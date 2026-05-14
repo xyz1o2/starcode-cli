@@ -18,7 +18,7 @@ Built for developers who value performance, simplicity, and reliability.
 **Feedback & Contributions**  
 We welcome bug reports, feature requests, and pull requests! Feel free to open an issue on GitHub.
 
-Try it today: [[https://github.com/xyz1o2/starcode-cli](https://github.com/xyz1o2/starcode-cli)](http://starcode.help/)
+Try it today:  http://starcode.help
 
 ---
 
