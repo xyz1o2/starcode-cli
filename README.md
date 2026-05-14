@@ -1,4 +1,6 @@
-**Starcode CLI**
+**Starcode CLI  **
+
+http://starcode.help/
 
 A blazing-fast, lightweight AI-powered coding assistant built in Rust.
 
