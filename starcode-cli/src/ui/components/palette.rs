@@ -52,6 +52,8 @@ pub fn get_items(mode: &PaletteMode, state: &ChatState) -> Vec<PaletteItem> {
         PaletteMode::ProviderOptions(pid) => {
             get_provider_options_items(pid, &state.configured_providers)
         }
+        PaletteMode::AddProvider => get_add_provider_items(),
+        PaletteMode::AddProviderId(provider_type) => get_add_provider_id_items(provider_type),
         PaletteMode::Memory => get_memory_palette_items(),
         PaletteMode::AgentMode => get_agent_mode_palette_items(),
         PaletteMode::ThinkingEffort => get_thinking_effort_palette_items(&state.thinking_effort, &state.current_model),
@@ -109,6 +111,8 @@ pub fn palette_title(mode: &PaletteMode, query: &str) -> String {
             PaletteMode::ProviderOther => "Regional Providers",
             PaletteMode::ProviderLocal => "Local Providers",
             PaletteMode::ProviderOptions(_) => "Provider Setup",
+            PaletteMode::AddProvider => "Add Provider",
+            PaletteMode::AddProviderId(_) => "Add Provider",
             PaletteMode::Language => "Language",
             PaletteMode::OutputStyle => "Output Style",
         }
@@ -167,10 +171,24 @@ fn get_global_search_palette_items(state: &ChatState) -> Vec<PaletteItem> {
 }
 
 fn get_all_provider_search_items(configured: &HashSet<String>) -> Vec<PaletteItem> {
-    ALL_PROVIDERS
+    let builtin_ids: HashSet<&str> = ALL_PROVIDERS.iter().map(|p| p.id).collect();
+    let mut items: Vec<PaletteItem> = ALL_PROVIDERS
         .iter()
         .map(|provider| build_provider_item_flat(provider, configured))
-        .collect()
+        .collect();
+
+    // Add custom providers
+    for id in configured.iter().filter(|id| !builtin_ids.contains(id.as_str())) {
+        items.push(PaletteItem {
+            id: format!("provider_{}", id),
+            label: format!("{} ✓", id),
+            description: "Custom provider".to_string(),
+            category: Some("Custom".to_string()),
+            action: PaletteAction::Navigate(PaletteMode::ProviderOptions(id.clone())),
+        });
+    }
+
+    items
 }
 
 fn is_actionable_item(item: &PaletteItem) -> bool {
@@ -221,6 +239,8 @@ fn palette_action_key(action: &PaletteAction) -> String {
         PaletteAction::ToggleUiVerbose => "toggle_ui_verbose".to_string(),
         PaletteAction::CreatePr => "create_pr".to_string(),
         PaletteAction::ToggleColorblindMode => "toggle_colorblind_mode".to_string(),
+        PaletteAction::InputProviderId(provider_type) => format!("add_provider_id:{}", provider_type),
+        PaletteAction::InputProviderName(provider_id) => format!("add_provider_name:{}", provider_id),
     }
 }
 
@@ -249,6 +269,8 @@ fn palette_mode_key(mode: &PaletteMode) -> String {
         PaletteMode::ProviderOptions(provider_id) => format!("provider_options:{}", provider_id),
         PaletteMode::Language => "language".to_string(),
         PaletteMode::OutputStyle => "output_style".to_string(),
+        PaletteMode::AddProvider => "add_provider".to_string(),
+        PaletteMode::AddProviderId(provider_type) => format!("add_provider_id:{}", provider_type),
     }
 }
 
@@ -875,9 +897,38 @@ pub fn get_provider_palette_items(configured: &std::collections::HashSet<String>
         action: PaletteAction::Back,
     }];
 
+    // Built-in providers
+    let builtin_ids: std::collections::HashSet<&str> = ALL_PROVIDERS.iter().map(|p| p.id).collect();
     for provider in ALL_PROVIDERS.iter() {
         items.push(build_provider_item_flat(provider, configured));
     }
+
+    // Custom providers (configured but not built-in)
+    let mut custom_ids: Vec<&String> = configured
+        .iter()
+        .filter(|id| !builtin_ids.contains(id.as_str()))
+        .collect();
+    custom_ids.sort();
+    for id in custom_ids {
+        let is_active = false; // Will be determined by the palette rendering
+        let label = format!("{} ✓", id);
+        items.push(PaletteItem {
+            id: format!("provider_{}", id),
+            label,
+            description: "Custom provider — click to configure".to_string(),
+            category: Some("Custom".to_string()),
+            action: PaletteAction::Navigate(PaletteMode::ProviderOptions(id.clone())),
+        });
+    }
+
+    // Add new provider entry
+    items.push(PaletteItem {
+        id: "add_provider".to_string(),
+        label: "➕ Add New Provider".to_string(),
+        description: "Create a custom OpenAI/Anthropic compatible endpoint".to_string(),
+        category: Some("Custom".to_string()),
+        action: PaletteAction::Navigate(PaletteMode::AddProvider),
+    });
 
     items
 }
@@ -940,6 +991,56 @@ fn get_provider_category_items(
     }
 
     items
+}
+
+pub fn get_add_provider_items() -> Vec<PaletteItem> {
+    vec![
+        PaletteItem {
+            id: "back".to_string(),
+            label: ".. Back".to_string(),
+            description: "Return to providers".to_string(),
+            category: None,
+            action: PaletteAction::Back,
+        },
+        PaletteItem {
+            id: "add_openai_compatible".to_string(),
+            label: "OpenAI Compatible".to_string(),
+            description: "Custom OpenAI-compatible endpoint (LM Studio, Ollama, vLLM, etc.)".to_string(),
+            category: Some("Choose Type".to_string()),
+            action: PaletteAction::Navigate(PaletteMode::AddProviderId("openai-compatible".to_string())),
+        },
+        PaletteItem {
+            id: "add_anthropic_compatible".to_string(),
+            label: "Anthropic Compatible".to_string(),
+            description: "Custom Anthropic-compatible endpoint (Claude /v1/messages)".to_string(),
+            category: Some("Choose Type".to_string()),
+            action: PaletteAction::Navigate(PaletteMode::AddProviderId("anthropic-compatible".to_string())),
+        },
+    ]
+}
+
+pub fn get_add_provider_id_items(provider_type: &str) -> Vec<PaletteItem> {
+    let type_label = if provider_type == "anthropic-compatible" {
+        "Anthropic Compatible"
+    } else {
+        "OpenAI Compatible"
+    };
+    vec![
+        PaletteItem {
+            id: "back".to_string(),
+            label: ".. Back".to_string(),
+            description: "Return to add provider".to_string(),
+            category: None,
+            action: PaletteAction::Back,
+        },
+        PaletteItem {
+            id: "input_provider_id".to_string(),
+            label: format!("Enter a unique ID for your {} provider", type_label),
+            description: "e.g. my-lmstudio, my-ollama, work-api".to_string(),
+            category: Some("Provider ID".to_string()),
+            action: PaletteAction::InputProviderId(provider_type.to_string()),
+        },
+    ]
 }
 
 pub fn get_provider_options_items(
@@ -1538,7 +1639,7 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
         .filter(|item| palette_item_matches_query(item, &query_lower))
         .collect();
 
-    let grouped = !query.is_empty();
+    let grouped = !query.is_empty() || matches!(state.palette_mode, PaletteMode::Model);
 
     let mut list_items: Vec<ListItem> = Vec::new();
     let mut selectable_indices: Vec<usize> = Vec::new();

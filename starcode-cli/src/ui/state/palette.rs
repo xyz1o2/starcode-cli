@@ -22,6 +22,8 @@ pub enum PaletteMode {
     ProviderOther,
     ProviderLocal,
     ProviderOptions(String),
+    AddProvider,
+    AddProviderId(String), // provider_type: "openai-compatible" or "anthropic-compatible"
     Language,
     OutputStyle,
 }
@@ -62,6 +64,8 @@ pub enum PaletteAction {
     ToggleUiVerbose,
     CreatePr,
     ToggleColorblindMode,
+    InputProviderId(String),    // provider_type
+    InputProviderName(String),  // provider_id (after ID is entered)
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +73,10 @@ pub enum InputContext {
     ProviderKey { provider_id: String },
     ProviderBaseUrl { provider_id: String },
     ContextWindow,
+    AddProviderId { provider_type: String },
+    AddProviderName { provider_type: String, provider_id: String },
+    AddProviderBaseUrl { provider_type: String, provider_id: String, name: String },
+    AddProviderApiKey { provider_type: String, provider_id: String, name: String, base_url: String },
 }
 
 impl Default for PaletteMode {
