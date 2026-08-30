@@ -1,0 +1,29 @@
+# Runtime data
+target/
+Cargo.lock
+
+# Environment variable file
+.env
+
+# Configuration directories
+
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Test outputs
+**/test_*.rs
+**/temp_*.rs

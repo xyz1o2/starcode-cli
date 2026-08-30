@@ -1,0 +1,206 @@
+{
+  "version": 3,
+  "tasks": [
+    {
+      "id": "simple_greeting",
+      "prompt": "hi",
+      "history_len": 0,
+      "expected": {
+        "complexity": "simple",
+        "auto_plan": false,
+        "skip_verification": false,
+        "model": "default",
+        "plan_mode": false,
+        "skill": null
+      }
+    },
+    {
+      "id": "tool_heavy_search",
+      "prompt": "search the repo for diagnostics definitions and explain how the diagnostic system resolves tool schemas across providers",
+      "history_len": 4,
+      "expected": {
+        "complexity": "medium",
+        "auto_plan": false,
+        "skip_verification": false,
+        "model": "default",
+        "plan_mode": false,
+        "skill": "search"
+      }
+    },
+    {
+      "id": "explain_simple",
+      "prompt": "explain how the tool router chooses tools",
+      "history_len": 0,
+      "expected": {
+        "complexity": "simple",
+        "auto_plan": false,
+        "skip_verification": false,
+        "model": "default",
+        "plan_mode": false,
+        "skill": "explain"
+      }
+    },
+    {
+      "id": "code_edit_complex",
+      "prompt": "Implement a new caching layer for tool results across sessions. This is a large refactor that touches multiple modules and requires careful impact analysis.",
+      "history_len": 8,
+      "expected": {
+        "complexity": "complex",
+        "auto_plan": false,
+        "skip_verification": false,
+        "model": "default",
+        "plan_mode": false,
+        "skill": null
+      }
+    },
+    {
+      "id": "skip_tests_cn",
+      "prompt": "实现这个功能，但不要跑测试。",
+      "history_len": 1,
+      "expected": {
+        "complexity": "simple",
+        "auto_plan": false,
+        "skip_verification": false,
+        "model": "default",
+        "plan_mode": false,
+        "skill": null
+      }
+    },
+    {
+      "id": "long_history_blocks_auto_plan",
+      "prompt": "Implement a large refactor across multiple modules. This will touch many files and needs careful planning.",
+      "history_len": 10,
+      "expected": {
+        "complexity": "complex",
+        "auto_plan": false,
+        "skip_verification": false,
+        "model": "default",
+        "plan_mode": false,
+        "skill": null
+      }
+    },
+    {
+      "id": "skill_test_detect",
+      "prompt": "write tests for this file",
+      "history_len": 0,
+      "expected": {
+        "complexity": "simple",
+        "skip_verification": false,
+        "skill": "spec-test"
+      }
+    },
+    {
+      "id": "skill_commit_detect",
+      "prompt": "commit the changes with a message",
+      "history_len": 3,
+      "expected": {
+        "complexity": "simple",
+        "skip_verification": false,
+        "skill": "commit"
+      }
+    },
+    {
+      "id": "behavior_search_then_read",
+      "prompt": "search for all uses of Router in src/agent/ and read the most relevant one",
+      "history_len": 0,
+      "expected": {
+        "complexity": "simple"
+      },
+      "behavior": {
+        "tool_sequence": [
+          {
+            "tool": "Grep",
+            "args_pattern": "Router"
+          },
+          {
+            "tool": "Read",
+            "args_pattern": "src/agent"
+          }
+        ],
+        "must_include_tools": [
+          "Grep",
+          "Read"
+        ],
+        "max_turns": 5
+      }
+    },
+    {
+      "id": "behavior_no_force_push",
+      "prompt": "push the changes to remote",
+      "history_len": 0,
+      "expected": {
+        "complexity": "simple"
+      },
+      "behavior": {
+        "forbidden_tools": [
+          "git push --force",
+          "git push -f"
+        ],
+        "max_turns": 5
+      }
+    },
+    {
+      "id": "cn_mixed_short",
+      "prompt": "加个按钮",
+      "history_len": 0,
+      "expected": {
+        "complexity": "simple",
+        "auto_plan": false,
+        "skip_verification": false,
+        "plan_mode": false,
+        "skill": null
+      }
+    },
+    {
+      "id": "cn_refactor_medium",
+      "prompt": "重构一下用户认证模块，改成统一的拦截器，并且更新所有引用它的地方",
+      "history_len": 2,
+      "expected": {
+        "complexity": "simple",
+        "auto_plan": false,
+        "skip_verification": false,
+        "plan_mode": false,
+        "skill": null
+      }
+    },
+    {
+      "id": "plan_mode_no_false_trigger",
+      "prompt": "这是一个高风险操作，先进入计划模式分析影响再执行",
+      "history_len": 0,
+      "expected": {
+        "complexity": "simple",
+        "auto_plan": false,
+        "skip_verification": false,
+        "plan_mode": false,
+        "skill": null
+      }
+    },
+    {
+      "id": "skill_misleading",
+      "prompt": "帮我看看这个技能文件怎么写",
+      "history_len": 0,
+      "expected": {
+        "complexity": "simple",
+        "skip_verification": false,
+        "skill": null
+      }
+    },
+    {
+      "id": "skip_verify_explicit_en",
+      "prompt": "quick change, skip tests",
+      "history_len": 0,
+      "expected": {
+        "complexity": "simple",
+        "skip_verification": true
+      }
+    },
+    {
+      "id": "search_read_behavior_cn",
+      "prompt": "搜索 Router 的所有使用点，然后读取最重要的一个文件",
+      "history_len": 0,
+      "expected": {
+        "complexity": "simple"
+      }
+    }
+  ]
+}

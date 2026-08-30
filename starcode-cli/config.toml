@@ -1,0 +1,88 @@
+# StarCode CLI 配置文件
+# Configuration file for StarCode CLI
+
+[api]
+# API Key / Base URL / Provider / Model 请在菜单中设置：
+# Ctrl+P -> System & Config -> Provider Settings / Model Settings
+# 这里只保留高级默认值（若用户未设置则回退到这些值）
+temperature = 0.2
+max_tokens = 8192
+openai_compatible = false
+
+[context]
+# 上下文窗口大小
+window = 200000
+
+# 压缩阈值 (比例)
+compression_threshold = 0.92
+
+# 压缩检查冷却时间 (秒)
+compress_check_cooldown = 60
+
+# 索引刷新间隔 (秒)
+index_refresh_secs = 300
+
+[timeout]
+# LLM 请求超时 (秒)
+llm_request = 120
+
+# 工具确认超时 (秒)
+tool_confirmation = 60
+
+# 流式响应警告阈值 (秒)
+stream_warning = 10
+
+# 流式响应停滞阈值 (秒)
+stream_stall = 30
+
+# 流式心跳间隔 (秒)
+stream_heartbeat = 3
+
+[ui]
+# 禁用启动画面
+no_splash = true
+
+# 启用备用屏幕模式
+enable_alt_screen = false
+
+# 启用鼠标支持
+enable_mouse = false
+
+# 启用会话记录
+enable_transcript = true
+
+# 启用自动继续
+enable_auto_continue = true
+
+[ui.system_prompts]
+# 使用系统提示目录
+use_dir = true
+
+# 系统提示目录路径
+dir = "src/agent/prompts/system-prompts"
+
+# 最大字符数
+max_chars = 80000
+
+# 单文件最大字符数
+max_file_chars = 20000
+
+[agent]
+# 最大会话轮次
+max_session_turns = 100
+
+# 最大并发工具数
+max_concurrent_tools = 10
+
+[debug]
+# 启用调试日志
+log_enabled = false
+
+# 日志目录
+log_dir = ""
+
+# 输出到 stderr
+log_stderr = false
+
+# 禁用代理
+no_proxy = true

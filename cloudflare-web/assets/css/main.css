@@ -1,0 +1,181 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #000000;
+  --bg2: #0a0a0a;
+  --bg3: #141414;
+  --border-color: rgba(255, 255, 255, 0.15);
+  --accent: #ffffff;
+  --accent2: #cccccc;
+  --text-muted: #888888;
+  --text-dim: #555555;
+}
+
+@theme inline {
+  --font-sans: "Press Start 2P", "VT323", "Segoe UI", -apple-system, "PingFang SC", "Microsoft YaHei", ui-sans-serif, sans-serif;
+  --font-mono: "Press Start 2P", "VT323", "JetBrains Mono", "Fira Code", monospace;
+  --font-pixel: "Press Start 2P", "VT323", monospace;
+}
+
+html {
+  color-scheme: dark;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-sans);
+}
+
+/* ── Utilities ── */
+.gradient-text {
+  background: linear-gradient(135deg, #ffffff 0%, #cccccc 50%, #888888 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── Scroll-reveal ── */
+.reveal {
+  opacity: 0;
+  transform: translateY(24px);
+  transition: opacity 0.7s ease, transform 0.7s ease;
+}
+.reveal.revealed {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ── Terminal demo ── */
+.term-user-msg {
+  color: #ffffff;
+  font-weight: 600;
+  margin-bottom: 8px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border-left: 2px solid rgba(255, 255, 255, 0.2);
+  border-radius: 0 4px 4px 0;
+  font-family: var(--font-pixel);
+  font-size: 12px;
+}
+.t-dim { color: #555555; }
+.t-green { color: #ffffff; }
+.t-blue { color: #cccccc; }
+.t-cyan { color: #aaaaaa; }
+.t-tool { color: #ffffff; }
+.t-meta { color: #888888; padding-left: 18px; }
+.t-add { color: #ffffff; padding-left: 18px; }
+.t-remove { color: #777777; opacity: 0.75; padding-left: 18px; }
+
+/* ── Entry animations ── */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(40px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ── Scrollbar ── */
+.scrollbar-none::-webkit-scrollbar { display: none; }
+.scrollbar-none { scrollbar-width: none; }
+
+/* ── Custom animate-pulse duration override ── */
+.animate-pulse-slow {
+  animation: pulse 8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* ── Marquee ── */
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-100%); }
+}
+@keyframes marquee-vertical {
+  from { transform: translateY(0); }
+  to   { transform: translateY(-100%); }
+}
+.animate-marquee       { animation: marquee var(--duration, 40s) linear infinite; }
+.animate-marquee-vert  { animation: marquee-vertical var(--duration, 40s) linear infinite; }
+
+/* ── Pixel Style Utilities ── */
+.pixel-border {
+  border: 2px solid #ffffff;
+  box-shadow: 
+    2px 2px 0 #ffffff,
+    -2px -2px 0 #ffffff,
+    2px -2px 0 #ffffff,
+    -2px 2px 0 #ffffff;
+  image-rendering: pixelated;
+}
+
+.pixel-text {
+  font-family: var(--font-pixel);
+  font-size: 12px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+.pixel-card {
+  background: #000000;
+  border: 2px solid #ffffff;
+  box-shadow: 4px 4px 0 #ffffff;
+  transition: all 0.1s ease;
+}
+
+.pixel-card:hover {
+  box-shadow: 2px 2px 0 #ffffff;
+  transform: translate(2px, 2px);
+}
+
+.pixel-button {
+  background: #000000;
+  border: 2px solid #ffffff;
+  color: #ffffff;
+  padding: 8px 16px;
+  font-family: var(--font-pixel);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.1s ease;
+}
+
+.pixel-button:hover {
+  background: #ffffff;
+  color: #000000;
+  box-shadow: 4px 4px 0 #000000;
+}
+
+.pixel-line {
+  height: 2px;
+  background: #ffffff;
+  box-shadow: 0 0 0 1px #ffffff;
+}
+
+.pixel-grid {
+  background-image: 
+    linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+.pixel-corners::before,
+.pixel-corners::after {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background: #ffffff;
+}
+
+.pixel-corners::before {
+  top: -2px;
+  left: -2px;
+}
+
+.pixel-corners::after {
+  bottom: -2px;
+  right: -2px;
+}

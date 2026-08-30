@@ -1,0 +1,56 @@
+<script setup lang="ts">
+import { cn } from "~/lib/utils";
+
+withDefaults(defineProps<{
+  class?: string;
+  reverse?: boolean;
+  pauseOnHover?: boolean;
+  vertical?: boolean;
+  repeat?: number;
+}>(), {
+  pauseOnHover: false,
+  vertical: false,
+  repeat: 4,
+});
+</script>
+
+<template>
+  <div
+    :class="cn(
+      'group flex gap-[--gap] overflow-hidden p-2',
+      vertical ? 'flex-col' : 'flex-row',
+      $props.class,
+    )"
+    :style="{ '--duration': '40s', '--gap': '1rem' }"
+  >
+    <div
+      v-for="index in repeat"
+      :key="index"
+      :class="cn(
+        'flex shrink-0 justify-around gap-[--gap]',
+        vertical ? 'animate-marquee-vertical flex-col' : 'animate-marquee flex-row',
+        pauseOnHover ? 'group-hover:[animation-play-state:paused]' : '',
+      )"
+      :style="{ animationDirection: reverse ? 'reverse' : 'normal' }"
+    >
+      <slot />
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.animate-marquee {
+  animation: marquee var(--duration) linear infinite;
+}
+.animate-marquee-vertical {
+  animation: marquee-vertical var(--duration) linear infinite;
+}
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-100%); }
+}
+@keyframes marquee-vertical {
+  from { transform: translateY(0); }
+  to { transform: translateY(-100%); }
+}
+</style>

@@ -1,0 +1,247 @@
+{
+  "version": 3,
+  "tasks": [
+    {
+      "id": "live_read_explain",
+      "prompt": "Explain how apply_discount handles negative discount values. Read the source code to confirm.",
+      "history_len": 0,
+      "expected": {
+        "kind": "explain",
+        "complexity": "simple"
+      },
+      "behavior": {
+        "must_include_tools": [
+          "read_file"
+        ],
+        "forbidden_tools": [
+          "replace",
+          "write_file",
+          "multi_edit",
+          "bash(rm"
+        ],
+        "max_turns": 8
+      },
+      "live": {
+        "fixture": "rust-lab",
+        "verify": [
+          "git diff --quiet && git diff --cached --quiet"
+        ],
+        "max_turns": 8,
+        "timeout_secs": 180
+      }
+    },
+    {
+      "id": "live_fix_discount",
+      "prompt": "The test discount_negative_ignored is failing. Find and fix the bug in apply_discount in src/calc.rs so that all tests pass.",
+      "history_len": 0,
+      "expected": {
+        "kind": "code_edit",
+        "complexity": "medium"
+      },
+      "behavior": {
+        "must_include_tools": [
+          "read_file",
+          "replace"
+        ],
+        "max_turns": 15
+      },
+      "live": {
+        "fixture": "rust-lab",
+        "verify": [
+          "cargo test discount_",
+          "cargo check"
+        ],
+        "max_turns": 15,
+        "timeout_secs": 300
+      }
+    },
+    {
+      "id": "live_fix_rounding",
+      "prompt": "The test rounding_half_up is failing. Fix round_to_2 in src/calc.rs to round half up so that all tests pass.",
+      "history_len": 0,
+      "expected": {
+        "kind": "code_edit",
+        "complexity": "simple"
+      },
+      "behavior": {
+        "must_include_tools": [
+          "read_file",
+          "replace"
+        ],
+        "max_turns": 12
+      },
+      "live": {
+        "fixture": "rust-lab",
+        "verify": [
+          "cargo test rounding_",
+          "cargo check"
+        ],
+        "max_turns": 12,
+        "timeout_secs": 300
+      }
+    },
+    {
+      "id": "live_fix_quotes",
+      "prompt": "The test trim_both_quotes is failing. Fix trim_quotes in src/strings.rs so that all tests pass.",
+      "history_len": 0,
+      "expected": {
+        "kind": "code_edit",
+        "complexity": "simple"
+      },
+      "behavior": {
+        "must_include_tools": [
+          "read_file",
+          "replace"
+        ],
+        "max_turns": 12
+      },
+      "live": {
+        "fixture": "rust-lab",
+        "verify": [
+          "cargo test trim_",
+          "cargo check"
+        ],
+        "max_turns": 12,
+        "timeout_secs": 300
+      }
+    },
+    {
+      "id": "live_refactor_rename",
+      "prompt": "Rename the function sanitize_name to normalize_name. Update all callers and re-exports (src/lib.rs, src/strings.rs, src/calc.rs). Keep all tests passing.",
+      "history_len": 0,
+      "expected": {
+        "kind": "code_edit",
+        "complexity": "complex"
+      },
+      "behavior": {
+        "must_include_tools": [
+          "search"
+        ],
+        "max_turns": 20
+      },
+      "live": {
+        "fixture": "rust-lab",
+        "verify": [
+          "cargo test"
+        ],
+        "max_turns": 20,
+        "timeout_secs": 420
+      }
+    },
+    {
+      "id": "live_implement_anagram",
+      "prompt": "Implement is_anagram(a: &str, b: &str) -> bool in src/strings.rs, export it from src/lib.rs, and add unit tests for it. All tests must pass.",
+      "history_len": 0,
+      "expected": {
+        "kind": "code_edit",
+        "complexity": "medium"
+      },
+      "behavior": {
+        "max_turns": 20
+      },
+      "live": {
+        "fixture": "rust-lab",
+        "verify": [
+          "cargo test"
+        ],
+        "max_turns": 20,
+        "timeout_secs": 420
+      }
+    },
+    {
+      "id": "live_no_bash_file_ops",
+      "prompt": "Fix the negative-discount bug in apply_discount (src/calc.rs) and make tests pass. Do NOT use bash for file reading or editing.",
+      "history_len": 0,
+      "expected": {
+        "kind": "code_edit",
+        "complexity": "medium"
+      },
+      "behavior": {
+        "forbidden_tools": [
+          "bash(cat",
+          "bash(sed",
+          "bash(echo",
+          "bash(rm",
+          "bash(head",
+          "bash(tail"
+        ],
+        "max_turns": 15
+      },
+      "live": {
+        "fixture": "rust-lab",
+        "verify": [
+          "cargo test discount_",
+          "cargo check"
+        ],
+        "max_turns": 15,
+        "timeout_secs": 300
+      }
+    },
+    {
+      "id": "live_cn_fix_discount",
+      "prompt": "修复 src/calc.rs 中 apply_discount 的负数折扣 bug，让所有测试通过。",
+      "history_len": 0,
+      "expected": {
+        "kind": "code_edit",
+        "complexity": "medium"
+      },
+      "behavior": {
+        "max_turns": 15
+      },
+      "live": {
+        "fixture": "rust-lab",
+        "verify": [
+          "cargo test discount_",
+          "cargo check"
+        ],
+        "max_turns": 15,
+        "timeout_secs": 300
+      }
+    },
+    {
+      "id": "live_turn_pressure",
+      "prompt": "Fix all failing tests in this project.",
+      "history_len": 0,
+      "expected": {
+        "kind": "code_edit",
+        "complexity": "complex"
+      },
+      "behavior": {
+        "max_turns": 12
+      },
+      "live": {
+        "fixture": "rust-lab",
+        "verify": [
+          "cargo test"
+        ],
+        "max_turns": 12,
+        "timeout_secs": 420
+      }
+    },
+    {
+      "id": "live_explain_only",
+      "prompt": "Explain what the function is_valid_product_name does in this codebase, mentioning which module it lives in.",
+      "history_len": 0,
+      "expected": {
+        "kind": "explain",
+        "complexity": "simple"
+      },
+      "behavior": {
+        "forbidden_tools": [
+          "replace",
+          "write_file",
+          "multi_edit"
+        ],
+        "max_turns": 8
+      },
+      "live": {
+        "fixture": "rust-lab",
+        "verify": [
+          "git diff --quiet && git diff --cached --quiet"
+        ],
+        "max_turns": 8,
+        "timeout_secs": 180
+      }
+    }
+  ]
+}

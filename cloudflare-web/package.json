@@ -1,0 +1,26 @@
+{
+  "name": "starcode-cli-website",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxi dev",
+    "build": "nuxi build",
+    "generate": "nuxi generate",
+    "postgenerate": "if [ -d dist ]; then mkdir -p .output/public/dist && cp -r dist/* .output/public/dist/ 2>/dev/null; fi; true",
+    "deploy": "npm run generate && echo 'Ready: .output/public/'"
+  },
+  "dependencies": {
+    "@vueuse/core": "^14.3.0",
+    "motion-v": "^2.2.1",
+    "nuxt": "^3.16.2",
+    "simplex-noise": "^4.0.3",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.4",
+    "clsx": "^2.1.1",
+    "tailwind-merge": "^3.2.0",
+    "tailwindcss": "^4.1.4"
+  }
+}
