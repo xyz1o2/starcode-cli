@@ -113,9 +113,10 @@ pub(crate) fn render_tool_entry_blocks(
     let is_tool_result = entry.entry_type == ChatEntryType::ToolResult;
     let tool_box_width = area_width as usize;
     // 统一使用 5 字符前缀宽度，确保 ToolCall 和 ToolResult 对齐
-    // "⎿ " (2) + 3空格缩进 = 5 字符
+    // "  ⎿  " (5) —— 对标 Claude Code MessageResponse 前缀
+    // 内容宽度再留 1 列右边距，避免与滚动条列重叠
     let prefix_width: usize = 5;
-    let tool_inner_width = tool_box_width.saturating_sub(prefix_width);
+    let tool_inner_width = tool_box_width.saturating_sub(prefix_width + 1);
 
     let expanded = entry
         .tool_call
@@ -254,20 +255,27 @@ pub(crate) fn render_tool_entry_blocks(
             boxed_lines.push(Line::from(spans));
         }
     } else if entry.entry_type == ChatEntryType::ToolResult {
-        // ToolResult: 无标记，直接显示结果内容
-        for (i, line) in content_lines.into_iter().enumerate() {
+        // ToolResult: 对标 Claude Code MessageResponse 的 "  ⎿ " 前缀（5 列）——
+        // 首行带 ⎿ 标记，续行用等宽空格缩进，保证整个输出块左缘对齐，
+        // 而不是只有首行缩进、其余行顶到行首。
+        let mut first_line = true;
+        for line in content_lines.into_iter() {
             let line_is_blank = line.spans.iter().all(|s| s.content.trim().is_empty());
             if line_is_blank {
                 boxed_lines.push(Line::from(""));
                 continue;
             }
 
-            let mut spans = Vec::new();
-            if i == 0 {
-                // 首行：2空格缩进（与 ToolCall 的内容对齐）
-                spans.push(Span::raw("  "));
+            let mut spans = Vec::with_capacity(line.spans.len() + 1);
+            if first_line {
+                spans.push(Span::styled(
+                    "  ⎿  ",
+                    Style::default().fg(theme.subtle),
+                ));
+                first_line = false;
+            } else {
+                spans.push(Span::raw("     "));
             }
-            // 续行无缩进，保持内容原始格式
             spans.extend(line.spans);
             boxed_lines.push(Line::from(spans));
         }
@@ -516,8 +524,9 @@ fn render_rich_tool_content(
                     if line.starts_with('+') && !line.starts_with("+++") { added += 1; }
                     else if line.starts_with('-') && !line.starts_with("---") { removed += 1; }
                 }
+                // ⎿ 标记由 ToolResult 统一前缀提供，这里只写正文（对标 FileEditToolUpdatedMessage）
                 lines.push(Line::from(vec![
-                    Span::raw("⎿ Added "),
+                    Span::raw("Added "),
                     Span::styled(format!("{}", added), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
                     Span::raw(" lines, removed "),
                     Span::styled(format!("{}", removed), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
@@ -559,22 +568,27 @@ fn render_tool_result_text(
     if !expanded {
         // 折叠态：预览前几行真实内容 + "Tab 展开"提示（而非只有行数）。
         // 之前只显示第一行 + N lines，用户看不到任何正文，误以为输出被截断/不显示。
+        // 带颜色的行保留 ANSI 颜色（对标参考实现折叠输出仍显示彩色）。
         let mut shown = 0usize;
         for raw_line in text.lines() {
             if shown >= TOOL_RESULT_PREVIEW_LINES {
                 break;
             }
-            let line = raw_line.trim();
-            if line.is_empty() {
+            if raw_line.trim().is_empty() {
                 continue;
             }
-            let clean = crate::ui::utils::render::strip_ansi_codes(line);
-            let preview = if clean.chars().count() > width {
-                let truncated: String = clean.chars().take(width.saturating_sub(3)).collect();
-                format!("{}...", truncated)
-            } else {
-                clean
-            };
+            if raw_line.contains('\x1b') {
+                let spans = crate::ui::utils::render::parse_ansi_text(raw_line);
+                let truncated =
+                    crate::ui::utils::render::truncate_spans_to_width(&spans, width);
+                if !truncated.is_empty() {
+                    lines.push(Line::from(truncated));
+                    shown += 1;
+                }
+                continue;
+            }
+            let clean = crate::ui::utils::render::strip_ansi_codes(raw_line);
+            let preview = crate::ui::utils::render::truncate_to_display_width(clean.trim(), width);
             if !preview.is_empty() {
                 lines.push(Line::from(Span::styled(
                     preview,
@@ -602,10 +616,29 @@ fn render_tool_result_text(
 
     if !success {
         for line in result_text.lines() {
-            let stripped = crate::ui::utils::render::strip_ansi_codes(line);
-            lines.push(Line::from(vec![
-                Span::styled(stripped, Style::default().fg(Color::Red)),
-            ]));
+            // 错误输出同样保留 ANSI 颜色，无色部分补红色（对标 OutputLine isError）
+            if line.contains('\x1b') {
+                let spans = crate::ui::utils::render::parse_ansi_text(line);
+                let rows = if crate::ui::utils::render::line_spans_width_cjk(&spans) > width {
+                    crate::ui::utils::render::wrap_spans_to_width(spans, width)
+                } else {
+                    vec![spans]
+                };
+                for mut row in rows {
+                    for span in row.iter_mut() {
+                        if span.style == Style::default() {
+                            let content = span.content.clone();
+                            *span = Span::styled(content, Style::default().fg(Color::Red));
+                        }
+                    }
+                    lines.push(Line::from(row));
+                }
+            } else {
+                let stripped = crate::ui::utils::render::strip_ansi_codes(line);
+                lines.push(Line::from(vec![
+                    Span::styled(stripped, Style::default().fg(Color::Red)),
+                ]));
+            }
         }
     } else {
         lines.extend(crate::ui::utils::render::build_tool_body_block(&result_text, width, true));

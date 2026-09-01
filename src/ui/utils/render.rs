@@ -114,8 +114,97 @@ pub fn truncate_to_display_width(s: &str, max_width: usize) -> String {
 
 /// Calculate CJK-aware display width of ratatui Spans.
 /// ratatui's Line::width() uses non-CJK width; this matches the terminal's actual rendering.
-fn line_spans_width_cjk(spans: &[Span]) -> usize {
+pub fn line_spans_width_cjk(spans: &[Span]) -> usize {
     spans.iter().map(|s| UnicodeWidthStr::width_cjk(s.content.as_ref())).sum()
+}
+
+/// Split a span's content at a display-width boundary (CJK-aware).
+/// Returns (part that fits within `max_width`, remainder).
+fn split_span_at_width(content: &str, max_width: usize) -> (String, String) {
+    let mut w = 0usize;
+    let mut fitted = String::new();
+    let mut rest = String::new();
+    let mut full = false;
+    for c in content.chars() {
+        let cw = UnicodeWidthChar::width_cjk(c).unwrap_or(0);
+        if !full && w + cw <= max_width {
+            fitted.push(c);
+            w += cw;
+        } else {
+            full = true;
+            rest.push(c);
+        }
+    }
+    (fitted, rest)
+}
+
+/// Truncate styled spans to a maximum display width (drops the overflow, caller
+/// may append an ellipsis span). Equivalent of the reference implementation's
+/// ANSI-aware slicing for truncation.
+pub fn truncate_spans_to_width(spans: &[Span<'static>], max_width: usize) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut remaining = max_width;
+    for span in spans {
+        if remaining == 0 {
+            break;
+        }
+        let w = UnicodeWidthStr::width_cjk(span.content.as_ref());
+        if w <= remaining {
+            remaining -= w;
+            out.push(span.clone());
+        } else {
+            let (fitted, _) = split_span_at_width(&span.content, remaining);
+            if !fitted.is_empty() {
+                out.push(Span::styled(fitted, span.style));
+            }
+            break;
+        }
+    }
+    out
+}
+
+/// Hard-wrap styled spans into rows of at most `wrap_width` display columns.
+/// Mirrors the reference implementation: long lines are sliced at fixed width
+/// boundaries while preserving ANSI-derived styles (not word-wrapped).
+pub fn wrap_spans_to_width(spans: Vec<Span<'static>>, wrap_width: usize) -> Vec<Vec<Span<'static>>> {
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut current: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    for span in spans {
+        let mut rest_content = span.content.to_string();
+        let style = span.style;
+        while !rest_content.is_empty() {
+            let space = wrap_width.saturating_sub(used);
+            if space == 0 {
+                rows.push(std::mem::take(&mut current));
+                used = 0;
+                continue;
+            }
+            let (fitted, rest) = split_span_at_width(&rest_content, space);
+            if fitted.is_empty() {
+                if used > 0 {
+                    // Wide char doesn't fit the remaining columns — flush the
+                    // row and retry at the start of the next row.
+                    rows.push(std::mem::take(&mut current));
+                    used = 0;
+                    continue;
+                }
+                // Char is wider than the whole row width — drop it to avoid
+                // an infinite loop.
+                let mut chars = rest_content.chars();
+                chars.next();
+                rest_content = chars.as_str().to_string();
+                continue;
+            }
+            used += UnicodeWidthStr::width_cjk(fitted.as_str());
+            current.push(Span::styled(fitted, style));
+            rest_content = rest;
+        }
+    }
+    if !current.is_empty() || rows.is_empty() {
+        rows.push(current);
+    }
+    rows
 }
 
 /// Strip ALL ANSI escape sequences — complete, partial, and malformed.
@@ -172,9 +261,8 @@ pub fn parse_ansi_text(text: &str) -> Vec<Span<'static>> {
                         if params.is_empty() {
                             current_style = Style::default();
                         } else {
-                            for p in params.split(';') {
-                                current_style = apply_sgr_param(current_style, p);
-                            }
+                            let param_list: Vec<&str> = params.split(';').collect();
+                            current_style = apply_sgr_params(current_style, &param_list);
                         }
                     }
                     // Non-m: cursor/erase/etc. — silently consumed
@@ -208,30 +296,100 @@ pub fn parse_ansi_text(text: &str) -> Vec<Span<'static>> {
     spans
 }
 
-/// Apply a single SGR parameter to a style.
-fn apply_sgr_param(style: Style, param: &str) -> Style {
-    match param {
-        "0" => Style::default(),
-        "1" => style.add_modifier(Modifier::BOLD),
-        "4" => style.add_modifier(Modifier::UNDERLINED),
-        "30" => style.fg(Color::Black),
-        "31" => style.fg(Color::Red),
-        "32" => style.fg(Color::Green),
-        "33" => style.fg(Color::Yellow),
-        "34" => style.fg(Color::Blue),
-        "35" => style.fg(Color::Magenta),
-        "36" => style.fg(Color::Cyan),
-        "37" => style.fg(Color::White),
-        "90" => style.fg(Color::DarkGray),
-        "91" => style.fg(Color::LightRed),
-        "92" => style.fg(Color::LightGreen),
-        "93" => style.fg(Color::LightYellow),
-        "94" => style.fg(Color::LightBlue),
-        "95" => style.fg(Color::LightMagenta),
-        "96" => style.fg(Color::LightCyan),
-        "97" => style.fg(Color::White),
-        _ => style, // Ignore unsupported
+/// Apply a full SGR parameter list to a style, with look-ahead support for
+/// 256-color (`38;5;N` / `48;5;N`) and truecolor (`38;2;R;G;B` / `48;2;R;G;B`).
+/// 对标参考实现 `<Ansi>` 组件的完整色彩支持。
+fn apply_sgr_params(mut style: Style, params: &[&str]) -> Style {
+    let mut i = 0;
+    while i < params.len() {
+        match params[i] {
+            "0" => style = Style::default(),
+            "1" => style = style.add_modifier(Modifier::BOLD),
+            "2" => style = style.add_modifier(Modifier::DIM),
+            "3" => style = style.add_modifier(Modifier::ITALIC),
+            "4" => style = style.add_modifier(Modifier::UNDERLINED),
+            "7" => style = style.add_modifier(Modifier::REVERSED),
+            "9" => style = style.add_modifier(Modifier::CROSSED_OUT),
+            "22" => {
+                style = style.remove_modifier(Modifier::BOLD);
+                style = style.remove_modifier(Modifier::DIM);
+            }
+            "23" => style = style.remove_modifier(Modifier::ITALIC),
+            "24" => style = style.remove_modifier(Modifier::UNDERLINED),
+            "29" => style = style.remove_modifier(Modifier::CROSSED_OUT),
+            "30" => style = style.fg(Color::Black),
+            "31" => style = style.fg(Color::Red),
+            "32" => style = style.fg(Color::Green),
+            "33" => style = style.fg(Color::Yellow),
+            "34" => style = style.fg(Color::Blue),
+            "35" => style = style.fg(Color::Magenta),
+            "36" => style = style.fg(Color::Cyan),
+            "37" => style = style.fg(Color::Gray),
+            "39" => style = style.fg(Color::Reset),
+            "40" => style = style.bg(Color::Black),
+            "41" => style = style.bg(Color::Red),
+            "42" => style = style.bg(Color::Green),
+            "43" => style = style.bg(Color::Yellow),
+            "44" => style = style.bg(Color::Blue),
+            "45" => style = style.bg(Color::Magenta),
+            "46" => style = style.bg(Color::Cyan),
+            "47" => style = style.bg(Color::Gray),
+            "49" => style = style.bg(Color::Reset),
+            "90" => style = style.fg(Color::DarkGray),
+            "91" => style = style.fg(Color::LightRed),
+            "92" => style = style.fg(Color::LightGreen),
+            "93" => style = style.fg(Color::LightYellow),
+            "94" => style = style.fg(Color::LightBlue),
+            "95" => style = style.fg(Color::LightMagenta),
+            "96" => style = style.fg(Color::LightCyan),
+            "97" => style = style.fg(Color::White),
+            "100" => style = style.bg(Color::DarkGray),
+            "101" => style = style.bg(Color::LightRed),
+            "102" => style = style.bg(Color::LightGreen),
+            "103" => style = style.bg(Color::LightYellow),
+            "104" => style = style.bg(Color::LightBlue),
+            "105" => style = style.bg(Color::LightMagenta),
+            "106" => style = style.bg(Color::LightCyan),
+            "107" => style = style.bg(Color::White),
+            "38" | "48" => {
+                let is_fg = params[i] == "38";
+                // 38;5;N (256-color) or 38;2;R;G;B (truecolor)
+                if i + 1 < params.len() {
+                    let color = match params[i + 1] {
+                        "5" if i + 2 < params.len() => params[i + 2]
+                            .parse::<u8>()
+                            .ok()
+                            .map(Color::Indexed),
+                        "2" if i + 4 < params.len() => {
+                            let (r, g, b) = (
+                                params[i + 2].parse::<u8>().ok(),
+                                params[i + 3].parse::<u8>().ok(),
+                                params[i + 4].parse::<u8>().ok(),
+                            );
+                            match (r, g, b) {
+                                (Some(r), Some(g), Some(b)) => Some(Color::Rgb(r, g, b)),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(c) = color {
+                        style = if is_fg { style.fg(c) } else { style.bg(c) };
+                    }
+                    // Skip consumed sub-params (5;N or 2;R;G;B); unknown forms
+                    // skip only the mode byte to avoid swallowing content params.
+                    i += match params.get(i + 1) {
+                        Some(&"5") => 2,
+                        Some(&"2") => 4,
+                        _ => 1,
+                    };
+                }
+            }
+            _ => {} // Ignore unsupported
+        }
+        i += 1;
     }
+    style
 }
 
 pub fn get_spinner_anim() -> &'static str {
@@ -374,6 +532,21 @@ fn trim_trailing_visual_empty_lines(text: &str) -> &str {
     text[..end].trim_end()
 }
 
+/// Format a single line as pretty-printed JSON when it parses as a JSON
+/// object/array (对标参考实现 tryFormatJson 的逐行处理，覆盖 ndjson/日志行)。
+fn try_format_json_line(line: &str) -> String {
+    let trimmed = line.trim();
+    if trimmed.len() < 2 || (!trimmed.starts_with('{') && !trimmed.starts_with('[')) {
+        return line.to_string();
+    }
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Ok(pretty) = serde_json::to_string_pretty(&val) {
+            return pretty;
+        }
+    }
+    line.to_string()
+}
+
 pub fn build_tool_body_block(
     content: &str,
     wrap_width: usize,
@@ -411,6 +584,18 @@ pub fn build_tool_body_block(
         content.to_string()
     };
 
+    // 逐行 JSON 美化（对标参考实现 tryJsonFormatContent，长度上限一致）
+    const MAX_JSON_FORMAT_LENGTH: usize = 10_000;
+    let formatted_content = if formatted_content.len() <= MAX_JSON_FORMAT_LENGTH {
+        formatted_content
+            .split('\n')
+            .map(try_format_json_line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        formatted_content
+    };
+
     // Detect language for syntax highlighting
     let language = detect_language_from_content(&formatted_content);
     let use_syntax_highlight = language != "unknown";
@@ -445,6 +630,21 @@ pub fn build_tool_body_block(
             continue;
         }
         consecutive_empty = 0;
+
+        // 带颜色输出的行：保留 ANSI 颜色渲染（对标参考实现 <Ansi> 组件），
+        // 而不是剥掉全部转义序列导致彩色输出（git/ls/测试运行器等）褪色。
+        if line.contains('\x1b') {
+            let spans = parse_ansi_text(line);
+            let rows = if line_spans_width_cjk(&spans) > wrap_width {
+                wrap_spans_to_width(spans, wrap_width)
+            } else {
+                vec![spans]
+            };
+            for row in rows {
+                lines.push(Line::from(row));
+            }
+            continue;
+        }
 
         // Use syntax highlighting if language is detected
         if use_syntax_highlight {
@@ -1122,5 +1322,96 @@ pub fn apply_alignment(lines: &mut Vec<Line<'static>>, align: Alignment) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sgr_256_and_truecolor_are_preserved() {
+        let spans = parse_ansi_text("\x1b[38;5;196mred\x1b[0m plain");
+        assert_eq!(spans[0].style.fg, Some(Color::Indexed(196)));
+        assert_eq!(spans[0].content, "red");
+
+        let spans = parse_ansi_text("\x1b[38;2;12;34;56mtrue\x1b[0m");
+        assert_eq!(spans[0].style.fg, Some(Color::Rgb(12, 34, 56)));
+
+        let spans = parse_ansi_text("\x1b[48;5;22mgreen-bg\x1b[0m");
+        assert_eq!(spans[0].style.bg, Some(Color::Indexed(22)));
+
+        // dim + bold combos and reset
+        let spans = parse_ansi_text("\x1b[1;31mbold-red\x1b[22m plain-red\x1b[0m x");
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[0].style.fg, Some(Color::Red));
+        assert!(!spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[1].style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn ansi_colors_survive_in_tool_body() {
+        let lines = build_tool_body_block("\x1b[32m✔ done\x1b[0m\nplain", 80, true);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans[0].style.fg, Some(Color::Green));
+        assert_eq!(lines[1].spans[0].content, "plain");
+    }
+
+    #[test]
+    fn ansi_lines_are_hard_wrapped_by_display_width() {
+        let long = format!("\x1b[36m{}\x1b[0m", "x".repeat(50));
+        let lines = build_tool_body_block(&long, 20, true);
+        assert_eq!(lines.len(), 3);
+        for line in &lines {
+            assert!(line_spans_width_cjk(&line.spans) <= 20);
+        }
+    }
+
+    #[test]
+    fn truncate_spans_keeps_style_and_width() {
+        let spans = vec![
+            Span::styled("abcdef", Style::default().fg(Color::Red)),
+            Span::styled("ghij", Style::default().fg(Color::Blue)),
+        ];
+        let cut = truncate_spans_to_width(&spans, 4);
+        assert_eq!(line_spans_width_cjk(&cut), 4);
+        assert_eq!(cut[0].content, "abcd");
+        assert_eq!(cut.len(), 1);
+    }
+
+    #[test]
+    fn wide_chars_are_never_split() {
+        let spans = vec![Span::raw("中文中文")];
+        // width 4 = exactly two CJK chars per row
+        let rows = wrap_spans_to_width(spans.clone(), 4);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0].content, "中文");
+        assert_eq!(rows[1][0].content, "中文");
+        // width 3: one char per row, nothing dropped or split
+        let rows = wrap_spans_to_width(spans, 3);
+        assert_eq!(rows.len(), 4);
+        let joined: String = rows.iter().flat_map(|r| r.iter().map(|s| s.content.to_string())).collect();
+        assert_eq!(joined, "中文中文");
+        for row in &rows {
+            assert!(line_spans_width_cjk(row) <= 3);
+        }
+    }
+
+    #[test]
+    fn json_lines_are_pretty_printed_per_line() {
+        let out = try_format_json_line(r#"{"a":1,"b":[2,3]}"#);
+        assert!(out.contains("\n"));
+        assert_eq!(try_format_json_line("not json {"), "not json {");
+        assert_eq!(try_format_json_line("text"), "text");
+    }
+
+    #[test]
+    fn cjk_truncate_uses_display_width() {
+        // 7 cells: 3 for "..." leaves 4 → two CJK chars (4 cells) fit
+        let s = truncate_to_display_width("中文中文中文", 7);
+        assert_eq!(s, "中文...");
+        assert!(UnicodeWidthStr::width_cjk(s.as_str()) <= 7);
+        // ASCII unaffected
+        assert_eq!(truncate_to_display_width("abcdef", 10), "abcdef");
     }
 }
