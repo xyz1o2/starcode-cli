@@ -103,7 +103,7 @@ tempfile = "3.14"
 
 # Hashing
 sha2 = "0.10"
-md5 = "0.7"
+md5 = "0.8"
 
 # Base64 encoding for image support
 base64 = "0.21"
