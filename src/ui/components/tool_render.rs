@@ -12,7 +12,10 @@ pub(crate) fn is_tool_entry(entry: &crate::types::ChatEntry) -> bool {
 }
 
 /// 工具状态图标
-pub fn get_tool_status_icon(entry: &crate::types::ChatEntry, theme: &Theme) -> (&'static str, Color) {
+pub fn get_tool_status_icon(
+    entry: &crate::types::ChatEntry,
+    theme: &Theme,
+) -> (&'static str, Color) {
     match &entry.status {
         Some(EntryStatus::Success) => ("✓", theme.tool_success),
         Some(EntryStatus::Error) => ("✗", theme.tool_error),
@@ -80,11 +83,7 @@ pub(crate) fn confirmation_card_wrap_width(area_width: u16) -> usize {
 
 /// 对工具输出行应用预览行数限制，超出部分添加溢出提示行
 /// 返回 (截断后的行, 被隐藏的行数)
-fn apply_preview_limit(
-    lines: &mut Vec<Line<'static>>,
-    max_lines: usize,
-    theme: &Theme,
-) -> usize {
+fn apply_preview_limit(lines: &mut Vec<Line<'static>>, max_lines: usize, theme: &Theme) -> usize {
     let total = lines.len();
     if total > max_lines {
         let hidden = total.saturating_sub(max_lines);
@@ -122,15 +121,25 @@ pub(crate) fn render_tool_entry_blocks(
         .tool_call
         .as_ref()
         .map(|tc| {
-            // ToolCall 默认展开；ToolResult 有 diff 时也默认展开
-            let has_diff = entry.tool_result.as_ref()
+            // ToolCall 默认展开；ToolResult 有 diff 或编辑类工具时也默认展开
+            let has_diff = entry
+                .tool_result
+                .as_ref()
                 .and_then(|tr| tr.data.as_ref())
                 .and_then(|d| d.get("diff"))
                 .and_then(|v| v.as_str())
                 .map(|s| !s.trim().is_empty())
                 .unwrap_or(false);
+
+            // 编辑类工具默认展开（Edit、Write、create_file、edit_file 等）
+            let is_edit_tool = matches!(
+                tc.function.name.as_str(),
+                "Edit" | "create_file" | "edit_file" | "str_replace_editor" | "smart_edit" | "Write"
+            );
+
             let default_expanded = matches!(entry.entry_type, ChatEntryType::ToolCall)
-                || (matches!(entry.entry_type, ChatEntryType::ToolResult) && has_diff);
+                || (matches!(entry.entry_type, ChatEntryType::ToolResult)
+                    && (has_diff || is_edit_tool));
             let toggled = state.expanded_tool_call_ids.contains(&tc.id);
             default_expanded ^ toggled
         })
@@ -141,7 +150,10 @@ pub(crate) fn render_tool_entry_blocks(
     // ToolConfirmation: 显示确认卡片
     let content_lines = if entry.entry_type == ChatEntryType::ToolConfirmation {
         if let Some(ref conf) = entry.confirmation {
-            if matches!(conf.operation_type, crate::types::ConfirmationType::AskUserQuestion) {
+            if matches!(
+                conf.operation_type,
+                crate::types::ConfirmationType::AskUserQuestion
+            ) {
                 crate::ui::components::confirmation_dialog::build_ask_user_question_card(
                     conf,
                     confirmation_card_wrap_width(area_width),
@@ -165,19 +177,41 @@ pub(crate) fn render_tool_entry_blocks(
             ))]
         }
     } else if entry.entry_type == ChatEntryType::ToolCall {
-        // ToolCall: 只显示工具名称和参数摘要
+        // ToolCall: 显示工具名称和参数，格式为 ● ToolName(args)
         if let Some(tc) = &entry.tool_call {
-            let (summary, _extra_info) = build_tool_argument_display(tc, state.ui_verbose);
+            let (args_str, _extra_info) = build_tool_argument_display(tc, state.ui_verbose);
             let tool_name = crate::ui::utils::format::tool_display_name(tc.function.name.as_str());
-            let short_summary = if !state.ui_verbose && summary.chars().count() > 60 {
-                format!("{}...", summary.chars().take(57).collect::<String>())
+
+            // 构建完整行：工具名(参数)
+            let full_line = format!("{}({})", tool_name, args_str);
+
+            // 按终端宽度截断（对标 Claude Code wrap="truncate-end"）
+            let display_args = if !state.ui_verbose {
+                let truncated = crate::ui::utils::render::truncate_to_display_width(
+                    &full_line,
+                    tool_inner_width,
+                );
+                // 从截断后的行中提取参数部分
+                truncated
+                    .strip_prefix(&tool_name)
+                    .and_then(|s| s.strip_prefix('('))
+                    .and_then(|s| s.strip_suffix(')'))
+                    .unwrap_or(&args_str)
+                    .to_string()
             } else {
-                summary
+                args_str
             };
+
             vec![Line::from(vec![
-                Span::styled(tool_name, Style::default().add_modifier(Modifier::BOLD).fg(theme.primary)),
-                Span::raw(" "),
-                Span::styled(short_summary, Style::default().fg(Color::Gray)),
+                Span::styled(
+                    tool_name,
+                    Style::default()
+                        .add_modifier(Modifier::BOLD)
+                        .fg(theme.primary),
+                ),
+                Span::raw("("),
+                Span::styled(display_args, Style::default()),
+                Span::raw(")"),
             ])]
         } else {
             vec![]
@@ -185,7 +219,14 @@ pub(crate) fn render_tool_entry_blocks(
     } else if entry.entry_type == ChatEntryType::ToolResult {
         // ToolResult: 显示结果内容
         if let Some(tc) = &entry.tool_call {
-            render_rich_tool_content(entry, tc, tool_inner_width, expanded, _prev_is_confirmation, theme)
+            render_rich_tool_content(
+                entry,
+                tc,
+                tool_inner_width,
+                expanded,
+                _prev_is_confirmation,
+                theme,
+            )
         } else if !entry.content.trim().is_empty() {
             crate::ui::utils::render::build_tool_body_block(
                 &entry.content,
@@ -196,11 +237,7 @@ pub(crate) fn render_tool_entry_blocks(
             vec![]
         }
     } else {
-        crate::ui::utils::render::build_tool_body_block(
-            &entry.content,
-            tool_inner_width,
-            expanded,
-        )
+        crate::ui::utils::render::build_tool_body_block(&entry.content, tool_inner_width, expanded)
     };
 
     let mut boxed_lines = Vec::new();
@@ -217,16 +254,20 @@ pub(crate) fn render_tool_entry_blocks(
         let marker = if cancelling {
             "⊘"
         } else if is_streaming {
-            if blink_visible { "●" } else { " " }
+            if blink_visible {
+                "●"
+            } else {
+                " "
+            }
         } else {
-            "●"  // 完成后也显示圆点，但颜色不同
+            "●" // 完成后也显示圆点，但颜色不同
         };
         let marker_color = if cancelling {
             theme.warning
         } else if is_streaming {
             theme.primary
         } else {
-            theme.tool_success  // 完成后用绿色
+            theme.tool_success // 完成后用绿色
         };
 
         // 第一行：圆点 + 工具信息（在 content_lines 中已经渲染好了）
@@ -268,10 +309,7 @@ pub(crate) fn render_tool_entry_blocks(
 
             let mut spans = Vec::with_capacity(line.spans.len() + 1);
             if first_line {
-                spans.push(Span::styled(
-                    "  ⎿  ",
-                    Style::default().fg(theme.subtle),
-                ));
+                spans.push(Span::styled("  ⎿  ", Style::default().fg(theme.subtle)));
                 first_line = false;
             } else {
                 spans.push(Span::raw("     "));
@@ -292,7 +330,6 @@ pub(crate) fn render_tool_entry_blocks(
 
     blocks
 }
-
 
 fn truncate_chars_with_ellipsis(s: &str, max_chars: usize) -> String {
     if max_chars == 0 {
@@ -356,7 +393,13 @@ fn build_tool_argument_display(
 ) -> (String, Vec<String>) {
     // verbose 模式不截断、不缩短路径（对标 Claude Code verbose 显示）
     let lim = |n: usize| if verbose { usize::MAX } else { n };
-    let shorten = |p: &str| if verbose { p.to_string() } else { shorten_path_for_display(p) };
+    let shorten = |p: &str| {
+        if verbose {
+            p.to_string()
+        } else {
+            shorten_path_for_display(p)
+        }
+    };
     let args = match serde_json::from_str::<serde_json::Value>(&tc.function.arguments) {
         Ok(v) => v,
         Err(_) => {
@@ -478,11 +521,9 @@ fn build_tool_argument_display(
                 format!("{} in {}", pat, shorten(&dir))
             }
         }
-        "list_directory" | "ListDir" => {
-            get_str(&["directory", "path"])
-                .map(|p| shorten(&p))
-                .unwrap_or_else(|| ".".to_string())
-        }
+        "list_directory" | "ListDir" => get_str(&["directory", "path"])
+            .map(|p| shorten(&p))
+            .unwrap_or_else(|| ".".to_string()),
         _ => summarize_object_inline(obj),
     };
 
@@ -501,16 +542,61 @@ fn render_rich_tool_content(
 
     // 此函数只处理 ToolResult
     let tool_color = if let Some(tr) = &entry.tool_result {
-        if tr.success { theme.tool_success } else { theme.tool_error }
+        if tr.success {
+            theme.tool_success
+        } else {
+            theme.tool_error
+        }
     } else {
         theme.warning
     };
 
     let _tool_name = crate::ui::utils::format::tool_display_name(tc.function.name.as_str());
 
+    // ===== Write/create_file 工具：折叠态显示 Wrote N lines to path =====
+    if !expanded && matches!(tc.function.name.as_str(), "create_file" | "Write") {
+        if let Some(tr) = &entry.tool_result {
+            if tr.success {
+                // 从 args 提取文件路径和内容行数
+                if let Ok(args) = serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                {
+                    let path = args
+                        .get("path")
+                        .or_else(|| args.get("file_path"))
+                        .or_else(|| args.get("target_file"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(unknown)");
+
+                    // 优先从 args.content 获取行数，其次从 output 获取
+                    let line_count = args
+                        .get("content")
+                        .or_else(|| args.get("file_text"))
+                        .and_then(|v| v.as_str())
+                        .map(|c| c.lines().count())
+                        .or_else(|| tr.output.as_deref().map(|o| o.lines().count()))
+                        .unwrap_or(0);
+
+                    let short_path = shorten_path_for_display(path);
+                    lines.push(Line::from(vec![
+                        Span::raw("Wrote "),
+                        Span::styled(
+                            format!("{}", line_count),
+                            Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" lines to "),
+                        Span::styled(short_path, Style::default().add_modifier(Modifier::BOLD)),
+                    ]));
+                    return lines;
+                }
+            }
+        }
+    }
+
     // ===== ToolResult 路径 =====
     if let Some(tr) = &entry.tool_result {
-        let diff_str = tr.data.as_ref()
+        let diff_str = tr
+            .data
+            .as_ref()
             .and_then(|d| d.get("diff").and_then(|v| v.as_str()));
         let has_diff = diff_str.is_some() && !diff_str.unwrap_or("").trim().is_empty();
 
@@ -521,29 +607,109 @@ fn render_rich_tool_content(
                 let mut added = 0usize;
                 let mut removed = 0usize;
                 for line in diff_content.lines() {
-                    if line.starts_with('+') && !line.starts_with("+++") { added += 1; }
-                    else if line.starts_with('-') && !line.starts_with("---") { removed += 1; }
+                    if line.starts_with('+') && !line.starts_with("+++") {
+                        added += 1;
+                    } else if line.starts_with('-') && !line.starts_with("---") {
+                        removed += 1;
+                    }
                 }
                 // ⎿ 标记由 ToolResult 统一前缀提供，这里只写正文（对标 FileEditToolUpdatedMessage）
                 lines.push(Line::from(vec![
                     Span::raw("Added "),
-                    Span::styled(format!("{}", added), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        format!("{}", added),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw(" lines, removed "),
-                    Span::styled(format!("{}", removed), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        format!("{}", removed),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw(" lines"),
                 ]));
             } else {
-                lines.extend(crate::ui::utils::render::build_diff_block(diff_content, tool_inner_width));
+                lines.extend(crate::ui::utils::render::build_diff_block(
+                    diff_content,
+                    tool_inner_width,
+                ));
             }
             return lines;
         }
 
-        // 非 diff 工具：统一的折叠/展开渲染
+        // 非 diff 工具：根据工具类型决定折叠态显示方式
         let text = if tr.success {
             tr.output.as_deref().unwrap_or("")
         } else {
             tr.error.as_deref().unwrap_or("")
         };
+
+        // ===== 查看类工具：折叠态只显示摘要行 =====
+        if !expanded && !text.trim().is_empty() && tr.success {
+            match tc.function.name.as_str() {
+                // Read/view_file: "Read N lines"
+                "view_file" | "Read" => {
+                    let line_count = text.lines().count();
+                    lines.push(Line::from(vec![
+                        Span::raw("Read "),
+                        Span::styled(
+                            format!("{}", line_count),
+                            Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" lines"),
+                    ]));
+                    lines.push(Line::from(Span::styled(
+                        "  (Tab to expand)",
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::DIM),
+                    )));
+                    return lines;
+                }
+                // Grep/search: "Found N matches"
+                "Grep" | "search_file_content" | "grep_search" => {
+                    let match_count = text.lines().filter(|l| !l.trim().is_empty()).count();
+                    lines.push(Line::from(vec![
+                        Span::raw("Found "),
+                        Span::styled(
+                            format!("{}", match_count),
+                            Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" matches"),
+                    ]));
+                    lines.push(Line::from(Span::styled(
+                        "  (Tab to expand)",
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::DIM),
+                    )));
+                    return lines;
+                }
+                // find_by_name/list_directory/ListDir: "Found N files"
+                "find_by_name" | "list_directory" | "ListDir" => {
+                    let file_count = text.lines().filter(|l| !l.trim().is_empty()).count();
+                    lines.push(Line::from(vec![
+                        Span::raw("Found "),
+                        Span::styled(
+                            format!("{}", file_count),
+                            Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" files"),
+                    ]));
+                    lines.push(Line::from(Span::styled(
+                        "  (Tab to expand)",
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::DIM),
+                    )));
+                    return lines;
+                }
+                // 其他工具：维持预览逻辑
+                _ => {}
+            }
+        }
+
         render_tool_result_text(&mut lines, text, tr.success, tool_inner_width, expanded);
     } else {
         // 回退：tool_result 字段缺失时（如会话恢复），使用 entry.content 渲染
@@ -565,6 +731,17 @@ fn render_tool_result_text(
 ) {
     let total = text.lines().count();
 
+    // ===== Bash 无输出时显示 Done =====
+    if success && text.trim().is_empty() && !expanded {
+        lines.push(Line::from(Span::styled(
+            "Done",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )));
+        return;
+    }
+
     if !expanded {
         // 折叠态：预览前几行真实内容 + "Tab 展开"提示（而非只有行数）。
         // 之前只显示第一行 + N lines，用户看不到任何正文，误以为输出被截断/不显示。
@@ -579,8 +756,7 @@ fn render_tool_result_text(
             }
             if raw_line.contains('\x1b') {
                 let spans = crate::ui::utils::render::parse_ansi_text(raw_line);
-                let truncated =
-                    crate::ui::utils::render::truncate_spans_to_width(&spans, width);
+                let truncated = crate::ui::utils::render::truncate_spans_to_width(&spans, width);
                 if !truncated.is_empty() {
                     lines.push(Line::from(truncated));
                     shown += 1;
@@ -602,7 +778,9 @@ fn render_tool_result_text(
             let hidden = total.saturating_sub(shown);
             lines.push(Line::from(Span::styled(
                 format!("... +{} lines  (press Tab to expand)", hidden),
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
             )));
         }
         return;
@@ -635,12 +813,17 @@ fn render_tool_result_text(
                 }
             } else {
                 let stripped = crate::ui::utils::render::strip_ansi_codes(line);
-                lines.push(Line::from(vec![
-                    Span::styled(stripped, Style::default().fg(Color::Red)),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    stripped,
+                    Style::default().fg(Color::Red),
+                )]));
             }
         }
     } else {
-        lines.extend(crate::ui::utils::render::build_tool_body_block(&result_text, width, true));
+        lines.extend(crate::ui::utils::render::build_tool_body_block(
+            &result_text,
+            width,
+            true,
+        ));
     }
 }

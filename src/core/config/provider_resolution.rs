@@ -10,15 +10,18 @@ pub const SRC_PROVIDER_STORE_ACTIVE_PROVIDER: &str = "provider_store.active_prov
 pub const SRC_SESSION_MODEL: &str = "session.current_model";
 pub const SRC_CLI_MODEL: &str = "cli.model";
 pub const SRC_ENV_STAR_MODEL: &str = "env.STAR_MODEL";
+pub const SRC_ENV_ANTHROPIC_MODEL: &str = "env.ANTHROPIC_MODEL";
 pub const SRC_PROVIDER_STORE_ACTIVE_MODEL: &str = "provider_store.active_model";
 pub const SRC_USER_SETTINGS_DEFAULT_MODEL: &str = "user_settings.default_model";
 pub const SRC_CLI_STAR_BASE_URL: &str = "cli.STAR_BASE_URL";
 pub const SRC_ENV_STAR_BASE_URL: &str = "env.STAR_BASE_URL";
+pub const SRC_ENV_ANTHROPIC_BASE_URL: &str = "env.ANTHROPIC_BASE_URL";
 pub const SRC_PROVIDER_STORE_BASE_URL: &str = "provider_store.base_url";
 pub const SRC_PROVIDER_DEFAULT_BASE_URL: &str = "provider_default.base_url";
 pub const SRC_USER_SETTINGS_BASE_URL: &str = "user_settings.base_url";
 pub const SRC_CLI_STAR_API_KEY: &str = "cli.STAR_API_KEY";
 pub const SRC_ENV_STAR_API_KEY: &str = "env.STAR_API_KEY";
+pub const SRC_ENV_ANTHROPIC_API_KEY: &str = "env.ANTHROPIC_API_KEY";
 pub const SRC_PROVIDER_STORE_API_KEY: &str = "provider_store.api_key";
 pub const SRC_PROVIDER_ENV_API_KEY: &str = "provider_env.api_key";
 pub const SRC_USER_SETTINGS_API_KEY: &str = "user_settings.api_key";
@@ -96,6 +99,10 @@ struct EnvSnapshot {
     star_base_url: Option<String>,
     star_api_key: Option<String>,
     star_openai_compatible: Option<String>,
+    // Claude Code compatible env vars
+    anthropic_model: Option<String>,
+    anthropic_base_url: Option<String>,
+    anthropic_api_key: Option<String>,
 }
 
 impl EnvSnapshot {
@@ -105,6 +112,10 @@ impl EnvSnapshot {
             star_base_url: std::env::var("STAR_BASE_URL").ok(),
             star_api_key: std::env::var("STAR_API_KEY").ok(),
             star_openai_compatible: std::env::var("STAR_OPENAI_COMPATIBLE").ok(),
+            // Claude Code compatible env vars (fallback when STAR_* not set)
+            anthropic_model: std::env::var("ANTHROPIC_MODEL").ok(),
+            anthropic_base_url: std::env::var("ANTHROPIC_BASE_URL").ok(),
+            anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
         }
     }
 }
@@ -115,12 +126,7 @@ pub fn resolve_effective_provider_settings(
     settings: &UserSettings,
 ) -> EffectiveProviderResolution {
     let env = EnvSnapshot::capture();
-    resolve_effective_provider_settings_with_env(
-        inputs,
-        provider_config,
-        settings,
-        &env,
-    )
+    resolve_effective_provider_settings_with_env(inputs, provider_config, settings, &env)
 }
 
 fn resolve_effective_provider_settings_with_env(
@@ -143,26 +149,17 @@ fn resolve_effective_provider_settings_with_env(
     );
     // When no explicit active provider is set but providers are configured,
     // auto-select the first one so its API key / base URL can be resolved.
-    let provider_id = provider_id.or_else(|| {
-        provider_config
-            .providers
-            .keys()
-            .next()
-            .cloned()
-    });
+    let provider_id = provider_id.or_else(|| provider_config.providers.keys().next().cloned());
     let stored_settings = provider_id.as_deref().and_then(|provider_id| {
-        provider_config
-            .providers
-            .get(provider_id)
-            .or_else(|| {
-                provider_config.providers.iter().find_map(|(k, v)| {
-                    if k.eq_ignore_ascii_case(provider_id) {
-                        Some(v)
-                    } else {
-                        None
-                    }
-                })
+        provider_config.providers.get(provider_id).or_else(|| {
+            provider_config.providers.iter().find_map(|(k, v)| {
+                if k.eq_ignore_ascii_case(provider_id) {
+                    Some(v)
+                } else {
+                    None
+                }
             })
+        })
     });
 
     EffectiveProviderResolution {
@@ -185,18 +182,9 @@ fn resolve_effective_provider_settings_with_env(
             settings,
             env,
         ),
-        openai_compatible: resolve_openai_compatible(
-            provider_id.as_deref(),
-            settings,
-            env,
-        )
-        .0,
-        openai_compatible_source: resolve_openai_compatible(
-            provider_id.as_deref(),
-            settings,
-            env,
-        )
-        .1,
+        openai_compatible: resolve_openai_compatible(provider_id.as_deref(), settings, env).0,
+        openai_compatible_source: resolve_openai_compatible(provider_id.as_deref(), settings, env)
+            .1,
     }
 }
 
@@ -236,6 +224,11 @@ fn resolve_model(
         return ResolvedValue::present(model, SourceRef::new(SRC_ENV_STAR_MODEL));
     }
 
+    // Claude Code compatible env var (fallback)
+    if let Some(model) = trimmed_non_empty(env.anthropic_model.clone()) {
+        return ResolvedValue::present(model, SourceRef::new(SRC_ENV_ANTHROPIC_MODEL));
+    }
+
     if let Some(active_provider_id) = provider_config.active_provider_id.as_deref() {
         if let Some(model) = provider_config
             .providers
@@ -270,6 +263,11 @@ fn resolve_base_url(
 
     if let Some(base_url) = trimmed_non_empty(env.star_base_url.clone()) {
         return ResolvedValue::present(base_url, SourceRef::new(SRC_ENV_STAR_BASE_URL));
+    }
+
+    // Claude Code compatible env var (fallback)
+    if let Some(base_url) = trimmed_non_empty(env.anthropic_base_url.clone()) {
+        return ResolvedValue::present(base_url, SourceRef::new(SRC_ENV_ANTHROPIC_BASE_URL));
     }
 
     if let Some(base_url) =
@@ -324,6 +322,11 @@ fn resolve_api_key(
 
     if let Some(api_key) = providers::normalize_api_key_value(env.star_api_key.clone()) {
         return ResolvedValue::present(api_key, SourceRef::new(SRC_ENV_STAR_API_KEY));
+    }
+
+    // Claude Code compatible env var (fallback)
+    if let Some(api_key) = providers::normalize_api_key_value(env.anthropic_api_key.clone()) {
+        return ResolvedValue::present(api_key, SourceRef::new(SRC_ENV_ANTHROPIC_API_KEY));
     }
 
     if let Some(api_key) = providers::normalize_api_key_value(settings.api_key.clone()) {
@@ -383,5 +386,3 @@ fn parse_truthy_value(value: Option<&str>) -> Option<bool> {
     }
     Some(!matches!(normalized.as_str(), "0" | "false" | "off" | "no"))
 }
-
- 

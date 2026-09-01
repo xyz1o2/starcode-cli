@@ -34,12 +34,11 @@ use tokio::sync::mpsc;
 
 use crate::core::utils::watchdog::Watchdog;
 use crate::runtime::messages::{AgentRequest, StreamMessage};
-use crate::ui::state::ChatState;
 use crate::ui::events::clipboard_paste::{
-    save_clipboard_image, detect_file_paths, insert_image_paste_block,
-    insert_file_paste_block, insert_paste_block, sync_input_from_textarea,
-    maybe_auto_fold_input,
+    detect_file_paths, insert_file_paste_block, insert_image_paste_block, insert_paste_block,
+    maybe_auto_fold_input, save_clipboard_image, sync_input_from_textarea,
 };
+use crate::ui::state::ChatState;
 
 /// Result from clipboard operations (to avoid blocking async runtime)
 enum ClipboardResult {
@@ -366,7 +365,9 @@ pub async fn run_ui_loop(
     std::thread::Builder::new()
         .name("crossterm-key-reader".into())
         .spawn(move || {
-            crate::utils::logging::append_debug_log_line("[KEY_THREAD] Started (crossterm + use-dev-tty)");
+            crate::utils::logging::append_debug_log_line(
+                "[KEY_THREAD] Started (crossterm + use-dev-tty)",
+            );
             let mut ev_count: u64 = 0;
             loop {
                 match crossterm::event::read() {
@@ -375,13 +376,18 @@ pub async fn run_ui_loop(
                         match key_tx.blocking_send(ev) {
                             Ok(()) => {}
                             Err(_) => {
-                                crate::utils::logging::append_debug_log_line("[KEY_THREAD] send FAILED (receiver dropped)");
+                                crate::utils::logging::append_debug_log_line(
+                                    "[KEY_THREAD] send FAILED (receiver dropped)",
+                                );
                                 break;
                             }
                         }
                     }
                     Err(e) => {
-                        crate::utils::logging::append_debug_log_line(&format!("[KEY_THREAD] read error: {}", e));
+                        crate::utils::logging::append_debug_log_line(&format!(
+                            "[KEY_THREAD] read error: {}",
+                            e
+                        ));
                         // On some terminals, read() can fail transiently (e.g. SIGWINCH).
                         // Brief sleep before retrying to avoid tight error loop.
                         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -445,8 +451,15 @@ pub async fn run_ui_loop(
                         Event::Key(key) => {
                             if key.kind != KeyEventKind::Release {
                                 let (norm_code, norm_mods) = normalize_key(key.code, key.modifiers);
-                                let norm_key = crossterm::event::KeyEvent::new(norm_code, norm_mods);
-                                crate::ui::events::input::handle_key_event(state, norm_key, &agent_tx, last_processed_key_time).await?;
+                                let norm_key =
+                                    crossterm::event::KeyEvent::new(norm_code, norm_mods);
+                                crate::ui::events::input::handle_key_event(
+                                    state,
+                                    norm_key,
+                                    &agent_tx,
+                                    last_processed_key_time,
+                                )
+                                .await?;
                                 last_processed_key_time = Some(Instant::now());
                                 needs_redraw = true;
                             }
@@ -456,7 +469,10 @@ pub async fn run_ui_loop(
                             needs_redraw = true;
                         }
                         Event::Paste(pasted_text) => {
-                            crate::utils::logging::append_debug_log_line(&format!("[BRACKETED_PASTE] Received {} chars", pasted_text.len()));
+                            crate::utils::logging::append_debug_log_line(&format!(
+                                "[BRACKETED_PASTE] Received {} chars",
+                                pasted_text.len()
+                            ));
                             // Handle bracketed paste event from supported terminals
                             state.paste_in_progress = true;
                             state.paste_end_time = Some(Instant::now());
@@ -466,9 +482,13 @@ pub async fn run_ui_loop(
                             // 2. Palette filter → palette_filter
                             // 3. Main input → main textarea
                             if state.show_input_modal {
-                                let normalized = pasted_text.replace("\r\n", "\n").replace('\r', "\n");
+                                let normalized =
+                                    pasted_text.replace("\r\n", "\n").replace('\r', "\n");
                                 state.modal_textarea.insert_str(&normalized);
-                                state.input_modal_value = crate::ui::events::clipboard_paste::collect_modal_input(&state.modal_textarea);
+                                state.input_modal_value =
+                                    crate::ui::events::clipboard_paste::collect_modal_input(
+                                        &state.modal_textarea,
+                                    );
                             } else if state.show_palette {
                                 for c in pasted_text.chars() {
                                     if !c.is_control() {
@@ -483,7 +503,8 @@ pub async fn run_ui_loop(
                                         return Ok(ClipboardResult::Image(path, w, h));
                                     }
                                     Err("No image in clipboard".to_string())
-                                }).await;
+                                })
+                                .await;
 
                                 match clipboard_result {
                                     Ok(Ok(ClipboardResult::Image(path, w, h))) => {
@@ -526,7 +547,10 @@ pub async fn run_ui_loop(
         if task_panel_changed {
             // Use try-clear to avoid crashing on terminal errors
             if let Err(e) = terminal.clear() {
-                crate::utils::logging::append_debug_log_line(&format!("[UI] terminal.clear() failed: {}", e));
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[UI] terminal.clear() failed: {}",
+                    e
+                ));
             }
         }
         last_scroll = state.scroll;
@@ -539,7 +563,8 @@ pub async fn run_ui_loop(
         // This is a fatal condition since the user can't type anything.
         if !key_thread_alive.load(std::sync::atomic::Ordering::Relaxed) {
             crate::utils::logging::append_debug_log_line("[UI] Key reader thread died, exiting");
-            state.current_status_line = Some("Input thread crashed. Press Ctrl+C to exit.".to_string());
+            state.current_status_line =
+                Some("Input thread crashed. Press Ctrl+C to exit.".to_string());
             // Don't break immediately — let the user see the message and Ctrl+C.
             // The ctrl_c handler in the select below will catch it.
         }
@@ -579,12 +604,13 @@ pub async fn run_ui_loop(
                 if let Some(next_input) = state.pending_user_messages.pop_front() {
                     let remaining = state.pending_user_messages.len();
                     if remaining > 0 {
-                        state.current_status_line =
-                            Some(format!("\u{23f3} {} pending", remaining));
+                        state.current_status_line = Some(format!("\u{23f3} {} pending", remaining));
                     } else {
                         state.current_status_line = None;
                     }
-                    let _ = crate::ui::app::logic::enqueue_user_message(state, next_input, &agent_tx).await;
+                    let _ =
+                        crate::ui::app::logic::enqueue_user_message(state, next_input, &agent_tx)
+                            .await;
                 }
             }
         }
@@ -592,12 +618,14 @@ pub async fn run_ui_loop(
         // 超时保护：如果 is_processing 为 true 但超过 30 秒没有新消息，自动清除
         // 这处理 Done 消息丢失或 agent 卡住的情况
         if state.is_processing {
-            let stall_secs = state.last_token_time
+            let stall_secs = state
+                .last_token_time
                 .map(|t| t.elapsed().as_secs())
                 .unwrap_or(0);
             if stall_secs > 30 {
                 crate::utils::logging::append_debug_log_line(&format!(
-                    "[STALL] is_processing stuck for {}s, auto-clearing", stall_secs
+                    "[STALL] is_processing stuck for {}s, auto-clearing",
+                    stall_secs
                 ));
                 state.is_processing = false;
                 state.is_streaming = false;
@@ -610,7 +638,9 @@ pub async fn run_ui_loop(
         // 超时保护：current_tool_name 超过 15 秒没更新就清除
         // 这处理工具已完成但 ToolResult 消息丢失的情况
         if state.current_tool_name.is_some() {
-            let tool_stale = state.tool_started_at.values()
+            let tool_stale = state
+                .tool_started_at
+                .values()
                 .max()
                 .map(|t| t.elapsed().as_secs() > 15)
                 .unwrap_or(true);
@@ -625,8 +655,10 @@ pub async fn run_ui_loop(
             last_loop_tick = Instant::now();
             match tokio::time::timeout(
                 Duration::from_millis(500),
-                crate::runtime::background::poll_loop_tasks(state, &agent_tx, &ui_cwd)
-            ).await {
+                crate::runtime::background::poll_loop_tasks(state, &agent_tx, &ui_cwd),
+            )
+            .await
+            {
                 Ok(Ok(redraw)) => {
                     needs_redraw |= redraw;
                 }
@@ -634,7 +666,9 @@ pub async fn run_ui_loop(
                     state.current_status_line = Some(format!("/loop scheduling failed: {}", err));
                 }
                 Err(_) => {
-                    crate::utils::logging::append_debug_log_line("[LOOP] poll_loop_tasks timed out (slow filesystem?)");
+                    crate::utils::logging::append_debug_log_line(
+                        "[LOOP] poll_loop_tasks timed out (slow filesystem?)",
+                    );
                 }
             }
         }
@@ -645,16 +679,21 @@ pub async fn run_ui_loop(
             last_remote_tick = Instant::now();
             match tokio::time::timeout(
                 Duration::from_millis(500),
-                crate::runtime::background::poll_remote_requests(state, &agent_tx, &ui_cwd)
-            ).await {
+                crate::runtime::background::poll_remote_requests(state, &agent_tx, &ui_cwd),
+            )
+            .await
+            {
                 Ok(Ok(redraw)) => {
                     needs_redraw |= redraw;
                 }
                 Ok(Err(err)) => {
-                    state.current_status_line = Some(format!("/remote consumption failed: {}", err));
+                    state.current_status_line =
+                        Some(format!("/remote consumption failed: {}", err));
                 }
                 Err(_) => {
-                    crate::utils::logging::append_debug_log_line("[REMOTE] poll_remote_requests timed out (slow filesystem?)");
+                    crate::utils::logging::append_debug_log_line(
+                        "[REMOTE] poll_remote_requests timed out (slow filesystem?)",
+                    );
                 }
             }
         }
@@ -663,11 +702,11 @@ pub async fn run_ui_loop(
         // Adaptive framerate during streaming: faster when content changes rapidly.
         let framerate = if state.is_streaming {
             if stream_msgs_per_sec > 20.0 {
-                target_framerate_streaming_fast   // 30fps — rapid content changes
+                target_framerate_streaming_fast // 30fps — rapid content changes
             } else if stream_msgs_per_sec > 5.0 {
-                target_framerate_streaming_base   // 24fps — moderate streaming
+                target_framerate_streaming_base // 24fps — moderate streaming
             } else {
-                target_framerate_streaming_slow   // 20fps — slow/idle streaming
+                target_framerate_streaming_slow // 20fps — slow/idle streaming
             }
         } else {
             target_framerate
@@ -695,7 +734,8 @@ pub async fn run_ui_loop(
         while stream_batch_count < MAX_STREAM_BATCH && stream_start.elapsed() < stream_budget {
             match rx.try_recv() {
                 Ok(msg) => {
-                    crate::ui::services::stream::handle_stream_update(state, msg, &agent_tx).await?;
+                    crate::ui::services::stream::handle_stream_update(state, msg, &agent_tx)
+                        .await?;
                     needs_redraw = true;
                     stream_msg_count += 1;
                     stream_batch_count += 1;
@@ -705,7 +745,8 @@ pub async fn run_ui_loop(
                     crate::utils::logging::append_debug_log_line("[STREAM] channel disconnected");
                     // Show error to user when worker disconnects unexpectedly
                     if state.is_streaming || state.is_processing {
-                        state.current_status_line = Some("Worker disconnected — press Enter to retry".to_string());
+                        state.current_status_line =
+                            Some("Worker disconnected — press Enter to retry".to_string());
                         state.is_streaming = false;
                         state.is_processing = false;
                         state.thinking_started_at = None;
@@ -803,12 +844,17 @@ async fn persist_session_on_exit(
 /// 3. Flush pending input bytes
 /// 4. Wait for terminal to stabilize
 /// 5. Create Terminal with retry + exponential backoff
-fn init_terminal() -> Result<ratatui::Terminal<ratatui::prelude::CrosstermBackend<std::io::Stdout>>, Box<dyn std::error::Error + Send + Sync>> {
-    use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
-    use std::io::{stdout, Write};
+fn init_terminal() -> Result<
+    ratatui::Terminal<ratatui::prelude::CrosstermBackend<std::io::Stdout>>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     use crossterm::execute;
+    use crossterm::terminal::{
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    };
     use ratatui::prelude::CrosstermBackend;
     use ratatui::Terminal as RatatuiTerminal;
+    use std::io::{stdout, Write};
 
     // Stage 1: Clean slate — disable raw mode and leave alternate screen
     // This handles the case where a previous session crashed without cleanup.
@@ -817,15 +863,18 @@ fn init_terminal() -> Result<ratatui::Terminal<ratatui::prelude::CrosstermBacken
 
     // Reset terminal state: disable bracketed paste, switch to main screen, show cursor
     let _ = crossterm::execute!(stdout(), crossterm::event::DisableBracketedPaste);
-    let _ = stdout().write_all(b"\x1b[?1049l");   // switch to main screen
-    let _ = stdout().write_all(b"\x1b[?25h");     // show cursor
-    let _ = stdout().write_all(b"\x1b[0m");       // reset attributes
+    let _ = stdout().write_all(b"\x1b[?1049l"); // switch to main screen
+    let _ = stdout().write_all(b"\x1b[?25h"); // show cursor
+    let _ = stdout().write_all(b"\x1b[0m"); // reset attributes
     let _ = stdout().flush();
 
     // Stage 2: Enable raw mode
     crate::utils::logging::append_debug_log_line("[TERM] calling enable_raw_mode...");
     enable_raw_mode().map_err(|e| {
-        crate::utils::logging::append_debug_log_line(&format!("[TERM] enable_raw_mode() FAILED: {}", e));
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[TERM] enable_raw_mode() FAILED: {}",
+            e
+        ));
         e
     })?;
     crate::utils::logging::append_debug_log_line("[TERM] enable_raw_mode() succeeded");
@@ -833,13 +882,13 @@ fn init_terminal() -> Result<ratatui::Terminal<ratatui::prelude::CrosstermBacken
     // Stage 3: Enter alternate screen, enable bracketed paste and mouse capture
     execute!(stdout(), EnterAlternateScreen)?;
     let _ = crossterm::execute!(stdout(), crossterm::event::EnableBracketedPaste);
-    // Enable mouse capture so scroll events arrive as Event::Mouse(ScrollUp/Down)
-    // instead of being translated to Up/Down arrow keys by the terminal.
-    // Users can disable via STARCODE_DISABLE_MOUSE=1 env var.
-    let mouse_disabled = std::env::var("STARCODE_DISABLE_MOUSE")
+    // Mouse capture is DISABLED by default to allow native terminal text selection/copy.
+    // Users can enable via STARCODE_ENABLE_MOUSE=1 env var for scroll events.
+    // Scroll events will be translated to Up/Down arrow keys when mouse capture is disabled.
+    let mouse_enabled = std::env::var("STARCODE_ENABLE_MOUSE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    if !mouse_disabled {
+    if mouse_enabled {
         let _ = crossterm::execute!(stdout(), crossterm::event::EnableMouseCapture);
     }
     let _ = stdout().flush();
@@ -876,7 +925,9 @@ fn init_terminal() -> Result<ratatui::Terminal<ratatui::prelude::CrosstermBacken
             Err(e) => {
                 crate::utils::logging::append_debug_log_line(&format!(
                     "[TERM] Terminal::new failed attempt {}/{}: {}",
-                    attempt + 1, max_retries, e
+                    attempt + 1,
+                    max_retries,
+                    e
                 ));
                 last_err = Some(e);
                 // Exponential backoff: 100ms, 200ms, 400ms
@@ -892,29 +943,38 @@ fn init_terminal() -> Result<ratatui::Terminal<ratatui::prelude::CrosstermBacken
     }
 
     // All retries failed — try one last time with raw stdin approach
-    crate::utils::logging::append_debug_log_line("[TERM] All retries failed, attempting fallback...");
+    crate::utils::logging::append_debug_log_line(
+        "[TERM] All retries failed, attempting fallback...",
+    );
     Err(Box::new(last_err.unwrap_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::Other, "Terminal initialization failed after all retries")
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Terminal initialization failed after all retries",
+        )
     })))
 }
 
 pub async fn run_app(
     init_rx: tokio::sync::oneshot::Receiver<
-        Result<(crate::agent::StarAgent, std::sync::Arc<crate::core::config::Config>), String>
+        Result<
+            (
+                crate::agent::StarAgent,
+                std::sync::Arc<crate::core::config::Config>,
+            ),
+            String,
+        >,
     >,
     initial_message: String,
     initial_history: Vec<crate::types::ChatEntry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
-    use std::io::{stdout, Write};
     use crate::ui::services::worker::agent_worker;
     use crossterm::execute;
+    use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
+    use std::io::{stdout, Write};
     use std::panic;
 
     // ── 终端初始化（在独立线程执行，避免阻塞 tokio 运行时）──
-    let terminal_result = tokio::task::spawn_blocking(|| {
-        init_terminal()
-    }).await?;
+    let terminal_result = tokio::task::spawn_blocking(|| init_terminal()).await?;
 
     let mut terminal = match terminal_result {
         Ok(t) => t,
@@ -928,21 +988,42 @@ pub async fn run_app(
         }
     };
 
+    // ── Splash 启动画面 ──
+    let _ = crate::ui::utils::splash::run_splash_ratatui(&mut terminal).await;
+
     // ── 加载界面 ──
     terminal.draw(|f| {
-        use ratatui::widgets::Paragraph;
-        use ratatui::text::{Line, Span};
         use ratatui::style::{Color, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::Paragraph;
         let area = f.area();
         let lines = vec![
             Line::from(""),
-            Line::from(Span::styled(format!("  ✳ {}...", crate::ui::components::status_line::random_spinner_verb()), Style::default().fg(Color::Rgb(215, 119, 87)))),
+            Line::from(Span::styled(
+                format!(
+                    "  ✳ {}...",
+                    crate::ui::components::status_line::random_spinner_verb()
+                ),
+                Style::default().fg(Color::Rgb(215, 119, 87)),
+            )),
             Line::from(""),
-            Line::from(Span::styled("  Loading configuration and tools...", Style::default().fg(Color::DarkGray))),
-            Line::from(Span::styled("  (This happens once and may take a few seconds)", Style::default().fg(Color::DarkGray))),
+            Line::from(Span::styled(
+                "  Loading configuration and tools...",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "  (This happens once and may take a few seconds)",
+                Style::default().fg(Color::DarkGray),
+            )),
             Line::from(""),
-            Line::from(Span::styled("  You can start typing now - input will appear after initialization", Style::default().fg(Color::DarkGray))),
-            Line::from(Span::styled("  Press Ctrl+C to cancel", Style::default().fg(Color::DarkGray))),
+            Line::from(Span::styled(
+                "  You can start typing now - input will appear after initialization",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "  Press Ctrl+C to cancel",
+                Style::default().fg(Color::DarkGray),
+            )),
         ];
         f.render_widget(Paragraph::new(lines), area);
     })?;
@@ -1027,8 +1108,8 @@ pub async fn run_app(
         // Best-effort: ignore individual errors since we're cleaning up
         let _ = crossterm::execute!(stdout(), crossterm::event::DisableMouseCapture);
         let _ = crossterm::execute!(stdout(), crossterm::event::DisableBracketedPaste);
-        let _ = stdout().write_all(b"\x1b[?25h");     // show cursor
-        let _ = stdout().write_all(b"\x1b[0m");       // reset attributes
+        let _ = stdout().write_all(b"\x1b[?25h"); // show cursor
+        let _ = stdout().write_all(b"\x1b[0m"); // reset attributes
         let _ = stdout().flush();
         // Leave alternate screen first, then disable raw mode
         // (disabling raw mode first can cause issues if alt screen is still active)
@@ -1064,14 +1145,14 @@ pub async fn run_app(
         let mut engine = crate::core::context::integration::ContextEngine::new(cwd);
         match engine.index_project().await {
             Ok(result) => {
-                let _ = index_tx.send(AgentRequest::EmitStatus(
-                    format!("Indexed: {}", result)
-                )).await;
+                let _ = index_tx
+                    .send(AgentRequest::EmitStatus(format!("Indexed: {}", result)))
+                    .await;
             }
             Err(e) => {
-                let _ = index_tx.send(AgentRequest::EmitStatus(
-                    format!("Index failed: {}", e)
-                )).await;
+                let _ = index_tx
+                    .send(AgentRequest::EmitStatus(format!("Index failed: {}", e)))
+                    .await;
             }
         }
     });
@@ -1085,9 +1166,11 @@ pub async fn run_app(
              /help for help  ·  Esc to interrupt  ·  --resume <id> to resume",
             version
         );
-        state
-            .chat_history
-            .push(ChatEntry::assistant(welcome).with_streaming(false).with_welcome());
+        state.chat_history.push(
+            ChatEntry::assistant(welcome)
+                .with_streaming(false)
+                .with_welcome(),
+        );
     }
     // Start at the bottom (Claude Code style).
     state.auto_follow = true;
@@ -1154,7 +1237,7 @@ pub async fn run_app(
 /// Parse ANSI escape sequences from raw stdin bytes into crossterm Events.
 /// Returns (bytes_consumed, Option<Event>). If 0 consumed, need more bytes.
 fn parse_ansi_event(buf: &[u8]) -> (usize, Option<Event>) {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, KeyEventKind};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
     if buf.is_empty() {
         return (0, None);
@@ -1175,41 +1258,105 @@ fn parse_ansi_event(buf: &[u8]) -> (usize, Option<Event>) {
                         return (0, None);
                     }
                     match buf[2] {
-                        b'A' => (3, Some(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)))),
-                        b'B' => (3, Some(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)))),
-                        b'C' => (3, Some(Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)))),
-                        b'D' => (3, Some(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)))),
-                        b'Z' => (3, Some(Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)))),
-                        b'H' => (3, Some(Event::Key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)))),
-                        b'F' => (3, Some(Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)))),
+                        b'A' => (
+                            3,
+                            Some(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))),
+                        ),
+                        b'B' => (
+                            3,
+                            Some(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))),
+                        ),
+                        b'C' => (
+                            3,
+                            Some(Event::Key(KeyEvent::new(
+                                KeyCode::Right,
+                                KeyModifiers::NONE,
+                            ))),
+                        ),
+                        b'D' => (
+                            3,
+                            Some(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))),
+                        ),
+                        b'Z' => (
+                            3,
+                            Some(Event::Key(KeyEvent::new(
+                                KeyCode::BackTab,
+                                KeyModifiers::SHIFT,
+                            ))),
+                        ),
+                        b'H' => (
+                            3,
+                            Some(Event::Key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))),
+                        ),
+                        b'F' => (
+                            3,
+                            Some(Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))),
+                        ),
                         b'3' => {
                             if buf.len() >= 4 && buf[3] == b'~' {
-                                (4, Some(Event::Key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))))
+                                (
+                                    4,
+                                    Some(Event::Key(KeyEvent::new(
+                                        KeyCode::Delete,
+                                        KeyModifiers::NONE,
+                                    ))),
+                                )
                             } else {
-                                (2, Some(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))))
+                                (
+                                    2,
+                                    Some(Event::Key(KeyEvent::new(
+                                        KeyCode::Esc,
+                                        KeyModifiers::NONE,
+                                    ))),
+                                )
                             }
                         }
                         b'5' => {
                             if buf.len() >= 4 && buf[3] == b'~' {
-                                (4, Some(Event::Key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))))
+                                (
+                                    4,
+                                    Some(Event::Key(KeyEvent::new(
+                                        KeyCode::PageUp,
+                                        KeyModifiers::NONE,
+                                    ))),
+                                )
                             } else {
-                                (2, Some(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))))
+                                (
+                                    2,
+                                    Some(Event::Key(KeyEvent::new(
+                                        KeyCode::Esc,
+                                        KeyModifiers::NONE,
+                                    ))),
+                                )
                             }
                         }
                         b'6' => {
                             if buf.len() >= 4 && buf[3] == b'~' {
-                                (4, Some(Event::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))))
+                                (
+                                    4,
+                                    Some(Event::Key(KeyEvent::new(
+                                        KeyCode::PageDown,
+                                        KeyModifiers::NONE,
+                                    ))),
+                                )
                             } else {
-                                (2, Some(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))))
+                                (
+                                    2,
+                                    Some(Event::Key(KeyEvent::new(
+                                        KeyCode::Esc,
+                                        KeyModifiers::NONE,
+                                    ))),
+                                )
                             }
                         }
                         b'1' => {
                             // ESC[1; modifier sequences like ESC[1;2A (Shift+Up)
                             // Find the end of the sequence
-                            if let Some(end) = buf[3..].iter().position(|&b| b >= 0x40 && b < 0x80) {
+                            if let Some(end) = buf[3..].iter().position(|&b| b >= 0x40 && b < 0x80)
+                            {
                                 let total = 3 + end + 1;
-                                let seq = &buf[3..3+end];
-                                let final_byte = buf[3+end];
+                                let seq = &buf[3..3 + end];
+                                let final_byte = buf[3 + end];
                                 let mods = parse_csi_modifiers(seq);
                                 let key = match final_byte {
                                     b'A' => KeyCode::Up,
@@ -1217,7 +1364,13 @@ fn parse_ansi_event(buf: &[u8]) -> (usize, Option<Event>) {
                                     b'C' => KeyCode::Right,
                                     b'D' => KeyCode::Left,
                                     _ => {
-                                        return (total, Some(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))));
+                                        return (
+                                            total,
+                                            Some(Event::Key(KeyEvent::new(
+                                                KeyCode::Esc,
+                                                KeyModifiers::NONE,
+                                            ))),
+                                        );
                                     }
                                 };
                                 (total, Some(Event::Key(KeyEvent::new(key, mods))))
@@ -1227,7 +1380,10 @@ fn parse_ansi_event(buf: &[u8]) -> (usize, Option<Event>) {
                         }
                         _ => {
                             // Unknown CSI - consume ESC[ and the byte
-                            (3, Some(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))))
+                            (
+                                3,
+                                Some(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
+                            )
                         }
                     }
                 }
@@ -1237,11 +1393,26 @@ fn parse_ansi_event(buf: &[u8]) -> (usize, Option<Event>) {
                         return (0, None);
                     }
                     match buf[2] {
-                        b'P' => (3, Some(Event::Key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)))),
-                        b'Q' => (3, Some(Event::Key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)))),
-                        b'R' => (3, Some(Event::Key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE)))),
-                        b'S' => (3, Some(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)))),
-                        _ => (3, Some(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)))),
+                        b'P' => (
+                            3,
+                            Some(Event::Key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))),
+                        ),
+                        b'Q' => (
+                            3,
+                            Some(Event::Key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))),
+                        ),
+                        b'R' => (
+                            3,
+                            Some(Event::Key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))),
+                        ),
+                        b'S' => (
+                            3,
+                            Some(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE))),
+                        ),
+                        _ => (
+                            3,
+                            Some(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
+                        ),
                     }
                 }
                 _ => {
@@ -1253,21 +1424,60 @@ fn parse_ansi_event(buf: &[u8]) -> (usize, Option<Event>) {
             }
         }
         // Ctrl+C
-        0x03 => (1, Some(Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)))),
+        0x03 => (
+            1,
+            Some(Event::Key(KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            ))),
+        ),
         // Ctrl+D
-        0x04 => (1, Some(Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)))),
+        0x04 => (
+            1,
+            Some(Event::Key(KeyEvent::new(
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+            ))),
+        ),
         // Ctrl+Z
-        0x1A => (1, Some(Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL)))),
+        0x1A => (
+            1,
+            Some(Event::Key(KeyEvent::new(
+                KeyCode::Char('z'),
+                KeyModifiers::CONTROL,
+            ))),
+        ),
         // Tab
-        0x09 => (1, Some(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)))),
+        0x09 => (
+            1,
+            Some(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))),
+        ),
         // Enter (CR or LF)
-        0x0D | 0x0A => (1, Some(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)))),
+        0x0D | 0x0A => (
+            1,
+            Some(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ))),
+        ),
         // Backspace
-        0x7F => (1, Some(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)))),
+        0x7F => (
+            1,
+            Some(Event::Key(KeyEvent::new(
+                KeyCode::Backspace,
+                KeyModifiers::NONE,
+            ))),
+        ),
         // Other control chars 0x01-0x1A (Ctrl+A through Ctrl+Z)
         0x01..=0x08 | 0x0B..=0x0C | 0x0E..=0x1A => {
             let ch = (buf[0] + b'a' - 1) as char;
-            (1, Some(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL))))
+            (
+                1,
+                Some(Event::Key(KeyEvent::new(
+                    KeyCode::Char(ch),
+                    KeyModifiers::CONTROL,
+                ))),
+            )
         }
         // FS/GS/RS/US (0x1C-0x1F) - treat as escape or skip
         0x1C..=0x1F => (1, None),
@@ -1276,7 +1486,13 @@ fn parse_ansi_event(buf: &[u8]) -> (usize, Option<Event>) {
         // Regular printable ASCII
         0x20..=0x7E => {
             let ch = buf[0] as char;
-            (1, Some(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))))
+            (
+                1,
+                Some(Event::Key(KeyEvent::new(
+                    KeyCode::Char(ch),
+                    KeyModifiers::NONE,
+                ))),
+            )
         }
         // UTF-8 multi-byte
         0x80..=0xFF => {
@@ -1287,11 +1503,23 @@ fn parse_ansi_event(buf: &[u8]) -> (usize, Option<Event>) {
             }
             if let Ok(s) = std::str::from_utf8(&buf[..len]) {
                 if let Some(ch) = s.chars().next() {
-                    return (len, Some(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))));
+                    return (
+                        len,
+                        Some(Event::Key(KeyEvent::new(
+                            KeyCode::Char(ch),
+                            KeyModifiers::NONE,
+                        ))),
+                    );
                 }
             }
             // Invalid UTF-8, skip byte
-            (1, Some(Event::Key(KeyEvent::new(KeyCode::Char('\u{FFFD}'), KeyModifiers::NONE))))
+            (
+                1,
+                Some(Event::Key(KeyEvent::new(
+                    KeyCode::Char('\u{FFFD}'),
+                    KeyModifiers::NONE,
+                ))),
+            )
         }
     }
 }
@@ -1308,9 +1536,15 @@ fn parse_csi_modifiers(seq: &[u8]) -> KeyModifiers {
     if parts.len() >= 2 {
         if let Ok(mod_val) = parts[1].parse::<u8>() {
             let mut mods = KeyModifiers::NONE;
-            if mod_val & 1 != 0 { mods |= KeyModifiers::SHIFT; }
-            if mod_val & 2 != 0 { mods |= KeyModifiers::ALT; }  // actually Alt in crossterm is 0x04, but this is csi modifier
-            if mod_val & 4 != 0 { mods |= KeyModifiers::CONTROL; }
+            if mod_val & 1 != 0 {
+                mods |= KeyModifiers::SHIFT;
+            }
+            if mod_val & 2 != 0 {
+                mods |= KeyModifiers::ALT;
+            } // actually Alt in crossterm is 0x04, but this is csi modifier
+            if mod_val & 4 != 0 {
+                mods |= KeyModifiers::CONTROL;
+            }
             return mods;
         }
     }
@@ -1320,7 +1554,11 @@ fn parse_csi_modifiers(seq: &[u8]) -> KeyModifiers {
 /// Map a byte to (KeyCode, KeyModifiers) for Alt+key combinations
 fn byte_to_keycode(b: u8, alt: bool) -> (KeyCode, KeyModifiers) {
     use crossterm::event::{KeyCode, KeyModifiers};
-    let mut mods = if alt { KeyModifiers::ALT } else { KeyModifiers::NONE };
+    let mut mods = if alt {
+        KeyModifiers::ALT
+    } else {
+        KeyModifiers::NONE
+    };
     match b {
         b'a'..=b'z' => {
             if b >= b'a' && b <= b'z' {
@@ -1348,4 +1586,3 @@ fn utf8_char_len(first: u8) -> usize {
         _ => 1,
     }
 }
- 
