@@ -109,7 +109,7 @@ md5 = "0.7"
 base64 = "0.21"
 
 # Random jitter for retry logic
-rand = "0.8"
+rand = "0.10"
 
 # Error handling
 anyhow = "1.0"
