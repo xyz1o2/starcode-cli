@@ -121,7 +121,7 @@ once_cell = "1.19"
 parking_lot = "0.12"
 
 # LRU cache for query result caching
-lru = "0.12"
+lru = "0.18"
 
 # Multi-pattern substring search with SIMD (hint keyword detection)
 aho-corasick = "1.1"
