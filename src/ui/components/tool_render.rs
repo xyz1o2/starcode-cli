@@ -121,25 +121,20 @@ pub(crate) fn render_tool_entry_blocks(
         .tool_call
         .as_ref()
         .map(|tc| {
-            // ToolCall 默认展开；ToolResult 有 diff 或编辑类工具时也默认展开
-            let has_diff = entry
-                .tool_result
-                .as_ref()
-                .and_then(|tr| tr.data.as_ref())
-                .and_then(|d| d.get("diff"))
-                .and_then(|v| v.as_str())
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
-
-            // 编辑类工具默认展开（Edit、Write、create_file、edit_file 等）
+            // ToolCall 默认展开
+            // ToolResult: 编辑类工具默认展开，其他工具默认折叠
             let is_edit_tool = matches!(
                 tc.function.name.as_str(),
-                "Edit" | "create_file" | "edit_file" | "str_replace_editor" | "smart_edit" | "Write"
+                "Edit"
+                    | "create_file"
+                    | "edit_file"
+                    | "str_replace_editor"
+                    | "smart_edit"
+                    | "Write"
             );
 
             let default_expanded = matches!(entry.entry_type, ChatEntryType::ToolCall)
-                || (matches!(entry.entry_type, ChatEntryType::ToolResult)
-                    && (has_diff || is_edit_tool));
+                || (matches!(entry.entry_type, ChatEntryType::ToolResult) && is_edit_tool);
             let toggled = state.expanded_tool_call_ids.contains(&tc.id);
             default_expanded ^ toggled
         })
@@ -600,41 +595,40 @@ fn render_rich_tool_content(
             .and_then(|d| d.get("diff").and_then(|v| v.as_str()));
         let has_diff = diff_str.is_some() && !diff_str.unwrap_or("").trim().is_empty();
 
-        // 编辑工具：折叠态显示 +N/-M，展开态显示完整 diff
+        // 编辑工具：始终显示摘要行 + 完整 diff
         if has_diff {
             let diff_content = diff_str.unwrap();
-            if !expanded {
-                let mut added = 0usize;
-                let mut removed = 0usize;
-                for line in diff_content.lines() {
-                    if line.starts_with('+') && !line.starts_with("+++") {
-                        added += 1;
-                    } else if line.starts_with('-') && !line.starts_with("---") {
-                        removed += 1;
-                    }
+            // 计算新增/删除行数
+            let mut added = 0usize;
+            let mut removed = 0usize;
+            for line in diff_content.lines() {
+                if line.starts_with('+') && !line.starts_with("+++") {
+                    added += 1;
+                } else if line.starts_with('-') && !line.starts_with("---") {
+                    removed += 1;
                 }
-                // ⎿ 标记由 ToolResult 统一前缀提供，这里只写正文（对标 FileEditToolUpdatedMessage）
-                lines.push(Line::from(vec![
-                    Span::raw("Added "),
-                    Span::styled(
-                        format!("{}", added),
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(" lines, removed "),
-                    Span::styled(
-                        format!("{}", removed),
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(" lines"),
-                ]));
-            } else {
-                lines.extend(crate::ui::utils::render::build_diff_block(
-                    diff_content,
-                    tool_inner_width,
-                ));
             }
+            // 摘要行（对标 FileEditToolUpdatedMessage）
+            lines.push(Line::from(vec![
+                Span::raw("Added "),
+                Span::styled(
+                    format!("{}", added),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" lines, removed "),
+                Span::styled(
+                    format!("{}", removed),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" lines"),
+            ]));
+            // 完整 diff 内容
+            lines.extend(crate::ui::utils::render::build_diff_block(
+                diff_content,
+                tool_inner_width,
+            ));
             return lines;
         }
 
@@ -735,6 +729,18 @@ fn render_tool_result_text(
     if success && text.trim().is_empty() && !expanded {
         lines.push(Line::from(Span::styled(
             "Done",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )));
+        return;
+    }
+
+    // ===== Bash 后台任务显示 =====
+    // 检查 text 是否包含后台任务标识
+    if success && text.contains("Running in the background") && !expanded {
+        lines.push(Line::from(Span::styled(
+            "Running in the background (↓ to manage)",
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),

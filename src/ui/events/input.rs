@@ -1912,7 +1912,9 @@ pub async fn handle_key_event(
                         crate::ui::components::command_suggestions::on_input_changed(state);
                     }
                 }
-            } else if cursor_row == 0 {
+            } else if cursor_row == 0 && input_is_empty {
+                // Only scroll chat when input is empty AND cursor is at first line
+                // This prevents mouse scroll (translated to Up/Down by terminal) from scrolling chat
                 crate::ui::state::scroll_chat(state, -1);
             } else if state.textarea.input(key) {
                 sync_input_from_textarea(state);
@@ -1945,7 +1947,9 @@ pub async fn handle_key_event(
                     sync_input_from_textarea(state);
                     crate::ui::components::command_suggestions::on_input_changed(state);
                 }
-            } else if cursor_row + 1 >= line_count {
+            } else if cursor_row + 1 >= line_count && state.input.trim().is_empty() {
+                // Only scroll chat when input is empty AND cursor is at last line
+                // This prevents mouse scroll (translated to Up/Down by terminal) from scrolling chat
                 crate::ui::state::scroll_chat(state, 1);
             } else if state.textarea.input(key) {
                 sync_input_from_textarea(state);
