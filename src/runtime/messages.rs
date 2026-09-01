@@ -11,7 +11,7 @@
 /// - `AgentRequest.send().await` blocks (backpressure)
 /// - `StreamMessage` uses `try_send` in hot paths to avoid blocking
 ///
-use crate::types::{ChatEntry, StarToolCall, ToolResult};
+use crate::types::{AgentTaskStatus, ChatEntry, StarToolCall, ToolResult};
 
 #[derive(Clone, Debug)]
 pub enum PendingCheckpointAction {
@@ -114,6 +114,22 @@ pub enum StreamMessage {
     StatusUpdate {
         message_id: u64,
         status: String,
+    },
+    /// Agent 任务生命周期更新（启动/进度/完成）
+    AgentTaskUpdate {
+        message_id: u64,
+        task_id: String,
+        agent_type: String,
+        description: String,
+        status: AgentTaskStatus,
+        tool_use_count: u32,
+        tokens: u32,
+        is_async: bool,
+        is_resolved: bool,
+        is_error: bool,
+        last_tool_info: Option<String>,
+        /// 新增的子消息（追加到现有列表）
+        new_sub_entries: Vec<ChatEntry>,
     },
 }
 

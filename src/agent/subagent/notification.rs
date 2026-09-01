@@ -24,6 +24,9 @@ pub struct TaskNotification {
     pub result: String,
     /// token + 工具调用统计
     pub usage: NotificationUsage,
+    /// 执行过程中产生的所有条目（包括 ToolCall、Assistant 消息等）
+    #[serde(default)]
+    pub entries: Vec<crate::types::ChatEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

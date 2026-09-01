@@ -257,6 +257,37 @@ impl TextSelection {
     }
 }
 
+/// Agent 任务追踪信息
+#[derive(Debug, Clone)]
+pub struct AgentTaskInfo {
+    /// 任务 ID
+    pub task_id: String,
+    /// Agent 类型（"fork" | "general-purpose" | "worker" ...）
+    pub agent_type: String,
+    /// Agent 描述
+    pub description: String,
+    /// 任务状态
+    pub status: crate::types::AgentTaskStatus,
+    /// 工具使用次数
+    pub tool_use_count: u32,
+    /// Token 使用量
+    pub tokens: u32,
+    /// 是否异步
+    pub is_async: bool,
+    /// 是否完成
+    pub is_resolved: bool,
+    /// 是否出错
+    pub is_error: bool,
+    /// 最后工具信息
+    pub last_tool_info: Option<String>,
+    /// 开始时间
+    pub started_at: Instant,
+    /// 子消息列表
+    pub sub_entries: Vec<crate::types::ChatEntry>,
+    /// 在 chat_history 中的位置索引
+    pub entry_idx: usize,
+}
+
 pub struct ChatState {
     pub chat_history: Vec<ChatEntry>,
     pub input: String,
@@ -436,6 +467,10 @@ pub struct ChatState {
     pub sandbox_enabled: bool,
     /// 动画帧计数器 — 每帧 +1，用于旋转指示器和闪烁效果
     pub animation_tick: u64,
+    /// 鼠标滚轮检测：待处理的箭头键事件
+    /// 当收到 Up/Down 时，先缓存方向，等待下一个事件判断是否为滚轮
+    pub pending_scroll_direction: Option<i32>, // -1=Up, 1=Down
+    pub pending_scroll_time: Option<Instant>,
     // ============ Smooth Scrolling ============
     /// Scroll velocity for momentum-based scrolling (lines per tick)
     pub scroll_velocity: f64,
@@ -506,6 +541,16 @@ pub struct ChatState {
     pub request_clear_screen: bool,
     pub show_paste_confirmation: bool,
     pub pending_paste: Option<String>,
+    // ============ Agent 任务追踪 ============
+    /// 活跃的 Agent 任务信息
+    pub active_agent_tasks: HashMap<String, AgentTaskInfo>,
+    /// 当前活跃的 Agent 组 ID
+    pub agent_group_id: Option<String>,
+    /// 正在聚焦查看的 Agent ID
+    pub viewing_agent_task_id: Option<String>,
+    /// 全局 transcript 模式开关（Ctrl+O 切换）
+    pub is_transcript_mode: bool,
+    // ========================================
 }
 
 impl ChatState {
@@ -792,6 +837,14 @@ impl ChatState {
             request_clear_screen: false,
             show_paste_confirmation: false,
             pending_paste: None,
+            // ============ Agent 任务追踪 ============
+            active_agent_tasks: HashMap::new(),
+            agent_group_id: None,
+            viewing_agent_task_id: None,
+            is_transcript_mode: false,
+            // ========================================
+            pending_scroll_direction: None,
+            pending_scroll_time: None,
         }
     }
 

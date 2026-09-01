@@ -169,6 +169,31 @@ pub async fn handle_stream_chunk(
             let _ = tx.send(StreamMessage::Done { message_id }).await;
             return true;
         }
+        StreamingChunkType::AgentTaskUpdate => {
+            if let (Some(task_id), Some(agent_type), Some(description), Some(status)) = (
+                chunk.agent_task_id,
+                chunk.agent_type,
+                chunk.agent_description,
+                chunk.agent_status,
+            ) {
+                let _ = tx
+                    .send(StreamMessage::AgentTaskUpdate {
+                        message_id,
+                        task_id,
+                        agent_type,
+                        description,
+                        status,
+                        tool_use_count: chunk.agent_tool_use_count.unwrap_or(0),
+                        tokens: chunk.agent_tokens.unwrap_or(0),
+                        is_async: chunk.agent_is_async.unwrap_or(false),
+                        is_resolved: chunk.agent_is_resolved.unwrap_or(false),
+                        is_error: chunk.agent_is_error.unwrap_or(false),
+                        last_tool_info: chunk.agent_last_tool_info,
+                        new_sub_entries: chunk.agent_new_sub_entries.unwrap_or_default(),
+                    })
+                    .await;
+            }
+        }
     }
     false
 }

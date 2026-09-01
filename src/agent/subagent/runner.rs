@@ -80,7 +80,10 @@ impl StarAgentRunner {
             .map(|entry| entry.content.clone())
             .unwrap_or_else(|| "SubAgent completed but returned no specific output.".to_string());
 
-        Ok(SubAgentResult { output })
+        Ok(SubAgentResult {
+            output,
+            entries,
+        })
     }
 }
 
@@ -145,14 +148,15 @@ impl AsyncSubagentRunner {
             let start = std::time::Instant::now();
             let result = runner.run(request).await;
 
-            let (status, output, tokens, tool_uses) = match &result {
+            let (status, output, entries, tokens, tool_uses) = match &result {
                 Ok(r) => (
                     NotificationStatus::Completed,
                     r.output.clone(),
+                    r.entries.clone(),
                     0, // TODO: 从 SubAgentResult 获取实际 token 数
                     0, // TODO: 从 SubAgentResult 获取实际工具调用数
                 ),
-                Err(_) => (NotificationStatus::Failed, format!("{:?}", result), 0, 0),
+                Err(_) => (NotificationStatus::Failed, format!("{:?}", result), Vec::new(), 0, 0),
             };
 
             let mut q = queue.lock().await;
@@ -167,6 +171,7 @@ impl AsyncSubagentRunner {
                     tool_uses,
                     duration_ms: start.elapsed().as_millis() as u64,
                 },
+                entries,
             });
         });
 

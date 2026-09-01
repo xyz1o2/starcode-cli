@@ -1890,14 +1890,38 @@ pub async fn handle_key_event(
             let cursor_row = state.textarea.cursor().0;
             let input_is_empty = state.input.trim().is_empty();
 
-            // Command history navigation: Up when cursor is on first line and input is
-            // empty or already in history mode (Claude Code: 行内移动优先，首行边界翻历史)
-            if cursor_row == 0 && (input_is_empty || state.history_index.is_some()) {
+            // 鼠标滚轮检测：连续 Up/Down 事件间隔 < 50ms 视为滚轮
+            let now = Instant::now();
+            let is_mouse_scroll = if let Some(pending_time) = state.pending_scroll_time {
+                let elapsed = now.duration_since(pending_time).as_millis();
+                if elapsed < 50 {
+                    // 第二个事件快速到达，确认是鼠标滚轮
+                    state.pending_scroll_direction = None;
+                    state.pending_scroll_time = None;
+                    true
+                } else {
+                    // 超时，第一个事件是键盘按键，执行历史导航
+                    state.pending_scroll_direction = None;
+                    state.pending_scroll_time = None;
+                    false
+                }
+            } else {
+                // 第一个事件，缓存为 pending
+                state.pending_scroll_direction = Some(-1); // -1 = Up
+                state.pending_scroll_time = Some(now);
+                false
+            };
+
+            if is_mouse_scroll {
+                // 鼠标滚轮：滚动聊天而非导航历史
+                crate::ui::state::scroll_chat(state, -3);
+            } else if cursor_row == 0 && (input_is_empty || state.history_index.is_some()) {
+                // Command history navigation: Up when cursor is on first line and input is
+                // empty or already in history mode
                 if !state.command_history.is_empty() {
                     let idx = match state.history_index {
                         Some(i) => i.saturating_add(1),
                         None => {
-                            // Save current input before entering history mode
                             state.history_input_snapshot = Some(state.input.clone());
                             0
                         }
@@ -1912,10 +1936,6 @@ pub async fn handle_key_event(
                         crate::ui::components::command_suggestions::on_input_changed(state);
                     }
                 }
-            } else if cursor_row == 0 && input_is_empty {
-                // Only scroll chat when input is empty AND cursor is at first line
-                // This prevents mouse scroll (translated to Up/Down by terminal) from scrolling chat
-                crate::ui::state::scroll_chat(state, -1);
             } else if state.textarea.input(key) {
                 sync_input_from_textarea(state);
                 crate::ui::components::command_suggestions::on_input_changed(state);
@@ -1925,11 +1945,35 @@ pub async fn handle_key_event(
             let cursor_row = state.textarea.cursor().0;
             let line_count = state.input_line_count;
 
-            // Command history navigation: Down when cursor is on last line and in history mode
-            if cursor_row + 1 >= line_count && state.history_index.is_some() {
+            // 鼠标滚轮检测：连续 Up/Down 事件间隔 < 50ms 视为滚轮
+            let now = Instant::now();
+            let is_mouse_scroll = if let Some(pending_time) = state.pending_scroll_time {
+                let elapsed = now.duration_since(pending_time).as_millis();
+                if elapsed < 50 {
+                    // 第二个事件快速到达，确认是鼠标滚轮
+                    state.pending_scroll_direction = None;
+                    state.pending_scroll_time = None;
+                    true
+                } else {
+                    // 超时，第一个事件是键盘按键，执行历史导航
+                    state.pending_scroll_direction = None;
+                    state.pending_scroll_time = None;
+                    false
+                }
+            } else {
+                // 第一个事件，缓存为 pending
+                state.pending_scroll_direction = Some(1); // 1 = Down
+                state.pending_scroll_time = Some(now);
+                false
+            };
+
+            if is_mouse_scroll {
+                // 鼠标滚轮：滚动聊天而非导航历史
+                crate::ui::state::scroll_chat(state, 3);
+            } else if cursor_row + 1 >= line_count && state.history_index.is_some() {
+                // Command history navigation: Down when cursor is on last line and in history mode
                 let idx = state.history_index.unwrap();
                 if idx == 0 {
-                    // Exit history mode, restore original input
                     state.history_index = None;
                     let snapshot = state.history_input_snapshot.take().unwrap_or_default();
                     state.textarea.select_all();
@@ -1947,10 +1991,6 @@ pub async fn handle_key_event(
                     sync_input_from_textarea(state);
                     crate::ui::components::command_suggestions::on_input_changed(state);
                 }
-            } else if cursor_row + 1 >= line_count && state.input.trim().is_empty() {
-                // Only scroll chat when input is empty AND cursor is at last line
-                // This prevents mouse scroll (translated to Up/Down by terminal) from scrolling chat
-                crate::ui::state::scroll_chat(state, 1);
             } else if state.textarea.input(key) {
                 sync_input_from_textarea(state);
                 crate::ui::components::command_suggestions::on_input_changed(state);
@@ -2333,6 +2373,19 @@ async fn handle_overlay_input(
             state
                 .task_panel
                 .enter_edit_mode(crate::ui::components::task_panel::EditMode::Title);
+            return Ok(true);
+        }
+
+        // Ctrl+O: 切换 Transcript 模式（对标 Claude Code 的 app:toggleTranscript）
+        if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            state.is_transcript_mode = !state.is_transcript_mode;
+            state.clear_cache();
+            let mode_text = if state.is_transcript_mode { "ON" } else { "OFF" };
+            crate::ui::app::logic::emit_status_text(
+                state,
+                0,
+                &format!("Transcript mode: {}", mode_text),
+            );
             return Ok(true);
         }
 

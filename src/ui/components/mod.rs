@@ -1,4 +1,6 @@
+pub mod agent_group_render;
 pub mod agent_progress;
+pub mod agent_task_render;
 pub mod chat_history;
 pub mod chat_input;
 pub mod collapsed_group;

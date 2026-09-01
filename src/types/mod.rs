@@ -79,6 +79,17 @@ pub enum ChatEntryType {
     CollapsedGroup,  // 折叠组（用于折叠多个消息）
     GroupedToolUse,  // 分组工具调用（连续的工具调用合并显示）
     CompactSummary,  // 压缩摘要
+    AgentTask,       // 单个 Agent 任务条目（含子消息列表）
+    AgentGroup,      // 多个 Agent 并发任务组
+}
+
+/// Agent 任务状态
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AgentTaskStatus {
+    Running,
+    Completed,
+    Failed,
+    Background, // 异步后台运行
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +147,45 @@ pub struct ChatEntry {
     // 工具执行耗时（毫秒，仅 ToolResult 条目）
     #[serde(skip)]
     pub tool_elapsed_ms: Option<u128>,
+
+    // ============ Agent 任务相关字段 ============
+    /// Agent 任务 ID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_task_id: Option<String>,
+    /// Agent 类型（"fork" | "general-purpose" | "worker" ...）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    /// Agent 描述
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_description: Option<String>,
+    /// Agent 任务状态
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_status: Option<AgentTaskStatus>,
+    /// Agent 工具使用次数
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_tool_use_count: Option<u32>,
+    /// Agent Token 使用量
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_tokens: Option<u32>,
+    /// Agent 是否完成
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_is_resolved: Option<bool>,
+    /// Agent 是否出错
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_is_error: Option<bool>,
+    /// Agent 是否异步
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_is_async: Option<bool>,
+    /// Agent 最后工具信息
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_last_tool_info: Option<String>,
+    /// Agent 内部子消息
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_sub_entries: Option<Vec<ChatEntry>>,
+    /// Agent 组的任务 ID 列表（仅 AgentGroup 类型）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_task_ids: Option<Vec<String>>,
+    // ============================================
 }
 
 impl ChatEntry {
@@ -163,6 +213,19 @@ impl ChatEntry {
             progress: None,
             cost: None,
             tool_elapsed_ms: None,
+            // Agent 任务字段
+            agent_task_id: None,
+            agent_type: None,
+            agent_description: None,
+            agent_status: None,
+            agent_tool_use_count: None,
+            agent_tokens: None,
+            agent_is_resolved: None,
+            agent_is_error: None,
+            agent_is_async: None,
+            agent_last_tool_info: None,
+            agent_sub_entries: None,
+            agent_task_ids: None,
         }
     }
 
@@ -280,6 +343,42 @@ impl ChatEntry {
 
     pub fn with_group_id(mut self, id: impl Into<String>) -> Self {
         self.group_id = Some(id.into());
+        self
+    }
+
+    // ── Agent 任务构造函数 ──
+
+    /// 创建单个 Agent 任务条目
+    pub fn agent_task(task_id: impl Into<String>, agent_type: impl Into<String>) -> Self {
+        let mut entry = Self::new(ChatEntryType::AgentTask, String::new());
+        entry.agent_task_id = Some(task_id.into());
+        entry.agent_type = Some(agent_type.into());
+        entry.agent_status = Some(AgentTaskStatus::Running);
+        entry.agent_tool_use_count = Some(0);
+        entry.agent_tokens = Some(0);
+        entry.agent_is_resolved = Some(false);
+        entry.agent_is_error = Some(false);
+        entry.agent_is_async = Some(false);
+        entry.agent_sub_entries = Some(Vec::new());
+        entry
+    }
+
+    /// 创建 Agent 并发任务组条目
+    pub fn agent_group(task_ids: Vec<String>) -> Self {
+        let mut entry = Self::new(ChatEntryType::AgentGroup, String::new());
+        entry.agent_task_ids = Some(task_ids);
+        entry
+    }
+
+    /// 设置 Agent 描述
+    pub fn with_agent_description(mut self, desc: impl Into<String>) -> Self {
+        self.agent_description = Some(desc.into());
+        self
+    }
+
+    /// 设置 Agent 异步状态
+    pub fn with_agent_async(mut self, is_async: bool) -> Self {
+        self.agent_is_async = Some(is_async);
         self
     }
 
@@ -575,6 +674,30 @@ pub struct StreamingChunk {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     // ============================================
+    // ============ Agent 任务 UI ============
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_status: Option<AgentTaskStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_tool_use_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_is_async: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_is_resolved: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_is_error: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_last_tool_info: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_new_sub_entries: Option<Vec<ChatEntry>>,
+    // ============================================
 }
 
 impl StreamingChunk {
@@ -679,6 +802,41 @@ impl StreamingChunk {
     pub fn done() -> Self {
         Self::new(StreamingChunkType::Done)
     }
+
+    /// Agent 任务更新
+    pub fn agent_task_update(
+        task_id: impl Into<String>,
+        agent_type: impl Into<String>,
+        description: impl Into<String>,
+        status: AgentTaskStatus,
+        tool_use_count: u32,
+        tokens: u32,
+        is_async: bool,
+        is_resolved: bool,
+        is_error: bool,
+        last_tool_info: Option<String>,
+        new_sub_entries: Vec<ChatEntry>,
+    ) -> Self {
+        Self {
+            chunk_type: StreamingChunkType::AgentTaskUpdate,
+            agent_task_id: Some(task_id.into()),
+            agent_type: Some(agent_type.into()),
+            agent_description: Some(description.into()),
+            agent_status: Some(status),
+            agent_tool_use_count: Some(tool_use_count),
+            agent_tokens: Some(tokens),
+            agent_is_async: Some(is_async),
+            agent_is_resolved: Some(is_resolved),
+            agent_is_error: Some(is_error),
+            agent_last_tool_info: last_tool_info,
+            agent_new_sub_entries: if new_sub_entries.is_empty() {
+                None
+            } else {
+                Some(new_sub_entries)
+            },
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -730,6 +888,9 @@ pub enum StreamingChunkType {
     // ============ UX 改进: 工具确认 ============
     ToolConfirmation, // 工具执行确认请求
                       // ============================================
+    // ============ Agent 任务 UI ============
+    AgentTaskUpdate, // Agent 任务生命周期更新
+                     // ============================================
 }
 
 // ============ UX 改进: ApprovalMode（审批模式）============

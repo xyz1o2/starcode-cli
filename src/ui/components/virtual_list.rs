@@ -49,6 +49,13 @@ impl VirtualList {
         }
     }
 
+    /// 标记所有项为 dirty（需要重新渲染）
+    pub fn mark_dirty_all(&mut self) {
+        for item in &mut self.heights {
+            item.dirty = true;
+        }
+    }
+
     /// 在 idx 处插入一个新项（中插条目时使用），后续项顺移；新项标记为 dirty。
     pub fn insert_at(&mut self, idx: usize) {
         let idx = idx.min(self.heights.len());

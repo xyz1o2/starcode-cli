@@ -133,9 +133,10 @@ fn parse_count_after(s: &str, keyword: &str) -> Option<u32> {
         .and_then(|n| n.parse().ok())
 }
 
-/// Claude Code style spinner characters
-const SPINNER_FRAMES: &[&str] = &["·", "✢", "✱", "✶", "✻", "✽"];
-const SPINNER_FRAMES_REV: &[&str] = &["✽", "✻", "✶", "✱", "✢", "·"];
+/// Claude Code style spinner characters - 使用固定宽度字符避免行移动
+/// 使用 ● 和空格交替，确保宽度一致
+const SPINNER_FRAMES: &[&str] = &["●", " ", "●", " "];
+const SPINNER_FRAMES_REV: &[&str] = &[" ", "●", " ", "●"];
 
 /// Braille spinner frames for smoother animation
 const BRAILLE_SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -662,13 +663,12 @@ pub fn processing_spinner_line(state: &ChatState) -> Vec<ratatui::text::Line<'st
         let token_pulse = ((state.animation_tick as f64 * 0.08).sin() * 0.15 + 0.85).max(0.7);
         let token_color_pulsed =
             lerp_color(token_color, theme.secondary_shimmer, token_pulse * 0.3);
-        // Show in/out breakdown if we have completion data
+        // 显示 token 用量（紧凑模式）
         let token_display = match &state.token_usage {
-            Some(u) if u.completion_tokens > 0 => {
+            Some(u) if u.prompt_tokens > 0 => {
                 format!(
-                    " · {} in / {} out",
-                    format_token_count(u.prompt_tokens),
-                    format_token_count(u.completion_tokens)
+                    " · {} tokens",
+                    format_token_count(u.prompt_tokens)
                 )
             }
             _ => format!(" · ↓ {}", format_token_count(state.token_count)),
@@ -942,12 +942,21 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
                 };
 
                 let token_label = if usage.completion_tokens > 0 {
-                    format!(
-                        "{} in / {} out · {:.1}%",
-                        format_tok(usage.prompt_tokens),
-                        format_tok(usage.completion_tokens),
+                    // 显示上下文使用率 + 缓存命中（如果有）
+                    let base = format!(
+                        "{}/{} ({:.1}%)",
+                        format_tok(tokens),
+                        format_tok(ctx),
                         pct
-                    )
+                    );
+                    // 如果有缓存数据，附加缓存命中率
+                    if usage.cache_read_tokens > 0 && tokens > 0 {
+                        let cache_pct =
+                            (usage.cache_read_tokens as f64 / tokens as f64 * 100.0).min(100.0);
+                        format!("{} · {:.0}% cached", base, cache_pct)
+                    } else {
+                        base
+                    }
                 } else {
                     format!("{}/{} ({:.1}%)", format_tok(tokens), format_tok(ctx), pct)
                 };

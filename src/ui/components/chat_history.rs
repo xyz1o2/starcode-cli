@@ -563,7 +563,44 @@ fn render_entry_lines(state: &ChatState, entry_idx: usize, area_width: u16) -> V
 
     let mut blocks: Vec<Vec<Line<'static>>> = Vec::new();
 
-    if is_tool {
+    // ── 特殊条目分发 ──
+    if entry.entry_type == ChatEntryType::AgentTask {
+        blocks.extend(super::agent_task_render::render_agent_task_entry(
+            state,
+            entry,
+            area_width,
+            entry_idx,
+        ));
+    } else if entry.entry_type == ChatEntryType::AgentGroup {
+        blocks.extend(super::agent_group_render::render_agent_group(
+            state,
+            entry,
+            area_width,
+        ));
+    } else if entry.entry_type == ChatEntryType::CollapsedGroup {
+        blocks.extend(super::collapsed_group::render_collapsed_group(
+            state,
+            entry,
+            area_width as usize,
+        ).into_iter().map(|line| vec![line]));
+    } else if entry.entry_type == ChatEntryType::GroupedToolUse {
+        // 分组工具调用：展开显示子条目
+        if let Some(sub_entries) = &entry.collapsed_entries {
+            for sub in sub_entries {
+                if super::tool_render::is_tool_entry(sub) {
+                    blocks.extend(super::tool_render::render_tool_entry_blocks(
+                        state,
+                        sub,
+                        entry_idx,
+                        area_width,
+                        false,
+                        false,
+                        false,
+                    ));
+                }
+            }
+        }
+    } else if is_tool {
         blocks.extend(super::tool_render::render_tool_entry_blocks(
             state,
             entry,
@@ -589,6 +626,7 @@ fn render_entry_lines(state: &ChatState, entry_idx: usize, area_width: u16) -> V
     //   - ToolResult/ToolConfirmation immediately after ToolCall (flow together)
     //   - ToolCall immediately after ToolCall (multiple tool calls in sequence)
     //   - ToolCall immediately after ToolResult (continuation of tool sequence)
+    //   - AgentTask/AgentGroup entries (always flow together)
     let add_leading_blank = if entry_idx == 0 {
         false
     } else {
@@ -601,7 +639,15 @@ fn render_entry_lines(state: &ChatState, entry_idx: usize, area_width: u16) -> V
             prev.entry_type,
             ChatEntryType::ToolCall | ChatEntryType::ToolResult | ChatEntryType::ToolConfirmation
         );
-        !is_tool_sequence
+        // Agent 任务条目之间不加空行
+        let is_agent_sequence = matches!(
+            entry.entry_type,
+            ChatEntryType::AgentTask | ChatEntryType::AgentGroup
+        ) && matches!(
+            prev.entry_type,
+            ChatEntryType::AgentTask | ChatEntryType::AgentGroup
+        );
+        !is_tool_sequence && !is_agent_sequence
     };
     if add_leading_blank {
         entry_lines.insert(0, Line::from(""));

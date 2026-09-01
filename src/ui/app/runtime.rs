@@ -882,9 +882,9 @@ fn init_terminal() -> Result<
     // Stage 3: Enter alternate screen, enable bracketed paste and mouse capture
     execute!(stdout(), EnterAlternateScreen)?;
     let _ = crossterm::execute!(stdout(), crossterm::event::EnableBracketedPaste);
-    // Mouse capture is DISABLED by default to allow native terminal text selection/copy.
-    // Users can enable via STARCODE_ENABLE_MOUSE=1 env var for scroll events.
-    // Scroll events will be translated to Up/Down arrow keys when mouse capture is disabled.
+    // 鼠标捕获默认禁用，保留原生终端文本选择/复制功能
+    // 滚轮事件转换为 Up/Down 箭头键，通过时间检测区分鼠标滚轮和键盘
+    // 可通过 STARCODE_ENABLE_MOUSE=1 启用鼠标捕获（禁用原生文本选择）
     let mouse_enabled = std::env::var("STARCODE_ENABLE_MOUSE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);

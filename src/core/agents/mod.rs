@@ -26,6 +26,8 @@ impl SubAgentRequest {
 #[derive(Debug, Clone)]
 pub struct SubAgentResult {
     pub output: String,
+    /// 执行过程中产生的所有条目（包括 ToolCall、Assistant 消息等）
+    pub entries: Vec<crate::types::ChatEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

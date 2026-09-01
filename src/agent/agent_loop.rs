@@ -117,6 +117,33 @@ impl Agent {
                     self.emit_direct_chunk(crate::types::StreamingChunk::assistant_note(
                         note.clone(),
                     ));
+
+                    // 发送 AgentTaskUpdate 让 UI 更新对应的 AgentTask 条目
+                    let (is_resolved, is_error, agent_status) = match notification.status {
+                        crate::agent::subagent::notification::NotificationStatus::Completed => {
+                            (true, false, crate::types::AgentTaskStatus::Completed)
+                        }
+                        crate::agent::subagent::notification::NotificationStatus::Failed => {
+                            (true, true, crate::types::AgentTaskStatus::Failed)
+                        }
+                        crate::agent::subagent::notification::NotificationStatus::Killed => {
+                            (true, true, crate::types::AgentTaskStatus::Failed)
+                        }
+                    };
+                    self.emit_direct_chunk(crate::types::StreamingChunk::agent_task_update(
+                        &notification.task_id,
+                        "general-purpose",
+                        &notification.summary,
+                        agent_status,
+                        notification.usage.tool_uses as u32,
+                        notification.usage.total_tokens as u32,
+                        true, // is_async
+                        is_resolved,
+                        is_error,
+                        Some(status_str.to_string()),
+                        notification.entries.clone(),
+                    ));
+
                     crate::utils::logging::append_debug_log_line(&format!(
                         "[SubAgent] notification surfaced to UI: {}",
                         note
