@@ -27,3 +27,5 @@ logs/
 # Test outputs
 **/test_*.rs
 **/temp_*.rs
+study_or_copy_projects/
+.spec-workflow/

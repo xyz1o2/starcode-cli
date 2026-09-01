@@ -6,67 +6,51 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
+  CARGO_ENCODED_RUSTFLAGS: "-Dwarnings"
 
 jobs:
-  fmt:
-    name: Format
+  lint:
+    name: Lint & Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
 
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-clippy-
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev
-
-      - run: cargo clippy --all-targets -- -D warnings
+      - name: Verify Cargo.lock is up to date
+        run: cargo generate-lockfile --locked 2>/dev/null || cargo check --workspace
 
   test:
     name: Test (${{ matrix.os }})
+    needs: lint
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-test-
+          key: ${{ matrix.os }}
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -75,33 +59,30 @@ jobs:
           sudo apt-get install -y pkg-config libssl-dev
 
       - name: Run unit tests
-        run: cargo test --lib
+        run: cargo test --workspace --lib
 
-      - name: Run integration tests (without live API)
-        run: cargo test --test eval_harness_live -- --test-threads=1
+      - name: Run doc tests
+        run: cargo test --workspace --doc
+
+      - name: Run integration tests
+        run: cargo test --workspace --test eval_harness_live -- --test-threads=1
         env:
           STAR_API_KEY: ""
 
   build:
-    name: Build (${{ matrix.os }})
+    name: Build Release (${{ matrix.os }})
+    needs: test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-build-
+          key: release-${{ matrix.os }}
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -112,11 +93,18 @@ jobs:
       - name: Build release
         run: cargo build --release
 
-      - name: Upload binary
+      - name: Upload binary (Unix)
+        if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: starcode-cli-${{ runner.os }}-${{ runner.arch }}
-          path: |
-            target/release/starcode-cli
-            target/release/starcode-cli.exe
+          path: target/release/starcode-cli
+          retention-days: 7
+
+      - name: Upload binary (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: starcode-cli-${{ runner.os }}-${{ runner.arch }}
+          path: target/release/starcode-cli.exe
           retention-days: 7

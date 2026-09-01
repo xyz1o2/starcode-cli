@@ -1,0 +1,8 @@
+# Clippy configuration
+# https://doc.rust-lang.org/clippy/configuration.html
+
+# Warn on functions that are too long
+too-many-lines-threshold = 100
+
+# Warn on functions with too many arguments
+too-many-arguments-threshold = 10
