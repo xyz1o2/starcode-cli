@@ -410,14 +410,30 @@ fn render_sub_entry_verbose(
             lines
         }
         ChatEntryType::Assistant => {
+            // 使用 markdown 解析器渲染内容（支持表格、代码块等）
             let content = &entry.content;
+            if content.trim().is_empty() {
+                return Vec::new();
+            }
+
+            let blocks = crate::utils::markdown_parser::parse_markdown_content(content);
+            let md_lines = crate::utils::markdown_parser::render_content_blocks(
+                &blocks,
+                Some(inner_width),
+            );
+
+            // 添加缩进前缀
             let mut lines = Vec::new();
-            for line in content.lines().take(10) {
-                let truncated = truncate_str(line, inner_width.saturating_sub(4));
-                lines.push(Line::from(vec![
+            for md_line in md_lines.into_iter().take(50) {
+                // 最多显示 50 行
+                let mut prefixed_spans = vec![
                     Span::styled("  ✦ ", Style::default().fg(Color::Blue)),
-                    Span::styled(truncated, Style::default().fg(Color::White)),
-                ]));
+                ];
+                // 将原始 spans 添加缩进
+                for span in md_line.spans {
+                    prefixed_spans.push(span);
+                }
+                lines.push(Line::from(prefixed_spans));
             }
             lines
         }

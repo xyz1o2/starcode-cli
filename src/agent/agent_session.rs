@@ -72,6 +72,10 @@ impl Agent {
     }
 
     pub(crate) fn persist_session_messages(&mut self) {
+        // 子代理不持久化会话消息（避免覆盖父代理的 session_messages.json）
+        if self.config.recursion_depth > 0 {
+            return;
+        }
         session::persist_session_messages(
             &self.session_messages,
             self.config.storage().session_messages_path(),
