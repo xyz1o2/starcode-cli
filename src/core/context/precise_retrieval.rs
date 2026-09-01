@@ -1,4 +1,4 @@
-use super::structure_index::{StructureIndex, Import};
+use super::structure_index::{Import, StructureIndex};
 
 /// Precise retrieval - get only the relevant code for a task
 pub struct PreciseRetriever {
@@ -13,7 +13,7 @@ impl PreciseRetriever {
     /// Retrieve context for editing a specific function
     pub fn for_edit(&self, function_name: &str, file_path: &str) -> RetrievalResult {
         let mut result = RetrievalResult::default();
-        
+
         // 1. Get the function definition
         if let Some(funcs) = self.index.functions.get(function_name) {
             for func in funcs {
@@ -26,7 +26,7 @@ impl PreciseRetriever {
                 });
             }
         }
-        
+
         // 2. Get related functions (callers and callees)
         let related = self.index.find_related(function_name);
         for rel in &related {
@@ -42,7 +42,7 @@ impl PreciseRetriever {
                 }
             }
         }
-        
+
         // 3. Get types used by the function
         let types = self.index.find_types_for_function(function_name);
         for t in &types {
@@ -53,7 +53,7 @@ impl PreciseRetriever {
                 relevance: 0.7,
             });
         }
-        
+
         // 4. Get imports
         if let Some(funcs) = self.index.functions.get(function_name) {
             for func in funcs {
@@ -62,14 +62,14 @@ impl PreciseRetriever {
                 }
             }
         }
-        
+
         result
     }
 
     /// Retrieve context for understanding a file
     pub fn for_file(&self, file_path: &str) -> RetrievalResult {
         let mut result = RetrievalResult::default();
-        
+
         // Get all functions in the file
         for funcs in self.index.functions.values() {
             for func in funcs {
@@ -84,7 +84,7 @@ impl PreciseRetriever {
                 }
             }
         }
-        
+
         // Get all types in the file
         for types in self.index.types.values() {
             for t in types {
@@ -98,14 +98,14 @@ impl PreciseRetriever {
                 }
             }
         }
-        
+
         result
     }
 
     /// Retrieve context for a search query
     pub fn for_query(&self, query: &str) -> RetrievalResult {
         let mut result = RetrievalResult::default();
-        
+
         let functions = self.index.search_functions(query);
         for func in functions {
             result.primary_code.push(CodeSlice {
@@ -116,7 +116,7 @@ impl PreciseRetriever {
                 relevance: 0.9,
             });
         }
-        
+
         result
     }
 

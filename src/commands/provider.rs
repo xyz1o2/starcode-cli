@@ -3,9 +3,8 @@ use crate::core::config::models::{
     ProviderConfig as StoredProviderConfig, ProviderSettings as StoredProviderSettings,
 };
 use crate::core::config::provider_resolution::{
-    resolve_effective_provider_settings, ProviderResolutionInputs,
-    ResolvedValue, SourceRef, SRC_CLI_MODEL,
-    SRC_ENV_STAR_API_KEY, SRC_ENV_STAR_BASE_URL, SRC_ENV_STAR_MODEL,
+    resolve_effective_provider_settings, ProviderResolutionInputs, ResolvedValue, SourceRef,
+    SRC_CLI_MODEL, SRC_ENV_STAR_API_KEY, SRC_ENV_STAR_BASE_URL, SRC_ENV_STAR_MODEL,
     SRC_ENV_STAR_OPENAI_COMPATIBLE, SRC_PROVIDER_DEFAULT_BASE_URL, SRC_PROVIDER_ENV_API_KEY,
     SRC_PROVIDER_RULE_OPENAI_COMPATIBLE, SRC_PROVIDER_STORE_ACTIVE_MODEL,
     SRC_PROVIDER_STORE_ACTIVE_PROVIDER, SRC_PROVIDER_STORE_API_KEY, SRC_PROVIDER_STORE_BASE_URL,
@@ -299,8 +298,13 @@ async fn list_providers(ctx: CommandContext<'_>) -> CommandResult {
             let is_active = config.active_provider_id.as_deref() == Some(id.as_str());
             let name = settings.name.as_deref().unwrap_or(id);
             let description = settings.description.as_deref().unwrap_or("Custom Provider");
-            let requires_key = providers::normalize_api_key_value(settings.api_key.clone()).is_some();
-            let key_status = if requires_key { "✅ Config" } else { "⚪ Optional" };
+            let requires_key =
+                providers::normalize_api_key_value(settings.api_key.clone()).is_some();
+            let key_status = if requires_key {
+                "✅ Config"
+            } else {
+                "⚪ Optional"
+            };
             let status_icon = if is_active { "🟢" } else { "⚪" };
             output.push_str(&format!(
                 "- {} **{}** (`{}`) — {} | type: {} | key: {}\n",
@@ -335,11 +339,7 @@ async fn doctor_provider(ctx: CommandContext<'_>) -> CommandResult {
     let store = ProviderStore::new();
     let provider_config = store.load().await.unwrap_or_default();
 
-    let diagnosis = build_provider_doctor_diagnosis(
-        ctx.state,
-        &provider_config,
-        &settings,
-    );
+    let diagnosis = build_provider_doctor_diagnosis(ctx.state, &provider_config, &settings);
     let report = render_provider_doctor_report(&diagnosis);
 
     ctx.state
@@ -424,10 +424,7 @@ fn build_provider_doctor_diagnosis(
         .and_then(|provider_id| provider_config.providers.get(provider_id));
 
     ProviderDoctorDiagnosis {
-        provider_name: provider_display_name(
-            resolution.provider_id.as_deref(),
-            stored_settings,
-        ),
+        provider_name: provider_display_name(resolution.provider_id.as_deref(), stored_settings),
         provider_id: resolution.provider_id.clone(),
         provider_source: resolution.provider_source,
         model: resolution.model,
@@ -675,7 +672,11 @@ fn render_provider_doctor_report(diagnosis: &ProviderDoctorDiagnosis) -> String 
     ));
     report.push_str(&format!(
         "- {}: {}\n",
-        i18n::t("cmd.provider.doctor.model", "Current model", "Current model"),
+        i18n::t(
+            "cmd.provider.doctor.model",
+            "Current model",
+            "Current model"
+        ),
         format_optional_code(diagnosis.model.value.as_deref()),
     ));
     report.push_str(&format!(
@@ -981,4 +982,3 @@ fn format_optional_code(value: Option<&str>) -> String {
         .map(|value| format!("`{}`", value))
         .unwrap_or_else(|| "-".to_string())
 }
- 

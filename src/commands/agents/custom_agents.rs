@@ -9,7 +9,8 @@ pub(super) async fn list_agents(ctx: CommandContext<'_>) -> CommandResult {
     let effective_defs = load_custom_subagent_definitions(&storage.project_root());
 
     let mut lines = vec!["# Agents
-".to_string()];
+"
+    .to_string()];
 
     let project_agents = list_agent_files(&project_dir).await?;
     lines.push(format!("## Project ({})", project_dir.to_string_lossy()));
@@ -22,8 +23,11 @@ pub(super) async fn list_agents(ctx: CommandContext<'_>) -> CommandResult {
     }
 
     let user_agents = list_agent_files(&user_dir).await?;
-    lines.push(format!("
-## User ({})", user_dir.to_string_lossy()));
+    lines.push(format!(
+        "
+## User ({})",
+        user_dir.to_string_lossy()
+    ));
     if user_agents.is_empty() {
         lines.push("- (empty)".to_string());
     } else {
@@ -32,8 +36,11 @@ pub(super) async fn list_agents(ctx: CommandContext<'_>) -> CommandResult {
         }
     }
 
-    lines.push("
-## Resolved Registry (project overrides user)".to_string());
+    lines.push(
+        "
+## Resolved Registry (project overrides user)"
+            .to_string(),
+    );
     if effective_defs.is_empty() {
         lines.push("- (empty)".to_string());
     } else {
@@ -60,10 +67,13 @@ pub(super) async fn list_agents(ctx: CommandContext<'_>) -> CommandResult {
     );
     lines.push("- `/agents delete reviewer`".to_string());
 
-    ctx.state
-        .chat_history
-        .push(crate::types::ChatEntry::assistant(lines.join("
-")).with_streaming(false));
+    ctx.state.chat_history.push(
+        crate::types::ChatEntry::assistant(lines.join(
+            "
+",
+        ))
+        .with_streaming(false),
+    );
 
     Ok(())
 }
@@ -204,8 +214,10 @@ fn default_agent_prompt(id: &str, description: &str, tools: &[String]) -> String
         ));
     }
     lines.push("Keep responses concise and execution-oriented.".to_string());
-    lines.join("
-")
+    lines.join(
+        "
+",
+    )
 }
 
 async fn resolve_prompt_input(
@@ -422,7 +434,11 @@ pub(super) async fn edit_agent(ctx: CommandContext<'_>, args: AgentEditArgs) -> 
     Ok(())
 }
 
-pub(super) async fn delete_agent(ctx: CommandContext<'_>, name: String, user: bool) -> CommandResult {
+pub(super) async fn delete_agent(
+    ctx: CommandContext<'_>,
+    name: String,
+    user: bool,
+) -> CommandResult {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let storage = crate::core::config::storage::Storage::new(cwd);
     let Some((path, scope)) = resolve_agent_path(&storage, &name, user) else {
@@ -454,7 +470,11 @@ pub(super) async fn delete_agent(ctx: CommandContext<'_>, name: String, user: bo
     Ok(())
 }
 
-pub(super) async fn add_agent(ctx: CommandContext<'_>, source: String, name: Option<String>) -> CommandResult {
+pub(super) async fn add_agent(
+    ctx: CommandContext<'_>,
+    source: String,
+    name: Option<String>,
+) -> CommandResult {
     let source_path = PathBuf::from(&source);
     if !source_path.exists() {
         return Err(format!("source file not found: {}", source));

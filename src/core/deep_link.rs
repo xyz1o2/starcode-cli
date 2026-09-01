@@ -54,15 +54,9 @@ impl DeepLinkHandler {
 
     pub fn handle(&self, action: DeepLinkAction) -> Result<String, String> {
         match action {
-            DeepLinkAction::OpenFile(path) => {
-                Ok(format!("Opening file: {}", path))
-            }
-            DeepLinkAction::ResumeSession(id) => {
-                Ok(format!("Resuming session: {}", id))
-            }
-            DeepLinkAction::RunCommand(cmd) => {
-                Ok(format!("Running command: {}", cmd))
-            }
+            DeepLinkAction::OpenFile(path) => Ok(format!("Opening file: {}", path)),
+            DeepLinkAction::ResumeSession(id) => Ok(format!("Resuming session: {}", id)),
+            DeepLinkAction::RunCommand(cmd) => Ok(format!("Running command: {}", cmd)),
         }
     }
 }

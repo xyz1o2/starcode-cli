@@ -1,7 +1,7 @@
 use super::{SubAgent, SubTask, SubTaskResult};
-use crate::core::prompts::skills::search::SEARCH_SYSTEM_PROMPT;
 use crate::agent::StarAgent;
 use crate::core::config::Config;
+use crate::core::prompts::skills::search::SEARCH_SYSTEM_PROMPT;
 use crate::core::tools::semantic_search::run_semantic_search_for_skill;
 use crate::core::utils::paths::resolve_tool_path;
 use crate::llm::client::StarClient;
@@ -280,4 +280,3 @@ impl SubAgent for SearchAgent {
         self.run_search_loop(&task).await
     }
 }
- 

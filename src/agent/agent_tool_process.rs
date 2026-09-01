@@ -3,13 +3,12 @@ use crate::agent::agent_loop::TurnResult;
 use crate::agent::loop_engineering::{LoopState, LoopStrategy, StructuredError};
 use crate::agent::nudges;
 use crate::agent::tool_routing::{
-    build_analyzer_skill_tool_call, build_editor_skill_tool_call,
-    build_json_fallback_prompt, build_navigator_skill_tool_call, build_project_map_tool_call,
-    build_semantic_search_tool_call, build_tool_loop_signature, build_validation_tool_call,
-    detect_tool_loop, is_edit_tool_name, is_read_only_tool_name,
-    is_validation_tool_name, json_fallback_extract_tool_call,
-    has_action_intent, resolved_read_only_turn_limit,
-    AutoTriggerKind, select_best_auto_trigger,
+    build_analyzer_skill_tool_call, build_editor_skill_tool_call, build_json_fallback_prompt,
+    build_navigator_skill_tool_call, build_project_map_tool_call, build_semantic_search_tool_call,
+    build_tool_loop_signature, build_validation_tool_call, detect_tool_loop, has_action_intent,
+    is_edit_tool_name, is_read_only_tool_name, is_validation_tool_name,
+    json_fallback_extract_tool_call, resolved_read_only_turn_limit, select_best_auto_trigger,
+    AutoTriggerKind,
 };
 use crate::agent::{hooks, reflection, tool_helpers};
 use crate::core::i18n;
@@ -50,10 +49,7 @@ impl Agent {
         if let Some(ref usage) = usage {
             crate::utils::logging::append_debug_log_line(&format!(
                 "[TOKEN-API] Turn {} actual: prompt={}, completion={}, total={}",
-                current_turn,
-                usage.prompt_tokens,
-                usage.completion_tokens,
-                usage.total_tokens,
+                current_turn, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
             ));
             // Surface usage to consumers (eval harness, UI, cost tracking).
             self.emit_event(crate::agent::messaging::AgentEvent::StatsUpdate {
@@ -107,7 +103,11 @@ impl Agent {
 
         // Build assistant message from collected content
         let mut assistant_message = StarMessage::assistant(content.clone());
-        assistant_message.reasoning_content = if reasoning.is_empty() { None } else { Some(reasoning.clone()) };
+        assistant_message.reasoning_content = if reasoning.is_empty() {
+            None
+        } else {
+            Some(reasoning.clone())
+        };
         if !tool_calls.is_empty() {
             assistant_message.tool_calls = Some(tool_calls.clone());
         }
@@ -116,7 +116,10 @@ impl Agent {
         // Check if we have tool calls to execute
         if !tool_calls.is_empty() {
             // Track which tools were attempted
-            if tool_calls.iter().any(|tc| tc.function.name == "SemanticSearch") {
+            if tool_calls
+                .iter()
+                .any(|tc| tc.function.name == "SemanticSearch")
+            {
                 *semantic_search_attempted = true;
             }
             if tool_calls.iter().any(|tc| tc.function.name == "ProjectMap") {
@@ -140,10 +143,14 @@ impl Agent {
             // Skip if already streamed in real-time via Branch B (TextDelta/ReasoningDelta)
             // to avoid duplicating content in the UI.
             if !content.is_empty() && !content_streamed {
-                self.emit_event(crate::agent::messaging::AgentEvent::Message(content.clone()));
+                self.emit_event(crate::agent::messaging::AgentEvent::Message(
+                    content.clone(),
+                ));
             }
             if !reasoning.is_empty() && !reasoning_streamed {
-                self.emit_event(crate::agent::messaging::AgentEvent::ReasoningDelta(reasoning.clone()));
+                self.emit_event(crate::agent::messaging::AgentEvent::ReasoningDelta(
+                    reasoning.clone(),
+                ));
             }
 
             // 不再合成 "Reading/Editing xxx" 之类的文字说明：
@@ -164,7 +171,8 @@ impl Agent {
                 consecutive_read_only_turns,
                 file_read_tracker,
                 loop_state,
-            ).await;
+            )
+            .await;
 
             // Continue to next round
             TurnResult::Continue
@@ -205,7 +213,9 @@ impl Agent {
                         "message": "Model returned empty response, retrying...",
                     }),
                 });
-                messages.push(StarMessage::system(nudges::NUDGE_EMPTY_RESPONSE.to_string()));
+                messages.push(StarMessage::system(
+                    nudges::NUDGE_EMPTY_RESPONSE.to_string(),
+                ));
                 return TurnResult::Continue;
             }
 
@@ -239,21 +249,23 @@ impl Agent {
                 return TurnResult::Continue;
             }
             // No tool calls - check for auto-triggers
-            let trigger_result = self.handle_auto_triggers(
-                user_input,
-                messages,
-                content_trimmed,
-                all_active_tools,
-                current_turn,
-                semantic_search_attempted,
-                navigator_skill_attempted,
-                analyzer_skill_attempted,
-                editor_skill_attempted,
-                project_map_attempted,
-                turn_active_tools,
-                skip_verification,
-                verification_required,
-            ).await;
+            let trigger_result = self
+                .handle_auto_triggers(
+                    user_input,
+                    messages,
+                    content_trimmed,
+                    all_active_tools,
+                    current_turn,
+                    semantic_search_attempted,
+                    navigator_skill_attempted,
+                    analyzer_skill_attempted,
+                    editor_skill_attempted,
+                    project_map_attempted,
+                    turn_active_tools,
+                    skip_verification,
+                    verification_required,
+                )
+                .await;
 
             // Auto-trigger executed a tool → model produced useful output,
             // reset the consecutive-empty counter. Only reset on Continue
@@ -277,7 +289,8 @@ impl Agent {
                                 .starts_with("[CONCLUSION_REQUEST]")
                     })
                     .unwrap_or(false);
-                if !already_asked_conclusion && current_turn > 1
+                if !already_asked_conclusion
+                    && current_turn > 1
                     && *nudge_interventions < max_nudge_interventions
                 {
                     crate::utils::logging::append_debug_log_line(&format!(
@@ -285,7 +298,9 @@ impl Agent {
                         current_turn, content_trimmed.len(),
                     ));
                     *nudge_interventions += 1;
-                    messages.push(StarMessage::system(nudges::NUDGE_CONCLUSION_REQUEST.to_string()));
+                    messages.push(StarMessage::system(
+                        nudges::NUDGE_CONCLUSION_REQUEST.to_string(),
+                    ));
                     return TurnResult::Continue;
                 } else {
                     // Conclusion guard passed (content is long enough, first turn,
@@ -300,9 +315,7 @@ impl Agent {
             // - Long input (>50 chars) with action intent → likely a task
             // - Short input (<30 chars) → likely a question, don't nudge
             // - Medium input with action keywords → likely a task
-            if matches!(trigger_result, TurnResult::Done)
-                && user_input.chars().count() > 5
-            {
+            if matches!(trigger_result, TurnResult::Done) && user_input.chars().count() > 5 {
                 let input_len = user_input.chars().count();
                 let looks_like_task = if input_len > 50 {
                     // Long input: nudge if it has any action intent
@@ -339,7 +352,9 @@ impl Agent {
                         current_turn,
                     ));
                     *nudge_interventions += 1;
-                    messages.push(StarMessage::system(nudges::NUDGE_ACTION_REQUIRED.to_string()));
+                    messages.push(StarMessage::system(
+                        nudges::NUDGE_ACTION_REQUIRED.to_string(),
+                    ));
                     return TurnResult::Continue;
                 }
             }
@@ -372,17 +387,20 @@ impl Agent {
         if budget.calls_this_turn + tool_calls.len() > budget.max_calls_per_turn {
             crate::utils::logging::append_debug_log_line(&format!(
                 "[BUDGET] turn {} exceeded max tool calls per turn ({} + {} > {})",
-                current_turn, budget.calls_this_turn, tool_calls.len(), budget.max_calls_per_turn,
+                current_turn,
+                budget.calls_this_turn,
+                tool_calls.len(),
+                budget.max_calls_per_turn,
             ));
             // Push a summary of the budget exhaustion to the messages so the
             // model can decide how to proceed (abort, summarize, or split work).
-            messages.push(StarMessage::system(
-                format!(
-                    "Tool call budget exhausted this turn ({}/{} calls already made, {} pending). \
+            messages.push(StarMessage::system(format!(
+                "Tool call budget exhausted this turn ({}/{} calls already made, {} pending). \
                      Summarize your progress so far and describe the remaining work.",
-                    budget.calls_this_turn, budget.max_calls_per_turn, tool_calls.len(),
-                ),
-            ));
+                budget.calls_this_turn,
+                budget.max_calls_per_turn,
+                tool_calls.len(),
+            )));
             return;
         }
         budget.calls_this_turn += tool_calls.len();
@@ -397,10 +415,10 @@ impl Agent {
                     // ── Denial Tracking ──
                     // Detect same-tool consecutive denials (≥3 → auto-inject
                     // nudge). Mirrors Claude Code's denialTracking.ts.
-                    if let Some(nudge_msg) = self.denial_tracker.record_denial(
-                        &tool_call.function.name,
-                        &reason,
-                    ) {
+                    if let Some(nudge_msg) = self
+                        .denial_tracker
+                        .record_denial(&tool_call.function.name, &reason)
+                    {
                         let thresh = self.denial_tracker.threshold();
                         crate::utils::logging::append_debug_log_line(&format!(
                             "[DENIAL_TRACKING] threshold ({thresh}) reached for {} — injecting nudge",
@@ -436,11 +454,8 @@ impl Agent {
 
             let has_long_running = runnable_tool_calls
                 .iter()
-                .any(|tc| {
-                    tc.function.name == "SemanticSearch"
-                        || tc.function.name == "ProjectMap"
-                });
-            
+                .any(|tc| tc.function.name == "SemanticSearch" || tc.function.name == "ProjectMap");
+
             if has_long_running {
                 for tool_call in &runnable_tool_calls {
                     // 通过 stream_tx 实时发送工具开始事件
@@ -459,13 +474,19 @@ impl Agent {
                     if is_edit_tool_name(&tool_call.function.name) && result.success {
                         successful_edit_happened = true;
                         successful_edit_tools.push(tool_call.function.name.clone());
-                        
+
                         // Auto-verify syntax after successful edits
                         if let Some(file_path) = extract_file_path_from_tool_call(tool_call) {
                             if let Ok(content) = std::fs::read_to_string(&file_path) {
-                                let verify_result = crate::core::tools::verify_edit::verify_edit_syntax(&file_path, &content);
+                                let verify_result =
+                                    crate::core::tools::verify_edit::verify_edit_syntax(
+                                        &file_path, &content,
+                                    );
                                 if !verify_result.syntax_ok {
-                                    let verify_msg = crate::core::tools::verify_edit::format_verification_result(&verify_result);
+                                    let verify_msg =
+                                        crate::core::tools::verify_edit::format_verification_result(
+                                            &verify_result,
+                                        );
                                     crate::utils::logging::append_debug_log_line(&format!(
                                         "[VERIFY] Post-edit syntax check failed: {}",
                                         verify_msg
@@ -486,7 +507,8 @@ impl Agent {
                     );
                     hooks::run_post_tool_hooks(user_input, tool_call, &result).await;
                     reflection::maybe_write_reflection_memory(user_input, tool_call, &result).await;
-                    let recovery_instruction = record_tool_outcome(loop_state, &tool_call.function.name, &result);
+                    let recovery_instruction =
+                        record_tool_outcome(loop_state, &tool_call.function.name, &result);
                     if let Some(instr) = recovery_instruction {
                         messages.push(StarMessage::system(instr));
                     }
@@ -495,22 +517,23 @@ impl Agent {
                     if is_read_only_tool_name(&tool_call.function.name) && result.success {
                         if let Some(file_path) = extract_file_path_from_tool_call(tool_call) {
                             let memory_manager = &self.memory_manager;
-                            let _ = memory_manager.record_file_access(
-                                &file_path,
-                                None,
-                                None,
-                            ).await;
+                            let _ = memory_manager
+                                .record_file_access(&file_path, None, None)
+                                .await;
                         }
                     }
 
-                    let tool_msg_content = result.output.unwrap_or_else(|| result.error.unwrap_or_default());
+                    let tool_msg_content = result
+                        .output
+                        .unwrap_or_else(|| result.error.unwrap_or_default());
                     messages.push(StarMessage::tool(
                         tool_call.id.clone(),
                         tool_msg_content.clone(),
                     ));
-                    
+
                     if is_edit_tool_name(&tool_call.function.name)
-                        && tool_msg_content.contains(crate::core::tools::constants::EDIT_FILE_NOT_READ_MARKER)
+                        && tool_msg_content
+                            .contains(crate::core::tools::constants::EDIT_FILE_NOT_READ_MARKER)
                     {
                         self.handle_edit_not_read_error(messages, tool_call);
                     }
@@ -523,7 +546,8 @@ impl Agent {
                         tool_call: tc.clone(),
                     });
                 }
-                let results = self.tool_executor
+                let results = self
+                    .tool_executor
                     .execute_batch(runnable_tool_calls.clone(), None, None)
                     .await;
 
@@ -549,7 +573,8 @@ impl Agent {
                     );
                     hooks::run_post_tool_hooks(user_input, tool_call, &result).await;
                     reflection::maybe_write_reflection_memory(user_input, tool_call, &result).await;
-                    let recovery_instruction = record_tool_outcome(loop_state, &tool_call.function.name, &result);
+                    let recovery_instruction =
+                        record_tool_outcome(loop_state, &tool_call.function.name, &result);
                     if let Some(instr) = recovery_instruction {
                         messages.push(StarMessage::system(instr));
                     }
@@ -558,22 +583,23 @@ impl Agent {
                     if is_read_only_tool_name(&tool_call.function.name) && result.success {
                         if let Some(file_path) = extract_file_path_from_tool_call(tool_call) {
                             let memory_manager = &self.memory_manager;
-                            let _ = memory_manager.record_file_access(
-                                &file_path,
-                                None,
-                                None,
-                            ).await;
+                            let _ = memory_manager
+                                .record_file_access(&file_path, None, None)
+                                .await;
                         }
                     }
 
-                    let tool_msg_content = result.output.unwrap_or_else(|| result.error.unwrap_or_default());
+                    let tool_msg_content = result
+                        .output
+                        .unwrap_or_else(|| result.error.unwrap_or_default());
                     messages.push(StarMessage::tool(
                         tool_call.id.clone(),
                         tool_msg_content.clone(),
                     ));
-                    
+
                     if is_edit_tool_name(&tool_call.function.name)
-                        && tool_msg_content.contains(crate::core::tools::constants::EDIT_FILE_NOT_READ_MARKER)
+                        && tool_msg_content
+                            .contains(crate::core::tools::constants::EDIT_FILE_NOT_READ_MARKER)
                     {
                         self.handle_edit_not_read_error(messages, tool_call);
                     }
@@ -627,14 +653,14 @@ impl Agent {
                 }
             } else {
                 *consecutive_read_only_turns += 1;
-                
+
                 // Track which files are being read
                 for tc in &runnable_tool_calls {
                     if is_read_only_tool_name(&tc.function.name) {
                         if let Some(file_path) = extract_file_path_from_tool_call(tc) {
                             let count = file_read_tracker.entry(file_path.clone()).or_insert(0);
                             *count += 1;
-                            
+
                             // If same file read 3+ times, inject strong nudge
                             if *count >= 3 {
                                 messages.push(StarMessage::system(format!(
@@ -646,7 +672,7 @@ impl Agent {
                         }
                     }
                 }
-                
+
                 let read_only_limit = resolved_read_only_turn_limit();
                 if *consecutive_read_only_turns >= read_only_limit {
                     let count = *consecutive_read_only_turns;
@@ -697,7 +723,9 @@ impl Agent {
         verification_required: &mut bool,
         skip_verification: bool,
     ) -> TurnResult {
-        messages.push(StarMessage::assistant_with_tool_calls(vec![tool_call.clone()]));
+        messages.push(StarMessage::assistant_with_tool_calls(vec![
+            tool_call.clone()
+        ]));
 
         self.emit_event(crate::agent::messaging::AgentEvent::ToolStarted {
             tool_call: tool_call.clone(),
@@ -707,13 +735,19 @@ impl Agent {
             Ok(()) => {
                 let result = self.execute_single_tool(&tool_call).await;
                 tool_helpers::update_verification_state(
-                    &tool_call, &result, verification_required, skip_verification,
+                    &tool_call,
+                    &result,
+                    verification_required,
+                    skip_verification,
                 );
                 hooks::run_post_tool_hooks(user_input, &tool_call, &result).await;
                 reflection::maybe_write_reflection_memory(user_input, &tool_call, &result).await;
                 messages.push(StarMessage::tool(
                     tool_call.id.clone(),
-                    result.output.clone().unwrap_or_else(|| result.error.clone().unwrap_or_default()),
+                    result
+                        .output
+                        .clone()
+                        .unwrap_or_else(|| result.error.clone().unwrap_or_default()),
                 ));
                 self.emit_event(crate::agent::messaging::AgentEvent::ToolFinished {
                     tool_call: tool_call.clone(),
@@ -723,10 +757,10 @@ impl Agent {
             }
             Err(reason) => {
                 // Denial tracking for auto-trigger tools too
-                if let Some(nudge_msg) = self.denial_tracker.record_denial(
-                    &tool_call.function.name,
-                    &reason,
-                ) {
+                if let Some(nudge_msg) = self
+                    .denial_tracker
+                    .record_denial(&tool_call.function.name, &reason)
+                {
                     crate::utils::logging::append_debug_log_line(&format!(
                         "[DENIAL_TRACKING] auto-trigger threshold ({}) reached for {} — injecting nudge",
                         self.denial_tracker.threshold(),
@@ -734,13 +768,21 @@ impl Agent {
                     ));
                     messages.push(StarMessage::system(nudge_msg));
                 }
-                let blocked = ToolResult { success: false, output: None, error: Some(reason), data: None };
+                let blocked = ToolResult {
+                    success: false,
+                    output: None,
+                    error: Some(reason),
+                    data: None,
+                };
                 reflection::maybe_write_reflection_memory(user_input, &tool_call, &blocked).await;
                 self.emit_event(crate::agent::messaging::AgentEvent::ToolFinished {
                     tool_call: tool_call.clone(),
                     result: blocked.clone(),
                 });
-                messages.push(StarMessage::tool(tool_call.id.clone(), blocked.error.unwrap_or_default()));
+                messages.push(StarMessage::tool(
+                    tool_call.id.clone(),
+                    blocked.error.unwrap_or_default(),
+                ));
                 TurnResult::Continue
             }
         }
@@ -790,52 +832,107 @@ impl Agent {
             AutoTriggerKind::Verification => {
                 let tool_call = build_validation_tool_call(current_turn);
                 crate::utils::logging::append_debug_log_line(&format!(
-                    "[VERIFY_AUTO] auto-trigger diagnostics (turn={})", current_turn
+                    "[VERIFY_AUTO] auto-trigger diagnostics (turn={})",
+                    current_turn
                 ));
-                self.run_auto_trigger_tool(user_input, messages, tool_call, verification_required, skip_verification).await
+                self.run_auto_trigger_tool(
+                    user_input,
+                    messages,
+                    tool_call,
+                    verification_required,
+                    skip_verification,
+                )
+                .await
             }
             AutoTriggerKind::SemanticSearch => {
                 *semantic_search_attempted = true;
                 let tool_call = build_semantic_search_tool_call(user_input, current_turn);
-                self.run_auto_trigger_tool(user_input, messages, tool_call, verification_required, skip_verification).await
+                self.run_auto_trigger_tool(
+                    user_input,
+                    messages,
+                    tool_call,
+                    verification_required,
+                    skip_verification,
+                )
+                .await
             }
             AutoTriggerKind::NavigatorSkill => {
                 *navigator_skill_attempted = true;
                 let tool_call = build_navigator_skill_tool_call(user_input, current_turn);
-                self.run_auto_trigger_tool(user_input, messages, tool_call, verification_required, skip_verification).await
+                self.run_auto_trigger_tool(
+                    user_input,
+                    messages,
+                    tool_call,
+                    verification_required,
+                    skip_verification,
+                )
+                .await
             }
             AutoTriggerKind::ProjectMap => {
                 *project_map_attempted = true;
                 let tool_call = build_project_map_tool_call(user_input, current_turn);
-                self.run_auto_trigger_tool(user_input, messages, tool_call, verification_required, skip_verification).await
+                self.run_auto_trigger_tool(
+                    user_input,
+                    messages,
+                    tool_call,
+                    verification_required,
+                    skip_verification,
+                )
+                .await
             }
             AutoTriggerKind::AnalyzerSkill => {
                 *analyzer_skill_attempted = true;
                 let tool_call = build_analyzer_skill_tool_call(user_input, current_turn);
-                self.run_auto_trigger_tool(user_input, messages, tool_call, verification_required, skip_verification).await
+                self.run_auto_trigger_tool(
+                    user_input,
+                    messages,
+                    tool_call,
+                    verification_required,
+                    skip_verification,
+                )
+                .await
             }
             AutoTriggerKind::JsonFallback => {
-                let fallback_prompt = build_json_fallback_prompt(current_content, turn_active_tools);
+                let fallback_prompt =
+                    build_json_fallback_prompt(current_content, turn_active_tools);
                 let mut fallback_messages = messages.clone();
                 fallback_messages.push(StarMessage::user(fallback_prompt));
-                crate::agent::message_processing::repair_tool_message_sequence(&mut fallback_messages);
+                crate::agent::message_processing::repair_tool_message_sequence(
+                    &mut fallback_messages,
+                );
                 crate::agent::message_processing::normalize_messages_for_llm(
-                    &mut fallback_messages, self.client.supports_thinking(),
+                    &mut fallback_messages,
+                    self.client.supports_thinking(),
                 );
 
                 match self.client.chat(fallback_messages, None, None, None).await {
                     Ok(response) => {
-                        let response_text = response.choices.first()
-                            .and_then(|c| c.message.content.as_deref()).unwrap_or("");
+                        let response_text = response
+                            .choices
+                            .first()
+                            .and_then(|c| c.message.content.as_deref())
+                            .unwrap_or("");
                         if let Some(fb_tool) = json_fallback_extract_tool_call(response_text) {
                             crate::utils::logging::append_debug_log_line(&format!(
-                                "[JSON_FALLBACK] extracted: {}", fb_tool.function.name
+                                "[JSON_FALLBACK] extracted: {}",
+                                fb_tool.function.name
                             ));
-                            return self.run_auto_trigger_tool(user_input, messages, fb_tool, verification_required, skip_verification).await;
+                            return self
+                                .run_auto_trigger_tool(
+                                    user_input,
+                                    messages,
+                                    fb_tool,
+                                    verification_required,
+                                    skip_verification,
+                                )
+                                .await;
                         }
                     }
                     Err(e) => {
-                        crate::utils::logging::append_debug_log_line(&format!("[JSON_FALLBACK] error: {}", e));
+                        crate::utils::logging::append_debug_log_line(&format!(
+                            "[JSON_FALLBACK] error: {}",
+                            e
+                        ));
                     }
                 }
                 // Fallback failed — inject nudge to use standard tool calling format
@@ -845,14 +942,22 @@ impl Agent {
                 messages.push(StarMessage::system(
                     "Your response could not be parsed as a tool call. \
                      Please use the standard tool calling mechanism (not JSON text). \
-                     Call the appropriate tools directly to continue the task.".to_string(),
+                     Call the appropriate tools directly to continue the task."
+                        .to_string(),
                 ));
                 TurnResult::Continue
             }
             AutoTriggerKind::EditorSkill => {
                 *editor_skill_attempted = true;
                 let tool_call = build_editor_skill_tool_call(user_input, current_turn);
-                self.run_auto_trigger_tool(user_input, messages, tool_call, verification_required, skip_verification).await
+                self.run_auto_trigger_tool(
+                    user_input,
+                    messages,
+                    tool_call,
+                    verification_required,
+                    skip_verification,
+                )
+                .await
             }
         }
     }
@@ -861,14 +966,14 @@ impl Agent {
 /// Extract file path from tool call arguments
 fn extract_file_path_from_tool_call(tool_call: &StarToolCall) -> Option<String> {
     let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments).ok()?;
-    
+
     // Try common parameter names
     for key in &["file_path", "filePath", "path", "filename", "file"] {
         if let Some(value) = args.get(*key).and_then(|v| v.as_str()) {
             return Some(value.to_string());
         }
     }
-    
+
     // For multi_edit, extract from edits array
     if let Some(edits) = args.get("edits").and_then(|v| v.as_array()) {
         if let Some(first_edit) = edits.first() {
@@ -877,7 +982,7 @@ fn extract_file_path_from_tool_call(tool_call: &StarToolCall) -> Option<String> 
             }
         }
     }
-    
+
     None
 }
 
@@ -887,7 +992,11 @@ fn extract_file_path_from_tool_call(tool_call: &StarToolCall) -> Option<String> 
 /// 返回一个可选的恢复指令：工具失败时，根据 `LoopState` 当前采纳的
 /// `LoopStrategy` 生成明确的下一步动作，注入会话供 LLM 执行，使策略
 /// 真正驱动行为（而非仅作展示/统计）。
-fn record_tool_outcome(loop_state: &mut LoopState, tool_name: &str, result: &crate::types::ToolResult) -> Option<String> {
+fn record_tool_outcome(
+    loop_state: &mut LoopState,
+    tool_name: &str,
+    result: &crate::types::ToolResult,
+) -> Option<String> {
     if result.success {
         loop_state.record_success(tool_name, "tool_executed");
         return None;

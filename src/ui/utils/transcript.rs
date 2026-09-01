@@ -242,5 +242,3 @@ pub fn append_transcript_event(
     let line = build_transcript_event(state, event, message_id, payload);
     append_transcript_line(state, line);
 }
-
- 

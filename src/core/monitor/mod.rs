@@ -2,7 +2,7 @@
 //!
 //! 后台 shell 监控工具
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -106,10 +106,8 @@ impl MonitorManager {
         tokio::spawn(async move {
             loop {
                 Self::check_processes(&processes, &alerts, &config).await;
-                tokio::time::sleep(std::time::Duration::from_secs(
-                    config.check_interval_secs,
-                ))
-                .await;
+                tokio::time::sleep(std::time::Duration::from_secs(config.check_interval_secs))
+                    .await;
             }
         });
 
@@ -157,7 +155,10 @@ impl MonitorManager {
                     if cpu > config.alert_threshold_cpu {
                         alerts.lock().unwrap().push(MonitorAlert {
                             alert_type: AlertType::HighCpu,
-                            message: format!("Process {} (PID {}) CPU usage: {:.1}%", parts[10], pid, cpu),
+                            message: format!(
+                                "Process {} (PID {}) CPU usage: {:.1}%",
+                                parts[10], pid, cpu
+                            ),
                             severity: AlertSeverity::Warning,
                             timestamp: now_secs(),
                             process: Some(parts[10].to_string()),

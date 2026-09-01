@@ -82,7 +82,10 @@ impl CommandQueue {
     }
 
     /// 按优先级获取命令
-    pub fn get_commands_by_max_priority(&self, max_priority: CommandPriority) -> Vec<&QueuedCommand> {
+    pub fn get_commands_by_max_priority(
+        &self,
+        max_priority: CommandPriority,
+    ) -> Vec<&QueuedCommand> {
         self.commands
             .iter()
             .filter(|cmd| cmd.priority <= max_priority)
@@ -104,7 +107,8 @@ impl CommandQueue {
 
     /// 通知命令生命周期
     pub fn notify_lifecycle(&mut self, uuid: &str, lifecycle: CommandLifecycle) {
-        self.lifecycle_notifications.insert(uuid.to_string(), lifecycle);
+        self.lifecycle_notifications
+            .insert(uuid.to_string(), lifecycle);
     }
 
     /// 消费命令
@@ -133,10 +137,9 @@ impl CommandQueue {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        
-        self.commands.retain(|cmd| {
-            now.saturating_sub(cmd.created_at) < max_age_secs
-        });
+
+        self.commands
+            .retain(|cmd| now.saturating_sub(cmd.created_at) < max_age_secs);
     }
 }
 
@@ -432,7 +435,7 @@ impl TaskSummaryManager {
         // 简单的摘要生成逻辑
         let mut summary = String::new();
         let recent_messages: Vec<_> = messages.iter().rev().take(10).collect();
-        
+
         for msg in recent_messages.iter().rev() {
             if let Some(content) = &msg.content {
                 let preview: String = content.chars().take(100).collect();
@@ -499,7 +502,10 @@ impl AttachmentMessageCreator {
     }
 
     /// 创建最大轮次达到附件消息
-    pub fn create_max_turns_reached_attachment(max_turns: usize, current_turn: usize) -> StarMessage {
+    pub fn create_max_turns_reached_attachment(
+        max_turns: usize,
+        current_turn: usize,
+    ) -> StarMessage {
         StarMessage::system(&format!(
             "[Max Turns Reached]\nReached maximum turns limit: {}/{}",
             current_turn, max_turns
@@ -514,7 +520,7 @@ mod tests {
     #[test]
     fn test_command_queue() {
         let mut queue = CommandQueue::new();
-        
+
         let cmd = QueuedCommand {
             uuid: "test-uuid".to_string(),
             mode: CommandMode::Prompt,
@@ -523,10 +529,10 @@ mod tests {
             priority: CommandPriority::Next,
             created_at: 0,
         };
-        
+
         queue.enqueue(cmd);
         assert_eq!(queue.commands.len(), 1);
-        
+
         let consumed = queue.consume("test-uuid");
         assert!(consumed.is_some());
         assert_eq!(queue.commands.len(), 0);
@@ -535,17 +541,17 @@ mod tests {
     #[test]
     fn test_attachment_manager() {
         let mut manager = AttachmentManager::new();
-        
+
         let attachment = Attachment {
             attachment_type: AttachmentType::EditedTextFile,
             content: "test content".to_string(),
             tool_use_id: None,
             created_at: 0,
         };
-        
+
         manager.add_attachment(attachment);
         assert_eq!(manager.get_attachments().len(), 1);
-        
+
         manager.clear_attachments();
         assert_eq!(manager.get_attachments().len(), 0);
     }
@@ -553,18 +559,16 @@ mod tests {
     #[test]
     fn test_tool_refresh_manager() {
         let mut manager = ToolRefreshManager::new();
-        
+
         assert!(manager.needs_refresh());
-        
-        let tools = vec![
-            ToolInfo {
-                name: "Read".to_string(),
-                description: "Read file".to_string(),
-                is_mcp: false,
-                mcp_server: None,
-            },
-        ];
-        
+
+        let tools = vec![ToolInfo {
+            name: "Read".to_string(),
+            description: "Read file".to_string(),
+            is_mcp: false,
+            mcp_server: None,
+        }];
+
         manager.refresh(tools);
         assert!(!manager.needs_refresh());
         assert!(manager.get_tool("Read").is_some());

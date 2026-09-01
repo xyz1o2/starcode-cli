@@ -71,7 +71,10 @@ impl ToolInvocation for CtxInspectInvocation {
                     prompt_caching_enabled: true,
                     session_memory_enabled: true,
                     context_collapse_enabled: false,
-                    summary: format!("Context window has 15000 tokens across 25 messages. Query: {}", query),
+                    summary: format!(
+                        "Context window has 15000 tokens across 25 messages. Query: {}",
+                        query
+                    ),
                 })?,
                 error: None,
                 data: Some(serde_json::json!({

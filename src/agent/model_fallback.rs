@@ -135,10 +135,7 @@ impl ModelFallbackManager {
 
                 crate::utils::logging::append_debug_log_line(&format!(
                     "[MODEL_FALLBACK] Switching from {} to {} (attempt {}/{})",
-                    original_model,
-                    fallback_model,
-                    self.retry_count,
-                    self.config.max_retries
+                    original_model, fallback_model, self.retry_count, self.config.max_retries
                 ));
 
                 return FallbackDecision::Fallback {
@@ -157,9 +154,7 @@ impl ModelFallbackManager {
 
             crate::utils::logging::append_debug_log_line(&format!(
                 "[MODEL_FALLBACK] Switching base URL to {} (attempt {}/{})",
-                fallback_url,
-                self.retry_count,
-                self.config.max_retries
+                fallback_url, self.retry_count, self.config.max_retries
             ));
 
             return FallbackDecision::Fallback {
@@ -187,7 +182,8 @@ impl ModelFallbackManager {
             enabled: self.config.enabled,
             retry_count: self.retry_count,
             max_retries: self.config.max_retries,
-            available_fallbacks: self.config.fallback_models.len() + self.config.fallback_base_urls.len(),
+            available_fallbacks: self.config.fallback_models.len()
+                + self.config.fallback_base_urls.len(),
         }
     }
 }
@@ -202,9 +198,7 @@ pub enum FallbackDecision {
         reason: String,
     },
     /// 不回退
-    NoFallback {
-        reason: String,
-    },
+    NoFallback { reason: String },
 }
 
 /// 回退状态

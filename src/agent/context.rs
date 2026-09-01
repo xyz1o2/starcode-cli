@@ -103,9 +103,15 @@ pub(crate) fn build_compaction_summary(removed: &[StarMessage]) -> Option<String
             // 提取文件路径（src/、path/、./等开头的路径）
             for line in c.lines() {
                 let trimmed = line.trim();
-                if (trimmed.contains("src/") || trimmed.contains("path/") || trimmed.starts_with("./"))
-                    && (trimmed.ends_with(".rs") || trimmed.ends_with(".ts") || trimmed.ends_with(".js")
-                        || trimmed.ends_with(".py") || trimmed.ends_with(".md") || trimmed.ends_with(".toml"))
+                if (trimmed.contains("src/")
+                    || trimmed.contains("path/")
+                    || trimmed.starts_with("./"))
+                    && (trimmed.ends_with(".rs")
+                        || trimmed.ends_with(".ts")
+                        || trimmed.ends_with(".js")
+                        || trimmed.ends_with(".py")
+                        || trimmed.ends_with(".md")
+                        || trimmed.ends_with(".toml"))
                 {
                     let file_path = trimmed.split_whitespace().next().unwrap_or(trimmed);
                     if !key_files.contains(&file_path.to_string()) && key_files.len() < 20 {
@@ -113,9 +119,14 @@ pub(crate) fn build_compaction_summary(removed: &[StarMessage]) -> Option<String
                     }
                 }
                 // 提取关键决策
-                if (trimmed.contains("决定") || trimmed.contains("选择") || trimmed.contains("方案")
-                    || trimmed.contains("问题") || trimmed.contains("修复") || trimmed.contains("修改"))
-                    && trimmed.len() > 10 && trimmed.len() < 200
+                if (trimmed.contains("决定")
+                    || trimmed.contains("选择")
+                    || trimmed.contains("方案")
+                    || trimmed.contains("问题")
+                    || trimmed.contains("修复")
+                    || trimmed.contains("修改"))
+                    && trimmed.len() > 10
+                    && trimmed.len() < 200
                 {
                     if !key_decisions.contains(&trimmed.to_string()) && key_decisions.len() < 10 {
                         key_decisions.push(trimmed.to_string());
@@ -179,7 +190,9 @@ pub(crate) fn build_compaction_summary(removed: &[StarMessage]) -> Option<String
                 .map(|v| !v.is_empty())
                 .unwrap_or(false)
             {
-                let tool_names: Vec<&str> = m.tool_calls.as_ref()
+                let tool_names: Vec<&str> = m
+                    .tool_calls
+                    .as_ref()
                     .map(|tcs| tcs.iter().map(|tc| tc.function.name.as_str()).collect())
                     .unwrap_or_default();
                 body = format!("[tool_calls: {}]", tool_names.join(", "));

@@ -90,10 +90,7 @@ impl ToolInvocation for DiscoverSkillsInvocation {
             Ok(ToolResult {
                 llm_content: Some(format!("Found {} skills matching '{}'", count, description)),
                 return_display: Some(format!("{} skills found", count)),
-                output: serde_json::to_string(&DiscoverSkillsOutput {
-                    results,
-                    count,
-                })?,
+                output: serde_json::to_string(&DiscoverSkillsOutput { results, count })?,
                 error: None,
                 data: Some(serde_json::json!({
                     "count": count,

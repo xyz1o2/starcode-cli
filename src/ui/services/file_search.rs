@@ -120,12 +120,16 @@ fn scan_entries(root: &Path) -> Vec<CachedEntry> {
     if let Ok(mut guard) = SCAN_CACHE.lock() {
         if let Some(cache) = guard.as_ref() {
             if cache.root == root && cache.at.elapsed().as_secs() < SCAN_CACHE_TTL_SECS {
-                return cache.entries.iter().map(|e| CachedEntry {
-                    path: e.path.clone(),
-                    is_dir: e.is_dir,
-                    depth: e.depth,
-                    hidden: e.hidden,
-                }).collect();
+                return cache
+                    .entries
+                    .iter()
+                    .map(|e| CachedEntry {
+                        path: e.path.clone(),
+                        is_dir: e.is_dir,
+                        depth: e.depth,
+                        hidden: e.hidden,
+                    })
+                    .collect();
             }
         }
     }
@@ -207,7 +211,11 @@ fn search_children(pattern: &str, current_dir: &Path) -> Option<Vec<String>> {
         let is_dir = entry.path().is_dir();
         let child_path = format!("{}{}", prefix, fname);
         let score = if name_query.is_empty() {
-            if is_dir { 1000 } else { 500 }
+            if is_dir {
+                1000
+            } else {
+                500
+            }
         } else {
             let s = fuzzy_match_score(&fname, name_query);
             if s < 0 {
@@ -226,13 +234,15 @@ fn search_children(pattern: &str, current_dir: &Path) -> Option<Vec<String>> {
         }
     }
 
-    results.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| {
-        match (a.is_dir, b.is_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.path.cmp(&b.path),
-        }
-    }));
+    results.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| match (a.is_dir, b.is_dir) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.path.cmp(&b.path),
+            })
+    });
 
     let hints: Vec<String> = results
         .into_iter()
@@ -290,7 +300,11 @@ pub fn search_files(pattern: &str) -> Vec<String> {
             if name_score < 0 && path_score < 0 {
                 continue;
             }
-            let best_score = if name_score >= 0 { name_score + 100 } else { path_score };
+            let best_score = if name_score >= 0 {
+                name_score + 100
+            } else {
+                path_score
+            };
             best_score + if is_dir { 10 } else { 0 }
         };
 
@@ -307,22 +321,16 @@ pub fn search_files(pattern: &str) -> Vec<String> {
     }
 
     // 排序
-    results.sort_by(|a, b| {
-        match b.score.cmp(&a.score) {
-            std::cmp::Ordering::Equal => {
-                match (a.is_dir, b.is_dir) {
-                    (true, false) => std::cmp::Ordering::Less,
-                    (false, true) => std::cmp::Ordering::Greater,
-                    _ => {
-                        match a.depth.cmp(&b.depth) {
-                            std::cmp::Ordering::Equal => a.path.cmp(&b.path),
-                            other => other,
-                        }
-                    }
-                }
-            }
-            other => other,
-        }
+    results.sort_by(|a, b| match b.score.cmp(&a.score) {
+        std::cmp::Ordering::Equal => match (a.is_dir, b.is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => match a.depth.cmp(&b.depth) {
+                std::cmp::Ordering::Equal => a.path.cmp(&b.path),
+                other => other,
+            },
+        },
+        other => other,
     });
 
     // 格式对标 Claude Code：仅路径本身，目录带尾 `/`；无匹配返回空列表
@@ -351,8 +359,14 @@ mod hint_format_tests {
         for h in &r {
             assert!(!h.contains('['), "hint should be bare path, got: {}", h);
         }
-        assert!(r.iter().any(|h| h.ends_with('/')), "top-level listing should contain dirs");
-        assert!(r.iter().any(|h| !h.ends_with('/')), "top-level listing should contain files");
+        assert!(
+            r.iter().any(|h| h.ends_with('/')),
+            "top-level listing should contain dirs"
+        );
+        assert!(
+            r.iter().any(|h| !h.ends_with('/')),
+            "top-level listing should contain files"
+        );
     }
 
     #[test]

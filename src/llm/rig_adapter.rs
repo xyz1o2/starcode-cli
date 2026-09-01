@@ -11,12 +11,12 @@ use std::error::Error;
 use std::pin::Pin;
 
 use rig_core::{
-    providers::{anthropic, deepseek, openai},
-    completion::{self, CompletionModel, CompletionRequest},
     completion::message::{
-        AssistantContent, Message, ReasoningContent, Text, ToolCall, ToolFunction,
-        ToolResult, ToolResultContent, UserContent,
+        AssistantContent, Message, ReasoningContent, Text, ToolCall, ToolFunction, ToolResult,
+        ToolResultContent, UserContent,
     },
+    completion::{self, CompletionModel, CompletionRequest},
+    providers::{anthropic, deepseek, openai},
     OneOrMany,
 };
 
@@ -33,33 +33,84 @@ const EMPTY_JSON: &str = "{}";
 /// A unified LLM client wrapping rig-core for native providers.
 #[derive(Debug, Clone)]
 pub enum RigAdapter {
-    OpenAI { api_key: String, model: String, base_url: Option<String> },
-    Anthropic { api_key: String, model: String, base_url: Option<String> },
-    DeepSeek { api_key: String, model: String, base_url: Option<String> },
-    OpenAiCompatible { api_key: String, model: String, base_url: String, provider_name: String },
+    OpenAI {
+        api_key: String,
+        model: String,
+        base_url: Option<String>,
+    },
+    Anthropic {
+        api_key: String,
+        model: String,
+        base_url: Option<String>,
+    },
+    DeepSeek {
+        api_key: String,
+        model: String,
+        base_url: Option<String>,
+    },
+    OpenAiCompatible {
+        api_key: String,
+        model: String,
+        base_url: String,
+        provider_name: String,
+    },
 }
 
 impl RigAdapter {
     pub fn openai(api_key: String, model: String) -> Self {
-        Self::OpenAI { api_key, model, base_url: None }
+        Self::OpenAI {
+            api_key,
+            model,
+            base_url: None,
+        }
     }
     pub fn openai_with_base_url(api_key: String, model: String, base_url: String) -> Self {
-        Self::OpenAI { api_key, model, base_url: Some(base_url) }
+        Self::OpenAI {
+            api_key,
+            model,
+            base_url: Some(base_url),
+        }
     }
     pub fn anthropic(api_key: String, model: String) -> Self {
-        Self::Anthropic { api_key, model, base_url: None }
+        Self::Anthropic {
+            api_key,
+            model,
+            base_url: None,
+        }
     }
     pub fn anthropic_with_base_url(api_key: String, model: String, base_url: String) -> Self {
-        Self::Anthropic { api_key, model, base_url: Some(base_url) }
+        Self::Anthropic {
+            api_key,
+            model,
+            base_url: Some(base_url),
+        }
     }
     pub fn deepseek(api_key: String, model: String) -> Self {
-        Self::DeepSeek { api_key, model, base_url: None }
+        Self::DeepSeek {
+            api_key,
+            model,
+            base_url: None,
+        }
     }
     pub fn deepseek_with_base_url(api_key: String, model: String, base_url: String) -> Self {
-        Self::DeepSeek { api_key, model, base_url: Some(base_url) }
+        Self::DeepSeek {
+            api_key,
+            model,
+            base_url: Some(base_url),
+        }
     }
-    pub fn openai_compatible(api_key: String, model: String, base_url: String, provider_name: String) -> Self {
-        Self::OpenAiCompatible { api_key, model, base_url, provider_name }
+    pub fn openai_compatible(
+        api_key: String,
+        model: String,
+        base_url: String,
+        provider_name: String,
+    ) -> Self {
+        Self::OpenAiCompatible {
+            api_key,
+            model,
+            base_url,
+            provider_name,
+        }
     }
 }
 
@@ -69,7 +120,10 @@ fn convert_messages(msgs: &[StarMessage]) -> Vec<Message> {
 }
 
 fn convert_one_message(msg: &StarMessage) -> Message {
-    let text = |s: &str| Text { text: s.to_string(), additional_params: None };
+    let text = |s: &str| Text {
+        text: s.to_string(),
+        additional_params: None,
+    };
     match msg.role.as_str() {
         ROLE_SYSTEM => Message::System {
             content: msg.content.clone().unwrap_or_default(),
@@ -112,9 +166,8 @@ fn convert_one_message(msg: &StarMessage) -> Message {
             }
             Message::Assistant {
                 id: None,
-                content: OneOrMany::many(parts).unwrap_or(OneOrMany::one(
-                    AssistantContent::Text(text("")),
-                )),
+                content: OneOrMany::many(parts)
+                    .unwrap_or(OneOrMany::one(AssistantContent::Text(text("")))),
             }
         }
         ROLE_TOOL => Message::User {
@@ -168,7 +221,10 @@ fn build_request(
             .filter_map(|m| m.cache_control.as_ref())
             .collect();
         if !cache_control_hints.is_empty() {
-            extra_params.insert("cache_control".to_string(), serde_json::json!(cache_control_hints));
+            extra_params.insert(
+                "cache_control".to_string(),
+                serde_json::json!(cache_control_hints),
+            );
         }
     }
 
@@ -179,13 +235,19 @@ fn build_request(
             // OpenAI/Grok style: reasoningEffort
             extra_params.insert("reasoningEffort".to_string(), serde_json::json!(effort));
             // DeepSeek/Qwen style: thinking.type
-            extra_params.insert("thinking".to_string(), serde_json::json!({
-                "type": if effort == "none" { "disabled" } else { "enabled" }
-            }));
+            extra_params.insert(
+                "thinking".to_string(),
+                serde_json::json!({
+                    "type": if effort == "none" { "disabled" } else { "enabled" }
+                }),
+            );
             // OpenRouter style: reasoning.effort
-            extra_params.insert("reasoning".to_string(), serde_json::json!({
-                "effort": effort
-            }));
+            extra_params.insert(
+                "reasoning".to_string(),
+                serde_json::json!({
+                    "effort": effort
+                }),
+            );
         }
     }
 
@@ -198,13 +260,14 @@ fn build_request(
     CompletionRequest {
         model: None,
         preamble: None,
-        chat_history: OneOrMany::many(convert_messages(messages))
-            .unwrap_or(OneOrMany::one(Message::User {
+        chat_history: OneOrMany::many(convert_messages(messages)).unwrap_or(OneOrMany::one(
+            Message::User {
                 content: OneOrMany::one(UserContent::Text(Text {
                     text: String::new(),
                     additional_params: None,
                 })),
-            })),
+            },
+        )),
         documents: vec![],
         tools: convert_tools(tools),
         temperature: None,
@@ -250,11 +313,19 @@ fn extract_response(contents: &OneOrMany<AssistantContent>) -> CompletionResult 
                     other => other.to_string(),
                 };
                 tool_calls.push(crate::types::StarToolCall {
-                    id: tc.id.strip_prefix("call_function_").map(|s| s.to_string()).unwrap_or_else(|| tc.id.clone()),
+                    id: tc
+                        .id
+                        .strip_prefix("call_function_")
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| tc.id.clone()),
                     call_type: CALL_TYPE_FUNCTION.to_string(),
                     function: crate::types::StarToolCallFunction {
                         name: tc.function.name.clone(),
-                        arguments: if args_str.is_empty() { EMPTY_JSON.to_string() } else { args_str },
+                        arguments: if args_str.is_empty() {
+                            EMPTY_JSON.to_string()
+                        } else {
+                            args_str
+                        },
                     },
                 });
             }
@@ -264,20 +335,36 @@ fn extract_response(contents: &OneOrMany<AssistantContent>) -> CompletionResult 
 
     CompletionResult {
         text,
-        reasoning: if reasoning.is_empty() { None } else { Some(reasoning) },
+        reasoning: if reasoning.is_empty() {
+            None
+        } else {
+            Some(reasoning)
+        },
         tool_calls,
         usage: None,
     }
 }
 
 fn build_star_response(result: CompletionResult) -> StarResponse {
-    let finish_reason = if result.tool_calls.is_empty() { FINISH_STOP } else { FINISH_TOOL_CALLS };
+    let finish_reason = if result.tool_calls.is_empty() {
+        FINISH_STOP
+    } else {
+        FINISH_TOOL_CALLS
+    };
     StarResponse {
         choices: vec![StarChoice {
             message: StarMessage {
                 role: ROLE_ASSISTANT.to_string(),
-                content: if result.text.is_empty() { None } else { Some(result.text) },
-                tool_calls: if result.tool_calls.is_empty() { None } else { Some(result.tool_calls) },
+                content: if result.text.is_empty() {
+                    None
+                } else {
+                    Some(result.text)
+                },
+                tool_calls: if result.tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(result.tool_calls)
+                },
                 reasoning_content: result.reasoning,
                 tool_call_id: None,
                 cache_control: None,
@@ -306,13 +393,13 @@ macro_rules! rig_complete_with_url {
         if let Some(url) = $base_url {
             builder = builder.base_url(url);
         }
-        let client = builder.build()
-            .map_err(|e| LlmError::ProviderError(format!("rig {} client: {e}", stringify!($mod))))?;
+        let client = builder.build().map_err(|e| {
+            LlmError::ProviderError(format!("rig {} client: {e}", stringify!($mod)))
+        })?;
         let model = client.completion_model($model.clone());
-        model
-            .completion($request)
-            .await
-            .map_err(|e| LlmError::ProviderError(format!("rig {} completion: {e}", stringify!($mod))))
+        model.completion($request).await.map_err(|e| {
+            LlmError::ProviderError(format!("rig {} completion: {e}", stringify!($mod)))
+        })
     }};
 }
 
@@ -331,7 +418,8 @@ async fn rig_openai_complete(
     if let Some(url) = base_url {
         builder = builder.base_url(url);
     }
-    let client = builder.build()
+    let client = builder
+        .build()
         .map_err(|e| LlmError::ProviderError(format!("rig openai client: {e}")))?;
     let model_client = client.completion_model(model);
     let r = model_client
@@ -350,22 +438,22 @@ async fn rig_openai_complete(
 // stream Send + Sync.
 macro_rules! rig_stream_with_url {
     ($mod:ident, $api_key:expr, $model:expr, $base_url:expr, $request:expr) => {{
-        use rig_core::client::CompletionClient;
-        use rig_core::streaming::StreamedAssistantContent;
-        use rig_core::completion::request::GetTokenUsage;
         use futures::StreamExt;
+        use rig_core::client::CompletionClient;
+        use rig_core::completion::request::GetTokenUsage;
+        use rig_core::streaming::StreamedAssistantContent;
 
         let mut builder = $mod::Client::builder().api_key($api_key);
         if let Some(url) = $base_url {
             builder = builder.base_url(url);
         }
-        let client = builder.build()
-            .map_err(|e| LlmError::ProviderError(format!("rig {} client: {e}", stringify!($mod))))?;
+        let client = builder.build().map_err(|e| {
+            LlmError::ProviderError(format!("rig {} client: {e}", stringify!($mod)))
+        })?;
         let model = client.completion_model($model.clone());
-        let stream = model
-            .stream($request)
-            .await
-            .map_err(|e| LlmError::ProviderError(format!("rig {} stream: {e}", stringify!($mod))))?;
+        let stream = model.stream($request).await.map_err(|e| {
+            LlmError::ProviderError(format!("rig {} stream: {e}", stringify!($mod)))
+        })?;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<LlmEvent, LlmError>>(64);
         tokio::spawn(async move {
@@ -377,23 +465,35 @@ macro_rules! rig_stream_with_url {
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(StreamedAssistantContent::Text(t)) => {
-                        if tx.send(Ok(LlmEvent::TextChunk(t.text))).await.is_err() { return; }
+                        if tx.send(Ok(LlmEvent::TextChunk(t.text))).await.is_err() {
+                            return;
+                        }
                     }
                     Ok(StreamedAssistantContent::Reasoning(r)) => {
                         for rc in r.content {
                             match rc {
                                 ReasoningContent::Text { text, .. } => {
-                                    if tx.send(Ok(LlmEvent::ReasoningChunk(text))).await.is_err() { return; }
+                                    if tx.send(Ok(LlmEvent::ReasoningChunk(text))).await.is_err() {
+                                        return;
+                                    }
                                 }
                                 ReasoningContent::Summary(s) => {
-                                    if tx.send(Ok(LlmEvent::ReasoningChunk(s))).await.is_err() { return; }
+                                    if tx.send(Ok(LlmEvent::ReasoningChunk(s))).await.is_err() {
+                                        return;
+                                    }
                                 }
                                 _ => {}
                             }
                         }
                     }
                     Ok(StreamedAssistantContent::ReasoningDelta { reasoning, .. }) => {
-                        if tx.send(Ok(LlmEvent::ReasoningChunk(reasoning))).await.is_err() { return; }
+                        if tx
+                            .send(Ok(LlmEvent::ReasoningChunk(reasoning)))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
                     Ok(StreamedAssistantContent::ToolCall { tool_call, .. }) => {
                         has_tool_calls = true;
@@ -401,14 +501,24 @@ macro_rules! rig_stream_with_url {
                             Value::String(s) => s,
                             other => other.to_string(),
                         };
-                        if tx.send(Ok(LlmEvent::ToolCall(crate::types::StarToolCall {
-                            id: tool_call.id,
-                            call_type: CALL_TYPE_FUNCTION.to_string(),
-                            function: crate::types::StarToolCallFunction {
-                                name: tool_call.function.name,
-                                arguments: if args.is_empty() { EMPTY_JSON.to_string() } else { args },
-                            },
-                        }))).await.is_err() { return; }
+                        if tx
+                            .send(Ok(LlmEvent::ToolCall(crate::types::StarToolCall {
+                                id: tool_call.id,
+                                call_type: CALL_TYPE_FUNCTION.to_string(),
+                                function: crate::types::StarToolCallFunction {
+                                    name: tool_call.function.name,
+                                    arguments: if args.is_empty() {
+                                        EMPTY_JSON.to_string()
+                                    } else {
+                                        args
+                                    },
+                                },
+                            })))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
                     // rig-core aggregates tool call deltas internally and emits
                     // the complete ToolCall above; nothing to do here.
@@ -426,16 +536,20 @@ macro_rules! rig_stream_with_url {
                     }
                     Ok(StreamedAssistantContent::Unknown(_)) => {}
                     Err(e) => {
-                        let _ = tx.send(Err(LlmError::ProviderError(format!(
-                            "rig {} stream error: {e}",
-                            stringify!($mod)
-                        )))).await;
+                        let _ = tx
+                            .send(Err(LlmError::ProviderError(format!(
+                                "rig {} stream error: {e}",
+                                stringify!($mod)
+                            ))))
+                            .await;
                         return;
                     }
                 }
             }
             if let Some(usage) = last_usage {
-                if tx.send(Ok(LlmEvent::UsageUpdate(usage))).await.is_err() { return; }
+                if tx.send(Ok(LlmEvent::UsageUpdate(usage))).await.is_err() {
+                    return;
+                }
             }
             saved_finish_reason = if has_tool_calls {
                 FINISH_TOOL_CALLS.to_string()
@@ -457,10 +571,10 @@ async fn rig_openai_stream(
     base_url: Option<&str>,
     request: CompletionRequest,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError> {
-    use rig_core::client::CompletionClient;
-    use rig_core::streaming::StreamedAssistantContent;
-    use rig_core::completion::request::GetTokenUsage;
     use futures::StreamExt;
+    use rig_core::client::CompletionClient;
+    use rig_core::completion::request::GetTokenUsage;
+    use rig_core::streaming::StreamedAssistantContent;
 
     let mut builder = openai::CompletionsClient::builder().api_key(api_key);
     if let Some(url) = base_url {
@@ -485,23 +599,35 @@ async fn rig_openai_stream(
         while let Some(item) = stream.next().await {
             match item {
                 Ok(StreamedAssistantContent::Text(t)) => {
-                    if tx.send(Ok(LlmEvent::TextChunk(t.text))).await.is_err() { return; }
+                    if tx.send(Ok(LlmEvent::TextChunk(t.text))).await.is_err() {
+                        return;
+                    }
                 }
                 Ok(StreamedAssistantContent::Reasoning(r)) => {
                     for rc in r.content {
                         match rc {
                             ReasoningContent::Text { text, .. } => {
-                                if tx.send(Ok(LlmEvent::ReasoningChunk(text))).await.is_err() { return; }
+                                if tx.send(Ok(LlmEvent::ReasoningChunk(text))).await.is_err() {
+                                    return;
+                                }
                             }
                             ReasoningContent::Summary(s) => {
-                                if tx.send(Ok(LlmEvent::ReasoningChunk(s))).await.is_err() { return; }
+                                if tx.send(Ok(LlmEvent::ReasoningChunk(s))).await.is_err() {
+                                    return;
+                                }
                             }
                             _ => {}
                         }
                     }
                 }
                 Ok(StreamedAssistantContent::ReasoningDelta { reasoning, .. }) => {
-                    if tx.send(Ok(LlmEvent::ReasoningChunk(reasoning))).await.is_err() { return; }
+                    if tx
+                        .send(Ok(LlmEvent::ReasoningChunk(reasoning)))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
                 Ok(StreamedAssistantContent::ToolCall { tool_call, .. }) => {
                     has_tool_calls = true;
@@ -509,14 +635,24 @@ async fn rig_openai_stream(
                         Value::String(s) => s,
                         other => other.to_string(),
                     };
-                    if tx.send(Ok(LlmEvent::ToolCall(crate::types::StarToolCall {
-                        id: tool_call.id,
-                        call_type: CALL_TYPE_FUNCTION.to_string(),
-                        function: crate::types::StarToolCallFunction {
-                            name: tool_call.function.name,
-                            arguments: if args.is_empty() { EMPTY_JSON.to_string() } else { args },
-                        },
-                    }))).await.is_err() { return; }
+                    if tx
+                        .send(Ok(LlmEvent::ToolCall(crate::types::StarToolCall {
+                            id: tool_call.id,
+                            call_type: CALL_TYPE_FUNCTION.to_string(),
+                            function: crate::types::StarToolCallFunction {
+                                name: tool_call.function.name,
+                                arguments: if args.is_empty() {
+                                    EMPTY_JSON.to_string()
+                                } else {
+                                    args
+                                },
+                            },
+                        })))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
                 Ok(StreamedAssistantContent::ToolCallDelta { .. }) => {}
                 Ok(StreamedAssistantContent::Final(res)) => {
@@ -532,15 +668,19 @@ async fn rig_openai_stream(
                 }
                 Ok(StreamedAssistantContent::Unknown(_)) => {}
                 Err(e) => {
-                    let _ = tx.send(Err(LlmError::ProviderError(format!(
-                        "rig openai stream error: {e}"
-                    )))).await;
+                    let _ = tx
+                        .send(Err(LlmError::ProviderError(format!(
+                            "rig openai stream error: {e}"
+                        ))))
+                        .await;
                     return;
                 }
             }
         }
         if let Some(usage) = last_usage {
-            if tx.send(Ok(LlmEvent::UsageUpdate(usage))).await.is_err() { return; }
+            if tx.send(Ok(LlmEvent::UsageUpdate(usage))).await.is_err() {
+                return;
+            }
         }
         saved_finish_reason = if has_tool_calls {
             FINISH_TOOL_CALLS.to_string()
@@ -569,7 +709,8 @@ impl LlmClient for RigAdapter {
         &self,
         messages: Vec<StarMessage>,
         tools: Option<Vec<StarTool>>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError>
+    {
         let request = build_request(&messages, &tools, self.supports_prompt_caching());
         self.do_stream(request).await
     }
@@ -586,24 +727,44 @@ impl RigAdapter {
         matches!(self, Self::Anthropic { .. })
     }
 
-    async fn do_completion(&self, request: CompletionRequest) -> Result<CompletionResult, LlmError> {
+    async fn do_completion(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResult, LlmError> {
         match self {
             // OpenAI: use CompletionsClient (Chat Completions API) instead of
             // the default Client (Responses API). The Responses API requires an
             // OpenAI-generated ID for reasoning items on historical assistant
             // messages, which we don't have. The Chat Completions API silently
             // skips reasoning content, avoiding the error.
-            Self::OpenAI { api_key, model, base_url } => {
-                rig_openai_complete(api_key, model, base_url.as_deref(), request).await
-            }
-            Self::Anthropic { api_key, model, base_url } => {
-                let r = rig_complete_with_url!(anthropic, api_key, model, base_url.as_deref(), request)?;
+            Self::OpenAI {
+                api_key,
+                model,
+                base_url,
+            } => rig_openai_complete(api_key, model, base_url.as_deref(), request).await,
+            Self::Anthropic {
+                api_key,
+                model,
+                base_url,
+            } => {
+                let r = rig_complete_with_url!(
+                    anthropic,
+                    api_key,
+                    model,
+                    base_url.as_deref(),
+                    request
+                )?;
                 let mut result = extract_response(&r.choice);
                 result.usage = Some(convert_usage(&r.usage));
                 Ok(result)
             }
-            Self::DeepSeek { api_key, model, base_url } => {
-                let r = rig_complete_with_url!(deepseek, api_key, model, base_url.as_deref(), request)?;
+            Self::DeepSeek {
+                api_key,
+                model,
+                base_url,
+            } => {
+                let r =
+                    rig_complete_with_url!(deepseek, api_key, model, base_url.as_deref(), request)?;
                 let mut result = extract_response(&r.choice);
                 result.usage = Some(convert_usage(&r.usage));
                 Ok(result)
@@ -611,9 +772,12 @@ impl RigAdapter {
             // Generic OpenAI Compatible: use rig-core's OpenAI CompletionsClient
             // with custom base_url. This leverages rig-core's proper reasoning
             // content handling (PR #1999, #2112).
-            Self::OpenAiCompatible { api_key, model, base_url, provider_name: _ } => {
-                rig_openai_complete(api_key, model, Some(base_url.as_str()), request).await
-            }
+            Self::OpenAiCompatible {
+                api_key,
+                model,
+                base_url,
+                provider_name: _,
+            } => rig_openai_complete(api_key, model, Some(base_url.as_str()), request).await,
         }
     }
 
@@ -623,22 +787,34 @@ impl RigAdapter {
     async fn do_stream(
         &self,
         request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError>
+    {
         match self {
-            Self::OpenAI { api_key, model, base_url } => {
-                rig_openai_stream(api_key, model, base_url.as_deref(), request).await
-            }
-            Self::OpenAiCompatible { api_key, model, base_url, .. } => {
-                rig_openai_stream(api_key, model, Some(base_url.as_str()), request).await
-            }
-            Self::Anthropic { api_key, model, base_url } => {
+            Self::OpenAI {
+                api_key,
+                model,
+                base_url,
+            } => rig_openai_stream(api_key, model, base_url.as_deref(), request).await,
+            Self::OpenAiCompatible {
+                api_key,
+                model,
+                base_url,
+                ..
+            } => rig_openai_stream(api_key, model, Some(base_url.as_str()), request).await,
+            Self::Anthropic {
+                api_key,
+                model,
+                base_url,
+            } => {
                 rig_stream_with_url!(anthropic, api_key, model, base_url.as_deref(), request)
             }
-            Self::DeepSeek { api_key, model, base_url } => {
+            Self::DeepSeek {
+                api_key,
+                model,
+                base_url,
+            } => {
                 rig_stream_with_url!(deepseek, api_key, model, base_url.as_deref(), request)
             }
         }
     }
 }
-
- 

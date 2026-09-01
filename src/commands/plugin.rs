@@ -449,10 +449,9 @@ pub async fn execute_plugin_command(ctx: CommandContext<'_>, cmd: PluginCommand)
                     let mut lines = vec!["# Plugin Update\n".to_string()];
                     let mut any_changed = false;
                     for plugin in &plugins {
-                        let result =
-                            crate::core::plugins::update_plugin(&cwd, &plugin.entry.name)
-                                .await
-                                .map_err(|e| e.to_string())?;
+                        let result = crate::core::plugins::update_plugin(&cwd, &plugin.entry.name)
+                            .await
+                            .map_err(|e| e.to_string())?;
                         if result.success {
                             any_changed = true;
                         }
@@ -467,8 +466,7 @@ pub async fn execute_plugin_command(ctx: CommandContext<'_>, cmd: PluginCommand)
                     }
 
                     ctx.state.chat_history.push(
-                        crate::types::ChatEntry::assistant(lines.join("\n"))
-                            .with_streaming(false),
+                        crate::types::ChatEntry::assistant(lines.join("\n")).with_streaming(false),
                     );
                 }
             }
@@ -521,10 +519,7 @@ pub async fn execute_plugin_command(ctx: CommandContext<'_>, cmd: PluginCommand)
             let hooks: Vec<_> = match name.as_deref() {
                 Some(n) => {
                     let prefix = format!("plugin:{}", n);
-                    hooks
-                        .into_iter()
-                        .filter(|h| h.source == prefix)
-                        .collect()
+                    hooks.into_iter().filter(|h| h.source == prefix).collect()
                 }
                 None => hooks,
             };
@@ -536,11 +531,7 @@ pub async fn execute_plugin_command(ctx: CommandContext<'_>, cmd: PluginCommand)
                 for h in &hooks {
                     lines.push(format!(
                         "- `[{}]` {} | source={} | timeout={}s | blocking={}",
-                        h.event,
-                        h.name,
-                        h.source,
-                        h.timeout_secs,
-                        h.blocking
+                        h.event, h.name, h.source, h.timeout_secs, h.blocking
                     ));
                 }
                 lines.join("\n")
@@ -591,10 +582,7 @@ pub async fn execute_plugin_command(ctx: CommandContext<'_>, cmd: PluginCommand)
                 .map_err(|e| format!("failed to discover tools: {}", e))?;
 
             let tools: Vec<_> = match name.as_deref() {
-                Some(n) => tools
-                    .into_iter()
-                    .filter(|t| t.plugin_name == n)
-                    .collect(),
+                Some(n) => tools.into_iter().filter(|t| t.plugin_name == n).collect(),
                 None => tools,
             };
 
@@ -1077,4 +1065,3 @@ fn summarize_runtime_warnings(plugin: &crate::core::plugins::ResolvedPlugin) -> 
     }
     lines.join("\n")
 }
- 

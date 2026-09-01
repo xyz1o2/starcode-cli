@@ -1,8 +1,8 @@
-use crate::types::StarMessage;
 use super::CompactStrategy;
+use crate::types::StarMessage;
 
 /// 会话记忆压缩策略
-/// 
+///
 /// 对标claude-code-main的sessionMemoryCompact.ts
 /// 将会话记忆压缩为摘要形式
 pub struct SessionMemoryCompactStrategy {
@@ -114,10 +114,9 @@ impl SessionMemoryCompactStrategy {
 
         // 如果保留工具详情，添加工具消息摘要
         if self.keep_tool_details {
-            let tool_msgs: Vec<&StarMessage> = turn_messages.iter()
-                .filter(|m| m.role == "tool")
-                .collect();
-            
+            let tool_msgs: Vec<&StarMessage> =
+                turn_messages.iter().filter(|m| m.role == "tool").collect();
+
             if !tool_msgs.is_empty() {
                 let summary = self.summarize_tool_messages(&tool_msgs);
                 let mut summary_msg = StarMessage::system(&summary);
@@ -151,20 +150,22 @@ impl SessionMemoryCompactStrategy {
     /// 提取关键内容
     fn extract_key_content(&self, content: &str) -> String {
         let lines: Vec<&str> = content.lines().collect();
-        
+
         if lines.len() <= 10 {
             return content.to_string();
         }
 
         // 提取第一段（通常是摘要）
-        let first_paragraph: String = lines.iter()
+        let first_paragraph: String = lines
+            .iter()
             .take_while(|line| !line.trim().is_empty())
             .cloned()
             .collect::<Vec<&str>>()
             .join("\n");
 
         // 提取最后一段（通常是结论）
-        let last_paragraph: String = lines.iter()
+        let last_paragraph: String = lines
+            .iter()
             .rev()
             .take_while(|line| !line.trim().is_empty())
             .cloned()
@@ -176,8 +177,7 @@ impl SessionMemoryCompactStrategy {
 
         format!(
             "{}\n\n[... content summarized ...]\n\n{}",
-            first_paragraph,
-            last_paragraph
+            first_paragraph, last_paragraph
         )
     }
 
@@ -231,7 +231,7 @@ impl CompactStrategy for SessionMemoryCompactStrategy {
 
     fn apply(&self, messages: &[StarMessage]) -> Vec<StarMessage> {
         let turns = self.identify_turns(messages);
-        
+
         if turns.len() <= self.recent_turns_to_keep {
             return messages.to_vec();
         }

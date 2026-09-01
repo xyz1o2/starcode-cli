@@ -48,7 +48,10 @@ impl EnterPlanModeTool {
         plan_mode_state: Arc<Mutex<PlanModeState>>,
         approval_mode: Arc<Mutex<ApprovalMode>>,
     ) -> Self {
-        Self { plan_mode_state, approval_mode }
+        Self {
+            plan_mode_state,
+            approval_mode,
+        }
     }
 }
 
@@ -71,8 +74,17 @@ impl ToolInvocation for EnterPlanModeInvocation {
     fn should_confirm_execute(
         &self,
         _abort_signal: Option<&tokio_util::sync::CancellationToken>,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<ToolCallConfirmationDetails>, Box<dyn std::error::Error + Send + Sync>>> + Send + '_>>
-    {
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Option<ToolCallConfirmationDetails>,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
         Box::pin(async move {
             Ok(Some(ToolCallConfirmationDetails {
                 confirmation_type: ConfirmationType::Ask,
@@ -91,7 +103,9 @@ impl ToolInvocation for EnterPlanModeInvocation {
     {
         let state = self.plan_mode_state.clone();
         let approval = self.approval_mode.clone();
-        let reason = self.params.get("reason")
+        let reason = self
+            .params
+            .get("reason")
             .and_then(|r| r.as_str())
             .unwrap_or("Planning required")
             .to_string();
@@ -143,12 +157,18 @@ impl ToolInvocation for EnterPlanModeInvocation {
 }
 
 impl BaseDeclarativeTool for EnterPlanModeTool {
-    fn name(&self) -> &str { "enter_plan_mode" }
-    fn display_name(&self) -> &str { "Enter Plan Mode" }
+    fn name(&self) -> &str {
+        "enter_plan_mode"
+    }
+    fn display_name(&self) -> &str {
+        "Enter Plan Mode"
+    }
     fn description(&self) -> &str {
         "Enter Plan Mode for read-only exploration before making changes."
     }
-    fn kind(&self) -> Kind { Kind::Think }
+    fn kind(&self) -> Kind {
+        Kind::Think
+    }
 
     fn parameter_schema(&self) -> Value {
         json!({
@@ -160,7 +180,10 @@ impl BaseDeclarativeTool for EnterPlanModeTool {
         })
     }
 
-    fn create_invocation(&self, params: Value) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
+    fn create_invocation(
+        &self,
+        params: Value,
+    ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Box::new(EnterPlanModeInvocation {
             params,
             plan_mode_state: self.plan_mode_state.clone(),

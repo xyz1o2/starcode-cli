@@ -14,12 +14,10 @@ impl Planner {
         tool_catalog: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let planner_prompt = crate::core::prompts::loader::load_prompt("planner-system.md");
-        let system = StarMessage::system(
-            crate::core::prompts::loader::render_template(
-                &planner_prompt,
-                &[("tool_catalog", tool_catalog)],
-            )
-        );
+        let system = StarMessage::system(crate::core::prompts::loader::render_template(
+            &planner_prompt,
+            &[("tool_catalog", tool_catalog)],
+        ));
 
         let user = StarMessage::user(user_input.to_string());
 

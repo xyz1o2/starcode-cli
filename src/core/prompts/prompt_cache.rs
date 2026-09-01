@@ -231,10 +231,7 @@ pub fn get_cache_control_with_ttl(scope: &CacheScope) -> Option<CacheControl> {
 /// 为消息添加缓存控制标记
 ///
 /// 对标 Claude Code 的 cache_control 字段
-pub fn add_cache_control_to_message(
-    message: &mut serde_json::Value,
-    scope: CacheScope,
-) {
+pub fn add_cache_control_to_message(message: &mut serde_json::Value, scope: CacheScope) {
     if !prompt_cache_enabled() {
         return;
     }
@@ -256,7 +253,10 @@ pub fn add_cache_control_to_message(
                 let cache_control = get_cache_control(&scope);
                 if let Some(cc) = cache_control {
                     if let Some(obj) = last.as_object_mut() {
-                        obj.insert("cache_control".to_string(), serde_json::to_value(cc).unwrap());
+                        obj.insert(
+                            "cache_control".to_string(),
+                            serde_json::to_value(cc).unwrap(),
+                        );
                     }
                 }
             }

@@ -1,7 +1,13 @@
-use super::team_definitions::{normalize_agent_name, find_team_agent, resolve_team_agents, team_run_mode_label, parse_team_run_mode};
+use super::team_definitions::{
+    find_team_agent, normalize_agent_name, parse_team_run_mode, resolve_team_agents,
+    team_run_mode_label,
+};
 use super::*;
 
-pub(super) async fn save_team_preset(ctx: CommandContext<'_>, args: AgentTeamSaveArgs) -> CommandResult {
+pub(super) async fn save_team_preset(
+    ctx: CommandContext<'_>,
+    args: AgentTeamSaveArgs,
+) -> CommandResult {
     let preset_name = sanitize_preset_name(&args.name);
     if preset_name.is_empty() {
         return Err("invalid preset name".to_string());
@@ -151,14 +157,21 @@ pub(super) async fn show_team_preset(ctx: CommandContext<'_>, name: String) -> C
         name
     ));
 
-    ctx.state
-        .chat_history
-        .push(ChatEntry::assistant(lines.join("
-")).with_streaming(false));
+    ctx.state.chat_history.push(
+        ChatEntry::assistant(lines.join(
+            "
+",
+        ))
+        .with_streaming(false),
+    );
     Ok(())
 }
 
-pub(super) async fn remove_team_preset(ctx: CommandContext<'_>, name: String, user: bool) -> CommandResult {
+pub(super) async fn remove_team_preset(
+    ctx: CommandContext<'_>,
+    name: String,
+    user: bool,
+) -> CommandResult {
     let preset_name = sanitize_preset_name(&name);
     if preset_name.is_empty() {
         return Err("invalid preset name".to_string());

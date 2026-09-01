@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::path::PathBuf;
 
 /// Agent 模式
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,7 +150,9 @@ pub mod presets {
                 tone: "authoritative".to_string(),
             },
             settings: ModeSettings {
-                system_prompt_template: "You are a software architect. Help design scalable and maintainable systems.".to_string(),
+                system_prompt_template:
+                    "You are a software architect. Help design scalable and maintainable systems."
+                        .to_string(),
                 tool_permissions: vec!["*".to_string()],
                 disabled_tools: vec![],
                 context_window_size: Some(150000),
@@ -187,7 +189,9 @@ pub mod presets {
                 tone: "supportive".to_string(),
             },
             settings: ModeSettings {
-                system_prompt_template: "You are a debugging expert. Help identify and fix bugs systematically.".to_string(),
+                system_prompt_template:
+                    "You are a debugging expert. Help identify and fix bugs systematically."
+                        .to_string(),
                 tool_permissions: vec!["*".to_string()],
                 disabled_tools: vec![],
                 context_window_size: Some(100000),
@@ -206,7 +210,8 @@ pub mod presets {
         AgentMode {
             id: "documentation_writer".to_string(),
             name: "Documentation Writer".to_string(),
-            description: "A documentation writer that creates clear and comprehensive docs".to_string(),
+            description: "A documentation writer that creates clear and comprehensive docs"
+                .to_string(),
             persona: Persona {
                 name: "Documenter".to_string(),
                 avatar: Some("📝".to_string()),
@@ -224,7 +229,9 @@ pub mod presets {
                 tone: "informative".to_string(),
             },
             settings: ModeSettings {
-                system_prompt_template: "You are a technical writer. Create clear, comprehensive documentation.".to_string(),
+                system_prompt_template:
+                    "You are a technical writer. Create clear, comprehensive documentation."
+                        .to_string(),
                 tool_permissions: vec!["Read".to_string(), "Write".to_string(), "Glob".to_string()],
                 disabled_tools: vec!["shell".to_string(), "Bash".to_string()],
                 context_window_size: Some(80000),
@@ -336,7 +343,7 @@ pub struct ModeManager {
 impl ModeManager {
     pub fn new() -> Self {
         let mut modes = HashMap::new();
-        
+
         // 加载预设模式
         for mode in presets::get_all_presets() {
             modes.insert(mode.id.clone(), mode);
@@ -373,20 +380,17 @@ impl ModeManager {
     async fn save_custom_modes(&self) -> Result<(), String> {
         if let Some(path) = &self.config_path {
             let modes = self.modes.read().await;
-            let custom_modes: Vec<&AgentMode> = modes.values()
-                .filter(|m| m.is_custom)
-                .collect();
-            
+            let custom_modes: Vec<&AgentMode> = modes.values().filter(|m| m.is_custom).collect();
+
             let content = serde_json::to_string_pretty(&custom_modes)
                 .map_err(|e| format!("Failed to serialize modes: {}", e))?;
-            
+
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("Failed to create config directory: {}", e))?;
             }
-            
-            std::fs::write(path, content)
-                .map_err(|e| format!("Failed to write config: {}", e))?;
+
+            std::fs::write(path, content).map_err(|e| format!("Failed to write config: {}", e))?;
         }
         Ok(())
     }
@@ -395,10 +399,10 @@ impl ModeManager {
     pub async fn register_mode(&self, mut mode: AgentMode) -> Result<(), String> {
         mode.is_custom = true;
         mode.created_at = Some(chrono::Utc::now());
-        
+
         let mut modes = self.modes.write().await;
         modes.insert(mode.id.clone(), mode);
-        
+
         self.save_custom_modes().await?;
         Ok(())
     }
@@ -455,7 +459,8 @@ impl ModeManager {
     /// 删除模式
     pub async fn delete_mode(&self, mode_id: &str) -> Result<(), String> {
         let mut modes = self.modes.write().await;
-        let mode = modes.get(mode_id)
+        let mode = modes
+            .get(mode_id)
             .ok_or_else(|| format!("Mode '{}' not found", mode_id))?;
 
         if !mode.is_custom {
@@ -470,7 +475,7 @@ impl ModeManager {
 
         modes.remove(mode_id);
         drop(modes);
-        
+
         self.save_custom_modes().await?;
         Ok(())
     }
@@ -478,7 +483,9 @@ impl ModeManager {
     /// 获取模式的系统提示
     pub async fn get_system_prompt(&self, mode_id: &str) -> Option<String> {
         let modes = self.modes.read().await;
-        modes.get(mode_id).map(|m| m.settings.system_prompt_template.clone())
+        modes
+            .get(mode_id)
+            .map(|m| m.settings.system_prompt_template.clone())
     }
 
     /// 检查工具是否被允许
@@ -486,7 +493,11 @@ impl ModeManager {
         let modes = self.modes.read().await;
         if let Some(mode) = modes.get(mode_id) {
             // 检查是否在禁用列表中
-            if mode.settings.disabled_tools.contains(&tool_name.to_string()) {
+            if mode
+                .settings
+                .disabled_tools
+                .contains(&tool_name.to_string())
+            {
                 return false;
             }
 
@@ -495,7 +506,9 @@ impl ModeManager {
                 return true;
             }
 
-            mode.settings.tool_permissions.contains(&tool_name.to_string())
+            mode.settings
+                .tool_permissions
+                .contains(&tool_name.to_string())
         } else {
             true // 没有模式时允许所有工具
         }
@@ -510,13 +523,17 @@ impl ModeManager {
     /// 获取模式的上下文窗口大小
     pub async fn get_context_window_size(&self, mode_id: &str) -> Option<usize> {
         let modes = self.modes.read().await;
-        modes.get(mode_id).and_then(|m| m.settings.context_window_size)
+        modes
+            .get(mode_id)
+            .and_then(|m| m.settings.context_window_size)
     }
 
     /// 获取模式的最大输出长度
     pub async fn get_max_output_length(&self, mode_id: &str) -> Option<usize> {
         let modes = self.modes.read().await;
-        modes.get(mode_id).and_then(|m| m.settings.max_output_length)
+        modes
+            .get(mode_id)
+            .and_then(|m| m.settings.max_output_length)
     }
 }
 

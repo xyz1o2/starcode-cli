@@ -1,8 +1,8 @@
-use crate::types::StarMessage;
 use super::CompactConfig;
+use crate::types::StarMessage;
 
 /// 压缩警告钩子
-/// 
+///
 /// 对标claude-code-main的compactWarningHook.ts
 /// 在压缩即将发生时发出警告
 pub struct CompactWarningHook {
@@ -75,7 +75,11 @@ impl CompactWarningHook {
     }
 
     /// 检查是否需要警告
-    pub fn check_warning(&mut self, current_tokens: usize, max_tokens: usize) -> Option<CompactWarning> {
+    pub fn check_warning(
+        &mut self,
+        current_tokens: usize,
+        max_tokens: usize,
+    ) -> Option<CompactWarning> {
         if !self.enabled {
             return None;
         }
@@ -125,7 +129,9 @@ impl CompactWarningHook {
                         "Token usage at {:.1}% ({}/{}). Compaction may be needed soon.",
                         usage_percent, current_tokens, max_tokens
                     ),
-                    recommendation: "Consider using more concise responses or ending the conversation.".to_string(),
+                    recommendation:
+                        "Consider using more concise responses or ending the conversation."
+                            .to_string(),
                 });
             }
         }
@@ -181,16 +187,10 @@ impl CompactWarning {
     pub fn format_for_user(&self) -> String {
         match self.level {
             WarningLevel::Warning => {
-                format!(
-                    "⚠️ {}\n💡 {}",
-                    self.message, self.recommendation
-                )
+                format!("⚠️ {}\n💡 {}", self.message, self.recommendation)
             }
             WarningLevel::Critical => {
-                format!(
-                    "🚨 {}\n💡 {}",
-                    self.message, self.recommendation
-                )
+                format!("🚨 {}\n💡 {}", self.message, self.recommendation)
             }
         }
     }
@@ -205,7 +205,7 @@ impl CompactWarning {
 }
 
 /// 压缩警告管理器
-/// 
+///
 /// 管理多个警告钩子，提供统一的警告接口
 pub struct CompactWarningManager {
     hook: CompactWarningHook,
@@ -234,12 +234,16 @@ impl CompactWarningManager {
     }
 
     /// 检查警告并记录
-    pub fn check_and_record(&mut self, current_tokens: usize, max_tokens: usize) -> Option<CompactWarning> {
+    pub fn check_and_record(
+        &mut self,
+        current_tokens: usize,
+        max_tokens: usize,
+    ) -> Option<CompactWarning> {
         let warning = self.hook.check_warning(current_tokens, max_tokens);
-        
+
         if let Some(w) = &warning {
             self.warnings.push(w.clone());
-            
+
             // 限制历史记录大小
             if self.warnings.len() > self.max_history {
                 self.warnings.remove(0);
@@ -262,10 +266,12 @@ impl CompactWarningManager {
     /// 获取警告统计
     pub fn statistics(&self) -> WarningStatistics {
         let total_warnings = self.warnings.len();
-        let critical_warnings = self.warnings.iter()
+        let critical_warnings = self
+            .warnings
+            .iter()
             .filter(|w| w.level == WarningLevel::Critical)
             .count();
-        
+
         let avg_usage = if total_warnings > 0 {
             self.warnings.iter().map(|w| w.usage_percent).sum::<f64>() / total_warnings as f64
         } else {

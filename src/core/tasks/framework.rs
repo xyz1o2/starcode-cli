@@ -1,8 +1,7 @@
 /// 任务框架
-/// 
+///
 /// 对标claude-code-main的src/utils/task/framework.ts
 /// 提供任务状态管理、注册、更新和驱逐功能
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -101,14 +100,9 @@ pub enum TaskEvent {
         result: Option<String>,
     },
     /// 任务失败
-    Failed {
-        task_id: String,
-        error: String,
-    },
+    Failed { task_id: String, error: String },
     /// 任务停止
-    Killed {
-        task_id: String,
-    },
+    Killed { task_id: String },
 }
 
 /// 任务框架
@@ -140,7 +134,10 @@ impl TaskFramework {
     pub fn update_task_status(&mut self, task_id: &str, status: TaskStatus) {
         if let Some(task) = self.tasks.get_mut(task_id) {
             task.status = status.clone();
-            if status == TaskStatus::Completed || status == TaskStatus::Failed || status == TaskStatus::Killed {
+            if status == TaskStatus::Completed
+                || status == TaskStatus::Failed
+                || status == TaskStatus::Killed
+            {
                 task.end_time = Some(Self::current_time_ms());
             }
         }
@@ -153,7 +150,8 @@ impl TaskFramework {
 
     /// 获取所有运行中的任务
     pub fn get_running_tasks(&self) -> Vec<&TaskStateBase> {
-        self.tasks.values()
+        self.tasks
+            .values()
             .filter(|t| t.status == TaskStatus::Running)
             .collect()
     }
@@ -162,7 +160,10 @@ impl TaskFramework {
     pub fn evict_completed_tasks(&mut self) {
         let now = Self::current_time_ms();
         self.tasks.retain(|_, task| {
-            if task.status == TaskStatus::Completed || task.status == TaskStatus::Failed || task.status == TaskStatus::Killed {
+            if task.status == TaskStatus::Completed
+                || task.status == TaskStatus::Failed
+                || task.status == TaskStatus::Killed
+            {
                 if let Some(end_time) = task.end_time {
                     now - end_time < self.max_display_ms
                 } else {
@@ -176,7 +177,8 @@ impl TaskFramework {
 
     /// 生成任务附件
     pub fn generate_attachments(&self) -> Vec<TaskAttachment> {
-        self.tasks.values()
+        self.tasks
+            .values()
             .filter(|t| t.status == TaskStatus::Running)
             .map(|t| TaskAttachment {
                 attachment_type: "task_status".to_string(),

@@ -6,10 +6,10 @@ pub mod deny_log;
 pub mod path_rules;
 pub mod rule_parser;
 
+use classifier::{CommandClassifier, SafetyLevel};
 use deny_log::DenyLog;
 use path_rules::{PathPermission, PathRuleMatcher};
 use rule_parser::{ParsedRule, RuleParser};
-use classifier::{CommandClassifier, SafetyLevel};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PermissionAction {
@@ -248,22 +248,18 @@ impl PermissionRuleEngine {
 
     fn path_matches(&self, _pattern: &str, path: &str) -> bool {
         let matcher = PathRuleMatcher::new(PathBuf::from("."));
-        matcher.check_permission(
-            std::path::Path::new(path),
-            &PathPermission::Read,
-        )
+        matcher.check_permission(std::path::Path::new(path), &PathPermission::Read)
     }
 
     fn extract_path_from_args(&self, tool: &str, args: &serde_json::Value) -> Option<String> {
         match tool {
-            "Edit" | "str_replace_editor" | "smart_edit" | "create_file"
-            | "Write" | "Read" | "view_file" | "read_many_files" => {
-                args.get("path")
-                    .or_else(|| args.get("file_path"))
-                    .or_else(|| args.get("target_file"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            }
+            "Edit" | "str_replace_editor" | "smart_edit" | "create_file" | "Write" | "Read"
+            | "view_file" | "read_many_files" => args
+                .get("path")
+                .or_else(|| args.get("file_path"))
+                .or_else(|| args.get("target_file"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             "Bash" | "shell" => {
                 if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
                     self.extract_path_from_command(cmd)
@@ -334,4 +330,3 @@ impl Default for PermissionRuleEngine {
         Self::new()
     }
 }
- 

@@ -14,26 +14,28 @@ pub async fn relay_confirmation_bus_message(
             let args_json = serde_json::to_string(&args_value).unwrap_or_else(|_| "{}".to_string());
 
             // ask_user_question gets its own confirmation type with parsed options
-            let mut confirmation =
-                if req.tool_call.name == "ask_user_question" {
-                    build_ask_user_question_confirmation(&args_value)
-                } else {
-                    let synthetic_tool_call = crate::types::StarToolCall {
-                        id: req.correlation_id.clone(),
-                        call_type: "function".to_string(),
-                        function: crate::types::StarToolCallFunction {
-                            name: req.tool_call.name.clone(),
-                            arguments: args_json,
-                        },
-                    };
-
-                    crate::ui::components::confirmation_dialog::build_confirmation_from_tool_call(
-                        &synthetic_tool_call,
-                    )
-                    .await
+            let mut confirmation = if req.tool_call.name == "ask_user_question" {
+                build_ask_user_question_confirmation(&args_value)
+            } else {
+                let synthetic_tool_call = crate::types::StarToolCall {
+                    id: req.correlation_id.clone(),
+                    call_type: "function".to_string(),
+                    function: crate::types::StarToolCallFunction {
+                        name: req.tool_call.name.clone(),
+                        arguments: args_json,
+                    },
                 };
 
-            if !matches!(confirmation.operation_type, crate::types::ConfirmationType::AskUserQuestion) {
+                crate::ui::components::confirmation_dialog::build_confirmation_from_tool_call(
+                    &synthetic_tool_call,
+                )
+                .await
+            };
+
+            if !matches!(
+                confirmation.operation_type,
+                crate::types::ConfirmationType::AskUserQuestion
+            ) {
                 if let Some(prompt) = &req.prompt {
                     if let Some(rest) = prompt.strip_prefix("DIFF_VIEW:") {
                         let mut parts = rest.splitn(2, '\n');
@@ -49,7 +51,10 @@ pub async fn relay_confirmation_bus_message(
                     } else if !prompt.trim().is_empty() {
                         confirmation.operation_type = crate::types::ConfirmationType::Generic;
                         confirmation.details = crate::types::ConfirmationDetails::Generic {
-                            title: req.title.clone().unwrap_or_else(|| "Permission confirmation".to_string()),
+                            title: req
+                                .title
+                                .clone()
+                                .unwrap_or_else(|| "Permission confirmation".to_string()),
                             prompt: prompt.clone(),
                         };
                         confirmation.is_dangerous = true;
@@ -124,7 +129,9 @@ pub async fn relay_confirmation_bus_message(
 
 /// Build a ToolConfirmation for the ask_user_question tool directly from
 /// its parsed JSON arguments, bypassing the generic tool-call dialog builder.
-fn build_ask_user_question_confirmation(args: &serde_json::Value) -> crate::types::ToolConfirmation {
+fn build_ask_user_question_confirmation(
+    args: &serde_json::Value,
+) -> crate::types::ToolConfirmation {
     use crate::types::{AskUserQuestionOption, ConfirmationDetails, ConfirmationType};
 
     let question = args
@@ -146,12 +153,21 @@ fn build_ask_user_question_confirmation(args: &serde_json::Value) -> crate::type
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .map(|opt| {
-                    AskUserQuestionOption {
-                        label: opt.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        description: opt.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        preview: opt.get("preview").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    }
+                .map(|opt| AskUserQuestionOption {
+                    label: opt
+                        .get("label")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    description: opt
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    preview: opt
+                        .get("preview")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                 })
                 .collect()
         })

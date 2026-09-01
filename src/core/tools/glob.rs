@@ -56,8 +56,16 @@ pub struct GlobToolInvocation {
 }
 
 impl GlobToolInvocation {
-    pub fn new(config: Arc<crate::core::config::Config>, params: GlobToolParams, global_state: Arc<GlobalState>) -> Self {
-        Self { config, params, global_state }
+    pub fn new(
+        config: Arc<crate::core::config::Config>,
+        params: GlobToolParams,
+        global_state: Arc<GlobalState>,
+    ) -> Self {
+        Self {
+            config,
+            params,
+            global_state,
+        }
     }
 }
 
@@ -190,7 +198,8 @@ impl ToolInvocation for GlobToolInvocation {
 
                 let mut entries = Vec::new();
 
-                let paths = glob::glob(&glob_pattern).map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+                let paths = glob::glob(&glob_pattern)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
                 for entry in paths {
                     if let Ok(path) = entry {
@@ -199,7 +208,9 @@ impl ToolInvocation for GlobToolInvocation {
                             match std::fs::metadata(&path) {
                                 Ok(metadata) => {
                                     if let Ok(modified) = metadata.modified() {
-                                        if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
+                                        if let Ok(duration) =
+                                            modified.duration_since(std::time::UNIX_EPOCH)
+                                        {
                                             entries.push(GlobPath {
                                                 fullpath: path,
                                                 mtime_ms: Some(duration.as_millis() as u64),
@@ -219,13 +230,15 @@ impl ToolInvocation for GlobToolInvocation {
                         pattern,
                         search_dir.display()
                     );
-                    return Ok::<ToolResult, Box<dyn std::error::Error + Send + Sync>>(ToolResult {
-                        llm_content: Some(message.clone()),
-                        return_display: Some("No files found".to_string()),
-                        output: message,
-                        error: None,
-                        data: None,
-                    });
+                    return Ok::<ToolResult, Box<dyn std::error::Error + Send + Sync>>(
+                        ToolResult {
+                            llm_content: Some(message.clone()),
+                            return_display: Some("No files found".to_string()),
+                            output: message,
+                            error: None,
+                            data: None,
+                        },
+                    );
                 }
 
                 // Sort by modification time
@@ -265,7 +278,8 @@ impl ToolInvocation for GlobToolInvocation {
                     error: None,
                     data: Some(serde_json::to_value(found_file_paths).unwrap_or_default()),
                 })
-            }).await;
+            })
+            .await;
 
             match result {
                 Ok(Ok(tool_result)) => {
@@ -301,8 +315,15 @@ pub struct GlobMatchTool {
 }
 
 impl GlobMatchTool {
-    pub fn new(config: Arc<crate::core::config::Config>, _message_bus: Arc<MessageBus>, global_state: Arc<GlobalState>) -> Self {
-        Self { config, global_state }
+    pub fn new(
+        config: Arc<crate::core::config::Config>,
+        _message_bus: Arc<MessageBus>,
+        global_state: Arc<GlobalState>,
+    ) -> Self {
+        Self {
+            config,
+            global_state,
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -379,7 +400,11 @@ impl GlobMatchTool {
     }
 
     pub fn build(&self, params: GlobToolParams) -> Box<dyn ToolInvocation> {
-        Box::new(GlobToolInvocation::new(self.config.clone(), params, self.global_state.clone()))
+        Box::new(GlobToolInvocation::new(
+            self.config.clone(),
+            params,
+            self.global_state.clone(),
+        ))
     }
 }
 

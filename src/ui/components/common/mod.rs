@@ -1,8 +1,8 @@
-pub mod dialog;
 pub mod badge;
+pub mod dialog;
 pub mod divider;
-pub mod spinner;
 pub mod progress;
+pub mod spinner;
 pub mod tooltip;
 
 use ratatui::{
@@ -12,17 +12,17 @@ use ratatui::{
 
 /// 通用的确认/取消按钮样式
 pub fn render_action_buttons(
-    actions: &[(&str, &str)],  // (key, label)
+    actions: &[(&str, &str)], // (key, label)
     selected: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut spans = Vec::new();
-    
+
     for (i, (key, label)) in actions.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled("  ", Style::default()));
         }
-        
+
         let is_selected = i == selected;
         let style = if is_selected {
             Style::default()
@@ -32,44 +32,37 @@ pub fn render_action_buttons(
         } else {
             Style::default().fg(Color::Gray)
         };
-        
-        spans.push(Span::styled(
-            format!(" {} ", key),
-            style,
-        ));
+
+        spans.push(Span::styled(format!(" {} ", key), style));
         spans.push(Span::styled(" ", Style::default()));
         spans.push(Span::styled(
             label.to_string(),
             if is_selected {
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Gray)
             },
         ));
     }
-    
+
     lines.push(Line::from(spans));
     lines
 }
 
 /// 渲染分隔线
 pub fn render_separator(width: usize, color: Color) -> Line<'static> {
-    Line::from(Span::styled(
-        "─".repeat(width),
-        Style::default().fg(color),
-    ))
+    Line::from(Span::styled("─".repeat(width), Style::default().fg(color)))
 }
 
 /// 渲染带标题的分隔线
 pub fn render_titled_separator(title: &str, width: usize, color: Color) -> Line<'static> {
     let title_len = title.len();
     let separator_len = width.saturating_sub(title_len + 4); // 两边各2个空格
-    
+
     Line::from(vec![
-        Span::styled(
-            "─".repeat(separator_len / 2),
-            Style::default().fg(color),
-        ),
+        Span::styled("─".repeat(separator_len / 2), Style::default().fg(color)),
         Span::styled("  ", Style::default()),
         Span::styled(
             title.to_string(),
@@ -109,11 +102,7 @@ pub fn render_label(text: &str, color: Color) -> Span<'static> {
 
 /// 渲染徽章
 pub fn render_badge(text: &str, color: Color) -> Span<'static> {
-    Span::styled(
-        format!(" {} ", text),
-        Style::default()
-            .fg(color),
-    )
+    Span::styled(format!(" {} ", text), Style::default().fg(color))
 }
 
 /// 渲染计数器
@@ -121,9 +110,7 @@ pub fn render_counter(count: usize, color: Color) -> Span<'static> {
     if count > 0 {
         Span::styled(
             format!(" {} ", count),
-            Style::default()
-                .fg(color)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         )
     } else {
         Span::raw("")
@@ -134,19 +121,15 @@ pub fn render_counter(count: usize, color: Color) -> Span<'static> {
 pub fn render_progress_indicator(progress: f32, width: usize) -> String {
     let filled = (progress * width as f32).round() as usize;
     let empty = width.saturating_sub(filled);
-    
-    format!(
-        "[{}{}]",
-        "█".repeat(filled),
-        "░".repeat(empty)
-    )
+
+    format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
 }
 
 /// 渲染时间戳
 pub fn render_timestamp(timestamp: &chrono::DateTime<chrono::Utc>) -> Span<'static> {
     let now = chrono::Utc::now();
     let duration = now.signed_duration_since(timestamp);
-    
+
     let time_str = if duration.num_seconds() < 60 {
         "just now".to_string()
     } else if duration.num_minutes() < 60 {
@@ -156,7 +139,7 @@ pub fn render_timestamp(timestamp: &chrono::DateTime<chrono::Utc>) -> Span<'stat
     } else {
         format!("{}d ago", duration.num_days())
     };
-    
+
     Span::styled(time_str, Style::default().fg(Color::DarkGray))
 }
 
@@ -172,7 +155,7 @@ pub fn render_truncated_text(text: &str, max_len: usize) -> String {
 /// 渲染换行文本
 pub fn render_wrapped_text(text: &str, width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    
+
     for line in text.lines() {
         if line.len() <= width {
             lines.push(Line::from(line.to_string()));
@@ -195,10 +178,10 @@ pub fn render_wrapped_text(text: &str, width: usize) -> Vec<Line<'static>> {
             }
         }
     }
-    
+
     if lines.is_empty() {
         lines.push(Line::from(""));
     }
-    
+
     lines
 }

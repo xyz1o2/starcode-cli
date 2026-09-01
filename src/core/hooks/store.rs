@@ -355,5 +355,3 @@ pub async fn remove_hook(project_root: &Path, name: &str) -> Result<bool, String
     save_store(project_root, &store).await?;
     Ok(true)
 }
-
- 

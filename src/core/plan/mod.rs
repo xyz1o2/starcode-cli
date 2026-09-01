@@ -171,15 +171,13 @@ impl PlanManager {
 
         // 确保目录存在
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| PlanError::IoError(e.to_string()))?;
+            std::fs::create_dir_all(parent).map_err(|e| PlanError::IoError(e.to_string()))?;
         }
 
         let content = serde_json::to_string_pretty(plan)
             .map_err(|e| PlanError::SerializeError(e.to_string()))?;
 
-        std::fs::write(&path, content)
-            .map_err(|e| PlanError::IoError(e.to_string()))?;
+        std::fs::write(&path, content).map_err(|e| PlanError::IoError(e.to_string()))?;
 
         Ok(())
     }
@@ -192,11 +190,10 @@ impl PlanManager {
             return Err(PlanError::NotFound(plan_id.to_string()));
         }
 
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| PlanError::IoError(e.to_string()))?;
+        let content =
+            std::fs::read_to_string(&path).map_err(|e| PlanError::IoError(e.to_string()))?;
 
-        serde_json::from_str(&content)
-            .map_err(|e| PlanError::ParseError(e.to_string()))
+        serde_json::from_str(&content).map_err(|e| PlanError::ParseError(e.to_string()))
     }
 
     /// 列出所有计划
@@ -207,8 +204,8 @@ impl PlanManager {
 
         let mut plans = Vec::new();
 
-        for entry in std::fs::read_dir(&self.storage_dir)
-            .map_err(|e| PlanError::IoError(e.to_string()))?
+        for entry in
+            std::fs::read_dir(&self.storage_dir).map_err(|e| PlanError::IoError(e.to_string()))?
         {
             let entry = entry.map_err(|e| PlanError::IoError(e.to_string()))?;
             let path = entry.path();
@@ -236,8 +233,7 @@ impl PlanManager {
             return Err(PlanError::NotFound(plan_id.to_string()));
         }
 
-        std::fs::remove_file(&path)
-            .map_err(|e| PlanError::IoError(e.to_string()))?;
+        std::fs::remove_file(&path).map_err(|e| PlanError::IoError(e.to_string()))?;
 
         Ok(())
     }
@@ -251,8 +247,10 @@ impl PlanManager {
             let trimmed = line.trim();
 
             // 匹配任务列表格式：- [ ] 或 - [x] 或 * [ ] 或 * [x]
-            if trimmed.starts_with("- [ ]") || trimmed.starts_with("- [x]")
-                || trimmed.starts_with("* [ ]") || trimmed.starts_with("* [x]")
+            if trimmed.starts_with("- [ ]")
+                || trimmed.starts_with("- [x]")
+                || trimmed.starts_with("* [ ]")
+                || trimmed.starts_with("* [x]")
             {
                 let completed = trimmed.contains("[x]");
                 let description = trimmed
@@ -362,7 +360,8 @@ Brief description of the feature.
 ## Documentation
 - [ ] Update README
 - [ ] Add inline comments
-"#.to_string(),
+"#
+            .to_string(),
             tags: vec!["feature".to_string()],
         },
         PlanTemplate {
@@ -390,7 +389,8 @@ Description of the fix.
 - [ ] Verify the fix
 - [ ] Run existing tests
 - [ ] Add new tests if needed
-"#.to_string(),
+"#
+            .to_string(),
             tags: vec!["bugfix".to_string()],
         },
         PlanTemplate {
@@ -423,7 +423,8 @@ Description of the refactoring.
 - [ ] Existing tests pass
 - [ ] New tests added
 - [ ] Performance verified
-"#.to_string(),
+"#
+            .to_string(),
             tags: vec!["refactor".to_string()],
         },
     ]

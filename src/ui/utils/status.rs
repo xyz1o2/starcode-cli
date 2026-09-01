@@ -76,5 +76,3 @@ pub fn status_summary(state: &ChatState) -> String {
         current_language_display()
     )
 }
-
- 

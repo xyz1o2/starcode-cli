@@ -49,7 +49,11 @@ pub fn detect_shell() -> String {
     } else {
         std::env::var("SHELL")
             .ok()
-            .and_then(|s| std::path::Path::new(&s).file_name().map(|f| f.to_string_lossy().to_string()))
+            .and_then(|s| {
+                std::path::Path::new(&s)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+            })
             .unwrap_or_else(|| "sh".to_string())
     }
 }
@@ -88,12 +92,7 @@ pub fn is_ci() -> bool {
 
 /// Render static environment info (does NOT change between turns).
 /// This part is cached with cache_control for prompt caching.
-pub fn render_static_env_info(
-    today: &str,
-    platform: &str,
-    cwd: &str,
-    shell: &str,
-) -> String {
+pub fn render_static_env_info(today: &str, platform: &str, cwd: &str, shell: &str) -> String {
     let mut parts = vec![
         "# Environment".to_string(),
         "You have been invoked in the following environment:".to_string(),

@@ -438,11 +438,7 @@ fn find_matching_paren(s: &str) -> Option<usize> {
 
 /// Parse argument items from YAML block.
 /// Supports both simple list items and structured blocks.
-fn parse_argument_items(
-    _lines: &[&str],
-    _pos: &mut usize,
-    items: &[String],
-) -> Vec<SkillArgument> {
+fn parse_argument_items(_lines: &[&str], _pos: &mut usize, items: &[String]) -> Vec<SkillArgument> {
     let mut args = Vec::new();
 
     // Try to parse structured arguments: each item could be "name: description"
@@ -485,10 +481,5 @@ fn parse_inline_csv(value: &str) -> Vec<String> {
 }
 
 fn is_truthy(value: &str) -> bool {
-    matches!(
-        value.to_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    matches!(value.to_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
-
- 

@@ -1,8 +1,7 @@
 /// 设置同步系统
-/// 
+///
 /// 对标claude-code-main的src/services/settingsSync/
 /// 跨设备设置同步
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -67,7 +66,7 @@ pub struct SettingsSyncManager {
 impl SettingsSyncManager {
     pub fn new(config: SyncConfig) -> Self {
         let device_id = uuid::Uuid::new_v4().to_string();
-        
+
         Self {
             config,
             settings: HashMap::new(),

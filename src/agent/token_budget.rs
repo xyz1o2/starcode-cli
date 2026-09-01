@@ -20,10 +20,10 @@ impl Default for TokenBudgetConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            turn_budget: 500_000,  // 500K tokens
+            turn_budget: 500_000, // 500K tokens
             max_continuations: 5,
-            continue_threshold: 0.9,  // 90%
-            diminishing_returns_threshold: 0.1,  // 10%
+            continue_threshold: 0.9,            // 90%
+            diminishing_returns_threshold: 0.1, // 10%
         }
     }
 }
@@ -50,10 +50,11 @@ impl TokenBudgetConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.9);
 
-        let diminishing_returns_threshold = std::env::var("STAR_TOKEN_BUDGET_DIMINISHING_THRESHOLD")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.1);
+        let diminishing_returns_threshold =
+            std::env::var("STAR_TOKEN_BUDGET_DIMINISHING_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.1);
 
         Self {
             enabled,
@@ -222,9 +223,7 @@ pub enum TokenBudgetDecision {
         budget: usize,
     },
     /// 停止执行
-    Stop {
-        reason: String,
-    },
+    Stop { reason: String },
 }
 
 #[cfg(test)]

@@ -17,7 +17,6 @@ pub mod tool_list;
 
 #[cfg(test)]
 mod tests;
- 
 
 use rust_embed::RustEmbed;
 

@@ -1,15 +1,12 @@
 use crate::llm::{create_client, LlmClient, LlmConfig, LlmEvent, LlmProvider};
 use crate::llm::{
-    API_KEY_NOT_SET, API_KEY_SOURCE_CONFIGURED, API_KEY_SOURCE_ENV_STAR,
-    API_KEY_SOURCE_PROVIDER_ENV_PREFIX, API_KEY_SOURCE_UNKNOWN,
-    ANTHROPIC_API_URL_PATTERN, ANTHROPIC_API_VERSION,
-    AUTH_ERROR_INCORRECT_KEY, AUTH_ERROR_UNAUTHORIZED,
-    BEARER_PREFIX, CONTENT_TYPE_JSON, DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE,
-    ENV_STAR_API_KEY, ENV_STAR_MAX_TOKENS, ENV_STAR_TEMPERATURE,
-    HEADER_ANTHROPIC_VERSION, HEADER_AUTHORIZATION,
-    HEADER_CONTENT_TYPE, HEADER_X_API_KEY, HTTP_STATUS_401, HTTP_STATUS_402,
-    KIMI_CODE_URL_PATTERN, OPENAI_DEFAULT_BASE_URL,
-    PAYMENT_ERROR_BALANCE, PAYMENT_ERROR_REQUIRED,
+    ANTHROPIC_API_URL_PATTERN, ANTHROPIC_API_VERSION, API_KEY_NOT_SET, API_KEY_SOURCE_CONFIGURED,
+    API_KEY_SOURCE_ENV_STAR, API_KEY_SOURCE_PROVIDER_ENV_PREFIX, API_KEY_SOURCE_UNKNOWN,
+    AUTH_ERROR_INCORRECT_KEY, AUTH_ERROR_UNAUTHORIZED, BEARER_PREFIX, CONTENT_TYPE_JSON,
+    DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE, ENV_STAR_API_KEY, ENV_STAR_MAX_TOKENS,
+    ENV_STAR_TEMPERATURE, HEADER_ANTHROPIC_VERSION, HEADER_AUTHORIZATION, HEADER_CONTENT_TYPE,
+    HEADER_X_API_KEY, HTTP_STATUS_401, HTTP_STATUS_402, KIMI_CODE_URL_PATTERN,
+    OPENAI_DEFAULT_BASE_URL, PAYMENT_ERROR_BALANCE, PAYMENT_ERROR_REQUIRED,
     PROVIDER_ENV_ID_ANTHROPIC, PROVIDER_ENV_ID_DEEPSEEK, PROVIDER_ENV_ID_XIAOMI,
     PROVIDER_NAME_OPENAI_COMPATIBLE,
 };
@@ -57,48 +54,54 @@ pub struct StarClient {
     detected_thinking_support: Arc<RwLock<Option<bool>>>,
 }
 
-
 fn infer_provider(
     model_name: &str,
     base_url: &str,
     is_openai_compatible: bool,
     provider_id: Option<&str>,
 ) -> LlmProvider {
-	// 用户显式选择了 Anthropic 兼容第三方 → 直接按 Anthropic 协议走，保留自定义 base_url。
-	// 与 openai-compatible 对称，避免把这网关误路由到 URL 推断（其 host 通常不含 "anthropic"）。
-	if provider_id == Some("anthropic-compatible") {
-		return LlmProvider::Custom("anthropic-compatible".to_string());
-	}
-	// 用户明确配置了 openai-compatible provider → 跳过所有 URL/模型名推断，
-	// 直接使用 OpenAiCompatibleClient，保留用户配置的 base_url。
-	// 避免第三方代理（如 api.183399.xyz 提供 deepseek 模型）被错误路由到
-	// 官方 SDK（如 LlmProvider::DeepSeek），导致 base_url 丢失。
-	if is_openai_compatible {
-		return LlmProvider::Custom(PROVIDER_NAME_OPENAI_COMPATIBLE.to_string());
-	}
-	let url = base_url.to_ascii_lowercase();
-	let model = model_name.to_ascii_lowercase();
-	if url.contains("anthropic") { LlmProvider::Anthropic }
-	else if url.contains("deepseek") || model.contains("deepseek") { LlmProvider::DeepSeek }
-	else if url.contains("minimax") || model.contains("minimax") { LlmProvider::MiniMax }
-	else if url.contains("xiaomimimo") || model.contains("mimo") || model.contains("milm") { LlmProvider::Xiaomi }
-	else if url.contains("openai.com") { LlmProvider::OpenAi }
-	else { LlmProvider::Custom(PROVIDER_NAME_OPENAI_COMPATIBLE.to_string()) }
+    // 用户显式选择了 Anthropic 兼容第三方 → 直接按 Anthropic 协议走，保留自定义 base_url。
+    // 与 openai-compatible 对称，避免把这网关误路由到 URL 推断（其 host 通常不含 "anthropic"）。
+    if provider_id == Some("anthropic-compatible") {
+        return LlmProvider::Custom("anthropic-compatible".to_string());
+    }
+    // 用户明确配置了 openai-compatible provider → 跳过所有 URL/模型名推断，
+    // 直接使用 OpenAiCompatibleClient，保留用户配置的 base_url。
+    // 避免第三方代理（如 api.183399.xyz 提供 deepseek 模型）被错误路由到
+    // 官方 SDK（如 LlmProvider::DeepSeek），导致 base_url 丢失。
+    if is_openai_compatible {
+        return LlmProvider::Custom(PROVIDER_NAME_OPENAI_COMPATIBLE.to_string());
+    }
+    let url = base_url.to_ascii_lowercase();
+    let model = model_name.to_ascii_lowercase();
+    if url.contains("anthropic") {
+        LlmProvider::Anthropic
+    } else if url.contains("deepseek") || model.contains("deepseek") {
+        LlmProvider::DeepSeek
+    } else if url.contains("minimax") || model.contains("minimax") {
+        LlmProvider::MiniMax
+    } else if url.contains("xiaomimimo") || model.contains("mimo") || model.contains("milm") {
+        LlmProvider::Xiaomi
+    } else if url.contains("openai.com") {
+        LlmProvider::OpenAi
+    } else {
+        LlmProvider::Custom(PROVIDER_NAME_OPENAI_COMPATIBLE.to_string())
+    }
 }
 
 fn provider_env_id(provider: &LlmProvider, _base_url: &str) -> Option<&'static str> {
-	match provider {
-		LlmProvider::DeepSeek => Some(PROVIDER_ENV_ID_DEEPSEEK),
-		LlmProvider::Anthropic => Some(PROVIDER_ENV_ID_ANTHROPIC),
-		LlmProvider::Xiaomi => Some(PROVIDER_ENV_ID_XIAOMI),
-		_ => None,
-	}
+    match provider {
+        LlmProvider::DeepSeek => Some(PROVIDER_ENV_ID_DEEPSEEK),
+        LlmProvider::Anthropic => Some(PROVIDER_ENV_ID_ANTHROPIC),
+        LlmProvider::Xiaomi => Some(PROVIDER_ENV_ID_XIAOMI),
+        _ => None,
+    }
 }
 
 struct ResolvedApiKey {
-	value: String,
-	source: Option<String>,
-	preview: Option<String>,
+    value: String,
+    source: Option<String>,
+    preview: Option<String>,
 }
 fn format_api_key_preview(api_key: &str) -> Option<String> {
     let normalized = api_key.trim();
@@ -225,9 +228,7 @@ fn missing_api_key_error(provider_env_id: Option<&'static str>) -> String {
 
     // Generic / OpenAI-compatible provider: check STAR_API_KEY as last resort
     if let Ok(key) = std::env::var(ENV_STAR_API_KEY) {
-        if !key.trim().is_empty()
-            && !crate::core::config::providers::is_placeholder_api_key(&key)
-        {
+        if !key.trim().is_empty() && !crate::core::config::providers::is_placeholder_api_key(&key) {
             return format!(
                 "✦ API key not set in config, but `STAR_API_KEY` is present. If this key is for the current provider, set it via Ctrl+P → Providers, or unset `STAR_API_KEY` to use provider-specific settings."
             );
@@ -257,7 +258,9 @@ fn authentication_error_message(
         api_key_preview.unwrap_or("-"),
     );
 
-    if lower_base_url.contains("deepseek") || matches!(provider_env_id, Some(PROVIDER_ENV_ID_DEEPSEEK)) {
+    if lower_base_url.contains("deepseek")
+        || matches!(provider_env_id, Some(PROVIDER_ENV_ID_DEEPSEEK))
+    {
         return format!(
             "✦ DeepSeek 认证失败 (401)：当前生效的 API Key 无效、已过期，或命中了错误的 Key 来源。请先检查 `DEEPSEEK_API_KEY`、Provider 已保存的 Key，以及 `STAR_API_KEY` 是否混用；也可以运行 `/provider doctor` 查看当前运行时命中的来源。\n{}\nOriginal Error: {}",
             debug_context, original_error
@@ -518,7 +521,8 @@ impl StarClient {
         // provider env vars, then the provider store as a final fallback.
         let effective_api_key = resolve_effective_api_key(&self.api_key);
         let effective_api_key = if effective_api_key == API_KEY_NOT_SET {
-            load_api_key_from_store(&self.base_url).await
+            load_api_key_from_store(&self.base_url)
+                .await
                 .unwrap_or(effective_api_key)
         } else {
             effective_api_key
@@ -597,7 +601,8 @@ impl StarClient {
             .unwrap_or(true);
         let effective_api_key = resolve_effective_api_key(&self.api_key);
         let effective_api_key = if effective_api_key == API_KEY_NOT_SET {
-            load_api_key_from_store(&self.base_url).await
+            load_api_key_from_store(&self.base_url)
+                .await
                 .unwrap_or(effective_api_key)
         } else {
             effective_api_key
@@ -674,13 +679,18 @@ impl StarClient {
                         "[FALLBACK] chat_stream_events failed ({}), attempting non-streaming fallback",
                         &err_str.chars().take(200).collect::<String>(),
                     ));
-                    match inner_client.chat_completion(fallback_messages, fallback_tools).await {
+                    match inner_client
+                        .chat_completion(fallback_messages, fallback_tools)
+                        .await
+                    {
                         Ok(response) => {
                             crate::utils::logging::append_debug_log_line(
                                 "[FALLBACK] non-streaming fallback succeeded",
                             );
                             let events: Vec<Result<_, Box<dyn std::error::Error + Send + Sync>>> =
-                                crate::llm::client::StarClient::build_events_from_response(response);
+                                crate::llm::client::StarClient::build_events_from_response(
+                                    response,
+                                );
                             let stream = Box::pin(stream! {
                                 for event in events {
                                     yield event;
@@ -797,7 +807,8 @@ impl StarClient {
     pub fn build_events_from_response(
         response: StarResponse,
     ) -> Vec<Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>>> {
-        let mut events: Vec<Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>>> = Vec::new();
+        let mut events: Vec<Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>>> =
+            Vec::new();
         for choice in &response.choices {
             if let Some(reasoning) = &choice.message.reasoning_content {
                 if !reasoning.is_empty() {
@@ -895,7 +906,10 @@ impl StarClient {
                     .header(HEADER_X_API_KEY, &self.api_key)
                     .header(HEADER_ANTHROPIC_VERSION, ANTHROPIC_API_VERSION);
             } else {
-                req = req.header(HEADER_AUTHORIZATION, format!("{}{}", BEARER_PREFIX, self.api_key));
+                req = req.header(
+                    HEADER_AUTHORIZATION,
+                    format!("{}{}", BEARER_PREFIX, self.api_key),
+                );
             }
         }
 
@@ -974,5 +988,3 @@ impl StarClient {
         }
     }
 }
-
- 

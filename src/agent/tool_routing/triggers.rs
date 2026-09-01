@@ -55,7 +55,12 @@ pub(crate) fn select_best_auto_trigger(
     }
 
     // 语义搜索 — 概念性查询的通用最佳选择
-    if should_trigger_semantic_search(user_input, current_content, active_tools, semantic_search_attempted) {
+    if should_trigger_semantic_search(
+        user_input,
+        current_content,
+        active_tools,
+        semantic_search_attempted,
+    ) {
         let score = score_semantic_search_relevance(user_input, current_content);
         candidates.push(TriggerEval {
             kind: AutoTriggerKind::SemanticSearch,
@@ -75,8 +80,11 @@ pub(crate) fn select_best_auto_trigger(
 
     // 导航器技能 — 需要代码结构理解
     if should_trigger_navigator_skill(
-        user_input, current_content, active_tools,
-        semantic_search_attempted, navigator_skill_attempted,
+        user_input,
+        current_content,
+        active_tools,
+        semantic_search_attempted,
+        navigator_skill_attempted,
     ) {
         candidates.push(TriggerEval {
             kind: AutoTriggerKind::NavigatorSkill,
@@ -86,7 +94,12 @@ pub(crate) fn select_best_auto_trigger(
     }
 
     // 项目地图 — 需要项目结构总览
-    if should_trigger_project_map(user_input, current_content, active_tools, project_map_attempted) {
+    if should_trigger_project_map(
+        user_input,
+        current_content,
+        active_tools,
+        project_map_attempted,
+    ) {
         candidates.push(TriggerEval {
             kind: AutoTriggerKind::ProjectMap,
             score: 2,
@@ -96,8 +109,11 @@ pub(crate) fn select_best_auto_trigger(
 
     // 分析器技能 — 需要结构化分析
     if should_trigger_analyzer_skill(
-        user_input, current_content, active_tools,
-        project_map_attempted, analyzer_skill_attempted,
+        user_input,
+        current_content,
+        active_tools,
+        project_map_attempted,
+        analyzer_skill_attempted,
     ) {
         candidates.push(TriggerEval {
             kind: AutoTriggerKind::AnalyzerSkill,
@@ -108,8 +124,12 @@ pub(crate) fn select_best_auto_trigger(
 
     // 编辑器技能 — 最后手段
     if should_trigger_editor_skill(
-        user_input, current_content, active_tools,
-        semantic_search_attempted, navigator_skill_attempted, editor_skill_attempted,
+        user_input,
+        current_content,
+        active_tools,
+        semantic_search_attempted,
+        navigator_skill_attempted,
+        editor_skill_attempted,
     ) {
         candidates.push(TriggerEval {
             kind: AutoTriggerKind::EditorSkill,
@@ -119,9 +139,7 @@ pub(crate) fn select_best_auto_trigger(
     }
 
     // 按优先级排序：先比 kind 的固有优先级（Ord），再比相关性分数
-    candidates.sort_by(|a, b| {
-        b.kind.cmp(&a.kind).then(b.score.cmp(&a.score))
-    });
+    candidates.sort_by(|a, b| b.kind.cmp(&a.kind).then(b.score.cmp(&a.score)));
 
     candidates.into_iter().next()
 }
@@ -133,13 +151,24 @@ fn score_semantic_search_relevance(user_input: &str, current_content: &str) -> u
     let mut score = 5u32; // 基准分
 
     let high_indicators = [
-        "how", "why", "what", "explain", "understand",
-        "概念", "原理", "怎么", "为什么", "是什么", "理解",
-        "架构", "architecture", "design", "pattern",
+        "how",
+        "why",
+        "what",
+        "explain",
+        "understand",
+        "概念",
+        "原理",
+        "怎么",
+        "为什么",
+        "是什么",
+        "理解",
+        "架构",
+        "architecture",
+        "design",
+        "pattern",
     ];
     let medium_indicators = [
-        "find", "Grep", "locate", "where",
-        "找", "搜索", "定位", "哪里",
+        "find", "Grep", "locate", "where", "找", "搜索", "定位", "哪里",
     ];
 
     for kw in &high_indicators {
@@ -290,10 +319,7 @@ fn should_trigger_analyzer_skill_with_flag(
     already_attempted: bool,
     auto_enabled: bool,
 ) -> bool {
-    auto_enabled
-        && !already_attempted
-        && project_map_attempted
-        && active_tools.contains("skill")
+    auto_enabled && !already_attempted && project_map_attempted && active_tools.contains("skill")
 }
 
 /// 检查是否应该触发项目地图

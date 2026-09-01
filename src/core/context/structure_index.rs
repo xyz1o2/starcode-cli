@@ -24,7 +24,7 @@ pub struct FunctionDef {
     pub end_line: usize,
     pub signature: String,
     pub doc_comment: Option<String>,
-    pub visibility: String,  // pub, pub(crate), private
+    pub visibility: String, // pub, pub(crate), private
     pub is_async: bool,
     pub body_hash: String,
 }
@@ -40,12 +40,12 @@ pub struct TypeDef {
 
 #[derive(Debug, Clone)]
 pub enum TypeKind {
-    Struct,     // Rust struct, C struct, Go struct
-    Enum,       // enum in any language
-    Interface,  // trait (Rust), interface (Java/TS/Go), protocol (Swift), ABC (Python)
-    Class,      // class (Python/JS/Java/C++/Ruby)
-    TypeAlias,  // type alias, typedef
-    Module,     // mod (Rust), package (Java), namespace (C++/TS)
+    Struct,    // Rust struct, C struct, Go struct
+    Enum,      // enum in any language
+    Interface, // trait (Rust), interface (Java/TS/Go), protocol (Swift), ABC (Python)
+    Class,     // class (Python/JS/Java/C++/Ruby)
+    TypeAlias, // type alias, typedef
+    Module,    // mod (Rust), package (Java), namespace (C++/TS)
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +83,7 @@ impl StructureIndex {
     /// Find all references to a function
     pub fn find_references(&self, name: &str) -> Vec<Reference> {
         let mut refs = Vec::new();
-        
+
         // Direct calls
         if let Some(callers) = self.reverse_call_graph.get(name) {
             for caller in callers {
@@ -118,12 +118,12 @@ impl StructureIndex {
     /// Find related functions (callers and callees)
     pub fn find_related(&self, name: &str) -> Vec<String> {
         let mut related = HashSet::new();
-        
+
         // Callees
         if let Some(callees) = self.call_graph.get(name) {
             related.extend(callees.iter().cloned());
         }
-        
+
         // Callers
         if let Some(callers) = self.reverse_call_graph.get(name) {
             related.extend(callers.iter().cloned());
@@ -135,11 +135,12 @@ impl StructureIndex {
     /// Find functions by partial name or signature
     pub fn search_functions(&self, query: &str) -> Vec<&FunctionDef> {
         let query_lower = query.to_lowercase();
-        self.functions.values()
+        self.functions
+            .values()
             .flatten()
             .filter(|f| {
                 f.signature.to_lowercase().contains(&query_lower)
-                || f.file.to_lowercase().contains(&query_lower)
+                    || f.file.to_lowercase().contains(&query_lower)
             })
             .collect()
     }
@@ -147,12 +148,12 @@ impl StructureIndex {
     /// Get context for editing a function - returns related code
     pub fn get_edit_context(&self, name: &str) -> EditContext {
         let mut context = EditContext::default();
-        
+
         // The function itself
         if let Some(funcs) = self.functions.get(name) {
             context.target_functions = funcs.clone();
         }
-        
+
         // Related functions (callers and callees)
         let related = self.find_related(name);
         for rel in &related {
@@ -160,17 +161,17 @@ impl StructureIndex {
                 context.related_functions.extend(funcs.clone());
             }
         }
-        
+
         // Types used by the function
         context.related_types = self.find_types_for_function(name);
-        
+
         // Imports
         for func in &context.target_functions {
             if let Some(imports) = self.imports.get(&func.file) {
                 context.imports = imports.clone();
             }
         }
-        
+
         context
     }
 
@@ -178,7 +179,8 @@ impl StructureIndex {
         // Simple heuristic: types in the same file as the function
         if let Some(funcs) = self.functions.get(name) {
             let files: HashSet<&str> = funcs.iter().map(|f| f.file.as_str()).collect();
-            self.types.values()
+            self.types
+                .values()
                 .flatten()
                 .filter(|t| files.contains(t.file.as_str()))
                 .cloned()
@@ -193,22 +195,14 @@ impl StructureIndex {
         let func_regex = regex::Regex::new(
             r"(?m)^(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*(?:<[^>]*>)?\s*\(([^)]*)\)(?:\s*->\s*([^\{]+))?\s*\{"
         ).unwrap();
-        
-        let struct_regex = regex::Regex::new(
-            r"(?m)^(?:pub\s+)?struct\s+(\w+)"
-        ).unwrap();
 
-        let enum_regex = regex::Regex::new(
-            r"(?m)^(?:pub\s+)?enum\s+(\w+)"
-        ).unwrap();
+        let struct_regex = regex::Regex::new(r"(?m)^(?:pub\s+)?struct\s+(\w+)").unwrap();
 
-        let impl_regex = regex::Regex::new(
-            r"(?m)^impl\s+(?:<[^>]*>\s+)?(\w+)"
-        ).unwrap();
+        let enum_regex = regex::Regex::new(r"(?m)^(?:pub\s+)?enum\s+(\w+)").unwrap();
 
-        let use_regex = regex::Regex::new(
-            r"(?m)^use\s+([\w:]+)(?:\s+as\s+(\w+))?;"
-        ).unwrap();
+        let impl_regex = regex::Regex::new(r"(?m)^impl\s+(?:<[^>]*>\s+)?(\w+)").unwrap();
+
+        let use_regex = regex::Regex::new(r"(?m)^use\s+([\w:]+)(?:\s+as\s+(\w+))?;").unwrap();
 
         // Index functions
         for cap in func_regex.captures_iter(content) {
@@ -216,29 +210,42 @@ impl StructureIndex {
             let params = cap[2].to_string();
             let return_type = cap.get(3).map(|m| m.as_str().trim().to_string());
             let line = content[..cap.get(0).unwrap().start()].lines().count();
-            
-            let signature = format!("fn {}({}){}", name, params, 
-                return_type.map(|r| format!(" -> {}", r)).unwrap_or_default());
-            
+
+            let signature = format!(
+                "fn {}({}){}",
+                name,
+                params,
+                return_type
+                    .map(|r| format!(" -> {}", r))
+                    .unwrap_or_default()
+            );
+
             let func_def = FunctionDef {
                 file: path.to_string(),
                 line,
                 end_line: line + 10, // Approximate
                 signature,
                 doc_comment: None,
-                visibility: if cap[0].contains("pub") { "pub".to_string() } else { "private".to_string() },
+                visibility: if cap[0].contains("pub") {
+                    "pub".to_string()
+                } else {
+                    "private".to_string()
+                },
                 is_async: cap[0].contains("async"),
                 body_hash: format!("{:x}", md5::compute(&cap[0])),
             };
-            
-            self.functions.entry(name).or_insert_with(Vec::new).push(func_def);
+
+            self.functions
+                .entry(name)
+                .or_insert_with(Vec::new)
+                .push(func_def);
         }
 
         // Index structs
         for cap in struct_regex.captures_iter(content) {
             let name = cap[1].to_string();
             let line = content[..cap.get(0).unwrap().start()].lines().count();
-            
+
             let type_def = TypeDef {
                 file: path.to_string(),
                 line,
@@ -246,15 +253,18 @@ impl StructureIndex {
                 fields: Vec::new(),
                 methods: Vec::new(),
             };
-            
-            self.types.entry(name).or_insert_with(Vec::new).push(type_def);
+
+            self.types
+                .entry(name)
+                .or_insert_with(Vec::new)
+                .push(type_def);
         }
 
         // Index enums
         for cap in enum_regex.captures_iter(content) {
             let name = cap[1].to_string();
             let line = content[..cap.get(0).unwrap().start()].lines().count();
-            
+
             let type_def = TypeDef {
                 file: path.to_string(),
                 line,
@@ -262,15 +272,18 @@ impl StructureIndex {
                 fields: Vec::new(),
                 methods: Vec::new(),
             };
-            
-            self.types.entry(name).or_insert_with(Vec::new).push(type_def);
+
+            self.types
+                .entry(name)
+                .or_insert_with(Vec::new)
+                .push(type_def);
         }
 
         // Index impls
         for cap in impl_regex.captures_iter(content) {
             let name = cap[1].to_string();
             let line = content[..cap.get(0).unwrap().start()].lines().count();
-            
+
             let type_def = TypeDef {
                 file: path.to_string(),
                 line,
@@ -278,8 +291,11 @@ impl StructureIndex {
                 fields: Vec::new(),
                 methods: Vec::new(),
             };
-            
-            self.types.entry(name).or_insert_with(Vec::new).push(type_def);
+
+            self.types
+                .entry(name)
+                .or_insert_with(Vec::new)
+                .push(type_def);
         }
 
         // Index imports
@@ -287,14 +303,17 @@ impl StructureIndex {
             let module = cap[1].to_string();
             let alias = cap.get(2).map(|m| m.as_str().to_string());
             let name = module.split("::").last().unwrap_or(&module).to_string();
-            
+
             let import = Import {
                 module,
                 name,
                 alias,
             };
-            
-            self.imports.entry(path.to_string()).or_insert_with(Vec::new).push(import);
+
+            self.imports
+                .entry(path.to_string())
+                .or_insert_with(Vec::new)
+                .push(import);
         }
 
         // Build call graph
@@ -304,18 +323,25 @@ impl StructureIndex {
     fn index_python(&mut self, path: &str, content: &str) {
         // Similar implementation for Python
         let func_regex = regex::Regex::new(
-            r"(?m)^(?:async\s+)?def\s+(\w+)\s*\(([^)]*)\)(?:\s*->\s*([^\:]+))?\s*:"
-        ).unwrap();
+            r"(?m)^(?:async\s+)?def\s+(\w+)\s*\(([^)]*)\)(?:\s*->\s*([^\:]+))?\s*:",
+        )
+        .unwrap();
 
         for cap in func_regex.captures_iter(content) {
             let name = cap[1].to_string();
             let params = cap[2].to_string();
             let return_type = cap.get(3).map(|m| m.as_str().trim().to_string());
             let line = content[..cap.get(0).unwrap().start()].lines().count();
-            
-            let signature = format!("def {}({}){}", name, params,
-                return_type.map(|r| format!(" -> {}", r)).unwrap_or_default());
-            
+
+            let signature = format!(
+                "def {}({}){}",
+                name,
+                params,
+                return_type
+                    .map(|r| format!(" -> {}", r))
+                    .unwrap_or_default()
+            );
+
             let func_def = FunctionDef {
                 file: path.to_string(),
                 line,
@@ -326,8 +352,11 @@ impl StructureIndex {
                 is_async: cap[0].contains("async"),
                 body_hash: format!("{:x}", md5::compute(&cap[0])),
             };
-            
-            self.functions.entry(name).or_insert_with(Vec::new).push(func_def);
+
+            self.functions
+                .entry(name)
+                .or_insert_with(Vec::new)
+                .push(func_def);
         }
     }
 
@@ -342,31 +371,44 @@ impl StructureIndex {
             let params = cap[2].to_string();
             let return_type = cap.get(3).map(|m| m.as_str().trim().to_string());
             let line = content[..cap.get(0).unwrap().start()].lines().count();
-            
-            let signature = format!("function {}({}){}", name, params,
-                return_type.map(|r| format!(": {}", r)).unwrap_or_default());
-            
+
+            let signature = format!(
+                "function {}({}){}",
+                name,
+                params,
+                return_type.map(|r| format!(": {}", r)).unwrap_or_default()
+            );
+
             let func_def = FunctionDef {
                 file: path.to_string(),
                 line,
                 end_line: line + 10,
                 signature,
                 doc_comment: None,
-                visibility: if cap[0].contains("export") { "public".to_string() } else { "private".to_string() },
+                visibility: if cap[0].contains("export") {
+                    "public".to_string()
+                } else {
+                    "private".to_string()
+                },
                 is_async: cap[0].contains("async"),
                 body_hash: format!("{:x}", md5::compute(&cap[0])),
             };
-            
-            self.functions.entry(name).or_insert_with(Vec::new).push(func_def);
+
+            self.functions
+                .entry(name)
+                .or_insert_with(Vec::new)
+                .push(func_def);
         }
     }
 
     fn build_call_graph(&mut self, path: &str, content: &str) {
         // Find all function calls in the file
         let call_regex = regex::Regex::new(r"(\w+)\s*\(").unwrap();
-        
+
         // Get all functions defined in this file
-        let file_funcs: Vec<String> = self.functions.values()
+        let file_funcs: Vec<String> = self
+            .functions
+            .values()
             .flatten()
             .filter(|f| f.file == path)
             .map(|f| f.signature.split('(').next().unwrap_or("").to_string())
@@ -374,14 +416,14 @@ impl StructureIndex {
 
         for func_name in &file_funcs {
             let mut callees = HashSet::new();
-            
+
             // Find all calls in the function body
             // This is simplified - in production, use AST parsing
             for cap in call_regex.captures_iter(content) {
                 let called = cap[1].to_string();
                 if called != *func_name && self.functions.contains_key(&called) {
                     callees.insert(called.clone());
-                    
+
                     // Update reverse call graph
                     self.reverse_call_graph
                         .entry(called)
@@ -389,7 +431,7 @@ impl StructureIndex {
                         .insert(func_name.clone());
                 }
             }
-            
+
             self.call_graph.insert(func_name.clone(), callees);
         }
     }
@@ -416,4 +458,3 @@ pub enum RefKind {
     Import,
     Definition,
 }
-

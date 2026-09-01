@@ -19,9 +19,9 @@ impl Default for ToolResultPersistConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            persist_threshold: 50_000,  // 50K字符
-            preview_size: 2000,         // 2KB预览
-            max_result_size: 500_000,   // 500K字符
+            persist_threshold: 50_000, // 50K字符
+            preview_size: 2000,        // 2KB预览
+            max_result_size: 500_000,  // 500K字符
         }
     }
 }
@@ -81,7 +81,10 @@ pub struct ToolResultPersister {
 impl ToolResultPersister {
     pub fn new(session_dir: PathBuf) -> Self {
         let config = ToolResultPersistConfig::from_env();
-        Self { config, session_dir }
+        Self {
+            config,
+            session_dir,
+        }
     }
 
     /// 获取工具结果目录
@@ -101,7 +104,8 @@ impl ToolResultPersister {
     /// 获取工具结果文件路径
     fn get_result_path(&self, tool_use_id: &str, is_json: bool) -> PathBuf {
         let ext = if is_json { "json" } else { "txt" };
-        self.tool_results_dir().join(format!("{}.{}", tool_use_id, ext))
+        self.tool_results_dir()
+            .join(format!("{}.{}", tool_use_id, ext))
     }
 
     /// 生成预览内容
@@ -164,7 +168,9 @@ impl ToolResultPersister {
     pub async fn read(&self, tool_use_id: &str) -> Result<String, String> {
         // 尝试JSON和TXT两种格式
         for ext in &["json", "txt"] {
-            let filepath = self.tool_results_dir().join(format!("{}.{}", tool_use_id, ext));
+            let filepath = self
+                .tool_results_dir()
+                .join(format!("{}.{}", tool_use_id, ext));
             if filepath.exists() {
                 return fs::read_to_string(&filepath)
                     .await
@@ -182,7 +188,10 @@ impl ToolResultPersister {
             format_size(result.original_size),
             result.filepath
         ));
-        message.push_str(&format!("Preview (first {}):\n", format_size(self.config.preview_size)));
+        message.push_str(&format!(
+            "Preview (first {}):\n",
+            format_size(self.config.preview_size)
+        ));
         message.push_str(&result.preview);
         if result.has_more {
             message.push_str("\n...\n");

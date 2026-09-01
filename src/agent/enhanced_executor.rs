@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 /// 错误扣留管理器 - 对标claude-code的withheld机制
-/// 
+///
 /// 用于扣留可恢复的错误，直到确定是否可以恢复
 pub struct ErrorWithholdingManager {
     /// 扣留的错误消息
@@ -52,22 +52,22 @@ impl ErrorWithholdingManager {
     pub fn should_withhold(&self, message: &StarMessage) -> Option<WithholdReason> {
         if let Some(content) = &message.content {
             let content_lower = content.to_lowercase();
-            
+
             // 检查是否是prompt-too-long错误
-            if content_lower.contains("prompt_too_long") 
+            if content_lower.contains("prompt_too_long")
                 || content_lower.contains("context_length_exceeded")
                 || content_lower.contains("maximum context length")
             {
                 return Some(WithholdReason::PromptTooLong);
             }
-            
+
             // 检查是否是max-output-tokens错误
-            if content_lower.contains("max_output_tokens") 
+            if content_lower.contains("max_output_tokens")
                 || content_lower.contains("output token limit")
             {
                 return Some(WithholdReason::MaxOutputTokens);
             }
-            
+
             // 检查是否是媒体大小错误
             if content_lower.contains("image_too_large")
                 || content_lower.contains("pdf_too_large")
@@ -233,19 +233,15 @@ impl BashClassifierChecker {
     }
 
     /// 开始推测性检查
-    pub fn start_speculative_check(
-        &mut self,
-        command: &str,
-        permission_mode: &str,
-    ) {
+    pub fn start_speculative_check(&mut self, command: &str, permission_mode: &str) {
         self.is_checking = true;
         self.check_result = None;
 
         // 简化的分类器逻辑
         let command_lower = command.to_lowercase();
-        
+
         // 危险命令
-        if command_lower.contains("rm -rf") 
+        if command_lower.contains("rm -rf")
             || command_lower.contains("rm -f")
             || command_lower.contains("format")
             || command_lower.contains("mkfs")
@@ -258,7 +254,7 @@ impl BashClassifierChecker {
         }
 
         // 网络命令
-        if command_lower.contains("curl") 
+        if command_lower.contains("curl")
             || command_lower.contains("wget")
             || command_lower.contains("nc ")
             || command_lower.contains("netcat")
@@ -403,12 +399,20 @@ impl ToolAttributeExtractor {
         if let Some(obj) = input.as_object() {
             match tool_name {
                 "Read" | "view_file" => {
-                    if let Some(path) = obj.get("file_path").or(obj.get("path")).and_then(|v| v.as_str()) {
+                    if let Some(path) = obj
+                        .get("file_path")
+                        .or(obj.get("path"))
+                        .and_then(|v| v.as_str())
+                    {
                         attributes.insert("file_path".to_string(), path.to_string());
                     }
                 }
                 "Edit" | "edit_file" | "Write" | "create_file" => {
-                    if let Some(path) = obj.get("file_path").or(obj.get("path")).and_then(|v| v.as_str()) {
+                    if let Some(path) = obj
+                        .get("file_path")
+                        .or(obj.get("path"))
+                        .and_then(|v| v.as_str())
+                    {
                         attributes.insert("file_path".to_string(), path.to_string());
                     }
                 }
@@ -443,7 +447,7 @@ impl ToolInputCleaner {
     pub fn clean_input(tool_name: &str, input: &mut Value) {
         // 剥离_simulatedSedEdit
         SimulatedSedEditStripper::strip(tool_name, input);
-        
+
         // 其他清理逻辑可以在这里添加
     }
 }
@@ -509,7 +513,8 @@ impl StreamingToolExecutorManager {
     /// 完成工具
     pub fn complete_tool(&mut self, tool_use_id: &str, result: Value) {
         self.in_progress.remove(tool_use_id);
-        self.completed_results.insert(tool_use_id.to_string(), result);
+        self.completed_results
+            .insert(tool_use_id.to_string(), result);
     }
 
     /// 获取已完成的结果
@@ -521,10 +526,10 @@ impl StreamingToolExecutorManager {
     /// 获取剩余结果
     pub fn get_remaining_results(&mut self) -> Vec<(String, Value)> {
         let mut results = Vec::new();
-        
+
         // 获取已完成的结果
         results.extend(self.completed_results.drain());
-        
+
         // 为进行中的工具生成合成结果
         for (tool_use_id, tool) in self.in_progress.drain() {
             results.push((
@@ -535,7 +540,7 @@ impl StreamingToolExecutorManager {
                 }),
             ));
         }
-        
+
         results
     }
 
@@ -566,7 +571,7 @@ impl StreamingToolExecutorManager {
 }
 
 /// 增强的工具执行器 - 整合所有增强功能
-/// 
+///
 /// 对标claude-code-main的toolExecution.ts
 /// 提供完整的工具执行流程，包括验证、权限检查、Hook执行等
 pub struct EnhancedToolExecutor {
@@ -587,7 +592,7 @@ pub struct EnhancedToolExecutor {
 }
 
 /// 工具使用摘要生成器
-/// 
+///
 /// 对标claude-code-main的toolUseSummaryGenerator.ts
 pub struct ToolUseSummaryGenerator;
 
@@ -645,7 +650,7 @@ impl ToolUseSummaryGenerator {
 }
 
 /// 结构化输出捕获器
-/// 
+///
 /// 对标claude-code-main的structured output捕获
 pub struct StructuredOutputCapture {
     /// 捕获的输出
@@ -766,9 +771,12 @@ impl EnhancedToolExecutor {
         // 4. 检查Bash分类器
         if tool_name == "Bash" || tool_name == "bash" {
             if let Some(command) = cleaned_input.get("command").and_then(|v| v.as_str()) {
-                self.bash_classifier.start_speculative_check(command, "default");
-                
-                if let Some(BashClassifierResult::Deny { reason }) = self.bash_classifier.get_result() {
+                self.bash_classifier
+                    .start_speculative_check(command, "default");
+
+                if let Some(BashClassifierResult::Deny { reason }) =
+                    self.bash_classifier.get_result()
+                {
                     self.span_manager.end_span(false, Some(reason.clone()));
                     return serde_json::json!({
                         "error": reason,
@@ -779,7 +787,8 @@ impl EnhancedToolExecutor {
         }
 
         // 5. 添加到流式执行器
-        self.streaming_executor.add_tool(tool_name, tool_use_id, is_concurrency_safe);
+        self.streaming_executor
+            .add_tool(tool_name, tool_use_id, is_concurrency_safe);
 
         // 6. 模拟工具执行（实际实现会调用真实的工具）
         let result = serde_json::json!({
@@ -788,7 +797,8 @@ impl EnhancedToolExecutor {
         });
 
         // 7. 捕获结构化输出
-        self.structured_output.capture(tool_name, tool_use_id, result.clone());
+        self.structured_output
+            .capture(tool_name, tool_use_id, result.clone());
 
         // 8. 生成摘要
         let _summary = self.summary_generator.generate_summary(
@@ -798,7 +808,8 @@ impl EnhancedToolExecutor {
         );
 
         // 9. 完成工具
-        self.streaming_executor.complete_tool(tool_use_id, result.clone());
+        self.streaming_executor
+            .complete_tool(tool_use_id, result.clone());
 
         // 10. 结束span
         self.span_manager.end_span(true, None);
@@ -811,8 +822,11 @@ impl EnhancedToolExecutor {
         // 检查是否应该扣留错误
         let mock_message = StarMessage::system(error);
         if let Some(reason) = self.error_withholding.should_withhold(&mock_message) {
-            self.error_withholding.withhold_message(mock_message, reason.clone());
-            return ErrorHandlingResult::Withheld { reason: reason.clone() };
+            self.error_withholding
+                .withhold_message(mock_message, reason.clone());
+            return ErrorHandlingResult::Withheld {
+                reason: reason.clone(),
+            };
         }
 
         // 检查是否是可恢复的错误
@@ -850,13 +864,13 @@ mod tests {
     #[test]
     fn test_error_withholding_manager() {
         let mut manager = ErrorWithholdingManager::new();
-        
+
         let msg = StarMessage::system("Error: prompt_too_long");
         assert_eq!(
             manager.should_withhold(&msg),
             Some(WithholdReason::PromptTooLong)
         );
-        
+
         manager.withhold_message(msg, WithholdReason::PromptTooLong);
         assert_eq!(manager.get_withheld_messages().len(), 1);
     }
@@ -864,13 +878,13 @@ mod tests {
     #[test]
     fn test_bash_classifier_checker() {
         let mut checker = BashClassifierChecker::new();
-        
+
         checker.start_speculative_check("rm -rf /", "default");
         assert!(matches!(
             checker.get_result(),
             Some(BashClassifierResult::Deny { .. })
         ));
-        
+
         checker.start_speculative_check("ls -la", "default");
         assert!(matches!(
             checker.get_result(),
@@ -884,7 +898,7 @@ mod tests {
             "command": "sed 's/old/new/g' file.txt",
             "_simulatedSedEdit": {"filePath": "file.txt"}
         });
-        
+
         let stripped = SimulatedSedEditStripper::strip("Bash", &mut input);
         assert!(stripped);
         assert!(!input.as_object().unwrap().contains_key("_simulatedSedEdit"));
@@ -893,13 +907,13 @@ mod tests {
     #[test]
     fn test_tool_span_manager() {
         let mut manager = ToolSpanManager::new();
-        
+
         let mut attributes = HashMap::new();
         attributes.insert("file_path".to_string(), "/tmp/test.txt".to_string());
-        
+
         manager.start_span("Read", attributes);
         assert!(manager.get_current_span().is_some());
-        
+
         manager.end_span(true, None);
         assert!(manager.get_current_span().is_none());
         assert_eq!(manager.get_span_history().len(), 1);
@@ -912,21 +926,24 @@ mod tests {
             "offset": 0,
             "limit": 100,
         });
-        
+
         let attributes = ToolAttributeExtractor::extract("Read", &input);
-        assert_eq!(attributes.get("file_path"), Some(&"/tmp/test.txt".to_string()));
+        assert_eq!(
+            attributes.get("file_path"),
+            Some(&"/tmp/test.txt".to_string())
+        );
     }
 
     #[test]
     fn test_streaming_tool_executor() {
         let mut executor = StreamingToolExecutorManager::new(vec!["Read".to_string()]);
-        
+
         executor.add_tool("Read", "tool1", true);
         assert_eq!(executor.in_progress_count(), 1);
-        
+
         executor.complete_tool("tool1", serde_json::json!({"result": "ok"}));
         assert_eq!(executor.in_progress_count(), 0);
-        
+
         let results = executor.get_completed_results();
         assert_eq!(results.len(), 1);
     }

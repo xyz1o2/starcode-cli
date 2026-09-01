@@ -1,7 +1,7 @@
 //! Event bus for publishing and subscribing to events
 
-use tokio::sync::broadcast;
 use super::types::SessionEvent;
+use tokio::sync::broadcast;
 
 /// Event bus for publishing and subscribing to session events
 #[derive(Clone)]
@@ -17,7 +17,10 @@ impl EventBus {
     }
 
     /// Publish an event to all subscribers
-    pub fn publish(&self, event: SessionEvent) -> Result<(), broadcast::error::SendError<SessionEvent>> {
+    pub fn publish(
+        &self,
+        event: SessionEvent,
+    ) -> Result<(), broadcast::error::SendError<SessionEvent>> {
         self.sender.send(event)?;
         Ok(())
     }
@@ -38,4 +41,3 @@ impl Default for EventBus {
         Self::new(1000)
     }
 }
- 

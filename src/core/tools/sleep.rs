@@ -25,11 +25,7 @@ pub struct WaitInvocation {
 
 impl ToolInvocation for WaitInvocation {
     fn get_description(&self) -> String {
-        let reason = self
-            .params
-            .reason
-            .as_deref()
-            .unwrap_or("waiting");
+        let reason = self.params.reason.as_deref().unwrap_or("waiting");
         format!("Wait {:.1}s ({})", self.params.seconds, reason)
     }
 

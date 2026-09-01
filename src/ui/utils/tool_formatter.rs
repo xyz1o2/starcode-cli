@@ -92,7 +92,11 @@ fn truncate_args(tool_name: &str, args: &str) -> String {
                 let q = query.as_str().unwrap_or("");
                 let preview = truncate_string(q, 40);
                 if let Some(path) = parsed.get("path").or_else(|| parsed.get("glob")) {
-                    return format!("{} in {}", preview, format_display_path(path.as_str().unwrap_or(".")));
+                    return format!(
+                        "{} in {}",
+                        preview,
+                        format_display_path(path.as_str().unwrap_or("."))
+                    );
                 }
                 return preview;
             }

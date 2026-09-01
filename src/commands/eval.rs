@@ -44,9 +44,9 @@ pub async fn run(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
             }
             "--trials" => {
                 if let Some(value) = args.get(i + 1) {
-                    trials = value
-                        .parse::<usize>()
-                        .map_err(|_| format!("--trials must be a positive integer, got: {}", value))?;
+                    trials = value.parse::<usize>().map_err(|_| {
+                        format!("--trials must be a positive integer, got: {}", value)
+                    })?;
                     if trials == 0 {
                         return Err("--trials must be at least 1".to_string());
                     }
@@ -84,8 +84,7 @@ pub async fn run(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     let tasks_path = tasks_path.unwrap_or_else(|| cwd.join("eval").join("tasks.json"));
     let output_path = output_path.unwrap_or_else(|| cwd.join(".star").join("eval-results.json"));
 
-    let report =
-        crate::agent::eval_harness::run_eval(&tasks_path, &output_path, trials).await?;
+    let report = crate::agent::eval_harness::run_eval(&tasks_path, &output_path, trials).await?;
     let summary = &report.summary;
 
     let mut message = format!(
@@ -112,10 +111,7 @@ pub async fn run(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
             .map(|r| r.id.as_str())
             .collect();
         if !failed_live.is_empty() {
-            message.push_str(&format!(
-                ". Live failed: {}",
-                failed_live.join(", ")
-            ));
+            message.push_str(&format!(". Live failed: {}", failed_live.join(", ")));
         }
     }
 
@@ -150,7 +146,12 @@ pub async fn run(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
                 if r.outcome.failed_rules.is_empty() {
                     format!("{}#{}", r.id, r.trial_num)
                 } else {
-                    format!("{}#{}[{}]", r.id, r.trial_num, r.outcome.failed_rules.join(","))
+                    format!(
+                        "{}#{}[{}]",
+                        r.id,
+                        r.trial_num,
+                        r.outcome.failed_rules.join(",")
+                    )
                 }
             })
             .collect();
@@ -169,7 +170,9 @@ pub async fn run(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
                 let regressions: Vec<_> = deltas
                     .iter()
                     .filter_map(|d| match &d.change {
-                        BaselineChange::Regression { .. } => Some(format!("{}[REGRESSION]", d.task_id)),
+                        BaselineChange::Regression { .. } => {
+                            Some(format!("{}[REGRESSION]", d.task_id))
+                        }
                         BaselineChange::Removed => Some(format!("{}[REMOVED]", d.task_id)),
                         BaselineChange::New => Some(format!("{}[NEW]", d.task_id)),
                     })

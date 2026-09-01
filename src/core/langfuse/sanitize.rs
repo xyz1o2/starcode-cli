@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 /// 数据清理器
-/// 
+///
 /// 清理敏感信息，准备发送到Langfuse
 pub struct DataSanitizer {
     /// 是否启用清理
@@ -79,9 +79,8 @@ impl DataSanitizer {
                 Value::Object(sanitized)
             }
             Value::Array(arr) => {
-                let sanitized: Vec<Value> = arr.into_iter()
-                    .map(|v| self.sanitize_value(v))
-                    .collect();
+                let sanitized: Vec<Value> =
+                    arr.into_iter().map(|v| self.sanitize_value(v)).collect();
                 Value::Array(sanitized)
             }
             Value::String(s) => {
@@ -100,9 +99,9 @@ impl DataSanitizer {
     /// 检查是否是敏感字段
     fn is_sensitive_field(&self, field: &str) -> bool {
         let field_lower = field.to_lowercase();
-        self.sensitive_patterns.iter().any(|pattern| {
-            field_lower.contains(&pattern.to_lowercase())
-        })
+        self.sensitive_patterns
+            .iter()
+            .any(|pattern| field_lower.contains(&pattern.to_lowercase()))
     }
 
     /// 清理消息内容
@@ -133,7 +132,9 @@ impl DataSanitizer {
                     for i in 1..parts.len() {
                         // 替换等号后的值
                         let value_part = parts[i];
-                        if let Some(end_pos) = value_part.find(|c: char| c.is_whitespace() || c == ',' || c == ';') {
+                        if let Some(end_pos) =
+                            value_part.find(|c: char| c.is_whitespace() || c == ',' || c == ';')
+                        {
                             new_result.push_str(pattern);
                             new_result.push_str(replacement);
                             new_result.push_str(&value_part[end_pos..]);

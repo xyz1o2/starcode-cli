@@ -81,7 +81,7 @@ pub fn render_history_search(f: &mut Frame, state: &HistorySearchState, area: Re
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Search input
-            Constraint::Min(5),   // Results
+            Constraint::Min(5),    // Results
         ])
         .split(area);
 
@@ -113,10 +113,7 @@ pub fn render_history_search(f: &mut Frame, state: &HistorySearchState, area: Re
                     format!("{:<8}", entry.role),
                     Style::default().fg(role_color),
                 ),
-                Span::styled(
-                    entry.content.clone(),
-                    Style::default().fg(Color::White),
-                ),
+                Span::styled(entry.content.clone(), Style::default().fg(Color::White)),
             ]);
             ListItem::new(line)
         })

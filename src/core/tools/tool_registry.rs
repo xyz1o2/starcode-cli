@@ -151,4 +151,3 @@ impl ToolRegistry {
         declarations
     }
 }
-

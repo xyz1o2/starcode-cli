@@ -1,9 +1,9 @@
-use crate::types::StarMessage;
 use super::CompactStrategy;
+use crate::types::StarMessage;
 use async_trait::async_trait;
 
 /// 微压缩策略
-/// 
+///
 /// 轻量级压缩，更频繁地触发（每 N 条消息）
 /// 只压缩大型工具输出（截断到前/后 N 行）
 /// 保留：所有用户消息、所有助手消息、工具调用元数据
@@ -43,7 +43,9 @@ impl MicroCompactStrategy {
 
     /// 检查是否应该触发压缩
     fn should_trigger(&self) -> bool {
-        let count = self.message_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let count = self
+            .message_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         count % self.trigger_frequency == 0
     }
 
@@ -112,7 +114,8 @@ impl CompactStrategy for MicroCompactStrategy {
         let mut changed = false;
 
         // 首先收集工具名称映射（tool_call_id -> tool_name）
-        let mut tool_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut tool_name_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for msg in messages.iter() {
             if msg.role == "assistant" {
                 if let Some(tool_calls) = &msg.tool_calls {
@@ -126,7 +129,9 @@ impl CompactStrategy for MicroCompactStrategy {
         for msg in messages {
             if msg.role == "tool" {
                 // 检查工具是否豁免（如 Read、Grep、Glob 等）
-                let is_exempt = msg.tool_call_id.as_ref()
+                let is_exempt = msg
+                    .tool_call_id
+                    .as_ref()
                     .and_then(|id| tool_name_map.get(id))
                     .map(|tool_name| EXEMPT_TOOLS.iter().any(|e| e == tool_name))
                     .unwrap_or(false);
@@ -151,9 +156,7 @@ impl CompactStrategy for MicroCompactStrategy {
         }
 
         if changed {
-            crate::utils::logging::append_debug_log_line(
-                "[COMPACT] Applied micro compression"
-            );
+            crate::utils::logging::append_debug_log_line("[COMPACT] Applied micro compression");
         }
 
         result
@@ -163,4 +166,3 @@ impl CompactStrategy for MicroCompactStrategy {
         200 // 中等优先级
     }
 }
- 

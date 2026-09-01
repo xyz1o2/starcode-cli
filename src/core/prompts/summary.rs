@@ -1,6 +1,5 @@
 /// Conversation summary prompts for context compression.
 /// Loaded from centralized .md file for easy maintenance.
-
 use crate::core::prompts::loader;
 
 /// Summary prompt for context compression - loaded from file

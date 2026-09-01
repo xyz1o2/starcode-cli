@@ -114,7 +114,9 @@ pub fn highlight_line(line: &str, language: &str) -> Line<'static> {
     let theme = &THEME_SET.themes["base16-ocean.dark"];
     let mut highlighter = HighlightLines::new(syntax, theme);
 
-    let ranges = highlighter.highlight_line(line, &SYNTAX_SET).unwrap_or_default();
+    let ranges = highlighter
+        .highlight_line(line, &SYNTAX_SET)
+        .unwrap_or_default();
     let spans: Vec<Span<'static>> = ranges
         .into_iter()
         .map(|(style, text)| Span::styled(text.to_string(), to_ratatui_style(style)))

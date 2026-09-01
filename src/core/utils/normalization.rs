@@ -163,4 +163,3 @@ fn truncate_value(v: Value, string_limit: usize, array_limit: usize, changed: &m
         _ => v,
     }
 }
- 

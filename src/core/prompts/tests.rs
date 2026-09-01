@@ -143,7 +143,10 @@ fn test_tool_description_resolution() {
     let desc = tool_descriptions::resolve_tool_description("Read");
     assert!(desc.is_some(), "Read 应有 .md 描述");
     let desc = desc.unwrap();
-    assert!(desc.contains("Read file"), "描述应为 frontmatter 精简句: {desc}");
+    assert!(
+        desc.contains("Read file"),
+        "描述应为 frontmatter 精简句: {desc}"
+    );
     assert!(!desc.contains("<!--"), "描述不应含 frontmatter 注释");
 
     let edit_desc = tool_descriptions::resolve_tool_description("Edit");
@@ -161,9 +164,15 @@ fn test_tool_description_resolution() {
 #[test]
 fn test_description_key_matches_active_tools() {
     let active = HashSet::from(["Read".to_string(), "Edit".to_string()]);
-    assert!(tool_descriptions::description_key_matches_active_tools("readfile", &active));
-    assert!(tool_descriptions::description_key_matches_active_tools("edit", &active));
-    assert!(!tool_descriptions::description_key_matches_active_tools("Bash", &active));
+    assert!(tool_descriptions::description_key_matches_active_tools(
+        "readfile", &active
+    ));
+    assert!(tool_descriptions::description_key_matches_active_tools(
+        "edit", &active
+    ));
+    assert!(!tool_descriptions::description_key_matches_active_tools(
+        "Bash", &active
+    ));
 }
 
 #[test]

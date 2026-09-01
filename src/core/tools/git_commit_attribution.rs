@@ -88,10 +88,7 @@ impl ToolInvocation for GitCommitAttributionInvocation {
             let hash = hash.trim();
 
             Ok(ToolResult {
-                llm_content: Some(format!(
-                    "Committed as {}:\n{}",
-                    hash, commit_message
-                )),
+                llm_content: Some(format!("Committed as {}:\n{}", hash, commit_message)),
                 return_display: Some(format!("Committed {}", hash)),
                 output: format!(
                     "Commit {} created.\n\n{}\n\n{}",

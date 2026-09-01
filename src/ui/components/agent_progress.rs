@@ -1,8 +1,7 @@
 /// Agent进度行组件
-/// 
+///
 /// 对标claude-code-main的AgentProgressLine组件
 /// 显示Agent执行进度
-
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -47,7 +46,7 @@ fn format_tokens(count: u32) -> String {
 }
 
 /// 渲染Agent进度行
-/// 
+///
 /// 输出格式：
 /// ```
 /// ├─ AgentType (Description)
@@ -62,34 +61,44 @@ pub fn render_agent_progress_line(
 ) -> Line<'static> {
     let tree_char = if is_last { "└─" } else { "├─" };
     let is_backgrounded = progress.is_async && progress.is_resolved;
-    
+
     // 确定状态文本
     let status_text = if !progress.is_resolved {
-        progress.last_tool_info.as_deref().unwrap_or("Initializing…")
+        progress
+            .last_tool_info
+            .as_deref()
+            .unwrap_or("Initializing…")
     } else if is_backgrounded {
-        progress.task_description.as_deref().unwrap_or("Running in the background")
+        progress
+            .task_description
+            .as_deref()
+            .unwrap_or("Running in the background")
     } else {
         "Done"
     };
-    
+
     let mut spans = Vec::new();
-    
+
     // 树形字符
     spans.push(Span::styled(
         format!("   {} ", tree_char),
         Style::default().fg(Color::DarkGray),
     ));
-    
+
     // Agent类型/名称
     if progress.hide_type {
-        let display_name = progress.name.as_deref()
+        let display_name = progress
+            .name
+            .as_deref()
             .or(progress.description.as_deref())
             .unwrap_or(&progress.agent_type);
         spans.push(Span::styled(
             display_name.to_string(),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ));
-        
+
         if let (Some(name), Some(desc)) = (&progress.name, &progress.description) {
             spans.push(Span::styled(
                 format!(": {}", desc),
@@ -103,7 +112,7 @@ pub fn render_agent_progress_line(
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ));
-        
+
         if let Some(desc) = &progress.description {
             spans.push(Span::styled(
                 format!(" ({})", desc),
@@ -111,7 +120,7 @@ pub fn render_agent_progress_line(
             ));
         }
     }
-    
+
     // 状态文本
     let status_color = if progress.is_resolved {
         if progress.is_error {
@@ -122,12 +131,12 @@ pub fn render_agent_progress_line(
     } else {
         Color::Yellow
     };
-    
+
     spans.push(Span::styled(
         format!(" {}", status_text),
         Style::default().fg(status_color),
     ));
-    
+
     // 工具使用次数
     if progress.tool_use_count > 0 {
         spans.push(Span::styled(
@@ -135,7 +144,7 @@ pub fn render_agent_progress_line(
             Style::default().fg(Color::DarkGray),
         ));
     }
-    
+
     // Token使用量
     if let Some(tokens) = progress.tokens {
         spans.push(Span::styled(
@@ -143,19 +152,19 @@ pub fn render_agent_progress_line(
             Style::default().fg(Color::DarkGray),
         ));
     }
-    
+
     Line::from(spans)
 }
 
 /// 渲染Agent进度树
-/// 
+///
 /// 显示多个Agent的进度树
 pub fn render_agent_progress_tree(
     progresses: &[AgentProgress],
     theme_color: Color,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    
+
     for (i, progress) in progresses.iter().enumerate() {
         let is_last = i == progresses.len() - 1;
         lines.push(render_agent_progress_line(
@@ -165,7 +174,7 @@ pub fn render_agent_progress_tree(
             None,
         ));
     }
-    
+
     lines
 }
 
@@ -174,13 +183,19 @@ pub fn render_agent_progress_compact(progresses: &[AgentProgress]) -> String {
     if progresses.is_empty() {
         return String::new();
     }
-    
+
     let running = progresses.iter().filter(|p| !p.is_resolved).count();
-    let completed = progresses.iter().filter(|p| p.is_resolved && !p.is_error).count();
-    let failed = progresses.iter().filter(|p| p.is_resolved && p.is_error).count();
-    
+    let completed = progresses
+        .iter()
+        .filter(|p| p.is_resolved && !p.is_error)
+        .count();
+    let failed = progresses
+        .iter()
+        .filter(|p| p.is_resolved && p.is_error)
+        .count();
+
     let mut parts = Vec::new();
-    
+
     if running > 0 {
         parts.push(format!("{} running", running));
     }
@@ -190,6 +205,6 @@ pub fn render_agent_progress_compact(progresses: &[AgentProgress]) -> String {
     if failed > 0 {
         parts.push(format!("{} failed", failed));
     }
-    
+
     parts.join(", ")
 }

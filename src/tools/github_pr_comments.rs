@@ -254,7 +254,10 @@ async fn resolve_repo_pr(
     } else if let Some(r) = pr_view.head_repository.or(pr_view.base_repository) {
         (r.owner.login, r.name)
     } else {
-        return Err("Cannot parse repo from gh pr view, please provide repo=owner/repo explicitly".to_string());
+        return Err(
+            "Cannot parse repo from gh pr view, please provide repo=owner/repo explicitly"
+                .to_string(),
+        );
     };
 
     Ok((repo_name.0, repo_name.1, pr, pr_view.head_ref_name))

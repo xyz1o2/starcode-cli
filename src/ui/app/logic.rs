@@ -3,9 +3,7 @@ use crate::runtime::messages::AgentRequest;
 use crate::types::{ChatEntry, ChatEntryType, ToolResult};
 use crate::ui::services::at_processor;
 use crate::ui::state::ChatState;
-use crate::ui::utils::text::{
-    is_status_text, sanitize_filename, strip_tool_running_prefix,
-};
+use crate::ui::utils::text::{is_status_text, sanitize_filename, strip_tool_running_prefix};
 use crate::ui::utils::transcript::{append_transcript_event, build_user_transcript_payload};
 use serde_json::json;
 use std::time::Instant;
@@ -119,10 +117,7 @@ pub fn recover_missing_tool_results(state: &mut ChatState, message_id: u64, reas
 
         // Silently mark missing tool as failed — no alarming warning message.
         // The tool call entry just transitions to a clean "interrupted" state.
-        let content = format!(
-            "{} (interrupted)",
-            brief
-        );
+        let content = format!("{} (interrupted)", brief);
 
         state.chat_history[i].entry_type = ChatEntryType::ToolResult;
         state.chat_history[i].content = content;
@@ -196,11 +191,10 @@ fn is_streaming_safe_command(input: &str) -> bool {
         // 无子命令限制的安全命令
         (
             Some(
-                "tasks" | "todos" | "stats" | "cost" | "tokens" | "usage" | "status"
-                | "about" | "version" | "help" | "tools" | "bashes" | "context"
-                | "files" | "diff" | "export" | "doctor" | "bug" | "feedback"
-                | "ide" | "theme" | "lang" | "vim" | "models" | "model"
-                | "model-info" | "provider-info" | "token-count" | "workflows",
+                "tasks" | "todos" | "stats" | "cost" | "tokens" | "usage" | "status" | "about"
+                | "version" | "help" | "tools" | "bashes" | "context" | "files" | "diff" | "export"
+                | "doctor" | "bug" | "feedback" | "ide" | "theme" | "lang" | "vim" | "models"
+                | "model" | "model-info" | "provider-info" | "token-count" | "workflows",
             ),
             _,
         ) => true,
@@ -228,7 +222,11 @@ pub async fn enqueue_user_message(
     // Save to command history (deduplicate consecutive entries)
     let trimmed = user_input.trim().to_string();
     if !trimmed.is_empty() {
-        let is_duplicate = state.command_history.front().map(|last| last == &trimmed).unwrap_or(false);
+        let is_duplicate = state
+            .command_history
+            .front()
+            .map(|last| last == &trimmed)
+            .unwrap_or(false);
         if !is_duplicate {
             state.command_history.push_front(trimmed.clone());
             if state.command_history.len() > 100 {
@@ -243,7 +241,9 @@ pub async fn enqueue_user_message(
 
     if state.pending_confirmation_entry_idx.is_some() {
         state.pending_user_messages.push_back(user_input.clone());
-        state.queued_messages_display.push_back((user_input, Instant::now()));
+        state
+            .queued_messages_display
+            .push_back((user_input, Instant::now()));
         let n = state.pending_user_messages.len();
         state.current_status_line = Some(format!("\u{23f3} {} pending", n));
         return Ok(());
@@ -255,7 +255,9 @@ pub async fn enqueue_user_message(
 
     if (state.is_processing || state.is_streaming) && !is_safe_command_during_stream {
         state.pending_user_messages.push_back(user_input.clone());
-        state.queued_messages_display.push_back((user_input, Instant::now()));
+        state
+            .queued_messages_display
+            .push_back((user_input, Instant::now()));
         let n = state.pending_user_messages.len();
         state.current_status_line = Some(format!("\u{23f3} {} pending", n));
         return Ok(());

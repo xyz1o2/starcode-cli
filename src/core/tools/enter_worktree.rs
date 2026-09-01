@@ -134,7 +134,11 @@ impl ToolInvocation for EnterWorktreeInvocation {
             } else {
                 let dir = std::env::temp_dir().join(format!(
                     "star-worktree-{}",
-                    uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0000")
+                    uuid::Uuid::new_v4()
+                        .to_string()
+                        .split('-')
+                        .next()
+                        .unwrap_or("0000")
                 ));
                 dir
             };
@@ -142,63 +146,64 @@ impl ToolInvocation for EnterWorktreeInvocation {
             // Create the worktree from current branch
             let cwd = std::env::current_dir().unwrap_or_default();
             let worktree_path_clone = worktree_path.clone();
-            
-            let result = tokio::task::spawn_blocking(move || -> Result<ToolResult, Box<dyn std::error::Error + Send + Sync>> {
-                let branch = std::process::Command::new("git")
-                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                    .current_dir(&cwd)
-                    .output()
-                    .ok()
-                    .and_then(|o| String::from_utf8(o.stdout).ok())
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_else(|| "HEAD".to_string());
 
-                let output = std::process::Command::new("git")
-                    .args([
-                        "worktree",
-                        "add",
-                        "--detach",
-                        worktree_path_clone.to_str().unwrap_or("/tmp/star-worktree"),
-                        &branch,
-                    ])
-                    .current_dir(&cwd)
-                    .output();
+            let result = tokio::task::spawn_blocking(
+                move || -> Result<ToolResult, Box<dyn std::error::Error + Send + Sync>> {
+                    let branch = std::process::Command::new("git")
+                        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                        .current_dir(&cwd)
+                        .output()
+                        .ok()
+                        .and_then(|o| String::from_utf8(o.stdout).ok())
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|| "HEAD".to_string());
 
-                match output {
-                    Ok(out) if out.status.success() => {
-                        let path_str = worktree_path_clone.display().to_string();
-                        Ok(ToolResult {
-                            llm_content: Some(format!(
-                                "Worktree created at: {}\n\
+                    let output = std::process::Command::new("git")
+                        .args([
+                            "worktree",
+                            "add",
+                            "--detach",
+                            worktree_path_clone.to_str().unwrap_or("/tmp/star-worktree"),
+                            &branch,
+                        ])
+                        .current_dir(&cwd)
+                        .output();
+
+                    match output {
+                        Ok(out) if out.status.success() => {
+                            let path_str = worktree_path_clone.display().to_string();
+                            Ok(ToolResult {
+                                llm_content: Some(format!(
+                                    "Worktree created at: {}\n\
                                  You are now working in an isolated git worktree. \
                                  Changes here will not affect the main working directory. \
                                  Use 'exit_worktree' to clean up this worktree when done.\n\
                                  Current branch: {}",
-                                path_str, branch
-                            )),
-                            return_display: Some(format!(
-                                "Entered worktree: {}",
-                                path_str
-                            )),
-                            output: format!(
-                                "Created isolated worktree at {}\nWorking on branch: {}",
-                                path_str, branch
-                            ),
-                            error: None,
-                            data: Some(serde_json::json!({
-                                "worktree_path": path_str,
-                                "branch": branch,
-                                "worktree_active": true
-                            })),
-                        })
+                                    path_str, branch
+                                )),
+                                return_display: Some(format!("Entered worktree: {}", path_str)),
+                                output: format!(
+                                    "Created isolated worktree at {}\nWorking on branch: {}",
+                                    path_str, branch
+                                ),
+                                error: None,
+                                data: Some(serde_json::json!({
+                                    "worktree_path": path_str,
+                                    "branch": branch,
+                                    "worktree_active": true
+                                })),
+                            })
+                        }
+                        Ok(out) => {
+                            let stderr = String::from_utf8_lossy(&out.stderr);
+                            Err(format!("git worktree add failed: {}", stderr).into())
+                        }
+                        Err(e) => Err(format!("Failed to run git worktree add: {}", e).into()),
                     }
-                    Ok(out) => {
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        Err(format!("git worktree add failed: {}", stderr).into())
-                    }
-                    Err(e) => Err(format!("Failed to run git worktree add: {}", e).into()),
-                }
-            }).await.map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+                },
+            )
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 
             result.map_err(|e| -> Box<dyn std::error::Error> { e })
         })

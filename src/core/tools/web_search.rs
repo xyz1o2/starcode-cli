@@ -314,7 +314,9 @@ impl ToolInvocation for WebSearchInvocation {
             }
 
             if search_results.is_empty() {
-                crate::utils::logging::append_debug_log_line("[web_search] All engines returned no results");
+                crate::utils::logging::append_debug_log_line(
+                    "[web_search] All engines returned no results",
+                );
                 return Ok(CoreToolResult {
                     llm_content: None,
                     return_display: None,
@@ -332,7 +334,10 @@ impl ToolInvocation for WebSearchInvocation {
 
             // Format output
             let mut output = String::new();
-            output.push_str(&format!("Search results for \"{}\" (via {}):\n\n", query, source));
+            output.push_str(&format!(
+                "Search results for \"{}\" (via {}):\n\n",
+                query, source
+            ));
 
             for (i, result) in search_results.iter().enumerate() {
                 output.push_str(&format!(

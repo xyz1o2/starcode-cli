@@ -32,12 +32,7 @@ impl FeatureFlags {
             50,
         );
         self.register("context_collapse", "Enable context collapse", true, 100);
-        self.register(
-            "auto_compact",
-            "Enable auto context compression",
-            true,
-            100,
-        );
+        self.register("auto_compact", "Enable auto context compression", true, 100);
     }
 
     pub fn register(&mut self, name: &str, desc: &str, enabled: bool, rollout: u8) {
@@ -120,4 +115,3 @@ impl Default for FeatureFlags {
         Self::new()
     }
 }
- 

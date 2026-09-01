@@ -145,4 +145,3 @@ impl Storage {
         self.star_dir().join("session_messages.json")
     }
 }
- 

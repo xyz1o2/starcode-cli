@@ -42,8 +42,8 @@ pub(crate) fn render_non_tool_entry_blocks(
                 let reasoning_trimmed = reasoning_display.trim();
                 let is_meaningful = !reasoning_trimmed.is_empty()
                     && reasoning_trimmed != "empty"
-                    && reasoning_trimmed.len() > 5;  // 至少 5 个字符才算有意义
-                
+                    && reasoning_trimmed.len() > 5; // 至少 5 个字符才算有意义
+
                 if is_meaningful {
                     let is_expanded = state.expanded_thinking_indices.contains(&entry_idx);
 
@@ -60,8 +60,7 @@ pub(crate) fn render_non_tool_entry_blocks(
                         let dots = "...";
                         let token_unit =
                             crate::core::i18n::t("ui.thinking.token_unit", "tokens", "tokens");
-                        let token_count =
-                            state.token_count.max(reasoning_display.len() as u32 / 4);
+                        let token_count = state.token_count.max(reasoning_display.len() as u32 / 4);
 
                         let mut header_spans = vec![
                             Span::styled(
@@ -117,10 +116,7 @@ pub(crate) fn render_non_tool_entry_blocks(
                                         ));
                                     } else {
                                         // 续行缩进对齐
-                                        spans.push(Span::styled(
-                                            "  ",
-                                            Style::default(),
-                                        ));
+                                        spans.push(Span::styled("  ", Style::default()));
                                     }
                                     spans.push(Span::styled(
                                         wrapped.to_string(),
@@ -147,10 +143,7 @@ pub(crate) fn render_non_tool_entry_blocks(
                                 )
                             };
                             thinking_lines.push(Line::from(vec![
-                                Span::styled(
-                                    "│ ",
-                                    Style::default().fg(theme.thinking_fg),
-                                ),
+                                Span::styled("│ ", Style::default().fg(theme.thinking_fg)),
                                 Span::styled(
                                     format!("{}{}", placeholder_label, dots),
                                     Style::default()
@@ -164,17 +157,9 @@ pub(crate) fn render_non_tool_entry_blocks(
                         // Collapsed view: only show header line with thinking label and elapsed time
                         // No preview lines — user clicks to expand and see content
                         let thinking_label = if cancelling {
-                            crate::core::i18n::t(
-                                "ui.thinking.cancelling",
-                                "Canceling",
-                                "Canceling",
-                            )
+                            crate::core::i18n::t("ui.thinking.cancelling", "Canceling", "Canceling")
                         } else {
-                            crate::core::i18n::t(
-                                "ui.thinking.label",
-                                "Thinking",
-                                "Thinking",
-                            )
+                            crate::core::i18n::t("ui.thinking.label", "Thinking", "Thinking")
                         };
                         let dots = "...";
 
@@ -194,10 +179,7 @@ pub(crate) fn render_non_tool_entry_blocks(
                         ];
                         if elapsed_ms > 0 {
                             header_spans.push(Span::styled(
-                                format!(
-                                    " {}",
-                                    super::chat_history::format_elapsed(elapsed_ms)
-                                ),
+                                format!(" {}", super::chat_history::format_elapsed(elapsed_ms)),
                                 Style::default().fg(theme.thinking_fg),
                             ));
                         }
@@ -229,7 +211,12 @@ pub(crate) fn render_non_tool_entry_blocks(
                 };
                 let dots = "...";
                 let mut stream_spans = vec![
-                    Span::styled("✻ ", Style::default().fg(theme.thinking_fg).add_modifier(Modifier::ITALIC)),
+                    Span::styled(
+                        "✻ ",
+                        Style::default()
+                            .fg(theme.thinking_fg)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
                     Span::styled(
                         format!("{}{}", label, dots),
                         Style::default()
@@ -286,10 +273,7 @@ pub(crate) fn render_non_tool_entry_blocks(
             }
         }
         ChatEntryType::User => {
-            let user_prefix = Span::styled(
-                "> ",
-                Style::default().fg(theme.user_fg),
-            );
+            let user_prefix = Span::styled("> ", Style::default().fg(theme.user_fg));
             let display_content = crate::ui::utils::text::sanitize_for_tui(&entry.content);
             let mut user_lines =
                 crate::ui::utils::render::build_user_body_block(&display_content, wrap_width);
@@ -305,13 +289,19 @@ pub(crate) fn render_non_tool_entry_blocks(
 
     // Only show "Thinking..." when the model actually supports thinking
     // (detected from model list or model name). For non-thinking models, don't show any placeholder.
-    let is_thinking = state.current_model_supports_thinking
+    let is_thinking = state
+        .current_model_supports_thinking
         .unwrap_or_else(|| crate::core::config::models::is_thinking_model(&state.current_model));
     if blocks.is_empty() && is_streaming_now && is_thinking {
         let label = crate::core::i18n::t("ui.thinking.label", "Thinking", "Thinking");
         let dots = "...";
         let mut thinking_spans = vec![
-            Span::styled("✻ ", Style::default().fg(theme.thinking_fg).add_modifier(Modifier::ITALIC)),
+            Span::styled(
+                "✻ ",
+                Style::default()
+                    .fg(theme.thinking_fg)
+                    .add_modifier(Modifier::ITALIC),
+            ),
             Span::styled(
                 format!("{}{}", label, dots),
                 Style::default()
@@ -400,16 +390,18 @@ mod tests {
 
         let backend = TestBackend::new(80, 12);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal.draw(|f| {
-            let blocks = render_non_tool_entry_blocks(&state, &state.chat_history[0], 0, 70);
-            let mut lines: Vec<Line> = Vec::new();
-            for b in &blocks {
-                for l in b {
-                    lines.push(l.clone());
+        terminal
+            .draw(|f| {
+                let blocks = render_non_tool_entry_blocks(&state, &state.chat_history[0], 0, 70);
+                let mut lines: Vec<Line> = Vec::new();
+                for b in &blocks {
+                    for l in b {
+                        lines.push(l.clone());
+                    }
                 }
-            }
-            f.render_widget(ratatui::widgets::Paragraph::new(lines), f.area());
-        }).unwrap();
+                f.render_widget(ratatui::widgets::Paragraph::new(lines), f.area());
+            })
+            .unwrap();
 
         let buf = terminal.backend().buffer();
         let mut black_bg = 0usize;
@@ -422,6 +414,10 @@ mod tests {
                 }
             }
         }
-        assert_eq!(black_bg, 0, "found {} cells with black background", black_bg);
+        assert_eq!(
+            black_bg, 0,
+            "found {} cells with black background",
+            black_bg
+        );
     }
 }

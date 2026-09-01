@@ -245,7 +245,9 @@ impl RelevanceAnalyzer {
         }
 
         // 计算关键词匹配比例
-        let matches = self.context_keywords.iter()
+        let matches = self
+            .context_keywords
+            .iter()
             .filter(|keyword| content.contains(keyword.as_str()))
             .count();
 
@@ -282,7 +284,10 @@ impl RelevanceAnalyzer {
             };
 
             // 错误信息通常重要
-            if content.contains("error") || content.contains("failed") || content.contains("failure") {
+            if content.contains("error")
+                || content.contains("failed")
+                || content.contains("failure")
+            {
                 return 0.8;
             }
 
@@ -292,7 +297,8 @@ impl RelevanceAnalyzer {
             }
 
             // 搜索结果可能重要
-            if content.contains("found") || content.contains("match") || content.contains("result") {
+            if content.contains("found") || content.contains("match") || content.contains("result")
+            {
                 return 0.5;
             }
 
@@ -320,15 +326,13 @@ impl RelevanceAnalyzer {
         max_messages: usize,
     ) -> Vec<StarMessage> {
         let scores = self.score_messages(messages);
-        
+
         // 按综合分数排序
-        let mut indexed_scores: Vec<(usize, f64)> = scores
-            .iter()
-            .map(|s| (s.index, s.combined_score))
-            .collect();
-        
+        let mut indexed_scores: Vec<(usize, f64)> =
+            scores.iter().map(|s| (s.index, s.combined_score)).collect();
+
         indexed_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        
+
         // 过滤低分消息并限制数量
         let mut result = Vec::new();
         for (index, score) in indexed_scores {
@@ -336,14 +340,20 @@ impl RelevanceAnalyzer {
                 result.push(messages[index].clone());
             }
         }
-        
+
         // 按原始顺序排序
         result.sort_by(|a, b| {
-            let a_idx = messages.iter().position(|m| std::ptr::eq(m, a)).unwrap_or(0);
-            let b_idx = messages.iter().position(|m| std::ptr::eq(m, b)).unwrap_or(0);
+            let a_idx = messages
+                .iter()
+                .position(|m| std::ptr::eq(m, a))
+                .unwrap_or(0);
+            let b_idx = messages
+                .iter()
+                .position(|m| std::ptr::eq(m, b))
+                .unwrap_or(0);
             a_idx.cmp(&b_idx)
         });
-        
+
         result
     }
 }
@@ -351,16 +361,14 @@ impl RelevanceAnalyzer {
 /// 从文本中提取关键词
 fn extract_keywords(text: &str) -> Vec<String> {
     let stop_words: std::collections::HashSet<&str> = [
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "could",
-        "should", "may", "might", "can", "shall", "to", "of", "in", "for",
-        "on", "with", "at", "by", "from", "as", "into", "through", "during",
-        "before", "after", "above", "below", "between", "out", "off", "over",
-        "under", "again", "further", "then", "once", "here", "there", "when",
-        "where", "why", "how", "all", "both", "each", "few", "more", "most",
-        "other", "some", "such", "no", "nor", "not", "only", "own", "same",
-        "so", "than", "too", "very", "just", "because", "but", "and", "or",
-        "if", "while", "this", "that", "these", "those", "it", "its",
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+        "do", "does", "did", "will", "would", "could", "should", "may", "might", "can", "shall",
+        "to", "of", "in", "for", "on", "with", "at", "by", "from", "as", "into", "through",
+        "during", "before", "after", "above", "below", "between", "out", "off", "over", "under",
+        "again", "further", "then", "once", "here", "there", "when", "where", "why", "how", "all",
+        "both", "each", "few", "more", "most", "other", "some", "such", "no", "nor", "not", "only",
+        "own", "same", "so", "than", "too", "very", "just", "because", "but", "and", "or", "if",
+        "while", "this", "that", "these", "those", "it", "its",
     ]
     .iter()
     .cloned()
@@ -392,9 +400,9 @@ impl Default for PredictiveCompactConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            estimated_tool_result_growth: 15_000,  // 保守估计15K tokens
-            estimated_model_output: 8_000,         // 估计8K tokens
-            safety_margin: 0.1,                    // 10%安全边际
+            estimated_tool_result_growth: 15_000, // 保守估计15K tokens
+            estimated_model_output: 8_000,        // 估计8K tokens
+            safety_margin: 0.1,                   // 10%安全边际
         }
     }
 }
@@ -438,7 +446,7 @@ impl PredictiveCompactConfig {
 }
 
 /// 压缩管理器
-/// 
+///
 /// 管理多个压缩策略，按优先级顺序尝试应用
 pub struct CompactManager {
     strategies: Vec<Box<dyn CompactStrategy>>,
@@ -453,31 +461,33 @@ impl CompactManager {
 
         // 添加工具输出压缩策略（优先级最高）
         strategies.push(Box::new(
-            tool_output_compact::ToolOutputCompactStrategy::new()
+            tool_output_compact::ToolOutputCompactStrategy::new(),
         ));
 
         // 添加微压缩策略
         strategies.push(Box::new(
             micro_compact::MicroCompactStrategy::new()
-                .with_tool_output_threshold(config.micro_compact_threshold)
+                .with_tool_output_threshold(config.micro_compact_threshold),
         ));
 
         // 添加自动压缩策略
-        strategies.push(Box::new(
-            auto_compact::AutoCompactStrategy::new(config.clone())
-        ));
+        strategies.push(Box::new(auto_compact::AutoCompactStrategy::new(
+            config.clone(),
+        )));
 
         // 添加激进压缩策略（优先级最低）
-        strategies.push(Box::new(
-            snip_compact::SnipCompactStrategy::new()
-        ));
+        strategies.push(Box::new(snip_compact::SnipCompactStrategy::new()));
 
         // 按优先级排序
         strategies.sort_by_key(|s| s.priority());
 
         let predictive_config = PredictiveCompactConfig::from_env();
 
-        Self { strategies, config, predictive_config }
+        Self {
+            strategies,
+            config,
+            predictive_config,
+        }
     }
 
     /// 从环境变量创建压缩管理器
@@ -486,7 +496,7 @@ impl CompactManager {
     }
 
     /// 预测性压缩检查
-    /// 
+    ///
     /// 估算当前轮次增长是否会超过上下文窗口，如果是则提前压缩
     pub fn predictive_compact(&self, messages: &[StarMessage]) -> Option<CompactResult> {
         if !self.predictive_config.enabled {
@@ -505,11 +515,11 @@ impl CompactManager {
                     current_tokens, estimated_growth, projected_tokens, self.config.max_tokens
                 )
             );
-            
+
             // 尝试压缩到目标token数以下
             let target_tokens = self.config.target_tokens;
             let compact_result = self.compact(messages);
-            
+
             if compact_result.was_compacted {
                 return Some(compact_result);
             }
@@ -539,7 +549,7 @@ impl CompactManager {
     }
 
     /// 执行压缩
-    /// 
+    ///
     /// Preserves the system message prefix to maintain cache hit rates.
     /// Only compresses non-system messages (user/assistant/tool).
     pub fn compact(&self, messages: &[StarMessage]) -> CompactResult {
@@ -585,7 +595,7 @@ impl CompactManager {
                     // Reassemble: system prefix + compressed non-system messages
                     let mut new_messages = system_prefix.clone();
                     new_messages.extend(compressed_non_system);
-                    
+
                     return CompactResult {
                         messages: new_messages,
                         was_compacted: true,

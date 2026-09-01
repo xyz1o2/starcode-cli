@@ -112,7 +112,13 @@ pub async fn handle_request(
                 "[Worker] UpdateProviderConfig: provider={:?}, api_key={:?}, base_url={:?}, openai_compatible={:?}, model={:?}",
                 provider_id, key_preview, base_url, is_openai_compatible, model
             ));
-            agent.update_provider_config(provider_id, api_key, base_url, is_openai_compatible, model);
+            agent.update_provider_config(
+                provider_id,
+                api_key,
+                base_url,
+                is_openai_compatible,
+                model,
+            );
         }
         AgentRequest::MarkFilesAsRead(paths) => {
             for path in paths {

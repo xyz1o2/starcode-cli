@@ -1,8 +1,7 @@
 /// 摘要整合管理器
-/// 
+///
 /// 整合多个摘要为一个综合摘要
-
-use super::{Summary, SummaryType, SummaryStats};
+use super::{Summary, SummaryStats, SummaryType};
 
 /// 整合管理器
 pub struct ConsolidationManager;

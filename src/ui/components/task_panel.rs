@@ -35,15 +35,15 @@ impl std::fmt::Display for TaskViewMode {
 
 pub struct TaskPanel {
     pub is_visible: bool,
-    pub manually_hidden: bool,  // Track if user manually hid the panel
+    pub manually_hidden: bool, // Track if user manually hid the panel
     pub list_state: ListState,
     pub task_manager: TaskManager,
     pub editing_task_id: Option<String>,
     pub edit_mode: EditMode,
     pub edit_input: TextArea<'static>,
     pub view_mode: TaskViewMode,
-    pub auto_hide_at: Option<std::time::Instant>,  // When to auto-hide after all tasks complete
-    pub tasks_modified_since_load: bool,  // Track if tasks were modified since startup
+    pub auto_hide_at: Option<std::time::Instant>, // When to auto-hide after all tasks complete
+    pub tasks_modified_since_load: bool,          // Track if tasks were modified since startup
 }
 
 use std::path::PathBuf;
@@ -242,7 +242,11 @@ impl TaskPanel {
     pub fn auto_show_if_needed(&mut self) {
         // Only auto-show if tasks were modified since startup (e.g., via TodoWrite)
         if !self.is_visible && !self.manually_hidden && self.tasks_modified_since_load {
-            let has_active = self.task_manager.graph.nodes.values()
+            let has_active = self
+                .task_manager
+                .graph
+                .nodes
+                .values()
                 .any(|n| matches!(n.status, TaskStatus::Pending | TaskStatus::InProgress));
             if has_active {
                 self.is_visible = true;
@@ -250,7 +254,11 @@ impl TaskPanel {
         }
         // Reset manually_hidden when all tasks are complete
         if self.manually_hidden {
-            let has_active = self.task_manager.graph.nodes.values()
+            let has_active = self
+                .task_manager
+                .graph
+                .nodes
+                .values()
                 .any(|n| matches!(n.status, TaskStatus::Pending | TaskStatus::InProgress));
             if !has_active {
                 self.manually_hidden = false;
@@ -265,9 +273,13 @@ impl TaskPanel {
 
     /// Check if we should auto-hide (all tasks completed, 5s delay)
     pub fn check_auto_hide(&mut self) {
-        let has_active = self.task_manager.graph.nodes.values()
-            .any(|n| matches!(n.status, TaskStatus::Pending | TaskStatus::InProgress | TaskStatus::Blocked));
-        
+        let has_active = self.task_manager.graph.nodes.values().any(|n| {
+            matches!(
+                n.status,
+                TaskStatus::Pending | TaskStatus::InProgress | TaskStatus::Blocked
+            )
+        });
+
         if has_active {
             self.auto_hide_at = None;
         } else if !self.task_manager.graph.nodes.is_empty() && self.is_visible {
@@ -293,20 +305,38 @@ impl TaskPanel {
             return None;
         }
 
-        let completed = self.task_manager.graph.nodes.values()
+        let completed = self
+            .task_manager
+            .graph
+            .nodes
+            .values()
             .filter(|n| n.status == TaskStatus::Completed)
             .count();
-        let in_progress = self.task_manager.graph.nodes.values()
+        let in_progress = self
+            .task_manager
+            .graph
+            .nodes
+            .values()
             .filter(|n| n.status == TaskStatus::InProgress)
             .count();
-        let pending = self.task_manager.graph.nodes.values()
+        let pending = self
+            .task_manager
+            .graph
+            .nodes
+            .values()
             .filter(|n| n.status == TaskStatus::Pending)
             .count();
 
         if in_progress > 0 {
-            Some(format!("{} tasks ({} active, {} done)", total, in_progress, completed))
+            Some(format!(
+                "{} tasks ({} active, {} done)",
+                total, in_progress, completed
+            ))
         } else if pending > 0 {
-            Some(format!("{} tasks ({} pending, {} done)", total, pending, completed))
+            Some(format!(
+                "{} tasks ({} pending, {} done)",
+                total, pending, completed
+            ))
         } else {
             Some(format!("{} tasks (all done)", total))
         }

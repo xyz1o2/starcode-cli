@@ -171,10 +171,7 @@ pub enum StallDecision {
     /// 继续执行
     Continue,
     /// 当前停滞
-    Stalled {
-        elapsed_secs: f64,
-        stall_count: u32,
-    },
+    Stalled { elapsed_secs: f64, stall_count: u32 },
     /// 应该终止
     Abort {
         reason: String,

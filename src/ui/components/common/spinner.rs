@@ -21,10 +21,7 @@ pub fn get_ascii_spinner_frame(tick: u64) -> &'static str {
 
 /// 渲染 spinner
 pub fn render_spinner(tick: u64, color: Color) -> Span<'static> {
-    Span::styled(
-        get_spinner_frame(tick),
-        Style::default().fg(color),
-    )
+    Span::styled(get_spinner_frame(tick), Style::default().fg(color))
 }
 
 /// 渲染带文本的 spinner
@@ -62,22 +59,22 @@ pub fn render_shimmer_text(
 ) -> Vec<Span<'static>> {
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len();
-    
+
     if len == 0 {
         return vec![Span::raw("")];
     }
-    
+
     let cycle_len = len + 10;
     let pos = (tick / speed) as usize % cycle_len;
     let shimmer_start = if pos >= 10 { pos - 10 } else { 0 };
     let shimmer_end = pos.min(len);
-    
+
     let mut spans = Vec::new();
     let mut current_text = String::new();
-    
+
     for (i, ch) in chars.iter().enumerate() {
         let is_shimmer = i >= shimmer_start && i < shimmer_end;
-        
+
         if is_shimmer {
             // 先输出累积的普通文本
             if !current_text.is_empty() {
@@ -87,7 +84,7 @@ pub fn render_shimmer_text(
                 ));
                 current_text.clear();
             }
-            
+
             // 输出 shimmer 字符
             spans.push(Span::styled(
                 ch.to_string(),
@@ -97,24 +94,17 @@ pub fn render_shimmer_text(
             current_text.push(*ch);
         }
     }
-    
+
     // 输出剩余的普通文本
     if !current_text.is_empty() {
-        spans.push(Span::styled(
-            current_text,
-            Style::default().fg(base_color),
-        ));
+        spans.push(Span::styled(current_text, Style::default().fg(base_color)));
     }
-    
+
     spans
 }
 
 /// 渲染脉冲效果
-pub fn render_pulse_color(
-    base_color: Color,
-    tick: u64,
-    speed: u64,
-) -> Color {
+pub fn render_pulse_color(base_color: Color, tick: u64, speed: u64) -> Color {
     let phase = (tick / speed) % 6;
     let intensity = match phase {
         0 => 0.7,
@@ -124,15 +114,13 @@ pub fn render_pulse_color(
         4 => 0.85,
         _ => 0.7,
     };
-    
+
     match base_color {
-        Color::Rgb(r, g, b) => {
-            Color::Rgb(
-                (r as f64 * intensity) as u8,
-                (g as f64 * intensity) as u8,
-                (b as f64 * intensity) as u8,
-            )
-        }
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (r as f64 * intensity) as u8,
+            (g as f64 * intensity) as u8,
+            (b as f64 * intensity) as u8,
+        ),
         _ => base_color,
     }
 }
@@ -146,16 +134,9 @@ pub fn render_progress_spinner(
 ) -> Span<'static> {
     let filled = (progress * width as f32).round() as usize;
     let empty = width.saturating_sub(filled);
-    
+
     let spinner = get_spinner_frame(tick);
-    let bar = format!(
-        "[{}{}]",
-        "█".repeat(filled),
-        "░".repeat(empty)
-    );
-    
-    Span::styled(
-        format!("{} {}", spinner, bar),
-        Style::default().fg(color),
-    )
+    let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(empty));
+
+    Span::styled(format!("{} {}", spinner, bar), Style::default().fg(color))
 }

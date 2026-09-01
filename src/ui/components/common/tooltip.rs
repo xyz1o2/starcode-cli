@@ -19,7 +19,7 @@ pub fn render_tooltip(
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    
+
     match position {
         TooltipPosition::Top => {
             lines.push(render_tooltip_content(text, width, theme));
@@ -36,7 +36,7 @@ pub fn render_tooltip(
             lines.push(render_tooltip_content(text, width, theme));
         }
     }
-    
+
     lines
 }
 
@@ -47,42 +47,20 @@ fn render_tooltip_content(text: &str, width: usize, theme: &Theme) -> Line<'stat
     } else {
         text.to_string()
     };
-    
+
     Line::from(Span::styled(
         format!(" {} ", truncated),
-        Style::default()
-            .fg(theme.foreground)
-            .bg(theme.border),
+        Style::default().fg(theme.foreground).bg(theme.border),
     ))
 }
 
 /// 渲染工具提示箭头
 fn render_tooltip_arrow(position: TooltipPosition, theme: &Theme) -> Line<'static> {
     match position {
-        TooltipPosition::Top => {
-            Line::from(Span::styled(
-                "▲",
-                Style::default().fg(theme.border),
-            ))
-        }
-        TooltipPosition::Bottom => {
-            Line::from(Span::styled(
-                "▼",
-                Style::default().fg(theme.border),
-            ))
-        }
-        TooltipPosition::Left => {
-            Line::from(Span::styled(
-                "◄",
-                Style::default().fg(theme.border),
-            ))
-        }
-        TooltipPosition::Right => {
-            Line::from(Span::styled(
-                "►",
-                Style::default().fg(theme.border),
-            ))
-        }
+        TooltipPosition::Top => Line::from(Span::styled("▲", Style::default().fg(theme.border))),
+        TooltipPosition::Bottom => Line::from(Span::styled("▼", Style::default().fg(theme.border))),
+        TooltipPosition::Left => Line::from(Span::styled("◄", Style::default().fg(theme.border))),
+        TooltipPosition::Right => Line::from(Span::styled("►", Style::default().fg(theme.border))),
     }
 }
 
@@ -100,19 +78,19 @@ pub fn render_key_hint(key: &str, description: &str, theme: &Theme) -> Span<'sta
 /// 渲染多个快捷键提示
 pub fn render_key_hints(hints: &[(&str, &str)], theme: &Theme) -> Line<'static> {
     let mut spans = Vec::new();
-    
+
     for (i, (key, description)) in hints.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled("  ", Style::default()));
         }
-        
+
         spans.push(render_key_hint(key, description, theme));
         spans.push(Span::styled(
             format!(" {}", description),
             Style::default().fg(theme.secondary),
         ));
     }
-    
+
     Line::from(spans)
 }
 
@@ -126,48 +104,32 @@ pub fn render_help_text(text: &str) -> Line<'static> {
 
 /// 渲染错误提示
 pub fn render_error_tooltip(text: &str) -> Vec<Line<'static>> {
-    vec![
-        Line::from(Span::styled(
-            format!(" ✗ {} ", text),
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::Red),
-        )),
-    ]
+    vec![Line::from(Span::styled(
+        format!(" ✗ {} ", text),
+        Style::default().fg(Color::White).bg(Color::Red),
+    ))]
 }
 
 /// 渲染成功提示
 pub fn render_success_tooltip(text: &str) -> Vec<Line<'static>> {
-    vec![
-        Line::from(Span::styled(
-            format!(" ✓ {} ", text),
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::Green),
-        )),
-    ]
+    vec![Line::from(Span::styled(
+        format!(" ✓ {} ", text),
+        Style::default().fg(Color::White).bg(Color::Green),
+    ))]
 }
 
 /// 渲染警告提示
 pub fn render_warning_tooltip(text: &str) -> Vec<Line<'static>> {
-    vec![
-        Line::from(Span::styled(
-            format!(" ⚠ {} ", text),
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow),
-        )),
-    ]
+    vec![Line::from(Span::styled(
+        format!(" ⚠ {} ", text),
+        Style::default().fg(Color::Black).bg(Color::Yellow),
+    ))]
 }
 
 /// 渲染信息提示
 pub fn render_info_tooltip(text: &str) -> Vec<Line<'static>> {
-    vec![
-        Line::from(Span::styled(
-            format!(" ℹ {} ", text),
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::Blue),
-        )),
-    ]
+    vec![Line::from(Span::styled(
+        format!(" ℹ {} ", text),
+        Style::default().fg(Color::White).bg(Color::Blue),
+    ))]
 }

@@ -5,7 +5,7 @@
 //! - 实例发现
 //! - 消息路由
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -115,7 +115,12 @@ impl LanPipesManager {
         }
     }
 
-    pub async fn send_message(&self, to: &str, message_type: &str, payload: Value) -> Result<(), String> {
+    pub async fn send_message(
+        &self,
+        to: &str,
+        message_type: &str,
+        payload: Value,
+    ) -> Result<(), String> {
         let instances = self.instances.lock().await;
         let target = instances
             .get(to)
@@ -144,7 +149,10 @@ impl LanPipesManager {
             status: InstanceStatus::Online,
         };
 
-        self.instances.lock().await.insert(instance.id.clone(), instance);
+        self.instances
+            .lock()
+            .await
+            .insert(instance.id.clone(), instance);
     }
 
     pub async fn receive_message(&self) -> Option<LanMessage> {

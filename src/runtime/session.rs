@@ -459,9 +459,7 @@ pub async fn apply_deferred_runtime_actions(
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     let current_mode = agent.get_approval_mode();
                     let _ = tx
-                        .send(StreamMessage::ApprovalModeChanged {
-                            mode: current_mode,
-                        })
+                        .send(StreamMessage::ApprovalModeChanged { mode: current_mode })
                         .await;
                 }
             }

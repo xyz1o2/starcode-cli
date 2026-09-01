@@ -51,10 +51,7 @@ impl Default for RrfParams {
 
 impl RrfParams {
     pub const fn new(k: f64) -> Self {
-        Self {
-            k,
-            weights: None,
-        }
+        Self { k, weights: None }
     }
 }
 
@@ -104,4 +101,3 @@ pub fn fuse(result_sets: &[Vec<Candidate>], params: &RrfParams) -> Vec<FusedResu
 
     output
 }
- 

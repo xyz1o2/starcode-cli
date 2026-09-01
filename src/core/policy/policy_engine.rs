@@ -1,5 +1,5 @@
-use crate::core::policy::types::*;
 use crate::core::permission_rules::PermissionRuleEngine;
+use crate::core::policy::types::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,8 +49,13 @@ impl PolicyEngine {
         }
     }
 
-    pub fn load_permission_rules(&mut self, project_dir: &std::path::PathBuf, home_dir: &std::path::PathBuf) {
-        self.permission_rule_engine.load_rules_from_files(project_dir, home_dir);
+    pub fn load_permission_rules(
+        &mut self,
+        project_dir: &std::path::PathBuf,
+        home_dir: &std::path::PathBuf,
+    ) {
+        self.permission_rule_engine
+            .load_rules_from_files(project_dir, home_dir);
     }
 
     pub fn get_permission_rule_engine(&self) -> &PermissionRuleEngine {
@@ -84,7 +89,9 @@ impl PolicyEngine {
 
         // 0.5. Check permission rule engine first
         let args = tool_call.args.clone().unwrap_or(serde_json::Value::Null);
-        let permission_decision = self.permission_rule_engine.check_permission(&tool_call.name, &args);
+        let permission_decision = self
+            .permission_rule_engine
+            .check_permission(&tool_call.name, &args);
         if !permission_decision.allowed {
             let reason = if permission_decision.reason.is_empty() {
                 format!("Tool '{}' denied by permission rules", tool_call.name)

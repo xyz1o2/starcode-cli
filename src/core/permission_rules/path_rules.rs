@@ -171,9 +171,8 @@ impl PathRuleMatcher {
                 }
             } else if pi < pattern.len() && pattern[pi] == '{' {
                 if let Some(end) = pattern[pi..].iter().position(|&c| c == '}') {
-                    let options: Vec<&[char]> = pattern[pi + 1..pi + end]
-                        .split(|&c| c == ',')
-                        .collect();
+                    let options: Vec<&[char]> =
+                        pattern[pi + 1..pi + end].split(|&c| c == ',').collect();
 
                     let mut matched = false;
                     for option in options {
@@ -232,4 +231,3 @@ pub fn is_path_within(base: &Path, target: &Path) -> bool {
     };
     target_canon.starts_with(&base_canon)
 }
- 

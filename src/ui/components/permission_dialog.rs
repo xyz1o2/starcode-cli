@@ -28,14 +28,9 @@ pub enum PermissionRequestType {
         content_preview: String,
     },
     /// 网页抓取权限
-    WebFetch {
-        url: String,
-    },
+    WebFetch { url: String },
     /// 通用权限请求
-    Generic {
-        title: String,
-        description: String,
-    },
+    Generic { title: String, description: String },
 }
 
 /// 风险等级
@@ -203,7 +198,7 @@ pub fn render_permission_dialog(f: &mut Frame, state: &PermissionDialogState, ar
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // 标题
+            Constraint::Length(3), // 标题
             Constraint::Min(5),    // 内容
             Constraint::Length(3), // 操作提示
         ])
@@ -221,46 +216,36 @@ pub fn render_permission_dialog(f: &mut Frame, state: &PermissionDialogState, ar
 
 fn render_title(f: &mut Frame, request: &PermissionRequestType, area: Rect) {
     let title = match request {
-        PermissionRequestType::FileEdit { .. } => {
-            Span::styled(
-                "File Edit Permission",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-        }
-        PermissionRequestType::ShellCommand { .. } => {
-            Span::styled(
-                "Shell Command Permission",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-        }
-        PermissionRequestType::FileWrite { .. } => {
-            Span::styled(
-                "File Write Permission",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            )
-        }
-        PermissionRequestType::WebFetch { .. } => {
-            Span::styled(
-                "Web Fetch Permission",
-                Style::default()
-                    .fg(Color::Blue)
-                    .add_modifier(Modifier::BOLD),
-            )
-        }
-        PermissionRequestType::Generic { title, .. } => {
-            Span::styled(
-                title.clone(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )
-        }
+        PermissionRequestType::FileEdit { .. } => Span::styled(
+            "File Edit Permission",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        PermissionRequestType::ShellCommand { .. } => Span::styled(
+            "Shell Command Permission",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        PermissionRequestType::FileWrite { .. } => Span::styled(
+            "File Write Permission",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        PermissionRequestType::WebFetch { .. } => Span::styled(
+            "Web Fetch Permission",
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ),
+        PermissionRequestType::Generic { title, .. } => Span::styled(
+            title.clone(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
     };
 
     let block = Block::default()
@@ -268,11 +253,7 @@ fn render_title(f: &mut Frame, request: &PermissionRequestType, area: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray));
 
-    let paragraph = Paragraph::new(Line::from(vec![
-        Span::raw("  "),
-        title,
-    ]))
-    .block(block);
+    let paragraph = Paragraph::new(Line::from(vec![Span::raw("  "), title])).block(block);
 
     f.render_widget(paragraph, area);
 }
@@ -336,21 +317,12 @@ fn render_content(f: &mut Frame, state: &PermissionDialogState, area: Rect) {
             ]));
 
             lines.push(Line::from(vec![
-                Span::styled(
-                    "Risk: ",
-                    Style::default().fg(Color::Gray),
-                ),
-                Span::styled(
-                    risk_level.label(),
-                    Style::default().fg(risk_level.color()),
-                ),
+                Span::styled("Risk: ", Style::default().fg(Color::Gray)),
+                Span::styled(risk_level.label(), Style::default().fg(risk_level.color())),
             ]));
 
             lines.push(Line::from(vec![
-                Span::styled(
-                    "Dir: ",
-                    Style::default().fg(Color::Gray),
-                ),
+                Span::styled("Dir: ", Style::default().fg(Color::Gray)),
                 Span::styled(working_dir.clone(), Style::default().fg(Color::DarkGray)),
             ]));
         }

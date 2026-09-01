@@ -7,8 +7,8 @@
 
 use crate::types::ModelInfo;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 use std::sync::RwLock;
+use std::time::{Duration, Instant};
 
 /// 模型列表缓存
 struct ModelCache {
@@ -29,7 +29,9 @@ fn get_cached_models(provider_id: &str) -> Option<Vec<ModelInfo>> {
     let cached = cache.as_ref()?;
 
     // 检查缓存是否有效（同一 provider 且未过期）
-    if cached.provider_id == provider_id && cached.timestamp.elapsed() < Duration::from_secs(CACHE_TTL_SECS) {
+    if cached.provider_id == provider_id
+        && cached.timestamp.elapsed() < Duration::from_secs(CACHE_TTL_SECS)
+    {
         Some(cached.models.clone())
     } else {
         None
@@ -72,7 +74,8 @@ pub async fn list_models(
     if let Some(cached_models) = get_cached_models(&current_provider_id) {
         crate::utils::logging::append_debug_log_line(&format!(
             "[ListModels] Using cached models for provider '{}', count={}",
-            current_provider_id, cached_models.len()
+            current_provider_id,
+            cached_models.len()
         ));
         return Ok(cached_models);
     }
@@ -251,7 +254,8 @@ pub async fn list_models(
         set_cached_models(provider_id, models.clone());
         crate::utils::logging::append_debug_log_line(&format!(
             "[ListModels] Cached {} models for provider '{}'",
-            models.len(), current_provider_id
+            models.len(),
+            current_provider_id
         ));
     }
 

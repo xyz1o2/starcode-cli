@@ -86,10 +86,7 @@ impl ToolInvocation for GitPrSubscribeInvocation {
                     "Subscribed to PR #{} in {}. Current state: {}",
                     params.pr_number, params.repo, current_state
                 )),
-                return_display: Some(format!(
-                    "Subscribed to PR #{}",
-                    params.pr_number
-                )),
+                return_display: Some(format!("Subscribed to PR #{}", params.pr_number)),
                 output: format!(
                     "Subscribed to PR #{} in {}.\nCurrent state: {}\nSubscription saved to: {}",
                     params.pr_number,

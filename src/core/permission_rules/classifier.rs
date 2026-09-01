@@ -68,11 +68,21 @@ fn is_safe_working_dir_deletion(command: &str) -> bool {
         }
         // System directories are dangerous
         let lower = arg.to_lowercase();
-        if lower.starts_with("etc") || lower.starts_with("var") || lower.starts_with("usr")
-            || lower.starts_with("bin") || lower.starts_with("sbin") || lower.starts_with("boot")
-            || lower.starts_with("dev") || lower.starts_with("proc") || lower.starts_with("sys")
-            || lower.starts_with("tmp") || lower.starts_with("opt") || lower.starts_with("mnt")
-            || lower.starts_with("media") || lower.starts_with("root") || lower.starts_with("home")
+        if lower.starts_with("etc")
+            || lower.starts_with("var")
+            || lower.starts_with("usr")
+            || lower.starts_with("bin")
+            || lower.starts_with("sbin")
+            || lower.starts_with("boot")
+            || lower.starts_with("dev")
+            || lower.starts_with("proc")
+            || lower.starts_with("sys")
+            || lower.starts_with("tmp")
+            || lower.starts_with("opt")
+            || lower.starts_with("mnt")
+            || lower.starts_with("media")
+            || lower.starts_with("root")
+            || lower.starts_with("home")
         {
             return false;
         }
@@ -109,9 +119,9 @@ fn is_safe_cache_deletion(command: &str) -> bool {
         }
         // Get the basename for comparison
         let basename = arg.rsplit('/').next().unwrap_or(arg);
-        let is_safe = SAFE_CACHE_DIRS.iter().any(|safe| {
-            *safe == basename || *safe == arg || arg.ends_with(safe)
-        });
+        let is_safe = SAFE_CACHE_DIRS
+            .iter()
+            .any(|safe| *safe == basename || *safe == arg || arg.ends_with(safe));
         if !is_safe {
             return false;
         }
@@ -194,7 +204,8 @@ impl CommandClassifier {
         }
 
         // sudo + 危险命令
-        if lower.contains("sudo") && (lower.contains("rm") || lower.contains("chmod") || lower.contains("chown"))
+        if lower.contains("sudo")
+            && (lower.contains("rm") || lower.contains("chmod") || lower.contains("chown"))
         {
             return true;
         }
@@ -234,9 +245,9 @@ impl CommandClassifier {
     fn classify_by_name(cmd_name: &str, full_cmd: &str) -> SafetyLevel {
         match cmd_name {
             "ListDir" | "cat" | "Grep" | "find" | "echo" | "pwd" | "whoami" | "date" | "which"
-            | "whereis" | "file" | "stat" | "wc" | "head" | "tail" | "less" | "more"
-            | "sort" | "uniq" | "diff" | "tree" | "du" | "df" | "env" | "printenv"
-            | "history" | "type" | "realpath" | "basename" | "dirname" => SafetyLevel::Safe,
+            | "whereis" | "file" | "stat" | "wc" | "head" | "tail" | "less" | "more" | "sort"
+            | "uniq" | "diff" | "tree" | "du" | "df" | "env" | "printenv" | "history" | "type"
+            | "realpath" | "basename" | "dirname" => SafetyLevel::Safe,
 
             "git" | "npm" | "yarn" | "pnpm" | "cargo" | "pip" | "pip3" | "make" | "cmake"
             | "docker" | "podman" | "kubectl" | "helm" | "terraform" | "ansible" | "gradle"
@@ -264,7 +275,8 @@ impl CommandClassifier {
             "ssh" | "scp" | "rsync" | "nc" | "ncat" | "netcat" => SafetyLevel::Moderate,
 
             "curl" | "wget" => {
-                if full_cmd.contains("|") && (full_cmd.contains("Bash") || full_cmd.contains("sh")) {
+                if full_cmd.contains("|") && (full_cmd.contains("Bash") || full_cmd.contains("sh"))
+                {
                     SafetyLevel::Dangerous
                 } else {
                     SafetyLevel::Moderate
@@ -297,20 +309,22 @@ impl CommandClassifier {
 
     pub fn classify_with_pipes(command: &str) -> Vec<CommandClassification> {
         let segments: Vec<&str> = command.split('|').map(|s| s.trim()).collect();
-        segments
-            .iter()
-            .map(|seg| Self::classify(seg))
-            .collect()
+        segments.iter().map(|seg| Self::classify(seg)).collect()
     }
 
     pub fn overall_safety(classifications: &[CommandClassification]) -> SafetyLevel {
-        if classifications.iter().any(|c| c.level == SafetyLevel::Dangerous) {
+        if classifications
+            .iter()
+            .any(|c| c.level == SafetyLevel::Dangerous)
+        {
             SafetyLevel::Dangerous
-        } else if classifications.iter().any(|c| c.level == SafetyLevel::Moderate) {
+        } else if classifications
+            .iter()
+            .any(|c| c.level == SafetyLevel::Moderate)
+        {
             SafetyLevel::Moderate
         } else {
             SafetyLevel::Safe
         }
     }
 }
- 

@@ -151,7 +151,8 @@ impl SandboxManager {
             vec![
                 "📦 Windows sandbox requires WSL2 (Windows Subsystem for Linux)".to_string(),
                 "".to_string(),
-                "WSL2 provides a complete Linux kernel with bubblewrap isolation support.".to_string(),
+                "WSL2 provides a complete Linux kernel with bubblewrap isolation support."
+                    .to_string(),
                 "".to_string(),
                 "Installation steps:".to_string(),
                 "  1. Open PowerShell as Administrator".to_string(),

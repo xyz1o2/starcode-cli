@@ -1,9 +1,10 @@
 /// macOS Computer Use适配器
-/// 
+///
 /// 对标claude-code-main的packages/@ant/computer-use-swift/
 /// 使用AppleScript和osascript进行macOS屏幕操控
-
-use super::{ComputerAdapter, Screenshot, ImageFormat, MouseButton, Modifier, WindowInfo, WindowList};
+use super::{
+    ComputerAdapter, ImageFormat, Modifier, MouseButton, Screenshot, WindowInfo, WindowList,
+};
 
 /// macOS Computer Use适配器
 pub struct MacOSComputerAdapter;
@@ -21,19 +22,19 @@ impl ComputerAdapter for MacOSComputerAdapter {
             MouseButton::Right => "right",
             MouseButton::Middle => "middle",
         };
-        
+
         let script = format!(
             r#"tell application "System Events"
                 click at {{{}, {}}} with button "{}"
             end tell"#,
             x, y, button_str
         );
-        
+
         std::process::Command::new("osascript")
             .args(["-e", &script])
             .output()
             .map_err(|e| format!("macOS click failed: {}", e))?;
-        
+
         Ok(())
     }
 
@@ -46,12 +47,12 @@ impl ComputerAdapter for MacOSComputerAdapter {
             end tell"#,
             x, y, x, y
         );
-        
+
         std::process::Command::new("osascript")
             .args(["-e", &script])
             .output()
             .map_err(|e| format!("macOS double click failed: {}", e))?;
-        
+
         Ok(())
     }
 
@@ -66,12 +67,12 @@ impl ComputerAdapter for MacOSComputerAdapter {
             end tell"#,
             x, y
         );
-        
+
         std::process::Command::new("osascript")
             .args(["-e", &script])
             .output()
             .map_err(|e| format!("macOS mouse move failed: {}", e))?;
-        
+
         Ok(())
     }
 
@@ -86,12 +87,12 @@ impl ComputerAdapter for MacOSComputerAdapter {
             end tell"#,
             from_x, from_y, to_x, to_y
         );
-        
+
         std::process::Command::new("osascript")
             .args(["-e", &script])
             .output()
             .map_err(|e| format!("macOS mouse drag failed: {}", e))?;
-        
+
         Ok(())
     }
 
@@ -102,12 +103,12 @@ impl ComputerAdapter for MacOSComputerAdapter {
             end tell"#,
             text.replace('"', "\\\"")
         );
-        
+
         std::process::Command::new("osascript")
             .args(["-e", &script])
             .output()
             .map_err(|e| format!("macOS type failed: {}", e))?;
-        
+
         Ok(())
     }
 
@@ -121,19 +122,20 @@ impl ComputerAdapter for MacOSComputerAdapter {
                 Modifier::Super => modifier_str.push_str("command down, "),
             }
         }
-        
+
         let script = format!(
             r#"tell application "System Events"
                 key code {} using {{{}}}
             end tell"#,
-            key, modifier_str.trim_end_matches(", ")
+            key,
+            modifier_str.trim_end_matches(", ")
         );
-        
+
         std::process::Command::new("osascript")
             .args(["-e", &script])
             .output()
             .map_err(|e| format!("macOS key press failed: {}", e))?;
-        
+
         Ok(())
     }
 
@@ -162,18 +164,21 @@ impl ComputerAdapter for MacOSComputerAdapter {
             end tell"#,
             x, y, delta_x, delta_y
         );
-        
+
         std::process::Command::new("osascript")
             .args(["-e", &script])
             .output()
             .map_err(|e| format!("macOS scroll failed: {}", e))?;
-        
+
         Ok(())
     }
 
     fn get_screen_size(&self) -> Result<(u32, u32), String> {
         let output = std::process::Command::new("osascript")
-            .args(["-e", "tell application \"Finder\" to get bounds of window of desktop"])
+            .args([
+                "-e",
+                "tell application \"Finder\" to get bounds of window of desktop",
+            ])
             .output()
             .map_err(|e| format!("macOS screen size failed: {}", e))?;
 
@@ -184,7 +189,7 @@ impl ComputerAdapter for MacOSComputerAdapter {
             let h: u32 = parts[3].parse().unwrap_or(0);
             return Ok((w, h));
         }
-        
+
         Err("Failed to parse screen size".to_string())
     }
 
@@ -209,12 +214,16 @@ impl ComputerAdapter for MacOSComputerAdapter {
 
     fn list_windows(&self) -> Result<WindowList, String> {
         let output = std::process::Command::new("osascript")
-            .args(["-e", "tell application \"System Events\" to get name of every application process"])
+            .args([
+                "-e",
+                "tell application \"System Events\" to get name of every application process",
+            ])
             .output()
             .map_err(|e| format!("macOS list windows failed: {}", e))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let windows: Vec<WindowInfo> = stdout.trim()
+        let windows: Vec<WindowInfo> = stdout
+            .trim()
             .split(", ")
             .enumerate()
             .map(|(i, name)| WindowInfo {
@@ -239,12 +248,12 @@ impl ComputerAdapter for MacOSComputerAdapter {
             end tell"#,
             window_id
         );
-        
+
         std::process::Command::new("osascript")
             .args(["-e", &script])
             .output()
             .map_err(|e| format!("macOS switch window failed: {}", e))?;
-        
+
         Ok(())
     }
 }

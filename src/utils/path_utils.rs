@@ -1,7 +1,6 @@
 /// 路径工具
-/// 
+///
 /// 对标claude-code-main的src/utils/path.ts
-
 use std::path::{Path, PathBuf};
 
 /// 规范化路径
@@ -9,7 +8,7 @@ pub fn normalize(path: &str) -> String {
     let path = path.replace('\\', "/");
     let parts: Vec<&str> = path.split('/').collect();
     let mut result = Vec::new();
-    
+
     for part in parts {
         match part {
             "." => {}
@@ -26,7 +25,7 @@ pub fn normalize(path: &str) -> String {
             }
         }
     }
-    
+
     if result.is_empty() {
         ".".to_string()
     } else {
@@ -38,7 +37,7 @@ pub fn normalize(path: &str) -> String {
 pub fn join(base: &str, relative: &str) -> String {
     let base = normalize(base);
     let relative = normalize(relative);
-    
+
     if relative.starts_with('/') {
         relative
     } else if base.ends_with('/') {
@@ -66,9 +65,7 @@ pub fn dirname(path: &str) -> &str {
 
 /// 获取文件扩展名
 pub fn extension(path: &str) -> Option<&str> {
-    Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
+    Path::new(path).extension().and_then(|e| e.to_str())
 }
 
 /// 获取不带扩展名的文件名
@@ -105,7 +102,7 @@ pub fn to_absolute(path: &str) -> PathBuf {
 pub fn relative_to(base: &str, target: &str) -> String {
     let base = Path::new(base);
     let target = Path::new(target);
-    
+
     match pathdiff::diff_paths(target, base) {
         Some(rel) => rel.to_string_lossy().to_string(),
         None => target.to_string_lossy().to_string(),
@@ -116,7 +113,7 @@ pub fn relative_to(base: &str, target: &str) -> String {
 pub fn is_under(path: &str, dir: &str) -> bool {
     let path = normalize(path);
     let dir = normalize(dir);
-    
+
     path.starts_with(&dir)
 }
 

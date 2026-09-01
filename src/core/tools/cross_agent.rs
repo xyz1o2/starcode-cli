@@ -42,7 +42,10 @@ pub struct SendMessageTool {
 
 impl SendMessageTool {
     pub fn new(config: Arc<crate::core::config::Config>) -> Self {
-        Self { config, agent_registry: None }
+        Self {
+            config,
+            agent_registry: None,
+        }
     }
 
     /// 注入 agent 注册表（启用 broadcast/protocol 消息功能）
@@ -137,7 +140,12 @@ impl ToolInvocation for SendMessageInvocation {
 
             if let Some(ref reg) = registry {
                 return reg
-                    .deliver_message(&params.target_agent, &params.message, &params.summary, is_protocol)
+                    .deliver_message(
+                        &params.target_agent,
+                        &params.message,
+                        &params.summary,
+                        is_protocol,
+                    )
                     .await;
             }
 
@@ -252,7 +260,6 @@ impl BaseDeclarativeTool for SendMessageTool {
         }))
     }
 }
-
 
 // ── PushNotification ─────────────────────────────────────────────────
 
@@ -374,7 +381,6 @@ impl BaseDeclarativeTool for PushNotificationTool {
     }
 }
 
-
 // ── SendUserFile ─────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -425,7 +431,9 @@ impl ToolInvocation for SendUserFileInvocation {
         let params = self.params.clone();
         Box::pin(async move {
             let file_path = params.file_path.clone();
-            let description = params.description.unwrap_or_else(|| "No description".to_string());
+            let description = params
+                .description
+                .unwrap_or_else(|| "No description".to_string());
 
             Ok(ToolResult {
                 llm_content: Some(format!("Sent file '{}' to user", file_path)),

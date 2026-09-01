@@ -642,7 +642,9 @@ impl ToolInvocation for SearchToolInvocation {
 
             // ── 更新 read_file_state：从搜索结果中提取文件路径 ──
             if let Some(ref data) = result.data {
-                if let Ok(results) = serde_json::from_value::<Vec<UnifiedSearchResult>>(data.clone()) {
+                if let Ok(results) =
+                    serde_json::from_value::<Vec<UnifiedSearchResult>>(data.clone())
+                {
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
@@ -671,5 +673,3 @@ impl ToolInvocation for SearchToolInvocation {
         })
     }
 }
-
- 

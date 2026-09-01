@@ -1,5 +1,5 @@
-use crate::ui::utils::text::format_elapsed_for_tool;
 use super::*;
+use crate::ui::utils::text::format_elapsed_for_tool;
 use std::time::Instant;
 
 use crate::core::i18n;
@@ -18,7 +18,6 @@ pub(super) fn should_suppress_redundant_result_after_confirmation(
         )
 }
 
- 
 pub(super) fn truncate_status_detail(detail: &str, max_chars: usize) -> String {
     let mut truncated = String::new();
     for (idx, ch) in detail.chars().enumerate() {
@@ -44,7 +43,11 @@ pub(super) fn format_tool_name_for_status(name: &str) -> String {
     }
 }
 
-pub(super) fn format_running_tool_label(state: &ChatState, tool_call_id: &str, tool_name: &str) -> String {
+pub(super) fn format_running_tool_label(
+    state: &ChatState,
+    tool_call_id: &str,
+    tool_name: &str,
+) -> String {
     let pretty_name = format_tool_name_for_status(tool_name);
     match state
         .tool_started_at

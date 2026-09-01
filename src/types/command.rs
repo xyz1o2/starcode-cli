@@ -1,7 +1,6 @@
 /// 命令类型定义
-/// 
+///
 /// 对标claude-code-main的src/types/command.ts
-
 use serde::{Deserialize, Serialize};
 
 /// 命令类型

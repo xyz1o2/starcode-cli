@@ -14,7 +14,10 @@
 /// - Errors are propagated to the UI loop which logs them
 /// - The UI continues running even if a single message fails
 ///
-use super::status_helpers::{should_suppress_redundant_result_after_confirmation, truncate_status_detail, format_tool_name_for_status, format_running_tool_label};
+use super::status_helpers::{
+    format_running_tool_label, format_tool_name_for_status,
+    should_suppress_redundant_result_after_confirmation, truncate_status_detail,
+};
 use crate::core::i18n;
 use crate::runtime::messages::{AgentRequest, StreamMessage};
 use crate::types::{ChatEntry, ChatEntryType, StarToolCall, ToolResult};
@@ -50,7 +53,6 @@ fn finalize_entry_streaming(state: &mut ChatState, idx: usize) {
 use crate::ui::utils::transcript::append_transcript_event;
 use std::time::Instant;
 use tokio::sync::mpsc;
-
 
 pub async fn handle_stream_update(
     state: &mut ChatState,
@@ -105,7 +107,11 @@ pub async fn handle_stream_update(
             emit_status_text(
                 state,
                 message_id,
-                &i18n::t("ui.status.start", "Status: processing", "Status: processing"),
+                &i18n::t(
+                    "ui.status.start",
+                    "Status: processing",
+                    "Status: processing",
+                ),
             );
             append_transcript_event(
                 state,
@@ -320,9 +326,7 @@ pub async fn handle_stream_update(
                 return Ok(());
             }
             emit_status_text(state, message_id, note);
-            if note.starts_with("Warning:")
-                || note.starts_with("Error:")
-            {
+            if note.starts_with("Warning:") || note.starts_with("Error:") {
                 state
                     .chat_history
                     .push(ChatEntry::assistant(note).with_streaming(false));
@@ -464,12 +468,8 @@ pub async fn handle_stream_update(
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     if !msg.is_empty() {
-                        let status = i18n::t(
-                            "ui.status.agent",
-                            "Status: {msg}",
-                            "Status: {msg}",
-                        )
-                        .replace("{msg}", msg);
+                        let status = i18n::t("ui.status.agent", "Status: {msg}", "Status: {msg}")
+                            .replace("{msg}", msg);
                         emit_status_text(state, message_id, &status);
                     }
                 }
@@ -501,7 +501,7 @@ pub async fn handle_stream_update(
                 false
             };
             finalize_entry_streaming(state, assistant_idx);
-            
+
             // 2. Append tool calls with individual transition messages
             // This creates: thinking → explain1 → tool1 → explain2 → tool2 → ...
             let mut _insert_pos = state.chat_history.len();
@@ -513,8 +513,13 @@ pub async fn handle_stream_update(
                 });
                 if let Some(idx) = existing_idx {
                     // Still update tracking state for the existing entry
-                    state.tool_started_at.entry(tc.id.clone()).or_insert_with(Instant::now);
-                    state.tool_call_args_cache.insert(tc.id.clone(), tc.function.arguments.clone());
+                    state
+                        .tool_started_at
+                        .entry(tc.id.clone())
+                        .or_insert_with(Instant::now);
+                    state
+                        .tool_call_args_cache
+                        .insert(tc.id.clone(), tc.function.arguments.clone());
                     state.current_tool_name = Some(tc.function.name.clone());
                     // Mark existing entry as streaming again
                     state.chat_history[idx].is_streaming = Some(true);
@@ -568,7 +573,11 @@ pub async fn handle_stream_update(
                     .select(Some(state.chat_history.len().saturating_sub(1)));
             }
         }
-        StreamMessage::ToolResult { message_id, tool_call, tool_result } => {
+        StreamMessage::ToolResult {
+            message_id,
+            tool_call,
+            tool_result,
+        } => {
             handle_tool_result_message(state, message_id, tool_call, tool_result);
         }
         StreamMessage::ToolOutput {
@@ -703,14 +712,15 @@ pub async fn handle_stream_update(
             let error_type = crate::ui::components::error_overlay::classify_error(&error);
             if crate::ui::components::error_overlay::is_retryable(&error_type) {
                 state.show_error_overlay = true;
-                state.error_overlay_state = crate::ui::components::error_overlay::ErrorOverlayState {
-                    error_message: error.clone(),
-                    error_type,
-                    retry_count: 0,
-                    max_retries: 10,
-                    is_retrying: false,
-                    selected_action: crate::ui::components::error_overlay::ErrorAction::Retry,
-                };
+                state.error_overlay_state =
+                    crate::ui::components::error_overlay::ErrorOverlayState {
+                        error_message: error.clone(),
+                        error_type,
+                        retry_count: 0,
+                        max_retries: 10,
+                        is_retrying: false,
+                        selected_action: crate::ui::components::error_overlay::ErrorAction::Retry,
+                    };
             }
 
             emit_status_text(
@@ -738,8 +748,7 @@ pub async fn handle_stream_update(
                 if let Some(next_input) = state.pending_user_messages.pop_front() {
                     let remaining = state.pending_user_messages.len();
                     if remaining > 0 {
-                        state.current_status_line =
-                            Some(format!("\u{23f3} {} pending", remaining));
+                        state.current_status_line = Some(format!("\u{23f3} {} pending", remaining));
                     } else {
                         state.current_status_line = None;
                     }
@@ -879,7 +888,8 @@ pub async fn handle_stream_update(
             state.current_provider_id =
                 provider_id.or_else(|| state.model_provider_map.get(&state.current_model).cloned());
             // 从可用模型列表中查找当前模型是否支持 thinking
-            state.current_model_supports_thinking = state.available_models_info
+            state.current_model_supports_thinking = state
+                .available_models_info
                 .iter()
                 .find(|m| m.id == state.current_model)
                 .and_then(|m| m.supports_thinking);
@@ -941,7 +951,10 @@ pub async fn handle_stream_update(
             confirmation,
         } => {
             let awaiting = confirmation.outcome.is_none();
-            let is_ask = matches!(confirmation.operation_type, crate::types::ConfirmationType::AskUserQuestion);
+            let is_ask = matches!(
+                confirmation.operation_type,
+                crate::types::ConfirmationType::AskUserQuestion
+            );
             if awaiting && state.is_awaiting_confirmation {
                 if let Some(idx) = state.pending_confirmation_entry_idx {
                     if idx < state.chat_history.len()
@@ -975,12 +988,11 @@ pub async fn handle_stream_update(
                 state.pending_message_id = Some(message_id);
                 state.is_awaiting_confirmation = true;
                 state.pending_tool_call_id = Some(tool_call_id);
-                state.pending_confirmation_choice =
-                    if is_ask {
-                        0 // 0-based: first option
-                    } else {
-                        1 // 1-based: "Allow once" is option 1
-                    };
+                state.pending_confirmation_choice = if is_ask {
+                    0 // 0-based: first option
+                } else {
+                    1 // 1-based: "Allow once" is option 1
+                };
             } else if !state.is_awaiting_confirmation {
                 state.pending_confirmation_entry_idx = Some(idx);
                 state.pending_message_id = Some(message_id);
@@ -994,7 +1006,10 @@ pub async fn handle_stream_update(
                 // Force scroll to bottom calculation in next render
             }
         }
-        StreamMessage::StatusUpdate { message_id: _, status } => {
+        StreamMessage::StatusUpdate {
+            message_id: _,
+            status,
+        } => {
             state.current_status_line = Some(status);
         }
     }
@@ -1067,17 +1082,16 @@ async fn handle_done_message(
         state.is_processing = true;
         state.is_streaming = true;
         state.active_message_id = Some(message_id);
-        
+
         // 在聊天区域显示明确的继续提示，让用户知道 Agent 还在工作
         let continue_msg = i18n::t(
             "ui.status.continue",
             "Status: continuing final response",
             "Status: continuing final response",
         );
-        state.chat_history.push(
-            ChatEntry::assistant(format!("⟳ {}", continue_msg))
-                .with_streaming(false),
-        );
+        state
+            .chat_history
+            .push(ChatEntry::assistant(format!("⟳ {}", continue_msg)).with_streaming(false));
         emit_status_text(state, message_id, &continue_msg);
         append_transcript_event(
             state,
@@ -1133,7 +1147,8 @@ async fn handle_done_message(
     if let Some(idx) = assistant_idx {
         if idx < state.chat_history.len() {
             if let Some(ref usage) = state.token_usage {
-                let cost = crate::ui::utils::cost::compute_response_cost(usage, &state.current_model);
+                let cost =
+                    crate::ui::utils::cost::compute_response_cost(usage, &state.current_model);
                 state.chat_history[idx].cost = Some(cost);
                 state.total_cost += cost;
             }
@@ -1155,8 +1170,7 @@ async fn handle_done_message(
         if let Some(next_input) = state.pending_user_messages.pop_front() {
             let remaining = state.pending_user_messages.len();
             if remaining > 0 {
-                state.current_status_line =
-                    Some(format!("\u{23f3} {} pending", remaining));
+                state.current_status_line = Some(format!("\u{23f3} {} pending", remaining));
             } else {
                 state.current_status_line = None;
             }
@@ -1225,7 +1239,8 @@ fn handle_tool_result_message(
     message_id: u64,
     tool_call: StarToolCall,
     tool_result: ToolResult,
-) {    if state.is_awaiting_confirmation {
+) {
+    if state.is_awaiting_confirmation {
         if let Some(pending_id) = state.pending_tool_call_id.as_deref() {
             if pending_id == tool_call.id {
                 state.is_awaiting_confirmation = false;
@@ -1241,8 +1256,13 @@ fn handle_tool_result_message(
         state.task_panel.reload();
         state.task_panel.mark_modified();
         if !state.task_panel.is_visible && !state.task_panel.manually_hidden {
-            let has_active = state.task_panel.task_manager.graph.nodes.values()
-                .any(|n| matches!(n.status, crate::core::tasks::models::TaskStatus::Pending | crate::core::tasks::models::TaskStatus::InProgress));
+            let has_active = state.task_panel.task_manager.graph.nodes.values().any(|n| {
+                matches!(
+                    n.status,
+                    crate::core::tasks::models::TaskStatus::Pending
+                        | crate::core::tasks::models::TaskStatus::InProgress
+                )
+            });
             if has_active {
                 state.task_panel.is_visible = true;
             }
@@ -1296,7 +1316,10 @@ fn handle_tool_result_message(
     for (idx, e) in state.chat_history.iter_mut().enumerate() {
         if e.entry_type == ChatEntryType::ToolCall
             && e.is_streaming == Some(true)
-            && e.tool_call.as_ref().map(|tc| tc.id == tool_call.id).unwrap_or(false)
+            && e.tool_call
+                .as_ref()
+                .map(|tc| tc.id == tool_call.id)
+                .unwrap_or(false)
         {
             e.is_streaming = Some(false);
             state.rendered_cache.remove(&idx);
@@ -1307,7 +1330,10 @@ fn handle_tool_result_message(
     // 如果已存在相同 tool_call.id 的 ToolResult 条目则跳过。
     let already_has_result = state.chat_history.iter().rev().take(20).any(|e| {
         e.entry_type == ChatEntryType::ToolResult
-            && e.tool_call.as_ref().map(|tc| tc.id == tool_call.id).unwrap_or(false)
+            && e.tool_call
+                .as_ref()
+                .map(|tc| tc.id == tool_call.id)
+                .unwrap_or(false)
     });
     if already_has_result {
         return;
@@ -1323,12 +1349,10 @@ fn handle_tool_result_message(
             state.chat_history[i].tool_elapsed_ms = elapsed_ms;
             state.rendered_cache.remove(&i);
             state.virtual_list.mark_dirty(i);
-            if !should_suppress_redundant_result_after_confirmation(
-                &tool_call,
-                &tool_result,
-            ) {
-                let mut entry = ChatEntry::tool_result(content, tool_call.clone(), tool_result.clone())
-                    .with_streaming(false);
+            if !should_suppress_redundant_result_after_confirmation(&tool_call, &tool_result) {
+                let mut entry =
+                    ChatEntry::tool_result(content, tool_call.clone(), tool_result.clone())
+                        .with_streaming(false);
                 entry.tool_elapsed_ms = elapsed_ms;
                 state.chat_history.push(entry);
             }
@@ -1523,9 +1547,7 @@ fn extract_last_code_block(content: &str) -> Option<String> {
     }
 
     match (last_block_start, last_block_end) {
-        (Some(start), Some(end)) if end > start => {
-            Some(lines[start..end].join("\n"))
-        }
+        (Some(start), Some(end)) if end > start => Some(lines[start..end].join("\n")),
         _ => None,
     }
 }

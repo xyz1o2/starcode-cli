@@ -1,7 +1,7 @@
 use crate::types::StarMessage;
 
 /// 压缩后清理
-/// 
+///
 /// 对标claude-code-main的postCompactCleanup.ts
 /// 在压缩执行后进行清理工作
 pub struct PostCompactCleanup {
@@ -88,7 +88,8 @@ impl PostCompactCleanup {
 
     /// 移除空消息
     fn remove_empty_messages(&self, messages: Vec<StarMessage>) -> Vec<StarMessage> {
-        messages.into_iter()
+        messages
+            .into_iter()
             .filter(|msg| {
                 // 保留系统消息（即使为空，可能包含重要配置）
                 if msg.role == "system" {
@@ -108,12 +109,14 @@ impl PostCompactCleanup {
     /// 移除孤立的工具调用
     fn remove_orphaned_tool_calls(&self, messages: Vec<StarMessage>) -> Vec<StarMessage> {
         // 收集所有工具调用ID
-        let tool_call_ids: std::collections::HashSet<String> = messages.iter()
+        let tool_call_ids: std::collections::HashSet<String> = messages
+            .iter()
             .filter_map(|msg| msg.tool_call_id.clone())
             .collect();
 
         // 收集所有助手消息中声明的工具调用ID
-        let declared_tool_call_ids: std::collections::HashSet<String> = messages.iter()
+        let declared_tool_call_ids: std::collections::HashSet<String> = messages
+            .iter()
             .filter(|msg| msg.role == "assistant")
             .filter_map(|msg| msg.tool_calls.as_ref())
             .flat_map(|tc| tc.iter())
@@ -121,7 +124,8 @@ impl PostCompactCleanup {
             .collect();
 
         // 找出孤立的工具调用（有声明但无结果）
-        let orphaned_ids: Vec<String> = declared_tool_call_ids.difference(&tool_call_ids)
+        let orphaned_ids: Vec<String> = declared_tool_call_ids
+            .difference(&tool_call_ids)
             .cloned()
             .collect();
 
@@ -130,14 +134,16 @@ impl PostCompactCleanup {
         }
 
         // 移除孤立的工具调用
-        messages.into_iter()
+        messages
+            .into_iter()
             .map(|mut msg| {
                 if msg.role == "assistant" {
                     if let Some(tool_calls) = msg.tool_calls {
-                        let filtered: Vec<_> = tool_calls.into_iter()
+                        let filtered: Vec<_> = tool_calls
+                            .into_iter()
                             .filter(|tc| !orphaned_ids.contains(&tc.id))
                             .collect();
-                        
+
                         if filtered.is_empty() {
                             msg.tool_calls = None;
                         } else {
@@ -159,7 +165,7 @@ impl PostCompactCleanup {
         for msg in messages {
             // 确保消息的基本字段完整
             let mut cleaned_msg = msg;
-            
+
             // 如果内容为空，设置为空字符串
             if cleaned_msg.content.is_none() {
                 cleaned_msg.content = Some(String::new());
@@ -181,14 +187,15 @@ impl PostCompactCleanup {
         let marker = StarMessage::system(
             "[Context was compacted to fit within token limits. Some earlier messages may have been summarized or removed.]"
         );
-        
+
         messages.insert(0, marker);
         messages
     }
 
     /// 清理工具结果中的敏感信息
     pub fn sanitize_tool_results(&self, messages: Vec<StarMessage>) -> Vec<StarMessage> {
-        messages.into_iter()
+        messages
+            .into_iter()
             .map(|mut msg| {
                 if msg.role == "tool" {
                     if let Some(content) = msg.content {
@@ -228,7 +235,9 @@ impl PostCompactCleanup {
                     for i in 1..parts.len() {
                         // 替换等号后的值
                         let value_part = parts[i];
-                        if let Some(end_pos) = value_part.find(|c: char| c.is_whitespace() || c == ',' || c == ';') {
+                        if let Some(end_pos) =
+                            value_part.find(|c: char| c.is_whitespace() || c == ',' || c == ';')
+                        {
                             new_result.push_str(pattern);
                             new_result.push_str(replacement);
                             new_result.push_str(&value_part[end_pos..]);
@@ -256,7 +265,7 @@ impl PostCompactCleanup {
 }
 
 /// 压缩清理管理器
-/// 
+///
 /// 管理压缩后的清理流程
 pub struct PostCompactCleanupManager {
     cleanup: PostCompactCleanup,
@@ -282,7 +291,11 @@ impl PostCompactCleanupManager {
     }
 
     /// 执行清理并更新统计
-    pub fn cleanup_with_stats(&mut self, messages: Vec<StarMessage>, was_compacted: bool) -> Vec<StarMessage> {
+    pub fn cleanup_with_stats(
+        &mut self,
+        messages: Vec<StarMessage>,
+        was_compacted: bool,
+    ) -> Vec<StarMessage> {
         let initial_count = messages.len();
         let result = self.cleanup.cleanup(messages, was_compacted);
         let final_count = result.len();

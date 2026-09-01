@@ -1,8 +1,7 @@
 /// 提示词建议系统
-/// 
+///
 /// 对标claude-code-main的src/services/PromptSuggestion/
 /// 基于上下文提供智能提示词建议
-
 use serde::{Deserialize, Serialize};
 
 /// 提示词建议
@@ -63,7 +62,7 @@ impl PromptSuggestionManager {
             max_history,
             templates: Vec::new(),
         };
-        
+
         manager.load_default_templates();
         manager
     }

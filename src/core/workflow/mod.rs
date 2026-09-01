@@ -17,7 +17,7 @@ pub use persistence::WorkflowPersistence;
 pub use progress::WorkflowProgress;
 pub use registry::WorkflowRegistry;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -310,7 +310,10 @@ fn evaluate_condition(condition: &str, context: &WorkflowContext) -> bool {
     !condition.is_empty()
 }
 
-async fn execute_step(step: &WorkflowStep, context: &mut WorkflowContext) -> Result<String, String> {
+async fn execute_step(
+    step: &WorkflowStep,
+    context: &mut WorkflowContext,
+) -> Result<String, String> {
     match step.step_type {
         StepType::Shell => {
             if let Some(cmd) = &step.command {
@@ -333,7 +336,10 @@ async fn execute_step(step: &WorkflowStep, context: &mut WorkflowContext) -> Res
             Ok("Tool step executed (placeholder)".to_string())
         }
         StepType::Prompt => Ok("Prompt step executed (placeholder)".to_string()),
-        _ => Ok(format!("Step '{}' completed (type not implemented)", step.name)),
+        _ => Ok(format!(
+            "Step '{}' completed (type not implemented)",
+            step.name
+        )),
     }
 }
 

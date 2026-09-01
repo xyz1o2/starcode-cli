@@ -26,7 +26,11 @@ pub async fn undo(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult 
         let summary = if changed.is_empty() {
             "no files changed (already at this state)".to_string()
         } else {
-            format!("restored {} file(s):\n{}", changed.len(), changed.join("\n"))
+            format!(
+                "restored {} file(s):\n{}",
+                changed.len(),
+                changed.join("\n")
+            )
         };
 
         let template = i18n::t(

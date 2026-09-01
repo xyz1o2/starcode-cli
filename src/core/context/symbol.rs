@@ -322,5 +322,3 @@ fn byte_to_line(source: &str, byte_offset: usize) -> usize {
     let prefix = &source[..byte_offset.min(source.len())];
     prefix.lines().count().max(1)
 }
-
- 

@@ -1,5 +1,4 @@
 /// Bridge会话管理
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -100,7 +99,8 @@ impl SessionManager {
 
     /// 移除会话
     pub fn remove_session(&mut self, connection_id: &str) {
-        self.sessions.retain(|_, session| session.connection_id != connection_id);
+        self.sessions
+            .retain(|_, session| session.connection_id != connection_id);
     }
 
     /// 获取所有会话

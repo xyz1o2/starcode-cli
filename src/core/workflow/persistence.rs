@@ -1,5 +1,4 @@
 /// 工作流持久化
-
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -55,7 +54,10 @@ impl WorkflowPersistence {
     }
 
     /// 加载执行历史
-    pub fn load_executions(&self, workflow_name: &str) -> Result<Vec<PersistedWorkflowContext>, String> {
+    pub fn load_executions(
+        &self,
+        workflow_name: &str,
+    ) -> Result<Vec<PersistedWorkflowContext>, String> {
         if !self.storage_dir.exists() {
             return Ok(Vec::new());
         }
@@ -68,13 +70,15 @@ impl WorkflowPersistence {
             let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
             let path = entry.path();
 
-            if path.file_name()
+            if path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .map(|n| n.starts_with(workflow_name))
                 .unwrap_or(false)
             {
                 if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(context) = serde_json::from_str::<PersistedWorkflowContext>(&content) {
+                    if let Ok(context) = serde_json::from_str::<PersistedWorkflowContext>(&content)
+                    {
                         executions.push(context);
                     }
                 }

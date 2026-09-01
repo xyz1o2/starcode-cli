@@ -29,10 +29,7 @@ pub struct BriefInvocation {
 
 impl ToolInvocation for BriefInvocation {
     fn get_description(&self) -> String {
-        format!(
-            "Summarize content (max {} chars)",
-            self.params.max_length
-        )
+        format!("Summarize content (max {} chars)", self.params.max_length)
     }
 
     fn tool_locations(&self) -> Vec<ToolLocation> {
@@ -88,11 +85,7 @@ impl ToolInvocation for BriefInvocation {
 
             Ok(ToolResult {
                 llm_content: Some(summary.clone()),
-                return_display: Some(format!(
-                    "Brief: {} → {} chars",
-                    original_len,
-                    brief.len()
-                )),
+                return_display: Some(format!("Brief: {} → {} chars", original_len, brief.len())),
                 output: summary,
                 error: None,
                 data: Some(serde_json::json!({

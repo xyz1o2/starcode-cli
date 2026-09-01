@@ -1,19 +1,18 @@
 /// Langfuse可观测性系统
-/// 
+///
 /// 对标claude-code-main的src/services/langfuse/
 /// 提供LLM调用追踪、span管理和性能监控功能
-
 pub mod client;
 pub mod convert;
+pub mod integration;
 pub mod sanitize;
 pub mod tracing;
-pub mod integration;
 
 pub use client::LangfuseClient;
 pub use convert::EventConverter;
+pub use integration::{IntegrationConfig, LangfuseIntegration};
 pub use sanitize::DataSanitizer;
-pub use tracing::{TraceManager, Trace, Span, SpanStatus};
-pub use integration::{LangfuseIntegration, IntegrationConfig};
+pub use tracing::{Span, SpanStatus, Trace, TraceManager};
 
 use serde::{Deserialize, Serialize};
 

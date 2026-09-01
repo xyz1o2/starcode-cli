@@ -1,7 +1,6 @@
 /// 本地技能搜索
-/// 
+///
 /// 在本地技能索引中搜索
-
 use super::{SkillSearchConfig, SkillSearchResult};
 
 /// 本地技能搜索
@@ -21,15 +20,19 @@ impl LocalSkillSearch {
         }
 
         let query_lower = query.to_lowercase();
-        let mut results: Vec<SkillSearchResult> = skills.iter()
+        let mut results: Vec<SkillSearchResult> = skills
+            .iter()
             .filter_map(|skill| {
-                let name_score = self.calculate_similarity(&query_lower, &skill.name.to_lowercase());
-                let desc_score = skill.description.as_ref()
+                let name_score =
+                    self.calculate_similarity(&query_lower, &skill.name.to_lowercase());
+                let desc_score = skill
+                    .description
+                    .as_ref()
                     .map(|d| self.calculate_similarity(&query_lower, &d.to_lowercase()))
                     .unwrap_or(0.0);
-                
+
                 let score = name_score.max(desc_score);
-                
+
                 if score >= self.config.min_relevance {
                     Some(SkillSearchResult {
                         skill_id: skill.id.clone(),
@@ -58,19 +61,17 @@ impl LocalSkillSearch {
         if s1.is_empty() || s2.is_empty() {
             return 0.0;
         }
-        
+
         if s1 == s2 {
             return 1.0;
         }
-        
+
         if s2.contains(s1) {
             return 0.8;
         }
-        
-        let common_words: usize = s1.split_whitespace()
-            .filter(|w| s2.contains(w))
-            .count();
-        
+
+        let common_words: usize = s1.split_whitespace().filter(|w| s2.contains(w)).count();
+
         let total_words = s1.split_whitespace().count().max(1);
         common_words as f64 / total_words as f64
     }

@@ -38,8 +38,7 @@ async fn load_store(project_root: &std::path::Path) -> Result<SnipStore, String>
     if content.trim().is_empty() {
         return Ok(SnipStore::default());
     }
-    serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse {}: {}", path.display(), e))
 }
 
 async fn save_store(project_root: &std::path::Path, store: &SnipStore) -> Result<(), String> {
@@ -228,10 +227,7 @@ impl ToolInvocation for SnipInvocation {
                     };
                     match store.snippets.iter().find(|s| s.name == name) {
                         Some(snippet) => {
-                            let lang = snippet
-                                .language
-                                .as_deref()
-                                .unwrap_or("text");
+                            let lang = snippet.language.as_deref().unwrap_or("text");
                             let display = format!("```{}\n{}\n```", lang, snippet.content);
                             Ok(ToolResult {
                                 llm_content: Some(display.clone()),
@@ -295,9 +291,7 @@ impl ToolInvocation for SnipInvocation {
                             return_display: Some(format!("{} snippets", store.snippets.len())),
                             output: text,
                             error: None,
-                            data: Some(
-                                serde_json::to_value(&store.snippets).unwrap_or_default(),
-                            ),
+                            data: Some(serde_json::to_value(&store.snippets).unwrap_or_default()),
                         })
                     }
                 }

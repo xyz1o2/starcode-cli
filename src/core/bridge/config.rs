@@ -1,5 +1,4 @@
 /// Bridge配置
-
 use serde::{Deserialize, Serialize};
 
 /// Bridge配置

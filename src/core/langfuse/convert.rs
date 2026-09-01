@@ -1,8 +1,8 @@
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// 事件转换器
-/// 
+///
 /// 将内部事件转换为Langfuse格式
 pub struct EventConverter {
     /// 是否包含详细信息
@@ -44,15 +44,27 @@ impl EventConverter {
     /// 转换LLM调用事件
     pub fn convert_llm_call(&self, call: &LlmCall) -> ConvertedEvent {
         let mut metadata = HashMap::new();
-        metadata.insert("model".to_string(), serde_json::Value::String(call.model.clone()));
-        metadata.insert("provider".to_string(), serde_json::Value::String(call.provider.clone()));
-        
+        metadata.insert(
+            "model".to_string(),
+            serde_json::Value::String(call.model.clone()),
+        );
+        metadata.insert(
+            "provider".to_string(),
+            serde_json::Value::String(call.provider.clone()),
+        );
+
         if let Some(tokens) = call.total_tokens {
-            metadata.insert("total_tokens".to_string(), serde_json::Value::Number(tokens.into()));
+            metadata.insert(
+                "total_tokens".to_string(),
+                serde_json::Value::Number(tokens.into()),
+            );
         }
 
         if let Some(duration) = call.duration_ms {
-            metadata.insert("duration_ms".to_string(), serde_json::Value::Number(duration.into()));
+            metadata.insert(
+                "duration_ms".to_string(),
+                serde_json::Value::Number(duration.into()),
+            );
         }
 
         let input = if self.include_details {
@@ -90,11 +102,20 @@ impl EventConverter {
     /// 转换工具调用事件
     pub fn convert_tool_call(&self, call: &ToolCall) -> ConvertedEvent {
         let mut metadata = HashMap::new();
-        metadata.insert("tool_name".to_string(), serde_json::Value::String(call.tool_name.clone()));
-        metadata.insert("arguments".to_string(), serde_json::Value::String(call.arguments.clone()));
+        metadata.insert(
+            "tool_name".to_string(),
+            serde_json::Value::String(call.tool_name.clone()),
+        );
+        metadata.insert(
+            "arguments".to_string(),
+            serde_json::Value::String(call.arguments.clone()),
+        );
 
         if let Some(duration) = call.duration_ms {
-            metadata.insert("duration_ms".to_string(), serde_json::Value::Number(duration.into()));
+            metadata.insert(
+                "duration_ms".to_string(),
+                serde_json::Value::Number(duration.into()),
+            );
         }
 
         let input = serde_json::json!({
@@ -130,11 +151,20 @@ impl EventConverter {
     /// 转换错误事件
     pub fn convert_error(&self, error: &ErrorEvent) -> ConvertedEvent {
         let mut metadata = HashMap::new();
-        metadata.insert("error_type".to_string(), serde_json::Value::String(error.error_type.clone()));
-        metadata.insert("message".to_string(), serde_json::Value::String(error.message.clone()));
+        metadata.insert(
+            "error_type".to_string(),
+            serde_json::Value::String(error.error_type.clone()),
+        );
+        metadata.insert(
+            "message".to_string(),
+            serde_json::Value::String(error.message.clone()),
+        );
 
         if let Some(stack_trace) = &error.stack_trace {
-            metadata.insert("stack_trace".to_string(), serde_json::Value::String(stack_trace.clone()));
+            metadata.insert(
+                "stack_trace".to_string(),
+                serde_json::Value::String(stack_trace.clone()),
+            );
         }
 
         ConvertedEvent {
@@ -154,7 +184,7 @@ impl EventConverter {
     /// 截断JSON字符串
     fn truncate_json(&self, value: serde_json::Value, max_length: usize) -> serde_json::Value {
         let string_value = serde_json::to_string(&value).unwrap_or_default();
-        
+
         if string_value.len() <= max_length {
             value
         } else {

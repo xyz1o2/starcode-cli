@@ -1,6 +1,5 @@
 /// 工作流引擎
-
-use super::{Workflow, WorkflowStep, StepType, WorkflowContext};
+use super::{StepType, Workflow, WorkflowContext, WorkflowStep};
 
 /// 工作流引擎
 pub struct WorkflowEngine {
@@ -74,7 +73,8 @@ impl WorkflowEngine {
 
     /// 获取最近的执行
     pub fn get_recent_execution(&self, workflow_name: &str) -> Option<&WorkflowExecution> {
-        self.execution_history.iter()
+        self.execution_history
+            .iter()
             .filter(|e| e.workflow_name == workflow_name)
             .last()
     }

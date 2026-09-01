@@ -22,21 +22,15 @@ pub(crate) fn execute_single_tool_with_progress<'a>(
         // 内部挂起导致 emit_tool_finished 永不发出、UI 圆点永远闪烁。
         // 超时后返回带超时提示的 error result，调用方仍会 emit finished 停止闪烁。
         const TOOL_HARD_TIMEOUT_SECS: u64 = 600;
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(TOOL_HARD_TIMEOUT_SECS),
-            exec,
-        )
-        .await
+        match tokio::time::timeout(std::time::Duration::from_secs(TOOL_HARD_TIMEOUT_SECS), exec)
+            .await
         {
-            Ok(results) => results
-                .into_iter()
-                .next()
-                .unwrap_or(ToolResult {
-                    success: false,
-                    output: None,
-                    error: Some("tool executor returned no result".to_string()),
-                    data: None,
-                }),
+            Ok(results) => results.into_iter().next().unwrap_or(ToolResult {
+                success: false,
+                output: None,
+                error: Some("tool executor returned no result".to_string()),
+                data: None,
+            }),
             Err(_) => ToolResult {
                 success: false,
                 output: None,

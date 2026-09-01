@@ -47,8 +47,16 @@ const BUILTIN_SKILLS: &[(&str, &str, &str)] = &[
     ("analyzer", "Code analysis expert", "skills/analyzer"),
     ("editor", "Batch editing expert", "skills/editor"),
     ("Grep", "Search expert", "skills/search"),
-    ("navigator", "Recursive context navigator", "skills/navigator"),
-    ("auto_fix", "Auto-fix with test-driven approach", "skills/auto_fix"),
+    (
+        "navigator",
+        "Recursive context navigator",
+        "skills/navigator",
+    ),
+    (
+        "auto_fix",
+        "Auto-fix with test-driven approach",
+        "skills/auto_fix",
+    ),
     ("verify", "Build/test/lint verification", "skills/verify"),
 ];
 
@@ -106,11 +114,31 @@ impl Marketplace {
 
         // Add some common MCP servers
         let common_mcp = vec![
-            ("filesystem", "Filesystem operations MCP server", "@modelcontextprotocol/server-filesystem"),
-            ("github", "GitHub API MCP server", "@modelcontextprotocol/server-github"),
-            ("memory", "In-memory knowledge graph", "@modelcontextprotocol/server-memory"),
-            ("brave-search", "Brave Search MCP server", "@anthropic/brave-search-mcp"),
-            ("puppeteer", "Browser automation MCP server", "@anthropic/puppeteer-mcp"),
+            (
+                "filesystem",
+                "Filesystem operations MCP server",
+                "@modelcontextprotocol/server-filesystem",
+            ),
+            (
+                "github",
+                "GitHub API MCP server",
+                "@modelcontextprotocol/server-github",
+            ),
+            (
+                "memory",
+                "In-memory knowledge graph",
+                "@modelcontextprotocol/server-memory",
+            ),
+            (
+                "brave-search",
+                "Brave Search MCP server",
+                "@anthropic/brave-search-mcp",
+            ),
+            (
+                "puppeteer",
+                "Browser automation MCP server",
+                "@anthropic/puppeteer-mcp",
+            ),
         ];
 
         for (name, desc, pkg) in common_mcp {
@@ -159,7 +187,9 @@ impl Marketplace {
             .filter(|e| {
                 e.name.to_lowercase().contains(&query_lower)
                     || e.description.to_lowercase().contains(&query_lower)
-                    || e.tags.iter().any(|t| t.to_lowercase().contains(&query_lower))
+                    || e.tags
+                        .iter()
+                        .any(|t| t.to_lowercase().contains(&query_lower))
             })
             .cloned()
             .collect()
@@ -207,7 +237,10 @@ impl Marketplace {
     }
 
     /// Install a built-in skill
-    async fn install_builtin_skill(&self, entry: &MarketplaceEntry) -> Result<InstallResult, String> {
+    async fn install_builtin_skill(
+        &self,
+        entry: &MarketplaceEntry,
+    ) -> Result<InstallResult, String> {
         let extensions_dir = ExtensionRegistryManager::global_extensions_dir();
         let skills_dir = extensions_dir.join("skills").join(&entry.name);
 
@@ -323,7 +356,13 @@ impl Marketplace {
 
         // Clone the repository
         let output = tokio::process::Command::new("git")
-            .args(&["clone", "--depth", "1", source, &target_dir.to_string_lossy()])
+            .args(&[
+                "clone",
+                "--depth",
+                "1",
+                source,
+                &target_dir.to_string_lossy(),
+            ])
             .output()
             .await
             .map_err(|e| format!("Failed to run git: {}", e))?;
@@ -363,7 +402,10 @@ impl Marketplace {
             name: entry.name.clone(),
             extension_type: entry.extension_type.clone(),
             success: true,
-            message: format!("{} '{}' installed successfully", entry.extension_type, entry.name),
+            message: format!(
+                "{} '{}' installed successfully",
+                entry.extension_type, entry.name
+            ),
         })
     }
 
@@ -478,12 +520,30 @@ impl Marketplace {
     /// Get built-in skill content
     fn get_builtin_skill_content(&self, name: &str) -> Result<String, String> {
         let skills: std::collections::HashMap<&str, &str> = vec![
-            ("analyzer", include_str!("../../agent/skills/resources/analyzer_skill.md")),
-            ("editor", include_str!("../../agent/skills/resources/editor_skill.md")),
-            ("Grep", include_str!("../../agent/skills/resources/search_skill.md")),
-            ("navigator", include_str!("../../agent/skills/resources/navigator_skill.md")),
-            ("auto_fix", include_str!("../../agent/skills/resources/auto_fix_skill.md")),
-            ("verify", include_str!("../../agent/skills/resources/verify_skill.md")),
+            (
+                "analyzer",
+                include_str!("../../agent/skills/resources/analyzer_skill.md"),
+            ),
+            (
+                "editor",
+                include_str!("../../agent/skills/resources/editor_skill.md"),
+            ),
+            (
+                "Grep",
+                include_str!("../../agent/skills/resources/search_skill.md"),
+            ),
+            (
+                "navigator",
+                include_str!("../../agent/skills/resources/navigator_skill.md"),
+            ),
+            (
+                "auto_fix",
+                include_str!("../../agent/skills/resources/auto_fix_skill.md"),
+            ),
+            (
+                "verify",
+                include_str!("../../agent/skills/resources/verify_skill.md"),
+            ),
         ]
         .into_iter()
         .collect();

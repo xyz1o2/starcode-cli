@@ -110,8 +110,13 @@ type ProgressCallback = Arc<dyn Fn(String) + Send + Sync>;
 /// Read the mtime of the Indexer's `index.json` for the given project root.
 /// Returns `None` when the file doesn't exist (project never indexed).
 fn index_mtime(project_root: &Path) -> Option<SystemTime> {
-    let index_path = project_root.join(".star").join("context").join("index.json");
-    std::fs::metadata(&index_path).and_then(|m| m.modified()).ok()
+    let index_path = project_root
+        .join(".star")
+        .join("context")
+        .join("index.json");
+    std::fs::metadata(&index_path)
+        .and_then(|m| m.modified())
+        .ok()
 }
 
 /// Returns a cached SearchEngine if the index hasn't changed, otherwise builds a new one.
@@ -247,8 +252,7 @@ fn build_search_engine_from_fs(
                                 stats.total_bytes += file_size;
 
                                 if stats.indexed_files == 1
-                                    || stats.indexed_files
-                                        .saturating_sub(last_progress_indexed)
+                                    || stats.indexed_files.saturating_sub(last_progress_indexed)
                                         >= SEMANTIC_SEARCH_PROGRESS_EVERY_FILES
                                 {
                                     last_progress_indexed = stats.indexed_files;
@@ -272,10 +276,7 @@ fn build_search_engine_from_fs(
                 }
             }
             Err(err) => {
-                emit_semantic_progress(
-                    update_output,
-                    format!("Walk error (non-fatal): {}", err),
-                );
+                emit_semantic_progress(update_output, format!("Walk error (non-fatal): {}", err));
             }
         }
     }
@@ -656,12 +657,14 @@ fn search_codebase_with_limits(
     emit_semantic_progress(&update_output, progress_msg);
 
     // Strategy A: full expansion, no diversity (preserves raw scores for RRF)
-    let expanded_results =
-        engine.search_with_options(query, TOP_N_CANDIDATE, &SearchOptions::expanded_no_diversity());
+    let expanded_results = engine.search_with_options(
+        query,
+        TOP_N_CANDIDATE,
+        &SearchOptions::expanded_no_diversity(),
+    );
 
     // Strategy B: exact terms only, no diversity
-    let exact_results =
-        engine.search_with_options(query, TOP_N_CANDIDATE, &SearchOptions::exact());
+    let exact_results = engine.search_with_options(query, TOP_N_CANDIDATE, &SearchOptions::exact());
 
     // Convert to RRF candidates
     let expanded_candidates: Vec<Candidate> = expanded_results
@@ -876,9 +879,9 @@ fn format_ripgrep_results(
 /// This is a lighter-weight scan than SearchEngine building — it only needs to
 /// parse call-graph-capable files (Rust/Python/JS/TS/Go/Java/C/C++) and extract
 /// function definitions and call sites.
-pub fn build_call_graph(root: &Path) -> Result<CallGraph, Box<dyn std::error::Error + Send + Sync>> {
-    
-
+pub fn build_call_graph(
+    root: &Path,
+) -> Result<CallGraph, Box<dyn std::error::Error + Send + Sync>> {
     let mut file_symbols: Vec<FileSymbols> = Vec::new();
     let mut next_id: symbol::SymbolId = 0;
 
@@ -917,7 +920,9 @@ pub fn build_call_graph(root: &Path) -> Result<CallGraph, Box<dyn std::error::Er
             .to_string_lossy()
             .replace('\\', "/");
 
-        if let Some(fs) = symbol::extract_symbols(&content, &rel_path, ext, &language.unwrap(), &mut next_id) {
+        if let Some(fs) =
+            symbol::extract_symbols(&content, &rel_path, ext, &language.unwrap(), &mut next_id)
+        {
             file_symbols.push(fs);
         }
     }
@@ -960,10 +965,7 @@ pub fn trace_call_chain(
     }
 
     let mut output = String::new();
-    output.push_str(&format!(
-        "Call Graph Search for '{}'\n",
-        name_hint
-    ));
+    output.push_str(&format!("Call Graph Search for '{}'\n", name_hint));
     output.push_str(&format!(
         "Total symbols indexed: {} | Resolved call edges: {}\n\n",
         graph.len(),
@@ -993,5 +995,3 @@ pub fn trace_call_chain(
 
     Ok(output)
 }
-
- 

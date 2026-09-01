@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 /// 消息处理增强模块 - 对标claude-code的消息处理功能
-/// 
+///
 /// 提供消息ID标签追加、工具引用块过滤、caller字段剥离等功能
 
 /// 消息ID标签追加器
@@ -18,9 +18,8 @@ impl MessageTagAppender {
         }
 
         // 生成短消息ID
-        let short_id = Self::derive_short_message_id(
-            &message.tool_call_id.clone().unwrap_or_default(),
-        );
+        let short_id =
+            Self::derive_short_message_id(&message.tool_call_id.clone().unwrap_or_default());
 
         let tag = format!("\n[id:{}]", short_id);
 
@@ -70,7 +69,8 @@ impl ToolReferenceFilter {
         if let Some(content) = &message.content {
             if content.contains("tool_reference") {
                 // 简化处理：移除tool_reference相关内容
-                let filtered = content.replace("\"type\": \"tool_reference\"", "\"type\": \"text\"");
+                let filtered =
+                    content.replace("\"type\": \"tool_reference\"", "\"type\": \"text\"");
                 message.content = Some(filtered);
             }
         }
@@ -296,7 +296,10 @@ impl CommandLifecycleNotifier {
     pub fn is_completed(&self, uuid: &str) -> bool {
         self.events
             .get(uuid)
-            .map(|v| v.iter().any(|e| matches!(e.event_type, CommandLifecycleEventType::Completed)))
+            .map(|v| {
+                v.iter()
+                    .any(|e| matches!(e.event_type, CommandLifecycleEventType::Completed))
+            })
             .unwrap_or(false)
     }
 }
@@ -321,7 +324,7 @@ impl PerformanceBufferCleaner {
 }
 
 /// 系统提醒兄弟压缩器 - 对标claude-code的smooshSystemReminderSiblings
-/// 
+///
 /// 将<system-reminder>前缀的文本兄弟压缩到最后一个tool_result中
 pub struct SystemReminderSmoosher;
 
@@ -356,7 +359,7 @@ impl SystemReminderSmoosher {
                 if !system_reminders.is_empty() {
                     let reminder_text = system_reminders.join("\n");
                     let mut new_content = other_content.join("\n");
-                    
+
                     // 将系统提醒附加到最后一个工具结果后面
                     if let Some(last_tr_pos) = new_content.rfind("tool_result") {
                         // 找到最后一个tool_result的结束位置
@@ -378,7 +381,7 @@ impl SystemReminderSmoosher {
 }
 
 /// 错误工具结果内容清理器 - 对标claude-code的sanitizeErrorToolResultContent
-/// 
+///
 /// 从is_error的tool_results中剥离非文本块
 pub struct ErrorToolResultSanitizer;
 
@@ -416,8 +419,8 @@ impl ErrorToolResultSanitizer {
 
             if in_tool_result {
                 // 检查是否是图片或其他非文本块
-                if line.contains("\"type\": \"image\"") 
-                    || line.contains("\"type\": \"tool_reference\"") 
+                if line.contains("\"type\": \"image\"")
+                    || line.contains("\"type\": \"tool_reference\"")
                 {
                     skip_block = true;
                     continue;
@@ -497,7 +500,8 @@ impl MessageProcessor {
 
     /// 通知命令完成
     pub fn notify_command_completed(&mut self, uuid: &str) {
-        self.lifecycle_notifier.notify(uuid, CommandLifecycleEventType::Completed);
+        self.lifecycle_notifier
+            .notify(uuid, CommandLifecycleEventType::Completed);
     }
 
     /// 清理性能缓冲区
@@ -515,9 +519,9 @@ mod tests {
     fn test_message_tag_appender() {
         let mut msg = StarMessage::user("Hello");
         msg.tool_call_id = Some("550e8400-e29b-41d4-a716-446655440000".to_string());
-        
+
         MessageTagAppender::append_message_tag(&mut msg);
-        
+
         assert!(msg.content.unwrap().contains("[id:"));
     }
 
@@ -525,25 +529,23 @@ mod tests {
     fn test_tool_reference_filter() {
         let mut msg = StarMessage::user(r#"{"type": "tool_reference", "name": "test"}"#);
         ToolReferenceFilter::strip_tool_reference_blocks(&mut msg);
-        
+
         assert!(!msg.content.unwrap().contains("tool_reference"));
     }
 
     #[test]
     fn test_caller_field_stripper() {
-        let mut msg = StarMessage::assistant_with_tool_calls(vec![
-            StarToolCall {
-                id: "test".to_string(),
-                call_type: "function".to_string(),
-                function: crate::types::StarToolCallFunction {
-                    name: "test".to_string(),
-                    arguments: r#"{"caller": "test", "key": "value"}"#.to_string(),
-                },
+        let mut msg = StarMessage::assistant_with_tool_calls(vec![StarToolCall {
+            id: "test".to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: "test".to_string(),
+                arguments: r#"{"caller": "test", "key": "value"}"#.to_string(),
             },
-        ]);
-        
+        }]);
+
         CallerFieldStripper::strip_caller_field(&mut msg);
-        
+
         let tool_calls = msg.tool_calls.unwrap();
         assert!(!tool_calls[0].function.arguments.contains("caller"));
     }
@@ -552,22 +554,22 @@ mod tests {
     fn test_system_reminder_wrapper() {
         let mut msg = StarMessage::user("[Attachment] test content");
         SystemReminderWrapper::ensure_system_reminder_wrap(&mut msg);
-        
+
         assert!(msg.content.unwrap().contains("<system-reminder>"));
     }
 
     #[test]
     fn test_context_modifier_manager() {
         let mut manager = ContextModifierManager::new();
-        
+
         let modifier = ContextModifier {
             tool_use_id: "test".to_string(),
             modifier_type: ContextModifierType::AddContext,
             data: serde_json::json!({"key": "value"}),
         };
-        
+
         manager.add_modifier("test".to_string(), modifier);
-        
+
         let modifiers = manager.get_modifiers("test");
         assert_eq!(modifiers.len(), 1);
     }
@@ -575,9 +577,9 @@ mod tests {
     #[test]
     fn test_command_lifecycle_notifier() {
         let mut notifier = CommandLifecycleNotifier::new();
-        
+
         notifier.notify("test-uuid", CommandLifecycleEventType::Completed);
-        
+
         assert!(notifier.is_completed("test-uuid"));
     }
 }

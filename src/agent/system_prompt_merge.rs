@@ -6,7 +6,7 @@
 //! - CLAUDE.md 多级合并
 //! - 缓存策略
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// System Prompt 优先级
@@ -84,11 +84,7 @@ impl SystemPromptMerger {
 
         // 添加 CLAUDE.md 内容（作为 Custom 优先级）
         for (path, content) in &self.claudemd_contents {
-            let section = format!(
-                "# Project context from {}\n{}",
-                path.display(),
-                content
-            );
+            let section = format!("# Project context from {}\n{}", path.display(), content);
             static_parts.push(section);
         }
 
@@ -106,7 +102,10 @@ impl SystemPromptMerger {
         let full = if dynamic_part.is_empty() {
             static_part.clone()
         } else {
-            format!("{}\n\n{}\n\n{}", static_part, self.boundary_marker, dynamic_part)
+            format!(
+                "{}\n\n{}\n\n{}",
+                static_part, self.boundary_marker, dynamic_part
+            )
         };
 
         MergedSystemPrompt {

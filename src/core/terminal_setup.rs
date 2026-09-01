@@ -44,27 +44,21 @@ impl TerminalSetup {
 
     fn get_config_path(shell: &ShellType) -> String {
         match shell {
-            ShellType::Bash => {
-                dirs::home_dir()
-                    .map(|p| p.join(".bashrc").to_string_lossy().to_string())
-                    .unwrap_or_else(|| "~/.bashrc".to_string())
-            }
-            ShellType::Zsh => {
-                dirs::home_dir()
-                    .map(|p| p.join(".zshrc").to_string_lossy().to_string())
-                    .unwrap_or_else(|| "~/.zshrc".to_string())
-            }
-            ShellType::Fish => {
-                dirs::home_dir()
-                    .map(|p| {
-                        p.join(".config")
-                            .join("fish")
-                            .join("config.fish")
-                            .to_string_lossy()
-                            .to_string()
-                    })
-                    .unwrap_or_else(|| "~/.config/fish/config.fish".to_string())
-            }
+            ShellType::Bash => dirs::home_dir()
+                .map(|p| p.join(".bashrc").to_string_lossy().to_string())
+                .unwrap_or_else(|| "~/.bashrc".to_string()),
+            ShellType::Zsh => dirs::home_dir()
+                .map(|p| p.join(".zshrc").to_string_lossy().to_string())
+                .unwrap_or_else(|| "~/.zshrc".to_string()),
+            ShellType::Fish => dirs::home_dir()
+                .map(|p| {
+                    p.join(".config")
+                        .join("fish")
+                        .join("config.fish")
+                        .to_string_lossy()
+                        .to_string()
+                })
+                .unwrap_or_else(|| "~/.config/fish/config.fish".to_string()),
             ShellType::PowerShell => "$PROFILE".to_string(),
             ShellType::Cmd => String::new(),
         }

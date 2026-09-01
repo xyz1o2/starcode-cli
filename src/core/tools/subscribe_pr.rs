@@ -31,7 +31,10 @@ pub struct SubscribePRInvocation {
 
 impl ToolInvocation for SubscribePRInvocation {
     fn get_description(&self) -> String {
-        format!("Subscribe to PR #{} in {}", self.params.pr_number, self.params.repo)
+        format!(
+            "Subscribe to PR #{} in {}",
+            self.params.pr_number, self.params.repo
+        )
     }
 
     fn tool_locations(&self) -> Vec<ToolLocation> {

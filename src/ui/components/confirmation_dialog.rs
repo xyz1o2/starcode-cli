@@ -6,12 +6,12 @@ use ratatui::{
 use crate::core::i18n;
 
 /// Permission dialog colors (matching Claude Code dark theme)
-const PERMISSION_COLOR: Color = Color::Rgb(177, 185, 249);  // Light blue-purple
-const SUGGESTION_COLOR: Color = Color::Rgb(177, 185, 249);  // Same as permission
-const SUCCESS_COLOR: Color = Color::Rgb(78, 186, 101);      // Bright green
-const ERROR_COLOR: Color = Color::Rgb(255, 107, 128);       // Bright red
-const INACTIVE_COLOR: Color = Color::Rgb(153, 153, 153);    // Light gray
-const SUBTLE_COLOR: Color = Color::Rgb(80, 80, 80);         // Dark gray
+const PERMISSION_COLOR: Color = Color::Rgb(177, 185, 249); // Light blue-purple
+const SUGGESTION_COLOR: Color = Color::Rgb(177, 185, 249); // Same as permission
+const SUCCESS_COLOR: Color = Color::Rgb(78, 186, 101); // Bright green
+const ERROR_COLOR: Color = Color::Rgb(255, 107, 128); // Bright red
+const INACTIVE_COLOR: Color = Color::Rgb(153, 153, 153); // Light gray
+const SUBTLE_COLOR: Color = Color::Rgb(80, 80, 80); // Dark gray
 
 fn risk_label(risk: &crate::types::RiskLevel) -> String {
     let shape = match risk {
@@ -60,15 +60,9 @@ pub fn build_confirmation_card_block(
         let color = if rejected { ERROR_COLOR } else { SUCCESS_COLOR };
         let icon = if rejected { "✗" } else { "✓" };
         let detail = match &confirmation.details {
-            ConfirmationDetails::EditFile { file_path, .. } => {
-                format_display_path(file_path)
-            }
-            ConfirmationDetails::CreateFile { file_path, .. } => {
-                format_display_path(file_path)
-            }
-            ConfirmationDetails::DeleteFile { file_path } => {
-                format_display_path(file_path)
-            }
+            ConfirmationDetails::EditFile { file_path, .. } => format_display_path(file_path),
+            ConfirmationDetails::CreateFile { file_path, .. } => format_display_path(file_path),
+            ConfirmationDetails::DeleteFile { file_path } => format_display_path(file_path),
             ConfirmationDetails::ShellCommand { command, .. } => {
                 let cmd = command.trim();
                 if cmd.is_empty() {
@@ -81,14 +75,21 @@ pub fn build_confirmation_card_block(
                 format!("{} {}", method, truncate_str(url, 60))
             }
             ConfirmationDetails::Generic { title, .. } => {
-                if title.is_empty() { confirmation.tool_name.clone() } else { title.clone() }
+                if title.is_empty() {
+                    confirmation.tool_name.clone()
+                } else {
+                    title.clone()
+                }
             }
-            ConfirmationDetails::AskUserQuestion { header, question, .. } => {
-                header.clone().unwrap_or_else(|| truncate_str(question, 40))
-            }
+            ConfirmationDetails::AskUserQuestion {
+                header, question, ..
+            } => header.clone().unwrap_or_else(|| truncate_str(question, 40)),
         };
         return vec![Line::from(vec![
-            Span::styled(format!("{} ", icon), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{} ", icon),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(outcome.clone(), Style::default().fg(color)),
             Span::styled(format!("  {}", detail), Style::default().fg(INACTIVE_COLOR)),
         ])];
@@ -98,20 +99,31 @@ pub fn build_confirmation_card_block(
 
     // ── Title (bold, permission color) ──
     let title = match &confirmation.operation_type {
-        ConfirmationType::EditFile => i18n::t("ui.confirm.title.edit_file", "编辑文件", "Edit file"),
-        ConfirmationType::ShellCommand => i18n::t("ui.confirm.title.bash", "Bash 命令", "Bash command"),
-        ConfirmationType::CreateFile => i18n::t("ui.confirm.title.create_file", "新建文件", "Create file"),
+        ConfirmationType::EditFile => {
+            i18n::t("ui.confirm.title.edit_file", "编辑文件", "Edit file")
+        }
+        ConfirmationType::ShellCommand => {
+            i18n::t("ui.confirm.title.bash", "Bash 命令", "Bash command")
+        }
+        ConfirmationType::CreateFile => {
+            i18n::t("ui.confirm.title.create_file", "新建文件", "Create file")
+        }
         ConfirmationType::AskUserQuestion => "Question".to_string(), // rendered by build_ask_user_question_card
         _ => i18n::t("ui.confirm.title.tool_use", "工具调用", "Tool use"),
     };
     lines.push(Line::from(Span::styled(
         title,
-        Style::default().fg(PERMISSION_COLOR).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(PERMISSION_COLOR)
+            .add_modifier(Modifier::BOLD),
     )));
 
     // ── Separator ──
     let sep = "─".repeat(wrap_width.saturating_sub(2));
-    lines.push(Line::from(Span::styled(sep, Style::default().fg(SUBTLE_COLOR))));
+    lines.push(Line::from(Span::styled(
+        sep,
+        Style::default().fg(SUBTLE_COLOR),
+    )));
 
     // ── Content (command/file with description) ──
     match &confirmation.operation_type {
@@ -148,17 +160,22 @@ pub fn build_confirmation_card_block(
                     Span::styled("  $ ", Style::default().fg(SUCCESS_COLOR)),
                     Span::styled(preview, Style::default().fg(Color::White)),
                 ]));
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("{}{}", i18n::t("ui.confirm.label.risk", "  风险: ", "  Risk: "), risk_label(estimated_risk)),
-                        Style::default().fg(risk_color(estimated_risk)),
+                lines.push(Line::from(vec![Span::styled(
+                    format!(
+                        "{}{}",
+                        i18n::t("ui.confirm.label.risk", "  风险: ", "  Risk: "),
+                        risk_label(estimated_risk)
                     ),
-                ]));
+                    Style::default().fg(risk_color(estimated_risk)),
+                )]));
                 // Render diff preview if available
                 if let Some(diff) = diff_preview {
                     if !diff.is_empty() {
                         lines.push(Line::from(Span::styled(
-                            format!("  {}", i18n::t("ui.confirm.label.diff", "变更预览:", "Diff preview:")),
+                            format!(
+                                "  {}",
+                                i18n::t("ui.confirm.label.diff", "变更预览:", "Diff preview:")
+                            ),
                             Style::default().fg(INACTIVE_COLOR),
                         )));
                         for diff_line in diff.lines().take(20) {
@@ -172,7 +189,10 @@ pub fn build_confirmation_card_block(
                                 Color::Gray
                             };
                             lines.push(Line::from(Span::styled(
-                                format!("  {}", truncate_str(diff_line, wrap_width.saturating_sub(4) as usize)),
+                                format!(
+                                    "  {}",
+                                    truncate_str(diff_line, wrap_width.saturating_sub(4) as usize)
+                                ),
                                 Style::default().fg(color),
                             )));
                         }
@@ -201,7 +221,10 @@ pub fn build_confirmation_card_block(
                 if !prompt.is_empty() {
                     lines.push(Line::from(vec![
                         Span::styled("  ", Style::default()),
-                        Span::styled(truncate_str(prompt, 60), Style::default().fg(INACTIVE_COLOR)),
+                        Span::styled(
+                            truncate_str(prompt, 60),
+                            Style::default().fg(INACTIVE_COLOR),
+                        ),
                     ]));
                 }
             }
@@ -211,12 +234,17 @@ pub fn build_confirmation_card_block(
     // ── Danger warning ──
     if confirmation.is_dangerous {
         lines.push(Line::from(Span::styled(
-            format!("  ⚠ {}", i18n::t(
-                "ui.confirm.warning.danger",
-                "注意：可能修改文件或执行命令",
-                "This action may modify files or run commands",
-            )),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            format!(
+                "  ⚠ {}",
+                i18n::t(
+                    "ui.confirm.warning.danger",
+                    "注意：可能修改文件或执行命令",
+                    "This action may modify files or run commands",
+                )
+            ),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )));
     }
 
@@ -225,7 +253,11 @@ pub fn build_confirmation_card_block(
 
     // ── Question ──
     lines.push(Line::from(Span::styled(
-        i18n::t("ui.confirm.question.proceed", "  是否继续？", "  Do you want to proceed?"),
+        i18n::t(
+            "ui.confirm.question.proceed",
+            "  是否继续？",
+            "  Do you want to proceed?",
+        ),
         Style::default().fg(Color::White),
     )));
 
@@ -233,34 +265,69 @@ pub fn build_confirmation_card_block(
     let option = |choice: usize, label: &str| -> Line<'static> {
         let selected = selected_choice == choice;
         let indicator = if selected {
-            Span::styled("❯ ", Style::default().fg(SUGGESTION_COLOR).add_modifier(Modifier::BOLD))
+            Span::styled(
+                "❯ ",
+                Style::default()
+                    .fg(SUGGESTION_COLOR)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
             Span::styled("  ", Style::default())
         };
         let num = Span::styled(
             format!("{}. ", choice),
-            Style::default().fg(if selected { SUGGESTION_COLOR } else { INACTIVE_COLOR }),
+            Style::default().fg(if selected {
+                SUGGESTION_COLOR
+            } else {
+                INACTIVE_COLOR
+            }),
         );
         let text = Span::styled(
             label.to_string(),
             Style::default()
                 .fg(if selected { Color::White } else { Color::Gray })
-                .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
         );
         Line::from(vec![indicator, num, text])
     };
 
-    lines.push(option(1, &i18n::t("ui.confirm.option.once", "1. 允许一次", "1. Allow once")));
-    lines.push(option(2, &i18n::t("ui.confirm.option.session", "2. 本会话允许", "2. Allow for session")));
-    lines.push(option(3, &i18n::t("ui.confirm.option.always", "3. 永久允许", "3. Always allow")));
-    lines.push(option(4, &i18n::t("ui.confirm.option.deny", "4. 拒绝", "4. Deny")));
+    lines.push(option(
+        1,
+        &i18n::t("ui.confirm.option.once", "1. 允许一次", "1. Allow once"),
+    ));
+    lines.push(option(
+        2,
+        &i18n::t(
+            "ui.confirm.option.session",
+            "2. 本会话允许",
+            "2. Allow for session",
+        ),
+    ));
+    lines.push(option(
+        3,
+        &i18n::t("ui.confirm.option.always", "3. 永久允许", "3. Always allow"),
+    ));
+    lines.push(option(
+        4,
+        &i18n::t("ui.confirm.option.deny", "4. 拒绝", "4. Deny"),
+    ));
 
     // ── Explanation section (Ctrl+E) ──
     if show_explanation {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            i18n::t("ui.confirm.explain.title", "  为什么询问此权限？", "  Why is this permission needed?"),
-            Style::default().fg(PERMISSION_COLOR).add_modifier(Modifier::BOLD),
+            i18n::t(
+                "ui.confirm.explain.title",
+                "  为什么询问此权限？",
+                "  Why is this permission needed?",
+            ),
+            Style::default()
+                .fg(PERMISSION_COLOR)
+                .add_modifier(Modifier::BOLD),
         )));
         let explanation = match &confirmation.details {
             ConfirmationDetails::EditFile { .. } | ConfirmationDetails::CreateFile { .. } => {
@@ -310,7 +377,9 @@ pub fn build_confirmation_card_block(
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  Debug (tool input)",
-            Style::default().fg(PERMISSION_COLOR).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(PERMISSION_COLOR)
+                .add_modifier(Modifier::BOLD),
         )));
         let debug_json = match &confirmation.details {
             ConfirmationDetails::Generic { title, .. } => title.clone(),
@@ -347,9 +416,9 @@ pub fn build_confirmation_card_block(
 pub fn build_ask_user_question_card(
     confirmation: &crate::types::ToolConfirmation,
     wrap_width: usize,
-    selected_choice: usize,         // 1-based focused option index
-    selected_options: &[usize],      // selected indices for multi-select
-    other_input: &str,               // "Other" text input value
+    selected_choice: usize,     // 1-based focused option index
+    selected_options: &[usize], // selected indices for multi-select
+    other_input: &str,          // "Other" text input value
 ) -> Vec<Line<'static>> {
     use crate::types::ConfirmationDetails;
 
@@ -362,7 +431,10 @@ pub fn build_ask_user_question_card(
         let icon = if rejected { "✗" } else { "✓" };
         let outcome_text = outcome.clone();
         return vec![Line::from(vec![
-            Span::styled(format!("{} ", icon), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{} ", icon),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(outcome_text, Style::default().fg(color)),
         ])];
     }
@@ -379,7 +451,11 @@ pub fn build_ask_user_question_card(
         } = &confirmation.details
         {
             let h = header.clone().unwrap_or_else(|| "Question".to_string());
-            let m = if *multi_select { " (多选)".to_string() } else { " (单选)".to_string() };
+            let m = if *multi_select {
+                " (多选)".to_string()
+            } else {
+                " (单选)".to_string()
+            };
             let opts: Vec<(String, String)> = options
                 .iter()
                 .map(|o| (o.label.clone(), o.description.clone()))
@@ -391,16 +467,26 @@ pub fn build_ask_user_question_card(
 
     // ── Header ──
     lines.push(Line::from(vec![
-        Span::styled("? ", Style::default().fg(SUGGESTION_COLOR).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "? ",
+            Style::default()
+                .fg(SUGGESTION_COLOR)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             format!("{}{}", header_text, mode_label),
-            Style::default().fg(PERMISSION_COLOR).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(PERMISSION_COLOR)
+                .add_modifier(Modifier::BOLD),
         ),
     ]));
 
     // ── Separator ──
     let sep = "─".repeat(wrap_width.saturating_sub(2));
-    lines.push(Line::from(Span::styled(sep, Style::default().fg(SUBTLE_COLOR))));
+    lines.push(Line::from(Span::styled(
+        sep,
+        Style::default().fg(SUBTLE_COLOR),
+    )));
 
     // ── Question text (wrapped) ──
     let max_line = wrap_width.saturating_sub(4);
@@ -429,13 +515,20 @@ pub fn build_ask_user_question_card(
         let is_selected = multi_select_flag && selected_options.contains(&i);
 
         let pointer = if is_focused {
-            Span::styled("❯ ", Style::default().fg(SUGGESTION_COLOR).add_modifier(Modifier::BOLD))
+            Span::styled(
+                "❯ ",
+                Style::default()
+                    .fg(SUGGESTION_COLOR)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
             Span::styled("  ", Style::default())
         };
 
         let focus_style = if is_focused {
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
         };
@@ -475,12 +568,19 @@ pub fn build_ask_user_question_card(
     // ── "Other" option ──
     let is_other_focused = selected_choice == other_idx;
     let pointer = if is_other_focused {
-        Span::styled("❯ ", Style::default().fg(SUGGESTION_COLOR).add_modifier(Modifier::BOLD))
+        Span::styled(
+            "❯ ",
+            Style::default()
+                .fg(SUGGESTION_COLOR)
+                .add_modifier(Modifier::BOLD),
+        )
     } else {
         Span::styled("  ", Style::default())
     };
     let other_style = if is_other_focused {
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Gray)
     };
@@ -496,7 +596,11 @@ pub fn build_ask_user_question_card(
         Span::styled(format!("{}. Other: ", other_idx), other_style),
         Span::styled(
             other_display,
-            if other_input_owned.is_empty() { Style::default().fg(SUBTLE_COLOR) } else { Style::default().fg(Color::White) },
+            if other_input_owned.is_empty() {
+                Style::default().fg(SUBTLE_COLOR)
+            } else {
+                Style::default().fg(Color::White)
+            },
         ),
     ]));
 
@@ -581,7 +685,6 @@ fn format_display_path(path: &str) -> String {
     path.to_string()
 }
 
-
 pub async fn build_confirmation_from_tool_call(
     tc: &crate::types::StarToolCall,
 ) -> crate::types::ToolConfirmation {
@@ -614,7 +717,9 @@ pub async fn build_confirmation_from_tool_call(
 
     match tc.function.name.as_str() {
         "exit_plan_mode" => {
-            let plan = get_str(&["plan"]).unwrap_or_else(|| i18n::t("ui.confirm.msg.empty_plan", "（空计划）", "(empty plan)"));
+            let plan = get_str(&["plan"]).unwrap_or_else(|| {
+                i18n::t("ui.confirm.msg.empty_plan", "（空计划）", "(empty plan)")
+            });
             let preview = if plan.chars().count() > 800 {
                 format!("{}...", plan.chars().take(800).collect::<String>())
             } else {
@@ -669,13 +774,21 @@ pub async fn build_confirmation_from_tool_call(
                                 out.push_str(&format!("+{}\n", n));
                                 shown += 1;
                                 if shown >= 20 {
-                                    out.push_str(&i18n::t("ui.confirm.msg.diff_truncated", "...（差异已截断）\n", "... (diff truncated)\n"));
+                                    out.push_str(&i18n::t(
+                                        "ui.confirm.msg.diff_truncated",
+                                        "...（差异已截断）\n",
+                                        "... (diff truncated)\n",
+                                    ));
                                     break;
                                 }
                             }
                         }
                         if shown == 0 {
-                            out.push_str(&i18n::t("ui.confirm.msg.no_diff", "（无差异或替换未匹配）\n", "(no differences or replacement not matched)\n"));
+                            out.push_str(&i18n::t(
+                                "ui.confirm.msg.no_diff",
+                                "（无差异或替换未匹配）\n",
+                                "(no differences or replacement not matched)\n",
+                            ));
                         }
                         out
                     }
@@ -688,7 +801,7 @@ pub async fn build_confirmation_from_tool_call(
                         tpl.replace("{0}", &e.to_string())
                             .replace("{1}", &old_str)
                             .replace("{2}", &new_str)
-                    },
+                    }
                 }
             } else {
                 let raw = tc.function.arguments.chars().take(800).collect::<String>();
@@ -745,13 +858,21 @@ pub async fn build_confirmation_from_tool_call(
                                 out.push_str(&format!("+{}\n", n));
                                 shown += 1;
                                 if shown >= 20 {
-                                    out.push_str(&i18n::t("ui.confirm.msg.diff_truncated", "...（差异已截断）\n", "... (diff truncated)\n"));
+                                    out.push_str(&i18n::t(
+                                        "ui.confirm.msg.diff_truncated",
+                                        "...（差异已截断）\n",
+                                        "... (diff truncated)\n",
+                                    ));
                                     break;
                                 }
                             }
                         }
                         if shown == 0 {
-                            out.push_str(&i18n::t("ui.confirm.msg.no_diff", "（无差异或替换未匹配）\n", "(no differences or replacement not matched)\n"));
+                            out.push_str(&i18n::t(
+                                "ui.confirm.msg.no_diff",
+                                "（无差异或替换未匹配）\n",
+                                "(no differences or replacement not matched)\n",
+                            ));
                         }
                         out
                     }
@@ -764,7 +885,7 @@ pub async fn build_confirmation_from_tool_call(
                         tpl.replace("{0}", &e.to_string())
                             .replace("{1}", &old_str)
                             .replace("{2}", &new_str)
-                    },
+                    }
                 }
             } else {
                 let old_preview = old_str.lines().take(6).collect::<Vec<_>>().join("\n");

@@ -107,7 +107,9 @@ pub(super) fn find_team_agent(input: &str) -> Option<&'static TeamAgentDef> {
     })
 }
 
-pub(super) fn resolve_team_agents(raw_agents: Vec<String>) -> Result<Vec<&'static TeamAgentDef>, String> {
+pub(super) fn resolve_team_agents(
+    raw_agents: Vec<String>,
+) -> Result<Vec<&'static TeamAgentDef>, String> {
     let requested: Vec<String> = raw_agents
         .into_iter()
         .map(|s| normalize_agent_name(&s))

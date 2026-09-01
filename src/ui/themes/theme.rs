@@ -16,13 +16,13 @@ pub struct Theme {
     pub string: Color,
     pub keyword: Color,
     pub function: Color,
-    
+
     // Shimmer 效果颜色（用于 spinner 和状态栏的闪烁）
     pub primary_shimmer: Color,
     pub secondary_shimmer: Color,
     pub warning_shimmer: Color,
     pub error_shimmer: Color,
-    
+
     // Diff 颜色
     pub diff_added: Color,
     pub diff_removed: Color,
@@ -30,7 +30,7 @@ pub struct Theme {
     pub diff_removed_dimmed: Color,
     pub diff_added_word: Color,
     pub diff_removed_word: Color,
-    
+
     // Agent 颜色（用于多代理场景）
     pub agent_red: Color,
     pub agent_blue: Color,
@@ -38,46 +38,46 @@ pub struct Theme {
     pub agent_yellow: Color,
     pub agent_purple: Color,
     pub agent_orange: Color,
-    
+
     // UI 元素颜色
     pub user_message_bg: Color,
     pub selection_bg: Color,
     pub inactive: Color,
     pub subtle: Color,
     pub suggestion: Color,
-    
+
     // Thinking 相关颜色
     pub thinking_fg: Color,
     pub thinking_bg: Color,
-    
+
     // Tool 相关颜色
     pub tool_fg: Color,
     pub tool_bg: Color,
     pub tool_success: Color,
     pub tool_error: Color,
     pub tool_border: Color,
-    
+
     // 用户消息颜色
     pub user_fg: Color,
     pub user_bg: Color,
-    
+
     // Assistant 消息颜色
     pub assistant_fg: Color,
     pub assistant_bg: Color,
-    
+
     // 状态栏颜色
     pub status_fg: Color,
     pub status_bg: Color,
-    
+
     // 输入框颜色
     pub input_fg: Color,
     pub input_bg: Color,
     pub input_border: Color,
-    
+
     // 代码块颜色
     pub code_fg: Color,
     pub code_bg: Color,
-    
+
     // 链接颜色
     pub link_fg: Color,
 }

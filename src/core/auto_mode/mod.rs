@@ -11,10 +11,12 @@ pub mod dangerous_patterns;
 pub mod prompts;
 
 pub use classifier::{AutoModeClassifier, ClassifierDecision, ClassifierResult, ClassifierStage};
-pub use dangerous_patterns::{is_dangerous_pattern, DANGEROUS_BASH_PATTERNS, DANGEROUS_PERMISSION_PATTERNS};
+pub use dangerous_patterns::{
+    is_dangerous_pattern, DANGEROUS_BASH_PATTERNS, DANGEROUS_PERMISSION_PATTERNS,
+};
 
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use serde::{Serialize, Deserialize};
 
 /// Auto Mode 状态
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,8 +94,7 @@ impl AutoModeState {
         }
         // 更新平均延迟
         let n = self.stats.total_classifications as f64;
-        self.stats.avg_latency_ms =
-            (self.stats.avg_latency_ms * (n - 1.0) + result.latency_ms) / n;
+        self.stats.avg_latency_ms = (self.stats.avg_latency_ms * (n - 1.0) + result.latency_ms) / n;
     }
 
     /// 剥离危险权限
@@ -154,7 +155,10 @@ impl AutoModeManager {
         tool_params: &serde_json::Value,
         transcript: &str,
     ) -> ClassifierResult {
-        let result = self.classifier.classify(tool_name, tool_params, transcript).await;
+        let result = self
+            .classifier
+            .classify(tool_name, tool_params, transcript)
+            .await;
         self.state.lock().unwrap().record_classification(&result);
         result
     }

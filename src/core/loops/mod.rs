@@ -183,10 +183,7 @@ pub async fn tick_and_collect_due_tasks(
 }
 
 /// Mark a task as completed. This prevents re-execution until the next interval.
-pub async fn mark_task_completed(
-    project_root: &Path,
-    task_name: &str,
-) -> Result<(), String> {
+pub async fn mark_task_completed(project_root: &Path, task_name: &str) -> Result<(), String> {
     let mut store = load_store(project_root).await?;
     if let Some(task) = store.tasks.iter_mut().find(|t| t.name == task_name) {
         task.completion_count += 1;
@@ -209,5 +206,3 @@ pub fn is_task_recently_completed(task: &LoopTask, now_ts: i64) -> bool {
         false
     }
 }
-
- 

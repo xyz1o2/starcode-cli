@@ -10,9 +10,7 @@
 use std::path::PathBuf;
 
 fn eval_dir() -> PathBuf {
-    std::env::current_dir()
-        .expect("cwd")
-        .join("eval")
+    std::env::current_dir().expect("cwd").join("eval")
 }
 
 #[tokio::test]
@@ -66,9 +64,18 @@ async fn mechanism_tasks_run_and_report() {
             println!("FAILED {} rules={:?}", r.id, r.outcome.failed_rules);
         }
     }
-    println!("summary: {} total, {} passed", report.summary.total, report.summary.passed);
+    println!(
+        "summary: {} total, {} passed",
+        report.summary.total, report.summary.passed
+    );
 
-    assert_eq!(report.summary.total, 16, "tasks.json should define 16 tasks");
-    assert!(report.summary.passed >= 14, "mechanism layer should mostly pass");
+    assert_eq!(
+        report.summary.total, 16,
+        "tasks.json should define 16 tasks"
+    );
+    assert!(
+        report.summary.passed >= 14,
+        "mechanism layer should mostly pass"
+    );
     assert!(report.results.len() == 16);
 }

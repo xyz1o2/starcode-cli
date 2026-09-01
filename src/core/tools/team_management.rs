@@ -85,12 +85,18 @@ impl ToolInvocation for TeamCreateInvocation {
 }
 
 impl BaseDeclarativeTool for TeamCreateTool {
-    fn name(&self) -> &str { "team_create" }
-    fn display_name(&self) -> &str { "TeamCreate" }
+    fn name(&self) -> &str {
+        "team_create"
+    }
+    fn display_name(&self) -> &str {
+        "TeamCreate"
+    }
     fn description(&self) -> &str {
         "创建新团队用于协调多个Agent。用于多Agent协作任务。(Create a new team for coordinating multiple agents. Used for multi-agent collaboration tasks.)"
     }
-    fn kind(&self) -> Kind { Kind::Execute }
+    fn kind(&self) -> Kind {
+        Kind::Execute
+    }
 
     fn parameter_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -121,9 +127,10 @@ impl BaseDeclarativeTool for TeamCreateTool {
         Ok(Box::new(TeamCreateInvocation { params }))
     }
 
-    fn is_read_only(&self) -> bool { false }
+    fn is_read_only(&self) -> bool {
+        false
+    }
 }
-
 
 // ── TeamDelete ───────────────────────────────────────────────────────
 
@@ -176,12 +183,14 @@ impl ToolInvocation for TeamDeleteInvocation {
         >,
     > {
         Box::pin(async {
-            Ok(Some(crate::core::tools::tools::ToolCallConfirmationDetails {
-                confirmation_type: crate::core::tools::tools::ConfirmationType::Ask,
-                title: "Delete Team".to_string(),
-                prompt: "Delete team and remove all members".to_string(),
-                on_confirm: Arc::new(|_| {}),
-            }))
+            Ok(Some(
+                crate::core::tools::tools::ToolCallConfirmationDetails {
+                    confirmation_type: crate::core::tools::tools::ConfirmationType::Ask,
+                    title: "Delete Team".to_string(),
+                    prompt: "Delete team and remove all members".to_string(),
+                    on_confirm: Arc::new(|_| {}),
+                },
+            ))
         })
     }
 
@@ -219,12 +228,18 @@ impl ToolInvocation for TeamDeleteInvocation {
 }
 
 impl BaseDeclarativeTool for TeamDeleteTool {
-    fn name(&self) -> &str { "team_delete" }
-    fn display_name(&self) -> &str { "TeamDelete" }
+    fn name(&self) -> &str {
+        "team_delete"
+    }
+    fn display_name(&self) -> &str {
+        "TeamDelete"
+    }
     fn description(&self) -> &str {
         "删除团队并移除所有成员。用于结束多Agent协作任务。(Delete a team and remove all members. Used to end multi-agent collaboration tasks.)"
     }
-    fn kind(&self) -> Kind { Kind::Execute }
+    fn kind(&self) -> Kind {
+        Kind::Execute
+    }
 
     fn parameter_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -247,9 +262,10 @@ impl BaseDeclarativeTool for TeamDeleteTool {
         Ok(Box::new(TeamDeleteInvocation { params }))
     }
 
-    fn is_read_only(&self) -> bool { false }
+    fn is_read_only(&self) -> bool {
+        false
+    }
 }
-
 
 // ── ListPeers ────────────────────────────────────────────────────────
 
@@ -308,25 +324,20 @@ impl ToolInvocation for ListPeersInvocation {
     > {
         let params = self.params.clone();
         Box::pin(async move {
-            let peers = vec![
-                PeerInfo {
-                    agent_id: "team-lead@default".to_string(),
-                    name: "team-lead".to_string(),
-                    agent_type: "team-lead".to_string(),
-                    status: "active".to_string(),
-                    joined_at: chrono::Utc::now().to_rfc3339(),
-                },
-            ];
+            let peers = vec![PeerInfo {
+                agent_id: "team-lead@default".to_string(),
+                name: "team-lead".to_string(),
+                agent_type: "team-lead".to_string(),
+                status: "active".to_string(),
+                joined_at: chrono::Utc::now().to_rfc3339(),
+            }];
 
             let total_count = peers.len();
 
             Ok(ToolResult {
                 llm_content: Some(format!("Found {} peers in team", total_count)),
                 return_display: Some(format!("{} peers found", total_count)),
-                output: serde_json::to_string(&ListPeersOutput {
-                    peers,
-                    total_count,
-                })?,
+                output: serde_json::to_string(&ListPeersOutput { peers, total_count })?,
                 error: None,
                 data: Some(serde_json::json!({
                     "total_count": total_count
@@ -337,12 +348,18 @@ impl ToolInvocation for ListPeersInvocation {
 }
 
 impl BaseDeclarativeTool for ListPeersTool {
-    fn name(&self) -> &str { "list_peers" }
-    fn display_name(&self) -> &str { "ListPeers" }
+    fn name(&self) -> &str {
+        "list_peers"
+    }
+    fn display_name(&self) -> &str {
+        "ListPeers"
+    }
     fn description(&self) -> &str {
         "列出当前团队中的所有对等Agent。用于查看团队成员状态。(List all peer agents in the current team. Used to view team member status.)"
     }
-    fn kind(&self) -> Kind { Kind::Read }
+    fn kind(&self) -> Kind {
+        Kind::Read
+    }
 
     fn parameter_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -364,5 +381,7 @@ impl BaseDeclarativeTool for ListPeersTool {
         Ok(Box::new(ListPeersInvocation { params }))
     }
 
-    fn is_read_only(&self) -> bool { true }
+    fn is_read_only(&self) -> bool {
+        true
+    }
 }

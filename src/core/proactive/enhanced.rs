@@ -5,7 +5,7 @@
 //! - SleepTool 控制节奏
 //! - 主动建议系统
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -164,7 +164,8 @@ impl ProactiveManager {
                 id: uuid::Uuid::new_v4().to_string(),
                 suggestion_type: SuggestionType::RunTests,
                 title: "Run tests".to_string(),
-                description: "It's been a while since tests were run. Would you like to run them?".to_string(),
+                description: "It's been a while since tests were run. Would you like to run them?"
+                    .to_string(),
                 confidence: 0.8,
                 auto_executable: true,
                 action: Some(SuggestedAction {
@@ -177,7 +178,9 @@ impl ProactiveManager {
                 id: uuid::Uuid::new_v4().to_string(),
                 suggestion_type: SuggestionType::CheckErrors,
                 title: "Check for errors".to_string(),
-                description: "Would you like me to check for any errors or warnings in the codebase?".to_string(),
+                description:
+                    "Would you like me to check for any errors or warnings in the codebase?"
+                        .to_string(),
                 confidence: 0.7,
                 auto_executable: true,
                 action: Some(SuggestedAction {
@@ -241,10 +244,7 @@ impl SleepTool {
     }
 
     /// 休眠直到条件满足
-    pub async fn sleep_until(
-        duration: Duration,
-        check: impl Fn() -> bool,
-    ) -> bool {
+    pub async fn sleep_until(duration: Duration, check: impl Fn() -> bool) -> bool {
         let start = Instant::now();
         while start.elapsed() < duration {
             if check() {

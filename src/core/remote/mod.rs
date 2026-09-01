@@ -169,5 +169,3 @@ pub async fn drain_requests(project_root: &Path) -> Result<RemoteDrainResult, St
 pub fn protocol_example() -> &'static str {
     r#"{"protocol":"starcode.remote.v1","action":"send_message","source":"ci-bot","message":"请检查 main 分支构建失败原因"}"#
 }
-
- 

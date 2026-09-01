@@ -39,8 +39,9 @@ pub async fn get_git_status<P: AsRef<Path>>(cwd: P) -> Option<GitStatus> {
         tokio::process::Command::new("git")
             .args(["symbolic-ref", "--short", "HEAD"])
             .current_dir(&cwd)
-            .output()
-    ).await;
+            .output(),
+    )
+    .await;
 
     let branch_output = match branch_output {
         Ok(result) => result,
@@ -59,8 +60,9 @@ pub async fn get_git_status<P: AsRef<Path>>(cwd: P) -> Option<GitStatus> {
                 tokio::process::Command::new("git")
                     .args(["rev-parse", "--short", "HEAD"])
                     .current_dir(&cwd)
-                    .output()
-            ).await;
+                    .output(),
+            )
+            .await;
 
             let rev_output = match rev_output {
                 Ok(result) => result,
@@ -89,8 +91,9 @@ pub async fn get_git_status<P: AsRef<Path>>(cwd: P) -> Option<GitStatus> {
         tokio::process::Command::new("git")
             .args(["status", "--porcelain"])
             .current_dir(&cwd)
-            .output()
-    ).await;
+            .output(),
+    )
+    .await;
 
     let status_output = match status_output {
         Ok(result) => result,

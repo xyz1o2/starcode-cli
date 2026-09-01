@@ -44,8 +44,7 @@ async fn share(ctx: CommandContext<'_>, args: &[String]) -> CommandResult {
         .join(".star")
         .join("exports");
     if !dir.exists() {
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("Failed to create export dir: {}", e))?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create export dir: {}", e))?;
     }
     let file_name = format!("session_{}.md", label);
     let path = dir.join(&file_name);

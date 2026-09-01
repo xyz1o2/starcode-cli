@@ -155,8 +155,7 @@ impl MemoryManager {
         let content = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| format!("Failed to read project memory: {}", e))?;
-        serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse project memory: {}", e))
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse project memory: {}", e))
     }
 
     /// Save project memory
@@ -180,8 +179,7 @@ impl MemoryManager {
         let content = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| format!("Failed to read user memory: {}", e))?;
-        serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse user memory: {}", e))
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse user memory: {}", e))
     }
 
     /// Save user memory
@@ -205,8 +203,7 @@ impl MemoryManager {
         let content = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| format!("Failed to read error memory: {}", e))?;
-        serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse error memory: {}", e))
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse error memory: {}", e))
     }
 
     /// Save error memory
@@ -230,19 +227,22 @@ impl MemoryManager {
     ) -> Result<(), String> {
         let mut memory = self.load_project_memory().await?;
         let now = chrono::Utc::now().timestamp();
-        
+
         // Clone values before using them in closure
         let symbols_clone = symbols.clone();
         let desc_clone = description.map(|s| s.to_string());
-        
-        let entry = memory.files.entry(file_path.to_string()).or_insert_with(|| FileMeta {
-            description: desc_clone.unwrap_or_default(),
-            symbols: symbols_clone.unwrap_or_default(),
-            last_read: now,
-            last_modified: now,
-            access_count: 0,
-        });
-        
+
+        let entry = memory
+            .files
+            .entry(file_path.to_string())
+            .or_insert_with(|| FileMeta {
+                description: desc_clone.unwrap_or_default(),
+                symbols: symbols_clone.unwrap_or_default(),
+                last_read: now,
+                last_modified: now,
+                access_count: 0,
+            });
+
         entry.last_read = now;
         entry.access_count += 1;
         if let Some(desc) = description {
@@ -251,31 +251,27 @@ impl MemoryManager {
         if let Some(syms) = symbols {
             entry.symbols = syms;
         }
-        
+
         memory.last_updated = now;
         self.save_project_memory(&memory).await
     }
 
     /// Record a user feedback
-    pub async fn record_feedback(
-        &self,
-        message: &str,
-        sentiment: Sentiment,
-    ) -> Result<(), String> {
+    pub async fn record_feedback(&self, message: &str, sentiment: Sentiment) -> Result<(), String> {
         let mut memory = self.load_user_memory().await?;
         let now = chrono::Utc::now().timestamp();
-        
+
         memory.feedback.push(Feedback {
             message: message.to_string(),
             sentiment,
             timestamp: now,
         });
-        
+
         // Keep only last 100 feedback entries
         if memory.feedback.len() > 100 {
             memory.feedback = memory.feedback.split_off(memory.feedback.len() - 100);
         }
-        
+
         memory.last_updated = now;
         self.save_user_memory(&memory).await
     }
@@ -289,7 +285,7 @@ impl MemoryManager {
     ) -> Result<(), String> {
         let mut memory = self.load_error_memory().await?;
         let now = chrono::Utc::now().timestamp();
-        
+
         // Check if this pattern already exists
         if let Some(existing) = memory.patterns.iter_mut().find(|p| p.pattern == pattern) {
             existing.occurrence_count += 1;
@@ -304,24 +300,21 @@ impl MemoryManager {
                 last_seen: now,
             });
         }
-        
+
         // Keep only last 200 patterns
         if memory.patterns.len() > 200 {
             memory.patterns = memory.patterns.split_off(memory.patterns.len() - 200);
         }
-        
+
         memory.last_updated = now;
         self.save_error_memory(&memory).await
     }
 
     /// Update user coding style observation
-    pub async fn update_coding_style(
-        &self,
-        style: &CodingStyle,
-    ) -> Result<(), String> {
+    pub async fn update_coding_style(&self, style: &CodingStyle) -> Result<(), String> {
         let mut memory = self.load_user_memory().await?;
         let now = chrono::Utc::now().timestamp();
-        
+
         // Merge style observations
         if let Some(indent) = &style.indentation {
             memory.coding_style.indentation = Some(indent.clone());
@@ -338,7 +331,7 @@ impl MemoryManager {
         if let Some(line_end) = &style.line_endings {
             memory.coding_style.line_endings = Some(line_end.clone());
         }
-        
+
         memory.last_updated = now;
         self.save_user_memory(&memory).await
     }
@@ -348,13 +341,16 @@ impl MemoryManager {
         let project = self.load_project_memory().await?;
         let user = self.load_user_memory().await?;
         let errors = self.load_error_memory().await?;
-        
+
         Ok(MemorySummary {
             files_tracked: project.files.len(),
             conventions_count: project.conventions.len(),
             feedback_count: user.feedback.len(),
             error_patterns_count: errors.patterns.len(),
-            last_updated: project.last_updated.max(user.last_updated).max(errors.last_updated),
+            last_updated: project
+                .last_updated
+                .max(user.last_updated)
+                .max(errors.last_updated),
         })
     }
 }
@@ -392,14 +388,17 @@ mod tests {
     async fn test_memory_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let manager = MemoryManager::new(dir.path());
-        
+
         // Record file access
-        manager.record_file_access(
-            "src/main.rs",
-            Some("Main entry point"),
-            Some(vec!["main".to_string(), "init".to_string()]),
-        ).await.unwrap();
-        
+        manager
+            .record_file_access(
+                "src/main.rs",
+                Some("Main entry point"),
+                Some(vec!["main".to_string(), "init".to_string()]),
+            )
+            .await
+            .unwrap();
+
         // Load and verify
         let memory = manager.load_project_memory().await.unwrap();
         assert_eq!(memory.files.len(), 1);
@@ -411,14 +410,17 @@ mod tests {
     async fn test_error_recording() {
         let dir = tempfile::tempdir().unwrap();
         let manager = MemoryManager::new(dir.path());
-        
+
         // Record error
-        manager.record_error(
-            "string not found",
-            "replace operation",
-            "re-read file first",
-        ).await.unwrap();
-        
+        manager
+            .record_error(
+                "string not found",
+                "replace operation",
+                "re-read file first",
+            )
+            .await
+            .unwrap();
+
         // Load and verify
         let memory = manager.load_error_memory().await.unwrap();
         assert_eq!(memory.patterns.len(), 1);

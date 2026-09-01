@@ -90,9 +90,10 @@ pub fn render_export_dialog(f: &mut Frame, state: &ExportState, area: Rect) {
     f.render_widget(block, area);
 
     // Title
-    let title = Line::from(vec![
-        Span::styled("  Export conversation to file", Style::default().fg(Color::White)),
-    ]);
+    let title = Line::from(vec![Span::styled(
+        "  Export conversation to file",
+        Style::default().fg(Color::White),
+    )]);
     f.render_widget(Paragraph::new(title), chunks[0]);
 
     // Format
@@ -100,7 +101,9 @@ pub fn render_export_dialog(f: &mut Frame, state: &ExportState, area: Rect) {
         Span::styled("  Format: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             state.format.name(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" (Tab to change)", Style::default().fg(Color::DarkGray)),
     ]);
@@ -109,10 +112,7 @@ pub fn render_export_dialog(f: &mut Frame, state: &ExportState, area: Rect) {
     // Filename
     let filename_line = Line::from(vec![
         Span::styled("  File: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            state.filename.clone(),
-            Style::default().fg(Color::Yellow),
-        ),
+        Span::styled(state.filename.clone(), Style::default().fg(Color::Yellow)),
     ]);
     f.render_widget(Paragraph::new(filename_line), chunks[2]);
 
@@ -121,23 +121,36 @@ pub fn render_export_dialog(f: &mut Frame, state: &ExportState, area: Rect) {
         Span::styled("  Include metadata: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             if state.include_metadata { "Yes" } else { "No" },
-            Style::default().fg(if state.include_metadata { Color::Green } else { Color::Red }),
+            Style::default().fg(if state.include_metadata {
+                Color::Green
+            } else {
+                Color::Red
+            }),
         ),
-        Span::styled("  Include tool calls: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            if state.include_tool_calls { "Yes" } else { "No" },
-            Style::default().fg(if state.include_tool_calls { Color::Green } else { Color::Red }),
+            "  Include tool calls: ",
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            if state.include_tool_calls {
+                "Yes"
+            } else {
+                "No"
+            },
+            Style::default().fg(if state.include_tool_calls {
+                Color::Green
+            } else {
+                Color::Red
+            }),
         ),
     ]);
     f.render_widget(Paragraph::new(options_line), chunks[3]);
 
     // Help
-    let help_line = Line::from(vec![
-        Span::styled(
-            "  Enter Export  Esc Cancel  Tab Format  m Metadata  t Tool calls",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]);
+    let help_line = Line::from(vec![Span::styled(
+        "  Enter Export  Esc Cancel  Tab Format  m Metadata  t Tool calls",
+        Style::default().fg(Color::DarkGray),
+    )]);
     f.render_widget(Paragraph::new(help_line), chunks[4]);
 }
 

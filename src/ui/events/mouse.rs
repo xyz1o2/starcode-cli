@@ -1,7 +1,7 @@
 use crate::ui::state::ChatState;
 
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use arboard::Clipboard;
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
 pub fn scroll_chat_by_lines(state: &mut ChatState, delta_lines: i32) {
     crate::ui::state::scroll_chat(state, delta_lines);
@@ -116,7 +116,7 @@ pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
                             // 展开时：点击任意行折叠
                             // 折叠时：点击标题或预览行展开
                             let should_toggle = if is_expanded {
-                                true  // 展开时点击任意位置都折叠
+                                true // 展开时点击任意位置都折叠
                             } else {
                                 let preview_lines = reasoning.lines().take(3).count();
                                 row <= preview_lines
@@ -202,13 +202,15 @@ pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
                         Ok(mut clipboard) => {
                             if let Err(e) = clipboard.set_text(&selected_text) {
                                 crate::utils::logging::append_debug_log_line(&format!(
-                                    "[COPY] clipboard set_text failed: {}", e
+                                    "[COPY] clipboard set_text failed: {}",
+                                    e
                                 ));
                             }
                         }
                         Err(e) => {
                             crate::utils::logging::append_debug_log_line(&format!(
-                                "[COPY] clipboard init failed: {}", e
+                                "[COPY] clipboard init failed: {}",
+                                e
                             ));
                         }
                     }

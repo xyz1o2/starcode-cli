@@ -184,10 +184,8 @@ impl MissingToolResultGenerator {
 
             if let Some(tool_calls) = &msg.tool_calls {
                 for tool_call in tool_calls {
-                    let error_content = format!(
-                        "[Tool result missing due to error: {}]",
-                        error_message
-                    );
+                    let error_content =
+                        format!("[Tool result missing due to error: {}]", error_message);
                     results.push(StarMessage::tool(&tool_call.id, &error_content));
                 }
             }
@@ -202,10 +200,7 @@ pub struct ToolParameterLogger;
 
 impl ToolParameterLogger {
     /// 提取工具输入用于遥测（使用starcode-cli中的实际工具名称）
-    pub fn extract_tool_input_for_telemetry(
-        tool_name: &str,
-        input: &Value,
-    ) -> Option<Value> {
+    pub fn extract_tool_input_for_telemetry(tool_name: &str, input: &Value) -> Option<Value> {
         if let Some(obj) = input.as_object() {
             let mut telemetry = serde_json::Map::new();
 
@@ -214,22 +209,34 @@ impl ToolParameterLogger {
                     if let Some(command) = obj.get("command").and_then(|v| v.as_str()) {
                         let parts: Vec<&str> = command.trim().split_whitespace().collect();
                         if let Some(first) = parts.first() {
-                            telemetry.insert("bash_command".to_string(), Value::String(first.to_string()));
+                            telemetry.insert(
+                                "bash_command".to_string(),
+                                Value::String(first.to_string()),
+                            );
                         }
-                        telemetry.insert("full_command".to_string(), Value::String(command.to_string()));
+                        telemetry.insert(
+                            "full_command".to_string(),
+                            Value::String(command.to_string()),
+                        );
                     }
                     if let Some(timeout) = obj.get("timeout").and_then(|v| v.as_u64()) {
                         telemetry.insert("timeout".to_string(), Value::Number(timeout.into()));
                     }
                     if let Some(description) = obj.get("description").and_then(|v| v.as_str()) {
-                        telemetry.insert("description".to_string(), Value::String(description.to_string()));
+                        telemetry.insert(
+                            "description".to_string(),
+                            Value::String(description.to_string()),
+                        );
                     }
                 }
                 "Read" => {
                     if let Some(path) = obj.get("file_path").and_then(|v| v.as_str()) {
                         telemetry.insert("file_path".to_string(), Value::String(path.to_string()));
                         if let Some(ext) = std::path::Path::new(path).extension() {
-                            telemetry.insert("file_extension".to_string(), Value::String(ext.to_string_lossy().to_string()));
+                            telemetry.insert(
+                                "file_extension".to_string(),
+                                Value::String(ext.to_string_lossy().to_string()),
+                            );
                         }
                     }
                 }
@@ -237,7 +244,10 @@ impl ToolParameterLogger {
                     if let Some(path) = obj.get("file_path").and_then(|v| v.as_str()) {
                         telemetry.insert("file_path".to_string(), Value::String(path.to_string()));
                         if let Some(ext) = std::path::Path::new(path).extension() {
-                            telemetry.insert("file_extension".to_string(), Value::String(ext.to_string_lossy().to_string()));
+                            telemetry.insert(
+                                "file_extension".to_string(),
+                                Value::String(ext.to_string_lossy().to_string()),
+                            );
                         }
                     }
                 }
@@ -245,19 +255,30 @@ impl ToolParameterLogger {
                     if let Some(path) = obj.get("file_path").and_then(|v| v.as_str()) {
                         telemetry.insert("file_path".to_string(), Value::String(path.to_string()));
                         if let Some(ext) = std::path::Path::new(path).extension() {
-                            telemetry.insert("file_extension".to_string(), Value::String(ext.to_string_lossy().to_string()));
+                            telemetry.insert(
+                                "file_extension".to_string(),
+                                Value::String(ext.to_string_lossy().to_string()),
+                            );
                         }
                     }
                     if let Some(content) = obj.get("content").and_then(|v| v.as_str()) {
-                        telemetry.insert("content_length".to_string(), Value::Number(content.len().into()));
+                        telemetry.insert(
+                            "content_length".to_string(),
+                            Value::Number(content.len().into()),
+                        );
                     }
                 }
                 "Grep" => {
                     if let Some(query) = obj.get("query").and_then(|v| v.as_str()) {
                         telemetry.insert("query".to_string(), Value::String(query.to_string()));
                     }
-                    if let Some(path) = obj.get("path").or(obj.get("include_pattern")).and_then(|v| v.as_str()) {
-                        telemetry.insert("search_path".to_string(), Value::String(path.to_string()));
+                    if let Some(path) = obj
+                        .get("path")
+                        .or(obj.get("include_pattern"))
+                        .and_then(|v| v.as_str())
+                    {
+                        telemetry
+                            .insert("search_path".to_string(), Value::String(path.to_string()));
                     }
                 }
                 "Glob" => {
@@ -302,7 +323,11 @@ impl ToolParameterLogger {
     /// 提取技能名称
     pub fn extract_skill_name(tool_name: &str, input: &Value) -> Option<String> {
         if tool_name == "skill" || tool_name == "Skill" {
-            if let Some(name) = input.get("name").or(input.get("skill_name")).and_then(|v| v.as_str()) {
+            if let Some(name) = input
+                .get("name")
+                .or(input.get("skill_name"))
+                .and_then(|v| v.as_str())
+            {
                 return Some(name.to_string());
             }
         }
@@ -364,7 +389,10 @@ impl MessageNormalizer {
                         is_new_chain = is_new_chain || tool_calls.len() > 1;
                         for (index, tool_call) in tool_calls.iter().enumerate() {
                             let uuid = if is_new_chain {
-                                Self::derive_uuid(&msg.tool_call_id.clone().unwrap_or_default(), index)
+                                Self::derive_uuid(
+                                    &msg.tool_call_id.clone().unwrap_or_default(),
+                                    index,
+                                )
                             } else {
                                 msg.tool_call_id.clone().unwrap_or_default()
                             };

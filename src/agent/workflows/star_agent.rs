@@ -60,17 +60,19 @@ impl StarAgent {
         let client = StarClient::new(api_key, model, base_url.into(), is_openai_compatible, None);
         let initial_mode = Self::initial_approval_mode(config.as_ref());
         let abort_flag = Arc::new(AtomicBool::new(false));
-        
+
         crate::utils::logging::append_agent_log_line("[INIT] Creating Agent::new...");
         let mut inner = Agent::new(client.clone(), config);
         crate::utils::logging::append_agent_log_line("[INIT] Agent::new completed");
-        
+
         inner.set_abort_flag(abort_flag.clone());
         inner.set_approval_mode(initial_mode.clone());
-        
+
         // refresh_plugin_tools 延迟到首次使用时调用（在 lazy_init 中）
-        crate::utils::logging::append_agent_log_line("[INIT] StarAgent::new completed (plugin tools deferred)");
-        
+        crate::utils::logging::append_agent_log_line(
+            "[INIT] StarAgent::new completed (plugin tools deferred)",
+        );
+
         Ok(Self {
             inner,
             abort_flag,
@@ -96,7 +98,11 @@ impl StarAgent {
             // Try exact match first, then case-insensitive fallback
             let settings = config.providers.get(pid).or_else(|| {
                 config.providers.iter().find_map(|(k, v)| {
-                    if k.eq_ignore_ascii_case(pid) { Some(v) } else { None }
+                    if k.eq_ignore_ascii_case(pid) {
+                        Some(v)
+                    } else {
+                        None
+                    }
                 })
             });
             let (base_url, api_key) = if let Some(settings) = settings {
@@ -138,8 +144,13 @@ impl StarAgent {
 
             let is_openai_compatible =
                 crate::core::config::providers::provider_openai_compatible_mode(pid);
-            self.inner
-                .switch_provider(model, &base_url, &api_key, is_openai_compatible, Some(pid.to_string()));
+            self.inner.switch_provider(
+                model,
+                &base_url,
+                &api_key,
+                is_openai_compatible,
+                Some(pid.to_string()),
+            );
             self.client = self.inner.get_client();
         } else {
             self.inner.set_model(model);
@@ -221,7 +232,10 @@ impl StarAgent {
         // will see an empty history and not overwrite the current one.
         let changed = crate::utils::checkpoint_manager::rewind(id, None).await?;
         let summary = if changed.is_empty() {
-            format!("Snapshot `{}` restored. No files changed (already at this state).", id)
+            format!(
+                "Snapshot `{}` restored. No files changed (already at this state).",
+                id
+            )
         } else {
             format!(
                 "Snapshot `{}` restored. Restored {} file(s):\n{}",
@@ -278,8 +292,7 @@ impl StarAgent {
         // Create a direct-to-UI channel so that thinking / text deltas
         // emitted during the LLM stream reach the UI in real-time, without
         // waiting for the agent loop to finish.
-        let (stream_tx, stream_rx) =
-            tokio::sync::mpsc::unbounded_channel::<StreamingChunk>();
+        let (stream_tx, stream_rx) = tokio::sync::mpsc::unbounded_channel::<StreamingChunk>();
         self.inner.stream_tx = Some(stream_tx);
 
         let event_stream = self.inner.run_stream(prompt.to_string());
@@ -626,7 +639,6 @@ impl StarAgent {
     }
 }
 
- 
 impl Deref for StarAgent {
     type Target = Agent;
     fn deref(&self) -> &Self::Target {

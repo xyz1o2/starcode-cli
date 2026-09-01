@@ -109,7 +109,7 @@ pub fn render_global_search(f: &mut Frame, state: &GlobalSearchState, area: Rect
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // 搜索输入
+            Constraint::Length(3), // 搜索输入
             Constraint::Min(5),    // 结果列表
             Constraint::Length(3), // 预览和状态
         ])
@@ -176,10 +176,7 @@ fn render_results_list(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
             .border_style(Style::default().fg(Color::Red));
 
         let paragraph = Paragraph::new(vec![
-            Line::from(Span::styled(
-                error.clone(),
-                Style::default().fg(Color::Red),
-            )),
+            Line::from(Span::styled(error.clone(), Style::default().fg(Color::Red))),
             Line::from(Span::styled(
                 "Press Esc to close",
                 Style::default().fg(Color::DarkGray),
@@ -206,12 +203,10 @@ fn render_results_list(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
             "No results found"
         };
 
-        let paragraph = Paragraph::new(vec![
-            Line::from(Span::styled(
-                message,
-                Style::default().fg(Color::Gray),
-            )),
-        ])
+        let paragraph = Paragraph::new(vec![Line::from(Span::styled(
+            message,
+            Style::default().fg(Color::Gray),
+        ))])
         .block(block);
 
         f.render_widget(paragraph, area);

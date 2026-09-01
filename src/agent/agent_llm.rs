@@ -1,5 +1,7 @@
 use crate::agent::agent_core::Agent;
-use crate::agent::loop_engineering::{LoopState, RecoveryManager, RecoveryContext, AgentError, RecoveryAction};
+use crate::agent::loop_engineering::{
+    AgentError, LoopState, RecoveryAction, RecoveryContext, RecoveryManager,
+};
 use crate::agent::messaging::AgentEvent;
 use crate::agent::tool_routing::ToolSelection;
 use crate::agent::{hooks, tool_helpers};
@@ -37,8 +39,7 @@ impl Agent {
         recovery_manager: &mut RecoveryManager,
         loop_state: &mut LoopState,
     ) -> LlmResult {
-        let verbose_debug_logging =
-            crate::utils::logging::is_verbose_debug_logging_enabled();
+        let verbose_debug_logging = crate::utils::logging::is_verbose_debug_logging_enabled();
 
         // Token 用量预估日志
         let estimated_tokens: usize = request_messages
@@ -57,13 +58,11 @@ impl Agent {
                 *self
                     .tool_schema_len_cache
                     .entry(t.function.name.clone())
-                    .or_insert_with(|| {
-                        serde_json::to_string(t).map(|s| s.len()).unwrap_or(0)
-                    })
+                    .or_insert_with(|| serde_json::to_string(t).map(|s| s.len()).unwrap_or(0))
             })
             .sum();
         let tool_schema_tokens = tool_schema_json_len / 4;
-        
+
         crate::utils::logging::append_debug_log_line(&format!(
             "[TOKEN] Turn {}: {} msgs, ~{} msg tokens + ~{} tool-schema tokens ({} tools, {} bytes JSON), ~{} total est.",
             current_turn,
@@ -81,20 +80,23 @@ impl Agent {
         if estimated_tokens + tool_schema_tokens > safety_threshold {
             crate::utils::logging::append_debug_log_line(&format!(
                 "[WARN] Estimated tokens {} > {} (80% of {}), auto-compressing before send",
-                estimated_tokens + tool_schema_tokens, safety_threshold, context_window,
+                estimated_tokens + tool_schema_tokens,
+                safety_threshold,
+                context_window,
             ));
-            
+
             let compact_result = self.compact_manager.compact(request_messages);
-            
+
             if compact_result.was_compacted {
                 *request_messages = compact_result.messages;
             } else {
                 // Clone messages before compression attempt so we can recover on failure
                 let original_messages = request_messages.clone();
-                match self.context_compressor.force_compress(
-                    request_messages.clone(),
-                    Some(&self.client),
-                ).await {
+                match self
+                    .context_compressor
+                    .force_compress(request_messages.clone(), Some(&self.client))
+                    .await
+                {
                     Ok(compression_result) => {
                         *request_messages = compression_result.messages;
                     }
@@ -142,35 +144,36 @@ impl Agent {
                         ("est", &format!("{total_est}")),
                         ("max", &format!("{context_window}")),
                     ],
-                )
+                ),
             ));
             nudged_msgs
         } else {
             msgs
         };
 
-        let mut stream = match self.client.chat_stream(
-            msgs,
-            Some(turn_tool_selection.tools.clone()),
-            None,
-            None,
-        ).await {
+        let mut stream = match self
+            .client
+            .chat_stream(msgs, Some(turn_tool_selection.tools.clone()), None, None)
+            .await
+        {
             Ok(stream) => stream,
             Err(e) => {
-                return self.handle_llm_error(
-                    e.to_string(),
-                    messages,
-                    recovery_manager,
-                    loop_state,
-                    current_turn,
-                    estimated_tokens,
-                    context_window,
-                ).await;
+                return self
+                    .handle_llm_error(
+                        e.to_string(),
+                        messages,
+                        recovery_manager,
+                        loop_state,
+                        current_turn,
+                        estimated_tokens,
+                        context_window,
+                    )
+                    .await;
             }
         };
 
         let model_request_started_at = Instant::now();
-        
+
         if verbose_debug_logging {
             crate::utils::logging::append_debug_log_line(
                 "[DEBUG] Agent: chat_stream created, starting to read chunks",
@@ -217,7 +220,7 @@ impl Agent {
             std::env::var("STAR_MAX_THINKING_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(complexity_default_secs)
+                .unwrap_or(complexity_default_secs),
         );
 
         use futures::StreamExt;
@@ -232,7 +235,7 @@ impl Agent {
             std::env::var("STAR_THINKING_ABORT_GRACE_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(10)
+                .unwrap_or(10),
         );
         // 流式停滞检测（类似 Claude Code 的 stall detection）：
         // - stall_threshold: 10s 无事件视为一次 stall
@@ -241,13 +244,13 @@ impl Agent {
             std::env::var("STAR_STREAM_STALL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(10)
+                .unwrap_or(10),
         );
         let idle_timeout = std::time::Duration::from_secs(
             std::env::var("STAR_STREAM_IDLE_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(30)
+                .unwrap_or(30),
         );
         let mut last_event_at = Instant::now();
         let mut stall_count = 0u32;
@@ -335,43 +338,65 @@ impl Agent {
             };
             chunk_count += 1;
             if verbose_debug_logging && chunk_count <= 3 {
-                crate::utils::logging::append_debug_log_line(&format!("[DEBUG] Agent: Received chunk #{}", chunk_count));
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[DEBUG] Agent: Received chunk #{}",
+                    chunk_count
+                ));
             }
-            
+
             match chunk_result {
                 Ok(json) => {
                     // Handle trace events
                     if let Some(trace) = json.get("star_trace") {
-                        if let Some(event_name) = trace.get("event").and_then(|value| value.as_str()) {
+                        if let Some(event_name) =
+                            trace.get("event").and_then(|value| value.as_str())
+                        {
                             // Trace events are handled by the caller
                             continue;
                         }
                     }
-                    
+
                     if !first_model_chunk_seen {
                         first_model_chunk_seen = true;
                     }
-                    
+
                     // Parse usage update
                     if let Some(usage) = json.get("usage").and_then(|v| v.as_object()) {
-                        let prompt_tokens = usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                        let completion_tokens = usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                        let reported = usage.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                        let total_tokens = if reported > 0 { reported } else { prompt_tokens + completion_tokens };
-                        
+                        let prompt_tokens = usage
+                            .get("prompt_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32;
+                        let completion_tokens = usage
+                            .get("completion_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32;
+                        let reported = usage
+                            .get("total_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32;
+                        let total_tokens = if reported > 0 {
+                            reported
+                        } else {
+                            prompt_tokens + completion_tokens
+                        };
+
                         // Log cache hit information (DeepSeek/Anthropic specific fields)
-                        let cache_hit_tokens = usage.get("prompt_cache_hit_tokens")
+                        let cache_hit_tokens = usage
+                            .get("prompt_cache_hit_tokens")
                             .or_else(|| usage.get("cache_read_input_tokens"))
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0) as u32;
-                        let cache_miss_tokens = usage.get("prompt_cache_miss_tokens")
+                        let cache_miss_tokens = usage
+                            .get("prompt_cache_miss_tokens")
                             .or_else(|| usage.get("cache_creation_input_tokens"))
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0) as u32;
-                        
+
                         if cache_hit_tokens > 0 || cache_miss_tokens > 0 {
                             let hit_rate = if cache_hit_tokens + cache_miss_tokens > 0 {
-                                (cache_hit_tokens as f64 / (cache_hit_tokens + cache_miss_tokens) as f64 * 100.0) as u32
+                                (cache_hit_tokens as f64
+                                    / (cache_hit_tokens + cache_miss_tokens) as f64
+                                    * 100.0) as u32
                             } else {
                                 0
                             };
@@ -380,7 +405,7 @@ impl Agent {
                                 current_turn, cache_hit_tokens, cache_miss_tokens, hit_rate
                             ));
                         }
-                        
+
                         if total_tokens > 0 || prompt_tokens > 0 || completion_tokens > 0 {
                             last_usage = Some(crate::types::StarUsage {
                                 prompt_tokens,
@@ -391,7 +416,7 @@ impl Agent {
                             });
                         }
                     }
-                    
+
                     // Parse the JSON chunk
                     if let Some(choices) = json.get("choices").and_then(|c| c.as_array()) {
                         if let Some(choice) = choices.first() {
@@ -400,9 +425,12 @@ impl Agent {
                                 // for typewriter effect, also buffered for session history.
                                 // Only mark as streamed when stream_tx is active (interactive mode);
                                 // in headless mode the Branch A emission is needed.
-                                if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                                if let Some(content) = delta.get("content").and_then(|c| c.as_str())
+                                {
                                     if !content.is_empty() {
-                                        self.emit_direct_chunk(crate::types::StreamingChunk::text_delta(content));
+                                        self.emit_direct_chunk(
+                                            crate::types::StreamingChunk::text_delta(content),
+                                        );
                                         content_streamed = self.stream_tx.is_some();
                                         current_content.push_str(content);
                                     }
@@ -410,44 +438,57 @@ impl Agent {
 
                                 // Reasoning content — streamed in real-time via Branch B
                                 // for typewriter effect, also buffered for session history.
-                                if let Some(raw_reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
+                                if let Some(raw_reasoning) =
+                                    delta.get("reasoning_content").and_then(|r| r.as_str())
+                                {
                                     if !raw_reasoning.is_empty() && !thinking_limit_reached {
                                         // Refresh the thinking idle timer: each incoming
                                         // reasoning chunk counts as activity, so the
                                         // limit only fires after a genuine pause.
                                         thinking_started_at = std::time::Instant::now();
-                                        let reasoning = tool_helpers::sanitize_reasoning_content(raw_reasoning);
+                                        let reasoning =
+                                            tool_helpers::sanitize_reasoning_content(raw_reasoning);
                                         if !reasoning.is_empty() {
                                             let thinking_tokens = current_reasoning.len() / 4;
                                             let thinking_elapsed = thinking_started_at.elapsed();
 
                                             if thinking_tokens >= max_thinking_tokens {
                                                 thinking_limit_reached = true;
-                                                thinking_limit_reached_at = Some(std::time::Instant::now());
+                                                thinking_limit_reached_at =
+                                                    Some(std::time::Instant::now());
                                                 crate::utils::logging::append_debug_log_line(&format!(
                                                     "[THINKING] limit reached: {} tokens (max {}) — suppressing further reasoning",
                                                     thinking_tokens, max_thinking_tokens,
                                                 ));
                                             } else if thinking_elapsed >= max_thinking_duration {
                                                 thinking_limit_reached = true;
-                                                thinking_limit_reached_at = Some(std::time::Instant::now());
+                                                thinking_limit_reached_at =
+                                                    Some(std::time::Instant::now());
                                                 crate::utils::logging::append_debug_log_line(&format!(
                                                     "[THINKING] limit reached: {:.1}s elapsed (max {}s) — suppressing further reasoning",
                                                     thinking_elapsed.as_secs_f64(), max_thinking_duration.as_secs(),
                                                 ));
                                             } else {
-                                                self.emit_direct_chunk(crate::types::StreamingChunk::reasoning_delta(&reasoning));
+                                                self.emit_direct_chunk(
+                                                    crate::types::StreamingChunk::reasoning_delta(
+                                                        &reasoning,
+                                                    ),
+                                                );
                                                 reasoning_streamed = self.stream_tx.is_some();
                                                 current_reasoning.push_str(&reasoning);
                                             }
                                         }
                                     }
                                 }
-                                
+
                                 // Tool calls
-                                if let Some(tc_array) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                                if let Some(tc_array) =
+                                    delta.get("tool_calls").and_then(|t| t.as_array())
+                                {
                                     for tc in tc_array {
-                                        let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                                        let index =
+                                            tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0)
+                                                as usize;
                                         while tool_calls.len() <= index {
                                             tool_calls.push(StarToolCall {
                                                 id: String::new(),
@@ -464,21 +505,28 @@ impl Agent {
                                             }
                                         }
                                         if let Some(func) = tc.get("function") {
-                                            if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                                            if let Some(name) =
+                                                func.get("name").and_then(|n| n.as_str())
+                                            {
                                                 if !name.is_empty() {
-                                                    tool_calls[index].function.name = name.to_string();
+                                                    tool_calls[index].function.name =
+                                                        name.to_string();
                                                 }
                                             }
-                                            if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
+                                            if let Some(args) =
+                                                func.get("arguments").and_then(|a| a.as_str())
+                                            {
                                                 tool_calls[index].function.arguments.push_str(args);
                                             }
                                         }
                                     }
                                 }
                             }
-                            
+
                             // Handle finish reason
-                            if let Some(finish) = choice.get("finish_reason").and_then(|f| f.as_str()) {
+                            if let Some(finish) =
+                                choice.get("finish_reason").and_then(|f| f.as_str())
+                            {
                                 if finish != "null" && !finish.is_empty() {
                                     finish_reason = Some(finish.to_string());
                                 }
@@ -499,15 +547,17 @@ impl Agent {
                     }
 
                     let err_str = e.to_string();
-                    return self.handle_llm_error(
-                        err_str,
-                        messages,
-                        recovery_manager,
-                        loop_state,
-                        current_turn,
-                        estimated_tokens,
-                        context_window,
-                    ).await;
+                    return self
+                        .handle_llm_error(
+                            err_str,
+                            messages,
+                            recovery_manager,
+                            loop_state,
+                            current_turn,
+                            estimated_tokens,
+                            context_window,
+                        )
+                        .await;
                 }
             }
 
@@ -547,9 +597,7 @@ impl Agent {
             // model still hasn't produced any text or tool calls within the grace
             // period, drop the stream (cancelling the in-flight request) so the
             // recovery nudge in process_llm_response can retry the turn.
-            if thinking_limit_reached
-                && current_content.trim().is_empty()
-                && tool_calls.is_empty()
+            if thinking_limit_reached && current_content.trim().is_empty() && tool_calls.is_empty()
             {
                 if let Some(limit_at) = thinking_limit_reached_at {
                     if limit_at.elapsed() >= thinking_abort_grace {
@@ -663,8 +711,7 @@ impl Agent {
         let err_preview: String = err_str.chars().take(300).collect();
         crate::utils::logging::append_debug_log_line(&format!(
             "[LLM_ERROR] turn={} error={}",
-            current_turn,
-            err_preview,
+            current_turn, err_preview,
         ));
 
         let agent_error = if err_str.contains("context window exceeds")
@@ -682,7 +729,7 @@ impl Agent {
         match recovery_manager.handle_error(&agent_error, &recovery_context) {
             RecoveryAction::CompactAndRetry => {
                 crate::utils::logging::append_debug_log_line(
-                    "[RECOVERY] Attempting context compression and retry"
+                    "[RECOVERY] Attempting context compression and retry",
                 );
                 let compact_result = self.compact_manager.compact(messages);
                 if compact_result.was_compacted {
@@ -692,7 +739,7 @@ impl Agent {
             }
             RecoveryAction::EscalateOutputTokens => {
                 crate::utils::logging::append_debug_log_line(
-                    "[RECOVERY] Escalating output tokens and retry"
+                    "[RECOVERY] Escalating output tokens and retry",
                 );
                 // 实际提升 max_tokens：每次翻倍，上限 64K
                 let current = self.client.default_max_tokens;
@@ -700,7 +747,8 @@ impl Agent {
                 if new_max > current {
                     self.client.default_max_tokens = new_max;
                     crate::utils::logging::append_debug_log_line(&format!(
-                        "[RECOVERY] Max output tokens: {} -> {}", current, new_max
+                        "[RECOVERY] Max output tokens: {} -> {}",
+                        current, new_max
                     ));
                 }
                 // Claude Code 模式：注入 continue-where-you-left-off 提示
@@ -713,14 +761,15 @@ impl Agent {
             }
             RecoveryAction::InjectRecoveryMessage(msg) => {
                 crate::utils::logging::append_debug_log_line(&format!(
-                    "[RECOVERY] Injecting recovery message: {}", msg
+                    "[RECOVERY] Injecting recovery message: {}",
+                    msg
                 ));
                 messages.push(StarMessage::system(msg));
                 LlmResult::Retry
             }
             RecoveryAction::SwitchProviderAndRetry => {
                 crate::utils::logging::append_debug_log_line(
-                    "[RECOVERY] Switching provider and retry"
+                    "[RECOVERY] Switching provider and retry",
                 );
                 // 尝试环境变量中配置的后备模型/端点
                 let fallback_model = std::env::var("STAR_FALLBACK_MODEL").ok();
@@ -733,7 +782,8 @@ impl Agent {
                     self.client.set_model(alt_model);
                 } else if let Some(ref url) = fallback_url {
                     crate::utils::logging::append_debug_log_line(&format!(
-                        "[RECOVERY] Switching to STAR_FALLBACK_BASE_URL: {}", url
+                        "[RECOVERY] Switching to STAR_FALLBACK_BASE_URL: {}",
+                        url
                     ));
                     self.client.set_base_url(url);
                 } else {
@@ -743,7 +793,8 @@ impl Agent {
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(10u64);
                     crate::utils::logging::append_debug_log_line(&format!(
-                        "[RECOVERY] No fallback configured, waiting {}s before retry", wait_secs
+                        "[RECOVERY] No fallback configured, waiting {}s before retry",
+                        wait_secs
                     ));
                     tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
                 }
@@ -751,7 +802,8 @@ impl Agent {
             }
             RecoveryAction::StopWithError(error_msg) => {
                 crate::utils::logging::append_debug_log_line(&format!(
-                    "[RECOVERY] Stopping with error: {}", error_msg
+                    "[RECOVERY] Stopping with error: {}",
+                    error_msg
                 ));
                 if err_str.contains("context window exceeds")
                     || err_str.contains("context_length_exceeded")
@@ -772,7 +824,8 @@ impl Agent {
             }
             RecoveryAction::CircuitBreakerCooldown(duration) => {
                 crate::utils::logging::append_debug_log_line(&format!(
-                    "[RECOVERY] Circuit breaker cooldown: {:?}", duration
+                    "[RECOVERY] Circuit breaker cooldown: {:?}",
+                    duration
                 ));
                 // Send periodic heartbeats during cooldown so the UI's STALL
                 // watchdog doesn't clear is_processing (30s threshold).
@@ -797,27 +850,36 @@ impl Agent {
                 }
                 LlmResult::Retry
             }
-            RecoveryAction::FallbackToSimplerTool { original_tool, fallback_tool, reason } => {
+            RecoveryAction::FallbackToSimplerTool {
+                original_tool,
+                fallback_tool,
+                reason,
+            } => {
                 crate::utils::logging::append_debug_log_line(&format!(
-                    "[RECOVERY] Falling back from {} to {}: {}", original_tool, fallback_tool, reason
+                    "[RECOVERY] Falling back from {} to {}: {}",
+                    original_tool, fallback_tool, reason
                 ));
                 LlmResult::Retry
             }
             RecoveryAction::RetryWithDifferentArgs { suggestion } => {
                 crate::utils::logging::append_debug_log_line(&format!(
-                    "[RECOVERY] Retrying with different args: {}", suggestion
+                    "[RECOVERY] Retrying with different args: {}",
+                    suggestion
                 ));
                 messages.push(StarMessage::system(format!(
-                    "Previous attempt failed. {}", suggestion
+                    "Previous attempt failed. {}",
+                    suggestion
                 )));
                 LlmResult::Retry
             }
             RecoveryAction::SkipAndContinue { reason } => {
                 crate::utils::logging::append_debug_log_line(&format!(
-                    "[RECOVERY] Skipping step: {}", reason
+                    "[RECOVERY] Skipping step: {}",
+                    reason
                 ));
                 messages.push(StarMessage::system(format!(
-                    "Skipping previous step: {}", reason
+                    "Skipping previous step: {}",
+                    reason
                 )));
                 LlmResult::Retry
             }

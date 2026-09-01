@@ -1,8 +1,7 @@
 /// 自动摘要系统
-/// 
+///
 /// 对标claude-code-main的src/services/autoDream/和awaySummary.ts和AgentSummary/
 /// 生成会话摘要、离开摘要和Agent周期性摘要
-
 pub mod agent_summary;
 pub mod consolidation;
 
@@ -87,12 +86,10 @@ impl SummaryManager {
         messages: &[crate::types::StarMessage],
     ) -> Summary {
         let id = uuid::Uuid::new_v4().to_string();
-        
+
         // 统计信息
         let message_count = messages.len() as u32;
-        let tool_calls = messages.iter()
-            .filter(|m| m.tool_calls.is_some())
-            .count() as u32;
+        let tool_calls = messages.iter().filter(|m| m.tool_calls.is_some()).count() as u32;
 
         // 提取关键点
         let key_points = self.extract_key_points(messages);
@@ -122,7 +119,7 @@ impl SummaryManager {
         };
 
         self.summaries.push(summary.clone());
-        
+
         if self.summaries.len() > self.max_summaries {
             self.summaries.remove(0);
         }
@@ -169,8 +166,11 @@ impl SummaryManager {
 
     /// 按类型获取摘要
     pub fn get_summaries_by_type(&self, summary_type: &SummaryType) -> Vec<&Summary> {
-        self.summaries.iter()
-            .filter(|s| std::mem::discriminant(&s.summary_type) == std::mem::discriminant(summary_type))
+        self.summaries
+            .iter()
+            .filter(|s| {
+                std::mem::discriminant(&s.summary_type) == std::mem::discriminant(summary_type)
+            })
             .collect()
     }
 }

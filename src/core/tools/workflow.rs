@@ -81,7 +81,10 @@ impl ToolInvocation for WorkflowInvocation {
                     if output.status.success() {
                         return Ok(ToolResult {
                             llm_content: Some(stdout.to_string()),
-                            return_display: Some(format!("Workflow '{}' completed", params.workflow)),
+                            return_display: Some(format!(
+                                "Workflow '{}' completed",
+                                params.workflow
+                            )),
                             output: stdout.to_string(),
                             error: None,
                             data: None,
@@ -160,7 +163,16 @@ impl ToolInvocation for WorkflowInvocation {
                     .map_err(|e| format!("Step '{}' failed: {}", step_name, e))?;
 
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                results.push(format!("[{}] {}: {}", step_name, if output.status.success() { "OK" } else { "FAIL" }, stdout.trim()));
+                results.push(format!(
+                    "[{}] {}: {}",
+                    step_name,
+                    if output.status.success() {
+                        "OK"
+                    } else {
+                        "FAIL"
+                    },
+                    stdout.trim()
+                ));
             }
 
             Ok(ToolResult {

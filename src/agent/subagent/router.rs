@@ -3,7 +3,9 @@
 //! 对标 CCB sub-agents.mdx §路由规则 + coordinator-and-swarm.mdx §AgentTool 分流。
 //! 纯决策函数：根据参数和上下文返回 AgentRoute，不执行任何副作用。
 
-use crate::core::agents::{AgentExecutionMode, AgentIsolation, AgentToolFullInput, SubAgentRequest, SubagentType};
+use crate::core::agents::{
+    AgentExecutionMode, AgentIsolation, AgentToolFullInput, SubAgentRequest, SubagentType,
+};
 
 // ── AgentRoute ───────────────────────────────────────────────────────────
 
@@ -107,7 +109,7 @@ pub fn route_agent_call(
             agent_id: generate_agent_id(),
             request: ForkRequest {
                 base: build_request(input),
-                parent_messages: Vec::new(), // 由调用方填充
+                parent_messages: Vec::new(),   // 由调用方填充
                 parent_tool_names: Vec::new(), // 由调用方填充
                 description: input.description.clone(),
             },
@@ -172,9 +174,13 @@ mod tests {
     #[test]
     fn default_routes_to_sync_general() {
         let route = route_agent_call(&default_input(), false, false);
-        assert!(matches!(route, AgentRoute::SyncNamedAgent {
-            subagent_type: SubagentType::GeneralPurpose, ..
-        }));
+        assert!(matches!(
+            route,
+            AgentRoute::SyncNamedAgent {
+                subagent_type: SubagentType::GeneralPurpose,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -202,8 +208,12 @@ mod tests {
         let mut input = default_input();
         input.subagent_type = Some(SubagentType::CodeReviewer);
         let route = route_agent_call(&input, false, false);
-        assert!(matches!(route, AgentRoute::SyncNamedAgent {
-            subagent_type: SubagentType::CodeReviewer, ..
-        }));
+        assert!(matches!(
+            route,
+            AgentRoute::SyncNamedAgent {
+                subagent_type: SubagentType::CodeReviewer,
+                ..
+            }
+        ));
     }
 }

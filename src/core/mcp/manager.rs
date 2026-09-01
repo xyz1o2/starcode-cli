@@ -324,5 +324,3 @@ impl Default for MCPManager {
         Self::new()
     }
 }
-
- 

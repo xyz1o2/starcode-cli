@@ -39,9 +39,11 @@ pub struct VaultHttpFetchInvocation {
 
 impl ToolInvocation for VaultHttpFetchInvocation {
     fn get_description(&self) -> String {
-        format!("Vault HTTP fetch: {} {}", 
+        format!(
+            "Vault HTTP fetch: {} {}",
             self.params.method.as_deref().unwrap_or("GET"),
-            self.params.url)
+            self.params.url
+        )
     }
 
     fn tool_locations(&self) -> Vec<ToolLocation> {
@@ -63,12 +65,14 @@ impl ToolInvocation for VaultHttpFetchInvocation {
         >,
     > {
         Box::pin(async {
-            Ok(Some(crate::core::tools::tools::ToolCallConfirmationDetails {
-                confirmation_type: crate::core::tools::tools::ConfirmationType::Ask,
-                title: "Vault HTTP Request".to_string(),
-                prompt: "Make HTTP request using vault credentials".to_string(),
-                on_confirm: Arc::new(|_| {}),
-            }))
+            Ok(Some(
+                crate::core::tools::tools::ToolCallConfirmationDetails {
+                    confirmation_type: crate::core::tools::tools::ConfirmationType::Ask,
+                    title: "Vault HTTP Request".to_string(),
+                    prompt: "Make HTTP request using vault credentials".to_string(),
+                    on_confirm: Arc::new(|_| {}),
+                },
+            ))
         })
     }
 
@@ -115,7 +119,10 @@ impl ToolInvocation for VaultHttpFetchInvocation {
 
             // For now, return a placeholder response
             Ok(ToolResult {
-                llm_content: Some(format!("Made {} request to {} using vault key '{}'", method, url, vault_auth_key)),
+                llm_content: Some(format!(
+                    "Made {} request to {} using vault key '{}'",
+                    method, url, vault_auth_key
+                )),
                 return_display: Some(format!("HTTP {} {} - 200 OK", method, url)),
                 output: serde_json::to_string(&VaultHttpFetchOutput {
                     status: 200,
@@ -124,7 +131,8 @@ impl ToolInvocation for VaultHttpFetchInvocation {
                         headers.insert("content-type".to_string(), "application/json".to_string());
                         headers
                     },
-                    body: r#"{"status": "success", "message": "Request completed successfully"}"#.to_string(),
+                    body: r#"{"status": "success", "message": "Request completed successfully"}"#
+                        .to_string(),
                     scrubbed: true,
                 })?,
                 error: None,

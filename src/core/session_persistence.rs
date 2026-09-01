@@ -102,15 +102,17 @@ impl TranscriptWriter {
         file.write_all(line.as_bytes())
             .await
             .map_err(|e| e.to_string())?;
-        file.write_all(b"\n")
-            .await
-            .map_err(|e| e.to_string())?;
+        file.write_all(b"\n").await.map_err(|e| e.to_string())?;
         file.flush().await.map_err(|e| e.to_string())?;
 
         if entry.role == "assistant" {
             if let Some(tc) = &entry.tool_calls {
                 for call in tc {
-                    if let Some(name) = call.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+                    if let Some(name) = call
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                    {
                         self.tools_used.insert(name.to_string());
                     }
                 }
@@ -119,10 +121,18 @@ impl TranscriptWriter {
         Ok(())
     }
 
-    pub async fn finalize(&self, files_modified: &[String], token_usage: &TokenUsageSummary) -> Result<(), String> {
+    pub async fn finalize(
+        &self,
+        files_modified: &[String],
+        token_usage: &TokenUsageSummary,
+    ) -> Result<(), String> {
         let metadata = SessionMetadata {
             session_id: self.session_id.clone(),
-            title: if self.title.is_empty() { "Untitled Session".to_string() } else { self.title.clone() },
+            title: if self.title.is_empty() {
+                "Untitled Session".to_string()
+            } else {
+                self.title.clone()
+            },
             start_time: self.session_start.clone(),
             end_time: Some(Utc::now().to_rfc3339()),
             tools_used: self.tools_used.iter().cloned().collect(),
@@ -163,7 +173,10 @@ pub async fn list_sessions() -> Result<Vec<SessionMetadata>, String> {
     while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("json")
-            && path.file_stem().and_then(|s| s.to_str()).map_or(false, |s| s.ends_with(".meta"))
+            && path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map_or(false, |s| s.ends_with(".meta"))
         {
             if let Ok(content) = fs::read_to_string(&path).await {
                 if let Ok(meta) = serde_json::from_str::<SessionMetadata>(&content) {

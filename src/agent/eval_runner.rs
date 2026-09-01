@@ -104,12 +104,10 @@ pub async fn run_agent_with_trace(
                 }
             }
             Ok(AgentEvent::ToolFinished { tool_call, result }) => {
-                let output_summary = summarize_output(
-                    result.output.as_deref().unwrap_or(""),
-                    200,
+                let output_summary = summarize_output(result.output.as_deref().unwrap_or(""), 200);
+                let args_value = serde_json::from_str(&tool_call.function.arguments).unwrap_or(
+                    serde_json::Value::String(tool_call.function.arguments.clone()),
                 );
-                let args_value = serde_json::from_str(&tool_call.function.arguments)
-                    .unwrap_or(serde_json::Value::String(tool_call.function.arguments.clone()));
                 tool_calls.push(ToolCallRecord {
                     tool_name: tool_call.function.name.clone(),
                     arguments: args_value,
@@ -207,18 +205,12 @@ pub async fn run_agent_quick(
 ///
 /// 注意：此函数返回一个 `Agent` 结构体，调用方负责传入正确的
 /// `StarClient` 和 `Config`（已配置只读工具）。
-pub fn make_evaluator_agent(
-    client: StarClient,
-    config: Arc<Config>,
-) -> Agent {
+pub fn make_evaluator_agent(client: StarClient, config: Arc<Config>) -> Agent {
     Agent::new(client, config)
 }
 
 /// 创建 Builder agent (全权限，用于执行 E2E 任务)。
-pub fn make_builder_agent(
-    client: StarClient,
-    config: Arc<Config>,
-) -> Agent {
+pub fn make_builder_agent(client: StarClient, config: Arc<Config>) -> Agent {
     Agent::new(client, config)
 }
 

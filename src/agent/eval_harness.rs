@@ -460,7 +460,10 @@ fn evaluate_task_case(
     let complexity = Router::classify(&task.prompt, history_len);
     trace.push(EvalTraceStep {
         step: "classify".to_string(),
-        detail: format!("router classified complexity as {}", complexity_label(complexity)),
+        detail: format!(
+            "router classified complexity as {}",
+            complexity_label(complexity)
+        ),
         data: json!({
             "complexity": complexity_label(complexity),
         }),
@@ -676,13 +679,8 @@ fn evaluate_task_case(
         .map(|failure| failure.rule.clone())
         .collect::<Vec<_>>();
     // Routing failure + behavior failure → either failure makes overall passed = false
-    let routing_passed = failed_rules
-        .iter()
-        .all(|r| r.starts_with("behavior."));
-    let behavior_passed = behavior_result
-        .as_ref()
-        .map(|b| b.passed)
-        .unwrap_or(true);
+    let routing_passed = failed_rules.iter().all(|r| r.starts_with("behavior."));
+    let behavior_passed = behavior_result.as_ref().map(|b| b.passed).unwrap_or(true);
     let passed = routing_passed && behavior_passed;
     let finished_at = chrono::Utc::now().to_rfc3339();
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -968,10 +966,7 @@ fn detect_skill(prompt: &str) -> Option<String> {
 }
 
 /// Save regression baseline to file
-pub async fn save_baseline(
-    report: &EvalReport,
-    baseline_path: &Path,
-) -> Result<String, String> {
+pub async fn save_baseline(report: &EvalReport, baseline_path: &Path) -> Result<String, String> {
     let mut tasks_map = BTreeMap::new();
     for result in &report.results {
         // Only save first trial result per task (deduplicate)
@@ -1035,9 +1030,7 @@ pub async fn compare_baseline(
     // Collect current report's best-of-trial results (aggregate by task_id, take first pass)
     let mut current_map: BTreeMap<String, &EvalResult> = BTreeMap::new();
     for result in &report.results {
-        current_map
-            .entry(result.id.clone())
-            .or_insert(result);
+        current_map.entry(result.id.clone()).or_insert(result);
     }
 
     let mut deltas = Vec::new();
@@ -1127,11 +1120,16 @@ async fn evaluate_live_task(task: &EvalTask) -> LiveEvalResult {
         };
     };
 
-    let Some(api_key) = std::env::var("STAR_API_KEY").ok().filter(|k| !k.trim().is_empty()) else {
+    let Some(api_key) = std::env::var("STAR_API_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+    else {
         return LiveEvalResult {
             id: task.id.clone(),
             executed: false,
-            skip_reason: Some("STAR_API_KEY not set — configure credentials to run live tasks".to_string()),
+            skip_reason: Some(
+                "STAR_API_KEY not set — configure credentials to run live tasks".to_string(),
+            ),
             passed: false,
             failed_rules: vec!["no_api_key".to_string()],
             finish_signal: None,
@@ -1148,10 +1146,16 @@ async fn evaluate_live_task(task: &EvalTask) -> LiveEvalResult {
     };
 
     let base_url = std::env::var("STAR_BASE_URL").ok();
-    let openai_compatible = std::env::var("STAR_OPENAI_COMPATIBLE")
-        .ok()
-        .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"));
-    let model = live.model.clone().or_else(|| std::env::var("STAR_MODEL").ok());
+    let openai_compatible = std::env::var("STAR_OPENAI_COMPATIBLE").ok().map(|v| {
+        matches!(
+            v.trim().to_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    });
+    let model = live
+        .model
+        .clone()
+        .or_else(|| std::env::var("STAR_MODEL").ok());
 
     // 1. Copy fixture to a temp dir (keeps the fixture pristine; the copy
     //    carries its own .git so the agent gets full git context).
@@ -1220,13 +1224,8 @@ async fn evaluate_live_task(task: &EvalTask) -> LiveEvalResult {
         }
     };
 
-    let client = crate::llm::client::StarClient::new(
-        &api_key,
-        model,
-        base_url,
-        openai_compatible,
-        None,
-    );
+    let client =
+        crate::llm::client::StarClient::new(&api_key, model, base_url, openai_compatible, None);
 
     // 3. Switch the process cwd to the fixture copy and override the
     //    process-level project-root cache, so the agent works inside the
@@ -1322,10 +1321,8 @@ async fn evaluate_live_task(task: &EvalTask) -> LiveEvalResult {
     let mut failed_rules: Vec<String> = Vec::new();
 
     if let Some(behavior) = &task.behavior {
-        let efficiency = crate::agent::eval_behaviors::compute_efficiency(
-            tool_calls,
-            tool_calls.len().max(1),
-        );
+        let efficiency =
+            crate::agent::eval_behaviors::compute_efficiency(tool_calls, tool_calls.len().max(1));
         let signal = crate::agent::eval_behaviors::detect_finish_signal(
             tool_calls,
             if agent_run.final_message.is_empty() {
@@ -1353,10 +1350,7 @@ async fn evaluate_live_task(task: &EvalTask) -> LiveEvalResult {
     if verify_results.iter().any(|v| !v.passed) {
         failed_rules.push("verify_failed".to_string());
     }
-    if matches!(
-        agent_run.finish_signal,
-        FinishSignal::FalseFinish { .. }
-    ) {
+    if matches!(agent_run.finish_signal, FinishSignal::FalseFinish { .. }) {
         failed_rules.push("false_finish".to_string());
     }
     if matches!(agent_run.finish_signal, FinishSignal::TurnLimit) {
@@ -1498,10 +1492,7 @@ fn render_live_result_markdown(r: &LiveEvalResult) -> String {
         r.total_tokens,
     ));
     if !r.failed_rules.is_empty() {
-        out.push_str(&format!(
-            "- Failed rules: {}\n",
-            r.failed_rules.join(", ")
-        ));
+        out.push_str(&format!("- Failed rules: {}\n", r.failed_rules.join(", ")));
     }
     if !r.behavior_failures.is_empty() {
         out.push_str("\n#### Behavior failures\n\n");
@@ -1513,12 +1504,16 @@ fn render_live_result_markdown(r: &LiveEvalResult) -> String {
         out.push_str("\n#### Verification\n\n");
         for v in &r.verify {
             let mark = if v.passed { "✅" } else { "❌" };
-            out.push_str(&format!("- {} `{}` (exit {})\n", mark, v.command, v.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "n/a".to_string())));
+            out.push_str(&format!(
+                "- {} `{}` (exit {})\n",
+                mark,
+                v.command,
+                v.exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "n/a".to_string())
+            ));
             if !v.passed && !v.output_tail.is_empty() {
-                out.push_str(&format!(
-                    "```\n{}\n```\n",
-                    v.output_tail
-                ));
+                out.push_str(&format!("```\n{}\n```\n", v.output_tail));
             }
         }
     }
@@ -1539,7 +1534,12 @@ fn render_live_result_markdown(r: &LiveEvalResult) -> String {
         ));
     }
     if !r.final_message.is_empty() {
-        let msg = r.final_message.lines().take(6).collect::<Vec<_>>().join("\n");
+        let msg = r
+            .final_message
+            .lines()
+            .take(6)
+            .collect::<Vec<_>>()
+            .join("\n");
         out.push_str(&format!(
             "\n#### Final message (truncated)\n\n```\n{}\n```\n",
             msg
@@ -1551,4 +1551,3 @@ fn render_live_result_markdown(r: &LiveEvalResult) -> String {
     out.push('\n');
     out
 }
- 

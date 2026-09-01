@@ -126,7 +126,7 @@ pub fn render_global_search(f: &mut Frame, state: &GlobalSearchState, area: Rect
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Search input
+            Constraint::Length(3), // Search input
             Constraint::Min(5),    // Results list
             Constraint::Length(3), // Preview
         ])
@@ -191,10 +191,7 @@ pub fn render_global_search(f: &mut Frame, state: &GlobalSearchState, area: Rect
                         format!("{} ", result.line_number),
                         Style::default().fg(Color::Green),
                     ),
-                    Span::styled(
-                        result.content.clone(),
-                        Style::default().fg(Color::White),
-                    ),
+                    Span::styled(result.content.clone(), Style::default().fg(Color::White)),
                 ]);
                 ListItem::new(line)
             })

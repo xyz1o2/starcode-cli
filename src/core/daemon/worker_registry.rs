@@ -1,8 +1,7 @@
 /// Worker注册表
-/// 
+///
 /// 对标claude-code-main的src/daemon/workerRegistry.ts
 /// 管理后台Worker的注册、状态和健康检查
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -74,7 +73,9 @@ impl WorkerRegistry {
     pub fn register(&mut self, name: &str, worker_type: &str) -> String {
         if self.workers.len() >= self.max_workers {
             // 移除最旧的空闲Worker
-            if let Some(oldest_id) = self.workers.values()
+            if let Some(oldest_id) = self
+                .workers
+                .values()
                 .filter(|w| w.status == WorkerStatus::Idle)
                 .min_by_key(|w| w.last_heartbeat)
                 .map(|w| w.id.clone())
@@ -155,7 +156,8 @@ impl WorkerRegistry {
 
     /// 健康Worker数量
     pub fn healthy_worker_count(&self) -> usize {
-        self.workers.values()
+        self.workers
+            .values()
             .filter(|w| w.health == WorkerHealth::Healthy)
             .count()
     }

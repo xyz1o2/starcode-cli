@@ -69,9 +69,8 @@ impl ToolInvocation for CronCreateInvocation {
                         task.name, task.interval_minutes, task.next_run_at
                     )),
                     return_display: Some(format!("Loop task '{}' created", task.name)),
-                    output: serde_json::to_string_pretty(&task).unwrap_or_else(|_| {
-                        format!("Loop task '{}' created", task.name)
-                    }),
+                    output: serde_json::to_string_pretty(&task)
+                        .unwrap_or_else(|_| format!("Loop task '{}' created", task.name)),
                     error: None,
                     data: Some(serde_json::to_value(&task).unwrap_or_default()),
                 }),
@@ -198,10 +197,7 @@ impl ToolInvocation for CronListInvocation {
                             .map(|t| {
                                 format!(
                                     "- **{}**: every {} min, enabled={}, next_run={}",
-                                    t.name,
-                                    t.interval_minutes,
-                                    t.enabled,
-                                    t.next_run_at
+                                    t.name, t.interval_minutes, t.enabled, t.next_run_at
                                 )
                             })
                             .collect::<Vec<_>>()

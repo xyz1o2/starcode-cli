@@ -54,17 +54,20 @@ pub struct Agent {
     /// 流式停滞检测器
     pub(crate) stream_stall_detector: crate::agent::stream_stall::StreamStallDetector,
     /// Reactive Compact管理器
-    pub(crate) reactive_compact_manager: crate::agent::compact::reactive_compact::ReactiveCompactManager,
+    pub(crate) reactive_compact_manager:
+        crate::agent::compact::reactive_compact::ReactiveCompactManager,
 }
 
 impl Agent {
     pub fn new(client: StarClient, config: Arc<Config>) -> Self {
         crate::utils::logging::append_agent_log_line("[INIT] Agent::new starting...");
-        
+
         crate::utils::logging::append_agent_log_line("[INIT] build_agent_runtime_artifacts...");
         let runtime =
             crate::core::config::runtime_bootstrap::build_agent_runtime_artifacts(&client, &config);
-        crate::utils::logging::append_agent_log_line("[INIT] build_agent_runtime_artifacts completed");
+        crate::utils::logging::append_agent_log_line(
+            "[INIT] build_agent_runtime_artifacts completed",
+        );
 
         let tool_registry = runtime.tool_registry.clone();
 
@@ -82,11 +85,14 @@ impl Agent {
 
         let context_window = config.context_window();
         let tool_executor_arc = Arc::new(tool_executor);
-        let streaming_executor = crate::agent::streaming_executor::StreamingToolExecutor::new(tool_executor_arc.clone(), 4);
+        let streaming_executor = crate::agent::streaming_executor::StreamingToolExecutor::new(
+            tool_executor_arc.clone(),
+            4,
+        );
 
         let compact_manager = crate::agent::compact::CompactManager::from_env();
         let compact_config = compact_manager.config().clone();
-        
+
         let mut agent = Self {
             client,
             config,
@@ -113,9 +119,8 @@ impl Agent {
             context_engine_initialized: false,
             token_budget_tracker: crate::agent::token_budget::TokenBudgetTracker::new(),
             stream_stall_detector: crate::agent::stream_stall::StreamStallDetector::new(),
-            reactive_compact_manager: crate::agent::compact::reactive_compact::ReactiveCompactManager::new(
-                compact_config
-            ),
+            reactive_compact_manager:
+                crate::agent::compact::reactive_compact::ReactiveCompactManager::new(compact_config),
         };
         agent.load_persisted_session_messages();
         crate::utils::logging::append_agent_log_line("[INIT] Agent::new completed");
@@ -145,17 +150,18 @@ impl Agent {
         if let Ok(cwd) = std::env::current_dir() {
             crate::utils::logging::append_agent_log_line("[INIT-LAZY] init_project_components...");
             self.context_engine.init_project_components(&cwd);
-            
+
             if self.context_engine.has_dynamic_context_candidates(&cwd) {
                 crate::utils::logging::append_agent_log_line("[INIT-LAZY] prewarm_index_cache...");
                 self.context_engine.prewarm_index_cache();
             }
 
             if let Some(tool_registry) = self.runtime_tool_registry() {
-                let cached_tool = crate::core::tools::semantic_search::SemanticSearchTool::with_cache(
-                    self.config.clone(),
-                    self.context_engine.search_cache.clone(),
-                );
+                let cached_tool =
+                    crate::core::tools::semantic_search::SemanticSearchTool::with_cache(
+                        self.config.clone(),
+                        self.context_engine.search_cache.clone(),
+                    );
                 tool_registry.register_tool(Arc::new(cached_tool));
             }
 
@@ -205,8 +211,15 @@ impl Agent {
         self.emit_direct_chunk(StreamingChunk::tool_calls(vec![tool_call.clone()]));
     }
 
-    pub(crate) fn emit_tool_finished(&self, tool_call: &crate::types::StarToolCall, result: &crate::types::ToolResult) {
-        self.emit_direct_chunk(StreamingChunk::tool_result(tool_call.clone(), result.clone()));
+    pub(crate) fn emit_tool_finished(
+        &self,
+        tool_call: &crate::types::StarToolCall,
+        result: &crate::types::ToolResult,
+    ) {
+        self.emit_direct_chunk(StreamingChunk::tool_result(
+            tool_call.clone(),
+            result.clone(),
+        ));
     }
 
     /// 注入异步通知队列（启用后台 SubAgent 完成通知的回流）

@@ -1,11 +1,10 @@
-pub use crate::core::mcp::{MCPServerConfig, TransportConfig};
-use crate::core::mcp::context_server;
-use crate::core::mcp::{WindsurfMcpConfig, WindsurfMcpServer};
 use crate::core::i18n;
+use crate::core::mcp::context_server;
+pub use crate::core::mcp::{MCPServerConfig, TransportConfig};
+use crate::core::mcp::{WindsurfMcpConfig, WindsurfMcpServer};
 use clap::Subcommand;
 use std::collections::HashMap;
 use std::path::PathBuf;
-
 
 #[derive(Subcommand)]
 pub enum McpCommand {
@@ -181,7 +180,8 @@ pub async fn remove_mcp_server(name: &str) -> Result<String, crate::core::mcp::M
     .replace("{name}", name))
 }
 
-async fn build_live_mcp_manager() -> Result<crate::core::mcp::MCPManager, crate::core::mcp::McpError> {
+async fn build_live_mcp_manager() -> Result<crate::core::mcp::MCPManager, crate::core::mcp::McpError>
+{
     let manager = crate::core::mcp::MCPManager::new();
     manager.initialize_mcp_servers().await?;
     Ok(manager)
@@ -321,8 +321,12 @@ async fn render_status_snapshot() -> Result<String, crate::core::mcp::McpError> 
         .replace("{disabled}", &configured_disabled.to_string()),
     );
     out.push_str(
-        &i18n::t("cmd.mcp.status.active", "- active: {count}\n", "- active: {count}\n")
-            .replace("{count}", &servers.len().to_string()),
+        &i18n::t(
+            "cmd.mcp.status.active",
+            "- active: {count}\n",
+            "- active: {count}\n",
+        )
+        .replace("{count}", &servers.len().to_string()),
     );
     out.push_str(&i18n::t(
         "cmd.mcp.status.servers_header",
@@ -373,7 +377,9 @@ async fn render_status_snapshot() -> Result<String, crate::core::mcp::McpError> 
     Ok(out.trim_end().to_string())
 }
 
-pub async fn execute_mcp_command(command: McpCommand) -> Result<String, crate::core::mcp::McpError> {
+pub async fn execute_mcp_command(
+    command: McpCommand,
+) -> Result<String, crate::core::mcp::McpError> {
     match command {
         McpCommand::List => {
             let config = crate::core::mcp::load_project_mcp_config().await?;
@@ -406,12 +412,8 @@ pub async fn execute_mcp_command(command: McpCommand) -> Result<String, crate::c
                 );
                 if let Some(args) = &server.args {
                     out.push_str(
-                        &i18n::t(
-                            "cmd.mcp.list.args",
-                            "  Args: {args}\n",
-                            "  Args: {args}\n",
-                        )
-                        .replace("{args}", &format!("{:?}", args)),
+                        &i18n::t("cmd.mcp.list.args", "  Args: {args}\n", "  Args: {args}\n")
+                            .replace("{args}", &format!("{:?}", args)),
                     );
                 }
                 if server.disabled.unwrap_or(false) {

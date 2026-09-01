@@ -1,5 +1,5 @@
-use std::collections::{HashMap, HashSet};
 use super::indexer::Indexer;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// Incremental index - only updates changed files

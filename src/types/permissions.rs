@@ -1,7 +1,6 @@
 /// 权限类型定义
-/// 
+///
 /// 对标claude-code-main的src/types/permissions.ts
-
 use serde::{Deserialize, Serialize};
 
 /// 权限模式

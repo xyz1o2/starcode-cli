@@ -1,5 +1,5 @@
 /// 密钥扫描器
-/// 
+///
 /// 对标claude-code-main的secretScanner.ts
 /// 检测内容中的敏感信息
 

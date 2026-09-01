@@ -5,7 +5,7 @@
 /// - Syntax highlighting
 /// - Add/remove/modify indicators
 /// - Context lines
-use super::{get_highlighter, detect_language};
+use super::{detect_language, get_highlighter};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -97,11 +97,7 @@ fn parse_hunk_header(header: &str) -> Option<(usize, usize)> {
 }
 
 /// Render a diff as ratatui Lines with syntax highlighting
-pub fn render_diff_lines(
-    diff_text: &str,
-    filename: &str,
-    width: u16,
-) -> Vec<Line<'static>> {
+pub fn render_diff_lines(diff_text: &str, filename: &str, width: u16) -> Vec<Line<'static>> {
     let diff_lines = parse_diff(diff_text);
     let language = detect_language(filename);
     let highlighter = get_highlighter();
@@ -121,13 +117,18 @@ pub fn render_diff_lines(
                     ),
                     Span::styled(
                         diff_line.content.clone(),
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
                 ]));
             }
             DiffLineType::Added => {
                 let highlighted = highlighter.highlight_line(&diff_line.content, language);
-                let line_num = diff_line.new_line.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
+                let line_num = diff_line
+                    .new_line
+                    .map(|n| format!("{:>4}", n))
+                    .unwrap_or_else(|| "    ".to_string());
                 result.push(Line::from(vec![
                     Span::styled(
                         format!("{} │ ", line_num),
@@ -135,7 +136,9 @@ pub fn render_diff_lines(
                     ),
                     Span::styled(
                         "+ ",
-                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         truncate_ansi(&highlighted, content_width),
@@ -145,7 +148,10 @@ pub fn render_diff_lines(
             }
             DiffLineType::Removed => {
                 let highlighted = highlighter.highlight_line(&diff_line.content, language);
-                let line_num = diff_line.old_line.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
+                let line_num = diff_line
+                    .old_line
+                    .map(|n| format!("{:>4}", n))
+                    .unwrap_or_else(|| "    ".to_string());
                 result.push(Line::from(vec![
                     Span::styled(
                         format!("{} │ ", line_num),
@@ -163,17 +169,20 @@ pub fn render_diff_lines(
             }
             DiffLineType::Context => {
                 let highlighted = highlighter.highlight_line(&diff_line.content, language);
-                let old_num = diff_line.old_line.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
-                let new_num = diff_line.new_line.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
+                let old_num = diff_line
+                    .old_line
+                    .map(|n| format!("{:>4}", n))
+                    .unwrap_or_else(|| "    ".to_string());
+                let new_num = diff_line
+                    .new_line
+                    .map(|n| format!("{:>4}", n))
+                    .unwrap_or_else(|| "    ".to_string());
                 result.push(Line::from(vec![
                     Span::styled(
                         format!("{} │ ", old_num),
                         Style::default().fg(Color::DarkGray),
                     ),
-                    Span::styled(
-                        "  ",
-                        Style::default(),
-                    ),
+                    Span::styled("  ", Style::default()),
                     Span::styled(
                         truncate_ansi(&highlighted, content_width),
                         Style::default().fg(Color::DarkGray),
@@ -233,10 +242,7 @@ pub fn render_diff_simple(diff_text: &str) -> Vec<Line<'static>> {
 
         result.push(Line::from(vec![
             Span::styled(prefix, Style::default().fg(color)),
-            Span::styled(
-                diff_line.content.clone(),
-                Style::default().fg(color),
-            ),
+            Span::styled(diff_line.content.clone(), Style::default().fg(color)),
         ]));
     }
 

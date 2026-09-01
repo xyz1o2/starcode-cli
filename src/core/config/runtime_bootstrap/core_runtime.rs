@@ -72,7 +72,10 @@ fn register_core_file_tools(
     }
 
     if is_core_tool_enabled(selection_config, "read_many_files") {
-        registry.register_tool(Arc::new(ReadManyFilesTool::new(registry_config.clone(), global_state.clone())));
+        registry.register_tool(Arc::new(ReadManyFilesTool::new(
+            registry_config.clone(),
+            global_state.clone(),
+        )));
     }
 
     if is_core_tool_enabled(selection_config, "Glob") {

@@ -556,5 +556,3 @@ fn plugin_tool_error_result(
         })),
     }
 }
-
- 

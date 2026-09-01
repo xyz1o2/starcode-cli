@@ -191,7 +191,10 @@ impl SmartEditTool {
         dry_run: bool,
     ) -> Result<ToolResult, Box<dyn std::error::Error>> {
         // 读取文件内容
-        let content = crate::core::utils::file_utils::read_file_with_encoding_async(std::path::Path::new(file_path)).await?;
+        let content = crate::core::utils::file_utils::read_file_with_encoding_async(
+            std::path::Path::new(file_path),
+        )
+        .await?;
 
         // 构建编辑上下文
         let context = EditContext::new(
@@ -287,8 +290,11 @@ impl SmartEditTool {
         let mut added = 0usize;
         let mut removed = 0usize;
         for line in diff_output.lines() {
-            if line.starts_with('+') && !line.starts_with("+++") { added += 1; }
-            else if line.starts_with('-') && !line.starts_with("---") { removed += 1; }
+            if line.starts_with('+') && !line.starts_with("+++") {
+                added += 1;
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                removed += 1;
+            }
         }
         let brief = format!("+{} -{}", added, removed);
 
@@ -326,4 +332,3 @@ impl SmartEditTool {
             .collect()
     }
 }
- 

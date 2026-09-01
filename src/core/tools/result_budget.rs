@@ -178,7 +178,12 @@ pub fn cleanup_old_outputs(max_files: usize) {
     let mut files: Vec<_> = match std::fs::read_dir(&dir) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|ext| ext == "txt").unwrap_or(false))
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "txt")
+                    .unwrap_or(false)
+            })
             .collect(),
         Err(_) => return,
     };

@@ -1,6 +1,5 @@
 use crate::core::tools::tools::{
-    ToolError,
-    BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation, ToolResult,
+    BaseDeclarativeTool, Kind, ToolError, ToolInvocation, ToolLocation, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 
@@ -60,15 +59,18 @@ impl ToolInvocation for LocalMemoryRecallInvocation {
         let params = self.params.clone();
         Box::pin(async move {
             let action = params.action.clone();
-            
+
             match action.as_str() {
                 "get" => {
                     let key = params.key.ok_or("key is required for get action")?;
                     let store = params.store.unwrap_or_else(|| "default".to_string());
-                    
+
                     // In a real implementation, this would read from the memory store
                     Ok(ToolResult {
-                        llm_content: Some(format!("Retrieved value for key '{}' from store '{}'", key, store)),
+                        llm_content: Some(format!(
+                            "Retrieved value for key '{}' from store '{}'",
+                            key, store
+                        )),
                         return_display: Some(format!("Memory retrieved: {}", key)),
                         output: serde_json::to_string(&LocalMemoryRecallOutput {
                             entries: vec![MemoryEntry {
@@ -88,7 +90,7 @@ impl ToolInvocation for LocalMemoryRecallInvocation {
                 }
                 "list" => {
                     let store = params.store.unwrap_or_else(|| "default".to_string());
-                    
+
                     // In a real implementation, this would list all entries in the store
                     Ok(ToolResult {
                         llm_content: Some(format!("Listed entries in store '{}'", store)),
@@ -141,7 +143,13 @@ impl ToolInvocation for LocalMemoryRecallInvocation {
                         entries: vec![],
                         stores: None,
                     })?,
-                    error: Some(ToolError { error_type: "validation".to_string(), message: format!("Unknown action: {}. Use 'get', 'list', or 'list_stores'", action) }),
+                    error: Some(ToolError {
+                        error_type: "validation".to_string(),
+                        message: format!(
+                            "Unknown action: {}. Use 'get', 'list', or 'list_stores'",
+                            action
+                        ),
+                    }),
                     data: None,
                 }),
             }

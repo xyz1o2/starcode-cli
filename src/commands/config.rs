@@ -222,8 +222,7 @@ pub async fn lang(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
 pub async fn theme(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     if args.is_empty() {
         // 打开交互式主题选择器（↑↓ 实时预览 / Enter 应用 / Esc 取消恢复）
-        let themes =
-            crate::ui::components::highlight::theme_picker::available_themes();
+        let themes = crate::ui::components::highlight::theme_picker::available_themes();
         let current_name = ctx.state.theme_manager.current().name.clone();
         ctx.state.theme_picker_prev = Some(current_name.clone());
         ctx.state.selected_theme_index = themes
@@ -239,16 +238,20 @@ pub async fn theme(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRes
         "next" => {
             ctx.state.theme_manager.next_theme();
             let name = ctx.state.theme_manager.current().name.clone();
-            ctx.state
-                .chat_history
-                .push(ChatEntry::assistant(format!("Switched to theme: {}", name)).with_streaming(false));
+            ctx.state.chat_history.push(
+                ChatEntry::assistant(format!("Switched to theme: {}", name)).with_streaming(false),
+            );
         }
         "list" => {
             let themes = ctx.state.theme_manager.list_themes();
             let current_name = ctx.state.theme_manager.current().name.clone();
             let mut lines = vec!["Available themes:".to_string()];
             for name in themes {
-                let marker = if name == current_name { " (current)" } else { "" };
+                let marker = if name == current_name {
+                    " (current)"
+                } else {
+                    ""
+                };
                 lines.push(format!("  - {}{}", name, marker));
             }
             ctx.state
@@ -258,22 +261,20 @@ pub async fn theme(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRes
         name => {
             let name_owned = name.to_string();
             if ctx.state.theme_manager.set_theme(&name_owned) {
-                ctx.state
-                    .chat_history
-                    .push(ChatEntry::assistant(format!("Switched to theme: {}", name_owned)).with_streaming(false));
-            } else {
-                ctx.state
-                    .chat_history
-                    .push(
-                        ChatEntry::assistant(format!(
-                            "Unknown theme: {}. Use /theme list to see available themes.",
-                            name_owned
-                        ))
+                ctx.state.chat_history.push(
+                    ChatEntry::assistant(format!("Switched to theme: {}", name_owned))
                         .with_streaming(false),
-                    );
+                );
+            } else {
+                ctx.state.chat_history.push(
+                    ChatEntry::assistant(format!(
+                        "Unknown theme: {}. Use /theme list to see available themes.",
+                        name_owned
+                    ))
+                    .with_streaming(false),
+                );
             }
         }
     }
     Ok(())
 }
- 

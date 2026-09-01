@@ -227,4 +227,3 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
         truncated
     }
 }
-

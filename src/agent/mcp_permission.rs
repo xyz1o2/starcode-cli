@@ -161,12 +161,10 @@ impl PermissionDecisionMapper {
         behavior: PermissionBehavior,
     ) -> &'static str {
         match reason {
-            PermissionDecisionReason::PermissionPromptTool { .. } => {
-                match behavior {
-                    PermissionBehavior::Allow => "user_temporary",
-                    PermissionBehavior::Deny => "user_reject",
-                }
-            }
+            PermissionDecisionReason::PermissionPromptTool { .. } => match behavior {
+                PermissionBehavior::Allow => "user_temporary",
+                PermissionBehavior::Deny => "user_reject",
+            },
             PermissionDecisionReason::Rule { source } => {
                 Self::rule_source_to_otel_source(source, behavior)
             }
@@ -183,10 +181,7 @@ impl PermissionDecisionMapper {
     }
 
     /// 将规则来源映射到OTel源
-    fn rule_source_to_otel_source(
-        source: &str,
-        behavior: PermissionBehavior,
-    ) -> &'static str {
+    fn rule_source_to_otel_source(source: &str, behavior: PermissionBehavior) -> &'static str {
         match source {
             "session" => match behavior {
                 PermissionBehavior::Allow => "user_temporary",
@@ -205,17 +200,11 @@ impl PermissionDecisionMapper {
 #[derive(Debug, Clone)]
 pub enum PermissionDecisionReason {
     /// 权限提示工具
-    PermissionPromptTool {
-        tool_result: Option<Value>,
-    },
+    PermissionPromptTool { tool_result: Option<Value> },
     /// 规则
-    Rule {
-        source: String,
-    },
+    Rule { source: String },
     /// Hook
-    Hook {
-        hook_name: String,
-    },
+    Hook { hook_name: String },
     /// 模式
     Mode,
     /// 分类器
@@ -351,7 +340,10 @@ impl MessageSanitizer {
                     if let Some(command) = obj.get("command").and_then(|v| v.as_str()) {
                         let parts: Vec<&str> = command.trim().split_whitespace().collect();
                         if let Some(first) = parts.first() {
-                            telemetry.insert("bash_command".to_string(), Value::String(first.to_string()));
+                            telemetry.insert(
+                                "bash_command".to_string(),
+                                Value::String(first.to_string()),
+                            );
                         }
                     }
                 }
@@ -421,7 +413,7 @@ mod tests {
     #[test]
     fn test_mcp_server_manager() {
         let mut manager = McpServerManager::new();
-        
+
         manager.add_connection(McpServerConnection {
             name: "test-server".to_string(),
             server_type: McpServerType::Stdio,

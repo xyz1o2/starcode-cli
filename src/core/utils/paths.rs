@@ -152,11 +152,7 @@ fn windows_unc_path_to_unix(raw_path: &str) -> Option<PathBuf> {
 
     // 检查是否是驱动器路径 (如 H:\...)
     let bytes = normalized.as_bytes();
-    if bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && bytes[2] == b'/'
-    {
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/' {
         let drive = (bytes[0] as char).to_ascii_lowercase();
         let rest = &normalized[3..];
         return Some(PathBuf::from(format!("/mnt/{}/{}", drive, rest)));
@@ -326,5 +322,3 @@ pub fn current_project_star_dir() -> PathBuf {
     let cwd = current_dir_cached().clone();
     find_nearest_existing_star_dir(&cwd).unwrap_or_else(|| cwd.join(STAR_DIR))
 }
-
- 

@@ -1,10 +1,9 @@
-/// 转录引擎
-/// 
-/// 整合音频捕获和STT提供商，提供统一的转录接口
-
-use serde::{Deserialize, Serialize};
 use super::capture::{AudioCapture, CaptureConfig, CaptureError};
-use super::stt::{SttProvider, SttConfig, SttError, SttResult};
+use super::stt::{SttConfig, SttError, SttProvider, SttResult};
+/// 转录引擎
+///
+/// 整合音频捕获和STT提供商，提供统一的转录接口
+use serde::{Deserialize, Serialize};
 
 /// 转录请求
 #[derive(Debug, Clone)]
@@ -45,8 +44,14 @@ impl TranscriptionEngine {
     }
 
     /// 转录音频数据
-    pub async fn transcribe(&self, audio_data: &[u8]) -> Result<TranscriptionResponse, TranscriptionError> {
-        let result = self.provider.transcribe(audio_data, &self.config).await
+    pub async fn transcribe(
+        &self,
+        audio_data: &[u8],
+    ) -> Result<TranscriptionResponse, TranscriptionError> {
+        let result = self
+            .provider
+            .transcribe(audio_data, &self.config)
+            .await
             .map_err(|e| TranscriptionError::SttError(e.to_string()))?;
 
         Ok(TranscriptionResponse {

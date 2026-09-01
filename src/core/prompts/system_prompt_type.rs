@@ -32,8 +32,13 @@ pub struct SystemPrompt {
 impl SystemPrompt {
     /// 创建新的 System Prompt
     pub fn new(segments: Vec<String>) -> Self {
-        let has_boundary = segments.iter().any(|s| s.contains(SYSTEM_PROMPT_DYNAMIC_BOUNDARY));
-        Self { segments, has_boundary }
+        let has_boundary = segments
+            .iter()
+            .any(|s| s.contains(SYSTEM_PROMPT_DYNAMIC_BOUNDARY));
+        Self {
+            segments,
+            has_boundary,
+        }
     }
 
     /// 获取所有段
@@ -345,7 +350,10 @@ pub struct SystemPromptBuilder;
 
 impl SystemPromptBuilder {
     /// 构建默认 System Prompt（包含静态区 + 动态区 + 分界标记）
-    pub fn build_default(static_segments: Vec<String>, dynamic_segments: Vec<String>) -> SystemPrompt {
+    pub fn build_default(
+        static_segments: Vec<String>,
+        dynamic_segments: Vec<String>,
+    ) -> SystemPrompt {
         let mut segments = Vec::new();
 
         // 静态区
@@ -424,8 +432,10 @@ mod tests {
     #[test]
     fn test_section_registry() {
         let registry = SectionRegistry::new();
-        registry.register_cached("test", SectionType::Dynamic, 10, || "cached content".to_string());
-        
+        registry.register_cached("test", SectionType::Dynamic, 10, || {
+            "cached content".to_string()
+        });
+
         let section = registry.get("test").unwrap();
         assert_eq!(section.content.unwrap(), "cached content");
         assert!(section.cached);

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// ToolUseContext - 对标claude-code的ToolUseContext
-/// 
+///
 /// 管理工具执行的上下文状态
 pub struct ToolUseContext {
     /// 进行中的工具ID集合
@@ -134,7 +134,9 @@ impl ToolUseContext {
 
     /// 克隆内容替换状态（用于缓存共享的fork）
     pub fn clone_content_replacement_state(&self) -> Option<ContentReplacementState> {
-        self.content_replacement_state.as_ref().map(|s| s.clone_for_fork())
+        self.content_replacement_state
+            .as_ref()
+            .map(|s| s.clone_for_fork())
     }
 
     /// 设置渲染的系统提示
@@ -311,7 +313,8 @@ pub struct SyntheticMessageDetector;
 impl SyntheticMessageDetector {
     /// 合成消息常量
     pub const INTERRUPT_MESSAGE: &'static str = "[Request interrupted by user]";
-    pub const INTERRUPT_MESSAGE_FOR_TOOL_USE: &'static str = "[Request interrupted by user for tool use]";
+    pub const INTERRUPT_MESSAGE_FOR_TOOL_USE: &'static str =
+        "[Request interrupted by user for tool use]";
     pub const CANCEL_MESSAGE: &'static str = "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed.";
     pub const REJECT_MESSAGE: &'static str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
     pub const NO_RESPONSE_REQUESTED: &'static str = "No response requested.";
@@ -406,7 +409,9 @@ pub fn has_tool_calls_in_last_assistant_turn(messages: &[crate::types::StarMessa
 }
 
 /// 获取最后一条助手消息
-pub fn get_last_assistant_message(messages: &[crate::types::StarMessage]) -> Option<&crate::types::StarMessage> {
+pub fn get_last_assistant_message(
+    messages: &[crate::types::StarMessage],
+) -> Option<&crate::types::StarMessage> {
     messages.iter().rev().find(|msg| msg.role == "assistant")
 }
 
@@ -416,9 +421,15 @@ mod tests {
 
     #[test]
     fn test_synthetic_message_detection() {
-        assert!(SyntheticMessageDetector::is_synthetic_message("[Request interrupted by user]"));
-        assert!(SyntheticMessageDetector::is_synthetic_message(SyntheticMessageDetector::CANCEL_MESSAGE));
-        assert!(!SyntheticMessageDetector::is_synthetic_message("Hello world"));
+        assert!(SyntheticMessageDetector::is_synthetic_message(
+            "[Request interrupted by user]"
+        ));
+        assert!(SyntheticMessageDetector::is_synthetic_message(
+            SyntheticMessageDetector::CANCEL_MESSAGE
+        ));
+        assert!(!SyntheticMessageDetector::is_synthetic_message(
+            "Hello world"
+        ));
     }
 
     #[test]

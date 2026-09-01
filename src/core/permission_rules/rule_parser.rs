@@ -24,8 +24,8 @@ impl RuleParser {
     }
 
     pub fn parse_toml(content: &str) -> Result<Vec<ParsedRule>, String> {
-        let file: RulesFile = toml::from_str(content)
-            .map_err(|e| format!("Failed to parse TOML rules: {}", e))?;
+        let file: RulesFile =
+            toml::from_str(content).map_err(|e| format!("Failed to parse TOML rules: {}", e))?;
         Ok(file.rules)
     }
 
@@ -72,5 +72,3 @@ impl RuleParser {
         toml::to_string_pretty(&file).map_err(|e| format!("Failed to serialize rules: {}", e))
     }
 }
-
- 

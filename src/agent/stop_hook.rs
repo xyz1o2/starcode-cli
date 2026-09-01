@@ -156,10 +156,8 @@ impl StopHookManager {
         }
 
         let reason = self.block_reason.clone().unwrap_or_default();
-        let error_message = StarMessage::system(format!(
-            "[STOP_HOOK] Conversation stopped: {}",
-            reason
-        ));
+        let error_message =
+            StarMessage::system(format!("[STOP_HOOK] Conversation stopped: {}", reason));
 
         StopHookResult {
             prevent_continuation: true,
@@ -220,12 +218,12 @@ mod tests {
     #[test]
     fn test_empty_response_detection() {
         let mut manager = StopHookManager::new();
-        
+
         // 连续空响应
         manager.record_response(&None, &[]);
         manager.record_response(&None, &[]);
         assert!(!manager.should_prevent_continuation().prevent_continuation);
-        
+
         manager.record_response(&None, &[]);
         assert!(manager.should_prevent_continuation().prevent_continuation);
     }
@@ -233,13 +231,13 @@ mod tests {
     #[test]
     fn test_same_tool_call_detection() {
         let mut manager = StopHookManager::new();
-        
+
         // 连续相同工具调用
         for _ in 0..4 {
             manager.record_response(&None, &["Bash".to_string()]);
         }
         assert!(!manager.should_prevent_continuation().prevent_continuation);
-        
+
         manager.record_response(&None, &["Bash".to_string()]);
         assert!(manager.should_prevent_continuation().prevent_continuation);
     }
@@ -247,12 +245,12 @@ mod tests {
     #[test]
     fn test_consecutive_failure_detection() {
         let mut manager = StopHookManager::new();
-        
+
         // 连续失败
         manager.record_tool_result(false);
         manager.record_tool_result(false);
         assert!(!manager.should_prevent_continuation().prevent_continuation);
-        
+
         manager.record_tool_result(false);
         assert!(manager.should_prevent_continuation().prevent_continuation);
     }

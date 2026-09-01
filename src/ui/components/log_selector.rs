@@ -78,7 +78,12 @@ pub fn render_log_selector(f: &mut Frame, state: &LogSelectorState, area: Rect, 
     let height = 24.min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let popup_area = Rect { x, y, width, height };
+    let popup_area = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
 
     f.render_widget(Clear, popup_area);
 
@@ -86,7 +91,7 @@ pub fn render_log_selector(f: &mut Frame, state: &LogSelectorState, area: Rect, 
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2), // Title + search
-            Constraint::Min(10),  // List + preview
+            Constraint::Min(10),   // List + preview
             Constraint::Length(1), // Hints
         ])
         .split(popup_area);
@@ -94,8 +99,13 @@ pub fn render_log_selector(f: &mut Frame, state: &LogSelectorState, area: Rect, 
     // Title + search
     let title_line = Line::from(vec![
         Span::styled(
-            format!(" {} ", i18n::t("ui.log_selector.title", "会话浏览器", "Session Browser")),
-            Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
+            format!(
+                " {} ",
+                i18n::t("ui.log_selector.title", "会话浏览器", "Session Browser")
+            ),
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("  /{}", state.search_query),
@@ -107,10 +117,7 @@ pub fn render_log_selector(f: &mut Frame, state: &LogSelectorState, area: Rect, 
     // List + preview
     let inner_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(40),
-            Constraint::Percentage(60),
-        ])
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(chunks[1]);
 
     // Session list
@@ -139,7 +146,10 @@ pub fn render_log_selector(f: &mut Frame, state: &LogSelectorState, area: Rect, 
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.border))
                 .title(Span::styled(
-                    format!(" {} ", i18n::t("ui.log_selector.sessions", "会话", "Sessions")),
+                    format!(
+                        " {} ",
+                        i18n::t("ui.log_selector.sessions", "会话", "Sessions")
+                    ),
                     Style::default().fg(theme.secondary),
                 )),
         )
@@ -158,7 +168,11 @@ pub fn render_log_selector(f: &mut Frame, state: &LogSelectorState, area: Rect, 
             session.preview.clone()
         }
     } else {
-        i18n::t("ui.log_selector.no_sessions", "无保存的会话", "No saved sessions")
+        i18n::t(
+            "ui.log_selector.no_sessions",
+            "无保存的会话",
+            "No saved sessions",
+        )
     };
 
     let preview = Paragraph::new(preview_text)
@@ -169,23 +183,24 @@ pub fn render_log_selector(f: &mut Frame, state: &LogSelectorState, area: Rect, 
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.border))
                 .title(Span::styled(
-                    format!(" {} ", i18n::t("ui.log_selector.preview", "预览", "Preview")),
+                    format!(
+                        " {} ",
+                        i18n::t("ui.log_selector.preview", "预览", "Preview")
+                    ),
                     Style::default().fg(theme.secondary),
                 )),
         );
     f.render_widget(preview, inner_chunks[1]);
 
     // Hints
-    let hints = Line::from(vec![
-        Span::styled(
-            format!(
-                " Enter={} Esc={} /={}",
-                i18n::t("ui.log_selector.resume", "恢复", "Resume"),
-                i18n::t("ui.log_selector.close", "关闭", "Close"),
-                i18n::t("ui.log_selector.filter", "筛选", "Filter"),
-            ),
-            Style::default().fg(theme.comment),
+    let hints = Line::from(vec![Span::styled(
+        format!(
+            " Enter={} Esc={} /={}",
+            i18n::t("ui.log_selector.resume", "恢复", "Resume"),
+            i18n::t("ui.log_selector.close", "关闭", "Close"),
+            i18n::t("ui.log_selector.filter", "筛选", "Filter"),
         ),
-    ]);
+        Style::default().fg(theme.comment),
+    )]);
     f.render_widget(Paragraph::new(hints), chunks[2]);
 }

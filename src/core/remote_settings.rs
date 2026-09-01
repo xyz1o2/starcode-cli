@@ -62,7 +62,6 @@ impl RemoteSettings {
     }
 
     pub fn get_policy_limit(&self, key: &str) -> Option<serde_json::Value> {
-        self.get_setting(&format!("policy_limits.{}", key))
-            .cloned()
+        self.get_setting(&format!("policy_limits.{}", key)).cloned()
     }
 }

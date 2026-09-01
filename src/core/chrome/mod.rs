@@ -5,7 +5,7 @@
 //! - 页面交互
 //! - 网络监控
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// Chrome MCP 配置

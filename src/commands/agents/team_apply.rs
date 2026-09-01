@@ -1,7 +1,12 @@
-use super::team_definitions::{validate_team_run_id, normalize_agent_name, TeamAgentDef, TeamMemberWorkspace};
+use super::team_definitions::{
+    normalize_agent_name, validate_team_run_id, TeamAgentDef, TeamMemberWorkspace,
+};
 use super::*;
 
-pub(super) async fn apply_team_run(ctx: CommandContext<'_>, args: AgentTeamApplyArgs) -> CommandResult {
+pub(super) async fn apply_team_run(
+    ctx: CommandContext<'_>,
+    args: AgentTeamApplyArgs,
+) -> CommandResult {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let storage = crate::core::config::storage::Storage::new(cwd.clone());
     let run_id = validate_team_run_id(&args.run_id)?;
@@ -247,9 +252,12 @@ pub(super) async fn apply_team_run(ctx: CommandContext<'_>, args: AgentTeamApply
         );
     }
 
-    ctx.state
-        .chat_history
-        .push(ChatEntry::assistant(lines.join("
-")).with_streaming(false));
+    ctx.state.chat_history.push(
+        ChatEntry::assistant(lines.join(
+            "
+",
+        ))
+        .with_streaming(false),
+    );
     Ok(())
 }

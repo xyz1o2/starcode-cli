@@ -49,7 +49,9 @@ pub fn render_compression_status(f: &mut Frame, state: &CompressionState, area: 
                 Span::styled("  Compression: ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     "Active",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(vec![
@@ -82,15 +84,10 @@ pub fn render_compression_status(f: &mut Frame, state: &CompressionState, area: 
             ]),
         ]
     } else {
-        vec![
-            Line::from(vec![
-                Span::styled("  Compression: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    "Not needed",
-                    Style::default().fg(Color::Green),
-                ),
-            ]),
-        ]
+        vec![Line::from(vec![
+            Span::styled("  Compression: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Not needed", Style::default().fg(Color::Green)),
+        ])]
     };
 
     let block = Block::default()

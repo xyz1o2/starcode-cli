@@ -281,7 +281,11 @@ pub fn load_custom_subagent_from_file(path: &Path) -> Option<CustomSubAgentDefin
     } else {
         meta.allowed_tools.clone()
     };
-    let aliases = parse_csv_field(legacy_meta.get("aliases").or_else(|| legacy_meta.get("alias")));
+    let aliases = parse_csv_field(
+        legacy_meta
+            .get("aliases")
+            .or_else(|| legacy_meta.get("alias")),
+    );
     let model = meta.model.clone();
     let prompt = body.trim().to_string();
     let prompt = if prompt.is_empty() {
@@ -511,4 +515,3 @@ fn tokenize(input: &str) -> Vec<String> {
         })
         .collect()
 }
- 

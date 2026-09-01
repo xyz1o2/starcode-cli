@@ -76,10 +76,7 @@ impl ToolInvocation for VerifyPlanInvocation {
             Ok(ToolResult {
                 llm_content: Some(llm_content),
                 return_display: Some(return_display),
-                output: serde_json::to_string(&VerifyPlanOutput {
-                    verified,
-                    summary,
-                })?,
+                output: serde_json::to_string(&VerifyPlanOutput { verified, summary })?,
                 error: None,
                 data: Some(serde_json::json!({
                     "verified": verified,

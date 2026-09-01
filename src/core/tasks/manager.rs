@@ -17,7 +17,7 @@ impl TaskManager {
             notifier: Arc::new(TaskNotifier::new()),
         }
     }
-    
+
     /// 获取任务变更通知器
     pub fn get_notifier(&self) -> Arc<TaskNotifier> {
         self.notifier.clone()
@@ -41,7 +41,7 @@ impl TaskManager {
         let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
         let mut graph: TaskGraph = serde_json::from_str(&content).map_err(|e| e.to_string())?;
         repair_task_graph(&mut graph);
-        Ok(Self { 
+        Ok(Self {
             graph,
             notifier: Arc::new(TaskNotifier::new()),
         })
@@ -50,33 +50,41 @@ impl TaskManager {
     pub fn task_file_for_workspace(workspace: &Path) -> PathBuf {
         workspace.join(".star").join("tasks.json")
     }
-    
+
     /// 获取基于会话ID隔离的任务文件路径
     pub fn task_file_for_session(workspace: &Path, session_id: &str) -> PathBuf {
         let sanitized_session = sanitize_path_component(session_id);
-        workspace.join(".star").join(format!("tasks_{}.json", sanitized_session))
+        workspace
+            .join(".star")
+            .join(format!("tasks_{}.json", sanitized_session))
     }
-    
+
     /// 获取基于团队名称隔离的任务文件路径
     pub fn task_file_for_team(workspace: &Path, team_name: &str) -> PathBuf {
         let sanitized_team = sanitize_path_component(team_name);
-        workspace.join(".star").join(format!("tasks_team_{}.json", sanitized_team))
+        workspace
+            .join(".star")
+            .join(format!("tasks_team_{}.json", sanitized_team))
     }
 
     pub fn archive_file_for_workspace(workspace: &Path) -> PathBuf {
         workspace.join(".star").join("tasks_archive.json")
     }
-    
+
     /// 获取基于会话ID隔离的归档文件路径
     pub fn archive_file_for_session(workspace: &Path, session_id: &str) -> PathBuf {
         let sanitized_session = sanitize_path_component(session_id);
-        workspace.join(".star").join(format!("tasks_archive_{}.json", sanitized_session))
+        workspace
+            .join(".star")
+            .join(format!("tasks_archive_{}.json", sanitized_session))
     }
-    
+
     /// 获取基于团队名称隔离的归档文件路径
     pub fn archive_file_for_team(workspace: &Path, team_name: &str) -> PathBuf {
         let sanitized_team = sanitize_path_component(team_name);
-        workspace.join(".star").join(format!("tasks_archive_team_{}.json", sanitized_team))
+        workspace
+            .join(".star")
+            .join(format!("tasks_archive_team_{}.json", sanitized_team))
     }
 
     /// Add a new task to the graph
@@ -115,16 +123,16 @@ impl TaskManager {
         let task_id = task.id.clone();
         let title = task.title.clone();
         let status = task.status.clone();
-        
+
         self.graph.add_task(task.clone());
-        
+
         // 发送任务创建通知
         self.notifier.notify(TaskChangeEvent::Created {
             task_id,
             title,
             status,
         });
-        
+
         Ok(task.id)
     }
 
@@ -271,18 +279,18 @@ impl TaskManager {
         if task.assigned_agent != original_task.assigned_agent {
             updated_fields.push("assigned_agent".to_string());
         }
-        
+
         let task_id = task.id.clone();
         let title = task.title.clone();
         let old_status = original_task.status.clone();
         let new_status = task.status.clone();
-        
+
         task.updated_at = chrono::Utc::now();
         // Preserve children structure from original task
         task.children = original_task.children;
 
         self.graph.nodes.insert(task.id.clone(), task);
-        
+
         // 发送任务更新通知
         if !updated_fields.is_empty() {
             self.notifier.notify(TaskChangeEvent::Updated {
@@ -293,7 +301,7 @@ impl TaskManager {
                 updated_fields,
             });
         }
-        
+
         Ok(())
     }
 
@@ -321,8 +329,13 @@ impl TaskManager {
         }
 
         // 获取任务信息用于通知
-        let task_title = self.graph.nodes.get(id).map(|t| t.title.clone()).unwrap_or_default();
-        
+        let task_title = self
+            .graph
+            .nodes
+            .get(id)
+            .map(|t| t.title.clone())
+            .unwrap_or_default();
+
         // Get parent_id before deletion for cleanup
         let parent_id = self.graph.nodes.get(id).and_then(|n| n.parent_id.clone());
 
@@ -364,7 +377,7 @@ impl TaskManager {
         for node in self.graph.nodes.values_mut() {
             node.dependencies.retain(|dep| !deleted_set.contains(dep));
         }
-        
+
         // 发送任务删除通知
         self.notifier.notify(TaskChangeEvent::Deleted {
             task_id: id.to_string(),
@@ -480,7 +493,7 @@ impl TaskManager {
             let title = task.title.clone();
             task.status = status.clone();
             task.updated_at = chrono::Utc::now();
-            
+
             // 发送状态变更通知
             self.notifier.notify(TaskChangeEvent::Updated {
                 task_id: id.to_string(),
@@ -489,7 +502,7 @@ impl TaskManager {
                 new_status: status,
                 updated_fields: vec!["status".to_string()],
             });
-            
+
             Ok(())
         } else {
             Err(format!("Task {} not found", id))
@@ -733,7 +746,7 @@ impl TaskManager {
 
         // 提取形如 `src/foo/bar.rs` 或 `packages/core/src/lib.ts` 的路径
         let re = regex::Regex::new(
-            r#"["'`]?([\w\-./]+\.(?:rs|ts|js|tsx|jsx|py|go|java|rb|cpp|c|h|hpp|css|scss|html|json|yaml|yml|toml|md))"#
+            r#"["'`]?([\w\-./]+\.(?:rs|ts|js|tsx|jsx|py|go|java|rb|cpp|c|h|hpp|css|scss|html|json|yaml|yml|toml|md))"#,
         );
         if let Ok(re) = re {
             for cap in re.captures_iter(&combined) {
@@ -752,11 +765,7 @@ impl TaskManager {
     /// 规则（纯基于路径，无关键词/语言依赖）：
     /// 1. 路径重叠：新任务引用的文件与已有任务引用的文件重叠 → 推断为依赖
     /// 2. 同父约束：仅对同一父任务下的子任务推断依赖，避免跨模块误关联
-    pub fn infer_dependencies(
-        &self,
-        new_task: &TaskNode,
-        existing_ids: &[String],
-    ) -> Vec<String> {
+    pub fn infer_dependencies(&self, new_task: &TaskNode, existing_ids: &[String]) -> Vec<String> {
         let new_paths = Self::extract_file_paths(&[
             &new_task.title,
             new_task.description.as_deref().unwrap_or(""),
@@ -776,7 +785,9 @@ impl TaskManager {
                 ]);
 
                 let path_overlap = new_paths.iter().any(|np| {
-                    ex_paths.iter().any(|ep| np == ep || np.starts_with(ep) || ep.starts_with(np))
+                    ex_paths
+                        .iter()
+                        .any(|ep| np == ep || np.starts_with(ep) || ep.starts_with(np))
                 });
 
                 if path_overlap
@@ -793,10 +804,7 @@ impl TaskManager {
     }
 
     /// 添加任务并自动推断依赖
-    pub fn add_task_with_auto_deps(
-        &mut self,
-        task: TaskNode,
-    ) -> Result<AddTaskOutcome, String> {
+    pub fn add_task_with_auto_deps(&mut self, task: TaskNode) -> Result<AddTaskOutcome, String> {
         // 检查去重
         if let Some(existing) = self.find_equivalent_task(&task.title, task.parent_id.as_deref()) {
             return Ok(AddTaskOutcome::Existing(existing.id.clone()));

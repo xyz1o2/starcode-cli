@@ -485,7 +485,10 @@ impl BashTool {
                             return Ok(ToolResult {
                                 success: false,
                                 output: None,
-                                error: Some(format!("command timed out: {}s", effective_timeout_secs)),
+                                error: Some(format!(
+                                    "command timed out: {}s",
+                                    effective_timeout_secs
+                                )),
                                 data: None,
                             });
                         }
@@ -553,7 +556,10 @@ impl BashTool {
                             return Ok(ToolResult {
                                 success: false,
                                 output: None,
-                                error: Some(format!("command timed out: {}s", effective_timeout_secs)),
+                                error: Some(format!(
+                                    "command timed out: {}s",
+                                    effective_timeout_secs
+                                )),
                                 data: None,
                             });
                         }

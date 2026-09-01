@@ -289,7 +289,8 @@ impl ToolInvocation for SkillInvocation {
                     // 将其内容作为上下文注入返回
                     // 沙箱隔离：明确标记来源和边界
                     // 执行内联 shell 命令 (!(...) 语法)
-                    let rendered_body = crate::agent::skills::loader::SkillLoader::render_skill_prompt(&skill);
+                    let rendered_body =
+                        crate::agent::skills::loader::SkillLoader::render_skill_prompt(&skill);
                     let output = format!(
                         "✅ External Skill Loaded Successfully\n\n<skill_sandbox name=\"{}\" source=\"{}\">\n{}\n</skill_sandbox>\n\n⚠️ This skill is running in a restricted context. Please follow the instructions above.",
                         skill.name, skill.location, rendered_body

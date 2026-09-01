@@ -1,9 +1,10 @@
 /// Windows Computer Use适配器
-/// 
+///
 /// 对标claude-code-main的packages/@ant/computer-use-input/
 /// 使用PowerShell和Windows API进行Windows屏幕操控
-
-use super::{ComputerAdapter, Screenshot, ImageFormat, MouseButton, Modifier, WindowInfo, WindowList};
+use super::{
+    ComputerAdapter, ImageFormat, Modifier, MouseButton, Screenshot, WindowInfo, WindowList,
+};
 
 /// Windows Computer Use适配器
 pub struct WindowsComputerAdapter;
@@ -21,19 +22,19 @@ impl ComputerAdapter for WindowsComputerAdapter {
             MouseButton::Right => "right",
             MouseButton::Middle => "middle",
         };
-        
+
         let script = format!(
             r#"Add-Type -AssemblyName System.Windows.Forms
             [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point({}, {})
             [System.Windows.Forms.SendInput]::Click("{}")"#,
             x, y, button_str
         );
-        
+
         std::process::Command::new("powershell")
             .args(["-Command", &script])
             .output()
             .map_err(|e| format!("Windows click failed: {}", e))?;
-        
+
         Ok(())
     }
 
@@ -46,12 +47,12 @@ impl ComputerAdapter for WindowsComputerAdapter {
             [System.Windows.Forms.SendInput]::Click("left")"#,
             x, y
         );
-        
+
         std::process::Command::new("powershell")
             .args(["-Command", &script])
             .output()
             .map_err(|e| format!("Windows double click failed: {}", e))?;
-        
+
         Ok(())
     }
 
@@ -65,12 +66,12 @@ impl ComputerAdapter for WindowsComputerAdapter {
             [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point({}, {})"#,
             x, y
         );
-        
+
         std::process::Command::new("powershell")
             .args(["-Command", &script])
             .output()
             .map_err(|e| format!("Windows mouse move failed: {}", e))?;
-        
+
         Ok(())
     }
 
@@ -84,12 +85,12 @@ impl ComputerAdapter for WindowsComputerAdapter {
             [System.Windows.Forms.SendInput]::MouseUp("left")"#,
             from_x, from_y, to_x, to_y
         );
-        
+
         std::process::Command::new("powershell")
             .args(["-Command", &script])
             .output()
             .map_err(|e| format!("Windows mouse drag failed: {}", e))?;
-        
+
         Ok(())
     }
 
@@ -99,12 +100,12 @@ impl ComputerAdapter for WindowsComputerAdapter {
             [System.Windows.Forms.SendKeys]::SendWait("{}")"#,
             text.replace('"', "\\\"")
         );
-        
+
         std::process::Command::new("powershell")
             .args(["-Command", &script])
             .output()
             .map_err(|e| format!("Windows type failed: {}", e))?;
-        
+
         Ok(())
     }
 
@@ -118,18 +119,18 @@ impl ComputerAdapter for WindowsComputerAdapter {
                 Modifier::Super => modifier_str.push('#'),
             }
         }
-        
+
         let script = format!(
             r#"Add-Type -AssemblyName System.Windows.Forms
             [System.Windows.Forms.SendKeys]::SendWait("{}{}")"#,
             modifier_str, key
         );
-        
+
         std::process::Command::new("powershell")
             .args(["-Command", &script])
             .output()
             .map_err(|e| format!("Windows key press failed: {}", e))?;
-        
+
         Ok(())
     }
 
@@ -143,7 +144,7 @@ impl ComputerAdapter for WindowsComputerAdapter {
         $bitmap.Save("C:\temp\starcode_screenshot.png", [System.Drawing.Imaging.ImageFormat]::Png)
         $graphics.Dispose()
         $bitmap.Dispose()"#;
-        
+
         std::process::Command::new("powershell")
             .args(["-Command", script])
             .output()
@@ -167,12 +168,12 @@ impl ComputerAdapter for WindowsComputerAdapter {
             [System.Windows.Forms.SendInput]::Scroll({})"#,
             x, y, delta_y
         );
-        
+
         std::process::Command::new("powershell")
             .args(["-Command", &script])
             .output()
             .map_err(|e| format!("Windows scroll failed: {}", e))?;
-        
+
         Ok(())
     }
 
@@ -180,7 +181,7 @@ impl ComputerAdapter for WindowsComputerAdapter {
         let script = r#"Add-Type -AssemblyName System.Windows.Forms
         $screen = [System.Windows.Forms.Screen]::PrimaryScreen
         Write-Output "$($screen.Bounds.Width) $($screen.Bounds.Height)""#;
-        
+
         let output = std::process::Command::new("powershell")
             .args(["-Command", script])
             .output()
@@ -193,7 +194,7 @@ impl ComputerAdapter for WindowsComputerAdapter {
             let h: u32 = parts[1].parse().unwrap_or(0);
             return Ok((w, h));
         }
-        
+
         Err("Failed to parse screen size".to_string())
     }
 
@@ -201,7 +202,7 @@ impl ComputerAdapter for WindowsComputerAdapter {
         let script = r#"Add-Type -AssemblyName Microsoft.VisualBasic
         $window = [Microsoft.VisualBasic.Interaction]::AppActivate((Get-Process | Where-Object {$_.MainWindowTitle -ne ""} | Select-Object -First 1).Id)
         Write-Output $window"#;
-        
+
         let output = std::process::Command::new("powershell")
             .args(["-Command", script])
             .output()
@@ -222,22 +223,23 @@ impl ComputerAdapter for WindowsComputerAdapter {
 
     fn list_windows(&self) -> Result<WindowList, String> {
         let script = r#"Get-Process | Where-Object {$_.MainWindowTitle -ne ""} | Select-Object Id, MainWindowTitle, ProcessName"#;
-        
+
         let output = std::process::Command::new("powershell")
             .args(["-Command", script])
             .output()
             .map_err(|e| format!("Windows list windows failed: {}", e))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let windows: Vec<WindowInfo> = stdout.lines()
+        let windows: Vec<WindowInfo> = stdout
+            .lines()
             .skip(3) // Skip header
             .filter_map(|line| {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 3 {
                     Some(WindowInfo {
                         id: parts[0].to_string(),
-                        title: parts[1..parts.len()-1].join(" "),
-                        process_name: parts[parts.len()-1].to_string(),
+                        title: parts[1..parts.len() - 1].join(" "),
+                        process_name: parts[parts.len() - 1].to_string(),
                         x: 0,
                         y: 0,
                         width: 0,
@@ -259,12 +261,12 @@ impl ComputerAdapter for WindowsComputerAdapter {
             [Microsoft.VisualBasic.Interaction]::AppActivate({})"#,
             window_id
         );
-        
+
         std::process::Command::new("powershell")
             .args(["-Command", &script])
             .output()
             .map_err(|e| format!("Windows switch window failed: {}", e))?;
-        
+
         Ok(())
     }
 }

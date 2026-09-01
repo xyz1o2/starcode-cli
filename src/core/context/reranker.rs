@@ -74,8 +74,6 @@ mod weights {
     pub const NAMED_DEFINITION_BOOST: f64 = 1.25;
 }
 
-
-
 /// A heuristic code-aware reranker — no API calls needed.
 ///
 /// Re-scores candidates by applying stronger versions of the first-pass signals,
@@ -102,11 +100,7 @@ impl Reranker for HeuristicReranker {
                 let mut score = c.initial_score.max(0.01); // keep positive baseline
                 let mut signals = Vec::new();
                 let content_lower = c.content.to_lowercase();
-                let header_lower = c
-                    .context_header
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase();
+                let header_lower = c.context_header.as_deref().unwrap_or("").to_lowercase();
                 let path_lower = c.file_path.to_lowercase();
 
                 // Context header contains a query token
@@ -196,4 +190,3 @@ fn line_overlap(a_start: usize, a_end: usize, b_start: usize, b_end: usize) -> f
     }
     overlap_len as f64 / total_len as f64
 }
- 

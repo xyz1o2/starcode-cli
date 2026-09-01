@@ -61,7 +61,10 @@ pub(crate) fn detect_tool_loop(
 /// 为签名调整阈值
 fn adjusted_threshold_for_signature(signature: &str, base_threshold: usize) -> usize {
     // 对于 bash/search 工具，允许更高的重复次数
-    if signature.starts_with("bash(") || signature.starts_with("search(") || signature.starts_with("rg(") {
+    if signature.starts_with("bash(")
+        || signature.starts_with("search(")
+        || signature.starts_with("rg(")
+    {
         base_threshold + 2
     } else {
         base_threshold

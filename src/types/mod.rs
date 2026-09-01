@@ -1,7 +1,6 @@
 /// 类型定义模块
-/// 
+///
 /// 对标claude-code-main的src/types/
-
 pub mod command;
 pub mod message;
 pub mod permissions;
@@ -44,13 +43,13 @@ pub struct EditorCommand {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub enum EntryStatus {
     #[default]
-    Normal,           // 正常状态
-    Success,          // 成功
-    Error,            // 错误
-    Warning,          // 警告
-    Cancelled,        // 已取消
-    InProgress,       // 进行中
-    Pending,          // 等待中
+    Normal, // 正常状态
+    Success,    // 成功
+    Error,      // 错误
+    Warning,    // 警告
+    Cancelled,  // 已取消
+    InProgress, // 进行中
+    Pending,    // 等待中
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,16 +69,16 @@ pub enum ChatEntryType {
     ToolResult,
     ToolCall,
     ToolConfirmation, // 工具确认卡片（内联显示在对话流中）
-    
+
     // 新增消息类型
-    SystemMessage,      // 系统消息（通知、警告等）
-    ErrorMessage,       // 错误消息
-    DiffBlock,          // Diff 块
-    CodeBlock,          // 代码块
-    ProgressMessage,    // 进度消息
-    CollapsedGroup,     // 折叠组（用于折叠多个消息）
-    GroupedToolUse,     // 分组工具调用（连续的工具调用合并显示）
-    CompactSummary,     // 压缩摘要
+    SystemMessage,   // 系统消息（通知、警告等）
+    ErrorMessage,    // 错误消息
+    DiffBlock,       // Diff 块
+    CodeBlock,       // 代码块
+    ProgressMessage, // 进度消息
+    CollapsedGroup,  // 折叠组（用于折叠多个消息）
+    GroupedToolUse,  // 分组工具调用（连续的工具调用合并显示）
+    CompactSummary,  // 压缩摘要
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,28 +107,28 @@ pub struct ChatEntry {
     // Transient welcome header — never persisted to session files
     #[serde(skip)]
     pub is_welcome: bool,
-    
+
     // 折叠相关字段
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub collapsed_entries: Option<Vec<ChatEntry>>,  // 折叠的子条目
+    pub collapsed_entries: Option<Vec<ChatEntry>>, // 折叠的子条目
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_collapsed: Option<bool>,                 // 是否折叠
+    pub is_collapsed: Option<bool>, // 是否折叠
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub collapse_summary: Option<String>,           // 折叠摘要
+    pub collapse_summary: Option<String>, // 折叠摘要
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub group_id: Option<String>,                   // 分组 ID
-    
+    pub group_id: Option<String>, // 分组 ID
+
     // Diff 相关字段
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub diff_content: Option<String>,               // Diff 内容
+    pub diff_content: Option<String>, // Diff 内容
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_path: Option<String>,                  // 文件路径
-    
+    pub file_path: Option<String>, // 文件路径
+
     // 状态相关字段
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<EntryStatus>,                // 条目状态
+    pub status: Option<EntryStatus>, // 条目状态
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub progress: Option<f32>,                      // 进度 (0.0 - 1.0)
+    pub progress: Option<f32>, // 进度 (0.0 - 1.0)
 
     // 每条回复的费用（仅 assistant 条目）
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -217,38 +216,38 @@ impl ChatEntry {
         self.is_welcome = true;
         self
     }
-    
+
     // 新增构造函数
     pub fn system_message(content: impl Into<String>) -> Self {
         Self::new(ChatEntryType::SystemMessage, content.into())
     }
-    
+
     pub fn error_message(content: impl Into<String>) -> Self {
         let mut entry = Self::new(ChatEntryType::ErrorMessage, content.into());
         entry.status = Some(EntryStatus::Error);
         entry
     }
-    
+
     pub fn diff_block(diff_content: impl Into<String>, file_path: impl Into<String>) -> Self {
         let mut entry = Self::new(ChatEntryType::DiffBlock, String::new());
         entry.diff_content = Some(diff_content.into());
         entry.file_path = Some(file_path.into());
         entry
     }
-    
+
     pub fn code_block(content: impl Into<String>, language: impl Into<String>) -> Self {
         let mut entry = Self::new(ChatEntryType::CodeBlock, content.into());
         entry.file_path = Some(language.into()); // 复用 file_path 存储语言
         entry
     }
-    
+
     pub fn progress_message(content: impl Into<String>, progress: f32) -> Self {
         let mut entry = Self::new(ChatEntryType::ProgressMessage, content.into());
         entry.progress = Some(progress.clamp(0.0, 1.0));
         entry.status = Some(EntryStatus::InProgress);
         entry
     }
-    
+
     pub fn collapsed_group(entries: Vec<ChatEntry>, summary: impl Into<String>) -> Self {
         let mut entry = Self::new(ChatEntryType::CollapsedGroup, String::new());
         entry.collapsed_entries = Some(entries);
@@ -256,34 +255,34 @@ impl ChatEntry {
         entry.is_collapsed = Some(true);
         entry
     }
-    
+
     pub fn grouped_tool_use(entries: Vec<ChatEntry>, group_id: impl Into<String>) -> Self {
         let mut entry = Self::new(ChatEntryType::GroupedToolUse, String::new());
         entry.collapsed_entries = Some(entries);
         entry.group_id = Some(group_id.into());
         entry
     }
-    
+
     pub fn with_status(mut self, status: EntryStatus) -> Self {
         self.status = Some(status);
         self
     }
-    
+
     pub fn with_progress(mut self, progress: f32) -> Self {
         self.progress = Some(progress.clamp(0.0, 1.0));
         self
     }
-    
+
     pub fn with_file_path(mut self, path: impl Into<String>) -> Self {
         self.file_path = Some(path.into());
         self
     }
-    
+
     pub fn with_group_id(mut self, id: impl Into<String>) -> Self {
         self.group_id = Some(id.into());
         self
     }
-    
+
     // 辅助方法
     pub fn is_collapsible(&self) -> bool {
         matches!(
@@ -291,7 +290,7 @@ impl ChatEntry {
             ChatEntryType::CollapsedGroup | ChatEntryType::GroupedToolUse
         )
     }
-    
+
     pub fn get_status_icon(&self) -> &'static str {
         match &self.status {
             Some(EntryStatus::Success) => "✓",
@@ -303,7 +302,7 @@ impl ChatEntry {
             _ => "",
         }
     }
-    
+
     pub fn get_status_color(&self) -> ratatui::style::Color {
         match &self.status {
             Some(EntryStatus::Success) => ratatui::style::Color::Green,
@@ -745,10 +744,10 @@ pub enum ApprovalMode {
 // ============ UX 改进: ThinkingEffort（思考努力级别）============
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ThinkingEffort {
-    Off,   // 禁用思考
-    Low,   // 低努力：快速简单思考
+    Off,    // 禁用思考
+    Low,    // 低努力：快速简单思考
     Medium, // 中等努力：平衡思考
-    High,  // 高努力：深度思考
+    High,   // 高努力：深度思考
 }
 
 impl Default for ThinkingEffort {
@@ -799,13 +798,13 @@ pub struct ToolConfirmation {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConfirmationType {
-    EditFile,         // 编辑文件
-    CreateFile,       // 创建文件
-    ShellCommand,     // Shell 命令
-    DeleteFile,       // 删除文件（极度危险）
-    NetworkRequest,   // 网络请求
-    Generic,          // 通用请求
-    AskUserQuestion,  // 向用户提问
+    EditFile,        // 编辑文件
+    CreateFile,      // 创建文件
+    ShellCommand,    // Shell 命令
+    DeleteFile,      // 删除文件（极度危险）
+    NetworkRequest,  // 网络请求
+    Generic,         // 通用请求
+    AskUserQuestion, // 向用户提问
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -964,4 +963,3 @@ impl ModelInfo {
         self.display_name.clone().unwrap_or_else(|| self.id.clone())
     }
 }
- 

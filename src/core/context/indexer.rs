@@ -6,7 +6,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Blob {
     pub hash: String,
@@ -109,10 +108,7 @@ impl Indexer {
         //                          even without a .git directory)
         // No hardcoded directory list.  Users configure exclusions in these files.
         let mut builder = WalkBuilder::new(&self.project_root);
-        builder
-            .hidden(false)
-            .git_ignore(true)
-            .require_git(false);
+        builder.hidden(false).git_ignore(true).require_git(false);
         // Layer 1: user-global ignore.
         if let Some(home) = dirs::home_dir() {
             let global_ignore = home.join(".star").join("ignore");

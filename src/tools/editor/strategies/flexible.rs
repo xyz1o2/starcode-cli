@@ -167,5 +167,3 @@ impl EditStrategy for FlexibleIndentStrategy {
         Ok(None)
     }
 }
-
- 

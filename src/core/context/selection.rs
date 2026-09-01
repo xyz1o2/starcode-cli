@@ -8,7 +8,7 @@ use super::types::{
 };
 
 // ── Matching thresholds & weights ────────────────────────────────────────────
-const SCORE_THRESHOLD: f64 = 0.3;       // minimum score to keep a candidate
+const SCORE_THRESHOLD: f64 = 0.3; // minimum score to keep a candidate
 
 const W_TECH_STACK: f64 = 0.30;
 const W_PROJECT_TYPE: f64 = 0.25;
@@ -18,7 +18,7 @@ const W_DIRECTORY: f64 = 0.15;
 const RECOMMEND_STRONG: f64 = 0.8;
 const RECOMMEND_GOOD: f64 = 0.6;
 const RECOMMEND_WEAK: f64 = 0.4;
-const SIGNAL_LOW: f64 = 0.5;            // metric score below this → emit improvement hint
+const SIGNAL_LOW: f64 = 0.5; // metric score below this → emit improvement hint
 
 pub struct ContextMatcher;
 

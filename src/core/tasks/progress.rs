@@ -1,7 +1,6 @@
 /// 任务进度追踪
-/// 
+///
 /// 对标claude-code-main的进度追踪功能
-
 use serde::{Deserialize, Serialize};
 
 /// 进度更新

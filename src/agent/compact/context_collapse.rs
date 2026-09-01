@@ -146,4 +146,3 @@ impl Default for ContextCollapse {
         Self::new()
     }
 }
- 

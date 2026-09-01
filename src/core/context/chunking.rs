@@ -172,9 +172,10 @@ impl SmartChunker {
     pub fn chunk(content: &str, file_ext: &str) -> Vec<CodeChunk> {
         // ── Layer 1: Tree-sitter AST-aware chunking ────────────────────────────
         match file_ext {
-            "rs" | "py" | "pyi" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "go"
-            | "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "java" => {
-                let ts_chunks = super::tree_sitter_chunker::chunk_with_tree_sitter(content, file_ext);
+            "rs" | "py" | "pyi" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "go" | "c"
+            | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "java" => {
+                let ts_chunks =
+                    super::tree_sitter_chunker::chunk_with_tree_sitter(content, file_ext);
                 if !ts_chunks.is_empty() {
                     return ts_chunks;
                 }
@@ -331,4 +332,3 @@ impl SmartChunker {
         chunks
     }
 }
- 

@@ -11,11 +11,11 @@
 /// - create_file
 /// - replace（降级）
 use super::{SubAgent, SubTask, SubTaskResult};
-use crate::core::prompts::skills::editor::EDITOR_SYSTEM_PROMPT;
 use crate::agent::StarAgent;
 use crate::core::config::Config;
 use crate::core::confirmation_bus::MessageBus;
 use crate::core::policy::PolicyEngine;
+use crate::core::prompts::skills::editor::EDITOR_SYSTEM_PROMPT;
 use crate::core::state::GlobalState;
 use crate::core::tools::edit::{EditTool, EditToolParams};
 use crate::core::tools::multi_edit::{MultiEditTool, MultiEditToolParams, SingleFileEdit};
@@ -402,4 +402,3 @@ impl SubAgent for EditorAgent {
         self.run_edit_loop(&task).await
     }
 }
- 

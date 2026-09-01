@@ -1,7 +1,6 @@
 /// 消息类型定义
-/// 
+///
 /// 对标claude-code-main的src/types/message.ts
-
 use serde::{Deserialize, Serialize};
 
 /// 消息角色

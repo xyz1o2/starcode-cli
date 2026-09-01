@@ -26,7 +26,12 @@ pub async fn clear(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult
     } else {
         // Nothing to clear
         ctx.state.current_status_line = Some(
-            crate::core::i18n::t("ui.status.nothing_to_clear", "没有可清除的内容", "Nothing to clear").to_string()
+            crate::core::i18n::t(
+                "ui.status.nothing_to_clear",
+                "没有可清除的内容",
+                "Nothing to clear",
+            )
+            .to_string(),
         );
     }
     Ok(())
@@ -66,14 +71,15 @@ pub async fn status(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResul
 
     // Token 用量
     if let Some(usage) = &ctx.state.token_usage {
-        let ctx_win = crate::agent::model_catalog::get_cached_context_window(&ctx.state.current_model)
-            .map(|c| c as usize)
-            .or_else(|| {
-                std::env::var("STAR_CONTEXT_WINDOW")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-            })
-            .unwrap_or(200_000);
+        let ctx_win =
+            crate::agent::model_catalog::get_cached_context_window(&ctx.state.current_model)
+                .map(|c| c as usize)
+                .or_else(|| {
+                    std::env::var("STAR_CONTEXT_WINDOW")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                })
+                .unwrap_or(200_000);
         let pct = if ctx_win > 0 {
             (usage.prompt_tokens as f64 / ctx_win as f64) * 100.0
         } else {
@@ -102,10 +108,7 @@ pub async fn status(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResul
 
     // Git
     if let Some(branch) = &ctx.state.git_branch {
-        let status_str = ctx.state
-            .git_status
-            .as_deref()
-            .unwrap_or("未知");
+        let status_str = ctx.state.git_status.as_deref().unwrap_or("未知");
         lines.push(format!("**Git:** {} ({})", branch, status_str));
     } else {
         lines.push("**Git:** 无仓库".to_string());
@@ -122,7 +125,11 @@ pub async fn status(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResul
     // 沙箱
     lines.push(format!(
         "**沙箱:** {}",
-        if ctx.state.sandbox_enabled { "启用" } else { "禁用" }
+        if ctx.state.sandbox_enabled {
+            "启用"
+        } else {
+            "禁用"
+        }
     ));
 
     // 语言
@@ -132,16 +139,16 @@ pub async fn status(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResul
     ));
 
     // 提供商会话数
-    if let Ok(store) = crate::core::config::provider_store::ProviderStore::new().load().await {
-        lines.push(format!(
-            "**已配置供应商:** {} 个",
-            store.providers.len()
-        ));
+    if let Ok(store) = crate::core::config::provider_store::ProviderStore::new()
+        .load()
+        .await
+    {
+        lines.push(format!("**已配置供应商:** {} 个", store.providers.len()));
     }
 
-    ctx.state.chat_history.push(
-        ChatEntry::assistant(lines.join("\n")).with_streaming(false),
-    );
+    ctx.state
+        .chat_history
+        .push(ChatEntry::assistant(lines.join("\n")).with_streaming(false));
     Ok(())
 }
 

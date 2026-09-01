@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH, Instant};
-use serde::{Deserialize, Serialize};
 use super::client::LangfuseClient;
-use super::convert::{EventConverter, LlmCall, ToolCall, ErrorEvent};
+use super::convert::{ErrorEvent, EventConverter, LlmCall, ToolCall};
 use super::sanitize::DataSanitizer;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Trace状态
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,7 +70,7 @@ pub struct Span {
 }
 
 /// Trace管理器
-/// 
+///
 /// 管理Langfuse的trace和span
 pub struct TraceManager {
     /// Langfuse客户端
@@ -106,7 +106,11 @@ impl TraceManager {
     }
 
     /// 开始新的trace
-    pub fn start_trace(&mut self, name: &str, metadata: HashMap<String, serde_json::Value>) -> Result<String, TraceError> {
+    pub fn start_trace(
+        &mut self,
+        name: &str,
+        metadata: HashMap<String, serde_json::Value>,
+    ) -> Result<String, TraceError> {
         if !self.enabled || !self.client.config().enabled {
             return Ok("disabled".to_string());
         }
@@ -124,7 +128,8 @@ impl TraceManager {
         self.active_traces.insert(trace_id.clone(), trace);
 
         // 发送到Langfuse
-        self.client.create_trace(&trace_id, name, metadata)
+        self.client
+            .create_trace(&trace_id, name, metadata)
             .map_err(|e| TraceError::ClientError(e.to_string()))?;
 
         Ok(trace_id)
@@ -149,14 +154,22 @@ impl TraceManager {
 
             // 这里应该调用client的更新方法
             // 简化实现：直接打印
-            println!("[Langfuse] Trace {} ended with status: {}", trace_id, status_str);
+            println!(
+                "[Langfuse] Trace {} ended with status: {}",
+                trace_id, status_str
+            );
         }
 
         Ok(())
     }
 
     /// 开始新的span
-    pub fn start_span(&mut self, trace_id: &str, name: &str, input: Option<serde_json::Value>) -> Result<String, TraceError> {
+    pub fn start_span(
+        &mut self,
+        trace_id: &str,
+        name: &str,
+        input: Option<serde_json::Value>,
+    ) -> Result<String, TraceError> {
         if !self.enabled || !self.client.config().enabled {
             return Ok("disabled".to_string());
         }
@@ -181,14 +194,20 @@ impl TraceManager {
             metadata.insert("input".to_string(), input_value);
         }
 
-        self.client.create_span(trace_id, &span_id, name, metadata)
+        self.client
+            .create_span(trace_id, &span_id, name, metadata)
             .map_err(|e| TraceError::ClientError(e.to_string()))?;
 
         Ok(span_id)
     }
 
     /// 结束span
-    pub fn end_span(&mut self, span_id: &str, status: SpanStatus, output: Option<serde_json::Value>) -> Result<(), TraceError> {
+    pub fn end_span(
+        &mut self,
+        span_id: &str,
+        status: SpanStatus,
+        output: Option<serde_json::Value>,
+    ) -> Result<(), TraceError> {
         if !self.enabled || !self.client.config().enabled {
             return Ok(());
         }
@@ -205,7 +224,8 @@ impl TraceManager {
                 SpanStatus::Cancelled => "cancelled",
             };
 
-            self.client.update_span(span_id, status_str, output)
+            self.client
+                .update_span(span_id, status_str, output)
                 .map_err(|e| TraceError::ClientError(e.to_string()))?;
         }
 
@@ -225,14 +245,16 @@ impl TraceManager {
         let sanitized_input = self.sanitizer.sanitize_value(converted.input);
         let sanitized_output = converted.output.map(|o| self.sanitizer.sanitize_value(o));
 
-        self.client.create_generation(
-            trace_id,
-            &generation_id,
-            &call.model,
-            sanitized_input,
-            sanitized_output,
-            converted.metadata,
-        ).map_err(|e| TraceError::ClientError(e.to_string()))?;
+        self.client
+            .create_generation(
+                trace_id,
+                &generation_id,
+                &call.model,
+                sanitized_input,
+                sanitized_output,
+                converted.metadata,
+            )
+            .map_err(|e| TraceError::ClientError(e.to_string()))?;
 
         Ok(())
     }
@@ -250,12 +272,9 @@ impl TraceManager {
         let sanitized_input = self.sanitizer.sanitize_value(converted.input);
         let sanitized_output = converted.output.map(|o| self.sanitizer.sanitize_value(o));
 
-        self.client.create_span(
-            trace_id,
-            &span_id,
-            &converted.name,
-            converted.metadata,
-        ).map_err(|e| TraceError::ClientError(e.to_string()))?;
+        self.client
+            .create_span(trace_id, &span_id, &converted.name, converted.metadata)
+            .map_err(|e| TraceError::ClientError(e.to_string()))?;
 
         // 结束span
         let status = if converted.level == "ERROR" {
@@ -278,12 +297,9 @@ impl TraceManager {
         let converted = self.converter.convert_error(error);
         let span_id = uuid::Uuid::new_v4().to_string();
 
-        self.client.create_span(
-            trace_id,
-            &span_id,
-            &converted.name,
-            converted.metadata,
-        ).map_err(|e| TraceError::ClientError(e.to_string()))?;
+        self.client
+            .create_span(trace_id, &span_id, &converted.name, converted.metadata)
+            .map_err(|e| TraceError::ClientError(e.to_string()))?;
 
         // 结束span（错误状态）
         self.end_span(&span_id, SpanStatus::Error, converted.output)?;
@@ -297,7 +313,8 @@ impl TraceManager {
             return Ok(());
         }
 
-        self.client.flush()
+        self.client
+            .flush()
             .map_err(|e| TraceError::ClientError(e.to_string()))?;
 
         Ok(())

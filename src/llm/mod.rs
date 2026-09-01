@@ -231,13 +231,16 @@ pub fn create_client(config: LlmConfig) -> Box<dyn LlmClient> {
 
     match &config.provider {
         LlmProvider::OpenAi => Box::new(rig_adapter::RigAdapter::openai(
-            config.api_key.clone(), config.model.clone(),
+            config.api_key.clone(),
+            config.model.clone(),
         )),
         LlmProvider::Anthropic => Box::new(rig_adapter::RigAdapter::anthropic(
-            config.api_key.clone(), config.model.clone(),
+            config.api_key.clone(),
+            config.model.clone(),
         )),
         LlmProvider::DeepSeek => Box::new(rig_adapter::RigAdapter::deepseek(
-            config.api_key.clone(), config.model.clone(),
+            config.api_key.clone(),
+            config.model.clone(),
         )),
         LlmProvider::MiniMax => Box::new(rig_adapter::RigAdapter::openai_compatible(
             config.api_key.clone(),

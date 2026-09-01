@@ -271,5 +271,3 @@ pub fn generate_recovery_suggestions(
 
     suggestions
 }
-
- 

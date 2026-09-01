@@ -1,7 +1,6 @@
 /// 工具类型定义
-/// 
+///
 /// 对标claude-code-main的src/types/tools.ts
-
 use serde::{Deserialize, Serialize};
 
 /// 工具类型

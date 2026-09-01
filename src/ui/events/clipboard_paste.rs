@@ -2,11 +2,11 @@ use super::*;
 use std::time::{Duration, Instant};
 use tui_textarea::TextArea;
 
+use crate::ui::state::ChatState;
 use arboard::Clipboard;
 use chrono::Local;
 use image::ImageFormat;
 use std::fs;
-use crate::ui::state::ChatState;
 
 /// Maximum image dimensions (matching Claude Code's IMAGE_MAX_WIDTH/HEIGHT)
 const IMAGE_MAX_WIDTH: u32 = 2000;
@@ -32,32 +32,50 @@ pub(crate) fn save_clipboard_image() -> Option<(String, u32, u32)> {
     )?;
 
     // Resize if dimensions exceed limits
-    let (final_width, final_height, final_img) = if width > IMAGE_MAX_WIDTH || height > IMAGE_MAX_HEIGHT {
-        let ratio_w = IMAGE_MAX_WIDTH as f64 / width as f64;
-        let ratio_h = IMAGE_MAX_HEIGHT as f64 / height as f64;
-        let ratio = ratio_w.min(ratio_h);
-        let new_width = (width as f64 * ratio).round() as u32;
-        let new_height = (height as f64 * ratio).round() as u32;
-        let resized = image::imageops::resize(&img, new_width, new_height, image::imageops::FilterType::Lanczos3);
-        (new_width, new_height, resized)
-    } else {
-        (width, height, img)
-    };
+    let (final_width, final_height, final_img) =
+        if width > IMAGE_MAX_WIDTH || height > IMAGE_MAX_HEIGHT {
+            let ratio_w = IMAGE_MAX_WIDTH as f64 / width as f64;
+            let ratio_h = IMAGE_MAX_HEIGHT as f64 / height as f64;
+            let ratio = ratio_w.min(ratio_h);
+            let new_width = (width as f64 * ratio).round() as u32;
+            let new_height = (height as f64 * ratio).round() as u32;
+            let resized = image::imageops::resize(
+                &img,
+                new_width,
+                new_height,
+                image::imageops::FilterType::Lanczos3,
+            );
+            (new_width, new_height, resized)
+        } else {
+            (width, height, img)
+        };
 
     // Save as PNG first
-    final_img.save_with_format(&file_path, ImageFormat::Png).ok()?;
+    final_img
+        .save_with_format(&file_path, ImageFormat::Png)
+        .ok()?;
 
     // Check file size and compress to JPEG if too large
     let file_size = fs::metadata(&file_path).ok()?.len();
     if file_size > IMAGE_MAX_SIZE_BYTES {
         let jpg_path = images_dir.join(format!("image_{}.jpg", timestamp));
         let dynamic_img = image::DynamicImage::ImageRgba8(final_img);
-        dynamic_img.save_with_format(&jpg_path, ImageFormat::Jpeg).ok()?;
+        dynamic_img
+            .save_with_format(&jpg_path, ImageFormat::Jpeg)
+            .ok()?;
         // Remove the PNG file and use JPEG instead
         let _ = fs::remove_file(&file_path);
-        Some((format!(".star/images/image_{}.jpg", timestamp), final_width, final_height))
+        Some((
+            format!(".star/images/image_{}.jpg", timestamp),
+            final_width,
+            final_height,
+        ))
     } else {
-        Some((format!(".star/images/{}", filename), final_width, final_height))
+        Some((
+            format!(".star/images/{}", filename),
+            final_width,
+            final_height,
+        ))
     }
 }
 
@@ -87,7 +105,12 @@ pub(crate) fn detect_file_paths(text: &str) -> Option<Vec<String>> {
 }
 
 /// 创建图片粘贴块（始终创建，无行数限制）
-pub(crate) fn insert_image_paste_block(state: &mut ChatState, path: String, width: u32, height: u32) {
+pub(crate) fn insert_image_paste_block(
+    state: &mut ChatState,
+    path: String,
+    width: u32,
+    height: u32,
+) {
     let content = format!("![Image]({})", path);
     let id = state.paste_segments.len();
     let placeholder = crate::ui::state::format_image_paste_ref(id);
@@ -142,7 +165,6 @@ pub(crate) fn insert_file_paste_block(state: &mut ChatState, paths: Vec<String>)
     let _ = names;
 }
 
-
 /// 如果光标当前在占位符行，将光标移到下一行，避免在 sentinel 行插入文字导致其损坏
 pub(crate) fn push_cursor_off_sentinel_pub(state: &mut ChatState) {
     push_cursor_off_sentinel(state);
@@ -160,9 +182,7 @@ pub(super) fn push_cursor_off_sentinel(state: &mut ChatState) {
         .and_then(|l| crate::ui::state::parse_paste_reference(l.as_str()))
         .is_some()
     {
-        state
-            .textarea
-            .move_cursor(tui_textarea::CursorMove::Down);
+        state.textarea.move_cursor(tui_textarea::CursorMove::Down);
     }
 }
 
@@ -206,7 +226,10 @@ pub(super) fn normalize_modal_base_url(value: &str) -> String {
     value.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-pub(super) fn needs_manual_base_url_confirmation(provider_id: &str, saved_base_url: Option<&str>) -> bool {
+pub(super) fn needs_manual_base_url_confirmation(
+    provider_id: &str,
+    saved_base_url: Option<&str>,
+) -> bool {
     crate::core::config::providers::provider_requires_manual_base_url(provider_id)
         && saved_base_url
             .map(|value| value.trim().is_empty())
@@ -295,4 +318,3 @@ pub(crate) fn insert_paste_block_confirmed(state: &mut ChatState, text: String) 
         state.textarea.insert_str(&normalized);
     }
 }
-

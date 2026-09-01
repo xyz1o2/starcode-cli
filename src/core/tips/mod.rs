@@ -1,8 +1,7 @@
 /// Tips提示系统
-/// 
+///
 /// 对标claude-code-main的src/services/tips/
 /// 提供使用技巧和最佳实践提示
-
 use serde::{Deserialize, Serialize};
 
 /// 提示类型
@@ -49,7 +48,7 @@ impl TipManager {
             tips: Vec::new(),
             shown_tips: std::collections::HashSet::new(),
         };
-        
+
         manager.load_default_tips();
         manager
     }
@@ -60,7 +59,8 @@ impl TipManager {
             id: "ctrl_p".to_string(),
             tip_type: TipType::Shortcut,
             title: "Command Palette".to_string(),
-            content: "Press Ctrl+P to open the command palette for quick access to commands.".to_string(),
+            content: "Press Ctrl+P to open the command palette for quick access to commands."
+                .to_string(),
             command: Some("Ctrl+P".to_string()),
             priority: 10,
         });
@@ -78,7 +78,8 @@ impl TipManager {
             id: "memory".to_string(),
             tip_type: TipType::BestPractice,
             title: "Use Memory".to_string(),
-            content: "Use the /memory command to save important information for future reference.".to_string(),
+            content: "Use the /memory command to save important information for future reference."
+                .to_string(),
             command: Some("/memory".to_string()),
             priority: 8,
         });
@@ -104,7 +105,9 @@ impl TipManager {
 
     /// 获取随机提示
     pub fn get_random_tip(&mut self) -> Option<&Tip> {
-        let unshown: Vec<&Tip> = self.tips.iter()
+        let unshown: Vec<&Tip> = self
+            .tips
+            .iter()
             .filter(|t| !self.shown_tips.contains(&t.id))
             .collect();
 
@@ -122,7 +125,8 @@ impl TipManager {
 
     /// 按类型获取提示
     pub fn get_tips_by_type(&self, tip_type: &TipType) -> Vec<&Tip> {
-        self.tips.iter()
+        self.tips
+            .iter()
             .filter(|t| std::mem::discriminant(&t.tip_type) == std::mem::discriminant(tip_type))
             .collect()
     }

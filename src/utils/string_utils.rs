@@ -1,5 +1,5 @@
 /// 字符串工具
-/// 
+///
 /// 对标claude-code-main的src/utils/stringUtils.ts
 
 /// 截断字符串
@@ -33,7 +33,7 @@ pub fn capitalize(s: &str) -> String {
 pub fn to_camel_case(s: &str) -> String {
     let mut result = String::new();
     let mut capitalize_next = false;
-    
+
     for c in s.chars() {
         if c == '_' || c == '-' || c == ' ' {
             capitalize_next = true;
@@ -44,7 +44,7 @@ pub fn to_camel_case(s: &str) -> String {
             result.push(c);
         }
     }
-    
+
     result
 }
 
@@ -52,7 +52,7 @@ pub fn to_camel_case(s: &str) -> String {
 pub fn to_snake_case(s: &str) -> String {
     let mut result = String::new();
     let mut prev_uppercase = false;
-    
+
     for (i, c) in s.chars().enumerate() {
         if c.is_uppercase() {
             if i > 0 && !prev_uppercase {
@@ -65,7 +65,7 @@ pub fn to_snake_case(s: &str) -> String {
             prev_uppercase = false;
         }
     }
-    
+
     result
 }
 
@@ -126,16 +126,16 @@ pub fn pad_right(s: &str, width: usize, fill: char) -> String {
 pub fn levenshtein_distance(s1: &str, s2: &str) -> usize {
     let len1 = s1.len();
     let len2 = s2.len();
-    
+
     let mut matrix = vec![vec![0; len2 + 1]; len1 + 1];
-    
+
     for i in 0..=len1 {
         matrix[i][0] = i;
     }
     for j in 0..=len2 {
         matrix[0][j] = j;
     }
-    
+
     for (i, c1) in s1.chars().enumerate() {
         for (j, c2) in s2.chars().enumerate() {
             let cost = if c1 == c2 { 0 } else { 1 };
@@ -144,6 +144,6 @@ pub fn levenshtein_distance(s1: &str, s2: &str) -> usize {
                 .min(matrix[i][j] + cost);
         }
     }
-    
+
     matrix[len1][len2]
 }

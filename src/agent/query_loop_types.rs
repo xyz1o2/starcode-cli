@@ -6,13 +6,9 @@ pub enum ContinueReason {
     /// Reactive Compact重试
     ReactiveCompactRetry,
     /// Context Collapse排水重试
-    CollapseDrainRetry {
-        committed: usize,
-    },
+    CollapseDrainRetry { committed: usize },
     /// Max-output-tokens恢复
-    MaxOutputTokensRecovery {
-        attempt: usize,
-    },
+    MaxOutputTokensRecovery { attempt: usize },
     /// Max-output-tokens升级（8k → 64k）
     MaxOutputTokensEscalate,
     /// Stop Hook阻止继续
@@ -166,9 +162,7 @@ pub enum TokenBudgetDecision {
         budget: usize,
     },
     /// 停止执行
-    Stop {
-        reason: String,
-    },
+    Stop { reason: String },
 }
 
 /// 媒体恢复配置
@@ -187,10 +181,7 @@ impl Default for MediaRecoveryConfig {
         Self {
             enabled: true,
             max_retries: 1,
-            supported_types: vec![
-                "image".to_string(),
-                "pdf".to_string(),
-            ],
+            supported_types: vec!["image".to_string(), "pdf".to_string()],
         }
     }
 }

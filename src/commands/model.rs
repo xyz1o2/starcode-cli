@@ -27,7 +27,10 @@ async fn list_models(mut ctx: CommandContext<'_>) -> CommandResult {
     if !ctx.state.available_models.is_empty() {
         let current = &ctx.state.current_model;
         let mut output = String::from("# Available Models\n\n");
-        output.push_str(&format!("Current: `{}`\n\n", if current.is_empty() { "-" } else { current }));
+        output.push_str(&format!(
+            "Current: `{}`\n\n",
+            if current.is_empty() { "-" } else { current }
+        ));
         let mut sorted = ctx.state.available_models.clone();
         sorted.sort();
         for m in &sorted {
@@ -51,7 +54,9 @@ async fn list_models(mut ctx: CommandContext<'_>) -> CommandResult {
     let config = store.load().await.unwrap_or_default();
 
     let mut output = String::from("# Available Models\n\n");
-    output.push_str("*(Model list not fetched yet — run `/model` to fetch and pick interactively)*\n\n");
+    output.push_str(
+        "*(Model list not fetched yet — run `/model` to fetch and pick interactively)*\n\n",
+    );
     let mut listed_providers = std::collections::HashSet::new();
 
     // 1. Built-in Providers

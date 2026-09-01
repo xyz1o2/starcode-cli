@@ -162,7 +162,9 @@ fn split_by_width(text: &str, start_width: usize, end_width: usize) -> (String, 
     let mut in_middle = false;
 
     for ch in text.chars() {
-        let ch_width = unicode_width::UnicodeWidthChar::width_cjk(ch).unwrap_or(0).max(1);
+        let ch_width = unicode_width::UnicodeWidthChar::width_cjk(ch)
+            .unwrap_or(0)
+            .max(1);
 
         if in_prefix && current_width < start_width {
             prefix.push(ch);
@@ -245,13 +247,21 @@ pub fn render_chat_lines(state: &mut ChatState, area_width: u16) -> Vec<Line<'st
     for idx in 0..history_len {
         let entry = &state.chat_history[idx];
         let is_streaming = entry.is_streaming == Some(true);
-        let reasoning_len = entry.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0);
+        let reasoning_len = entry
+            .reasoning_content
+            .as_ref()
+            .map(|r| r.len())
+            .unwrap_or(0);
         let content_len = entry.content.len();
         let current_key = (reasoning_len, content_len);
 
         let stale = if is_streaming {
             state.virtual_list.item_height(idx) == 0
-                || state.last_rendered_stream_key.get(&idx).map(|k| *k != current_key).unwrap_or(true)
+                || state
+                    .last_rendered_stream_key
+                    .get(&idx)
+                    .map(|k| *k != current_key)
+                    .unwrap_or(true)
         } else {
             state.virtual_list.is_dirty(idx) || !state.rendered_cache.contains_key(&idx)
         };
@@ -266,7 +276,9 @@ pub fn render_chat_lines(state: &mut ChatState, area_width: u16) -> Vec<Line<'st
                 if (lines.len() as u16) < floor {
                     lines.resize(floor as usize, Line::from(""));
                 }
-                state.streaming_height_floor.insert(idx, lines.len().min(u16::MAX as usize) as u16);
+                state
+                    .streaming_height_floor
+                    .insert(idx, lines.len().min(u16::MAX as usize) as u16);
             } else {
                 state.streaming_height_floor.remove(&idx);
             }
@@ -308,12 +320,7 @@ pub fn render_chat_lines(state: &mut ChatState, area_width: u16) -> Vec<Line<'st
         for (entry_idx, &height) in state.last_item_heights.iter().enumerate() {
             let h = height as usize;
             if h > 0 && offset + h <= all_lines.len() {
-                apply_selection_highlight(
-                    &mut all_lines[offset..offset + h],
-                    entry_idx,
-                    0,
-                    state,
-                );
+                apply_selection_highlight(&mut all_lines[offset..offset + h], entry_idx, 0, state);
             }
             offset += h;
         }
@@ -353,7 +360,6 @@ pub fn render_chat_history(
         }
     }
 
-
     // ── VirtualList: per-entry dirty tracking + viewport clipping ──
     let history_len = state.chat_history.len();
     state.virtual_list.auto_follow = state.auto_follow;
@@ -370,14 +376,22 @@ pub fn render_chat_history(
     for idx in 0..history_len {
         let entry = &state.chat_history[idx];
         let is_streaming = entry.is_streaming == Some(true);
-        let reasoning_len = entry.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0);
+        let reasoning_len = entry
+            .reasoning_content
+            .as_ref()
+            .map(|r| r.len())
+            .unwrap_or(0);
         let content_len = entry.content.len();
         let current_key = (reasoning_len, content_len);
 
         // Per-entry dirty: streaming OR content changed OR first render
         let stale = if is_streaming {
             state.virtual_list.item_height(idx) == 0
-                || state.last_rendered_stream_key.get(&idx).map(|k| *k != current_key).unwrap_or(true)
+                || state
+                    .last_rendered_stream_key
+                    .get(&idx)
+                    .map(|k| *k != current_key)
+                    .unwrap_or(true)
         } else {
             state.virtual_list.is_dirty(idx) || !state.rendered_cache.contains_key(&idx)
         };
@@ -409,10 +423,16 @@ pub fn render_chat_history(
     // Scroll: auto-follow or anchor-preserve.
     // Subtract 1 from viewport so the last chat line doesn't touch the input.
     let viewport_height = chat_area.height.saturating_sub(1) as usize;
-    let max_scroll = state.virtual_list.total_lines().saturating_sub(viewport_height);
+    let max_scroll = state
+        .virtual_list
+        .total_lines()
+        .saturating_sub(viewport_height);
     if !state.auto_follow {
         if let Some(entry_idx) = anchor_idx {
-            state.scroll = state.virtual_list.anchor_scroll(entry_idx, 0).min(max_scroll);
+            state.scroll = state
+                .virtual_list
+                .anchor_scroll(entry_idx, 0)
+                .min(max_scroll);
         }
     }
     if state.auto_follow {
@@ -422,7 +442,9 @@ pub fn render_chat_history(
     }
 
     // Use VirtualList's visible range for viewport clipping
-    let (start_idx, end_idx, _skip) = state.virtual_list.visible_range(chat_area.height, state.scroll);
+    let (start_idx, end_idx, _skip) = state
+        .virtual_list
+        .visible_range(chat_area.height, state.scroll);
     let scroll_top = state.scroll;
     let scroll_bottom = scroll_top + viewport_height;
 
@@ -438,7 +460,9 @@ pub fn render_chat_history(
         let entry_start = current_y;
 
         if entry_start < scroll_bottom {
-            let is_streaming = state.chat_history.get(entry_idx)
+            let is_streaming = state
+                .chat_history
+                .get(entry_idx)
                 .map(|e| e.is_streaming == Some(true))
                 .unwrap_or(false);
 
@@ -454,7 +478,11 @@ pub fn render_chat_history(
                 std::borrow::Cow::Owned(lines)
             };
 
-            let skip = if scroll_top > entry_start { scroll_top - entry_start } else { 0 };
+            let skip = if scroll_top > entry_start {
+                scroll_top - entry_start
+            } else {
+                0
+            };
             let take = (scroll_bottom - (entry_start + skip)).min(height - skip);
             let chunk_iter = lines_cow.iter().skip(skip).take(take);
 
@@ -477,8 +505,7 @@ pub fn render_chat_history(
         visible_lines.insert(0, Line::from(""));
     }
 
-    let paragraph = Paragraph::new(visible_lines)
-        .wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
 
     f.render_widget(paragraph, chat_area);
 
@@ -587,12 +614,10 @@ fn render_entry_lines(state: &ChatState, entry_idx: usize, area_width: u16) -> V
         // 1. Remove artifacts — trim common wide/drawing chars from span ends
         for span in &mut line.spans {
             let trimmed = span.content.trim_end_matches([
-                '█', '║', '╔', '╗', '╚', '╝', '╠', '╣', '╦', '╩', '╬',
-                '═', '╒', '╓', '╕', '╖', '╘', '╙', '╛', '╜', '╞', '╟',
-                '╡', '╢', '╤', '╥', '╧', '╨', '╪', '╫',
-                '│', '─', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼',
-                '┃', '━', '┏', '┓', '┗', '┛',
-                '⎾', '⏀', '⏁', '⏂', '⏃', '⏄', '⏅', '⏆', '⏇', '⏈', '⏉', '⏊', '⏋',
+                '█', '║', '╔', '╗', '╚', '╝', '╠', '╣', '╦', '╩', '╬', '═', '╒', '╓', '╕', '╖',
+                '╘', '╙', '╛', '╜', '╞', '╟', '╡', '╢', '╤', '╥', '╧', '╨', '╪', '╫', '│', '─',
+                '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼', '┃', '━', '┏', '┓', '┗', '┛', '⎾',
+                '⏀', '⏁', '⏂', '⏃', '⏄', '⏅', '⏆', '⏇', '⏈', '⏉', '⏊', '⏋',
             ]);
             if trimmed.len() != span.content.len() {
                 span.content = trimmed.to_string().into();
@@ -633,7 +658,6 @@ fn render_entry_lines(state: &ChatState, entry_idx: usize, area_width: u16) -> V
     entry_lines
 }
 
-
 // ── Animation helper ──────────────────────────────────────────────
 
 /// Calculate animation frame: returns (elapsed ms, frame index 0/1/2 for dot cycling, cursor visible)
@@ -667,5 +691,3 @@ pub(crate) fn format_token_count(tokens: u32) -> String {
         tokens.to_string()
     }
 }
-
- 

@@ -1,8 +1,7 @@
 /// 目标追踪系统
-/// 
+///
 /// 对标claude-code-main的src/services/goal/
 /// 追踪用户的长期目标和任务，支持持久化和Agent集成
-
 pub mod persistence;
 pub mod prompts;
 
@@ -117,7 +116,12 @@ impl GoalManager {
     }
 
     /// 创建新目标
-    pub fn create_goal(&mut self, title: &str, description: Option<&str>, priority: GoalPriority) -> String {
+    pub fn create_goal(
+        &mut self,
+        title: &str,
+        description: Option<&str>,
+        priority: GoalPriority,
+    ) -> String {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().timestamp();
 
@@ -144,13 +148,18 @@ impl GoalManager {
     }
 
     /// 创建子目标
-    pub fn create_sub_goal(&mut self, parent_id: &str, title: &str, description: Option<&str>) -> Result<String, String> {
+    pub fn create_sub_goal(
+        &mut self,
+        parent_id: &str,
+        title: &str,
+        description: Option<&str>,
+    ) -> Result<String, String> {
         if !self.goals.contains_key(parent_id) {
             return Err(format!("Parent goal not found: {}", parent_id));
         }
 
         let id = self.create_goal(title, description, GoalPriority::Medium);
-        
+
         if let Some(goal) = self.goals.get_mut(&id) {
             goal.parent_id = Some(parent_id.to_string());
         }
@@ -168,12 +177,12 @@ impl GoalManager {
         if let Some(goal) = self.goals.get_mut(goal_id) {
             goal.status = status.clone();
             goal.updated_at = chrono::Utc::now().timestamp();
-            
+
             if status == GoalStatus::Completed {
                 goal.completed_at = Some(chrono::Utc::now().timestamp());
                 goal.progress = 100;
             }
-            
+
             let _ = self.save();
             Ok(())
         } else {
@@ -186,12 +195,12 @@ impl GoalManager {
         if let Some(goal) = self.goals.get_mut(goal_id) {
             goal.progress = progress.min(100);
             goal.updated_at = chrono::Utc::now().timestamp();
-            
+
             if progress >= 100 {
                 goal.status = GoalStatus::Completed;
                 goal.completed_at = Some(chrono::Utc::now().timestamp());
             }
-            
+
             let _ = self.save();
             Ok(())
         } else {
@@ -211,7 +220,7 @@ impl GoalManager {
             };
             goal.milestones.push(milestone);
             goal.updated_at = chrono::Utc::now().timestamp();
-            
+
             let _ = self.save();
             Ok(milestone_id)
         } else {
@@ -226,7 +235,7 @@ impl GoalManager {
                 milestone.completed = true;
                 milestone.completed_at = Some(chrono::Utc::now().timestamp());
                 goal.updated_at = chrono::Utc::now().timestamp();
-                
+
                 let _ = self.save();
                 return Ok(());
             }
@@ -246,14 +255,16 @@ impl GoalManager {
 
     /// 获取活跃目标
     pub fn get_active_goals(&self) -> Vec<&Goal> {
-        self.goals.values()
+        self.goals
+            .values()
             .filter(|g| g.status == GoalStatus::InProgress)
             .collect()
     }
 
     /// 获取子目标
     pub fn get_sub_goals(&self, parent_id: &str) -> Vec<&Goal> {
-        self.goals.values()
+        self.goals
+            .values()
             .filter(|g| g.parent_id.as_deref() == Some(parent_id))
             .collect()
     }
@@ -270,9 +281,11 @@ impl GoalManager {
 
     /// 生成目标提示词
     pub fn generate_prompt(&self, goal_id: &str) -> Result<String, String> {
-        let goal = self.goals.get(goal_id)
+        let goal = self
+            .goals
+            .get(goal_id)
             .ok_or_else(|| format!("Goal not found: {}", goal_id))?;
-        
+
         Ok(self.prompts.generate_goal_prompt(goal))
     }
 }

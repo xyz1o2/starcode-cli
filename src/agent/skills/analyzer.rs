@@ -11,9 +11,9 @@
 /// - Read / read_many_files
 /// - grep
 use super::{SubAgent, SubTask, SubTaskResult};
-use crate::core::prompts::skills::analyzer::ANALYZER_SYSTEM_PROMPT;
 use crate::agent::StarAgent;
 use crate::core::config::Config;
+use crate::core::prompts::skills::analyzer::ANALYZER_SYSTEM_PROMPT;
 use crate::core::tools::project_map::run_project_map_for_skill;
 use crate::core::utils::paths::resolve_tool_path;
 use crate::llm::client::StarClient;
@@ -274,4 +274,3 @@ impl SubAgent for AnalyzerAgent {
         self.run_analysis_loop(&task).await
     }
 }
- 

@@ -1,5 +1,4 @@
 /// 目标持久化
-
 use super::Goal;
 use std::path::PathBuf;
 
@@ -12,14 +11,12 @@ pub struct GoalPersistence {
 impl GoalPersistence {
     /// 创建新的目标持久化管理器
     pub fn new(storage_path: Option<&str>) -> Self {
-        let path = storage_path
-            .map(|p| PathBuf::from(p))
-            .unwrap_or_else(|| {
-                dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".starcode")
-                    .join("goals.json")
-            });
+        let path = storage_path.map(|p| PathBuf::from(p)).unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".starcode")
+                .join("goals.json")
+        });
 
         Self { storage_path: path }
     }
@@ -33,8 +30,8 @@ impl GoalPersistence {
         let content = std::fs::read_to_string(&self.storage_path)
             .map_err(|e| format!("Failed to read goals file: {}", e))?;
 
-        let goals: Vec<Goal> = serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse goals: {}", e))?;
+        let goals: Vec<Goal> =
+            serde_json::from_str(&content).map_err(|e| format!("Failed to parse goals: {}", e))?;
 
         Ok(goals)
     }

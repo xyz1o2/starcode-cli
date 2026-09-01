@@ -1,9 +1,14 @@
 pub(crate) use super::clipboard_paste::push_cursor_off_sentinel_pub;
+use super::clipboard_paste::{
+    collect_modal_input, detect_file_paths, insert_file_paste_block, insert_image_paste_block,
+    insert_paste_block, maybe_auto_fold_input, needs_manual_base_url_confirmation,
+    normalize_modal_api_key, normalize_modal_base_url, push_cursor_off_sentinel,
+    reset_main_textarea, save_clipboard_image, sync_input_from_textarea,
+};
 use super::clipboard_paste::{PASTE_ENTER_GUARD_MS, RAPID_PASTE_KEY_INTERVAL_MS};
-use std::time::{Duration, Instant};
-use super::clipboard_paste::{collect_modal_input, normalize_modal_api_key, normalize_modal_base_url, needs_manual_base_url_confirmation,save_clipboard_image, detect_file_paths, insert_image_paste_block, insert_file_paste_block, push_cursor_off_sentinel, reset_main_textarea, sync_input_from_textarea, maybe_auto_fold_input, insert_paste_block};
 use arboard::Clipboard;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tui_textarea::TextArea;
 
@@ -65,7 +70,9 @@ fn yank_from_ring(state: &mut ChatState, idx: usize) {
 }
 
 /// Build context breakdown from current state for the context visualization.
-fn build_context_breakdown(state: &ChatState) -> crate::ui::components::highlight::context_viz::TokenBreakdown {
+fn build_context_breakdown(
+    state: &ChatState,
+) -> crate::ui::components::highlight::context_viz::TokenBreakdown {
     let total = state.token_count;
     // Heuristic breakdown
     crate::ui::components::highlight::context_viz::TokenBreakdown {
@@ -282,7 +289,8 @@ async fn execute_palette_action(
             // If conversation has history, show confirmation
             let has_history = state.chat_history.iter().any(|e| {
                 !e.is_welcome
-                    && (e.entry_type == ChatEntryType::User || e.entry_type == ChatEntryType::Assistant)
+                    && (e.entry_type == ChatEntryType::User
+                        || e.entry_type == ChatEntryType::Assistant)
                     && !e.content.trim().is_empty()
             });
 
@@ -357,12 +365,16 @@ async fn execute_palette_action(
                 // Show input modal for custom context window
                 state.show_input_modal = true;
                 state.input_modal_title = "Context Window Size".to_string();
-                state.input_modal_prompt = "Enter context window size (e.g. 128k, 200k, 512k, 1M, 2000000):".to_string();
+                state.input_modal_prompt =
+                    "Enter context window size (e.g. 128k, 200k, 512k, 1M, 2000000):".to_string();
                 state.input_modal_value = String::new();
                 let mut textarea = tui_textarea::TextArea::default();
                 textarea.set_cursor_line_style(ratatui::style::Style::default());
                 textarea.set_placeholder_text("128k");
-                textarea.set_cursor_style(ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED));
+                textarea.set_cursor_style(
+                    ratatui::style::Style::default()
+                        .add_modifier(ratatui::style::Modifier::REVERSED),
+                );
                 state.modal_textarea = textarea;
                 state.input_context = Some(crate::ui::state::palette::InputContext::ContextWindow);
             } else {
@@ -372,7 +384,9 @@ async fn execute_palette_action(
                     state.context_window_override = Some(tokens);
                     state.current_status_line = Some(format!("Context Window: {}k", tokens / 1000));
                     tokio::spawn(async move {
-                        if let Ok(mgr) = crate::core::config::settings_manager::SettingsManager::new() {
+                        if let Ok(mgr) =
+                            crate::core::config::settings_manager::SettingsManager::new()
+                        {
                             if let Ok(mut settings) = mgr.load_user_settings().await {
                                 settings.context_window = Some(tokens);
                                 let _ = mgr.save_user_settings(&settings).await;
@@ -401,7 +415,10 @@ async fn execute_palette_action(
                     }
                 }
             });
-            state.current_status_line = Some(format!("Thinking: {}", state.thinking_effort.display_name()));
+            state.current_status_line = Some(format!(
+                "Thinking: {}",
+                state.thinking_effort.display_name()
+            ));
         }
         PaletteAction::SetTheme(theme_name) => {
             state.show_palette = false;
@@ -478,12 +495,15 @@ async fn execute_palette_action(
 
                 // Check is_openai_compatible: built-in check first, then custom provider type
                 let provider_config = store.load().await.unwrap_or_default();
-                let is_openai_compat = crate::core::config::providers::provider_openai_compatible_mode(&pid)
-                    .or_else(|| {
-                        provider_config.providers.get(&pid).and_then(|s| {
-                            s.r#type.as_deref().map(|t| t == "openai-compatible")
-                        })
-                    });
+                let is_openai_compat =
+                    crate::core::config::providers::provider_openai_compatible_mode(&pid).or_else(
+                        || {
+                            provider_config
+                                .providers
+                                .get(&pid)
+                                .and_then(|s| s.r#type.as_deref().map(|t| t == "openai-compatible"))
+                        },
+                    );
 
                 let _ = tx
                     .send(AgentRequest::UpdateProviderConfig {
@@ -542,7 +562,8 @@ async fn execute_palette_action(
             state.show_palette = false;
             state.show_input_modal = true;
             state.input_modal_title = "Add New Provider — Enter ID".to_string();
-            state.input_modal_prompt = "Choose a unique ID for this provider (e.g. my-lmstudio, my-ollama):".to_string();
+            state.input_modal_prompt =
+                "Choose a unique ID for this provider (e.g. my-lmstudio, my-ollama):".to_string();
             state.input_modal_value = String::new();
             let mut textarea = TextArea::default();
             textarea.set_cursor_line_style(ratatui::style::Style::default());
@@ -558,17 +579,15 @@ async fn execute_palette_action(
         PaletteAction::InputProviderName(_provider_id) => {
             // This action is not directly used; the flow is handled via InputContext transitions
         }
-        PaletteAction::ToggleFeature(feature) => {
-            match feature.as_str() {
-                "context_viz" => {
-                    state.show_context_viz = !state.show_context_viz;
-                    if state.show_context_viz {
-                        state.context_breakdown = build_context_breakdown(state);
-                    }
+        PaletteAction::ToggleFeature(feature) => match feature.as_str() {
+            "context_viz" => {
+                state.show_context_viz = !state.show_context_viz;
+                if state.show_context_viz {
+                    state.context_breakdown = build_context_breakdown(state);
                 }
-                _ => {}
             }
-        }
+            _ => {}
+        },
         PaletteAction::SetOutputStyle(style) => {
             state.show_palette = false;
             let style_clone = style.clone();
@@ -580,11 +599,7 @@ async fn execute_palette_action(
                     }
                 }
             });
-            crate::ui::app::logic::emit_status_text(
-                state,
-                0,
-                &format!("Output style: {}", style),
-            );
+            crate::ui::app::logic::emit_status_text(state, 0, &format!("Output style: {}", style));
         }
         PaletteAction::ShowLogSelector => {
             state.show_palette = false;
@@ -614,7 +629,10 @@ async fn execute_palette_action(
             crate::ui::app::logic::emit_status_text(
                 state,
                 0,
-                &format!("Verbose UI: {}", if state.ui_verbose { "ON" } else { "OFF" }),
+                &format!(
+                    "Verbose UI: {}",
+                    if state.ui_verbose { "ON" } else { "OFF" }
+                ),
             );
         }
         PaletteAction::CreatePr => {
@@ -631,10 +649,12 @@ async fn execute_palette_action(
                 crate::types::ChatEntryType::User,
                 msg.clone(),
             ));
-            let _ = agent_tx.send(crate::runtime::messages::AgentRequest::SendMessage {
-                message_id,
-                message: msg,
-            }).await;
+            let _ = agent_tx
+                .send(crate::runtime::messages::AgentRequest::SendMessage {
+                    message_id,
+                    message: msg,
+                })
+                .await;
         }
         PaletteAction::ToggleColorblindMode => {
             state.show_palette = false;
@@ -644,8 +664,18 @@ async fn execute_palette_action(
                 0,
                 &crate::core::i18n::t(
                     "ui.status.colorblind",
-                    &format!("色盲模式: {}", if state.colorblind_mode { "开启" } else { "关闭" }),
-                    &format!("Colorblind mode: {}", if state.colorblind_mode { "ON" } else { "OFF" }),
+                    &format!(
+                        "色盲模式: {}",
+                        if state.colorblind_mode {
+                            "开启"
+                        } else {
+                            "关闭"
+                        }
+                    ),
+                    &format!(
+                        "Colorblind mode: {}",
+                        if state.colorblind_mode { "ON" } else { "OFF" }
+                    ),
                 ),
             );
         }
@@ -718,7 +748,11 @@ async fn handle_ask_user_question_input(
             KeyCode::Enter => {
                 // Confirm with other input included
                 submit_ask_user_question_answer(
-                    state, agent_tx, tool_call_id, option_count, multi_select,
+                    state,
+                    agent_tx,
+                    tool_call_id,
+                    option_count,
+                    multi_select,
                 )
                 .await?;
             }
@@ -762,9 +796,7 @@ async fn handle_ask_user_question_input(
                 invalidate_cache(state);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if total_items > 0
-                    && state.pending_confirmation_choice + 1 < total_items
-                {
+                if total_items > 0 && state.pending_confirmation_choice + 1 < total_items {
                     state.pending_confirmation_choice += 1;
                 } else if total_items > 0 {
                     state.pending_confirmation_choice = 0;
@@ -788,7 +820,11 @@ async fn handle_ask_user_question_input(
                         // Single-select: select and confirm immediately
                         state.pending_confirmation_choice = opt_idx;
                         submit_ask_user_question_answer(
-                            state, agent_tx, tool_call_id, option_count, multi_select,
+                            state,
+                            agent_tx,
+                            tool_call_id,
+                            option_count,
+                            multi_select,
                         )
                         .await?;
                     }
@@ -799,8 +835,10 @@ async fn handle_ask_user_question_input(
                 // Toggle current option in multi-select mode
                 let focused = state.pending_confirmation_choice;
                 if focused < option_count {
-                    if let Some(pos) =
-                        state.pending_question_selections.iter().position(|&i| i == focused)
+                    if let Some(pos) = state
+                        .pending_question_selections
+                        .iter()
+                        .position(|&i| i == focused)
                     {
                         state.pending_question_selections.remove(pos);
                     } else {
@@ -816,12 +854,20 @@ async fn handle_ask_user_question_input(
                     invalidate_cache(state);
                 } else if multi_select && !state.pending_question_selections.is_empty() {
                     submit_ask_user_question_answer(
-                        state, agent_tx, tool_call_id, option_count, multi_select,
+                        state,
+                        agent_tx,
+                        tool_call_id,
+                        option_count,
+                        multi_select,
                     )
                     .await?;
                 } else if !multi_select && option_count > 0 {
                     submit_ask_user_question_answer(
-                        state, agent_tx, tool_call_id, option_count, multi_select,
+                        state,
+                        agent_tx,
+                        tool_call_id,
+                        option_count,
+                        multi_select,
                     )
                     .await?;
                 }
@@ -854,9 +900,9 @@ async fn submit_ask_user_question_answer(
                     .and_then(|entry_idx| state.chat_history.get(entry_idx))
                     .and_then(|entry| entry.confirmation.as_ref())
                     .and_then(|conf| match &conf.details {
-                        crate::types::ConfirmationDetails::AskUserQuestion {
-                            options, ..
-                        } => options.get(idx).map(|o| o.label.clone()),
+                        crate::types::ConfirmationDetails::AskUserQuestion { options, .. } => {
+                            options.get(idx).map(|o| o.label.clone())
+                        }
                         _ => None,
                     })
             })
@@ -868,9 +914,9 @@ async fn submit_ask_user_question_answer(
             .and_then(|entry_idx| state.chat_history.get(entry_idx))
             .and_then(|entry| entry.confirmation.as_ref())
             .and_then(|conf| match &conf.details {
-                crate::types::ConfirmationDetails::AskUserQuestion {
-                    options, ..
-                } => options.get(focused).map(|o| o.label.clone()),
+                crate::types::ConfirmationDetails::AskUserQuestion { options, .. } => {
+                    options.get(focused).map(|o| o.label.clone())
+                }
                 _ => None,
             })
             .into_iter()
@@ -900,7 +946,11 @@ async fn submit_ask_user_question_answer(
                         format!("User selected: {}", answers[0])
                     }
                 } else {
-                    format!("User selected {} options: {}", answers.len(), answers.join(", "))
+                    format!(
+                        "User selected {} options: {}",
+                        answers.len(),
+                        answers.join(", ")
+                    )
                 };
                 conf.outcome = Some(outcome_str);
             }
@@ -959,7 +1009,8 @@ pub async fn handle_key_event(
                     .send(crate::runtime::messages::AgentRequest::ResetSession)
                     .await;
                 state.current_status_line = Some(
-                    crate::core::i18n::t("ui.status.cleared", "对话已清除", "Conversation cleared").to_string()
+                    crate::core::i18n::t("ui.status.cleared", "对话已清除", "Conversation cleared")
+                        .to_string(),
                 );
                 return Ok(());
             }
@@ -1013,11 +1064,16 @@ pub async fn handle_key_event(
     // Handle Ctrl+T for toggling thinking blocks
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('t')) {
         let has_thinking = state.chat_history.iter().any(|e| {
-            e.reasoning_content.as_ref().map_or(false, |r| !r.is_empty())
+            e.reasoning_content
+                .as_ref()
+                .map_or(false, |r| !r.is_empty())
         });
         if has_thinking {
             let all_expanded = state.chat_history.iter().enumerate().all(|(idx, e)| {
-                if e.reasoning_content.as_ref().map_or(false, |r| !r.is_empty()) {
+                if e.reasoning_content
+                    .as_ref()
+                    .map_or(false, |r| !r.is_empty())
+                {
                     state.expanded_thinking_indices.contains(&idx)
                 } else {
                     true
@@ -1030,7 +1086,10 @@ pub async fn handle_key_event(
             } else {
                 // Expand all
                 for (idx, e) in state.chat_history.iter().enumerate() {
-                    if e.reasoning_content.as_ref().map_or(false, |r| !r.is_empty()) {
+                    if e.reasoning_content
+                        .as_ref()
+                        .map_or(false, |r| !r.is_empty())
+                    {
                         state.expanded_thinking_indices.insert(idx);
                     }
                 }
@@ -1068,13 +1127,18 @@ pub async fn handle_key_event(
                     crate::core::config::models::ThinkingCapability::Binary => {
                         // Binary models: Off ↔ Medium (On)
                         match state.thinking_effort {
-                            crate::types::ThinkingEffort::Off => crate::types::ThinkingEffort::Medium,
+                            crate::types::ThinkingEffort::Off => {
+                                crate::types::ThinkingEffort::Medium
+                            }
                             _ => crate::types::ThinkingEffort::Off,
                         }
                     }
                     _ => state.thinking_effort.next(),
                 };
-                state.current_status_line = Some(format!("Thinking: {}", state.thinking_effort.display_name()));
+                state.current_status_line = Some(format!(
+                    "Thinking: {}",
+                    state.thinking_effort.display_name()
+                ));
                 // Persist to user settings
                 let effort_str = state.thinking_effort.as_str().to_string();
                 tokio::spawn(async move {
@@ -1204,10 +1268,19 @@ pub async fn handle_key_event(
     }
 
     // Vim mode intercept
-    if state.vim_enabled && !state.show_palette && !state.show_help && !state.show_status_modal
-        && !state.show_input_modal && !state.show_theme_picker && !state.show_usage_stats
-        && !state.show_export_dialog && !state.show_global_search && !state.show_quick_open
-        && !state.show_history_search && !state.show_error_overlay && !state.show_log_selector
+    if state.vim_enabled
+        && !state.show_palette
+        && !state.show_help
+        && !state.show_status_modal
+        && !state.show_input_modal
+        && !state.show_theme_picker
+        && !state.show_usage_stats
+        && !state.show_export_dialog
+        && !state.show_global_search
+        && !state.show_quick_open
+        && !state.show_history_search
+        && !state.show_error_overlay
+        && !state.show_log_selector
         && !state.show_context_viz
     {
         use crate::ui::vim::VimMode;
@@ -1218,7 +1291,9 @@ pub async fn handle_key_event(
                     let pending_keys = state.vim_state.pending_keys.clone();
 
                     // Try motion first
-                    if let Some(motion) = crate::ui::vim::motions::Motion::from_key(c, &pending_keys) {
+                    if let Some(motion) =
+                        crate::ui::vim::motions::Motion::from_key(c, &pending_keys)
+                    {
                         apply_vim_motion(state, &motion);
                         state.vim_state.reset();
                         return Ok(());
@@ -1239,7 +1314,9 @@ pub async fn handle_key_event(
                         }
                         'a' => {
                             state.vim_state.mode = VimMode::Insert;
-                            state.textarea.move_cursor(tui_textarea::CursorMove::Forward);
+                            state
+                                .textarea
+                                .move_cursor(tui_textarea::CursorMove::Forward);
                             state.vim_state.reset();
                             return Ok(());
                         }
@@ -1314,7 +1391,9 @@ pub async fn handle_key_event(
                     }
                     // Other visual mode keys handled by motions
                     let pending_keys = state.vim_state.pending_keys.clone();
-                    if let Some(motion) = crate::ui::vim::motions::Motion::from_key(c, &pending_keys) {
+                    if let Some(motion) =
+                        crate::ui::vim::motions::Motion::from_key(c, &pending_keys)
+                    {
                         apply_vim_motion(state, &motion);
                         state.vim_state.reset();
                         return Ok(());
@@ -1338,15 +1417,13 @@ pub async fn handle_key_event(
         } else {
             // Non-char keys in vim modes
             match state.vim_state.mode {
-                VimMode::Normal => {
-                    match key.code {
-                        KeyCode::Esc => {
-                            state.vim_state.reset();
-                            return Ok(());
-                        }
-                        _ => {}
+                VimMode::Normal => match key.code {
+                    KeyCode::Esc => {
+                        state.vim_state.reset();
+                        return Ok(());
                     }
-                }
+                    _ => {}
+                },
                 VimMode::Insert => {
                     // Fall through to normal input handling for non-char keys
                 }
@@ -1399,10 +1476,10 @@ pub async fn handle_key_event(
             }
             UiAction::AcceptCompletion => {
                 if crate::ui::components::command_suggestions::handle_tab(state) {
-                return Ok(());
+                    return Ok(());
+                }
             }
         }
-    }
     }
 
     if handle_paste(state, key).await? {
@@ -1513,7 +1590,12 @@ pub async fn handle_key_event(
                 // Retry
                 state.show_error_overlay = false;
                 // Re-send last user message
-                if let Some(last_user) = state.chat_history.iter().rev().find(|e| e.entry_type == ChatEntryType::User) {
+                if let Some(last_user) = state
+                    .chat_history
+                    .iter()
+                    .rev()
+                    .find(|e| e.entry_type == ChatEntryType::User)
+                {
                     let msg = last_user.content.clone();
                     crate::ui::app::logic::enqueue_user_message(state, msg, agent_tx).await?;
                 }
@@ -1528,7 +1610,8 @@ pub async fn handle_key_event(
                 state.show_error_overlay = false;
                 state.show_palette = true;
                 state.palette_mode = PaletteMode::Provider;
-                state.palette_items = crate::ui::components::palette::get_items(&PaletteMode::Provider, state);
+                state.palette_items =
+                    crate::ui::components::palette::get_items(&PaletteMode::Provider, state);
                 return Ok(());
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -1580,10 +1663,8 @@ pub async fn handle_key_event(
                 }
 
                 let raw_input = state.textarea.lines().join("\n");
-                let input = crate::ui::state::expand_paste_segments(
-                    &raw_input,
-                    &state.paste_segments,
-                );
+                let input =
+                    crate::ui::state::expand_paste_segments(&raw_input, &state.paste_segments);
 
                 let trimmed_raw = raw_input.trim();
                 if trimmed_raw == "/model" || trimmed_raw == "/models" {
@@ -1620,10 +1701,12 @@ pub async fn handle_key_event(
                             .cloned()
                             .or_else(|| state.current_provider_id.clone());
                         state.current_provider_id = provider_id.clone();
-                        let _ = agent_tx.send(AgentRequest::SetModel {
-                            model: model_name.to_string(),
-                            provider_id,
-                        }).await;
+                        let _ = agent_tx
+                            .send(AgentRequest::SetModel {
+                                model: model_name.to_string(),
+                                provider_id,
+                            })
+                            .await;
                         // 已获取过模型列表时做校验提示（仍允许自定义名称）
                         let known = state.available_models.is_empty()
                             || state.available_models.iter().any(|m| m == model_name);
@@ -1640,7 +1723,8 @@ pub async fn handle_key_event(
                             )
                         };
                         crate::ui::app::logic::emit_status_text(
-                            state, 0,
+                            state,
+                            0,
                             &format!(
                                 "{}{}{}",
                                 crate::core::i18n::t(
@@ -1713,7 +1797,11 @@ pub async fn handle_key_event(
                     .unwrap_or(false);
                 if double {
                     let input = state.input.trim().to_string();
-                    let is_dup = state.command_history.front().map(|l| l == &input).unwrap_or(false);
+                    let is_dup = state
+                        .command_history
+                        .front()
+                        .map(|l| l == &input)
+                        .unwrap_or(false);
                     if !is_dup {
                         state.command_history.push_front(input);
                         state.command_history.truncate(100);
@@ -1722,7 +1810,8 @@ pub async fn handle_key_event(
                     reset_main_textarea(state);
                     crate::ui::components::command_suggestions::on_input_changed(state);
                     state.last_esc_at = None;
-                    state.current_status_line = Some("Input cleared (saved to history)".to_string());
+                    state.current_status_line =
+                        Some("Input cleared (saved to history)".to_string());
                 } else {
                     state.last_esc_at = Some(now);
                     state.current_status_line = Some("Press Esc again to clear input".to_string());
@@ -1734,7 +1823,9 @@ pub async fn handle_key_event(
         KeyCode::F(1) => {
             state.show_help = !state.show_help;
         }
-        KeyCode::Char('?') if !state.show_palette && !state.show_status_modal && !state.show_input_modal => {
+        KeyCode::Char('?')
+            if !state.show_palette && !state.show_status_modal && !state.show_input_modal =>
+        {
             // ? when input is empty: show help (like Claude Code)
             if state.textarea.lines().iter().all(|l| l.is_empty()) {
                 state.show_help = !state.show_help;
@@ -1972,7 +2063,9 @@ pub async fn handle_key_event(
                 // Move cursor to new_col
                 state.textarea.move_cursor(tui_textarea::CursorMove::Head);
                 for _ in 0..new_col {
-                    state.textarea.move_cursor(tui_textarea::CursorMove::Forward);
+                    state
+                        .textarea
+                        .move_cursor(tui_textarea::CursorMove::Forward);
                 }
                 sync_input_from_textarea(state);
                 crate::ui::components::command_suggestions::on_input_changed(state);
@@ -1986,7 +2079,8 @@ pub async fn handle_key_event(
                 if !handled {
                     if let KeyCode::Char(c) = key.code {
                         if !c.is_control()
-                            && (key.modifiers.is_empty() || key.modifiers == crossterm::event::KeyModifiers::SHIFT)
+                            && (key.modifiers.is_empty()
+                                || key.modifiers == crossterm::event::KeyModifiers::SHIFT)
                         {
                             state.textarea.insert_char(c);
                             handled = true;
@@ -2081,8 +2175,7 @@ async fn handle_overlay_input(
                     KeyCode::Char('e') | KeyCode::Char('E')
                         if key.modifiers.contains(KeyModifiers::CONTROL) =>
                     {
-                        state.show_permission_explanation =
-                            !state.show_permission_explanation;
+                        state.show_permission_explanation = !state.show_permission_explanation;
                         if let Some(idx) = state.pending_confirmation_entry_idx {
                             state.rendered_cache.remove(&idx);
                         }
@@ -2201,7 +2294,11 @@ async fn handle_overlay_input(
             }
             KeyCode::Up => {
                 let count = crate::ui::components::status_modal::settings_item_count();
-                state.settings_selected_index = state.settings_selected_index.saturating_add(count).saturating_sub(1) % count;
+                state.settings_selected_index = state
+                    .settings_selected_index
+                    .saturating_add(count)
+                    .saturating_sub(1)
+                    % count;
             }
             KeyCode::Down => {
                 let count = crate::ui::components::status_modal::settings_item_count();
@@ -2209,7 +2306,9 @@ async fn handle_overlay_input(
             }
             KeyCode::Enter => {
                 // Get the action for the selected setting and execute it
-                if let Some(action) = crate::ui::components::status_modal::get_settings_action(state) {
+                if let Some(action) =
+                    crate::ui::components::status_modal::get_settings_action(state)
+                {
                     state.show_status_modal = false;
                     // Re-dispatch the action through execute_palette_action
                     execute_palette_action(state, action, agent_tx).await?;
@@ -2359,7 +2458,8 @@ async fn handle_overlay_input(
             }
             KeyCode::PageDown => {
                 if items_len > 0 {
-                    state.selected_palette_index = (state.selected_palette_index + 10).min(items_len - 1);
+                    state.selected_palette_index =
+                        (state.selected_palette_index + 10).min(items_len - 1);
                 }
             }
             KeyCode::Enter => {
@@ -2469,15 +2569,11 @@ async fn handle_input_modal(
 
                         if !key.is_empty() {
                             let pid = provider_id.clone();
-                            let store =
-                                crate::core::config::provider_store::ProviderStore::new();
+                            let store = crate::core::config::provider_store::ProviderStore::new();
                             let saved_base_url = store.get_base_url(&pid).await.unwrap_or(None);
                             let _ = store.set_api_key(&pid, &key).await;
 
-                            if needs_manual_base_url_confirmation(
-                                &pid,
-                                saved_base_url.as_deref(),
-                            ) {
+                            if needs_manual_base_url_confirmation(&pid, saved_base_url.as_deref()) {
                                 let initial_value =
                                     crate::core::config::providers::resolve_provider_base_url(
                                         &pid,
@@ -2523,7 +2619,10 @@ async fn handle_input_modal(
 
                             // Check is_openai_compatible: built-in check first, then custom provider type
                             let provider_config = store.load().await.unwrap_or_default();
-                            let is_openai_compat = crate::core::config::providers::provider_openai_compatible_mode(&pid)
+                            let is_openai_compat =
+                                crate::core::config::providers::provider_openai_compatible_mode(
+                                    &pid,
+                                )
                                 .or_else(|| {
                                     provider_config.providers.get(&pid).and_then(|s| {
                                         s.r#type.as_deref().map(|t| t == "openai-compatible")
@@ -2565,21 +2664,19 @@ async fn handle_input_modal(
                             }
                         }
                     }
-                    crate::ui::state::palette::InputContext::ProviderBaseUrl {
-                        provider_id,
-                    } => {
+                    crate::ui::state::palette::InputContext::ProviderBaseUrl { provider_id } => {
                         let url = normalize_modal_base_url(&state.input_modal_value);
                         let pid = provider_id.clone();
 
                         let store = crate::core::config::provider_store::ProviderStore::new();
                         let _ = store.set_base_url(&pid, &url).await;
-                        let base_url =
-                            crate::core::config::providers::resolve_provider_base_url(
-                                &pid,
-                                Some(url.clone()),
-                            );
+                        let base_url = crate::core::config::providers::resolve_provider_base_url(
+                            &pid,
+                            Some(url.clone()),
+                        );
                         // Check if user has EXPLICITLY saved an API key (not from env vars)
-                        let has_explicit_key = store.get_api_key(&pid).await.unwrap_or(None).is_some();
+                        let has_explicit_key =
+                            store.get_api_key(&pid).await.unwrap_or(None).is_some();
 
                         if base_url.is_none() {
                             crate::ui::app::logic::emit_status_text(
@@ -2608,9 +2705,12 @@ async fn handle_input_modal(
                         let tokens = parse_context_window_str(&input);
                         if let Some(tokens) = tokens {
                             state.context_window_override = Some(tokens);
-                            state.current_status_line = Some(format!("Context Window: {}k", tokens / 1000));
+                            state.current_status_line =
+                                Some(format!("Context Window: {}k", tokens / 1000));
                             tokio::spawn(async move {
-                                if let Ok(mgr) = crate::core::config::settings_manager::SettingsManager::new() {
+                                if let Ok(mgr) =
+                                    crate::core::config::settings_manager::SettingsManager::new()
+                                {
                                     if let Ok(mut settings) = mgr.load_user_settings().await {
                                         settings.context_window = Some(tokens);
                                         let _ = mgr.save_user_settings(&settings).await;
@@ -2618,102 +2718,153 @@ async fn handle_input_modal(
                                 }
                             });
                         } else {
-                            state.current_status_line = Some("Invalid context window size. Use e.g. 128k, 1M".to_string());
+                            state.current_status_line =
+                                Some("Invalid context window size. Use e.g. 128k, 1M".to_string());
                         }
                         state.show_input_modal = false;
                     }
                     crate::ui::state::palette::InputContext::AddProviderId { provider_type } => {
-                        let provider_id = state.input_modal_value.trim().to_lowercase().replace(' ', "-");
+                        let provider_id = state
+                            .input_modal_value
+                            .trim()
+                            .to_lowercase()
+                            .replace(' ', "-");
                         if provider_id.is_empty() {
-                            crate::ui::app::logic::emit_status_text(state, 0, "Provider ID cannot be empty.");
-                            state.input_context = Some(crate::ui::state::palette::InputContext::AddProviderId { provider_type });
+                            crate::ui::app::logic::emit_status_text(
+                                state,
+                                0,
+                                "Provider ID cannot be empty.",
+                            );
+                            state.input_context =
+                                Some(crate::ui::state::palette::InputContext::AddProviderId {
+                                    provider_type,
+                                });
                             return Ok(true);
                         }
                         // Check for conflicts with built-in providers
-                        if crate::core::config::providers::get_provider_by_id(&provider_id).is_some() {
+                        if crate::core::config::providers::get_provider_by_id(&provider_id)
+                            .is_some()
+                        {
                             crate::ui::app::logic::emit_status_text(state, 0, &format!("'{}' conflicts with a built-in provider. Choose a different ID.", provider_id));
-                            state.input_context = Some(crate::ui::state::palette::InputContext::AddProviderId { provider_type });
+                            state.input_context =
+                                Some(crate::ui::state::palette::InputContext::AddProviderId {
+                                    provider_type,
+                                });
                             return Ok(true);
                         }
                         // Transition to name input
                         state.show_input_modal = true;
                         state.input_modal_title = "Add New Provider — Enter Name".to_string();
-                        state.input_modal_prompt = format!("Enter a display name for '{}':", provider_id);
+                        state.input_modal_prompt =
+                            format!("Enter a display name for '{}':", provider_id);
                         state.input_modal_value = String::new();
                         let mut textarea = TextArea::default();
                         textarea.set_cursor_line_style(ratatui::style::Style::default());
                         textarea.set_placeholder_text("e.g. My LM Studio");
                         textarea.set_cursor_style(
-                            ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+                            ratatui::style::Style::default()
+                                .add_modifier(ratatui::style::Modifier::REVERSED),
                         );
                         state.modal_textarea = textarea;
-                        state.input_context = Some(crate::ui::state::palette::InputContext::AddProviderName {
-                            provider_type,
-                            provider_id,
-                        });
-                        return Ok(true);
-                    }
-                    crate::ui::state::palette::InputContext::AddProviderName { provider_type, provider_id } => {
-                        let name = state.input_modal_value.trim().to_string();
-                        if name.is_empty() {
-                            crate::ui::app::logic::emit_status_text(state, 0, "Name cannot be empty.");
-                            state.input_context = Some(crate::ui::state::palette::InputContext::AddProviderName {
+                        state.input_context =
+                            Some(crate::ui::state::palette::InputContext::AddProviderName {
                                 provider_type,
                                 provider_id,
                             });
+                        return Ok(true);
+                    }
+                    crate::ui::state::palette::InputContext::AddProviderName {
+                        provider_type,
+                        provider_id,
+                    } => {
+                        let name = state.input_modal_value.trim().to_string();
+                        if name.is_empty() {
+                            crate::ui::app::logic::emit_status_text(
+                                state,
+                                0,
+                                "Name cannot be empty.",
+                            );
+                            state.input_context =
+                                Some(crate::ui::state::palette::InputContext::AddProviderName {
+                                    provider_type,
+                                    provider_id,
+                                });
                             return Ok(true);
                         }
                         // Transition to base URL input
                         state.show_input_modal = true;
-                        state.input_modal_title = format!("Add New Provider — Base URL for {}", provider_id);
+                        state.input_modal_title =
+                            format!("Add New Provider — Base URL for {}", provider_id);
                         state.input_modal_prompt = "Enter the API endpoint base URL:".to_string();
                         state.input_modal_value = String::new();
                         let mut textarea = TextArea::default();
                         textarea.set_cursor_line_style(ratatui::style::Style::default());
                         textarea.set_placeholder_text("e.g. http://localhost:1234/v1");
                         textarea.set_cursor_style(
-                            ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+                            ratatui::style::Style::default()
+                                .add_modifier(ratatui::style::Modifier::REVERSED),
                         );
                         state.modal_textarea = textarea;
-                        state.input_context = Some(crate::ui::state::palette::InputContext::AddProviderBaseUrl {
-                            provider_type,
-                            provider_id,
-                            name,
-                        });
-                        return Ok(true);
-                    }
-                    crate::ui::state::palette::InputContext::AddProviderBaseUrl { provider_type, provider_id, name } => {
-                        let base_url = normalize_modal_base_url(&state.input_modal_value);
-                        if base_url.is_empty() {
-                            crate::ui::app::logic::emit_status_text(state, 0, "Base URL cannot be empty.");
-                            state.input_context = Some(crate::ui::state::palette::InputContext::AddProviderBaseUrl {
+                        state.input_context = Some(
+                            crate::ui::state::palette::InputContext::AddProviderBaseUrl {
                                 provider_type,
                                 provider_id,
                                 name,
-                            });
+                            },
+                        );
+                        return Ok(true);
+                    }
+                    crate::ui::state::palette::InputContext::AddProviderBaseUrl {
+                        provider_type,
+                        provider_id,
+                        name,
+                    } => {
+                        let base_url = normalize_modal_base_url(&state.input_modal_value);
+                        if base_url.is_empty() {
+                            crate::ui::app::logic::emit_status_text(
+                                state,
+                                0,
+                                "Base URL cannot be empty.",
+                            );
+                            state.input_context = Some(
+                                crate::ui::state::palette::InputContext::AddProviderBaseUrl {
+                                    provider_type,
+                                    provider_id,
+                                    name,
+                                },
+                            );
                             return Ok(true);
                         }
                         // Transition to API key input (optional)
                         state.show_input_modal = true;
-                        state.input_modal_title = format!("Add New Provider — API Key for {}", provider_id);
-                        state.input_modal_prompt = "Enter API key (leave empty to skip):".to_string();
+                        state.input_modal_title =
+                            format!("Add New Provider — API Key for {}", provider_id);
+                        state.input_modal_prompt =
+                            "Enter API key (leave empty to skip):".to_string();
                         state.input_modal_value = String::new();
                         let mut textarea = TextArea::default();
                         textarea.set_cursor_line_style(ratatui::style::Style::default());
                         textarea.set_placeholder_text("Optional — press Enter to skip");
                         textarea.set_cursor_style(
-                            ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+                            ratatui::style::Style::default()
+                                .add_modifier(ratatui::style::Modifier::REVERSED),
                         );
                         state.modal_textarea = textarea;
-                        state.input_context = Some(crate::ui::state::palette::InputContext::AddProviderApiKey {
-                            provider_type,
-                            provider_id,
-                            name,
-                            base_url,
-                        });
+                        state.input_context =
+                            Some(crate::ui::state::palette::InputContext::AddProviderApiKey {
+                                provider_type,
+                                provider_id,
+                                name,
+                                base_url,
+                            });
                         return Ok(true);
                     }
-                    crate::ui::state::palette::InputContext::AddProviderApiKey { provider_type, provider_id, name, base_url } => {
+                    crate::ui::state::palette::InputContext::AddProviderApiKey {
+                        provider_type,
+                        provider_id,
+                        name,
+                        base_url,
+                    } => {
                         let api_key = normalize_modal_api_key(&state.input_modal_value);
                         let pid = provider_id.clone();
                         let store = crate::core::config::provider_store::ProviderStore::new();
@@ -2755,13 +2906,15 @@ async fn handle_input_modal(
                             Some(api_key.clone()),
                         );
                         let is_openai_compat = provider_type == "openai-compatible";
-                        let _ = agent_tx.send(AgentRequest::UpdateProviderConfig {
-                            provider_id: Some(pid.clone()),
-                            api_key: resolved_key,
-                            base_url: Some(base_url.clone()),
-                            is_openai_compatible: Some(is_openai_compat),
-                            model: None,
-                        }).await;
+                        let _ = agent_tx
+                            .send(AgentRequest::UpdateProviderConfig {
+                                provider_id: Some(pid.clone()),
+                                api_key: resolved_key,
+                                base_url: Some(base_url.clone()),
+                                is_openai_compatible: Some(is_openai_compat),
+                                model: None,
+                            })
+                            .await;
                         let _ = agent_tx.send(AgentRequest::ListModels).await;
 
                         state.available_models.clear();
@@ -2770,17 +2923,18 @@ async fn handle_input_modal(
                         state.show_palette = true;
                         state.palette_history.clear();
                         state.palette_mode = PaletteMode::Model;
-                        state.palette_items = crate::ui::components::palette::get_items(
-                            &PaletteMode::Model,
-                            state,
-                        );
+                        state.palette_items =
+                            crate::ui::components::palette::get_items(&PaletteMode::Model, state);
                         state.selected_palette_index = 0;
                         state.palette_filter.clear();
 
                         crate::ui::app::logic::emit_status_text(
                             state,
                             0,
-                            &format!("Created provider '{}' ({}) — now choose a model.", name, pid),
+                            &format!(
+                                "Created provider '{}' ({}) — now choose a model.",
+                                name, pid
+                            ),
                         );
                         return Ok(true);
                     }
@@ -2902,13 +3056,19 @@ fn apply_vim_motion(state: &mut ChatState, motion: &crate::ui::vim::motions::Mot
             state.textarea.move_cursor(tui_textarea::CursorMove::Up);
         }
         Motion::Right => {
-            state.textarea.move_cursor(tui_textarea::CursorMove::Forward);
+            state
+                .textarea
+                .move_cursor(tui_textarea::CursorMove::Forward);
         }
         Motion::WordForward => {
-            state.textarea.move_cursor(tui_textarea::CursorMove::WordForward);
+            state
+                .textarea
+                .move_cursor(tui_textarea::CursorMove::WordForward);
         }
         Motion::WordBackward => {
-            state.textarea.move_cursor(tui_textarea::CursorMove::WordBack);
+            state
+                .textarea
+                .move_cursor(tui_textarea::CursorMove::WordBack);
         }
         Motion::WordEnd => {
             state.textarea.move_cursor(tui_textarea::CursorMove::End);
@@ -2927,7 +3087,9 @@ fn apply_vim_motion(state: &mut ChatState, motion: &crate::ui::vim::motions::Mot
         }
         _ => {
             // Paragraph, matching bracket, find char — approximate with word movements
-            state.textarea.move_cursor(tui_textarea::CursorMove::WordForward);
+            state
+                .textarea
+                .move_cursor(tui_textarea::CursorMove::WordForward);
         }
     }
 }

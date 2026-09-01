@@ -22,7 +22,10 @@ pub fn strip_prompt_injection_tags(content: &str) -> String {
             if let Some(end) = result[start..].find(close) {
                 let end_pos = start + end + close.len();
                 // Replace the entire tag with a notice
-                let notice = format!("[REMOVED: embedded {} tag]", open.trim_matches('<').trim_matches('>'));
+                let notice = format!(
+                    "[REMOVED: embedded {} tag]",
+                    open.trim_matches('<').trim_matches('>')
+                );
                 result.replace_range(start..end_pos, &notice);
             } else {
                 // No closing tag found, just remove the opening tag
@@ -243,9 +246,7 @@ pub async fn read_file_with_encoding_async(path: &Path) -> std::io::Result<Strin
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || read_file_with_encoding_io(&path))
         .await
-        .map_err(|join_err| {
-            std::io::Error::new(std::io::ErrorKind::Other, join_err.to_string())
-        })?
+        .map_err(|join_err| std::io::Error::new(std::io::ErrorKind::Other, join_err.to_string()))?
 }
 
 /// 读取文件并自动检测编码
@@ -257,7 +258,7 @@ pub fn read_file_with_encoding(path: &Path) -> Result<String, String> {
 }
 
 /// 阻塞式读取文件并处理（截断、分页等）
-/// 
+///
 /// 策略对标 Claude Code:
 /// - 默认尽可能多返回内容，以 token 限制为截断标准
 /// - 超过限制时返回 PARTIAL view 通知，告知如何继续读取
@@ -361,18 +362,19 @@ pub fn process_file_read_blocking(
     let is_truncated = end < total_lines;
 
     // Add PARTIAL view notice (like Claude Code)
-    let llm_content = if is_truncated {
-        let remaining = total_lines - end;
-        format!(
+    let llm_content =
+        if is_truncated {
+            let remaining = total_lines - end;
+            format!(
             "{}\n\n[PARTIAL VIEW] Showing lines {}-{} of {} total lines ({} lines remaining).\n\
              To read more, use: read_file(path=\"{}\", offset={}, limit={})",
             output,
             offset + 1, end, total_lines, remaining,
             path.display(), end, remaining.min(500)
         )
-    } else {
-        output.clone()
-    };
+        } else {
+            output.clone()
+        };
 
     Ok(ProcessedFileReadResult {
         llm_content,

@@ -8,7 +8,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// Detect language from content for syntax highlighting
 fn detect_language_from_content(content: &str) -> &'static str {
     let trimmed = content.trim();
-    
+
     // JSON detection
     if (trimmed.starts_with('{') && trimmed.ends_with('}'))
         || (trimmed.starts_with('[') && trimmed.ends_with(']'))
@@ -17,69 +17,82 @@ fn detect_language_from_content(content: &str) -> &'static str {
             return "json";
         }
     }
-    
+
     // YAML detection (simple heuristic)
     if trimmed.contains("---") && (trimmed.contains(": ") || trimmed.contains(":\n")) {
         return "yaml";
     }
-    
+
     // TOML detection
     if trimmed.contains("[[") && trimmed.contains("]]") && trimmed.contains("=") {
         return "toml";
     }
-    
+
     // HTML detection
     if trimmed.starts_with("<!DOCTYPE") || trimmed.starts_with("<html") || trimmed.contains("</") {
         return "html";
     }
-    
+
     // CSS detection
-    if trimmed.contains("{") && trimmed.contains("}") && trimmed.contains(":") && !trimmed.contains("def ") && !trimmed.contains("function ") {
+    if trimmed.contains("{")
+        && trimmed.contains("}")
+        && trimmed.contains(":")
+        && !trimmed.contains("def ")
+        && !trimmed.contains("function ")
+    {
         return "css";
     }
-    
+
     // Python detection
     if trimmed.contains("def ") && trimmed.contains(":") && !trimmed.contains("{") {
         return "python";
     }
-    
+
     // JavaScript/TypeScript detection
-    if (trimmed.contains("function ") || trimmed.contains("=>") || trimmed.contains("const ") || trimmed.contains("let "))
+    if (trimmed.contains("function ")
+        || trimmed.contains("=>")
+        || trimmed.contains("const ")
+        || trimmed.contains("let "))
         && (trimmed.contains("{") || trimmed.contains(";"))
     {
         return "javascript";
     }
-    
+
     // Rust detection
     if trimmed.contains("fn ") && (trimmed.contains("let ") || trimmed.contains("->")) {
         return "rust";
     }
-    
+
     // Go detection
     if trimmed.contains("func ") && trimmed.contains("package ") {
         return "go";
     }
-    
+
     // Java detection
-    if trimmed.contains("public class ") || trimmed.contains("private ") && trimmed.contains("void ") {
+    if trimmed.contains("public class ")
+        || trimmed.contains("private ") && trimmed.contains("void ")
+    {
         return "java";
     }
-    
+
     // Shell detection
-    if trimmed.starts_with("#!/bin/bash") || trimmed.starts_with("#!/bin/sh") || trimmed.contains("#!/usr/bin/env bash") {
+    if trimmed.starts_with("#!/bin/bash")
+        || trimmed.starts_with("#!/bin/sh")
+        || trimmed.contains("#!/usr/bin/env bash")
+    {
         return "shell";
     }
-    
+
     // SQL detection
     if trimmed.contains("SELECT ") && trimmed.contains("FROM ") {
         return "sql";
     }
-    
+
     // XML detection
     if trimmed.starts_with("<?xml") || trimmed.starts_with("<") && trimmed.contains("xmlns:") {
         return "xml";
     }
-    
+
     "unknown"
 }
 
@@ -115,7 +128,10 @@ pub fn truncate_to_display_width(s: &str, max_width: usize) -> String {
 /// Calculate CJK-aware display width of ratatui Spans.
 /// ratatui's Line::width() uses non-CJK width; this matches the terminal's actual rendering.
 pub fn line_spans_width_cjk(spans: &[Span]) -> usize {
-    spans.iter().map(|s| UnicodeWidthStr::width_cjk(s.content.as_ref())).sum()
+    spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width_cjk(s.content.as_ref()))
+        .sum()
 }
 
 /// Split a span's content at a display-width boundary (CJK-aware).
@@ -166,7 +182,10 @@ pub fn truncate_spans_to_width(spans: &[Span<'static>], max_width: usize) -> Vec
 /// Hard-wrap styled spans into rows of at most `wrap_width` display columns.
 /// Mirrors the reference implementation: long lines are sliced at fixed width
 /// boundaries while preserving ANSI-derived styles (not word-wrapped).
-pub fn wrap_spans_to_width(spans: Vec<Span<'static>>, wrap_width: usize) -> Vec<Vec<Span<'static>>> {
+pub fn wrap_spans_to_width(
+    spans: Vec<Span<'static>>,
+    wrap_width: usize,
+) -> Vec<Vec<Span<'static>>> {
     let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
     let mut current: Vec<Span<'static>> = Vec::new();
     let mut used = 0usize;
@@ -213,12 +232,12 @@ pub fn wrap_spans_to_width(spans: Vec<Span<'static>>, wrap_width: usize) -> Vec<
 pub fn strip_ansi_codes(s: &str) -> String {
     let regex = ANSI_REGEX.get_or_init(|| {
         Regex::new(concat!(
-            r"\x1b\[[\d;?>=]*[a-zA-Z]",     // CSI: ESC [ params* letter
-            r"|\x1b\[[\d;?>=]*",            // Broken CSI: ESC [ params* (no terminator)
-            r"|\x1b\].*?(\x07|\x1b\\)",     // OSC: ESC ] ... (BEL or ST)
-            r"|\x1b\][^\x07\x1b]*",         // Broken OSC: ESC ] ... (no terminator)
-            r"|\x1b[PX^_].*?\x1b\\",        // DCS/SOS/PM/APC ... ST
-            r"|\x1b.",                      // Lone ESC + one char (any)
+            r"\x1b\[[\d;?>=]*[a-zA-Z]", // CSI: ESC [ params* letter
+            r"|\x1b\[[\d;?>=]*",        // Broken CSI: ESC [ params* (no terminator)
+            r"|\x1b\].*?(\x07|\x1b\\)", // OSC: ESC ] ... (BEL or ST)
+            r"|\x1b\][^\x07\x1b]*",     // Broken OSC: ESC ] ... (no terminator)
+            r"|\x1b[PX^_].*?\x1b\\",    // DCS/SOS/PM/APC ... ST
+            r"|\x1b.",                  // Lone ESC + one char (any)
         ))
         .unwrap()
     });
@@ -272,10 +291,14 @@ pub fn parse_ansi_text(text: &str) -> Vec<Span<'static>> {
                 // OSC: ESC ] ... BEL or ESC ] ... ST
                 chars.next(); // consume ']'
                 for pc in chars.by_ref() {
-                    if pc == '\x07' { break; }
+                    if pc == '\x07' {
+                        break;
+                    }
                     if pc == '\x1b' {
                         // ST: ESC backslash
-                        if chars.peek() == Some(&'\\') { chars.next(); }
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                        }
                         break;
                     }
                 }
@@ -356,10 +379,9 @@ fn apply_sgr_params(mut style: Style, params: &[&str]) -> Style {
                 // 38;5;N (256-color) or 38;2;R;G;B (truecolor)
                 if i + 1 < params.len() {
                     let color = match params[i + 1] {
-                        "5" if i + 2 < params.len() => params[i + 2]
-                            .parse::<u8>()
-                            .ok()
-                            .map(Color::Indexed),
+                        "5" if i + 2 < params.len() => {
+                            params[i + 2].parse::<u8>().ok().map(Color::Indexed)
+                        }
                         "2" if i + 4 < params.len() => {
                             let (r, g, b) = (
                                 params[i + 2].parse::<u8>().ok(),
@@ -404,7 +426,9 @@ pub fn get_spinner_anim() -> &'static str {
     SPINNERS[idx]
 }
 
-use crate::utils::markdown_parser::{parse_markdown_content_ext, render_content_blocks, render_markdown_incremental};
+use crate::utils::markdown_parser::{
+    parse_markdown_content_ext, render_content_blocks, render_markdown_incremental,
+};
 
 pub fn build_assistant_body_block(
     content: &str,
@@ -424,8 +448,7 @@ pub fn build_assistant_body_block(
         let mut collapsed: Vec<Line<'static>> = Vec::with_capacity(lines.len());
         let mut prev_blank = false;
         for line in lines {
-            let is_blank =
-                line.spans.is_empty() || line.spans.iter().all(|s| s.content.is_empty());
+            let is_blank = line.spans.is_empty() || line.spans.iter().all(|s| s.content.is_empty());
             if is_blank && prev_blank {
                 continue;
             }
@@ -458,7 +481,8 @@ pub fn wrap_text_to_width(text: &str, wrap_width: usize) -> Vec<String> {
         // Use split_whitespace to handle all types of whitespace characters
         // This includes: space, tab, newline, zero-width space, non-breaking space, etc.
         for word in paragraph.split_whitespace() {
-            let word_w: usize = word.chars()
+            let word_w: usize = word
+                .chars()
                 .map(|c| UnicodeWidthChar::width_cjk(c).unwrap_or(0))
                 .sum();
             // Add space separator if line already has content
@@ -492,7 +516,9 @@ pub fn wrap_text_to_width(text: &str, wrap_width: usize) -> Vec<String> {
                     line.push(c);
                     line_w += cw;
                     // Safety: avoid infinite loop on zero-width
-                    if i > 10000 { break; }
+                    if i > 10000 {
+                        break;
+                    }
                 }
             } else {
                 // Flush current line and start new line with this word
@@ -747,10 +773,16 @@ pub fn build_user_body_block(content: &str, wrap_width: usize) -> Vec<Line<'stat
     for line in content.lines() {
         let clean = strip_ansi_codes(line);
         if line_spans_width_cjk(&[Span::raw(&clean)]) <= wrap_width {
-            lines.push(Line::from(Span::styled(clean, Style::default().fg(Color::White))));
+            lines.push(Line::from(Span::styled(
+                clean,
+                Style::default().fg(Color::White),
+            )));
         } else {
             for wrapped in wrap_text_to_width(&clean, wrap_width) {
-                lines.push(Line::from(Span::styled(wrapped, Style::default().fg(Color::White))));
+                lines.push(Line::from(Span::styled(
+                    wrapped,
+                    Style::default().fg(Color::White),
+                )));
             }
         }
     }
@@ -1176,7 +1208,7 @@ pub fn calculate_diff_stats(diff_content: &str) -> DiffStats {
     let mut files_changed = 0;
     let mut current_file_added = false;
     let mut current_file_deleted = false;
-    
+
     for line in diff_content.lines() {
         if line.starts_with("diff --git") {
             // 新文件开始
@@ -1193,12 +1225,12 @@ pub fn calculate_diff_stats(diff_content: &str) -> DiffStats {
             current_file_deleted = true;
         }
     }
-    
+
     // 计算最后一个文件
     if current_file_added || current_file_deleted {
         files_changed += 1;
     }
-    
+
     DiffStats {
         additions,
         deletions,
@@ -1211,7 +1243,9 @@ pub fn render_diff_stats_summary(stats: &DiffStats) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             format!("+{}", stats.additions),
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" ", Style::default()),
         Span::styled(
@@ -1229,19 +1263,18 @@ pub fn render_diff_stats_summary(stats: &DiffStats) -> Line<'static> {
 pub fn render_collapsed_diff_summary(diff_content: &str, file_path: &str) -> Vec<Line<'static>> {
     let stats = calculate_diff_stats(diff_content);
     let mut lines = Vec::new();
-    
+
     // 文件路径
     lines.push(Line::from(vec![
-        Span::styled(
-            "📄 ",
-            Style::default().fg(Color::Blue),
-        ),
+        Span::styled("📄 ", Style::default().fg(Color::Blue)),
         Span::styled(
             file_path.to_string(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
     ]));
-    
+
     // 统计信息
     lines.push(render_diff_stats_summary(&stats));
 
@@ -1255,33 +1288,29 @@ pub fn render_expanded_diff(
     wrap_width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    
+
     // 文件路径标题
     lines.push(Line::from(vec![
-        Span::styled(
-            "📄 ",
-            Style::default().fg(Color::Blue),
-        ),
+        Span::styled("📄 ", Style::default().fg(Color::Blue)),
         Span::styled(
             file_path.to_string(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            " (Tab to collapse)",
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(" (Tab to collapse)", Style::default().fg(Color::DarkGray)),
     ]));
-    
+
     // 分隔线
     lines.push(Line::from(Span::styled(
         "─".repeat(wrap_width.min(100)),
         Style::default().fg(Color::DarkGray),
     )));
-    
+
     // Diff 内容
     let diff_lines = build_diff_block(diff_content, wrap_width);
     lines.extend(diff_lines);
-    
+
     lines
 }
 
@@ -1390,7 +1419,10 @@ mod tests {
         // width 3: one char per row, nothing dropped or split
         let rows = wrap_spans_to_width(spans, 3);
         assert_eq!(rows.len(), 4);
-        let joined: String = rows.iter().flat_map(|r| r.iter().map(|s| s.content.to_string())).collect();
+        let joined: String = rows
+            .iter()
+            .flat_map(|r| r.iter().map(|s| s.content.to_string()))
+            .collect();
         assert_eq!(joined, "中文中文");
         for row in &rows {
             assert!(line_spans_width_cjk(row) <= 3);

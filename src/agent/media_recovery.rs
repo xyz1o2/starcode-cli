@@ -22,8 +22,8 @@ impl Default for MediaRecoveryConfig {
         Self {
             enabled: true,
             max_retries: 1,
-            max_image_size: 10 * 1024 * 1024,  // 10MB
-            max_pdf_size: 30 * 1024 * 1024,     // 30MB
+            max_image_size: 10 * 1024 * 1024, // 10MB
+            max_pdf_size: 30 * 1024 * 1024,   // 30MB
             image_quality: 80,
             auto_resize: true,
         }
@@ -77,19 +77,11 @@ impl MediaRecoveryConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaError {
     /// 图片过大
-    ImageTooLarge {
-        size: usize,
-        max_size: usize,
-    },
+    ImageTooLarge { size: usize, max_size: usize },
     /// PDF过大
-    PdfTooLarge {
-        size: usize,
-        max_size: usize,
-    },
+    PdfTooLarge { size: usize, max_size: usize },
     /// 图片格式不支持
-    UnsupportedImageFormat {
-        format: String,
-    },
+    UnsupportedImageFormat { format: String },
     /// PDF损坏
     CorruptedPdf,
     /// 其他媒体错误
@@ -100,7 +92,11 @@ impl std::fmt::Display for MediaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MediaError::ImageTooLarge { size, max_size } => {
-                write!(f, "Image too large: {} bytes (max: {} bytes)", size, max_size)
+                write!(
+                    f,
+                    "Image too large: {} bytes (max: {} bytes)",
+                    size, max_size
+                )
             }
             MediaError::PdfTooLarge { size, max_size } => {
                 write!(f, "PDF too large: {} bytes (max: {} bytes)", size, max_size)
@@ -147,10 +143,10 @@ impl MediaRecoveryManager {
     /// 解析媒体错误
     pub fn parse_media_error(&self, error: &str) -> MediaError {
         let error_lower = error.to_lowercase();
-        
+
         if error_lower.contains("image_too_large") || error_lower.contains("image_size") {
             MediaError::ImageTooLarge {
-                size: 0,  // 实际大小需要从错误消息中解析
+                size: 0, // 实际大小需要从错误消息中解析
                 max_size: self.config.max_image_size,
             }
         } else if error_lower.contains("pdf_too_large") || error_lower.contains("pdf_size") {
@@ -226,14 +222,9 @@ impl MediaRecoveryManager {
 #[derive(Debug, Clone)]
 pub enum MediaRecoveryDecision {
     /// 重试并调整大小
-    RetryWithResize {
-        target_size: usize,
-        quality: u32,
-    },
+    RetryWithResize { target_size: usize, quality: u32 },
     /// 不恢复
-    NoRecovery {
-        reason: String,
-    },
+    NoRecovery { reason: String },
 }
 
 #[cfg(test)]
@@ -251,10 +242,10 @@ mod tests {
     #[test]
     fn test_parse_media_error() {
         let manager = MediaRecoveryManager::new();
-        
+
         let error = manager.parse_media_error("Error: image_too_large");
         assert!(matches!(error, MediaError::ImageTooLarge { .. }));
-        
+
         let error = manager.parse_media_error("Error: pdf_too_large");
         assert!(matches!(error, MediaError::PdfTooLarge { .. }));
     }

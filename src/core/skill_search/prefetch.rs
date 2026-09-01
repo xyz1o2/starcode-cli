@@ -1,7 +1,6 @@
 /// 技能预取管理器
-/// 
+///
 /// 预测并预取可能需要的技能
-
 use super::SkillSearchConfig;
 
 /// 技能预取管理器
@@ -32,16 +31,16 @@ impl SkillPrefetchManager {
             if msg.role == "user" {
                 if let Some(content) = &msg.content {
                     let content_lower = content.to_lowercase();
-                    
+
                     // 基于关键词预测
                     if content_lower.contains("test") || content_lower.contains("run") {
                         predictions.push("run_tests".to_string());
                     }
-                    
+
                     if content_lower.contains("git") || content_lower.contains("commit") {
                         predictions.push("git_commit".to_string());
                     }
-                    
+
                     if content_lower.contains("search") || content_lower.contains("find") {
                         predictions.push("semantic_search".to_string());
                     }

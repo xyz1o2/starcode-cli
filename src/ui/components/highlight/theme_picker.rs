@@ -85,7 +85,9 @@ pub fn render_theme_picker(f: &mut Frame, themes: &[ThemeInfo], selected: usize,
             let line = Line::from(vec![
                 Span::styled(
                     theme.name.clone(),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!(" - {}", theme.description),
@@ -126,10 +128,7 @@ pub fn render_theme_picker(f: &mut Frame, themes: &[ThemeInfo], selected: usize,
                     format!("  {:<12}", name),
                     Style::default().fg(Color::DarkGray),
                 ),
-                Span::styled(
-                    "████████",
-                    Style::default().fg(*color),
-                ),
+                Span::styled("████████", Style::default().fg(*color)),
             ])
         })
         .collect();

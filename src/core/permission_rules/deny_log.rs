@@ -234,4 +234,3 @@ impl Default for DenyLog {
         Self::new()
     }
 }
- 

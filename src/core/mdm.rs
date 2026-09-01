@@ -199,7 +199,11 @@ impl MdmManager {
                 status.push_str(&format!(
                     "\n  - {} ({}): {}",
                     policy.name,
-                    if policy.enforced { "enforced" } else { "advisory" },
+                    if policy.enforced {
+                        "enforced"
+                    } else {
+                        "advisory"
+                    },
                     policy.value
                 ));
             }

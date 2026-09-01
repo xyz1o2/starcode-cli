@@ -136,7 +136,6 @@ impl BaseDeclarativeTool for TaskGetTool {
     }
 }
 
-
 // ── TaskList ─────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -318,7 +317,6 @@ impl BaseDeclarativeTool for TaskListTool {
     }
 }
 
-
 // ── TaskUpdate ───────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -415,11 +413,7 @@ impl ToolInvocation for TaskUpdateInvocation {
                         .save_to_file(&path)
                         .map_err(|e| format!("Failed to save: {}", e))?;
 
-                    Ok(format!(
-                        "Updated task '{}': {}",
-                        title,
-                        changes.join(", ")
-                    ))
+                    Ok(format!("Updated task '{}': {}", title, changes.join(", ")))
                 } else {
                     Err(format!("Task '{}' not found", params.task_id))
                 }
@@ -500,7 +494,6 @@ impl BaseDeclarativeTool for TaskUpdateTool {
         }))
     }
 }
-
 
 // ── TaskOutput ───────────────────────────────────────────────────────
 
@@ -594,8 +587,8 @@ impl ToolInvocation for TaskOutputInvocation {
             let data: serde_json::Value = serde_json::from_str(&content)
                 .unwrap_or_else(|_| serde_json::json!({"raw": content}));
 
-            let output_text = serde_json::to_string_pretty(&data)
-                .unwrap_or_else(|_| content.clone());
+            let output_text =
+                serde_json::to_string_pretty(&data).unwrap_or_else(|_| content.clone());
 
             Ok(ToolResult {
                 llm_content: Some(output_text.clone()),

@@ -1,7 +1,7 @@
 use super::{SubAgent, SubTask, SubTaskResult};
-use crate::core::prompts::skills::navigator::NAVIGATOR_SYSTEM_PROMPT;
 use crate::agent::StarAgent;
 use crate::core::config::Config;
+use crate::core::prompts::skills::navigator::NAVIGATOR_SYSTEM_PROMPT;
 use crate::core::tools::semantic_search::search_codebase;
 use crate::core::utils::paths::resolve_tool_path;
 use crate::llm::client::StarClient;
@@ -311,13 +311,18 @@ fn extract_seed_files_from_semantic_output(output: &str) -> Vec<PathBuf> {
     // Just "/path/to/file"
     use regex::Regex;
     let re = Regex::new(
-        r"(?m)^[\s•*-]*\s*(?:File:\s*)?(?P<path>(?:/[^\s()]+)+)(?:\s*\(Score:\s*[0-9.]+\s*\))?"
-    ).unwrap_or_else(|_| Regex::new(r"(?m)^\s*(?:File:\s*)?(?P<path>/[^\s]+)").unwrap());
+        r"(?m)^[\s•*-]*\s*(?:File:\s*)?(?P<path>(?:/[^\s()]+)+)(?:\s*\(Score:\s*[0-9.]+\s*\))?",
+    )
+    .unwrap_or_else(|_| Regex::new(r"(?m)^\s*(?:File:\s*)?(?P<path>/[^\s]+)").unwrap());
 
     re.captures_iter(output)
         .filter_map(|cap| {
             let path = cap.name("path")?.as_str().trim();
-            if path.is_empty() { None } else { Some(PathBuf::from(path)) }
+            if path.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(path))
+            }
         })
         .collect()
 }
@@ -409,11 +414,13 @@ fn build_recursive_context(
         out.push_str(&format!("- [D{}] {}  (via: {})\n", depth, path, via));
     }
     if truncated {
-        out.push_str("- [TRUNCATED] Expansion reached file budget. Continue on-demand with Grep/Read.\n");
+        out.push_str(
+            "- [TRUNCATED] Expansion reached file budget. Continue on-demand with Grep/Read.\n",
+        );
     }
     out
 }
- 
+
 fn discover_reference_paths(
     root_path: &Path,
     current_file: &Path,

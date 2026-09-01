@@ -398,4 +398,3 @@ pub fn api_key_env_hint(provider_id: &str) -> Option<String> {
         Some(vars.join(" or "))
     }
 }
- 

@@ -82,17 +82,28 @@ impl Motion {
     pub fn apply(&self, content: &str, cursor: usize) -> usize {
         match self {
             Motion::Left => {
-                if cursor > 0 { cursor - 1 } else { cursor }
+                if cursor > 0 {
+                    cursor - 1
+                } else {
+                    cursor
+                }
             }
             Motion::Right => {
-                if cursor < content.len() { cursor + 1 } else { cursor }
+                if cursor < content.len() {
+                    cursor + 1
+                } else {
+                    cursor
+                }
             }
             Motion::Down => {
                 let line_start = content[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0);
                 let col = cursor - line_start;
                 let next_line_start = content[cursor..].find('\n').map(|i| cursor + i + 1);
                 if let Some(next_start) = next_line_start {
-                    let next_line_end = content[next_start..].find('\n').map(|i| next_start + i).unwrap_or(content.len());
+                    let next_line_end = content[next_start..]
+                        .find('\n')
+                        .map(|i| next_start + i)
+                        .unwrap_or(content.len());
                     let next_line_len = next_line_end - next_start;
                     next_start + col.min(next_line_len)
                 } else {
@@ -104,7 +115,10 @@ impl Motion {
                 let col = cursor - line_start;
                 if line_start > 0 {
                     let prev_line_end = line_start - 1;
-                    let prev_line_start = content[..prev_line_end].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                    let prev_line_start = content[..prev_line_end]
+                        .rfind('\n')
+                        .map(|i| i + 1)
+                        .unwrap_or(0);
                     let prev_line_len = prev_line_end - prev_line_start;
                     prev_line_start + col.min(prev_line_len)
                 } else {
@@ -157,12 +171,11 @@ impl Motion {
                 }
                 new_pos
             }
-            Motion::LineStart => {
-                content[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0)
-            }
-            Motion::LineEnd => {
-                content[cursor..].find('\n').map(|i| cursor + i - 1).unwrap_or(content.len() - 1)
-            }
+            Motion::LineStart => content[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0),
+            Motion::LineEnd => content[cursor..]
+                .find('\n')
+                .map(|i| cursor + i - 1)
+                .unwrap_or(content.len() - 1),
             Motion::FileStart => 0,
             Motion::FileEnd => content.len(),
             Motion::ParagraphPrev => {
@@ -190,7 +203,10 @@ impl Motion {
                     if line.trim().is_empty() {
                         empty_line_found = true;
                     } else if empty_line_found {
-                        pos = content[cursor..].find(line).map(|i| cursor + i).unwrap_or(cursor);
+                        pos = content[cursor..]
+                            .find(line)
+                            .map(|i| cursor + i)
+                            .unwrap_or(cursor);
                         break;
                     }
                 }
@@ -208,18 +224,19 @@ impl Motion {
                     _ => cursor,
                 }
             }
-            Motion::FindCharForward(target) => {
-                content[cursor..].find(*target).map(|i| cursor + i).unwrap_or(cursor)
-            }
-            Motion::FindCharBackward(target) => {
-                content[..cursor].rfind(*target).unwrap_or(cursor)
-            }
-            Motion::TillCharForward(target) => {
-                content[cursor..].find(*target).map(|i| if i > 0 { cursor + i - 1 } else { cursor }).unwrap_or(cursor)
-            }
-            Motion::TillCharBackward(target) => {
-                content[..cursor].rfind(*target).map(|i| i + 1).unwrap_or(cursor)
-            }
+            Motion::FindCharForward(target) => content[cursor..]
+                .find(*target)
+                .map(|i| cursor + i)
+                .unwrap_or(cursor),
+            Motion::FindCharBackward(target) => content[..cursor].rfind(*target).unwrap_or(cursor),
+            Motion::TillCharForward(target) => content[cursor..]
+                .find(*target)
+                .map(|i| if i > 0 { cursor + i - 1 } else { cursor })
+                .unwrap_or(cursor),
+            Motion::TillCharBackward(target) => content[..cursor]
+                .rfind(*target)
+                .map(|i| i + 1)
+                .unwrap_or(cursor),
         }
     }
 }
@@ -229,17 +246,17 @@ fn find_matching_bracket(content: &str, pos: usize, open: char, close: char) -> 
     if pos >= chars.len() {
         return pos;
     }
-    
+
     let current = chars[pos];
     let (target, direction) = if current == open {
         (close, 1i32)
     } else {
         (open, -1i32)
     };
-    
+
     let mut depth = 0;
     let mut i = pos as i32;
-    
+
     while i >= 0 && (i as usize) < chars.len() {
         if chars[i as usize] == current {
             depth += 1;
@@ -251,6 +268,6 @@ fn find_matching_bracket(content: &str, pos: usize, open: char, close: char) -> 
         }
         i += direction;
     }
-    
+
     pos
 }

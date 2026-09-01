@@ -1,9 +1,8 @@
 /// Agent周期性摘要生成器
-/// 
+///
 /// 对标claude-code-main的src/services/AgentSummary/
 /// 每30秒为子Agent生成摘要
-
-use super::{Summary, SummaryType, SummaryStats};
+use super::{Summary, SummaryStats, SummaryType};
 
 /// Agent摘要生成器
 pub struct AgentSummaryGenerator {
@@ -44,9 +43,7 @@ impl AgentSummaryGenerator {
 
         // 统计信息
         let message_count = messages.len() as u32;
-        let tool_calls = messages.iter()
-            .filter(|m| m.tool_calls.is_some())
-            .count() as u32;
+        let tool_calls = messages.iter().filter(|m| m.tool_calls.is_some()).count() as u32;
 
         // 提取最近的活动
         let recent_activity = self.extract_recent_activity(messages);
@@ -54,9 +51,7 @@ impl AgentSummaryGenerator {
         // 生成摘要内容
         let content = format!(
             "Agent periodic summary: {} messages, {} tool calls. Recent: {}",
-            message_count,
-            tool_calls,
-            recent_activity
+            message_count, tool_calls, recent_activity
         );
 
         Summary {
@@ -79,7 +74,8 @@ impl AgentSummaryGenerator {
     /// 提取最近活动
     fn extract_recent_activity(&self, messages: &[crate::types::StarMessage]) -> String {
         // 获取最近5条消息
-        let recent: Vec<String> = messages.iter()
+        let recent: Vec<String> = messages
+            .iter()
             .rev()
             .take(5)
             .filter_map(|m| m.content.clone())

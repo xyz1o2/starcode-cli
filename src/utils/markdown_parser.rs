@@ -66,7 +66,14 @@ pub fn parse_markdown_content_ext(content: &str, extract_thinking: bool) -> Vec<
     } else {
         // Strip all thinking tags
         let mut remaining = content.to_string();
-        for tag in ["<thinking>", "<think>", "<思考>", "<thought>", "<plan>", "<thinking_process>"] {
+        for tag in [
+            "<thinking>",
+            "<think>",
+            "<思考>",
+            "<thought>",
+            "<plan>",
+            "<thinking_process>",
+        ] {
             let close = tag.replacen("<", "</", 1);
             remaining = remaining.replace(tag, "").replace(&close, "");
         }
@@ -100,7 +107,14 @@ pub fn parse_markdown_content_ext(content: &str, extract_thinking: bool) -> Vec<
         if remaining.trim().is_empty() && !content.trim().is_empty() {
             // Strip tags and check if any non-whitespace remains
             let mut stripped = content.to_string();
-            for tag in ["<thinking>", "<think>", "<思考>", "<thought>", "<plan>", "<thinking_process>"] {
+            for tag in [
+                "<thinking>",
+                "<think>",
+                "<思考>",
+                "<thought>",
+                "<plan>",
+                "<thinking_process>",
+            ] {
                 let close = tag.replacen("<", "</", 1);
                 stripped = stripped.replace(tag, "").replace(&close, "");
             }
@@ -223,12 +237,12 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                         HeadingLevel::H1 => Style::default()
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                        HeadingLevel::H2 => {
-                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-                        }
-                        HeadingLevel::H3 => {
-                            Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)
-                        }
+                        HeadingLevel::H2 => Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                        HeadingLevel::H3 => Style::default()
+                            .fg(Color::Blue)
+                            .add_modifier(Modifier::BOLD),
                         _ => Style::default().fg(Color::Blue),
                     };
                     style_stack.push(heading_style);
@@ -236,8 +250,7 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                 Tag::BlockQuote(_) => {
                     blockquote_depth += 1;
                     let prefix = "│ ".repeat(blockquote_depth);
-                    current_spans
-                        .push(Span::styled(prefix, Style::default().fg(Color::DarkGray)));
+                    current_spans.push(Span::styled(prefix, Style::default().fg(Color::DarkGray)));
                 }
                 Tag::CodeBlock(kind) => {
                     in_code_block = true;
@@ -257,7 +270,9 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                         lines.push(Line::from(vec![
                             Span::styled(
                                 label,
-                                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                                Style::default()
+                                    .fg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(
                                 "─".repeat(dash_count),
@@ -267,10 +282,7 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                     } else {
                         let dash_count = 40.min(wrap_width.unwrap_or(80)).saturating_sub(4);
                         lines.push(Line::from(vec![
-                            Span::styled(
-                                "  ┌ ",
-                                Style::default().fg(Color::DarkGray),
-                            ),
+                            Span::styled("  ┌ ", Style::default().fg(Color::DarkGray)),
                             Span::styled(
                                 "─".repeat(dash_count),
                                 Style::default().fg(Color::DarkGray),
@@ -342,10 +354,8 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                     link_url_stack.push(dest_url.to_string());
                 }
                 Tag::Image { dest_url, .. } => {
-                    current_spans.push(Span::styled(
-                        "[img: ",
-                        Style::default().fg(Color::DarkGray),
-                    ));
+                    current_spans
+                        .push(Span::styled("[img: ", Style::default().fg(Color::DarkGray)));
                     let mut s = current_style(&style_stack);
                     s = s.fg(Color::Cyan).add_modifier(Modifier::UNDERLINED);
                     style_stack.push(s);
@@ -353,9 +363,7 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                 }
                 Tag::MetadataBlock(_) => {}
                 Tag::HtmlBlock => {}
-                Tag::DefinitionList
-                | Tag::DefinitionListTitle
-                | Tag::DefinitionListDefinition => {}
+                Tag::DefinitionList | Tag::DefinitionListTitle | Tag::DefinitionListDefinition => {}
             },
             Event::End(tag_end) => match tag_end {
                 TagEnd::Paragraph => {
@@ -376,10 +384,7 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                     // 顶边总宽 = 40.min(w)（含语言标签与 copy hint），底边 "  └" 占 3 列，
                     // 因此 dash 数 = 40.min(w) - 3，保证左右角与顶边对齐
                     lines.push(Line::from(vec![
-                        Span::styled(
-                            "  └",
-                            Style::default().fg(Color::DarkGray),
-                        ),
+                        Span::styled("  └", Style::default().fg(Color::DarkGray)),
                         Span::styled(
                             "─".repeat(40.min(wrap_width.unwrap_or(80)).saturating_sub(3)),
                             Style::default().fg(Color::DarkGray),
@@ -464,9 +469,10 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                                 lines.push(Line::from(""));
                             } else {
                                 let mut is_first = true;
-                                for wrapped in crate::ui::utils::render::wrap_text_to_width(line_str, code_w) {
-                                    let highlighted =
-                                        highlight_code_line(&wrapped, &language);
+                                for wrapped in
+                                    crate::ui::utils::render::wrap_text_to_width(line_str, code_w)
+                                {
+                                    let highlighted = highlight_code_line(&wrapped, &language);
                                     let mut line_spans: Vec<Span> = Vec::new();
                                     is_first = false;
                                     line_spans.extend(highlighted.spans.iter().cloned());
@@ -485,9 +491,7 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                 } else {
                     current_spans.push(Span::styled(
                         text.to_string(),
-                        Style::default()
-                            .fg(Color::White)
-                            .bg(Color::DarkGray),
+                        Style::default().fg(Color::White).bg(Color::DarkGray),
                     ));
                 }
             }
@@ -501,9 +505,10 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                             if line_str.is_empty() {
                                 lines.push(Line::from(""));
                             } else {
-                                for wrapped in crate::ui::utils::render::wrap_text_to_width(line_str, code_w) {
-                                    let highlighted =
-                                        highlight_code_line(&wrapped, &language);
+                                for wrapped in
+                                    crate::ui::utils::render::wrap_text_to_width(line_str, code_w)
+                                {
+                                    let highlighted = highlight_code_line(&wrapped, &language);
                                     let mut line_spans: Vec<Span> = Vec::new();
                                     line_spans.extend(highlighted.spans.iter().cloned());
                                     lines.push(Line::from(line_spans));
@@ -522,7 +527,8 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                     let style = current_style(&style_stack);
                     // Apply text wrapping to regular text
                     if let Some(max_w) = wrap_width {
-                        let wrapped_lines = crate::ui::utils::render::wrap_text_to_width(text, max_w);
+                        let wrapped_lines =
+                            crate::ui::utils::render::wrap_text_to_width(text, max_w);
                         for (i, wrapped_line) in wrapped_lines.iter().enumerate() {
                             if i > 0 {
                                 flush_line(&mut current_spans, &mut lines);
@@ -553,8 +559,7 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                 flush_line(&mut current_spans, &mut lines);
                 if blockquote_depth > 0 {
                     let prefix = "│ ".repeat(blockquote_depth);
-                    current_spans
-                        .push(Span::styled(prefix, Style::default().fg(Color::DarkGray)));
+                    current_spans.push(Span::styled(prefix, Style::default().fg(Color::DarkGray)));
                 }
             }
             Event::Rule => {
@@ -568,10 +573,7 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
             }
             Event::TaskListMarker(checked) => {
                 let marker = if checked { "[x] " } else { "[ ] " };
-                current_spans.push(Span::styled(
-                    marker,
-                    Style::default().fg(Color::Yellow),
-                ));
+                current_spans.push(Span::styled(marker, Style::default().fg(Color::Yellow)));
             }
         }
     }
@@ -593,7 +595,10 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
     let mut lines = collapsed;
 
     // Trim trailing empty lines to avoid double-blank at end of content
-    while lines.last().is_some_and(|l| l.spans.is_empty() || l.spans.iter().all(|s| s.content.is_empty())) {
+    while lines
+        .last()
+        .is_some_and(|l| l.spans.is_empty() || l.spans.iter().all(|s| s.content.is_empty()))
+    {
         lines.pop();
     }
 
@@ -643,10 +648,13 @@ fn render_table(
             // Reduce column widths proportionally
             let available_width = max_w.saturating_sub(border_chars + padding_chars);
             let scale_factor = available_width as f64 / total_content_width as f64;
-            col_widths.iter().map(|&w| {
-                let scaled = (w as f64 * scale_factor) as usize;
-                scaled.max(3) // Minimum 3 chars per column
-            }).collect::<Vec<_>>()
+            col_widths
+                .iter()
+                .map(|&w| {
+                    let scaled = (w as f64 * scale_factor) as usize;
+                    scaled.max(3) // Minimum 3 chars per column
+                })
+                .collect::<Vec<_>>()
         } else {
             col_widths.clone()
         }
@@ -704,7 +712,7 @@ fn render_table(
                 cell.to_string()
             };
             let display_width = UnicodeWidthStr::width_cjk(display_cell.as_str());
-            
+
             let pad = target_width.saturating_sub(display_width);
             let alignment = col_alignments.get(ci).unwrap_or(&Alignment::Left);
             let padded = match alignment {
@@ -848,7 +856,10 @@ fn starts_list_item(s: &str) -> bool {
         }
     }
     // 有序列表: "1. " / "23) " 等
-    let digits: String = first_line.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = first_line
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     if !digits.is_empty() {
         let after = &first_line[digits.len()..];
         if after.starts_with(". ") || after.starts_with(") ") {

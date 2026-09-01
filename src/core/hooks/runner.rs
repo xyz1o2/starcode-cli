@@ -92,7 +92,14 @@ async fn run_one_hook(
     if let Some(stop_reason) = context.stop_reason.as_ref() {
         cmd.env("STAR_HOOK_STOP_REASON", stop_reason);
     }
-    cmd.env("STAR_HOOK_STOP_HOOK_ACTIVE", if context.stop_hook_active { "true" } else { "false" });
+    cmd.env(
+        "STAR_HOOK_STOP_HOOK_ACTIVE",
+        if context.stop_hook_active {
+            "true"
+        } else {
+            "false"
+        },
+    );
     if let Some(working_dir) = working_dir {
         cmd.current_dir(working_dir);
         cmd.env("STAR_HOOK_WORKING_DIR", working_dir);

@@ -130,7 +130,11 @@ impl MailboxManager {
     }
 
     /// 读取 mailbox
-    pub fn read_mailbox(&self, team_name: &str, agent_name: &str) -> Result<MailboxFile, MailboxError> {
+    pub fn read_mailbox(
+        &self,
+        team_name: &str,
+        agent_name: &str,
+    ) -> Result<MailboxFile, MailboxError> {
         let path = self.mailbox_path(team_name, agent_name);
         if !path.exists() {
             return Ok(MailboxFile {
@@ -141,11 +145,10 @@ impl MailboxManager {
             });
         }
 
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| MailboxError::IoError(e.to_string()))?;
+        let content =
+            std::fs::read_to_string(&path).map_err(|e| MailboxError::IoError(e.to_string()))?;
 
-        serde_json::from_str(&content)
-            .map_err(|e| MailboxError::ParseError(e.to_string()))
+        serde_json::from_str(&content).map_err(|e| MailboxError::ParseError(e.to_string()))
     }
 
     /// 写入 mailbox（原子写入：先写临时文件，再 rename）
@@ -154,8 +157,7 @@ impl MailboxManager {
 
         // 确保目录存在
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| MailboxError::IoError(e.to_string()))?;
+            std::fs::create_dir_all(parent).map_err(|e| MailboxError::IoError(e.to_string()))?;
         }
 
         // 序列化
@@ -172,10 +174,8 @@ impl MailboxManager {
 
         // 原子写入：先写临时文件，再 rename
         let temp_path = path.with_extension("json.tmp");
-        std::fs::write(&temp_path, &content)
-            .map_err(|e| MailboxError::IoError(e.to_string()))?;
-        std::fs::rename(&temp_path, &path)
-            .map_err(|e| MailboxError::IoError(e.to_string()))?;
+        std::fs::write(&temp_path, &content).map_err(|e| MailboxError::IoError(e.to_string()))?;
+        std::fs::rename(&temp_path, &path).map_err(|e| MailboxError::IoError(e.to_string()))?;
 
         Ok(())
     }
@@ -214,7 +214,12 @@ impl MailboxManager {
         agent_name: &str,
     ) -> Result<Vec<MailboxMessage>, MailboxError> {
         let mailbox = self.read_mailbox(team_name, agent_name)?;
-        Ok(mailbox.messages.iter().filter(|m| !m.read).cloned().collect())
+        Ok(mailbox
+            .messages
+            .iter()
+            .filter(|m| !m.read)
+            .cloned()
+            .collect())
     }
 
     /// 标记消息为已读
@@ -235,11 +240,7 @@ impl MailboxManager {
     }
 
     /// 获取未读消息数量
-    pub fn unread_count(
-        &self,
-        team_name: &str,
-        agent_name: &str,
-    ) -> Result<usize, MailboxError> {
+    pub fn unread_count(&self, team_name: &str, agent_name: &str) -> Result<usize, MailboxError> {
         let mailbox = self.read_mailbox(team_name, agent_name)?;
         Ok(mailbox.messages.iter().filter(|m| !m.read).count())
     }
@@ -322,8 +323,14 @@ pub enum MailboxError {
     IoError(String),
     ParseError(String),
     SerializeError(String),
-    MessageTooLarge { size: usize, max_size: usize },
-    MailboxFull { current_size: usize, max_size: usize },
+    MessageTooLarge {
+        size: usize,
+        max_size: usize,
+    },
+    MailboxFull {
+        current_size: usize,
+        max_size: usize,
+    },
 }
 
 impl std::fmt::Display for MailboxError {
@@ -335,8 +342,15 @@ impl std::fmt::Display for MailboxError {
             MailboxError::MessageTooLarge { size, max_size } => {
                 write!(f, "Message too large: {} bytes (max: {})", size, max_size)
             }
-            MailboxError::MailboxFull { current_size, max_size } => {
-                write!(f, "Mailbox full: {} bytes (max: {})", current_size, max_size)
+            MailboxError::MailboxFull {
+                current_size,
+                max_size,
+            } => {
+                write!(
+                    f,
+                    "Mailbox full: {} bytes (max: {})",
+                    current_size, max_size
+                )
             }
         }
     }
@@ -439,12 +453,18 @@ impl ToolInvocation for SendMessageInvocation {
 }
 
 impl BaseDeclarativeTool for SendMessageTool {
-    fn name(&self) -> &str { "send_message" }
-    fn display_name(&self) -> &str { "SendMessage" }
+    fn name(&self) -> &str {
+        "send_message"
+    }
+    fn display_name(&self) -> &str {
+        "SendMessage"
+    }
     fn description(&self) -> &str {
         "向团队成员发送消息。用于多Agent协作中的通信。(Send a message to a team member. Used for communication in multi-agent collaboration.)"
     }
-    fn kind(&self) -> Kind { Kind::Other }
+    fn kind(&self) -> Kind {
+        Kind::Other
+    }
 
     fn parameter_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -482,7 +502,9 @@ impl BaseDeclarativeTool for SendMessageTool {
         }))
     }
 
-    fn is_read_only(&self) -> bool { false }
+    fn is_read_only(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -506,9 +528,13 @@ mod tests {
             color: None,
         };
 
-        mailbox.send_message("test-team", "researcher", msg).unwrap();
+        mailbox
+            .send_message("test-team", "researcher", msg)
+            .unwrap();
 
-        let unread = mailbox.read_unread_messages("test-team", "researcher").unwrap();
+        let unread = mailbox
+            .read_unread_messages("test-team", "researcher")
+            .unwrap();
         assert_eq!(unread.len(), 1);
         assert_eq!(unread[0].content, "Hello!");
     }
@@ -530,10 +556,16 @@ mod tests {
             color: None,
         };
 
-        mailbox.send_message("test-team", "researcher", msg).unwrap();
-        mailbox.mark_as_read("test-team", "researcher", "test-msg-1").unwrap();
+        mailbox
+            .send_message("test-team", "researcher", msg)
+            .unwrap();
+        mailbox
+            .mark_as_read("test-team", "researcher", "test-msg-1")
+            .unwrap();
 
-        let unread = mailbox.read_unread_messages("test-team", "researcher").unwrap();
+        let unread = mailbox
+            .read_unread_messages("test-team", "researcher")
+            .unwrap();
         assert_eq!(unread.len(), 0);
     }
 }

@@ -50,56 +50,57 @@ pub fn render_usage_stats(f: &mut Frame, stats: &UsageStats, area: Rect, theme: 
         .border_style(Style::default().fg(theme.border));
 
     // Session info
-    let session_lines = vec![
-        Line::from(vec![
-            Span::styled("  Sessions: ", Style::default().fg(theme.secondary)),
-            Span::styled(
-                format!("{}", stats.session_count),
-                Style::default().fg(theme.foreground),
-            ),
-            Span::styled("  Duration: ", Style::default().fg(theme.secondary)),
-            Span::styled(
-                stats.session_duration.clone(),
-                Style::default().fg(theme.foreground),
-            ),
-        ]),
-    ];
-    f.render_widget(Paragraph::new(session_lines).block(block.clone()), chunks[0]);
+    let session_lines = vec![Line::from(vec![
+        Span::styled("  Sessions: ", Style::default().fg(theme.secondary)),
+        Span::styled(
+            format!("{}", stats.session_count),
+            Style::default().fg(theme.foreground),
+        ),
+        Span::styled("  Duration: ", Style::default().fg(theme.secondary)),
+        Span::styled(
+            stats.session_duration.clone(),
+            Style::default().fg(theme.foreground),
+        ),
+    ])];
+    f.render_widget(
+        Paragraph::new(session_lines).block(block.clone()),
+        chunks[0],
+    );
 
     // Token info
-    let token_lines = vec![
-        Line::from(vec![
-            Span::styled("  Total Tokens: ", Style::default().fg(theme.secondary)),
-            Span::styled(
-                stats.format_total_tokens(),
-                Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  Messages: ", Style::default().fg(theme.secondary)),
-            Span::styled(
-                format!("{}", stats.total_messages),
-                Style::default().fg(theme.foreground),
-            ),
-        ]),
-    ];
+    let token_lines = vec![Line::from(vec![
+        Span::styled("  Total Tokens: ", Style::default().fg(theme.secondary)),
+        Span::styled(
+            stats.format_total_tokens(),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  Messages: ", Style::default().fg(theme.secondary)),
+        Span::styled(
+            format!("{}", stats.total_messages),
+            Style::default().fg(theme.foreground),
+        ),
+    ])];
     f.render_widget(Paragraph::new(token_lines).block(block.clone()), chunks[1]);
 
     // Cost info
-    let cost_lines = vec![
-        Line::from(vec![
-            Span::styled("  Total Cost: ", Style::default().fg(theme.secondary)),
-            Span::styled(
-                format!("${:.2}", stats.total_cost),
-                Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-    ];
+    let cost_lines = vec![Line::from(vec![
+        Span::styled("  Total Cost: ", Style::default().fg(theme.secondary)),
+        Span::styled(
+            format!("${:.2}", stats.total_cost),
+            Style::default()
+                .fg(theme.success)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
     f.render_widget(Paragraph::new(cost_lines).block(block.clone()), chunks[2]);
 
     // Model usage
-    let mut model_lines = vec![Line::from(vec![
-        Span::styled("  Model Usage:", Style::default().fg(theme.secondary),
-        ),
-    ])];
+    let mut model_lines = vec![Line::from(vec![Span::styled(
+        "  Model Usage:",
+        Style::default().fg(theme.secondary),
+    )])];
     for (model, tokens) in &stats.models_used {
         let token_str = if *tokens >= 1_000_000 {
             format!("{:.1}M", *tokens as f64 / 1_000_000.0)
@@ -109,7 +110,10 @@ pub fn render_usage_stats(f: &mut Frame, stats: &UsageStats, area: Rect, theme: 
             tokens.to_string()
         };
         model_lines.push(Line::from(vec![
-            Span::styled(format!("    {}: ", model), Style::default().fg(theme.secondary)),
+            Span::styled(
+                format!("    {}: ", model),
+                Style::default().fg(theme.secondary),
+            ),
             Span::styled(token_str, Style::default().fg(theme.primary)),
         ]));
     }

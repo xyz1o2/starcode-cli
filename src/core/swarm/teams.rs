@@ -5,7 +5,7 @@
 //! - Teammate 生命周期
 //! - 团队协作协议
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -144,7 +144,10 @@ impl SwarmManager {
             .ok_or_else(|| format!("Member '{}' not found in team '{}'", member_name, team_name))?;
 
         if member.status != TeammateStatus::Idle {
-            return Err(format!("Member '{}' is not idle (status: {:?})", member_name, member.status));
+            return Err(format!(
+                "Member '{}' is not idle (status: {:?})",
+                member_name, member.status
+            ));
         }
 
         member.status = TeammateStatus::Working;
@@ -265,10 +268,9 @@ fn now_ms() -> u128 {
 }
 
 pub fn load_team_file(path: &std::path::Path) -> Result<TeamFile, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read team file: {}", e))?;
-    serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse team file: {}", e))
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read team file: {}", e))?;
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse team file: {}", e))
 }
 
 pub fn validate_team_file(team: &TeamFile) -> Result<(), String> {

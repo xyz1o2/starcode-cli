@@ -56,12 +56,19 @@ pub fn get_items(mode: &PaletteMode, state: &ChatState) -> Vec<PaletteItem> {
         PaletteMode::AddProviderId(provider_type) => get_add_provider_id_items(provider_type),
         PaletteMode::Memory => get_memory_palette_items(),
         PaletteMode::AgentMode => get_agent_mode_palette_items(),
-        PaletteMode::ThinkingEffort => get_thinking_effort_palette_items(&state.thinking_effort, &state.current_model),
-        PaletteMode::ContextWindow => get_context_window_palette_items(state.context_window_override),
-        PaletteMode::Theme => get_theme_palette_items(state),
-        PaletteMode::Model => {
-            get_model_palette_items(&state.available_models, &state.current_model, state.awaiting_models, &state.model_provider_map)
+        PaletteMode::ThinkingEffort => {
+            get_thinking_effort_palette_items(&state.thinking_effort, &state.current_model)
         }
+        PaletteMode::ContextWindow => {
+            get_context_window_palette_items(state.context_window_override)
+        }
+        PaletteMode::Theme => get_theme_palette_items(state),
+        PaletteMode::Model => get_model_palette_items(
+            &state.available_models,
+            &state.current_model,
+            state.awaiting_models,
+            &state.model_provider_map,
+        ),
         PaletteMode::Project => get_project_palette_items(),
         PaletteMode::Integrations => get_integrations_palette_items(),
         PaletteMode::McpManage => get_mcp_manage_palette_items(),
@@ -163,7 +170,12 @@ fn get_global_search_palette_items(state: &ChatState) -> Vec<PaletteItem> {
         push_unique_actionable_items(
             &mut items,
             &mut seen,
-            get_model_palette_items(&state.available_models, &state.current_model, state.awaiting_models, &state.model_provider_map),
+            get_model_palette_items(
+                &state.available_models,
+                &state.current_model,
+                state.awaiting_models,
+                &state.model_provider_map,
+            ),
         );
     }
 
@@ -178,7 +190,10 @@ fn get_all_provider_search_items(configured: &HashSet<String>) -> Vec<PaletteIte
         .collect();
 
     // Add custom providers
-    for id in configured.iter().filter(|id| !builtin_ids.contains(id.as_str())) {
+    for id in configured
+        .iter()
+        .filter(|id| !builtin_ids.contains(id.as_str()))
+    {
         items.push(PaletteItem {
             id: format!("provider_{}", id),
             label: format!("{} ✓", id),
@@ -239,8 +254,12 @@ fn palette_action_key(action: &PaletteAction) -> String {
         PaletteAction::ToggleUiVerbose => "toggle_ui_verbose".to_string(),
         PaletteAction::CreatePr => "create_pr".to_string(),
         PaletteAction::ToggleColorblindMode => "toggle_colorblind_mode".to_string(),
-        PaletteAction::InputProviderId(provider_type) => format!("add_provider_id:{}", provider_type),
-        PaletteAction::InputProviderName(provider_id) => format!("add_provider_name:{}", provider_id),
+        PaletteAction::InputProviderId(provider_type) => {
+            format!("add_provider_id:{}", provider_type)
+        }
+        PaletteAction::InputProviderName(provider_id) => {
+            format!("add_provider_name:{}", provider_id)
+        }
     }
 }
 
@@ -352,14 +371,26 @@ fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec<PaletteIte
         },
         PaletteItem {
             id: "settings_overview".to_string(),
-            label: i18n::t("palette.label.settings_overview", "Settings Overview", "Settings Overview"),
-            description: i18n::t("palette.desc.settings_overview", "Config files, language and provider paths", "Config files, language and provider paths"),
+            label: i18n::t(
+                "palette.label.settings_overview",
+                "Settings Overview",
+                "Settings Overview",
+            ),
+            description: i18n::t(
+                "palette.desc.settings_overview",
+                "Config files, language and provider paths",
+                "Config files, language and provider paths",
+            ),
             category: Some(i18n::t("palette.cat.settings", "Settings", "Settings")),
             action: PaletteAction::ExecuteCommand("/settings".to_string()),
         },
         PaletteItem {
             id: "approval_mode".to_string(),
-            label: i18n::t("palette.label.approval_mode", "Approval Mode", "Approval Mode"),
+            label: i18n::t(
+                "palette.label.approval_mode",
+                "Approval Mode",
+                "Approval Mode",
+            ),
             description: approval_mode_description(state),
             category: Some(i18n::t("palette.cat.settings", "Settings", "Settings")),
             action: PaletteAction::Navigate(PaletteMode::AgentMode),
@@ -382,9 +413,17 @@ fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec<PaletteIte
             id: "vim_mode".to_string(),
             label: i18n::t("palette.label.vim_mode", "Vim Mode", "Vim Mode"),
             description: if state.map_or(false, |s| s.vim_enabled) {
-                i18n::t("palette.desc.vim_on", "Enabled — toggle off", "Enabled — toggle off")
+                i18n::t(
+                    "palette.desc.vim_on",
+                    "Enabled — toggle off",
+                    "Enabled — toggle off",
+                )
             } else {
-                i18n::t("palette.desc.vim_off", "Disabled — toggle on", "Disabled — toggle on")
+                i18n::t(
+                    "palette.desc.vim_off",
+                    "Disabled — toggle on",
+                    "Disabled — toggle on",
+                )
             },
             category: Some(i18n::t("palette.cat.settings", "Settings", "Settings")),
             action: PaletteAction::ToggleVimMode,
@@ -402,75 +441,135 @@ fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec<PaletteIte
         },
         PaletteItem {
             id: "colorblind_mode".to_string(),
-            label: i18n::t("palette.label.colorblind", "Colorblind Mode", "Colorblind Mode"),
+            label: i18n::t(
+                "palette.label.colorblind",
+                "Colorblind Mode",
+                "Colorblind Mode",
+            ),
             description: if state.map_or(false, |s| s.colorblind_mode) {
-                i18n::t("palette.desc.colorblind_on", "Enabled — toggle off", "Enabled — toggle off")
+                i18n::t(
+                    "palette.desc.colorblind_on",
+                    "Enabled — toggle off",
+                    "Enabled — toggle off",
+                )
             } else {
-                i18n::t("palette.desc.colorblind_off", "Disabled — add shape indicators", "Disabled — add shape indicators")
+                i18n::t(
+                    "palette.desc.colorblind_off",
+                    "Disabled — add shape indicators",
+                    "Disabled — add shape indicators",
+                )
             },
             category: Some(i18n::t("palette.cat.settings", "Settings", "Settings")),
             action: PaletteAction::ToggleColorblindMode,
         },
         PaletteItem {
             id: "system_doctor".to_string(),
-            label: i18n::t("palette.label.system_doctor", "System Doctor", "System Doctor"),
-            description: i18n::t("palette.desc.system_doctor", "Run diagnostics", "Run diagnostics"),
+            label: i18n::t(
+                "palette.label.system_doctor",
+                "System Doctor",
+                "System Doctor",
+            ),
+            description: i18n::t(
+                "palette.desc.system_doctor",
+                "Run diagnostics",
+                "Run diagnostics",
+            ),
             category: Some(i18n::t("palette.cat.settings", "Settings", "Settings")),
             action: PaletteAction::ExecuteCommand("/doctor".to_string()),
         },
         PaletteItem {
             id: "session_menu".to_string(),
             label: i18n::t("palette.label.sessions", "Sessions", "Sessions"),
-            description: i18n::t("palette.desc.sessions", "New, switch, save and delete sessions", "New, switch, save and delete sessions"),
+            description: i18n::t(
+                "palette.desc.sessions",
+                "New, switch, save and delete sessions",
+                "New, switch, save and delete sessions",
+            ),
             category: Some(i18n::t("palette.cat.workspace", "Workspace", "Workspace")),
             action: PaletteAction::Navigate(PaletteMode::Session),
         },
         PaletteItem {
             id: "project_menu".to_string(),
             label: i18n::t("palette.label.project", "Project", "Project"),
-            description: i18n::t("palette.desc.project", "Init, Restore, Git Status", "Init, Restore, Git Status"),
+            description: i18n::t(
+                "palette.desc.project",
+                "Init, Restore, Git Status",
+                "Init, Restore, Git Status",
+            ),
             category: Some(i18n::t("palette.cat.workspace", "Workspace", "Workspace")),
             action: PaletteAction::Navigate(PaletteMode::Project),
         },
         PaletteItem {
             id: "integrations_menu".to_string(),
             label: i18n::t("palette.label.integrations", "Integrations", "Integrations"),
-            description: i18n::t("palette.desc.integrations", "MCP Servers, Tools", "MCP Servers, Tools"),
+            description: i18n::t(
+                "palette.desc.integrations",
+                "MCP Servers, Tools",
+                "MCP Servers, Tools",
+            ),
             category: Some(i18n::t("palette.cat.workspace", "Workspace", "Workspace")),
             action: PaletteAction::Navigate(PaletteMode::Integrations),
         },
         PaletteItem {
             id: "memory_menu".to_string(),
             label: i18n::t("palette.label.memory", "Memory", "Memory"),
-            description: i18n::t("palette.desc.memory", "Show, add, refresh", "Show, add, refresh"),
+            description: i18n::t(
+                "palette.desc.memory",
+                "Show, add, refresh",
+                "Show, add, refresh",
+            ),
             category: Some(i18n::t("palette.cat.workspace", "Workspace", "Workspace")),
             action: PaletteAction::Navigate(PaletteMode::Memory),
         },
         PaletteItem {
             id: "help_menu".to_string(),
             label: i18n::t("palette.label.help", "Help", "Help"),
-            description: i18n::t("palette.desc.help", "Shortcuts and common commands", "Shortcuts and common commands"),
+            description: i18n::t(
+                "palette.desc.help",
+                "Shortcuts and common commands",
+                "Shortcuts and common commands",
+            ),
             category: Some(i18n::t("palette.cat.support", "Support", "Support")),
             action: PaletteAction::Navigate(PaletteMode::Help),
         },
         PaletteItem {
             id: "context_viz".to_string(),
             label: i18n::t("palette.label.context", "Context Window", "Context Window"),
-            description: i18n::t("palette.desc.context", "View token usage breakdown", "View token usage breakdown"),
-            category: Some(i18n::t("palette.cat.diagnostics", "Diagnostics", "Diagnostics")),
+            description: i18n::t(
+                "palette.desc.context",
+                "View token usage breakdown",
+                "View token usage breakdown",
+            ),
+            category: Some(i18n::t(
+                "palette.cat.diagnostics",
+                "Diagnostics",
+                "Diagnostics",
+            )),
             action: PaletteAction::ShowContextViz,
         },
         PaletteItem {
             id: "output_style".to_string(),
             label: i18n::t("palette.label.output_style", "Output Style", "Output Style"),
-            description: i18n::t("palette.desc.output_style", "Change response formatting style", "Change response formatting style"),
+            description: i18n::t(
+                "palette.desc.output_style",
+                "Change response formatting style",
+                "Change response formatting style",
+            ),
             category: Some(i18n::t("palette.cat.settings", "Settings", "Settings")),
             action: PaletteAction::Navigate(PaletteMode::OutputStyle),
         },
         PaletteItem {
             id: "log_selector".to_string(),
-            label: i18n::t("palette.label.log_selector", "Session Browser", "Session Browser"),
-            description: i18n::t("palette.desc.log_selector", "Browse and resume past sessions", "Browse and resume past sessions"),
+            label: i18n::t(
+                "palette.label.log_selector",
+                "Session Browser",
+                "Session Browser",
+            ),
+            description: i18n::t(
+                "palette.desc.log_selector",
+                "Browse and resume past sessions",
+                "Browse and resume past sessions",
+            ),
             category: Some(i18n::t("palette.cat.workspace", "Workspace", "Workspace")),
             action: PaletteAction::ShowLogSelector,
         },
@@ -483,42 +582,78 @@ pub fn get_session_palette_items() -> Vec<PaletteItem> {
         PaletteItem {
             id: "back".to_string(),
             label: i18n::t("palette.back.label", ".. Back", ".. Back"),
-            description: i18n::t("palette.back.desc.main", "Return to main menu", "Return to main menu"),
+            description: i18n::t(
+                "palette.back.desc.main",
+                "Return to main menu",
+                "Return to main menu",
+            ),
             category: None,
             action: PaletteAction::Back,
         },
         PaletteItem {
             id: "new_session".to_string(),
             label: i18n::t("palette.label.new_session", "New Session", "New Session"),
-            description: i18n::t("palette.desc.new_session", "Start a new session", "Start a new session"),
+            description: i18n::t(
+                "palette.desc.new_session",
+                "Start a new session",
+                "Start a new session",
+            ),
             category: cat.clone(),
             action: PaletteAction::ExecuteCommand("/clear".to_string()),
         },
         PaletteItem {
             id: "switch_session".to_string(),
-            label: i18n::t("palette.label.switch_session", "Switch Session", "Switch Session"),
-            description: i18n::t("palette.desc.switch_session", "Browse and resume a saved session", "Browse and resume a saved session"),
+            label: i18n::t(
+                "palette.label.switch_session",
+                "Switch Session",
+                "Switch Session",
+            ),
+            description: i18n::t(
+                "palette.desc.switch_session",
+                "Browse and resume a saved session",
+                "Browse and resume a saved session",
+            ),
             category: cat.clone(),
             action: PaletteAction::ShowSessionMenu,
         },
         PaletteItem {
             id: "save_session".to_string(),
             label: i18n::t("palette.label.save_session", "Save Session", "Save Session"),
-            description: i18n::t("palette.desc.save_session", "Save checkpoint (/chat save)", "Save checkpoint (/chat save)"),
+            description: i18n::t(
+                "palette.desc.save_session",
+                "Save checkpoint (/chat save)",
+                "Save checkpoint (/chat save)",
+            ),
             category: cat.clone(),
             action: PaletteAction::TypeCommand("/chat save ".to_string()),
         },
         PaletteItem {
             id: "delete_session".to_string(),
-            label: i18n::t("palette.label.delete_session", "Delete Session", "Delete Session"),
-            description: i18n::t("palette.desc.delete_session", "Delete a saved session", "Delete a saved session"),
+            label: i18n::t(
+                "palette.label.delete_session",
+                "Delete Session",
+                "Delete Session",
+            ),
+            description: i18n::t(
+                "palette.desc.delete_session",
+                "Delete a saved session",
+                "Delete a saved session",
+            ),
             category: cat.clone(),
             action: PaletteAction::TypeCommand("/chat delete ".to_string()),
         },
         PaletteItem {
             id: "resume_latest".to_string(),
-            label: i18n::t("palette.label.resume_latest", "Resume Latest", "Resume Latest"),
-            description: i18n::t("palette.desc.resume_latest", "Restore the most recent saved session", "Restore the most recent saved session"),
+            label: i18n::t(
+                "palette.label.resume_latest",
+                "Resume Latest",
+                "Resume Latest",
+            ),
+            description: i18n::t(
+                "palette.desc.resume_latest",
+                "Restore the most recent saved session",
+                "Restore the most recent saved session",
+            ),
             category: cat,
             action: PaletteAction::ExecuteCommand("/resume".to_string()),
         },
@@ -527,33 +662,65 @@ pub fn get_session_palette_items() -> Vec<PaletteItem> {
 
 pub fn get_system_palette_items() -> Vec<PaletteItem> {
     let cat_settings = Some(i18n::t("palette.cat.settings", "Settings", "Settings"));
-    let cat_diag = Some(i18n::t("palette.cat.diagnostics", "Diagnostics", "Diagnostics"));
+    let cat_diag = Some(i18n::t(
+        "palette.cat.diagnostics",
+        "Diagnostics",
+        "Diagnostics",
+    ));
     vec![
         PaletteItem {
             id: "back".to_string(),
             label: i18n::t("palette.back.label", ".. Back", ".. Back"),
-            description: i18n::t("palette.back.desc.main", "Return to main menu", "Return to main menu"),
+            description: i18n::t(
+                "palette.back.desc.main",
+                "Return to main menu",
+                "Return to main menu",
+            ),
             category: None,
             action: PaletteAction::Back,
         },
         PaletteItem {
             id: "settings_help".to_string(),
-            label: i18n::t("palette.label.settings_overview", "Settings Overview", "Settings Overview"),
-            description: i18n::t("palette.desc.settings_show", "Show current model, provider and config paths", "Show current model, provider and config paths"),
+            label: i18n::t(
+                "palette.label.settings_overview",
+                "Settings Overview",
+                "Settings Overview",
+            ),
+            description: i18n::t(
+                "palette.desc.settings_show",
+                "Show current model, provider and config paths",
+                "Show current model, provider and config paths",
+            ),
             category: cat_settings.clone(),
             action: PaletteAction::ExecuteCommand("/settings".to_string()),
         },
         PaletteItem {
             id: "approval_mode".to_string(),
-            label: i18n::t("palette.label.approval_mode", "Approval Mode", "Approval Mode"),
-            description: i18n::t("palette.desc.approval_mode", "Switch Auto, Plan or Yolo", "Switch Auto, Plan or Yolo"),
+            label: i18n::t(
+                "palette.label.approval_mode",
+                "Approval Mode",
+                "Approval Mode",
+            ),
+            description: i18n::t(
+                "palette.desc.approval_mode",
+                "Switch Auto, Plan or Yolo",
+                "Switch Auto, Plan or Yolo",
+            ),
             category: cat_settings.clone(),
             action: PaletteAction::Navigate(PaletteMode::AgentMode),
         },
         PaletteItem {
             id: "system_doctor".to_string(),
-            label: i18n::t("palette.label.system_doctor", "System Doctor", "System Doctor"),
-            description: i18n::t("palette.desc.system_doctor_run", "Run system diagnostics (/doctor)", "Run system diagnostics (/doctor)"),
+            label: i18n::t(
+                "palette.label.system_doctor",
+                "System Doctor",
+                "System Doctor",
+            ),
+            description: i18n::t(
+                "palette.desc.system_doctor_run",
+                "Run system diagnostics (/doctor)",
+                "Run system diagnostics (/doctor)",
+            ),
             category: cat_diag,
             action: PaletteAction::ExecuteCommand("/doctor".to_string()),
         },
@@ -564,7 +731,11 @@ pub fn get_system_palette_items() -> Vec<PaletteItem> {
                 "{}: {} — {}",
                 i18n::t("palette.desc.lang_current", "Current", "Current"),
                 i18n::current_language().as_code(),
-                i18n::t("palette.desc.lang_switch", "Switch interface language", "Switch interface language"),
+                i18n::t(
+                    "palette.desc.lang_switch",
+                    "Switch interface language",
+                    "Switch interface language"
+                ),
             ),
             category: cat_settings,
             action: PaletteAction::Navigate(PaletteMode::Language),
@@ -574,15 +745,17 @@ pub fn get_system_palette_items() -> Vec<PaletteItem> {
 
 pub fn get_language_palette_items() -> Vec<PaletteItem> {
     let current = i18n::current_language();
-    let mut items = vec![
-        PaletteItem {
-            id: "back".to_string(),
-            label: i18n::t("palette.back.label", ".. Back", ".. Back"),
-            description: i18n::t("palette.back.desc.settings", "Return to settings", "Return to settings"),
-            category: None,
-            action: PaletteAction::Back,
-        },
-    ];
+    let mut items = vec![PaletteItem {
+        id: "back".to_string(),
+        label: i18n::t("palette.back.label", ".. Back", ".. Back"),
+        description: i18n::t(
+            "palette.back.desc.settings",
+            "Return to settings",
+            "Return to settings",
+        ),
+        category: None,
+        action: PaletteAction::Back,
+    }];
 
     for (code, label) in i18n::available_languages() {
         let resolved = i18n::resolve_ui_language(Some(code));
@@ -610,28 +783,44 @@ pub fn get_agent_palette_items() -> Vec<PaletteItem> {
         PaletteItem {
             id: "back".to_string(),
             label: i18n::t("palette.back.label", ".. Back", ".. Back"),
-            description: i18n::t("palette.back.desc.main", "Return to main menu", "Return to main menu"),
+            description: i18n::t(
+                "palette.back.desc.main",
+                "Return to main menu",
+                "Return to main menu",
+            ),
             category: None,
             action: PaletteAction::Back,
         },
         PaletteItem {
             id: "agent_mode".to_string(),
             label: i18n::t("palette.label.agent_mode", "Agent Mode", "Agent Mode"),
-            description: i18n::t("palette.desc.agent_mode", "Switch agent mode (Plan/Auto/Yolo)", "Switch agent mode (Plan/Auto/Yolo)"),
+            description: i18n::t(
+                "palette.desc.agent_mode",
+                "Switch agent mode (Plan/Auto/Yolo)",
+                "Switch agent mode (Plan/Auto/Yolo)",
+            ),
             category: cat.clone(),
             action: PaletteAction::Navigate(PaletteMode::AgentMode),
         },
         PaletteItem {
             id: "list_tools".to_string(),
             label: i18n::t("palette.label.list_tools", "List Tools", "List Tools"),
-            description: i18n::t("palette.desc.list_tools", "Show available tools", "Show available tools"),
+            description: i18n::t(
+                "palette.desc.list_tools",
+                "Show available tools",
+                "Show available tools",
+            ),
             category: cat.clone(),
             action: PaletteAction::ExecuteCommand("/tools".to_string()),
         },
         PaletteItem {
             id: "mcp_status".to_string(),
             label: i18n::t("palette.label.mcp_status", "MCP Status", "MCP Status"),
-            description: i18n::t("palette.desc.mcp_status", "Check MCP server status", "Check MCP server status"),
+            description: i18n::t(
+                "palette.desc.mcp_status",
+                "Check MCP server status",
+                "Check MCP server status",
+            ),
             category: cat,
             action: PaletteAction::ExecuteCommand("/mcp status".to_string()),
         },
@@ -644,28 +833,48 @@ pub fn get_memory_palette_items() -> Vec<PaletteItem> {
         PaletteItem {
             id: "back".to_string(),
             label: i18n::t("palette.back.label", ".. Back", ".. Back"),
-            description: i18n::t("palette.back.desc.prev", "Return to previous menu", "Return to previous menu"),
+            description: i18n::t(
+                "palette.back.desc.prev",
+                "Return to previous menu",
+                "Return to previous menu",
+            ),
             category: None,
             action: PaletteAction::Back,
         },
         PaletteItem {
             id: "memory_stats".to_string(),
             label: i18n::t("palette.label.show_memory", "Show Memory", "Show Memory"),
-            description: i18n::t("palette.desc.show_memory", "Open current project memory", "Open current project memory"),
+            description: i18n::t(
+                "palette.desc.show_memory",
+                "Open current project memory",
+                "Open current project memory",
+            ),
             category: cat.clone(),
             action: PaletteAction::ExecuteCommand("/memory show".to_string()),
         },
         PaletteItem {
             id: "compact_memory".to_string(),
             label: i18n::t("palette.label.add_memory", "Add Memory", "Add Memory"),
-            description: i18n::t("palette.desc.add_memory", "Append a new memory entry", "Append a new memory entry"),
+            description: i18n::t(
+                "palette.desc.add_memory",
+                "Append a new memory entry",
+                "Append a new memory entry",
+            ),
             category: cat.clone(),
             action: PaletteAction::TypeCommand("/memory add ".to_string()),
         },
         PaletteItem {
             id: "clear_memory".to_string(),
-            label: i18n::t("palette.label.refresh_memory", "Refresh Memory", "Refresh Memory"),
-            description: i18n::t("palette.desc.refresh_memory", "Reload memory from file", "Reload memory from file"),
+            label: i18n::t(
+                "palette.label.refresh_memory",
+                "Refresh Memory",
+                "Refresh Memory",
+            ),
+            description: i18n::t(
+                "palette.desc.refresh_memory",
+                "Reload memory from file",
+                "Reload memory from file",
+            ),
             category: cat,
             action: PaletteAction::ExecuteCommand("/memory refresh".to_string()),
         },
@@ -678,35 +887,54 @@ pub fn get_agent_mode_palette_items() -> Vec<PaletteItem> {
         PaletteItem {
             id: "back".to_string(),
             label: i18n::t("palette.back.label", ".. Back", ".. Back"),
-            description: i18n::t("palette.back.desc.prev", "Return to previous menu", "Return to previous menu"),
+            description: i18n::t(
+                "palette.back.desc.prev",
+                "Return to previous menu",
+                "Return to previous menu",
+            ),
             category: None,
             action: PaletteAction::Back,
         },
         PaletteItem {
             id: "mode_default".to_string(),
             label: i18n::t("palette.label.mode_auto", "Auto", "Auto"),
-            description: i18n::t("palette.desc.mode_auto", "Ask for confirmation on risky actions", "Ask for confirmation on risky actions"),
+            description: i18n::t(
+                "palette.desc.mode_auto",
+                "Ask for confirmation on risky actions",
+                "Ask for confirmation on risky actions",
+            ),
             category: cat.clone(),
             action: PaletteAction::SetAgentMode("default".to_string()),
         },
         PaletteItem {
             id: "mode_plan".to_string(),
             label: i18n::t("palette.label.mode_plan", "Plan Mode", "Plan Mode"),
-            description: i18n::t("palette.desc.mode_plan", "Research first, avoid write actions", "Research first, avoid write actions"),
+            description: i18n::t(
+                "palette.desc.mode_plan",
+                "Research first, avoid write actions",
+                "Research first, avoid write actions",
+            ),
             category: cat.clone(),
             action: PaletteAction::SetAgentMode("plan".to_string()),
         },
         PaletteItem {
             id: "mode_yolo".to_string(),
             label: i18n::t("palette.label.mode_yolo", "YOLO Mode", "YOLO Mode"),
-            description: i18n::t("palette.desc.mode_yolo", "Auto-approve all actions (dangerous)", "Auto-approve all actions (dangerous)"),
+            description: i18n::t(
+                "palette.desc.mode_yolo",
+                "Auto-approve all actions (dangerous)",
+                "Auto-approve all actions (dangerous)",
+            ),
             category: cat,
             action: PaletteAction::SetAgentMode("yolo".to_string()),
         },
     ]
 }
 
-pub fn get_thinking_effort_palette_items(current: &crate::types::ThinkingEffort, model_name: &str) -> Vec<PaletteItem> {
+pub fn get_thinking_effort_palette_items(
+    current: &crate::types::ThinkingEffort,
+    model_name: &str,
+) -> Vec<PaletteItem> {
     let cat = Some(i18n::t("palette.cat.thinking", "Thinking", "Thinking"));
     let cap = crate::core::config::models::thinking_capability(model_name);
 
@@ -718,21 +946,27 @@ pub fn get_thinking_effort_palette_items(current: &crate::types::ThinkingEffort,
     };
     let check = |id: &str| if id == current_id { " ●" } else { "" };
 
-    let mut items = vec![
-        PaletteItem {
-            id: "back".to_string(),
-            label: i18n::t("palette.back.label", ".. Back", ".. Back"),
-            description: i18n::t("palette.desc.back.main", "Return to previous menu", "Return to previous menu"),
-            category: None,
-            action: PaletteAction::Back,
-        },
-    ];
+    let mut items = vec![PaletteItem {
+        id: "back".to_string(),
+        label: i18n::t("palette.back.label", ".. Back", ".. Back"),
+        description: i18n::t(
+            "palette.desc.back.main",
+            "Return to previous menu",
+            "Return to previous menu",
+        ),
+        category: None,
+        action: PaletteAction::Back,
+    }];
 
     // Always show Off
     items.push(PaletteItem {
         id: "thinking_off".to_string(),
         label: format!("Off{}", check("thinking_off")),
-        description: i18n::t("palette.desc.thinking_off", "Disable thinking/reasoning", "Disable thinking/reasoning"),
+        description: i18n::t(
+            "palette.desc.thinking_off",
+            "Disable thinking/reasoning",
+            "Disable thinking/reasoning",
+        ),
         category: cat.clone(),
         action: PaletteAction::SetThinkingEffort("off".to_string()),
     });
@@ -743,21 +977,33 @@ pub fn get_thinking_effort_palette_items(current: &crate::types::ThinkingEffort,
             items.push(PaletteItem {
                 id: "thinking_low".to_string(),
                 label: format!("Low{}", check("thinking_low")),
-                description: i18n::t("palette.desc.thinking_low", "Light thinking for simple tasks", "Light thinking for simple tasks"),
+                description: i18n::t(
+                    "palette.desc.thinking_low",
+                    "Light thinking for simple tasks",
+                    "Light thinking for simple tasks",
+                ),
                 category: cat.clone(),
                 action: PaletteAction::SetThinkingEffort("low".to_string()),
             });
             items.push(PaletteItem {
                 id: "thinking_medium".to_string(),
                 label: format!("Medium{}", check("thinking_medium")),
-                description: i18n::t("palette.desc.thinking_medium", "Balanced thinking (recommended)", "Balanced thinking (recommended)"),
+                description: i18n::t(
+                    "palette.desc.thinking_medium",
+                    "Balanced thinking (recommended)",
+                    "Balanced thinking (recommended)",
+                ),
                 category: cat.clone(),
                 action: PaletteAction::SetThinkingEffort("medium".to_string()),
             });
             items.push(PaletteItem {
                 id: "thinking_high".to_string(),
                 label: format!("High{}", check("thinking_high")),
-                description: i18n::t("palette.desc.thinking_high", "Deep thinking for complex tasks", "Deep thinking for complex tasks"),
+                description: i18n::t(
+                    "palette.desc.thinking_high",
+                    "Deep thinking for complex tasks",
+                    "Deep thinking for complex tasks",
+                ),
                 category: cat,
                 action: PaletteAction::SetThinkingEffort("high".to_string()),
             });
@@ -767,7 +1013,11 @@ pub fn get_thinking_effort_palette_items(current: &crate::types::ThinkingEffort,
             items.push(PaletteItem {
                 id: "thinking_medium".to_string(),
                 label: format!("On{}", check("thinking_medium")),
-                description: i18n::t("palette.desc.thinking_on", "Enable thinking/reasoning", "Enable thinking/reasoning"),
+                description: i18n::t(
+                    "palette.desc.thinking_on",
+                    "Enable thinking/reasoning",
+                    "Enable thinking/reasoning",
+                ),
                 category: cat,
                 action: PaletteAction::SetThinkingEffort("medium".to_string()),
             });
@@ -776,8 +1026,16 @@ pub fn get_thinking_effort_palette_items(current: &crate::types::ThinkingEffort,
             // No thinking support — show info only
             items.push(PaletteItem {
                 id: "thinking_unavailable".to_string(),
-                label: i18n::t("palette.thinking.unavailable", "Not supported by this model", "Not supported by this model"),
-                description: i18n::t("palette.desc.thinking_unavailable", "Current model does not support thinking/reasoning", "Current model does not support thinking/reasoning"),
+                label: i18n::t(
+                    "palette.thinking.unavailable",
+                    "Not supported by this model",
+                    "Not supported by this model",
+                ),
+                description: i18n::t(
+                    "palette.desc.thinking_unavailable",
+                    "Current model does not support thinking/reasoning",
+                    "Current model does not support thinking/reasoning",
+                ),
                 category: cat,
                 action: PaletteAction::SetThinkingEffort("off".to_string()),
             });
@@ -788,7 +1046,11 @@ pub fn get_thinking_effort_palette_items(current: &crate::types::ThinkingEffort,
 }
 
 pub fn get_context_window_palette_items(current_override: Option<u32>) -> Vec<PaletteItem> {
-    let cat = Some(i18n::t("palette.cat.context_window", "Context Window", "Context Window"));
+    let cat = Some(i18n::t(
+        "palette.cat.context_window",
+        "Context Window",
+        "Context Window",
+    ));
     let presets: &[(&str, u32, &str)] = &[
         ("ctx_auto", 0, "Auto (detect from model)"),
         ("ctx_128k", 128, "128k"),
@@ -802,7 +1064,8 @@ pub fn get_context_window_palette_items(current_override: Option<u32>) -> Vec<Pa
         None => "ctx_auto",
         Some(v) => {
             let k = v / 1000;
-            presets.iter()
+            presets
+                .iter()
                 .find(|(_, val, _)| *val == k)
                 .map(|(id, _, _)| *id)
                 .unwrap_or("ctx_custom")
@@ -810,22 +1073,28 @@ pub fn get_context_window_palette_items(current_override: Option<u32>) -> Vec<Pa
     };
     let check = |id: &str| if id == current_id { " ●" } else { "" };
 
-    let mut items = vec![
-        PaletteItem {
-            id: "back".to_string(),
-            label: i18n::t("palette.back.label", ".. Back", ".. Back"),
-            description: i18n::t("palette.desc.back.main", "Return to previous menu", "Return to previous menu"),
-            category: None,
-            action: PaletteAction::Back,
-        },
-    ];
+    let mut items = vec![PaletteItem {
+        id: "back".to_string(),
+        label: i18n::t("palette.back.label", ".. Back", ".. Back"),
+        description: i18n::t(
+            "palette.desc.back.main",
+            "Return to previous menu",
+            "Return to previous menu",
+        ),
+        category: None,
+        action: PaletteAction::Back,
+    }];
 
     for (id, _val, label) in presets {
         items.push(PaletteItem {
             id: id.to_string(),
             label: format!("{}{}", label, check(id)),
             description: if *id == "ctx_auto" {
-                i18n::t("palette.desc.ctx_auto", "Use model's default context window", "Use model's default context window")
+                i18n::t(
+                    "palette.desc.ctx_auto",
+                    "Use model's default context window",
+                    "Use model's default context window",
+                )
             } else {
                 format!("Set context window to {}", label)
             },
@@ -851,7 +1120,11 @@ pub fn get_context_window_palette_items(current_override: Option<u32>) -> Vec<Pa
     items.push(PaletteItem {
         id: "ctx_custom".to_string(),
         label: custom_label,
-        description: i18n::t("palette.desc.ctx_custom", "Enter a custom context window size (e.g. 128k, 1M)", "Enter a custom context window size (e.g. 128k, 1M)"),
+        description: i18n::t(
+            "palette.desc.ctx_custom",
+            "Enter a custom context window size (e.g. 128k, 1M)",
+            "Enter a custom context window size (e.g. 128k, 1M)",
+        ),
         category: cat,
         action: PaletteAction::SetContextWindow("custom".to_string()),
     });
@@ -863,17 +1136,19 @@ pub fn get_theme_palette_items(state: &ChatState) -> Vec<PaletteItem> {
     let cat = Some(i18n::t("palette.cat.theme", "Theme", "Theme"));
     let current_name = &state.theme_manager.current().name;
     let check = |name: &str| if name == current_name { " ●" } else { "" };
-    
-    let mut items = vec![
-        PaletteItem {
-            id: "back".to_string(),
-            label: i18n::t("palette.back.label", ".. Back", ".. Back"),
-            description: i18n::t("palette.desc.back.main", "Return to previous menu", "Return to previous menu"),
-            category: None,
-            action: PaletteAction::Back,
-        },
-    ];
-    
+
+    let mut items = vec![PaletteItem {
+        id: "back".to_string(),
+        label: i18n::t("palette.back.label", ".. Back", ".. Back"),
+        description: i18n::t(
+            "palette.desc.back.main",
+            "Return to previous menu",
+            "Return to previous menu",
+        ),
+        category: None,
+        action: PaletteAction::Back,
+    }];
+
     for theme_name in state.theme_manager.list_themes() {
         let display_name = theme_name.to_string();
         items.push(PaletteItem {
@@ -884,15 +1159,21 @@ pub fn get_theme_palette_items(state: &ChatState) -> Vec<PaletteItem> {
             action: PaletteAction::SetTheme(theme_name.to_string()),
         });
     }
-    
+
     items
 }
 
-pub fn get_provider_palette_items(configured: &std::collections::HashSet<String>) -> Vec<PaletteItem> {
+pub fn get_provider_palette_items(
+    configured: &std::collections::HashSet<String>,
+) -> Vec<PaletteItem> {
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
         label: i18n::t("palette.back.label", ".. Back", ".. Back"),
-        description: i18n::t("palette.desc.back.main", "Return to main menu", "Return to main menu"),
+        description: i18n::t(
+            "palette.desc.back.main",
+            "Return to main menu",
+            "Return to main menu",
+        ),
         category: None,
         action: PaletteAction::Back,
     }];
@@ -981,7 +1262,11 @@ fn get_provider_category_items(
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
         label: i18n::t("palette.back.label", ".. Back", ".. Back"),
-        description: i18n::t("palette.back.desc.providers", "Return to providers", "Return to providers"),
+        description: i18n::t(
+            "palette.back.desc.providers",
+            "Return to providers",
+            "Return to providers",
+        ),
         category: None,
         action: PaletteAction::Back,
     }];
@@ -1005,16 +1290,21 @@ pub fn get_add_provider_items() -> Vec<PaletteItem> {
         PaletteItem {
             id: "add_openai_compatible".to_string(),
             label: "OpenAI Compatible".to_string(),
-            description: "Custom OpenAI-compatible endpoint (LM Studio, Ollama, vLLM, etc.)".to_string(),
+            description: "Custom OpenAI-compatible endpoint (LM Studio, Ollama, vLLM, etc.)"
+                .to_string(),
             category: Some("Choose Type".to_string()),
-            action: PaletteAction::Navigate(PaletteMode::AddProviderId("openai-compatible".to_string())),
+            action: PaletteAction::Navigate(PaletteMode::AddProviderId(
+                "openai-compatible".to_string(),
+            )),
         },
         PaletteItem {
             id: "add_anthropic_compatible".to_string(),
             label: "Anthropic Compatible".to_string(),
             description: "Custom Anthropic-compatible endpoint (Claude /v1/messages)".to_string(),
             category: Some("Choose Type".to_string()),
-            action: PaletteAction::Navigate(PaletteMode::AddProviderId("anthropic-compatible".to_string())),
+            action: PaletteAction::Navigate(PaletteMode::AddProviderId(
+                "anthropic-compatible".to_string(),
+            )),
         },
     ]
 }
@@ -1282,17 +1572,11 @@ pub fn get_model_palette_items(
         std::collections::BTreeMap::new();
 
     for model in models {
-        let provider = model_provider_map
-            .get(model)
-            .cloned()
-            .unwrap_or_else(|| {
-                // Infer provider from model name
-                infer_provider_from_model(model)
-            });
-        provider_models
-            .entry(provider)
-            .or_default()
-            .push(model);
+        let provider = model_provider_map.get(model).cloned().unwrap_or_else(|| {
+            // Infer provider from model name
+            infer_provider_from_model(model)
+        });
+        provider_models.entry(provider).or_default().push(model);
     }
 
     // Add provider-grouped models
@@ -1330,7 +1614,10 @@ pub fn get_model_palette_items(
 /// Infer provider from model name prefix
 fn infer_provider_from_model(model: &str) -> String {
     let model_lower = model.to_lowercase();
-    if model_lower.starts_with("gpt-") || model_lower.starts_with("o1-") || model_lower.starts_with("o3-") {
+    if model_lower.starts_with("gpt-")
+        || model_lower.starts_with("o1-")
+        || model_lower.starts_with("o3-")
+    {
         "openai".to_string()
     } else if model_lower.starts_with("claude-") {
         "anthropic".to_string()
@@ -1589,7 +1876,6 @@ pub fn get_help_palette_items() -> Vec<PaletteItem> {
     items
 }
 
- 
 pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
     if !state.show_palette {
         return;
@@ -1630,7 +1916,12 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
         Span::raw(" "),
         Span::styled(input_text.to_string(), input_style),
     ]))
-    .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).title(" Search "));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(" Search "),
+    );
     f.render_widget(input, chunks[0]);
 
     let search_items = get_search_items(&state.palette_mode, state, query);

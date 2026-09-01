@@ -60,8 +60,10 @@ pub async fn search_files(query: &str, cwd: &str, max_results: usize) -> Vec<Fil
 
     let output = tokio::process::Command::new("fd")
         .args(&[
-            "--type", "f",
-            "--max-results", &max_results.to_string(),
+            "--type",
+            "f",
+            "--max-results",
+            &max_results.to_string(),
             query,
             cwd,
         ])
@@ -98,7 +100,7 @@ pub fn render_quick_open(f: &mut Frame, state: &QuickOpenState, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Search input
-            Constraint::Min(5),   // File list
+            Constraint::Min(5),    // File list
         ])
         .split(area);
 
@@ -129,10 +131,7 @@ pub fn render_quick_open(f: &mut Frame, state: &QuickOpenState, area: Rect) {
         .iter()
         .map(|file| {
             let line = Line::from(vec![
-                Span::styled(
-                    file.name.clone(),
-                    Style::default().fg(Color::White),
-                ),
+                Span::styled(file.name.clone(), Style::default().fg(Color::White)),
                 Span::styled(
                     format!("  {}", file.path),
                     Style::default().fg(Color::DarkGray),

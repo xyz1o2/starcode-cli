@@ -26,7 +26,11 @@ pub struct PermissionRule {
 
 impl PermissionRule {
     /// Create a new permission rule
-    pub fn new(action: impl Into<String>, resource: impl Into<String>, effect: PermissionEffect) -> Self {
+    pub fn new(
+        action: impl Into<String>,
+        resource: impl Into<String>,
+        effect: PermissionEffect,
+    ) -> Self {
         Self {
             action: action.into(),
             resource: resource.into(),

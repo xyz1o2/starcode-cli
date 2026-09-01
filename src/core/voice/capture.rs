@@ -1,8 +1,7 @@
 /// 音频捕获模块
-/// 
+///
 /// 对标claude-code-main的packages/audio-capture-napi/
 /// 提供麦克风音频捕获功能
-
 use serde::{Deserialize, Serialize};
 
 /// 捕获配置
@@ -68,8 +67,10 @@ impl AudioCapture {
 
         // TODO: 实现实际的音频捕获
         // 可以使用cpal crate进行跨平台音频捕获
-        println!("Audio capture started (sample_rate={}, channels={})", 
-            self.config.sample_rate, self.config.channels);
+        println!(
+            "Audio capture started (sample_rate={}, channels={})",
+            self.config.sample_rate, self.config.channels
+        );
 
         Ok(())
     }
@@ -90,7 +91,15 @@ impl AudioCapture {
         // TODO: 实现实际的音频帧获取
         // 返回模拟数据
         Some(AudioFrame {
-            data: vec![0; (self.config.sample_rate * self.config.channels as u32 * self.config.bits_per_sample as u32 / 8 / 1000 * self.config.buffer_size_ms) as usize],
+            data: vec![
+                0;
+                (self.config.sample_rate
+                    * self.config.channels as u32
+                    * self.config.bits_per_sample as u32
+                    / 8
+                    / 1000
+                    * self.config.buffer_size_ms) as usize
+            ],
             timestamp: chrono::Utc::now().timestamp_millis(),
             sequence: self.frame_count,
         })

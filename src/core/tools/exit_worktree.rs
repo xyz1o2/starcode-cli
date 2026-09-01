@@ -105,27 +105,29 @@ impl ToolInvocation for ExitWorktreeInvocation {
             } else {
                 "\n\nAll uncommitted changes in the worktree will be DISCARDED."
             };
-            Ok(Some(crate::core::tools::tools::ToolCallConfirmationDetails {
-                confirmation_type: crate::core::tools::tools::ConfirmationType::Ask,
-                title: "Exit Worktree?".to_string(),
-                prompt: format!(
-                    "The agent wants to remove the isolated worktree at:\n\n{}{}",
-                    path, keep_msg
-                ),
-                on_confirm: std::sync::Arc::new(move |outcome| {
-                    if matches!(
-                        outcome,
-                        crate::types::ToolConfirmationOutcome::ProceedOnce
-                            | crate::types::ToolConfirmationOutcome::ProceedAlways
-                            | crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave
-                            | crate::types::ToolConfirmationOutcome::AllowSession
-                    ) {
-                        crate::utils::logging::append_debug_log_line(
-                            "[ExitWorktree] User confirmed worktree removal.",
-                        );
-                    }
-                }),
-            }))
+            Ok(Some(
+                crate::core::tools::tools::ToolCallConfirmationDetails {
+                    confirmation_type: crate::core::tools::tools::ConfirmationType::Ask,
+                    title: "Exit Worktree?".to_string(),
+                    prompt: format!(
+                        "The agent wants to remove the isolated worktree at:\n\n{}{}",
+                        path, keep_msg
+                    ),
+                    on_confirm: std::sync::Arc::new(move |outcome| {
+                        if matches!(
+                            outcome,
+                            crate::types::ToolConfirmationOutcome::ProceedOnce
+                                | crate::types::ToolConfirmationOutcome::ProceedAlways
+                                | crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave
+                                | crate::types::ToolConfirmationOutcome::AllowSession
+                        ) {
+                            crate::utils::logging::append_debug_log_line(
+                                "[ExitWorktree] User confirmed worktree removal.",
+                            );
+                        }
+                    }),
+                },
+            ))
         })
     }
 
@@ -146,7 +148,7 @@ impl ToolInvocation for ExitWorktreeInvocation {
         Box::pin(async move {
             let path_clone = path.clone();
             let keep_clone = keep;
-            
+
             let result = tokio::task::spawn_blocking(move || -> Result<ToolResult, Box<dyn std::error::Error + Send + Sync>> {
                 let cwd = std::env::current_dir().unwrap_or_default();
                 let worktree_path = std::path::Path::new(&path_clone);

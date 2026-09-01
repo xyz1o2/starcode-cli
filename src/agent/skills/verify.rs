@@ -43,7 +43,13 @@ impl VerifyAgent {
             .spawn()
         {
             Ok(c) => c,
-            Err(e) => return (false, String::new(), format!("Failed to start {}: {}", cmd_owned, e)),
+            Err(e) => {
+                return (
+                    false,
+                    String::new(),
+                    format!("Failed to start {}: {}", cmd_owned, e),
+                )
+            }
         };
 
         let child_id = child.id();
@@ -71,16 +77,25 @@ impl VerifyAgent {
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn();
-                (false, String::new(), format!("Command timed out after {}s", timeout_secs))
+                (
+                    false,
+                    String::new(),
+                    format!("Command timed out after {}s", timeout_secs),
+                )
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                (false, String::new(), format!("Command {} process ended unexpectedly", cmd))
-            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => (
+                false,
+                String::new(),
+                format!("Command {} process ended unexpectedly", cmd),
+            ),
         }
     }
 
     /// Auto-detect project type and return verification commands.
-    fn detect_commands(&self, task: &SubTask) -> Vec<(&'static str, &'static str, Vec<&'static str>, u64)> {
+    fn detect_commands(
+        &self,
+        task: &SubTask,
+    ) -> Vec<(&'static str, &'static str, Vec<&'static str>, u64)> {
         let target = task.target.clone();
         let cwd = std::env::current_dir().unwrap_or_default();
         let search_dir = if target.is_empty() || target == "." {
@@ -144,18 +159,14 @@ impl SubAgent for VerifyAgent {
         ]
     }
 
-    async fn execute(
-        &self,
-        task: SubTask,
-    ) -> Result<SubTaskResult, Box<dyn std::error::Error>> {
+    async fn execute(&self, task: SubTask) -> Result<SubTaskResult, Box<dyn std::error::Error>> {
         let commands = self.detect_commands(&task);
 
         let mut results = Vec::new();
         let mut all_passed = true;
 
         for (_label, cmd, args, timeout) in &commands {
-            let (success, stdout, stderr) =
-                Self::run_bash(cmd, args, *timeout);
+            let (success, stdout, stderr) = Self::run_bash(cmd, args, *timeout);
 
             let status = if success { "PASS" } else { "FAIL" };
             let output_summary = if stdout.len() > 500 {
@@ -170,8 +181,13 @@ impl SubAgent for VerifyAgent {
                 cmd,
                 args.join(" "),
                 if !stderr.is_empty() {
-                    format!("\n  stderr: {}",
-                        if stderr.len() > 300 { format!("{}...", &stderr[..300]) } else { stderr.clone() }
+                    format!(
+                        "\n  stderr: {}",
+                        if stderr.len() > 300 {
+                            format!("{}...", &stderr[..300])
+                        } else {
+                            stderr.clone()
+                        }
                     )
                 } else {
                     String::new()

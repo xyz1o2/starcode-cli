@@ -352,7 +352,8 @@ impl Config {
     }
     pub fn context_window(&self) -> usize {
         // 1. 模型专用上下文窗口：从 API /models 缓存中查（如 Anthropic 的 max_input_tokens）
-        if let Some(ctx) = crate::agent::model_catalog::get_cached_context_window(self.active_model())
+        if let Some(ctx) =
+            crate::agent::model_catalog::get_cached_context_window(self.active_model())
         {
             return ctx as usize;
         }
@@ -564,7 +565,8 @@ impl Config {
     }
     pub(crate) fn runtime_notification_queue(
         &self,
-    ) -> Option<Arc<tokio::sync::Mutex<crate::agent::subagent::notification::NotificationQueue>>> {
+    ) -> Option<Arc<tokio::sync::Mutex<crate::agent::subagent::notification::NotificationQueue>>>
+    {
         self.runtime_services
             .as_ref()
             .and_then(|services| services.notification_queue())

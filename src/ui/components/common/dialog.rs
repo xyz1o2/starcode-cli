@@ -39,23 +39,23 @@ pub fn render_dialog(
     // 计算居中位置
     let x = area.x + (area.width.saturating_sub(config.width)) / 2;
     let y = area.y + (area.height.saturating_sub(config.height)) / 2;
-    
+
     let popup_area = Rect {
         x,
         y,
         width: config.width,
         height: config.height,
     };
-    
+
     // 清除背景
     f.render_widget(Clear, popup_area);
-    
+
     // 构建标题
     let mut title = config.title.clone();
     if config.show_close_hint {
         title.push_str(" (ESC to close)");
     }
-    
+
     // 构建块
     let block = Block::default()
         .borders(Borders::ALL)
@@ -66,12 +66,12 @@ pub fn render_dialog(
                 .add_modifier(Modifier::BOLD),
         ))
         .border_style(Style::default().fg(config.border_color));
-    
+
     // 渲染内容
     let paragraph = Paragraph::new(content)
         .block(block)
         .wrap(Wrap { trim: false });
-    
+
     f.render_widget(paragraph, popup_area);
 }
 
@@ -80,12 +80,12 @@ pub fn render_confirmation_dialog(
     f: &mut Frame,
     title: &str,
     message: &str,
-    options: &[(&str, &str)],  // (key, label)
+    options: &[(&str, &str)], // (key, label)
     selected: usize,
     area: Rect,
 ) {
     let mut content = Vec::new();
-    
+
     // 消息
     content.push(Line::from(""));
     content.push(Line::from(Span::styled(
@@ -93,7 +93,7 @@ pub fn render_confirmation_dialog(
         Style::default().fg(Color::White),
     )));
     content.push(Line::from(""));
-    
+
     // 选项
     for (i, (key, label)) in options.iter().enumerate() {
         let is_selected = i == selected;
@@ -104,7 +104,7 @@ pub fn render_confirmation_dialog(
         } else {
             Style::default().fg(Color::Gray)
         };
-        
+
         content.push(Line::from(vec![
             Span::styled(
                 if is_selected { "❯ " } else { "  " },
@@ -114,14 +114,14 @@ pub fn render_confirmation_dialog(
             Span::styled(label.to_string(), style),
         ]));
     }
-    
+
     // 提示
     content.push(Line::from(""));
     content.push(Line::from(Span::styled(
         "Press number to select, ESC to cancel",
         Style::default().fg(Color::DarkGray),
     )));
-    
+
     let config = DialogConfig {
         title: title.to_string(),
         width: 50,
@@ -130,7 +130,7 @@ pub fn render_confirmation_dialog(
         title_color: Color::Cyan,
         show_close_hint: false,
     };
-    
+
     render_dialog(f, &config, content, area);
 }
 
@@ -144,7 +144,7 @@ pub fn render_input_dialog(
     area: Rect,
 ) {
     let mut content = Vec::new();
-    
+
     // 提示
     content.push(Line::from(""));
     content.push(Line::from(Span::styled(
@@ -152,7 +152,7 @@ pub fn render_input_dialog(
         Style::default().fg(Color::White),
     )));
     content.push(Line::from(""));
-    
+
     // 输入框
     let input_line = Line::from(vec![
         Span::styled("> ", Style::default().fg(Color::Blue)),
@@ -160,14 +160,14 @@ pub fn render_input_dialog(
         Span::styled("▌", Style::default().fg(Color::White)),
     ]);
     content.push(input_line);
-    
+
     // 提示
     content.push(Line::from(""));
     content.push(Line::from(Span::styled(
         "Press Enter to confirm, ESC to cancel",
         Style::default().fg(Color::DarkGray),
     )));
-    
+
     let config = DialogConfig {
         title: title.to_string(),
         width: 60,
@@ -176,6 +176,6 @@ pub fn render_input_dialog(
         title_color: Color::Cyan,
         show_close_hint: false,
     };
-    
+
     render_dialog(f, &config, content, area);
 }

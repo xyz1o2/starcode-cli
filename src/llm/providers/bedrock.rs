@@ -1,17 +1,18 @@
 /// AWS Bedrock Provider适配器
-/// 
+///
 /// 对标claude-code-main的bedrockClient.ts
 /// 支持AWS Bedrock服务调用Claude模型
-
 use async_trait::async_trait;
 use futures::Stream;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::pin::Pin;
-use serde::{Deserialize, Serialize};
 
 use super::{LlmClient, LlmConfig, LlmError, LlmEvent, LlmProvider};
 use crate::llm::ModelInfo;
-use crate::types::{StarMessage, StarResponse, StarChoice, StarTool, StarToolCall, StarToolCallFunction, StarUsage};
+use crate::types::{
+    StarChoice, StarMessage, StarResponse, StarTool, StarToolCall, StarToolCallFunction, StarUsage,
+};
 
 /// AWS Bedrock配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +76,10 @@ impl BedrockProvider {
     /// 创建新的Bedrock Provider
     pub fn new(config: BedrockConfig) -> Self {
         let http_client = reqwest::Client::new();
-        Self { config, http_client }
+        Self {
+            config,
+            http_client,
+        }
     }
 
     /// 从环境变量创建
@@ -108,7 +112,8 @@ impl LlmClient for BedrockProvider {
             }).collect::<Vec<_>>()
         });
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .post(&url)
             .header("Content-Type", "application/json")
             .json(&request_body)
@@ -121,7 +126,9 @@ impl LlmClient for BedrockProvider {
             return Err(Box::new(LlmError::ProviderError(error_text)));
         }
 
-        let response_body: serde_json::Value = response.json().await
+        let response_body: serde_json::Value = response
+            .json()
+            .await
             .map_err(|e| LlmError::ParsingError(e.to_string()))?;
 
         let content = response_body["content"][0]["text"]
@@ -131,9 +138,13 @@ impl LlmClient for BedrockProvider {
 
         let usage = StarUsage {
             prompt_tokens: response_body["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32,
-            completion_tokens: response_body["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32,
-            total_tokens: (response_body["usage"]["input_tokens"].as_u64().unwrap_or(0) +
-                          response_body["usage"]["output_tokens"].as_u64().unwrap_or(0)) as u32,
+            completion_tokens: response_body["usage"]["output_tokens"]
+                .as_u64()
+                .unwrap_or(0) as u32,
+            total_tokens: (response_body["usage"]["input_tokens"].as_u64().unwrap_or(0)
+                + response_body["usage"]["output_tokens"]
+                    .as_u64()
+                    .unwrap_or(0)) as u32,
             ..Default::default()
         };
 

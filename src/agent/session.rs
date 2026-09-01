@@ -33,10 +33,7 @@ pub(crate) fn session_persist_sender() -> &'static mpsc::Sender<SessionPersistRe
     })
 }
 
-pub(crate) fn persist_session_messages(
-    session_messages: &[StarMessage],
-    storage_path: PathBuf,
-) {
+pub(crate) fn persist_session_messages(session_messages: &[StarMessage], storage_path: PathBuf) {
     let max_messages = std::env::var("STAR_SESSION_MAX_MESSAGES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())

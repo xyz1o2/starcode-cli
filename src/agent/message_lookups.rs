@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 /// 消息查找表 - 对标claude-code的MessageLookups
-/// 
+///
 /// 预计算的消息关系查找表，用于高效O(1)访问
 #[derive(Debug, Clone)]
 pub struct MessageLookups {
@@ -69,10 +69,7 @@ pub struct ProgressMessage {
 #[derive(Debug, Clone)]
 pub enum ProgressData {
     /// 工具进度
-    ToolProgress {
-        tool_name: String,
-        message: String,
-    },
+    ToolProgress { tool_name: String, message: String },
     /// Hook进度
     HookProgress {
         hook_event: String,
@@ -84,7 +81,8 @@ impl MessageLookups {
     /// 构建消息查找表
     pub fn build(messages: &[StarMessage]) -> Self {
         let mut sibling_tool_use_ids: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut progress_messages_by_tool_use_id: HashMap<String, Vec<ProgressMessage>> = HashMap::new();
+        let mut progress_messages_by_tool_use_id: HashMap<String, Vec<ProgressMessage>> =
+            HashMap::new();
         let mut in_progress_hook_counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
         let mut resolved_hook_counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
         let mut tool_result_by_tool_use_id: HashMap<String, usize> = HashMap::new();
@@ -99,15 +97,18 @@ impl MessageLookups {
         for (idx, msg) in messages.iter().enumerate() {
             if msg.role == "assistant" {
                 if let Some(tool_calls) = &msg.tool_calls {
-                    let message_id = msg.tool_call_id.clone().unwrap_or_else(|| format!("msg_{}", idx));
+                    let message_id = msg
+                        .tool_call_id
+                        .clone()
+                        .unwrap_or_else(|| format!("msg_{}", idx));
                     let mut tool_ids = HashSet::new();
-                    
+
                     for tc in tool_calls {
                         tool_ids.insert(tc.id.clone());
                         message_id_by_tool_id.insert(tc.id.clone(), message_id.clone());
                         tool_use_by_tool_use_id.insert(tc.id.clone(), tc.clone());
                     }
-                    
+
                     tool_ids_by_message.insert(message_id, tool_ids);
                 }
             }
@@ -126,7 +127,7 @@ impl MessageLookups {
                 if let Some(tool_call_id) = &msg.tool_call_id {
                     tool_result_by_tool_use_id.insert(tool_call_id.clone(), idx);
                     resolved_tool_use_ids.insert(tool_call_id.clone());
-                    
+
                     // 检查是否是错误结果
                     if let Some(content) = &msg.content {
                         if content.contains("error") || content.contains("Error") {
@@ -142,11 +143,12 @@ impl MessageLookups {
             if !resolved_tool_use_ids.contains(tool_id) {
                 // 如果是最后一个助手消息中的工具，可能还在执行中
                 // 否则标记为错误
-                let is_last_message_tool = messages.last()
+                let is_last_message_tool = messages
+                    .last()
                     .and_then(|m| m.tool_calls.as_ref())
                     .map(|tcs| tcs.iter().any(|tc| &tc.id == tool_id))
                     .unwrap_or(false);
-                
+
                 if !is_last_message_tool {
                     errored_tool_use_ids.insert(tool_id.clone());
                 }
@@ -184,18 +186,20 @@ impl MessageLookups {
 
     /// 检查是否有未完成的Hooks
     pub fn has_unresolved_hooks(&self, tool_use_id: &str, hook_event: &str) -> bool {
-        let in_progress = self.in_progress_hook_counts
+        let in_progress = self
+            .in_progress_hook_counts
             .get(tool_use_id)
             .and_then(|m| m.get(hook_event))
             .copied()
             .unwrap_or(0);
-        
-        let resolved = self.resolved_hook_counts
+
+        let resolved = self
+            .resolved_hook_counts
             .get(tool_use_id)
             .and_then(|m| m.get(hook_event))
             .copied()
             .unwrap_or(0);
-        
+
         in_progress > resolved
     }
 
@@ -294,9 +298,7 @@ pub struct PostToolUseHook {
 
 impl PostToolUseHookManager {
     pub fn new() -> Self {
-        Self {
-            hooks: Vec::new(),
-        }
+        Self { hooks: Vec::new() }
     }
 
     /// 添加Hook
@@ -379,10 +381,7 @@ pub struct McpAuthErrorHandler;
 
 impl McpAuthErrorHandler {
     /// 处理MCP认证错误
-    pub fn handle_auth_error(
-        server_name: &str,
-        error: &str,
-    ) -> McpAuthErrorResult {
+    pub fn handle_auth_error(server_name: &str, error: &str) -> McpAuthErrorResult {
         McpAuthErrorResult {
             server_name: server_name.to_string(),
             error: error.to_string(),
@@ -442,12 +441,7 @@ impl ToolDecisionManager {
     }
 
     /// 记录决策
-    pub fn record_decision(
-        &mut self,
-        tool_use_id: String,
-        source: String,
-        decision: ToolDecision,
-    ) {
+    pub fn record_decision(&mut self, tool_use_id: String, source: String, decision: ToolDecision) {
         self.decisions.insert(
             tool_use_id,
             ToolDecisionRecord {
@@ -507,15 +501,15 @@ mod tests {
         ];
 
         let lookups = MessageLookups::build(&messages);
-        
+
         // 测试兄弟工具ID
         let siblings = lookups.get_sibling_tool_use_ids("tool1");
         assert!(siblings.contains("tool2"));
-        
+
         // 测试工具结果
         assert!(lookups.is_tool_resolved("tool1"));
         assert!(lookups.is_tool_resolved("tool2"));
-        
+
         // 测试孤立工具
         let orphaned = lookups.get_orphaned_tool_ids();
         assert!(orphaned.is_empty());
@@ -524,16 +518,14 @@ mod tests {
     #[test]
     fn test_orphaned_tool_detection() {
         let messages = vec![
-            StarMessage::assistant_with_tool_calls(vec![
-                StarToolCall {
-                    id: "tool1".to_string(),
-                    call_type: "function".to_string(),
-                    function: crate::types::StarToolCallFunction {
-                        name: "Read".to_string(),
-                        arguments: "{}".to_string(),
-                    },
+            StarMessage::assistant_with_tool_calls(vec![StarToolCall {
+                id: "tool1".to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::StarToolCallFunction {
+                    name: "Read".to_string(),
+                    arguments: "{}".to_string(),
                 },
-            ]),
+            }]),
             // 没有tool1的结果
         ];
 
@@ -561,7 +553,10 @@ pub fn get_sibling_tool_use_ids_from_lookup<'a>(
     tool_use_id: &str,
     lookups: &'a MessageLookups,
 ) -> &'a HashSet<String> {
-    lookups.sibling_tool_use_ids.get(tool_use_id).unwrap_or_else(|| get_empty_string_set())
+    lookups
+        .sibling_tool_use_ids
+        .get(tool_use_id)
+        .unwrap_or_else(|| get_empty_string_set())
 }
 
 /// 从Lookup获取进度消息
@@ -569,10 +564,13 @@ pub fn get_progress_messages_from_lookup<'a>(
     tool_use_id: &str,
     lookups: &'a MessageLookups,
 ) -> &'a Vec<ProgressMessage> {
-    lookups.progress_messages_by_tool_use_id.get(tool_use_id).unwrap_or_else(|| {
-        static EMPTY_VEC: Vec<ProgressMessage> = Vec::new();
-        &EMPTY_VEC
-    })
+    lookups
+        .progress_messages_by_tool_use_id
+        .get(tool_use_id)
+        .unwrap_or_else(|| {
+            static EMPTY_VEC: Vec<ProgressMessage> = Vec::new();
+            &EMPTY_VEC
+        })
 }
 
 /// 从Lookup检查未完成的Hooks
@@ -581,18 +579,20 @@ pub fn has_unresolved_hooks_from_lookup(
     hook_event: &str,
     lookups: &MessageLookups,
 ) -> bool {
-    let in_progress_count = lookups.in_progress_hook_counts
+    let in_progress_count = lookups
+        .in_progress_hook_counts
         .get(tool_use_id)
         .and_then(|m| m.get(hook_event))
         .copied()
         .unwrap_or(0);
-    
-    let resolved_count = lookups.resolved_hook_counts
+
+    let resolved_count = lookups
+        .resolved_hook_counts
         .get(tool_use_id)
         .and_then(|m| m.get(hook_event))
         .copied()
         .unwrap_or(0);
-    
+
     in_progress_count > resolved_count
 }
 
@@ -651,9 +651,8 @@ pub fn reorder_attachments_for_api(messages: Vec<StarMessage>) -> Vec<StarMessag
             pending_attachments.push(msg);
         } else {
             // 检查是否是停止点
-            let is_stopping_point = msg.role == "assistant" 
-                || (msg.role == "tool");
-            
+            let is_stopping_point = msg.role == "assistant" || (msg.role == "tool");
+
             if is_stopping_point && !pending_attachments.is_empty() {
                 // 将附件放在停止点之后
                 for attachment in pending_attachments.drain(..) {
@@ -680,30 +679,33 @@ pub fn strip_unavailable_tool_references(
     messages: Vec<StarMessage>,
     available_tool_names: &HashSet<String>,
 ) -> Vec<StarMessage> {
-    messages.into_iter().map(|msg| {
-        if msg.role == "user" {
-            if let Some(content) = &msg.content {
-                // 检查是否包含不可用工具的引用
-                if content.contains("tool_reference") {
-                    // 简单过滤：如果包含不可用工具名称，移除相关引用
-                    let mut filtered_content = content.clone();
-                    for tool_name in available_tool_names {
-                        // 这里简化处理，实际应该解析JSON结构
-                        if !available_tool_names.contains(tool_name) {
-                            filtered_content = filtered_content.replace(
-                                &format!("\"tool_name\": \"{}\"", tool_name),
-                                "\"tool_name\": \"unavailable\"",
-                            );
+    messages
+        .into_iter()
+        .map(|msg| {
+            if msg.role == "user" {
+                if let Some(content) = &msg.content {
+                    // 检查是否包含不可用工具的引用
+                    if content.contains("tool_reference") {
+                        // 简单过滤：如果包含不可用工具名称，移除相关引用
+                        let mut filtered_content = content.clone();
+                        for tool_name in available_tool_names {
+                            // 这里简化处理，实际应该解析JSON结构
+                            if !available_tool_names.contains(tool_name) {
+                                filtered_content = filtered_content.replace(
+                                    &format!("\"tool_name\": \"{}\"", tool_name),
+                                    "\"tool_name\": \"unavailable\"",
+                                );
+                            }
                         }
+                        let mut new_msg = msg.clone();
+                        new_msg.content = Some(filtered_content);
+                        return new_msg;
                     }
-                    let mut new_msg = msg.clone();
-                    new_msg.content = Some(filtered_content);
-                    return new_msg;
                 }
             }
-        }
-        msg
-    }).collect()
+            msg
+        })
+        .collect()
 }
 
 /// 系统初始化消息构建
@@ -754,11 +756,11 @@ impl FileHistorySnapshot {
     pub fn new(file_path: &str, content: &str) -> Self {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        
+
         let mut hasher = DefaultHasher::new();
         content.hash(&mut hasher);
         let content_hash = format!("{:x}", hasher.finish());
-        
+
         Self {
             file_path: file_path.to_string(),
             content_hash,

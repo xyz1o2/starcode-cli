@@ -195,5 +195,3 @@ impl ToolInvocation for ToolSearchInvocation {
         })
     }
 }
-
- 

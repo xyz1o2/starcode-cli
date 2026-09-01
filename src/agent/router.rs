@@ -78,14 +78,10 @@ impl Router {
             "Classify this coding task. Reply with one word: Simple, Medium, or Complex."
                 .to_string(),
         );
-        let user = crate::types::StarMessage::user(format!(
-            "Task: {}\n\nComplexity (one word):",
-            input
-        ));
+        let user =
+            crate::types::StarMessage::user(format!("Task: {}\n\nComplexity (one word):", input));
 
-        let resp = client
-            .chat(vec![system, user], None, None, None)
-            .await?;
+        let resp = client.chat(vec![system, user], None, None, None).await?;
         let text = resp
             .choices
             .first()
@@ -157,4 +153,3 @@ fn semantic_routing_timeout_secs() -> u64 {
             .clamp(1, 5)
     })
 }
- 

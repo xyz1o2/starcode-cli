@@ -12,7 +12,7 @@ pub mod windows;
 pub use macos::MacOSComputerAdapter;
 pub use windows::WindowsComputerAdapter;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// 屏幕截图
 #[derive(Debug, Clone)]
@@ -50,30 +50,73 @@ pub enum Modifier {
 /// Computer Use 操作
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ComputerAction {
-    Click { x: i32, y: i32, button: MouseButton },
-    DoubleClick { x: i32, y: i32 },
-    RightClick { x: i32, y: i32 },
-    MouseMove { x: i32, y: i32 },
-    MouseDrag { from_x: i32, from_y: i32, to_x: i32, to_y: i32 },
-    Type { text: String },
-    KeyPress { key: String, modifiers: Vec<Modifier> },
+    Click {
+        x: i32,
+        y: i32,
+        button: MouseButton,
+    },
+    DoubleClick {
+        x: i32,
+        y: i32,
+    },
+    RightClick {
+        x: i32,
+        y: i32,
+    },
+    MouseMove {
+        x: i32,
+        y: i32,
+    },
+    MouseDrag {
+        from_x: i32,
+        from_y: i32,
+        to_x: i32,
+        to_y: i32,
+    },
+    Type {
+        text: String,
+    },
+    KeyPress {
+        key: String,
+        modifiers: Vec<Modifier>,
+    },
     Screenshot,
-    Scroll { x: i32, y: i32, delta_x: i32, delta_y: i32 },
-    Wait { ms: u64 },
+    Scroll {
+        x: i32,
+        y: i32,
+        delta_x: i32,
+        delta_y: i32,
+    },
+    Wait {
+        ms: u64,
+    },
     GetScreenSize,
     GetActiveWindow,
     ListWindows,
-    SwitchWindow { window_id: String },
+    SwitchWindow {
+        window_id: String,
+    },
 }
 
 /// Computer Use 结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ComputerResult {
-    Success { message: String },
-    ScreenshotData { width: u32, height: u32, base64: String },
-    ScreenSize { width: u32, height: u32 },
+    Success {
+        message: String,
+    },
+    ScreenshotData {
+        width: u32,
+        height: u32,
+        base64: String,
+    },
+    ScreenSize {
+        width: u32,
+        height: u32,
+    },
     Windows(WindowList),
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,7 +177,15 @@ impl ComputerAdapter for LinuxComputerAdapter {
 
     fn double_click(&self, x: i32, y: i32) -> Result<(), String> {
         std::process::Command::new("xdotool")
-            .args(["mousemove", &x.to_string(), &y.to_string(), "click", "--repeat", "2", "1"])
+            .args([
+                "mousemove",
+                &x.to_string(),
+                &y.to_string(),
+                "click",
+                "--repeat",
+                "2",
+                "1",
+            ])
             .output()
             .map_err(|e| format!("xdotool double click failed: {}", e))?;
         Ok(())
@@ -155,10 +206,16 @@ impl ComputerAdapter for LinuxComputerAdapter {
     fn mouse_drag(&self, from_x: i32, from_y: i32, to_x: i32, to_y: i32) -> Result<(), String> {
         std::process::Command::new("xdotool")
             .args([
-                "mousemove", &from_x.to_string(), &from_y.to_string(),
-                "mousedown", "1",
-                "mousemove", &to_x.to_string(), &to_y.to_string(),
-                "mouseup", "1",
+                "mousemove",
+                &from_x.to_string(),
+                &from_y.to_string(),
+                "mousedown",
+                "1",
+                "mousemove",
+                &to_x.to_string(),
+                &to_y.to_string(),
+                "mouseup",
+                "1",
             ])
             .output()
             .map_err(|e| format!("xdotool drag failed: {}", e))?;
@@ -307,40 +364,49 @@ impl ComputerUseManager {
 
     pub fn execute(&self, action: ComputerAction) -> ComputerResult {
         match action {
-            ComputerAction::Click { x, y, button } => {
-                self.adapter.click(x, y, button)
-                    .map(|()| ComputerResult::Success { message: format!("Clicked at ({}, {})", x, y) })
-                    .unwrap_or_else(|e| ComputerResult::Error { message: e })
-            }
-            ComputerAction::DoubleClick { x, y } => {
-                self.adapter.double_click(x, y)
-                    .map(|()| ComputerResult::Success { message: format!("Double-clicked at ({}, {})", x, y) })
-                    .unwrap_or_else(|e| ComputerResult::Error { message: e })
-            }
-            ComputerAction::Type { text } => {
-                self.adapter.type_text(&text)
-                    .map(|()| ComputerResult::Success { message: format!("Typed {} chars", text.len()) })
-                    .unwrap_or_else(|e| ComputerResult::Error { message: e })
-            }
-            ComputerAction::Screenshot => {
-                self.adapter.screenshot()
-                    .map(|s| ComputerResult::ScreenshotData {
-                        width: s.width,
-                        height: s.height,
-                        base64: base64_encode(&s.data),
-                    })
-                    .unwrap_or_else(|e| ComputerResult::Error { message: e })
-            }
-            ComputerAction::GetScreenSize => {
-                self.adapter.get_screen_size()
-                    .map(|(w, h)| ComputerResult::ScreenSize { width: w, height: h })
-                    .unwrap_or_else(|e| ComputerResult::Error { message: e })
-            }
-            ComputerAction::ListWindows => {
-                self.adapter.list_windows()
-                    .map(ComputerResult::Windows)
-                    .unwrap_or_else(|e| ComputerResult::Error { message: e })
-            }
+            ComputerAction::Click { x, y, button } => self
+                .adapter
+                .click(x, y, button)
+                .map(|()| ComputerResult::Success {
+                    message: format!("Clicked at ({}, {})", x, y),
+                })
+                .unwrap_or_else(|e| ComputerResult::Error { message: e }),
+            ComputerAction::DoubleClick { x, y } => self
+                .adapter
+                .double_click(x, y)
+                .map(|()| ComputerResult::Success {
+                    message: format!("Double-clicked at ({}, {})", x, y),
+                })
+                .unwrap_or_else(|e| ComputerResult::Error { message: e }),
+            ComputerAction::Type { text } => self
+                .adapter
+                .type_text(&text)
+                .map(|()| ComputerResult::Success {
+                    message: format!("Typed {} chars", text.len()),
+                })
+                .unwrap_or_else(|e| ComputerResult::Error { message: e }),
+            ComputerAction::Screenshot => self
+                .adapter
+                .screenshot()
+                .map(|s| ComputerResult::ScreenshotData {
+                    width: s.width,
+                    height: s.height,
+                    base64: base64_encode(&s.data),
+                })
+                .unwrap_or_else(|e| ComputerResult::Error { message: e }),
+            ComputerAction::GetScreenSize => self
+                .adapter
+                .get_screen_size()
+                .map(|(w, h)| ComputerResult::ScreenSize {
+                    width: w,
+                    height: h,
+                })
+                .unwrap_or_else(|e| ComputerResult::Error { message: e }),
+            ComputerAction::ListWindows => self
+                .adapter
+                .list_windows()
+                .map(ComputerResult::Windows)
+                .unwrap_or_else(|e| ComputerResult::Error { message: e }),
             _ => ComputerResult::Error {
                 message: "Action not yet implemented".to_string(),
             },

@@ -122,11 +122,8 @@ pub(crate) async fn run_pre_tool_hooks(
     };
     let cwd = &cwd_owned;
 
-    if !hooks_maybe_enabled_for_event(
-        cwd,
-        crate::core::hooks::store::ManagedHookEvent::PreToolUse,
-    )
-    .await
+    if !hooks_maybe_enabled_for_event(cwd, crate::core::hooks::store::ManagedHookEvent::PreToolUse)
+        .await
     {
         return Ok(());
     }

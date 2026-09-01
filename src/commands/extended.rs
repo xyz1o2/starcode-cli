@@ -25,7 +25,10 @@ pub async fn git_status(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandR
 }
 
 pub async fn git_log(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
-    let count = args.first().and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
+    let count = args
+        .first()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(20);
     let message_id = ctx.state.next_message_id;
     ctx.state.next_message_id += 1;
     ctx.agent_tx
@@ -39,7 +42,11 @@ pub async fn git_log(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResul
 }
 
 pub async fn git_diff(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
-    let target = if args.is_empty() { String::new() } else { args.join(" ") };
+    let target = if args.is_empty() {
+        String::new()
+    } else {
+        args.join(" ")
+    };
     let message_id = ctx.state.next_message_id;
     ctx.state.next_message_id += 1;
     ctx.agent_tx
@@ -242,7 +249,10 @@ pub async fn config_show(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Com
         .await
         .map_err(|e| e.to_string())?;
     let json = serde_json::to_string_pretty(&settings).unwrap_or_else(|_| "{}".to_string());
-    push_msg(&mut ctx, format!("Current configuration:\n```json\n{}\n```", json));
+    push_msg(
+        &mut ctx,
+        format!("Current configuration:\n```json\n{}\n```", json),
+    );
     Ok(())
 }
 
@@ -275,7 +285,10 @@ pub async fn config_export(mut ctx: CommandContext<'_>, _args: Vec<String>) -> C
         .join("user-settings.json");
     if settings_path.exists() {
         let content = std::fs::read_to_string(&settings_path).unwrap_or_default();
-        push_msg(&mut ctx, format!("Exported configuration:\n```json\n{}\n```", content));
+        push_msg(
+            &mut ctx,
+            format!("Exported configuration:\n```json\n{}\n```", content),
+        );
     } else {
         push_msg(&mut ctx, "No configuration file found.");
     }
@@ -388,7 +401,10 @@ pub async fn debug_log(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Comma
     std::env::set_var("STAR_LOG_ENABLED", new_state);
     push_msg(
         &mut ctx,
-        format!("Debug logging: {}", if new_state == "true" { "ON" } else { "OFF" }),
+        format!(
+            "Debug logging: {}",
+            if new_state == "true" { "ON" } else { "OFF" }
+        ),
     );
     Ok(())
 }
@@ -427,7 +443,12 @@ pub async fn debug_tools(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Com
             .as_ref()
             .map(|tc| tc.function.name.as_str())
             .unwrap_or("unknown");
-        lines.push(format!("  {}. {} - {}", i + 1, name, &entry.content[..entry.content.len().min(80)]));
+        lines.push(format!(
+            "  {}. {} - {}",
+            i + 1,
+            name,
+            &entry.content[..entry.content.len().min(80)]
+        ));
     }
     push_msg(&mut ctx, lines.join("\n"));
     Ok(())
@@ -477,7 +498,13 @@ pub async fn agent_switch(mut ctx: CommandContext<'_>, args: Vec<String>) -> Com
         push_msg(&mut ctx, "Usage: /agent switch <name>");
         return Ok(());
     }
-    push_msg(&mut ctx, format!("Agent switch requested: {}\nUse /agents to manage agent definitions.", name));
+    push_msg(
+        &mut ctx,
+        format!(
+            "Agent switch requested: {}\nUse /agents to manage agent definitions.",
+            name
+        ),
+    );
     Ok(())
 }
 
@@ -489,7 +516,10 @@ pub async fn agent_create(mut ctx: CommandContext<'_>, args: Vec<String>) -> Com
     }
     push_msg(
         &mut ctx,
-        format!("Create agent: {}\nUse /agents create for interactive agent creation.", name),
+        format!(
+            "Create agent: {}\nUse /agents create for interactive agent creation.",
+            name
+        ),
     );
     Ok(())
 }
@@ -502,7 +532,10 @@ pub async fn agent_delete(mut ctx: CommandContext<'_>, args: Vec<String>) -> Com
     }
     push_msg(
         &mut ctx,
-        format!("Delete agent: {}\nUse /agents delete for confirmation.", name),
+        format!(
+            "Delete agent: {}\nUse /agents delete for confirmation.",
+            name
+        ),
     );
     Ok(())
 }
@@ -535,7 +568,10 @@ pub async fn workflow_create(mut ctx: CommandContext<'_>, args: Vec<String>) -> 
     }
     push_msg(
         &mut ctx,
-        format!("Create workflow: {}\nCreate a .star/workflows/{}.md file.", name, name),
+        format!(
+            "Create workflow: {}\nCreate a .star/workflows/{}.md file.",
+            name, name
+        ),
     );
     Ok(())
 }
@@ -612,15 +648,27 @@ pub async fn model_cmd(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Comma
 }
 
 pub async fn provider_cmd(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
-    push_msg(&mut ctx, "Use /provider list to see available providers, /provider select to switch.");
+    push_msg(
+        &mut ctx,
+        "Use /provider list to see available providers, /provider select to switch.",
+    );
     Ok(())
 }
 
 pub async fn temperature_cmd(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     if let Some(val) = args.first() {
-        push_msg(&mut ctx, format!("Temperature set to: {}\nNote: This takes effect on the next request.", val));
+        push_msg(
+            &mut ctx,
+            format!(
+                "Temperature set to: {}\nNote: This takes effect on the next request.",
+                val
+            ),
+        );
     } else {
-        push_msg(&mut ctx, "Current temperature: default (provider-specific)\nUsage: /temperature <value>");
+        push_msg(
+            &mut ctx,
+            "Current temperature: default (provider-specific)\nUsage: /temperature <value>",
+        );
     }
     Ok(())
 }
@@ -816,10 +864,7 @@ pub async fn suggestions_cmd(mut ctx: CommandContext<'_>, args: Vec<String>) -> 
                         crate::core::proactive::suggestions::SuggestionPriority::Medium => "MED",
                         crate::core::proactive::suggestions::SuggestionPriority::High => "HIGH",
                     };
-                    lines.push(format!(
-                        "  [{}] {} ({})",
-                        priority, s.message, s.id
-                    ));
+                    lines.push(format!("  [{}] {} ({})", priority, s.message, s.id));
                 }
                 push_msg(&mut ctx, lines.join("\n"));
             }
@@ -922,12 +967,12 @@ pub async fn voice_cmd(mut ctx: CommandContext<'_>, args: Vec<String>) -> Comman
                 if let Ok(rate) = rate_str.parse::<f32>() {
                     ctx.state.voice_config.speech_rate = rate.clamp(0.5, 2.0);
                     let rate = ctx.state.voice_config.speech_rate;
+                    push_msg(&mut ctx, format!("Speech rate set to: {}", rate));
+                } else {
                     push_msg(
                         &mut ctx,
-                        format!("Speech rate set to: {}", rate),
+                        "Invalid rate value. Use a number between 0.5 and 2.0.".to_string(),
                     );
-                } else {
-                    push_msg(&mut ctx, "Invalid rate value. Use a number between 0.5 and 2.0.".to_string());
                 }
             } else {
                 let rate = ctx.state.voice_config.speech_rate;
@@ -945,28 +990,26 @@ pub async fn voice_cmd(mut ctx: CommandContext<'_>, args: Vec<String>) -> Comman
                 if let Ok(vol) = vol_str.parse::<f32>() {
                     ctx.state.voice_config.volume = vol.clamp(0.0, 1.0);
                     let volume = ctx.state.voice_config.volume;
+                    push_msg(&mut ctx, format!("Volume set to: {}", volume));
+                } else {
                     push_msg(
                         &mut ctx,
-                        format!("Volume set to: {}", volume),
+                        "Invalid volume value. Use a number between 0.0 and 1.0.".to_string(),
                     );
-                } else {
-                    push_msg(&mut ctx, "Invalid volume value. Use a number between 0.0 and 1.0.".to_string());
                 }
             } else {
                 let volume = ctx.state.voice_config.volume;
                 push_msg(
                     &mut ctx,
-                    format!(
-                        "Current volume: {}\nUsage: /voice volume <0.0-1.0>",
-                        volume
-                    ),
+                    format!("Current volume: {}\nUsage: /voice volume <0.0-1.0>", volume),
                 );
             }
         }
         _ => {
             push_msg(
                 &mut ctx,
-                "Usage: /voice [on|off|status|lang <code>|rate <0.5-2.0>|volume <0.0-1.0>]".to_string(),
+                "Usage: /voice [on|off|status|lang <code>|rate <0.5-2.0>|volume <0.0-1.0>]"
+                    .to_string(),
             );
         }
     }
@@ -1081,7 +1124,10 @@ pub async fn remote_settings_cmd(mut ctx: CommandContext<'_>, args: Vec<String>)
                 ctx.state.remote_settings.set_endpoint(endpoint);
                 push_msg(&mut ctx, format!("Endpoint set to: {}", endpoint));
             } else {
-                push_msg(&mut ctx, "Usage: /remote-settings set-endpoint <url>".to_string());
+                push_msg(
+                    &mut ctx,
+                    "Usage: /remote-settings set-endpoint <url>".to_string(),
+                );
             }
         }
         "sync" => match ctx.state.remote_settings.sync().await {
@@ -1090,11 +1136,7 @@ pub async fn remote_settings_cmd(mut ctx: CommandContext<'_>, args: Vec<String>)
         },
         "get" => {
             if let Some(path) = args.get(1) {
-                let result = ctx
-                    .state
-                    .remote_settings
-                    .get_setting(path)
-                    .cloned();
+                let result = ctx.state.remote_settings.get_setting(path).cloned();
                 match result {
                     Some(value) => {
                         push_msg(&mut ctx, format!("{}: {}", path, value));
@@ -1175,7 +1217,11 @@ pub async fn export_conversation(mut ctx: CommandContext<'_>, args: Vec<String>)
     md.push_str(&format!(
         "- Date: {}\n- Model: {}\n\n---\n\n",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-        if ctx.state.current_model.is_empty() { "-" } else { &ctx.state.current_model }
+        if ctx.state.current_model.is_empty() {
+            "-"
+        } else {
+            &ctx.state.current_model
+        }
     ));
 
     for e in &ctx.state.chat_history {
@@ -1289,7 +1335,14 @@ pub async fn files_in_context(mut ctx: CommandContext<'_>, _args: Vec<String>) -
         let name = tc.function.name.as_str();
         let is_file_tool = matches!(
             name,
-            "Read" | "view_file" | "Edit" | "edit_file" | "create_file" | "Write" | "str_replace_editor" | "smart_edit"
+            "Read"
+                | "view_file"
+                | "Edit"
+                | "edit_file"
+                | "create_file"
+                | "Write"
+                | "str_replace_editor"
+                | "smart_edit"
         );
         if !is_file_tool {
             continue;
@@ -1307,7 +1360,10 @@ pub async fn files_in_context(mut ctx: CommandContext<'_>, _args: Vec<String>) -
     }
 
     if files.is_empty() {
-        push_msg(&mut ctx, "No files have been read or edited in this session yet.");
+        push_msg(
+            &mut ctx,
+            "No files have been read or edited in this session yet.",
+        );
         return Ok(());
     }
     let mut out = format!("Files touched this session ({}):\n", files.len());
@@ -1346,8 +1402,10 @@ pub async fn rewind(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRe
         let recent = &snapshots[start..];
 
         let mut lines = String::from("📋 File-history snapshots (newest last):\n\n");
-        lines.push_str("  id                            | time              | tool       | files\n");
-        lines.push_str("  ------------------------------+-------------------+------------+------\n");
+        lines
+            .push_str("  id                            | time              | tool       | files\n");
+        lines
+            .push_str("  ------------------------------+-------------------+------------+------\n");
 
         for s in recent {
             let id_short: String = if s.snapshot_id.len() > 30 {
@@ -1409,7 +1467,11 @@ pub async fn rewind(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRe
     let summary = if changed.is_empty() {
         "no files changed (already at this state)".to_string()
     } else {
-        format!("restored {} file(s):\n{}", changed.len(), changed.join("\n"))
+        format!(
+            "restored {} file(s):\n{}",
+            changed.len(),
+            changed.join("\n")
+        )
     };
 
     push_msg(

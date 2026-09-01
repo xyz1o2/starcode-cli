@@ -69,7 +69,11 @@ impl StreamFallbackManager {
     }
 
     /// 创建回退结果消息
-    pub fn create_fallback_result_message(&self, original_model: &str, fallback_model: &str) -> StarMessage {
+    pub fn create_fallback_result_message(
+        &self,
+        original_model: &str,
+        fallback_model: &str,
+    ) -> StarMessage {
         StarMessage::system(&format!(
             "[Model Fallback] Switched to {} due to high demand for {}",
             fallback_model, original_model
@@ -86,19 +90,31 @@ impl TombstoneManager {
     pub fn create_tombstone_message(original_message: &StarMessage) -> StarMessage {
         let content = format!(
             "[Tombstone] Original message removed: {}",
-            original_message.content.as_deref().unwrap_or("").chars().take(50).collect::<String>()
+            original_message
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(50)
+                .collect::<String>()
         );
         StarMessage::system(&content)
     }
 
     /// 批量创建tombstone消息
     pub fn create_tombstone_messages(messages: &[StarMessage]) -> Vec<StarMessage> {
-        messages.iter().map(|m| Self::create_tombstone_message(m)).collect()
+        messages
+            .iter()
+            .map(|m| Self::create_tombstone_message(m))
+            .collect()
     }
 
     /// 检查是否是tombstone消息
     pub fn is_tombstone_message(message: &StarMessage) -> bool {
-        message.content.as_ref().map_or(false, |c| c.starts_with("[Tombstone]"))
+        message
+            .content
+            .as_ref()
+            .map_or(false, |c| c.starts_with("[Tombstone]"))
     }
 }
 
@@ -108,10 +124,7 @@ pub struct MessageBackfillManager;
 impl MessageBackfillManager {
     /// 回填可观测输入
     /// 在消息被yield之前，为SDK流输出和转录序列化添加遗留/派生字段
-    pub fn backfill_observable_input(
-        tool: &dyn BackfillCapableTool,
-        input: &mut Value,
-    ) {
+    pub fn backfill_observable_input(tool: &dyn BackfillCapableTool, input: &mut Value) {
         if let Some(obj) = input.as_object_mut() {
             tool.backfill_observable_input(obj);
         }
@@ -130,13 +143,10 @@ impl MessageBackfillManager {
     }
 
     /// 克隆并回填
-    pub fn clone_and_backfill(
-        tool: &dyn BackfillCapableTool,
-        input: &Value,
-    ) -> Option<Value> {
+    pub fn clone_and_backfill(tool: &dyn BackfillCapableTool, input: &Value) -> Option<Value> {
         let mut input_copy = input.clone();
         Self::backfill_observable_input(tool, &mut input_copy);
-        
+
         if Self::has_added_fields(input, &input_copy) {
             Some(input_copy)
         } else {
@@ -261,13 +271,9 @@ pub enum StreamPermissionResult {
     /// 允许执行
     Allowed,
     /// 拒绝执行
-    Denied {
-        message: String,
-    },
+    Denied { message: String },
     /// 需要确认
-    NeedsConfirmation {
-        message: String,
-    },
+    NeedsConfirmation { message: String },
 }
 
 /// 流式工具执行器增强 - 对标claude-code的StreamingToolExecutor
@@ -328,7 +334,8 @@ impl EnhancedStreamingToolExecutor {
     /// 完成工具
     pub fn complete_tool(&mut self, tool_use_id: &str, result: Value) {
         self.in_progress.remove(tool_use_id);
-        self.completed_results.insert(tool_use_id.to_string(), result);
+        self.completed_results
+            .insert(tool_use_id.to_string(), result);
     }
 
     /// 获取已完成的结果
@@ -411,7 +418,9 @@ impl Default for QueryConfig {
 impl QueryConfig {
     pub fn from_env() -> Self {
         Self {
-            is_ant: std::env::var("USER_TYPE").map(|v| v == "ant").unwrap_or(false),
+            is_ant: std::env::var("USER_TYPE")
+                .map(|v| v == "ant")
+                .unwrap_or(false),
             streaming_tool_execution: true,
             fast_mode_enabled: false,
             session_id: uuid::Uuid::new_v4().to_string(),
@@ -438,11 +447,11 @@ mod tests {
         let mut manager = StreamFallbackManager::new();
         assert!(!manager.is_fallback_active());
         assert!(manager.can_fallback());
-        
+
         manager.start_fallback("model-a", "model-b");
         assert!(manager.is_fallback_active());
         assert_eq!(manager.get_fallback_model(), Some("model-b"));
-        
+
         manager.end_fallback();
         assert!(!manager.is_fallback_active());
     }
@@ -457,11 +466,11 @@ mod tests {
     #[test]
     fn test_enhanced_streaming_executor() {
         let mut executor = EnhancedStreamingToolExecutor::new(vec!["Read".to_string()]);
-        
+
         executor.add_tool("Read", "tool1", true);
         assert_eq!(executor.in_progress_count(), 1);
         assert!(executor.can_execute_tool(true));
-        
+
         executor.complete_tool("tool1", serde_json::json!({"result": "ok"}));
         assert_eq!(executor.in_progress_count(), 0);
         assert!(executor.get_completed_results().contains_key("tool1"));

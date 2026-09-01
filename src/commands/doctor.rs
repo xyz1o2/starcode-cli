@@ -294,4 +294,3 @@ fn is_decision_trace_event(event: &str) -> bool {
             | "auto_verification_injected"
     )
 }
- 

@@ -3,17 +3,21 @@ use std::collections::HashSet;
 
 /// 检查是否是编辑工具
 pub(crate) fn is_edit_tool_name(name: &str) -> bool {
-    matches!(
-        name,
-        "Edit" | "multi_edit" | "Write" | "create_file"
-    )
+    matches!(name, "Edit" | "multi_edit" | "Write" | "create_file")
 }
 
 /// 检查是否是只读工具
 pub(crate) fn is_read_only_tool_name(name: &str) -> bool {
     matches!(
         name,
-        "Read" | "Grep" | "Glob" | "SemanticSearch" | "ProjectMap" | "get_diagnostics" | "ListDir" | "rg"
+        "Read"
+            | "Grep"
+            | "Glob"
+            | "SemanticSearch"
+            | "ProjectMap"
+            | "get_diagnostics"
+            | "ListDir"
+            | "rg"
     )
 }
 
@@ -52,17 +56,34 @@ pub(crate) fn truncate_chars(input: &str, max_chars: usize) -> String {
 /// 检查是否有操作意图
 pub(crate) fn has_action_intent(text: &str) -> bool {
     let action_keywords = [
-        "create", "write", "edit", "Edit", "delete", "remove",
-        "update", "change", "fix", "add", "insert", "modify",
-        "implement", "refactor", "optimize", "improve",
+        "create",
+        "write",
+        "edit",
+        "Edit",
+        "delete",
+        "remove",
+        "update",
+        "change",
+        "fix",
+        "add",
+        "insert",
+        "modify",
+        "implement",
+        "refactor",
+        "optimize",
+        "improve",
     ];
-    
+
     let text_lower = text.to_lowercase();
-    action_keywords.iter().any(|keyword| text_lower.contains(keyword))
+    action_keywords
+        .iter()
+        .any(|keyword| text_lower.contains(keyword))
 }
 
 /// 获取请求复杂度标签
-pub(crate) fn request_complexity_label(complexity: crate::core::routing::RequestComplexity) -> &'static str {
+pub(crate) fn request_complexity_label(
+    complexity: crate::core::routing::RequestComplexity,
+) -> &'static str {
     match complexity {
         crate::core::routing::RequestComplexity::Simple => "simple",
         crate::core::routing::RequestComplexity::Medium => "medium",
@@ -117,7 +138,9 @@ fn canonical_json_signature(value: &serde_json::Value) -> serde_json::Value {
             }
             serde_json::to_value(sorted).unwrap_or(serde_json::Value::Null)
         }
-        serde_json::Value::Array(items) => serde_json::Value::Array(items.iter().map(canonical_json_signature).collect()),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(canonical_json_signature).collect())
+        }
         _ => value.clone(),
     }
 }
@@ -134,7 +157,9 @@ fn is_path_like_tool_arg(key: &str) -> bool {
 pub(crate) fn should_skip_verification(user_input: &str) -> bool {
     let skip_keywords = ["quick", "fast", "simple", "minor", "small"];
     let input_lower = user_input.to_lowercase();
-    skip_keywords.iter().any(|keyword| input_lower.contains(keyword))
+    skip_keywords
+        .iter()
+        .any(|keyword| input_lower.contains(keyword))
 }
 
 /// 构建工具选择系统消息
@@ -253,7 +278,9 @@ fn select_tools_for_turn_with_limit(
     {
         let mut unselected_mcp: Vec<(f64, &StarTool)> = scored_tools
             .iter()
-            .filter(|(_, t)| is_mcp_dynamic_tool(&t.function.name) && !selected_names.contains(&t.function.name))
+            .filter(|(_, t)| {
+                is_mcp_dynamic_tool(&t.function.name) && !selected_names.contains(&t.function.name)
+            })
             .map(|(s, t)| (*s, *t))
             .collect();
         unselected_mcp.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -366,22 +393,34 @@ fn score_tool_for_turn(tool: &StarTool, user_input: &str, current_turn: i32) -> 
     // 特定工具加分
     match tool_name.as_str() {
         "Read" | "view_file" => {
-            if input_lower.contains("read") || input_lower.contains("view") || input_lower.contains("show") {
+            if input_lower.contains("read")
+                || input_lower.contains("view")
+                || input_lower.contains("show")
+            {
                 score += 5.0;
             }
         }
         "Grep" | "Glob" => {
-            if input_lower.contains("Grep") || input_lower.contains("find") || input_lower.contains("Grep") {
+            if input_lower.contains("Grep")
+                || input_lower.contains("find")
+                || input_lower.contains("Grep")
+            {
                 score += 5.0;
             }
         }
         "Edit" | "multi_edit" => {
-            if input_lower.contains("edit") || input_lower.contains("change") || input_lower.contains("update") {
+            if input_lower.contains("edit")
+                || input_lower.contains("change")
+                || input_lower.contains("update")
+            {
                 score += 5.0;
             }
         }
         "Bash" => {
-            if input_lower.contains("run") || input_lower.contains("execute") || input_lower.contains("command") {
+            if input_lower.contains("run")
+                || input_lower.contains("execute")
+                || input_lower.contains("command")
+            {
                 score += 5.0;
             }
         }
@@ -415,15 +454,33 @@ pub(crate) struct ToolHints {
 impl ToolHints {
     pub(crate) fn active_tags(&self) -> Vec<&'static str> {
         let mut tags = Vec::new();
-        if self.explicit_skill { tags.push("skill"); }
-        if self.explicit_plan { tags.push("plan"); }
-        if self.explicit_git { tags.push("git"); }
-        if self.explicit_web { tags.push("web"); }
-        if self.explicit_diag { tags.push("diag"); }
-        if self.explicit_task { tags.push("task"); }
-        if self.explicit_new_file { tags.push("new_file"); }
-        if self.explicit_code_nav { tags.push("code_nav"); }
-        if self.explicit_memory { tags.push("memory"); }
+        if self.explicit_skill {
+            tags.push("skill");
+        }
+        if self.explicit_plan {
+            tags.push("plan");
+        }
+        if self.explicit_git {
+            tags.push("git");
+        }
+        if self.explicit_web {
+            tags.push("web");
+        }
+        if self.explicit_diag {
+            tags.push("diag");
+        }
+        if self.explicit_task {
+            tags.push("task");
+        }
+        if self.explicit_new_file {
+            tags.push("new_file");
+        }
+        if self.explicit_code_nav {
+            tags.push("code_nav");
+        }
+        if self.explicit_memory {
+            tags.push("memory");
+        }
         tags
     }
 }
@@ -432,52 +489,67 @@ impl ToolHints {
 pub(crate) fn infer_tool_hints(user_input: &str) -> ToolHints {
     let input_lower = user_input.to_lowercase();
     let mut hints = ToolHints::default();
-    
+
     // 技能提示
     if input_lower.contains("skill") || input_lower.contains("能力") {
         hints.explicit_skill = true;
     }
-    
+
     // 计划提示
     if input_lower.contains("plan") || input_lower.contains("计划") {
         hints.explicit_plan = true;
     }
-    
+
     // Git 提示
-    if input_lower.contains("git") || input_lower.contains("commit") || input_lower.contains("branch") {
+    if input_lower.contains("git")
+        || input_lower.contains("commit")
+        || input_lower.contains("branch")
+    {
         hints.explicit_git = true;
     }
-    
+
     // Web 提示
     if input_lower.contains("web") || input_lower.contains("http") || input_lower.contains("url") {
         hints.explicit_web = true;
     }
-    
+
     // 诊断提示
-    if input_lower.contains("diagnostic") || input_lower.contains("error") || input_lower.contains("lint") {
+    if input_lower.contains("diagnostic")
+        || input_lower.contains("error")
+        || input_lower.contains("lint")
+    {
         hints.explicit_diag = true;
     }
-    
+
     // 任务提示
     if input_lower.contains("task") || input_lower.contains("任务") {
         hints.explicit_task = true;
     }
-    
+
     // 新文件提示
-    if input_lower.contains("new file") || input_lower.contains("create file") || input_lower.contains("新建文件") {
+    if input_lower.contains("new file")
+        || input_lower.contains("create file")
+        || input_lower.contains("新建文件")
+    {
         hints.explicit_new_file = true;
     }
-    
+
     // 代码导航提示
-    if input_lower.contains("navigate") || input_lower.contains("go to") || input_lower.contains("跳转") {
+    if input_lower.contains("navigate")
+        || input_lower.contains("go to")
+        || input_lower.contains("跳转")
+    {
         hints.explicit_code_nav = true;
     }
-    
+
     // 记忆提示
-    if input_lower.contains("remember") || input_lower.contains("memory") || input_lower.contains("记忆") {
+    if input_lower.contains("remember")
+        || input_lower.contains("memory")
+        || input_lower.contains("记忆")
+    {
         hints.explicit_memory = true;
     }
-    
+
     hints
 }
 
@@ -507,12 +579,18 @@ pub(crate) fn compute_tool_roles(tool: &StarTool) -> ToolRoles {
 
 /// 检查是否是读取工具
 fn is_read_tool(tool: &StarTool) -> bool {
-    matches!(tool.function.name.as_str(), "Read" | "view_file" | "ListDir")
+    matches!(
+        tool.function.name.as_str(),
+        "Read" | "view_file" | "ListDir"
+    )
 }
 
 /// 检查是否是搜索工具
 fn is_search_tool(tool: &StarTool) -> bool {
-    matches!(tool.function.name.as_str(), "Grep" | "Glob" | "rg" | "SemanticSearch")
+    matches!(
+        tool.function.name.as_str(),
+        "Grep" | "Glob" | "rg" | "SemanticSearch"
+    )
 }
 
 /// 检查是否是项目地图工具
@@ -527,5 +605,7 @@ fn is_semantic_search_tool(tool: &StarTool) -> bool {
 
 /// 检查是否匹配模式
 fn tool_matches_patterns(tool: &StarTool, patterns: &[&str]) -> bool {
-    patterns.iter().any(|pattern| tool.function.name.contains(pattern))
+    patterns
+        .iter()
+        .any(|pattern| tool.function.name.contains(pattern))
 }

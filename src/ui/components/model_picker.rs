@@ -105,7 +105,7 @@ pub fn render_model_picker(f: &mut Frame, state: &ModelPickerState, area: Rect) 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // 标题和过滤器
+            Constraint::Length(3), // 标题和过滤器
             Constraint::Min(5),    // 模型列表
             Constraint::Length(3), // 详情和操作提示
         ])
@@ -252,10 +252,7 @@ fn render_footer(f: &mut Frame, state: &ModelPickerState, area: Rect) {
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(
-                        format!("{}", max_tokens),
-                        Style::default().fg(Color::White),
-                    ),
+                    Span::styled(format!("{}", max_tokens), Style::default().fg(Color::White)),
                 ]));
             }
 
@@ -314,10 +311,7 @@ fn render_footer(f: &mut Frame, state: &ModelPickerState, area: Rect) {
 }
 
 /// 处理模型选择器输入
-pub fn handle_model_picker_input(
-    state: &mut ModelPickerState,
-    key: char,
-) -> Option<ModelInfo> {
+pub fn handle_model_picker_input(state: &mut ModelPickerState, key: char) -> Option<ModelInfo> {
     match key {
         '\n' | '\r' => state.get_selected_model().cloned(),
         '\x1b' => None, // Esc

@@ -1,8 +1,7 @@
 /// ACP协议 (Agent Client Protocol)
-/// 
+///
 /// 对标claude-code-main的src/services/acp/
 /// Agent客户端协议实现
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

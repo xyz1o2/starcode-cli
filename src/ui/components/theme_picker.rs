@@ -81,7 +81,7 @@ pub fn render_theme_picker(f: &mut Frame, state: &ThemePickerState, area: Rect) 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // 标题
+            Constraint::Length(3), // 标题
             Constraint::Min(5),    // 主题列表
             Constraint::Length(3), // 预览和操作提示
         ])
@@ -240,10 +240,7 @@ fn render_footer(f: &mut Frame, state: &ThemePickerState, area: Rect) {
 }
 
 /// 处理主题选择器输入
-pub fn handle_theme_picker_input(
-    state: &mut ThemePickerState,
-    key: char,
-) -> Option<ThemeInfo> {
+pub fn handle_theme_picker_input(state: &mut ThemePickerState, key: char) -> Option<ThemeInfo> {
     match key {
         '\n' | '\r' => state.confirm_selection(),
         '\x1b' => {

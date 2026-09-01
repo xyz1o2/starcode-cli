@@ -45,7 +45,12 @@ impl PermissionEvaluator {
     }
 
     /// Evaluate permission for an action on a resource
-    pub fn evaluate(&self, action: &str, resource: &str, project_id: Option<&str>) -> PermissionEffect {
+    pub fn evaluate(
+        &self,
+        action: &str,
+        resource: &str,
+        project_id: Option<&str>,
+    ) -> PermissionEffect {
         // Check saved rules first (project-specific)
         if let Some(pid) = project_id {
             if let Some(rules) = self.saved.get(pid) {
@@ -65,10 +70,17 @@ impl PermissionEvaluator {
     }
 
     /// Check a list of rules for a match
-    fn check_rules(&self, rules: &[PermissionRule], action: &str, resource: &str) -> Option<PermissionEffect> {
+    fn check_rules(
+        &self,
+        rules: &[PermissionRule],
+        action: &str,
+        resource: &str,
+    ) -> Option<PermissionEffect> {
         // Search from last to first (last match wins)
         for rule in rules.iter().rev() {
-            if self.matches_pattern(&rule.action, action) && self.matches_pattern(&rule.resource, resource) {
+            if self.matches_pattern(&rule.action, action)
+                && self.matches_pattern(&rule.resource, resource)
+            {
                 return Some(rule.effect.clone());
             }
         }
@@ -80,17 +92,17 @@ impl PermissionEvaluator {
         if pattern == "*" {
             return true;
         }
-        
+
         if pattern.ends_with('*') {
             let prefix = &pattern[..pattern.len() - 1];
             return text.starts_with(prefix);
         }
-        
+
         if pattern.starts_with('*') {
             let suffix = &pattern[1..];
             return text.ends_with(suffix);
         }
-        
+
         pattern == text
     }
 }
@@ -100,4 +112,3 @@ impl Default for PermissionEvaluator {
         Self::new()
     }
 }
- 

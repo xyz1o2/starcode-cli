@@ -1,5 +1,4 @@
 /// Bridge JWT认证
-
 use serde::{Deserialize, Serialize};
 
 /// JWT令牌
@@ -53,10 +52,11 @@ impl JwtAuth {
 
         // 简化的JWT实现
         // 实际应该使用jsonwebtoken crate
-        let payload = serde_json::to_string(&token)
-            .map_err(|e| JwtError::EncodeError(e.to_string()))?;
+        let payload =
+            serde_json::to_string(&token).map_err(|e| JwtError::EncodeError(e.to_string()))?;
 
-        Ok(format!("{}.{}.{}", 
+        Ok(format!(
+            "{}.{}.{}",
             base64::encode(&self.issuer),
             base64::encode(&payload),
             base64::encode("signature") // 简化的签名
@@ -90,11 +90,10 @@ impl JwtAuth {
             return Err(JwtError::InvalidFormat);
         }
 
-        let payload = base64::decode(parts[1])
-            .map_err(|e| JwtError::DecodeError(e.to_string()))?;
+        let payload = base64::decode(parts[1]).map_err(|e| JwtError::DecodeError(e.to_string()))?;
 
-        let token_data: JwtToken = serde_json::from_slice(&payload)
-            .map_err(|e| JwtError::DecodeError(e.to_string()))?;
+        let token_data: JwtToken =
+            serde_json::from_slice(&payload).map_err(|e| JwtError::DecodeError(e.to_string()))?;
 
         let now = chrono::Utc::now().timestamp();
         if token_data.exp <= now {

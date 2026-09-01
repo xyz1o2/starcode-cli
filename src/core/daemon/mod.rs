@@ -1,11 +1,10 @@
 /// Daemon模式增强
-/// 
+///
 /// 对标claude-code-main的src/daemon/
 /// 长驻后台进程管理，支持Worker注册、状态监控和任务调度
-
 pub mod worker_registry;
 
-pub use worker_registry::{WorkerRegistry, WorkerEntry, WorkerHealth};
+pub use worker_registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -144,7 +143,7 @@ impl DaemonManager {
 
         self.status = DaemonStatus::Running;
         self.started_at = Some(chrono::Utc::now().timestamp());
-        
+
         // 写入PID文件
         if let Some(pid_file) = &self.config.pid_file {
             let pid = std::process::id();
@@ -159,7 +158,7 @@ impl DaemonManager {
     pub fn stop(&mut self) {
         self.status = DaemonStatus::Stopped;
         self.started_at = None;
-        
+
         // 清理PID文件
         if let Some(pid_file) = &self.config.pid_file {
             let _ = std::fs::remove_file(pid_file);
@@ -177,7 +176,7 @@ impl DaemonManager {
     /// 提交任务
     pub fn submit_task(&mut self, name: &str, task_type: &str) -> String {
         let id = uuid::Uuid::new_v4().to_string();
-        
+
         let task = DaemonTask {
             id: id.clone(),
             name: name.to_string(),
@@ -195,10 +194,14 @@ impl DaemonManager {
 
     /// 分配任务给Worker
     pub fn assign_task(&mut self, task_id: &str, worker_id: &str) -> Result<(), String> {
-        let task = self.tasks.get_mut(task_id)
+        let task = self
+            .tasks
+            .get_mut(task_id)
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
-        let worker = self.worker_registry.get_worker(worker_id)
+        let worker = self
+            .worker_registry
+            .get_worker(worker_id)
             .ok_or_else(|| format!("Worker not found: {}", worker_id))?;
 
         task.status = DaemonStatus::Running;
@@ -221,7 +224,7 @@ impl DaemonManager {
     pub fn health_check(&mut self) {
         let now = chrono::Utc::now().timestamp();
         self.last_health_check = Some(now);
-        
+
         // 检查Worker健康状态
         self.worker_registry.health_check();
     }
@@ -250,9 +253,16 @@ impl DaemonManager {
     pub fn get_statistics(&self) -> DaemonStatistics {
         DaemonStatistics {
             status: self.status.clone(),
-            uptime_seconds: self.started_at.map(|t| chrono::Utc::now().timestamp() - t).unwrap_or(0),
+            uptime_seconds: self
+                .started_at
+                .map(|t| chrono::Utc::now().timestamp() - t)
+                .unwrap_or(0),
             total_tasks: self.tasks.len() as u64,
-            running_tasks: self.tasks.values().filter(|t| t.status == DaemonStatus::Running).count() as u64,
+            running_tasks: self
+                .tasks
+                .values()
+                .filter(|t| t.status == DaemonStatus::Running)
+                .count() as u64,
             total_workers: self.worker_registry.worker_count(),
             healthy_workers: self.worker_registry.healthy_worker_count(),
         }

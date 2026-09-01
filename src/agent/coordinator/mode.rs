@@ -87,7 +87,11 @@ impl CoordinatorMode {
 
     /// 序列化当前 mode 到 session
     pub fn to_session_mode(&self) -> &str {
-        if self.active { "coordinator" } else { "normal" }
+        if self.active {
+            "coordinator"
+        } else {
+            "normal"
+        }
     }
 
     // ── ③ Prompt ────────────────────────────────────────────────────────
@@ -148,7 +152,9 @@ impl CoordinatorMode {
         for n in notifications {
             summary.push_str(&format!(
                 "- **{}** ({:?}): {}\n",
-                n.summary, n.status, n.result.lines().next().unwrap_or("(no output)")
+                n.summary,
+                n.status,
+                n.result.lines().next().unwrap_or("(no output)")
             ));
         }
         summary.push_str("\nSynthesize these results into a coherent response for the user.");

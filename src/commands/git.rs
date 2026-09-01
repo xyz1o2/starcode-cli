@@ -165,7 +165,6 @@ async fn handle_commit_and_push(
         })
         .or(settings.default_model);
 
-
     let is_openai_compatible = effective_provider_id
         .as_deref()
         .and_then(crate::core::config::providers::provider_openai_compatible_mode)

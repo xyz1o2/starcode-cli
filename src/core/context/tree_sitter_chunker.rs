@@ -42,8 +42,7 @@ fn language_for_ext(ext: &str) -> Option<Language> {
 // is not poisoned — a panic during parsing releases the lock cleanly.
 
 /// Thread-safe pool of tree-sitter parsers, lazily created per language.
-static PARSER_POOL: Lazy<Mutex<HashMap<String, Parser>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static PARSER_POOL: Lazy<Mutex<HashMap<String, Parser>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Execute `f` with a pooled parser for the given file extension.
 /// The parser is created on first use per language and reused thereafter.
@@ -286,11 +285,7 @@ fn chunk_from_tree(source: &str, tree: &Tree) -> Vec<CodeChunk> {
 }
 
 /// Sub-chunk a large definition by its inner definition children.
-fn sub_chunk_definition<'a>(
-    source: &'a str,
-    node: Node<'a>,
-    lines: &[&'a str],
-) -> Vec<CodeChunk> {
+fn sub_chunk_definition<'a>(source: &'a str, node: Node<'a>, lines: &[&'a str]) -> Vec<CodeChunk> {
     let node_start_line = byte_to_line(source, node.start_byte());
     let node_end_line = byte_to_line(source, node.end_byte());
 
@@ -425,4 +420,3 @@ fn trivial_chunks(source: &str) -> Vec<CodeChunk> {
         context_header: None,
     }]
 }
- 

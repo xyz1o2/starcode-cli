@@ -89,10 +89,7 @@ pub async fn agent_worker(
             continue;
         };
 
-        append_debug_log_line(&format!(
-            "[Worker] Processing message id={}",
-            message_id
-        ));
+        append_debug_log_line(&format!("[Worker] Processing message id={}", message_id));
 
         // Check if tx is still open before processing
         if tx.is_closed() {

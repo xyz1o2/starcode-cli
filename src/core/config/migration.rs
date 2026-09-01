@@ -47,10 +47,7 @@ impl MigrationRunner {
     }
 
     pub fn run(&self, config: &mut serde_json::Value) -> Result<u32, String> {
-        let current_version = config
-            .get("version")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
+        let current_version = config.get("version").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
         let mut applied = 0;
         for migration in &self.migrations {
@@ -64,10 +61,7 @@ impl MigrationRunner {
     }
 
     pub fn get_pending_migrations(&self, config: &serde_json::Value) -> Vec<&ConfigMigration> {
-        let current_version = config
-            .get("version")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
+        let current_version = config.get("version").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
         self.migrations
             .iter()
@@ -76,10 +70,7 @@ impl MigrationRunner {
     }
 
     pub fn current_version(&self, config: &serde_json::Value) -> u32 {
-        config
-            .get("version")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32
+        config.get("version").and_then(|v| v.as_u64()).unwrap_or(0) as u32
     }
 }
 
@@ -88,5 +79,3 @@ impl Default for MigrationRunner {
         Self::new()
     }
 }
-
- 

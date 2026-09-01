@@ -69,7 +69,9 @@ fn replace_at_token_with_path(input: &mut String, path: &str, is_dir: bool) {
         let after = &input[at + 1..];
         if after.starts_with('"') {
             let body = &after[1..];
-            body.find('"').map(|i| at + 1 + 1 + i + 1).unwrap_or(input.len())
+            body.find('"')
+                .map(|i| at + 1 + 1 + i + 1)
+                .unwrap_or(input.len())
         } else {
             after
                 .find(char::is_whitespace)
@@ -349,7 +351,12 @@ pub fn render_overlays(f: &mut Frame<'_>, state: &ChatState, input_area: Rect) {
     render_session_selection_overlay(f, state, input_area, theme);
 }
 
-fn render_provider_selection_overlay(f: &mut Frame<'_>, state: &ChatState, _input_area: Rect, theme: &Theme) {
+fn render_provider_selection_overlay(
+    f: &mut Frame<'_>,
+    state: &ChatState,
+    _input_area: Rect,
+    theme: &Theme,
+) {
     if !state.show_provider_menu {
         return;
     }
@@ -387,7 +394,11 @@ fn render_provider_selection_overlay(f: &mut Frame<'_>, state: &ChatState, _inpu
                     Style::default()
                         .fg(label_fg)
                         .bg(bg)
-                        .add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() }),
+                        .add_modifier(if is_selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
                 ),
                 Span::styled(
                     format!("  [{}] {}", category, item.description),
@@ -402,7 +413,12 @@ fn render_provider_selection_overlay(f: &mut Frame<'_>, state: &ChatState, _inpu
     render_centered_list(f, f.area(), "Providers", &items);
 }
 
-fn render_session_selection_overlay(f: &mut Frame<'_>, state: &ChatState, _input_area: Rect, theme: &Theme) {
+fn render_session_selection_overlay(
+    f: &mut Frame<'_>,
+    state: &ChatState,
+    _input_area: Rect,
+    theme: &Theme,
+) {
     if !state.show_session_menu {
         return;
     }
@@ -426,7 +442,11 @@ fn render_session_selection_overlay(f: &mut Frame<'_>, state: &ChatState, _input
                     Style::default()
                         .fg(label_fg)
                         .bg(bg)
-                        .add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() }),
+                        .add_modifier(if is_selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
                 ),
                 Span::styled(
                     format!("  {}", item.description),
@@ -473,7 +493,12 @@ fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
 
 use ratatui::widgets::Clear;
 
-fn render_mention_hints_overlay(f: &mut Frame<'_>, state: &ChatState, input_area: Rect, theme: &Theme) {
+fn render_mention_hints_overlay(
+    f: &mut Frame<'_>,
+    state: &ChatState,
+    input_area: Rect,
+    theme: &Theme,
+) {
     if !state.show_mention_hints || state.mention_hints.is_empty() {
         return;
     }
@@ -531,14 +556,11 @@ fn render_mention_hints_overlay(f: &mut Frame<'_>, state: &ChatState, input_area
                 ),
                 Span::styled(
                     truncate_str(&display_path, 60),
-                    Style::default()
-                        .fg(fg)
-                        .bg(bg)
-                        .add_modifier(if is_selected {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
+                    Style::default().fg(fg).bg(bg).add_modifier(if is_selected {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
                 ),
             ];
 
@@ -557,7 +579,6 @@ fn render_mention_hints_overlay(f: &mut Frame<'_>, state: &ChatState, input_area
     f.render_widget(Clear, popup_area);
     f.render_widget(hints_list, popup_area);
 }
-
 
 /// Simplify path for display
 fn simplify_path(path: &str, cwd: &std::path::Path) -> String {
@@ -587,7 +608,12 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     }
 }
 
-fn render_command_hints_overlay(f: &mut Frame<'_>, state: &ChatState, input_area: Rect, theme: &Theme) {
+fn render_command_hints_overlay(
+    f: &mut Frame<'_>,
+    state: &ChatState,
+    input_area: Rect,
+    theme: &Theme,
+) {
     if !state.show_command_hints || state.command_hints.is_empty() {
         return;
     }
@@ -636,22 +662,29 @@ fn render_command_hints_overlay(f: &mut Frame<'_>, state: &ChatState, input_area
             let mut spans = vec![
                 Span::styled(
                     format!(" {} ", icon),
-                    Style::default().fg(if is_selected { theme.primary } else { theme.inactive }).bg(bg),
+                    Style::default()
+                        .fg(if is_selected {
+                            theme.primary
+                        } else {
+                            theme.inactive
+                        })
+                        .bg(bg),
                 ),
                 Span::styled(
                     format!("{:<18}", cmd_part),
                     Style::default()
                         .fg(label_fg)
                         .bg(bg)
-                        .add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() }),
+                        .add_modifier(if is_selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
                 ),
             ];
 
             if !desc_part.is_empty() {
-                spans.push(Span::styled(
-                    desc_part,
-                    Style::default().fg(desc_fg).bg(bg),
-                ));
+                spans.push(Span::styled(desc_part, Style::default().fg(desc_fg).bg(bg)));
             }
 
             ListItem::new(Line::from(spans)).style(Style::default().bg(bg))

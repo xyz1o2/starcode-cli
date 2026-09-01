@@ -1,5 +1,4 @@
 /// Bridge消息类型
-
 use serde::{Deserialize, Serialize};
 
 /// 消息类型

@@ -136,13 +136,19 @@ impl ToolInvocation for WebBrowserToolInvocation {
         Box::pin(async move {
             if action == "navigate" {
                 if let Some(url) = &url {
-                    if url.starts_with("file://") || url.contains("localhost") || url.contains("127.0.0.1") {
-                        return Ok(Some(crate::core::tools::tools::ToolCallConfirmationDetails {
-                            confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
-                            title: "Local Navigation".to_string(),
-                            prompt: format!("Navigating to local URL: {}. Proceed?", url),
-                            on_confirm: std::sync::Arc::new(|_| {}),
-                        }));
+                    if url.starts_with("file://")
+                        || url.contains("localhost")
+                        || url.contains("127.0.0.1")
+                    {
+                        return Ok(Some(
+                            crate::core::tools::tools::ToolCallConfirmationDetails {
+                                confirmation_type:
+                                    crate::core::tools::tools::ConfirmationType::Warning,
+                                title: "Local Navigation".to_string(),
+                                prompt: format!("Navigating to local URL: {}. Proceed?", url),
+                                on_confirm: std::sync::Arc::new(|_| {}),
+                            },
+                        ));
                     }
                 }
             }
@@ -254,7 +260,11 @@ impl ToolInvocation for WebBrowserToolInvocation {
 
                     Ok(ToolResult {
                         llm_content: Some(format!("Extracted content from {}", url)),
-                        return_display: Some(format!("Extracted {} characters from {}", text.len(), url)),
+                        return_display: Some(format!(
+                            "Extracted {} characters from {}",
+                            text.len(),
+                            url
+                        )),
                         output: text,
                         error: None,
                         data: None,
@@ -269,8 +279,11 @@ impl ToolInvocation for WebBrowserToolInvocation {
 
                     Ok(ToolResult {
                         llm_content: Some(format!("Screenshot of {} (placeholder)", url)),
-                        return_display: Some("Screenshot functionality requires headless browser".to_string()),
-                        output: "Screenshot functionality requires headless browser integration".to_string(),
+                        return_display: Some(
+                            "Screenshot functionality requires headless browser".to_string(),
+                        ),
+                        output: "Screenshot functionality requires headless browser integration"
+                            .to_string(),
                         error: None,
                         data: None,
                     })
@@ -283,8 +296,13 @@ impl ToolInvocation for WebBrowserToolInvocation {
                         .ok_or("Missing required parameter: selector")?;
 
                     Ok(ToolResult {
-                        llm_content: Some(format!("{} on {} (placeholder)", params.action, selector)),
-                        return_display: Some("DOM interaction requires headless browser".to_string()),
+                        llm_content: Some(format!(
+                            "{} on {} (placeholder)",
+                            params.action, selector
+                        )),
+                        return_display: Some(
+                            "DOM interaction requires headless browser".to_string(),
+                        ),
                         output: "DOM interaction requires headless browser integration".to_string(),
                         error: None,
                         data: None,

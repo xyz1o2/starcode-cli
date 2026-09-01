@@ -14,7 +14,7 @@ use crate::core::utils::paths::find_project_file_upwards;
 const SETTINGS_VERSION: u32 = 2;
 
 /// 设置源类型
-/// 
+///
 /// 对标claude-code-main的SettingSource
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SettingSource {
@@ -70,7 +70,7 @@ pub struct SettingsChangeEvent {
 }
 
 /// 设置缓存
-/// 
+///
 /// 对标claude-code-main的settingsCache.ts
 pub struct SettingsCache {
     /// 缓存的设置
@@ -129,9 +129,8 @@ impl SettingsCache {
     /// 清除过期缓存
     pub fn clear_expired(&mut self) {
         let now = chrono::Utc::now().timestamp();
-        self.cache.retain(|_, cached| {
-            now - cached.cached_at < self.ttl_secs as i64
-        });
+        self.cache
+            .retain(|_, cached| now - cached.cached_at < self.ttl_secs as i64);
     }
 }
 
@@ -697,5 +696,3 @@ pub async fn get_settings_manager(
 ) -> Result<SettingsManager, Box<dyn std::error::Error + Send + Sync>> {
     SettingsManager::new()
 }
-
- 

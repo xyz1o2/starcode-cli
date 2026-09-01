@@ -1,6 +1,5 @@
 use crate::core::tools::tools::{
-    ToolError,
-    BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation, ToolResult,
+    BaseDeclarativeTool, Kind, ToolError, ToolInvocation, ToolLocation, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -75,8 +74,10 @@ impl ToolInvocation for RemoteTriggerInvocation {
                     })
                 }
                 "get" => {
-                    let trigger_id = params.trigger_id.ok_or("trigger_id is required for get action")?;
-                    
+                    let trigger_id = params
+                        .trigger_id
+                        .ok_or("trigger_id is required for get action")?;
+
                     // In a real implementation, this would get the trigger details
                     Ok(ToolResult {
                         llm_content: Some(format!("Got trigger '{}'", trigger_id)),
@@ -95,10 +96,10 @@ impl ToolInvocation for RemoteTriggerInvocation {
                 }
                 "create" => {
                     let body = params.body.ok_or("body is required for create action")?;
-                    
+
                     // In a real implementation, this would create a new trigger
                     let trigger_id = format!("trigger_{}", uuid::Uuid::new_v4());
-                    
+
                     Ok(ToolResult {
                         llm_content: Some(format!("Created trigger '{}'", trigger_id)),
                         return_display: Some(format!("Trigger '{}' created", trigger_id)),
@@ -116,9 +117,11 @@ impl ToolInvocation for RemoteTriggerInvocation {
                     })
                 }
                 "update" => {
-                    let trigger_id = params.trigger_id.ok_or("trigger_id is required for update action")?;
+                    let trigger_id = params
+                        .trigger_id
+                        .ok_or("trigger_id is required for update action")?;
                     let body = params.body.ok_or("body is required for update action")?;
-                    
+
                     // In a real implementation, this would update the trigger
                     Ok(ToolResult {
                         llm_content: Some(format!("Updated trigger '{}'", trigger_id)),
@@ -137,15 +140,20 @@ impl ToolInvocation for RemoteTriggerInvocation {
                     })
                 }
                 "run" => {
-                    let trigger_id = params.trigger_id.ok_or("trigger_id is required for run action")?;
-                    
+                    let trigger_id = params
+                        .trigger_id
+                        .ok_or("trigger_id is required for run action")?;
+
                     // In a real implementation, this would run the trigger
                     Ok(ToolResult {
                         llm_content: Some(format!("Ran trigger '{}'", trigger_id)),
                         return_display: Some(format!("Trigger '{}' executed", trigger_id)),
                         output: serde_json::to_string(&RemoteTriggerOutput {
                             status: 200,
-                            json: format!(r#"{{"trigger_id": "{}", "status": "executed"}}"#, trigger_id),
+                            json: format!(
+                                r#"{{"trigger_id": "{}", "status": "executed"}}"#,
+                                trigger_id
+                            ),
                             audit_id: Some(format!("audit_{}", uuid::Uuid::new_v4())),
                         })?,
                         error: None,
@@ -163,7 +171,13 @@ impl ToolInvocation for RemoteTriggerInvocation {
                         json: format!(r#"{{"error": "Unknown action: {}"}}"#, action),
                         audit_id: None,
                     })?,
-                    error: Some(ToolError { error_type: "validation".to_string(), message: format!("Unknown action: {}. Use 'list', 'get', 'create', 'update', or 'run'", action) }),
+                    error: Some(ToolError {
+                        error_type: "validation".to_string(),
+                        message: format!(
+                            "Unknown action: {}. Use 'list', 'get', 'create', 'update', or 'run'",
+                            action
+                        ),
+                    }),
                     data: None,
                 }),
             }

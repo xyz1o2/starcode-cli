@@ -150,8 +150,7 @@ fn parse_frontmatter_description(content: &str) -> Option<String> {
 
 /// 获取工具描述文件的完整文件名（`tool-description-<key>.md`）
 pub fn tool_description_filename(tool_name: &str) -> Option<String> {
-    tool_description_key(tool_name)
-        .map(|key| format!("tool-description-{}.md", key))
+    tool_description_key(tool_name).map(|key| format!("tool-description-{}.md", key))
 }
 
 /// 加载工具的 schema 描述（frontmatter `description` 字段）
@@ -161,8 +160,7 @@ pub fn tool_description_filename(tool_name: &str) -> Option<String> {
 pub fn resolve_tool_description(tool_name: &str) -> Option<String> {
     let filename = tool_description_filename(tool_name)?;
     let content = crate::core::prompts::loader::try_load_prompt(&filename)?;
-    parse_frontmatter_description(&content)
-        .or_else(|| Some(content.trim().to_string()))
+    parse_frontmatter_description(&content).or_else(|| Some(content.trim().to_string()))
 }
 
 /// 判断某个 `tool-description-<key>.md` 文件是否与当前激活工具集匹配。
@@ -173,9 +171,7 @@ pub fn description_key_matches_active_tools(
 ) -> bool {
     tool_description_key_map()
         .iter()
-        .any(|(tool_name, tool_key)| {
-            *tool_key == key && active_tools.contains(*tool_name)
-        })
+        .any(|(tool_name, tool_key)| *tool_key == key && active_tools.contains(*tool_name))
 }
 
 /// 获取已注册的工具描述键数量（供测试/诊断）

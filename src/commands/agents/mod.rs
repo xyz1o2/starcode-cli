@@ -5,18 +5,18 @@ mod team_execution;
 mod team_presets;
 mod team_runs;
 
-use crate::commands::execution::{CommandContext, CommandResult};
+use crate::commands::agent_team_presets::{
+    list_team_presets, load_team_preset_store, resolve_team_preset, sanitize_preset_name,
+    save_team_preset_store, scope_label, team_preset_file_path, TeamPreset, TeamPresetScope,
+};
+use crate::commands::agent_team_render::{render_team_run_details, render_team_runs_list};
 use crate::commands::agent_team_support::{
     cleanup_team_run_artifacts, collect_apply_conflict_files, load_team_run_record,
     map_target_for_worktree, save_team_run_record, scan_team_run_records, summarize_output,
     team_run_dir, team_run_record_path, team_runs_root, TeamRunMemberRecord, TeamRunRecord,
     TeamRunRoundRecord,
 };
-use crate::commands::agent_team_presets::{
-    list_team_presets, load_team_preset_store, resolve_team_preset, sanitize_preset_name,
-    save_team_preset_store, scope_label, team_preset_file_path, TeamPreset, TeamPresetScope,
-};
-use crate::commands::agent_team_render::{render_team_run_details, render_team_runs_list};
+use crate::commands::execution::{CommandContext, CommandResult};
 use crate::core::config::provider_resolution::{
     resolve_effective_provider_settings, ProviderResolutionInputs,
 };
@@ -324,7 +324,10 @@ pub struct AgentTeamCleanArgs {
     pub all: bool,
 }
 
-pub(crate) async fn execute_agents_command(ctx: CommandContext<'_>, cmd: AgentsCommand) -> CommandResult {
+pub(crate) async fn execute_agents_command(
+    ctx: CommandContext<'_>,
+    cmd: AgentsCommand,
+) -> CommandResult {
     match cmd {
         AgentsCommand::List => custom_agents::list_agents(ctx).await,
         AgentsCommand::Create(args) => custom_agents::create_agent(ctx, args).await,
@@ -347,7 +350,9 @@ async fn execute_agent_team_command(
         AgentTeamCommand::Run(args) => team_execution::run_agent_team(ctx, args).await,
         AgentTeamCommand::Save(args) => team_presets::save_team_preset(ctx, args).await,
         AgentTeamCommand::Show { name } => team_presets::show_team_preset(ctx, name).await,
-        AgentTeamCommand::Remove { name, user } => team_presets::remove_team_preset(ctx, name, user).await,
+        AgentTeamCommand::Remove { name, user } => {
+            team_presets::remove_team_preset(ctx, name, user).await
+        }
         AgentTeamCommand::Apply(args) => team_apply::apply_team_run(ctx, args).await,
         AgentTeamCommand::Clean(args) => team_runs::clean_team_runs(ctx, args).await,
     }

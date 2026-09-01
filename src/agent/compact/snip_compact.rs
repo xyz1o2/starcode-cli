@@ -1,9 +1,9 @@
-use crate::types::StarMessage;
 use super::CompactStrategy;
+use crate::types::StarMessage;
 use async_trait::async_trait;
 
 /// 激进压缩策略
-/// 
+///
 /// 当接近上下文限制时触发
 /// 用摘要段落替换旧对话
 /// 保留：系统提示 + 最后 10 条消息 + 摘要
@@ -57,13 +57,19 @@ impl SnipCompactStrategy {
                 }
                 "tool" => {
                     if let Some(content) = &msg.content {
-                        if content.to_lowercase().contains("error") || content.to_lowercase().contains("fail") {
+                        if content.to_lowercase().contains("error")
+                            || content.to_lowercase().contains("fail")
+                        {
                             errors_count += 1;
                         }
                         // Extract file paths from tool results
                         for line in content.lines() {
-                            if line.contains(".rs") || line.contains(".js") || line.contains(".ts")
-                                || line.contains(".py") || line.contains(".go") || line.contains(".java")
+                            if line.contains(".rs")
+                                || line.contains(".js")
+                                || line.contains(".ts")
+                                || line.contains(".py")
+                                || line.contains(".go")
+                                || line.contains(".java")
                             {
                                 let path: String = line.chars().take(100).collect();
                                 if !files_mentioned.contains(&path) {
@@ -79,7 +85,7 @@ impl SnipCompactStrategy {
 
         let mut summary = String::new();
         summary.push_str("## Conversation Summary\n\n");
-        
+
         // Current task state
         summary.push_str("### Current Task\n");
         if !last_user_request.is_empty() {
@@ -98,7 +104,10 @@ impl SnipCompactStrategy {
                 summary.push_str(&format!("{}. {}\n", i + 1, preview));
             }
             if user_messages.len() > 3 {
-                summary.push_str(&format!("... and {} more messages\n", user_messages.len() - 3));
+                summary.push_str(&format!(
+                    "... and {} more messages\n",
+                    user_messages.len() - 3
+                ));
             }
         }
 
@@ -143,7 +152,7 @@ impl CompactStrategy for SnipCompactStrategy {
         }
 
         let split_idx = messages.len() - self.keep_recent;
-        
+
         // 确定要压缩的消息（排除系统消息）
         let start_idx = if !messages.is_empty() && messages[0].role == "system" {
             1
@@ -152,7 +161,7 @@ impl CompactStrategy for SnipCompactStrategy {
         };
 
         let messages_to_summarize = &messages[start_idx..split_idx];
-        
+
         if messages_to_summarize.is_empty() {
             return messages.to_vec();
         }
@@ -208,12 +217,15 @@ impl CompactStrategy for SnipCompactStrategy {
         // 保留最近的消息
         result.extend_from_slice(&messages[split_idx..]);
 
-        crate::utils::logging::append_debug_log_line(
-            &format!("[COMPACT] Applied snip compression: {} → {} messages (preserved {} user messages)", 
-                messages.len(), result.len(), 
-                messages[start_idx..split_idx].iter().filter(|m| m.role == "user").count()
-            )
-        );
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[COMPACT] Applied snip compression: {} → {} messages (preserved {} user messages)",
+            messages.len(),
+            result.len(),
+            messages[start_idx..split_idx]
+                .iter()
+                .filter(|m| m.role == "user")
+                .count()
+        ));
 
         result
     }
@@ -222,4 +234,3 @@ impl CompactStrategy for SnipCompactStrategy {
         400 // 最低优先级，作为最后手段
     }
 }
-  

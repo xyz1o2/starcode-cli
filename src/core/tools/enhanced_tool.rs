@@ -20,13 +20,9 @@ pub enum ToolPermissionResult {
     /// 允许执行
     Allow,
     /// 需要用户确认
-    Ask {
-        message: String,
-    },
+    Ask { message: String },
     /// 拒绝执行
-    Deny {
-        message: String,
-    },
+    Deny { message: String },
 }
 
 /// 工具中断行为
@@ -82,7 +78,7 @@ pub trait EnhancedTool: Send + Sync {
     }
 
     /// 是否并发安全（根据输入判断）
-    /// 
+    ///
     /// 对标claude-code-main的Tool.isConcurrencySafe
     /// 默认只读工具是并发安全的，但可以根据输入进一步判断
     fn is_concurrency_safe(&self, input: &Value) -> bool {
@@ -91,7 +87,7 @@ pub trait EnhancedTool: Send + Sync {
     }
 
     /// 检查工具是否可以并发执行
-    /// 
+    ///
     /// 对标claude-code-main的StreamingToolExecutor.canExecuteTool
     fn can_execute_concurrently(&self, input: &Value, other_tools_running: bool) -> bool {
         // 如果没有其他工具在运行，总是可以执行
@@ -104,7 +100,7 @@ pub trait EnhancedTool: Send + Sync {
     }
 
     /// 获取并发组ID
-    /// 
+    ///
     /// 用于将并发安全的工具分组执行
     fn concurrency_group_id(&self, input: &Value) -> Option<String> {
         if self.is_concurrency_safe(input) {
@@ -295,11 +291,7 @@ pub struct ToolUseSummaryGenerator;
 
 impl ToolUseSummaryGenerator {
     /// 生成工具使用摘要
-    pub fn generate_summary(
-        tool_name: &str,
-        input: &Value,
-        output: &str,
-    ) -> Option<String> {
+    pub fn generate_summary(tool_name: &str, input: &Value, output: &str) -> Option<String> {
         // 根据工具类型生成摘要（使用starcode-cli中的实际工具名称）
         match tool_name {
             "Bash" => {
@@ -367,7 +359,8 @@ pub struct SyntheticMessageDetector;
 impl SyntheticMessageDetector {
     /// 合成消息常量
     pub const INTERRUPT_MESSAGE: &'static str = "[Request interrupted by user]";
-    pub const INTERRUPT_MESSAGE_FOR_TOOL_USE: &'static str = "[Request interrupted by user for tool use]";
+    pub const INTERRUPT_MESSAGE_FOR_TOOL_USE: &'static str =
+        "[Request interrupted by user for tool use]";
     pub const CANCEL_MESSAGE: &'static str = "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed.";
     pub const REJECT_MESSAGE: &'static str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
     pub const NO_RESPONSE_REQUESTED: &'static str = "No response requested.";
@@ -507,9 +500,15 @@ mod tests {
 
     #[test]
     fn test_synthetic_message_detection() {
-        assert!(SyntheticMessageDetector::is_synthetic_message("[Request interrupted by user]"));
-        assert!(SyntheticMessageDetector::is_synthetic_message(SyntheticMessageDetector::CANCEL_MESSAGE));
-        assert!(!SyntheticMessageDetector::is_synthetic_message("Hello world"));
+        assert!(SyntheticMessageDetector::is_synthetic_message(
+            "[Request interrupted by user]"
+        ));
+        assert!(SyntheticMessageDetector::is_synthetic_message(
+            SyntheticMessageDetector::CANCEL_MESSAGE
+        ));
+        assert!(!SyntheticMessageDetector::is_synthetic_message(
+            "Hello world"
+        ));
     }
 
     #[test]

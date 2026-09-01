@@ -398,7 +398,8 @@ pub fn get_error_replace_result(
         })
     } else if final_old_string == final_new_string {
         let detail = if params.old_string != params.new_string {
-            " (they differ only in line endings: old_string uses CRLF, new_string uses LF)".to_string()
+            " (they differ only in line endings: old_string uses CRLF, new_string uses LF)"
+                .to_string()
         } else {
             String::new()
         };
@@ -424,7 +425,7 @@ pub fn get_error_replace_result(
 /// Diagnose why a replace operation failed by analyzing the file content
 fn diagnose_replace_failure(file_path: &str, old_string: &str) -> String {
     let mut diagnosis = String::new();
-    
+
     // Try to read the file
     let content = match std::fs::read_to_string(file_path) {
         Ok(c) => c,
@@ -440,7 +441,7 @@ fn diagnose_replace_failure(file_path: &str, old_string: &str) -> String {
         // Try to find first and last lines of old_string
         let first_line = old_trimmed.lines().next().unwrap_or("").trim();
         let last_line = old_trimmed.lines().last().unwrap_or("").trim();
-        
+
         if !first_line.is_empty() && content.contains(first_line) {
             diagnosis.push_str(&format!(
                 "DIAGNOSIS: Found partial match for the first line ('{}'). \
@@ -503,9 +504,9 @@ fn diagnose_replace_failure(file_path: &str, old_string: &str) -> String {
     diagnosis.push_str(
         "DIAGNOSIS: No similar content found in the file. \
          Common causes: (1) typo in old_string, (2) file was already modified, \
-         (3) wrong file path. Suggestion: Read to get current content."
+         (3) wrong file path. Suggestion: Read to get current content.",
     );
-    
+
     diagnosis
 }
 
@@ -706,7 +707,8 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
                                             return_display: Some(format!("Error: {}", msg)),
                                             output: msg.clone(),
                                             error: Some(ToolError {
-                                                error_type: ToolErrorType::EditFileModified.to_string(),
+                                                error_type: ToolErrorType::EditFileModified
+                                                    .to_string(),
                                                 message: msg,
                                             }),
                                             data: None,
@@ -803,7 +805,9 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
                 let mut _file_exists = false;
                 let mut original_line_ending = LineEnding::LF;
 
-                match crate::core::utils::file_utils::read_file_with_encoding_io(std::path::Path::new(&params.file_path)) {
+                match crate::core::utils::file_utils::read_file_with_encoding_io(
+                    std::path::Path::new(&params.file_path),
+                ) {
                     Ok(content) => {
                         original_line_ending = detect_line_ending(&content);
                         current_content = Some(normalize_line_endings(&content));
@@ -819,10 +823,7 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
 
                 if is_new_file {
                     let line_count = params.new_string.lines().count();
-                    let msg = format!(
-                        "Wrote {} lines to {}",
-                        line_count, params.file_path
-                    );
+                    let msg = format!("Wrote {} lines to {}", line_count, params.file_path);
                     // Create parent directory if needed
                     if let Some(parent) = Path::new(&params.file_path).parent() {
                         std::fs::create_dir_all(parent)
@@ -842,8 +843,14 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
 
                     let line_count = params.new_string.lines().count();
                     return Ok(ToolResult {
-                        llm_content: Some(format!("Wrote {} lines to {}", line_count, params.file_path)),
-                        return_display: Some(format!("Wrote {} lines to {}", line_count, params.file_path)),
+                        llm_content: Some(format!(
+                            "Wrote {} lines to {}",
+                            line_count, params.file_path
+                        )),
+                        return_display: Some(format!(
+                            "Wrote {} lines to {}",
+                            line_count, params.file_path
+                        )),
                         output: msg.clone(),
                         error: None,
                         data: None,
@@ -942,9 +949,20 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
                 let added = params.new_string.lines().count();
                 let removed = params.old_string.lines().count();
                 let msg = if replacement_result.occurrences == 1 {
-                    format!("Updated {} (+{} -{})", params.file_path, added.saturating_sub(removed), removed.saturating_sub(added))
+                    format!(
+                        "Updated {} (+{} -{})",
+                        params.file_path,
+                        added.saturating_sub(removed),
+                        removed.saturating_sub(added)
+                    )
                 } else {
-                    format!("Updated {} ({} replacements, +{} -{})", params.file_path, replacement_result.occurrences, added.saturating_sub(removed), removed.saturating_sub(added))
+                    format!(
+                        "Updated {} ({} replacements, +{} -{})",
+                        params.file_path,
+                        replacement_result.occurrences,
+                        added.saturating_sub(removed),
+                        removed.saturating_sub(added)
+                    )
                 };
                 Ok(ToolResult {
                     llm_content: Some(msg.clone()),
@@ -964,7 +982,12 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
             match result {
                 Ok(inner_result) => {
                     // Update ReadFileState after successful edit so subsequent edits don't see stale mtime
-                    if inner_result.is_ok() && inner_result.as_ref().map(|r| r.error.is_none()).unwrap_or(false) {
+                    if inner_result.is_ok()
+                        && inner_result
+                            .as_ref()
+                            .map(|r| r.error.is_none())
+                            .unwrap_or(false)
+                    {
                         let file_system_timestamp = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap_or_default()
@@ -972,7 +995,12 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
                         let timestamp = file_system_timestamp;
 
                         // Read current content for the state update
-                        if let Ok(content) = crate::core::utils::file_utils::read_file_with_encoding_async(&resolved_path).await {
+                        if let Ok(content) =
+                            crate::core::utils::file_utils::read_file_with_encoding_async(
+                                &resolved_path,
+                            )
+                            .await
+                        {
                             let mut state = global_state.read_file_state.write().await;
                             state.insert(
                                 abs_path.clone(),

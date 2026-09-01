@@ -1,8 +1,7 @@
 /// 团队记忆同步系统
-/// 
+///
 /// 对标claude-code-main的src/services/teamMemorySync/
 /// 团队协作记忆共享，含密钥扫描和安全守卫
-
 pub mod scanner;
 pub mod security;
 
@@ -107,7 +106,12 @@ impl TeamMemoryManager {
     }
 
     /// 添加团队记忆
-    pub fn add_memory(&mut self, author: &str, content: &str, tags: Vec<String>) -> Result<String, TeamMemoryError> {
+    pub fn add_memory(
+        &mut self,
+        author: &str,
+        content: &str,
+        tags: Vec<String>,
+    ) -> Result<String, TeamMemoryError> {
         // 安全检查
         if self.config.security_guard {
             self.security_guard.check_content(content)?;
@@ -146,17 +150,21 @@ impl TeamMemoryManager {
     /// 搜索团队记忆
     pub fn search_memories(&self, query: &str) -> Vec<&TeamMemoryEntry> {
         let query_lower = query.to_lowercase();
-        self.memories.iter()
+        self.memories
+            .iter()
             .filter(|m| {
-                m.content.to_lowercase().contains(&query_lower) ||
-                m.tags.iter().any(|t| t.to_lowercase().contains(&query_lower))
+                m.content.to_lowercase().contains(&query_lower)
+                    || m.tags
+                        .iter()
+                        .any(|t| t.to_lowercase().contains(&query_lower))
             })
             .collect()
     }
 
     /// 按标签获取记忆
     pub fn get_memories_by_tag(&self, tag: &str) -> Vec<&TeamMemoryEntry> {
-        self.memories.iter()
+        self.memories
+            .iter()
             .filter(|m| m.tags.contains(&tag.to_string()))
             .collect()
     }

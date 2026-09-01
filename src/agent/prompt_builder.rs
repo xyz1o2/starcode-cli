@@ -199,9 +199,7 @@ impl PromptBuilder {
                 break;
             }
 
-            if let Some(file_content) =
-                crate::core::prompts::loader::try_load_prompt(&filename)
-            {
+            if let Some(file_content) = crate::core::prompts::loader::try_load_prompt(&filename) {
                 let content = if file_content.len() > max_file_chars {
                     let safe_end = file_content
                         .char_indices()
@@ -262,9 +260,10 @@ impl PromptBuilder {
         if let Some(files) = active_files {
             let mut file_history = String::new();
             for file in files {
-                if let Some(hist) =
-                    crate::core::services::git_service::get_file_history(std::path::Path::new(file), GIT_FILE_HISTORY_DEPTH)
-                {
+                if let Some(hist) = crate::core::services::git_service::get_file_history(
+                    std::path::Path::new(file),
+                    GIT_FILE_HISTORY_DEPTH,
+                ) {
                     file_history.push_str(&format!("\n#### History for {}\n{}\n", file, hist));
                 }
             }
@@ -275,7 +274,9 @@ impl PromptBuilder {
                 ));
             }
         } else if flags.include_recent_git_context {
-            if let Some(recent_git) = crate::core::services::git_service::get_recent_changes(GIT_RECENT_CHANGES_COUNT) {
+            if let Some(recent_git) =
+                crate::core::services::git_service::get_recent_changes(GIT_RECENT_CHANGES_COUNT)
+            {
                 parts.push(format!(
                     "### Recent Git Context (Context Lineage)\n\n{}",
                     recent_git
@@ -454,34 +455,41 @@ impl PromptBuilder {
 
         if let Some(ctx) = project_context_override {
             dynamic_parts.push(format!(
-                "### Project Instructions (Dynamic Context)\n\n{}", ctx
+                "### Project Instructions (Dynamic Context)\n\n{}",
+                ctx
             ));
         } else if let Some(ctx) =
             crate::utils::project_context::load_merged_project_context(std::path::Path::new(cwd))
         {
             dynamic_parts.push(format!(
-                "### Project Instructions (from STAR.md)\n\n{}", ctx
+                "### Project Instructions (from STAR.md)\n\n{}",
+                ctx
             ));
         }
 
         if let Some(files) = active_files {
             let mut file_history = String::new();
             for file in files {
-                if let Some(hist) =
-                    crate::core::services::git_service::get_file_history(std::path::Path::new(file), GIT_FILE_HISTORY_DEPTH)
-                {
+                if let Some(hist) = crate::core::services::git_service::get_file_history(
+                    std::path::Path::new(file),
+                    GIT_FILE_HISTORY_DEPTH,
+                ) {
                     file_history.push_str(&format!("\n#### History for {}\n{}\n", file, hist));
                 }
             }
             if !file_history.is_empty() {
                 dynamic_parts.push(format!(
-                    "### Active Files Git Context (Insight)\n\n{}", file_history
+                    "### Active Files Git Context (Insight)\n\n{}",
+                    file_history
                 ));
             }
         } else if flags.include_recent_git_context {
-            if let Some(recent_git) = crate::core::services::git_service::get_recent_changes(GIT_RECENT_CHANGES_COUNT) {
+            if let Some(recent_git) =
+                crate::core::services::git_service::get_recent_changes(GIT_RECENT_CHANGES_COUNT)
+            {
                 dynamic_parts.push(format!(
-                    "### Recent Git Context (Context Lineage)\n\n{}", recent_git
+                    "### Recent Git Context (Context Lineage)\n\n{}",
+                    recent_git
                 ));
             }
         }
@@ -494,7 +502,8 @@ impl PromptBuilder {
 
         if let Some(hint) = complexity_hint {
             dynamic_parts.push(format!(
-                "### Task Complexity & Planning Strategy\n\n{}", hint
+                "### Task Complexity & Planning Strategy\n\n{}",
+                hint
             ));
         }
 
@@ -535,10 +544,7 @@ impl PromptBuilder {
         // Static env info (platform, shell — does NOT change between turns)
         let shell = prompts::env_info::detect_shell();
         static_parts.push(prompts::env_info::render_static_env_info(
-            today,
-            platform,
-            cwd,
-            &shell,
+            today, platform, cwd, &shell,
         ));
 
         if flags.include_tool_catalog {
@@ -584,7 +590,11 @@ impl PromptBuilder {
                 .and_then(|o| String::from_utf8(o.stdout).ok())
                 .map(|s| {
                     let lines: Vec<&str> = s.lines().collect();
-                    if lines.is_empty() { "(clean)".to_string() } else { format!("{} files changed", lines.len()) }
+                    if lines.is_empty() {
+                        "(clean)".to_string()
+                    } else {
+                        format!("{} files changed", lines.len())
+                    }
                 });
 
             let recent_commits = std::process::Command::new("git")
@@ -740,7 +750,8 @@ fn cached_extended_bundle_first_turn_enabled() -> bool {
 }
 
 /// 从 scope-strategy.md 加载当前文件数的编辑策略段落（外部目录可覆盖）。
-fn scope_strategy_for(file_count: usize) -> String {    if file_count == 0 {
+fn scope_strategy_for(file_count: usize) -> String {
+    if file_count == 0 {
         return String::new();
     }
     let template = crate::core::prompts::loader::load_prompt("scope-strategy.md");
@@ -773,12 +784,9 @@ fn render_scope_strategy(file_count: usize) -> Option<String> {
 /// 默认启用。设置 `STAR_PROMPT_KEY_SCENARIOS=0` 可禁用。
 fn maybe_push_key_scenarios(parts: &mut Vec<String>, is_thinking_model: bool) {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let enabled = *ENABLED.get_or_init(|| {
-        env_flag(std::env::var("STAR_PROMPT_KEY_SCENARIOS").ok(), true)
-    });
+    let enabled =
+        *ENABLED.get_or_init(|| env_flag(std::env::var("STAR_PROMPT_KEY_SCENARIOS").ok(), true));
     if enabled {
         parts.push(prompts::key_scenarios::render(is_thinking_model));
     }
 }
-
- 

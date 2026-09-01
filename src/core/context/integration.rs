@@ -2,10 +2,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::structure_index::{StructureIndex, EditContext, FunctionDef};
-use super::precise_retrieval::{PreciseRetriever, RetrievalResult};
 use super::activity_tracker::ActivityTracker;
 use super::incremental_index::IncrementalIndex;
+use super::precise_retrieval::{PreciseRetriever, RetrievalResult};
+use super::structure_index::{EditContext, FunctionDef, StructureIndex};
 
 /// Integrated context engine - combines all context features
 pub struct ContextEngine {
@@ -96,7 +96,8 @@ impl ContextEngine {
                     continue;
                 }
 
-                let relative = path.strip_prefix(&root)
+                let relative = path
+                    .strip_prefix(&root)
                     .unwrap_or(path)
                     .to_string_lossy()
                     .to_string();
@@ -163,7 +164,11 @@ impl ContextEngine {
     }
 
     /// Get precise retrieval result for editing a function
-    pub async fn get_function_context(&self, function_name: &str, file_path: &str) -> RetrievalResult {
+    pub async fn get_function_context(
+        &self,
+        function_name: &str,
+        file_path: &str,
+    ) -> RetrievalResult {
         let retriever = self.retriever.read().await;
         retriever.for_edit(function_name, file_path)
     }
@@ -171,14 +176,18 @@ impl ContextEngine {
     /// Search for functions matching a query
     pub async fn search_functions(&self, query: &str) -> Vec<FunctionDef> {
         let structure = self.structure_index.read().await;
-        structure.search_functions(query)
+        structure
+            .search_functions(query)
             .into_iter()
             .cloned()
             .collect()
     }
 
     /// Find all references to a function
-    pub async fn find_references(&self, function_name: &str) -> Vec<super::structure_index::Reference> {
+    pub async fn find_references(
+        &self,
+        function_name: &str,
+    ) -> Vec<super::structure_index::Reference> {
         let structure = self.structure_index.read().await;
         structure.find_references(function_name)
     }
@@ -215,7 +224,11 @@ impl ContextEngine {
 
         let functions = structure.functions.values().map(|v| v.len()).sum::<usize>();
         let types = structure.types.values().map(|v| v.len()).sum::<usize>();
-        let active_files = activity.file_activity.values().filter(|&&v| v > 0.3).count();
+        let active_files = activity
+            .file_activity
+            .values()
+            .filter(|&&v| v > 0.3)
+            .count();
 
         format!(
             "Index: {} functions, {} types, {} active files | {}",
@@ -246,6 +259,11 @@ impl std::fmt::Display for IndexResult {
 }
 
 fn is_source_file(path: &str) -> bool {
-    let extensions = ["rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "cpp", "c", "h", "hpp"];
-    path.split('.').last().map(|ext| extensions.contains(&ext)).unwrap_or(false)
+    let extensions = [
+        "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "cpp", "c", "h", "hpp",
+    ];
+    path.split('.')
+        .last()
+        .map(|ext| extensions.contains(&ext))
+        .unwrap_or(false)
 }

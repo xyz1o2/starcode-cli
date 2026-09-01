@@ -38,7 +38,10 @@ impl ReadFileToolInvocation {
         _tool_display_name: Option<String>,
     ) -> Self {
         let resolved_paths = if let Some(file_paths) = &params.file_paths {
-            file_paths.iter().map(|p| config.target_dir().join(p)).collect()
+            file_paths
+                .iter()
+                .map(|p| config.target_dir().join(p))
+                .collect()
         } else if let Some(file_path) = &params.file_path {
             vec![config.target_dir().join(file_path)]
         } else {
@@ -70,10 +73,13 @@ impl ToolInvocation for ReadFileToolInvocation {
     }
 
     fn tool_locations(&self) -> Vec<ToolLocation> {
-        self.resolved_paths.iter().map(|path| ToolLocation {
-            path: path.clone(),
-            location_type: crate::core::tools::tools::LocationType::Read,
-        }).collect()
+        self.resolved_paths
+            .iter()
+            .map(|path| ToolLocation {
+                path: path.clone(),
+                location_type: crate::core::tools::tools::LocationType::Read,
+            })
+            .collect()
     }
 
     fn should_confirm_execute(
@@ -160,26 +166,32 @@ impl ToolInvocation for ReadFileToolInvocation {
                             results.push((resolved_path.clone(), file_result));
                         }
                         Ok(Err(e)) => {
-                            results.push((resolved_path.clone(), ProcessedFileReadResult {
-                                llm_content: String::new(),
-                                return_display: String::new(),
-                                error: Some(e.to_string()),
-                                error_type: Some(ToolErrorType::Unknown),
-                                is_truncated: Some(false),
-                                original_line_count: Some(0),
-                                lines_shown: Some((0, 0)),
-                            }));
+                            results.push((
+                                resolved_path.clone(),
+                                ProcessedFileReadResult {
+                                    llm_content: String::new(),
+                                    return_display: String::new(),
+                                    error: Some(e.to_string()),
+                                    error_type: Some(ToolErrorType::Unknown),
+                                    is_truncated: Some(false),
+                                    original_line_count: Some(0),
+                                    lines_shown: Some((0, 0)),
+                                },
+                            ));
                         }
                         Err(e) => {
-                            results.push((resolved_path.clone(), ProcessedFileReadResult {
-                                llm_content: String::new(),
-                                return_display: String::new(),
-                                error: Some(e.to_string()),
-                                error_type: Some(ToolErrorType::Unknown),
-                                is_truncated: Some(false),
-                                original_line_count: Some(0),
-                                lines_shown: Some((0, 0)),
-                            }));
+                            results.push((
+                                resolved_path.clone(),
+                                ProcessedFileReadResult {
+                                    llm_content: String::new(),
+                                    return_display: String::new(),
+                                    error: Some(e.to_string()),
+                                    error_type: Some(ToolErrorType::Unknown),
+                                    is_truncated: Some(false),
+                                    original_line_count: Some(0),
+                                    lines_shown: Some((0, 0)),
+                                },
+                            ));
                         }
                     }
                 }
@@ -189,7 +201,11 @@ impl ToolInvocation for ReadFileToolInvocation {
                 let mut has_errors = false;
                 for (path, result) in &results {
                     if let Some(error) = &result.error {
-                        combined_output.push_str(&format!("Error reading {}: {}\n", path.display(), error));
+                        combined_output.push_str(&format!(
+                            "Error reading {}: {}\n",
+                            path.display(),
+                            error
+                        ));
                         has_errors = true;
                     } else {
                         combined_output.push_str(&format!("--- {} ---\n", path.display()));
@@ -202,10 +218,14 @@ impl ToolInvocation for ReadFileToolInvocation {
                     llm_content: Some(combined_output.clone()),
                     return_display: Some(combined_output.clone()),
                     output: combined_output,
-                    error: if has_errors { Some(crate::core::tools::tools::ToolError {
-                        error_type: "batch_read_error".to_string(),
-                        message: "Some files had errors".to_string(),
-                    }) } else { None },
+                    error: if has_errors {
+                        Some(crate::core::tools::tools::ToolError {
+                            error_type: "batch_read_error".to_string(),
+                            message: "Some files had errors".to_string(),
+                        })
+                    } else {
+                        None
+                    },
                     data: None,
                 })
             } else {
@@ -213,7 +233,11 @@ impl ToolInvocation for ReadFileToolInvocation {
                 let resolved_path = resolved_paths.first().cloned().unwrap_or_default();
                 let resolved_path_for_closure = resolved_path.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    process_file_read_blocking(&resolved_path_for_closure, params.offset, params.limit)
+                    process_file_read_blocking(
+                        &resolved_path_for_closure,
+                        params.offset,
+                        params.limit,
+                    )
                 })
                 .await;
 
@@ -309,12 +333,13 @@ impl ToolInvocation for ReadFileToolInvocation {
                     exec_state.mark_file_read(abs_path.clone(), snapshot);
                 }
 
-                let mut llm_content = if result.is_truncated.unwrap_or(false) {
-                    let (start, end) = result.lines_shown.unwrap_or((0, 0));
-                    let total = result.original_line_count.unwrap_or(0);
-                    let next_offset = end; // 0-based offset for next read
+                let mut llm_content =
+                    if result.is_truncated.unwrap_or(false) {
+                        let (start, end) = result.lines_shown.unwrap_or((0, 0));
+                        let total = result.original_line_count.unwrap_or(0);
+                        let next_offset = end; // 0-based offset for next read
 
-                    format!(
+                        format!(
                     "The file content has been truncated (showing lines {}-{} of {} total).\n\
                      To read more, use: read_file(file_path=\"{}\", offset={}, limit={})\n\n\
                      --- FILE CONTENT (truncated) ---\n\
@@ -323,9 +348,9 @@ impl ToolInvocation for ReadFileToolInvocation {
                     resolved_path.display(), end, total - end,
                     result.llm_content
                 )
-                } else {
-                    result.llm_content.clone()
-                };
+                    } else {
+                        result.llm_content.clone()
+                    };
 
                 // ── AST symbol overview injection (P2) ────────────────────────────
                 {
@@ -460,7 +485,9 @@ impl ReadFileTool {
             }
             for file_path in file_paths {
                 if file_path.trim().is_empty() {
-                    return Err("The 'file_paths' parameter must not contain empty strings.".to_string());
+                    return Err(
+                        "The 'file_paths' parameter must not contain empty strings.".to_string()
+                    );
                 }
             }
         } else {

@@ -1,8 +1,7 @@
 /// 磁盘输出管理
-/// 
+///
 /// 对标claude-code-main的src/utils/task/diskOutput.ts
 /// 管理任务输出的磁盘存储
-
 use std::path::{Path, PathBuf};
 
 /// 磁盘输出管理器
@@ -59,7 +58,11 @@ impl DiskOutputManager {
     }
 
     /// 获取任务输出增量
-    pub fn get_task_output_delta(&self, task_id: &str, offset: usize) -> Result<(String, usize), std::io::Error> {
+    pub fn get_task_output_delta(
+        &self,
+        task_id: &str,
+        offset: usize,
+    ) -> Result<(String, usize), std::io::Error> {
         let content = self.read_task_output(task_id)?;
         let new_offset = content.len();
         let delta = if offset < content.len() {
@@ -84,7 +87,8 @@ impl DiskOutputManager {
         let cutoff = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs() - (max_age_days * 86400);
+            .as_secs()
+            - (max_age_days * 86400);
 
         let mut cleaned = 0;
         if self.output_dir.exists() {

@@ -105,27 +105,27 @@ impl ToolInvocation for SuggestPRInvocation {
             }
 
             // 3. Get commit log
-            let log_output =
-                run_git(&root, &["log", &format!("{}..HEAD", base_branch), "--oneline"])
-                    .await
-                    .unwrap_or_default();
+            let log_output = run_git(
+                &root,
+                &["log", &format!("{}..HEAD", base_branch), "--oneline"],
+            )
+            .await
+            .unwrap_or_default();
 
             // 4. Get diff stat
-            let diff_stat =
-                run_git(&root, &["diff", &format!("{}..HEAD", base_branch), "--stat"])
-                    .await
-                    .unwrap_or_default();
+            let diff_stat = run_git(
+                &root,
+                &["diff", &format!("{}..HEAD", base_branch), "--stat"],
+            )
+            .await
+            .unwrap_or_default();
 
             // 5. Get diff (first 200 lines)
-            let diff_output =
-                run_git(&root, &["diff", &format!("{}..HEAD", base_branch)])
-                    .await
-                    .unwrap_or_default();
-            let diff_truncated: String = diff_output
-                .lines()
-                .take(200)
-                .collect::<Vec<_>>()
-                .join("\n");
+            let diff_output = run_git(&root, &["diff", &format!("{}..HEAD", base_branch)])
+                .await
+                .unwrap_or_default();
+            let diff_truncated: String =
+                diff_output.lines().take(200).collect::<Vec<_>>().join("\n");
 
             // 6. Infer PR title from branch name
             let title = current_branch

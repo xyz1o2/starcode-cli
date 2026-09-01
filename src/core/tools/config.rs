@@ -1,6 +1,5 @@
 use crate::core::tools::tools::{
-    ToolError,
-    BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation, ToolResult,
+    BaseDeclarativeTool, Kind, ToolError, ToolInvocation, ToolLocation, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -41,7 +40,10 @@ pub struct ConfigInvocation {
 impl ToolInvocation for ConfigInvocation {
     fn get_description(&self) -> String {
         if self.params.value.is_some() {
-            format!("Set config {} to {:?}", self.params.setting, self.params.value)
+            format!(
+                "Set config {} to {:?}",
+                self.params.setting, self.params.value
+            )
         } else {
             format!("Get config {}", self.params.setting)
         }
@@ -72,16 +74,18 @@ impl ToolInvocation for ConfigInvocation {
                 return Ok(None);
             }
             // Ask for confirmation when setting values
-            Ok(Some(crate::core::tools::tools::ToolCallConfirmationDetails {
-                confirmation_type: crate::core::tools::tools::ConfirmationType::Ask,
-                title: "Config Change".to_string(),
-                prompt: format!(
-                    "Set {} to {:?}",
-                    params.setting,
-                    params.value.unwrap_or(serde_json::Value::Null)
-                ),
-                on_confirm: Arc::new(|_| {}),
-            }))
+            Ok(Some(
+                crate::core::tools::tools::ToolCallConfirmationDetails {
+                    confirmation_type: crate::core::tools::tools::ConfirmationType::Ask,
+                    title: "Config Change".to_string(),
+                    prompt: format!(
+                        "Set {} to {:?}",
+                        params.setting,
+                        params.value.unwrap_or(serde_json::Value::Null)
+                    ),
+                    on_confirm: Arc::new(|_| {}),
+                },
+            ))
         })
     }
 
@@ -297,7 +301,10 @@ fn is_supported_setting(setting: &str) -> bool {
     )
 }
 
-fn get_config_value(config: &crate::core::config::Config, setting: &str) -> Option<serde_json::Value> {
+fn get_config_value(
+    config: &crate::core::config::Config,
+    setting: &str,
+) -> Option<serde_json::Value> {
     match setting {
         "theme" => Some(serde_json::json!("dark")),
         "model" => Some(serde_json::json!(config.model())),
@@ -309,14 +316,22 @@ fn get_config_value(config: &crate::core::config::Config, setting: &str) -> Opti
         "showMemoryUsage" => Some(serde_json::json!(config.show_memory_usage())),
         "enableTelemetry" => Some(serde_json::json!(true)),
         "enableCheckpointing" => Some(serde_json::json!(config.checkpointing_enabled())),
-        "enableShellOutputEfficiency" => Some(serde_json::json!(config.enable_shell_output_efficiency())),
-        "shellToolInactivityTimeout" => Some(serde_json::json!(config.shell_tool_inactivity_timeout())),
+        "enableShellOutputEfficiency" => {
+            Some(serde_json::json!(config.enable_shell_output_efficiency()))
+        }
+        "shellToolInactivityTimeout" => {
+            Some(serde_json::json!(config.shell_tool_inactivity_timeout()))
+        }
         "maxSessionTurns" => Some(serde_json::json!(config.max_session_turns())),
         "contextWindow" => Some(serde_json::json!(config.context_window())),
         "compressionThreshold" => Some(serde_json::json!(config.compression_threshold())),
-        "truncateToolOutputThreshold" => Some(serde_json::json!(config.truncate_tool_output_threshold())),
+        "truncateToolOutputThreshold" => {
+            Some(serde_json::json!(config.truncate_tool_output_threshold()))
+        }
         "truncateToolOutputLines" => Some(serde_json::json!(config.truncate_tool_output_lines())),
-        "enableToolOutputTruncation" => Some(serde_json::json!(config.enable_tool_output_truncation())),
+        "enableToolOutputTruncation" => {
+            Some(serde_json::json!(config.enable_tool_output_truncation()))
+        }
         "enableInteractiveShell" => Some(serde_json::json!(config.enable_interactive_shell())),
         "enablePromptCompletion" => Some(serde_json::json!(config.enable_prompt_completion())),
         "enableHooks" => Some(serde_json::json!(config.enable_hooks())),

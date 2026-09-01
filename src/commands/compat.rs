@@ -189,10 +189,7 @@ pub async fn prs(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResul
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        push_assistant(
-            &mut ctx,
-            format!("Failed to list PRs:\n{}", err),
-        );
+        push_assistant(&mut ctx, format!("Failed to list PRs:\n{}", err));
         return Ok(());
     }
 
@@ -251,7 +248,7 @@ pub async fn bug(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResul
 
 pub async fn terminal_setup(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
     let setup = crate::core::terminal_setup::TerminalSetup::detect();
-    
+
     let content = format!(
         "Terminal Setup\n\
          \n\
@@ -276,7 +273,7 @@ pub async fn terminal_setup(mut ctx: CommandContext<'_>, _args: Vec<String>) -> 
         setup.integration_installed,
         setup.get_setup_instructions()
     );
-    
+
     push_assistant(&mut ctx, content);
     Ok(())
 }
@@ -428,10 +425,16 @@ pub async fn code_review(mut ctx: CommandContext<'_>, args: Vec<String>) -> Comm
     let message_id = ctx.state.next_message_id;
     ctx.state.next_message_id += 1;
     ctx.agent_tx
-        .send(AgentRequest::SendMessage { message_id, message: prompt })
+        .send(AgentRequest::SendMessage {
+            message_id,
+            message: prompt,
+        })
         .await
         .map_err(|e| e.to_string())?;
-    push_assistant(&mut ctx, "Started code review. Findings will be returned once analysis completes.");
+    push_assistant(
+        &mut ctx,
+        "Started code review. Findings will be returned once analysis completes.",
+    );
     Ok(())
 }
 
@@ -456,10 +459,16 @@ pub async fn security_review(mut ctx: CommandContext<'_>, args: Vec<String>) -> 
     let message_id = ctx.state.next_message_id;
     ctx.state.next_message_id += 1;
     ctx.agent_tx
-        .send(AgentRequest::SendMessage { message_id, message: prompt })
+        .send(AgentRequest::SendMessage {
+            message_id,
+            message: prompt,
+        })
         .await
         .map_err(|e| e.to_string())?;
-    push_assistant(&mut ctx, "Started security review. Findings will be returned once analysis completes.");
+    push_assistant(
+        &mut ctx,
+        "Started security review. Findings will be returned once analysis completes.",
+    );
     Ok(())
 }
 
@@ -482,10 +491,16 @@ pub async fn simplify(mut ctx: CommandContext<'_>, args: Vec<String>) -> Command
     let message_id = ctx.state.next_message_id;
     ctx.state.next_message_id += 1;
     ctx.agent_tx
-        .send(AgentRequest::SendMessage { message_id, message: prompt })
+        .send(AgentRequest::SendMessage {
+            message_id,
+            message: prompt,
+        })
         .await
         .map_err(|e| e.to_string())?;
-    push_assistant(&mut ctx, "Started simplification analysis. Suggestions will be returned once analysis completes.");
+    push_assistant(
+        &mut ctx,
+        "Started simplification analysis. Suggestions will be returned once analysis completes.",
+    );
     Ok(())
 }
 
@@ -507,7 +522,10 @@ pub async fn run(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResul
     let message_id = ctx.state.next_message_id;
     ctx.state.next_message_id += 1;
     ctx.agent_tx
-        .send(AgentRequest::SendMessage { message_id, message: prompt })
+        .send(AgentRequest::SendMessage {
+            message_id,
+            message: prompt,
+        })
         .await
         .map_err(|e| e.to_string())?;
     push_assistant(&mut ctx, "Running project...");
@@ -548,8 +566,7 @@ pub async fn tasks(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandRe
     ctx.state.task_panel.reload();
     ctx.state.task_panel.manually_hidden = false;
     ctx.state.task_panel.is_visible = true;
-    ctx.state.current_status_line =
-        Some("Task panel opened (Ctrl+B to toggle)".to_string());
+    ctx.state.current_status_line = Some("Task panel opened (Ctrl+B to toggle)".to_string());
     Ok(())
 }
 
@@ -667,7 +684,10 @@ pub async fn lint(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandRes
     let message_id = ctx.state.next_message_id;
     ctx.state.next_message_id += 1;
     ctx.agent_tx
-        .send(AgentRequest::SendMessage { message_id, message: prompt.to_string() })
+        .send(AgentRequest::SendMessage {
+            message_id,
+            message: prompt.to_string(),
+        })
         .await
         .map_err(|e| e.to_string())?;
     push_assistant(&mut ctx, "Running lint analysis...");
@@ -732,7 +752,10 @@ pub async fn forget(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRe
     let message_id = ctx.state.next_message_id;
     ctx.state.next_message_id += 1;
     ctx.agent_tx
-        .send(AgentRequest::SendMessage { message_id, message: prompt })
+        .send(AgentRequest::SendMessage {
+            message_id,
+            message: prompt,
+        })
         .await
         .map_err(|e| e.to_string())?;
     push_assistant(&mut ctx, format!("Forgetting: {}...", keyword));

@@ -170,10 +170,7 @@ pub async fn run_streaming_session(
         }
         Err(e) => {
             let error_msg = e.to_string();
-            append_debug_log_line(&format!(
-                "[Worker] Agent stream init failed: {}",
-                error_msg
-            ));
+            append_debug_log_line(&format!("[Worker] Agent stream init failed: {}", error_msg));
             let _ = context
                 .tx
                 .send(StreamMessage::Error {

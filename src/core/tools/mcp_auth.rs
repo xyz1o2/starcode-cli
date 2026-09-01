@@ -172,7 +172,9 @@ impl ToolInvocation for McpAuthInvocation {
                         if !s.scopes.is_empty() {
                             msg.push_str(&format!("Scopes: {}\n", s.scopes.join(", ")));
                         }
-                        msg.push_str("\nPlease visit the auth URL to authorize, then run `mcp_auth` again.");
+                        msg.push_str(
+                            "\nPlease visit the auth URL to authorize, then run `mcp_auth` again.",
+                        );
                         (msg, Some("auth_required"), "auth_required")
                     } else {
                         let msg = format!(

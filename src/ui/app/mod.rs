@@ -12,7 +12,8 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     use ratatui::layout::{Constraint, Direction, Layout};
 
     let input_height = crate::ui::components::chat_input::calc_input_height(state);
-    let status_lines = crate::ui::components::status_line::build_status_lines(state, viewport.width);
+    let status_lines =
+        crate::ui::components::status_line::build_status_lines(state, viewport.width);
     let footer_h = input_height + status_lines.len() as u16;
 
     // Spinner between chat and footer — always reserve space to avoid layout jump
@@ -57,8 +58,11 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     let chat_lines = crate::ui::components::chat_history::render_chat_lines(state, chat_area.width);
     let total = chat_lines.len();
     let max_scroll = total.saturating_sub(chat_area.height as usize);
-    if state.auto_follow { state.scroll = max_scroll; }
-    else if state.scroll > max_scroll { state.scroll = max_scroll; }
+    if state.auto_follow {
+        state.scroll = max_scroll;
+    } else if state.scroll > max_scroll {
+        state.scroll = max_scroll;
+    }
     state.total_rendered_lines = total;
     // Update chat area for mouse event coordinate mapping
     state.last_chat_area = Some(chat_area);
@@ -67,25 +71,25 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     // Empty state placeholder when no chat history
     let chat_lines = if total == 0 && !state.is_processing {
         let theme = state.theme_manager.current();
-        let model = if state.current_model.is_empty() { "..." } else { state.current_model.as_str() };
+        let model = if state.current_model.is_empty() {
+            "..."
+        } else {
+            state.current_model.as_str()
+        };
         vec![
             ratatui::text::Line::from(""),
-            ratatui::text::Line::from(vec![
-                ratatui::text::Span::styled(
-                    format!("  ⊙ {}", model),
-                    ratatui::style::Style::default().fg(theme.success),
+            ratatui::text::Line::from(vec![ratatui::text::Span::styled(
+                format!("  ⊙ {}", model),
+                ratatui::style::Style::default().fg(theme.success),
+            )]),
+            ratatui::text::Line::from(vec![ratatui::text::Span::styled(
+                crate::core::i18n::t(
+                    "ui.empty.hint",
+                    "  输入问题开始对话，或 Ctrl+P 打开命令面板",
+                    "  Type a question to start, or Ctrl+P for commands",
                 ),
-            ]),
-            ratatui::text::Line::from(vec![
-                ratatui::text::Span::styled(
-                    crate::core::i18n::t(
-                        "ui.empty.hint",
-                        "  输入问题开始对话，或 Ctrl+P 打开命令面板",
-                        "  Type a question to start, or Ctrl+P for commands",
-                    ),
-                    ratatui::style::Style::default().fg(theme.secondary),
-                ),
-            ]),
+                ratatui::style::Style::default().fg(theme.secondary),
+            )]),
         ]
     } else {
         chat_lines
@@ -99,7 +103,9 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
         let row = chat_area.y + y;
         // Clear row
         for cx in 0..chat_area.width {
-            if let Some(cell) = buf.cell_mut((x + cx, row)) { cell.reset(); }
+            if let Some(cell) = buf.cell_mut((x + cx, row)) {
+                cell.reset();
+            }
         }
         if line_idx < chat_lines.len() {
             let line = &chat_lines[line_idx];
@@ -110,7 +116,9 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
                     let w = UnicodeWidthChar::width_cjk(ch).unwrap_or(0);
                     // Skip zero-width characters (combining marks etc.)
                     // to avoid shifting subsequent characters and causing artifacts
-                    if w == 0 { continue; }
+                    if w == 0 {
+                        continue;
+                    }
                     // Write the character; for wide chars also clear the adjacent cell
                     if cx < x + chat_area.width {
                         if let Some(cell) = buf.cell_mut((cx, row)) {
@@ -139,15 +147,17 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
 
     // Render spinner between chat and footer (always render to prevent layout jumps)
     let spinner_line = crate::ui::components::status_line::processing_spinner_line(state);
-    f.render_widget(
-        ratatui::widgets::Paragraph::new(spinner_line),
-        spinner_area,
-    );
+    f.render_widget(ratatui::widgets::Paragraph::new(spinner_line), spinner_area);
 
     // Render task panel above input (like openclaude's TaskListV2 above PromptInput)
     if task_panel_visible {
         let theme = state.theme_manager.current();
-        crate::ui::components::task_panel::render_task_panel_mut(f, task_area, &mut state.task_panel, theme);
+        crate::ui::components::task_panel::render_task_panel_mut(
+            f,
+            task_area,
+            &mut state.task_panel,
+            theme,
+        );
     }
 
     let footer_chunks = Layout::default()
@@ -215,16 +225,15 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
             height: 1,
         };
         if confirm_area.y >= chat_area.y {
-            f.render_widget(
-                ratatui::widgets::Paragraph::new(confirm_text),
-                confirm_area,
-            );
+            f.render_widget(ratatui::widgets::Paragraph::new(confirm_text), confirm_area);
         }
     }
 
     // 大段粘贴确认 — 内联显示在输入框上方
     if state.show_paste_confirmation {
-        let line_count = state.pending_paste.as_ref()
+        let line_count = state
+            .pending_paste
+            .as_ref()
             .map(|t| t.lines().count())
             .unwrap_or(0);
         let paste_confirm_text = ratatui::text::Line::from(vec![
@@ -262,7 +271,11 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
     state.animation_tick = state.animation_tick.wrapping_add(1);
 
     let input_area = render_page(f, state, f.area());
-    if state.show_command_hints || state.show_mention_hints || state.show_provider_menu || state.show_session_menu {
+    if state.show_command_hints
+        || state.show_mention_hints
+        || state.show_provider_menu
+        || state.show_session_menu
+    {
         crate::ui::components::command_suggestions::render_overlays(f, state, input_area);
     }
 
@@ -394,7 +407,9 @@ fn render_toasts(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
 
     // Remove expired toasts
     let now = std::time::Instant::now();
-    state.toast_queue.retain(|t| now.duration_since(t.created_at).as_secs() < t.duration_secs);
+    state
+        .toast_queue
+        .retain(|t| now.duration_since(t.created_at).as_secs() < t.duration_secs);
 
     if state.toast_queue.is_empty() {
         return;
@@ -414,7 +429,12 @@ fn render_toasts(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
         let text = format!(" {} {} ", icon, toast.message);
         let width = text.len().min(max_width as usize) as u16;
         let x = area.x + area.width.saturating_sub(width + 2);
-        let toast_area = ratatui::layout::Rect { x, y, width, height: 1 };
+        let toast_area = ratatui::layout::Rect {
+            x,
+            y,
+            width,
+            height: 1,
+        };
         if y < area.y + area.height {
             f.render_widget(
                 ratatui::widgets::Paragraph::new(ratatui::text::Line::from(

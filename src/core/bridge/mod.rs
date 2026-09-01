@@ -1,8 +1,7 @@
 /// Bridge远程控制系统
-/// 
+///
 /// 对标claude-code-main的src/bridge/
 /// 提供远程控制、WebSocket消息传输、JWT认证和Web UI功能
-
 pub mod api;
 pub mod auth;
 pub mod config;
@@ -27,7 +26,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Bridge管理器
-/// 
+///
 /// 管理远程控制连接、会话和消息传输
 pub struct BridgeManager {
     /// 配置
@@ -85,7 +84,9 @@ impl BridgeManager {
         let session_manager = self.session_manager.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = Self::run_websocket_server(config, connections, auth, session_manager).await {
+            if let Err(e) =
+                Self::run_websocket_server(config, connections, auth, session_manager).await
+            {
                 eprintln!("WebSocket server error: {}", e);
             }
         });
@@ -109,7 +110,8 @@ impl BridgeManager {
         use tokio::net::TcpListener;
 
         let addr = format!("0.0.0.0:{}", config.port);
-        let listener = TcpListener::bind(&addr).await
+        let listener = TcpListener::bind(&addr)
+            .await
             .map_err(|e| BridgeError::BindError(e.to_string()))?;
 
         println!("Bridge TCP server listening on {}", addr);
@@ -120,7 +122,9 @@ impl BridgeManager {
             let session_manager = session_manager.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = Self::handle_connection(stream, peer, connections, auth, session_manager).await {
+                if let Err(e) =
+                    Self::handle_connection(stream, peer, connections, auth, session_manager).await
+                {
                     eprintln!("Connection error: {}", e);
                 }
             });
@@ -181,7 +185,9 @@ impl BridgeManager {
 
                     // 处理消息
                     let text = String::from_utf8_lossy(&buffer[..n]).to_string();
-                    if let Err(e) = Self::process_message(&text, &connection_id, &auth, &session_manager).await {
+                    if let Err(e) =
+                        Self::process_message(&text, &connection_id, &auth, &session_manager).await
+                    {
                         eprintln!("Message processing error: {}", e);
                     }
                 }
@@ -213,8 +219,8 @@ impl BridgeManager {
         auth: &JwtAuth,
         session_manager: &Arc<RwLock<SessionManager>>,
     ) -> Result<(), BridgeError> {
-        let message: BridgeMessage = serde_json::from_str(text)
-            .map_err(|e| BridgeError::ParseError(e.to_string()))?;
+        let message: BridgeMessage =
+            serde_json::from_str(text).map_err(|e| BridgeError::ParseError(e.to_string()))?;
 
         // 验证JWT令牌
         if let Some(token) = &message.token {
@@ -288,13 +294,18 @@ impl BridgeManager {
     /// 获取活跃连接数
     pub async fn active_connections(&self) -> usize {
         let connections = self.connections.read().await;
-        connections.values()
+        connections
+            .values()
             .filter(|c| matches!(c.status, ConnectionStatus::Connected))
             .count()
     }
 
     /// 发送消息
-    pub async fn send_message(&self, connection_id: &str, message: BridgeMessage) -> Result<(), BridgeError> {
+    pub async fn send_message(
+        &self,
+        connection_id: &str,
+        message: BridgeMessage,
+    ) -> Result<(), BridgeError> {
         // TODO: 实现WebSocket消息发送
         Ok(())
     }

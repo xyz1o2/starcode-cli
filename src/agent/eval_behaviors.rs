@@ -208,7 +208,9 @@ pub fn validate_behavior(
                 .filter(|tc| {
                     forbidden.iter().any(|f| {
                         let f_lower = f.to_lowercase();
-                        canonical_tool_name(&tc.tool_name).to_lowercase().contains(&f_lower)
+                        canonical_tool_name(&tc.tool_name)
+                            .to_lowercase()
+                            .contains(&f_lower)
                             || format!("{}({})", canonical_tool_name(&tc.tool_name), tc.arguments)
                                 .to_lowercase()
                                 .contains(&f_lower)
@@ -238,7 +240,9 @@ pub fn validate_behavior(
                 .filter(|req| {
                     let req_canonical = canonical_tool_name(&req.to_lowercase());
                     !tool_calls.iter().any(|tc| {
-                        canonical_tool_name(&tc.tool_name).to_lowercase().contains(&req_canonical)
+                        canonical_tool_name(&tc.tool_name)
+                            .to_lowercase()
+                            .contains(&req_canonical)
                     })
                 })
                 .cloned()
@@ -446,14 +450,12 @@ fn validate_sequence(
 }
 
 /// Calculate context efficiency
-pub fn compute_efficiency(
-    tool_calls: &[ToolCallRecord],
-    total_turns: usize,
-) -> ContextEfficiency {
+pub fn compute_efficiency(tool_calls: &[ToolCallRecord], total_turns: usize) -> ContextEfficiency {
     let total_tool_calls = tool_calls.len();
 
     // Detect redundant reads (same tool + same arguments called multiple times)
-    let mut read_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut read_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     let mut redundant_reads = 0usize;
 
     for tc in tool_calls {
@@ -520,9 +522,7 @@ pub fn detect_finish_signal(
     // Check if final message implies completion
     let message_implies_completion = final_message.map_or(false, |msg| {
         let lower = msg.to_lowercase();
-        lower.contains("done")
-            || lower.contains("finished")
-            || lower.contains("completed")
+        lower.contains("done") || lower.contains("finished") || lower.contains("completed")
     });
 
     if has_explicit_finish && message_implies_completion {

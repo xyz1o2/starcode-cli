@@ -91,10 +91,9 @@ impl ToolExecutor {
             // Tool description single source of truth: tool-description-*.md
             // (external dir → embedded). Falls back to the tool's default
             // description when no .md file is registered for it.
-            let description = crate::core::prompts::tool_descriptions::resolve_tool_description(
-                &f.name,
-            )
-            .unwrap_or_else(|| f.description.clone());
+            let description =
+                crate::core::prompts::tool_descriptions::resolve_tool_description(&f.name)
+                    .unwrap_or_else(|| f.description.clone());
             tools.push(StarTool {
                 tool_type: "function".to_string(),
                 function: crate::types::StarToolFunction {
@@ -439,22 +438,27 @@ impl ToolExecutor {
                         {
                             Ok(core_result) => {
                                 let success = core_result.error.is_none();
-                                let error_msg = core_result.error.clone().map(|e| e.message.clone());
-                                let output = core_result.return_display
+                                let error_msg =
+                                    core_result.error.clone().map(|e| e.message.clone());
+                                let output = core_result
+                                    .return_display
                                     .clone()
                                     .unwrap_or_else(|| core_result.output.clone());
 
                                 // Enrich error with structured error info
                                 if !success {
                                     if let Some(ref err) = error_msg {
-                                        let structured = StructuredError::from_tool_output(
-                                            name,
-                                            &output,
-                                            err,
-                                        );
-                                        let mut data = core_result.data.clone().unwrap_or_else(|| serde_json::json!({}));
+                                        let structured =
+                                            StructuredError::from_tool_output(name, &output, err);
+                                        let mut data = core_result
+                                            .data
+                                            .clone()
+                                            .unwrap_or_else(|| serde_json::json!({}));
                                         if let Some(obj) = data.as_object_mut() {
-                                            obj.insert("structured_error".to_string(), structured.to_json_value());
+                                            obj.insert(
+                                                "structured_error".to_string(),
+                                                structured.to_json_value(),
+                                            );
                                         }
                                         ToolResult {
                                             success: false,
@@ -478,7 +482,7 @@ impl ToolExecutor {
                                         data: core_result.data.clone(),
                                     }
                                 }
-                            },
+                            }
                             Err(e) => return Self::error_result(e),
                         };
 
@@ -493,8 +497,7 @@ impl ToolExecutor {
                                          );
 
                                         // Re-execute with sandbox disabled
-                                        let retry_args = if name == "Bash"
-                                        {
+                                        let retry_args = if name == "Bash" {
                                             let mut map =
                                                 args.as_object().cloned().unwrap_or_default();
                                             map.insert(
@@ -519,8 +522,9 @@ impl ToolExecutor {
                                                         return ToolResult {
                                                             success: retry_result.error.is_none(),
                                                             output: Some(
-                                                                retry_result.return_display
-                                                                    .unwrap_or(retry_result.output)
+                                                                retry_result
+                                                                    .return_display
+                                                                    .unwrap_or(retry_result.output),
                                                             ),
                                                             error: retry_result
                                                                 .error
@@ -721,7 +725,11 @@ impl ToolExecutor {
             return args;
         };
         // subagent_type: 兼容 camelCase 和 PascalCase
-        if let Some(val) = obj.get("subagent_type").or(obj.get("subagentType")).cloned() {
+        if let Some(val) = obj
+            .get("subagent_type")
+            .or(obj.get("subagentType"))
+            .cloned()
+        {
             if let Some(s) = val.as_str() {
                 let lower = s.to_lowercase();
                 let normalized = match lower.as_str() {
@@ -732,7 +740,10 @@ impl ToolExecutor {
                     "code_reviewer" | "codereviewer" | "reviewer" => "code_reviewer",
                     other => other,
                 };
-                obj.insert("subagent_type".to_string(), Value::String(normalized.to_string()));
+                obj.insert(
+                    "subagent_type".to_string(),
+                    Value::String(normalized.to_string()),
+                );
                 obj.remove("subagentType");
             }
         }
@@ -804,10 +815,8 @@ impl ToolExecutor {
         }) {
             let obj = args.as_object_mut().unwrap();
             // 提取 file_path, old_string, new_string
-            let file_path = Self::first_string_arg(
-                obj,
-                &["file_path", "path", "target_file", "file"],
-            );
+            let file_path =
+                Self::first_string_arg(obj, &["file_path", "path", "target_file", "file"]);
             let old_string = Self::first_string_arg(
                 obj,
                 &["old_string", "old_str", "old", "oldString", "old_text"],
@@ -1031,7 +1040,7 @@ impl ToolExecutor {
             if is_readonly && group.len() > 1 {
                 // Parallel execution for read-only tools with concurrency limit
                 use futures::future::join_all;
-                
+
                 // Split into chunks of max_concurrency size
                 for chunk in group.chunks(max_concurrency) {
                     let futures: Vec<_> = chunk
@@ -1851,10 +1860,7 @@ async fn execute_mcp_management_tool(
                 Err(err) => return err,
             };
             let prompt_args = args.get("arguments").cloned();
-            match mcp_manager
-                .get_prompt(&server, &prompt, prompt_args)
-                .await
-            {
+            match mcp_manager.get_prompt(&server, &prompt, prompt_args).await {
                 Ok(result) => {
                     let text = serde_json::to_string_pretty(&result)
                         .unwrap_or_else(|_| result.to_string());
@@ -1934,4 +1940,3 @@ async fn execute_mcp_dynamic_tool(
         },
     }
 }
- 

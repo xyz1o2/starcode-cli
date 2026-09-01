@@ -36,10 +36,7 @@ pub enum SkillsCommand {
     Agents,
 }
 
-pub async fn execute_skills_command(
-    ctx: CommandContext<'_>,
-    cmd: SkillsCommand,
-) -> CommandResult {
+pub async fn execute_skills_command(ctx: CommandContext<'_>, cmd: SkillsCommand) -> CommandResult {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let storage = crate::core::config::storage::Storage::new(cwd.clone());
     let project_skills_dir = storage.project_skills_dir();
@@ -118,11 +115,10 @@ pub async fn execute_skills_command(
 
         SkillsCommand::Show { name } => {
             let all_skills = {
-                let mut v =
-                    crate::agent::skills::loader::SkillLoader::load_skills_from_dir(
-                        &project_skills_dir,
-                    )
-                    .await;
+                let mut v = crate::agent::skills::loader::SkillLoader::load_skills_from_dir(
+                    &project_skills_dir,
+                )
+                .await;
                 v.extend(
                     crate::agent::skills::loader::SkillLoader::load_skills_from_dir(
                         &user_skills_dir,
@@ -135,7 +131,10 @@ pub async fn execute_skills_command(
             let skill = all_skills.into_iter().find(|s| s.name == name);
 
             let msg = match skill {
-                None => format!("⚠️ Skill `{}` not found.\n\nUse `/skills list` to see available skills.", name),
+                None => format!(
+                    "⚠️ Skill `{}` not found.\n\nUse `/skills list` to see available skills.",
+                    name
+                ),
                 Some(s) => {
                     let mut lines = vec![format!("# Skill: `{}`\n", s.name)];
                     if !s.description.is_empty() {
@@ -267,15 +266,26 @@ pub async fn execute_skills_command(
 
         SkillsCommand::Agents => {
             let builtin = vec![
-                ("analyzer", "Analyzes code structure, architecture, and patterns"),
-                ("editor",   "Makes targeted code edits and refactors"),
-                ("Grep",     "Searches for code, symbols, and content across the project"),
-                ("navigator","Navigates complex codebases to understand structure and flow"),
-                ("auto_fix", "Automatically diagnoses and fixes common code issues"),
+                (
+                    "analyzer",
+                    "Analyzes code structure, architecture, and patterns",
+                ),
+                ("editor", "Makes targeted code edits and refactors"),
+                (
+                    "Grep",
+                    "Searches for code, symbols, and content across the project",
+                ),
+                (
+                    "navigator",
+                    "Navigates complex codebases to understand structure and flow",
+                ),
+                (
+                    "auto_fix",
+                    "Automatically diagnoses and fixes common code issues",
+                ),
             ];
 
-            let custom_defs =
-                crate::agent::skills::custom::load_custom_subagent_definitions(&cwd);
+            let custom_defs = crate::agent::skills::custom::load_custom_subagent_definitions(&cwd);
 
             let mut lines = vec!["# Available Skills / Sub-Agents\n".to_string()];
 
@@ -298,14 +308,8 @@ pub async fn execute_skills_command(
                     } else {
                         format!(" _(aliases: {})_", def.aliases.join(", "))
                     };
-                    lines.push(format!(
-                        "- **{}**{}{}",
-                        def.id, desc, aliases
-                    ));
-                    lines.push(format!(
-                        "  - source: `{}`",
-                        def.source_path.display()
-                    ));
+                    lines.push(format!("- **{}**{}{}", def.id, desc, aliases));
+                    lines.push(format!("  - source: `{}`", def.source_path.display()));
                 }
             }
 

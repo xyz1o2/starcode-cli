@@ -46,7 +46,8 @@ impl Agent {
         let mut tool_loop_interventions = 0usize;
         let mut nudge_interventions = 0usize;
         let mut consecutive_read_only_turns = 0usize;
-        let mut file_read_tracker: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut file_read_tracker: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         // 初始化恢复管理器，从环境变量读取后备模型/provider
         let mut fallback_providers: Vec<String> = Vec::new();
         if let Ok(fb) = std::env::var("STAR_FALLBACK_MODEL") {
@@ -69,7 +70,8 @@ impl Agent {
             history_len,
             &mut project_map_attempted,
             &mut semantic_search_attempted,
-        ).await;
+        )
+        .await;
 
         // Main loop
         while current_turn < max_turns && loop_state.should_continue() {
@@ -77,10 +79,16 @@ impl Agent {
             loop_state.next_turn();
 
             // Abort check
-            if self.abort_flag.as_ref().map(|f| f.load(std::sync::atomic::Ordering::SeqCst)).unwrap_or(false) {
+            if self
+                .abort_flag
+                .as_ref()
+                .map(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+                .unwrap_or(false)
+            {
                 crate::utils::logging::append_debug_log_line(&format!(
                     "[AGENT] Loop exited: {} (turn={})",
-                    StopReason::Aborted, current_turn,
+                    StopReason::Aborted,
+                    current_turn,
                 ));
                 return Err((messages.clone(), AgentEvent::Done));
             }
@@ -92,17 +100,23 @@ impl Agent {
                     messages.push(notification.to_message());
                     // 实时推送到 UI，让用户立刻看到后台子 Agent 的完成情况
                     let status_str = match notification.status {
-                        crate::agent::subagent::notification::NotificationStatus::Completed => "✓ Done",
-                        crate::agent::subagent::notification::NotificationStatus::Failed => "✗ Failed",
-                        crate::agent::subagent::notification::NotificationStatus::Killed => "⏹ Killed",
+                        crate::agent::subagent::notification::NotificationStatus::Completed => {
+                            "✓ Done"
+                        }
+                        crate::agent::subagent::notification::NotificationStatus::Failed => {
+                            "✗ Failed"
+                        }
+                        crate::agent::subagent::notification::NotificationStatus::Killed => {
+                            "⏹ Killed"
+                        }
                     };
                     let note = format!(
                         "[SubAgent {}] {}  — {}",
-                        notification.task_id,
-                        status_str,
-                        notification.summary
+                        notification.task_id, status_str, notification.summary
                     );
-                    self.emit_direct_chunk(crate::types::StreamingChunk::assistant_note(note.clone()));
+                    self.emit_direct_chunk(crate::types::StreamingChunk::assistant_note(
+                        note.clone(),
+                    ));
                     crate::utils::logging::append_debug_log_line(&format!(
                         "[SubAgent] notification surfaced to UI: {}",
                         note
@@ -120,7 +134,10 @@ impl Agent {
             }
 
             // Compression Check
-            if let Err(reason) = self.run_compression_check(user_input, messages, current_turn).await {
+            if let Err(reason) = self
+                .run_compression_check(user_input, messages, current_turn)
+                .await
+            {
                 crate::utils::logging::append_debug_log_line(&format!(
                     "[WARN] Context compression failed: {} — continuing anyway",
                     reason,
@@ -129,35 +146,39 @@ impl Agent {
 
             // Tool Selection and LLM Call
             crate::utils::logging::append_debug_log_line(&format!(
-                "[AGENT] Turn {} starting execute_turn", current_turn
+                "[AGENT] Turn {} starting execute_turn",
+                current_turn
             ));
-            let turn_result = self.execute_turn(
-                user_input,
-                messages,
-                all_tools,
-                all_active_tools,
-                shortlist_profile,
-                current_turn,
-                &mut semantic_search_attempted,
-                &mut navigator_skill_attempted,
-                &mut analyzer_skill_attempted,
-                &mut editor_skill_attempted,
-                &mut project_map_attempted,
-                skip_verification,
-                &mut verification_required,
-                tool_loop_repeat_threshold,
-                &mut tool_signature_history,
-                &mut tool_loop_interventions,
-                &mut nudge_interventions,
-                &mut consecutive_read_only_turns,
-                &mut file_read_tracker,
-                &mut recovery_manager,
-                &mut loop_state,
-                history_len,
-            ).await;
+            let turn_result = self
+                .execute_turn(
+                    user_input,
+                    messages,
+                    all_tools,
+                    all_active_tools,
+                    shortlist_profile,
+                    current_turn,
+                    &mut semantic_search_attempted,
+                    &mut navigator_skill_attempted,
+                    &mut analyzer_skill_attempted,
+                    &mut editor_skill_attempted,
+                    &mut project_map_attempted,
+                    skip_verification,
+                    &mut verification_required,
+                    tool_loop_repeat_threshold,
+                    &mut tool_signature_history,
+                    &mut tool_loop_interventions,
+                    &mut nudge_interventions,
+                    &mut consecutive_read_only_turns,
+                    &mut file_read_tracker,
+                    &mut recovery_manager,
+                    &mut loop_state,
+                    history_len,
+                )
+                .await;
 
             crate::utils::logging::append_debug_log_line(&format!(
-                "[AGENT] Turn {} completed: {:?}", current_turn,
+                "[AGENT] Turn {} completed: {:?}",
+                current_turn,
                 match &turn_result {
                     TurnResult::Continue => "Continue",
                     TurnResult::Done => "Done",
@@ -172,7 +193,8 @@ impl Agent {
                 TurnResult::Done => {
                     crate::utils::logging::append_debug_log_line(&format!(
                         "[AGENT] Loop exited: {} (turn={})",
-                        StopReason::Completed, current_turn,
+                        StopReason::Completed,
+                        current_turn,
                     ));
                     return Ok(messages.clone());
                 }
@@ -193,12 +215,15 @@ impl Agent {
             stop_reason, current_turn, loop_state.consecutive_failures,
         ));
         if !loop_state.should_continue() {
-            Err((messages.clone(), AgentEvent::Error(format!(
-                "Loop stopped: {}",
-                loop_state.format_status()
-            ))))
+            Err((
+                messages.clone(),
+                AgentEvent::Error(format!("Loop stopped: {}", loop_state.format_status())),
+            ))
         } else {
-            Err((messages.clone(), AgentEvent::Error("Max turns reached".to_string())))
+            Err((
+                messages.clone(),
+                AgentEvent::Error("Max turns reached".to_string()),
+            ))
         }
     }
 
@@ -224,7 +249,7 @@ impl Agent {
             crate::utils::logging::append_debug_log_line(
                 "[ACE_PREFETCH] first-turn overview request detected; prefetching project_map before the first model call",
             );
-            
+
             messages.push(StarMessage::assistant_with_tool_calls(vec![
                 project_map_tool_call.clone(),
             ]));
@@ -235,7 +260,10 @@ impl Agent {
                     hooks::run_post_tool_hooks(user_input, &project_map_tool_call, &result).await;
                     messages.push(StarMessage::tool(
                         project_map_tool_call.id.clone(),
-                        result.output.clone().unwrap_or_else(|| result.error.clone().unwrap_or_default()),
+                        result
+                            .output
+                            .clone()
+                            .unwrap_or_else(|| result.error.clone().unwrap_or_default()),
                     ));
                 }
                 Err(reason) => {
@@ -258,7 +286,7 @@ impl Agent {
             crate::utils::logging::append_debug_log_line(
                 "[ACE_PREFETCH] first-turn conceptual query detected; prefetching semantic_search before the first model call",
             );
-            
+
             messages.push(StarMessage::assistant_with_tool_calls(vec![
                 semantic_tool_call.clone(),
             ]));
@@ -269,7 +297,10 @@ impl Agent {
                     hooks::run_post_tool_hooks(user_input, &semantic_tool_call, &result).await;
                     messages.push(StarMessage::tool(
                         semantic_tool_call.id.clone(),
-                        result.output.clone().unwrap_or_else(|| result.error.clone().unwrap_or_default()),
+                        result
+                            .output
+                            .clone()
+                            .unwrap_or_else(|| result.error.clone().unwrap_or_default()),
                     ));
                 }
                 Err(reason) => {
@@ -290,12 +321,11 @@ impl Agent {
 
     // 执行单个工具（带进度报告）
     pub(crate) async fn execute_single_tool(&self, tool_call: &StarToolCall) -> ToolResult {
-        let (mut progress_rx, tool_future) =
-            tool_helpers::execute_single_tool_with_progress(
-                self.tool_executor.clone(),
-                tool_call.clone(),
-                self.abort_token.clone(),
-            );
+        let (mut progress_rx, tool_future) = tool_helpers::execute_single_tool_with_progress(
+            self.tool_executor.clone(),
+            tool_call.clone(),
+            self.abort_token.clone(),
+        );
         tokio::pin!(tool_future);
 
         loop {
@@ -311,17 +341,18 @@ impl Agent {
     }
 
     /// 对工具结果执行预算限制
-    /// 
+    ///
     /// 限制单个工具结果的大小，防止上下文爆炸
     /// 注意：Read等文件查看工具不会被截断
     fn apply_tool_result_budget(&self, messages: &mut Vec<StarMessage>) {
         use crate::agent::compact::tool_output_compact::ToolResultBudget;
-        
+
         let budget = ToolResultBudget::new();
         let mut changed = false;
-        
+
         // 首先收集工具名称映射（tool_call_id -> tool_name）
-        let mut tool_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut tool_name_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for msg in messages.iter() {
             if msg.role == "assistant" {
                 if let Some(tool_calls) = &msg.tool_calls {
@@ -331,15 +362,17 @@ impl Agent {
                 }
             }
         }
-        
+
         for msg in messages.iter_mut() {
             if msg.role == "tool" {
                 if let Some(content) = &msg.content {
                     // 获取工具名称
-                    let tool_name = msg.tool_call_id.as_ref()
+                    let tool_name = msg
+                        .tool_call_id
+                        .as_ref()
                         .and_then(|id| tool_name_map.get(id))
                         .map(|s| s.as_str());
-                    
+
                     let original_len = content.len();
                     let enforced = budget.enforce(content, tool_name);
                     if enforced.len() < original_len {
@@ -349,10 +382,10 @@ impl Agent {
                 }
             }
         }
-        
+
         if changed {
             crate::utils::logging::append_debug_log_line(
-                "[COMPACT] Applied tool result budget to messages"
+                "[COMPACT] Applied tool result budget to messages",
             );
         }
     }
@@ -367,7 +400,8 @@ impl Agent {
         let mut released_count = 0;
 
         // 首先收集工具名称映射（tool_call_id -> tool_name）
-        let mut tool_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut tool_name_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for msg in messages.iter() {
             if msg.role == "assistant" {
                 if let Some(tool_calls) = &msg.tool_calls {
@@ -382,7 +416,9 @@ impl Agent {
             // 只处理工具消息（role="tool"）
             if msg.role == "tool" {
                 // 检查工具是否豁免
-                let is_exempt = msg.tool_call_id.as_ref()
+                let is_exempt = msg
+                    .tool_call_id
+                    .as_ref()
                     .and_then(|id| tool_name_map.get(id))
                     .map(|tool_name| EXEMPT_TOOLS.iter().any(|e| e == tool_name))
                     .unwrap_or(false);
@@ -394,7 +430,8 @@ impl Agent {
 
                 if let Some(content) = &msg.content {
                     // 如果工具结果包含大量数据，释放原始输出
-                    if content.len() > 10_000 {  // 超过10K字符
+                    if content.len() > 10_000 {
+                        // 超过10K字符
                         // 保留摘要，释放原始数据
                         // 追加显式截断标记，避免 agent 误以为 200 字符摘要就是完整输出，
                         // 需要时可重新读取相关文件/重新搜索。
@@ -463,21 +500,21 @@ impl Agent {
                     predictive_result.original_token_count,
                     predictive_result.new_token_count,
                 )));
-                
+
                 crate::utils::logging::append_debug_log_line(&format!(
                     "[COMPACT] Predictive compression: {} → {} tokens (strategy={})",
                     predictive_result.original_token_count,
                     predictive_result.new_token_count,
                     predictive_result.strategy_name,
                 ));
-                
+
                 return Ok(());
             }
         }
 
         // 3. 使用新的 CompactManager 进行常规压缩
         let compact_result = self.compact_manager.compact(messages);
-        
+
         // 如果 CompactManager 没有执行压缩，使用原有的 ContextCompressor 作为后备
         let compression_result = if compact_result.was_compacted {
             crate::agent::workflows::context_compression::CompressionResult {
@@ -491,20 +528,28 @@ impl Agent {
         } else {
             tokio::time::timeout(
                 std::time::Duration::from_secs(60),
-                self.context_compressor.compress_if_needed(messages.clone(), Some(&self.client))
-            ).await.unwrap_or_else(|_| {
-                crate::utils::logging::append_debug_log_line("[WARN] Context compression timed out, skipping");
-                Ok(crate::agent::workflows::context_compression::CompressionResult {
-                    messages: messages.clone(),
-                    was_compacted: false,
-                    original_token_count: 0,
-                    new_token_count: 0,
-                    threshold_tokens: 0,
-                    decision: "timeout_skip",
-                })
-            }).map_err(|e: Box<dyn std::error::Error + Send + Sync>| e.to_string())?
+                self.context_compressor
+                    .compress_if_needed(messages.clone(), Some(&self.client)),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                crate::utils::logging::append_debug_log_line(
+                    "[WARN] Context compression timed out, skipping",
+                );
+                Ok(
+                    crate::agent::workflows::context_compression::CompressionResult {
+                        messages: messages.clone(),
+                        was_compacted: false,
+                        original_token_count: 0,
+                        new_token_count: 0,
+                        threshold_tokens: 0,
+                        decision: "timeout_skip",
+                    },
+                )
+            })
+            .map_err(|e: Box<dyn std::error::Error + Send + Sync>| e.to_string())?
         };
-        
+
         if compression_result.was_compacted {
             *messages = compression_result.messages;
 
@@ -583,13 +628,9 @@ impl Agent {
             return TurnResult::Error(AgentEvent::Error(reason));
         }
 
-        let turn_tool_selection = select_tools_for_turn_for_client(
-            &self.client,
-            all_tools,
-            user_input,
-            current_turn,
-        );
-        
+        let turn_tool_selection =
+            select_tools_for_turn_for_client(&self.client, all_tools, user_input, current_turn);
+
         if !turn_tool_selection.tools.is_empty()
             && crate::core::config::models::is_deepseek_reasoner_model(
                 self.client.get_current_model(),
@@ -598,7 +639,7 @@ impl Agent {
             let reason = "DeepSeek `deepseek-reasoner` does not support function calling according to the official API docs. This agent workflow requires tools, so please switch to a tool-capable model such as `deepseek-chat`/`deepseek-v4-pro` with thinking mode enabled.".to_string();
             return TurnResult::Error(AgentEvent::Error(reason));
         }
-        
+
         let turn_active_tools = turn_tool_selection.selected_names.clone();
         crate::utils::logging::append_debug_log_line(&format!(
             "[TOOL_ROUTER] turn={} profile={} shortlist={}/{} rationale={}",
@@ -646,44 +687,62 @@ impl Agent {
         // Make LLM call
         crate::utils::logging::append_debug_log_line(&format!(
             "[AGENT] Turn {} calling LLM ({} messages, {} tools)",
-            current_turn, request_messages.len(), turn_tool_selection.tools.len()
-        ));
-        let llm_result = self.call_llm(
-            user_input,
-            messages,
-            &mut request_messages,
-            &turn_tool_selection,
             current_turn,
-            recovery_manager,
-            loop_state,
-        ).await;
+            request_messages.len(),
+            turn_tool_selection.tools.len()
+        ));
+        let llm_result = self
+            .call_llm(
+                user_input,
+                messages,
+                &mut request_messages,
+                &turn_tool_selection,
+                current_turn,
+                recovery_manager,
+                loop_state,
+            )
+            .await;
 
         crate::utils::logging::append_debug_log_line(&format!(
             "[AGENT] Turn {} LLM call completed: {}",
             current_turn,
             match &llm_result {
-                LlmResult::Success { tool_calls, .. } => format!("Success ({} tool_calls)", tool_calls.len()),
+                LlmResult::Success { tool_calls, .. } =>
+                    format!("Success ({} tool_calls)", tool_calls.len()),
                 LlmResult::Error(_) => "Error".to_string(),
                 LlmResult::Retry => "Retry".to_string(),
             }
         ));
 
         match llm_result {
-            LlmResult::Success { content, reasoning, tool_calls, usage, content_streamed, reasoning_streamed, was_truncated } => {
+            LlmResult::Success {
+                content,
+                reasoning,
+                tool_calls,
+                usage,
+                content_streamed,
+                reasoning_streamed,
+                was_truncated,
+            } => {
                 // Store streaming state so agent_run.rs can avoid duplicate emission
                 self.last_content_streamed = content_streamed;
                 self.last_reasoning_streamed = reasoning_streamed;
 
                 // Record token usage for budget tracking
                 if let Some(ref usage) = usage {
-                    self.token_budget_tracker.record_output_tokens(usage.completion_tokens as usize);
+                    self.token_budget_tracker
+                        .record_output_tokens(usage.completion_tokens as usize);
                 }
 
                 // Check token budget for auto-continuation
                 let budget_decision = self.token_budget_tracker.should_continue();
                 match &budget_decision {
-                    crate::agent::token_budget::TokenBudgetDecision::Continue { 
-                        nudge_message, continuation_count, pct, turn_tokens, budget 
+                    crate::agent::token_budget::TokenBudgetDecision::Continue {
+                        nudge_message,
+                        continuation_count,
+                        pct,
+                        turn_tokens,
+                        budget,
                     } => {
                         crate::utils::logging::append_debug_log_line(&format!(
                             "[TOKEN_BUDGET] Continuation #{}: {}% ({} / {} tokens)",
@@ -707,41 +766,48 @@ impl Agent {
                     crate::utils::logging::append_debug_log_line(
                         "[AGENT] response was truncated (finish_reason=length) — injecting continuation nudge",
                     );
-                    messages.push(StarMessage::system(nudges::NUDGE_TRUNCATED_STREAM.to_string()));
+                    messages.push(StarMessage::system(
+                        nudges::NUDGE_TRUNCATED_STREAM.to_string(),
+                    ));
                 }
 
                 // Process the response
-                let result = self.process_llm_response(
-                    user_input,
-                    messages,
-                    content,
-                    reasoning,
-                    tool_calls,
-                    usage,
-                    content_streamed,
-                    reasoning_streamed,
-                    current_turn,
-                    all_active_tools,
-                    semantic_search_attempted,
-                    navigator_skill_attempted,
-                    analyzer_skill_attempted,
-                    editor_skill_attempted,
-                    project_map_attempted,
-                    skip_verification,
-                    verification_required,
-                    tool_loop_repeat_threshold,
-                    tool_signature_history,
-                    tool_loop_interventions,
-                    nudge_interventions,
-                    consecutive_read_only_turns,
-                    file_read_tracker,
-                    &turn_active_tools,
-                    loop_state,
-                ).await;
+                let result = self
+                    .process_llm_response(
+                        user_input,
+                        messages,
+                        content,
+                        reasoning,
+                        tool_calls,
+                        usage,
+                        content_streamed,
+                        reasoning_streamed,
+                        current_turn,
+                        all_active_tools,
+                        semantic_search_attempted,
+                        navigator_skill_attempted,
+                        analyzer_skill_attempted,
+                        editor_skill_attempted,
+                        project_map_attempted,
+                        skip_verification,
+                        verification_required,
+                        tool_loop_repeat_threshold,
+                        tool_signature_history,
+                        tool_loop_interventions,
+                        nudge_interventions,
+                        consecutive_read_only_turns,
+                        file_read_tracker,
+                        &turn_active_tools,
+                        loop_state,
+                    )
+                    .await;
 
                 // If token budget says continue, override Done with Continue
-                if matches!(budget_decision, crate::agent::token_budget::TokenBudgetDecision::Continue { .. }) 
-                    && matches!(result, TurnResult::Done) {
+                if matches!(
+                    budget_decision,
+                    crate::agent::token_budget::TokenBudgetDecision::Continue { .. }
+                ) && matches!(result, TurnResult::Done)
+                {
                     TurnResult::Continue
                 } else {
                     result
@@ -798,5 +864,3 @@ impl std::fmt::Display for StopReason {
         }
     }
 }
-
-

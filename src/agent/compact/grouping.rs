@@ -1,7 +1,7 @@
 use crate::types::StarMessage;
 
 /// 消息分组策略
-/// 
+///
 /// 对标claude-code-main的grouping.ts
 /// 将消息按逻辑分组，便于压缩和管理
 pub struct MessageGroupingStrategy {
@@ -45,7 +45,12 @@ impl MessageGroupingStrategy {
     }
 
     /// 检查是否应该开始新组
-    fn should_start_new_group(&self, msg: &StarMessage, current_group: &MessageGroup, index: usize) -> bool {
+    fn should_start_new_group(
+        &self,
+        msg: &StarMessage,
+        current_group: &MessageGroup,
+        index: usize,
+    ) -> bool {
         // 如果当前组为空，不需要开始新组
         if current_group.is_empty() {
             return false;
@@ -72,9 +77,9 @@ impl MessageGroupingStrategy {
             if let Some(tool_call_id) = &msg.tool_call_id {
                 // 检查当前组中是否有对应的工具调用
                 let has_matching_call = current_group.messages.iter().any(|m| {
-                    m.tool_calls.as_ref().map_or(false, |tc| {
-                        tc.iter().any(|tc| tc.id == *tool_call_id)
-                    })
+                    m.tool_calls
+                        .as_ref()
+                        .map_or(false, |tc| tc.iter().any(|tc| tc.id == *tool_call_id))
                 });
 
                 if !has_matching_call {
@@ -96,7 +101,7 @@ impl MessageGroupingStrategy {
 
         // 计算当前token数
         let current_tokens = self.estimate_group_tokens(group);
-        
+
         if current_tokens <= target_tokens {
             return group.messages.clone();
         }
@@ -108,7 +113,7 @@ impl MessageGroupingStrategy {
 
         // 保留第一条和最后几条消息
         let mut result = Vec::new();
-        
+
         // 保留第一条消息（通常是用户输入）
         if let Some(first) = group.messages.first() {
             result.push(first.clone());
@@ -122,10 +127,7 @@ impl MessageGroupingStrategy {
 
         // 添加摘要消息
         if skip_count > 0 {
-            let summary = format!(
-                "[{} messages summarized]",
-                skip_count
-            );
+            let summary = format!("[{} messages summarized]", skip_count);
             result.insert(1, StarMessage::system(&summary));
         }
 
@@ -134,14 +136,20 @@ impl MessageGroupingStrategy {
 
     /// 估算组的token数
     fn estimate_group_tokens(&self, group: &MessageGroup) -> usize {
-        group.messages.iter().map(|msg| {
-            let content_len = msg.content.as_ref().map_or(0, |c| c.len());
-            let tool_calls_len = msg.tool_calls.as_ref().map_or(0, |tc| {
-                tc.iter().map(|tc| tc.function.arguments.len()).sum::<usize>()
-            });
-            // 粗略估算：1 token ≈ 4 字符
-            (content_len + tool_calls_len) / 4
-        }).sum()
+        group
+            .messages
+            .iter()
+            .map(|msg| {
+                let content_len = msg.content.as_ref().map_or(0, |c| c.len());
+                let tool_calls_len = msg.tool_calls.as_ref().map_or(0, |tc| {
+                    tc.iter()
+                        .map(|tc| tc.function.arguments.len())
+                        .sum::<usize>()
+                });
+                // 粗略估算：1 token ≈ 4 字符
+                (content_len + tool_calls_len) / 4
+            })
+            .sum()
     }
 }
 
@@ -169,7 +177,7 @@ impl MessageGroup {
     pub fn add_message(&mut self, message: StarMessage, index: usize) {
         // 更新组类型
         self.group_type = self.determine_group_type(&message);
-        
+
         self.messages.push(message);
         self.indices.push(index);
     }
@@ -232,7 +240,7 @@ pub enum GroupType {
 }
 
 /// 分组压缩管理器
-/// 
+///
 /// 管理消息分组和压缩
 pub struct GroupingCompactManager {
     strategy: MessageGroupingStrategy,
@@ -263,7 +271,9 @@ impl GroupingCompactManager {
         let mut result = Vec::new();
 
         for group in &groups {
-            let compressed = self.strategy.compress_group(group, target_tokens / group_count);
+            let compressed = self
+                .strategy
+                .compress_group(group, target_tokens / group_count);
             result.extend(compressed);
         }
 

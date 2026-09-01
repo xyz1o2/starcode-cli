@@ -120,10 +120,10 @@ impl EditStrategy for RegexFuzzyStrategy {
             .to_string();
 
         Ok(Some(
-            EditResult::success(new_content, matches.len(), self.name())
-                .with_details(format!("regex fuzzy match replaced {} occurrences", matches.len())),
+            EditResult::success(new_content, matches.len(), self.name()).with_details(format!(
+                "regex fuzzy match replaced {} occurrences",
+                matches.len()
+            )),
         ))
     }
 }
-
- 

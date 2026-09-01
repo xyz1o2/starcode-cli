@@ -54,7 +54,7 @@ impl Metric {
 }
 
 /// 指标收集器
-/// 
+///
 /// 收集和管理系统指标
 pub struct MetricsCollector {
     /// 指标存储
@@ -113,7 +113,10 @@ impl MetricsCollector {
             return;
         }
 
-        let histogram = self.histograms.entry(name.to_string()).or_insert_with(Vec::new);
+        let histogram = self
+            .histograms
+            .entry(name.to_string())
+            .or_insert_with(Vec::new);
         histogram.push(value);
 
         self.record_metric(Metric::new(name, MetricType::Histogram, value));
@@ -141,7 +144,10 @@ impl MetricsCollector {
 
     /// 记录指标
     fn record_metric(&mut self, metric: Metric) {
-        let metrics = self.metrics.entry(metric.name.clone()).or_insert_with(Vec::new);
+        let metrics = self
+            .metrics
+            .entry(metric.name.clone())
+            .or_insert_with(Vec::new);
         metrics.push(metric);
     }
 
@@ -231,7 +237,7 @@ impl MetricsCollector {
 }
 
 /// 计时器守卫
-/// 
+///
 /// 自动记录计时器值
 pub struct TimerGuard {
     name: String,

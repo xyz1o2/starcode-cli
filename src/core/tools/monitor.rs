@@ -31,10 +31,7 @@ impl ToolInvocation for MonitorInvocation {
                 "Check process status (PID: {})",
                 self.params.pid.unwrap_or(0)
             ),
-            "kill" => format!(
-                "Kill process (PID: {})",
-                self.params.pid.unwrap_or(0)
-            ),
+            "kill" => format!("Kill process (PID: {})", self.params.pid.unwrap_or(0)),
             _ => format!("Monitor action: {}", self.params.action),
         }
     }

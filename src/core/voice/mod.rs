@@ -1,8 +1,7 @@
 /// 语音系统
-/// 
+///
 /// 对标claude-code-main的src/services/voice.ts和voiceStreamSTT.ts
 /// 提供语音输入、STT转录和语音模式管理
-
 pub mod capture;
 pub mod config;
 pub mod enhanced;
@@ -11,8 +10,8 @@ pub mod transcription;
 
 pub use capture::{AudioCapture, CaptureConfig, CaptureError};
 pub use config::VoiceConfig;
-pub use enhanced::{VoiceManager, VoiceBackend, VoiceState, TranscriptionResult};
-pub use stt::{SttProvider, SttConfig, SttError};
+pub use enhanced::{TranscriptionResult, VoiceBackend, VoiceManager, VoiceState};
+pub use stt::{SttConfig, SttError, SttProvider};
 pub use transcription::{TranscriptionEngine, TranscriptionRequest, TranscriptionResponse};
 
 use serde::{Deserialize, Serialize};
@@ -103,14 +102,13 @@ impl VoiceManagerConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(16000);
 
-        let stt_provider = std::env::var("STAR_VOICE_STT_PROVIDER")
-            .unwrap_or_else(|_| "anthropic".to_string());
+        let stt_provider =
+            std::env::var("STAR_VOICE_STT_PROVIDER").unwrap_or_else(|_| "anthropic".to_string());
 
         let stt_api_key = std::env::var("STAR_VOICE_STT_API_KEY").ok();
         let stt_api_endpoint = std::env::var("STAR_VOICE_STT_API_ENDPOINT").ok();
 
-        let language = std::env::var("STAR_VOICE_LANGUAGE")
-            .unwrap_or_else(|_| "en".to_string());
+        let language = std::env::var("STAR_VOICE_LANGUAGE").unwrap_or_else(|_| "en".to_string());
 
         Self {
             mode,

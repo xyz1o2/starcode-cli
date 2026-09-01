@@ -37,9 +37,7 @@ pub enum ErrorSeverity {
 /// Returns a verification result with any syntax errors found.
 pub fn verify_edit_syntax(file_path: &str, content: &str) -> EditVerificationResult {
     let path = Path::new(file_path);
-    let extension = path.extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     match extension {
         "py" => verify_python(file_path, content),
@@ -413,8 +411,8 @@ fn extract_line_number(error_msg: &str) -> Option<usize> {
     // Try pattern like ":42:"
     let chars: Vec<char> = error_msg.chars().collect();
     for i in 0..chars.len().saturating_sub(3) {
-        if chars[i] == ':' && chars[i+2] == ':' {
-            let num_str: String = chars[i+1..i+2].iter().collect();
+        if chars[i] == ':' && chars[i + 2] == ':' {
+            let num_str: String = chars[i + 1..i + 2].iter().collect();
             if let Ok(line) = num_str.parse::<usize>() {
                 return Some(line);
             }
@@ -431,7 +429,7 @@ fn check_basic_yaml_syntax(content: &str) -> Vec<SyntaxError> {
     for line in content.lines() {
         line_num += 1;
         let trimmed = line.trim();
-        
+
         // Skip empty lines and comments
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
@@ -451,7 +449,7 @@ fn check_basic_yaml_syntax(content: &str) -> Vec<SyntaxError> {
             let parts: Vec<&str> = trimmed.splitn(2, ':').collect();
             if parts.len() == 2 {
                 let key = parts[0].trim();
-                
+
                 // Check for empty key
                 if key.is_empty() {
                     errors.push(SyntaxError {
@@ -477,7 +475,10 @@ pub fn format_verification_result(result: &EditVerificationResult) -> String {
     output.push_str(&format!("[SYNTAX_ERROR] {}\n", result.file_path));
 
     for error in &result.errors {
-        let line_str = error.line.map(|l| format!("Line {}: ", l)).unwrap_or_default();
+        let line_str = error
+            .line
+            .map(|l| format!("Line {}: ", l))
+            .unwrap_or_default();
         output.push_str(&format!("  {}{}\n", line_str, error.message));
     }
 
@@ -508,7 +509,10 @@ mod tests {
     #[test]
     fn test_extract_line_number() {
         assert_eq!(extract_line_number("SyntaxError at line 42"), Some(42));
-        assert_eq!(extract_line_number("Error on line 10: invalid syntax"), Some(10));
+        assert_eq!(
+            extract_line_number("Error on line 10: invalid syntax"),
+            Some(10)
+        );
         assert_eq!(extract_line_number("Unknown error"), None);
     }
 }

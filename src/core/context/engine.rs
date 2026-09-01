@@ -214,11 +214,7 @@ impl ContextEngine {
                     };
 
                     if should_refresh {
-                        ContextEngine::spawn_index_refresh_task(
-                            indexer,
-                            index_cache,
-                            refresh_flag,
-                        );
+                        ContextEngine::spawn_index_refresh_task(indexer, index_cache, refresh_flag);
                     }
                 });
             }

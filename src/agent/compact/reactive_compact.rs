@@ -1,9 +1,9 @@
-use crate::types::StarMessage;
-use crate::llm::client::StarClient;
 use super::CompactConfig;
+use crate::llm::client::StarClient;
+use crate::types::StarMessage;
 
 /// Reactive Compact配置
-/// 
+///
 /// 对标claude-code-main的reactiveCompact.ts
 /// 在API返回prompt-too-long错误时进行响应式压缩
 #[derive(Debug, Clone)]
@@ -27,7 +27,7 @@ impl Default for ReactiveCompactConfig {
         Self {
             enabled: true,
             max_retries: 2,
-            target_ratio: 0.5,  // 压缩到50%
+            target_ratio: 0.5, // 压缩到50%
             keep_recent_messages: 6,
             preserve_system_messages: true,
             preserve_tool_results: false,
@@ -96,7 +96,7 @@ pub struct ReactiveCompactResult {
 }
 
 /// Reactive Compact管理器
-/// 
+///
 /// 在API返回prompt-too-long错误时进行响应式压缩
 pub struct ReactiveCompactManager {
     config: ReactiveCompactConfig,
@@ -118,7 +118,7 @@ impl ReactiveCompactManager {
     /// 检查是否是prompt-too-long错误
     pub fn is_prompt_too_long_error(&self, error: &str) -> bool {
         let error_lower = error.to_lowercase();
-        error_lower.contains("prompt_too_long") 
+        error_lower.contains("prompt_too_long")
             || error_lower.contains("context_length_exceeded")
             || error_lower.contains("maximum context length")
             || error_lower.contains("token limit")
@@ -149,7 +149,7 @@ impl ReactiveCompactManager {
         // 检查是否已经尝试过
         if has_attempted && !self.can_retry() {
             crate::utils::logging::append_debug_log_line(
-                "[REACTIVE_COMPACT] Already attempted and max retries reached, skipping"
+                "[REACTIVE_COMPACT] Already attempted and max retries reached, skipping",
             );
             return None;
         }
@@ -157,22 +157,24 @@ impl ReactiveCompactManager {
         // 增加重试计数器
         self.retry_count += 1;
 
-        crate::utils::logging::append_debug_log_line(
-            &format!("[REACTIVE_COMPACT] Attempting reactive compression (attempt {}/{})", 
-                self.retry_count, self.config.max_retries)
-        );
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[REACTIVE_COMPACT] Attempting reactive compression (attempt {}/{})",
+            self.retry_count, self.config.max_retries
+        ));
 
         // 计算目标token数
         let current_tokens = super::token_counter::count_tokens(messages);
         let target_tokens = (current_tokens as f64 * self.config.target_ratio) as usize;
 
         // 尝试压缩
-        let result = self.compress_messages(messages, client, target_tokens).await;
+        let result = self
+            .compress_messages(messages, client, target_tokens)
+            .await;
 
         match result {
             Ok(compressed_messages) => {
                 let new_tokens = super::token_counter::count_tokens(&compressed_messages);
-                
+
                 crate::utils::logging::append_debug_log_line(&format!(
                     "[REACTIVE_COMPACT] Compression successful: {} → {} tokens ({}% reduction)",
                     current_tokens,
@@ -211,17 +213,14 @@ impl ReactiveCompactManager {
     ) -> Result<Vec<StarMessage>, Box<dyn std::error::Error + Send + Sync>> {
         // 分离系统消息、历史消息和最近消息
         let (system_messages, history_messages, recent_messages) = self.separate_messages(messages);
-        
+
         // 构建压缩提示
         let prompt = self.build_compression_prompt(&history_messages, target_tokens);
-        
+
         // 调用LLM进行压缩
-        let response = client.chat(
-            vec![StarMessage::user(prompt)],
-            None,
-            None,
-            None,
-        ).await?;
+        let response = client
+            .chat(vec![StarMessage::user(prompt)], None, None, None)
+            .await?;
 
         // 解析响应
         if let Some(choice) = response.choices.first() {
@@ -231,21 +230,21 @@ impl ReactiveCompactManager {
                     "[REACTIVE_COMPACT] Previous context was compressed due to token limit.\n\nSummary:\n{}",
                     content
                 ));
-                
+
                 // 构建压缩后的消息列表
                 let mut result = Vec::new();
-                
+
                 // 添加系统消息
                 if self.config.preserve_system_messages {
                     result.extend(system_messages);
                 }
-                
+
                 // 添加摘要
                 result.push(summary);
-                
+
                 // 添加最近的消息
                 result.extend(recent_messages);
-                
+
                 return Ok(result);
             }
         }
@@ -254,7 +253,10 @@ impl ReactiveCompactManager {
     }
 
     /// 分离消息
-    fn separate_messages(&self, messages: &[StarMessage]) -> (Vec<StarMessage>, Vec<StarMessage>, Vec<StarMessage>) {
+    fn separate_messages(
+        &self,
+        messages: &[StarMessage],
+    ) -> (Vec<StarMessage>, Vec<StarMessage>, Vec<StarMessage>) {
         let mut system_messages = Vec::new();
         let mut other_messages = Vec::new();
 
@@ -269,7 +271,7 @@ impl ReactiveCompactManager {
         // 分离最近消息和历史消息
         let keep_count = self.config.keep_recent_messages;
         let split_point = other_messages.len().saturating_sub(keep_count);
-        
+
         let history_messages = other_messages[..split_point].to_vec();
         let recent_messages = other_messages[split_point..].to_vec();
 
@@ -295,8 +297,7 @@ Conversation history:
 {}
 
 Summary:"#,
-            target_tokens,
-            history
+            target_tokens, history
         )
     }
 
@@ -304,7 +305,7 @@ Summary:"#,
     pub fn compress_single_message(&self, message: &StarMessage, max_tokens: usize) -> StarMessage {
         let content = message.content.as_deref().unwrap_or("");
         let current_tokens = content.len() / 4; // 粗略估算
-        
+
         if current_tokens <= max_tokens {
             return message.clone();
         }
@@ -312,7 +313,10 @@ Summary:"#,
         // 截断内容
         let target_chars = max_tokens * 4;
         let truncated = if content.len() > target_chars {
-            format!("{}...\n[Content truncated to fit token limit]", &content[..target_chars])
+            format!(
+                "{}...\n[Content truncated to fit token limit]",
+                &content[..target_chars]
+            )
         } else {
             content.to_string()
         };
@@ -330,19 +334,18 @@ Summary:"#,
     /// 构建压缩后的消息
     pub fn build_post_compact_messages(&self, result: &ReactiveCompactResult) -> Vec<StarMessage> {
         let mut messages = Vec::new();
-        
+
         // 添加压缩边界消息
         messages.push(StarMessage::system(format!(
             "[COMPACT] Context was reactively compressed due to prompt-too-long error. \
              Original: {} tokens → Now: {} tokens. \
              Continue the task based on the summarized context above.",
-            result.original_token_count,
-            result.new_token_count
+            result.original_token_count, result.new_token_count
         )));
-        
+
         // 添加压缩后的消息
         messages.extend(result.messages.clone());
-        
+
         messages
     }
 }
@@ -350,7 +353,7 @@ Summary:"#,
 /// 检查是否是prompt-too-long错误
 pub fn is_prompt_too_long_error(error: &str) -> bool {
     let error_lower = error.to_lowercase();
-    error_lower.contains("prompt_too_long") 
+    error_lower.contains("prompt_too_long")
         || error_lower.contains("context_length_exceeded")
         || error_lower.contains("maximum context length")
         || error_lower.contains("token limit")
@@ -364,7 +367,9 @@ mod tests {
     fn test_is_prompt_too_long_error() {
         assert!(is_prompt_too_long_error("Error: prompt_too_long"));
         assert!(is_prompt_too_long_error("context_length_exceeded"));
-        assert!(is_prompt_too_long_error("Maximum context length is 200000 tokens"));
+        assert!(is_prompt_too_long_error(
+            "Maximum context length is 200000 tokens"
+        ));
         assert!(!is_prompt_too_long_error("Some other error"));
     }
 }

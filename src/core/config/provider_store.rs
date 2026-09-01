@@ -402,22 +402,27 @@ impl ProviderStore {
     }
 
     /// Combined: set both active provider and model in a single load+save cycle
-    pub async fn set_active_provider_and_model(&self, provider_id: &str, model: &str) -> Result<(), String> {
+    pub async fn set_active_provider_and_model(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<(), String> {
         let mut config = self.load().await?;
         config.active_provider_id = Some(provider_id.to_string());
         config.active_model = Some(model.to_string());
-        let settings = config
-            .providers
-            .entry(provider_id.to_string())
-            .or_insert(ProviderSettings {
-                api_key: None,
-                base_url: None,
-                selected_model: None,
-                models: None,
-                name: None,
-                description: None,
-                r#type: None,
-            });
+        let settings =
+            config
+                .providers
+                .entry(provider_id.to_string())
+                .or_insert(ProviderSettings {
+                    api_key: None,
+                    base_url: None,
+                    selected_model: None,
+                    models: None,
+                    name: None,
+                    description: None,
+                    r#type: None,
+                });
         settings.selected_model = normalize_model_name(Some(model.to_string()));
         self.save(&config).await
     }
@@ -464,4 +469,3 @@ impl ProviderStore {
         Ok(ids)
     }
 }
- 

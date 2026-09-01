@@ -80,9 +80,7 @@ pub async fn build_runtime_services(
     );
     services = services.with_notification_queue(notification_queue);
 
-    Ok(RuntimeBootstrapArtifacts {
-        services,
-    })
+    Ok(RuntimeBootstrapArtifacts { services })
 }
 
 pub async fn build_core_tool_registry(
@@ -162,4 +160,3 @@ pub fn build_agent_runtime_artifacts(
         message_bus,
     }
 }
- 

@@ -77,12 +77,18 @@ impl ToolInvocation for McpListResourcesInvocation {
 }
 
 impl BaseDeclarativeTool for McpListResourcesTool {
-    fn name(&self) -> &str { "mcp_list_resources" }
-    fn display_name(&self) -> &str { "MCP List Resources" }
+    fn name(&self) -> &str {
+        "mcp_list_resources"
+    }
+    fn display_name(&self) -> &str {
+        "MCP List Resources"
+    }
     fn description(&self) -> &str {
         "列出 MCP 服务器提供的可用资源。(List available resources from MCP servers.)"
     }
-    fn kind(&self) -> Kind { Kind::Read }
+    fn kind(&self) -> Kind {
+        Kind::Read
+    }
 
     fn parameter_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -105,9 +111,10 @@ impl BaseDeclarativeTool for McpListResourcesTool {
         Ok(Box::new(McpListResourcesInvocation { params }))
     }
 
-    fn is_read_only(&self) -> bool { true }
+    fn is_read_only(&self) -> bool {
+        true
+    }
 }
-
 
 // ── McpReadResource ──────────────────────────────────────────────────
 
@@ -177,12 +184,18 @@ impl ToolInvocation for McpReadResourceInvocation {
 }
 
 impl BaseDeclarativeTool for McpReadResourceTool {
-    fn name(&self) -> &str { "mcp_read_resource" }
-    fn display_name(&self) -> &str { "MCP Read Resource" }
+    fn name(&self) -> &str {
+        "mcp_read_resource"
+    }
+    fn display_name(&self) -> &str {
+        "MCP Read Resource"
+    }
     fn description(&self) -> &str {
         "读取 MCP 服务器上指定资源的内容。(Read the content of a specific resource from an MCP server.)"
     }
-    fn kind(&self) -> Kind { Kind::Read }
+    fn kind(&self) -> Kind {
+        Kind::Read
+    }
 
     fn parameter_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -209,5 +222,7 @@ impl BaseDeclarativeTool for McpReadResourceTool {
         Ok(Box::new(McpReadResourceInvocation { params }))
     }
 
-    fn is_read_only(&self) -> bool { true }
+    fn is_read_only(&self) -> bool {
+        true
+    }
 }

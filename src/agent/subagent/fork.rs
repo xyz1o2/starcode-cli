@@ -5,7 +5,7 @@
 //! - prompt cache 共享
 //! - 独立执行环境
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
@@ -100,11 +100,7 @@ impl ForkManager {
             ));
         }
 
-        let parent_depth = self
-            .sessions
-            .last()
-            .map(|s| s.depth)
-            .unwrap_or(0);
+        let parent_depth = self.sessions.last().map(|s| s.depth).unwrap_or(0);
 
         if parent_depth >= config.max_depth {
             return Err(format!("Max fork depth reached ({})", config.max_depth));

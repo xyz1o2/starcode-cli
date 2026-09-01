@@ -5,7 +5,7 @@
 //! - CCR 远程会话
 //! - ExitPlanModeScanner
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// Ultraplan 配置
@@ -190,7 +190,11 @@ impl UltraplanManager {
         self.plans
             .iter()
             .find(|p| p.id == plan_id)
-            .map(|p| p.phases.iter().all(|phase| phase.steps.iter().all(|s| s.completed)))
+            .map(|p| {
+                p.phases
+                    .iter()
+                    .all(|phase| phase.steps.iter().all(|s| s.completed))
+            })
             .unwrap_or(false)
     }
 

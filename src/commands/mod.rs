@@ -25,8 +25,8 @@ pub mod permissions;
 pub mod plan;
 pub mod plugin;
 pub mod provider;
-pub mod skills;
 pub mod remote;
+pub mod skills;
 pub mod system;
 pub mod test;
 pub mod tools;
@@ -396,7 +396,10 @@ async fn git_wrapper(args: Vec<String>) -> CommandResult {
 }
 
 async fn git_ext_wrapper(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
-    let sub = args.first().cloned().unwrap_or_else(|| "status".to_string());
+    let sub = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "status".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     match sub.as_str() {
         "status" => extended::git_status(ctx, rest).await,
@@ -425,7 +428,13 @@ async fn config_ext_wrapper(ctx: CommandContext<'_>, args: Vec<String>) -> Comma
         "export" => extended::config_export(ctx, rest).await,
         "import" => extended::config_import(ctx, rest).await,
         _ => {
-            push_msg_to_ctx(ctx, format!("Unknown config subcommand: {}. Use: show, set, reset, export, import", sub));
+            push_msg_to_ctx(
+                ctx,
+                format!(
+                    "Unknown config subcommand: {}. Use: show, set, reset, export, import",
+                    sub
+                ),
+            );
             Ok(())
         }
     }
@@ -441,7 +450,13 @@ async fn session_ext_wrapper(ctx: CommandContext<'_>, args: Vec<String>) -> Comm
         "export" => extended::session_export(ctx, rest).await,
         "title" => extended::session_title(ctx, rest).await,
         _ => {
-            push_msg_to_ctx(ctx, format!("Unknown session subcommand: {}. Use: list, resume, delete, export, title", sub));
+            push_msg_to_ctx(
+                ctx,
+                format!(
+                    "Unknown session subcommand: {}. Use: list, resume, delete, export, title",
+                    sub
+                ),
+            );
             Ok(())
         }
     }
@@ -457,7 +472,13 @@ async fn debug_ext_wrapper(ctx: CommandContext<'_>, args: Vec<String>) -> Comman
         "state" => extended::debug_state(ctx, rest).await,
         "perf" => extended::debug_perf(ctx, rest).await,
         _ => {
-            push_msg_to_ctx(ctx, format!("Unknown debug subcommand: {}. Use: log, tokens, tools, state, perf", sub));
+            push_msg_to_ctx(
+                ctx,
+                format!(
+                    "Unknown debug subcommand: {}. Use: log, tokens, tools, state, perf",
+                    sub
+                ),
+            );
             Ok(())
         }
     }
@@ -472,7 +493,13 @@ async fn agent_ext_wrapper(ctx: CommandContext<'_>, args: Vec<String>) -> Comman
         "create" => extended::agent_create(ctx, rest).await,
         "delete" => extended::agent_delete(ctx, rest).await,
         _ => {
-            push_msg_to_ctx(ctx, format!("Unknown agent subcommand: {}. Use: list, switch, create, delete", sub));
+            push_msg_to_ctx(
+                ctx,
+                format!(
+                    "Unknown agent subcommand: {}. Use: list, switch, create, delete",
+                    sub
+                ),
+            );
             Ok(())
         }
     }
@@ -487,21 +514,36 @@ async fn workflow_ext_wrapper(ctx: CommandContext<'_>, args: Vec<String>) -> Com
         "create" => extended::workflow_create(ctx, rest).await,
         "edit" => extended::workflow_edit(ctx, rest).await,
         _ => {
-            push_msg_to_ctx(ctx, format!("Unknown workflow subcommand: {}. Use: list, run, create, edit", sub));
+            push_msg_to_ctx(
+                ctx,
+                format!(
+                    "Unknown workflow subcommand: {}. Use: list, run, create, edit",
+                    sub
+                ),
+            );
             Ok(())
         }
     }
 }
 
 async fn index_ext_wrapper(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
-    let sub = args.first().cloned().unwrap_or_else(|| "status".to_string());
+    let sub = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "status".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     match sub.as_str() {
         "status" => extended::index_status(ctx, rest).await,
         "rebuild" => extended::index_rebuild(ctx, rest).await,
         "structure" => index_cmd(ctx, rest).await,
         _ => {
-            push_msg_to_ctx(ctx, format!("Unknown index subcommand: {}. Use: status, rebuild, structure", sub));
+            push_msg_to_ctx(
+                ctx,
+                format!(
+                    "Unknown index subcommand: {}. Use: status, rebuild, structure",
+                    sub
+                ),
+            );
             Ok(())
         }
     }
@@ -532,7 +574,8 @@ async fn sandbox_wrapper(ctx: CommandContext<'_>, args: Vec<String>) -> CommandR
         }
         "off" | "disable" => {
             ctx.state.sandbox_enabled = false;
-            "✅ Sandbox disabled\n\nCommands will execute directly without isolation protection.".to_string()
+            "✅ Sandbox disabled\n\nCommands will execute directly without isolation protection."
+                .to_string()
         }
         "help" | "install" => {
             let help = crate::core::sandbox::SandboxManager::get_installation_help();
@@ -605,10 +648,7 @@ async fn plugin_command_fallback(
         let mut best: Option<(i32, &str)> = None;
         for cmd in system::ALL_COMMANDS {
             if let Some(score) = system::fuzzy_score(cmd, &query) {
-                let better = best
-                    .as_ref()
-                    .map(|(s, _)| score > *s)
-                    .unwrap_or(true);
+                let better = best.as_ref().map(|(s, _)| score > *s).unwrap_or(true);
                 if better && score >= 300 {
                     best = Some((score, cmd.name));
                 }
@@ -664,7 +704,7 @@ async fn index_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult 
     use walkdir::WalkDir;
 
     let start = std::time::Instant::now();
-    
+
     // Get the directory to index (default: current directory)
     let dir = if args.is_empty() {
         std::env::current_dir().map_err(|e| e.to_string())?
@@ -675,7 +715,10 @@ async fn index_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult 
     if !dir.exists() {
         ctx.state.chat_history.push(crate::types::ChatEntry {
             is_streaming: Some(false),
-            ..crate::types::ChatEntry::assistant(format!("❌ Directory not found: {}", dir.display()))
+            ..crate::types::ChatEntry::assistant(format!(
+                "❌ Directory not found: {}",
+                dir.display()
+            ))
         });
         return Ok(());
     }
@@ -692,11 +735,12 @@ async fn index_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult 
     {
         let path = entry.path();
         let path_str = path.to_string_lossy().to_string();
-        
+
         // Skip hidden directories and common non-source directories
-        if path_str.contains("/.") || path_str.contains("\\.") 
-            || path_str.contains("node_modules") 
-            || path_str.contains("target/") 
+        if path_str.contains("/.")
+            || path_str.contains("\\.")
+            || path_str.contains("node_modules")
+            || path_str.contains("target/")
             || path_str.contains("__pycache__")
             || path_str.contains(".git/")
         {
@@ -723,7 +767,7 @@ async fn index_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult 
     }
 
     let elapsed = start.elapsed();
-    
+
     // Build summary
     let mut summary = Vec::new();
     summary.push(format!("📊 Code Structure Index Complete"));
@@ -731,11 +775,11 @@ async fn index_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult 
     summary.push(format!("📁 Directory: {}", dir.display()));
     summary.push(format!("📄 Files indexed: {}", file_count));
     summary.push(format!("⏱️  Time: {:.2}s", elapsed.as_secs_f64()));
-    
+
     if error_count > 0 {
         summary.push(format!("⚠️  Errors: {}", error_count));
     }
-    
+
     summary.push(format!(""));
     summary.push(format!("📈 Index Statistics:"));
     summary.push(format!("   Functions: {}", index.functions.len()));
@@ -763,7 +807,12 @@ async fn feature_flags_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> Comman
 
         for (name, enabled) in flags {
             let status = if enabled { "✅" } else { "❌" };
-            output.push_str(&format!("  {} {}: {}\n", status, name, if enabled { "enabled" } else { "disabled" }));
+            output.push_str(&format!(
+                "  {} {}: {}\n",
+                status,
+                name,
+                if enabled { "enabled" } else { "disabled" }
+            ));
         }
 
         output.push_str("\nUsage: /feature-flags <flag_name> [on|off]\n");
@@ -794,7 +843,10 @@ async fn feature_flags_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> Comman
         } else {
             ctx.state.chat_history.push(crate::types::ChatEntry {
                 is_streaming: Some(false),
-                ..crate::types::ChatEntry::assistant(format!("❌ Unknown feature flag: {}", flag_name))
+                ..crate::types::ChatEntry::assistant(format!(
+                    "❌ Unknown feature flag: {}",
+                    flag_name
+                ))
             });
         }
     } else if args.len() == 2 {
@@ -805,7 +857,10 @@ async fn feature_flags_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> Comman
         if ctx.state.feature_flags.get_flag(flag_name).is_none() {
             ctx.state.chat_history.push(crate::types::ChatEntry {
                 is_streaming: Some(false),
-                ..crate::types::ChatEntry::assistant(format!("❌ Unknown feature flag: {}", flag_name))
+                ..crate::types::ChatEntry::assistant(format!(
+                    "❌ Unknown feature flag: {}",
+                    flag_name
+                ))
             });
             return Ok(());
         }
@@ -815,27 +870,38 @@ async fn feature_flags_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> Comman
                 ctx.state.feature_flags.set_enabled(flag_name, true);
                 ctx.state.chat_history.push(crate::types::ChatEntry {
                     is_streaming: Some(false),
-                    ..crate::types::ChatEntry::assistant(format!("✅ Feature flag '{}' enabled", flag_name))
+                    ..crate::types::ChatEntry::assistant(format!(
+                        "✅ Feature flag '{}' enabled",
+                        flag_name
+                    ))
                 });
             }
             "off" | "disable" | "false" | "0" => {
                 ctx.state.feature_flags.set_enabled(flag_name, false);
                 ctx.state.chat_history.push(crate::types::ChatEntry {
                     is_streaming: Some(false),
-                    ..crate::types::ChatEntry::assistant(format!("✅ Feature flag '{}' disabled", flag_name))
+                    ..crate::types::ChatEntry::assistant(format!(
+                        "✅ Feature flag '{}' disabled",
+                        flag_name
+                    ))
                 });
             }
             _ => {
                 ctx.state.chat_history.push(crate::types::ChatEntry {
                     is_streaming: Some(false),
-                    ..crate::types::ChatEntry::assistant(format!("❌ Invalid state '{}'. Use: on/off, enable/disable, true/false", state))
+                    ..crate::types::ChatEntry::assistant(format!(
+                        "❌ Invalid state '{}'. Use: on/off, enable/disable, true/false",
+                        state
+                    ))
                 });
             }
         }
     } else {
         ctx.state.chat_history.push(crate::types::ChatEntry {
             is_streaming: Some(false),
-            ..crate::types::ChatEntry::assistant("Usage: /feature-flags [flag_name] [on|off]".to_string())
+            ..crate::types::ChatEntry::assistant(
+                "Usage: /feature-flags [flag_name] [on|off]".to_string(),
+            )
         });
     }
 
@@ -861,15 +927,13 @@ async fn mdm_wrapper(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResul
             ctx.state.mdm.unenroll();
             "✅ Unenrolled from MDM server".to_string()
         }
-        "sync" => {
-            match ctx.state.mdm.sync_policies().await {
-                Ok(()) => {
-                    let status = ctx.state.mdm.get_status();
-                    format!("✅ Policies synced\n\n{}", status)
-                }
-                Err(e) => format!("❌ Failed to sync policies: {}", e),
+        "sync" => match ctx.state.mdm.sync_policies().await {
+            Ok(()) => {
+                let status = ctx.state.mdm.get_status();
+                format!("✅ Policies synced\n\n{}", status)
             }
-        }
+            Err(e) => format!("❌ Failed to sync policies: {}", e),
+        },
         "status" | _ => {
             let status = ctx.state.mdm.get_status();
             format!("📋 MDM Status\n\n{}", status)

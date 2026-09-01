@@ -41,8 +41,10 @@ pub struct ReviewArtifactInvocation {
 
 impl ToolInvocation for ReviewArtifactInvocation {
     fn get_description(&self) -> String {
-        format!("Review artifact: {}", 
-            self.params.title.as_deref().unwrap_or("untitled"))
+        format!(
+            "Review artifact: {}",
+            self.params.title.as_deref().unwrap_or("untitled")
+        )
     }
 
     fn tool_locations(&self) -> Vec<ToolLocation> {
@@ -63,10 +65,14 @@ impl ToolInvocation for ReviewArtifactInvocation {
         let params = self.params.clone();
         Box::pin(async move {
             let artifact = params.artifact.clone();
-            let title = params.title.unwrap_or_else(|| "Untitled Review".to_string());
+            let title = params
+                .title
+                .unwrap_or_else(|| "Untitled Review".to_string());
             let annotation_count = params.annotations.len();
             let has_summary = params.summary.is_some();
-            let summary = params.summary.unwrap_or_else(|| "Review completed".to_string());
+            let summary = params
+                .summary
+                .unwrap_or_else(|| "Review completed".to_string());
 
             // In a real implementation, this would:
             // 1. Process the artifact and annotations
@@ -75,8 +81,14 @@ impl ToolInvocation for ReviewArtifactInvocation {
 
             // For now, return a placeholder response
             Ok(ToolResult {
-                llm_content: Some(format!("Reviewed '{}' with {} annotations", title, annotation_count)),
-                return_display: Some(format!("Review completed: {} annotations", annotation_count)),
+                llm_content: Some(format!(
+                    "Reviewed '{}' with {} annotations",
+                    title, annotation_count
+                )),
+                return_display: Some(format!(
+                    "Review completed: {} annotations",
+                    annotation_count
+                )),
                 output: serde_json::to_string(&ReviewArtifactOutput {
                     artifact: if artifact.len() > 100 {
                         format!("{}...", &artifact[..97])

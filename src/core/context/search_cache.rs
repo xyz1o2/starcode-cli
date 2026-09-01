@@ -43,9 +43,9 @@ impl SearchEngineCacheManager {
     pub fn new() -> Self {
         Self {
             engine_cache: RwLock::new(HashMap::new()),
-            query_cache: RwLock::new(
-                LruCache::new(NonZeroUsize::new(MAX_CACHED_QUERIES).unwrap()),
-            ),
+            query_cache: RwLock::new(LruCache::new(
+                NonZeroUsize::new(MAX_CACHED_QUERIES).unwrap(),
+            )),
         }
     }
 
@@ -78,10 +78,7 @@ impl SearchEngineCacheManager {
     }
 
     /// Look up a cached query result.
-    pub fn get_query(
-        &self,
-        key: &(PathBuf, String, Option<SystemTime>),
-    ) -> Option<String> {
+    pub fn get_query(&self, key: &(PathBuf, String, Option<SystemTime>)) -> Option<String> {
         self.query_cache.write().get(key).cloned()
     }
 

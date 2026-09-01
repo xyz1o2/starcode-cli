@@ -44,7 +44,7 @@ pub(crate) fn find_compress_split_point(
 /// and filter out system markers that might confuse the model
 pub(crate) fn normalize_messages_for_llm(messages: &mut Vec<StarMessage>, supports_thinking: bool) {
     let sanitize_empty_messages = empty_message_sanitizer_enabled();
-    
+
     // First pass: remove internal system markers from ALL messages
     // These markers are for debugging/logging only and should not be sent to the LLM
     messages.retain(|m| {
@@ -263,4 +263,3 @@ fn empty_message_sanitizer_enabled() -> bool {
         })
         .unwrap_or(true)
 }
- 

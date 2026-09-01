@@ -1,11 +1,11 @@
+use super::{CompactConfig, CompactStrategy};
 use crate::llm::client::StarClient;
 use crate::types::StarMessage;
-use super::{CompactConfig, CompactStrategy};
 use async_trait::async_trait;
 use std::time::{Duration, Instant};
 
 /// 熔断器
-/// 
+///
 /// 用于防止自动压缩在连续失败时反复触发
 /// 当连续失败次数达到阈值时，进入冷却状态
 pub struct CircuitBreaker {
@@ -56,7 +56,7 @@ impl CircuitBreaker {
 }
 
 /// 自动压缩策略
-/// 
+///
 /// 当 token 数量超过 max_tokens 时触发
 /// 保留：系统提示、最近 N 条消息、包含重要数据的工具结果
 /// 压缩：旧助手消息（摘要）、旧工具结果（仅保留摘要）
@@ -122,7 +122,8 @@ impl AutoCompactStrategy {
         if msg.role == "tool" {
             if let Some(content) = &msg.content {
                 let lower = content.to_lowercase();
-                if lower.contains("error") || lower.contains("failed") || lower.contains("failure") {
+                if lower.contains("error") || lower.contains("failed") || lower.contains("failure")
+                {
                     return true;
                 }
             }
@@ -147,30 +148,49 @@ impl AutoCompactStrategy {
                 for line in c.lines() {
                     let trimmed = line.trim();
                     // 涉及文件路径
-                    let is_code_ext = trimmed.ends_with(".rs") || trimmed.ends_with(".ts")
-                        || trimmed.ends_with(".js") || trimmed.ends_with(".py")
-                        || trimmed.ends_with(".md") || trimmed.ends_with(".toml")
-                        || trimmed.ends_with(".json") || trimmed.ends_with(".go")
-                        || trimmed.ends_with(".c") || trimmed.ends_with(".cpp")
-                        || trimmed.ends_with(".h") || trimmed.ends_with(".java");
-                    if (trimmed.contains("src/") || trimmed.contains("path/")
-                        || trimmed.starts_with("./") || trimmed.contains(":/"))
+                    let is_code_ext = trimmed.ends_with(".rs")
+                        || trimmed.ends_with(".ts")
+                        || trimmed.ends_with(".js")
+                        || trimmed.ends_with(".py")
+                        || trimmed.ends_with(".md")
+                        || trimmed.ends_with(".toml")
+                        || trimmed.ends_with(".json")
+                        || trimmed.ends_with(".go")
+                        || trimmed.ends_with(".c")
+                        || trimmed.ends_with(".cpp")
+                        || trimmed.ends_with(".h")
+                        || trimmed.ends_with(".java");
+                    if (trimmed.contains("src/")
+                        || trimmed.contains("path/")
+                        || trimmed.starts_with("./")
+                        || trimmed.contains(":/"))
                         && is_code_ext
                     {
-                        let file = trimmed.split_whitespace().next().unwrap_or(trimmed)
-                            .trim_matches(|ch: char| ch == '`' || ch == '"' || ch == '\'' || ch == ',');
+                        let file = trimmed
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or(trimmed)
+                            .trim_matches(|ch: char| {
+                                ch == '`' || ch == '"' || ch == '\'' || ch == ','
+                            });
                         if !key_files.contains(&file.to_string()) && key_files.len() < 20 {
                             key_files.push(file.to_string());
                         }
                     }
                     // 关键操作/决策：以动词开头或含决策性关键词的中等长度行
-                    if (trimmed.starts_with("修复") || trimmed.starts_with("决定")
-                        || trimmed.starts_with("选择") || trimmed.starts_with("方案")
-                        || trimmed.starts_with("修改") || trimmed.starts_with("新增")
-                        || trimmed.starts_with("添加") || trimmed.starts_with("删除")
-                        || trimmed.starts_with("重构") || trimmed.starts_with("实现")
+                    if (trimmed.starts_with("修复")
+                        || trimmed.starts_with("决定")
+                        || trimmed.starts_with("选择")
+                        || trimmed.starts_with("方案")
+                        || trimmed.starts_with("修改")
+                        || trimmed.starts_with("新增")
+                        || trimmed.starts_with("添加")
+                        || trimmed.starts_with("删除")
+                        || trimmed.starts_with("重构")
+                        || trimmed.starts_with("实现")
                         || trimmed.starts_with("创建"))
-                        && trimmed.len() > 6 && trimmed.len() < 160
+                        && trimmed.len() > 6
+                        && trimmed.len() < 160
                     {
                         if !key_actions.contains(&trimmed.to_string()) && key_actions.len() < 12 {
                             key_actions.push(trimmed.to_string());
@@ -228,7 +248,7 @@ impl CompactStrategy for AutoCompactStrategy {
         // 注意：这个方法不使用 LLM，只进行简单的截断
         // 实际的 LLM 摘要需要通过 AutoCompactManager 处理
         let keep_recent = self.get_keep_recent_count();
-        
+
         if messages.len() <= keep_recent {
             return messages.to_vec();
         }
@@ -284,12 +304,15 @@ impl CompactStrategy for AutoCompactStrategy {
         // 保留最近的消息
         result.extend_from_slice(&messages[split_idx..]);
 
-        crate::utils::logging::append_debug_log_line(
-            &format!("[COMPACT] Applied auto compression: {} → {} messages (preserved {} user messages)", 
-                messages.len(), result.len(), 
-                messages[1..split_idx].iter().filter(|m| m.role == "user").count()
-            )
-        );
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[COMPACT] Applied auto compression: {} → {} messages (preserved {} user messages)",
+            messages.len(),
+            result.len(),
+            messages[1..split_idx]
+                .iter()
+                .filter(|m| m.role == "user")
+                .count()
+        ));
 
         result
     }
@@ -300,7 +323,7 @@ impl CompactStrategy for AutoCompactStrategy {
 }
 
 /// 自动压缩管理器
-/// 
+///
 /// 使用 LLM 生成摘要的完整自动压缩
 pub struct AutoCompactManager {
     strategy: AutoCompactStrategy,
@@ -320,13 +343,13 @@ impl AutoCompactManager {
         client: &StarClient,
     ) -> Result<Vec<StarMessage>, Box<dyn std::error::Error + Send + Sync>> {
         let keep_recent = self.strategy.get_keep_recent_count();
-        
+
         if messages.len() <= keep_recent {
             return Ok(messages.to_vec());
         }
 
         let split_idx = messages.len() - keep_recent;
-        
+
         // 确定要压缩的消息（排除系统消息）
         let start_idx = if !messages.is_empty() && messages[0].role == "system" {
             1
@@ -335,13 +358,16 @@ impl AutoCompactManager {
         };
 
         let messages_to_summarize = &messages[start_idx..split_idx];
-        
+
         if messages_to_summarize.is_empty() {
             return Ok(messages.to_vec());
         }
 
         // 生成摘要
-        let summary = self.strategy.generate_summary(messages_to_summarize, client).await?;
+        let summary = self
+            .strategy
+            .generate_summary(messages_to_summarize, client)
+            .await?;
 
         // 构建新消息列表
         let mut result = Vec::with_capacity(messages.len());
@@ -369,10 +395,11 @@ impl AutoCompactManager {
         // 保留最近的消息
         result.extend_from_slice(&messages[split_idx..]);
 
-        crate::utils::logging::append_debug_log_line(
-            &format!("[COMPACT] Applied auto compression with LLM summary: {} → {} messages", 
-                messages.len(), result.len())
-        );
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[COMPACT] Applied auto compression with LLM summary: {} → {} messages",
+            messages.len(),
+            result.len()
+        ));
 
         Ok(result)
     }

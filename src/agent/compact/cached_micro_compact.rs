@@ -1,8 +1,8 @@
-use crate::types::StarMessage;
 use super::CompactStrategy;
+use crate::types::StarMessage;
 
 /// 缓存编辑模式微压缩策略
-/// 
+///
 /// 对标claude-code-main的cachedMicrocompact.ts
 /// 在编辑模式下缓存微压缩结果，避免重复计算
 pub struct CachedMicroCompactStrategy {
@@ -54,7 +54,7 @@ impl CachedMicroCompactStrategy {
         use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
-        
+
         for msg in messages {
             msg.role.hash(&mut hasher);
             if let Some(content) = &msg.content {
@@ -73,7 +73,7 @@ impl CachedMicroCompactStrategy {
         if let Some(cache) = &self.cache {
             let current_hash = Self::hash_messages(messages);
             let current_count = messages.len();
-            
+
             // 检查哈希是否匹配
             if cache.input_hash != current_hash {
                 return false;
@@ -103,7 +103,8 @@ impl CachedMicroCompactStrategy {
         let mut i = 0;
 
         // 首先收集工具名称映射（tool_call_id -> tool_name）
-        let mut tool_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut tool_name_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for msg in messages.iter() {
             if msg.role == "assistant" {
                 if let Some(tool_calls) = &msg.tool_calls {
@@ -120,7 +121,9 @@ impl CachedMicroCompactStrategy {
             // 如果是工具消息且包含文件内容，尝试压缩
             if msg.role == "tool" {
                 // 检查工具是否豁免（如 Read、Grep、Glob 等）
-                let is_exempt = msg.tool_call_id.as_ref()
+                let is_exempt = msg
+                    .tool_call_id
+                    .as_ref()
                     .and_then(|id| tool_name_map.get(id))
                     .map(|tool_name| EXEMPT_TOOLS.iter().any(|e| e == tool_name))
                     .unwrap_or(false);
@@ -179,7 +182,7 @@ impl CachedMicroCompactStrategy {
 
     /// 检测是否是文件读取结果
     fn is_file_read_result(&self, content: &str) -> bool {
-        content.len() > 500 
+        content.len() > 500
             && (content.contains("line ") || content.contains("Line "))
             && (content.contains(":") || content.contains("|"))
     }
@@ -187,7 +190,7 @@ impl CachedMicroCompactStrategy {
     /// 压缩文件内容
     fn compress_file_content(&self, content: &str) -> String {
         let lines: Vec<&str> = content.lines().collect();
-        
+
         if lines.len() <= 20 {
             return content.to_string();
         }
@@ -198,12 +201,12 @@ impl CachedMicroCompactStrategy {
             result.push_str(line);
             result.push('\n');
         }
-        
+
         result.push_str(&format!(
             "\n[... {} lines omitted ...]\n\n",
             lines.len() - 15
         ));
-        
+
         for line in lines.iter().skip(lines.len() - 5) {
             result.push_str(line);
             result.push('\n');
@@ -214,7 +217,7 @@ impl CachedMicroCompactStrategy {
 
     /// 检测是否是编辑操作结果
     fn is_edit_result(&self, content: &str) -> bool {
-        content.contains("Successfully edited") 
+        content.contains("Successfully edited")
             || content.contains("File updated")
             || content.contains("Changes applied")
     }
@@ -248,7 +251,8 @@ impl CachedMicroCompactStrategy {
                             code_block_lines - 10
                         ));
                         // 保留最后几行
-                        let last_lines: Vec<&str> = code_block_content.lines()
+                        let last_lines: Vec<&str> = code_block_content
+                            .lines()
                             .skip(code_block_lines - 5)
                             .collect();
                         for last_line in last_lines {
@@ -273,7 +277,7 @@ impl CachedMicroCompactStrategy {
                 code_block_lines += 1;
                 code_block_content.push_str(line);
                 code_block_content.push('\n');
-                
+
                 // 保留前5行
                 if code_block_lines <= 5 {
                     result.push_str(line);

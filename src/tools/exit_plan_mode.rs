@@ -6,13 +6,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use crate::core::plan::{PlanManager, Plan};
+use super::enter_plan_mode::{AllowedPrompt, PlanModeState};
+use crate::core::plan::{Plan, PlanManager};
 use crate::core::tools::tools::{
     BaseDeclarativeTool, ConfirmationType, Kind, ToolCallConfirmationDetails, ToolError,
     ToolInvocation, ToolLocation, ToolResult,
 };
 use crate::types::ApprovalMode;
-use super::enter_plan_mode::{AllowedPrompt, PlanModeState};
 
 pub struct ExitPlanModeTool {
     pub plan_mode_state: Arc<Mutex<PlanModeState>>,
@@ -24,7 +24,10 @@ impl ExitPlanModeTool {
         plan_mode_state: Arc<Mutex<PlanModeState>>,
         approval_mode: Arc<Mutex<ApprovalMode>>,
     ) -> Self {
-        Self { plan_mode_state, approval_mode }
+        Self {
+            plan_mode_state,
+            approval_mode,
+        }
     }
 }
 
@@ -47,8 +50,17 @@ impl ToolInvocation for ExitPlanModeInvocation {
     fn should_confirm_execute(
         &self,
         _abort_signal: Option<&tokio_util::sync::CancellationToken>,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<ToolCallConfirmationDetails>, Box<dyn std::error::Error + Send + Sync>>> + Send + '_>>
-    {
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Option<ToolCallConfirmationDetails>,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
         Box::pin(async move {
             Ok(Some(ToolCallConfirmationDetails {
                 confirmation_type: ConfirmationType::Ask,
@@ -84,8 +96,16 @@ impl ToolInvocation for ExitPlanModeInvocation {
                 }
             }
 
-            let plan_content = params.get("plan").and_then(|p| p.as_str()).unwrap_or("").to_string();
-            let title = params.get("title").and_then(|t| t.as_str()).unwrap_or("Execution Plan").to_string();
+            let plan_content = params
+                .get("plan")
+                .and_then(|p| p.as_str())
+                .unwrap_or("")
+                .to_string();
+            let title = params
+                .get("title")
+                .and_then(|t| t.as_str())
+                .unwrap_or("Execution Plan")
+                .to_string();
 
             let allowed_prompts: Vec<AllowedPrompt> = params
                 .get("allowedPrompts")
@@ -117,7 +137,10 @@ impl ToolInvocation for ExitPlanModeInvocation {
 
             let msg = format!(
                 "Plan submitted for approval.\nPlan ID: {}\nTitle: {}\nTasks: {}\n\n{}",
-                plan_id, title, plan.tasks.len(), plan_content
+                plan_id,
+                title,
+                plan.tasks.len(),
+                plan_content
             );
 
             Ok(ToolResult {
@@ -137,12 +160,18 @@ impl ToolInvocation for ExitPlanModeInvocation {
 }
 
 impl BaseDeclarativeTool for ExitPlanModeTool {
-    fn name(&self) -> &str { "exit_plan_mode" }
-    fn display_name(&self) -> &str { "Exit Plan Mode" }
+    fn name(&self) -> &str {
+        "exit_plan_mode"
+    }
+    fn display_name(&self) -> &str {
+        "Exit Plan Mode"
+    }
     fn description(&self) -> &str {
         "Exit Plan Mode and submit your execution plan for user approval."
     }
-    fn kind(&self) -> Kind { Kind::Think }
+    fn kind(&self) -> Kind {
+        Kind::Think
+    }
 
     fn parameter_schema(&self) -> Value {
         json!({
@@ -166,7 +195,10 @@ impl BaseDeclarativeTool for ExitPlanModeTool {
         })
     }
 
-    fn create_invocation(&self, params: Value) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
+    fn create_invocation(
+        &self,
+        params: Value,
+    ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Box::new(ExitPlanModeInvocation {
             params,
             plan_mode_state: self.plan_mode_state.clone(),

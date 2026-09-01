@@ -89,9 +89,10 @@ impl EditStrategy for ExactMatchStrategy {
         };
 
         Ok(Some(
-            EditResult::success(new_content, occurrences, self.name())
-                .with_details(format!("Exact match succeeded, {} replacements", occurrences)),
+            EditResult::success(new_content, occurrences, self.name()).with_details(format!(
+                "Exact match succeeded, {} replacements",
+                occurrences
+            )),
         ))
     }
 }
- 

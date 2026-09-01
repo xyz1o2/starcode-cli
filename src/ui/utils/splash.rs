@@ -21,9 +21,7 @@ pub const LOGO: &[&str] = &[
     "  █▄▄ █▄█ █▀▄ █░▀░█ █░▀░█ ░█░ █▄█ █▄▀",
 ];
 
-const TIPS: &[&str] = &[
-    "/help for help  ·  Esc to interrupt  ·  --resume <id> to resume",
-];
+const TIPS: &[&str] = &["/help for help  ·  Esc to interrupt  ·  --resume <id> to resume"];
 
 fn splash_disabled() -> bool {
     std::env::var("STAR_NO_SPLASH")
@@ -208,20 +206,22 @@ pub async fn run_splash_ratatui(
                     .push(Line::from(*t).style(Style::default().fg(TuiColor::DarkGray)));
             }
 
-            let para = Paragraph::new(text)
-                .alignment(Alignment::Center);
+            let para = Paragraph::new(text).alignment(Alignment::Center);
             f.render_widget(para, popup_area);
 
             // Status line at bottom
             let status = Paragraph::new(status_text(i as usize))
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(TuiColor::DarkGray));
-            f.render_widget(status, Rect {
-                x: size.x,
-                y: size.y + size.height.saturating_sub(1),
-                width: size.width,
-                height: 1,
-            });
+            f.render_widget(
+                status,
+                Rect {
+                    x: size.x,
+                    y: size.y + size.height.saturating_sub(1),
+                    width: size.width,
+                    height: 1,
+                },
+            );
         })?;
 
         // After first frame, allow skip; skip_delay_ms prevents accidental skip

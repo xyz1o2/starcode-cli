@@ -37,7 +37,6 @@ mod weights {
     pub const MIN_TOKEN_LEN: usize = 2;
 }
 
-
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub file_path: String,
@@ -318,10 +317,9 @@ impl SearchEngine {
             let mut per_file_hits: HashMap<String, usize> = HashMap::new();
             for res in &mut results {
                 let hits = per_file_hits.entry(res.file_path.clone()).or_insert(0);
-                let decay = weights::FILE_DIVERSITY_DECAY
-                    .get(*hits)
-                    .copied()
-                    .unwrap_or(weights::FILE_DIVERSITY_DECAY[weights::FILE_DIVERSITY_DECAY.len() - 1]);
+                let decay = weights::FILE_DIVERSITY_DECAY.get(*hits).copied().unwrap_or(
+                    weights::FILE_DIVERSITY_DECAY[weights::FILE_DIVERSITY_DECAY.len() - 1],
+                );
                 res.score *= decay;
                 *hits += 1;
             }
@@ -343,7 +341,11 @@ impl SearchEngine {
         let expanded_terms = self.expand_query_terms(query, &base_terms);
         let query_lower = query.to_lowercase();
         let phrases = Self::extract_query_phrases(&query_lower, &base_terms);
-        QueryProfile { base_terms, expanded_terms, phrases }
+        QueryProfile {
+            base_terms,
+            expanded_terms,
+            phrases,
+        }
     }
 
     /// Expand query terms using **co-occurrence within the actual index**.
@@ -355,9 +357,9 @@ impl SearchEngine {
     /// vocabulary list.
     fn expand_query_terms(&self, _query: &str, base_terms: &[String]) -> Vec<String> {
         // Caps that keep expansion fast and focused.
-        const MAX_SAMPLE_CHUNKS: usize = 8;  // chunks to sample per query term
-        const MIN_COOCCURRENCE: usize = 2;   // a token must appear in ≥2 sampled chunks
-        const MAX_EXPANSIONS: usize = 20;    // total extra terms added
+        const MAX_SAMPLE_CHUNKS: usize = 8; // chunks to sample per query term
+        const MIN_COOCCURRENCE: usize = 2; // a token must appear in ≥2 sampled chunks
+        const MAX_EXPANSIONS: usize = 20; // total extra terms added
 
         let mut expanded: HashSet<String> = base_terms.iter().cloned().collect();
         let mut cooccur: HashMap<String, usize> = HashMap::new();
@@ -514,7 +516,10 @@ impl SearchEngine {
             signals.push("file path matches query terms".to_string());
         }
         if chunk_lines < weights::SMALL_SNIPPET_LINES {
-            signals.push(format!("tiny snippet < {} lines", weights::SMALL_SNIPPET_LINES));
+            signals.push(format!(
+                "tiny snippet < {} lines",
+                weights::SMALL_SNIPPET_LINES
+            ));
         }
         if has_named_definition {
             signals.push("named definition (function/class/struct)".to_string());
@@ -526,4 +531,3 @@ impl SearchEngine {
         signals
     }
 }
- 

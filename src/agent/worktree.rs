@@ -5,7 +5,7 @@
 //! - EnterWorktreeTool / ExitWorktreeTool
 //! - 安全防护（防止主工作区污染）
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

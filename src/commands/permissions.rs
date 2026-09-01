@@ -109,7 +109,12 @@ pub async fn run(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
                 source: RuleSource::Project,
             };
             ctx.state.permission_rules.add_rule(rule);
-            let msg = format!("✅ 已添加规则 `{}`: {}{}", id, tool, path.map(|p| format!(" 路径: {}", p)).unwrap_or_default());
+            let msg = format!(
+                "✅ 已添加规则 `{}`: {}{}",
+                id,
+                tool,
+                path.map(|p| format!(" 路径: {}", p)).unwrap_or_default()
+            );
             ctx.state
                 .chat_history
                 .push(crate::types::ChatEntry::assistant(msg).with_streaming(false));

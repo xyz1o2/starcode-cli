@@ -54,10 +54,14 @@ impl ToolInvocation for BackgroundTaskInvocation {
         Box::pin(async move {
             // Check if this is a one-shot task that was already completed
             if params.once.unwrap_or(false) {
-                let completion_file = config.project_root()
+                let completion_file = config
+                    .project_root()
                     .join(".star")
                     .join("completed_tasks")
-                    .join(format!("{}.done", sanitize_filename(&params.task_description)));
+                    .join(format!(
+                        "{}.done",
+                        sanitize_filename(&params.task_description)
+                    ));
                 if completion_file.exists() {
                     return Ok(ToolResult {
                         llm_content: Some(format!(
@@ -94,13 +98,15 @@ impl ToolInvocation for BackgroundTaskInvocation {
                 Ok(()) => {
                     // If one-shot, create completion marker after successful queue
                     if params.once.unwrap_or(false) {
-                        let completion_dir = config.project_root()
-                            .join(".star")
-                            .join("completed_tasks");
+                        let completion_dir =
+                            config.project_root().join(".star").join("completed_tasks");
                         let _ = tokio::fs::create_dir_all(&completion_dir).await;
-                        let completion_file = completion_dir
-                            .join(format!("{}.done", sanitize_filename(&params.task_description)));
-                        let _ = tokio::fs::write(&completion_file, chrono::Utc::now().to_string()).await;
+                        let completion_file = completion_dir.join(format!(
+                            "{}.done",
+                            sanitize_filename(&params.task_description)
+                        ));
+                        let _ = tokio::fs::write(&completion_file, chrono::Utc::now().to_string())
+                            .await;
                     }
 
                     Ok(ToolResult {
@@ -139,7 +145,13 @@ impl ToolInvocation for BackgroundTaskInvocation {
 /// Sanitize a string for use as a filename
 fn sanitize_filename(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .chars()
         .take(50)

@@ -1,6 +1,6 @@
 pub mod motions;
 pub mod operators;
-pub mod text_objects;
 pub mod state;
+pub mod text_objects;
 
-pub use state::{VimState, VimMode};
+pub use state::{VimMode, VimState};

@@ -134,4 +134,3 @@ fn extract_def_name(node: &Node, source: &str) -> Option<String> {
 fn node_text<'a>(node: &Node<'a>, source: &'a str) -> &'a str {
     &source[node.start_byte()..node.end_byte()]
 }
- 

@@ -313,11 +313,7 @@ fn build_response(id: Option<serde_json::Value>, result: &serde_json::Value) -> 
 }
 
 /// Build a JSON-RPC error response.
-fn build_error(
-    id: Option<serde_json::Value>,
-    code: i64,
-    message: &str,
-) -> serde_json::Value {
+fn build_error(id: Option<serde_json::Value>, code: i64, message: &str) -> serde_json::Value {
     let mut resp = serde_json::json!({
         "jsonrpc": "2.0",
         "error": {

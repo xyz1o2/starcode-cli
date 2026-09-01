@@ -1,6 +1,8 @@
-use super::team_definitions::{resolve_team_agents, generate_team_run_id, team_run_mode_label};
+use super::team_definitions::{generate_team_run_id, resolve_team_agents, team_run_mode_label};
+use super::team_definitions::{
+    normalize_agent_name, parse_team_run_mode, TeamAgentDef, TeamMemberWorkspace,
+};
 use super::team_presets::TeamRuntimeInfo;
-use super::team_definitions::{TeamAgentDef, TeamMemberWorkspace, normalize_agent_name, parse_team_run_mode};
 use super::*;
 
 fn map_ui_approval_mode(
@@ -100,8 +102,10 @@ pub(super) fn truncate_chars(input: &str, max_chars: usize) -> String {
         return input.to_string();
     }
     let mut truncated: String = input.chars().take(max_chars).collect();
-    truncated.push_str("
-...[truncated]");
+    truncated.push_str(
+        "
+...[truncated]",
+    );
     truncated
 }
 
@@ -156,14 +160,21 @@ impl StructuredTeamContext {
         let mut summary_parts: Vec<String> = Vec::new();
 
         for o in outcomes {
-            if o.result.success { success_count += 1; }
+            if o.result.success {
+                success_count += 1;
+            }
             if o.has_changes {
                 changed += o.changed_files;
                 for word in o.result.summary.split_whitespace() {
                     if word.contains('.') && (word.contains('/') || word.contains('\\')) {
-                        let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '_' && c != '-');
+                        let clean = word.trim_matches(|c: char| {
+                            !c.is_alphanumeric() && c != '.' && c != '/' && c != '_' && c != '-'
+                        });
                         if clean.len() > 3 && clean.len() < 200 {
-                            self.files_changed.entry(clean.to_string()).or_default().push(o.member_name.clone());
+                            self.files_changed
+                                .entry(clean.to_string())
+                                .or_default()
+                                .push(o.member_name.clone());
                         }
                     }
                 }
@@ -171,29 +182,46 @@ impl StructuredTeamContext {
             if !o.result.success {
                 if let Some(ref err) = o.result.error {
                     let short: String = err.chars().take(120).collect();
-                    self.unresolved_errors.push(if err.len() > 120 { format!("{}...", short) } else { short });
+                    self.unresolved_errors.push(if err.len() > 120 {
+                        format!("{}...", short)
+                    } else {
+                        short
+                    });
                 }
             }
-            summary_parts.push(format!("{}:{}", o.member_name, if o.result.success { "ok" } else { "fail" }));
+            summary_parts.push(format!(
+                "{}:{}",
+                o.member_name,
+                if o.result.success { "ok" } else { "fail" }
+            ));
         }
 
         self.round_summaries.push(RoundDigest {
-            round, total_outcomes: outcomes.len(), success_count, changed_files: changed,
+            round,
+            total_outcomes: outcomes.len(),
+            success_count,
+            changed_files: changed,
             summary: summary_parts.join(", "),
         });
-        if self.round_summaries.len() > 8 { self.round_summaries.remove(0); }
+        if self.round_summaries.len() > 8 {
+            self.round_summaries.remove(0);
+        }
 
         self.unresolved_errors.sort();
         self.unresolved_errors.dedup();
         if self.unresolved_errors.len() > 10 {
-            self.unresolved_errors = self.unresolved_errors.split_off(self.unresolved_errors.len() - 10);
+            self.unresolved_errors = self
+                .unresolved_errors
+                .split_off(self.unresolved_errors.len() - 10);
         }
     }
 
     /// 渲染为注入到轮次目标的 JSON 文本
     pub fn render(&self) -> Option<String> {
         let json = serde_json::to_string(self).ok()?;
-        if json.len() < 20 { return None; }
+        if json.len() < 20 {
+            return None;
+        }
         let template = crate::core::prompts::loader::load_prompt("team-context-injection.md");
         Some(crate::core::prompts::loader::render_template(
             &template,
@@ -238,7 +266,10 @@ pub(super) fn build_round_objective(
     lines.join("\n")
 }
 
-pub(super) fn summarize_round_context(outcomes: &[TeamTaskOutcome], max_items: usize) -> Vec<String> {
+pub(super) fn summarize_round_context(
+    outcomes: &[TeamTaskOutcome],
+    max_items: usize,
+) -> Vec<String> {
     outcomes
         .iter()
         .take(max_items)
@@ -317,7 +348,11 @@ pub(super) fn summarize_round_memory(
     memory
 }
 
-pub(super) fn append_shared_memory(shared_memory: &mut Vec<String>, additions: Vec<String>, max_items: usize) {
+pub(super) fn append_shared_memory(
+    shared_memory: &mut Vec<String>,
+    additions: Vec<String>,
+    max_items: usize,
+) {
     if max_items == 0 {
         shared_memory.clear();
         return;
@@ -333,7 +368,10 @@ pub(super) fn append_shared_memory(shared_memory: &mut Vec<String>, additions: V
     }
 }
 
-pub(super) fn sort_outcomes_by_member_order(outcomes: &mut Vec<TeamTaskOutcome>, selected: &[&TeamAgentDef]) {
+pub(super) fn sort_outcomes_by_member_order(
+    outcomes: &mut Vec<TeamTaskOutcome>,
+    selected: &[&TeamAgentDef],
+) {
     let order_map: HashMap<&str, usize> = selected
         .iter()
         .enumerate()
@@ -564,10 +602,12 @@ async fn execute_round_pipeline(
     for (idx, workspace) in workspaces.iter().cloned().enumerate() {
         let mut step_objective = objective.clone();
         if !step_context.is_empty() {
-            step_objective.push_str("
+            step_objective.push_str(
+                "
 
 [Pipeline handoff context]
-");
+",
+            );
             for item in &step_context {
                 step_objective.push_str("- ");
                 step_objective.push_str(item);
@@ -611,7 +651,10 @@ async fn execute_round_pipeline(
     outcomes
 }
 
-pub(super) async fn run_agent_team(ctx: CommandContext<'_>, args: AgentTeamRunArgs) -> CommandResult {
+pub(super) async fn run_agent_team(
+    ctx: CommandContext<'_>,
+    args: AgentTeamRunArgs,
+) -> CommandResult {
     let command_cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let storage = crate::core::config::storage::Storage::new(command_cwd.clone());
 
@@ -764,7 +807,13 @@ pub(super) async fn run_agent_team(ctx: CommandContext<'_>, args: AgentTeamRunAr
     let mut structured_context = StructuredTeamContext::new();
 
     for round in 1..=rounds {
-        let round_objective = build_round_objective(&objective, round, rounds, &shared_context, Some(&structured_context));
+        let round_objective = build_round_objective(
+            &objective,
+            round,
+            rounds,
+            &shared_context,
+            Some(&structured_context),
+        );
         let round_started = Instant::now();
         let mut round_outcomes = match run_mode {
             TeamRunMode::Parallel => {
@@ -1001,10 +1050,13 @@ pub(super) async fn run_agent_team(ctx: CommandContext<'_>, args: AgentTeamRunAr
         }
     }
 
-    ctx.state
-        .chat_history
-        .push(ChatEntry::assistant(lines.join("
-")).with_streaming(false));
+    ctx.state.chat_history.push(
+        ChatEntry::assistant(lines.join(
+            "
+",
+        ))
+        .with_streaming(false),
+    );
 
     Ok(())
 }

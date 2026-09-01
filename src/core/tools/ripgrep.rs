@@ -269,4 +269,3 @@ fn should_skip_entry(entry: &DirEntry) -> bool {
 
     false
 }
- 

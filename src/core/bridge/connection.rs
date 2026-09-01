@@ -1,5 +1,4 @@
 /// Bridge连接管理
-
 use serde::{Deserialize, Serialize};
 
 /// 连接状态

@@ -9,5 +9,5 @@
 pub mod mailbox;
 pub mod teams;
 
-pub use mailbox::{MailboxManager, MailboxMessage, MailboxError, MessageType};
-pub use teams::{SwarmManager, TeamFile, TeammateDefinition, TeamInstance, TeammateStatus};
+pub use mailbox::{MailboxError, MailboxManager, MailboxMessage, MessageType};
+pub use teams::{SwarmManager, TeamFile, TeamInstance, TeammateDefinition, TeammateStatus};

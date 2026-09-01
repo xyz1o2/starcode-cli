@@ -95,10 +95,9 @@ impl HookChain {
                 }
             }
             Ok(Err(e)) => HookResult::block(format!("Shell hook execution error: {}", e)),
-            Err(_) => HookResult::block(format!(
-                "Shell hook timed out after {}ms",
-                hook.timeout_ms
-            )),
+            Err(_) => {
+                HookResult::block(format!("Shell hook timed out after {}ms", hook.timeout_ms))
+            }
         }
     }
 
@@ -110,12 +109,7 @@ impl HookChain {
         let client = reqwest::Client::new();
         let timeout = std::time::Duration::from_millis(hook.timeout_ms.max(1000));
 
-        match tokio::time::timeout(
-            timeout,
-            client.post(url).json(input).send(),
-        )
-        .await
-        {
+        match tokio::time::timeout(timeout, client.post(url).json(input).send()).await {
             Ok(Ok(resp)) => {
                 if resp.status().is_success() {
                     match resp.json::<Value>().await {
@@ -127,10 +121,7 @@ impl HookChain {
                 }
             }
             Ok(Err(e)) => HookResult::block(format!("HTTP hook request error: {}", e)),
-            Err(_) => HookResult::block(format!(
-                "HTTP hook timed out after {}ms",
-                hook.timeout_ms
-            )),
+            Err(_) => HookResult::block(format!("HTTP hook timed out after {}ms", hook.timeout_ms)),
         }
     }
 
@@ -138,10 +129,8 @@ impl HookChain {
         let Some(ref prompt) = hook.prompt else {
             return HookResult::block("Agent hook missing prompt");
         };
-        HookResult::allow().with_additional_context(format!(
-            "Agent hook prompt: {} (input: {})",
-            prompt, input
-        ))
+        HookResult::allow()
+            .with_additional_context(format!("Agent hook prompt: {} (input: {})", prompt, input))
     }
 
     fn parse_hook_output(stdout: &str) -> HookResult {
@@ -193,5 +182,3 @@ impl HookChain {
         }
     }
 }
-
- 

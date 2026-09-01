@@ -37,7 +37,12 @@ fn truncate_for_preview(value: &str, max_chars: usize) -> String {
 /// Calculate border color based on approval mode and input prefix
 pub fn resolve_border_color(state: &ChatState) -> Color {
     let theme = state.theme_manager.current();
-    let first_line = state.textarea.lines().first().map(|s| s.trim()).unwrap_or("");
+    let first_line = state
+        .textarea
+        .lines()
+        .first()
+        .map(|s| s.trim())
+        .unwrap_or("");
     let base_color = match state.approval_mode {
         crate::types::ApprovalMode::Default => theme.input_border,
         crate::types::ApprovalMode::Plan => Color::Cyan,
@@ -118,10 +123,13 @@ pub fn render_input(f: &mut Frame<'_>, state: &ChatState, area: Rect) {
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::default().fg(border_color))
-        .title_top(Line::from(Span::styled(
-            format!(" {} ", count_label),
-            Style::default().fg(Color::DarkGray),
-        )).alignment(ratatui::layout::Alignment::Right));
+        .title_top(
+            Line::from(Span::styled(
+                format!(" {} ", count_label),
+                Style::default().fg(Color::DarkGray),
+            ))
+            .alignment(ratatui::layout::Alignment::Right),
+        );
 
     let inner_area = block.inner(area);
     f.render_widget(block, area);
@@ -156,42 +164,93 @@ fn build_paste_lines(state: &ChatState) -> Vec<Line<'static>> {
             if let Some(seg) = state.paste_segments.get(id) {
                 let prefix = Span::styled(
                     "› ".to_string(),
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
                 );
                 let line = match &seg.kind {
                     PasteKind::Text => {
                         let char_count = seg.content.len();
                         Line::from(vec![
                             prefix,
-                            Span::styled("[Pasted · ~".to_string(), Style::default().fg(Color::Cyan)),
-                            Span::styled(format!("{} lines", seg.line_count), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                "[Pasted · ~".to_string(),
+                                Style::default().fg(Color::Cyan),
+                            ),
+                            Span::styled(
+                                format!("{} lines", seg.line_count),
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
                             Span::styled(" · ".to_string(), Style::default().fg(Color::Cyan)),
-                            Span::styled(format!("{} chars", char_count), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                format!("{} chars", char_count),
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
                             Span::styled("]".to_string(), Style::default().fg(Color::Cyan)),
                         ])
                     }
-                    PasteKind::Image { path, width, height } => {
+                    PasteKind::Image {
+                        path,
+                        width,
+                        height,
+                    } => {
                         let fname = std::path::Path::new(path)
-                            .file_name().and_then(|n| n.to_str())
-                            .unwrap_or(path.as_str()).to_string();
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(path.as_str())
+                            .to_string();
                         Line::from(vec![
                             prefix,
-                            Span::styled(format!("[📷 {}×{} ", width, height), Style::default().fg(Color::Magenta)),
-                            Span::styled(fname, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                format!("[📷 {}×{} ", width, height),
+                                Style::default().fg(Color::Magenta),
+                            ),
+                            Span::styled(
+                                fname,
+                                Style::default()
+                                    .fg(Color::White)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
                             Span::styled("]".to_string(), Style::default().fg(Color::Magenta)),
                         ])
                     }
                     PasteKind::Files(paths) => {
-                        let names: Vec<String> = paths.iter().take(3)
-                            .map(|p| std::path::Path::new(p.as_str())
-                                .file_name().and_then(|n| n.to_str())
-                                .unwrap_or(p.as_str()).to_string())
+                        let names: Vec<String> = paths
+                            .iter()
+                            .take(3)
+                            .map(|p| {
+                                std::path::Path::new(p.as_str())
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(p.as_str())
+                                    .to_string()
+                            })
                             .collect();
-                        let extra = if paths.len() > 3 { format!(" +{}", paths.len() - 3) } else { String::new() };
+                        let extra = if paths.len() > 3 {
+                            format!(" +{}", paths.len() - 3)
+                        } else {
+                            String::new()
+                        };
                         Line::from(vec![
                             prefix,
-                            Span::styled(format!("[📁 {} file{} · ", paths.len(), if paths.len() == 1 { "" } else { "s" }), Style::default().fg(Color::Blue)),
-                            Span::styled(format!("{}{}", names.join(", "), extra), Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                format!(
+                                    "[📁 {} file{} · ",
+                                    paths.len(),
+                                    if paths.len() == 1 { "" } else { "s" }
+                                ),
+                                Style::default().fg(Color::Blue),
+                            ),
+                            Span::styled(
+                                format!("{}{}", names.join(", "), extra),
+                                Style::default()
+                                    .fg(Color::LightBlue)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
                             Span::styled("]".to_string(), Style::default().fg(Color::Blue)),
                         ])
                     }
@@ -209,18 +268,27 @@ fn build_paste_lines(state: &ChatState) -> Vec<Line<'static>> {
 
 fn build_folded_lines(state: &ChatState, total_lines: usize) -> Vec<Line<'static>> {
     let all_lines = state.textarea.lines();
-    let first_non_empty = all_lines.iter()
+    let first_non_empty = all_lines
+        .iter()
         .find(|line| !line.trim().is_empty())
-        .map(|line| line.as_str()).unwrap_or("");
+        .map(|line| line.as_str())
+        .unwrap_or("");
     let preview = truncate_for_preview(first_non_empty, FOLDED_PREVIEW_MAX_CHARS);
     vec![
         Line::from(vec![
             Span::styled(
-                i18n::t("ui.input.paste_folded", "[已粘贴 +{lines} 行]", "[Pasted +{lines} lines]")
-                    .replace("{lines}", &total_lines.saturating_sub(1).to_string()),
+                i18n::t(
+                    "ui.input.paste_folded",
+                    "[已粘贴 +{lines} 行]",
+                    "[Pasted +{lines} lines]",
+                )
+                .replace("{lines}", &total_lines.saturating_sub(1).to_string()),
                 Style::default().fg(Color::Yellow),
             ),
-            Span::styled(" (Alt+P 展开)".to_string(), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                " (Alt+P 展开)".to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         Line::from(vec![
             Span::styled("预览: ".to_string(), Style::default().fg(Color::DarkGray)),
@@ -230,7 +298,11 @@ fn build_folded_lines(state: &ChatState, total_lines: usize) -> Vec<Line<'static
 }
 
 fn build_truncated_lines(state: &ChatState) -> Vec<Line<'static>> {
-    state.textarea.lines().iter().take(MAX_RENDER_LINES)
+    state
+        .textarea
+        .lines()
+        .iter()
+        .take(MAX_RENDER_LINES)
         .map(|line| Line::raw(line.to_string()))
         .collect()
 }
@@ -238,8 +310,8 @@ fn build_truncated_lines(state: &ChatState) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::state::ChatState;
     use crate::types::ApprovalMode;
+    use crate::ui::state::ChatState;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -304,10 +376,12 @@ mod tests {
         let state = make_state(ApprovalMode::Default, "hello world");
         let backend = TestBackend::new(60, 5);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| {
-            let area = Rect::new(0, 0, 60, 5);
-            render_input(f, &state, area);
-        }).unwrap();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 60, 5);
+                render_input(f, &state, area);
+            })
+            .unwrap();
         let buffer = terminal.backend().buffer().clone();
         // Check that "hello" text appears in the buffer
         let mut found_hello = false;

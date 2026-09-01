@@ -62,7 +62,8 @@ impl LlmClient for OpenAiCompatibleClient {
         &self,
         messages: Vec<StarMessage>,
         tools: Option<Vec<StarTool>>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError>
+    {
         self.inner.chat_stream_events(messages, tools).await
     }
 

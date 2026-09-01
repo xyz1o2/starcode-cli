@@ -555,7 +555,9 @@ impl BaseDeclarativeTool for ShellTool {
     }
 }
 
-fn check_interactive_command(command: &str) -> Option<crate::core::tools::tools::ToolCallConfirmationDetails> {
+fn check_interactive_command(
+    command: &str,
+) -> Option<crate::core::tools::tools::ToolCallConfirmationDetails> {
     let parts: Vec<&str> = command.split_whitespace().collect();
     let first = parts.first()?;
     let cmd_lower = first.to_lowercase();
@@ -577,20 +579,30 @@ fn check_interactive_command(command: &str) -> Option<crate::core::tools::tools:
             on_confirm: std::sync::Arc::new(|_| {}),
         });
     }
-    if (cmd_lower == "python" || cmd_lower == "python3" || cmd_lower == "node") && parts.len() == 1 {
+    if (cmd_lower == "python" || cmd_lower == "python3" || cmd_lower == "node") && parts.len() == 1
+    {
         return Some(crate::core::tools::tools::ToolCallConfirmationDetails {
             confirmation_type: crate::core::tools::tools::ConfirmationType::Danger,
             title: "Interactive Interpreter Detected".to_string(),
-            prompt: format!("The command '{}' starts an interactive interpreter which will hang. Proceed?", command),
+            prompt: format!(
+                "The command '{}' starts an interactive interpreter which will hang. Proceed?",
+                command
+            ),
             on_confirm: std::sync::Arc::new(|_| {}),
         });
     }
     None
 }
 
-fn check_dangerous_patterns(command: &str) -> Option<crate::core::tools::tools::ToolCallConfirmationDetails> {
+fn check_dangerous_patterns(
+    command: &str,
+) -> Option<crate::core::tools::tools::ToolCallConfirmationDetails> {
     let dangerous_commands = [
-        "rm -rf /", ":(){ :|:& };:", "mkfs", "dd if=/dev/zero", "chmod -R 777 /",
+        "rm -rf /",
+        ":(){ :|:& };:",
+        "mkfs",
+        "dd if=/dev/zero",
+        "chmod -R 777 /",
     ];
     for dangerous in dangerous_commands {
         if command.contains(dangerous) {
@@ -604,14 +616,24 @@ fn check_dangerous_patterns(command: &str) -> Option<crate::core::tools::tools::
     }
 
     let sensitive_patterns = [
-        ".ssh", ".env", ".aws", ".kube", "id_rsa", ".pem", "/etc/shadow", "/etc/passwd",
+        ".ssh",
+        ".env",
+        ".aws",
+        ".kube",
+        "id_rsa",
+        ".pem",
+        "/etc/shadow",
+        "/etc/passwd",
     ];
     for pattern in sensitive_patterns {
         if command.contains(pattern) {
             return Some(crate::core::tools::tools::ToolCallConfirmationDetails {
                 confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
                 title: "Sensitive Resource Access".to_string(),
-                prompt: format!("The command references a sensitive resource '{}'. Do you want to proceed?", pattern),
+                prompt: format!(
+                    "The command references a sensitive resource '{}'. Do you want to proceed?",
+                    pattern
+                ),
                 on_confirm: std::sync::Arc::new(|_| {}),
             });
         }
@@ -619,7 +641,9 @@ fn check_dangerous_patterns(command: &str) -> Option<crate::core::tools::tools::
     None
 }
 
-fn check_tool_substitution(command: &str) -> Option<crate::core::tools::tools::ToolCallConfirmationDetails> {
+fn check_tool_substitution(
+    command: &str,
+) -> Option<crate::core::tools::tools::ToolCallConfirmationDetails> {
     let cmd_parts: Vec<&str> = command.split_whitespace().collect();
     let cmd_lower = cmd_parts.first()?.to_lowercase();
 
@@ -636,7 +660,9 @@ fn check_tool_substitution(command: &str) -> Option<crate::core::tools::tools::T
         return Some(crate::core::tools::tools::ToolCallConfirmationDetails {
             confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
             title: "Tool Substitution Suggestion".to_string(),
-            prompt: "Use the 'glob' tool instead of 'find'. It is optimized for codebase exploration.".to_string(),
+            prompt:
+                "Use the 'glob' tool instead of 'find'. It is optimized for codebase exploration."
+                    .to_string(),
             on_confirm: std::sync::Arc::new(|_| {}),
         });
     }
@@ -650,7 +676,9 @@ fn check_tool_substitution(command: &str) -> Option<crate::core::tools::tools::T
         });
     }
 
-    if (cmd_lower == "ListDir" || cmd_lower == "dir") && (command.contains("-R") || command.contains("/s")) {
+    if (cmd_lower == "ListDir" || cmd_lower == "dir")
+        && (command.contains("-R") || command.contains("/s"))
+    {
         return Some(crate::core::tools::tools::ToolCallConfirmationDetails {
             confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
             title: "Tool Substitution Suggestion".to_string(),
@@ -661,13 +689,18 @@ fn check_tool_substitution(command: &str) -> Option<crate::core::tools::tools::T
     None
 }
 
-fn check_dangerous_operators(command: &str) -> Option<crate::core::tools::tools::ToolCallConfirmationDetails> {
+fn check_dangerous_operators(
+    command: &str,
+) -> Option<crate::core::tools::tools::ToolCallConfirmationDetails> {
     let dangerous_ops = ["&&", "||", ";", "|", ">"];
     if dangerous_ops.iter().any(|op| command.contains(op)) {
         return Some(crate::core::tools::tools::ToolCallConfirmationDetails {
             confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
             title: "Complex Command".to_string(),
-            prompt: format!("The command contains shell operators/chaining. Review carefully: {}", command),
+            prompt: format!(
+                "The command contains shell operators/chaining. Review carefully: {}",
+                command
+            ),
             on_confirm: std::sync::Arc::new(|_| {}),
         });
     }
@@ -1160,8 +1193,16 @@ impl ShellToolInvocation {
              Exit Code: {}",
             original_command,
             cwd.display(),
-            if stdout_output.is_empty() { "(empty)" } else { stdout_output },
-            if stderr_output.is_empty() { "(none)" } else { stderr_output },
+            if stdout_output.is_empty() {
+                "(empty)"
+            } else {
+                stdout_output
+            },
+            if stderr_output.is_empty() {
+                "(none)"
+            } else {
+                stderr_output
+            },
             status.code().unwrap_or(-1)
         );
 

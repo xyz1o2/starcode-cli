@@ -7,12 +7,8 @@
 use crate::types::StarTool;
 
 /// Coordinator 主线程允许的工具名列表
-const COORDINATOR_ALLOWED_TOOLS: &[&str] = &[
-    "Agent",
-    "send_message",
-    "task_stop",
-    "synthetic_output",
-];
+const COORDINATOR_ALLOWED_TOOLS: &[&str] =
+    &["Agent", "send_message", "task_stop", "synthetic_output"];
 
 /// Worker 工具池中排除的工具（防止嵌套编排）
 const WORKER_DISALLOWED_TOOLS: &[&str] = &[

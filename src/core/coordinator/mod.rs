@@ -1,8 +1,7 @@
 /// 协调器模式
-/// 
+///
 /// 对标claude-code-main的src/coordinator/
 /// 多Agent协调和worker管理，支持任务调度、负载均衡和故障恢复
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -154,7 +153,7 @@ impl Coordinator {
     pub fn register_worker(&mut self, worker_type: &str) -> String {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().timestamp();
-        
+
         let worker = WorkerInfo {
             id: id.clone(),
             worker_type: worker_type.to_string(),
@@ -199,7 +198,7 @@ impl Coordinator {
         self.task_queue.sort_by(|a, b| b.priority.cmp(&a.priority));
 
         let task = self.task_queue.first()?.clone();
-        
+
         // 根据负载均衡策略选择worker
         let worker_id = match self.config.load_balancing_strategy {
             LoadBalancingStrategy::RoundRobin => self.select_round_robin(),
@@ -211,7 +210,7 @@ impl Coordinator {
             worker.status = WorkerStatus::Running;
             worker.current_task = Some(task.name.clone());
             worker.last_activity = chrono::Utc::now().timestamp();
-            
+
             self.task_queue.remove(0);
             Some(worker_id)
         } else {
@@ -221,7 +220,9 @@ impl Coordinator {
 
     /// 轮询选择
     fn select_round_robin(&mut self) -> Option<String> {
-        let idle_workers: Vec<&WorkerInfo> = self.workers.values()
+        let idle_workers: Vec<&WorkerInfo> = self
+            .workers
+            .values()
             .filter(|w| w.status == WorkerStatus::Idle)
             .collect();
 
@@ -231,13 +232,14 @@ impl Coordinator {
 
         let index = self.round_robin_index % idle_workers.len();
         self.round_robin_index += 1;
-        
+
         Some(idle_workers[index].id.clone())
     }
 
     /// 最少连接选择
     fn select_least_connections(&self) -> Option<String> {
-        self.workers.values()
+        self.workers
+            .values()
             .filter(|w| w.status == WorkerStatus::Idle)
             .min_by_key(|w| w.completed_tasks + w.failed_tasks)
             .map(|w| w.id.clone())
@@ -245,21 +247,28 @@ impl Coordinator {
 
     /// 加权选择
     fn select_weighted(&self) -> Option<String> {
-        self.workers.values()
+        self.workers
+            .values()
             .filter(|w| w.status == WorkerStatus::Idle)
             .min_by_key(|w| w.avg_execution_time_ms)
             .map(|w| w.id.clone())
     }
 
     /// 完成任务
-    pub fn complete_task(&mut self, worker_id: &str, success: bool, output: Option<serde_json::Value>, error: Option<String>) {
+    pub fn complete_task(
+        &mut self,
+        worker_id: &str,
+        success: bool,
+        output: Option<serde_json::Value>,
+        error: Option<String>,
+    ) {
         if let Some(worker) = self.workers.get_mut(worker_id) {
             let execution_time = chrono::Utc::now().timestamp() - worker.last_activity;
-            
+
             worker.status = WorkerStatus::Idle;
             worker.current_task = None;
             worker.last_activity = chrono::Utc::now().timestamp();
-            
+
             if success {
                 worker.completed_tasks += 1;
             } else {
@@ -269,8 +278,10 @@ impl Coordinator {
             // 更新平均执行时间
             let total_tasks = worker.completed_tasks + worker.failed_tasks;
             if total_tasks > 0 {
-                worker.avg_execution_time_ms = 
-                    (worker.avg_execution_time_ms * (total_tasks - 1) as u64 + execution_time as u64 * 1000) / total_tasks as u64;
+                worker.avg_execution_time_ms = (worker.avg_execution_time_ms
+                    * (total_tasks - 1) as u64
+                    + execution_time as u64 * 1000)
+                    / total_tasks as u64;
             }
 
             // 记录结果
@@ -312,8 +323,16 @@ impl Coordinator {
     /// 获取统计信息
     pub fn get_statistics(&self) -> CoordinatorStatistics {
         let total_workers = self.workers.len();
-        let idle_workers = self.workers.values().filter(|w| w.status == WorkerStatus::Idle).count();
-        let running_workers = self.workers.values().filter(|w| w.status == WorkerStatus::Running).count();
+        let idle_workers = self
+            .workers
+            .values()
+            .filter(|w| w.status == WorkerStatus::Idle)
+            .count();
+        let running_workers = self
+            .workers
+            .values()
+            .filter(|w| w.status == WorkerStatus::Running)
+            .count();
         let total_completed: u32 = self.workers.values().map(|w| w.completed_tasks).sum();
         let total_failed: u32 = self.workers.values().map(|w| w.failed_tasks).sum();
 

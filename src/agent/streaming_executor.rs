@@ -64,7 +64,7 @@ pub struct ToolExecutionSpan {
 }
 
 /// 流式工具执行器
-/// 
+///
 /// 对标claude-code-main的StreamingToolExecutor
 /// 在模型还在生成响应时就开始执行工具调用
 /// 减少整体延迟，特别是对于只读工具
@@ -174,11 +174,16 @@ impl StreamingToolExecutor {
                 if self.errored_tool_description.is_empty() {
                     "Cancelled: parallel tool call errored".to_string()
                 } else {
-                    format!("Cancelled: parallel tool call {} errored", self.errored_tool_description)
+                    format!(
+                        "Cancelled: parallel tool call {} errored",
+                        self.errored_tool_description
+                    )
                 }
             }
             ToolAbortReason::UserInterrupted => "User interrupted tool execution".to_string(),
-            ToolAbortReason::StreamingFallback => "Streaming fallback - tool execution discarded".to_string(),
+            ToolAbortReason::StreamingFallback => {
+                "Streaming fallback - tool execution discarded".to_string()
+            }
         };
 
         ToolResult {
@@ -195,7 +200,7 @@ impl StreamingToolExecutor {
         if tool_call.function.arguments.is_empty() || tool_call.function.arguments == "{}" {
             return false;
         }
-        
+
         // 尝试解析参数
         match serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments) {
             Ok(value) => {
@@ -207,7 +212,7 @@ impl StreamingToolExecutor {
     }
 
     /// 提交工具调用进行流式执行
-    /// 
+    ///
     /// 如果工具调用参数已完整，立即开始执行
     /// 否则等待参数完整后再执行
     pub fn submit_call(&mut self, tool_call: StarToolCall) -> Option<tokio::task::JoinHandle<()>> {
@@ -255,10 +260,13 @@ impl StreamingToolExecutor {
         let (result_tx, result_rx) = oneshot::channel();
 
         // 记录正在执行的工具调用
-        self.in_progress.insert(tool_id.clone(), InProgressToolCall {
-            tool_call: tool_call.clone(),
-            result_rx,
-        });
+        self.in_progress.insert(
+            tool_id.clone(),
+            InProgressToolCall {
+                tool_call: tool_call.clone(),
+                result_rx,
+            },
+        );
 
         // 创建执行span
         let span = ToolExecutionSpan {
@@ -294,7 +302,7 @@ impl StreamingToolExecutor {
             });
 
             let result = tool_executor.execute(&call_clone, None, None).await;
-            
+
             // 检查是否是Bash工具错误
             if !result.success && Self::is_bash_tool(&tool_name) {
                 has_errored.store(true, Ordering::Relaxed);
@@ -333,7 +341,8 @@ impl StreamingToolExecutor {
             // 尝试非阻塞地获取结果
             match in_progress.result_rx.try_recv() {
                 Ok(result) => {
-                    self.completed_results.insert(tool_id.to_string(), result.clone());
+                    self.completed_results
+                        .insert(tool_id.to_string(), result.clone());
                     // 清理span
                     self.spans.remove(tool_id);
                     Some(result)
@@ -373,7 +382,8 @@ impl StreamingToolExecutor {
         if let Some(mut in_progress) = self.in_progress.remove(tool_id) {
             match in_progress.result_rx.await {
                 Ok(result) => {
-                    self.completed_results.insert(tool_id.to_string(), result.clone());
+                    self.completed_results
+                        .insert(tool_id.to_string(), result.clone());
                     // 清理span
                     self.spans.remove(tool_id);
                     Some(result)
@@ -397,10 +407,10 @@ impl StreamingToolExecutor {
     /// 执行所有待执行的工具调用
     pub fn execute_pending(&mut self) -> Vec<tokio::task::JoinHandle<()>> {
         let mut handles = Vec::new();
-        
+
         // 收集可以执行的待执行工具调用
         let pending: Vec<PendingToolCall> = self.pending_calls.drain(..).collect();
-        
+
         for pending_call in pending {
             if Self::is_call_complete(&pending_call.tool_call) {
                 if let Some(handle) = self.execute_call(pending_call.tool_call) {
@@ -411,7 +421,7 @@ impl StreamingToolExecutor {
                 self.pending_calls.push(pending_call);
             }
         }
-        
+
         handles
     }
 
@@ -454,7 +464,7 @@ impl StreamingToolExecutor {
     }
 
     /// 分区执行工具调用
-    /// 
+    ///
     /// 对标claude-code-main的toolOrchestration.ts
     /// 将工具调用分为只读和写入两组，只读工具并发执行，写入工具串行执行
     pub async fn execute_partitioned(
@@ -463,13 +473,13 @@ impl StreamingToolExecutor {
         abort_signal: Option<CancellationToken>,
     ) -> Vec<ToolResult> {
         use futures::future::join_all;
-        
+
         let mut results = Vec::with_capacity(tool_calls.len());
         let mut readonly_calls = Vec::new();
         let mut write_calls = Vec::new();
         let mut readonly_indices = Vec::new();
         let mut write_indices = Vec::new();
-        
+
         // 分区工具调用
         for (i, call) in tool_calls.into_iter().enumerate() {
             if self.tool_executor.is_tool_read_only(&call.function.name) {
@@ -480,17 +490,15 @@ impl StreamingToolExecutor {
                 write_indices.push(i);
             }
         }
-        
+
         // 初始化结果数组
-        results.resize_with(readonly_calls.len() + write_calls.len(), || {
-            ToolResult {
-                success: false,
-                output: None,
-                error: Some("Not executed".to_string()),
-                data: None,
-            }
+        results.resize_with(readonly_calls.len() + write_calls.len(), || ToolResult {
+            success: false,
+            output: None,
+            error: Some("Not executed".to_string()),
+            data: None,
         });
-        
+
         // 并发执行只读工具
         if !readonly_calls.is_empty() {
             let futures: Vec<_> = readonly_calls
@@ -499,24 +507,25 @@ impl StreamingToolExecutor {
                     let executor = self.tool_executor.clone();
                     let call_clone = call.clone();
                     let abort = abort_signal.clone();
-                    async move {
-                        executor.execute(&call_clone, None, abort).await
-                    }
+                    async move { executor.execute(&call_clone, None, abort).await }
                 })
                 .collect();
-            
+
             let readonly_results = join_all(futures).await;
             for (i, result) in readonly_results.into_iter().enumerate() {
                 results[readonly_indices[i]] = result;
             }
         }
-        
+
         // 串行执行写入工具
         for (i, call) in write_calls.iter().enumerate() {
-            let result = self.tool_executor.execute(call, None, abort_signal.clone()).await;
+            let result = self
+                .tool_executor
+                .execute(call, None, abort_signal.clone())
+                .await;
             results[write_indices[i]] = result;
         }
-        
+
         results
     }
 }

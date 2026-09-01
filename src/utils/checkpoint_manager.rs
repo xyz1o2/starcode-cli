@@ -111,7 +111,10 @@ fn state_file_path(session_id: &str) -> Result<PathBuf, CheckpointError> {
     Ok(file_history_dir(session_id)?.join("state.json"))
 }
 
-fn resolve_backup_path(backup_file_name: &str, session_id: &str) -> Result<PathBuf, CheckpointError> {
+fn resolve_backup_path(
+    backup_file_name: &str,
+    session_id: &str,
+) -> Result<PathBuf, CheckpointError> {
     Ok(file_history_dir(session_id)?.join(backup_file_name))
 }
 
@@ -390,8 +393,8 @@ pub async fn check_origin_file_changed(
 /// two snapshots are taken within the same millisecond. Avoids the unstable
 /// `ThreadId::as_u64` API.
 fn generate_snapshot_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
     use once_cell::sync::Lazy;
+    use std::sync::atomic::{AtomicU64, Ordering};
     static SNAPSHOT_COUNTER: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
     let ms = Utc::now().timestamp_millis();
     let counter = SNAPSHOT_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -439,7 +442,11 @@ pub async fn track_edit(
     let version = state
         .snapshots
         .iter()
-        .flat_map(|s| s.tracked_file_backups.get(&tracking_path).map(|b| b.version))
+        .flat_map(|s| {
+            s.tracked_file_backups
+                .get(&tracking_path)
+                .map(|b| b.version)
+        })
         .max()
         .unwrap_or(0)
         + 1;
@@ -458,10 +465,15 @@ pub async fn track_edit(
         if attach_to_last {
             // Mutate the last snapshot in place by cloning + pushing back.
             if let Some(last) = state.snapshots.last_mut() {
-                last.tracked_file_backups.insert(tracking_path.clone(), backup);
+                last.tracked_file_backups
+                    .insert(tracking_path.clone(), backup);
                 last.snapshot_sequence_touch();
             }
-            state.snapshots.last().map(|s| s.snapshot_id.clone()).unwrap_or_default()
+            state
+                .snapshots
+                .last()
+                .map(|s| s.snapshot_id.clone())
+                .unwrap_or_default()
         } else {
             let snapshot = FileHistorySnapshot {
                 snapshot_id: generate_snapshot_id(),
@@ -648,23 +660,32 @@ pub async fn apply_snapshot(
 
 /// Restore files to the state captured by `snapshot_id`.
 /// Returns the list of file paths that were modified.
-pub async fn rewind(snapshot_id: &str, session_id: Option<&str>) -> Result<Vec<String>, CheckpointError> {
+pub async fn rewind(
+    snapshot_id: &str,
+    session_id: Option<&str>,
+) -> Result<Vec<String>, CheckpointError> {
     if !file_history_enabled() {
         return Ok(Vec::new());
     }
     let sid = resolve_session_id(session_id);
     let state = load_state(Some(&sid)).await?;
 
-    let target = state.snapshots.iter().find(|s| s.snapshot_id == snapshot_id).cloned();
-    let target = target.ok_or_else(|| {
-        CheckpointError::from(format!("snapshot {} not found", snapshot_id))
-    })?;
+    let target = state
+        .snapshots
+        .iter()
+        .find(|s| s.snapshot_id == snapshot_id)
+        .cloned();
+    let target = target
+        .ok_or_else(|| CheckpointError::from(format!("snapshot {} not found", snapshot_id)))?;
 
     apply_snapshot(&target, Some(&sid)).await
 }
 
 /// Whether a snapshot exists with the given id.
-pub async fn can_restore(snapshot_id: &str, session_id: Option<&str>) -> Result<bool, CheckpointError> {
+pub async fn can_restore(
+    snapshot_id: &str,
+    session_id: Option<&str>,
+) -> Result<bool, CheckpointError> {
     if !file_history_enabled() {
         return Ok(false);
     }
@@ -683,7 +704,10 @@ pub async fn has_any_changes(
     let sid = resolve_session_id(session_id);
     let state = load_state(Some(&sid)).await?;
 
-    let target = state.snapshots.iter().find(|s| s.snapshot_id == snapshot_id);
+    let target = state
+        .snapshots
+        .iter()
+        .find(|s| s.snapshot_id == snapshot_id);
     let target = match target {
         Some(t) => t,
         None => return Ok(false),
@@ -742,7 +766,9 @@ pub async fn list_snapshots(
 }
 
 /// Return the most recent snapshot id, or None if no snapshots exist.
-pub async fn latest_snapshot_id(session_id: Option<&str>) -> Result<Option<String>, CheckpointError> {
+pub async fn latest_snapshot_id(
+    session_id: Option<&str>,
+) -> Result<Option<String>, CheckpointError> {
     let state = load_state(session_id).await?;
     Ok(state.snapshots.last().map(|s| s.snapshot_id.clone()))
 }
@@ -984,9 +1010,14 @@ mod tests {
         let file_path = td.path().join("sample.txt");
         std::fs::write(&file_path, "hello v1").unwrap();
 
-        let snap_id = track_edit(&file_path, Some(1), Some("write_file"), Some("test_session"))
-            .await
-            .expect("track_edit");
+        let snap_id = track_edit(
+            &file_path,
+            Some(1),
+            Some("write_file"),
+            Some("test_session"),
+        )
+        .await
+        .expect("track_edit");
         assert!(snap_id.is_some(), "snapshot id should be returned");
 
         let snaps = list_snapshots(Some("test_session")).await.expect("list");
@@ -1000,9 +1031,14 @@ mod tests {
         let (td, _guard) = make_test_project();
         let file_path = td.path().join("never_existed.txt");
 
-        let snap_id = track_edit(&file_path, Some(2), Some("write_file"), Some("test_session"))
-            .await
-            .expect("track_edit");
+        let snap_id = track_edit(
+            &file_path,
+            Some(2),
+            Some("write_file"),
+            Some("test_session"),
+        )
+        .await
+        .expect("track_edit");
         assert!(snap_id.is_some());
 
         let state = load_state(Some("test_session")).await.expect("state");
@@ -1023,10 +1059,15 @@ mod tests {
         let file_path = td.path().join("doc.txt");
         std::fs::write(&file_path, "version 1").unwrap();
 
-        let snap_id = track_edit(&file_path, Some(10), Some("write_file"), Some("test_session"))
-            .await
-            .expect("track_edit")
-            .expect("some snap id");
+        let snap_id = track_edit(
+            &file_path,
+            Some(10),
+            Some("write_file"),
+            Some("test_session"),
+        )
+        .await
+        .expect("track_edit")
+        .expect("some snap id");
 
         // Mutate the file after snapshot.
         let mut f = std::fs::File::create(&file_path).unwrap();
@@ -1036,7 +1077,9 @@ mod tests {
         // Sanity: file is now v2.
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "version 2");
 
-        let changed = rewind(&snap_id, Some("test_session")).await.expect("rewind");
+        let changed = rewind(&snap_id, Some("test_session"))
+            .await
+            .expect("rewind");
         assert_eq!(changed.len(), 1);
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "version 1");
     }
@@ -1046,16 +1089,23 @@ mod tests {
         let (td, _guard) = make_test_project();
         // Snapshot an empty project — file does not exist yet → null marker.
         let file_path = td.path().join("new.txt");
-        let snap_id = track_edit(&file_path, Some(20), Some("write_file"), Some("test_session"))
-            .await
-            .expect("track_edit")
-            .expect("snap id");
+        let snap_id = track_edit(
+            &file_path,
+            Some(20),
+            Some("write_file"),
+            Some("test_session"),
+        )
+        .await
+        .expect("track_edit")
+        .expect("snap id");
 
         // Create the file after snapshot.
         std::fs::write(&file_path, "created later").unwrap();
         assert!(file_path.exists());
 
-        let changed = rewind(&snap_id, Some("test_session")).await.expect("rewind");
+        let changed = rewind(&snap_id, Some("test_session"))
+            .await
+            .expect("rewind");
         assert!(changed.iter().any(|p| p.contains("new.txt")));
         assert!(!file_path.exists(), "file should be deleted by rewind");
     }
@@ -1066,21 +1116,26 @@ mod tests {
         let file_path = td.path().join("changed.txt");
         std::fs::write(&file_path, "before").unwrap();
 
-        let snap_id = track_edit(&file_path, Some(30), Some("write_file"), Some("test_session"))
-            .await
-            .expect("track_edit")
-            .expect("snap id");
+        let snap_id = track_edit(
+            &file_path,
+            Some(30),
+            Some("write_file"),
+            Some("test_session"),
+        )
+        .await
+        .expect("track_edit")
+        .expect("snap id");
 
         // No change yet.
-        assert!(
-            !has_any_changes(&snap_id, Some("test_session")).await.expect("has")
-        );
+        assert!(!has_any_changes(&snap_id, Some("test_session"))
+            .await
+            .expect("has"));
 
         // Mutate.
         std::fs::write(&file_path, "after").unwrap();
-        assert!(
-            has_any_changes(&snap_id, Some("test_session")).await.expect("has")
-        );
+        assert!(has_any_changes(&snap_id, Some("test_session"))
+            .await
+            .expect("has"));
     }
 
     #[tokio::test]
@@ -1088,17 +1143,22 @@ mod tests {
         let (td, _guard) = make_test_project();
         let file_path = td.path().join("any.txt");
         std::fs::write(&file_path, "x").unwrap();
-        let snap_id = track_edit(&file_path, Some(40), Some("write_file"), Some("test_session"))
-            .await
-            .expect("track_edit")
-            .expect("snap id");
+        let snap_id = track_edit(
+            &file_path,
+            Some(40),
+            Some("write_file"),
+            Some("test_session"),
+        )
+        .await
+        .expect("track_edit")
+        .expect("snap id");
 
-        assert!(
-            can_restore(&snap_id, Some("test_session")).await.expect("can")
-        );
-        assert!(
-            !can_restore("nonexistent_id", Some("test_session")).await.expect("can")
-        );
+        assert!(can_restore(&snap_id, Some("test_session"))
+            .await
+            .expect("can"));
+        assert!(!can_restore("nonexistent_id", Some("test_session"))
+            .await
+            .expect("can"));
     }
 
     #[tokio::test]
@@ -1112,9 +1172,14 @@ mod tests {
         // message_id to force new snapshot each time.
         for i in 0..(MAX_SNAPSHOTS + 5) {
             std::fs::write(&file_path, format!("v{}", i)).unwrap();
-            let _ = track_edit(&file_path, Some(i as u64), Some("test"), Some("cap_session"))
-                .await
-                .expect("track");
+            let _ = track_edit(
+                &file_path,
+                Some(i as u64),
+                Some("test"),
+                Some("cap_session"),
+            )
+            .await
+            .expect("track");
         }
 
         let snaps = list_snapshots(Some("cap_session")).await.expect("list");

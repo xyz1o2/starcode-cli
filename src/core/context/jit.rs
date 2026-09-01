@@ -27,7 +27,8 @@ impl JitContextLoader {
             // Keep the tail — that is usually where errors appear.
             let start = trimmed.len() - MAX_OUTPUT_CHARS;
             // Align to a char boundary.
-            let start = trimmed.char_indices()
+            let start = trimmed
+                .char_indices()
                 .map(|(i, _)| i)
                 .filter(|&i| i >= start)
                 .next()

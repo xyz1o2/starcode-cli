@@ -87,42 +87,42 @@ impl McpClient {
                     None => return Err::<Value, McpError>("mcp server closed transport".into()),
                 };
 
-            if v.is_null() {
-                continue;
-            }
+                if v.is_null() {
+                    continue;
+                }
 
-            if v.get("id").is_none() {
-                if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
-                    let m = method.to_lowercase();
-                    if m.contains("tools") && m.contains("list") && m.contains("changed") {
-                        self.tool_list_changed_seen = true;
-                    }
-                    if m.contains("resources") && m.contains("list") && m.contains("changed") {
-                        self.resource_list_changed_seen = true;
-                    }
-                    if m.contains("prompts") && m.contains("list") && m.contains("changed") {
-                        self.prompt_list_changed_seen = true;
-                    }
-                    if m == "notifications/message" {
-                        if let Some(params) = v.get("params") {
-                            let level = params
-                                .get("level")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("info");
-                            let data = params.get("data");
-                            let logger = params
-                                .get("logger")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("mcp");
-                            crate::utils::logging::append_debug_log_line(&format!(
-                                "[MCP:{}:{}] {:?}",
-                                logger, level, data
-                            ));
+                if v.get("id").is_none() {
+                    if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
+                        let m = method.to_lowercase();
+                        if m.contains("tools") && m.contains("list") && m.contains("changed") {
+                            self.tool_list_changed_seen = true;
+                        }
+                        if m.contains("resources") && m.contains("list") && m.contains("changed") {
+                            self.resource_list_changed_seen = true;
+                        }
+                        if m.contains("prompts") && m.contains("list") && m.contains("changed") {
+                            self.prompt_list_changed_seen = true;
+                        }
+                        if m == "notifications/message" {
+                            if let Some(params) = v.get("params") {
+                                let level = params
+                                    .get("level")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("info");
+                                let data = params.get("data");
+                                let logger = params
+                                    .get("logger")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("mcp");
+                                crate::utils::logging::append_debug_log_line(&format!(
+                                    "[MCP:{}:{}] {:?}",
+                                    logger, level, data
+                                ));
+                            }
                         }
                     }
+                    continue;
                 }
-                continue;
-            }
 
                 if v.get("id").and_then(|x| x.as_u64()) != Some(id) {
                     continue;

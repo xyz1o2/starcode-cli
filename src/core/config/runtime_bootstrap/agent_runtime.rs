@@ -76,14 +76,12 @@ fn register_agent_execution_tools(
 ) {
     // 后台 SubAgent 异步执行器 + 全局通知队列
     let subagent_runner = crate::agent::StarAgentRunner::shared(client.clone(), config.clone());
-    let async_runner = config
-        .runtime_notification_queue()
-        .map(|queue| {
-            Arc::new(crate::agent::subagent::runner::AsyncSubagentRunner::new(
-                subagent_runner.clone(),
-                queue,
-            ))
-        });
+    let async_runner = config.runtime_notification_queue().map(|queue| {
+        Arc::new(crate::agent::subagent::runner::AsyncSubagentRunner::new(
+            subagent_runner.clone(),
+            queue,
+        ))
+    });
 
     use crate::core::tools::agent_tool::AgentTool;
     let mut agent_tool = AgentTool::new(subagent_runner.clone());
@@ -144,9 +142,7 @@ fn register_agent_execution_tools(
     use crate::core::tools::background_task::BackgroundTaskTool;
     tool_registry.register_tool(Arc::new(BackgroundTaskTool::new(config.clone())));
 
-    use crate::core::tools::cron::{
-        CronCreateTool, CronDeleteTool, CronListTool,
-    };
+    use crate::core::tools::cron::{CronCreateTool, CronDeleteTool, CronListTool};
     tool_registry.register_tool(Arc::new(CronCreateTool::new(config.clone())));
     tool_registry.register_tool(Arc::new(CronListTool::new(config.clone())));
     tool_registry.register_tool(Arc::new(CronDeleteTool::new(config.clone())));
@@ -279,7 +275,10 @@ fn ensure_fallback_core_tools(
     ));
 
     // Critical file tools - must always be available
-    if !tool_names.iter().any(|name| name == "Read" || name == "view_file") {
+    if !tool_names
+        .iter()
+        .any(|name| name == "Read" || name == "view_file")
+    {
         crate::utils::logging::append_debug_log_line(
             "Read/view_file missing, attempting manual registration.",
         );
@@ -301,7 +300,10 @@ fn ensure_fallback_core_tools(
             global_state.clone(),
         )));
     }
-    if !tool_names.iter().any(|name| name == "Edit" || name == "edit") {
+    if !tool_names
+        .iter()
+        .any(|name| name == "Edit" || name == "edit")
+    {
         crate::utils::logging::append_debug_log_line(
             "Edit/edit missing, attempting manual registration.",
         );
@@ -319,10 +321,7 @@ fn ensure_fallback_core_tools(
             "Grep missing, attempting manual registration.",
         );
         use crate::core::tools::grep::GrepTool;
-        tool_registry.register_tool(Arc::new(GrepTool::new(
-            config.clone(),
-            message_bus.clone(),
-        )));
+        tool_registry.register_tool(Arc::new(GrepTool::new(config.clone(), message_bus.clone())));
     }
 
     // Other important tools
@@ -331,7 +330,10 @@ fn ensure_fallback_core_tools(
             "read_many_files missing, attempting manual registration.",
         );
         use crate::core::tools::read_many::ReadManyFilesTool;
-        tool_registry.register_tool(Arc::new(ReadManyFilesTool::new(config.clone(), global_state.clone())));
+        tool_registry.register_tool(Arc::new(ReadManyFilesTool::new(
+            config.clone(),
+            global_state.clone(),
+        )));
     }
     if !tool_names.iter().any(|name| name == "ListDir") {
         crate::utils::logging::append_debug_log_line(

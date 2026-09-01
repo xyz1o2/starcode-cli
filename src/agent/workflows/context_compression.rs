@@ -99,8 +99,8 @@ impl ContextCompressor {
     /// 使用模型名称创建，自动从 API 缓存中查找上下文窗口
     pub fn new_with_model(model_name: &str) -> Self {
         // 1. 尝试从 API /models 缓存中获取（由 list_models_for_client 填充）
-        let cached = crate::agent::model_catalog::get_cached_context_window(model_name)
-            .map(|v| v as usize);
+        let cached =
+            crate::agent::model_catalog::get_cached_context_window(model_name).map(|v| v as usize);
 
         // 2. 使用默认值
         let context_window = cached.unwrap_or(DEFAULT_CONTEXT_WINDOW);
@@ -348,9 +348,8 @@ impl ContextCompressor {
 
         let ratio_threshold = (self.context_window as f64 * ratio) as usize;
         // 对齐 Claude Code：threshold = window - buffer（约 95-98%）
-        let ratio_threshold = ratio_threshold.max(
-            self.context_window.saturating_sub(self.buffer_tokens),
-        );
+        let ratio_threshold =
+            ratio_threshold.max(self.context_window.saturating_sub(self.buffer_tokens));
         let threshold = ratio_threshold.max(min_tokens);
 
         if total_tokens < threshold {
@@ -382,7 +381,8 @@ impl ContextCompressor {
         }
 
         // --- Level 1 ---
-        let (messages_l1, changed_l1) = self.perform_level_1_compression(messages.clone(), LEVEL1_KEEP_RECENT);
+        let (messages_l1, changed_l1) =
+            self.perform_level_1_compression(messages.clone(), LEVEL1_KEEP_RECENT);
         let tokens_l1 = self.calculate_tokens(&messages_l1);
 
         if changed_l1 && tokens_l1 < threshold {

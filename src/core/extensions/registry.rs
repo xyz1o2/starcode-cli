@@ -168,7 +168,9 @@ impl ExtensionRegistryManager {
                     let manifest_path = entry.path().join("manifest.json");
                     if manifest_path.exists() {
                         if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-                            if let Ok(manifest) = serde_json::from_str::<ExtensionManifest>(&content) {
+                            if let Ok(manifest) =
+                                serde_json::from_str::<ExtensionManifest>(&content)
+                            {
                                 discovered.push(manifest);
                             }
                         }

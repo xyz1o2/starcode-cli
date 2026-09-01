@@ -28,16 +28,27 @@ impl WebSearchTool {
         Self { default_results: 5 }
     }
 
-    async fn search_ddg(&self, query: &str, num_results: usize) -> Result<Vec<SearchResult>, String> {
+    async fn search_ddg(
+        &self,
+        query: &str,
+        num_results: usize,
+    ) -> Result<Vec<SearchResult>, String> {
         let client = reqwest::Client::new();
         let response = client
             .get("https://api.duckduckgo.com/")
-            .query(&[("q", query), ("format", &"json".to_string()), ("no_redirect", &"1".to_string())])
+            .query(&[
+                ("q", query),
+                ("format", &"json".to_string()),
+                ("no_redirect", &"1".to_string()),
+            ])
             .send()
             .await
             .map_err(|e| format!("DuckDuckGo API error: {}", e))?;
 
-        let resp: Value = response.json().await.map_err(|e| format!("JSON error: {}", e))?;
+        let resp: Value = response
+            .json()
+            .await
+            .map_err(|e| format!("JSON error: {}", e))?;
         let mut results = Vec::new();
 
         if let Some(abstract_text) = resp["Abstract"].as_str() {
@@ -52,7 +63,10 @@ impl WebSearchTool {
         }
 
         if let Some(topics) = resp["RelatedTopics"].as_array() {
-            for topic in topics.iter().take(num_results.saturating_sub(results.len())) {
+            for topic in topics
+                .iter()
+                .take(num_results.saturating_sub(results.len()))
+            {
                 if let Some(text) = topic["Text"].as_str() {
                     if !text.is_empty() {
                         results.push(SearchResult {
@@ -82,7 +96,9 @@ impl ToolInvocation for WebSearchInvocation {
         format!("Web search: {}", self.query)
     }
 
-    fn tool_locations(&self) -> Vec<ToolLocation> { Vec::new() }
+    fn tool_locations(&self) -> Vec<ToolLocation> {
+        Vec::new()
+    }
 
     fn execute(
         &self,
@@ -97,15 +113,22 @@ impl ToolInvocation for WebSearchInvocation {
             if query.is_empty() {
                 return Ok(ToolResult {
                     output: "Search query cannot be empty".to_string(),
-                    error: Some(ToolError { error_type: "validation".to_string(), message: "Empty query".to_string() }),
+                    error: Some(ToolError {
+                        error_type: "validation".to_string(),
+                        message: "Empty query".to_string(),
+                    }),
                     ..Default::default()
                 });
             }
 
             match self.tool.search_ddg(&query, num_results).await {
                 Ok(results) if !results.is_empty() => {
-                    let output = results.iter().enumerate()
-                        .map(|(i, r)| format!("{}. {}\n   {}\n   {}\n", i + 1, r.title, r.url, r.snippet))
+                    let output = results
+                        .iter()
+                        .enumerate()
+                        .map(|(i, r)| {
+                            format!("{}. {}\n   {}\n   {}\n", i + 1, r.title, r.url, r.snippet)
+                        })
                         .collect::<Vec<_>>()
                         .join("\n");
 
@@ -126,7 +149,10 @@ impl ToolInvocation for WebSearchInvocation {
                 }),
                 Err(e) => Ok(ToolResult {
                     output: String::new(),
-                    error: Some(ToolError { error_type: "search".to_string(), message: e }),
+                    error: Some(ToolError {
+                        error_type: "search".to_string(),
+                        message: e,
+                    }),
                     ..Default::default()
                 }),
             }
@@ -135,12 +161,18 @@ impl ToolInvocation for WebSearchInvocation {
 }
 
 impl BaseDeclarativeTool for WebSearchTool {
-    fn name(&self) -> &str { "web_search" }
-    fn display_name(&self) -> &str { "Web Search" }
+    fn name(&self) -> &str {
+        "web_search"
+    }
+    fn display_name(&self) -> &str {
+        "Web Search"
+    }
     fn description(&self) -> &str {
         "Search the web for information using DuckDuckGo."
     }
-    fn kind(&self) -> Kind { Kind::Read }
+    fn kind(&self) -> Kind {
+        Kind::Read
+    }
 
     fn parameter_schema(&self) -> Value {
         json!({
@@ -153,14 +185,27 @@ impl BaseDeclarativeTool for WebSearchTool {
         })
     }
 
-    fn create_invocation(&self, params: Value) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
-        let query = params.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
-        let num_results = params.get("num_results").and_then(|n| n.as_u64()).map(|n| n as usize).unwrap_or(self.default_results);
+    fn create_invocation(
+        &self,
+        params: Value,
+    ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
+        let query = params
+            .get("query")
+            .and_then(|q| q.as_str())
+            .unwrap_or("")
+            .to_string();
+        let num_results = params
+            .get("num_results")
+            .and_then(|n| n.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(self.default_results);
 
         Ok(Box::new(WebSearchInvocation {
             query,
             num_results,
-            tool: WebSearchTool { default_results: self.default_results },
+            tool: WebSearchTool {
+                default_results: self.default_results,
+            },
         }))
     }
 }

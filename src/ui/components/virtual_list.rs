@@ -32,7 +32,9 @@ impl VirtualList {
         }
     }
 
-    pub fn len(&self) -> usize { self.heights.len() }
+    pub fn len(&self) -> usize {
+        self.heights.len()
+    }
 
     /// Resize to match the given number of items.
     pub fn resize(&mut self, new_len: usize) {
@@ -50,7 +52,13 @@ impl VirtualList {
     /// 在 idx 处插入一个新项（中插条目时使用），后续项顺移；新项标记为 dirty。
     pub fn insert_at(&mut self, idx: usize) {
         let idx = idx.min(self.heights.len());
-        self.heights.insert(idx, ItemState { height: 0, dirty: true });
+        self.heights.insert(
+            idx,
+            ItemState {
+                height: 0,
+                dirty: true,
+            },
+        );
         self.recalc_total();
     }
 
@@ -121,7 +129,7 @@ impl VirtualList {
             } else {
                 item_height
             };
-            
+
             if visible_lines + effective_height as usize > viewport_height as usize {
                 end_index = i;
                 break;
@@ -177,10 +185,9 @@ impl VirtualList {
 }
 
 /// 虚拟消息列表组件
-/// 
+///
 /// 对标claude-code-main的VirtualMessageList组件
 /// 优化大量消息时的渲染性能
-
 use std::collections::VecDeque;
 
 /// 消息项
@@ -461,7 +468,10 @@ mod tests {
     fn test_scroll() {
         let mut list = VirtualMessageList::new(5);
         for i in 0..20 {
-            list.push(create_test_message(&i.to_string(), &format!("Message {}", i)));
+            list.push(create_test_message(
+                &i.to_string(),
+                &format!("Message {}", i),
+            ));
         }
 
         assert!(list.is_at_bottom());
@@ -483,19 +493,19 @@ mod tests {
     fn test_virtual_list() {
         let mut list = VirtualList::new();
         list.resize(10);
-        
+
         assert_eq!(list.len(), 10);
-        
+
         list.set_height(0, 5);
         list.set_height(1, 3);
-        
+
         assert_eq!(list.get_height(0), 5);
         assert_eq!(list.get_height(1), 3);
         assert_eq!(list.total_lines(), 8);
-        
+
         list.mark_dirty(0);
         assert!(list.is_dirty(0));
-        
+
         list.clear_dirty(0);
         assert!(!list.is_dirty(0));
     }

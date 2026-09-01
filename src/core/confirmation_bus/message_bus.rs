@@ -230,4 +230,3 @@ impl MessageBus {
 }
 
 // TryFromMessage trait is defined in types.rs
-

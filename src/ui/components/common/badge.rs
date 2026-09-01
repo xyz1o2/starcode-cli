@@ -89,9 +89,5 @@ pub fn render_priority_badge(priority: &str, theme: &Theme) -> Span<'static> {
 
 /// 渲染标签徽章
 pub fn render_tag_badge(tag: &str, theme: &Theme) -> Span<'static> {
-    Span::styled(
-        format!(" {} ", tag),
-        Style::default()
-            .fg(theme.primary),
-    )
+    Span::styled(format!(" {} ", tag), Style::default().fg(theme.primary))
 }

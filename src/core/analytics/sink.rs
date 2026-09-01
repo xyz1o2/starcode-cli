@@ -17,7 +17,7 @@ pub enum SinkType {
 }
 
 /// 分析Sink
-/// 
+///
 /// 将事件和指标发送到不同的目标
 pub struct AnalyticsSink {
     /// Sink类型
@@ -83,7 +83,7 @@ impl AnalyticsSink {
         }
 
         let entries: Vec<SinkEntry> = self.buffer.drain(..).collect();
-        
+
         match &self.sink_type {
             SinkType::Console => {
                 for entry in &entries {
@@ -119,15 +119,27 @@ impl AnalyticsSink {
             }
             SinkType::Http(url) => {
                 // HTTP输出实现（简化版）
-                println!("[Analytics HTTP] Would send {} entries to {}", entries.len(), url);
+                println!(
+                    "[Analytics HTTP] Would send {} entries to {}",
+                    entries.len(),
+                    url
+                );
             }
             SinkType::Database(conn) => {
                 // 数据库输出实现（简化版）
-                println!("[Analytics DB] Would store {} entries to {}", entries.len(), conn);
+                println!(
+                    "[Analytics DB] Would store {} entries to {}",
+                    entries.len(),
+                    conn
+                );
             }
             SinkType::Custom(name) => {
                 // 自定义输出实现（简化版）
-                println!("[Analytics Custom] Would process {} entries via {}", entries.len(), name);
+                println!(
+                    "[Analytics Custom] Would process {} entries via {}",
+                    entries.len(),
+                    name
+                );
             }
         }
     }
@@ -149,7 +161,7 @@ impl AnalyticsSink {
 }
 
 /// Sink管理器
-/// 
+///
 /// 管理多个Sink
 pub struct SinkManager {
     sinks: Vec<AnalyticsSink>,
@@ -158,9 +170,7 @@ pub struct SinkManager {
 impl SinkManager {
     /// 创建新的Sink管理器
     pub fn new() -> Self {
-        Self {
-            sinks: Vec::new(),
-        }
+        Self { sinks: Vec::new() }
     }
 
     /// 添加Sink

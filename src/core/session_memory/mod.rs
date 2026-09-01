@@ -1,8 +1,7 @@
 /// 会话记忆系统
-/// 
+///
 /// 对标claude-code-main的src/services/SessionMemory/
 /// 管理跨会话的记忆和上下文
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -42,7 +41,7 @@ impl SessionMemoryManager {
     /// 添加记忆
     pub fn add_memory(&mut self, session_id: &str, memory_type: &str, content: &str) -> String {
         let id = uuid::Uuid::new_v4().to_string();
-        
+
         let entry = SessionMemoryEntry {
             id: id.clone(),
             session_id: session_id.to_string(),
@@ -64,7 +63,8 @@ impl SessionMemoryManager {
 
     /// 获取会话记忆
     pub fn get_session_memories(&self, session_id: &str) -> Vec<&SessionMemoryEntry> {
-        self.memories.iter()
+        self.memories
+            .iter()
             .filter(|m| m.session_id == session_id)
             .collect()
     }
@@ -72,7 +72,8 @@ impl SessionMemoryManager {
     /// 搜索记忆
     pub fn search_memories(&self, query: &str) -> Vec<&SessionMemoryEntry> {
         let query_lower = query.to_lowercase();
-        self.memories.iter()
+        self.memories
+            .iter()
             .filter(|m| m.content.to_lowercase().contains(&query_lower))
             .collect()
     }

@@ -1458,10 +1458,7 @@ pub fn parse_command(input: &str) -> Option<ParsedCommand> {
             .map(|s| s.join(" "))
             .unwrap_or_default();
 
-        ParsedCommand {
-            path,
-            args,
-        }
+        ParsedCommand { path, args }
     })
 }
 
@@ -1491,9 +1488,7 @@ pub fn get_command_hints(input: &str) -> Vec<String> {
     let mut consumed = 0;
 
     for (idx, part) in parts.iter().enumerate() {
-        let matched = current_commands
-            .iter()
-            .find(|cmd| cmd.name == *part);
+        let matched = current_commands.iter().find(|cmd| cmd.name == *part);
 
         if let Some(cmd) = matched {
             consumed = idx + 1;
@@ -1708,5 +1703,3 @@ pub fn format_help() -> String {
 
     help_text
 }
-
- 

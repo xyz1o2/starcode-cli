@@ -1,6 +1,6 @@
 use crate::core::confirmation_bus::MessageBus;
-use crate::core::tools::ripgrep::{search_with_ripgrep, RipgrepConfig};
 use crate::core::tools::constants::ToolErrorType;
+use crate::core::tools::ripgrep::{search_with_ripgrep, RipgrepConfig};
 use crate::core::tools::tools::{
     BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation, ToolResult,
 };
@@ -244,35 +244,41 @@ impl ToolInvocation for GrepToolInvocation {
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
                 // Apply filters
-                let filtered_matches: Vec<_> = matches.iter().filter(|m| {
-                    // Filter by exclude patterns (test files, etc.)
-                    if let Some(exclude_patterns) = &params.exclude_patterns {
-                        for pattern in exclude_patterns {
-                            if matches_glob_pattern(&m.file, pattern) {
-                                return false;
+                let filtered_matches: Vec<_> = matches
+                    .iter()
+                    .filter(|m| {
+                        // Filter by exclude patterns (test files, etc.)
+                        if let Some(exclude_patterns) = &params.exclude_patterns {
+                            for pattern in exclude_patterns {
+                                if matches_glob_pattern(&m.file, pattern) {
+                                    return false;
+                                }
                             }
                         }
-                    }
-                    
-                    // Filter out test files by default
-                    if is_test_file(&m.file) {
-                        return false;
-                    }
-                    
-                    // Filter out comment lines
-                    if params.exclude_comments {
-                        if let Some(text) = &m.text {
-                            if is_comment_line(text) {
-                                return false;
+
+                        // Filter out test files by default
+                        if is_test_file(&m.file) {
+                            return false;
+                        }
+
+                        // Filter out comment lines
+                        if params.exclude_comments {
+                            if let Some(text) = &m.text {
+                                if is_comment_line(text) {
+                                    return false;
+                                }
                             }
                         }
-                    }
-                    
-                    true
-                }).collect();
+
+                        true
+                    })
+                    .collect();
 
                 if filtered_matches.is_empty() {
-                    let message = format!("No matches found for pattern \"{}\" (after filtering)", params.pattern);
+                    let message = format!(
+                        "No matches found for pattern \"{}\" (after filtering)",
+                        params.pattern
+                    );
                     return Ok(ToolResult {
                         llm_content: Some(message.clone()),
                         return_display: Some(message.clone()),
@@ -454,12 +460,23 @@ impl BaseDeclarativeTool for GrepTool {
 fn is_test_file(file_path: &str) -> bool {
     let lower = file_path.to_lowercase();
     let test_patterns = [
-        "_test.", ".test.", "_spec.", ".spec.",
-        "test_", "spec_",
-        "/tests/", "/test/", "/spec/", "/specs/",
-        "__tests__", "__test__",
-        ".test.ts", ".test.js", ".test.py",
-        "_test.go", "_test.rs",
+        "_test.",
+        ".test.",
+        "_spec.",
+        ".spec.",
+        "test_",
+        "spec_",
+        "/tests/",
+        "/test/",
+        "/spec/",
+        "/specs/",
+        "__tests__",
+        "__test__",
+        ".test.ts",
+        ".test.js",
+        ".test.py",
+        "_test.go",
+        "_test.rs",
     ];
     test_patterns.iter().any(|p| lower.contains(p))
 }
@@ -468,13 +485,19 @@ fn is_test_file(file_path: &str) -> bool {
 fn is_comment_line(line: &str) -> bool {
     let trimmed = line.trim();
     // Single-line comments
-    if trimmed.starts_with("//") || trimmed.starts_with("#") || 
-       trimmed.starts_with("--") || trimmed.starts_with(";") {
+    if trimmed.starts_with("//")
+        || trimmed.starts_with("#")
+        || trimmed.starts_with("--")
+        || trimmed.starts_with(";")
+    {
         return true;
     }
     // Block comment starts
-    if trimmed.starts_with("/*") || trimmed.starts_with("<!--") ||
-       trimmed.starts_with("'''") || trimmed.starts_with("\"\"\"") {
+    if trimmed.starts_with("/*")
+        || trimmed.starts_with("<!--")
+        || trimmed.starts_with("'''")
+        || trimmed.starts_with("\"\"\"")
+    {
         return true;
     }
     // Python docstrings

@@ -1,8 +1,7 @@
 /// 技能搜索系统
-/// 
+///
 /// 对标claude-code-main的src/services/skillSearch/
 /// 提供技能发现、意图归一化和预取功能
-
 pub mod intent_normalize;
 pub mod local_search;
 pub mod prefetch;

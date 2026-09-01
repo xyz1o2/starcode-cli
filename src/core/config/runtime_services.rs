@@ -48,10 +48,7 @@ impl RuntimeServices {
     }
 
     /// 设置或读取后台 SubAgent 通知队列
-    pub fn with_notification_queue(
-        mut self,
-        queue: Arc<Mutex<NotificationQueue>>,
-    ) -> Self {
+    pub fn with_notification_queue(mut self, queue: Arc<Mutex<NotificationQueue>>) -> Self {
         self.notification_queue = Some(queue);
         self
     }

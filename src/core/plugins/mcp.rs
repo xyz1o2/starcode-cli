@@ -31,17 +31,13 @@ pub struct ResolvedPluginMcpServer {
 
 impl ResolvedPluginMcpServer {
     pub fn to_mcp_server_config(&self) -> MCPServerConfig {
-        let transport_type = self
-            .config
-            .transport_type
-            .clone()
-            .unwrap_or_else(|| {
-                if self.config.url.is_some() {
-                    "sse".to_string()
-                } else {
-                    "stdio".to_string()
-                }
-            });
+        let transport_type = self.config.transport_type.clone().unwrap_or_else(|| {
+            if self.config.url.is_some() {
+                "sse".to_string()
+            } else {
+                "stdio".to_string()
+            }
+        });
 
         MCPServerConfig {
             name: self.qualified_name.clone(),
@@ -71,4 +67,3 @@ pub fn is_valid_plugin_mcp_server_name(name: &str) -> bool {
 pub fn qualify_plugin_mcp_server_name(plugin_name: &str, server_name: &str) -> String {
     format!("plugin:{}:{}", plugin_name, server_name)
 }
-

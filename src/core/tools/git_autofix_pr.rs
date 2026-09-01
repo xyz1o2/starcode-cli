@@ -84,8 +84,7 @@ impl ToolInvocation for GitAutofixPrInvocation {
             }
 
             let pr_data: serde_json::Value =
-                serde_json::from_str(&String::from_utf8_lossy(&pr_info.stdout))
-                    .unwrap_or_default();
+                serde_json::from_str(&String::from_utf8_lossy(&pr_info.stdout)).unwrap_or_default();
 
             let head_branch = pr_data
                 .get("headRefName")
@@ -110,12 +109,9 @@ impl ToolInvocation for GitAutofixPrInvocation {
                 });
             }
 
-            let diff = run_git(
-                root,
-                &["diff", &format!("{}..HEAD", base_branch)],
-            )
-            .await
-            .unwrap_or_default();
+            let diff = run_git(root, &["diff", &format!("{}..HEAD", base_branch)])
+                .await
+                .unwrap_or_default();
 
             let review_comments = tokio::process::Command::new("gh")
                 .args([
@@ -131,9 +127,7 @@ impl ToolInvocation for GitAutofixPrInvocation {
                 .map_err(|e| format!("Failed to get PR comments: {}", e));
 
             let comments_text = match review_comments {
-                Ok(out) if out.status.success() => {
-                    String::from_utf8_lossy(&out.stdout).to_string()
-                }
+                Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
                 _ => "(unable to fetch comments)".to_string(),
             };
 

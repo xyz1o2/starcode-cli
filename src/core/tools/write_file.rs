@@ -1,8 +1,8 @@
 use crate::core::confirmation_bus::MessageBus;
 use crate::core::state::GlobalState;
+use crate::core::tools::constants::ToolErrorType;
 use crate::core::tools::diff_options::{create_patch, get_diff_stat};
 use crate::core::tools::modifiable_tool::{ModifiableDeclarativeTool, ModifyContext};
-use crate::core::tools::constants::ToolErrorType;
 use crate::core::tools::tools::{
     BaseDeclarativeTool, FileDiff, Kind, ToolInvocation, ToolLocation, ToolResult,
 };
@@ -519,7 +519,11 @@ impl ToolInvocation for WriteFileToolInvocation {
                     && existing_file_verified_for_overwrite
                     && full_rewrite_auto_recover_enabled()
                 {
-                    let current_content = crate::core::utils::file_utils::read_file_with_encoding_async(&resolved_path).await?;
+                    let current_content =
+                        crate::core::utils::file_utils::read_file_with_encoding_async(
+                            &resolved_path,
+                        )
+                        .await?;
                     let normalized_current = super::edit::normalize_line_endings(&current_content);
                     if normalized_current == *original_content {
                         write_content_atomically(&resolved_path, &content_to_write).await?;
@@ -748,4 +752,3 @@ impl ModifiableDeclarativeTool<WriteFileToolParams> for WriteFileTool {
         }
     }
 }
-

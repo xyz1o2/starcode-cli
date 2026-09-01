@@ -1,5 +1,5 @@
 /// 分析配置
-/// 
+///
 /// 管理分析系统的配置选项
 #[derive(Debug, Clone)]
 pub struct AnalyticsConfig {

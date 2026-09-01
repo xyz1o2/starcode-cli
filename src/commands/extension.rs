@@ -95,7 +95,10 @@ fn cmd_list() -> Result<String, String> {
     let entries = registry.list_all();
 
     if entries.is_empty() {
-        return Ok("No extensions installed. Use '/extension market' to browse available extensions.".to_string());
+        return Ok(
+            "No extensions installed. Use '/extension market' to browse available extensions."
+                .to_string(),
+        );
     }
 
     let mut output = String::from("Installed Extensions:\n\n");
@@ -129,10 +132,7 @@ fn cmd_list_by_type(type_name: &str) -> Result<String, String> {
     let entries = registry.list_by_type(&ext_type);
 
     if entries.is_empty() {
-        return Ok(format!(
-            "No {} extensions installed.",
-            type_name
-        ));
+        return Ok(format!("No {} extensions installed.", type_name));
     }
 
     let mut output = format!("Installed {}s:\n\n", type_name);

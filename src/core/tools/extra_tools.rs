@@ -76,7 +76,11 @@ impl ToolInvocation for SearchExtraToolsInvocation {
             let matches = matches.into_iter().take(max_results).collect::<Vec<_>>();
 
             Ok(ToolResult {
-                llm_content: Some(format!("Found {} tools matching '{}'", matches.len(), query)),
+                llm_content: Some(format!(
+                    "Found {} tools matching '{}'",
+                    matches.len(),
+                    query
+                )),
                 return_display: Some(format!("{} tools found", matches.len())),
                 output: serde_json::to_string(&SearchExtraToolsOutput {
                     matches: matches.clone(),
@@ -141,7 +145,6 @@ impl BaseDeclarativeTool for SearchExtraToolsTool {
         true
     }
 }
-
 
 // ── ExecuteExtraTool ─────────────────────────────────────────────────
 

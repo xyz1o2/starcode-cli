@@ -1,8 +1,9 @@
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
 use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-static EARLY_INPUT_BUFFER: Lazy<Arc<Mutex<String>>> = Lazy::new(|| Arc::new(Mutex::new(String::new())));
+static EARLY_INPUT_BUFFER: Lazy<Arc<Mutex<String>>> =
+    Lazy::new(|| Arc::new(Mutex::new(String::new())));
 static CAPTURING: AtomicBool = AtomicBool::new(false);
 static THREAD_HANDLE: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 
@@ -59,8 +60,10 @@ fn handle_key(buffer: &Arc<Mutex<String>>, key: crossterm::event::KeyEvent) {
             let mut buf = buffer.lock().unwrap();
             buf.push('\n');
         }
-        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL)
-                            && !key.modifiers.contains(KeyModifiers::ALT) => {
+        KeyCode::Char(c)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
             let mut buf = buffer.lock().unwrap();
             buf.push(c);
         }
@@ -87,9 +90,9 @@ pub fn peek_early_input() -> String {
 }
 
 fn cleanup_terminal() {
-    use std::io::{stdout, Write};
     use crossterm::execute;
     use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
+    use std::io::{stdout, Write};
 
     let _ = crossterm::execute!(stdout(), crossterm::event::DisableMouseCapture);
     let _ = stdout().write_all(b"\x1b[?2004l");

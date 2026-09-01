@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
 
 /// Langfuse配置
 #[derive(Debug, Clone)]
@@ -83,7 +83,7 @@ impl LangfuseConfig {
 }
 
 /// Langfuse客户端
-/// 
+///
 /// 与Langfuse API交互的客户端
 pub struct LangfuseClient {
     /// 配置
@@ -128,7 +128,12 @@ impl LangfuseClient {
     }
 
     /// 创建trace
-    pub fn create_trace(&mut self, trace_id: &str, name: &str, metadata: HashMap<String, serde_json::Value>) -> Result<(), LangfuseError> {
+    pub fn create_trace(
+        &mut self,
+        trace_id: &str,
+        name: &str,
+        metadata: HashMap<String, serde_json::Value>,
+    ) -> Result<(), LangfuseError> {
         if !self.config.enabled {
             return Ok(());
         }
@@ -160,7 +165,13 @@ impl LangfuseClient {
     }
 
     /// 创建span
-    pub fn create_span(&mut self, trace_id: &str, span_id: &str, name: &str, metadata: HashMap<String, serde_json::Value>) -> Result<(), LangfuseError> {
+    pub fn create_span(
+        &mut self,
+        trace_id: &str,
+        span_id: &str,
+        name: &str,
+        metadata: HashMap<String, serde_json::Value>,
+    ) -> Result<(), LangfuseError> {
         if !self.config.enabled {
             return Ok(());
         }
@@ -193,7 +204,12 @@ impl LangfuseClient {
     }
 
     /// 更新span状态
-    pub fn update_span(&mut self, span_id: &str, status: &str, output: Option<serde_json::Value>) -> Result<(), LangfuseError> {
+    pub fn update_span(
+        &mut self,
+        span_id: &str,
+        status: &str,
+        output: Option<serde_json::Value>,
+    ) -> Result<(), LangfuseError> {
         if !self.config.enabled {
             return Ok(());
         }
@@ -225,7 +241,15 @@ impl LangfuseClient {
     }
 
     /// 记录生成（LLM调用）
-    pub fn create_generation(&mut self, trace_id: &str, generation_id: &str, model: &str, input: serde_json::Value, output: Option<serde_json::Value>, metadata: HashMap<String, serde_json::Value>) -> Result<(), LangfuseError> {
+    pub fn create_generation(
+        &mut self,
+        trace_id: &str,
+        generation_id: &str,
+        model: &str,
+        input: serde_json::Value,
+        output: Option<serde_json::Value>,
+        metadata: HashMap<String, serde_json::Value>,
+    ) -> Result<(), LangfuseError> {
         if !self.config.enabled {
             return Ok(());
         }
@@ -266,7 +290,7 @@ impl LangfuseClient {
         }
 
         let events: Vec<LangfuseEvent> = self.event_buffer.drain(..).collect();
-        
+
         // 在调试模式下打印事件
         if self.config.debug {
             println!("[Langfuse] Flushing {} events", events.len());
@@ -277,9 +301,11 @@ impl LangfuseClient {
 
         // 实际发送到Langfuse API
         // 注意：这里简化了实现，实际应该使用异步HTTP请求
-        if let (Some(public_key), Some(secret_key)) = (&self.config.public_key, &self.config.secret_key) {
+        if let (Some(public_key), Some(secret_key)) =
+            (&self.config.public_key, &self.config.secret_key)
+        {
             let url = format!("{}/api/public/ingestion", self.config.api_endpoint);
-            
+
             let payload = serde_json::json!({
                 "batch": events
             });
@@ -333,7 +359,9 @@ impl std::fmt::Display for LangfuseError {
             LangfuseError::ConfigError(msg) => write!(f, "Langfuse config error: {}", msg),
             LangfuseError::NetworkError(msg) => write!(f, "Langfuse network error: {}", msg),
             LangfuseError::ApiError(msg) => write!(f, "Langfuse API error: {}", msg),
-            LangfuseError::SerializationError(msg) => write!(f, "Langfuse serialization error: {}", msg),
+            LangfuseError::SerializationError(msg) => {
+                write!(f, "Langfuse serialization error: {}", msg)
+            }
         }
     }
 }

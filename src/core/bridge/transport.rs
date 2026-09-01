@@ -1,12 +1,11 @@
 /// Bridge传输层
-/// 
+///
 /// 对标claude-code-main的src/bridge/replBridgeTransport.ts
 /// 提供WebSocket、Stdio和HTTP传输
-
 use async_trait::async_trait;
 use futures::Stream;
-use std::pin::Pin;
 use std::collections::VecDeque;
+use std::pin::Pin;
 use tokio::sync::mpsc;
 
 /// 传输类型
@@ -59,25 +58,25 @@ impl Default for TransportConfig {
 pub trait Transport: Send + Sync {
     /// 发送消息
     async fn send(&mut self, message: TransportMessage) -> Result<(), TransportError>;
-    
+
     /// 接收消息
     async fn receive(&mut self) -> Result<TransportMessage, TransportError>;
-    
+
     /// 关闭传输
     async fn close(&mut self) -> Result<(), TransportError>;
-    
+
     /// 检查是否连接
     fn is_connected(&self) -> bool;
-    
+
     /// 获取传输类型
     fn transport_type(&self) -> TransportType;
-    
+
     /// 获取配置
     fn config(&self) -> &TransportConfig;
 }
 
 /// WebSocket传输
-/// 
+///
 /// 对标claude-code-main的WebSocket传输实现
 pub struct WebSocketTransport {
     /// 连接ID
@@ -98,7 +97,7 @@ impl WebSocketTransport {
     /// 创建新的WebSocket传输
     pub fn new(id: String) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        
+
         Self {
             id,
             connected: true,
@@ -112,7 +111,7 @@ impl WebSocketTransport {
     /// 使用配置创建
     pub fn with_config(id: String, config: TransportConfig) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        
+
         Self {
             id,
             connected: true,
@@ -160,7 +159,8 @@ impl Transport for WebSocketTransport {
 
         // 发送消息
         if let Some(tx) = &self.tx {
-            tx.send(message).map_err(|e| TransportError::SendError(e.to_string()))?;
+            tx.send(message)
+                .map_err(|e| TransportError::SendError(e.to_string()))?;
         }
 
         Ok(())
@@ -180,8 +180,10 @@ impl Transport for WebSocketTransport {
         if let Some(rx) = &mut self.rx {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(self.config.timeout_secs),
-                rx.recv()
-            ).await {
+                rx.recv(),
+            )
+            .await
+            {
                 Ok(Some(message)) => Ok(message),
                 Ok(None) => Err(TransportError::ConnectionClosed),
                 Err(_) => Err(TransportError::Timeout),
@@ -253,9 +255,10 @@ impl Transport for StdioTransport {
 
         // 从stdin读取
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input)
+        std::io::stdin()
+            .read_line(&mut input)
             .map_err(|e| TransportError::ReceiveError(e.to_string()))?;
-        
+
         Ok(TransportMessage::Text(input.trim().to_string()))
     }
 

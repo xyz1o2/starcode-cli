@@ -5,11 +5,11 @@
 //! - 基于完整对话上下文的判断
 //! - 三种裁决：allow / deny / ask
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::prompts;
 use super::dangerous_patterns;
+use super::prompts;
 
 /// 分类器决策
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,8 +133,8 @@ pub struct AutoModeClassifier {
 
 impl AutoModeClassifier {
     pub fn new() -> Self {
-        let mode = std::env::var("STAR_AUTO_MODE_CLASSIFIER_MODE")
-            .unwrap_or_else(|_| "both".to_string());
+        let mode =
+            std::env::var("STAR_AUTO_MODE_CLASSIFIER_MODE").unwrap_or_else(|_| "both".to_string());
         let model = std::env::var("STAR_AUTO_MODE_CLASSIFIER_MODEL")
             .unwrap_or_else(|_| "deepseek-chat".to_string());
         let api_base = std::env::var("STAR_BASE_URL").ok();
@@ -167,7 +167,8 @@ impl AutoModeClassifier {
 
         // 检查 API 可用性
         if self.api_base.is_none() || self.api_key.is_none() {
-            let mut r = ClassifierResult::ask("LLM API not configured, falling back to manual approval");
+            let mut r =
+                ClassifierResult::ask("LLM API not configured, falling back to manual approval");
             r.unavailable = true;
             r.latency_ms = start.elapsed().as_millis() as f64;
             return r;
@@ -191,7 +192,9 @@ impl AutoModeClassifier {
                 r
             }
             "thinking" => {
-                let mut r = self.thinking_classify(tool_name, tool_params, transcript).await;
+                let mut r = self
+                    .thinking_classify(tool_name, tool_params, transcript)
+                    .await;
                 r.latency_ms = start.elapsed().as_millis() as f64;
                 r
             }
@@ -203,7 +206,9 @@ impl AutoModeClassifier {
                     return r;
                 }
                 // Stage 2: Thinking classification
-                let mut r = self.thinking_classify(tool_name, tool_params, transcript).await;
+                let mut r = self
+                    .thinking_classify(tool_name, tool_params, transcript)
+                    .await;
                 r.latency_ms = start.elapsed().as_millis() as f64;
                 r
             }
@@ -213,7 +218,10 @@ impl AutoModeClassifier {
     /// 本地规则快速检查（零 LLM 开销）
     fn local_rule_check(&self, tool_name: &str, tool_params: &Value) -> Option<ClassifierResult> {
         // 读取类工具直接放行
-        if matches!(tool_name, "Read" | "Grep" | "Glob" | "Search" | "LS" | "read_file" | "search" | "glob") {
+        if matches!(
+            tool_name,
+            "Read" | "Grep" | "Glob" | "Search" | "LS" | "read_file" | "search" | "glob"
+        ) {
             return Some(ClassifierResult::allow(
                 "Read-only tool, always safe",
                 ClassifierStage::Fast,
@@ -233,8 +241,13 @@ impl AutoModeClassifier {
         }
 
         // 写入当前目录内的文件 — 通常安全
-        if tool_name == "Edit" || tool_name == "Write" || tool_name == "edit" || tool_name == "write_file" {
-            if let Some(path) = tool_params.get("file_path")
+        if tool_name == "Edit"
+            || tool_name == "Write"
+            || tool_name == "edit"
+            || tool_name == "write_file"
+        {
+            if let Some(path) = tool_params
+                .get("file_path")
                 .or_else(|| tool_params.get("path"))
                 .or_else(|| tool_params.get("filePath"))
                 .and_then(|p| p.as_str())
@@ -267,7 +280,10 @@ impl AutoModeClassifier {
             &transcript[..transcript.len().min(50000)]
         );
 
-        match self.call_llm(&system_prompt, &user_content, Some(self.fast_max_tokens)).await {
+        match self
+            .call_llm(&system_prompt, &user_content, Some(self.fast_max_tokens))
+            .await
+        {
             Ok(response) => {
                 let response_lower = response.to_lowercase();
                 if response_lower.contains("allow") {
@@ -284,9 +300,7 @@ impl AutoModeClassifier {
                     ClassifierResult::ask(format!("Fast classifier ambiguous: {}", response.trim()))
                 }
             }
-            Err(e) => {
-                ClassifierResult::fallback(format!("Fast classifier API error: {}", e))
-            }
+            Err(e) => ClassifierResult::fallback(format!("Fast classifier API error: {}", e)),
         }
     }
 
@@ -312,7 +326,14 @@ impl AutoModeClassifier {
             &transcript[..transcript.len().min(50000)]
         );
 
-        match self.call_llm(&system_prompt, &format!("{}\n\n{}", thinking_prompt, user_content), None).await {
+        match self
+            .call_llm(
+                &system_prompt,
+                &format!("{}\n\n{}", thinking_prompt, user_content),
+                None,
+            )
+            .await
+        {
             Ok(response) => {
                 let response_lower = response.to_lowercase();
                 if response_lower.contains("allow") {

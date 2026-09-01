@@ -6,7 +6,10 @@
 //! checks across `StarClient`, each preprocessing step lives in this module
 //! and the pipeline is assembled once based on the detected provider type.
 
-use crate::llm::{PROXY_TOOL_ID_PREFIX, SUMMARY_TRUNCATE_MAX_CHARS, SEGMENT_SUMMARY_ASSISTANT_MAX_CHARS, SEGMENT_SUMMARY_TOOL_MAX_CHARS};
+use crate::llm::{
+    PROXY_TOOL_ID_PREFIX, SEGMENT_SUMMARY_ASSISTANT_MAX_CHARS, SEGMENT_SUMMARY_TOOL_MAX_CHARS,
+    SUMMARY_TRUNCATE_MAX_CHARS,
+};
 use crate::types::StarMessage;
 use std::collections::HashSet;
 
@@ -54,7 +57,9 @@ impl MessagePipeline {
             step(messages);
             crate::utils::logging::append_debug_log_line(&format!(
                 "[PIPELINE] step {}/{} done, {} messages",
-                i + 1, self.steps.len(), messages.len()
+                i + 1,
+                self.steps.len(),
+                messages.len()
             ));
         }
     }
@@ -155,9 +160,13 @@ pub(crate) fn remove_orphaned_tool_messages(messages: &mut Vec<StarMessage>) {
 
     // Pass 1: try to repair mutated tool_call_ids
     for m in messages.iter_mut() {
-        if m.role != "tool" { continue; }
+        if m.role != "tool" {
+            continue;
+        }
         let id = m.tool_call_id.as_deref().unwrap_or("");
-        if id.is_empty() || known_ids.contains(id) { continue; }
+        if id.is_empty() || known_ids.contains(id) {
+            continue;
+        }
 
         // MiniMax appends `_1`, `_2`, `w_N`, `_w_N` to the original ID.
         // Try progressively shorter suffixes.
@@ -168,7 +177,9 @@ pub(crate) fn remove_orphaned_tool_messages(messages: &mut Vec<StarMessage>) {
 
     // Pass 2: remove anything still orphaned
     messages.retain(|m| {
-        if m.role != "tool" { return true; }
+        if m.role != "tool" {
+            return true;
+        }
         let id = m.tool_call_id.as_deref().unwrap_or("");
         !id.is_empty() && known_ids.contains(id)
     });
@@ -176,19 +187,25 @@ pub(crate) fn remove_orphaned_tool_messages(messages: &mut Vec<StarMessage>) {
 
 fn repair_minimax_id(mutated: &str, known: &HashSet<String>) -> Option<String> {
     // Exact match
-    if known.contains(mutated) { return Some(mutated.to_string()); }
+    if known.contains(mutated) {
+        return Some(mutated.to_string());
+    }
 
     // MiniMax prefix mutations: `call_function_` ↔ `toolu_` ↔ bare ID
     let prefixes: &[&str] = &["call_function_", "toolu_", "toolu_bdrk_"];
     for prefix in prefixes {
         if let Some(base) = mutated.strip_prefix(prefix) {
             // Try the bare ID
-            if known.contains(base) { return Some(base.to_string()); }
+            if known.contains(base) {
+                return Some(base.to_string());
+            }
             // Try with other prefixes
             for alt in prefixes {
                 if alt != prefix {
                     let alt_id = format!("{}{}", alt, base);
-                    if known.contains(&alt_id) { return Some(alt_id); }
+                    if known.contains(&alt_id) {
+                        return Some(alt_id);
+                    }
                 }
             }
         }
@@ -196,18 +213,24 @@ fn repair_minimax_id(mutated: &str, known: &HashSet<String>) -> Option<String> {
     // Try adding each prefix to the whole ID
     for prefix in prefixes {
         let prefixed = format!("{}{}", prefix, mutated);
-        if known.contains(&prefixed) { return Some(prefixed); }
+        if known.contains(&prefixed) {
+            return Some(prefixed);
+        }
     }
 
     // MiniMax suffix mutations: `_1`, `_2`, `_w_1`, `w_N`
-    for suffix in &["_1","_2","_3","_4","_5","w_1","w_2","_w_1","_w_2"] {
+    for suffix in &["_1", "_2", "_3", "_4", "_5", "w_1", "w_2", "_w_1", "_w_2"] {
         if let Some(base) = mutated.strip_suffix(suffix) {
             if !base.is_empty() {
-                if known.contains(base) { return Some(base.to_string()); }
+                if known.contains(base) {
+                    return Some(base.to_string());
+                }
                 // Also try base with alternate prefixes
                 for prefix in prefixes {
                     if let Some(bare) = base.strip_prefix(prefix) {
-                        if known.contains(bare) { return Some(bare.to_string()); }
+                        if known.contains(bare) {
+                            return Some(bare.to_string());
+                        }
                     }
                 }
             }
@@ -236,8 +259,7 @@ fn repair_minimax_id(mutated: &str, known: &HashSet<String>) -> Option<String> {
 /// invalid segments so the request isn't rejected with error 2013.
 pub(crate) fn prepare_deepseek_context(messages: &mut Vec<StarMessage>) {
     // Helper: does a segment have at least one tool-call?
-    let segment_has_tools =
-        |seg: &[StarMessage]| seg.iter().any(message_has_tool_calls);
+    let segment_has_tools = |seg: &[StarMessage]| seg.iter().any(message_has_tool_calls);
 
     // Helper: is reasoning *present* (not necessarily non-empty)?
     let has_reasoning = |m: &StarMessage| m.reasoning_content.is_some();
@@ -260,7 +282,9 @@ pub(crate) fn prepare_deepseek_context(messages: &mut Vec<StarMessage>) {
 
         let has_orphan = messages[..pre_user_end].iter().any(|m| {
             m.role == "tool"
-                && !m.tool_call_id.as_deref()
+                && !m
+                    .tool_call_id
+                    .as_deref()
                     .map(|id| known_ids.contains(id))
                     .unwrap_or(false)
         });
@@ -268,7 +292,9 @@ pub(crate) fn prepare_deepseek_context(messages: &mut Vec<StarMessage>) {
         if has_orphan {
             for msg in &messages[..pre_user_end] {
                 if msg.role == "tool"
-                    && !msg.tool_call_id.as_deref()
+                    && !msg
+                        .tool_call_id
+                        .as_deref()
                         .map(|id| known_ids.contains(id))
                         .unwrap_or(false)
                 {
@@ -312,7 +338,8 @@ pub(crate) fn prepare_deepseek_context(messages: &mut Vec<StarMessage>) {
                 if let Some(final_answer) = segment.iter().rev().find(|m| {
                     m.role == "assistant"
                         && !message_has_tool_calls(m)
-                        && m.content.as_deref()
+                        && m.content
+                            .as_deref()
                             .map(|c| !c.trim().is_empty())
                             .unwrap_or(false)
                 }) {
@@ -384,18 +411,26 @@ fn summarize_tool_message(msg: &StarMessage) -> Option<StarMessage> {
 
 fn summarize_non_tool_message(msg: &StarMessage) -> Option<StarMessage> {
     match msg.role.as_str() {
-        "assistant" => msg.content.as_deref().filter(|c| !c.trim().is_empty()).map(|c| {
-            StarMessage::system(format!(
-                "Previous assistant response summary: {}",
-                truncate_str(c, SUMMARY_TRUNCATE_MAX_CHARS)
-            ))
-        }),
-        "tool" => msg.content.as_deref().filter(|c| !c.trim().is_empty()).map(|c| {
-            StarMessage::system(format!(
-                "Previous tool result summary: {}",
-                truncate_str(c, SUMMARY_TRUNCATE_MAX_CHARS)
-            ))
-        }),
+        "assistant" => msg
+            .content
+            .as_deref()
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| {
+                StarMessage::system(format!(
+                    "Previous assistant response summary: {}",
+                    truncate_str(c, SUMMARY_TRUNCATE_MAX_CHARS)
+                ))
+            }),
+        "tool" => msg
+            .content
+            .as_deref()
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| {
+                StarMessage::system(format!(
+                    "Previous tool result summary: {}",
+                    truncate_str(c, SUMMARY_TRUNCATE_MAX_CHARS)
+                ))
+            }),
         _ => Some(msg.clone()),
     }
 }
@@ -424,16 +459,25 @@ fn summarize_invalid_segment(segment: &[StarMessage]) -> Option<StarMessage> {
             }
             "assistant" => {
                 if let Some(c) = msg.content.as_deref().filter(|c| !c.trim().is_empty()) {
-                    lines.push(format!("- assistant: {}", truncate_str(c, SEGMENT_SUMMARY_ASSISTANT_MAX_CHARS)));
+                    lines.push(format!(
+                        "- assistant: {}",
+                        truncate_str(c, SEGMENT_SUMMARY_ASSISTANT_MAX_CHARS)
+                    ));
                 }
             }
             "tool" => {
                 if let Some(c) = msg.content.as_deref().filter(|c| !c.trim().is_empty()) {
-                    let label = msg.tool_call_id.as_deref()
+                    let label = msg
+                        .tool_call_id
+                        .as_deref()
                         .filter(|id| !id.trim().is_empty())
                         .map(|id| format!("tool_result `{}`", id))
                         .unwrap_or_else(|| "tool_result".to_string());
-                    lines.push(format!("- {}: {}", label, truncate_str(c, SEGMENT_SUMMARY_TOOL_MAX_CHARS)));
+                    lines.push(format!(
+                        "- {}: {}",
+                        label,
+                        truncate_str(c, SEGMENT_SUMMARY_TOOL_MAX_CHARS)
+                    ));
                 }
             }
             _ => {}
@@ -464,5 +508,3 @@ pub fn pipeline_for(
     }
     MessagePipeline::STANDARD
 }
-
- 

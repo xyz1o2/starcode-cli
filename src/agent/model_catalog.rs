@@ -1,8 +1,8 @@
 use crate::core::config::provider_store::ProviderStore;
 use crate::llm::client::StarClient;
 use crate::types::ModelInfo;
-use std::sync::RwLock;
 use std::collections::HashMap;
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 /// 模型列表内存缓存有效期 — 避免每次切换模型都全量网络拉取
@@ -157,7 +157,13 @@ pub(crate) async fn list_models_for_client(
 
                     fetch_futures.push(tokio::spawn(async move {
                         // Create a temporary client with short timeout logic (handled by timeout wrapper)
-                        let client = StarClient::new(&api_key, None, Some(base_url), None, Some(pid.clone()));
+                        let client = StarClient::new(
+                            &api_key,
+                            None,
+                            Some(base_url),
+                            None,
+                            Some(pid.clone()),
+                        );
 
                         // 3 second timeout for dynamic fetching
                         let result = tokio::time::timeout(
@@ -218,5 +224,3 @@ pub(crate) async fn list_models_for_client(
 
     Ok(models)
 }
-
-

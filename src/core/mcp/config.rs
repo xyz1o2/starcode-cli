@@ -53,5 +53,3 @@ pub async fn save_project_mcp_config(config: &WindsurfMcpConfig) -> Result<(), M
     tokio::fs::write(path, content).await?;
     Ok(())
 }
-
- 

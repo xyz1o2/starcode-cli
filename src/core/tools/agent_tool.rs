@@ -44,7 +44,10 @@ pub struct AgentTool {
 
 impl AgentTool {
     pub fn new(runner: SharedSubAgentRunner) -> Self {
-        Self { runner, async_runner: None }
+        Self {
+            runner,
+            async_runner: None,
+        }
     }
 
     /// 注入异步 runner（启用后台执行能力）
@@ -133,7 +136,10 @@ pub struct AgentToolInvocation {
 
 impl ToolInvocation for AgentToolInvocation {
     fn get_description(&self) -> String {
-        format!("Agent [{}]: {}", self.full_input.description, self.full_input.prompt)
+        format!(
+            "Agent [{}]: {}",
+            self.full_input.description, self.full_input.prompt
+        )
     }
 
     fn tool_locations(&self) -> Vec<ToolLocation> {
@@ -194,7 +200,11 @@ impl ToolInvocation for AgentToolInvocation {
                 }
 
                 // 异步路径
-                AgentRoute::AsyncAgent { agent_id, request, name } => {
+                AgentRoute::AsyncAgent {
+                    agent_id,
+                    request,
+                    name,
+                } => {
                     let async_runner = async_runner
                         .ok_or_else(|| "AsyncSubagentRunner not configured".to_string())?;
 
@@ -225,9 +235,13 @@ impl ToolInvocation for AgentToolInvocation {
                 }
 
                 // Coordinator Worker 路径
-                AgentRoute::CoordinatorWorker { agent_id: _, request } => {
-                    let async_runner = async_runner
-                        .ok_or_else(|| "AsyncSubagentRunner not configured for coordinator".to_string())?;
+                AgentRoute::CoordinatorWorker {
+                    agent_id: _,
+                    request,
+                } => {
+                    let async_runner = async_runner.ok_or_else(|| {
+                        "AsyncSubagentRunner not configured for coordinator".to_string()
+                    })?;
 
                     let launch = async_runner.spawn_background(
                         SubAgentRequest {
@@ -263,12 +277,18 @@ impl ToolInvocation for AgentToolInvocation {
                     if !request.parent_messages.is_empty() {
                         enriched_prompt.push_str("## Inherited Context from Parent Agent\n\n");
                         enriched_prompt.push_str("The following conversation history was inherited from the parent agent. ");
-                        enriched_prompt.push_str("Use this context to understand the ongoing work:\n\n");
+                        enriched_prompt
+                            .push_str("Use this context to understand the ongoing work:\n\n");
                         for msg in &request.parent_messages {
-                            let role = if msg.role == "user" { "User" } else { "Assistant" };
+                            let role = if msg.role == "user" {
+                                "User"
+                            } else {
+                                "Assistant"
+                            };
                             let content = msg.content.as_deref().unwrap_or("(empty)");
                             let content_preview: String = content.chars().take(500).collect();
-                            enriched_prompt.push_str(&format!("**{}**: {}\n\n", role, content_preview));
+                            enriched_prompt
+                                .push_str(&format!("**{}**: {}\n\n", role, content_preview));
                         }
                         enriched_prompt.push_str("---\n\n## Fork Task\n\n");
                     }

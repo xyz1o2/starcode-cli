@@ -56,7 +56,7 @@ impl ToolInvocation for GitBranchInvocation {
         let params = self.params.clone();
         Box::pin(async move {
             let root = config.project_root();
-            
+
             match params.action.as_str() {
                 "list" => {
                     let output = match run_git(root, &["branch", "--all"]).await {

@@ -1,12 +1,12 @@
-use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 use super::config::AnalyticsConfig;
 use super::event_logger::{Event, EventLogger, EventType};
 use super::metrics::{MetricsCollector, TimerGuard};
 use super::sink::{AnalyticsSink, SinkManager, SinkType};
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 遥测管理器
-/// 
+///
 /// 对标claude-code-main的遥测系统
 /// 提供统一的遥测数据收集和发送接口
 pub struct TelemetryManager {
@@ -86,7 +86,11 @@ impl TelemetryManager {
     }
 
     /// 记录带数据的事件
-    pub fn log_event_with_data(&mut self, event_type: EventType, data: HashMap<String, serde_json::Value>) {
+    pub fn log_event_with_data(
+        &mut self,
+        event_type: EventType,
+        data: HashMap<String, serde_json::Value>,
+    ) {
         if !self.config.should_sample() {
             return;
         }
@@ -112,8 +116,14 @@ impl TelemetryManager {
     /// 记录工具调用
     pub fn log_tool_call(&mut self, tool_name: &str, arguments: &str) {
         let mut data = HashMap::new();
-        data.insert("tool_name".to_string(), serde_json::Value::String(tool_name.to_string()));
-        data.insert("arguments".to_string(), serde_json::Value::String(arguments.to_string()));
+        data.insert(
+            "tool_name".to_string(),
+            serde_json::Value::String(tool_name.to_string()),
+        );
+        data.insert(
+            "arguments".to_string(),
+            serde_json::Value::String(arguments.to_string()),
+        );
 
         self.log_event_with_data(EventType::ToolCall, data);
     }
@@ -121,59 +131,102 @@ impl TelemetryManager {
     /// 记录工具结果
     pub fn log_tool_result(&mut self, tool_name: &str, success: bool, duration_ms: u64) {
         let mut data = HashMap::new();
-        data.insert("tool_name".to_string(), serde_json::Value::String(tool_name.to_string()));
+        data.insert(
+            "tool_name".to_string(),
+            serde_json::Value::String(tool_name.to_string()),
+        );
         data.insert("success".to_string(), serde_json::Value::Bool(success));
-        data.insert("duration_ms".to_string(), serde_json::Value::Number(duration_ms.into()));
+        data.insert(
+            "duration_ms".to_string(),
+            serde_json::Value::Number(duration_ms.into()),
+        );
 
         self.log_event_with_data(EventType::ToolResult, data);
 
         // 记录性能指标
-        self.metrics_collector.record_timer(&format!("tool.{}.duration", tool_name), duration_ms as f64);
+        self.metrics_collector
+            .record_timer(&format!("tool.{}.duration", tool_name), duration_ms as f64);
         if !success {
-            self.metrics_collector.increment_counter(&format!("tool.{}.errors", tool_name), 1.0);
+            self.metrics_collector
+                .increment_counter(&format!("tool.{}.errors", tool_name), 1.0);
         }
     }
 
     /// 记录模型响应
     pub fn log_model_response(&mut self, model: &str, tokens_used: u32, duration_ms: u64) {
         let mut data = HashMap::new();
-        data.insert("model".to_string(), serde_json::Value::String(model.to_string()));
-        data.insert("tokens_used".to_string(), serde_json::Value::Number(tokens_used.into()));
-        data.insert("duration_ms".to_string(), serde_json::Value::Number(duration_ms.into()));
+        data.insert(
+            "model".to_string(),
+            serde_json::Value::String(model.to_string()),
+        );
+        data.insert(
+            "tokens_used".to_string(),
+            serde_json::Value::Number(tokens_used.into()),
+        );
+        data.insert(
+            "duration_ms".to_string(),
+            serde_json::Value::Number(duration_ms.into()),
+        );
 
         self.log_event_with_data(EventType::ModelResponse, data);
 
         // 记录性能指标
-        self.metrics_collector.record_timer("model.response_time", duration_ms as f64);
-        self.metrics_collector.record_histogram("model.tokens_used", tokens_used as f64);
+        self.metrics_collector
+            .record_timer("model.response_time", duration_ms as f64);
+        self.metrics_collector
+            .record_histogram("model.tokens_used", tokens_used as f64);
     }
 
     /// 记录错误
     pub fn log_error(&mut self, error_type: &str, message: &str) {
         let mut data = HashMap::new();
-        data.insert("error_type".to_string(), serde_json::Value::String(error_type.to_string()));
-        data.insert("message".to_string(), serde_json::Value::String(message.to_string()));
+        data.insert(
+            "error_type".to_string(),
+            serde_json::Value::String(error_type.to_string()),
+        );
+        data.insert(
+            "message".to_string(),
+            serde_json::Value::String(message.to_string()),
+        );
 
         self.log_event_with_data(EventType::Error, data);
 
         // 记录错误计数
-        self.metrics_collector.increment_counter("errors.total", 1.0);
-        self.metrics_collector.increment_counter(&format!("errors.{}", error_type), 1.0);
+        self.metrics_collector
+            .increment_counter("errors.total", 1.0);
+        self.metrics_collector
+            .increment_counter(&format!("errors.{}", error_type), 1.0);
     }
 
     /// 记录压缩事件
     pub fn log_compaction(&mut self, tokens_before: usize, tokens_after: usize, strategy: &str) {
         let mut data = HashMap::new();
-        data.insert("tokens_before".to_string(), serde_json::Value::Number(tokens_before.into()));
-        data.insert("tokens_after".to_string(), serde_json::Value::Number(tokens_after.into()));
-        data.insert("strategy".to_string(), serde_json::Value::String(strategy.to_string()));
-        data.insert("tokens_saved".to_string(), serde_json::Value::Number((tokens_before - tokens_after).into()));
+        data.insert(
+            "tokens_before".to_string(),
+            serde_json::Value::Number(tokens_before.into()),
+        );
+        data.insert(
+            "tokens_after".to_string(),
+            serde_json::Value::Number(tokens_after.into()),
+        );
+        data.insert(
+            "strategy".to_string(),
+            serde_json::Value::String(strategy.to_string()),
+        );
+        data.insert(
+            "tokens_saved".to_string(),
+            serde_json::Value::Number((tokens_before - tokens_after).into()),
+        );
 
         self.log_event_with_data(EventType::Compaction, data);
 
         // 记录压缩指标
-        self.metrics_collector.record_histogram("compaction.tokens_saved", (tokens_before - tokens_after) as f64);
-        self.metrics_collector.increment_counter("compaction.count", 1.0);
+        self.metrics_collector.record_histogram(
+            "compaction.tokens_saved",
+            (tokens_before - tokens_after) as f64,
+        );
+        self.metrics_collector
+            .increment_counter("compaction.count", 1.0);
     }
 
     /// 记录会话开始
@@ -181,24 +234,35 @@ impl TelemetryManager {
         self.set_session_id(session_id);
 
         let mut data = HashMap::new();
-        data.insert("session_id".to_string(), serde_json::Value::String(session_id.to_string()));
+        data.insert(
+            "session_id".to_string(),
+            serde_json::Value::String(session_id.to_string()),
+        );
 
         self.log_event_with_data(EventType::Session, data);
 
         // 记录会话计数
-        self.metrics_collector.increment_counter("sessions.total", 1.0);
+        self.metrics_collector
+            .increment_counter("sessions.total", 1.0);
     }
 
     /// 记录会话结束
     pub fn log_session_end(&mut self, session_id: &str, duration_ms: u64) {
         let mut data = HashMap::new();
-        data.insert("session_id".to_string(), serde_json::Value::String(session_id.to_string()));
-        data.insert("duration_ms".to_string(), serde_json::Value::Number(duration_ms.into()));
+        data.insert(
+            "session_id".to_string(),
+            serde_json::Value::String(session_id.to_string()),
+        );
+        data.insert(
+            "duration_ms".to_string(),
+            serde_json::Value::Number(duration_ms.into()),
+        );
 
         self.log_event_with_data(EventType::Session, data);
 
         // 记录会话时长
-        self.metrics_collector.record_timer("sessions.duration", duration_ms as f64);
+        self.metrics_collector
+            .record_timer("sessions.duration", duration_ms as f64);
     }
 
     /// 开始计时

@@ -31,10 +31,7 @@ pub enum TaskChangeEvent {
         updated_fields: Vec<String>,
     },
     /// 任务删除
-    Deleted {
-        task_id: String,
-        title: String,
-    },
+    Deleted { task_id: String, title: String },
     /// 任务列表重置
     Reset,
 }
@@ -50,13 +47,13 @@ impl TaskNotifier {
         let (sender, _) = broadcast::channel(100);
         Self { sender }
     }
-    
+
     /// 发送任务变更通知
     pub fn notify(&self, event: TaskChangeEvent) {
         // 忽略发送错误（如果没有接收者）
         let _ = self.sender.send(event);
     }
-    
+
     /// 订阅任务变更
     pub fn subscribe(&self) -> broadcast::Receiver<TaskChangeEvent> {
         self.sender.subscribe()

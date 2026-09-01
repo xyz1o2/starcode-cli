@@ -18,7 +18,10 @@ pub async fn deep_link(mut ctx: CommandContext<'_>, args: Vec<String>) -> Comman
         "register" => {
             let mut handler = crate::core::deep_link::DeepLinkHandler::new();
             match handler.register() {
-                Ok(()) => push_msg(&mut ctx, "✅ Deep link handler registered for cc:// protocol"),
+                Ok(()) => push_msg(
+                    &mut ctx,
+                    "✅ Deep link handler registered for cc:// protocol",
+                ),
                 Err(e) => push_msg(&mut ctx, format!("❌ Failed to register: {}", e)),
             }
         }
@@ -95,14 +98,20 @@ pub async fn teleport(mut ctx: CommandContext<'_>, args: Vec<String>) -> Command
     match sub.as_str() {
         "connect" => {
             let endpoint = rest.first().cloned().unwrap_or_default();
-            let name = rest.get(1).cloned().unwrap_or_else(|| "default".to_string());
+            let name = rest
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| "default".to_string());
             if endpoint.is_empty() {
                 push_msg(&mut ctx, "Usage: /teleport connect <endpoint> [name]");
                 return Ok(());
             }
             let mut manager = crate::core::teleport::TeleportManager::new();
             match manager.connect(&endpoint, &name).await {
-                Ok(id) => push_msg(&mut ctx, format!("✅ Connected to {}\nSession ID: {}", endpoint, id)),
+                Ok(id) => push_msg(
+                    &mut ctx,
+                    format!("✅ Connected to {}\nSession ID: {}", endpoint, id),
+                ),
                 Err(e) => push_msg(&mut ctx, format!("❌ Connection failed: {}", e)),
             }
         }
@@ -114,7 +123,10 @@ pub async fn teleport(mut ctx: CommandContext<'_>, args: Vec<String>) -> Command
             } else {
                 let mut output = String::from("📡 Teleport Sessions:\n\n");
                 for session in sessions {
-                    output.push_str(&format!("  {} - {} ({:?})\n", session.id, session.name, session.status));
+                    output.push_str(&format!(
+                        "  {} - {} ({:?})\n",
+                        session.id, session.name, session.status
+                    ));
                 }
                 push_msg(&mut ctx, output);
             }
@@ -158,20 +170,29 @@ pub async fn wiki(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
             }
         }
         "create" => {
-            let title = rest.first().cloned().unwrap_or_else(|| "Untitled".to_string());
+            let title = rest
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Untitled".to_string());
             let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
             let wiki_path = cwd.join(".star").join("wiki");
             let _ = std::fs::create_dir_all(&wiki_path);
             let mut manager = crate::core::wiki::WikiManager::new(&wiki_path.to_string_lossy());
             let page = manager.create_page(&title, "", vec![]);
-            push_msg(&mut ctx, format!("✅ Created wiki page: {} ({})", page.title, page.id));
+            push_msg(
+                &mut ctx,
+                format!("✅ Created wiki page: {} ({})", page.title, page.id),
+            );
         }
         _ => {
             let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
             let wiki_path = cwd.join(".star").join("wiki");
             let manager = crate::core::wiki::WikiManager::new(&wiki_path.to_string_lossy());
             if manager.pages.is_empty() {
-                push_msg(&mut ctx, "📚 No wiki pages found\n\nCreate one with: /wiki create <title>");
+                push_msg(
+                    &mut ctx,
+                    "📚 No wiki pages found\n\nCreate one with: /wiki create <title>",
+                );
             } else {
                 let mut output = String::from("📚 Wiki Pages:\n\n");
                 for page in &manager.pages {
@@ -213,7 +234,13 @@ pub async fn buddy(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRes
             if achievement.is_empty() {
                 push_msg(&mut ctx, "Usage: /buddy celebrate <achievement>");
             } else {
-                push_msg(&mut ctx, format!("🎉 Incredible work on {}! You should be proud!", achievement));
+                push_msg(
+                    &mut ctx,
+                    format!(
+                        "🎉 Incredible work on {}! You should be proud!",
+                        achievement
+                    ),
+                );
             }
         }
         _ => {

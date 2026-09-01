@@ -1,10 +1,9 @@
+use async_trait::async_trait;
 /// STT (Speech-to-Text) 提供商
-/// 
+///
 /// 对标claude-code-main的voiceStreamSTT.ts和doubaoSTT.ts
 /// 提供多种STT后端支持
-
 use serde::{Deserialize, Serialize};
-use async_trait::async_trait;
 
 /// STT配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,15 +54,19 @@ pub struct SttResult {
 #[async_trait]
 pub trait SttProvider: Send + Sync {
     /// 转录音频
-    async fn transcribe(&self, audio_data: &[u8], config: &SttConfig) -> Result<SttResult, SttError>;
-    
+    async fn transcribe(
+        &self,
+        audio_data: &[u8],
+        config: &SttConfig,
+    ) -> Result<SttResult, SttError>;
+
     /// 流式转录
     async fn transcribe_stream(
         &self,
         audio_stream: Box<dyn futures::Stream<Item = Vec<u8>> + Send + Unpin>,
         config: &SttConfig,
     ) -> Result<Box<dyn futures::Stream<Item = Result<SttResult, SttError>> + Send + Unpin>, SttError>;
-    
+
     /// 获取提供商名称
     fn provider_name(&self) -> &str;
 }
@@ -83,9 +86,12 @@ impl AnthropicSttProvider {
 
 #[async_trait]
 impl SttProvider for AnthropicSttProvider {
-    async fn transcribe(&self, audio_data: &[u8], config: &SttConfig) -> Result<SttResult, SttError> {
-        let api_key = config.api_key.as_ref()
-            .ok_or(SttError::MissingApiKey)?;
+    async fn transcribe(
+        &self,
+        audio_data: &[u8],
+        config: &SttConfig,
+    ) -> Result<SttResult, SttError> {
+        let api_key = config.api_key.as_ref().ok_or(SttError::MissingApiKey)?;
 
         // TODO: 实现Anthropic STT API调用
         // 这里是简化实现
@@ -102,9 +108,12 @@ impl SttProvider for AnthropicSttProvider {
         &self,
         _audio_stream: Box<dyn futures::Stream<Item = Vec<u8>> + Send + Unpin>,
         _config: &SttConfig,
-    ) -> Result<Box<dyn futures::Stream<Item = Result<SttResult, SttError>> + Send + Unpin>, SttError> {
+    ) -> Result<Box<dyn futures::Stream<Item = Result<SttResult, SttError>> + Send + Unpin>, SttError>
+    {
         // TODO: 实现流式转录
-        Err(SttError::NotSupported("Streaming transcription not yet implemented".to_string()))
+        Err(SttError::NotSupported(
+            "Streaming transcription not yet implemented".to_string(),
+        ))
     }
 
     fn provider_name(&self) -> &str {
@@ -128,9 +137,12 @@ impl DoubaoSttProvider {
 
 #[async_trait]
 impl SttProvider for DoubaoSttProvider {
-    async fn transcribe(&self, audio_data: &[u8], config: &SttConfig) -> Result<SttResult, SttError> {
-        let api_key = config.api_key.as_ref()
-            .ok_or(SttError::MissingApiKey)?;
+    async fn transcribe(
+        &self,
+        audio_data: &[u8],
+        config: &SttConfig,
+    ) -> Result<SttResult, SttError> {
+        let api_key = config.api_key.as_ref().ok_or(SttError::MissingApiKey)?;
 
         // TODO: 实现豆包STT API调用
         Ok(SttResult {
@@ -146,8 +158,11 @@ impl SttProvider for DoubaoSttProvider {
         &self,
         _audio_stream: Box<dyn futures::Stream<Item = Vec<u8>> + Send + Unpin>,
         _config: &SttConfig,
-    ) -> Result<Box<dyn futures::Stream<Item = Result<SttResult, SttError>> + Send + Unpin>, SttError> {
-        Err(SttError::NotSupported("Streaming transcription not yet implemented".to_string()))
+    ) -> Result<Box<dyn futures::Stream<Item = Result<SttResult, SttError>> + Send + Unpin>, SttError>
+    {
+        Err(SttError::NotSupported(
+            "Streaming transcription not yet implemented".to_string(),
+        ))
     }
 
     fn provider_name(&self) -> &str {

@@ -1,5 +1,5 @@
-use crate::core::tools::mcp_auth::{parse_www_authenticate, McpOAuthState};
 use crate::core::mcp::types::{McpError, TransportConfig};
+use crate::core::tools::mcp_auth::{parse_www_authenticate, McpOAuthState};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -202,9 +202,7 @@ impl SseTransport {
     fn build_auth_header(oauth_state: &Option<McpOAuthState>) -> Option<String> {
         oauth_state.as_ref().and_then(|s| {
             if s.has_valid_token() {
-                s.access_token
-                    .as_ref()
-                    .map(|t| format!("Bearer {}", t))
+                s.access_token.as_ref().map(|t| format!("Bearer {}", t))
             } else {
                 None
             }
@@ -395,9 +393,7 @@ impl StreamableHttpTransport {
     fn build_auth_header(oauth_state: &Option<McpOAuthState>) -> Option<String> {
         oauth_state.as_ref().and_then(|s| {
             if s.has_valid_token() {
-                s.access_token
-                    .as_ref()
-                    .map(|t| format!("Bearer {}", t))
+                s.access_token.as_ref().map(|t| format!("Bearer {}", t))
             } else {
                 None
             }

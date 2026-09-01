@@ -53,10 +53,7 @@ impl PermissionManager {
     }
 
     /// Request permission for an action
-    pub async fn request(
-        &self,
-        request: PermissionRequest,
-    ) -> Result<(), PermissionError> {
+    pub async fn request(&self, request: PermissionRequest) -> Result<(), PermissionError> {
         // Evaluate permission
         let effect = {
             let evaluator = self.evaluator.lock().await;

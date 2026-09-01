@@ -70,7 +70,9 @@ pub fn render_context_visualization(f: &mut Frame, breakdown: &TokenBreakdown, a
         Span::styled(" Context Window: ", Style::default().fg(Color::White)),
         Span::styled(
             format!("{}/{}", breakdown.format_total(), breakdown.format_max()),
-            Style::default().fg(title_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(title_color)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" ({:.1}%)", pct),
@@ -95,10 +97,30 @@ pub fn render_context_visualization(f: &mut Frame, breakdown: &TokenBreakdown, a
 
     // Breakdown
     let breakdown_lines = vec![
-        breakdown_line("System", breakdown.system_prompt, breakdown.total, Color::Cyan),
-        breakdown_line("Conversation", breakdown.conversation, breakdown.total, Color::White),
-        breakdown_line("Tool Outputs", breakdown.tool_outputs, breakdown.total, Color::Yellow),
-        breakdown_line("Context Files", breakdown.context_files, breakdown.total, Color::Green),
+        breakdown_line(
+            "System",
+            breakdown.system_prompt,
+            breakdown.total,
+            Color::Cyan,
+        ),
+        breakdown_line(
+            "Conversation",
+            breakdown.conversation,
+            breakdown.total,
+            Color::White,
+        ),
+        breakdown_line(
+            "Tool Outputs",
+            breakdown.tool_outputs,
+            breakdown.total,
+            Color::Yellow,
+        ),
+        breakdown_line(
+            "Context Files",
+            breakdown.context_files,
+            breakdown.total,
+            Color::Green,
+        ),
     ];
     f.render_widget(Paragraph::new(breakdown_lines), chunks[2]);
 }

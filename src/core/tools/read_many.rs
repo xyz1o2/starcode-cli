@@ -40,8 +40,16 @@ pub struct ReadManyToolInvocation {
 }
 
 impl ReadManyToolInvocation {
-    pub fn new(config: Arc<crate::core::config::Config>, params: ReadManyParams, global_state: Arc<GlobalState>) -> Self {
-        Self { config, params, global_state }
+    pub fn new(
+        config: Arc<crate::core::config::Config>,
+        params: ReadManyParams,
+        global_state: Arc<GlobalState>,
+    ) -> Self {
+        Self {
+            config,
+            params,
+            global_state,
+        }
     }
 }
 
@@ -88,7 +96,10 @@ impl FileOpResult {
 
 impl ReadManyFilesTool {
     pub fn new(config: Arc<crate::core::config::Config>, global_state: Arc<GlobalState>) -> Self {
-        Self { config, global_state }
+        Self {
+            config,
+            global_state,
+        }
     }
 
     pub async fn read_many(

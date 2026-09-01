@@ -145,9 +145,12 @@ impl ToolInvocation for MultiEditToolInvocation {
                 // Read file if not already read
                 if !file_contents.contains_key(&path) {
                     if path.exists() {
-                        let content = crate::core::utils::file_utils::read_file_with_encoding_async(&path).await.map_err(|e| {
-                            format!("Failed to read file {}: {}", edit.file_path, e)
-                        })?;
+                        let content =
+                            crate::core::utils::file_utils::read_file_with_encoding_async(&path)
+                                .await
+                                .map_err(|e| {
+                                    format!("Failed to read file {}: {}", edit.file_path, e)
+                                })?;
                         file_contents.insert(path.clone(), content);
                     } else {
                         // For new files, content is empty
@@ -247,7 +250,8 @@ impl ToolInvocation for MultiEditToolInvocation {
                             );
                         }
                     }
-                    match crate::core::utils::file_utils::read_file_with_encoding_async(path).await {
+                    match crate::core::utils::file_utils::read_file_with_encoding_async(path).await
+                    {
                         Ok(content) => {
                             backup_map.insert(path.clone(), content);
                         }

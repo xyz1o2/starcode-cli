@@ -107,9 +107,7 @@ fn find_project_root(start_dir: &Path) -> Option<PathBuf> {
         // 如果目录有上下文文件且父目录没有，也视为项目根
         if find_context_file_in_dir(current).is_some() {
             let parent = current.parent();
-            let parent_has_context = parent
-                .and_then(|p| find_context_file_in_dir(p))
-                .is_some();
+            let parent_has_context = parent.and_then(|p| find_context_file_in_dir(p)).is_some();
             if !parent_has_context {
                 return Some(current.to_path_buf());
             }
@@ -217,9 +215,20 @@ fn load_and_merge_context_files(files: &[PathBuf]) -> Option<String> {
         // 计算来源标签
         let source_label = if let Some(home) = dirs::home_dir() {
             if path.starts_with(&home) {
-                format!("User Global ({})", path.file_name().unwrap_or_default().to_string_lossy())
+                format!(
+                    "User Global ({})",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                )
             } else {
-                format!("Project ({})", path.strip_prefix(find_project_root(path.parent().unwrap_or(path)).unwrap_or_else(|| path.parent().unwrap_or(path).to_path_buf())).unwrap_or(path).display())
+                format!(
+                    "Project ({})",
+                    path.strip_prefix(
+                        find_project_root(path.parent().unwrap_or(path))
+                            .unwrap_or_else(|| path.parent().unwrap_or(path).to_path_buf())
+                    )
+                    .unwrap_or(path)
+                    .display()
+                )
             }
         } else {
             path.display().to_string()

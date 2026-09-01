@@ -63,8 +63,10 @@ impl ToolInvocation for TodoWriteInvocation {
         let todos = self.params.todos.clone();
         Box::pin(async move {
             // Update the task manager with the new todo list
-            let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let path = crate::core::tasks::manager::TaskManager::task_file_for_workspace(&workspace);
+            let workspace =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let path =
+                crate::core::tasks::manager::TaskManager::task_file_for_workspace(&workspace);
             let mut manager = crate::core::tasks::manager::TaskManager::load_from_file(&path)
                 .unwrap_or_else(|_| crate::core::tasks::manager::TaskManager::new());
 

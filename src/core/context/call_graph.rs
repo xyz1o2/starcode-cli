@@ -74,10 +74,7 @@ impl CallGraph {
         // Collect all symbols
         for fs in file_symbols {
             for sym in &fs.symbols {
-                name_index
-                    .entry(sym.name.clone())
-                    .or_default()
-                    .push(sym.id);
+                name_index.entry(sym.name.clone()).or_default().push(sym.id);
                 if sym.id >= symbols.len() {
                     symbols.resize(sym.id + 1, SymbolDef::placeholder());
                 }
@@ -104,14 +101,8 @@ impl CallGraph {
                             file_path: edge.file_path.clone(),
                             line: edge.line,
                         };
-                        calls_out
-                            .entry(edge.caller_id)
-                            .or_default()
-                            .push(callee_id);
-                        calls_in
-                            .entry(callee_id)
-                            .or_default()
-                            .push(edge.caller_id);
+                        calls_out.entry(edge.caller_id).or_default().push(callee_id);
+                        calls_in.entry(callee_id).or_default().push(edge.caller_id);
                         edges.push(resolved);
                     }
                 }
@@ -236,12 +227,7 @@ impl CallGraph {
         self.trace(start, max_depth, false)
     }
 
-    fn trace(
-        &self,
-        start: SymbolId,
-        max_depth: usize,
-        upstream: bool,
-    ) -> Vec<CallChainLevel> {
+    fn trace(&self, start: SymbolId, max_depth: usize, upstream: bool) -> Vec<CallChainLevel> {
         if max_depth == 0 {
             return Vec::new();
         }
@@ -258,15 +244,9 @@ impl CallGraph {
             }
 
             let neighbors: Vec<SymbolId> = if upstream {
-                self.calls_in
-                    .get(&current)
-                    .cloned()
-                    .unwrap_or_default()
+                self.calls_in.get(&current).cloned().unwrap_or_default()
             } else {
-                self.calls_out
-                    .get(&current)
-                    .cloned()
-                    .unwrap_or_default()
+                self.calls_out.get(&current).cloned().unwrap_or_default()
             };
 
             if neighbors.is_empty() {
@@ -384,4 +364,3 @@ pub fn format_call_chain(result: &CallChainResult) -> String {
 
     out
 }
- 

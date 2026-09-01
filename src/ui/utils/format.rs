@@ -43,10 +43,12 @@ fn summarize_json_value(v: &serde_json::Value, max: usize) -> String {
                     .replace("{count}", &arr.len().to_string())
             }
         }
-        serde_json::Value::Object(obj) => {
-            i18n::t("ui.format.fields", "{{{count} fields}}", "{{{count} fields}}")
-                .replace("{count}", &obj.len().to_string())
-        }
+        serde_json::Value::Object(obj) => i18n::t(
+            "ui.format.fields",
+            "{{{count} fields}}",
+            "{{{count} fields}}",
+        )
+        .replace("{count}", &obj.len().to_string()),
     }
 }
 
@@ -254,7 +256,11 @@ fn tool_call_brief(tc: &StarToolCall) -> String {
                 if p.is_empty() {
                     return truncate_text(&q, 200);
                 }
-                return format!("{} in {}", truncate_text(&q, 200), shorten_path_for_display(&p));
+                return format!(
+                    "{} in {}",
+                    truncate_text(&q, 200),
+                    shorten_path_for_display(&p)
+                );
             }
         }
         "find_by_name" => {
@@ -264,7 +270,11 @@ fn tool_call_brief(tc: &StarToolCall) -> String {
                 if dir.is_empty() {
                     return truncate_text(&pat, 200);
                 }
-                return format!("{} in {}", truncate_text(&pat, 200), shorten_path_for_display(&dir));
+                return format!(
+                    "{} in {}",
+                    truncate_text(&pat, 200),
+                    shorten_path_for_display(&dir)
+                );
             }
         }
         "list_directory" | "ListDir" => {
@@ -278,8 +288,7 @@ fn tool_call_brief(tc: &StarToolCall) -> String {
             }
         }
         "enter_plan_mode" => {
-            let reason = get_str("reason")
-                .unwrap_or_else(|| "".to_string());
+            let reason = get_str("reason").unwrap_or_else(|| "".to_string());
             if !reason.is_empty() {
                 return truncate_text(&reason, 220);
             }
@@ -362,10 +371,14 @@ pub fn format_tool_result(_tc: &StarToolCall, tr: &ToolResult) -> String {
     if let Some(data) = &tr.data {
         if let Some(diff) = data.get("diff").and_then(|v| v.as_str()) {
             if !diff.trim().is_empty() {
-                let mut added = 0; let mut removed = 0;
+                let mut added = 0;
+                let mut removed = 0;
                 for line in diff.lines() {
-                    if line.starts_with('+') && !line.starts_with("+++") { added += 1; }
-                    else if line.starts_with('-') && !line.starts_with("---") { removed += 1; }
+                    if line.starts_with('+') && !line.starts_with("+++") {
+                        added += 1;
+                    } else if line.starts_with('-') && !line.starts_with("---") {
+                        removed += 1;
+                    }
                 }
                 let summary = format!("+{} -{}", added, removed);
                 let d = truncate_text(diff.trim(), 2000);
@@ -374,16 +387,26 @@ pub fn format_tool_result(_tc: &StarToolCall, tr: &ToolResult) -> String {
         }
     }
 
-    let out_raw = if tr.success { tr.output.as_deref().unwrap_or("") } else { tr.error.as_deref().unwrap_or("") };
+    let out_raw = if tr.success {
+        tr.output.as_deref().unwrap_or("")
+    } else {
+        tr.error.as_deref().unwrap_or("")
+    };
     let out_clean = crate::ui::utils::text::sanitize_for_tui(out_raw);
     let out = truncate_text(&out_clean, 1200);
 
     let lines: Vec<&str> = out.trim().lines().collect();
     let n = lines.len();
 
-    if !tr.success { return truncate_text(out_raw, 100).to_string(); }
-    if n == 0 { return String::new(); }
-    if n == 1 { return out.trim().to_string(); }
+    if !tr.success {
+        return truncate_text(out_raw, 100).to_string();
+    }
+    if n == 0 {
+        return String::new();
+    }
+    if n == 1 {
+        return out.trim().to_string();
+    }
     format!("{} lines", n)
 }
 // ============================================

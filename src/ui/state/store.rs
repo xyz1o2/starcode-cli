@@ -41,7 +41,11 @@ pub struct Toast {
 #[derive(Debug, Clone)]
 pub enum PasteKind {
     Text,
-    Image { path: String, width: u32, height: u32 },
+    Image {
+        path: String,
+        width: u32,
+        height: u32,
+    },
     Files(Vec<String>),
 }
 
@@ -556,7 +560,6 @@ impl ChatState {
         }
     }
 
-   
     fn with_git_info(git_info: Option<(String, String)>) -> Self {
         let (git_branch, git_status) = git_info
             .map(|(b, s)| (Some(b), Some(s)))
@@ -749,7 +752,8 @@ impl ChatState {
             show_quick_open: false,
             quick_open_state: crate::ui::components::highlight::quick_open::QuickOpenState::new(),
             show_history_search: false,
-            history_search_state: crate::ui::components::highlight::history::HistorySearchState::new(),
+            history_search_state:
+                crate::ui::components::highlight::history::HistorySearchState::new(),
             show_theme_picker: false,
             selected_theme_index: 0,
             theme_picker_prev: None,
@@ -758,10 +762,12 @@ impl ChatState {
             show_export_dialog: false,
             export_state: crate::ui::components::highlight::export::ExportState::new(),
             show_compression_status: false,
-            compression_state: crate::ui::components::highlight::compression::CompressionState::default(),
+            compression_state:
+                crate::ui::components::highlight::compression::CompressionState::default(),
             // ============ New Feature States ============
             show_context_viz: false,
-            context_breakdown: crate::ui::components::highlight::context_viz::TokenBreakdown::default(),
+            context_breakdown:
+                crate::ui::components::highlight::context_viz::TokenBreakdown::default(),
             show_error_overlay: false,
             error_overlay_state: crate::ui::components::error_overlay::ErrorOverlayState::default(),
             show_log_selector: false,
@@ -807,7 +813,11 @@ impl ChatState {
             self.text_selection.end_entry_idx,
         ) {
             (Some(s), Some(e)) => {
-                if s <= e { (s, e) } else { (e, s) }
+                if s <= e {
+                    (s, e)
+                } else {
+                    (e, s)
+                }
             }
             _ => return None,
         };
@@ -825,17 +835,26 @@ impl ChatState {
                 continue;
             };
 
-            let line_start = if entry_idx == start_entry { start_row } else { 0 };
+            let line_start = if entry_idx == start_entry {
+                start_row
+            } else {
+                0
+            };
             let line_end = if entry_idx == end_entry {
                 end_row.min(rendered_lines.len().saturating_sub(1))
             } else {
                 rendered_lines.len().saturating_sub(1)
             };
 
-            for (i, line) in rendered_lines.iter().enumerate().take(line_end + 1).skip(line_start) {
+            for (i, line) in rendered_lines
+                .iter()
+                .enumerate()
+                .take(line_end + 1)
+                .skip(line_start)
+            {
                 // 将 Line 转换为纯文本
                 let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                
+
                 let col_start = if i == start_row && entry_idx == start_entry {
                     start_col.min(line_text.len())
                 } else {
@@ -863,7 +882,11 @@ impl ChatState {
             }
         }
 
-        if result.is_empty() { None } else { Some(result) }
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
     }
 
     pub fn update_item_height(&mut self, index: usize, height: u16) {

@@ -1,8 +1,7 @@
 /// 多Provider适配层
-/// 
+///
 /// 对标claude-code-main的多Provider支持
 /// 支持OpenAI、Anthropic、Bedrock、Vertex、Gemini、Grok等Provider
-
 pub mod bedrock;
 pub mod gemini;
 pub mod grok;
@@ -16,7 +15,7 @@ pub use vertex::{VertexConfig, VertexProvider};
 use crate::llm::{LlmClient, LlmConfig, LlmError, LlmEvent, LlmProvider};
 
 /// Provider工厂
-/// 
+///
 /// 根据配置创建相应的Provider
 pub struct ProviderFactory;
 
@@ -51,7 +50,9 @@ impl ProviderFactory {
         }
 
         // 2. 检查Vertex
-        if std::env::var("VERTEX_PROJECT_ID").is_ok() || std::env::var("GOOGLE_CLOUD_PROJECT").is_ok() {
+        if std::env::var("VERTEX_PROJECT_ID").is_ok()
+            || std::env::var("GOOGLE_CLOUD_PROJECT").is_ok()
+        {
             return Ok(Box::new(Self::create_vertex()?));
         }
 
@@ -65,6 +66,9 @@ impl ProviderFactory {
             return Ok(Box::new(Self::create_grok()?));
         }
 
-        Err("No provider configuration found. Please set the appropriate environment variables.".to_string())
+        Err(
+            "No provider configuration found. Please set the appropriate environment variables."
+                .to_string(),
+        )
     }
 }

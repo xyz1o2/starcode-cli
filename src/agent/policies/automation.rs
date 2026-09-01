@@ -123,4 +123,3 @@ pub fn detect_skip_verification_pattern(input: &str) -> Option<&'static str> {
 pub fn should_skip_verification(input: &str) -> bool {
     detect_skip_verification_pattern(input).is_some()
 }
- 

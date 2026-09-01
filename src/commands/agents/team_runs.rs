@@ -1,5 +1,7 @@
+use super::team_definitions::{
+    find_team_agent, normalize_agent_name, resolve_team_agents, team_run_mode_label,
+};
 use super::team_definitions::{validate_team_run_id, TEAM_AGENT_CATALOG};
-use super::team_definitions::{normalize_agent_name, find_team_agent, resolve_team_agents, team_run_mode_label};
 use super::*;
 
 pub(super) async fn list_agent_team_catalog(ctx: CommandContext<'_>) -> CommandResult {
@@ -74,10 +76,13 @@ pub(super) async fn list_agent_team_catalog(ctx: CommandContext<'_>) -> CommandR
     lines.push("".to_string());
     lines.push("Examples:".to_string());
     lines.push(
-        "- `/agents team run --agents search,analyzer --target src trace command execution flow`".to_string(),
+        "- `/agents team run --agents search,analyzer --target src trace command execution flow`"
+            .to_string(),
     );
     lines.push("- `/agents team save rust-refactor --agents analyzer,editor --target src --max-steps 6 --description \"Rust refactoring template\"`".to_string());
-    lines.push("- `/agents team run --team rust-refactor refactor provider parsing flow`".to_string());
+    lines.push(
+        "- `/agents team run --team rust-refactor refactor provider parsing flow`".to_string(),
+    );
     lines.push("- `/agents team run --agents analyzer,editor --mode pipeline --rounds 2 先分析后修改并复查`".to_string());
     lines.push("- `/agents team apply <run-id> --strategy manual`".to_string());
     lines.push("- `/agents team apply <run-id> --strategy ours --dry-run`".to_string());
@@ -89,14 +94,20 @@ pub(super) async fn list_agent_team_catalog(ctx: CommandContext<'_>) -> CommandR
             .to_string(),
     );
 
-    ctx.state
-        .chat_history
-        .push(ChatEntry::assistant(lines.join("
-")).with_streaming(false));
+    ctx.state.chat_history.push(
+        ChatEntry::assistant(lines.join(
+            "
+",
+        ))
+        .with_streaming(false),
+    );
     Ok(())
 }
 
-pub(super) async fn list_team_runs(ctx: CommandContext<'_>, args: AgentTeamRunsArgs) -> CommandResult {
+pub(super) async fn list_team_runs(
+    ctx: CommandContext<'_>,
+    args: AgentTeamRunsArgs,
+) -> CommandResult {
     if args.limit == 0 {
         return Err("limit must be >= 1".to_string());
     }
@@ -123,7 +134,10 @@ pub(super) async fn list_team_runs(ctx: CommandContext<'_>, args: AgentTeamRunsA
     Ok(())
 }
 
-pub(super) async fn show_team_run(ctx: CommandContext<'_>, args: AgentTeamShowRunArgs) -> CommandResult {
+pub(super) async fn show_team_run(
+    ctx: CommandContext<'_>,
+    args: AgentTeamShowRunArgs,
+) -> CommandResult {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let storage = crate::core::config::storage::Storage::new(cwd);
     let run_id = validate_team_run_id(&args.run_id)?;
@@ -138,11 +152,15 @@ pub(super) async fn show_team_run(ctx: CommandContext<'_>, args: AgentTeamShowRu
     if args.json {
         let text = serde_json::to_string_pretty(&run)
             .map_err(|e| format!("failed to serialize run record: {}", e))?;
-        ctx.state
-            .chat_history
-            .push(ChatEntry::assistant(format!("```json
+        ctx.state.chat_history.push(
+            ChatEntry::assistant(format!(
+                "```json
 {}
-```", text)).with_streaming(false));
+```",
+                text
+            ))
+            .with_streaming(false),
+        );
         return Ok(());
     }
 
@@ -152,7 +170,10 @@ pub(super) async fn show_team_run(ctx: CommandContext<'_>, args: AgentTeamShowRu
     Ok(())
 }
 
-pub(super) async fn clean_team_runs(ctx: CommandContext<'_>, args: AgentTeamCleanArgs) -> CommandResult {
+pub(super) async fn clean_team_runs(
+    ctx: CommandContext<'_>,
+    args: AgentTeamCleanArgs,
+) -> CommandResult {
     if !args.all
         && args
             .run_id
@@ -257,9 +278,12 @@ pub(super) async fn clean_team_runs(ctx: CommandContext<'_>, args: AgentTeamClea
         ok_count, warn_count
     ));
 
-    ctx.state
-        .chat_history
-        .push(ChatEntry::assistant(lines.join("
-")).with_streaming(false));
+    ctx.state.chat_history.push(
+        ChatEntry::assistant(lines.join(
+            "
+",
+        ))
+        .with_streaming(false),
+    );
     Ok(())
 }

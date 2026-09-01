@@ -81,9 +81,7 @@ pub fn is_thinking_model(model_name: &str) -> bool {
     }
 
     // OpenAI o-series models (o1, o3, o4-mini, etc.)
-    if clean_name.starts_with("o1")
-        || clean_name.starts_with("o3")
-        || clean_name.starts_with("o4")
+    if clean_name.starts_with("o1") || clean_name.starts_with("o3") || clean_name.starts_with("o4")
     {
         return true;
     }
@@ -140,7 +138,8 @@ pub fn thinking_capability(model_name: &str) -> ThinkingCapability {
     }
 
     // OpenAI o-series — reasoning effort parameter (low/medium/high)
-    if clean_name.starts_with("o1") || clean_name.starts_with("o3") || clean_name.starts_with("o4") {
+    if clean_name.starts_with("o1") || clean_name.starts_with("o3") || clean_name.starts_with("o4")
+    {
         return ThinkingCapability::Granular;
     }
 
@@ -179,10 +178,12 @@ pub fn thinking_capability(model_name: &str) -> ThinkingCapability {
     }
 
     // Generic thinking/reasoner/keyword models — binary
-    if clean_name.contains("thinking") || clean_name.contains("reasoner") || clean_name.contains("reasoning") {
+    if clean_name.contains("thinking")
+        || clean_name.contains("reasoner")
+        || clean_name.contains("reasoning")
+    {
         return ThinkingCapability::Binary;
     }
 
     ThinkingCapability::None
 }
- 

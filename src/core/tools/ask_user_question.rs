@@ -27,7 +27,9 @@ pub struct AskUserQuestionTool {
 /// Pre-process ask_user_question params to handle LLM passing options as JSON string.
 /// Some LLMs pass `options` as a JSON string like `"[{\"label\": \"Yes\"}]"` instead
 /// of an actual array. This function detects and converts such cases.
-fn preprocess_ask_user_params(params: serde_json::Value) -> Result<AskUserQuestionParams, Box<dyn std::error::Error + Send + Sync>> {
+fn preprocess_ask_user_params(
+    params: serde_json::Value,
+) -> Result<AskUserQuestionParams, Box<dyn std::error::Error + Send + Sync>> {
     let mut params = params;
 
     // If options is a string, try to parse it as JSON
@@ -150,7 +152,12 @@ impl AskUserQuestionInvocation {
     fn format_options_for_display(&self) -> String {
         let mut output = String::new();
         for (i, option) in self.params.options.iter().enumerate() {
-            output.push_str(&format!("  {}. **{}** — {}\n", i + 1, option.label, option.description));
+            output.push_str(&format!(
+                "  {}. **{}** — {}\n",
+                i + 1,
+                option.label,
+                option.description
+            ));
         }
         if self.params.multi_select {
             output.push_str("\n(You may select multiple options)\n");
@@ -251,8 +258,10 @@ impl ToolInvocation for AskUserQuestionInvocation {
 
         Box::pin(async move {
             let stored = outcome.lock().map_err(|e| {
-                Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-                    as Box<dyn std::error::Error>
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                )) as Box<dyn std::error::Error>
             })?;
 
             match stored.as_ref() {

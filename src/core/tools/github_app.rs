@@ -91,7 +91,9 @@ impl ToolInvocation for GithubAppInvocation {
                 "install" => {
                     let repo = match params.repo {
                         Some(r) => r,
-                        None => return Ok(Self::error_result("Missing repo parameter".to_string())),
+                        None => {
+                            return Ok(Self::error_result("Missing repo parameter".to_string()))
+                        }
                     };
                     Ok(ToolResult {
                         llm_content: Some(format!(
@@ -115,7 +117,15 @@ impl ToolInvocation for GithubAppInvocation {
                     })
                 }
                 "list" => {
-                    match invocation.run_gh(&["api", "user/installations", "--jq", ".installations[] | {id, app_slug, account: .account.login}"]).await {
+                    match invocation
+                        .run_gh(&[
+                            "api",
+                            "user/installations",
+                            "--jq",
+                            ".installations[] | {id, app_slug, account: .account.login}",
+                        ])
+                        .await
+                    {
                         Ok(output) => Ok(ToolResult {
                             llm_content: Some(output.clone()),
                             return_display: Some("Listed GitHub App installations".to_string()),
@@ -126,18 +136,16 @@ impl ToolInvocation for GithubAppInvocation {
                         Err(e) => Ok(Self::error_result(e)),
                     }
                 }
-                "status" => {
-                    match invocation.run_gh(&["auth", "status"]).await {
-                        Ok(output) => Ok(ToolResult {
-                            llm_content: Some(output.clone()),
-                            return_display: Some("GitHub CLI auth status".to_string()),
-                            output,
-                            error: None,
-                            data: None,
-                        }),
-                        Err(e) => Ok(Self::error_result(e)),
-                    }
-                }
+                "status" => match invocation.run_gh(&["auth", "status"]).await {
+                    Ok(output) => Ok(ToolResult {
+                        llm_content: Some(output.clone()),
+                        return_display: Some("GitHub CLI auth status".to_string()),
+                        output,
+                        error: None,
+                        data: None,
+                    }),
+                    Err(e) => Ok(Self::error_result(e)),
+                },
                 _ => Ok(Self::error_result(format!(
                     "Unknown action: {}. Valid: install, list, status",
                     params.action

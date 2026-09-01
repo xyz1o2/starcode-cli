@@ -1,17 +1,18 @@
 /// xAI Grok Provider适配器
-/// 
+///
 /// 对标claude-code-main的grok/
 /// 支持xAI Grok API
-
 use async_trait::async_trait;
 use futures::Stream;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::pin::Pin;
-use serde::{Deserialize, Serialize};
 
 use super::{LlmClient, LlmConfig, LlmError, LlmEvent, LlmProvider};
 use crate::llm::ModelInfo;
-use crate::types::{StarMessage, StarResponse, StarChoice, StarTool, StarToolCall, StarToolCallFunction, StarUsage};
+use crate::types::{
+    StarChoice, StarMessage, StarResponse, StarTool, StarToolCall, StarToolCallFunction, StarUsage,
+};
 
 /// Grok配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,11 +36,10 @@ impl GrokConfig {
             .or_else(|_| std::env::var("XAI_API_KEY"))
             .map_err(|_| "GROK_API_KEY or XAI_API_KEY not set".to_string())?;
 
-        let model = std::env::var("GROK_MODEL")
-            .unwrap_or_else(|_| "grok-2".to_string());
+        let model = std::env::var("GROK_MODEL").unwrap_or_else(|_| "grok-2".to_string());
 
-        let api_endpoint = std::env::var("GROK_API_ENDPOINT")
-            .unwrap_or_else(|_| "https://api.x.ai".to_string());
+        let api_endpoint =
+            std::env::var("GROK_API_ENDPOINT").unwrap_or_else(|_| "https://api.x.ai".to_string());
 
         let max_tokens = std::env::var("GROK_MAX_TOKENS")
             .ok()
@@ -72,7 +72,10 @@ impl GrokProvider {
     /// 创建新的Grok Provider
     pub fn new(config: GrokConfig) -> Self {
         let http_client = reqwest::Client::new();
-        Self { config, http_client }
+        Self {
+            config,
+            http_client,
+        }
     }
 
     /// 从环境变量创建
@@ -91,12 +94,15 @@ impl LlmClient for GrokProvider {
     ) -> Result<StarResponse, Box<dyn Error + Send + Sync>> {
         let url = format!("{}/v1/chat/completions", self.config.api_endpoint);
 
-        let messages_json: Vec<serde_json::Value> = messages.iter().map(|m| {
-            serde_json::json!({
-                "role": m.role,
-                "content": m.content
+        let messages_json: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": m.role,
+                    "content": m.content
+                })
             })
-        }).collect();
+            .collect();
 
         let mut request_body = serde_json::json!({
             "model": self.config.model,
@@ -105,7 +111,8 @@ impl LlmClient for GrokProvider {
             "temperature": self.config.temperature
         });
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json")
@@ -119,7 +126,9 @@ impl LlmClient for GrokProvider {
             return Err(Box::new(LlmError::ProviderError(error_text)));
         }
 
-        let response_body: serde_json::Value = response.json().await
+        let response_body: serde_json::Value = response
+            .json()
+            .await
             .map_err(|e| LlmError::ParsingError(e.to_string()))?;
 
         let content = response_body["choices"][0]["message"]["content"]
@@ -128,8 +137,12 @@ impl LlmClient for GrokProvider {
             .to_string();
 
         let usage = StarUsage {
-            prompt_tokens: response_body["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-            completion_tokens: response_body["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
+            prompt_tokens: response_body["usage"]["prompt_tokens"]
+                .as_u64()
+                .unwrap_or(0) as u32,
+            completion_tokens: response_body["usage"]["completion_tokens"]
+                .as_u64()
+                .unwrap_or(0) as u32,
             total_tokens: response_body["usage"]["total_tokens"].as_u64().unwrap_or(0) as u32,
             ..Default::default()
         };

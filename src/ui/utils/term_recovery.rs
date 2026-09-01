@@ -6,7 +6,6 @@
 /// - Raw mode failures
 /// - Alternate screen failures
 /// - Write errors to stdout
-
 use std::io::Write;
 use std::time::{Duration, Instant};
 
@@ -27,8 +26,8 @@ pub fn attempt_recovery() -> TermHealth {
     use std::io::stdout;
 
     // Step 1: Try to reset terminal state
-    let _ = stdout().write_all(b"\x1b[0m");       // reset attributes
-    let _ = stdout().write_all(b"\x1b[?25h");     // show cursor
+    let _ = stdout().write_all(b"\x1b[0m"); // reset attributes
+    let _ = stdout().write_all(b"\x1b[?25h"); // show cursor
     let _ = crossterm::execute!(stdout(), crossterm::event::DisableBracketedPaste);
     let _ = stdout().flush();
 
@@ -82,12 +81,10 @@ where
                     terminal.draw(&mut draw_fn)?;
                     Ok(())
                 }
-                TermHealth::Broken => {
-                    Err(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Terminal is broken, draw failed: {}", e),
-                    )))
-                }
+                TermHealth::Broken => Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Terminal is broken, draw failed: {}", e),
+                ))),
             }
         }
     }

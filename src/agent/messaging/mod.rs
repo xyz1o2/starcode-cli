@@ -4,4 +4,4 @@ pub mod router;
 
 pub use events::AgentEvent;
 pub use queue::AsyncMessageQueue;
-pub use router::{MessageRouter, RoutedMessage, MessageTarget, MessageType, RouteResult};
+pub use router::{MessageRouter, MessageTarget, MessageType, RouteResult, RoutedMessage};

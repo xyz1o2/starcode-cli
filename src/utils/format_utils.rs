@@ -1,5 +1,5 @@
 /// 格式化工具
-/// 
+///
 /// 对标claude-code-main的src/utils/format.ts
 
 /// 格式化文件大小
@@ -36,14 +36,14 @@ pub fn format_duration(ms: u64) -> String {
 pub fn format_number(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::new();
-    
+
     for (i, c) in s.chars().rev().enumerate() {
         if i > 0 && i % 3 == 0 {
             result.push(',');
         }
         result.push(c);
     }
-    
+
     result.chars().rev().collect()
 }
 
@@ -103,7 +103,7 @@ pub fn format_list(items: &[String], separator: &str) -> String {
 /// 格式化表格
 pub fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
     let mut result = String::new();
-    
+
     // 计算列宽
     let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
     for row in rows {
@@ -113,7 +113,7 @@ pub fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
             }
         }
     }
-    
+
     // 打印表头
     for (i, header) in headers.iter().enumerate() {
         if i > 0 {
@@ -122,16 +122,16 @@ pub fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
         result.push_str(&pad_right(header, widths[i], ' '));
     }
     result.push('\n');
-    
+
     // 打印分隔线
     for (i, width) in widths.iter().enumerate() {
         if i > 0 {
             result.push_str("-+-");
         }
-            result.push_str(&repeat("-", *width));
+        result.push_str(&repeat("-", *width));
     }
     result.push('\n');
-    
+
     // 打印数据行
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
@@ -142,7 +142,7 @@ pub fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
         }
         result.push('\n');
     }
-    
+
     result
 }
 

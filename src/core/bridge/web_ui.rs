@@ -1,5 +1,4 @@
 /// Bridge Web UI服务器
-
 use serde::{Deserialize, Serialize};
 
 /// Web UI配置

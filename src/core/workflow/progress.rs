@@ -52,11 +52,13 @@ impl WorkflowProgress {
         self.workflow_name = workflow_name.to_string();
         self.total_steps = total_steps;
         self.current_step = 0;
-        self.step_statuses = (0..total_steps).map(|i| StepProgress {
-            name: format!("Step {}", i + 1),
-            status: StepProgressStatus::Pending,
-            progress: 0,
-        }).collect();
+        self.step_statuses = (0..total_steps)
+            .map(|i| StepProgress {
+                name: format!("Step {}", i + 1),
+                status: StepProgressStatus::Pending,
+                progress: 0,
+            })
+            .collect();
         self.started_at = now_millis();
     }
 
@@ -101,7 +103,9 @@ impl WorkflowProgress {
             return 0;
         }
 
-        let completed = self.step_statuses.iter()
+        let completed = self
+            .step_statuses
+            .iter()
             .filter(|s| s.status == StepProgressStatus::Completed)
             .count();
 

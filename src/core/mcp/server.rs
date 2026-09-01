@@ -518,10 +518,7 @@ impl MCPServer {
             .into());
         }
 
-        let delay_ms = std::cmp::min(
-            self.base_retry_delay_ms * (1u64 << self.retry_count),
-            30000,
-        );
+        let delay_ms = std::cmp::min(self.base_retry_delay_ms * (1u64 << self.retry_count), 30000);
 
         if let Some(last) = self.last_retry_at {
             let now = chrono::Utc::now().timestamp_millis();
@@ -570,10 +567,7 @@ impl MCPServer {
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "Warning: Failed to read skill resource {}: {}",
-                        uri, e
-                    );
+                    eprintln!("Warning: Failed to read skill resource {}: {}", uri, e);
                 }
             }
         }

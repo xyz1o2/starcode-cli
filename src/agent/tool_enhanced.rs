@@ -109,18 +109,11 @@ pub struct ToolContentEvent {
 
 impl ToolContentEventRecorder {
     pub fn new() -> Self {
-        Self {
-            events: Vec::new(),
-        }
+        Self { events: Vec::new() }
     }
 
     /// 记录工具内容事件
-    pub fn record_event(
-        &mut self,
-        tool_name: &str,
-        input: &Value,
-        output: &Value,
-    ) {
+    pub fn record_event(&mut self, tool_name: &str, input: &Value, output: &Value) {
         let mut attributes = HashMap::new();
 
         match tool_name {
@@ -357,7 +350,10 @@ impl GitCommitIdParser {
                 if start < end {
                     let commit_id = &trimmed[start..end];
                     // 验证是否是有效的commit ID（40个十六进制字符）
-                    if commit_id.len() >= 7 && commit_id.len() <= 40 && commit_id.chars().all(|c| c.is_ascii_hexdigit()) {
+                    if commit_id.len() >= 7
+                        && commit_id.len() <= 40
+                        && commit_id.chars().all(|c| c.is_ascii_hexdigit())
+                    {
                         return Some(commit_id.to_string());
                     }
                 }
@@ -371,7 +367,10 @@ impl GitCommitIdParser {
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
                 if parts.len() >= 2 {
                     let commit_id = parts[1];
-                    if commit_id.len() >= 7 && commit_id.len() <= 40 && commit_id.chars().all(|c| c.is_ascii_hexdigit()) {
+                    if commit_id.len() >= 7
+                        && commit_id.len() <= 40
+                        && commit_id.chars().all(|c| c.is_ascii_hexdigit())
+                    {
                         return Some(commit_id.to_string());
                     }
                 }
@@ -439,8 +438,11 @@ impl OTLPLogger {
         attributes.insert("tool_name".to_string(), tool_name.to_string());
         attributes.insert("success".to_string(), success.to_string());
         attributes.insert("duration_ms".to_string(), duration_ms.to_string());
-        attributes.insert("tool_result_size_bytes".to_string(), tool_result_size_bytes.to_string());
-        
+        attributes.insert(
+            "tool_result_size_bytes".to_string(),
+            tool_result_size_bytes.to_string(),
+        );
+
         if let Some(source) = decision_source {
             attributes.insert("decision_source".to_string(), source.to_string());
         }
@@ -541,18 +543,17 @@ impl ToolExecutionEnhancer {
         }
 
         // 6. 记录OTLP日志
-        self.otlp_logger.log_tool_result(
-            tool_name,
-            success,
-            duration_ms,
-            result_size,
-            None,
-            None,
-        );
+        self.otlp_logger
+            .log_tool_result(tool_name, success, duration_ms, result_size, None, None);
     }
 
     /// 获取工具使用摘要
-    pub fn get_tool_summary(&self, tool_name: &str, input: &Value, output: Option<&str>) -> Option<String> {
+    pub fn get_tool_summary(
+        &self,
+        tool_name: &str,
+        input: &Value,
+        output: Option<&str>,
+    ) -> Option<String> {
         ToolUseSummaryGenerator::generate_summary(tool_name, input, output)
     }
 
@@ -600,7 +601,7 @@ mod tests {
         let input = serde_json::json!({
             "file_path": "/tmp/test.txt"
         });
-        
+
         let summary = ToolUseSummaryGenerator::generate_summary("Read", &input, None);
         assert_eq!(summary, Some("Reading: /tmp/test.txt".to_string()));
     }
@@ -610,7 +611,7 @@ mod tests {
         let mut recorder = ToolContentEventRecorder::new();
         let input = serde_json::json!({"file_path": "/tmp/test.txt"});
         let output = serde_json::json!({"content": "test content"});
-        
+
         recorder.record_event("Read", &input, &output);
         assert_eq!(recorder.get_events().len(), 1);
     }
@@ -621,7 +622,7 @@ mod tests {
         let output = serde_json::json!({
             "structured_output": {"key": "value"}
         });
-        
+
         capture.capture("test_tool", "tool1", &output);
         assert_eq!(capture.get_outputs().len(), 1);
     }
@@ -632,7 +633,7 @@ mod tests {
             "key": "value",
             "nested": {"a": "b"}
         });
-        
+
         let size = ToolResultSizeCalculator::calculate(&content);
         assert!(size > 0);
     }
@@ -649,7 +650,7 @@ mod tests {
         let mut logger = OTLPLogger::new();
         let mut attributes = HashMap::new();
         attributes.insert("key".to_string(), "value".to_string());
-        
+
         logger.log_event("test_event", attributes);
         assert_eq!(logger.get_logs().len(), 1);
     }

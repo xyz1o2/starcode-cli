@@ -246,8 +246,16 @@ impl ToolInvocation for PowerShellToolInvocation {
                     let llm_content = format!(
                         "PowerShell Command: {}\nOutput: {}\nError: {}\nExit Code: {}",
                         params.command,
-                        if stdout_output.is_empty() { "(empty)" } else { &stdout_output },
-                        if stderr_output.is_empty() { "(none)" } else { &stderr_output },
+                        if stdout_output.is_empty() {
+                            "(empty)"
+                        } else {
+                            &stdout_output
+                        },
+                        if stderr_output.is_empty() {
+                            "(none)"
+                        } else {
+                            &stderr_output
+                        },
                         status.code().unwrap_or(-1)
                     );
 
@@ -289,7 +297,10 @@ impl ToolInvocation for PowerShellToolInvocation {
                             "PowerShell command timed out after {}s: {}",
                             params.timeout, params.command
                         )),
-                        return_display: Some(format!("Command timed out after {}s", params.timeout)),
+                        return_display: Some(format!(
+                            "Command timed out after {}s",
+                            params.timeout
+                        )),
                         output: stdout_output,
                         error: Some(crate::core::tools::tools::ToolError {
                             error_type: "timeout".to_string(),

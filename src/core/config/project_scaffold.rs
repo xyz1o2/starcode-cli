@@ -294,4 +294,3 @@ fn extension_manifest_template() -> &'static str {
 }
 "#
 }
- 

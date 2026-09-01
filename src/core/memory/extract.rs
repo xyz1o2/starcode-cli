@@ -1,8 +1,7 @@
 /// 记忆提取系统
-/// 
+///
 /// 对标claude-code-main的src/services/extractMemories/
 /// 自动从对话中提取有价值的记忆信息
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -86,8 +85,7 @@ impl MemoryExtractorConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(1000);
 
-        let language = std::env::var("STAR_MEMORY_LANGUAGE")
-            .unwrap_or_else(|_| "en".to_string());
+        let language = std::env::var("STAR_MEMORY_LANGUAGE").unwrap_or_else(|_| "en".to_string());
 
         Self {
             enabled,
@@ -99,7 +97,7 @@ impl MemoryExtractorConfig {
 }
 
 /// 记忆提取器
-/// 
+///
 /// 从对话历史中自动提取有价值的记忆
 pub struct MemoryExtractor {
     config: MemoryExtractorConfig,
@@ -180,7 +178,11 @@ impl MemoryExtractor {
         // 添加到记忆列表
         for memory in &extracted {
             self.memories.push(memory.clone());
-            *self.stats.memories_by_type.entry(memory.memory_type.clone()).or_insert(0) += 1;
+            *self
+                .stats
+                .memories_by_type
+                .entry(memory.memory_type.clone())
+                .or_insert(0) += 1;
         }
 
         self.stats.total_extractions += 1;
@@ -195,8 +197,15 @@ impl MemoryExtractor {
 
         // 检测偏好关键词
         let preference_indicators = [
-            "i prefer", "i like", "i want", "please use", "always use",
-            "don't use", "never use", "my preference", "i usually",
+            "i prefer",
+            "i like",
+            "i want",
+            "please use",
+            "always use",
+            "don't use",
+            "never use",
+            "my preference",
+            "i usually",
         ];
 
         for indicator in &preference_indicators {
@@ -218,13 +227,22 @@ impl MemoryExtractor {
     }
 
     /// 提取项目知识
-    fn extract_project_knowledge(&self, content: &str, session_id: &str) -> Option<ExtractedMemory> {
+    fn extract_project_knowledge(
+        &self,
+        content: &str,
+        session_id: &str,
+    ) -> Option<ExtractedMemory> {
         let content_lower = content.to_lowercase();
 
         // 检测架构决策
         let architecture_indicators = [
-            "the architecture", "we use", "the project uses", "this is because",
-            "the reason for", "we decided", "the design",
+            "the architecture",
+            "we use",
+            "the project uses",
+            "this is because",
+            "the reason for",
+            "we decided",
+            "the design",
         ];
 
         for indicator in &architecture_indicators {
@@ -279,7 +297,8 @@ impl MemoryExtractor {
 
     /// 按类型获取记忆
     pub fn memories_by_type(&self, memory_type: &MemoryType) -> Vec<&ExtractedMemory> {
-        self.memories.iter()
+        self.memories
+            .iter()
             .filter(|m| m.memory_type == *memory_type)
             .collect()
     }

@@ -125,7 +125,14 @@ fn build_setting_lines(state: &ChatState, selected: usize) -> Vec<ListItem<'stat
             };
             let line = Line::from(vec![
                 Span::styled(format!("{:<18}", item.label), style),
-                Span::styled(value, style.fg(if is_selected { Color::Black } else { Color::Gray })),
+                Span::styled(
+                    value,
+                    style.fg(if is_selected {
+                        Color::Black
+                    } else {
+                        Color::Gray
+                    }),
+                ),
             ]);
             ListItem::new(line)
         })

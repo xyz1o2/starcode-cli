@@ -30,8 +30,10 @@ pub struct TerminalCaptureInvocation {
 
 impl ToolInvocation for TerminalCaptureInvocation {
     fn get_description(&self) -> String {
-        format!("Capture terminal output ({} lines)", 
-            self.params.lines.unwrap_or(50))
+        format!(
+            "Capture terminal output ({} lines)",
+            self.params.lines.unwrap_or(50)
+        )
     }
 
     fn tool_locations(&self) -> Vec<ToolLocation> {
@@ -63,7 +65,10 @@ impl ToolInvocation for TerminalCaptureInvocation {
             let content = content + &"Example output line\n".repeat(lines as usize);
 
             Ok(ToolResult {
-                llm_content: Some(format!("Captured {} lines from terminal panel '{}'", lines, panel_id)),
+                llm_content: Some(format!(
+                    "Captured {} lines from terminal panel '{}'",
+                    lines, panel_id
+                )),
                 return_display: Some(format!("Terminal captured: {} lines", lines)),
                 output: serde_json::to_string(&TerminalCaptureOutput {
                     content: content.clone(),

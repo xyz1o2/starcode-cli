@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 
 /// 工具序列学习器
-/// 
+///
 /// 记录成功的工具调用序列，用于上下文感知的工具建议
 #[derive(Debug, Clone)]
 pub struct ToolSequenceLearner {
@@ -45,7 +45,8 @@ impl ToolSequenceLearner {
 
     /// 记录失败的工具调用
     pub fn record_failure(&mut self, tool_name: &str, error_type: &str) {
-        let tool_failures = self.failed_tools
+        let tool_failures = self
+            .failed_tools
             .entry(tool_name.to_string())
             .or_insert_with(HashMap::new);
         *tool_failures.entry(error_type.to_string()).or_insert(0) += 1;
@@ -146,7 +147,8 @@ impl ToolSequenceLearner {
             if input.contains(keyword) {
                 for tool in tools {
                     let tool_string = tool.to_string();
-                    if available_tools.contains(&tool_string) && !suggestions.contains(&tool_string) {
+                    if available_tools.contains(&tool_string) && !suggestions.contains(&tool_string)
+                    {
                         suggestions.push(tool_string);
                     }
                 }
@@ -172,7 +174,8 @@ impl ToolSequenceLearner {
     pub fn cleanup(&mut self) {
         // 保留最近的成功序列
         let threshold = 2;
-        self.successful_sequences.retain(|_, count| *count >= threshold);
+        self.successful_sequences
+            .retain(|_, count| *count >= threshold);
 
         // 清理旧的失败记录
         self.failed_tools.retain(|_, failures| {

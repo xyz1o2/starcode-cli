@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
 
 /// 事件类型
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -112,7 +112,7 @@ impl Event {
 }
 
 /// 事件日志器
-/// 
+///
 /// 记录和管理系统事件
 pub struct EventLogger {
     /// 事件缓冲区
@@ -168,7 +168,8 @@ impl EventLogger {
 
     /// 获取指定类型的事件
     pub fn events_by_type(&self, event_type: &EventType) -> Vec<&Event> {
-        self.buffer.iter()
+        self.buffer
+            .iter()
             .filter(|e| &e.event_type == event_type)
             .collect()
     }
@@ -208,7 +209,7 @@ impl EventLogger {
 }
 
 /// 事件日志管理器
-/// 
+///
 /// 管理多个事件日志器和事件处理
 pub struct EventLogManager {
     /// 主日志器
@@ -244,7 +245,7 @@ impl EventFilter {
         };
 
         let matches = type_matches && tag_matches;
-        
+
         if self.include {
             matches
         } else {
@@ -257,7 +258,7 @@ impl EventFilter {
 pub trait EventHandler: Send + Sync {
     /// 处理事件
     fn handle(&self, event: &Event);
-    
+
     /// 处理器名称
     fn name(&self) -> &str;
 }

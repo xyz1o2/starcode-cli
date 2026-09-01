@@ -1,5 +1,4 @@
 /// 目标提示词
-
 use super::Goal;
 
 /// 目标提示词管理器
@@ -13,10 +12,7 @@ impl GoalPrompts {
 
     /// 生成目标提示词
     pub fn generate_goal_prompt(&self, goal: &Goal) -> String {
-        let mut prompt = format!(
-            "## Current Goal: {}\n\n",
-            goal.title
-        );
+        let mut prompt = format!("## Current Goal: {}\n\n", goal.title);
 
         if let Some(description) = &goal.description {
             prompt.push_str(&format!("**Description:** {}\n\n", description));

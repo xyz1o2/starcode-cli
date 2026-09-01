@@ -1,6 +1,5 @@
 use crate::core::tools::tools::{
-    ToolError,
-    BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation, ToolResult,
+    BaseDeclarativeTool, Kind, ToolError, ToolInvocation, ToolLocation, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 
@@ -57,7 +56,11 @@ impl ToolInvocation for GoalInvocation {
             "update" => format!(
                 "Update goal: {}{}",
                 self.params.status.as_deref().unwrap_or("unknown"),
-                self.params.reason.as_deref().map(|r| format!(" — {}", r)).unwrap_or_default()
+                self.params
+                    .reason
+                    .as_deref()
+                    .map(|r| format!(" — {}", r))
+                    .unwrap_or_default()
             ),
             _ => "Goal operation".to_string(),
         }
@@ -92,12 +95,18 @@ impl ToolInvocation for GoalInvocation {
                 "get" => {
                     // In a real implementation, this would read from goal state
                     Ok(ToolResult {
-                        llm_content: Some("No active goal. The user can set one with `/goal <objective>`.".to_string()),
+                        llm_content: Some(
+                            "No active goal. The user can set one with `/goal <objective>`."
+                                .to_string(),
+                        ),
                         return_display: Some("No active goal".to_string()),
                         output: serde_json::to_string(&GoalOutput {
                             success: true,
                             goal: None,
-                            message: Some("No active goal. The user can set one with `/goal <objective>`.".to_string()),
+                            message: Some(
+                                "No active goal. The user can set one with `/goal <objective>`."
+                                    .to_string(),
+                            ),
                             report: None,
                             error: None,
                         })?,
@@ -129,12 +138,18 @@ impl ToolInvocation for GoalInvocation {
                         "blocked" => {
                             // In a real implementation, this would record blocked attempt
                             Ok(ToolResult {
-                                llm_content: Some(format!("Goal marked as blocked. Reason: {}", reason)),
+                                llm_content: Some(format!(
+                                    "Goal marked as blocked. Reason: {}",
+                                    reason
+                                )),
                                 return_display: Some("Goal blocked".to_string()),
                                 output: serde_json::to_string(&GoalOutput {
                                     success: true,
                                     goal: None,
-                                    message: Some(format!("Goal marked as blocked. Reason: {}", reason)),
+                                    message: Some(format!(
+                                        "Goal marked as blocked. Reason: {}",
+                                        reason
+                                    )),
                                     report: None,
                                     error: None,
                                 })?,
@@ -143,16 +158,25 @@ impl ToolInvocation for GoalInvocation {
                             })
                         }
                         _ => Ok(ToolResult {
-                            llm_content: Some(format!("Invalid status: {}. Use 'complete' or 'blocked'", status)),
+                            llm_content: Some(format!(
+                                "Invalid status: {}. Use 'complete' or 'blocked'",
+                                status
+                            )),
                             return_display: Some(format!("Invalid status: {}", status)),
                             output: serde_json::to_string(&GoalOutput {
                                 success: false,
                                 goal: None,
                                 message: None,
                                 report: None,
-                                error: Some(format!("Invalid status: {}. Use 'complete' or 'blocked'", status)),
+                                error: Some(format!(
+                                    "Invalid status: {}. Use 'complete' or 'blocked'",
+                                    status
+                                )),
                             })?,
-                            error: Some(ToolError { error_type: "validation".to_string(), message: format!("Invalid status: {}", status) }),
+                            error: Some(ToolError {
+                                error_type: "validation".to_string(),
+                                message: format!("Invalid status: {}", status),
+                            }),
                             data: None,
                         }),
                     }
@@ -167,7 +191,10 @@ impl ToolInvocation for GoalInvocation {
                         report: None,
                         error: Some(format!("Unknown action: {}. Use 'get' or 'update'", action)),
                     })?,
-                    error: Some(ToolError { error_type: "validation".to_string(), message: format!("Unknown action: {}", action) }),
+                    error: Some(ToolError {
+                        error_type: "validation".to_string(),
+                        message: format!("Unknown action: {}", action),
+                    }),
                     data: None,
                 }),
             }

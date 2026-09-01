@@ -1,7 +1,6 @@
-/// Bridge API
-
-use super::BridgeManager;
 use super::message::{BridgeMessage, MessageType};
+/// Bridge API
+use super::BridgeManager;
 
 /// Bridge API
 pub struct BridgeApi {
@@ -16,9 +15,13 @@ impl BridgeApi {
     }
 
     /// 执行命令
-    pub async fn execute_command(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, ApiError> {
+    pub async fn execute_command(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, ApiError> {
         let message = BridgeMessage::command(method, params);
-        
+
         // TODO: 发送命令并等待响应
         Ok(serde_json::Value::Null)
     }
@@ -26,7 +29,7 @@ impl BridgeApi {
     /// 查询状态
     pub async fn query_status(&self, method: &str) -> Result<serde_json::Value, ApiError> {
         let message = BridgeMessage::query(method);
-        
+
         // TODO: 发送查询并等待响应
         Ok(serde_json::Value::Null)
     }
@@ -34,7 +37,8 @@ impl BridgeApi {
     /// 获取连接列表
     pub async fn list_connections(&self) -> Result<Vec<serde_json::Value>, ApiError> {
         let connections = self.manager.get_all_connections().await;
-        let result: Vec<serde_json::Value> = connections.iter()
+        let result: Vec<serde_json::Value> = connections
+            .iter()
             .map(|c| serde_json::to_value(c).unwrap_or_default())
             .collect();
         Ok(result)
@@ -61,14 +65,22 @@ impl BridgeApi {
     }
 
     /// 发送消息
-    pub async fn send_message(&self, connection_id: &str, message: BridgeMessage) -> Result<(), ApiError> {
-        self.manager.send_message(connection_id, message).await
+    pub async fn send_message(
+        &self,
+        connection_id: &str,
+        message: BridgeMessage,
+    ) -> Result<(), ApiError> {
+        self.manager
+            .send_message(connection_id, message)
+            .await
             .map_err(|e| ApiError::SendError(e.to_string()))
     }
 
     /// 广播消息
     pub async fn broadcast_message(&self, message: BridgeMessage) -> Result<(), ApiError> {
-        self.manager.broadcast_message(message).await
+        self.manager
+            .broadcast_message(message)
+            .await
             .map_err(|e| ApiError::SendError(e.to_string()))
     }
 

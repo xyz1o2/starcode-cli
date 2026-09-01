@@ -5,7 +5,7 @@
 //! - 消息类型分类
 //! - 异步投递
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

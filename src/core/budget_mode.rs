@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::path::PathBuf;
 
 /// 穷鬼模式配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,14 +124,13 @@ impl BudgetModeManager {
             let config = self.config.read().await;
             let content = serde_json::to_string_pretty(&*config)
                 .map_err(|e| format!("Failed to serialize config: {}", e))?;
-            
+
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("Failed to create config directory: {}", e))?;
             }
-            
-            std::fs::write(path, content)
-                .map_err(|e| format!("Failed to write config: {}", e))?;
+
+            std::fs::write(path, content).map_err(|e| format!("Failed to write config: {}", e))?;
         }
         Ok(())
     }
@@ -142,7 +141,7 @@ impl BudgetModeManager {
             let mut config = self.config.write().await;
             config.enabled = true;
         }
-        
+
         {
             let mut enabled_since = self.enabled_since.write().await;
             *enabled_since = Some(chrono::Utc::now());
@@ -168,7 +167,9 @@ impl BudgetModeManager {
         let enabled_duration = {
             let enabled_since = self.enabled_since.read().await;
             if let Some(since) = *enabled_since {
-                chrono::Utc::now().signed_duration_since(since).num_seconds() as u64
+                chrono::Utc::now()
+                    .signed_duration_since(since)
+                    .num_seconds() as u64
             } else {
                 0
             }
@@ -360,7 +361,11 @@ pub struct BudgetModeStatus {
 }
 
 impl BudgetModeStatus {
-    pub fn new(manager: &BudgetModeManager, config: BudgetModeConfig, stats: BudgetModeStats) -> Self {
+    pub fn new(
+        manager: &BudgetModeManager,
+        config: BudgetModeConfig,
+        stats: BudgetModeStats,
+    ) -> Self {
         Self {
             enabled: config.enabled,
             config,

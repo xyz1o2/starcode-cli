@@ -1,8 +1,7 @@
 /// PDF/图像处理系统
-/// 
+///
 /// 对标claude-code-main的src/utils/pdf.ts和imageResizer.ts
 /// 处理PDF和图像附件
-
 use serde::{Deserialize, Serialize};
 
 /// 附件类型
@@ -105,7 +104,10 @@ impl AttachmentProcessor {
     }
 
     /// 处理附件
-    pub fn process_attachment(&self, attachment: &AttachmentInfo) -> Result<ProcessedAttachment, String> {
+    pub fn process_attachment(
+        &self,
+        attachment: &AttachmentInfo,
+    ) -> Result<ProcessedAttachment, String> {
         match attachment.file_type {
             AttachmentType::Pdf => self.process_pdf(attachment),
             AttachmentType::Image => self.process_image(attachment),
@@ -127,7 +129,10 @@ impl AttachmentProcessor {
         }
 
         if attachment.size > self.pdf_config.max_file_size {
-            return Err(format!("PDF file too large: {} bytes (max: {})", attachment.size, self.pdf_config.max_file_size));
+            return Err(format!(
+                "PDF file too large: {} bytes (max: {})",
+                attachment.size, self.pdf_config.max_file_size
+            ));
         }
 
         Ok(ProcessedAttachment {
@@ -146,7 +151,10 @@ impl AttachmentProcessor {
         }
 
         if attachment.size > self.image_config.max_file_size {
-            return Err(format!("Image file too large: {} bytes (max: {})", attachment.size, self.image_config.max_file_size));
+            return Err(format!(
+                "Image file too large: {} bytes (max: {})",
+                attachment.size, self.image_config.max_file_size
+            ));
         }
 
         Ok(ProcessedAttachment {

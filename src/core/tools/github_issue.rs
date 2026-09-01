@@ -96,10 +96,14 @@ impl ToolInvocation for GithubIssueInvocation {
                 "list" => {
                     let limit = params.limit.unwrap_or(30).to_string();
                     let args = vec![
-                        "issue", "list",
-                        "--repo", &params.repo,
-                        "--limit", &limit,
-                        "--json", "number,title,state,author,createdAt,labels",
+                        "issue",
+                        "list",
+                        "--repo",
+                        &params.repo,
+                        "--limit",
+                        &limit,
+                        "--json",
+                        "number,title,state,author,createdAt,labels",
                     ];
                     match invocation.run_gh(&args).await {
                         Ok(output) => Ok(ToolResult {
@@ -119,9 +123,13 @@ impl ToolInvocation for GithubIssueInvocation {
                     };
                     let num_str = number.to_string();
                     let args = vec![
-                        "issue", "view", &num_str,
-                        "--repo", &params.repo,
-                        "--json", "number,title,body,state,author,createdAt,labels,comments",
+                        "issue",
+                        "view",
+                        &num_str,
+                        "--repo",
+                        &params.repo,
+                        "--json",
+                        "number,title,body,state,author,createdAt,labels,comments",
                     ];
                     match invocation.run_gh(&args).await {
                         Ok(output) => Ok(ToolResult {
@@ -141,10 +149,14 @@ impl ToolInvocation for GithubIssueInvocation {
                     };
                     let body = params.body.unwrap_or_default();
                     let mut args = vec![
-                        "issue", "create",
-                        "--repo", &params.repo,
-                        "--title", &title,
-                        "--body", &body,
+                        "issue",
+                        "create",
+                        "--repo",
+                        &params.repo,
+                        "--title",
+                        &title,
+                        "--body",
+                        &body,
                     ];
                     let labels_str;
                     if let Some(ref labels) = params.labels {
@@ -174,9 +186,13 @@ impl ToolInvocation for GithubIssueInvocation {
                     };
                     let num_str = number.to_string();
                     let args = vec![
-                        "issue", "comment", &num_str,
-                        "--repo", &params.repo,
-                        "--body", &body,
+                        "issue",
+                        "comment",
+                        &num_str,
+                        "--repo",
+                        &params.repo,
+                        "--body",
+                        &body,
                     ];
                     match invocation.run_gh(&args).await {
                         Ok(output) => Ok(ToolResult {
@@ -195,10 +211,7 @@ impl ToolInvocation for GithubIssueInvocation {
                         None => return Ok(Self::error_result("Missing issue number".to_string())),
                     };
                     let num_str = number.to_string();
-                    let args = vec![
-                        "issue", "close", &num_str,
-                        "--repo", &params.repo,
-                    ];
+                    let args = vec!["issue", "close", &num_str, "--repo", &params.repo];
                     match invocation.run_gh(&args).await {
                         Ok(output) => Ok(ToolResult {
                             llm_content: Some(output.clone()),

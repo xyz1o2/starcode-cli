@@ -1,25 +1,25 @@
-use crate::types::StarMessage;
 use super::CompactStrategy;
+use crate::types::StarMessage;
 use async_trait::async_trait;
 
 /// 不应被截断的工具列表
 /// 这些工具的输出需要完整保留，因为模型需要完整内容来理解文件
 /// 注意：使用starcode-cli中的实际工具名称
 pub const EXEMPT_TOOLS: &[&str] = &[
-    "Read",           // 主要的文件读取工具
+    "Read",            // 主要的文件读取工具
     "read_many_files", // 批量读取文件
-    "NotebookRead",   // Notebook读取
-    "Grep",           // 搜索结果需要完整显示
-    "Glob",           // 文件查找结果
-    "ListDir",        // 目录列表
-    "SemanticSearch", // 语义搜索结果
-    "ProjectMap",     // 项目地图
-    "git_insight",    // Git洞察
-    "git_branch",     // Git分支信息
+    "NotebookRead",    // Notebook读取
+    "Grep",            // 搜索结果需要完整显示
+    "Glob",            // 文件查找结果
+    "ListDir",         // 目录列表
+    "SemanticSearch",  // 语义搜索结果
+    "ProjectMap",      // 项目地图
+    "git_insight",     // Git洞察
+    "git_branch",      // Git分支信息
 ];
 
 /// 工具结果预算
-/// 
+///
 /// 用于限制单个工具结果的大小
 pub struct ToolResultBudget {
     pub max_chars_per_result: usize,
@@ -53,7 +53,7 @@ impl ToolResultBudget {
         }
 
         let lines: Vec<&str> = result.lines().collect();
-        
+
         if lines.len() > self.max_lines_per_result {
             let kept = &lines[..self.max_lines_per_result];
             let omitted = lines.len() - self.max_lines_per_result;
@@ -78,7 +78,7 @@ impl ToolResultBudget {
 }
 
 /// 工具输出压缩策略
-/// 
+///
 /// 专门用于压缩大型工具输出，保留前 20 行 + 后 10 行 + "... (N more lines)"
 /// 注意：Read等文件查看工具不会被压缩
 pub struct ToolOutputCompactStrategy {
@@ -158,7 +158,11 @@ impl ToolOutputCompactStrategy {
     }
 
     /// 从消息中提取工具名称（通过tool_call_id关联）
-    fn get_tool_name_for_message(&self, msg: &StarMessage, messages: &[StarMessage]) -> Option<String> {
+    fn get_tool_name_for_message(
+        &self,
+        msg: &StarMessage,
+        messages: &[StarMessage],
+    ) -> Option<String> {
         // 查找对应的tool_call消息
         if let Some(tool_call_id) = &msg.tool_call_id {
             for m in messages.iter() {
@@ -219,7 +223,7 @@ impl CompactStrategy for ToolOutputCompactStrategy {
                         continue;
                     }
                 }
-                
+
                 if let Some(content) = &msg.content {
                     if let Some(compressed) = self.compress_tool_output(content) {
                         let mut new_msg = msg.clone();
@@ -235,7 +239,7 @@ impl CompactStrategy for ToolOutputCompactStrategy {
 
         if changed {
             crate::utils::logging::append_debug_log_line(
-                "[COMPACT] Applied tool output compression"
+                "[COMPACT] Applied tool output compression",
             );
         }
 
@@ -246,4 +250,3 @@ impl CompactStrategy for ToolOutputCompactStrategy {
         100 // 高优先级，首先应用
     }
 }
-  

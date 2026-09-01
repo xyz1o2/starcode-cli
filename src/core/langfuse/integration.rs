@@ -1,12 +1,11 @@
+use super::client::{LangfuseClient, LangfuseConfig};
+use super::tracing::{Span, SpanStatus, Trace, TraceManager};
+use serde::{Deserialize, Serialize};
 /// Langfuse集成模块
-/// 
+///
 /// 对标claude-code-main的langfuse/index.ts
 /// 提供统一的Langfuse集成接口
-
 use std::sync::Arc;
-use super::client::{LangfuseClient, LangfuseConfig};
-use super::tracing::{TraceManager, Trace, Span, SpanStatus};
-use serde::{Deserialize, Serialize};
 
 /// 集成配置
 #[derive(Debug, Clone)]
@@ -54,11 +53,11 @@ impl LangfuseIntegration {
     pub fn new(config: LangfuseConfig) -> Self {
         let integration_config = IntegrationConfig::default();
         let enabled = config.is_valid();
-        
+
         if enabled {
             let client = Arc::new(LangfuseClient::new(config.clone()));
             let trace_manager = TraceManager::new(LangfuseClient::new(config.clone()));
-            
+
             Self {
                 config,
                 integration_config,
@@ -88,7 +87,11 @@ impl LangfuseIntegration {
     }
 
     /// 开始新的trace
-    pub fn start_trace(&mut self, name: &str, metadata: std::collections::HashMap<String, serde_json::Value>) -> Option<String> {
+    pub fn start_trace(
+        &mut self,
+        name: &str,
+        metadata: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Option<String> {
         if !self.enabled {
             return None;
         }
@@ -118,7 +121,12 @@ impl LangfuseIntegration {
     }
 
     /// 开始新的span
-    pub fn start_span(&mut self, trace_id: &str, name: &str, input: Option<serde_json::Value>) -> Option<String> {
+    pub fn start_span(
+        &mut self,
+        trace_id: &str,
+        name: &str,
+        input: Option<serde_json::Value>,
+    ) -> Option<String> {
         if !self.enabled {
             return None;
         }
@@ -131,7 +139,12 @@ impl LangfuseIntegration {
     }
 
     /// 结束span
-    pub fn end_span(&mut self, span_id: &str, status: SpanStatus, output: Option<serde_json::Value>) {
+    pub fn end_span(
+        &mut self,
+        span_id: &str,
+        status: SpanStatus,
+        output: Option<serde_json::Value>,
+    ) {
         if !self.enabled {
             return;
         }
@@ -155,12 +168,24 @@ impl LangfuseIntegration {
         }
 
         let mut metadata = std::collections::HashMap::new();
-        metadata.insert("model".to_string(), serde_json::Value::String(model.to_string()));
-        
+        metadata.insert(
+            "model".to_string(),
+            serde_json::Value::String(model.to_string()),
+        );
+
         if let Some(usage) = usage {
-            metadata.insert("prompt_tokens".to_string(), serde_json::Value::Number(usage.prompt_tokens.into()));
-            metadata.insert("completion_tokens".to_string(), serde_json::Value::Number(usage.completion_tokens.into()));
-            metadata.insert("total_tokens".to_string(), serde_json::Value::Number(usage.total_tokens.into()));
+            metadata.insert(
+                "prompt_tokens".to_string(),
+                serde_json::Value::Number(usage.prompt_tokens.into()),
+            );
+            metadata.insert(
+                "completion_tokens".to_string(),
+                serde_json::Value::Number(usage.completion_tokens.into()),
+            );
+            metadata.insert(
+                "total_tokens".to_string(),
+                serde_json::Value::Number(usage.total_tokens.into()),
+            );
         }
 
         let span_id = self.start_span(trace_id, "llm_call", Some(input));
@@ -184,7 +209,11 @@ impl LangfuseIntegration {
 
         let span_id = self.start_span(trace_id, &format!("tool_{}", tool_name), Some(input));
         if let Some(span_id) = span_id {
-            let status = if success { SpanStatus::Success } else { SpanStatus::Error };
+            let status = if success {
+                SpanStatus::Success
+            } else {
+                SpanStatus::Error
+            };
             self.end_span(&span_id, status, output);
         }
     }

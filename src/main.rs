@@ -1,4 +1,11 @@
-#![allow(dead_code, unused_imports, unused_variables, unused_mut, unused_assignments, unused_must_use)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    unused_mut,
+    unused_assignments,
+    unused_must_use
+)]
 
 mod agent;
 mod commands;
@@ -190,7 +197,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(live) = &report.live_results {
                 let passed = live.iter().filter(|r| r.passed).count();
                 let skipped = live.iter().filter(|r| !r.executed).count();
-                lines.push(format!("Live: {}/{} passed, {} skipped", passed, live.len(), skipped));
+                lines.push(format!(
+                    "Live: {}/{} passed, {} skipped",
+                    passed,
+                    live.len(),
+                    skipped
+                ));
                 for r in live.iter().filter(|r| r.executed && !r.passed) {
                     lines.push(format!("  ❌ {} — {}", r.id, r.failed_rules.join(", ")));
                 }
@@ -209,20 +221,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(bl) = &baseline {
                 let bl_path = cwd.join(bl);
                 match crate::agent::eval_harness::compare_baseline(&report, &bl_path).await {
-                    Ok(deltas) if deltas.is_empty() => lines.push("Baseline: no regressions.".to_string()),
+                    Ok(deltas) if deltas.is_empty() => {
+                        lines.push("Baseline: no regressions.".to_string())
+                    }
                     Ok(deltas) => {
                         let changes: Vec<String> = deltas
                             .iter()
                             .map(|d| {
                                 let tag = match &d.change {
-                                    crate::agent::eval_harness::BaselineChange::Regression { .. } => "REGRESSION",
-                                    crate::agent::eval_harness::BaselineChange::Removed => "REMOVED",
+                                    crate::agent::eval_harness::BaselineChange::Regression {
+                                        ..
+                                    } => "REGRESSION",
+                                    crate::agent::eval_harness::BaselineChange::Removed => {
+                                        "REMOVED"
+                                    }
                                     crate::agent::eval_harness::BaselineChange::New => "NEW",
                                 };
                                 format!("{}({})", d.task_id, tag)
                             })
                             .collect();
-                        lines.push(format!("Baseline: {} changes — {}", deltas.len(), changes.join(", ")));
+                        lines.push(format!(
+                            "Baseline: {} changes — {}",
+                            deltas.len(),
+                            changes.join(", ")
+                        ));
                     }
                     Err(e) => lines.push(format!("Baseline compare failed: {e}")),
                 }
@@ -306,9 +328,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let base_url = match provider_resolution.base_url.value.clone() {
         Some(url) => url,
-        None => {
-            "BASE_URL_NOT_SET".to_string()
-        }
+        None => "BASE_URL_NOT_SET".to_string(),
     };
 
     let is_openai_compatible = if provider_resolution.openai_compatible_source.kind
@@ -526,7 +546,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Spawn heavy init as a background task with timeout
         let (init_tx, init_rx) = tokio::sync::oneshot::channel::<
-            Result<(agent::StarAgent, Arc<core::config::Config>), String>
+            Result<(agent::StarAgent, Arc<core::config::Config>), String>,
         >();
         let api_key2 = api_key.clone();
         let model2 = model.clone();
@@ -540,15 +560,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let result = tokio::time::timeout(init_timeout, async {
                 utils::logging::append_agent_log_line("[INIT] Starting Config::new...");
                 let mut config = core::config::Config::new(config_params2);
-                
+
                 utils::logging::append_agent_log_line("[INIT] Starting Config::initialize...");
                 let config = match config.initialize().await {
                     Ok(_) => {
-                        utils::logging::append_agent_log_line("[INIT] Config::initialize completed");
+                        utils::logging::append_agent_log_line(
+                            "[INIT] Config::initialize completed",
+                        );
                         Ok(Arc::new(config))
-                    },
+                    }
                     Err(e) => {
-                        utils::logging::append_agent_log_line(&format!("[INIT] Config::initialize failed: {}", e));
+                        utils::logging::append_agent_log_line(&format!(
+                            "[INIT] Config::initialize failed: {}",
+                            e
+                        ));
                         Err(format!("Config 初始化失败: {}", e))
                     }
                 }?;
@@ -561,29 +586,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(args.max_tool_rounds),
                     is_openai_compatible,
                     Some(config.clone()),
-                ).await
+                )
+                .await
                 .map(|agent| {
                     utils::logging::append_agent_log_line("[INIT] StarAgent::new completed");
                     (agent, config)
                 })
                 .map_err(|e| {
-                    utils::logging::append_agent_log_line(&format!("[INIT] StarAgent::new failed: {}", e));
+                    utils::logging::append_agent_log_line(&format!(
+                        "[INIT] StarAgent::new failed: {}",
+                        e
+                    ));
                     format!("Agent 初始化失败: {}", e)
                 })
-            }).await;
+            })
+            .await;
 
             match result {
-                Ok(Ok(pair)) => { 
-                    utils::logging::append_agent_log_line("[INIT] Initialization completed successfully");
-                    let _ = init_tx.send(Ok(pair)); 
+                Ok(Ok(pair)) => {
+                    utils::logging::append_agent_log_line(
+                        "[INIT] Initialization completed successfully",
+                    );
+                    let _ = init_tx.send(Ok(pair));
                 }
-                Ok(Err(e)) => { 
-                    utils::logging::append_agent_log_line(&format!("[INIT] Initialization failed: {}", e));
-                    let _ = init_tx.send(Err(e)); 
+                Ok(Err(e)) => {
+                    utils::logging::append_agent_log_line(&format!(
+                        "[INIT] Initialization failed: {}",
+                        e
+                    ));
+                    let _ = init_tx.send(Err(e));
                 }
-                Err(_) => { 
-                    utils::logging::append_agent_log_line("[INIT] Initialization timed out (30 seconds)");
-                    let _ = init_tx.send(Err("初始化超时（30秒）".to_string())); 
+                Err(_) => {
+                    utils::logging::append_agent_log_line(
+                        "[INIT] Initialization timed out (30 seconds)",
+                    );
+                    let _ = init_tx.send(Err("初始化超时（30秒）".to_string()));
                 }
             }
         });

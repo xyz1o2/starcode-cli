@@ -1,3 +1,4 @@
+pub mod clipboard_paste;
 /// UI Event Handling
 ///
 /// # Event Types
@@ -24,4 +25,3 @@
 pub mod input;
 pub mod keymap;
 pub mod mouse;
-pub mod clipboard_paste;

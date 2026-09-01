@@ -49,16 +49,34 @@ pub enum TaskOperation {
 
 fn format_task_list(graph: &crate::core::tasks::models::TaskGraph) -> String {
     let mut output = String::new();
-    
+
     // 统计任务状态
     let total = graph.nodes.len();
-    let completed = graph.nodes.values().filter(|t| t.status == TaskStatus::Completed).count();
-    let in_progress = graph.nodes.values().filter(|t| t.status == TaskStatus::InProgress).count();
-    let pending = graph.nodes.values().filter(|t| t.status == TaskStatus::Pending).count();
-    let blocked = graph.nodes.values().filter(|t| t.status == TaskStatus::Blocked).count();
-    
-    output.push_str(&format!("Task List ({} total, {} completed, {} in progress, {} pending, {} blocked):\n", 
-        total, completed, in_progress, pending, blocked));
+    let completed = graph
+        .nodes
+        .values()
+        .filter(|t| t.status == TaskStatus::Completed)
+        .count();
+    let in_progress = graph
+        .nodes
+        .values()
+        .filter(|t| t.status == TaskStatus::InProgress)
+        .count();
+    let pending = graph
+        .nodes
+        .values()
+        .filter(|t| t.status == TaskStatus::Pending)
+        .count();
+    let blocked = graph
+        .nodes
+        .values()
+        .filter(|t| t.status == TaskStatus::Blocked)
+        .count();
+
+    output.push_str(&format!(
+        "Task List ({} total, {} completed, {} in progress, {} pending, {} blocked):\n",
+        total, completed, in_progress, pending, blocked
+    ));
     output.push_str("---\n");
 
     // Sort root IDs by creation time (implicitly by ID here for simplicity, or we could sort)
@@ -69,7 +87,7 @@ fn format_task_list(graph: &crate::core::tasks::models::TaskGraph) -> String {
     if graph.root_ids.is_empty() {
         output.push_str("(No tasks found)\n");
     }
-    
+
     output.push_str("---\n");
     output.push_str("Use 'update' with task ID to change status. Example: {\"operation\":{\"action\":\"update\",\"id\":\"1\",\"status\":\"InProgress\"}}\n");
 
@@ -97,7 +115,7 @@ fn format_task_recursive(
             TaskPriority::Medium => "",
             TaskPriority::Low => " [LOW]",
         };
-        
+
         let agent_info = if let Some(agent) = &task.assigned_agent {
             format!(" @{}", agent)
         } else {
@@ -113,10 +131,14 @@ fn format_task_recursive(
                 output.push_str(&format!("{}    {}\n", indent, desc));
             }
         }
-        
+
         // 显示依赖关系
         if !task.dependencies.is_empty() {
-            let deps: Vec<String> = task.dependencies.iter().map(|d| format!("#{}", d)).collect();
+            let deps: Vec<String> = task
+                .dependencies
+                .iter()
+                .map(|d| format!("#{}", d))
+                .collect();
             output.push_str(&format!("{}    Blocked by: {}\n", indent, deps.join(", ")));
         }
 
@@ -144,13 +166,13 @@ impl TaskTool {
             team_name: None,
         }
     }
-    
+
     /// 设置会话ID以启用会话隔离
     pub fn with_session_id(mut self, session_id: String) -> Self {
         self.session_id = Some(session_id);
         self
     }
-    
+
     /// 设置团队名称以启用团队隔离
     pub fn with_team_name(mut self, team_name: String) -> Self {
         self.team_name = Some(team_name);
@@ -299,13 +321,13 @@ const TASK_FIELD_KEYS: &[&str] = &[
 /// `parameter_schema()` builds its enum list from this table, so the schema
 /// and the normalization logic can never diverge.
 const ACTION_ALIASES: &[(&str, &[&str])] = &[
-    ("add",     &["add", "create", "new", "add_task", "create_task"]),
-    ("update",  &["update", "set", "update_task"]),
-    ("delete",  &["delete", "remove", "delete_task"]),
-    ("move",    &["move", "reorder"]),
+    ("add", &["add", "create", "new", "add_task", "create_task"]),
+    ("update", &["update", "set", "update_task"]),
+    ("delete", &["delete", "remove", "delete_task"]),
+    ("move", &["move", "reorder"]),
     ("execute", &["execute", "run"]),
     ("archive", &["archive"]),
-    ("list",    &["list", "show", "view", "unknown", ""]),
+    ("list", &["list", "show", "view", "unknown", ""]),
 ];
 
 /// Collect every accepted action string for use in JSON schemas.
@@ -764,5 +786,3 @@ impl ToolInvocation for TaskToolInvocation {
         })
     }
 }
-
- 

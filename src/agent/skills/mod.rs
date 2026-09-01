@@ -235,7 +235,10 @@ impl SubAgentManager {
     pub fn enrich_task_with_context(&self, task: &mut SubTask) {
         if let Some(ctx) = &self.shared_context {
             let ctx_summary = if ctx.chars().count() > 3000 {
-                format!("{}...[truncated]", ctx.chars().take(3000).collect::<String>())
+                format!(
+                    "{}...[truncated]",
+                    ctx.chars().take(3000).collect::<String>()
+                )
             } else {
                 ctx.clone()
             };
@@ -245,10 +248,8 @@ impl SubAgentManager {
             );
         }
         if let Some(root) = &self.project_root {
-            task.params.insert(
-                "_project_root".to_string(),
-                serde_json::json!(root),
-            );
+            task.params
+                .insert("_project_root".to_string(), serde_json::json!(root));
         }
     }
 

@@ -20,33 +20,117 @@ struct LanguageSpec {
 }
 
 static LANGUAGE_SPECS: &[LanguageSpec] = &[
-    LanguageSpec { ext: "rs",   bucket: "rust",        symbol_pattern: Some(r"^\s*(pub\s+)?(fn|struct|enum|trait|impl|mod|type)\s+([a-zA-Z0-9_]+)") },
-    LanguageSpec { ext: "py",   bucket: "python",      symbol_pattern: Some(r"^\s*(class|def)\s+([a-zA-Z0-9_]+)") },
-    LanguageSpec { ext: "js",   bucket: "javascript",  symbol_pattern: Some(r"^\s*(export\s+)?(class|function|const|let|var|interface|type)\s+([a-zA-Z0-9_]+)") },
-    LanguageSpec { ext: "ts",   bucket: "typescript",  symbol_pattern: Some(r"^\s*(export\s+)?(class|function|const|let|var|interface|type)\s+([a-zA-Z0-9_]+)") },
-    LanguageSpec { ext: "tsx",  bucket: "typescript",  symbol_pattern: Some(r"^\s*(export\s+)?(class|function|const|let|var|interface|type)\s+([a-zA-Z0-9_]+)") },
-    LanguageSpec { ext: "jsx",  bucket: "react",       symbol_pattern: Some(r"^\s*(export\s+)?(class|function|const|let|var|interface|type)\s+([a-zA-Z0-9_]+)") },
-    LanguageSpec { ext: "go",   bucket: "go",          symbol_pattern: Some(r"^\s*func\s+([a-zA-Z0-9_]+)") },
-    LanguageSpec { ext: "java", bucket: "java",        symbol_pattern: Some(r"^\s*(public|private|protected)?\s*(class|interface|enum)\s+([a-zA-Z0-9_]+)") },
-    LanguageSpec { ext: "c",    bucket: "c/cpp",       symbol_pattern: None },
-    LanguageSpec { ext: "cpp",  bucket: "c/cpp",       symbol_pattern: None },
-    LanguageSpec { ext: "h",    bucket: "c/cpp",       symbol_pattern: None },
-    LanguageSpec { ext: "hpp",  bucket: "c/cpp",       symbol_pattern: None },
-    LanguageSpec { ext: "toml", bucket: "toml",        symbol_pattern: None },
-    LanguageSpec { ext: "json", bucket: "json",        symbol_pattern: None },
-    LanguageSpec { ext: "yaml", bucket: "yaml",        symbol_pattern: None },
-    LanguageSpec { ext: "yml",  bucket: "yaml",        symbol_pattern: None },
-    LanguageSpec { ext: "md",   bucket: "markdown",    symbol_pattern: None },
-    LanguageSpec { ext: "sh",   bucket: "shell",       symbol_pattern: None },
+    LanguageSpec {
+        ext: "rs",
+        bucket: "rust",
+        symbol_pattern: Some(
+            r"^\s*(pub\s+)?(fn|struct|enum|trait|impl|mod|type)\s+([a-zA-Z0-9_]+)",
+        ),
+    },
+    LanguageSpec {
+        ext: "py",
+        bucket: "python",
+        symbol_pattern: Some(r"^\s*(class|def)\s+([a-zA-Z0-9_]+)"),
+    },
+    LanguageSpec {
+        ext: "js",
+        bucket: "javascript",
+        symbol_pattern: Some(
+            r"^\s*(export\s+)?(class|function|const|let|var|interface|type)\s+([a-zA-Z0-9_]+)",
+        ),
+    },
+    LanguageSpec {
+        ext: "ts",
+        bucket: "typescript",
+        symbol_pattern: Some(
+            r"^\s*(export\s+)?(class|function|const|let|var|interface|type)\s+([a-zA-Z0-9_]+)",
+        ),
+    },
+    LanguageSpec {
+        ext: "tsx",
+        bucket: "typescript",
+        symbol_pattern: Some(
+            r"^\s*(export\s+)?(class|function|const|let|var|interface|type)\s+([a-zA-Z0-9_]+)",
+        ),
+    },
+    LanguageSpec {
+        ext: "jsx",
+        bucket: "react",
+        symbol_pattern: Some(
+            r"^\s*(export\s+)?(class|function|const|let|var|interface|type)\s+([a-zA-Z0-9_]+)",
+        ),
+    },
+    LanguageSpec {
+        ext: "go",
+        bucket: "go",
+        symbol_pattern: Some(r"^\s*func\s+([a-zA-Z0-9_]+)"),
+    },
+    LanguageSpec {
+        ext: "java",
+        bucket: "java",
+        symbol_pattern: Some(
+            r"^\s*(public|private|protected)?\s*(class|interface|enum)\s+([a-zA-Z0-9_]+)",
+        ),
+    },
+    LanguageSpec {
+        ext: "c",
+        bucket: "c/cpp",
+        symbol_pattern: None,
+    },
+    LanguageSpec {
+        ext: "cpp",
+        bucket: "c/cpp",
+        symbol_pattern: None,
+    },
+    LanguageSpec {
+        ext: "h",
+        bucket: "c/cpp",
+        symbol_pattern: None,
+    },
+    LanguageSpec {
+        ext: "hpp",
+        bucket: "c/cpp",
+        symbol_pattern: None,
+    },
+    LanguageSpec {
+        ext: "toml",
+        bucket: "toml",
+        symbol_pattern: None,
+    },
+    LanguageSpec {
+        ext: "json",
+        bucket: "json",
+        symbol_pattern: None,
+    },
+    LanguageSpec {
+        ext: "yaml",
+        bucket: "yaml",
+        symbol_pattern: None,
+    },
+    LanguageSpec {
+        ext: "yml",
+        bucket: "yaml",
+        symbol_pattern: None,
+    },
+    LanguageSpec {
+        ext: "md",
+        bucket: "markdown",
+        symbol_pattern: None,
+    },
+    LanguageSpec {
+        ext: "sh",
+        bucket: "shell",
+        symbol_pattern: None,
+    },
 ];
 
 /// Manifest file names that always appear in the "Key Files" section and may
 /// override the ext-based language bucket label.
 static KEY_FILE_BUCKETS: &[(&str, &str)] = &[
-    ("cargo.toml",          "cargo"),
-    ("package.json",        "node"),
-    ("pyproject.toml",      "python-project"),
-    ("go.mod",              "go-project"),
+    ("cargo.toml", "cargo"),
+    ("package.json", "node"),
+    ("pyproject.toml", "python-project"),
+    ("go.mod", "go-project"),
     ("pnpm-workspace.yaml", "node"),
 ];
 
@@ -412,7 +496,6 @@ fn generate_project_map(
         .collect();
     let patterns = compiled_patterns();
 
-
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(true)
@@ -652,7 +735,13 @@ fn language_bucket(ext: &str, file_name: &str) -> String {
         .find(|s| s.ext == ext)
         .map(|s| s.bucket.to_string())
         // Unknown extension: show the actual extension so the map is still useful.
-        .unwrap_or_else(|| if ext.is_empty() { "no-ext".to_string() } else { ext.to_string() })
+        .unwrap_or_else(|| {
+            if ext.is_empty() {
+                "no-ext".to_string()
+            } else {
+                ext.to_string()
+            }
+        })
 }
 
 fn build_cache_key(root: &Path, options: &ProjectMapBuildOptions) -> String {
@@ -698,7 +787,14 @@ fn truncate_map(map: &str, max_chars: usize) -> String {
     let head_len = max_chars * 3 / 4;
     let tail_len = max_chars - head_len;
     let head: String = map.chars().take(head_len).collect();
-    let tail: String = map.chars().rev().take(tail_len).collect::<String>().chars().rev().collect();
+    let tail: String = map
+        .chars()
+        .rev()
+        .take(tail_len)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     format!(
         "{}…\n(truncated {} → {} chars)\n{}",
         head,
@@ -800,5 +896,3 @@ fn store_cache_entry(cache_key: &str, root: &Path, output: String) {
     prune_cache_entries(&mut disk_cache.entries);
     persist_disk_cache(&disk_path, &disk_cache);
 }
-
- 

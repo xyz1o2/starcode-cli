@@ -3,8 +3,12 @@
 //! - `StarAgentRunner` 从 `agent/subagent_runner.rs` 迁入，原有同步逻辑不变。
 //! - `AsyncSubagentRunner` 新增：后台执行 + 通知队列 + name 注册表。
 
-use crate::agent::subagent::notification::{NotificationQueue, NotificationStatus, NotificationUsage, TaskNotification};
-use crate::core::agents::{SharedSubAgentRunner, SubAgentError, SubAgentErrorKind, SubAgentRequest, SubAgentResult};
+use crate::agent::subagent::notification::{
+    NotificationQueue, NotificationStatus, NotificationUsage, TaskNotification,
+};
+use crate::core::agents::{
+    SharedSubAgentRunner, SubAgentError, SubAgentErrorKind, SubAgentRequest, SubAgentResult,
+};
 use crate::core::config::Config;
 use crate::core::tools::tools::ToolResult;
 use crate::llm::client::StarClient;
@@ -148,12 +152,7 @@ impl AsyncSubagentRunner {
                     0, // TODO: 从 SubAgentResult 获取实际 token 数
                     0, // TODO: 从 SubAgentResult 获取实际工具调用数
                 ),
-                Err(_) => (
-                    NotificationStatus::Failed,
-                    format!("{:?}", result),
-                    0,
-                    0,
-                ),
+                Err(_) => (NotificationStatus::Failed, format!("{:?}", result), 0, 0),
             };
 
             let mut q = queue.lock().await;

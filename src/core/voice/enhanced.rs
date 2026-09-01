@@ -5,7 +5,7 @@
 //! - 双后端支持（Anthropic STT / 豆包 ASR）
 //! - WebSocket 流式传输
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// 语音配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,7 +139,10 @@ impl VoiceManager {
 
     async fn transcribe_anthropic(&self, _audio: &[f32]) -> Result<TranscriptionResult, String> {
         // Anthropic STT API 调用
-        let api_key = self.config.api_key.as_ref()
+        let api_key = self
+            .config
+            .api_key
+            .as_ref()
             .ok_or("Anthropic API key not configured")?;
 
         // 实际实现需要调用 Anthropic 的语音 API
@@ -148,7 +151,10 @@ impl VoiceManager {
 
     async fn transcribe_doubao(&self, _audio: &[f32]) -> Result<TranscriptionResult, String> {
         // 豆包 ASR API 调用
-        let api_key = self.config.api_key.as_ref()
+        let api_key = self
+            .config
+            .api_key
+            .as_ref()
             .ok_or("Doubao API key not configured")?;
 
         Err("Doubao ASR not yet implemented".to_string())
@@ -177,8 +183,7 @@ impl VoiceManager {
 
     /// 检查是否可用
     pub fn is_available(&self) -> bool {
-        self.config.backend != VoiceBackend::Disabled
-            && self.config.api_key.is_some()
+        self.config.backend != VoiceBackend::Disabled && self.config.api_key.is_some()
     }
 
     /// 获取配置

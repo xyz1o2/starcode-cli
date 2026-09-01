@@ -1,5 +1,5 @@
 /// 基于时间的微压缩配置
-/// 
+///
 /// 对标claude-code-main的timeBasedMCConfig.ts
 /// 根据时间因素动态调整微压缩策略
 pub struct TimeBasedCompactConfig {
@@ -23,12 +23,12 @@ impl TimeBasedCompactConfig {
     pub fn new() -> Self {
         Self {
             enabled: true,
-            work_hours_threshold: 2.0,  // 工作时间2小时压缩一次
-            off_hours_threshold: 4.0,   // 非工作时间4小时压缩一次
-            work_hours_start: 9,        // 9:00 开始工作
-            work_hours_end: 18,         // 18:00 结束工作
+            work_hours_threshold: 2.0, // 工作时间2小时压缩一次
+            off_hours_threshold: 4.0,  // 非工作时间4小时压缩一次
+            work_hours_start: 9,       // 9:00 开始工作
+            work_hours_end: 18,        // 18:00 结束工作
             consider_timezone: true,
-            timezone_offset: 8,         // 默认UTC+8
+            timezone_offset: 8, // 默认UTC+8
         }
     }
 
@@ -87,7 +87,7 @@ impl TimeBasedCompactConfig {
         }
 
         let current_hour = self.get_current_hour();
-        
+
         if self.is_work_hours(current_hour) {
             self.work_hours_threshold
         } else {
@@ -97,10 +97,10 @@ impl TimeBasedCompactConfig {
 
     /// 获取当前小时（考虑时区）
     fn get_current_hour(&self) -> u8 {
-        use chrono::{Utc, FixedOffset, DateTime, Timelike};
-        
+        use chrono::{DateTime, FixedOffset, Timelike, Utc};
+
         let utc_now = Utc::now();
-        
+
         if self.consider_timezone {
             let offset = FixedOffset::east_opt(self.timezone_offset as i32 * 3600)
                 .unwrap_or(FixedOffset::east_opt(0).unwrap());
@@ -125,7 +125,7 @@ impl TimeBasedCompactConfig {
     /// 获取压缩建议
     pub fn get_compaction_suggestion(&self, hours_since_last_compact: f64) -> CompactionSuggestion {
         let threshold = self.get_current_threshold();
-        
+
         if hours_since_last_compact >= threshold {
             CompactionSuggestion {
                 should_compact: true,
@@ -156,7 +156,7 @@ impl TimeBasedCompactConfig {
     /// 获取建议的压缩策略
     fn get_suggested_strategy(&self) -> Option<String> {
         let current_hour = self.get_current_hour();
-        
+
         if self.is_work_hours(current_hour) {
             // 工作时间使用更保守的策略
             Some("micro_compact".to_string())
@@ -203,7 +203,7 @@ pub enum CompactionUrgency {
 }
 
 /// 时间感知的压缩管理器
-/// 
+///
 /// 管理基于时间的压缩策略
 pub struct TimeAwareCompactManager {
     config: TimeBasedCompactConfig,
@@ -238,7 +238,7 @@ impl TimeAwareCompactManager {
 
         // 结合时间和token使用率
         let suggestion = self.config.get_compaction_suggestion(hours_since_last);
-        
+
         // 如果token使用率很高，提高紧急程度
         if token_usage_ratio > 0.9 {
             CompactionSuggestion {
@@ -283,7 +283,9 @@ impl TimeAwareCompactManager {
     /// 获取压缩统计
     pub fn get_statistics(&self) -> CompactStatistics {
         let total_compactions = self.compaction_history.len();
-        let total_tokens_saved: usize = self.compaction_history.iter()
+        let total_tokens_saved: usize = self
+            .compaction_history
+            .iter()
             .map(|r| r.tokens_before.saturating_sub(r.tokens_after))
             .sum();
 

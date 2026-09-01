@@ -22,7 +22,6 @@ use std::process::Stdio;
 mod types;
 pub(crate) use types::*;
 
-
 fn storage(project_root: &Path) -> crate::core::config::storage::Storage {
     crate::core::config::storage::Storage::new(project_root.to_path_buf())
 }
@@ -279,10 +278,7 @@ pub async fn discover_plugin_mcp_servers(
             servers.push(ResolvedPluginMcpServer {
                 plugin_name: plugin.entry.name.clone(),
                 server_name: server_name.to_string(),
-                qualified_name: qualify_plugin_mcp_server_name(
-                    &plugin.entry.name,
-                    server_name,
-                ),
+                qualified_name: qualify_plugin_mcp_server_name(&plugin.entry.name, server_name),
                 config: config.clone(),
                 working_dir: plugin.root.clone(),
                 project_root: project_root.to_path_buf(),

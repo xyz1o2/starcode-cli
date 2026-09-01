@@ -1,6 +1,5 @@
 use crate::core::tools::tools::{
-    ToolError,
-    BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation, ToolResult,
+    BaseDeclarativeTool, Kind, ToolError, ToolInvocation, ToolLocation, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 

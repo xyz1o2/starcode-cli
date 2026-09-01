@@ -19,28 +19,64 @@ const RTK_COMPATIBLE_COMMANDS: &[&str] = &[
     // Version control
     "git",
     // Build & test
-    "cargo", "pytest", "jest", "vitest", "go", "rake", "rspec", "mix",
+    "cargo",
+    "pytest",
+    "jest",
+    "vitest",
+    "go",
+    "rake",
+    "rspec",
+    "mix",
     // Lint & type-check
-    "eslint", "tsc", "ruff", "golangci-lint", "rubocop",
-    "prettier", "biome",
+    "eslint",
+    "tsc",
+    "ruff",
+    "golangci-lint",
+    "rubocop",
+    "prettier",
+    "biome",
     // Package managers
-    "npm", "pnpm", "yarn", "pip", "bundle", "prisma",
+    "npm",
+    "pnpm",
+    "yarn",
+    "pip",
+    "bundle",
+    "prisma",
     // File & directory
-    "ls", "find", "cat", "head", "tail", "grep", "rg",
+    "ls",
+    "find",
+    "cat",
+    "head",
+    "tail",
+    "grep",
+    "rg",
     // Containers
-    "docker", "kubectl",
+    "docker",
+    "kubectl",
     // Cloud
-    "aws", "gcloud",
+    "aws",
+    "gcloud",
     // Package listing
-    "apt", "dpkg", "rpm",
+    "apt",
+    "dpkg",
+    "rpm",
 ];
 
 /// Commands that should NOT be wrapped with RTK even if the base command
 /// matches — these are interactive, short-lived, or pass-through operations.
 const RTK_EXCLUDED_SUBCOMMANDS: &[&str] = &[
-    "git add", "git commit", "git push", "git pull", "git fetch",
-    "git checkout", "git switch", "git branch", "git tag",
-    "git merge", "git rebase", "git stash",
+    "git add",
+    "git commit",
+    "git push",
+    "git pull",
+    "git fetch",
+    "git checkout",
+    "git switch",
+    "git branch",
+    "git tag",
+    "git merge",
+    "git rebase",
+    "git stash",
 ];
 
 /// Cached RTK availability check (lazy, runs once per process).
@@ -168,9 +204,7 @@ pub async fn fetch_rtk_stats() -> Option<RtkStats> {
     Some(RtkStats {
         available: true,
         version: get_rtk_version().await,
-        total_commands: json
-            .get("total_commands")
-            .and_then(|v| v.as_u64()),
+        total_commands: json.get("total_commands").and_then(|v| v.as_u64()),
         tokens_saved: json
             .get("tokens_saved")
             .or_else(|| json.get("total_tokens_saved"))
@@ -213,4 +247,3 @@ fn resolve_command_alias<'a>(raw_command: &'a str, first_word: &'a str) -> &'a s
 
     first_word
 }
- 

@@ -98,7 +98,8 @@ fn context_window_tokens(state: &ChatState) -> u32 {
     }
     // 1. 模型专用上下文窗口：从 API /models 缓存中查
     if !state.current_model.is_empty() {
-        if let Some(ctx) = crate::agent::model_catalog::get_cached_context_window(&state.current_model)
+        if let Some(ctx) =
+            crate::agent::model_catalog::get_cached_context_window(&state.current_model)
         {
             return ctx;
         }
@@ -143,47 +144,207 @@ const BRAILLE_SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 /// 184 whimsical verbs for the thinking spinner.
 const SPINNER_VERBS: &[&str] = &[
     // Core
-    "Working", "Processing", "Computing", "Analyzing", "Reasoning",
-    "Generating", "Planning", "Searching", "Reading", "Writing",
-    "Compiling", "Executing", "Validating", "Optimizing", "Indexing",
+    "Working",
+    "Processing",
+    "Computing",
+    "Analyzing",
+    "Reasoning",
+    "Generating",
+    "Planning",
+    "Searching",
+    "Reading",
+    "Writing",
+    "Compiling",
+    "Executing",
+    "Validating",
+    "Optimizing",
+    "Indexing",
     // Whimsical (Claude Code style)
-    "Cogitating", "Percolating", "Shenaniganing", "Moonwalking", "Ruminating",
-    "Pondering", "Musing", "Meditating", "Contemplating", "Deliberating",
-    "Pondering", "Reflecting", "Ruminating", "Brooding", "Considering",
-    "Weighing", "Evaluating", "Assessing", "Investigating", "Exploring",
-    "Discovering", "Unraveling", "Deciphering", "Decoding", "Interpreting",
-    "Synthesizing", "Composing", "Constructing", "Assembling", "Crafting",
-    "Forging", "Fabricating", "Manufacturing", "Producing", "Creating",
-    "Conjuring", "Manifesting", "Materializing", "Crystallizing", "Precipitating",
-    "Fermenting", "Brewing", "Distilling", "Refining", "Polishing",
-    "Honing", "Sharpening", "Tempering", "Annealing", "Forging",
-    "Tinkering", "Fiddling", "Tweaking", "Adjusting", "Calibrating",
-    "Balancing", "Harmonizing", "Orchestrating", "Conducting", "Choreographing",
-    "Waltzing", "Tangoing", "Sambaing", "Jiving", "Grooving",
-    "Vibing", "Flowing", "Gliding", "Soaring", "Floating",
-    "Drifting", "Wandering", "Meandering", "Rambling", "Roaming",
-    "Adventuring", "Exploring", "Discovering", "Uncovering", "Revealing",
-    "Illuminating", "Enlightening", "Educating", "Informing", "Enlightening",
-    "Debugging", "Squashing", "Stomping", "Eradicating", "Eliminating",
-    "Vanquishing", "Conquering", "Defeating", "Overcoming", "Surmounting",
-    "Transcending", "Surpassing", "Excelling", "Thriving", "Flourishing",
-    "Blossoming", "Blooming", "Flowering", "Sprouting", "Growing",
-    "Evolving", "Transforming", "Metamorphosing", "Transmuting", "Alchemizing",
-    "Transmogrifying", "Shape-shifting", "Morphing", "Adapting", "Adjusting",
-    "Calibrating", "Tuning", "Synchronizing", "Harmonizing", "Balancing",
-    "Orchestrating", "Conducting", "Directing", "Guiding", "Steering",
-    "Navigating", "Piloting", "Captain-ing", "Commanding", "Leading",
-    "Following", "Trailing", "Tracking", "Hunting", "Stalking",
-    "Chasing", "Pursuing", "Following", "Tailgating", "Shadowing",
-    "Lurking", "Skulking", "Creeping", "Sneaking", "Sidling",
-    "Ambling", "Sauntering", "Strolling", "Promenading", "Parading",
-    "Marching", "Striding", "Swaggering", "Strutting", "Prancing",
-    "Cavorting", "Frolicking", "Gamboling", "Romping", "Playing",
-    "Fiddling", "Twiddling", "Futzing", "Puttering", "Pottering",
-    "Dawdling", "Dilly-dallying", "Lollygagging", "Loafing", "Lazing",
-    "Lounging", "Lolling", "Sprawling", "Reclining", "Resting",
-    "Napping", "Snoozing", "Dozing", "Dreaming", "Fantasizing",
-    "Imagining", "Envisioning", "Visualizing", "Picturing", "Conceiving",
+    "Cogitating",
+    "Percolating",
+    "Shenaniganing",
+    "Moonwalking",
+    "Ruminating",
+    "Pondering",
+    "Musing",
+    "Meditating",
+    "Contemplating",
+    "Deliberating",
+    "Pondering",
+    "Reflecting",
+    "Ruminating",
+    "Brooding",
+    "Considering",
+    "Weighing",
+    "Evaluating",
+    "Assessing",
+    "Investigating",
+    "Exploring",
+    "Discovering",
+    "Unraveling",
+    "Deciphering",
+    "Decoding",
+    "Interpreting",
+    "Synthesizing",
+    "Composing",
+    "Constructing",
+    "Assembling",
+    "Crafting",
+    "Forging",
+    "Fabricating",
+    "Manufacturing",
+    "Producing",
+    "Creating",
+    "Conjuring",
+    "Manifesting",
+    "Materializing",
+    "Crystallizing",
+    "Precipitating",
+    "Fermenting",
+    "Brewing",
+    "Distilling",
+    "Refining",
+    "Polishing",
+    "Honing",
+    "Sharpening",
+    "Tempering",
+    "Annealing",
+    "Forging",
+    "Tinkering",
+    "Fiddling",
+    "Tweaking",
+    "Adjusting",
+    "Calibrating",
+    "Balancing",
+    "Harmonizing",
+    "Orchestrating",
+    "Conducting",
+    "Choreographing",
+    "Waltzing",
+    "Tangoing",
+    "Sambaing",
+    "Jiving",
+    "Grooving",
+    "Vibing",
+    "Flowing",
+    "Gliding",
+    "Soaring",
+    "Floating",
+    "Drifting",
+    "Wandering",
+    "Meandering",
+    "Rambling",
+    "Roaming",
+    "Adventuring",
+    "Exploring",
+    "Discovering",
+    "Uncovering",
+    "Revealing",
+    "Illuminating",
+    "Enlightening",
+    "Educating",
+    "Informing",
+    "Enlightening",
+    "Debugging",
+    "Squashing",
+    "Stomping",
+    "Eradicating",
+    "Eliminating",
+    "Vanquishing",
+    "Conquering",
+    "Defeating",
+    "Overcoming",
+    "Surmounting",
+    "Transcending",
+    "Surpassing",
+    "Excelling",
+    "Thriving",
+    "Flourishing",
+    "Blossoming",
+    "Blooming",
+    "Flowering",
+    "Sprouting",
+    "Growing",
+    "Evolving",
+    "Transforming",
+    "Metamorphosing",
+    "Transmuting",
+    "Alchemizing",
+    "Transmogrifying",
+    "Shape-shifting",
+    "Morphing",
+    "Adapting",
+    "Adjusting",
+    "Calibrating",
+    "Tuning",
+    "Synchronizing",
+    "Harmonizing",
+    "Balancing",
+    "Orchestrating",
+    "Conducting",
+    "Directing",
+    "Guiding",
+    "Steering",
+    "Navigating",
+    "Piloting",
+    "Captain-ing",
+    "Commanding",
+    "Leading",
+    "Following",
+    "Trailing",
+    "Tracking",
+    "Hunting",
+    "Stalking",
+    "Chasing",
+    "Pursuing",
+    "Following",
+    "Tailgating",
+    "Shadowing",
+    "Lurking",
+    "Skulking",
+    "Creeping",
+    "Sneaking",
+    "Sidling",
+    "Ambling",
+    "Sauntering",
+    "Strolling",
+    "Promenading",
+    "Parading",
+    "Marching",
+    "Striding",
+    "Swaggering",
+    "Strutting",
+    "Prancing",
+    "Cavorting",
+    "Frolicking",
+    "Gamboling",
+    "Romping",
+    "Playing",
+    "Fiddling",
+    "Twiddling",
+    "Futzing",
+    "Puttering",
+    "Pottering",
+    "Dawdling",
+    "Dilly-dallying",
+    "Lollygagging",
+    "Loafing",
+    "Lazing",
+    "Lounging",
+    "Lolling",
+    "Sprawling",
+    "Reclining",
+    "Resting",
+    "Napping",
+    "Snoozing",
+    "Dozing",
+    "Dreaming",
+    "Fantasizing",
+    "Imagining",
+    "Envisioning",
+    "Visualizing",
+    "Picturing",
+    "Conceiving",
 ];
 
 /// 返回一个随机动词（用于 Claude Code 风格的 thinking spinner）
@@ -208,11 +369,11 @@ const STALL_TRANSITION_SECS: u64 = 2;
 /// Get elapsed time color: green < 5s, yellow < 15s, red >= 15s
 fn elapsed_color(secs: u64) -> Color {
     if secs < 5 {
-        Color::Rgb(80, 220, 100)   // Green
+        Color::Rgb(80, 220, 100) // Green
     } else if secs < 15 {
-        Color::Rgb(255, 200, 50)   // Yellow
+        Color::Rgb(255, 200, 50) // Yellow
     } else {
-        Color::Rgb(255, 80, 80)    // Red
+        Color::Rgb(255, 80, 80) // Red
     }
 }
 
@@ -228,13 +389,11 @@ fn pulse_color(base: Color, tick: u64, speed: u64) -> Color {
         _ => 0.7,
     };
     match base {
-        Color::Rgb(r, g, b) => {
-            Color::Rgb(
-                (r as f64 * intensity) as u8,
-                (g as f64 * intensity) as u8,
-                (b as f64 * intensity) as u8,
-            )
-        }
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (r as f64 * intensity) as u8,
+            (g as f64 * intensity) as u8,
+            (b as f64 * intensity) as u8,
+        ),
         _ => base,
     }
 }
@@ -290,7 +449,8 @@ fn stall_intensity(
         if elapsed < STALL_THRESHOLD_SECS {
             return 0.0;
         }
-        let stall_progress = ((elapsed - STALL_THRESHOLD_SECS) as f64 / STALL_TRANSITION_SECS as f64).min(1.0);
+        let stall_progress =
+            ((elapsed - STALL_THRESHOLD_SECS) as f64 / STALL_TRANSITION_SECS as f64).min(1.0);
         let pulse = (animation_tick as f64 * 0.1).sin() * 0.1;
         return (stall_progress + pulse).clamp(0.0, 1.0);
     }
@@ -322,9 +482,10 @@ fn spinner_color_with_stall(base_color: Color, stall: f64, animation_tick: u64) 
 /// Render a shimmer effect on a text string.
 /// Returns a vector of (text, is_shimmer) segments.
 fn shimmer_segments(text: &str, animation_tick: u64, speed: u64) -> Vec<(&str, bool)> {
-    let chars: Vec<&str> = text.char_indices().map(|(i, c)| {
-        &text[i..i + c.len_utf8()]
-    }).collect();
+    let chars: Vec<&str> = text
+        .char_indices()
+        .map(|(i, c)| &text[i..i + c.len_utf8()])
+        .collect();
     let len = chars.len();
     if len == 0 {
         return vec![];
@@ -337,15 +498,35 @@ fn shimmer_segments(text: &str, animation_tick: u64, speed: u64) -> Vec<(&str, b
 
     let mut segments = Vec::new();
     if shimmer_start > 0 {
-        segments.push((text[..text.char_indices().nth(shimmer_start).map(|(i, _)| i).unwrap_or(0)].as_ref(), false));
+        segments.push((
+            text[..text
+                .char_indices()
+                .nth(shimmer_start)
+                .map(|(i, _)| i)
+                .unwrap_or(0)]
+                .as_ref(),
+            false,
+        ));
     }
     if shimmer_start < shimmer_end {
-        let start_byte = text.char_indices().nth(shimmer_start).map(|(i, _)| i).unwrap_or(0);
-        let end_byte = text.char_indices().nth(shimmer_end).map(|(i, _)| i).unwrap_or(text.len());
+        let start_byte = text
+            .char_indices()
+            .nth(shimmer_start)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let end_byte = text
+            .char_indices()
+            .nth(shimmer_end)
+            .map(|(i, _)| i)
+            .unwrap_or(text.len());
         segments.push((text[start_byte..end_byte].as_ref(), true));
     }
     if shimmer_end < len {
-        let start_byte = text.char_indices().nth(shimmer_end).map(|(i, _)| i).unwrap_or(text.len());
+        let start_byte = text
+            .char_indices()
+            .nth(shimmer_end)
+            .map(|(i, _)| i)
+            .unwrap_or(text.len());
         segments.push((text[start_byte..].as_ref(), false));
     }
 
@@ -358,7 +539,8 @@ pub fn processing_spinner_line(state: &ChatState) -> Vec<ratatui::text::Line<'st
     if !state.is_processing {
         return vec![];
     }
-    let elapsed = state.processing_started_at
+    let elapsed = state
+        .processing_started_at
         .map(|t| t.elapsed().as_secs())
         .unwrap_or(0);
 
@@ -391,7 +573,7 @@ pub fn processing_spinner_line(state: &ChatState) -> Vec<ratatui::text::Line<'st
 
     // 获取当前主题颜色
     let theme = state.theme_manager.current();
-    
+
     // Spinner color with stall detection
     let base_spinner_color = theme.warning; // 使用主题的 warning 颜色作为 spinner 基色
     let spinner_color = spinner_color_with_stall(base_spinner_color, stall, state.animation_tick);
@@ -409,9 +591,10 @@ pub fn processing_spinner_line(state: &ChatState) -> Vec<ratatui::text::Line<'st
     let shimmer_color = theme.secondary_shimmer; // 使用主题的 shimmer 颜色
     let dim_color = theme.secondary;
 
-    let mut spans = vec![
-        Span::styled(format!(" {} ", spinner), Style::default().fg(spinner_color)),
-    ];
+    let mut spans = vec![Span::styled(
+        format!(" {} ", spinner),
+        Style::default().fg(spinner_color),
+    )];
 
     // Render verb with shimmer effect
     let shimmer_speed = if state.is_streaming { 12 } else { 20 };
@@ -434,7 +617,10 @@ pub fn processing_spinner_line(state: &ChatState) -> Vec<ratatui::text::Line<'st
     } else {
         e_color
     };
-    spans.push(Span::styled(format_elapsed(elapsed), Style::default().fg(e_color_smooth)));
+    spans.push(Span::styled(
+        format_elapsed(elapsed),
+        Style::default().fg(e_color_smooth),
+    ));
 
     // Show thinking state with sine wave opacity
     if let Some(thinking_start) = state.thinking_started_at {
@@ -443,24 +629,22 @@ pub fn processing_spinner_line(state: &ChatState) -> Vec<ratatui::text::Line<'st
         let thinking_opacity = ((state.animation_tick as f64 * 0.05).sin() + 1.0) / 2.0;
         // Change color to red when thinking exceeds 20 seconds
         let thinking_color = if thinking_secs > 20 {
-            lerp_color(
-                theme.error,
-                theme.error_shimmer,
-                thinking_opacity,
-            )
+            lerp_color(theme.error, theme.error_shimmer, thinking_opacity)
         } else {
-            lerp_color(
-                theme.secondary,
-                theme.secondary_shimmer,
-                thinking_opacity,
-            )
+            lerp_color(theme.secondary, theme.secondary_shimmer, thinking_opacity)
         };
         let thinking_label = if thinking_secs > 20 {
-            format!(" · thinking {} (press Ctrl+C to cancel)", format_elapsed(thinking_secs))
+            format!(
+                " · thinking {} (press Ctrl+C to cancel)",
+                format_elapsed(thinking_secs)
+            )
         } else {
             format!(" · thinking {}", format_elapsed(thinking_secs))
         };
-        spans.push(Span::styled(thinking_label, Style::default().fg(thinking_color)));
+        spans.push(Span::styled(
+            thinking_label,
+            Style::default().fg(thinking_color),
+        ));
     }
 
     // 对标 Claude Code：spinner 行只显示动词 + 耗时，不显示模型名。
@@ -476,13 +660,16 @@ pub fn processing_spinner_line(state: &ChatState) -> Vec<ratatui::text::Line<'st
         };
         // Pulse effect on token count
         let token_pulse = ((state.animation_tick as f64 * 0.08).sin() * 0.15 + 0.85).max(0.7);
-        let token_color_pulsed = lerp_color(token_color, theme.secondary_shimmer, token_pulse * 0.3);
+        let token_color_pulsed =
+            lerp_color(token_color, theme.secondary_shimmer, token_pulse * 0.3);
         // Show in/out breakdown if we have completion data
         let token_display = match &state.token_usage {
             Some(u) if u.completion_tokens > 0 => {
-                format!(" · {} in / {} out",
+                format!(
+                    " · {} in / {} out",
                     format_token_count(u.prompt_tokens),
-                    format_token_count(u.completion_tokens))
+                    format_token_count(u.completion_tokens)
+                )
             }
             _ => format!(" · ↓ {}", format_token_count(state.token_count)),
         };
@@ -524,9 +711,9 @@ pub fn processing_spinner_line(state: &ChatState) -> Vec<ratatui::text::Line<'st
 }
 
 /// TokenWarning thresholds (percentage of context window used)
-const TOKEN_WARNING_THRESHOLD: f64 = 80.0;  // Show warning
-const TOKEN_ERROR_THRESHOLD: f64 = 90.0;    // Show error
-const AUTO_COMPACT_THRESHOLD: f64 = 92.0;   // Auto-compact triggers
+const TOKEN_WARNING_THRESHOLD: f64 = 80.0; // Show warning
+const TOKEN_ERROR_THRESHOLD: f64 = 90.0; // Show error
+const AUTO_COMPACT_THRESHOLD: f64 = 92.0; // Auto-compact triggers
 
 /// Render a token usage warning line above the input area.
 /// Shows warnings when context window is getting full.
@@ -540,8 +727,14 @@ pub fn token_warning_line(state: &ChatState) -> Vec<ratatui::text::Line<'static>
         Some(usage) if usage.total_tokens > 0 => usage.total_tokens,
         _ => {
             // Fallback: estimate from chat history
-            let estimated: u32 = state.chat_history.iter()
-                .map(|e| (e.content.len() + e.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0)) as u32 / 4)
+            let estimated: u32 = state
+                .chat_history
+                .iter()
+                .map(|e| {
+                    (e.content.len() + e.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0))
+                        as u32
+                        / 4
+                })
                 .sum();
             if estimated == 0 {
                 return vec![];
@@ -599,10 +792,7 @@ pub fn token_warning_line(state: &ChatState) -> Vec<ratatui::text::Line<'static>
             )
         } else {
             (
-                format!(
-                    "Context {:.0}% used · consider running /compact",
-                    pct_used
-                ),
+                format!("Context {:.0}% used · consider running /compact", pct_used),
                 theme.warning,
             )
         }
@@ -619,21 +809,33 @@ pub fn status_line_text(state: &ChatState) -> String {
     if let Some(ref line) = state.current_status_line {
         line.clone()
     } else {
-        let model = if state.current_model.is_empty() { "..." } else { state.current_model.as_str() };
+        let model = if state.current_model.is_empty() {
+            "..."
+        } else {
+            state.current_model.as_str()
+        };
         format!("⊙ {}", model)
     }
 }
 
 fn format_token_count(n: u32) -> String {
-    if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1_000_000.0) }
-    else if n >= 1_000 { format!("{:.1}k", n as f64 / 1_000.0) }
-    else { n.to_string() }
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
 }
 
 fn format_elapsed(secs: u64) -> String {
-    if secs < 60 { format!("{}s", secs) }
-    else if secs < 3600 { format!("{}m {}s", secs / 60, secs % 60) }
-    else { format!("{}h {}m", secs / 3600, (secs % 3600) / 60) }
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
 }
 
 /// Build the styled status line as a Vec<Line> for full-page rendering.
@@ -651,8 +853,8 @@ pub fn build_status_lines(state: &ChatState, width: u16) -> Vec<Line<'static>> {
 fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
     let compact = width < 60;
     let minimal = width < 40;
-     let mut spans: Vec<Span> = Vec::new();
-     
+    let mut spans: Vec<Span> = Vec::new();
+
     // 获取当前主题颜色
     let theme = state.theme_manager.current();
 
@@ -671,141 +873,164 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
 
     // ── 2. Directory  ▸ dirname ──────────────────────────────────────────────
     if !minimal {
-    let cwd = crate::core::utils::paths::current_dir_cached();
-    let dir_name = cwd
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| cwd.to_string_lossy().to_string());
-    let dir_color = theme.warning; // 使用主题的 warning 颜色
-    spans.push(sep());
-    spans.push(Span::styled("▸ ", Style::default().fg(dir_color)));
-    spans.push(Span::styled(dir_name, Style::default().fg(dir_color)));
+        let cwd = crate::core::utils::paths::current_dir_cached();
+        let dir_name = cwd
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| cwd.to_string_lossy().to_string());
+        let dir_color = theme.warning; // 使用主题的 warning 颜色
+        spans.push(sep());
+        spans.push(Span::styled("▸ ", Style::default().fg(dir_color)));
+        spans.push(Span::styled(dir_name, Style::default().fg(dir_color)));
     }
 
     // ── 3. Git  ⎇ branch  ↑N / ↓N / ✗ / ✓ ─────────────────────────────────
     if !minimal {
-    if let Some(branch) = &state.git_branch {
-        let git_color = theme.success; // 使用主题的 success 颜色
-        spans.push(sep());
-        spans.push(Span::styled("⎇ ", Style::default().fg(git_color)));
-        spans.push(Span::styled(branch.clone(), Style::default().fg(git_color)));
+        if let Some(branch) = &state.git_branch {
+            let git_color = theme.success; // 使用主题的 success 颜色
+            spans.push(sep());
+            spans.push(Span::styled("⎇ ", Style::default().fg(git_color)));
+            spans.push(Span::styled(branch.clone(), Style::default().fg(git_color)));
 
-        if let Some(status_str) = &state.git_status {
-            let dirty = status_str.starts_with("Dirty");
-            let (ahead, behind) = parse_ahead_behind(status_str);
+            if let Some(status_str) = &state.git_status {
+                let dirty = status_str.starts_with("Dirty");
+                let (ahead, behind) = parse_ahead_behind(status_str);
 
-            if dirty {
-                spans.push(Span::styled(
-                    " ✗",
-                    Style::default().fg(theme.warning),
-                ));
-            }
-            if let Some(a) = ahead {
-                spans.push(Span::styled(
-                    format!(" ↑{}", a),
-                    Style::default().fg(theme.warning_shimmer),
-                ));
-            }
-            if let Some(b) = behind {
-                spans.push(Span::styled(
-                    format!(" ↓{}", b),
-                    Style::default().fg(theme.warning),
-                ));
-            }
-            if !dirty && ahead.is_none() && behind.is_none() {
-                spans.push(Span::styled(" ✓", Style::default().fg(git_color)));
+                if dirty {
+                    spans.push(Span::styled(" ✗", Style::default().fg(theme.warning)));
+                }
+                if let Some(a) = ahead {
+                    spans.push(Span::styled(
+                        format!(" ↑{}", a),
+                        Style::default().fg(theme.warning_shimmer),
+                    ));
+                }
+                if let Some(b) = behind {
+                    spans.push(Span::styled(
+                        format!(" ↓{}", b),
+                        Style::default().fg(theme.warning),
+                    ));
+                }
+                if !dirty && ahead.is_none() && behind.is_none() {
+                    spans.push(Span::styled(" ✓", Style::default().fg(git_color)));
+                }
             }
         }
-    }
     }
 
     // ── 4. Tokens  ⚡ 23.4k in / 5.2k out · 41.1% ────────────────────────
     if !compact {
-    spans.push(sep());
-    match &state.token_usage {
-        Some(usage) if usage.prompt_tokens > 0 || usage.total_tokens > 0 => {
-            let tokens = if usage.prompt_tokens > 0 { usage.prompt_tokens } else { usage.total_tokens };
-            let ctx = context_window_tokens(state);
-            let pct = (tokens as f64 / ctx as f64) * 100.0;
-
-            let format_tok = |n: u32| -> String {
-                if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1_000_000.0) }
-                else if n >= 1_000 { format!("{:.1}k", n as f64 / 1_000.0) }
-                else { n.to_string() }
-            };
-
-            let token_label = if usage.completion_tokens > 0 {
-                format!("{} in / {} out · {:.1}%",
-                    format_tok(usage.prompt_tokens),
-                    format_tok(usage.completion_tokens),
-                    pct)
-            } else {
-                format!("{}/{} ({:.1}%)", format_tok(tokens), format_tok(ctx), pct)
-            };
-
-            let (token_color, bold) = if pct >= 90.0 {
-                (theme.error, true)
-            } else if pct >= 75.0 {
-                (theme.error_shimmer, false)
-            } else if pct >= 50.0 {
-                (theme.warning_shimmer, false)
-            } else {
-                (theme.warning, false)
-            };
-            let icon_style = if bold {
-                Style::default()
-                    .fg(token_color)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(token_color)
-            };
-            spans.push(Span::styled("⚡ ", icon_style));
-            spans.push(Span::styled(token_label, Style::default().fg(token_color)));
-        }
-        _ => {
-            // ── Fallback: 厂商未返回 usage 时，根据聊天历史估算 ──
-            let estimated: u32 = state.chat_history.iter()
-                .map(|e| (e.content.len() + e.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0)) as u32 / 4)
-                .sum();
-            if estimated > 0 {
-                let ctx = context_window_tokens(state);
-                let pct = (estimated as f64 / ctx as f64) * 100.0;
-                let format_tok = |n: u32| -> String {
-                    if n >= 1_000_000 { format!("~{:.1}M", n as f64 / 1_000_000.0) }
-                    else if n >= 1_000 { format!("~{:.1}k", n as f64 / 1_000.0) }
-                    else { format!("~{}", n) }
+        spans.push(sep());
+        match &state.token_usage {
+            Some(usage) if usage.prompt_tokens > 0 || usage.total_tokens > 0 => {
+                let tokens = if usage.prompt_tokens > 0 {
+                    usage.prompt_tokens
+                } else {
+                    usage.total_tokens
                 };
-                let dim = theme.inactive;
-                spans.push(Span::styled("⚡ ", Style::default().fg(dim)));
-                spans.push(Span::styled(
-                    format!("{}/{} ({:.1}%)", format_tok(estimated), format_tok(ctx), pct),
-                    Style::default().fg(dim),
-                ));
-            } else {
-                let dim = theme.inactive;
-                spans.push(Span::styled("⚡ ", Style::default().fg(dim)));
-                spans.push(Span::styled("—", Style::default().fg(dim)));
+                let ctx = context_window_tokens(state);
+                let pct = (tokens as f64 / ctx as f64) * 100.0;
+
+                let format_tok = |n: u32| -> String {
+                    if n >= 1_000_000 {
+                        format!("{:.1}M", n as f64 / 1_000_000.0)
+                    } else if n >= 1_000 {
+                        format!("{:.1}k", n as f64 / 1_000.0)
+                    } else {
+                        n.to_string()
+                    }
+                };
+
+                let token_label = if usage.completion_tokens > 0 {
+                    format!(
+                        "{} in / {} out · {:.1}%",
+                        format_tok(usage.prompt_tokens),
+                        format_tok(usage.completion_tokens),
+                        pct
+                    )
+                } else {
+                    format!("{}/{} ({:.1}%)", format_tok(tokens), format_tok(ctx), pct)
+                };
+
+                let (token_color, bold) = if pct >= 90.0 {
+                    (theme.error, true)
+                } else if pct >= 75.0 {
+                    (theme.error_shimmer, false)
+                } else if pct >= 50.0 {
+                    (theme.warning_shimmer, false)
+                } else {
+                    (theme.warning, false)
+                };
+                let icon_style = if bold {
+                    Style::default()
+                        .fg(token_color)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(token_color)
+                };
+                spans.push(Span::styled("⚡ ", icon_style));
+                spans.push(Span::styled(token_label, Style::default().fg(token_color)));
+            }
+            _ => {
+                // ── Fallback: 厂商未返回 usage 时，根据聊天历史估算 ──
+                let estimated: u32 = state
+                    .chat_history
+                    .iter()
+                    .map(|e| {
+                        (e.content.len()
+                            + e.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0))
+                            as u32
+                            / 4
+                    })
+                    .sum();
+                if estimated > 0 {
+                    let ctx = context_window_tokens(state);
+                    let pct = (estimated as f64 / ctx as f64) * 100.0;
+                    let format_tok = |n: u32| -> String {
+                        if n >= 1_000_000 {
+                            format!("~{:.1}M", n as f64 / 1_000_000.0)
+                        } else if n >= 1_000 {
+                            format!("~{:.1}k", n as f64 / 1_000.0)
+                        } else {
+                            format!("~{}", n)
+                        }
+                    };
+                    let dim = theme.inactive;
+                    spans.push(Span::styled("⚡ ", Style::default().fg(dim)));
+                    spans.push(Span::styled(
+                        format!(
+                            "{}/{} ({:.1}%)",
+                            format_tok(estimated),
+                            format_tok(ctx),
+                            pct
+                        ),
+                        Style::default().fg(dim),
+                    ));
+                } else {
+                    let dim = theme.inactive;
+                    spans.push(Span::styled("⚡ ", Style::default().fg(dim)));
+                    spans.push(Span::styled("—", Style::default().fg(dim)));
+                }
             }
         }
-    }
     }
 
     // ── 5. Cost — 已移除（不再显示 token 成本） ─────────────────────────────
 
     // ── 5b. Cache hit rate (only when below 50% — poor utilization) ───────────
     if !compact {
-    let total_cache = state.cache_read_tokens + state.cache_creation_tokens;
-    if total_cache > 0 {
-        let hit_rate = (state.cache_read_tokens as f64 / total_cache as f64 * 100.0) as u32;
-        if hit_rate < 50 {
-            spans.push(sep());
-            spans.push(Span::styled("Cache ", Style::default().fg(theme.inactive)));
-            spans.push(Span::styled(
-                format!("{}%", hit_rate),
-                Style::default().fg(theme.inactive),
-            ));
+        let total_cache = state.cache_read_tokens + state.cache_creation_tokens;
+        if total_cache > 0 {
+            let hit_rate = (state.cache_read_tokens as f64 / total_cache as f64 * 100.0) as u32;
+            if hit_rate < 50 {
+                spans.push(sep());
+                spans.push(Span::styled("Cache ", Style::default().fg(theme.inactive)));
+                spans.push(Span::styled(
+                    format!("{}%", hit_rate),
+                    Style::default().fg(theme.inactive),
+                ));
+            }
         }
-    }
     }
 
     // ── 6. Approval mode (non-default only) ──────────────────────────────────
@@ -831,18 +1056,20 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
 
     // ── 6b. Thinking effort (non-default only) ───────────────────────────────
     if !compact {
-    use crate::types::ThinkingEffort;
-    match state.thinking_effort {
-        ThinkingEffort::Off => {}
-        _ => {
-            spans.push(sep());
-            let label = format!("[T:{}]", state.thinking_effort.as_str().to_uppercase());
-            spans.push(Span::styled(
-                label,
-                Style::default().fg(theme.secondary).add_modifier(Modifier::ITALIC),
-            ));
+        use crate::types::ThinkingEffort;
+        match state.thinking_effort {
+            ThinkingEffort::Off => {}
+            _ => {
+                spans.push(sep());
+                let label = format!("[T:{}]", state.thinking_effort.as_str().to_uppercase());
+                spans.push(Span::styled(
+                    label,
+                    Style::default()
+                        .fg(theme.secondary)
+                        .add_modifier(Modifier::ITALIC),
+                ));
+            }
         }
-    }
     }
 
     // ── 6b2. Vim mode indicator ──────────────────────────────────────────────
@@ -871,7 +1098,9 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
         spans.push(sep());
         spans.push(Span::styled(
             "[COMPACTED]",
-            Style::default().fg(theme.info).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(theme.info)
+                .add_modifier(Modifier::ITALIC),
         ));
     }
 
@@ -880,10 +1109,7 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
         let avail = crate::core::sandbox::SandboxManager::is_available();
         if !avail {
             spans.push(sep());
-            spans.push(Span::styled(
-                "[!SBX]",
-                Style::default().fg(theme.warning),
-            ));
+            spans.push(Span::styled("[!SBX]", Style::default().fg(theme.warning)));
         }
     }
 
