@@ -1,6 +1,7 @@
 pub mod badge;
 pub mod dialog;
 pub mod divider;
+pub mod modal_shell;
 pub mod progress;
 pub mod spinner;
 pub mod tooltip;

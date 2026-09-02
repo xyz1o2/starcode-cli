@@ -258,6 +258,11 @@ pub async fn handle_streaming_request(
             // Session resume is handled by the control request handler
             StreamingRequestOutcome::Continue
         }
+        Some(AgentRequest::PluginOp { project_root, op }) => {
+            // 插件市场后台操作不依赖 agent：即使正在流式回复中也直接执行
+            crate::runtime::control_requests::spawn_plugin_op(&context.tx, project_root, op);
+            StreamingRequestOutcome::Continue
+        }
     }
 }
 

@@ -83,7 +83,7 @@ async fn resume(ctx: CommandContext<'_>, args: &[String]) -> CommandResult {
             ctx.state.current_status_line = Some("No saved sessions yet.".to_string());
             return Ok(());
         }
-        ctx.state.show_palette = false;
+        ctx.state.close_palette();
         ctx.state.show_session_menu = true;
         ctx.state.available_sessions = sessions;
         ctx.state.selected_session_index = 0;

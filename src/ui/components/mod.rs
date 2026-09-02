@@ -14,6 +14,7 @@ pub mod highlight;
 pub mod input_modal;
 pub mod log_selector;
 pub mod message_render;
+pub mod modal;
 pub mod model_picker;
 pub mod palette;
 pub mod permission_dialog;

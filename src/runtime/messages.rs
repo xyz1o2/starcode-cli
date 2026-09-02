@@ -135,6 +135,8 @@ pub enum StreamMessage {
         /// 新增的子消息（追加到现有列表）
         new_sub_entries: Vec<ChatEntry>,
     },
+    /// 插件市场后台操作完成：`None` 表示无需提示的成功（如已注册过）
+    PluginOpResult { message: Option<String> },
 }
 
 #[derive(Clone, Debug)]
@@ -194,4 +196,19 @@ pub enum AgentRequest {
     },
     EmitStatus(String),
     ResumeSession(String),
+    /// 插件市场后台操作（git clone / 删除仓库目录等耗时操作，避免阻塞 UI 事件循环）
+    PluginOp {
+        project_root: std::path::PathBuf,
+        op: PluginOp,
+    },
+}
+
+/// 可在后台执行的插件市场操作。结果通过
+/// [`StreamMessage::PluginOpResult`] 回传 UI。
+#[derive(Clone, Debug)]
+pub enum PluginOp {
+    EnsureDefaultMarketplace,
+    AddMarketplace { source: String },
+    RemoveMarketplace { name: String },
+    InstallPlugin(crate::core::plugins::marketplace::MarketplacePlugin),
 }

@@ -297,7 +297,7 @@ fn flush_input_batch(state: &mut ChatState, buf: &mut String) {
     let text = std::mem::take(buf);
 
     // When the palette is open, route chars to the search filter, not the main textarea.
-    if state.show_palette {
+    if state.is_palette_open() {
         for c in text.chars() {
             if !c.is_control() {
                 state.palette_filter.push(c);
@@ -465,8 +465,12 @@ pub async fn run_ui_loop(
                             }
                         }
                         Event::Mouse(m) => {
-                            crate::ui::events::mouse::handle_mouse_event(state, m);
-                            needs_redraw = true;
+                            // 鼠标捕获开启时 Moved（悬停）事件高频产生，
+                            // 不处理也不触发重绘，避免重绘风暴
+                            if !matches!(m.kind, crossterm::event::MouseEventKind::Moved) {
+                                crate::ui::events::mouse::handle_mouse_event(state, m);
+                                needs_redraw = true;
+                            }
                         }
                         Event::Paste(pasted_text) => {
                             crate::utils::logging::append_debug_log_line(&format!(
@@ -489,7 +493,7 @@ pub async fn run_ui_loop(
                                     crate::ui::events::clipboard_paste::collect_modal_input(
                                         &state.modal_textarea,
                                     );
-                            } else if state.show_palette {
+                            } else if state.is_palette_open() {
                                 for c in pasted_text.chars() {
                                     if !c.is_control() {
                                         state.palette_filter.push(c);
@@ -882,13 +886,12 @@ fn init_terminal() -> Result<
     // Stage 3: Enter alternate screen, enable bracketed paste and mouse capture
     execute!(stdout(), EnterAlternateScreen)?;
     let _ = crossterm::execute!(stdout(), crossterm::event::EnableBracketedPaste);
-    // 鼠标捕获默认禁用，保留原生终端文本选择/复制功能
-    // 滚轮事件转换为 Up/Down 箭头键，通过时间检测区分鼠标滚轮和键盘
-    // 可通过 STARCODE_ENABLE_MOUSE=1 启用鼠标捕获（禁用原生文本选择）
-    let mouse_enabled = std::env::var("STARCODE_ENABLE_MOUSE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if mouse_enabled {
+    // 默认启用鼠标捕获：滚轮以真实鼠标事件到达，直接滚动聊天区，
+    // 不再经终端转成 Up/Down 箭头键污染输入历史。
+    // 应用自带拖选复制（events/mouse.rs），Shift+点击仍可用终端原生选择。
+    // 若终端鼠标支持异常，可设 STARCODE_ENABLE_MOUSE=0 关闭——此时滚轮会被
+    // 终端转成箭头键，由 input.rs 的时间启发式尽力区分（不保证可靠）。
+    if !crate::ui::utils::term_recovery::mouse_capture_disabled_by_env() {
         let _ = crossterm::execute!(stdout(), crossterm::event::EnableMouseCapture);
     }
     let _ = stdout().flush();

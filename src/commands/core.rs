@@ -10,12 +10,8 @@ pub async fn help(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
 
     // 默认：打开可搜索的命令面板（分类 + 描述），替代 150 行文字倾倒
     ctx.state.show_help = false;
-    ctx.state.show_palette = true;
-    ctx.state.palette_mode = crate::ui::state::palette::PaletteMode::Help;
-    ctx.state.palette_items = crate::ui::components::palette::get_help_palette_items();
-    ctx.state.palette_filter.clear();
-    ctx.state.selected_palette_index = 0;
     ctx.state.palette_history.clear();
+    ctx.state.open_palette(crate::ui::state::palette::PaletteMode::Help);
     Ok(())
 }
 

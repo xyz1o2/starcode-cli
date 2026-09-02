@@ -321,7 +321,7 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "plugin",
         alt_names: &[],
-        description: "Plugin management",
+        description: "Plugin management (no args: open marketplace UI)",
         category: "Automation",
         sub_commands: &[
             SlashCommand {

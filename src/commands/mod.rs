@@ -81,19 +81,20 @@ pub async fn handle_command(
         }
         "resume" => chat::resume_cmd(ctx, args).await,
         "restore" => utility::undo(ctx, args).await,
-        // /mcp 无参数默认 status，避免 clap usage 错误倾倒到聊天
+        // /mcp 无参数：打开 MCP 管理弹窗（对标 Claude Code 的 /mcp 设置界面）
         "mcp" => {
-            let effective_args = if args.is_empty() {
-                vec!["status".to_string()]
-            } else {
-                args
-            };
-            mcp_wrapper(ctx, effective_args).await
+            if args.is_empty() {
+                ctx.state.show_status_modal = false;
+                ctx.state.open_mcp_modal();
+                crate::ui::state::modal::load_mcp_server_rows(ctx.state).await;
+                return Ok(());
+            }
+            mcp_wrapper(ctx, args).await
         }
         "memory" => memory_wrapper(ctx, args).await,
         // /provider 无参数或 select 缺 id：打开提供商选择菜单（交互优先于报错）
         "provider" if args.is_empty() || (args[0] == "select" && args.len() < 2) => {
-            ctx.state.show_palette = false;
+            ctx.state.close_palette();
             ctx.state.show_provider_menu = true;
             ctx.state.selected_provider_index = 0;
             Ok(())
@@ -149,9 +150,26 @@ pub async fn handle_command(
         "loop" => loop_wrapper(ctx, args).await,
         "agents" => agents_wrapper(ctx, args).await,
         "hooks" => hooks_wrapper(ctx, args).await,
-        "plugin" => plugin_wrapper(ctx, args).await,
+        // /plugin 无参数：打开插件管理弹窗（对标 Claude Code /plugin）；
+        // 带子命令（install/remove/...）仍走文本命令
+        "plugin" => {
+            if args.is_empty() {
+                ctx.state.close_palette();
+                ctx.state.open_plugins_modal(&ctx.agent_tx).await;
+                return Ok(());
+            }
+            plugin_wrapper(ctx, args).await
+        }
         "skills" => skills_wrapper(ctx, args).await,
-        "extension" | "ext" => extension_wrapper(ctx, args).await,
+        // /extension 与 /extension market：打开市场弹窗（其余子命令保持文本输出）
+        "extension" | "ext" => {
+            if args.is_empty() || matches!(args[0].as_str(), "market" | "marketplace") {
+                ctx.state.close_palette();
+                ctx.state.open_market_modal().await;
+                return Ok(());
+            }
+            extension_wrapper(ctx, args).await
+        }
         "remote" => remote_wrapper(ctx, args).await,
         "permissions" => permissions::run(ctx, args).await,
         "test" => test::run(ctx, args).await,

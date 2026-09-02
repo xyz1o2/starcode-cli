@@ -260,6 +260,8 @@ fn palette_action_key(action: &PaletteAction) -> String {
         PaletteAction::InputProviderName(provider_id) => {
             format!("add_provider_name:{}", provider_id)
         }
+        PaletteAction::OpenMcpModal => "open_mcp_modal".to_string(),
+        PaletteAction::OpenMarketModal => "open_market_modal".to_string(),
     }
 }
 
@@ -1766,9 +1768,16 @@ pub fn get_integrations_palette_items() -> Vec<PaletteItem> {
         PaletteItem {
             id: "manage_mcp".to_string(),
             label: "Manage MCP Servers".to_string(),
-            description: "Add, remove, refresh MCP servers".to_string(),
+            description: "Servers, tools, enable/disable, reconnect".to_string(),
             category: Some("MCP".to_string()),
-            action: PaletteAction::Navigate(PaletteMode::McpManage),
+            action: PaletteAction::OpenMcpModal,
+        },
+        PaletteItem {
+            id: "marketplace".to_string(),
+            label: "Extension Marketplace".to_string(),
+            description: "Browse & install skills, plugins, MCP servers".to_string(),
+            category: Some("Marketplace".to_string()),
+            action: PaletteAction::OpenMarketModal,
         },
         PaletteItem {
             id: "list_tools".to_string(),
@@ -1795,6 +1804,13 @@ pub fn get_mcp_manage_palette_items() -> Vec<PaletteItem> {
             description: "Return to Integrations".to_string(),
             category: None,
             action: PaletteAction::Back,
+        },
+        PaletteItem {
+            id: "mcp_manager".to_string(),
+            label: "Open MCP Manager".to_string(),
+            description: "Interactive server manager (status, tools, toggle)".to_string(),
+            category: Some("MCP".to_string()),
+            action: PaletteAction::OpenMcpModal,
         },
         PaletteItem {
             id: "mcp_list".to_string(),
@@ -1877,7 +1893,7 @@ pub fn get_help_palette_items() -> Vec<PaletteItem> {
 }
 
 pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
-    if !state.show_palette {
+    if !state.is_palette_open() {
         return;
     }
 

@@ -20,6 +20,27 @@ pub enum TermHealth {
     Broken,
 }
 
+/// 是否被环境变量显式关闭了鼠标捕获（STARCODE_ENABLE_MOUSE=0/false/off）。
+pub fn mouse_capture_disabled_by_env() -> bool {
+    std::env::var("STARCODE_ENABLE_MOUSE")
+        .map(|v| v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
+        .unwrap_or(false)
+}
+
+/// 按默认开启的策略（重新）启用鼠标捕获。
+///
+/// 恢复流程中 `disable_raw_mode` 会还原初始控制台模式，连带丢失 Windows
+/// 控制台的鼠标输入标志——不补启用的话滚轮会再次被终端转成箭头键。
+pub fn reenable_mouse_capture() {
+    if mouse_capture_disabled_by_env() {
+        return;
+    }
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::EnableMouseCapture
+    );
+}
+
 /// Attempt to recover terminal to a usable state.
 /// Returns the health status after recovery attempt.
 pub fn attempt_recovery() -> TermHealth {
@@ -32,23 +53,27 @@ pub fn attempt_recovery() -> TermHealth {
     let _ = stdout().flush();
 
     // Step 2: Check if raw mode is still functional
-    if crossterm::terminal::is_raw_mode_enabled().unwrap_or(false) {
+    let health = if crossterm::terminal::is_raw_mode_enabled().unwrap_or(false) {
         // Raw mode is on — try to disable and re-enable
         let _ = crossterm::terminal::disable_raw_mode();
         std::thread::sleep(Duration::from_millis(20));
         if crossterm::terminal::enable_raw_mode().is_ok() {
-            return TermHealth::Healthy;
+            TermHealth::Healthy
+        } else {
+            // Re-enable failed — terminal is degraded
+            TermHealth::Degraded
         }
-        // Re-enable failed — terminal is degraded
-        return TermHealth::Degraded;
-    }
-
-    // Step 3: Try to enable raw mode
-    if crossterm::terminal::enable_raw_mode().is_ok() {
-        TermHealth::Healthy
     } else {
-        TermHealth::Degraded
-    }
+        // Step 3: Try to enable raw mode
+        if crossterm::terminal::enable_raw_mode().is_ok() {
+            TermHealth::Healthy
+        } else {
+            TermHealth::Degraded
+        }
+    };
+
+    reenable_mouse_capture();
+    health
 }
 
 /// Check if the terminal can respond to a simple query within timeout.

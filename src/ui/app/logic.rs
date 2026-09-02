@@ -426,19 +426,12 @@ pub async fn enqueue_user_message(
             .map(|provider_id| !provider_id.trim().is_empty())
             .unwrap_or(false)
     {
-        state.show_palette = true;
         state.palette_history.clear();
-        state.palette_mode = crate::ui::state::palette::PaletteMode::Model;
+        state.open_palette(crate::ui::state::palette::PaletteMode::Model);
         if state.available_models.is_empty() {
             state.awaiting_models = true;
             let _ = agent_tx.send(AgentRequest::ListModels).await;
         }
-        state.palette_items = crate::ui::components::palette::get_items(
-            &crate::ui::state::palette::PaletteMode::Model,
-            state,
-        );
-        state.selected_palette_index = 0;
-        state.palette_filter.clear();
         state.chat_history.push(ChatEntry {
             is_streaming: Some(false),
             ..ChatEntry::assistant(

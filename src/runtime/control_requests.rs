@@ -233,8 +233,62 @@ pub async fn handle_request(
         AgentRequest::ResumeSession(_session_id) => {
             // Session resume is handled by the streaming request handler
         }
+        AgentRequest::PluginOp { project_root, op } => {
+            spawn_plugin_op(tx, project_root, op);
+        }
     }
     None
+}
+
+/// 在后台任务中执行插件市场操作（git clone 等可能耗时数秒），
+/// 完成后把结果经 [`StreamMessage::PluginOpResult`] 推回 UI。
+/// 控制请求路径与流式会话路径共用此入口。
+pub fn spawn_plugin_op(
+    tx: &mpsc::Sender<StreamMessage>,
+    project_root: std::path::PathBuf,
+    op: crate::runtime::messages::PluginOp,
+) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let message = run_plugin_op(&project_root, op).await;
+        let _ = tx.send(StreamMessage::PluginOpResult { message }).await;
+    });
+}
+
+/// 执行插件市场后台操作，返回要显示给用户的消息（None = 静默成功）。
+async fn run_plugin_op(
+    project_root: &std::path::Path,
+    op: crate::runtime::messages::PluginOp,
+) -> Option<String> {
+    use crate::core::plugins::marketplace as mp;
+    use crate::runtime::messages::PluginOp;
+    match op {
+        PluginOp::EnsureDefaultMarketplace => {
+            match mp::ensure_default_marketplace(project_root).await {
+                Ok(Some(name)) => Some(format!("Auto-registered default marketplace '{}'", name)),
+                Ok(None) => Some("Default marketplace auto-registration skipped".to_string()),
+                Err(e) => Some(format!("Default marketplace: {}", e)),
+            }
+        }
+        PluginOp::AddMarketplace { source } => match mp::add_marketplace(project_root, &source).await
+        {
+            Ok(m) => Some(format!("Added marketplace '{}'", m.name)),
+            Err(e) => Some(format!("Error: {}", e)),
+        },
+        PluginOp::RemoveMarketplace { name } => {
+            match mp::remove_marketplace(project_root, &name).await {
+                Ok(true) => Some(format!("Removed marketplace {}", name)),
+                Ok(false) => Some(format!("Marketplace not found: {}", name)),
+                Err(e) => Some(format!("Error: {}", e)),
+            }
+        }
+        PluginOp::InstallPlugin(plugin) => {
+            match mp::install_marketplace_plugin(project_root, &plugin).await {
+                Ok(_) => Some(format!("Installed plugin {}", plugin.name)),
+                Err(e) => Some(format!("Error: {}", e)),
+            }
+        }
+    }
 }
 
 async fn handle_tool_confirmation_response(

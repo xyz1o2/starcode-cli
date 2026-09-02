@@ -820,7 +820,7 @@ pub async fn handle_stream_update(
             }
             state.awaiting_models = false;
             // If Palette is open in Model mode, refresh the list
-            if state.show_palette
+            if state.is_palette_open()
                 && matches!(
                     state.palette_mode,
                     crate::ui::state::palette::PaletteMode::Model
@@ -835,9 +835,8 @@ pub async fn handle_stream_update(
             }
             // Fallback: models arrived, open palette in Model mode for selection
             else if !state.available_models.is_empty() {
-                state.show_palette = true;
                 state.palette_history.clear();
-                state.palette_mode = crate::ui::state::palette::PaletteMode::Model;
+                state.open_palette(crate::ui::state::palette::PaletteMode::Model);
                 state.palette_items = crate::ui::components::palette::get_model_palette_items(
                     &state.available_models,
                     &state.current_model,
@@ -880,6 +879,16 @@ pub async fn handle_stream_update(
             server: _,
             tools: _,
         } => {}
+        StreamMessage::PluginOpResult { message } => {
+            // 插件市场后台操作完成：清 pending、回填消息并刷新列表
+            state.plugin_op_pending = false;
+            state.plugin_loading = false;
+            state.plugin_selected.clear();
+            if let Some(m) = message {
+                state.plugin_message = Some(m);
+            }
+            state.reload_plugins_state().await;
+        }
         StreamMessage::ConfiguredProviders(ids) => {
             state.configured_providers = ids.into_iter().collect();
         }

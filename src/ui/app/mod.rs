@@ -284,9 +284,33 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
         crate::ui::components::help_popup::render_help_popup(f, f.area());
     }
 
-    // Draw palette if needed
-    if state.show_palette {
+    // Draw palette if needed (via unified modal stack)
+    if state.is_palette_open() {
         crate::ui::components::palette::render_palette(f, f.area(), state);
+    }
+
+    // Draw MCP manager modal if on top of the modal stack
+    if matches!(
+        state.top_modal(),
+        Some(crate::ui::state::Modal::Mcp { .. })
+    ) {
+        crate::ui::components::modal::render_mcp_modal(f, f.area(), state);
+    }
+
+    // Draw extension marketplace modal if on top of the modal stack
+    if matches!(
+        state.top_modal(),
+        Some(crate::ui::state::Modal::Market { .. })
+    ) {
+        crate::ui::components::modal::render_market_modal(f, f.area(), state);
+    }
+
+    // Draw plugin manager modal (Claude Code style /plugin) if on top
+    if matches!(
+        state.top_modal(),
+        Some(crate::ui::state::Modal::Plugins { .. })
+    ) {
+        crate::ui::components::modal::render_plugins_modal(f, f.area(), state);
     }
 
     // Draw input modal if needed
@@ -527,10 +551,12 @@ pub async fn run_app(
                     needs_redraw = true;
                 }
                 Event::Mouse(mouse) => {
-                    crate::ui::events::mouse::handle_mouse_event(&mut state, mouse);
-                    // Only redraw if mouse event actually changed something (e.g. scroll)
-                    // But for now, just redraw to be safe
-                    needs_redraw = true;
+                    // 鼠标捕获开启时 Moved（悬停）事件高频产生，
+                    // 不处理也不触发重绘，避免重绘风暴
+                    if !matches!(mouse.kind, crossterm::event::MouseEventKind::Moved) {
+                        crate::ui::events::mouse::handle_mouse_event(&mut state, mouse);
+                        needs_redraw = true;
+                    }
                 }
                 Event::Resize(width, height) => {
                     // Force cache clear on resize.
@@ -568,8 +594,10 @@ pub async fn run_app(
                         needs_redraw = true;
                     }
                     Event::Mouse(mouse) => {
-                        crate::ui::events::mouse::handle_mouse_event(&mut state, mouse);
-                        needs_redraw = true;
+                        if !matches!(mouse.kind, crossterm::event::MouseEventKind::Moved) {
+                            crate::ui::events::mouse::handle_mouse_event(&mut state, mouse);
+                            needs_redraw = true;
+                        }
                     }
                     Event::Resize(width, height) => {
                         state.last_chat_height = height.saturating_sub(4);

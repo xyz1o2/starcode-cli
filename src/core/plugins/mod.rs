@@ -1,4 +1,5 @@
 mod lifecycle;
+pub mod marketplace;
 pub mod mcp;
 mod tool;
 

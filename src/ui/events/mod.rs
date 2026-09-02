@@ -24,4 +24,5 @@ pub mod clipboard_paste;
 ///
 pub mod input;
 pub mod keymap;
+pub mod modal_input;
 pub mod mouse;

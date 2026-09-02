@@ -66,6 +66,8 @@ pub enum PaletteAction {
     ToggleColorblindMode,
     InputProviderId(String),   // provider_type
     InputProviderName(String), // provider_id (after ID is entered)
+    OpenMcpModal,              // open the unified /mcp manager modal
+    OpenMarketModal,           // open the unified extension marketplace modal
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +97,8 @@ pub enum InputContext {
         name: String,
         base_url: String,
     },
+    /// Plugins 弹窗：录入 marketplace 来源（git URL / owner/repo / 本地路径）
+    MarketplaceSource,
 }
 
 impl Default for PaletteMode {

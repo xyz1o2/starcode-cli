@@ -108,7 +108,7 @@ fn open_provider_selection_menu(
     origin_palette: bool,
 ) {
     clear_suggestion_overlays(state);
-    state.show_palette = false;
+    state.close_palette();
     state.show_input_modal = false;
     state.show_status_modal = false;
     close_quick_menus(state);
@@ -124,7 +124,7 @@ fn open_session_selection_menu(
     sessions: Vec<crate::utils::session_manager::SessionSummary>,
 ) {
     clear_suggestion_overlays(state);
-    state.show_palette = false;
+    state.close_palette();
     state.show_input_modal = false;
     state.show_status_modal = false;
     close_quick_menus(state);
@@ -159,21 +159,16 @@ fn navigate_back_from_quick_menu(state: &mut ChatState) {
     }
 }
 
-fn show_palette_mode(state: &mut ChatState, mode: PaletteMode) {
+pub(crate) fn show_palette_mode(state: &mut ChatState, mode: PaletteMode) {
     state.show_status_modal = false;
     close_quick_menus(state);
     state.quick_menu_back = None;
     state.quick_menu_origin_palette = false;
     state.show_input_modal = false;
-    state.show_palette = true;
-    state.palette_mode = mode.clone();
-    state.palette_items = crate::ui::components::palette::get_items(&mode, state);
-    state.selected_palette_index = 0;
-    state.palette_filter.clear();
-    state.input_modal_value.clear();
+    state.open_palette(mode);
 }
 
-fn show_provider_api_key_modal(
+pub(crate) fn show_provider_api_key_modal(
     state: &mut ChatState,
     provider_id: &str,
     edit_mode: bool,
@@ -181,7 +176,7 @@ fn show_provider_api_key_modal(
 ) {
     state.show_status_modal = false;
     close_quick_menus(state);
-    state.show_palette = false;
+    state.close_palette();
     state.show_input_modal = true;
     state.input_modal_title = if edit_mode {
         format!("Edit API Key for {}", provider_id)
@@ -211,7 +206,7 @@ fn show_provider_api_key_modal(
 fn show_provider_base_url_modal(state: &mut ChatState, provider_id: &str, initial_value: String) {
     state.show_status_modal = false;
     close_quick_menus(state);
-    state.show_palette = false;
+    state.close_palette();
     state.show_input_modal = true;
     state.input_modal_title = format!("Set Base URL for {}", provider_id);
     state.input_modal_prompt = if initial_value.trim().is_empty() {
@@ -236,7 +231,7 @@ fn show_provider_base_url_modal(state: &mut ChatState, provider_id: &str, initia
     });
 }
 
-async fn execute_palette_action(
+pub(crate) async fn execute_palette_action(
     state: &mut ChatState,
     action: PaletteAction,
     agent_tx: &mpsc::Sender<AgentRequest>,
@@ -244,23 +239,25 @@ async fn execute_palette_action(
     match action {
         PaletteAction::Navigate(mode) => {
             state.palette_history.push(state.palette_mode.clone());
-            state.palette_mode = mode.clone();
 
             if matches!(mode, PaletteMode::Model) && state.available_models.is_empty() {
                 let _ = agent_tx.send(AgentRequest::ListModels).await;
             }
 
-            // Entering from the settings modal (ShowStatus sets show_palette=false)
+            // Entering from the settings modal (ShowStatus closes the palette)
             // must reopen the palette, otherwise navigation appears to do nothing.
             state.show_status_modal = false;
-            state.show_palette = true;
-
-            state.palette_items = crate::ui::components::palette::get_items(&mode, state);
+            let items = crate::ui::components::palette::get_items(&mode, state);
+            state.palette_mode = mode;
+            state.palette_items = items;
             state.selected_palette_index = 0;
             state.palette_filter.clear();
+            if !state.is_palette_open() {
+                state.modal_stack.push(crate::ui::state::Modal::Palette);
+            }
         }
         PaletteAction::ShowStatus => {
-            state.show_palette = false;
+            state.close_palette();
             state.show_status_modal = true;
         }
         PaletteAction::ShowModelMenu => {
@@ -268,16 +265,21 @@ async fn execute_palette_action(
                 state.awaiting_models = true;
                 let _ = agent_tx.send(AgentRequest::ListModels).await;
             }
-            state.show_palette = true;
-            state.palette_history.push(state.palette_mode.clone());
-            state.palette_mode = PaletteMode::Model;
-            state.palette_items =
-                crate::ui::components::palette::get_items(&PaletteMode::Model, state);
-            state.selected_palette_index = 0;
-            state.palette_filter.clear();
+            state.push_palette_mode(PaletteMode::Model);
+            if !state.is_palette_open() {
+                state.modal_stack.push(crate::ui::state::Modal::Palette);
+            }
         }
         PaletteAction::ShowProviderMenu => {
             open_provider_selection_menu(state, None, true);
+        }
+        PaletteAction::OpenMcpModal => {
+            state.close_palette();
+            state.open_mcp_modal();
+            crate::ui::state::modal::load_mcp_server_rows(state).await;
+        }
+        PaletteAction::OpenMarketModal => {
+            state.open_market_modal().await;
         }
         PaletteAction::ShowSessionMenu => {
             let sessions = crate::utils::session_manager::list_session_summaries()
@@ -295,7 +297,7 @@ async fn execute_palette_action(
             });
 
             if has_history && !state.pending_model_confirmation {
-                state.show_palette = false;
+                state.close_palette();
                 state.pending_model_change = Some(model.clone());
                 state.pending_model_confirmation = true;
                 state.current_status_line = Some(format!(
@@ -309,7 +311,7 @@ async fn execute_palette_action(
                 return Ok(());
             }
 
-            state.show_palette = false;
+            state.close_palette();
             state.pending_model_confirmation = false;
             state.pending_model_change = Some(model.clone());
             state.current_model = model.clone();
@@ -337,7 +339,7 @@ async fn execute_palette_action(
             );
         }
         PaletteAction::SetAgentMode(mode) => {
-            state.show_palette = false;
+            state.close_palette();
             let approval_mode = match mode.as_str() {
                 "yolo" => crate::types::ApprovalMode::Yolo,
                 "plan" => crate::types::ApprovalMode::Plan,
@@ -349,7 +351,7 @@ async fn execute_palette_action(
                 .await;
         }
         PaletteAction::SetContextWindow(size_str) => {
-            state.show_palette = false;
+            state.close_palette();
             if size_str == "auto" {
                 state.context_window_override = None;
                 state.current_status_line = Some("Context Window: auto".to_string());
@@ -397,7 +399,7 @@ async fn execute_palette_action(
             }
         }
         PaletteAction::SetThinkingEffort(level) => {
-            state.show_palette = false;
+            state.close_palette();
             let effort = match level.as_str() {
                 "low" => crate::types::ThinkingEffort::Low,
                 "medium" => crate::types::ThinkingEffort::Medium,
@@ -421,7 +423,7 @@ async fn execute_palette_action(
             ));
         }
         PaletteAction::SetTheme(theme_name) => {
-            state.show_palette = false;
+            state.close_palette();
             if state.theme_manager.set_theme(&theme_name) {
                 state.current_status_line = Some(format!("Theme: {}", theme_name));
                 // Persist to user settings
@@ -442,18 +444,18 @@ async fn execute_palette_action(
                 state.selected_palette_index = 0;
                 state.palette_filter.clear();
             } else {
-                state.show_palette = false;
+                state.close_palette();
             }
         }
         PaletteAction::ExecuteCommand(cmd) => {
-            state.show_palette = false;
+            state.close_palette();
             state.input = cmd;
             crate::ui::app::logic::enqueue_user_message(state, state.input.clone(), agent_tx)
                 .await?;
             state.input.clear();
         }
         PaletteAction::TypeCommand(cmd) => {
-            state.show_palette = false;
+            state.close_palette();
             state.input = cmd;
         }
         PaletteAction::SelectProvider(provider_id) => {
@@ -523,13 +525,10 @@ async fn execute_palette_action(
                 0,
                 &format!("已选择 {}，接下来选择模型", provider_id),
             );
-            state.show_palette = true;
-            state.palette_history.push(state.palette_mode.clone());
-            state.palette_mode = PaletteMode::Model;
-            state.palette_items =
-                crate::ui::components::palette::get_items(&PaletteMode::Model, state);
-            state.selected_palette_index = 0;
-            state.palette_filter.clear();
+            state.push_palette_mode(PaletteMode::Model);
+            if !state.is_palette_open() {
+                state.modal_stack.push(crate::ui::state::Modal::Palette);
+            }
         }
         PaletteAction::InputApiKey(provider_id) => {
             state.quick_menu_back = Some(crate::ui::state::QuickMenuKind::Provider);
@@ -559,7 +558,7 @@ async fn execute_palette_action(
         PaletteAction::InputProviderId(provider_type) => {
             state.quick_menu_back = Some(crate::ui::state::QuickMenuKind::Provider);
             state.quick_menu_origin_palette = true;
-            state.show_palette = false;
+            state.close_palette();
             state.show_input_modal = true;
             state.input_modal_title = "Add New Provider — Enter ID".to_string();
             state.input_modal_prompt =
@@ -589,7 +588,7 @@ async fn execute_palette_action(
             _ => {}
         },
         PaletteAction::SetOutputStyle(style) => {
-            state.show_palette = false;
+            state.close_palette();
             let style_clone = style.clone();
             tokio::spawn(async move {
                 if let Ok(mgr) = crate::core::config::settings_manager::SettingsManager::new() {
@@ -602,16 +601,16 @@ async fn execute_palette_action(
             crate::ui::app::logic::emit_status_text(state, 0, &format!("Output style: {}", style));
         }
         PaletteAction::ShowLogSelector => {
-            state.show_palette = false;
+            state.close_palette();
             state.show_log_selector = true;
         }
         PaletteAction::ShowContextViz => {
-            state.show_palette = false;
+            state.close_palette();
             state.show_context_viz = true;
             state.context_breakdown = build_context_breakdown(state);
         }
         PaletteAction::ToggleVimMode => {
-            state.show_palette = false;
+            state.close_palette();
             state.vim_enabled = !state.vim_enabled;
             if state.vim_enabled {
                 state.vim_state = crate::ui::vim::VimState::new();
@@ -623,7 +622,7 @@ async fn execute_palette_action(
             );
         }
         PaletteAction::ToggleUiVerbose => {
-            state.show_palette = false;
+            state.close_palette();
             state.ui_verbose = !state.ui_verbose;
             state.rendered_cache.clear();
             crate::ui::app::logic::emit_status_text(
@@ -636,7 +635,7 @@ async fn execute_palette_action(
             );
         }
         PaletteAction::CreatePr => {
-            state.show_palette = false;
+            state.close_palette();
             // Send a message to the agent to create a PR
             let msg = crate::core::i18n::t(
                 "ui.pr.create_request",
@@ -657,7 +656,7 @@ async fn execute_palette_action(
                 .await;
         }
         PaletteAction::ToggleColorblindMode => {
-            state.show_palette = false;
+            state.close_palette();
             state.colorblind_mode = !state.colorblind_mode;
             crate::ui::app::logic::emit_status_text(
                 state,
@@ -984,9 +983,16 @@ pub async fn handle_key_event(
     agent_tx: &mpsc::Sender<AgentRequest>,
     last_key_time: Option<Instant>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // ── Unified modal stack takes priority over everything else ──
+    // Palette / MCP / Market modals consume keys first; Esc pops one level.
+    if super::modal_input::handle_modal_key(state, key, agent_tx).await? {
+        return Ok(());
+    }
+
     // Handle Shift+Tab for Plan/Build toggle (Shift+Tab is normalized to BackTab
     // by the runtime event loop before reaching here)
-    if key.code == KeyCode::BackTab {
+    // 输入模态打开时 Shift+Tab 不能触发模式切换（会吞掉输入框里的按键）
+    if key.code == KeyCode::BackTab && !state.show_input_modal {
         state.approval_mode = match state.approval_mode {
             ApprovalMode::Default => ApprovalMode::Plan,
             ApprovalMode::Plan => ApprovalMode::Default,
@@ -1043,20 +1049,17 @@ pub async fn handle_key_event(
 
     // Handle Ctrl+P for Palette
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('p')) {
-        state.show_palette = !state.show_palette;
-        if state.show_palette {
+        if state.is_palette_open() {
+            state.close_palette();
+        } else {
             state.show_help = false;
             state.show_input_modal = false;
             state.show_status_modal = false;
             close_quick_menus(state);
             state.quick_menu_back = None;
             state.quick_menu_origin_palette = false;
-            state.palette_mode = PaletteMode::Main;
-            state.palette_items =
-                crate::ui::components::palette::get_items(&PaletteMode::Main, state);
-            state.palette_filter.clear();
-            state.selected_palette_index = 0;
             state.palette_history.clear();
+            state.open_palette(PaletteMode::Main);
         }
         return Ok(());
     }
@@ -1101,7 +1104,7 @@ pub async fn handle_key_event(
 
     // Handle Alt+P for folded pasted input preview
     if !state.is_awaiting_confirmation
-        && !state.show_palette
+        && !state.is_palette_open()
         && !state.show_input_modal
         && key.modifiers.contains(KeyModifiers::ALT)
     {
@@ -1269,7 +1272,7 @@ pub async fn handle_key_event(
 
     // Vim mode intercept
     if state.vim_enabled
-        && !state.show_palette
+        && !state.is_palette_open()
         && !state.show_help
         && !state.show_status_modal
         && !state.show_input_modal
@@ -1608,10 +1611,7 @@ pub async fn handle_key_event(
             KeyCode::Char('s') | KeyCode::Char('S') => {
                 // Switch provider
                 state.show_error_overlay = false;
-                state.show_palette = true;
-                state.palette_mode = PaletteMode::Provider;
-                state.palette_items =
-                    crate::ui::components::palette::get_items(&PaletteMode::Provider, state);
+                state.open_palette(PaletteMode::Provider);
                 return Ok(());
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -1678,13 +1678,8 @@ pub async fn handle_key_event(
                         }
                     }
 
-                    state.show_palette = true;
                     state.palette_history.clear();
-                    state.palette_mode = PaletteMode::Model;
-                    state.palette_items =
-                        crate::ui::components::palette::get_items(&PaletteMode::Model, state);
-                    state.selected_palette_index = 0;
-                    state.palette_filter.clear();
+                    state.open_palette(PaletteMode::Model);
                     crate::ui::components::command_suggestions::on_input_changed(state);
                     return Ok(());
                 }
@@ -1824,7 +1819,7 @@ pub async fn handle_key_event(
             state.show_help = !state.show_help;
         }
         KeyCode::Char('?')
-            if !state.show_palette && !state.show_status_modal && !state.show_input_modal =>
+            if !state.is_palette_open() && !state.show_status_modal && !state.show_input_modal =>
         {
             // ? when input is empty: show help (like Claude Code)
             if state.textarea.lines().iter().all(|l| l.is_empty()) {
@@ -1838,7 +1833,7 @@ pub async fn handle_key_event(
         }
         KeyCode::Tab => {
             // Tab: toggle expand/collapse of the nearest tool entry
-            if !state.show_palette && !state.is_awaiting_confirmation {
+            if !state.is_palette_open() && !state.is_awaiting_confirmation {
                 let focused_idx = find_focused_tool_entry(state);
                 if let Some(idx) = focused_idx {
                     if let Some(entry) = state.chat_history.get(idx) {
@@ -2463,134 +2458,6 @@ async fn handle_overlay_input(
         }
     }
 
-    if state.show_palette {
-        let query = state.palette_filter.trim().to_lowercase();
-        let search_items =
-            crate::ui::components::palette::get_search_items(&state.palette_mode, state, &query);
-        let items_len = search_items
-            .iter()
-            .filter(|item| crate::ui::components::palette::palette_item_matches_query(item, &query))
-            .count();
-
-        match key.code {
-            KeyCode::Esc => {
-                if let Some(prev_mode) = state.palette_history.pop() {
-                    state.palette_mode = prev_mode.clone();
-                    state.palette_items =
-                        crate::ui::components::palette::get_items(&prev_mode, state);
-                    state.selected_palette_index = 0;
-                    state.palette_filter.clear();
-                } else {
-                    state.show_palette = false;
-                }
-            }
-            KeyCode::Up => {
-                if items_len > 0 {
-                    if state.selected_palette_index > 0 {
-                        state.selected_palette_index -= 1;
-                    } else {
-                        state.selected_palette_index = items_len - 1;
-                    }
-                }
-            }
-            KeyCode::Down => {
-                if state.is_awaiting_confirmation {
-                    if state.pending_confirmation_choice < 4 {
-                        state.pending_confirmation_choice += 1;
-                    }
-                    return Ok(true);
-                }
-                if items_len > 0 {
-                    if state.selected_palette_index < items_len - 1 {
-                        state.selected_palette_index += 1;
-                    } else {
-                        state.selected_palette_index = 0;
-                    }
-                }
-            }
-            KeyCode::PageUp => {
-                if items_len > 0 {
-                    state.selected_palette_index = state.selected_palette_index.saturating_sub(10);
-                }
-            }
-            KeyCode::PageDown => {
-                if items_len > 0 {
-                    state.selected_palette_index =
-                        (state.selected_palette_index + 10).min(items_len - 1);
-                }
-            }
-            KeyCode::Enter => {
-                let filtered_items: Vec<_> = search_items
-                    .iter()
-                    .filter(|item| {
-                        crate::ui::components::palette::palette_item_matches_query(item, &query)
-                    })
-                    .collect();
-
-                if let Some(selected_item) = filtered_items.get(state.selected_palette_index) {
-                    let action = selected_item.action.clone();
-                    execute_palette_action(state, action, agent_tx).await?;
-                }
-            }
-            KeyCode::Tab => {
-                if items_len > 0 {
-                    if state.selected_palette_index < items_len - 1 {
-                        state.selected_palette_index += 1;
-                    } else {
-                        state.selected_palette_index = 0;
-                    }
-                }
-            }
-            KeyCode::Backspace => {
-                state.palette_filter.pop();
-                state.selected_palette_index = 0;
-            }
-            KeyCode::Char(c) if c.is_control() => {
-                if c == '\t' && items_len > 0 {
-                    if state.selected_palette_index < items_len - 1 {
-                        state.selected_palette_index += 1;
-                    } else {
-                        state.selected_palette_index = 0;
-                    }
-                }
-            }
-            KeyCode::Char(c) => {
-                if state.palette_mode == PaletteMode::Provider && c == 'e' {
-                    let filtered_items: Vec<_> = search_items
-                        .iter()
-                        .filter(|item| {
-                            crate::ui::components::palette::palette_item_matches_query(item, &query)
-                        })
-                        .collect();
-
-                    if let Some(selected_item) = filtered_items.get(state.selected_palette_index) {
-                        let provider_id = match &selected_item.action {
-                            PaletteAction::SelectProvider(pid) => Some(pid.clone()),
-                            PaletteAction::InputApiKey(pid) => Some(pid.clone()),
-                            PaletteAction::InputBaseUrl(pid) => Some(pid.clone()),
-                            PaletteAction::Navigate(PaletteMode::ProviderOptions(pid)) => {
-                                Some(pid.clone())
-                            }
-                            _ => None,
-                        };
-
-                        if let Some(pid) = provider_id {
-                            let store = crate::core::config::provider_store::ProviderStore::new();
-                            let has_saved_key =
-                                store.get_api_key(&pid).await.unwrap_or(None).is_some();
-                            show_provider_api_key_modal(state, &pid, true, has_saved_key);
-                            return Ok(true);
-                        }
-                    }
-                }
-
-                state.palette_filter.push(c);
-                state.selected_palette_index = 0;
-            }
-            _ => {}
-        }
-        return Ok(true);
-    }
 
     Ok(false)
 }
@@ -2614,6 +2481,11 @@ async fn handle_input_modal(
         }
         KeyCode::Esc => {
             state.input_context = None;
+            if state.is_modal_open() {
+                // 底层还有模态（如 Plugins 弹窗）：仅关闭输入框，回到该模态
+                state.show_input_modal = false;
+                return Ok(true);
+            }
             show_palette_mode(state, state.palette_mode.clone());
         }
         KeyCode::Enter => {
@@ -2700,15 +2572,8 @@ async fn handle_input_modal(
                             state.available_models.clear();
                             state.show_input_modal = false;
                             close_quick_menus(state);
-                            state.show_palette = true;
                             state.palette_history.clear();
-                            state.palette_mode = PaletteMode::Model;
-                            state.palette_items = crate::ui::components::palette::get_items(
-                                &PaletteMode::Model,
-                                state,
-                            );
-                            state.selected_palette_index = 0;
-                            state.palette_filter.clear();
+                            state.open_palette(PaletteMode::Model);
                         } else {
                             if matches!(
                                 state.quick_menu_back,
@@ -2977,13 +2842,8 @@ async fn handle_input_modal(
                         state.available_models.clear();
                         state.show_input_modal = false;
                         close_quick_menus(state);
-                        state.show_palette = true;
                         state.palette_history.clear();
-                        state.palette_mode = PaletteMode::Model;
-                        state.palette_items =
-                            crate::ui::components::palette::get_items(&PaletteMode::Model, state);
-                        state.selected_palette_index = 0;
-                        state.palette_filter.clear();
+                        state.open_palette(PaletteMode::Model);
 
                         crate::ui::app::logic::emit_status_text(
                             state,
@@ -2993,6 +2853,32 @@ async fn handle_input_modal(
                                 name, pid
                             ),
                         );
+                        return Ok(true);
+                    }
+                    crate::ui::state::palette::InputContext::MarketplaceSource => {
+                        let source = state.input_modal_value.trim().to_string();
+                        state.show_input_modal = false;
+
+                        if source.is_empty() {
+                            state.input_context = None;
+                            return Ok(true);
+                        }
+
+                        // add_marketplace 需要克隆仓库，可能耗时数秒：后台执行，
+                        // 完成后经 StreamMessage::PluginOpResult 回填消息并刷新
+                        let cwd =
+                            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                        state.plugin_op_pending = true;
+                        state.plugin_message =
+                            Some(format!("Adding marketplace {}...", source));
+                        let _ = agent_tx
+                            .send(AgentRequest::PluginOp {
+                                project_root: cwd,
+                                op: crate::runtime::messages::PluginOp::AddMarketplace { source },
+                            })
+                            .await;
+                        state.plugin_index = 0;
+                        state.input_context = None;
                         return Ok(true);
                     }
                 }
