@@ -134,9 +134,10 @@ fn parse_count_after(s: &str, keyword: &str) -> Option<u32> {
 }
 
 /// Claude Code style spinner characters - 使用固定宽度字符避免行移动
-/// 使用 ● 和空格交替，确保宽度一致
-const SPINNER_FRAMES: &[&str] = &["●", " ", "●", " "];
-const SPINNER_FRAMES_REV: &[&str] = &[" ", "●", " ", "●"];
+/// ● 和 ○ 同属 East Asian Ambiguous 宽度类，在任何终端下宽度一致；
+/// 不能用空格 —— CJK 终端下 ● 是双宽、空格是单宽，交替会导致行内文字左右移动。
+const SPINNER_FRAMES: &[&str] = &["●", "○", "●", "○"];
+const SPINNER_FRAMES_REV: &[&str] = &["○", "●", "○", "●"];
 
 /// Braille spinner frames for smoother animation
 const BRAILLE_SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];

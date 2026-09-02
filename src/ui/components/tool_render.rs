@@ -246,21 +246,18 @@ pub(crate) fn render_tool_entry_blocks(
     // ToolResult: 无标记，直接显示结果内容
     if entry.entry_type == ChatEntryType::ToolCall {
         // ToolCall 行：圆点 + 工具名称 + 参数
-        let marker = if cancelling {
-            "⊘"
-        } else if is_streaming {
-            if blink_visible {
-                "●"
-            } else {
-                " "
-            }
-        } else {
-            "●" // 完成后也显示圆点，但颜色不同
-        };
+        // 注意：闪烁通过颜色明暗切换实现，字符恒为 ●。
+        // 不能用空格替代 ● —— CJK 终端下 ● 是双宽、空格是单宽，
+        // 交替会导致整行文字左右移动（所有工具行都会抖动）。
+        let marker = if cancelling { "⊘" } else { "●" };
         let marker_color = if cancelling {
             theme.warning
         } else if is_streaming {
-            theme.primary
+            if blink_visible {
+                theme.primary
+            } else {
+                theme.inactive // 闪烁"灭"态：暗色圆点，宽度不变
+            }
         } else {
             theme.tool_success // 完成后用绿色
         };
