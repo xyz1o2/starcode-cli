@@ -280,12 +280,33 @@ pub struct AgentTaskInfo {
     pub is_error: bool,
     /// 最后工具信息
     pub last_tool_info: Option<String>,
+    /// teammate 自定义名称（`@name` 显示，对标 renderGroupedAgentToolUse 的 name）
+    pub name: Option<String>,
+    /// 后台运行时替代 "Done" 的任务描述
+    pub task_description: Option<String>,
     /// 开始时间
     pub started_at: Instant,
+    /// 完成时间（首次 resolved 时冻结，避免耗时随渲染继续增长）
+    pub finished_at: Option<Instant>,
     /// 子消息列表
     pub sub_entries: Vec<crate::types::ChatEntry>,
     /// 在 chat_history 中的位置索引
     pub entry_idx: usize,
+}
+
+impl AgentTaskInfo {
+    /// 已耗时：完成后取冻结值，未完成时实时计算
+    pub fn elapsed(&self) -> std::time::Duration {
+        match self.finished_at {
+            Some(end) => end.saturating_duration_since(self.started_at),
+            None => self.started_at.elapsed(),
+        }
+    }
+
+    /// 是否「已转入后台」（对标 AgentProgressLine 的 isBackgrounded）
+    pub fn is_backgrounded(&self) -> bool {
+        self.is_async && self.is_resolved
+    }
 }
 
 pub struct ChatState {

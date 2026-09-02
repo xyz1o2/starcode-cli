@@ -233,6 +233,46 @@ pub enum SubagentType {
     CodeReviewer,
 }
 
+impl SubagentType {
+    /// 序列化用的 slug（与 `#[serde(rename_all = "snake_case")]` 一致）
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::GeneralPurpose => "general_purpose",
+            Self::Explorer => "explorer",
+            Self::Analyzer => "analyzer",
+            Self::Editor => "editor",
+            Self::CodeReviewer => "code_reviewer",
+        }
+    }
+
+    /// 用户可见名称（对标 `AgentTool/UI.tsx::userFacingName`）
+    ///
+    /// 参考实现把内置的 general-purpose agent 显示为 "Agent"，
+    /// 自定义类型则原样显示 slug。
+    pub fn user_facing_name(&self) -> &'static str {
+        match self {
+            Self::GeneralPurpose => "Agent",
+            Self::Explorer => "Explore",
+            Self::Analyzer => "Analyze",
+            Self::Editor => "Edit",
+            Self::CodeReviewer => "Review",
+        }
+    }
+
+    /// 是否为自定义（非内置 general-purpose）类型（对标 `isCustomSubagentType`）
+    pub fn is_custom(&self) -> bool {
+        !matches!(self, Self::GeneralPurpose)
+    }
+}
+
+/// `Option<SubagentType>` 的用户可见标签：`None` 代表 fork（继承父上下文）
+pub fn agent_type_label(subagent_type: Option<&SubagentType>) -> &'static str {
+    match subagent_type {
+        Some(t) => t.user_facing_name(),
+        None => "Fork",
+    }
+}
+
 /// Agent 隔离模式（对标 CCB isolation 参数）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentIsolation {

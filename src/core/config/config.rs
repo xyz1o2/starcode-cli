@@ -305,6 +305,10 @@ impl Config {
     pub fn max_session_turns(&self) -> i32 {
         self.max_session_turns
     }
+    /// 覆盖循环轮次上限（供 AgentTool 的 `max_rounds` 参数作用于子 Agent）
+    pub fn set_max_session_turns(&mut self, turns: i32) {
+        self.max_session_turns = turns;
+    }
     pub fn list_sessions(&self) -> bool {
         self.list_sessions
     }

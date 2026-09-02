@@ -6,6 +6,7 @@
 use crate::agent::subagent::notification::{
     NotificationQueue, NotificationStatus, NotificationUsage, TaskNotification,
 };
+use crate::agent::subagent::progress::{AgentProgressTracker, SubAgentProgressSink};
 use crate::core::agents::{
     SharedSubAgentRunner, SubAgentError, SubAgentErrorKind, SubAgentRequest, SubAgentResult,
 };
@@ -35,8 +36,24 @@ impl StarAgentRunner {
         Arc::new(Self::new(client, config))
     }
 
-    /// 同步执行 SubAgent
+    /// 同步执行 SubAgent（无进度回流）
     pub async fn run(&self, request: SubAgentRequest) -> Result<SubAgentResult, SubAgentError> {
+        self.run_with_progress(request, None).await
+    }
+
+    /// 同步执行 SubAgent，并把实时进度推给 `sink`。
+    ///
+    /// 对标 Claude Code 里 AgentTool 消费子 Agent 的 message 流并调用
+    /// `setToolUseProgress` 的做法：这里消费 `process_user_message_stream`
+    /// 产出的 chunk，边累加统计边回调。
+    ///
+    /// 之所以走 stream 而不是 `process_user_message`：后者只返回一条
+    /// assistant 文本，工具调用与 token 用量全部丢失。
+    pub async fn run_with_progress(
+        &self,
+        request: SubAgentRequest,
+        sink: Option<SubAgentProgressSink>,
+    ) -> Result<SubAgentResult, SubAgentError> {
         if self.config.recursion_depth >= 3 {
             return Err(SubAgentError::new(
                 SubAgentErrorKind::RecursionLimitExceeded,
@@ -63,26 +80,86 @@ impl StarAgentRunner {
             )
         })?;
 
-        let entries = agent
-            .process_user_message(&request.prompt)
-            .await
-            .map_err(|e| {
-                SubAgentError::new(
-                    SubAgentErrorKind::ExecutionFailed,
-                    format!("SubAgent execution error: {}", e),
-                )
-            })?;
+        let mut tracker = AgentProgressTracker::new(sink);
+        let mut final_text = String::new();
 
-        let output = entries
-            .iter()
-            .filter(|entry| matches!(entry.entry_type, crate::types::ChatEntryType::Assistant))
-            .last()
-            .map(|entry| entry.content.clone())
-            .unwrap_or_else(|| "SubAgent completed but returned no specific output.".to_string());
+        {
+            use crate::types::StreamingChunkType;
+            use futures::StreamExt;
+
+            let mut stream = agent
+                .process_user_message_stream(&request.prompt)
+                .await
+                .map_err(|e| {
+                    SubAgentError::new(
+                        SubAgentErrorKind::ExecutionFailed,
+                        format!("SubAgent execution error: {}", e),
+                    )
+                })?;
+
+            while let Some(item) = stream.next().await {
+                let chunk = item.map_err(|e| {
+                    SubAgentError::new(
+                        SubAgentErrorKind::ExecutionFailed,
+                        format!("SubAgent execution error: {}", e),
+                    )
+                })?;
+
+                match chunk.chunk_type {
+                    StreamingChunkType::ToolCalls => {
+                        for tc in chunk.tool_calls.iter().flatten() {
+                            tracker.on_tool_started(tc);
+                        }
+                    }
+                    StreamingChunkType::ToolResult => {
+                        if let (Some(tc), Some(tr)) = (&chunk.tool_call, &chunk.tool_result) {
+                            tracker.on_tool_finished(tc, tr);
+                        }
+                    }
+                    StreamingChunkType::TokenCount => {
+                        if let Some(tokens) = chunk.token_count {
+                            tracker.on_tokens(tokens);
+                        }
+                    }
+                    StreamingChunkType::Content => {
+                        if let Some(text) = chunk.content.as_ref() {
+                            if !text.trim().is_empty() {
+                                final_text = text.clone();
+                                tracker.on_assistant_text(text.clone());
+                            }
+                        }
+                    }
+                    // TextDelta / ReasoningDelta 是增量文本，子 Agent 的中间思考
+                    // 不回流父级 UI（对标参考实现只回流 progress messages）
+                    _ => {}
+                }
+            }
+        }
+
+        let tool_use_count = tracker.tool_use_count();
+        let total_tokens = tracker.tokens();
+        let last_tool_info = tracker.last_tool_info();
+        let entries = tracker.into_entries();
+
+        let output = if final_text.trim().is_empty() {
+            entries
+                .iter()
+                .filter(|entry| matches!(entry.entry_type, crate::types::ChatEntryType::Assistant))
+                .last()
+                .map(|entry| entry.content.clone())
+                .unwrap_or_else(|| {
+                    "SubAgent completed but returned no specific output.".to_string()
+                })
+        } else {
+            final_text
+        };
 
         Ok(SubAgentResult {
             output,
             entries,
+            tool_use_count,
+            total_tokens,
+            last_tool_info,
         })
     }
 }
@@ -121,42 +198,80 @@ impl AsyncSubagentRunner {
     }
 
     /// 后台启动 SubAgent，立即返回 AsyncLaunchResult
+    ///
+    /// `agent_type_label` 是用户可见的类型标签（对标 `userFacingName`），
+    /// 会随通知回到 UI，避免 UI 侧再硬编码 "general-purpose"。
     pub fn spawn_background(
         &self,
         request: SubAgentRequest,
         name: Option<String>,
         description: String,
+        agent_type_label: String,
     ) -> AsyncLaunchResult {
         let agent_id: String = {
             let id = uuid::Uuid::new_v4().to_string();
             format!("agent-{}", &id[..8])
         };
 
-        // 注册 name → agent_id 映射
-        if let Some(ref n) = name {
-            let mut registry = self.name_registry.blocking_lock();
-            registry.insert(n.clone(), agent_id.clone());
-        }
-
         let output_file = PathBuf::from(format!(".star/subagent_outputs/{}.txt", agent_id));
         let runner = self.sync_runner.clone();
         let queue = self.notification_queue.clone();
+        let registry = self.name_registry.clone();
         let desc = description.clone();
         let aid = agent_id.clone();
+        let agent_name = name.clone();
+        let type_label = agent_type_label.clone();
 
         tokio::spawn(async move {
-            let start = std::time::Instant::now();
-            let result = runner.run(request).await;
+            // 注册 name → agent_id 映射。放进 spawn 内用 async lock，
+            // 避免在 async 上下文里调用 blocking_lock 触发 panic。
+            if let Some(ref n) = agent_name {
+                registry.lock().await.insert(n.clone(), aid.clone());
+            }
 
-            let (status, output, entries, tokens, tool_uses) = match &result {
+            let start = std::time::Instant::now();
+
+            // 后台 agent 的进度同样回流到 UI（AgentTaskUpdate chunk）
+            let progress_id = aid.clone();
+            let progress_desc = desc.clone();
+            let progress_type = type_label.clone();
+            let progress_name = agent_name.clone();
+            let sink: SubAgentProgressSink = Arc::new(move |p| {
+                crate::agent::subagent::progress::emit_to_ui(
+                    crate::types::StreamingChunk::agent_task_update(
+                        crate::types::AgentTaskUpdatePayload::new(
+                            progress_id.clone(),
+                            progress_type.clone(),
+                        )
+                        .with_description(progress_desc.clone())
+                        .with_status(crate::types::AgentTaskStatus::Running)
+                        .with_stats(p.tool_use_count, p.tokens)
+                        .with_async(true)
+                        .with_last_tool_info(p.last_tool_info.clone())
+                        .with_name(progress_name.clone())
+                        .with_task_description(Some(progress_desc.clone()))
+                        .with_sub_entries(p.new_entries.clone()),
+                    ),
+                );
+            });
+
+            let result = runner.run_with_progress(request, Some(sink)).await;
+
+            let (status, output, entries, tokens, tool_uses) = match result {
                 Ok(r) => (
                     NotificationStatus::Completed,
-                    r.output.clone(),
-                    r.entries.clone(),
-                    0, // TODO: 从 SubAgentResult 获取实际 token 数
-                    0, // TODO: 从 SubAgentResult 获取实际工具调用数
+                    r.output,
+                    r.entries,
+                    r.total_tokens as u64,
+                    r.tool_use_count as u64,
                 ),
-                Err(_) => (NotificationStatus::Failed, format!("{:?}", result), Vec::new(), 0, 0),
+                Err(e) => (
+                    NotificationStatus::Failed,
+                    format!("SubAgent failed: {}", e),
+                    Vec::new(),
+                    0,
+                    0,
+                ),
             };
 
             let mut q = queue.lock().await;
@@ -172,6 +287,8 @@ impl AsyncSubagentRunner {
                     duration_ms: start.elapsed().as_millis() as u64,
                 },
                 entries,
+                agent_type: Some(type_label),
+                name: agent_name,
             });
         });
 

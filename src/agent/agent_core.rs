@@ -309,6 +309,11 @@ impl Agent {
         self.client.model.clone()
     }
 
+    /// 当前 Agent 的嵌套深度（0 = 顶层会话）
+    pub fn recursion_depth(&self) -> usize {
+        self.config.recursion_depth
+    }
+
     pub(crate) fn runtime_tool_registry(&self) -> Option<Arc<crate::core::tools::ToolRegistry>> {
         self.config.runtime_tool_registry()
     }

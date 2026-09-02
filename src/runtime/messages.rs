@@ -128,6 +128,10 @@ pub enum StreamMessage {
         is_resolved: bool,
         is_error: bool,
         last_tool_info: Option<String>,
+        /// teammate 自定义名称（`@name` 显示）
+        name: Option<String>,
+        /// 后台运行时替代 "Done" 的描述
+        task_description: Option<String>,
         /// 新增的子消息（追加到现有列表）
         new_sub_entries: Vec<ChatEntry>,
     },

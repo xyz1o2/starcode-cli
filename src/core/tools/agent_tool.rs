@@ -1,12 +1,18 @@
+use crate::agent::subagent::progress::{emit_to_ui, SubAgentProgressSink};
 use crate::agent::subagent::router::{route_agent_call, AgentRoute};
 use crate::agent::subagent::runner::AsyncSubagentRunner;
 use crate::core::agents::{
-    AgentToolFullInput, SharedSubAgentRunner, SubAgentErrorKind, SubAgentRequest, SubagentType,
+    agent_type_label, AgentToolFullInput, SharedSubAgentRunner, SubAgentErrorKind, SubAgentRequest,
+    SubagentType,
 };
 use crate::core::tools::tools::{BaseDeclarativeTool, ToolInvocation, ToolLocation, ToolResult};
+use crate::types::{AgentTaskStatus, AgentTaskUpdatePayload, StreamingChunk};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
+
+/// 同步 Agent 未显式指定 max_rounds 时的默认轮次上限
+const DEFAULT_SYNC_MAX_ROUNDS: u32 = 50;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AgentToolParams {
@@ -165,17 +171,90 @@ impl ToolInvocation for AgentToolInvocation {
             let route = route_agent_call(&input, false, false);
 
             match route {
-                // 同步路径（现有逻辑不变）
-                AgentRoute::SyncNamedAgent { request, .. } => {
-                    match runner.run(request.with_max_rounds(50)).await {
-                        Ok(result) => Ok(ToolResult {
-                            llm_content: None,
-                            return_display: None,
-                            output: result.output,
-                            error: None,
-                            data: None,
-                        }),
+                // 同步路径：阻塞等待，但实时把进度回流到父级 UI
+                AgentRoute::SyncNamedAgent {
+                    agent_id,
+                    subagent_type,
+                    request,
+                } => {
+                    let type_label = subagent_type.user_facing_name().to_string();
+                    let description = input.description.clone();
+                    let name = input.name.clone();
+
+                    // 建条目：让 UI 立即出现 "Initializing…" 的 AgentTask
+                    emit_to_ui(StreamingChunk::agent_task_update(
+                        AgentTaskUpdatePayload::new(&agent_id, &type_label)
+                            .with_description(&description)
+                            .with_status(AgentTaskStatus::Running)
+                            .with_name(name.clone()),
+                    ));
+
+                    // 进度回调：每条子消息都刷新统计 + 最近工具摘要
+                    let sink: SubAgentProgressSink = {
+                        let agent_id = agent_id.clone();
+                        let type_label = type_label.clone();
+                        let description = description.clone();
+                        let name = name.clone();
+                        Arc::new(move |p| {
+                            emit_to_ui(StreamingChunk::agent_task_update(
+                                AgentTaskUpdatePayload::new(&agent_id, &type_label)
+                                    .with_description(&description)
+                                    .with_status(AgentTaskStatus::Running)
+                                    .with_stats(p.tool_use_count, p.tokens)
+                                    .with_last_tool_info(p.last_tool_info.clone())
+                                    .with_name(name.clone())
+                                    .with_sub_entries(p.new_entries.clone()),
+                            ));
+                        })
+                    };
+
+                    // max_rounds 现在真正生效：调用方给了就用，否则回落默认值
+                    let rounds = request.max_rounds.unwrap_or(DEFAULT_SYNC_MAX_ROUNDS);
+                    let request = request.with_max_rounds(rounds);
+
+                    match runner.run_with_progress(request, Some(sink)).await {
+                        Ok(result) => {
+                            emit_to_ui(StreamingChunk::agent_task_update(
+                                AgentTaskUpdatePayload::new(&agent_id, &type_label)
+                                    .with_description(&description)
+                                    .with_status(AgentTaskStatus::Completed)
+                                    .with_stats(result.tool_use_count, result.total_tokens)
+                                    .with_last_tool_info(result.last_tool_info.clone())
+                                    .with_name(name.clone()),
+                            ));
+                            Ok(ToolResult {
+                                llm_content: None,
+                                return_display: None,
+                                output: result.output,
+                                error: None,
+                                data: Some(serde_json::json!({
+                                    "status": "sync_completed",
+                                    "agent_id": agent_id,
+                                    "agent_type": type_label,
+                                    "name": name,
+                                    "tool_use_count": result.tool_use_count,
+                                    "total_tokens": result.total_tokens,
+                                })),
+                            })
+                        }
                         Err(err) => {
+                            // 递归超限属于「被拒绝」语义（对标
+                            // renderToolUseRejectedMessage），其余算执行失败
+                            let status = if err.kind
+                                == SubAgentErrorKind::RecursionLimitExceeded
+                            {
+                                AgentTaskStatus::Rejected
+                            } else {
+                                AgentTaskStatus::Failed
+                            };
+                            emit_to_ui(StreamingChunk::agent_task_update(
+                                AgentTaskUpdatePayload::new(&agent_id, &type_label)
+                                    .with_description(&description)
+                                    .with_status(status)
+                                    .with_last_tool_info(Some(err.message.clone()))
+                                    .with_name(name.clone()),
+                            ));
+
                             let error_type = match err.kind {
                                 SubAgentErrorKind::RecursionLimitExceeded => {
                                     "RecursionLimitExceeded".to_string()
@@ -201,20 +280,24 @@ impl ToolInvocation for AgentToolInvocation {
 
                 // 异步路径
                 AgentRoute::AsyncAgent {
-                    agent_id,
+                    agent_id: _,
                     request,
                     name,
                 } => {
                     let async_runner = async_runner
                         .ok_or_else(|| "AsyncSubagentRunner not configured".to_string())?;
 
+                    let type_label =
+                        agent_type_label(input.subagent_type.as_ref()).to_string();
+
                     let launch = async_runner.spawn_background(
                         SubAgentRequest {
                             prompt: request.prompt,
                             max_rounds: request.max_rounds,
                         },
-                        name,
+                        name.clone(),
                         input.description.clone(),
+                        type_label.clone(),
                     );
 
                     Ok(ToolResult {
@@ -229,6 +312,9 @@ impl ToolInvocation for AgentToolInvocation {
                         data: Some(serde_json::json!({
                             "status": "async_launched",
                             "agent_id": launch.agent_id,
+                            "agent_type": type_label,
+                            "name": name,
+                            "description": input.description,
                             "output_file": launch.output_file.to_string_lossy(),
                         })),
                     })
@@ -243,6 +329,7 @@ impl ToolInvocation for AgentToolInvocation {
                         "AsyncSubagentRunner not configured for coordinator".to_string()
                     })?;
 
+                    let type_label = "Worker".to_string();
                     let launch = async_runner.spawn_background(
                         SubAgentRequest {
                             prompt: request.prompt,
@@ -250,6 +337,7 @@ impl ToolInvocation for AgentToolInvocation {
                         },
                         None,
                         input.description.clone(),
+                        type_label.clone(),
                     );
 
                     Ok(ToolResult {
@@ -263,6 +351,8 @@ impl ToolInvocation for AgentToolInvocation {
                         data: Some(serde_json::json!({
                             "status": "async_launched",
                             "agent_id": launch.agent_id,
+                            "agent_type": type_label,
+                            "description": input.description,
                             "coordinator_worker": true,
                         })),
                     })
@@ -301,6 +391,7 @@ impl ToolInvocation for AgentToolInvocation {
                         },
                         Some(format!("fork-{}", agent_id)),
                         request.description.clone(),
+                        "Fork".to_string(),
                     );
 
                     Ok(ToolResult {
@@ -315,6 +406,8 @@ impl ToolInvocation for AgentToolInvocation {
                         data: Some(serde_json::json!({
                             "status": "fork_launched",
                             "agent_id": launch.agent_id,
+                            "agent_type": "Fork",
+                            "description": request.description,
                             "inherited_messages": request.parent_messages.len(),
                             "output_file": launch.output_file.to_string_lossy(),
                         })),

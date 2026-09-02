@@ -189,6 +189,8 @@ pub async fn handle_stream_chunk(
                         is_resolved: chunk.agent_is_resolved.unwrap_or(false),
                         is_error: chunk.agent_is_error.unwrap_or(false),
                         last_tool_info: chunk.agent_last_tool_info,
+                        name: chunk.agent_name,
+                        task_description: chunk.agent_task_description,
                         new_sub_entries: chunk.agent_new_sub_entries.unwrap_or_default(),
                     })
                     .await;

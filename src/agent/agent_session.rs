@@ -88,6 +88,10 @@ impl Agent {
     }
 
     pub(crate) fn persist_session_messages_to_disk(&self) {
+        // 同 persist_session_messages：子代理不得覆盖父代理的会话文件
+        if self.config.recursion_depth > 0 {
+            return;
+        }
         session::persist_session_messages_to_disk(
             &self.session_messages,
             self.config.storage().session_messages_path(),

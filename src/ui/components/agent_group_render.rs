@@ -66,8 +66,11 @@ pub fn render_agent_group(
 fn render_group_header(stats: &[AgentStat], area_width: u16) -> Vec<Line<'static>> {
     let total = stats.len();
     let running = stats.iter().filter(|s| s.status == AgentTaskStatus::Running).count();
-    let completed = stats.iter().filter(|s| s.status == AgentTaskStatus::Completed).count();
-    let failed = stats.iter().filter(|s| s.status == AgentTaskStatus::Failed).count();
+    // Rejected 与 Failed 同归"未成功"，头部统一计入 failed 计数
+    let failed = stats
+        .iter()
+        .filter(|s| matches!(s.status, AgentTaskStatus::Failed | AgentTaskStatus::Rejected))
+        .count();
     let all_async = stats.iter().all(|s| s.is_async && s.is_resolved);
     let all_complete = running == 0;
 
@@ -172,7 +175,7 @@ fn render_agent_progress_lines(
     let type_color = match stat.status {
         AgentTaskStatus::Running => Color::Yellow,
         AgentTaskStatus::Completed => Color::Green,
-        AgentTaskStatus::Failed => Color::Red,
+        AgentTaskStatus::Failed | AgentTaskStatus::Rejected => Color::Red,
         AgentTaskStatus::Background => Color::DarkGray,
     };
     let display_name = stat.name.as_deref().unwrap_or(&stat.agent_type);
@@ -251,8 +254,18 @@ fn render_agent_progress_lines(
                 let text = stat.last_tool_info.as_deref().unwrap_or("Initializing…");
                 (text.to_string(), Color::Yellow)
             }
-            AgentTaskStatus::Completed => ("Done".to_string(), Color::Green),
-            AgentTaskStatus::Failed => ("Failed".to_string(), Color::Red),
+            AgentTaskStatus::Completed => (with_elapsed("Done", stat), Color::Green),
+            AgentTaskStatus::Failed => (with_elapsed("Failed", stat), Color::Red),
+            // 用户拒绝授权（对标 renderToolUseRejectedMessage）
+            AgentTaskStatus::Rejected => {
+                let reason = stat.last_tool_info.as_deref().unwrap_or("");
+                let text = if reason.is_empty() {
+                    "Rejected".to_string()
+                } else {
+                    format!("Rejected — {}", reason)
+                };
+                (text, Color::Red)
+            }
             AgentTaskStatus::Background => {
                 let text = stat.task_description.as_deref().unwrap_or("Running in the background");
                 (text.to_string(), Color::DarkGray)
@@ -277,6 +290,7 @@ struct AgentStat {
     is_error: bool,
     is_async: bool,
     last_tool_info: Option<String>,
+    elapsed: std::time::Duration,
 }
 
 impl AgentStat {
@@ -284,8 +298,8 @@ impl AgentStat {
         Self {
             agent_type: info.agent_type.clone(),
             description: Some(info.description.clone()),
-            name: None,
-            task_description: None,
+            name: info.name.clone(),
+            task_description: info.task_description.clone(),
             status: info.status.clone(),
             tool_use_count: info.tool_use_count,
             tokens: Some(info.tokens),
@@ -293,7 +307,37 @@ impl AgentStat {
             is_error: info.is_error,
             is_async: info.is_async,
             last_tool_info: info.last_tool_info.clone(),
+            elapsed: info.elapsed(),
         }
+    }
+}
+
+/// `Done (12 tool uses · 10.2k tokens · 8.4s)`（对标参考实现的完成态括号）
+fn with_elapsed(label: &str, stat: &AgentStat) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if stat.tool_use_count > 0 {
+        parts.push(format!(
+            "{} tool {}",
+            stat.tool_use_count,
+            if stat.tool_use_count == 1 { "use" } else { "uses" }
+        ));
+    }
+    if let Some(tokens) = stat.tokens.filter(|t| *t > 0) {
+        parts.push(format_tokens(tokens));
+    }
+    parts.push(format_duration(stat.elapsed));
+    format!("{} ({})", label, parts.join(" · "))
+}
+
+/// 耗时文案：`820ms` / `8.4s` / `2m5s`
+pub(crate) fn format_duration(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs >= 60 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else if elapsed.as_millis() >= 1000 {
+        format!("{:.1}s", elapsed.as_secs_f64())
+    } else {
+        format!("{}ms", elapsed.as_millis())
     }
 }
 

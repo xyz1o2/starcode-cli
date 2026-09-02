@@ -43,7 +43,7 @@ impl StarAgent {
         api_key: &str,
         model: Option<String>,
         base_url: impl Into<Option<String>>,
-        _max_subagent_rounds: Option<u32>,
+        max_subagent_rounds: Option<u32>,
         is_openai_compatible: Option<bool>,
         config: Option<Arc<Config>>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -56,6 +56,17 @@ impl StarAgent {
             )
             .into());
         }
+
+        // AgentTool 的 max_rounds 参数在此生效：覆盖该 agent 的循环轮次上限。
+        // 之前这个参数被忽略，导致子 Agent 永远跑主会话的 max_session_turns。
+        let config = match max_subagent_rounds {
+            Some(rounds) if rounds > 0 => {
+                let mut cloned = (*config).clone();
+                cloned.set_max_session_turns(rounds as i32);
+                Arc::new(cloned)
+            }
+            _ => config,
+        };
 
         let client = StarClient::new(api_key, model, base_url.into(), is_openai_compatible, None);
         let initial_mode = Self::initial_approval_mode(config.as_ref());
@@ -293,7 +304,14 @@ impl StarAgent {
         // emitted during the LLM stream reach the UI in real-time, without
         // waiting for the agent loop to finish.
         let (stream_tx, stream_rx) = tokio::sync::mpsc::unbounded_channel::<StreamingChunk>();
-        self.inner.stream_tx = Some(stream_tx);
+        self.inner.stream_tx = Some(stream_tx.clone());
+
+        // 把顶层会话的 chunk 发送端登记为全局 UI sink，供 AgentTool 在
+        // 同步/后台路径中推送子 Agent 进度（对标参考实现的 AsyncLocalStorage
+        // 透传 UI 回调）。只有 depth==0 才注册，否则子 Agent 会覆盖父级 sink。
+        if self.inner.recursion_depth() == 0 {
+            crate::agent::subagent::progress::set_ui_sink(stream_tx);
+        }
 
         let event_stream = self.inner.run_stream(prompt.to_string());
 

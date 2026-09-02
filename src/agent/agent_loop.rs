@@ -119,29 +119,36 @@ impl Agent {
                     ));
 
                     // 发送 AgentTaskUpdate 让 UI 更新对应的 AgentTask 条目
-                    let (is_resolved, is_error, agent_status) = match notification.status {
+                    let agent_status = match notification.status {
                         crate::agent::subagent::notification::NotificationStatus::Completed => {
-                            (true, false, crate::types::AgentTaskStatus::Completed)
+                            crate::types::AgentTaskStatus::Completed
                         }
-                        crate::agent::subagent::notification::NotificationStatus::Failed => {
-                            (true, true, crate::types::AgentTaskStatus::Failed)
-                        }
-                        crate::agent::subagent::notification::NotificationStatus::Killed => {
-                            (true, true, crate::types::AgentTaskStatus::Failed)
+                        crate::agent::subagent::notification::NotificationStatus::Failed
+                        | crate::agent::subagent::notification::NotificationStatus::Killed => {
+                            crate::types::AgentTaskStatus::Failed
                         }
                     };
+                    // 类型标签跟着通知走，不再硬编码 "general-purpose"
+                    let agent_type = notification
+                        .agent_type
+                        .clone()
+                        .unwrap_or_else(|| "Agent".to_string());
                     self.emit_direct_chunk(crate::types::StreamingChunk::agent_task_update(
-                        &notification.task_id,
-                        "general-purpose",
-                        &notification.summary,
-                        agent_status,
-                        notification.usage.tool_uses as u32,
-                        notification.usage.total_tokens as u32,
-                        true, // is_async
-                        is_resolved,
-                        is_error,
-                        Some(status_str.to_string()),
-                        notification.entries.clone(),
+                        crate::types::AgentTaskUpdatePayload::new(
+                            &notification.task_id,
+                            agent_type,
+                        )
+                        .with_description(&notification.summary)
+                        .with_status(agent_status)
+                        .with_stats(
+                            notification.usage.tool_uses as u32,
+                            notification.usage.total_tokens as u32,
+                        )
+                        .with_async(true)
+                        .with_last_tool_info(Some(status_str.to_string()))
+                        .with_name(notification.name.clone())
+                        .with_task_description(Some(notification.summary.clone()))
+                        .with_sub_entries(notification.entries.clone()),
                     ));
 
                     crate::utils::logging::append_debug_log_line(&format!(

@@ -84,12 +84,14 @@ pub enum ChatEntryType {
 }
 
 /// Agent 任务状态
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum AgentTaskStatus {
+    #[default]
     Running,
     Completed,
     Failed,
     Background, // 异步后台运行
+    Rejected,   // 用户拒绝授权（对标 renderToolUseRejectedMessage）
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,6 +187,12 @@ pub struct ChatEntry {
     /// Agent 组的任务 ID 列表（仅 AgentGroup 类型）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_task_ids: Option<Vec<String>>,
+    /// Agent 自定义名称（teammate `@name` 显示，对标 renderGroupedAgentToolUse 的 name）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    /// 后台 Agent 的任务描述（backgrounded 状态下替代 "Done" 显示）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_task_description: Option<String>,
     // ============================================
 }
 
@@ -226,6 +234,8 @@ impl ChatEntry {
             agent_last_tool_info: None,
             agent_sub_entries: None,
             agent_task_ids: None,
+            agent_name: None,
+            agent_task_description: None,
         }
     }
 
@@ -380,6 +390,23 @@ impl ChatEntry {
     pub fn with_agent_async(mut self, is_async: bool) -> Self {
         self.agent_is_async = Some(is_async);
         self
+    }
+
+    /// 设置 Agent 自定义名称（teammate `@name`）
+    pub fn with_agent_name(mut self, name: Option<String>) -> Self {
+        self.agent_name = name.filter(|s| !s.trim().is_empty());
+        self
+    }
+
+    /// 设置后台 Agent 的任务描述
+    pub fn with_agent_task_description(mut self, desc: Option<String>) -> Self {
+        self.agent_task_description = desc.filter(|s| !s.trim().is_empty());
+        self
+    }
+
+    /// 该 Agent 是否处于「已转入后台」状态（对标 AgentProgressLine 的 isBackgrounded）
+    pub fn agent_is_backgrounded(&self) -> bool {
+        self.agent_is_async.unwrap_or(false) && self.agent_is_resolved.unwrap_or(false)
     }
 
     // 辅助方法
@@ -696,6 +723,10 @@ pub struct StreamingChunk {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_last_tool_info: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_task_description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_new_sub_entries: Option<Vec<ChatEntry>>,
     // ============================================
 }
@@ -804,38 +835,124 @@ impl StreamingChunk {
     }
 
     /// Agent 任务更新
-    pub fn agent_task_update(
-        task_id: impl Into<String>,
-        agent_type: impl Into<String>,
-        description: impl Into<String>,
-        status: AgentTaskStatus,
-        tool_use_count: u32,
-        tokens: u32,
-        is_async: bool,
-        is_resolved: bool,
-        is_error: bool,
-        last_tool_info: Option<String>,
-        new_sub_entries: Vec<ChatEntry>,
-    ) -> Self {
+    pub fn agent_task_update(payload: AgentTaskUpdatePayload) -> Self {
         Self {
             chunk_type: StreamingChunkType::AgentTaskUpdate,
-            agent_task_id: Some(task_id.into()),
-            agent_type: Some(agent_type.into()),
-            agent_description: Some(description.into()),
-            agent_status: Some(status),
-            agent_tool_use_count: Some(tool_use_count),
-            agent_tokens: Some(tokens),
-            agent_is_async: Some(is_async),
-            agent_is_resolved: Some(is_resolved),
-            agent_is_error: Some(is_error),
-            agent_last_tool_info: last_tool_info,
-            agent_new_sub_entries: if new_sub_entries.is_empty() {
+            agent_task_id: Some(payload.task_id),
+            agent_type: Some(payload.agent_type),
+            agent_description: Some(payload.description),
+            agent_status: Some(payload.status),
+            agent_tool_use_count: Some(payload.tool_use_count),
+            agent_tokens: Some(payload.tokens),
+            agent_is_async: Some(payload.is_async),
+            agent_is_resolved: Some(payload.is_resolved),
+            agent_is_error: Some(payload.is_error),
+            agent_last_tool_info: payload.last_tool_info,
+            agent_name: payload.name,
+            agent_task_description: payload.task_description,
+            agent_new_sub_entries: if payload.new_sub_entries.is_empty() {
                 None
             } else {
-                Some(new_sub_entries)
+                Some(payload.new_sub_entries)
             },
             ..Default::default()
         }
+    }
+}
+
+/// `AgentTaskUpdate` chunk 的载荷。
+///
+/// 原先是 11 个位置参数，极易错位；改为具名结构体 + `Default`，
+/// 调用方只需填写关心的字段。
+#[derive(Debug, Clone, Default)]
+pub struct AgentTaskUpdatePayload {
+    pub task_id: String,
+    /// 用户可见的 Agent 类型标签（对标 `userFacingName`）
+    pub agent_type: String,
+    pub description: String,
+    pub status: AgentTaskStatus,
+    pub tool_use_count: u32,
+    pub tokens: u32,
+    pub is_async: bool,
+    pub is_resolved: bool,
+    pub is_error: bool,
+    /// 最近工具摘要（对标 `extractLastToolInfo`）
+    pub last_tool_info: Option<String>,
+    /// teammate 自定义名称（`@name`）
+    pub name: Option<String>,
+    /// 后台运行时替代 "Done" 的描述
+    pub task_description: Option<String>,
+    /// 本次新增的子条目（增量）
+    pub new_sub_entries: Vec<ChatEntry>,
+}
+
+impl AgentTaskUpdatePayload {
+    pub fn new(task_id: impl Into<String>, agent_type: impl Into<String>) -> Self {
+        Self {
+            task_id: task_id.into(),
+            agent_type: agent_type.into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
+        self
+    }
+
+    pub fn with_status(mut self, status: AgentTaskStatus) -> Self {
+        self.is_resolved = matches!(
+            status,
+            AgentTaskStatus::Completed
+                | AgentTaskStatus::Failed
+                | AgentTaskStatus::Rejected
+                | AgentTaskStatus::Background
+        );
+        self.is_error = matches!(status, AgentTaskStatus::Failed | AgentTaskStatus::Rejected);
+        self.status = status;
+        self
+    }
+
+    pub fn with_stats(mut self, tool_use_count: u32, tokens: u32) -> Self {
+        self.tool_use_count = tool_use_count;
+        self.tokens = tokens;
+        self
+    }
+
+    pub fn with_async(mut self, is_async: bool) -> Self {
+        self.is_async = is_async;
+        self
+    }
+
+    pub fn with_last_tool_info(mut self, info: Option<String>) -> Self {
+        self.last_tool_info = info.filter(|s| !s.trim().is_empty());
+        self
+    }
+
+    pub fn with_name(mut self, name: Option<String>) -> Self {
+        self.name = name.filter(|s| !s.trim().is_empty());
+        self
+    }
+
+    pub fn with_task_description(mut self, desc: Option<String>) -> Self {
+        self.task_description = desc.filter(|s| !s.trim().is_empty());
+        self
+    }
+
+    pub fn with_sub_entries(mut self, entries: Vec<ChatEntry>) -> Self {
+        self.new_sub_entries = entries;
+        self
+    }
+
+    /// 覆盖 `with_status` 推导出的 resolved/error（用于 Running 但已出错等边界）
+    pub fn with_resolved(mut self, is_resolved: bool) -> Self {
+        self.is_resolved = is_resolved;
+        self
+    }
+
+    pub fn with_error(mut self, is_error: bool) -> Self {
+        self.is_error = is_error;
+        self
     }
 }
 

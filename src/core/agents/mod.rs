@@ -23,11 +23,26 @@ impl SubAgentRequest {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SubAgentResult {
     pub output: String,
     /// 执行过程中产生的所有条目（包括 ToolCall、Assistant 消息等）
     pub entries: Vec<crate::types::ChatEntry>,
+    /// 工具调用次数（口径同 Claude Code `calculateAgentStats`：数 tool_result）
+    pub tool_use_count: u32,
+    /// 累计 token 用量
+    pub total_tokens: u32,
+    /// 最近一次工具的语义摘要，用于完成态仍需展示时回填
+    pub last_tool_info: Option<String>,
+}
+
+impl SubAgentResult {
+    pub fn new(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

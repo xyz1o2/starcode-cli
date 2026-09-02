@@ -1024,194 +1024,200 @@ pub async fn handle_stream_update(
             is_resolved,
             is_error,
             last_tool_info,
+            name,
+            task_description,
             new_sub_entries,
         } => {
             handle_agent_task_update(
                 state,
-                &task_id,
-                &agent_type,
-                &description,
-                status,
-                tool_use_count,
-                tokens,
-                is_async,
-                is_resolved,
-                is_error,
-                last_tool_info,
-                new_sub_entries,
+                AgentTaskUpdateArgs {
+                    task_id,
+                    agent_type,
+                    description,
+                    status,
+                    tool_use_count,
+                    tokens,
+                    is_async,
+                    is_resolved,
+                    is_error,
+                    last_tool_info,
+                    name,
+                    task_description,
+                    new_sub_entries,
+                },
             );
         }
     }
     Ok(())
 }
 
-/// 处理 Agent 任务更新：创建或更新 chat_history 中的 AgentTask 条目
+/// 同一批并发 Agent 的归组时间窗。
 ///
-/// 当多个 Agent 在短时间内启动时，自动分组为 AgentGroup 显示
-fn handle_agent_task_update(
-    state: &mut ChatState,
-    task_id: &str,
-    agent_type: &str,
-    description: &str,
-    status: crate::types::AgentTaskStatus,
-    tool_use_count: u32,
-    tokens: u32,
-    is_async: bool,
-    is_resolved: bool,
-    is_error: bool,
-    last_tool_info: Option<String>,
-    new_sub_entries: Vec<crate::types::ChatEntry>,
-) {
-    use crate::types::{AgentTaskStatus, ChatEntry};
+/// 对标 Claude Code 把同一条 assistant 消息里的多个 Agent tool_use 合并成
+/// 一个 group 渲染；这里用「相邻启动」近似「同一批并发」。
+const AGENT_GROUP_WINDOW_MS: i64 = 3000;
 
-    // 查找或创建 AgentTask 条目
-    let existing_idx = state
-        .chat_history
-        .iter()
-        .position(|e| {
-            e.entry_type == crate::types::ChatEntryType::AgentTask
-                && e.agent_task_id.as_deref() == Some(task_id)
-        });
+/// 一次 Agent 进度更新的全部字段（原先是 12 个位置参数）
+pub(crate) struct AgentTaskUpdateArgs {
+    pub task_id: String,
+    pub agent_type: String,
+    pub description: String,
+    pub status: crate::types::AgentTaskStatus,
+    pub tool_use_count: u32,
+    pub tokens: u32,
+    pub is_async: bool,
+    pub is_resolved: bool,
+    pub is_error: bool,
+    pub last_tool_info: Option<String>,
+    pub name: Option<String>,
+    pub task_description: Option<String>,
+    pub new_sub_entries: Vec<crate::types::ChatEntry>,
+}
 
-    // Clone values before moving into chat_history or active_agent_tasks
-    let status_clone = status.clone();
-    let last_tool_info_clone = last_tool_info.clone();
-    let new_sub_entries_clone = if !new_sub_entries.is_empty() {
-        Some(new_sub_entries.clone())
-    } else {
-        None
+/// 处理 Agent 任务更新：创建或更新 chat_history 中的 AgentTask / AgentGroup 条目
+///
+/// 条目归属只在该 task 的**第一条**更新时决定，之后一直复用
+/// `AgentTaskInfo::entry_idx`。否则每条进度更新都会重新走一遍归属判断，
+/// 把同一个 agent 反复追加进 `agent_task_ids`。
+fn handle_agent_task_update(state: &mut ChatState, args: AgentTaskUpdateArgs) {
+    use crate::types::ChatEntryType;
+
+    let prior = state.active_agent_tasks.get(&args.task_id);
+    let started_at = prior
+        .map(|i| i.started_at)
+        .unwrap_or_else(std::time::Instant::now);
+    // 首次进入 resolved 时冻结耗时，之后不再随渲染增长
+    let finished_at = prior
+        .and_then(|i| i.finished_at)
+        .or_else(|| args.is_resolved.then(std::time::Instant::now));
+    let mut sub_entries = prior.map(|i| i.sub_entries.clone()).unwrap_or_default();
+    sub_entries.extend(args.new_sub_entries.iter().cloned());
+    // 进度 chunk 未携带这些字段时沿用旧值，避免状态行闪回 "Initializing…"
+    let last_tool_info = args
+        .last_tool_info
+        .clone()
+        .or_else(|| prior.and_then(|i| i.last_tool_info.clone()));
+    let name = args.name.clone().or_else(|| prior.and_then(|i| i.name.clone()));
+    let task_description = args
+        .task_description
+        .clone()
+        .or_else(|| prior.and_then(|i| i.task_description.clone()));
+
+    let entry_idx = match prior.map(|i| i.entry_idx) {
+        Some(idx) if idx < state.chat_history.len() => idx,
+        _ => attach_agent_task_entry(state, &args),
     };
 
-    if let Some(idx) = existing_idx {
-        // 更新现有条目
-        if let Some(entry) = state.chat_history.get_mut(idx) {
-            entry.agent_status = Some(status);
-            entry.agent_tool_use_count = Some(tool_use_count);
-            entry.agent_tokens = Some(tokens);
-            entry.agent_is_resolved = Some(is_resolved);
-            entry.agent_is_error = Some(is_error);
-            entry.agent_is_async = Some(is_async);
-            entry.agent_last_tool_info = last_tool_info;
-
-            // 追加新的子消息
-            if let Some(subs) = &mut entry.agent_sub_entries {
-                subs.extend(new_sub_entries);
-            } else if !new_sub_entries.is_empty() {
-                entry.agent_sub_entries = Some(new_sub_entries);
+    // 独立 AgentTask 条目从 entry 自身取数渲染；AgentGroup 从
+    // active_agent_tasks 取数，无需回写。
+    let is_standalone = state
+        .chat_history
+        .get(entry_idx)
+        .map(|e| e.entry_type == ChatEntryType::AgentTask)
+        .unwrap_or(false);
+    if is_standalone {
+        if let Some(entry) = state.chat_history.get_mut(entry_idx) {
+            entry.agent_description = Some(args.description.clone());
+            entry.agent_status = Some(args.status.clone());
+            entry.agent_tool_use_count = Some(args.tool_use_count);
+            entry.agent_tokens = Some(args.tokens);
+            entry.agent_is_resolved = Some(args.is_resolved);
+            entry.agent_is_error = Some(args.is_error);
+            entry.agent_is_async = Some(args.is_async);
+            entry.agent_last_tool_info = last_tool_info.clone();
+            entry.agent_name = name.clone();
+            entry.agent_task_description = task_description.clone();
+            if !sub_entries.is_empty() {
+                entry.agent_sub_entries = Some(sub_entries.clone());
             }
+        }
+    }
+    state.rendered_cache.remove(&entry_idx);
+    state.virtual_list.mark_dirty(entry_idx);
 
-            // 标记 dirty 以重新渲染
-            state.rendered_cache.remove(&idx);
-            state.virtual_list.mark_dirty(idx);
+    state.active_agent_tasks.insert(
+        args.task_id.clone(),
+        crate::ui::state::store::AgentTaskInfo {
+            task_id: args.task_id,
+            agent_type: args.agent_type,
+            description: args.description,
+            status: args.status,
+            tool_use_count: args.tool_use_count,
+            tokens: args.tokens,
+            is_async: args.is_async,
+            is_resolved: args.is_resolved,
+            is_error: args.is_error,
+            last_tool_info,
+            name,
+            task_description,
+            started_at,
+            finished_at,
+            sub_entries,
+            entry_idx,
+        },
+    );
+
+    // 自动跟随到底部
+    if state.auto_follow {
+        state.scroll = state
+            .virtual_list
+            .total_lines()
+            .saturating_sub(state.last_chat_height as usize);
+    }
+}
+
+/// 决定一个**新** Agent 落在哪个 chat_history 条目上，返回该条目索引。
+///
+/// - 时间窗内已有 AgentGroup → 加入该组
+/// - 时间窗内是独立 AgentTask → 原地升级为 AgentGroup，两个 agent 一起渲染
+/// - 否则 → 新建独立 AgentTask 条目
+fn attach_agent_task_entry(state: &mut ChatState, args: &AgentTaskUpdateArgs) -> usize {
+    use crate::types::{ChatEntry, ChatEntryType};
+
+    let now = chrono::Utc::now();
+    let recent = state.chat_history.iter().rposition(|e| {
+        matches!(
+            e.entry_type,
+            ChatEntryType::AgentTask | ChatEntryType::AgentGroup
+        ) && now.signed_duration_since(e.timestamp).num_milliseconds() < AGENT_GROUP_WINDOW_MS
+    });
+
+    let Some(idx) = recent else {
+        let mut entry = ChatEntry::agent_task(&args.task_id, &args.agent_type);
+        entry.agent_description = Some(args.description.clone());
+        state.chat_history.push(entry);
+        let idx = state.chat_history.len() - 1;
+        state.virtual_list.mark_dirty(idx);
+        return idx;
+    };
+
+    if state.chat_history[idx].entry_type == ChatEntryType::AgentGroup {
+        if let Some(ids) = state.chat_history[idx].agent_task_ids.as_mut() {
+            if !ids.contains(&args.task_id) {
+                ids.push(args.task_id.clone());
+            }
         }
     } else {
-        // 查找最近的 AgentGroup 条目，尝试将新 Agent 加入现有组
-        let recent_group_idx = state
-            .chat_history
-            .iter()
-            .rposition(|e| e.entry_type == crate::types::ChatEntryType::AgentGroup);
-
-        if let Some(group_idx) = recent_group_idx {
-            // 检查是否应该加入现有组（3秒内的 Agent 启动）
-            let should_group = if let Some(entry) = state.chat_history.get(group_idx) {
-                let age = chrono::Utc::now()
-                    .signed_duration_since(entry.timestamp)
-                    .num_milliseconds();
-                age < 3000 // 3秒内的 Agent 启动分组
-            } else {
-                false
-            };
-
-            if should_group {
-                // 加入现有组
-                if let Some(entry) = state.chat_history.get_mut(group_idx) {
-                    if let Some(task_ids) = &mut entry.agent_task_ids {
-                        task_ids.push(task_id.to_string());
-                    }
-                    // 标记 dirty 以重新渲染
-                    state.rendered_cache.remove(&group_idx);
-                    state.virtual_list.mark_dirty(group_idx);
-                }
-
-                // 同步更新 active_agent_tasks
-                let info = crate::ui::state::store::AgentTaskInfo {
-                    task_id: task_id.to_string(),
-                    agent_type: agent_type.to_string(),
-                    description: description.to_string(),
-                    status: status_clone,
-                    tool_use_count,
-                    tokens,
-                    is_async,
-                    is_resolved,
-                    is_error,
-                    last_tool_info: last_tool_info_clone,
-                    started_at: std::time::Instant::now(),
-                    sub_entries: new_sub_entries_clone.unwrap_or_default(),
-                    entry_idx: group_idx,
-                };
-                state.active_agent_tasks.insert(task_id.to_string(), info);
-
-                // 自动跟随到底部
-                if state.auto_follow {
-                    state.scroll = state
-                        .virtual_list
-                        .total_lines()
-                        .saturating_sub(state.last_chat_height as usize);
-                }
-                return;
+        // 独立 AgentTask 遇到并发的第二个 agent → 升级成组
+        let mut ids: Vec<String> = state.chat_history[idx]
+            .agent_task_id
+            .clone()
+            .into_iter()
+            .collect();
+        ids.push(args.task_id.clone());
+        state.chat_history[idx] = ChatEntry::agent_group(ids.clone());
+        // 组内既有成员的 entry_idx 仍指向同一索引，无需迁移，
+        // 但要确保它们不会再被当作独立条目回写。
+        for id in ids {
+            if let Some(info) = state.active_agent_tasks.get_mut(&id) {
+                info.entry_idx = idx;
             }
-        }
-
-        // 创建新条目（单个 Agent 或新组的第一个 Agent）
-        let mut entry = ChatEntry::agent_task(task_id, agent_type);
-        entry.agent_description = Some(description.to_string());
-        entry.agent_status = Some(status);
-        entry.agent_tool_use_count = Some(tool_use_count);
-        entry.agent_tokens = Some(tokens);
-        entry.agent_is_resolved = Some(is_resolved);
-        entry.agent_is_error = Some(is_error);
-        entry.agent_is_async = Some(is_async);
-        entry.agent_last_tool_info = last_tool_info;
-        if !new_sub_entries.is_empty() {
-            entry.agent_sub_entries = Some(new_sub_entries);
-        }
-
-        state.chat_history.push(entry);
-        state.virtual_list.mark_dirty(state.chat_history.len() - 1);
-
-        // 自动跟随到底部
-        if state.auto_follow {
-            state.scroll = state
-                .virtual_list
-                .total_lines()
-                .saturating_sub(state.last_chat_height as usize);
         }
     }
 
-    // 同步更新 active_agent_tasks
-    let info = crate::ui::state::store::AgentTaskInfo {
-        task_id: task_id.to_string(),
-        agent_type: agent_type.to_string(),
-        description: description.to_string(),
-        status: status_clone,
-        tool_use_count,
-        tokens,
-        is_async,
-        is_resolved,
-        is_error,
-        last_tool_info: last_tool_info_clone,
-        started_at: std::time::Instant::now(),
-        sub_entries: new_sub_entries_clone.unwrap_or_default(),
-        entry_idx: state
-            .chat_history
-            .iter()
-            .position(|e| {
-                e.entry_type == crate::types::ChatEntryType::AgentTask
-                    && e.agent_task_id.as_deref() == Some(task_id)
-            })
-            .unwrap_or(0),
-    };
-    state.active_agent_tasks.insert(task_id.to_string(), info);
+    state.rendered_cache.remove(&idx);
+    state.virtual_list.mark_dirty(idx);
+    idx
 }
 
 async fn handle_done_message(
@@ -1480,38 +1486,55 @@ fn handle_tool_result_message(
                         .get("agent_id")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
-                    let agent_type = if status_str == "fork_launched" {
-                        "fork"
-                    } else {
-                        "general-purpose"
-                    };
+                    // 类型标签由 AgentTool 写进 data，不再按 status 猜
+                    let agent_type = data
+                        .get("agent_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(if status_str == "fork_launched" {
+                            "Fork"
+                        } else {
+                            "Agent"
+                        });
+                    let name = data
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
 
-                    // 从 tool_call 的参数中提取描述
-                    let description = if let Ok(params) = serde_json::from_str::<serde_json::Value>(
-                        &tool_call.function.arguments,
-                    ) {
-                        params
-                            .get("description")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Agent task")
-                            .to_string()
-                    } else {
-                        "Agent task".to_string()
-                    };
+                    // 描述优先取 data，回落到 tool_call 参数
+                    let description = data
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            serde_json::from_str::<serde_json::Value>(
+                                &tool_call.function.arguments,
+                            )
+                            .ok()?
+                            .get("description")?
+                            .as_str()
+                            .map(|s| s.to_string())
+                        })
+                        .unwrap_or_else(|| "Agent task".to_string());
 
                     handle_agent_task_update(
                         state,
-                        agent_id,
-                        agent_type,
-                        &description,
-                        crate::types::AgentTaskStatus::Running,
-                        0,
-                        0,
-                        true,  // is_async
-                        false, // is_resolved
-                        false, // is_error
-                        None,
-                        Vec::new(),
+                        AgentTaskUpdateArgs {
+                            task_id: agent_id.to_string(),
+                            agent_type: agent_type.to_string(),
+                            description: description.clone(),
+                            // 工具已交回控制权 → backgrounded（is_async +
+                            // is_resolved），状态行显示任务描述而非工具进度
+                            status: crate::types::AgentTaskStatus::Background,
+                            tool_use_count: 0,
+                            tokens: 0,
+                            is_async: true,
+                            is_resolved: true,
+                            is_error: false,
+                            last_tool_info: None,
+                            name,
+                            task_description: Some(description),
+                            new_sub_entries: Vec::new(),
+                        },
                     );
 
                     // 不再创建重复的 ToolCall 条目 — AgentTask 条目已包含完整信息

@@ -29,13 +29,12 @@ pub fn render_agent_task_entry(
     let is_transcript = state.is_transcript_mode;
 
     // ── 1. 头部汇总行 ──
-    let header = render_agent_header(state, entry, area_width);
+    let header = render_agent_header(entry, area_width);
     blocks.push(header);
 
     // ── 2. 子消息列表 ──
     let sub_entries = entry.agent_sub_entries.as_deref().unwrap_or(&[]);
     let is_resolved = entry.agent_is_resolved.unwrap_or(false);
-    let is_error = entry.agent_is_error.unwrap_or(false);
     let is_async = entry.agent_is_async.unwrap_or(false);
 
     if is_transcript {
@@ -46,7 +45,7 @@ pub fn render_agent_task_entry(
         }
     } else if is_resolved {
         // 已完成：精简一行 "Done"（含耗时）
-        blocks.push(render_done_line(state, entry, is_error));
+        blocks.push(render_done_line(state, entry));
     } else if sub_entries.is_empty() {
         // 初始化中
         blocks.push(vec![Line::from(Span::styled(
@@ -92,7 +91,6 @@ pub fn render_agent_task_entry(
 /// 对标 Claude Code 的 AgentProgressLine 第一行格式:
 /// `├─ AgentType (description) · N tool uses · Nk tokens`
 fn render_agent_header(
-    state: &ChatState,
     entry: &ChatEntry,
     area_width: u16,
 ) -> Vec<Line<'static>> {
@@ -101,8 +99,8 @@ fn render_agent_header(
     let status = entry.agent_status.as_ref().unwrap_or(&AgentTaskStatus::Running);
     let tool_count = entry.agent_tool_use_count.unwrap_or(0);
     let tokens = entry.agent_tokens.unwrap_or(0);
-    let is_error = entry.agent_is_error.unwrap_or(false);
-    let last_tool = entry.agent_last_tool_info.as_deref();
+    // teammate 的 `@name` 优先于类型名显示（对标 renderGroupedAgentToolUse）
+    let display_name = entry.agent_name.as_deref().unwrap_or(agent_type);
 
     let mut spans = Vec::new();
 
@@ -116,11 +114,11 @@ fn render_agent_header(
     let type_color = match status {
         AgentTaskStatus::Running => Color::Yellow,
         AgentTaskStatus::Completed => Color::Green,
-        AgentTaskStatus::Failed => Color::Red,
+        AgentTaskStatus::Failed | AgentTaskStatus::Rejected => Color::Red,
         AgentTaskStatus::Background => Color::DarkGray,
     };
     spans.push(Span::styled(
-        agent_type.to_string(),
+        display_name.to_string(),
         Style::default()
             .fg(type_color)
             .add_modifier(Modifier::BOLD),
@@ -173,14 +171,22 @@ fn render_agent_header(
 ///
 /// 对标 Claude Code 的 Done 格式:
 /// `│  ⎿  Done (N tool uses · Nk tokens · Xs)`
-fn render_done_line(state: &ChatState, entry: &ChatEntry, is_error: bool) -> Vec<Line<'static>> {
+fn render_done_line(state: &ChatState, entry: &ChatEntry) -> Vec<Line<'static>> {
     let tool_count = entry.agent_tool_use_count.unwrap_or(0);
     let tokens = entry.agent_tokens.unwrap_or(0);
+    let status = entry
+        .agent_status
+        .as_ref()
+        .unwrap_or(&AgentTaskStatus::Completed);
 
-    let (icon, color, label) = if is_error {
-        ("✗", Color::Red, "Failed")
-    } else {
-        ("✓", Color::Green, "Done")
+    let (icon, color, label) = match status {
+        // 用户拒绝授权（对标 renderToolUseRejectedMessage）
+        AgentTaskStatus::Rejected => ("✗", Color::Red, "Rejected"),
+        AgentTaskStatus::Failed => ("✗", Color::Red, "Failed"),
+        // 后台 agent 已交回控制权，不算"完成"
+        AgentTaskStatus::Background => ("●", Color::DarkGray, "Running in the background"),
+        _ if entry.agent_is_error.unwrap_or(false) => ("✗", Color::Red, "Failed"),
+        _ => ("✓", Color::Green, "Done"),
     };
 
     let mut spans = vec![
@@ -193,29 +199,27 @@ fn render_done_line(state: &ChatState, entry: &ChatEntry, is_error: bool) -> Vec
     ];
 
     // 统计信息
-    if tool_count > 0 || tokens > 0 {
+    let mut stats = Vec::new();
+    if tool_count > 0 {
+        stats.push(format!(
+            "{} tool {}",
+            tool_count,
+            if tool_count == 1 { "use" } else { "uses" }
+        ));
+    }
+    if tokens > 0 {
+        stats.push(format_tokens(tokens));
+    }
+    // 耗时取 AgentTaskInfo 的冻结值，完成后不再增长
+    if let Some(info) = entry
+        .agent_task_id
+        .as_ref()
+        .and_then(|id| state.active_agent_tasks.get(id))
+    {
+        stats.push(super::agent_group_render::format_duration(info.elapsed()));
+    }
+    if !stats.is_empty() {
         spans.push(Span::styled(" (", Style::default().fg(Color::DarkGray)));
-        let mut stats = Vec::new();
-        if tool_count > 0 {
-            stats.push(format!("{} tool {}", tool_count, if tool_count == 1 { "use" } else { "uses" }));
-        }
-        if tokens > 0 {
-            stats.push(format_tokens(tokens));
-        }
-        // 添加耗时
-        if let Some(task_id) = &entry.agent_task_id {
-            if let Some(task_info) = state.active_agent_tasks.get(task_id) {
-                let elapsed = task_info.started_at.elapsed();
-                let dur_str = if elapsed.as_secs() >= 60 {
-                    format!("{}m{}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
-                } else if elapsed.as_millis() >= 1000 {
-                    format!("{:.1}s", elapsed.as_secs_f64())
-                } else {
-                    format!("{}ms", elapsed.as_millis())
-                };
-                stats.push(dur_str);
-            }
-        }
         spans.push(Span::styled(
             stats.join(" · "),
             Style::default().fg(Color::DarkGray),

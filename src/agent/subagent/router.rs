@@ -14,6 +14,9 @@ use crate::core::agents::{
 pub enum AgentRoute {
     /// 同步命名 SubAgent — 阻塞等待，返回 tool_result
     SyncNamedAgent {
+        /// UI 任务 ID：同步 Agent 也需要一个稳定 id，才能在 chat_history
+        /// 里创建/更新对应的 AgentTask 条目
+        agent_id: String,
         subagent_type: SubagentType,
         request: SubAgentRequest,
     },
@@ -128,6 +131,7 @@ pub fn route_agent_call(
     // 规则 4：subagent_type 有值 → 同步命名 SubAgent
     if let Some(subagent_type) = &input.subagent_type {
         return AgentRoute::SyncNamedAgent {
+            agent_id: generate_agent_id(),
             subagent_type: subagent_type.clone(),
             request: build_request(input),
         };
@@ -135,6 +139,7 @@ pub fn route_agent_call(
 
     // 规则 5：省略 subagent_type → 默认同步 general-purpose
     AgentRoute::SyncNamedAgent {
+        agent_id: generate_agent_id(),
         subagent_type: SubagentType::GeneralPurpose,
         request: build_request(input),
     }

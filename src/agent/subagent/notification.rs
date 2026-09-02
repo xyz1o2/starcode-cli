@@ -27,6 +27,12 @@ pub struct TaskNotification {
     /// 执行过程中产生的所有条目（包括 ToolCall、Assistant 消息等）
     #[serde(default)]
     pub entries: Vec<crate::types::ChatEntry>,
+    /// 用户可见的 Agent 类型标签（对标 `userFacingName`），用于 UI 回显
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    /// teammate 自定义名称（`@name`）
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
