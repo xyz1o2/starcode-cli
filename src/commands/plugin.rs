@@ -264,9 +264,14 @@ pub async fn execute_plugin_command(ctx: CommandContext<'_>, cmd: PluginCommand)
                 if git_ref.is_some() {
                     return Err("`--ref` 仅适用于 git 源安装".to_string());
                 }
-                crate::core::plugins::install_plugin_local(&cwd, &source_path, &plugin_name)
-                    .await
-                    .map_err(|e| format!("failed to install plugin: {}", e))?
+                crate::core::plugins::install_plugin_local(
+                    &cwd,
+                    &source_path,
+                    &plugin_name,
+                    crate::core::plugins::SCOPE_PROJECT,
+                )
+                .await
+                .map_err(|e| format!("failed to install plugin: {}", e))?
             } else {
                 let resolved = crate::core::plugins::resolve_plugin_git_source(&source);
                 crate::core::plugins::install_plugin_git(
@@ -274,6 +279,7 @@ pub async fn execute_plugin_command(ctx: CommandContext<'_>, cmd: PluginCommand)
                     &resolved,
                     &plugin_name,
                     git_ref.as_deref(),
+                    crate::core::plugins::SCOPE_PROJECT,
                 )
                 .await
                 .map_err(|e| format!("failed to install plugin: {}", e))?

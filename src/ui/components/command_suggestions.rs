@@ -599,12 +599,13 @@ fn simplify_path(path: &str, cwd: &std::path::Path) -> String {
     path.to_string()
 }
 
-/// Truncate string to max length
+/// Truncate string to max length（按字符数截断，中文安全）
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        format!("{}…", &s[..max_len - 1])
+        let cut: String = s.chars().take(max_len.saturating_sub(1)).collect();
+        format!("{}…", cut)
     }
 }
 
@@ -622,10 +623,12 @@ fn render_command_hints_overlay(
     let total = state.command_hints.len();
     let visible = total.min(max_items);
     let hints_height = (visible as u16) + 2;
+    // 与 "@" 文件弹窗统一宽度
+    let popup_width = input_area.width.min(80);
     let popup_area = Rect {
         x: input_area.x,
         y: input_area.y.saturating_sub(hints_height),
-        width: input_area.width.min(72),
+        width: popup_width,
         height: hints_height,
     };
 
@@ -636,6 +639,26 @@ fn render_command_hints_overlay(
     if start + visible > total {
         start = total.saturating_sub(visible);
     }
+
+    // 动态命令列宽（对标 Claude Code：可见项最长命令 + 2，设上下限），
+    // 替代原固定 18 padding——短命令描述贴近、长命令不粘连
+    let name_w = {
+        let max_cmd = state
+            .command_hints
+            .iter()
+            .map(|h| {
+                h.split_once(" - ")
+                    .map(|(c, _)| c.chars().count())
+                    .unwrap_or(h.chars().count())
+            })
+            .max()
+            .unwrap_or(10);
+        (max_cmd + 2).clamp(10, 24) as usize
+    };
+    // 描述可用宽度：弹窗宽 - 图标(3) - 命令列 - 边框(2) - 余量(2)
+    let desc_w = popup_width
+        .saturating_sub(name_w as u16 + 7)
+        .max(10) as usize;
 
     let hint_items: Vec<ListItem> = state
         .command_hints
@@ -671,7 +694,7 @@ fn render_command_hints_overlay(
                         .bg(bg),
                 ),
                 Span::styled(
-                    format!("{:<18}", cmd_part),
+                    format!("{:<width$}", cmd_part, width = name_w),
                     Style::default()
                         .fg(label_fg)
                         .bg(bg)
@@ -684,7 +707,10 @@ fn render_command_hints_overlay(
             ];
 
             if !desc_part.is_empty() {
-                spans.push(Span::styled(desc_part, Style::default().fg(desc_fg).bg(bg)));
+                spans.push(Span::styled(
+                    truncate_str(desc_part.replace("  ", " ").trim(), desc_w),
+                    Style::default().fg(desc_fg).bg(bg),
+                ));
             }
 
             ListItem::new(Line::from(spans)).style(Style::default().bg(bg))

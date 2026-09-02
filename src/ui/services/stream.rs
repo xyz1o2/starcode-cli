@@ -880,13 +880,32 @@ pub async fn handle_stream_update(
             tools: _,
         } => {}
         StreamMessage::PluginOpResult { message } => {
-            // 插件市场后台操作完成：清 pending、回填消息并刷新列表
+            // 插件市场后台操作完成：清 pending、回填消息并刷新列表。
+            // 批量安装时聚合进度（对标 Claude Code 批量安装的逐项状态）：
+            // 每个结果计一次进度，全部完成才刷新列表
             state.plugin_op_pending = false;
             state.plugin_loading = false;
-            state.plugin_selected.clear();
-            if let Some(m) = message {
+            if state.plugin_batch_total > 0 {
+                state.plugin_batch_done += 1;
+                let done = state.plugin_batch_done;
+                let total = state.plugin_batch_total;
+                let last = message.unwrap_or_default();
+                if done >= total {
+                    state.plugin_batch_total = 0;
+                    state.plugin_batch_done = 0;
+                    state.plugin_message = Some(format!(
+                        "Batch install finished ({}/{}). Last: {}",
+                        done, total, last
+                    ));
+                } else {
+                    state.plugin_message =
+                        Some(format!("Installing {}/{}... ({})", done, total, last));
+                    return Ok(());
+                }
+            } else if let Some(m) = message {
                 state.plugin_message = Some(m);
             }
+            state.plugin_selected.clear();
             state.reload_plugins_state().await;
         }
         StreamMessage::ConfiguredProviders(ids) => {

@@ -27,12 +27,33 @@ fn storage(project_root: &Path) -> crate::core::config::storage::Storage {
     crate::core::config::storage::Storage::new(project_root.to_path_buf())
 }
 
+/// 安装范围对应的存储根目录：user → 用户主目录，project → 项目根
+pub fn scope_target_dir(project_root: &Path, scope: &str) -> PathBuf {
+    if scope == SCOPE_USER {
+        dirs::home_dir().unwrap_or_else(|| project_root.to_path_buf())
+    } else {
+        project_root.to_path_buf()
+    }
+}
+
+fn scope_storage(project_root: &Path, scope: &str) -> crate::core::config::storage::Storage {
+    crate::core::config::storage::Storage::new(scope_target_dir(project_root, scope))
+}
+
 pub fn plugins_dir(project_root: &Path) -> PathBuf {
-    storage(project_root).extensions_dir()
+    plugins_dir_scoped(project_root, SCOPE_PROJECT)
+}
+
+pub fn plugins_dir_scoped(project_root: &Path, scope: &str) -> PathBuf {
+    scope_storage(project_root, scope).extensions_dir()
 }
 
 pub fn manifest_path(project_root: &Path) -> PathBuf {
-    storage(project_root).extensions_config_path()
+    manifest_path_scoped(project_root, SCOPE_PROJECT)
+}
+
+pub fn manifest_path_scoped(project_root: &Path, scope: &str) -> PathBuf {
+    scope_storage(project_root, scope).extensions_config_path()
 }
 
 async fn ensure_parent(path: &Path) -> Result<(), String> {
@@ -47,7 +68,14 @@ async fn ensure_parent(path: &Path) -> Result<(), String> {
 }
 
 pub async fn load_manifest(project_root: &Path) -> Result<PluginManifest, String> {
-    let path = manifest_path(project_root);
+    load_manifest_scoped(project_root, SCOPE_PROJECT).await
+}
+
+pub async fn load_manifest_scoped(
+    project_root: &Path,
+    scope: &str,
+) -> Result<PluginManifest, String> {
+    let path = manifest_path_scoped(project_root, scope);
     if !path.exists() {
         return Ok(PluginManifest::default());
     }
@@ -64,7 +92,15 @@ pub async fn load_manifest(project_root: &Path) -> Result<PluginManifest, String
 }
 
 pub async fn save_manifest(project_root: &Path, manifest: &PluginManifest) -> Result<(), String> {
-    let path = manifest_path(project_root);
+    save_manifest_scoped(project_root, SCOPE_PROJECT, manifest).await
+}
+
+pub async fn save_manifest_scoped(
+    project_root: &Path,
+    scope: &str,
+    manifest: &PluginManifest,
+) -> Result<(), String> {
+    let path = manifest_path_scoped(project_root, scope);
     ensure_parent(&path).await?;
 
     let text = serde_json::to_string_pretty(manifest)
@@ -81,11 +117,31 @@ pub async fn list_plugins(project_root: &Path) -> Result<Vec<PluginEntry>, Strin
 }
 
 pub async fn resolve_installed_plugins(project_root: &Path) -> Result<Vec<ResolvedPlugin>, String> {
-    let manifest = load_manifest(project_root).await?;
-    let mut resolved = Vec::with_capacity(manifest.plugins.len());
+    // 合并两个安装范围（对标 Claude Code）：project 优先于 user（同名覆盖）
+    let mut entries: Vec<PluginEntry> = Vec::new();
+    for scope in [SCOPE_USER, SCOPE_PROJECT] {
+        let mut list = load_manifest_scoped(project_root, scope)
+            .await?
+            .plugins;
+        for e in &mut list {
+            e.scope = scope.to_string();
+        }
+        entries.extend(list);
+    }
+    // 去重：project 覆盖 user（后写入者保留）
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::with_capacity(entries.len());
+    for e in entries.into_iter().rev() {
+        if seen.insert(e.name.clone()) {
+            deduped.push(e);
+        }
+    }
+    deduped.reverse();
 
-    for entry in manifest.plugins {
-        let root = plugins_dir(project_root).join(&entry.name);
+    let mut resolved = Vec::with_capacity(deduped.len());
+
+    for entry in deduped {
+        let root = plugins_dir_scoped(project_root, &entry.scope).join(&entry.name);
         let root_exists = root.exists();
         let (manifest_path, runtime_manifest, runtime_error) = if root_exists {
             resolve_runtime_manifest(&root).await
@@ -404,8 +460,9 @@ pub async fn execute_plugin_command(
 async fn prepare_install_destination(
     project_root: &Path,
     plugin_name: &str,
+    scope: &str,
 ) -> Result<PathBuf, String> {
-    let dst_root = plugins_dir(project_root);
+    let dst_root = plugins_dir_scoped(project_root, scope);
     if !dst_root.exists() {
         tokio::fs::create_dir_all(&dst_root)
             .await
@@ -441,8 +498,9 @@ async fn upsert_manifest_entry(
     plugin_name: &str,
     source: String,
     install_type: &str,
+    scope: &str,
 ) -> Result<PluginEntry, String> {
-    let mut manifest = load_manifest(project_root).await?;
+    let mut manifest = load_manifest_scoped(project_root, scope).await?;
     manifest.plugins.retain(|p| p.name != plugin_name);
 
     let entry = PluginEntry {
@@ -451,10 +509,11 @@ async fn upsert_manifest_entry(
         install_type: install_type.to_string(),
         installed_at: Utc::now().timestamp(),
         enabled: true,
+        scope: scope.to_string(),
     };
 
     manifest.plugins.push(entry.clone());
-    save_manifest(project_root, &manifest).await?;
+    save_manifest_scoped(project_root, scope, &manifest).await?;
     Ok(entry)
 }
 
@@ -462,12 +521,13 @@ pub async fn install_plugin_local(
     project_root: &Path,
     source: &Path,
     plugin_name: &str,
+    scope: &str,
 ) -> Result<PluginEntry, String> {
     if !source.exists() {
         return Err(format!("source path does not exist: {}", source.display()));
     }
 
-    let dst = prepare_install_destination(project_root, plugin_name).await?;
+    let dst = prepare_install_destination(project_root, plugin_name, scope).await?;
 
     if source.is_file() {
         tokio::fs::copy(source, &dst)
@@ -482,6 +542,7 @@ pub async fn install_plugin_local(
         plugin_name,
         source.to_string_lossy().to_string(),
         "local",
+        scope,
     )
     .await
 }
@@ -491,8 +552,9 @@ pub async fn install_plugin_git(
     source: &str,
     plugin_name: &str,
     git_ref: Option<&str>,
+    scope: &str,
 ) -> Result<PluginEntry, String> {
-    let dst = prepare_install_destination(project_root, plugin_name).await?;
+    let dst = prepare_install_destination(project_root, plugin_name, scope).await?;
 
     let clone = tokio::process::Command::new("git")
         .arg("clone")
@@ -535,7 +597,7 @@ pub async fn install_plugin_git(
         source.to_string()
     };
 
-    upsert_manifest_entry(project_root, plugin_name, recorded_source, "git").await
+    upsert_manifest_entry(project_root, plugin_name, recorded_source, "git", scope).await
 }
 
 pub struct UpdatePluginResult {
@@ -630,7 +692,9 @@ pub async fn update_plugin(
                     )),
                 });
             }
-            match install_plugin_local(project_root, &source_path, plugin_name).await {
+            match install_plugin_local(project_root, &source_path, plugin_name, &plugin.entry.scope)
+                .await
+            {
                 Ok(_) => Ok(UpdatePluginResult {
                     plugin_name: plugin_name.to_string(),
                     install_type: "local".to_string(),
@@ -658,30 +722,34 @@ pub async fn update_plugin(
 }
 
 pub async fn remove_plugin(project_root: &Path, plugin_name: &str) -> Result<bool, String> {
-    let plugin_path = plugins_dir(project_root).join(plugin_name);
-    let mut removed_fs = false;
-    if plugin_path.exists() {
-        removed_fs = true;
-        if plugin_path.is_dir() {
-            tokio::fs::remove_dir_all(&plugin_path)
-                .await
-                .map_err(|e| format!("failed to remove {}: {}", plugin_path.display(), e))?;
-        } else {
-            tokio::fs::remove_file(&plugin_path)
-                .await
-                .map_err(|e| format!("failed to remove {}: {}", plugin_path.display(), e))?;
+    // 范围感知卸载（对标 Claude Code）：project 优先，其次 user
+    let mut removed_any = false;
+    for scope in [SCOPE_PROJECT, SCOPE_USER] {
+        let plugin_path = plugins_dir_scoped(project_root, scope).join(plugin_name);
+        let mut removed_fs = false;
+        if plugin_path.exists() {
+            removed_fs = true;
+            removed_any = true;
+            if plugin_path.is_dir() {
+                let _ = tokio::fs::remove_dir_all(&plugin_path).await;
+            } else {
+                let _ = tokio::fs::remove_file(&plugin_path).await;
+            }
+        }
+
+        let mut manifest = load_manifest_scoped(project_root, scope).await?;
+        let before = manifest.plugins.len();
+        manifest.plugins.retain(|p| p.name != plugin_name);
+        if before != manifest.plugins.len() {
+            removed_any = true;
+            save_manifest_scoped(project_root, scope, &manifest).await?;
+        }
+        if removed_fs {
+            break; // 命中即止（同范围 FS+manifest 清理完）
         }
     }
 
-    let mut manifest = load_manifest(project_root).await?;
-    let before = manifest.plugins.len();
-    manifest.plugins.retain(|p| p.name != plugin_name);
-    let removed = manifest.plugins.len() != before || removed_fs;
-    if before != manifest.plugins.len() {
-        save_manifest(project_root, &manifest).await?;
-    }
-
-    Ok(removed)
+    Ok(removed_any)
 }
 
 pub async fn set_plugin_enabled(
@@ -689,29 +757,34 @@ pub async fn set_plugin_enabled(
     plugin_name: &str,
     enabled: bool,
 ) -> Result<Option<PluginEnabledUpdate>, String> {
-    let mut manifest = load_manifest(project_root).await?;
-    let Some(entry) = manifest
-        .plugins
-        .iter_mut()
-        .find(|entry| entry.name == plugin_name)
-    else {
-        return Ok(None);
-    };
+    // 范围感知启停：project 优先，其次 user
+    for scope in [SCOPE_PROJECT, SCOPE_USER] {
+        let mut manifest = load_manifest_scoped(project_root, scope).await?;
+        let Some(entry) = manifest
+            .plugins
+            .iter_mut()
+            .find(|entry| entry.name == plugin_name)
+        else {
+            continue;
+        };
 
-    let previous_enabled = entry.enabled;
-    let changed = previous_enabled != enabled;
-    entry.enabled = enabled;
-    let updated = entry.clone();
+        let previous_enabled = entry.enabled;
+        let changed = previous_enabled != enabled;
+        entry.enabled = enabled;
+        let updated = entry.clone();
 
-    if changed {
-        save_manifest(project_root, &manifest).await?;
+        if changed {
+            save_manifest_scoped(project_root, scope, &manifest).await?;
+        }
+
+        return Ok(Some(PluginEnabledUpdate {
+            entry: updated,
+            previous_enabled,
+            changed,
+        }));
     }
 
-    Ok(Some(PluginEnabledUpdate {
-        entry: updated,
-        previous_enabled,
-        changed,
-    }))
+    Ok(None)
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {

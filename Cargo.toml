@@ -12,6 +12,9 @@ path = "src/main.rs"
 # CLI and command parsing
 clap = { version = "4.0", features = ["derive"] }
 
+# Zip extraction (official marketplace GCS fast channel)
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
 

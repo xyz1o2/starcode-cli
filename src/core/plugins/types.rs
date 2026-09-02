@@ -13,7 +13,19 @@ pub struct PluginEntry {
     pub install_type: String,
     pub installed_at: i64,
     pub enabled: bool,
+    /// 安装范围（对标 Claude Code）："user"（所有项目可用，装在 ~）或
+    /// "project"（仅本项目，默认）
+    #[serde(default = "default_scope")]
+    pub scope: String,
 }
+
+fn default_scope() -> String {
+    "project".to_string()
+}
+
+/// 安装范围常量
+pub const SCOPE_USER: &str = "user";
+pub const SCOPE_PROJECT: &str = "project";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginManifest {

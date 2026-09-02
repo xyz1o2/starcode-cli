@@ -210,5 +210,11 @@ pub enum PluginOp {
     EnsureDefaultMarketplace,
     AddMarketplace { source: String },
     RemoveMarketplace { name: String },
-    InstallPlugin(crate::core::plugins::marketplace::MarketplacePlugin),
+    /// 更新 marketplace 内容（官方走 GCS 比对，其他重新 clone）
+    UpdateMarketplace { name: String },
+    InstallPlugin {
+        plugin: crate::core::plugins::marketplace::MarketplacePlugin,
+        /// 安装范围："user" 或 "project"（对标 Claude Code）
+        scope: String,
+    },
 }

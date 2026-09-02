@@ -143,6 +143,26 @@ pub struct McpServerRow {
     pub connected: bool,
     pub tool_count: usize,
     pub error: Option<String>,
+    /// 连接失败因缺少 OAuth 鉴权（对标 Claude Code 的 needs-auth 态，
+    /// 显示 "Enter to auth"）
+    pub needs_auth: bool,
+}
+
+/// 传输层 401 错误是否为 OAuth 鉴权需求（对应 transport.rs 的
+/// "MCP OAuth required" 错误文案）
+fn is_oauth_required_error(err: &str) -> bool {
+    err.contains("OAuth required") || err.contains("needs-auth")
+}
+
+/// 从 OAuth 错误信息中提取授权 URL（transport 会把 Auth URL 拼进错误）
+pub fn extract_oauth_url(err: &str) -> Option<String> {
+    let idx = err.find("Auth URL: ")?;
+    let url = err[idx + "Auth URL: ".len()..].trim();
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Some(url.to_string())
+    } else {
+        None
+    }
 }
 
 /// Pending install/uninstall confirmation in the marketplace modal.
@@ -161,7 +181,13 @@ pub struct PluginConfirm {
 
 #[derive(Debug, Clone)]
 pub enum PluginConfirmKind {
+    /// 安装确认（scope 已选定）
     Install {
+        plugin: crate::core::plugins::marketplace::MarketplacePlugin,
+        scope: String,
+    },
+    /// 安装范围选择（对标 Claude Code 的 scope 菜单：u=user / p=project）
+    InstallScope {
         plugin: crate::core::plugins::marketplace::MarketplacePlugin,
     },
     Uninstall {
@@ -275,6 +301,9 @@ impl ChatState {
         self.plugin_index = 0;
         self.plugin_search.clear();
         self.plugin_selected.clear();
+        self.plugin_detail = None;
+        self.plugin_batch_total = 0;
+        self.plugin_batch_done = 0;
         self.plugin_confirm = None;
         self.plugin_message = None;
         self.plugin_op_pending = false;
@@ -575,6 +604,7 @@ pub async fn load_mcp_server_rows(state: &mut ChatState) {
                         connected: false,
                         tool_count: 0,
                         error: None,
+                        needs_auth: false,
                     });
                     continue;
                 }
@@ -588,16 +618,22 @@ pub async fn load_mcp_server_rows(state: &mut ChatState) {
                         connected: true,
                         tool_count: tools.len(),
                         error: None,
+                        needs_auth: false,
                     }),
-                    Ok(Err(e)) => rows.push(McpServerRow {
-                        name: name.clone(),
-                        transport,
-                        command,
-                        disabled: false,
-                        connected: false,
-                        tool_count: 0,
-                        error: Some(truncate(&e.to_string(), 48)),
-                    }),
+                    Ok(Err(e)) => {
+                        let err = e.to_string();
+                        let needs_auth = is_oauth_required_error(&err);
+                        rows.push(McpServerRow {
+                            name: name.clone(),
+                            transport,
+                            command,
+                            disabled: false,
+                            connected: false,
+                            tool_count: 0,
+                            error: Some(truncate(&err, 48)),
+                            needs_auth,
+                        })
+                    }
                     Err(_) => rows.push(McpServerRow {
                         name: name.clone(),
                         transport,
@@ -606,6 +642,7 @@ pub async fn load_mcp_server_rows(state: &mut ChatState) {
                         connected: false,
                         tool_count: 0,
                         error: Some("timeout".to_string()),
+                        needs_auth: false,
                     }),
                 }
             }

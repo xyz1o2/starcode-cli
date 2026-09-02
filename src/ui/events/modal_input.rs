@@ -228,7 +228,13 @@ async fn handle_mcp(
                 .iter()
                 .find(|r| r.name == name)
                 .cloned();
-            let menu_len = 5usize;
+            // needs-auth 服务器多一项 Authenticate（0=tools 1=reconnect 2=toggle
+            // [3=auth] [remove] [back]）
+            let has_auth = row.as_ref().map(|r| r.needs_auth).unwrap_or(false);
+            let auth_idx = if has_auth { Some(3usize) } else { None };
+            let remove_idx = if has_auth { 4 } else { 3 };
+            let back_idx = if has_auth { 5 } else { 4 };
+            let menu_len = back_idx + 1;
             match key.code {
                 Esc => {
                     state.pop_modal();
@@ -276,7 +282,32 @@ async fn handle_mcp(
                             Err(e) => state.mcp_modal_action_msg = Some(format!("Error: {}", e)),
                         }
                     }
-                    3 => {
+                    idx if Some(idx) == auth_idx => {
+                        // Authenticate：从错误信息提取授权 URL 并打开浏览器
+                        // （对标 Claude Code "Enter to auth"）
+                        let url = row
+                            .as_ref()
+                            .and_then(|r| r.error.as_deref())
+                            .and_then(crate::ui::state::modal::extract_oauth_url);
+                        match url {
+                            Some(u) => {
+                                let opened = tokio::process::Command::new("cmd")
+                                    .args(["/c", "start", "", &u])
+                                    .creation_flags(0x0800_0000)
+                                    .status()
+                                    .await;
+                                state.mcp_modal_action_msg = Some(match opened {
+                                    Ok(_) => format!("Opening auth page: {}", u),
+                                    Err(e) => format!("Failed to open browser: {} — {}", e, u),
+                                });
+                            }
+                            None => {
+                                state.mcp_modal_action_msg =
+                                    Some("No auth URL available. Reconnect first.".to_string());
+                            }
+                        }
+                    }
+                    idx if idx == remove_idx => {
                         state.push_modal(Modal::Mcp {
                             view: McpView::ConfirmRemove { name },
                         });
@@ -518,6 +549,30 @@ async fn uninstall_plugin(state: &mut ChatState, name: &str) -> String {
     }
 }
 
+/// 发送后台安装操作（scope 已定）：设 pending 提示并经 PluginOp 通道执行。
+async fn send_install_op(
+    state: &mut ChatState,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+    plugin: crate::core::plugins::marketplace::MarketplacePlugin,
+    scope: &str,
+) {
+    state.plugin_op_pending = true;
+    state.plugin_batch_total = 1;
+    state.plugin_batch_done = 0;
+    state.plugin_message = Some(format!("Installing plugin {} ({})...", plugin.name, scope));
+    state.plugin_detail = None;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let _ = agent_tx
+        .send(AgentRequest::PluginOp {
+            project_root: cwd,
+            op: crate::runtime::messages::PluginOp::InstallPlugin {
+                plugin,
+                scope: scope.to_string(),
+            },
+        })
+        .await;
+}
+
 /// `/plugin` 管理弹窗：Discover / Installed / Marketplaces / Errors 四 tab。
 async fn handle_plugins(
     state: &mut ChatState,
@@ -530,6 +585,23 @@ async fn handle_plugins(
 
     // 确认浮层优先
     if let Some(confirm) = state.plugin_confirm.clone() {
+        // scope 选择浮层（对标 Claude Code scope 菜单）：u=user / p=project
+        if let PluginConfirmKind::InstallScope { plugin } = &confirm.kind {
+            match key.code {
+                Esc => state.plugin_confirm = None,
+                Char('u') | Char('U') => {
+                    state.plugin_confirm = None;
+                    send_install_op(state, agent_tx, plugin.clone(), "user").await;
+                }
+                Char('p') | Char('P') => {
+                    state.plugin_confirm = None;
+                    send_install_op(state, agent_tx, plugin.clone(), "project").await;
+                }
+                _ => {}
+            }
+            return Ok(true);
+        }
+
         match key.code {
             Esc => state.plugin_confirm = None,
             Enter => {
@@ -537,19 +609,10 @@ async fn handle_plugins(
                 // 安装/移除 marketplace 涉及 git clone 或删目录，放后台执行，
                 // 完成后经 StreamMessage::PluginOpResult 回填消息并刷新列表
                 match confirm.kind {
-                    PluginConfirmKind::Install { plugin } => {
-                        state.plugin_op_pending = true;
-                        state.plugin_message =
-                            Some(format!("Installing plugin {}...", plugin.name));
-                        let cwd = std::env::current_dir()
-                            .unwrap_or_else(|_| std::path::PathBuf::from("."));
-                        let _ = agent_tx
-                            .send(AgentRequest::PluginOp {
-                                project_root: cwd,
-                                op: PluginOp::InstallPlugin(plugin),
-                            })
-                            .await;
+                    PluginConfirmKind::Install { plugin, scope } => {
+                        send_install_op(state, agent_tx, plugin, &scope).await;
                     }
+                    PluginConfirmKind::InstallScope { .. } => unreachable!(),
                     PluginConfirmKind::RemoveMarketplace { name } => {
                         state.plugin_op_pending = true;
                         state.plugin_message =
@@ -572,6 +635,24 @@ async fn handle_plugins(
             }
             _ => {}
         }
+        return Ok(true);
+    }
+
+    // 插件详情页按键（对标 Claude Code 详情视图）：Esc 返回，Enter/i 安装
+    if let Some((mp_name, plugin)) = state.plugin_detail.clone() {
+        match key.code {
+            Esc => state.plugin_detail = None,
+            Enter | Char('i') | Char('I') => {
+                state.plugin_confirm =
+                    Some(crate::ui::state::modal::PluginConfirm {
+                        kind: PluginConfirmKind::InstallScope {
+                            plugin: plugin.clone(),
+                        },
+                    });
+            }
+            _ => {}
+        }
+        let _ = mp_name;
         return Ok(true);
     }
 
@@ -660,14 +741,20 @@ async fn handle_plugins(
                 .collect();
             if !plugins.is_empty() {
                 state.plugin_op_pending = true;
-                state.plugin_message = Some(format!("Installing {} plugins...", plugins.len()));
+                state.plugin_batch_total = plugins.len();
+                state.plugin_batch_done = 0;
+                state.plugin_message =
+                    Some(format!("Installing 0/{} plugins...", plugins.len()));
                 let cwd =
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                 for p in plugins {
                     let _ = agent_tx
                         .send(AgentRequest::PluginOp {
                             project_root: cwd.clone(),
-                            op: PluginOp::InstallPlugin(p),
+                            op: PluginOp::InstallPlugin {
+                                plugin: p,
+                                scope: "project".to_string(),
+                            },
                         })
                         .await;
                 }
@@ -687,15 +774,40 @@ async fn handle_plugins(
         Char('a') | Char('A') if matches!(tab, PluginTab::Marketplaces) => {
             open_marketplace_source_input(state);
         }
+        // Marketplaces tab：u 更新所选 marketplace（官方走 GCS，其他重 clone）
+        Char('u') | Char('U') if matches!(tab, PluginTab::Marketplaces) => {
+            if state.plugin_index > 0 {
+                if let Some(m) = state
+                    .plugin_marketplaces
+                    .get(state.plugin_index - 1)
+                    .cloned()
+                {
+                    state.plugin_op_pending = true;
+                    state.plugin_message = Some(format!("Updating {}...", m.name));
+                    let cwd = std::env::current_dir()
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let _ = agent_tx
+                        .send(AgentRequest::PluginOp {
+                            project_root: cwd,
+                            op: PluginOp::UpdateMarketplace { name: m.name },
+                        })
+                        .await;
+                }
+            }
+        }
+        // Errors tab：r 重试（刷新重查，瞬态错误重试后即自愈）
+        Char('r') | Char('R') if matches!(tab, PluginTab::Errors) => {
+            state.plugin_message = Some("Retrying...".to_string());
+            state.plugin_errors_hint = None;
+            state.reload_plugins_state().await;
+        }
         Enter => match tab {
             PluginTab::Discover => {
+                // 对标 Claude Code：Enter 进插件详情页（版本/作者/安装入口）
                 let indices = state.filtered_discover_indices();
                 if let Some(&di) = indices.get(state.plugin_index) {
                     if let Some(row) = state.plugin_discover.get(di).cloned() {
-                        state.plugin_confirm =
-                            Some(crate::ui::state::modal::PluginConfirm {
-                                kind: PluginConfirmKind::Install { plugin: row.plugin },
-                            });
+                        state.plugin_detail = Some((row.marketplace, row.plugin));
                     }
                 }
             }

@@ -152,10 +152,29 @@ pub struct MarketplacePlugin {
     pub description: String,
     #[serde(default)]
     pub version: String,
+    /// 作者（字符串或 `{name}` 对象，对标 marketplace.json entry.author）
+    #[serde(default)]
+    pub author: String,
+    /// 插件主页
+    #[serde(default)]
+    pub homepage: String,
 }
 
 fn is_remote_source(s: &str) -> bool {
     s.contains("://") || s.starts_with("git@")
+}
+
+/// marketplace.json 的 author 字段兼容字符串 / `{name}` 对象两种形态
+fn author_label(v: Option<&serde_json::Value>) -> String {
+    match v {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Object(o)) => o
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        _ => String::new(),
+    }
 }
 
 /// 从 marketplace.json 的 source 字段归一化出 (url_or_path, path, ref)。
@@ -456,6 +475,12 @@ pub async fn list_marketplace_plugins(
                     .and_then(|x| x.as_str())
                     .unwrap_or("")
                     .to_string(),
+                author: author_label(pv.get("author")),
+                homepage: pv
+                    .get("homepage")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             });
         }
     }
@@ -463,14 +488,16 @@ pub async fn list_marketplace_plugins(
 }
 
 /// 统一安装入口：按归一化后的 source 形态分流到 local / git / git+子目录。
+/// `scope`: "project"（默认）或 "user"（对标 Claude Code 安装范围）。
 pub async fn install_marketplace_plugin(
     project_root: &Path,
     plugin: &MarketplacePlugin,
+    scope: &str,
 ) -> Result<PluginEntry, String> {
     match (&plugin.source_path, is_remote_source(&plugin.source)) {
         // 1. 本地路径
         (None, false) => {
-            super::install_plugin_local(project_root, Path::new(&plugin.source), &plugin.name)
+            super::install_plugin_local(project_root, Path::new(&plugin.source), &plugin.name, scope)
                 .await
         }
         // 2. 整 git 仓库
@@ -480,6 +507,7 @@ pub async fn install_marketplace_plugin(
                 &plugin.source,
                 &plugin.name,
                 plugin.source_ref.as_deref(),
+                scope,
             )
             .await
         }
@@ -528,7 +556,7 @@ pub async fn install_marketplace_plugin(
             };
             let sub_src = base.join(sub.trim_start_matches("./"));
             let result =
-                super::install_plugin_local(project_root, &sub_src, &plugin.name).await;
+                super::install_plugin_local(project_root, &sub_src, &plugin.name, scope).await;
             if let Some(t) = tmp {
                 let _ = force_remove_dir_all(&t).await;
             }
@@ -556,8 +584,208 @@ pub async fn ensure_default_marketplace(project_root: &Path) -> Result<Option<St
         return Ok(None);
     }
 
+    // 对标 Claude Code：GCS 镜像优先（~3.5MB zip，不依赖 git/GitHub），
+    // 失败才回落 git clone
+    match fetch_official_marketplace_from_gcs(project_root).await {
+        Ok(sha_opt) => {
+            register_marketplace_config(
+                project_root,
+                DEFAULT_MARKETPLACE_NAME,
+                DEFAULT_MARKETPLACE_SOURCE,
+            )
+            .await?;
+            return Ok(Some(match sha_opt {
+                Some(sha) => format!("{}@{}", DEFAULT_MARKETPLACE_NAME, &sha[..7.min(sha.len())]),
+                None => DEFAULT_MARKETPLACE_NAME.to_string(),
+            }));
+        }
+        Err(e) => {
+            tracing_debug(&format!("GCS fetch failed, falling back to git: {}", e));
+        }
+    }
+
     let added = add_marketplace(project_root, DEFAULT_MARKETPLACE_SOURCE).await?;
     Ok(Some(added.name))
+}
+
+fn tracing_debug(msg: &str) {
+    crate::utils::logging::append_debug_log_line(&format!("[marketplace] {}", msg));
+}
+
+pub const GCS_BASE: &str =
+    "https://downloads.claude.ai/claude-code-releases/plugins/claude-plugins-official";
+/// zip 内条目的种子目录前缀（对标 ARC_PREFIX）
+pub const GCS_ARC_PREFIX: &str = "marketplaces/claude-plugins-official/";
+
+/// GCS 快速通道（精准对标 officialMarketplaceGcs.ts）：
+/// 1. GET `{base}/latest` → SHA 指针（约 40 字节，可每次调用）
+/// 2. 安装目录 `.gcs-sha` 哨兵与 SHA 相同 → 已是最新，跳过下载
+/// 3. 下载 `{sha}.zip` → 解压到 staging（剥离种子目录前缀 + zip-slip 防护）
+///    → 原子落位
+///
+/// 返回 `Ok(Some(sha))` 表示下载并更新了内容；`Ok(None)` 表示已是最新。
+pub async fn fetch_official_marketplace_from_gcs(
+    project_root: &Path,
+) -> Result<Option<String>, String> {
+    use std::io::Read;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("http client: {}", e))?;
+
+    // 1. latest 指针
+    let sha = client
+        .get(format!("{}/latest", GCS_BASE))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("latest pointer: {}", e))?
+        .error_for_status()
+        .map_err(|e| format!("latest pointer: {}", e))?
+        .text()
+        .await
+        .map_err(|e| format!("latest body: {}", e))?;
+    let sha = sha.trim().to_string();
+    if sha.is_empty() {
+        return Err("latest pointer returned empty body".to_string());
+    }
+
+    let cache_root = marketplaces_dir(project_root);
+    let install_root = marketplace_root(project_root, DEFAULT_MARKETPLACE_NAME);
+    // 纵深防御：安装位置必须在 marketplaces 缓存目录内
+    if !install_root.starts_with(&cache_root) {
+        return Err(format!(
+            "refusing install location outside cache dir: {}",
+            install_root.display()
+        ));
+    }
+
+    // 2. 哨兵检查
+    if let Ok(cur) = tokio::fs::read_to_string(install_root.join(".gcs-sha")).await {
+        if cur.trim() == sha {
+            return Ok(None);
+        }
+    }
+
+    // 3. 下载 + 解压到 staging
+    let resp = client
+        .get(format!("{}/{}.zip", GCS_BASE, sha))
+        .send()
+        .await
+        .map_err(|e| format!("zip download: {}", e))?
+        .error_for_status()
+        .map_err(|e| format!("zip download: {}", e))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("zip read: {}", e))?;
+
+    let staging = cache_root.join(format!("{}.staging", DEFAULT_MARKETPLACE_NAME));
+    force_remove_dir_all(&staging).await?;
+
+    // 解压是纯同步 CPU/FS 工作（zip 的 Read 非 Send），放 blocking 线程
+    let staging2 = staging.clone();
+    let bytes2 = bytes.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        use std::io::Read;
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes2[..]))
+            .map_err(|e| format!("zip parse: {}", e))?;
+        for i in 0..archive.len() {
+            let mut entry = archive
+                .by_index(i)
+                .map_err(|e| format!("zip entry {}: {}", i, e))?;
+            let name = entry.name().to_string();
+            if !name.starts_with(GCS_ARC_PREFIX) {
+                continue;
+            }
+            let rel = name[GCS_ARC_PREFIX.len()..].to_string();
+            if rel.is_empty() || rel.ends_with('/') {
+                continue;
+            }
+            let dest = staging2.join(&rel);
+            // zip-slip 防护：解析后的目标必须仍在 staging 内
+            if !dest.starts_with(&staging2) {
+                return Err(format!("zip-slip entry rejected: {}", name));
+            }
+            if entry.is_dir() {
+                std::fs::create_dir_all(&dest)
+                    .map_err(|e| format!("mkdir {}: {}", dest.display(), e))?;
+                continue;
+            }
+            if let Some(p) = dest.parent() {
+                std::fs::create_dir_all(p)
+                    .map_err(|e| format!("mkdir {}: {}", p.display(), e))?;
+            }
+            let mut buf = Vec::with_capacity(entry.size() as usize);
+            entry
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("read {}: {}", name, e))?;
+            std::fs::write(&dest, buf)
+                .map_err(|e| format!("write {}: {}", dest.display(), e))?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("extract task: {}", e))??;
+
+    tokio::fs::write(staging.join(".gcs-sha"), &sha)
+        .await
+        .map_err(|e| format!("write sentinel: {}", e))?;
+
+    // 原子落位（staging → install_root，含只读清理与复制兜底）
+    move_dir_into_place(&staging, &install_root).await?;
+    Ok(Some(sha))
+}
+
+/// 仅写入 marketplace 注册信息到配置（不下载内容）。GCS 快速通道用：
+/// 内容已就位，只差配置条目。
+async fn register_marketplace_config(
+    project_root: &Path,
+    name: &str,
+    source: &str,
+) -> Result<(), String> {
+    let mut list = load_marketplaces(project_root).await?;
+    if list.iter().any(|m| m.name == name) {
+        return Ok(());
+    }
+    list.push(PluginMarketplace {
+        name: name.to_string(),
+        source: source.to_string(),
+        added_at: Utc::now().timestamp(),
+    });
+    save_marketplaces(project_root, &list).await
+}
+
+/// 更新（刷新）已注册 marketplace 的内容（对标 ManageMarketplaces 的
+/// update 动作）：
+/// - 官方源：走 GCS 重新比对 SHA 指针，有新版本才下载
+/// - 其他源：删除克隆目录并重新 shallow clone
+pub async fn update_marketplace(project_root: &Path, name: &str) -> Result<String, String> {
+    let list = load_marketplaces(project_root).await?;
+    let Some(m) = list.iter().find(|m| m.name == name) else {
+        return Err(format!("marketplace not found: {}", name));
+    };
+
+    if name == DEFAULT_MARKETPLACE_NAME {
+        match fetch_official_marketplace_from_gcs(project_root).await {
+            Ok(Some(sha)) => {
+                return Ok(format!("Updated {} ({})", name, &sha[..7.min(sha.len())]))
+            }
+            Ok(None) => return Ok(format!("{} already up to date", name)),
+            Err(e) => {
+                tracing_debug(&format!("GCS update failed, falling back to git: {}", e));
+            }
+        }
+    }
+
+    let cloned = marketplace_root(project_root, name);
+    if cloned.starts_with(marketplaces_dir(project_root)) {
+        force_remove_dir_all(&cloned).await?;
+    }
+    // 复用 add_marketplace 的克隆 + 校验逻辑；配置条目已存在会按 name 去重
+    add_marketplace(project_root, &m.source).await?;
+    Ok(format!("Updated {}", name))
 }
 
 #[cfg(test)]

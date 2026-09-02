@@ -653,24 +653,8 @@ fn render_entry_lines(state: &ChatState, entry_idx: usize, area_width: u16) -> V
         entry_lines.insert(0, Line::from(""));
     }
 
-    // Remove trailing unicode block/drawing characters that can cause
-    // rendering artifacts when ratatui's diff-based buffer update leaves
-    // remnants from previously wider lines.
+    // Coalesce adjacent spans with same style to reduce rendering overhead
     for line in &mut entry_lines {
-        // 1. Remove artifacts — trim common wide/drawing chars from span ends
-        for span in &mut line.spans {
-            let trimmed = span.content.trim_end_matches([
-                '█', '║', '╔', '╗', '╚', '╝', '╠', '╣', '╦', '╩', '╬', '═', '╒', '╓', '╕', '╖',
-                '╘', '╙', '╛', '╜', '╞', '╟', '╡', '╢', '╤', '╥', '╧', '╨', '╪', '╫', '│', '─',
-                '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼', '┃', '━', '┏', '┓', '┗', '┛', '⎾',
-                '⏀', '⏁', '⏂', '⏃', '⏄', '⏅', '⏆', '⏇', '⏈', '⏉', '⏊', '⏋',
-            ]);
-            if trimmed.len() != span.content.len() {
-                span.content = trimmed.to_string().into();
-            }
-        }
-
-        // 2. Coalesce adjacent spans with same style to reduce rendering overhead
         if line.spans.len() > 1 {
             let mut new_spans = Vec::with_capacity(line.spans.len());
             let mut current_span: Option<Span> = None;

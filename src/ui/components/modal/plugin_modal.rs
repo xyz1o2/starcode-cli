@@ -29,6 +29,10 @@ pub fn render_plugins_modal(f: &mut ratatui::Frame<'_>, area: ratatui::prelude::
     lines.push(tabs_line(tab));
 
     match tab {
+        // 详情页覆盖 Discover 列表（对标 Claude Code Enter 进详情）
+        PluginTab::Discover if state.plugin_detail.is_some() => {
+            lines.extend(detail_lines(state, body.height))
+        }
         PluginTab::Discover => lines.extend(discover_lines(state, body.height)),
         PluginTab::Installed => lines.extend(installed_lines(state, body.height)),
         PluginTab::Marketplaces => lines.extend(marketplaces_lines(state, body.height)),
@@ -36,16 +40,23 @@ pub fn render_plugins_modal(f: &mut ratatui::Frame<'_>, area: ratatui::prelude::
     }
 
     if let Some(confirm) = &state.plugin_confirm {
-        let text = match &confirm.kind {
-            PluginConfirmKind::Install { plugin } => {
-                format!("  Install plugin '{}'?", plugin.name)
-            }
-            PluginConfirmKind::Uninstall { name } => {
-                format!("  Uninstall plugin '{}'?", name)
-            }
-            PluginConfirmKind::RemoveMarketplace { name } => {
-                format!("  Remove marketplace '{}'?", name)
-            }
+        let (text, hint) = match &confirm.kind {
+            PluginConfirmKind::Install { plugin, scope } => (
+                format!("  Install plugin '{}' to {}?", plugin.name, scope),
+                "  Enter=confirm  Esc=cancel".to_string(),
+            ),
+            PluginConfirmKind::InstallScope { plugin } => (
+                format!("  Install plugin '{}' to:", plugin.name),
+                "  U=user (all projects)  P=this project  Esc=cancel".to_string(),
+            ),
+            PluginConfirmKind::Uninstall { name } => (
+                format!("  Uninstall plugin '{}'?", name),
+                "  Enter=confirm  Esc=cancel".to_string(),
+            ),
+            PluginConfirmKind::RemoveMarketplace { name } => (
+                format!("  Remove marketplace '{}'?", name),
+                "  Enter=confirm  Esc=cancel".to_string(),
+            ),
         };
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
@@ -53,22 +64,23 @@ pub fn render_plugins_modal(f: &mut ratatui::Frame<'_>, area: ratatui::prelude::
                 text,
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                "  Enter=confirm  Esc=cancel",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(hint, Style::default().fg(Color::DarkGray)),
         ]));
     }
 
     render_body(f, body, lines);
 
     let hints: &[(&str, &str)] = match tab {
+        PluginTab::Discover if state.plugin_detail.is_some() => &[
+            ("Enter/i", "install"),
+            ("Esc", "back to list"),
+        ],
         PluginTab::Discover => &[
             ("↑↓", "select"),
             ("Type", "filter"),
             ("Space", "toggle"),
             ("i", "install selected"),
-            ("Enter", "install"),
+            ("Enter", "details"),
             ("Esc", "clear search / back"),
         ],
         PluginTab::Installed => &[
@@ -81,11 +93,12 @@ pub fn render_plugins_modal(f: &mut ratatui::Frame<'_>, area: ratatui::prelude::
         PluginTab::Marketplaces => &[
             ("↑↓", "select"),
             ("A", "add marketplace"),
+            ("u", "update"),
             ("Enter", "remove"),
             ("Tab", "switch tab"),
             ("Esc", "close"),
         ],
-        PluginTab::Errors => &[("Tab", "switch tab"), ("Esc", "close")],
+        PluginTab::Errors => &[("R", "retry"), ("Tab", "switch tab"), ("Esc", "close")],
     };
     render_body(f, footer, vec![footer_hints(hints)]);
 }
@@ -321,12 +334,79 @@ fn installed_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
                     Style::default().fg(Color::Gray)
                 },
             ),
+            // 范围徽标（对标 Claude Code 的 [user]/[project] 标注）
             Span::styled(
-                format!(" {}", truncate_str(&p.entry.source, 40)),
+                format!(" [{:<7}]", p.entry.scope),
+                Style::default().fg(if p.entry.scope == "user" {
+                    Color::Magenta
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+            Span::styled(
+                format!(" {}", truncate_str(&p.entry.source, 32)),
                 Style::default().fg(Color::DarkGray),
             ),
         ]));
     }
+    lines
+}
+
+/// 插件详情页（对标 Claude Code Enter 进详情：版本/作者/来源/安装入口）
+fn detail_lines(state: &ChatState, _body_h: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let Some((marketplace, p)) = &state.plugin_detail else {
+        return lines;
+    };
+
+    lines.push(Line::from(Span::styled(
+        format!("  {}", p.name),
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+    )));
+    let mut meta: Vec<String> = Vec::new();
+    if !p.version.is_empty() {
+        meta.push(format!("v{}", p.version));
+    }
+    if !p.author.is_empty() {
+        meta.push(format!("by {}", p.author));
+    }
+    meta.push(format!("from {}", marketplace));
+    lines.push(Line::from(Span::styled(
+        format!("  {}", meta.join(" · ")),
+        Style::default().fg(Color::Gray),
+    )));
+
+    if !p.description.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", p.description),
+            Style::default().fg(Color::Gray),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("  Source: {}", p.source),
+        Style::default().fg(Color::DarkGray),
+    )));
+    if !p.homepage.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  Homepage: {}", p.homepage),
+            Style::default().fg(Color::Cyan),
+        )));
+    }
+    if let Some(r) = p.source_ref.as_deref().filter(|r| !r.trim().is_empty()) {
+        lines.push(Line::from(Span::styled(
+            format!("  Ref: {}", r),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Press Enter to install — choose U (user, all projects) or P (this project)",
+        Style::default().fg(Color::Yellow),
+    )));
     lines
 }
 
@@ -400,6 +480,22 @@ fn marketplaces_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
     lines
 }
 
+/// 错误分类（对标 Claude Code PluginErrors.tsx 的错误类型 + 可重试性）
+fn classify_plugin_error(err: &str) -> (&'static str, bool, Color) {
+    let e = err.to_lowercase();
+    if e.contains("authentication") || e.contains("auth") || e.contains("permission denied (os") && e.contains("git") {
+        ("git-auth", false, Color::Red)
+    } else if e.contains("timed out") || e.contains("timeout") {
+        ("git-timeout", true, Color::Yellow)
+    } else if e.contains("failed to connect") || e.contains("network") || e.contains("connection") {
+        ("network", true, Color::Yellow)
+    } else if e.contains("manifest") || e.contains("missing") {
+        ("invalid-manifest", false, Color::Red)
+    } else {
+        ("other", false, Color::Red)
+    }
+}
+
 fn errors_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
@@ -425,14 +521,21 @@ fn errors_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
         }
         let selected = i == state.plugin_index;
         let style = row_style(i, if selected { i } else { usize::MAX });
+        let (kind, retryable, color) = classify_plugin_error(err);
         lines.push(Line::from(vec![
             Span::raw("  "),
             Span::styled("✗", Style::default().fg(Color::Red)),
+            Span::styled(format!(" {} ", kind), Style::default().fg(color)),
             Span::styled(format!(" {}: ", name), style),
             Span::styled(
-                truncate_str(err, 60),
+                truncate_str(err, 48),
                 Style::default().fg(Color::Yellow),
             ),
+            if retryable {
+                Span::styled("  [R]", Style::default().fg(Color::Cyan))
+            } else {
+                Span::raw("")
+            },
         ]));
     }
     lines

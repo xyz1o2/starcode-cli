@@ -474,6 +474,14 @@ pub struct ChatState {
     pub plugin_search: String,
     /// Discover tab 勾选待批量安装的插件名（Space 切换，i 批量安装）
     pub plugin_selected: std::collections::HashSet<String>,
+    /// 插件详情页（对标 Claude Code 详情视图）：(marketplace, plugin)
+    pub plugin_detail: Option<(
+        String,
+        crate::core::plugins::marketplace::MarketplacePlugin,
+    )>,
+    /// 批量安装进度聚合（对标 Claude Code 批量安装确认页的逐项状态）
+    pub plugin_batch_total: usize,
+    pub plugin_batch_done: usize,
     pub plugin_loading: bool,
     /// 有插件市场后台操作（经 AgentRequest::PluginOp）在执行中
     pub plugin_op_pending: bool,
@@ -827,6 +835,9 @@ impl ChatState {
             plugin_index: 0,
             plugin_search: String::new(),
             plugin_selected: std::collections::HashSet::new(),
+            plugin_detail: None,
+            plugin_batch_total: 0,
+            plugin_batch_done: 0,
             plugin_loading: false,
             plugin_op_pending: false,
             plugin_message: None,

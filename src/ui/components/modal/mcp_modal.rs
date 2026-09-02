@@ -174,6 +174,9 @@ fn mcp_menu_lines(state: &ChatState, name: &str) -> Vec<Line<'static>> {
             "disabled"
         } else if row.connected {
             "connected"
+        } else if row.needs_auth {
+            // 对标 Claude Code UnifiedInstalledCell 的 "Enter to auth"
+            "needs-auth"
         } else {
             "offline"
         };
@@ -186,13 +189,17 @@ fn mcp_menu_lines(state: &ChatState, name: &str) -> Vec<Line<'static>> {
         Some(r) if r.disabled => "Enable server",
         _ => "Disable server",
     };
-    let actions = [
-        "View tools",
-        "Reconnect",
-        toggle_label,
-        "Remove server…",
-        ".. Back",
+    // needs-auth 服务器插入 Authenticate 项（对标 Claude Code "Enter to auth"）
+    let mut actions: Vec<String> = vec![
+        "View tools".to_string(),
+        "Reconnect".to_string(),
+        toggle_label.to_string(),
     ];
+    if row.as_ref().map(|r| r.needs_auth).unwrap_or(false) {
+        actions.push("Authenticate… (opens browser)".to_string());
+    }
+    actions.push("Remove server…".to_string());
+    actions.push(".. Back".to_string());
     for (i, label) in actions.iter().enumerate() {
         let style = row_style(i, state.mcp_modal_menu_index);
         lines.push(Line::from(vec![

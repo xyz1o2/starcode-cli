@@ -282,9 +282,15 @@ async fn run_plugin_op(
                 Err(e) => Some(format!("Error: {}", e)),
             }
         }
-        PluginOp::InstallPlugin(plugin) => {
-            match mp::install_marketplace_plugin(project_root, &plugin).await {
-                Ok(_) => Some(format!("Installed plugin {}", plugin.name)),
+        PluginOp::InstallPlugin { plugin, scope } => {
+            match mp::install_marketplace_plugin(project_root, &plugin, &scope).await {
+                Ok(_) => Some(format!("Installed plugin {} ({})", plugin.name, scope)),
+                Err(e) => Some(format!("Error: {}", e)),
+            }
+        }
+        PluginOp::UpdateMarketplace { name } => {
+            match mp::update_marketplace(project_root, &name).await {
+                Ok(msg) => Some(msg),
                 Err(e) => Some(format!("Error: {}", e)),
             }
         }
