@@ -290,17 +290,16 @@ async fn handle_mcp(
                             .and_then(|r| r.error.as_deref())
                             .and_then(crate::ui::state::modal::extract_oauth_url);
                         match url {
-                            Some(u) => {
-                                let opened = tokio::process::Command::new("cmd")
-                                    .args(["/c", "start", "", &u])
-                                    .creation_flags(0x0800_0000)
-                                    .status()
-                                    .await;
-                                state.mcp_modal_action_msg = Some(match opened {
-                                    Ok(_) => format!("Opening auth page: {}", u),
-                                    Err(e) => format!("Failed to open browser: {} — {}", e, u),
-                                });
-                            }
+                            Some(u) => match open_url_in_browser(&u).await {
+                                Ok(()) => {
+                                    state.mcp_modal_action_msg =
+                                        Some(format!("Opening auth page: {}", u))
+                                }
+                                Err(e) => {
+                                    state.mcp_modal_action_msg =
+                                        Some(format!("Failed to open browser: {} — {}", e, u))
+                                }
+                            },
                             None => {
                                 state.mcp_modal_action_msg =
                                     Some("No auth URL available. Reconnect first.".to_string());
@@ -546,6 +545,40 @@ async fn uninstall_plugin(state: &mut ChatState, name: &str) -> String {
         Ok(true) => format!("Uninstalled plugin {}", name),
         Ok(false) => format!("Plugin not found: {}", name),
         Err(e) => format!("Error: {}", e),
+    }
+}
+
+/// 跨平台打开 URL（MCP OAuth 授权页等）。
+/// Windows: `cmd /c start`（CREATE_NO_WINDOW 防闪控制台）；
+/// macOS: `open`；Linux: `xdg-open`。
+async fn open_url_in_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        tokio::process::Command::new("cmd")
+            .args(["/c", "start", "", url])
+            .creation_flags(0x0800_0000)
+            .status()
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        tokio::process::Command::new("open")
+            .arg(url)
+            .status()
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        tokio::process::Command::new("xdg-open")
+            .arg(url)
+            .status()
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 }
 
