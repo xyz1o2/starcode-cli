@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <strong>🚀 A powerful conversational AI CLI tool with text editor capabilities, built in Rust</strong>
+  <strong>A powerful conversational AI CLI tool with text editor capabilities, built in Rust</strong>
 </p>
 
 <p align="center">
@@ -23,22 +23,22 @@
 
 ---
 
-## ✨ Features
+## Features
 
-- **🤖 Multi-Provider AI Support** - Connect to OpenAI, Anthropic, and other OpenAI-compatible APIs
-- **📝 Interactive TUI** - Beautiful terminal user interface with real-time streaming
-- **🔧 Tool Integration** - Execute commands, edit files, and interact with your codebase
-- **🌐 MCP Protocol** - Model Context Protocol support for extensible toolchains
-- **📁 Git Integration** - AI-assisted git operations with intelligent suggestions
-- **🔍 Smart Search** - Fast code search using ripgrep with AST-aware chunking
-- **🎨 Syntax Highlighting** - Beautiful code highlighting with multiple themes
-- **📊 Session Management** - Save, resume, and manage conversation sessions
-- **🌍 Internationalization** - Multi-language support (English, Chinese)
-- **🔒 Permission System** - Fine-grained control over tool execution permissions
-- **⚡ Headless Mode** - Process prompts without interactive UI for scripting
-- **📦 Cross-Platform** - Works on Linux, macOS, and Windows
+- **Multi-Provider AI Support** - Connect to OpenAI, Anthropic, and other OpenAI-compatible APIs
+- **Interactive TUI** - Beautiful terminal user interface with real-time streaming
+- **Tool Integration** - Execute commands, edit files, and interact with your codebase
+- **MCP Protocol** - Model Context Protocol support for extensible toolchains
+- **Git Integration** - AI-assisted git operations with intelligent suggestions
+- **Smart Search** - Fast code search using ripgrep with AST-aware chunking
+- **Syntax Highlighting** - Beautiful code highlighting with multiple themes
+- **Session Management** - Save, resume, and manage conversation sessions
+- **Internationalization** - Multi-language support (English, Chinese)
+- **Permission System** - Fine-grained control over tool execution permissions
+- **Headless Mode** - Process prompts without interactive UI for scripting
+- **Cross-Platform** - Works on Linux, macOS, and Windows
 
-## 🎯 What Can It Do?
+## What Can It Do?
 
 StarCode CLI is your AI-powered coding assistant that can:
 
@@ -51,7 +51,7 @@ StarCode CLI is your AI-powered coding assistant that can:
 - **Resume sessions** to continue where you left off
 - **Process prompts** in headless mode for automation
 
-## 📦 Installation
+## Installation
 
 ### From Source (Recommended)
 
@@ -78,7 +78,7 @@ cargo install --git https://github.com/xyz1o2/starcode-cli.git starcode-cli
 
 Download the latest release for your platform from the [Releases](https://github.com/xyz1o2/starcode-cli/releases) page.
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Set up your API key
 
@@ -110,7 +110,7 @@ starcode -p "What files are in the current directory?"
 starcode -p "List all Rust files" --output-format text
 ```
 
-## ⚙️ Configuration
+## Configuration
 
 ### Environment Variables
 
@@ -157,7 +157,7 @@ StarCode looks for `STAR.md` in your project root for project-specific instructi
 - Core logic: src/core/
 ```
 
-## 📋 Commands
+## Commands
 
 ### Interactive Mode
 
@@ -217,7 +217,7 @@ starcode --permission-mode plan
 starcode --permission-mode yolo
 ```
 
-## 🔧 Available Tools
+## Available Tools
 
 StarCode CLI comes with a comprehensive set of built-in tools:
 
@@ -230,7 +230,7 @@ StarCode CLI comes with a comprehensive set of built-in tools:
 - **Agent** - Spawn sub-agents for complex tasks
 - **WebFetch** - Fetch and analyze web pages
 
-## 🌐 MCP Support
+## MCP Support
 
 StarCode supports the Model Context Protocol (Model Context Protocol) for extending its capabilities:
 
@@ -245,7 +245,7 @@ starcode mcp list
 starcode mcp remove filesystem
 ```
 
-## 🧪 Development
+## Development
 
 ### Building from Source
 
@@ -298,7 +298,7 @@ starcode/
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-## 📊 Evaluation
+## Evaluation
 
 StarCode includes a built-in evaluation harness for testing AI capabilities:
 
@@ -316,7 +316,7 @@ starcode eval --tasks eval/tasks.json --report-md eval-report.md
 starcode eval --baseline .star/eval-baseline.json
 ```
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
@@ -350,7 +350,7 @@ chmod +x target/release/starcode-cli
 sudo cp target/release/starcode-cli /usr/local/bin/
 ```
 
-## 📜 Changelog
+## Changelog
 
 ### v0.3.0 (Latest)
 - Added MCP (Model Context Protocol) support
@@ -371,15 +371,15 @@ sudo cp target/release/starcode-cli /usr/local/bin/
 - Basic tool integration
 - File operations
 
-## 🤝 Support
+## Support
 
-- 📖 [Documentation](https://github.com/xyz1o2/starcode-cli/wiki)
-- 🐛 [Report Issues](https://github.com/xyz1o2/starcode-cli/issues)
-- 💬 [Discussions](https://github.com/xyz1o2/starcode-cli/discussions)
+- [Documentation](https://github.com/xyz1o2/starcode-cli/wiki)
+- [Report Issues](https://github.com/xyz1o2/starcode-cli/issues)
+- [Discussions](https://github.com/xyz1o2/starcode-cli/discussions)
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
-- Built with [Rust](https://www.rust-lang.org/) 🦀
+- Built with [Rust](https://www.rust-lang.org/)
 - Terminal UI powered by [Ratatui](https://github.com/fdehau/tui-rs)
 - LLM integration via [Rig](https://github.com/0xPlaygrounds/rig)
 - MCP support following [Model Context Protocol](https://modelcontextprotocol.io/)
@@ -387,7 +387,7 @@ sudo cp target/release/starcode-cli /usr/local/bin/
 ---
 
 <p align="center">
-  Made with ❤️ by <a href="https://github.com/xyz1o2">xyz1o2</a>
+  Made by <a href="https://github.com/xyz1o2">xyz1o2</a>
 </p>
 
 <p align="center">
