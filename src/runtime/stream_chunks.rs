@@ -95,10 +95,7 @@ pub async fn handle_stream_chunk(
         }
         StreamingChunkType::ToolResult => {
             if let (Some(tool_call), Some(tool_result)) = (chunk.tool_call, chunk.tool_result) {
-                if tool_call.function.name == "Todo"
-                    || tool_call.function.name == "todo"
-                    || tool_call.function.name == "complete_task"
-                {
+                if tool_call.function.name == "TodoWrite" {
                     let _ = tx.send(StreamMessage::ReloadTasks).await;
                 }
                 let _ = tx

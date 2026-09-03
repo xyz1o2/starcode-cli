@@ -115,7 +115,7 @@ fn truncate_args(tool_name: &str, args: &str) -> String {
                 return display_path;
             }
         }
-        "TodoWrite" | "Todo" => {
+        "TodoWrite" => {
             if let Some(todos) = parsed.get("todos").and_then(|v| v.as_array()) {
                 return format!("{} items", todos.len());
             }

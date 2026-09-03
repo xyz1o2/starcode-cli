@@ -1523,10 +1523,7 @@ fn handle_tool_result_message(
             }
         }
     }
-    if matches!(
-        tool_call.function.name.as_str(),
-        "Todo" | "complete_task" | "TodoWrite"
-    ) {
+    if matches!(tool_call.function.name.as_str(), "TodoWrite") {
         state.task_panel.reload();
         state.task_panel.mark_modified();
         if !state.task_panel.is_visible && !state.task_panel.manually_hidden {

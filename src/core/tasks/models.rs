@@ -96,6 +96,10 @@ pub struct TaskNode {
     pub dependencies: Vec<String>,
     pub children: Vec<String>,
     pub assigned_agent: Option<String>,
+    /// 进行时描述（对标 Claude Code 的 `activeForm`）：任务 in_progress 时面板/转圈
+    /// 显示 "Running tests" 而不是祈使句 "Run tests"。旧文件没有该字段 → None。
+    #[serde(default)]
+    pub active_form: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -112,6 +116,7 @@ impl TaskNode {
             dependencies: Vec::new(),
             children: Vec::new(),
             assigned_agent: None,
+            active_form: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

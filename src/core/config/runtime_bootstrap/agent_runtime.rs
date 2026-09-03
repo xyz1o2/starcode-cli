@@ -93,8 +93,8 @@ fn register_agent_execution_tools(
     }
     tool_registry.register_tool(Arc::new(agent_tool));
 
-    use crate::core::tools::tasks::TaskTool;
-    tool_registry.register_tool(Arc::new(TaskTool::new(subagent_runner, config.clone())));
+    use crate::core::tools::tasks::TodoWriteTool;
+    tool_registry.register_tool(Arc::new(TodoWriteTool::new(config.clone())));
 
     use crate::core::tools::diagnostics::GetDiagnosticsTool;
     tool_registry.register_tool(Arc::new(GetDiagnosticsTool::new(config.clone())));

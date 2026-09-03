@@ -484,7 +484,7 @@ fn build_tool_argument_display(
                 format!("{} in {}", q, shorten(&p))
             }
         }
-        "Todo" => {
+        "TodoWrite" => {
             let action = crate::ui::utils::format::canonical_task_action_from_value(&args);
             let action_label = crate::ui::utils::format::task_action_display_label(action);
             if let Some(todos) = obj.get("todos").and_then(|v| v.as_array()) {

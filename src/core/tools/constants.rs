@@ -145,8 +145,8 @@ impl ToolName {
             // 代理/任务
             ToolName::Agent => "Agent",
             ToolName::Skill => "skill",
-            ToolName::Todo => "Todo",
-            ToolName::ManageTasks => "Todo", // 别名
+            ToolName::Todo => "TodoWrite",
+            ToolName::ManageTasks => "TodoWrite", // 别名
 
             // 分析
             ToolName::GetDiagnostics => "get_diagnostics",
@@ -246,7 +246,7 @@ impl ToolName {
             "run_tests" => Some(ToolName::RunTests),
             "Agent" => Some(ToolName::Agent),
             "skill" => Some(ToolName::Skill),
-            "Todo" => Some(ToolName::Todo),
+            "TodoWrite" => Some(ToolName::Todo),
             "get_diagnostics" => Some(ToolName::GetDiagnostics),
             "SemanticSearch" => Some(ToolName::SemanticSearch),
             "ProjectMap" => Some(ToolName::ProjectMap),
@@ -480,7 +480,7 @@ pub const MEMORY_TOOL_NAME: &str = "memory";
 pub const GET_INTERNAL_DOCS_TOOL_NAME: &str = "get_internal_docs";
 pub const SKILL_TOOL_NAME: &str = "skill";
 pub const ACTIVATE_SKILL_TOOL_NAME: &str = "activate_skill";
-pub const MANAGED_TASKS_TOOL_NAME: &str = "Todo";
+pub const MANAGED_TASKS_TOOL_NAME: &str = "TodoWrite";
 pub const RUN_AGENT_TOOL_NAME: &str = "Agent";
 pub const DELEGATE_TO_AGENT_TOOL_NAME: &str = "delegate_to_agent";
 pub const LSP_TOOL_NAME: &str = "LSP";

@@ -1178,7 +1178,7 @@ pub fn is_safe_query_tool(tool_name: &str) -> bool {
             | "SemanticSearch"
             | "gh_pr_comments"
             | "task_search"
-            | "Todo"
+            | "TodoWrite"
             | "mcp_list_servers"
             | "mcp_list_tools"
             | "mcp_search_tools"

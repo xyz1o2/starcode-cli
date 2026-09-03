@@ -765,7 +765,14 @@ pub fn render_task_panel_mut(f: &mut Frame, area: Rect, panel: &mut TaskPanel, t
                     status_style
                 };
 
-                let content = format!("{}{} {}", prefix, status_icon, node.title);
+                // 对标 Claude Code：进行中的行显示 activeForm（"Running tests"），
+                // 其余显示 content（祈使句）。没有 active_form 时回退到 title。
+                let label = if node.status == TaskStatus::InProgress {
+                    node.active_form.as_deref().unwrap_or(&node.title)
+                } else {
+                    &node.title
+                };
+                let content = format!("{}{} {}", prefix, status_icon, label);
 
                 ListItem::new(Line::from(Span::styled(content, title_style)))
             })

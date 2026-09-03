@@ -24,7 +24,7 @@ fn should_include_task_agent_usage(active_tools: Option<&HashSet<String>>) -> bo
     active_tools.iter().any(|tool| {
         matches!(
             tool.as_str(),
-            "skill" | "Agent" | "delegate" | "task" | "Todo"
+            "skill" | "Agent" | "delegate" | "task" | "TodoWrite"
         )
     })
 }

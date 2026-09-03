@@ -52,7 +52,7 @@ fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str
         m.insert("monitor", "monitor");
         m.insert("wait", "wait");
         // 任务管理
-        m.insert("Todo", "managetasks");
+        m.insert("TodoWrite", "managetasks");
         m.insert("task_get", "taskget");
         m.insert("task_list", "tasklist");
         m.insert("task_update", "taskupdate");

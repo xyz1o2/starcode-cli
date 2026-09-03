@@ -215,7 +215,7 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     "Bash",
     "SemanticSearch",
     "ProjectMap",
-    "Todo",
+    "TodoWrite",
     "get_diagnostics",
     "run_tests",
     // Discovery of long-tail tools (git/web/team/cron...) — always visible

@@ -108,7 +108,7 @@ pub fn tool_display_name(name: &str) -> String {
         "Edit" | "str_replace_editor" | "edit_file" | "smart_edit" => "edit".into(),
         "create_file" | "Write" => "write".into(),
         "complete_task" => "done".into(),
-        "Todo" => "tasks".into(),
+        "TodoWrite" => "tasks".into(),
         "enter_plan_mode" | "exit_plan_mode" => "plan".into(),
         "ask_user" | "user_prompt" => "ask".into(),
         _ => name.to_string(),
@@ -186,7 +186,7 @@ fn tool_call_brief(tc: &StarToolCall) -> String {
         |k: &str| -> Option<u64> { v.as_ref().and_then(|vv| vv.get(k)).and_then(|x| x.as_u64()) };
 
     match name {
-        "Todo" => {
+        "TodoWrite" => {
             return tool_display_name("tasks").to_string();
         }
         "Edit" | "str_replace_editor" => {
