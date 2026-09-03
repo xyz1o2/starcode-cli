@@ -214,6 +214,7 @@ impl AsyncSubagentRunner {
         };
 
         let output_file = PathBuf::from(format!(".star/subagent_outputs/{}.txt", agent_id));
+        let out_path = output_file.clone();
         let runner = self.sync_runner.clone();
         let queue = self.notification_queue.clone();
         let registry = self.name_registry.clone();
@@ -231,12 +232,22 @@ impl AsyncSubagentRunner {
 
             let start = std::time::Instant::now();
 
+            // 进度统计的最后一次快照。终态更新时，失败分支拿不到 SubAgentResult，
+            // 直接报 0 会把选择器里已经涨上去的 tool uses / tokens 抹平，所以留个副本。
+            let seen_tools = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let seen_tokens = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
             // 后台 agent 的进度同样回流到 UI（AgentTaskUpdate chunk）
             let progress_id = aid.clone();
             let progress_desc = desc.clone();
             let progress_type = type_label.clone();
             let progress_name = agent_name.clone();
+            let progress_tools = seen_tools.clone();
+            let progress_tokens = seen_tokens.clone();
             let sink: SubAgentProgressSink = Arc::new(move |p| {
+                use std::sync::atomic::Ordering;
+                progress_tools.store(p.tool_use_count, Ordering::Relaxed);
+                progress_tokens.store(p.tokens, Ordering::Relaxed);
                 crate::agent::subagent::progress::emit_to_ui(
                     crate::types::StreamingChunk::agent_task_update(
                         crate::types::AgentTaskUpdatePayload::new(
@@ -273,6 +284,44 @@ impl AsyncSubagentRunner {
                     0,
                 ),
             };
+
+            // 结果落盘：`AsyncLaunchResult.output_file` 这条路径已经作为
+            // "Output file: …" 告诉了模型，必须真的有内容，否则后续读取只会拿到
+            // "file not found"。写失败不影响任务本身，只记日志。
+            if let Some(parent) = out_path.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            if let Err(e) = tokio::fs::write(&out_path, &output).await {
+                crate::utils::logging::append_agent_log_line(&format!(
+                    "[AsyncSubagent] failed to write {}: {}",
+                    out_path.display(),
+                    e
+                ));
+            }
+
+            // 终态直接推给 UI。原先终态只在下一个 turn 排空通知队列时才到 UI
+            // （agent_loop.rs 的 drain_for_next_turn），用户空闲时后台代理跑完了，
+            // 选择器还一直显示 Running —— 等于对着用户撒谎。
+            {
+                use std::sync::atomic::Ordering;
+                let final_status = match &status {
+                    NotificationStatus::Completed => crate::types::AgentTaskStatus::Completed,
+                    _ => crate::types::AgentTaskStatus::Failed,
+                };
+                let final_tools = (tool_uses as u32).max(seen_tools.load(Ordering::Relaxed));
+                let final_tokens = (tokens as u32).max(seen_tokens.load(Ordering::Relaxed));
+                crate::agent::subagent::progress::emit_to_ui(
+                    crate::types::StreamingChunk::agent_task_update(
+                        crate::types::AgentTaskUpdatePayload::new(aid.clone(), type_label.clone())
+                            .with_description(desc.clone())
+                            .with_status(final_status)
+                            .with_stats(final_tools, final_tokens)
+                            .with_async(true)
+                            .with_name(agent_name.clone())
+                            .with_task_description(Some(desc.clone())),
+                    ),
+                );
+            }
 
             let mut q = queue.lock().await;
             q.enqueue(TaskNotification {

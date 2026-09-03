@@ -43,6 +43,44 @@ fn risk_color(risk: &crate::types::RiskLevel) -> Color {
     }
 }
 
+/// 非 Shell 类确认卡的风险分级。
+///
+/// ShellCommand 自带 `estimated_risk`（`tool_gate::estimate_bash_risk`），本函数只管其余类型：
+/// 它们原先只有一行布尔警告「可能修改文件或执行命令」，改不改系统目录都是同一句话。
+/// 落到系统路径的写/删按 `dangerous_patterns::is_system_path` 抬一级。
+fn estimate_details_risk(confirmation: &crate::types::ToolConfirmation) -> crate::types::RiskLevel {
+    use crate::core::auto_mode::dangerous_patterns::is_system_path;
+    use crate::types::{ConfirmationDetails, RiskLevel};
+
+    match &confirmation.details {
+        ConfirmationDetails::DeleteFile { file_path } => {
+            if is_system_path(file_path) {
+                RiskLevel::Critical
+            } else {
+                RiskLevel::High
+            }
+        }
+        ConfirmationDetails::EditFile { file_path, .. }
+        | ConfirmationDetails::CreateFile { file_path, .. } => {
+            if is_system_path(file_path) {
+                RiskLevel::High
+            } else {
+                RiskLevel::Low
+            }
+        }
+        ConfirmationDetails::NetworkRequest { .. } => RiskLevel::Medium,
+        ConfirmationDetails::AskUserQuestion { .. } => RiskLevel::Safe,
+        // Generic 覆盖 MCP / 插件等无结构信息的工具，只能听 is_dangerous
+        ConfirmationDetails::Generic { .. } | ConfirmationDetails::ShellCommand { .. } => {
+            if confirmation.is_dangerous {
+                RiskLevel::Medium
+            } else {
+                RiskLevel::Low
+            }
+        }
+    }
+}
+
 pub fn build_confirmation_card_block(
     confirmation: &crate::types::ToolConfirmation,
     wrap_width: usize,
@@ -231,21 +269,33 @@ pub fn build_confirmation_card_block(
         }
     }
 
-    // ── Danger warning ──
-    if confirmation.is_dangerous {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "  ⚠ {}",
-                i18n::t(
-                    "ui.confirm.warning.danger",
-                    "注意：可能修改文件或执行命令",
-                    "This action may modify files or run commands",
-                )
-            ),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )));
+    // ── Risk line ──
+    // ShellCommand 分支上面已经打印过分级风险，这里只补其余类型：原先它们无论改的是
+    // 项目里的一个文件还是 /etc 下的系统文件，都只有同一句布尔警告。
+    if !matches!(
+        confirmation.operation_type,
+        ConfirmationType::ShellCommand | ConfirmationType::AskUserQuestion
+    ) {
+        let risk = estimate_details_risk(confirmation);
+        if confirmation.is_dangerous || !matches!(risk, crate::types::RiskLevel::Safe) {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{}{}",
+                    i18n::t("ui.confirm.label.risk", "  风险: ", "  Risk: "),
+                    risk_label(&risk)
+                ),
+                Style::default().fg(risk_color(&risk)).add_modifier(
+                    if matches!(
+                        risk,
+                        crate::types::RiskLevel::High | crate::types::RiskLevel::Critical
+                    ) {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    },
+                ),
+            )));
+        }
     }
 
     // ── Blank line ──
@@ -1127,5 +1177,119 @@ pub async fn build_confirmation_from_tool_call(
             is_dangerous: false,
             outcome: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ConfirmationDetails, ConfirmationType, RiskLevel, ToolConfirmation};
+
+    fn conf(operation_type: ConfirmationType, details: ConfirmationDetails) -> ToolConfirmation {
+        ToolConfirmation {
+            tool_name: "T".to_string(),
+            operation_type,
+            details,
+            is_dangerous: false,
+            outcome: None,
+        }
+    }
+
+    /// Bash 卡片的风险来自 `estimate_bash_risk`，这里锚定两端：
+    /// `rm -rf /` 必须是 Critical，纯读命令不能被报成高风险。
+    #[test]
+    fn bash_risk_spans_critical_to_safe() {
+        use crate::agent::policies::tool_gate::estimate_bash_risk;
+        assert_eq!(estimate_bash_risk("rm -rf /"), RiskLevel::Critical);
+        assert_eq!(estimate_bash_risk("rm -fr /tmp/x"), RiskLevel::Critical);
+        assert_eq!(estimate_bash_risk("pwd"), RiskLevel::Low);
+        assert_eq!(estimate_bash_risk("whoami"), RiskLevel::Low);
+    }
+
+    /// 非 Shell 卡片的分级：写到系统路径比写到项目里高一级。
+    #[test]
+    fn details_risk_escalates_on_system_paths() {
+        let del_project = conf(
+            ConfirmationType::DeleteFile,
+            ConfirmationDetails::DeleteFile {
+                file_path: "src/main.rs".to_string(),
+            },
+        );
+        assert_eq!(estimate_details_risk(&del_project), RiskLevel::High);
+
+        let del_system = conf(
+            ConfirmationType::DeleteFile,
+            ConfirmationDetails::DeleteFile {
+                file_path: "/etc/passwd".to_string(),
+            },
+        );
+        assert_eq!(estimate_details_risk(&del_system), RiskLevel::Critical);
+
+        let edit_project = conf(
+            ConfirmationType::EditFile,
+            ConfirmationDetails::EditFile {
+                file_path: "src/main.rs".to_string(),
+                diff: String::new(),
+                old_lines: 1,
+                new_lines: 2,
+            },
+        );
+        assert_eq!(estimate_details_risk(&edit_project), RiskLevel::Low);
+
+        let edit_system = conf(
+            ConfirmationType::EditFile,
+            ConfirmationDetails::EditFile {
+                file_path: "/etc/hosts".to_string(),
+                diff: String::new(),
+                old_lines: 1,
+                new_lines: 2,
+            },
+        );
+        assert_eq!(estimate_details_risk(&edit_system), RiskLevel::High);
+
+        let net = conf(
+            ConfirmationType::NetworkRequest,
+            ConfirmationDetails::NetworkRequest {
+                url: "https://example.com".to_string(),
+                method: "GET".to_string(),
+            },
+        );
+        assert_eq!(estimate_details_risk(&net), RiskLevel::Medium);
+    }
+
+    /// 卡片上只能出现一条 Risk 行：Shell 由 details 分支打印，其余类型由新增分支打印。
+    #[test]
+    fn card_renders_exactly_one_risk_line() {
+        let count_risk = |c: &ToolConfirmation| {
+            build_confirmation_card_block(c, 60, 0, false, false)
+                .iter()
+                .filter(|l| {
+                    let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                    text.contains("Risk:") || text.contains("风险:")
+                })
+                .count()
+        };
+
+        let shell = conf(
+            ConfirmationType::ShellCommand,
+            ConfirmationDetails::ShellCommand {
+                command: "rm -rf /tmp/x".to_string(),
+                working_dir: ".".to_string(),
+                estimated_risk: RiskLevel::Critical,
+                diff_preview: None,
+            },
+        );
+        assert_eq!(count_risk(&shell), 1);
+
+        let edit = conf(
+            ConfirmationType::EditFile,
+            ConfirmationDetails::EditFile {
+                file_path: "/etc/hosts".to_string(),
+                diff: String::new(),
+                old_lines: 1,
+                new_lines: 2,
+            },
+        );
+        assert_eq!(count_risk(&edit), 1);
     }
 }

@@ -39,6 +39,10 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
         0u16
     };
 
+    // 后台代理选择器（对标 background agent selector）：仅在 ↓ 进入选择器后占位，
+    // 与 task_panel 同一套「按需撑开一段高度」的模式
+    let bg_panel_h = crate::ui::components::bg_agent_selector::selector_height(state);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -46,6 +50,7 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
             Constraint::Length(token_warning_h),
             Constraint::Length(spinner_h),
             Constraint::Length(task_panel_h),
+            Constraint::Length(bg_panel_h),
             Constraint::Length(footer_h),
         ])
         .split(viewport);
@@ -53,7 +58,8 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     let token_warning_area = chunks[1];
     let spinner_area = chunks[2];
     let task_area = chunks[3];
-    let footer_area = chunks[4];
+    let bg_panel_area = chunks[4];
+    let footer_area = chunks[5];
 
     let chat_lines = crate::ui::components::chat_history::render_chat_lines(state, chat_area.width);
     let total = chat_lines.len();
@@ -157,6 +163,15 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
             task_area,
             &mut state.task_panel,
             theme,
+        );
+    }
+
+    if bg_panel_h > 0 {
+        let selector_lines =
+            crate::ui::components::bg_agent_selector::render_selector(state, bg_panel_area.width);
+        f.render_widget(
+            ratatui::widgets::Paragraph::new(selector_lines),
+            bg_panel_area,
         );
     }
 

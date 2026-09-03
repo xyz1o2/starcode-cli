@@ -139,7 +139,34 @@ pub async fn handle_command(
         "forget" => compat::forget(ctx, args).await,
         "todos" => compat::tasks(ctx, args).await,
         "tools" => tools::tools(ctx, args).await,
-        "model" | "models" => model_wrapper(ctx, args).await,
+        // /model 无参数：打开交互式模型选择器（对标 Claude Code /model）。
+        // 走 clap 的话 bare `/model` 会命中 "missing subcommand"，把一段 usage 报错
+        // 塞进聊天记录 —— 而 /model 印出来的提示恰恰是「用 model picker」。
+        // 单参数且不是 list/use 时按模型名处理，兑现同一句提示里的 `/model <name>`。
+        "model" | "models" => match args.first().map(|s| s.as_str()) {
+            None => {
+                ctx.state.palette_history.clear();
+                ctx.state
+                    .open_palette(crate::ui::state::palette::PaletteMode::Model);
+                if ctx.state.available_models.is_empty() {
+                    ctx.state.awaiting_models = true;
+                    let _ = ctx
+                        .agent_tx
+                        .send(crate::runtime::messages::AgentRequest::ListModels)
+                        .await;
+                }
+                Ok(())
+            }
+            Some("list") | Some("use") | Some("help") | Some("--help") | Some("-h") => {
+                model_wrapper(ctx, args).await
+            }
+            Some(_) => {
+                let mut a = vec!["use".to_string()];
+                a.extend(args);
+                model_wrapper(ctx, a).await
+            }
+        },
+
         "settings" => config::settings(ctx, args).await,
         "lang" => config::lang(ctx, args).await,
         "theme" => config::theme(ctx, args).await,

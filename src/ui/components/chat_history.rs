@@ -223,6 +223,17 @@ fn scroll_top_for_anchor(heights: &[u16], entry_idx: usize, row: usize) -> Optio
 /// Render chat entries into lines for the full-page scrollable document.
 /// Returns the rendered lines WITHOUT drawing to the frame.
 pub fn render_chat_lines(state: &mut ChatState, area_width: u16) -> Vec<Line<'static>> {
+    // 详情视图优先：`viewing_agent_task_id` 有值时整块聊天区换成那个后台代理的输出。
+    // 刻意不走 virtual_list / rendered_cache —— 那两者的下标是按 `chat_history` 尺寸分配的，
+    // 塞进另一份条目列表会互相污染高度缓存。详情视图行数有限，每帧全量渲染即可。
+    if state.viewing_agent_task_id.is_some() {
+        if let Some(lines) = render_teammate_view(state, area_width) {
+            return lines;
+        }
+        // 任务已经不在 active_agent_tasks 里（理论上不会发生，只插不删）——退回主会话
+        state.exit_teammate_view();
+    }
+
     let history_len = state.chat_history.len();
     if history_len == 0 {
         return Vec::new();
@@ -534,6 +545,109 @@ pub fn render_chat_history(
             &mut state.chat_scrollbar_state,
         );
     }
+}
+
+/// 渲染某个后台代理的详情视图（对标 teammate view）。
+///
+/// `viewing_agent_task_id` 命中 `active_agent_tasks` 时返回「标题行 + 该任务的 sub_entries」，
+/// 否则返回 `None` 让调用方退回主会话。子条目复用 `tool_render` / `message_render` 的
+/// 同一套 block 构造器，不另写渲染逻辑。
+fn render_teammate_view(state: &ChatState, area_width: u16) -> Option<Vec<Line<'static>>> {
+    let task_id = state.viewing_agent_task_id.as_deref()?;
+    let info = state.active_agent_tasks.get(task_id)?;
+    let theme = state.theme_manager.current();
+
+    let label = info.name.as_deref().unwrap_or(info.agent_type.as_str());
+    let desc = info
+        .task_description
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(info.description.as_str());
+
+    let status_color = match info.status {
+        crate::types::AgentTaskStatus::Running => theme.warning,
+        crate::types::AgentTaskStatus::Completed => theme.success,
+        crate::types::AgentTaskStatus::Failed | crate::types::AgentTaskStatus::Rejected => {
+            theme.error
+        }
+        crate::types::AgentTaskStatus::Background => theme.info,
+    };
+
+    let hint = "Esc to return";
+    // 标题行：⏵ <label> — <desc> · <耗时> · <N tool uses>            Esc to return
+    let tool_uses = info.tool_use_count;
+    let plural = if tool_uses == 1 { "use" } else { "uses" };
+    let stats = format!(
+        "{} · {} tool {}",
+        super::agent_group_render::format_duration(info.elapsed()),
+        tool_uses,
+        plural,
+    );
+    let fixed = 2 + label.chars().count() + 3 + stats.chars().count() + hint.chars().count() + 4;
+    let desc_width = (area_width as usize).saturating_sub(fixed);
+    let desc_shown = crate::ui::utils::render::truncate_to_display_width(desc, desc_width);
+
+    let mut header = vec![
+        Span::styled("⏵ ", Style::default().fg(status_color)),
+        Span::styled(
+            label.to_string(),
+            Style::default()
+                .fg(status_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if !desc_shown.is_empty() {
+        header.push(Span::styled(
+            format!(" — {}", desc_shown),
+            Style::default().fg(theme.foreground),
+        ));
+    }
+    header.push(Span::styled(
+        format!(" · {}", stats),
+        Style::default().fg(theme.inactive),
+    ));
+    let used: usize = header.iter().map(|s| s.content.chars().count()).sum();
+    if (area_width as usize) > used + hint.chars().count() + 2 {
+        let pad = area_width as usize - used - hint.chars().count() - 1;
+        header.push(Span::styled(" ".repeat(pad), Style::default()));
+    } else {
+        header.push(Span::styled("  ", Style::default()));
+    }
+    header.push(Span::styled(hint, Style::default().fg(theme.inactive)));
+
+    let mut lines = vec![Line::from(header), Line::from("")];
+
+    if info.sub_entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  Waiting for the first tool call…",
+            Style::default().fg(theme.inactive),
+        )));
+        return Some(lines);
+    }
+
+    let wrap_width = area_width.saturating_sub(2) as usize;
+    for sub in &info.sub_entries {
+        let blocks = if super::tool_render::is_tool_entry(sub) {
+            super::tool_render::render_tool_entry_blocks(
+                state,
+                sub,
+                usize::MAX,
+                area_width,
+                false,
+                false,
+                false,
+            )
+        } else {
+            // `usize::MAX` 只用于 thinking 展开态的键；子条目不参与主历史的展开状态，
+            // 传一个不会与真实下标碰撞的哨兵即可。
+            super::message_render::render_non_tool_entry_blocks(state, sub, usize::MAX, wrap_width)
+        };
+        for b in blocks {
+            lines.extend(b);
+        }
+    }
+
+    Some(lines)
 }
 
 fn render_entry_lines(state: &ChatState, entry_idx: usize, area_width: u16) -> Vec<Line<'static>> {

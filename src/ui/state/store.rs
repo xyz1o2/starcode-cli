@@ -257,6 +257,9 @@ impl TextSelection {
     }
 }
 
+/// 后台代理选择器最多列出的行数（不含 main 行）
+pub const MAX_BG_AGENT_ROWS: usize = 8;
+
 /// Agent 任务追踪信息
 #[derive(Debug, Clone)]
 pub struct AgentTaskInfo {
@@ -633,6 +636,12 @@ pub struct ChatState {
     pub agent_group_id: Option<String>,
     /// 正在聚焦查看的 Agent ID
     pub viewing_agent_task_id: Option<String>,
+    /// 后台代理选择器的焦点（对标 background agent selector 的 selectedBgAgentIndex）
+    ///
+    /// `None` = 焦点在输入框（默认）；`Some(0)` = main 会话行；`Some(n)` = 第 n-1 个后台代理。
+    /// 刻意**不从** `viewing_agent_task_id` 推导：参照实现要求两者分离 —— 「光标停在哪一行」
+    /// 和「当前正在看谁的输出」是两件事，用户可以边浏览行边保持在某个 agent 的详情里。
+    pub bg_agent_selection: Option<usize>,
     /// 全局 transcript 模式开关（Ctrl+O 切换）
     pub is_transcript_mode: bool,
     // ========================================
@@ -966,6 +975,7 @@ impl ChatState {
             active_agent_tasks: HashMap::new(),
             agent_group_id: None,
             viewing_agent_task_id: None,
+            bg_agent_selection: None,
             is_transcript_mode: false,
             // ========================================
             pending_scroll_direction: None,
@@ -1002,6 +1012,48 @@ impl ChatState {
         }
         self.clear_cache();
         self.is_transcript_mode
+    }
+
+    // ── 后台代理选择器（对标 background agent selector）──────────────────
+
+    /// 选择器可列出的后台代理，单一数据源。
+    ///
+    /// 只收 `is_async` 的任务：同步子代理是当前 turn 的一部分，已经在聊天流里逐行展示，
+    /// 再进选择器只会重复。按 `started_at` 升序，保证行序稳定（`active_agent_tasks` 是
+    /// `HashMap`，直接遍历的顺序每帧都可能变）。
+    ///
+    /// 参照实现用 `evictAfter` 做过期驱逐；这里 `active_agent_tasks` 只插不删，所以靠
+    /// [`MAX_BG_AGENT_ROWS`] 上限收敛 —— 长会话里只保留最近启动的若干个。
+    pub fn background_agent_rows(&self) -> Vec<&AgentTaskInfo> {
+        let mut rows: Vec<&AgentTaskInfo> = self
+            .active_agent_tasks
+            .values()
+            .filter(|t| t.is_async)
+            .collect();
+        rows.sort_by_key(|t| t.started_at);
+        if rows.len() > MAX_BG_AGENT_ROWS {
+            rows.drain(..rows.len() - MAX_BG_AGENT_ROWS);
+        }
+        rows
+    }
+
+    /// 进入某个后台代理的详情视图（对标 `enterTeammateView`）。
+    ///
+    /// 只改 `viewing_agent_task_id`，**不动** `bg_agent_selection` —— 选择器的焦点要留在
+    /// 原行上，用户才能连着 ↑/↓ 翻看下一个 agent。
+    pub fn enter_teammate_view(&mut self, task_id: &str) {
+        if self.viewing_agent_task_id.as_deref() == Some(task_id) {
+            return;
+        }
+        self.viewing_agent_task_id = Some(task_id.to_string());
+        self.clear_cache();
+    }
+
+    /// 退出详情视图，回到主会话（对标 `exitTeammateView`）。
+    pub fn exit_teammate_view(&mut self) {
+        if self.viewing_agent_task_id.take().is_some() {
+            self.clear_cache();
+        }
     }
 
     /// 获取选中的文本内容（从渲染后的行中提取）
@@ -1214,5 +1266,94 @@ mod tests {
 
         assert!(!state.toggle_transcript_mode());
         assert!(state.expanded_thinking_indices.is_empty());
+    }
+
+    /// 造一个后台代理任务：`started_at` 用「now - offset_ms」拉开先后顺序
+    fn bg_task(id: &str, is_async: bool, offset_ms: u64) -> AgentTaskInfo {
+        AgentTaskInfo {
+            task_id: id.to_string(),
+            agent_type: "Explore".to_string(),
+            description: format!("desc {}", id),
+            status: crate::types::AgentTaskStatus::Running,
+            tool_use_count: 0,
+            tokens: 0,
+            is_async,
+            is_resolved: false,
+            is_error: false,
+            last_tool_info: None,
+            name: None,
+            task_description: None,
+            started_at: Instant::now() - std::time::Duration::from_millis(offset_ms),
+            finished_at: None,
+            sub_entries: Vec::new(),
+            entry_idx: 0,
+        }
+    }
+
+    /// 选择器的数据源：只收后台（is_async）任务，按启动时间升序，超出上限丢最老的。
+    #[test]
+    fn background_agent_rows_filters_sorts_and_caps() {
+        let mut state = ChatState::new();
+        // 同步子代理不进选择器
+        state
+            .active_agent_tasks
+            .insert("sync".to_string(), bg_task("sync", false, 500));
+        // 故意乱序插入（HashMap 遍历顺序本身也不稳定）
+        state
+            .active_agent_tasks
+            .insert("b".to_string(), bg_task("b", true, 200));
+        state
+            .active_agent_tasks
+            .insert("a".to_string(), bg_task("a", true, 300));
+        state
+            .active_agent_tasks
+            .insert("c".to_string(), bg_task("c", true, 100));
+
+        let ids: Vec<&str> = state
+            .background_agent_rows()
+            .iter()
+            .map(|i| i.task_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a", "b", "c"], "先启动的排在前面，同步任务被过滤");
+
+        // 超过上限时保留最近启动的 MAX_BG_AGENT_ROWS 个
+        for n in 0..MAX_BG_AGENT_ROWS + 3 {
+            let id = format!("x{}", n);
+            // offset 越大越老 → x0 最老
+            let task = bg_task(&id, true, (MAX_BG_AGENT_ROWS + 3 - n) as u64 * 1000);
+            state.active_agent_tasks.insert(id, task);
+        }
+        let rows = state.background_agent_rows();
+        assert_eq!(rows.len(), MAX_BG_AGENT_ROWS);
+        // 上限内仍然保持升序
+        for pair in rows.windows(2) {
+            assert!(pair[0].started_at <= pair[1].started_at);
+        }
+        assert!(
+            !rows.iter().any(|i| i.task_id == "x0"),
+            "最老的一个应当被上限挤掉"
+        );
+    }
+
+    /// 进入/退出详情视图只动 `viewing_agent_task_id`，不碰选择器焦点。
+    #[test]
+    fn teammate_view_toggles_without_moving_selection() {
+        let mut state = ChatState::new();
+        state
+            .active_agent_tasks
+            .insert("a".to_string(), bg_task("a", true, 10));
+        state.bg_agent_selection = Some(1);
+
+        state.enter_teammate_view("a");
+        assert_eq!(state.viewing_agent_task_id.as_deref(), Some("a"));
+        assert_eq!(state.bg_agent_selection, Some(1), "焦点必须留在原行");
+
+        // 重复进入同一个 task 是幂等的
+        state.enter_teammate_view("a");
+        assert_eq!(state.viewing_agent_task_id.as_deref(), Some("a"));
+
+        state.exit_teammate_view();
+        assert!(state.viewing_agent_task_id.is_none());
+        assert_eq!(state.bg_agent_selection, Some(1));
     }
 }

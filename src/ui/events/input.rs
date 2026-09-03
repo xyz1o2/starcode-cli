@@ -1236,6 +1236,15 @@ pub async fn handle_key_event(
         return Ok(());
     }
 
+    // 后台代理选择器：焦点在选择器上时独占 ↑/↓/Enter/Esc。
+    // 位置刻意在 handle_overlay_input **之后** —— 任何弹窗仍然优先，选择器只跟输入框抢键。
+    if state.bg_agent_selection.is_some()
+        && !state.show_input_modal
+        && handle_bg_agent_selector_key(state, key)
+    {
+        return Ok(());
+    }
+
     // Code block copy: press 'c' when no overlay is active to copy last code block
     if key.code == KeyCode::Char('c') && key.modifiers.is_empty() {
         if state.input.is_empty() {
@@ -1748,6 +1757,14 @@ pub async fn handle_key_event(
                 return Ok(());
             }
 
+            // 正在看某个后台代理的详情 → Esc 先回主会话（对标详情视图顶部那句
+            // "Esc to return"）。选择器自己的 Esc 在 handle_bg_agent_selector_key 里
+            // 已经被消费掉，走不到这儿。
+            if state.viewing_agent_task_id.is_some() {
+                state.exit_teammate_view();
+                return Ok(());
+            }
+
             state.show_help = false;
             state.show_command_hints = false;
             state.command_hints.clear();
@@ -1973,6 +1990,14 @@ pub async fn handle_key_event(
                     sync_input_from_textarea(state);
                     crate::ui::components::command_suggestions::on_input_changed(state);
                 }
+            } else if cursor_row + 1 >= line_count
+                && state.bg_agent_selection.is_none()
+                && !state.background_agent_rows().is_empty()
+            {
+                // ↓ 从输入框末行溢出 → 落进后台代理选择器（对标 background agent selector：
+                // 「↓ manage」那句提示指的就是这个动作）。没有后台代理时保持原样，
+                // 让 textarea 自己吞掉按键。
+                state.bg_agent_selection = Some(0);
             } else if state.textarea.input(key) {
                 sync_input_from_textarea(state);
                 crate::ui::components::command_suggestions::on_input_changed(state);
@@ -2126,6 +2151,63 @@ pub async fn handle_key_event(
     }
 
     Ok(())
+}
+
+/// 后台代理选择器的按键处理（对标 background agent selector）。
+///
+/// 返回 `true` 表示按键已被选择器消费，调用方应直接结束本次事件处理。
+///
+/// 「光标停在哪一行」（`bg_agent_selection`）与「正在看谁的输出」（`viewing_agent_task_id`）
+/// 是分开的两件事：`Enter` 只切换后者，焦点留在原行，用户可以连着 ↑/↓ 逐个翻看；
+/// `Esc` 只收起选择器，不改变当前正在看的详情。
+fn handle_bg_agent_selector_key(state: &mut ChatState, key: KeyEvent) -> bool {
+    // 行数每帧都可能变（后台代理还在陆续启动），先按当前快照收敛焦点
+    let task_ids: Vec<String> = state
+        .background_agent_rows()
+        .iter()
+        .map(|info| info.task_id.clone())
+        .collect();
+    if task_ids.is_empty() {
+        state.bg_agent_selection = None;
+        return false;
+    }
+    let last_idx = task_ids.len(); // 索引 0 是 main 行，代理从 1 开始
+    let selected = state.bg_agent_selection.unwrap_or(0).min(last_idx);
+
+    match key.code {
+        KeyCode::Up => {
+            if selected == 0 {
+                // 已在 main 行再往上 → 焦点还给输入框
+                state.bg_agent_selection = None;
+            } else {
+                state.bg_agent_selection = Some(selected - 1);
+            }
+            true
+        }
+        KeyCode::Down => {
+            state.bg_agent_selection = Some((selected + 1).min(last_idx));
+            true
+        }
+        KeyCode::Enter => {
+            if selected == 0 {
+                state.exit_teammate_view();
+            } else {
+                let task_id = task_ids[selected - 1].clone();
+                if state.viewing_agent_task_id.as_deref() == Some(task_id.as_str()) {
+                    // 再按一次 Enter 收回主会话，跟参照实现的 toggle 语义一致
+                    state.exit_teammate_view();
+                } else {
+                    state.enter_teammate_view(&task_id);
+                }
+            }
+            true
+        }
+        KeyCode::Esc => {
+            state.bg_agent_selection = None;
+            true
+        }
+        _ => false,
+    }
 }
 
 async fn handle_overlay_input(
@@ -3032,5 +3114,98 @@ fn apply_vim_motion(state: &mut ChatState, motion: &crate::ui::vim::motions::Mot
                 .textarea
                 .move_cursor(tui_textarea::CursorMove::WordForward);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::state::store::AgentTaskInfo;
+
+    fn bg_task(id: &str) -> AgentTaskInfo {
+        AgentTaskInfo {
+            task_id: id.to_string(),
+            agent_type: "Explore".to_string(),
+            description: "研究 src/hooks 目录".to_string(),
+            status: crate::types::AgentTaskStatus::Running,
+            tool_use_count: 3,
+            tokens: 1200,
+            is_async: true,
+            is_resolved: false,
+            is_error: false,
+            last_tool_info: None,
+            name: None,
+            task_description: None,
+            started_at: Instant::now(),
+            finished_at: None,
+            sub_entries: Vec::new(),
+            entry_idx: 0,
+        }
+    }
+
+    fn press(state: &mut ChatState, code: KeyCode) -> bool {
+        let key = KeyEvent::new(code, KeyModifiers::NONE);
+        handle_bg_agent_selector_key(state, key)
+    }
+
+    /// ↑/↓ 在 main 行与各代理行之间移动；在 main 行继续 ↑ 把焦点交回输入框。
+    #[test]
+    fn selector_keys_move_focus_and_release_to_input() {
+        let mut state = ChatState::new();
+        state
+            .active_agent_tasks
+            .insert("a".to_string(), bg_task("a"));
+        state
+            .active_agent_tasks
+            .insert("b".to_string(), bg_task("b"));
+        state.bg_agent_selection = Some(0);
+
+        assert!(press(&mut state, KeyCode::Down));
+        assert_eq!(state.bg_agent_selection, Some(1));
+        assert!(press(&mut state, KeyCode::Down));
+        assert_eq!(state.bg_agent_selection, Some(2));
+        // 到底了不再往下
+        assert!(press(&mut state, KeyCode::Down));
+        assert_eq!(state.bg_agent_selection, Some(2));
+
+        for expected in [Some(1), Some(0), None] {
+            assert!(press(&mut state, KeyCode::Up));
+            assert_eq!(state.bg_agent_selection, expected);
+        }
+    }
+
+    /// Enter 在「看主会话」与「看某个代理」之间切换，且不移动焦点行；
+    /// Esc 只收起选择器，不改变正在看的详情。
+    #[test]
+    fn selector_enter_toggles_view_and_esc_keeps_it() {
+        let mut state = ChatState::new();
+        state
+            .active_agent_tasks
+            .insert("a".to_string(), bg_task("a"));
+        state.bg_agent_selection = Some(1);
+
+        assert!(press(&mut state, KeyCode::Enter));
+        assert_eq!(state.viewing_agent_task_id.as_deref(), Some("a"));
+        assert_eq!(state.bg_agent_selection, Some(1));
+
+        // 同一行再按 Enter → 收回主会话
+        assert!(press(&mut state, KeyCode::Enter));
+        assert!(state.viewing_agent_task_id.is_none());
+
+        // 进详情后按 Esc：选择器收起，详情保留（详情自己的 Esc 在主 Esc 分支里处理）
+        assert!(press(&mut state, KeyCode::Enter));
+        assert_eq!(state.viewing_agent_task_id.as_deref(), Some("a"));
+        assert!(press(&mut state, KeyCode::Esc));
+        assert!(state.bg_agent_selection.is_none());
+        assert_eq!(state.viewing_agent_task_id.as_deref(), Some("a"));
+    }
+
+    /// 没有后台代理时选择器不该抢键，并顺手把残留焦点清掉。
+    #[test]
+    fn selector_yields_when_no_background_agents() {
+        let mut state = ChatState::new();
+        state.bg_agent_selection = Some(0);
+        assert!(!press(&mut state, KeyCode::Down));
+        assert!(state.bg_agent_selection.is_none());
     }
 }

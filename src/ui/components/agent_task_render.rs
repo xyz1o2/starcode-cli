@@ -4,11 +4,12 @@
 /// 1. 精简模式 (Condensed): 一行汇总 "In progress... · N tools · tokens"
 /// 2. 分组模式 (Grouped): 最后 N 条进度 + "+N more" 提示
 /// 3. Verbose/Transcript: 完整子消息列表
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::types::{AgentTaskStatus, ChatEntry};
 use crate::ui::state::ChatState;
+use crate::ui::themes::Theme;
 
 /// 分组模式下最多显示的进度消息数（对标 Claude Code 的 MAX_PROGRESS_MESSAGES_TO_SHOW = 3）
 const MAX_PROGRESS_MESSAGES_TO_SHOW: usize = 3;
@@ -27,9 +28,10 @@ pub fn render_agent_task_entry(
 ) -> Vec<Vec<Line<'static>>> {
     let mut blocks = Vec::new();
     let is_transcript = state.is_transcript_mode;
+    let theme = state.theme_manager.current();
 
     // ── 1. 头部汇总行 ──
-    let header = render_agent_header(entry, area_width);
+    let header = render_agent_header(entry, area_width, theme);
     blocks.push(header);
 
     // ── 2. 子消息列表 ──
@@ -50,7 +52,7 @@ pub fn render_agent_task_entry(
         // 初始化中
         blocks.push(vec![Line::from(Span::styled(
             "      Initializing…",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.inactive),
         ))]);
     } else {
         // 分组模式：显示最后 N 条 + "+N more" 提示
@@ -70,7 +72,7 @@ pub fn render_agent_task_entry(
         if hidden_count > 0 {
             blocks.push(vec![Line::from(Span::styled(
                 format!("      +{} more tool {}", hidden_count, if hidden_count == 1 { "use" } else { "uses" }),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.inactive),
             ))]);
         }
     }
@@ -79,7 +81,7 @@ pub fn render_agent_task_entry(
     if !is_transcript && !is_async {
         blocks.push(vec![Line::from(Span::styled(
             "      (ctrl+o to expand)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.inactive),
         ))]);
     }
 
@@ -93,6 +95,7 @@ pub fn render_agent_task_entry(
 fn render_agent_header(
     entry: &ChatEntry,
     area_width: u16,
+    theme: &Theme,
 ) -> Vec<Line<'static>> {
     let agent_type = entry.agent_type.as_deref().unwrap_or("agent");
     let description = entry.agent_description.as_deref().unwrap_or("");
@@ -107,15 +110,15 @@ fn render_agent_header(
     // 树形字符（单 Agent 用 ├─）
     spans.push(Span::styled(
         "├─ ",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.inactive),
     ));
 
     // Agent 类型（粗体，带颜色）
     let type_color = match status {
-        AgentTaskStatus::Running => Color::Yellow,
-        AgentTaskStatus::Completed => Color::Green,
-        AgentTaskStatus::Failed | AgentTaskStatus::Rejected => Color::Red,
-        AgentTaskStatus::Background => Color::DarkGray,
+        AgentTaskStatus::Running => theme.warning,
+        AgentTaskStatus::Completed => theme.success,
+        AgentTaskStatus::Failed | AgentTaskStatus::Rejected => theme.error,
+        AgentTaskStatus::Background => theme.inactive,
     };
     spans.push(Span::styled(
         display_name.to_string(),
@@ -127,14 +130,9 @@ fn render_agent_header(
     // 描述（灰色括号）
     if !description.is_empty() {
         let max_desc_width = (area_width as usize).saturating_sub(40);
-        let truncated_desc = if description.len() > max_desc_width {
-            format!(" ({}…)", &description[..max_desc_width.saturating_sub(1)])
-        } else {
-            format!(" ({})", description)
-        };
         spans.push(Span::styled(
-            truncated_desc,
-            Style::default().fg(Color::DarkGray),
+            format!(" ({})", truncate_str(description, max_desc_width)),
+            Style::default().fg(theme.inactive),
         ));
     }
 
@@ -142,24 +140,24 @@ fn render_agent_header(
     if tool_count > 0 || tokens > 0 {
         spans.push(Span::styled(
             " · ".to_string(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.inactive),
         ));
         if tool_count > 0 {
             spans.push(Span::styled(
                 format!("{} tool {}", tool_count, if tool_count == 1 { "use" } else { "uses" }),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.inactive),
             ));
         }
         if tokens > 0 {
             if tool_count > 0 {
                 spans.push(Span::styled(
                     " · ".to_string(),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.inactive),
                 ));
             }
             spans.push(Span::styled(
                 format_tokens(tokens),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.inactive),
             ));
         }
     }
@@ -172,6 +170,7 @@ fn render_agent_header(
 /// 对标 Claude Code 的 Done 格式:
 /// `│  ⎿  Done (N tool uses · Nk tokens · Xs)`
 fn render_done_line(state: &ChatState, entry: &ChatEntry) -> Vec<Line<'static>> {
+    let theme = state.theme_manager.current();
     let tool_count = entry.agent_tool_use_count.unwrap_or(0);
     let tokens = entry.agent_tokens.unwrap_or(0);
     let status = entry
@@ -181,18 +180,18 @@ fn render_done_line(state: &ChatState, entry: &ChatEntry) -> Vec<Line<'static>> 
 
     let (icon, color, label) = match status {
         // 用户拒绝授权（对标 renderToolUseRejectedMessage）
-        AgentTaskStatus::Rejected => ("✗", Color::Red, "Rejected"),
-        AgentTaskStatus::Failed => ("✗", Color::Red, "Failed"),
+        AgentTaskStatus::Rejected => ("✗", theme.error, "Rejected"),
+        AgentTaskStatus::Failed => ("✗", theme.error, "Failed"),
         // 后台 agent 已交回控制权，不算"完成"
-        AgentTaskStatus::Background => ("●", Color::DarkGray, "Running in the background"),
-        _ if entry.agent_is_error.unwrap_or(false) => ("✗", Color::Red, "Failed"),
-        _ => ("✓", Color::Green, "Done"),
+        AgentTaskStatus::Background => ("●", theme.inactive, "Running in the background"),
+        _ if entry.agent_is_error.unwrap_or(false) => ("✗", theme.error, "Failed"),
+        _ => ("✓", theme.success, "Done"),
     };
 
     let mut spans = vec![
         // 树形前缀
-        Span::styled("│  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("⎿  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("│  ", Style::default().fg(theme.inactive)),
+        Span::styled("⎿  ", Style::default().fg(theme.inactive)),
         // 状态图标和标签
         Span::styled(format!("{} ", icon), Style::default().fg(color)),
         Span::styled(label.to_string(), Style::default().fg(color)),
@@ -219,12 +218,12 @@ fn render_done_line(state: &ChatState, entry: &ChatEntry) -> Vec<Line<'static>> 
         stats.push(super::agent_group_render::format_duration(info.elapsed()));
     }
     if !stats.is_empty() {
-        spans.push(Span::styled(" (", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(" (", Style::default().fg(theme.inactive)));
         spans.push(Span::styled(
             stats.join(" · "),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.inactive),
         ));
-        spans.push(Span::styled(")", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(")", Style::default().fg(theme.inactive)));
     }
 
     vec![Line::from(spans)]
@@ -241,12 +240,13 @@ fn render_sub_entry_condensed(
 ) -> Vec<Line<'static>> {
     use crate::types::ChatEntryType;
 
+    let theme = state.theme_manager.current();
     let inner_width = (area_width as usize).saturating_sub(8); // 缩进 + 树形符
 
     let mut spans = vec![
         // 树形前缀
-        Span::styled("│  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("⎿  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("│  ", Style::default().fg(theme.inactive)),
+        Span::styled("⎿  ", Style::default().fg(theme.inactive)),
     ];
 
     match entry.entry_type {
@@ -265,12 +265,12 @@ fn render_sub_entry_condensed(
             );
             spans.push(Span::styled(
                 tool_name.to_string(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
             ));
             if !args_preview.is_empty() {
                 spans.push(Span::styled(
                     format!(": {}", args_preview),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.inactive),
                 ));
             }
         }
@@ -281,25 +281,16 @@ fn render_sub_entry_condensed(
                 .map(|tr| tr.success)
                 .unwrap_or(true);
             let content_preview = truncate_str(&entry.content, inner_width.saturating_sub(2));
-            if success {
-                spans.push(Span::styled(
-                    content_preview,
-                    Style::default().fg(Color::Green),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    content_preview,
-                    Style::default().fg(Color::Red),
-                ));
-            }
+            let color = if success { theme.success } else { theme.error };
+            spans.push(Span::styled(content_preview, Style::default().fg(color)));
         }
         ChatEntryType::Assistant => {
             let preview = truncate_str(&entry.content, inner_width.saturating_sub(2));
-            spans.push(Span::styled(preview, Style::default().fg(Color::White)));
+            spans.push(Span::styled(preview, Style::default().fg(theme.foreground)));
         }
         _ => {
             let preview = truncate_str(&entry.content, inner_width.saturating_sub(2));
-            spans.push(Span::styled(preview, Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(preview, Style::default().fg(theme.inactive)));
         }
     };
 
@@ -335,6 +326,7 @@ fn render_sub_entry_verbose(
 ) -> Vec<Line<'static>> {
     use crate::types::ChatEntryType;
 
+    let theme = state.theme_manager.current();
     let inner_width = (area_width as usize).saturating_sub(4);
 
     match entry.entry_type {
@@ -353,12 +345,12 @@ fn render_sub_entry_verbose(
             let mut lines = vec![Line::from(vec![
                 Span::styled(
                     "  ● ",
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(theme.info),
                 ),
                 Span::styled(
                     tool_name.to_string(),
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(theme.info)
                         .add_modifier(Modifier::BOLD),
                 ),
             ])];
@@ -369,13 +361,13 @@ fn render_sub_entry_verbose(
                 let truncated = truncate_str(arg_line, inner_width.saturating_sub(4));
                 lines.push(Line::from(vec![
                     Span::styled("    ", Style::default()),
-                    Span::styled(truncated, Style::default().fg(Color::DarkGray)),
+                    Span::styled(truncated, Style::default().fg(theme.inactive)),
                 ]));
             }
             if args.lines().count() > 3 {
                 lines.push(Line::from(Span::styled(
                     format!("    ... ({} more lines)", args.lines().count() - 3),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.inactive),
                 )));
             }
 
@@ -387,7 +379,7 @@ fn render_sub_entry_verbose(
                 .as_ref()
                 .map(|tr| tr.success)
                 .unwrap_or(true);
-            let icon_color = if success { Color::Green } else { Color::Red };
+            let icon_color = if success { theme.success } else { theme.error };
             let content = &entry.content;
 
             let mut lines = Vec::new();
@@ -396,19 +388,19 @@ fn render_sub_entry_verbose(
                 if i == 0 {
                     lines.push(Line::from(vec![
                         Span::styled("  ⎿ ", Style::default().fg(icon_color)),
-                        Span::styled(truncated, Style::default().fg(Color::White)),
+                        Span::styled(truncated, Style::default().fg(theme.foreground)),
                     ]));
                 } else {
                     lines.push(Line::from(vec![
                         Span::styled("    ", Style::default()),
-                        Span::styled(truncated, Style::default().fg(Color::White)),
+                        Span::styled(truncated, Style::default().fg(theme.foreground)),
                     ]));
                 }
             }
             if content.lines().count() > 10 {
                 lines.push(Line::from(Span::styled(
                     format!("    ... ({} more lines)", content.lines().count() - 10),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.inactive),
                 )));
             }
             lines
@@ -431,7 +423,7 @@ fn render_sub_entry_verbose(
             for md_line in md_lines.into_iter().take(50) {
                 // 最多显示 50 行
                 let mut prefixed_spans = vec![
-                    Span::styled("  ✦ ", Style::default().fg(Color::Blue)),
+                    Span::styled("  ✦ ", Style::default().fg(theme.agent_blue)),
                 ];
                 // 将原始 spans 添加缩进
                 for span in md_line.spans {
@@ -448,7 +440,7 @@ fn render_sub_entry_verbose(
             } else {
                 vec![Line::from(vec![
                     Span::styled("    ", Style::default()),
-                    Span::styled(content, Style::default().fg(Color::White)),
+                    Span::styled(content, Style::default().fg(theme.foreground)),
                 ])]
             }
         }
@@ -466,13 +458,37 @@ fn format_tokens(count: u32) -> String {
     }
 }
 
-/// 截断字符串
+/// 截断字符串到 `max_len` 个终端显示单元。
+///
+/// 原实现是 `&s[..max_len]` 这类**字节**切片。子代理的 description 与工具参数都由
+/// 模型生成，中文/emoji 一律会把切点落在多字节字符中间，直接 panic 掉整个 TUI。
+/// 现在统一走 CJK 宽度感知的公共实现，顺带修正宽字符的对齐。
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else if max_len > 3 {
-        format!("{}...", &s[..max_len - 3])
-    } else {
-        s[..max_len].to_string()
+    crate::ui::utils::render::truncate_to_display_width(s, max_len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归：中文描述 + 任意窄宽度都不能 panic（原字节切片实现必崩）
+    #[test]
+    fn truncate_str_survives_multibyte_at_every_width() {
+        let cjk = "研究 src/hooks 目录下的组件实现";
+        for width in 0..=cjk.len() + 4 {
+            let out = truncate_str(cjk, width);
+            // 只要不 panic 即通过；顺带确认输出仍是合法 UTF-8 的前缀语义
+            assert!(out.chars().count() <= cjk.chars().count() + 3);
+        }
+        let emoji = "✅ done 🎉🎉🎉";
+        for width in 0..=emoji.len() + 4 {
+            let _ = truncate_str(emoji, width);
+        }
+    }
+
+    #[test]
+    fn truncate_str_keeps_short_input_intact() {
+        assert_eq!(truncate_str("abc", 10), "abc");
+        assert_eq!(truncate_str("中文", 10), "中文");
     }
 }

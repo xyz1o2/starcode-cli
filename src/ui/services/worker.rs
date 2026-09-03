@@ -42,6 +42,33 @@ pub async fn agent_worker(
 
     crate::runtime::hooks::run_session_start(worker_cwd.as_deref()).await;
 
+    // ── 后台代理进度的常驻转发 ──
+    // 会话 sink 只活在一个 turn 内（接收端是那条流的一部分），而后台代理会跑过
+    // turn 边界。这里留一条与进程同寿的通道：主循环空闲时，后台代理的进度/终态
+    // 依旧能变成 StreamMessage 送到 UI，选择器才不会一直显示 Running。
+    {
+        let (bg_tx, mut bg_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::types::StreamingChunk>();
+        crate::agent::subagent::progress::set_bg_progress_sink(bg_tx);
+        let fwd_tx = tx.clone();
+        tokio::spawn(async move {
+            while let Some(chunk) = bg_rx.recv().await {
+                // 只转发 Agent 任务更新：其余类型都属于某个具体 turn 的流，
+                // 用一个假的 message_id 混进 UI 只会错位。
+                if !matches!(
+                    chunk.chunk_type,
+                    crate::types::StreamingChunkType::AgentTaskUpdate
+                ) {
+                    continue;
+                }
+                if fwd_tx.is_closed() {
+                    return;
+                }
+                crate::runtime::stream_chunks::handle_stream_chunk(&fwd_tx, 0, chunk).await;
+            }
+        });
+    }
+
     append_debug_log_line("[Worker] Started, entering main loop");
 
     loop {

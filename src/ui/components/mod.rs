@@ -1,6 +1,7 @@
 pub mod agent_group_render;
 pub mod agent_progress;
 pub mod agent_task_render;
+pub mod bg_agent_selector;
 pub mod chat_history;
 pub mod chat_input;
 pub mod collapsed_group;
@@ -15,9 +16,7 @@ pub mod input_modal;
 pub mod log_selector;
 pub mod message_render;
 pub mod modal;
-pub mod model_picker;
 pub mod palette;
-pub mod permission_dialog;
 pub mod status_line;
 pub mod status_modal;
 pub mod task_panel;

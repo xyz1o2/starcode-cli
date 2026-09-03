@@ -1147,10 +1147,19 @@ fn handle_agent_task_update(state: &mut ChatState, args: AgentTaskUpdateArgs) {
     let started_at = prior
         .map(|i| i.started_at)
         .unwrap_or_else(std::time::Instant::now);
-    // 首次进入 resolved 时冻结耗时，之后不再随渲染增长
+    // 首次进入**终态**时冻结耗时，之后不再随渲染增长。
+    // `Background` 不算终态 —— 它只表示 Agent 工具交回了控制权，任务还在后台跑；
+    // 早先按 `is_resolved` 判断会在启动那一刻就把 finished_at 钉住，
+    // 于是后台代理的耗时永远显示 0s。
+    let is_terminal = matches!(
+        args.status,
+        crate::types::AgentTaskStatus::Completed
+            | crate::types::AgentTaskStatus::Failed
+            | crate::types::AgentTaskStatus::Rejected
+    );
     let finished_at = prior
         .and_then(|i| i.finished_at)
-        .or_else(|| args.is_resolved.then(std::time::Instant::now));
+        .or_else(|| is_terminal.then(std::time::Instant::now));
     let mut sub_entries = prior.map(|i| i.sub_entries.clone()).unwrap_or_default();
     sub_entries.extend(args.new_sub_entries.iter().cloned());
     // 进度 chunk 未携带这些字段时沿用旧值，避免状态行闪回 "Initializing…"

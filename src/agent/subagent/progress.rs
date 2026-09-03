@@ -34,13 +34,44 @@ pub fn set_ui_sink(tx: UnboundedSender<StreamingChunk>) {
     }
 }
 
+/// 跨 turn 常驻的兜底 sink（后台代理专用）。
+///
+/// [`UI_SINK`] 里那个发送端属于**当前 turn** 的流：turn 一结束，接收端就随流被丢弃，
+/// 之后 `send` 全部失败。后台代理却会活过 turn 边界——它跑完时主循环往往正空闲，
+/// 终态就此丢失，选择器只能一直显示 Running。所以再留一个由 worker 常驻持有的槽位，
+/// 会话 sink 发不出去时走这里。
+static BG_SINK: OnceLock<RwLock<Option<UnboundedSender<StreamingChunk>>>> = OnceLock::new();
+
+fn bg_sink() -> &'static RwLock<Option<UnboundedSender<StreamingChunk>>> {
+    BG_SINK.get_or_init(|| RwLock::new(None))
+}
+
+/// 注册常驻兜底 sink（由 `agent_worker` 在启动时调用，生命周期与进程同长）。
+pub fn set_bg_progress_sink(tx: UnboundedSender<StreamingChunk>) {
+    if let Ok(mut slot) = bg_sink().write() {
+        *slot = Some(tx);
+    }
+}
+
 /// 向 UI 推送一个 chunk。没有活跃 UI（headless / 子代理内部）时静默丢弃。
+///
+/// 优先走当前会话的 sink —— turn 进行中时，chunk 与文本 delta 同序抵达；
+/// 会话已结束（接收端被丢弃）则退到常驻 sink，见 [`BG_SINK`]。
 pub fn emit_to_ui(chunk: StreamingChunk) {
-    let Ok(slot) = ui_sink().read() else {
-        return;
-    };
-    if let Some(tx) = slot.as_ref() {
-        let _ = tx.send(chunk);
+    let mut pending = chunk;
+    if let Ok(slot) = ui_sink().read() {
+        if let Some(tx) = slot.as_ref() {
+            match tx.send(pending) {
+                Ok(()) => return,
+                // 接收端已随 turn 结束被丢弃，把 chunk 取回来交给兜底 sink
+                Err(e) => pending = e.0,
+            }
+        }
+    }
+    if let Ok(slot) = bg_sink().read() {
+        if let Some(tx) = slot.as_ref() {
+            let _ = tx.send(pending);
+        }
     }
 }
 
