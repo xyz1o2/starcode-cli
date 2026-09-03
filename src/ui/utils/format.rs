@@ -108,55 +108,10 @@ pub fn tool_display_name(name: &str) -> String {
         "Edit" | "str_replace_editor" | "edit_file" | "smart_edit" => "edit".into(),
         "create_file" | "Write" => "write".into(),
         "complete_task" => "done".into(),
-        "TodoWrite" => "tasks".into(),
+        "TodoWrite" => "Update Todos".into(),
         "enter_plan_mode" | "exit_plan_mode" => "plan".into(),
         "ask_user" | "user_prompt" => "ask".into(),
         _ => name.to_string(),
-    }
-}
-
-pub fn canonical_task_action_from_value(args: &serde_json::Value) -> &'static str {
-    let raw_action = args
-        .get("action")
-        .and_then(|value| value.as_str())
-        .or_else(|| {
-            args.get("operation").and_then(|operation| {
-                operation.as_str().or_else(|| {
-                    operation
-                        .get("action")
-                        .or_else(|| operation.get("operation"))
-                        .or_else(|| operation.get("type"))
-                        .or_else(|| operation.get("op"))
-                        .or_else(|| operation.get("command"))
-                        .and_then(|value| value.as_str())
-                })
-            })
-        })
-        .unwrap_or("list")
-        .trim()
-        .to_ascii_lowercase();
-
-    match raw_action.as_str() {
-        "add" | "create" | "new" | "add_task" | "create_task" => "add",
-        "update" | "set" | "update_task" => "update",
-        "delete" | "remove" | "delete_task" => "delete",
-        "move" | "reorder" => "move",
-        "execute" | "run" => "execute",
-        "archive" => "archive",
-        "list" | "show" | "view" | "unknown" | "" => "list",
-        _ => "list",
-    }
-}
-
-pub fn task_action_display_label(action: &str) -> &'static str {
-    match action {
-        "add" => i18n::t("ui.task.add", "Add task", "Add task").leak(),
-        "update" => i18n::t("ui.task.update", "Update task", "Update task").leak(),
-        "delete" => i18n::t("ui.task.delete", "Delete task", "Delete task").leak(),
-        "move" => i18n::t("ui.task.move", "Move task", "Move task").leak(),
-        "execute" => i18n::t("ui.task.execute", "Execute task", "Execute task").leak(),
-        "archive" => i18n::t("ui.task.archive", "Archive task", "Archive task").leak(),
-        _ => i18n::t("ui.task.list", "List tasks", "List tasks").leak(),
     }
 }
 
@@ -186,8 +141,9 @@ fn tool_call_brief(tc: &StarToolCall) -> String {
         |k: &str| -> Option<u64> { v.as_ref().and_then(|vv| vv.get(k)).and_then(|x| x.as_u64()) };
 
     match name {
+        // 对标 Claude Code：TodoWrite 的调用行不带参数（renderToolUseMessage 返回 null）
         "TodoWrite" => {
-            return tool_display_name("tasks").to_string();
+            return String::new();
         }
         "Edit" | "str_replace_editor" => {
             if let Some(p) = get_str("file_path").or_else(|| get_str("path")) {

@@ -131,6 +131,7 @@ pub(crate) fn render_tool_entry_blocks(
                     | "str_replace_editor"
                     | "smart_edit"
                     | "Write"
+                    | "TodoWrite"
             );
 
             let default_expanded = matches!(entry.entry_type, ChatEntryType::ToolCall)
@@ -177,8 +178,12 @@ pub(crate) fn render_tool_entry_blocks(
             let (args_str, _extra_info) = build_tool_argument_display(tc, state.ui_verbose);
             let tool_name = crate::ui::utils::format::tool_display_name(tc.function.name.as_str());
 
-            // 构建完整行：工具名(参数)
-            let full_line = format!("{}({})", tool_name, args_str);
+            // 构建完整行：工具名(参数)；参数为空时不带括号（如 TodoWrite → "Update Todos"）
+            let full_line = if args_str.trim().is_empty() {
+                tool_name.clone()
+            } else {
+                format!("{}({})", tool_name, args_str)
+            };
 
             // 按终端宽度截断（对标 Claude Code wrap="truncate-end"）
             let display_args = if !state.ui_verbose {
@@ -485,15 +490,11 @@ fn build_tool_argument_display(
             }
         }
         "TodoWrite" => {
-            let action = crate::ui::utils::format::canonical_task_action_from_value(&args);
-            let action_label = crate::ui::utils::format::task_action_display_label(action);
+            // 对标 CC：调用行只显示工具名，参数以 "N items" 摘要挂在 extra_info
             if let Some(todos) = obj.get("todos").and_then(|v| v.as_array()) {
-                extra_info.push(format!("{} tasks", todos.len()));
+                extra_info.push(format!("{} items", todos.len()));
             }
-            if let Some(updates) = obj.get("updates").and_then(|v| v.as_array()) {
-                extra_info.push(format!("{} updates", updates.len()));
-            }
-            action_label.to_string()
+            String::new()
         }
         "complete_task" => {
             let first = get_str(&["result"])
@@ -522,6 +523,72 @@ fn build_tool_argument_display(
     (summary, extra_info)
 }
 
+/// TodoWrite 结果块：把 args 里的 todos 渲染成清单（对标 Claude Code TaskListV2::TaskItem）。
+/// completed `✔` + 删除线暗色；in_progress `▪` 高亮加粗（优先显示 activeForm）；
+/// pending `▫` 默认色。args 解析不出条目时返回空，由调用方回退到通用渲染。
+fn render_todo_checklist(
+    tc: &crate::types::StarToolCall,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let todos = serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+        .ok()
+        .and_then(|v| v.get("todos").and_then(|t| t.as_array()).cloned())
+        .unwrap_or_default();
+
+    let mut lines = Vec::with_capacity(todos.len());
+    for todo in &todos {
+        let status = todo
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("pending");
+        let content = todo.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        let active_form = todo
+            .get("activeForm")
+            .or_else(|| todo.get("active_form"))
+            .and_then(|a| a.as_str())
+            .filter(|s| !s.trim().is_empty());
+
+        let (icon, icon_style, text_style) = match status {
+            "completed" => (
+                "✔",
+                Style::default().fg(theme.success),
+                Style::default()
+                    .fg(theme.inactive)
+                    .add_modifier(Modifier::CROSSED_OUT | Modifier::DIM),
+            ),
+            "in_progress" => (
+                "▪",
+                Style::default().fg(theme.primary),
+                Style::default()
+                    .fg(theme.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            _ => (
+                "▫",
+                Style::default().fg(theme.secondary),
+                Style::default().fg(theme.foreground),
+            ),
+        };
+
+        // 进行中的行显示 activeForm（"Running tests"），其余显示 content
+        let label = if status == "in_progress" {
+            active_form.unwrap_or(content)
+        } else {
+            content
+        };
+        // 续行有 2 空格缩进 + 图标 + 空格，文本宽度按此收敛
+        let label =
+            crate::ui::utils::render::truncate_to_display_width(label, width.saturating_sub(4));
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(format!("{} ", icon), icon_style),
+            Span::styled(label.to_string(), text_style),
+        ]));
+    }
+    lines
+}
+
 fn render_rich_tool_content(
     entry: &crate::types::ChatEntry,
     tc: &crate::types::StarToolCall,
@@ -530,6 +597,15 @@ fn render_rich_tool_content(
     _prev_is_confirmation: bool,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
+    // ===== TodoWrite：结果块直接渲染 todos 清单（对标 Claude Code TaskListV2） =====
+    if tc.function.name == "TodoWrite" {
+        if let Some(tr) = &entry.tool_result {
+            if tr.success {
+                return render_todo_checklist(tc, tool_inner_width, theme);
+            }
+        }
+    }
+
     let mut lines = Vec::new();
 
     // 此函数只处理 ToolResult
@@ -828,5 +904,77 @@ fn render_tool_result_text(
             width,
             true,
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn todo_call(args: &str) -> crate::types::StarToolCall {
+        crate::types::StarToolCall {
+            id: "t1".to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: "TodoWrite".to_string(),
+                arguments: args.to_string(),
+            },
+        }
+    }
+
+    fn theme() -> Theme {
+        // 测试只取色值字段，用内置暗色主题即可
+        crate::ui::themes::theme::Theme::default_dark()
+    }
+
+    /// 三种状态按 CC TaskListV2 渲染：pending ▫、in_progress ▪ + activeForm、
+    /// completed ✔ + 删除线
+    #[test]
+    fn todo_checklist_renders_cc_styling() {
+        let tc = todo_call(
+            r#"{"todos":[
+                {"content":"安装 recharts 图表库","status":"pending","activeForm":"安装中"},
+                {"content":"跑回测","status":"in_progress","activeForm":"跑回测中"},
+                {"content":"接入真实历史数据","status":"completed","activeForm":"接入中"}
+            ]}"#,
+        );
+        let lines = render_todo_checklist(&tc, 80, &theme());
+        assert_eq!(lines.len(), 3);
+
+        // pending：▫ + content（祈使句）
+        assert_eq!(lines[0].spans[1].content, "▫ ");
+        assert_eq!(lines[0].spans[2].content, "安装 recharts 图表库");
+
+        // in_progress：▪ + activeForm（进行时）
+        assert_eq!(lines[1].spans[1].content, "▪ ");
+        assert_eq!(lines[1].spans[2].content, "跑回测中");
+
+        // completed：✔ + 删除线
+        assert_eq!(lines[2].spans[1].content, "✔ ");
+        assert!(lines[2].spans[2]
+            .style
+            .add_modifier
+            .contains(Modifier::CROSSED_OUT));
+    }
+
+    /// 窄宽度下中文标签被截断但不能 panic
+    #[test]
+    fn todo_checklist_truncates_cjk_at_narrow_width() {
+        let tc = todo_call(
+            r#"{"todos":[{"content":"安装 recharts 图表库到前端项目","status":"pending","activeForm":"安装中"}]}"#,
+        );
+        for width in 0..=30usize {
+            let lines = render_todo_checklist(&tc, width, &theme());
+            assert_eq!(lines.len(), 1, "width = {width}");
+        }
+    }
+
+    /// 解析不出 todos（如空参数）时返回空，由调用方回退到通用结果渲染
+    #[test]
+    fn todo_checklist_without_todos_yields_empty() {
+        let tc = todo_call(r#"{"todos":[]}"#);
+        assert!(render_todo_checklist(&tc, 80, &theme()).is_empty());
+        let tc = todo_call("not json");
+        assert!(render_todo_checklist(&tc, 80, &theme()).is_empty());
     }
 }

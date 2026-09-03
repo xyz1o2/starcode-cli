@@ -653,12 +653,13 @@ impl TaskPanel {
                 return;
             }
 
-            let marker = if is_last { "└ " } else { "├ " };
-            let current_prefix = format!("{}{}", prefix, marker);
+            // 对标 Claude Code TaskListV2：不用 ├/└ 树线，子任务按层级缩进 2 空格
+            let _ = is_last;
+            let current_prefix = prefix.to_string();
 
             result.push((node, current_prefix));
 
-            let child_prefix = format!("{}{}", prefix, if is_last { "  " } else { "│ " });
+            let child_prefix = format!("{}  ", prefix);
 
             // We need to know which children are actually going to be shown to determine is_last for them
             // This is getting complicated for tree lines.
@@ -740,49 +741,71 @@ pub fn render_task_panel_mut(f: &mut Frame, area: Rect, panel: &mut TaskPanel, t
         flat_tasks
             .iter()
             .map(|(node, prefix)| {
-                let status_icon = match node.status {
-                    TaskStatus::Pending => "☐",
-                    TaskStatus::InProgress => "▶",
-                    TaskStatus::Completed => "✓",
-                    TaskStatus::Blocked => "!",
-                    TaskStatus::Skipped => "-",
+                // 对标 Claude Code TaskListV2::getTaskIcon —— figures.tick / squareSmallFilled / squareSmall
+                let (status_icon, icon_color) = match node.status {
+                    TaskStatus::Pending => ("▫", None),
+                    TaskStatus::InProgress => ("▪", Some(theme.primary)),
+                    TaskStatus::Completed => ("✔", Some(theme.success)),
+                    TaskStatus::Blocked => ("▫", Some(theme.error)),
+                    TaskStatus::Skipped => ("▫", Some(theme.inactive)),
                 };
 
-                let status_style = match node.status {
-                    TaskStatus::Pending => Style::default().fg(theme.secondary),
+                // 对标 TaskItem 文本样式：完成 = 删除线 + 暗色；进行中 = 加粗高亮；阻塞/跳过 = 暗色
+                let mut title_style = match node.status {
+                    TaskStatus::Pending => Style::default(),
                     TaskStatus::InProgress => Style::default()
-                        .fg(theme.warning)
+                        .fg(theme.primary)
                         .add_modifier(Modifier::BOLD),
-                    TaskStatus::Completed => Style::default().fg(theme.success),
-                    TaskStatus::Blocked => Style::default().fg(theme.error),
-                    TaskStatus::Skipped => Style::default().fg(theme.inactive),
+                    TaskStatus::Completed => Style::default()
+                        .fg(theme.inactive)
+                        .add_modifier(Modifier::CROSSED_OUT),
+                    TaskStatus::Blocked | TaskStatus::Skipped => {
+                        Style::default().fg(theme.inactive)
+                    }
                 };
 
                 // If high priority, show marker
-                let title_style = if node.priority == TaskPriority::High {
-                    status_style.add_modifier(Modifier::BOLD)
-                } else {
-                    status_style
-                };
+                if node.priority == TaskPriority::High {
+                    title_style = title_style.add_modifier(Modifier::BOLD);
+                }
 
-                // 对标 Claude Code：进行中的行显示 activeForm（"Running tests"），
-                // 其余显示 content（祈使句）。没有 active_form 时回退到 title。
+                // 进行中的行显示 activeForm（"Running tests"），其余显示 content（祈使句）。
+                // 没有 active_form 时回退到 title。
                 let label = if node.status == TaskStatus::InProgress {
                     node.active_form.as_deref().unwrap_or(&node.title)
                 } else {
                     &node.title
                 };
-                let content = format!("{}{} {}", prefix, status_icon, label);
 
-                ListItem::new(Line::from(Span::styled(content, title_style)))
+                let icon_style = match icon_color {
+                    Some(color) => Style::default().fg(color),
+                    None => Style::default(),
+                };
+
+                ListItem::new(Line::from(vec![
+                    Span::styled(prefix.clone(), Style::default()),
+                    Span::styled(format!("{} ", status_icon), icon_style),
+                    Span::styled(label.to_string(), title_style),
+                ]))
             })
             .collect()
     };
 
+    // 对标 Claude Code TaskListV2 standalone 头："<N> tasks (<K> done, <M> in progress, <P> open)"
     let title = if total == 0 {
         " Tasks ".to_string()
     } else {
-        format!(" Tasks {}/{} ", completed, total)
+        let mut parts = vec![format!("{} done", completed)];
+        if in_progress > 0 {
+            parts.push(format!("{} in progress", in_progress));
+        }
+        parts.push(format!("{} open", pending));
+        format!(
+            " {} task{} ({}) ",
+            total,
+            if total == 1 { "" } else { "s" },
+            parts.join(", ")
+        )
     };
 
     let block = Block::default()

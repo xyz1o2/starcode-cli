@@ -556,7 +556,26 @@ pub fn processing_spinner_line(state: &ChatState) -> Vec<ratatui::text::Line<'st
         SPINNER_FRAMES_REV[cycle_frame - SPINNER_FRAMES.len()]
     };
 
-    let verb = SPINNER_VERBS[(elapsed as usize / 5) % SPINNER_VERBS.len()];
+    // 对标 Claude Code Spinner：动词优先取 in_progress 任务的 activeForm
+    // （"Running tests…"），没有进行中的 todo 时才轮换随机动词。
+    let todo_verb: Option<String> = state
+        .task_panel
+        .task_manager
+        .graph
+        .nodes
+        .values()
+        .filter(|n| n.status == crate::core::tasks::models::TaskStatus::InProgress)
+        .min_by_key(|n| n.id.clone())
+        .and_then(|n| {
+            n.active_form
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| Some(n.title.clone()))
+        });
+    let verb: &str = match todo_verb {
+        Some(ref v) => v,
+        None => SPINNER_VERBS[(elapsed as usize / 5) % SPINNER_VERBS.len()],
+    };
     let e_color = elapsed_color(elapsed);
 
     // Stall detection with smooth transition
@@ -667,10 +686,7 @@ pub fn processing_spinner_line(state: &ChatState) -> Vec<ratatui::text::Line<'st
         // 显示 token 用量（紧凑模式）
         let token_display = match &state.token_usage {
             Some(u) if u.prompt_tokens > 0 => {
-                format!(
-                    " · {} tokens",
-                    format_token_count(u.prompt_tokens)
-                )
+                format!(" · {} tokens", format_token_count(u.prompt_tokens))
             }
             _ => format!(" · ↓ {}", format_token_count(state.token_count)),
         };
@@ -944,12 +960,7 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
 
                 let token_label = if usage.completion_tokens > 0 {
                     // 显示上下文使用率 + 缓存命中（如果有）
-                    let base = format!(
-                        "{}/{} ({:.1}%)",
-                        format_tok(tokens),
-                        format_tok(ctx),
-                        pct
-                    );
+                    let base = format!("{}/{} ({:.1}%)", format_tok(tokens), format_tok(ctx), pct);
                     // 如果有缓存数据，附加缓存命中率
                     if usage.cache_read_tokens > 0 && tokens > 0 {
                         let cache_pct =
@@ -1040,19 +1051,13 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
             ));
         }
         spans.push(sep());
-        spans.push(Span::styled(
-            elapsed,
-            Style::default().fg(theme.inactive),
-        ));
+        spans.push(Span::styled(elapsed, Style::default().fg(theme.inactive)));
     }
 
     // ── 5a. Offline indicator（对标 Claude Code /network 状态指示）──────────
     if !compact && state.network_offline {
         spans.push(sep());
-        spans.push(Span::styled(
-            "OFFLINE",
-            Style::default().fg(theme.warning),
-        ));
+        spans.push(Span::styled("OFFLINE", Style::default().fg(theme.warning)));
     }
 
     // ── 5b. Cache hit rate (only when below 50% — poor utilization) ───────────
