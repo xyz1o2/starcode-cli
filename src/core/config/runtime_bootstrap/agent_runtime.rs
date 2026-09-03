@@ -55,8 +55,8 @@ fn register_agent_observability_tools(tool_registry: &Arc<ToolRegistry>) {
     use crate::core::tools::web_fetch::WebFetchTool;
     tool_registry.register_tool(Arc::new(WebFetchTool::new()));
 
-    use crate::core::tools::web_search::WebSearchTool;
-    tool_registry.register_tool(Arc::new(WebSearchTool::new()));
+    // WebSearch 由 CoreRuntime 层按 is_core_tool_enabled("WebSearch") 注册；
+    // 此处不得再无条件注册，否则 core_tools 白名单形同虚设。
 
     use crate::tools::git_insight::GitInsightTool;
     tool_registry.register_tool(Arc::new(GitInsightTool::new()));
@@ -106,10 +106,14 @@ fn register_agent_execution_tools(
     )));
 
     use crate::core::tools::exit_plan_mode::ExitPlanModeTool;
-    tool_registry.register_tool(Arc::new(ExitPlanModeTool::new(
-        config.clone(),
-        message_bus.clone(),
-    )));
+    // exit_plan_mode 同样由 CoreRuntime 层按门控注册；仅在缺失时兜底补齐，
+    // 保证 headless / 精简装配路径下仍能退出 Plan 模式。
+    if tool_registry.get_tool("exit_plan_mode").is_none() {
+        tool_registry.register_tool(Arc::new(ExitPlanModeTool::new(
+            config.clone(),
+            message_bus.clone(),
+        )));
+    }
 
     use crate::core::tools::enter_worktree::EnterWorktreeTool;
     tool_registry.register_tool(Arc::new(EnterWorktreeTool::new(

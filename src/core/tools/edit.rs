@@ -19,6 +19,10 @@ pub struct EditToolParams {
     pub new_string: String,
     #[serde(rename = "expected_replacements")]
     pub expected_replacements: Option<usize>,
+    /// 为 true 时替换文件中的所有匹配项，跳过 expected_replacements 数量校验。
+    /// 对标 Claude Code 的 Edit.replace_all —— tool-description-edit.md 里承诺了该参数。
+    #[serde(default, rename = "replace_all")]
+    pub replace_all: Option<bool>,
     pub instruction: Option<String>,
     #[serde(rename = "modified_by_user")]
     pub modified_by_user: Option<bool>,
@@ -378,7 +382,8 @@ pub fn get_error_replace_result(
             ),
             error_type: ToolErrorType::EditNoOccurrenceFound,
         })
-    } else if occurrences != expected_replacements {
+    } else if occurrences != expected_replacements && params.replace_all != Some(true) {
+        // replace_all=true 时不校验数量：替换逻辑本身已是全量替换，只需放行计数守卫。
         let occurrence_term = if expected_replacements == 1 {
             "occurrence"
         } else {
@@ -546,13 +551,22 @@ impl EditTool {
     }
 
     pub fn parameter_schema(&self) -> serde_json::Value {
+        Self::parameter_schema_json()
+    }
+
+    /// 不依赖实例的 schema，便于单元测试与其它调用方复用。
+    pub fn parameter_schema_json() -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
                 "file_path": { "type": "string" },
                 "old_string": { "type": "string" },
                 "new_string": { "type": "string" },
-                "expected_replacements": { "type": "number" }
+                "expected_replacements": { "type": "number" },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace every occurrence of old_string (default false)."
+                }
             },
             "required": ["file_path", "old_string", "new_string"]
         })
@@ -1056,5 +1070,66 @@ impl BaseDeclarativeTool for EditTool {
             self.message_bus.clone(),
             self.global_state.clone(),
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params(replace_all: Option<bool>) -> EditToolParams {
+        EditToolParams {
+            file_path: "/tmp/does-not-need-to-exist.rs".to_string(),
+            old_string: "oldName".to_string(),
+            new_string: "newName".to_string(),
+            expected_replacements: None,
+            replace_all,
+            instruction: None,
+            modified_by_user: None,
+            ai_proposed_content: None,
+        }
+    }
+
+    #[test]
+    fn count_mismatch_is_an_error_without_replace_all() {
+        let err = get_error_replace_result(&params(None), 3, 1, "oldName", "newName")
+            .expect("3 occurrences vs expected 1 必须报错");
+        assert_eq!(
+            err.error_type,
+            ToolErrorType::EditExpectedOccurrenceMismatch
+        );
+    }
+
+    #[test]
+    fn replace_all_suppresses_count_mismatch() {
+        assert!(
+            get_error_replace_result(&params(Some(true)), 3, 1, "oldName", "newName").is_none(),
+            "replace_all=true 时不应再校验替换数量"
+        );
+    }
+
+    #[test]
+    fn replace_all_still_reports_zero_occurrences() {
+        let err = get_error_replace_result(&params(Some(true)), 0, 1, "oldName", "newName")
+            .expect("0 occurrences 必须报错，即使 replace_all=true");
+        assert_eq!(err.error_type, ToolErrorType::EditNoOccurrenceFound);
+    }
+
+    #[test]
+    fn replace_all_is_advertised_in_the_schema() {
+        let schema = EditTool::parameter_schema_json();
+        assert!(
+            schema["properties"]["replace_all"].is_object(),
+            "tool-description-edit.md 承诺了 replace_all，schema 必须暴露它"
+        );
+    }
+
+    #[test]
+    fn replace_all_deserializes_from_llm_arguments() {
+        let parsed: EditToolParams = serde_json::from_str(
+            r#"{"file_path":"a.rs","old_string":"x","new_string":"y","replace_all":true}"#,
+        )
+        .expect("参数解析失败");
+        assert_eq!(parsed.replace_all, Some(true));
     }
 }

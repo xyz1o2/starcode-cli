@@ -207,7 +207,6 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     "Read",
     "read_many_files",
     "Grep",
-    "Grep",
     "Glob",
     "ListDir",
     "Edit",
@@ -293,6 +292,31 @@ fn select_tools_for_turn_with_limit(
         }
     }
 
+    // tool_search 命中过的工具粘滞：模型在本会话里发现过的长尾工具直接进入后续消息的
+    // 短名单，省掉「再搜一次」的往返。快照按消息冻结（见 tool_search::begin_message_epoch），
+    // 所以同一条用户消息内 tools 数组不会中途变形，prompt 缓存前缀保持有效。
+    {
+        let quota = resolved_discovered_tool_quota();
+        let mut added = 0usize;
+        for name in crate::core::tools::tool_search::discovered_tools_snapshot() {
+            if added >= quota {
+                break;
+            }
+            if selected_names.contains(&name) {
+                continue;
+            }
+            if let Some(tool) = all_tools.iter().find(|t| t.function.name == name) {
+                selected_names.insert(tool.function.name.clone());
+                selected.push(tool.clone());
+                added += 1;
+            }
+        }
+    }
+
+    // 按名称排序后再交给 LLM：入选集合相同但顺序不同时，序列化结果也相同，
+    // 从而在相邻消息之间也能命中 prompt 缓存前缀。
+    selected.sort_by(|a, b| a.function.name.cmp(&b.function.name));
+
     super::ToolSelection {
         tools: selected.clone(),
         selected_names,
@@ -301,13 +325,34 @@ fn select_tools_for_turn_with_limit(
     }
 }
 
-/// 解析工具短名单限制
-fn resolved_tool_shortlist_limit(total_tools: usize, current_turn: i32) -> usize {
+/// 解析工具短名单上限。
+///
+/// **缓存稳定性约束**：tools 数组位于 prompt 缓存前缀中，会话中途一变，
+/// 整段前缀失效、全部上下文按未缓存价格重算。因此 k 默认**不随轮次变化**——
+/// 同一条用户消息的所有轮次拿到完全相同的 tools 数组（对标 Claude Code v3
+/// 「延迟工具始终不进入 API tools 数组」的稳定性目标）。
+///
+/// 旧行为（首轮 14 / 后续 24）会在第 2 轮必然触发一次缓存未命中；
+/// 如需恢复，显式设置 `STAR_FIRST_TURN_TOOL_SHORTLIST_K`。
+fn resolved_tool_shortlist_limit(_total_tools: usize, current_turn: i32) -> usize {
     if current_turn <= 1 {
-        resolved_first_turn_tool_shortlist_limit()
-    } else {
-        resolved_general_tool_shortlist_limit()
+        if let Some(k) = explicit_first_turn_tool_shortlist_limit() {
+            return k;
+        }
     }
+    resolved_general_tool_shortlist_limit()
+}
+
+/// tool_search 粘滞工具的额外配额（超出 k 之外追加）。
+/// `STAR_DISCOVERED_TOOL_QUOTA=0` 可关闭粘滞。
+fn resolved_discovered_tool_quota() -> usize {
+    static QUOTA: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *QUOTA.get_or_init(|| {
+        std::env::var("STAR_DISCOVERED_TOOL_QUOTA")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(8)
+    })
 }
 
 /// 解析通用工具短名单限制
@@ -322,39 +367,42 @@ fn resolved_general_tool_shortlist_limit() -> usize {
     })
 }
 
-/// 解析第一轮工具短名单限制
-fn resolved_first_turn_tool_shortlist_limit() -> usize {
-    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+/// 首轮短名单上限：仅在显式设置 `STAR_FIRST_TURN_TOOL_SHORTLIST_K` 时生效。
+/// 返回 `None` 表示沿用通用上限，从而保持 tools 数组跨轮次不变。
+fn explicit_first_turn_tool_shortlist_limit() -> Option<usize> {
+    static LIMIT: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| {
         std::env::var("STAR_FIRST_TURN_TOOL_SHORTLIST_K")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(14)
-            .clamp(6, 64)
+            .map(|v| v.clamp(6, 64))
     })
 }
 
-/// 解析 Kimi Code 工具短名单限制
+/// 解析 Kimi Code 工具短名单限制。
+/// 同样默认不随轮次变化（见 [`resolved_tool_shortlist_limit`] 的缓存稳定性说明），
+/// 显式设置 `STAR_KIMI_CODE_FIRST_TURN_TOOL_SHORTLIST_K` 才恢复首轮收窄。
 fn resolved_kimi_code_tool_shortlist_limit(current_turn: i32) -> usize {
     if current_turn <= 1 {
-        static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-        *LIMIT.get_or_init(|| {
+        static FIRST: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+        let explicit = *FIRST.get_or_init(|| {
             std::env::var("STAR_KIMI_CODE_FIRST_TURN_TOOL_SHORTLIST_K")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(4)
-                .clamp(2, 20)
-        })
-    } else {
-        static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-        *LIMIT.get_or_init(|| {
-            std::env::var("STAR_KIMI_CODE_TOOL_SHORTLIST_K")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(10)
-                .clamp(2, 20)
-        })
+                .map(|v| v.clamp(2, 20))
+        });
+        if let Some(k) = explicit {
+            return k;
+        }
     }
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("STAR_KIMI_CODE_TOOL_SHORTLIST_K")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(10)
+            .clamp(2, 20)
+    })
 }
 
 /// 检查是否为 MCP 动态工具（格式：mcp__<server>__<toolname>）
@@ -362,8 +410,9 @@ fn is_mcp_dynamic_tool(tool_name: &str) -> bool {
     tool_name.starts_with("mcp__") && tool_name.matches("__").count() >= 2
 }
 
-/// 为工具评分
-fn score_tool_for_turn(tool: &StarTool, user_input: &str, current_turn: i32) -> f64 {
+/// 为工具评分。刻意不依赖 current_turn：同一条用户消息的所有轮次必须得到
+/// 完全相同的 tools 数组，否则 prompt 缓存前缀在第 2 轮就失效。
+fn score_tool_for_turn(tool: &StarTool, user_input: &str, _current_turn: i32) -> f64 {
     let mut score = 0.0;
     let tool_name = &tool.function.name;
     let input_lower = user_input.to_lowercase();
@@ -401,9 +450,9 @@ fn score_tool_for_turn(tool: &StarTool, user_input: &str, current_turn: i32) -> 
             }
         }
         "Grep" | "Glob" => {
-            if input_lower.contains("Grep")
+            if input_lower.contains("grep")
                 || input_lower.contains("find")
-                || input_lower.contains("Grep")
+                || input_lower.contains("search")
             {
                 score += 5.0;
             }
@@ -427,12 +476,8 @@ fn score_tool_for_turn(tool: &StarTool, user_input: &str, current_turn: i32) -> 
         _ => {}
     }
 
-    // 第一轮降低某些工具的分数
-    if current_turn <= 1 {
-        if tool_name == "Bash" || tool_name == "run_tests" {
-            score -= 2.0;
-        }
-    }
+    // 曾在首轮给 Bash / run_tests 减分。该逻辑既是死代码（两者都在 CORE_TOOL_NAMES 中，
+    // 评分前已入选），又会让 tools 数组随轮次变化而击穿 prompt 缓存，故移除。
 
     score
 }
@@ -608,4 +653,141 @@ fn tool_matches_patterns(tool: &StarTool, patterns: &[&str]) -> bool {
     patterns
         .iter()
         .any(|pattern| tool.function.name.contains(pattern))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{StarTool, StarToolFunction, StarToolParameters};
+
+    fn tool(name: &str, description: &str) -> StarTool {
+        StarTool {
+            tool_type: "function".to_string(),
+            function: StarToolFunction {
+                name: name.to_string(),
+                description: description.to_string(),
+                parameters: StarToolParameters {
+                    param_type: "object".to_string(),
+                    properties: std::collections::HashMap::new(),
+                    required: Vec::new(),
+                },
+            },
+        }
+    }
+
+    /// 构造一批数量远超短名单上限的工具，确保走到裁剪分支。
+    fn wide_tool_set() -> Vec<StarTool> {
+        let mut tools: Vec<StarTool> = CORE_TOOL_NAMES
+            .iter()
+            .map(|n| tool(n, "core tool"))
+            .collect();
+        for i in 0..60 {
+            tools.push(tool(
+                &format!("long_tail_tool_{i:02}"),
+                "auxiliary long tail capability",
+            ));
+        }
+        tools
+    }
+
+    /// 短名单会读 tool_search 的粘滞集合（进程级全局状态），
+    /// 因此每个调用选择函数的测试都要先串行化并清空它。
+    fn isolated_sticky_state() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::core::tools::tool_search::sticky_test_guard();
+        crate::core::tools::tool_search::reset_discovered_tools();
+        guard
+    }
+
+    #[test]
+    fn shortlist_is_identical_across_turns() {
+        let _guard = isolated_sticky_state();
+        let tools = wide_tool_set();
+        let input = "refactor the parser and run the tests";
+
+        let first = select_tools_for_turn_with_limit(&tools, input, 1, None);
+        for turn in 2..=6 {
+            let later = select_tools_for_turn_with_limit(&tools, input, turn, None);
+            let a: Vec<&str> = first
+                .tools
+                .iter()
+                .map(|t| t.function.name.as_str())
+                .collect();
+            let b: Vec<&str> = later
+                .tools
+                .iter()
+                .map(|t| t.function.name.as_str())
+                .collect();
+            assert_eq!(
+                a, b,
+                "tools 数组在第 {turn} 轮发生变化，会击穿 prompt 缓存前缀"
+            );
+        }
+    }
+
+    #[test]
+    fn shortlist_is_sorted_and_deduplicated() {
+        let _guard = isolated_sticky_state();
+        let selection = select_tools_for_turn_with_limit(&wide_tool_set(), "edit a file", 3, None);
+        let names: Vec<String> = selection
+            .tools
+            .iter()
+            .map(|t| t.function.name.clone())
+            .collect();
+
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "tools 数组必须按名称排序以稳定序列化结果");
+
+        let unique: std::collections::HashSet<&String> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "tools 数组不得包含重复工具");
+    }
+
+    #[test]
+    fn core_tool_names_has_no_duplicates() {
+        let unique: std::collections::HashSet<&&str> = CORE_TOOL_NAMES.iter().collect();
+        assert_eq!(unique.len(), CORE_TOOL_NAMES.len());
+    }
+
+    #[test]
+    fn scoring_ignores_turn_number() {
+        let bash = tool("Bash", "run a shell command");
+        let input = "run the build command";
+        assert_eq!(
+            score_tool_for_turn(&bash, input, 1),
+            score_tool_for_turn(&bash, input, 7)
+        );
+    }
+
+    /// tool_search 发现过的长尾工具应在下一条消息进入短名单，
+    /// 即使它一个关键词都不命中。
+    #[test]
+    fn discovered_tools_are_injected_after_the_next_message_epoch() {
+        let _guard = isolated_sticky_state();
+        use crate::core::tools::tool_search as ts;
+
+        let tools = wide_tool_set();
+        let input = "edit a file";
+        let target = "long_tail_tool_57".to_string();
+
+        let baseline = select_tools_for_turn_with_limit(&tools, input, 1, None);
+        assert!(
+            !baseline.selected_names.contains(&target),
+            "该工具本来不该入选，否则这个测试证明不了粘滞生效"
+        );
+
+        // 消息进行中发现：快照未刷新，短名单必须保持不变（缓存前缀不能动）。
+        ts::record_discovered_tools(std::slice::from_ref(&target));
+        let mid_message = select_tools_for_turn_with_limit(&tools, input, 2, None);
+        assert_eq!(
+            baseline.tools.len(),
+            mid_message.tools.len(),
+            "同一条消息内 tools 数组不得变形"
+        );
+        assert!(!mid_message.selected_names.contains(&target));
+
+        // 下一条用户消息：粘滞集合刷新，工具入选。
+        ts::begin_message_epoch();
+        let next_message = select_tools_for_turn_with_limit(&tools, input, 1, None);
+        assert!(next_message.selected_names.contains(&target));
+    }
 }

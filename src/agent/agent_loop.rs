@@ -689,10 +689,13 @@ impl Agent {
         // The repair and normalize steps are applied to ensure consistency,
         // but we keep the original messages untouched for cache prefix stability.
         let mut request_messages = messages.clone();
-        request_messages.push(StarMessage::system(build_tool_selection_system_message(
-            &turn_tool_selection,
-            current_turn,
-        )));
+        // build_tool_selection_system_message 目前返回空串；空 system 消息会白占一条
+        // 消息槽并干扰前缀缓存，因此只在非空时追加。
+        let tool_selection_note =
+            build_tool_selection_system_message(&turn_tool_selection, current_turn);
+        if !tool_selection_note.trim().is_empty() {
+            request_messages.push(StarMessage::system(tool_selection_note));
+        }
         // Only repair tool sequence if there are tool messages (avoid unnecessary mutation)
         if crate::agent::message_processing::tool_sequence_repair_needed(&request_messages) {
             crate::agent::message_processing::repair_tool_message_sequence(&mut request_messages);

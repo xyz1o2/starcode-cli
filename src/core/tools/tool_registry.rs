@@ -129,7 +129,7 @@ impl ToolRegistry {
         }
 
         let map = self.all_known_tools.read().unwrap();
-        let declarations = map
+        let mut declarations = map
             .values()
             .map(|tool| {
                 let schema = tool.parameter_schema();
@@ -143,6 +143,11 @@ impl ToolRegistry {
             .collect::<Vec<_>>();
 
         drop(map);
+
+        // 按名称排序：all_known_tools 是 HashMap，迭代顺序随进程随机。
+        // 排序后同一套工具在任何一次启动中都序列化成同一段 JSON，
+        // 使 tools 数组可复用 prompt 缓存前缀（跨会话亦然）。
+        declarations.sort_by(|a, b| a.name.cmp(&b.name));
 
         if let Ok(mut cache) = self.cached_function_declarations.write() {
             *cache = Some((generation, declarations.clone()));

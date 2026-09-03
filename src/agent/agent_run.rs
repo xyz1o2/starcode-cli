@@ -16,6 +16,10 @@ impl Agent {
         >,
     > {
         Box::pin(async_stream::try_stream! {
+            // 冻结 tool_search 粘滞集合：本条用户消息的所有轮次共享同一份快照，
+            // 中途新发现的工具要到下一条消息才进入 tools 数组，避免击穿 prompt 缓存前缀。
+            crate::core::tools::tool_search::begin_message_epoch();
+
             let history_len = self
                 .session_messages
                 .iter()
