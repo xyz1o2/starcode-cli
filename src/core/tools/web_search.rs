@@ -270,6 +270,24 @@ impl ToolInvocation for WebSearchInvocation {
         let num = self.params.num.unwrap_or(5).min(10);
 
         Box::pin(async move {
+            // 离线模式：WebSearch 直接拒绝（对标 Claude Code /network）
+            if crate::core::offline::is_offline() {
+                crate::utils::logging::append_debug_log_line(
+                    "[web_search] Refusing search (offline mode)",
+                );
+                return Ok(CoreToolResult {
+                    llm_content: Some(
+                        "Web search is unavailable because offline mode is ON. \
+                         Turn it off with /network off before searching the web."
+                            .to_string(),
+                    ),
+                    return_display: None,
+                    output: "Web search refused (offline mode)".to_string(),
+                    error: None,
+                    data: None,
+                });
+            }
+
             crate::utils::logging::append_debug_log_line(&format!(
                 "[web_search] Starting search: query='{}', num={}",
                 query, num

@@ -194,7 +194,8 @@ fn is_streaming_safe_command(input: &str) -> bool {
                 "tasks" | "todos" | "stats" | "cost" | "tokens" | "usage" | "status" | "about"
                 | "version" | "help" | "tools" | "bashes" | "context" | "files" | "diff" | "export"
                 | "doctor" | "bug" | "feedback" | "ide" | "theme" | "lang" | "vim" | "models"
-                | "model" | "model-info" | "provider-info" | "token-count" | "workflows",
+                | "model" | "model-info" | "provider-info" | "token-count" | "workflows"
+                | "network" | "detach",
             ),
             _,
         ) => true,
@@ -419,6 +420,18 @@ pub async fn enqueue_user_message(
         }
     }
 
+    // 离线模式：拒绝发送真正的消息（/、#、! 前缀在上方已分流，能走到这里的是普通消息）。
+    // 调用方在 enqueue 之前就清空了输入框（input.rs 的 reset_main_textarea），所以这里
+    // 把文本放回去，用户 /network off 之后可以直接重发，不用重新打一遍。
+    if state.network_offline || crate::core::offline::is_offline() {
+        state.push_toast(
+            "Offline mode is ON — message not sent. Use /network off to go back online.",
+            crate::ui::state::store::ToastKind::Warning,
+        );
+        state.textarea.insert_str(&user_input);
+        return Ok(());
+    }
+
     if state.current_model.trim().is_empty()
         && state
             .current_provider_id
@@ -448,6 +461,17 @@ pub async fn enqueue_user_message(
             "Please select a model for the current provider",
         ));
         return Ok(());
+    }
+
+    // /break-cache 的消费点：清掉进程内提示词缓存，让这一条消息的系统提示重新读盘，
+    // 然后解除标记（只作用于下一条消息，对标 Claude Code 的一次性 cache break）。
+    if state.break_cache_next {
+        state.break_cache_next = false;
+        let dropped = crate::core::prompts::loader::invalidate_cache();
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[CACHE-BREAK] Dropped {} cached prompt file(s) before sending",
+            dropped
+        ));
     }
 
     let message_id = state.next_message_id;

@@ -361,6 +361,8 @@ pub struct ChatState {
     pub processing_time_secs: u64,
     pub token_count: u32,
     pub total_cost: f64,
+    /// 会话创建时刻，用于状态栏展示会话耗时（对标 Claude Code running duration）
+    pub session_started_at: Instant,
     /// Last time a token was received (for stall detection)
     pub last_token_time: Option<Instant>,
     /// When thinking/reasoning started (for thinking duration display)
@@ -400,6 +402,10 @@ pub struct ChatState {
     pub extra_working_dirs: Vec<std::path::PathBuf>,
     /// /fast 快速模式（对标 Claude Code fast mode：切到轻量模型 + 状态栏指示）
     pub fast_mode: bool,
+    /// /network 离线模式（对标 Claude Code network 开关：拒绝网络请求 + 状态栏指示）
+    pub network_offline: bool,
+    /// /break-cache 标记：下一条消息强制重建 context（打破隐式缓存延续）
+    pub break_cache_next: bool,
     /// fast 开启前的模型（关闭时恢复）
     pub fast_mode_prev_model: Option<String>,
     /// /poor 省电模式（对标 Claude Code poor mode：跳过记忆抽取与提示建议）
@@ -766,6 +772,7 @@ impl ChatState {
             processing_time_secs: 0,
             token_count: 0,
             total_cost: 0.0,
+            session_started_at: Instant::now(),
             last_token_time: None,
             thinking_started_at: None,
             current_status_line: None,
@@ -798,6 +805,8 @@ impl ChatState {
             thinking_effort: crate::types::ThinkingEffort::default(),
             extra_working_dirs: Vec::new(),
             fast_mode: false,
+            network_offline: false,
+            break_cache_next: false,
             fast_mode_prev_model: None,
             poor_mode: false,
             advisor_mode: false,

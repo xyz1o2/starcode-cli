@@ -24,7 +24,7 @@ use crate::types::{ChatEntry, ChatEntryType, StarToolCall, ToolResult};
 use crate::ui::app::logic::{
     emit_status_text, enqueue_user_message, recover_missing_tool_results, save_tool_output,
 };
-use crate::ui::state::store::ChatState;
+use crate::ui::state::store::{ChatState, ToastKind};
 use crate::ui::utils::format::{
     format_tool_call, format_tool_result, format_tool_result_with_saved_path,
 };
@@ -471,6 +471,18 @@ pub async fn handle_stream_update(
                         let status = i18n::t("ui.status.agent", "Status: {msg}", "Status: {msg}")
                             .replace("{msg}", msg);
                         emit_status_text(state, message_id, &status);
+                    }
+                }
+                "auto_compact" => {
+                    // 对标 Claude Code「auto-compact on/off」闪现：compact 发生时
+                    // 给用户一个实时提示。payload 由 agent_loop.rs 的
+                    // run_compression_check 发出。
+                    if let Some(on) = payload.get("on").and_then(|value| value.as_bool()) {
+                        if on {
+                            state.push_toast("Auto-compact on", ToastKind::Success);
+                        } else {
+                            state.push_toast("Auto-compact off", ToastKind::Info);
+                        }
                     }
                 }
                 _ => {}

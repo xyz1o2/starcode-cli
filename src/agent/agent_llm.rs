@@ -674,6 +674,9 @@ impl Agent {
             }
         }
 
+        // 成功响应：重置回退状态，使下一次失败从首选项重新开始
+        self.model_fallback.reset();
+
         LlmResult::Success {
             content: current_content,
             reasoning: current_reasoning,
@@ -771,7 +774,7 @@ impl Agent {
                 crate::utils::logging::append_debug_log_line(
                     "[RECOVERY] Switching provider and retry",
                 );
-                // 尝试环境变量中配置的后备模型/端点
+                // 优先使用环境变量中配置的单个后备模型/端点（保持原有行为）
                 let fallback_model = std::env::var("STAR_FALLBACK_MODEL").ok();
                 let fallback_url = std::env::var("STAR_FALLBACK_BASE_URL").ok();
                 if let Some(ref alt_model) = fallback_model {
@@ -780,23 +783,46 @@ impl Agent {
                         self.client.model, alt_model
                     ));
                     self.client.set_model(alt_model);
+                    self.emit_fallback_event(&err_str, alt_model, None);
                 } else if let Some(ref url) = fallback_url {
                     crate::utils::logging::append_debug_log_line(&format!(
                         "[RECOVERY] Switching to STAR_FALLBACK_BASE_URL: {}",
                         url
                     ));
                     self.client.set_base_url(url);
+                    self.emit_fallback_event(&err_str, &self.client.model, Some(url));
+                } else if self.model_fallback.is_fallback_eligible_error(&err_str) {
+                    // 列表式回退配置（STAR_FALLBACK_MODELS / STAR_FALLBACK_BASE_URLS）：
+                    // 由 ModelFallbackManager 统一管理回退顺序与重试上限。
+                    let original_model = self.client.model.clone();
+                    match self.model_fallback.try_fallback(&original_model) {
+                        crate::agent::model_fallback::FallbackDecision::Fallback {
+                            model,
+                            base_url,
+                            reason,
+                        } => {
+                            crate::utils::logging::append_debug_log_line(&format!(
+                                "[MODEL_FALLBACK] Applying: {}",
+                                reason
+                            ));
+                            if let Some(ref url) = base_url {
+                                self.client.set_base_url(url);
+                            } else {
+                                self.client.set_model(&model);
+                            }
+                            self.emit_fallback_event(&err_str, &model, base_url.as_deref());
+                        }
+                        crate::agent::model_fallback::FallbackDecision::NoFallback { reason } => {
+                            crate::utils::logging::append_debug_log_line(&format!(
+                                "[MODEL_FALLBACK] No fallback: {}",
+                                reason
+                            ));
+                            self.fallback_cooldown().await;
+                        }
+                    }
                 } else {
-                    // 无后备配置：冷却等待后重试（应对临时限流 429）
-                    let wait_secs = std::env::var("STAR_RATE_LIMIT_RETRY_SECS")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(10u64);
-                    crate::utils::logging::append_debug_log_line(&format!(
-                        "[RECOVERY] No fallback configured, waiting {}s before retry",
-                        wait_secs
-                    ));
-                    tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+                    // 错误不可回退（如认证失败）：冷却等待后重试
+                    self.fallback_cooldown().await;
                 }
                 LlmResult::Retry
             }
@@ -884,5 +910,37 @@ impl Agent {
                 LlmResult::Retry
             }
         }
+    }
+
+    /// 回退生效时通过 Trace 事件通知 UI（对标 Claude Code 显示 fallback 提示）。
+    /// 仅报告，不影响回退本身的成功与否。
+    fn emit_fallback_event(&self, original_error: &str, model: &str, base_url: Option<&str>) {
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[MODEL_FALLBACK] emit_fallback_event model={} url={:?} err={}",
+            model,
+            base_url,
+            original_error.chars().take(120).collect::<String>()
+        ));
+        self.emit_event(crate::agent::messaging::AgentEvent::Trace {
+            event: "model_fallback".to_string(),
+            payload: serde_json::json!({
+                "model": model,
+                "base_url": base_url,
+                "error": original_error.chars().take(300).collect::<String>(),
+            }),
+        });
+    }
+
+    /// 无回退可用时的冷却等待（应对临时限流 429），保持原有行为
+    async fn fallback_cooldown(&self) {
+        let wait_secs = std::env::var("STAR_RATE_LIMIT_RETRY_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10u64);
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[RECOVERY] No fallback configured, waiting {}s before retry",
+            wait_secs
+        ));
+        tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
     }
 }

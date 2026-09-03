@@ -51,6 +51,21 @@ pub fn embedded_prompt(filename: &str) -> Option<String> {
         .map(|file| String::from_utf8_lossy(file.data.as_ref()).into_owned())
 }
 
+/// 清空外部提示词缓存，强制下一次加载重新读盘。
+///
+/// 常规路径靠 mtime 失效即可；这个函数给 `/break-cache` 用 —— 用户主动要求
+/// 下一次请求重建上下文时，把进程内缓存丢掉，不依赖 mtime 是否变化。
+pub fn invalidate_cache() -> usize {
+    match cache().lock() {
+        Ok(mut guard) => {
+            let n = guard.len();
+            guard.clear();
+            n
+        }
+        Err(_) => 0,
+    }
+}
+
 /// 从外部目录加载提示词（带 mtime 缓存，支持热更新）
 fn read_external_from_dirs(filename: &str, dirs: &[PathBuf]) -> Option<String> {
     for dir in dirs {

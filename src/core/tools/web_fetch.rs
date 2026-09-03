@@ -47,6 +47,27 @@ impl ToolInvocation for WebFetchInvocation {
         let url = self.params.url.clone();
 
         Box::pin(async move {
+            // 离线模式：WebFetch 直接拒绝（对标 Claude Code /network）
+            if crate::core::offline::is_offline() {
+                crate::utils::logging::append_debug_log_line(
+                    "[web_fetch] Refusing fetch (offline mode)",
+                );
+                return Ok(ToolResult {
+                    llm_content: Some(
+                        "Web fetch is unavailable because offline mode is ON. \
+                         Turn it off with /network off before fetching URLs."
+                            .to_string(),
+                    ),
+                    return_display: None,
+                    output: String::new(),
+                    error: Some(ToolError {
+                        error_type: "offline".to_string(),
+                        message: "Web fetch refused (offline mode)".to_string(),
+                    }),
+                    data: None,
+                });
+            }
+
             // 1. Fetch HTML
             let client = reqwest::Client::builder()
                 .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")

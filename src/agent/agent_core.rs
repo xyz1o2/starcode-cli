@@ -56,6 +56,10 @@ pub struct Agent {
     /// Reactive Compact管理器
     pub(crate) reactive_compact_manager:
         crate::agent::compact::reactive_compact::ReactiveCompactManager,
+    /// 模型回退管理器：跨 turn 存活，处理 STAR_FALLBACK_MODELS / STAR_FALLBACK_BASE_URLS
+    /// 等列表式回退配置（单值 STAR_FALLBACK_MODEL / STAR_FALLBACK_BASE_URL 仍由
+    /// agent_llm.rs 优先生效）。
+    pub(crate) model_fallback: crate::agent::model_fallback::ModelFallbackManager,
 }
 
 impl Agent {
@@ -121,6 +125,7 @@ impl Agent {
             stream_stall_detector: crate::agent::stream_stall::StreamStallDetector::new(),
             reactive_compact_manager:
                 crate::agent::compact::reactive_compact::ReactiveCompactManager::new(compact_config),
+            model_fallback: crate::agent::model_fallback::ModelFallbackManager::new(),
         };
         // 子代理不加载父代理的持久化会话消息（对标 Claude Code：子代理从空上下文开始）
         if agent.config.recursion_depth == 0 {

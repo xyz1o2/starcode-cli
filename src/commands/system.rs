@@ -10,6 +10,25 @@ pub struct SlashCommand {
     pub sub_commands: &'static [SlashCommand],
 }
 
+/// `format_help` 打印的分类白名单，**顺序即 /help 的展示顺序**。
+///
+/// 这个列表是承重的：`ALL_COMMANDS` 里 category 不在其中的命令会被 `/help` 静默跳过 ——
+/// 命令能用、能补全，但用户永远看不到。所以它被提到模块常量，好让下面的测试守住这条不变量。
+pub const HELP_CATEGORIES: &[&str] = &[
+    "General",
+    "Configuration",
+    "Config",
+    "Tools",
+    "Session",
+    "MCP",
+    "Git",
+    "Security",
+    "Automation",
+    "Utility",
+    "Memory",
+    "Debug",
+];
+
 /// All available commands
 pub const ALL_COMMANDS: &[SlashCommand] = &[
     // === 核心交互 (Core Interaction) ===
@@ -31,69 +50,6 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
                 alt_names: &[],
                 description: "Restore saved session",
                 category: "Session",
-                sub_commands: &[],
-            },
-            SlashCommand {
-                name: "export",
-                alt_names: &[],
-                description: "Export conversation to markdown file or clipboard",
-                category: "Session",
-                sub_commands: &[],
-            },
-            SlashCommand {
-                name: "rename",
-                alt_names: &[],
-                description: "Rename the current session",
-                category: "Session",
-                sub_commands: &[],
-            },
-            SlashCommand {
-                name: "rewind",
-                alt_names: &["checkpoint"],
-                description: "List file-history snapshots, or revert: /rewind [latest|<id>]",
-                category: "Session",
-                sub_commands: &[],
-            },
-            SlashCommand {
-                name: "diff",
-                alt_names: &[],
-                description: "Show uncommitted git changes",
-                category: "Git",
-                sub_commands: &[],
-            },
-            SlashCommand {
-                name: "files",
-                alt_names: &[],
-                description: "List files read/edited this session",
-                category: "Tools",
-                sub_commands: &[],
-            },
-            SlashCommand {
-                name: "model",
-                alt_names: &[],
-                description: "Switch model (alias of /models)",
-                category: "Configuration",
-                sub_commands: &[],
-            },
-            SlashCommand {
-                name: "ext",
-                alt_names: &["extension"],
-                description: "Extension marketplace (list/install/search)",
-                category: "Automation",
-                sub_commands: &[],
-            },
-            SlashCommand {
-                name: "voice",
-                alt_names: &[],
-                description: "Voice settings (lang/rate/volume)",
-                category: "Configuration",
-                sub_commands: &[],
-            },
-            SlashCommand {
-                name: "teleport",
-                alt_names: &["tp"],
-                description: "Connect to a remote session",
-                category: "Automation",
                 sub_commands: &[],
             },
             SlashCommand {
@@ -119,6 +75,73 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
             },
         ],
     },
+    // 下面九条早先被误写在 `/chat` 的 sub_commands 里，但 `chat::run` 只认
+    // save/resume/list/delete/share —— 既让 `/chat export` 之类补全出一个会报
+    // "Unknown subcommand" 的路径，又因为 `format_help` 只遍历顶层而在 /help 里隐身。
+    // 它们在 `handle_command` 里本来就是顶层分派，声明位置跟着修正到顶层。
+    SlashCommand {
+        name: "export",
+        alt_names: &[],
+        description: "Export conversation to markdown file or clipboard",
+        category: "Session",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "rename",
+        alt_names: &[],
+        description: "Rename the current session",
+        category: "Session",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "rewind",
+        alt_names: &["checkpoint"],
+        description: "List file-history snapshots, or revert: /rewind [latest|<id>]",
+        category: "Session",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "diff",
+        alt_names: &[],
+        description: "Show uncommitted git changes",
+        category: "Git",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "files",
+        alt_names: &[],
+        description: "List files read/edited this session",
+        category: "Tools",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "ext",
+        alt_names: &["extension"],
+        description: "Extension marketplace (list/install/search)",
+        category: "Automation",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "voice",
+        alt_names: &[],
+        description: "Voice settings (lang/rate/volume)",
+        category: "Configuration",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "teleport",
+        alt_names: &["tp"],
+        description: "Connect to a remote session",
+        category: "Automation",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "buddy",
+        alt_names: &[],
+        description: "Buddy mode (enable/disable/encourage/celebrate)",
+        category: "Utility",
+        sub_commands: &[],
+    },
     SlashCommand {
         name: "share",
         alt_names: &[],
@@ -128,7 +151,7 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "clear",
-        alt_names: &[],
+        alt_names: &["new", "reset"],
         description: "Clear chat history",
         category: "General",
         sub_commands: &[],
@@ -621,10 +644,12 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         sub_commands: &[],
     },
     SlashCommand {
-        name: "pr_comments",
-        alt_names: &["pr-comments"],
+        // 主名用带连字符的 `pr-comments`（对标 Claude Code），下划线写法留作别名；
+        // 两者在 `handle_command` 里本来就分派到同一个 `compat::pr_comments`。
+        name: "pr-comments",
+        alt_names: &["pr_comments"],
         description: "Pull GitHub PR comments (requires gh CLI)",
-        category: "Tools",
+        category: "Git",
         sub_commands: &[],
     },
     SlashCommand {
@@ -822,14 +847,16 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
     // === Configuration ===
     SlashCommand {
         name: "models",
-        alt_names: &[],
+        alt_names: &["model"],
         description: "Switch model",
         category: "Configuration",
         sub_commands: &[],
     },
     SlashCommand {
         name: "settings",
-        alt_names: &["config"],
+        // `config` 不放在这里当别名：它自己就是一条顶层命令（带 get/set/... 子命令），
+        // 重复声明会让 /help 把同一个名字列两次。
+        alt_names: &[],
         description: "Open settings editor",
         category: "Configuration",
         sub_commands: &[],
@@ -957,13 +984,8 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         category: "Memory",
         sub_commands: &[],
     },
-    SlashCommand {
-        name: "todos",
-        alt_names: &[],
-        description: "Show and manage project tasks (alias for tasks)",
-        category: "Tools",
-        sub_commands: &[],
-    },
+    // `/todos` 的声明并到 `tasks` 的 alt_names 里（两者在 `handle_command` 里都分派到
+    // `compat::tasks`）。独立声明会让它在 /help 和补全里各出现两次。
     SlashCommand {
         name: "index",
         alt_names: &[],
@@ -1279,13 +1301,8 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         category: "Utility",
         sub_commands: &[],
     },
-    SlashCommand {
-        name: "compact",
-        alt_names: &[],
-        description: "Force context compression",
-        category: "Utility",
-        sub_commands: &[],
-    },
+    // `/compact` 已由 `compress` 的 alt_names 覆盖（两者分派到同一个 `utility::compress`），
+    // 独立声明只会让它在 /help 与补全里各出现两次。
     SlashCommand {
         name: "cost-breakdown",
         alt_names: &[],
@@ -1439,6 +1456,239 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         sub_commands: &[],
     },
     SlashCommand {
+        name: "network",
+        alt_names: &[],
+        description: "Toggle offline mode (refuse network requests)",
+        category: "Config",
+        sub_commands: &[],
+    },
+    // === 对标 Claude Code 的别名 / 补齐命令（command gaps） ===
+    SlashCommand {
+        name: "continue",
+        alt_names: &[],
+        description: "Resume the current conversation (alias of /resume)",
+        category: "Session",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "quit",
+        alt_names: &[],
+        description: "Exit the application (alias of /exit)",
+        category: "General",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "hist",
+        alt_names: &[],
+        description: "Browse input history (alias of /history)",
+        category: "Utility",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "mem",
+        alt_names: &[],
+        description: "Show session memory (alias of /memory)",
+        category: "Memory",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "mstore",
+        alt_names: &[],
+        description: "Show memory stores (alias of /memory-stores)",
+        category: "Memory",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "allowed-tools",
+        alt_names: &[],
+        description: "Manage allowed tools (alias of /permissions)",
+        category: "Security",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "watch-pr",
+        alt_names: &[],
+        description: "Watch a pull request (alias of /subscribe-pr)",
+        category: "Git",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "api",
+        alt_names: &[],
+        description: "Configure provider API (alias of /provider)",
+        category: "Config",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "app",
+        alt_names: &[],
+        description: "Open the desktop app (alias of /desktop)",
+        category: "General",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "ios",
+        alt_names: &[],
+        description: "Show iOS companion app info (alias of /mobile)",
+        category: "General",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "android",
+        alt_names: &[],
+        description: "Show Android companion app info (alias of /mobile)",
+        category: "General",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "who",
+        alt_names: &[],
+        description: "Show connected peers (alias of /peers)",
+        category: "Automation",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "cron",
+        alt_names: &[],
+        description: "Manage scheduled triggers (alias of /schedule)",
+        category: "Automation",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "rc",
+        alt_names: &[],
+        description: "Remote control client (alias of /remote-control)",
+        category: "Automation",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "rcs",
+        alt_names: &[],
+        description: "Remote control server (alias of /remote-control)",
+        category: "Automation",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "color",
+        alt_names: &[],
+        description: "Switch color scheme (alias of /theme)",
+        category: "Configuration",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "detach",
+        alt_names: &[],
+        description: "Detach the running task into a background job",
+        category: "Session",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "schedule",
+        alt_names: &[],
+        description: "Schedule one-shot or recurring triggers",
+        category: "Automation",
+        sub_commands: &[
+            SlashCommand {
+                name: "add",
+                alt_names: &[],
+                description: "Add a scheduled trigger",
+                category: "Automation",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "list",
+                alt_names: &[],
+                description: "List scheduled triggers",
+                category: "Automation",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "remove",
+                alt_names: &[],
+                description: "Remove a scheduled trigger",
+                category: "Automation",
+                sub_commands: &[],
+            },
+        ],
+    },
+    SlashCommand {
+        name: "triggers",
+        alt_names: &[],
+        description: "List scheduled triggers (alias of /schedule list)",
+        category: "Automation",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "commit",
+        alt_names: &[],
+        description: "Generate an AI commit message and commit (alias of /commit-and-push)",
+        category: "Git",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "commit-push-pr",
+        alt_names: &[],
+        description: "Commit, push and open a pull request",
+        category: "Git",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "remote-env",
+        alt_names: &[],
+        description: "Show remote session environment variables",
+        category: "Automation",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "pipes",
+        alt_names: &[],
+        description: "List background pipes and remote connections",
+        category: "Automation",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "pipe-status",
+        alt_names: &[],
+        description: "Show status of a background pipe",
+        category: "Automation",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "break-cache",
+        alt_names: &[],
+        description: "Break the prompt cache and force a fresh context",
+        category: "Debug",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "autofix-pr",
+        alt_names: &[],
+        description: "Create a PR and run an automated fix loop",
+        category: "Git",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "thinkback-play",
+        alt_names: &[],
+        description: "Replay the last chain of thought (alias of /think-back play)",
+        category: "Session",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "force-snip",
+        alt_names: &[],
+        description: "Force a context snip/compaction now",
+        category: "Session",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "remote-control-server",
+        alt_names: &[],
+        description: "Start the remote control server",
+        category: "Automation",
+        sub_commands: &[],
+    },
+    SlashCommand {
         name: "fork",
         alt_names: &[],
         description: "Fork the current conversation into a new session",
@@ -1543,13 +1793,7 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         category: "Git",
         sub_commands: &[],
     },
-    SlashCommand {
-        name: "pr-comments",
-        alt_names: &[],
-        description: "Show GitHub PR comments",
-        category: "Git",
-        sub_commands: &[],
-    },
+    // `/pr-comments` 的声明上移到了 Git 组的那一条（带 `pr_comments` 别名），这里不再重复。
     SlashCommand {
         name: "extra-usage",
         alt_names: &[],
@@ -2151,22 +2395,7 @@ pub fn format_help() -> String {
     let mut help_text = " Starcode CLI - 可用命令\n\n".to_string();
 
     let categorized = get_categorized_commands();
-    let categories = [
-        "General",
-        "Configuration",
-        "Config",
-        "Tools",
-        "Session",
-        "MCP",
-        "Git",
-        "Security",
-        "Automation",
-        "Utility",
-        "Memory",
-        "Debug",
-    ];
-
-    for category in &categories {
+    for category in HELP_CATEGORIES {
         if let Some(cmds) = categorized.get(category) {
             help_text.push_str(&format!("{}:\n", category));
             for cmd in cmds {
@@ -2198,4 +2427,76 @@ pub fn format_help() -> String {
     help_text.push_str("使用 Ctrl+C 退出应用\n");
 
     help_text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `format_help` 只遍历 `HELP_CATEGORIES` 白名单，分类拼错的命令会从 /help 里消失
+    /// （命令仍可用、仍能补全，只是没人找得到）。这条断言把那种静默丢失变成编译后立刻失败。
+    #[test]
+    fn every_top_level_command_lands_in_a_help_category() {
+        let orphans: Vec<&str> = ALL_COMMANDS
+            .iter()
+            .filter(|c| !HELP_CATEGORIES.contains(&c.category))
+            .map(|c| c.name)
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "these commands have a category /help never prints: {:?}",
+            orphans
+        );
+    }
+
+    /// 顶层命令名与别名必须全局唯一：`handle_command` 是一个 `match name`，
+    /// 重名的第二个分支永远不会被执行，而声明里看不出这一点；`/help` 与补全也会把
+    /// 同一个名字列两遍。
+    #[test]
+    fn top_level_names_and_aliases_are_unique() {
+        let mut seen: HashMap<&str, &str> = HashMap::new();
+        let mut clashes: Vec<String> = Vec::new();
+        for cmd in ALL_COMMANDS {
+            for label in std::iter::once(cmd.name).chain(cmd.alt_names.iter().copied()) {
+                if let Some(prev) = seen.insert(label, cmd.name) {
+                    clashes.push(format!("`{}`: claimed by `{}` and `{}`", label, prev, cmd.name));
+                }
+            }
+        }
+        assert!(
+            clashes.is_empty(),
+            "duplicate command labels ({}):\n  {}",
+            clashes.len(),
+            clashes.join("\n  ")
+        );
+    }
+
+    /// 曾经被误放进 `/chat` 的 sub_commands 里的那批命令必须留在顶层：`chat::run`
+    /// 只认 save/resume/list/delete/share，放在那里既补全出死路径又在 /help 里隐身。
+    #[test]
+    fn commands_dispatched_at_top_level_are_declared_at_top_level() {
+        for name in [
+            "export", "rename", "rewind", "diff", "files", "ext", "voice", "teleport", "buddy",
+            "network", "schedule", "detach", "commit",
+        ] {
+            assert!(
+                ALL_COMMANDS
+                    .iter()
+                    .any(|c| c.name == name || c.alt_names.contains(&name)),
+                "`/{}` dispatches at top level but is not declared in ALL_COMMANDS",
+                name
+            );
+        }
+    }
+
+    /// `category: "Pending"` 是"已声明未实现"的哨兵；本轮补齐后不应再有残留。
+    #[test]
+    fn no_command_is_left_marked_pending() {
+        let pending: Vec<&str> = ALL_COMMANDS
+            .iter()
+            .filter(|c| c.category == "Pending")
+            .map(|c| c.name)
+            .collect();
+        assert!(pending.is_empty(), "still marked Pending: {:?}", pending);
+    }
 }

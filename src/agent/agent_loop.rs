@@ -542,6 +542,17 @@ impl Agent {
                     predictive_result.strategy_name,
                 ));
 
+                // 通知 UI：auto-compact 发生（对标 Claude Code 的实时提示）
+                self.emit_event(crate::agent::messaging::AgentEvent::Trace {
+                    event: "auto_compact".to_string(),
+                    payload: serde_json::json!({
+                        "on": true,
+                        "tokens_before": predictive_result.original_token_count,
+                        "tokens_after": predictive_result.new_token_count,
+                        "strategy": predictive_result.strategy_name,
+                    }),
+                });
+
                 return Ok(());
             }
         }
@@ -616,6 +627,17 @@ impl Agent {
                     }
                 )).await;
             }
+
+            // 通知 UI：auto-compact 发生（对标 Claude Code 的实时提示）
+            self.emit_event(crate::agent::messaging::AgentEvent::Trace {
+                event: "auto_compact".to_string(),
+                payload: serde_json::json!({
+                    "on": true,
+                    "tokens_before": compression_result.original_token_count,
+                    "tokens_after": compression_result.new_token_count,
+                    "strategy": compression_result.decision,
+                }),
+            });
         }
 
         Ok(())

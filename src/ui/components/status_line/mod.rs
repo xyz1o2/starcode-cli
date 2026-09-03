@@ -1025,7 +1025,35 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
         }
     }
 
-    // ── 5. Cost — 已移除（不再显示 token 成本） ─────────────────────────────
+    // ── 5. Cost + elapsed ────────────────────────────────────────────────────
+    // 对标 Claude Code 状态栏的 running cost & duration。成本已由 stream.rs 累计
+    // 到 state.total_cost；耗时用会话创建时刻计算。成本为 0（尚未产生 usage）时
+    // 只显示耗时。
+    if !compact {
+        let elapsed = format_elapsed(state.session_started_at.elapsed().as_secs());
+        if state.total_cost > 0.0 {
+            let cost_label = format!("${:.2}", state.total_cost);
+            spans.push(sep());
+            spans.push(Span::styled(
+                cost_label,
+                Style::default().fg(theme.secondary),
+            ));
+        }
+        spans.push(sep());
+        spans.push(Span::styled(
+            elapsed,
+            Style::default().fg(theme.inactive),
+        ));
+    }
+
+    // ── 5a. Offline indicator（对标 Claude Code /network 状态指示）──────────
+    if !compact && state.network_offline {
+        spans.push(sep());
+        spans.push(Span::styled(
+            "OFFLINE",
+            Style::default().fg(theme.warning),
+        ));
+    }
 
     // ── 5b. Cache hit rate (only when below 50% — poor utilization) ───────────
     if !compact {
