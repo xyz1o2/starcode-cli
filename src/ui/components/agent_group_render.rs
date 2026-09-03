@@ -343,11 +343,12 @@ pub(crate) fn format_duration(elapsed: std::time::Duration) -> String {
 
 /// 格式化 token 数量
 fn format_tokens(count: u32) -> String {
-    if count >= 1_000_000 {
+    let scaled = if count >= 1_000_000 {
         format!("{:.1}M", count as f64 / 1_000_000.0)
     } else if count >= 1_000 {
         format!("{:.1}k", count as f64 / 1_000.0)
     } else {
         count.to_string()
-    }
+    };
+    format!("{} tokens", scaled)
 }

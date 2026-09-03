@@ -55,18 +55,15 @@ pub fn render_agent_task_entry(
             Style::default().fg(theme.inactive),
         ))]);
     } else {
-        // 分组模式：显示最后 N 条 + "+N more" 提示
-        let (displayed, hidden_count) = if sub_entries.len() > MAX_PROGRESS_MESSAGES_TO_SHOW {
-            let displayed = &sub_entries[sub_entries.len() - MAX_PROGRESS_MESSAGES_TO_SHOW..];
-            let hidden = sub_entries.len() - MAX_PROGRESS_MESSAGES_TO_SHOW;
-            (displayed, hidden)
-        } else {
-            (sub_entries, 0)
-        };
+        // 分组模式：先把子条目折叠成“工具活动”行，再取尾部 N 条 + "+N more"。
+        // ToolCall 条目不占进度行（结果行会给出同一活动的描述，保留会把
+        // "+N more" 按 call+result 双倍计数）；连续相同的活动合并为 ×N。
+        let activities = condense_sub_activities(sub_entries);
+        let hidden_count = activities.len().saturating_sub(MAX_PROGRESS_MESSAGES_TO_SHOW);
+        let start = activities.len().saturating_sub(MAX_PROGRESS_MESSAGES_TO_SHOW);
 
-        for sub in displayed {
-            let line = render_sub_entry_condensed(state, sub, area_width);
-            blocks.push(line);
+        for item in &activities[start..] {
+            blocks.push(render_activity_line(state, item, area_width));
         }
 
         if hidden_count > 0 {
@@ -229,72 +226,100 @@ fn render_done_line(state: &ChatState, entry: &ChatEntry) -> Vec<Line<'static>> 
     vec![Line::from(spans)]
 }
 
-/// 精简模式下渲染子条目
-///
-/// 对标 Claude Code 的 AgentProgressLine 第二行格式:
-/// `│  ⎿  ToolName: summary` 或 `│  ⎿  Initializing…`
-fn render_sub_entry_condensed(
-    state: &ChatState,
-    entry: &ChatEntry,
-    area_width: u16,
-) -> Vec<Line<'static>> {
+/// 折叠后的工具活动行（分组进度条目）
+struct SubActivity {
+    text: String,
+    success: bool,
+    is_assistant: bool,
+    repeats: usize,
+}
+
+/// 把子条目折叠成活动列表（对标参考实现：进度行只描述“做了什么”，不倾倒结果内容）：
+/// - ToolCall 条目跳过 —— 结果行携带同一活动的描述，保留会把 "+N more" 双倍计数
+/// - ToolResult → `describe_tool_use` 的 "Read: b.txt" 式活动文案
+/// - Assistant → 首行文本
+/// - 连续相同的活动合并为一行，计 `repeats`
+fn condense_sub_activities(sub_entries: &[ChatEntry]) -> Vec<SubActivity> {
     use crate::types::ChatEntryType;
 
+    let mut items: Vec<SubActivity> = Vec::new();
+    for entry in sub_entries {
+        let text: String = match entry.entry_type {
+            ChatEntryType::ToolResult => entry
+                .tool_call
+                .as_ref()
+                .map(|tc| {
+                    crate::agent::subagent::progress::describe_tool_use(
+                        &tc.function.name,
+                        &tc.function.arguments,
+                    )
+                })
+                .unwrap_or_else(|| first_line_of(&entry.content)),
+            ChatEntryType::Assistant => first_line_of(&entry.content),
+            _ => continue,
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let success = entry
+            .tool_result
+            .as_ref()
+            .map(|tr| tr.success)
+            .unwrap_or(true);
+        let is_assistant = entry.entry_type == ChatEntryType::Assistant;
+        // 连续重复的活动（如同一个文件被连续读三次）合并为 "text ×N"
+        if let Some(last) = items.last_mut() {
+            if last.text == text && last.success == success && last.is_assistant == is_assistant {
+                last.repeats += 1;
+                continue;
+            }
+        }
+        items.push(SubActivity {
+            text,
+            success,
+            is_assistant,
+            repeats: 1,
+        });
+    }
+    items
+}
+
+fn first_line_of(s: &str) -> String {
+    s.lines().next().unwrap_or("").trim().to_string()
+}
+
+/// 渲染一条活动行：`│  ⎿  Read: b.txt ×3`
+fn render_activity_line(
+    state: &ChatState,
+    item: &SubActivity,
+    area_width: u16,
+) -> Vec<Line<'static>> {
     let theme = state.theme_manager.current();
     let inner_width = (area_width as usize).saturating_sub(8); // 缩进 + 树形符
 
-    let mut spans = vec![
-        // 树形前缀
-        Span::styled("│  ", Style::default().fg(theme.inactive)),
-        Span::styled("⎿  ", Style::default().fg(theme.inactive)),
-    ];
+    let suffix = if item.repeats > 1 {
+        format!(" ×{}", item.repeats)
+    } else {
+        String::new()
+    };
+    let budget = inner_width
+        .saturating_sub(2)
+        .saturating_sub(suffix.chars().count());
+    let text = format!("{}{}", truncate_str(&item.text, budget), suffix);
 
-    match entry.entry_type {
-        ChatEntryType::ToolCall => {
-            let tool_name = entry
-                .tool_call
-                .as_ref()
-                .map(|tc| tc.function.name.as_str())
-                .unwrap_or("unknown");
-            let args_preview = truncate_str(
-                &entry.tool_call
-                    .as_ref()
-                    .map(|tc| tc.function.arguments.as_str())
-                    .unwrap_or(""),
-                inner_width.saturating_sub(tool_name.len() + 3),
-            );
-            spans.push(Span::styled(
-                tool_name.to_string(),
-                Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
-            ));
-            if !args_preview.is_empty() {
-                spans.push(Span::styled(
-                    format!(": {}", args_preview),
-                    Style::default().fg(theme.inactive),
-                ));
-            }
-        }
-        ChatEntryType::ToolResult => {
-            let success = entry
-                .tool_result
-                .as_ref()
-                .map(|tr| tr.success)
-                .unwrap_or(true);
-            let content_preview = truncate_str(&entry.content, inner_width.saturating_sub(2));
-            let color = if success { theme.success } else { theme.error };
-            spans.push(Span::styled(content_preview, Style::default().fg(color)));
-        }
-        ChatEntryType::Assistant => {
-            let preview = truncate_str(&entry.content, inner_width.saturating_sub(2));
-            spans.push(Span::styled(preview, Style::default().fg(theme.foreground)));
-        }
-        _ => {
-            let preview = truncate_str(&entry.content, inner_width.saturating_sub(2));
-            spans.push(Span::styled(preview, Style::default().fg(theme.inactive)));
-        }
+    let color = if item.is_assistant {
+        theme.foreground
+    } else if item.success {
+        theme.success
+    } else {
+        theme.error
     };
 
-    vec![Line::from(spans)]
+    vec![Line::from(vec![
+        Span::styled("│  ", Style::default().fg(theme.inactive)),
+        Span::styled("⎿  ", Style::default().fg(theme.inactive)),
+        Span::styled(text, Style::default().fg(color)),
+    ])]
 }
 
 /// Transcript 模式下渲染完整子消息列表
@@ -449,13 +474,14 @@ fn render_sub_entry_verbose(
 
 /// 格式化 token 数量
 fn format_tokens(count: u32) -> String {
-    if count >= 1_000_000 {
+    let scaled = if count >= 1_000_000 {
         format!("{:.1}M", count as f64 / 1_000_000.0)
     } else if count >= 1_000 {
         format!("{:.1}k", count as f64 / 1_000.0)
     } else {
         count.to_string()
-    }
+    };
+    format!("{} tokens", scaled)
 }
 
 /// 截断字符串到 `max_len` 个终端显示单元。
@@ -490,5 +516,68 @@ mod tests {
     fn truncate_str_keeps_short_input_intact() {
         assert_eq!(truncate_str("abc", 10), "abc");
         assert_eq!(truncate_str("中文", 10), "中文");
+    }
+
+    fn progress_tool_call(name: &str, args: &str) -> crate::types::StarToolCall {
+        crate::types::StarToolCall {
+            id: format!("{name}-1"),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: name.to_string(),
+                arguments: args.to_string(),
+            },
+        }
+    }
+
+    /// 同一工具连读三次 → 一行活动 ×3；ToolCall 条目不产生活动行
+    #[test]
+    fn condense_merges_duplicates_and_skips_tool_calls() {
+        let tc = progress_tool_call("Read", r#"{"file_path":"/a/b.txt"}"#);
+        let mut subs = Vec::new();
+        subs.push(ChatEntry::tool_call(String::new(), tc.clone()));
+        for _ in 0..3 {
+            subs.push(ChatEntry::tool_result(
+                "import x",
+                tc.clone(),
+                crate::types::ToolResult {
+                    success: true,
+                    output: Some("import x".to_string()),
+                    error: None,
+                    data: None,
+                },
+            ));
+        }
+        let items = condense_sub_activities(&subs);
+        assert_eq!(items.len(), 1, "call 条目被跳过，重复活动合并");
+        assert_eq!(items[0].repeats, 3);
+        assert!(items[0].text.starts_with("Read:"));
+    }
+
+    /// 不同活动不合并，失败结果标记 success=false
+    #[test]
+    fn condense_keeps_distinct_activities() {
+        let mut subs = Vec::new();
+        for (name, args, ok) in [
+            ("Read", r#"{"file_path":"/a/b.txt"}"#, true),
+            ("Bash", r#"{"command":"cargo test"}"#, true),
+            ("Bash", r#"{"command":"cargo test"}"#, false),
+        ] {
+            let tc = progress_tool_call(name, args);
+            subs.push(ChatEntry::tool_result(
+                "out",
+                tc,
+                crate::types::ToolResult {
+                    success: ok,
+                    output: Some("out".to_string()),
+                    error: None,
+                    data: None,
+                },
+            ));
+        }
+        let items = condense_sub_activities(&subs);
+        assert_eq!(items.len(), 3);
+        assert!(items[0].text.starts_with("Read:"));
+        assert!(items[1].text.starts_with("Bash:"));
+        assert!(!items[2].success);
     }
 }

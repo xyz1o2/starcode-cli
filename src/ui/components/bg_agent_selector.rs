@@ -157,15 +157,16 @@ pub fn render_selector(state: &ChatState, area_width: u16) -> Vec<Line<'static>>
     lines
 }
 
-/// `10.9k` / `1.2M` 风格的 token 计数（与 agent_task_render 一致）
+/// `10.9k tokens` / `1.2M tokens` 风格的 token 计数（与 agent_task_render 一致）
 fn format_tokens(count: u32) -> String {
-    if count >= 1_000_000 {
+    let scaled = if count >= 1_000_000 {
         format!("{:.1}M", count as f64 / 1_000_000.0)
     } else if count >= 1_000 {
         format!("{:.1}k", count as f64 / 1_000.0)
     } else {
-        format!("{} tokens", count)
-    }
+        count.to_string()
+    };
+    format!("{} tokens", scaled)
 }
 
 #[cfg(test)]

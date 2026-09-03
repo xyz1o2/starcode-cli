@@ -496,6 +496,10 @@ fn build_tool_argument_display(
             }
             String::new()
         }
+        "Agent" | "agent" => {
+            // 对标 CC：Agent 调用行只显示 description，不倾倒 prompt 全文
+            get_str(&["description"]).unwrap_or_default()
+        }
         "complete_task" => {
             let first = get_str(&["result"])
                 .unwrap_or_default()
