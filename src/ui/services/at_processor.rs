@@ -195,7 +195,11 @@ fn extract_at_path(input: &str, at_char_pos: usize) -> (usize, String) {
 }
 
 /// Process @ commands, read file contents
-pub fn process_at_command(input: &str, workspace_root: Option<&Path>) -> ProcessedAt {
+pub fn process_at_command(
+    input: &str,
+    workspace_root: Option<&Path>,
+    extra_dirs: &[std::path::PathBuf],
+) -> ProcessedAt {
     if !may_contain_at_command(input) {
         return ProcessedAt {
             original_query: input.to_string(),
@@ -241,7 +245,7 @@ pub fn process_at_command(input: &str, workspace_root: Option<&Path>) -> Process
                 }
 
                 // Try to read file
-                match read_file_content(path_str, workspace_root) {
+                match read_file_content(path_str, workspace_root, extra_dirs) {
                     Ok(content) => {
                         file_contents.push(content.clone());
                         processed_query.push_str(&format!("@{}", path_str));
@@ -263,8 +267,13 @@ pub fn process_at_command(input: &str, workspace_root: Option<&Path>) -> Process
     }
 }
 
-/// Read file content, supports relative and absolute paths
-fn read_file_content(path_str: &str, workspace_root: Option<&Path>) -> Result<FileContent, String> {
+/// Read file content, supports relative and absolute paths.
+/// `extra_dirs` 是 /add-dir 追加的额外工作目录：路径落在其中也算 workspace 内。
+fn read_file_content(
+    path_str: &str,
+    workspace_root: Option<&Path>,
+    extra_dirs: &[std::path::PathBuf],
+) -> Result<FileContent, String> {
     let path = PathBuf::from(path_str);
 
     // Try to resolve path
@@ -282,14 +291,22 @@ fn read_file_content(path_str: &str, workspace_root: Option<&Path>) -> Result<Fi
         // If file doesn't exist, subsequent checks will catch it, or fuzzy search will handle it (fuzzy search also recurses under root)
         if resolved_path.exists() {
             if let Ok(canonical_path) = resolved_path.canonicalize() {
-                let canonical_root = root
-                    .canonicalize()
-                    .map_err(|e| format!("Failed to resolve workspace path: {}", e))?;
-                if !canonical_path.starts_with(&canonical_root) {
-                    return Err(format!(
-                        "Access denied: file path outside workspace scope: {}",
-                        resolved_path.display()
-                    ));
+                // /add-dir 追加目录内的文件放行
+                let in_extra = extra_dirs.iter().any(|d| {
+                    d.canonicalize()
+                        .map(|c| canonical_path.starts_with(&c))
+                        .unwrap_or(false)
+                });
+                if !in_extra {
+                    let canonical_root = root
+                        .canonicalize()
+                        .map_err(|e| format!("Failed to resolve workspace path: {}", e))?;
+                    if !canonical_path.starts_with(&canonical_root) {
+                        return Err(format!(
+                            "Access denied: file path outside workspace scope: {} (use /add-dir to grant access)",
+                            resolved_path.display()
+                        ));
+                    }
                 }
             }
         }
@@ -300,6 +317,12 @@ fn read_file_content(path_str: &str, workspace_root: Option<&Path>) -> Result<Fi
         // Try fuzzy search
         if let Some(root) = workspace_root {
             if let Some(found) = fuzzy_find_file(root, path_str) {
+                return read_file_at_path(&found);
+            }
+        }
+        // 额外工作目录里的模糊查找
+        for dir in extra_dirs {
+            if let Some(found) = fuzzy_find_file(dir, path_str) {
                 return read_file_at_path(&found);
             }
         }

@@ -470,7 +470,11 @@ pub async fn enqueue_user_message(
     } else {
         None
     };
-    let processed = at_processor::process_at_command(&processing_input, workspace_root);
+    let processed = at_processor::process_at_command(
+        &processing_input,
+        workspace_root,
+        &state.extra_working_dirs,
+    );
 
     let user_entry_idx = state.chat_history.len();
 

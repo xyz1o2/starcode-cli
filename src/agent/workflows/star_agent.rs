@@ -219,6 +219,102 @@ impl StarAgent {
         ))
     }
 
+    /// /summary、/recap、/btw：对当前会话消息做一次旁路 LLM 生成（对标 Claude Code
+    /// 手动 Session Memory 提取与 away-summary）。
+    /// 不修改 session_messages —— 结果仅回显给用户。
+    pub async fn generate_note(
+        &mut self,
+        kind: crate::runtime::messages::NoteKind,
+        question: Option<String>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::runtime::messages::NoteKind;
+
+        let messages = &self.inner.session_messages;
+        // 只统计有实际内容的 user/assistant 消息
+        let has_content = messages.iter().any(|m| {
+            (m.role == "user" || m.role == "assistant")
+                && m.content
+                    .as_deref()
+                    .map(|c| !c.trim().is_empty())
+                    .unwrap_or(false)
+        });
+        // /btw 是独立提问，空会话也应该能回答
+        if !has_content && kind != NoteKind::Aside {
+            return Err("Nothing to summarize yet — send a message first.".into());
+        }
+
+        // 压缩 transcript：跳过空内容与超长 tool 输出
+        let mut transcript = String::new();
+        for msg in messages {
+            let role = msg.role.as_str();
+            if role != "user" && role != "assistant" && role != "tool" {
+                continue;
+            }
+            let content = msg
+                .content
+                .as_deref()
+                .unwrap_or("[tool calls]")
+                .trim();
+            if content.is_empty() {
+                continue;
+            }
+            let safe_end = content
+                .char_indices()
+                .nth(2000)
+                .map(|(i, _)| i)
+                .unwrap_or(content.len());
+            let body = if safe_end < content.len() {
+                format!("{}…[truncated]", &content[..safe_end])
+            } else {
+                content.to_string()
+            };
+            transcript.push_str(&format!("{}: {}\n", role, body));
+        }
+
+        let prompt = match kind {
+            NoteKind::Summary => format!(
+                "Summarize the conversation below for the user.\n\
+                 Cover: (1) the user's goal, (2) key decisions made, (3) work completed \
+                 (files changed, commands run), (4) current state and any pending next steps.\n\
+                 Be factual and concise. Use short markdown sections or bullets. \
+                 Write in the same language as the conversation.\n\n\
+                 ## Conversation:\n{}",
+                transcript
+            ),
+            NoteKind::Recap => format!(
+                "Produce a ONE-sentence recap (max 40 words, plain text, no markdown) \
+                 of the conversation below: what the user is trying to accomplish, \
+                 what just happened, and what happens next. \
+                 Write in the same language as the conversation.\n\n\
+                 ## Conversation:\n{}",
+                transcript
+            ),
+            NoteKind::Aside => {
+                let q = question.unwrap_or_default();
+                if transcript.trim().is_empty() {
+                    format!(
+                        "Answer the following question directly and concisely. \
+                         Write in the same language as the question.\n\n\
+                         ## Question:\n{}",
+                        q
+                    )
+                } else {
+                    format!(
+                        "Answer the user's side question directly and concisely. It is a detour \
+                         from the ongoing work — do not restart or continue that work, and do not \
+                         propose changes to it unless the question asks for them. The conversation \
+                         is background only; use it just to resolve references in the question. \
+                         Write in the same language as the question.\n\n\
+                         ## Question:\n{}\n\n## Conversation (background):\n{}",
+                        q, transcript
+                    )
+                }
+            }
+        };
+
+        self.client.chat_completion_simple(&prompt).await
+    }
+
     pub async fn list_checkpoints(
         &mut self,
     ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {

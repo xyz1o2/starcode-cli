@@ -21,6 +21,7 @@ pub mod loop_cmd;
 pub mod mcp;
 pub mod memory;
 pub mod model;
+pub mod parity;
 pub mod permissions;
 pub mod plan;
 pub mod plugin;
@@ -259,6 +260,88 @@ pub async fn handle_command(
         "files" => extended::files_in_context(ctx, args).await,
         "rewind" | "checkpoint" => extended::rewind(ctx, args).await,
         "rename" => extended::rename_session(ctx, args).await,
+        // ── Claude Code parity: newly implemented commands ──────
+        "add-dir" => extended::add_dir(ctx, args).await,
+        "effort" => extended::effort(ctx, args).await,
+        "fast" => extended::fast(ctx, args).await,
+        "fork" => extended::fork(ctx, args).await,
+        "summary" => extended::summary_cmd(ctx, args).await,
+        "recap" | "away" | "catchup" => extended::recap(ctx, args).await,
+        // ── 对标 Claude Code：parity.rs 里补齐的实现 ─────────────────────
+        "env" => parity::env(ctx, args).await,
+        "release-notes" => parity::release_notes(ctx, args).await,
+        "history" => parity::history(ctx, args).await,
+        "mode" => parity::mode(ctx, args).await,
+        "output-style" => parity::output_style(ctx, args).await,
+        "tag" => parity::tag(ctx, args).await,
+        "keybindings" => parity::keybindings(ctx, args).await,
+        "reload-plugins" => parity::reload_plugins(ctx, args).await,
+        "statusline" => parity::statusline(ctx, args).await,
+        "poor" => parity::poor(ctx, args).await,
+        "attach" => parity::attach(ctx, args).await,
+        "tui" => parity::tui(ctx, args).await,
+        "proactive" => parity::proactive(ctx, args).await,
+        "advisor" => parity::advisor(ctx, args).await,
+        "autonomy" => parity::autonomy(ctx, args).await,
+        "coordinator" => parity::coordinator(ctx, args).await,
+        "goal" => parity::goal(ctx, args).await,
+        "insights" => parity::insights(ctx, args).await,
+        "heapdump" => parity::heapdump(ctx, args).await,
+        "debug-tool-call" => parity::debug_tool_call(ctx, args).await,
+        "torch" => parity::torch(ctx, &args).await,
+        "perf-issue" => parity::perf_issue(ctx, &args).await,
+        "onboarding" => parity::onboarding(ctx, &args).await,
+        "init-verifiers" => parity::init_verifiers(ctx, &args).await,
+        "assistant" => parity::assistant(ctx, &args).await,
+        "agents-platform" => parity::agents_platform(ctx, &args).await,
+        "artifacts" => parity::artifacts(ctx, &args).await,
+        "stickers" => parity::stickers(ctx, &args).await,
+        "install-github-app" => parity::install_github_app(ctx, args).await,
+        "install-slack-app" => parity::install_slack_app(ctx, args).await,
+        "subscribe-pr" => parity::subscribe_pr(ctx, args).await,
+        "issue" => parity::issue(ctx, args).await,
+        "job" => parity::job(ctx, args).await,
+        "monitor" => parity::monitor(ctx, args).await,
+        "daemon" => parity::daemon(ctx, args).await,
+        "peers" => parity::peers(ctx, args).await,
+        "send" => parity::send(ctx, args).await,
+        "claim-main" => parity::claim_main(ctx, args).await,
+        "bridge-kick" => parity::bridge_kick(ctx, args).await,
+        "remote-control" => parity::remote_control(ctx, args).await,
+        "mobile" => parity::mobile(ctx, args).await,
+        "desktop" => parity::desktop(ctx, args).await,
+        "chrome" => parity::chrome(ctx, &args).await,
+        "web-tools" => parity::web_tools(ctx, &args).await,
+        "web-setup" => parity::web_setup(ctx, &args).await,
+        "privacy-settings" => parity::privacy_settings(ctx, &args).await,
+        "extra-usage" => parity::extra_usage(ctx, &args).await,
+        "rate-limit-options" => parity::rate_limit_options(ctx, &args).await,
+        "passes" => parity::passes(ctx, &args).await,
+        "skill-search" => parity::skill_search(ctx, args).await,
+        "skill-learning" => parity::skill_learning(ctx, &args).await,
+        "skill-store" => parity::skill_store(ctx, &args).await,
+        "memory-stores" => parity::memory_stores(ctx, args).await,
+        "local-memory" => parity::local_memory(ctx, args).await,
+        "local-vault" => parity::local_vault(ctx, args).await,
+        "vault" => parity::vault(ctx, args).await,
+        "ultraplan" => parity::ultraplan(ctx, &args).await,
+        "ultrareview" => parity::ultrareview(ctx, &args).await,
+        "brief" => parity::brief(ctx, &args).await,
+        "btw" => parity::btw(ctx, &args).await,
+        "think-back" => parity::think_back(ctx, &args).await,
+        "weekly-report" => parity::weekly_report(ctx, &args).await,
+        // ── 对标 Claude Code：已声明待实现的命令 ─────────────────
+        // 仅占位提示，尚未实现；逐个补齐实现后在此添加真实分支
+        n if system::is_declared_pending(n) => {
+            let content = format!(
+                "`/{}` is declared (aligned with Claude Code) but not implemented yet.",
+                n
+            );
+            ctx.state
+                .chat_history
+                .push(crate::types::ChatEntry::assistant(content).with_streaming(false));
+            Ok(())
+        }
         _ => plugin_command_fallback(name, args, ctx).await,
     }
 }

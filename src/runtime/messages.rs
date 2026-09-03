@@ -137,6 +137,31 @@ pub enum StreamMessage {
     },
     /// 插件市场后台操作完成：`None` 表示无需提示的成功（如已注册过）
     PluginOpResult { message: Option<String> },
+    /// /summary、/recap 旁路生成完成（不进入主对话上下文）
+    NoteGenerated {
+        message_id: u64,
+        kind: NoteKind,
+        content: String,
+    },
+}
+
+/// 旁路笔记类型（/summary 全文摘要、/recap 一句话回顾、/btw 旁路问答）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoteKind {
+    Summary,
+    Recap,
+    /// /btw：不进入主上下文的一次性提问
+    Aside,
+}
+
+impl NoteKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            NoteKind::Summary => "Session Summary",
+            NoteKind::Recap => "Session Recap",
+            NoteKind::Aside => "Aside",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -196,6 +221,14 @@ pub enum AgentRequest {
     },
     EmitStatus(String),
     ResumeSession(String),
+    /// /summary、/recap、/btw：让 agent 做一次旁路 LLM 生成，
+    /// 结果经 [`StreamMessage::NoteGenerated`] 回 UI，不污染主上下文。
+    GenerateNote {
+        kind: NoteKind,
+        message_id: u64,
+        /// /btw 的问题；/summary、/recap 为 `None`
+        question: Option<String>,
+    },
     /// 插件市场后台操作（git clone / 删除仓库目录等耗时操作，避免阻塞 UI 事件循环）
     PluginOp {
         project_root: std::path::PathBuf,

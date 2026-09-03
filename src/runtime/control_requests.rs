@@ -233,6 +233,25 @@ pub async fn handle_request(
         AgentRequest::ResumeSession(_session_id) => {
             // Session resume is handled by the streaming request handler
         }
+        AgentRequest::GenerateNote {
+            kind,
+            message_id,
+            question,
+        } => {
+            // 非流式控制路径：与 ListModels 等一致，直接在 worker 上生成，
+            // 结果经 NoteGenerated 回 UI（session.rs 的 deferred 路径同样直等）。
+            let content = match agent.generate_note(kind, question).await {
+                Ok(text) => text,
+                Err(e) => format!("⚠️ {}", e),
+            };
+            let _ = tx
+                .send(StreamMessage::NoteGenerated {
+                    message_id,
+                    kind,
+                    content,
+                })
+                .await;
+        }
         AgentRequest::PluginOp { project_root, op } => {
             spawn_plugin_op(tx, project_root, op);
         }

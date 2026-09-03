@@ -908,6 +908,27 @@ pub async fn handle_stream_update(
             state.plugin_selected.clear();
             state.reload_plugins_state().await;
         }
+        StreamMessage::NoteGenerated {
+            message_id: _,
+            kind,
+            content,
+        } => {
+            // /summary、/recap 旁路生成结果：作为独立助手条目展示（不进入主上下文）
+            state.current_status_line = None;
+            state.is_processing = false;
+            let note = content.trim();
+            if note.is_empty() {
+                return Ok(());
+            }
+            let entry = if note.starts_with("⚠️") {
+                note.to_string()
+            } else {
+                format!("**{}**\n\n{}", kind.label(), note)
+            };
+            state
+                .chat_history
+                .push(ChatEntry::assistant(entry).with_streaming(false));
+        }
         StreamMessage::ConfiguredProviders(ids) => {
             state.configured_providers = ids.into_iter().collect();
         }

@@ -160,11 +160,15 @@ impl SkillLearningManager {
             return;
         }
 
-        let skills = self.storage.get_all_skills();
-        for skill in skills {
-            if let Some(evolved) = self.evolution.evolve(&skill) {
-                self.storage.update_skill(evolved);
-            }
+        // 先收集进化结果，避免与 get_all_skills 的不可变借用冲突
+        let evolved: Vec<Skill> = self
+            .storage
+            .get_all_skills()
+            .into_iter()
+            .filter_map(|skill| self.evolution.evolve(skill))
+            .collect();
+        for skill in evolved {
+            self.storage.update_skill(skill);
         }
     }
 

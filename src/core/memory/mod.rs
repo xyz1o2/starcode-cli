@@ -1,3 +1,4 @@
+pub mod classification;
 pub mod extract;
 
 use serde::{Deserialize, Serialize};

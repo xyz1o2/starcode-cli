@@ -30,6 +30,11 @@ pub struct DeferredRuntimeActions {
         Option<String>,
     )>,
     pub pending_compress_request: Option<u64>,
+    pub pending_generate_note: Option<(
+        crate::runtime::messages::NoteKind,
+        u64,
+        Option<String>,
+    )>,
     pub pending_mark_as_read: Vec<String>,
 }
 
@@ -179,6 +184,14 @@ pub async fn handle_streaming_request(
         }
         Some(AgentRequest::Compress { message_id }) => {
             deferred.pending_compress_request = Some(message_id);
+            StreamingRequestOutcome::Continue
+        }
+        Some(AgentRequest::GenerateNote {
+            kind,
+            message_id,
+            question,
+        }) => {
+            deferred.pending_generate_note = Some((kind, message_id, question));
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::ResetSession) => {
@@ -386,6 +399,20 @@ pub async fn apply_deferred_runtime_actions(
                 }
             }
         }
+    }
+
+    if let Some((kind, message_id, question)) = deferred.pending_generate_note.take() {
+        let content = match agent.generate_note(kind, question).await {
+            Ok(text) => text,
+            Err(e) => format!("⚠️ {}", e),
+        };
+        let _ = tx
+            .send(StreamMessage::NoteGenerated {
+                message_id,
+                kind,
+                content,
+            })
+            .await;
     }
 
     if deferred.pending_toggle_yolo {

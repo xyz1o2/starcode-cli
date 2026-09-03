@@ -1486,3 +1486,344 @@ pub async fn rewind(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRe
 pub async fn rename_session(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     session_title(ctx, args).await
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Claude Code parity commands (add-dir / effort / fast / fork / summary / recap)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 把一个目录加入会话的额外工作目录（/add-dir 共用逻辑，
+/// 也被 InputContext::AddWorkingDir 的输入弹窗回车路径调用）。
+pub fn add_working_dir_to_state(
+    state: &mut crate::ui::state::ChatState,
+    path_str: &str,
+) -> Result<String, String> {
+    let raw = path_str.trim().trim_matches('"').to_string();
+    if raw.is_empty() {
+        return Err("Usage: /add-dir <path>".to_string());
+    }
+
+    // 展开 ~ 为用户主目录
+    let expanded = if raw == "~" {
+        dirs::home_dir().ok_or_else(|| "Cannot resolve home directory".to_string())?
+    } else if let Some(rest) = raw.strip_prefix("~/").or(raw.strip_prefix("~\\")) {
+        let home = dirs::home_dir().ok_or_else(|| "Cannot resolve home directory".to_string())?;
+        home.join(rest)
+    } else {
+        std::path::PathBuf::from(&raw)
+    };
+
+    if !expanded.exists() {
+        return Err(format!("Directory not found: {}", expanded.display()));
+    }
+    if !expanded.is_dir() {
+        return Err(format!("Not a directory: {}", expanded.display()));
+    }
+
+    let canonical = expanded.canonicalize().unwrap_or(expanded);
+
+    // 与 cwd / 已有目录去重
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cwd_canon = cwd.canonicalize().unwrap_or(cwd);
+    if canonical == cwd_canon {
+        return Err("Already the current working directory.".to_string());
+    }
+    if state
+        .extra_working_dirs
+        .iter()
+        .any(|d| d.canonicalize().unwrap_or_else(|_| d.clone()) == canonical)
+    {
+        return Err(format!("Already added: {}", canonical.display()));
+    }
+
+    state.extra_working_dirs.push(canonical.clone());
+    Ok(format!(
+        "✅ Added working directory: {}\n\nExtra working directories: {}. \
+         Files under it are now accessible via @ mentions.",
+        canonical.display(),
+        state.extra_working_dirs.len()
+    ))
+}
+
+/// /add-dir — 追加工作目录（对标 Claude Code）。带参数直接加入；
+/// 无参数弹出路径输入框。
+pub async fn add_dir(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    if args.is_empty() {
+        // 打开输入弹窗（Enter 后走 InputContext::AddWorkingDir 分支）
+        ctx.state.show_status_modal = false;
+        ctx.state.close_palette();
+        ctx.state.show_input_modal = true;
+        ctx.state.input_modal_title = "Add Working Directory".to_string();
+        ctx.state.input_modal_prompt =
+            "Enter a directory path to add to this session:".to_string();
+        ctx.state.input_modal_value = String::new();
+
+        let mut textarea = tui_textarea::TextArea::default();
+        textarea.set_cursor_line_style(ratatui::style::Style::default());
+        textarea.set_placeholder_text("/path/to/directory or ~/projects/foo");
+        textarea.set_cursor_style(
+            ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+        );
+        ctx.state.modal_textarea = textarea;
+        ctx.state.input_context =
+            Some(crate::ui::state::palette::InputContext::AddWorkingDir);
+        return Ok(());
+    }
+
+    let path = args.join(" ");
+    match add_working_dir_to_state(ctx.state, &path) {
+        Ok(msg) => push_msg(&mut ctx, msg),
+        Err(e) => push_msg(&mut ctx, format!("❌ {}", e)),
+    }
+    Ok(())
+}
+
+/// /effort — 设置思考努力档位（对标 Claude Code effort）。
+/// 无参数打开 ThinkingEffort 选择面板；带参数直接设置。
+pub async fn effort(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    if args.is_empty() {
+        ctx.state.close_palette();
+        ctx.state
+            .open_palette(crate::ui::state::palette::PaletteMode::ThinkingEffort);
+        return Ok(());
+    }
+
+    let level = args[0].to_lowercase();
+    let effort = match level.as_str() {
+        "off" | "none" | "disable" | "disabled" => crate::types::ThinkingEffort::Off,
+        "low" => crate::types::ThinkingEffort::Low,
+        "medium" | "auto" => crate::types::ThinkingEffort::Medium,
+        "high" | "xhigh" | "max" => crate::types::ThinkingEffort::High,
+        other => {
+            push_msg(
+                &mut ctx,
+                format!(
+                    "❌ Unknown effort level: {}. Usage: /effort [off|low|medium|high]",
+                    other
+                ),
+            );
+            return Ok(());
+        }
+    };
+
+    ctx.state.thinking_effort = effort;
+    // 持久化到用户设置（与面板设置路径一致）
+    let effort_str = ctx.state.thinking_effort.as_str().to_string();
+    tokio::spawn(async move {
+        if let Ok(mgr) = crate::core::config::settings_manager::SettingsManager::new() {
+            if let Ok(mut settings) = mgr.load_user_settings().await {
+                settings.thinking_effort = Some(effort_str);
+                let _ = mgr.save_user_settings(&settings).await;
+            }
+        }
+    });
+
+    let display = ctx.state.thinking_effort.display_name().to_string();
+    push_msg(&mut ctx, format!("✅ Thinking effort: {}", display));
+    Ok(())
+}
+
+/// 从可用模型列表里挑一个"快速"模型（mini/flash/lite 等轻量标识）。
+fn pick_fast_model(state: &crate::ui::state::ChatState) -> Option<String> {
+    const FAST_HINTS: [&str; 7] = ["mini", "flash", "lite", "fast", "small", "turbo", "instant"];
+    let mut candidates: Vec<String> = state
+        .available_models_info
+        .iter()
+        .filter(|m| {
+            let id = m.id.to_lowercase();
+            FAST_HINTS.iter().any(|h| id.contains(h))
+        })
+        .map(|m| m.id.clone())
+        .collect();
+    // 当前模型若是轻量款则不再切换
+    candidates.retain(|id| id != &state.current_model);
+    candidates.first().cloned()
+}
+
+/// /fast — 快速模式开关（对标 Claude Code fast mode）：
+/// 开启时若当前不是轻量模型则自动切换，关闭时恢复原模型。
+/// 会话级开关（不持久化 —— 启动模型路由涉及异步模型列表，后续再补）。
+pub async fn fast(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    let action = args.first().map(|s| s.to_lowercase()).unwrap_or_else(|| "toggle".into());
+    let enable = match action.as_str() {
+        "on" | "enable" | "true" => true,
+        "off" | "disable" | "false" => false,
+        "toggle" => !ctx.state.fast_mode,
+        other => {
+            push_msg(
+                &mut ctx,
+                format!("❌ Unknown action: {}. Usage: /fast [on|off]", other),
+            );
+            return Ok(());
+        }
+    };
+
+    if enable == ctx.state.fast_mode {
+        push_msg(
+            &mut ctx,
+            format!(
+                "Fast mode is already {}.",
+                if enable { "ON" } else { "OFF" }
+            ),
+        );
+        return Ok(());
+    }
+
+    if enable {
+        ctx.state.fast_mode = true;
+        ctx.state.fast_mode_prev_model = Some(ctx.state.current_model.clone());
+
+        let mut switched = String::new();
+        if let Some(fast_model) = pick_fast_model(ctx.state) {
+            let provider_id = ctx
+                .state
+                .model_provider_map
+                .get(&fast_model)
+                .cloned()
+                .or_else(|| ctx.state.current_provider_id.clone());
+            let _ = ctx
+                .agent_tx
+                .send(AgentRequest::SetModel {
+                    model: fast_model.clone(),
+                    provider_id,
+                })
+                .await;
+            ctx.state.current_model = fast_model.clone();
+            switched = format!(" · model set to {}", fast_model);
+        }
+        ctx.state.current_status_line =
+            Some(format!("⚡ Fast mode ON{}", switched));
+        push_msg(
+            &mut ctx,
+            format!("⚡ Fast mode ON{}\n\nResponses will be optimized for speed.", switched),
+        );
+    } else {
+        ctx.state.fast_mode = false;
+        let mut restored = String::new();
+        if let Some(prev) = ctx.state.fast_mode_prev_model.take() {
+            if !prev.is_empty() && prev != ctx.state.current_model {
+                let provider_id = ctx
+                    .state
+                    .model_provider_map
+                    .get(&prev)
+                    .cloned()
+                    .or_else(|| ctx.state.current_provider_id.clone());
+                let _ = ctx
+                    .agent_tx
+                    .send(AgentRequest::SetModel {
+                        model: prev.clone(),
+                        provider_id,
+                    })
+                    .await;
+                ctx.state.current_model = prev.clone();
+                restored = format!(" · model restored to {}", prev);
+            }
+        }
+        ctx.state.current_status_line = Some("Fast mode OFF".to_string());
+        push_msg(&mut ctx, format!("Fast mode OFF{}", restored));
+    }
+    Ok(())
+}
+
+/// /fork — 把当前会话复制为一个新会话快照（对标 Claude Code fork）。
+/// 可带 <prompt>：快照保存后立即在当前会话中以该提示继续。
+pub async fn fork(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    let history: Vec<ChatEntry> = ctx
+        .state
+        .chat_history
+        .iter()
+        .filter(|e| !e.is_welcome)
+        .cloned()
+        .collect();
+
+    if history.is_empty() {
+        push_msg(&mut ctx, "Nothing to fork yet — the session is empty.");
+        return Ok(());
+    }
+
+    let fork_id = format!(
+        "fork-{}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    );
+    match crate::utils::session_manager::save_session(&fork_id, &history).await {
+        Ok(()) => {
+            let mut msg = format!(
+                "🍴 Forked session saved as `{}` ({} messages).\n\n\
+                 The fork preserves the conversation up to this point. \
+                 Resume it later with `/session-resume {}`.",
+                fork_id,
+                history.len(),
+                fork_id
+            );
+            // 带 prompt：fork 后立即以该提示继续当前（fork 点之后的）会话
+            let prompt = args.join(" ").trim().to_string();
+            if !prompt.is_empty() {
+                let message_id = ctx.state.next_message_id;
+                ctx.state.next_message_id += 1;
+                let _ = ctx
+                    .agent_tx
+                    .send(AgentRequest::SendMessage {
+                        message_id,
+                        message: prompt,
+                    })
+                    .await;
+                msg.push_str("\n\nPrompt queued — it will run after the current response finishes.");
+            }
+            push_msg(&mut ctx, msg);
+        }
+        Err(e) => push_msg(&mut ctx, format!("❌ Fork failed: {}", e)),
+    }
+    Ok(())
+}
+
+/// /summary、/recap、/btw 共用：请求 agent 旁路生成笔记
+pub(crate) async fn request_note(
+    ctx: &mut CommandContext<'_>,
+    kind: crate::runtime::messages::NoteKind,
+    question: Option<String>,
+) -> CommandResult {
+    use crate::runtime::messages::NoteKind;
+    let has_content = ctx.state.chat_history.iter().any(|e| {
+        !e.is_welcome
+            && matches!(
+                e.entry_type,
+                crate::types::ChatEntryType::User | crate::types::ChatEntryType::Assistant
+            )
+            && !e.content.trim().is_empty()
+    });
+    // /btw 自带问题，空会话也能回答
+    if !has_content && kind != NoteKind::Aside {
+        push_msg(
+            ctx,
+            match kind {
+                NoteKind::Summary => "No messages to summarize.",
+                _ => "Nothing to recap yet — send a message first.",
+            },
+        );
+        return Ok(());
+    }
+
+    let message_id = ctx.state.next_message_id;
+    ctx.state.next_message_id += 1;
+    ctx.state.current_status_line = Some(format!("Generating {}...", kind.label()));
+    let _ = ctx
+        .agent_tx
+        .send(AgentRequest::GenerateNote {
+            kind,
+            message_id,
+            question,
+        })
+        .await;
+    Ok(())
+}
+
+/// /summary — 生成并展示会话摘要（对标 Claude Code 手动 Session Memory 提取）
+pub async fn summary_cmd(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
+    let mut ctx = ctx;
+    request_note(&mut ctx, crate::runtime::messages::NoteKind::Summary, None).await
+}
+
+/// /recap — 一句话会话回顾（对标 Claude Code away-summary；别名 /away /catchup）
+pub async fn recap(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
+    let mut ctx = ctx;
+    request_note(&mut ctx, crate::runtime::messages::NoteKind::Recap, None).await
+}

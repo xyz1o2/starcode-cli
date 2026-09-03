@@ -1082,6 +1082,26 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
         }
     }
 
+    // ── 6b1. Fast mode indicator (/fast) ─────────────────────────────────────
+    if state.fast_mode {
+        spans.push(sep());
+        spans.push(Span::styled(
+            "⚡fast",
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // ── 6b2. Extra working directories (/add-dir) ────────────────────────────
+    if !compact && !state.extra_working_dirs.is_empty() {
+        spans.push(sep());
+        spans.push(Span::styled(
+            format!("+{} dir", state.extra_working_dirs.len()),
+            Style::default().fg(theme.info),
+        ));
+    }
+
     // ── 6b2. Vim mode indicator ──────────────────────────────────────────────
     if !compact && state.vim_enabled {
         spans.push(sep());

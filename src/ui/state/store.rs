@@ -396,6 +396,16 @@ pub struct ChatState {
     // ============ UX 改进: 审批模式状态 ============
     pub approval_mode: crate::types::ApprovalMode,
     pub thinking_effort: crate::types::ThinkingEffort,
+    /// /add-dir 追加的工作目录（对标 Claude Code add-dir：扩展 @ 文件访问范围）
+    pub extra_working_dirs: Vec<std::path::PathBuf>,
+    /// /fast 快速模式（对标 Claude Code fast mode：切到轻量模型 + 状态栏指示）
+    pub fast_mode: bool,
+    /// fast 开启前的模型（关闭时恢复）
+    pub fast_mode_prev_model: Option<String>,
+    /// /poor 省电模式（对标 Claude Code poor mode：跳过记忆抽取与提示建议）
+    pub poor_mode: bool,
+    /// /advisor 顾问模式（每轮结束后附带简短建议）
+    pub advisor_mode: bool,
     pub context_window_override: Option<u32>,
     // ============ UX 改进: 工具确认状态 ============
     // 内联确认卡片：存储待确认的工具调用，等待用户响应
@@ -786,6 +796,11 @@ impl ChatState {
             auto_continue_remaining: 0,
             approval_mode: crate::types::ApprovalMode::Default,
             thinking_effort: crate::types::ThinkingEffort::default(),
+            extra_working_dirs: Vec::new(),
+            fast_mode: false,
+            fast_mode_prev_model: None,
+            poor_mode: false,
+            advisor_mode: false,
             context_window_override: None,
             pending_tool_calls: None,
             pending_message_id: None,

@@ -2881,6 +2881,30 @@ async fn handle_input_modal(
                         state.input_context = None;
                         return Ok(true);
                     }
+                    crate::ui::state::palette::InputContext::AddWorkingDir => {
+                        let path = state.input_modal_value.clone();
+                        state.show_input_modal = false;
+                        state.input_context = None;
+
+                        if path.trim().is_empty() {
+                            return Ok(true);
+                        }
+
+                        match crate::commands::extended::add_working_dir_to_state(state, &path) {
+                            Ok(msg) => {
+                                state.chat_history.push(
+                                    crate::types::ChatEntry::assistant(msg).with_streaming(false),
+                                );
+                            }
+                            Err(e) => {
+                                state.chat_history.push(
+                                    crate::types::ChatEntry::assistant(format!("❌ {}", e))
+                                        .with_streaming(false),
+                                );
+                            }
+                        }
+                        return Ok(true);
+                    }
                 }
             } else {
                 state.show_input_modal = false;

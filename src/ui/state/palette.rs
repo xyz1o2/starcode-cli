@@ -99,6 +99,8 @@ pub enum InputContext {
     },
     /// Plugins 弹窗：录入 marketplace 来源（git URL / owner/repo / 本地路径）
     MarketplaceSource,
+    /// /add-dir 无参数：录入要追加的工作目录路径
+    AddWorkingDir,
 }
 
 impl Default for PaletteMode {
