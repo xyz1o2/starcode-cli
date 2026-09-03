@@ -157,12 +157,12 @@ impl ToolInvocation for ExitPlanModeInvocation {
                 PlanSeedOutcome::Seeded { count, appended } => {
                     if appended {
                         output.push_str(&format!(
-                            "\n\n任务列表已有内容，已追加为新计划节点（{} 个任务，Ctrl+B 查看任务面板）",
+                            "\n\n任务列表已有内容，已追加为新计划节点（{} 个任务，Ctrl+T 查看任务面板）",
                             count
                         ));
                     } else {
                         output.push_str(&format!(
-                            "\n\n已从计划生成 {} 个任务（Ctrl+B 查看任务面板）",
+                            "\n\n已从计划生成 {} 个任务（Ctrl+T 查看任务面板）",
                             count
                         ));
                     }

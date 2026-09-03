@@ -562,11 +562,11 @@ pub async fn feedback(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Comman
 // ── /tasks — show and manage tasks ─────────────────────────────
 
 pub async fn tasks(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
-    // 无参数：打开交互式任务面板（与 Ctrl+B 相同），而不是倾倒原始 JSON
+    // 无参数：打开交互式任务面板（与 Ctrl+T 相同），而不是倾倒原始 JSON
     ctx.state.task_panel.reload();
     ctx.state.task_panel.manually_hidden = false;
     ctx.state.task_panel.is_visible = true;
-    ctx.state.current_status_line = Some("Task panel opened (Ctrl+B to toggle)".to_string());
+    ctx.state.current_status_line = Some("Task panel opened (Ctrl+T to toggle)".to_string());
     Ok(())
 }
 

@@ -1064,40 +1064,27 @@ pub async fn handle_key_event(
         return Ok(());
     }
 
-    // Handle Ctrl+T for toggling thinking blocks
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('t')) {
-        let has_thinking = state.chat_history.iter().any(|e| {
-            e.reasoning_content
-                .as_ref()
-                .map_or(false, |r| !r.is_empty())
+    // Ctrl+O：全局切换 transcript / verbose 输出（对标 Claude Code 的 app:toggleTranscript，
+    // 同为 Global 作用域）。这里必须在 handle_overlay_input 之前，否则又会退回到
+    // 「只有任务面板可见时才生效」的老行为。
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('o')) {
+        let on = state.toggle_transcript_mode();
+        // 直接写 current_status_line：emit_status_text 只放行 i18n::status_prefixes()
+        // 允许的前缀，"Verbose output: …" 会被它静默丢掉。
+        state.current_status_line = Some(if on {
+            "Verbose output: ON".to_string()
+        } else {
+            "Verbose output: OFF".to_string()
         });
-        if has_thinking {
-            let all_expanded = state.chat_history.iter().enumerate().all(|(idx, e)| {
-                if e.reasoning_content
-                    .as_ref()
-                    .map_or(false, |r| !r.is_empty())
-                {
-                    state.expanded_thinking_indices.contains(&idx)
-                } else {
-                    true
-                }
-            });
-            if all_expanded {
-                // Collapse all
-                state.expanded_thinking_indices.clear();
-                state.current_status_line = Some("Thinking blocks collapsed".to_string());
-            } else {
-                // Expand all
-                for (idx, e) in state.chat_history.iter().enumerate() {
-                    if e.reasoning_content
-                        .as_ref()
-                        .map_or(false, |r| !r.is_empty())
-                    {
-                        state.expanded_thinking_indices.insert(idx);
-                    }
-                }
-                state.current_status_line = Some("Thinking blocks expanded".to_string());
-            }
+        return Ok(());
+    }
+
+    // Ctrl+T：全局切换任务面板（对标 Claude Code 的 app:toggleTodos）。
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('t')) {
+        state.task_panel.toggle_visibility();
+        if state.task_panel.is_visible {
+            // 打开时重读任务文件，和 /tasks 一样避免显示旧快照。
+            state.task_panel.reload();
         }
         return Ok(());
     }
@@ -1164,11 +1151,11 @@ pub async fn handle_key_event(
         }
     }
 
-    // Handle Ctrl+B for Task Panel
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('b')) {
-        state.task_panel.toggle_visibility();
-        return Ok(());
-    }
+    // Ctrl+B 有意不绑定：Claude Code 把它留给 `task:background`（Task 作用域），且只在
+    // 真有前台任务可转后台时才吃掉这个键，空闲时让它落回 readline 的 backward-char。
+    // starcode 目前没有「把正在跑的前台任务转后台」的运行时能力（run_in_background 只在
+    // 工具描述里许诺过，Rust 侧没有实现），所以这里同样不拦截，交给 textarea 当左移光标用。
+    // 任务面板改由 Ctrl+T 切换（对标 app:toggleTodos）。
 
     // Handle Ctrl+C (Copy selected text / Cancel / double-press Exit)
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
@@ -2368,19 +2355,6 @@ async fn handle_overlay_input(
             state
                 .task_panel
                 .enter_edit_mode(crate::ui::components::task_panel::EditMode::Title);
-            return Ok(true);
-        }
-
-        // Ctrl+O: 切换 Transcript 模式（对标 Claude Code 的 app:toggleTranscript）
-        if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            state.is_transcript_mode = !state.is_transcript_mode;
-            state.clear_cache();
-            let mode_text = if state.is_transcript_mode { "ON" } else { "OFF" };
-            crate::ui::app::logic::emit_status_text(
-                state,
-                0,
-                &format!("Transcript mode: {}", mode_text),
-            );
             return Ok(true);
         }
 

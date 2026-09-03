@@ -450,7 +450,8 @@ pub async fn keybindings(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Com
          | `Shift+Enter` / `Alt+Enter` | Newline |\n\
          | `Esc` | Cancel stream · twice clears input |\n\
          | `Ctrl+C` | Twice to quit |\n\
-         | `Ctrl+O` | Toggle transcript mode |\n\
+         | `Ctrl+O` | Verbose output (transcript) |\n\
+         | `Ctrl+T` | Toggle tasks |\n\
          | `Ctrl+R` | Search input history |\n\
          | `↑` / `↓` | Walk input history |\n\
          | `Ctrl+W` / `Ctrl+U` / `Ctrl+K` | Kill word / line-start / line-end |\n\
@@ -698,8 +699,8 @@ pub async fn tui(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResul
                 Some(("colorblind palette", ctx.state.colorblind_mode))
             }
             "transcript" => {
-                ctx.state.is_transcript_mode = !ctx.state.is_transcript_mode;
-                Some(("transcript mode", ctx.state.is_transcript_mode))
+                let now = ctx.state.toggle_transcript_mode();
+                Some(("transcript mode", now))
             }
             "preview" => {
                 ctx.state.preview_visible = !ctx.state.preview_visible;

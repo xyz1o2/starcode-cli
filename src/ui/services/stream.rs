@@ -953,13 +953,13 @@ pub async fn handle_stream_update(
             let mode_desc = match mode {
                 crate::types::ApprovalMode::Default => i18n::t(
                     "ui.mode.build.desc",
-                    "Build mode: confirm dangerous actions; manage tasks with Ctrl+B or /tasks",
-                    "Build mode: confirm dangerous actions; manage tasks with Ctrl+B or /tasks",
+                    "Build mode: confirm dangerous actions; manage tasks with Ctrl+T or /tasks",
+                    "Build mode: confirm dangerous actions; manage tasks with Ctrl+T or /tasks",
                 ),
                 crate::types::ApprovalMode::Plan => i18n::t(
                     "ui.mode.plan.desc",
-                    "Plan mode: read-only research; manage plans with /tasks or Ctrl+B",
-                    "Plan mode: read-only research; manage plans with /tasks or Ctrl+B",
+                    "Plan mode: read-only research; manage plans with /tasks or Ctrl+T",
+                    "Plan mode: read-only research; manage plans with /tasks or Ctrl+T",
                 ),
                 crate::types::ApprovalMode::Yolo => i18n::t(
                     "ui.mode.yolo.desc",

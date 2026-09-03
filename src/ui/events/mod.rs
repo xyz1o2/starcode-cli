@@ -17,9 +17,11 @@ pub mod clipboard_paste;
 /// # Key Binding Conventions
 /// - Ctrl+C: Cancel streaming / double-press to exit
 /// - Ctrl+P: Command palette
-/// - Ctrl+B: Task panel toggle
+/// - Ctrl+O: Toggle transcript / verbose output (对标 app:toggleTranscript)
+/// - Ctrl+T: Task panel toggle (对标 app:toggleTodos)
 /// - Shift+Tab: Plan/Build mode toggle
 /// - Alt+P: Fold/unfold pasted input
+/// - Alt+T: Cycle thinking effort (对标 chat:thinkingToggle)
 /// - Esc: Dismiss overlays / cancel
 ///
 pub mod input;

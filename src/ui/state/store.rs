@@ -971,6 +971,30 @@ impl ChatState {
         self.virtual_list.mark_all_dirty();
     }
 
+    /// 切换 transcript（verbose 输出）模式，返回切换后的状态。
+    ///
+    /// 对标 Claude Code 的 `app:toggleTranscript`：transcript 视图是「把这一轮的全部原始
+    /// 输出摊开」，所以 thinking 块随之展开／收起，而不是再占用一个独立快捷键。
+    /// Ctrl+O 与 `/tui transcript` 共用这里，保证两条入口行为一致。
+    pub fn toggle_transcript_mode(&mut self) -> bool {
+        self.is_transcript_mode = !self.is_transcript_mode;
+        if self.is_transcript_mode {
+            for (idx, entry) in self.chat_history.iter().enumerate() {
+                if entry
+                    .reasoning_content
+                    .as_ref()
+                    .is_some_and(|r| !r.is_empty())
+                {
+                    self.expanded_thinking_indices.insert(idx);
+                }
+            }
+        } else {
+            self.expanded_thinking_indices.clear();
+        }
+        self.clear_cache();
+        self.is_transcript_mode
+    }
+
     /// 获取选中的文本内容（从渲染后的行中提取）
     pub fn get_selected_text(&self) -> Option<String> {
         if !self.text_selection.has_selection() {
@@ -1147,5 +1171,39 @@ pub fn bump_indices_after_insert(state: &mut ChatState, from: usize, delta: usiz
         if *idx >= from {
             *idx += delta;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ChatEntry, ChatEntryType};
+
+    /// Ctrl+O / `/tui transcript` 共用的开关：开启时展开所有 thinking 块，关闭时收起，
+    /// 对标 Claude Code transcript 视图「摊开全部原始输出」的语义。
+    #[test]
+    fn toggle_transcript_mode_drives_thinking_expansion() {
+        let mut state = ChatState::new();
+        state.chat_history.clear();
+        state
+            .chat_history
+            .push(ChatEntry::new(ChatEntryType::User, "hi".to_string()));
+        let mut with_reasoning = ChatEntry::assistant("answer");
+        with_reasoning.reasoning_content = Some("thought".to_string());
+        state.chat_history.push(with_reasoning);
+        state
+            .chat_history
+            .push(ChatEntry::assistant("no reasoning here"));
+
+        assert!(!state.is_transcript_mode);
+        assert!(state.expanded_thinking_indices.is_empty());
+
+        assert!(state.toggle_transcript_mode());
+        // 只有带 reasoning_content 的条目会被展开
+        let expanded: Vec<usize> = state.expanded_thinking_indices.iter().copied().collect();
+        assert_eq!(expanded, vec![1]);
+
+        assert!(!state.toggle_transcript_mode());
+        assert!(state.expanded_thinking_indices.is_empty());
     }
 }

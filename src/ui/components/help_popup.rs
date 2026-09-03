@@ -76,8 +76,16 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
                     ),
                 ),
                 (
-                    "Ctrl+B".to_string(),
-                    i18n::t("ui.help.control.tasks", "打开任务面板", "Open task panel"),
+                    "Ctrl+T".to_string(),
+                    i18n::t("ui.help.control.tasks", "切换任务面板", "Toggle tasks"),
+                ),
+                (
+                    "Ctrl+O".to_string(),
+                    i18n::t(
+                        "ui.help.control.transcript",
+                        "切换详细输出（transcript）",
+                        "Verbose output (transcript)",
+                    ),
                 ),
                 (
                     "Ctrl+C".to_string(),
