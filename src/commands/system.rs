@@ -180,7 +180,7 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "init",
         alt_names: &[],
-        description: "Initialize project config",
+        description: "Initialize a new STARCODE.md file with codebase documentation",
         category: "Config",
         sub_commands: &[],
     },

@@ -156,14 +156,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let cwd = std::env::current_dir()?;
             match crate::commands::init::generate_initial_context(&cwd) {
                 Ok(path) => {
-                    println!("✅ Successfully created CLAUDE.md at {}", path.display());
-                    println!("💡 Tip: Run `starcode` to start an interactive session for further analysis.");
+                    println!("✅ Successfully created context file at {}", path.display());
+                    println!("💡 Tip: Run `starcode` and use `/init` for a full AI analysis.");
                 }
                 Err(e) => {
                     eprintln!("❌ {}", e);
                     if e.contains("already exists") {
                         println!(
-                            "💡 Tip: Run `starcode` to start an interactive session to update it."
+                            "💡 Tip: Run `starcode` and use `/init` to improve the existing file."
                         );
                     } else {
                         std::process::exit(1);
@@ -371,6 +371,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let config_params = core::config::ConfigParameters {
         session_id,
+        resume_session: resume_session_id.is_some(),
         sandbox: None,
         target_dir: cwd.clone(),
         debug_mode: false,
