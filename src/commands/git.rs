@@ -174,6 +174,7 @@ async fn handle_commit_and_push(
     let cwd = std::env::current_dir()?;
     let config_params = core::config::ConfigParameters {
         session_id: uuid::Uuid::new_v4().to_string(),
+        resume_session: false,
         sandbox: None,
         target_dir: cwd.clone(),
         debug_mode: false,

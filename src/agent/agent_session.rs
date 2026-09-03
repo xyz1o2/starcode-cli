@@ -72,13 +72,15 @@ impl Agent {
     }
 
     pub(crate) fn persist_session_messages(&mut self) {
-        // 子代理不持久化会话消息（避免覆盖父代理的 session_messages.json）
+        // 子代理不持久化会话消息（避免覆盖父代理的会话文件）
         if self.config.recursion_depth > 0 {
             return;
         }
         session::persist_session_messages(
             &self.session_messages,
-            self.config.storage().session_messages_path(),
+            self.config
+                .storage()
+                .session_messages_path(self.config.session_id()),
         );
     }
 
@@ -94,13 +96,18 @@ impl Agent {
         }
         session::persist_session_messages_to_disk(
             &self.session_messages,
-            self.config.storage().session_messages_path(),
+            self.config
+                .storage()
+                .session_messages_path(self.config.session_id()),
         );
     }
 
     pub(crate) fn load_persisted_session_messages(&mut self) {
         self.session_messages = session::load_persisted_session_messages(
-            &self.config.storage().session_messages_path(),
+            &self
+                .config
+                .storage()
+                .session_messages_path(self.config.session_id()),
         );
     }
 }

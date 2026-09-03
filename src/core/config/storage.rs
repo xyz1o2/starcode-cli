@@ -141,7 +141,49 @@ impl Storage {
         self.star_dir().join("permissions.json")
     }
 
-    pub fn session_messages_path(&self) -> PathBuf {
-        self.star_dir().join("session_messages.json")
+    /// 会话消息持久化路径，按会话 ID 隔离（对标 Claude Code 的
+    /// `<projectDir>/<sessionId>.jsonl` per-session transcript）。
+    /// 新会话 = 新 ID = 空上下文；只有 --resume 才会加载对应文件。
+    /// 放在 `sessions/<id>/` 子目录而非 `sessions/<id>.json`，
+    /// 避免 session_manager 的 `*.json` 扫描把它误当成 UI 会话。
+    pub fn session_messages_path(&self, session_id: &str) -> PathBuf {
+        self.star_dir()
+            .join("sessions")
+            .join(session_id)
+            .join("messages.json")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 会话消息路径必须按会话 ID 隔离：不同会话读写不同文件，
+    /// 否则新会话会继承上一个会话的完整上下文（对标 Claude Code
+    /// 的 per-session transcript）。
+    #[test]
+    fn session_messages_paths_are_isolated_per_session() {
+        let storage = Storage::new(std::env::temp_dir());
+        let a = storage.session_messages_path("aaaa-bbbb");
+        let b = storage.session_messages_path("cccc-dddd");
+        assert_ne!(a, b);
+        assert_eq!(
+            a.parent().and_then(|p| p.file_name()),
+            Some(std::ffi::OsStr::new("aaaa-bbbb"))
+        );
+        assert_eq!(a.file_name(), Some(std::ffi::OsStr::new("messages.json")));
+    }
+
+    /// 会话消息文件位于 `sessions/<id>/` 子目录内而不是 `sessions/<id>.json`，
+    /// 这样 session_manager 扫描 `sessions/*.json` 时不会把它误当成 UI 会话。
+    #[test]
+    fn session_messages_path_lives_inside_session_subdir() {
+        let storage = Storage::new(std::env::temp_dir());
+        let path = storage.session_messages_path("sess-1");
+        let sessions_dir = storage.star_dir().join("sessions");
+        assert_eq!(
+            path.parent().map(|p| p.to_path_buf()),
+            Some(sessions_dir.join("sess-1"))
+        );
     }
 }

@@ -127,12 +127,14 @@ impl Agent {
                 crate::agent::compact::reactive_compact::ReactiveCompactManager::new(compact_config),
             model_fallback: crate::agent::model_fallback::ModelFallbackManager::new(),
         };
-        // 子代理不加载父代理的持久化会话消息（对标 Claude Code：子代理从空上下文开始）
-        if agent.config.recursion_depth == 0 {
+        // 子代理不加载父代理的持久化会话消息（对标 Claude Code：子代理从空上下文开始）；
+        // 顶层代理也只在 --resume 恢复会话时加载（对标 Claude Code：只有
+        // --resume/--continue 才 adopt 已有 transcript，新会话一律空上下文）
+        if agent.config.recursion_depth == 0 && agent.config.is_resume_session() {
             agent.load_persisted_session_messages();
         } else {
             crate::utils::logging::append_agent_log_line(
-                "[INIT] SubAgent: skipping persisted session messages (fresh context)",
+                "[INIT] Skipping persisted session messages (fresh context or subagent)",
             );
         }
         crate::utils::logging::append_agent_log_line("[INIT] Agent::new completed");

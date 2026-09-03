@@ -321,6 +321,10 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                 Tag::Table(alignments) => {
                     in_table = true;
                     table_rows.clear();
+                    // 必须连同 current_row 一起清：上一张表最后一行结束后没人清 current_row
+                    // （清除只发生在下一行开始时），残留行会被下一张表的表头单元格追加，
+                    // 渲染出 [上一表末行 | 下一表表头] 的合并表头
+                    current_row.clear();
                     table_alignments = alignments;
                 }
                 Tag::TableHead => {
@@ -412,6 +416,8 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                     }
                     in_table = false;
                     table_rows.clear();
+                    // 表格结束即清残留行，不把状态带进后续块（与 Tag::Table 处双保险）
+                    current_row.clear();
                     table_alignments.clear();
                     lines.push(Line::from(""));
                 }
@@ -699,7 +705,9 @@ fn render_table(
         }
 
         // Row content — 按 col_count 补齐缺失单元格，保证每行右边界完整对齐
-        spans.push(Span::styled("│ ", border_style));
+        // 每列渲染为 " 内容(w) "（恰占 w+2 列）+ "│"，与边框 ─(w+2)+┬ 逐列严格对齐，
+        // 行尾不再多出一列空格
+        spans.push(Span::styled("│", border_style));
         for ci in 0..col_count {
             let cell = row.get(ci).map(|s| s.as_str()).unwrap_or("");
             let target_width = adjusted_widths.get(ci).copied().unwrap_or(3);
@@ -716,21 +724,21 @@ fn render_table(
             let pad = target_width.saturating_sub(display_width);
             let alignment = col_alignments.get(ci).unwrap_or(&Alignment::Left);
             let padded = match alignment {
-                Alignment::Left => format!("{}{} ", display_cell, " ".repeat(pad)),
+                Alignment::Left => format!("{}{}", display_cell, " ".repeat(pad)),
                 Alignment::Center => {
                     let left_pad = pad / 2;
                     let right_pad = pad - left_pad;
                     format!(
-                        "{}{}{} ",
+                        "{}{}{}",
                         " ".repeat(left_pad),
                         display_cell,
                         " ".repeat(right_pad)
                     )
                 }
-                Alignment::Right => format!("{}{} ", " ".repeat(pad), display_cell),
+                Alignment::Right => format!("{}{}", " ".repeat(pad), display_cell),
             };
-            spans.push(Span::styled(padded, cell_style));
-            spans.push(Span::styled("│ ", border_style));
+            spans.push(Span::styled(format!(" {} ", padded), cell_style));
+            spans.push(Span::styled("│", border_style));
         }
         lines.push(Line::from(spans));
 
@@ -998,91 +1006,76 @@ mod boundary_tests {
 }
 
 #[cfg(test)]
-mod repro_screenshot {
+mod table_render_tests {
     use super::*;
 
-    const CONTENT: &str = r#"## 项目重新分析
-
-### 架构总览
-
-```
-trading_web/
-├── trading_system/    # 核心量化引擎（27 文件）
-├── backend/           # FastAPI 后端 API（6 文件）
-├── frontend/          # React + shadcn/ui 前端（17 文件）
-├── docs/              # 架构文档
-└── logs/              # 运行日志
-```
-
-### 各模块状态
-
-| 模块 | 完成度 | 说明 |
-|------|--------|------|
-| **trading_system/** | 90% | 策略、回测、风控、执行引擎完整 |
-| **backend/** | 85% | 已连接真实引擎，API 全部可用 |
-| **frontend/** | 75% | 4 个页面可用，路由正常 |
-
-### API 端点验证
-
-| 端点 | 状态 | 结果 |
-|------|------|------|
-| `GET /api/health` | ✅ | `version: 2.0.0` |
-| `GET /api/strategies` | ✅ | 返回 2 个策略（MA 交叉、RSI） |
-| `POST /api/backtest` | ✅ | 调用真实引擎，返回完整指标 |
-| `GET /api/quotes` | ✅ | 模拟行情数据 |
-| `GET /api/trades` | ✅ | 模拟交易记录 |
-| `GET /api/portfolio` | ✅ | 模拟资产数据 |
-| `WS /ws/quotes` | ✅ | WebSocket 实时推送 |
-
-### 前端页面
-
-| 页面 | 功能 |
-|------|------|
-| 仪表盘 | 资产概览、实时行情、交易记录 |
-"#;
-
-    fn dump(tag: &str, lines: &[Line<'static>]) {
-        println!("===== {} =====", tag);
-        for l in lines {
-            let s: String = l.spans.iter().map(|s| s.content.to_string()).collect();
-            println!("|{}", s);
-        }
+    fn rendered(md: &str, width: usize) -> Vec<String> {
+        render_markdown(md, Some(width))
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect()
     }
 
     #[test]
-    fn repro_final_render() {
-        let lines = render_markdown(CONTENT, Some(120));
-        dump("FINAL", &lines);
+    fn consecutive_tables_keep_headers_separate() {
+        // 回归：表格结束后 current_row 残留上一张表的最后一行，下一张表的表头
+        // 单元格会追加到它上面，渲染出 [上一表末行 | 下一表表头] 的合并表头。
+        // 典型场景：相邻两个小节各带一张表，中间只隔一个标题。
+        let md = "| A | B |\n|---|---|\n| 1 | 2 |\n\n# Title\n\n| C | D |\n|---|---|\n| 3 | 4 |\n";
+        let lines = rendered(md, 80);
+
+        // 含 "C" 的行必然是第二张表的表头，其中不允许出现第一张表的数据 "1"
+        let head2 = lines
+            .iter()
+            .find(|l| l.contains('C'))
+            .expect("second table header must render");
+        assert!(
+            !head2.contains(" 1 "),
+            "下一张表的表头混入了上一张表的末行: {:?}",
+            head2
+        );
+        // 标题独立成行，两张表各自有完整的上边框
+        assert!(lines.iter().any(|l| l.trim() == "Title"));
+        assert_eq!(lines.iter().filter(|l| l.contains('┌')).count(), 2);
     }
 
     #[test]
-    fn repro_streaming_prefixes() {
-        // 模拟流式：按 1~7 字符步进切块，扫每个前缀的渲染结果，
-        // 找出同时含 "路由正常" 和 "端点" 的行（截图中的合并行）
-        let chars: Vec<char> = CONTENT.chars().collect();
-        let mut found = Vec::new();
-        for step in [1usize, 2, 3, 5, 7] {
-            for n in (0..chars.len()).step_by(step) {
-                let prefix: String = chars[..n].iter().collect();
-                let (stable, unstable) = render_markdown_incremental(&prefix, Some(120));
-                let all: Vec<String> = stable
-                    .iter()
-                    .chain(unstable.iter())
-                    .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
-                    .collect();
-                for (i, s) in all.iter().enumerate() {
-                    if s.contains("路由正常") && s.contains("端点") {
-                        found.push((step, n, prefix.lines().last().unwrap_or("").to_string(), s.clone()));
-                    }
-                }
-                let _ = i_unused(&all);
-            }
-        }
-        for (step, n, last, line) in &found {
-            println!("MERGED at step={} n={} last_src={:?} => {:?}", step, n, last, line);
-        }
-        println!("total merged occurrences: {}", found.len());
+    fn consecutive_tables_with_cjk_cells_keep_headers_separate() {
+        // CJK 单元格 + 行内代码 + emoji（真实对话回复的构成）同样不能串行
+        let md = "| 模块 | 结果 |\n|---|---|\n| 前端 | 正常 |\n\n### 下节\n\n| 端点 | 状态 |\n|---|---|\n| `GET /x` | ✅ |\n";
+        let lines = rendered(md, 80);
+
+        let head2 = lines
+            .iter()
+            .find(|l| l.contains("端点"))
+            .expect("second table header must render");
+        assert!(
+            !head2.contains("前端"),
+            "下一张表的表头混入了上一张表的末行: {:?}",
+            head2
+        );
     }
 
-    fn i_unused(_: &[String]) -> usize { 0 }
+    #[test]
+    fn table_rows_align_with_borders() {
+        // 内容行与边框行必须等宽：行尾不允许再多一列（旧实现在每个单元格后
+        // 追加 "│ "，导致最右侧竖线落在 ┐/┘ 之外一格）
+        let md = "| A | B |\n|---|---|\n| 1 | 2 |";
+        let lines = rendered(md, 80);
+        let border = lines
+            .iter()
+            .find(|l| l.starts_with('┌'))
+            .expect("top border must render");
+        let row = lines
+            .iter()
+            .find(|l| l.starts_with('│'))
+            .expect("table row must render");
+        assert_eq!(
+            row.chars().count(),
+            border.chars().count(),
+            "row {:?} vs border {:?}",
+            row,
+            border
+        );
+    }
 }

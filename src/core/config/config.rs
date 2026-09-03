@@ -13,6 +13,7 @@ pub const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES: usize = 1000;
 #[derive(Clone)]
 pub struct Config {
     pub(crate) session_id: String,
+    pub(crate) resume_session: bool,
     pub(crate) sandbox: Option<SandboxConfig>,
     pub(crate) target_dir: PathBuf,
     pub(crate) debug_mode: bool,
@@ -107,6 +108,7 @@ impl Config {
         Self {
             trusted_folders_manager,
             session_id: params.session_id,
+            resume_session: params.resume_session,
             sandbox: params.sandbox,
             target_dir: params.target_dir,
             debug_mode: params.debug_mode,
@@ -229,6 +231,10 @@ impl Config {
     // Getters
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+    /// 是否处于 --resume 恢复的会话（决定启动时是否加载持久化会话消息）
+    pub fn is_resume_session(&self) -> bool {
+        self.resume_session
     }
     pub fn sandbox(&self) -> Option<&SandboxConfig> {
         self.sandbox.as_ref()
