@@ -12,7 +12,7 @@ pub struct TaskToolParams {
     pub operation: TaskOperation,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum TaskOperation {
     Add {
@@ -424,6 +424,30 @@ fn normalize_operation_object(operation: &mut Value) -> Result<(), String> {
     copy_alias_if_missing(obj, "new_parent_id", &["new_parent"]);
     copy_alias_if_missing(obj, "after_id", &["after"]);
 
+    // 兜底：弱模型偶尔会把整个任务对象先序列化成字符串，再塞进 title/content/task
+    // （比如 title = "{\"title\":\"...\",\"status\":\"pending\"}"）。这里把里层的
+    // 字段还原出来；调用方显式给出的字段始终优先，不会被里层值覆盖。
+    let from_title = obj.get("title").and_then(parse_embedded_task_object);
+    let embedded = from_title.clone().or_else(|| {
+        ["content", "task", "todo", "item", "name"]
+            .iter()
+            .find_map(|key| obj.get(*key).and_then(parse_embedded_task_object))
+    });
+    if let Some(object) = embedded {
+        if let Some(title) = title_from_task_object(&object) {
+            // 来源就是 title 本身 → 整段 JSON 就是标题，用解码值覆盖；
+            // 来自别名字段 → 只在缺 title 时补，不抢显式的 title。
+            if from_title.is_some() || obj.get("title").and_then(Value::as_str).is_none() {
+                obj.insert("title".to_string(), Value::String(title));
+            }
+        }
+        for key in ["status", "priority", "description", "parent_id", "id"] {
+            if let Some(value) = object.get(key) {
+                obj.entry(key.to_string()).or_insert_with(|| value.clone());
+            }
+        }
+    }
+
     if action == "add" {
         if obj.get("title").and_then(Value::as_str).is_none() {
             let title = ["content", "task", "todo", "item", "name"]
@@ -461,8 +485,44 @@ fn normalize_operation_object(operation: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
+/// 还原被二次序列化成字符串的任务对象。单对象直接用；数组取第一个对象。
+/// 只处理以 `{` / `[` 开头的字符串，普通标题零开销跳过。
+fn parse_embedded_task_object(value: &Value) -> Option<serde_json::Map<String, Value>> {
+    let text = value.as_str()?.trim();
+    if !(text.starts_with('{') || text.starts_with('[')) {
+        return None;
+    }
+    match serde_json::from_str::<Value>(text).ok()? {
+        Value::Object(map) => Some(map),
+        // 整个列表被当作一个"任务"传进来：取第一个对象元素
+        Value::Array(items) => items.into_iter().find_map(|item| match item {
+            Value::Object(map) => Some(map),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// 从还原出的任务对象里取标题。
+fn title_from_task_object(object: &serde_json::Map<String, Value>) -> Option<String> {
+    ["title", "content", "task", "name", "summary"]
+        .iter()
+        .find_map(|key| {
+            object
+                .get(*key)
+                .and_then(Value::as_str)
+                .and_then(non_empty_string)
+        })
+}
+
 fn extract_task_title(value: &Value) -> Option<String> {
     if let Some(text) = value.as_str() {
+        // 二次序列化的任务对象：取里层 title，而不是把整段 JSON 当标题
+        if let Some(title) =
+            parse_embedded_task_object(value).and_then(|object| title_from_task_object(&object))
+        {
+            return Some(title);
+        }
         return non_empty_string(text);
     }
 
@@ -784,5 +844,94 @@ impl ToolInvocation for TaskToolInvocation {
                 data: None,
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn normalize(params: Value) -> Result<TaskOperation, String> {
+        normalize_task_tool_params(params).map(|p| p.operation)
+    }
+
+    /// 弱模型把 {title,status,id} 整体序列化成字符串塞进 title —— 面板必须显示
+    /// 解码后的标题，而不是整段 JSON（回归：任务列表里出现
+    /// `{"title": "...", "status": "pending"}` 字样）。
+    #[test]
+    fn double_encoded_title_is_decoded() {
+        let raw = r#"{"title": "安装 recharts 图表库", "id": "1", "status": "in_progress"}"#;
+        let op = normalize(json!({ "operation": { "action": "add", "title": raw } })).unwrap();
+        match op {
+            TaskOperation::Add { title, .. } => assert_eq!(title, "安装 recharts 图表库"),
+            other => panic!("expected Add, got {:?}", other),
+        }
+    }
+
+    /// 数组形态（`[{...}]`）同样要解出第一个对象的标题。
+    #[test]
+    fn double_encoded_array_yields_first_title() {
+        let raw = r#"[{"title": "接入真实历史数据（CSV 加载器）", "status": "pending"}]"#;
+        let op = normalize(json!({ "operation": { "action": "add", "content": raw } })).unwrap();
+        match op {
+            TaskOperation::Add { title, .. } => assert_eq!(title, "接入真实历史数据（CSV 加载器）"),
+            other => panic!("expected Add, got {:?}", other),
+        }
+    }
+
+    /// 显式给出的 title 不被别名字段里解码出的值覆盖。
+    #[test]
+    fn explicit_title_beats_embedded_alias() {
+        let op = normalize(json!({
+            "operation": {
+                "action": "add",
+                "title": "安装 plotly",
+                "content": r#"{"title": "不要用这个", "status": "pending"}"#,
+            }
+        }))
+        .unwrap();
+        match op {
+            TaskOperation::Add { title, .. } => assert_eq!(title, "安装 plotly"),
+            other => panic!("expected Add, got {:?}", other),
+        }
+    }
+
+    /// update 里嵌的状态/优先级要提升并归一化（"in_progress" → InProgress），
+    /// 但显式字段优先。
+    #[test]
+    fn update_hoists_embedded_status_and_respects_explicit() {
+        let op = normalize(json!({
+            "operation": {
+                "action": "update",
+                "id": "1",
+                "status": "completed",
+                "task": r#"{"status": "in_progress", "priority": "high"}"#,
+            }
+        }))
+        .unwrap();
+        match op {
+            TaskOperation::Update {
+                status, priority, ..
+            } => {
+                assert_eq!(status, Some(TaskStatus::Completed));
+                assert_eq!(priority, Some(TaskPriority::High));
+            }
+            other => panic!("expected Update, got {:?}", other),
+        }
+    }
+
+    /// 普通标题、以及以 `{` 开头但不是合法 JSON 的标题，都原样保留。
+    #[test]
+    fn plain_and_malformed_titles_pass_through() {
+        for title in ["创建前后端分离架构", "{\"oops", "[1, 2"] {
+            let op = normalize(json!(
+                { "operation": { "action": "add", "title": title } }
+            ))
+            .unwrap();
+            match op {
+                TaskOperation::Add { title: got, .. } => assert_eq!(got, title),
+                other => panic!("expected Add, got {:?}", other),
+            }
+        }
     }
 }
