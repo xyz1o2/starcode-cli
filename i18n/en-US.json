@@ -1,5 +1,5 @@
 {
-  "ui.input.placeholder": "Ask Star (Shift+Enter for newline, Ctrl+P for commands, Ctrl+B for tasks, Tab for auto-completion)",
+  "ui.input.placeholder": "Ask Star (Shift+Enter for newline, Ctrl+P for commands, Ctrl+T for tasks, Tab for auto-completion)",
   "ui.input.empty": "(empty)",
   "ui.input.copied": "[✓ Copied to clipboard]",
   "ui.input.paste_folded": "[Pasted content +{lines} lines]",
@@ -35,8 +35,8 @@
   "ui.mode.build": "Build",
   "ui.mode.plan": "Plan",
   "ui.mode.yolo": "YOLO",
-  "ui.mode.build.desc": "Build mode: confirm dangerous actions; manage tasks with Ctrl+B or /task",
-  "ui.mode.plan.desc": "Plan mode: read-only research; manage plans with /task or Ctrl+B",
+  "ui.mode.build.desc": "Build mode: confirm dangerous actions; manage tasks with Ctrl+T or /task",
+  "ui.mode.plan.desc": "Plan mode: read-only research; manage plans with /task or Ctrl+T",
   "ui.mode.yolo.desc": "YOLO mode: all actions auto-run (dangerous!)",
 
   "ui.approval.mode_changed.label": "Status: Approval mode changed to: ",

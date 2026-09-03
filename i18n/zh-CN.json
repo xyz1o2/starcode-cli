@@ -1,5 +1,5 @@
 {
-  "ui.input.placeholder": "询问 Star（Shift+Enter 换行，Ctrl+P 打开命令面板，Ctrl+B 打开任务面板，Tab 自动补全）",
+  "ui.input.placeholder": "询问 Star（Shift+Enter 换行，Ctrl+P 打开命令面板，Ctrl+T 打开任务面板，Tab 自动补全）",
   "ui.input.empty": "(空内容)",
   "ui.input.copied": "[✓ 已复制到剪贴板]",
   "ui.input.paste_folded": "[已粘贴内容 +{lines} 行]",
@@ -35,8 +35,8 @@
   "ui.mode.build": "Build",
   "ui.mode.plan": "Plan",
   "ui.mode.yolo": "YOLO",
-  "ui.mode.build.desc": "Build 模式：危险操作需确认；任务列表用 Ctrl+B 或 /task 管理",
-  "ui.mode.plan.desc": "Plan 模式：只读研究/规划，禁止写操作；可用 /task 或 Ctrl+B 记录计划",
+  "ui.mode.build.desc": "Build 模式：危险操作需确认；任务列表用 Ctrl+T 或 /task 管理",
+  "ui.mode.plan.desc": "Plan 模式：只读研究/规划，禁止写操作；可用 /task 或 Ctrl+T 记录计划",
   "ui.mode.yolo.desc": "YOLO 模式：所有操作自动执行（危险！）",
 
   "ui.approval.mode_changed.label": "状态：审批模式已切换为: ",

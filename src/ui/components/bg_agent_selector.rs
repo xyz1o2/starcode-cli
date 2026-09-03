@@ -73,8 +73,8 @@ pub fn render_selector(state: &ChatState, area_width: u16) -> Vec<Line<'static>>
             Style::default().fg(main_fg).add_modifier(main_mod),
         ),
     ];
-    // 操作提示只挂在 main 行右侧，避免每行都重复一遍
-    let hint = "↑/↓ select · Enter view · Esc close";
+    // 操作提示只挂在 main 行右侧，避免每行都重复一遍（文案对齐参考实现文档）
+    let hint = "↑/↓ to select · Enter to view";
     let used = 4 + 4 + "main".len();
     if (area_width as usize) > used + hint.len() + 2 {
         let pad = area_width as usize - used - hint.len() - 1;

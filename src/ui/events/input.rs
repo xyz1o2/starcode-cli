@@ -1080,10 +1080,9 @@ pub async fn handle_key_event(
     }
 
     // Ctrl+T：全局切换任务面板（对标 Claude Code 的 app:toggleTodos）。
-    // 任务面板：Ctrl+T（原有）与 Ctrl+B（footer 提示写的是 Ctrl+B，补上绑定让提示成真）
-    if key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('t') | KeyCode::Char('b'))
-    {
+    // Ctrl+T：任务面板（对标 app:toggleTodos）。Ctrl+B 不在此列 —— Claude Code 把它
+    // 留给 task:background（仅前台有任务可转后台时才拦截），空闲时归输入框。
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('t')) {
         state.task_panel.toggle_visibility();
         if state.task_panel.is_visible {
             // 打开时重读任务文件，和 /tasks 一样避免显示旧快照。
