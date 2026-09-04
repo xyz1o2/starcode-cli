@@ -464,72 +464,172 @@ pub fn build_assistant_body_block(
 
 /// Word-aware text wrapping — wraps at whitespace boundaries, hard-breaks long words.
 /// Safe for CJK via UnicodeWidthChar. Truncates > 5000 chars to avoid OOM.
-/// Handles special whitespace characters (zero-width spaces, non-breaking spaces, etc.)
+///
+/// 保留原文空白：行首缩进（代码块）与词间连续空格都不会被折叠，
+/// 只有折行断点处的空格被丢弃（与终端/浏览器的折行行为一致）。
 pub fn wrap_text_to_width(text: &str, wrap_width: usize) -> Vec<String> {
     if wrap_width <= 2 {
         return text.lines().map(|l| l.to_string()).collect();
     }
-    let safe: String = text.chars().take(5000).collect();
-    let mut out = Vec::new();
-    for paragraph in safe.split('\n') {
-        if paragraph.is_empty() {
-            out.push(String::new());
+    let chars: Vec<char> = text.chars().take(5000).collect();
+    if chars.is_empty() {
+        return vec![String::new()];
+    }
+    wrap_char_ranges(&chars, wrap_width, wrap_width)
+        .into_iter()
+        .map(|(s, e)| chars[s..e].iter().collect())
+        .collect()
+}
+
+/// 折行核心：按显示宽度对字符流做贪心断行，返回每行在 `chars` 中的区间 `[start, end)`。
+///
+/// 断点规则：
+/// - `'\n'` 强制换行；
+/// - 空格处可断，断点处的空格被丢弃（行尾不留空格）；
+/// - 宽字符（CJK / emoji）两侧可断，实现逐字折行；
+/// - 单个 token 比整行还宽（长 URL、长路径）时硬断。
+///
+/// 与按空白重组文本的实现不同，这里只切片不重写，因此：
+/// 源行的前导缩进保留（代码块靠它对齐），词间的连续空格也保留
+/// （`**bold**` 前后的空格曾被 `split_whitespace` 吃掉，粘成 "withboldinside"）。
+///
+/// `first_width` 用于首行，`rest_width` 用于续行（悬挂缩进场景）。
+pub fn wrap_char_ranges(
+    chars: &[char],
+    first_width: usize,
+    rest_width: usize,
+) -> Vec<(usize, usize)> {
+    let n = chars.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let cw = |c: char| UnicodeWidthChar::width_cjk(c).unwrap_or(0);
+    // 只含空白的行归一为空行，避免行尾残留空格
+    fn push_line(out: &mut Vec<(usize, usize)>, chars: &[char], s: usize, e: usize) {
+        if e > s && chars[s..e].iter().all(|c| c.is_whitespace()) {
+            out.push((s, s));
+        } else {
+            out.push((s, e.max(s)));
+        }
+    }
+
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    let mut avail = first_width.max(1);
+    // 当前行：start = 行首下标，end = 最后一个已放入字符之后，width = 可见宽度
+    let mut start: Option<usize> = None;
+    let mut end = 0usize;
+    let mut width = 0usize;
+    // 待定空格：只有后面还跟内容时才计入行宽
+    let mut pending = 0usize;
+    // 本源行尚未放下第一个词 —— 此时的空格是缩进，必须保留
+    let mut keep_indent = true;
+    // 本输出行已有词 —— 只有这样才允许软断行（避免缩进独占一行）
+    let mut has_word = false;
+
+    let mut i = 0usize;
+    while i < n {
+        let c = chars[i];
+        if c == '\n' {
+            let s = start.unwrap_or(i);
+            push_line(&mut out, chars, s, end);
+            start = None;
+            end = 0;
+            width = 0;
+            pending = 0;
+            keep_indent = true;
+            has_word = false;
+            avail = rest_width.max(1);
+            i += 1;
             continue;
         }
-        let mut line = String::new();
-        let mut line_w = 0usize;
-        // Use split_whitespace to handle all types of whitespace characters
-        // This includes: space, tab, newline, zero-width space, non-breaking space, etc.
-        for word in paragraph.split_whitespace() {
-            let word_w: usize = word
-                .chars()
-                .map(|c| UnicodeWidthChar::width_cjk(c).unwrap_or(0))
-                .sum();
-            // Add space separator if line already has content
-            if !line.is_empty() {
-                let space_w = 1; // Space character width
-                if line_w + space_w + word_w > wrap_width {
-                    // Flush current line
-                    out.push(line);
-                    line = String::new();
-                    line_w = 0;
-                } else {
-                    line.push(' ');
-                    line_w += space_w;
-                }
+        if c.is_whitespace() {
+            let ws_start = i;
+            let mut ws_w = 0usize;
+            while i < n && chars[i].is_whitespace() && chars[i] != '\n' {
+                ws_w += cw(chars[i]).max(1);
+                i += 1;
             }
-            // Word fits on current line
-            if line_w + word_w <= wrap_width {
-                line.push_str(word);
-                line_w += word_w;
-                continue;
-            }
-            // Word doesn't fit — if line is empty, hard-break the word
-            if line.is_empty() {
-                for (i, c) in word.char_indices() {
-                    let cw = UnicodeWidthChar::width_cjk(c).unwrap_or(0);
-                    if line_w + cw > wrap_width {
-                        out.push(line);
-                        line = String::new();
-                        line_w = 0;
-                    }
-                    line.push(c);
-                    line_w += cw;
-                    // Safety: avoid infinite loop on zero-width
-                    if i > 10000 {
-                        break;
-                    }
+            match start {
+                // 源行缩进：保留；折行断点处的空格：丢弃
+                None if keep_indent => {
+                    start = Some(ws_start);
+                    end = i;
+                    width = ws_w;
                 }
-            } else {
-                // Flush current line and start new line with this word
-                out.push(line);
-                line = word.to_string();
-                line_w = word_w;
+                None => {}
+                Some(_) => pending += ws_w,
+            }
+            continue;
+        }
+        // 取一个 token：单个宽字符，或一段连续窄字符
+        let tok_start = i;
+        if cw(c) >= 2 {
+            i += 1;
+        } else {
+            while i < n && !chars[i].is_whitespace() && cw(chars[i]) < 2 {
+                i += 1;
             }
         }
-        if !line.is_empty() {
-            out.push(line);
+        let tok_w: usize = chars[tok_start..i].iter().map(|&ch| cw(ch)).sum();
+
+        if has_word && width + pending + tok_w > avail {
+            push_line(&mut out, chars, start.unwrap_or(tok_start), end);
+            start = None;
+            end = 0;
+            width = 0;
+            pending = 0;
+            keep_indent = false;
+            has_word = false;
+            avail = rest_width.max(1);
         }
+        match start {
+            None => {
+                start = Some(tok_start);
+                end = i;
+                width = tok_w;
+            }
+            Some(_) => {
+                end = i;
+                width += pending + tok_w;
+            }
+        }
+        pending = 0;
+        keep_indent = false;
+        has_word = true;
+
+        // token 本身超过整行宽度（长 URL / 无空格长串）→ 硬断
+        while width > avail {
+            let s = start.unwrap_or(tok_start);
+            let mut k = s;
+            let mut acc = 0usize;
+            while k < end {
+                let ch_w = cw(chars[k]);
+                if acc + ch_w > avail && k > s {
+                    break;
+                }
+                acc += ch_w;
+                k += 1;
+            }
+            if k == s {
+                k = s + 1;
+            }
+            push_line(&mut out, chars, s, k);
+            start = Some(k);
+            width = chars[k..end].iter().map(|&ch| cw(ch)).sum();
+            avail = rest_width.max(1);
+            if k >= end {
+                start = None;
+                width = 0;
+                has_word = false;
+                break;
+            }
+        }
+    }
+    if let Some(s) = start {
+        push_line(&mut out, chars, s, end);
+    }
+    if out.is_empty() {
+        out.push((0, 0));
     }
     out
 }
@@ -1445,5 +1545,70 @@ mod tests {
         assert!(UnicodeWidthStr::width_cjk(s.as_str()) <= 7);
         // ASCII unaffected
         assert_eq!(truncate_to_display_width("abcdef", 10), "abcdef");
+    }
+
+    #[test]
+    fn wrap_preserves_leading_indentation() {
+        // 回归：split_whitespace 重组会吃掉行首缩进，代码块整体左移
+        let out = wrap_text_to_width("fn main() {\n    let x = 42;\n}", 40);
+        assert_eq!(out, vec!["fn main() {", "    let x = 42;", "}"]);
+    }
+
+    #[test]
+    fn wrap_preserves_inner_spacing() {
+        // 回归："with **bold** inside" 各片段分别折行时被粘成 "withboldinside"
+        let src = "with  bold inside and code here";
+        assert_eq!(wrap_text_to_width(src, 80), vec![src.to_string()]);
+    }
+
+    #[test]
+    fn wrap_breaks_cjk_per_char_without_loss() {
+        let out = wrap_text_to_width("中文中文中文", 5);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out.concat(), "中文中文中文");
+        for line in &out {
+            assert!(UnicodeWidthStr::width_cjk(line.as_str()) <= 5);
+        }
+    }
+
+    #[test]
+    fn wrap_hard_breaks_overlong_token() {
+        let url = format!("https://example.com/{}", "a".repeat(80));
+        let out = wrap_text_to_width(&url, 20);
+        assert_eq!(out.concat(), url);
+        for line in &out {
+            assert!(
+                UnicodeWidthStr::width_cjk(line.as_str()) <= 20,
+                "长 token 未硬断: {:?}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_never_exceeds_width_for_mixed_content() {
+        let src = "混合 content with 中文 and a very-long-hyphenated-identifier-token plus  \
+                   trailing words to force several breaks";
+        for w in [12usize, 20, 33, 50] {
+            for line in wrap_text_to_width(src, w) {
+                assert!(
+                    UnicodeWidthStr::width_cjk(line.as_str()) <= w,
+                    "width {} 超宽: {:?}",
+                    w,
+                    line
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_char_ranges_supports_hanging_indent() {
+        let chars: Vec<char> = "aaa bbb ccc ddd".chars().collect();
+        // 首行 7 列、续行 3 列 → "aaa bbb" / "ccc" / "ddd"
+        let rows: Vec<String> = wrap_char_ranges(&chars, 7, 3)
+            .into_iter()
+            .map(|(s, e)| chars[s..e].iter().collect())
+            .collect();
+        assert_eq!(rows, vec!["aaa bbb", "ccc", "ddd"]);
     }
 }

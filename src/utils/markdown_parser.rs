@@ -194,6 +194,125 @@ pub fn highlight_code_line(line: &str, language: &str) -> Line<'static> {
     crate::utils::syntax_highlight::highlight_line(line, language)
 }
 
+/// 代码块正文的一行 → 渲染行（可能因折行变成多行）。
+///
+/// 左侧统一缩进 2 列，与 `  ┌` / `  └` 边框对齐（此前正文顶到第 0 列，
+/// 边框却从第 2 列开始，看起来像框歪了）。折行宽度相应减 2。
+fn code_block_lines(
+    line_str: &str,
+    language: &str,
+    wrap_width: Option<usize>,
+) -> Vec<Line<'static>> {
+    const GUTTER: &str = "  ";
+    let mut out = Vec::new();
+    if line_str.trim().is_empty() {
+        out.push(Line::from(""));
+        return out;
+    }
+    let pieces = match wrap_width {
+        Some(max_w) => {
+            crate::ui::utils::render::wrap_text_to_width(line_str, max_w.saturating_sub(2))
+        }
+        None => vec![line_str.to_string()],
+    };
+    for piece in pieces {
+        let highlighted = highlight_code_line(&piece, language);
+        let mut line_spans: Vec<Span<'static>> = vec![Span::raw(GUTTER)];
+        line_spans.extend(highlighted.spans.iter().cloned());
+        out.push(Line::from(line_spans));
+    }
+    out
+}
+
+/// 把累积的内联 spans 按显示宽度折行，样式与空格原样保留。
+///
+/// 折行必须在"整行内联内容收齐之后"做，不能在每个 `Event::Text` 里各自折 ——
+/// 一个带 `**bold**`/`` `code` ``/链接的段落会拆成多个 Text 事件，逐事件折行时
+/// 每个片段单看都不超宽，拼到同一行后整行远超终端宽度（右侧被裁掉）。
+///
+/// `cont_prefix` 是续行前缀（列表悬挂缩进 / 引用竖线），首行不加。
+fn wrap_spans_to_lines(
+    spans: &[Span<'static>],
+    wrap_width: Option<usize>,
+    cont_prefix: &[Span<'static>],
+) -> Vec<Line<'static>> {
+    if spans.is_empty() {
+        return Vec::new();
+    }
+    let Some(total) = wrap_width else {
+        return vec![Line::from(spans.to_vec())];
+    };
+    // 展平成字符流（样式逐字符对齐），折行后再按样式合并回 span
+    let mut chars: Vec<char> = Vec::new();
+    let mut styles: Vec<Style> = Vec::new();
+    for span in spans {
+        for c in span.content.chars() {
+            chars.push(c);
+            styles.push(span.style);
+        }
+    }
+    let prefix_w: usize = cont_prefix
+        .iter()
+        .map(|s| UnicodeWidthStr::width_cjk(s.content.as_ref()))
+        .sum();
+    let ranges = crate::ui::utils::render::wrap_char_ranges(
+        &chars,
+        total.max(1),
+        total.saturating_sub(prefix_w).max(1),
+    );
+
+    let mut out = Vec::with_capacity(ranges.len());
+    for (idx, (s, e)) in ranges.into_iter().enumerate() {
+        let mut line_spans: Vec<Span<'static>> = Vec::new();
+        if idx > 0 {
+            line_spans.extend(cont_prefix.iter().cloned());
+        }
+        let mut k = s;
+        while k < e {
+            let style = styles[k];
+            let mut text = String::new();
+            while k < e && styles[k] == style {
+                text.push(chars[k]);
+                k += 1;
+            }
+            line_spans.push(Span::styled(text, style));
+        }
+        out.push(Line::from(line_spans));
+    }
+    out
+}
+
+/// 输出当前累积的内联内容（折行 + 续行前缀）。
+///
+/// 无内容时什么都不做：空行一律由块级处理显式插入。旧实现在这里无条件补一个
+/// 空行，嵌套列表结束时会凭空多出一行，把同级的下一项与前面隔开。
+fn flush_inline(
+    spans: &mut Vec<Span<'static>>,
+    lines: &mut Vec<Line<'static>>,
+    wrap_width: Option<usize>,
+    cont_prefix: &[Span<'static>],
+) {
+    if spans.is_empty() {
+        return;
+    }
+    lines.extend(wrap_spans_to_lines(spans, wrap_width, cont_prefix));
+    spans.clear();
+}
+
+/// 续行前缀：引用块用竖线，列表用与标记等宽的缩进。
+fn continuation_prefix(blockquote_depth: usize, list_marker_width: usize) -> Vec<Span<'static>> {
+    if blockquote_depth > 0 {
+        vec![Span::styled(
+            "│ ".repeat(blockquote_depth),
+            Style::default().fg(Color::DarkGray),
+        )]
+    } else if list_marker_width > 0 {
+        vec![Span::raw(" ".repeat(list_marker_width))]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Render markdown text using pulldown-cmark, producing ratatui `Line`s.
 fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> {
     let parser = Parser::new_ext(text, Options::all());
@@ -211,6 +330,8 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
     let mut list_depth: usize = 0;
     let mut list_is_ordered: Vec<bool> = Vec::new();
     let mut list_counters: Vec<u64> = Vec::new();
+    // 当前列表项标记（"• " / "1. " 含缩进）的显示宽度，用于续行悬挂缩进
+    let mut list_marker_width: usize = 0;
     let mut language = String::new();
     let mut code_line_number: usize = 0;
     let mut blockquote_depth: usize = 0;
@@ -219,19 +340,27 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
 
     let current_style = |stack: &[Style]| stack.last().copied().unwrap_or_default();
 
-    let flush_line = |spans: &mut Vec<Span<'static>>, lines: &mut Vec<Line<'static>>| {
-        if !spans.is_empty() {
-            lines.push(Line::from(spans.clone()));
-            spans.clear();
-        } else {
-            lines.push(Line::from(""));
-        }
-    };
+    // 折行发生在这里（整行内联内容收齐后），续行前缀按当前引用/列表状态计算
+    macro_rules! flush_line {
+        () => {{
+            let cp = continuation_prefix(blockquote_depth, list_marker_width);
+            flush_inline(&mut current_spans, &mut lines, wrap_width, &cp);
+        }};
+    }
 
     for event in parser {
         match event {
             Event::Start(tag) => match tag {
-                Tag::Paragraph => {}
+                Tag::Paragraph => {
+                    // 引用块内每个段落自带竖线前缀（在 BlockQuote 起始处只加一次的话，
+                    // 多段引用的第二段起就没有前缀了）
+                    if blockquote_depth > 0 && current_spans.is_empty() {
+                        current_spans.push(Span::styled(
+                            "│ ".repeat(blockquote_depth),
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                    }
+                }
                 Tag::Heading { level, .. } => {
                     let heading_style = match level {
                         HeadingLevel::H1 => Style::default()
@@ -249,8 +378,6 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                 }
                 Tag::BlockQuote(_) => {
                     blockquote_depth += 1;
-                    let prefix = "│ ".repeat(blockquote_depth);
-                    current_spans.push(Span::styled(prefix, Style::default().fg(Color::DarkGray)));
                 }
                 Tag::CodeBlock(kind) => {
                     in_code_block = true;
@@ -259,7 +386,7 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                         CodeBlockKind::Fenced(lang) => lang.to_string(),
                         CodeBlockKind::Indented => String::new(),
                     };
-                    flush_line(&mut current_spans, &mut lines);
+                    flush_line!();
                     // 语言标签 + 分隔线（对标 Claude Code：不显示快捷键提示，边框保持干净。
                     // 顶边总宽 = 40.min(w)，与底边 "  └" + dash 对齐）
                     if !language.is_empty() {
@@ -295,26 +422,30 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                     list_is_ordered.push(order.is_some());
                     list_counters.push(0);
                     if list_depth > 1 {
-                        flush_line(&mut current_spans, &mut lines);
+                        flush_line!();
                     }
                 }
                 Tag::Item => {
                     if list_depth > 0 {
                         let indent = "  ".repeat(list_depth.saturating_sub(1));
-                        if list_is_ordered.last().copied().unwrap_or(false) {
-                            if let Some(c) = list_counters.last_mut() {
-                                *c += 1;
-                                current_spans.push(Span::styled(
-                                    format!("{}{}. ", indent, c),
-                                    Style::default().fg(Color::Yellow),
-                                ));
-                            }
+                        let marker = if list_is_ordered.last().copied().unwrap_or(false) {
+                            let n = list_counters
+                                .last_mut()
+                                .map(|c| {
+                                    *c += 1;
+                                    *c
+                                })
+                                .unwrap_or(1);
+                            format!("{}{}. ", indent, n)
                         } else {
-                            current_spans.push(Span::styled(
-                                format!("{}• ", indent),
-                                Style::default().fg(Color::Yellow),
-                            ));
-                        }
+                            format!("{}• ", indent)
+                        };
+                        // 续行按标记宽度悬挂缩进，长条目折行后与首行文字左对齐。
+                        // 这里用 width（非 width_cjk）：ratatui 与终端按 width 排版，
+                        // "• " 这类 Ambiguous 字符用 width_cjk 会多算一列、缩进歪一格
+                        list_marker_width = UnicodeWidthStr::width(marker.as_str());
+                        current_spans
+                            .push(Span::styled(marker, Style::default().fg(Color::Yellow)));
                     }
                 }
                 Tag::FootnoteDefinition(_) => {}
@@ -371,17 +502,25 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
             },
             Event::End(tag_end) => match tag_end {
                 TagEnd::Paragraph => {
-                    flush_line(&mut current_spans, &mut lines);
-                    lines.push(Line::from(""));
+                    flush_line!();
+                    // 引用块内的段落不各自留空行（空行没有竖线前缀，会把引用切开），
+                    // 块间空行统一由 TagEnd::BlockQuote 补
+                    if blockquote_depth == 0 {
+                        lines.push(Line::from(""));
+                    }
                 }
                 TagEnd::Heading(_) => {
                     style_stack.pop();
-                    flush_line(&mut current_spans, &mut lines);
+                    flush_line!();
                     lines.push(Line::from(""));
                 }
                 TagEnd::BlockQuote(_) => {
+                    // 先 flush 再降深度：续行前缀依赖当前深度
+                    flush_line!();
                     blockquote_depth = blockquote_depth.saturating_sub(1);
-                    flush_line(&mut current_spans, &mut lines);
+                    if blockquote_depth == 0 {
+                        lines.push(Line::from(""));
+                    }
                 }
                 TagEnd::CodeBlock => {
                     // Closing separator line — 宽度与顶边对齐:
@@ -402,13 +541,14 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                     list_depth = list_depth.saturating_sub(1);
                     list_is_ordered.pop();
                     list_counters.pop();
-                    flush_line(&mut current_spans, &mut lines);
+                    flush_line!();
                     if list_depth == 0 {
                         lines.push(Line::from(""));
                     }
                 }
                 TagEnd::Item => {
-                    flush_line(&mut current_spans, &mut lines);
+                    flush_line!();
+                    list_marker_width = 0;
                 }
                 TagEnd::Table => {
                     if !table_rows.is_empty() {
@@ -469,28 +609,7 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                 if in_code_block {
                     for line_str in text.lines() {
                         code_line_number += 1;
-                        if let Some(max_w) = wrap_width {
-                            let code_w = max_w;
-                            if line_str.is_empty() {
-                                lines.push(Line::from(""));
-                            } else {
-                                let mut is_first = true;
-                                for wrapped in
-                                    crate::ui::utils::render::wrap_text_to_width(line_str, code_w)
-                                {
-                                    let highlighted = highlight_code_line(&wrapped, &language);
-                                    let mut line_spans: Vec<Span> = Vec::new();
-                                    is_first = false;
-                                    line_spans.extend(highlighted.spans.iter().cloned());
-                                    lines.push(Line::from(line_spans));
-                                }
-                            }
-                        } else {
-                            let highlighted = highlight_code_line(line_str, &language);
-                            let mut line_spans: Vec<Span> = Vec::new();
-                            line_spans.extend(highlighted.spans.iter().cloned());
-                            lines.push(Line::from(line_spans));
-                        }
+                        lines.extend(code_block_lines(line_str, &language, wrap_width));
                     }
                 } else if in_table_head || in_table {
                     current_cell.push_str(text.as_ref());
@@ -506,44 +625,14 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                 if in_code_block {
                     for line_str in text.lines() {
                         code_line_number += 1;
-                        if let Some(max_w) = wrap_width {
-                            let code_w = max_w;
-                            if line_str.is_empty() {
-                                lines.push(Line::from(""));
-                            } else {
-                                for wrapped in
-                                    crate::ui::utils::render::wrap_text_to_width(line_str, code_w)
-                                {
-                                    let highlighted = highlight_code_line(&wrapped, &language);
-                                    let mut line_spans: Vec<Span> = Vec::new();
-                                    line_spans.extend(highlighted.spans.iter().cloned());
-                                    lines.push(Line::from(line_spans));
-                                }
-                            }
-                        } else {
-                            let highlighted = highlight_code_line(line_str, &language);
-                            let mut line_spans: Vec<Span> = Vec::new();
-                            line_spans.extend(highlighted.spans.iter().cloned());
-                            lines.push(Line::from(line_spans));
-                        }
+                        lines.extend(code_block_lines(line_str, &language, wrap_width));
                     }
                 } else if in_table_head || in_table {
                     current_cell.push_str(text);
                 } else {
+                    // 不在这里折行：本段的内联片段还没收齐（见 wrap_spans_to_lines）
                     let style = current_style(&style_stack);
-                    // Apply text wrapping to regular text
-                    if let Some(max_w) = wrap_width {
-                        let wrapped_lines =
-                            crate::ui::utils::render::wrap_text_to_width(text, max_w);
-                        for (i, wrapped_line) in wrapped_lines.iter().enumerate() {
-                            if i > 0 {
-                                flush_line(&mut current_spans, &mut lines);
-                            }
-                            current_spans.push(Span::styled(wrapped_line.to_string(), style));
-                        }
-                    } else {
-                        current_spans.push(Span::styled(text.to_string(), style));
-                    }
+                    current_spans.push(Span::styled(text.to_string(), style));
                 }
             }
             Event::Html(html) | Event::InlineHtml(html) => {
@@ -562,15 +651,20 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                 }
             }
             Event::HardBreak => {
-                flush_line(&mut current_spans, &mut lines);
+                if current_spans.is_empty() {
+                    lines.push(Line::from(""));
+                } else {
+                    flush_line!();
+                }
                 if blockquote_depth > 0 {
                     let prefix = "│ ".repeat(blockquote_depth);
                     current_spans.push(Span::styled(prefix, Style::default().fg(Color::DarkGray)));
                 }
             }
             Event::Rule => {
-                flush_line(&mut current_spans, &mut lines);
-                let rule = "─".repeat(60);
+                flush_line!();
+                // 铺满可用宽度，而不是固定 60 列（窄终端会溢出、宽终端又太短）
+                let rule = "─".repeat(wrap_width.unwrap_or(60).clamp(3, 200));
                 lines.push(Line::from(Span::styled(
                     rule,
                     Style::default().fg(Color::DarkGray),
@@ -578,13 +672,21 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                 lines.push(Line::from(""));
             }
             Event::TaskListMarker(checked) => {
+                // 复选框取代圆点标记，避免渲染成 "• [ ] 任务"
+                if let Some(last) = current_spans.last_mut() {
+                    if last.content.ends_with("• ") {
+                        let indent = last.content[..last.content.len() - "• ".len()].to_string();
+                        list_marker_width = UnicodeWidthStr::width(indent.as_str()) + 4;
+                        *last = Span::raw(indent);
+                    }
+                }
                 let marker = if checked { "[x] " } else { "[ ] " };
                 current_spans.push(Span::styled(marker, Style::default().fg(Color::Yellow)));
             }
         }
     }
 
-    flush_line(&mut current_spans, &mut lines);
+    flush_line!();
 
     // 连续空行归一为单行 — 保证块与块之间固定一个空行，
     // 避免 stable/unstable 拼接或源文本多空行造成"突然多换几行"的观感
@@ -1076,6 +1178,106 @@ mod table_render_tests {
             "row {:?} vs border {:?}",
             row,
             border
+        );
+    }
+}
+
+#[cfg(test)]
+mod inline_layout_tests {
+    use super::*;
+
+    fn rendered(md: &str, width: usize) -> Vec<String> {
+        let blocks = parse_markdown_content_ext(md, false);
+        render_content_blocks(&blocks, Some(width))
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn inline_marks_keep_surrounding_spaces() {
+        // 回归：逐 Text 事件调用 split_whitespace 折行会吃掉片段首尾空格，
+        // "with **bold** inside" 被粘成 "withboldinside"
+        let lines = rendered("with **bold** inside and `code` here\n", 80);
+        let body = lines.join("\n");
+        assert!(
+            body.contains("with bold inside and code here"),
+            "行内标记两侧空格丢失: {:?}",
+            body
+        );
+    }
+
+    #[test]
+    fn paragraph_with_inline_marks_wraps_within_width() {
+        // 回归：折行在每个 Text 事件里各自进行，片段单看都不超宽，
+        // 拼回同一行后整段远超终端宽度，右侧被裁掉
+        let md = "这是一个比较长的段落，包含 **加粗文字** 和 *斜体* 以及 `inline_code`，\
+                  还有一个 [链接](https://example.com/very/long/path)，用来测试折行。\n";
+        for &w in &[40usize, 60, 80] {
+            for line in rendered(md, w) {
+                assert!(
+                    UnicodeWidthStr::width_cjk(line.as_str()) <= w,
+                    "宽度 {} 下溢出: {:?}",
+                    w,
+                    line
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn code_block_keeps_indentation_and_aligns_with_border() {
+        // 回归：wrap_text_to_width 曾用 split_whitespace 重组文本，代码块的
+        // 前导缩进全部被吃掉，整段代码顶到最左侧
+        let md = "```rust\nfn main() {\n    let x = 42;\n}\n```\n";
+        let lines = rendered(md, 80);
+        assert!(
+            lines.iter().any(|l| l == "      let x = 42;"),
+            "代码缩进丢失或未与边框对齐: {:?}",
+            lines
+        );
+        // 正文与 "  ┌" / "  └" 边框同起于第 2 列
+        assert!(lines.iter().any(|l| l.starts_with("  fn main() {")));
+    }
+
+    #[test]
+    fn nested_list_keeps_siblings_adjacent() {
+        // 回归：flush 在无内容时也塞一个空行，子列表结束后同级下一项被空行隔开
+        let md = "- A\n  - A1\n  - A2\n- B\n";
+        let lines = rendered(md, 80);
+        let b = lines
+            .iter()
+            .position(|l| l.contains('B'))
+            .expect("最后一项必须渲染");
+        assert!(
+            !lines[b - 1].trim().is_empty(),
+            "子列表结束后多出空行: {:?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn long_list_item_wraps_with_hanging_indent() {
+        let md = "- 这一项内容很长很长很长很长很长很长很长很长很长很长很长很长很长很长，需要折行\n";
+        let lines = rendered(md, 40);
+        assert!(lines.len() >= 2, "长条目必须折行: {:?}", lines);
+        assert!(
+            lines[1].starts_with("  ") && !lines[1].starts_with("  •"),
+            "续行未做悬挂缩进: {:?}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn blockquote_continuation_keeps_bar() {
+        let md = "> 引用内容很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长\n";
+        let lines = rendered(md, 40);
+        let quoted: Vec<&String> = lines.iter().filter(|l| !l.trim().is_empty()).collect();
+        assert!(quoted.len() >= 2, "长引用必须折行: {:?}", lines);
+        assert!(
+            quoted.iter().all(|l| l.starts_with('│')),
+            "折行后的引用缺少竖线前缀: {:?}",
+            quoted
         );
     }
 }
