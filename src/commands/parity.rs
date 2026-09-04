@@ -25,7 +25,10 @@ async fn ask_agent(ctx: &mut CommandContext<'_>, prompt: String) -> CommandResul
     let message_id = ctx.state.next_message_id;
     ctx.state.next_message_id += 1;
     ctx.agent_tx
-        .send(AgentRequest::SendMessage { message_id, message: prompt })
+        .send(AgentRequest::SendMessage {
+            message_id,
+            message: prompt,
+        })
         .await
         .map_err(|e| e.to_string())
 }
@@ -233,7 +236,7 @@ pub async fn history(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandR
     if sub == "search" || sub == "find" {
         // 交给已有的历史搜索浮层（Ctrl+R 同一入口）
         ctx.state.close_palette();
-        ctx.state.show_history_search = true;
+        ctx.state.open_history_search();
         return Ok(());
     }
 
@@ -247,7 +250,10 @@ pub async fn history(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandR
         .collect();
 
     let mut out = if query.is_empty() {
-        format!("# Input history ({} stored)\n\n", ctx.state.command_history.len())
+        format!(
+            "# Input history ({} stored)\n\n",
+            ctx.state.command_history.len()
+        )
     } else {
         format!("# Input history matching `{}`\n\n", query)
     };
@@ -343,7 +349,10 @@ pub async fn output_style(mut ctx: CommandContext<'_>, args: Vec<String>) -> Com
             }
             push_msg(
                 &mut ctx,
-                format!("✅ Output style: **{}** (saved to user settings)", style_owned),
+                format!(
+                    "✅ Output style: **{}** (saved to user settings)",
+                    style_owned
+                ),
             );
         }
         Err(e) => push_msg(&mut ctx, format!("❌ Settings unavailable: {}", e)),
@@ -429,7 +438,10 @@ pub async fn tag(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResul
                 entry.push(name.clone());
                 let all = entry.join(", ");
                 save_tags(&map)?;
-                format!("🏷️ Tagged session `{}` with `{}`.\n\nTags: {}", key, name, all)
+                format!(
+                    "🏷️ Tagged session `{}` with `{}`.\n\nTags: {}",
+                    key, name, all
+                )
             }
         }
     };
@@ -510,7 +522,10 @@ pub async fn statusline(mut ctx: CommandContext<'_>, args: Vec<String>) -> Comma
         other => {
             push_msg(
                 &mut ctx,
-                format!("❌ Unknown option `{}`. Usage: /statusline [verbose|vim]", other),
+                format!(
+                    "❌ Unknown option `{}`. Usage: /statusline [verbose|vim]",
+                    other
+                ),
             );
             return Ok(());
         }
@@ -566,7 +581,10 @@ pub async fn poor(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
     let enable = match parse_toggle(&args, ctx.state.poor_mode) {
         Ok(v) => v,
         Err(other) => {
-            push_msg(&mut ctx, format!("❌ Unknown action `{}`. Usage: /poor [on|off]", other));
+            push_msg(
+                &mut ctx,
+                format!("❌ Unknown action `{}`. Usage: /poor [on|off]", other),
+            );
             return Ok(());
         }
     };
@@ -590,7 +608,10 @@ pub async fn proactive(mut ctx: CommandContext<'_>, args: Vec<String>) -> Comman
     let enable = match parse_toggle(&args, current) {
         Ok(v) => v,
         Err(other) => {
-            push_msg(&mut ctx, format!("❌ Unknown action `{}`. Usage: /proactive [on|off]", other));
+            push_msg(
+                &mut ctx,
+                format!("❌ Unknown action `{}`. Usage: /proactive [on|off]", other),
+            );
             return Ok(());
         }
     };
@@ -617,7 +638,10 @@ pub async fn advisor(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandR
     let enable = match parse_toggle(&args, ctx.state.advisor_mode) {
         Ok(v) => v,
         Err(other) => {
-            push_msg(&mut ctx, format!("❌ Unknown action `{}`. Usage: /advisor [on|off]", other));
+            push_msg(
+                &mut ctx,
+                format!("❌ Unknown action `{}`. Usage: /advisor [on|off]", other),
+            );
             return Ok(());
         }
     };
@@ -651,7 +675,10 @@ pub async fn autonomy(mut ctx: CommandContext<'_>, args: Vec<String>) -> Command
         Err(other) => {
             push_msg(
                 &mut ctx,
-                format!("❌ Unknown action `{}`. Usage: /autonomy [on|off|<rounds>]", other),
+                format!(
+                    "❌ Unknown action `{}`. Usage: /autonomy [on|off|<rounds>]",
+                    other
+                ),
             );
             return Ok(());
         }
@@ -836,12 +863,12 @@ pub async fn attach(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRe
     let count = resolved.len();
     crate::ui::events::clipboard_paste::insert_file_paste_block(ctx.state, resolved);
 
-    let mut out = format!(
-        "📎 Attached **{}** file(s) to your next message.",
-        count
-    );
+    let mut out = format!("📎 Attached **{}** file(s) to your next message.", count);
     if !missing.is_empty() {
-        out.push_str(&format!("\n\n⚠️ Skipped (not found): {}", missing.join(", ")));
+        out.push_str(&format!(
+            "\n\n⚠️ Skipped (not found): {}",
+            missing.join(", ")
+        ));
     }
     push_msg(&mut ctx, out);
     Ok(())
@@ -862,11 +889,13 @@ pub async fn insights(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Comman
     let assistant_msgs = s
         .chat_history
         .iter()
-        .filter(|e| {
-            matches!(e.entry_type, crate::types::ChatEntryType::Assistant) && !e.is_welcome
-        })
+        .filter(|e| matches!(e.entry_type, crate::types::ChatEntryType::Assistant) && !e.is_welcome)
         .count();
-    let tool_entries = s.chat_history.iter().filter(|e| e.tool_call.is_some()).count();
+    let tool_entries = s
+        .chat_history
+        .iter()
+        .filter(|e| e.tool_call.is_some())
+        .count();
     let thinking_blocks = s
         .chat_history
         .iter()
@@ -999,7 +1028,12 @@ pub async fn debug_tool_call(mut ctx: CommandContext<'_>, args: Vec<String>) -> 
                     Some(_) => "❌",
                     None => "…",
                 };
-                out.push_str(&format!("{:>3}. {} `{}`\n", i + 1, status, tc.function.name));
+                out.push_str(&format!(
+                    "{:>3}. {} `{}`\n",
+                    i + 1,
+                    status,
+                    tc.function.name
+                ));
             }
             out.push_str("\n_Inspect one with `/debug-tool-call <n>`._\n");
             out
@@ -1037,7 +1071,11 @@ fn render_tool_call(entry: &ChatEntry, back: usize) -> String {
         Some(r) => {
             out.push_str(&format!(
                 "\n## Result — {}\n",
-                if r.success { "success ✅" } else { "failure ❌" }
+                if r.success {
+                    "success ✅"
+                } else {
+                    "failure ❌"
+                }
             ));
             if let Some(err) = &r.error {
                 out.push_str(&format!("\n**error:** {}\n", err));
@@ -1072,10 +1110,20 @@ fn gh_ready() -> Result<(), String> {
 
 /// 当前仓库 slug（`owner/repo`），来自 `gh repo view`
 fn repo_slug() -> Option<String> {
-    run("gh", &["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    run(
+        "gh",
+        &[
+            "repo",
+            "view",
+            "--json",
+            "nameWithOwner",
+            "-q",
+            ".nameWithOwner",
+        ],
+    )
+    .ok()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
 }
 
 /// `/issue [list | new <title…> | view <n>]` — 通过 `gh` 管理 issue。
@@ -1092,7 +1140,10 @@ pub async fn issue(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRes
         return Ok(());
     };
 
-    let sub = args.first().map(|s| s.to_lowercase()).unwrap_or_else(|| "list".into());
+    let sub = args
+        .first()
+        .map(|s| s.to_lowercase())
+        .unwrap_or_else(|| "list".into());
     let rest: Vec<String> = args.iter().skip(1).cloned().collect();
 
     let out = match sub.as_str() {
@@ -1214,8 +1265,15 @@ pub async fn subscribe_pr(mut ctx: CommandContext<'_>, args: Vec<String>) -> Com
 
     let state = run(
         "gh",
-        &["pr", "view", &n.to_string(), "--json", "state,title,url", "-q",
-          "[.state, .title, .url] | join(\" | \")"],
+        &[
+            "pr",
+            "view",
+            &n.to_string(),
+            "--json",
+            "state,title,url",
+            "-q",
+            "[.state, .title, .url] | join(\" | \")",
+        ],
     )
     .unwrap_or_else(|e| format!("unknown ({})", e));
 
@@ -1276,8 +1334,12 @@ pub async fn install_github_app(mut ctx: CommandContext<'_>, _args: Vec<String>)
             ));
             if let Ok(apps) = run(
                 "gh",
-                &["api", "user/installations", "--jq",
-                  ".installations[] | \"\\(.app_slug) → \\(.account.login)\""],
+                &[
+                    "api",
+                    "user/installations",
+                    "--jq",
+                    ".installations[] | \"\\(.app_slug) → \\(.account.login)\"",
+                ],
             ) {
                 if !apps.trim().is_empty() {
                     out.push_str("\n## Installed GitHub Apps\n");
@@ -1366,7 +1428,12 @@ fn scan_mailboxes() -> Vec<(String, String, usize, usize)> {
             };
             if let Ok(mb) = mgr.read_mailbox(&team_name, agent) {
                 let unread = mb.messages.iter().filter(|m| !m.read).count();
-                rows.push((team_name.clone(), agent.to_string(), unread, mb.messages.len()));
+                rows.push((
+                    team_name.clone(),
+                    agent.to_string(),
+                    unread,
+                    mb.messages.len(),
+                ));
             }
         }
     }
@@ -1412,7 +1479,10 @@ pub async fn peers(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRes
         shown += 1;
     }
     if shown == 0 {
-        out.push_str(&format!("| _no peers in team `{}`_ | | | |\n", want_team.unwrap_or_default()));
+        out.push_str(&format!(
+            "| _no peers in team `{}`_ | | | |\n",
+            want_team.unwrap_or_default()
+        ));
     }
     out.push_str("\nSend with `/send [team/]<agent> <message>`.\n");
     push_msg(&mut ctx, out);
@@ -1576,7 +1646,10 @@ pub async fn claim_main(mut ctx: CommandContext<'_>, args: Vec<String>) -> Comma
         if pid == me {
             push_msg(
                 &mut ctx,
-                format!("✅ This process (pid {}) already holds main for `{}`.", me, team),
+                format!(
+                    "✅ This process (pid {}) already holds main for `{}`.",
+                    me, team
+                ),
             );
             return Ok(());
         }
@@ -1608,7 +1681,10 @@ fn write_claim(
     let path = claim_file(team);
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            push_msg(ctx, format!("⚠️ Cannot create `{}`: {}", parent.display(), e));
+            push_msg(
+                ctx,
+                format!("⚠️ Cannot create `{}`: {}", parent.display(), e),
+            );
             return;
         }
     }
@@ -1686,7 +1762,9 @@ pub async fn bridge_kick(mut ctx: CommandContext<'_>, args: Vec<String>) -> Comm
 
     let Some(target) = args.first().cloned() else {
         let rows = scan_mailboxes();
-        let mut out = String::from("Usage: `/bridge-kick [team/]<agent>` | `/bridge-kick --release [team]`\n\n");
+        let mut out = String::from(
+            "Usage: `/bridge-kick [team/]<agent>` | `/bridge-kick --release [team]`\n\n",
+        );
         if rows.is_empty() {
             out.push_str("No peer mailboxes to kick.\n");
         } else {
@@ -1770,8 +1848,16 @@ async fn remote_surface(client: &str) -> String {
         cfg.port,
         on_off(cfg.web_ui_enabled),
         cfg.web_ui_port,
-        if cfg.auth_token.is_some() { "set" } else { "unset" },
-        if cfg.jwt_secret.is_some() { "set" } else { "unset" },
+        if cfg.auth_token.is_some() {
+            "set"
+        } else {
+            "unset"
+        },
+        if cfg.jwt_secret.is_some() {
+            "set"
+        } else {
+            "unset"
+        },
         cfg.max_connections,
         cfg.session_timeout_secs
     ));
@@ -1845,9 +1931,8 @@ pub async fn desktop(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Command
 /// 项目级 goal 存储（`.star/goals.json`），比默认的 `~/.starcode/goals.json` 更贴合仓库
 fn goal_manager() -> Result<crate::core::goal_tracking::GoalManager, String> {
     let path = star_dir()?.join("goals.json");
-    let mut mgr = crate::core::goal_tracking::GoalManager::new(Some(
-        path.to_string_lossy().as_ref(),
-    ));
+    let mut mgr =
+        crate::core::goal_tracking::GoalManager::new(Some(path.to_string_lossy().as_ref()));
     mgr.load()?;
     Ok(mgr)
 }
@@ -1870,7 +1955,10 @@ fn resolve_goal_id(
     match hits.len() {
         1 => Ok(hits[0].clone()),
         0 => Err(format!("No goal matching `{}`.", prefix)),
-        n => Err(format!("`{}` matches {} goals — use more characters.", prefix, n)),
+        n => Err(format!(
+            "`{}` matches {} goals — use more characters.",
+            prefix, n
+        )),
     }
 }
 
@@ -2044,13 +2132,14 @@ pub async fn job(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResul
             }
             push_msg(
                 &mut ctx,
-                format!("🧹 Cleared {} completion marker(s) in `{}`.", removed, dir.display()),
+                format!(
+                    "🧹 Cleared {} completion marker(s) in `{}`.",
+                    removed,
+                    dir.display()
+                ),
             );
         }
-        _ => push_msg(
-            &mut ctx,
-            "Usage: `/job` | `/job add <task>` | `/job clear`",
-        ),
+        _ => push_msg(&mut ctx, "Usage: `/job` | `/job add <task>` | `/job clear`"),
     }
     Ok(())
 }
@@ -2094,7 +2183,13 @@ async fn render_jobs(cwd: &std::path::Path) -> String {
     if let Ok(entries) = std::fs::read_dir(&done_dir) {
         for e in entries.flatten() {
             if e.path().extension().and_then(|s| s.to_str()) == Some("done") {
-                done.push(e.path().file_stem().unwrap_or_default().to_string_lossy().to_string());
+                done.push(
+                    e.path()
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string(),
+                );
             }
         }
     }
@@ -2121,7 +2216,10 @@ pub async fn monitor(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Command
         .and_then(|s| s.lines().nth(1).map(|l| l.trim().to_string()));
     let siblings = run(
         "sh",
-        &["-c", "ps -eo pid,pcpu,rss,etime,comm --no-headers | grep -i star | grep -v grep"],
+        &[
+            "-c",
+            "ps -eo pid,pcpu,rss,etime,comm --no-headers | grep -i star | grep -v grep",
+        ],
     )
     .unwrap_or_default();
 
@@ -2194,7 +2292,9 @@ pub async fn daemon(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRe
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let cfg = crate::core::daemon::DaemonConfig::from_env();
     let queued = crate::core::remote::queued_count(&cwd).await.unwrap_or(0);
-    let loop_tasks = crate::core::loops::list_tasks(&cwd).await.unwrap_or_default();
+    let loop_tasks = crate::core::loops::list_tasks(&cwd)
+        .await
+        .unwrap_or_default();
 
     if args.first().map(|s| s.to_lowercase()).as_deref() == Some("tasks") {
         let mut out = String::from("## Daemon: scheduled /loop tasks\n\n");
@@ -2317,7 +2417,10 @@ pub async fn coordinator(mut ctx: CommandContext<'_>, args: Vec<String>) -> Comm
             out.push('\n');
         }
     }
-    out.push_str(&format!("\n### peers\n\n{} mailbox(es) — see `/peers`\n", peers.len()));
+    out.push_str(&format!(
+        "\n### peers\n\n{} mailbox(es) — see `/peers`\n",
+        peers.len()
+    ));
     out.push_str("\n`/coordinator claim [team]` · `/coordinator release [team]`\n");
     push_msg(&mut ctx, out);
     Ok(())
@@ -2332,8 +2435,8 @@ fn classified_dir() -> Result<PathBuf, String> {
     Ok(star_dir()?.join("memory"))
 }
 
-fn classified_manager() -> Result<crate::core::memory::classification::ClassifiedMemoryManager, String>
-{
+fn classified_manager(
+) -> Result<crate::core::memory::classification::ClassifiedMemoryManager, String> {
     use crate::core::memory::classification::ClassifiedMemoryManager;
     let mut mgr = ClassifiedMemoryManager::new(classified_dir()?);
     mgr.initialize()?;
@@ -2455,13 +2558,16 @@ fn render_local_memory(
     ] {
         let n = stats.get(&t.to_string()).copied().unwrap_or(0);
         total += n;
-        out.push_str(&format!("- **{}** — {} entr{}\n", t, n, if n == 1 { "y" } else { "ies" }));
+        out.push_str(&format!(
+            "- **{}** — {} entr{}\n",
+            t,
+            n,
+            if n == 1 { "y" } else { "ies" }
+        ));
     }
 
     if total == 0 {
-        out.push_str(
-            "\n_empty_ — add one with `/local-memory add project <title> :: <content>`\n",
-        );
+        out.push_str("\n_empty_ — add one with `/local-memory add project <title> :: <content>`\n");
         return out;
     }
 
@@ -2544,15 +2650,36 @@ pub async fn memory_stores(mut ctx: CommandContext<'_>, _args: Vec<String>) -> C
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let team = crate::core::team_memory::TeamMemoryConfig::from_env();
 
-    let mut out = String::from("## Memory stores\n\n| store | path | size | state |\n|---|---|---|---|\n");
-    out.push_str(&store_row("project memory (/memory)", &cwd.join(".star").join("memory.md"), false));
-    out.push_str(&store_row("classified (/local-memory)", &cwd.join(".star").join("memory"), true));
+    let mut out =
+        String::from("## Memory stores\n\n| store | path | size | state |\n|---|---|---|---|\n");
+    out.push_str(&store_row(
+        "project memory (/memory)",
+        &cwd.join(".star").join("memory.md"),
+        false,
+    ));
+    out.push_str(&store_row(
+        "classified (/local-memory)",
+        &cwd.join(".star").join("memory"),
+        true,
+    ));
     for name in ["STAR.md", "STARCODE.md", "CLAUDE.md", "AGENTS.md"] {
         out.push_str(&store_row(name, &cwd.join(name), false));
     }
-    out.push_str(&store_row("global CLAUDE.md", &home.join(".claude").join("CLAUDE.md"), false));
-    out.push_str(&store_row("user memdir", &home.join(".starcode").join("memory"), true));
-    out.push_str(&store_row("session transcripts", &home.join(".star").join("transcripts"), true));
+    out.push_str(&store_row(
+        "global CLAUDE.md",
+        &home.join(".claude").join("CLAUDE.md"),
+        false,
+    ));
+    out.push_str(&store_row(
+        "user memdir",
+        &home.join(".starcode").join("memory"),
+        true,
+    ));
+    out.push_str(&store_row(
+        "session transcripts",
+        &home.join(".star").join("transcripts"),
+        true,
+    ));
 
     out.push_str("\n### Shared / team memory\n\n");
     out.push_str(&format!(
@@ -2610,7 +2737,11 @@ pub async fn local_vault(mut ctx: CommandContext<'_>, args: Vec<String>) -> Comm
             let mut s = format!(
                 "## Local vault\n\n- backend: `{:?}`{}\n- store: `{}`\n- entries: `{}`\n\n",
                 backend,
-                if plaintext { " (plaintext fallback)" } else { "" },
+                if plaintext {
+                    " (plaintext fallback)"
+                } else {
+                    ""
+                },
                 vault_path(),
                 keys.len()
             );
@@ -2681,7 +2812,10 @@ pub async fn vault(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRes
             None => "Usage: `/vault endpoint <url>`".to_string(),
             Some(url) => {
                 ctx.state.remote_settings.set_endpoint(url);
-                format!("✅ Remote settings endpoint set to `{}` (this session).", url)
+                format!(
+                    "✅ Remote settings endpoint set to `{}` (this session).",
+                    url
+                )
             }
         };
         push_msg(&mut ctx, out);
@@ -2716,7 +2850,10 @@ pub async fn vault(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRes
         "- provider store: `{}` provider(s) configured — `/provider`\n",
         configured.len()
     ));
-    out.push_str(&format!("- local vault: `{}` — `/local-vault`\n", vault_path()));
+    out.push_str(&format!(
+        "- local vault: `{}` — `/local-vault`\n",
+        vault_path()
+    ));
     if env_keys.is_empty() {
         out.push_str("- environment: no secret-looking vars set\n");
     } else {
@@ -2834,7 +2971,10 @@ pub async fn skill_search(mut ctx: CommandContext<'_>, args: Vec<String>) -> Com
                 r.match_reason
             ));
             if let Some(d) = &r.description {
-                out.push_str(&format!("  - {}\n", d.chars().take(120).collect::<String>()));
+                out.push_str(&format!(
+                    "  - {}\n",
+                    d.chars().take(120).collect::<String>()
+                ));
             }
         }
         out.push_str("\nRun one with `/skill <name>`.\n");
@@ -2849,9 +2989,7 @@ pub async fn skill_search(mut ctx: CommandContext<'_>, args: Vec<String>) -> Com
 /// 也还没有接到会话循环上，所以这里如实报告策略与真实持久化的技能来源，
 /// 并提供 `probe` 子命令对真实文本跑一次 InstinctParser。
 pub async fn skill_learning(mut ctx: CommandContext<'_>, args: &[String]) -> CommandResult {
-    use crate::core::skill_learning::{
-        InstinctParser, LearningPolicy, SkillLearningManager,
-    };
+    use crate::core::skill_learning::{InstinctParser, LearningPolicy, SkillLearningManager};
 
     let sub = args.first().map(|s| s.as_str()).unwrap_or("");
     if sub == "probe" {
@@ -3025,7 +3163,10 @@ pub async fn skill_store(mut ctx: CommandContext<'_>, args: &[String]) -> Comman
         }
         "all" => {
             let all = market.list_all();
-            push_msg(&mut ctx, render_store_entries("All entries", &all, &registry));
+            push_msg(
+                &mut ctx,
+                render_store_entries("All entries", &all, &registry),
+            );
         }
         _ => {
             let featured = market.list_featured();
@@ -3144,7 +3285,11 @@ pub async fn ultrareview(mut ctx: CommandContext<'_>, args: &[String]) -> Comman
     let unstaged = run("git", &["diff", "--stat"]).unwrap_or_default();
     let staged = run("git", &["diff", "--cached", "--stat"]).unwrap_or_default();
     let dirty = !unstaged.is_empty() || !staged.is_empty();
-    let scope_cmd = if dirty { "git diff HEAD" } else { "git show HEAD" };
+    let scope_cmd = if dirty {
+        "git diff HEAD"
+    } else {
+        "git show HEAD"
+    };
     let files = if dirty {
         run("git", &["diff", "HEAD", "--name-only"]).unwrap_or_default()
     } else {
@@ -3162,11 +3307,7 @@ pub async fn ultrareview(mut ctx: CommandContext<'_>, args: &[String]) -> Comman
         );
         return Ok(());
     } else {
-        format!(
-            "the {} changed file(s) in `{}`",
-            file_list.len(),
-            scope_cmd
-        )
+        format!("the {} changed file(s) in `{}`", file_list.len(), scope_cmd)
     };
 
     let scope_note = if explicit.is_empty() {
@@ -3504,7 +3645,11 @@ pub async fn rate_limit_options(mut ctx: CommandContext<'_>, _args: &[String]) -
         .unwrap_or_else(|| "-".to_string());
     let fallback_count = ["STAR_FALLBACK_MODEL", "STAR_FALLBACK_BASE_URL"]
         .iter()
-        .filter(|k| std::env::var(k).map(|v| !v.trim().is_empty()).unwrap_or(false))
+        .filter(|k| {
+            std::env::var(k)
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+        })
         .count();
 
     let mut out = format!(
@@ -3584,7 +3729,9 @@ pub async fn extra_usage(mut ctx: CommandContext<'_>, _args: &[String]) -> Comma
     let window = ctx
         .state
         .context_window_override
-        .or_else(|| crate::agent::model_catalog::get_cached_context_window(&ctx.state.current_model))
+        .or_else(|| {
+            crate::agent::model_catalog::get_cached_context_window(&ctx.state.current_model)
+        })
         .or_else(|| {
             std::env::var("STAR_CONTEXT_WINDOW")
                 .ok()
@@ -3630,7 +3777,9 @@ pub async fn extra_usage(mut ctx: CommandContext<'_>, _args: &[String]) -> Comma
             pct
         ));
     } else {
-        out.push_str("### Tokens\n\nNo completed response yet — counters appear after the first reply.\n");
+        out.push_str(
+            "### Tokens\n\nNo completed response yet — counters appear after the first reply.\n",
+        );
     }
 
     out.push_str(&format!(
@@ -3668,7 +3817,9 @@ pub async fn privacy_settings(mut ctx: CommandContext<'_>, _args: &[String]) -> 
             let pid = c.active_provider_id.clone()?;
             let p = c.providers.get(&pid)?;
             Some((
-                p.base_url.clone().unwrap_or_else(|| "provider default".into()),
+                p.base_url
+                    .clone()
+                    .unwrap_or_else(|| "provider default".into()),
                 if p.api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false) {
                     "stored in provider config"
                 } else if std::env::var("STAR_API_KEY").is_ok() {
@@ -3765,13 +3916,21 @@ pub async fn privacy_settings(mut ctx: CommandContext<'_>, _args: &[String]) -> 
         &cwd.join(".star").join("transcript.jsonl"),
         false,
     ));
-    out.push_str(&store_row("debug logs", &cwd.join(".star").join("logs"), true));
+    out.push_str(&store_row(
+        "debug logs",
+        &cwd.join(".star").join("logs"),
+        true,
+    ));
     out.push_str(&store_row(
         "file checkpoints",
         &cwd.join(".star").join("file-history"),
         true,
     ));
-    out.push_str(&store_row("project memory", &cwd.join(".star").join("memory.md"), false));
+    out.push_str(&store_row(
+        "project memory",
+        &cwd.join(".star").join("memory.md"),
+        false,
+    ));
     out.push_str(&store_row(
         "credential vault",
         &home.join(".star").join("secure_storage.json"),
@@ -3845,7 +4004,9 @@ pub async fn web_setup(mut ctx: CommandContext<'_>, _args: &[String]) -> Command
     let mcp_remote = mcp
         .mcp_servers
         .values()
-        .filter(|s| !s.disabled.unwrap_or(false) && s.url.as_deref().map(|u| !u.is_empty()).unwrap_or(false))
+        .filter(|s| {
+            !s.disabled.unwrap_or(false) && s.url.as_deref().map(|u| !u.is_empty()).unwrap_or(false)
+        })
         .count();
 
     let row = |ok: bool, name: &str, detail: String, next: &str| {
@@ -4013,18 +4174,68 @@ fn artifact_locations() -> Vec<(&'static str, PathBuf, bool, &'static str)> {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".star");
     vec![
-        ("transcript", star.join("transcript.jsonl"), false, "full session transcript (JSONL)"),
+        (
+            "transcript",
+            star.join("transcript.jsonl"),
+            false,
+            "full session transcript (JSONL)",
+        ),
         ("logs", star.join("logs"), true, "debug/agent logs"),
-        ("checkpoints", star.join("file-history"), true, "file snapshots behind /rewind"),
-        ("team-runs", star.join("agent-teams").join("runs"), true, "agent team run records and patches"),
-        ("agents", star.join("agents"), true, "project sub-agent definitions"),
+        (
+            "checkpoints",
+            star.join("file-history"),
+            true,
+            "file snapshots behind /rewind",
+        ),
+        (
+            "team-runs",
+            star.join("agent-teams").join("runs"),
+            true,
+            "agent team run records and patches",
+        ),
+        (
+            "agents",
+            star.join("agents"),
+            true,
+            "project sub-agent definitions",
+        ),
         ("skills", star.join("skills"), true, "project skills"),
-        ("commands", star.join("commands"), true, "project slash commands"),
-        ("extensions", star.join("extensions"), true, "plugins installed into this project"),
-        ("user-extensions", home_star.join("extensions"), true, "plugins installed for your user"),
-        ("memory", star.join("memory"), true, "classified memory store"),
-        ("reports", star.join("reports"), true, "reports written by commands like /perf-issue"),
-        ("tmp", star.join("tmp"), true, "scratch space (safe to delete)"),
+        (
+            "commands",
+            star.join("commands"),
+            true,
+            "project slash commands",
+        ),
+        (
+            "extensions",
+            star.join("extensions"),
+            true,
+            "plugins installed into this project",
+        ),
+        (
+            "user-extensions",
+            home_star.join("extensions"),
+            true,
+            "plugins installed for your user",
+        ),
+        (
+            "memory",
+            star.join("memory"),
+            true,
+            "classified memory store",
+        ),
+        (
+            "reports",
+            star.join("reports"),
+            true,
+            "reports written by commands like /perf-issue",
+        ),
+        (
+            "tmp",
+            star.join("tmp"),
+            true,
+            "scratch space (safe to delete)",
+        ),
     ]
 }
 
@@ -4056,7 +4267,8 @@ pub async fn artifacts(mut ctx: CommandContext<'_>, args: &[String]) -> CommandR
         return Ok(());
     }
 
-    let mut out = String::from("## Artifacts\n\n| set | path | size | state |\n|---|---|---|---|\n");
+    let mut out =
+        String::from("## Artifacts\n\n| set | path | size | state |\n|---|---|---|---|\n");
     for (key, path, is_dir, _) in &locations {
         out.push_str(&store_row(key, path, *is_dir));
     }
@@ -4101,7 +4313,9 @@ fn render_artifact_set(name: &str, path: &std::path::Path, is_dir: bool, note: &
             name,
             note,
             path.display(),
-            meta.as_ref().map(|m| human_bytes(m.len())).unwrap_or_else(|| "-".into()),
+            meta.as_ref()
+                .map(|m| human_bytes(m.len()))
+                .unwrap_or_else(|| "-".into()),
             meta.as_ref().map(stamp).unwrap_or_else(|| "-".into())
         );
     }
@@ -4274,7 +4488,11 @@ pub async fn torch(mut ctx: CommandContext<'_>, _args: &[String]) -> CommandResu
     }
 
     match writable(&cwd.join(".star")) {
-        Ok(()) => checks.push(check(true, "`.star/` writable", cwd.join(".star").display().to_string())),
+        Ok(()) => checks.push(check(
+            true,
+            "`.star/` writable",
+            cwd.join(".star").display().to_string(),
+        )),
         Err(e) => checks.push(check(false, "`.star/` writable", e)),
     }
 
@@ -4329,7 +4547,10 @@ pub async fn torch(mut ctx: CommandContext<'_>, _args: &[String]) -> CommandResu
         ctx.state.plugin_errors.is_empty(),
         "plugins",
         if ctx.state.plugin_errors.is_empty() {
-            format!("{} installed, no load errors", ctx.state.plugin_installed.len())
+            format!(
+                "{} installed, no load errors",
+                ctx.state.plugin_installed.len()
+            )
         } else {
             format!(
                 "{} load error(s): {}",
@@ -4468,7 +4689,10 @@ fn perf_report(ctx: &CommandContext<'_>) -> String {
     for (var, default) in [
         ("STAR_LLM_TIMEOUT", "120"),
         ("STAR_CONNECT_TIMEOUT", "30"),
-        ("STAR_TOOL_TIMEOUT_SECS", "240 smart_edit/skill, 120 Bash, 180 other"),
+        (
+            "STAR_TOOL_TIMEOUT_SECS",
+            "240 smart_edit/skill, 120 Bash, 180 other",
+        ),
     ] {
         out.push_str(&format!(
             "- `{}`: {}\n",
@@ -4499,7 +4723,11 @@ fn perf_report_runtime(ctx: &CommandContext<'_>) -> String {
         })
         .unwrap_or(128_000);
     let used = st.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
-    let tool_entries = st.chat_history.iter().filter(|e| e.tool_call.is_some()).count();
+    let tool_entries = st
+        .chat_history
+        .iter()
+        .filter(|e| e.tool_call.is_some())
+        .count();
     out.push_str(&format!(
         "- history: {} entr(ies), {} with a tool call\n",
         st.chat_history.len(),
@@ -4534,13 +4762,20 @@ fn perf_report_runtime(ctx: &CommandContext<'_>) -> String {
         on_off(st.is_streaming)
     ));
     if let Some(t) = st.processing_started_at {
-        out.push_str(&format!("- current turn elapsed: {:.1}s\n", t.elapsed().as_secs_f64()));
+        out.push_str(&format!(
+            "- current turn elapsed: {:.1}s\n",
+            t.elapsed().as_secs_f64()
+        ));
     }
     if let Some(t) = st.last_token_time {
         out.push_str(&format!(
             "- since last token: {:.1}s{}\n",
             t.elapsed().as_secs_f64(),
-            if t.elapsed().as_secs() > 30 { " ⚠️ stalled" } else { "" }
+            if t.elapsed().as_secs() > 30 {
+                " ⚠️ stalled"
+            } else {
+                ""
+            }
         ));
     }
     if st.tool_started_at.is_empty() {
@@ -4597,11 +4832,7 @@ fn perf_report_disk(ctx: &CommandContext<'_>) -> String {
         let star = cwd.join(".star");
         if star.exists() {
             let (n, b) = dir_stats(&star);
-            out.push_str(&format!(
-                "- `.star/`: {} file(s) / {}\n",
-                n,
-                human_bytes(b)
-            ));
+            out.push_str(&format!("- `.star/`: {} file(s) / {}\n", n, human_bytes(b)));
         }
     }
     out
@@ -4693,7 +4924,11 @@ fn detect_verifiers(root: &std::path::Path) -> Vec<Verifier> {
         add("build", "Cargo.toml", "cargo check --all-targets");
         add("test", "Cargo.toml", "cargo test");
         if run("cargo", &["clippy", "--version"]).is_ok() {
-            add("lint", "Cargo.toml", "cargo clippy --all-targets -- -D warnings");
+            add(
+                "lint",
+                "Cargo.toml",
+                "cargo clippy --all-targets -- -D warnings",
+            );
         }
         if run("cargo", &["fmt", "--version"]).is_ok() {
             add("format", "Cargo.toml", "cargo fmt --check");
@@ -4779,7 +5014,9 @@ fn detect_verifiers_more(root: &std::path::Path) -> Vec<Verifier> {
             let targets: Vec<String> = text
                 .lines()
                 .filter_map(|l| l.split_once(':').map(|(t, _)| t.trim().to_string()))
-                .filter(|t| !t.is_empty() && !t.starts_with('.') && !t.contains(char::is_whitespace))
+                .filter(|t| {
+                    !t.is_empty() && !t.starts_with('.') && !t.contains(char::is_whitespace)
+                })
                 .collect();
             for (target, kind) in [
                 ("build", "build"),
@@ -4797,7 +5034,11 @@ fn detect_verifiers_more(root: &std::path::Path) -> Vec<Verifier> {
     }
 
     if has(".pre-commit-config.yaml") && run("pre-commit", &["--version"]).is_ok() {
-        add("lint", ".pre-commit-config.yaml", "pre-commit run --all-files");
+        add(
+            "lint",
+            ".pre-commit-config.yaml",
+            "pre-commit run --all-files",
+        );
     }
     v
 }
@@ -4901,7 +5142,10 @@ pub async fn init_verifiers(mut ctx: CommandContext<'_>, args: &[String]) -> Com
                 .join("\n");
             push_msg(
                 &mut ctx,
-                format!("Running the detected verifiers via the Bash tool:\n\n{}\n", list),
+                format!(
+                    "Running the detected verifiers via the Bash tool:\n\n{}\n",
+                    list
+                ),
             );
             ask_agent(
                 &mut ctx,
@@ -4923,7 +5167,9 @@ pub async fn init_verifiers(mut ctx: CommandContext<'_>, args: &[String]) -> Com
 
 /// 检测结果表格 + 目标文件状态 + 下一步。
 fn render_verifiers(root: &std::path::Path, verifiers: &[Verifier], section: &str) -> String {
-    let mut out = String::from("## /init-verifiers\n\n| purpose | command | inferred from |\n|---|---|---|\n");
+    let mut out = String::from(
+        "## /init-verifiers\n\n| purpose | command | inferred from |\n|---|---|---|\n",
+    );
     for v in verifiers {
         out.push_str(&format!(
             "| {} | `{}` | {} |\n",
@@ -4953,7 +5199,10 @@ fn render_verifiers(root: &std::path::Path, verifiers: &[Verifier], section: &st
         )),
     }
 
-    out.push_str(&format!("\nWhat `apply` writes:\n\n```markdown\n{}```\n", section));
+    out.push_str(&format!(
+        "\nWhat `apply` writes:\n\n```markdown\n{}```\n",
+        section
+    ));
     out.push_str(
         "\n`/init-verifiers apply` writes it · `/init-verifiers run` asks the agent to execute \
          the commands with the Bash tool. Detection reads manifests only; commands are never run \
@@ -5171,7 +5420,11 @@ fn agent_defs_in(dir: &std::path::Path) -> Vec<(String, String)> {
                 .and_then(|t| {
                     t.lines()
                         .find(|l| l.trim_start().starts_with("description:"))
-                        .map(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()).unwrap_or_default())
+                        .map(|l| {
+                            l.split_once(':')
+                                .map(|(_, v)| v.trim().to_string())
+                                .unwrap_or_default()
+                        })
                 })
                 .unwrap_or_default();
             (name, desc)
@@ -5190,7 +5443,8 @@ pub async fn agents_platform(mut ctx: CommandContext<'_>, _args: &[String]) -> C
     let storage = crate::core::config::storage::Storage::new(cwd.clone());
 
     let project = agent_defs_in(&storage.star_dir().join("agents"));
-    let user = agent_defs_in(&crate::core::config::storage::Storage::global_star_dir().join("agents"));
+    let user =
+        agent_defs_in(&crate::core::config::storage::Storage::global_star_dir().join("agents"));
 
     let mut out = String::from("## /agents-platform\n\n### Built-in subagent types\n\n");
     out.push_str("| slug | shown as |\n|---|---|\n");
@@ -5201,7 +5455,11 @@ pub async fn agents_platform(mut ctx: CommandContext<'_>, _args: &[String]) -> C
         crate::core::agents::types::SubagentType::Editor,
         crate::core::agents::types::SubagentType::CodeReviewer,
     ] {
-        out.push_str(&format!("| `{}` | {} |\n", t.as_str(), t.user_facing_name()));
+        out.push_str(&format!(
+            "| `{}` | {} |\n",
+            t.as_str(),
+            t.user_facing_name()
+        ));
     }
     out.push_str(
         "\nOmitting `subagent_type` runs `general_purpose` synchronously; `background: true` \
@@ -5227,7 +5485,11 @@ pub async fn agents_platform(mut ctx: CommandContext<'_>, _args: &[String]) -> C
                     "| {} | `{}` | {} |\n",
                     scope,
                     name,
-                    if desc.is_empty() { "—" } else { desc.as_str() }
+                    if desc.is_empty() {
+                        "—"
+                    } else {
+                        desc.as_str()
+                    }
                 ));
             }
         }
@@ -5323,7 +5585,9 @@ pub async fn assistant(mut ctx: CommandContext<'_>, _args: &[String]) -> Command
         Err(_) => "default (settings unavailable)".to_string(),
     };
 
-    let mut out = String::from("## /assistant\n\n### Model\n\n| setting | value | change with |\n|---|---|---|\n");
+    let mut out = String::from(
+        "## /assistant\n\n### Model\n\n| setting | value | change with |\n|---|---|---|\n",
+    );
     out.push_str(&format!(
         "| model | `{}` | `/model` |\n| provider | `{}` | `/provider` |\n",
         if ctx.state.current_model.is_empty() {
@@ -5353,7 +5617,10 @@ pub async fn assistant(mut ctx: CommandContext<'_>, _args: &[String]) -> Command
         "| approval mode | `{}` — the gate that actually blocks tools | `/mode` |\n",
         approval_label(&ctx.state.approval_mode)
     ));
-    out.push_str(&format!("| output style | `{}` | `/output-style` |\n", style));
+    out.push_str(&format!(
+        "| output style | `{}` | `/output-style` |\n",
+        style
+    ));
     out.push_str(&format!(
         "| advisor | {} | `/advisor` |\n| proactive suggestions | {} | `/proactive` |\n",
         on_off(ctx.state.advisor_mode),
@@ -5399,7 +5666,9 @@ async fn assistant_sources(ctx: &CommandContext<'_>, cwd: &std::path::Path) -> S
             .unwrap_or(0)
     };
     let star = cwd.join(".star");
-    out.push_str("\n### Capabilities in reach\n\n| capability | state | manage with |\n|---|---|---|\n");
+    out.push_str(
+        "\n### Capabilities in reach\n\n| capability | state | manage with |\n|---|---|---|\n",
+    );
     out.push_str(&format!(
         "| MCP servers | {} | `/mcp` |\n",
         match crate::core::mcp::load_project_mcp_config().await {
@@ -5453,7 +5722,9 @@ pub async fn passes(mut ctx: CommandContext<'_>, _args: &[String]) -> CommandRes
             out.push_str("No providers configured yet — run `/provider` to add one.\n")
         }
         Some(c) => {
-            out.push_str("| provider | credential | base URL | selected model |\n|---|---|---|---|\n");
+            out.push_str(
+                "| provider | credential | base URL | selected model |\n|---|---|---|---|\n",
+            );
             let mut ids: Vec<&String> = c.providers.keys().collect();
             ids.sort();
             for id in ids {
@@ -5477,7 +5748,9 @@ pub async fn passes(mut ctx: CommandContext<'_>, _args: &[String]) -> CommandRes
                     p.selected_model.as_deref().unwrap_or("—")
                 ));
             }
-            out.push_str("\n`▸` marks the active provider. Keys are never printed, only their length.\n");
+            out.push_str(
+                "\n`▸` marks the active provider. Keys are never printed, only their length.\n",
+            );
         }
     }
 
@@ -5509,14 +5782,8 @@ const STICKERS: &[(&str, &str)] = &[
         "ship",
         "   ___|____\n  /  ship  \\\n~~~~~~~~~~~~~~~\n  it's green",
     ),
-    (
-        "bug",
-        "   \\   /\n    (o o)\n   /  V  \\\n  reproduced!",
-    ),
-    (
-        "star",
-        "      *\n     /|\\\n    * + *\n     \\|/\n      *",
-    ),
+    ("bug", "   \\   /\n    (o o)\n   /  V  \\\n  reproduced!"),
+    ("star", "      *\n     /|\\\n    * + *\n     \\|/\n      *"),
     (
         "coffee",
         "  ( (\n   ) )\n  ______\n |      |]\n \\      /\n  `----'",
@@ -5529,10 +5796,7 @@ const STICKERS: &[(&str, &str)] = &[
         "green",
         "  +------------+\n  | all tests  |\n  |   passed   |\n  +------------+",
     ),
-    (
-        "lgtm",
-        "   ,--.\n  ( oo )  LGTM\n   \\__/",
-    ),
+    ("lgtm", "   ,--.\n  ( oo )  LGTM\n   \\__/"),
 ];
 
 /// `/stickers [<name>]` — 在会话里画一张本地贴纸；无参数列出可用名字。
@@ -5557,11 +5821,7 @@ pub async fn stickers(mut ctx: CommandContext<'_>, args: &[String]) -> CommandRe
     };
 
     let key = raw.to_lowercase();
-    let Some((name, art)) = STICKERS
-        .iter()
-        .find(|(n, _)| *n == key.as_str())
-        .copied()
-    else {
+    let Some((name, art)) = STICKERS.iter().find(|(n, _)| *n == key.as_str()).copied() else {
         push_msg(
             &mut ctx,
             format!("No sticker called `{}`. Available: {}", raw, names),
@@ -5657,17 +5917,29 @@ mod tests {
 
     #[test]
     fn schedule_delay_rejects_nonsense() {
-        assert!(parse_schedule_delay(&words("in 0")).is_err(), "in 0 is not a delay");
+        assert!(
+            parse_schedule_delay(&words("in 0")).is_err(),
+            "in 0 is not a delay"
+        );
         assert!(parse_schedule_delay(&words("in soon")).is_err());
-        assert!(parse_schedule_delay(&words("in")).is_err(), "`in` needs a value");
+        assert!(
+            parse_schedule_delay(&words("in")).is_err(),
+            "`in` needs a value"
+        );
         assert!(parse_schedule_delay(&words("at 25:00")).is_err());
-        assert!(parse_schedule_delay(&words("every 5m")).is_err(), "only in/at are supported");
+        assert!(
+            parse_schedule_delay(&words("every 5m")).is_err(),
+            "only in/at are supported"
+        );
     }
 
     #[test]
     fn schedule_when_reads_naturally() {
         assert!(format_schedule_when(45).contains("45"));
-        assert!(format_schedule_when(3_600).contains("60"), "minutes for long delays");
+        assert!(
+            format_schedule_when(3_600).contains("60"),
+            "minutes for long delays"
+        );
     }
 }
 

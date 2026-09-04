@@ -76,67 +76,101 @@ pub fn search_history(history: &[(String, String)], query: &str) -> Vec<HistoryE
 }
 
 /// Render history search dialog
+///
+/// 对标 CCB HistorySearchDialog: 响应式布局 —
+/// columns >= 100 时预览在右侧，否则在底部。
 pub fn render_history_search(f: &mut Frame, state: &HistorySearchState, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Search input
-            Constraint::Min(5),    // Results
-        ])
-        .split(area);
+    use super::fuzzy_picker;
 
     f.render_widget(Clear, area);
 
-    // Search input
-    let input_block = Block::default()
-        .title(" Search History ")
+    // Pane 分割线（对标 CCB Pane Divider）
+    fuzzy_picker::render_pane_divider(f, area, Color::Cyan);
+
+    // 计算布局（对标 CCB FuzzyPicker 布局）
+    let (areas, _preview_pos, _content_area) = fuzzy_picker::compute_layout(area, 100, 6);
+
+    // Search input（对标 CCB SearchBox）
+    fuzzy_picker::render_search_input(
+        f,
+        areas.search,
+        "Search prompts",
+        &state.query,
+        "Filter history…",
+    );
+
+    // Results list（对标 CCB FuzzyPicker List + ListItem）
+    let match_label =
+        fuzzy_picker::format_match_label(state.results.len(), false, false, "prompts");
+    let results_block = Block::default()
+        .title(format!(" Results ({}) ", match_label))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan));
-    let input = Paragraph::new(state.query.as_str())
-        .block(input_block)
-        .style(Style::default().fg(Color::White));
-    f.render_widget(input, chunks[0]);
+        .border_style(Style::default().fg(Color::DarkGray));
 
-    // Results
-    let items: Vec<ListItem> = state
-        .results
-        .iter()
-        .map(|entry| {
-            let role_color = if entry.role == "user" {
-                Color::Cyan
-            } else {
-                Color::Green
-            };
-            let line = Line::from(vec![
-                Span::styled(
-                    format!("{:<8}", entry.role),
-                    Style::default().fg(role_color),
-                ),
-                Span::styled(entry.content.clone(), Style::default().fg(Color::White)),
-            ]);
-            ListItem::new(line)
-        })
-        .collect();
+    if state.results.is_empty() {
+        let empty_msg = if state.query.is_empty() {
+            "No history yet"
+        } else {
+            "No matching prompts"
+        };
+        fuzzy_picker::render_empty_state(f, areas.list, results_block, empty_msg);
+    } else {
+        fuzzy_picker::render_scrolling_list(
+            f,
+            areas.list,
+            results_block,
+            &state.results,
+            state.selected_index,
+            |entry, _is_focused| {
+                let role_color = if entry.role == "user" {
+                    Color::Cyan
+                } else {
+                    Color::Green
+                };
+                Line::from(vec![
+                    Span::styled(
+                        format!("{:<8}", entry.role),
+                        Style::default().fg(role_color),
+                    ),
+                    Span::styled(entry.content.clone(), Style::default().fg(Color::White)),
+                ])
+            },
+        );
+    }
 
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .title(format!(" Results ({}) ", state.results.len()))
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::Rgb(40, 40, 60))
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▶ ");
+    // Preview（对标 CCB HistorySearchDialog renderPreview — 圆角边框）
+    let selected = state.results.get(state.selected_index);
+    let preview_lines: Vec<Line> = if let Some(entry) = selected {
+        entry
+            .content
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(80)
+            .map(|chunk| {
+                Line::from(Span::styled(
+                    chunk.iter().collect::<String>(),
+                    Style::default().fg(Color::White),
+                ))
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+    let preview = Paragraph::new(preview_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(preview, areas.preview);
 
-    let mut list_state = ListState::default();
-    list_state.select(Some(state.selected_index));
-    f.render_stateful_widget(list, chunks[1], &mut list_state);
+    // Byline（对标 CCB FuzzyPicker byline）
+    fuzzy_picker::render_byline(
+        f,
+        area,
+        &[("↑/↓", "navigate"), ("Enter", "use"), ("Esc", "cancel")],
+    );
 }
 
 fn truncate(s: &str, max: usize) -> String {

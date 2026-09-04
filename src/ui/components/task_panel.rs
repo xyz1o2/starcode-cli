@@ -782,11 +782,38 @@ pub fn render_task_panel_mut(f: &mut Frame, area: Rect, panel: &mut TaskPanel, t
                     None => Style::default(),
                 };
 
-                ListItem::new(Line::from(vec![
+                // 构建任务行：前缀 + 图标 + 标题 + 阻塞信息
+                let mut spans = vec![
                     Span::styled(prefix.clone(), Style::default()),
                     Span::styled(format!("{} ", status_icon), icon_style),
                     Span::styled(label.to_string(), title_style),
-                ]))
+                ];
+
+                // 显示 blocked-by 信息（对标 Claude Code `> blocked by #id1, #id2`）
+                if !node.dependencies.is_empty() {
+                    let unresolved: Vec<&str> = node
+                        .dependencies
+                        .iter()
+                        .filter(|dep_id| {
+                            panel
+                                .task_manager
+                                .graph
+                                .nodes
+                                .get(*dep_id)
+                                .map(|n| n.status != TaskStatus::Completed)
+                                .unwrap_or(true)
+                        })
+                        .map(|s| s.as_str())
+                        .collect();
+                    if !unresolved.is_empty() {
+                        spans.push(Span::styled(
+                            format!(" > blocked by {}", unresolved.join(", ")),
+                            Style::default().fg(theme.error),
+                        ));
+                    }
+                }
+
+                ListItem::new(Line::from(spans))
             })
             .collect()
     };

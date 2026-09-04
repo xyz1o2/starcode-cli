@@ -258,7 +258,7 @@ pub(crate) async fn execute_palette_action(
         }
         PaletteAction::ShowStatus => {
             state.close_palette();
-            state.show_status_modal = true;
+            state.open_status_modal();
         }
         PaletteAction::ShowModelMenu => {
             if state.available_models.is_empty() {
@@ -580,8 +580,13 @@ pub(crate) async fn execute_palette_action(
         }
         PaletteAction::ToggleFeature(feature) => match feature.as_str() {
             "context_viz" => {
-                state.show_context_viz = !state.show_context_viz;
-                if state.show_context_viz {
+                if matches!(
+                    state.top_modal(),
+                    Some(crate::ui::state::modal::Modal::ContextViz)
+                ) {
+                    state.pop_modal();
+                } else {
+                    state.open_context_viz();
                     state.context_breakdown = build_context_breakdown(state);
                 }
             }
@@ -602,11 +607,11 @@ pub(crate) async fn execute_palette_action(
         }
         PaletteAction::ShowLogSelector => {
             state.close_palette();
-            state.show_log_selector = true;
+            state.open_log_selector();
         }
         PaletteAction::ShowContextViz => {
             state.close_palette();
-            state.show_context_viz = true;
+            state.open_context_viz();
             state.context_breakdown = build_context_breakdown(state);
         }
         PaletteAction::ToggleVimMode => {
@@ -1091,6 +1096,36 @@ pub async fn handle_key_event(
         return Ok(());
     }
 
+    // Ctrl+Shift+F：全局搜索（对标 Claude Code app:globalSearch）。
+    if key
+        .modifiers
+        .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        && matches!(key.code, KeyCode::Char('F'))
+    {
+        state.open_global_search();
+        return Ok(());
+    }
+
+    // Ctrl+Shift+P：快速打开文件（对标 Claude Code app:quickOpen）。
+    if key
+        .modifiers
+        .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        && matches!(key.code, KeyCode::Char('P'))
+    {
+        state.open_quick_open();
+        return Ok(());
+    }
+
+    // Ctrl+R：历史搜索（对标 Claude Code history:search）。
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('r'))
+        && !state.is_awaiting_confirmation
+        && !state.is_palette_open()
+    {
+        state.open_history_search();
+        return Ok(());
+    }
+
     // Handle Alt+P for folded pasted input preview
     if !state.is_awaiting_confirmation
         && !state.is_palette_open()
@@ -1269,21 +1304,7 @@ pub async fn handle_key_event(
     }
 
     // Vim mode intercept
-    if state.vim_enabled
-        && !state.is_palette_open()
-        && !state.show_help
-        && !state.show_status_modal
-        && !state.show_input_modal
-        && !state.show_theme_picker
-        && !state.show_usage_stats
-        && !state.show_export_dialog
-        && !state.show_global_search
-        && !state.show_quick_open
-        && !state.show_history_search
-        && !state.show_error_overlay
-        && !state.show_log_selector
-        && !state.show_context_viz
-    {
+    if state.vim_enabled && !state.has_overlay_active() {
         use crate::ui::vim::VimMode;
         if let KeyCode::Char(c) = key.code {
             match state.vim_state.mode {
@@ -1772,6 +1793,18 @@ pub async fn handle_key_event(
             state.command_hints.clear();
             state.show_mention_hints = false;
             state.mention_hints.clear();
+            // 关闭 modal stack 栈顶（如果有）
+            if let Some(closed) = state.pop_modal() {
+                match closed {
+                    crate::ui::state::modal::Modal::ThemePicker { prev_theme } => {
+                        if let Some(prev) = prev_theme {
+                            state.theme_manager.set_theme(&prev);
+                        }
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
             state.show_context_viz = false;
             state.show_error_overlay = false;
             state.show_log_selector = false;
@@ -1783,13 +1816,7 @@ pub async fn handle_key_event(
             }
 
             // Claude Code 风格：无任何覆盖层时，双击 Esc 清空输入并存入历史
-            let overlay_open = state.show_command_hints
-                || state.show_mention_hints
-                || state.show_context_viz
-                || state.show_error_overlay
-                || state.show_log_selector
-                || state.show_help
-                || state.pending_model_confirmation;
+            let overlay_open = state.has_overlay_active() || state.pending_model_confirmation;
             if !overlay_open && !state.input.trim().is_empty() {
                 let now = Instant::now();
                 let double = state
@@ -2516,7 +2543,6 @@ async fn handle_overlay_input(
         }
     }
 
-
     Ok(false)
 }
 
@@ -2924,11 +2950,10 @@ async fn handle_input_modal(
 
                         // add_marketplace 需要克隆仓库，可能耗时数秒：后台执行，
                         // 完成后经 StreamMessage::PluginOpResult 回填消息并刷新
-                        let cwd =
-                            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                        let cwd = std::env::current_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("."));
                         state.plugin_op_pending = true;
-                        state.plugin_message =
-                            Some(format!("Adding marketplace {}...", source));
+                        state.plugin_message = Some(format!("Adding marketplace {}...", source));
                         let _ = agent_tx
                             .send(AgentRequest::PluginOp {
                                 project_root: cwd,

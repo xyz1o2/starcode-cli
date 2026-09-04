@@ -30,7 +30,16 @@ pub struct GlobalSearchState {
     pub selected_index: usize,
     pub is_searching: bool,
     pub search_error: Option<String>,
+    /// 代次计数器 — 每次 query 变化递增，用于丢弃过期搜索结果
+    pub search_generation: u64,
+    /// 结果是否被截断（达到 MAX_TOTAL_MATCHES）
+    pub truncated: bool,
 }
+
+/// 每个文件最大匹配数
+const MAX_MATCHES_PER_FILE: usize = 10;
+/// 全局最大匹配数
+const MAX_TOTAL_MATCHES: usize = 500;
 
 impl GlobalSearchState {
     pub fn new() -> Self {
@@ -40,6 +49,8 @@ impl GlobalSearchState {
             selected_index: 0,
             is_searching: false,
             search_error: None,
+            search_generation: 0,
+            truncated: false,
         }
     }
 
@@ -49,6 +60,8 @@ impl GlobalSearchState {
         self.selected_index = 0;
         self.is_searching = false;
         self.search_error = None;
+        self.search_generation = 0;
+        self.truncated = false;
     }
 
     pub fn move_up(&mut self) {
@@ -68,20 +81,27 @@ impl GlobalSearchState {
     }
 }
 
-/// Execute a ripgrep search
-pub async fn execute_search(query: &str, cwd: &str, max_results: usize) -> Vec<SearchResult> {
+/// Execute a ripgrep search，返回 (results, truncated)。
+///
+/// 对标 Claude Code GlobalSearchDialog:
+/// - `-n --no-heading -i -m {MAX_MATCHES_PER_FILE} -F -e query`
+/// - 结果去重（key = "file:line"）
+/// - 达到 MAX_TOTAL_MATCHES 时截断
+pub async fn execute_search(query: &str, cwd: &str) -> (Vec<SearchResult>, bool) {
     if query.is_empty() {
-        return Vec::new();
+        return (Vec::new(), false);
     }
 
+    let max_per_file = MAX_MATCHES_PER_FILE.to_string();
     let output = tokio::process::Command::new("rg")
         .args(&[
             "--line-number",
-            "--column",
             "--no-heading",
-            "--color=never",
-            "--max-count=1",
-            &format!("--max-count={}", max_results),
+            "-i",
+            "-m",
+            &max_per_file,
+            "-F",
+            "-e",
             query,
             cwd,
         ])
@@ -91,10 +111,49 @@ pub async fn execute_search(query: &str, cwd: &str, max_results: usize) -> Vec<S
     match output {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            parse_rg_output(&stdout, max_results)
+            let results = parse_rg_output(stdout.trim(), MAX_TOTAL_MATCHES);
+            let truncated = results.len() >= MAX_TOTAL_MATCHES;
+            (results, truncated)
         }
-        Err(_) => Vec::new(),
+        Err(_) => (Vec::new(), false),
     }
+}
+
+/// 将新结果合并到已有结果中（追加 + 去重，对标 Claude Code 的 append+dedup 策略）。
+pub fn merge_results(existing: &mut Vec<SearchResult>, new_results: Vec<SearchResult>) {
+    use std::collections::HashSet;
+    let seen: HashSet<String> = existing
+        .iter()
+        .map(|r| format!("{}:{}", r.file, r.line_number))
+        .collect();
+    for r in new_results {
+        let key = format!("{}:{}", r.file, r.line_number);
+        if !seen.contains(&key) {
+            existing.push(r);
+        }
+    }
+}
+
+/// 路径截断：保留两端（对标 CCB truncatePathMiddle）。
+///
+/// 当路径过长时，保留目录开头和文件名，中间用 `...` 连接。
+/// 例如: `/very/long/path/to/file.rs` → `/very/.../file.rs`
+pub fn truncate_path_middle(path: &str, max_width: usize) -> String {
+    if path.len() <= max_width || max_width < 5 {
+        return path.to_string();
+    }
+    // 找到最后一个 / 分隔目录和文件名
+    let last_sep = path.rfind('/').unwrap_or(0);
+    let file_name = &path[last_sep..];
+    let dir_part = &path[..last_sep];
+    // 如果文件名本身就够长，截断文件名
+    if file_name.len() >= max_width.saturating_sub(3) {
+        let start = file_name.len().saturating_sub(max_width.saturating_sub(3));
+        return format!("...{}", &file_name[start..]);
+    }
+    // 保留目录开头 + ... + 文件名
+    let dir_budget = max_width.saturating_sub(file_name.len()).saturating_sub(3);
+    format!("{}...{}", &dir_part[..dir_budget], file_name)
 }
 
 /// Parse ripgrep output into SearchResult entries
@@ -121,108 +180,148 @@ fn parse_rg_output(output: &str, max_results: usize) -> Vec<SearchResult> {
     results
 }
 
-/// Render the global search dialog
-pub fn render_global_search(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Search input
-            Constraint::Min(5),    // Results list
-            Constraint::Length(3), // Preview
-        ])
-        .split(area);
+/// 高亮文本中的 query 匹配（对标 CCB highlightMatch — inverse video）。
+///
+/// 返回 Vec<Span>，匹配部分用 REVERSED 样式高亮。
+pub fn highlight_query_matches(text: &str, query: &str) -> Vec<Span<'static>> {
+    if query.is_empty() || text.is_empty() {
+        return vec![Span::raw(text.to_string())];
+    }
 
-    // Clear background
+    let query_lower = query.to_lowercase();
+    let text_lower = text.to_lowercase();
+    let mut spans = Vec::new();
+    let mut last_end = 0;
+
+    // 查找所有匹配位置
+    let mut search_start = 0;
+    while let Some(pos) = text_lower[search_start..].find(&query_lower) {
+        let abs_pos = search_start + pos;
+        // 匹配前的普通文本
+        if abs_pos > last_end {
+            spans.push(Span::raw(text[last_end..abs_pos].to_string()));
+        }
+        // 匹配部分 — inverse video 高亮
+        let match_end = abs_pos + query.len();
+        spans.push(Span::styled(
+            text[abs_pos..match_end].to_string(),
+            Style::default().add_modifier(Modifier::REVERSED),
+        ));
+        last_end = match_end;
+        search_start = match_end;
+    }
+    // 剩余普通文本
+    if last_end < text.len() {
+        spans.push(Span::raw(text[last_end..].to_string()));
+    }
+
+    if spans.is_empty() {
+        vec![Span::raw(text.to_string())]
+    } else {
+        spans
+    }
+}
+
+/// Render the global search dialog
+///
+/// 对标 CCB GlobalSearchDialog: 响应式布局 —
+/// columns >= 140 时预览在右侧，否则在底部。
+pub fn render_global_search(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
+    use super::fuzzy_picker;
+
     f.render_widget(Clear, area);
 
-    // Search input
-    let input_block = Block::default()
-        .title(" Search ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-    let input_text = if state.query.is_empty() {
-        "Type to search...".to_string()
-    } else {
-        state.query.clone()
-    };
-    let input = Paragraph::new(input_text)
-        .block(input_block)
-        .style(if state.query.is_empty() {
-            Style::default().fg(Color::DarkGray)
-        } else {
-            Style::default().fg(Color::White)
-        });
-    f.render_widget(input, chunks[0]);
+    // Pane 分割线（对标 CCB Pane Divider）
+    fuzzy_picker::render_pane_divider(f, area, Color::Cyan);
 
-    // Results list
+    // 计算布局（对标 CCB FuzzyPicker 布局）
+    let (areas, _preview_pos, _content_area) = fuzzy_picker::compute_layout(area, 140, 5);
+
+    // Search input（对标 CCB SearchBox）
+    fuzzy_picker::render_search_input(f, areas.search, "Search", &state.query, "Type to search…");
+
+    // Results list（对标 CCB FuzzyPicker List + ListItem）
+    let match_label = fuzzy_picker::format_match_label(
+        state.results.len(),
+        state.truncated,
+        state.is_searching,
+        "matches",
+    );
     let results_block = Block::default()
-        .title(format!(" Results ({}) ", state.results.len()))
+        .title(format!(" Results ({}) ", match_label))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
 
     if state.results.is_empty() {
         let empty_msg = if state.is_searching {
-            "Searching..."
+            "Searching…"
         } else if state.query.is_empty() {
-            "Enter a search query"
+            "Type to search…"
         } else {
-            "No results found"
+            "No matches"
         };
-        let empty = Paragraph::new(empty_msg)
-            .block(results_block)
-            .style(Style::default().fg(Color::DarkGray));
-        f.render_widget(empty, chunks[1]);
+        fuzzy_picker::render_empty_state(f, areas.list, results_block, empty_msg);
     } else {
-        let items: Vec<ListItem> = state
-            .results
-            .iter()
-            .enumerate()
-            .map(|(i, result)| {
+        let query = state.query.clone();
+        fuzzy_picker::render_scrolling_list(
+            f,
+            areas.list,
+            results_block,
+            &state.results,
+            state.selected_index,
+            |result, _is_focused| {
                 let file_name = std::path::Path::new(&result.file)
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| result.file.clone());
-                let line = Line::from(vec![
-                    Span::styled(
-                        format!("{}:", file_name),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    Span::styled(
-                        format!("{} ", result.line_number),
-                        Style::default().fg(Color::Green),
-                    ),
-                    Span::styled(result.content.clone(), Style::default().fg(Color::White)),
-                ]);
-                ListItem::new(line)
-            })
-            .collect();
-
-        let list = List::new(items)
-            .block(results_block)
-            .highlight_style(
-                Style::default()
-                    .bg(Color::Rgb(40, 40, 60))
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("▶ ");
-
-        let mut list_state = ListState::default();
-        list_state.select(Some(state.selected_index));
-        f.render_stateful_widget(list, chunks[1], &mut list_state);
+                let mut spans = vec![];
+                let path_display = truncate_path_middle(&result.file, 40);
+                spans.push(Span::styled(
+                    format!("{}:", path_display),
+                    Style::default().fg(Color::Yellow),
+                ));
+                spans.push(Span::styled(
+                    format!("{} ", result.line_number),
+                    Style::default().fg(Color::Green),
+                ));
+                spans.extend(highlight_query_matches(result.content.trim_start(), &query));
+                Line::from(spans)
+            },
+        );
     }
 
-    // Preview / Help
-    let preview_text = if let Some(result) = state.selected_result() {
-        format!("{}:{}", result.file, result.line_number)
+    // Preview（对标 CCB FuzzyPicker renderPreview）
+    let preview_lines = if let Some(result) = state.selected_result() {
+        vec![
+            Line::from(vec![Span::styled(
+                format!("{}:{}", result.file, result.line_number),
+                Style::default().fg(Color::Cyan),
+            )]),
+            Line::from(highlight_query_matches(
+                result.content.trim_start(),
+                &state.query,
+            )),
+        ]
     } else {
-        "↑↓ Navigate  Enter Open  Esc Close".to_string()
+        vec![]
     };
-    let preview = Paragraph::new(preview_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        )
-        .style(Style::default().fg(Color::DarkGray));
-    f.render_widget(preview, chunks[2]);
+    let preview = Paragraph::new(preview_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(preview, areas.preview);
+
+    // Byline（对标 CCB FuzzyPicker byline）
+    fuzzy_picker::render_byline(
+        f,
+        area,
+        &[
+            ("↑/↓", "navigate"),
+            ("Enter", "open"),
+            ("Tab", "mention"),
+            ("Shift+Tab", "insert path"),
+            ("Esc", "cancel"),
+        ],
+    );
 }

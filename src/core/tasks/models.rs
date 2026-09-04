@@ -94,6 +94,9 @@ pub struct TaskNode {
     pub status: TaskStatus,
     pub priority: TaskPriority,
     pub dependencies: Vec<String>,
+    /// 本任务阻塞的其他任务 ID（反向依赖，对标 Claude Code 的 `blocks`）
+    #[serde(default)]
+    pub blocks: Vec<String>,
     pub children: Vec<String>,
     pub assigned_agent: Option<String>,
     /// 进行时描述（对标 Claude Code 的 `activeForm`）：任务 in_progress 时面板/转圈
@@ -114,6 +117,7 @@ impl TaskNode {
             status: TaskStatus::Pending,
             priority: TaskPriority::Medium,
             dependencies: Vec::new(),
+            blocks: Vec::new(),
             children: Vec::new(),
             assigned_agent: None,
             active_form: None,

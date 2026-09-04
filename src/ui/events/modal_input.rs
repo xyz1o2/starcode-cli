@@ -6,8 +6,8 @@
 
 use crate::runtime::messages::AgentRequest;
 use crate::ui::state::modal::{
-    load_mcp_server_rows, load_mcp_tools, set_mcp_server_disabled, MarketTab, McpView,
-    PluginConfirmKind, PluginTab, Modal,
+    load_mcp_server_rows, load_mcp_tools, set_mcp_server_disabled, MarketTab, McpView, Modal,
+    PluginConfirmKind, PluginTab,
 };
 use crate::ui::state::ChatState;
 use tokio::sync::mpsc;
@@ -34,6 +34,11 @@ pub async fn handle_modal_key(
         Modal::Mcp { view } => handle_mcp(state, key, view, agent_tx).await,
         Modal::Market { tab } => handle_market(state, key, tab, agent_tx).await,
         Modal::Plugins { tab } => handle_plugins(state, key, tab, agent_tx).await,
+        Modal::GlobalSearch => handle_global_search(state, key, agent_tx).await,
+        Modal::QuickOpen => handle_quick_open(state, key, agent_tx).await,
+        Modal::HistorySearch => handle_history_search(state, key, agent_tx).await,
+        // 其余 modal 变体暂由 input.rs 的 handle_overlay_input 处理
+        _ => Ok(false),
     }
 }
 
@@ -55,8 +60,7 @@ async fn handle_palette(
     match key.code {
         Esc => {
             if let Some(prev_mode) = state.palette_history.pop() {
-                let items =
-                    crate::ui::components::palette::get_items(&prev_mode, state);
+                let items = crate::ui::components::palette::get_items(&prev_mode, state);
                 state.palette_mode = prev_mode;
                 state.palette_items = items;
                 state.selected_palette_index = 0;
@@ -157,8 +161,7 @@ async fn handle_palette(
 
                     if let Some(pid) = provider_id {
                         let store = crate::core::config::provider_store::ProviderStore::new();
-                        let has_saved_key =
-                            store.get_api_key(&pid).await.unwrap_or(None).is_some();
+                        let has_saved_key = store.get_api_key(&pid).await.unwrap_or(None).is_some();
                         super::input::show_provider_api_key_modal(state, &pid, true, has_saved_key);
                         return Ok(true);
                     }
@@ -195,7 +198,8 @@ async fn handle_mcp(
             }
             Down | Right | Tab => {
                 if !state.mcp_modal_servers.is_empty() {
-                    state.mcp_modal_index = (state.mcp_modal_index + 1) % state.mcp_modal_servers.len();
+                    state.mcp_modal_index =
+                        (state.mcp_modal_index + 1) % state.mcp_modal_servers.len();
                 }
             }
             Char('r') | Char('R') => {
@@ -333,7 +337,8 @@ async fn handle_mcp(
             }
             Down | Tab => {
                 if !state.mcp_modal_tools.is_empty() {
-                    state.mcp_modal_index = (state.mcp_modal_index + 1) % state.mcp_modal_tools.len();
+                    state.mcp_modal_index =
+                        (state.mcp_modal_index + 1) % state.mcp_modal_tools.len();
                 }
             }
             Enter => {
@@ -447,7 +452,13 @@ async fn handle_market(
             }
         }
         Backspace => {
-            if matches!(state.top_modal(), Some(Modal::Market { tab: MarketTab::Browse })) && !state.market_query.is_empty() {
+            if matches!(
+                state.top_modal(),
+                Some(Modal::Market {
+                    tab: MarketTab::Browse
+                })
+            ) && !state.market_query.is_empty()
+            {
                 state.market_query.pop();
                 state.market_index = 0;
                 state.reload_market_entries().await;
@@ -479,11 +490,7 @@ async fn handle_market(
                 if let Some(entry) = state.market_entries.get(state.market_index).cloned() {
                     let name = entry.name.clone();
                     if state.market_plugin_names.contains(&name) {
-                        let current = state
-                            .market_enabled_map
-                            .get(&name)
-                            .copied()
-                            .unwrap_or(true);
+                        let current = state.market_enabled_map.get(&name).copied().unwrap_or(true);
                         let cwd = std::env::current_dir()
                             .unwrap_or_else(|_| std::path::PathBuf::from("."));
                         match crate::core::plugins::set_plugin_enabled(&cwd, &name, !current).await
@@ -502,11 +509,7 @@ async fn handle_market(
                         }
                     } else {
                         use crate::core::extensions::registry::ExtensionRegistryManager;
-                        let current = state
-                            .market_enabled_map
-                            .get(&name)
-                            .copied()
-                            .unwrap_or(true);
+                        let current = state.market_enabled_map.get(&name).copied().unwrap_or(true);
                         match ExtensionRegistryManager::new().set_enabled(&name, !current) {
                             Ok(()) => {
                                 state.market_message = Some(if current {
@@ -524,8 +527,12 @@ async fn handle_market(
             MarketTab::Sources => {}
         },
         Char(c) => {
-            if matches!(state.top_modal(), Some(Modal::Market { tab: MarketTab::Browse }))
-                && !c.is_control()
+            if matches!(
+                state.top_modal(),
+                Some(Modal::Market {
+                    tab: MarketTab::Browse
+                })
+            ) && !c.is_control()
             {
                 state.market_query.push(c);
                 state.market_index = 0;
@@ -648,8 +655,7 @@ async fn handle_plugins(
                     PluginConfirmKind::InstallScope { .. } => unreachable!(),
                     PluginConfirmKind::RemoveMarketplace { name } => {
                         state.plugin_op_pending = true;
-                        state.plugin_message =
-                            Some(format!("Removing marketplace {}...", name));
+                        state.plugin_message = Some(format!("Removing marketplace {}...", name));
                         let cwd = std::env::current_dir()
                             .unwrap_or_else(|_| std::path::PathBuf::from("."));
                         let _ = agent_tx
@@ -676,12 +682,11 @@ async fn handle_plugins(
         match key.code {
             Esc => state.plugin_detail = None,
             Enter | Char('i') | Char('I') => {
-                state.plugin_confirm =
-                    Some(crate::ui::state::modal::PluginConfirm {
-                        kind: PluginConfirmKind::InstallScope {
-                            plugin: plugin.clone(),
-                        },
-                    });
+                state.plugin_confirm = Some(crate::ui::state::modal::PluginConfirm {
+                    kind: PluginConfirmKind::InstallScope {
+                        plugin: plugin.clone(),
+                    },
+                });
             }
             _ => {}
         }
@@ -689,8 +694,8 @@ async fn handle_plugins(
         return Ok(true);
     }
 
-    let discover_indices = matches!(tab, PluginTab::Discover)
-        .then(|| state.filtered_discover_indices());
+    let discover_indices =
+        matches!(tab, PluginTab::Discover).then(|| state.filtered_discover_indices());
     let list_len = match tab {
         // Discover 用过滤后的数量（搜索框实时过滤）
         PluginTab::Discover => discover_indices.as_ref().map_or(0, |v| v.len()),
@@ -776,10 +781,8 @@ async fn handle_plugins(
                 state.plugin_op_pending = true;
                 state.plugin_batch_total = plugins.len();
                 state.plugin_batch_done = 0;
-                state.plugin_message =
-                    Some(format!("Installing 0/{} plugins...", plugins.len()));
-                let cwd =
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                state.plugin_message = Some(format!("Installing 0/{} plugins...", plugins.len()));
+                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                 for p in plugins {
                     let _ = agent_tx
                         .send(AgentRequest::PluginOp {
@@ -817,8 +820,8 @@ async fn handle_plugins(
                 {
                     state.plugin_op_pending = true;
                     state.plugin_message = Some(format!("Updating {}...", m.name));
-                    let cwd = std::env::current_dir()
-                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let cwd =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                     let _ = agent_tx
                         .send(AgentRequest::PluginOp {
                             project_root: cwd,
@@ -847,8 +850,8 @@ async fn handle_plugins(
             PluginTab::Installed => {
                 if let Some(p) = state.plugin_installed.get(state.plugin_index).cloned() {
                     let current = p.entry.enabled;
-                    let cwd = std::env::current_dir()
-                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let cwd =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                     match crate::core::plugins::set_plugin_enabled(&cwd, &p.entry.name, !current)
                         .await
                     {
@@ -886,6 +889,300 @@ async fn handle_plugins(
         _ => {}
     }
     Ok(true)
+}
+
+/// 全局搜索弹窗键盘处理（对标 Claude Code GlobalSearchDialog）。
+///
+/// - Up/Down/Ctrl+P/Ctrl+N: 导航结果
+/// - 字符输入: 更新 query 并触发 ripgrep 搜索
+/// - Backspace: 删除字符
+/// - Enter: 将选中结果的 file:line 插入输入框
+/// - Esc: 关闭弹窗
+async fn handle_global_search(
+    state: &mut ChatState,
+    key: crossterm::event::KeyEvent,
+    _agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<bool, Err> {
+    use crossterm::event::{KeyCode::*, KeyModifiers};
+
+    match key.code {
+        Esc => {
+            state.pop_modal();
+            return Ok(true);
+        }
+        Up if state.global_search_state.results.len() > 1 => {
+            state.global_search_state.move_up();
+        }
+        Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.global_search_state.move_up();
+        }
+        Down if state.global_search_state.results.len() > 1 => {
+            state.global_search_state.move_down();
+        }
+        Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.global_search_state.move_down();
+        }
+        Enter => {
+            // 对标 CCB: Enter 打开外部编辑器（暂无，插入 file:line）
+            if let Some(result) = state.global_search_state.selected_result().cloned() {
+                let insert = format!("{}:{} ", result.file, result.line_number);
+                if !state.input.is_empty() && !state.input.ends_with(' ') {
+                    state.input.push(' ');
+                }
+                state.input.push_str(&insert);
+                state.pop_modal();
+            }
+        }
+        Tab => {
+            // 对标 CCB: Tab 插入 mention 格式 @file#Lline
+            if let Some(result) = state.global_search_state.selected_result().cloned() {
+                let insert = format!("@{}#L{} ", result.file, result.line_number);
+                if !state.input.is_empty() && !state.input.ends_with(' ') {
+                    state.input.push(' ');
+                }
+                state.input.push_str(&insert);
+                state.pop_modal();
+            }
+        }
+        BackTab => {
+            // 对标 CCB: Shift+Tab 插入纯路径 file:line
+            if let Some(result) = state.global_search_state.selected_result().cloned() {
+                let insert = format!("{}:{} ", result.file, result.line_number);
+                if !state.input.is_empty() && !state.input.ends_with(' ') {
+                    state.input.push(' ');
+                }
+                state.input.push_str(&insert);
+                state.pop_modal();
+            }
+        }
+        Backspace => {
+            state.global_search_state.query.pop();
+            state.global_search_state.selected_index = 0;
+            trigger_global_search(state).await;
+        }
+        Char(c) if !c.is_control() => {
+            state.global_search_state.query.push(c);
+            state.global_search_state.selected_index = 0;
+            trigger_global_search(state).await;
+        }
+        _ => {}
+    }
+    Ok(true)
+}
+
+/// 触发全局搜索（带代次计数器防过期 + 客户端预过滤）。
+///
+/// 对标 CCB: 在 ripgrep 返回前先过滤现有结果，避免空白闪烁。
+async fn trigger_global_search(state: &mut ChatState) {
+    let gen = state.global_search_state.search_generation.wrapping_add(1);
+    state.global_search_state.search_generation = gen;
+    let query = state.global_search_state.query.clone();
+    if query.is_empty() {
+        state.global_search_state.results.clear();
+        state.global_search_state.truncated = false;
+        state.global_search_state.is_searching = false;
+        return;
+    }
+    // 客户端预过滤（对标 CCB: filter existing results while rg walks）
+    let query_lower = query.to_lowercase();
+    let prev_count = state.global_search_state.results.len();
+    state.global_search_state.results.retain(|r| {
+        r.content.to_lowercase().contains(&query_lower)
+            || r.file.to_lowercase().contains(&query_lower)
+    });
+    // 如果过滤后结果没变（query 是扩展），保留；否则清空避免显示旧结果
+    if state.global_search_state.results.len() == prev_count {
+        // query 扩展了，现有结果都还匹配，保留
+    } else if state.global_search_state.results.is_empty() {
+        // 没有匹配的预过滤结果，等 ripgrep 返回
+    }
+    state.global_search_state.selected_index = 0;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cwd_str = cwd.to_string_lossy().to_string();
+    state.global_search_state.is_searching = true;
+    let (results, truncated) =
+        crate::ui::components::highlight::search::execute_search(&query, &cwd_str).await;
+    // 丢弃过期结果
+    if state.global_search_state.search_generation == gen {
+        state.global_search_state.results = results;
+        state.global_search_state.truncated = truncated;
+        state.global_search_state.is_searching = false;
+    }
+}
+
+/// 快速打开弹窗键盘处理（对标 Claude Code QuickOpenDialog）。
+///
+/// - Up/Down: 导航文件列表
+/// - 字符输入: 更新 query 并触发 fd 搜索
+/// - Backspace: 删除字符
+/// - Enter: 将选中文件路径插入输入框
+/// - Esc: 关闭弹窗
+async fn handle_quick_open(
+    state: &mut ChatState,
+    key: crossterm::event::KeyEvent,
+    _agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<bool, Err> {
+    use crossterm::event::KeyCode::*;
+
+    match key.code {
+        Esc => {
+            state.pop_modal();
+            return Ok(true);
+        }
+        Up => {
+            state.quick_open_state.move_up();
+        }
+        Down => {
+            state.quick_open_state.move_down();
+        }
+        Enter => {
+            // 对标 CCB: Enter 打开外部编辑器（暂无，插入路径）
+            if let Some(file) = state.quick_open_state.selected_file().cloned() {
+                let insert = format!("{} ", file.path);
+                if !state.input.is_empty() && !state.input.ends_with(' ') {
+                    state.input.push(' ');
+                }
+                state.input.push_str(&insert);
+                state.pop_modal();
+            }
+        }
+        Tab => {
+            // 对标 CCB: Tab 插入 mention 格式 @path
+            if let Some(file) = state.quick_open_state.selected_file().cloned() {
+                let insert = format!("@{} ", file.path);
+                if !state.input.is_empty() && !state.input.ends_with(' ') {
+                    state.input.push(' ');
+                }
+                state.input.push_str(&insert);
+                state.pop_modal();
+            }
+        }
+        BackTab => {
+            // 对标 CCB: Shift+Tab 插入纯路径
+            if let Some(file) = state.quick_open_state.selected_file().cloned() {
+                let insert = format!("{} ", file.path);
+                if !state.input.is_empty() && !state.input.ends_with(' ') {
+                    state.input.push(' ');
+                }
+                state.input.push_str(&insert);
+                state.pop_modal();
+            }
+        }
+        Backspace => {
+            state.quick_open_state.query.pop();
+            state.quick_open_state.selected_index = 0;
+            trigger_quick_open_search(state).await;
+        }
+        Char(c) if !c.is_control() => {
+            state.quick_open_state.query.push(c);
+            state.quick_open_state.selected_index = 0;
+            trigger_quick_open_search(state).await;
+        }
+        _ => {}
+    }
+    Ok(true)
+}
+
+/// 触发快速打开搜索（带代次计数器防过期）。
+/// 触发快速打开搜索（带代次计数器防过期 + 客户端预过滤）。
+async fn trigger_quick_open_search(state: &mut ChatState) {
+    let gen = state.quick_open_state.search_generation.wrapping_add(1);
+    state.quick_open_state.search_generation = gen;
+    let query = state.quick_open_state.query.clone();
+    if query.is_empty() {
+        state.quick_open_state.files.clear();
+        return;
+    }
+    // 客户端预过滤（对标 CCB: filter existing results while fd walks）
+    let query_lower = query.to_lowercase();
+    state.quick_open_state.files.retain(|f| {
+        f.path.to_lowercase().contains(&query_lower) || f.name.to_lowercase().contains(&query_lower)
+    });
+    state.quick_open_state.selected_index = 0;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cwd_str = cwd.to_string_lossy().to_string();
+    let files =
+        crate::ui::components::highlight::quick_open::search_files(&query, &cwd_str, 20).await;
+    // 丢弃过期结果
+    if state.quick_open_state.search_generation == gen {
+        state.quick_open_state.files = files;
+    }
+}
+
+/// 历史搜索弹窗键盘处理（对标 Claude Code HistorySearchDialog）。
+///
+/// - Up/Down: 导航历史条目
+/// - 字符输入: 更新 query 并过滤历史
+/// - Backspace: 删除字符
+/// - Enter: 将选中历史条目内容填入输入框
+/// - Esc: 关闭弹窗
+async fn handle_history_search(
+    state: &mut ChatState,
+    key: crossterm::event::KeyEvent,
+    _agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<bool, Err> {
+    use crossterm::event::KeyCode::*;
+
+    match key.code {
+        Esc => {
+            state.pop_modal();
+            return Ok(true);
+        }
+        Up => {
+            state.history_search_state.move_up();
+        }
+        Down => {
+            state.history_search_state.move_down();
+        }
+        Enter => {
+            // 将选中历史条目内容填入输入框
+            if let Some(entry) = state
+                .history_search_state
+                .results
+                .get(state.history_search_state.selected_index)
+            {
+                state.input = entry.content.clone();
+                state.pop_modal();
+            }
+        }
+        Backspace => {
+            state.history_search_state.query.pop();
+            state.history_search_state.selected_index = 0;
+            refresh_history_search(state);
+        }
+        Char(c) if !c.is_control() => {
+            state.history_search_state.query.push(c);
+            state.history_search_state.selected_index = 0;
+            refresh_history_search(state);
+        }
+        _ => {}
+    }
+    Ok(true)
+}
+
+/// 刷新历史搜索结果（从 chat_history 过滤）。
+fn refresh_history_search(state: &mut ChatState) {
+    let history_tuples: Vec<(String, String)> = state
+        .chat_history
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.entry_type,
+                crate::types::ChatEntryType::User | crate::types::ChatEntryType::Assistant
+            )
+        })
+        .map(|e| {
+            let role = match e.entry_type {
+                crate::types::ChatEntryType::User => "user".to_string(),
+                _ => "assistant".to_string(),
+            };
+            (role, e.content.clone())
+        })
+        .collect();
+    state.history_search_state.results = crate::ui::components::highlight::history::search_history(
+        &history_tuples,
+        &state.history_search_state.query,
+    );
 }
 
 /// 打开输入模态录入 marketplace 来源（git URL / owner/repo / 本地路径）。

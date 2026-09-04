@@ -723,7 +723,6 @@ pub async fn handle_stream_update(
             // Classify error and show overlay for retryable errors
             let error_type = crate::ui::components::error_overlay::classify_error(&error);
             if crate::ui::components::error_overlay::is_retryable(&error_type) {
-                state.show_error_overlay = true;
                 state.error_overlay_state =
                     crate::ui::components::error_overlay::ErrorOverlayState {
                         error_message: error.clone(),
@@ -733,6 +732,7 @@ pub async fn handle_stream_update(
                         is_retrying: false,
                         selected_action: crate::ui::components::error_overlay::ErrorAction::Retry,
                     };
+                state.open_error_overlay();
             }
 
             emit_status_text(
@@ -1167,7 +1167,10 @@ fn handle_agent_task_update(state: &mut ChatState, args: AgentTaskUpdateArgs) {
         .last_tool_info
         .clone()
         .or_else(|| prior.and_then(|i| i.last_tool_info.clone()));
-    let name = args.name.clone().or_else(|| prior.and_then(|i| i.name.clone()));
+    let name = args
+        .name
+        .clone()
+        .or_else(|| prior.and_then(|i| i.name.clone()));
     let task_description = args
         .task_description
         .clone()
@@ -1554,14 +1557,13 @@ fn handle_tool_result_message(
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
                     // 类型标签由 AgentTool 写进 data，不再按 status 猜
-                    let agent_type = data
-                        .get("agent_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(if status_str == "fork_launched" {
+                    let agent_type = data.get("agent_type").and_then(|v| v.as_str()).unwrap_or(
+                        if status_str == "fork_launched" {
                             "Fork"
                         } else {
                             "Agent"
-                        });
+                        },
+                    );
                     let name = data
                         .get("name")
                         .and_then(|v| v.as_str())
@@ -1573,13 +1575,11 @@ fn handle_tool_result_message(
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string())
                         .or_else(|| {
-                            serde_json::from_str::<serde_json::Value>(
-                                &tool_call.function.arguments,
-                            )
-                            .ok()?
-                            .get("description")?
-                            .as_str()
-                            .map(|s| s.to_string())
+                            serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
+                                .ok()?
+                                .get("description")?
+                                .as_str()
+                                .map(|s| s.to_string())
                         })
                         .unwrap_or_else(|| "Agent task".to_string());
 

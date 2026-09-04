@@ -9,10 +9,10 @@
 //! Palette keeps its existing `palette_mode`/`palette_history` view state;
 //! the stack only tracks that it is open (`Modal::Palette`).
 
-use crate::core::mcp::MCPManager;
-use crate::core::mcp::types::MCPTool;
 use crate::core::mcp::load_project_mcp_config;
 use crate::core::mcp::save_project_mcp_config;
+use crate::core::mcp::types::MCPTool;
+use crate::core::mcp::MCPManager;
 use crate::ui::state::palette::PaletteMode;
 use crate::ui::state::ChatState;
 use std::time::Duration;
@@ -28,6 +28,34 @@ pub enum Modal {
     Market { tab: MarketTab },
     /// `/plugin` — Claude Code style plugin manager (Discover/Installed/Marketplaces/Errors)
     Plugins { tab: PluginTab },
+    // ── 从 show_* bool 迁移来的对话框 ──
+    /// 全局搜索（Ctrl+Shift+F）
+    GlobalSearch,
+    /// 快速打开文件（Ctrl+Shift+P）
+    QuickOpen,
+    /// 历史搜索（Ctrl+R）
+    HistorySearch,
+    /// 主题选择器
+    ThemePicker {
+        /// 进入前的主题名（Esc 取消时恢复）
+        prev_theme: Option<String>,
+    },
+    /// 用量统计
+    UsageStats,
+    /// 导出对话框
+    Export,
+    /// 压缩状态
+    CompressionStatus,
+    /// 上下文可视化
+    ContextViz,
+    /// 错误覆盖层
+    ErrorOverlay,
+    /// 日志选择器
+    LogSelector,
+    /// 通用输入对话框（API Key、重命名等）
+    InputModal,
+    /// 状态模态（provider/session 选择）
+    StatusModal,
 }
 
 /// Tabs for the plugin manager modal (mirrors Claude Code PluginSettings).
@@ -230,9 +258,7 @@ impl ChatState {
     // ---- palette (replaces the old `show_palette: bool`) ----
 
     pub fn is_palette_open(&self) -> bool {
-        self.modal_stack
-            .iter()
-            .any(|m| matches!(m, Modal::Palette))
+        self.modal_stack.iter().any(|m| matches!(m, Modal::Palette))
     }
 
     /// Close any open palette instance.
@@ -266,7 +292,9 @@ impl ChatState {
 
     pub fn open_mcp_modal(&mut self) {
         self.close_all_modals();
-        self.modal_stack.push(Modal::Mcp { view: McpView::List });
+        self.modal_stack.push(Modal::Mcp {
+            view: McpView::List,
+        });
         self.mcp_modal_index = 0;
         self.mcp_modal_action_msg = None;
     }
@@ -333,7 +361,133 @@ impl ChatState {
         self.reload_plugins_state().await;
     }
 
-    /// Discover tab 实时过滤：按 `plugin_search`（不区分大小写）匹配
+    // ---- 从 show_* bool 迁移来的对话框 ----
+
+    /// 全局搜索
+    pub fn open_global_search(&mut self) {
+        self.close_all_modals();
+        self.global_search_state =
+            crate::ui::components::highlight::search::GlobalSearchState::new();
+        self.modal_stack.push(Modal::GlobalSearch);
+    }
+
+    /// 快速打开
+    pub fn open_quick_open(&mut self) {
+        self.close_all_modals();
+        self.quick_open_state = crate::ui::components::highlight::quick_open::QuickOpenState::new();
+        self.modal_stack.push(Modal::QuickOpen);
+    }
+
+    /// 历史搜索（打开时预填充全部历史条目）
+    pub fn open_history_search(&mut self) {
+        self.close_all_modals();
+        self.history_search_state =
+            crate::ui::components::highlight::history::HistorySearchState::new();
+        // 预填充历史数据
+        let history_tuples: Vec<(String, String)> = self
+            .chat_history
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.entry_type,
+                    crate::types::ChatEntryType::User | crate::types::ChatEntryType::Assistant
+                )
+            })
+            .map(|e| {
+                let role = match e.entry_type {
+                    crate::types::ChatEntryType::User => "user".to_string(),
+                    _ => "assistant".to_string(),
+                };
+                (role, e.content.clone())
+            })
+            .collect();
+        self.history_search_state.results =
+            crate::ui::components::highlight::history::search_history(&history_tuples, "");
+        self.modal_stack.push(Modal::HistorySearch);
+    }
+
+    /// 主题选择器
+    pub fn open_theme_picker(&mut self) {
+        self.close_all_modals();
+        let prev = self.theme_manager.current().name.clone();
+        self.selected_theme_index = 0;
+        self.modal_stack.push(Modal::ThemePicker {
+            prev_theme: Some(prev),
+        });
+    }
+
+    /// 用量统计
+    pub fn open_usage_stats(&mut self) {
+        self.close_all_modals();
+        self.modal_stack.push(Modal::UsageStats);
+    }
+
+    /// 导出对话框
+    pub fn open_export_dialog(&mut self) {
+        self.close_all_modals();
+        self.modal_stack.push(Modal::Export);
+    }
+
+    /// 压缩状态
+    pub fn open_compression_status(&mut self) {
+        self.close_all_modals();
+        self.modal_stack.push(Modal::CompressionStatus);
+    }
+
+    /// 上下文可视化
+    pub fn open_context_viz(&mut self) {
+        self.close_all_modals();
+        self.modal_stack.push(Modal::ContextViz);
+    }
+
+    /// 错误覆盖层
+    pub fn open_error_overlay(&mut self) {
+        self.close_all_modals();
+        self.modal_stack.push(Modal::ErrorOverlay);
+    }
+
+    /// 日志选择器
+    pub fn open_log_selector(&mut self) {
+        self.close_all_modals();
+        self.modal_stack.push(Modal::LogSelector);
+    }
+
+    /// 通用输入对话框
+    pub fn open_input_modal(&mut self, title: String, prompt: String) {
+        self.close_all_modals();
+        self.input_modal_title = title;
+        self.input_modal_prompt = prompt;
+        self.input_modal_value.clear();
+        let mut textarea = tui_textarea::TextArea::default();
+        textarea.set_cursor_line_style(ratatui::style::Style::default());
+        textarea.set_cursor_style(
+            ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+        );
+        self.modal_textarea = textarea;
+        self.modal_stack.push(Modal::InputModal);
+    }
+
+    /// 状态模态
+    pub fn open_status_modal(&mut self) {
+        self.close_all_modals();
+        self.modal_stack.push(Modal::StatusModal);
+    }
+
+    /// 检查是否有任何覆盖层打开（替代旧的 show_X 链）
+    pub fn has_overlay_active(&self) -> bool {
+        !self.modal_stack.is_empty()
+            || self.show_help
+            || self.show_command_hints
+            || self.show_mention_hints
+            || self.is_awaiting_confirmation
+    }
+
+    /// 检查是否有任何对话框打开（不含 help/autocomplete 等轻量覆盖层）
+    pub fn has_dialog_active(&self) -> bool {
+        !self.modal_stack.is_empty() || self.show_help
+    }
+
+    // ---- Discover tab 实时过滤：按 `plugin_search`（不区分大小写）匹配
     /// 插件名 / marketplace / 描述，返回命中的 `plugin_discover` 下标。
     /// 渲染与按键导航共用，保证两边看到同一份过滤结果。
     pub fn filtered_discover_indices(&self) -> Vec<usize> {
@@ -415,25 +569,23 @@ impl ChatState {
                         .await
                         .map(|v| v.len())
                         .unwrap_or(0);
-                    self.plugin_marketplace_counts
-                        .insert(m.name.clone(), count);
+                    self.plugin_marketplace_counts.insert(m.name.clone(), count);
                 }
                 // 行 0 = "Add marketplace…"，其余为 marketplace 行
-                self.plugin_index = self
-                    .plugin_index
-                    .min(self.plugin_marketplaces.len());
+                self.plugin_index = self.plugin_index.min(self.plugin_marketplaces.len());
             }
             PluginTab::Errors => {
                 self.plugin_errors.clear();
                 if let Ok(plugins) = crate::core::plugins::resolve_installed_plugins(&cwd).await {
                     for p in plugins {
                         if let Some(err) = &p.runtime_error {
-                            self.plugin_errors
-                                .push((p.entry.name.clone(), err.clone()));
+                            self.plugin_errors.push((p.entry.name.clone(), err.clone()));
                         }
                     }
                 }
-                self.plugin_index = self.plugin_index.min(self.plugin_errors.len().saturating_sub(1));
+                self.plugin_index = self
+                    .plugin_index
+                    .min(self.plugin_errors.len().saturating_sub(1));
             }
         }
         self.plugin_loading = false;
@@ -470,7 +622,11 @@ impl ChatState {
                 } else {
                     marketplace.search(self.market_query.trim())
                 };
-                entries.sort_by(|a, b| b.featured.cmp(&a.featured).then(b.downloads.cmp(&a.downloads)));
+                entries.sort_by(|a, b| {
+                    b.featured
+                        .cmp(&a.featured)
+                        .then(b.downloads.cmp(&a.downloads))
+                });
                 self.market_entries = entries;
             }
             MarketTab::Installed => {
@@ -580,16 +736,13 @@ pub async fn load_mcp_server_rows(state: &mut ChatState) {
                     None => continue,
                 };
                 let disabled = server.disabled.unwrap_or(false);
-                let transport = server
-                    .transport_type
-                    .clone()
-                    .unwrap_or_else(|| {
-                        if server.url.is_some() {
-                            "http".to_string()
-                        } else {
-                            "stdio".to_string()
-                        }
-                    });
+                let transport = server.transport_type.clone().unwrap_or_else(|| {
+                    if server.url.is_some() {
+                        "http".to_string()
+                    } else {
+                        "stdio".to_string()
+                    }
+                });
                 let command = match &server.url {
                     Some(url) => url.clone(),
                     None => server.command.clone().unwrap_or_else(|| "-".to_string()),
@@ -653,7 +806,9 @@ pub async fn load_mcp_server_rows(state: &mut ChatState) {
     }
 
     state.mcp_modal_servers = rows;
-    state.mcp_modal_index = state.mcp_modal_index.min(state.mcp_modal_servers.len().saturating_sub(1));
+    state.mcp_modal_index = state
+        .mcp_modal_index
+        .min(state.mcp_modal_servers.len().saturating_sub(1));
     state.mcp_modal_loading = false;
 }
 
@@ -665,24 +820,20 @@ pub async fn load_mcp_tools(state: &mut ChatState, server: &str) {
     let manager = MCPManager::new();
     let _ = manager.initialize_mcp_servers().await;
 
-    let tools: Vec<MCPTool> = match tokio::time::timeout(
-        Duration::from_secs(4),
-        manager.list_tools(server),
-    )
-    .await
-    {
-        Ok(Ok(tools)) => tools,
-        Ok(Err(e)) => {
-            state.mcp_modal_error = Some(truncate(&format!("{}: {}", server, e), 96));
-            state.mcp_modal_loading = false;
-            return;
-        }
-        Err(_) => {
-            state.mcp_modal_error = Some(format!("{}: timeout", server));
-            state.mcp_modal_loading = false;
-            return;
-        }
-    };
+    let tools: Vec<MCPTool> =
+        match tokio::time::timeout(Duration::from_secs(4), manager.list_tools(server)).await {
+            Ok(Ok(tools)) => tools,
+            Ok(Err(e)) => {
+                state.mcp_modal_error = Some(truncate(&format!("{}: {}", server, e), 96));
+                state.mcp_modal_loading = false;
+                return;
+            }
+            Err(_) => {
+                state.mcp_modal_error = Some(format!("{}: timeout", server));
+                state.mcp_modal_loading = false;
+                return;
+            }
+        };
 
     state.mcp_modal_tools = tools;
     state.mcp_modal_index = 0;
@@ -691,9 +842,7 @@ pub async fn load_mcp_tools(state: &mut ChatState, server: &str) {
 
 /// Toggle a server's `disabled` flag in the project MCP config.
 pub async fn set_mcp_server_disabled(name: &str, disabled: bool) -> Result<(), String> {
-    let mut cfg = load_project_mcp_config()
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut cfg = load_project_mcp_config().await.map_err(|e| e.to_string())?;
     match cfg.mcp_servers.get_mut(name) {
         Some(server) => {
             server.disabled = Some(disabled);

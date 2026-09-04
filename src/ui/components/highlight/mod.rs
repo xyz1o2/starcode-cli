@@ -19,6 +19,7 @@ pub mod compression;
 pub mod context_viz;
 pub mod diff;
 pub mod export;
+pub mod fuzzy_picker;
 pub mod history;
 pub mod quick_open;
 pub mod search;

@@ -224,12 +224,11 @@ pub async fn theme(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRes
         // 打开交互式主题选择器（↑↓ 实时预览 / Enter 应用 / Esc 取消恢复）
         let themes = crate::ui::components::highlight::theme_picker::available_themes();
         let current_name = ctx.state.theme_manager.current().name.clone();
-        ctx.state.theme_picker_prev = Some(current_name.clone());
+        ctx.state.open_theme_picker();
         ctx.state.selected_theme_index = themes
             .iter()
             .position(|t| t.name == current_name)
             .unwrap_or(0);
-        ctx.state.show_theme_picker = true;
         return Ok(());
     }
 

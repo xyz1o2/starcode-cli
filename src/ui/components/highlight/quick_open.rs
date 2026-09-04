@@ -1,4 +1,6 @@
 /// Quick open dialog — fuzzy file finder with preview.
+///
+/// 对标 Claude Code QuickOpenDialog: 三区域布局（搜索框 / 文件列表 / 预览）。
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -23,6 +25,8 @@ pub struct QuickOpenState {
     pub files: Vec<FileEntry>,
     pub selected_index: usize,
     pub preview_content: Option<String>,
+    /// 代次计数器 — 每次 query 变化递增，用于丢弃过期搜索结果
+    pub search_generation: u64,
 }
 
 impl QuickOpenState {
@@ -32,6 +36,7 @@ impl QuickOpenState {
             files: Vec::new(),
             selected_index: 0,
             preview_content: None,
+            search_generation: 0,
         }
     }
 
@@ -95,67 +100,96 @@ pub async fn search_files(query: &str, cwd: &str, max_results: usize) -> Vec<Fil
 }
 
 /// Render quick open dialog
+///
+/// 对标 CCB QuickOpenDialog: 响应式布局 —
+/// columns >= 120 时预览在右侧，否则在底部。
 pub fn render_quick_open(f: &mut Frame, state: &QuickOpenState, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Search input
-            Constraint::Min(5),    // File list
-        ])
-        .split(area);
+    use super::fuzzy_picker;
 
     f.render_widget(Clear, area);
 
-    // Search input
-    let input_block = Block::default()
-        .title(" Quick Open ")
+    // Pane 分割线（对标 CCB Pane Divider）
+    fuzzy_picker::render_pane_divider(f, area, Color::Cyan);
+
+    // 计算布局（对标 CCB FuzzyPicker 布局）
+    let (areas, _preview_pos, _content_area) = fuzzy_picker::compute_layout(area, 120, 5);
+
+    // Search input（对标 CCB SearchBox）
+    fuzzy_picker::render_search_input(
+        f,
+        areas.search,
+        "Quick Open",
+        &state.query,
+        "Type to search files…",
+    );
+
+    // File list（对标 CCB FuzzyPicker List + ListItem）
+    let match_label = fuzzy_picker::format_match_label(state.files.len(), false, false, "files");
+    let files_block = Block::default()
+        .title(format!(" Files ({}) ", match_label))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-    let input_text = if state.query.is_empty() {
-        "Type to search files...".to_string()
-    } else {
-        state.query.clone()
-    };
-    let input = Paragraph::new(input_text)
-        .block(input_block)
-        .style(if state.query.is_empty() {
-            Style::default().fg(Color::DarkGray)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    if state.files.is_empty() {
+        let empty_msg = if state.query.is_empty() {
+            "Start typing to search…"
         } else {
-            Style::default().fg(Color::White)
-        });
-    f.render_widget(input, chunks[0]);
+            "No matching files"
+        };
+        fuzzy_picker::render_empty_state(f, areas.list, files_block, empty_msg);
+    } else {
+        fuzzy_picker::render_scrolling_list(
+            f,
+            areas.list,
+            files_block,
+            &state.files,
+            state.selected_index,
+            |file, _is_focused| {
+                let path_display =
+                    crate::ui::components::highlight::search::truncate_path_middle(&file.path, 50);
+                Line::from(vec![Span::styled(
+                    path_display,
+                    Style::default().fg(Color::White),
+                )])
+            },
+        );
+    }
 
-    // File list
-    let items: Vec<ListItem> = state
-        .files
-        .iter()
-        .map(|file| {
-            let line = Line::from(vec![
-                Span::styled(file.name.clone(), Style::default().fg(Color::White)),
-                Span::styled(
-                    format!("  {}", file.path),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]);
-            ListItem::new(line)
-        })
-        .collect();
+    // Preview（对标 CCB FuzzyPicker renderPreview）
+    let preview_lines = if let Some(file) = state.selected_file() {
+        vec![
+            Line::from(Span::styled(
+                file.path.clone(),
+                Style::default().fg(Color::Cyan),
+            )),
+            Line::from(Span::styled(
+                state
+                    .preview_content
+                    .as_deref()
+                    .unwrap_or("Press Enter to open"),
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]
+    } else {
+        vec![]
+    };
+    let preview = Paragraph::new(preview_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(preview, areas.preview);
 
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .title(format!(" Files ({}) ", state.files.len()))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::Rgb(40, 40, 60))
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▶ ");
-
-    let mut list_state = ListState::default();
-    list_state.select(Some(state.selected_index));
-    f.render_stateful_widget(list, chunks[1], &mut list_state);
+    // Byline（对标 CCB FuzzyPicker byline）
+    fuzzy_picker::render_byline(
+        f,
+        area,
+        &[
+            ("↑/↓", "navigate"),
+            ("Enter", "open"),
+            ("Tab", "mention"),
+            ("Shift+Tab", "insert path"),
+            ("Esc", "cancel"),
+        ],
+    );
 }

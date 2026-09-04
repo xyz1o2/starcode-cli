@@ -305,10 +305,7 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
     }
 
     // Draw MCP manager modal if on top of the modal stack
-    if matches!(
-        state.top_modal(),
-        Some(crate::ui::state::Modal::Mcp { .. })
-    ) {
+    if matches!(state.top_modal(), Some(crate::ui::state::Modal::Mcp { .. })) {
         crate::ui::components::modal::render_mcp_modal(f, f.area(), state);
     }
 
@@ -329,17 +326,26 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
     }
 
     // Draw input modal if needed
-    if state.show_input_modal {
+    if matches!(
+        state.top_modal(),
+        Some(crate::ui::state::modal::Modal::InputModal)
+    ) {
         crate::ui::components::input_modal::render_input_modal(f, f.area(), state);
     }
 
     // Draw status modal if needed
-    if state.show_status_modal {
+    if matches!(
+        state.top_modal(),
+        Some(crate::ui::state::modal::Modal::StatusModal)
+    ) {
         crate::ui::components::status_modal::render_status_modal(f, f.area(), state);
     }
 
     // Draw global search dialog if active
-    if state.show_global_search {
+    if matches!(
+        state.top_modal(),
+        Some(crate::ui::state::modal::Modal::GlobalSearch)
+    ) {
         crate::ui::components::highlight::search::render_global_search(
             f,
             &state.global_search_state,
@@ -348,7 +354,10 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
     }
 
     // Draw quick open dialog if active
-    if state.show_quick_open {
+    if matches!(
+        state.top_modal(),
+        Some(crate::ui::state::modal::Modal::QuickOpen)
+    ) {
         crate::ui::components::highlight::quick_open::render_quick_open(
             f,
             &state.quick_open_state,
@@ -357,7 +366,10 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
     }
 
     // Draw history search dialog if active
-    if state.show_history_search {
+    if matches!(
+        state.top_modal(),
+        Some(crate::ui::state::modal::Modal::HistorySearch)
+    ) {
         crate::ui::components::highlight::history::render_history_search(
             f,
             &state.history_search_state,
@@ -366,7 +378,10 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
     }
 
     // Draw theme picker if active
-    if state.show_theme_picker {
+    if matches!(
+        state.top_modal(),
+        Some(crate::ui::state::modal::Modal::ThemePicker { .. })
+    ) {
         let themes = crate::ui::components::highlight::theme_picker::available_themes();
         crate::ui::components::highlight::theme_picker::render_theme_picker(
             f,
@@ -377,7 +392,10 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
     }
 
     // Draw usage stats if active
-    if state.show_usage_stats {
+    if matches!(
+        state.top_modal(),
+        Some(crate::ui::state::modal::Modal::UsageStats)
+    ) {
         let theme = state.theme_manager.current();
         crate::ui::components::highlight::stats::render_usage_stats(
             f,
@@ -388,7 +406,10 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
     }
 
     // Draw export dialog if active
-    if state.show_export_dialog {
+    if matches!(
+        state.top_modal(),
+        Some(crate::ui::state::modal::Modal::Export)
+    ) {
         crate::ui::components::highlight::export::render_export_dialog(
             f,
             &state.export_state,
@@ -397,7 +418,10 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
     }
 
     // Draw compression status if active
-    if state.show_compression_status {
+    if matches!(
+        state.top_modal(),
+        Some(crate::ui::state::modal::Modal::CompressionStatus)
+    ) {
         crate::ui::components::highlight::compression::render_compression_status(
             f,
             &state.compression_state,
@@ -406,7 +430,10 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
     }
 
     // Draw context visualization if active
-    if state.show_context_viz {
+    if matches!(
+        state.top_modal(),
+        Some(crate::ui::state::modal::Modal::ContextViz)
+    ) {
         let theme = state.theme_manager.current();
         crate::ui::components::highlight::context_viz::render_context_visualization(
             f,
@@ -416,7 +443,10 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
     }
 
     // Draw error overlay if active
-    if state.show_error_overlay {
+    if matches!(
+        state.top_modal(),
+        Some(crate::ui::state::modal::Modal::ErrorOverlay)
+    ) {
         let theme = state.theme_manager.current();
         crate::ui::components::error_overlay::render_error_overlay(
             f,
@@ -427,7 +457,10 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
     }
 
     // Draw log selector if active
-    if state.show_log_selector {
+    if matches!(
+        state.top_modal(),
+        Some(crate::ui::state::modal::Modal::LogSelector)
+    ) {
         let theme = state.theme_manager.current();
         crate::ui::components::log_selector::render_log_selector(
             f,
