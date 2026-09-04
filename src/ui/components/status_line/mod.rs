@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Clear, Paragraph},
     Frame,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub mod git;
 
@@ -481,58 +482,153 @@ fn spinner_color_with_stall(base_color: Color, stall: f64, animation_tick: u64) 
     }
 }
 
+/// 流光光带的半宽（列）：光带总宽 `2 * HALF + 1`，对标 Claude Code 的
+/// `glimmerIndex ± 1`（GlimmerMessage.tsx）。
+const SHIMMER_BAND_HALF_WIDTH: i64 = 1;
+
+/// 两次扫光之间的间隔（列）：周期取 `文本宽度 + GAP`，光带走到文本之外的
+/// 那段时间就是间隔。对标 Claude Code 的 `cycleLength = width + 20`。
+const SHIMMER_GAP_COLUMNS: i64 = 20;
+
+/// 光带每前进一列要经过的动画帧数。
+///
+/// `animation_tick` 每绘制一帧 +1，帧间隔 33–50ms（见 runtime.rs 的
+/// target_framerate），4 帧 ≈ 165–200ms，对上 Claude Code 的 200ms
+/// （`glimmerSpeed`，50ms 时钟下每 4 帧走一列）。
+const SHIMMER_TICKS_PER_COLUMN: u64 = 4;
+
 /// Render a shimmer effect on a text string.
 /// Returns a vector of (text, is_shimmer) segments.
-fn shimmer_segments(text: &str, animation_tick: u64, speed: u64) -> Vec<(&str, bool)> {
-    let chars: Vec<&str> = text
-        .char_indices()
-        .map(|(i, c)| &text[i..i + c.len_utf8()])
-        .collect();
-    let len = chars.len();
-    if len == 0 {
+///
+/// 对标 Claude Code 的 GlimmerMessage：高亮是一条 3 列宽的窄光带，从右向左
+/// 扫过文字，扫出去之后停一会儿再从右边进来。
+///
+/// 按**显示列**切分而不是按字符数：CJK 字符占 2 列，按字符数算光带在中文里
+/// 会走得比看起来快一倍；更要紧的是，之前这里的光带宽 10 个字符，遇到
+/// 「正在完善前端页面」这种 8 字短语时整条几乎永远被点亮 —— 看上去就是不动。
+fn shimmer_segments(text: &str, animation_tick: u64) -> Vec<(&str, bool)> {
+    let total_width = text.width() as i64;
+    if total_width == 0 {
         return vec![];
     }
 
-    let cycle_len = len + 10; // Extra space between cycles
-    let pos = (animation_tick / speed) as usize % cycle_len;
-    let shimmer_start = if pos >= 10 { pos - 10 } else { 0 };
-    let shimmer_end = (pos).min(len);
+    // 光带中心从 total_width + GAP/2 递减到负值，走完一圈重新开始
+    let cycle_len = total_width + SHIMMER_GAP_COLUMNS;
+    let step = (animation_tick / SHIMMER_TICKS_PER_COLUMN) as i64;
+    let center = total_width + SHIMMER_GAP_COLUMNS / 2 - step.rem_euclid(cycle_len);
+    let band_start = center - SHIMMER_BAND_HALF_WIDTH;
+    let band_end = center + SHIMMER_BAND_HALF_WIDTH;
 
-    let mut segments = Vec::new();
-    if shimmer_start > 0 {
-        segments.push((
-            text[..text
-                .char_indices()
-                .nth(shimmer_start)
-                .map(|(i, _)| i)
-                .unwrap_or(0)]
-                .as_ref(),
-            false,
-        ));
+    // 光带完全在文本之外：整条按暗色渲染（这就是两次扫光之间的间隔）
+    if band_start >= total_width || band_end < 0 {
+        return vec![(text, false)];
     }
-    if shimmer_start < shimmer_end {
-        let start_byte = text
-            .char_indices()
-            .nth(shimmer_start)
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        let end_byte = text
-            .char_indices()
-            .nth(shimmer_end)
-            .map(|(i, _)| i)
-            .unwrap_or(text.len());
-        segments.push((text[start_byte..end_byte].as_ref(), true));
+
+    // 按列位置把字符分到 before / shimmer / after 三段。col 单调递增，
+    // 所以两个字节游标只需各自向前推进。
+    let mut col = 0i64;
+    let mut before_end = 0usize;
+    let mut shimmer_end = 0usize;
+    for (byte_idx, ch) in text.char_indices() {
+        let ch_width = ch.width().unwrap_or(0) as i64;
+        let ch_end = byte_idx + ch.len_utf8();
+        if col + ch_width <= band_start {
+            before_end = ch_end;
+            shimmer_end = ch_end;
+        } else if col <= band_end {
+            shimmer_end = ch_end;
+        }
+        col += ch_width;
     }
-    if shimmer_end < len {
-        let start_byte = text
-            .char_indices()
-            .nth(shimmer_end)
-            .map(|(i, _)| i)
-            .unwrap_or(text.len());
-        segments.push((text[start_byte..].as_ref(), false));
+
+    let mut segments = Vec::with_capacity(3);
+    if before_end > 0 {
+        segments.push((&text[..before_end], false));
+    }
+    if shimmer_end > before_end {
+        segments.push((&text[before_end..shimmer_end], true));
+    }
+    if shimmer_end < text.len() {
+        segments.push((&text[shimmer_end..], false));
     }
 
     segments
+}
+
+/// spinner 动词的最大显示宽度（列）。
+///
+/// Claude Code 靠 SpinnerAnimationRow 的逐段宽度门控来保护右侧的耗时/token
+/// 后缀，我们这行没有门控，所以在源头卡一刀：太长的 todo 文案不进 spinner。
+const MAX_TODO_VERB_WIDTH: usize = 32;
+
+/// 本轮对话固定使用的随机动词。
+///
+/// 对标 Claude Code：动词在 spinner 挂载时抽一次就定下来
+/// （`const [randomVerb] = useState(() => sample(getSpinnerVerbs()))`），整轮
+/// 不再变 —— 那一行的动感来自文字上扫过的流光，不是来自换词。之前这里写的是
+/// `SPINNER_VERBS[elapsed / 5 % len]`，每 5 秒跳一个词，反而不像参照实现。
+///
+/// 这里没有"挂载"可挂，就拿每轮递增的 `active_message_id` 当种子：轮内稳定，
+/// 换轮换词。哈希一遍是为了让相邻两轮不至于按 SPINNER_VERBS 的顺序往下念。
+fn turn_spinner_verb(state: &ChatState) -> &'static str {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    state.active_message_id.unwrap_or(0).hash(&mut hasher);
+    SPINNER_VERBS[hasher.finish() as usize % SPINNER_VERBS.len()]
+}
+
+/// 这段文字能不能当界面文案用。
+///
+/// 判据是"每个字符都不超过 1 列，且至少有一个 ASCII 字母"：宽字符（CJK、
+/// emoji）直接排除，`Flambéing` 这种带变音符号的拉丁词照收 —— 参照实现的
+/// 动词表里就有。
+fn is_latin_phrase(text: &str) -> bool {
+    text.chars().all(|c| c.width().unwrap_or(0) <= 1)
+        && text.chars().any(|c| c.is_ascii_alphabetic())
+}
+
+/// 取进行中 todo 的进行时描述当 spinner 动词，取不到就返回 None。
+///
+/// Claude Code 是无条件用的（`currentTodo?.activeForm ?? currentTodo?.subject`），
+/// 因为它的 activeForm 被 schema 约束成英文现在进行时（"Running tests"）。我们的
+/// 模型跟着对话语言走，中文会话里写出来的是「正在完善前端页面」—— 直接塞进状态行
+/// 就成了一句钉死的中文，既违反"界面文案用英文"，也让这行看起来卡住了。所以只收
+/// 英文短语，其余回落到动词池。
+fn in_progress_todo_verb(state: &ChatState) -> Option<String> {
+    use crate::core::tasks::models::TaskStatus;
+
+    let graph = &state.task_panel.task_manager.graph;
+    // 按 root_ids 的顺序找第一个进行中的任务，和清单里看到的顺序一致
+    // （对标 `tasksV2.find(...)`）。root_ids 里没有就退回到全表扫描，
+    // 保证子任务也能命中。
+    let node = graph
+        .root_ids
+        .iter()
+        .filter_map(|id| graph.nodes.get(id))
+        .find(|n| n.status == TaskStatus::InProgress)
+        .or_else(|| {
+            graph
+                .nodes
+                .values()
+                .filter(|n| n.status == TaskStatus::InProgress)
+                .min_by_key(|n| (n.created_at, n.id.clone()))
+        })?;
+
+    let text = node
+        .active_form
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| node.title.trim());
+
+    // 模型有时自己带了省略号，而这行后面还会再补一个「… 」
+    let text = text.trim_end_matches(['…', '.', ' ']);
+    if text.is_empty() || !is_latin_phrase(text) || text.width() > MAX_TODO_VERB_WIDTH {
+        return None;
+    }
+    Some(text.to_string())
 }
 
 /// Render a spinner line above the input area.
@@ -556,25 +652,14 @@ pub fn processing_spinner_line(state: &ChatState) -> Vec<ratatui::text::Line<'st
         SPINNER_FRAMES_REV[cycle_frame - SPINNER_FRAMES.len()]
     };
 
-    // 对标 Claude Code Spinner：动词优先取 in_progress 任务的 activeForm
-    // （"Running tests…"），没有进行中的 todo 时才轮换随机动词。
-    let todo_verb: Option<String> = state
-        .task_panel
-        .task_manager
-        .graph
-        .nodes
-        .values()
-        .filter(|n| n.status == crate::core::tasks::models::TaskStatus::InProgress)
-        .min_by_key(|n| n.id.clone())
-        .and_then(|n| {
-            n.active_form
-                .clone()
-                .filter(|s| !s.trim().is_empty())
-                .or_else(|| Some(n.title.clone()))
-        });
+    // 对标 Claude Code Spinner 的动词优先级：
+    // `overrideMessage ?? currentTodo?.activeForm ?? currentTodo?.subject ?? randomVerb`。
+    // 区别只在于 todo 文案要先过一遍英文/长度筛（见 in_progress_todo_verb），
+    // 筛不过就用本轮固定的随机动词。
+    let todo_verb = in_progress_todo_verb(state);
     let verb: &str = match todo_verb {
         Some(ref v) => v,
-        None => SPINNER_VERBS[(elapsed as usize / 5) % SPINNER_VERBS.len()],
+        None => turn_spinner_verb(state),
     };
     let e_color = elapsed_color(elapsed);
 
@@ -618,8 +703,7 @@ pub fn processing_spinner_line(state: &ChatState) -> Vec<ratatui::text::Line<'st
     )];
 
     // Render verb with shimmer effect
-    let shimmer_speed = if state.is_streaming { 12 } else { 20 };
-    let shimmer_seg = shimmer_segments(verb, state.animation_tick, shimmer_speed);
+    let shimmer_seg = shimmer_segments(verb, state.animation_tick);
     for (text, is_shimmer) in shimmer_seg {
         let color = if stall > 0.5 {
             lerp_color(dim_color, stalled_msg_color, stall * 0.5)
@@ -1211,4 +1295,107 @@ pub fn render_status_bar(f: &mut Frame, state: &ChatState, area: Rect) {
     );
     let spans = build_status_spans(state, area.width);
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 把分段还原成"高亮起止列"，方便断言光带位置。
+    fn shimmer_columns(text: &str, tick: u64) -> Option<(usize, usize)> {
+        let mut col = 0usize;
+        let mut found: Option<(usize, usize)> = None;
+        for (seg, is_shimmer) in shimmer_segments(text, tick) {
+            let w = seg.width();
+            if is_shimmer {
+                found = Some((col, col + w));
+            }
+            col += w;
+        }
+        found
+    }
+
+    #[test]
+    fn shimmer_segments_rejoin_into_the_original_text() {
+        // 三段拼回去必须和原文一字不差，否则状态行会漏字或重字
+        let text = "Percolating";
+        for tick in
+            0..(text.width() as u64 + SHIMMER_GAP_COLUMNS as u64 + 4) * SHIMMER_TICKS_PER_COLUMN
+        {
+            let joined: String = shimmer_segments(text, tick)
+                .into_iter()
+                .map(|(s, _)| s)
+                .collect();
+            assert_eq!(joined, text, "tick {} 拼接结果不一致", tick);
+        }
+    }
+
+    #[test]
+    fn shimmer_band_is_narrow_and_moves() {
+        // 光带宽度对标 Claude Code 的 glimmerIndex ± 1（3 列），并且要真的在走。
+        // 之前的实现是 10 字符宽、从左侧长出来，短动词上整条几乎永远点亮。
+        let text = "Percolating";
+        let max_band = (2 * SHIMMER_BAND_HALF_WIDTH + 1) as usize;
+        let mut seen = std::collections::BTreeSet::new();
+        for step in 0..(text.width() + SHIMMER_GAP_COLUMNS as usize) {
+            let tick = step as u64 * SHIMMER_TICKS_PER_COLUMN;
+            if let Some((start, end)) = shimmer_columns(text, tick) {
+                assert!(
+                    end - start <= max_band,
+                    "step {} 光带宽度 {} 超过 {}",
+                    step,
+                    end - start,
+                    max_band
+                );
+                seen.insert(start);
+            }
+        }
+        assert!(seen.len() > 3, "光带没有移动，只出现在 {:?}", seen);
+    }
+
+    #[test]
+    fn shimmer_leaves_the_text_dark_between_sweeps() {
+        // 扫光之间要有间隔：至少有一帧整条都不高亮
+        let text = "Working";
+        let all_dark = (0..(text.width() + SHIMMER_GAP_COLUMNS as usize))
+            .any(|step| shimmer_columns(text, step as u64 * SHIMMER_TICKS_PER_COLUMN).is_none());
+        assert!(all_dark, "整个周期里都有高亮，缺少扫光间隔");
+    }
+
+    #[test]
+    fn shimmer_splits_wide_characters_by_column_not_by_char() {
+        // CJK 一个字占 2 列，光带宽 3 列 → 最多同时覆盖 2 个字
+        let text = "正在完善前端页面";
+        for step in 0..(text.width() + SHIMMER_GAP_COLUMNS as usize) {
+            if let Some((start, end)) =
+                shimmer_columns(text, step as u64 * SHIMMER_TICKS_PER_COLUMN)
+            {
+                assert!(end - start <= 4, "step {} 高亮了 {} 列", step, end - start);
+            }
+        }
+    }
+
+    #[test]
+    fn shimmer_handles_empty_text() {
+        assert!(shimmer_segments("", 0).is_empty());
+    }
+
+    #[test]
+    fn latin_phrases_pass_the_ui_text_gate() {
+        // 参照实现的动词表里有 Flambéing / Sautéing，带变音符号的拉丁词要放行
+        assert!(is_latin_phrase("Running tests"));
+        assert!(is_latin_phrase("Flambéing"));
+        assert!(is_latin_phrase("Wiring up the /login flow"));
+    }
+
+    #[test]
+    fn wide_script_fails_the_ui_text_gate() {
+        // 这条就是 bug 现场：中文 activeForm 不能进状态行
+        assert!(!is_latin_phrase("正在完善前端页面"));
+        assert!(!is_latin_phrase("Fixing 前端页面"));
+        assert!(!is_latin_phrase("🚀 shipping"));
+        // 没有字母的纯符号也不算文案
+        assert!(!is_latin_phrase("---"));
+        assert!(!is_latin_phrase(""));
+    }
 }
