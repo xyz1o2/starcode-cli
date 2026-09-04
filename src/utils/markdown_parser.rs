@@ -1,4 +1,4 @@
-use crate::ui::utils::render::{char_display_width, display_width};
+use crate::ui::utils::render::{char_display_width, display_width, line_spans_display_width};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -169,6 +169,64 @@ pub fn highlight_code_line(line: &str, language: &str) -> Line<'static> {
     crate::utils::syntax_highlight::highlight_line(line, language)
 }
 
+/// 代码块围栏（上下边框）的总显示宽度，从第 0 列算起。
+///
+/// 贴着正文最宽的一行，但至少要放得下语言标签加一根 dash，且不超过可用宽度。
+/// 旧实现写死 `40.min(wrap_width)`：正文按 `wrap_width - 2` 折行，宽终端里
+/// 一行 CJK 正文轻松超过 40 列，于是围栏只框住左边一小截，正文从框子右侧
+/// 溢出去 —— 看起来像框画歪了（见 code_fence_hugs_widest_content_line）。
+fn code_fence_width(content_w: usize, language: &str, wrap_width: Option<usize>) -> usize {
+    let want = content_w.max(code_fence_head(language).0 + 1);
+    match wrap_width {
+        Some(w) => want.min(w),
+        None => want,
+    }
+}
+
+/// 上边框的引导部分：`(显示宽度, 文本)`。有语言时是 `  ┌ rust `，否则 `  ┌`。
+fn code_fence_head(language: &str) -> (usize, String) {
+    let head = if language.is_empty() {
+        "  ┌".to_string()
+    } else {
+        format!("  ┌ {} ", language)
+    };
+    (display_width(&head), head)
+}
+
+/// 代码块上边框：`  ┌ rust ─────` / `  ┌────────`。
+///
+/// `total` 是含 dash 的总宽，与 [`code_fence_bottom`] 取同一个值，两条边右端对齐。
+/// 无语言标签时 dash 紧接 `┌`（旧实现写成 `"  ┌ "` + dash，顶边比底边晚一列起笔，
+/// 左上角凭空多出一个缺口）。
+fn code_fence_top(language: &str, total: usize) -> Line<'static> {
+    let border = Style::default().fg(Color::DarkGray);
+    let (head_w, head) = code_fence_head(language);
+    let head_style = if language.is_empty() {
+        border
+    } else {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    };
+    Line::from(vec![
+        Span::styled(head, head_style),
+        Span::styled("─".repeat(total.saturating_sub(head_w)), border),
+    ])
+}
+
+/// 代码块下边框：`  └────────`，宽度与 [`code_fence_top`] 一致。
+fn code_fence_bottom(total: usize) -> Line<'static> {
+    let border = Style::default().fg(Color::DarkGray);
+    const HEAD: &str = "  └";
+    Line::from(vec![
+        Span::styled(HEAD, border),
+        Span::styled(
+            "─".repeat(total.saturating_sub(display_width(HEAD))),
+            border,
+        ),
+    ])
+}
+
 /// 代码块正文的一行 → 渲染行（可能因折行变成多行）。
 ///
 /// 左侧统一缩进 2 列，与 `  ┌` / `  └` 边框对齐（此前正文顶到第 0 列，
@@ -309,6 +367,10 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
     let mut list_marker_width: usize = 0;
     let mut language = String::new();
     let mut code_line_number: usize = 0;
+    // 代码块上边框的占位行下标 + 正文最宽一行的显示宽度：上边框在正文之前就要
+    // 发出，宽度却取决于正文，所以先占位，到 TagEnd::CodeBlock 再回填
+    let mut code_fence_top_idx: Option<usize> = None;
+    let mut code_fence_content_w: usize = 0;
     let mut blockquote_depth: usize = 0;
     let mut link_url_stack: Vec<String> = Vec::new();
     let mut table_alignments: Vec<pulldown_cmark::Alignment> = Vec::new();
@@ -362,35 +424,11 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                         CodeBlockKind::Indented => String::new(),
                     };
                     flush_line!();
-                    // 语言标签 + 分隔线（对标 Claude Code：不显示快捷键提示，边框保持干净。
-                    // 顶边总宽 = 40.min(w)，与底边 "  └" + dash 对齐）
-                    if !language.is_empty() {
-                        let label = format!("  ┌ {} ", language);
-                        let dash_count = 40
-                            .min(wrap_width.unwrap_or(80))
-                            .saturating_sub(label.chars().count());
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                label,
-                                Style::default()
-                                    .fg(Color::Cyan)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(
-                                "─".repeat(dash_count),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                        ]));
-                    } else {
-                        let dash_count = 40.min(wrap_width.unwrap_or(80)).saturating_sub(4);
-                        lines.push(Line::from(vec![
-                            Span::styled("  ┌ ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(
-                                "─".repeat(dash_count),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                        ]));
-                    }
+                    // 上边框要贴着正文最宽的一行，而正文还没解析到 —— 先占位，
+                    // 到 TagEnd::CodeBlock 与下边框一起按同一个宽度发出
+                    code_fence_top_idx = Some(lines.len());
+                    code_fence_content_w = 0;
+                    lines.push(Line::from(""));
                 }
                 Tag::List(order) => {
                     list_depth += 1;
@@ -498,16 +536,12 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                     }
                 }
                 TagEnd::CodeBlock => {
-                    // Closing separator line — 宽度与顶边对齐:
-                    // 顶边总宽 = 40.min(w)（含语言标签与 copy hint），底边 "  └" 占 3 列，
-                    // 因此 dash 数 = 40.min(w) - 3，保证左右角与顶边对齐
-                    lines.push(Line::from(vec![
-                        Span::styled("  └", Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            "─".repeat(40.min(wrap_width.unwrap_or(80)).saturating_sub(3)),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ]));
+                    // 上下边框同宽（见 code_fence_width）：上边框此前是占位行，这里回填
+                    let total = code_fence_width(code_fence_content_w, &language, wrap_width);
+                    if let Some(idx) = code_fence_top_idx.take() {
+                        lines[idx] = code_fence_top(&language, total);
+                    }
+                    lines.push(code_fence_bottom(total));
                     // 与段落/标题一致：块后留一个空行
                     lines.push(Line::from(""));
                     in_code_block = false;
@@ -584,7 +618,11 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                 if in_code_block {
                     for line_str in text.lines() {
                         code_line_number += 1;
-                        lines.extend(code_block_lines(line_str, &language, wrap_width));
+                        for l in code_block_lines(line_str, &language, wrap_width) {
+                            code_fence_content_w =
+                                code_fence_content_w.max(line_spans_display_width(&l.spans));
+                            lines.push(l);
+                        }
                     }
                 } else if in_table_head || in_table {
                     current_cell.push_str(text.as_ref());
@@ -600,7 +638,11 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                 if in_code_block {
                     for line_str in text.lines() {
                         code_line_number += 1;
-                        lines.extend(code_block_lines(line_str, &language, wrap_width));
+                        for l in code_block_lines(line_str, &language, wrap_width) {
+                            code_fence_content_w =
+                                code_fence_content_w.max(line_spans_display_width(&l.spans));
+                            lines.push(l);
+                        }
                     }
                 } else if in_table_head || in_table {
                     current_cell.push_str(text);
@@ -1400,6 +1442,112 @@ mod inline_layout_tests {
         );
         // 正文与 "  ┌" / "  └" 边框同起于第 2 列
         assert!(lines.iter().any(|l| l.starts_with("  fn main() {")));
+    }
+
+    /// 围栏的上下边框 + 正文行（跳过块前后的空行）
+    fn fence_parts(lines: &[String]) -> (String, String, Vec<String>) {
+        let top = lines
+            .iter()
+            .find(|l| l.starts_with("  ┌"))
+            .expect("上边框必须渲染")
+            .clone();
+        let bottom = lines
+            .iter()
+            .find(|l| l.starts_with("  └"))
+            .expect("下边框必须渲染")
+            .clone();
+        let body = lines
+            .iter()
+            .filter(|l| !l.trim().is_empty() && **l != top && **l != bottom)
+            .cloned()
+            .collect();
+        (top, bottom, body)
+    }
+
+    #[test]
+    fn code_fence_hugs_widest_content_line() {
+        // 回归：围栏宽度写死 40.min(wrap_width)，而正文按 wrap_width - 2 折行 ——
+        // 宽终端里一行 CJK 正文轻松超过 40 列，围栏只框住左边一小截，
+        // 正文整片从框子右侧溢出去，看起来像框画歪了
+        let md = "```\n\
+                  第 1 步： 配置管理 （解耦环境，方便后续所有工作）\n\
+                  第 2 步： 接入真实行情数据源\n\
+                  第 3 步： 测试覆盖 + 部署\n\
+                  ```\n";
+        let lines = rendered(md, 100);
+        let (top, bottom, body) = fence_parts(&lines);
+        let widest = body.iter().map(|l| display_width(l)).max().unwrap_or(0);
+        assert!(widest > 40, "样例正文必须超过旧的 40 列硬上限: {}", widest);
+        assert_eq!(
+            display_width(&top),
+            widest,
+            "上边框没有贴住最宽的正文行\n top: {:?}\n body: {:?}",
+            top,
+            body
+        );
+        assert_eq!(
+            display_width(&bottom),
+            display_width(&top),
+            "上下边框不同宽: {:?} / {:?}",
+            top,
+            bottom
+        );
+    }
+
+    #[test]
+    fn unlabeled_code_fence_has_no_notch_at_top_left() {
+        // 回归：无语言标签时上边框写成 "  ┌ " + dash，比下边框晚一列起笔，
+        // 左上角凭空多出一个缺口
+        let lines = rendered("```\nplain\n```\n", 80);
+        let (top, bottom, _) = fence_parts(&lines);
+        assert!(top.starts_with("  ┌─"), "左上角有缺口: {:?}", top);
+        assert!(bottom.starts_with("  └─"), "左下角有缺口: {:?}", bottom);
+    }
+
+    #[test]
+    fn labeled_code_fence_keeps_label_and_one_dash() {
+        // 语言标签比正文还宽时，围栏不能被正文压得放不下标签
+        let lines = rendered("```typescript\nx\n```\n", 80);
+        let (top, bottom, _) = fence_parts(&lines);
+        assert!(
+            top.starts_with("  ┌ typescript ─"),
+            "语言标签或其后的 dash 丢失: {:?}",
+            top
+        );
+        assert_eq!(
+            display_width(&bottom),
+            display_width(&top),
+            "上下边框不同宽: {:?} / {:?}",
+            top,
+            bottom
+        );
+    }
+
+    #[test]
+    fn code_fence_never_exceeds_wrap_width() {
+        let md =
+            "```rust\nlet very_long_identifier_name = compute_something_expensive(a, b, c);\n```\n";
+        for &w in &[20usize, 32, 48, 80] {
+            let lines = rendered(md, w);
+            for line in &lines {
+                assert!(
+                    display_width(line) <= w,
+                    "宽度 {} 下溢出 {} 列: {:?}",
+                    w,
+                    display_width(line),
+                    line
+                );
+            }
+            let (top, bottom, _) = fence_parts(&lines);
+            assert_eq!(
+                display_width(&top),
+                display_width(&bottom),
+                "宽度 {} 下上下边框不同宽: {:?} / {:?}",
+                w,
+                top,
+                bottom
+            );
+        }
     }
 
     #[test]
