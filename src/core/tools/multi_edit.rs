@@ -1,5 +1,7 @@
 use crate::core::state::GlobalState;
-use crate::core::tools::edit::apply_replacement;
+use crate::core::tools::edit::{
+    apply_replacement, calculate_replacement, diagnose_replace_failure,
+};
 use crate::core::tools::tools::{
     BaseDeclarativeTool, Kind, ToolError, ToolInvocation, ToolLocation, ToolResult,
 };
@@ -161,17 +163,28 @@ impl ToolInvocation for MultiEditToolInvocation {
                 let current_content = file_contents.get(&path).unwrap();
                 let is_new_file = current_content.is_empty() && !path.exists();
 
-                // Check if old_string exists
-                if !is_new_file && !current_content.contains(&edit.old_string) {
+                // 预校验走和 Edit 相同的匹配级联（exact → 缩进/空白归一化 → 易混字符 → 首尾锚定 → 正则），
+                // 旧实现只做 contains() 精确匹配，Edit 能改的编辑在 MultiEdit 里会被直接拒掉
+                if !is_new_file
+                    && calculate_replacement(current_content, &edit.old_string, &edit.new_string)
+                        .occurrences
+                        == 0
+                {
+                    let diagnosis =
+                        diagnose_replace_failure(&path.to_string_lossy(), &edit.old_string);
                     return Ok(ToolResult {
                         llm_content: None,
                         return_display: None,
-                        output: format!("Verification failed: Could not find exact match for `old_string` in {}.", edit.file_path),
+                        output: format!(
+                            "Verification failed: could not find `old_string` in {}.",
+                            edit.file_path
+                        ),
                         error: Some(ToolError {
                             error_type: "edit_verification_failed".to_string(),
                             message: format!(
-                                "Could not find exact match for `old_string` in {}. Please verify the file content.",
-                                edit.file_path
+                                "Could not find `old_string` in {}. \
+                                 All matching strategies were tried and failed.\n\n{}",
+                                edit.file_path, diagnosis
                             ),
                         }),
                         data: None,
@@ -190,28 +203,33 @@ impl ToolInvocation for MultiEditToolInvocation {
                 let is_new_file = current_content.is_empty() && !path.exists(); // Approximate check
 
                 // Note: We remove debug printlns for production
-                if !is_new_file && !current_content.contains(&edit.old_string) {
-                    return Ok(ToolResult {
-                        llm_content: None,
-                        return_display: None,
-                        output: format!("Verification failed during sequence: `old_string` not found in {}.", edit.file_path),
-                        error: Some(ToolError {
-                            error_type: "edit_verification_failed".to_string(),
-                            message: format!(
-                                "Could not find exact match for `old_string` in {}. This might be due to overlapping edits.",
+                let new_content = if is_new_file {
+                    apply_replacement(Some(current_content), &edit.old_string, &edit.new_string, true)
+                } else {
+                    let result =
+                        calculate_replacement(current_content, &edit.old_string, &edit.new_string);
+                    if result.occurrences == 0 {
+                        return Ok(ToolResult {
+                            llm_content: None,
+                            return_display: None,
+                            output: format!(
+                                "Verification failed during sequence: `old_string` not found in {}.",
                                 edit.file_path
                             ),
-                        }),
-                        data: None,
-                    });
-                }
-
-                let new_content = apply_replacement(
-                    Some(current_content),
-                    &edit.old_string,
-                    &edit.new_string,
-                    is_new_file,
-                );
+                            error: Some(ToolError {
+                                error_type: "edit_verification_failed".to_string(),
+                                message: format!(
+                                    "Could not find `old_string` in {} while applying edits in order. \
+                                     An earlier edit in this batch probably already rewrote that region — \
+                                     check for overlapping edits.",
+                                    edit.file_path
+                                ),
+                            }),
+                            data: None,
+                        });
+                    }
+                    result.new_content
+                };
                 working_contents.insert(path, new_content);
             }
 

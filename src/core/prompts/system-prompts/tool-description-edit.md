@@ -9,6 +9,9 @@ Performs exact string replacements in files.
 
 **Rules**:
 - MUST read file first — edit fails on unread files
+- Copy `old_string` verbatim from the file. Do NOT retype it from memory: a paraphrased line, a
+  straight quote turned curly, or a rewrapped line is the most common cause of a failed edit.
+  Strip the `NNN→` line-number prefixes that `Read` adds, but keep everything after them byte-for-byte.
 - Preserve exact indentation (tabs/spaces)
 - `old_string` must be unique, or set `replace_all: true`
 - Smallest possible match to avoid unintended changes

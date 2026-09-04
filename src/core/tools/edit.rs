@@ -139,6 +139,268 @@ pub fn strip_line_number_prefixes(s: &str) -> (String, bool) {
     (stripped, was_stripped)
 }
 
+/// 模糊匹配的归一化等级，从严到松。`calculate_replacement` 按顺序尝试，
+/// 第一个命中的等级决定结果 —— 越靠前越接近原文，误匹配风险越低。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchLevel {
+    /// 仅去掉每行首尾空白（缩进差异）
+    Trim,
+    /// 再把行内连续空白压成单个空格（`foo( a , b )` ↔ `foo(a, b)`）
+    CollapseWs,
+    /// 再把 Unicode 易混字符折叠成 ASCII（弯引号、NBSP、长破折号…）
+    Confusable,
+}
+
+/// 把模型常写错的 Unicode 字符折叠回 ASCII。
+///
+/// LLM 复述代码时经常把 `'` 写成 `'`/`'`、把普通空格写成 NBSP、
+/// 把 `-` 写成 `–`。这些字符在终端里和 ASCII 几乎一模一样，
+/// 人眼看不出差别，exact/trim 匹配却全部失败。
+fn fold_confusables(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' | '\u{2032}' | '\u{00B4}'
+            | '\u{FF07}' => out.push('\''),
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' | '\u{2033}' | '\u{FF02}' => {
+                out.push('"')
+            }
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+            | '\u{2212}' | '\u{FF0D}' => out.push('-'),
+            '\u{00A0}' | '\u{1680}' | '\u{2000}'..='\u{200A}' | '\u{202F}' | '\u{205F}'
+            | '\u{3000}' => out.push(' '),
+            // 零宽字符：直接丢弃
+            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}' => {}
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// 行内连续空白压成单个空格，并去掉首尾空白。
+fn collapse_ws(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_ws = false;
+    for ch in s.trim().chars() {
+        if ch.is_whitespace() {
+            in_ws = true;
+        } else {
+            if in_ws {
+                out.push(' ');
+            }
+            in_ws = false;
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// 按归一化等级把一行变成用于比较的形式（只用于比较，不写回文件）。
+fn normalize_for_match(line: &str, level: MatchLevel) -> String {
+    match level {
+        MatchLevel::Trim => line.trim().to_string(),
+        MatchLevel::CollapseWs => collapse_ws(line),
+        MatchLevel::Confusable => collapse_ws(&fold_confusables(line)),
+    }
+}
+
+/// 一行的前导空白。
+fn leading_ws(line: &str) -> &str {
+    &line[..line.len() - line.trim_start().len()]
+}
+
+/// 一组行里所有非空行共同的前导空白前缀。
+fn common_indent(lines: &[&str]) -> String {
+    let mut common: Option<&str> = None;
+    for line in lines.iter().filter(|l| !l.trim().is_empty()) {
+        let ws = leading_ws(line);
+        common = Some(match common {
+            None => ws,
+            Some(prev) => {
+                let n = prev
+                    .char_indices()
+                    .zip(ws.char_indices())
+                    .take_while(|((_, a), (_, b))| a == b)
+                    .map(|((i, c), _)| i + c.len_utf8())
+                    .last()
+                    .unwrap_or(0);
+                &prev[..n]
+            }
+        });
+    }
+    common.unwrap_or("").to_string()
+}
+
+/// 把 `new_string` 的缩进基准换成匹配窗口的缩进基准。
+///
+/// 关键修复：旧实现是「窗口缩进 + 整行原样」，而 `new_string` 自己已经带了缩进，
+/// 于是每次走模糊匹配的编辑都把缩进翻倍（2 空格变 4 空格）。
+/// 正确做法是先脱掉 `new_string` 自身的公共缩进，再套上窗口缩进，
+/// 这样块内的相对缩进保持不变，模型按文件风格写的正常情况则原样落地。
+fn reindent_block(replace_lines: &[&str], window_base: &str) -> Vec<String> {
+    let base = common_indent(replace_lines);
+    replace_lines
+        .iter()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                let rest = line.strip_prefix(base.as_str()).unwrap_or(line.trim_start());
+                format!("{}{}", window_base, rest)
+            }
+        })
+        .collect()
+}
+
+/// 找出所有与 `search` 行序列匹配的窗口起点（按给定归一化等级）。
+///
+/// 窗口互不重叠：命中后从窗口末尾继续扫，避免自重叠块被重复计数。
+fn find_line_windows(source: &[String], search: &[String], level: MatchLevel) -> Vec<usize> {
+    // 空 search 或 search 比源文件还长 —— 旧实现在这里直接切片越界 panic
+    if search.is_empty() || search.len() > source.len() {
+        return Vec::new();
+    }
+    let search_norm: Vec<String> = search
+        .iter()
+        .map(|l| normalize_for_match(l, level))
+        .collect();
+
+    let mut hits = Vec::new();
+    let mut i = 0usize;
+    let last_start = source.len() - search.len();
+    while i <= last_start {
+        let matched = (0..search.len())
+            .all(|k| normalize_for_match(&source[i + k], level) == search_norm[k]);
+        if matched {
+            hits.push(i);
+            i += search.len();
+        } else {
+            i += 1;
+        }
+    }
+    hits
+}
+
+/// 把每个命中窗口替换成重新缩进后的 `replace_lines`（从后往前splice，下标不失效）。
+fn splice_windows(
+    source: &[String],
+    windows: &[usize],
+    search_len: usize,
+    replace_lines: &[&str],
+) -> Vec<String> {
+    let mut out: Vec<String> = source.to_vec();
+    for &start in windows.iter().rev() {
+        let window_base = source[start..start + search_len]
+            .iter()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| leading_ws(l).to_string())
+            .unwrap_or_default();
+        let block = reindent_block(replace_lines, &window_base);
+        out.splice(start..start + search_len, block);
+    }
+    out
+}
+
+/// 按行窗口做替换：命中几个就替换几个，`occurrences` 是真实命中数。
+///
+/// 真实计数很重要 —— 旧的 flexible/regex 实现命中第一个就返回 `occurrences: 1`，
+/// 于是块在文件里出现两次时，工具悄悄改了第一处却声称是唯一匹配。
+/// 现在多处命中会让 `get_error_replace_result` 的数量守卫拦下来（除非 replace_all）。
+pub fn calculate_line_window_replacement(
+    current_content: &str,
+    old_string: &str,
+    new_string: &str,
+    level: MatchLevel,
+) -> Option<ReplacementResult> {
+    let normalized_code = normalize_line_endings(current_content);
+    let normalized_search = normalize_line_endings(old_string);
+    let normalized_replace = normalize_line_endings(new_string);
+
+    let source_lines: Vec<String> = normalized_code.lines().map(|l| l.to_string()).collect();
+    let search_lines: Vec<String> = normalized_search.lines().map(|l| l.to_string()).collect();
+    let replace_lines: Vec<&str> = normalized_replace.lines().collect();
+
+    let windows = find_line_windows(&source_lines, &search_lines, level);
+    if windows.is_empty() {
+        return None;
+    }
+
+    let new_lines = splice_windows(&source_lines, &windows, search_lines.len(), &replace_lines);
+    Some(ReplacementResult {
+        new_content: restore_trailing_newline(current_content, &new_lines.join("\n")),
+        occurrences: windows.len(),
+        final_old_string: normalized_search,
+        final_new_string: normalized_replace,
+    })
+}
+
+/// 首尾行锚定匹配：块中间漂了几个字符时的兜底。
+///
+/// 要求同时满足才动手，宁可报错也不要改错地方：
+/// 行数一致、首行与末行（折叠易混字符后）匹配、命中窗口唯一、
+/// 且中间行至少有一半能对上。
+pub fn calculate_anchor_replacement(
+    current_content: &str,
+    old_string: &str,
+    new_string: &str,
+) -> Option<ReplacementResult> {
+    let normalized_code = normalize_line_endings(current_content);
+    let normalized_search = normalize_line_endings(old_string);
+    let normalized_replace = normalize_line_endings(new_string);
+
+    let source_lines: Vec<String> = normalized_code.lines().map(|l| l.to_string()).collect();
+    let search_lines: Vec<String> = normalized_search.lines().map(|l| l.to_string()).collect();
+    let replace_lines: Vec<&str> = normalized_replace.lines().collect();
+
+    // 少于 3 行时首尾锚定等于全量匹配，没有额外价值，反而更容易撞错
+    if search_lines.len() < 3 || search_lines.len() > source_lines.len() {
+        return None;
+    }
+
+    let lvl = MatchLevel::Confusable;
+    let norm = |s: &str| normalize_for_match(s, lvl);
+    let first = norm(&search_lines[0]);
+    let last = norm(&search_lines[search_lines.len() - 1]);
+    if first.is_empty() || last.is_empty() {
+        return None;
+    }
+    let search_norm: Vec<String> = search_lines.iter().map(|l| norm(l)).collect();
+
+    let mut hits = Vec::new();
+    for start in 0..=(source_lines.len() - search_lines.len()) {
+        let end = start + search_lines.len() - 1;
+        if norm(&source_lines[start]) != first || norm(&source_lines[end]) != last {
+            continue;
+        }
+        let inner = search_lines.len().saturating_sub(2);
+        if inner > 0 {
+            let same = (1..search_lines.len() - 1)
+                .filter(|k| norm(&source_lines[start + k]) == search_norm[*k])
+                .count();
+            if same * 2 < inner {
+                continue;
+            }
+        }
+        hits.push(start);
+    }
+
+    // 唯一命中才允许落地
+    if hits.len() != 1 {
+        return None;
+    }
+    crate::utils::logging::append_debug_log_line(
+        "[Edit] Matched old_string by first/last line anchors (block interior drifted)",
+    );
+
+    let new_lines = splice_windows(&source_lines, &hits, search_lines.len(), &replace_lines);
+    Some(ReplacementResult {
+        new_content: restore_trailing_newline(current_content, &new_lines.join("\n")),
+        occurrences: 1,
+        final_old_string: normalized_search,
+        final_new_string: normalized_replace,
+    })
+}
+
 pub fn calculate_exact_replacement(
     current_content: &str,
     old_string: &str,
@@ -169,87 +431,26 @@ pub fn calculate_exact_replacement(
     }
 }
 
+/// 忽略每行首尾空白的匹配（缩进差异）。保留公开签名，实现委托给行窗口匹配器。
 pub fn calculate_flexible_replacement(
     current_content: &str,
     old_string: &str,
     new_string: &str,
 ) -> Option<ReplacementResult> {
-    let normalized_code = normalize_line_endings(current_content);
-    let normalized_search = normalize_line_endings(old_string);
-    let normalized_replace = normalize_line_endings(new_string);
-
-    let source_lines: Vec<String> = normalized_code.lines().map(|l| l.to_string()).collect();
-    let search_lines_stripped: Vec<String> = normalized_search
-        .lines()
-        .map(|l| l.trim().to_string())
-        .collect();
-    let replace_lines: Vec<&str> = normalized_replace.lines().collect();
-
-    let mut flexible_occurrences = 0;
-    let mut i = 0;
-
-    while i
-        <= source_lines
-            .len()
-            .saturating_sub(search_lines_stripped.len())
-    {
-        let window = &source_lines[i..i + search_lines_stripped.len()];
-        let window_stripped: Vec<String> = window.iter().map(|l| l.trim().to_string()).collect();
-
-        let is_match = window_stripped
-            .iter()
-            .enumerate()
-            .all(|(idx, line)| line == &search_lines_stripped[idx]);
-
-        if is_match {
-            flexible_occurrences += 1;
-            let first_line = window.get(0).map(|s| s.as_str()).unwrap_or("");
-            let indent_len = first_line.len() - first_line.trim_start().len();
-            let indentation = &first_line[..indent_len];
-
-            let new_block_with_indent: Vec<String> = replace_lines
-                .iter()
-                .map(|line| format!("{}{}", indentation, line))
-                .collect();
-
-            let mut new_source_lines = source_lines.clone();
-            new_source_lines.splice(i..i + search_lines_stripped.len(), new_block_with_indent);
-            // i += replace_lines.len();
-            // 用新结果继续匹配
-            return Some(ReplacementResult {
-                new_content: restore_trailing_newline(
-                    current_content,
-                    &new_source_lines.join("\n"),
-                ),
-                occurrences: flexible_occurrences,
-                final_old_string: normalized_search,
-                final_new_string: normalized_replace,
-            });
-        } else {
-            i += 1;
-        }
-    }
-
-    if flexible_occurrences > 0 {
-        let modified_code = source_lines.join("\n");
-        let modified_code = restore_trailing_newline(current_content, &modified_code);
-
-        Some(ReplacementResult {
-            new_content: modified_code,
-            occurrences: flexible_occurrences,
-            final_old_string: normalized_search,
-            final_new_string: normalized_replace,
-        })
-    } else {
-        None
-    }
+    calculate_line_window_replacement(current_content, old_string, new_string, MatchLevel::Trim)
 }
 
+/// 最后的兜底：把 old_string 按分隔符切成 token，用 `\s*` 连接成正则。
+///
+/// 只在前面所有等级都没命中时才用 —— 它对空白完全不敏感，误匹配风险最高。
+/// 三处修复：正则编译失败不再静默吞掉（记日志）；命中数按真实数量统计而不是恒为 1；
+/// 替换块的缩进按窗口基准重排，不再叠加。
 pub fn calculate_regex_replacement(
     current_content: &str,
     old_string: &str,
     new_string: &str,
 ) -> Option<ReplacementResult> {
+    let normalized_code = normalize_line_endings(current_content);
     let normalized_search = normalize_line_endings(old_string);
     let normalized_replace = normalize_line_endings(new_string);
 
@@ -269,33 +470,87 @@ pub fn calculate_regex_replacement(
     let escaped_tokens: Vec<String> = tokens.iter().map(|t| escape_regex(t)).collect();
     let pattern = escaped_tokens.join(r"\s*");
     // (?m) enables multi-line mode so ^ matches start of each line, not just start of string
-    let final_pattern = format!(r"(?m)^(\s*){}", pattern);
+    let final_pattern = format!(r"(?m)^([ \t]*){}", pattern);
 
-    let regex = regex::Regex::new(&final_pattern).ok()?;
+    // 大块 old_string 生成的模式会超过 regex 默认体积上限，旧实现在这里静默返回 None，
+    // 表现成"三种匹配都试过了"却其实没试
+    let regex = match regex::RegexBuilder::new(&final_pattern)
+        .size_limit(32 * 1024 * 1024)
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[Edit] regex fallback unavailable ({} tokens): {}",
+                tokens.len(),
+                e
+            ));
+            return None;
+        }
+    };
 
-    if let Some(captures) = regex.captures(current_content) {
-        let indentation = captures.get(1).map(|m| m.as_str()).unwrap_or("");
-        let new_lines: Vec<&str> = normalized_replace.lines().collect();
-        let new_block_with_indent: String = new_lines
-            .iter()
-            .map(|line| format!("{}{}", indentation, line))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let modified_code = regex
-            .replace(current_content, &new_block_with_indent)
-            .to_string();
-        let modified_code = restore_trailing_newline(current_content, &modified_code);
-
-        Some(ReplacementResult {
-            new_content: modified_code,
-            occurrences: 1,
-            final_old_string: normalized_search,
-            final_new_string: normalized_replace,
+    let replace_lines: Vec<&str> = normalized_replace.lines().collect();
+    let matches: Vec<(usize, usize, String)> = regex
+        .captures_iter(&normalized_code)
+        .filter_map(|c| {
+            let whole = c.get(0)?;
+            let indent = c.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            Some((whole.start(), whole.end(), indent))
         })
-    } else {
-        None
+        .collect();
+
+    if matches.is_empty() {
+        return None;
     }
+
+    let mut modified_code = normalized_code.clone();
+    for (start, end, indent) in matches.iter().rev() {
+        let block = reindent_block(&replace_lines, indent).join("\n");
+        modified_code.replace_range(*start..*end, &block);
+    }
+
+    Some(ReplacementResult {
+        new_content: restore_trailing_newline(current_content, &modified_code),
+        occurrences: matches.len(),
+        final_old_string: normalized_search,
+        final_new_string: normalized_replace,
+    })
+}
+
+/// 依次尝试各匹配等级，第一个命中的等级决定结果。
+///
+/// 顺序即安全性排序：越靠后越宽松，所以只有前面全部落空才会往下走。
+/// 除 exact 之外的等级都按行窗口替换并统计真实命中数，多处命中时由
+/// `get_error_replace_result` 的数量守卫拦下（除非显式 replace_all）。
+fn try_all_levels(
+    current_content: &str,
+    old_string: &str,
+    new_string: &str,
+) -> Option<ReplacementResult> {
+    if let Some(result) = calculate_exact_replacement(current_content, old_string, new_string) {
+        return Some(result);
+    }
+    for level in [
+        MatchLevel::Trim,
+        MatchLevel::CollapseWs,
+        MatchLevel::Confusable,
+    ] {
+        if let Some(result) =
+            calculate_line_window_replacement(current_content, old_string, new_string, level)
+        {
+            if level != MatchLevel::Trim {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[Edit] Matched old_string at fuzzy level {:?}",
+                    level
+                ));
+            }
+            return Some(result);
+        }
+    }
+    if let Some(result) = calculate_anchor_replacement(current_content, old_string, new_string) {
+        return Some(result);
+    }
+    calculate_regex_replacement(current_content, old_string, new_string)
 }
 
 pub fn calculate_replacement(
@@ -315,16 +570,7 @@ pub fn calculate_replacement(
         };
     }
 
-    // Try original old_string first.
-    if let Some(result) = calculate_exact_replacement(current_content, old_string, new_string) {
-        return result;
-    }
-
-    if let Some(result) = calculate_flexible_replacement(current_content, old_string, new_string) {
-        return result;
-    }
-
-    if let Some(result) = calculate_regex_replacement(current_content, old_string, new_string) {
+    if let Some(result) = try_all_levels(current_content, old_string, new_string) {
         return result;
     }
 
@@ -335,20 +581,7 @@ pub fn calculate_replacement(
         crate::utils::logging::append_debug_log_line(
             "[Edit] Auto-stripped line-number prefix from old_string",
         );
-
-        if let Some(result) =
-            calculate_exact_replacement(current_content, &stripped_old, new_string)
-        {
-            return result;
-        }
-        if let Some(result) =
-            calculate_flexible_replacement(current_content, &stripped_old, new_string)
-        {
-            return result;
-        }
-        if let Some(result) =
-            calculate_regex_replacement(current_content, &stripped_old, new_string)
-        {
+        if let Some(result) = try_all_levels(current_content, &stripped_old, new_string) {
             return result;
         }
     }
@@ -375,7 +608,10 @@ pub fn get_error_replace_result(
             display: "Failed to edit, could not find the string to replace.".to_string(),
             raw: format!(
                 "Failed to edit, 0 occurrences found for old_string in {}. \
-                 The string to replace was not found in the file (even after trying exact, flexible-indent, and regex-fuzzy matching). \
+                 The string to replace was not found in the file. \
+                 All matching strategies were tried and failed: exact, ignore-indentation, \
+                 collapse-inner-whitespace, unicode-fold (curly quotes / NBSP / dashes), \
+                 first-and-last-line anchors, and whitespace-insensitive regex. \
                  \n\n{}\n\n\
                  Next step: re-read the file with Read to get the current content, then retry with the exact text.",
                 params.file_path, diagnosis
@@ -396,7 +632,9 @@ pub fn get_error_replace_result(
                 expected_replacements, occurrence_term, occurrences
             ),
             raw: format!(
-                "Failed to edit, Expected {} {} but found {} for old_string in file: {}",
+                "Failed to edit, Expected {} {} but found {} for old_string in file: {}. \
+                 Next step: extend old_string with a few surrounding lines so it identifies exactly \
+                 one location, or pass replace_all=true to change every occurrence.",
                 expected_replacements, occurrence_term, occurrences, params.file_path
             ),
             error_type: ToolErrorType::EditExpectedOccurrenceMismatch,
@@ -427,8 +665,21 @@ pub fn get_error_replace_result(
     }
 }
 
-/// Diagnose why a replace operation failed by analyzing the file content
-fn diagnose_replace_failure(file_path: &str, old_string: &str) -> String {
+/// 按字符（而不是字节）截断，避免在多字节字符中间切开导致 panic。
+fn clip(s: &str, max_chars: usize) -> String {
+    let mut out: String = s.chars().take(max_chars).collect();
+    if s.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
+}
+
+/// 分析 replace 失败的原因，给出能直接指导下一步动作的诊断。
+///
+/// 检查顺序即信息量从高到低：先排除整体性偏差（大小写、空白），
+/// 再定位到具体是哪一行对不上 —— 旧实现只会说"首行部分匹配"，
+/// 而首行几乎总能匹配上，模型除了把整块重猜一遍别无选择。
+pub(crate) fn diagnose_replace_failure(file_path: &str, old_string: &str) -> String {
     let mut diagnosis = String::new();
 
     // Try to read the file
@@ -440,68 +691,94 @@ fn diagnose_replace_failure(file_path: &str, old_string: &str) -> String {
         }
     };
 
-    // Check 1: Partial match (most common)
-    let old_trimmed = old_string.trim();
-    if old_trimmed.len() > 10 {
-        // Try to find first and last lines of old_string
-        let first_line = old_trimmed.lines().next().unwrap_or("").trim();
-        let last_line = old_trimmed.lines().last().unwrap_or("").trim();
+    let source_lines: Vec<&str> = content.lines().collect();
+    let search_lines: Vec<&str> = old_string.lines().collect();
+    let norm = |s: &str| normalize_for_match(s, MatchLevel::Confusable);
 
-        if !first_line.is_empty() && content.contains(first_line) {
-            diagnosis.push_str(&format!(
-                "DIAGNOSIS: Found partial match for the first line ('{}'). \
-                 The old_string might have extra whitespace or different indentation. \
-                 Suggestion: Read to get exact content, then copy-paste the exact text.",
-                first_line.chars().take(50).collect::<String>()
-            ));
-            return diagnosis;
+    // Check 1: 只差大小写
+    if !old_string.trim().is_empty()
+        && content
+            .to_lowercase()
+            .contains(&old_string.to_lowercase())
+    {
+        diagnosis.push_str(
+            "DIAGNOSIS: Found a case-insensitive match — old_string differs from the file only in letter case. \
+             Suggestion: copy the exact case from the file."
+        );
+        return diagnosis;
+    }
+
+    // Check 2: 空白差异大到连模糊匹配也桥不过去（例如整块换了行）
+    let strip_ws = |s: &str| -> String { s.chars().filter(|c| !c.is_whitespace()).collect() };
+    let old_bare = strip_ws(old_string);
+    if !old_bare.is_empty() && strip_ws(&content).contains(&old_bare) {
+        diagnosis.push_str(
+            "DIAGNOSIS: Found a match after ignoring all whitespace — old_string has different \
+             indentation or line breaks than the file. \
+             Suggestion: Read the file and copy the block verbatim, including spaces and tabs."
+        );
+        return diagnosis;
+    }
+
+    // Check 3: 定位第一条在文件里完全找不到的行 —— 这就是真正对不上的那行。
+    // 一行都对不上时不走这条：那不是"某行漂了"，而是整段都不在这个文件里。
+    let file_norm: std::collections::HashSet<String> =
+        source_lines.iter().map(|l| norm(l)).collect();
+    let mut culprit: Option<(usize, &str)> = None;
+    let (mut found, mut missing) = (0usize, 0usize);
+    for (idx, line) in search_lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if file_norm.contains(&norm(line)) {
+            found += 1;
+        } else {
+            missing += 1;
+            culprit = culprit.or(Some((idx, line)));
         }
     }
 
-    // Check 2: Case sensitivity
-    let content_lower = content.to_lowercase();
-    let old_lower = old_string.to_lowercase();
-    if content_lower.contains(&old_lower) && !content.contains(old_string) {
-        diagnosis.push_str(
-            "DIAGNOSIS: Found case-insensitive match. The old_string has different case than the file content. \
-             Suggestion: use the exact case from the file."
-        );
+    if let Some((idx, line)) = culprit.filter(|_| found > 0) {
+        diagnosis.push_str(&format!(
+            "DIAGNOSIS: old_string line {} does not appear anywhere in the file: '{}'. \
+             {} other line(s) of old_string were found, {} were not — so the block matches the file \
+             at first and then diverges at this line, which was probably paraphrased or came from a \
+             stale read. Suggestion: Read the file around the target and copy the block verbatim.",
+            idx + 1,
+            clip(line.trim(), 80),
+            found,
+            missing
+        ));
         return diagnosis;
     }
 
-    // Check 3: Whitespace differences
-    let old_normalized: String = old_string.chars().filter(|c| !c.is_whitespace()).collect();
-    let content_normalized: String = content.chars().filter(|c| !c.is_whitespace()).collect();
-    if content_normalized.contains(&old_normalized) && !content.contains(old_string) {
-        diagnosis.push_str(
-            "DIAGNOSIS: Found match after ignoring whitespace. The old_string has different whitespace than the file content. \
-             Suggestion: Read to get exact content, including spaces and tabs."
-        );
-        return diagnosis;
-    }
-
-    // Check 4: Line ending differences
-    let old_lf = old_string.replace("\r\n", "\n");
-    let content_lf = content.replace("\r\n", "\n");
-    if content_lf.contains(&old_lf) && !content.contains(old_string) {
-        diagnosis.push_str(
-            "DIAGNOSIS: Found match after normalizing line endings. The file might use different line endings (CRLF vs LF). \
-             Suggestion: the system should handle this automatically, but try reading the file again."
-        );
-        return diagnosis;
-    }
-
-    // Check 5: Substring match
-    if old_trimmed.len() > 20 {
-        let substr = &old_trimmed[..old_trimmed.len() / 2];
-        if content.contains(substr) {
-            diagnosis.push_str(&format!(
-                "DIAGNOSIS: Found partial match for first half of old_string ('{}...'). \
-                 The full string might have been modified or might not exist in the file. \
-                 Suggestion: Read to verify the current content.",
-                substr.chars().take(30).collect::<String>()
-            ));
-            return diagnosis;
+    // Check 4: every line exists individually, but not as a contiguous block
+    if !search_lines.is_empty() {
+        let first = search_lines
+            .iter()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| norm(l));
+        if let Some(first) = first {
+            let anchors: Vec<usize> = source_lines
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| norm(l) == first)
+                .map(|(i, _)| i + 1)
+                .collect();
+            if !anchors.is_empty() {
+                diagnosis.push_str(&format!(
+                    "DIAGNOSIS: all lines of old_string exist in the file but not as one contiguous block \
+                     (first line matches at line {}). Lines were probably reordered, or a line was dropped \
+                     or inserted in the middle. Suggestion: Read that region and copy the block verbatim.",
+                    anchors
+                        .iter()
+                        .take(3)
+                        .map(|n| n.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                return diagnosis;
+            }
         }
     }
 
@@ -1132,4 +1409,216 @@ mod tests {
         .expect("参数解析失败");
         assert_eq!(parsed.replace_all, Some(true));
     }
+
+    // ---- 匹配级联的回归测试 ----------------------------------------------
+    // 这些用例来自真实失败：模型复述代码时改了空白或引号，
+    // 旧实现要么报 0 occurrences，要么悄悄把缩进翻倍。
+
+    /// 2 空格缩进的样板文件，覆盖大部分回归场景
+    const FILE: &str = "class Api {\n  async testAlert(): Promise<Alert> {\n    return this.get('/alert');\n  }\n}\n";
+
+    fn expect_edit(file: &str, old: &str, new: &str) -> ReplacementResult {
+        let result = calculate_replacement(file, old, new);
+        assert!(
+            result.occurrences > 0,
+            "匹配失败（occurrences=0），old_string=\n{:?}",
+            old
+        );
+        result
+    }
+
+    #[test]
+    fn exact_match_is_preferred_and_untouched() {
+        let r = expect_edit(FILE, "    return this.get('/alert');", "    return this.post('/alert');");
+        assert_eq!(r.occurrences, 1);
+        assert_eq!(
+            r.new_content,
+            FILE.replace("this.get('/alert');", "this.post('/alert');")
+        );
+    }
+
+    #[test]
+    fn fuzzy_match_does_not_double_indent() {
+        // 回归：旧实现是「窗口缩进 + 整行原样」，new_string 自带缩进时每次编辑都把缩进翻倍。
+        // 这里用弯引号迫使走模糊匹配，new_string 按文件风格带了 2 空格缩进。
+        let old = "  async testAlert(): Promise<Alert> {\n    return this.get(\u{2018}/alert\u{2019});\n  }";
+        let new = "  async testAlert(kind: string): Promise<Alert> {\n    return this.get('/alert/' + kind);\n  }";
+        let r = expect_edit(FILE, old, new);
+        assert_eq!(r.occurrences, 1);
+        assert_eq!(
+            r.new_content,
+            "class Api {\n  async testAlert(kind: string): Promise<Alert> {\n    return this.get('/alert/' + kind);\n  }\n}\n",
+            "缩进被翻倍或丢失"
+        );
+    }
+    #[test]
+    fn dedented_old_string_keeps_relative_indent() {
+        // 模型把块整体贴平（丢了外层缩进），替换块也是贴平的 —— 内部相对缩进必须保住
+        let old = "async testAlert(): Promise<Alert> {\nreturn this.get('/alert');\n}";
+        let new = "async testAlert(): Promise<Alert> {\n  return this.post('/alert');\n}";
+        let r = expect_edit(FILE, old, new);
+        assert_eq!(
+            r.new_content,
+            "class Api {\n  async testAlert(): Promise<Alert> {\n    return this.post('/alert');\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn curly_quotes_still_match() {
+        // 回归：exact/trim 三个 pass 全灭，因为 ' 被写成 U+2019
+        let old = "return this.get(\u{2018}/alert\u{2019});";
+        let r = expect_edit(FILE, old, "return this.get('/v2/alert');");
+        assert!(r.new_content.contains("this.get('/v2/alert');"));
+    }
+
+    #[test]
+    fn nbsp_and_zero_width_still_match() {
+        // NBSP / 表意空格 / 零宽空格在终端里和普通空格一模一样，模型分不清
+        let old = "return\u{00A0}this.get('/alert');\u{200B}";
+        let r = expect_edit(FILE, old, "return this.get('/v3/alert');");
+        assert!(r.new_content.contains("this.get('/v3/alert');"));
+        assert!(!r.new_content.contains('\u{00A0}'), "NBSP 被写回了文件");
+    }
+
+    #[test]
+    fn collapsed_inner_whitespace_still_matches() {
+        let old = "return  this.get('/alert');"; // 行内多了一个空格
+        let r = expect_edit(FILE, old, "return this.get('/v4/alert');");
+        assert!(r.new_content.contains("this.get('/v4/alert');"));
+    }
+
+    #[test]
+    fn tab_indentation_still_matches_space_indentation() {
+        let old = "\tasync testAlert(): Promise<Alert> {\n\t\treturn this.get('/alert');\n\t}";
+        let new = "async testAlert(): Promise<Alert> {\n  return this.head('/alert');\n}";
+        let r = expect_edit(FILE, old, new);
+        assert!(r.new_content.contains("\n    return this.head('/alert');\n"));
+        assert!(!r.new_content.contains('\t'), "制表符被写回了文件");
+    }
+    #[test]
+    fn anchor_match_recovers_drifted_interior() {
+        // 首尾行对得上、中间某行漂了 —— 兜底靠首尾锚定，但要求过半中间行匹配
+        let file = "class Api {\n  async testAlert(): Promise<Alert> {\n    const url = '/api/alert';\n    return this.get(url);\n  }\n}\n";
+        let old = "  async testAlert(): Promise<Alert> {\n    const url = '/api/alerts';\n    return this.get(url);\n  }";
+        let new = "  async testAlert(): Promise<Alert> {\n    return this.get('/api/alert');\n  }";
+        let r = expect_edit(file, old, new);
+        assert_eq!(r.occurrences, 1);
+        assert_eq!(
+            r.new_content,
+            "class Api {\n  async testAlert(): Promise<Alert> {\n    return this.get('/api/alert');\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn anchor_match_refuses_when_interior_is_mostly_different() {
+        // 中间行全不一样时宁可报错也不能猜 —— 首尾行是 `{` / `}` 这种到处都有的字符
+        let file = "fn a() {\n    one();\n    two();\n}\n";
+        let old = "fn a() {\n    nine();\n    ten();\n}";
+        let r = calculate_replacement(file, old, "fn a() {\n    zero();\n}");
+        assert_eq!(r.occurrences, 0, "中间行大面积不匹配时不应落地");
+    }
+
+    #[test]
+    fn ambiguous_fuzzy_match_reports_true_occurrence_count() {
+        // 回归：旧实现命中第一处就返回 occurrences=1，悄悄改了两处中的一处
+        let file = "class A {\n  run() {\n    work();\n  }\n}\nclass B {\n    run() {\n      work();\n    }\n}\n";
+        let old = "run() {\nwork();\n}";
+        let r = calculate_replacement(file, old, "run() {\n  work(1);\n}");
+        assert_eq!(r.occurrences, 2, "两处同形块必须如实上报");
+        let err = get_error_replace_result(&params(None), r.occurrences, 1, &r.final_old_string, &r.final_new_string)
+            .expect("多处命中且未开 replace_all 必须报错");
+        assert_eq!(err.error_type, ToolErrorType::EditExpectedOccurrenceMismatch);
+    }
+
+    #[test]
+    fn old_string_longer_than_file_does_not_panic() {
+        // 回归：source_lines[i..i + search_len] 越界 panic
+        // （"range end index 30 out of range for slice of length 17"）
+        let old: String = (0..30).map(|i| format!("line {}\n", i)).collect();
+        let r = calculate_replacement("a\nb\nc\n", &old, "x\n");
+        assert_eq!(r.occurrences, 0);
+    }
+    #[test]
+    fn empty_old_string_is_reported_as_no_match() {
+        let r = calculate_replacement(FILE, "", "x");
+        assert_eq!(r.occurrences, 0);
+        assert_eq!(r.new_content, FILE);
+    }
+
+    #[test]
+    fn read_style_line_number_prefixes_are_stripped() {
+        // 模型经常把 Read 的输出（"  12→code"）整段粘进 old_string
+        let old = "  2→  async testAlert(): Promise<Alert> {\n  3→    return this.get('/alert');\n  4→  }";
+        let new = "  async testAlert(): Promise<Alert> {\n    return this.head('/alert');\n  }";
+        let r = expect_edit(FILE, old, new);
+        assert!(r.new_content.contains("\n    return this.head('/alert');\n"));
+    }
+
+    // ---- 失败诊断 ---------------------------------------------------------
+
+    fn temp_file(tag: &str, content: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir()
+            .join(format!("starcode-edit-{}-{}.txt", std::process::id(), tag));
+        std::fs::write(&path, content).expect("写入临时文件失败");
+        path
+    }
+
+    #[test]
+    fn clip_never_splits_a_multibyte_char() {
+        assert_eq!(clip("这是一段中文", 3), "这是一…");
+        assert_eq!(clip("这是一段中文", 99), "这是一段中文");
+    }
+
+    #[test]
+    fn cjk_old_string_does_not_panic_in_diagnosis() {
+        // 回归：旧实现按字节切半（&old_trimmed[..len/2]），CJK 必然切在字符中间 panic。
+        // 这里是 25 个汉字 = 75 字节，字节中点 37 不是字符边界。
+        let path = temp_file("cjk", "fn main() {\n    println!(\"hi\");\n}\n");
+        let old = "这是一段完全不存在于文件里的中文注释内容需要被替换";
+        let d = diagnose_replace_failure(path.to_str().unwrap(), old);
+        assert!(d.contains("DIAGNOSIS"), "诊断为空: {}", d);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn diagnosis_names_the_divergent_line() {
+        // 旧诊断只说"首行部分匹配"，而首行本来就是对的 —— 错的是第 2 行
+        let path = temp_file("divergent", FILE);
+        let old = "class Api {\n  async testAlarm(): Promise<Alarm> {\n";
+        let d = diagnose_replace_failure(path.to_str().unwrap(), old);
+        assert!(d.contains("line 2"), "诊断必须点名对不上的行: {}", d);
+        assert!(d.contains("testAlarm"), "诊断必须回显那一行的原文: {}", d);
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn diagnosis_flags_a_non_contiguous_block() {
+        let path = temp_file("noncontig", "let a = 1;\nlet b = 2;\nlet c = 3;\n");
+        let d = diagnose_replace_failure(path.to_str().unwrap(), "let a = 1;\nlet c = 3;\n");
+        assert!(d.contains("contiguous"), "应指出块不连续: {}", d);
+        assert!(d.contains("line 1"), "应给出首行位置: {}", d);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn diagnosis_flags_case_only_difference() {
+        let path = temp_file("case", "const Timeout = 30;\n");
+        let d = diagnose_replace_failure(path.to_str().unwrap(), "const timeout = 30;");
+        assert!(d.contains("case-insensitive"), "{}", d);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn diagnosis_falls_back_when_nothing_is_similar() {
+        let path = temp_file("nothing", "fn main() {}\n");
+        let d = diagnose_replace_failure(path.to_str().unwrap(), "impl Display for Widget {}");
+        assert!(d.contains("No similar content"), "{}", d);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn diagnosis_reports_unreadable_file_instead_of_panicking() {
+        let d = diagnose_replace_failure("/nonexistent/starcode/does-not-exist.rs", "anything");
+        assert!(d.contains("Could not read file"), "{}", d);
+    }
 }
+
