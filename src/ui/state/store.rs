@@ -719,6 +719,9 @@ impl ChatState {
             ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
         );
 
+        // 抬头占位条目：渲染走 ui::components::welcome_header（从 state 现算，
+        // 见 message_render 里的 `is_welcome` 分支），所以 content 只是兜底文案，
+        // 界面上并不显示；其余消费者一律按 is_welcome 跳过它。
         let welcome_entry = ChatEntry {
             entry_type: crate::types::ChatEntryType::Assistant,
             content: crate::core::i18n::t(

@@ -64,7 +64,8 @@ enum HeadlessOutputFormat {
 }
 
 #[derive(Parser)]
-#[command(name = "starcode-cli")]
+// name/bin_name 在 main() 里按 argv[0] 覆盖（见 utils::invocation）；这里给的是兜底值。
+#[command(name = crate::utils::invocation::CANONICAL_PROGRAM_NAME)]
 #[command(
     about = "A conversational AI CLI tool powered by star (OpenAI-compatible) with text editor capabilities"
 )]
@@ -132,7 +133,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load environment variables
     dotenvy::dotenv().ok();
 
-    let args = CliArgs::parse();
+    // sc / starcode / starcode-cli 是同一个二进制的三个入口，usage 和报错要回显
+    // 本次实际敲的那个名字，所以 name 在这里按 argv[0] 覆盖掉派生宏里的兜底值。
+    let args = {
+        use clap::{CommandFactory, FromArgMatches};
+        let prog = crate::utils::invocation::program_name();
+        let matches = CliArgs::command()
+            .name(prog.clone())
+            .bin_name(prog)
+            .get_matches();
+        CliArgs::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+    };
 
     // Handle subcommands first
     match args.command {

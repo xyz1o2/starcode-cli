@@ -10,7 +10,9 @@ path = "src/main.rs"
 
 [dependencies]
 # CLI and command parsing
-clap = { version = "4.0", features = ["derive"] }
+# "string": 让 Command::name/bin_name 接受运行期 String —— 我们按 argv[0]
+# 覆盖程序名（sc / starcode / starcode-cli 共用一个二进制），名字不是 'static。
+clap = { version = "4.0", features = ["derive", "string"] }
 
 # Zip extraction (official marketplace GCS fast channel)
 zip = { version = "2", default-features = false, features = ["deflate"] }

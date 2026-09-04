@@ -60,10 +60,23 @@ StarCode CLI is your AI-powered coding assistant that can:
 git clone https://github.com/xyz1o2/starcode-cli.git
 cd starcode-cli
 
-# Build the project
-cargo build --release
+# Build and install into ~/.cargo/bin
+./install.sh          # Windows: .\install.ps1
+```
 
-# The binary will be in target/release/starcode-cli
+`install.sh` installs one binary and adds two command aliases, so any of these
+starts the same program:
+
+```bash
+sc              # short form
+starcode
+starcode-cli
+```
+
+To build by hand instead — note this only gives you the `starcode-cli` name:
+
+```bash
+cargo build --release
 cp target/release/starcode-cli /usr/local/bin/
 ```
 
@@ -94,20 +107,20 @@ echo "STAR_API_KEY=your-api-key" > .env
 
 ```bash
 # Start interactive mode
-starcode
+sc
 
 # Or with an initial message
-starcode "Explain the structure of this project"
+sc "Explain the structure of this project"
 ```
 
 ### 3. Use headless mode for scripting
 
 ```bash
 # Process a single prompt
-starcode -p "What files are in the current directory?"
+sc -p "What files are in the current directory?"
 
 # With specific output format
-starcode -p "List all Rust files" --output-format text
+sc -p "List all Rust files" --output-format text
 ```
 
 ## Configuration

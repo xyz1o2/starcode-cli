@@ -23,3 +23,4 @@ pub mod task_panel;
 pub mod theme_picker;
 pub(crate) mod tool_render;
 pub mod virtual_list;
+pub mod welcome_header;

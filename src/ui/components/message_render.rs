@@ -34,6 +34,11 @@ pub(crate) fn render_non_tool_entry_blocks(
     let cancelling = state.cancelling_since.is_some();
 
     match entry.entry_type {
+        ChatEntryType::Assistant if entry.is_welcome => {
+            // 欢迎抬头走专用渲染：左侧标记 + 右侧信息，从 state 现算，
+            // 不能走 markdown（markdown 排不出"左标记右三行"的并排布局）
+            blocks.push(super::welcome_header::welcome_header_lines(state));
+        }
         ChatEntryType::Assistant => {
             let display_content = crate::ui::utils::text::sanitize_for_tui(&entry.content);
             if let Some(reasoning) = &entry.reasoning_content {

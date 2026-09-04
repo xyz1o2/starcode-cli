@@ -6291,10 +6291,13 @@ pub async fn pipe_status(mut ctx: CommandContext<'_>, args: Vec<String>) -> Comm
         }
         "daemon" => {
             let mut out = String::from("## Daemon pipe\n\n");
-            // `pgrep -f starcode-cli` 会匹配到**正在跑的这个 TUI 自己**，直接展示等于
-            // 永远报告"daemon 在跑"。所以先剔除自身 pid 再判断。
+            // pgrep 会匹配到**正在跑的这个 TUI 自己**，直接展示等于永远报告
+            // "daemon 在跑"。所以先剔除自身 pid 再判断。
+            // 模式覆盖全部入口名（sc / starcode / starcode-cli 是同一个二进制），
+            // 只认 starcode-cli 会漏掉用简称启动的实例。
             let own = std::process::id().to_string();
-            let raw = run("pgrep", &["-f", "starcode-cli"]).unwrap_or_default();
+            let pattern = crate::utils::invocation::process_match_pattern();
+            let raw = run("pgrep", &["-f", &pattern]).unwrap_or_default();
             let others: Vec<&str> = raw
                 .lines()
                 .map(|l| l.trim())
@@ -6302,18 +6305,18 @@ pub async fn pipe_status(mut ctx: CommandContext<'_>, args: Vec<String>) -> Comm
                 .collect();
             if others.is_empty() {
                 out.push_str(&format!(
-                    "- no other starcode-cli process is running (this TUI is pid {})\n",
+                    "- no other StarCode process is running (this TUI is pid {})\n",
                     own
                 ));
             } else {
                 out.push_str(&format!(
-                    "- {} other starcode-cli process(es), excluding this TUI (pid {}):\n```\n{}\n```\n",
+                    "- {} other StarCode process(es), excluding this TUI (pid {}):\n```\n{}\n```\n",
                     others.len(),
                     own,
                     others.join("\n")
                 ));
                 out.push_str(
-                    "- a match is not proof of a daemon: any second starcode-cli \
+                    "- a match is not proof of a daemon: any second StarCode process \
                      (another TUI, a headless `-p` run) shows up here too\n",
                 );
             }

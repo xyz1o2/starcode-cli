@@ -957,6 +957,27 @@ fn init_terminal() -> Result<
     })))
 }
 
+/// 把输入框内容整体重设为 `text`（而不是追加）。
+///
+/// 初始化等待期间要把 early_input 的快照反复镜像进真正的输入框，
+/// 追加语义会越写越长，所以这里按 repo 既有做法重建一个 TextArea 并补回样式。
+fn sync_textarea(state: &mut ChatState, text: &str) {
+    use tui_textarea::TextArea;
+
+    let mut textarea = TextArea::default();
+    textarea.set_placeholder_text(crate::ui::utils::text::input_placeholder_text());
+    textarea.set_cursor_line_style(ratatui::style::Style::default());
+    textarea.set_cursor_style(
+        ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+    );
+    if !text.is_empty() {
+        textarea.insert_str(text);
+    }
+    state.textarea = textarea;
+    state.input = text.to_string();
+    state.input_line_count = text.lines().count().max(1);
+}
+
 pub async fn run_app(
     init_rx: tokio::sync::oneshot::Receiver<
         Result<
@@ -991,45 +1012,24 @@ pub async fn run_app(
         }
     };
 
-    // ── Splash 启动画面 ──
-    let _ = crate::ui::utils::splash::run_splash_ratatui(&mut terminal).await;
-
-    // ── 加载界面 ──
-    terminal.draw(|f| {
-        use ratatui::style::{Color, Style};
-        use ratatui::text::{Line, Span};
-        use ratatui::widgets::Paragraph;
-        let area = f.area();
-        let lines = vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                format!(
-                    "  ✳ {}...",
-                    crate::ui::components::status_line::random_spinner_verb()
-                ),
-                Style::default().fg(Color::Rgb(215, 119, 87)),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "  Loading configuration and tools...",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from(Span::styled(
-                "  (This happens once and may take a few seconds)",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "  You can start typing now - input will appear after initialization",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from(Span::styled(
-                "  Press Ctrl+C to cancel",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ];
-        f.render_widget(Paragraph::new(lines), area);
-    })?;
+    // ── 直接进主界面 ──
+    //
+    // 以前这里是 splash 启动画面 + 两块手搓的 "Loading..." 文本页。现在
+    // `ChatState::new()` 提前到初始化之前构造（它不依赖 Config，只读历史文件），
+    // 于是等待期间画的就是真正的主界面：抬头、空的对话区、真的输入框。
+    // 初始化进度改为走状态行，而不是另起一个页面。
+    let mut state = ChatState::new();
+    state.auto_follow = true;
+    state.virtual_list.mark_all_dirty();
+    state.current_status_line = Some(
+        crate::core::i18n::t(
+            "ui.init.loading",
+            "正在加载配置和工具…",
+            "Loading configuration and tools…",
+        )
+        .to_string(),
+    );
+    terminal.draw(|f| super::draw_ui(f, &mut state))?;
 
     // ── 启动早期输入捕获 ──
     super::early_input::start_capturing();
@@ -1068,33 +1068,11 @@ pub async fn run_app(
             _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
                 let preview = super::early_input::peek_early_input();
                 if preview != last_preview {
-                    terminal.draw(|f| {
-                        use ratatui::widgets::Paragraph;
-                        use ratatui::text::{Line, Span};
-                        use ratatui::style::{Color, Style};
-                        let area = f.area();
-                        let mut lines = vec![
-                            Line::from(""),
-                            Line::from(Span::styled(format!("  ✳ {}...", crate::ui::components::status_line::random_spinner_verb()), Style::default().fg(Color::Rgb(215, 119, 87)))),
-                            Line::from(""),
-                            Line::from(Span::styled("  Loading configuration and tools...", Style::default().fg(Color::DarkGray))),
-                            Line::from(Span::styled("  (This happens once and may take a few seconds)", Style::default().fg(Color::DarkGray))),
-                            Line::from(""),
-                        ];
-                        if !preview.is_empty() {
-                            let display_text = if preview.len() > 60 {
-                                format!("  ❯ ...{}", &preview[preview.len()-57..])
-                            } else {
-                                format!("  ❯ {}", preview)
-                            };
-                            lines.push(Line::from(Span::styled(display_text, Style::default().fg(Color::White))));
-                            lines.push(Line::from(""));
-                        }
-                        lines.push(Line::from(Span::styled("  Press Ctrl+C to cancel", Style::default().fg(Color::DarkGray))));
-                        f.render_widget(Paragraph::new(lines), area);
-                    })?;
+                    // 把早期输入镜像进真正的输入框，用户看到的就是自己在主界面里打字
+                    sync_textarea(&mut state, &preview);
                     last_preview = preview;
                 }
+                terminal.draw(|f| super::draw_ui(f, &mut state))?;
             }
         }
     };
@@ -1132,7 +1110,11 @@ pub async fn run_app(
     let (agent_tx, agent_rx) = mpsc::channel::<AgentRequest>(100);
     let (ui_tx, ui_rx) = mpsc::channel::<StreamMessage>(100);
 
-    let mut state = ChatState::new();
+    // 初始化完成：清掉加载提示，把解析出来的模型名填进抬头
+    state.current_status_line = None;
+    if state.current_model.is_empty() {
+        state.current_model = config.model().to_string();
+    }
 
     // Restore draft from previous session
     state.restore_draft();
@@ -1160,23 +1142,9 @@ pub async fn run_app(
         }
     });
 
-    // Add welcome header entry at the top of chat (not persisted to session)
-    {
-        use crate::types::ChatEntry;
-        let version = env!("CARGO_PKG_VERSION");
-        let welcome = format!(
-            "v{} · AI Coding Agent\n\n\
-             /help for help  ·  Esc to interrupt  ·  --resume <id> to resume",
-            version
-        );
-        state.chat_history.push(
-            ChatEntry::assistant(welcome)
-                .with_streaming(false)
-                .with_welcome(),
-        );
-    }
-    // Start at the bottom (Claude Code style).
-    state.auto_follow = true;
+    // 抬头由 `ChatState::new()` 建的那条 is_welcome 条目承载，渲染期现算
+    // （见 ui::components::welcome_header）。这里不再另塞一条，否则主界面
+    // 顶部会出现两个欢迎块。
     state.virtual_list.mark_all_dirty();
 
     // Load thinking_effort from user settings
@@ -1205,11 +1173,12 @@ pub async fn run_app(
         state.chat_list_state.select(Some(len.saturating_sub(1)));
     }
 
+    // 等待期间早期输入已镜像进 textarea，这里统一按最终文本重设一次，
+    // 不能再 insert_str —— 那会把已经显示出来的内容再追加一遍
     if !initial_message.is_empty() {
-        state.input = initial_message;
+        sync_textarea(&mut state, &initial_message);
     } else if !early_input_text.is_empty() {
-        state.input = early_input_text.clone();
-        state.textarea.insert_str(&early_input_text);
+        sync_textarea(&mut state, &early_input_text);
     }
 
     // Start worker
@@ -1231,7 +1200,12 @@ pub async fn run_app(
     // Print resume hint after terminal is restored
     if let Some(id) = saved_session_id {
         println!("\nSession saved. To resume:");
-        println!("  starcode-cli --resume {}", id);
+        // 用本次实际启动用的命令名（sc / starcode / starcode-cli 是同一个二进制）
+        println!(
+            "  {} --resume {}",
+            crate::utils::invocation::program_name(),
+            id
+        );
     }
 
     res

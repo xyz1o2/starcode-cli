@@ -1,7 +1,6 @@
 pub mod cost;
 pub mod format;
 pub mod render;
-pub mod splash;
 pub mod status;
 pub mod term_recovery;
 pub mod text;

@@ -4,6 +4,7 @@
 pub mod checkpoint_manager;
 pub mod environment_context;
 pub mod format_utils;
+pub mod invocation;
 pub mod logging;
 pub mod markdown_parser;
 pub mod path_utils;
