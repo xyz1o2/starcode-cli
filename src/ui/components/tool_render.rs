@@ -880,7 +880,7 @@ fn render_tool_result_text(
             // 错误输出同样保留 ANSI 颜色，无色部分补红色（对标 OutputLine isError）
             if line.contains('\x1b') {
                 let spans = crate::ui::utils::render::parse_ansi_text(line);
-                let rows = if crate::ui::utils::render::line_spans_width_cjk(&spans) > width {
+                let rows = if crate::ui::utils::render::line_spans_display_width(&spans) > width {
                     crate::ui::utils::render::wrap_spans_to_width(spans, width)
                 } else {
                     vec![spans]

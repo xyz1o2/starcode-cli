@@ -1,6 +1,5 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthChar;
 
 use crate::types::ChatEntryType;
 use crate::ui::state::ChatState;
@@ -242,10 +241,18 @@ pub(crate) fn render_non_tool_entry_blocks(
                     Style::default().fg(theme.secondary),
                 ))]);
             } else if !display_content.trim().is_empty() {
+                // 流式光标 "▌" 是在折行之后追加的，必须先给它留出 1 列，
+                // 否则正好排满的那一行会超出可用宽度、末字被右边界截掉，
+                // 每来一个 token 就重新截一次，看起来像整行在抖动
+                let body_width = if is_streaming_now {
+                    wrap_width.saturating_sub(1)
+                } else {
+                    wrap_width
+                };
                 let mut lines = crate::ui::utils::render::build_assistant_body_block(
                     &display_content,
                     is_streaming_now,
-                    wrap_width,
+                    body_width,
                 );
                 // If markdown parsing returned empty lines but content exists,
                 // render as plain text (handles edge cases like thinking-only responses)
@@ -278,14 +285,26 @@ pub(crate) fn render_non_tool_entry_blocks(
             }
         }
         ChatEntryType::User => {
-            let user_prefix = Span::styled("> ", Style::default().fg(theme.user_fg));
+            const USER_PREFIX: &str = "> ";
+            let user_prefix = Span::styled(USER_PREFIX, Style::default().fg(theme.user_fg));
             let display_content = crate::ui::utils::text::sanitize_for_tui(&entry.content);
-            let mut user_lines =
-                crate::ui::utils::render::build_user_body_block(&display_content, wrap_width);
-            if let Some(first) = user_lines.first_mut() {
-                let mut new_spans = vec![user_prefix];
-                new_spans.extend(first.spans.clone());
-                *first = Line::from(new_spans);
+            // "> " 是折行之后才加到首行上的，所以正文必须按 wrap_width - 2 折行，
+            // 否则首行固定超出 2 列被右边界截掉；续行同样缩进 2 列，
+            // 多行输入才会整块对齐在提示符右侧
+            let indent_w = USER_PREFIX.len(); // ASCII，2 列
+            let mut user_lines = crate::ui::utils::render::build_user_body_block(
+                &display_content,
+                wrap_width.saturating_sub(indent_w),
+            );
+            for (idx, line) in user_lines.iter_mut().enumerate() {
+                let lead = if idx == 0 {
+                    user_prefix.clone()
+                } else {
+                    Span::raw(" ".repeat(indent_w))
+                };
+                let mut new_spans = vec![lead];
+                new_spans.extend(std::mem::take(&mut line.spans));
+                *line = Line::from(new_spans);
             }
             blocks.push(user_lines);
         }
@@ -364,7 +383,8 @@ fn push_wrapped_preview_line(out: &mut Vec<String>, line: &str, max_width: usize
     let mut width = 0usize;
 
     for ch in line.chars() {
-        let ch_width = UnicodeWidthChar::width_cjk(ch).unwrap_or(0).max(1);
+        // 与 ratatui 的缓冲区度量保持一致（见 render::display_width）
+        let ch_width = crate::ui::utils::render::char_display_width(ch).max(1);
         if width > 0 && width + ch_width > max_width {
             out.push(current);
             current = String::new();

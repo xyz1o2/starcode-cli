@@ -6,7 +6,6 @@ use crate::ui::state::ChatState;
 use ratatui::prelude::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::widgets::Block;
-use unicode_width::UnicodeWidthChar;
 
 fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect) -> Rect {
     use ratatui::layout::{Constraint, Direction, Layout};
@@ -102,46 +101,12 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     };
 
     // Write chat lines directly to buffer — stable cell positions enable ratatui diff
-    let buf = f.buffer_mut();
-    for y in 0..chat_area.height {
-        let line_idx = state.scroll + y as usize;
-        let x = chat_area.x;
-        let row = chat_area.y + y;
-        // Clear row
-        for cx in 0..chat_area.width {
-            if let Some(cell) = buf.cell_mut((x + cx, row)) {
-                cell.reset();
-            }
-        }
-        if line_idx < chat_lines.len() {
-            let line = &chat_lines[line_idx];
-            let mut cx = x;
-            for span in &line.spans {
-                let content = span.content.as_ref();
-                for ch in content.chars() {
-                    let w = UnicodeWidthChar::width_cjk(ch).unwrap_or(0);
-                    // Skip zero-width characters (combining marks etc.)
-                    // to avoid shifting subsequent characters and causing artifacts
-                    if w == 0 {
-                        continue;
-                    }
-                    // Write the character; for wide chars also clear the adjacent cell
-                    if cx < x + chat_area.width {
-                        if let Some(cell) = buf.cell_mut((cx, row)) {
-                            cell.set_char(ch).set_style(span.style);
-                        }
-                    }
-                    // Clear the cell that wide chars extend into
-                    if w > 1 && cx + 1 < x + chat_area.width {
-                        if let Some(cell) = buf.cell_mut((cx + 1, row)) {
-                            cell.set_char(' ').set_style(span.style);
-                        }
-                    }
-                    cx += w as u16;
-                }
-            }
-        }
-    }
+    crate::ui::utils::render::write_lines_to_buffer(
+        f.buffer_mut(),
+        chat_area,
+        &chat_lines,
+        state.scroll,
+    );
 
     // Render token warning (context window usage)
     if !token_warning_lines.is_empty() {

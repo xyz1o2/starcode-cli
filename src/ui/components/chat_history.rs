@@ -162,9 +162,9 @@ fn split_by_width(text: &str, start_width: usize, end_width: usize) -> (String, 
     let mut in_middle = false;
 
     for ch in text.chars() {
-        let ch_width = unicode_width::UnicodeWidthChar::width_cjk(ch)
-            .unwrap_or(0)
-            .max(1);
+        // 度量口径必须与 ratatui 的缓冲区一致（见 render::display_width），
+        // 否则选区高亮的起止列会随 Ambiguous 字符逐个右移
+        let ch_width = crate::ui::utils::render::char_display_width(ch).max(1);
 
         if in_prefix && current_width < start_width {
             prefix.push(ch);

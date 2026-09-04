@@ -98,13 +98,91 @@ fn detect_language_from_content(content: &str) -> &'static str {
 
 static ANSI_REGEX: OnceLock<Regex> = OnceLock::new();
 
+/// 一个字符串占用的终端列数 —— **必须与 ratatui 的度量一致**。
+///
+/// ratatui 按 `UnicodeWidthStr::width()`（非 CJK 变体）分配缓冲区单元格，
+/// 折行也用同一个函数：见 `ratatui-core/src/text/span.rs` 的 `Span::width`
+/// 与 `ratatui-widgets/src/reflow.rs` 的 `grapheme.symbol.width()`。
+///
+/// 因此排版计算只能用 `width()`。改用 `width_cjk()` 会把 East-Asian
+/// *Ambiguous* 字符算成 2 列而 ratatui 只给 1 列 —— 而这套 UI 恰好到处都是
+/// 这类字符：`─ │ ┌ ┬ └`（表格与代码块边框）、`•`（列表标记）、`→ ✓ …`、
+/// 希腊字母与西里尔字母。每出现一个就错位一列，表现为表格右边框逐行左移、
+/// 段落提前折行、悬挂缩进歪一格。
+///
+/// 真正的 CJK 汉字/假名/谚文是 Wide 或 Fullwidth，两个函数都返回 2，
+/// 所以中文排版不受影响。
+pub fn display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+/// 单个字符占用的终端列数，度量口径同 [`display_width`]。
+pub fn char_display_width(c: char) -> usize {
+    UnicodeWidthChar::width(c).unwrap_or(0)
+}
+
+/// 把 `lines[scroll..]` 逐格写进 `area`，超出右边界的部分截断。
+///
+/// 聊天区不走 `Paragraph`，而是直接写缓冲区 —— 单元格位置稳定，ratatui 的
+/// 帧间 diff 才能只重绘变化的格子（长会话滚动时这是主要的性能来源）。
+///
+/// **光标推进必须用 [`char_display_width`]**：缓冲区一格 = ratatui 眼里的一列。
+/// 用 `width_cjk` 会让 East-Asian *Ambiguous* 字符（表格边框 `─ │ ┌ ┬ └`、
+/// 列表标记 `•`、`→ ✓ … ▌`、希腊/西里尔字母）每出现一个就多跳一格，并把它写成
+/// "字符 + 空格" —— 边框和标记后面凭空多出一列、整行逐字符右移，
+/// 于是表格错行、缩进歪斜。真正的宽字符（CJK / emoji）两个函数都返回 2，不受影响。
+pub fn write_lines_to_buffer(
+    buf: &mut ratatui::buffer::Buffer,
+    area: ratatui::layout::Rect,
+    lines: &[Line<'_>],
+    scroll: usize,
+) {
+    let right = area.x.saturating_add(area.width);
+    for y in 0..area.height {
+        let row = area.y + y;
+        // Clear row
+        for cx in area.x..right {
+            if let Some(cell) = buf.cell_mut((cx, row)) {
+                cell.reset();
+            }
+        }
+        let Some(line) = scroll.checked_add(y as usize).and_then(|i| lines.get(i)) else {
+            continue;
+        };
+        let mut cx = area.x;
+        for span in &line.spans {
+            for ch in span.content.chars() {
+                if cx >= right {
+                    break;
+                }
+                let w = char_display_width(ch);
+                // Skip zero-width characters (combining marks etc.)
+                // to avoid shifting subsequent characters and causing artifacts
+                if w == 0 {
+                    continue;
+                }
+                if let Some(cell) = buf.cell_mut((cx, row)) {
+                    cell.set_char(ch).set_style(span.style);
+                }
+                // Clear the cell that wide chars extend into
+                if w > 1 && cx + 1 < right {
+                    if let Some(cell) = buf.cell_mut((cx + 1, row)) {
+                        cell.set_char(' ').set_style(span.style);
+                    }
+                }
+                cx = cx.saturating_add(w as u16);
+            }
+        }
+    }
+}
+
 /// Truncate a string to fit within `max_width` display cells, appending "..." if needed.
 /// Uses Unicode display width, safe for CJK and other wide chars.
 pub fn truncate_to_display_width(s: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
-    let width = UnicodeWidthStr::width_cjk(s);
+    let width = display_width(s);
     if width <= max_width {
         return s.to_string();
     }
@@ -114,7 +192,7 @@ pub fn truncate_to_display_width(s: &str, max_width: usize) -> String {
     let mut result = String::new();
     let mut w = 0;
     for c in s.chars() {
-        let cw = UnicodeWidthChar::width_cjk(c).unwrap_or(0);
+        let cw = char_display_width(c);
         if w + cw > target {
             break;
         }
@@ -125,16 +203,15 @@ pub fn truncate_to_display_width(s: &str, max_width: usize) -> String {
     result
 }
 
-/// Calculate CJK-aware display width of ratatui Spans.
-/// ratatui's Line::width() uses non-CJK width; this matches the terminal's actual rendering.
-pub fn line_spans_width_cjk(spans: &[Span]) -> usize {
+/// ratatui Span 序列的显示宽度，度量口径同 [`display_width`]。
+pub fn line_spans_display_width(spans: &[Span]) -> usize {
     spans
         .iter()
-        .map(|s| UnicodeWidthStr::width_cjk(s.content.as_ref()))
+        .map(|s| display_width(s.content.as_ref()))
         .sum()
 }
 
-/// Split a span's content at a display-width boundary (CJK-aware).
+/// Split a span's content at a display-width boundary.
 /// Returns (part that fits within `max_width`, remainder).
 fn split_span_at_width(content: &str, max_width: usize) -> (String, String) {
     let mut w = 0usize;
@@ -142,7 +219,7 @@ fn split_span_at_width(content: &str, max_width: usize) -> (String, String) {
     let mut rest = String::new();
     let mut full = false;
     for c in content.chars() {
-        let cw = UnicodeWidthChar::width_cjk(c).unwrap_or(0);
+        let cw = char_display_width(c);
         if !full && w + cw <= max_width {
             fitted.push(c);
             w += cw;
@@ -164,7 +241,7 @@ pub fn truncate_spans_to_width(spans: &[Span<'static>], max_width: usize) -> Vec
         if remaining == 0 {
             break;
         }
-        let w = UnicodeWidthStr::width_cjk(span.content.as_ref());
+        let w = display_width(span.content.as_ref());
         if w <= remaining {
             remaining -= w;
             out.push(span.clone());
@@ -215,7 +292,7 @@ pub fn wrap_spans_to_width(
                 rest_content = chars.as_str().to_string();
                 continue;
             }
-            used += UnicodeWidthStr::width_cjk(fitted.as_str());
+            used += display_width(fitted.as_str());
             current.push(Span::styled(fitted, style));
             rest_content = rest;
         }
@@ -503,7 +580,7 @@ pub fn wrap_char_ranges(
     if n == 0 {
         return Vec::new();
     }
-    let cw = |c: char| UnicodeWidthChar::width_cjk(c).unwrap_or(0);
+    let cw = char_display_width;
     // 只含空白的行归一为空行，避免行尾残留空格
     fn push_line(out: &mut Vec<(usize, usize)>, chars: &[char], s: usize, e: usize) {
         if e > s && chars[s..e].iter().all(|c| c.is_whitespace()) {
@@ -761,7 +838,7 @@ pub fn build_tool_body_block(
         // 而不是剥掉全部转义序列导致彩色输出（git/ls/测试运行器等）褪色。
         if line.contains('\x1b') {
             let spans = parse_ansi_text(line);
-            let rows = if line_spans_width_cjk(&spans) > wrap_width {
+            let rows = if line_spans_display_width(&spans) > wrap_width {
                 wrap_spans_to_width(spans, wrap_width)
             } else {
                 vec![spans]
@@ -776,7 +853,7 @@ pub fn build_tool_body_block(
         if use_syntax_highlight {
             let highlighted = crate::utils::syntax_highlight::highlight_line(&clean_line, language);
             // Manual wrapping logic (CJK-aware width check)
-            if line_spans_width_cjk(&highlighted.spans) > wrap_width {
+            if line_spans_display_width(&highlighted.spans) > wrap_width {
                 for wrapped in wrap_text_to_width(&clean_line, wrap_width) {
                     lines.push(Line::from(wrapped));
                 }
@@ -853,7 +930,7 @@ pub fn build_tool_body_block(
             }
 
             // Manual wrapping logic (CJK-aware width check)
-            if line_spans_width_cjk(&spans) > wrap_width {
+            if line_spans_display_width(&spans) > wrap_width {
                 for wrapped in wrap_text_to_width(&clean_line, wrap_width) {
                     lines.push(Line::from(wrapped));
                 }
@@ -872,7 +949,7 @@ pub fn build_user_body_block(content: &str, wrap_width: usize) -> Vec<Line<'stat
     let mut lines: Vec<Line<'static>> = Vec::new();
     for line in content.lines() {
         let clean = strip_ansi_codes(line);
-        if line_spans_width_cjk(&[Span::raw(&clean)]) <= wrap_width {
+        if line_spans_display_width(&[Span::raw(&clean)]) <= wrap_width {
             lines.push(Line::from(Span::styled(
                 clean,
                 Style::default().fg(Color::White),
@@ -1458,6 +1535,62 @@ pub fn apply_alignment(lines: &mut Vec<Line<'static>>, align: Alignment) {
 mod tests {
     use super::*;
 
+    /// 度量口径守卫：`display_width` 必须与 ratatui 自己算出的宽度逐字符一致。
+    ///
+    /// ratatui 按 `Span::width()`（= `UnicodeWidthStr::width`）分配缓冲区单元格，
+    /// `src/ui/app/mod.rs` 里手写的聊天区写入循环也按同一口径推进光标。
+    /// 一旦有人把这里换回 `width_cjk()`，East-Asian *Ambiguous* 字符
+    /// （表格边框 `─ │ ┌ ┬ └`、列表标记 `•`、`→ ✓ …`、希腊/西里尔字母）
+    /// 每出现一个就多算一列，聊天区会重现"表格错行、缩进歪斜"的老毛病。
+    #[test]
+    fn display_width_matches_ratatui_span_width() {
+        use ratatui::text::Line as RLine;
+
+        // 前一组是 Ambiguous（width=1 / width_cjk=2），后一组是真正的宽字符
+        let samples = [
+            "─", "│", "┌", "┬", "└", "├", "┼", "•", "→", "✓", "…", "▌", "α", "д", "①", "中文",
+            "かな", "한", "😀", "abc",
+        ];
+        for s in samples {
+            let span = Span::raw(s);
+            assert_eq!(
+                display_width(s),
+                span.width(),
+                "display_width 与 ratatui Span::width 不一致: {:?}",
+                s
+            );
+            assert_eq!(
+                line_spans_display_width(&[Span::raw(s)]),
+                RLine::from(s).width(),
+                "line_spans_display_width 与 ratatui Line::width 不一致: {:?}",
+                s
+            );
+            assert_eq!(
+                s.chars().map(char_display_width).sum::<usize>(),
+                span.width(),
+                "逐字符宽度之和与整串宽度不一致: {:?}",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_lines_fit_ratatui_width() {
+        // 折行结果按 ratatui 的度量不得超宽 —— 超出的部分会被聊天区右边界截掉
+        let text = "表格边框 ─│┌ 与项目符号 • 箭头 → 对勾 ✓ 混排的长行，外加 α β γ 和 ASCII words";
+        for w in [12usize, 20, 33, 48] {
+            for line in wrap_text_to_width(text, w) {
+                assert!(
+                    display_width(&line) <= w,
+                    "宽度 {} 下溢出 {} 列: {:?}",
+                    w,
+                    display_width(&line),
+                    line
+                );
+            }
+        }
+    }
+
     #[test]
     fn sgr_256_and_truecolor_are_preserved() {
         let spans = parse_ansi_text("\x1b[38;5;196mred\x1b[0m plain");
@@ -1492,7 +1625,7 @@ mod tests {
         let lines = build_tool_body_block(&long, 20, true);
         assert_eq!(lines.len(), 3);
         for line in &lines {
-            assert!(line_spans_width_cjk(&line.spans) <= 20);
+            assert!(line_spans_display_width(&line.spans) <= 20);
         }
     }
 
@@ -1503,7 +1636,7 @@ mod tests {
             Span::styled("ghij", Style::default().fg(Color::Blue)),
         ];
         let cut = truncate_spans_to_width(&spans, 4);
-        assert_eq!(line_spans_width_cjk(&cut), 4);
+        assert_eq!(line_spans_display_width(&cut), 4);
         assert_eq!(cut[0].content, "abcd");
         assert_eq!(cut.len(), 1);
     }
@@ -1525,7 +1658,7 @@ mod tests {
             .collect();
         assert_eq!(joined, "中文中文");
         for row in &rows {
-            assert!(line_spans_width_cjk(row) <= 3);
+            assert!(line_spans_display_width(row) <= 3);
         }
     }
 
@@ -1542,7 +1675,7 @@ mod tests {
         // 7 cells: 3 for "..." leaves 4 → two CJK chars (4 cells) fit
         let s = truncate_to_display_width("中文中文中文", 7);
         assert_eq!(s, "中文...");
-        assert!(UnicodeWidthStr::width_cjk(s.as_str()) <= 7);
+        assert!(display_width(s.as_str()) <= 7);
         // ASCII unaffected
         assert_eq!(truncate_to_display_width("abcdef", 10), "abcdef");
     }
@@ -1567,7 +1700,7 @@ mod tests {
         assert_eq!(out.len(), 3);
         assert_eq!(out.concat(), "中文中文中文");
         for line in &out {
-            assert!(UnicodeWidthStr::width_cjk(line.as_str()) <= 5);
+            assert!(display_width(line.as_str()) <= 5);
         }
     }
 
@@ -1578,7 +1711,7 @@ mod tests {
         assert_eq!(out.concat(), url);
         for line in &out {
             assert!(
-                UnicodeWidthStr::width_cjk(line.as_str()) <= 20,
+                display_width(line.as_str()) <= 20,
                 "长 token 未硬断: {:?}",
                 line
             );
@@ -1592,7 +1725,7 @@ mod tests {
         for w in [12usize, 20, 33, 50] {
             for line in wrap_text_to_width(src, w) {
                 assert!(
-                    UnicodeWidthStr::width_cjk(line.as_str()) <= w,
+                    display_width(line.as_str()) <= w,
                     "width {} 超宽: {:?}",
                     w,
                     line

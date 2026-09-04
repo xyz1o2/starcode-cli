@@ -1,7 +1,8 @@
+use crate::ui::utils::render::{char_display_width, display_width};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Alignment {
@@ -16,6 +17,16 @@ pub enum ContentBlock {
     Thinking(String),
 }
 
+/// 被识别为"思考过程"的标签对。顺序无关 —— 提取始终按文档顺序进行。
+const THINKING_TAGS: &[(&str, &str)] = &[
+    ("<thinking>", "</thinking>"),
+    ("<think>", "</think>"),
+    ("<思考>", "</思考>"),
+    ("<thought>", "</thought>"),
+    ("<plan>", "</plan>"),
+    ("<thinking_process>", "</thinking_process>"),
+];
+
 /// Parse Markdown content into structured blocks.
 /// When `extract_thinking` is true, `<thinking>` blocks are extracted and
 /// rendered with dimmed styling. For non-thinking models this should be false
@@ -24,71 +35,58 @@ pub fn parse_markdown_content_ext(content: &str, extract_thinking: bool) -> Vec<
     let mut blocks = Vec::new();
 
     if extract_thinking {
-        // Extract thinking blocks into separate ContentBlock::Thinking
-        let mut remaining = content.to_string();
-        let thinking_tags = [
-            ("<thinking>", "</thinking>"),
-            ("<think>", "</think>"),
-            ("<思考>", "</思考>"),
-            ("<thought>", "</thought>"),
-            ("<plan>", "</plan>"),
-            ("<thinking_process>", "</thinking_process>"),
-        ];
-
-        // Find and extract thinking blocks
-        for (open, close) in &thinking_tags {
-            while let Some(start) = remaining.find(open) {
-                // Add text before thinking block
-                if start > 0 {
-                    let before = remaining[..start].trim().to_string();
-                    if !before.is_empty() {
-                        blocks.push(ContentBlock::Text(before));
-                    }
-                }
-
-                let content_start = start + open.len();
-                if let Some(end) = remaining[content_start..].find(close) {
-                    let inner = remaining[content_start..content_start + end].to_string();
+        // 按**文档顺序**逐个取最靠前的开标签。
+        //
+        // 旧实现以标签种类为外层循环（先抽干所有 `<thinking>`，再处理
+        // `<think>`…），混用两种标签时会把夹在中间的 `<think>…</think>`
+        // 连标签一起当正文输出，并且正文块的先后顺序被打乱。
+        let mut rest = content;
+        while let Some((start, open, close)) = THINKING_TAGS
+            .iter()
+            .filter_map(|&(open, close)| rest.find(open).map(|i| (i, open, close)))
+            .min_by_key(|&(i, _, _)| i)
+        {
+            let before = rest[..start].trim();
+            if !before.is_empty() {
+                blocks.push(ContentBlock::Text(before.to_string()));
+            }
+            let body_start = start + open.len();
+            match rest[body_start..].find(close) {
+                Some(end_rel) => {
+                    let inner = &rest[body_start..body_start + end_rel];
                     if !inner.trim().is_empty() {
-                        blocks.push(ContentBlock::Thinking(inner));
+                        blocks.push(ContentBlock::Thinking(inner.to_string()));
                     }
-                    remaining = remaining[content_start + end + close.len()..].to_string();
-                } else {
+                    rest = &rest[body_start + end_rel + close.len()..];
+                }
+                None => {
+                    // 闭标签还没到（流式输出中）：剩余内容整体作为思考块，
+                    // 而不是把裸的 `<think>` 标签打到界面上
+                    let inner = &rest[body_start..];
+                    if !inner.trim().is_empty() {
+                        blocks.push(ContentBlock::Thinking(inner.to_string()));
+                    }
+                    rest = "";
                     break;
                 }
             }
         }
 
         // Add remaining text
-        if !remaining.trim().is_empty() {
-            blocks.push(ContentBlock::Text(remaining));
+        if !rest.trim().is_empty() {
+            blocks.push(ContentBlock::Text(rest.to_string()));
         }
     } else {
         // Strip all thinking tags
         let mut remaining = content.to_string();
-        for tag in [
-            "<thinking>",
-            "<think>",
-            "<思考>",
-            "<thought>",
-            "<plan>",
-            "<thinking_process>",
-        ] {
-            let close = tag.replacen("<", "</", 1);
-            remaining = remaining.replace(tag, "").replace(&close, "");
+        for (open, close) in THINKING_TAGS {
+            remaining = remaining.replace(open, "").replace(close, "");
         }
 
         // If stripping thinking tags left nothing, extract content from inside the tags
         // This handles models that wrap entire response in thinking tags
         if remaining.trim().is_empty() && !content.trim().is_empty() {
-            for (open, close) in [
-                ("<thinking>", "</thinking>"),
-                ("<think>", "</think>"),
-                ("<思考>", "</思考>"),
-                ("<thought>", "</thought>"),
-                ("<plan>", "</plan>"),
-                ("<thinking_process>", "</thinking_process>"),
-            ] {
+            for (open, close) in THINKING_TAGS {
                 if let Some(start) = content.find(open) {
                     let content_start = start + open.len();
                     if let Some(end) = content[content_start..].find(close) {
@@ -100,29 +98,6 @@ pub fn parse_markdown_content_ext(content: &str, extract_thinking: bool) -> Vec<
                     }
                 }
             }
-        }
-
-        // If still empty after extraction, check if original content has any real text
-        // outside of thinking tags. If so, use it. Otherwise leave empty.
-        if remaining.trim().is_empty() && !content.trim().is_empty() {
-            // Strip tags and check if any non-whitespace remains
-            let mut stripped = content.to_string();
-            for tag in [
-                "<thinking>",
-                "<think>",
-                "<思考>",
-                "<thought>",
-                "<plan>",
-                "<thinking_process>",
-            ] {
-                let close = tag.replacen("<", "</", 1);
-                stripped = stripped.replace(tag, "").replace(&close, "");
-            }
-            if !stripped.trim().is_empty() {
-                remaining = stripped;
-            }
-            // If stripped is also empty, the content was just thinking tags with no real text
-            // In this case, remaining stays empty and no block is added
         }
 
         if !remaining.trim().is_empty() {
@@ -253,7 +228,7 @@ fn wrap_spans_to_lines(
     }
     let prefix_w: usize = cont_prefix
         .iter()
-        .map(|s| UnicodeWidthStr::width_cjk(s.content.as_ref()))
+        .map(|s| display_width(s.content.as_ref()))
         .sum();
     let ranges = crate::ui::utils::render::wrap_char_ranges(
         &chars,
@@ -713,6 +688,79 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
     lines
 }
 
+/// 把各列的自然宽度压进 `max_width`，**保证**渲染后的总宽不超限
+/// —— 前提是 `max_width` 至少放得下 chrome，见下。
+///
+/// 表格一行的总宽 = 列内容宽度之和 + `col_count + 1` 条竖线 + 每格 2 列内边距。
+/// 后两项合称 chrome，不可压缩：`n` 列至少要 `3n + 1` 列终端宽。`max_width` 连
+/// chrome 都放不下时（19 列的终端里放 6 列的表），把每列压到 0 宽也仍然溢出，
+/// 这种表在任何排布下都不可读，不再特殊处理。
+///
+/// 旧实现按比例缩放后给每列再套一个 `.max(3)` 下限，触到下限的列会把总宽顶回
+/// 超限 —— 窄终端下 6 列小表能算出 37 列宽（限 24 列）。溢出的行会被右边界
+/// 直接截断，整张表当场散架。
+///
+/// 这里改成"先按比例分配，再按整列增减把和调到恰好等于可用宽度"，
+/// 极窄场景下宁可让靠后的列退化为 0 宽，也不允许溢出。
+fn fit_column_widths(natural: &[usize], max_width: Option<usize>) -> Vec<usize> {
+    let n = natural.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let chrome = (n + 1) + n * 2; // 竖线 + 内边距，不可压缩
+    let natural_sum: usize = natural.iter().sum();
+
+    let Some(max_w) = max_width else {
+        return natural.to_vec();
+    };
+    if chrome + natural_sum <= max_w {
+        return natural.to_vec();
+    }
+
+    let available = max_w.saturating_sub(chrome);
+    // 连每列 1 列都排不下：靠前的列各留 1 列，其余退化为 0 宽
+    if available < n {
+        return (0..n).map(|i| usize::from(i < available)).collect();
+    }
+
+    // natural_sum 为 0 的情况已被上面两个提前返回覆盖（全 0 列必然走
+    // `chrome + 0 <= max_w` 或 `available < n`），这里的 max(1) 只是不留除零口子
+    let denom = natural_sum.max(1);
+    let mut out: Vec<usize> = natural
+        .iter()
+        .map(|&w| (w * available / denom).max(1))
+        .collect();
+
+    // 取整误差与下限抬升都会让和偏离 available —— 从最宽的列扣、给最宽的列补，
+    // 直到严格相等（此处 available >= n，所以扣减不会把任何列压到 0）
+    let mut sum: usize = out.iter().sum();
+    while sum > available {
+        let i = max_index(&out);
+        if out[i] <= 1 {
+            break;
+        }
+        out[i] -= 1;
+        sum -= 1;
+    }
+    while sum < available {
+        let i = max_index(&out);
+        out[i] += 1;
+        sum += 1;
+    }
+    out
+}
+
+/// 最宽列的下标（并列取第一个，保证结果稳定）
+fn max_index(widths: &[usize]) -> usize {
+    let mut best = 0usize;
+    for (i, &w) in widths.iter().enumerate() {
+        if w > widths[best] {
+            best = i;
+        }
+    }
+    best
+}
+
 /// Render a collected table into lines with box-drawing borders.
 /// Handles terminal width constraints by truncating cells if needed.
 fn render_table(
@@ -734,7 +782,7 @@ fn render_table(
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
             if i < col_count {
-                col_widths[i] = col_widths[i].max(UnicodeWidthStr::width_cjk(cell.as_str()));
+                col_widths[i] = col_widths[i].max(display_width(cell.as_str()));
             }
         }
     }
@@ -743,32 +791,7 @@ fn render_table(
         *w = (*w).max(3);
     }
 
-    // Calculate total table width
-    // Format: │ + (content + padding) + │ for each column
-    let border_chars = col_count + 1; // │ separators
-    let padding_chars = col_count * 2; // 2 spaces padding per cell
-    let total_content_width: usize = col_widths.iter().sum();
-    let total_table_width = border_chars + padding_chars + total_content_width;
-
-    // If table is too wide, adjust column widths to fit
-    let adjusted_widths = if let Some(max_w) = max_width {
-        if total_table_width > max_w {
-            // Reduce column widths proportionally
-            let available_width = max_w.saturating_sub(border_chars + padding_chars);
-            let scale_factor = available_width as f64 / total_content_width as f64;
-            col_widths
-                .iter()
-                .map(|&w| {
-                    let scaled = (w as f64 * scale_factor) as usize;
-                    scaled.max(3) // Minimum 3 chars per column
-                })
-                .collect::<Vec<_>>()
-        } else {
-            col_widths.clone()
-        }
-    } else {
-        col_widths.clone()
-    };
+    let adjusted_widths = fit_column_widths(&col_widths, max_width);
 
     let header_style = Style::default()
         .fg(Color::Cyan)
@@ -813,17 +836,17 @@ fn render_table(
         for ci in 0..col_count {
             let cell = row.get(ci).map(|s| s.as_str()).unwrap_or("");
             let target_width = adjusted_widths.get(ci).copied().unwrap_or(3);
-            let cw = UnicodeWidthStr::width_cjk(cell);
 
-            // Truncate cell if it's too wide
-            let display_cell = if cw > target_width {
-                truncate_to_width(cell, target_width.saturating_sub(1))
+            // Truncate cell if it's too wide（truncate_to_width 自带省略号预算，
+            // 这里不能再 -1：target_width 为 0/1 时会算出比目标更宽的结果）
+            let display_cell = if display_width(cell) > target_width {
+                truncate_to_width(cell, target_width)
             } else {
                 cell.to_string()
             };
-            let display_width = UnicodeWidthStr::width_cjk(display_cell.as_str());
+            let cell_w = display_width(display_cell.as_str());
 
-            let pad = target_width.saturating_sub(display_width);
+            let pad = target_width.saturating_sub(cell_w);
             let alignment = col_alignments.get(ci).unwrap_or(&Alignment::Left);
             let padded = match alignment {
                 Alignment::Left => format!("{}{}", display_cell, " ".repeat(pad)),
@@ -872,19 +895,27 @@ fn render_table(
     lines.push(Line::from(bottom_spans));
 }
 
-/// Truncate a string to fit within a certain display width
+/// 截断到 `max_width` 显示列以内。返回值宽度**严格** ≤ `max_width`
+/// （省略号 `…` 也算 1 列，从预算里扣）。
 fn truncate_to_width(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if display_width(s) <= max_width {
+        return s.to_string();
+    }
+    let budget = max_width - 1; // 留给 "…"
     let mut result = String::new();
-    let mut width = 0;
+    let mut width = 0usize;
     for ch in s.chars() {
-        let ch_width = UnicodeWidthChar::width_cjk(ch).unwrap_or(0);
-        if width + ch_width > max_width {
-            result.push('…');
+        let ch_width = char_display_width(ch);
+        if width + ch_width > budget {
             break;
         }
         result.push(ch);
         width += ch_width;
     }
+    result.push('…');
     result
 }
 
@@ -1183,6 +1214,137 @@ mod table_render_tests {
 }
 
 #[cfg(test)]
+mod ratatui_width_parity_tests {
+    use super::*;
+
+    /// ratatui 用 `width()`（非 CJK）分配缓冲区单元格 —— 见
+    /// `ratatui-core/src/text/span.rs` 与 `ratatui-widgets/src/reflow.rs`。
+    /// 排版度量必须与之一致，否则 East-Asian *Ambiguous* 字符
+    /// （`─ │ ┌ • → ✓ … α д`：`width_cjk`=2 而 `width`=1）会让
+    /// 计算宽度与实际渲染宽度逐字符错位。
+    fn ratatui_width(s: &str) -> usize {
+        UnicodeWidthStr::width(s)
+    }
+
+    fn rendered(md: &str, width: usize) -> Vec<String> {
+        render_markdown(md, Some(width))
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn table_borders_align_when_cells_contain_ambiguous_width_chars() {
+        // 单元格含 Ambiguous 字符（箭头/对勾/省略号/希腊字母/西里尔字母）时，
+        // 用 width_cjk 补空格会让该行按 ratatui 的度量比边框窄，右边框逐行左移
+        let md = "| Key | Value |\n|---|---|\n| a→b | ✓ |\n| α | д |\n";
+        let lines = rendered(md, 80);
+        let border = lines
+            .iter()
+            .find(|l| l.starts_with('┌'))
+            .expect("top border must render");
+        for row in lines.iter().filter(|l| l.starts_with('│')) {
+            assert_eq!(
+                ratatui_width(row),
+                ratatui_width(border),
+                "行与边框显示宽度不一致\n row: {:?} ({})\n bord: {:?} ({})",
+                row,
+                ratatui_width(row),
+                border,
+                ratatui_width(border)
+            );
+        }
+    }
+
+    #[test]
+    fn narrow_table_never_exceeds_wrap_width() {
+        // 列多、终端窄：按比例缩放后每列还要 `.max(3)` 兜底，
+        // 各列之和可能反超可用宽度 —— 表格行溢出后被 Paragraph 的
+        // Wrap 重新折行，整张表当场散架
+        let md = "| aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa | b | c | d | e | f |\n\
+                  |---|---|---|---|---|---|\n\
+                  | 1 | 2 | 3 | 4 | 5 | 6 |\n";
+        // 19 是 6 列表格的 chrome 下限（`3n + 1`），也就是这条不变式的边界；
+        // 再窄就连竖线和内边距都放不下，函数不再承诺不溢出
+        for &w in &[19usize, 20, 24, 32, 40, 56] {
+            for line in rendered(md, w) {
+                assert!(
+                    ratatui_width(&line) <= w,
+                    "宽度 {} 下表格溢出 {} 列: {:?}",
+                    w,
+                    ratatui_width(&line),
+                    line
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn paragraph_lines_fit_ratatui_width() {
+        // 段落里的 Ambiguous 字符同样要按 ratatui 的度量折行，
+        // 否则同一行在计算上"超宽"而被提前折断，右侧留出大片空白
+        let md = "列表箭头 a→b→c 与对勾 ✓ 混排的长段落，用来验证折行宽度度量一致，\
+                  再加上 **加粗** 与 `code` 以及 α β γ δ ε 等 Ambiguous 字符。\n";
+        for &w in &[40usize, 60, 80] {
+            for line in rendered(md, w) {
+                assert!(ratatui_width(&line) <= w, "宽度 {} 下溢出: {:?}", w, line);
+            }
+        }
+    }
+
+    #[test]
+    fn blockquote_continuation_hangs_at_bar_width() {
+        // `│ ` 前缀 width_cjk=3 / width=2 —— 按 3 预留会让续行少用一列
+        let md = "> 引用内容很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长\n";
+        let lines = rendered(md, 40);
+        let quoted: Vec<&String> = lines.iter().filter(|l| !l.trim().is_empty()).collect();
+        assert!(quoted.len() >= 2, "长引用必须折行: {:?}", lines);
+        for l in &quoted {
+            assert!(ratatui_width(l) <= 40, "引用行溢出: {:?}", l);
+        }
+    }
+}
+
+#[cfg(test)]
+mod thinking_extraction_tests {
+    use super::*;
+
+    fn kinds(blocks: &[ContentBlock]) -> Vec<String> {
+        blocks
+            .iter()
+            .map(|b| match b {
+                ContentBlock::Text(t) => format!("T:{}", t.trim()),
+                ContentBlock::Thinking(t) => format!("K:{}", t.trim()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mixed_thinking_tags_keep_document_order() {
+        // 回归：提取按"标签种类"外层循环，而不是按文档顺序 —— 先把所有
+        // <thinking> 抽干，剩下的 <think> 连标签一起当正文输出，
+        // 且正文顺序被打乱
+        let content = "A\n\n<think>t1</think>\n\nB\n\n<thinking>t2</thinking>\n\nC";
+        let blocks = parse_markdown_content_ext(content, true);
+        assert_eq!(
+            kinds(&blocks),
+            vec!["T:A", "K:t1", "T:B", "K:t2", "T:C"],
+            "混用 <think>/<thinking> 时块顺序或类型错误"
+        );
+    }
+
+    #[test]
+    fn thinking_tags_never_leak_into_text() {
+        let content = "<think>inner</think>after";
+        for b in parse_markdown_content_ext(content, true) {
+            if let ContentBlock::Text(t) = b {
+                assert!(!t.contains("<think"), "正文残留 thinking 标签: {:?}", t);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod inline_layout_tests {
     use super::*;
 
@@ -1216,7 +1378,7 @@ mod inline_layout_tests {
         for &w in &[40usize, 60, 80] {
             for line in rendered(md, w) {
                 assert!(
-                    UnicodeWidthStr::width_cjk(line.as_str()) <= w,
+                    display_width(line.as_str()) <= w,
                     "宽度 {} 下溢出: {:?}",
                     w,
                     line
