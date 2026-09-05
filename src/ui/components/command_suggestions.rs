@@ -656,9 +656,7 @@ fn render_command_hints_overlay(
         (max_cmd + 2).clamp(10, 24) as usize
     };
     // 描述可用宽度：弹窗宽 - 图标(3) - 命令列 - 边框(2) - 余量(2)
-    let desc_w = popup_width
-        .saturating_sub(name_w as u16 + 7)
-        .max(10) as usize;
+    let desc_w = popup_width.saturating_sub(name_w as u16 + 7).max(10) as usize;
 
     let hint_items: Vec<ListItem> = state
         .command_hints

@@ -5,8 +5,7 @@ use crate::llm::{
     AUTH_ERROR_INCORRECT_KEY, AUTH_ERROR_UNAUTHORIZED, BEARER_PREFIX, CONTENT_TYPE_JSON,
     DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE, ENV_STAR_API_KEY, ENV_STAR_MAX_TOKENS,
     ENV_STAR_TEMPERATURE, HEADER_ANTHROPIC_VERSION, HEADER_AUTHORIZATION, HEADER_CONTENT_TYPE,
-    HEADER_X_API_KEY, HTTP_STATUS_401, HTTP_STATUS_402, KIMI_CODE_URL_PATTERN,
-    OPENAI_DEFAULT_BASE_URL, PAYMENT_ERROR_BALANCE, PAYMENT_ERROR_REQUIRED,
+    HEADER_X_API_KEY, HTTP_STATUS_401, KIMI_CODE_URL_PATTERN, OPENAI_DEFAULT_BASE_URL,
     PROVIDER_ENV_ID_ANTHROPIC, PROVIDER_ENV_ID_DEEPSEEK, PROVIDER_ENV_ID_XIAOMI,
     PROVIDER_NAME_OPENAI_COMPATIBLE,
 };
@@ -559,13 +558,9 @@ impl StarClient {
                     )
                     .into());
                 }
-                if err_str.contains(HTTP_STATUS_402)
-                    || err_str.contains(PAYMENT_ERROR_REQUIRED)
-                    || err_str.contains(PAYMENT_ERROR_BALANCE)
-                {
-                    return Err(format!("✦ Payment Error (402): Insufficient balance or credit limit exceeded. Please check your provider account (e.g., OpenAI/DeepSeek billing).\nOriginal Error: {}", err_str).into());
-                }
-                Err(e)
+                // 其余错误统一走分类器：以前只有 402 有说明，429 / 5xx / 连接失败
+                // 都是原样抛出的一串 provider 文本，用户无从判断是欠费还是网络。
+                Err(crate::llm::error_kind::diagnose(&err_str).into())
             }
         }
     }
@@ -646,6 +641,7 @@ impl StarClient {
                     ));
                 }
                 let err_str = e.to_string();
+                let kind = crate::llm::error_kind::LlmErrorKind::classify(&err_str);
                 if err_str.contains(HTTP_STATUS_401)
                     || err_str.contains(AUTH_ERROR_UNAUTHORIZED)
                     || err_str.contains(AUTH_ERROR_INCORRECT_KEY)
@@ -661,12 +657,15 @@ impl StarClient {
                         ),
                     )));
                 }
-                if err_str.contains(HTTP_STATUS_402)
-                    || err_str.contains(PAYMENT_ERROR_REQUIRED)
-                    || err_str.contains(PAYMENT_ERROR_BALANCE)
-                {
+                // 终止类错误（欠费 / 配额耗尽 / 请求非法）不做非流式重试 ——
+                // 同一个请求换个端点照样被拒，只是把等待时间翻倍。
+                if kind.is_terminal() {
+                    crate::utils::logging::append_debug_log_line(&format!(
+                        "[LLM] terminal error ({}), skipping non-streaming fallback",
+                        kind.label(),
+                    ));
                     return Err(Box::new(std::io::Error::other(
-                        format!("✦ Payment Error (402): Insufficient balance or credit limit exceeded. Please check your provider account (e.g., OpenAI/DeepSeek billing).\nOriginal Error: {}", err_str)
+                        crate::llm::error_kind::diagnose(&err_str),
                     )));
                 }
                 // Non-streaming fallback: mirroring claude-code's pattern,
@@ -674,7 +673,7 @@ impl StarClient {
                 // (timeout, connection drop, gateway 504) fall back to a
                 // synchronous completion call so the user gets a result
                 // instead of an error.
-                if !err_str.contains(HTTP_STATUS_401) {
+                {
                     crate::utils::logging::append_debug_log_line(&format!(
                         "[FALLBACK] chat_stream_events failed ({}), attempting non-streaming fallback",
                         &err_str.chars().take(200).collect::<String>(),
@@ -691,7 +690,23 @@ impl StarClient {
                                 crate::llm::client::StarClient::build_events_from_response(
                                     response,
                                 );
+                            // 降级本身要让用户知道：整段回答会一次性出现而不是
+                            // 逐字流出，不说清楚就像是模型卡了很久才开口。
+                            let notice = json!({
+                                "star_trace": {
+                                    "event": "agent_status",
+                                    "payload": {
+                                        "status": "degraded",
+                                        "phase": "non_streaming_fallback",
+                                        "message": format!(
+                                            "{} on the streaming endpoint — answered in one shot (non-streaming)",
+                                            kind.label(),
+                                        ),
+                                    },
+                                }
+                            });
                             let stream = Box::pin(stream! {
+                                yield Ok(notice);
                                 for event in events {
                                     yield event;
                                 }
@@ -699,14 +714,20 @@ impl StarClient {
                             return Ok(stream);
                         }
                         Err(fallback_err) => {
+                            // 两条路都断了：报**后一个**错误。前一个是流式端点的，
+                            // 非流式那次才是刚刚发生的，且往往更具体（带 body）。
                             crate::utils::logging::append_debug_log_line(&format!(
                                 "[FALLBACK] non-streaming fallback also failed: {}",
                                 fallback_err,
                             ));
+                            return Err(Box::new(std::io::Error::other(format!(
+                                "{}\nThe non-streaming fallback failed too: {}",
+                                crate::llm::error_kind::diagnose(&err_str),
+                                fallback_err,
+                            ))));
                         }
                     }
                 }
-                return Err(Box::new(e));
             }
         };
 

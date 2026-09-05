@@ -6,10 +6,24 @@ use crate::core::tools::tools::{
 use crate::core::utils::paths::{
     make_relative, normalize_cross_platform_path, resolve_tool_path, shorten_path,
 };
+use crate::utils::file_walk::{glob_matches, include_matcher, walk, WalkOptions};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// 返回给模型的条数上限。
+///
+/// 对标 Claude Code（`GlobTool.ts:154` 的 `maxResults ?? 100`）。之前这里
+/// 不封顶：本仓库一次 `Glob("**/*.ts")` 返回 2541 条、20K+ token，其中
+/// 2536 条来自被 `.gitignore` 忽略的 `study_or_copy_projects/`。
+fn glob_result_limit() -> usize {
+    std::env::var("STAR_GLOB_MAX_RESULTS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(100)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobToolParams {
@@ -187,41 +201,55 @@ impl ToolInvocation for GlobToolInvocation {
                     config.target_dir().clone()
                 };
 
-                let pattern = &params.pattern;
+                let pattern = params.pattern.clone();
 
-                // Use glob crate to find files
-                let glob_pattern = if search_dir == *config.target_dir() {
-                    pattern.clone()
-                } else {
-                    format!("{}/**/{}", search_dir.display(), pattern)
+                // 优先级：调用参数 > settings.json 的 `fileFiltering` > 默认值。
+                // 这三个参数以前是装饰品 —— schema 里写着 "Defaults to true"，
+                // 实现却直接调 `glob::glob()`，谁传都一样。
+                let filtering = config.file_filtering();
+                let opts = WalkOptions::new()
+                    .with_file_filtering(
+                        filtering.respect_git_ignore,
+                        filtering.respect_star_ignore,
+                    )
+                    .with_file_filtering(params.respect_git_ignore, params.respect_star_ignore)
+                    .case_sensitive(params.case_sensitive.unwrap_or(false))
+                    .include([pattern.clone()]);
+
+                let Some(matcher) = include_matcher(&opts) else {
+                    let message = format!("Invalid glob pattern: \"{}\"", pattern);
+                    return Ok::<ToolResult, Box<dyn std::error::Error + Send + Sync>>(
+                        ToolResult {
+                            llm_content: Some(message.clone()),
+                            return_display: Some(message.clone()),
+                            output: message.clone(),
+                            error: Some(crate::core::tools::tools::ToolError {
+                                error_type: "invalid_pattern".to_string(),
+                                message,
+                            }),
+                            data: None,
+                        },
+                    );
                 };
 
                 let mut entries = Vec::new();
-
-                let paths = glob::glob(&glob_pattern)
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-                for entry in paths {
-                    if let Ok(path) = entry {
-                        if path.is_file() {
-                            // Use std::fs::metadata (blocking) instead of tokio::fs::metadata
-                            match std::fs::metadata(&path) {
-                                Ok(metadata) => {
-                                    if let Ok(modified) = metadata.modified() {
-                                        if let Ok(duration) =
-                                            modified.duration_since(std::time::UNIX_EPOCH)
-                                        {
-                                            entries.push(GlobPath {
-                                                fullpath: path,
-                                                mtime_ms: Some(duration.as_millis() as u64),
-                                            });
-                                        }
-                                    }
-                                }
-                                Err(_) => continue, // Skip files we can't stat
-                            }
-                        }
+                for entry in walk(&search_dir, &opts).flatten() {
+                    if !entry.file_type().is_some_and(|t| t.is_file()) {
+                        continue;
                     }
+                    if !glob_matches(&matcher, &search_dir, entry.path()) {
+                        continue;
+                    }
+                    let mtime_ms = entry
+                        .metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as u64);
+                    entries.push(GlobPath {
+                        fullpath: entry.path().to_path_buf(),
+                        mtime_ms,
+                    });
                 }
 
                 if entries.is_empty() {
@@ -250,6 +278,12 @@ impl ToolInvocation for GlobToolInvocation {
 
                 sort_file_entries(&mut entries, now_timestamp, one_day_in_ms);
 
+                // 先排序再截断，留下的是"最近改过的 N 个"，而不是随机 N 个。
+                let total_matches = entries.len();
+                let limit = glob_result_limit();
+                let truncated = total_matches > limit;
+                entries.truncate(limit);
+
                 let sorted_paths: Vec<String> = entries
                     .iter()
                     .map(|e| e.fullpath.to_string_lossy().to_string())
@@ -261,15 +295,25 @@ impl ToolInvocation for GlobToolInvocation {
                 let file_count = sorted_paths.len();
 
                 // LLM: full detail with paths
-                let llm_message = format!(
+                let mut llm_message = format!(
                     "Found {} file(s) matching \"{}\":\n{}",
                     file_count,
                     pattern,
                     sorted_paths.join("\n")
                 );
+                if truncated {
+                    llm_message.push_str(&format!(
+                        "\n\n(Truncated: showing the {} most recently modified of {} matches. \
+                         Use a narrower pattern or `dir_path` to see the rest.)",
+                        file_count, total_matches
+                    ));
+                }
 
                 // UI display: grouped by directory for compact scanning
-                let display = format_glob_display(&search_dir, &sorted_paths, file_count);
+                let mut display = format_glob_display(&search_dir, &sorted_paths, file_count);
+                if truncated {
+                    display.push_str(&format!("\n… {} more (truncated)", total_matches - limit));
+                }
 
                 Ok::<ToolResult, Box<dyn std::error::Error + Send + Sync>>(ToolResult {
                     llm_content: Some(llm_message.clone()),
@@ -335,7 +379,7 @@ impl GlobMatchTool {
     }
 
     pub fn description(&self) -> &str {
-        "Efficiently finds files matching specific glob patterns (e.g., `src/**/*.ts`, `**/*.md`), returning absolute paths sorted by modification time (newest first). Ideal for quickly locating files based on their name or path structure, especially in large codebases."
+        "Efficiently finds files matching specific glob patterns (e.g., `src/**/*.ts`, `**/*.md`), returning absolute paths sorted by modification time (newest first). Ideal for quickly locating files based on their name or path structure, especially in large codebases. Returns at most 100 paths; the response says so when results were truncated."
     }
 
     pub fn kind(&self) -> Kind {
@@ -346,7 +390,7 @@ impl GlobMatchTool {
         serde_json::json!({
             "properties": {
                 "pattern": {
-                    "description": "The glob pattern to match against (e.g., '**/*.py', 'docs/*.md').",
+                    "description": "The glob pattern to match against (e.g., '**/*.py', 'docs/*.md'). A pattern without a '/' matches at any depth, so '*.py' finds every Python file. '*' does not cross directory separators.",
                     "type": "string"
                 },
                 "dir_path": {
@@ -358,7 +402,7 @@ impl GlobMatchTool {
                     "type": "boolean"
                 },
                 "respect_git_ignore": {
-                    "description": "Optional: Whether to respect .gitignore patterns when finding files. Only available in git repositories. Defaults to true.",
+                    "description": "Optional: Whether to respect .gitignore patterns when finding files. Defaults to true; set false to search build output and other ignored paths.",
                     "type": "boolean"
                 },
                 "respect_star_ignore": {

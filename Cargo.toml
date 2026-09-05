@@ -96,6 +96,7 @@ grep-searcher = "0.1"
 grep-matcher = "0.1"
 grep-regex = "0.1"
 ignore = "0.4"  # .gitignore support (used by ripgrep)
+globset = "0.4" # glob 匹配（ignore 的同族 crate，语义与 rg --glob 一致）
 
 # Windows cmd output decoding (GBK/GB18030 fallback)
 encoding_rs = "0.8"

@@ -3,6 +3,13 @@ use std::fs;
 /// Reference implementation, supports multiple @, path escaping, fuzzy matching and other advanced features
 use std::path::{Path, PathBuf};
 
+use crate::utils::file_walk::{walk, WalkOptions};
+
+/// `@dir` 单次列举上限 —— 结果是直接进提示词的，不能不封顶。
+const DIR_LISTING_CAP: usize = 200;
+/// 模糊查找最多走多少个条目。
+const FUZZY_SCAN_CAP: usize = 20_000;
+
 #[derive(Debug, Clone)]
 pub struct AtCommandPart {
     pub part_type: AtPartType,
@@ -349,23 +356,36 @@ fn read_file_at_path(path: &Path) -> Result<FileContent, String> {
 }
 
 /// Read directory content (list file tree)
+///
+/// 走 `utils::file_walk` 的统一口径：`.gitignore` / `.starignore` 生效、
+/// dotfile 可见、VCS 目录剪掉。以前是裸 `fs::read_dir` 且没有上限，
+/// `@target/` 会把构建产物整目录塞进提示词。
 fn read_directory_content(dir: &Path) -> Result<FileContent, String> {
+    if !dir.is_dir() {
+        return Err(format!("Failed to read directory: {}", dir.display()));
+    }
+
     let mut output = String::new();
     output.push_str(&format!("Directory: {}\n\n", dir.display()));
 
-    let entries = fs::read_dir(dir).map_err(|e| format!("Failed to read directory: {}", e))?;
-
     let mut files = Vec::new();
     let mut dirs = Vec::new();
+    let mut truncated = false;
 
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let opts = WalkOptions::new().max_depth(1);
+    for entry in walk(dir, &opts).flatten() {
+        if entry.path() == dir {
+            continue;
+        }
+        if files.len() + dirs.len() >= DIR_LISTING_CAP {
+            truncated = true;
+            break;
+        }
         let name = entry.file_name().to_string_lossy().to_string();
-
-        if path.is_dir() {
+        if entry.file_type().is_some_and(|t| t.is_dir()) {
             dirs.push(format!("  [DIR]  {}/", name));
         } else {
-            let size = path.metadata().ok().map(|m| m.len()).unwrap_or(0);
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
             files.push(format!("  [FILE] {} ({} bytes)", name, size));
         }
     }
@@ -381,6 +401,12 @@ fn read_directory_content(dir: &Path) -> Result<FileContent, String> {
         output.push_str(&f);
         output.push('\n');
     }
+    if truncated {
+        output.push_str(&format!(
+            "  ... (truncated at {} entries)\n",
+            DIR_LISTING_CAP
+        ));
+    }
 
     Ok(FileContent {
         path: dir.to_string_lossy().to_string(),
@@ -390,37 +416,29 @@ fn read_directory_content(dir: &Path) -> Result<FileContent, String> {
 }
 
 /// Fuzzy find file (simplified)
+///
+/// 以前是 depth-3 的手写递归 + 硬编码跳过 `.` / `node_modules` / `target`：
+/// `.github/workflows/ci.yml` 永远找不到，深一点的路径也找不到。现在走统一
+/// walker，`.gitignore` 已经把构建产物挡掉了，深度限制随之取消。
 fn fuzzy_find_file(root: &Path, pattern: &str) -> Option<PathBuf> {
-    fn search_recursive(dir: &Path, pattern: &str, max_depth: usize) -> Option<PathBuf> {
-        if max_depth == 0 {
-            return None;
-        }
-
-        let entries = fs::read_dir(dir).ok()?;
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-
-            if name.starts_with('.') || name == "node_modules" || name == "target" {
-                continue;
-            }
-
-            if path.is_file() && name.contains(pattern) {
-                return Some(path);
-            }
-
-            if path.is_dir() {
-                if let Some(found) = search_recursive(&path, pattern, max_depth - 1) {
-                    return Some(found);
-                }
-            }
-        }
-
-        None
+    if pattern.is_empty() {
+        return None;
     }
-
-    search_recursive(root, pattern, 3)
+    let opts = WalkOptions::new();
+    let mut scanned = 0usize;
+    for entry in walk(root, &opts).flatten() {
+        scanned += 1;
+        if scanned > FUZZY_SCAN_CAP {
+            break;
+        }
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        if entry.file_name().to_string_lossy().contains(pattern) {
+            return Some(entry.into_path());
+        }
+    }
+    None
 }
 
 /// Format processed result for sending to LLM

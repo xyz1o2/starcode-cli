@@ -6,7 +6,7 @@
 //! - project: 项目特定知识
 //! - reference: 参考资料和最佳实践
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -114,8 +114,7 @@ impl ClassifiedMemoryManager {
     /// 存储记忆
     pub fn store(&mut self, memory: ClassifiedMemory) -> Result<(), String> {
         let dir = self.base_dir.join(memory.memory_type.subdirectory());
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("Failed to create dir: {}", e))?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create dir: {}", e))?;
 
         let file_path = dir.join(format!("{}.md", memory.id));
         let content = format!(
@@ -199,7 +198,7 @@ impl ClassifiedMemoryManager {
 
         // 记忆类型权重
         score += match entry.memory_type {
-            MemoryType::Project => 1.0,  // 项目记忆优先
+            MemoryType::Project => 1.0, // 项目记忆优先
             MemoryType::User => 0.8,
             MemoryType::Feedback => 0.6,
             MemoryType::Reference => 0.4,
@@ -232,8 +231,9 @@ impl ClassifiedMemoryManager {
                 // 格式: - [type] title (id)
                 let parts: Vec<&str> = line[2..].splitn(3, ' ').collect();
                 if parts.len() >= 3 {
-                    let mem_type = MemoryType::from_str(parts[0].trim_matches(|c| c == '[' || c == ']'))
-                        .unwrap_or(MemoryType::Project);
+                    let mem_type =
+                        MemoryType::from_str(parts[0].trim_matches(|c| c == '[' || c == ']'))
+                            .unwrap_or(MemoryType::Project);
                     self.index.push(MemoryIndexEntry {
                         id: parts[2].trim_matches(|c| c == '(' || c == ')').to_string(),
                         memory_type: mem_type,
@@ -282,9 +282,7 @@ impl ClassifiedMemoryManager {
     pub fn stats(&self) -> HashMap<String, usize> {
         let mut stats = HashMap::new();
         for entry in &self.index {
-            *stats
-                .entry(entry.memory_type.to_string())
-                .or_insert(0) += 1;
+            *stats.entry(entry.memory_type.to_string()).or_insert(0) += 1;
         }
         stats.insert("total".to_string(), self.index.len());
         stats
@@ -300,7 +298,10 @@ mod tests {
         assert_eq!(MemoryType::from_str("user"), Some(MemoryType::User));
         assert_eq!(MemoryType::from_str("FEEDBACK"), Some(MemoryType::Feedback));
         assert_eq!(MemoryType::from_str("project"), Some(MemoryType::Project));
-        assert_eq!(MemoryType::from_str("reference"), Some(MemoryType::Reference));
+        assert_eq!(
+            MemoryType::from_str("reference"),
+            Some(MemoryType::Reference)
+        );
         assert_eq!(MemoryType::from_str("unknown"), None);
     }
 

@@ -501,10 +501,7 @@ pub struct ChatState {
     /// Discover tab 勾选待批量安装的插件名（Space 切换，i 批量安装）
     pub plugin_selected: std::collections::HashSet<String>,
     /// 插件详情页（对标 Claude Code 详情视图）：(marketplace, plugin)
-    pub plugin_detail: Option<(
-        String,
-        crate::core::plugins::marketplace::MarketplacePlugin,
-    )>,
+    pub plugin_detail: Option<(String, crate::core::plugins::marketplace::MarketplacePlugin)>,
     /// 批量安装进度聚合（对标 Claude Code 批量安装确认页的逐项状态）
     pub plugin_batch_total: usize,
     pub plugin_batch_done: usize,

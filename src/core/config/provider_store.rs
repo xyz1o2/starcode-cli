@@ -238,6 +238,7 @@ impl ProviderStore {
                 thinking_effort: None,
                 output_style: None,
                 context_window: None,
+                file_filtering: None,
             })
         } else {
             // Default if not exists
@@ -256,6 +257,7 @@ impl ProviderStore {
                 thinking_effort: None,
                 output_style: None,
                 context_window: None,
+                file_filtering: None,
             }
         };
 

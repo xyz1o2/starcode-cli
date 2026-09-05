@@ -1,5 +1,4 @@
 /// 安全存储类型定义
-
 use serde::{Deserialize, Serialize};
 
 /// 存储条目
@@ -59,19 +58,19 @@ impl std::error::Error for StorageError {}
 pub trait SecureStorage: Send + Sync {
     /// 存储凭证
     fn store(&self, key: &str, value: &str) -> Result<(), StorageError>;
-    
+
     /// 获取凭证
     fn get(&self, key: &str) -> Result<Option<String>, StorageError>;
-    
+
     /// 删除凭证
     fn delete(&self, key: &str) -> Result<(), StorageError>;
-    
+
     /// 列出所有凭证
     fn list(&self) -> Result<Vec<String>, StorageError>;
-    
+
     /// 检查凭证是否存在
     fn exists(&self, key: &str) -> Result<bool, StorageError>;
-    
+
     /// 检查存储是否可用
     fn is_available(&self) -> bool {
         true

@@ -1,7 +1,6 @@
 /// 学习策略
-/// 
+///
 /// 定义技能学习的策略
-
 use serde::{Deserialize, Serialize};
 
 /// 学习策略

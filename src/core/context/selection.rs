@@ -1,4 +1,3 @@
-use ignore::WalkBuilder;
 use std::collections::HashSet;
 use std::path::Path;
 use tokio::fs;
@@ -210,24 +209,11 @@ impl ContextMatcher {
         project_path: &Path,
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let mut patterns = HashSet::new();
-        let mut builder = WalkBuilder::new(project_path);
-        builder
-            .hidden(true)
-            .git_ignore(true)
-            .require_git(false)
-            .max_depth(Some(3));
-        if let Some(home) = dirs::home_dir() {
-            let global_ignore = home.join(".star").join("ignore");
-            if global_ignore.exists() {
-                let _ = builder.add_ignore(&global_ignore);
-            }
-        }
-        let project_ignore = project_path.join(".starignore");
-        if project_ignore.exists() {
-            let _ = builder.add_ignore(&project_ignore);
-        }
+        // 三层 ignore（`~/.star/ignore` → `.starignore` → `.gitignore`）已经
+        // 收进 `utils::file_walk`，这里只声明深度。
+        let opts = crate::utils::file_walk::WalkOptions::new().max_depth(3);
 
-        for result in builder.build() {
+        for result in crate::utils::file_walk::walk(project_path, &opts) {
             let Ok(entry) = result else { continue };
             if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;

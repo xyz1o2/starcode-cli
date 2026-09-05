@@ -59,8 +59,12 @@ pub fn render_agent_task_entry(
         // ToolCall 条目不占进度行（结果行会给出同一活动的描述，保留会把
         // "+N more" 按 call+result 双倍计数）；连续相同的活动合并为 ×N。
         let activities = condense_sub_activities(sub_entries);
-        let hidden_count = activities.len().saturating_sub(MAX_PROGRESS_MESSAGES_TO_SHOW);
-        let start = activities.len().saturating_sub(MAX_PROGRESS_MESSAGES_TO_SHOW);
+        let hidden_count = activities
+            .len()
+            .saturating_sub(MAX_PROGRESS_MESSAGES_TO_SHOW);
+        let start = activities
+            .len()
+            .saturating_sub(MAX_PROGRESS_MESSAGES_TO_SHOW);
 
         for item in &activities[start..] {
             blocks.push(render_activity_line(state, item, area_width));
@@ -68,7 +72,11 @@ pub fn render_agent_task_entry(
 
         if hidden_count > 0 {
             blocks.push(vec![Line::from(Span::styled(
-                format!("      +{} more tool {}", hidden_count, if hidden_count == 1 { "use" } else { "uses" }),
+                format!(
+                    "      +{} more tool {}",
+                    hidden_count,
+                    if hidden_count == 1 { "use" } else { "uses" }
+                ),
                 Style::default().fg(theme.inactive),
             ))]);
         }
@@ -89,14 +97,13 @@ pub fn render_agent_task_entry(
 ///
 /// 对标 Claude Code 的 AgentProgressLine 第一行格式:
 /// `├─ AgentType (description) · N tool uses · Nk tokens`
-fn render_agent_header(
-    entry: &ChatEntry,
-    area_width: u16,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
+fn render_agent_header(entry: &ChatEntry, area_width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let agent_type = entry.agent_type.as_deref().unwrap_or("agent");
     let description = entry.agent_description.as_deref().unwrap_or("");
-    let status = entry.agent_status.as_ref().unwrap_or(&AgentTaskStatus::Running);
+    let status = entry
+        .agent_status
+        .as_ref()
+        .unwrap_or(&AgentTaskStatus::Running);
     let tool_count = entry.agent_tool_use_count.unwrap_or(0);
     let tokens = entry.agent_tokens.unwrap_or(0);
     // teammate 的 `@name` 优先于类型名显示（对标 renderGroupedAgentToolUse）
@@ -105,10 +112,7 @@ fn render_agent_header(
     let mut spans = Vec::new();
 
     // 树形字符（单 Agent 用 ├─）
-    spans.push(Span::styled(
-        "├─ ",
-        Style::default().fg(theme.inactive),
-    ));
+    spans.push(Span::styled("├─ ", Style::default().fg(theme.inactive)));
 
     // Agent 类型（粗体，带颜色）
     let type_color = match status {
@@ -119,9 +123,7 @@ fn render_agent_header(
     };
     spans.push(Span::styled(
         display_name.to_string(),
-        Style::default()
-            .fg(type_color)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(type_color).add_modifier(Modifier::BOLD),
     ));
 
     // 描述（灰色括号）
@@ -141,7 +143,11 @@ fn render_agent_header(
         ));
         if tool_count > 0 {
             spans.push(Span::styled(
-                format!("{} tool {}", tool_count, if tool_count == 1 { "use" } else { "uses" }),
+                format!(
+                    "{} tool {}",
+                    tool_count,
+                    if tool_count == 1 { "use" } else { "uses" }
+                ),
                 Style::default().fg(theme.inactive),
             ));
         }
@@ -368,15 +374,10 @@ fn render_sub_entry_verbose(
                 .unwrap_or("{}");
 
             let mut lines = vec![Line::from(vec![
-                Span::styled(
-                    "  ● ",
-                    Style::default().fg(theme.info),
-                ),
+                Span::styled("  ● ", Style::default().fg(theme.info)),
                 Span::styled(
                     tool_name.to_string(),
-                    Style::default()
-                        .fg(theme.info)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
                 ),
             ])];
 
@@ -438,18 +439,15 @@ fn render_sub_entry_verbose(
             }
 
             let blocks = crate::utils::markdown_parser::parse_markdown_content(content);
-            let md_lines = crate::utils::markdown_parser::render_content_blocks(
-                &blocks,
-                Some(inner_width),
-            );
+            let md_lines =
+                crate::utils::markdown_parser::render_content_blocks(&blocks, Some(inner_width));
 
             // 添加缩进前缀
             let mut lines = Vec::new();
             for md_line in md_lines.into_iter().take(50) {
                 // 最多显示 50 行
-                let mut prefixed_spans = vec![
-                    Span::styled("  ✦ ", Style::default().fg(theme.agent_blue)),
-                ];
+                let mut prefixed_spans =
+                    vec![Span::styled("  ✦ ", Style::default().fg(theme.agent_blue))];
                 // 将原始 spans 添加缩进
                 for span in md_line.spans {
                     prefixed_spans.push(span);

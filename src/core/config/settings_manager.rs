@@ -192,6 +192,11 @@ pub struct UserSettings {
     #[serde(alias = "contextWindow")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+
+    // 文件遍历过滤（.gitignore / .starignore 开关），见 config_types::FileFiltering
+    #[serde(alias = "fileFiltering")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_filtering: Option<crate::core::config::config_types::FileFiltering>,
 }
 
 /// Sandbox settings for user-level configuration
@@ -437,6 +442,7 @@ impl SettingsManager {
             thinking_effort: None,
             output_style: None,
             context_window: None,
+            file_filtering: None,
         }
     }
 

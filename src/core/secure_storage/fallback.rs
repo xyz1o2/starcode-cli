@@ -1,11 +1,10 @@
 /// 回退存储
-/// 
+///
 /// 对标claude-code-main的fallbackStorage.ts
-
 use super::types::{SecureStorage, StorageError};
 
 /// 回退存储
-/// 
+///
 /// 尝试多个存储后端，直到成功
 pub struct FallbackStorage {
     /// 存储后端列表

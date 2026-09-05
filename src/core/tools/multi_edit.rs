@@ -204,7 +204,12 @@ impl ToolInvocation for MultiEditToolInvocation {
 
                 // Note: We remove debug printlns for production
                 let new_content = if is_new_file {
-                    apply_replacement(Some(current_content), &edit.old_string, &edit.new_string, true)
+                    apply_replacement(
+                        Some(current_content),
+                        &edit.old_string,
+                        &edit.new_string,
+                        true,
+                    )
                 } else {
                     let result =
                         calculate_replacement(current_content, &edit.old_string, &edit.new_string);

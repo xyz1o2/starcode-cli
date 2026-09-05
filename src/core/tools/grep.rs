@@ -256,10 +256,12 @@ impl ToolInvocation for GrepToolInvocation {
                             }
                         }
 
-                        // Filter out test files by default
-                        if is_test_file(&m.file) {
-                            return false;
-                        }
+                        // 这里以前无条件 `if is_test_file(&m.file) { return false }`，
+                        // 而 `is_test_file` 是拿**绝对路径**做子串匹配（`/test/`、
+                        // `test_`、`_spec.` …）。仓库放在 `/mnt/h/test/starcode`
+                        // 这种路径下时，每一条结果都被判成测试文件，Grep 只会回
+                        // "No matches found (after filtering)"。要排除测试就用
+                        // `exclude_patterns`，那是调用方显式表达的意图。
 
                         // Filter out comment lines
                         if params.exclude_comments {
@@ -454,31 +456,6 @@ impl BaseDeclarativeTool for GrepTool {
     fn is_read_only(&self) -> bool {
         true
     }
-}
-
-/// Check if a file is a test file based on common naming patterns
-fn is_test_file(file_path: &str) -> bool {
-    let lower = file_path.to_lowercase();
-    let test_patterns = [
-        "_test.",
-        ".test.",
-        "_spec.",
-        ".spec.",
-        "test_",
-        "spec_",
-        "/tests/",
-        "/test/",
-        "/spec/",
-        "/specs/",
-        "__tests__",
-        "__test__",
-        ".test.ts",
-        ".test.js",
-        ".test.py",
-        "_test.go",
-        "_test.rs",
-    ];
-    test_patterns.iter().any(|p| lower.contains(p))
 }
 
 /// Check if a line is a comment based on common comment patterns

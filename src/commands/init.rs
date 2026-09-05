@@ -222,11 +222,8 @@ mod tests {
 
     /// 每个测试独占一个临时目录，避免相互干扰
     fn temp_repo(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "starcode-init-{}-{}",
-            tag,
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("starcode-init-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

@@ -1,8 +1,7 @@
 /// 安全存储系统
-/// 
+///
 /// 对标claude-code-main的src/utils/secureStorage/
 /// 提供安全的凭证存储功能
-
 pub mod fallback;
 pub mod keychain;
 pub mod plaintext;
@@ -94,7 +93,9 @@ impl SecureStorageManager {
         let storage: Box<dyn SecureStorage> = match config.backend {
             StorageBackend::Keychain => Box::new(KeychainStorage::new()),
             StorageBackend::PlainText => {
-                let path = config.storage_path.clone()
+                let path = config
+                    .storage_path
+                    .clone()
                     .unwrap_or_else(|| "~/.star/secure_storage.json".to_string());
                 Box::new(PlainTextStorage::new(&path))
             }
@@ -104,7 +105,9 @@ impl SecureStorageManager {
                 if keychain.is_available() {
                     Box::new(keychain)
                 } else {
-                    let path = config.storage_path.clone()
+                    let path = config
+                        .storage_path
+                        .clone()
                         .unwrap_or_else(|| "~/.star/secure_storage.json".to_string());
                     Box::new(PlainTextStorage::new(&path))
                 }

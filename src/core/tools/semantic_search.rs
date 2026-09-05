@@ -9,27 +9,14 @@ use crate::core::tools::ripgrep::{search_with_ripgrep, RipgrepConfig};
 use crate::core::tools::tools::{
     BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation, ToolResult as CoreToolResult,
 };
-use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-const IGNORED_SEMANTIC_SEARCH_DIRS: &[&str] = &[
-    ".git",
-    ".next",
-    ".star",
-    ".turbo",
-    ".venv",
-    "build",
-    "coverage",
-    "dist",
-    "node_modules",
-    "target",
-    "vendor",
-    "venv",
-];
+/// StarCode 自己的状态目录 —— 索引它纯属噪声，且用户的 `.gitignore` 未必写了。
+const SEMANTIC_SEARCH_EXCLUDES: &[&str] = &[".star/"];
 const DEFAULT_SEMANTIC_SEARCH_MAX_FILES: usize = 1200;
 const DEFAULT_SEMANTIC_SEARCH_MAX_FILE_BYTES: u64 = 512 * 1024;
 const DEFAULT_SEMANTIC_SEARCH_MAX_TOTAL_BYTES: u64 = 12 * 1024 * 1024;
@@ -186,10 +173,11 @@ fn build_search_engine_from_fs(
     let mut last_progress_indexed = 0usize;
     let mut file_errors: Vec<FileIndexError> = Vec::new();
 
-    let mut builder = WalkBuilder::new(root);
-    builder.hidden(true).git_ignore(true);
-    builder.filter_entry(|entry| !should_skip_semantic_search_entry(entry.path()));
-    let walker = builder.build();
+    // 遍历口径统一走 `utils::file_walk`：`.gitignore`（含 `require_git(false)`）、
+    // `.starignore`、`~/.star/ignore` 都生效，dotfile 可见。以前只有
+    // `hidden(true) + git_ignore(true)`，没有 `require_git(false)` —— worktree
+    // 和还没 `git init` 的项目里 `.gitignore` 直接失效。
+    let walker = crate::utils::file_walk::walk(root, &semantic_walk_options());
 
     emit_semantic_progress(
         update_output,
@@ -416,11 +404,14 @@ fn semantic_search_limits_for_profile(profile: Option<&str>) -> SemanticSearchLi
     }
 }
 
-fn should_skip_semantic_search_entry(path: &std::path::Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| IGNORED_SEMANTIC_SEARCH_DIRS.contains(&name))
-        .unwrap_or(false)
+/// 索引用的遍历口径。
+///
+/// 硬编码黑名单原来有 13 个目录名（`build`、`dist`、`target`、`node_modules`
+/// …），按**文件名**匹配，所以 `src/build/` 这种正常源码目录也会被整棵剪掉。
+/// 那些目录本来就在 `.gitignore` 里，交给 ignore 文件即可；只有
+/// [`SEMANTIC_SEARCH_EXCLUDES`] 里的 agent 自身状态目录需要显式排除。
+fn semantic_walk_options() -> crate::utils::file_walk::WalkOptions {
+    crate::utils::file_walk::WalkOptions::new().exclude(SEMANTIC_SEARCH_EXCLUDES.iter().copied())
 }
 
 async fn run_semantic_search(
@@ -885,11 +876,7 @@ pub fn build_call_graph(
     let mut file_symbols: Vec<FileSymbols> = Vec::new();
     let mut next_id: symbol::SymbolId = 0;
 
-    let mut builder = WalkBuilder::new(root);
-    builder.hidden(true).git_ignore(true);
-    builder.filter_entry(|entry| !should_skip_semantic_search_entry(entry.path()));
-
-    for result in builder.build() {
+    for result in crate::utils::file_walk::walk(root, &semantic_walk_options()) {
         let entry = match result {
             Ok(e) => e,
             Err(_) => continue,

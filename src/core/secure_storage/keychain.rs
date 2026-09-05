@@ -1,7 +1,6 @@
 /// 钥匙串存储
-/// 
+///
 /// 对标claude-code-main的macOsKeychainStorage.ts
-
 use super::types::{SecureStorage, StorageError};
 
 /// 钥匙串存储
@@ -25,27 +24,32 @@ impl SecureStorage for KeychainStorage {
         // 在macOS上使用security命令或keychain-rs crate
         // 在Linux上使用secret-service
         // 在Windows上使用Windows Credential Manager
-        
+
         #[cfg(target_os = "macos")]
         {
             // 使用security命令存储到macOS钥匙串
             let output = std::process::Command::new("security")
-                .args(["add-generic-password", 
-                       "-s", &self.service_name,
-                       "-a", key,
-                       "-w", value,
-                       "-U"])  // 更新如果存在
+                .args([
+                    "add-generic-password",
+                    "-s",
+                    &self.service_name,
+                    "-a",
+                    key,
+                    "-w",
+                    value,
+                    "-U",
+                ]) // 更新如果存在
                 .output()
                 .map_err(|e| StorageError::KeychainError(e.to_string()))?;
-            
+
             if !output.status.success() {
                 let error = String::from_utf8_lossy(&output.stderr);
                 return Err(StorageError::KeychainError(error.to_string()));
             }
-            
+
             Ok(())
         }
-        
+
         #[cfg(not(target_os = "macos"))]
         {
             Err(StorageError::Unsupported)
@@ -56,13 +60,17 @@ impl SecureStorage for KeychainStorage {
         #[cfg(target_os = "macos")]
         {
             let output = std::process::Command::new("security")
-                .args(["find-generic-password",
-                       "-s", &self.service_name,
-                       "-a", key,
-                       "-w"])
+                .args([
+                    "find-generic-password",
+                    "-s",
+                    &self.service_name,
+                    "-a",
+                    key,
+                    "-w",
+                ])
                 .output()
                 .map_err(|e| StorageError::KeychainError(e.to_string()))?;
-            
+
             if output.status.success() {
                 let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 Ok(Some(value))
@@ -70,7 +78,7 @@ impl SecureStorage for KeychainStorage {
                 Ok(None)
             }
         }
-        
+
         #[cfg(not(target_os = "macos"))]
         {
             Err(StorageError::Unsupported)
@@ -81,19 +89,23 @@ impl SecureStorage for KeychainStorage {
         #[cfg(target_os = "macos")]
         {
             let output = std::process::Command::new("security")
-                .args(["delete-generic-password",
-                       "-s", &self.service_name,
-                       "-a", key])
+                .args([
+                    "delete-generic-password",
+                    "-s",
+                    &self.service_name,
+                    "-a",
+                    key,
+                ])
                 .output()
                 .map_err(|e| StorageError::KeychainError(e.to_string()))?;
-            
+
             if output.status.success() {
                 Ok(())
             } else {
                 Err(StorageError::NotFound)
             }
         }
-        
+
         #[cfg(not(target_os = "macos"))]
         {
             Err(StorageError::Unsupported)
@@ -119,7 +131,7 @@ impl SecureStorage for KeychainStorage {
                 .output()
                 .is_ok()
         }
-        
+
         #[cfg(not(target_os = "macos"))]
         {
             false

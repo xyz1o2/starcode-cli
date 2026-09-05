@@ -117,12 +117,8 @@ impl CoordinatorMode {
             .ok_or_else(|| "AsyncSubagentRunner not set".to_string())?;
 
         let request = CoreSubAgentRequest::new(prompt);
-        let launch = runner.spawn_background(
-            request,
-            None,
-            description.to_string(),
-            "Worker".to_string(),
-        );
+        let launch =
+            runner.spawn_background(request, None, description.to_string(), "Worker".to_string());
 
         let handle = WorkerHandle {
             agent_id: launch.agent_id.clone(),

@@ -1,9 +1,8 @@
-/// 技能生成器
-/// 
-/// 从观察结果生成技能
-
-use super::{Skill, SkillType, SkillStatus};
 use super::observer::Observation;
+/// 技能生成器
+///
+/// 从观察结果生成技能
+use super::{Skill, SkillStatus, SkillType};
 
 /// 技能生成器
 pub struct SkillGenerator {
@@ -86,7 +85,7 @@ impl SkillGenerator {
     /// 提取触发条件
     fn extract_triggers(&self, observation: &Observation) -> Vec<String> {
         let mut triggers = Vec::new();
-        
+
         // 从上下文中提取关键词作为触发条件
         let words: Vec<&str> = observation.context.split_whitespace().collect();
         for word in words.iter().take(5) {

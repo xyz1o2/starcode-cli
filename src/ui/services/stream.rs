@@ -707,9 +707,9 @@ pub async fn handle_stream_update(
             }
 
             state.is_processing = false;
-            state.is_processing = false;
             state.current_tool_name = None;
             state.thinking_started_at = None;
+            state.last_token_time = None;
             if !cancelling_graceful {
                 state.is_streaming = false;
             }
@@ -726,25 +726,40 @@ pub async fn handle_stream_update(
                 state.error_overlay_state =
                     crate::ui::components::error_overlay::ErrorOverlayState {
                         error_message: error.clone(),
-                        error_type,
+                        error_type: error_type.clone(),
                         retry_count: 0,
                         max_retries: 10,
                         is_retrying: false,
                         selected_action: crate::ui::components::error_overlay::ErrorAction::Retry,
                     };
                 state.open_error_overlay();
+            } else {
+                // 不可重试的（欠费 / key 无效 / 请求非法 / 上下文超限）不弹浮层
+                // —— 弹一个只能"重试"的框反而误导。用 toast 保证它不会被
+                // 滚上去的历史盖住，具体的修复建议在下面的 chat 条目里。
+                state.push_toast(
+                    &crate::ui::components::error_overlay::error_type_title(&error_type),
+                    ToastKind::Error,
+                );
             }
 
+            // 状态栏只有一行：诊断信息（label + 建议 + 原始错误）是多行的，
+            // 整段塞进去会把状态栏挤爆，所以这里只取第一行。
+            // 完整内容进 chat_history —— 那里能滚动、能复制。
+            let first_line = error.lines().next().unwrap_or(&error).trim().to_string();
             emit_status_text(
                 state,
                 message_id,
                 &i18n::t("ui.status.error", "Error: {error}", "Error: {error}")
-                    .replace("{error}", &error),
+                    .replace("{error}", &first_line),
             );
             state.chat_history.push(
                 ChatEntry::assistant(
+                    // 不用 ChatEntryType::ErrorMessage —— message_render 的
+                    // dispatch 只认 Assistant / User，其余走 `_ => {}`，
+                    // 换成 ErrorMessage 这条会被渲染成空白。
                     i18n::t("ui.status.error", "Error: {error}", "Error: {error}")
-                        .replace("{error}", &error),
+                        .replace("{error}", error.trim()),
                 )
                 .with_streaming(false),
             );

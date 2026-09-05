@@ -347,10 +347,27 @@ impl Agent {
                             yield event;
                         }
                         // 更新 session_messages 以保留对话历史
-                        if let Some((_, updated_session_messages)) = result {
+                        if let Some((loop_result, updated_session_messages)) = result {
                             self.session_messages = updated_session_messages;
                             // 持久化到磁盘，确保下次启动时可以恢复
                             self.persist_session_messages();
+
+                            // `run_agentic_loop` 的失败**只**活在这个 Err 里 ——
+                            // 循环内部不 emit_event，所以之前把它丢进 `_`、
+                            // 再无条件 yield Done，等于把「流式失败三次后放弃」
+                            // 「Max turns reached」「hook 拒绝」全部报成正常完成。
+                            // 用户那边看到的就是：转了半天，什么都没发生。
+                            if let Err((_, event)) = loop_result {
+                                // 中断走的也是 Err，但载荷是 Done（agent_loop.rs
+                                // 的 abort 分支），不能当错误弹出来。
+                                if !matches!(event, AgentEvent::Done) {
+                                    crate::utils::logging::append_debug_log_line(&format!(
+                                        "[AGENT] loop failed, surfacing to UI: {:?}",
+                                        event,
+                                    ));
+                                    yield event;
+                                }
+                            }
                         }
                         result_rx = None;
                         break;

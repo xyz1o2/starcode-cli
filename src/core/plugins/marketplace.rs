@@ -178,7 +178,9 @@ fn author_label(v: Option<&serde_json::Value>) -> String {
 }
 
 /// 从 marketplace.json 的 source 字段归一化出 (url_or_path, path, ref)。
-fn normalize_plugin_source(v: &serde_json::Value) -> Option<(String, Option<String>, Option<String>)> {
+fn normalize_plugin_source(
+    v: &serde_json::Value,
+) -> Option<(String, Option<String>, Option<String>)> {
     match v {
         serde_json::Value::String(s) => Some((s.clone(), None, None)),
         serde_json::Value::Object(m) => {
@@ -195,9 +197,7 @@ fn normalize_plugin_source(v: &serde_json::Value) -> Option<(String, Option<Stri
                 m.get("path")
                     .and_then(|x| x.as_str())
                     .map(|s| s.to_string()),
-                m.get("ref")
-                    .and_then(|x| x.as_str())
-                    .map(|s| s.to_string()),
+                m.get("ref").and_then(|x| x.as_str()).map(|s| s.to_string()),
             ))
         }
         _ => None,
@@ -257,10 +257,7 @@ pub async fn load_marketplaces(project_root: &Path) -> Result<Vec<PluginMarketpl
         .map_err(|e| format!("failed to parse {}: {}", path.display(), e))
 }
 
-async fn save_marketplaces(
-    project_root: &Path,
-    list: &[PluginMarketplace],
-) -> Result<(), String> {
+async fn save_marketplaces(project_root: &Path, list: &[PluginMarketplace]) -> Result<(), String> {
     let path = marketplaces_config_path(project_root);
     ensure_parent(&path).await?;
     let text = serde_json::to_string_pretty(&serde_json::json!({ "marketplaces": list }))
@@ -288,7 +285,10 @@ fn is_github_shorthand(source: &str) -> bool {
 }
 
 /// 添加 marketplace：git clone（或引用本地路径），并校验 marketplace.json。
-pub async fn add_marketplace(project_root: &Path, source: &str) -> Result<PluginMarketplace, String> {
+pub async fn add_marketplace(
+    project_root: &Path,
+    source: &str,
+) -> Result<PluginMarketplace, String> {
     let source = source.trim();
     if source.is_empty() {
         return Err("empty marketplace source".to_string());
@@ -497,8 +497,13 @@ pub async fn install_marketplace_plugin(
     match (&plugin.source_path, is_remote_source(&plugin.source)) {
         // 1. 本地路径
         (None, false) => {
-            super::install_plugin_local(project_root, Path::new(&plugin.source), &plugin.name, scope)
-                .await
+            super::install_plugin_local(
+                project_root,
+                Path::new(&plugin.source),
+                &plugin.name,
+                scope,
+            )
+            .await
         }
         // 2. 整 git 仓库
         (None, true) => {
@@ -526,17 +531,18 @@ pub async fn install_marketplace_plugin(
 
                 let mut cmd = tokio::process::Command::new("git");
                 cmd.args(["clone", "--quiet", "--depth", "1"]);
-                if let Some(r) = plugin.source_ref.as_deref().filter(|r| !r.trim().is_empty()) {
+                if let Some(r) = plugin
+                    .source_ref
+                    .as_deref()
+                    .filter(|r| !r.trim().is_empty())
+                {
                     cmd.args(["--branch", r]);
                 }
                 cmd.arg(mirror_github_url(&plugin.source)).arg(&tmp);
-                let out = tokio::time::timeout(
-                    std::time::Duration::from_secs(180),
-                    cmd.output(),
-                )
-                .await
-                .map_err(|_| format!("git clone timed out after 180s: {}", plugin.source))?
-                .map_err(|e| format!("failed to run `git clone`: {}", e))?;
+                let out = tokio::time::timeout(std::time::Duration::from_secs(180), cmd.output())
+                    .await
+                    .map_err(|_| format!("git clone timed out after 180s: {}", plugin.source))?
+                    .map_err(|e| format!("failed to run `git clone`: {}", e))?;
                 if !out.status.success() {
                     let _ = force_remove_dir_all(&tmp).await;
                     return Err(format!(
@@ -676,10 +682,7 @@ pub async fn fetch_official_marketplace_from_gcs(
         .map_err(|e| format!("zip download: {}", e))?
         .error_for_status()
         .map_err(|e| format!("zip download: {}", e))?;
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("zip read: {}", e))?;
+    let bytes = resp.bytes().await.map_err(|e| format!("zip read: {}", e))?;
 
     let staging = cache_root.join(format!("{}.staging", DEFAULT_MARKETPLACE_NAME));
     force_remove_dir_all(&staging).await?;
@@ -714,15 +717,13 @@ pub async fn fetch_official_marketplace_from_gcs(
                 continue;
             }
             if let Some(p) = dest.parent() {
-                std::fs::create_dir_all(p)
-                    .map_err(|e| format!("mkdir {}: {}", p.display(), e))?;
+                std::fs::create_dir_all(p).map_err(|e| format!("mkdir {}: {}", p.display(), e))?;
             }
             let mut buf = Vec::with_capacity(entry.size() as usize);
             entry
                 .read_to_end(&mut buf)
                 .map_err(|e| format!("read {}: {}", name, e))?;
-            std::fs::write(&dest, buf)
-                .map_err(|e| format!("write {}: {}", dest.display(), e))?;
+            std::fs::write(&dest, buf).map_err(|e| format!("write {}: {}", dest.display(), e))?;
         }
         Ok(())
     })
@@ -769,9 +770,7 @@ pub async fn update_marketplace(project_root: &Path, name: &str) -> Result<Strin
 
     if name == DEFAULT_MARKETPLACE_NAME {
         match fetch_official_marketplace_from_gcs(project_root).await {
-            Ok(Some(sha)) => {
-                return Ok(format!("Updated {} ({})", name, &sha[..7.min(sha.len())]))
-            }
+            Ok(Some(sha)) => return Ok(format!("Updated {} ({})", name, &sha[..7.min(sha.len())])),
             Ok(None) => return Ok(format!("{} already up to date", name)),
             Err(e) => {
                 tracing_debug(&format!("GCS update failed, falling back to git: {}", e));
@@ -815,7 +814,9 @@ mod tests {
         // 残留的 dst 存在且含只读文件：直接 rename 会 error 13
         std::fs::write(src.join("marketplace.json"), b"{}").unwrap();
 
-        move_dir_into_place(&src, &dst).await.expect("move should succeed");
+        move_dir_into_place(&src, &dst)
+            .await
+            .expect("move should succeed");
 
         assert!(dst.join("marketplace.json").exists());
         assert!(!src.exists(), "src should be moved away");
@@ -839,7 +840,9 @@ mod tests {
         perms.set_readonly(true);
         std::fs::set_permissions(&ro, perms).unwrap();
 
-        force_remove_dir_all(&dir).await.expect("remove should succeed");
+        force_remove_dir_all(&dir)
+            .await
+            .expect("remove should succeed");
         assert!(!dir.exists());
     }
 }

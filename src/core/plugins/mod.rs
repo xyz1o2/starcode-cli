@@ -120,9 +120,7 @@ pub async fn resolve_installed_plugins(project_root: &Path) -> Result<Vec<Resolv
     // 合并两个安装范围（对标 Claude Code）：project 优先于 user（同名覆盖）
     let mut entries: Vec<PluginEntry> = Vec::new();
     for scope in [SCOPE_USER, SCOPE_PROJECT] {
-        let mut list = load_manifest_scoped(project_root, scope)
-            .await?
-            .plugins;
+        let mut list = load_manifest_scoped(project_root, scope).await?.plugins;
         for e in &mut list {
             e.scope = scope.to_string();
         }

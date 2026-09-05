@@ -37,11 +37,17 @@ fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str
         m.insert("notebook_edit", "notebookedit");
         m.insert("next_edit", "nextedit");
         // 搜索/导航
-        m.insert("Grep", "Grep");
-        m.insert("Glob", "Glob");
-        m.insert("ListDir", "ListDir");
-        m.insert("SemanticSearch", "SemanticSearch");
-        m.insert("ProjectMap", "ProjectMap");
+        // 键必须是**磁盘上的文件名**（`tool-description-<key>.md`），不是工具注册名。
+        // 这五个原来写成了 `"Grep" => "Grep"` 这样的注册名，而文件叫
+        // `tool-description-grep.md` —— `rust_embed::get()` 和 `dir.join()`
+        // 都是大小写敏感的，于是这五个工具的 schema 描述一直静默回退到 Rust
+        // 里的默认字符串，正文也进不了系统提示词 bundle（`prompt_builder.rs`
+        // 传进来的 key 是小写化后的文件名）。
+        m.insert("Grep", "grep");
+        m.insert("Glob", "glob");
+        m.insert("ListDir", "ls");
+        m.insert("SemanticSearch", "semantic_search");
+        m.insert("ProjectMap", "projectmap");
         m.insert("tool_search", "toolsearch");
         m.insert("get_diagnostics", "getdiagnostics");
         // 执行
@@ -177,4 +183,12 @@ pub fn description_key_matches_active_tools(
 /// 获取已注册的工具描述键数量（供测试/诊断）
 pub fn registered_tool_count() -> usize {
     tool_description_key_map().len()
+}
+
+/// 所有 `(工具注册名, .md 文件键)` 对 —— 供测试校验每个键都有对应文件。
+pub fn registered_tool_keys() -> Vec<(&'static str, &'static str)> {
+    tool_description_key_map()
+        .iter()
+        .map(|(tool, key)| (*tool, *key))
+        .collect()
 }

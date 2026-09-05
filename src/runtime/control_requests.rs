@@ -150,6 +150,13 @@ pub async fn handle_request(
             agent.set_approval_mode(mode.clone());
             let _ = tx.send(StreamMessage::ApprovalModeChanged { mode }).await;
         }
+        AgentRequest::ReloadPermissions => {
+            let count = reload_permission_rules(agent).await;
+            crate::utils::logging::append_agent_log_line(&format!(
+                "[AgentRuntime] permission rules reloaded ({} settings rules)",
+                count
+            ));
+        }
         AgentRequest::SetThinkingEffort(effort) => {
             // 存进会话状态，之后每一次请求构造时按 provider 方言翻成
             // 对应字段（见 `crate::llm::thinking`）。切模型会重建 client，
@@ -311,11 +318,12 @@ async fn run_plugin_op(
                 Err(e) => Some(format!("Default marketplace: {}", e)),
             }
         }
-        PluginOp::AddMarketplace { source } => match mp::add_marketplace(project_root, &source).await
-        {
-            Ok(m) => Some(format!("Added marketplace '{}'", m.name)),
-            Err(e) => Some(format!("Error: {}", e)),
-        },
+        PluginOp::AddMarketplace { source } => {
+            match mp::add_marketplace(project_root, &source).await {
+                Ok(m) => Some(format!("Added marketplace '{}'", m.name)),
+                Err(e) => Some(format!("Error: {}", e)),
+            }
+        }
         PluginOp::RemoveMarketplace { name } => {
             match mp::remove_marketplace(project_root, &name).await {
                 Ok(true) => Some(format!("Removed marketplace {}", name)),
@@ -488,6 +496,16 @@ async fn handle_tool_confirmation_response(
     }
 }
 
+/// 让运行时的 PolicyEngine 重新读盘。规则活在 MessageBus 里，
+/// UI 侧改完 `.star/settings.local.json` 只能靠这条路生效。
+async fn reload_permission_rules(agent: &StarAgent) -> usize {
+    let Some(bus) = agent.runtime_message_bus() else {
+        return 0;
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    bus.reload_permission_rules(&cwd).await
+}
+
 async fn handle_confirm_tool(
     agent: &StarAgent,
     _tx: &mpsc::Sender<StreamMessage>,
@@ -499,8 +517,9 @@ async fn handle_confirm_tool(
     let message_bus = agent.runtime_message_bus().unwrap_or_else(|| {
         use crate::core::policy::PolicyEngine;
         use crate::core::policy::PolicyEngineConfig;
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::sync::Arc::new(crate::core::confirmation_bus::MessageBus::new(
-            PolicyEngine::new(PolicyEngineConfig::default()),
+            PolicyEngine::with_project_rules(PolicyEngineConfig::default(), &cwd),
             false,
         ))
     });

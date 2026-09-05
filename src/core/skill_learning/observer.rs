@@ -1,7 +1,6 @@
 /// 技能观察器
-/// 
+///
 /// 观察用户行为并记录观察结果
-
 use serde::{Deserialize, Serialize};
 
 /// 观察类型
@@ -84,8 +83,11 @@ impl SkillObserver {
 
     /// 按类型获取观察
     pub fn get_observations_by_type(&self, obs_type: &ObservationType) -> Vec<&Observation> {
-        self.observations.iter()
-            .filter(|obs| std::mem::discriminant(&obs.observation_type) == std::mem::discriminant(obs_type))
+        self.observations
+            .iter()
+            .filter(|obs| {
+                std::mem::discriminant(&obs.observation_type) == std::mem::discriminant(obs_type)
+            })
             .collect()
     }
 

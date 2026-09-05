@@ -1,7 +1,6 @@
 /// 技能进化
-/// 
+///
 /// 进化现有技能
-
 use super::Skill;
 
 /// 技能进化器
@@ -26,13 +25,13 @@ impl SkillEvolution {
         }
 
         let mut evolved = skill.clone();
-        
+
         // 进化技能状态
         evolved.status = self.evolve_status(&skill.status);
-        
+
         // 优化触发条件
         evolved.triggers = self.optimize_triggers(&skill.triggers);
-        
+
         // 优化执行步骤
         evolved.steps = self.optimize_steps(&skill.steps);
 

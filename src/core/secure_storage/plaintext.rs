@@ -1,8 +1,7 @@
 /// 纯文本存储
-/// 
+///
 /// 对标claude-code-main的plainTextStorage.ts
-
-use super::types::{SecureStorage, StorageError, StorageEntry};
+use super::types::{SecureStorage, StorageEntry, StorageError};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -34,16 +33,14 @@ impl PlainTextStorage {
         let content = std::fs::read_to_string(&self.storage_path)
             .map_err(|e| StorageError::IoError(e.to_string()))?;
 
-        serde_json::from_str(&content)
-            .map_err(|e| StorageError::SerializationError(e.to_string()))
+        serde_json::from_str(&content).map_err(|e| StorageError::SerializationError(e.to_string()))
     }
 
     /// 保存存储
     fn save_storage(&self, storage: &HashMap<String, StorageEntry>) -> Result<(), StorageError> {
         // 确保目录存在
         if let Some(parent) = self.storage_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| StorageError::IoError(e.to_string()))?;
+            std::fs::create_dir_all(parent).map_err(|e| StorageError::IoError(e.to_string()))?;
         }
 
         let content = serde_json::to_string_pretty(storage)

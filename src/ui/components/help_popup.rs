@@ -148,8 +148,8 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
                     "/permissions".to_string(),
                     i18n::t(
                         "ui.help.cmd.permissions",
-                        "切换审批模式",
-                        "Change approval mode",
+                        "权限规则与审批模式",
+                        "Permission rules and approval mode",
                     ),
                 ),
                 (

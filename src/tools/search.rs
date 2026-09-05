@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use walkdir::WalkDir;
 
 #[derive(Clone)]
 pub struct SearchTool {
@@ -88,7 +87,9 @@ impl SearchTool {
             });
         }
         let mut results = Vec::new();
-        let include_hidden_default = query.trim_start().starts_with('@');
+        // dotfile 默认可见 —— 对齐 Claude Code。以前只有 `@` 开头的查询才
+        // 看得到 `.github/`、`.env.example` 这类真正需要搜的文件。
+        let include_hidden_default = true;
         let include_hidden_flag = include_hidden.unwrap_or_else(|| {
             std::env::var("STAR_SEARCH_INCLUDE_HIDDEN")
                 .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
@@ -255,34 +256,6 @@ impl SearchTool {
             .to_string()
     }
 
-    fn should_skip_walk_entry(path: &std::path::Path, include_hidden: bool) -> bool {
-        let ignored = [
-            "node_modules",
-            ".git",
-            ".svn",
-            ".hg",
-            "dist",
-            "build",
-            ".next",
-            ".cache",
-            "target",
-            ".idea",
-            ".vscode",
-        ];
-
-        for component in path.components() {
-            let s = component.as_os_str().to_string_lossy();
-            if !include_hidden && s.starts_with('.') {
-                return true;
-            }
-            if ignored.contains(&s.as_ref()) {
-                return true;
-            }
-        }
-
-        false
-    }
-
     async fn find_files_by_pattern(
         &self,
         pattern: &str,
@@ -296,24 +269,27 @@ impl SearchTool {
         let mut files = Vec::new();
         let search_pattern = pattern.to_lowercase();
 
-        let include_hidden = include_hidden.unwrap_or(false);
-        let walker = WalkDir::new(base_dir)
-            .follow_links(false)
-            .max_depth(max_depth)
-            .into_iter()
-            .filter_entry(|e| !Self::should_skip_walk_entry(e.path(), include_hidden))
-            .filter_map(|e| e.ok());
+        // 以前这里是 `WalkDir` + `should_skip_walk_entry`，后者拿**绝对路径**
+        // 逐个组件比对硬编码黑名单：仓库放在 `/mnt/h/test/starcode` 这种路径下
+        // 时，路径里的 `build`/`dist`/`target` 一命中，整个仓库就被跳过了。
+        // 现在走统一 walker：`.gitignore` 生效，判断只针对 root 以下的相对路径。
+        let root = Path::new(base_dir);
+        let mut opts = crate::utils::file_walk::WalkOptions::new()
+            .hidden(include_hidden.unwrap_or(true))
+            .max_depth(max_depth);
+        if let Some(exclude) = exclude_pattern.map(str::trim).filter(|p| !p.is_empty()) {
+            opts = opts.exclude([exclude]);
+        }
 
-        for entry in walker {
+        for entry in crate::utils::file_walk::walk(root, &opts).flatten() {
             let file_path = entry.path();
-            let file_name = entry.file_name().to_string_lossy().to_string();
-
-            if !include_hidden && file_name.starts_with('.') {
+            if file_path == root {
                 continue;
             }
+            let file_name = entry.file_name().to_string_lossy().to_string();
 
             let relative_path = file_path
-                .strip_prefix(Path::new(base_dir))
+                .strip_prefix(root)
                 .unwrap_or(file_path)
                 .to_string_lossy()
                 .to_string();
@@ -323,16 +299,8 @@ impl SearchTool {
                 relative_path
             };
 
-            if let Some(exclude_pat) = exclude_pattern {
-                if relative_path.contains(exclude_pat) {
-                    continue;
-                }
-            }
-
-            if file_path.is_file() || file_path.is_dir() {
-                let _score = calculate_file_score(&file_name, &relative_path, &search_pattern);
-                files.push((relative_path, file_name));
-            }
+            let _score = calculate_file_score(&file_name, &relative_path, &search_pattern);
+            files.push((relative_path, file_name));
 
             if files.len() >= max_results {
                 break;

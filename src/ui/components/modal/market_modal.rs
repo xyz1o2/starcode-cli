@@ -10,7 +10,11 @@ use ratatui::{
     text::{Line, Span},
 };
 
-pub fn render_market_modal(f: &mut ratatui::Frame<'_>, area: ratatui::prelude::Rect, state: &ChatState) {
+pub fn render_market_modal(
+    f: &mut ratatui::Frame<'_>,
+    area: ratatui::prelude::Rect,
+    state: &ChatState,
+) {
     let Some(Modal::Market { tab }) = state.top_modal() else {
         return;
     };
@@ -37,12 +41,18 @@ pub fn render_market_modal(f: &mut ratatui::Frame<'_>, area: ratatui::prelude::R
     }
 
     if let Some(confirm) = &state.market_confirm {
-        let verb = if confirm.install { "Install" } else { "Uninstall" };
+        let verb = if confirm.install {
+            "Install"
+        } else {
+            "Uninstall"
+        };
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled(
                 format!("  ⚠ {} '{}'? ", verb, confirm.name),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "Enter=confirm  Esc=cancel",
@@ -131,7 +141,12 @@ fn entry_rows(
         return lines;
     }
 
-    if matches!(state.top_modal(), Some(Modal::Market { tab: MarketTab::Browse })) {
+    if matches!(
+        state.top_modal(),
+        Some(Modal::Market {
+            tab: MarketTab::Browse
+        })
+    ) {
         let query_disp = if state.market_query.is_empty() {
             "  / search…".to_string()
         } else {
@@ -206,7 +221,9 @@ fn entry_rows(
 }
 
 fn browse_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
-    entry_rows(state, body_h, state.market_installed_names.clone(), |_| None)
+    entry_rows(state, body_h, state.market_installed_names.clone(), |_| {
+        None
+    })
 }
 
 fn installed_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
@@ -232,7 +249,10 @@ fn sources_lines(state: &ChatState) -> Vec<Line<'static>> {
         ]),
         Line::from(vec![
             Span::styled("  Index entries:    ", Style::default().fg(Color::DarkGray)),
-            Span::styled(index.entries.len().to_string(), Style::default().fg(Color::White)),
+            Span::styled(
+                index.entries.len().to_string(),
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             Span::styled("  Updated at:       ", Style::default().fg(Color::DarkGray)),

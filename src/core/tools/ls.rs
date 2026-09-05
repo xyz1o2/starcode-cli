@@ -4,6 +4,7 @@ use crate::core::tools::tools::{
 };
 use crate::core::utils::file_utils::format_file_size;
 use crate::core::utils::paths::normalize_cross_platform_path;
+use crate::utils::file_walk::{walk, WalkOptions};
 use serde::Deserialize;
 use serde_json::{json, Value};
 /// List Directory Tool - AI-Friendly File Browsing
@@ -15,10 +16,14 @@ use serde_json::{json, Value};
 /// - 智能排序：文件夹优先、字母排序
 /// - 灵活过滤：按扩展名、大小、时间过滤
 /// - Tree 模式：递归显示目录树
-use std::future::Future;
+///
+/// 遍历口径统一走 [`crate::utils::file_walk`]：`.gitignore` / `.starignore`
+/// 生效、dotfile 默认可见、6 个 VCS 目录永不进入。
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use tokio::fs;
+
+/// 单次列举上限。之前没有上限，且完全不认 `.gitignore` —— 在本仓库对根
+/// 目录跑一次 `recursive: true`，`target/` 会被整棵吐给模型。
+const MAX_ENTRIES: usize = 1000;
 
 #[derive(Clone)]
 pub struct ListDirTool;
@@ -129,8 +134,8 @@ impl BaseDeclarativeTool for ListDirTool {
                 },
                 "include_hidden": {
                     "type": "boolean",
-                    "description": "Whether to include hidden files/directories",
-                    "default": false
+                    "description": "Whether to include dotfiles and dot-directories. Defaults to true; `.git`, `.svn`, `.hg`, `.bzr`, `.jj` and `.sl` are always skipped. Paths ignored by .gitignore / .starignore are never listed.",
+                    "default": true
                 }
             },
             "required": ["directory"]
@@ -164,7 +169,9 @@ impl ListDirTool {
     ) -> Result<CoreToolResult, Box<dyn std::error::Error>> {
         let recursive = recursive.unwrap_or(false);
         let max_depth = max_depth.unwrap_or(3);
-        let include_hidden = include_hidden.unwrap_or(false);
+        // dotfile 默认可见 —— 对齐 Claude Code。`.github/workflows`、
+        // `.env.example` 这类文件本来就是要看的。
+        let include_hidden = include_hidden.unwrap_or(true);
 
         let dir_path = normalize_cross_platform_path(directory);
         let display_dir = dir_path.to_string_lossy().to_string();
@@ -198,14 +205,19 @@ impl ListDirTool {
             });
         }
 
-        // 列出条目
-        let entries = if recursive {
-            self.list_recursive(&dir_path, 0, max_depth, &filter_ext, include_hidden)
-                .await?
+        // 列出条目。`list_recursive(depth=0, max_depth=N)` 以前能下到相对
+        // 深度 N+1，这里保持同一口径。
+        let walk_depth = if recursive {
+            max_depth.saturating_add(1)
         } else {
-            self.list_flat(&dir_path, &filter_ext, include_hidden)
-                .await?
+            1
         };
+        let scan_root = dir_path.clone();
+        let (entries, truncated) = tokio::task::spawn_blocking(move || {
+            Self::collect(&scan_root, walk_depth, &filter_ext, include_hidden)
+        })
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         if entries.is_empty() {
             let msg = format!(
@@ -222,7 +234,7 @@ impl ListDirTool {
         }
 
         // 格式化输出
-        let output = self.format_entries(&entries, &display_dir, recursive);
+        let output = self.format_entries(&entries, &display_dir, recursive, truncated);
 
         Ok(CoreToolResult {
             llm_content: Some(output.clone()),
@@ -233,44 +245,56 @@ impl ListDirTool {
         })
     }
 
-    /// 平铺列出（非递归）
-    async fn list_flat(
-        &self,
+    /// 收集条目。`walk_depth` 是相对根目录的最大深度（1 = 只列直接子项）。
+    ///
+    /// 以前这里是两份 `fs::read_dir` 实现 + `name.starts_with('.')`：不认任何
+    /// ignore 文件，`recursive: true` 会一头钻进 `target/`；而 `.github/`
+    /// 这类真正要看的目录反倒被当"隐藏文件"跳掉。
+    ///
+    /// 返回值第二项表示是否因为 [`MAX_ENTRIES`] 截断。
+    fn collect(
         dir_path: &Path,
+        walk_depth: usize,
         filter_ext: &Option<Vec<String>>,
         include_hidden: bool,
-    ) -> Result<Vec<DirEntry>, Box<dyn std::error::Error>> {
-        let mut entries = Vec::new();
-        let mut read_dir = fs::read_dir(dir_path).await?;
+    ) -> (Vec<DirEntry>, bool) {
+        let opts = WalkOptions::new()
+            .hidden(include_hidden)
+            .max_depth(walk_depth);
+        let mut entries: Vec<DirEntry> = Vec::new();
+        let mut truncated = false;
 
-        while let Some(entry) = read_dir.next_entry().await? {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-
-            // 跳过隐藏文件
-            if !include_hidden && name.starts_with('.') {
+        for entry in walk(dir_path, &opts).flatten() {
+            if entry.path() == dir_path {
                 continue;
             }
-
-            let metadata = entry.metadata().await?;
-            let is_dir = metadata.is_dir();
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            let path = entry.path().to_path_buf();
 
             // 扩展名过滤（仅对文件）
-            if !is_dir {
-                if let Some(ref exts) = filter_ext {
-                    if let Some(ext) = path.extension() {
-                        let ext_str = ext.to_string_lossy().to_lowercase();
-                        if !exts.iter().any(|e| e.to_lowercase() == ext_str) {
-                            continue;
+            if !metadata.is_dir() {
+                if let Some(exts) = filter_ext {
+                    match path.extension() {
+                        Some(ext) => {
+                            let ext_str = ext.to_string_lossy().to_lowercase();
+                            if !exts.iter().any(|e| e.to_lowercase() == ext_str) {
+                                continue;
+                            }
                         }
-                    } else {
-                        // 无扩展名文件，如果设置了过滤器则跳过
-                        continue;
+                        // 设了过滤器时，无扩展名的文件不算命中
+                        None => continue,
                     }
                 }
             }
 
-            entries.push(self.create_entry(name, path, metadata).await?);
+            if entries.len() >= MAX_ENTRIES {
+                truncated = true;
+                break;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            entries.push(Self::create_entry(name, path, metadata));
         }
 
         // 排序：目录在前，然后按名称排序
@@ -282,91 +306,10 @@ impl ListDirTool {
             }
         });
 
-        Ok(entries)
+        (entries, truncated)
     }
 
-    /// 递归列出
-    fn list_recursive<'a>(
-        &'a self,
-        dir_path: &'a Path,
-        depth: usize,
-        max_depth: usize,
-        filter_ext: &'a Option<Vec<String>>,
-        include_hidden: bool,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<DirEntry>, Box<dyn std::error::Error>>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            let mut entries = Vec::new();
-            if depth > max_depth {
-                return Ok(entries);
-            }
-
-            let mut read_dir = match fs::read_dir(dir_path).await {
-                Ok(rd) => rd,
-                Err(_) => return Ok(entries), // 忽略无法读取的目录
-            };
-
-            while let Some(entry) = read_dir.next_entry().await.unwrap_or(None) {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-
-                if !include_hidden && name.starts_with('.') {
-                    continue;
-                }
-
-                let metadata = match entry.metadata().await {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-                let is_dir = metadata.is_dir();
-
-                // 扩展名过滤
-                if !is_dir {
-                    if let Some(ref exts) = filter_ext {
-                        if let Some(ext) = path.extension() {
-                            let ext_str = ext.to_string_lossy().to_lowercase();
-                            if !exts.iter().any(|e| e.to_lowercase() == ext_str) {
-                                continue;
-                            }
-                        } else {
-                            continue;
-                        }
-                    }
-                }
-
-                entries.push(
-                    self.create_entry(name.clone(), path.clone(), metadata)
-                        .await?,
-                );
-
-                // 递归
-                if is_dir {
-                    let mut sub_entries = self
-                        .list_recursive(&path, depth + 1, max_depth, filter_ext, include_hidden)
-                        .await?;
-                    entries.append(&mut sub_entries);
-                }
-            }
-
-            // 排序：目录在前，然后按名称排序
-            entries.sort_by(|a, b| {
-                if a.is_dir != b.is_dir {
-                    b.is_dir.cmp(&a.is_dir) // 目录优先
-                } else {
-                    a.name.cmp(&b.name)
-                }
-            });
-
-            Ok(entries)
-        })
-    }
-
-    async fn create_entry(
-        &self,
-        name: String,
-        path: PathBuf,
-        metadata: std::fs::Metadata,
-    ) -> Result<DirEntry, Box<dyn std::error::Error>> {
+    fn create_entry(name: String, path: PathBuf, metadata: std::fs::Metadata) -> DirEntry {
         let size = if metadata.is_file() {
             Some(metadata.len())
         } else {
@@ -381,17 +324,23 @@ impl ListDirTool {
             datetime.format("%Y-%m-%d %H:%M:%S").to_string()
         });
 
-        Ok(DirEntry {
+        DirEntry {
             name,
             path: path.to_string_lossy().to_string(),
             is_dir: metadata.is_dir(),
             size,
             extension,
             modified,
-        })
+        }
     }
 
-    fn format_entries(&self, entries: &[DirEntry], root_dir: &str, recursive: bool) -> String {
+    fn format_entries(
+        &self,
+        entries: &[DirEntry],
+        root_dir: &str,
+        recursive: bool,
+        truncated: bool,
+    ) -> String {
         let mut output = String::new();
         output.push_str(&format!("📁 Directory Listing: {}\n", root_dir));
         output.push_str("--------------------------------------------------\n");
@@ -426,6 +375,12 @@ impl ListDirTool {
 
         output.push_str("--------------------------------------------------\n");
         output.push_str(&format!("Total: {} items", entries.len()));
+        if truncated {
+            output.push_str(&format!(
+                " (truncated at {}; narrow the directory or lower max_depth to see the rest)",
+                MAX_ENTRIES
+            ));
+        }
 
         output
     }

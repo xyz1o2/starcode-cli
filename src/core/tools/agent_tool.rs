@@ -240,9 +240,7 @@ impl ToolInvocation for AgentToolInvocation {
                         Err(err) => {
                             // 递归超限属于「被拒绝」语义（对标
                             // renderToolUseRejectedMessage），其余算执行失败
-                            let status = if err.kind
-                                == SubAgentErrorKind::RecursionLimitExceeded
-                            {
+                            let status = if err.kind == SubAgentErrorKind::RecursionLimitExceeded {
                                 AgentTaskStatus::Rejected
                             } else {
                                 AgentTaskStatus::Failed
@@ -287,8 +285,7 @@ impl ToolInvocation for AgentToolInvocation {
                     let async_runner = async_runner
                         .ok_or_else(|| "AsyncSubagentRunner not configured".to_string())?;
 
-                    let type_label =
-                        agent_type_label(input.subagent_type.as_ref()).to_string();
+                    let type_label = agent_type_label(input.subagent_type.as_ref()).to_string();
 
                     let launch = async_runner.spawn_background(
                         SubAgentRequest {

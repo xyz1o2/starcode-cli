@@ -1,7 +1,6 @@
 /// 本能解析和存储
-/// 
+///
 /// 对标claude-code-main的instinctParser.ts和instinctStore.ts
-
 use serde::{Deserialize, Serialize};
 
 /// 本能
@@ -46,7 +45,7 @@ impl InstinctParser {
         let mut parser = Self {
             patterns: Vec::new(),
         };
-        
+
         parser.load_default_patterns();
         parser
     }
@@ -61,13 +60,21 @@ impl InstinctParser {
 
         self.patterns.push(InstinctPattern {
             name: "refactor".to_string(),
-            triggers: vec!["refactor".to_string(), "improve".to_string(), "optimize".to_string()],
+            triggers: vec![
+                "refactor".to_string(),
+                "improve".to_string(),
+                "optimize".to_string(),
+            ],
             response_template: "Suggest refactoring improvements".to_string(),
         });
 
         self.patterns.push(InstinctPattern {
             name: "test".to_string(),
-            triggers: vec!["test".to_string(), "verify".to_string(), "check".to_string()],
+            triggers: vec![
+                "test".to_string(),
+                "verify".to_string(),
+                "check".to_string(),
+            ],
             response_template: "Write or run tests".to_string(),
         });
     }

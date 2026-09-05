@@ -1,14 +1,35 @@
-/// 高级文件搜索模块
-/// 参考 Star CLI 的实现，提供模糊匹配、智能排序、扫描缓存、路径下钻等功能
+//! `@` 文件选择器 —— 模糊匹配、智能排序、扫描缓存、路径下钻。
+//!
+//! 候选来源对标 Claude Code 的 `fileSuggestions.ts`：先问 git
+//! （`ls-files --cached` + `ls-files --others --exclude-standard`），
+//! 不是 git 仓库才退回 `utils::file_walk` 的统一遍历。
+//!
+//! 之前这里是 `WalkDir::max_depth(5)` + 7 个硬编码目录名 + 5000 条上限，
+//! 完全不认 `.gitignore`。实测本仓库：走过 7198 个条目，其中 6228 个
+//! （87%）是被 `.gitignore` 忽略的；5000 条的名额在
+//! `study_or_copy_projects/` 里就被吃掉 4067 个，真正想选的源文件反而
+//! 因为 depth-5 和名额耗尽进不来。
+//!
+//! dotfile 现在正常参与模糊匹配（`.github/workflows/ci.yml` 是要选的），
+//! 只在同分时轻微降权，不再要求查询必须以 `.` 开头。
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
-use walkdir::WalkDir;
 
-/// 目录扫描缓存有效期 — 避免每次按键都重新 WalkDir
+use crate::utils::file_walk::{walk, WalkOptions, VCS_DIRS};
+
+/// 目录扫描缓存有效期 — 避免每次按键都重新扫描
 const SCAN_CACHE_TTL_SECS: u64 = 5;
 /// 单次目录列举上限（下钻模式）
 const CHILDREN_CAP: usize = 500;
+/// 扫描条目上限。纯内存保护 —— 尊重 `.gitignore` 之后正常仓库远达不到
+/// （本仓库 826 个 tracked 文件 ≈ 1.1K 条含目录）。
+const SCAN_CAP: usize = 50_000;
+/// 单次查询最多收集多少条命中再排序。
+const MATCH_CAP: usize = 2000;
+/// dotfile 的同分降权。不再整条过滤，只是排在普通文件后面。
+const HIDDEN_PENALTY: i32 = 5;
 
 /// 文件搜索结果
 #[derive(Debug, Clone)]
@@ -115,71 +136,129 @@ fn expand_tilde(p: &str) -> String {
     p.to_string()
 }
 
-/// 全量扫描（带 5s TTL 缓存）。depth-5、跳过常见无关目录。
+/// 全量扫描（带 5s TTL 缓存）。git 仓库走 `git ls-files`，否则走统一 walker。
 fn scan_entries(root: &Path) -> Vec<CachedEntry> {
-    if let Ok(mut guard) = SCAN_CACHE.lock() {
+    if let Ok(guard) = SCAN_CACHE.lock() {
         if let Some(cache) = guard.as_ref() {
             if cache.root == root && cache.at.elapsed().as_secs() < SCAN_CACHE_TTL_SECS {
-                return cache
-                    .entries
-                    .iter()
-                    .map(|e| CachedEntry {
-                        path: e.path.clone(),
-                        is_dir: e.is_dir,
-                        depth: e.depth,
-                        hidden: e.hidden,
-                    })
-                    .collect();
+                return clone_entries(&cache.entries);
             }
         }
     }
 
-    let mut entries: Vec<CachedEntry> = Vec::new();
-    for entry in WalkDir::new(root)
-        .max_depth(5)
-        .into_iter()
-        .filter_entry(|e| {
-            let fname = e.file_name().to_string_lossy();
-            !matches!(
-                fname.as_ref(),
-                "node_modules" | "target" | ".git" | "dist" | "build" | "__pycache__" | ".next"
-            )
-        })
-        .flatten()
-    {
-        let path = entry.path();
-        if path == root {
-            continue;
-        }
-        let rel = path.strip_prefix(root).unwrap_or(path);
-        let rel_str = rel.to_string_lossy().replace('\\', "/");
-        entries.push(CachedEntry {
-            hidden: rel_str.split('/').any(|c| c.starts_with('.')),
-            path: rel_str,
-            is_dir: path.is_dir(),
-            depth: rel.components().count(),
-        });
-        if entries.len() >= 5000 {
-            break;
-        }
-    }
+    let entries = match git_ls_files(root) {
+        Some(paths) => entries_from_paths(paths),
+        None => walk_entries(root),
+    };
 
     if let Ok(mut guard) = SCAN_CACHE.lock() {
         *guard = Some(ScanCache {
             root: root.to_path_buf(),
             at: Instant::now(),
-            entries: entries
-                .iter()
-                .map(|e| CachedEntry {
-                    path: e.path.clone(),
-                    is_dir: e.is_dir,
-                    depth: e.depth,
-                    hidden: e.hidden,
-                })
-                .collect(),
+            entries: clone_entries(&entries),
         });
     }
 
+    entries
+}
+
+fn clone_entries(entries: &[CachedEntry]) -> Vec<CachedEntry> {
+    entries
+        .iter()
+        .map(|e| CachedEntry {
+            path: e.path.clone(),
+            is_dir: e.is_dir,
+            depth: e.depth,
+            hidden: e.hidden,
+        })
+        .collect()
+}
+
+/// tracked + untracked-but-not-ignored 的文件清单。
+///
+/// `-z` 是必须的：默认输出会把非 ASCII 文件名转义成 `"\344\275\240"`，
+/// 直接当路径用就找不到文件了。非 git 仓库（或没装 git）返回 `None`。
+fn git_ls_files(root: &Path) -> Option<Vec<String>> {
+    const ARGS: [&[&str]; 2] = [
+        &["ls-files", "-z", "--cached"],
+        &["ls-files", "-z", "--others", "--exclude-standard"],
+    ];
+    let mut paths = Vec::new();
+    for args in ARGS {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        paths.extend(
+            output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|chunk| !chunk.is_empty())
+                .map(|chunk| String::from_utf8_lossy(chunk).replace('\\', "/")),
+        );
+    }
+    Some(paths)
+}
+
+/// 把文件清单展开成"文件 + 各级祖先目录"—— git 只列文件，选择器要能下钻。
+fn entries_from_paths(paths: Vec<String>) -> Vec<CachedEntry> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut entries: Vec<CachedEntry> = Vec::new();
+    for path in paths {
+        let components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+        let mut accumulated = String::new();
+        let mut hidden = false;
+        for (index, component) in components.iter().enumerate() {
+            if !accumulated.is_empty() {
+                accumulated.push('/');
+            }
+            accumulated.push_str(component);
+            hidden |= component.starts_with('.');
+            if !seen.insert(accumulated.clone()) {
+                continue;
+            }
+            entries.push(CachedEntry {
+                path: accumulated.clone(),
+                is_dir: index + 1 < components.len(),
+                depth: index + 1,
+                hidden,
+            });
+        }
+        if entries.len() >= SCAN_CAP {
+            break;
+        }
+    }
+    entries
+}
+
+/// 非 git 仓库的退路：统一 walker，口径和 Grep / Glob 一致。
+fn walk_entries(root: &Path) -> Vec<CachedEntry> {
+    let mut entries: Vec<CachedEntry> = Vec::new();
+    for entry in walk(root, &WalkOptions::new()).flatten() {
+        let path = entry.path();
+        if path == root {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        let relative_str = relative.to_string_lossy().replace('\\', "/");
+        entries.push(CachedEntry {
+            hidden: relative_str.split('/').any(|c| c.starts_with('.')),
+            path: relative_str,
+            is_dir: entry.file_type().is_some_and(|t| t.is_dir()),
+            depth: relative.components().count(),
+        });
+        if entries.len() >= SCAN_CAP {
+            break;
+        }
+    }
     entries
 }
 
@@ -200,15 +279,19 @@ fn search_children(pattern: &str, current_dir: &Path) -> Option<Vec<String>> {
         return None;
     }
 
-    let show_hidden = name_query.starts_with('.');
+    // 下钻也走统一 walker：`.gitignore` 生效、dotfile 可见、VCS 目录剪掉。
+    // 之前是裸 `read_dir`，`target/` 和 `node_modules/` 的内容一览无余。
     let mut results: Vec<FileSearchResult> = Vec::new();
     let prefix = dir_part.replace('\\', "/");
-    for entry in std::fs::read_dir(&base).ok()?.flatten() {
-        let fname = entry.file_name().to_string_lossy().to_string();
-        if !show_hidden && fname.starts_with('.') {
+    for entry in walk(&base, &WalkOptions::new().max_depth(1)).flatten() {
+        if entry.path() == base {
             continue;
         }
-        let is_dir = entry.path().is_dir();
+        let fname = entry.file_name().to_string_lossy().to_string();
+        if VCS_DIRS.contains(&fname.as_str()) {
+            continue;
+        }
+        let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
         let child_path = format!("{}{}", prefix, fname);
         let score = if name_query.is_empty() {
             if is_dir {
@@ -226,7 +309,12 @@ fn search_children(pattern: &str, current_dir: &Path) -> Option<Vec<String>> {
         results.push(FileSearchResult {
             path: child_path,
             is_dir,
-            score,
+            score: score
+                - if fname.starts_with('.') {
+                    HIDDEN_PENALTY
+                } else {
+                    0
+                },
             depth: prefix.matches('/').count() + 1,
         });
         if results.len() >= CHILDREN_CAP {
@@ -270,13 +358,9 @@ pub fn search_files(pattern: &str) -> Vec<String> {
     }
 
     let entries = scan_entries(&current_dir);
-    let show_hidden = pattern.starts_with('.');
     let mut results: Vec<FileSearchResult> = Vec::new();
 
     for e in &entries {
-        if !show_hidden && e.hidden {
-            continue;
-        }
         let is_dir = e.is_dir;
         let depth = e.depth;
         let path_str = e.path.clone();
@@ -311,11 +395,12 @@ pub fn search_files(pattern: &str) -> Vec<String> {
         results.push(FileSearchResult {
             path: path_str,
             is_dir,
-            score,
+            // dotfile 不再被整条过滤掉，只在同分时排后面。
+            score: score - if e.hidden { HIDDEN_PENALTY } else { 0 },
             depth,
         });
 
-        if results.len() >= 200 {
+        if results.len() >= MATCH_CAP {
             break;
         }
     }

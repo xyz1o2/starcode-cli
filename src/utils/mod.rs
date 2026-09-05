@@ -3,6 +3,7 @@
 /// 对标claude-code-main的src/utils/
 pub mod checkpoint_manager;
 pub mod environment_context;
+pub mod file_walk;
 pub mod format_utils;
 pub mod invocation;
 pub mod logging;

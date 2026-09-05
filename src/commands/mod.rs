@@ -860,7 +860,6 @@ async fn plugin_command_fallback(
 async fn index_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     use crate::core::context::structure_index::StructureIndex;
     use std::path::Path;
-    use walkdir::WalkDir;
 
     let start = std::time::Instant::now();
 
@@ -886,25 +885,16 @@ async fn index_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult 
     let mut file_count = 0;
     let mut error_count = 0;
 
-    // Walk through the directory and index all supported files
-    for entry in WalkDir::new(&dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
+    // 走 `utils::file_walk` 的统一口径 —— 和 `ContextEngine` 的索引一致。
+    // 以前是 `WalkDir` + 一串**绝对路径**子串判断：`path_str.contains("/.")`
+    // 只要仓库的任一祖先目录以 `.` 开头（`~/.local/src/foo` 之类），整棵树
+    // 一条都进不来；`target/`、`node_modules` 同理会误伤同名的源码目录。
+    for entry in crate::utils::file_walk::walk(&dir, &crate::utils::file_walk::WalkOptions::new())
+        .flatten()
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
     {
         let path = entry.path();
         let path_str = path.to_string_lossy().to_string();
-
-        // Skip hidden directories and common non-source directories
-        if path_str.contains("/.")
-            || path_str.contains("\\.")
-            || path_str.contains("node_modules")
-            || path_str.contains("target/")
-            || path_str.contains("__pycache__")
-            || path_str.contains(".git/")
-        {
-            continue;
-        }
 
         // Check if it's a supported file type
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");

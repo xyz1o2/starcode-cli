@@ -1,5 +1,4 @@
 use crate::core::utils::file_utils::read_file_with_encoding;
-use ignore::WalkBuilder; // Use ignore crate instead of walkdir
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -101,27 +100,13 @@ impl Indexer {
         let mut new_blobs = Vec::new();
         let mut found_paths = HashSet::new();
 
-        // Three-layer ignore (same model as Claude Code):
-        //   1. ~/.star/ignore   — user-level global, applies to every project
-        //   2. .starignore      — project-level, committed to repo, team-shared
-        //   3. .gitignore       — standard VCS ignore (require_git(false): honoured
-        //                          even without a .git directory)
-        // No hardcoded directory list.  Users configure exclusions in these files.
-        let mut builder = WalkBuilder::new(&self.project_root);
-        builder.hidden(false).git_ignore(true).require_git(false);
-        // Layer 1: user-global ignore.
-        if let Some(home) = dirs::home_dir() {
-            let global_ignore = home.join(".star").join("ignore");
-            if global_ignore.exists() {
-                let _ = builder.add_ignore(&global_ignore);
-            }
-        }
-        // Layer 2: project-level ignore.
-        let project_ignore = self.project_root.join(".starignore");
-        if project_ignore.exists() {
-            let _ = builder.add_ignore(&project_ignore);
-        }
-        let walker = builder.build();
+        // 三层 ignore（`~/.star/ignore` → `.starignore` → `.gitignore`，
+        // `require_git(false)`）就是从这里抽到 `utils::file_walk` 的，全树共用
+        // 同一份口径。没有硬编码目录名单 —— 排除规则写在那三个文件里。
+        let walker = crate::utils::file_walk::walk(
+            &self.project_root,
+            &crate::utils::file_walk::WalkOptions::new(),
+        );
 
         for result in walker {
             match result {

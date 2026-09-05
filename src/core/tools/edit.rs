@@ -167,7 +167,11 @@ fn fold_confusables(s: &str) -> String {
             }
             '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
             | '\u{2212}' | '\u{FF0D}' => out.push('-'),
-            '\u{00A0}' | '\u{1680}' | '\u{2000}'..='\u{200A}' | '\u{202F}' | '\u{205F}'
+            '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200A}'
+            | '\u{202F}'
+            | '\u{205F}'
             | '\u{3000}' => out.push(' '),
             // 零宽字符：直接丢弃
             '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}' => {}
@@ -245,7 +249,9 @@ fn reindent_block(replace_lines: &[&str], window_base: &str) -> Vec<String> {
             if line.trim().is_empty() {
                 String::new()
             } else {
-                let rest = line.strip_prefix(base.as_str()).unwrap_or(line.trim_start());
+                let rest = line
+                    .strip_prefix(base.as_str())
+                    .unwrap_or(line.trim_start());
                 format!("{}{}", window_base, rest)
             }
         })
@@ -269,8 +275,8 @@ fn find_line_windows(source: &[String], search: &[String], level: MatchLevel) ->
     let mut i = 0usize;
     let last_start = source.len() - search.len();
     while i <= last_start {
-        let matched = (0..search.len())
-            .all(|k| normalize_for_match(&source[i + k], level) == search_norm[k]);
+        let matched =
+            (0..search.len()).all(|k| normalize_for_match(&source[i + k], level) == search_norm[k]);
         if matched {
             hits.push(i);
             i += search.len();
@@ -696,10 +702,7 @@ pub(crate) fn diagnose_replace_failure(file_path: &str, old_string: &str) -> Str
     let norm = |s: &str| normalize_for_match(s, MatchLevel::Confusable);
 
     // Check 1: 只差大小写
-    if !old_string.trim().is_empty()
-        && content
-            .to_lowercase()
-            .contains(&old_string.to_lowercase())
+    if !old_string.trim().is_empty() && content.to_lowercase().contains(&old_string.to_lowercase())
     {
         diagnosis.push_str(
             "DIAGNOSIS: Found a case-insensitive match — old_string differs from the file only in letter case. \
@@ -715,7 +718,7 @@ pub(crate) fn diagnose_replace_failure(file_path: &str, old_string: &str) -> Str
         diagnosis.push_str(
             "DIAGNOSIS: Found a match after ignoring all whitespace — old_string has different \
              indentation or line breaks than the file. \
-             Suggestion: Read the file and copy the block verbatim, including spaces and tabs."
+             Suggestion: Read the file and copy the block verbatim, including spaces and tabs.",
         );
         return diagnosis;
     }
@@ -1429,7 +1432,11 @@ mod tests {
 
     #[test]
     fn exact_match_is_preferred_and_untouched() {
-        let r = expect_edit(FILE, "    return this.get('/alert');", "    return this.post('/alert');");
+        let r = expect_edit(
+            FILE,
+            "    return this.get('/alert');",
+            "    return this.post('/alert');",
+        );
         assert_eq!(r.occurrences, 1);
         assert_eq!(
             r.new_content,
@@ -1492,7 +1499,9 @@ mod tests {
         let old = "\tasync testAlert(): Promise<Alert> {\n\t\treturn this.get('/alert');\n\t}";
         let new = "async testAlert(): Promise<Alert> {\n  return this.head('/alert');\n}";
         let r = expect_edit(FILE, old, new);
-        assert!(r.new_content.contains("\n    return this.head('/alert');\n"));
+        assert!(r
+            .new_content
+            .contains("\n    return this.head('/alert');\n"));
         assert!(!r.new_content.contains('\t'), "制表符被写回了文件");
     }
     #[test]
@@ -1525,9 +1534,18 @@ mod tests {
         let old = "run() {\nwork();\n}";
         let r = calculate_replacement(file, old, "run() {\n  work(1);\n}");
         assert_eq!(r.occurrences, 2, "两处同形块必须如实上报");
-        let err = get_error_replace_result(&params(None), r.occurrences, 1, &r.final_old_string, &r.final_new_string)
-            .expect("多处命中且未开 replace_all 必须报错");
-        assert_eq!(err.error_type, ToolErrorType::EditExpectedOccurrenceMismatch);
+        let err = get_error_replace_result(
+            &params(None),
+            r.occurrences,
+            1,
+            &r.final_old_string,
+            &r.final_new_string,
+        )
+        .expect("多处命中且未开 replace_all 必须报错");
+        assert_eq!(
+            err.error_type,
+            ToolErrorType::EditExpectedOccurrenceMismatch
+        );
     }
 
     #[test]
@@ -1551,14 +1569,16 @@ mod tests {
         let old = "  2→  async testAlert(): Promise<Alert> {\n  3→    return this.get('/alert');\n  4→  }";
         let new = "  async testAlert(): Promise<Alert> {\n    return this.head('/alert');\n  }";
         let r = expect_edit(FILE, old, new);
-        assert!(r.new_content.contains("\n    return this.head('/alert');\n"));
+        assert!(r
+            .new_content
+            .contains("\n    return this.head('/alert');\n"));
     }
 
     // ---- 失败诊断 ---------------------------------------------------------
 
     fn temp_file(tag: &str, content: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir()
-            .join(format!("starcode-edit-{}-{}.txt", std::process::id(), tag));
+        let path =
+            std::env::temp_dir().join(format!("starcode-edit-{}-{}.txt", std::process::id(), tag));
         std::fs::write(&path, content).expect("写入临时文件失败");
         path
     }
@@ -1621,4 +1641,3 @@ mod tests {
         assert!(d.contains("Could not read file"), "{}", d);
     }
 }
-

@@ -80,10 +80,11 @@ impl ContextEngine {
         let structure = tokio::task::spawn_blocking(move || {
             let mut structure = StructureIndex::new();
 
-            let walker = ignore::WalkBuilder::new(&root)
-                .hidden(false)
-                .git_ignore(true)
-                .build();
+            // 统一口径：以前缺 `require_git(false)`（worktree / 未 git init
+            // 的项目里 `.gitignore` 失效），也没剪 `.git/` —— `hidden(false)`
+            // 之下 `.git` 内部会被整棵走一遍。
+            let walker =
+                crate::utils::file_walk::walk(&root, &crate::utils::file_walk::WalkOptions::new());
 
             for entry in walker {
                 let entry = match entry {

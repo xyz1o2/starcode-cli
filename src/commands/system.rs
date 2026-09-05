@@ -719,9 +719,59 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "permissions",
         alt_names: &[],
-        description: "View or switch approval mode",
+        description: "View permission rules or switch approval mode",
         category: "Security",
-        sub_commands: &[],
+        sub_commands: &[
+            SlashCommand {
+                name: "list",
+                alt_names: &[],
+                description: "Show active rules, sources and mode",
+                category: "Security",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "allow",
+                alt_names: &[],
+                description: "Run a matching tool call without asking",
+                category: "Security",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "ask",
+                alt_names: &[],
+                description: "Always confirm a matching tool call",
+                category: "Security",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "deny",
+                alt_names: &[],
+                description: "Never run a matching tool call",
+                category: "Security",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "remove",
+                alt_names: &[],
+                description: "Delete a rule from settings.local.json",
+                category: "Security",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "reload",
+                alt_names: &[],
+                description: "Re-read permission rules from disk",
+                category: "Security",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "deny-log",
+                alt_names: &[],
+                description: "Show denied tool calls",
+                category: "Security",
+                sub_commands: &[],
+            },
+        ],
     },
     SlashCommand {
         name: "hooks",
@@ -2459,7 +2509,10 @@ mod tests {
         for cmd in ALL_COMMANDS {
             for label in std::iter::once(cmd.name).chain(cmd.alt_names.iter().copied()) {
                 if let Some(prev) = seen.insert(label, cmd.name) {
-                    clashes.push(format!("`{}`: claimed by `{}` and `{}`", label, prev, cmd.name));
+                    clashes.push(format!(
+                        "`{}`: claimed by `{}` and `{}`",
+                        label, prev, cmd.name
+                    ));
                 }
             }
         }

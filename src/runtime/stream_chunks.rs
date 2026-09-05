@@ -166,6 +166,17 @@ pub async fn handle_stream_chunk(
             let _ = tx.send(StreamMessage::Done { message_id }).await;
             return true;
         }
+        StreamingChunkType::Error => {
+            // 返回 true 结束这一轮：错误之后没有 Done 可等，
+            // 不收尾的话流式会话会一直挂在 select 上。
+            let _ = tx
+                .send(StreamMessage::Error {
+                    message_id,
+                    error: chunk.content.unwrap_or_else(|| "Unknown error".to_string()),
+                })
+                .await;
+            return true;
+        }
         StreamingChunkType::AgentTaskUpdate => {
             if let (Some(task_id), Some(agent_type), Some(description), Some(status)) = (
                 chunk.agent_task_id,

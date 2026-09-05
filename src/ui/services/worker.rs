@@ -33,8 +33,10 @@ pub async fn agent_worker(
     let message_bus = agent.runtime_message_bus().unwrap_or_else(|| {
         use crate::core::policy::PolicyEngine;
         use crate::core::policy::PolicyEngineConfig;
+        // 兜底路径也要装载权限规则：不然 runtime 缺席时规则会静默失效
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         std::sync::Arc::new(crate::core::confirmation_bus::MessageBus::new(
-            PolicyEngine::new(PolicyEngineConfig::default()),
+            PolicyEngine::with_project_rules(PolicyEngineConfig::default(), &cwd),
             false,
         ))
     });
@@ -70,6 +72,18 @@ pub async fn agent_worker(
     }
 
     append_debug_log_line("[Worker] Started, entering main loop");
+
+    // 把启动时真正生效的审批模式告诉 UI。`ChatState` 一律以 Default 起步，
+    // 而 `--permission-mode` / `--dangerously-skip-permissions` /
+    // settings 里的 `permissions.defaultMode` 只落在了 agent 侧 ——
+    // 不补这一条，状态栏和 `/permissions` 会一直谎报 default。
+    {
+        let mode = agent.get_approval_mode();
+        if mode != crate::types::ApprovalMode::Default {
+            append_debug_log_line(&format!("[Worker] Initial approval mode: {:?}", mode));
+        }
+        let _ = tx.send(StreamMessage::ApprovalModeChanged { mode }).await;
+    }
 
     loop {
         // Priority: check steering queue first (for interrupts/steering)

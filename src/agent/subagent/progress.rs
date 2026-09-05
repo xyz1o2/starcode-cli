@@ -149,7 +149,11 @@ pub fn search_read_summary_text(
             "{} {} {}",
             verb,
             repl_count,
-            if repl_count == 1 { "snippet" } else { "snippets" }
+            if repl_count == 1 {
+                "snippet"
+            } else {
+                "snippets"
+            }
         ));
     }
     if parts.is_empty() {
@@ -338,10 +342,12 @@ impl AgentProgressTracker {
         // 与参考实现一致：统计口径是 tool_result
         self.tool_use_count = self.tool_use_count.saturating_add(1);
 
-        let (name, args) = self
-            .pending
-            .remove(&tool_call.id)
-            .unwrap_or_else(|| (tool_call.function.name.clone(), tool_call.function.arguments.clone()));
+        let (name, args) = self.pending.remove(&tool_call.id).unwrap_or_else(|| {
+            (
+                tool_call.function.name.clone(),
+                tool_call.function.arguments.clone(),
+            )
+        });
 
         match classify_tool(&name) {
             ToolKindHint::Search => self.trailing_search = self.trailing_search.saturating_add(1),
@@ -425,7 +431,10 @@ mod tests {
 
     #[test]
     fn mcp_tool_name_is_shortened() {
-        assert_eq!(user_facing_tool_name("mcp__exa__web_search"), "exa:web_search");
+        assert_eq!(
+            user_facing_tool_name("mcp__exa__web_search"),
+            "exa:web_search"
+        );
     }
 
     #[test]

@@ -141,7 +141,9 @@ pub enum StreamMessage {
         new_sub_entries: Vec<ChatEntry>,
     },
     /// 插件市场后台操作完成：`None` 表示无需提示的成功（如已注册过）
-    PluginOpResult { message: Option<String> },
+    PluginOpResult {
+        message: Option<String>,
+    },
     /// /summary、/recap 旁路生成完成（不进入主对话上下文）
     NoteGenerated {
         message_id: u64,
@@ -221,6 +223,9 @@ pub enum AgentRequest {
     },
     ToggleYoloMode,
     SetApprovalMode(crate::types::ApprovalMode),
+    /// 重新读取磁盘上的权限规则（`/permissions allow|deny|ask|remove` 改完 settings 之后）。
+    /// PolicyEngine 活在 MessageBus 里，UI 侧改不到，只能靠这条消息让运行时自己重载。
+    ReloadPermissions,
     /// 思考力度档位（Alt+T / `/effort` / 命令面板）。UI 侧只改显示，
     /// 真正让它作用到请求上要靠这条消息落到 `llm::thinking`。
     SetThinkingEffort(crate::types::ThinkingEffort),
@@ -262,10 +267,16 @@ pub enum AgentRequest {
 #[derive(Clone, Debug)]
 pub enum PluginOp {
     EnsureDefaultMarketplace,
-    AddMarketplace { source: String },
-    RemoveMarketplace { name: String },
+    AddMarketplace {
+        source: String,
+    },
+    RemoveMarketplace {
+        name: String,
+    },
     /// 更新 marketplace 内容（官方走 GCS 比对，其他重新 clone）
-    UpdateMarketplace { name: String },
+    UpdateMarketplace {
+        name: String,
+    },
     InstallPlugin {
         plugin: crate::core::plugins::marketplace::MarketplacePlugin,
         /// 安装范围："user" 或 "project"（对标 Claude Code）

@@ -1,8 +1,7 @@
 /// 技能学习系统
-/// 
+///
 /// 对标claude-code-main的src/services/skillLearning/
 /// 自动从用户行为中学习和进化技能
-
 pub mod evolution;
 pub mod generator;
 pub mod instinct;
@@ -13,7 +12,7 @@ pub mod storage;
 pub use evolution::SkillEvolution;
 pub use generator::SkillGenerator;
 pub use instinct::{InstinctParser, InstinctStore};
-pub use observer::{SkillObserver, Observation};
+pub use observer::{Observation, SkillObserver};
 pub use policy::LearningPolicy;
 pub use storage::SkillStorage;
 

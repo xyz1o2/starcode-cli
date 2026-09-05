@@ -175,6 +175,45 @@ fn test_description_key_matches_active_tools() {
     ));
 }
 
+/// 每个映射键都必须对应磁盘上真实存在的 `.md`。
+///
+/// `Grep`/`Glob`/`ListDir`/`SemanticSearch`/`ProjectMap` 五个键原来写的是工具
+/// 注册名（`"Grep" => "Grep"`），而文件叫 `tool-description-grep.md` —— 大小写
+/// 不匹配，于是 schema 描述静默回退到 Rust 默认串，正文也进不了 bundle。
+#[test]
+fn every_mapped_description_key_has_a_file() {
+    for (tool, key) in tool_descriptions::registered_tool_keys() {
+        let filename = format!("tool-description-{}.md", key);
+        assert!(
+            loader::try_load_prompt(&filename).is_some(),
+            "tool {tool:?} maps to key {key:?} but {filename} does not exist"
+        );
+        assert!(
+            tool_descriptions::resolve_tool_description(tool).is_some(),
+            "tool {tool:?} should resolve a schema description from {filename}"
+        );
+    }
+}
+
+/// bundle 过滤器传进来的是**小写化后的文件名**（`prompt_builder.rs:251`），
+/// 所以映射值必须是小写，否则正文永远进不了系统提示词。
+#[test]
+fn search_tool_bodies_reach_the_prompt_bundle() {
+    let active = HashSet::from([
+        "Grep".to_string(),
+        "Glob".to_string(),
+        "ListDir".to_string(),
+        "SemanticSearch".to_string(),
+        "ProjectMap".to_string(),
+    ]);
+    for key in ["grep", "glob", "ls", "semantic_search", "projectmap"] {
+        assert!(
+            tool_descriptions::description_key_matches_active_tools(key, &active),
+            "{key} body should be included when its tool is active"
+        );
+    }
+}
+
 #[test]
 fn test_scope_strategy_loaded_from_file() {
     let template = loader::load_prompt("scope-strategy.md");

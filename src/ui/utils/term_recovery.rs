@@ -35,10 +35,7 @@ pub fn reenable_mouse_capture() {
     if mouse_capture_disabled_by_env() {
         return;
     }
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        crossterm::event::EnableMouseCapture
-    );
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
 }
 
 /// Attempt to recover terminal to a usable state.

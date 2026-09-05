@@ -9,7 +9,11 @@ use ratatui::{
     text::{Line, Span},
 };
 
-pub fn render_plugins_modal(f: &mut ratatui::Frame<'_>, area: ratatui::prelude::Rect, state: &ChatState) {
+pub fn render_plugins_modal(
+    f: &mut ratatui::Frame<'_>,
+    area: ratatui::prelude::Rect,
+    state: &ChatState,
+) {
     let Some(Modal::Plugins { tab }) = state.top_modal() else {
         return;
     };
@@ -62,7 +66,9 @@ pub fn render_plugins_modal(f: &mut ratatui::Frame<'_>, area: ratatui::prelude::
         lines.push(Line::from(vec![
             Span::styled(
                 text,
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(hint, Style::default().fg(Color::DarkGray)),
         ]));
@@ -71,10 +77,9 @@ pub fn render_plugins_modal(f: &mut ratatui::Frame<'_>, area: ratatui::prelude::
     render_body(f, body, lines);
 
     let hints: &[(&str, &str)] = match tab {
-        PluginTab::Discover if state.plugin_detail.is_some() => &[
-            ("Enter/i", "install"),
-            ("Esc", "back to list"),
-        ],
+        PluginTab::Discover if state.plugin_detail.is_some() => {
+            &[("Enter/i", "install"), ("Esc", "back to list")]
+        }
         PluginTab::Discover => &[
             ("↑↓", "select"),
             ("Type", "filter"),
@@ -322,10 +327,7 @@ fn installed_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
         lines.push(Line::from(vec![
             Span::raw("  "),
             plugin_status_icon(p.entry.enabled),
-            Span::styled(
-                format!(" {:<22}", truncate_str(&p.entry.name, 22)),
-                style,
-            ),
+            Span::styled(format!(" {:<22}", truncate_str(&p.entry.name, 22)), style),
             Span::styled(
                 format!(" {:<8}", truncate_str(&p.entry.install_type, 8)),
                 if selected {
@@ -361,7 +363,9 @@ fn detail_lines(state: &ChatState, _body_h: u16) -> Vec<Line<'static>> {
 
     lines.push(Line::from(Span::styled(
         format!("  {}", p.name),
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
     )));
     let mut meta: Vec<String> = Vec::new();
     if !p.version.is_empty() {
@@ -433,10 +437,7 @@ fn marketplaces_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
         let style = row_style(0, if selected { 0 } else { usize::MAX });
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(
-                "＋ Add marketplace…".to_string(),
-                style,
-            ),
+            Span::styled("＋ Add marketplace…".to_string(), style),
             Span::styled(
                 "  (git URL / GitHub owner/repo / local path)",
                 Style::default().fg(Color::DarkGray),
@@ -459,10 +460,7 @@ fn marketplaces_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
         lines.push(Line::from(vec![
             Span::raw("  "),
             Span::styled("●", Style::default().fg(Color::Green)),
-            Span::styled(
-                format!(" {:<22}", truncate_str(&m.name, 22)),
-                style,
-            ),
+            Span::styled(format!(" {:<22}", truncate_str(&m.name, 22)), style),
             Span::styled(
                 format!(" {} plugins", count),
                 Style::default().fg(Color::DarkGray),
@@ -483,7 +481,10 @@ fn marketplaces_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
 /// 错误分类（对标 Claude Code PluginErrors.tsx 的错误类型 + 可重试性）
 fn classify_plugin_error(err: &str) -> (&'static str, bool, Color) {
     let e = err.to_lowercase();
-    if e.contains("authentication") || e.contains("auth") || e.contains("permission denied (os") && e.contains("git") {
+    if e.contains("authentication")
+        || e.contains("auth")
+        || e.contains("permission denied (os") && e.contains("git")
+    {
         ("git-auth", false, Color::Red)
     } else if e.contains("timed out") || e.contains("timeout") {
         ("git-timeout", true, Color::Yellow)
@@ -527,10 +528,7 @@ fn errors_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
             Span::styled("✗", Style::default().fg(Color::Red)),
             Span::styled(format!(" {} ", kind), Style::default().fg(color)),
             Span::styled(format!(" {}: ", name), style),
-            Span::styled(
-                truncate_str(err, 48),
-                Style::default().fg(Color::Yellow),
-            ),
+            Span::styled(truncate_str(err, 48), Style::default().fg(Color::Yellow)),
             if retryable {
                 Span::styled("  [R]", Style::default().fg(Color::Cyan))
             } else {

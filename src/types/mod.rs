@@ -834,6 +834,16 @@ impl StreamingChunk {
         Self::new(StreamingChunkType::Done)
     }
 
+    /// 调用失败。`content` 放最终要给用户看的那段文字
+    /// （通常是 `llm::error_kind::diagnose` 的输出）。
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            chunk_type: StreamingChunkType::Error,
+            content: Some(message.into()),
+            ..Default::default()
+        }
+    }
+
     /// Agent 任务更新
     pub fn agent_task_update(payload: AgentTaskUpdatePayload) -> Self {
         Self {
@@ -998,13 +1008,18 @@ pub enum StreamingChunkType {
     ToolCalls,
     ToolResult,
     Done,
+    /// 调用失败。必须和 `Content` 分开：以前 `AgentEvent::Error` 被塞成
+    /// `Content("[Error] …")`，于是它只是助手回答里的一行字 —— 不触发错误分类、
+    /// 不开重试浮层、不清理 processing 状态。走这一路才能变成
+    /// `StreamMessage::Error`。
+    Error,
     TokenCount,
     // ============ 智能化改进 10: 工具执行进度反馈 ============
     ToolProgress, // 工具执行进度提示
     // ============ 进度反馈类型完成 ============
     // ============ UX 改进: 工具确认 ============
     ToolConfirmation, // 工具执行确认请求
-                      // ============================================
+    // ============================================
     // ============ Agent 任务 UI ============
     AgentTaskUpdate, // Agent 任务生命周期更新
                      // ============================================

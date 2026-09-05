@@ -1549,8 +1549,7 @@ pub async fn add_dir(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandR
         ctx.state.close_palette();
         ctx.state.show_input_modal = true;
         ctx.state.input_modal_title = "Add Working Directory".to_string();
-        ctx.state.input_modal_prompt =
-            "Enter a directory path to add to this session:".to_string();
+        ctx.state.input_modal_prompt = "Enter a directory path to add to this session:".to_string();
         ctx.state.input_modal_value = String::new();
 
         let mut textarea = tui_textarea::TextArea::default();
@@ -1560,8 +1559,7 @@ pub async fn add_dir(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandR
             ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
         );
         ctx.state.modal_textarea = textarea;
-        ctx.state.input_context =
-            Some(crate::ui::state::palette::InputContext::AddWorkingDir);
+        ctx.state.input_context = Some(crate::ui::state::palette::InputContext::AddWorkingDir);
         return Ok(());
     }
 
@@ -1658,7 +1656,10 @@ fn pick_fast_model(state: &crate::ui::state::ChatState) -> Option<String> {
 /// 开启时若当前不是轻量模型则自动切换，关闭时恢复原模型。
 /// 会话级开关（不持久化 —— 启动模型路由涉及异步模型列表，后续再补）。
 pub async fn fast(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
-    let action = args.first().map(|s| s.to_lowercase()).unwrap_or_else(|| "toggle".into());
+    let action = args
+        .first()
+        .map(|s| s.to_lowercase())
+        .unwrap_or_else(|| "toggle".into());
     let enable = match action.as_str() {
         "on" | "enable" | "true" => true,
         "off" | "disable" | "false" => false,
@@ -1705,11 +1706,13 @@ pub async fn fast(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
             ctx.state.current_model = fast_model.clone();
             switched = format!(" · model set to {}", fast_model);
         }
-        ctx.state.current_status_line =
-            Some(format!("⚡ Fast mode ON{}", switched));
+        ctx.state.current_status_line = Some(format!("⚡ Fast mode ON{}", switched));
         push_msg(
             &mut ctx,
-            format!("⚡ Fast mode ON{}\n\nResponses will be optimized for speed.", switched),
+            format!(
+                "⚡ Fast mode ON{}\n\nResponses will be optimized for speed.",
+                switched
+            ),
         );
     } else {
         ctx.state.fast_mode = false;
@@ -1755,10 +1758,7 @@ pub async fn fork(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
         return Ok(());
     }
 
-    let fork_id = format!(
-        "fork-{}",
-        chrono::Local::now().format("%Y%m%d-%H%M%S")
-    );
+    let fork_id = format!("fork-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
     match crate::utils::session_manager::save_session(&fork_id, &history).await {
         Ok(()) => {
             let mut msg = format!(
@@ -1781,7 +1781,9 @@ pub async fn fork(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
                         message: prompt,
                     })
                     .await;
-                msg.push_str("\n\nPrompt queued — it will run after the current response finishes.");
+                msg.push_str(
+                    "\n\nPrompt queued — it will run after the current response finishes.",
+                );
             }
             push_msg(&mut ctx, msg);
         }

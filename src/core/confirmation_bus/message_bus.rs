@@ -42,6 +42,22 @@ impl MessageBus {
         policy_engine.set_approval_mode(mode);
     }
 
+    /// 重新从磁盘装载权限规则。PolicyEngine 只活在这里，UI 改完 settings 必须走这一趟。
+    pub async fn reload_permission_rules(&self, cwd: &std::path::Path) -> usize {
+        let mut policy_engine = self.policy_engine.write().await;
+        policy_engine.load_project_permissions(cwd);
+        policy_engine.settings_permissions().rule_count()
+    }
+
+    /// 当前生效的 settings 权限规则快照，给 `/permissions list` 用。
+    pub async fn settings_permissions(&self) -> crate::core::policy::SettingsPermissions {
+        self.policy_engine
+            .read()
+            .await
+            .settings_permissions()
+            .clone()
+    }
+
     pub async fn check_tool_policy(
         &self,
         tool_call: &crate::core::policy::FunctionCall,

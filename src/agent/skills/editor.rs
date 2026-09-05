@@ -50,10 +50,15 @@ impl EditorAgent {
             None => return Ok(None),
         };
 
-        let message_bus = self
-            .config
-            .runtime_message_bus()
-            .unwrap_or_else(|| Arc::new(MessageBus::new(PolicyEngine::default(), false)));
+        let message_bus = self.config.runtime_message_bus().unwrap_or_else(|| {
+            Arc::new(MessageBus::new(
+                crate::core::policy::PolicyEngine::with_project_rules(
+                    Default::default(),
+                    self.config.project_root(),
+                ),
+                false,
+            ))
+        });
         let global_state = self
             .config
             .runtime_global_state()

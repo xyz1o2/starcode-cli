@@ -9,7 +9,6 @@
 /// 4. Supports custom output format
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{sinks::UTF8, SearcherBuilder};
-use ignore::{DirEntry, WalkBuilder};
 use std::sync::{Arc, Mutex};
 
 use crate::core::tools::tools::SearchResult;
@@ -46,7 +45,8 @@ impl Default for RipgrepConfig {
             file_types: None,
             exclude_patterns: None,
             include_patterns: None,
-            include_hidden: false,
+            // dotfile 默认可见 —— 对齐 Claude Code（`GrepTool.ts` 恒传 `--hidden`）。
+            include_hidden: true,
             max_file_size: Some(2 * 1024 * 1024), // 2MB
         }
     }
@@ -77,38 +77,23 @@ pub fn search_with_ripgrep(
         matcher_builder.build(&escaped)?
     };
 
-    // Build Walker (file traversal)
-    let mut walker_builder = WalkBuilder::new(base_dir);
-
-    walker_builder
-        .follow_links(true)
-        .hidden(!config.include_hidden)
-        .git_ignore(true)
-        .git_global(false)
-        .git_exclude(false)
-        .require_git(false);
-
-    // Add exclude patterns
+    // Build Walker —— 走 `utils::file_walk` 的统一口径（dotfile 默认可见、
+    // 只剪 6 个 VCS 目录、`.gitignore`/`.starignore` 生效）。
+    let root = std::path::Path::new(base_dir);
+    let mut walk_opts = crate::utils::file_walk::WalkOptions::new()
+        .hidden(config.include_hidden)
+        .case_sensitive(config.case_sensitive)
+        .follow_links(true);
     if let Some(ref excludes) = config.exclude_patterns {
-        for pattern in excludes {
-            walker_builder.add_ignore(pattern);
-        }
+        // 以前这些 pattern 被喂给 `add_ignore()` —— 那个参数是"忽略文件的
+        // 路径"，不是 pattern，所以整段是静默 no-op。
+        walk_opts = walk_opts.exclude(excludes.clone());
     }
-
-    /*
-    // Add include patterns
     if let Some(ref includes) = config.include_patterns {
-        println!("DEBUG: Include patterns: {:?}", includes);
-        let mut override_builder = ignore::overrides::OverrideBuilder::new(base_dir);
-        for pattern in includes {
-            override_builder.add(pattern)?;
-        }
-        walker_builder.overrides(override_builder.build()?);
+        walk_opts = walk_opts.include(includes.clone());
     }
-    */
-
-    // General exclusions
-    walker_builder.filter_entry(move |entry| !should_skip_entry(entry));
+    let include_matcher = crate::utils::file_walk::include_matcher(&walk_opts);
+    let walker = crate::utils::file_walk::walk(root, &walk_opts);
 
     // Build Searcher
     let mut searcher_builder = SearcherBuilder::new();
@@ -129,7 +114,7 @@ pub fn search_with_ripgrep(
     let current_count = Arc::new(Mutex::new(0u32));
 
     // Traverse files and search
-    for result in walker_builder.build() {
+    for result in walker {
         let entry = match result {
             Ok(e) => e,
             Err(_) => continue,
@@ -170,21 +155,10 @@ pub fn search_with_ripgrep(
             }
         }
 
-        // Manually check include patterns
-        if let Some(ref includes) = config.include_patterns {
-            let path_str = entry.path().to_string_lossy();
-            let path_normalized = path_str.replace("\\", "/");
-            let mut matched = false;
-            for pattern in includes {
-                let pattern_normalized = pattern.replace("\\", "/");
-                // Simple match: if path contains the pattern (assuming pattern is part of the path)
-                // This is not perfect glob matching but works for file paths passed as include_pattern
-                if path_normalized.contains(&pattern_normalized) {
-                    matched = true;
-                    break;
-                }
-            }
-            if !matched {
+        // include pattern：真正的 glob 匹配。以前是 `path.contains(pattern)`
+        // 的子串比较 —— `*.rs` 这种正常写法永远匹配不到任何东西。
+        if let Some(ref matcher) = include_matcher {
+            if !crate::utils::file_walk::glob_matches(matcher, root, entry.path()) {
                 continue;
             }
         }
@@ -240,32 +214,4 @@ pub fn search_with_ripgrep(
     };
 
     Ok(results)
-}
-
-/// Determine whether a directory entry should be skipped
-fn should_skip_entry(entry: &DirEntry) -> bool {
-    let ignored_dirs = [
-        "node_modules",
-        ".git",
-        ".svn",
-        ".hg",
-        "dist",
-        "build",
-        ".next",
-        ".cache",
-        "target",
-        ".idea",
-        ".vscode",
-        "target/debug",
-        "target/release",
-    ];
-
-    if let Some(file_name) = entry.file_name().to_str() {
-        // Skip common build directories
-        if ignored_dirs.contains(&file_name) {
-            return true;
-        }
-    }
-
-    false
 }

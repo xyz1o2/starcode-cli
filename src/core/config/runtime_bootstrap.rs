@@ -31,8 +31,16 @@ pub async fn build_runtime_services(
     let message_bus = existing_runtime
         .map(|runtime| runtime.message_bus())
         .unwrap_or_else(|| {
+            // 唯一真正参与运行时的 PolicyEngine 构造点：审批模式和磁盘上的权限规则
+            // 都得在这里灌进去，否则用户在 settings.json 里配的 allow/deny 形同废纸。
             Arc::new(MessageBus::new(
-                PolicyEngine::new(PolicyEngineConfig::default()),
+                PolicyEngine::with_project_rules(
+                    PolicyEngineConfig {
+                        approval_mode: Some(config.approval_mode().clone()),
+                        ..Default::default()
+                    },
+                    config.project_root(),
+                ),
                 config.debug_mode(),
             ))
         });

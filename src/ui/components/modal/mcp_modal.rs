@@ -8,7 +8,11 @@ use ratatui::{
     text::{Line, Span},
 };
 
-pub fn render_mcp_modal(f: &mut ratatui::Frame<'_>, area: ratatui::prelude::Rect, state: &ChatState) {
+pub fn render_mcp_modal(
+    f: &mut ratatui::Frame<'_>,
+    area: ratatui::prelude::Rect,
+    state: &ChatState,
+) {
     let Some(Modal::Mcp { view }) = state.top_modal() else {
         return;
     };
@@ -135,8 +139,16 @@ fn mcp_list_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
         lines.push(Line::from(spans));
     }
 
-    let enabled = state.mcp_modal_servers.iter().filter(|r| !r.disabled).count();
-    let connected = state.mcp_modal_servers.iter().filter(|r| r.connected).count();
+    let enabled = state
+        .mcp_modal_servers
+        .iter()
+        .filter(|r| !r.disabled)
+        .count();
+    let connected = state
+        .mcp_modal_servers
+        .iter()
+        .filter(|r| r.connected)
+        .count();
     lines.push(Line::from(Span::styled(
         format!(
             "  {} servers · {} connected · {} enabled",
@@ -180,7 +192,10 @@ fn mcp_menu_lines(state: &ChatState, name: &str) -> Vec<Line<'static>> {
         } else {
             "offline"
         };
-        spans.push(Span::styled(st.to_string(), Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            st.to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
         lines.push(Line::from(spans));
         lines.push(Line::from(""));
     }

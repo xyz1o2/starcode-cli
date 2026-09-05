@@ -33,11 +33,7 @@ pub struct DeferredRuntimeActions {
         Option<String>,
     )>,
     pub pending_compress_request: Option<u64>,
-    pub pending_generate_note: Option<(
-        crate::runtime::messages::NoteKind,
-        u64,
-        Option<String>,
-    )>,
+    pub pending_generate_note: Option<(crate::runtime::messages::NoteKind, u64, Option<String>)>,
     pub pending_mark_as_read: Vec<String>,
     /// 流式过程中收到的 `!command` 输出：等这一轮结束再追加进上下文，
     /// 免得在 agent 正读 session_messages 的时候插队改它。
@@ -211,6 +207,17 @@ pub async fn handle_streaming_request(
         }
         Some(AgentRequest::SetApprovalMode(mode)) => {
             deferred.pending_set_approval_mode = Some(mode);
+            StreamingRequestOutcome::Continue
+        }
+        Some(AgentRequest::ReloadPermissions) => {
+            // 不推迟：用户刚在 `/permissions allow` 里放行的规则，同一回合的下一个
+            // 工具调用就该认。重载走 PolicyEngine 的写锁，和检查路径互不阻塞。
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let count = context.message_bus.reload_permission_rules(&cwd).await;
+            append_debug_log_line(&format!(
+                "[Worker/Streaming] permission rules reloaded ({} settings rules)",
+                count
+            ));
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::SetThinkingEffort(effort)) => {

@@ -1,7 +1,6 @@
 /// 技能存储
-/// 
+///
 /// 持久化存储技能
-
 use super::Skill;
 use std::collections::HashMap;
 
@@ -49,11 +48,15 @@ impl SkillStorage {
         if let Some(skill) = self.skills.get_mut(skill_id) {
             skill.usage_count += 1;
             skill.last_used_at = Some(chrono::Utc::now().timestamp());
-            
+
             // 更新成功率
             let total = skill.usage_count as f64;
             let current_successes = skill.success_rate * (total - 1.0);
-            let new_successes = if success { current_successes + 1.0 } else { current_successes };
+            let new_successes = if success {
+                current_successes + 1.0
+            } else {
+                current_successes
+            };
             skill.success_rate = new_successes / total;
         }
     }
@@ -62,7 +65,9 @@ impl SkillStorage {
     pub fn cleanup_expired(&mut self, max_age_secs: i64) {
         let cutoff = chrono::Utc::now().timestamp() - max_age_secs;
         self.skills.retain(|_, skill| {
-            skill.last_used_at.map_or(true, |last_used| last_used > cutoff)
+            skill
+                .last_used_at
+                .map_or(true, |last_used| last_used > cutoff)
         });
     }
 }

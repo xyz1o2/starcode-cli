@@ -716,23 +716,29 @@ impl RecoveryManager {
         RecoveryAction::CircuitBreakerCooldown(Duration::from_secs(backoff_secs))
     }
 
+    /// 流式失败的兜底阶梯。
+    ///
+    /// 注意这里**不再压缩上下文** —— 走到这一步的错误已经被
+    /// `LlmErrorKind` 排除了上下文超限和可退避的网络/5xx，剩下的是认不出来的
+    /// 协议级失败。为一个不明原因的断流去压缩上下文，代价是永久丢历史，
+    /// 而收益（万一真是长度问题）已经由 `PromptTooLong` 那条路覆盖了。
     fn handle_streaming_error(&mut self, _context: &RecoveryContext) -> RecoveryAction {
         let count = self.retry_counts.get("streaming").copied().unwrap_or(0);
 
-        if count == 0 {
-            self.retry_counts.insert("streaming".to_string(), 1);
-            return RecoveryAction::CompactAndRetry;
-        }
-
-        if count == 1 {
-            self.retry_counts.insert("streaming".to_string(), 2);
-            // 尝试非流式模式
+        if count < 2 {
+            self.retry_counts.insert("streaming".to_string(), count + 1);
+            // 让模型知道上一轮是断流而不是它答错了，否则它会把不完整的
+            // 回答当成已完成，接着往下走。
             return RecoveryAction::InjectRecoveryMessage(
-                "Switching to non-streaming mode for reliability.".to_string(),
+                "The previous response was interrupted by a stream failure, not by you. \
+                 Resume from where the output stopped."
+                    .to_string(),
             );
         }
 
-        RecoveryAction::StopWithError("Streaming failed after retry".to_string())
+        RecoveryAction::StopWithError(
+            "the stream failed repeatedly and could not be classified".to_string(),
+        )
     }
 
     fn handle_tool_loop(

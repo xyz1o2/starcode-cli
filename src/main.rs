@@ -367,7 +367,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             err
         })?)
     } else {
-        None
+        // settings.json 里的 `permissions.defaultMode`（对标 Claude Code）。
+        // 优先级低于 CLI flag，高于内置默认值。
+        crate::core::policy::SettingsPermissions::from_project(&cwd)
+            .default_mode
+            .as_deref()
+            .and_then(crate::core::policy::approval_mode_from_str)
     };
 
     // 创建 Config
@@ -412,7 +417,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         accessibility: None,
         telemetry: None,
         usage_statistics_enabled: None,
-        file_filtering: None,
+        // settings.json 的 `fileFiltering` —— 之前这里恒为 None，
+        // `Config::file_filtering()` 拿到的永远是硬编码默认值。
+        file_filtering: settings.file_filtering.clone(),
         checkpointing: None,
         proxy: None,
         disable_model_router_for_auth: None,
@@ -658,16 +665,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn parse_cli_approval_mode(
     input: &str,
 ) -> Result<crate::core::policy::types::ApprovalMode, String> {
-    let normalized = input.trim().to_lowercase();
-    match normalized.as_str() {
-        "default" | "acceptedits" => Ok(crate::core::policy::types::ApprovalMode::Default),
-        "plan" | "readonly" => Ok(crate::core::policy::types::ApprovalMode::Plan),
-        "yolo" | "bypasspermissions" => Ok(crate::core::policy::types::ApprovalMode::Yolo),
-        _ => Err(format!(
+    // 别名口径和 `permissions.defaultMode`、`/permissions <mode>` 共用一份。
+    crate::core::policy::approval_mode_from_str(input).ok_or_else(|| {
+        format!(
             "invalid --permission-mode `{}` (expected: default|plan|yolo|acceptEdits|bypassPermissions)",
             input
-        )),
-    }
+        )
+    })
 }
 
 /// Headless mode: process a single prompt and output results

@@ -102,14 +102,13 @@ pub fn footer_hints(hints: &[(&str, &str)]) -> Line<'static> {
     let mut spans: Vec<Span> = vec![Span::raw(" ")];
     for (i, (key, label)) in hints.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(
-                "  ·  ",
-                Style::default().fg(Color::DarkGray),
-            ));
+            spans.push(Span::styled("  ·  ", Style::default().fg(Color::DarkGray)));
         }
         spans.push(Span::styled(
             key.to_string(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
             format!(" {}", label),
@@ -123,16 +122,10 @@ pub fn footer_hints(hints: &[(&str, &str)]) -> Line<'static> {
 /// it also works in colorblind mode).
 pub fn status_spans(connected: bool, disabled: bool) -> Vec<Span<'static>> {
     if disabled {
-        return vec![Span::styled(
-            "○",
-            Style::default().fg(Color::DarkGray),
-        )];
+        return vec![Span::styled("○", Style::default().fg(Color::DarkGray))];
     }
     if connected {
-        return vec![Span::styled(
-            "●",
-            Style::default().fg(Color::Green),
-        )];
+        return vec![Span::styled("●", Style::default().fg(Color::Green))];
     }
     vec![Span::styled("✗", Style::default().fg(Color::Red))]
 }

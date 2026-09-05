@@ -397,11 +397,19 @@ pub enum ImportFormat {
     Flat,
 }
 
+/// 文件遍历过滤开关。settings.json 里写 `"fileFiltering": { … }`，
+/// 由 `utils::file_walk::WalkOptions::with_file_filtering` 消费。
+/// `respectGitignore` 是 Claude Code 的写法，留作别名。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FileFiltering {
+    #[serde(alias = "respectGitIgnore", alias = "respectGitignore")]
     pub respect_git_ignore: Option<bool>,
+    #[serde(alias = "respectStarIgnore")]
     pub respect_star_ignore: Option<bool>,
+    #[serde(alias = "enableRecursiveFileSearch")]
     pub enable_recursive_file_search: Option<bool>,
+    #[serde(alias = "disableFuzzySearch")]
     pub disable_fuzzy_search: Option<bool>,
 }
 

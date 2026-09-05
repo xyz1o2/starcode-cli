@@ -250,11 +250,7 @@ impl StarAgent {
             if role != "user" && role != "assistant" && role != "tool" {
                 continue;
             }
-            let content = msg
-                .content
-                .as_deref()
-                .unwrap_or("[tool calls]")
-                .trim();
+            let content = msg.content.as_deref().unwrap_or("[tool calls]").trim();
             if content.is_empty() {
                 continue;
             }
@@ -490,11 +486,11 @@ impl StarAgent {
                         total,
                     })),
                     AgentEvent::Error(err) => {
-                        Some(StreamingChunk {
-                            chunk_type: StreamingChunkType::Content,
-                            content: Some(format!("[Error] {}", err)),
-                            ..Default::default()
-                        })
+                        // 走 Error 通道而不是伪装成一段助手文本 —— 只有这一路
+                        // 才会触发 UI 的错误分类、清理 processing 状态、
+                        // 并按可重试性决定要不要开重试浮层。
+                        streamed_text_buf.clear();
+                        Some(StreamingChunk::error(err))
                     }
                     AgentEvent::TurnFinished | AgentEvent::Done => {
                         streamed_text_buf.clear();

@@ -354,7 +354,18 @@ impl Agent {
                         if let Some(event_name) =
                             trace.get("event").and_then(|value| value.as_str())
                         {
-                            // Trace events are handled by the caller
+                            // 转发给 UI。以前这里直接 continue（注释说"由调用方处理"，
+                            // 但调用方拿到的是已经被这层吃掉的流），于是 provider 层
+                            // 想告诉用户的事 —— 比如"流式失败，已降级为非流式" ——
+                            // 一律进不了界面。
+                            let payload = trace
+                                .get("payload")
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+                            self.emit_event(AgentEvent::Trace {
+                                event: event_name.to_string(),
+                                payload,
+                            });
                             continue;
                         }
                     }
@@ -704,6 +715,14 @@ impl Agent {
     }
 
     // 处理 LLM 错误
+    //
+    // 分三条路走，别混在一起：
+    //   1. 终止类（认证 / 欠费 / 请求非法）—— 立刻停，带上"怎么修"。
+    //      重试和压缩对它们毫无作用，只会把同一个错误重复三遍再报出来。
+    //   2. 可重试类（网络抖动 / 5xx / 过载）—— 自己做指数退避 + 抖动，
+    //      每次等待都发 Trace 让状态栏有字，别让 UI 看起来像卡死。
+    //   3. 其余（限流 / 上下文超限 / 认不出来）—— 交给 RecoveryManager
+    //      的策略阶梯（切 provider、压缩、冷却）。
     pub(crate) async fn handle_llm_error(
         &mut self,
         err_str: String,
@@ -714,6 +733,8 @@ impl Agent {
         estimated_tokens: usize,
         context_window: usize,
     ) -> LlmResult {
+        use crate::llm::error_kind::{diagnose, retry_after_secs, LlmErrorKind};
+
         let recovery_context = RecoveryContext {
             current_tokens: estimated_tokens,
             max_tokens: context_window,
@@ -726,23 +747,49 @@ impl Agent {
         };
 
         // 记录原始错误，便于诊断流式失败的根本原因
+        let kind = LlmErrorKind::classify(&err_str);
         let err_preview: String = err_str.chars().take(300).collect();
         crate::utils::logging::append_debug_log_line(&format!(
-            "[LLM_ERROR] turn={} error={}",
-            current_turn, err_preview,
+            "[LLM_ERROR] turn={} kind={:?} error={}",
+            current_turn, kind, err_preview,
         ));
 
-        let agent_error = if err_str.contains("context window exceeds")
-            || err_str.contains("context_length_exceeded")
-        {
-            AgentError::PromptTooLong
-        } else if err_str.contains("max_output_tokens") {
-            AgentError::MaxOutputTokens
-        } else if err_str.contains("rate_limit") || err_str.contains("429") {
-            AgentError::RateLimit
-        } else {
-            AgentError::StreamingError
+        // ── 1. 终止类：重试改变不了结果，立刻把原因和下一步交给用户 ──
+        if kind.is_terminal() {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[LLM_ERROR] terminal ({}) — not retrying",
+                kind.label(),
+            ));
+            self.emit_retry_status(&format!("{} — stopping", kind.label()));
+            return LlmResult::Error(AgentEvent::Error(diagnose(&err_str)));
+        }
+
+        // ── 2. 可重试类：真正的退避重试，退避期间有可见反馈 ──
+        // 只覆盖"等一会儿就能好"的错误。限流交给下面的 RecoveryManager ——
+        // 它还会顺手切 provider，比单纯等待强。
+        if matches!(
+            kind,
+            LlmErrorKind::Network | LlmErrorKind::ServerError | LlmErrorKind::Overloaded
+        ) {
+            // `None` 表示次数用尽：不返回，落到下面的 RecoveryManager，
+            // 让它决定切 provider 还是收尾。
+            if let Some(result) = self
+                .backoff_retry(&err_str, kind, recovery_manager, current_turn)
+                .await
+            {
+                return result;
+            }
+        }
+
+        let agent_error = match kind {
+            LlmErrorKind::ContextWindow => AgentError::PromptTooLong,
+            LlmErrorKind::RateLimit => AgentError::RateLimit,
+            _ if err_str.contains("max_output_tokens") => AgentError::MaxOutputTokens,
+            _ => AgentError::StreamingError,
         };
+
+        // 服务端给了 Retry-After 就听它的，比本地猜的退避准
+        let server_delay = retry_after_secs(&err_str);
 
         match recovery_manager.handle_error(&agent_error, &recovery_context) {
             RecoveryAction::CompactAndRetry => {
@@ -846,27 +893,37 @@ impl Agent {
                     "[RECOVERY] Stopping with error: {}",
                     error_msg
                 ));
-                if err_str.contains("context window exceeds")
-                    || err_str.contains("context_length_exceeded")
-                {
+                if kind == LlmErrorKind::ContextWindow {
                     crate::agent::model_catalog::halve_cached_context_window(
                         self.client.get_current_model(),
                     );
                     LlmResult::Error(AgentEvent::Error(format!(
-                        "上下文窗口超限，已自动降低窗口大小。请重试（系统将使用更激进的压缩策略）。\nContext window exceeded, auto-reduced window size. Please retry.\nStream error: {}",
+                        "Context Overflow: the request exceeded the context window, so the cached \
+                         window size was halved. Retry — compaction will be more aggressive. \
+                         You can also run `/compact` first.\nOriginal error: {}",
                         err_str
                     )))
                 } else {
-                    LlmResult::Error(AgentEvent::Error(format!("Stream error: {}", err_str)))
+                    // 带上恢复层放弃的原因，否则用户只看到一句 "Stream error"，
+                    // 不知道背后已经试过压缩 / 切 provider / 冷却。
+                    LlmResult::Error(AgentEvent::Error(format!(
+                        "{}\nRecovery gave up: {}",
+                        diagnose(&err_str),
+                        error_msg
+                    )))
                 }
             }
-            RecoveryAction::Continue => {
-                LlmResult::Error(AgentEvent::Error(format!("Stream error: {}", err_str)))
-            }
+            RecoveryAction::Continue => LlmResult::Error(AgentEvent::Error(diagnose(&err_str))),
             RecoveryAction::CircuitBreakerCooldown(duration) => {
+                // 服务端说等多久就等多久（429 常带 Retry-After），只在它比
+                // 本地阶梯更长时采纳 —— 更短的值往往会立刻再撞一次限流。
+                let duration = match server_delay {
+                    Some(secs) => duration.max(std::time::Duration::from_secs(secs)),
+                    None => duration,
+                };
                 crate::utils::logging::append_debug_log_line(&format!(
-                    "[RECOVERY] Circuit breaker cooldown: {:?}",
-                    duration
+                    "[RECOVERY] Circuit breaker cooldown: {:?} (server hint: {:?})",
+                    duration, server_delay,
                 ));
                 // Send periodic heartbeats during cooldown so the UI's STALL
                 // watchdog doesn't clear is_processing (30s threshold).
@@ -874,6 +931,11 @@ impl Agent {
                 let heartbeat_interval = std::time::Duration::from_secs(5);
                 let mut remaining = duration;
                 while remaining > std::time::Duration::ZERO {
+                    if self.is_aborted() {
+                        return LlmResult::Error(AgentEvent::Error(
+                            "Cancelled during rate-limit cooldown.".to_string(),
+                        ));
+                    }
                     let wait = remaining.min(heartbeat_interval);
                     self.emit_event(crate::agent::messaging::AgentEvent::Trace {
                         event: "agent_status".to_string(),
@@ -957,5 +1019,137 @@ impl Agent {
             wait_secs
         ));
         tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+    }
+
+    /// 用户是否按了中断。退避等待可能长达数十秒，期间必须能被打断，
+    /// 否则 Ctrl+C 之后 UI 已经收手了，这里还在傻等。
+    fn is_aborted(&self) -> bool {
+        self.abort_flag
+            .as_ref()
+            .map(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+            .unwrap_or(false)
+    }
+
+    /// 把一句状态送到状态栏（走 `agent_status` Trace，`ui/services/stream.rs`
+    /// 已经在渲染它，顺带刷新 STALL 看门狗的计时）。
+    fn emit_retry_status(&self, message: &str) {
+        self.emit_event(crate::agent::messaging::AgentEvent::Trace {
+            event: "agent_status".to_string(),
+            payload: serde_json::json!({
+                "status": "retrying",
+                "phase": "llm_retry",
+                "message": message,
+            }),
+        });
+    }
+
+    /// 网络 / 5xx / 过载错误的退避重试。
+    ///
+    /// 返回 `Some(LlmResult::Retry)` 表示已等待完毕、让外层重跑这一轮；
+    /// 返回 `None` 表示次数用尽，交回 `RecoveryManager` 走切 provider 那条路。
+    ///
+    /// 退避是 `base * 2^attempt` 加最多 ±25% 抖动（多实例同时撞上同一个 5xx 时
+    /// 不要一起在同一秒重试），上限 `STAR_RETRY_MAX_DELAY_MS`。等待期间每秒发一次
+    /// Trace：这类失败以前是全静默的，用户只看到界面停住。
+    async fn backoff_retry(
+        &mut self,
+        err_str: &str,
+        kind: crate::llm::error_kind::LlmErrorKind,
+        recovery_manager: &mut RecoveryManager,
+        current_turn: i32,
+    ) -> Option<LlmResult> {
+        let max_attempts: u32 = std::env::var("STAR_MAX_RETRIES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3);
+        if max_attempts == 0 {
+            return None;
+        }
+        let base_delay_ms: u64 = std::env::var("STAR_RETRY_BASE_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000);
+        let max_delay_ms: u64 = std::env::var("STAR_RETRY_MAX_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(32_000);
+
+        // 计数按类别分桶：一次网络抖动不该消耗 5xx 的重试预算。
+        let key = format!("llm_backoff:{:?}", kind);
+        let attempt = recovery_manager
+            .retry_counts
+            .get(&key)
+            .copied()
+            .unwrap_or(0);
+        if attempt >= max_attempts {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[LLM_RETRY] {} exhausted after {} attempt(s) — handing off to recovery manager",
+                kind.label(),
+                attempt,
+            ));
+            return None;
+        }
+        recovery_manager.retry_counts.insert(key, attempt + 1);
+
+        // 服务端建议优先；否则指数退避 + 抖动。
+        let delay_ms = match crate::llm::error_kind::retry_after_secs(err_str) {
+            Some(secs) => secs * 1000,
+            None => {
+                let raw = base_delay_ms.saturating_mul(1u64 << attempt.min(16));
+                let capped = raw.min(max_delay_ms);
+                // 抖动不引入 rand 依赖：用当前纳秒当熵源，够散了。
+                let entropy = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos() as u64)
+                    .unwrap_or(0);
+                let jitter_span = capped / 4;
+                let jitter = if jitter_span == 0 {
+                    0
+                } else {
+                    entropy % (jitter_span * 2 + 1)
+                };
+                capped.saturating_add(jitter).saturating_sub(jitter_span)
+            }
+        };
+
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[LLM_RETRY] turn={} {} attempt {}/{} — waiting {}ms",
+            current_turn,
+            kind.label(),
+            attempt + 1,
+            max_attempts,
+            delay_ms,
+        ));
+
+        let mut remaining = std::time::Duration::from_millis(delay_ms);
+        let tick = std::time::Duration::from_secs(1);
+        loop {
+            if self.is_aborted() {
+                return Some(LlmResult::Error(AgentEvent::Error(
+                    "Cancelled while waiting to retry.".to_string(),
+                )));
+            }
+            self.emit_retry_status(&format!(
+                "{} — retry {}/{} in {:.0}s",
+                kind.label(),
+                attempt + 1,
+                max_attempts,
+                remaining.as_secs_f64().ceil(),
+            ));
+            if remaining <= tick {
+                tokio::time::sleep(remaining).await;
+                break;
+            }
+            tokio::time::sleep(tick).await;
+            remaining = remaining.saturating_sub(tick);
+        }
+
+        self.emit_retry_status(&format!(
+            "{} — retrying now ({}/{})",
+            kind.label(),
+            attempt + 1,
+            max_attempts,
+        ));
+        Some(LlmResult::Retry)
     }
 }

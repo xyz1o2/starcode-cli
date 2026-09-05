@@ -1,6 +1,5 @@
 use crate::core::tools::tools::ToolResult as CoreToolResult;
 use crate::core::tools::tools::{BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation};
-use ignore::WalkBuilder;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -496,20 +495,10 @@ fn generate_project_map(
         .collect();
     let patterns = compiled_patterns();
 
-    let mut builder = WalkBuilder::new(root);
-    builder
-        .hidden(true)
-        .git_ignore(true)
-        // Respect .gitignore even when there is no .git directory.
-        .require_git(false)
-        .max_depth(Some(options.max_depth));
-    // Tool-specific ignore file: .starignore (same syntax as .gitignore).
-    // Users can put project-specific exclusions here without touching .gitignore.
-    let starignore = root.join(".starignore");
-    if starignore.exists() {
-        let _ = builder.add_ignore(&starignore);
-    }
-    let walker = builder.build();
+    // 遍历口径统一走 `utils::file_walk`：dotfile 可见（`.github/workflows`
+    // 是项目结构的一部分）、`~/.star/ignore` 也生效，不再只认 `.starignore`。
+    let opts = crate::utils::file_walk::WalkOptions::new().max_depth(options.max_depth);
+    let walker = crate::utils::file_walk::walk(root, &opts);
 
     let mut output = String::new();
     output.push_str(&format!("Project Map for {}\n\n", root.display()));

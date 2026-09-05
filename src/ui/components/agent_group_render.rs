@@ -65,11 +65,19 @@ pub fn render_agent_group(
 /// - 部分运行: `● Running 3 agents…`
 fn render_group_header(stats: &[AgentStat], area_width: u16) -> Vec<Line<'static>> {
     let total = stats.len();
-    let running = stats.iter().filter(|s| s.status == AgentTaskStatus::Running).count();
+    let running = stats
+        .iter()
+        .filter(|s| s.status == AgentTaskStatus::Running)
+        .count();
     // Rejected 与 Failed 同归"未成功"，头部统一计入 failed 计数
     let failed = stats
         .iter()
-        .filter(|s| matches!(s.status, AgentTaskStatus::Failed | AgentTaskStatus::Rejected))
+        .filter(|s| {
+            matches!(
+                s.status,
+                AgentTaskStatus::Failed | AgentTaskStatus::Rejected
+            )
+        })
         .count();
     let all_async = stats.iter().all(|s| s.is_async && s.is_resolved);
     let all_complete = running == 0;
@@ -79,10 +87,7 @@ fn render_group_header(stats: &[AgentStat], area_width: u16) -> Vec<Line<'static
     if all_complete {
         // 全部完成
         if all_async {
-            spans.push(Span::styled(
-                "● ",
-                Style::default().fg(Color::DarkGray),
-            ));
+            spans.push(Span::styled("● ", Style::default().fg(Color::DarkGray)));
             spans.push(Span::styled(
                 total.to_string(),
                 Style::default()
@@ -99,7 +104,11 @@ fn render_group_header(stats: &[AgentStat], area_width: u16) -> Vec<Line<'static
             ));
         } else {
             let icon = if failed > 0 { "⚠" } else { "✓" };
-            let color = if failed > 0 { Color::Yellow } else { Color::Green };
+            let color = if failed > 0 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
             spans.push(Span::styled(
                 format!("{} ", icon),
                 Style::default().fg(color),
@@ -123,12 +132,13 @@ fn render_group_header(stats: &[AgentStat], area_width: u16) -> Vec<Line<'static
         }
     } else {
         // 有正在运行的
+        spans.push(Span::styled("● ", Style::default().fg(Color::Yellow)));
         spans.push(Span::styled(
-            "● ",
-            Style::default().fg(Color::Yellow),
-        ));
-        spans.push(Span::styled(
-            format!("Running {} agent{}…", total, if total == 1 { "" } else { "s" }),
+            format!(
+                "Running {} agent{}…",
+                total,
+                if total == 1 { "" } else { "s" }
+            ),
             Style::default().fg(Color::DarkGray),
         ));
     }
@@ -181,9 +191,7 @@ fn render_agent_progress_lines(
     let display_name = stat.name.as_deref().unwrap_or(&stat.agent_type);
     line1_spans.push(Span::styled(
         display_name.to_string(),
-        Style::default()
-            .fg(type_color)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(type_color).add_modifier(Modifier::BOLD),
     ));
 
     // 描述（灰色括号）
@@ -209,7 +217,15 @@ fn render_agent_progress_lines(
             ));
             if stat.tool_use_count > 0 {
                 line1_spans.push(Span::styled(
-                    format!("{} tool {}", stat.tool_use_count, if stat.tool_use_count == 1 { "use" } else { "uses" }),
+                    format!(
+                        "{} tool {}",
+                        stat.tool_use_count,
+                        if stat.tool_use_count == 1 {
+                            "use"
+                        } else {
+                            "uses"
+                        }
+                    ),
                     Style::default().fg(Color::DarkGray),
                 ));
             }
@@ -246,7 +262,10 @@ fn render_agent_progress_lines(
 
     // 状态文本
     let (status_text, status_color) = if is_backgrounded {
-        let text = stat.task_description.as_deref().unwrap_or("Running in the background");
+        let text = stat
+            .task_description
+            .as_deref()
+            .unwrap_or("Running in the background");
         (text.to_string(), Color::DarkGray)
     } else {
         match stat.status {
@@ -267,7 +286,10 @@ fn render_agent_progress_lines(
                 (text, Color::Red)
             }
             AgentTaskStatus::Background => {
-                let text = stat.task_description.as_deref().unwrap_or("Running in the background");
+                let text = stat
+                    .task_description
+                    .as_deref()
+                    .unwrap_or("Running in the background");
                 (text.to_string(), Color::DarkGray)
             }
         }
@@ -319,7 +341,11 @@ fn with_elapsed(label: &str, stat: &AgentStat) -> String {
         parts.push(format!(
             "{} tool {}",
             stat.tool_use_count,
-            if stat.tool_use_count == 1 { "use" } else { "uses" }
+            if stat.tool_use_count == 1 {
+                "use"
+            } else {
+                "uses"
+            }
         ));
     }
     if let Some(tokens) = stat.tokens.filter(|t| *t > 0) {
