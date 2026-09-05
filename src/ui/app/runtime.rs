@@ -1098,10 +1098,44 @@ pub async fn run_app(
         let _ = execute!(stdout(), crossterm::cursor::Show);
     }
 
+    // 只有渲染线程自己 panic 才该拆终端 —— 那种情况进程正在死，用户必须看到消息。
+    //
+    // 后台 tokio 工作线程或阻塞池里的 panic 只会让那一个任务失败，UI 循环还在正常
+    // 渲染；这时候如果照旧跑 cleanup_terminal()，终端会被拽出 alternate screen、
+    // 关掉 raw mode，紧接着 original_hook 再往 stderr 打一段 panic 信息，画面就花了
+    // ——用户看到的是"排版乱了"，而不是任何有用的报错。典型来源是抓网页：
+    // readability-rust 会在畸形标签名上 `unwrap()` panic（见 core::tools::readability_safe，
+    // 那里的 catch_unwind 能挡住展开，但挡不住 hook 先跑一遍）。
+    //
+    // `run_app` 由 `#[tokio::main]` 的 block_on 直接驱动，跑在主线程上且不会迁移，
+    // 所以这里拿到的就是渲染线程的 id。
+    let render_thread = std::thread::current().id();
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
-        cleanup_terminal();
-        original_hook(panic_info);
+        let thread = std::thread::current();
+        let is_render_thread = thread.id() == render_thread;
+        // 直接 downcast，不去写 PanicHookInfo/PanicInfo 的类型名（两者随 rustc 版本改名）
+        let payload = panic_info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic_info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[UI] panic on thread '{}'{} at {}: {}",
+            thread.name().unwrap_or("<unnamed>"),
+            if is_render_thread { " (render)" } else { "" },
+            panic_info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "<unknown>".to_string()),
+            payload,
+        ));
+
+        if is_render_thread {
+            cleanup_terminal();
+            original_hook(panic_info);
+        }
     }));
 
     let (agent_tx, agent_rx) = mpsc::channel::<AgentRequest>(100);

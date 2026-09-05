@@ -4,7 +4,6 @@ use crate::core::tools::tools::{
 use anyhow::{Context, Result};
 use once_cell::sync::Lazy;
 use rand::seq::SliceRandom;
-use readability_rust::Readability;
 use reqwest::{Client, ClientBuilder};
 use scraper::{Html, Selector};
 use serde::Deserialize;
@@ -598,10 +597,8 @@ async fn fetch_and_extract(url: &str) -> Result<String> {
 
     let html = resp.text().await.context("Failed to read page")?;
 
-    // Prefer readability-rust
-    if let Some(article) = Readability::new(&html, None)
-        .ok()
-        .and_then(|mut p| p.parse())
+    // Prefer readability-rust（外壳会兜住畸形标签引发的 panic，见 readability_safe）
+    if let Some(article) = crate::core::tools::readability_safe::extract_article(html.clone()).await
     {
         if let Some(content) = article.content.as_ref() {
             if !content.is_empty() {

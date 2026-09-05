@@ -2,7 +2,6 @@ use crate::core::tools::tools::{
     BaseDeclarativeTool, Kind, ToolError, ToolInvocation, ToolLocation, ToolResult,
 };
 use html2text;
-use readability_rust::Readability;
 use reqwest;
 use serde::Deserialize;
 
@@ -92,13 +91,10 @@ impl ToolInvocation for WebFetchInvocation {
             let html_content = response.text().await?;
 
             // 2. Extract Content using Readability
-            // readability-rust uses synchronous parsing, so we might block the async thread briefly.
-            let parser_result = Readability::new(&html_content, None);
-
-            let article = match parser_result {
-                Ok(mut parser) => parser.parse(),
-                Err(_) => None, // Failed to init parser
-            };
+            // 解析同步且会 panic 在畸形标签上，所以走 readability_safe 的
+            // spawn_blocking + catch_unwind 外壳。
+            let article =
+                crate::core::tools::readability_safe::extract_article(html_content.clone()).await;
 
             if let Some(article) = article {
                 // 3. Convert Extracted HTML to Markdown

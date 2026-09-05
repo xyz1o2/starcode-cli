@@ -38,6 +38,7 @@ pub mod notebook_read;
 pub mod project_map;
 pub mod read_file;
 pub mod read_many;
+pub mod readability_safe;
 pub mod remote_trigger;
 pub mod result_budget;
 pub mod ripgrep;
