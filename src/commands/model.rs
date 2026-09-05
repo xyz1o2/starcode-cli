@@ -44,6 +44,16 @@ async fn list_models(mut ctx: CommandContext<'_>) -> CommandResult {
             output.push_str(&format!("- `{}`{}{}\n", m, provider, marker));
         }
         output.push_str("\nTip: switch with `/model <name>` or the model picker.\n");
+        // 列表可能来自磁盘缓存，标一下年龄，免得用户对着旧列表找新模型。
+        // 措辞复用面板那份格式化函数，两处保持一致。
+        if let Some(age) =
+            crate::ui::components::palette::format_cache_age(ctx.state.models_list_age_secs())
+        {
+            output.push_str(&format!(
+                "List was fetched {} — refresh via `/model` → `⟳ Fetch model list from API`.\n",
+                age
+            ));
+        }
         ctx.state
             .chat_history
             .push(ChatEntry::assistant(output).with_streaming(false));
@@ -151,6 +161,8 @@ async fn use_model(ctx: CommandContext<'_>, model_id: String) -> CommandResult {
     // streaming session ends (see session.rs deferred_model), but the UI
     // should not appear frozen during that window.
     ctx.state.current_model = model_name.clone();
+    // provider 也要跟上，否则状态栏和后续 SetModel 会拿旧 provider 去配新模型。
+    ctx.state.current_provider_id = Some(provider_id.clone());
 
     // Notify agent to reload config with new model (processed after current
     // streaming session ends if one is active).

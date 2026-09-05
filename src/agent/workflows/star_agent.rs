@@ -359,6 +359,15 @@ impl StarAgent {
         crate::agent::model_list::list_models(&self.client).await
     }
 
+    /// 带来源信息的模型列表。`force = true` 时跳过缓存并扇出到所有已配置
+    /// provider（面板里的显式刷新）；否则走缓存优先的便宜路径。
+    pub async fn list_models_cached(
+        &self,
+        force: bool,
+    ) -> Result<crate::agent::model_list::ModelListResult, String> {
+        crate::agent::model_list::list_models_with_mode(&self.client, force).await
+    }
+
     /// Expose the runtime GlobalState so external callers (e.g. the streaming
     /// session worker) can set `current_message_id` for file-history
     /// checkpoint association before tool execution begins.

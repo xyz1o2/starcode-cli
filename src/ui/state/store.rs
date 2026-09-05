@@ -394,6 +394,10 @@ pub struct ChatState {
     pub message_start_indices: HashMap<u64, usize>,
     pub active_message_id: Option<u64>,
     pub awaiting_models: bool,
+    /// `available_models` 里那份列表是**什么时候从 API 拉下来的**（可能是上一个进程
+    /// 拉的 —— 磁盘缓存见 `agent::model_cache`）。模型面板用它显示"多久之前拉的"，
+    /// 所以存的是拉取时刻而不是收到消息时的年龄：会话开着好几个小时也不会显示成"刚拉的"。
+    pub models_listed_at: Option<Instant>,
     pub mcp_ready: bool,
     pub auto_continue_enabled: bool,
     pub auto_continue_remaining: u32,
@@ -653,6 +657,22 @@ impl ChatState {
         Self::with_git_info(None)
     }
 
+    /// 模型列表的年龄（秒）。`None` = 这个会话里还没拿到过列表。
+    pub fn models_list_age_secs(&self) -> Option<u64> {
+        self.models_listed_at.map(|at| at.elapsed().as_secs())
+    }
+
+    /// 记下"这份列表是 `age_secs` 秒前拉的"。`None` 表示刚从 API 拉的。
+    pub fn set_models_list_age(&mut self, age_secs: Option<u64>) {
+        let now = Instant::now();
+        self.models_listed_at = match age_secs {
+            Some(age) => now
+                .checked_sub(std::time::Duration::from_secs(age))
+                .or(Some(now)),
+            None => Some(now),
+        };
+    }
+
     /// Push a toast notification (auto-dismisses after duration)
     pub fn push_toast(&mut self, message: &str, kind: ToastKind) {
         self.toast_queue.push_back(Toast {
@@ -808,6 +828,7 @@ impl ChatState {
             message_start_indices: HashMap::new(),
             active_message_id: None,
             awaiting_models: false,
+            models_listed_at: None,
             mcp_ready: false,
             auto_continue_enabled: false,
             auto_continue_remaining: 0,
@@ -1240,6 +1261,34 @@ pub fn bump_indices_after_insert(state: &mut ChatState, from: usize, delta: usiz
 mod tests {
     use super::*;
     use crate::types::{ChatEntry, ChatEntryType};
+
+    /// 列表年龄要按"拉取时刻"算，而不是"收到消息的时刻"：会话开着两小时后再看，
+    /// 一份两小时前从磁盘缓存读出来的列表不能显示成"刚拉的"。
+    #[test]
+    fn model_list_age_counts_from_the_fetch_not_from_receipt() {
+        let mut state = ChatState::new();
+        assert_eq!(state.models_list_age_secs(), None);
+
+        // 刚从 API 拉的 -> 年龄约 0
+        state.set_models_list_age(None);
+        assert!(state.models_list_age_secs().unwrap() < 5);
+
+        // 缓存里读出来的，两小时前拉的 -> 年龄从那时算起
+        state.set_models_list_age(Some(7_200));
+        let age = state.models_list_age_secs().unwrap();
+        assert!((7_200..7_205).contains(&age), "age was {}", age);
+    }
+
+    /// 进程刚起来时 `Instant::now()` 减不出那么早的时刻，不能 panic 也不能丢状态。
+    #[test]
+    fn an_absurd_cache_age_degrades_to_now() {
+        let mut state = ChatState::new();
+        state.set_models_list_age(Some(u64::MAX));
+        assert!(
+            state.models_list_age_secs().is_some(),
+            "the list should still be marked as seen"
+        );
+    }
 
     /// Ctrl+O / `/tui transcript` 共用的开关：开启时展开所有 thinking 块，关闭时收起，
     /// 对标 Claude Code transcript 视图「摊开全部原始输出」的语义。

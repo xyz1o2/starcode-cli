@@ -51,7 +51,9 @@ pub async fn extract_article(html: String) -> Option<Article> {
 /// 拽出 alternate screen（见 `ui::app::runtime` 里设置 hook 的地方）。
 pub fn extract_article_blocking(html: &str) -> Option<Article> {
     let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        Readability::new(html, None).ok().and_then(|mut p| p.parse())
+        Readability::new(html, None)
+            .ok()
+            .and_then(|mut p| p.parse())
     }));
 
     match parsed {
@@ -69,20 +71,42 @@ pub fn extract_article_blocking(html: &str) -> Option<Article> {
 mod tests {
     use super::*;
 
-    /// 复现用户遇到的那次崩溃：`<100%>` 这种标签名会被 html5ever 当成元素留在
-    /// 树里，再被上游塞进 `Selector::parse` —— 不兜住就是 `Delim('%')` panic。
+    /// 复现用户遇到的那次崩溃。`<div%wrap>` 会被 html5ever 当成一个名叫
+    /// `div%wrap` 的元素留在树里，正文段落都挂在它下面，于是它成了得分最高的
+    /// candidate，上游把这个名字原样喂给 `Selector::parse` —— 不兜住就是
+    /// `UnexpectedToken(Delim('%'))`。
+    ///
+    /// 顺带记一笔：`<100%>` 这种不以字母开头的写法反而不会触发，html5ever 把它
+    /// 当纯文本处理；能进 DOM 的畸形标签必须像 `div%wrap` 这样以字母开头。
+    const MALFORMED: &str = r#"<html><body><div%wrap>
+        <p>Real article text that is long enough to be scored as content by the
+        readability heuristics, so the parser actually reaches the candidate
+        selection step where the offending selector gets built.</p>
+        <p>A second paragraph, also long enough to matter for scoring purposes,
+        keeps the candidate from being discarded as too short.</p>
+    </div%wrap></body></html>"#;
+
     #[test]
     fn a_malformed_tag_name_does_not_take_the_process_down() {
-        let html = r#"<html><body><article><100%>
-            <p>Real article text that is long enough to be scored as content by the
-            readability heuristics, so the parser actually reaches the candidate
-            selection step where the offending selector is built.</p>
-            <p>A second paragraph, also long enough to matter for scoring purposes,
-            keeps the candidate from being discarded as too short.</p>
-        </100%></article></body></html>"#;
+        // 先确认这段 markup 现在真的还能把上游打崩 —— 否则这个回归测试就是摆设。
+        // 期间把 panic hook 换成空的，免得一个通过的测试往输出里打一条 panic 消息。
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let unguarded = std::panic::catch_unwind(|| {
+            Readability::new(MALFORMED, None)
+                .ok()
+                .and_then(|mut p| p.parse())
+        });
+        std::panic::set_hook(hook);
 
-        // 唯一的要求：不 panic。抽不出正文（None）也算通过。
-        let _ = extract_article_blocking(html);
+        assert!(
+            unguarded.is_err(),
+            "upstream no longer panics on this markup: find a new repro, or drop the guard"
+        );
+        assert!(
+            extract_article_blocking(MALFORMED).is_none(),
+            "the guard should degrade to None so callers fall back to html2text"
+        );
     }
 
     #[test]
@@ -103,8 +127,11 @@ mod tests {
     }
 
     #[test]
-    fn garbage_input_returns_none_instead_of_panicking() {
-        assert!(extract_article_blocking("").is_none());
-        assert!(extract_article_blocking("\0\0\0 not html at all %{}[]<<<>>>").is_none());
+    fn garbage_input_never_panics() {
+        // html5ever 很宽容，纯垃圾也能包成一棵树，所以这里只保证"不炸"：
+        // 抽出正文还是抽不出都算通过。
+        for junk in ["", "\0\0\0 not html at all %{}[]<<<>>>", "<div%><p%>x</p%>"] {
+            let _ = extract_article_blocking(junk);
+        }
     }
 }

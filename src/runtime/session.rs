@@ -12,7 +12,9 @@ use tokio::sync::Notify;
 #[derive(Default)]
 pub struct DeferredRuntimeActions {
     pub deferred_model: Option<(String, Option<String>)>,
-    pub pending_models_request: bool,
+    /// `Some(force)` = 流式期间来过 ListModels，回合结束后补上（force 语义见
+    /// `AgentRequest::ListModels`）；多次请求里只要有一次 force 就按 force 算。
+    pub pending_models_request: Option<bool>,
     pub pending_plugin_tools_refresh: bool,
     pub pending_mcp_refresh: bool,
     pub pending_mcp_list_servers: bool,
@@ -116,8 +118,9 @@ pub async fn handle_streaming_request(
             deferred.deferred_model = Some((model, provider_id));
             StreamingRequestOutcome::Continue
         }
-        Some(AgentRequest::ListModels) => {
-            deferred.pending_models_request = true;
+        Some(AgentRequest::ListModels { force }) => {
+            let pending = deferred.pending_models_request.unwrap_or(false);
+            deferred.pending_models_request = Some(pending || force);
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::PluginToolsRefresh) => {
@@ -344,11 +347,15 @@ pub async fn apply_deferred_runtime_actions(
             .await;
     }
 
-    if deferred.pending_models_request {
-        deferred.pending_models_request = false;
-        match agent.list_models().await {
-            Ok(models) => {
-                let _ = tx.send(StreamMessage::ModelsList(models)).await;
+    if let Some(force) = deferred.pending_models_request.take() {
+        match agent.list_models_cached(force).await {
+            Ok(result) => {
+                let _ = tx
+                    .send(StreamMessage::ModelsList {
+                        models: result.models,
+                        cache_age_secs: result.cache_age_secs,
+                    })
+                    .await;
             }
             Err(e) => {
                 let _ = tx.send(StreamMessage::ModelsError(e)).await;

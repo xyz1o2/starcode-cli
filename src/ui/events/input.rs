@@ -253,6 +253,36 @@ fn show_provider_base_url_modal(state: &mut ChatState, provider_id: &str, initia
     });
 }
 
+/// 手动输入模型名的弹窗。刻意不做任何联网校验：中转站的 `/models` 常年不全，
+/// 拉不到不等于不能用；用户敲什么就切什么，错了从状态栏的报错里看得出来。
+fn show_model_name_modal(state: &mut ChatState) {
+    state.show_status_modal = false;
+    close_quick_menus(state);
+    state.close_palette();
+    state.show_input_modal = true;
+    state.input_modal_title = "Enter Model Name".to_string();
+    state.input_modal_prompt = match state.current_provider_id.as_deref() {
+        Some(pid) if !pid.trim().is_empty() => {
+            format!("Model ID to use with provider '{}', then press Enter:", pid)
+        }
+        _ => "Type the model ID and press Enter:".to_string(),
+    };
+    state.input_modal_value = state.current_model.clone();
+
+    let mut textarea = TextArea::default();
+    textarea.set_cursor_line_style(ratatui::style::Style::default());
+    textarea.insert_str(&state.input_modal_value);
+    textarea.set_placeholder_text("e.g. claude-opus-5");
+    textarea.set_cursor_style(
+        ratatui::style::Style::default()
+            .bg(ratatui::style::Color::Blue)
+            .fg(ratatui::style::Color::White),
+    );
+    state.modal_textarea = textarea;
+
+    state.input_context = Some(crate::ui::state::palette::InputContext::ModelName);
+}
+
 pub(crate) async fn execute_palette_action(
     state: &mut ChatState,
     action: PaletteAction,
@@ -263,7 +293,9 @@ pub(crate) async fn execute_palette_action(
             state.palette_history.push(state.palette_mode.clone());
 
             if matches!(mode, PaletteMode::Model) && state.available_models.is_empty() {
-                let _ = agent_tx.send(AgentRequest::ListModels).await;
+                let _ = agent_tx
+                    .send(AgentRequest::ListModels { force: false })
+                    .await;
             }
 
             // Entering from the settings modal (ShowStatus closes the palette)
@@ -285,12 +317,36 @@ pub(crate) async fn execute_palette_action(
         PaletteAction::ShowModelMenu => {
             if state.available_models.is_empty() {
                 state.awaiting_models = true;
-                let _ = agent_tx.send(AgentRequest::ListModels).await;
+                let _ = agent_tx
+                    .send(AgentRequest::ListModels { force: false })
+                    .await;
             }
             state.push_palette_mode(PaletteMode::Model);
             if !state.is_palette_open() {
                 state.modal_stack.push(crate::ui::state::Modal::Palette);
             }
+        }
+        PaletteAction::InputModelName => {
+            show_model_name_modal(state);
+        }
+        PaletteAction::RefreshModels => {
+            // 显式刷新：跳过内存/磁盘缓存，扇出到所有已配置 provider。
+            // 面板留在原地（不 push 历史，否则 Back 会退回自己），只把 "⟳ Fetching..."
+            // 的状态刷出来；列表到货后由 StreamMessage::ModelsList 重建 items。
+            state.awaiting_models = true;
+            if !state.is_palette_open() {
+                state.palette_history.clear();
+                state.open_palette(crate::ui::state::palette::PaletteMode::Model);
+            } else {
+                state.palette_mode = crate::ui::state::palette::PaletteMode::Model;
+            }
+            state.palette_items = crate::ui::components::palette::get_items(
+                &crate::ui::state::palette::PaletteMode::Model,
+                state,
+            );
+            let _ = agent_tx
+                .send(AgentRequest::ListModels { force: true })
+                .await;
         }
         PaletteAction::ShowProviderMenu => {
             open_provider_selection_menu(state, None, true);
@@ -545,7 +601,7 @@ pub(crate) async fn execute_palette_action(
                     })
                     .await;
 
-                let _ = tx.send(AgentRequest::ListModels).await;
+                let _ = tx.send(AgentRequest::ListModels { force: false }).await;
             });
 
             crate::ui::app::logic::emit_status_text(
@@ -1734,7 +1790,10 @@ pub async fn handle_key_event(
                     if state.available_models.is_empty() {
                         state.awaiting_models = true;
                         // Trigger model list fetch
-                        if let Err(_e) = agent_tx.send(AgentRequest::ListModels).await {
+                        if let Err(_e) = agent_tx
+                            .send(AgentRequest::ListModels { force: false })
+                            .await
+                        {
                             // Handle error silently or log
                         }
                     }
@@ -2718,7 +2777,9 @@ async fn handle_input_modal(
                                     model: state.pending_provider_selected_model.clone(),
                                 })
                                 .await;
-                            let _ = agent_tx.send(AgentRequest::ListModels).await;
+                            let _ = agent_tx
+                                .send(AgentRequest::ListModels { force: false })
+                                .await;
 
                             state.available_models.clear();
                             state.show_input_modal = false;
@@ -2795,6 +2856,56 @@ async fn handle_input_modal(
                                 Some("Invalid context window size. Use e.g. 128k, 1M".to_string());
                         }
                         state.show_input_modal = false;
+                    }
+                    crate::ui::state::palette::InputContext::ModelName => {
+                        let model = state.input_modal_value.trim().to_string();
+                        if model.is_empty() {
+                            crate::ui::app::logic::emit_status_text(
+                                state,
+                                0,
+                                "Model name cannot be empty.",
+                            );
+                            state.input_context =
+                                Some(crate::ui::state::palette::InputContext::ModelName);
+                            return Ok(true);
+                        }
+
+                        state.show_input_modal = false;
+                        close_quick_menus(state);
+                        state.close_palette();
+
+                        // 手敲的模型名不一定在 model_provider_map 里，那就留在当前 provider 上。
+                        let provider_id = state
+                            .model_provider_map
+                            .get(&model)
+                            .cloned()
+                            .or_else(|| state.current_provider_id.clone());
+                        state.pending_model_confirmation = false;
+                        state.pending_model_change = Some(model.clone());
+                        state.current_model = model.clone();
+                        state.current_provider_id = provider_id.clone();
+                        // 手动指定的模型不在列表里时，thinking 支持情况未知
+                        state.current_model_supports_thinking = state
+                            .available_models_info
+                            .iter()
+                            .find(|m| m.id == model)
+                            .and_then(|m| m.supports_thinking);
+
+                        let _ = agent_tx
+                            .send(AgentRequest::SetModel {
+                                model: model.clone(),
+                                provider_id: provider_id.clone(),
+                            })
+                            .await;
+                        crate::ui::app::logic::emit_status_text(
+                            state,
+                            0,
+                            &format!(
+                                "Model set to {} (provider {})",
+                                model,
+                                provider_id.as_deref().unwrap_or("default")
+                            ),
+                        );
                     }
                     crate::ui::state::palette::InputContext::AddProviderId { provider_type } => {
                         let provider_id = state
@@ -2988,7 +3099,9 @@ async fn handle_input_modal(
                                 model: None,
                             })
                             .await;
-                        let _ = agent_tx.send(AgentRequest::ListModels).await;
+                        let _ = agent_tx
+                            .send(AgentRequest::ListModels { force: false })
+                            .await;
 
                         state.available_models.clear();
                         state.show_input_modal = false;

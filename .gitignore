@@ -31,3 +31,6 @@ study_or_copy_projects/
 .spec-workflow/
 .star/
 .freebuff/
+
+# Tool data (agent session memory/logs)
+.workbuddy/

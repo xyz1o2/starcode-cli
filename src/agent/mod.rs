@@ -25,6 +25,7 @@ mod message_lookups;
 mod message_processing;
 mod message_processor;
 pub mod messaging;
+pub(crate) mod model_cache;
 pub mod model_catalog;
 mod model_fallback;
 pub(crate) mod model_list;

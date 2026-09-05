@@ -762,9 +762,13 @@ pub async fn handle_stream_update(
                 }
             }
         }
-        StreamMessage::ModelsList(models) => {
+        StreamMessage::ModelsList {
+            models,
+            cache_age_secs,
+        } => {
             state.available_models = models.iter().map(|m| m.id.clone()).collect();
             state.available_models_info = models.clone(); // 保存完整的模型信息
+            state.set_models_list_age(cache_age_secs);
             state.model_provider_map.clear();
             for m in &models {
                 if !m.provider.is_empty() {
@@ -837,6 +841,7 @@ pub async fn handle_stream_update(
                     &state.current_model,
                     state.awaiting_models,
                     &state.model_provider_map,
+                    state.models_list_age_secs(),
                 );
             }
             // Fallback: models arrived, open palette in Model mode for selection
@@ -848,6 +853,7 @@ pub async fn handle_stream_update(
                     &state.current_model,
                     state.awaiting_models,
                     &state.model_provider_map,
+                    state.models_list_age_secs(),
                 );
                 state.selected_palette_index = 0;
                 state.palette_filter.clear();

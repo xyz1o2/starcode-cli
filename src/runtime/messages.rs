@@ -86,7 +86,12 @@ pub enum StreamMessage {
         tool_call_id: String,
         confirmation: crate::types::ToolConfirmation,
     },
-    ModelsList(Vec<crate::types::ModelInfo>),
+    ModelsList {
+        models: Vec<crate::types::ModelInfo>,
+        /// `None` = 刚从 API 拉的；`Some(n)` = 命中缓存，n 秒前拉的。
+        /// UI 用它在模型面板上显示"多久之前拉的"，好让用户判断要不要刷新。
+        cache_age_secs: Option<u64>,
+    },
     ModelsError(String),
     McpStatus {
         ready: bool,
@@ -170,7 +175,12 @@ pub enum AgentRequest {
         message_id: u64,
         message: String,
     },
-    ListModels,
+    /// 请求模型列表。`force = false`（打开面板等隐式触发）走缓存优先的便宜路径；
+    /// `force = true`（面板里的 `⟳`）跳过缓存并扇出到所有已配置 provider。
+    /// 详见 `agent::model_list` 的模块说明。
+    ListModels {
+        force: bool,
+    },
     SetModel {
         model: String,
         provider_id: Option<String>,

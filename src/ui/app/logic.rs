@@ -436,7 +436,9 @@ pub async fn enqueue_user_message(
         state.open_palette(crate::ui::state::palette::PaletteMode::Model);
         if state.available_models.is_empty() {
             state.awaiting_models = true;
-            let _ = agent_tx.send(AgentRequest::ListModels).await;
+            let _ = agent_tx
+                .send(AgentRequest::ListModels { force: false })
+                .await;
         }
         state.chat_history.push(ChatEntry {
             is_streaming: Some(false),

@@ -66,8 +66,12 @@ pub enum PaletteAction {
     ToggleColorblindMode,
     InputProviderId(String),   // provider_type
     InputProviderName(String), // provider_id (after ID is entered)
-    OpenMcpModal,              // open the unified /mcp manager modal
-    OpenMarketModal,           // open the unified extension marketplace modal
+    /// 手动输入模型名：打开输入框，不发任何网络请求
+    InputModelName,
+    /// 显式刷新模型列表（跳过缓存，扇出到所有已配置 provider）
+    RefreshModels,
+    OpenMcpModal,    // open the unified /mcp manager modal
+    OpenMarketModal, // open the unified extension marketplace modal
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +83,8 @@ pub enum InputContext {
         provider_id: String,
     },
     ContextWindow,
+    /// 手动录入模型名（不校验、不联网，直接切过去）
+    ModelName,
     AddProviderId {
         provider_type: String,
     },

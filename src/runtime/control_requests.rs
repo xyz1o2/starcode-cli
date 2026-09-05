@@ -46,15 +46,24 @@ pub async fn handle_request(
         AgentRequest::RestoreCheckpoint { message_id, id } => {
             return Some(PendingCheckpointAction::Restore { message_id, id });
         }
-        AgentRequest::ListModels => {
-            append_debug_log_line("[DEBUG] Worker: Handling ListModels request");
-            match agent.list_models().await {
-                Ok(models) => {
+        AgentRequest::ListModels { force } => {
+            append_debug_log_line(&format!(
+                "[DEBUG] Worker: Handling ListModels request (force={})",
+                force
+            ));
+            match agent.list_models_cached(force).await {
+                Ok(result) => {
                     append_debug_log_line(&format!(
-                        "[DEBUG] Worker: ListModels success, count={}",
-                        models.len()
+                        "[DEBUG] Worker: ListModels success, count={}, cache_age={:?}",
+                        result.models.len(),
+                        result.cache_age_secs
                     ));
-                    let _ = tx.send(StreamMessage::ModelsList(models)).await;
+                    let _ = tx
+                        .send(StreamMessage::ModelsList {
+                            models: result.models,
+                            cache_age_secs: result.cache_age_secs,
+                        })
+                        .await;
                 }
                 Err(e) => {
                     append_debug_log_line(&format!("[DEBUG] Worker: ListModels failed: {}", e));

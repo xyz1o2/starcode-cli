@@ -41,6 +41,11 @@ impl Storage {
         Self::global_star_dir().join("installation_id")
     }
 
+    /// 模型列表的磁盘缓存（按 provider 分桶），见 `agent::model_cache`。
+    pub fn model_cache_path() -> PathBuf {
+        Self::global_star_dir().join("model-cache.json")
+    }
+
     pub fn user_commands_dir() -> PathBuf {
         Self::global_star_dir().join("commands")
     }

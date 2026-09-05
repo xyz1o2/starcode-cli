@@ -68,6 +68,7 @@ pub fn get_items(mode: &PaletteMode, state: &ChatState) -> Vec<PaletteItem> {
             &state.current_model,
             state.awaiting_models,
             &state.model_provider_map,
+            state.models_list_age_secs(),
         ),
         PaletteMode::Project => get_project_palette_items(),
         PaletteMode::Integrations => get_integrations_palette_items(),
@@ -175,6 +176,7 @@ fn get_global_search_palette_items(state: &ChatState) -> Vec<PaletteItem> {
                 &state.current_model,
                 state.awaiting_models,
                 &state.model_provider_map,
+                state.models_list_age_secs(),
             ),
         );
     }
@@ -260,6 +262,8 @@ fn palette_action_key(action: &PaletteAction) -> String {
         PaletteAction::InputProviderName(provider_id) => {
             format!("add_provider_name:{}", provider_id)
         }
+        PaletteAction::InputModelName => "input_model_name".to_string(),
+        PaletteAction::RefreshModels => "refresh_models".to_string(),
         PaletteAction::OpenMcpModal => "open_mcp_modal".to_string(),
         PaletteAction::OpenMarketModal => "open_market_modal".to_string(),
     }
@@ -1525,11 +1529,67 @@ pub fn get_provider_quick_items(configured: &HashSet<String>) -> Vec<PaletteItem
     items
 }
 
+/// 把缓存年龄写成人话（"12m ago"）。`None` 表示这个会话里还没拿到过列表。
+/// `/model list` 也用它，保证两处措辞一致。
+pub(crate) fn format_cache_age(age_secs: Option<u64>) -> Option<String> {
+    let secs = age_secs?;
+    Some(match secs {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{}m ago", secs / 60),
+        3600..=86_399 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86_400),
+    })
+}
+
+/// 手动输入模型名 + 显式刷新。
+///
+/// 这两项放在列表最前面（紧跟 `.. Back`）是有意的：模型多的中转站一屏放不下，
+/// 放在末尾等于用户找不到。用户要的就是"要么自己敲模型名，要么明确让它去拉一次"。
+fn push_model_entry_options(
+    items: &mut Vec<PaletteItem>,
+    current: &str,
+    is_loading: bool,
+    cache_age_secs: Option<u64>,
+) {
+    items.push(PaletteItem {
+        id: "type_model".to_string(),
+        label: "⌨ Enter model name...".to_string(),
+        description: if current.is_empty() {
+            "Type any model ID your provider accepts — no network call".to_string()
+        } else {
+            format!("Type any model ID (prefilled with {})", current)
+        },
+        category: Some("Manual".to_string()),
+        action: PaletteAction::InputModelName,
+    });
+
+    let (label, description) = if is_loading {
+        (
+            "⟳ Fetching model list...".to_string(),
+            "Querying every configured provider".to_string(),
+        )
+    } else {
+        let hint = match format_cache_age(cache_age_secs) {
+            Some(age) => format!("List cached {} · queries every configured provider", age),
+            None => "Queries every configured provider (can take a few seconds)".to_string(),
+        };
+        ("⟳ Fetch model list from API".to_string(), hint)
+    };
+    items.push(PaletteItem {
+        id: "refresh_models".to_string(),
+        label,
+        description,
+        category: Some("Manual".to_string()),
+        action: PaletteAction::RefreshModels,
+    });
+}
+
 pub fn get_model_palette_items(
     models: &[String],
     current: &str,
     is_loading: bool,
     model_provider_map: &std::collections::HashMap<String, String>,
+    cache_age_secs: Option<u64>,
 ) -> Vec<PaletteItem> {
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
@@ -1538,6 +1598,8 @@ pub fn get_model_palette_items(
         category: None,
         action: PaletteAction::Back,
     }];
+
+    push_model_entry_options(&mut items, current, is_loading, cache_age_secs);
 
     if models.is_empty() {
         if is_loading {
@@ -1559,13 +1621,6 @@ pub fn get_model_palette_items(
                 action: PaletteAction::SetModel(current.to_string()),
             });
         }
-        items.push(PaletteItem {
-            id: "type_model".to_string(),
-            label: "⌨ Enter model name...".to_string(),
-            description: "Type /model your-model-name to use a custom model".to_string(),
-            category: Some("Manual".to_string()),
-            action: PaletteAction::TypeCommand("/model ".to_string()),
-        });
         return items;
     }
 
@@ -1600,15 +1655,6 @@ pub fn get_model_palette_items(
             });
         }
     }
-
-    // Add manual entry
-    items.push(PaletteItem {
-        id: "type_model".to_string(),
-        label: "⌨ Enter model name...".to_string(),
-        description: "Type /model your-model-name to use a custom model".to_string(),
-        category: Some("Manual".to_string()),
-        action: PaletteAction::TypeCommand("/model ".to_string()),
-    });
 
     items
 }
@@ -2150,4 +2196,113 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1]);
 
     layout[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ids(items: &[PaletteItem]) -> Vec<&str> {
+        items.iter().map(|i| i.label.as_str()).collect()
+    }
+
+    /// 手动输入和显式刷新必须在列表最前面：中转站能返回几百个模型，
+    /// 放在末尾等于用户翻不到。
+    #[test]
+    fn manual_entry_and_refresh_come_before_the_models() {
+        let models: Vec<String> = (0..40).map(|i| format!("model-{}", i)).collect();
+        let items = get_model_palette_items(
+            &models,
+            "model-0",
+            false,
+            &std::collections::HashMap::new(),
+            None,
+        );
+
+        let labels = ids(&items);
+        assert_eq!(labels[0], ".. Back");
+        assert!(labels[1].contains("Enter model name"), "{:?}", labels[1]);
+        assert!(labels[2].contains("Fetch model list"), "{:?}", labels[2]);
+        assert_eq!(items.len(), 3 + models.len());
+    }
+
+    /// 空列表时同样给出两个出口 —— 拉不到模型不该是死路。
+    #[test]
+    fn an_empty_list_still_offers_both_ways_forward() {
+        let items = get_model_palette_items(
+            &[],
+            "claude-opus-5",
+            false,
+            &std::collections::HashMap::new(),
+            None,
+        );
+
+        let labels = ids(&items);
+        assert!(labels.iter().any(|l| l.contains("Enter model name")));
+        assert!(labels.iter().any(|l| l.contains("Fetch model list")));
+        // 当前模型即使不在列表里也要能选回来
+        assert!(labels.iter().any(|l| l.starts_with("claude-opus-5")));
+    }
+
+    #[test]
+    fn refresh_item_reports_progress_while_fetching() {
+        let items = get_model_palette_items(
+            &["a".to_string()],
+            "a",
+            true,
+            &std::collections::HashMap::new(),
+            None,
+        );
+        let refresh = items
+            .iter()
+            .find(|i| i.id == "refresh_models")
+            .expect("refresh item should always be present");
+        assert!(refresh.label.contains("Fetching"), "{}", refresh.label);
+    }
+
+    #[test]
+    fn cache_age_shows_up_in_the_refresh_hint() {
+        let items = get_model_palette_items(
+            &["a".to_string()],
+            "a",
+            false,
+            &std::collections::HashMap::new(),
+            Some(7_200),
+        );
+        let refresh = items.iter().find(|i| i.id == "refresh_models").unwrap();
+        assert!(
+            refresh.description.contains("2h ago"),
+            "{}",
+            refresh.description
+        );
+    }
+
+    #[test]
+    fn cache_age_is_written_in_the_biggest_fitting_unit() {
+        assert_eq!(format_cache_age(None), None);
+        assert_eq!(format_cache_age(Some(0)).unwrap(), "just now");
+        assert_eq!(format_cache_age(Some(59)).unwrap(), "just now");
+        assert_eq!(format_cache_age(Some(60)).unwrap(), "1m ago");
+        assert_eq!(format_cache_age(Some(3_599)).unwrap(), "59m ago");
+        assert_eq!(format_cache_age(Some(3_600)).unwrap(), "1h ago");
+        assert_eq!(format_cache_age(Some(86_400)).unwrap(), "1d ago");
+    }
+
+    /// 主面板搜索列表里两个入口都要有，且 key 不能撞（撞了会被去重掉一个）。
+    #[test]
+    fn the_two_entry_points_have_distinct_dedup_keys() {
+        let items = get_model_palette_items(
+            &["a".to_string()],
+            "a",
+            false,
+            &std::collections::HashMap::new(),
+            None,
+        );
+        let mut seen = HashSet::new();
+        let mut merged = Vec::new();
+        push_unique_actionable_items(&mut merged, &mut seen, items);
+
+        assert!(merged.iter().any(|i| i.id == "type_model"));
+        assert!(merged.iter().any(|i| i.id == "refresh_models"));
+    }
 }

@@ -152,7 +152,7 @@ pub async fn handle_command(
                     ctx.state.awaiting_models = true;
                     let _ = ctx
                         .agent_tx
-                        .send(crate::runtime::messages::AgentRequest::ListModels)
+                        .send(crate::runtime::messages::AgentRequest::ListModels { force: false })
                         .await;
                 }
                 Ok(())
