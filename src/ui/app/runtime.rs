@@ -598,24 +598,21 @@ pub async fn run_ui_loop(
             state.current_tool_name = None;
             state.thinking_started_at = None;
             state.last_token_time = None;
-            state.queued_messages_display.clear();
             // Clear confirmation state to unblock queued messages
             state.is_awaiting_confirmation = false;
             state.pending_confirmation_entry_idx = None;
 
-            // Process queued messages after cancel completes
-            if !state.is_awaiting_confirmation && !state.pending_user_messages.is_empty() {
-                if let Some(next_input) = state.pending_user_messages.pop_front() {
-                    let remaining = state.pending_user_messages.len();
-                    if remaining > 0 {
-                        state.current_status_line = Some(format!("\u{23f3} {} pending", remaining));
-                    } else {
-                        state.current_status_line = None;
-                    }
-                    let _ =
-                        crate::ui::app::logic::enqueue_user_message(state, next_input, &agent_tx)
-                            .await;
-                }
+            // 用户刚按下 Esc 打断，这时候把排队的输入自动发出去等于没打断成功。
+            // 对标 Claude Code 取消时的 `handleQueuedCommandOnCancel`：
+            // 把排队内容取回输入框，改词还是删掉交给用户决定。
+            if !state.pending_user_messages.is_empty() {
+                let n = state.pending_user_messages.len();
+                crate::ui::events::input::restore_queued_messages_to_input(state);
+                state.current_status_line = Some(format!(
+                    "Cancelled · {} queued message{} moved back to the prompt",
+                    n,
+                    if n == 1 { "" } else { "s" }
+                ));
             }
         }
 
@@ -1151,13 +1148,10 @@ pub async fn run_app(
     if let Ok(settings_manager) = crate::core::config::settings_manager::SettingsManager::new() {
         if let Ok(settings) = settings_manager.load_user_settings().await {
             if let Some(ref effort_str) = settings.thinking_effort {
-                state.thinking_effort = match effort_str.to_lowercase().as_str() {
-                    "off" => crate::types::ThinkingEffort::Off,
-                    "low" => crate::types::ThinkingEffort::Low,
-                    "medium" => crate::types::ThinkingEffort::Medium,
-                    "high" => crate::types::ThinkingEffort::High,
-                    _ => crate::types::ThinkingEffort::Off,
-                };
+                // 只是把档位显示出来 —— 真正作用到请求上的那份会话状态在
+                // `main.rs` 加载 settings 时就写进 `llm::thinking` 了。
+                state.thinking_effort =
+                    crate::llm::thinking::parse_effort(effort_str).unwrap_or_default();
             }
             if let Some(ctx) = settings.context_window {
                 state.context_window_override = Some(ctx);

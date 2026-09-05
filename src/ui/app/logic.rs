@@ -240,13 +240,11 @@ pub async fn enqueue_user_message(
     state.history_index = None;
     state.history_input_snapshot = None;
 
+    // 等待工具确认 / 本轮还在跑 —— 输入进队列，由输入框上方的排队面板
+    // （queued_input，对标 PromptInputQueuedCommands）原样显示出来，
+    // 所以这里不再往状态栏塞 "⏳ N pending" 这种看不出内容的提示。
     if state.pending_confirmation_entry_idx.is_some() {
-        state.pending_user_messages.push_back(user_input.clone());
-        state
-            .queued_messages_display
-            .push_back((user_input, Instant::now()));
-        let n = state.pending_user_messages.len();
-        state.current_status_line = Some(format!("\u{23f3} {} pending", n));
+        state.pending_user_messages.push_back(user_input);
         return Ok(());
     }
 
@@ -255,12 +253,7 @@ pub async fn enqueue_user_message(
     let is_safe_command_during_stream = is_streaming_safe_command(user_input.trim());
 
     if (state.is_processing || state.is_streaming) && !is_safe_command_during_stream {
-        state.pending_user_messages.push_back(user_input.clone());
-        state
-            .queued_messages_display
-            .push_back((user_input, Instant::now()));
-        let n = state.pending_user_messages.len();
-        state.current_status_line = Some(format!("\u{23f3} {} pending", n));
+        state.pending_user_messages.push_back(user_input);
         return Ok(());
     }
 

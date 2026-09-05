@@ -203,6 +203,9 @@ pub enum AgentRequest {
     MarkFilesAsRead(Vec<String>),
     ToggleYoloMode,
     SetApprovalMode(crate::types::ApprovalMode),
+    /// 思考力度档位（Alt+T / `/effort` / 命令面板）。UI 侧只改显示，
+    /// 真正让它作用到请求上要靠这条消息落到 `llm::thinking`。
+    SetThinkingEffort(crate::types::ThinkingEffort),
     LoadConfiguredProviders,
     Compress {
         message_id: u64,

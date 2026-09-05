@@ -301,6 +301,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .map_err(|e| e as Box<dyn std::error::Error>)?;
     core::i18n::init(settings.ui_language.as_deref(), &cwd);
+    // 持久化的思考力度档位在这里就落到会话状态里：TUI 和 headless 都要经过
+    // 这一段，构造请求时由 `llm::thinking` 按 provider 方言翻成对应字段。
+    if let Some(effort) = settings
+        .thinking_effort
+        .as_deref()
+        .and_then(llm::thinking::parse_effort)
+    {
+        llm::thinking::set_session_effort(&effort);
+    }
     let provider_resolution =
         crate::core::config::provider_resolution::resolve_effective_provider_settings(
             crate::core::config::provider_resolution::ProviderResolutionInputs {

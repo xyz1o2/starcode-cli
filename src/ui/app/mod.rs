@@ -42,6 +42,11 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     // 与 task_panel 同一套「按需撑开一段高度」的模式
     let bg_panel_h = crate::ui::components::bg_agent_selector::selector_height(state);
 
+    // 排队中的用户输入（对标 PromptInputQueuedCommands）：紧贴输入框上方，
+    // 同样按需撑开
+    let queued_panel_h =
+        crate::ui::components::queued_input::queued_panel_height(state, viewport.width);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -50,6 +55,7 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
             Constraint::Length(spinner_h),
             Constraint::Length(task_panel_h),
             Constraint::Length(bg_panel_h),
+            Constraint::Length(queued_panel_h),
             Constraint::Length(footer_h),
         ])
         .split(viewport);
@@ -58,7 +64,8 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     let spinner_area = chunks[2];
     let task_area = chunks[3];
     let bg_panel_area = chunks[4];
-    let footer_area = chunks[5];
+    let queued_panel_area = chunks[5];
+    let footer_area = chunks[6];
 
     let chat_lines = crate::ui::components::chat_history::render_chat_lines(state, chat_area.width);
     let total = chat_lines.len();
@@ -137,6 +144,17 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
         f.render_widget(
             ratatui::widgets::Paragraph::new(selector_lines),
             bg_panel_area,
+        );
+    }
+
+    if queued_panel_h > 0 {
+        let queued_lines = crate::ui::components::queued_input::render_queued_panel(
+            state,
+            queued_panel_area.width,
+        );
+        f.render_widget(
+            ratatui::widgets::Paragraph::new(queued_lines),
+            queued_panel_area,
         );
     }
 

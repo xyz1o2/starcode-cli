@@ -19,6 +19,7 @@ pub struct DeferredRuntimeActions {
     pub pending_mcp_list_tools: Option<String>,
     pub pending_toggle_yolo: bool,
     pub pending_set_approval_mode: Option<crate::types::ApprovalMode>,
+    pub pending_set_thinking_effort: Option<crate::types::ThinkingEffort>,
     pub pending_reset_session: bool,
     pub pending_tool_confirmation: Option<(Vec<crate::types::StarToolCall>, u64, bool, bool)>,
     pub pending_checkpoint_action: Option<PendingCheckpointAction>,
@@ -200,6 +201,13 @@ pub async fn handle_streaming_request(
         }
         Some(AgentRequest::SetApprovalMode(mode)) => {
             deferred.pending_set_approval_mode = Some(mode);
+            StreamingRequestOutcome::Continue
+        }
+        Some(AgentRequest::SetThinkingEffort(effort)) => {
+            // 本轮跑完再生效。中途打开思考会让接下来的一次请求带上
+            // thinking 参数，而历史里已经有不含 thinking block 的
+            // assistant 轮次 —— Anthropic 会因此报错。
+            deferred.pending_set_thinking_effort = Some(effort);
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::ListCheckpoints { message_id }) => {
@@ -426,6 +434,14 @@ pub async fn apply_deferred_runtime_actions(
     if let Some(mode) = deferred.pending_set_approval_mode.take() {
         agent.set_approval_mode(mode.clone());
         let _ = tx.send(StreamMessage::ApprovalModeChanged { mode }).await;
+    }
+
+    if let Some(effort) = deferred.pending_set_thinking_effort.take() {
+        crate::llm::thinking::set_session_effort(&effort);
+        crate::utils::logging::append_agent_log_line(&format!(
+            "[AgentRuntime] thinking effort -> {} (deferred)",
+            effort.as_str()
+        ));
     }
 
     if deferred.pending_reset_session {

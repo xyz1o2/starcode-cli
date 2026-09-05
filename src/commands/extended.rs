@@ -1606,6 +1606,14 @@ pub async fn effort(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRe
     };
 
     ctx.state.thinking_effort = effort;
+    // 让档位真的生效：UI 侧只改显示，作用到请求上要靠这条消息
+    // （落到 `llm::thinking`，按 provider 方言翻成对应字段）。
+    let _ = ctx
+        .agent_tx
+        .send(crate::runtime::messages::AgentRequest::SetThinkingEffort(
+            ctx.state.thinking_effort.clone(),
+        ))
+        .await;
     // 持久化到用户设置（与面板设置路径一致）
     let effort_str = ctx.state.thinking_effort.as_str().to_string();
     tokio::spawn(async move {

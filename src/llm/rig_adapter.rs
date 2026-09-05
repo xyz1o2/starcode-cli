@@ -208,6 +208,7 @@ fn build_request(
     messages: &[StarMessage],
     tools: &Option<Vec<StarTool>>,
     supports_prompt_caching: bool,
+    profile: crate::llm::thinking::ProviderProfile<'_>,
 ) -> CompletionRequest {
     let mut extra_params = serde_json::Map::new();
 
@@ -228,28 +229,34 @@ fn build_request(
         }
     }
 
-    // Add thinking/reasoning effort level for supported providers
-    if let Ok(effort) = std::env::var(crate::llm::ENV_STAR_THINKING_EFFORT) {
-        let effort = effort.trim().to_lowercase();
-        if !effort.is_empty() && effort != "none" {
-            // OpenAI/Grok style: reasoningEffort
-            extra_params.insert("reasoningEffort".to_string(), serde_json::json!(effort));
-            // DeepSeek/Qwen style: thinking.type
-            extra_params.insert(
-                "thinking".to_string(),
-                serde_json::json!({
-                    "type": if effort == "none" { "disabled" } else { "enabled" }
-                }),
-            );
-            // OpenRouter style: reasoning.effort
-            extra_params.insert(
-                "reasoning".to_string(),
-                serde_json::json!({
-                    "effort": effort
-                }),
-            );
-        }
+    // 思考力度 —— 档位由 UI 侧（Alt+T / `/effort` / 命令面板）经
+    // `AgentRequest::SetThinkingEffort` 存进 `llm::thinking` 的会话状态，
+    // 这里按 provider 方言翻成它认识的那**一个**字段：`additional_params`
+    // 是 `#[serde(flatten)]`，几种字段一起发会让严格的服务端 400。
+    let effort = crate::llm::thinking::current_effort();
+    let thinking = crate::llm::thinking::thinking_params(&profile, &effort);
+    if !thinking.is_empty() {
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[LLM] thinking effort={} dialect={:?} params={}",
+            effort.as_str(),
+            thinking.dialect,
+            serde_json::Value::Object(thinking.extra.clone())
+        ));
     }
+    for (key, value) in thinking.extra {
+        extra_params.insert(key, value);
+    }
+
+    // budget 方言要求 `max_tokens > budget_tokens`，而 rig 只在请求没给
+    // `max_tokens` 时才填自己的默认值（老模型上是 2048，比 budget 还小），
+    // 所以这里必须显式给出；用户自己配了更大的值就听用户的。
+    let max_tokens = thinking.max_tokens.map(|need| {
+        std::env::var(crate::llm::ENV_STAR_MAX_TOKENS)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|configured| *configured > need)
+            .unwrap_or(need)
+    });
 
     let additional_params = if extra_params.is_empty() {
         None
@@ -271,7 +278,7 @@ fn build_request(
         documents: vec![],
         tools: convert_tools(tools),
         temperature: None,
-        max_tokens: None,
+        max_tokens,
         tool_choice: None,
         additional_params,
         output_schema: None,
@@ -700,7 +707,12 @@ impl LlmClient for RigAdapter {
         messages: Vec<StarMessage>,
         tools: Option<Vec<StarTool>>,
     ) -> Result<StarResponse, Box<dyn Error + Send + Sync>> {
-        let request = build_request(&messages, &tools, self.supports_prompt_caching());
+        let request = build_request(
+            &messages,
+            &tools,
+            self.supports_prompt_caching(),
+            self.thinking_profile(),
+        );
         let result = self.do_completion(request).await?;
         Ok(build_star_response(result))
     }
@@ -711,7 +723,12 @@ impl LlmClient for RigAdapter {
         tools: Option<Vec<StarTool>>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError>
     {
-        let request = build_request(&messages, &tools, self.supports_prompt_caching());
+        let request = build_request(
+            &messages,
+            &tools,
+            self.supports_prompt_caching(),
+            self.thinking_profile(),
+        );
         self.do_stream(request).await
     }
 
@@ -725,6 +742,49 @@ impl RigAdapter {
     /// providers reject it with a 400 error.
     fn supports_prompt_caching(&self) -> bool {
         matches!(self, Self::Anthropic { .. })
+    }
+
+    /// 判断思考参数该用哪种方言所需的 provider 画像
+    /// （见 `crate::llm::thinking`）。
+    fn thinking_profile(&self) -> crate::llm::thinking::ProviderProfile<'_> {
+        use crate::llm::thinking::{ProviderKind, ProviderProfile};
+        match self {
+            Self::OpenAI {
+                model, base_url, ..
+            } => ProviderProfile {
+                kind: ProviderKind::OpenAi,
+                model,
+                base_url: base_url.as_deref(),
+                provider_name: None,
+            },
+            Self::Anthropic {
+                model, base_url, ..
+            } => ProviderProfile {
+                kind: ProviderKind::Anthropic,
+                model,
+                base_url: base_url.as_deref(),
+                provider_name: None,
+            },
+            Self::DeepSeek {
+                model, base_url, ..
+            } => ProviderProfile {
+                kind: ProviderKind::DeepSeek,
+                model,
+                base_url: base_url.as_deref(),
+                provider_name: None,
+            },
+            Self::OpenAiCompatible {
+                model,
+                base_url,
+                provider_name,
+                ..
+            } => ProviderProfile {
+                kind: ProviderKind::Compatible,
+                model,
+                base_url: Some(base_url),
+                provider_name: Some(provider_name),
+            },
+        }
     }
 
     async fn do_completion(

@@ -758,12 +758,6 @@ pub async fn handle_stream_update(
             );
             if !state.is_awaiting_confirmation {
                 if let Some(next_input) = state.pending_user_messages.pop_front() {
-                    let remaining = state.pending_user_messages.len();
-                    if remaining > 0 {
-                        state.current_status_line = Some(format!("\u{23f3} {} pending", remaining));
-                    } else {
-                        state.current_status_line = None;
-                    }
                     enqueue_user_message(state, next_input, agent_tx).await?
                 }
             }
@@ -1406,7 +1400,6 @@ async fn handle_done_message(
     state.current_tool_name = None;
     state.thinking_started_at = None;
     state.last_token_time = None;
-    state.queued_messages_display.clear();
     if !cancelling_graceful {
         state.is_streaming = false;
         state.current_status_line = None;
@@ -1445,12 +1438,6 @@ async fn handle_done_message(
     );
     if !state.is_awaiting_confirmation {
         if let Some(next_input) = state.pending_user_messages.pop_front() {
-            let remaining = state.pending_user_messages.len();
-            if remaining > 0 {
-                state.current_status_line = Some(format!("\u{23f3} {} pending", remaining));
-            } else {
-                state.current_status_line = None;
-            }
             enqueue_user_message(state, next_input, agent_tx).await?
         }
     }

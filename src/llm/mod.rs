@@ -4,6 +4,7 @@ mod mock;
 mod openai_compatible;
 pub mod providers;
 pub mod rig_adapter;
+pub mod thinking;
 
 pub use crate::core::config::models::ModelInfo;
 pub use mock::MockClient;

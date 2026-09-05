@@ -330,7 +330,6 @@ pub struct ChatState {
     pub command_history: VecDeque<String>,
     pub history_index: Option<usize>,
     pub history_input_snapshot: Option<String>,
-    pub queued_messages_display: VecDeque<(String, Instant)>,
     // ==========================================
     pub tool_started_at: HashMap<String, Instant>,
     pub tool_call_args_cache: HashMap<String, String>,
@@ -751,7 +750,6 @@ impl ChatState {
             command_history: crate::core::config::history_store::load_history(),
             history_index: None,
             history_input_snapshot: None,
-            queued_messages_display: VecDeque::new(),
             // ==========================================
             tool_started_at: HashMap::new(),
             tool_call_args_cache: HashMap::new(),

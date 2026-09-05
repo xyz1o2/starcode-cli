@@ -69,6 +69,28 @@ fn yank_from_ring(state: &mut ChatState, idx: usize) {
     crate::ui::components::command_suggestions::on_input_changed(state);
 }
 
+/// 把排队中的输入全部取回输入框 —— 对标 Claude Code 的 `popAllEditable`
+/// （`src/utils/messageQueueManager.ts`）：多条按入队顺序用换行拼接，输入框里
+/// 已有的内容接在最后，光标留在末尾。返回是否真的取回了内容。
+///
+/// 排队面板只负责把队列显示出来，「改词 / 撤掉」这条退路靠这个函数：
+/// 参考实现把它绑在 ↑ 和 Esc 上，这里保持一致。
+pub(crate) fn restore_queued_messages_to_input(state: &mut ChatState) -> bool {
+    if state.pending_user_messages.is_empty() {
+        return false;
+    }
+    let mut parts: Vec<String> = state.pending_user_messages.drain(..).collect();
+    if !state.input.trim().is_empty() {
+        parts.push(state.input.clone());
+    }
+    let text = parts.join("\n");
+    reset_main_textarea(state);
+    state.textarea.insert_str(&text);
+    sync_input_from_textarea(state);
+    crate::ui::components::command_suggestions::on_input_changed(state);
+    true
+}
+
 /// Build context breakdown from current state for the context visualization.
 fn build_context_breakdown(
     state: &ChatState,
@@ -407,6 +429,12 @@ pub(crate) async fn execute_palette_action(
                 _ => crate::types::ThinkingEffort::Off,
             };
             state.thinking_effort = effort;
+            // 让档位真的生效：不通知 agent 的话，这里改的只是显示。
+            let _ = agent_tx
+                .send(AgentRequest::SetThinkingEffort(
+                    state.thinking_effort.clone(),
+                ))
+                .await;
             // Persist to user settings
             let effort_str = state.thinking_effort.as_str().to_string();
             tokio::spawn(async move {
@@ -1162,10 +1190,24 @@ pub async fn handle_key_event(
                     }
                     _ => state.thinking_effort.next(),
                 };
+                // 当前模型根本没有思考开关时说清楚，否则用户会以为档位没生效
+                let unsupported =
+                    matches!(cap, crate::core::config::models::ThinkingCapability::None);
                 state.current_status_line = Some(format!(
-                    "Thinking: {}",
-                    state.thinking_effort.display_name()
+                    "Thinking: {}{}",
+                    state.thinking_effort.display_name(),
+                    if unsupported {
+                        " · current model has no thinking mode"
+                    } else {
+                        ""
+                    }
                 ));
+                // 让档位真的生效：不通知 agent 的话，这里改的只是显示。
+                let _ = agent_tx
+                    .send(AgentRequest::SetThinkingEffort(
+                        state.thinking_effort.clone(),
+                    ))
+                    .await;
                 // Persist to user settings
                 let effort_str = state.thinking_effort.as_str().to_string();
                 tokio::spawn(async move {
@@ -1817,6 +1859,21 @@ pub async fn handle_key_event(
 
             // Claude Code 风格：无任何覆盖层时，双击 Esc 清空输入并存入历史
             let overlay_open = state.has_overlay_active() || state.pending_model_confirmation;
+
+            // 本轮已经停了但队列还压着东西：Esc 先把它取回输入框，
+            // 让用户能改词或直接删掉（对标 popAllEditable 绑在 Esc 上）
+            if !overlay_open && !state.pending_user_messages.is_empty() {
+                let n = state.pending_user_messages.len();
+                restore_queued_messages_to_input(state);
+                state.last_esc_at = None;
+                state.current_status_line = Some(format!(
+                    "{} queued message{} moved back to the prompt",
+                    n,
+                    if n == 1 { "" } else { "s" }
+                ));
+                return Ok(());
+            }
+
             if !overlay_open && !state.input.trim().is_empty() {
                 let now = Instant::now();
                 let double = state
@@ -1943,6 +2000,16 @@ pub async fn handle_key_event(
             if is_mouse_scroll {
                 // 鼠标滚轮：滚动聊天而非导航历史
                 crate::ui::state::scroll_chat(state, -3);
+            } else if cursor_row == 0 && !state.pending_user_messages.is_empty() {
+                // 队列优先于命令历史（对标 PromptInput 的 handleHistoryUp）：
+                // 光标在首行时 ↑ 先把排队的输入取回来改，而不是翻历史
+                let n = state.pending_user_messages.len();
+                restore_queued_messages_to_input(state);
+                state.current_status_line = Some(format!(
+                    "{} queued message{} moved back to the prompt",
+                    n,
+                    if n == 1 { "" } else { "s" }
+                ));
             } else if cursor_row == 0 && (input_is_empty || state.history_index.is_some()) {
                 // Command history navigation: Up when cursor is on first line and input is
                 // empty or already in history mode
@@ -3234,5 +3301,40 @@ mod tests {
         state.bg_agent_selection = Some(0);
         assert!(!press(&mut state, KeyCode::Down));
         assert!(state.bg_agent_selection.is_none());
+    }
+
+    /// 排队的输入按入队顺序拼回输入框，队列随之清空。
+    #[test]
+    fn restoring_the_queue_joins_messages_in_order() {
+        let mut state = ChatState::new();
+        state.pending_user_messages.push_back("first".to_string());
+        state.pending_user_messages.push_back("second".to_string());
+
+        assert!(restore_queued_messages_to_input(&mut state));
+        assert_eq!(state.input, "first\nsecond");
+        assert!(state.pending_user_messages.is_empty());
+    }
+
+    /// 输入框里已经敲了一半的内容不能被队列覆盖：它接在队列后面。
+    #[test]
+    fn restoring_the_queue_keeps_the_half_typed_draft() {
+        let mut state = ChatState::new();
+        state.pending_user_messages.push_back("queued".to_string());
+        state.textarea.insert_str("half typed");
+        sync_input_from_textarea(&mut state);
+
+        assert!(restore_queued_messages_to_input(&mut state));
+        assert_eq!(state.input, "queued\nhalf typed");
+    }
+
+    /// 队列为空时是 no-op，输入框内容不动（否则 ↑ 会莫名清掉草稿）。
+    #[test]
+    fn restoring_an_empty_queue_is_a_noop() {
+        let mut state = ChatState::new();
+        state.textarea.insert_str("draft");
+        sync_input_from_textarea(&mut state);
+
+        assert!(!restore_queued_messages_to_input(&mut state));
+        assert_eq!(state.input, "draft");
     }
 }

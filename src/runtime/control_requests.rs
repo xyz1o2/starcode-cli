@@ -138,6 +138,16 @@ pub async fn handle_request(
             agent.set_approval_mode(mode.clone());
             let _ = tx.send(StreamMessage::ApprovalModeChanged { mode }).await;
         }
+        AgentRequest::SetThinkingEffort(effort) => {
+            // 存进会话状态，之后每一次请求构造时按 provider 方言翻成
+            // 对应字段（见 `crate::llm::thinking`）。切模型会重建 client，
+            // 所以档位不能挂在 client 上。
+            crate::llm::thinking::set_session_effort(&effort);
+            crate::utils::logging::append_agent_log_line(&format!(
+                "[AgentRuntime] thinking effort -> {}",
+                effort.as_str()
+            ));
+        }
         AgentRequest::Compress { message_id } => {
             let _ = tx.send(StreamMessage::Start { message_id }).await;
             match agent.compress_context().await {

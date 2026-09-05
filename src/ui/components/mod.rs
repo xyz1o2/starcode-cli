@@ -17,6 +17,7 @@ pub mod log_selector;
 pub mod message_render;
 pub mod modal;
 pub mod palette;
+pub mod queued_input;
 pub mod status_line;
 pub mod status_modal;
 pub mod task_panel;
