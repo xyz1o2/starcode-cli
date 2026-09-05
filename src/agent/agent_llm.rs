@@ -182,6 +182,9 @@ impl Agent {
 
         let mut current_content = String::new();
         let mut current_reasoning = String::new();
+        // reasoning 净化必须跨分片保持状态：逐片净化会吃掉片首/片尾空白，
+        // " user" → "user"，拼接后就粘成 "theuserwants"
+        let mut reasoning_sanitizer = tool_helpers::ReasoningSanitizer::default();
         let mut tool_calls: Vec<StarToolCall> = Vec::new();
         let mut content_streamed = false;
         let mut reasoning_streamed = false;
@@ -446,8 +449,7 @@ impl Agent {
                                         // reasoning chunk counts as activity, so the
                                         // limit only fires after a genuine pause.
                                         thinking_started_at = std::time::Instant::now();
-                                        let reasoning =
-                                            tool_helpers::sanitize_reasoning_content(raw_reasoning);
+                                        let reasoning = reasoning_sanitizer.push(raw_reasoning);
                                         if !reasoning.is_empty() {
                                             let thinking_tokens = current_reasoning.len() / 4;
                                             let thinking_elapsed = thinking_started_at.elapsed();
@@ -608,6 +610,19 @@ impl Agent {
                         break;
                     }
                 }
+            }
+        }
+
+        // 收尾净化器：最后一行若以 '<' 开头且没有换行符结尾，它还压在缓冲区里，
+        // 不 flush 就会从思考块和会话历史里双双丢失
+        {
+            let tail = reasoning_sanitizer.flush();
+            if !tail.is_empty() && !thinking_limit_reached {
+                self.emit_direct_chunk(crate::types::StreamingChunk::reasoning_delta(&tail));
+                if self.stream_tx.is_some() {
+                    reasoning_streamed = true;
+                }
+                current_reasoning.push_str(&tail);
             }
         }
 

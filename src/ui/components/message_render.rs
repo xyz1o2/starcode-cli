@@ -411,13 +411,15 @@ mod tests {
         entry.reasoning_content = Some("hello thinking content here".to_string());
         entry.is_streaming = Some(true);
         state.chat_history.push(entry);
-        state.expanded_thinking_indices.insert(0);
+        let idx = state.chat_history.len() - 1;
+        state.expanded_thinking_indices.insert(idx);
 
         let backend = TestBackend::new(80, 12);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let blocks = render_non_tool_entry_blocks(&state, &state.chat_history[0], 0, 70);
+                let blocks =
+                    render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, 70);
                 let mut lines: Vec<Line> = Vec::new();
                 for b in &blocks {
                     for l in b {
@@ -443,6 +445,44 @@ mod tests {
             black_bg, 0,
             "found {} cells with black background",
             black_bg
+        );
+    }
+
+    /// 折行不得吞掉词间空格：思考块渲染后的词序列必须与原文一致。
+    #[test]
+    fn thinking_content_keeps_word_spacing_across_wraps() {
+        let mut state = crate::ui::state::ChatState::new();
+        let mut entry = crate::types::ChatEntry::assistant("");
+        entry.reasoning_content =
+            Some("The user wants the words spaced out properly here".to_string());
+        state.chat_history.push(entry);
+        // ChatState::new() 自带欢迎条目，思考条目在其后
+        let idx = state.chat_history.len() - 1;
+        state.expanded_thinking_indices.insert(idx);
+
+        let blocks = render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, 30);
+        // blocks[0] 是 header，blocks[1] 是思考正文
+        let rendered: Vec<String> = blocks[1]
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(rendered.len() > 1, "expected wrapping: {:?}", rendered);
+
+        let words: Vec<&str> = rendered
+            .iter()
+            .flat_map(|l| l.split_whitespace())
+            .filter(|w| *w != "│")
+            .collect();
+        assert_eq!(
+            words,
+            vec!["The", "user", "wants", "the", "words", "spaced", "out", "properly", "here"],
+            "rendered: {:?}",
+            rendered
         );
     }
 }
