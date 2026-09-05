@@ -1244,11 +1244,7 @@ pub async fn export_conversation(mut ctx: CommandContext<'_>, args: Vec<String>)
                     md.push_str(&format!(
                         "### ⏺ {}\n\n```json\n{}\n```\n\n",
                         tc.function.name,
-                        if tc.function.arguments.len() > 500 {
-                            format!("{}...", &tc.function.arguments[..500])
-                        } else {
-                            tc.function.arguments.clone()
-                        }
+                        crate::utils::string_utils::truncate_chars(&tc.function.arguments, 500)
                     ));
                 }
             }
@@ -1625,8 +1621,19 @@ pub async fn effort(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRe
         }
     });
 
-    let display = ctx.state.thinking_effort.display_name().to_string();
-    push_msg(&mut ctx, format!("✅ Thinking effort: {}", display));
+    // 措辞与 Alt+T、命令面板统一（`◐ medium`），用户才认得出是同一个档位。
+    let mut msg = format!("✅ Thinking effort: {}", ctx.state.thinking_effort.label());
+    if matches!(
+        crate::core::config::models::thinking_capability(&ctx.state.current_model),
+        crate::core::config::models::ThinkingCapability::None
+    ) {
+        // 模型压根没有思考开关时说清楚，否则用户以为设了没生效
+        msg.push_str(
+            "\n\n⚠️ The current model has no thinking mode — this takes effect \
+             after you switch to one that does.",
+        );
+    }
+    push_msg(&mut ctx, msg);
     Ok(())
 }
 

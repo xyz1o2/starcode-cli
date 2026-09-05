@@ -392,6 +392,14 @@ impl StarAgent {
         self.abort_flag.store(false, Ordering::SeqCst);
     }
 
+    /// 把 `!command` 的输出攒进上下文，等下一条用户消息一起发出去
+    ///
+    /// 给 `!command` 用：命令输出得进上下文，模型下一轮才看得见；
+    /// 又不该因为跑了个 `git status` 就触发一次回答。
+    pub fn append_session_context(&mut self, content: String) {
+        self.inner.pending_local_context.push(content);
+    }
+
     pub async fn process_user_message_stream(
         &mut self,
         prompt: &str,

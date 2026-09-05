@@ -36,7 +36,7 @@ pub fn welcome_header_lines(state: &ChatState) -> Vec<Line<'static>> {
     } else {
         state.current_model.clone()
     };
-    let effort = effort_label(&state.thinking_effort);
+    let effort = effort_label(&state.thinking_effort, &state.current_model);
     let model_line = match effort {
         Some(label) => format!("{} · {}", model, label),
         None => model,
@@ -90,15 +90,48 @@ pub fn welcome_header_lines(state: &ChatState) -> Vec<Line<'static>> {
     lines
 }
 
-/// thinking effort 的后缀；Off 不显示，避免抬头出现无意义的 "· off"。
-fn effort_label(effort: &crate::types::ThinkingEffort) -> Option<&'static str> {
-    use crate::types::ThinkingEffort;
-    match effort {
-        ThinkingEffort::Off => None,
-        ThinkingEffort::Low => Some("thinking low"),
-        ThinkingEffort::Medium => Some("thinking medium"),
-        ThinkingEffort::High => Some("thinking high"),
+/// 抬头是渲染期现算的，但渲染结果按条目缓存在 `state.rendered_cache` 里，且只在条目被
+/// 标脏时才刷新。抬头里的信息（模型、思考档位）在别处被改动后，必须把承载抬头的那条
+/// `is_welcome` 条目标脏，否则屏幕上留着的还是旧字符串。
+pub fn invalidate(state: &mut ChatState) {
+    if let Some(idx) = state.chat_history.iter().position(|e| e.is_welcome) {
+        state.virtual_list.mark_dirty(idx);
     }
+}
+
+/// 抬头的内容指纹。抬头里会变的东西只有这两样：模型名（含"支不支持思考"这个派生判断）
+/// 和思考档位；版本号是编译期常量，工作目录一个会话内不变。
+fn fingerprint(state: &ChatState) -> String {
+    format!(
+        "{}\u{1}{}",
+        state.current_model,
+        state.thinking_effort.as_str()
+    )
+}
+
+/// 渲染前调用：指纹变了就把抬头标脏。
+///
+/// 之所以在渲染路径上判而不是在赋值点上通知：`current_model` 全仓库有十几个赋值点
+/// （`/model`、`/fast`、面板、流式响应回填的模型名……），漏一个就是一处静默的过期显示。
+pub fn refresh_if_stale(state: &mut ChatState) {
+    let fp = fingerprint(state);
+    if state.welcome_header_fingerprint.as_deref() == Some(fp.as_str()) {
+        return;
+    }
+    state.welcome_header_fingerprint = Some(fp);
+    invalidate(state);
+}
+
+/// thinking effort 的后缀，例如 `◐ medium`。
+///
+/// 只要模型有思考开关就一直显示，包括默认的 Off。原来 Off 返回 `None`，而 Off 恰好是
+/// 默认值 —— 于是没人动过档位时抬头里根本没有这一格，用户自然会问"调思考深度的 UI 在
+/// 哪"。对标 Claude Code：档位常驻显示，只在模型不支持思考时才隐藏。
+fn effort_label(effort: &crate::types::ThinkingEffort, model: &str) -> Option<String> {
+    if !crate::core::config::models::supports_thinking_ui(model) {
+        return None;
+    }
+    Some(effort.label())
 }
 
 /// 把家目录前缀折成 `~`，长路径不至于把抬头撑爆。
@@ -150,7 +183,28 @@ mod tests {
     }
 
     #[test]
-    fn effort_off_adds_no_suffix() {
-        assert_eq!(effort_label(&crate::types::ThinkingEffort::Off), None);
+    fn effort_is_shown_even_at_the_default_off() {
+        // 默认档位就是 Off；这一格必须照样出现，否则用户翻遍界面也找不到思考深度在哪调
+        assert_eq!(
+            effort_label(&crate::types::ThinkingEffort::Off, "claude-opus-5"),
+            Some("◌ off".to_string())
+        );
+    }
+
+    #[test]
+    fn effort_is_shown_before_the_model_name_resolves() {
+        // 启动阶段模型名还是空串，先按"支持"处理，指示器早一点出现
+        assert_eq!(
+            effort_label(&crate::types::ThinkingEffort::Medium, ""),
+            Some("◐ medium".to_string())
+        );
+    }
+
+    #[test]
+    fn a_model_without_thinking_hides_the_effort() {
+        assert_eq!(
+            effort_label(&crate::types::ThinkingEffort::High, "gpt-4o"),
+            None
+        );
     }
 }

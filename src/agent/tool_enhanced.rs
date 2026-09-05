@@ -15,11 +15,7 @@ impl ToolUseSummaryGenerator {
         let summary = match tool_name {
             "Bash" | "bash" => {
                 if let Some(command) = input.get("command").and_then(|v| v.as_str()) {
-                    let short_cmd = if command.len() > 50 {
-                        format!("{}...", &command[..47])
-                    } else {
-                        command.to_string()
-                    };
+                    let short_cmd = crate::utils::string_utils::truncate_with_ellipsis(command, 50);
                     format!("Running: {}", short_cmd)
                 } else {
                     "Running bash command".to_string()

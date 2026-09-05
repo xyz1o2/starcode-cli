@@ -134,6 +134,9 @@ pub async fn handle_request(
                 agent.mark_file_as_read(&path).await;
             }
         }
+        AgentRequest::AppendContext { content } => {
+            agent.append_session_context(content);
+        }
         AgentRequest::SendMessage { .. } => {
             // Handled in worker main loop
         }

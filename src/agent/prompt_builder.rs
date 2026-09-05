@@ -1,7 +1,9 @@
 use crate::core::prompts;
 use crate::core::prompts::SystemPrompts;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 // ── Scope-aware editing strategy thresholds ──
 /// 1–N files → tight scope (fast path: search → read → replace).
@@ -32,6 +34,137 @@ fn prompt_cache_enabled() -> bool {
             })
             .unwrap_or(true)
     })
+}
+
+// ── Git 快照缓存 ──
+//
+// 之前每构建一次 system prompt 就 fork 4 个 git 子进程（rev-parse ×2 / status / log），
+// 每条用户消息一次。更要命的是 `git status --short` 的行数在 coding agent 里几乎每次
+// 编辑之后都会变，而它落在 system 消息里 —— 等于每轮都把 prompt 缓存前缀改掉一截，
+// 于是那 4 万多字符的 system prompt 每轮都在按原价重新计费。
+//
+// 这里加一层 TTL 缓存，默认 300 秒，**正好是 Anthropic ephemeral 缓存的存活时间**：
+// 同一个缓存窗口内 git 段落逐字节相同，缓存前缀不会因为「刚改了个文件」而失效；
+// 窗口过期时缓存本来就要重建，那一刻刷新 git 信息不损失任何东西。
+// 用 STAR_PROMPT_GIT_SNAPSHOT_SECS 调整（0 = 关掉缓存，每次都真跑 git）。
+const GIT_SNAPSHOT_TTL_SECS: u64 = 300;
+
+/// 一次 git 探测的结果（分支 / 工作区状态 / 最近提交）
+#[derive(Clone, Default)]
+struct GitSnapshot {
+    is_repo: bool,
+    branch: Option<String>,
+    status: Option<String>,
+    recent_commits: Option<String>,
+}
+
+fn git_snapshot_ttl() -> Duration {
+    Duration::from_secs(
+        std::env::var("STAR_PROMPT_GIT_SNAPSHOT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(GIT_SNAPSHOT_TTL_SECS),
+    )
+}
+
+fn git_snapshot_cache() -> &'static Mutex<HashMap<PathBuf, (Instant, GitSnapshot)>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (Instant, GitSnapshot)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 真正去跑 git 的那一层（4 个子进程，只在缓存未命中时执行）
+fn probe_git_snapshot(cwd: &Path) -> GitSnapshot {
+    let run = |args: &[&str]| -> Option<String> {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+    };
+
+    let is_repo = run(&["rev-parse", "--is-inside-work-tree"]).is_some();
+    if !is_repo {
+        return GitSnapshot::default();
+    }
+
+    GitSnapshot {
+        is_repo: true,
+        branch: run(&["rev-parse", "--abbrev-ref", "HEAD"]).map(|s| s.trim().to_string()),
+        // 只报「几个文件改了」而不是文件名列表：既省 token，也让这一段在
+        // 同一批改动里更容易保持逐字节稳定。
+        status: run(&["status", "--short"]).map(|s| {
+            let changed = s.lines().filter(|l| !l.trim().is_empty()).count();
+            if changed == 0 {
+                "(clean)".to_string()
+            } else {
+                format!("{} files changed", changed)
+            }
+        }),
+        recent_commits: run(&["log", "--oneline", "-5"]).map(|s| s.trim().to_string()),
+    }
+}
+
+/// 带 TTL 的 git 快照；同一个 cwd 在 TTL 内复用上一次的结果
+fn cached_git_snapshot(cwd: &Path) -> GitSnapshot {
+    let ttl = git_snapshot_ttl();
+    if ttl.is_zero() {
+        return probe_git_snapshot(cwd);
+    }
+
+    let key = cwd.to_path_buf();
+    if let Ok(cache) = git_snapshot_cache().lock() {
+        if let Some((checked_at, snapshot)) = cache.get(&key) {
+            if checked_at.elapsed() < ttl {
+                return snapshot.clone();
+            }
+        }
+    }
+
+    let snapshot = probe_git_snapshot(cwd);
+    if let Ok(mut cache) = git_snapshot_cache().lock() {
+        cache.insert(key, (Instant::now(), snapshot.clone()));
+    }
+    snapshot
+}
+
+// ── System prompt 逃生口（对标 pi 的 SYSTEM.md / APPEND_SYSTEM.md）──
+//
+// 本项目生成的 system prompt 约 4 万字符（≈1.2 万 token），还没算工具 schema。
+// 有的场景（跑评测、接小上下文模型、只想要个纯粹的 shell agent）根本不需要这一整套，
+// 但之前没有任何办法绕开它。现在给两个钩子：
+//
+// - `SYSTEM.md`：**整体替换**生成好的 system prompt；
+// - `APPEND_SYSTEM.md`：在生成内容**后面追加**（保留全部内建行为，只加自己的规则）。
+//
+// 查找顺序：`$STAR_SYSTEM_PROMPT_FILE` / `$STAR_APPEND_SYSTEM_PROMPT_FILE` 指定的路径
+// > 项目 `./.star/` > 全局 `~/.star/`。两个钩子可以同时用。
+fn read_prompt_override(cwd: &Path, env_key: &str, filename: &str) -> Option<String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(explicit) = std::env::var(env_key).ok().filter(|v| !v.trim().is_empty()) {
+        candidates.push(PathBuf::from(explicit.trim()));
+    }
+    candidates.push(
+        crate::core::config::storage::Storage::new(cwd.to_path_buf())
+            .star_dir()
+            .join(filename),
+    );
+    candidates.push(crate::core::config::storage::Storage::global_star_dir().join(filename));
+
+    for path in candidates {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if !content.trim().is_empty() {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[Prompt] Using {} override from {}",
+                    filename,
+                    path.display()
+                ));
+                return Some(content.trim().to_string());
+            }
+        }
+    }
+    None
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -331,67 +464,18 @@ impl PromptBuilder {
         // Detect environment info (lightweight, ~50ms)
         let shell = prompts::env_info::detect_shell();
 
-        // Get git info (blocking, runs in prompt builder context)
-        let cwd_path = std::path::Path::new(cwd);
-        let is_git = std::process::Command::new("git")
-            .args(&["rev-parse", "--is-inside-work-tree"])
-            .current_dir(cwd_path)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        let git_branch = if is_git {
-            std::process::Command::new("git")
-                .args(&["rev-parse", "--abbrev-ref", "HEAD"])
-                .current_dir(cwd_path)
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-        } else {
-            None
-        };
-
-        let git_status = if is_git {
-            std::process::Command::new("git")
-                .args(&["status", "--short"])
-                .current_dir(cwd_path)
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| {
-                    let lines: Vec<&str> = s.lines().collect();
-                    if lines.is_empty() {
-                        "(clean)".to_string()
-                    } else {
-                        format!("{} files changed", lines.len())
-                    }
-                })
-        } else {
-            None
-        };
-
-        let recent_commits = if is_git {
-            std::process::Command::new("git")
-                .args(&["log", "--oneline", "-5"])
-                .current_dir(cwd_path)
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-        } else {
-            None
-        };
+        // Git 信息走 TTL 缓存（见 cached_git_snapshot 的注释）
+        let git = cached_git_snapshot(std::path::Path::new(cwd));
 
         parts.push(prompts::env_info::render(prompts::env_info::EnvInfo {
             today,
             platform,
             cwd,
             shell: &shell,
-            is_git_repo: is_git,
-            git_branch: git_branch.as_deref(),
-            git_status: git_status.as_deref(),
-            recent_commits: recent_commits.as_deref(),
+            is_git_repo: git.is_repo,
+            git_branch: git.branch.as_deref(),
+            git_status: git.status.as_deref(),
+            recent_commits: git.recent_commits.as_deref(),
         }));
 
         if flags.include_tool_catalog {
@@ -426,14 +510,27 @@ impl PromptBuilder {
 
     /// Build system messages with prompt cache optimization.
     ///
-    /// Returns two system messages:
-    /// 1. Static parts (core identity, security policy, env info, etc.)
-    ///    marked with `cache_control: {"type": "ephemeral"}` — these are
-    ///    reused across turns, saving 30-50% token costs on Anthropic API.
-    /// 2. Dynamic parts (project context, git context, complexity hints) —
-    ///    not cached, changes per turn.
+    /// # 缓存前缀必须逐字节稳定
     ///
-    /// If `STAR_PROMPT_CACHE_ENABLED=0`, both messages are plain system messages
+    /// Anthropic 的 prompt cache 是**前缀**缓存，而 rig 只在 system 数组的最后一块上
+    /// 打断点（`apply_system_cache_control` → `system.last_mut()`），所以**整个 system
+    /// 数组都属于被缓存的前缀**：其中任何一个字节变了，这一整段（本项目约 4 万字符）
+    /// 就要按原价重算。
+    ///
+    /// 因此这里只往 system 里放"一个缓存窗口内不会变"的东西：
+    ///
+    /// - 静态段：身份 / 模式提示 / 安全策略 / reminders / 平台信息 / 工具目录 /
+    ///   扩展提示包 / final override rules；
+    /// - 准静态段：项目指令（STAR.md，改了会变但不会每轮变）+ git 快照
+    ///   （TTL 300s ≈ 缓存存活时间，见 [`cached_git_snapshot`]）。
+    ///
+    /// 真正每轮都变的东西（`complexity_hint`、检索出来的动态上下文）不再进 system，
+    /// 由调用方挂到当轮 user 消息上 —— 见 [`PromptBuilder::build_turn_context`]。
+    ///
+    /// `.star/SYSTEM.md` 可以整体替换这里生成的内容，`.star/APPEND_SYSTEM.md` 可以在
+    /// 后面追加 —— 见 [`read_prompt_override`]。
+    ///
+    /// If `STAR_PROMPT_CACHE_ENABLED=0`, the messages are plain system messages
     /// without cache_control.
     pub fn build_cached_system_messages(
         mode: PromptMode,
@@ -443,25 +540,31 @@ impl PromptBuilder {
         active_tools: Option<&HashSet<String>>,
         active_files: Option<&[String]>,
         project_context_override: Option<String>,
-        complexity_hint: Option<String>,
         is_thinking_model: bool,
         include_extended_bundle: bool,
     ) -> Vec<crate::types::StarMessage> {
-        let flags = PromptFlags::from_env();
-        let cache_enabled = prompt_cache_enabled();
+        let cwd_path = std::path::Path::new(cwd);
 
-        // ── Dynamic parts (NOT cached) ──
-        let mut dynamic_parts: Vec<String> = Vec::new();
+        // SYSTEM.md 整体替换：命中就直接返回，连 git / 扩展包 / 项目指令都不用去读。
+        if let Some(replacement) =
+            read_prompt_override(cwd_path, "STAR_SYSTEM_PROMPT_FILE", "SYSTEM.md")
+        {
+            return vec![Self::finish_system_message(cwd_path, replacement)];
+        }
+
+        let flags = PromptFlags::from_env();
+
+        // ── 准静态段（跟着静态段一起进缓存前缀）──
+        // 这些内容会变，但不是每轮都变；跟静态段放在同一条 system 消息里，
+        // 变的时候重建一次缓存即可，比每轮都变要划算得多。
+        let mut semi_static_parts: Vec<String> = Vec::new();
 
         if let Some(ctx) = project_context_override {
-            dynamic_parts.push(format!(
-                "### Project Instructions (Dynamic Context)\n\n{}",
-                ctx
-            ));
+            semi_static_parts.push(format!("### Project Instructions\n\n{}", ctx));
         } else if let Some(ctx) =
             crate::utils::project_context::load_merged_project_context(std::path::Path::new(cwd))
         {
-            dynamic_parts.push(format!(
+            semi_static_parts.push(format!(
                 "### Project Instructions (from STAR.md)\n\n{}",
                 ctx
             ));
@@ -478,7 +581,7 @@ impl PromptBuilder {
                 }
             }
             if !file_history.is_empty() {
-                dynamic_parts.push(format!(
+                semi_static_parts.push(format!(
                     "### Active Files Git Context (Insight)\n\n{}",
                     file_history
                 ));
@@ -487,7 +590,7 @@ impl PromptBuilder {
             if let Some(recent_git) =
                 crate::core::services::git_service::get_recent_changes(GIT_RECENT_CHANGES_COUNT)
             {
-                dynamic_parts.push(format!(
+                semi_static_parts.push(format!(
                     "### Recent Git Context (Context Lineage)\n\n{}",
                     recent_git
                 ));
@@ -496,15 +599,8 @@ impl PromptBuilder {
 
         if let Some(files) = active_files {
             if let Some(scope_strategy) = render_scope_strategy(files.len()) {
-                dynamic_parts.push(scope_strategy);
+                semi_static_parts.push(scope_strategy);
             }
-        }
-
-        if let Some(hint) = complexity_hint {
-            dynamic_parts.push(format!(
-                "### Task Complexity & Planning Strategy\n\n{}",
-                hint
-            ));
         }
 
         // Note: Language response is handled by core_identity prompt which instructs
@@ -562,77 +658,89 @@ impl PromptBuilder {
             }
         }
 
-        // ── Dynamic parts (NOT cached, changes per turn) ──
-        // Git status, branch, recent commits change between turns,
-        // so they MUST be in dynamic_parts to avoid cache invalidation.
-        let cwd_path = std::path::Path::new(cwd);
-        let is_git = std::process::Command::new("git")
-            .args(&["rev-parse", "--is-inside-work-tree"])
-            .current_dir(cwd_path)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        if is_git {
-            let git_branch = std::process::Command::new("git")
-                .args(&["rev-parse", "--abbrev-ref", "HEAD"])
-                .current_dir(cwd_path)
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string());
-
-            let git_status = std::process::Command::new("git")
-                .args(&["status", "--short"])
-                .current_dir(cwd_path)
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| {
-                    let lines: Vec<&str> = s.lines().collect();
-                    if lines.is_empty() {
-                        "(clean)".to_string()
-                    } else {
-                        format!("{} files changed", lines.len())
-                    }
-                });
-
-            let recent_commits = std::process::Command::new("git")
-                .args(&["log", "--oneline", "-5"])
-                .current_dir(cwd_path)
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string());
-
-            dynamic_parts.push(prompts::env_info::render_dynamic_git_info(
-                git_branch.as_deref(),
-                git_status.as_deref(),
-                recent_commits.as_deref(),
+        // ── Git 快照（准静态：TTL 内逐字节稳定）──
+        let git = cached_git_snapshot(cwd_path);
+        if git.is_repo {
+            semi_static_parts.push(prompts::env_info::render_dynamic_git_info(
+                git.branch.as_deref(),
+                git.status.as_deref(),
+                git.recent_commits.as_deref(),
             ));
         }
 
-        // Override rules
-        dynamic_parts.push(final_override_rules());
-
         // ── Assemble messages ──
-        let mut messages: Vec<crate::types::StarMessage> = Vec::new();
+        // 静态 + 准静态合成**一条** system 消息：rig 只会在 system 数组最后一块上打
+        // 缓存断点，拆成两条并不会让前面那条单独进缓存，反而白白多一条消息。
+        // final override rules 压在最后，保持"最后读到"的位置优势。
+        let mut parts = static_parts;
+        parts.append(&mut semi_static_parts);
+        parts.push(final_override_rules());
 
-        if !static_parts.is_empty() {
-            let static_content = static_parts.join("\n\n");
-            if cache_enabled {
-                messages.push(crate::types::StarMessage::cached_system(static_content));
-            } else {
-                messages.push(crate::types::StarMessage::system(static_content));
-            }
+        vec![Self::finish_system_message(cwd_path, parts.join("\n\n"))]
+    }
+
+    /// 收尾：追加 `APPEND_SYSTEM.md`，再按开关决定是否打缓存标记
+    fn finish_system_message(cwd: &Path, mut content: String) -> crate::types::StarMessage {
+        if let Some(appended) =
+            read_prompt_override(cwd, "STAR_APPEND_SYSTEM_PROMPT_FILE", "APPEND_SYSTEM.md")
+        {
+            content.push_str("\n\n");
+            content.push_str(&appended);
         }
 
-        if !dynamic_parts.is_empty() {
-            let dynamic_content = dynamic_parts.join("\n\n");
-            messages.push(crate::types::StarMessage::system(dynamic_content));
+        if prompt_cache_enabled() {
+            crate::types::StarMessage::cached_system(content)
+        } else {
+            crate::types::StarMessage::system(content)
+        }
+    }
+
+    /// 构造"当轮上下文"—— 每条用户消息都会变、因此**不能**进 system prompt 的那部分
+    ///
+    /// 复杂度提示会在 Simple/Medium/Complex 之间来回跳，检索出来的动态上下文更是每问
+    /// 一次就换一批。这两样只要放进 system 数组，缓存前缀就每轮都被击穿。对标 Claude
+    /// Code 的做法：挂到当轮 user 消息上，用 `<system-reminder>` 包起来。
+    ///
+    /// 返回 `None` 表示这一轮没有额外上下文，调用方直接发原始输入即可。
+    /// 总长度受 `STAR_TURN_CONTEXT_MAX_CHARS` 限制（默认 4000），避免长会话里
+    /// 一轮一轮堆积。
+    pub fn build_turn_context(
+        dynamic_context: Option<&str>,
+        complexity_hint: Option<&str>,
+    ) -> Option<String> {
+        let mut blocks: Vec<String> = Vec::new();
+
+        if let Some(hint) = complexity_hint.map(str::trim).filter(|s| !s.is_empty()) {
+            blocks.push(format!(
+                "### Task Complexity & Planning Strategy\n\n{}",
+                hint
+            ));
+        }
+        if let Some(ctx) = dynamic_context.map(str::trim).filter(|s| !s.is_empty()) {
+            blocks.push(format!("### Retrieved Project Context\n\n{}", ctx));
         }
 
-        messages
+        if blocks.is_empty() {
+            return None;
+        }
+
+        let max_chars = std::env::var("STAR_TURN_CONTEXT_MAX_CHARS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(4000);
+
+        let mut body = blocks.join("\n\n");
+        if body.chars().count() > max_chars {
+            let cut = body
+                .char_indices()
+                .nth(max_chars)
+                .map(|(i, _)| i)
+                .unwrap_or(body.len());
+            body.truncate(cut);
+            body.push_str("\n\n... [turn context truncated]");
+        }
+
+        Some(format!("<system-reminder>\n{}\n</system-reminder>", body))
     }
 }
 
@@ -788,5 +896,38 @@ fn maybe_push_key_scenarios(parts: &mut Vec<String>, is_thinking_model: bool) {
         *ENABLED.get_or_init(|| env_flag(std::env::var("STAR_PROMPT_KEY_SCENARIOS").ok(), true));
     if enabled {
         parts.push(prompts::key_scenarios::render(is_thinking_model));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_context_is_none_when_nothing_to_say() {
+        assert!(PromptBuilder::build_turn_context(None, None).is_none());
+        assert!(PromptBuilder::build_turn_context(Some("  "), Some("\n")).is_none());
+    }
+
+    #[test]
+    fn turn_context_wraps_blocks_in_system_reminder() {
+        let out = PromptBuilder::build_turn_context(Some("retrieved doc"), Some("plan first"))
+            .expect("both blocks present");
+        assert!(out.starts_with("<system-reminder>"));
+        assert!(out.ends_with("</system-reminder>"));
+        // 复杂度提示排在检索上下文之前
+        let hint_at = out.find("plan first").unwrap();
+        let ctx_at = out.find("retrieved doc").unwrap();
+        assert!(hint_at < ctx_at);
+    }
+
+    #[test]
+    fn turn_context_respects_char_budget() {
+        // 不动环境变量：默认上限 4000，直接喂一段更长的进去。
+        // （单测并行跑，set_var 会漏给同文件里的其它测试。）
+        let long = "x".repeat(9000);
+        let out = PromptBuilder::build_turn_context(Some(&long), None).unwrap();
+        assert!(out.contains("turn context truncated"));
+        assert!(out.chars().count() < 5000);
     }
 }

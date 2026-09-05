@@ -4,7 +4,13 @@ use std::path::{Path, PathBuf};
 
 /// 上下文文件的解析口径与 `utils::project_context` 的加载顺序保持一致：
 /// 加载器只注入第一个命中的候选文件。
-const CONTEXT_FILE_CANDIDATES: &[&str] = &["STAR.md", "STARCODE.md", "CLAUDE.md"];
+const CONTEXT_FILE_CANDIDATES: &[&str] = &[
+    "AGENTS.override.md",
+    "STAR.md",
+    "STARCODE.md",
+    "CLAUDE.md",
+    "AGENTS.md",
+];
 
 /// 解析 /init 的目标文件：返回 (路径, 是否已存在)。
 ///

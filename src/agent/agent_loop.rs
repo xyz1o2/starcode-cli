@@ -14,6 +14,106 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// 主 agentic 循环的执行结果
 type LoopResult = Result<Vec<StarMessage>, (Vec<StarMessage>, AgentEvent)>;
 
+/// 受保护的最近工具结果条数：这些结果一个字都不动
+///
+/// 模型请求一个工具，结果在**下一轮**才会被它读到 —— 而"释放"是在每轮开头跑的。
+/// 所以只要保护窗口小于"请求→读到"的距离，就等于在模型看之前把答案撕了。取 4 是
+/// 因为一轮里并行调好几个工具很常见（`join_all`），保护窗口得能装下一整轮。
+const KEEP_RECENT_TOOL_RESULTS: usize = 4;
+
+/// 旧工具结果的压缩门槛（字符数）
+///
+/// 原来是 10_000 **字节**。这里放宽并改成按字符算：一次网页搜索（3 条正文摘录）
+/// 通常几千字符，落在门槛以下，于是完全不受影响。
+const RELEASE_THRESHOLD_CHARS: usize = 20_000;
+
+/// 压缩后保留的开头字符数
+const RELEASE_HEAD_CHARS: usize = 1_500;
+
+/// 压缩后保留的结尾字符数
+///
+/// 留尾巴是因为命令输出的结论往往在最后（错误摘要、退出码、统计行）。
+const RELEASE_TAIL_CHARS: usize = 500;
+
+/// 把一条超长的旧工具结果压成"头 + 省略标记 + 尾"
+///
+/// 标记只说明省略了多少，不给模型任何"重新搜索/重新读取"的指令 —— 原来的措辞正是
+/// 反复联网搜索的直接诱因。
+fn release_summary(content: &str, char_count: usize) -> String {
+    debug_assert!(char_count > RELEASE_THRESHOLD_CHARS);
+
+    let head: String = content.chars().take(RELEASE_HEAD_CHARS).collect();
+    let tail: String = content
+        .chars()
+        .skip(char_count.saturating_sub(RELEASE_TAIL_CHARS))
+        .collect();
+    let omitted = char_count
+        .saturating_sub(RELEASE_HEAD_CHARS)
+        .saturating_sub(RELEASE_TAIL_CHARS);
+
+    format!(
+        "{}\n\n[... {} of {} characters omitted from this earlier tool result to save context; \
+         the first {} and last {} characters are shown ...]\n\n{}",
+        head, omitted, char_count, RELEASE_HEAD_CHARS, RELEASE_TAIL_CHARS, tail
+    )
+}
+
+/// [`Agent::release_stale_tool_results`] 的实际逻辑，返回 `(条数, 回收的字符数)`
+///
+/// 抽成自由函数纯粹是为了可测：这段逻辑不碰 `Agent` 的任何字段，没必要为了测它去
+/// 造一个真的 agent（构造要读配置、建 LLM 客户端）。
+fn release_stale_tool_results_in(messages: &mut Vec<StarMessage>) -> (usize, usize) {
+    use crate::agent::compact::tool_output_compact::EXEMPT_TOOLS;
+
+    let tool_name_map = Agent::collect_tool_name_map(messages);
+
+    // 倒着数：最后 KEEP_RECENT_TOOL_RESULTS 条工具结果受保护。
+    let total_tool_msgs = messages.iter().filter(|m| m.role == "tool").count();
+    let protected_from = total_tool_msgs.saturating_sub(KEEP_RECENT_TOOL_RESULTS);
+
+    let mut tool_msg_index = 0usize;
+    let mut released_count = 0usize;
+    let mut released_chars = 0usize;
+
+    for msg in messages.iter_mut() {
+        if msg.role != "tool" {
+            continue;
+        }
+        let index = tool_msg_index;
+        tool_msg_index += 1;
+
+        // 最近几条：模型可能正要读，绝不动。
+        if index >= protected_from {
+            continue;
+        }
+
+        let is_exempt = msg
+            .tool_call_id
+            .as_ref()
+            .and_then(|id| tool_name_map.get(id))
+            .map(|tool_name| EXEMPT_TOOLS.iter().any(|e| e == tool_name))
+            .unwrap_or(false);
+        if is_exempt {
+            continue;
+        }
+
+        let Some(content) = &msg.content else {
+            continue;
+        };
+        let char_count = content.chars().count();
+        if char_count <= RELEASE_THRESHOLD_CHARS {
+            continue;
+        }
+
+        let released = release_summary(content, char_count);
+        released_chars += char_count.saturating_sub(released.chars().count());
+        msg.content = Some(released);
+        released_count += 1;
+    }
+
+    (released_count, released_chars)
+}
+
 impl Agent {
     /// 执行主 agentic 循环。
     ///
@@ -384,18 +484,7 @@ impl Agent {
         let budget = ToolResultBudget::new();
         let mut changed = false;
 
-        // 首先收集工具名称映射（tool_call_id -> tool_name）
-        let mut tool_name_map: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        for msg in messages.iter() {
-            if msg.role == "assistant" {
-                if let Some(tool_calls) = &msg.tool_calls {
-                    for tc in tool_calls {
-                        tool_name_map.insert(tc.id.clone(), tc.function.name.clone());
-                    }
-                }
-            }
-        }
+        let tool_name_map = Self::collect_tool_name_map(messages);
 
         for msg in messages.iter_mut() {
             if msg.role == "tool" {
@@ -424,74 +513,49 @@ impl Agent {
         }
     }
 
-    /// 释放前一轮次的工具结果原始数据
+    /// 释放旧轮次的大工具结果，避免 `session_messages` 无限增长
     ///
-    /// 防止内存无限增长，只保留API需要的内容
-    /// 注意：豁免 Read 等文件查看工具，避免 LLM 看不到完整内容导致反复重读
+    /// # 这个函数原来会把刚拿到的结果毁掉
+    ///
+    /// 原实现每轮开头无条件扫全部 `role="tool"` 消息，凡超过 10K 的一律砍成
+    /// **开头 200 字节**，再附一句"如需完整内容请重新读取/搜索"。三个后果：
+    ///
+    /// 1. `&content[..200]` 是字节切片，工具输出带中文时直接 panic；
+    /// 2. 上一轮刚抓回来的网页正文/命令输出，在模型真正读到之前就被砍了 —— 表现
+    ///    就是"上网找了但系统不知道"；
+    /// 3. 那句提示还明确要求模型重新搜索，于是它照做，再被砍，再搜 —— "不停地找"。
+    ///
+    /// 现在的规则：
+    /// - 最近 [`KEEP_RECENT_TOOL_RESULTS`] 条工具结果**完全不动**（模型必须读得到
+    ///   自己刚要来的东西）；
+    /// - 更早的结果只在超过 [`RELEASE_THRESHOLD_CHARS`] 个**字符**时压缩，且保留
+    ///   头 + 尾，而不是只留一个头；
+    /// - 豁免工具（Read / Grep / …）继续完全不动；
+    /// - 标记只陈述"这里省略了多少"，不再指挥模型重新搜索。
     fn release_stale_tool_results(&self, messages: &mut Vec<StarMessage>) {
-        use crate::agent::compact::tool_output_compact::EXEMPT_TOOLS;
+        let (released_count, released_chars) = release_stale_tool_results_in(messages);
 
-        let mut released_count = 0;
+        if released_count > 0 {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[MEMORY] Released {} stale tool results ({} chars reclaimed, {} recent results kept intact)",
+                released_count, released_chars, KEEP_RECENT_TOOL_RESULTS
+            ));
+        }
+    }
 
-        // 首先收集工具名称映射（tool_call_id -> tool_name）
-        let mut tool_name_map: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
+    /// 收集 `tool_call_id -> tool_name` 映射（判断豁免工具要用）
+    fn collect_tool_name_map(messages: &[StarMessage]) -> HashMap<String, String> {
+        let mut map = HashMap::new();
         for msg in messages.iter() {
             if msg.role == "assistant" {
                 if let Some(tool_calls) = &msg.tool_calls {
                     for tc in tool_calls {
-                        tool_name_map.insert(tc.id.clone(), tc.function.name.clone());
+                        map.insert(tc.id.clone(), tc.function.name.clone());
                     }
                 }
             }
         }
-
-        for msg in messages.iter_mut() {
-            // 只处理工具消息（role="tool"）
-            if msg.role == "tool" {
-                // 检查工具是否豁免
-                let is_exempt = msg
-                    .tool_call_id
-                    .as_ref()
-                    .and_then(|id| tool_name_map.get(id))
-                    .map(|tool_name| EXEMPT_TOOLS.iter().any(|e| e == tool_name))
-                    .unwrap_or(false);
-
-                // 豁免工具不截断
-                if is_exempt {
-                    continue;
-                }
-
-                if let Some(content) = &msg.content {
-                    // 如果工具结果包含大量数据，释放原始输出
-                    if content.len() > 10_000 {
-                        // 超过10K字符
-                        // 保留摘要，释放原始数据
-                        // 追加显式截断标记，避免 agent 误以为 200 字符摘要就是完整输出，
-                        // 需要时可重新读取相关文件/重新搜索。
-                        let trunc_marker = format!(
-                            "; [TRUNCATED: 完整输出 {} 字符，仅保留开头 200 字符。如需完整内容请重新读取/搜索。]",
-                            content.len()
-                        );
-                        let summary = if content.len() > 200 {
-                            format!("{}...{}", &content[..200], trunc_marker)
-                        } else {
-                            content.clone()
-                        };
-
-                        msg.content = Some(summary);
-                        released_count += 1;
-                    }
-                }
-            }
-        }
-
-        if released_count > 0 {
-            crate::utils::logging::append_debug_log_line(&format!(
-                "[MEMORY] Released {} stale tool results to prevent memory growth",
-                released_count
-            ));
-        }
+        map
     }
 
     // 运行压缩检查
@@ -921,5 +985,132 @@ impl std::fmt::Display for StopReason {
             StopReason::StreamingError => write!(f, "Streaming error"),
             StopReason::LoopStateStopped => write!(f, "Loop state stopped"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{StarToolCall, StarToolCallFunction};
+
+    fn assistant_call(id: &str, tool_name: &str) -> StarMessage {
+        StarMessage::assistant_with_tool_calls(vec![StarToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: StarToolCallFunction {
+                name: tool_name.to_string(),
+                arguments: "{}".to_string(),
+            },
+        }])
+    }
+
+    /// 一段远超门槛的中文内容 —— 字节切片版本在这里直接 panic。
+    fn big_cjk() -> String {
+        "上网找到的知识点，模型必须读得到。".repeat(4_000)
+    }
+
+    fn tool_content(messages: &[StarMessage], idx: usize) -> &str {
+        messages[idx].content.as_deref().unwrap()
+    }
+
+    #[test]
+    fn the_most_recent_tool_results_are_never_touched() {
+        let body = big_cjk();
+        let mut messages = vec![
+            assistant_call("call-1", "WebSearch"),
+            StarMessage::tool("call-1", body.clone()),
+        ];
+
+        let (released, _) = release_stale_tool_results_in(&mut messages);
+
+        // 上一轮刚抓回来的东西，模型还没读到，一个字都不能少。
+        assert_eq!(released, 0);
+        assert_eq!(tool_content(&messages, 1), body);
+    }
+
+    #[test]
+    fn older_oversized_results_are_trimmed_but_keep_head_and_tail() {
+        let body = format!("HEAD-MARKER{}TAIL-MARKER", big_cjk());
+        let mut messages = vec![assistant_call("old", "WebSearch")];
+        messages.push(StarMessage::tool("old", body.clone()));
+        // 再塞满保护窗口，把上面那条挤成"旧的"。
+        for i in 0..KEEP_RECENT_TOOL_RESULTS {
+            let id = format!("recent-{}", i);
+            messages.push(assistant_call(&id, "Bash"));
+            messages.push(StarMessage::tool(&id, "small"));
+        }
+
+        let (released, reclaimed) = release_stale_tool_results_in(&mut messages);
+
+        assert_eq!(released, 1);
+        assert!(reclaimed > 0, "reclaimed was {}", reclaimed);
+
+        let trimmed = tool_content(&messages, 1);
+        assert!(trimmed.starts_with("HEAD-MARKER"));
+        assert!(trimmed.ends_with("TAIL-MARKER"), "tail was dropped");
+        assert!(trimmed.contains("characters omitted"));
+        assert!(trimmed.chars().count() < body.chars().count());
+
+        // 标记不能再指挥模型重新搜索 —— 那正是"不停地找"的来源。
+        let lowered = trimmed.to_lowercase();
+        assert!(!lowered.contains("re-search"));
+        assert!(!lowered.contains("重新搜索"));
+        assert!(!lowered.contains("重新读取"));
+    }
+
+    #[test]
+    fn exempt_tools_are_left_alone_even_when_stale() {
+        let body = big_cjk();
+        let mut messages = vec![assistant_call("read-1", "Read")];
+        messages.push(StarMessage::tool("read-1", body.clone()));
+        for i in 0..KEEP_RECENT_TOOL_RESULTS {
+            let id = format!("recent-{}", i);
+            messages.push(assistant_call(&id, "Bash"));
+            messages.push(StarMessage::tool(&id, "small"));
+        }
+
+        let (released, _) = release_stale_tool_results_in(&mut messages);
+
+        assert_eq!(released, 0);
+        assert_eq!(tool_content(&messages, 1), body);
+    }
+
+    #[test]
+    fn results_under_the_threshold_survive_untouched() {
+        // 一次典型的网页搜索：3 条正文摘录，几千字符 —— 现在完全不受影响。
+        let body = "search result 内容".repeat(200);
+        assert!(body.chars().count() < RELEASE_THRESHOLD_CHARS);
+
+        let mut messages = vec![assistant_call("old", "WebSearch")];
+        messages.push(StarMessage::tool("old", body.clone()));
+        for i in 0..KEEP_RECENT_TOOL_RESULTS {
+            let id = format!("recent-{}", i);
+            messages.push(assistant_call(&id, "Bash"));
+            messages.push(StarMessage::tool(&id, "small"));
+        }
+
+        let (released, _) = release_stale_tool_results_in(&mut messages);
+
+        assert_eq!(released, 0);
+        assert_eq!(tool_content(&messages, 1), body);
+    }
+
+    #[test]
+    fn releasing_is_idempotent() {
+        let body = big_cjk();
+        let mut messages = vec![assistant_call("old", "WebFetch")];
+        messages.push(StarMessage::tool("old", body));
+        for i in 0..KEEP_RECENT_TOOL_RESULTS {
+            let id = format!("recent-{}", i);
+            messages.push(assistant_call(&id, "Bash"));
+            messages.push(StarMessage::tool(&id, "small"));
+        }
+
+        assert_eq!(release_stale_tool_results_in(&mut messages).0, 1);
+        let after_first = tool_content(&messages, 1).to_string();
+
+        // 每轮开头都会跑一次，第二次不该再啃一口。
+        assert_eq!(release_stale_tool_results_in(&mut messages).0, 0);
+        assert_eq!(tool_content(&messages, 1), after_first);
     }
 }

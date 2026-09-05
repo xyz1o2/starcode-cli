@@ -338,7 +338,7 @@ fn approval_mode_description(state: Option<&ChatState>) -> String {
 
 fn thinking_effort_description(state: Option<&ChatState>) -> String {
     state
-        .map(|state| format!("Current: {}", state.thinking_effort.display_name()))
+        .map(|state| format!("Current: {}", state.thinking_effort.label()))
         .unwrap_or_else(|| "Set thinking/reasoning effort level".to_string())
 }
 
@@ -950,7 +950,10 @@ pub fn get_thinking_effort_palette_items(
         crate::types::ThinkingEffort::Medium => "thinking_medium",
         crate::types::ThinkingEffort::High => "thinking_high",
     };
-    let check = |id: &str| if id == current_id { " ●" } else { "" };
+    // 选中标记不能再用 "●" —— 那正是 High 档的符号，`High ●` 读起来像两个东西。
+    // 档位前缀直接用状态栏那套符号，用户在面板里选一次就认得状态栏上那一格了。
+    let check = |id: &str| if id == current_id { "  (current)" } else { "" };
+    let sym = |e: crate::types::ThinkingEffort| e.symbol();
 
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
@@ -967,7 +970,11 @@ pub fn get_thinking_effort_palette_items(
     // Always show Off
     items.push(PaletteItem {
         id: "thinking_off".to_string(),
-        label: format!("Off{}", check("thinking_off")),
+        label: format!(
+            "{} Off{}",
+            sym(crate::types::ThinkingEffort::Off),
+            check("thinking_off")
+        ),
         description: i18n::t(
             "palette.desc.thinking_off",
             "Disable thinking/reasoning",
@@ -982,7 +989,11 @@ pub fn get_thinking_effort_palette_items(
             // Full granular support: Low, Medium, High
             items.push(PaletteItem {
                 id: "thinking_low".to_string(),
-                label: format!("Low{}", check("thinking_low")),
+                label: format!(
+                    "{} Low{}",
+                    sym(crate::types::ThinkingEffort::Low),
+                    check("thinking_low")
+                ),
                 description: i18n::t(
                     "palette.desc.thinking_low",
                     "Light thinking for simple tasks",
@@ -993,7 +1004,11 @@ pub fn get_thinking_effort_palette_items(
             });
             items.push(PaletteItem {
                 id: "thinking_medium".to_string(),
-                label: format!("Medium{}", check("thinking_medium")),
+                label: format!(
+                    "{} Medium{}",
+                    sym(crate::types::ThinkingEffort::Medium),
+                    check("thinking_medium")
+                ),
                 description: i18n::t(
                     "palette.desc.thinking_medium",
                     "Balanced thinking (recommended)",
@@ -1004,7 +1019,11 @@ pub fn get_thinking_effort_palette_items(
             });
             items.push(PaletteItem {
                 id: "thinking_high".to_string(),
-                label: format!("High{}", check("thinking_high")),
+                label: format!(
+                    "{} High{}",
+                    sym(crate::types::ThinkingEffort::High),
+                    check("thinking_high")
+                ),
                 description: i18n::t(
                     "palette.desc.thinking_high",
                     "Deep thinking for complex tasks",
@@ -1018,7 +1037,11 @@ pub fn get_thinking_effort_palette_items(
             // Binary support: just On (mapped to Medium internally)
             items.push(PaletteItem {
                 id: "thinking_medium".to_string(),
-                label: format!("On{}", check("thinking_medium")),
+                label: format!(
+                    "{} On{}",
+                    sym(crate::types::ThinkingEffort::Medium),
+                    check("thinking_medium")
+                ),
                 description: i18n::t(
                     "palette.desc.thinking_on",
                     "Enable thinking/reasoning",

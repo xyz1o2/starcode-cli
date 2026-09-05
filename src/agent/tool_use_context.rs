@@ -250,11 +250,7 @@ impl ToolResultSummaryGenerator {
         match tool_name {
             "Bash" => {
                 if let Some(command) = input.get("command").and_then(|v| v.as_str()) {
-                    let short_cmd = if command.len() > 50 {
-                        format!("{}...", &command[..47])
-                    } else {
-                        command.to_string()
-                    };
+                    let short_cmd = crate::utils::string_utils::truncate_with_ellipsis(command, 50);
                     Some(format!("Running: {}", short_cmd))
                 } else {
                     Some("Running bash command".to_string())

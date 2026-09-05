@@ -186,11 +186,7 @@ impl ToolInvocation for AskUserQuestionInvocation {
         } else {
             format!(
                 "Ask User: {}",
-                if self.params.question.len() > 60 {
-                    format!("{}...", &self.params.question[..57])
-                } else {
-                    self.params.question.clone()
-                }
+                crate::utils::string_utils::truncate_with_ellipsis(&self.params.question, 60)
             )
         }
     }

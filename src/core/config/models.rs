@@ -187,3 +187,37 @@ pub fn thinking_capability(model_name: &str) -> ThinkingCapability {
 
     ThinkingCapability::None
 }
+
+/// UI 是否该显示思考档位（对标 Claude Code 的 `modelSupportsEffort`）。
+///
+/// 启动阶段模型名还没解析出来（空串），先当作支持 —— 指示器早一点出现，用户才知道
+/// 有这个档位可调；解析完成后这一格会跟着重画。
+pub fn supports_thinking_ui(model_name: &str) -> bool {
+    model_name.trim().is_empty()
+        || !matches!(thinking_capability(model_name), ThinkingCapability::None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unresolved_model_name_still_shows_the_indicator() {
+        // 启动阶段模型名是空串 —— 这时候藏起来，用户第一眼就看不到档位在哪
+        assert!(supports_thinking_ui(""));
+        assert!(supports_thinking_ui("   "));
+    }
+
+    #[test]
+    fn thinking_models_show_the_indicator() {
+        assert!(supports_thinking_ui("claude-opus-5"));
+        assert!(supports_thinking_ui("deepseek-reasoner"));
+        assert!(supports_thinking_ui("gpt-5"));
+    }
+
+    #[test]
+    fn a_model_without_thinking_hides_the_indicator() {
+        assert!(!supports_thinking_ui("gpt-4o"));
+        assert!(!supports_thinking_ui("qwen2.5-coder-32b-instruct"));
+    }
+}

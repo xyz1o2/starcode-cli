@@ -18,6 +18,11 @@ pub struct Agent {
     pub(crate) compact_manager: crate::agent::compact::CompactManager,
     pub(crate) context_engine: crate::core::context::engine::ContextEngine,
     pub(crate) session_messages: Vec<StarMessage>,
+    /// `!command` 跑出来的输出，等下一条用户消息一起发出去
+    ///
+    /// 不直接 push 成一条独立的 user 消息：Anthropic 要求 user/assistant 交替，
+    /// 连续两条 user 会被拒。所以攒在这里，`run_stream` 组装当轮 user 消息时带上。
+    pub(crate) pending_local_context: Vec<String>,
     pub(crate) abort_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) abort_token: Option<tokio_util::sync::CancellationToken>,
     pub(crate) approval_mode: crate::types::ApprovalMode,
@@ -106,6 +111,7 @@ impl Agent {
             compact_manager,
             context_engine,
             session_messages: Vec::new(),
+            pending_local_context: Vec::new(),
             abort_flag: None,
             abort_token: None,
             approval_mode: crate::types::ApprovalMode::Default,

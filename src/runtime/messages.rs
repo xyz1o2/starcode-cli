@@ -211,6 +211,14 @@ pub enum AgentRequest {
         model: Option<String>,
     },
     MarkFilesAsRead(Vec<String>),
+    /// `!command` 的输出：追加进会话上下文，但**不触发**模型回合。
+    ///
+    /// 对标 Claude Code —— 用户在 `!` 里跑的命令，模型下一轮要能看到结果，
+    /// 否则「跑一下测试再修」这种最常见的用法要靠用户手动把输出粘回去。
+    /// `!!command` 走本地执行、不调用这条消息。
+    AppendContext {
+        content: String,
+    },
     ToggleYoloMode,
     SetApprovalMode(crate::types::ApprovalMode),
     /// 思考力度档位（Alt+T / `/effort` / 命令面板）。UI 侧只改显示，

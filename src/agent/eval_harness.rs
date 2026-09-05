@@ -1521,11 +1521,7 @@ fn render_live_result_markdown(r: &LiveEvalResult) -> String {
     out.push_str("| Tool | Success | Args |\n|---|---|---|\n");
     for tc in &r.tool_call_summary {
         let args = tc.args.to_string();
-        let args = if args.len() > 100 {
-            format!("{}…", &args[..100])
-        } else {
-            args
-        };
+        let args = crate::utils::string_utils::truncate_chars(&args, 100);
         out.push_str(&format!(
             "| `{}` | {} | `{}` |\n",
             tc.tool,

@@ -29,6 +29,25 @@ static USER_AGENTS: &[&str] = &[
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.3; rv:133.0) Gecko/20100101 Firefox/133.0",
 ];
 
+/// 每条结果给模型的正文摘录长度（字符，不是字节）
+const CONTENT_EXCERPT_CHARS: usize = 2000;
+
+/// 搜索时顺带抓取正文的结果条数，默认 0。
+///
+/// 对标 Claude Code：WebSearch 只回标题 / URL / 摘要，正文由模型自己决定要不要用
+/// WebFetch 去取。原来是固定抓前 3 条 —— 一次搜索就变成 3 次额外的整页请求（每次前面
+/// 还有 0.5~1.8s 的反爬延迟），用户看到的就是"webfetch 这类一直在触发"，而这最多
+/// 6000 字符的正文大多数时候模型压根不需要，纯烧 token。
+///
+/// 想恢复旧行为：`STAR_WEB_SEARCH_INLINE_PAGES=3`。
+fn inline_content_pages() -> usize {
+    std::env::var("STAR_WEB_SEARCH_INLINE_PAGES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(3)
+}
+
 fn random_ua() -> &'static str {
     USER_AGENTS
         .choose(&mut rand::thread_rng())
@@ -275,13 +294,13 @@ impl ToolInvocation for WebSearchInvocation {
                     "[web_search] Refusing search (offline mode)",
                 );
                 return Ok(CoreToolResult {
-                    llm_content: Some(
-                        "Web search is unavailable because offline mode is ON. \
-                         Turn it off with /network off before searching the web."
-                            .to_string(),
-                    ),
+                    llm_content: None,
                     return_display: None,
-                    output: "Web search refused (offline mode)".to_string(),
+                    // 提示写在 output 里（error 为空时 output 才是模型看到的那一份），
+                    // llm_content 全仓库没人读
+                    output: "Web search is unavailable because offline mode is ON. \
+                             Do not retry — it stays off until the user runs /network off."
+                        .to_string(),
                     error: None,
                     data: None,
                 });
@@ -337,7 +356,13 @@ impl ToolInvocation for WebSearchInvocation {
                 return Ok(CoreToolResult {
                     llm_content: None,
                     return_display: None,
-                    output: "All search engines returned no valid results".to_string(),
+                    output: format!(
+                        "No results for \"{}\". All three engines (Brave, DuckDuckGo, Startpage) \
+                         came back empty, which usually means the query is too narrow or the \
+                         engines are rate-limiting. Rephrase before trying again — repeating this \
+                         exact query will return nothing again.",
+                        query
+                    ),
                     error: None,
                     data: None,
                 });
@@ -350,10 +375,15 @@ impl ToolInvocation for WebSearchInvocation {
             ));
 
             // Format output
+            let inline_pages = inline_content_pages();
             let mut output = String::new();
+            // 开头就报条数和引擎：这一行既是 UI 里唯一能看到的"到底找到没找到"，也是模型
+            // 判断该不该再搜一次的依据
             output.push_str(&format!(
-                "Search results for \"{}\" (via {}):\n\n",
-                query, source
+                "Found {} result(s) for \"{}\" via {}.\n\n",
+                search_results.len(),
+                query,
+                source
             ));
 
             for (i, result) in search_results.iter().enumerate() {
@@ -365,19 +395,22 @@ impl ToolInvocation for WebSearchInvocation {
                     result.snippet
                 ));
 
-                // Fetch full content for top 3 results
-                if i < 3 {
+                // 只在显式开启时才抓正文，见 inline_content_pages
+                if i < inline_pages {
                     crate::utils::logging::append_debug_log_line(&format!(
                         "[web_search] Extracting content: {}",
                         result.url
                     ));
                     match fetch_and_extract(&result.url).await {
                         Ok(content) if !content.is_empty() => {
-                            let truncated = if content.len() > 2000 {
-                                format!("{}...", &content[..2000])
-                            } else {
-                                content
-                            };
+                            // 按字符截断。原来是 `&content[..2000]` —— 抓中文网页时
+                            // 2000 字节几乎必然落在某个汉字中间，直接 panic，而工具
+                            // 执行没有 catch_unwind 兜底，一崩整个 agent worker 就
+                            // 停了：用户看到的是"搜了但系统不知道"。
+                            let truncated = crate::utils::string_utils::truncate_chars(
+                                &content,
+                                CONTENT_EXCERPT_CHARS,
+                            );
                             output.push_str(&format!("   Content excerpt: {}\n", truncated));
                         }
                         _ => {
@@ -390,6 +423,14 @@ impl ToolInvocation for WebSearchInvocation {
                     }
                 }
                 output.push('\n');
+            }
+
+            if inline_pages == 0 {
+                output.push_str(
+                    "These are titles, URLs and snippets only. \
+                     Call WebFetch on one of the URLs above if you need a page's full text; \
+                     searching again for the same thing will return the same list.\n",
+                );
             }
 
             Ok(CoreToolResult {
@@ -613,19 +654,37 @@ async fn fetch_and_extract(url: &str) -> Result<String> {
     Ok(clean_content(&text))
 }
 
+/// 样板行的长度上限（字符）
+///
+/// cookie 提示条、广告标签这类都很短；真正在讲 cookie 的技术段落不会。原来只要一行里
+/// 出现 "cookie" 就整行删掉 —— 搜 HTTP cookie / session 相关资料时正文会被删成骨头，
+/// 模型拿不到东西就再搜一次。
+const BOILERPLATE_MAX_CHARS: usize = 120;
+
+/// 判断是否是网页样板（广告 / cookie 提示 / 隐私政策）
+fn is_boilerplate_line(line: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "广告",
+        "Advertisement",
+        "sponsored",
+        "Sponsored",
+        "cookie",
+        "Cookie",
+        "Privacy Policy",
+    ];
+
+    if line.chars().count() > BOILERPLATE_MAX_CHARS {
+        return false;
+    }
+    MARKERS.iter().any(|marker| line.contains(marker))
+}
+
 /// Cleanup function: remove common ads, tracking text, blank lines, etc.
 fn clean_content(text: &str) -> String {
     text.lines()
         .map(str::trim)
-        .filter(|line| {
-            !line.is_empty()
-                && !line.contains("广告")
-                && !line.contains("Advertisement")
-                && !line.contains("sponsored")
-                && !line.contains("cookie")
-                && !line.contains("Privacy Policy")
-                && line.len() > 5 // Filter out short garbage lines
-        })
+        // 按字符数过滤碎行 —— 两个汉字就有 6 字节，按字节算等于放行
+        .filter(|line| line.chars().count() > 5 && !is_boilerplate_line(line))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -670,5 +729,44 @@ impl BaseDeclarativeTool for WebSearchTool {
     ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
         let params: WebSearchParams = serde_json::from_value(params.clone())?;
         Ok(Box::new(WebSearchInvocation { params }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 搜 HTTP cookie 相关资料时，正文段落不能因为出现 "cookie" 就被整段删掉。
+    #[test]
+    fn prose_about_cookies_survives_cleaning() {
+        let prose = "A cookie is a small piece of data that a server sends to a user's web \
+                     browser, which the browser may store and send back with later requests to \
+                     the same server so that the server can tell requests apart.";
+        assert!(prose.chars().count() > BOILERPLATE_MAX_CHARS);
+        assert_eq!(clean_content(prose), prose);
+    }
+
+    #[test]
+    fn short_boilerplate_lines_are_dropped() {
+        let text =
+            "This site uses cookies.\nAdvertisement\n广告\nPrivacy Policy\nReal content here.";
+        let cleaned = clean_content(text);
+        assert_eq!(cleaned, "Real content here.");
+    }
+
+    /// 碎行过滤按字符算：两个汉字 6 字节，按字节算会被放行。
+    #[test]
+    fn short_cjk_lines_are_dropped_by_char_count() {
+        let cleaned = clean_content("知识点\n上网找的知识点很多很多");
+        assert_eq!(cleaned, "上网找的知识点很多很多");
+    }
+
+    #[test]
+    fn a_long_line_mentioning_ads_is_not_treated_as_boilerplate() {
+        let line = format!(
+            "Advertisement systems are described in detail here: {}",
+            "x".repeat(150)
+        );
+        assert!(!is_boilerplate_line(&line));
     }
 }

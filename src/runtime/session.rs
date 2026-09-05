@@ -39,6 +39,9 @@ pub struct DeferredRuntimeActions {
         Option<String>,
     )>,
     pub pending_mark_as_read: Vec<String>,
+    /// 流式过程中收到的 `!command` 输出：等这一轮结束再追加进上下文，
+    /// 免得在 agent 正读 session_messages 的时候插队改它。
+    pub pending_context_appends: Vec<String>,
 }
 
 pub enum StreamingRequestOutcome {
@@ -180,6 +183,10 @@ pub async fn handle_streaming_request(
         }
         Some(AgentRequest::MarkFilesAsRead(paths)) => {
             deferred.pending_mark_as_read.extend(paths);
+            StreamingRequestOutcome::Continue
+        }
+        Some(AgentRequest::AppendContext { content }) => {
+            deferred.pending_context_appends.push(content);
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::ToggleYoloMode) => {
@@ -366,6 +373,12 @@ pub async fn apply_deferred_runtime_actions(
     if !deferred.pending_mark_as_read.is_empty() {
         for path in deferred.pending_mark_as_read.drain(..) {
             agent.mark_file_as_read(&path).await;
+        }
+    }
+
+    if !deferred.pending_context_appends.is_empty() {
+        for content in deferred.pending_context_appends.drain(..) {
+            agent.append_session_context(content);
         }
     }
 

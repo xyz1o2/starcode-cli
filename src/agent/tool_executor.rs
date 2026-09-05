@@ -24,6 +24,18 @@ const DEFAULT_CONFIRM_TIMEOUT_MS: u64 = 600_000; // 10分钟（给用户充足�
 // 默认工具执行超时 (毫秒)
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 600_000; // 10分钟
 
+/// 从 panic payload 里取出可读消息
+///
+/// `panic!("...")` 的 payload 是 `&str` 或 `String`（`format!` 参数化的那种）；
+/// 切片越界这类由 std 抛的也是 `String`。其它类型只能给个占位。
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "<non-string panic payload>".to_string())
+}
+
 pub struct ToolExecutor {
     tool_registry: Arc<ToolRegistry>,
     config: Arc<Config>,
@@ -146,7 +158,75 @@ impl ToolExecutor {
         compacted
     }
 
+    /// 执行一个工具调用。
+    ///
+    /// # 为什么套一层 `catch_unwind`
+    ///
+    /// 工具是在 agent worker 那个 tokio 任务里**直接** await 的（`execute_batch` 用
+    /// `join_all`，没有 per-tool spawn）。于是任何一个工具 panic，展开的是 worker 自己：
+    /// UI→Agent 通道从此静默失效，用户看到的是"消息发出去了，没有任何反应"，而且没有
+    /// 任何错误提示。
+    ///
+    /// 已知触发过这条路径的：`WebSearch` 按字节切中文网页正文（`&content[..2000]` 落在
+    /// 汉字中间）。那些切片已经逐一改成按字符，但工具还会继续加，第三方 crate 也会自己
+    /// panic（`readability-rust` 就是现成的例子），所以这里留一道兜底 —— panic 变成一条
+    /// 普通的工具错误：模型看得到、能换个做法，worker 活着。
+    ///
+    /// panic hook 仍会先跑一遍，但 `ui::app::runtime` 的 hook 只在渲染线程上拆终端，
+    /// 后台线程的 panic 只落日志，不会花屏。
     pub async fn execute(
+        &self,
+        tool_call: &StarToolCall,
+        update_output: Option<Arc<dyn Fn(String) + Send + Sync>>,
+        abort_signal: Option<tokio_util::sync::CancellationToken>,
+    ) -> ToolResult {
+        let guarded = std::panic::AssertUnwindSafe(self.execute_inner(
+            tool_call,
+            update_output,
+            abort_signal,
+        ));
+
+        match futures::FutureExt::catch_unwind(guarded).await {
+            Ok(result) => result,
+            Err(payload) => {
+                let detail = panic_payload_message(payload.as_ref());
+                let tool_name = tool_call.function.name.as_str();
+
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[ToolExecutor] tool '{}' panicked ({}) — surfaced as a tool error instead of \
+                     unwinding the agent worker",
+                    tool_name, detail
+                ));
+
+                // 正常路径末尾会发 ToolFinished；panic 跳过了那里，这里补一条，
+                // 否则 UI 上这个工具会一直转圈。
+                if let Some(bus) = &self.message_bus {
+                    let _ = bus
+                        .publish(Message::ToolFinished(ToolFinished {
+                            message_type: MessageBusType::ToolFinished,
+                            tool_call_id: tool_call.id.clone(),
+                            tool_name: tool_name.to_string(),
+                            success: false,
+                        }))
+                        .await;
+                }
+
+                ToolResult {
+                    success: false,
+                    output: Some(format!(
+                        "Tool `{}` crashed while running ({}). This is a defect in the tool itself, \
+                         not in the request. The session is unaffected — try a different approach \
+                         or a different tool.",
+                        tool_name, detail
+                    )),
+                    error: Some(format!("tool panicked: {}", detail)),
+                    data: None,
+                }
+            }
+        }
+    }
+
+    async fn execute_inner(
         &self,
         tool_call: &StarToolCall,
         update_output: Option<Arc<dyn Fn(String) + Send + Sync>>,
@@ -1938,5 +2018,54 @@ async fn execute_mcp_dynamic_tool(
             error: Some(e.to_string()),
             data: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 静音 panic hook 跑一段代码：被捕获的 panic 不该往测试输出里打噪音。
+    fn without_panic_output<T>(f: impl FnOnce() -> T) -> T {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let out = f();
+        std::panic::set_hook(hook);
+        out
+    }
+
+    #[test]
+    fn panic_messages_are_extracted_from_both_payload_shapes() {
+        // `panic!("literal")` → &str
+        assert_eq!(panic_payload_message(&"boom"), "boom");
+        // `panic!("{}", x)` 和 std 自己抛的（比如切片越界）→ String
+        assert_eq!(panic_payload_message(&"boom".to_string()), "boom");
+        // 其它类型只能给占位，但不能崩
+        assert_eq!(panic_payload_message(&42u8), "<non-string panic payload>");
+    }
+
+    /// `execute` 用的就是这套组合子。这里验证机制本身：一个会 panic 的 async 块被
+    /// 捕获成 `Err(payload)`，而不是把调用方（真实场景里就是 agent worker）带走。
+    #[test]
+    fn a_panicking_future_is_contained_by_the_same_guard_execute_uses() {
+        let caught = without_panic_output(|| {
+            futures::executor::block_on(async {
+                let boom = async {
+                    // 复现真实成因：按字节切一段中文。
+                    let content = "上网找的知识点";
+                    let _ = &content[..2];
+                    "unreachable"
+                };
+                futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(boom)).await
+            })
+        });
+
+        let payload = caught.expect_err("byte-slicing CJK should panic");
+        let message = panic_payload_message(payload.as_ref());
+        assert!(
+            message.contains("byte index") || message.contains("char boundary"),
+            "unexpected panic message: {}",
+            message
+        );
     }
 }

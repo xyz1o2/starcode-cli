@@ -8,8 +8,14 @@ const PROJECT_CONTEXT_CACHE_TTL_SECS: u64 = 30;
 const DEFAULT_PROJECT_CONTEXT_MAX_CHARS: usize = 8000;
 
 // ── Context file candidates (priority order) ──
-const CONTEXT_FILE_CANDIDATES: &[&str] = &["STAR.md", "STARCODE.md", "CLAUDE.md"];
+/// AGENTS.md 排在 CLAUDE.md 之后：既认社区正在收敛的 AGENTS.md 标准，
+/// 又不改变已有仓库（多数只有 CLAUDE.md）的行为。
+const CONTEXT_FILE_CANDIDATES: &[&str] = &["STAR.md", "STARCODE.md", "CLAUDE.md", "AGENTS.md"];
 const CONTEXT_FILE_LEGACY: &str = ".star/STAR.md";
+/// 覆盖文件：某个目录里存在它时，**只用它**，忽略同目录其它候选文件。
+/// 用途是在不动团队共享的 CLAUDE.md 的前提下本地改写指令（对标 pi 的 override 语义）。
+/// 建议加进 .gitignore。
+const CONTEXT_FILE_OVERRIDE: &str = "AGENTS.override.md";
 
 #[derive(Clone)]
 struct ProjectContextCacheEntry {
@@ -66,7 +72,13 @@ fn file_fingerprint(path: &Path) -> Option<(Option<u128>, u64)> {
 }
 
 /// 在目录中查找第一个匹配的上下文文件
+///
+/// `AGENTS.override.md` 优先于全部候选：存在即独占。
 fn find_context_file_in_dir(dir: &Path) -> Option<PathBuf> {
+    let override_path = dir.join(CONTEXT_FILE_OVERRIDE);
+    if override_path.exists() {
+        return Some(override_path);
+    }
     for filename in CONTEXT_FILE_CANDIDATES {
         let p = dir.join(filename);
         if p.exists() {
@@ -82,7 +94,7 @@ fn find_context_file_in_dir(dir: &Path) -> Option<PathBuf> {
 }
 
 /// 递归向上查找项目上下文文件（单文件模式，保持向后兼容）
-/// 优先顺序: STAR.md > STARCODE.md > CLAUDE.md (legacy) > .star/STAR.md
+/// 优先顺序: AGENTS.override.md > STAR.md > STARCODE.md > CLAUDE.md > AGENTS.md > .star/STAR.md
 pub fn find_project_context_file(start_dir: &Path) -> Option<PathBuf> {
     let mut current = start_dir;
     loop {
@@ -436,4 +448,46 @@ pub fn load_merged_project_context(start_dir: &Path) -> Option<String> {
 /// 获取所有已加载的上下文文件路径（用于 UI 显示和调试）
 pub fn get_context_file_paths(start_dir: &Path) -> Vec<PathBuf> {
     collect_context_files(start_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("starcode-ctx-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn agents_md_is_a_recognized_candidate() {
+        let dir = tmp_dir("agents");
+        std::fs::write(dir.join("AGENTS.md"), "hi").unwrap();
+        assert_eq!(find_context_file_in_dir(&dir), Some(dir.join("AGENTS.md")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claude_md_still_wins_over_agents_md() {
+        let dir = tmp_dir("claude-first");
+        std::fs::write(dir.join("AGENTS.md"), "a").unwrap();
+        std::fs::write(dir.join("CLAUDE.md"), "c").unwrap();
+        assert_eq!(find_context_file_in_dir(&dir), Some(dir.join("CLAUDE.md")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn override_file_shadows_every_other_candidate() {
+        let dir = tmp_dir("override");
+        std::fs::write(dir.join("STAR.md"), "s").unwrap();
+        std::fs::write(dir.join("CLAUDE.md"), "c").unwrap();
+        std::fs::write(dir.join("AGENTS.override.md"), "o").unwrap();
+        assert_eq!(
+            find_context_file_in_dir(&dir),
+            Some(dir.join("AGENTS.override.md"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

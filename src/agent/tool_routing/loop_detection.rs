@@ -72,10 +72,56 @@ fn adjusted_threshold_for_signature(signature: &str, base_threshold: usize) -> u
 }
 
 /// 截断字符串
+///
+/// 转发到共享实现。原来这里是 `&input[..max_chars]` —— 字节切片，而签名里几乎必然
+/// 带用户输入（搜索词、文件路径）。也就是说循环检测一旦真的命中，格式化告警信息时
+/// 自己就先 panic 了，正好是最不该崩的时刻。
 fn truncate_chars(input: &str, max_chars: usize) -> String {
-    if input.len() <= max_chars {
-        input.to_string()
-    } else {
-        format!("{}...", &input[..max_chars])
+    crate::utils::string_utils::truncate_chars(input, max_chars)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn history(sigs: &[&str]) -> VecDeque<String> {
+        sigs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn repeated_signatures_are_detected() {
+        let h = history(&["Read(a)", "Read(a)", "Read(a)", "Read(a)"]);
+        let hit = detect_tool_loop(&h, 4).expect("4 identical calls should trip the detector");
+        assert!(hit.contains("repeated 4 times"));
+    }
+
+    #[test]
+    fn alternating_signatures_are_detected() {
+        let h = history(&["Read(a)", "Edit(b)", "Read(a)", "Edit(b)"]);
+        let hit = detect_tool_loop(&h, 9).expect("A-B-A-B should trip the detector");
+        assert!(hit.contains("alternating"));
+    }
+
+    /// 命中时要格式化签名 —— 签名里带中文时旧实现在这一步 panic。
+    #[test]
+    fn a_cjk_signature_does_not_panic_when_reported() {
+        let long = format!("WebSearch(query=\"{}\")", "上网找的知识点".repeat(40));
+        let h = history(&[&long, &long, &long, &long]);
+        let hit = detect_tool_loop(&h, 4).expect("should still be detected");
+        assert!(hit.contains("repeated 4 times"));
+        assert!(hit.contains("上网找的知识点"));
+    }
+
+    #[test]
+    fn distinct_signatures_are_not_a_loop() {
+        // 每次换关键词的联网搜索：签名各不相同，这个检测器看不到 —— 所以
+        // "不停地找" 不能指望它兜住，得从源头（工具结果不再被毁）解决。
+        let h = history(&[
+            "WebSearch(q=a)",
+            "WebSearch(q=b)",
+            "WebSearch(q=c)",
+            "WebSearch(q=d)",
+        ]);
+        assert!(detect_tool_loop(&h, 4).is_none());
     }
 }

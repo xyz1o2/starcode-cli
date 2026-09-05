@@ -242,6 +242,12 @@ pub fn render_chat_lines(state: &mut ChatState, area_width: u16) -> Vec<Line<'st
     state.virtual_list.auto_follow = state.auto_follow;
     state.virtual_list.resize(history_len);
 
+    // 抬头那条条目的内容不来自 `entry.content`，而是渲染期从 state 现算（模型名 +
+    // 思考档位）。而 `rendered_cache` 只在条目被标脏时才刷新 —— 所以模型或档位在别处
+    // 一改，屏幕上留着的还是旧字符串。这里按内容指纹判一次，比在十几个
+    // `current_model = …` 赋值点各插一次 invalidate 可靠。
+    super::welcome_header::refresh_if_stale(state);
+
     // Clear cache if terminal width changed
     if state.last_terminal_width != area_width {
         state.clear_cache();
@@ -375,6 +381,9 @@ pub fn render_chat_history(
     let history_len = state.chat_history.len();
     state.virtual_list.auto_follow = state.auto_follow;
     state.virtual_list.resize(history_len);
+
+    // 抬头是渲染期现算的，缓存却只认 dirty 标记 —— 详见 `render_chat_lines` 里的同一句
+    super::welcome_header::refresh_if_stale(state);
 
     // Save scroll anchor when not auto-following
     let anchor_idx = if !state.auto_follow && state.virtual_list.total_lines() > 0 {

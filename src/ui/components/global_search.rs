@@ -230,19 +230,11 @@ fn render_results_list(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
 
             let prefix = if is_selected { "> " } else { "  " };
 
-            // 截断长路径
-            let file_path = if result.file_path.len() > 40 {
-                format!("...{}", &result.file_path[result.file_path.len() - 37..])
-            } else {
-                result.file_path.clone()
-            };
-
-            // 截断长内容
-            let content = if result.content.len() > 60 {
-                format!("{}...", &result.content[..57])
-            } else {
-                result.content.clone()
-            };
+            // 截断长路径 / 长内容。
+            // 原来两处都是字节切片，搜到含中文的行就会在渲染线程里 panic ——
+            // 而这个仓库自己的注释就是中文。
+            let file_path = crate::utils::string_utils::truncate_start_chars(&result.file_path, 37);
+            let content = crate::utils::string_utils::truncate_with_ellipsis(&result.content, 60);
 
             ListItem::new(Line::from(vec![
                 Span::styled(prefix, style),

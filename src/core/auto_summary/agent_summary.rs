@@ -79,13 +79,7 @@ impl AgentSummaryGenerator {
             .rev()
             .take(5)
             .filter_map(|m| m.content.clone())
-            .map(|c| {
-                if c.len() > 50 {
-                    format!("{}...", &c[..50])
-                } else {
-                    c
-                }
-            })
+            .map(|c| crate::utils::string_utils::truncate_chars(&c, 50))
             .collect();
 
         if recent.is_empty() {

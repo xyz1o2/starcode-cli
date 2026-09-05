@@ -169,8 +169,12 @@ impl SubAgent for VerifyAgent {
             let (success, stdout, stderr) = Self::run_bash(cmd, args, *timeout);
 
             let status = if success { "PASS" } else { "FAIL" };
-            let output_summary = if stdout.len() > 500 {
-                format!("{}... ({} chars total)", &stdout[..500], stdout.len())
+            let output_summary = if stdout.chars().count() > 500 {
+                format!(
+                    "{}... ({} chars total)",
+                    crate::utils::string_utils::truncate(&stdout, 500),
+                    stdout.chars().count()
+                )
             } else {
                 stdout.clone()
             };
@@ -183,11 +187,7 @@ impl SubAgent for VerifyAgent {
                 if !stderr.is_empty() {
                     format!(
                         "\n  stderr: {}",
-                        if stderr.len() > 300 {
-                            format!("{}...", &stderr[..300])
-                        } else {
-                            stderr.clone()
-                        }
+                        crate::utils::string_utils::truncate_chars(&stderr, 300)
                     )
                 } else {
                     String::new()

@@ -1061,6 +1061,35 @@ impl ThinkingEffort {
             Self::High => Self::Off,
         }
     }
+
+    /// 状态栏/抬头用的档位符号（对标 Claude Code `constants/figures.ts`：
+    /// `EFFORT_LOW='○' EFFORT_MEDIUM='◐' EFFORT_HIGH='●'`）。
+    ///
+    /// Claude Code 没有 Off 这一档，所以空心圈在那边是 low；这里 Off 用虚线圈
+    /// `◌`，把"关掉"和"低"区分开。
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            Self::Off => "◌",
+            Self::Low => "○",
+            Self::Medium => "◐",
+            Self::High => "●",
+        }
+    }
+
+    /// 档位的显示标签，例如 `◐ medium`。
+    ///
+    /// 状态栏、欢迎抬头、`/effort` 回执共用这一份措辞，符号和词才不会各处各样。
+    pub fn label(&self) -> String {
+        format!("{} {}", self.symbol(), self.as_str())
+    }
+
+    /// 一行式档位提示，例如 `◐ medium · /effort`（对标 Claude Code 的
+    /// `getEffortNotificationText`）。
+    ///
+    /// Alt+T、`/effort`、命令面板三条路径都用它，措辞才不会各说一套。
+    pub fn notification_text(&self) -> String {
+        format!("{} · /effort", self.label())
+    }
 }
 
 // ============ UX 改进: 工具确认相关类型 ============
@@ -1239,5 +1268,44 @@ impl ModelInfo {
     /// Get short display string (just model name)
     pub fn short_display(&self) -> String {
         self.display_name.clone().unwrap_or_else(|| self.id.clone())
+    }
+}
+
+#[cfg(test)]
+mod thinking_effort_tests {
+    use super::ThinkingEffort;
+
+    #[test]
+    fn every_gear_has_its_own_symbol() {
+        // 四档的符号必须互不相同，否则状态栏上看不出按 Alt+T 到底动没动
+        let gears = [
+            ThinkingEffort::Off,
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+        ];
+        let mut symbols: Vec<&str> = gears.iter().map(|g| g.symbol()).collect();
+        symbols.sort_unstable();
+        symbols.dedup();
+        assert_eq!(symbols.len(), gears.len(), "档位符号有重复: {:?}", symbols);
+    }
+
+    #[test]
+    fn the_notification_points_at_the_command_that_changes_it() {
+        // 通知里必须带上 /effort —— 用户看见档位还得知道去哪调
+        assert_eq!(ThinkingEffort::Medium.label(), "◐ medium");
+        assert_eq!(
+            ThinkingEffort::Medium.notification_text(),
+            "◐ medium · /effort"
+        );
+    }
+
+    #[test]
+    fn cycling_four_gears_returns_to_the_start() {
+        let mut gear = ThinkingEffort::Off;
+        for _ in 0..4 {
+            gear = gear.next();
+        }
+        assert!(matches!(gear, ThinkingEffort::Off));
     }
 }

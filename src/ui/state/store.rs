@@ -404,6 +404,10 @@ pub struct ChatState {
     // ============ UX 改进: 审批模式状态 ============
     pub approval_mode: crate::types::ApprovalMode,
     pub thinking_effort: crate::types::ThinkingEffort,
+    /// 欢迎抬头上次渲染时的内容指纹（模型 + 思考档位）。抬头是渲染期现算的，但结果进了
+    /// `rendered_cache`，只认 dirty 标记；靠这份指纹在渲染路径上发现内容变了。
+    /// 见 `ui::components::welcome_header::refresh_if_stale`。
+    pub welcome_header_fingerprint: Option<String>,
     /// /add-dir 追加的工作目录（对标 Claude Code add-dir：扩展 @ 文件访问范围）
     pub extra_working_dirs: Vec<std::path::PathBuf>,
     /// /fast 快速模式（对标 Claude Code fast mode：切到轻量模型 + 状态栏指示）
@@ -834,6 +838,7 @@ impl ChatState {
             auto_continue_remaining: 0,
             approval_mode: crate::types::ApprovalMode::Default,
             thinking_effort: crate::types::ThinkingEffort::default(),
+            welcome_header_fingerprint: None,
             extra_working_dirs: Vec::new(),
             fast_mode: false,
             network_offline: false,

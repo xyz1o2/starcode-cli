@@ -501,10 +501,7 @@ pub(crate) async fn execute_palette_action(
                     }
                 }
             });
-            state.current_status_line = Some(format!(
-                "Thinking: {}",
-                state.thinking_effort.display_name()
-            ));
+            state.current_status_line = Some(state.thinking_effort.notification_text());
         }
         PaletteAction::SetTheme(theme_name) => {
             state.close_palette();
@@ -1232,6 +1229,20 @@ pub async fn handle_key_event(
                 }
                 return Ok(());
             }
+            // Alt+Shift+T: Cycle theme
+            //
+            // 必须排在下面的 Alt+T 之前：`eq_ignore_ascii_case` 连大写 'T' 一起吃掉，
+            // 原来主题分支写在后面，永远走不到。
+            // 判据不能只看 SHIFT —— 传统终端对字符键压根不上报 SHIFT，只把字符本身变成
+            // 大写（只有 kitty 键盘协议才会同时给 SHIFT），所以两个条件都认。
+            if ch.eq_ignore_ascii_case(&'t')
+                && (ch.is_uppercase() || key.modifiers.contains(KeyModifiers::SHIFT))
+            {
+                state.theme_manager.next_theme();
+                let theme_name = state.theme_manager.current().name.clone();
+                state.current_status_line = Some(format!("Theme: {}", theme_name));
+                return Ok(());
+            }
             if ch.eq_ignore_ascii_case(&'t') {
                 let cap = crate::core::config::models::thinking_capability(&state.current_model);
                 state.thinking_effort = match cap {
@@ -1249,9 +1260,12 @@ pub async fn handle_key_event(
                 // 当前模型根本没有思考开关时说清楚，否则用户会以为档位没生效
                 let unsupported =
                     matches!(cap, crate::core::config::models::ThinkingCapability::None);
+                // 措辞统一走 `notification_text()`：Alt+T / `/effort` / 命令面板三条路径
+                // 原来各写一套（"Thinking: Medium" / "✅ Thinking effort: Medium"），
+                // 用户看不出是同一个档位。对标 Claude Code 的 `◐ medium · /effort`。
                 state.current_status_line = Some(format!(
-                    "Thinking: {}{}",
-                    state.thinking_effort.display_name(),
+                    "{}{}",
+                    state.thinking_effort.notification_text(),
                     if unsupported {
                         " · current model has no thinking mode"
                     } else {
@@ -1274,13 +1288,6 @@ pub async fn handle_key_event(
                         }
                     }
                 });
-                return Ok(());
-            }
-            // Alt+Shift+T: Cycle theme
-            if ch.eq_ignore_ascii_case(&'t') && key.modifiers.contains(KeyModifiers::SHIFT) {
-                state.theme_manager.next_theme();
-                let theme_name = state.theme_manager.current().name.clone();
-                state.current_status_line = Some(format!("Theme: {}", theme_name));
                 return Ok(());
             }
         }

@@ -68,6 +68,11 @@ impl StructuredError {
             && (error_lower.contains("fail") || error_lower.contains("assert"))
         {
             ErrorCategory::TestFailure
+        } else if Self::is_network_error(&error_lower) {
+            // 网络错误必须在 `not found` 之前判掉。`HTTP error: 404 Not Found` 本来会掉进
+            // NotFound 分支，于是模型收到的建议是"用 glob/search 找到正确的文件路径" ——
+            // 对 URL 抓取毫无意义，还正好把它推回搜索循环。
+            ErrorCategory::ToolExecution
         } else if error_lower.contains("permission") || error_lower.contains("access denied") {
             ErrorCategory::Permission
         } else if error_lower.contains("not found") || error_lower.contains("no such file") {
@@ -79,6 +84,18 @@ impl StructuredError {
         } else {
             ErrorCategory::ToolExecution
         }
+    }
+
+    /// 判断是不是网络/HTTP 层的失败（入参需已转小写）
+    fn is_network_error(error_lower: &str) -> bool {
+        error_lower.contains("http error")
+            || error_lower.contains("http status")
+            || error_lower.starts_with("http ")
+            || error_lower.contains("connection refused")
+            || error_lower.contains("connection reset")
+            || error_lower.contains("connect error")
+            || error_lower.contains("dns error")
+            || error_lower.contains("certificate")
     }
 
     fn is_recoverable(category: &ErrorCategory) -> bool {
@@ -94,7 +111,18 @@ impl StructuredError {
         }
     }
 
-    fn generate_suggestion(category: &ErrorCategory, _error: &str) -> Option<String> {
+    fn generate_suggestion(category: &ErrorCategory, error: &str) -> Option<String> {
+        // 网络失败给网络建议 —— 而且明确说"重试同一个请求不会有别的结果"，别让模型
+        // 把同一个 URL 反复抓
+        if Self::is_network_error(&error.to_lowercase()) {
+            return Some(
+                "The request did not succeed and nothing was retrieved. Repeating the same \
+                 request will fail the same way — use a different URL or source, or continue \
+                 without this page."
+                    .to_string(),
+            );
+        }
+
         match category {
             ErrorCategory::Compilation => {
                 Some("Read the error message carefully. Check syntax, imports, and type annotations. Use `get_diagnostics` to see all issues.".to_string())
@@ -307,10 +335,17 @@ impl AttemptHistory {
         }
 
         // Check if all recent failures have similar error messages
-        let first = recent[0];
+        // 按字符前缀比较：`e[..50]` 是字节切片，错误信息里带中文时会 panic。
+        let prefix = |e: &str| -> Option<String> {
+            let head: String = e.chars().take(50).collect();
+            (head.chars().count() == 50).then_some(head)
+        };
+        let Some(first) = prefix(recent[0]) else {
+            return false;
+        };
         recent
             .iter()
-            .all(|e| e.len() >= 50 && first.len() >= 50 && e[..50] == first[..50])
+            .all(|e| prefix(e).as_deref() == Some(first.as_str()))
     }
 }
 
@@ -981,4 +1016,48 @@ fn analyze_test_failure(error_msg: &str) -> String {
     }
 
     "Review the test failure details and fix the underlying issue".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `HTTP error: 404 Not Found` 曾被判成 NotFound，于是建议模型"用 glob/search 找到
+    /// 正确的文件路径" —— 对 URL 抓取毫无意义，还正好把它推回搜索循环。
+    #[test]
+    fn an_http_failure_is_not_reported_as_a_missing_file() {
+        let err = StructuredError::from_tool_output(
+            "WebFetch",
+            "",
+            "HTTP error: https://example.com/x returned 404 Not Found",
+        );
+        assert!(matches!(err.category, ErrorCategory::ToolExecution));
+
+        let suggestion = err.suggestion.expect("network errors get a suggestion");
+        assert!(!suggestion.contains("glob"));
+        assert!(!suggestion.contains("file path"));
+        assert!(suggestion.contains("Repeating the same request will fail the same way"));
+    }
+
+    #[test]
+    fn a_real_missing_file_is_still_reported_as_not_found() {
+        let err = StructuredError::from_tool_output("Read", "", "no such file or directory");
+        assert!(matches!(err.category, ErrorCategory::NotFound));
+        assert!(err
+            .suggestion
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Verify the file path"));
+    }
+
+    /// 网络判断不能抢走编译错误 —— 编译输出里出现 certificate/http 之类的词是常事。
+    #[test]
+    fn a_compilation_error_wins_over_the_network_check() {
+        let err = StructuredError::from_tool_output(
+            "Bash",
+            "",
+            "error: cannot find value `certificate` in this scope (compile)",
+        );
+        assert!(matches!(err.category, ErrorCategory::Compilation));
+    }
 }

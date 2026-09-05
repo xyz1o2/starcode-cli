@@ -206,6 +206,32 @@ fn is_streaming_safe_command(input: &str) -> bool {
     }
 }
 
+/// `!command` 输出进上下文前的截断：保留头尾，掐掉中间
+///
+/// 一次 `!cargo test` 可能刷出几万字符，整段塞进上下文会把预算吃干。
+/// 报错信息通常在头部或尾部，中间是重复的进度行 —— 所以两头都留。
+/// 上限用 STAR_LOCAL_COMMAND_OUTPUT_MAX_CHARS 调（默认 8000）。
+fn truncate_local_command_output(output: &str) -> String {
+    let max_chars = std::env::var("STAR_LOCAL_COMMAND_OUTPUT_MAX_CHARS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(8000);
+
+    let chars: Vec<char> = output.chars().collect();
+    if chars.len() <= max_chars {
+        return output.to_string();
+    }
+
+    let head_len = max_chars * 2 / 3;
+    let tail_len = max_chars - head_len;
+    let head: String = chars[..head_len].iter().collect();
+    let tail: String = chars[chars.len() - tail_len..].iter().collect();
+    format!(
+        "{head}\n\n... [{} chars omitted] ...\n\n{tail}",
+        chars.len() - max_chars
+    )
+}
+
 pub async fn enqueue_user_message(
     state: &mut ChatState,
     user_input: String,
@@ -333,6 +359,9 @@ pub async fn enqueue_user_message(
 
     // Check for ! shortcut (Bash/Shell) - Direct Execution
     // Exclude markdown image syntax ![...] which starts with ! but is NOT a shell command
+    //
+    // `!cmd`  → 本地执行，并把输出追加进模型上下文（对标 Claude Code）
+    // `!!cmd` → 本地执行，输出只给人看，不进上下文
     if user_input.trim().starts_with('!') && !user_input.trim().starts_with("![") {
         if state.approval_mode == crate::types::ApprovalMode::Plan {
             state.chat_history.push(ChatEntry {
@@ -342,7 +371,9 @@ pub async fn enqueue_user_message(
             return Ok(());
         }
 
-        let cmd = user_input.trim()[1..].trim();
+        let trimmed = user_input.trim();
+        let local_only = trimmed.starts_with("!!");
+        let cmd = trimmed[if local_only { 2 } else { 1 }..].trim();
         if !cmd.is_empty() {
             // Show the command in history as user message
             state.chat_history.push(ChatEntry::user(user_input.clone()));
@@ -388,6 +419,20 @@ pub async fn enqueue_user_message(
                             } else {
                                 format!("Exit Code: {:?}\n\n{}", res.exit_code, res.output)
                             };
+
+                            // 先喂给模型再回显：`!!` 才跳过这一步。
+                            // 包成 <local-command-stdout> 是为了让模型明确知道
+                            // 这段是用户自己在终端里跑出来的，不是它调工具的结果。
+                            if !local_only {
+                                let payload = format!(
+                                    "<local-command-stdout cmd=\"{}\">\n{}\n</local-command-stdout>",
+                                    cmd.replace('"', "'"),
+                                    truncate_local_command_output(&content)
+                                );
+                                let _ = agent_tx
+                                    .send(AgentRequest::AppendContext { content: payload })
+                                    .await;
+                            }
 
                             state.chat_history.push(ChatEntry {
                                 is_streaming: Some(false),
@@ -613,4 +658,39 @@ pub async fn enqueue_user_message(
         })
         .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod local_command_tests {
+    use super::truncate_local_command_output;
+
+    #[test]
+    fn short_output_passes_through_untouched() {
+        assert_eq!(truncate_local_command_output("ok\n"), "ok\n");
+    }
+
+    #[test]
+    fn long_output_keeps_head_and_tail() {
+        // 不动环境变量（单测并行，set_var 会漏给别的测试）：默认上限 8000，
+        // 直接喂一段更长的。
+        let out = truncate_local_command_output(&format!(
+            "{}{}{}",
+            "H".repeat(100),
+            "M".repeat(20_000),
+            "T".repeat(100)
+        ));
+        assert!(out.starts_with("HHHH"));
+        assert!(out.ends_with("TTTT"));
+        assert!(out.contains("chars omitted"));
+    }
+
+    #[test]
+    fn multibyte_output_does_not_split_a_char() {
+        // 4 个汉字 × 3000 = 12000 字符，超过默认 8000 上限
+        let out = truncate_local_command_output(&"编译错误".repeat(3000));
+        assert!(out.starts_with('编'));
+        assert!(out.contains("chars omitted"));
+        // 按字符切而不是按字节切：切点不会落在汉字中间产生替换字符
+        assert!(!out.contains('\u{FFFD}'));
+    }
 }

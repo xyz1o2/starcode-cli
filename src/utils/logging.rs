@@ -212,11 +212,9 @@ pub fn log_llm_response(finish_reason: &str, tokens: usize) {
 
 /// 记录工具调用
 pub fn log_tool_call(tool_name: &str, args: &str) {
-    let preview = if args.len() > 100 {
-        format!("{}...", &args[..97])
-    } else {
-        args.to_string()
-    };
+    // 按字符截断：参数里带中文（搜索词、写入内容）时字节切片会 panic —— 而这行日志
+    // 每次工具调用都会走。
+    let preview = crate::utils::string_utils::truncate_with_ellipsis(args, 100);
     let msg = format!("🔧 TOOL CALL: {} | {}", tool_name, preview);
     append_debug_log_line(&msg);
 }

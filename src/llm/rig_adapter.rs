@@ -207,27 +207,24 @@ fn convert_tools(tools: &Option<Vec<StarTool>>) -> Vec<completion::request::Tool
 fn build_request(
     messages: &[StarMessage],
     tools: &Option<Vec<StarTool>>,
-    supports_prompt_caching: bool,
     profile: crate::llm::thinking::ProviderProfile<'_>,
 ) -> CompletionRequest {
     let mut extra_params = serde_json::Map::new();
 
-    // `cache_control` is an Anthropic-only prompt-caching parameter. Only
-    // send it for Anthropic — OpenAI-compatible providers (NVIDIA NIM, etc.)
-    // reject unknown parameters with a 400 error.
-    if supports_prompt_caching {
-        let cache_control_hints: Vec<&serde_json::Value> = messages
-            .iter()
-            .filter(|m| m.role == ROLE_SYSTEM && m.cache_control.is_some())
-            .filter_map(|m| m.cache_control.as_ref())
-            .collect();
-        if !cache_control_hints.is_empty() {
-            extra_params.insert(
-                "cache_control".to_string(),
-                serde_json::json!(cache_control_hints),
-            );
-        }
-    }
+    // 这里**故意不再**塞 `cache_control`。
+    //
+    // 原来的代码把所有带 `cache_control` 的 system 消息收集成一个数组塞进
+    // `additional_params["cache_control"]`。rig 的 Anthropic provider 会把这个键
+    // 取出来做 `serde_json::from_value::<CacheControl>()` —— 而 `CacheControl` 是
+    // `#[serde(tag = "type")]` 的内部标签枚举，只认对象 `{"type":"ephemeral"}`，
+    // 数组直接反序列化失败，于是**每一次 Anthropic 请求都在发出之前就报
+    // `Invalid Anthropic additional_params.cache_control payload`**。
+    //
+    // 缓存断点现在交给 rig 自己打（见 `rig_anthropic_complete` /
+    // `rig_anthropic_stream` 里的 `with_prompt_caching().with_automatic_caching()`）：
+    // system 与 tools 各占一个显式断点，会话历史的移动断点由 Anthropic 服务端
+    // 自己往后推。`StarMessage::cache_control` 保留下来只用于 prompt builder 侧
+    // 区分静态/动态段落，不再参与请求构造。
 
     // 思考力度 —— 档位由 UI 侧（Alt+T / `/effort` / 命令面板）经
     // `AgentRequest::SetThinkingEffort` 存进 `llm::thinking` 的会话状态，
@@ -383,12 +380,19 @@ fn build_star_response(result: CompletionResult) -> StarResponse {
 }
 
 /// Convert rig Usage to StarUsage.
+/// 把 rig 的 `Usage` 翻成 `StarUsage`，**包括缓存计数**
+///
+/// 之前这里是 `..Default::default()`，于是 `cache_read_tokens` /
+/// `cache_creation_tokens` 永远是 0。状态栏的 "Cache N%" 只在
+/// `total_cache > 0` 时才画，所以那个指示器从来没出现过 —— 看上去像"没开缓存"，
+/// 实际上是"开了但没统计"。两个字段 rig 都给了，照抄即可。
 fn convert_usage(usage: &rig_core::completion::Usage) -> StarUsage {
     StarUsage {
         prompt_tokens: usage.input_tokens as u32,
         completion_tokens: usage.output_tokens as u32,
         total_tokens: usage.total_tokens as u32,
-        ..Default::default()
+        cache_read_tokens: usage.cached_input_tokens as u32,
+        cache_creation_tokens: usage.cache_creation_input_tokens as u32,
     }
 }
 
@@ -443,12 +447,14 @@ async fn rig_openai_complete(
 // forwarded incrementally to the agent layer. The rig stream is consumed on
 // a spawned task and forwarded via a channel, which keeps the returned
 // stream Send + Sync.
+//
+// 拆成两层：`rig_stream_with_url!` 负责按 provider 模块建 client + model，
+// `rig_stream_from_model!` 负责驱动流。Anthropic 需要在 model 上额外挂
+// `with_prompt_caching()` / `with_automatic_caching()`（这两个方法只有 Anthropic
+// 的 `CompletionModel` 有），所以它自己建 model 再走下层宏。
 macro_rules! rig_stream_with_url {
     ($mod:ident, $api_key:expr, $model:expr, $base_url:expr, $request:expr) => {{
-        use futures::StreamExt;
         use rig_core::client::CompletionClient;
-        use rig_core::completion::request::GetTokenUsage;
-        use rig_core::streaming::StreamedAssistantContent;
 
         let mut builder = $mod::Client::builder().api_key($api_key);
         if let Some(url) = $base_url {
@@ -458,9 +464,21 @@ macro_rules! rig_stream_with_url {
             LlmError::ProviderError(format!("rig {} client: {e}", stringify!($mod)))
         })?;
         let model = client.completion_model($model.clone());
-        let stream = model.stream($request).await.map_err(|e| {
-            LlmError::ProviderError(format!("rig {} stream: {e}", stringify!($mod)))
-        })?;
+        rig_stream_from_model!(stringify!($mod), model, $request)
+    }};
+}
+
+macro_rules! rig_stream_from_model {
+    ($label:expr, $model:expr, $request:expr) => {{
+        use futures::StreamExt;
+        use rig_core::completion::request::GetTokenUsage;
+        use rig_core::streaming::StreamedAssistantContent;
+
+        let label: &str = $label;
+        let stream = $model
+            .stream($request)
+            .await
+            .map_err(|e| LlmError::ProviderError(format!("rig {label} stream: {e}")))?;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<LlmEvent, LlmError>>(64);
         tokio::spawn(async move {
@@ -532,21 +550,22 @@ macro_rules! rig_stream_with_url {
                     Ok(StreamedAssistantContent::ToolCallDelta { .. }) => {}
                     Ok(StreamedAssistantContent::Final(res)) => {
                         let usage = res.token_usage();
-                        if usage.input_tokens > 0 || usage.output_tokens > 0 {
-                            last_usage = Some(crate::types::StarUsage {
-                                prompt_tokens: usage.input_tokens as u32,
-                                completion_tokens: usage.output_tokens as u32,
-                                total_tokens: usage.total_tokens as u32,
-                                ..Default::default()
-                            });
+                        // 缓存命中时 `input_tokens` 会很小（大头记在 cached_input_tokens
+                        // 上），所以判空必须把缓存计数也算进来，否则高命中率的那一轮
+                        // 会被当成"没有 usage"而丢掉。
+                        if usage.input_tokens > 0
+                            || usage.output_tokens > 0
+                            || usage.cached_input_tokens > 0
+                            || usage.cache_creation_input_tokens > 0
+                        {
+                            last_usage = Some(convert_usage(&usage));
                         }
                     }
                     Ok(StreamedAssistantContent::Unknown(_)) => {}
                     Err(e) => {
                         let _ = tx
                             .send(Err(LlmError::ProviderError(format!(
-                                "rig {} stream error: {e}",
-                                stringify!($mod)
+                                "rig {label} stream error: {e}"
                             ))))
                             .await;
                         return;
@@ -664,13 +683,14 @@ async fn rig_openai_stream(
                 Ok(StreamedAssistantContent::ToolCallDelta { .. }) => {}
                 Ok(StreamedAssistantContent::Final(res)) => {
                     let usage = res.token_usage();
-                    if usage.input_tokens > 0 || usage.output_tokens > 0 {
-                        last_usage = Some(crate::types::StarUsage {
-                            prompt_tokens: usage.input_tokens as u32,
-                            completion_tokens: usage.output_tokens as u32,
-                            total_tokens: usage.total_tokens as u32,
-                            ..Default::default()
-                        });
+                    // 见 `rig_stream_with_url!` 里的同一段注释：缓存命中的那一轮
+                    // `input_tokens` 很小，判空要连缓存计数一起看。
+                    if usage.input_tokens > 0
+                        || usage.output_tokens > 0
+                        || usage.cached_input_tokens > 0
+                        || usage.cache_creation_input_tokens > 0
+                    {
+                        last_usage = Some(convert_usage(&usage));
                     }
                 }
                 Ok(StreamedAssistantContent::Unknown(_)) => {}
@@ -700,6 +720,78 @@ async fn rig_openai_stream(
     Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
 }
 
+/// 建一个开好 prompt cache 的 Anthropic model
+///
+/// # 为什么要单独一份而不走通用宏
+///
+/// `with_prompt_caching()` / `with_automatic_caching()` 只长在 Anthropic 的
+/// `CompletionModel` 上，泛型宏（`$mod::Client`）拿不到。
+///
+/// # 两个开关是叠加的，不是二选一
+///
+/// rig 的文档写得很清楚：两个一起开时，**顶层自动断点负责会话历史那个会往后移动
+/// 的缓存点，rig 仍然在预算允许时给 tools 和 system 各打一个显式断点**。
+/// Anthropic 一次请求最多 4 个断点，这里用掉 3 个（顶层 1 + tools 1 + system 1），
+/// 正好是 agent 循环想要的形状：
+///
+/// - system prompt（本项目约 4 万字符）只在首轮付全价；
+/// - tool schema（几十个工具的 JSON）同样只付一次；
+/// - 会话历史随着轮次增长，断点由服务端自己往后推，每轮只为**增量**付全价。
+///
+/// 只开 `automatic_caching` 也能省，但 system 和 tools 会跟历史挤在同一个移动断点
+/// 之前，命中率会差一截。
+fn anthropic_caching_model(
+    model: anthropic::completion::CompletionModel,
+) -> anthropic::completion::CompletionModel {
+    model.with_prompt_caching().with_automatic_caching()
+}
+
+/// Anthropic 非流式补全（带 prompt cache）
+async fn rig_anthropic_complete(
+    api_key: &str,
+    model: &str,
+    base_url: Option<&str>,
+    request: CompletionRequest,
+) -> Result<CompletionResult, LlmError> {
+    use rig_core::client::CompletionClient;
+
+    let mut builder = anthropic::Client::builder().api_key(api_key);
+    if let Some(url) = base_url {
+        builder = builder.base_url(url);
+    }
+    let client = builder
+        .build()
+        .map_err(|e| LlmError::ProviderError(format!("rig anthropic client: {e}")))?;
+    let model_client = anthropic_caching_model(client.completion_model(model));
+    let r = model_client
+        .completion(request)
+        .await
+        .map_err(|e| LlmError::ProviderError(format!("rig anthropic completion: {e}")))?;
+    let mut result = extract_response(&r.choice);
+    result.usage = Some(convert_usage(&r.usage));
+    Ok(result)
+}
+
+/// Anthropic 流式补全（带 prompt cache）
+async fn rig_anthropic_stream(
+    api_key: &str,
+    model: &str,
+    base_url: Option<&str>,
+    request: CompletionRequest,
+) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError> {
+    use rig_core::client::CompletionClient;
+
+    let mut builder = anthropic::Client::builder().api_key(api_key);
+    if let Some(url) = base_url {
+        builder = builder.base_url(url);
+    }
+    let client = builder
+        .build()
+        .map_err(|e| LlmError::ProviderError(format!("rig anthropic client: {e}")))?;
+    let model_client = anthropic_caching_model(client.completion_model(model));
+    rig_stream_from_model!("anthropic", model_client, request)
+}
+
 #[async_trait]
 impl LlmClient for RigAdapter {
     async fn chat_completion(
@@ -707,12 +799,7 @@ impl LlmClient for RigAdapter {
         messages: Vec<StarMessage>,
         tools: Option<Vec<StarTool>>,
     ) -> Result<StarResponse, Box<dyn Error + Send + Sync>> {
-        let request = build_request(
-            &messages,
-            &tools,
-            self.supports_prompt_caching(),
-            self.thinking_profile(),
-        );
+        let request = build_request(&messages, &tools, self.thinking_profile());
         let result = self.do_completion(request).await?;
         Ok(build_star_response(result))
     }
@@ -723,12 +810,7 @@ impl LlmClient for RigAdapter {
         tools: Option<Vec<StarTool>>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError>
     {
-        let request = build_request(
-            &messages,
-            &tools,
-            self.supports_prompt_caching(),
-            self.thinking_profile(),
-        );
+        let request = build_request(&messages, &tools, self.thinking_profile());
         self.do_stream(request).await
     }
 
@@ -738,12 +820,6 @@ impl LlmClient for RigAdapter {
 }
 
 impl RigAdapter {
-    /// `cache_control` prompt caching is Anthropic-only; OpenAI-compatible
-    /// providers reject it with a 400 error.
-    fn supports_prompt_caching(&self) -> bool {
-        matches!(self, Self::Anthropic { .. })
-    }
-
     /// 判断思考参数该用哪种方言所需的 provider 画像
     /// （见 `crate::llm::thinking`）。
     fn thinking_profile(&self) -> crate::llm::thinking::ProviderProfile<'_> {
@@ -806,18 +882,7 @@ impl RigAdapter {
                 api_key,
                 model,
                 base_url,
-            } => {
-                let r = rig_complete_with_url!(
-                    anthropic,
-                    api_key,
-                    model,
-                    base_url.as_deref(),
-                    request
-                )?;
-                let mut result = extract_response(&r.choice);
-                result.usage = Some(convert_usage(&r.usage));
-                Ok(result)
-            }
+            } => rig_anthropic_complete(api_key, model, base_url.as_deref(), request).await,
             Self::DeepSeek {
                 api_key,
                 model,
@@ -865,9 +930,7 @@ impl RigAdapter {
                 api_key,
                 model,
                 base_url,
-            } => {
-                rig_stream_with_url!(anthropic, api_key, model, base_url.as_deref(), request)
-            }
+            } => rig_anthropic_stream(api_key, model, base_url.as_deref(), request).await,
             Self::DeepSeek {
                 api_key,
                 model,

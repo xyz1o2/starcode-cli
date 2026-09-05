@@ -1217,8 +1217,26 @@ impl ShellToolInvocation {
             llm_content = s.to_string();
         }
 
+        // 失败时把 stderr 和退出码一起带上。
+        //
+        // executor 用 `return_display.unwrap_or(output)` 得到**同一个**字符串，既发给
+        // 模型也给 UI（`llm_content` 根本没人读，见 agent/tool_executor.rs）。所以
+        // 只放 stdout 的话，一个同时写了两个流的失败命令，模型看到的是"输出正常"，
+        // 只能靠重跑去猜哪里错了。
         let return_display = if !stdout_output.is_empty() {
-            stdout_output.to_string()
+            if status.success() {
+                stdout_output.to_string()
+            } else {
+                let mut combined = stdout_output.to_string();
+                if !stderr_output.is_empty() {
+                    combined.push_str(&format!("\n\nstderr:\n{}", stderr_output));
+                }
+                combined.push_str(&format!(
+                    "\n\nCommand exited with code: {}",
+                    status.code().unwrap_or(-1)
+                ));
+                combined
+            }
         } else if !stderr_output.is_empty() {
             format!("Command failed: {}", stderr_output)
         } else if status.success() {
@@ -1227,10 +1245,13 @@ impl ShellToolInvocation {
             format!("Command exited with code: {}", status.code().unwrap_or(-1))
         };
 
-        let output_for_display = if return_display.len() > 100 * 1024 {
+        // 按字符截断：命令输出里有中文时，`&return_display[..100 * 1024]` 会切在
+        // 汉字中间直接 panic，而工具执行没有 catch_unwind，一崩整个 agent 就停。
+        const DISPLAY_CAP_CHARS: usize = 100 * 1024;
+        let output_for_display = if return_display.chars().count() > DISPLAY_CAP_CHARS {
             format!(
                 "{}... (output truncated, total length: {})",
-                &return_display[..100 * 1024],
+                crate::utils::string_utils::truncate(&return_display, DISPLAY_CAP_CHARS),
                 return_display.len()
             )
         } else {

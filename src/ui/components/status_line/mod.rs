@@ -1181,22 +1181,17 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
         }
     }
 
-    // ── 6b. Thinking effort (non-default only) ───────────────────────────────
-    if !compact {
-        use crate::types::ThinkingEffort;
-        match state.thinking_effort {
-            ThinkingEffort::Off => {}
-            _ => {
-                spans.push(sep());
-                let label = format!("[T:{}]", state.thinking_effort.as_str().to_uppercase());
-                spans.push(Span::styled(
-                    label,
-                    Style::default()
-                        .fg(theme.secondary)
-                        .add_modifier(Modifier::ITALIC),
-                ));
-            }
-        }
+    // ── 6b. Thinking effort ──────────────────────────────────────────────────
+    //
+    // 只要模型有思考开关就一直显示，包括默认的 Off。原来是"非默认才显示"，而默认恰好
+    // 是 Off —— 于是没人动过档位时状态栏、抬头、通知全是空的，用户找不到"调思考深度的
+    // UI 在哪"。对标 Claude Code：档位常驻显示，只在模型不支持思考时才隐藏。
+    if !compact && crate::core::config::models::supports_thinking_ui(&state.current_model) {
+        spans.push(sep());
+        spans.push(Span::styled(
+            state.thinking_effort.label(),
+            Style::default().fg(theme.secondary),
+        ));
     }
 
     // ── 6b1. Fast mode indicator (/fast) ─────────────────────────────────────

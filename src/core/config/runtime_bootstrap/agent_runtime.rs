@@ -14,7 +14,7 @@ pub(super) fn register_agent_runtime_tools(
 ) {
     register_skill_tool(client, config, tool_registry);
     register_agent_editing_tools(tool_registry, config, message_bus, global_state, client);
-    register_agent_observability_tools(tool_registry);
+    register_agent_observability_tools(tool_registry, client);
     register_agent_execution_tools(tool_registry, config, message_bus, client);
     register_tool_search(tool_registry);
 }
@@ -51,9 +51,11 @@ fn register_agent_editing_tools(
     ensure_fallback_core_tools(config, tool_registry, message_bus, global_state);
 }
 
-fn register_agent_observability_tools(tool_registry: &Arc<ToolRegistry>) {
+fn register_agent_observability_tools(tool_registry: &Arc<ToolRegistry>, client: &StarClient) {
     use crate::core::tools::web_fetch::WebFetchTool;
-    tool_registry.register_tool(Arc::new(WebFetchTool::new()));
+    // 带客户端注册：WebFetch 的 `prompt` 参数靠它把整页压成一个答案，主上下文里就不用
+    // 塞几万字符的网页了（对标 Claude Code 的 WebFetch）
+    tool_registry.register_tool(Arc::new(WebFetchTool::with_client(client.clone())));
 
     // WebSearch 由 CoreRuntime 层按 is_core_tool_enabled("WebSearch") 注册；
     // 此处不得再无条件注册，否则 core_tools 白名单形同虚设。

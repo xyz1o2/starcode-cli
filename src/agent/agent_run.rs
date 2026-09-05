@@ -210,7 +210,14 @@ impl Agent {
             let cwd_str = cwd.to_string_lossy().to_string();
             let selected_names = initial_tool_selection.selected_names.clone();
             let dynamic_ctx = dynamic_context;
-            let complexity_hint_clone = complexity_hint;
+            // 每轮都会变的两样（复杂度提示 + 检索到的动态上下文）不再进 system prompt，
+            // 而是挂到当轮 user 消息上。system 数组整体就是 Anthropic 的缓存前缀
+            // （rig 只在最后一块上打断点），放进去等于每条消息都把 4 万字符的前缀
+            // 击穿一次。见 PromptBuilder::build_turn_context。
+            let turn_context = crate::agent::prompt_builder::PromptBuilder::build_turn_context(
+                dynamic_ctx.as_deref(),
+                complexity_hint.as_deref(),
+            );
             // Fix date string at session start to ensure deterministic serialization
             // for LLM prompt caching. The date should not change between turns.
             let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -222,8 +229,7 @@ impl Agent {
                     &cwd_str,
                     Some(&selected_names),
                     None,
-                    dynamic_ctx,
-                    complexity_hint_clone,
+                    None,
                     is_thinking_model,
                     include_extended_bundle,
                 )
@@ -260,7 +266,20 @@ impl Agent {
                 &mut messages,
             );
 
-            messages.push(StarMessage::user(user_input.clone()));
+            // 当轮上下文跟在用户输入后面（对标 Claude Code 的 <system-reminder> 位置：
+            // 用户的话先说完，附加上下文再跟上），这样 system 前缀保持稳定。
+            // `!command` 攒下的输出排在最前面 —— 它是"用户在问之前做过的事"。
+            let mut turn_message = String::new();
+            for local in self.pending_local_context.drain(..) {
+                turn_message.push_str(&local);
+                turn_message.push_str("\n\n");
+            }
+            turn_message.push_str(&user_input);
+            if let Some(ctx) = &turn_context {
+                turn_message.push_str("\n\n");
+                turn_message.push_str(ctx);
+            }
+            messages.push(StarMessage::user(turn_message));
 
             // Create the event bridging channel and wire it on the agent.
             // Events are emitted through this channel via emit_event().

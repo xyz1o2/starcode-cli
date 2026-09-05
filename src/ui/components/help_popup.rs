@@ -9,18 +9,6 @@ use ratatui::{
 use crate::core::i18n;
 
 pub fn render_help_popup(f: &mut Frame, area: Rect) {
-    let height = 28.min(area.height.saturating_sub(4));
-    let width = 80.min(area.width.saturating_sub(8));
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-
-    let popup_area = Rect {
-        x,
-        y,
-        width,
-        height,
-    };
-
     let sections: Vec<(String, Vec<(String, String)>)> = vec![
         (
             i18n::t("ui.help.section.nav", "导航", "Navigation"),
@@ -111,6 +99,18 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
                         "Toggle Plan/Build",
                     ),
                 ),
+                (
+                    "Alt+T".to_string(),
+                    i18n::t(
+                        "ui.help.control.thinking",
+                        "切换思考深度（◌/○/◐/●）",
+                        "Cycle thinking depth (◌/○/◐/●)",
+                    ),
+                ),
+                (
+                    "Alt+Shift+T".to_string(),
+                    i18n::t("ui.help.control.theme", "切换主题", "Cycle theme"),
+                ),
             ],
         ),
         (
@@ -127,6 +127,14 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
                 (
                     "/model".to_string(),
                     i18n::t("ui.help.cmd.model", "选择模型", "Select model"),
+                ),
+                (
+                    "/effort".to_string(),
+                    i18n::t(
+                        "ui.help.cmd.effort",
+                        "设置思考深度（off/low/medium/high）",
+                        "Set thinking depth (off/low/medium/high)",
+                    ),
                 ),
                 (
                     "/settings".to_string(),
@@ -201,6 +209,22 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
                         "Auto-read file content",
                     ),
                 ),
+                (
+                    "!cmd".to_string(),
+                    i18n::t(
+                        "ui.help.other.bang",
+                        "本地跑命令，输出进上下文",
+                        "Run locally, output goes to the model",
+                    ),
+                ),
+                (
+                    "!!cmd".to_string(),
+                    i18n::t(
+                        "ui.help.other.bangbang",
+                        "本地跑命令，输出只给你看",
+                        "Run locally, output stays out of context",
+                    ),
+                ),
             ],
         ),
     ];
@@ -262,6 +286,19 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
             Style::default().fg(Color::DarkGray),
         ),
     ]));
+
+    // 弹窗按内容定高，不再写死 28 行。写死的高度早就装不下了（光命令区就十几条），
+    // Paragraph 又没有滚动，超出的部分是静默切掉的 —— 排在后半截的条目等于没写。
+    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
+    let width = 80.min(area.width.saturating_sub(8));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let popup_area = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
 
     let paragraph = Paragraph::new(lines).block(
         Block::default()

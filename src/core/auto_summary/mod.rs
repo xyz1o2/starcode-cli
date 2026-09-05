@@ -147,12 +147,7 @@ impl SummaryManager {
 
         for msg in messages.iter().filter(|m| m.role == "user").take(5) {
             if let Some(content) = &msg.content {
-                let truncated = if content.len() > 100 {
-                    format!("{}...", &content[..100])
-                } else {
-                    content.clone()
-                };
-                key_points.push(truncated);
+                key_points.push(crate::utils::string_utils::truncate_chars(content, 100));
             }
         }
 
