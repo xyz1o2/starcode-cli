@@ -10,6 +10,7 @@ use arboard::Clipboard;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tui_textarea::TextArea;
 
 use crate::runtime::messages::AgentRequest;
@@ -131,7 +132,7 @@ fn open_provider_selection_menu(
 ) {
     clear_suggestion_overlays(state);
     state.close_palette();
-    state.show_input_modal = false;
+    state.exit_input_modal();
     state.show_status_modal = false;
     close_quick_menus(state);
     state.quick_menu_back = back;
@@ -147,7 +148,7 @@ fn open_session_selection_menu(
 ) {
     clear_suggestion_overlays(state);
     state.close_palette();
-    state.show_input_modal = false;
+    state.exit_input_modal();
     state.show_status_modal = false;
     close_quick_menus(state);
     state.quick_menu_back = None;
@@ -186,7 +187,7 @@ pub(crate) fn show_palette_mode(state: &mut ChatState, mode: PaletteMode) {
     close_quick_menus(state);
     state.quick_menu_back = None;
     state.quick_menu_origin_palette = false;
-    state.show_input_modal = false;
+    state.exit_input_modal();
     state.open_palette(mode);
 }
 
@@ -199,7 +200,7 @@ pub(crate) fn show_provider_api_key_modal(
     state.show_status_modal = false;
     close_quick_menus(state);
     state.close_palette();
-    state.show_input_modal = true;
+    state.enter_input_modal();
     state.input_modal_title = if edit_mode {
         format!("Edit API Key for {}", provider_id)
     } else {
@@ -229,7 +230,7 @@ fn show_provider_base_url_modal(state: &mut ChatState, provider_id: &str, initia
     state.show_status_modal = false;
     close_quick_menus(state);
     state.close_palette();
-    state.show_input_modal = true;
+    state.enter_input_modal();
     state.input_modal_title = format!("Set Base URL for {}", provider_id);
     state.input_modal_prompt = if initial_value.trim().is_empty() {
         "Enter Base URL:".to_string()
@@ -259,7 +260,7 @@ fn show_model_name_modal(state: &mut ChatState) {
     state.show_status_modal = false;
     close_quick_menus(state);
     state.close_palette();
-    state.show_input_modal = true;
+    state.enter_input_modal();
     state.input_modal_title = "Enter Model Name".to_string();
     state.input_modal_prompt = match state.current_provider_id.as_deref() {
         Some(pid) if !pid.trim().is_empty() => {
@@ -281,6 +282,80 @@ fn show_model_name_modal(state: &mut ChatState) {
     state.modal_textarea = textarea;
 
     state.input_context = Some(crate::ui::state::palette::InputContext::ModelName);
+}
+
+/// 删除一个自定义 provider。
+///
+/// 删除范围是本地配置里 `providers.<id>` 整项 —— endpoint、API key、选中的模型
+/// 都在这一项里。如果它正是当前生效的 provider，`active_provider_id` /
+/// `active_model` 也要一起清掉，否则下次启动会解析到一个已经不存在的 provider。
+///
+/// 内置 provider 不走这里（面板里也不给入口）：它们的"配置"只是 key 和 URL，
+/// 删掉整项没有意义。
+async fn delete_custom_provider(
+    state: &mut ChatState,
+    provider_id: &str,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) {
+    if crate::core::config::providers::get_provider_by_id(provider_id).is_some() {
+        crate::ui::app::logic::emit_status_text(
+            state,
+            0,
+            &format!(
+                "Warning: '{}' is a built-in provider and cannot be removed.",
+                provider_id
+            ),
+        );
+        return;
+    }
+
+    let store = crate::core::config::provider_store::ProviderStore::new();
+    let mut config = store.load().await.unwrap_or_default();
+    let existed = config.providers.remove(provider_id).is_some();
+    let was_active = config.active_provider_id.as_deref() == Some(provider_id);
+    if was_active {
+        config.active_provider_id = None;
+        config.active_model = None;
+    }
+
+    if let Err(e) = store.save(&config).await {
+        crate::ui::app::logic::emit_status_text(
+            state,
+            0,
+            &format!("Error: Failed to remove {}: {}", provider_id, e),
+        );
+        return;
+    }
+
+    state.configured_providers.remove(provider_id);
+    state.available_models.clear();
+    state.available_models_info.clear();
+    state.model_provider_map.retain(|_, pid| pid != provider_id);
+    if was_active || state.current_provider_id.as_deref() == Some(provider_id) {
+        state.current_provider_id = None;
+        state.current_model.clear();
+        state.pending_model_provider = None;
+        state.pending_provider_selected_model = None;
+    }
+
+    // 模型列表按 provider 扇出，删完必须重拉，否则列表里还留着已删 provider 的模型。
+    let _ = agent_tx.send(AgentRequest::ListModels { force: true }).await;
+
+    let message = if !existed {
+        format!("'{}' was not in the local config; nothing to remove.", provider_id)
+    } else if was_active {
+        format!(
+            "Removed provider '{}'. It was the active one — pick another provider.",
+            provider_id
+        )
+    } else {
+        format!("Removed provider '{}'.", provider_id)
+    };
+    crate::ui::app::logic::emit_status_text(state, 0, &message);
+
+    // 回到 provider 列表：条目由 `get_items` 现算，重开一次才能反映删除结果。
+    state.palette_history.clear();
+    state.open_palette(PaletteMode::Provider);
 }
 
 pub(crate) async fn execute_palette_action(
@@ -443,7 +518,7 @@ pub(crate) async fn execute_palette_action(
                 });
             } else if size_str == "custom" {
                 // Show input modal for custom context window
-                state.show_input_modal = true;
+                state.enter_input_modal();
                 state.input_modal_title = "Context Window Size".to_string();
                 state.input_modal_prompt =
                     "Enter context window size (e.g. 128k, 200k, 512k, 1M, 2000000):".to_string();
@@ -640,7 +715,7 @@ pub(crate) async fn execute_palette_action(
             state.quick_menu_back = Some(crate::ui::state::QuickMenuKind::Provider);
             state.quick_menu_origin_palette = true;
             state.close_palette();
-            state.show_input_modal = true;
+            state.enter_input_modal();
             state.input_modal_title = "Add New Provider — Enter ID".to_string();
             state.input_modal_prompt =
                 "Choose a unique ID for this provider (e.g. my-lmstudio, my-ollama):".to_string();
@@ -658,6 +733,9 @@ pub(crate) async fn execute_palette_action(
         }
         PaletteAction::InputProviderName(_provider_id) => {
             // This action is not directly used; the flow is handled via InputContext transitions
+        }
+        PaletteAction::DeleteProvider(provider_id) => {
+            delete_custom_provider(state, &provider_id, agent_tx).await;
         }
         PaletteAction::ToggleFeature(feature) => match feature.as_str() {
             "context_viz" => {
@@ -1139,7 +1217,7 @@ pub async fn handle_key_event(
             state.close_palette();
         } else {
             state.show_help = false;
-            state.show_input_modal = false;
+            state.exit_input_modal();
             state.show_status_modal = false;
             close_quick_menus(state);
             state.quick_menu_back = None;
@@ -2698,9 +2776,9 @@ async fn handle_input_modal(
         }
         KeyCode::Esc => {
             state.input_context = None;
+            state.exit_input_modal();
             if state.is_modal_open() {
                 // 底层还有模态（如 Plugins 弹窗）：仅关闭输入框，回到该模态
-                state.show_input_modal = false;
                 return Ok(true);
             }
             show_palette_mode(state, state.palette_mode.clone());
@@ -2789,7 +2867,7 @@ async fn handle_input_modal(
                                 .await;
 
                             state.available_models.clear();
-                            state.show_input_modal = false;
+                            state.exit_input_modal();
                             close_quick_menus(state);
                             state.palette_history.clear();
                             state.open_palette(PaletteMode::Model);
@@ -2862,7 +2940,7 @@ async fn handle_input_modal(
                             state.current_status_line =
                                 Some("Invalid context window size. Use e.g. 128k, 1M".to_string());
                         }
-                        state.show_input_modal = false;
+                        state.exit_input_modal();
                     }
                     crate::ui::state::palette::InputContext::ModelName => {
                         let model = state.input_modal_value.trim().to_string();
@@ -2877,7 +2955,7 @@ async fn handle_input_modal(
                             return Ok(true);
                         }
 
-                        state.show_input_modal = false;
+                        state.exit_input_modal();
                         close_quick_menus(state);
                         state.close_palette();
 
@@ -2944,7 +3022,7 @@ async fn handle_input_modal(
                             return Ok(true);
                         }
                         // Transition to name input
-                        state.show_input_modal = true;
+                        state.enter_input_modal();
                         state.input_modal_title = "Add New Provider — Enter Name".to_string();
                         state.input_modal_prompt =
                             format!("Enter a display name for '{}':", provider_id);
@@ -2983,7 +3061,7 @@ async fn handle_input_modal(
                             return Ok(true);
                         }
                         // Transition to base URL input
-                        state.show_input_modal = true;
+                        state.enter_input_modal();
                         state.input_modal_title =
                             format!("Add New Provider — Base URL for {}", provider_id);
                         state.input_modal_prompt = "Enter the API endpoint base URL:".to_string();
@@ -3027,7 +3105,7 @@ async fn handle_input_modal(
                             return Ok(true);
                         }
                         // Transition to API key input (optional)
-                        state.show_input_modal = true;
+                        state.enter_input_modal();
                         state.input_modal_title =
                             format!("Add New Provider — API Key for {}", provider_id);
                         state.input_modal_prompt =
@@ -3111,7 +3189,7 @@ async fn handle_input_modal(
                             .await;
 
                         state.available_models.clear();
-                        state.show_input_modal = false;
+                        state.exit_input_modal();
                         close_quick_menus(state);
                         state.palette_history.clear();
                         state.open_palette(PaletteMode::Model);
@@ -3128,7 +3206,7 @@ async fn handle_input_modal(
                     }
                     crate::ui::state::palette::InputContext::MarketplaceSource => {
                         let source = state.input_modal_value.trim().to_string();
-                        state.show_input_modal = false;
+                        state.exit_input_modal();
 
                         if source.is_empty() {
                             state.input_context = None;
@@ -3153,7 +3231,7 @@ async fn handle_input_modal(
                     }
                     crate::ui::state::palette::InputContext::AddWorkingDir => {
                         let path = state.input_modal_value.clone();
-                        state.show_input_modal = false;
+                        state.exit_input_modal();
                         state.input_context = None;
 
                         if path.trim().is_empty() {
@@ -3177,7 +3255,7 @@ async fn handle_input_modal(
                     }
                 }
             } else {
-                state.show_input_modal = false;
+                state.exit_input_modal();
             }
         }
         _ => {
@@ -3198,26 +3276,31 @@ async fn handle_paste(
     state.paste_in_progress = true;
     state.paste_end_time = Some(Instant::now());
 
-    let clipboard_result = tokio::task::spawn_blocking(|| {
-        if let Some((path, w, h)) = save_clipboard_image() {
-            return Ok(ClipboardResult::Image(path, w, h));
-        }
-        if let Ok(mut clipboard) = Clipboard::new() {
-            if let Ok(text) = clipboard.get_text() {
-                return Ok(ClipboardResult::Text(text));
+    // Timeout prevents hangs on WSL2/SSH where clipboard access may block indefinitely
+    const CLIPBOARD_TIMEOUT_MS: u64 = 500;
+    let clipboard_result = timeout(
+        Duration::from_millis(CLIPBOARD_TIMEOUT_MS),
+        tokio::task::spawn_blocking(|| {
+            if let Some((path, w, h)) = save_clipboard_image() {
+                return Ok(ClipboardResult::Image(path, w, h));
             }
-        }
-        Err("Clipboard empty".to_string())
-    })
+            if let Ok(mut clipboard) = Clipboard::new() {
+                if let Ok(text) = clipboard.get_text() {
+                    return Ok(ClipboardResult::Text(text));
+                }
+            }
+            Err("Clipboard empty".to_string())
+        }),
+    )
     .await;
 
     match clipboard_result {
-        Ok(Ok(ClipboardResult::Image(path, w, h))) => {
+        Ok(Ok(Ok(ClipboardResult::Image(path, w, h)))) => {
             insert_image_paste_block(state, path, w, h);
             sync_input_from_textarea(state);
             crate::ui::components::command_suggestions::on_input_changed(state);
         }
-        Ok(Ok(ClipboardResult::Text(text))) => {
+        Ok(Ok(Ok(ClipboardResult::Text(text)))) => {
             if let Some(file_paths) = detect_file_paths(&text) {
                 insert_file_paste_block(state, file_paths);
             } else {
@@ -3228,6 +3311,13 @@ async fn handle_paste(
             }
             sync_input_from_textarea(state);
             crate::ui::components::command_suggestions::on_input_changed(state);
+        }
+        Err(_) => {
+            // Timeout — clipboard access hung (common on WSL2/SSH)
+            crate::utils::logging::append_debug_log_line(
+                "[PASTE] Clipboard read timed out, ignoring Ctrl+V",
+            );
+            return Ok(false);
         }
         _ => return Ok(false),
     }

@@ -35,16 +35,11 @@ use tokio::sync::mpsc;
 use crate::core::utils::watchdog::Watchdog;
 use crate::runtime::messages::{AgentRequest, StreamMessage};
 use crate::ui::events::clipboard_paste::{
-    detect_file_paths, insert_file_paste_block, insert_image_paste_block, insert_paste_block,
-    maybe_auto_fold_input, save_clipboard_image, sync_input_from_textarea,
+    detect_file_paths, insert_file_paste_block, insert_paste_block,
+    maybe_auto_fold_input, sync_input_from_textarea,
 };
 use crate::ui::state::ChatState;
 
-/// Result from clipboard operations (to avoid blocking async runtime)
-enum ClipboardResult {
-    Image(String, u32, u32),
-    Text(String),
-}
 use std::sync::Arc;
 
 /// Minimum interval between two paste events — skips the second one when
@@ -308,7 +303,9 @@ fn flush_input_batch(state: &mut ChatState, buf: &mut String) {
     }
 
     let line_count = text.chars().filter(|&c| c == '\n').count() + 1;
-    if !state.show_input_modal && line_count >= crate::ui::state::INPUT_FOLD_MIN_LINES {
+    let is_large = line_count >= crate::ui::state::INPUT_FOLD_MIN_LINES
+        || text.len() >= crate::ui::events::clipboard_paste::PASTE_CHAR_THRESHOLD;
+    if !state.show_input_modal && is_large {
         state.paste_in_progress = true;
         state.paste_end_time = Some(Instant::now());
         let id = state.paste_segments.len();
@@ -501,35 +498,19 @@ pub async fn run_ui_loop(
                                 }
                                 state.selected_palette_index = 0;
                             } else {
-                                // Check if clipboard has image (priority over text paste)
-                                let clipboard_result = tokio::task::spawn_blocking(|| {
-                                    if let Some((path, w, h)) = save_clipboard_image() {
-                                        return Ok(ClipboardResult::Image(path, w, h));
-                                    }
-                                    Err("No image in clipboard".to_string())
-                                })
-                                .await;
-
-                                match clipboard_result {
-                                    Ok(Ok(ClipboardResult::Image(path, w, h))) => {
-                                        insert_image_paste_block(state, path, w, h);
-                                        sync_input_from_textarea(state);
-                                        crate::ui::components::command_suggestions::on_input_changed(state);
-                                    }
-                                    _ => {
-                                        // No image, process as text paste
-                                        if let Some(file_paths) = detect_file_paths(&pasted_text) {
-                                            insert_file_paste_block(state, file_paths);
-                                        } else {
-                                            insert_paste_block(state, pasted_text);
-                                            if state.paste_segments.is_empty() {
-                                                maybe_auto_fold_input(state);
-                                            }
-                                        }
-                                        sync_input_from_textarea(state);
-                                        crate::ui::components::command_suggestions::on_input_changed(state);
+                                // Bracketed paste already carries the text content —
+                                // skip image clipboard check (which can hang on WSL2/SSH).
+                                // Image paste is handled by the Ctrl+V path instead.
+                                if let Some(file_paths) = detect_file_paths(&pasted_text) {
+                                    insert_file_paste_block(state, file_paths);
+                                } else {
+                                    insert_paste_block(state, pasted_text);
+                                    if state.paste_segments.is_empty() {
+                                        maybe_auto_fold_input(state);
                                     }
                                 }
+                                sync_input_from_textarea(state);
+                                crate::ui::components::command_suggestions::on_input_changed(state);
                             }
                             needs_redraw = true;
                         }

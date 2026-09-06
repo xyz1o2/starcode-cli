@@ -54,6 +54,7 @@ pub fn get_items(mode: &PaletteMode, state: &ChatState) -> Vec<PaletteItem> {
         }
         PaletteMode::AddProvider => get_add_provider_items(),
         PaletteMode::AddProviderId(provider_type) => get_add_provider_id_items(provider_type),
+        PaletteMode::ProviderDelete(provider_id) => get_provider_delete_items(provider_id),
         PaletteMode::Memory => get_memory_palette_items(),
         PaletteMode::AgentMode => get_agent_mode_palette_items(),
         PaletteMode::ThinkingEffort => {
@@ -121,6 +122,7 @@ pub fn palette_title(mode: &PaletteMode, query: &str) -> String {
             PaletteMode::ProviderOptions(_) => "Provider Setup",
             PaletteMode::AddProvider => "Add Provider",
             PaletteMode::AddProviderId(_) => "Add Provider",
+            PaletteMode::ProviderDelete(_) => "Remove Provider",
             PaletteMode::Language => "Language",
             PaletteMode::OutputStyle => "Output Style",
         }
@@ -262,6 +264,7 @@ fn palette_action_key(action: &PaletteAction) -> String {
         PaletteAction::InputProviderName(provider_id) => {
             format!("add_provider_name:{}", provider_id)
         }
+        PaletteAction::DeleteProvider(provider_id) => format!("delete_provider:{}", provider_id),
         PaletteAction::InputModelName => "input_model_name".to_string(),
         PaletteAction::RefreshModels => "refresh_models".to_string(),
         PaletteAction::OpenMcpModal => "open_mcp_modal".to_string(),
@@ -296,6 +299,7 @@ fn palette_mode_key(mode: &PaletteMode) -> String {
         PaletteMode::OutputStyle => "output_style".to_string(),
         PaletteMode::AddProvider => "add_provider".to_string(),
         PaletteMode::AddProviderId(provider_type) => format!("add_provider_id:{}", provider_type),
+        PaletteMode::ProviderDelete(provider_id) => format!("provider_delete:{}", provider_id),
     }
 }
 
@@ -1220,12 +1224,11 @@ pub fn get_provider_palette_items(
         .collect();
     custom_ids.sort();
     for id in custom_ids {
-        let is_active = false; // Will be determined by the palette rendering
         let label = format!("{} ✓", id);
         items.push(PaletteItem {
             id: format!("provider_{}", id),
             label,
-            description: "Custom provider — click to configure".to_string(),
+            description: "Custom provider — configure or remove".to_string(),
             category: Some("Custom".to_string()),
             action: PaletteAction::Navigate(PaletteMode::ProviderOptions(id.clone())),
         });
@@ -1234,7 +1237,7 @@ pub fn get_provider_palette_items(
     // Add new provider entry
     items.push(PaletteItem {
         id: "add_provider".to_string(),
-        label: "➕ Add New Provider".to_string(),
+        label: "Add New Provider".to_string(),
         description: "Create a custom OpenAI/Anthropic compatible endpoint".to_string(),
         category: Some("Custom".to_string()),
         action: PaletteAction::Navigate(PaletteMode::AddProvider),
@@ -1467,7 +1470,42 @@ pub fn get_provider_options_items(
         action: PaletteAction::ExecuteCommand("/provider doctor".to_string()),
     });
 
+    // 自定义 provider 才给删除入口 —— 内置 provider 只是"未配置"，没有可删的记录。
+    if metadata.is_none() {
+        items.push(PaletteItem {
+            id: "remove_provider".to_string(),
+            label: "Remove This Provider".to_string(),
+            description: "Delete this custom provider, its endpoint and stored API key".to_string(),
+            category: Some("Danger".to_string()),
+            action: PaletteAction::Navigate(PaletteMode::ProviderDelete(provider_id.to_string())),
+        });
+    }
+
     items
+}
+
+/// 删除自定义 provider 的二次确认页。
+///
+/// 删的是本地配置（`user-settings.json` 里那一项），不可撤销但可重建，所以
+/// 只做一次显式确认，不再要求输入 provider 名。
+pub fn get_provider_delete_items(provider_id: &str) -> Vec<PaletteItem> {
+    vec![
+        PaletteItem {
+            id: "back".to_string(),
+            label: ".. Back".to_string(),
+            description: "Keep this provider".to_string(),
+            category: None,
+            action: PaletteAction::Back,
+        },
+        PaletteItem {
+            id: "confirm_remove_provider".to_string(),
+            label: format!("Yes, remove '{}'", provider_id),
+            description: "Deletes the endpoint URL, API key and model selection from local config"
+                .to_string(),
+            category: Some("Confirm".to_string()),
+            action: PaletteAction::DeleteProvider(provider_id.to_string()),
+        },
+    ]
 }
 
 fn build_provider_item(

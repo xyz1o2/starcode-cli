@@ -188,6 +188,9 @@ pub(super) fn push_cursor_off_sentinel(state: &mut ChatState) {
 
 pub(super) const PASTE_ENTER_GUARD_MS: u64 = 350;
 pub(super) const RAPID_PASTE_KEY_INTERVAL_MS: u64 = 60;
+/// Character count threshold — long single-line pastes also become paste blocks
+/// (matching Claude Code's PASTE_THRESHOLD = 800 with margin)
+pub(crate) const PASTE_CHAR_THRESHOLD: usize = 1000;
 
 pub(super) fn reset_main_textarea(state: &mut ChatState) {
     state.textarea = TextArea::default();
@@ -261,7 +264,9 @@ pub(crate) fn insert_paste_block(state: &mut ChatState, text: String) {
         return;
     }
 
-    if line_count >= crate::ui::state::INPUT_FOLD_MIN_LINES {
+    let is_large = line_count >= crate::ui::state::INPUT_FOLD_MIN_LINES
+        || normalized.len() >= PASTE_CHAR_THRESHOLD;
+    if is_large {
         let id = state.paste_segments.len();
         state.paste_segments.push(crate::ui::state::PasteSegment {
             id,
@@ -294,7 +299,9 @@ pub(crate) fn insert_paste_block_confirmed(state: &mut ChatState, text: String) 
         .replace("\u{2028}", "\n")
         .replace("\u{2029}", "\n");
     let line_count = normalized.lines().count();
-    if line_count >= crate::ui::state::INPUT_FOLD_MIN_LINES {
+    let is_large = line_count >= crate::ui::state::INPUT_FOLD_MIN_LINES
+        || normalized.len() >= PASTE_CHAR_THRESHOLD;
+    if is_large {
         let id = state.paste_segments.len();
         state.paste_segments.push(crate::ui::state::PasteSegment {
             id,

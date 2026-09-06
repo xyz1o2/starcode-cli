@@ -24,6 +24,8 @@ pub enum PaletteMode {
     ProviderOptions(String),
     AddProvider,
     AddProviderId(String), // provider_type: "openai-compatible" or "anthropic-compatible"
+    /// 删除自定义 provider 的二次确认页（内容是 provider_id）
+    ProviderDelete(String),
     Language,
     OutputStyle,
 }
@@ -66,6 +68,8 @@ pub enum PaletteAction {
     ToggleColorblindMode,
     InputProviderId(String),   // provider_type
     InputProviderName(String), // provider_id (after ID is entered)
+    /// 删除一个自定义 provider（内置 provider 不可删）
+    DeleteProvider(String),
     /// 手动输入模型名：打开输入框，不发任何网络请求
     InputModelName,
     /// 显式刷新模型列表（跳过缓存，扇出到所有已配置 provider）

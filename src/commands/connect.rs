@@ -33,7 +33,7 @@ pub async fn run(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
 
     // Assume provider configuration
     // Trigger Input Modal
-    ctx.state.show_input_modal = true;
+    ctx.state.enter_input_modal();
     ctx.state.input_modal_title = format!("Configure {}", target);
     ctx.state.input_modal_prompt = format!("Enter API Key for {}:", target);
     ctx.state.input_modal_value = String::new();

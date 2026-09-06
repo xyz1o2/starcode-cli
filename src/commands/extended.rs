@@ -1547,7 +1547,7 @@ pub async fn add_dir(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandR
         // 打开输入弹窗（Enter 后走 InputContext::AddWorkingDir 分支）
         ctx.state.show_status_modal = false;
         ctx.state.close_palette();
-        ctx.state.show_input_modal = true;
+        ctx.state.enter_input_modal();
         ctx.state.input_modal_title = "Add Working Directory".to_string();
         ctx.state.input_modal_prompt = "Enter a directory path to add to this session:".to_string();
         ctx.state.input_modal_value = String::new();

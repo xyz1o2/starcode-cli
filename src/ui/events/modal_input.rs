@@ -1188,7 +1188,7 @@ fn refresh_history_search(state: &mut ChatState) {
 /// 打开输入模态录入 marketplace 来源（git URL / owner/repo / 本地路径）。
 fn open_marketplace_source_input(state: &mut ChatState) {
     state.show_status_modal = false;
-    state.show_input_modal = true;
+    state.enter_input_modal();
     state.input_modal_title = "Add Marketplace".to_string();
     state.input_modal_prompt =
         "Marketplace source (git URL, owner/repo, or local path):".to_string();
