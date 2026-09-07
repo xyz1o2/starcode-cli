@@ -135,6 +135,7 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
             task_area,
             &mut state.task_panel,
             theme,
+            state.animation_tick,
         );
     }
 

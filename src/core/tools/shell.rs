@@ -820,7 +820,7 @@ impl ToolInvocation for ShellToolInvocation {
             if !external_paths.is_empty() {
                 let persist_path = config.storage().project_permissions_path();
                 let persisted = Self::load_permission_signatures(&persist_path);
-                let session_allowed = EXTERNAL_DIR_ALLOW_SESSION.lock().unwrap();
+                let session_allowed = EXTERNAL_DIR_ALLOW_SESSION.lock().unwrap_or_else(|e| e.into_inner());
                 let mut pending: Vec<PathBuf> = Vec::new();
 
                 for p in external_paths {
@@ -859,7 +859,7 @@ impl ToolInvocation for ShellToolInvocation {
                             on_confirm: std::sync::Arc::new(move |outcome| match outcome {
                                 crate::types::ToolConfirmationOutcome::AllowSession
                                 | crate::types::ToolConfirmationOutcome::ProceedAlways => {
-                                    let mut set = EXTERNAL_DIR_ALLOW_SESSION.lock().unwrap();
+                                    let mut set = EXTERNAL_DIR_ALLOW_SESSION.lock().unwrap_or_else(|e| e.into_inner());
                                     for dir in &pending_for_confirm {
                                         set.insert(dir.clone());
                                     }

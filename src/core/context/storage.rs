@@ -14,22 +14,22 @@ impl ContextCache {
     }
 
     pub fn get(&self, id: &str) -> Option<ContextDefinition> {
-        let cache = self.cache.lock().unwrap();
+        let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         cache.get(id).cloned()
     }
 
     pub fn put(&self, context: ContextDefinition) {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         cache.insert(context.id.clone(), context);
     }
 
     pub fn remove(&self, id: &str) {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         cache.remove(id);
     }
 
     pub fn clear(&self) {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         cache.clear();
     }
 }

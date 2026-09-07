@@ -202,6 +202,13 @@ impl Agent {
 
             // 6. Build System Prompt (with Prompt Cache optimization)
             // Uses Anthropic-style cache_control: {"type": "ephemeral"} on static
+
+            // 读取 output_style 设置
+            let output_style = dirs::home_dir()
+                .map(|h| h.join(".star").join("user-settings.json"))
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                .and_then(|v| v.get("output_style").and_then(|s| s.as_str()).map(String::from));
             // system prompt parts, saving 30-50% token costs on repeated turns.
             // Gracefully degrades to plain system messages when cache is disabled.
             // Wrapped in spawn_blocking because prompt_builder makes synchronous git calls.
@@ -221,6 +228,7 @@ impl Agent {
             // Fix date string at session start to ensure deterministic serialization
             // for LLM prompt caching. The date should not change between turns.
             let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let output_style_clone = output_style.clone();
             let cached_system_msgs = tokio::task::spawn_blocking(move || {
                 crate::agent::prompt_builder::PromptBuilder::build_cached_system_messages(
                     crate::agent::prompt_builder::PromptMode::Agent,
@@ -232,6 +240,7 @@ impl Agent {
                     None,
                     is_thinking_model,
                     include_extended_bundle,
+                    output_style_clone.as_deref(),
                 )
             }).await.unwrap_or_default();
 

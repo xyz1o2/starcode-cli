@@ -805,7 +805,7 @@ fn render_tool_result_text(
     // ===== Bash 无输出时显示 Done =====
     if success && text.trim().is_empty() && !expanded {
         lines.push(Line::from(Span::styled(
-            "Done",
+            crate::core::i18n::t("tool.done", "Done", "Done"),
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),

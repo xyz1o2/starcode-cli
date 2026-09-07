@@ -80,7 +80,10 @@ impl RecursiveChunker {
         let mut final_chunks = Vec::new();
 
         // 1. Find the best separator that works
-        let mut separator = separators.last().unwrap().as_str();
+        let Some(last_sep) = separators.last() else {
+            return vec![text.to_string()];
+        };
+        let mut separator = last_sep.as_str();
         let mut next_separators = &separators[..];
 
         for (i, sep) in separators.iter().enumerate() {

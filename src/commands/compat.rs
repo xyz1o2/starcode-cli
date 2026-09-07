@@ -279,10 +279,14 @@ pub async fn terminal_setup(mut ctx: CommandContext<'_>, _args: Vec<String>) -> 
 }
 
 pub async fn vim(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
-    push_assistant(
-        &mut ctx,
-        "Vim mode is not implemented yet in this TUI. Use current keybindings and /help for now.",
-    );
+    ctx.state.vim_enabled = !ctx.state.vim_enabled;
+    let status = if ctx.state.vim_enabled {
+        ctx.state.vim_state.mode = crate::ui::vim::VimMode::Normal;
+        "Vim mode: ON (Normal mode)"
+    } else {
+        "Vim mode: OFF"
+    };
+    push_assistant(&mut ctx, status);
     Ok(())
 }
 

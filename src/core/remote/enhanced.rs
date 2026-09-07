@@ -140,7 +140,7 @@ impl RemoteControlManager {
 
     /// 停止服务器
     pub async fn stop(&self) -> Result<(), String> {
-        let mut conns = self.connections.lock().unwrap();
+        let mut conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
         conns.clear();
         Ok(())
     }
@@ -149,7 +149,7 @@ impl RemoteControlManager {
     pub fn handle_command(&self, command: RemoteCommand) -> RemoteResponse {
         match command {
             RemoteCommand::GetStatus => {
-                let conns = self.connections.lock().unwrap();
+                let conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
                 RemoteResponse::Status(RemoteStatus {
                     state: "running".to_string(),
                     session_id: None,
@@ -164,7 +164,7 @@ impl RemoteControlManager {
             }
             RemoteCommand::Prompt { text } => {
                 // 将提示词加入队列
-                let mut queue = self.command_queue.lock().unwrap();
+                let mut queue = self.command_queue.lock().unwrap_or_else(|e| e.into_inner());
                 let conn_id = "remote".to_string();
                 queue.push((conn_id, RemoteCommand::Prompt { text }));
                 RemoteResponse::Ok
@@ -178,7 +178,7 @@ impl RemoteControlManager {
 
     /// 获取连接数
     pub fn connection_count(&self) -> usize {
-        self.connections.lock().unwrap().len()
+        self.connections.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// 检查认证
@@ -191,13 +191,13 @@ impl RemoteControlManager {
 
     /// 入队命令
     pub fn enqueue_command(&self, conn_id: String, command: RemoteCommand) {
-        let mut queue = self.command_queue.lock().unwrap();
+        let mut queue = self.command_queue.lock().unwrap_or_else(|e| e.into_inner());
         queue.push((conn_id, command));
     }
 
     /// 出队命令
     pub fn dequeue_command(&self) -> Option<(String, RemoteCommand)> {
-        let mut queue = self.command_queue.lock().unwrap();
+        let mut queue = self.command_queue.lock().unwrap_or_else(|e| e.into_inner());
         if queue.is_empty() {
             None
         } else {
@@ -207,6 +207,6 @@ impl RemoteControlManager {
 
     /// 获取队列大小
     pub fn queue_size(&self) -> usize {
-        self.command_queue.lock().unwrap().len()
+        self.command_queue.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 }

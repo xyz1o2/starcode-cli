@@ -135,17 +135,17 @@ impl AutoModeManager {
 
     /// 是否处于 Auto Mode
     pub fn is_active(&self) -> bool {
-        self.state.lock().unwrap().active
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).active
     }
 
     /// 进入 Auto Mode
     pub fn enter(&self) -> Result<(), String> {
-        self.state.lock().unwrap().enter()
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).enter()
     }
 
     /// 退出 Auto Mode
     pub fn exit(&self) {
-        self.state.lock().unwrap().exit();
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).exit();
     }
 
     /// 分类工具调用
@@ -159,19 +159,19 @@ impl AutoModeManager {
             .classifier
             .classify(tool_name, tool_params, transcript)
             .await;
-        self.state.lock().unwrap().record_classification(&result);
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).record_classification(&result);
         result
     }
 
     /// 触发 Circuit Breaker
     pub fn trigger_circuit_breaker(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.circuit_broken = true;
         state.active = false;
     }
 
     /// 获取统计信息
     pub fn stats(&self) -> AutoModeStats {
-        self.state.lock().unwrap().stats.clone()
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).stats.clone()
     }
 }

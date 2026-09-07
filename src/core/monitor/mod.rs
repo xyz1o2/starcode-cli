@@ -127,7 +127,7 @@ impl MonitorManager {
 
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut procs = processes.lock().unwrap();
+            let mut procs = processes.lock().unwrap_or_else(|e| e.into_inner());
             procs.clear();
 
             for line in stdout.lines().take(config.max_processes) {
@@ -153,7 +153,7 @@ impl MonitorManager {
 
                     // 检查告警
                     if cpu > config.alert_threshold_cpu {
-                        alerts.lock().unwrap().push(MonitorAlert {
+                        alerts.lock().unwrap_or_else(|e| e.into_inner()).push(MonitorAlert {
                             alert_type: AlertType::HighCpu,
                             message: format!(
                                 "Process {} (PID {}) CPU usage: {:.1}%",
@@ -171,23 +171,23 @@ impl MonitorManager {
 
     /// 获取所有监控进程
     pub fn list_processes(&self) -> Vec<MonitoredProcess> {
-        self.processes.lock().unwrap().values().cloned().collect()
+        self.processes.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect()
     }
 
     /// 获取告警
     pub fn get_alerts(&self) -> Vec<MonitorAlert> {
-        self.alerts.lock().unwrap().clone()
+        self.alerts.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// 清除告警
     pub fn clear_alerts(&self) {
-        self.alerts.lock().unwrap().clear();
+        self.alerts.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     /// 获取进程统计
     pub fn stats(&self) -> Value {
-        let procs = self.processes.lock().unwrap();
-        let alerts = self.alerts.lock().unwrap();
+        let procs = self.processes.lock().unwrap_or_else(|e| e.into_inner());
+        let alerts = self.alerts.lock().unwrap_or_else(|e| e.into_inner());
 
         json!({
             "process_count": procs.len(),

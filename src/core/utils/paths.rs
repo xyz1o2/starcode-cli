@@ -277,7 +277,7 @@ pub fn find_project_file_upwards(start: &Path, candidates: &[&str]) -> Option<Pa
         (start.to_path_buf(), owned_candidates)
     };
     {
-        let cache = PROJECT_FILE_CACHE.lock().unwrap();
+        let cache = PROJECT_FILE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(result) = cache.get(&cache_key) {
             return result.clone();
         }
@@ -294,7 +294,7 @@ pub fn find_project_file_upwards(start: &Path, candidates: &[&str]) -> Option<Pa
             let path = dir.join(candidate);
             if path.exists() {
                 let result = Some(path);
-                let mut cache = PROJECT_FILE_CACHE.lock().unwrap();
+                let mut cache = PROJECT_FILE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
                 cache.insert(cache_key, result.clone());
                 return result;
             }
@@ -309,7 +309,7 @@ pub fn find_project_file_upwards(start: &Path, candidates: &[&str]) -> Option<Pa
         }
     }
 
-    let mut cache = PROJECT_FILE_CACHE.lock().unwrap();
+    let mut cache = PROJECT_FILE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     cache.insert(cache_key, None);
     None
 }

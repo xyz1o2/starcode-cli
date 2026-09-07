@@ -445,7 +445,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         import_format: None,
         discovery_max_dirs: None,
         compression_threshold: None,
-        context_window: None,
+        context_window: settings.context_window.map(|v| v as usize),
         interactive: None,
         pty_info: None,
         trusted_folder: None,

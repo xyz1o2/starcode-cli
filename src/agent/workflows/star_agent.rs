@@ -697,7 +697,7 @@ impl StarAgent {
     pub fn toggle_yolo_mode(&mut self) -> crate::types::ApprovalMode {
         if self.inner.is_yolo_mode_disabled() {
             {
-                let mut mode = self.approval_mode_lock.lock().unwrap();
+                let mut mode = self.approval_mode_lock.lock().unwrap_or_else(|e| e.into_inner());
                 *mode = ApprovalMode::Default;
             }
             self.inner.set_approval_mode(ApprovalMode::Default);
@@ -717,7 +717,7 @@ impl StarAgent {
             return mode;
         }
 
-        let mut mode = self.approval_mode_lock.lock().unwrap();
+        let mut mode = self.approval_mode_lock.lock().unwrap_or_else(|e| e.into_inner());
         let new_mode = if *mode == ApprovalMode::Yolo {
             ApprovalMode::Default
         } else {
@@ -743,13 +743,13 @@ impl StarAgent {
             return;
         }
 
-        let mut m = self.approval_mode_lock.lock().unwrap();
+        let mut m = self.approval_mode_lock.lock().unwrap_or_else(|e| e.into_inner());
         *m = safe_mode;
     }
 
     /// Get the current approval mode
     pub fn get_approval_mode(&self) -> crate::types::ApprovalMode {
-        let mode = self.approval_mode_lock.lock().unwrap().clone();
+        let mode = self.approval_mode_lock.lock().unwrap_or_else(|e| e.into_inner()).clone();
         crate::utils::logging::append_debug_log_line(&format!(
             "[STAR_AGENT] get_approval_mode: {:?}",
             mode

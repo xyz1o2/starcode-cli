@@ -189,10 +189,10 @@ async fn search_brave(query: &str, num: u32) -> Result<Vec<SearchResult>> {
     let mut results = vec![];
 
     for (cont_sel, title_sel, desc_sel, url_sel) in selector_patterns {
-        let cont = Selector::parse(cont_sel).unwrap();
-        let title_s = Selector::parse(title_sel).unwrap();
-        let desc_s = Selector::parse(desc_sel).unwrap();
-        let url_s = Selector::parse(url_sel).unwrap();
+        let cont = Selector::parse(cont_sel).expect("valid CSS selector: container");
+        let title_s = Selector::parse(title_sel).expect("valid CSS selector: title");
+        let desc_s = Selector::parse(desc_sel).expect("valid CSS selector: description");
+        let url_s = Selector::parse(url_sel).expect("valid CSS selector: url");
 
         for elem in doc.select(&cont).take(num as usize) {
             let title = elem
@@ -477,10 +477,10 @@ async fn search_duckduckgo(query: &str, num: u32) -> Result<Vec<SearchResult>> {
     let document = Html::parse_document(&html);
 
     // DuckDuckGo HTML selectors
-    let result_selector = Selector::parse(".result").unwrap();
-    let title_selector = Selector::parse(".result__a").unwrap();
-    let snippet_selector = Selector::parse(".result__snippet").unwrap();
-    let url_selector = Selector::parse(".result__url").unwrap();
+    let result_selector = Selector::parse(".result").expect("valid CSS selector: .result");
+    let title_selector = Selector::parse(".result__a").expect("valid CSS selector: .result__a");
+    let snippet_selector = Selector::parse(".result__snippet").expect("valid CSS selector: .result__snippet");
+    let url_selector = Selector::parse(".result__url").expect("valid CSS selector: .result__url");
 
     let mut results = Vec::new();
 
@@ -561,10 +561,10 @@ async fn search_startpage(query: &str, num: u32) -> Result<Vec<SearchResult>> {
     let html = resp.text().await?;
     let doc = Html::parse_document(&html);
 
-    let result_sel = Selector::parse(".w-gl__result, .search-result, article").unwrap();
-    let title_sel = Selector::parse(".w-gl__title a, h3 a, .title a").unwrap();
-    let url_sel = Selector::parse(".w-gl__title a, h3 a, a[href]").unwrap();
-    let desc_sel = Selector::parse(".w-gl__description, .description, p").unwrap();
+    let result_sel = Selector::parse(".w-gl__result, .search-result, article").expect("valid CSS selector: result");
+    let title_sel = Selector::parse(".w-gl__title a, h3 a, .title a").expect("valid CSS selector: title");
+    let url_sel = Selector::parse(".w-gl__title a, h3 a, a[href]").expect("valid CSS selector: url");
+    let desc_sel = Selector::parse(".w-gl__description, .description, p").expect("valid CSS selector: description");
 
     let mut results = vec![];
 

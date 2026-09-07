@@ -609,6 +609,10 @@ impl TaskPanel {
         if let Some(node) = self.task_manager.graph.nodes.get(id) {
             for child_id in &node.children {
                 if let Some(child) = self.task_manager.graph.nodes.get(child_id) {
+                    // Skip expired completed tasks
+                    if Self::is_completed_expired(child) {
+                        continue;
+                    }
                     // Check child itself
                     let is_child_visible = match self.view_mode {
                         TaskViewMode::All => true,
@@ -630,6 +634,18 @@ impl TaskPanel {
         false
     }
 
+    /// 对标 Claude Code: completed 任务保留 30s 后自动从 UI 清除
+    const COMPLETED_TTL_SECS: i64 = 30;
+
+    fn is_completed_expired(node: &TaskNode) -> bool {
+        if let Some(completed_at) = node.completed_at {
+            let elapsed = chrono::Utc::now().signed_duration_since(completed_at);
+            elapsed.num_seconds() > Self::COMPLETED_TTL_SECS
+        } else {
+            false
+        }
+    }
+
     fn collect_nodes<'a>(
         &'a self,
         id: &str,
@@ -638,6 +654,11 @@ impl TaskPanel {
         result: &mut Vec<(&'a TaskNode, String)>,
     ) {
         if let Some(node) = self.task_manager.graph.nodes.get(id) {
+            // 30s TTL: completed/skipped tasks older than 30s are hidden
+            if Self::is_completed_expired(node) {
+                return;
+            }
+
             // Visibility Check
             let is_self_visible = match self.view_mode {
                 TaskViewMode::All => true,
@@ -670,6 +691,10 @@ impl TaskPanel {
                 .iter()
                 .filter(|cid| {
                     if let Some(c) = self.task_manager.graph.nodes.get(*cid) {
+                        // Skip expired completed tasks
+                        if Self::is_completed_expired(c) {
+                            return false;
+                        }
                         let c_visible = match self.view_mode {
                             TaskViewMode::All => true,
                             TaskViewMode::Active => matches!(
@@ -693,7 +718,13 @@ impl TaskPanel {
 }
 
 // Revised signature for rendering with mutable state
-pub fn render_task_panel_mut(f: &mut Frame, area: Rect, panel: &mut TaskPanel, theme: &Theme) {
+pub fn render_task_panel_mut(
+    f: &mut Frame,
+    area: Rect,
+    panel: &mut TaskPanel,
+    theme: &Theme,
+    animation_tick: u64,
+) {
     if !panel.is_visible {
         return;
     }
@@ -742,9 +773,14 @@ pub fn render_task_panel_mut(f: &mut Frame, area: Rect, panel: &mut TaskPanel, t
             .iter()
             .map(|(node, prefix)| {
                 // 对标 Claude Code TaskListV2::getTaskIcon —— figures.tick / squareSmallFilled / squareSmall
+                // Spinner 帧：对标 Claude Code spinner 动画 (dots variant)
+                const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                let spinner_frame = SPINNER_FRAMES
+                    [(animation_tick as usize / 6) % SPINNER_FRAMES.len()];
+
                 let (status_icon, icon_color) = match node.status {
                     TaskStatus::Pending => ("▫", None),
-                    TaskStatus::InProgress => ("▪", Some(theme.primary)),
+                    TaskStatus::InProgress => (spinner_frame, Some(theme.primary)),
                     TaskStatus::Completed => ("✔", Some(theme.success)),
                     TaskStatus::Blocked => ("▫", Some(theme.error)),
                     TaskStatus::Skipped => ("▫", Some(theme.inactive)),
@@ -842,6 +878,9 @@ pub fn render_task_panel_mut(f: &mut Frame, area: Rect, panel: &mut TaskPanel, t
         .title_style(Style::default().fg(theme.primary))
         .border_style(Style::default().fg(theme.border));
 
+    // Find next task hint (对标 Claude Code "Next task" 提示)
+    let next_task_hint = find_next_task_hint(panel);
+
     let list = List::new(items)
         .block(block)
         .highlight_style(
@@ -852,6 +891,23 @@ pub fn render_task_panel_mut(f: &mut Frame, area: Rect, panel: &mut TaskPanel, t
         .highlight_symbol("> ");
 
     f.render_stateful_widget(list, area, &mut panel.list_state);
+
+    // Render next task hint at the bottom if available
+    if let Some(hint) = next_task_hint {
+        if area.height > 3 {
+            let hint_area = Rect {
+                x: area.x + 1,
+                y: area.y + area.height - 2,
+                width: area.width.saturating_sub(2),
+                height: 1,
+            };
+            let hint_line = Line::from(vec![
+                Span::styled("→ ", Style::default().fg(theme.primary)),
+                Span::styled(hint, Style::default().fg(theme.subtle)),
+            ]);
+            f.render_widget(ratatui::widgets::Paragraph::new(hint_line), hint_area);
+        }
+    }
 
     // Render Edit Input Overlay
     if panel.is_editing() {
@@ -882,4 +938,36 @@ pub fn render_task_panel_mut(f: &mut Frame, area: Rect, panel: &mut TaskPanel, t
         f.render_widget(Clear, popup_area);
         f.render_widget(&panel.edit_input, popup_area);
     }
+}
+
+/// 找到下一个建议执行的任务（对标 Claude Code "Next task" 提示）
+///
+/// 优先级：
+/// 1. 最近完成任务解除阻塞的第一个 pending 任务
+/// 2. 第一个 pending 任务
+/// 3. 无则返回 None
+fn find_next_task_hint(panel: &TaskPanel) -> Option<String> {
+    let graph = &panel.task_manager.graph;
+
+    // 找最近完成的任务（有 completed_at 的最新一个）
+    let recently_completed = graph
+        .nodes
+        .values()
+        .filter(|n| n.status == TaskStatus::Completed)
+        .max_by_key(|n| n.completed_at)?;
+
+    // 找被这个任务阻塞的 pending 任务
+    for node in graph.nodes.values() {
+        if node.status == TaskStatus::Pending && node.dependencies.contains(&recently_completed.id)
+        {
+            return Some(format!("Next: {}", node.title));
+        }
+    }
+
+    // 如果没有被阻塞的任务，找第一个 pending 任务
+    graph
+        .nodes
+        .values()
+        .find(|n| n.status == TaskStatus::Pending)
+        .map(|n| format!("Next: {}", n.title))
 }

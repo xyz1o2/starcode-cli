@@ -14,7 +14,7 @@
 
 ---
 
-### 1. 依赖关系 (blocks / blockedBy) — P0
+### 1. 依赖关系 (blocks / blockedBy) — P0 — ✅ 已实现
 
 **CCB 实现**:
 ```typescript
@@ -24,56 +24,45 @@ interface Task {
 }
 ```
 
-- `TaskUpdate` 工具可设置 `addBlocks` / `addBlockedBy`
-- UI 显示: blocked 任务显示 `⊘` 图标 + 灰色
-- `TaskGet` 检查 blockedBy 列表为空才可开始
-- 自动状态流转: 所有 blocker completed → blocked 任务自动 unblock
+**StarCode 实现**:
+- `TaskNode` 已有 `blocks: Vec<String>` 和 `dependencies: Vec<String>`
+- `TaskUpdate` 已有 `add_blocks` / `add_blocked_by` 参数
+- UI: blocked 任务显示 `⊘ blocked by #id1, #id2`
+- 逻辑: 完成任务时自动解锁被阻塞的依赖
 
-**Starcode 需实现**:
-- `TaskNode` 增加 `blocks: Vec<String>`, `blocked_by: Vec<String>`
-- `TaskUpdate` 增加 `add_blocks` / `add_blocked_by` 参数
-- UI: blocked 任务灰色显示 + 阻塞原因
-- 逻辑: blocker 全部 completed 时自动清除 blocked_by
-
-**涉及文件**: `src/ui/components/task_panel.rs`, `src/tools/` (TaskCreate/Update 工具)
+**涉及文件**: `src/core/tasks/models.rs`, `src/core/tools/task_management.rs`, `src/ui/components/task_panel.rs`
 
 ---
 
-### 2. 文件持久化 — P1
+### 2. 文件持久化 — P1 — ✅ 已实现
 
 **CCB 实现**:
 ```
 ~/.claude/tasks/<listId>/<taskId>.json
 ```
-- 每个 task 一个 JSON 文件
-- `proper-lockfile` 文件锁防止并发写入
-- 跨会话保持: 重启后任务列表恢复
 
-**Starcode 需实现**:
-- 存储路径: `.star/tasks/<list_id>/<task_id>.json` (通过 `Storage` 工具)
-- 序列化: `serde_json` 写入 / 读取
-- 加载: 启动时或首次打开 Task Panel 时加载
-- 保存: 任务创建 / 更新 / 完成时写入
+**StarCode 实现**:
+- `TaskManager::save_to_file()` / `TaskManager::load_from_file()` 已实现
+- 任务创建/更新/完成时自动保存
+- 启动时自动加载
 
-**涉及文件**: 新建 `src/core/tasks/storage.rs`, 修改 `task_panel.rs`
+**涉及文件**: `src/core/tasks/manager.rs`, `src/ui/components/task_panel.rs`
 
 ---
 
-### 3. 30 秒完成 TTL — P1
+### 3. 30 秒完成 TTL — P1 — ✅ 已实现
 
 **CCB 实现**:
 ```typescript
 const RECENT_COMPLETED_TTL_MS = 30_000;
 ```
-- 任务标记 completed 后保留 30 秒在列表中可见
-- 超时后自动从 UI 移除 (数据仍持久化)
 
-**Starcode 需实现**:
-- `TaskNode` 增加 `completed_at: Option<Instant>`
-- 渲染时过滤: `completed_at` 超过 30s 的不显示
-- 或使用后台定时器清理
+**StarCode 实现**:
+- `TaskNode` 已有 `completed_at: Option<DateTime<Utc>>`
+- 渲染时过滤: completed_at 超过 30s 的不显示
+- 自动清理机制已实现
 
-**涉及文件**: `src/ui/components/task_panel.rs`
+**涉及文件**: `src/ui/components/task_panel.rs`, `src/core/tasks/models.rs`
 
 ---
 
@@ -93,15 +82,17 @@ const RECENT_COMPLETED_TTL_MS = 30_000;
 
 ---
 
-### 5. Spinner inline 集成 — P1
+### 5. Spinner inline 集成 — P1 — ✅ 已实现
 
 **CCB 实现**:
 - 执行中的任务行内显示 spinner 动画
 - `Next: {subject}` 提示下一个 pending task
 - Spinner 随机选择动词 + activeForm
 
-**Starcode 需实现**:
-- 在 in_progress 任务行首显示 spinner 帧
+**StarCode 实现**:
+- Spinner 帧已实现 (dots variant)
+- `Next: {subject}` 提示已实现 (`find_next_task_hint`)
+- `active_form` 字段已实现 ("Running tests" vs "Run tests")
 - 列表底部或末尾显示 "Next: {subject}"
 - Spinner 帧来源: `status_line.rs` 已有 spinner 逻辑可复用
 
@@ -109,22 +100,19 @@ const RECENT_COMPLETED_TTL_MS = 30_000;
 
 ---
 
-### 6. Ctrl+T 三态循环 — P1
+### 6. Ctrl+T 三态循环 — P1 — ✅ 部分实现
 
 **CCB 实现**:
 ```
 Ctrl+T: none → tasks → teammates → none
 ```
-- tasks: 显示 TaskListV2
-- teammates: 显示 teammate 列表 (swarm 模式)
-- none: 隐藏
 
-**Starcode 需实现**:
-- 在 `input.rs` 中绑定 Ctrl+T
-- 三态循环: 隐藏 → Task Panel → Teammate Panel → 隐藏
-- Teammate Panel 需要独立组件 (或暂用 placeholder)
+**StarCode 实现**:
+- Ctrl+T 已绑定为任务面板切换
+- 三态循环: 隐藏 → Task Panel → 隐藏 (无 Teammate Panel)
+- Teammate Panel 未实现 (P2, 多 agent 场景)
 
-**涉及文件**: `src/ui/events/input.rs`, `task_panel.rs`
+**涉及文件**: `src/ui/events/input.rs`, `src/ui/components/task_panel.rs`
 
 ---
 
@@ -165,15 +153,15 @@ BackgroundTasksDialog:
 
 ---
 
-## 实施建议
+## 实施状态
 
-| 序号 | 任务 | 优先级 | 工作量 | 依赖 |
-|------|------|--------|--------|------|
-| 1 | 依赖关系 blocks/blockedBy | P0 | 中 | 需要 Task 工具支持 |
-| 2 | 30s 完成 TTL | P1 | 小 | 无 |
-| 3 | Spinner inline | P1 | 小 | 复用 status_line |
-| 4 | 文件持久化 | P1 | 中 | Storage 工具 |
-| 5 | Ctrl+T 三态 | P1 | 小 | 需 Teammate Panel |
-| 6 | Owner 跟踪 | P2 | 小 | 多 agent 场景 |
-| 7 | 底部状态药丸 | P2 | 小 | 多 agent 场景 |
-| 8 | Background Tasks 对话框 | P2 | 大 | 后台任务系统 |
+| 序号 | 任务 | 优先级 | 状态 |
+|------|------|--------|------|
+| 1 | 依赖关系 blocks/blockedBy | P0 | ✅ 已实现 |
+| 2 | 30s 完成 TTL | P1 | ✅ 已实现 |
+| 3 | Spinner inline | P1 | ✅ 已实现 |
+| 4 | 文件持久化 | P1 | ✅ 已实现 |
+| 5 | Ctrl+T 三态 | P1 | ✅ 部分实现 (无 Teammate Panel) |
+| 6 | Owner 跟踪 | P2 | ❌ 未实现 (多 agent 场景) |
+| 7 | 底部状态药丸 | P2 | ❌ 未实现 (多 agent 场景) |
+| 8 | Background Tasks 对话框 | P2 | ❌ 未实现 |

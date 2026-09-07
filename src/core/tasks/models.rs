@@ -103,6 +103,10 @@ pub struct TaskNode {
     /// 显示 "Running tests" 而不是祈使句 "Run tests"。旧文件没有该字段 → None。
     #[serde(default)]
     pub active_form: Option<String>,
+    /// 完成时间（对标 Claude Code 的30s TTL自动清除）。
+    /// 旧文件没有该字段 → None，不会被自动清除。
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -121,6 +125,7 @@ impl TaskNode {
             children: Vec::new(),
             assigned_agent: None,
             active_form: None,
+            completed_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

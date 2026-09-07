@@ -11,42 +11,37 @@
 
 ---
 
-### 1. Next Task 提示 — P1
+### 1. Next Task 提示 — P1 — ✅ 已实现
 
 **CCB 实现**:
 ```
 AgentProgressLine 底部:
   Next: {next_pending_task.subject}
 ```
-- 从 TaskListV2 中查找第一个 `status === 'pending'` 且未被 blocked 的任务
-- 显示为灰色小字, 在当前任务 spinner 行下方
 
-**Starcode 需实现**:
-- 读取 `TaskPanel.tasks`, 过滤 pending + unblocked
-- 取第一个, 显示 "Next: {subject}"
-- 颜色: 灰色 (dim)
-- 无 pending 任务时不显示
+**StarCode 实现**:
+- `task_panel.rs` 已有 `find_next_task_hint()` 函数
+- 优先级: 最近完成任务的未阻塞依赖 > 第一个 pending 任务
+- 渲染: 任务面板底部显示 "Next: {subject}"
 
-**涉及文件**: `src/ui/components/agent_progress.rs`, `task_panel.rs` (数据源)
+**涉及文件**: `src/ui/components/task_panel.rs`
 
 ---
 
-### 2. activeForm 显示 — 待验证
+### 2. activeForm 显示 — ✅ 已实现
 
 **CCB 实现**:
 ```tsx
 <Spinner activeForm={task.activeForm} />
 // "Searching for files..." / "Reading config..."
 ```
-- `activeForm` 是工具调用时的动态描述
-- 来源: `ToolUseBlock` 的 `activeForm` 字段, 或工具元数据
 
-**Starcode 需确认**:
-- `StreamMessage` 中是否有 `activeForm` 字段?
-- 进度行是否已显示此信息?
-- 如缺失: 需要从 tool call 元数据中提取
+**StarCode 实现**:
+- `TaskNode` 已有 `active_form: Option<String>` 字段
+- 渲染: 进行中的行显示 activeForm ("Running tests"), 其余显示 title ("Run tests")
+- 无 activeForm 时回退到 title
 
-**涉及文件**: `src/runtime/messages.rs`, `agent_progress.rs`
+**涉及文件**: `src/core/tasks/models.rs`, `src/ui/components/task_panel.rs`
 
 ---
 

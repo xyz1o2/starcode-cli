@@ -122,7 +122,7 @@ pub fn search_with_ripgrep(
 
         // Check if max results exceeded
         {
-            let count = current_count.lock().unwrap();
+            let count = current_count.lock().unwrap_or_else(|e| e.into_inner());
             if *count >= max_results {
                 break;
             }
@@ -175,13 +175,13 @@ pub fn search_with_ripgrep(
             path,
             UTF8(|line_num, line_content| {
                 // Check if max results reached
-                let mut count = current_count_clone.lock().unwrap();
+                let mut count = current_count_clone.lock().unwrap_or_else(|e| e.into_inner());
                 if *count >= max_results {
                     return Ok(false); // Stop search
                 }
 
                 // Add result
-                let mut results_guard = results_clone.lock().unwrap();
+                let mut results_guard = results_clone.lock().unwrap_or_else(|e| e.into_inner());
                 results_guard.push(SearchResult {
                     file: path_str.clone(),
                     line: Some(line_num as u32),
@@ -210,7 +210,7 @@ pub fn search_with_ripgrep(
     // Get results
     let results = match Arc::try_unwrap(results) {
         Ok(mutex) => mutex.into_inner().unwrap(),
-        Err(arc) => arc.lock().unwrap().clone(),
+        Err(arc) => arc.lock().unwrap_or_else(|e| e.into_inner()).clone(),
     };
 
     Ok(results)

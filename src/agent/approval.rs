@@ -32,13 +32,13 @@ pub fn set_approval_mode(
 ) {
     // Skip if mode is already set to avoid unnecessary async updates
     {
-        let current = approval_mode_lock.lock().unwrap();
+        let current = approval_mode_lock.lock().unwrap_or_else(|e| e.into_inner());
         if *current == mode {
             return;
         }
     }
 
-    let mut m = approval_mode_lock.lock().unwrap();
+    let mut m = approval_mode_lock.lock().unwrap_or_else(|e| e.into_inner());
     *m = mode.clone();
 
     // Update MessageBus policy engine
@@ -58,7 +58,7 @@ pub fn toggle_yolo_mode(
     approval_mode_lock: &Arc<Mutex<ApprovalMode>>,
     message_bus: &Arc<MessageBus>,
 ) -> ApprovalMode {
-    let mut m = approval_mode_lock.lock().unwrap();
+    let mut m = approval_mode_lock.lock().unwrap_or_else(|e| e.into_inner());
     let new_mode = if *m == ApprovalMode::Yolo {
         ApprovalMode::Default
     } else {

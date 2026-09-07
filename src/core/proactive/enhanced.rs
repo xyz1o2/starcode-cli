@@ -122,13 +122,13 @@ impl ProactiveManager {
 
     /// 启动 proactive 模式
     pub fn start(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.active = true;
     }
 
     /// 停止 proactive 模式
     pub fn stop(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.active = false;
     }
 
@@ -138,7 +138,7 @@ impl ProactiveManager {
             return None;
         }
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if !state.active {
             return None;
         }
@@ -197,26 +197,26 @@ impl ProactiveManager {
 
     /// 记录用户接受了建议
     pub fn accept_suggestion(&mut self, suggestion_id: &str) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.suggestions_accepted += 1;
         state.idle_ticks = 0;
     }
 
     /// 记录用户拒绝了建议
     pub fn reject_suggestion(&mut self, suggestion_id: &str) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.idle_ticks = 0;
     }
 
     /// 通知有活动发生
     pub fn notify_activity(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.idle_ticks = 0;
     }
 
     /// 获取状态
     pub fn state(&self) -> ProactiveState {
-        self.state.lock().unwrap().clone()
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// 获取当前建议

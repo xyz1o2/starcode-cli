@@ -40,7 +40,7 @@ pub fn start_capturing() {
         })
         .expect("Failed to spawn early input capture thread");
 
-    *THREAD_HANDLE.lock().unwrap() = Some(handle);
+    *THREAD_HANDLE.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
 }
 
 fn handle_key(buffer: &Arc<Mutex<String>>, key: crossterm::event::KeyEvent) {
@@ -53,18 +53,18 @@ fn handle_key(buffer: &Arc<Mutex<String>>, key: crossterm::event::KeyEvent) {
             std::process::exit(130);
         }
         KeyCode::Backspace => {
-            let mut buf = buffer.lock().unwrap();
+            let mut buf = buffer.lock().unwrap_or_else(|e| e.into_inner());
             buf.pop();
         }
         KeyCode::Enter => {
-            let mut buf = buffer.lock().unwrap();
+            let mut buf = buffer.lock().unwrap_or_else(|e| e.into_inner());
             buf.push('\n');
         }
         KeyCode::Char(c)
             if !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT) =>
         {
-            let mut buf = buffer.lock().unwrap();
+            let mut buf = buffer.lock().unwrap_or_else(|e| e.into_inner());
             buf.push(c);
         }
         _ => {}
@@ -73,19 +73,19 @@ fn handle_key(buffer: &Arc<Mutex<String>>, key: crossterm::event::KeyEvent) {
 
 pub fn stop_capturing() {
     CAPTURING.store(false, Ordering::SeqCst);
-    if let Some(handle) = THREAD_HANDLE.lock().unwrap().take() {
+    if let Some(handle) = THREAD_HANDLE.lock().unwrap_or_else(|e| e.into_inner()).take() {
         let _ = handle.join();
     }
 }
 
 pub fn consume_early_input() -> String {
     stop_capturing();
-    let mut buf = EARLY_INPUT_BUFFER.lock().unwrap();
+    let mut buf = EARLY_INPUT_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
     std::mem::take(&mut *buf)
 }
 
 pub fn peek_early_input() -> String {
-    let buf = EARLY_INPUT_BUFFER.lock().unwrap();
+    let buf = EARLY_INPUT_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
     buf.clone()
 }
 

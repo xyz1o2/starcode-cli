@@ -133,7 +133,6 @@ fn open_provider_selection_menu(
     clear_suggestion_overlays(state);
     state.close_palette();
     state.exit_input_modal();
-    state.show_status_modal = false;
     close_quick_menus(state);
     state.quick_menu_back = back;
     state.quick_menu_origin_palette = origin_palette;
@@ -149,7 +148,6 @@ fn open_session_selection_menu(
     clear_suggestion_overlays(state);
     state.close_palette();
     state.exit_input_modal();
-    state.show_status_modal = false;
     close_quick_menus(state);
     state.quick_menu_back = None;
     state.quick_menu_origin_palette = origin_palette;
@@ -183,7 +181,6 @@ fn navigate_back_from_quick_menu(state: &mut ChatState) {
 }
 
 pub(crate) fn show_palette_mode(state: &mut ChatState, mode: PaletteMode) {
-    state.show_status_modal = false;
     close_quick_menus(state);
     state.quick_menu_back = None;
     state.quick_menu_origin_palette = false;
@@ -197,7 +194,6 @@ pub(crate) fn show_provider_api_key_modal(
     edit_mode: bool,
     has_saved_key: bool,
 ) {
-    state.show_status_modal = false;
     close_quick_menus(state);
     state.close_palette();
     state.enter_input_modal();
@@ -227,7 +223,6 @@ pub(crate) fn show_provider_api_key_modal(
 }
 
 fn show_provider_base_url_modal(state: &mut ChatState, provider_id: &str, initial_value: String) {
-    state.show_status_modal = false;
     close_quick_menus(state);
     state.close_palette();
     state.enter_input_modal();
@@ -257,7 +252,6 @@ fn show_provider_base_url_modal(state: &mut ChatState, provider_id: &str, initia
 /// 手动输入模型名的弹窗。刻意不做任何联网校验：中转站的 `/models` 常年不全，
 /// 拉不到不等于不能用；用户敲什么就切什么，错了从状态栏的报错里看得出来。
 fn show_model_name_modal(state: &mut ChatState) {
-    state.show_status_modal = false;
     close_quick_menus(state);
     state.close_palette();
     state.enter_input_modal();
@@ -375,7 +369,7 @@ pub(crate) async fn execute_palette_action(
 
             // Entering from the settings modal (ShowStatus closes the palette)
             // must reopen the palette, otherwise navigation appears to do nothing.
-            state.show_status_modal = false;
+            state.pop_modal();
             let items = crate::ui::components::palette::get_items(&mode, state);
             state.palette_mode = mode;
             state.palette_items = items;
@@ -485,8 +479,10 @@ pub(crate) async fn execute_palette_action(
                 state,
                 0,
                 &format!(
-                    "已切换模型 {}，提供商 {}",
+                    "{} {}，{} {}",
+                    crate::core::i18n::t("model.switched", "已切换模型", "Switched to model"),
                     state.current_model,
+                    crate::core::i18n::t("model.provider", "提供商", "provider"),
                     state.current_provider_id.as_deref().unwrap_or("?")
                 ),
             );
@@ -679,7 +675,12 @@ pub(crate) async fn execute_palette_action(
             crate::ui::app::logic::emit_status_text(
                 state,
                 0,
-                &format!("已选择 {}，接下来选择模型", provider_id),
+                &format!(
+                    "{} {}，{}",
+                    crate::core::i18n::t("provider.selected", "已选择", "Selected"),
+                    provider_id,
+                    crate::core::i18n::t("provider.next_select_model", "接下来选择模型", "now select a model")
+                ),
             );
             state.push_palette_mode(PaletteMode::Model);
             if !state.is_palette_open() {
@@ -886,6 +887,7 @@ async fn handle_ask_user_question_input(
                     .send(AgentRequest::ConfirmTool {
                         tool_call_id: tool_call_id.to_string(),
                         outcome: crate::types::ToolConfirmationOutcome::Cancel,
+                        feedback: None,
                     })
                     .await;
                 state.is_awaiting_confirmation = false;
@@ -941,6 +943,7 @@ async fn handle_ask_user_question_input(
                     .send(AgentRequest::ConfirmTool {
                         tool_call_id: tool_call_id.to_string(),
                         outcome: crate::types::ToolConfirmationOutcome::Cancel,
+                        feedback: None,
                     })
                     .await;
                 state.is_awaiting_confirmation = false;
@@ -1128,6 +1131,7 @@ async fn submit_ask_user_question_answer(
                 answers,
                 text_input,
             },
+            feedback: None,
         })
         .await;
 
@@ -1153,13 +1157,13 @@ pub async fn handle_key_event(
         return Ok(());
     }
 
-    // Handle Shift+Tab for Plan/Build toggle (Shift+Tab is normalized to BackTab
-    // by the runtime event loop before reaching here)
+    // Handle Shift+Tab for mode cycle: Default → Plan → Yolo → Default
+    // (Shift+Tab is normalized to BackTab by the runtime event loop before reaching here)
     // 输入模态打开时 Shift+Tab 不能触发模式切换（会吞掉输入框里的按键）
-    if key.code == KeyCode::BackTab && !state.show_input_modal {
+    if key.code == KeyCode::BackTab && !state.show_input_modal && !state.is_awaiting_confirmation {
         state.approval_mode = match state.approval_mode {
             ApprovalMode::Default => ApprovalMode::Plan,
-            ApprovalMode::Plan => ApprovalMode::Default,
+            ApprovalMode::Plan => ApprovalMode::Yolo,
             ApprovalMode::Yolo => ApprovalMode::Default,
         };
 
@@ -1218,7 +1222,6 @@ pub async fn handle_key_event(
         } else {
             state.show_help = false;
             state.exit_input_modal();
-            state.show_status_modal = false;
             close_quick_menus(state);
             state.quick_menu_back = None;
             state.quick_menu_origin_palette = false;
@@ -1715,8 +1718,10 @@ pub async fn handle_key_event(
                         state,
                         0,
                         &format!(
-                            "已切换模型 {}，提供商 {}",
+                            "{} {}，{} {}",
+                            crate::core::i18n::t("model.switched", "已切换模型", "Switched to model"),
                             state.current_model,
+                            crate::core::i18n::t("model.provider", "提供商", "provider"),
                             state.current_provider_id.as_deref().unwrap_or("?")
                         ),
                     );
@@ -1738,13 +1743,13 @@ pub async fn handle_key_event(
     }
 
     // Handle log selector input
-    if state.show_log_selector {
+    if state.top_modal() == Some(&crate::ui::state::modal::Modal::LogSelector) {
         match key.code {
             KeyCode::Enter => {
                 // Resume selected session
                 if let Some(session) = state.log_selector_state.get_selected_session() {
                     let session_id = session.id.clone();
-                    state.show_log_selector = false;
+                    state.pop_modal();
                     // Send resume request
                     let _ = agent_tx
                         .send(AgentRequest::ResumeSession(session_id.clone()))
@@ -1758,7 +1763,7 @@ pub async fn handle_key_event(
                 return Ok(());
             }
             KeyCode::Esc => {
-                state.show_log_selector = false;
+                state.pop_modal();
                 return Ok(());
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -1789,11 +1794,11 @@ pub async fn handle_key_event(
     }
 
     // Handle error overlay input
-    if state.show_error_overlay {
+    if state.top_modal() == Some(&crate::ui::state::modal::Modal::ErrorOverlay) {
         match key.code {
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 // Retry
-                state.show_error_overlay = false;
+                state.pop_modal();
                 // Re-send last user message
                 if let Some(last_user) = state
                     .chat_history
@@ -1807,12 +1812,12 @@ pub async fn handle_key_event(
                 return Ok(());
             }
             KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
-                state.show_error_overlay = false;
+                state.pop_modal();
                 return Ok(());
             }
             KeyCode::Char('s') | KeyCode::Char('S') => {
                 // Switch provider
-                state.show_error_overlay = false;
+                state.pop_modal();
                 state.open_palette(PaletteMode::Provider);
                 return Ok(());
             }
@@ -1991,9 +1996,6 @@ pub async fn handle_key_event(
                 }
                 return Ok(());
             }
-            state.show_context_viz = false;
-            state.show_error_overlay = false;
-            state.show_log_selector = false;
             state.pending_model_confirmation = false;
             if state.show_provider_menu || state.show_session_menu {
                 navigate_back_from_quick_menu(state);
@@ -2053,7 +2055,7 @@ pub async fn handle_key_event(
             state.show_help = !state.show_help;
         }
         KeyCode::Char('?')
-            if !state.is_palette_open() && !state.show_status_modal && !state.show_input_modal =>
+            if !state.is_palette_open() && !state.show_input_modal =>
         {
             // ? when input is empty: show help (like Claude Code)
             if state.textarea.lines().iter().all(|l| l.is_empty()) {
@@ -2456,7 +2458,7 @@ async fn handle_overlay_input(
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     // ── 主题选择器：↑↓ 导航（实时预览）、Enter 应用、Esc 取消 ──
-    if state.show_theme_picker {
+    if matches!(state.top_modal(), Some(crate::ui::state::modal::Modal::ThemePicker { .. })) {
         let themes = crate::ui::components::highlight::theme_picker::available_themes();
         let count = themes.len();
         let prev_index = state.selected_theme_index;
@@ -2479,15 +2481,18 @@ async fn handle_overlay_input(
                 if state.theme_manager.set_theme(&name) {
                     state.current_status_line = Some(format!("Theme: {}", name));
                 }
-                state.show_theme_picker = false;
+                state.pop_modal();
                 return Ok(true);
             }
             KeyCode::Esc => {
                 // 取消：恢复进入 picker 前的主题
-                if let Some(prev) = state.theme_picker_prev.take() {
-                    state.theme_manager.set_theme(&prev);
+                if let Some(crate::ui::state::modal::Modal::ThemePicker { prev_theme }) =
+                    state.pop_modal()
+                {
+                    if let Some(prev) = prev_theme {
+                        state.theme_manager.set_theme(&prev);
+                    }
                 }
-                state.show_theme_picker = false;
                 return Ok(true);
             }
             _ => {}
@@ -2517,8 +2522,117 @@ async fn handle_overlay_input(
 
             if is_ask {
                 handle_ask_user_question_input(key, state, agent_tx, &id).await?;
+            } else if state.confirmation_feedback_mode {
+                // Feedback input mode: Tab back to options, Enter submits with feedback
+                match key.code {
+                    KeyCode::Tab => {
+                        state.confirmation_feedback_mode = false;
+                        if let Some(idx) = state.pending_confirmation_entry_idx {
+                            state.rendered_cache.remove(&idx);
+                        }
+                    }
+                    KeyCode::Esc => {
+                        state.confirmation_feedback_mode = false;
+                        state.pending_confirmation_feedback.clear();
+                        if let Some(idx) = state.pending_confirmation_entry_idx {
+                            state.rendered_cache.remove(&idx);
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        state.pending_confirmation_feedback.pop();
+                        if let Some(idx) = state.pending_confirmation_entry_idx {
+                            state.rendered_cache.remove(&idx);
+                        }
+                    }
+                    KeyCode::Enter => {
+                        // Submit with current choice + feedback
+                        let outcome = match state.pending_confirmation_choice {
+                            1 => crate::types::ToolConfirmationOutcome::ProceedOnce,
+                            2 => crate::types::ToolConfirmationOutcome::AllowSession,
+                            3 => crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave,
+                            _ => crate::types::ToolConfirmationOutcome::Cancel,
+                        };
+                        let feedback = if state.pending_confirmation_feedback.is_empty() {
+                            None
+                        } else {
+                            Some(state.pending_confirmation_feedback.clone())
+                        };
+                        if let Some(idx) = state.pending_confirmation_entry_idx {
+                            if let Some(entry) = state.chat_history.get_mut(idx) {
+                                if let Some(conf) = entry.confirmation.as_mut() {
+                                    let outcome_str = match state.pending_confirmation_choice {
+                                        1 => "Allowed (once)",
+                                        2 => "Allowed (session)",
+                                        3 => "Allowed (always)",
+                                        _ => "Denied",
+                                    };
+                                    if let Some(ref fb) = feedback {
+                                        conf.outcome =
+                                            Some(format!("{} with feedback: {}", outcome_str, fb));
+                                    } else {
+                                        conf.outcome = Some(outcome_str.to_string());
+                                    }
+                                }
+                            }
+                            state.rendered_cache.remove(&idx);
+                        }
+                        let _ = agent_tx
+                            .send(AgentRequest::ConfirmTool {
+                                tool_call_id: id,
+                                outcome,
+                                feedback,
+                            })
+                            .await;
+                        state.is_awaiting_confirmation = false;
+                        state.pending_tool_call_id = None;
+                        state.show_permission_explanation = false;
+                        state.show_permission_debug = false;
+                        state.pending_confirmation_feedback.clear();
+                        state.confirmation_feedback_mode = false;
+                        state.pending_confirmation_entry_idx = None;
+                    }
+                    KeyCode::Char(ch) => {
+                        state.pending_confirmation_feedback.push(ch);
+                        if let Some(idx) = state.pending_confirmation_entry_idx {
+                            state.rendered_cache.remove(&idx);
+                        }
+                    }
+                    _ => {}
+                }
             } else {
                 match key.code {
+                    // Tab: 切换到反馈输入模式（对标 Claude Code "Tab to provide feedback"）
+                    KeyCode::Tab => {
+                        state.confirmation_feedback_mode = true;
+                        if let Some(idx) = state.pending_confirmation_entry_idx {
+                            state.rendered_cache.remove(&idx);
+                        }
+                    }
+                    // Shift+Tab: 快速批准（对标 Claude Code quick approve）
+                    KeyCode::BackTab => {
+                        if let Some(idx) = state.pending_confirmation_entry_idx {
+                            if let Some(entry) = state.chat_history.get_mut(idx) {
+                                if let Some(conf) = entry.confirmation.as_mut() {
+                                    conf.outcome = Some("Quick approved (Shift+Tab)".to_string());
+                                }
+                            }
+                            state.rendered_cache.remove(&idx);
+                        }
+                        let _ = agent_tx
+                            .send(AgentRequest::ConfirmTool {
+                                tool_call_id: id,
+                                outcome: crate::types::ToolConfirmationOutcome::ProceedOnce,
+                                feedback: None,
+                            })
+                            .await;
+                        state.is_awaiting_confirmation = false;
+                        state.pending_tool_call_id = None;
+                        state.show_permission_explanation = false;
+                        state.show_permission_debug = false;
+                        state.pending_confirmation_feedback.clear();
+                        state.confirmation_feedback_mode = false;
+                        state.pending_confirmation_entry_idx = None;
+                    }
                     // Ctrl+E: 切换权限解释区 / Ctrl+D: 切换 debug 详情（Claude Code 风格）
                     KeyCode::Char('e') | KeyCode::Char('E')
                         if key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -2566,6 +2680,7 @@ async fn handle_overlay_input(
                             .send(AgentRequest::ConfirmTool {
                                 tool_call_id: id,
                                 outcome: crate::types::ToolConfirmationOutcome::Cancel,
+                                feedback: None,
                             })
                             .await;
                         state.is_awaiting_confirmation = false;
@@ -2614,16 +2729,25 @@ async fn handle_overlay_input(
                             }
                             state.rendered_cache.remove(&idx);
                         }
+                        // Collect feedback if user typed any
+                        let feedback = if state.pending_confirmation_feedback.is_empty() {
+                            None
+                        } else {
+                            Some(state.pending_confirmation_feedback.clone())
+                        };
                         let _ = agent_tx
                             .send(AgentRequest::ConfirmTool {
                                 tool_call_id: id,
                                 outcome,
+                                feedback,
                             })
                             .await;
                         state.is_awaiting_confirmation = false;
                         state.pending_tool_call_id = None;
                         state.show_permission_explanation = false;
                         state.show_permission_debug = false;
+                        state.pending_confirmation_feedback.clear();
+                        state.confirmation_feedback_mode = false;
                         state.pending_confirmation_entry_idx = None;
                     }
                     _ => {}
@@ -2635,10 +2759,10 @@ async fn handle_overlay_input(
         return Ok(true);
     }
 
-    if state.show_status_modal {
+    if state.top_modal() == Some(&crate::ui::state::modal::Modal::StatusModal) {
         match key.code {
             KeyCode::Esc => {
-                state.show_status_modal = false;
+                state.pop_modal();
             }
             KeyCode::Up => {
                 let count = crate::ui::components::status_modal::settings_item_count();
@@ -2657,7 +2781,7 @@ async fn handle_overlay_input(
                 if let Some(action) =
                     crate::ui::components::status_modal::get_settings_action(state)
                 {
-                    state.show_status_modal = false;
+                    state.pop_modal();
                     // Re-dispatch the action through execute_palette_action
                     execute_palette_action(state, action, agent_tx).await?;
                 }
@@ -2837,7 +2961,11 @@ async fn handle_input_modal(
                             crate::ui::app::logic::emit_status_text(
                                 state,
                                 0,
-                                &format!("已配置并切换到 {}", provider_id),
+                                &format!(
+                                    "{} {}",
+                                    crate::core::i18n::t("provider.configured", "已配置并切换到", "Configured and switched to"),
+                                    provider_id
+                                ),
                             );
                             state.configured_providers.insert(pid.clone());
 

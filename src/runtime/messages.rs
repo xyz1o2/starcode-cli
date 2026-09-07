@@ -244,6 +244,8 @@ pub enum AgentRequest {
     ConfirmTool {
         tool_call_id: String,
         outcome: crate::types::ToolConfirmationOutcome,
+        /// 对标 Claude Code: 用户在确认时可附加反馈文本 (Tab to provide feedback)
+        feedback: Option<String>,
     },
     EmitStatus(String),
     ResumeSession(String),

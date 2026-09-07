@@ -435,6 +435,10 @@ pub struct ChatState {
     pub pending_other_input: String,                   // "Other" 文本输入值
     pub pending_question_other_focused: bool,          // "Other" 输入框是否聚焦
     pub last_confirmation_message_id: Option<u64>,
+    /// 对标 Claude Code: Tab 切换到反馈输入模式
+    pub confirmation_feedback_mode: bool,
+    /// 对标 Claude Code: 确认时附加的反馈文本
+    pub pending_confirmation_feedback: String,
     // ============================================
     // ============ 文本选择和复制功能 ============
     pub text_selection: TextSelection,
@@ -853,6 +857,8 @@ impl ChatState {
             pending_question_selections: Vec::new(),
             pending_other_input: String::new(),
             pending_question_other_focused: false,
+            confirmation_feedback_mode: false,
+            pending_confirmation_feedback: String::new(),
             last_confirmation_message_id: None,
             text_selection: TextSelection::new(),
             copy_status: None,

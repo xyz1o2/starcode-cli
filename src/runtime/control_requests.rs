@@ -248,6 +248,7 @@ pub async fn handle_request(
         AgentRequest::ConfirmTool {
             tool_call_id,
             outcome,
+            feedback: _,
         } => {
             handle_confirm_tool(agent, tx, tool_call_id, outcome).await;
         }

@@ -171,7 +171,7 @@ impl ToolInvocation for MemoryToolInvocation {
             let allowlist_key = memory_file_path.to_string_lossy().to_string();
 
             let already_allowed = {
-                let guard = allowlist.lock().unwrap();
+                let guard = allowlist.lock().unwrap_or_else(|e| e.into_inner());
                 guard.contains(&allowlist_key)
             };
             if already_allowed {

@@ -170,7 +170,7 @@ fn render_search_input(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
 fn render_results_list(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
     if let Some(error) = &state.error {
         let block = Block::default()
-            .title("Error")
+            .title(crate::core::i18n::t("search.error", "Error", "Error"))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Red));
@@ -178,7 +178,7 @@ fn render_results_list(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
         let paragraph = Paragraph::new(vec![
             Line::from(Span::styled(error.clone(), Style::default().fg(Color::Red))),
             Line::from(Span::styled(
-                "Press Esc to close",
+                crate::core::i18n::t("search.press_esc", "Press Esc to close", "Press Esc to close"),
                 Style::default().fg(Color::DarkGray),
             )),
         ])

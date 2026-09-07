@@ -133,7 +133,7 @@ pub fn escape_regex(s: &str) -> String {
 /// in `cat -n` format, and despite warnings, models occasionally include the
 /// `NN→` prefix in `old_string`. This auto-strips it as a safety net.
 pub fn strip_line_number_prefixes(s: &str) -> (String, bool) {
-    let re = regex::Regex::new(r"(?m)^\s*\d+→\s*").unwrap();
+    let re = regex::Regex::new(r"(?m)^\s*\d+→\s*").expect("valid regex: line number prefix");
     let stripped = re.replace_all(s, "").to_string();
     let was_stripped = stripped != s;
     (stripped, was_stripped)

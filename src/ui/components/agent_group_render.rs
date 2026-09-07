@@ -273,8 +273,8 @@ fn render_agent_progress_lines(
                 let text = stat.last_tool_info.as_deref().unwrap_or("Initializing…");
                 (text.to_string(), Color::Yellow)
             }
-            AgentTaskStatus::Completed => (with_elapsed("Done", stat), Color::Green),
-            AgentTaskStatus::Failed => (with_elapsed("Failed", stat), Color::Red),
+            AgentTaskStatus::Completed => (with_elapsed(&crate::core::i18n::t("agent.done", "Done", "Done"), stat), Color::Green),
+            AgentTaskStatus::Failed => (with_elapsed(&crate::core::i18n::t("agent.failed", "Failed", "Failed"), stat), Color::Red),
             // 用户拒绝授权（对标 renderToolUseRejectedMessage）
             AgentTaskStatus::Rejected => {
                 let reason = stat.last_tool_info.as_deref().unwrap_or("");

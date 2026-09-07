@@ -88,7 +88,7 @@ static RTK_AVAILABLE: Lazy<Mutex<Option<bool>>> = Lazy::new(|| Mutex::new(None))
 /// 1. `STAR_RTK_ENABLED` env var — `"1"`/`"true"` forces on, `"0"`/`"false"` forces off
 /// 2. Fall back to detecting the `rtk` binary on PATH
 pub fn is_rtk_available() -> bool {
-    let mut cache = RTK_AVAILABLE.lock().unwrap();
+    let mut cache = RTK_AVAILABLE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(cached) = *cache {
         return cached;
     }
@@ -116,7 +116,7 @@ fn detect_rtk() -> bool {
 
 /// Reset the RTK availability cache. Useful after installation.
 pub fn reset_rtk_cache() {
-    let mut cache = RTK_AVAILABLE.lock().unwrap();
+    let mut cache = RTK_AVAILABLE.lock().unwrap_or_else(|e| e.into_inner());
     *cache = None;
 }
 

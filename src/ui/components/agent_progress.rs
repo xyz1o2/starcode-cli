@@ -74,7 +74,7 @@ pub fn render_agent_progress_line(
             .as_deref()
             .unwrap_or("Running in the background")
     } else {
-        "Done"
+        &crate::core::i18n::t("ui.progress.done", "完成", "Done")
     };
 
     let mut spans = Vec::new();

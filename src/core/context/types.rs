@@ -187,7 +187,9 @@ impl ContextLayer {
     }
 
     pub fn set_expiration(&mut self, duration: Duration) {
-        self.expires_at = Some(Utc::now() + chrono::Duration::from_std(duration).unwrap());
+        self.expires_at = Some(
+            Utc::now() + chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::hours(1)),
+        );
     }
 }
 

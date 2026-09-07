@@ -280,7 +280,18 @@ impl StreamingToolExecutor {
         // 启动异步执行任务
         let handle = tokio::spawn(async move {
             // 获取并发许可
-            let _permit = semaphore.acquire().await.unwrap();
+            let _permit = match semaphore.acquire().await {
+                Ok(permit) => permit,
+                Err(_) => {
+                    let _ = result_tx.send(ToolResult {
+                        success: false,
+                        output: None,
+                        error: Some("Semaphore closed".to_string()),
+                        data: None,
+                    });
+                    return;
+                }
+            };
 
             // 检查是否应该取消
             if sibling_abort_token.is_cancelled() {

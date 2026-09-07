@@ -99,21 +99,31 @@ impl AnalyticsSink {
             }
             SinkType::File(path) => {
                 // 文件输出实现
-                let mut file = std::fs::OpenOptions::new()
+                let file = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(path)
-                    .unwrap();
+                    .open(path);
+                let mut file = match file {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!("[Analytics] Failed to open log file {}: {}", path, e);
+                        return;
+                    }
+                };
 
                 use std::io::Write;
                 for entry in &entries {
-                    match entry {
+                    let result = match entry {
                         SinkEntry::Event(event) => {
-                            writeln!(file, "[Event] {:?}", event).unwrap();
+                            writeln!(file, "[Event] {:?}", event)
                         }
                         SinkEntry::Metric(metric) => {
-                            writeln!(file, "[Metric] {:?}", metric).unwrap();
+                            writeln!(file, "[Metric] {:?}", metric)
                         }
+                    };
+                    if let Err(e) = result {
+                        eprintln!("[Analytics] Failed to write to log file: {}", e);
+                        return;
                     }
                 }
             }

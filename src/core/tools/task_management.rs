@@ -337,6 +337,18 @@ pub struct TaskUpdateParams {
     pub status: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
+    /// 重命名任务标题 (Rename task subject)
+    #[serde(default)]
+    pub subject: Option<String>,
+    /// 设置 in_progress 时的动态描述 (Set activeForm for in_progress display)
+    #[serde(default)]
+    pub active_form: Option<String>,
+    /// 本任务完成后解锁的任务 ID (Tasks unblocked when this completes)
+    #[serde(default)]
+    pub add_blocks: Option<Vec<String>>,
+    /// 阻塞本任务的任务 ID (Tasks blocking this one)
+    #[serde(default)]
+    pub add_blocked_by: Option<Vec<String>>,
 }
 
 pub struct TaskUpdateInvocation {
@@ -386,8 +398,18 @@ impl ToolInvocation for TaskUpdateInvocation {
                             "skipped" => TaskStatus::Skipped,
                             _ => return Err(format!("Invalid status: {}", status_str)),
                         };
+                        let is_terminal = matches!(
+                            new_status,
+                            TaskStatus::Completed | TaskStatus::Skipped
+                        );
                         if let Some(task) = manager.get_task_mut(&params.task_id) {
                             task.status = new_status;
+                            // Set completed_at timestamp for 30s TTL
+                            if is_terminal {
+                                task.completed_at = Some(chrono::Utc::now());
+                            } else {
+                                task.completed_at = None;
+                            }
                         }
                         changes.push(format!("status={}", status_str));
                     }
@@ -402,6 +424,99 @@ impl ToolInvocation for TaskUpdateInvocation {
                             }
                         }
                         changes.push("notes added".to_string());
+                    }
+
+                    if let Some(ref subject) = params.subject {
+                        if let Some(task) = manager.get_task_mut(&params.task_id) {
+                            task.title = subject.clone();
+                            task.updated_at = chrono::Utc::now();
+                        }
+                        changes.push(format!("subject={}", subject));
+                    }
+
+                    if let Some(ref active_form) = params.active_form {
+                        if let Some(task) = manager.get_task_mut(&params.task_id) {
+                            task.active_form = Some(active_form.clone());
+                        }
+                        changes.push(format!("active_form={}", active_form));
+                    }
+
+                    if let Some(ref block_ids) = params.add_blocks {
+                        let mut new_blocks = Vec::new();
+                        if let Some(task) = manager.get_task(&params.task_id) {
+                            for bid in block_ids {
+                                if !task.blocks.contains(bid) {
+                                    new_blocks.push(bid.clone());
+                                }
+                            }
+                        }
+                        // Apply: add to this task's blocks
+                        if let Some(task) = manager.get_task_mut(&params.task_id) {
+                            for bid in &new_blocks {
+                                task.blocks.push(bid.clone());
+                            }
+                        }
+                        // Apply: add reverse dependency on blocked tasks
+                        for bid in &new_blocks {
+                            if let Some(blocked_task) = manager.get_task_mut(bid) {
+                                if !blocked_task.dependencies.contains(&params.task_id) {
+                                    blocked_task.dependencies.push(params.task_id.clone());
+                                }
+                            }
+                        }
+                        changes.push(format!("blocks=[{}]", block_ids.join(", ")));
+                    }
+
+                    if let Some(ref blocked_by_ids) = params.add_blocked_by {
+                        let mut new_deps = Vec::new();
+                        if let Some(task) = manager.get_task(&params.task_id) {
+                            for bid in blocked_by_ids {
+                                if !task.dependencies.contains(bid) {
+                                    new_deps.push(bid.clone());
+                                }
+                            }
+                        }
+                        // Apply: add to this task's dependencies
+                        if let Some(task) = manager.get_task_mut(&params.task_id) {
+                            for bid in &new_deps {
+                                task.dependencies.push(bid.clone());
+                            }
+                        }
+                        // Apply: add reverse block on blocking tasks
+                        for bid in &new_deps {
+                            if let Some(blocker) = manager.get_task_mut(bid) {
+                                if !blocker.blocks.contains(&params.task_id) {
+                                    blocker.blocks.push(params.task_id.clone());
+                                }
+                            }
+                        }
+                        changes.push(format!("blocked_by=[{}]", blocked_by_ids.join(", ")));
+                    }
+
+                    // Auto-update status when marking completed: unblock dependents
+                    if params.status.as_deref() == Some("completed") {
+                        let task_id = params.task_id.clone();
+                        let blocked_ids: Vec<String> = manager
+                            .get_task(&task_id)
+                            .map(|t| t.blocks.clone())
+                            .unwrap_or_default();
+                        // Collect which tasks need status change (avoid borrow conflict)
+                        let mut unblock_ids = Vec::new();
+                        for blocked_id in &blocked_ids {
+                            if let Some(blocked_task) = manager.get_task_mut(blocked_id) {
+                                blocked_task.dependencies.retain(|d| d != &task_id);
+                                if blocked_task.dependencies.is_empty()
+                                    && blocked_task.status == crate::core::tasks::models::TaskStatus::Blocked
+                                {
+                                    unblock_ids.push(blocked_id.clone());
+                                }
+                            }
+                        }
+                        for uid in &unblock_ids {
+                            if let Some(task) = manager.get_task_mut(uid) {
+                                task.status = crate::core::tasks::models::TaskStatus::Pending;
+                            }
+                        }
                     }
 
                     let title = manager
@@ -454,7 +569,7 @@ impl BaseDeclarativeTool for TaskUpdateTool {
     }
 
     fn description(&self) -> &str {
-        "更新任务状态或添加备注。(Update task status or add notes to a task.)"
+        "更新任务状态、标题、依赖关系或备注。完成任务自动解锁被阻塞的依赖。(Update task status, subject, dependencies, or notes. Completing auto-unblocks dependents.)"
     }
 
     fn kind(&self) -> Kind {
@@ -472,11 +587,29 @@ impl BaseDeclarativeTool for TaskUpdateTool {
                 "status": {
                     "type": "string",
                     "enum": ["pending", "in_progress", "completed", "blocked", "skipped"],
-                    "description": "新状态 (New status)"
+                    "description": "新状态 (New status). Completing auto-unblocks dependents."
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "重命名任务标题 (Rename task subject)"
                 },
                 "notes": {
                     "type": "string",
                     "description": "备注内容 (Notes to append)"
+                },
+                "active_form": {
+                    "type": "string",
+                    "description": "进行时描述,如 'Running tests' (activeForm shown while in_progress)"
+                },
+                "add_blocks": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "本任务完成后解锁的任务 ID (Tasks unblocked when this completes)"
+                },
+                "add_blocked_by": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "阻塞本任务的任务 ID (Tasks blocking this one)"
                 }
             },
             "required": ["task_id"]

@@ -542,6 +542,7 @@ impl PromptBuilder {
         project_context_override: Option<String>,
         is_thinking_model: bool,
         include_extended_bundle: bool,
+        output_style: Option<&str>,
     ) -> Vec<crate::types::StarMessage> {
         let cwd_path = std::path::Path::new(cwd);
 
@@ -568,6 +569,18 @@ impl PromptBuilder {
                 "### Project Instructions (from STAR.md)\n\n{}",
                 ctx
             ));
+        }
+
+        // Output style: 用户通过 /output-style 设置的响应风格
+        if let Some(style) = output_style {
+            let instruction = match style {
+                "concise" => Some("Respond concisely. Minimize prose; use bullet points and short sentences. Skip explanations unless asked."),
+                "verbose" => Some("Provide detailed, thorough explanations. Include reasoning, alternatives, and context for decisions."),
+                _ => None, // "default" — no extra instruction
+            };
+            if let Some(inst) = instruction {
+                semi_static_parts.push(format!("### Response Style\n\n{}", inst));
+            }
         }
 
         if let Some(files) = active_files {

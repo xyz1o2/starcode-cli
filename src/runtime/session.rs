@@ -261,6 +261,7 @@ pub async fn handle_streaming_request(
         Some(AgentRequest::ConfirmTool {
             tool_call_id,
             outcome,
+            feedback: _,
         }) => {
             let confirmed = matches!(
                 outcome,

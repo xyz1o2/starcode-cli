@@ -569,10 +569,9 @@ impl SettingsManager {
             let use_auth = api_key_opt.is_some() && attempt == 0;
             let mut req = client.get(&url).header("Content-Type", "application/json");
             if use_auth {
-                req = req.header(
-                    "Authorization",
-                    format!("Bearer {}", api_key_opt.clone().unwrap()),
-                );
+                if let Some(ref key) = api_key_opt {
+                    req = req.header("Authorization", format!("Bearer {}", key));
+                }
             }
 
             let resp = match req.send().await {

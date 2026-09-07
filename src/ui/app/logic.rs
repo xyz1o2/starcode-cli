@@ -581,9 +581,19 @@ pub async fn enqueue_user_message(
             .collect();
 
         let content = if items.len() == 1 {
-            format!("状态：已读取 1 个文件: {}", items[0])
+            format!(
+                "{} 1 {}: {}",
+                crate::core::i18n::t("status.read_files", "状态：已读取", "Read"),
+                crate::core::i18n::t("status.file", "个文件", "file"),
+                items[0]
+            )
         } else {
-            let mut s = format!("状态：已读取 {} 个文件:", items.len());
+            let mut s = format!(
+                "{} {} {}:",
+                crate::core::i18n::t("status.read_files", "状态：已读取", "Read"),
+                items.len(),
+                crate::core::i18n::t("status.files", "个文件", "files")
+            );
             for it in &items {
                 s.push_str("\n  ");
                 s.push_str(it);

@@ -46,11 +46,15 @@ pub struct OAuthUtils;
 
 impl OAuthUtils {
     pub fn build_well_known_urls(base_url: &str, include_path_suffix: bool) -> WellKnownUrls {
-        let server_url = url::Url::parse(base_url).unwrap();
+        let server_url = url::Url::parse(base_url).unwrap_or_else(|_| {
+            url::Url::parse(&format!("https://{}", base_url)).unwrap_or_else(|_| {
+                url::Url::parse("https://invalid.example.com").expect("valid fallback URL")
+            })
+        });
         let base = format!(
             "{}://{}",
             server_url.scheme(),
-            server_url.host_str().unwrap()
+            server_url.host_str().unwrap_or("invalid.example.com")
         );
 
         if !include_path_suffix {

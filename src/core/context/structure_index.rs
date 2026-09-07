@@ -191,18 +191,22 @@ impl StructureIndex {
     }
 
     fn index_rust(&mut self, path: &str, content: &str) {
-        // Parse Rust code using regex patterns
+        // Parse Rust code using regex patterns (all are compile-time valid literals)
         let func_regex = regex::Regex::new(
             r"(?m)^(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*(?:<[^>]*>)?\s*\(([^)]*)\)(?:\s*->\s*([^\{]+))?\s*\{"
-        ).unwrap();
+        ).expect("valid regex: rust fn pattern");
 
-        let struct_regex = regex::Regex::new(r"(?m)^(?:pub\s+)?struct\s+(\w+)").unwrap();
+        let struct_regex = regex::Regex::new(r"(?m)^(?:pub\s+)?struct\s+(\w+)")
+            .expect("valid regex: rust struct pattern");
 
-        let enum_regex = regex::Regex::new(r"(?m)^(?:pub\s+)?enum\s+(\w+)").unwrap();
+        let enum_regex = regex::Regex::new(r"(?m)^(?:pub\s+)?enum\s+(\w+)")
+            .expect("valid regex: rust enum pattern");
 
-        let impl_regex = regex::Regex::new(r"(?m)^impl\s+(?:<[^>]*>\s+)?(\w+)").unwrap();
+        let impl_regex = regex::Regex::new(r"(?m)^impl\s+(?:<[^>]*>\s+)?(\w+)")
+            .expect("valid regex: rust impl pattern");
 
-        let use_regex = regex::Regex::new(r"(?m)^use\s+([\w:]+)(?:\s+as\s+(\w+))?;").unwrap();
+        let use_regex = regex::Regex::new(r"(?m)^use\s+([\w:]+)(?:\s+as\s+(\w+))?;")
+            .expect("valid regex: rust use pattern");
 
         // Index functions
         for cap in func_regex.captures_iter(content) {
@@ -403,7 +407,8 @@ impl StructureIndex {
 
     fn build_call_graph(&mut self, path: &str, content: &str) {
         // Find all function calls in the file
-        let call_regex = regex::Regex::new(r"(\w+)\s*\(").unwrap();
+        let call_regex =
+            regex::Regex::new(r"(\w+)\s*\(").expect("valid regex: function call pattern");
 
         // Get all functions defined in this file
         let file_funcs: Vec<String> = self
