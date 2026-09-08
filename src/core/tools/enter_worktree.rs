@@ -99,7 +99,7 @@ impl ToolInvocation for EnterWorktreeInvocation {
                 confirmation_type: crate::core::tools::tools::ConfirmationType::Ask,
                 title: "Enter Isolated Worktree?".to_string(),
                 prompt: "The agent wants to create an isolated git worktree for experimental changes. This uses `git worktree add` and will not affect your main working directory.".to_string(),
-                on_confirm: std::sync::Arc::new(|outcome| {
+                on_confirm: std::sync::Arc::new(|outcome, _feedback| {
                     if matches!(
                         outcome,
                         crate::types::ToolConfirmationOutcome::ProceedOnce

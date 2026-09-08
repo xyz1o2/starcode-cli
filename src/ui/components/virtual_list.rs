@@ -69,6 +69,14 @@ impl VirtualList {
         self.recalc_total();
     }
 
+    /// 在 idx 处删除一个条目（中间删除聊天条目时使用），后续项自动前移。
+    pub fn remove_at(&mut self, idx: usize) {
+        if idx < self.heights.len() {
+            self.heights.remove(idx);
+            self.recalc_total();
+        }
+    }
+
     /// Check if an item is dirty.
     pub fn is_dirty(&self, index: usize) -> bool {
         self.heights.get(index).map(|i| i.dirty).unwrap_or(false)

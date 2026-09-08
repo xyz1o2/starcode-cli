@@ -100,6 +100,7 @@ impl MessageBus {
                                 confirmed: true,
                                 requires_user_confirmation: None,
                                 outcome: None,
+                                feedback: None,
                             },
                         ))
                         .await;
@@ -118,6 +119,7 @@ impl MessageBus {
                                 confirmed: false,
                                 requires_user_confirmation: None,
                                 outcome: None,
+                                feedback: None,
                             },
                         ))
                         .await;
@@ -136,6 +138,7 @@ impl MessageBus {
                                 confirmed: false,
                                 requires_user_confirmation: None,
                                 outcome: Some(crate::types::ToolConfirmationOutcome::Cancel),
+                                feedback: None,
                             },
                         ))
                         .await;

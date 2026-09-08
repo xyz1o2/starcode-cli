@@ -115,7 +115,7 @@ impl ToolInvocation for GrepToolInvocation {
                              confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
                              title: "Untrusted Folder".to_string(),
                              prompt: format!("Security: Path {:?} is not in a trusted folder. Do you want to proceed?", path),
-                             on_confirm: std::sync::Arc::new(move |outcome| {
+                             on_confirm: std::sync::Arc::new(move |outcome, _feedback| {
                                  if let crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave = outcome {
                                      if let Some(tf) = config_clone.trusted_folders() {
                                          let _ = tf.set_trust_level(&path_clone, crate::core::config::trusted_folders::TrustLevel::TrustFolder);

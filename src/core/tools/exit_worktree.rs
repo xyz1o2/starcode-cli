@@ -113,7 +113,7 @@ impl ToolInvocation for ExitWorktreeInvocation {
                         "The agent wants to remove the isolated worktree at:\n\n{}{}",
                         path, keep_msg
                     ),
-                    on_confirm: std::sync::Arc::new(move |outcome| {
+                    on_confirm: std::sync::Arc::new(move |outcome, _feedback| {
                         if matches!(
                             outcome,
                             crate::types::ToolConfirmationOutcome::ProceedOnce

@@ -78,7 +78,7 @@ impl ToolInvocation for SmartEditToolInvocation {
                         "Editing file: {}\n- old: {}\n- new: {}\n(full diff will be shown after execution)",
                         path, old_preview, new_preview
                     ),
-                    on_confirm: std::sync::Arc::new(|_| {}),
+                    on_confirm: std::sync::Arc::new(|_, _feedback| {}),
                 },
             ))
         })

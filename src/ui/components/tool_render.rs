@@ -164,6 +164,8 @@ pub(crate) fn render_tool_entry_blocks(
                     state.pending_confirmation_choice,
                     state.show_permission_explanation,
                     state.show_permission_debug,
+                    state.confirmation_feedback_mode,
+                    &state.pending_confirmation_feedback,
                 )
             }
         } else {

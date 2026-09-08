@@ -13,6 +13,15 @@
 ///
 use crate::types::{AgentTaskStatus, ChatEntry, StarToolCall, ToolResult};
 
+/// 一条全局搜索匹配，作为 UI/worker 协议数据而非组件私有渲染状态。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlobalSearchMatch {
+    pub file: String,
+    pub line_number: usize,
+    pub content: String,
+    pub score: i32,
+}
+
 #[derive(Clone, Debug)]
 pub enum PendingCheckpointAction {
     List { message_id: u64 },
@@ -144,6 +153,12 @@ pub enum StreamMessage {
     PluginOpResult {
         message: Option<String>,
     },
+    /// 全局搜索后台任务完成。取消任务不发送结果，避免无效 UI 刷新。
+    GlobalSearchResults {
+        request_id: u64,
+        results: Vec<GlobalSearchMatch>,
+        truncated: bool,
+    },
     /// /summary、/recap 旁路生成完成（不进入主对话上下文）
     NoteGenerated {
         message_id: u64,
@@ -261,6 +276,13 @@ pub enum AgentRequest {
     PluginOp {
         project_root: std::path::PathBuf,
         op: PluginOp,
+    },
+    /// 全局搜索在 worker 后台运行，避免 ripgrep 阻塞终端键盘事件。
+    RunGlobalSearch {
+        request_id: u64,
+        query: String,
+        cwd: std::path::PathBuf,
+        cancellation: tokio_util::sync::CancellationToken,
     },
 }
 

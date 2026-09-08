@@ -2687,6 +2687,8 @@ async fn handle_overlay_input(
                         state.pending_tool_call_id = None;
                         state.show_permission_explanation = false;
                         state.show_permission_debug = false;
+                        state.pending_confirmation_feedback.clear();
+                        state.confirmation_feedback_mode = false;
                         if let Some(idx) = state.pending_confirmation_entry_idx {
                             state.rendered_cache.remove(&idx);
                         }

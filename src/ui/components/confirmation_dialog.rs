@@ -87,6 +87,8 @@ pub fn build_confirmation_card_block(
     selected_choice: usize,
     show_explanation: bool,
     show_debug: bool,
+    feedback_mode: bool,
+    feedback: &str,
 ) -> Vec<Line<'static>> {
     use crate::types::{ConfirmationDetails, ConfirmationType};
 
@@ -366,6 +368,37 @@ pub fn build_confirmation_card_block(
         &i18n::t("ui.confirm.option.deny", "4. 拒绝", "4. Deny"),
     ));
 
+    // ── Feedback input (Tab) ──
+    let feedback_prompt = if feedback_mode {
+        "  Feedback (Tab to return): "
+    } else {
+        "  Feedback (Tab to add): "
+    };
+    let feedback_display = if feedback.is_empty() && feedback_mode {
+        "Type feedback…"
+    } else {
+        feedback
+    };
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            feedback_prompt,
+            Style::default().fg(if feedback_mode {
+                SUGGESTION_COLOR
+            } else {
+                INACTIVE_COLOR
+            }),
+        ),
+        Span::styled(
+            feedback_display.to_string(),
+            Style::default().fg(if feedback.is_empty() {
+                INACTIVE_COLOR
+            } else {
+                Color::White
+            }),
+        ),
+    ]));
+
     // ── Explanation section (Ctrl+E) ──
     if show_explanation {
         lines.push(Line::from(""));
@@ -453,8 +486,8 @@ pub fn build_confirmation_card_block(
     lines.push(Line::from(Span::styled(
         i18n::t(
             "ui.confirm.hint.key_guide",
-            "  Esc 拒绝 · 1-4 选择 · Enter 确认 · Ctrl+E 解释 / Ctrl+D 调试",
-            "  Esc to reject · 1-4 to select · Enter to confirm · Ctrl+E explain · Ctrl+D debug",
+            "  Esc 拒绝 · 1-4 选择 · Enter 确认 · Tab 反馈 · Ctrl+E 解释 / Ctrl+D 调试",
+            "  Esc to reject · 1-4 to select · Enter to confirm · Tab feedback · Ctrl+E explain · Ctrl+D debug",
         ),
         Style::default().fg(SUBTLE_COLOR),
     )));
@@ -1261,7 +1294,7 @@ mod tests {
     #[test]
     fn card_renders_exactly_one_risk_line() {
         let count_risk = |c: &ToolConfirmation| {
-            build_confirmation_card_block(c, 60, 0, false, false)
+            build_confirmation_card_block(c, 60, 0, false, false, false, "")
                 .iter()
                 .filter(|l| {
                     let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -1291,5 +1324,33 @@ mod tests {
             },
         );
         assert_eq!(count_risk(&edit), 1);
+    }
+
+    #[test]
+    fn feedback_row_shows_draft_and_tab_hint() {
+        let confirmation = conf(
+            ConfirmationType::Generic,
+            ConfirmationDetails::Generic {
+                title: "Confirm operation".to_string(),
+                prompt: "Continue?".to_string(),
+            },
+        );
+        let lines = build_confirmation_card_block(
+            &confirmation,
+            80,
+            1,
+            false,
+            false,
+            true,
+            "Use the safe path",
+        );
+        let rendered: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+
+        assert!(rendered.contains("Feedback (Tab to return): Use the safe path"));
+        assert!(rendered.contains("Tab feedback"));
     }
 }

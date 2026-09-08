@@ -129,29 +129,11 @@ impl ContextMatcher {
         let mut stack = Vec::new();
 
         // Rust
-        if project_path.join("Cargo.toml").exists() {
+        let cargo_manifest = project_path.join("Cargo.toml");
+        if cargo_manifest.exists() {
             stack.push("rust".to_string());
-            // TODO: parse Cargo.toml for dependencies (tokio, serde, etc.)
-            let content = fs::read_to_string(project_path.join("Cargo.toml"))
-                .await
-                .unwrap_or_default();
-            if content.contains("tokio") {
-                stack.push("tokio".to_string());
-            }
-            if content.contains("actix") {
-                stack.push("actix".to_string());
-            }
-            if content.contains("axum") {
-                stack.push("axum".to_string());
-            }
-            if content.contains("yew") {
-                stack.push("yew".to_string());
-            }
-            if content.contains("leptos") {
-                stack.push("leptos".to_string());
-            }
-            if content.contains("ratatui") {
-                stack.push("ratatui".to_string());
+            if let Ok(content) = fs::read_to_string(cargo_manifest).await {
+                stack.extend(detect_cargo_tech_stack(&content));
             }
         }
 
@@ -444,5 +426,107 @@ impl ContextMatcher {
         }
 
         Ok(())
+    }
+}
+
+const CARGO_TECH_STACK_PACKAGES: &[&str] = &["tokio", "actix", "axum", "yew", "leptos", "ratatui"];
+
+/// 从 Cargo 清单中的直接运行时依赖提取已识别的技术栈标签。
+///
+/// 不读取 Cargo.lock 或解析 workspace 继承项：动态上下文匹配只需稳定、离线的
+/// 项目级信号。解析失败时由调用方保留 `rust`，但不猜测框架依赖。
+fn detect_cargo_tech_stack(content: &str) -> Vec<String> {
+    let Ok(manifest) = content.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+
+    let mut dependencies = HashSet::new();
+    collect_cargo_dependencies(manifest.get("dependencies"), &mut dependencies);
+
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        for target in targets.values() {
+            collect_cargo_dependencies(
+                target
+                    .as_table()
+                    .and_then(|target| target.get("dependencies")),
+                &mut dependencies,
+            );
+        }
+    }
+
+    CARGO_TECH_STACK_PACKAGES
+        .iter()
+        .filter(|package| dependencies.contains(**package))
+        .map(|package| (*package).to_string())
+        .collect()
+}
+
+/// 收集一个 `[dependencies]` 表的键及 inline-table `package` 别名。
+fn collect_cargo_dependencies(value: Option<&toml::Value>, dependencies: &mut HashSet<String>) {
+    let Some(table) = value.and_then(toml::Value::as_table) else {
+        return;
+    };
+
+    for (name, specification) in table {
+        dependencies.insert(name.clone());
+        if let Some(package) = specification
+            .as_table()
+            .and_then(|specification| specification.get("package"))
+            .and_then(toml::Value::as_str)
+        {
+            dependencies.insert(package.to_string());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cargo_stack_detects_direct_dependencies() {
+        let stack = detect_cargo_tech_stack(
+            r#"
+            [dependencies]
+            tokio = "1"
+            ratatui = "0.30"
+            "#,
+        );
+
+        assert_eq!(stack, vec!["tokio", "ratatui"]);
+    }
+
+    #[test]
+    fn cargo_stack_ignores_substring_only_matches() {
+        let stack = detect_cargo_tech_stack(
+            r#"
+            description = "An axum and ratatui example"
+            # tokio appears only in a comment.
+            [dependencies]
+            tokio-util = "0.7"
+            "#,
+        );
+
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn cargo_stack_detects_aliased_and_target_dependencies() {
+        let stack = detect_cargo_tech_stack(
+            r#"
+            [dependencies]
+            runtime = { package = "tokio", version = "1" }
+
+            [target.'cfg(windows)'.dependencies]
+            ratatui = "0.30"
+            "#,
+        );
+
+        assert_eq!(stack, vec!["tokio", "ratatui"]);
+    }
+
+    #[test]
+    fn malformed_cargo_manifest_has_no_dependency_signals() {
+        assert!(detect_cargo_tech_stack("[dependencies\ntokio = \"1\"").is_empty());
     }
 }

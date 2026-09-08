@@ -114,7 +114,7 @@ impl ToolInvocation for ExitPlanModeInvocation {
                     "The agent wants to exit Plan Mode and execute the following plan:\n\n{}",
                     plan
                 ),
-                on_confirm: std::sync::Arc::new(move |outcome| {
+                on_confirm: std::sync::Arc::new(move |outcome, _feedback| {
                     let confirmed = matches!(
                         outcome,
                         crate::types::ToolConfirmationOutcome::ProceedOnce

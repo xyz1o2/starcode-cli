@@ -248,9 +248,9 @@ pub async fn handle_request(
         AgentRequest::ConfirmTool {
             tool_call_id,
             outcome,
-            feedback: _,
+            feedback,
         } => {
-            handle_confirm_tool(agent, tx, tool_call_id, outcome).await;
+            handle_confirm_tool(agent, tx, tool_call_id, outcome, feedback).await;
         }
         AgentRequest::EmitStatus(status) => {
             let _ = tx
@@ -285,6 +285,14 @@ pub async fn handle_request(
         AgentRequest::PluginOp { project_root, op } => {
             spawn_plugin_op(tx, project_root, op);
         }
+        AgentRequest::RunGlobalSearch {
+            request_id,
+            query,
+            cwd,
+            cancellation,
+        } => {
+            spawn_global_search(tx, request_id, query, cwd, cancellation);
+        }
     }
     None
 }
@@ -301,6 +309,37 @@ pub fn spawn_plugin_op(
     tokio::spawn(async move {
         let message = run_plugin_op(&project_root, op).await;
         let _ = tx.send(StreamMessage::PluginOpResult { message }).await;
+    });
+}
+
+/// 在后台执行全局搜索。取消的请求不会发送结果，UI 端的请求 ID 仍是最终竞态保护。
+pub fn spawn_global_search(
+    tx: &mpsc::Sender<StreamMessage>,
+    request_id: u64,
+    query: String,
+    cwd: std::path::PathBuf,
+    cancellation: tokio_util::sync::CancellationToken,
+) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        if cancellation.is_cancelled() {
+            return;
+        }
+        let result =
+            crate::ui::components::highlight::search::execute_search(&query, &cwd, &cancellation)
+                .await;
+        if cancellation.is_cancelled() {
+            return;
+        }
+        if let Some((results, truncated)) = result {
+            let _ = tx
+                .send(StreamMessage::GlobalSearchResults {
+                    request_id,
+                    results,
+                    truncated,
+                })
+                .await;
+        }
     });
 }
 
@@ -512,8 +551,9 @@ async fn handle_confirm_tool(
     _tx: &mpsc::Sender<StreamMessage>,
     tool_call_id: String,
     outcome: crate::types::ToolConfirmationOutcome,
+    feedback: Option<String>,
 ) {
-    use crate::core::confirmation_bus::types::{Message, MessageBusType, ToolConfirmationResponse};
+    use crate::core::confirmation_bus::types::{Message, ToolConfirmationResponse};
 
     let message_bus = agent.runtime_message_bus().unwrap_or_else(|| {
         use crate::core::policy::PolicyEngine;
@@ -524,22 +564,37 @@ async fn handle_confirm_tool(
             false,
         ))
     });
-    let confirmed = matches!(
+    let msg = Message::ToolConfirmationResponse(ToolConfirmationResponse::from_user_decision(
+        tool_call_id,
         outcome,
-        crate::types::ToolConfirmationOutcome::ProceedOnce
-            | crate::types::ToolConfirmationOutcome::ProceedAlways
-            | crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave
-            | crate::types::ToolConfirmationOutcome::AllowSession
-            | crate::types::ToolConfirmationOutcome::UserAnswer { .. }
-    );
-
-    let msg = Message::ToolConfirmationResponse(ToolConfirmationResponse {
-        message_type: MessageBusType::ToolConfirmationResponse,
-        correlation_id: tool_call_id,
-        confirmed,
-        outcome: Some(outcome),
-        requires_user_confirmation: None,
-    });
+        feedback,
+    ));
 
     let _ = message_bus.publish(msg).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn cancelled_global_search_emits_no_results() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        spawn_global_search(
+            &tx,
+            7,
+            "needle".to_string(),
+            std::path::PathBuf::from("."),
+            cancellation,
+        );
+
+        assert!(tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .is_err());
+    }
 }

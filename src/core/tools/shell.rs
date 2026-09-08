@@ -567,7 +567,7 @@ fn check_interactive_command(
             confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
             title: "Admin privileges required".to_string(),
             prompt: format!("Command '{}' requires sudo privileges.\n\nPlease run this command manually in the terminal, or configure sudoers for passwordless access.\n\nContinuing will wait for password input (may timeout).", command),
-            on_confirm: std::sync::Arc::new(|_| {}),
+            on_confirm: std::sync::Arc::new(|_, _feedback| {}),
         });
     }
 
@@ -576,7 +576,7 @@ fn check_interactive_command(
             confirmation_type: crate::core::tools::tools::ConfirmationType::Danger,
             title: "Interactive Command Detected".to_string(),
             prompt: format!("The command '{}' appears to be interactive and may hang the session. Do you want to proceed?", command),
-            on_confirm: std::sync::Arc::new(|_| {}),
+            on_confirm: std::sync::Arc::new(|_, _feedback| {}),
         });
     }
     if (cmd_lower == "python" || cmd_lower == "python3" || cmd_lower == "node") && parts.len() == 1
@@ -588,7 +588,7 @@ fn check_interactive_command(
                 "The command '{}' starts an interactive interpreter which will hang. Proceed?",
                 command
             ),
-            on_confirm: std::sync::Arc::new(|_| {}),
+            on_confirm: std::sync::Arc::new(|_, _feedback| {}),
         });
     }
     None
@@ -610,7 +610,7 @@ fn check_dangerous_patterns(
                 confirmation_type: crate::core::tools::tools::ConfirmationType::Danger,
                 title: "⛔ CRITICAL: Dangerous Command Detected".to_string(),
                 prompt: format!("The command '{}' contains a pattern explicitly blocked for safety ('{}'). Execution is highly discouraged.", command, dangerous),
-                on_confirm: std::sync::Arc::new(|_| {}),
+                on_confirm: std::sync::Arc::new(|_, _feedback| {}),
             });
         }
     }
@@ -634,7 +634,7 @@ fn check_dangerous_patterns(
                     "The command references a sensitive resource '{}'. Do you want to proceed?",
                     pattern
                 ),
-                on_confirm: std::sync::Arc::new(|_| {}),
+                on_confirm: std::sync::Arc::new(|_, _feedback| {}),
             });
         }
     }
@@ -652,7 +652,7 @@ fn check_tool_substitution(
             confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
             title: "Tool Substitution Suggestion".to_string(),
             prompt: format!("Use the 'Grep' tool instead of shell '{}'. It is safer, faster, and provides structured output for the agent.", cmd_parts.first().unwrap()),
-            on_confirm: std::sync::Arc::new(|_| {}),
+            on_confirm: std::sync::Arc::new(|_, _feedback| {}),
         });
     }
 
@@ -663,7 +663,7 @@ fn check_tool_substitution(
             prompt:
                 "Use the 'glob' tool instead of 'find'. It is optimized for codebase exploration."
                     .to_string(),
-            on_confirm: std::sync::Arc::new(|_| {}),
+            on_confirm: std::sync::Arc::new(|_, _feedback| {}),
         });
     }
 
@@ -672,7 +672,7 @@ fn check_tool_substitution(
             confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
             title: "Tool Substitution Suggestion".to_string(),
             prompt: format!("Use the 'Read' tool instead of '{}'. It handles large files better and tracks file access context.", cmd_parts.first().unwrap()),
-            on_confirm: std::sync::Arc::new(|_| {}),
+            on_confirm: std::sync::Arc::new(|_, _feedback| {}),
         });
     }
 
@@ -683,7 +683,7 @@ fn check_tool_substitution(
             confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
             title: "Tool Substitution Suggestion".to_string(),
             prompt: "Use the 'ListDir' (list_directory) tool for recursive or detailed directory listing. It provides file types and sizes in a parsed format.".to_string(),
-            on_confirm: std::sync::Arc::new(|_| {}),
+            on_confirm: std::sync::Arc::new(|_, _feedback| {}),
         });
     }
     None
@@ -701,7 +701,7 @@ fn check_dangerous_operators(
                 "The command contains shell operators/chaining. Review carefully: {}",
                 command
             ),
-            on_confirm: std::sync::Arc::new(|_| {}),
+            on_confirm: std::sync::Arc::new(|_, _feedback| {}),
         });
     }
     None
@@ -804,7 +804,7 @@ impl ToolInvocation for ShellToolInvocation {
                                          confirmation_type: crate::core::tools::tools::ConfirmationType::Danger,
                                          title: "⚠️ Security Alert: Command Injection Detected".to_string(),
                                          prompt: format!("The security system detected a potential command injection risk in the command:\n\n`{}`\n\nThis command attempts to execute code beyond the detected prefix. Proceed with extreme caution.", command),
-                                         on_confirm: std::sync::Arc::new(|_| {}),
+                                         on_confirm: std::sync::Arc::new(|_, _feedback| {}),
                                      }));
                                     }
                                 }
@@ -856,7 +856,7 @@ impl ToolInvocation for ShellToolInvocation {
                                 "Command references paths outside the project:\n{}\n\nPlease confirm whether to proceed.",
                                 lines.join("\n")
                             ),
-                            on_confirm: std::sync::Arc::new(move |outcome| match outcome {
+                            on_confirm: std::sync::Arc::new(move |outcome, _feedback| match outcome {
                                 crate::types::ToolConfirmationOutcome::AllowSession
                                 | crate::types::ToolConfirmationOutcome::ProceedAlways => {
                                     let mut set = EXTERNAL_DIR_ALLOW_SESSION.lock().unwrap_or_else(|e| e.into_inner());
@@ -900,7 +900,7 @@ impl ToolInvocation for ShellToolInvocation {
                              confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
                              title: "Untrusted Folder".to_string(),
                              prompt: format!("Security: Execution in untrusted path {:?} is blocked. Do you want to proceed?", path),
-                             on_confirm: std::sync::Arc::new(move |outcome| {
+                             on_confirm: std::sync::Arc::new(move |outcome, _feedback| {
                                  if let crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave = outcome {
                                      if let Some(tf) = config_clone.trusted_folders() {
                                          let folder_to_trust = if path_clone.is_dir() {

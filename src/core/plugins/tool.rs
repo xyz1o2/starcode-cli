@@ -154,7 +154,7 @@ impl ToolInvocation for PluginToolInvocation {
                 confirmation_type,
                 title: plugin_tool_confirmation_title(&spec),
                 prompt: plugin_tool_confirmation_prompt(&spec, &params),
-                on_confirm: Arc::new(|_outcome| {}),
+                on_confirm: Arc::new(|_outcome, _feedback| {}),
             }))
         })
     }

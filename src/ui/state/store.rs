@@ -596,11 +596,11 @@ pub struct ChatState {
     pub mdm: crate::core::mdm::MdmManager,
     // ============ Code Structure Index ============
     pub structure_index: Option<crate::core::context::structure_index::StructureIndex>,
-    // ============ Context Engine (integrated) ============
-    pub context_engine: Option<crate::core::context::integration::ContextEngine>,
     // ============ Highlight/Dialog States ============
     pub show_global_search: bool,
     pub global_search_state: crate::ui::components::highlight::search::GlobalSearchState,
+    /// 全局搜索请求序列号，跨弹窗生命周期单调递增，防止旧结果命中新弹窗。
+    next_global_search_request_id: u64,
     pub show_quick_open: bool,
     pub quick_open_state: crate::ui::components::highlight::quick_open::QuickOpenState,
     pub show_history_search: bool,
@@ -665,6 +665,16 @@ impl ChatState {
     /// 模型列表的年龄（秒）。`None` = 这个会话里还没拿到过列表。
     pub fn models_list_age_secs(&self) -> Option<u64> {
         self.models_listed_at.map(|at| at.elapsed().as_secs())
+    }
+
+    /// 分配一个不在同一进程中复用的全局搜索请求 ID。
+    pub fn allocate_global_search_request_id(&mut self) -> u64 {
+        let request_id = self.next_global_search_request_id;
+        self.next_global_search_request_id = self
+            .next_global_search_request_id
+            .checked_add(1)
+            .expect("global search request ID exhausted");
+        request_id
     }
 
     /// 记下"这份列表是 `age_secs` 秒前拉的"。`None` 表示刚从 API 拉的。
@@ -954,10 +964,10 @@ impl ChatState {
             theme_manager: crate::ui::themes::ThemeManager::new(),
             mdm: crate::core::mdm::MdmManager::new(),
             structure_index: None,
-            context_engine: None,
             // ============ Highlight/Dialog States ============
             show_global_search: false,
             global_search_state: crate::ui::components::highlight::search::GlobalSearchState::new(),
+            next_global_search_request_id: 1,
             show_quick_open: false,
             quick_open_state: crate::ui::components::highlight::quick_open::QuickOpenState::new(),
             show_history_search: false,

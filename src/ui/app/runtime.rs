@@ -35,16 +35,58 @@ use tokio::sync::mpsc;
 use crate::core::utils::watchdog::Watchdog;
 use crate::runtime::messages::{AgentRequest, StreamMessage};
 use crate::ui::events::clipboard_paste::{
-    detect_file_paths, insert_file_paste_block, insert_paste_block,
-    maybe_auto_fold_input, sync_input_from_textarea,
+    detect_file_paths, insert_file_paste_block, insert_paste_block, maybe_auto_fold_input,
+    sync_input_from_textarea,
 };
-use crate::ui::state::ChatState;
+use crate::ui::state::{modal::Modal, ChatState};
 
 use std::sync::Arc;
 
 /// Minimum interval between two paste events — skips the second one when
 /// WSL2/Windows Terminal sends both Event::Paste and individual char events for a single paste action.
 const PASTE_DEBOUNCE_MS: u64 = 200;
+
+/// 返回需要因流输出停滞而结束 UI processing 的秒数。
+///
+/// 已登记的工具仍由执行器和 `ToolResult` 负责生命周期，不能被纯 UI 空闲计时误判为完成。
+fn stalled_processing_secs_without_active_tool(state: &ChatState) -> Option<u64> {
+    if !state.is_processing || !state.tool_started_at.is_empty() {
+        return None;
+    }
+
+    let stall_secs = state.last_token_time?.elapsed().as_secs();
+    (stall_secs > 30).then_some(stall_secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn processing_watchdog_waits_for_recorded_tools() {
+        let mut state = ChatState::new();
+        state.is_processing = true;
+        state.last_token_time = Some(Instant::now() - Duration::from_secs(31));
+        assert_eq!(
+            stalled_processing_secs_without_active_tool(&state),
+            Some(31)
+        );
+
+        state.tool_started_at.insert(
+            "call-1".to_string(),
+            Instant::now() - Duration::from_secs(31),
+        );
+        assert_eq!(stalled_processing_secs_without_active_tool(&state), None);
+
+        state.tool_started_at.clear();
+        state.is_processing = false;
+        assert_eq!(stalled_processing_secs_without_active_tool(&state), None);
+
+        state.is_processing = true;
+        state.last_token_time = None;
+        assert_eq!(stalled_processing_secs_without_active_tool(&state), None);
+    }
+}
 
 /// Prevent escape sequences from being split into independent key events due to crossterm's internal ESC timeout (~100ms).
 /// On affected terminals (legacy Windows console, WSL2 PTY, high-latency SSH),
@@ -525,6 +567,16 @@ pub async fn run_ui_loop(
             }
         }
 
+        // Local Quick Open searches never await the modal key handler. Drain their
+        // completions here so a slow `fd` walk cannot hold up terminal input.
+        let quick_open_active = matches!(state.top_modal(), Some(Modal::QuickOpen));
+        if state
+            .quick_open_state
+            .drain_search_results(quick_open_active)
+        {
+            needs_redraw = true;
+        }
+
         // Only clear terminal on layout changes (task panel toggle), not on scroll.
         // The buffer clearing in render_page (cell.reset()) handles CJK ghosting.
         // terminal.clear() on scroll causes flickering.
@@ -582,6 +634,8 @@ pub async fn run_ui_loop(
             // Clear confirmation state to unblock queued messages
             state.is_awaiting_confirmation = false;
             state.pending_confirmation_entry_idx = None;
+            state.pending_confirmation_feedback.clear();
+            state.confirmation_feedback_mode = false;
 
             // 用户刚按下 Esc 打断，这时候把排队的输入自动发出去等于没打断成功。
             // 对标 Claude Code 取消时的 `handleQueuedCommandOnCancel`：
@@ -597,38 +651,18 @@ pub async fn run_ui_loop(
             }
         }
 
-        // 超时保护：如果 is_processing 为 true 但超过 30 秒没有新消息，自动清除
-        // 这处理 Done 消息丢失或 agent 卡住的情况
-        if state.is_processing {
-            let stall_secs = state
-                .last_token_time
-                .map(|t| t.elapsed().as_secs())
-                .unwrap_or(0);
-            if stall_secs > 30 {
-                crate::utils::logging::append_debug_log_line(&format!(
-                    "[STALL] is_processing stuck for {}s, auto-clearing",
-                    stall_secs
-                ));
-                state.is_processing = false;
-                state.is_streaming = false;
-                state.current_tool_name = None;
-                state.thinking_started_at = None;
-                state.current_status_line = Some("✓ Done (timeout)".to_string());
-            }
-        }
-
-        // 超时保护：current_tool_name 超过 15 秒没更新就清除
-        // 这处理工具已完成但 ToolResult 消息丢失的情况
-        if state.current_tool_name.is_some() {
-            let tool_stale = state
-                .tool_started_at
-                .values()
-                .max()
-                .map(|t| t.elapsed().as_secs() > 15)
-                .unwrap_or(true);
-            if tool_stale {
-                state.current_tool_name = None;
-            }
+        // 超时保护：流输出停滞时恢复 UI。仍有已登记工具则等待 ToolResult、
+        // Done/Error、取消或执行器自身超时，不把 UI 空闲误报成完成。
+        if let Some(stall_secs) = stalled_processing_secs_without_active_tool(state) {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[STALL] is_processing stuck for {}s, auto-clearing",
+                stall_secs
+            ));
+            state.is_processing = false;
+            state.is_streaming = false;
+            state.current_tool_name = None;
+            state.thinking_started_at = None;
+            state.current_status_line = Some("✓ Done (timeout)".to_string());
         }
 
         // Poll /loop scheduled tasks (once per second)
@@ -1130,29 +1164,6 @@ pub async fn run_app(
 
     // Restore draft from previous session
     state.restore_draft();
-
-    // Initialize context engine and start background indexing
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let mut context_engine = crate::core::context::integration::ContextEngine::new(cwd.clone());
-    state.context_engine = Some(context_engine);
-
-    // Spawn background indexing task
-    let index_tx = agent_tx.clone();
-    tokio::spawn(async move {
-        let mut engine = crate::core::context::integration::ContextEngine::new(cwd);
-        match engine.index_project().await {
-            Ok(result) => {
-                let _ = index_tx
-                    .send(AgentRequest::EmitStatus(format!("Indexed: {}", result)))
-                    .await;
-            }
-            Err(e) => {
-                let _ = index_tx
-                    .send(AgentRequest::EmitStatus(format!("Index failed: {}", e)))
-                    .await;
-            }
-        }
-    });
 
     // 抬头由 `ChatState::new()` 建的那条 is_welcome 条目承载，渲染期现算
     // （见 ui::components::welcome_header）。这里不再另塞一条，否则主界面

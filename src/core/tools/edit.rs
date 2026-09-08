@@ -5,7 +5,8 @@ use crate::core::tools::tools::{BaseDeclarativeTool, Kind, ToolError, ToolResult
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use similar::TextDiff;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -607,9 +608,28 @@ pub fn get_error_replace_result(
     final_old_string: &str,
     final_new_string: &str,
 ) -> Option<EditError> {
+    get_error_replace_result_at_path(
+        params,
+        Path::new(&params.file_path),
+        occurrences,
+        expected_replacements,
+        final_old_string,
+        final_new_string,
+    )
+}
+
+fn get_error_replace_result_at_path(
+    params: &EditToolParams,
+    diagnostic_path: &Path,
+    occurrences: usize,
+    expected_replacements: usize,
+    final_old_string: &str,
+    final_new_string: &str,
+) -> Option<EditError> {
     if occurrences == 0 {
         // Enhanced diagnosis: try to find similar content in the file
-        let diagnosis = diagnose_replace_failure(&params.file_path, &params.old_string);
+        let diagnosis =
+            diagnose_replace_failure(&diagnostic_path.to_string_lossy(), &params.old_string);
         Some(EditError {
             display: "Failed to edit, could not find the string to replace.".to_string(),
             raw: format!(
@@ -858,6 +878,8 @@ pub struct EditToolInvocation {
     params: EditToolParams,
     message_bus: Arc<MessageBus>,
     global_state: Arc<GlobalState>,
+    resolved_path: PathBuf,
+    confirmed_untrusted_edit: Arc<AtomicBool>,
 }
 
 impl EditToolInvocation {
@@ -867,11 +889,15 @@ impl EditToolInvocation {
         message_bus: Arc<MessageBus>,
         global_state: Arc<GlobalState>,
     ) -> Self {
+        let resolved_path =
+            crate::core::utils::paths::resolve_tool_path(config.target_dir(), &params.file_path);
         Self {
             config,
             params,
             message_bus,
             global_state,
+            resolved_path,
+            confirmed_untrusted_edit: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -883,7 +909,7 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
 
     fn tool_locations(&self) -> Vec<crate::core::tools::tools::ToolLocation> {
         vec![crate::core::tools::tools::ToolLocation {
-            path: std::path::PathBuf::from(&self.params.file_path),
+            path: self.resolved_path.clone(),
             location_type: crate::core::tools::tools::LocationType::Write,
         }]
     }
@@ -902,21 +928,62 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
         >,
     > {
         let config = self.config.clone();
-        let path_str = self.params.file_path.clone();
+        let resolved_path = self.resolved_path.clone();
+        let confirmed_untrusted_edit = self.confirmed_untrusted_edit.clone();
         Box::pin(async move {
             if config.folder_trust() {
-                if let Some(tf) = config.trusted_folders() {
-                    let path = std::path::Path::new(&path_str);
-                    if !tf.is_path_trusted(path).unwrap_or(false) {
-                        return Ok(Some(crate::core::tools::tools::ToolCallConfirmationDetails {
-                             confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
-                             title: "Untrusted Edit".to_string(),
-                             prompt: format!("Security: Editing file in untrusted path {:?} is blocked. Do you want to proceed?", path),
-                             on_confirm: std::sync::Arc::new(move |_outcome| {
-                                 // Placeholder for trust logic
-                             }),
-                         }));
-                    }
+                let is_trusted = config
+                    .trusted_folders()
+                    .and_then(|trusted_folders| trusted_folders.is_path_trusted(&resolved_path))
+                    .unwrap_or(false);
+                if !is_trusted {
+                    let path_for_callback = resolved_path.clone();
+                    let config_for_callback = config.clone();
+                    return Ok(Some(crate::core::tools::tools::ToolCallConfirmationDetails {
+                            confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
+                            title: "Untrusted Edit".to_string(),
+                            prompt: format!(
+                                "Security: Editing file in untrusted path {:?} is blocked. Do you want to proceed?",
+                                resolved_path
+                            ),
+                            on_confirm: std::sync::Arc::new(move |outcome, _feedback| {
+                                use crate::types::ToolConfirmationOutcome;
+
+                                match outcome {
+                                    ToolConfirmationOutcome::ProceedOnce
+                                    | ToolConfirmationOutcome::AllowSession
+                                    | ToolConfirmationOutcome::ProceedAlways
+                                    | ToolConfirmationOutcome::ProceedAlwaysAndSave => {
+                                        confirmed_untrusted_edit.store(true, Ordering::Release);
+                                    }
+                                    ToolConfirmationOutcome::Cancel
+                                    | ToolConfirmationOutcome::UserAnswer { .. } => return,
+                                }
+
+                                if matches!(outcome, ToolConfirmationOutcome::ProceedAlwaysAndSave) {
+                                    if let Some(tf) = config_for_callback.trusted_folders() {
+                                        let folder_to_trust = if path_for_callback.is_dir() {
+                                            path_for_callback.clone()
+                                        } else {
+                                            path_for_callback
+                                                .parent()
+                                                .unwrap_or(&path_for_callback)
+                                                .to_path_buf()
+                                        };
+                                        if let Err(err) = tf.set_trust_level(
+                                            &folder_to_trust,
+                                            crate::core::config::trusted_folders::TrustLevel::TrustFolder,
+                                        ) {
+                                            log::warn!(
+                                                "Failed to persist trusted folder {}: {}",
+                                                folder_to_trust.display(),
+                                                err
+                                            );
+                                        }
+                                    }
+                                }
+                            }),
+                        }));
                 }
             }
             Ok(None)
@@ -937,30 +1004,35 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
         let config = self.config.clone();
         let params = self.params.clone();
         let global_state = self.global_state.clone();
+        let resolved_path = self.resolved_path.clone();
+        let confirmed_untrusted_edit = self.confirmed_untrusted_edit.clone();
 
         Box::pin(async move {
-            // Re-use logic from original EditTool::execute
+            // Keep this guard for direct execution paths that bypass ToolExecutor.
             if config.folder_trust() {
-                if let Some(tf) = config.trusted_folders() {
-                    let path = std::path::Path::new(&params.file_path);
-                    if !tf.is_path_trusted(path).unwrap_or(false) {
-                        let msg = format!("Security: Path {:?} is not in a trusted folder.", path);
-                        return Ok(ToolResult {
-                            llm_content: Some(msg.clone()),
-                            return_display: Some(msg.clone()),
-                            output: msg.clone(),
-                            error: Some(ToolError {
-                                error_type: "SecurityError".to_string(),
-                                message: msg,
-                            }),
-                            data: None,
-                        });
-                    }
+                let is_trusted = config
+                    .trusted_folders()
+                    .and_then(|trusted_folders| trusted_folders.is_path_trusted(&resolved_path))
+                    .unwrap_or(false);
+                let was_confirmed = confirmed_untrusted_edit.load(Ordering::Acquire);
+                if !is_trusted && !was_confirmed {
+                    let msg = format!(
+                        "Security: Path {:?} is not in a trusted folder.",
+                        resolved_path
+                    );
+                    return Ok(ToolResult {
+                        llm_content: Some(msg.clone()),
+                        return_display: Some(msg.clone()),
+                        output: msg.clone(),
+                        error: Some(ToolError {
+                            error_type: "SecurityError".to_string(),
+                            message: msg,
+                        }),
+                        data: None,
+                    });
                 }
             }
 
-            // Resolve path consistently with read_file (join with target_dir)
-            let resolved_path = config.target_dir().join(&params.file_path);
             let abs_path = resolved_path
                 .canonicalize()
                 .unwrap_or_else(|_| resolved_path.clone())
@@ -1019,9 +1091,8 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
                         }
                     }
                 } else {
-                    // Not in state
-                    // Allow if file doesn't exist (creating new file)
-                    if std::path::Path::new(&params.file_path).exists() {
+                    // Allow creating a new file, but existing files must have been read.
+                    if resolved_path.exists() {
                         let msg = format!(
                             "Edit blocked [edit_file_not_read]: file '{}' must be read with `Read` before using `replace`. \
                              REQUIRED NEXT STEP: call `Read` with file_path='{}' first, then retry. \
@@ -1075,7 +1146,7 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
             // they must never block the edit.
             {
                 let msg_id = global_state.current_message_id().await;
-                let edit_file_path = std::path::Path::new(&params.file_path).to_path_buf();
+                let edit_file_path = resolved_path.clone();
                 if let Err(e) = crate::utils::checkpoint_manager::track_edit(
                     &edit_file_path,
                     msg_id,
@@ -1092,16 +1163,16 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
                 }
             }
 
+            let resolved_path_for_io = resolved_path.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let expected_replacements = params.expected_replacements.unwrap_or(1);
+                let path_for_io = resolved_path_for_io;
 
                 let mut current_content: Option<String> = None;
                 let mut _file_exists = false;
                 let mut original_line_ending = LineEnding::LF;
 
-                match crate::core::utils::file_utils::read_file_with_encoding_io(
-                    std::path::Path::new(&params.file_path),
-                ) {
+                match crate::core::utils::file_utils::read_file_with_encoding_io(&path_for_io) {
                     Ok(content) => {
                         original_line_ending = detect_line_ending(&content);
                         current_content = Some(normalize_line_endings(&content));
@@ -1119,17 +1190,23 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
                     let line_count = params.new_string.lines().count();
                     let msg = format!("Wrote {} lines to {}", line_count, params.file_path);
                     // Create parent directory if needed
-                    if let Some(parent) = Path::new(&params.file_path).parent() {
+                    if let Some(parent) = path_for_io.parent() {
                         std::fs::create_dir_all(parent)
                             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
                     }
                     // Atomic write: write to temp then rename
-                    let tmp_path = format!("{}.star_tmp", &params.file_path);
+                    let tmp_path = path_for_io.with_extension(format!(
+                        "{}.star_tmp",
+                        path_for_io
+                            .extension()
+                            .and_then(|extension| extension.to_str())
+                            .unwrap_or_default()
+                    ));
                     std::fs::write(&tmp_path, &params.new_string)
                         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-                    std::fs::rename(&tmp_path, &params.file_path)
+                    std::fs::rename(&tmp_path, &path_for_io)
                         .or_else(|_| {
-                            std::fs::copy(&tmp_path, &params.file_path)
+                            std::fs::copy(&tmp_path, &path_for_io)
                                 .map(|_| ())
                                 .and_then(|_| std::fs::remove_file(&tmp_path))
                         })
@@ -1189,8 +1266,9 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
                 let replacement_result =
                     calculate_replacement(current, &params.old_string, &params.new_string);
 
-                if let Some(error) = get_error_replace_result(
+                if let Some(error) = get_error_replace_result_at_path(
                     &params,
+                    &path_for_io,
                     replacement_result.occurrences,
                     expected_replacements,
                     &replacement_result.final_old_string,
@@ -1215,18 +1293,24 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
                     final_content = final_content.replace('\n', "\r\n");
                 }
 
-                if let Some(parent) = Path::new(&params.file_path).parent() {
+                if let Some(parent) = path_for_io.parent() {
                     std::fs::create_dir_all(parent)
                         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
                 }
 
                 // Atomic write: write to temp then rename
-                let tmp_path = format!("{}.star_tmp", &params.file_path);
+                let tmp_path = path_for_io.with_extension(format!(
+                    "{}.star_tmp",
+                    path_for_io
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .unwrap_or_default()
+                ));
                 std::fs::write(&tmp_path, &final_content)
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-                std::fs::rename(&tmp_path, &params.file_path)
+                std::fs::rename(&tmp_path, &path_for_io)
                     .or_else(|_| {
-                        std::fs::copy(&tmp_path, &params.file_path)
+                        std::fs::copy(&tmp_path, &path_for_io)
                             .map(|_| ())
                             .and_then(|_| std::fs::remove_file(&tmp_path))
                     })
@@ -1336,6 +1420,10 @@ impl BaseDeclarativeTool for EditTool {
         EditTool::parameter_schema(self)
     }
 
+    fn requires_invocation_confirmation(&self) -> bool {
+        self.config.folder_trust()
+    }
+
     fn create_invocation(
         &self,
         params: serde_json::Value,
@@ -1411,6 +1499,351 @@ mod tests {
         )
         .expect("参数解析失败");
         assert_eq!(parsed.replace_all, Some(true));
+    }
+
+    fn untrusted_edit_fixture(
+        root: &std::path::Path,
+    ) -> (
+        Arc<crate::core::config::Config>,
+        Arc<MessageBus>,
+        Arc<GlobalState>,
+    ) {
+        let mut config_params = crate::core::config::ConfigParameters::default();
+        config_params.target_dir = root.to_path_buf();
+        config_params.cwd = root.to_path_buf();
+        config_params.folder_trust = Some(true);
+
+        let mut config = crate::core::config::Config::new(config_params);
+        config.trusted_folders_manager = Some(
+            crate::core::config::trusted_folders::TrustedFolders::new_for_test(
+                root.join("trustedFolders.json"),
+            )
+            .expect("创建隔离 trust 配置失败"),
+        );
+
+        let message_bus = Arc::new(MessageBus::new(
+            crate::core::policy::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        (Arc::new(config), message_bus, Arc::new(GlobalState::new()))
+    }
+
+    fn new_file_edit_params(file_path: &str, content: &str) -> EditToolParams {
+        EditToolParams {
+            file_path: file_path.to_string(),
+            old_string: String::new(),
+            new_string: content.to_string(),
+            expected_replacements: Some(1),
+            replace_all: None,
+            instruction: None,
+            modified_by_user: None,
+            ai_proposed_content: None,
+        }
+    }
+
+    async fn untrusted_confirmation(
+        invocation: &EditToolInvocation,
+    ) -> crate::core::tools::tools::ToolCallConfirmationDetails {
+        use crate::core::tools::tools::ToolInvocation;
+
+        invocation
+            .should_confirm_execute(None)
+            .await
+            .expect("确认检查失败")
+            .expect("未受信任路径必须请求确认")
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_untrusted_edit_is_blocked_without_creating_the_file() {
+        use crate::core::tools::tools::ToolInvocation;
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        let (config, message_bus, global_state) = untrusted_edit_fixture(temp.path());
+        let invocation = EditToolInvocation::new(
+            config,
+            new_file_edit_params("nested/blocked.txt", "blocked"),
+            message_bus,
+            global_state,
+        );
+
+        let result = invocation
+            .execute(None, None)
+            .await
+            .expect("Edit 应返回工具错误而非执行失败");
+
+        assert_eq!(
+            result.error.expect("未确认编辑必须被拒绝").error_type,
+            "SecurityError"
+        );
+        assert!(!temp.path().join("nested/blocked.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn proceed_once_edits_configured_target_without_persisting_trust() {
+        use crate::core::tools::tools::ToolInvocation;
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        let (config, message_bus, global_state) = untrusted_edit_fixture(temp.path());
+        let invocation = EditToolInvocation::new(
+            config.clone(),
+            new_file_edit_params("nested/once.txt", "once"),
+            message_bus.clone(),
+            global_state.clone(),
+        );
+
+        let confirmation = untrusted_confirmation(&invocation).await;
+        (confirmation.on_confirm)(crate::types::ToolConfirmationOutcome::ProceedOnce, None);
+        let result = invocation.execute(None, None).await.expect("Edit 执行失败");
+
+        assert!(result.error.is_none());
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("nested/once.txt")).expect("读取编辑结果失败"),
+            "once"
+        );
+        assert!(!config
+            .trusted_folders()
+            .expect("缺少 trust 管理器")
+            .is_path_trusted(&temp.path().join("nested/once.txt"))
+            .unwrap_or(false));
+
+        let fresh_invocation = EditToolInvocation::new(
+            config,
+            new_file_edit_params("nested/fresh.txt", "fresh"),
+            message_bus,
+            global_state,
+        );
+        let fresh_result = fresh_invocation
+            .execute(None, None)
+            .await
+            .expect("Edit 应返回工具错误而非执行失败");
+        assert_eq!(
+            fresh_result
+                .error
+                .expect("新的未确认调用不得继承批准状态")
+                .error_type,
+            "SecurityError"
+        );
+    }
+
+    #[tokio::test]
+    async fn allow_session_only_enables_the_confirmed_edit_invocation() {
+        use crate::core::tools::tools::ToolInvocation;
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        let (config, message_bus, global_state) = untrusted_edit_fixture(temp.path());
+        let invocation = EditToolInvocation::new(
+            config.clone(),
+            new_file_edit_params("nested/session.txt", "session"),
+            message_bus,
+            global_state,
+        );
+
+        let confirmation = untrusted_confirmation(&invocation).await;
+        (confirmation.on_confirm)(crate::types::ToolConfirmationOutcome::AllowSession, None);
+        let result = invocation.execute(None, None).await.expect("Edit 执行失败");
+
+        assert!(result.error.is_none());
+        assert!(!config
+            .trusted_folders()
+            .expect("缺少 trust 管理器")
+            .is_path_trusted(&temp.path().join("nested/session.txt"))
+            .unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn proceed_always_and_save_persists_parent_trust_for_fresh_invocations() {
+        use crate::core::tools::tools::ToolInvocation;
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        let (config, message_bus, global_state) = untrusted_edit_fixture(temp.path());
+        let invocation = EditToolInvocation::new(
+            config.clone(),
+            new_file_edit_params("nested/saved.txt", "saved"),
+            message_bus.clone(),
+            global_state.clone(),
+        );
+
+        let confirmation = untrusted_confirmation(&invocation).await;
+        (confirmation.on_confirm)(crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave, None);
+        let result = invocation.execute(None, None).await.expect("Edit 执行失败");
+        assert!(result.error.is_none());
+
+        let fresh_invocation = EditToolInvocation::new(
+            config.clone(),
+            new_file_edit_params("nested/fresh.txt", "fresh"),
+            message_bus,
+            global_state,
+        );
+        assert!(
+            fresh_invocation
+                .should_confirm_execute(None)
+                .await
+                .expect("确认检查失败")
+                .is_none(),
+            "保存后的父目录必须让新的 Edit 调用跳过 folder trust 确认"
+        );
+        let fresh_result = fresh_invocation
+            .execute(None, None)
+            .await
+            .expect("新 Edit 执行失败");
+        assert!(fresh_result.error.is_none());
+
+        let persisted = std::fs::read_to_string(temp.path().join("trustedFolders.json"))
+            .expect("应写入隔离 trust 配置");
+        let trusted_parent = temp.path().join("nested");
+        assert!(persisted.contains(trusted_parent.to_string_lossy().as_ref()));
+    }
+
+    #[tokio::test]
+    async fn cancelled_confirmation_does_not_authorize_the_edit() {
+        use crate::core::tools::tools::ToolInvocation;
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        let (config, message_bus, global_state) = untrusted_edit_fixture(temp.path());
+        let invocation = EditToolInvocation::new(
+            config,
+            new_file_edit_params("nested/cancelled.txt", "cancelled"),
+            message_bus,
+            global_state,
+        );
+
+        let confirmation = untrusted_confirmation(&invocation).await;
+        (confirmation.on_confirm)(crate::types::ToolConfirmationOutcome::Cancel, None);
+        let result = invocation
+            .execute(None, None)
+            .await
+            .expect("Edit 应返回工具错误而非执行失败");
+
+        assert_eq!(
+            result.error.expect("取消不得授权编辑").error_type,
+            "SecurityError"
+        );
+        assert!(!temp.path().join("nested/cancelled.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn proceed_always_only_enables_the_confirmed_edit_invocation() {
+        use crate::core::tools::tools::ToolInvocation;
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        let (config, message_bus, global_state) = untrusted_edit_fixture(temp.path());
+        let invocation = EditToolInvocation::new(
+            config.clone(),
+            new_file_edit_params("nested/always.txt", "always"),
+            message_bus.clone(),
+            global_state.clone(),
+        );
+
+        let confirmation = untrusted_confirmation(&invocation).await;
+        (confirmation.on_confirm)(crate::types::ToolConfirmationOutcome::ProceedAlways, None);
+        assert!(invocation
+            .execute(None, None)
+            .await
+            .expect("Edit 执行失败")
+            .error
+            .is_none());
+
+        let fresh_invocation = EditToolInvocation::new(
+            config,
+            new_file_edit_params("nested/fresh-after-always.txt", "fresh"),
+            message_bus,
+            global_state,
+        );
+        assert_eq!(
+            fresh_invocation
+                .execute(None, None)
+                .await
+                .expect("Edit 应返回工具错误而非执行失败")
+                .error
+                .expect("新的调用不得继承 ProceedAlways")
+                .error_type,
+            "SecurityError"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_answer_does_not_authorize_the_edit() {
+        use crate::core::tools::tools::ToolInvocation;
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        let (config, message_bus, global_state) = untrusted_edit_fixture(temp.path());
+        let invocation = EditToolInvocation::new(
+            config,
+            new_file_edit_params("nested/answered.txt", "answered"),
+            message_bus,
+            global_state,
+        );
+
+        let confirmation = untrusted_confirmation(&invocation).await;
+        (confirmation.on_confirm)(crate::types::ToolConfirmationOutcome::UserAnswer {
+            answers: vec!["yes".to_string()],
+            text_input: None,
+        }, None);
+        assert_eq!(
+            invocation
+                .execute(None, None)
+                .await
+                .expect("Edit 应返回工具错误而非执行失败")
+                .error
+                .expect("UserAnswer 不得授权编辑")
+                .error_type,
+            "SecurityError"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_trust_manager_fails_closed() {
+        use crate::core::tools::tools::ToolInvocation;
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        let (config, message_bus, global_state) = untrusted_edit_fixture(temp.path());
+        let mut config = (*config).clone();
+        config.trusted_folders_manager = None;
+        let invocation = EditToolInvocation::new(
+            Arc::new(config),
+            new_file_edit_params("nested/no-manager.txt", "blocked"),
+            message_bus,
+            global_state,
+        );
+
+        assert!(untrusted_confirmation(&invocation)
+            .await
+            .prompt
+            .contains("untrusted path"));
+        assert_eq!(
+            invocation
+                .execute(None, None)
+                .await
+                .expect("Edit 应返回工具错误而非执行失败")
+                .error
+                .expect("缺少 trust 管理器必须阻止编辑")
+                .error_type,
+            "SecurityError"
+        );
+    }
+
+    #[tokio::test]
+    async fn relative_parent_path_edits_the_configured_target_not_process_cwd() {
+        use crate::core::tools::tools::ToolInvocation;
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        let (config, message_bus, global_state) = untrusted_edit_fixture(temp.path());
+        let invocation = EditToolInvocation::new(
+            config,
+            new_file_edit_params("nested/../resolved.txt", "resolved"),
+            message_bus,
+            global_state,
+        );
+        let expected = temp.path().join("resolved.txt");
+
+        assert_ne!(
+            std::env::current_dir().expect("读取当前目录失败"),
+            temp.path()
+        );
+        assert_eq!(invocation.resolved_path, expected);
+        let confirmation = untrusted_confirmation(&invocation).await;
+        (confirmation.on_confirm)(crate::types::ToolConfirmationOutcome::ProceedOnce, None);
+        assert!(invocation
+            .execute(None, None)
+            .await
+            .expect("Edit 执行失败")
+            .error
+            .is_none());
+        assert_eq!(
+            std::fs::read_to_string(expected).expect("读取目标文件失败"),
+            "resolved"
+        );
     }
 
     // ---- 匹配级联的回归测试 ----------------------------------------------

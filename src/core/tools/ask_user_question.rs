@@ -226,7 +226,7 @@ impl ToolInvocation for AskUserQuestionInvocation {
                 confirmation_type: crate::core::tools::tools::ConfirmationType::Ask,
                 title: format!("{} ({})", title, selection_mode),
                 prompt,
-                on_confirm: std::sync::Arc::new(move |confirmation_outcome| {
+                on_confirm: std::sync::Arc::new(move |confirmation_outcome, _feedback| {
                     if let Ok(mut stored) = outcome.lock() {
                         *stored = Some(confirmation_outcome);
                     }

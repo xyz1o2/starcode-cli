@@ -8,16 +8,30 @@ pub fn estimate_text_tokens(text: &str) -> usize {
     let char_count = text.chars().count();
     let byte_count = text.len();
 
-    // 如果主要是 ASCII 字符，使用字符数 / 4
-    // 如果主要是多字节字符，使用字符数 / 2
-    let ascii_ratio = byte_count as f64 / char_count.max(1) as f64;
+    // ASCII 的每字符字节数约为 1；多字节文本则明显更高。
+    let avg_bytes_per_char = byte_count as f64 / char_count.max(1) as f64;
 
-    if ascii_ratio > 1.5 {
+    if avg_bytes_per_char <= 1.5 {
         // 主要是 ASCII 字符
         (char_count + 3) / 4
     } else {
         // 主要是多字节字符（如中文）
         (char_count + 1) / 2
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ascii_text_uses_four_characters_per_token() {
+        assert_eq!(estimate_text_tokens("test"), 1);
+    }
+
+    #[test]
+    fn multibyte_text_uses_two_characters_per_token() {
+        assert_eq!(estimate_text_tokens("中文测"), 2);
     }
 }
 

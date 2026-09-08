@@ -207,7 +207,7 @@ impl ToolInvocation for MemoryToolInvocation {
                         tildeify_path(&memory_file_path.to_string_lossy())
                     ),
                     prompt: file_diff,
-                    on_confirm: Arc::new(|_outcome| {}),
+                    on_confirm: Arc::new(|_outcome, _feedback| {}),
                 },
             ))
         })

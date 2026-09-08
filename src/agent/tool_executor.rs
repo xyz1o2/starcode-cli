@@ -36,6 +36,13 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "<non-string panic payload>".to_string())
 }
 
+fn should_run_invocation_confirmation(
+    approved: bool,
+    requires_invocation_confirmation: bool,
+) -> bool {
+    !approved || requires_invocation_confirmation
+}
+
 pub struct ToolExecutor {
     tool_registry: Arc<ToolRegistry>,
     config: Arc<Config>,
@@ -326,6 +333,7 @@ impl ToolExecutor {
         // Try registry
         let result = if let Some(tool) = self.tool_registry.get_tool(name) {
             let permission_identity = tool.permission_cache_identity();
+            let requires_invocation_confirmation = tool.requires_invocation_confirmation();
             match tool.create_invocation(args.clone()) {
                 Ok(invocation) => {
                     // 1. Check Policy / Confirmation
@@ -378,7 +386,7 @@ impl ToolExecutor {
                         }
                     }
 
-                    if !approved {
+                    if !approved && !requires_invocation_confirmation {
                         let permission_hit = self.permission_manager.check_allowed_with_identity(
                             name,
                             &args,
@@ -400,7 +408,10 @@ impl ToolExecutor {
                         }
                     }
 
-                    if !approved {
+                    if should_run_invocation_confirmation(
+                        approved,
+                        requires_invocation_confirmation,
+                    ) {
                         if let Some(bus) = &self.message_bus {
                             // Pass cancellation token to confirmation check if needed (though it's usually fast)
                             let should_confirm = invocation
@@ -450,7 +461,10 @@ impl ToolExecutor {
                                                         name, requested_outcome, outcome_val
                                                     ));
                                                 }
-                                                (details.on_confirm)(outcome_val.clone());
+                                                (details.on_confirm)(
+                                                    outcome_val.clone(),
+                                                    resp.feedback.clone(),
+                                                );
 
                                                 if resp.outcome.is_some() {
                                                     match outcome_val {
@@ -2067,5 +2081,303 @@ mod tests {
             "unexpected panic message: {}",
             message
         );
+    }
+
+    #[test]
+    fn path_specific_confirmation_runs_despite_generic_approval() {
+        assert!(should_run_invocation_confirmation(false, false));
+        assert!(!should_run_invocation_confirmation(true, false));
+        assert!(should_run_invocation_confirmation(true, true));
+    }
+
+    type ObservedConfirmation =
+        Arc<std::sync::Mutex<Option<(crate::types::ToolConfirmationOutcome, Option<String>)>>>;
+
+    struct FeedbackTool {
+        observed: ObservedConfirmation,
+    }
+
+    struct FeedbackInvocation {
+        observed: ObservedConfirmation,
+    }
+
+    impl crate::core::tools::tools::BaseDeclarativeTool for FeedbackTool {
+        fn name(&self) -> &str {
+            "FeedbackTest"
+        }
+
+        fn display_name(&self) -> &str {
+            "Feedback test"
+        }
+
+        fn description(&self) -> &str {
+            "test-only confirmation tool"
+        }
+
+        fn kind(&self) -> crate::core::tools::tools::Kind {
+            crate::core::tools::tools::Kind::Other
+        }
+
+        fn parameter_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn create_invocation(
+            &self,
+            _params: serde_json::Value,
+        ) -> Result<
+            Box<dyn crate::core::tools::tools::ToolInvocation>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            Ok(Box::new(FeedbackInvocation {
+                observed: self.observed.clone(),
+            }))
+        }
+
+        fn normalize_confirmation_outcome(
+            &self,
+            _outcome: crate::types::ToolConfirmationOutcome,
+        ) -> crate::types::ToolConfirmationOutcome {
+            crate::types::ToolConfirmationOutcome::ProceedOnce
+        }
+    }
+
+    impl crate::core::tools::tools::ToolInvocation for FeedbackInvocation {
+        fn get_description(&self) -> String {
+            "Feedback test".to_string()
+        }
+
+        fn tool_locations(&self) -> Vec<crate::core::tools::tools::ToolLocation> {
+            Vec::new()
+        }
+
+        fn should_confirm_execute(
+            &self,
+            _abort_signal: Option<&tokio_util::sync::CancellationToken>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            Option<crate::core::tools::tools::ToolCallConfirmationDetails>,
+                            Box<dyn std::error::Error + Send + Sync>,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            let observed = self.observed.clone();
+            Box::pin(async move {
+                Ok(Some(
+                    crate::core::tools::tools::ToolCallConfirmationDetails {
+                        confirmation_type: crate::core::tools::tools::ConfirmationType::Ask,
+                        title: "Confirm".to_string(),
+                        prompt: "Continue?".to_string(),
+                        on_confirm: Arc::new(move |outcome, feedback| {
+                            *observed.lock().expect("callback state poisoned") =
+                                Some((outcome, feedback));
+                        }),
+                    },
+                ))
+            })
+        }
+
+        fn execute(
+            &self,
+            _signal: Option<&tokio_util::sync::CancellationToken>,
+            _update_output: Option<Arc<dyn Fn(String) + Send + Sync>>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            crate::core::tools::tools::ToolResult,
+                            Box<dyn std::error::Error>,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async { Ok(crate::core::tools::tools::ToolResult::default()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn approved_confirmation_passes_feedback_to_normalized_callback() {
+        use crate::core::config::ConfigParameters;
+        use crate::types::StarToolCallFunction;
+
+        let temp = tempfile::tempdir().expect("create temporary directory");
+        let mut params = ConfigParameters::default();
+        params.target_dir = temp.path().to_path_buf();
+        params.cwd = temp.path().to_path_buf();
+        let config = Arc::new(Config::new(params));
+        let bus = Arc::new(MessageBus::new(
+            crate::core::policy::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let registry = Arc::new(ToolRegistry::new(config.clone()));
+        registry.register_tool(Arc::new(FeedbackTool {
+            observed: observed.clone(),
+        }));
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            registry,
+            Some(bus.clone()),
+            config,
+        );
+
+        let mut requests = bus.subscribe();
+        let responder_bus = bus.clone();
+        let responder = tokio::spawn(async move {
+            let request = loop {
+                if let Message::ToolConfirmationRequest(request) =
+                    requests.recv().await.expect("confirmation channel closed")
+                {
+                    break request;
+                }
+            };
+            responder_bus
+                .publish(Message::ToolConfirmationResponse(
+                    ToolConfirmationResponse::from_user_decision(
+                        request.correlation_id,
+                        crate::types::ToolConfirmationOutcome::AllowSession,
+                        Some("take the safe route".to_string()),
+                    ),
+                ))
+                .await
+                .expect("publish confirmation response");
+        });
+
+        let result = executor
+            .execute(
+                &StarToolCall {
+                    id: "feedback-call".to_string(),
+                    call_type: "function".to_string(),
+                    function: StarToolCallFunction {
+                        name: "FeedbackTest".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                },
+                None,
+                None,
+            )
+            .await;
+        assert!(result.success);
+        responder.await.expect("response task failed");
+        assert_eq!(
+            *observed.lock().expect("callback state poisoned"),
+            Some((
+                crate::types::ToolConfirmationOutcome::ProceedOnce,
+                Some("take the safe route".to_string()),
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_edit_permission_does_not_skip_path_specific_confirmation() {
+        use crate::core::config::trusted_folders::TrustedFolders;
+        use crate::core::config::ConfigParameters;
+        use crate::core::state::GlobalState;
+        use crate::core::tools::edit::EditTool;
+        use crate::types::StarToolCallFunction;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        let mut config_params = ConfigParameters::default();
+        config_params.target_dir = temp.path().to_path_buf();
+        config_params.cwd = temp.path().to_path_buf();
+        config_params.folder_trust = Some(true);
+        let mut config = Config::new(config_params);
+        config.trusted_folders_manager = Some(
+            TrustedFolders::new_for_test(temp.path().join("trustedFolders.json"))
+                .expect("创建隔离 trust 配置失败"),
+        );
+        let config = Arc::new(config);
+        let bus = Arc::new(MessageBus::new(
+            crate::core::policy::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let registry = Arc::new(ToolRegistry::new(config.clone()));
+        registry.register_tool(Arc::new(EditTool::new(
+            config.clone(),
+            bus.clone(),
+            Arc::new(GlobalState::new()),
+        )));
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            registry,
+            Some(bus.clone()),
+            config,
+        );
+
+        let mut requests = bus.subscribe();
+        let responder_bus = bus.clone();
+        let responder = tokio::spawn(async move {
+            let mut file_paths = Vec::new();
+            while file_paths.len() < 2 {
+                if let Message::ToolConfirmationRequest(request) =
+                    requests.recv().await.expect("确认消息通道关闭")
+                {
+                    file_paths.push(
+                        request
+                            .tool_call
+                            .args
+                            .as_ref()
+                            .and_then(|args| args.get("file_path"))
+                            .and_then(serde_json::Value::as_str)
+                            .expect("确认请求缺少 file_path")
+                            .to_string(),
+                    );
+                    responder_bus
+                        .publish(Message::ToolConfirmationResponse(
+                            ToolConfirmationResponse {
+                                message_type: MessageBusType::ToolConfirmationResponse,
+                                correlation_id: request.correlation_id,
+                                confirmed: true,
+                                outcome: Some(crate::types::ToolConfirmationOutcome::AllowSession),
+                                requires_user_confirmation: None,
+                                feedback: None,
+                            },
+                        ))
+                        .await
+                        .expect("发送确认结果失败");
+                }
+            }
+            file_paths
+        });
+
+        let make_call = |id: &str, file_path: &str| StarToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: StarToolCallFunction {
+                name: "Edit".to_string(),
+                arguments: serde_json::json!({
+                    "file_path": file_path,
+                    "old_string": "",
+                    "new_string": id,
+                    "expected_replacements": 1,
+                })
+                .to_string(),
+            },
+        };
+
+        assert!(
+            executor
+                .execute(&make_call("first", "first.txt"), None, None)
+                .await
+                .success
+        );
+        assert!(
+            executor
+                .execute(&make_call("second", "second.txt"), None, None)
+                .await
+                .success
+        );
+
+        let file_paths = tokio::time::timeout(Duration::from_secs(2), responder)
+            .await
+            .expect("第二个未受信任 Edit 必须再次请求确认")
+            .expect("确认响应任务失败");
+        assert_eq!(file_paths, ["first.txt", "second.txt"]);
     }
 }

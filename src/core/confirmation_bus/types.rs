@@ -76,6 +76,72 @@ pub struct ToolConfirmationResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<ToolConfirmationOutcome>,
     pub requires_user_confirmation: Option<bool>,
+    /// 用户在确认卡片中输入的补充说明只在内存中传递，避免进入调试日志。
+    #[serde(skip_serializing, default)]
+    pub feedback: Option<String>,
+}
+
+impl ToolConfirmationResponse {
+    /// 从用户的确认决定创建响应，保持既有的 outcome→confirmed 语义。
+    pub fn from_user_decision(
+        correlation_id: String,
+        outcome: ToolConfirmationOutcome,
+        feedback: Option<String>,
+    ) -> Self {
+        let confirmed = matches!(
+            outcome,
+            ToolConfirmationOutcome::ProceedOnce
+                | ToolConfirmationOutcome::ProceedAlways
+                | ToolConfirmationOutcome::ProceedAlwaysAndSave
+                | ToolConfirmationOutcome::AllowSession
+                | ToolConfirmationOutcome::UserAnswer { .. }
+        );
+
+        Self {
+            message_type: MessageBusType::ToolConfirmationResponse,
+            correlation_id,
+            confirmed,
+            outcome: Some(outcome),
+            requires_user_confirmation: None,
+            feedback,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_feedback_stays_in_memory_and_defaults_when_absent() {
+        let response = ToolConfirmationResponse::from_user_decision(
+            "call-1".to_string(),
+            ToolConfirmationOutcome::ProceedOnce,
+            Some("Use the safe path".to_string()),
+        );
+
+        assert!(response.confirmed);
+        assert_eq!(response.feedback.as_deref(), Some("Use the safe path"));
+        let serialized = serde_json::to_string(&response).expect("serialize response");
+        assert!(!serialized.contains("feedback"));
+        assert!(!serialized.contains("Use the safe path"));
+
+        let restored: ToolConfirmationResponse =
+            serde_json::from_str(&serialized).expect("deserialize response without feedback");
+        assert_eq!(restored.feedback, None);
+    }
+
+    #[test]
+    fn cancellation_with_feedback_is_not_confirmed() {
+        let response = ToolConfirmationResponse::from_user_decision(
+            "call-2".to_string(),
+            ToolConfirmationOutcome::Cancel,
+            Some("Do not continue".to_string()),
+        );
+
+        assert!(!response.confirmed);
+        assert_eq!(response.feedback.as_deref(), Some("Do not continue"));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

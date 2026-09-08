@@ -101,7 +101,7 @@ impl ToolInvocation for EnterPlanModeInvocation {
                     "The agent wants to enter Plan Mode for the following reason:\n\n{}",
                     reason
                 ),
-                on_confirm: std::sync::Arc::new(move |outcome| {
+                on_confirm: std::sync::Arc::new(move |outcome, _feedback| {
                     let confirmed = matches!(
                         outcome,
                         crate::types::ToolConfirmationOutcome::ProceedOnce

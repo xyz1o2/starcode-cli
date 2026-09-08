@@ -236,7 +236,14 @@ impl ChatState {
     }
 
     pub fn pop_modal(&mut self) -> Option<Modal> {
-        self.modal_stack.pop()
+        let modal = self.modal_stack.pop();
+        if matches!(modal, Some(Modal::GlobalSearch)) {
+            self.global_search_state.cancel_active_request();
+        }
+        if matches!(modal, Some(Modal::QuickOpen)) {
+            self.quick_open_state.cancel_search();
+        }
+        modal
     }
 
     pub fn top_modal(&self) -> Option<&Modal> {
@@ -248,6 +255,20 @@ impl ChatState {
     }
 
     pub fn close_all_modals(&mut self) {
+        if self
+            .modal_stack
+            .iter()
+            .any(|modal| matches!(modal, Modal::GlobalSearch))
+        {
+            self.global_search_state.cancel_active_request();
+        }
+        if self
+            .modal_stack
+            .iter()
+            .any(|modal| matches!(modal, Modal::QuickOpen))
+        {
+            self.quick_open_state.cancel_search();
+        }
         self.modal_stack.clear();
         // 输入框的 flag 也要一起清 —— 留着它会让按键继续被
         // `handle_input_modal` 吞掉，而屏幕上已经没有输入框了。
@@ -377,7 +398,7 @@ impl ChatState {
     /// 快速打开
     pub fn open_quick_open(&mut self) {
         self.close_all_modals();
-        self.quick_open_state = crate::ui::components::highlight::quick_open::QuickOpenState::new();
+        self.quick_open_state.reset();
         self.modal_stack.push(Modal::QuickOpen);
     }
 
@@ -496,8 +517,7 @@ impl ChatState {
     /// 之类的模态），pop 会把别人的模态误关掉。
     pub fn exit_input_modal(&mut self) {
         self.show_input_modal = false;
-        self.modal_stack
-            .retain(|m| !matches!(m, Modal::InputModal));
+        self.modal_stack.retain(|m| !matches!(m, Modal::InputModal));
     }
 
     /// 状态模态
@@ -901,5 +921,63 @@ fn type_word(t: &crate::core::extensions::types::ExtensionType) -> &'static str 
         crate::core::extensions::types::ExtensionType::Skill => "skill",
         crate::core::extensions::types::ExtensionType::Plugin => "plugin",
         crate::core::extensions::types::ExtensionType::Mcp => "mcp",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pop_global_search_cancels_active_request() {
+        let mut state = ChatState::new();
+        state.open_global_search();
+        let token = state.global_search_state.begin_request(7);
+
+        assert_eq!(state.pop_modal(), Some(Modal::GlobalSearch));
+        assert!(token.is_cancelled());
+        assert!(!state.global_search_state.is_searching);
+    }
+
+    #[test]
+    fn close_all_modals_cancels_global_search_below_another_modal() {
+        let mut state = ChatState::new();
+        state.open_global_search();
+        let token = state.global_search_state.begin_request(8);
+        state.push_modal(Modal::Palette);
+
+        state.close_all_modals();
+
+        assert!(state.modal_stack.is_empty());
+        assert!(token.is_cancelled());
+        assert!(!state.global_search_state.is_searching);
+    }
+
+    #[test]
+    fn quick_open_close_and_reopen_invalidates_searches() {
+        let mut state = ChatState::new();
+        state.open_quick_open();
+        let opened_generation = state.quick_open_state.search_generation;
+
+        assert_eq!(state.pop_modal(), Some(Modal::QuickOpen));
+        let closed_generation = state.quick_open_state.search_generation;
+        assert!(closed_generation > opened_generation);
+
+        state.open_quick_open();
+        assert!(state.quick_open_state.search_generation > closed_generation);
+        assert!(matches!(state.top_modal(), Some(Modal::QuickOpen)));
+    }
+
+    #[test]
+    fn close_all_modals_invalidates_quick_open_below_another_modal() {
+        let mut state = ChatState::new();
+        state.open_quick_open();
+        let generation = state.quick_open_state.search_generation;
+        state.push_modal(Modal::Palette);
+
+        state.close_all_modals();
+
+        assert!(state.modal_stack.is_empty());
+        assert!(state.quick_open_state.search_generation > generation);
     }
 }

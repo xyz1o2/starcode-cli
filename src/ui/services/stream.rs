@@ -50,6 +50,29 @@ fn finalize_entry_streaming(state: &mut ChatState, idx: usize) {
     state.rendered_cache.remove(&idx);
     state.virtual_list.mark_dirty(idx);
 }
+
+/// 从仍在执行的工具中选出最后启动的一项，保持状态行的显示标签与 ID 生命周期同步。
+fn refresh_current_tool_name(state: &mut ChatState) {
+    let active_id = state
+        .tool_started_at
+        .iter()
+        .max_by(|(left_id, left_started), (right_id, right_started)| {
+            left_started
+                .cmp(right_started)
+                .then_with(|| left_id.cmp(right_id))
+        })
+        .map(|(id, _)| id.as_str());
+
+    state.current_tool_name = active_id.and_then(|id| {
+        state.chat_history.iter().rev().find_map(|entry| {
+            entry
+                .tool_call
+                .as_ref()
+                .filter(|tool_call| tool_call.id == id)
+                .map(|tool_call| tool_call.function.name.clone())
+        })
+    });
+}
 use crate::ui::utils::transcript::append_transcript_event;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -225,6 +248,7 @@ pub async fn handle_stream_update(
             content,
         } => {
             let content = sanitize_for_tui(&content);
+            state.last_token_time = Some(std::time::Instant::now());
             if let Some(&idx0) = state.stream_targets.get(&message_id) {
                 let mut idx = idx0;
                 if idx < state.chat_history.len() {
@@ -619,6 +643,16 @@ pub async fn handle_stream_update(
                 }
             }
             if let Some(idx) = found {
+                let active_tool_id = state.chat_history[idx]
+                    .tool_call
+                    .as_ref()
+                    .map(|tool_call| tool_call.id.as_str());
+                // 仅已登记工具的真实进度可以维持请求存活；迟到的输出不能掩盖完成后的停滞。
+                if active_tool_id
+                    .is_some_and(|active_id| state.tool_started_at.contains_key(active_id))
+                {
+                    state.last_token_time = Some(Instant::now());
+                }
                 // 更新流式状态和缓存（不再往 ToolCall 的 content 追加输出，避免与 ToolResult 重复）
                 state.rendered_cache.remove(&idx);
                 state.virtual_list.mark_dirty(idx);
@@ -935,6 +969,21 @@ pub async fn handle_stream_update(
             state.plugin_selected.clear();
             state.reload_plugins_state().await;
         }
+        StreamMessage::GlobalSearchResults {
+            request_id,
+            results,
+            truncated,
+        } => {
+            // 只允许仍处于前台且请求 ID 匹配的弹窗消费结果。
+            if matches!(
+                state.top_modal(),
+                Some(crate::ui::state::modal::Modal::GlobalSearch)
+            ) {
+                state
+                    .global_search_state
+                    .apply_results(request_id, results, truncated);
+            }
+        }
         StreamMessage::NoteGenerated {
             message_id: _,
             kind,
@@ -1040,6 +1089,8 @@ pub async fn handle_stream_update(
                         state.chat_history[idx].is_streaming = Some(false);
                         state.pending_message_id = Some(message_id);
                         state.pending_tool_call_id = Some(tool_call_id);
+                        state.confirmation_feedback_mode = false;
+                        state.pending_confirmation_feedback.clear();
                         if state.pending_confirmation_choice == 0 {
                             state.pending_confirmation_choice = 1;
                         }
@@ -1064,6 +1115,8 @@ pub async fn handle_stream_update(
                 state.pending_message_id = Some(message_id);
                 state.is_awaiting_confirmation = true;
                 state.pending_tool_call_id = Some(tool_call_id);
+                state.confirmation_feedback_mode = false;
+                state.pending_confirmation_feedback.clear();
                 state.pending_confirmation_choice = if is_ask {
                     0 // 0-based: first option
                 } else {
@@ -1519,6 +1572,97 @@ fn shift_index_caches_after_insert(state: &mut ChatState, pos: usize) {
     }
 }
 
+fn shift_indexed_cache_after_removal<T>(
+    cache: &mut std::collections::HashMap<usize, T>,
+    pos: usize,
+) {
+    *cache = cache
+        .drain()
+        .filter_map(|(idx, value)| match idx.cmp(&pos) {
+            std::cmp::Ordering::Less => Some((idx, value)),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some((idx - 1, value)),
+        })
+        .collect();
+}
+
+/// 在 pos 处从 chat_history 移除条目后，修正所有按索引的缓存/映射（>pos 的 -1）。
+/// 删除目标自身的渲染、流式和选择状态，防止后续更新指向相邻条目。
+fn remove_chat_entry_and_shift_indices(state: &mut ChatState, pos: usize) {
+    if pos >= state.chat_history.len() {
+        return;
+    }
+
+    state.chat_history.remove(pos);
+    state.virtual_list.remove_at(pos);
+    state.virtual_list.mark_dirty_all();
+    state.text_selection.clear();
+    state.expanded_thinking_indices = state
+        .expanded_thinking_indices
+        .drain()
+        .filter_map(|idx| match idx.cmp(&pos) {
+            std::cmp::Ordering::Less => Some(idx),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some(idx - 1),
+        })
+        .collect();
+
+    if pos < state.last_item_heights.len() {
+        state.last_item_heights.remove(pos);
+    }
+
+    shift_indexed_cache_after_removal(&mut state.rendered_cache, pos);
+    shift_indexed_cache_after_removal(&mut state.last_rendered_stream_key, pos);
+    shift_indexed_cache_after_removal(&mut state.streaming_height_floor, pos);
+
+    for idx in state.message_start_indices.values_mut() {
+        if *idx > pos {
+            *idx -= 1;
+        } else if *idx == pos {
+            *idx = pos.min(state.chat_history.len());
+        }
+    }
+    for idx in state.stream_targets.values_mut() {
+        if *idx > pos {
+            *idx -= 1;
+        } else if *idx == pos {
+            *idx = pos.min(state.chat_history.len());
+        }
+    }
+    if let Some(idx) = state.pending_confirmation_entry_idx.as_mut() {
+        if *idx > pos {
+            *idx -= 1;
+        } else if *idx == pos {
+            state.pending_confirmation_entry_idx = None;
+        }
+    }
+    if let Some(idx) = state.preview_last_entry_idx.as_mut() {
+        if *idx > pos {
+            *idx -= 1;
+        } else if *idx == pos {
+            state.preview_last_entry_idx = None;
+        }
+    }
+    if let Some(idx) = state.chat_list_state.selected() {
+        let remapped = match idx.cmp(&pos) {
+            std::cmp::Ordering::Less => Some(idx),
+            std::cmp::Ordering::Equal => {
+                (!state.chat_history.is_empty()).then(|| pos.min(state.chat_history.len() - 1))
+            }
+            std::cmp::Ordering::Greater => Some(idx - 1),
+        };
+        state.chat_list_state.select(remapped);
+    }
+    for info in state.active_agent_tasks.values_mut() {
+        if info.entry_idx > pos {
+            info.entry_idx -= 1;
+        }
+    }
+
+    state.total_rendered_lines = state.virtual_list.total_lines();
+    state.scroll = state.scroll.min(state.total_rendered_lines);
+}
+
 fn handle_tool_result_message(
     state: &mut ChatState,
     message_id: u64,
@@ -1531,6 +1675,8 @@ fn handle_tool_result_message(
                 state.is_awaiting_confirmation = false;
                 state.pending_tool_call_id = None;
                 state.pending_confirmation_entry_idx = None;
+                state.confirmation_feedback_mode = false;
+                state.pending_confirmation_feedback.clear();
             }
         }
     }
@@ -1550,6 +1696,17 @@ fn handle_tool_result_message(
             }
         }
     }
+    let start_idx = state
+        .message_start_indices
+        .get(&message_id)
+        .copied()
+        .unwrap_or(0);
+    let elapsed_ms = state
+        .tool_started_at
+        .remove(&tool_call.id)
+        .map(|t| t.elapsed().as_millis());
+    refresh_current_tool_name(state);
+
     // ── Agent 工具异步启动检测 ──
     // 当 Agent 工具以 background=true 执行时，ToolResult.data 包含
     // { status: "async_launched", agent_id: "..." }
@@ -1621,22 +1778,19 @@ fn handle_tool_result_message(
                                 .map(|tc| tc.id == tool_call.id)
                                 .unwrap_or(false)
                     }) {
-                        state.chat_history.remove(tc_idx);
-                        state.virtual_list.mark_dirty_all();
-                        state.rendered_cache.clear();
+                        remove_chat_entry_and_shift_indices(state, tc_idx);
                     }
+                    // 下一段主 agent 文本必须追加在 AgentTask 之后。若沿用删除后
+                    // 的旧 target，它会指向刚创建的 AgentTask，导致最终回答混入进度卡片。
+                    state
+                        .stream_targets
+                        .insert(message_id, state.chat_history.len());
                     return;
                 }
             }
         }
     }
 
-    state.current_tool_name = None;
-    let start_idx = state
-        .message_start_indices
-        .get(&message_id)
-        .copied()
-        .unwrap_or(0);
     let search_end_idx = state.chat_history.len();
     let mut found: Option<usize> = None;
     for i in (start_idx..search_end_idx).rev() {
@@ -1651,10 +1805,6 @@ fn handle_tool_result_message(
             }
         }
     }
-    let elapsed_ms = state
-        .tool_started_at
-        .remove(&tool_call.id)
-        .map(|t| t.elapsed().as_millis());
     let elapsed = elapsed_ms.map(|ms| format_elapsed_for_tool(ms));
     let elapsed_for_status = elapsed.clone();
     let raw_out = if tool_result.success {
@@ -1884,6 +2034,354 @@ fn handle_content_message(state: &mut ChatState, message_id: u64, content: &str)
 
 /// Extract the last fenced code block from markdown content.
 /// Returns the code block content (without fences) if found.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::StarToolCallFunction;
+
+    fn agent_tool_call() -> StarToolCall {
+        StarToolCall {
+            id: "agent-call".to_string(),
+            call_type: "function".to_string(),
+            function: StarToolCallFunction {
+                name: "Agent".to_string(),
+                arguments: r#"{"description":"scan"}"#.to_string(),
+            },
+        }
+    }
+
+    fn async_agent_launch_result() -> ToolResult {
+        ToolResult {
+            success: true,
+            output: Some(String::new()),
+            error: None,
+            data: Some(serde_json::json!({
+                "status": "async_launched",
+                "agent_id": "worker-1",
+                "agent_type": "Explore",
+                "description": "scan",
+            })),
+        }
+    }
+
+    #[test]
+    fn async_agent_launch_remaps_indices_before_follow_up_updates() {
+        let mut state = ChatState::new();
+        state.chat_history.clear();
+        state.chat_history.push(ChatEntry::assistant("before"));
+        state
+            .chat_history
+            .push(ChatEntry::tool_call("Agent", agent_tool_call()).with_streaming(true));
+        state.chat_history.push(
+            ChatEntry::new(ChatEntryType::ToolConfirmation, String::new()).with_streaming(false),
+        );
+        state
+            .chat_history
+            .push(ChatEntry::assistant("after").with_streaming(true));
+        state.stream_targets.insert(42, 3);
+        state.message_start_indices.insert(42, 1);
+        state.pending_confirmation_entry_idx = Some(2);
+        state.preview_last_entry_idx = Some(3);
+        state.chat_list_state.select(Some(3));
+        state.expanded_thinking_indices.insert(3);
+        state.last_item_heights = vec![5, 7, 11, 13];
+        state.virtual_list.resize(4);
+        for (idx, height) in [5, 7, 11, 13].into_iter().enumerate() {
+            state.virtual_list.set_height(idx, height);
+        }
+        state.total_rendered_lines = state.virtual_list.total_lines();
+        state.rendered_cache.insert(1, (7, Vec::new()));
+        state.rendered_cache.insert(3, (13, Vec::new()));
+        state.last_rendered_stream_key.insert(3, (1, 2));
+        state.streaming_height_floor.insert(3, 13);
+
+        handle_tool_result_message(
+            &mut state,
+            42,
+            agent_tool_call(),
+            async_agent_launch_result(),
+        );
+
+        assert_eq!(state.chat_history.len(), 4);
+        assert_eq!(state.stream_targets.get(&42), Some(&4));
+        assert_eq!(state.message_start_indices.get(&42), Some(&1));
+        assert_eq!(state.pending_confirmation_entry_idx, Some(1));
+        assert_eq!(state.preview_last_entry_idx, Some(2));
+        assert_eq!(state.chat_list_state.selected(), Some(2));
+        assert_eq!(
+            state.expanded_thinking_indices,
+            std::collections::HashSet::from([2])
+        );
+        assert_eq!(state.last_item_heights, vec![5, 11, 13]);
+        assert_eq!(state.virtual_list.len(), 3);
+        assert_eq!(state.total_rendered_lines, 29);
+        assert!(!state.rendered_cache.contains_key(&1));
+        assert!(state.rendered_cache.contains_key(&2));
+        assert_eq!(state.last_rendered_stream_key.get(&2), Some(&(1, 2)));
+        assert_eq!(state.streaming_height_floor.get(&2), Some(&13));
+        assert_eq!(state.active_agent_tasks["worker-1"].entry_idx, 3);
+        assert_eq!(state.chat_history[3].entry_type, ChatEntryType::AgentTask);
+
+        handle_content_message(&mut state, 42, " updated");
+        assert_eq!(state.chat_history[4].content, " updated");
+        assert_eq!(state.chat_history[2].content, "after");
+
+        handle_agent_task_update(
+            &mut state,
+            AgentTaskUpdateArgs {
+                task_id: "worker-1".to_string(),
+                agent_type: "Explore".to_string(),
+                description: "scan".to_string(),
+                status: crate::types::AgentTaskStatus::Running,
+                tool_use_count: 1,
+                tokens: 12,
+                is_async: true,
+                is_resolved: false,
+                is_error: false,
+                last_tool_info: Some("Reading config".to_string()),
+                name: None,
+                task_description: Some("scan".to_string()),
+                new_sub_entries: Vec::new(),
+            },
+        );
+
+        assert_eq!(state.active_agent_tasks["worker-1"].entry_idx, 3);
+        assert_eq!(state.chat_history[3].agent_tool_use_count, Some(1));
+        assert_eq!(
+            state.chat_history[3].agent_last_tool_info.as_deref(),
+            Some("Reading config")
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_delta_refreshes_stream_liveness() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let message_id = 7;
+        state.stream_targets.insert(message_id, 0);
+        state.last_token_time =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::ReasoningDelta {
+                message_id,
+                content: "Checking the implementation".to_string(),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+
+        let elapsed = state.last_token_time.unwrap().elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(1));
+        assert_eq!(
+            state
+                .chat_history
+                .last()
+                .unwrap()
+                .reasoning_content
+                .as_deref(),
+            Some("Checking the implementation")
+        );
+    }
+
+    #[tokio::test]
+    async fn active_tool_output_and_results_preserve_parallel_lifecycle() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let message_id = 9;
+        state.stream_targets.insert(message_id, 0);
+        let first = StarToolCall {
+            id: "call-a".to_string(),
+            call_type: "function".to_string(),
+            function: StarToolCallFunction {
+                name: "Read".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+        let second = StarToolCall {
+            id: "call-b".to_string(),
+            call_type: "function".to_string(),
+            function: StarToolCallFunction {
+                name: "Bash".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::ToolCalls {
+                message_id,
+                tool_calls: vec![first.clone(), second.clone()],
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        state.last_token_time = Some(Instant::now() - std::time::Duration::from_secs(31));
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::ToolOutput {
+                message_id,
+                tool_call_id: second.id.clone(),
+                output: "still running".to_string(),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        assert!(state.last_token_time.unwrap().elapsed() < std::time::Duration::from_secs(1));
+
+        let success = ToolResult {
+            success: true,
+            output: None,
+            error: None,
+            data: None,
+        };
+        handle_tool_result_message(&mut state, message_id, first.clone(), success.clone());
+        assert!(!state.tool_started_at.contains_key(&first.id));
+        assert!(state.tool_started_at.contains_key(&second.id));
+        assert_eq!(state.current_tool_name.as_deref(), Some("Bash"));
+        assert!(state.chat_history.iter().any(|entry| {
+            entry.tool_call.as_ref().map(|call| call.id.as_str()) == Some(second.id.as_str())
+                && entry.is_streaming == Some(true)
+        }));
+
+        handle_tool_result_message(&mut state, message_id, second.clone(), success);
+        assert!(state.tool_started_at.is_empty());
+        assert_eq!(state.current_tool_name, None);
+    }
+
+    #[tokio::test]
+    async fn global_search_results_apply_only_to_open_current_request() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        state.open_global_search();
+        state.global_search_state.begin_request(7);
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::GlobalSearchResults {
+                request_id: 7,
+                results: vec![crate::runtime::messages::GlobalSearchMatch {
+                    file: "src/lib.rs".to_string(),
+                    line_number: 3,
+                    content: "needle".to_string(),
+                    score: 0,
+                }],
+                truncated: false,
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.global_search_state.results.len(), 1);
+        assert_eq!(state.global_search_state.results[0].file, "src/lib.rs");
+        assert!(!state.global_search_state.is_searching);
+
+        state.global_search_state.begin_request(8);
+        handle_stream_update(
+            &mut state,
+            StreamMessage::GlobalSearchResults {
+                request_id: 7,
+                results: Vec::new(),
+                truncated: true,
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.global_search_state.active_request_id, Some(8));
+        assert_eq!(state.global_search_state.results.len(), 1);
+        assert!(!state.global_search_state.truncated);
+
+        state.pop_modal();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::GlobalSearchResults {
+                request_id: 8,
+                results: Vec::new(),
+                truncated: true,
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.global_search_state.results.len(), 1);
+        assert!(!state.global_search_state.truncated);
+    }
+
+    #[tokio::test]
+    async fn confirmation_feedback_draft_resets_for_new_request_and_matching_result() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        state.confirmation_feedback_mode = true;
+        state.pending_confirmation_feedback = "stale draft".to_string();
+        let confirmation = crate::types::ToolConfirmation {
+            tool_name: "Bash".to_string(),
+            operation_type: crate::types::ConfirmationType::Generic,
+            details: crate::types::ConfirmationDetails::Generic {
+                title: "Confirm".to_string(),
+                prompt: "Continue?".to_string(),
+            },
+            is_dangerous: false,
+            outcome: None,
+        };
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::ToolConfirmationRequest {
+                message_id: 1,
+                tool_call_id: "call-1".to_string(),
+                confirmation,
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        assert!(!state.confirmation_feedback_mode);
+        assert!(state.pending_confirmation_feedback.is_empty());
+
+        state.confirmation_feedback_mode = true;
+        state.pending_confirmation_feedback = "result draft".to_string();
+        handle_tool_result_message(
+            &mut state,
+            1,
+            agent_tool_call(),
+            ToolResult {
+                success: true,
+                output: None,
+                error: None,
+                data: None,
+            },
+        );
+        assert!(state.confirmation_feedback_mode);
+        assert_eq!(state.pending_confirmation_feedback, "result draft");
+
+        handle_tool_result_message(
+            &mut state,
+            1,
+            StarToolCall {
+                id: "call-1".to_string(),
+                ..agent_tool_call()
+            },
+            ToolResult {
+                success: true,
+                output: None,
+                error: None,
+                data: None,
+            },
+        );
+        assert!(!state.confirmation_feedback_mode);
+        assert!(state.pending_confirmation_feedback.is_empty());
+    }
+}
+
 fn extract_last_code_block(content: &str) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
     let mut last_block_start: Option<usize> = None;

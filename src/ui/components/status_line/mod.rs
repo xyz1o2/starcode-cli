@@ -472,6 +472,11 @@ fn stall_intensity(
     0.0
 }
 
+/// 返回仍在执行的工具中最后开始的时间，作为工具状态的权威来源。
+fn latest_active_tool_started_at(state: &ChatState) -> Option<std::time::Instant> {
+    state.tool_started_at.values().max().copied()
+}
+
 /// Get spinner color with stall detection
 fn spinner_color_with_stall(base_color: Color, stall: f64, animation_tick: u64) -> Color {
     let stalled_color = Color::Rgb(171, 43, 63); // ERROR_RED from Claude Code
@@ -663,16 +668,14 @@ pub fn processing_spinner_line(state: &ChatState) -> Vec<ratatui::text::Line<'st
     };
     let e_color = elapsed_color(elapsed);
 
-    // Stall detection with smooth transition
-    // Get the start time of the current active tool (if any)
-    let current_tool_started = state.current_tool_name.as_ref().and_then(|_| {
-        // Find the most recent tool start time
-        state.tool_started_at.values().max().copied()
-    });
+    // Stall detection with smooth transition. Tool IDs, not the optional display
+    // label, are authoritative: parallel tool completion must not hide siblings.
+    let current_tool_started = latest_active_tool_started_at(state);
+    let has_active_tools = current_tool_started.is_some();
     let stall = stall_intensity(
         state.is_streaming,
         state.last_token_time,
-        state.current_tool_name.is_some(),
+        has_active_tools,
         current_tool_started,
         state.animation_tick,
     );
@@ -1398,5 +1401,17 @@ mod tests {
         // 没有字母的纯符号也不算文案
         assert!(!is_latin_phrase("---"));
         assert!(!is_latin_phrase(""));
+    }
+
+    #[test]
+    fn active_tool_timestamp_does_not_depend_on_display_label() {
+        let mut state = ChatState::new();
+        let older = std::time::Instant::now() - std::time::Duration::from_secs(20);
+        let newer = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        state.tool_started_at.insert("older".to_string(), older);
+        state.tool_started_at.insert("newer".to_string(), newer);
+
+        assert!(state.current_tool_name.is_none());
+        assert_eq!(latest_active_tool_started_at(&state), Some(newer));
     }
 }

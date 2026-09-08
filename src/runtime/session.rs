@@ -261,24 +261,11 @@ pub async fn handle_streaming_request(
         Some(AgentRequest::ConfirmTool {
             tool_call_id,
             outcome,
-            feedback: _,
+            feedback,
         }) => {
-            let confirmed = matches!(
-                outcome,
-                crate::types::ToolConfirmationOutcome::ProceedOnce
-                    | crate::types::ToolConfirmationOutcome::ProceedAlways
-                    | crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave
-                    | crate::types::ToolConfirmationOutcome::AllowSession
-                    | crate::types::ToolConfirmationOutcome::UserAnswer { .. }
+            let msg = Message::ToolConfirmationResponse(
+                ToolConfirmationResponse::from_user_decision(tool_call_id, outcome, feedback),
             );
-
-            let msg = Message::ToolConfirmationResponse(ToolConfirmationResponse {
-                message_type: MessageBusType::ToolConfirmationResponse,
-                correlation_id: tool_call_id,
-                confirmed,
-                outcome: Some(outcome),
-                requires_user_confirmation: None,
-            });
             let _ = context.message_bus.publish(msg).await;
             StreamingRequestOutcome::Continue
         }
@@ -300,6 +287,22 @@ pub async fn handle_streaming_request(
         Some(AgentRequest::PluginOp { project_root, op }) => {
             // 插件市场后台操作不依赖 agent：即使正在流式回复中也直接执行
             crate::runtime::control_requests::spawn_plugin_op(&context.tx, project_root, op);
+            StreamingRequestOutcome::Continue
+        }
+        Some(AgentRequest::RunGlobalSearch {
+            request_id,
+            query,
+            cwd,
+            cancellation,
+        }) => {
+            // 全局搜索与主 agent 回合无关，必须立刻后台执行，不能等流式结束。
+            crate::runtime::control_requests::spawn_global_search(
+                &context.tx,
+                request_id,
+                query,
+                cwd,
+                cancellation,
+            );
             StreamingRequestOutcome::Continue
         }
     }

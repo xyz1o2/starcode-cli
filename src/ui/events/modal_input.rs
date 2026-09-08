@@ -901,7 +901,7 @@ async fn handle_plugins(
 async fn handle_global_search(
     state: &mut ChatState,
     key: crossterm::event::KeyEvent,
-    _agent_tx: &mpsc::Sender<AgentRequest>,
+    agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<bool, Err> {
     use crossterm::event::{KeyCode::*, KeyModifiers};
 
@@ -958,55 +958,50 @@ async fn handle_global_search(
         Backspace => {
             state.global_search_state.query.pop();
             state.global_search_state.selected_index = 0;
-            trigger_global_search(state).await;
+            trigger_global_search(state, agent_tx);
         }
         Char(c) if !c.is_control() => {
             state.global_search_state.query.push(c);
             state.global_search_state.selected_index = 0;
-            trigger_global_search(state).await;
+            trigger_global_search(state, agent_tx);
         }
         _ => {}
     }
     Ok(true)
 }
 
-/// 触发全局搜索（带代次计数器防过期 + 客户端预过滤）。
+/// 触发全局搜索：先同步更新界面，再把 ripgrep 交给 worker 后台执行。
 ///
 /// 对标 CCB: 在 ripgrep 返回前先过滤现有结果，避免空白闪烁。
-async fn trigger_global_search(state: &mut ChatState) {
-    let gen = state.global_search_state.search_generation.wrapping_add(1);
-    state.global_search_state.search_generation = gen;
+fn trigger_global_search(state: &mut ChatState, agent_tx: &mpsc::Sender<AgentRequest>) {
     let query = state.global_search_state.query.clone();
+    state.global_search_state.cancel_active_request();
     if query.is_empty() {
         state.global_search_state.results.clear();
         state.global_search_state.truncated = false;
-        state.global_search_state.is_searching = false;
         return;
     }
+
     // 客户端预过滤（对标 CCB: filter existing results while rg walks）
     let query_lower = query.to_lowercase();
-    let prev_count = state.global_search_state.results.len();
     state.global_search_state.results.retain(|r| {
         r.content.to_lowercase().contains(&query_lower)
             || r.file.to_lowercase().contains(&query_lower)
     });
-    // 如果过滤后结果没变（query 是扩展），保留；否则清空避免显示旧结果
-    if state.global_search_state.results.len() == prev_count {
-        // query 扩展了，现有结果都还匹配，保留
-    } else if state.global_search_state.results.is_empty() {
-        // 没有匹配的预过滤结果，等 ripgrep 返回
-    }
     state.global_search_state.selected_index = 0;
+
+    let request_id = state.allocate_global_search_request_id();
+    let cancellation = state.global_search_state.begin_request(request_id);
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let cwd_str = cwd.to_string_lossy().to_string();
-    state.global_search_state.is_searching = true;
-    let (results, truncated) =
-        crate::ui::components::highlight::search::execute_search(&query, &cwd_str).await;
-    // 丢弃过期结果
-    if state.global_search_state.search_generation == gen {
-        state.global_search_state.results = results;
-        state.global_search_state.truncated = truncated;
-        state.global_search_state.is_searching = false;
+    let request = AgentRequest::RunGlobalSearch {
+        request_id,
+        query,
+        cwd,
+        cancellation,
+    };
+    if agent_tx.try_send(request).is_err() {
+        // 队列满或 worker 已退出时绝不能阻塞键盘处理，也不能留下永久 spinner。
+        state.global_search_state.cancel_active_request();
     }
 }
 
@@ -1071,28 +1066,27 @@ async fn handle_quick_open(
         Backspace => {
             state.quick_open_state.query.pop();
             state.quick_open_state.selected_index = 0;
-            trigger_quick_open_search(state).await;
+            trigger_quick_open_search(state);
         }
         Char(c) if !c.is_control() => {
             state.quick_open_state.query.push(c);
             state.quick_open_state.selected_index = 0;
-            trigger_quick_open_search(state).await;
+            trigger_quick_open_search(state);
         }
         _ => {}
     }
     Ok(true)
 }
 
-/// 触发快速打开搜索（带代次计数器防过期）。
-/// 触发快速打开搜索（带代次计数器防过期 + 客户端预过滤）。
-async fn trigger_quick_open_search(state: &mut ChatState) {
-    let gen = state.quick_open_state.search_generation.wrapping_add(1);
-    state.quick_open_state.search_generation = gen;
+/// 触发快速打开搜索：同步更新界面，再交给本地后台任务执行。
+fn trigger_quick_open_search(state: &mut ChatState) {
     let query = state.quick_open_state.query.clone();
     if query.is_empty() {
+        state.quick_open_state.cancel_search();
         state.quick_open_state.files.clear();
         return;
     }
+
     // 客户端预过滤（对标 CCB: filter existing results while fd walks）
     let query_lower = query.to_lowercase();
     state.quick_open_state.files.retain(|f| {
@@ -1100,13 +1094,7 @@ async fn trigger_quick_open_search(state: &mut ChatState) {
     });
     state.quick_open_state.selected_index = 0;
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let cwd_str = cwd.to_string_lossy().to_string();
-    let files =
-        crate::ui::components::highlight::quick_open::search_files(&query, &cwd_str, 20).await;
-    // 丢弃过期结果
-    if state.quick_open_state.search_generation == gen {
-        state.quick_open_state.files = files;
-    }
+    state.quick_open_state.start_search(query, cwd, 20);
 }
 
 /// 历史搜索弹窗键盘处理（对标 Claude Code HistorySearchDialog）。

@@ -76,13 +76,42 @@ pub fn normalize_cross_platform_path(raw_path: &str) -> PathBuf {
     normalize_cross_platform_path_for_env(raw_path, detected_path_environment())
 }
 
+/// 词法规范化路径，消除 `.` 和可安全折叠的 `..`，但不解析符号链接。
+pub fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(..) | std::path::Component::RootDir => {
+                normalized.push(component);
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if normalized
+                    .components()
+                    .next_back()
+                    .is_some_and(|component| matches!(component, std::path::Component::Normal(..)))
+                {
+                    normalized.pop();
+                } else if !normalized.is_absolute() {
+                    normalized.push(component);
+                }
+            }
+            std::path::Component::Normal(component) => normalized.push(component),
+        }
+    }
+
+    normalized
+}
+
 pub fn resolve_tool_path(base_dir: &Path, raw_path: &str) -> PathBuf {
     let normalized = normalize_cross_platform_path(raw_path);
-    if normalized.is_absolute() {
+    let resolved = if normalized.is_absolute() {
         normalized
     } else {
         base_dir.join(normalized)
-    }
+    };
+    normalize_path(&resolved)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,4 +350,25 @@ pub fn find_nearest_existing_star_dir(start: &Path) -> Option<PathBuf> {
 pub fn current_project_star_dir() -> PathBuf {
     let cwd = current_dir_cached().clone();
     find_nearest_existing_star_dir(&cwd).unwrap_or_else(|| cwd.join(STAR_DIR))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_path_does_not_escape_an_absolute_root() {
+        assert_eq!(
+            normalize_path(Path::new("/../../workspace/file.rs")),
+            PathBuf::from("/workspace/file.rs")
+        );
+    }
+
+    #[test]
+    fn resolve_tool_path_normalizes_relative_parent_components() {
+        assert_eq!(
+            resolve_tool_path(Path::new("/workspace/project"), "nested/../src/file.rs"),
+            PathBuf::from("/workspace/project/src/file.rs")
+        );
+    }
 }

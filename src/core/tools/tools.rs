@@ -68,7 +68,7 @@ pub struct ToolCallConfirmationDetails {
     pub confirmation_type: ConfirmationType,
     pub title: String,
     pub prompt: String,
-    pub on_confirm: Arc<dyn Fn(ToolConfirmationOutcome) + Send + Sync>,
+    pub on_confirm: Arc<dyn Fn(ToolConfirmationOutcome, Option<String>) + Send + Sync>,
 }
 
 impl std::fmt::Debug for ToolCallConfirmationDetails {
@@ -147,6 +147,13 @@ pub trait BaseDeclarativeTool: Send + Sync {
 
     fn permission_cache_identity(&self) -> Option<String> {
         None
+    }
+
+    /// 即使通用权限缓存命中，也必须先让调用实例检查是否需要确认。
+    ///
+    /// 用于依赖具体参数或目标路径的二次授权；默认保留现有缓存行为。
+    fn requires_invocation_confirmation(&self) -> bool {
+        false
     }
 
     fn normalize_confirmation_outcome(
