@@ -358,8 +358,6 @@ impl Agent {
                         // 更新 session_messages 以保留对话历史
                         if let Some((loop_result, updated_session_messages)) = result {
                             self.session_messages = updated_session_messages;
-                            // 持久化到磁盘，确保下次启动时可以恢复
-                            self.persist_session_messages();
 
                             // `run_agentic_loop` 的失败**只**活在这个 Err 里 ——
                             // 循环内部不 emit_event，所以之前把它丢进 `_`、
@@ -395,7 +393,7 @@ impl Agent {
     pub async fn run(
         &mut self,
         user_input: &str,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(String, Option<crate::types::StarUsage>), Box<dyn std::error::Error + Send + Sync>> {
         crate::utils::logging::append_debug_log_line("[DEBUG] Agent::run: Starting");
         use futures::StreamExt;
         let mut stream = self.run_stream(user_input.to_string());
@@ -403,24 +401,28 @@ impl Agent {
             "[DEBUG] Agent::run: run_stream created, polling events",
         );
         let mut final_response = String::new();
+        let mut latest_usage = None;
 
         while let Some(event_result) = stream.next().await {
             match event_result {
-                Ok(event) => {
-                    match event {
-                        AgentEvent::Message(content) => {
-                            final_response = content;
-                        }
-                        AgentEvent::Error(err) => {
-                            return Err(err.into());
-                        }
-                        _ => {} // Ignore other events for legacy run
+                Ok(event) => match event {
+                    AgentEvent::Message(content) => {
+                        final_response = content;
                     }
-                }
+                    AgentEvent::StatsUpdate { token_usage } => {
+                        if token_usage.is_some() {
+                            latest_usage = token_usage;
+                        }
+                    }
+                    AgentEvent::Error(err) => {
+                        return Err(err.into());
+                    }
+                    _ => {}
+                },
                 Err(e) => return Err(e),
             }
         }
 
-        Ok(final_response)
+        Ok((final_response, latest_usage))
     }
 }

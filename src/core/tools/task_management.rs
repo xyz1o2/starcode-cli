@@ -398,10 +398,8 @@ impl ToolInvocation for TaskUpdateInvocation {
                             "skipped" => TaskStatus::Skipped,
                             _ => return Err(format!("Invalid status: {}", status_str)),
                         };
-                        let is_terminal = matches!(
-                            new_status,
-                            TaskStatus::Completed | TaskStatus::Skipped
-                        );
+                        let is_terminal =
+                            matches!(new_status, TaskStatus::Completed | TaskStatus::Skipped);
                         if let Some(task) = manager.get_task_mut(&params.task_id) {
                             task.status = new_status;
                             // Set completed_at timestamp for 30s TTL
@@ -506,7 +504,8 @@ impl ToolInvocation for TaskUpdateInvocation {
                             if let Some(blocked_task) = manager.get_task_mut(blocked_id) {
                                 blocked_task.dependencies.retain(|d| d != &task_id);
                                 if blocked_task.dependencies.is_empty()
-                                    && blocked_task.status == crate::core::tasks::models::TaskStatus::Blocked
+                                    && blocked_task.status
+                                        == crate::core::tasks::models::TaskStatus::Blocked
                                 {
                                     unblock_ids.push(blocked_id.clone());
                                 }

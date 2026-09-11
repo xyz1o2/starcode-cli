@@ -1,10 +1,10 @@
 use crate::agent::agent_core::Agent;
-use crate::agent::session;
 use crate::types::StarMessage;
 
 impl Agent {
     pub fn replace_session_messages(&mut self, messages: Vec<StarMessage>) {
-        self.sync_and_persist(messages);
+        self.session_messages = messages;
+        self.pending_local_context.clear();
     }
 
     pub fn push_message(&mut self, message: StarMessage) {
@@ -13,7 +13,7 @@ impl Agent {
 
     pub fn clear_session_messages(&mut self) {
         self.session_messages.clear();
-        self.persist_session_messages_to_disk();
+        self.pending_local_context.clear();
     }
 
     pub async fn force_compress_session_messages(
@@ -40,7 +40,6 @@ impl Agent {
             .force_compress(self.session_messages.clone(), Some(&self.client))
             .await?;
         self.session_messages = result.messages.clone();
-        self.persist_session_messages();
         Ok(result)
     }
 
@@ -67,47 +66,5 @@ impl Agent {
                 .or_else(|| tool_result.error.clone())
                 .unwrap_or_default(),
         ));
-
-        self.persist_session_messages();
-    }
-
-    pub(crate) fn persist_session_messages(&mut self) {
-        // 子代理不持久化会话消息（避免覆盖父代理的会话文件）
-        if self.config.recursion_depth > 0 {
-            return;
-        }
-        session::persist_session_messages(
-            &self.session_messages,
-            self.config
-                .storage()
-                .session_messages_path(self.config.session_id()),
-        );
-    }
-
-    pub(crate) fn sync_and_persist(&mut self, messages: Vec<StarMessage>) {
-        self.session_messages = messages;
-        self.persist_session_messages();
-    }
-
-    pub(crate) fn persist_session_messages_to_disk(&self) {
-        // 同 persist_session_messages：子代理不得覆盖父代理的会话文件
-        if self.config.recursion_depth > 0 {
-            return;
-        }
-        session::persist_session_messages_to_disk(
-            &self.session_messages,
-            self.config
-                .storage()
-                .session_messages_path(self.config.session_id()),
-        );
-    }
-
-    pub(crate) fn load_persisted_session_messages(&mut self) {
-        self.session_messages = session::load_persisted_session_messages(
-            &self
-                .config
-                .storage()
-                .session_messages_path(self.config.session_id()),
-        );
     }
 }

@@ -124,7 +124,8 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     }
 
     // Render spinner between chat and footer (always render to prevent layout jumps)
-    let spinner_line = crate::ui::components::status_line::processing_spinner_line(state);
+    let spinner_line =
+        crate::ui::components::status_line::processing_spinner_line(state, spinner_area.width);
     f.render_widget(ratatui::widgets::Paragraph::new(spinner_line), spinner_area);
 
     // Render task panel above input (like openclaude's TaskListV2 above PromptInput)

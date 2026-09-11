@@ -6,7 +6,9 @@ use crate::core::state::{FileSnapshot, ReadFileState};
 use crate::llm::client::StarClient;
 use crate::types::ApprovalMode;
 use crate::types::StarToolCall;
-use crate::types::{ChatEntry, StarUsage, StreamingChunk, StreamingChunkType, ToolResult};
+use crate::types::{
+    ChatEntry, StarMessage, StarUsage, StreamingChunk, StreamingChunkType, ToolResult,
+};
 use futures::Stream;
 use sha2::{Digest, Sha256};
 use std::ops::{Deref, DerefMut};
@@ -172,8 +174,18 @@ impl StarAgent {
         &mut self,
         prompt: &str,
     ) -> Result<Vec<ChatEntry>, Box<dyn std::error::Error + Send + Sync>> {
-        let text = self.inner.run(prompt).await?;
-        Ok(vec![ChatEntry::assistant(text)])
+        self.process_user_message_with_usage(prompt)
+            .await
+            .map(|(entries, _)| entries)
+    }
+
+    /// 非流式调用也保留最新一次真实 provider 的用量，供 headless 会话快照使用。
+    pub async fn process_user_message_with_usage(
+        &mut self,
+        prompt: &str,
+    ) -> Result<(Vec<ChatEntry>, Option<StarUsage>), Box<dyn std::error::Error + Send + Sync>> {
+        let (text, usage) = self.inner.run(prompt).await?;
+        Ok((vec![ChatEntry::assistant(text)], usage))
     }
 
     pub async fn execute_tool(
@@ -385,6 +397,25 @@ impl StarAgent {
 
     pub fn clear_session_context(&mut self) {
         self.inner.clear_session_messages();
+        self.abort_flag.store(false, Ordering::SeqCst);
+    }
+
+    /// 取得 worker 所有的原生 provider 上下文与尚未注入的本地命令输出。
+    pub fn session_context_snapshot(&self) -> (Vec<StarMessage>, Vec<String>) {
+        (
+            self.inner.session_messages.clone(),
+            self.inner.pending_local_context.clone(),
+        )
+    }
+
+    /// 用已验证的原生 provider 上下文和本地命令输出替换当前会话。
+    pub fn replace_session_context(
+        &mut self,
+        messages: Vec<StarMessage>,
+        pending_local_context: Vec<String>,
+    ) {
+        self.inner.replace_session_messages(messages);
+        self.inner.pending_local_context = pending_local_context;
         self.abort_flag.store(false, Ordering::SeqCst);
     }
 
@@ -697,7 +728,10 @@ impl StarAgent {
     pub fn toggle_yolo_mode(&mut self) -> crate::types::ApprovalMode {
         if self.inner.is_yolo_mode_disabled() {
             {
-                let mut mode = self.approval_mode_lock.lock().unwrap_or_else(|e| e.into_inner());
+                let mut mode = self
+                    .approval_mode_lock
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 *mode = ApprovalMode::Default;
             }
             self.inner.set_approval_mode(ApprovalMode::Default);
@@ -717,7 +751,10 @@ impl StarAgent {
             return mode;
         }
 
-        let mut mode = self.approval_mode_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut mode = self
+            .approval_mode_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let new_mode = if *mode == ApprovalMode::Yolo {
             ApprovalMode::Default
         } else {
@@ -743,13 +780,20 @@ impl StarAgent {
             return;
         }
 
-        let mut m = self.approval_mode_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = self
+            .approval_mode_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *m = safe_mode;
     }
 
     /// Get the current approval mode
     pub fn get_approval_mode(&self) -> crate::types::ApprovalMode {
-        let mode = self.approval_mode_lock.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mode = self
+            .approval_mode_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         crate::utils::logging::append_debug_log_line(&format!(
             "[STAR_AGENT] get_approval_mode: {:?}",
             mode

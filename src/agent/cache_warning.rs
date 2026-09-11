@@ -1,13 +1,11 @@
-use crate::types::{StarMessage, StarToolCall};
+use crate::types::{StarMessage, StarToolCall, StarUsage};
 use serde_json::Value;
 
 /// 缓存警告配置
 #[derive(Debug, Clone)]
-pub struct CacheWarningConfig {
+pub(crate) struct CacheWarningConfig {
     /// 是否启用缓存警告
     pub enabled: bool,
-    /// 缓存命中率阈值（低于此值会警告）
-    pub hit_rate_threshold: f64,
     /// 缓存创建token阈值（高于此值会警告）
     pub creation_token_threshold: u64,
 }
@@ -16,23 +14,18 @@ impl Default for CacheWarningConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            hit_rate_threshold: 0.5,
             creation_token_threshold: 10000,
         }
     }
 }
 
 impl CacheWarningConfig {
-    pub fn from_env() -> Self {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn from_env() -> Self {
         let enabled = std::env::var("STAR_CACHE_WARNING_ENABLED")
             .ok()
             .map(|v| v.to_lowercase() != "false" && v != "0")
             .unwrap_or(true);
-
-        let hit_rate_threshold = std::env::var("STAR_CACHE_HIT_RATE_THRESHOLD")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.5);
 
         let creation_token_threshold = std::env::var("STAR_CACHE_CREATION_TOKEN_THRESHOLD")
             .ok()
@@ -41,128 +34,65 @@ impl CacheWarningConfig {
 
         Self {
             enabled,
-            hit_rate_threshold,
             creation_token_threshold,
         }
     }
 }
 
-/// 缓存使用信息
-#[derive(Debug, Clone)]
-pub struct CacheUsage {
-    /// 输入tokens
-    pub input_tokens: u64,
-    /// 缓存创建tokens
-    pub cache_creation_tokens: u64,
-    /// 缓存读取tokens
-    pub cache_read_tokens: u64,
-}
-
-impl CacheUsage {
-    /// 计算缓存命中率
-    pub fn hit_rate(&self) -> f64 {
-        let total_input = self.input_tokens + self.cache_read_tokens;
-        if total_input == 0 {
-            return 0.0;
-        }
-        self.cache_read_tokens as f64 / total_input as f64
-    }
-
-    /// 计算缓存创建比例
-    pub fn creation_ratio(&self) -> f64 {
-        if self.input_tokens == 0 {
-            return 0.0;
-        }
-        self.cache_creation_tokens as f64 / self.input_tokens as f64
-    }
-}
-
 /// 缓存警告信息
 #[derive(Debug, Clone)]
-pub struct CacheWarningInfo {
+pub(crate) struct CacheWarningInfo {
     /// 警告类型
     pub warning_type: CacheWarningType,
     /// 警告消息
     pub message: String,
-    /// 缓存命中率
-    pub hit_rate: f64,
     /// 缓存创建tokens
     pub creation_tokens: u64,
 }
 
 /// 缓存警告类型
-#[derive(Debug, Clone)]
-pub enum CacheWarningType {
-    /// 低命中率
-    LowHitRate,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CacheWarningType {
     /// 高创建成本
     HighCreationCost,
-    /// 无缓存
-    NoCache,
 }
 
 /// 缓存警告检测器
-pub struct CacheWarningDetector {
+pub(crate) struct CacheWarningDetector {
     config: CacheWarningConfig,
 }
 
 impl CacheWarningDetector {
-    pub fn new() -> Self {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn new() -> Self {
         let config = CacheWarningConfig::from_env();
         Self { config }
     }
 
-    /// 检查是否需要显示缓存警告
-    pub fn should_show_warning(&self, usage: &CacheUsage) -> Option<CacheWarningInfo> {
-        if !self.config.enabled {
+    /// 仅在提供商明确上报缓存遥测时评估创建成本。缓存计数和提示 token 不共享可靠的分母，
+    /// 因此不推导所谓“命中率”。
+    pub(crate) fn warning_for_usage(&self, usage: &StarUsage) -> Option<CacheWarningInfo> {
+        if !usage.cache_telemetry_reported {
             return None;
         }
 
-        let hit_rate = usage.hit_rate();
-        let creation_tokens = usage.cache_creation_tokens;
-
-        // 检查无缓存情况
-        if usage.cache_read_tokens == 0 && usage.cache_creation_tokens == 0 {
-            return Some(CacheWarningInfo {
-                warning_type: CacheWarningType::NoCache,
-                message: "No cache hits detected. Consider using cache_control hints for better performance.".to_string(),
-                hit_rate: 0.0,
-                creation_tokens: 0,
-            });
-        }
-
-        // 检查低命中率
-        if hit_rate < self.config.hit_rate_threshold && usage.cache_read_tokens > 0 {
-            return Some(CacheWarningInfo {
-                warning_type: CacheWarningType::LowHitRate,
-                message: format!(
-                    "Low cache hit rate: {:.1}%. Consider reordering system prompts for better cache utilization.",
-                    hit_rate * 100.0
-                ),
-                hit_rate,
-                creation_tokens,
-            });
-        }
-
-        // 检查高创建成本
-        if creation_tokens > self.config.creation_token_threshold {
-            return Some(CacheWarningInfo {
-                warning_type: CacheWarningType::HighCreationCost,
-                message: format!(
-                    "High cache creation cost: {} tokens. This may impact performance on subsequent turns.",
-                    creation_tokens
-                ),
-                hit_rate,
-                creation_tokens,
-            });
-        }
-
-        None
+        self.should_show_warning(usage.cache_creation_tokens as u64)
     }
 
-    /// 创建缓存警告消息
-    pub fn create_warning_message(&self, warning: &CacheWarningInfo) -> StarMessage {
-        StarMessage::system(&format!("[CACHE_WARNING] {}", warning.message))
+    /// 检查是否需要显示缓存创建成本警告
+    pub(crate) fn should_show_warning(&self, creation_tokens: u64) -> Option<CacheWarningInfo> {
+        if !self.config.enabled || creation_tokens <= self.config.creation_token_threshold {
+            return None;
+        }
+
+        Some(CacheWarningInfo {
+            warning_type: CacheWarningType::HighCreationCost,
+            message: format!(
+                "High cache creation cost: {} tokens. This may impact performance on subsequent turns.",
+                creation_tokens
+            ),
+            creation_tokens,
+        })
     }
 }
 
@@ -593,25 +523,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cache_hit_rate() {
-        let usage = CacheUsage {
-            input_tokens: 1000,
-            cache_creation_tokens: 100,
-            cache_read_tokens: 500,
+    fn cache_warning_requires_reported_telemetry_and_never_warns_for_zeroes() {
+        let detector = CacheWarningDetector {
+            config: CacheWarningConfig::default(),
         };
-        assert!((usage.hit_rate() - 0.333).abs() < 0.01);
+        let base_usage = StarUsage {
+            prompt_tokens: 1_000,
+            completion_tokens: 100,
+            total_tokens: 1_100,
+            ..Default::default()
+        };
+
+        assert!(detector.warning_for_usage(&base_usage).is_none());
+        assert!(detector
+            .warning_for_usage(&StarUsage {
+                cache_telemetry_reported: true,
+                ..base_usage.clone()
+            })
+            .is_none());
     }
 
     #[test]
-    fn test_cache_warning() {
-        let detector = CacheWarningDetector::new();
-        let usage = CacheUsage {
-            input_tokens: 1000,
-            cache_creation_tokens: 100,
+    fn cache_warning_respects_thresholds_and_enabled_flag() {
+        let usage = StarUsage {
+            prompt_tokens: 900,
+            completion_tokens: 100,
+            total_tokens: 1_000,
             cache_read_tokens: 100,
+            cache_creation_tokens: 20_000,
+            cache_telemetry_reported: true,
         };
-        let warning = detector.should_show_warning(&usage);
-        assert!(warning.is_some());
+        let detector = CacheWarningDetector {
+            config: CacheWarningConfig {
+                enabled: true,
+                creation_token_threshold: 10_000,
+            },
+        };
+        let warning = detector
+            .warning_for_usage(&usage)
+            .expect("high creation cost warning");
+        assert_eq!(warning.warning_type, CacheWarningType::HighCreationCost);
+        assert_eq!(warning.creation_tokens, 20_000);
+        assert!(warning.message.contains("20,000") || warning.message.contains("20000"));
+
+        let disabled = CacheWarningDetector {
+            config: CacheWarningConfig {
+                enabled: false,
+                ..CacheWarningConfig::default()
+            },
+        };
+        assert!(disabled.warning_for_usage(&usage).is_none());
     }
 
     #[test]

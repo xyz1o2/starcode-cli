@@ -110,16 +110,12 @@ pub async fn relay_confirmation_bus_message(
                 })
                 .await;
         }
-        Message::ContextUpdated(ctx) => {
+        Message::ContextUpdated(_ctx) => {
             let _ = tx
                 .send(StreamMessage::StatsUpdate {
                     au2_compressed: true,
-                    token_usage: Some(crate::types::StarUsage {
-                        prompt_tokens: 0,
-                        completion_tokens: 0,
-                        total_tokens: ctx.new_token_count as u32,
-                        ..Default::default()
-                    }),
+                    // Compression reports a context estimate, not provider usage.
+                    token_usage: None,
                 })
                 .await;
         }

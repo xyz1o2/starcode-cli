@@ -178,7 +178,11 @@ fn render_results_list(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
         let paragraph = Paragraph::new(vec![
             Line::from(Span::styled(error.clone(), Style::default().fg(Color::Red))),
             Line::from(Span::styled(
-                crate::core::i18n::t("search.press_esc", "Press Esc to close", "Press Esc to close"),
+                crate::core::i18n::t(
+                    "search.press_esc",
+                    "Press Esc to close",
+                    "Press Esc to close",
+                ),
                 Style::default().fg(Color::DarkGray),
             )),
         ])

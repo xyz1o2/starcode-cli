@@ -20,6 +20,8 @@ mod utils;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::sync::Arc;
 
+use crate::types::ChatEntry;
+
 #[derive(Subcommand)]
 enum Commands {
     /// Manage MCP (Model Context Protocol) servers
@@ -120,6 +122,42 @@ struct CliArgs {
 
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+struct ResolvedResumeSession {
+    id: String,
+    session: crate::utils::session_manager::Session,
+}
+
+/// Resolve CLI resume input to the one canonical JSON snapshot that will own the session.
+/// Exact IDs win; only explicit non-auto IDs may use the historical `auto-` fallback.
+async fn resolve_resume_session(requested_id: &str) -> Result<ResolvedResumeSession, String> {
+    let exact_id = if requested_id == "latest" {
+        crate::utils::session_manager::read_latest_session_id()
+            .await
+            .map_err(|error| format!("Failed to read latest session: {}", error))?
+            .ok_or_else(|| "No sessions found. Start a new session first.".to_string())?
+    } else {
+        requested_id.to_string()
+    };
+
+    match crate::utils::session_manager::load_session(&exact_id).await {
+        Ok(session) => Ok(ResolvedResumeSession {
+            id: exact_id,
+            session,
+        }),
+        Err(exact_error) if requested_id != "latest" && !exact_id.starts_with("auto-") => {
+            let fallback_id = format!("auto-{}", exact_id);
+            crate::utils::session_manager::load_session(&fallback_id)
+                .await
+                .map(|session| ResolvedResumeSession {
+                    id: fallback_id,
+                    session,
+                })
+                .map_err(|_| format!("Failed to load session '{}': {}", exact_id, exact_error))
+        }
+        Err(error) => Err(format!("Failed to load session '{}': {}", exact_id, error)),
+    }
 }
 
 #[tokio::main]
@@ -375,28 +413,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(crate::core::policy::approval_mode_from_str)
     };
 
-    // 创建 Config
-    // When resuming, reuse the same session ID so auto-save on exit overwrites the same file.
-    // --resume (no value) → load latest session
-    // --resume auto-xxx → load specified session
-    // --resume xxx → load specified session (with auto- prefix if needed)
-    let (session_id, resume_session_id) = if let Some(ref id) = args.resume {
-        let lookup_id = if id == "latest" {
-            // Load latest session - will be resolved later
-            "latest".to_string()
-        } else {
-            // Use the ID as-is (user may pass with or without auto- prefix)
-            id.clone()
-        };
-        // For Config.session_id, strip auto- prefix to get the base UUID
-        let base_id = lookup_id.strip_prefix("auto-").unwrap_or(&lookup_id);
-        (base_id.to_string(), Some(lookup_id))
-    } else {
-        (uuid::Uuid::new_v4().to_string(), None)
+    let resumed_session = match args.resume.as_deref() {
+        Some(requested_id) => Some(resolve_resume_session(requested_id).await.map_err(
+            |error| {
+                eprintln!("{}", error);
+                let boxed: Box<dyn std::error::Error> = error.into();
+                boxed
+            },
+        )?),
+        None => None,
     };
+
+    // 创建 Config：成功解析的 canonical 文件名是整个运行期的会话身份。
+    let session_id = resumed_session
+        .as_ref()
+        .map(|resolved| resolved.id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let config_params = core::config::ConfigParameters {
         session_id,
-        resume_session: resume_session_id.is_some(),
+        resume_session: resumed_session.is_some(),
         sandbox: None,
         target_dir: cwd.clone(),
         debug_mode: false,
@@ -503,6 +538,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.max_tool_rounds,
             is_openai_compatible,
             config.clone(),
+            resumed_session,
             args.output_format.clone(),
             prompt,
         )
@@ -511,66 +547,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         // Interactive mode: initialize terminal first, then agent in background
         let initial_message = args.message.join(" ");
-        let initial_history = if let Some(ref lookup_id) = resume_session_id {
-            let resolved_id = if lookup_id == "latest" {
-                // Load the latest session
-                match crate::utils::session_manager::read_latest_session_id().await {
-                    Ok(Some(id)) => id,
-                    Ok(None) => {
-                        eprintln!("No sessions found. Start a new session first.");
-                        std::process::exit(1);
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to read latest session: {}", e);
-                        std::process::exit(1);
-                    }
-                }
-            } else {
-                lookup_id.clone()
-            };
-            match crate::utils::session_manager::load_session(&resolved_id).await {
-                Ok(session) => {
-                    eprintln!("Resumed session: {}", resolved_id);
-                    session.chat_history
-                }
-                Err(e) => {
-                    // Try with auto- prefix if not already present
-                    let alt_id = if resolved_id.starts_with("auto-") {
-                        resolved_id.clone()
-                    } else {
-                        format!("auto-{}", resolved_id)
-                    };
-                    match crate::utils::session_manager::load_session(&alt_id).await {
-                        Ok(session) => {
-                            eprintln!("Resumed session: {}", alt_id);
-                            session.chat_history
-                        }
-                        Err(_) => {
-                            eprintln!("Failed to load session '{}': {}", resolved_id, e);
-                            eprintln!("\nAvailable sessions:");
-                            match crate::utils::session_manager::list_session_summaries().await {
-                                Ok(summaries) => {
-                                    if summaries.is_empty() {
-                                        eprintln!("  (none)");
-                                    } else {
-                                        for s in summaries.iter().take(10) {
-                                            eprintln!("  {} - {}", s.id, s.title);
-                                        }
-                                        if summaries.len() > 10 {
-                                            eprintln!("  ... and {} more", summaries.len() - 10);
-                                        }
-                                    }
-                                }
-                                Err(_) => eprintln!("  (failed to list sessions)"),
-                            }
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            }
-        } else {
-            Vec::new()
-        };
+        let initial_session_id = resumed_session
+            .as_ref()
+            .map(|resolved| resolved.id.clone());
+        let initial_session = resumed_session.map(|resolved| {
+            eprintln!("Resumed session: {}", resolved.id);
+            resolved.session
+        });
+        let initial_history = initial_session
+            .as_ref()
+            .map(|session| session.chat_history.clone())
+            .unwrap_or_default();
+        let initial_usage = initial_session
+            .as_ref()
+            .and_then(|session| session.last_usage.clone());
+        let restored_context = initial_session.as_ref().map(|session| {
+            (
+                crate::utils::session_manager::agent_messages_for_restore(session),
+                session.pending_local_context.clone().unwrap_or_default(),
+            )
+        });
 
         // Spawn heavy init as a background task with timeout
         let (init_tx, init_rx) = tokio::sync::oneshot::channel::<
@@ -580,6 +576,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let model2 = model.clone();
         let base_url2 = base_url.clone();
         let config_params2 = config_params.clone();
+        let restored_context2 = restored_context.clone();
         let _cwd2 = cwd_clone;
         tokio::spawn(async move {
             // Overall timeout for initialization (30 seconds - reduced from 60)
@@ -607,7 +604,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }?;
 
                 utils::logging::append_agent_log_line("[INIT] Starting StarAgent::new...");
-                agent::StarAgent::new(
+                let mut agent = agent::StarAgent::new(
                     &api_key2,
                     model2,
                     base_url2,
@@ -616,17 +613,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(config.clone()),
                 )
                 .await
-                .map(|agent| {
-                    utils::logging::append_agent_log_line("[INIT] StarAgent::new completed");
-                    (agent, config)
-                })
                 .map_err(|e| {
                     utils::logging::append_agent_log_line(&format!(
                         "[INIT] StarAgent::new failed: {}",
                         e
                     ));
                     format!("Agent 初始化失败: {}", e)
-                })
+                })?;
+
+                if let Some((messages, pending_local_context)) = restored_context2 {
+                    agent.replace_session_context(messages, pending_local_context);
+                }
+
+                utils::logging::append_agent_log_line("[INIT] StarAgent::new completed");
+                Ok((agent, config))
             })
             .await;
 
@@ -654,9 +654,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
 
         // Enter UI immediately with loading screen, then receive init result
-        crate::ui::app::runtime::run_app(init_rx, initial_message, initial_history)
-            .await
-            .map_err(|e| e as Box<dyn std::error::Error>)?;
+        crate::ui::app::runtime::run_app(
+            init_rx,
+            initial_message,
+            initial_history,
+            initial_usage,
+            initial_session_id,
+        )
+        .await
+        .map_err(|e| e as Box<dyn std::error::Error>)?;
     }
 
     Ok(())
@@ -682,10 +688,19 @@ async fn process_prompt_headless(
     max_tool_rounds: u32,
     is_openai_compatible: Option<bool>,
     config: Arc<core::config::Config>,
+    resumed_session: Option<ResolvedResumeSession>,
     output_format: HeadlessOutputFormat,
     prompt: String, // 直接接收 prompt 参数
 ) -> Result<(), Box<dyn std::error::Error>> {
     let prompt = prompt.trim();
+    let resumed_session_id = resumed_session.as_ref().map(|resolved| resolved.id.clone());
+    let mut snapshot_history = resumed_session
+        .as_ref()
+        .map(|resolved| resolved.session.chat_history.clone())
+        .unwrap_or_default();
+    let restored_usage = resumed_session
+        .as_ref()
+        .and_then(|resolved| resolved.session.last_usage.clone());
 
     let mut agent = agent::StarAgent::new(
         api_key,
@@ -698,14 +713,39 @@ async fn process_prompt_headless(
     .await
     .map_err(|e| e as Box<dyn std::error::Error>)?;
 
+    if let Some(resolved) = resumed_session.as_ref() {
+        let messages = crate::utils::session_manager::agent_messages_for_restore(&resolved.session);
+        let pending_local_context = resolved
+            .session
+            .pending_local_context
+            .clone()
+            .unwrap_or_default();
+        agent.replace_session_context(messages, pending_local_context);
+    }
+
     // Initialize MCP servers for headless mode (non-fatal)
     let _ = agent.initialize_mcp().await;
 
     // Process the user message
-    let chat_entries = agent
-        .process_user_message(prompt)
+    let (chat_entries, latest_usage) = agent
+        .process_user_message_with_usage(prompt)
         .await
         .map_err(|e| e as Box<dyn std::error::Error>)?;
+
+    if let Some(id) = resumed_session_id {
+        snapshot_history.push(ChatEntry::user(prompt));
+        snapshot_history.extend(chat_entries.iter().cloned());
+        let (messages, pending_local_context) = agent.session_context_snapshot();
+        crate::utils::session_manager::save_session_snapshot(
+            &id,
+            &snapshot_history,
+            Some(messages),
+            Some(pending_local_context),
+            latest_usage.or(restored_usage),
+        )
+        .await
+        .map_err(|error| -> Box<dyn std::error::Error> { error })?;
+    }
 
     match output_format {
         HeadlessOutputFormat::Jsonl => {

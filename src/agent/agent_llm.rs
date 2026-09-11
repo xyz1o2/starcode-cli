@@ -5,8 +5,66 @@ use crate::agent::loop_engineering::{
 use crate::agent::messaging::AgentEvent;
 use crate::agent::tool_routing::ToolSelection;
 use crate::agent::{hooks, tool_helpers};
-use crate::types::{StarMessage, StarToolCall};
+use crate::types::{StarMessage, StarToolCall, StarUsage};
 use std::time::Instant;
+
+fn parse_usage(usage: &serde_json::Map<String, serde_json::Value>) -> Option<StarUsage> {
+    let prompt_tokens = usage
+        .get("prompt_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let completion_tokens = usage
+        .get("completion_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let reported = usage
+        .get("total_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let total_tokens = if reported > 0 {
+        reported
+    } else {
+        prompt_tokens + completion_tokens
+    };
+
+    let cache_read_tokens = usage
+        .get("cache_read_tokens")
+        .or_else(|| usage.get("prompt_cache_hit_tokens"))
+        .or_else(|| usage.get("cache_read_input_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let cache_creation_tokens = usage
+        .get("cache_creation_tokens")
+        .or_else(|| usage.get("prompt_cache_miss_tokens"))
+        .or_else(|| usage.get("cache_creation_input_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let cache_telemetry_reported = usage
+        .get("cache_telemetry_reported")
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(|| {
+            [
+                "cache_read_tokens",
+                "cache_creation_tokens",
+                "prompt_cache_hit_tokens",
+                "prompt_cache_miss_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            ]
+            .iter()
+            .any(|key| usage.contains_key(*key))
+        });
+
+    (total_tokens > 0 || prompt_tokens > 0 || completion_tokens > 0 || cache_telemetry_reported)
+        .then_some(StarUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            cache_telemetry_reported,
+        })
+}
 
 /// LLM 调用的结果
 pub(crate) enum LlmResult {
@@ -376,58 +434,16 @@ impl Agent {
 
                     // Parse usage update
                     if let Some(usage) = json.get("usage").and_then(|v| v.as_object()) {
-                        let prompt_tokens = usage
-                            .get("prompt_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32;
-                        let completion_tokens = usage
-                            .get("completion_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32;
-                        let reported = usage
-                            .get("total_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32;
-                        let total_tokens = if reported > 0 {
-                            reported
-                        } else {
-                            prompt_tokens + completion_tokens
-                        };
-
-                        // Log cache hit information (DeepSeek/Anthropic specific fields)
-                        let cache_hit_tokens = usage
-                            .get("prompt_cache_hit_tokens")
-                            .or_else(|| usage.get("cache_read_input_tokens"))
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32;
-                        let cache_miss_tokens = usage
-                            .get("prompt_cache_miss_tokens")
-                            .or_else(|| usage.get("cache_creation_input_tokens"))
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32;
-
-                        if cache_hit_tokens > 0 || cache_miss_tokens > 0 {
-                            let hit_rate = if cache_hit_tokens + cache_miss_tokens > 0 {
-                                (cache_hit_tokens as f64
-                                    / (cache_hit_tokens + cache_miss_tokens) as f64
-                                    * 100.0) as u32
-                            } else {
-                                0
-                            };
-                            crate::utils::logging::append_debug_log_line(&format!(
-                                "[CACHE] Turn {}: hit={} miss={} rate={}%",
-                                current_turn, cache_hit_tokens, cache_miss_tokens, hit_rate
-                            ));
-                        }
-
-                        if total_tokens > 0 || prompt_tokens > 0 || completion_tokens > 0 {
-                            last_usage = Some(crate::types::StarUsage {
-                                prompt_tokens,
-                                completion_tokens,
-                                total_tokens,
-                                cache_read_tokens: cache_hit_tokens,
-                                cache_creation_tokens: cache_miss_tokens,
-                            });
+                        if let Some(parsed_usage) = parse_usage(usage) {
+                            if parsed_usage.cache_telemetry_reported {
+                                crate::utils::logging::append_debug_log_line(&format!(
+                                    "[CACHE] Turn {}: read={} write={}",
+                                    current_turn,
+                                    parsed_usage.cache_read_tokens,
+                                    parsed_usage.cache_creation_tokens,
+                                ));
+                            }
+                            last_usage = Some(parsed_usage);
                         }
                     }
 
@@ -1151,5 +1167,44 @@ impl Agent {
             max_attempts,
         ));
         Some(LlmResult::Retry)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_usage;
+    use serde_json::json;
+
+    #[test]
+    fn parse_usage_preserves_canonical_cache_telemetry() {
+        let usage = json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "cache_read_tokens": 80,
+            "cache_creation_tokens": 40,
+            "cache_telemetry_reported": true,
+        });
+        let parsed = parse_usage(usage.as_object().unwrap()).expect("usage should parse");
+
+        assert_eq!(parsed.cache_read_tokens, 80);
+        assert_eq!(parsed.cache_creation_tokens, 40);
+        assert!(parsed.cache_telemetry_reported);
+    }
+
+    #[test]
+    fn parse_usage_supports_aliases_and_cache_only_telemetry() {
+        let aliases = json!({
+            "prompt_cache_hit_tokens": 20,
+            "prompt_cache_miss_tokens": 5,
+        });
+        let parsed = parse_usage(aliases.as_object().unwrap()).expect("aliases should parse");
+        assert_eq!(parsed.total_tokens, 0);
+        assert_eq!(parsed.cache_read_tokens, 20);
+        assert_eq!(parsed.cache_creation_tokens, 5);
+        assert!(parsed.cache_telemetry_reported);
+
+        let empty = json!({ "prompt_tokens": 0, "total_tokens": 0 });
+        assert!(parse_usage(empty.as_object().unwrap()).is_none());
     }
 }

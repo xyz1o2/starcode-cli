@@ -902,13 +902,6 @@ pub async fn insights(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Comman
         .filter(|e| e.reasoning_content.is_some())
         .count();
 
-    let cache_total = s.cache_read_tokens + s.cache_creation_tokens;
-    let cache_rate = if cache_total > 0 {
-        (s.cache_read_tokens as f64 / cache_total as f64) * 100.0
-    } else {
-        0.0
-    };
-
     let mut tool_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for t in &s.tools_used {
         *tool_counts.entry(t.as_str()).or_insert(0) += 1;
@@ -924,9 +917,19 @@ pub async fn insights(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Comman
 
     out.push_str("\n## Cost & tokens\n");
     out.push_str(&format!(
-        "- context tokens: **{}**\n- cumulative cost: **${:.4}**\n- cache reads: **{}** · writes: **{}** (hit rate **{:.1}%**)\n",
-        s.token_count, s.total_cost, s.cache_read_tokens, s.cache_creation_tokens, cache_rate
+        "- context tokens: **{}**\n- cumulative cost: **${:.4}**\n",
+        s.token_count, s.total_cost
     ));
+    if let Some(usage) = s
+        .token_usage
+        .as_ref()
+        .filter(|usage| usage.cache_telemetry_reported)
+    {
+        out.push_str(&format!(
+            "- cache reads: **{}** · writes: **{}**\n",
+            usage.cache_read_tokens, usage.cache_creation_tokens
+        ));
+    }
 
     if let Some(usage) = &s.token_usage {
         out.push_str(&format!(

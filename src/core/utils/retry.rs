@@ -210,7 +210,8 @@ where
 
 /// 计算带 jitter 的延迟 (±JITTER_FACTOR)
 fn compute_delay_with_jitter(base_delay_ms: u64) -> u64 {
-    let jitter = base_delay_ms as f64 * JITTER_FACTOR * (rand::thread_rng().gen::<f64>() * 2.0 - 1.0);
+    let jitter =
+        base_delay_ms as f64 * JITTER_FACTOR * (rand::thread_rng().gen::<f64>() * 2.0 - 1.0);
     (base_delay_ms as f64 + jitter).max(0.0) as u64
 }
 
@@ -306,12 +307,21 @@ mod tests {
         // 包含 "5" 但不是 5xx 错误
         assert!(!is_retryable_error(&FakeError("error 1235".into()), false));
         // 真正的 5xx
-        assert!(is_retryable_error(&FakeError("500 Internal Server Error".into()), false));
-        assert!(is_retryable_error(&FakeError("502 Bad Gateway".into()), false));
+        assert!(is_retryable_error(
+            &FakeError("500 Internal Server Error".into()),
+            false
+        ));
+        assert!(is_retryable_error(
+            &FakeError("502 Bad Gateway".into()),
+            false
+        ));
         // 网络错误
         assert!(is_retryable_error(&FakeError("ECONNRESET".into()), false));
         // timeout
-        assert!(is_retryable_error(&FakeError("connection timed out".into()), false));
+        assert!(is_retryable_error(
+            &FakeError("connection timed out".into()),
+            false
+        ));
     }
 
     #[test]

@@ -654,6 +654,12 @@ pub struct StarUsage {
     /// Cache creation tokens (prompt cache writes) — Anthropic/DeepSeek specific
     #[serde(default)]
     pub cache_creation_tokens: u32,
+    /// Whether the provider explicitly reported cache accounting for this response.
+    ///
+    /// Zero counters alone cannot distinguish no cache use from an adapter that has no
+    /// cache telemetry, so callers must use this provenance flag before warning users.
+    #[serde(default)]
+    pub cache_telemetry_reported: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -380,12 +380,9 @@ fn build_star_response(result: CompletionResult) -> StarResponse {
 }
 
 /// Convert rig Usage to StarUsage.
-/// 把 rig 的 `Usage` 翻成 `StarUsage`，**包括缓存计数**
 ///
-/// 之前这里是 `..Default::default()`，于是 `cache_read_tokens` /
-/// `cache_creation_tokens` 永远是 0。状态栏的 "Cache N%" 只在
-/// `total_cache > 0` 时才画，所以那个指示器从来没出现过 —— 看上去像"没开缓存"，
-/// 实际上是"开了但没统计"。两个字段 rig 都给了，照抄即可。
+/// Rig normalizes absent cache accounting to zero. It cannot distinguish that from an
+/// explicitly reported zero, so mark provenance only when it exposes a nonzero cache value.
 fn convert_usage(usage: &rig_core::completion::Usage) -> StarUsage {
     StarUsage {
         prompt_tokens: usage.input_tokens as u32,
@@ -393,6 +390,8 @@ fn convert_usage(usage: &rig_core::completion::Usage) -> StarUsage {
         total_tokens: usage.total_tokens as u32,
         cache_read_tokens: usage.cached_input_tokens as u32,
         cache_creation_tokens: usage.cache_creation_input_tokens as u32,
+        cache_telemetry_reported: usage.cached_input_tokens > 0
+            || usage.cache_creation_input_tokens > 0,
     }
 }
 

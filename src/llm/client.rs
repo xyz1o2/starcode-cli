@@ -21,6 +21,22 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+fn legacy_usage_json(usage: &crate::types::StarUsage) -> serde_json::Value {
+    let mut usage_json = serde_json::json!({
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+    });
+
+    if usage.cache_telemetry_reported {
+        usage_json["cache_read_tokens"] = json!(usage.cache_read_tokens);
+        usage_json["cache_creation_tokens"] = json!(usage.cache_creation_tokens);
+        usage_json["cache_telemetry_reported"] = json!(true);
+    }
+
+    usage_json
+}
+
 #[derive(Debug, Zeroize, ZeroizeOnDrop)]
 pub struct StarClient {
     pub api_key: String,
@@ -798,14 +814,7 @@ impl StarClient {
                                 yield Ok(json);
                             },
                             LlmEvent::UsageUpdate(usage) => {
-                                let json = json!({
-                                    "usage": {
-                                        "prompt_tokens": usage.prompt_tokens,
-                                        "completion_tokens": usage.completion_tokens,
-                                        "total_tokens": usage.total_tokens,
-                                    }
-                                });
-                                yield Ok(json);
+                                yield Ok(json!({ "usage": legacy_usage_json(&usage) }));
                             },
                             LlmEvent::Error(msg) => {
                                 yield Err(Box::new(std::io::Error::other(msg)) as Box<dyn std::error::Error + Send + Sync>);
@@ -875,15 +884,14 @@ impl StarClient {
             })));
         }
         if let Some(usage) = &response.usage {
-            events.push(Ok(json!({
-                "usage": {
-                    "prompt_tokens": usage.prompt_tokens,
-                    "completion_tokens": usage.completion_tokens,
-                    "total_tokens": usage.total_tokens,
-                }
-            })));
+            events.push(Ok(json!({ "usage": legacy_usage_json(usage) })));
         }
         events
+    }
+
+    #[cfg(test)]
+    pub(crate) fn usage_json_for_test(usage: &crate::types::StarUsage) -> serde_json::Value {
+        legacy_usage_json(usage)
     }
 
     pub async fn chat_completion_simple(
@@ -1007,5 +1015,74 @@ impl StarClient {
             LlmProvider::Mock => "Mock".to_string(),
             LlmProvider::Custom(name) => name.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StarClient;
+    use crate::types::{StarChoice, StarMessage, StarResponse, StarUsage};
+
+    #[test]
+    fn cache_telemetry_is_preserved_in_legacy_usage_json() {
+        let usage = StarUsage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            cache_read_tokens: 80,
+            cache_creation_tokens: 40,
+            cache_telemetry_reported: true,
+        };
+        let json = StarClient::usage_json_for_test(&usage);
+
+        assert_eq!(json["cache_read_tokens"], 80);
+        assert_eq!(json["cache_creation_tokens"], 40);
+        assert_eq!(json["cache_telemetry_reported"], true);
+    }
+
+    #[test]
+    fn legacy_usage_json_omits_unreported_cache_counters() {
+        let usage = StarUsage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            cache_read_tokens: 80,
+            cache_creation_tokens: 40,
+            ..Default::default()
+        };
+        let json = StarClient::usage_json_for_test(&usage);
+
+        assert!(json.get("cache_read_tokens").is_none());
+        assert!(json.get("cache_creation_tokens").is_none());
+        assert!(json.get("cache_telemetry_reported").is_none());
+    }
+
+    #[test]
+    fn fallback_events_preserve_reported_zero_cache_telemetry() {
+        let response = StarResponse {
+            choices: vec![StarChoice {
+                message: StarMessage::assistant("done"),
+                finish_reason: "stop".to_string(),
+            }],
+            usage: Some(StarUsage {
+                prompt_tokens: 100,
+                completion_tokens: 20,
+                total_tokens: 120,
+                cache_telemetry_reported: true,
+                ..Default::default()
+            }),
+        };
+        let events = StarClient::build_events_from_response(response);
+        let usage = events
+            .last()
+            .expect("usage event")
+            .as_ref()
+            .expect("valid event")
+            .get("usage")
+            .expect("usage payload");
+
+        assert_eq!(usage["cache_read_tokens"], 0);
+        assert_eq!(usage["cache_creation_tokens"], 0);
+        assert_eq!(usage["cache_telemetry_reported"], true);
     }
 }

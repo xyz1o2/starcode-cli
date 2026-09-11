@@ -1,13 +1,42 @@
 use crate::agent::messaging::AsyncMessageQueue;
 use crate::agent::StarAgent;
 use crate::core::confirmation_bus::types::{Message, MessageBusType, ToolConfirmationResponse};
-use crate::runtime::messages::{AgentRequest, PendingCheckpointAction, StreamMessage};
+use crate::runtime::messages::{
+    AgentRequest, PendingCheckpointAction, StreamMessage, StreamStartKind,
+};
 use crate::utils::logging::append_debug_log_line;
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
+
+/// 流式回合结束后才可接触 agent 原生上下文的操作。
+///
+/// 必须保持收到请求的顺序：例如 `AppendContext` 后的 save 应保存追加内容，
+/// 而 save 后的 `AppendContext` 则不应提前混入那个快照。
+enum DeferredContextAction {
+    Append {
+        content: String,
+    },
+    Reset,
+    Save {
+        id: String,
+        history: Vec<crate::types::ChatEntry>,
+        last_usage: Option<crate::types::StarUsage>,
+        response: mpsc::Sender<Result<(), String>>,
+    },
+    Restore {
+        messages: Vec<crate::types::StarMessage>,
+        pending_local_context: Vec<String>,
+        response: mpsc::Sender<Result<(), String>>,
+    },
+    /// 此项必须排在 save/restore 等上下文变更之后执行，确保快照拿到流结束同步的原生消息。
+    Shutdown {
+        response: mpsc::Sender<Result<(), String>>,
+    },
+}
 
 #[derive(Default)]
 pub struct DeferredRuntimeActions {
@@ -22,7 +51,6 @@ pub struct DeferredRuntimeActions {
     pub pending_toggle_yolo: bool,
     pub pending_set_approval_mode: Option<crate::types::ApprovalMode>,
     pub pending_set_thinking_effort: Option<crate::types::ThinkingEffort>,
-    pub pending_reset_session: bool,
     pub pending_tool_confirmation: Option<(Vec<crate::types::StarToolCall>, u64, bool, bool)>,
     pub pending_checkpoint_action: Option<PendingCheckpointAction>,
     pub pending_update_provider_config: Option<(
@@ -35,15 +63,20 @@ pub struct DeferredRuntimeActions {
     pub pending_compress_request: Option<u64>,
     pub pending_generate_note: Option<(crate::runtime::messages::NoteKind, u64, Option<String>)>,
     pub pending_mark_as_read: Vec<String>,
-    /// 流式过程中收到的 `!command` 输出：等这一轮结束再追加进上下文，
-    /// 免得在 agent 正读 session_messages 的时候插队改它。
-    pub pending_context_appends: Vec<String>,
+    /// 流式过程中收到的会话上下文变更。必须按接收顺序串行执行，避免
+    /// `AppendContext`、save、restore 之间的边界互相穿插。
+    pending_context_actions: VecDeque<DeferredContextAction>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamingRequestOutcome {
     Continue,
     Break,
+    /// 已请求中断；继续 drain 当前 stream，等待 agent 同步最终原生上下文。
+    Abort,
     Return,
+    /// 已请求终止；继续 drain 当前 stream，等待 agent 同步最终原生上下文。
+    Shutdown,
 }
 
 pub struct StreamingRequestContext<'a> {
@@ -90,7 +123,16 @@ pub async fn handle_streaming_request(
                     message_id: context.message_id,
                 })
                 .await;
-            StreamingRequestOutcome::Break
+            StreamingRequestOutcome::Abort
+        }
+        Some(AgentRequest::Shutdown { response }) => {
+            // 不直接丢掉 outer stream：它负责接收 agent loop 的最终 session_messages。
+            // 保持 drain，等取消后的 Done 抵达再让 worker 统一收尾。
+            context.abort_flag.store(true, Ordering::SeqCst);
+            deferred
+                .pending_context_actions
+                .push_back(DeferredContextAction::Shutdown { response });
+            StreamingRequestOutcome::Shutdown
         }
         Some(AgentRequest::LoadConfiguredProviders) => {
             let store = crate::core::config::provider_store::ProviderStore::new();
@@ -182,7 +224,9 @@ pub async fn handle_streaming_request(
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::AppendContext { content }) => {
-            deferred.pending_context_appends.push(content);
+            deferred
+                .pending_context_actions
+                .push_back(DeferredContextAction::Append { content });
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::ToggleYoloMode) => {
@@ -202,7 +246,9 @@ pub async fn handle_streaming_request(
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::ResetSession) => {
-            deferred.pending_reset_session = true;
+            deferred
+                .pending_context_actions
+                .push_back(DeferredContextAction::Reset);
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::SetApprovalMode(mode)) => {
@@ -279,10 +325,39 @@ pub async fn handle_streaming_request(
                 .await;
             StreamingRequestOutcome::Continue
         }
-        None => StreamingRequestOutcome::Return,
-        Some(AgentRequest::ResumeSession(_session_id)) => {
-            // Session resume is handled by the control request handler
+        Some(AgentRequest::SaveSession {
+            id,
+            history,
+            last_usage,
+            response,
+        }) => {
+            deferred
+                .pending_context_actions
+                .push_back(DeferredContextAction::Save {
+                    id,
+                    history,
+                    last_usage,
+                    response,
+                });
             StreamingRequestOutcome::Continue
+        }
+        Some(AgentRequest::RestoreSession {
+            messages,
+            pending_local_context,
+            response,
+        }) => {
+            deferred
+                .pending_context_actions
+                .push_back(DeferredContextAction::Restore {
+                    messages,
+                    pending_local_context,
+                    response,
+                });
+            StreamingRequestOutcome::Continue
+        }
+        None => {
+            context.abort_flag.store(true, Ordering::SeqCst);
+            StreamingRequestOutcome::Return
         }
         Some(AgentRequest::PluginOp { project_root, op }) => {
             // 插件市场后台操作不依赖 agent：即使正在流式回复中也直接执行
@@ -306,6 +381,49 @@ pub async fn handle_streaming_request(
             StreamingRequestOutcome::Continue
         }
     }
+}
+
+pub async fn apply_deferred_context_actions(
+    agent: &mut StarAgent,
+    deferred: &mut DeferredRuntimeActions,
+) -> Option<mpsc::Sender<Result<(), String>>> {
+    // 在 agent 已完成本回合并同步原生消息后，按请求抵达的原始顺序处理。
+    // 这样 `!command` 输出、重置、restore、save 都不会越过彼此的上下文边界。
+    while let Some(action) = deferred.pending_context_actions.pop_front() {
+        match action {
+            DeferredContextAction::Append { content } => agent.append_session_context(content),
+            DeferredContextAction::Reset => agent.clear_session_context(),
+            DeferredContextAction::Save {
+                id,
+                history,
+                last_usage,
+                response,
+            } => {
+                let (messages, pending_local_context) = agent.session_context_snapshot();
+                let result = crate::utils::session_manager::save_session_snapshot(
+                    &id,
+                    &history,
+                    Some(messages),
+                    Some(pending_local_context),
+                    last_usage,
+                )
+                .await
+                .map_err(|error| error.to_string());
+                let _ = response.send(result).await;
+            }
+            DeferredContextAction::Restore {
+                messages,
+                pending_local_context,
+                response,
+            } => {
+                agent.replace_session_context(messages, pending_local_context);
+                let _ = response.send(Ok(())).await;
+            }
+            DeferredContextAction::Shutdown { response } => return Some(response),
+        }
+    }
+
+    None
 }
 
 pub async fn apply_deferred_runtime_actions(
@@ -387,14 +505,22 @@ pub async fn apply_deferred_runtime_actions(
         }
     }
 
-    if !deferred.pending_context_appends.is_empty() {
-        for content in deferred.pending_context_appends.drain(..) {
-            agent.append_session_context(content);
-        }
+    if let Some(response) = apply_deferred_context_actions(agent, deferred).await {
+        // 正常路径不应看到 Shutdown：agent_runtime 会在流 drain 后先截获它，
+        // 再由 worker 在 SessionEnd 后确认。保留防御性错误，避免调用方无止境等待。
+        let _ = response
+            .send(Err("Shutdown bypassed the worker lifecycle.".to_string()))
+            .await;
+        return;
     }
 
     if let Some(message_id) = deferred.pending_compress_request.take() {
-        let _ = tx.send(StreamMessage::Start { message_id }).await;
+        let _ = tx
+            .send(StreamMessage::Start {
+                message_id,
+                kind: StreamStartKind::Operation,
+            })
+            .await;
         let pre_compact_summary = crate::runtime::hooks::run_pre_compact_hooks(project_root).await;
         for note in pre_compact_summary.assistant_notes {
             let _ = tx
@@ -475,16 +601,16 @@ pub async fn apply_deferred_runtime_actions(
         ));
     }
 
-    if deferred.pending_reset_session {
-        deferred.pending_reset_session = false;
-        agent.clear_session_context();
-    }
-
     if let Some((tool_calls, message_id, approved, always_allow)) =
         deferred.pending_tool_confirmation.take()
     {
         if approved || always_allow {
-            let _ = tx.send(StreamMessage::Start { message_id }).await;
+            let _ = tx
+                .send(StreamMessage::Start {
+                    message_id,
+                    kind: StreamStartKind::Operation,
+                })
+                .await;
 
             for tool_call in tool_calls {
                 let _ = tx

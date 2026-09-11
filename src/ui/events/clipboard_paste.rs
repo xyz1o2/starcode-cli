@@ -297,7 +297,11 @@ pub(crate) fn insert_paste_block(state: &mut ChatState, text: String) {
             crate::core::i18n::t("paste.block", "已粘贴块", "Pasted block"),
             id + 1,
             line_count,
-            crate::core::i18n::t("paste.lines_with_hint", "行（继续输入或再次粘贴）", "lines (continue typing or paste again)")
+            crate::core::i18n::t(
+                "paste.lines_with_hint",
+                "行（继续输入或再次粘贴）",
+                "lines (continue typing or paste again)"
+            )
         ));
     } else {
         state.textarea.insert_str(&normalized);
@@ -334,7 +338,11 @@ pub(crate) fn insert_paste_block_confirmed(state: &mut ChatState, text: String) 
             crate::core::i18n::t("paste.block", "已粘贴块", "Pasted block"),
             id + 1,
             line_count,
-            crate::core::i18n::t("paste.lines_with_hint", "行（继续输入或再次粘贴）", "lines (continue typing or paste again)")
+            crate::core::i18n::t(
+                "paste.lines_with_hint",
+                "行（继续输入或再次粘贴）",
+                "lines (continue typing or paste again)"
+            )
         ));
     } else {
         state.textarea.insert_str(&normalized);

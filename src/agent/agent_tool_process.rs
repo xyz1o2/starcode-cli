@@ -1,6 +1,6 @@
 use crate::agent::agent_core::Agent;
 use crate::agent::agent_loop::TurnResult;
-use crate::agent::loop_engineering::{LoopState, LoopStrategy, StructuredError};
+use crate::agent::loop_engineering::{LoopState, LoopStrategy, StructuredError, ToolCallBudget};
 use crate::agent::nudges;
 use crate::agent::tool_routing::{
     build_analyzer_skill_tool_call, build_editor_skill_tool_call, build_json_fallback_prompt,
@@ -264,6 +264,7 @@ impl Agent {
                     turn_active_tools,
                     skip_verification,
                     verification_required,
+                    loop_state,
                 )
                 .await;
 
@@ -381,29 +382,17 @@ impl Agent {
         loop_state: &mut LoopState,
     ) {
         // ── Budget enforcement ──
-        // Check per-turn tool call budget before executing tools.
-        // This prevents runaway tool execution from consuming excessive API credits.
-        let budget = &mut loop_state.budget;
-        if budget.calls_this_turn + tool_calls.len() > budget.max_calls_per_turn {
+        // 在 hook 前接受整个模型批次，避免部分执行导致协议消息不完整。
+        if let Err(exhausted) = accept_tool_calls(&mut loop_state.budget, tool_calls) {
             crate::utils::logging::append_debug_log_line(&format!(
-                "[BUDGET] turn {} exceeded max tool calls per turn ({} + {} > {})",
-                current_turn,
-                budget.calls_this_turn,
-                tool_calls.len(),
-                budget.max_calls_per_turn,
+                "[BUDGET] turn {} rejected tool calls: {:?}",
+                current_turn, exhausted
             ));
-            // Push a summary of the budget exhaustion to the messages so the
-            // model can decide how to proceed (abort, summarize, or split work).
-            messages.push(StarMessage::system(format!(
-                "Tool call budget exhausted this turn ({}/{} calls already made, {} pending). \
-                     Summarize your progress so far and describe the remaining work.",
-                budget.calls_this_turn,
-                budget.max_calls_per_turn,
-                tool_calls.len(),
-            )));
+            messages.push(StarMessage::system(
+                exhausted.recovery_message(tool_calls.len()),
+            ));
             return;
         }
-        budget.calls_this_turn += tool_calls.len();
 
         let mut runnable_tool_calls: Vec<StarToolCall> = Vec::new();
         for tool_call in tool_calls {
@@ -452,156 +441,48 @@ impl Agent {
             let mut successful_edit_tools = Vec::new();
             let mut validation_tool_happened = false;
 
-            let has_long_running = runnable_tool_calls
-                .iter()
-                .any(|tc| tc.function.name == "SemanticSearch" || tc.function.name == "ProjectMap");
-
-            if has_long_running {
-                for tool_call in &runnable_tool_calls {
-                    // 通过 stream_tx 实时发送工具开始事件
-                    self.emit_tool_started(tool_call);
-                    self.emit_event(crate::agent::messaging::AgentEvent::ToolStarted {
-                        tool_call: tool_call.clone(),
-                    });
-                    let result = self.execute_single_tool(tool_call).await;
-                    // 通过 stream_tx 实时发送工具完成事件
-                    self.emit_tool_finished(tool_call, &result);
-                    self.emit_event(crate::agent::messaging::AgentEvent::ToolFinished {
-                        tool_call: tool_call.clone(),
-                        result: result.clone(),
-                    });
-
-                    if is_edit_tool_name(&tool_call.function.name) && result.success {
-                        successful_edit_happened = true;
-                        successful_edit_tools.push(tool_call.function.name.clone());
-
-                        // Auto-verify syntax after successful edits
-                        if let Some(file_path) = extract_file_path_from_tool_call(tool_call) {
-                            if let Ok(content) = std::fs::read_to_string(&file_path) {
-                                let verify_result =
-                                    crate::core::tools::verify_edit::verify_edit_syntax(
-                                        &file_path, &content,
-                                    );
-                                if !verify_result.syntax_ok {
-                                    let verify_msg =
-                                        crate::core::tools::verify_edit::format_verification_result(
-                                            &verify_result,
-                                        );
-                                    crate::utils::logging::append_debug_log_line(&format!(
-                                        "[VERIFY] Post-edit syntax check failed: {}",
-                                        verify_msg
-                                    ));
-                                    messages.push(StarMessage::system(verify_msg));
-                                }
-                            }
+            for segment in tool_execution_segments(&runnable_tool_calls) {
+                match segment {
+                    ToolExecutionSegment::Batch(indices) => {
+                        let calls = indices
+                            .iter()
+                            .map(|&index| runnable_tool_calls[index].clone())
+                            .collect::<Vec<_>>();
+                        self.emit_tool_starts(&calls);
+                        let results = self.tool_executor.execute_batch(calls, None, None).await;
+                        for (index, result) in indices.into_iter().zip(results) {
+                            self.consume_tool_result(
+                                user_input,
+                                messages,
+                                &runnable_tool_calls[index],
+                                result,
+                                skip_verification,
+                                verification_required,
+                                loop_state,
+                                &mut successful_edit_happened,
+                                &mut successful_edit_tools,
+                                &mut validation_tool_happened,
+                            )
+                            .await;
                         }
                     }
-                    if is_validation_tool_name(&tool_call.function.name) {
-                        validation_tool_happened = true;
-                    }
-                    tool_helpers::update_verification_state(
-                        tool_call,
-                        &result,
-                        verification_required,
-                        skip_verification,
-                    );
-                    hooks::run_post_tool_hooks(user_input, tool_call, &result).await;
-                    reflection::maybe_write_reflection_memory(user_input, tool_call, &result).await;
-                    let recovery_instruction =
-                        record_tool_outcome(loop_state, &tool_call.function.name, &result);
-                    if let Some(instr) = recovery_instruction {
-                        messages.push(StarMessage::system(instr));
-                    }
-
-                    // Record file access in memory system
-                    if is_read_only_tool_name(&tool_call.function.name) && result.success {
-                        if let Some(file_path) = extract_file_path_from_tool_call(tool_call) {
-                            let memory_manager = &self.memory_manager;
-                            let _ = memory_manager
-                                .record_file_access(&file_path, None, None)
-                                .await;
-                        }
-                    }
-
-                    let tool_msg_content = result
-                        .output
-                        .unwrap_or_else(|| result.error.unwrap_or_default());
-                    messages.push(StarMessage::tool(
-                        tool_call.id.clone(),
-                        tool_msg_content.clone(),
-                    ));
-
-                    if is_edit_tool_name(&tool_call.function.name)
-                        && tool_msg_content
-                            .contains(crate::core::tools::constants::EDIT_FILE_NOT_READ_MARKER)
-                    {
-                        self.handle_edit_not_read_error(messages, tool_call);
-                    }
-                }
-            } else {
-                for tc in &runnable_tool_calls {
-                    // 通过 stream_tx 实时发送工具开始事件
-                    self.emit_tool_started(tc);
-                    self.emit_event(crate::agent::messaging::AgentEvent::ToolStarted {
-                        tool_call: tc.clone(),
-                    });
-                }
-                let results = self
-                    .tool_executor
-                    .execute_batch(runnable_tool_calls.clone(), None, None)
-                    .await;
-
-                for (tool_call, result) in runnable_tool_calls.iter().zip(results.into_iter()) {
-                    // 通过 stream_tx 实时发送工具完成事件
-                    self.emit_tool_finished(tool_call, &result);
-                    self.emit_event(crate::agent::messaging::AgentEvent::ToolFinished {
-                        tool_call: tool_call.clone(),
-                        result: result.clone(),
-                    });
-                    if is_edit_tool_name(&tool_call.function.name) && result.success {
-                        successful_edit_happened = true;
-                        successful_edit_tools.push(tool_call.function.name.clone());
-                    }
-                    if is_validation_tool_name(&tool_call.function.name) {
-                        validation_tool_happened = true;
-                    }
-                    tool_helpers::update_verification_state(
-                        tool_call,
-                        &result,
-                        verification_required,
-                        skip_verification,
-                    );
-                    hooks::run_post_tool_hooks(user_input, tool_call, &result).await;
-                    reflection::maybe_write_reflection_memory(user_input, tool_call, &result).await;
-                    let recovery_instruction =
-                        record_tool_outcome(loop_state, &tool_call.function.name, &result);
-                    if let Some(instr) = recovery_instruction {
-                        messages.push(StarMessage::system(instr));
-                    }
-
-                    // Record file access in memory system
-                    if is_read_only_tool_name(&tool_call.function.name) && result.success {
-                        if let Some(file_path) = extract_file_path_from_tool_call(tool_call) {
-                            let memory_manager = &self.memory_manager;
-                            let _ = memory_manager
-                                .record_file_access(&file_path, None, None)
-                                .await;
-                        }
-                    }
-
-                    let tool_msg_content = result
-                        .output
-                        .unwrap_or_else(|| result.error.unwrap_or_default());
-                    messages.push(StarMessage::tool(
-                        tool_call.id.clone(),
-                        tool_msg_content.clone(),
-                    ));
-
-                    if is_edit_tool_name(&tool_call.function.name)
-                        && tool_msg_content
-                            .contains(crate::core::tools::constants::EDIT_FILE_NOT_READ_MARKER)
-                    {
-                        self.handle_edit_not_read_error(messages, tool_call);
+                    ToolExecutionSegment::Barrier(index) => {
+                        let tool_call = &runnable_tool_calls[index];
+                        self.emit_tool_starts(std::slice::from_ref(tool_call));
+                        let result = self.execute_single_tool(tool_call).await;
+                        self.consume_tool_result(
+                            user_input,
+                            messages,
+                            tool_call,
+                            result,
+                            skip_verification,
+                            verification_required,
+                            loop_state,
+                            &mut successful_edit_happened,
+                            &mut successful_edit_tools,
+                            &mut validation_tool_happened,
+                        )
+                        .await;
                     }
                 }
             }
@@ -690,6 +571,107 @@ impl Agent {
         }
     }
 
+    /// 在执行段开始前按原始模型顺序发布工具开始事件。
+    fn emit_tool_starts(&self, tool_calls: &[StarToolCall]) {
+        for tool_call in tool_calls {
+            self.emit_tool_started(tool_call);
+            self.emit_event(crate::agent::messaging::AgentEvent::ToolStarted {
+                tool_call: tool_call.clone(),
+            });
+        }
+    }
+
+    /// 消费一次工具执行结果，保证串行 barrier 与批处理的后处理完全一致。
+    #[allow(clippy::too_many_arguments)]
+    async fn consume_tool_result(
+        &mut self,
+        user_input: &str,
+        messages: &mut Vec<StarMessage>,
+        tool_call: &StarToolCall,
+        result: ToolResult,
+        skip_verification: bool,
+        verification_required: &mut bool,
+        loop_state: &mut LoopState,
+        successful_edit_happened: &mut bool,
+        successful_edit_tools: &mut Vec<String>,
+        validation_tool_happened: &mut bool,
+    ) {
+        self.emit_tool_finished(tool_call, &result);
+        self.emit_event(crate::agent::messaging::AgentEvent::ToolFinished {
+            tool_call: tool_call.clone(),
+            result: result.clone(),
+        });
+
+        if is_edit_tool_name(&tool_call.function.name) && result.success {
+            *successful_edit_happened = true;
+            successful_edit_tools.push(tool_call.function.name.clone());
+            self.verify_successful_edit(messages, tool_call);
+        }
+        if is_validation_tool_name(&tool_call.function.name) {
+            *validation_tool_happened = true;
+        }
+        tool_helpers::update_verification_state(
+            tool_call,
+            &result,
+            verification_required,
+            skip_verification,
+        );
+        hooks::run_post_tool_hooks(user_input, tool_call, &result).await;
+        reflection::maybe_write_reflection_memory(user_input, tool_call, &result).await;
+        if let Some(instruction) =
+            record_tool_outcome(loop_state, &tool_call.function.name, &result)
+        {
+            messages.push(StarMessage::system(instruction));
+        }
+
+        // Record file access in memory system
+        if is_read_only_tool_name(&tool_call.function.name) && result.success {
+            if let Some(file_path) = extract_file_path_from_tool_call(tool_call) {
+                let _ = self
+                    .memory_manager
+                    .record_file_access(&file_path, None, None)
+                    .await;
+            }
+        }
+
+        let tool_msg_content = result
+            .output
+            .unwrap_or_else(|| result.error.unwrap_or_default());
+        messages.push(StarMessage::tool(
+            tool_call.id.clone(),
+            tool_msg_content.clone(),
+        ));
+
+        if is_edit_tool_name(&tool_call.function.name)
+            && tool_msg_content.contains(crate::core::tools::constants::EDIT_FILE_NOT_READ_MARKER)
+        {
+            self.handle_edit_not_read_error(messages, tool_call);
+        }
+    }
+
+    /// 成功编辑后执行已有的语法验证，失败结果注入模型上下文。
+    fn verify_successful_edit(&self, messages: &mut Vec<StarMessage>, tool_call: &StarToolCall) {
+        let Some(file_path) = extract_file_path_from_tool_call(tool_call) else {
+            return;
+        };
+        let Ok(content) = std::fs::read_to_string(&file_path) else {
+            return;
+        };
+        let verify_result =
+            crate::core::tools::verify_edit::verify_edit_syntax(&file_path, &content);
+        if verify_result.syntax_ok {
+            return;
+        }
+
+        let verify_msg =
+            crate::core::tools::verify_edit::format_verification_result(&verify_result);
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[VERIFY] Post-edit syntax check failed: {}",
+            verify_msg
+        ));
+        messages.push(StarMessage::system(verify_msg));
+    }
+
     /// 处理编辑未读错误
     fn handle_edit_not_read_error(
         &self,
@@ -722,7 +704,14 @@ impl Agent {
         tool_call: StarToolCall,
         verification_required: &mut bool,
         skip_verification: bool,
+        loop_state: &mut LoopState,
     ) -> TurnResult {
+        if let Err(exhausted) =
+            accept_tool_calls(&mut loop_state.budget, std::slice::from_ref(&tool_call))
+        {
+            messages.push(StarMessage::system(exhausted.recovery_message(1)));
+            return TurnResult::Continue;
+        }
         messages.push(StarMessage::assistant_with_tool_calls(vec![
             tool_call.clone()
         ]));
@@ -804,6 +793,7 @@ impl Agent {
         turn_active_tools: &HashSet<String>,
         skip_verification: bool,
         verification_required: &mut bool,
+        loop_state: &mut LoopState,
     ) -> TurnResult {
         // 使用优先级驱动选择替代原串行链
         let best = select_best_auto_trigger(
@@ -841,6 +831,7 @@ impl Agent {
                     tool_call,
                     verification_required,
                     skip_verification,
+                    loop_state,
                 )
                 .await
             }
@@ -853,6 +844,7 @@ impl Agent {
                     tool_call,
                     verification_required,
                     skip_verification,
+                    loop_state,
                 )
                 .await
             }
@@ -865,6 +857,7 @@ impl Agent {
                     tool_call,
                     verification_required,
                     skip_verification,
+                    loop_state,
                 )
                 .await
             }
@@ -877,6 +870,7 @@ impl Agent {
                     tool_call,
                     verification_required,
                     skip_verification,
+                    loop_state,
                 )
                 .await
             }
@@ -889,6 +883,7 @@ impl Agent {
                     tool_call,
                     verification_required,
                     skip_verification,
+                    loop_state,
                 )
                 .await
             }
@@ -924,6 +919,7 @@ impl Agent {
                                     fb_tool,
                                     verification_required,
                                     skip_verification,
+                                    loop_state,
                                 )
                                 .await;
                         }
@@ -956,11 +952,129 @@ impl Agent {
                     tool_call,
                     verification_required,
                     skip_verification,
+                    loop_state,
                 )
                 .await
             }
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ToolBudgetExhausted {
+    Total {
+        accepted: usize,
+        pending: usize,
+        limit: usize,
+    },
+    PerTool {
+        tool_name: String,
+        accepted: usize,
+        pending: usize,
+        limit: usize,
+    },
+}
+
+impl ToolBudgetExhausted {
+    fn recovery_message(&self, batch_size: usize) -> String {
+        match self {
+            Self::Total {
+                accepted,
+                pending,
+                limit,
+            } => format!(
+                "Tool call budget exhausted this turn ({accepted}/{limit} calls already made, \
+                 {pending} pending in this {batch_size}-call response). Summarize your progress \
+                 so far and describe the remaining work."
+            ),
+            Self::PerTool {
+                tool_name,
+                accepted,
+                pending,
+                limit,
+            } => format!(
+                "Tool call limit for `{tool_name}` is exhausted this turn ({accepted}/{limit} \
+                 already accepted, {pending} pending in this {batch_size}-call response). Do not \
+                 execute a partial batch; use prior results or choose a different tool."
+            ),
+        }
+    }
+}
+
+/// 原子地接受一次模型/自动触发提出的工具批次；拒绝时不改变现有计数。
+fn accept_tool_calls(
+    budget: &mut ToolCallBudget,
+    tool_calls: &[StarToolCall],
+) -> Result<(), ToolBudgetExhausted> {
+    if budget.calls_this_turn + tool_calls.len() > budget.max_calls_per_turn {
+        return Err(ToolBudgetExhausted::Total {
+            accepted: budget.calls_this_turn,
+            pending: tool_calls.len(),
+            limit: budget.max_calls_per_turn,
+        });
+    }
+
+    let mut proposed_by_tool = std::collections::HashMap::<&str, usize>::new();
+    for tool_call in tool_calls {
+        *proposed_by_tool
+            .entry(tool_call.function.name.as_str())
+            .or_default() += 1;
+    }
+    for (tool_name, pending) in proposed_by_tool {
+        let accepted = budget
+            .tool_calls
+            .get(tool_name)
+            .copied()
+            .unwrap_or_default();
+        if accepted + pending > budget.max_calls_per_tool {
+            return Err(ToolBudgetExhausted::PerTool {
+                tool_name: tool_name.to_string(),
+                accepted,
+                pending,
+                limit: budget.max_calls_per_tool,
+            });
+        }
+    }
+
+    budget.calls_this_turn += tool_calls.len();
+    for tool_call in tool_calls {
+        *budget
+            .tool_calls
+            .entry(tool_call.function.name.clone())
+            .or_default() += 1;
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ToolExecutionSegment {
+    Batch(Vec<usize>),
+    Barrier(usize),
+}
+
+/// 将必须独占的检索工具作为 barrier，保留相邻普通调用的批处理并发。
+fn tool_execution_segments(tool_calls: &[StarToolCall]) -> Vec<ToolExecutionSegment> {
+    let mut segments = Vec::new();
+    let mut batch = Vec::new();
+
+    for (index, tool_call) in tool_calls.iter().enumerate() {
+        if matches!(
+            tool_call.function.name.as_str(),
+            "SemanticSearch" | "ProjectMap"
+        ) {
+            if !batch.is_empty() {
+                segments.push(ToolExecutionSegment::Batch(std::mem::take(&mut batch)));
+            }
+            segments.push(ToolExecutionSegment::Barrier(index));
+        } else {
+            batch.push(index);
+        }
+    }
+    if !batch.is_empty() {
+        segments.push(ToolExecutionSegment::Batch(batch));
+    }
+
+    segments
 }
 
 /// Extract file path from tool call arguments
@@ -1028,10 +1142,104 @@ fn record_tool_outcome(
 
     if instruction.is_some() {
         crate::utils::logging::append_debug_log_line(&format!(
-            "[LOOP_CONTEXT] {} strategy -> recovery instruction injected",
-            format!("{:?}", loop_state.strategy)
+            "[LOOP_CONTEXT] {:?} strategy -> recovery instruction injected",
+            loop_state.strategy
         ));
     }
 
     instruction
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::StarToolCallFunction;
+
+    fn tool_call(id: usize, name: &str) -> StarToolCall {
+        StarToolCall {
+            id: format!("call_{id}"),
+            call_type: "function".to_string(),
+            function: StarToolCallFunction {
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn tool_budget_enforces_independent_per_tool_limits_and_turn_reset() {
+        let mut budget = ToolCallBudget::new(50, 50.0);
+        let reads = (0..15).map(|id| tool_call(id, "Read")).collect::<Vec<_>>();
+        accept_tool_calls(&mut budget, &reads).expect("fifteenth Read is permitted");
+        assert_eq!(budget.calls_this_turn, 15);
+        assert_eq!(budget.tool_calls.get("Read"), Some(&15));
+
+        let rejected = accept_tool_calls(&mut budget, &[tool_call(15, "Read")]);
+        assert!(matches!(
+            rejected,
+            Err(ToolBudgetExhausted::PerTool {
+                ref tool_name,
+                accepted: 15,
+                pending: 1,
+                limit: 15,
+            }) if tool_name == "Read"
+        ));
+        assert_eq!(budget.calls_this_turn, 15, "rejected batches stay atomic");
+        assert_eq!(budget.tool_calls.get("Read"), Some(&15));
+
+        accept_tool_calls(&mut budget, &[tool_call(16, "Grep")])
+            .expect("different tools retain independent ceilings");
+        assert_eq!(budget.tool_calls.get("Grep"), Some(&1));
+
+        budget.reset_turn();
+        assert_eq!(budget.calls_this_turn, 0);
+        assert!(budget.tool_calls.is_empty());
+        accept_tool_calls(&mut budget, &[tool_call(17, "Read")])
+            .expect("the existing turn reset restores the tool quota");
+    }
+
+    #[test]
+    fn tool_segments_preserve_order_around_long_running_barriers() {
+        let calls = [
+            tool_call(0, "Read"),
+            tool_call(1, "Grep"),
+            tool_call(2, "SemanticSearch"),
+            tool_call(3, "Read"),
+            tool_call(4, "ProjectMap"),
+            tool_call(5, "Glob"),
+        ];
+        assert_eq!(
+            tool_execution_segments(&calls),
+            vec![
+                ToolExecutionSegment::Batch(vec![0, 1]),
+                ToolExecutionSegment::Barrier(2),
+                ToolExecutionSegment::Batch(vec![3]),
+                ToolExecutionSegment::Barrier(4),
+                ToolExecutionSegment::Batch(vec![5]),
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_segments_batch_calls_without_or_beside_long_running_tools() {
+        let regular = [tool_call(0, "Read"), tool_call(1, "Grep")];
+        assert_eq!(
+            tool_execution_segments(&regular),
+            vec![ToolExecutionSegment::Batch(vec![0, 1])]
+        );
+
+        let edges = [
+            tool_call(0, "SemanticSearch"),
+            tool_call(1, "Read"),
+            tool_call(2, "ProjectMap"),
+        ];
+        assert_eq!(
+            tool_execution_segments(&edges),
+            vec![
+                ToolExecutionSegment::Barrier(0),
+                ToolExecutionSegment::Batch(vec![1]),
+                ToolExecutionSegment::Barrier(2),
+            ]
+        );
+    }
 }

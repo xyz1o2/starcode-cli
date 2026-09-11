@@ -73,7 +73,11 @@ fn handle_key(buffer: &Arc<Mutex<String>>, key: crossterm::event::KeyEvent) {
 
 pub fn stop_capturing() {
     CAPTURING.store(false, Ordering::SeqCst);
-    if let Some(handle) = THREAD_HANDLE.lock().unwrap_or_else(|e| e.into_inner()).take() {
+    if let Some(handle) = THREAD_HANDLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+    {
         let _ = handle.join();
     }
 }

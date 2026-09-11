@@ -175,7 +175,9 @@ pub fn search_with_ripgrep(
             path,
             UTF8(|line_num, line_content| {
                 // Check if max results reached
-                let mut count = current_count_clone.lock().unwrap_or_else(|e| e.into_inner());
+                let mut count = current_count_clone
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 if *count >= max_results {
                     return Ok(false); // Stop search
                 }

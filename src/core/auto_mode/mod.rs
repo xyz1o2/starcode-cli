@@ -159,7 +159,10 @@ impl AutoModeManager {
             .classifier
             .classify(tool_name, tool_params, transcript)
             .await;
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).record_classification(&result);
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_classification(&result);
         result
     }
 
@@ -172,6 +175,10 @@ impl AutoModeManager {
 
     /// 获取统计信息
     pub fn stats(&self) -> AutoModeStats {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).stats.clone()
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stats
+            .clone()
     }
 }

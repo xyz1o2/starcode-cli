@@ -820,7 +820,9 @@ impl ToolInvocation for ShellToolInvocation {
             if !external_paths.is_empty() {
                 let persist_path = config.storage().project_permissions_path();
                 let persisted = Self::load_permission_signatures(&persist_path);
-                let session_allowed = EXTERNAL_DIR_ALLOW_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+                let session_allowed = EXTERNAL_DIR_ALLOW_SESSION
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 let mut pending: Vec<PathBuf> = Vec::new();
 
                 for p in external_paths {

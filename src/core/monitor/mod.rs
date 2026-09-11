@@ -153,16 +153,19 @@ impl MonitorManager {
 
                     // 检查告警
                     if cpu > config.alert_threshold_cpu {
-                        alerts.lock().unwrap_or_else(|e| e.into_inner()).push(MonitorAlert {
-                            alert_type: AlertType::HighCpu,
-                            message: format!(
-                                "Process {} (PID {}) CPU usage: {:.1}%",
-                                parts[10], pid, cpu
-                            ),
-                            severity: AlertSeverity::Warning,
-                            timestamp: now_secs(),
-                            process: Some(parts[10].to_string()),
-                        });
+                        alerts
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(MonitorAlert {
+                                alert_type: AlertType::HighCpu,
+                                message: format!(
+                                    "Process {} (PID {}) CPU usage: {:.1}%",
+                                    parts[10], pid, cpu
+                                ),
+                                severity: AlertSeverity::Warning,
+                                timestamp: now_secs(),
+                                process: Some(parts[10].to_string()),
+                            });
                     }
                 }
             }
@@ -171,17 +174,28 @@ impl MonitorManager {
 
     /// 获取所有监控进程
     pub fn list_processes(&self) -> Vec<MonitoredProcess> {
-        self.processes.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect()
+        self.processes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// 获取告警
     pub fn get_alerts(&self) -> Vec<MonitorAlert> {
-        self.alerts.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.alerts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// 清除告警
     pub fn clear_alerts(&self) {
-        self.alerts.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.alerts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     /// 获取进程统计

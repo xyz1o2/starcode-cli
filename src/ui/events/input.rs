@@ -333,10 +333,15 @@ async fn delete_custom_provider(
     }
 
     // 模型列表按 provider 扇出，删完必须重拉，否则列表里还留着已删 provider 的模型。
-    let _ = agent_tx.send(AgentRequest::ListModels { force: true }).await;
+    let _ = agent_tx
+        .send(AgentRequest::ListModels { force: true })
+        .await;
 
     let message = if !existed {
-        format!("'{}' was not in the local config; nothing to remove.", provider_id)
+        format!(
+            "'{}' was not in the local config; nothing to remove.",
+            provider_id
+        )
     } else if was_active {
         format!(
             "Removed provider '{}'. It was the active one — pick another provider.",
@@ -679,7 +684,11 @@ pub(crate) async fn execute_palette_action(
                     "{} {}，{}",
                     crate::core::i18n::t("provider.selected", "已选择", "Selected"),
                     provider_id,
-                    crate::core::i18n::t("provider.next_select_model", "接下来选择模型", "now select a model")
+                    crate::core::i18n::t(
+                        "provider.next_select_model",
+                        "接下来选择模型",
+                        "now select a model"
+                    )
                 ),
             );
             state.push_palette_mode(PaletteMode::Model);
@@ -768,6 +777,24 @@ pub(crate) async fn execute_palette_action(
         PaletteAction::ShowLogSelector => {
             state.close_palette();
             state.open_log_selector();
+            state.log_selector_state.begin_loading();
+
+            match crate::utils::session_manager::list_session_summaries().await {
+                Ok(sessions) => {
+                    state
+                        .log_selector_state
+                        .set_sessions(sessions.into_iter().map(Into::into).collect());
+                }
+                Err(error) => {
+                    let error = error.to_string();
+                    state.log_selector_state.set_load_error(error.clone());
+                    crate::ui::app::logic::emit_status_text(
+                        state,
+                        0,
+                        &format!("Could not load saved sessions: {}", error),
+                    );
+                }
+            }
         }
         PaletteAction::ShowContextViz => {
             state.close_palette();
@@ -1719,7 +1746,11 @@ pub async fn handle_key_event(
                         0,
                         &format!(
                             "{} {}，{} {}",
-                            crate::core::i18n::t("model.switched", "已切换模型", "Switched to model"),
+                            crate::core::i18n::t(
+                                "model.switched",
+                                "已切换模型",
+                                "Switched to model"
+                            ),
                             state.current_model,
                             crate::core::i18n::t("model.provider", "提供商", "provider"),
                             state.current_provider_id.as_deref().unwrap_or("?")
@@ -1746,19 +1777,15 @@ pub async fn handle_key_event(
     if state.top_modal() == Some(&crate::ui::state::modal::Modal::LogSelector) {
         match key.code {
             KeyCode::Enter => {
-                // Resume selected session
+                if state.log_selector_state.is_loading {
+                    return Ok(());
+                }
+
+                // 走统一命令入口，保留流式中的排队保护，并复用 /chat resume 的状态清理。
                 if let Some(session) = state.log_selector_state.get_selected_session() {
-                    let session_id = session.id.clone();
+                    let command = format!("/chat resume {}", session.id);
                     state.pop_modal();
-                    // Send resume request
-                    let _ = agent_tx
-                        .send(AgentRequest::ResumeSession(session_id.clone()))
-                        .await;
-                    crate::ui::app::logic::emit_status_text(
-                        state,
-                        0,
-                        &format!("Resuming session: {}", session_id),
-                    );
+                    crate::ui::app::logic::enqueue_user_message(state, command, agent_tx).await?;
                 }
                 return Ok(());
             }
@@ -1767,26 +1794,36 @@ pub async fn handle_key_event(
                 return Ok(());
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                state.log_selector_state.select_prev();
+                if !state.log_selector_state.is_loading {
+                    state.log_selector_state.select_prev();
+                }
                 return Ok(());
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                state.log_selector_state.select_next();
+                if !state.log_selector_state.is_loading {
+                    state.log_selector_state.select_next();
+                }
                 return Ok(());
             }
             KeyCode::Char('/') => {
-                // Focus search
-                state.log_selector_state.search_query.clear();
+                if !state.log_selector_state.is_loading {
+                    // Focus search
+                    state.log_selector_state.search_query.clear();
+                }
                 return Ok(());
             }
             KeyCode::Backspace => {
-                state.log_selector_state.search_query.pop();
-                state.log_selector_state.selected_index = 0;
+                if !state.log_selector_state.is_loading {
+                    state.log_selector_state.search_query.pop();
+                    state.log_selector_state.selected_index = 0;
+                }
                 return Ok(());
             }
             KeyCode::Char(c) => {
-                state.log_selector_state.search_query.push(c);
-                state.log_selector_state.selected_index = 0;
+                if !state.log_selector_state.is_loading {
+                    state.log_selector_state.search_query.push(c);
+                    state.log_selector_state.selected_index = 0;
+                }
                 return Ok(());
             }
             _ => return Ok(()),
@@ -2054,9 +2091,7 @@ pub async fn handle_key_event(
         KeyCode::F(1) => {
             state.show_help = !state.show_help;
         }
-        KeyCode::Char('?')
-            if !state.is_palette_open() && !state.show_input_modal =>
-        {
+        KeyCode::Char('?') if !state.is_palette_open() && !state.show_input_modal => {
             // ? when input is empty: show help (like Claude Code)
             if state.textarea.lines().iter().all(|l| l.is_empty()) {
                 state.show_help = !state.show_help;
@@ -2458,7 +2493,10 @@ async fn handle_overlay_input(
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     // ── 主题选择器：↑↓ 导航（实时预览）、Enter 应用、Esc 取消 ──
-    if matches!(state.top_modal(), Some(crate::ui::state::modal::Modal::ThemePicker { .. })) {
+    if matches!(
+        state.top_modal(),
+        Some(crate::ui::state::modal::Modal::ThemePicker { .. })
+    ) {
         let themes = crate::ui::components::highlight::theme_picker::available_themes();
         let count = themes.len();
         let prev_index = state.selected_theme_index;
@@ -2965,7 +3003,11 @@ async fn handle_input_modal(
                                 0,
                                 &format!(
                                     "{} {}",
-                                    crate::core::i18n::t("provider.configured", "已配置并切换到", "Configured and switched to"),
+                                    crate::core::i18n::t(
+                                        "provider.configured",
+                                        "已配置并切换到",
+                                        "Configured and switched to"
+                                    ),
                                     provider_id
                                 ),
                             );
@@ -3641,6 +3683,43 @@ mod tests {
         state.bg_agent_selection = Some(0);
         assert!(!press(&mut state, KeyCode::Down));
         assert!(state.bg_agent_selection.is_none());
+    }
+
+    /// Session Browser 选择项必须经统一命令入口排队，不能发送已断开的 ResumeSession 请求。
+    #[tokio::test]
+    async fn log_selector_queues_resume_command_while_streaming() {
+        let mut state = ChatState::new();
+        state.is_streaming = true;
+        state.open_log_selector();
+        state.log_selector_state.set_sessions(vec![
+            crate::ui::components::log_selector::LogSessionEntry {
+                id: "saved-session".to_string(),
+                title: "Saved".to_string(),
+                created_at: "today".to_string(),
+                message_count: 1,
+                preview: "preview".to_string(),
+            },
+        ]);
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
+
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &agent_tx,
+            None,
+        )
+        .await
+        .expect("selector Enter should be handled");
+
+        assert_ne!(
+            state.top_modal(),
+            Some(&crate::ui::state::modal::Modal::LogSelector)
+        );
+        assert_eq!(
+            state.pending_user_messages.iter().collect::<Vec<_>>(),
+            vec![&"/chat resume saved-session".to_string()]
+        );
+        assert!(agent_rx.try_recv().is_err());
     }
 
     /// 排队的输入按入队顺序拼回输入框，队列随之清空。

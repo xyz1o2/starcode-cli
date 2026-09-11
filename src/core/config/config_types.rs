@@ -212,8 +212,8 @@ pub struct MCPOAuthConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigParameters {
     pub session_id: String,
-    /// 是否从已有会话恢复（--resume / --continue）。仅此时 Agent 才加载
-    /// 持久化的会话消息；新启动一律从空上下文开始（对标 Claude Code）。
+    /// 是否通过 `--resume` 选择了已有会话。启动器据此解析 canonical snapshot；
+    /// Agent 构造本身不再隐式加载旧 sidecar。
     pub resume_session: bool,
     pub sandbox: Option<SandboxConfig>,
     pub target_dir: PathBuf,

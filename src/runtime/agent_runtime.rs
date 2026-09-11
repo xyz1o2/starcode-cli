@@ -1,7 +1,7 @@
 use crate::agent::messaging::AsyncMessageQueue;
 use crate::agent::StarAgent;
 use crate::core::confirmation_bus::types::Message;
-use crate::runtime::messages::{AgentRequest, StreamMessage};
+use crate::runtime::messages::{AgentRequest, StreamMessage, StreamStartKind};
 use crate::utils::logging::append_debug_log_line;
 use std::path::Path;
 use std::sync::Arc;
@@ -12,6 +12,7 @@ use tokio::sync::Notify;
 pub enum AgentRuntimeOutcome {
     Completed,
     WorkerClosed,
+    Shutdown(tokio::sync::mpsc::Sender<Result<(), String>>),
 }
 
 pub struct AgentRuntimeContext<'a> {
@@ -62,7 +63,16 @@ pub async fn process_message(
         message.len()
     ));
 
-    let _ = context.tx.send(StreamMessage::Start { message_id }).await;
+    let current_model_snapshot = agent.model();
+    let _ = context
+        .tx
+        .send(StreamMessage::Start {
+            message_id,
+            kind: StreamStartKind::UserTurn {
+                model: current_model_snapshot.clone(),
+            },
+        })
+        .await;
     let has_preflight_hooks =
         crate::runtime::hooks::has_preflight_hooks(context.project_root).await;
     if has_preflight_hooks {
@@ -118,33 +128,45 @@ pub async fn process_message(
         })
         .await;
 
-    let current_model_snapshot = agent.model();
     let mut deferred = crate::runtime::session::DeferredRuntimeActions::default();
 
     append_debug_log_line("[AgentRuntime] Starting streaming session");
-    if matches!(
-        crate::runtime::streaming_session::run_streaming_session(
-            agent,
-            &mut deferred,
-            crate::runtime::streaming_session::StreamingSessionContext {
-                tx: context.tx,
-                rx: context.rx,
-                bus_rx: context.bus_rx,
-                message_id,
-                user_message: message,
-                current_model_snapshot: &current_model_snapshot,
-                project_root: context.project_root,
-                abort_flag: &abort_flag,
-                steering_queue: context.steering_queue,
-                steering_signal: context.steering_signal,
-                message_bus: context.message_bus,
-            },
-        )
-        .await,
-        crate::runtime::streaming_session::StreamingSessionResult::WorkerClosed
-    ) {
-        append_debug_log_line("[AgentRuntime] Streaming session returned WorkerClosed");
-        return AgentRuntimeOutcome::WorkerClosed;
+    match crate::runtime::streaming_session::run_streaming_session(
+        agent,
+        &mut deferred,
+        crate::runtime::streaming_session::StreamingSessionContext {
+            tx: context.tx,
+            rx: context.rx,
+            bus_rx: context.bus_rx,
+            message_id,
+            user_message: message,
+            current_model_snapshot: &current_model_snapshot,
+            project_root: context.project_root,
+            abort_flag: &abort_flag,
+            steering_queue: context.steering_queue,
+            steering_signal: context.steering_signal,
+            message_bus: context.message_bus,
+        },
+    )
+    .await
+    {
+        crate::runtime::streaming_session::StreamingSessionResult::Completed => {}
+        crate::runtime::streaming_session::StreamingSessionResult::WorkerClosed => {
+            append_debug_log_line("[AgentRuntime] Streaming session returned WorkerClosed");
+            return AgentRuntimeOutcome::WorkerClosed;
+        }
+        crate::runtime::streaming_session::StreamingSessionResult::Shutdown => {
+            append_debug_log_line("[AgentRuntime] Streaming session drained for Shutdown");
+            let Some(response) =
+                crate::runtime::session::apply_deferred_context_actions(agent, &mut deferred).await
+            else {
+                append_debug_log_line(
+                    "[AgentRuntime] Shutdown result had no deferred lifecycle acknowledgement",
+                );
+                return AgentRuntimeOutcome::WorkerClosed;
+            };
+            return AgentRuntimeOutcome::Shutdown(response);
+        }
     }
     append_debug_log_line("[AgentRuntime] Streaming session completed");
 

@@ -232,7 +232,7 @@ impl Config {
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
-    /// 是否处于 --resume 恢复的会话（决定启动时是否加载持久化会话消息）
+    /// 是否通过 `--resume` 选择了已有会话；canonical 上下文由启动器显式安装。
     pub fn is_resume_session(&self) -> bool {
         self.resume_session
     }

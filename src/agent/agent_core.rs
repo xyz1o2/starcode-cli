@@ -133,16 +133,11 @@ impl Agent {
                 crate::agent::compact::reactive_compact::ReactiveCompactManager::new(compact_config),
             model_fallback: crate::agent::model_fallback::ModelFallbackManager::new(),
         };
-        // 子代理不加载父代理的持久化会话消息（对标 Claude Code：子代理从空上下文开始）；
-        // 顶层代理也只在 --resume 恢复会话时加载（对标 Claude Code：只有
-        // --resume/--continue 才 adopt 已有 transcript，新会话一律空上下文）
-        if agent.config.recursion_depth == 0 && agent.config.is_resume_session() {
-            agent.load_persisted_session_messages();
-        } else {
-            crate::utils::logging::append_agent_log_line(
-                "[INIT] Skipping persisted session messages (fresh context or subagent)",
-            );
-        }
+        // 原生会话由启动解析器或 UI→worker RestoreSession 显式安装。
+        // 不在构造期间读取旧 sidecar，避免它覆盖用户明确选择的 canonical JSON 会话。
+        crate::utils::logging::append_agent_log_line(
+            "[INIT] Session context starts empty pending explicit restoration",
+        );
         crate::utils::logging::append_agent_log_line("[INIT] Agent::new completed");
 
         // 连接后台 SubAgent 通知队列（若 runtime 已初始化）

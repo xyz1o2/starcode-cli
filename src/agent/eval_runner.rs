@@ -191,7 +191,7 @@ pub async fn run_agent_quick(
     agent: &mut Agent,
     prompt: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    agent.run(prompt).await.map_err(|e| e)
+    agent.run(prompt).await.map(|(text, _)| text)
 }
 
 /// 创建 Evaluator agent。

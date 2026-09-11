@@ -16,6 +16,7 @@ use tokio::sync::Notify;
 pub enum StreamingSessionResult {
     Completed,
     WorkerClosed,
+    Shutdown,
 }
 
 pub struct StreamingSessionContext<'a> {
@@ -67,6 +68,8 @@ pub async fn run_streaming_session(
         gs.set_current_message_id(Some(context.message_id)).await;
     }
 
+    let mut shutdown_requested = false;
+    let mut abort_requested = false;
     match agent
         .process_user_message_stream(context.user_message)
         .await
@@ -76,7 +79,9 @@ pub async fn run_streaming_session(
             'streaming: loop {
                 tokio::select! {
                     Ok(msg) = async {
-                        if let Some(rx) = &mut *context.bus_rx {
+                        if shutdown_requested {
+                            std::future::pending().await
+                        } else if let Some(rx) = &mut *context.bus_rx {
                             rx.recv().await
                         } else {
                             std::future::pending().await
@@ -89,7 +94,7 @@ pub async fn run_streaming_session(
                         )
                         .await;
                     }
-                    maybe_req = context.rx.recv() => {
+                    maybe_req = context.rx.recv(), if !shutdown_requested && !abort_requested => {
                         match crate::runtime::session::handle_streaming_request(
                             deferred,
                             maybe_req,
@@ -109,8 +114,20 @@ pub async fn run_streaming_session(
                             StreamingRequestOutcome::Break => {
                                 break 'streaming;
                             }
+                            StreamingRequestOutcome::Abort => {
+                                abort_requested = true;
+                                append_debug_log_line(
+                                    "[Worker] Abort requested; draining cancelled agent stream",
+                                );
+                            }
                             StreamingRequestOutcome::Return => {
                                 return StreamingSessionResult::WorkerClosed;
+                            }
+                            StreamingRequestOutcome::Shutdown => {
+                                shutdown_requested = true;
+                                append_debug_log_line(
+                                    "[Worker] Shutdown requested; draining cancelled agent stream",
+                                );
                             }
                         }
                     }
@@ -181,5 +198,9 @@ pub async fn run_streaming_session(
         }
     }
 
-    StreamingSessionResult::Completed
+    if shutdown_requested {
+        StreamingSessionResult::Shutdown
+    } else {
+        StreamingSessionResult::Completed
+    }
 }

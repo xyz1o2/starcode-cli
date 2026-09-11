@@ -636,9 +636,30 @@ fn in_progress_todo_verb(state: &ChatState) -> Option<String> {
     Some(text.to_string())
 }
 
+/// 状态行上显示打断提示的最小宽度，避免在窄终端挤掉核心状态。
+const INTERRUPT_HINT_MIN_WIDTH: u16 = 72;
+const LONG_THINKING_INTERRUPT_THRESHOLD_SECS: u64 = 20;
+
+/// 已有更明确的取消文案时，避免同时显示两种快捷键提示。
+fn existing_interrupt_guidance_visible(state: &ChatState, stall: f64) -> bool {
+    state
+        .thinking_started_at
+        .is_some_and(|started| started.elapsed().as_secs() > LONG_THINKING_INTERRUPT_THRESHOLD_SECS)
+        || (stall > 0.3 && state.current_tool_name.is_some())
+}
+
+/// 仅在正常活跃请求中显示简洁的中断提示；已经展示更强的 stall 指引时不重复。
+fn interrupt_hint(state: &ChatState, width: u16, stall: f64) -> Option<&'static str> {
+    (state.is_processing
+        && width >= INTERRUPT_HINT_MIN_WIDTH
+        && !existing_interrupt_guidance_visible(state, stall))
+    .then_some(" · Esc to interrupt")
+}
+
 /// Render a spinner line above the input area.
+/// `width` gates optional status text so narrow terminals keep the main progress label.
 /// Only shows when processing WITHOUT active thinking (thinking block handles itself).
-pub fn processing_spinner_line(state: &ChatState) -> Vec<ratatui::text::Line<'static>> {
+pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::text::Line<'static>> {
     if !state.is_processing {
         return vec![];
     }
@@ -730,18 +751,22 @@ pub fn processing_spinner_line(state: &ChatState) -> Vec<ratatui::text::Line<'st
         Style::default().fg(e_color_smooth),
     ));
 
+    if let Some(hint) = interrupt_hint(state, width, stall) {
+        spans.push(Span::styled(hint, Style::default().fg(theme.inactive)));
+    }
+
     // Show thinking state with sine wave opacity
     if let Some(thinking_start) = state.thinking_started_at {
         let thinking_secs = thinking_start.elapsed().as_secs();
         // Sine wave opacity for thinking indicator (Claude Code style)
         let thinking_opacity = ((state.animation_tick as f64 * 0.05).sin() + 1.0) / 2.0;
         // Change color to red when thinking exceeds 20 seconds
-        let thinking_color = if thinking_secs > 20 {
+        let thinking_color = if thinking_secs > LONG_THINKING_INTERRUPT_THRESHOLD_SECS {
             lerp_color(theme.error, theme.error_shimmer, thinking_opacity)
         } else {
             lerp_color(theme.secondary, theme.secondary_shimmer, thinking_opacity)
         };
-        let thinking_label = if thinking_secs > 20 {
+        let thinking_label = if thinking_secs > LONG_THINKING_INTERRUPT_THRESHOLD_SECS {
             format!(
                 " · thinking {} (press Ctrl+C to cancel)",
                 format_elapsed(thinking_secs)
@@ -932,6 +957,25 @@ fn format_token_count(n: u32) -> String {
     }
 }
 
+/// 为 provider 明确上报的缓存计数生成状态栏文本；不计算跨 provider 的百分比。
+fn format_cache_telemetry(usage: Option<&crate::types::StarUsage>) -> Option<String> {
+    let usage = usage.filter(|usage| usage.cache_telemetry_reported)?;
+    let mut parts = Vec::with_capacity(2);
+    if usage.cache_read_tokens > 0 {
+        parts.push(format!(
+            "read {}",
+            format_token_count(usage.cache_read_tokens)
+        ));
+    }
+    if usage.cache_creation_tokens > 0 {
+        parts.push(format!(
+            "write {}",
+            format_token_count(usage.cache_creation_tokens)
+        ));
+    }
+    (!parts.is_empty()).then(|| format!("Cache {}", parts.join(" · ")))
+}
+
 fn format_elapsed(secs: u64) -> String {
     if secs < 60 {
         format!("{}s", secs)
@@ -1045,20 +1089,8 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
                     }
                 };
 
-                let token_label = if usage.completion_tokens > 0 {
-                    // 显示上下文使用率 + 缓存命中（如果有）
-                    let base = format!("{}/{} ({:.1}%)", format_tok(tokens), format_tok(ctx), pct);
-                    // 如果有缓存数据，附加缓存命中率
-                    if usage.cache_read_tokens > 0 && tokens > 0 {
-                        let cache_pct =
-                            (usage.cache_read_tokens as f64 / tokens as f64 * 100.0).min(100.0);
-                        format!("{} · {:.0}% cached", base, cache_pct)
-                    } else {
-                        base
-                    }
-                } else {
-                    format!("{}/{} ({:.1}%)", format_tok(tokens), format_tok(ctx), pct)
-                };
+                let token_label =
+                    format!("{}/{} ({:.1}%)", format_tok(tokens), format_tok(ctx), pct);
 
                 let (token_color, bold) = if pct >= 90.0 {
                     (theme.error, true)
@@ -1147,19 +1179,16 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
         spans.push(Span::styled("OFFLINE", Style::default().fg(theme.warning)));
     }
 
-    // ── 5b. Cache hit rate (only when below 50% — poor utilization) ───────────
+    // ── 5b. Provider cache telemetry ────────────────────────────────────────
+    // Cache tokens do not share a provider-independent denominator with prompt tokens,
+    // so render the raw explicitly-reported values rather than inventing a hit percentage.
     if !compact {
-        let total_cache = state.cache_read_tokens + state.cache_creation_tokens;
-        if total_cache > 0 {
-            let hit_rate = (state.cache_read_tokens as f64 / total_cache as f64 * 100.0) as u32;
-            if hit_rate < 50 {
-                spans.push(sep());
-                spans.push(Span::styled("Cache ", Style::default().fg(theme.inactive)));
-                spans.push(Span::styled(
-                    format!("{}%", hit_rate),
-                    Style::default().fg(theme.inactive),
-                ));
-            }
+        if let Some(cache_label) = format_cache_telemetry(state.token_usage.as_ref()) {
+            spans.push(sep());
+            spans.push(Span::styled(
+                cache_label,
+                Style::default().fg(theme.inactive),
+            ));
         }
     }
 
@@ -1404,6 +1433,31 @@ mod tests {
     }
 
     #[test]
+    fn cache_telemetry_shows_raw_counts_without_percentage() {
+        let read_only = crate::types::StarUsage {
+            cache_read_tokens: 12_345,
+            cache_telemetry_reported: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            format_cache_telemetry(Some(&read_only)).as_deref(),
+            Some("Cache read 12.3k")
+        );
+
+        let write_only = crate::types::StarUsage {
+            cache_creation_tokens: 100,
+            cache_telemetry_reported: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            format_cache_telemetry(Some(&write_only)).as_deref(),
+            Some("Cache write 100")
+        );
+        assert!(format_cache_telemetry(None).is_none());
+        assert!(format_cache_telemetry(Some(&crate::types::StarUsage::default())).is_none());
+    }
+
+    #[test]
     fn active_tool_timestamp_does_not_depend_on_display_label() {
         let mut state = ChatState::new();
         let older = std::time::Instant::now() - std::time::Duration::from_secs(20);
@@ -1413,5 +1467,54 @@ mod tests {
 
         assert!(state.current_tool_name.is_none());
         assert_eq!(latest_active_tool_started_at(&state), Some(newer));
+    }
+
+    #[test]
+    fn interrupt_hint_requires_a_wide_active_request() {
+        let mut state = ChatState::new();
+        assert_eq!(interrupt_hint(&state, 120, 0.0), None);
+
+        state.is_processing = true;
+        assert_eq!(
+            interrupt_hint(&state, INTERRUPT_HINT_MIN_WIDTH, 0.0),
+            Some(" · Esc to interrupt")
+        );
+        assert_eq!(
+            interrupt_hint(&state, INTERRUPT_HINT_MIN_WIDTH - 1, 0.0),
+            None
+        );
+    }
+
+    #[test]
+    fn interrupt_hint_yields_to_existing_long_thinking_or_stall_guidance() {
+        let mut state = ChatState::new();
+        state.is_processing = true;
+        state.thinking_started_at = Some(
+            std::time::Instant::now()
+                - std::time::Duration::from_secs(LONG_THINKING_INTERRUPT_THRESHOLD_SECS + 1),
+        );
+        assert_eq!(interrupt_hint(&state, 120, 0.0), None);
+
+        state.thinking_started_at = None;
+        state.current_tool_name = Some("Read".to_string());
+        assert_eq!(interrupt_hint(&state, 120, 0.4), None);
+    }
+
+    #[test]
+    fn spinner_line_contains_only_one_interrupt_hint() {
+        let mut state = ChatState::new();
+        state.is_processing = true;
+        state.thinking_started_at = Some(
+            std::time::Instant::now()
+                - std::time::Duration::from_secs(LONG_THINKING_INTERRUPT_THRESHOLD_SECS + 1),
+        );
+
+        let text: String = processing_spinner_line(&state, 120)[1]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("press Ctrl+C to cancel"));
+        assert!(!text.contains("Esc to interrupt"));
     }
 }

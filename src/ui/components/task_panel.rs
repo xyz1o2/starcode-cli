@@ -775,8 +775,8 @@ pub fn render_task_panel_mut(
                 // 对标 Claude Code TaskListV2::getTaskIcon —— figures.tick / squareSmallFilled / squareSmall
                 // Spinner 帧：对标 Claude Code spinner 动画 (dots variant)
                 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                let spinner_frame = SPINNER_FRAMES
-                    [(animation_tick as usize / 6) % SPINNER_FRAMES.len()];
+                let spinner_frame =
+                    SPINNER_FRAMES[(animation_tick as usize / 6) % SPINNER_FRAMES.len()];
 
                 let (status_icon, icon_color) = match node.status {
                     TaskStatus::Pending => ("▫", None),

@@ -324,14 +324,18 @@ pub(crate) fn inject_directory_context_if_needed(
             let h = hasher.finish();
 
             let already = {
-                let cache = injected_dir_context_hashes.lock().unwrap_or_else(|e| e.into_inner());
+                let cache = injected_dir_context_hashes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 cache.contains(&h)
             };
             if already {
                 continue;
             }
             {
-                let mut cache = injected_dir_context_hashes.lock().unwrap_or_else(|e| e.into_inner());
+                let mut cache = injected_dir_context_hashes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 cache.insert(h);
             }
 
@@ -654,7 +658,9 @@ pub(crate) fn inject_project_rules_if_needed(
     let hash = hasher.finish();
 
     {
-        let mut last = injected_rules_hash.lock().unwrap_or_else(|e| e.into_inner());
+        let mut last = injected_rules_hash
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if last.as_ref() == Some(&hash) {
             return;
         }
@@ -716,7 +722,9 @@ pub(crate) fn inject_project_memory_if_needed(
 
     let hash = hasher.finish();
     {
-        let mut last = injected_memory_hash.lock().unwrap_or_else(|e| e.into_inner());
+        let mut last = injected_memory_hash
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if last.as_ref() == Some(&hash) {
             return;
         }

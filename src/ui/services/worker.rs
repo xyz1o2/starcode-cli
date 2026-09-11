@@ -85,7 +85,7 @@ pub async fn agent_worker(
         let _ = tx.send(StreamMessage::ApprovalModeChanged { mode }).await;
     }
 
-    loop {
+    let stop_reason = loop {
         // Priority: check steering queue first (for interrupts/steering)
         let next_message = if let Some(msg) = steering_queue.try_next() {
             append_debug_log_line("[Worker] Got message from steering_queue");
@@ -105,6 +105,10 @@ pub async fn agent_worker(
                     ));
                     Some((message_id, message))
                 }
+                Some(AgentRequest::Shutdown { response }) => {
+                    append_debug_log_line("[Worker] Received Shutdown while idle");
+                    break ("ui_shutdown", Some(response));
+                }
                 Some(other) => {
                     append_debug_log_line(&format!(
                         "[Worker] Received control request: {:?}",
@@ -115,13 +119,8 @@ pub async fn agent_worker(
                     continue;
                 }
                 None => {
-                    crate::runtime::hooks::run_session_end(
-                        worker_cwd.as_deref(),
-                        "worker_channel_closed",
-                    )
-                    .await;
                     append_debug_log_line("[Worker] rx closed, exiting");
-                    return;
+                    break ("worker_channel_closed", None);
                 }
             }
         };
@@ -135,34 +134,45 @@ pub async fn agent_worker(
         // Check if tx is still open before processing
         if tx.is_closed() {
             append_debug_log_line("[Worker] tx closed before processing, exiting");
-            return;
+            break ("ui_channel_closed", None);
         }
 
-        if matches!(
-            crate::runtime::agent_runtime::process_message(
-                &mut agent,
-                crate::runtime::agent_runtime::AgentRuntimeContext {
-                    tx: &tx,
-                    rx: &mut rx,
-                    bus_rx: &mut bus_rx,
-                    project_root: worker_cwd.as_deref(),
-                    steering_queue: &steering_queue,
-                    steering_signal: &steering_signal,
-                    message_bus: &message_bus,
-                },
-                message_id,
-                &message,
-            )
-            .await,
-            crate::runtime::agent_runtime::AgentRuntimeOutcome::WorkerClosed
-        ) {
-            append_debug_log_line("[Worker] process_message returned WorkerClosed");
-            return;
+        match crate::runtime::agent_runtime::process_message(
+            &mut agent,
+            crate::runtime::agent_runtime::AgentRuntimeContext {
+                tx: &tx,
+                rx: &mut rx,
+                bus_rx: &mut bus_rx,
+                project_root: worker_cwd.as_deref(),
+                steering_queue: &steering_queue,
+                steering_signal: &steering_signal,
+                message_bus: &message_bus,
+            },
+            message_id,
+            &message,
+        )
+        .await
+        {
+            crate::runtime::agent_runtime::AgentRuntimeOutcome::Completed => {
+                append_debug_log_line(&format!(
+                    "[Worker] Message id={} processing complete",
+                    message_id
+                ));
+            }
+            crate::runtime::agent_runtime::AgentRuntimeOutcome::WorkerClosed => {
+                append_debug_log_line("[Worker] process_message returned WorkerClosed");
+                break ("worker_channel_closed", None);
+            }
+            crate::runtime::agent_runtime::AgentRuntimeOutcome::Shutdown(response) => {
+                append_debug_log_line("[Worker] process_message completed Shutdown");
+                break ("ui_shutdown", Some(response));
+            }
         }
+    };
 
-        append_debug_log_line(&format!(
-            "[Worker] Message id={} processing complete",
-            message_id
-        ));
+    crate::runtime::hooks::run_session_end(worker_cwd.as_deref(), stop_reason.0).await;
+    if let Some(response) = stop_reason.1 {
+        let _ = response.send(Ok(())).await;
     }
+    append_debug_log_line(&format!("[Worker] Exited: {}", stop_reason.0));
 }

@@ -1,5 +1,7 @@
 use crate::agent::StarAgent;
-use crate::runtime::messages::{AgentRequest, PendingCheckpointAction, StreamMessage};
+use crate::runtime::messages::{
+    AgentRequest, PendingCheckpointAction, StreamMessage, StreamStartKind,
+};
 use crate::utils::logging::append_debug_log_line;
 use tokio::sync::mpsc;
 
@@ -14,6 +16,14 @@ pub async fn handle_request(
         }
         AgentRequest::Abort => {
             agent.abort();
+        }
+        AgentRequest::Shutdown { response } => {
+            // worker 在空闲状态截获此请求，经过唯一的 SessionEnd epilogue 后才确认。
+            let _ = response
+                .send(Err(
+                    "Shutdown must be handled by the agent worker.".to_string()
+                ))
+                .await;
         }
         AgentRequest::SetModel { model, provider_id } => {
             agent
@@ -168,7 +178,12 @@ pub async fn handle_request(
             ));
         }
         AgentRequest::Compress { message_id } => {
-            let _ = tx.send(StreamMessage::Start { message_id }).await;
+            let _ = tx
+                .send(StreamMessage::Start {
+                    message_id,
+                    kind: StreamStartKind::Operation,
+                })
+                .await;
             match agent.compress_context().await {
                 Ok(msg) => {
                     let _ = tx
@@ -260,8 +275,31 @@ pub async fn handle_request(
                 })
                 .await;
         }
-        AgentRequest::ResumeSession(_session_id) => {
-            // Session resume is handled by the streaming request handler
+        AgentRequest::SaveSession {
+            id,
+            history,
+            last_usage,
+            response,
+        } => {
+            let (messages, pending_local_context) = agent.session_context_snapshot();
+            let result = crate::utils::session_manager::save_session_snapshot(
+                &id,
+                &history,
+                Some(messages),
+                Some(pending_local_context),
+                last_usage,
+            )
+            .await
+            .map_err(|error| error.to_string());
+            let _ = response.send(result).await;
+        }
+        AgentRequest::RestoreSession {
+            messages,
+            pending_local_context,
+            response,
+        } => {
+            agent.replace_session_context(messages, pending_local_context);
+            let _ = response.send(Ok(())).await;
         }
         AgentRequest::GenerateNote {
             kind,
@@ -408,7 +446,12 @@ async fn handle_tool_confirmation_response(
         if verbose_logging {
             append_debug_log_line("[DEBUG] Worker: starting tool execution");
         }
-        let _ = tx.send(StreamMessage::Start { message_id }).await;
+        let _ = tx
+            .send(StreamMessage::Start {
+                message_id,
+                kind: StreamStartKind::Operation,
+            })
+            .await;
 
         for (tool_idx, tool_call) in tool_calls.iter().enumerate() {
             let _ = tx

@@ -1,5 +1,5 @@
 use crate::agent::StarAgent;
-use crate::runtime::messages::{PendingCheckpointAction, StreamMessage};
+use crate::runtime::messages::{PendingCheckpointAction, StreamMessage, StreamStartKind};
 use tokio::sync::mpsc;
 
 pub async fn handle_checkpoint_action(
@@ -9,7 +9,12 @@ pub async fn handle_checkpoint_action(
 ) {
     match action {
         PendingCheckpointAction::List { message_id } => {
-            let _ = tx.send(StreamMessage::Start { message_id }).await;
+            let _ = tx
+                .send(StreamMessage::Start {
+                    message_id,
+                    kind: StreamStartKind::Operation,
+                })
+                .await;
             match agent.list_checkpoints().await {
                 Ok(ids) => {
                     let content = if ids.is_empty() {
@@ -36,7 +41,12 @@ pub async fn handle_checkpoint_action(
             }
         }
         PendingCheckpointAction::Restore { message_id, id } => {
-            let _ = tx.send(StreamMessage::Start { message_id }).await;
+            let _ = tx
+                .send(StreamMessage::Start {
+                    message_id,
+                    kind: StreamStartKind::Operation,
+                })
+                .await;
             match agent.restore_checkpoint(&id).await {
                 Ok((hist, summary)) => {
                     let _ = tx

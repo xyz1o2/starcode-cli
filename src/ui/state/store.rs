@@ -363,6 +363,10 @@ pub struct ChatState {
     pub processing_time_secs: u64,
     pub token_count: u32,
     pub total_cost: f64,
+    /// 每个逻辑请求内已收到的所有真实 provider 响应费用。
+    pub response_costs: HashMap<u64, f64>,
+    /// 逻辑请求开始时固定的模型，用于避免中途切换模型影响已发出的响应计价。
+    pub response_models: HashMap<u64, String>,
     /// 会话创建时刻，用于状态栏展示会话耗时（对标 Claude Code running duration）
     pub session_started_at: Instant,
     /// Last time a token was received (for stall detection)
@@ -451,10 +455,12 @@ pub struct ChatState {
     pub au2_compressed: bool,
     pub token_usage: Option<crate::types::StarUsage>,
     // ============ Cache Stats ============
-    /// Cumulative cache read tokens (prompt cache hits)
+    /// Latest provider-reported cache read tokens (not a session total).
     pub cache_read_tokens: u64,
-    /// Cumulative cache creation tokens (prompt cache misses/writes)
+    /// Latest provider-reported cache creation tokens (not a session total).
     pub cache_creation_tokens: u64,
+    /// 已显示过缓存警告的响应和类别，避免同一 usage 被流式重复提示。
+    pub(crate) cache_warning_shown: HashSet<(u64, crate::agent::cache_warning::CacheWarningType)>,
     // ============ Rendering Cache ============
     pub rendered_cache: HashMap<usize, (u16, Vec<ratatui::text::Line<'static>>)>,
     /// Virtual-scrolling list with per-entry dirty tracking (tuie-inspired).
@@ -576,6 +582,8 @@ pub struct ChatState {
     /// Currently executing tool name for spinner display
     pub current_tool_name: Option<String>,
     // ============ Session Persistence ============
+    /// 当前恢复的 canonical session 文件名；退出时覆盖它而非创建新的 auto snapshot。
+    pub active_session_id: Option<String>,
     pub current_session_title: Option<String>,
     // ============ Permission Rules ============
     pub permission_rules: crate::core::permission_rules::PermissionRuleEngine,
@@ -817,6 +825,8 @@ impl ChatState {
             processing_time_secs: 0,
             token_count: 0,
             total_cost: 0.0,
+            response_costs: HashMap::new(),
+            response_models: HashMap::new(),
             session_started_at: Instant::now(),
             last_token_time: None,
             thinking_started_at: None,
@@ -878,6 +888,7 @@ impl ChatState {
             token_usage: None,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            cache_warning_shown: HashSet::new(),
             rendered_cache: HashMap::new(),
             virtual_list: VirtualList::new(),
             last_terminal_width: 0,
@@ -953,6 +964,7 @@ impl ChatState {
             scroll_velocity: 0.0,
             last_scroll_time: None,
             current_tool_name: None,
+            active_session_id: None,
             current_session_title: None,
             permission_rules: crate::core::permission_rules::PermissionRuleEngine::new(),
             feature_flags: FeatureFlags::new(),

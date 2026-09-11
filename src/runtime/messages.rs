@@ -28,10 +28,21 @@ pub enum PendingCheckpointAction {
     Restore { message_id: u64, id: String },
 }
 
+/// 流开始的来源。只有用户回合会重置最近一次 provider 用量，并固定该逻辑请求的计价模型。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StreamStartKind {
+    UserTurn {
+        model: String,
+    },
+    /// 压缩、checkpoint、确认后的工具执行等非模型回合操作。
+    Operation,
+}
+
 #[derive(Clone, Debug)]
 pub enum StreamMessage {
     Start {
         message_id: u64,
+        kind: StreamStartKind,
     },
     Content {
         message_id: u64,
@@ -263,7 +274,23 @@ pub enum AgentRequest {
         feedback: Option<String>,
     },
     EmitStatus(String),
-    ResumeSession(String),
+    /// 保存 coherent UI transcript 与 worker 所有的原生上下文。
+    SaveSession {
+        id: String,
+        history: Vec<crate::types::ChatEntry>,
+        last_usage: Option<crate::types::StarUsage>,
+        response: tokio::sync::mpsc::Sender<Result<(), String>>,
+    },
+    /// 恢复已加载且验证过的原生会话上下文和待注入本地命令输出。
+    RestoreSession {
+        messages: Vec<crate::types::StarMessage>,
+        pending_local_context: Vec<String>,
+        response: tokio::sync::mpsc::Sender<Result<(), String>>,
+    },
+    /// 完成已排队的会话操作后结束 worker。用于 TUI 退出时等待终态快照和 session-end hooks。
+    Shutdown {
+        response: tokio::sync::mpsc::Sender<Result<(), String>>,
+    },
     /// /summary、/recap、/btw：让 agent 做一次旁路 LLM 生成，
     /// 结果经 [`StreamMessage::NoteGenerated`] 回 UI，不污染主上下文。
     GenerateNote {

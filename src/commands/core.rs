@@ -34,24 +34,11 @@ pub async fn clear(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult
     Ok(())
 }
 
-pub async fn exit(_ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
-    if let Ok(cwd) = std::env::current_dir() {
-        let _ = crate::core::hooks::runner::run_hooks(
-            &cwd,
-            crate::core::hooks::store::ManagedHookEvent::SessionEnd,
-            &crate::core::hooks::runner::HookRunContext {
-                user_message: String::new(),
-                status: "session_end".to_string(),
-                tool_name: None,
-                tool_arguments: None,
-                tool_success: None,
-                stop_reason: Some("user_exit".to_string()),
-                stop_hook_active: false,
-            },
-        )
-        .await;
-    }
-    std::process::exit(0);
+pub async fn exit(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
+    // 由 run_app 统一编排保存、worker shutdown 与 SessionEnd hook；这里不能直接
+    // process::exit，否则 worker 持有的原生会话上下文会丢失且 hooks 可能重复执行。
+    ctx.state.should_exit = true;
+    Ok(())
 }
 
 pub async fn status(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {

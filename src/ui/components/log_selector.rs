@@ -20,6 +20,18 @@ pub struct LogSessionEntry {
     pub preview: String,
 }
 
+impl From<crate::utils::session_manager::SessionSummary> for LogSessionEntry {
+    fn from(summary: crate::utils::session_manager::SessionSummary) -> Self {
+        Self {
+            id: summary.id,
+            title: summary.title,
+            created_at: summary.subtitle.clone(),
+            message_count: 0,
+            preview: summary.subtitle,
+        }
+    }
+}
+
 /// Log selector state
 #[derive(Debug, Clone, Default)]
 pub struct LogSelectorState {
@@ -27,10 +39,37 @@ pub struct LogSelectorState {
     pub selected_index: usize,
     pub preview_scroll: usize,
     pub is_loading: bool,
+    pub load_error: Option<String>,
     pub search_query: String,
 }
 
 impl LogSelectorState {
+    /// 打开选择器前清理旧查询和结果，避免上一项目状态泄漏到本次加载。
+    pub fn begin_loading(&mut self) {
+        self.sessions.clear();
+        self.selected_index = 0;
+        self.preview_scroll = 0;
+        self.search_query.clear();
+        self.load_error = None;
+        self.is_loading = true;
+    }
+
+    /// 用新的持久化会话列表替换旧结果并回到第一项。
+    pub fn set_sessions(&mut self, sessions: Vec<LogSessionEntry>) {
+        self.sessions = sessions;
+        self.selected_index = 0;
+        self.preview_scroll = 0;
+        self.is_loading = false;
+    }
+
+    /// 记录加载错误，让空会话与读取失败在 UI 中可区分。
+    pub fn set_load_error(&mut self, error: String) {
+        self.sessions.clear();
+        self.selected_index = 0;
+        self.preview_scroll = 0;
+        self.is_loading = false;
+        self.load_error = Some(error);
+    }
     pub fn filtered_sessions(&self) -> Vec<(usize, &LogSessionEntry)> {
         if self.search_query.is_empty() {
             self.sessions.iter().enumerate().collect()
@@ -161,7 +200,23 @@ pub fn render_log_selector(f: &mut Frame, state: &LogSelectorState, area: Rect, 
     f.render_stateful_widget(list, inner_chunks[0], &mut list_state);
 
     // Preview
-    let preview_text = if let Some(session) = state.get_selected_session() {
+    let preview_text = if state.is_loading {
+        i18n::t(
+            "ui.log_selector.loading",
+            "正在加载保存的会话…",
+            "Loading saved sessions...",
+        )
+    } else if let Some(error) = state.load_error.as_deref() {
+        format!(
+            "{}: {}",
+            i18n::t(
+                "ui.log_selector.load_failed",
+                "无法加载会话",
+                "Could not load sessions"
+            ),
+            error
+        )
+    } else if let Some(session) = state.get_selected_session() {
         if session.preview.is_empty() {
             i18n::t("ui.log_selector.no_preview", "无预览", "No preview")
         } else {
@@ -203,4 +258,85 @@ pub fn render_log_selector(f: &mut Frame, state: &LogSelectorState, area: Rect, 
         Style::default().fg(theme.comment),
     )]);
     f.render_widget(Paragraph::new(hints), chunks[2]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LogSelectorState, LogSessionEntry};
+    use crate::utils::session_manager::SessionSummary;
+
+    fn entry(id: &str, title: &str) -> LogSessionEntry {
+        LogSessionEntry {
+            id: id.to_string(),
+            title: title.to_string(),
+            created_at: "09-08 12:00".to_string(),
+            message_count: 1,
+            preview: format!("{} preview", title),
+        }
+    }
+
+    #[test]
+    fn summary_conversion_preserves_browser_identity_and_metadata() {
+        let entry = LogSessionEntry::from(SessionSummary {
+            id: "auto-123".to_string(),
+            title: "Investigate rendering".to_string(),
+            subtitle: "Latest · 09-08 12:00 · 3 msgs".to_string(),
+            created_at: 0,
+        });
+
+        assert_eq!(entry.id, "auto-123");
+        assert_eq!(entry.title, "Investigate rendering");
+        assert_eq!(entry.created_at, "Latest · 09-08 12:00 · 3 msgs");
+        assert_eq!(entry.preview, "Latest · 09-08 12:00 · 3 msgs");
+    }
+
+    #[test]
+    fn loading_and_refresh_reset_selector_state() {
+        let mut state = LogSelectorState {
+            sessions: vec![entry("old", "Old")],
+            selected_index: 3,
+            preview_scroll: 4,
+            is_loading: false,
+            load_error: Some("old error".to_string()),
+            search_query: "old".to_string(),
+        };
+
+        state.begin_loading();
+        assert!(state.is_loading);
+        assert!(state.sessions.is_empty());
+        assert_eq!(state.selected_index, 0);
+        assert_eq!(state.preview_scroll, 0);
+        assert!(state.search_query.is_empty());
+        assert!(state.load_error.is_none());
+
+        state.set_sessions(vec![entry("new", "New")]);
+        assert!(!state.is_loading);
+        assert_eq!(
+            state
+                .get_selected_session()
+                .map(|session| session.id.as_str()),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn selection_tracks_filtered_rows() {
+        let mut state = LogSelectorState::default();
+        state.set_sessions(vec![entry("one", "Alpha"), entry("two", "Beta")]);
+        state.search_query = "beta".to_string();
+
+        assert_eq!(
+            state
+                .get_selected_session()
+                .map(|session| session.id.as_str()),
+            Some("two")
+        );
+        state.select_next();
+        assert_eq!(
+            state
+                .get_selected_session()
+                .map(|session| session.id.as_str()),
+            Some("two")
+        );
+    }
 }

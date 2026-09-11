@@ -19,7 +19,7 @@ use super::status_helpers::{
     should_suppress_redundant_result_after_confirmation, truncate_status_detail,
 };
 use crate::core::i18n;
-use crate::runtime::messages::{AgentRequest, StreamMessage};
+use crate::runtime::messages::{AgentRequest, StreamMessage, StreamStartKind};
 use crate::types::{ChatEntry, ChatEntryType, StarToolCall, ToolResult};
 use crate::ui::app::logic::{
     emit_status_text, enqueue_user_message, recover_missing_tool_results, save_tool_output,
@@ -88,28 +88,40 @@ pub async fn handle_stream_update(
         }
         StreamMessage::StatsUpdate {
             au2_compressed,
-            token_usage,
+            token_usage: _,
         } => {
             state.au2_compressed = au2_compressed;
-            // Update cache stats from usage data (use latest values, not accumulate)
-            if let Some(ref usage) = token_usage {
-                if usage.cache_read_tokens > 0 || usage.cache_creation_tokens > 0 {
-                    state.cache_read_tokens = usage.cache_read_tokens as u64;
-                    state.cache_creation_tokens = usage.cache_creation_tokens as u64;
-                }
-            }
-            state.token_usage = token_usage;
+            // Context compression carries an estimate, not a concrete provider response.
+            // Keep the latest provider usage and cache telemetry intact.
             append_transcript_event(
                 state,
                 "stats_update",
                 state.active_message_id,
                 serde_json::json!({
                     "au2_compressed": state.au2_compressed,
-                    "token_usage": state.token_usage,
                 }),
             );
         }
-        StreamMessage::Start { message_id } => {
+        StreamMessage::Start { message_id, kind } => {
+            let is_fresh_user_turn = matches!(&kind, StreamStartKind::UserTurn { .. })
+                && !state.response_models.contains_key(&message_id);
+            if let StreamStartKind::UserTurn { model } = &kind {
+                state
+                    .response_models
+                    .entry(message_id)
+                    .or_insert_with(|| model.clone());
+            }
+            if is_fresh_user_turn {
+                state.complete_task_message_ids.remove(&message_id);
+                state.auto_continued_message_ids.remove(&message_id);
+                state.response_costs.remove(&message_id);
+                state.cache_warning_shown.clear();
+                // 不让上一回合的 provider 用量或缓存读数停留到新回合。
+                state.token_count = 0;
+                state.token_usage = None;
+                state.cache_read_tokens = 0;
+                state.cache_creation_tokens = 0;
+            }
             state
                 .stream_targets
                 .entry(message_id)
@@ -141,6 +153,10 @@ pub async fn handle_stream_update(
                 "start",
                 Some(message_id),
                 serde_json::json!({
+                    "kind": match &kind {
+                        StreamStartKind::UserTurn { .. } => "user_turn",
+                        StreamStartKind::Operation => "operation",
+                    },
                     "queued_inputs": state.pending_user_messages.len(),
                 }),
             );
@@ -678,138 +694,54 @@ pub async fn handle_stream_update(
             }
         }
         StreamMessage::TokenCount {
-            message_id: _,
+            message_id,
             tokens,
             usage,
         } => {
+            // 终态之后的 drain/重复 chunk 不属于新的 provider 响应，不能污染显示或再次计费。
+            if state.complete_task_message_ids.contains(&message_id) {
+                return Ok(());
+            }
+
             state.token_count = tokens;
             if let Some(ref u) = usage {
-                // Update cache token tracking
-                if u.cache_read_tokens > 0 || u.cache_creation_tokens > 0 {
+                // 每个 TokenCount 带的是一次具体 provider 响应，必须整体替换。
+                // 不能将工具循环中不同模型调用的 prompt/completion/cache 字段拼成一条。
+                state.token_usage = Some(u.clone());
+                // 当前响应未明确报告缓存计数时，不能保留上一响应的数字。
+                state.cache_read_tokens = 0;
+                state.cache_creation_tokens = 0;
+                if u.cache_telemetry_reported {
                     state.cache_read_tokens = u.cache_read_tokens as u64;
                     state.cache_creation_tokens = u.cache_creation_tokens as u64;
                 }
-                // Accumulate usage: keep max prompt_tokens, update completion_tokens
-                // API returns cumulative usage per-turn, so we take the latest values
-                match &mut state.token_usage {
-                    Some(existing) => {
-                        // prompt_tokens grows as context grows — keep the max
-                        existing.prompt_tokens = existing.prompt_tokens.max(u.prompt_tokens);
-                        // completion_tokens is per-turn — update if newer data available
-                        if u.completion_tokens > 0 {
-                            existing.completion_tokens = u.completion_tokens;
+
+                // 显示的是最近一次响应；费用则必须累计同一逻辑请求的每次真实 provider 响应。
+                let model = state
+                    .response_models
+                    .get(&message_id)
+                    .map(String::as_str)
+                    .unwrap_or(state.current_model.as_str());
+                let response_cost = crate::ui::utils::cost::compute_response_cost(u, model);
+                *state.response_costs.entry(message_id).or_insert(0.0) += response_cost;
+
+                // 只有具备明确来源的缓存遥测才能触发提示；缺失字段的零值不表示缓存未命中。
+                if u.cache_telemetry_reported {
+                    let detector = crate::agent::cache_warning::CacheWarningDetector::new();
+                    if let Some(warning) = detector.warning_for_usage(u) {
+                        let warning_key = (message_id, warning.warning_type);
+                        if state.cache_warning_shown.insert(warning_key) {
+                            state.push_toast(&warning.message, ToastKind::Warning);
                         }
-                        existing.total_tokens = existing.prompt_tokens + existing.completion_tokens;
-                        existing.cache_read_tokens = u.cache_read_tokens;
-                        existing.cache_creation_tokens = u.cache_creation_tokens;
-                    }
-                    None => {
-                        state.token_usage = Some(u.clone());
                     }
                 }
-            } else if state.token_usage.is_none() {
-                // No usage from API and no existing usage — estimate from token_count
-                state.token_usage = Some(crate::types::StarUsage {
-                    prompt_tokens: tokens,
-                    completion_tokens: 0,
-                    total_tokens: tokens,
-                    ..Default::default()
-                });
             }
         }
         StreamMessage::Done { message_id } => {
             handle_done_message(state, agent_tx, message_id).await?
         }
         StreamMessage::Error { message_id, error } => {
-            recover_missing_tool_results(state, message_id, &error);
-
-            // ── Cancel transition: preserve thinking block 1.5s after ESC/Ctrl+C ──
-            let cancelling_graceful = state
-                .cancelling_since
-                .map(|t| t.elapsed() < std::time::Duration::from_millis(1500))
-                .unwrap_or(false);
-
-            // Don't clear Assistant's streaming state during cancel transition
-            if !cancelling_graceful {
-                if let Some(assistant_idx) = state.stream_targets.get(&message_id).copied() {
-                    if assistant_idx < state.chat_history.len()
-                        && state.chat_history[assistant_idx].entry_type == ChatEntryType::Assistant
-                    {
-                        finalize_entry_streaming(state, assistant_idx);
-                    }
-                }
-            }
-
-            state.is_processing = false;
-            state.current_tool_name = None;
-            state.thinking_started_at = None;
-            state.last_token_time = None;
-            if !cancelling_graceful {
-                state.is_streaming = false;
-            }
-            state.model_wait_started_at = None;
-            state.processing_started_at = None;
-            state.active_message_id = Some(message_id);
-            // Clean up stream tracking maps (normally done in Done handler)
-            state.stream_targets.remove(&message_id);
-            state.message_start_indices.remove(&message_id);
-
-            // Classify error and show overlay for retryable errors
-            let error_type = crate::ui::components::error_overlay::classify_error(&error);
-            if crate::ui::components::error_overlay::is_retryable(&error_type) {
-                state.error_overlay_state =
-                    crate::ui::components::error_overlay::ErrorOverlayState {
-                        error_message: error.clone(),
-                        error_type: error_type.clone(),
-                        retry_count: 0,
-                        max_retries: 10,
-                        is_retrying: false,
-                        selected_action: crate::ui::components::error_overlay::ErrorAction::Retry,
-                    };
-                state.open_error_overlay();
-            } else {
-                // 不可重试的（欠费 / key 无效 / 请求非法 / 上下文超限）不弹浮层
-                // —— 弹一个只能"重试"的框反而误导。用 toast 保证它不会被
-                // 滚上去的历史盖住，具体的修复建议在下面的 chat 条目里。
-                state.push_toast(
-                    &crate::ui::components::error_overlay::error_type_title(&error_type),
-                    ToastKind::Error,
-                );
-            }
-
-            // 状态栏只有一行：诊断信息（label + 建议 + 原始错误）是多行的，
-            // 整段塞进去会把状态栏挤爆，所以这里只取第一行。
-            // 完整内容进 chat_history —— 那里能滚动、能复制。
-            let first_line = error.lines().next().unwrap_or(&error).trim().to_string();
-            emit_status_text(
-                state,
-                message_id,
-                &i18n::t("ui.status.error", "Error: {error}", "Error: {error}")
-                    .replace("{error}", &first_line),
-            );
-            state.chat_history.push(
-                ChatEntry::assistant(
-                    // 不用 ChatEntryType::ErrorMessage —— message_render 的
-                    // dispatch 只认 Assistant / User，其余走 `_ => {}`，
-                    // 换成 ErrorMessage 这条会被渲染成空白。
-                    i18n::t("ui.status.error", "Error: {error}", "Error: {error}")
-                        .replace("{error}", error.trim()),
-                )
-                .with_streaming(false),
-            );
-            append_transcript_event(
-                state,
-                "error",
-                Some(message_id),
-                serde_json::json!({
-                    "error": error,
-                }),
-            );
-            if !state.is_awaiting_confirmation {
-                if let Some(next_input) = state.pending_user_messages.pop_front() {
-                    enqueue_user_message(state, next_input, agent_tx).await?
-                }
-            }
+            handle_error_message(state, agent_tx, message_id, error).await?
         }
         StreamMessage::ModelsList {
             models,
@@ -1361,11 +1293,50 @@ fn attach_agent_task_entry(state: &mut ChatState, args: &AgentTaskUpdateArgs) ->
     idx
 }
 
+fn settle_response_cost(state: &mut ChatState, message_id: u64, assistant_idx: Option<usize>) {
+    let response_cost = state.response_costs.remove(&message_id).unwrap_or(0.0);
+    state.response_models.remove(&message_id);
+    if response_cost == 0.0 {
+        return;
+    }
+
+    let start_idx = state
+        .message_start_indices
+        .get(&message_id)
+        .copied()
+        .unwrap_or(0);
+    let entry_idx = assistant_idx.and_then(|idx| {
+        if state
+            .chat_history
+            .get(idx)
+            .is_some_and(|entry| entry.entry_type == ChatEntryType::Assistant)
+        {
+            return Some(idx);
+        }
+
+        let end_idx = idx.saturating_add(1).min(state.chat_history.len());
+        state.chat_history[start_idx.min(end_idx)..end_idx]
+            .iter()
+            .rposition(|entry| entry.entry_type == ChatEntryType::Assistant)
+            .map(|offset| start_idx.min(end_idx) + offset)
+    });
+
+    state.total_cost += response_cost;
+    if let Some(idx) = entry_idx {
+        let entry = &mut state.chat_history[idx];
+        entry.cost = Some(entry.cost.unwrap_or(0.0) + response_cost);
+    }
+}
+
 async fn handle_done_message(
     state: &mut ChatState,
     agent_tx: &mpsc::Sender<AgentRequest>,
     message_id: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if state.complete_task_message_ids.contains(&message_id) {
+        return Ok(());
+    }
+
     crate::utils::logging::append_debug_log_line(&format!(
         "[DEBUG] StreamHandler: Received Done message (message_id={})",
         message_id
@@ -1379,12 +1350,11 @@ async fn handle_done_message(
         .unwrap_or(false);
 
     if let Some(idx) = assistant_idx {
-        if idx < state.chat_history.len() {
-            if state.chat_history[idx].entry_type == ChatEntryType::Assistant {
-                if !cancelling_graceful {
-                    finalize_entry_streaming(state, idx);
-                }
-            }
+        if idx < state.chat_history.len()
+            && state.chat_history[idx].entry_type == ChatEntryType::Assistant
+            && !cancelling_graceful
+        {
+            finalize_entry_streaming(state, idx);
         }
     }
     let start_idx = state
@@ -1408,10 +1378,7 @@ async fn handle_done_message(
         .and_then(|idx| state.chat_history.get(idx))
         .map(|ce| ce.content.trim().is_empty())
         .unwrap_or(true);
-    // Auto-continue when tools were used and we haven't exceeded the limit.
-    // Removed the `assistant_empty` requirement — even if the LLM gave partial
-    // text, we should still continue if tools were involved (the task may be
-    // incomplete). The nudge asks for a "final answer" so the LLM will wrap up.
+    // Auto-continue keeps the same message ID, so this logical request retains its cost and model.
     let can_auto_continue = state.auto_continue_enabled
         && state.auto_continue_remaining > 0
         && has_tools
@@ -1428,7 +1395,6 @@ async fn handle_done_message(
         state.is_streaming = true;
         state.active_message_id = Some(message_id);
 
-        // 在聊天区域显示明确的继续提示，让用户知道 Agent 还在工作
         let continue_msg = i18n::t(
             "ui.status.continue",
             "Status: continuing final response",
@@ -1460,46 +1426,26 @@ async fn handle_done_message(
             .await;
         return Ok(());
     }
+
     if let Some(idx) = assistant_idx {
         if idx < state.chat_history.len() {
             if !cancelling_graceful {
                 state.chat_history[idx].is_streaming = Some(false);
             }
+            state.rendered_cache.remove(&idx);
+            state.last_rendered_stream_key.remove(&idx);
+            state.virtual_list.mark_dirty(idx);
         }
-        state.rendered_cache.remove(&idx);
-        state.last_rendered_stream_key.remove(&idx);
-        state.virtual_list.mark_dirty(idx);
     }
-    state.is_processing = false;
-    state.current_tool_name = None;
-    state.thinking_started_at = None;
-    state.last_token_time = None;
+    settle_response_cost(state, message_id, assistant_idx);
+    finish_terminal_stream(state, message_id, cancelling_graceful);
     if !cancelling_graceful {
-        state.is_streaming = false;
-        state.current_status_line = None;
-        // 显示完成提示，让用户明确知道 Agent 已完成
         state.current_status_line = Some("✓ Done".to_string());
     }
-    state.model_wait_started_at = None;
-    state.processing_started_at = None;
-    state.active_message_id = Some(message_id);
-    state.complete_task_message_ids.insert(message_id);
-    state.stream_targets.remove(&message_id);
-    state.message_start_indices.remove(&message_id);
 
-    // Compute and store per-response cost
-    if let Some(idx) = assistant_idx {
-        if idx < state.chat_history.len() {
-            if let Some(ref usage) = state.token_usage {
-                let cost =
-                    crate::ui::utils::cost::compute_response_cost(usage, &state.current_model);
-                state.chat_history[idx].cost = Some(cost);
-                state.total_cost += cost;
-            }
-            // Extract the last code block for copy-on-key feature
-            let content = &state.chat_history[idx].content;
-            state.last_code_block_content = extract_last_code_block(content);
-        }
+    if let Some(idx) = assistant_idx.filter(|&idx| idx < state.chat_history.len()) {
+        let content = &state.chat_history[idx].content;
+        state.last_code_block_content = extract_last_code_block(content);
     }
 
     append_transcript_event(
@@ -1510,12 +1456,110 @@ async fn handle_done_message(
             "auto_continued": false,
         }),
     );
+    dequeue_pending_user_input(state, agent_tx).await
+}
+
+/// 终态状态仅允许结算一次；错误和完成路径共享清理逻辑。
+fn finish_terminal_stream(state: &mut ChatState, message_id: u64, cancelling_graceful: bool) {
+    state.is_processing = false;
+    state.current_tool_name = None;
+    state.thinking_started_at = None;
+    state.last_token_time = None;
+    if !cancelling_graceful {
+        state.is_streaming = false;
+    }
+    state.model_wait_started_at = None;
+    state.processing_started_at = None;
+    state.active_message_id = Some(message_id);
+    state.complete_task_message_ids.insert(message_id);
+    state.stream_targets.remove(&message_id);
+    state.message_start_indices.remove(&message_id);
+}
+
+async fn dequeue_pending_user_input(
+    state: &mut ChatState,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !state.is_awaiting_confirmation {
         if let Some(next_input) = state.pending_user_messages.pop_front() {
-            enqueue_user_message(state, next_input, agent_tx).await?
+            enqueue_user_message(state, next_input, agent_tx).await?;
         }
     }
     Ok(())
+}
+
+async fn handle_error_message(
+    state: &mut ChatState,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+    message_id: u64,
+    error: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if state.complete_task_message_ids.contains(&message_id) {
+        return Ok(());
+    }
+
+    recover_missing_tool_results(state, message_id, &error);
+    let assistant_idx = state.stream_targets.get(&message_id).copied();
+    let cancelling_graceful = state
+        .cancelling_since
+        .map(|t| t.elapsed() < std::time::Duration::from_millis(1500))
+        .unwrap_or(false);
+
+    if !cancelling_graceful {
+        if let Some(idx) = assistant_idx {
+            if idx < state.chat_history.len()
+                && state.chat_history[idx].entry_type == ChatEntryType::Assistant
+            {
+                finalize_entry_streaming(state, idx);
+            }
+        }
+    }
+
+    let error_type = crate::ui::components::error_overlay::classify_error(&error);
+    if crate::ui::components::error_overlay::is_retryable(&error_type) {
+        state.error_overlay_state = crate::ui::components::error_overlay::ErrorOverlayState {
+            error_message: error.clone(),
+            error_type: error_type.clone(),
+            retry_count: 0,
+            max_retries: 10,
+            is_retrying: false,
+            selected_action: crate::ui::components::error_overlay::ErrorAction::Retry,
+        };
+        state.open_error_overlay();
+    } else {
+        state.push_toast(
+            &crate::ui::components::error_overlay::error_type_title(&error_type),
+            ToastKind::Error,
+        );
+    }
+
+    let first_line = error.lines().next().unwrap_or(&error).trim().to_string();
+    emit_status_text(
+        state,
+        message_id,
+        &i18n::t("ui.status.error", "Error: {error}", "Error: {error}")
+            .replace("{error}", &first_line),
+    );
+    state.chat_history.push(
+        ChatEntry::assistant(
+            i18n::t("ui.status.error", "Error: {error}", "Error: {error}")
+                .replace("{error}", error.trim()),
+        )
+        .with_streaming(false),
+    );
+    let error_idx = state.chat_history.len() - 1;
+    settle_response_cost(state, message_id, Some(error_idx));
+    finish_terminal_stream(state, message_id, cancelling_graceful);
+
+    append_transcript_event(
+        state,
+        "error",
+        Some(message_id),
+        serde_json::json!({
+            "error": error,
+        }),
+    );
+    dequeue_pending_user_input(state, agent_tx).await
 }
 
 /// 在 pos 处向 chat_history 中插入条目后，修正所有按索引的缓存/映射（>=pos 的 +1）。
@@ -2379,6 +2423,541 @@ mod tests {
         );
         assert!(!state.confirmation_feedback_mode);
         assert!(state.pending_confirmation_feedback.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cache_warnings_are_transient_deduplicated_and_do_not_touch_history() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let history_len = state.chat_history.len();
+        let costly_cache_write = crate::types::StarUsage {
+            prompt_tokens: 900,
+            completion_tokens: 10,
+            total_tokens: 910,
+            cache_read_tokens: 100,
+            cache_creation_tokens: 20_000,
+            cache_telemetry_reported: true,
+        };
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::TokenCount {
+                message_id: 41,
+                tokens: 910,
+                usage: Some(costly_cache_write.clone()),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.toast_queue.len(), 1);
+        assert!(matches!(state.toast_queue[0].kind, ToastKind::Warning));
+        assert_eq!(state.chat_history.len(), history_len);
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::TokenCount {
+                message_id: 41,
+                tokens: 910,
+                usage: Some(costly_cache_write),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.toast_queue.len(), 1);
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::TokenCount {
+                message_id: 41,
+                tokens: 1_010,
+                usage: Some(crate::types::StarUsage {
+                    prompt_tokens: 100,
+                    completion_tokens: 10,
+                    total_tokens: 1_010,
+                    cache_read_tokens: 900,
+                    cache_creation_tokens: 30_000,
+                    cache_telemetry_reported: true,
+                }),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.toast_queue.len(), 1);
+        assert_eq!(state.chat_history.len(), history_len);
+    }
+
+    #[tokio::test]
+    async fn latest_provider_usage_replaces_prior_response_and_unknown_cache_clears_counters() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let message_id = 43;
+        let first = crate::types::StarUsage {
+            prompt_tokens: 900,
+            completion_tokens: 10,
+            total_tokens: 910,
+            cache_read_tokens: 800,
+            cache_creation_tokens: 50,
+            cache_telemetry_reported: true,
+        };
+        let second = crate::types::StarUsage {
+            prompt_tokens: 20,
+            completion_tokens: 5,
+            total_tokens: 25,
+            cache_read_tokens: 999,
+            cache_creation_tokens: 999,
+            cache_telemetry_reported: false,
+        };
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Start {
+                message_id,
+                kind: StreamStartKind::UserTurn {
+                    model: "gpt-4o".to_string(),
+                },
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::TokenCount {
+                message_id,
+                tokens: first.total_tokens,
+                usage: Some(first.clone()),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::TokenCount {
+                message_id,
+                tokens: second.total_tokens,
+                usage: Some(second.clone()),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.token_count, 25);
+        let usage = state.token_usage.expect("latest usage");
+        assert_eq!(usage.prompt_tokens, 20);
+        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.total_tokens, 25);
+        assert!(!usage.cache_telemetry_reported);
+        assert_eq!(state.cache_read_tokens, 0);
+        assert_eq!(state.cache_creation_tokens, 0);
+        let expected = crate::ui::utils::cost::compute_response_cost(&first, "gpt-4o")
+            + crate::ui::utils::cost::compute_response_cost(&second, "gpt-4o");
+        assert_eq!(state.response_costs.get(&message_id), Some(&expected));
+    }
+
+    #[tokio::test]
+    async fn operation_start_preserves_latest_provider_usage_and_cache_counters() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let usage = crate::types::StarUsage {
+            prompt_tokens: 100,
+            completion_tokens: 10,
+            total_tokens: 110,
+            cache_read_tokens: 40,
+            cache_creation_tokens: 3,
+            cache_telemetry_reported: true,
+        };
+        state.token_count = usage.total_tokens;
+        state.token_usage = Some(usage.clone());
+        state.cache_read_tokens = usage.cache_read_tokens as u64;
+        state.cache_creation_tokens = usage.cache_creation_tokens as u64;
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Start {
+                message_id: 44,
+                kind: StreamStartKind::Operation,
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.token_count, 110);
+        let restored = state.token_usage.as_ref().expect("usage is preserved");
+        assert_eq!(restored.total_tokens, usage.total_tokens);
+        assert_eq!(restored.cache_read_tokens, usage.cache_read_tokens);
+        assert_eq!(restored.cache_creation_tokens, usage.cache_creation_tokens);
+        assert!(restored.cache_telemetry_reported);
+        assert_eq!(state.cache_read_tokens, 40);
+        assert_eq!(state.cache_creation_tokens, 3);
+    }
+
+    #[tokio::test]
+    async fn new_request_clears_usage_while_compression_stats_preserve_it() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let usage = crate::types::StarUsage {
+            prompt_tokens: 100,
+            completion_tokens: 10,
+            total_tokens: 110,
+            cache_read_tokens: 40,
+            cache_creation_tokens: 3,
+            cache_telemetry_reported: true,
+        };
+        state.token_count = usage.total_tokens;
+        state.token_usage = Some(usage.clone());
+        state.cache_read_tokens = usage.cache_read_tokens as u64;
+        state.cache_creation_tokens = usage.cache_creation_tokens as u64;
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::StatsUpdate {
+                au2_compressed: true,
+                token_usage: Some(crate::types::StarUsage {
+                    total_tokens: 9_999,
+                    ..Default::default()
+                }),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.token_usage.as_ref().unwrap().total_tokens, 110);
+        assert_eq!(state.cache_read_tokens, 40);
+
+        state.cache_warning_shown.insert((
+            1,
+            crate::agent::cache_warning::CacheWarningType::HighCreationCost,
+        ));
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Start {
+                message_id: 44,
+                kind: StreamStartKind::UserTurn {
+                    model: "test-model".to_string(),
+                },
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.token_count, 0);
+        assert!(state.token_usage.is_none());
+        assert_eq!(state.cache_read_tokens, 0);
+        assert_eq!(state.cache_creation_tokens, 0);
+        assert!(state.cache_warning_shown.is_empty());
+    }
+
+    #[tokio::test]
+    async fn terminal_messages_settle_accumulated_cost_once_and_ignore_late_usage() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let message_id = 45;
+        let first = crate::types::StarUsage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            ..Default::default()
+        };
+        let second = crate::types::StarUsage {
+            prompt_tokens: 200,
+            completion_tokens: 30,
+            total_tokens: 230,
+            ..Default::default()
+        };
+        let late = crate::types::StarUsage {
+            prompt_tokens: 999,
+            completion_tokens: 999,
+            total_tokens: 1_998,
+            ..Default::default()
+        };
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Start {
+                message_id,
+                kind: StreamStartKind::UserTurn {
+                    model: "gpt-4o".to_string(),
+                },
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::TextDelta {
+                message_id,
+                content: "answer".to_string(),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        for usage in [&first, &second] {
+            handle_stream_update(
+                &mut state,
+                StreamMessage::TokenCount {
+                    message_id,
+                    tokens: usage.total_tokens,
+                    usage: Some((*usage).clone()),
+                },
+                &agent_tx,
+            )
+            .await
+            .unwrap();
+        }
+
+        let expected = crate::ui::utils::cost::compute_response_cost(&first, "gpt-4o")
+            + crate::ui::utils::cost::compute_response_cost(&second, "gpt-4o");
+        handle_stream_update(&mut state, StreamMessage::Done { message_id }, &agent_tx)
+            .await
+            .unwrap();
+        assert_eq!(state.total_cost, expected);
+        assert_eq!(
+            state.chat_history.last().and_then(|entry| entry.cost),
+            Some(expected)
+        );
+        assert!(state.complete_task_message_ids.contains(&message_id));
+        assert!(!state.response_costs.contains_key(&message_id));
+        assert!(!state.response_models.contains_key(&message_id));
+
+        handle_stream_update(&mut state, StreamMessage::Done { message_id }, &agent_tx)
+            .await
+            .unwrap();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::TokenCount {
+                message_id,
+                tokens: late.total_tokens,
+                usage: Some(late),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.total_cost, expected);
+        assert_eq!(state.token_count, second.total_tokens);
+    }
+
+    #[tokio::test]
+    async fn error_settles_accumulated_cost_once() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let message_id = 46;
+        let usage = crate::types::StarUsage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            ..Default::default()
+        };
+        let expected = crate::ui::utils::cost::compute_response_cost(&usage, "gpt-4o");
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Start {
+                message_id,
+                kind: StreamStartKind::UserTurn {
+                    model: "gpt-4o".to_string(),
+                },
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::TokenCount {
+                message_id,
+                tokens: usage.total_tokens,
+                usage: Some(usage),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Error {
+                message_id,
+                error: "invalid API key".to_string(),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.total_cost, expected);
+        assert_eq!(
+            state.chat_history.last().and_then(|entry| entry.cost),
+            Some(expected)
+        );
+        assert!(state.complete_task_message_ids.contains(&message_id));
+        handle_stream_update(&mut state, StreamMessage::Done { message_id }, &agent_tx)
+            .await
+            .unwrap();
+        assert_eq!(state.total_cost, expected);
+    }
+
+    #[tokio::test]
+    async fn auto_continue_retains_accumulated_cost_for_same_message_id() {
+        let mut state = ChatState::new();
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
+        let message_id = 47;
+        let first = crate::types::StarUsage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            ..Default::default()
+        };
+        let second = crate::types::StarUsage {
+            prompt_tokens: 50,
+            completion_tokens: 10,
+            total_tokens: 60,
+            ..Default::default()
+        };
+        state.auto_continue_enabled = true;
+        state.auto_continue_remaining = 1;
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Start {
+                message_id,
+                kind: StreamStartKind::UserTurn {
+                    model: "gpt-4o".to_string(),
+                },
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::TextDelta {
+                message_id,
+                content: "working".to_string(),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::ToolCalls {
+                message_id,
+                tool_calls: vec![StarToolCall {
+                    id: "call-1".to_string(),
+                    call_type: "function".to_string(),
+                    function: StarToolCallFunction {
+                        name: "Read".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }],
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::TokenCount {
+                message_id,
+                tokens: first.total_tokens,
+                usage: Some(first.clone()),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        handle_stream_update(&mut state, StreamMessage::Done { message_id }, &agent_tx)
+            .await
+            .unwrap();
+        let AgentRequest::SendMessage {
+            message_id: continued_id,
+            ..
+        } = agent_rx.recv().await.expect("auto-continue request")
+        else {
+            panic!("expected auto-continue request");
+        };
+        assert_eq!(continued_id, message_id);
+        assert_eq!(state.total_cost, 0.0);
+        assert!(state.response_costs.contains_key(&message_id));
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Start {
+                message_id,
+                kind: StreamStartKind::UserTurn {
+                    model: "different-model".to_string(),
+                },
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::TextDelta {
+                message_id,
+                content: " final".to_string(),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::TokenCount {
+                message_id,
+                tokens: second.total_tokens,
+                usage: Some(second.clone()),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        handle_stream_update(&mut state, StreamMessage::Done { message_id }, &agent_tx)
+            .await
+            .unwrap();
+
+        let expected = crate::ui::utils::cost::compute_response_cost(&first, "gpt-4o")
+            + crate::ui::utils::cost::compute_response_cost(&second, "gpt-4o");
+        assert_eq!(state.total_cost, expected);
+        assert!(!state.response_costs.contains_key(&message_id));
+        assert!(!state.response_models.contains_key(&message_id));
+    }
+
+    #[tokio::test]
+    async fn reported_zero_cache_telemetry_replaces_prior_cache_counters() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        state.cache_read_tokens = 500;
+        state.cache_creation_tokens = 250;
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::TokenCount {
+                message_id: 42,
+                tokens: 100,
+                usage: Some(crate::types::StarUsage {
+                    prompt_tokens: 100,
+                    total_tokens: 100,
+                    cache_telemetry_reported: true,
+                    ..Default::default()
+                }),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.cache_read_tokens, 0);
+        assert_eq!(state.cache_creation_tokens, 0);
     }
 }
 

@@ -1660,7 +1660,10 @@ mod tests {
         );
 
         let confirmation = untrusted_confirmation(&invocation).await;
-        (confirmation.on_confirm)(crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave, None);
+        (confirmation.on_confirm)(
+            crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave,
+            None,
+        );
         let result = invocation.execute(None, None).await.expect("Edit 执行失败");
         assert!(result.error.is_none());
 
@@ -1768,10 +1771,13 @@ mod tests {
         );
 
         let confirmation = untrusted_confirmation(&invocation).await;
-        (confirmation.on_confirm)(crate::types::ToolConfirmationOutcome::UserAnswer {
-            answers: vec!["yes".to_string()],
-            text_input: None,
-        }, None);
+        (confirmation.on_confirm)(
+            crate::types::ToolConfirmationOutcome::UserAnswer {
+                answers: vec!["yes".to_string()],
+                text_input: None,
+            },
+            None,
+        );
         assert_eq!(
             invocation
                 .execute(None, None)

@@ -1,4 +1,5 @@
-# StarCode CLI
+# StarCode CLI  
+starcode.help 
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-0.3.0-blue" alt="version">
@@ -25,6 +26,10 @@
 
 ## Features
 
+- TPS is fast 
+-  Rust is fast 
+-  copy by claude code 
+-  100% rust code 
 - **Multi-Provider AI Support** - Connect to OpenAI, Anthropic, and other OpenAI-compatible APIs
 - **Interactive TUI** - Beautiful terminal user interface with real-time streaming
 - **Tool Integration** - Execute commands, edit files, and interact with your codebase

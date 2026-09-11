@@ -1759,12 +1759,19 @@ pub async fn fork(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
     }
 
     let fork_id = format!("fork-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
-    match crate::utils::session_manager::save_session(&fork_id, &history).await {
+    match crate::commands::chat::request_session_save(
+        &ctx.agent_tx,
+        fork_id.clone(),
+        history.clone(),
+        ctx.state.token_usage.clone(),
+    )
+    .await
+    {
         Ok(()) => {
             let mut msg = format!(
                 "🍴 Forked session saved as `{}` ({} messages).\n\n\
                  The fork preserves the conversation up to this point. \
-                 Resume it later with `/session-resume {}`.",
+                 Resume it later with `/chat resume {}`.",
                 fork_id,
                 history.len(),
                 fork_id

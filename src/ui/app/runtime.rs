@@ -61,6 +61,7 @@ fn stalled_processing_secs_without_active_tool(state: &ChatState) -> Option<u64>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ChatEntry;
 
     #[test]
     fn processing_watchdog_waits_for_recorded_tools() {
@@ -85,6 +86,77 @@ mod tests {
         state.is_processing = true;
         state.last_token_time = None;
         assert_eq!(stalled_processing_secs_without_active_tool(&state), None);
+    }
+
+    #[test]
+    fn restore_initial_session_keeps_welcome_and_confirmed_usage() {
+        let mut state = ChatState::new();
+        let welcome_len = state.chat_history.len();
+        let mut stale = crate::types::StarUsage {
+            total_tokens: 999,
+            cache_read_tokens: 888,
+            cache_creation_tokens: 777,
+            cache_telemetry_reported: true,
+            ..Default::default()
+        };
+        state.token_usage = Some(stale.clone());
+        state.token_count = stale.total_tokens;
+        state.cache_read_tokens = stale.cache_read_tokens as u64;
+        state.cache_creation_tokens = stale.cache_creation_tokens as u64;
+
+        restore_initial_session_state(
+            &mut state,
+            vec![ChatEntry::user("restored"), {
+                let mut old_welcome = ChatEntry::assistant("old welcome");
+                old_welcome.is_welcome = true;
+                old_welcome
+            }],
+            Some(crate::types::StarUsage {
+                prompt_tokens: 100,
+                completion_tokens: 20,
+                total_tokens: 120,
+                cache_read_tokens: 70,
+                cache_creation_tokens: 10,
+                cache_telemetry_reported: true,
+            }),
+            Some("resumed-id".to_string()),
+        );
+
+        assert_eq!(state.active_session_id.as_deref(), Some("resumed-id"));
+        assert_eq!(state.chat_history.len(), welcome_len + 1);
+        assert!(state.chat_history[0].is_welcome);
+        assert_eq!(state.chat_history[1].content, "restored");
+        assert_eq!(state.token_count, 120);
+        assert_eq!(state.cache_read_tokens, 70);
+        assert_eq!(state.cache_creation_tokens, 10);
+        assert_eq!(state.chat_list_state.selected(), Some(1));
+
+        stale.cache_telemetry_reported = false;
+        restore_initial_session_state(&mut state, Vec::new(), Some(stale), None);
+        assert_eq!(state.token_count, 999);
+        assert_eq!(state.cache_read_tokens, 0);
+        assert_eq!(state.cache_creation_tokens, 0);
+    }
+
+    #[test]
+    fn exit_session_id_preserves_resumed_canonical_identity() {
+        let mut fresh = crate::core::config::ConfigParameters::default();
+        fresh.session_id = "uuid-123".to_string();
+        let fresh = crate::core::config::Config::new(fresh);
+        assert_eq!(exit_session_id(&ChatState::new(), &fresh), "auto-uuid-123");
+
+        let mut resumed = crate::core::config::ConfigParameters::default();
+        resumed.session_id = "named.session".to_string();
+        resumed.resume_session = true;
+        let resumed = crate::core::config::Config::new(resumed);
+        assert_eq!(
+            exit_session_id(&ChatState::new(), &resumed),
+            "named.session"
+        );
+
+        let mut switched = ChatState::new();
+        switched.active_session_id = Some("session-chosen-in-ui".to_string());
+        assert_eq!(exit_session_id(&switched, &resumed), "session-chosen-in-ui");
     }
 }
 
@@ -795,53 +867,114 @@ pub async fn run_ui_loop(
     }
 }
 
-fn sanitize_session_id(input: &str) -> String {
-    let mut out = String::new();
-    for ch in input.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-            out.push(ch);
+fn exit_session_id(state: &ChatState, config: &crate::core::config::Config) -> String {
+    // `/chat resume` 可以在同一个进程中多次切换 session，因此 UI 记录的实际已加载
+    // filename 优先于启动 Config。启动时的 --resume 已使用 canonical filename 填入 Config。
+    state.active_session_id.clone().unwrap_or_else(|| {
+        if config.is_resume_session() {
+            config.session_id().to_string()
         } else {
-            out.push('-');
+            format!("auto-{}", config.session_id())
         }
-    }
-    let trimmed = out.trim_matches('-');
-    if trimmed.is_empty() {
-        "autosave".to_string()
-    } else {
-        trimmed.to_string()
-    }
+    })
 }
 
+/// 经 worker 保存完整快照后结束会话。worker 持有 canonical agent context，因此 UI
+/// 只能提交 display transcript 和最新 provider usage，不能直接写 history-only JSON。
 async fn persist_session_on_exit(
     config: &Arc<crate::core::config::Config>,
     state: &ChatState,
+    agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Option<String> {
-    // Exclude the transient welcome header entry from saved history
+    // Exclude the transient welcome header entry from saved history.
     let history: Vec<_> = state
         .chat_history
         .iter()
-        .filter(|e| !e.is_welcome)
+        .filter(|entry| !entry.is_welcome)
         .cloned()
         .collect();
 
     if history.is_empty() {
+        if let Err(error) = crate::commands::chat::request_worker_shutdown(agent_tx).await {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[SESSION] Failed to shut down an empty session: {}",
+                error
+            ));
+        }
         return None;
     }
 
-    let id = format!("auto-{}", sanitize_session_id(config.session_id()));
-    if let Err(e) = crate::utils::session_manager::save_session(&id, &history).await {
-        crate::utils::logging::append_debug_log_line(&format!(
-            "[SESSION] Failed to auto-save session on exit: {}",
-            e
-        ));
-        None
-    } else {
-        crate::utils::logging::append_debug_log_line(&format!(
-            "[SESSION] Auto-saved session on exit: {}",
-            id
-        ));
-        Some(id)
+    let id = exit_session_id(state, config);
+    match crate::commands::chat::request_session_save_then_shutdown(
+        agent_tx,
+        id.clone(),
+        history,
+        state.token_usage.clone(),
+    )
+    .await
+    {
+        Ok(()) => {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[SESSION] Saved complete session snapshot on exit: {}",
+                id
+            ));
+            Some(id)
+        }
+        Err(error) => {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[SESSION] Failed to persist session on exit: {}",
+                error
+            ));
+            None
+        }
     }
+}
+
+/// 将启动阶段加载的持久化 display 状态装回新的 UI state。
+///
+/// 欢迎条目属于当前 TUI 进程，不能由旧快照替换；provider usage 则只恢复最近一次真实
+/// 响应，缓存值还必须有显式遥测来源。
+fn restore_initial_session_state(
+    state: &mut ChatState,
+    initial_history: Vec<crate::types::ChatEntry>,
+    initial_usage: Option<crate::types::StarUsage>,
+    initial_session_id: Option<String>,
+) {
+    state.chat_history.extend(
+        initial_history
+            .into_iter()
+            .filter(|entry| !entry.is_welcome),
+    );
+    state.active_session_id = initial_session_id;
+    state.token_count = initial_usage
+        .as_ref()
+        .map(|usage| usage.total_tokens)
+        .unwrap_or(0);
+    state.cache_read_tokens = initial_usage
+        .as_ref()
+        .filter(|usage| usage.cache_telemetry_reported)
+        .map(|usage| usage.cache_read_tokens as u64)
+        .unwrap_or(0);
+    state.cache_creation_tokens = initial_usage
+        .as_ref()
+        .filter(|usage| usage.cache_telemetry_reported)
+        .map(|usage| usage.cache_creation_tokens as u64)
+        .unwrap_or(0);
+    state.token_usage = initial_usage;
+    state.total_cost = state
+        .chat_history
+        .iter()
+        .filter_map(|entry| entry.cost)
+        .sum();
+    state.response_costs.clear();
+    state.response_models.clear();
+
+    if state.chat_history.len() > 1 {
+        state
+            .chat_list_state
+            .select(Some(state.chat_history.len() - 1));
+    }
+    state.clear_cache();
 }
 
 /// Initialize terminal with robust error recovery.
@@ -1002,6 +1135,8 @@ pub async fn run_app(
     >,
     initial_message: String,
     initial_history: Vec<crate::types::ChatEntry>,
+    initial_usage: Option<crate::types::StarUsage>,
+    initial_session_id: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::ui::services::worker::agent_worker;
     use crossterm::execute;
@@ -1185,13 +1320,15 @@ pub async fn run_app(
         }
     }
 
-    // Load previous session history if provided
-    if !initial_history.is_empty() {
-        state.chat_history.extend(initial_history);
-        state.auto_follow = true;
-        let len = state.chat_history.len();
-        state.chat_list_state.select(Some(len.saturating_sub(1)));
-    }
+    // 恢复快照中的 display transcript 和最近一次 provider usage；欢迎块仍归当前
+    // TUI 生命周期所有，不能从旧 session 覆盖。
+    restore_initial_session_state(
+        &mut state,
+        initial_history,
+        initial_usage,
+        initial_session_id,
+    );
+    state.auto_follow = true;
 
     // 等待期间早期输入已镜像进 textarea，这里统一按最终文本重设一次，
     // 不能再 insert_str —— 那会把已经显示出来的内容再追加一遍
@@ -1201,16 +1338,26 @@ pub async fn run_app(
         sync_textarea(&mut state, &early_input_text);
     }
 
-    // Start worker
-    tokio::spawn(async move {
+    // Worker owns the canonical protocol transcript. Retain both its lifecycle sender and
+    // join handle so exit persistence and SessionEnd complete before restoring the terminal.
+    let lifecycle_tx = agent_tx.clone();
+    let worker_handle = tokio::spawn(async move {
         agent_worker(agent, agent_rx, ui_tx).await;
     });
 
     // Run UI loop
     let res = run_ui_loop(&mut terminal, &mut state, agent_tx, ui_rx).await;
 
-    // Persist chat history for resume after graceful exits (including Ctrl+C key handling).
-    let saved_session_id = persist_session_on_exit(&config, &state).await;
+    // Ordered worker requests save the canonical native context before the worker runs its sole
+    // SessionEnd epilogue. Even a save error still waits for shutdown acknowledgement.
+    let saved_session_id = persist_session_on_exit(&config, &state, &lifecycle_tx).await;
+    drop(lifecycle_tx);
+    if let Err(error) = worker_handle.await {
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[Worker] Agent worker task failed during shutdown: {}",
+            error
+        ));
+    }
 
     // Cleanup
     #[cfg(windows)]
