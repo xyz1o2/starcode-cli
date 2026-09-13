@@ -691,6 +691,15 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
             thinking_label,
             Style::default().fg(thinking_color),
         ));
+    } else if let Some((think_secs, finished_at)) = state.thinking_finished {
+        // 思考结束后的回顾标签（对标 Claude Code `thought for Xs`），
+        // 驻留 2 秒后随 spinner 行一起消失
+        if finished_at.elapsed() < std::time::Duration::from_secs(2) {
+            spans.push(Span::styled(
+                format!(" · thought for {}s", think_secs.max(1)),
+                Style::default().fg(theme.inactive),
+            ));
+        }
     }
 
     // 对标 Claude Code：spinner 行只显示动词 + 耗时，不显示模型名。

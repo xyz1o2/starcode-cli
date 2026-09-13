@@ -648,8 +648,8 @@ fn render_teammate_view(state: &ChatState, area_width: u16) -> Option<Vec<Line<'
             )
         } else {
             // `usize::MAX` 只用于 thinking 展开态的键；子条目不参与主历史的展开状态，
-            // 传一个不会与真实下标碰撞的哨兵即可。
-            super::message_render::render_non_tool_entry_blocks(state, sub, usize::MAX, wrap_width)
+            // 传一个不会与真实下标碰撞的哨兵即可。子转录始终显示折叠头（不走隐藏规则）。
+            super::message_render::render_non_tool_entry_blocks(state, sub, usize::MAX, wrap_width, true)
         };
         for b in blocks {
             lines.extend(b);
@@ -724,7 +724,7 @@ fn render_entry_lines(state: &ChatState, entry_idx: usize, area_width: u16) -> V
         ));
     } else {
         blocks.extend(super::message_render::render_non_tool_entry_blocks(
-            state, entry, entry_idx, wrap_width,
+            state, entry, entry_idx, wrap_width, false,
         ));
     }
 
@@ -798,38 +798,4 @@ fn render_entry_lines(state: &ChatState, entry_idx: usize, area_width: u16) -> V
     }
 
     entry_lines
-}
-
-// ── Animation helper ──────────────────────────────────────────────
-
-/// Calculate animation frame: returns (elapsed ms, frame index 0/1/2 for dot cycling, cursor visible)
-pub(crate) fn animation_state(state: &ChatState) -> (u128, usize) {
-    let elapsed_ms = state
-        .processing_started_at
-        .map(|t| t.elapsed().as_millis())
-        .unwrap_or(0);
-    let frame = (elapsed_ms / 400) as usize % 3; // 0, 1, 2 — dot cycling
-    (elapsed_ms, frame)
-}
-
-pub(crate) fn format_elapsed(elapsed_ms: u128) -> String {
-    if elapsed_ms < 1000 {
-        format!("{}ms", elapsed_ms)
-    } else if elapsed_ms < 60_000 {
-        format!("{:.1}s", elapsed_ms as f64 / 1000.0)
-    } else {
-        let mins = elapsed_ms / 60_000;
-        let secs = (elapsed_ms % 60_000) / 1000;
-        format!("{}m{}s", mins, secs)
-    }
-}
-
-pub(crate) fn format_token_count(tokens: u32) -> String {
-    if tokens >= 1_000_000 {
-        format!("{:.1}M", tokens as f64 / 1_000_000.0)
-    } else if tokens >= 1000 {
-        format!("{:.1}k", tokens as f64 / 1000.0)
-    } else {
-        tokens.to_string()
-    }
 }

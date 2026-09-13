@@ -242,6 +242,7 @@ fn restore_session_history(
     state.is_processing = false;
     state.processing_started_at = None;
     state.thinking_started_at = None;
+    state.thinking_finished = None;
     state.active_message_id = None;
     state.stream_targets.clear();
     state.message_start_indices.clear();

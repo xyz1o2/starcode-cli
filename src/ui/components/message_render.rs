@@ -5,11 +5,16 @@ use crate::types::ChatEntryType;
 use crate::ui::state::ChatState;
 use crate::ui::themes::theme::Theme;
 
+/// 渲染非工具条目（assistant / user）的文本块。
+///
+/// `is_sub_transcript`：agent 组展开视图里的子转录条目不走「完成后隐藏」规则，
+/// thinking 折叠头始终可见（它们不参与主历史的 30 秒宽限窗口）。
 pub(crate) fn render_non_tool_entry_blocks(
     state: &ChatState,
     entry: &crate::types::ChatEntry,
     entry_idx: usize,
     wrap_width: usize,
+    is_sub_transcript: bool,
 ) -> Vec<Vec<Line<'static>>> {
     let mut blocks = Vec::new();
     let theme = state.theme_manager.current();
@@ -20,16 +25,7 @@ pub(crate) fn render_non_tool_entry_blocks(
             .any(|prefix| t.starts_with(prefix))
     };
 
-    let (global_elapsed_ms, _dot_frame) = super::chat_history::animation_state(state);
     let is_streaming_now = entry.is_streaming == Some(true);
-    // Use frozen completion time for finished blocks so their timers
-    // don't keep ticking when a new thinking block starts streaming.
-    let elapsed_ms = if is_streaming_now {
-        global_elapsed_ms
-    } else {
-        entry.reasoning_finished_elapsed_ms.unwrap_or(0)
-    };
-
     let cancelling = state.cancelling_since.is_some();
 
     match entry.entry_type {
@@ -49,146 +45,87 @@ pub(crate) fn render_non_tool_entry_blocks(
                     && reasoning_trimmed.len() > 5; // 至少 5 个字符才算有意义
 
                 if is_meaningful {
-                    let is_expanded = state.expanded_thinking_indices.contains(&entry_idx);
+                    // 对标 Claude Code：普通模式下完成的 thinking 块只在 30 秒宽限窗口内
+                    // 可见，之后隐藏；transcript 模式（Ctrl+O）或手动展开时重新显示。
+                    let within_grace = entry
+                        .reasoning_finished_at
+                        .map(|t| t.elapsed() < std::time::Duration::from_secs(30))
+                        .unwrap_or(false);
+                    let is_expanded = state.is_transcript_mode
+                        || state.expanded_thinking_indices.contains(&entry_idx);
+                    let is_visible = is_expanded || is_sub_transcript || is_streaming_now || within_grace;
 
                     // 间距规则（对标 Claude Code：只有"块的顶部 margin"一个所有者）：
                     // thinking 块前不另加空行 — entry 级 leading blank 已提供分隔，
                     // 此处再加会叠加成双空行
 
-                    if is_expanded {
+                    if is_visible {
                         let thinking_label = if cancelling {
                             crate::core::i18n::t("ui.thinking.cancelling", "Canceling", "Canceling")
                         } else {
                             crate::core::i18n::t("ui.thinking.label", "Thinking", "Thinking")
                         };
-                        let dots = "...";
-                        let token_unit =
-                            crate::core::i18n::t("ui.thinking.token_unit", "tokens", "tokens");
-                        let token_count = state.token_count.max(reasoning_display.len() as u32 / 4);
+                        let label_style = Style::default()
+                            .fg(theme.thinking_fg)
+                            .add_modifier(Modifier::ITALIC);
 
-                        let mut header_spans = vec![
-                            Span::styled(
-                                "✻ ",
-                                Style::default()
-                                    .fg(theme.thinking_fg)
-                                    .add_modifier(Modifier::ITALIC),
-                            ),
-                            Span::styled(
-                                format!("{}{}", thinking_label, dots),
-                                Style::default()
-                                    .fg(theme.thinking_fg)
-                                    .add_modifier(Modifier::ITALIC),
-                            ),
-                        ];
+                        if is_expanded {
+                            // 展开态：对标 Claude Code `∴ Thinking…`（头部不显示耗时/token 数）
+                            blocks.push(vec![Line::from(vec![
+                                Span::styled("∴ ", label_style),
+                                Span::styled(format!("{}…", thinking_label), label_style),
+                            ])]);
 
-                        if elapsed_ms > 0 {
-                            header_spans.push(Span::styled(
-                                format!(" {}", super::chat_history::format_elapsed(elapsed_ms)),
-                                Style::default().fg(theme.thinking_fg),
-                            ));
-                        }
-                        if token_count > 0 {
-                            header_spans.push(Span::styled(
-                                format!(
-                                    " · {} {}",
-                                    super::chat_history::format_token_count(token_count),
-                                    token_unit
-                                ),
-                                Style::default().fg(theme.thinking_fg),
-                            ));
-                        }
-
-                        blocks.push(vec![Line::from(header_spans)]);
-
-                        let mut thinking_lines = Vec::new();
-                        for line in reasoning_display.lines() {
-                            if line.trim().is_empty() {
-                                thinking_lines.push(Line::from(""));
+                            // 内容：对标 `<Markdown dimColor>` — dim 色而非斜体，整块缩进
+                            // 2 列，不再使用 │ 竖线前缀
+                            let content_width = wrap_width.saturating_sub(2);
+                            let md_lines = crate::ui::utils::render::build_assistant_body_block(
+                                &reasoning_display,
+                                is_streaming_now,
+                                content_width,
+                            );
+                            let mut thinking_lines = Vec::new();
+                            if md_lines.is_empty() {
+                                // markdown 解析失败时按纯文本兜底
+                                thinking_lines.push(Line::from(vec![
+                                    Span::raw("  "),
+                                    Span::styled(
+                                        reasoning_trimmed.to_string(),
+                                        Style::default().fg(theme.thinking_fg),
+                                    ),
+                                ]));
                             } else {
-                                // 对 thinking 内容进行换行处理
-                                let wrapped_lines = crate::ui::utils::render::wrap_text_to_width(
-                                    line,
-                                    wrap_width.saturating_sub(2), // 减去 "│ " 前缀宽度
-                                );
-                                for (i, wrapped) in wrapped_lines.iter().enumerate() {
-                                    let mut spans = Vec::new();
-                                    if i == 0 {
-                                        // 第一行带 │ 前缀
+                                for line in md_lines {
+                                    let mut spans = vec![Span::raw("  ")];
+                                    for s in line.spans {
                                         spans.push(Span::styled(
-                                            "│ ",
-                                            Style::default().fg(theme.thinking_fg),
+                                            s.content,
+                                            s.style.fg(theme.thinking_fg),
                                         ));
-                                    } else {
-                                        // 续行缩进对齐
-                                        spans.push(Span::styled("  ", Style::default()));
                                     }
-                                    spans.push(Span::styled(
-                                        wrapped.to_string(),
-                                        Style::default()
-                                            .fg(theme.thinking_fg)
-                                            .add_modifier(Modifier::ITALIC),
-                                    ));
                                     thinking_lines.push(Line::from(spans));
                                 }
                             }
-                        }
-                        if thinking_lines.is_empty() && (is_streaming_now || cancelling) {
-                            let placeholder_label = if cancelling {
-                                crate::core::i18n::t(
-                                    "ui.thinking.cancelling",
-                                    "Canceling",
-                                    "Canceling",
-                                )
-                            } else {
-                                crate::core::i18n::t(
-                                    "ui.thinking.placeholder",
-                                    "Thinking",
-                                    "Thinking",
-                                )
-                            };
-                            thinking_lines.push(Line::from(vec![
-                                Span::styled("│ ", Style::default().fg(theme.thinking_fg)),
-                                Span::styled(
-                                    format!("{}{}", placeholder_label, dots),
-                                    Style::default()
-                                        .fg(theme.subtle)
-                                        .add_modifier(Modifier::ITALIC),
-                                ),
-                            ]));
-                        }
-                        blocks.push(thinking_lines);
-                    } else {
-                        // Collapsed view: only show header line with thinking label and elapsed time
-                        // No preview lines — user clicks to expand and see content
-                        let thinking_label = if cancelling {
-                            crate::core::i18n::t("ui.thinking.cancelling", "Canceling", "Canceling")
+                            blocks.push(thinking_lines);
                         } else {
-                            crate::core::i18n::t("ui.thinking.label", "Thinking", "Thinking")
-                        };
-                        let dots = "...";
-
-                        let mut header_spans = vec![
-                            Span::styled(
-                                "✻ ",
-                                Style::default()
-                                    .fg(theme.thinking_fg)
-                                    .add_modifier(Modifier::ITALIC),
-                            ),
-                            Span::styled(
-                                format!("{}{}", thinking_label, dots),
-                                Style::default()
-                                    .fg(theme.thinking_fg)
-                                    .add_modifier(Modifier::ITALIC),
-                            ),
-                        ];
-                        if elapsed_ms > 0 {
-                            header_spans.push(Span::styled(
-                                format!(" {}", super::chat_history::format_elapsed(elapsed_ms)),
-                                Style::default().fg(theme.thinking_fg),
-                            ));
+                            // 折叠态：对标 Claude Code `∴ Thinking (ctrl+o to expand)`，
+                            // 不再显示耗时（进行中的耗时由状态行 `· thinking Xs` 负责）
+                            blocks.push(vec![Line::from(vec![
+                                Span::styled("∴ ", label_style),
+                                Span::styled(thinking_label, label_style),
+                                Span::styled(
+                                    format!(
+                                        " {}",
+                                        crate::core::i18n::t(
+                                            "ui.thinking.expand_hint",
+                                            "(ctrl+o 展开思考)",
+                                            "(ctrl+o to expand)",
+                                        )
+                                    ),
+                                    Style::default().fg(theme.subtle),
+                                ),
+                            ])]);
                         }
-
-                        blocks.push(vec![Line::from(header_spans)]);
                     }
                     // 顶部 margin 规则：正文块的"顶部空行"是 thinking 与正文之间
                     // 唯一的间隔来源；只在正文确实会渲染时才加，避免条目尾部悬空行
@@ -208,33 +145,19 @@ pub(crate) fn render_non_tool_entry_blocks(
                 && entry.reasoning_content.is_none()
                 && state.thinking_started_at.is_some()
             {
+                // 流式占位：对标 Claude Code 流式期 thinking 头 `∴ Thinking…`
                 let label = if cancelling {
                     crate::core::i18n::t("ui.thinking.cancelling", "Canceling", "Canceling")
                 } else {
                     crate::core::i18n::t("ui.thinking.label", "Thinking", "Thinking")
                 };
-                let dots = "...";
-                let mut stream_spans = vec![
-                    Span::styled(
-                        "✻ ",
-                        Style::default()
-                            .fg(theme.thinking_fg)
-                            .add_modifier(Modifier::ITALIC),
-                    ),
-                    Span::styled(
-                        format!("{}{}", label, dots),
-                        Style::default()
-                            .fg(theme.thinking_fg)
-                            .add_modifier(Modifier::ITALIC),
-                    ),
-                ];
-                if elapsed_ms > 0 {
-                    stream_spans.push(Span::styled(
-                        format!(" {}", super::chat_history::format_elapsed(elapsed_ms)),
-                        Style::default().fg(theme.thinking_fg),
-                    ));
-                }
-                blocks.push(vec![Line::from(stream_spans)]);
+                let label_style = Style::default()
+                    .fg(theme.thinking_fg)
+                    .add_modifier(Modifier::ITALIC);
+                blocks.push(vec![Line::from(vec![
+                    Span::styled("∴ ", label_style),
+                    Span::styled(format!("{}…", label), label_style),
+                ])]);
             } else if is_status_line(&display_content) {
                 blocks.push(vec![Line::from(Span::styled(
                     display_content.trim().to_string(),
@@ -317,29 +240,15 @@ pub(crate) fn render_non_tool_entry_blocks(
         .current_model_supports_thinking
         .unwrap_or_else(|| crate::core::config::models::is_thinking_model(&state.current_model));
     if blocks.is_empty() && is_streaming_now && is_thinking {
+        // 兜底占位：对标 Claude Code 流式期 thinking 头 `∴ Thinking…`
         let label = crate::core::i18n::t("ui.thinking.label", "Thinking", "Thinking");
-        let dots = "...";
-        let mut thinking_spans = vec![
-            Span::styled(
-                "✻ ",
-                Style::default()
-                    .fg(theme.thinking_fg)
-                    .add_modifier(Modifier::ITALIC),
-            ),
-            Span::styled(
-                format!("{}{}", label, dots),
-                Style::default()
-                    .fg(theme.thinking_fg)
-                    .add_modifier(Modifier::ITALIC),
-            ),
-        ];
-        if elapsed_ms > 0 {
-            thinking_spans.push(Span::styled(
-                format!(" {}", super::chat_history::format_elapsed(elapsed_ms)),
-                Style::default().fg(theme.thinking_fg),
-            ));
-        }
-        blocks.push(vec![Line::from(thinking_spans)]);
+        let label_style = Style::default()
+            .fg(theme.thinking_fg)
+            .add_modifier(Modifier::ITALIC);
+        blocks.push(vec![Line::from(vec![
+            Span::styled("∴ ", label_style),
+            Span::styled(format!("{}…", label), label_style),
+        ])]);
     }
 
     blocks
@@ -419,7 +328,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let blocks =
-                    render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, 70);
+                    render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, 70, false);
                 let mut lines: Vec<Line> = Vec::new();
                 for b in &blocks {
                     for l in b {
@@ -460,7 +369,7 @@ mod tests {
         let idx = state.chat_history.len() - 1;
         state.expanded_thinking_indices.insert(idx);
 
-        let blocks = render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, 30);
+        let blocks = render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, 30, false);
         // blocks[0] 是 header，blocks[1] 是思考正文
         let rendered: Vec<String> = blocks[1]
             .iter()

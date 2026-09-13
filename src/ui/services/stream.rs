@@ -47,6 +47,8 @@ fn finalize_entry_streaming(state: &mut ChatState, idx: usize) {
                 .map(|t| t.elapsed().as_millis())
                 .unwrap_or(0);
             entry.reasoning_finished_elapsed_ms = Some(frozen);
+            // 记录完成时刻：30 秒宽限窗口从这一刻起算
+            entry.reasoning_finished_at = Some(std::time::Instant::now());
         }
     }
     state.rendered_cache.remove(&idx);
@@ -295,6 +297,8 @@ pub async fn handle_stream_update(
             state.processing_started_at = Some(std::time::Instant::now());
             state.last_token_time = Some(std::time::Instant::now());
             state.thinking_started_at = None;
+            // 新一轮请求开始：清掉上一轮遗留的思考结束回顾，避免新 spinner 行闪现
+            state.thinking_finished = None;
             state.current_tool_name = None;
             state.auto_follow = true; // Lock to bottom when streaming starts
             state.show_scroll_to_bottom = false;
@@ -1625,7 +1629,7 @@ async fn handle_done_message(
 fn finish_terminal_stream(state: &mut ChatState, message_id: u64, cancelling_graceful: bool) {
     state.is_processing = false;
     state.current_tool_name = None;
-    state.thinking_started_at = None;
+    state.end_thinking();
     state.last_token_time = None;
     if !cancelling_graceful {
         state.is_streaming = false;

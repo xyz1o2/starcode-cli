@@ -391,6 +391,9 @@ pub struct ChatState {
     pub last_token_time: Option<Instant>,
     /// When thinking/reasoning started (for thinking duration display)
     pub thinking_started_at: Option<Instant>,
+    /// (思考总秒数, 结束时刻)：思考结束后状态行继续显示 `thought for Xs`
+    /// （对标 Claude Code Spinner，每个状态至少驻留 2 秒再消失）。
+    pub thinking_finished: Option<(u64, Instant)>,
     pub current_status_line: Option<String>,
     pub available_models: Vec<String>,
     /// 完整的模型信息列表（包含 supports_thinking 等字段）
@@ -864,6 +867,7 @@ impl ChatState {
             session_started_at: Instant::now(),
             last_token_time: None,
             thinking_started_at: None,
+            thinking_finished: None,
             current_status_line: None,
             available_models: Vec::new(),
             available_models_info: Vec::new(),
@@ -1187,6 +1191,17 @@ impl ChatState {
         self.last_rendered_stream_key.clear();
         self.streaming_height_floor.clear();
         self.virtual_list.mark_all_dirty();
+    }
+
+    /// 思考阶段结束：把进行中的计时器结算成「结束后回顾」状态。
+    ///
+    /// 对标 Claude Code Spinner 的 `thought for Xs`：思考结束后回顾标签继续
+    /// 驻留 2 秒再随 spinner 行消失，而不是思考一结束就瞬间蒸发。
+    pub fn end_thinking(&mut self) {
+        if let Some(started) = self.thinking_started_at.take() {
+            let secs = started.elapsed().as_secs();
+            self.thinking_finished = Some((secs, Instant::now()));
+        }
     }
 
     /// 切换 transcript（verbose 输出）模式，返回切换后的状态。

@@ -117,6 +117,11 @@ pub struct ChatEntry {
     /// on completed thinking blocks while new blocks are still streaming.
     #[serde(skip)]
     pub reasoning_finished_elapsed_ms: Option<u128>,
+    /// Wall-clock instant when reasoning finished — drives the 30s visibility
+    /// grace window for completed thinking blocks (对标 Claude Code：完成后只
+    /// 短暂停留，随后隐藏；transcript 模式或手动展开时重新显示)。
+    #[serde(skip)]
+    pub reasoning_finished_at: Option<std::time::Instant>,
     // Transient welcome header — never persisted to session files
     #[serde(skip)]
     pub is_welcome: bool,
@@ -209,6 +214,7 @@ impl ChatEntry {
             confirmation: None,
             reasoning_content: None,
             reasoning_finished_elapsed_ms: None,
+            reasoning_finished_at: None,
             is_welcome: false,
             // 新增字段
             collapsed_entries: None,

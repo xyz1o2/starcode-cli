@@ -701,7 +701,7 @@ pub async fn run_ui_loop(
             state.is_processing = false;
             state.cancelling_since = None;
             state.current_tool_name = None;
-            state.thinking_started_at = None;
+            state.end_thinking();
             state.last_token_time = None;
             // Clear confirmation state to unblock queued messages
             state.is_awaiting_confirmation = false;
@@ -733,7 +733,7 @@ pub async fn run_ui_loop(
             state.is_processing = false;
             state.is_streaming = false;
             state.current_tool_name = None;
-            state.thinking_started_at = None;
+            state.end_thinking();
             state.current_status_line = Some("✓ Done (timeout)".to_string());
         }
 
@@ -837,7 +837,7 @@ pub async fn run_ui_loop(
                             Some("Worker disconnected — press Enter to retry".to_string());
                         state.is_streaming = false;
                         state.is_processing = false;
-                        state.thinking_started_at = None;
+                        state.end_thinking();
                         needs_redraw = true;
                     }
                     break;
