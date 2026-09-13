@@ -113,74 +113,89 @@ async fn list_models(mut ctx: CommandContext<'_>) -> CommandResult {
     Ok(())
 }
 
-async fn use_model(ctx: CommandContext<'_>, model_id: String) -> CommandResult {
-    // Parse provider/model
+async fn use_model(mut ctx: CommandContext<'_>, model_id: String) -> CommandResult {
+    // Bare model names resolve against the worker-confirmed active provider. Disk settings are
+    // persistence output, not runtime authority, so they must not select this transition.
     let parts: Vec<&str> = model_id.splitn(2, '/').collect();
     let (provider_id, model_name) = if parts.len() == 2 {
         (parts[0].to_string(), parts[1].to_string())
+    } else if let Some(provider_id) = ctx.state.current_provider_id.clone() {
+        (provider_id, parts[0].to_string())
     } else {
-        let store = ProviderStore::new();
-        let config = store.load().await.unwrap_or_default();
-        if let Some(active) = &config.active_provider_id {
-            (active.clone(), parts[0].to_string())
-        } else {
-            return Err(
-                "No active provider is selected. Use `/provider select <provider>` or specify `provider/model`."
-                    .to_string(),
-            );
-        }
+        return Err(
+            "No active provider is confirmed yet. Specify `provider/model` or wait for startup to finish."
+                .to_string(),
+        );
     };
 
-    let store = ProviderStore::new();
-
-    // 1. Update Active Provider if changed
-    let current_config = store.load().await.unwrap_or_default();
-    if current_config.active_provider_id.as_deref() != Some(&provider_id) {
-        // Verify provider exists
-        let built_in = get_provider_by_id(&provider_id);
-        let is_custom = current_config.providers.contains_key(&provider_id);
-
-        if built_in.is_none() && !is_custom {
-            return Err(format!("Unknown provider: {}", provider_id));
-        }
-
-        store
-            .set_active_provider(&provider_id)
-            .await
-            .map_err(|e| format!("Failed to set active provider: {}", e))?;
+    let accepted = crate::ui::events::input::request_runtime_model_change(
+        ctx.state,
+        model_name.clone(),
+        Some(provider_id.clone()),
+        ctx.agent_tx,
+    )
+    .await;
+    if !accepted {
+        return Err("Runtime settings could not reach the agent worker.".to_string());
     }
-
-    store
-        .set_selected_model(&provider_id, &model_name)
-        .await
-        .map_err(|e| format!("Failed to save selected model: {}", e))?;
-
-    // Update UI state immediately so the model picker / status bar reflects
-    // the new model without waiting for the agent to process UpdateModel.
-    // The agent's actual client switch is deferred until the current
-    // streaming session ends (see session.rs deferred_model), but the UI
-    // should not appear frozen during that window.
-    ctx.state.current_model = model_name.clone();
-    // provider 也要跟上，否则状态栏和后续 SetModel 会拿旧 provider 去配新模型。
-    ctx.state.current_provider_id = Some(provider_id.clone());
-
-    // Notify agent to reload config with new model (processed after current
-    // streaming session ends if one is active).
-    let _ = ctx
-        .agent_tx
-        .send(crate::runtime::messages::AgentRequest::UpdateModel {
-            model: model_name.to_string(),
-            provider_id: Some(provider_id.clone()),
-        })
-        .await;
 
     ctx.state.chat_history.push(
         ChatEntry::assistant(format!(
-            "✅ Switched to model **{}** (Provider: {})",
+            "Requested switch to model **{}** (Provider: {}). It takes effect after worker confirmation.",
             model_name, provider_id
         ))
         .with_streaming(false),
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::messages::AgentRequest;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn bare_model_uses_confirmed_provider_without_changing_active_state() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.current_model = "active-model".to_string();
+        state.current_provider_id = Some("active-provider".to_string());
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
+
+        use_model(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            "target-model".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let Some(AgentRequest::UpdateRuntimeSettings(mutation)) = agent_rx.recv().await else {
+            panic!("expected revisioned model request");
+        };
+        assert_eq!(mutation.ui_revision, 1);
+        assert_eq!(
+            mutation.persistence,
+            crate::runtime::messages::RuntimeSettingsPersistencePolicy::Persistent
+        );
+        assert_eq!(
+            mutation.model,
+            Some(crate::runtime::messages::RuntimeModelSelection {
+                model: "target-model".to_string(),
+                provider_id: Some("active-provider".to_string()),
+            })
+        );
+        assert_eq!(state.current_model, "active-model");
+        assert_eq!(
+            state.current_provider_id.as_deref(),
+            Some("active-provider")
+        );
+        assert!(matches!(
+            state.runtime_settings_persistence,
+            Some(crate::ui::state::store::RuntimeSettingsPersistence::Pending { ui_revision: 1 })
+        ));
+    }
 }

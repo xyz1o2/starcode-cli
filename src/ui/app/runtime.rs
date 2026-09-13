@@ -1291,11 +1291,9 @@ pub async fn run_app(
     let (agent_tx, agent_rx) = mpsc::channel::<AgentRequest>(100);
     let (ui_tx, ui_rx) = mpsc::channel::<StreamMessage>(100);
 
-    // 初始化完成：清掉加载提示，把解析出来的模型名填进抬头
+    // 初始化完成：移除加载提示；model/provider/effort/context 的 active 显示只能等
+    // worker 初始 acknowledgement，不能从 Config 或设置文件提前猜测。
     state.current_status_line = None;
-    if state.current_model.is_empty() {
-        state.current_model = config.model().to_string();
-    }
 
     // Restore draft from previous session
     state.restore_draft();
@@ -1305,20 +1303,8 @@ pub async fn run_app(
     // 顶部会出现两个欢迎块。
     state.virtual_list.mark_all_dirty();
 
-    // Load thinking_effort from user settings
-    if let Ok(settings_manager) = crate::core::config::settings_manager::SettingsManager::new() {
-        if let Ok(settings) = settings_manager.load_user_settings().await {
-            if let Some(ref effort_str) = settings.thinking_effort {
-                // 只是把档位显示出来 —— 真正作用到请求上的那份会话状态在
-                // `main.rs` 加载 settings 时就写进 `llm::thinking` 了。
-                state.thinking_effort =
-                    crate::llm::thinking::parse_effort(effort_str).unwrap_or_default();
-            }
-            if let Some(ctx) = settings.context_window {
-                state.context_window_override = Some(ctx);
-            }
-        }
-    }
+    // runtime setting 的 active 显示一律等 worker 发送初始 acknowledgement；这里不能
+    // 再从 settings 文件提前写 UI 字段，否则短暂显示的值会绕开实际 provider capability。
 
     // 恢复快照中的 display transcript 和最近一次 provider usage；欢迎块仍归当前
     // TUI 生命周期所有，不能从旧 session 覆盖。

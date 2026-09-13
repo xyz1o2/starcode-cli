@@ -37,6 +37,24 @@ pub struct Toast {
     pub duration_secs: u64,
 }
 
+/// UI 侧用户设置文件写入的独立结果；它不能代替 worker runtime acknowledgement。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeSettingsPersistence {
+    Pending { ui_revision: u64 },
+    Saved { ui_revision: u64 },
+    Failed { ui_revision: u64, reason: String },
+}
+
+/// /fast 尚未收到 worker acknowledgement 的 session-only 转换。只有匹配 revision
+/// 的成功 acknowledgement 才能提交 `fast_mode` 与恢复模型；失败则完整丢弃。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingFastModeTransition {
+    pub ui_revision: u64,
+    pub enabled: bool,
+    pub previous_model: Option<crate::runtime::messages::RuntimeModelSelection>,
+    pub target_model: crate::runtime::messages::RuntimeModelSelection,
+}
+
 /// 粘贴块类型
 #[derive(Debug, Clone)]
 pub enum PasteKind {
@@ -407,7 +425,21 @@ pub struct ChatState {
     pub auto_continue_remaining: u32,
     // ============ UX 改进: 审批模式状态 ============
     pub approval_mode: crate::types::ApprovalMode,
+    /// 仅由 worker acknowledgement 更新的当前生效 thinking 档位。
     pub thinking_effort: crate::types::ThinkingEffort,
+    /// UI 发出的下一个 runtime-setting mutation revision。`0` 留给兼容请求。
+    pub next_runtime_settings_revision: u64,
+    /// 最近一次用户明确请求的语义设置。失败或降级时仍保留 intent。
+    pub requested_runtime_settings: Option<crate::runtime::messages::RequestedRuntimeSettings>,
+    /// 尚未收到 worker 终态确认的 UI mutations，按发出 revision 排序。
+    /// worker 在流式回合结束后按 FIFO 应用；UI 只展示最新 revision 的确认。
+    pub pending_runtime_settings: VecDeque<crate::runtime::messages::RuntimeSettingsMutation>,
+    /// worker 已确认的完整运行时快照，是 UI 显示 active 状态的唯一来源。
+    pub confirmed_runtime_settings: Option<crate::runtime::messages::RuntimeSettingsSnapshot>,
+    /// 最近一条可见 runtime acknowledgement，含终态和原因。
+    pub last_runtime_settings_ack: Option<crate::runtime::messages::RuntimeSettingsAcknowledgement>,
+    /// 用户设置文件写入结果，独立于 worker 是否应用该 mutation。
+    pub runtime_settings_persistence: Option<RuntimeSettingsPersistence>,
     /// 欢迎抬头上次渲染时的内容指纹（模型 + 思考档位）。抬头是渲染期现算的，但结果进了
     /// `rendered_cache`，只认 dirty 标记；靠这份指纹在渲染路径上发现内容变了。
     /// 见 `ui::components::welcome_header::refresh_if_stale`。
@@ -420,8 +452,10 @@ pub struct ChatState {
     pub network_offline: bool,
     /// /break-cache 标记：下一条消息强制重建 context（打破隐式缓存延续）
     pub break_cache_next: bool,
-    /// fast 开启前的模型（关闭时恢复）
-    pub fast_mode_prev_model: Option<String>,
+    /// fast 开启前的完整模型/provider 选择（关闭时精确恢复）
+    pub fast_mode_prev_model: Option<crate::runtime::messages::RuntimeModelSelection>,
+    /// 正在等待 runtime acknowledgement 的 /fast 转换。它不能乐观改变 fast mode。
+    pub pending_fast_mode_transition: Option<PendingFastModeTransition>,
     /// /poor 省电模式（对标 Claude Code poor mode：跳过记忆抽取与提示建议）
     pub poor_mode: bool,
     /// /advisor 顾问模式（每轮结束后附带简短建议）
@@ -859,12 +893,19 @@ impl ChatState {
             auto_continue_remaining: 0,
             approval_mode: crate::types::ApprovalMode::Default,
             thinking_effort: crate::types::ThinkingEffort::default(),
+            next_runtime_settings_revision: 1,
+            requested_runtime_settings: None,
+            pending_runtime_settings: VecDeque::new(),
+            confirmed_runtime_settings: None,
+            last_runtime_settings_ack: None,
+            runtime_settings_persistence: None,
             welcome_header_fingerprint: None,
             extra_working_dirs: Vec::new(),
             fast_mode: false,
             network_offline: false,
             break_cache_next: false,
             fast_mode_prev_model: None,
+            pending_fast_mode_transition: None,
             poor_mode: false,
             advisor_mode: false,
             context_window_override: None,
@@ -1033,6 +1074,112 @@ impl ChatState {
             pending_scroll_direction: None,
             pending_scroll_time: None,
         }
+    }
+
+    /// 分配单调 UI revision，并记录请求意图；active 值必须等 worker acknowledgement。
+    pub fn begin_runtime_settings_update(
+        &mut self,
+        model: Option<crate::runtime::messages::RuntimeModelSelection>,
+        context_window: Option<crate::core::context_policy::ContextWindowSelection>,
+        thinking_effort: Option<crate::types::ThinkingEffort>,
+    ) -> crate::runtime::messages::RuntimeSettingsMutation {
+        self.begin_runtime_settings_update_with_persistence(
+            model,
+            context_window,
+            thinking_effort,
+            crate::runtime::messages::RuntimeSettingsPersistencePolicy::Persistent,
+        )
+    }
+
+    /// 记录带明确持久化语义的 runtime mutation。会话级变更同样必须占用 revision，
+    /// 以保留流式回合结束后的 FIFO 顺序，但不能让 UI 误报设置文件正在写入。
+    pub fn begin_runtime_settings_update_with_persistence(
+        &mut self,
+        model: Option<crate::runtime::messages::RuntimeModelSelection>,
+        context_window: Option<crate::core::context_policy::ContextWindowSelection>,
+        thinking_effort: Option<crate::types::ThinkingEffort>,
+        persistence: crate::runtime::messages::RuntimeSettingsPersistencePolicy,
+    ) -> crate::runtime::messages::RuntimeSettingsMutation {
+        let ui_revision = self.next_runtime_settings_revision;
+        self.next_runtime_settings_revision = self.next_runtime_settings_revision.saturating_add(1);
+        let mutation = crate::runtime::messages::RuntimeSettingsMutation {
+            ui_revision,
+            persistence,
+            model,
+            context_window,
+            thinking_effort,
+        };
+        let mut requested = self
+            .requested_runtime_settings
+            .clone()
+            .or_else(|| {
+                self.confirmed_runtime_settings
+                    .as_ref()
+                    .map(|snapshot| snapshot.requested.clone())
+            })
+            .unwrap_or_else(|| crate::runtime::messages::RequestedRuntimeSettings {
+                model: crate::runtime::messages::RuntimeModelSelection {
+                    model: self.current_model.clone(),
+                    provider_id: self.current_provider_id.clone(),
+                },
+                context_window: self
+                    .context_window_override
+                    .map(crate::core::context_policy::ContextWindowSelection::Fixed)
+                    .unwrap_or_default(),
+                thinking_effort: self.thinking_effort.clone(),
+            });
+        if let Some(model) = mutation.model.clone() {
+            requested.model = model;
+        }
+        if let Some(context_window) = mutation.context_window {
+            requested.context_window = context_window;
+        }
+        if let Some(thinking_effort) = mutation.thinking_effort.clone() {
+            requested.thinking_effort = thinking_effort;
+        }
+        self.requested_runtime_settings = Some(requested);
+        self.pending_runtime_settings.push_back(mutation.clone());
+        mutation
+    }
+
+    /// 移除尚未送达 worker 的 mutation，并从已确认状态重建剩余请求意图。
+    /// 不能只删队列：否则 channel 已关闭时 UI 仍会展示一个从未被 worker 接收的请求。
+    pub fn discard_runtime_settings_update(&mut self, ui_revision: u64) {
+        let previous_len = self.pending_runtime_settings.len();
+        self.pending_runtime_settings
+            .retain(|pending| pending.ui_revision != ui_revision);
+        if self.pending_runtime_settings.len() == previous_len {
+            return;
+        }
+
+        let fallback_requested = crate::runtime::messages::RequestedRuntimeSettings {
+            model: crate::runtime::messages::RuntimeModelSelection {
+                model: self.current_model.clone(),
+                provider_id: self.current_provider_id.clone(),
+            },
+            context_window: self
+                .context_window_override
+                .map(crate::core::context_policy::ContextWindowSelection::Fixed)
+                .unwrap_or_default(),
+            thinking_effort: self.thinking_effort.clone(),
+        };
+        let mut requested = self
+            .confirmed_runtime_settings
+            .as_ref()
+            .map(|snapshot| snapshot.requested.clone());
+        for mutation in &self.pending_runtime_settings {
+            let requested = requested.get_or_insert_with(|| fallback_requested.clone());
+            if let Some(model) = mutation.model.clone() {
+                requested.model = model;
+            }
+            if let Some(context_window) = mutation.context_window {
+                requested.context_window = context_window;
+            }
+            if let Some(thinking_effort) = mutation.thinking_effort.clone() {
+                requested.thinking_effort = thinking_effort;
+            }
+        }
+        self.requested_runtime_settings = requested;
     }
 
     pub fn clear_cache(&mut self) {
@@ -1435,5 +1582,40 @@ mod tests {
         state.exit_teammate_view();
         assert!(state.viewing_agent_task_id.is_none());
         assert_eq!(state.bg_agent_selection, Some(1));
+    }
+
+    #[test]
+    fn discarding_a_runtime_mutation_rebuilds_requested_intent_from_remaining_queue() {
+        let mut state = ChatState::new();
+        state.current_model = "active-model".to_string();
+        state.current_provider_id = Some("active-provider".to_string());
+        let first = state.begin_runtime_settings_update_with_persistence(
+            None,
+            Some(crate::core::context_policy::ContextWindowSelection::Fixed(
+                1_000_000,
+            )),
+            None,
+            crate::runtime::messages::RuntimeSettingsPersistencePolicy::SessionOnly,
+        );
+        let second = state.begin_runtime_settings_update_with_persistence(
+            None,
+            None,
+            Some(crate::types::ThinkingEffort::High),
+            crate::runtime::messages::RuntimeSettingsPersistencePolicy::SessionOnly,
+        );
+
+        state.discard_runtime_settings_update(second.ui_revision);
+
+        assert_eq!(state.pending_runtime_settings.len(), 1);
+        assert_eq!(
+            state.pending_runtime_settings[0].ui_revision,
+            first.ui_revision
+        );
+        let requested = state.requested_runtime_settings.as_ref().unwrap();
+        assert_eq!(
+            requested.context_window,
+            crate::core::context_policy::ContextWindowSelection::Fixed(1_000_000)
+        );
+        assert_eq!(requested.thinking_effort, crate::types::ThinkingEffort::Off);
     }
 }

@@ -60,9 +60,18 @@ pub fn get_items(mode: &PaletteMode, state: &ChatState) -> Vec<PaletteItem> {
         PaletteMode::ThinkingEffort => {
             get_thinking_effort_palette_items(&state.thinking_effort, &state.current_model)
         }
-        PaletteMode::ContextWindow => {
-            get_context_window_palette_items(state.context_window_override)
-        }
+        PaletteMode::ContextWindow => get_context_window_palette_items(
+            state
+                .requested_runtime_settings
+                .as_ref()
+                .map(|settings| settings.context_window)
+                .or_else(|| {
+                    state
+                        .context_window_override
+                        .map(crate::core::context_policy::ContextWindowSelection::Fixed)
+                })
+                .unwrap_or_default(),
+        ),
         PaletteMode::Theme => get_theme_palette_items(state),
         PaletteMode::Model => get_model_palette_items(
             &state.available_models,
@@ -248,8 +257,13 @@ fn palette_action_key(action: &PaletteAction) -> String {
         PaletteAction::Back => "back".to_string(),
         PaletteAction::SetModel(model) => format!("model:{}", model),
         PaletteAction::SetAgentMode(mode) => format!("agent_mode:{}", mode),
-        PaletteAction::SetThinkingEffort(level) => format!("thinking_effort:{}", level),
-        PaletteAction::SetContextWindow(size) => format!("context_window:{}", size),
+        PaletteAction::SetThinkingEffort(effort) => {
+            format!("thinking_effort:{}", effort.as_str())
+        }
+        PaletteAction::SetContextWindow(selection) => {
+            format!("context_window:{}", selection.display())
+        }
+        PaletteAction::InputContextWindow => "input_context_window".to_string(),
         PaletteAction::SetTheme(theme) => format!("theme:{}", theme),
         PaletteAction::SetOutputStyle(style) => format!("output_style:{}", style),
         PaletteAction::ShowLogSelector => "show_log_selector".to_string(),
@@ -985,7 +999,7 @@ pub fn get_thinking_effort_palette_items(
             "Disable thinking/reasoning",
         ),
         category: cat.clone(),
-        action: PaletteAction::SetThinkingEffort("off".to_string()),
+        action: PaletteAction::SetThinkingEffort(crate::types::ThinkingEffort::Off),
     });
 
     match cap {
@@ -1004,7 +1018,7 @@ pub fn get_thinking_effort_palette_items(
                     "Light thinking for simple tasks",
                 ),
                 category: cat.clone(),
-                action: PaletteAction::SetThinkingEffort("low".to_string()),
+                action: PaletteAction::SetThinkingEffort(crate::types::ThinkingEffort::Low),
             });
             items.push(PaletteItem {
                 id: "thinking_medium".to_string(),
@@ -1019,7 +1033,7 @@ pub fn get_thinking_effort_palette_items(
                     "Balanced thinking (recommended)",
                 ),
                 category: cat.clone(),
-                action: PaletteAction::SetThinkingEffort("medium".to_string()),
+                action: PaletteAction::SetThinkingEffort(crate::types::ThinkingEffort::Medium),
             });
             items.push(PaletteItem {
                 id: "thinking_high".to_string(),
@@ -1034,7 +1048,7 @@ pub fn get_thinking_effort_palette_items(
                     "Deep thinking for complex tasks",
                 ),
                 category: cat,
-                action: PaletteAction::SetThinkingEffort("high".to_string()),
+                action: PaletteAction::SetThinkingEffort(crate::types::ThinkingEffort::High),
             });
         }
         crate::core::config::models::ThinkingCapability::Binary => {
@@ -1052,7 +1066,7 @@ pub fn get_thinking_effort_palette_items(
                     "Enable thinking/reasoning",
                 ),
                 category: cat,
-                action: PaletteAction::SetThinkingEffort("medium".to_string()),
+                action: PaletteAction::SetThinkingEffort(crate::types::ThinkingEffort::Medium),
             });
         }
         crate::core::config::models::ThinkingCapability::None => {
@@ -1070,7 +1084,7 @@ pub fn get_thinking_effort_palette_items(
                     "Current model does not support thinking/reasoning",
                 ),
                 category: cat,
-                action: PaletteAction::SetThinkingEffort("off".to_string()),
+                action: PaletteAction::SetThinkingEffort(crate::types::ThinkingEffort::Off),
             });
         }
     }
@@ -1078,34 +1092,57 @@ pub fn get_thinking_effort_palette_items(
     items
 }
 
-pub fn get_context_window_palette_items(current_override: Option<u32>) -> Vec<PaletteItem> {
+pub fn get_context_window_palette_items(
+    current: crate::core::context_policy::ContextWindowSelection,
+) -> Vec<PaletteItem> {
     let cat = Some(i18n::t(
         "palette.cat.context_window",
         "Context Window",
         "Context Window",
     ));
-    let presets: &[(&str, u32, &str)] = &[
-        ("ctx_auto", 0, "Auto (detect from model)"),
-        ("ctx_128k", 128, "128k"),
-        ("ctx_200k", 200, "200k"),
-        ("ctx_256k", 256, "256k"),
-        ("ctx_512k", 512, "512k"),
-        ("ctx_1m", 1000, "1M"),
-        ("ctx_2m", 2000, "2M"),
+    let presets = [
+        (
+            "ctx_auto",
+            crate::core::context_policy::ContextWindowSelection::Auto,
+            "Auto (detect from model)",
+        ),
+        (
+            "ctx_128k",
+            crate::core::context_policy::ContextWindowSelection::Fixed(128_000),
+            "128k",
+        ),
+        (
+            "ctx_200k",
+            crate::core::context_policy::ContextWindowSelection::Fixed(200_000),
+            "200k",
+        ),
+        (
+            "ctx_256k",
+            crate::core::context_policy::ContextWindowSelection::Fixed(256_000),
+            "256k",
+        ),
+        (
+            "ctx_512k",
+            crate::core::context_policy::ContextWindowSelection::Fixed(512_000),
+            "512k",
+        ),
+        (
+            "ctx_1m",
+            crate::core::context_policy::ContextWindowSelection::Fixed(1_000_000),
+            "1M",
+        ),
+        (
+            "ctx_2m",
+            crate::core::context_policy::ContextWindowSelection::Fixed(2_000_000),
+            "2M",
+        ),
     ];
-    let current_id = match current_override {
-        None => "ctx_auto",
-        Some(v) => {
-            let k = v / 1000;
-            presets
-                .iter()
-                .find(|(_, val, _)| *val == k)
-                .map(|(id, _, _)| *id)
-                .unwrap_or("ctx_custom")
-        }
-    };
+    let current_id = presets
+        .iter()
+        .find(|(_, selection, _)| *selection == current)
+        .map(|(id, _, _)| *id)
+        .unwrap_or("ctx_custom");
     let check = |id: &str| if id == current_id { " ●" } else { "" };
-
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
         label: i18n::t("palette.back.label", ".. Back", ".. Back"),
@@ -1117,12 +1154,14 @@ pub fn get_context_window_palette_items(current_override: Option<u32>) -> Vec<Pa
         category: None,
         action: PaletteAction::Back,
     }];
-
-    for (id, _val, label) in presets {
+    for (id, selection, label) in presets {
         items.push(PaletteItem {
             id: id.to_string(),
             label: format!("{}{}", label, check(id)),
-            description: if *id == "ctx_auto" {
+            description: if matches!(
+                selection,
+                crate::core::context_policy::ContextWindowSelection::Auto
+            ) {
                 i18n::t(
                     "palette.desc.ctx_auto",
                     "Use model's default context window",
@@ -1132,21 +1171,11 @@ pub fn get_context_window_palette_items(current_override: Option<u32>) -> Vec<Pa
                 format!("Set context window to {}", label)
             },
             category: cat.clone(),
-            action: if *id == "ctx_auto" {
-                PaletteAction::SetContextWindow("auto".to_string())
-            } else {
-                PaletteAction::SetContextWindow(format!("{}k", _val))
-            },
+            action: PaletteAction::SetContextWindow(selection),
         });
     }
-
-    // Custom input option
     let custom_label = if current_id == "ctx_custom" {
-        if let Some(v) = current_override {
-            format!("Custom: {}k ●", v / 1000)
-        } else {
-            "Custom...".to_string()
-        }
+        format!("Custom: {} ●", current.display())
     } else {
         "Custom...".to_string()
     };
@@ -1159,9 +1188,8 @@ pub fn get_context_window_palette_items(current_override: Option<u32>) -> Vec<Pa
             "Enter a custom context window size (e.g. 128k, 1M)",
         ),
         category: cat,
-        action: PaletteAction::SetContextWindow("custom".to_string()),
+        action: PaletteAction::InputContextWindow,
     });
-
     items
 }
 

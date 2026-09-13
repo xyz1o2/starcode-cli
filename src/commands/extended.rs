@@ -1599,28 +1599,23 @@ pub async fn effort(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRe
         }
     };
 
-    ctx.state.thinking_effort = effort;
-    // 让档位真的生效：UI 侧只改显示，作用到请求上要靠这条消息
-    // （落到 `llm::thinking`，按 provider 方言翻成对应字段）。
-    let _ = ctx
-        .agent_tx
-        .send(crate::runtime::messages::AgentRequest::SetThinkingEffort(
-            ctx.state.thinking_effort.clone(),
-        ))
-        .await;
-    // 持久化到用户设置（与面板设置路径一致）
-    let effort_str = ctx.state.thinking_effort.as_str().to_string();
-    tokio::spawn(async move {
-        if let Ok(mgr) = crate::core::config::settings_manager::SettingsManager::new() {
-            if let Ok(mut settings) = mgr.load_user_settings().await {
-                settings.thinking_effort = Some(effort_str);
-                let _ = mgr.save_user_settings(&settings).await;
-            }
-        }
-    });
+    let accepted = crate::ui::events::input::request_runtime_settings(
+        ctx.state,
+        None,
+        None,
+        Some(effort.clone()),
+        ctx.agent_tx,
+    )
+    .await;
+    if !accepted {
+        return Err("Runtime settings could not reach the agent worker.".to_string());
+    }
 
-    // 措辞与 Alt+T、命令面板统一（`◐ medium`），用户才认得出是同一个档位。
-    let mut msg = format!("✅ Thinking effort: {}", ctx.state.thinking_effort.label());
+    // 只有 worker acknowledgement 才能更新 active 档位；命令回显只说明本次请求已排队。
+    let mut msg = format!(
+        "Thinking effort requested: {}\n\nIt takes effect after worker confirmation.",
+        effort.label()
+    );
     if matches!(
         crate::core::config::models::thinking_capability(&ctx.state.current_model),
         crate::core::config::models::ThinkingCapability::None
@@ -1635,26 +1630,33 @@ pub async fn effort(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRe
     Ok(())
 }
 
-/// 从可用模型列表里挑一个"快速"模型（mini/flash/lite 等轻量标识）。
-fn pick_fast_model(state: &crate::ui::state::ChatState) -> Option<String> {
+/// /fast — 快速模式开关（对标 Claude Code fast mode）：
+/// 开启时切换到同一 provider 的轻量模型，关闭时精确恢复原模型/provider。
+/// 会话级开关：通过 session-only revisioned runtime mutation 生效，不写设置文件。
+fn pick_fast_model(
+    state: &crate::ui::state::ChatState,
+) -> Option<crate::runtime::messages::RuntimeModelSelection> {
     const FAST_HINTS: [&str; 7] = ["mini", "flash", "lite", "fast", "small", "turbo", "instant"];
-    let mut candidates: Vec<String> = state
+    let current_provider = state.current_provider_id.as_deref();
+    state
         .available_models_info
         .iter()
-        .filter(|m| {
-            let id = m.id.to_lowercase();
-            FAST_HINTS.iter().any(|h| id.contains(h))
+        .filter(|model| {
+            let id = model.id.to_lowercase();
+            model.id != state.current_model
+                && FAST_HINTS.iter().any(|hint| id.contains(hint))
+                && match current_provider {
+                    Some(provider) => model.provider == provider,
+                    None => true,
+                }
         })
-        .map(|m| m.id.clone())
-        .collect();
-    // 当前模型若是轻量款则不再切换
-    candidates.retain(|id| id != &state.current_model);
-    candidates.first().cloned()
+        .map(|model| crate::runtime::messages::RuntimeModelSelection {
+            model: model.id.clone(),
+            provider_id: Some(model.provider.clone()),
+        })
+        .min_by(|left, right| left.model.cmp(&right.model))
 }
 
-/// /fast — 快速模式开关（对标 Claude Code fast mode）：
-/// 开启时若当前不是轻量模型则自动切换，关闭时恢复原模型。
-/// 会话级开关（不持久化 —— 启动模型路由涉及异步模型列表，后续再补）。
 pub async fn fast(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     let action = args
         .first()
@@ -1673,6 +1675,13 @@ pub async fn fast(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
         }
     };
 
+    if ctx.state.pending_fast_mode_transition.is_some() {
+        push_msg(
+            &mut ctx,
+            "Fast mode transition is already waiting for worker confirmation.",
+        );
+        return Ok(());
+    }
     if enable == ctx.state.fast_mode {
         push_msg(
             &mut ctx,
@@ -1684,62 +1693,188 @@ pub async fn fast(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
         return Ok(());
     }
 
-    if enable {
-        ctx.state.fast_mode = true;
-        ctx.state.fast_mode_prev_model = Some(ctx.state.current_model.clone());
-
-        let mut switched = String::new();
-        if let Some(fast_model) = pick_fast_model(ctx.state) {
-            let provider_id = ctx
-                .state
-                .model_provider_map
-                .get(&fast_model)
-                .cloned()
-                .or_else(|| ctx.state.current_provider_id.clone());
-            let _ = ctx
-                .agent_tx
-                .send(AgentRequest::SetModel {
-                    model: fast_model.clone(),
-                    provider_id,
-                })
-                .await;
-            ctx.state.current_model = fast_model.clone();
-            switched = format!(" · model set to {}", fast_model);
+    let (target_selection, previous_model, status) = if enable {
+        let previous_model = (!ctx.state.current_model.is_empty()).then(|| {
+            crate::runtime::messages::RuntimeModelSelection {
+                model: ctx.state.current_model.clone(),
+                provider_id: ctx.state.current_provider_id.clone(),
+            }
+        });
+        match pick_fast_model(ctx.state) {
+            Some(fast_model) => {
+                let status = format!("Requesting fast mode · model {}…", fast_model.model);
+                (Some(fast_model), previous_model, status)
+            }
+            None => (None, previous_model, "Requesting fast mode…".to_string()),
         }
-        ctx.state.current_status_line = Some(format!("⚡ Fast mode ON{}", switched));
+    } else {
+        let previous_model = ctx.state.fast_mode_prev_model.clone();
+        let current_selection = crate::runtime::messages::RuntimeModelSelection {
+            model: ctx.state.current_model.clone(),
+            provider_id: ctx.state.current_provider_id.clone(),
+        };
+        let target_selection = previous_model
+            .as_ref()
+            .filter(|model| **model != current_selection)
+            .cloned();
+        let status = target_selection
+            .as_ref()
+            .map(|model| format!("Requesting fast mode off · restore {}…", model.model))
+            .unwrap_or_else(|| "Requesting fast mode off…".to_string());
+        (target_selection, previous_model, status)
+    };
+
+    let Some(target_selection) = target_selection else {
+        // /fast without a model transition is UI-only today; do not pretend it crossed the
+        // runtime settings protocol. Keeping state unchanged is safer than a false active mode.
         push_msg(
             &mut ctx,
-            format!(
-                "⚡ Fast mode ON{}\n\nResponses will be optimized for speed.",
-                switched
-            ),
+            if enable {
+                "No alternate fast model is available for the confirmed provider."
+            } else {
+                "No previous model is available to restore from fast mode."
+            },
         );
-    } else {
-        ctx.state.fast_mode = false;
-        let mut restored = String::new();
-        if let Some(prev) = ctx.state.fast_mode_prev_model.take() {
-            if !prev.is_empty() && prev != ctx.state.current_model {
-                let provider_id = ctx
-                    .state
-                    .model_provider_map
-                    .get(&prev)
-                    .cloned()
-                    .or_else(|| ctx.state.current_provider_id.clone());
-                let _ = ctx
-                    .agent_tx
-                    .send(AgentRequest::SetModel {
-                        model: prev.clone(),
-                        provider_id,
-                    })
-                    .await;
-                ctx.state.current_model = prev.clone();
-                restored = format!(" · model restored to {}", prev);
-            }
-        }
-        ctx.state.current_status_line = Some("Fast mode OFF".to_string());
-        push_msg(&mut ctx, format!("Fast mode OFF{}", restored));
-    }
+        return Ok(());
+    };
+    let Some(ui_revision) =
+        crate::ui::events::input::request_runtime_settings_with_persistence_revision(
+            ctx.state,
+            Some(target_selection.clone()),
+            None,
+            None,
+            crate::runtime::messages::RuntimeSettingsPersistencePolicy::SessionOnly,
+            ctx.agent_tx,
+        )
+        .await
+    else {
+        return Err("Runtime settings could not reach the agent worker.".to_string());
+    };
+
+    ctx.state.pending_fast_mode_transition =
+        Some(crate::ui::state::store::PendingFastModeTransition {
+            ui_revision,
+            enabled: enable,
+            previous_model: if enable { previous_model } else { None },
+            target_model: target_selection,
+        });
+    ctx.state.current_status_line = Some(status);
+    push_msg(
+        &mut ctx,
+        format!(
+            "Fast mode {} requested. It takes effect after worker confirmation.",
+            if enable { "ON" } else { "OFF" }
+        ),
+    );
     Ok(())
+}
+
+#[cfg(test)]
+mod runtime_settings_tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn effort_queues_a_persistent_request_without_changing_active_state() {
+        let mut state = crate::ui::state::ChatState::new();
+        let original_effort = state.thinking_effort.clone();
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
+        effort(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            vec!["high".into()],
+        )
+        .await
+        .unwrap();
+        let Some(AgentRequest::UpdateRuntimeSettings(mutation)) = agent_rx.recv().await else {
+            panic!("expected revisioned effort request");
+        };
+        assert_eq!(mutation.ui_revision, 1);
+        assert_eq!(
+            mutation.thinking_effort,
+            Some(crate::types::ThinkingEffort::High)
+        );
+        assert_eq!(state.thinking_effort, original_effort);
+        assert!(matches!(
+            state.runtime_settings_persistence,
+            Some(crate::ui::state::store::RuntimeSettingsPersistence::Pending { ui_revision: 1 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn fast_on_uses_a_lightweight_model_from_the_confirmed_provider() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.current_model = "standard-model".into();
+        state.current_provider_id = Some("provider-a".into());
+        state.available_models_info = vec![
+            crate::types::ModelInfo::new("model-mini", "provider-a"),
+            crate::types::ModelInfo::new("other-mini", "provider-b"),
+        ];
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
+
+        fast(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            vec!["on".into()],
+        )
+        .await
+        .unwrap();
+
+        let Some(AgentRequest::UpdateRuntimeSettings(mutation)) = agent_rx.recv().await else {
+            panic!("expected session-only fast-mode request");
+        };
+        assert_eq!(
+            mutation.persistence,
+            crate::runtime::messages::RuntimeSettingsPersistencePolicy::SessionOnly
+        );
+        assert_eq!(
+            mutation.model.unwrap().provider_id.as_deref(),
+            Some("provider-a")
+        );
+        assert!(!state.fast_mode);
+        assert!(state.pending_fast_mode_transition.is_some());
+        assert!(state.runtime_settings_persistence.is_none());
+    }
+
+    #[tokio::test]
+    async fn fast_off_restores_provider_when_model_name_matches() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.fast_mode = true;
+        state.current_model = "shared-model".into();
+        state.current_provider_id = Some("fast-provider".into());
+        state.fast_mode_prev_model = Some(crate::runtime::messages::RuntimeModelSelection {
+            model: "shared-model".into(),
+            provider_id: Some("original-provider".into()),
+        });
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
+        fast(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            vec!["off".into()],
+        )
+        .await
+        .unwrap();
+        let Some(AgentRequest::UpdateRuntimeSettings(mutation)) = agent_rx.recv().await else {
+            panic!("expected session-only restore request");
+        };
+        assert_eq!(
+            mutation.persistence,
+            crate::runtime::messages::RuntimeSettingsPersistencePolicy::SessionOnly
+        );
+        assert_eq!(
+            mutation.model.unwrap().provider_id.as_deref(),
+            Some("original-provider")
+        );
+        assert!(state.fast_mode);
+        assert!(state.pending_fast_mode_transition.is_some());
+        assert!(state.runtime_settings_persistence.is_none());
+    }
 }
 
 /// /fork — 把当前会话复制为一个新会话快照（对标 Claude Code fork）。

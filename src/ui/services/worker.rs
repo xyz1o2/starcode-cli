@@ -85,6 +85,13 @@ pub async fn agent_worker(
         let _ = tx.send(StreamMessage::ApprovalModeChanged { mode }).await;
     }
 
+    {
+        let acknowledgement = agent.initial_runtime_settings_acknowledgement();
+        let _ = tx
+            .send(StreamMessage::RuntimeSettingsAcknowledged(acknowledgement))
+            .await;
+    }
+
     let stop_reason = loop {
         // Priority: check steering queue first (for interrupts/steering)
         let next_message = if let Some(msg) = steering_queue.try_next() {

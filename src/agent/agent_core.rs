@@ -61,6 +61,10 @@ pub struct Agent {
     /// Reactive Compact管理器
     pub(crate) reactive_compact_manager:
         crate::agent::compact::reactive_compact::ReactiveCompactManager,
+    /// 当前逻辑回合冻结的上下文策略。由顶层 `StarAgent` 在开始用户回合前安装。
+    pub(crate) context_policy: crate::core::context_policy::ResolvedContextPolicy,
+    /// 当前逻辑回合冻结的思考力度。后续 LLM request-options 迁移会消费它。
+    pub(crate) thinking_effort: crate::types::ThinkingEffort,
     /// 模型回退管理器：跨 turn 存活，处理 STAR_FALLBACK_MODELS / STAR_FALLBACK_BASE_URLS
     /// 等列表式回退配置（单值 STAR_FALLBACK_MODEL / STAR_FALLBACK_BASE_URL 仍由
     /// agent_llm.rs 优先生效）。
@@ -92,14 +96,19 @@ impl Agent {
         // ContextEngine: 延迟初始化，不在构造函数中做任何 I/O
         let context_engine = crate::core::context::engine::ContextEngine::new();
 
-        let context_window = config.context_window();
+        let context_policy = crate::core::context_policy::ResolvedContextPolicy::from_evidence(
+            config.configured_context_window_selection(),
+            crate::core::context_policy::ContextWindowEvidence::default(),
+        );
         let tool_executor_arc = Arc::new(tool_executor);
         let streaming_executor = crate::agent::streaming_executor::StreamingToolExecutor::new(
             tool_executor_arc.clone(),
             4,
         );
 
-        let compact_manager = crate::agent::compact::CompactManager::from_env();
+        let compact_manager = crate::agent::compact::CompactManager::new(
+            crate::agent::compact::CompactConfig::from_context_policy(&context_policy),
+        );
         let compact_config = compact_manager.config().clone();
 
         let mut agent = Self {
@@ -107,7 +116,7 @@ impl Agent {
             config,
             tool_executor: tool_executor_arc,
             streaming_executor,
-            context_compressor: ContextCompressor::new(Some(context_window)),
+            context_compressor: ContextCompressor::from_context_policy(&context_policy),
             compact_manager,
             context_engine,
             session_messages: Vec::new(),
@@ -131,6 +140,8 @@ impl Agent {
             stream_stall_detector: crate::agent::stream_stall::StreamStallDetector::new(),
             reactive_compact_manager:
                 crate::agent::compact::reactive_compact::ReactiveCompactManager::new(compact_config),
+            context_policy,
+            thinking_effort: crate::types::ThinkingEffort::default(),
             model_fallback: crate::agent::model_fallback::ModelFallbackManager::new(),
         };
         // 原生会话由启动解析器或 UI→worker RestoreSession 显式安装。
@@ -358,6 +369,27 @@ impl Agent {
 
     pub fn get_client(&self) -> StarClient {
         self.client.clone()
+    }
+
+    /// 用 worker 已解析的会话策略重新配置所有上下文敏感组件。
+    /// 此方法只在逻辑用户回合的边界调用，因此不会改变正在进行的工具循环。
+    pub fn apply_runtime_snapshot(
+        &mut self,
+        context_policy: crate::core::context_policy::ResolvedContextPolicy,
+        thinking_effort: crate::types::ThinkingEffort,
+    ) {
+        let compact_config =
+            crate::agent::compact::CompactConfig::from_context_policy(&context_policy);
+        self.context_compressor = ContextCompressor::from_context_policy(&context_policy);
+        self.compact_manager = crate::agent::compact::CompactManager::new(compact_config.clone());
+        self.reactive_compact_manager =
+            crate::agent::compact::reactive_compact::ReactiveCompactManager::new(compact_config);
+        self.context_policy = context_policy;
+        self.thinking_effort = thinking_effort;
+    }
+
+    pub fn context_policy(&self) -> &crate::core::context_policy::ResolvedContextPolicy {
+        &self.context_policy
     }
 
     /// 获取压缩管理器的引用

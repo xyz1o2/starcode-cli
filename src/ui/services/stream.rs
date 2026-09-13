@@ -19,12 +19,14 @@ use super::status_helpers::{
     should_suppress_redundant_result_after_confirmation, truncate_status_detail,
 };
 use crate::core::i18n;
-use crate::runtime::messages::{AgentRequest, StreamMessage, StreamStartKind};
+use crate::runtime::messages::{
+    AgentRequest, RuntimeSettingsAcknowledgement, StreamMessage, StreamStartKind,
+};
 use crate::types::{ChatEntry, ChatEntryType, StarToolCall, ToolResult};
 use crate::ui::app::logic::{
     emit_status_text, enqueue_user_message, recover_missing_tool_results, save_tool_output,
 };
-use crate::ui::state::store::{ChatState, ToastKind};
+use crate::ui::state::store::{ChatState, RuntimeSettingsPersistence, ToastKind};
 use crate::ui::utils::format::{
     format_tool_call, format_tool_result, format_tool_result_with_saved_path,
 };
@@ -73,6 +75,163 @@ fn refresh_current_tool_name(state: &mut ChatState) {
         })
     });
 }
+
+/// 将 worker 已确认的 runtime snapshot 作为 UI active 状态的唯一事实来源。
+///
+/// revision `0` 是兼容旧请求；只要 UI 已发出过 revisioned mutation，就不能让旧消息
+/// 倒灌覆盖新请求。对于正常 revision，晚到的 acknowledgement 不会改写更晚的 requested
+/// intent，但仍可确认对应 worker 已安装的 active snapshot。
+fn apply_runtime_settings_acknowledgement(
+    state: &mut ChatState,
+    acknowledgement: RuntimeSettingsAcknowledgement,
+) {
+    let ui_revision = acknowledgement.ui_revision;
+    let newest_pending_revision = state
+        .pending_runtime_settings
+        .back()
+        .map(|mutation| mutation.ui_revision);
+    let newest_ack_revision = state
+        .last_runtime_settings_ack
+        .as_ref()
+        .map(|ack| ack.ui_revision)
+        .unwrap_or(0);
+
+    if (ui_revision == 0 && state.next_runtime_settings_revision > 1)
+        || (ui_revision != 0 && ui_revision < newest_ack_revision)
+    {
+        return;
+    }
+
+    let has_later_pending = newest_pending_revision.is_some_and(|revision| revision > ui_revision);
+    let fast_transition = state
+        .pending_fast_mode_transition
+        .as_ref()
+        .filter(|transition| transition.ui_revision == ui_revision)
+        .cloned();
+    if let Some(transition) = fast_transition {
+        if matches!(
+            acknowledgement.outcome,
+            crate::core::context_policy::RuntimeSettingOutcome::Applied
+                | crate::core::context_policy::RuntimeSettingOutcome::Degraded
+        ) {
+            state.fast_mode = transition.enabled;
+            state.fast_mode_prev_model = if transition.enabled {
+                transition.previous_model
+            } else {
+                None
+            };
+        }
+        state.pending_fast_mode_transition = None;
+    }
+    state
+        .pending_runtime_settings
+        .retain(|pending| pending.ui_revision > ui_revision || pending.ui_revision == 0);
+    if has_later_pending {
+        return;
+    }
+
+    // The worker snapshot is authoritative for active values. Once no newer UI request is
+    // pending, it also becomes the displayed requested intent.
+    let active = &acknowledgement.snapshot.active;
+    state.current_model = active.model.model.clone();
+    state.current_provider_id = active
+        .model
+        .provider_id
+        .clone()
+        .or_else(|| state.model_provider_map.get(&state.current_model).cloned());
+    state.thinking_effort = active.thinking_effort.clone();
+    state.context_window_override = active.context_policy.selection.as_fixed();
+    state.current_model_supports_thinking = state
+        .available_models_info
+        .iter()
+        .find(|model| {
+            model.id == state.current_model
+                && (state.current_provider_id.is_none()
+                    || model.provider == state.current_provider_id.as_deref().unwrap_or_default())
+        })
+        .and_then(|model| model.supports_thinking);
+    state.confirmed_runtime_settings = Some(acknowledgement.snapshot.clone());
+
+    let persisted_by_worker = matches!(
+        acknowledgement.outcome,
+        crate::core::context_policy::RuntimeSettingOutcome::Applied
+            | crate::core::context_policy::RuntimeSettingOutcome::Degraded
+    );
+    if persisted_by_worker {
+        state.requested_runtime_settings = Some(acknowledgement.snapshot.requested.clone());
+    } else if matches!(
+        state.runtime_settings_persistence.as_ref(),
+        Some(RuntimeSettingsPersistence::Pending { ui_revision: pending_revision })
+            if *pending_revision == ui_revision
+    ) {
+        // Rejected, failed, and superseded mutations never start persistence. Do not leave a
+        // local "Pending" marker that could be mistaken for an outstanding file write.
+        state.runtime_settings_persistence = None;
+    }
+    if ui_revision >= newest_ack_revision {
+        state.last_runtime_settings_ack = Some(acknowledgement.clone());
+    }
+
+    let active_context =
+        crate::core::context_policy::format_context_window(active.context_policy.effective_tokens);
+    let detail = acknowledgement
+        .reason
+        .as_deref()
+        .or(active.context_policy.reason.as_deref());
+    state.current_status_line = Some(match acknowledgement.outcome {
+        crate::core::context_policy::RuntimeSettingOutcome::Applied => {
+            format!("Runtime settings applied · context {}", active_context)
+        }
+        crate::core::context_policy::RuntimeSettingOutcome::Degraded => format!(
+            "Runtime settings applied with reduced context {}{}",
+            active_context,
+            detail
+                .map(|reason| format!(" · {}", reason))
+                .unwrap_or_default()
+        ),
+        crate::core::context_policy::RuntimeSettingOutcome::Rejected
+        | crate::core::context_policy::RuntimeSettingOutcome::Failed => format!(
+            "Runtime settings not applied{}",
+            detail
+                .map(|reason| format!(" · {}", reason))
+                .unwrap_or_default()
+        ),
+        crate::core::context_policy::RuntimeSettingOutcome::Superseded => {
+            "Runtime settings request superseded by a newer update.".to_string()
+        }
+    });
+}
+
+fn apply_runtime_settings_persistence(
+    state: &mut ChatState,
+    ui_revision: u64,
+    error: Option<String>,
+) {
+    let newest_known_revision = state
+        .last_runtime_settings_ack
+        .as_ref()
+        .map(|ack| ack.ui_revision)
+        .unwrap_or(0)
+        .max(
+            state
+                .pending_runtime_settings
+                .back()
+                .map(|mutation| mutation.ui_revision)
+                .unwrap_or(0),
+        );
+    if ui_revision == 0 || ui_revision < newest_known_revision {
+        return;
+    }
+
+    state.runtime_settings_persistence = Some(match error {
+        Some(reason) => RuntimeSettingsPersistence::Failed {
+            ui_revision,
+            reason,
+        },
+        None => RuntimeSettingsPersistence::Saved { ui_revision },
+    });
+}
+
 use crate::ui::utils::transcript::append_transcript_event;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -771,29 +930,18 @@ pub async fn handle_stream_update(
                 if let Some(model) = remembered_model
                     .filter(|model| models.iter().any(|m| m.id == *model && m.provider == pid))
                 {
-                    state.current_model = model.clone();
                     let provider_id = state
                         .model_provider_map
                         .get(&model)
                         .cloned()
                         .or_else(|| Some(pid.clone()));
-                    state.current_provider_id = provider_id.clone();
-                    let _ = agent_tx
-                        .send(AgentRequest::SetModel {
-                            model: model.clone(),
-                            provider_id,
-                        })
-                        .await;
-                    emit_status_text(
+                    let _ = crate::ui::events::input::request_runtime_model_change(
                         state,
-                        0,
-                        &i18n::t(
-                            "ui.status.model.changed",
-                            "Status: model switched to {model}",
-                            "Status: model switched to {model}",
-                        )
-                        .replace("{model}", &state.current_model),
-                    );
+                        model,
+                        provider_id,
+                        agent_tx,
+                    )
+                    .await;
                 } else {
                     state.current_provider_id = Some(pid.clone());
                     state.current_model.clear();
@@ -941,6 +1089,14 @@ pub async fn handle_stream_update(
             state.configured_providers = ids.into_iter().collect();
         }
         StreamMessage::CurrentModelChanged { model, provider_id } => {
+            // Legacy startup/provider-listing notifications cannot overwrite a newer
+            // revisioned UI request or the worker-confirmed runtime snapshot.
+            if state.next_runtime_settings_revision > 1
+                || !state.pending_runtime_settings.is_empty()
+                || state.confirmed_runtime_settings.is_some()
+            {
+                return Ok(());
+            }
             state.current_model = model;
             state.current_provider_id =
                 provider_id.or_else(|| state.model_provider_map.get(&state.current_model).cloned());
@@ -950,6 +1106,12 @@ pub async fn handle_stream_update(
                 .iter()
                 .find(|m| m.id == state.current_model)
                 .and_then(|m| m.supports_thinking);
+        }
+        StreamMessage::RuntimeSettingsAcknowledged(acknowledgement) => {
+            apply_runtime_settings_acknowledgement(state, acknowledgement);
+        }
+        StreamMessage::RuntimeSettingsPersistenceCompleted { ui_revision, error } => {
+            apply_runtime_settings_persistence(state, ui_revision, error);
         }
         StreamMessage::ApprovalModeChanged { mode } => {
             state.approval_mode = mode.clone();
@@ -2106,6 +2268,564 @@ mod tests {
                 "description": "scan",
             })),
         }
+    }
+
+    fn runtime_acknowledgement(
+        ui_revision: u64,
+        outcome: crate::core::context_policy::RuntimeSettingOutcome,
+        requested_context: crate::core::context_policy::ContextWindowSelection,
+        effective_tokens: u32,
+    ) -> RuntimeSettingsAcknowledgement {
+        use crate::core::context_policy::{ContextWindowSource, ResolvedContextPolicy};
+        use crate::runtime::messages::{
+            ActiveRuntimeSettings, RequestedRuntimeSettings, RuntimeModelSelection,
+            RuntimeSettingsSnapshot,
+        };
+
+        let policy = ResolvedContextPolicy {
+            selection: requested_context,
+            nominal_tokens: requested_context.as_fixed().unwrap_or(effective_tokens),
+            effective_tokens,
+            source: ContextWindowSource::FixedSelection,
+            outcome,
+            reason: (outcome == crate::core::context_policy::RuntimeSettingOutcome::Degraded)
+                .then(|| "provider cap".to_string()),
+            pre_send_threshold: effective_tokens * 80 / 100,
+            budget_nudge_threshold: effective_tokens * 90 / 100,
+            compact_max_tokens: effective_tokens * 75 / 100,
+            compact_target_tokens: effective_tokens / 2,
+        };
+        let model = RuntimeModelSelection {
+            model: "test-model".to_string(),
+            provider_id: Some("test-provider".to_string()),
+        };
+        RuntimeSettingsAcknowledgement {
+            ui_revision,
+            outcome,
+            snapshot: RuntimeSettingsSnapshot {
+                runtime_revision: ui_revision,
+                requested: RequestedRuntimeSettings {
+                    model: model.clone(),
+                    context_window: requested_context,
+                    thinking_effort: crate::types::ThinkingEffort::Medium,
+                },
+                active: ActiveRuntimeSettings {
+                    model,
+                    context_policy: policy,
+                    thinking_effort: crate::types::ThinkingEffort::Medium,
+                },
+            },
+            reason: None,
+        }
+    }
+
+    fn confirmed_context_tokens(state: &ChatState) -> u32 {
+        state
+            .confirmed_runtime_settings
+            .as_ref()
+            .expect("confirmed runtime settings")
+            .active
+            .context_policy
+            .effective_tokens
+    }
+
+    #[tokio::test]
+    async fn initial_runtime_acknowledgement_hydrates_active_settings() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let acknowledgement = runtime_acknowledgement(
+            0,
+            crate::core::context_policy::RuntimeSettingOutcome::Applied,
+            crate::core::context_policy::ContextWindowSelection::Fixed(1_000_000),
+            1_000_000,
+        );
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::RuntimeSettingsAcknowledged(acknowledgement),
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.current_model, "test-model");
+        assert_eq!(state.thinking_effort, crate::types::ThinkingEffort::Medium);
+        assert_eq!(
+            state
+                .confirmed_runtime_settings
+                .as_ref()
+                .expect("initial snapshot")
+                .active
+                .context_policy
+                .effective_tokens,
+            1_000_000
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_providers_update_metadata_without_overwriting_confirmed_runtime_state() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let acknowledgement = runtime_acknowledgement(
+            0,
+            crate::core::context_policy::RuntimeSettingOutcome::Applied,
+            crate::core::context_policy::ContextWindowSelection::Fixed(1_000_000),
+            1_000_000,
+        );
+        handle_stream_update(
+            &mut state,
+            StreamMessage::RuntimeSettingsAcknowledged(acknowledgement),
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        let confirmed = state.confirmed_runtime_settings.clone();
+        let model = state.current_model.clone();
+        let provider = state.current_provider_id.clone();
+        let effort = state.thinking_effort.clone();
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::ConfiguredProviders(vec!["disk-provider".to_string()]),
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+
+        assert!(state.configured_providers.contains("disk-provider"));
+        assert_eq!(state.current_model, model);
+        assert_eq!(state.current_provider_id, provider);
+        assert_eq!(state.thinking_effort, effort);
+        assert_eq!(state.confirmed_runtime_settings, confirmed);
+    }
+
+    #[test]
+    fn acknowledgement_keeps_newer_pending_intent() {
+        let mut state = ChatState::new();
+        state.begin_runtime_settings_update(
+            None,
+            Some(crate::core::context_policy::ContextWindowSelection::Fixed(
+                1_000_000,
+            )),
+            None,
+        );
+        state.begin_runtime_settings_update(
+            None,
+            Some(crate::core::context_policy::ContextWindowSelection::Fixed(
+                2_000_000,
+            )),
+            None,
+        );
+
+        apply_runtime_settings_acknowledgement(
+            &mut state,
+            runtime_acknowledgement(
+                1,
+                crate::core::context_policy::RuntimeSettingOutcome::Applied,
+                crate::core::context_policy::ContextWindowSelection::Fixed(1_000_000),
+                1_000_000,
+            ),
+        );
+
+        assert_eq!(state.pending_runtime_settings.len(), 1);
+        assert_eq!(
+            state
+                .requested_runtime_settings
+                .as_ref()
+                .expect("latest requested intent")
+                .context_window,
+            crate::core::context_policy::ContextWindowSelection::Fixed(2_000_000)
+        );
+        assert!(state.confirmed_runtime_settings.is_none());
+    }
+
+    #[test]
+    fn rejected_acknowledgement_preserves_requested_intent_and_active_snapshot() {
+        let mut state = ChatState::new();
+        apply_runtime_settings_acknowledgement(
+            &mut state,
+            runtime_acknowledgement(
+                0,
+                crate::core::context_policy::RuntimeSettingOutcome::Applied,
+                crate::core::context_policy::ContextWindowSelection::Fixed(200_000),
+                200_000,
+            ),
+        );
+        let mutation = state.begin_runtime_settings_update(
+            None,
+            Some(crate::core::context_policy::ContextWindowSelection::Fixed(
+                2_000_000,
+            )),
+            None,
+        );
+        state.runtime_settings_persistence = Some(RuntimeSettingsPersistence::Pending {
+            ui_revision: mutation.ui_revision,
+        });
+
+        apply_runtime_settings_acknowledgement(
+            &mut state,
+            runtime_acknowledgement(
+                mutation.ui_revision,
+                crate::core::context_policy::RuntimeSettingOutcome::Rejected,
+                crate::core::context_policy::ContextWindowSelection::Fixed(200_000),
+                200_000,
+            ),
+        );
+
+        assert!(state.pending_runtime_settings.is_empty());
+        assert_eq!(
+            state
+                .requested_runtime_settings
+                .as_ref()
+                .expect("preserved requested intent")
+                .context_window,
+            crate::core::context_policy::ContextWindowSelection::Fixed(2_000_000)
+        );
+        assert_eq!(confirmed_context_tokens(&state), 200_000);
+        assert!(state.runtime_settings_persistence.is_none());
+    }
+
+    #[test]
+    fn degraded_acknowledgement_preserves_requested_capacity_and_active_limit() {
+        let mut state = ChatState::new();
+        let mutation = state.begin_runtime_settings_update(
+            None,
+            Some(crate::core::context_policy::ContextWindowSelection::Fixed(
+                2_000_000,
+            )),
+            None,
+        );
+
+        apply_runtime_settings_acknowledgement(
+            &mut state,
+            runtime_acknowledgement(
+                mutation.ui_revision,
+                crate::core::context_policy::RuntimeSettingOutcome::Degraded,
+                crate::core::context_policy::ContextWindowSelection::Fixed(2_000_000),
+                1_000_000,
+            ),
+        );
+
+        let snapshot = state
+            .confirmed_runtime_settings
+            .as_ref()
+            .expect("degraded active snapshot");
+        assert_eq!(
+            snapshot.requested.context_window.as_fixed(),
+            Some(2_000_000)
+        );
+        assert_eq!(snapshot.active.context_policy.effective_tokens, 1_000_000);
+        assert_eq!(
+            state
+                .requested_runtime_settings
+                .as_ref()
+                .expect("requested state")
+                .context_window,
+            crate::core::context_policy::ContextWindowSelection::Fixed(2_000_000)
+        );
+        assert_eq!(
+            state
+                .last_runtime_settings_ack
+                .as_ref()
+                .map(|ack| ack.outcome),
+            Some(crate::core::context_policy::RuntimeSettingOutcome::Degraded)
+        );
+    }
+
+    #[test]
+    fn stale_persistence_and_legacy_acknowledgement_cannot_overwrite_revisioned_state() {
+        let mut state = ChatState::new();
+        let mutation = state.begin_runtime_settings_update(
+            None,
+            Some(crate::core::context_policy::ContextWindowSelection::Fixed(
+                1_000_000,
+            )),
+            None,
+        );
+        apply_runtime_settings_acknowledgement(
+            &mut state,
+            runtime_acknowledgement(
+                mutation.ui_revision,
+                crate::core::context_policy::RuntimeSettingOutcome::Applied,
+                crate::core::context_policy::ContextWindowSelection::Fixed(1_000_000),
+                1_000_000,
+            ),
+        );
+        apply_runtime_settings_persistence(&mut state, mutation.ui_revision, None);
+        assert!(matches!(
+            state.runtime_settings_persistence,
+            Some(RuntimeSettingsPersistence::Saved { ui_revision: 1 })
+        ));
+
+        apply_runtime_settings_persistence(&mut state, 0, Some("old failure".to_string()));
+        apply_runtime_settings_acknowledgement(
+            &mut state,
+            runtime_acknowledgement(
+                0,
+                crate::core::context_policy::RuntimeSettingOutcome::Applied,
+                crate::core::context_policy::ContextWindowSelection::Fixed(200_000),
+                200_000,
+            ),
+        );
+
+        assert_eq!(confirmed_context_tokens(&state), 1_000_000);
+        assert!(matches!(
+            state.runtime_settings_persistence,
+            Some(RuntimeSettingsPersistence::Saved { ui_revision: 1 })
+        ));
+    }
+
+    #[test]
+    fn persistence_result_does_not_change_confirmed_runtime_settings() {
+        let mut state = ChatState::new();
+        let mutation = state.begin_runtime_settings_update(
+            None,
+            Some(crate::core::context_policy::ContextWindowSelection::Fixed(
+                1_000_000,
+            )),
+            None,
+        );
+        apply_runtime_settings_acknowledgement(
+            &mut state,
+            runtime_acknowledgement(
+                mutation.ui_revision,
+                crate::core::context_policy::RuntimeSettingOutcome::Applied,
+                crate::core::context_policy::ContextWindowSelection::Fixed(1_000_000),
+                1_000_000,
+            ),
+        );
+        let snapshot = state.confirmed_runtime_settings.clone();
+
+        apply_runtime_settings_persistence(
+            &mut state,
+            mutation.ui_revision,
+            Some("disk full".to_string()),
+        );
+
+        assert_eq!(state.confirmed_runtime_settings, snapshot);
+        assert!(matches!(
+            state.runtime_settings_persistence,
+            Some(RuntimeSettingsPersistence::Failed { ui_revision: 1, ref reason })
+                if reason == "disk full"
+        ));
+    }
+
+    #[test]
+    fn fast_transition_commits_only_on_matching_successful_acknowledgement() {
+        use crate::runtime::messages::RuntimeModelSelection;
+        use crate::ui::state::store::PendingFastModeTransition;
+
+        let mut state = ChatState::new();
+        let mutation = state.begin_runtime_settings_update_with_persistence(
+            Some(RuntimeModelSelection {
+                model: "fast-model".to_string(),
+                provider_id: Some("fast-provider".to_string()),
+            }),
+            None,
+            None,
+            crate::runtime::messages::RuntimeSettingsPersistencePolicy::SessionOnly,
+        );
+        state.pending_fast_mode_transition = Some(PendingFastModeTransition {
+            ui_revision: mutation.ui_revision,
+            enabled: true,
+            previous_model: Some(RuntimeModelSelection {
+                model: "original-model".to_string(),
+                provider_id: Some("original-provider".to_string()),
+            }),
+            target_model: RuntimeModelSelection {
+                model: "fast-model".to_string(),
+                provider_id: Some("fast-provider".to_string()),
+            },
+        });
+
+        apply_runtime_settings_acknowledgement(
+            &mut state,
+            runtime_acknowledgement(
+                mutation.ui_revision,
+                crate::core::context_policy::RuntimeSettingOutcome::Applied,
+                crate::core::context_policy::ContextWindowSelection::Fixed(200_000),
+                200_000,
+            ),
+        );
+
+        assert!(state.fast_mode);
+        assert_eq!(
+            state.fast_mode_prev_model,
+            Some(RuntimeModelSelection {
+                model: "original-model".to_string(),
+                provider_id: Some("original-provider".to_string()),
+            })
+        );
+        assert!(state.pending_fast_mode_transition.is_none());
+    }
+
+    #[test]
+    fn superseded_fast_transition_clears_only_its_transition_and_keeps_newer_intent() {
+        use crate::runtime::messages::RuntimeModelSelection;
+        use crate::ui::state::store::PendingFastModeTransition;
+
+        let mut state = ChatState::new();
+        let fast = state.begin_runtime_settings_update_with_persistence(
+            Some(RuntimeModelSelection {
+                model: "fast-model".to_string(),
+                provider_id: Some("fast-provider".to_string()),
+            }),
+            None,
+            None,
+            crate::runtime::messages::RuntimeSettingsPersistencePolicy::SessionOnly,
+        );
+        state.pending_fast_mode_transition = Some(PendingFastModeTransition {
+            ui_revision: fast.ui_revision,
+            enabled: true,
+            previous_model: Some(RuntimeModelSelection {
+                model: "original-model".to_string(),
+                provider_id: Some("original-provider".to_string()),
+            }),
+            target_model: RuntimeModelSelection {
+                model: "fast-model".to_string(),
+                provider_id: Some("fast-provider".to_string()),
+            },
+        });
+        let newer = state.begin_runtime_settings_update_with_persistence(
+            None,
+            Some(crate::core::context_policy::ContextWindowSelection::Fixed(
+                1_000_000,
+            )),
+            None,
+            crate::runtime::messages::RuntimeSettingsPersistencePolicy::SessionOnly,
+        );
+
+        apply_runtime_settings_acknowledgement(
+            &mut state,
+            runtime_acknowledgement(
+                fast.ui_revision,
+                crate::core::context_policy::RuntimeSettingOutcome::Superseded,
+                crate::core::context_policy::ContextWindowSelection::Fixed(200_000),
+                200_000,
+            ),
+        );
+
+        assert!(!state.fast_mode);
+        assert!(state.fast_mode_prev_model.is_none());
+        assert!(state.pending_fast_mode_transition.is_none());
+        assert_eq!(state.pending_runtime_settings.len(), 1);
+        assert_eq!(
+            state
+                .pending_runtime_settings
+                .front()
+                .map(|mutation| mutation.ui_revision),
+            Some(newer.ui_revision)
+        );
+        assert_eq!(
+            state
+                .requested_runtime_settings
+                .as_ref()
+                .expect("newer requested intent")
+                .context_window,
+            crate::core::context_policy::ContextWindowSelection::Fixed(1_000_000)
+        );
+        assert!(state.confirmed_runtime_settings.is_none());
+    }
+
+    #[test]
+    fn failed_fast_transition_keeps_existing_fast_mode_and_restore_target() {
+        use crate::runtime::messages::RuntimeModelSelection;
+        use crate::ui::state::store::PendingFastModeTransition;
+
+        let mut state = ChatState::new();
+        state.fast_mode = true;
+        state.fast_mode_prev_model = Some(RuntimeModelSelection {
+            model: "original-model".to_string(),
+            provider_id: Some("original-provider".to_string()),
+        });
+        let mutation = state.begin_runtime_settings_update_with_persistence(
+            Some(RuntimeModelSelection {
+                model: "new-fast-model".to_string(),
+                provider_id: Some("fast-provider".to_string()),
+            }),
+            None,
+            None,
+            crate::runtime::messages::RuntimeSettingsPersistencePolicy::SessionOnly,
+        );
+        state.pending_fast_mode_transition = Some(PendingFastModeTransition {
+            ui_revision: mutation.ui_revision,
+            enabled: false,
+            previous_model: None,
+            target_model: RuntimeModelSelection {
+                model: "original-model".to_string(),
+                provider_id: Some("original-provider".to_string()),
+            },
+        });
+
+        apply_runtime_settings_acknowledgement(
+            &mut state,
+            runtime_acknowledgement(
+                mutation.ui_revision,
+                crate::core::context_policy::RuntimeSettingOutcome::Failed,
+                crate::core::context_policy::ContextWindowSelection::Fixed(200_000),
+                200_000,
+            ),
+        );
+
+        assert!(state.fast_mode);
+        assert_eq!(
+            state.fast_mode_prev_model,
+            Some(RuntimeModelSelection {
+                model: "original-model".to_string(),
+                provider_id: Some("original-provider".to_string()),
+            })
+        );
+        assert!(state.pending_fast_mode_transition.is_none());
+    }
+
+    #[test]
+    fn stale_acknowledgement_cannot_commit_a_fast_transition() {
+        use crate::runtime::messages::RuntimeModelSelection;
+        use crate::ui::state::store::PendingFastModeTransition;
+
+        let mut state = ChatState::new();
+        let newer = state.begin_runtime_settings_update_with_persistence(
+            None,
+            Some(crate::core::context_policy::ContextWindowSelection::Fixed(
+                1_000_000,
+            )),
+            None,
+            crate::runtime::messages::RuntimeSettingsPersistencePolicy::SessionOnly,
+        );
+        state.pending_fast_mode_transition = Some(PendingFastModeTransition {
+            ui_revision: newer.ui_revision,
+            enabled: true,
+            previous_model: None,
+            target_model: RuntimeModelSelection {
+                model: "fast-model".to_string(),
+                provider_id: Some("fast-provider".to_string()),
+            },
+        });
+        state.last_runtime_settings_ack = Some(runtime_acknowledgement(
+            newer.ui_revision,
+            crate::core::context_policy::RuntimeSettingOutcome::Applied,
+            crate::core::context_policy::ContextWindowSelection::Fixed(200_000),
+            200_000,
+        ));
+
+        apply_runtime_settings_acknowledgement(
+            &mut state,
+            runtime_acknowledgement(
+                newer.ui_revision.saturating_sub(1),
+                crate::core::context_policy::RuntimeSettingOutcome::Applied,
+                crate::core::context_policy::ContextWindowSelection::Fixed(200_000),
+                200_000,
+            ),
+        );
+
+        assert!(!state.fast_mode);
+        assert_eq!(
+            state
+                .pending_fast_mode_transition
+                .as_ref()
+                .map(|transition| transition.ui_revision),
+            Some(newer.ui_revision)
+        );
     }
 
     #[test]

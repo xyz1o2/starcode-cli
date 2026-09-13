@@ -56,8 +56,10 @@ pub enum PaletteAction {
     // New actions
     SetModel(String),
     SetAgentMode(String),
-    SetThinkingEffort(String),
-    SetContextWindow(String),
+    SetThinkingEffort(crate::types::ThinkingEffort),
+    SetContextWindow(crate::core::context_policy::ContextWindowSelection),
+    /// 打开精确 context capacity 的输入框；解析由 ContextWindowSelection 共用实现负责。
+    InputContextWindow,
     SetTheme(String),
     SetOutputStyle(String),
     ShowLogSelector,

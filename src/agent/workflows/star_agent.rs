@@ -2,8 +2,15 @@ use crate::agent::messaging::queue::AsyncMessageQueue;
 use crate::agent::messaging::AgentEvent;
 use crate::agent::Agent;
 use crate::core::config::Config;
+use crate::core::context_policy::{
+    ContextWindowEvidence, ContextWindowSelection, ResolvedContextPolicy, RuntimeSettingOutcome,
+};
 use crate::core::state::{FileSnapshot, ReadFileState};
 use crate::llm::client::StarClient;
+use crate::runtime::messages::{
+    ActiveRuntimeSettings, RequestedRuntimeSettings, RuntimeModelSelection,
+    RuntimeSettingsAcknowledgement, RuntimeSettingsMutation, RuntimeSettingsSnapshot,
+};
 use crate::types::ApprovalMode;
 use crate::types::StarToolCall;
 use crate::types::{
@@ -19,6 +26,16 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::Notify;
 
+/// 当前会话在下一条逻辑用户回合要冻结的运行时设置。
+///
+/// 只由 `StarAgent` 持有：长期 `inner` 和每轮新建的 `Agent` 都从这里取一致快照，
+/// 所以流式工具循环期间到达的变更绝不会改变已经开始的请求。
+#[derive(Clone, Debug)]
+pub struct TurnRuntimeSnapshot {
+    pub context_policy: ResolvedContextPolicy,
+    pub thinking_effort: crate::types::ThinkingEffort,
+}
+
 pub struct StarAgent {
     inner: Agent,
     abort_flag: Arc<AtomicBool>,
@@ -28,6 +45,14 @@ pub struct StarAgent {
     is_mcp_initialized: Arc<AtomicBool>,
     steering_queue: Option<Arc<AsyncMessageQueue<(u64, String)>>>,
     steering_signal: Option<Arc<Notify>>,
+    /// 最近一次被用户请求的值；即使 provider 将实际容量降级，也不能改写它。
+    requested_runtime_settings: RequestedRuntimeSettings,
+    /// 当前已经安装到长期 inner agent、可供下一轮使用的确认值。
+    active_runtime_settings: ActiveRuntimeSettings,
+    /// worker 自己的状态版本号；不依赖 UI revision 的连续性。
+    runtime_settings_revision: u64,
+    /// 下一条用户回合要复制进 fresh Agent 的不可变设置快照。
+    turn_runtime_snapshot: TurnRuntimeSnapshot,
 }
 
 impl StarAgent {
@@ -74,8 +99,36 @@ impl StarAgent {
         let initial_mode = Self::initial_approval_mode(config.as_ref());
         let abort_flag = Arc::new(AtomicBool::new(false));
 
+        let initial_context_policy = ResolvedContextPolicy::from_evidence(
+            config.configured_context_window_selection(),
+            Self::context_window_evidence_for(&client, None),
+        );
+        let initial_model = RuntimeModelSelection {
+            model: client.model.clone(),
+            provider_id: client.provider_id.clone(),
+        };
+        let initial_thinking_effort = crate::llm::thinking::current_effort();
+        let requested_runtime_settings = RequestedRuntimeSettings {
+            model: initial_model.clone(),
+            context_window: initial_context_policy.selection,
+            thinking_effort: initial_thinking_effort.clone(),
+        };
+        let active_runtime_settings = ActiveRuntimeSettings {
+            model: initial_model,
+            context_policy: initial_context_policy.clone(),
+            thinking_effort: initial_thinking_effort.clone(),
+        };
+        let turn_runtime_snapshot = TurnRuntimeSnapshot {
+            context_policy: initial_context_policy.clone(),
+            thinking_effort: initial_thinking_effort,
+        };
+
         crate::utils::logging::append_agent_log_line("[INIT] Creating Agent::new...");
         let mut inner = Agent::new(client.clone(), config);
+        inner.apply_runtime_snapshot(
+            initial_context_policy,
+            turn_runtime_snapshot.thinking_effort.clone(),
+        );
         crate::utils::logging::append_agent_log_line("[INIT] Agent::new completed");
 
         inner.set_abort_flag(abort_flag.clone());
@@ -95,9 +148,208 @@ impl StarAgent {
             is_mcp_initialized: Arc::new(AtomicBool::new(false)),
             steering_queue: None,
             steering_signal: None,
+            requested_runtime_settings,
+            active_runtime_settings,
+            runtime_settings_revision: 0,
+            turn_runtime_snapshot,
         })
     }
 
+    fn context_window_evidence_for(
+        client: &StarClient,
+        configured_default: Option<u32>,
+    ) -> ContextWindowEvidence {
+        let provider_id = client.provider_id.as_deref();
+        let model = client.get_current_model();
+        ContextWindowEvidence {
+            provider_capability: crate::agent::model_catalog::get_cached_context_window(
+                provider_id,
+                model,
+            ),
+            known_model_capability: None,
+            environment_default: std::env::var("STAR_CONTEXT_WINDOW")
+                .ok()
+                .and_then(|value| crate::core::context_policy::parse_context_window(&value).ok()),
+            configured_default,
+            provider_safe_cap: crate::agent::model_catalog::get_provider_safe_context_cap(
+                provider_id,
+                model,
+            ),
+        }
+    }
+
+    fn current_runtime_model_selection(&self) -> RuntimeModelSelection {
+        RuntimeModelSelection {
+            model: self.client.model.clone(),
+            provider_id: self.client.provider_id.clone(),
+        }
+    }
+
+    fn runtime_settings_snapshot(&self) -> RuntimeSettingsSnapshot {
+        RuntimeSettingsSnapshot {
+            runtime_revision: self.runtime_settings_revision,
+            requested: self.requested_runtime_settings.clone(),
+            active: self.active_runtime_settings.clone(),
+        }
+    }
+
+    /// 返回当前 session 的完整初始快照，使 UI 不必根据配置、环境或模型名自行推断。
+    pub fn initial_runtime_settings_acknowledgement(&self) -> RuntimeSettingsAcknowledgement {
+        RuntimeSettingsAcknowledgement {
+            ui_revision: RuntimeSettingsMutation::LEGACY_UI_REVISION,
+            outcome: self.active_runtime_settings.context_policy.outcome,
+            snapshot: self.runtime_settings_snapshot(),
+            reason: self.active_runtime_settings.context_policy.reason.clone(),
+        }
+    }
+
+    /// 为已被后续排队 mutation 完全覆盖的 UI 请求构造终态确认。
+    /// 它只报告当前 worker 状态，不能改变下一轮将使用的设置或版本号。
+    pub(crate) fn superseded_runtime_settings_acknowledgement(
+        &self,
+        ui_revision: u64,
+    ) -> RuntimeSettingsAcknowledgement {
+        RuntimeSettingsAcknowledgement {
+            ui_revision,
+            outcome: RuntimeSettingOutcome::Superseded,
+            snapshot: self.runtime_settings_snapshot(),
+            reason: Some("Superseded by later queued runtime settings updates.".to_string()),
+        }
+    }
+
+    /// 将一条 UI revision 变更原子地安装到下一条逻辑用户回合。
+    ///
+    /// 当前回合已经持有独立的 fresh Agent，因此此方法只改变长寿命 inner 和
+    /// `turn_runtime_snapshot`；不会中途影响正在执行的模型或工具请求。
+    pub async fn apply_runtime_settings(
+        &mut self,
+        mutation: RuntimeSettingsMutation,
+    ) -> RuntimeSettingsAcknowledgement {
+        if !mutation.has_changes() {
+            return RuntimeSettingsAcknowledgement {
+                ui_revision: mutation.ui_revision,
+                outcome: RuntimeSettingOutcome::Rejected,
+                snapshot: self.runtime_settings_snapshot(),
+                reason: Some("Runtime settings update contained no changes.".to_string()),
+            };
+        }
+        if matches!(mutation.context_window, Some(selection) if !selection.is_valid()) {
+            return RuntimeSettingsAcknowledgement {
+                ui_revision: mutation.ui_revision,
+                outcome: RuntimeSettingOutcome::Rejected,
+                snapshot: self.runtime_settings_snapshot(),
+                reason: Some("Context window size must be greater than zero.".to_string()),
+            };
+        }
+
+        let prior_requested = self.requested_runtime_settings.clone();
+        let mut requested = prior_requested.clone();
+        if let Some(model) = mutation.model.clone() {
+            requested.model = model;
+        }
+        if let Some(context_window) = mutation.context_window {
+            requested.context_window = context_window;
+        }
+        if let Some(thinking_effort) = mutation.thinking_effort.clone() {
+            requested.thinking_effort = thinking_effort;
+        }
+
+        if let Some(model) = mutation.model.as_ref() {
+            if let Err(reason) = self
+                .apply_model_selection(&model.model, model.provider_id.as_deref())
+                .await
+            {
+                return RuntimeSettingsAcknowledgement {
+                    ui_revision: mutation.ui_revision,
+                    outcome: RuntimeSettingOutcome::Failed,
+                    snapshot: self.runtime_settings_snapshot(),
+                    reason: Some(reason),
+                };
+            }
+        }
+
+        let policy = ResolvedContextPolicy::from_evidence(
+            requested.context_window,
+            Self::context_window_evidence_for(
+                &self.client,
+                self.inner
+                    .config
+                    .configured_context_window_selection()
+                    .as_fixed(),
+            ),
+        );
+        let active_model = self.current_runtime_model_selection();
+        self.inner
+            .apply_runtime_snapshot(policy.clone(), requested.thinking_effort.clone());
+
+        self.requested_runtime_settings = requested;
+        self.active_runtime_settings = ActiveRuntimeSettings {
+            model: active_model,
+            context_policy: policy.clone(),
+            thinking_effort: self.requested_runtime_settings.thinking_effort.clone(),
+        };
+        self.turn_runtime_snapshot = TurnRuntimeSnapshot {
+            context_policy: policy.clone(),
+            thinking_effort: self.requested_runtime_settings.thinking_effort.clone(),
+        };
+        self.runtime_settings_revision = self.runtime_settings_revision.saturating_add(1);
+
+        RuntimeSettingsAcknowledgement {
+            ui_revision: mutation.ui_revision,
+            outcome: policy.outcome,
+            snapshot: self.runtime_settings_snapshot(),
+            reason: policy.reason,
+        }
+    }
+
+    pub fn turn_runtime_snapshot(&self) -> TurnRuntimeSnapshot {
+        self.turn_runtime_snapshot.clone()
+    }
+
+    /// 解析并验证一个模型/provider 选择，然后同步长期 Agent 与外层 client。
+    /// 不能把未知 provider 静默降级为当前 provider，否则 acknowledgement 会谎报
+    /// 完整模型切换已经生效。
+    async fn apply_model_selection(
+        &mut self,
+        model: &str,
+        provider_id: Option<&str>,
+    ) -> Result<(), String> {
+        if model.trim().is_empty() {
+            return Err("Model name cannot be empty.".to_string());
+        }
+
+        if let Some(provider_id) = provider_id {
+            let store = crate::core::config::provider_store::ProviderStore::new();
+            let config = store.load().await.map_err(|error| {
+                format!(
+                    "Could not load provider '{}' configuration: {}",
+                    provider_id, error
+                )
+            })?;
+            let configured = config
+                .providers
+                .keys()
+                .any(|id| id.eq_ignore_ascii_case(provider_id));
+            let built_in =
+                crate::core::config::providers::get_provider_by_id(provider_id).is_some();
+            if !configured && !built_in {
+                return Err(format!("Provider '{}' is not configured.", provider_id));
+            }
+        }
+
+        self.set_model_with_provider(model, provider_id).await;
+        let active = self.current_runtime_model_selection();
+        if active.model != model || active.provider_id.as_deref() != provider_id {
+            return Err(format!(
+                "Provider/model transition did not activate '{}'.",
+                model
+            ));
+        }
+        Ok(())
+    }
+
+    /// 为兼容旧调用点立即应用模型选择；新的 UI 路径应使用
+    /// `apply_runtime_settings`，以便得到 revision acknowledgement。
     pub async fn set_model(&mut self, model: &str) {
         self.inner.set_model(model);
         self.client = self.inner.get_client();
@@ -147,6 +399,7 @@ impl StarAgent {
                 (url, key)
             } else {
                 self.inner.set_model(model);
+                self.client = self.inner.get_client();
                 return;
             };
 
@@ -167,6 +420,7 @@ impl StarAgent {
             self.client = self.inner.get_client();
         } else {
             self.inner.set_model(model);
+            self.client = self.inner.get_client();
         }
     }
 
@@ -807,6 +1061,63 @@ impl StarAgent {
 
     pub fn set_steering_signal(&mut self, signal: Arc<Notify>) {
         self.steering_signal = Some(signal);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn new_for_runtime_settings_test() -> Self {
+        let mut parameters = crate::core::config::ConfigParameters::default();
+        parameters.model = "test-model".to_string();
+        parameters.core_tools = Some(Vec::new());
+        parameters.mcp_enabled = Some(false);
+        parameters.enable_agents = Some(false);
+
+        let mut config = Config::new(parameters);
+        config
+            .initialize()
+            .await
+            .expect("runtime settings test config must initialize");
+
+        Self::new(
+            "test-api-key",
+            Some("test-model".to_string()),
+            Some("http://127.0.0.1:9".to_string()),
+            None,
+            None,
+            Some(Arc::new(config)),
+        )
+        .await
+        .expect("runtime settings test agent must initialize")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn superseded_acknowledgement_does_not_mutate_runtime_settings() {
+        let agent = StarAgent::new_for_runtime_settings_test().await;
+        let before = agent.runtime_settings_snapshot();
+        let before_turn = agent.turn_runtime_snapshot();
+
+        let acknowledgement = agent.superseded_runtime_settings_acknowledgement(42);
+
+        assert_eq!(acknowledgement.ui_revision, 42);
+        assert_eq!(acknowledgement.outcome, RuntimeSettingOutcome::Superseded);
+        assert_eq!(acknowledgement.snapshot, before);
+        assert_eq!(
+            acknowledgement.reason.as_deref(),
+            Some("Superseded by later queued runtime settings updates.")
+        );
+        assert_eq!(agent.runtime_settings_snapshot(), before);
+        assert_eq!(
+            agent.turn_runtime_snapshot().context_policy,
+            before_turn.context_policy
+        );
+        assert_eq!(
+            agent.turn_runtime_snapshot().thinking_effort,
+            before_turn.thinking_effort
+        );
     }
 }
 

@@ -109,9 +109,11 @@ pub async fn list_models_with_mode(
     // providers.json 只读一次：原来这里前后 load 了三四遍。
     let store = crate::core::config::provider_store::ProviderStore::new();
     let config = store.load().await.ok();
-    let current_provider_id = config
-        .as_ref()
-        .and_then(|c| c.active_provider_id.clone())
+    let current_provider_id = star_client
+        .provider_id
+        .clone()
+        .filter(|provider_id| !provider_id.trim().is_empty())
+        .or_else(|| config.as_ref().and_then(|c| c.active_provider_id.clone()))
         .unwrap_or_default();
 
     // 1. 便宜路径：先内存缓存，再磁盘缓存，命中就直接返回，一个网络请求都不发。
@@ -130,7 +132,10 @@ pub async fn list_models_with_mode(
 
         if let Some(hit) = crate::agent::model_cache::load(&current_provider_id) {
             // 顺手把内存缓存和上下文窗口缓存热起来，后面的状态栏/压缩逻辑都要用。
-            crate::agent::model_catalog::update_context_window_cache(&hit.models);
+            crate::agent::model_catalog::update_context_window_cache(
+                Some(current_provider_id.as_str()),
+                &hit.models,
+            );
             set_cached_models(current_provider_id.clone(), hit.models.clone());
             return Ok(ModelListResult {
                 models: hit.models,
@@ -215,7 +220,10 @@ pub async fn list_models_with_mode(
                     configured_models.len()
                 ));
                 for (model_id, _) in configured_models {
-                    if !models.iter().any(|m| m.id == *model_id) {
+                    if !models
+                        .iter()
+                        .any(|m| m.id == *model_id && m.provider == *pid)
+                    {
                         models.push(ModelInfo::new(model_id.clone(), pid.clone()));
                     }
                 }
@@ -296,7 +304,10 @@ pub async fn list_models_with_mode(
             for res in results {
                 if let Ok(Some(fetched_models)) = res {
                     for m in fetched_models {
-                        if !models.iter().any(|existing| existing.id == m.id) {
+                        if !models
+                            .iter()
+                            .any(|existing| existing.id == m.id && existing.provider == m.provider)
+                        {
                             models.push(m);
                         }
                     }
@@ -307,17 +318,30 @@ pub async fn list_models_with_mode(
 
     // 4. Ensure current model is in the list
     let current = star_client.model.clone();
-    if !models.iter().any(|m| m.id == current) && !current.is_empty() {
-        let provider = detect_provider_name(&star_client.base_url);
-        models.insert(0, ModelInfo::new(current, provider));
+    let provider_id = active_pid_for_list
+        .or_else(|| {
+            star_client
+                .provider_id
+                .clone()
+                .filter(|provider_id| !provider_id.trim().is_empty())
+        })
+        .unwrap_or_else(|| current_provider_id.clone());
+    let current_provider = if provider_id.is_empty() {
+        detect_provider_name(&star_client.base_url)
+    } else {
+        provider_id.clone()
+    };
+    if !models
+        .iter()
+        .any(|m| m.id == current && m.provider == current_provider)
+        && !current.is_empty()
+    {
+        models.insert(0, ModelInfo::new(current, current_provider));
     }
 
     // 5. Cache the result
-    //    上下文窗口缓存也在这里灌：状态栏和压缩逻辑读的是它
-    //    （`model_catalog::get_cached_context_window`），而唯一往里写的那条路径
-    //    `model_catalog::list_models_for_client` 没有任何调用方。
-    crate::agent::model_catalog::update_context_window_cache(&models);
-    let provider_id = active_pid_for_list.unwrap_or_else(|| current_provider_id.clone());
+    //    上下文窗口缓存也在这里灌：状态栏和压缩逻辑读的是它。
+    crate::agent::model_catalog::update_context_window_cache(Some(provider_id.as_str()), &models);
     if !models.is_empty() {
         set_cached_models(provider_id.clone(), models.clone());
         crate::agent::model_cache::save(&provider_id, &models);

@@ -16,106 +16,19 @@ fn sep() -> Span<'static> {
     Span::styled(SEP, Style::default().fg(Color::DarkGray))
 }
 
-/// Known context window sizes for popular models.
-/// Used when the API doesn't return context_window in /models.
-fn known_context_window(model: &str) -> Option<u32> {
-    let lower = model.to_lowercase();
-
-    // Gemini 1M+ context
-    if lower.contains("gemini-2.5-pro") || lower.contains("gemini-2.5-flash") {
-        return Some(1_048_576);
-    }
-    if lower.contains("gemini-2.0-flash") {
-        return Some(1_048_576);
-    }
-    if lower.contains("gemini-1.5-pro") || lower.contains("gemini-1.5-flash") {
-        return Some(1_048_576);
-    }
-    if lower.contains("gemini-pro") {
-        return Some(1_048_576);
-    }
-
-    // GPT-4.1 series — 1M context
-    if lower.contains("gpt-4.1") {
-        return Some(1_047_576);
-    }
-
-    // GPT-4o / GPT-4-turbo — 128k
-    if lower.contains("gpt-4o") || lower.contains("gpt-4-turbo") {
-        return Some(128_000);
-    }
-
-    // OpenAI reasoning models — 200k
-    if lower.starts_with("o1") || lower.starts_with("o3") || lower.starts_with("o4") {
-        return Some(200_000);
-    }
-
-    // Claude — 200k
-    if lower.contains("claude") {
-        return Some(200_000);
-    }
-
-    // DeepSeek — 128k
-    if lower.contains("deepseek") {
-        return Some(128_000);
-    }
-
-    // Qwen
-    if lower.contains("qwen-max") || lower.contains("qwen-plus") || lower.contains("qwen-turbo") {
-        return Some(131_072);
-    }
-    if lower.contains("qwen") {
-        return Some(131_072);
-    }
-
-    // Llama
-    if lower.contains("llama-4") {
-        return Some(1_048_576);
-    }
-    if lower.contains("llama") {
-        return Some(128_000);
-    }
-
-    // Mistral
-    if lower.contains("mistral-large") {
-        return Some(128_000);
-    }
-    if lower.contains("mistral") {
-        return Some(128_000);
-    }
-
-    // Grok
-    if lower.contains("grok") {
-        return Some(131_072);
-    }
-
-    None
+/// UI 只用 worker acknowledgement 中的 policy 计算 active context 比例；启动前不能
+/// 根据模型名、模型列表或环境变量猜测一个容量。
+fn confirmed_context_policy(
+    state: &ChatState,
+) -> Option<&crate::core::context_policy::ResolvedContextPolicy> {
+    state
+        .confirmed_runtime_settings
+        .as_ref()
+        .map(|snapshot| &snapshot.active.context_policy)
 }
 
-fn context_window_tokens(state: &ChatState) -> u32 {
-    // 0. User override takes highest priority
-    if let Some(override_val) = state.context_window_override {
-        return override_val;
-    }
-    // 1. 模型专用上下文窗口：从 API /models 缓存中查
-    if !state.current_model.is_empty() {
-        if let Some(ctx) =
-            crate::agent::model_catalog::get_cached_context_window(&state.current_model)
-        {
-            return ctx;
-        }
-    }
-    // 2. 按模型名匹配已知上下文窗口
-    if !state.current_model.is_empty() {
-        if let Some(ctx) = known_context_window(&state.current_model) {
-            return ctx;
-        }
-    }
-    // 3. 环境变量
-    std::env::var("STAR_CONTEXT_WINDOW")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(128_000u32)
+fn context_window_tokens(state: &ChatState) -> Option<u32> {
+    confirmed_context_policy(state).map(|policy| policy.effective_tokens)
 }
 
 /// Parse "ahead N" and "behind N" counts from a git status summary string.
@@ -839,23 +752,18 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
     ]
 }
 
-/// TokenWarning thresholds (percentage of context window used)
-const TOKEN_WARNING_THRESHOLD: f64 = 80.0; // Show warning
-const TOKEN_ERROR_THRESHOLD: f64 = 90.0; // Show error
-const AUTO_COMPACT_THRESHOLD: f64 = 92.0; // Auto-compact triggers
-
 /// Render a token usage warning line above the input area.
-/// Shows warnings when context window is getting full.
-/// Returns 0 or 1 lines.
+/// 仅在 worker 已确认真实 capacity 后显示上下文占用提醒。
 pub fn token_warning_line(state: &ChatState) -> Vec<ratatui::text::Line<'static>> {
+    let auto_compact_enabled = std::env::var("STAR_ENABLE_AUTO_COMPACT")
+        .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "off"))
+        .unwrap_or(true);
     let theme = state.theme_manager.current();
 
-    // Get current token usage
     let tokens = match &state.token_usage {
         Some(usage) if usage.prompt_tokens > 0 => usage.prompt_tokens,
         Some(usage) if usage.total_tokens > 0 => usage.total_tokens,
         _ => {
-            // Fallback: estimate from chat history
             let estimated: u32 = state
                 .chat_history
                 .iter()
@@ -872,31 +780,26 @@ pub fn token_warning_line(state: &ChatState) -> Vec<ratatui::text::Line<'static>
         }
     };
 
-    let ctx = context_window_tokens(state);
-    if ctx == 0 {
+    let Some(policy) = confirmed_context_policy(state) else {
+        return vec![];
+    };
+    let ctx = policy.effective_tokens;
+    if ctx == 0 || tokens < policy.pre_send_threshold {
         return vec![];
     }
 
     let pct_used = (tokens as f64 / ctx as f64) * 100.0;
     let pct_remaining = 100.0 - pct_used;
 
-    // Below warning threshold — no warning needed
-    if pct_used < TOKEN_WARNING_THRESHOLD {
-        return vec![];
-    }
-
-    // Check if auto-compact is enabled
-    let auto_compact_enabled = std::env::var("STAR_AUTO_COMPACT")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(true); // Default enabled
-
-    let (message, color) = if pct_used >= TOKEN_ERROR_THRESHOLD {
-        // Critical: context almost full
+    let (message, color) = if tokens >= policy.budget_nudge_threshold {
         if auto_compact_enabled {
             (
                 format!(
-                    "Context {:.0}% used · auto-compact will trigger at {:.0}%",
-                    pct_used, AUTO_COMPACT_THRESHOLD
+                    "Context {:.0}% used · compact target {}",
+                    pct_used,
+                    crate::core::context_policy::format_context_window(
+                        policy.compact_target_tokens
+                    )
                 ),
                 theme.error,
             )
@@ -909,22 +812,20 @@ pub fn token_warning_line(state: &ChatState) -> Vec<ratatui::text::Line<'static>
                 theme.error,
             )
         }
+    } else if auto_compact_enabled {
+        (
+            format!(
+                "Context {:.0}% used · compact begins near {}",
+                pct_used,
+                crate::core::context_policy::format_context_window(policy.compact_max_tokens)
+            ),
+            theme.warning,
+        )
     } else {
-        // Warning: getting close
-        if auto_compact_enabled {
-            (
-                format!(
-                    "{:.0}% until auto-compact",
-                    AUTO_COMPACT_THRESHOLD - pct_used
-                ),
-                theme.warning,
-            )
-        } else {
-            (
-                format!("Context {:.0}% used · consider running /compact", pct_used),
-                theme.warning,
-            )
-        }
+        (
+            format!("Context {:.0}% used · consider running /compact", pct_used),
+            theme.warning,
+        )
     };
 
     vec![ratatui::text::Line::from(vec![
@@ -1076,40 +977,53 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
                 } else {
                     usage.total_tokens
                 };
-                let ctx = context_window_tokens(state);
-                let pct = (tokens as f64 / ctx as f64) * 100.0;
+                if let Some(ctx) = context_window_tokens(state) {
+                    let pct = (tokens as f64 / ctx as f64) * 100.0;
 
-                let format_tok = |n: u32| -> String {
-                    if n >= 1_000_000 {
-                        format!("{:.1}M", n as f64 / 1_000_000.0)
-                    } else if n >= 1_000 {
-                        format!("{:.1}k", n as f64 / 1_000.0)
+                    let format_tok = |n: u32| -> String {
+                        if n >= 1_000_000 {
+                            format!("{:.1}M", n as f64 / 1_000_000.0)
+                        } else if n >= 1_000 {
+                            format!("{:.1}k", n as f64 / 1_000.0)
+                        } else {
+                            n.to_string()
+                        }
+                    };
+
+                    let token_label =
+                        format!("{}/{} ({:.1}%)", format_tok(tokens), format_tok(ctx), pct);
+
+                    let (token_color, bold) = if let Some(policy) = confirmed_context_policy(state)
+                    {
+                        if tokens >= policy.budget_nudge_threshold {
+                            (theme.error, true)
+                        } else if tokens >= policy.pre_send_threshold {
+                            (theme.error_shimmer, false)
+                        } else if tokens >= policy.compact_target_tokens {
+                            (theme.warning_shimmer, false)
+                        } else {
+                            (theme.warning, false)
+                        }
                     } else {
-                        n.to_string()
-                    }
-                };
-
-                let token_label =
-                    format!("{}/{} ({:.1}%)", format_tok(tokens), format_tok(ctx), pct);
-
-                let (token_color, bold) = if pct >= 90.0 {
-                    (theme.error, true)
-                } else if pct >= 75.0 {
-                    (theme.error_shimmer, false)
-                } else if pct >= 50.0 {
-                    (theme.warning_shimmer, false)
+                        (theme.inactive, false)
+                    };
+                    let icon_style = if bold {
+                        Style::default()
+                            .fg(token_color)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(token_color)
+                    };
+                    spans.push(Span::styled("⚡ ", icon_style));
+                    spans.push(Span::styled(token_label, Style::default().fg(token_color)));
                 } else {
-                    (theme.warning, false)
-                };
-                let icon_style = if bold {
-                    Style::default()
-                        .fg(token_color)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(token_color)
-                };
-                spans.push(Span::styled("⚡ ", icon_style));
-                spans.push(Span::styled(token_label, Style::default().fg(token_color)));
+                    let dim = theme.inactive;
+                    spans.push(Span::styled("⚡ ", Style::default().fg(dim)));
+                    spans.push(Span::styled(
+                        format_token_count(tokens),
+                        Style::default().fg(dim),
+                    ));
+                }
             }
             _ => {
                 // ── Fallback: 厂商未返回 usage 时，根据聊天历史估算 ──
@@ -1124,28 +1038,36 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
                     })
                     .sum();
                 if estimated > 0 {
-                    let ctx = context_window_tokens(state);
-                    let pct = (estimated as f64 / ctx as f64) * 100.0;
-                    let format_tok = |n: u32| -> String {
-                        if n >= 1_000_000 {
-                            format!("~{:.1}M", n as f64 / 1_000_000.0)
-                        } else if n >= 1_000 {
-                            format!("~{:.1}k", n as f64 / 1_000.0)
-                        } else {
-                            format!("~{}", n)
-                        }
-                    };
-                    let dim = theme.inactive;
-                    spans.push(Span::styled("⚡ ", Style::default().fg(dim)));
-                    spans.push(Span::styled(
-                        format!(
-                            "{}/{} ({:.1}%)",
-                            format_tok(estimated),
-                            format_tok(ctx),
-                            pct
-                        ),
-                        Style::default().fg(dim),
-                    ));
+                    if let Some(ctx) = context_window_tokens(state) {
+                        let pct = (estimated as f64 / ctx as f64) * 100.0;
+                        let format_tok = |n: u32| -> String {
+                            if n >= 1_000_000 {
+                                format!("~{:.1}M", n as f64 / 1_000_000.0)
+                            } else if n >= 1_000 {
+                                format!("~{:.1}k", n as f64 / 1_000.0)
+                            } else {
+                                format!("~{}", n)
+                            }
+                        };
+                        let dim = theme.inactive;
+                        spans.push(Span::styled("⚡ ", Style::default().fg(dim)));
+                        spans.push(Span::styled(
+                            format!(
+                                "{}/{} ({:.1}%)",
+                                format_tok(estimated),
+                                format_tok(ctx),
+                                pct
+                            ),
+                            Style::default().fg(dim),
+                        ));
+                    } else {
+                        let dim = theme.inactive;
+                        spans.push(Span::styled("⚡ ", Style::default().fg(dim)));
+                        spans.push(Span::styled(
+                            format!("~{}", format_token_count(estimated)),
+                            Style::default().fg(dim),
+                        ));
+                    }
                 } else {
                     let dim = theme.inactive;
                     spans.push(Span::styled("⚡ ", Style::default().fg(dim)));

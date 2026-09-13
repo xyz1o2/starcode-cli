@@ -52,17 +52,19 @@ impl Default for CompactConfig {
 }
 
 impl CompactConfig {
+    fn positive_env_tokens(name: &str) -> Option<usize> {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|tokens| *tokens > 0)
+    }
+
     /// 从环境变量加载配置
     pub fn from_env() -> Self {
-        let max_tokens = std::env::var("STAR_COMPACT_MAX_TOKENS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(150_000);
+        let max_tokens = Self::positive_env_tokens("STAR_COMPACT_MAX_TOKENS").unwrap_or(150_000);
 
-        let target_tokens = std::env::var("STAR_COMPACT_TARGET_TOKENS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(100_000);
+        let target_tokens =
+            Self::positive_env_tokens("STAR_COMPACT_TARGET_TOKENS").unwrap_or(100_000);
 
         let auto_compact_enabled = std::env::var("STAR_AUTO_COMPACT_ENABLED")
             .ok()
@@ -104,6 +106,19 @@ impl CompactConfig {
             relevance_weight,
             tool_result_weight,
         }
+    }
+
+    /// 以会话上下文策略为默认值构造压缩配置。显式环境变量依然优先，
+    /// 这样运维调优不会被一次 UI 选择悄悄覆盖。
+    pub fn from_context_policy(
+        policy: &crate::core::context_policy::ResolvedContextPolicy,
+    ) -> Self {
+        let mut config = Self::from_env();
+        config.max_tokens = Self::positive_env_tokens("STAR_COMPACT_MAX_TOKENS")
+            .unwrap_or(policy.compact_max_tokens as usize);
+        config.target_tokens = Self::positive_env_tokens("STAR_COMPACT_TARGET_TOKENS")
+            .unwrap_or(policy.compact_target_tokens as usize);
+        config
     }
 }
 

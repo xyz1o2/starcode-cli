@@ -37,8 +37,9 @@ pub fn describe_provider_id(provider_id: &str) -> String {
 
 pub fn current_provider_id(state: &ChatState) -> Option<String> {
     state
-        .pending_model_provider
-        .as_deref()
+        .confirmed_runtime_settings
+        .as_ref()
+        .and_then(|snapshot| snapshot.active.model.provider_id.as_deref())
         .and_then(non_empty)
         .map(str::to_string)
         .or_else(|| {
@@ -52,6 +53,15 @@ pub fn current_provider_id(state: &ChatState) -> Option<String> {
             current_model_id(state)
                 .and_then(|model| state.model_provider_map.get(model))
                 .and_then(|provider_id| non_empty(provider_id))
+                .map(str::to_string)
+        })
+        // Provider provisioning is not an active runtime transition. Keep it only as a
+        // display fallback before the worker has supplied an active provider snapshot.
+        .or_else(|| {
+            state
+                .pending_model_provider
+                .as_deref()
+                .and_then(non_empty)
                 .map(str::to_string)
         })
 }

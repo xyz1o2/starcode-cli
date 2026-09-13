@@ -157,6 +157,12 @@ pub async fn process_message(
         }
         crate::runtime::streaming_session::StreamingSessionResult::Shutdown => {
             append_debug_log_line("[AgentRuntime] Streaming session drained for Shutdown");
+            crate::runtime::session::apply_deferred_runtime_settings(
+                agent,
+                &mut deferred,
+                context.tx,
+            )
+            .await;
             let Some(response) =
                 crate::runtime::session::apply_deferred_context_actions(agent, &mut deferred).await
             else {

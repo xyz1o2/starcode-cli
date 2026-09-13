@@ -36,42 +36,99 @@ fn store_model_list(models: &[ModelInfo]) {
     }
 }
 
-/// 全局模型上下文窗口缓存：模型名 -> context_window（tokens）
-/// 从 API /models 端点提取（如 Anthropic 的 max_input_tokens）后填充
-static MODEL_CONTEXT_WINDOW_CACHE: RwLock<Option<HashMap<String, u32>>> = RwLock::new(None);
+/// 提供商与模型共同构成能力缓存身份：相同 model id 可以由不同网关以不同
+/// 上下文容量提供，绝不能互相污染。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ModelCapabilityKey {
+    provider_id: String,
+    model_id: String,
+}
 
-/// 从全局缓存中查询模型的上下文窗口大小
-pub fn get_cached_context_window(model_name: &str) -> Option<u32> {
+impl ModelCapabilityKey {
+    fn new(provider_id: Option<&str>, model_id: &str) -> Self {
+        Self {
+            provider_id: provider_id.unwrap_or_default().to_string(),
+            model_id: model_id.to_string(),
+        }
+    }
+}
+
+/// 由 `/models` 返回的名义容量，按 provider + model 保存。
+static MODEL_CONTEXT_WINDOW_CACHE: RwLock<Option<HashMap<ModelCapabilityKey, u32>>> =
+    RwLock::new(None);
+/// provider 明确返回上下文溢出后记录的会话安全上限，不能覆盖用户的 Fixed 选择。
+static PROVIDER_SAFE_CONTEXT_CAP_CACHE: RwLock<Option<HashMap<ModelCapabilityKey, u32>>> =
+    RwLock::new(None);
+
+/// 从 provider + model 作用域的缓存中查询模型上下文窗口。
+pub fn get_cached_context_window(provider_id: Option<&str>, model_name: &str) -> Option<u32> {
+    let key = ModelCapabilityKey::new(provider_id, model_name);
     MODEL_CONTEXT_WINDOW_CACHE
         .read()
         .ok()
-        .and_then(|guard| guard.as_ref()?.get(model_name).copied())
+        .and_then(|guard| guard.as_ref()?.get(&key).copied())
 }
 
-/// 更新上下文窗口缓存
-pub fn update_context_window_cache(models: &[ModelInfo]) {
+/// 查询 provider 明确报告的会话安全容量上限。
+pub fn get_provider_safe_context_cap(provider_id: Option<&str>, model_name: &str) -> Option<u32> {
+    let key = ModelCapabilityKey::new(provider_id, model_name);
+    PROVIDER_SAFE_CONTEXT_CAP_CACHE
+        .read()
+        .ok()
+        .and_then(|guard| guard.as_ref()?.get(&key).copied())
+}
+
+/// 更新指定 provider 的模型上下文窗口缓存。
+pub fn update_context_window_cache(provider_id: Option<&str>, models: &[ModelInfo]) {
     if let Ok(mut guard) = MODEL_CONTEXT_WINDOW_CACHE.write() {
         let cache = guard.get_or_insert_with(HashMap::new);
-        for m in models {
-            if let Some(ctx) = m.context_window {
-                cache.insert(m.id.clone(), ctx);
+        for model in models {
+            if let Some(context_window) = model.context_window {
+                let resolved_provider = if model.provider.is_empty() {
+                    provider_id
+                } else {
+                    Some(model.provider.as_str())
+                };
+                cache.insert(
+                    ModelCapabilityKey::new(resolved_provider, &model.id),
+                    context_window,
+                );
             }
         }
     }
 }
 
-/// 当 API 返回 "context window exceeds limit" 错误时，将缓存的上下文窗口减半
-/// 这样后续压缩会更激进，避免重复同样的错误
-pub fn halve_cached_context_window(model_name: &str) {
-    if let Ok(mut guard) = MODEL_CONTEXT_WINDOW_CACHE.write() {
+/// 当 provider 明确报告了确切的 context-window 上限时，记录当前
+/// provider + model 的安全容量。单纯的溢出只证明请求过大，不能推断精确上限，
+/// 因此 `reported_cap` 为 `None` 时不会写入猜测值。
+///
+/// 该证据仅影响 Auto 的最终容量；Fixed 选择会保留请求值并由 policy 报告降级。
+pub fn record_provider_safe_context_cap(
+    provider_id: Option<&str>,
+    model_name: &str,
+    reported_cap: Option<u32>,
+) -> Option<u32> {
+    let reported_cap = reported_cap.filter(|cap| *cap > 0)?;
+    let key = ModelCapabilityKey::new(provider_id, model_name);
+    let nominal_cap = get_cached_context_window(provider_id, model_name);
+    // Provider 报出的值只能受已知名义容量约束；产品默认值不是 provider 证据，
+    // 不能把一个已确认的大容量错误地截断到默认 200K。
+    let safe_cap = nominal_cap.map_or(reported_cap, |nominal| reported_cap.min(nominal));
+
+    if let Ok(mut guard) = PROVIDER_SAFE_CONTEXT_CAP_CACHE.write() {
         let cache = guard.get_or_insert_with(HashMap::new);
-        let old = cache.get(model_name).copied().unwrap_or(200_000);
-        let new = (old / 2).max(32_000); // 不低于 32K
-        cache.insert(model_name.to_string(), new);
+        let prior_cap = cache.get(&key).copied();
+        let effective_cap = prior_cap.map_or(safe_cap, |prior_cap| prior_cap.min(safe_cap));
+        cache.insert(key, effective_cap);
         crate::utils::logging::append_debug_log_line(&format!(
-            "[CTX_WINDOW] Reduced context window for '{}': {} -> {}",
-            model_name, old, new
+            "[CTX_WINDOW] Recorded provider-reported context capacity for '{}': {} -> {}",
+            model_name,
+            prior_cap.unwrap_or(safe_cap),
+            effective_cap
         ));
+        Some(effective_cap)
+    } else {
+        Some(safe_cap)
     }
 }
 
@@ -87,7 +144,15 @@ pub(crate) async fn list_models_for_client(
 
     // 1. Try to fetch from API — 短超时，避免慢速 /models 端点阻塞模型切换
     match tokio::time::timeout(CURRENT_PROVIDER_FETCH_TIMEOUT, star_client.list_models()).await {
-        Ok(Ok(remote_models)) => {
+        Ok(Ok(mut remote_models)) => {
+            let provider_id = star_client.provider_id.clone().unwrap_or_else(|| {
+                crate::agent::model_list::detect_provider_name(&star_client.base_url)
+            });
+            for model in &mut remote_models {
+                if model.provider.is_empty() {
+                    model.provider = provider_id.clone();
+                }
+            }
             models.extend(remote_models);
         }
         Ok(Err(e)) => {
@@ -124,7 +189,10 @@ pub(crate) async fn list_models_for_client(
                     configured_models.len()
                 ));
                 for (model_id, _) in configured_models {
-                    if !models.iter().any(|m| m.id == *model_id) {
+                    if !models
+                        .iter()
+                        .any(|m| m.id == *model_id && m.provider == *pid)
+                    {
                         models.push(ModelInfo::new(model_id.clone(), pid.clone()));
                     }
                 }
@@ -173,7 +241,14 @@ pub(crate) async fn list_models_for_client(
                         .await;
 
                         match result {
-                            Ok(Ok(fetched_models)) => Some(fetched_models),
+                            Ok(Ok(mut fetched_models)) => {
+                                for model in &mut fetched_models {
+                                    if model.provider.is_empty() {
+                                        model.provider = pid.clone();
+                                    }
+                                }
+                                Some(fetched_models)
+                            }
                             Ok(Err(e)) => {
                                 crate::utils::logging::append_debug_log_line(&format!(
                                     "[ListModels] Failed to fetch from '{}': {}",
@@ -200,7 +275,10 @@ pub(crate) async fn list_models_for_client(
             for res in results {
                 if let Ok(Some(fetched_models)) = res {
                     for m in fetched_models {
-                        if !models.iter().any(|existing| existing.id == m.id) {
+                        if !models
+                            .iter()
+                            .any(|existing| existing.id == m.id && existing.provider == m.provider)
+                        {
                             models.push(m);
                         }
                     }
@@ -211,16 +289,93 @@ pub(crate) async fn list_models_for_client(
 
     // 4. Ensure current model is in the list
     let current = star_client.model.clone();
-    if !models.iter().any(|m| m.id == current) && !current.is_empty() {
-        let provider = crate::agent::model_list::detect_provider_name(&star_client.base_url);
-        models.insert(0, ModelInfo::new(current, provider));
+    let current_provider = star_client
+        .provider_id
+        .clone()
+        .unwrap_or_else(|| crate::agent::model_list::detect_provider_name(&star_client.base_url));
+    if !models
+        .iter()
+        .any(|m| m.id == current && m.provider == current_provider)
+        && !current.is_empty()
+    {
+        models.insert(0, ModelInfo::new(current, current_provider.clone()));
     }
 
     // 5. 更新全局上下文窗口缓存（用于后续压缩和状态栏显示）
-    update_context_window_cache(&models);
+    update_context_window_cache(Some(current_provider.as_str()), &models);
 
     // 6. 写入模型列表 TTL 缓存
     store_model_list(&models);
 
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_capabilities_are_scoped_to_provider_and_model() {
+        let provider_a = "model-catalog-test-provider-a";
+        let provider_b = "model-catalog-test-provider-b";
+        let model = "model-catalog-test-model";
+
+        update_context_window_cache(
+            Some(provider_a),
+            &[ModelInfo::new(model, provider_a).with_context_window(1_000_000)],
+        );
+        update_context_window_cache(
+            Some(provider_b),
+            &[ModelInfo::new(model, provider_b).with_context_window(200_000)],
+        );
+
+        assert_eq!(
+            get_cached_context_window(Some(provider_a), model),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            get_cached_context_window(Some(provider_b), model),
+            Some(200_000)
+        );
+        assert_eq!(get_cached_context_window(None, model), None);
+    }
+
+    #[test]
+    fn reported_safe_cap_without_nominal_evidence_is_not_clamped_to_the_product_default() {
+        let provider = "model-catalog-test-unbounded-safe-cap-provider";
+        let model = "model-catalog-test-unbounded-safe-cap-model";
+
+        assert_eq!(
+            record_provider_safe_context_cap(Some(provider), model, Some(1_000_000)),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            get_provider_safe_context_cap(Some(provider), model),
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn provider_safe_cap_uses_only_reported_limits_and_never_exceeds_nominal() {
+        let provider = "model-catalog-test-safe-cap-provider";
+        let model = "model-catalog-test-safe-cap-model";
+        update_context_window_cache(
+            Some(provider),
+            &[ModelInfo::new(model, provider).with_context_window(16_000)],
+        );
+
+        assert_eq!(
+            record_provider_safe_context_cap(Some(provider), model, None),
+            None
+        );
+        assert_eq!(get_provider_safe_context_cap(Some(provider), model), None);
+        assert_eq!(
+            record_provider_safe_context_cap(Some(provider), model, Some(32_000)),
+            Some(16_000)
+        );
+        assert_eq!(
+            get_provider_safe_context_cap(Some(provider), model),
+            Some(16_000)
+        );
+    }
 }

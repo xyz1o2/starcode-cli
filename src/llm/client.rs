@@ -37,6 +37,20 @@ fn legacy_usage_json(usage: &crate::types::StarUsage) -> serde_json::Value {
     usage_json
 }
 
+/// 从兼容 `/models` 响应读取一个有效的正 u32 上下文窗口。
+/// 无效、零或超出内部表示范围的字段不能污染 capability 缓存。
+fn parse_model_context_window(model: &serde_json::Value) -> Option<u32> {
+    ["max_input_tokens", "context_window", "contextWindow"]
+        .into_iter()
+        .find_map(|field| {
+            model
+                .get(field)
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|tokens| u32::try_from(tokens).ok())
+                .filter(|tokens| *tokens > 0)
+        })
+}
+
 #[derive(Debug, Zeroize, ZeroizeOnDrop)]
 pub struct StarClient {
     pub api_key: String,
@@ -428,9 +442,7 @@ impl StarClient {
         if let Some(flag) = is_openai_compatible {
             self.is_openai_compatible = flag;
         }
-        if provider_id.is_some() {
-            self.provider_id = provider_id;
-        }
+        self.provider_id = provider_id;
         self.reset_thinking_detection();
         self.recreate_inner();
     }
@@ -975,12 +987,7 @@ impl StarClient {
                 // 尝试从 API 响应中提取上下文窗口大小
                 // Anthropic: max_input_tokens
                 // OpenAI-compatible 有 context_window 的提供商
-                let context_window = m
-                    .get("max_input_tokens")
-                    .or_else(|| m.get("context_window"))
-                    .or_else(|| m.get("contextWindow"))
-                    .and_then(|v| v.as_u64())
-                    .map(|n| n as u32);
+                let context_window = parse_model_context_window(m);
 
                 // 自动判断模型是否支持 thinking/reasoning
                 let supports_thinking = crate::core::config::models::is_thinking_model(id);
@@ -1020,8 +1027,41 @@ impl StarClient {
 
 #[cfg(test)]
 mod tests {
-    use super::StarClient;
+    use super::{parse_model_context_window, StarClient};
     use crate::types::{StarChoice, StarMessage, StarResponse, StarUsage};
+    use serde_json::json;
+
+    #[test]
+    fn parses_supported_model_context_window_fields() {
+        assert_eq!(
+            parse_model_context_window(&json!({ "max_input_tokens": 1_000_000 })),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            parse_model_context_window(&json!({ "context_window": 200_000 })),
+            Some(200_000)
+        );
+        assert_eq!(
+            parse_model_context_window(&json!({ "contextWindow": 128_000 })),
+            Some(128_000)
+        );
+    }
+
+    #[test]
+    fn ignores_invalid_model_context_window_values() {
+        assert_eq!(
+            parse_model_context_window(&json!({ "max_input_tokens": 0 })),
+            None
+        );
+        assert_eq!(
+            parse_model_context_window(&json!({ "context_window": "200000" })),
+            None
+        );
+        assert_eq!(
+            parse_model_context_window(&json!({ "contextWindow": u64::from(u32::MAX) + 1 })),
+            None
+        );
+    }
 
     #[test]
     fn cache_telemetry_is_preserved_in_legacy_usage_json() {

@@ -10,8 +10,8 @@ const COMPRESSION_THRESHOLD_RATIO: f64 = 0.95;
 const DEFAULT_COMPRESSION_MIN_TOKENS: usize = 30_000;
 /// 压缩前预留的 buffer token 数（确保模型有空间完成当前响应）
 const COMPRESSION_BUFFER_TOKENS: usize = 10_000;
-/// 默认 Context Window 大小（256K，可通过 STAR_CONTEXT_WINDOW 环境变量覆盖）
-const DEFAULT_CONTEXT_WINDOW: usize = 256_000;
+/// 默认 Context Window 大小（由会话 context policy 统一派生）。
+const DEFAULT_CONTEXT_WINDOW: usize = crate::core::context_policy::DEFAULT_CONTEXT_WINDOW as usize;
 /// 压缩检查冷却时间 (秒) - 避免频繁检查
 const DEFAULT_CHECK_COOLDOWN_SECS: u64 = 60;
 /// Level 1 压缩保留的最近消息数
@@ -58,6 +58,13 @@ pub struct ContextCompressor {
 }
 
 impl ContextCompressor {
+    /// 直接使用已解析的会话策略；调用方负责选择 Auto / Fixed 和 capability 证据。
+    pub fn from_context_policy(
+        policy: &crate::core::context_policy::ResolvedContextPolicy,
+    ) -> Self {
+        Self::new(Some(policy.effective_tokens as usize))
+    }
+
     pub fn new(context_window: Option<usize>) -> Self {
         let env_window = std::env::var("STAR_CONTEXT_WINDOW")
             .ok()
@@ -96,11 +103,12 @@ impl ContextCompressor {
         }
     }
 
-    /// 使用模型名称创建，自动从 API 缓存中查找上下文窗口
-    pub fn new_with_model(model_name: &str) -> Self {
-        // 1. 尝试从 API /models 缓存中获取（由 list_models_for_client 填充）
+    /// 使用 provider + 模型身份创建，自动从 API 缓存中查找上下文窗口。
+    pub fn new_with_model(provider_id: Option<&str>, model_name: &str) -> Self {
+        // 1. 尝试从 API /models 缓存中获取；同名模型不能跨 provider 借用容量。
         let cached =
-            crate::agent::model_catalog::get_cached_context_window(model_name).map(|v| v as usize);
+            crate::agent::model_catalog::get_cached_context_window(provider_id, model_name)
+                .map(|v| v as usize);
 
         // 2. 使用默认值
         let context_window = cached.unwrap_or(DEFAULT_CONTEXT_WINDOW);

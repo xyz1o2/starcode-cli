@@ -11,7 +11,108 @@
 /// - `AgentRequest.send().await` blocks (backpressure)
 /// - `StreamMessage` uses `try_send` in hot paths to avoid blocking
 ///
-use crate::types::{AgentTaskStatus, ChatEntry, StarToolCall, ToolResult};
+use crate::core::context_policy::{
+    ContextWindowSelection, ResolvedContextPolicy, RuntimeSettingOutcome,
+};
+use crate::types::{AgentTaskStatus, ChatEntry, StarToolCall, ThinkingEffort, ToolResult};
+use serde::{Deserialize, Serialize};
+
+/// 一次模型切换的完整目标。provider 与 model 必须作为一个逻辑设置更新，
+/// 避免 UI 只看到其中一半已经生效。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeModelSelection {
+    pub model: String,
+    pub provider_id: Option<String>,
+}
+
+/// 运行时变更是否应写入用户设置文件。revision 描述协议顺序，不能再兼任持久化开关：
+/// `/fast` 等临时会话行为同样需要 revision acknowledgement，但绝不能改磁盘设置。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSettingsPersistencePolicy {
+    #[default]
+    Persistent,
+    SessionOnly,
+}
+
+/// UI 发给 worker 的原子运行时设置变更。`ui_revision` 由 UI 单调递增，
+/// worker 据此保留流式期间的 FIFO 顺序并让 UI 丢弃过时确认。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSettingsMutation {
+    pub ui_revision: u64,
+    /// 是否在 runtime 安装成功后异步写入设置文件。
+    #[serde(default)]
+    pub persistence: RuntimeSettingsPersistencePolicy,
+    pub model: Option<RuntimeModelSelection>,
+    pub context_window: Option<ContextWindowSelection>,
+    pub thinking_effort: Option<ThinkingEffort>,
+}
+
+impl RuntimeSettingsMutation {
+    /// `0` 保留给尚未迁移的兼容调用点；UI 发起的请求必须从 1 开始单调递增。
+    pub const LEGACY_UI_REVISION: u64 = 0;
+
+    pub fn has_changes(&self) -> bool {
+        self.model.is_some() || self.context_window.is_some() || self.thinking_effort.is_some()
+    }
+
+    pub fn legacy_model(model: String, provider_id: Option<String>) -> Self {
+        Self {
+            ui_revision: Self::LEGACY_UI_REVISION,
+            persistence: RuntimeSettingsPersistencePolicy::Persistent,
+            model: Some(RuntimeModelSelection { model, provider_id }),
+            context_window: None,
+            thinking_effort: None,
+        }
+    }
+
+    pub fn legacy_thinking_effort(thinking_effort: ThinkingEffort) -> Self {
+        Self {
+            ui_revision: Self::LEGACY_UI_REVISION,
+            persistence: RuntimeSettingsPersistencePolicy::Persistent,
+            model: None,
+            context_window: None,
+            thinking_effort: Some(thinking_effort),
+        }
+    }
+}
+
+/// 用户最近请求的运行时设置。它在 provider 降级或拒绝某项设置时依然保留，
+/// 因此 UI 不会把用户意图误显示成当前实际状态。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestedRuntimeSettings {
+    pub model: RuntimeModelSelection,
+    pub context_window: ContextWindowSelection,
+    pub thinking_effort: ThinkingEffort,
+}
+
+/// worker 当前确认已生效的运行时设置。上下文策略同时携带名义容量、
+/// provider 安全上限后的有效容量、来源和派生阈值。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveRuntimeSettings {
+    pub model: RuntimeModelSelection,
+    pub context_policy: ResolvedContextPolicy,
+    pub thinking_effort: ThinkingEffort,
+}
+
+/// worker 所有的完整运行时设置状态。`runtime_revision` 只在 worker 成功
+/// 改变可供后续逻辑回合使用的状态时单调递增。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSettingsSnapshot {
+    pub runtime_revision: u64,
+    pub requested: RequestedRuntimeSettings,
+    pub active: ActiveRuntimeSettings,
+}
+
+/// 对一个 UI 设置变更的终态确认。失败或降级时快照仍会同时报告保留的请求
+/// 和实际 active 状态；`reason` 描述 mutation 层面的失败或 supersession。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSettingsAcknowledgement {
+    pub ui_revision: u64,
+    pub outcome: RuntimeSettingOutcome,
+    pub snapshot: RuntimeSettingsSnapshot,
+    pub reason: Option<String>,
+}
 
 /// 一条全局搜索匹配，作为 UI/worker 协议数据而非组件私有渲染状态。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,6 +231,14 @@ pub enum StreamMessage {
         model: String,
         provider_id: Option<String>,
     },
+    /// worker 对一次带 UI revision 的运行时设置变更的终态确认。
+    RuntimeSettingsAcknowledged(RuntimeSettingsAcknowledgement),
+    /// 用户设置文件写入是独立于 runtime application 的后续结果。
+    /// `None` 表示成功；worker acknowledgement 绝不依赖这条消息。
+    RuntimeSettingsPersistenceCompleted {
+        ui_revision: u64,
+        error: Option<String>,
+    },
     ReloadTasks,
     StatsUpdate {
         au2_compressed: bool,
@@ -217,6 +326,9 @@ pub enum AgentRequest {
         model: String,
         provider_id: Option<String>,
     },
+    /// 单一运行时设置协议入口。流式回合期间会按接收顺序排队，
+    /// 并且只会在该逻辑回合结束后才影响下一条用户消息。
+    UpdateRuntimeSettings(RuntimeSettingsMutation),
     Abort,
     ListCheckpoints {
         message_id: u64,
@@ -333,4 +445,71 @@ pub enum PluginOp {
         /// 安装范围："user" 或 "project"（对标 Claude Code）
         scope: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_mutation_reports_whether_it_changes_any_setting() {
+        let empty = RuntimeSettingsMutation {
+            ui_revision: 1,
+            persistence: RuntimeSettingsPersistencePolicy::Persistent,
+            model: None,
+            context_window: None,
+            thinking_effort: None,
+        };
+        assert!(!empty.has_changes());
+
+        let context_only = RuntimeSettingsMutation {
+            ui_revision: 2,
+            persistence: RuntimeSettingsPersistencePolicy::Persistent,
+            model: None,
+            context_window: Some(ContextWindowSelection::Fixed(1_000_000)),
+            thinking_effort: None,
+        };
+        assert!(context_only.has_changes());
+    }
+
+    #[test]
+    fn runtime_snapshot_keeps_requested_and_active_context_distinct() {
+        let requested = RequestedRuntimeSettings {
+            model: RuntimeModelSelection {
+                model: "model-a".to_string(),
+                provider_id: Some("provider-a".to_string()),
+            },
+            context_window: ContextWindowSelection::Fixed(1_000_000),
+            thinking_effort: ThinkingEffort::High,
+        };
+        let policy = ResolvedContextPolicy::from_evidence(
+            requested.context_window,
+            crate::core::context_policy::ContextWindowEvidence {
+                provider_safe_cap: Some(200_000),
+                ..Default::default()
+            },
+        );
+        let snapshot = RuntimeSettingsSnapshot {
+            runtime_revision: 4,
+            requested,
+            active: ActiveRuntimeSettings {
+                model: RuntimeModelSelection {
+                    model: "model-a".to_string(),
+                    provider_id: Some("provider-a".to_string()),
+                },
+                context_policy: policy,
+                thinking_effort: ThinkingEffort::High,
+            },
+        };
+
+        assert_eq!(
+            snapshot.requested.context_window,
+            ContextWindowSelection::Fixed(1_000_000)
+        );
+        assert_eq!(snapshot.active.context_policy.effective_tokens, 200_000);
+        assert_eq!(
+            snapshot.active.context_policy.outcome,
+            RuntimeSettingOutcome::Degraded
+        );
+    }
 }

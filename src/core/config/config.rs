@@ -58,6 +58,9 @@ pub struct Config {
     pub(crate) import_format: ImportFormat,
     pub(crate) discovery_max_dirs: usize,
     pub(crate) compression_threshold: Option<f64>,
+    /// 用户明确配置的容量；`None` 表示保留 Auto 语义。
+    pub(crate) configured_context_window: Option<u32>,
+    /// 为尚未迁移的旧调用点保留的数值回退，不是会话策略的权威来源。
     pub(crate) context_window: usize,
     pub(crate) interactive: bool,
     pub(crate) pty_info: String,
@@ -157,6 +160,10 @@ impl Config {
             import_format: params.import_format.unwrap_or(ImportFormat::Tree),
             discovery_max_dirs: params.discovery_max_dirs.unwrap_or(200),
             compression_threshold: params.compression_threshold,
+            configured_context_window: params
+                .context_window
+                .and_then(|tokens| u32::try_from(tokens).ok())
+                .filter(|tokens| *tokens > 0),
             context_window: params.context_window.unwrap_or(
                 std::env::var("STAR_CONTEXT_WINDOW")
                     .ok()
@@ -360,15 +367,30 @@ impl Config {
     pub fn compression_threshold(&self) -> Option<f64> {
         self.compression_threshold
     }
+    /// 读取显式配置而不混入模型目录缓存。`None` 保留用户尚未固定容量的 Auto 语义。
+    pub fn configured_context_window_selection(
+        &self,
+    ) -> crate::core::context_policy::ContextWindowSelection {
+        self.configured_context_window
+            .map(crate::core::context_policy::ContextWindowSelection::Fixed)
+            .unwrap_or_default()
+    }
+
+    /// 旧调用点的数值配置回退；新会话策略必须使用
+    /// [`Self::configured_context_window_selection`]。
+    pub fn configured_context_window(&self) -> usize {
+        self.context_window
+    }
+
     pub fn context_window(&self) -> usize {
-        // 1. 模型专用上下文窗口：从 API /models 缓存中查（如 Anthropic 的 max_input_tokens）
+        // 兼容尚未迁移到会话策略的调用点：模型专用上下文窗口仍优先。
+        // `Config` 不保存 provider identity，不能在这里模糊匹配别的 gateway 的同名模型。
         if let Some(ctx) =
-            crate::agent::model_catalog::get_cached_context_window(self.active_model())
+            crate::agent::model_catalog::get_cached_context_window(None, self.active_model())
         {
             return ctx as usize;
         }
-        // 2. AppConfig / ConfigParameters 中配置的值（含 STAR_CONTEXT_WINDOW env var 回退）
-        self.context_window
+        self.configured_context_window()
     }
     pub fn interactive(&self) -> bool {
         self.interactive

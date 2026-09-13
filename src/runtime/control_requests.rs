@@ -1,6 +1,6 @@
 use crate::agent::StarAgent;
 use crate::runtime::messages::{
-    AgentRequest, PendingCheckpointAction, StreamMessage, StreamStartKind,
+    AgentRequest, PendingCheckpointAction, RuntimeSettingsMutation, StreamMessage, StreamStartKind,
 };
 use crate::utils::logging::append_debug_log_line;
 use tokio::sync::mpsc;
@@ -25,30 +25,17 @@ pub async fn handle_request(
                 ))
                 .await;
         }
-        AgentRequest::SetModel { model, provider_id } => {
-            agent
-                .set_model_with_provider(&model, provider_id.as_deref())
-                .await;
-            // Single load+save instead of two separate cycles
-            if let Some(pid) = &provider_id {
-                let store = crate::core::config::provider_store::ProviderStore::new();
-                let _ = store.set_active_provider_and_model(pid, &model).await;
-            } else {
-                let store = crate::core::config::provider_store::ProviderStore::new();
-                let _ = store.set_active_model(&model).await;
-            }
+        AgentRequest::SetModel { model, provider_id }
+        | AgentRequest::UpdateModel { model, provider_id } => {
+            apply_runtime_settings_and_persist(
+                agent,
+                tx,
+                RuntimeSettingsMutation::legacy_model(model, provider_id),
+            )
+            .await;
         }
-        AgentRequest::UpdateModel { model, provider_id } => {
-            agent
-                .set_model_with_provider(&model, provider_id.as_deref())
-                .await;
-            if let Some(pid) = &provider_id {
-                let store = crate::core::config::provider_store::ProviderStore::new();
-                let _ = store.set_active_provider_and_model(pid, &model).await;
-            } else {
-                let store = crate::core::config::provider_store::ProviderStore::new();
-                let _ = store.set_active_model(&model).await;
-            }
+        AgentRequest::UpdateRuntimeSettings(mutation) => {
+            apply_runtime_settings_and_persist(agent, tx, mutation).await;
         }
         AgentRequest::ListCheckpoints { message_id } => {
             return Some(PendingCheckpointAction::List { message_id });
@@ -168,14 +155,12 @@ pub async fn handle_request(
             ));
         }
         AgentRequest::SetThinkingEffort(effort) => {
-            // 存进会话状态，之后每一次请求构造时按 provider 方言翻成
-            // 对应字段（见 `crate::llm::thinking`）。切模型会重建 client，
-            // 所以档位不能挂在 client 上。
-            crate::llm::thinking::set_session_effort(&effort);
-            crate::utils::logging::append_agent_log_line(&format!(
-                "[AgentRuntime] thinking effort -> {}",
-                effort.as_str()
-            ));
+            apply_runtime_settings_and_persist(
+                agent,
+                tx,
+                RuntimeSettingsMutation::legacy_thinking_effort(effort),
+            )
+            .await;
         }
         AgentRequest::Compress { message_id } => {
             let _ = tx
@@ -208,41 +193,12 @@ pub async fn handle_request(
             agent.clear_session_context();
         }
         AgentRequest::LoadConfiguredProviders => {
+            // 这里只加载 provider 菜单元数据。启动时的 model/provider 已在构造 StarAgent
+            // 前按 CLI/env/settings 优先级解析；绝不能在初始 runtime acknowledgement 后再
+            // 由磁盘 provider store 覆盖运行中 client。
             let store = crate::core::config::provider_store::ProviderStore::new();
-            if let Ok(config) = store.load().await {
-                let ids = store.configured_provider_ids().await.unwrap_or_default();
-                let _ = tx.send(StreamMessage::ConfiguredProviders(ids)).await;
-
-                let startup_model = config
-                    .active_provider_id
-                    .as_deref()
-                    .and_then(|provider_id| {
-                        config
-                            .providers
-                            .get(provider_id)
-                            .and_then(|provider| provider.selected_model.clone())
-                    })
-                    .or_else(|| config.active_model.clone());
-                if let Some(startup_model_name) = startup_model.as_deref() {
-                    let active_pid = config.active_provider_id.as_deref();
-                    append_debug_log_line(&format!(
-                        "[Worker] Restoring active model: {} (provider: {:?})",
-                        startup_model_name, active_pid
-                    ));
-                    agent
-                        .set_model_with_provider(startup_model_name, active_pid)
-                        .await;
-                }
-
-                let current_model = startup_model.unwrap_or_default();
-                let current_provider_id = config.active_provider_id.clone();
-                let _ = tx
-                    .send(StreamMessage::CurrentModelChanged {
-                        model: current_model,
-                        provider_id: current_provider_id,
-                    })
-                    .await;
-            }
+            let ids = store.configured_provider_ids().await.unwrap_or_default();
+            let _ = tx.send(StreamMessage::ConfiguredProviders(ids)).await;
         }
         AgentRequest::ToolConfirmationResponse {
             tool_calls,
@@ -333,6 +289,95 @@ pub async fn handle_request(
         }
     }
     None
+}
+
+/// 发送已被后续排队更新完全覆盖的确认。此路径刻意不调用 agent 的应用入口，
+/// 也绝不能启动 settings 文件持久化。
+pub(crate) async fn acknowledge_superseded_runtime_settings(
+    agent: &StarAgent,
+    tx: &mpsc::Sender<StreamMessage>,
+    ui_revision: u64,
+) {
+    let _ = tx
+        .send(StreamMessage::RuntimeSettingsAcknowledged(
+            agent.superseded_runtime_settings_acknowledgement(ui_revision),
+        ))
+        .await;
+}
+
+/// 通过唯一的 session-owned coordinator 应用设置。worker acknowledgement 先精确
+/// 表示 runtime 安装状态；用户设置文件持久化随后经独立事件回 UI，绝不能混为一谈。
+pub(crate) async fn apply_runtime_settings_and_persist(
+    agent: &mut StarAgent,
+    tx: &mpsc::Sender<StreamMessage>,
+    mutation: RuntimeSettingsMutation,
+) {
+    let persistence_mutation = mutation.clone();
+    let acknowledgement = agent.apply_runtime_settings(mutation).await;
+    let persistence_revision = acknowledgement.ui_revision;
+    let runtime_applied = matches!(
+        acknowledgement.outcome,
+        crate::core::context_policy::RuntimeSettingOutcome::Applied
+            | crate::core::context_policy::RuntimeSettingOutcome::Degraded
+    );
+
+    let _ = tx
+        .send(StreamMessage::RuntimeSettingsAcknowledged(acknowledgement))
+        .await;
+
+    if !runtime_applied
+        || persistence_revision == RuntimeSettingsMutation::LEGACY_UI_REVISION
+        || persistence_mutation.persistence
+            == crate::runtime::messages::RuntimeSettingsPersistencePolicy::SessionOnly
+    {
+        return;
+    }
+
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = async {
+            let manager = crate::core::config::settings_manager::SettingsManager::new()
+                .map_err(|error| error.to_string())?;
+            let mut settings = manager
+                .load_user_settings()
+                .await
+                .map_err(|error| error.to_string())?;
+            if let Some(context_window) = persistence_mutation.context_window {
+                settings.context_window = context_window.as_fixed();
+            }
+            if let Some(thinking_effort) = persistence_mutation.thinking_effort {
+                settings.thinking_effort = Some(thinking_effort.as_str().to_string());
+            }
+            manager
+                .save_user_settings(&settings)
+                .await
+                .map_err(|error| error.to_string())?;
+
+            if let Some(model) = persistence_mutation.model {
+                let store = crate::core::config::provider_store::ProviderStore::new();
+                if let Some(provider_id) = model.provider_id.as_deref() {
+                    store
+                        .set_active_provider_and_model(provider_id, &model.model)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                } else {
+                    store
+                        .set_active_model(&model.model)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+
+        let _ = tx
+            .send(StreamMessage::RuntimeSettingsPersistenceCompleted {
+                ui_revision: persistence_revision,
+                error: result.err(),
+            })
+            .await;
+    });
 }
 
 /// 在后台任务中执行插件市场操作（git clone 等可能耗时数秒），
@@ -621,6 +666,29 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn superseded_settings_acknowledgement_emits_no_persistence_event() {
+        let agent = StarAgent::new_for_runtime_settings_test().await;
+        let (tx, mut rx) = mpsc::channel(2);
+
+        acknowledge_superseded_runtime_settings(&agent, &tx, 17).await;
+
+        let message = rx.recv().await.expect("superseded acknowledgement");
+        match message {
+            StreamMessage::RuntimeSettingsAcknowledged(acknowledgement) => {
+                assert_eq!(acknowledgement.ui_revision, 17);
+                assert_eq!(
+                    acknowledgement.outcome,
+                    crate::core::context_policy::RuntimeSettingOutcome::Superseded
+                );
+            }
+            other => panic!("expected runtime settings acknowledgement, got {other:?}"),
+        }
+        assert!(tokio::time::timeout(Duration::from_millis(25), rx.recv())
+            .await
+            .is_err());
+    }
 
     #[tokio::test]
     async fn cancelled_global_search_emits_no_results() {

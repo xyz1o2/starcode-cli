@@ -547,9 +547,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         // Interactive mode: initialize terminal first, then agent in background
         let initial_message = args.message.join(" ");
-        let initial_session_id = resumed_session
-            .as_ref()
-            .map(|resolved| resolved.id.clone());
+        let initial_session_id = resumed_session.as_ref().map(|resolved| resolved.id.clone());
         let initial_session = resumed_session.map(|resolved| {
             eprintln!("Resumed session: {}", resolved.id);
             resolved.session

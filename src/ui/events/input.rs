@@ -180,6 +180,108 @@ fn navigate_back_from_quick_menu(state: &mut ChatState) {
     }
 }
 
+pub(crate) async fn request_runtime_settings(
+    state: &mut ChatState,
+    model: Option<crate::runtime::messages::RuntimeModelSelection>,
+    context_window: Option<crate::core::context_policy::ContextWindowSelection>,
+    thinking_effort: Option<crate::types::ThinkingEffort>,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> bool {
+    request_runtime_settings_with_persistence(
+        state,
+        model,
+        context_window,
+        thinking_effort,
+        crate::runtime::messages::RuntimeSettingsPersistencePolicy::Persistent,
+        agent_tx,
+    )
+    .await
+}
+
+/// 发出具备明确持久化语义的 runtime mutation。所有变更均取得 FIFO revision；只有
+/// persistent mutation 才在 UI 上显示设置文件正在保存。
+pub(crate) async fn request_runtime_settings_with_persistence(
+    state: &mut ChatState,
+    model: Option<crate::runtime::messages::RuntimeModelSelection>,
+    context_window: Option<crate::core::context_policy::ContextWindowSelection>,
+    thinking_effort: Option<crate::types::ThinkingEffort>,
+    persistence: crate::runtime::messages::RuntimeSettingsPersistencePolicy,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> bool {
+    request_runtime_settings_with_persistence_revision(
+        state,
+        model,
+        context_window,
+        thinking_effort,
+        persistence,
+        agent_tx,
+    )
+    .await
+    .is_some()
+}
+
+/// 与 [`request_runtime_settings_with_persistence`] 相同，但在 worker 收到请求后返回
+/// UI revision，供必须将本地 UI 状态绑定到 acknowledgement 的会话级操作使用。
+pub(crate) async fn request_runtime_settings_with_persistence_revision(
+    state: &mut ChatState,
+    model: Option<crate::runtime::messages::RuntimeModelSelection>,
+    context_window: Option<crate::core::context_policy::ContextWindowSelection>,
+    thinking_effort: Option<crate::types::ThinkingEffort>,
+    persistence: crate::runtime::messages::RuntimeSettingsPersistencePolicy,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Option<u64> {
+    let mutation = state.begin_runtime_settings_update_with_persistence(
+        model,
+        context_window,
+        thinking_effort,
+        persistence,
+    );
+    let ui_revision = mutation.ui_revision;
+    if persistence == crate::runtime::messages::RuntimeSettingsPersistencePolicy::Persistent {
+        state.runtime_settings_persistence =
+            Some(crate::ui::state::store::RuntimeSettingsPersistence::Pending { ui_revision });
+    }
+    match agent_tx
+        .send(AgentRequest::UpdateRuntimeSettings(mutation))
+        .await
+    {
+        Ok(()) => Some(ui_revision),
+        Err(_) => {
+            state.discard_runtime_settings_update(ui_revision);
+            if matches!(
+                state.runtime_settings_persistence.as_ref(),
+                Some(crate::ui::state::store::RuntimeSettingsPersistence::Pending {
+                    ui_revision: pending_revision,
+                }) if *pending_revision == ui_revision
+            ) {
+                state.runtime_settings_persistence = None;
+            }
+            state.current_status_line =
+                Some("Runtime settings could not reach the agent worker.".to_string());
+            None
+        }
+    }
+}
+
+/// 从 UI 发起模型切换时只记录 requested intent；实际 active model 只能由 worker
+/// acknowledgement 写回，避免 provider 失败时界面提前谎报成功。
+pub(crate) async fn request_runtime_model_change(
+    state: &mut ChatState,
+    model: String,
+    provider_id: Option<String>,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> bool {
+    state.pending_model_change = None;
+    request_runtime_settings(
+        state,
+        Some(crate::runtime::messages::RuntimeModelSelection { model, provider_id }),
+        None,
+        None,
+        agent_tx,
+    )
+    .await
+}
+
 pub(crate) fn show_palette_mode(state: &mut ChatState, mode: PaletteMode) {
     close_quick_menus(state);
     state.quick_menu_back = None;
@@ -440,12 +542,15 @@ pub(crate) async fn execute_palette_action(
             open_session_selection_menu(state, true, sessions);
         }
         PaletteAction::SetModel(model) => {
-            // If conversation has history, show confirmation
-            let has_history = state.chat_history.iter().any(|e| {
-                !e.is_welcome
-                    && (e.entry_type == ChatEntryType::User
-                        || e.entry_type == ChatEntryType::Assistant)
-                    && !e.content.trim().is_empty()
+            // If conversation has history, preserve the existing confirmation gate. Only the
+            // eventual worker acknowledgement may change the active model display.
+            let has_history = state.chat_history.iter().any(|entry| {
+                !entry.is_welcome
+                    && matches!(
+                        entry.entry_type,
+                        ChatEntryType::User | ChatEntryType::Assistant
+                    )
+                    && !entry.content.trim().is_empty()
             });
 
             if has_history && !state.pending_model_confirmation {
@@ -465,32 +570,14 @@ pub(crate) async fn execute_palette_action(
 
             state.close_palette();
             state.pending_model_confirmation = false;
-            state.pending_model_change = Some(model.clone());
-            state.current_model = model.clone();
-            // 从 model_provider_map 查找对应提供商，失败则保持当前提供商
             let provider_id = state
                 .model_provider_map
                 .get(&model)
                 .cloned()
                 .or_else(|| state.current_provider_id.clone());
-            state.current_provider_id = provider_id.clone();
-            let _ = agent_tx
-                .send(AgentRequest::SetModel {
-                    model: model.clone(),
-                    provider_id,
-                })
-                .await;
-            crate::ui::app::logic::emit_status_text(
-                state,
-                0,
-                &format!(
-                    "{} {}，{} {}",
-                    crate::core::i18n::t("model.switched", "已切换模型", "Switched to model"),
-                    state.current_model,
-                    crate::core::i18n::t("model.provider", "提供商", "provider"),
-                    state.current_provider_id.as_deref().unwrap_or("?")
-                ),
-            );
+            if request_runtime_model_change(state, model.clone(), provider_id, agent_tx).await {
+                state.current_status_line = Some(format!("Switching to model {}…", model));
+            }
         }
         PaletteAction::SetAgentMode(mode) => {
             state.close_palette();
@@ -504,80 +591,37 @@ pub(crate) async fn execute_palette_action(
                 .send(AgentRequest::SetApprovalMode(approval_mode))
                 .await;
         }
-        PaletteAction::SetContextWindow(size_str) => {
+        PaletteAction::SetContextWindow(selection) => {
             state.close_palette();
-            if size_str == "auto" {
-                state.context_window_override = None;
-                state.current_status_line = Some("Context Window: auto".to_string());
-                tokio::spawn(async move {
-                    if let Ok(mgr) = crate::core::config::settings_manager::SettingsManager::new() {
-                        if let Ok(mut settings) = mgr.load_user_settings().await {
-                            settings.context_window = None;
-                            let _ = mgr.save_user_settings(&settings).await;
-                        }
-                    }
-                });
-            } else if size_str == "custom" {
-                // Show input modal for custom context window
-                state.enter_input_modal();
-                state.input_modal_title = "Context Window Size".to_string();
-                state.input_modal_prompt =
-                    "Enter context window size (e.g. 128k, 200k, 512k, 1M, 2000000):".to_string();
-                state.input_modal_value = String::new();
-                let mut textarea = tui_textarea::TextArea::default();
-                textarea.set_cursor_line_style(ratatui::style::Style::default());
-                textarea.set_placeholder_text("128k");
-                textarea.set_cursor_style(
-                    ratatui::style::Style::default()
-                        .add_modifier(ratatui::style::Modifier::REVERSED),
-                );
-                state.modal_textarea = textarea;
-                state.input_context = Some(crate::ui::state::palette::InputContext::ContextWindow);
-            } else {
-                // Parse preset like "128k", "1M"
-                let tokens = parse_context_window_str(&size_str);
-                if let Some(tokens) = tokens {
-                    state.context_window_override = Some(tokens);
-                    state.current_status_line = Some(format!("Context Window: {}k", tokens / 1000));
-                    tokio::spawn(async move {
-                        if let Ok(mgr) =
-                            crate::core::config::settings_manager::SettingsManager::new()
-                        {
-                            if let Ok(mut settings) = mgr.load_user_settings().await {
-                                settings.context_window = Some(tokens);
-                                let _ = mgr.save_user_settings(&settings).await;
-                            }
-                        }
-                    });
-                }
+            if request_runtime_settings(state, None, Some(selection), None, agent_tx).await {
+                state.current_status_line = Some(format!(
+                    "Requesting context window {}…",
+                    selection.display()
+                ));
             }
         }
-        PaletteAction::SetThinkingEffort(level) => {
+        PaletteAction::InputContextWindow => {
             state.close_palette();
-            let effort = match level.as_str() {
-                "low" => crate::types::ThinkingEffort::Low,
-                "medium" => crate::types::ThinkingEffort::Medium,
-                "high" => crate::types::ThinkingEffort::High,
-                _ => crate::types::ThinkingEffort::Off,
-            };
-            state.thinking_effort = effort;
-            // 让档位真的生效：不通知 agent 的话，这里改的只是显示。
-            let _ = agent_tx
-                .send(AgentRequest::SetThinkingEffort(
-                    state.thinking_effort.clone(),
-                ))
-                .await;
-            // Persist to user settings
-            let effort_str = state.thinking_effort.as_str().to_string();
-            tokio::spawn(async move {
-                if let Ok(mgr) = crate::core::config::settings_manager::SettingsManager::new() {
-                    if let Ok(mut settings) = mgr.load_user_settings().await {
-                        settings.thinking_effort = Some(effort_str);
-                        let _ = mgr.save_user_settings(&settings).await;
-                    }
-                }
-            });
-            state.current_status_line = Some(state.thinking_effort.notification_text());
+            state.enter_input_modal();
+            state.input_modal_title = "Context Window Size".to_string();
+            state.input_modal_prompt =
+                "Enter a positive size (e.g. 128k, 1M, 1048576), or auto:".to_string();
+            state.input_modal_value = String::new();
+            let mut textarea = tui_textarea::TextArea::default();
+            textarea.set_cursor_line_style(ratatui::style::Style::default());
+            textarea.set_placeholder_text("128k");
+            textarea.set_cursor_style(
+                ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+            );
+            state.modal_textarea = textarea;
+            state.input_context = Some(crate::ui::state::palette::InputContext::ContextWindow);
+        }
+        PaletteAction::SetThinkingEffort(effort) => {
+            state.close_palette();
+            if request_runtime_settings(state, None, None, Some(effort.clone()), agent_tx).await {
+                state.current_status_line =
+                    Some(format!("Requesting {}…", effort.notification_text()));
+            }
         }
         PaletteAction::SetTheme(theme_name) => {
             state.close_palette();
@@ -1353,7 +1397,7 @@ pub async fn handle_key_event(
             }
             if ch.eq_ignore_ascii_case(&'t') {
                 let cap = crate::core::config::models::thinking_capability(&state.current_model);
-                state.thinking_effort = match cap {
+                let effort = match cap {
                     crate::core::config::models::ThinkingCapability::Binary => {
                         // Binary models: Off ↔ Medium (On)
                         match state.thinking_effort {
@@ -1365,37 +1409,21 @@ pub async fn handle_key_event(
                     }
                     _ => state.thinking_effort.next(),
                 };
-                // 当前模型根本没有思考开关时说清楚，否则用户会以为档位没生效
+                // 当前模型根本没有思考开关时说清楚，否则用户会以为档位没生效。
                 let unsupported =
                     matches!(cap, crate::core::config::models::ThinkingCapability::None);
-                // 措辞统一走 `notification_text()`：Alt+T / `/effort` / 命令面板三条路径
-                // 原来各写一套（"Thinking: Medium" / "✅ Thinking effort: Medium"），
-                // 用户看不出是同一个档位。对标 Claude Code 的 `◐ medium · /effort`。
-                state.current_status_line = Some(format!(
-                    "{}{}",
-                    state.thinking_effort.notification_text(),
-                    if unsupported {
-                        " · current model has no thinking mode"
-                    } else {
-                        ""
-                    }
-                ));
-                // 让档位真的生效：不通知 agent 的话，这里改的只是显示。
-                let _ = agent_tx
-                    .send(AgentRequest::SetThinkingEffort(
-                        state.thinking_effort.clone(),
-                    ))
-                    .await;
-                // Persist to user settings
-                let effort_str = state.thinking_effort.as_str().to_string();
-                tokio::spawn(async move {
-                    if let Ok(mgr) = crate::core::config::settings_manager::SettingsManager::new() {
-                        if let Ok(mut settings) = mgr.load_user_settings().await {
-                            settings.thinking_effort = Some(effort_str);
-                            let _ = mgr.save_user_settings(&settings).await;
+                if request_runtime_settings(state, None, None, Some(effort.clone()), agent_tx).await
+                {
+                    state.current_status_line = Some(format!(
+                        "Requesting {}{}",
+                        effort.notification_text(),
+                        if unsupported {
+                            " · current model has no thinking mode"
+                        } else {
+                            ""
                         }
-                    }
-                });
+                    ));
+                }
                 return Ok(());
             }
         }
@@ -1695,16 +1723,17 @@ pub async fn handle_key_event(
                         execute_palette_action(state, action, agent_tx).await?;
                     }
                     if let Some(model) = state.pending_model_change.take() {
-                        state.current_model = model.clone();
                         let provider_id = state
                             .model_provider_map
                             .get(&model)
                             .cloned()
                             .or_else(|| state.current_provider_id.clone());
-                        state.current_provider_id = provider_id.clone();
-                        let _ = agent_tx
-                            .send(AgentRequest::SetModel { model, provider_id })
-                            .await;
+                        if request_runtime_model_change(state, model.clone(), provider_id, agent_tx)
+                            .await
+                        {
+                            state.current_status_line =
+                                Some(format!("Switching to model {}…", model));
+                        }
                     }
                     return Ok(());
                 }
@@ -1728,34 +1757,29 @@ pub async fn handle_key_event(
                 // Confirm model switch
                 if let Some(model) = state.pending_model_change.clone() {
                     state.pending_model_confirmation = false;
-                    state.current_model = model.clone();
                     let provider_id = state
                         .model_provider_map
                         .get(&model)
                         .cloned()
                         .or_else(|| state.current_provider_id.clone());
-                    state.current_provider_id = provider_id.clone();
-                    let _ = agent_tx
-                        .send(AgentRequest::SetModel {
-                            model: model.clone(),
-                            provider_id,
-                        })
-                        .await;
-                    crate::ui::app::logic::emit_status_text(
+                    if request_runtime_model_change(
                         state,
-                        0,
-                        &format!(
-                            "{} {}，{} {}",
-                            crate::core::i18n::t(
-                                "model.switched",
-                                "已切换模型",
-                                "Switched to model"
+                        model.clone(),
+                        provider_id.clone(),
+                        agent_tx,
+                    )
+                    .await
+                    {
+                        crate::ui::app::logic::emit_status_text(
+                            state,
+                            0,
+                            &format!(
+                                "Requesting model {} (provider {})…",
+                                model,
+                                provider_id.as_deref().unwrap_or("default")
                             ),
-                            state.current_model,
-                            crate::core::i18n::t("model.provider", "提供商", "provider"),
-                            state.current_provider_id.as_deref().unwrap_or("?")
-                        ),
-                    );
+                        );
+                    }
                 }
                 return Ok(());
             }
@@ -1935,21 +1959,13 @@ pub async fn handle_key_event(
                     let model_name = model_name.trim();
                     if !model_name.is_empty() {
                         reset_main_textarea(state);
-                        state.current_model = model_name.to_string();
-                        // 与 palette 路径同口径：优先用 model_provider_map 解析提供商
+                        // 与 palette 路径同口径：优先用 model_provider_map 解析提供商。
                         let provider_id = state
                             .model_provider_map
                             .get(model_name)
                             .cloned()
                             .or_else(|| state.current_provider_id.clone());
-                        state.current_provider_id = provider_id.clone();
-                        let _ = agent_tx
-                            .send(AgentRequest::SetModel {
-                                model: model_name.to_string(),
-                                provider_id,
-                            })
-                            .await;
-                        // 已获取过模型列表时做校验提示（仍允许自定义名称）
+                        // 已获取过模型列表时做校验提示（仍允许自定义名称）。
                         let known = state.available_models.is_empty()
                             || state.available_models.iter().any(|m| m == model_name);
                         let note = if known {
@@ -1964,20 +1980,20 @@ pub async fn handle_key_event(
                                 )
                             )
                         };
-                        crate::ui::app::logic::emit_status_text(
+                        if request_runtime_model_change(
                             state,
-                            0,
-                            &format!(
-                                "{}{}{}",
-                                crate::core::i18n::t(
-                                    "ui.model.switched_to",
-                                    "已切换到模型 ",
-                                    "Switched to model ",
-                                ),
-                                model_name,
-                                note,
-                            ),
-                        );
+                            model_name.to_string(),
+                            provider_id,
+                            agent_tx,
+                        )
+                        .await
+                        {
+                            crate::ui::app::logic::emit_status_text(
+                                state,
+                                0,
+                                &format!("Requesting model {}{}…", model_name, note),
+                            );
+                        }
                         return Ok(());
                     }
                 }
@@ -3093,26 +3109,29 @@ async fn handle_input_modal(
                     }
                     crate::ui::state::palette::InputContext::ContextWindow => {
                         let input = state.input_modal_value.trim().to_string();
-                        let tokens = parse_context_window_str(&input);
-                        if let Some(tokens) = tokens {
-                            state.context_window_override = Some(tokens);
-                            state.current_status_line =
-                                Some(format!("Context Window: {}k", tokens / 1000));
-                            tokio::spawn(async move {
-                                if let Ok(mgr) =
-                                    crate::core::config::settings_manager::SettingsManager::new()
+                        match crate::core::context_policy::ContextWindowSelection::parse(&input) {
+                            Ok(selection) => {
+                                state.exit_input_modal();
+                                if request_runtime_settings(
+                                    state,
+                                    None,
+                                    Some(selection),
+                                    None,
+                                    agent_tx,
+                                )
+                                .await
                                 {
-                                    if let Ok(mut settings) = mgr.load_user_settings().await {
-                                        settings.context_window = Some(tokens);
-                                        let _ = mgr.save_user_settings(&settings).await;
-                                    }
+                                    state.current_status_line = Some(format!(
+                                        "Requesting context window {}…",
+                                        selection.display()
+                                    ));
                                 }
-                            });
-                        } else {
-                            state.current_status_line =
-                                Some("Invalid context window size. Use e.g. 128k, 1M".to_string());
+                            }
+                            Err(error) => {
+                                state.current_status_line =
+                                    Some(format!("Invalid context window size: {}.", error));
+                            }
                         }
-                        state.exit_input_modal();
                     }
                     crate::ui::state::palette::InputContext::ModelName => {
                         let model = state.input_modal_value.trim().to_string();
@@ -3138,31 +3157,24 @@ async fn handle_input_modal(
                             .cloned()
                             .or_else(|| state.current_provider_id.clone());
                         state.pending_model_confirmation = false;
-                        state.pending_model_change = Some(model.clone());
-                        state.current_model = model.clone();
-                        state.current_provider_id = provider_id.clone();
-                        // 手动指定的模型不在列表里时，thinking 支持情况未知
-                        state.current_model_supports_thinking = state
-                            .available_models_info
-                            .iter()
-                            .find(|m| m.id == model)
-                            .and_then(|m| m.supports_thinking);
-
-                        let _ = agent_tx
-                            .send(AgentRequest::SetModel {
-                                model: model.clone(),
-                                provider_id: provider_id.clone(),
-                            })
-                            .await;
-                        crate::ui::app::logic::emit_status_text(
+                        if request_runtime_model_change(
                             state,
-                            0,
-                            &format!(
-                                "Model set to {} (provider {})",
-                                model,
-                                provider_id.as_deref().unwrap_or("default")
-                            ),
-                        );
+                            model.clone(),
+                            provider_id.clone(),
+                            agent_tx,
+                        )
+                        .await
+                        {
+                            crate::ui::app::logic::emit_status_text(
+                                state,
+                                0,
+                                &format!(
+                                    "Requesting model {} (provider {})…",
+                                    model,
+                                    provider_id.as_deref().unwrap_or("default")
+                                ),
+                            );
+                        }
                     }
                     crate::ui::state::palette::InputContext::AddProviderId { provider_type } => {
                         let provider_id = state
@@ -3496,21 +3508,6 @@ async fn handle_paste(
     Ok(true)
 }
 
-/// Parse a context window size string like "128k", "1M", "2000000" into tokens.
-fn parse_context_window_str(s: &str) -> Option<u32> {
-    let s = s.trim().to_lowercase();
-    if s.is_empty() {
-        return None;
-    }
-    if let Some(num_str) = s.strip_suffix('k') {
-        num_str.parse::<u32>().ok().map(|v| v * 1000)
-    } else if let Some(num_str) = s.strip_suffix('m') {
-        num_str.parse::<u32>().ok().map(|v| v * 1_000_000)
-    } else {
-        s.parse::<u32>().ok()
-    }
-}
-
 /// Find the nearest ToolCall entry to the current viewport center for keyboard toggle.
 /// Returns the index into chat_history, or None if no ToolCall entry is visible.
 fn find_focused_tool_entry(state: &ChatState) -> Option<usize> {
@@ -3755,5 +3752,62 @@ mod tests {
 
         assert!(!restore_queued_messages_to_input(&mut state));
         assert_eq!(state.input, "draft");
+    }
+
+    #[tokio::test]
+    async fn session_only_runtime_requests_keep_revisions_without_persistence_state() {
+        let mut state = ChatState::new();
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
+        let revision = request_runtime_settings_with_persistence_revision(
+            &mut state,
+            Some(crate::runtime::messages::RuntimeModelSelection {
+                model: "fast-model".to_string(),
+                provider_id: Some("provider-a".to_string()),
+            }),
+            None,
+            None,
+            crate::runtime::messages::RuntimeSettingsPersistencePolicy::SessionOnly,
+            &agent_tx,
+        )
+        .await;
+
+        assert_eq!(revision, Some(1));
+        assert!(state.runtime_settings_persistence.is_none());
+        match agent_rx.recv().await {
+            Some(AgentRequest::UpdateRuntimeSettings(mutation)) => {
+                assert_eq!(mutation.ui_revision, 1);
+                assert_eq!(
+                    mutation.persistence,
+                    crate::runtime::messages::RuntimeSettingsPersistencePolicy::SessionOnly
+                );
+            }
+            request => panic!("unexpected request: {request:?}"),
+        }
+
+        let (closed_tx, closed_rx) = mpsc::channel(1);
+        drop(closed_rx);
+        assert_eq!(
+            request_runtime_settings_with_persistence_revision(
+                &mut state,
+                None,
+                None,
+                Some(crate::types::ThinkingEffort::High),
+                crate::runtime::messages::RuntimeSettingsPersistencePolicy::SessionOnly,
+                &closed_tx,
+            )
+            .await,
+            None
+        );
+        assert_eq!(state.pending_runtime_settings.len(), 1);
+        assert_eq!(
+            state
+                .requested_runtime_settings
+                .as_ref()
+                .unwrap()
+                .model
+                .model,
+            "fast-model"
+        );
+        assert!(state.runtime_settings_persistence.is_none());
     }
 }

@@ -298,6 +298,12 @@ impl Agent {
 
             // Run the main agentic loop in a background task
             let mut agent_for_loop = Agent::new(self.client.clone(), self.config.clone());
+            // fresh Agent 承担本条消息的实际工具循环，必须先安装 worker 已冻结的
+            // 快照，避免构造期 Config 或全局状态覆写本轮 context/thinking 设置。
+            agent_for_loop.apply_runtime_snapshot(
+                self.context_policy.clone(),
+                self.thinking_effort.clone(),
+            );
             agent_for_loop.event_tx = self.event_tx.clone();
             agent_for_loop.stream_tx = self.stream_tx.clone();
             agent_for_loop.approval_mode = self.approval_mode.clone();
@@ -393,7 +399,8 @@ impl Agent {
     pub async fn run(
         &mut self,
         user_input: &str,
-    ) -> Result<(String, Option<crate::types::StarUsage>), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(String, Option<crate::types::StarUsage>), Box<dyn std::error::Error + Send + Sync>>
+    {
         crate::utils::logging::append_debug_log_line("[DEBUG] Agent::run: Starting");
         use futures::StreamExt;
         let mut stream = self.run_stream(user_input.to_string());

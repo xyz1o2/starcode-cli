@@ -14,6 +14,7 @@ pub mod chrome;
 pub mod computer_use;
 pub mod config;
 pub mod confirmation_bus;
+pub mod context_policy;
 pub mod coordinator;
 pub mod daemon;
 pub mod deep_link;

@@ -2,7 +2,7 @@ use crate::agent::messaging::AsyncMessageQueue;
 use crate::agent::StarAgent;
 use crate::core::confirmation_bus::types::{Message, MessageBusType, ToolConfirmationResponse};
 use crate::runtime::messages::{
-    AgentRequest, PendingCheckpointAction, StreamMessage, StreamStartKind,
+    AgentRequest, PendingCheckpointAction, RuntimeSettingsMutation, StreamMessage, StreamStartKind,
 };
 use crate::utils::logging::append_debug_log_line;
 use std::collections::VecDeque;
@@ -40,7 +40,9 @@ enum DeferredContextAction {
 
 #[derive(Default)]
 pub struct DeferredRuntimeActions {
-    pub deferred_model: Option<(String, Option<String>)>,
+    /// 运行时设置必须保留 UI 到达顺序：在流式回合结束后逐项确认，绝不能把
+    /// 模型和 thinking 的最新值各自覆盖成两条无序的副作用。
+    pending_runtime_settings: VecDeque<RuntimeSettingsMutation>,
     /// `Some(force)` = 流式期间来过 ListModels，回合结束后补上（force 语义见
     /// `AgentRequest::ListModels`）；多次请求里只要有一次 force 就按 force 算。
     pub pending_models_request: Option<bool>,
@@ -50,7 +52,6 @@ pub struct DeferredRuntimeActions {
     pub pending_mcp_list_tools: Option<String>,
     pub pending_toggle_yolo: bool,
     pub pending_set_approval_mode: Option<crate::types::ApprovalMode>,
-    pub pending_set_thinking_effort: Option<crate::types::ThinkingEffort>,
     pub pending_tool_confirmation: Option<(Vec<crate::types::StarToolCall>, u64, bool, bool)>,
     pub pending_checkpoint_action: Option<PendingCheckpointAction>,
     pub pending_update_provider_config: Option<(
@@ -135,28 +136,25 @@ pub async fn handle_streaming_request(
             StreamingRequestOutcome::Shutdown
         }
         Some(AgentRequest::LoadConfiguredProviders) => {
+            // provider 列表仅供 UI 菜单显示；不得在流式回合内从磁盘重置已冻结的
+            // runtime model/provider，也不发送会冒充 active 状态的旧消息。
             let store = crate::core::config::provider_store::ProviderStore::new();
-            if let Ok(config) = store.load().await {
-                let ids = store.configured_provider_ids().await.unwrap_or_default();
-                let _ = context
-                    .tx
-                    .send(StreamMessage::ConfiguredProviders(ids))
-                    .await;
-
-                let current_provider_id = config.active_provider_id;
-                let _ = context
-                    .tx
-                    .send(StreamMessage::CurrentModelChanged {
-                        model: context.current_model_snapshot.to_string(),
-                        provider_id: current_provider_id,
-                    })
-                    .await;
-            }
+            let ids = store.configured_provider_ids().await.unwrap_or_default();
+            let _ = context
+                .tx
+                .send(StreamMessage::ConfiguredProviders(ids))
+                .await;
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::SetModel { model, provider_id })
         | Some(AgentRequest::UpdateModel { model, provider_id }) => {
-            deferred.deferred_model = Some((model, provider_id));
+            deferred
+                .pending_runtime_settings
+                .push_back(RuntimeSettingsMutation::legacy_model(model, provider_id));
+            StreamingRequestOutcome::Continue
+        }
+        Some(AgentRequest::UpdateRuntimeSettings(mutation)) => {
+            deferred.pending_runtime_settings.push_back(mutation);
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::ListModels { force }) => {
@@ -270,7 +268,9 @@ pub async fn handle_streaming_request(
             // 本轮跑完再生效。中途打开思考会让接下来的一次请求带上
             // thinking 参数，而历史里已经有不含 thinking block 的
             // assistant 轮次 —— Anthropic 会因此报错。
-            deferred.pending_set_thinking_effort = Some(effort);
+            deferred
+                .pending_runtime_settings
+                .push_back(RuntimeSettingsMutation::legacy_thinking_effort(effort));
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::ListCheckpoints { message_id }) => {
@@ -426,6 +426,391 @@ pub async fn apply_deferred_context_actions(
     None
 }
 
+/// 按 UI 到达顺序安装本轮结束后才可生效的设置，并为每项发送终态确认。
+#[derive(Default)]
+struct RuntimeSettingFields {
+    model: bool,
+    context_window: bool,
+    thinking_effort: bool,
+}
+
+impl RuntimeSettingFields {
+    fn from_mutation(mutation: &RuntimeSettingsMutation) -> Self {
+        Self {
+            model: mutation.model.is_some(),
+            context_window: mutation.context_window.is_some(),
+            thinking_effort: mutation.thinking_effort.is_some(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.model && !self.context_window && !self.thinking_effort
+    }
+
+    fn cover(&mut self, mutation: &RuntimeSettingsMutation) {
+        self.model |= mutation.model.is_some();
+        self.context_window |= mutation.context_window.is_some();
+        self.thinking_effort |= mutation.thinking_effort.is_some();
+    }
+
+    fn covers(&self, fields: &Self) -> bool {
+        (!fields.model || self.model)
+            && (!fields.context_window || self.context_window)
+            && (!fields.thinking_effort || self.thinking_effort)
+    }
+}
+
+/// 只有 revisioned 请求才参与 supersession：旧协议讯息既不能成为候选项，也不该
+/// 覆盖新 UI 意图。持久化请求还要求后续的 persistent 更新覆盖每一个字段，避免
+/// 丢掉用户最后一次需要写盘的意图。
+fn is_fully_superseded<'a>(
+    candidate: &RuntimeSettingsMutation,
+    later_mutations: impl Iterator<Item = &'a RuntimeSettingsMutation>,
+) -> bool {
+    if candidate.ui_revision == RuntimeSettingsMutation::LEGACY_UI_REVISION {
+        return false;
+    }
+    let candidate_fields = RuntimeSettingFields::from_mutation(candidate);
+    if candidate_fields.is_empty() {
+        return false;
+    }
+
+    let mut all_later_fields = RuntimeSettingFields::default();
+    let mut persistent_later_fields = RuntimeSettingFields::default();
+    for later in later_mutations {
+        if later.ui_revision == RuntimeSettingsMutation::LEGACY_UI_REVISION {
+            continue;
+        }
+        all_later_fields.cover(later);
+        if later.persistence
+            == crate::runtime::messages::RuntimeSettingsPersistencePolicy::Persistent
+        {
+            persistent_later_fields.cover(later);
+        }
+    }
+
+    all_later_fields.covers(&candidate_fields)
+        && (candidate.persistence
+            != crate::runtime::messages::RuntimeSettingsPersistencePolicy::Persistent
+            || persistent_later_fields.covers(&candidate_fields))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::context_policy::ContextWindowSelection;
+    use crate::runtime::messages::{
+        RuntimeModelSelection, RuntimeSettingsMutation, RuntimeSettingsPersistencePolicy,
+    };
+    use crate::types::ThinkingEffort;
+    use std::sync::atomic::AtomicBool;
+
+    fn mutation(
+        ui_revision: u64,
+        persistence: RuntimeSettingsPersistencePolicy,
+        model: bool,
+        context_window: bool,
+        thinking_effort: bool,
+    ) -> RuntimeSettingsMutation {
+        RuntimeSettingsMutation {
+            ui_revision,
+            persistence,
+            model: model.then(|| RuntimeModelSelection {
+                model: format!("model-{ui_revision}"),
+                provider_id: Some("test-provider".to_string()),
+            }),
+            context_window: context_window
+                .then_some(ContextWindowSelection::Fixed(200_000 + ui_revision as u32)),
+            thinking_effort: thinking_effort.then_some(ThinkingEffort::High),
+        }
+    }
+
+    #[test]
+    fn runtime_setting_supersession_requires_full_field_and_persistence_coverage() {
+        use RuntimeSettingsPersistencePolicy::{Persistent, SessionOnly};
+
+        let cases = [
+            (
+                mutation(1, Persistent, true, false, false),
+                vec![mutation(2, Persistent, true, false, false)],
+                true,
+                "persistent same field",
+            ),
+            (
+                mutation(1, SessionOnly, true, false, false),
+                vec![mutation(2, Persistent, true, false, false)],
+                true,
+                "session-only replaced persistently",
+            ),
+            (
+                mutation(1, Persistent, true, false, false),
+                vec![mutation(2, SessionOnly, true, false, false)],
+                false,
+                "persistent intent cannot be replaced session-only",
+            ),
+            (
+                mutation(1, Persistent, true, false, false),
+                vec![mutation(2, Persistent, false, false, true)],
+                false,
+                "disjoint fields",
+            ),
+            (
+                mutation(1, Persistent, true, true, false),
+                vec![mutation(2, Persistent, true, false, false)],
+                false,
+                "partial coverage",
+            ),
+            (
+                mutation(1, Persistent, true, true, false),
+                vec![
+                    mutation(2, Persistent, true, false, false),
+                    mutation(3, Persistent, false, true, false),
+                ],
+                true,
+                "collective persistent coverage",
+            ),
+            (
+                mutation(1, Persistent, true, true, false),
+                vec![
+                    mutation(2, Persistent, true, false, false),
+                    mutation(3, SessionOnly, false, true, false),
+                ],
+                false,
+                "collective runtime coverage without persistence coverage",
+            ),
+        ];
+
+        for (candidate, later, expected, label) in cases {
+            assert_eq!(
+                is_fully_superseded(&candidate, later.iter()),
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_and_empty_runtime_mutations_are_never_superseded() {
+        use RuntimeSettingsPersistencePolicy::Persistent;
+
+        let legacy = mutation(
+            RuntimeSettingsMutation::LEGACY_UI_REVISION,
+            Persistent,
+            true,
+            false,
+            false,
+        );
+        assert!(!is_fully_superseded(
+            &legacy,
+            [mutation(1, Persistent, true, false, false)].iter()
+        ));
+
+        let candidate = mutation(1, Persistent, true, false, false);
+        assert!(!is_fully_superseded(
+            &candidate,
+            [mutation(
+                RuntimeSettingsMutation::LEGACY_UI_REVISION,
+                Persistent,
+                true,
+                false,
+                false,
+            )]
+            .iter()
+        ));
+
+        let empty = mutation(1, Persistent, false, false, false);
+        assert!(!is_fully_superseded(
+            &empty,
+            [mutation(2, Persistent, true, false, false)].iter()
+        ));
+    }
+
+    #[tokio::test]
+    async fn deferred_runtime_settings_acknowledge_supersession_before_applying_survivor() {
+        use RuntimeSettingsPersistencePolicy::SessionOnly;
+
+        let mut agent = crate::agent::StarAgent::new_for_runtime_settings_test().await;
+        let mut deferred = DeferredRuntimeActions::default();
+        deferred
+            .pending_runtime_settings
+            .push_back(mutation(1, SessionOnly, false, true, false));
+        deferred
+            .pending_runtime_settings
+            .push_back(mutation(2, SessionOnly, false, true, false));
+        let (tx, mut rx) = mpsc::channel(3);
+
+        apply_deferred_runtime_settings(&mut agent, &mut deferred, &tx).await;
+
+        let first = rx.recv().await.expect("superseded acknowledgement");
+        let second = rx.recv().await.expect("surviving acknowledgement");
+        let StreamMessage::RuntimeSettingsAcknowledged(first) = first else {
+            panic!("expected first runtime settings acknowledgement");
+        };
+        let StreamMessage::RuntimeSettingsAcknowledged(second) = second else {
+            panic!("expected second runtime settings acknowledgement");
+        };
+
+        assert_eq!(
+            (
+                first.ui_revision,
+                first.outcome,
+                first.snapshot.runtime_revision
+            ),
+            (
+                1,
+                crate::core::context_policy::RuntimeSettingOutcome::Superseded,
+                0
+            )
+        );
+        assert_eq!(
+            (
+                second.ui_revision,
+                second.outcome,
+                second.snapshot.runtime_revision
+            ),
+            (
+                2,
+                crate::core::context_policy::RuntimeSettingOutcome::Applied,
+                1
+            )
+        );
+        assert_eq!(
+            second.snapshot.active.context_policy.selection,
+            ContextWindowSelection::Fixed(200_002)
+        );
+        assert!(deferred.pending_runtime_settings.is_empty());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), rx.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_disjoint_runtime_settings_apply_in_fifo_order() {
+        use RuntimeSettingsPersistencePolicy::SessionOnly;
+
+        let mut agent = crate::agent::StarAgent::new_for_runtime_settings_test().await;
+        let mut deferred = DeferredRuntimeActions::default();
+        deferred
+            .pending_runtime_settings
+            .push_back(mutation(1, SessionOnly, false, true, false));
+        deferred
+            .pending_runtime_settings
+            .push_back(mutation(2, SessionOnly, false, false, true));
+        let (tx, mut rx) = mpsc::channel(3);
+
+        apply_deferred_runtime_settings(&mut agent, &mut deferred, &tx).await;
+
+        let first = rx.recv().await.expect("first runtime acknowledgement");
+        let second = rx.recv().await.expect("second runtime acknowledgement");
+        let StreamMessage::RuntimeSettingsAcknowledged(first) = first else {
+            panic!("expected first runtime settings acknowledgement");
+        };
+        let StreamMessage::RuntimeSettingsAcknowledged(second) = second else {
+            panic!("expected second runtime settings acknowledgement");
+        };
+
+        assert_eq!(
+            (
+                first.ui_revision,
+                first.outcome,
+                first.snapshot.runtime_revision
+            ),
+            (
+                1,
+                crate::core::context_policy::RuntimeSettingOutcome::Applied,
+                1
+            )
+        );
+        assert_eq!(
+            first.snapshot.active.context_policy.selection,
+            ContextWindowSelection::Fixed(200_001)
+        );
+        assert_eq!(
+            (
+                second.ui_revision,
+                second.outcome,
+                second.snapshot.runtime_revision
+            ),
+            (
+                2,
+                crate::core::context_policy::RuntimeSettingOutcome::Applied,
+                2
+            )
+        );
+        assert_eq!(
+            second.snapshot.active.context_policy.selection,
+            ContextWindowSelection::Fixed(200_001)
+        );
+        assert_eq!(second.snapshot.active.thinking_effort, ThinkingEffort::High);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), rx.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_provider_loading_emits_metadata_only() {
+        let mut deferred = DeferredRuntimeActions::default();
+        let (tx, mut rx) = mpsc::channel(1);
+        let steering_queue = Arc::new(AsyncMessageQueue::new());
+        let steering_signal = Arc::new(Notify::new());
+        let message_bus = Arc::new(crate::core::confirmation_bus::MessageBus::new(
+            crate::core::policy::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let abort_flag = Arc::new(AtomicBool::new(false));
+
+        let outcome = handle_streaming_request(
+            &mut deferred,
+            Some(AgentRequest::LoadConfiguredProviders),
+            StreamingRequestContext {
+                tx: &tx,
+                message_id: 7,
+                user_message: "test",
+                current_model_snapshot: "active-model",
+                project_root: None,
+                abort_flag: &abort_flag,
+                steering_queue: &steering_queue,
+                steering_signal: &steering_signal,
+                message_bus: &message_bus,
+            },
+        )
+        .await;
+
+        assert_eq!(outcome, StreamingRequestOutcome::Continue);
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamMessage::ConfiguredProviders(_))
+        ));
+        assert!(deferred.pending_runtime_settings.is_empty());
+    }
+}
+
+pub async fn apply_deferred_runtime_settings(
+    agent: &mut StarAgent,
+    deferred: &mut DeferredRuntimeActions,
+    tx: &mpsc::Sender<StreamMessage>,
+) {
+    while let Some(mutation) = deferred.pending_runtime_settings.pop_front() {
+        if is_fully_superseded(&mutation, deferred.pending_runtime_settings.iter()) {
+            crate::runtime::control_requests::acknowledge_superseded_runtime_settings(
+                agent,
+                tx,
+                mutation.ui_revision,
+            )
+            .await;
+        } else {
+            crate::runtime::control_requests::apply_runtime_settings_and_persist(
+                agent, tx, mutation,
+            )
+            .await;
+        }
+    }
+}
+
 pub async fn apply_deferred_runtime_actions(
     agent: &mut StarAgent,
     deferred: &mut DeferredRuntimeActions,
@@ -477,11 +862,7 @@ pub async fn apply_deferred_runtime_actions(
         }
     }
 
-    if let Some((model, provider_id)) = deferred.deferred_model.take() {
-        agent
-            .set_model_with_provider(&model, provider_id.as_deref())
-            .await;
-    }
+    apply_deferred_runtime_settings(agent, deferred, tx).await;
 
     if let Some(force) = deferred.pending_models_request.take() {
         match agent.list_models_cached(force).await {
@@ -591,14 +972,6 @@ pub async fn apply_deferred_runtime_actions(
     if let Some(mode) = deferred.pending_set_approval_mode.take() {
         agent.set_approval_mode(mode.clone());
         let _ = tx.send(StreamMessage::ApprovalModeChanged { mode }).await;
-    }
-
-    if let Some(effort) = deferred.pending_set_thinking_effort.take() {
-        crate::llm::thinking::set_session_effort(&effort);
-        crate::utils::logging::append_agent_log_line(&format!(
-            "[AgentRuntime] thinking effort -> {} (deferred)",
-            effort.as_str()
-        ));
     }
 
     if let Some((tool_calls, message_id, approved, always_allow)) =

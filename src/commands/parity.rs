@@ -3729,11 +3729,15 @@ pub async fn extra_usage(mut ctx: CommandContext<'_>, _args: &[String]) -> Comma
         .current_provider_id
         .clone()
         .unwrap_or_else(|| "-".to_string());
+    let provider_id = crate::ui::utils::status::current_provider_id(ctx.state);
     let window = ctx
         .state
         .context_window_override
         .or_else(|| {
-            crate::agent::model_catalog::get_cached_context_window(&ctx.state.current_model)
+            crate::agent::model_catalog::get_cached_context_window(
+                provider_id.as_deref(),
+                &ctx.state.current_model,
+            )
         })
         .or_else(|| {
             std::env::var("STAR_CONTEXT_WINDOW")
@@ -4716,9 +4720,15 @@ fn perf_report_runtime(ctx: &CommandContext<'_>) -> String {
     let st = &ctx.state;
     let mut out = String::from("\n### Session counters\n");
 
+    let provider_id = crate::ui::utils::status::current_provider_id(st);
     let window = st
         .context_window_override
-        .or_else(|| crate::agent::model_catalog::get_cached_context_window(&st.current_model))
+        .or_else(|| {
+            crate::agent::model_catalog::get_cached_context_window(
+                provider_id.as_deref(),
+                &st.current_model,
+            )
+        })
         .or_else(|| {
             std::env::var("STAR_CONTEXT_WINDOW")
                 .ok()

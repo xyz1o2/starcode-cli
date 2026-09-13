@@ -10,6 +10,162 @@ use ratatui::{
     Frame,
 };
 
+fn requested_context_selection(
+    state: &ChatState,
+) -> Option<crate::core::context_policy::ContextWindowSelection> {
+    state
+        .requested_runtime_settings
+        .as_ref()
+        .map(|settings| settings.context_window)
+        .or_else(|| {
+            state
+                .confirmed_runtime_settings
+                .as_ref()
+                .map(|snapshot| snapshot.requested.context_window)
+        })
+}
+
+fn context_window_value(state: &ChatState) -> String {
+    let requested = requested_context_selection(state)
+        .map(crate::core::context_policy::ContextWindowSelection::display)
+        .unwrap_or_else(|| "Waiting for worker".to_string());
+    let Some(policy) = state
+        .confirmed_runtime_settings
+        .as_ref()
+        .map(|snapshot| &snapshot.active.context_policy)
+    else {
+        return requested;
+    };
+    let active = crate::core::context_policy::format_context_window(policy.effective_tokens);
+    if policy.selection == requested_context_selection(state).unwrap_or_default()
+        && policy.nominal_tokens == policy.effective_tokens
+    {
+        active
+    } else {
+        format!("{} requested · {} active", requested, active)
+    }
+}
+
+fn setting_outcome_label(
+    outcome: crate::core::context_policy::RuntimeSettingOutcome,
+) -> &'static str {
+    match outcome {
+        crate::core::context_policy::RuntimeSettingOutcome::Applied => "Applied",
+        crate::core::context_policy::RuntimeSettingOutcome::Degraded => "Applied with limits",
+        crate::core::context_policy::RuntimeSettingOutcome::Rejected => "Rejected",
+        crate::core::context_policy::RuntimeSettingOutcome::Failed => "Failed",
+        crate::core::context_policy::RuntimeSettingOutcome::Superseded => "Superseded",
+    }
+}
+
+fn context_window_detail_lines(state: &ChatState) -> Vec<Line<'static>> {
+    let requested = requested_context_selection(state)
+        .map(crate::core::context_policy::ContextWindowSelection::display)
+        .unwrap_or_else(|| "Waiting for worker".to_string());
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Context Window",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::default(),
+        Line::from(Span::styled(
+            format!("Requested: {}", requested),
+            Style::default().fg(Color::White),
+        )),
+    ];
+
+    if let Some(pending) = state
+        .pending_runtime_settings
+        .iter()
+        .rev()
+        .find(|mutation| mutation.context_window.is_some())
+    {
+        let selection = pending
+            .context_window
+            .map(crate::core::context_policy::ContextWindowSelection::display)
+            .unwrap_or_else(|| "unchanged".to_string());
+        lines.push(Line::from(Span::styled(
+            format!("Pending #{}: {}", pending.ui_revision, selection),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    if let Some(snapshot) = state.confirmed_runtime_settings.as_ref() {
+        let policy = &snapshot.active.context_policy;
+        let active = crate::core::context_policy::format_context_window(policy.effective_tokens);
+        lines.push(Line::from(Span::styled(
+            format!("Active: {} ({})", active, policy.source.label()),
+            Style::default().fg(Color::White),
+        )));
+        if policy.nominal_tokens != policy.effective_tokens {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "Selected capacity: {}",
+                    crate::core::context_policy::format_context_window(policy.nominal_tokens)
+                ),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+    }
+
+    if let Some(acknowledgement) = state.last_runtime_settings_ack.as_ref() {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Last result: {}",
+                setting_outcome_label(acknowledgement.outcome)
+            ),
+            Style::default().fg(Color::Gray),
+        )));
+        if let Some(reason) = acknowledgement.reason.as_deref().or(acknowledgement
+            .snapshot
+            .active
+            .context_policy
+            .reason
+            .as_deref())
+        {
+            lines.push(Line::from(Span::styled(
+                reason.to_string(),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+    }
+
+    if let Some(persistence) = state.runtime_settings_persistence.as_ref() {
+        let label = match persistence {
+            crate::ui::state::store::RuntimeSettingsPersistence::Pending { ui_revision } => {
+                format!("Settings file: saving #{}", ui_revision)
+            }
+            crate::ui::state::store::RuntimeSettingsPersistence::Saved { ui_revision } => {
+                format!("Settings file: saved #{}", ui_revision)
+            }
+            crate::ui::state::store::RuntimeSettingsPersistence::Failed {
+                ui_revision,
+                reason,
+            } => format!("Settings file: failed #{} · {}", ui_revision, reason),
+        };
+        lines.push(Line::from(Span::styled(
+            label,
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    lines.extend([
+        Line::default(),
+        Line::from(Span::styled(
+            "Auto follows provider/model capability. Custom values stay exact.",
+            Style::default().fg(Color::Gray),
+        )),
+        Line::default(),
+        Line::from(Span::styled(
+            "Enter to change | Esc to close",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ]);
+    lines
+}
+
 /// Returns the number of setting items (for navigation bounds).
 pub fn settings_item_count() -> usize {
     SETTING_ITEMS.len()
@@ -62,14 +218,8 @@ const SETTING_ITEMS: &[SettingItem] = &[
     SettingItem {
         id: "context_window",
         label: "Context Window",
-        get_value: |s| {
-            if let Some(override_val) = s.context_window_override {
-                format!("{}k (custom)", override_val / 1000)
-            } else {
-                "auto".to_string()
-            }
-        },
-        description: "Override the model's context window size\nAuto: detect from model/API\nCustom: set manually (e.g. 128k, 200k, 1M)",
+        get_value: context_window_value,
+        description: "Choose Auto or an exact capacity; worker confirmation reports the active provider limit.",
     },
     SettingItem {
         id: "theme",
@@ -144,6 +294,9 @@ fn build_detail_lines(state: &ChatState, selected: usize) -> Vec<Line<'static>> 
         return vec![];
     }
     let item = &SETTING_ITEMS[selected];
+    if item.id == "context_window" {
+        return context_window_detail_lines(state);
+    }
     let value = (item.get_value)(state);
     vec![
         Line::from(Span::styled(

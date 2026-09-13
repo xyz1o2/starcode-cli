@@ -910,14 +910,24 @@ impl Agent {
                     error_msg
                 ));
                 if kind == LlmErrorKind::ContextWindow {
-                    crate::agent::model_catalog::halve_cached_context_window(
-                        self.client.get_current_model(),
-                    );
+                    // 单纯溢出不能证明一个精确的新上限；只有 provider 明确报告容量时才写入
+                    // safe-cap cache，避免把一次猜测变成后续会话的事实。
+                    let recorded_cap =
+                        crate::agent::model_catalog::record_provider_safe_context_cap(
+                            self.client.provider_id.as_deref(),
+                            self.client.get_current_model(),
+                            None,
+                        );
+                    let capacity_note = recorded_cap
+                        .map(|cap| format!(" Provider-reported safe capacity: {cap} tokens."))
+                        .unwrap_or_else(|| {
+                            " The provider did not report an exact usable capacity, so no setting was changed."
+                                .to_string()
+                        });
                     LlmResult::Error(AgentEvent::Error(format!(
-                        "Context Overflow: the request exceeded the context window, so the cached \
-                         window size was halved. Retry — compaction will be more aggressive. \
-                         You can also run `/compact` first.\nOriginal error: {}",
-                        err_str
+                        "Context Overflow: the request exceeded the context window.{} Run `/compact` \
+                         before retrying.\nOriginal error: {}",
+                        capacity_note, err_str
                     )))
                 } else {
                     // 带上恢复层放弃的原因，否则用户只看到一句 "Stream error"，

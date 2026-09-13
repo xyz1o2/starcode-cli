@@ -55,15 +55,18 @@ pub async fn status(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResul
 
     // Token 用量
     if let Some(usage) = &ctx.state.token_usage {
-        let ctx_win =
-            crate::agent::model_catalog::get_cached_context_window(&ctx.state.current_model)
-                .map(|c| c as usize)
-                .or_else(|| {
-                    std::env::var("STAR_CONTEXT_WINDOW")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                })
-                .unwrap_or(200_000);
+        let provider_id = crate::ui::utils::status::current_provider_id(ctx.state);
+        let ctx_win = crate::agent::model_catalog::get_cached_context_window(
+            provider_id.as_deref(),
+            &ctx.state.current_model,
+        )
+        .map(|c| c as usize)
+        .or_else(|| {
+            std::env::var("STAR_CONTEXT_WINDOW")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(200_000);
         let pct = if ctx_win > 0 {
             (usage.prompt_tokens as f64 / ctx_win as f64) * 100.0
         } else {
