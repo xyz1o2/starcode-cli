@@ -47,6 +47,7 @@ fn encode(effort: &ThinkingEffort) -> u8 {
         ThinkingEffort::Low => 2,
         ThinkingEffort::Medium => 3,
         ThinkingEffort::High => 4,
+        ThinkingEffort::Xhigh => 5,
     }
 }
 
@@ -56,6 +57,7 @@ fn decode(raw: u8) -> Option<ThinkingEffort> {
         2 => Some(ThinkingEffort::Low),
         3 => Some(ThinkingEffort::Medium),
         4 => Some(ThinkingEffort::High),
+        5 => Some(ThinkingEffort::Xhigh),
         _ => None,
     }
 }
@@ -71,7 +73,9 @@ pub fn parse_effort(raw: &str) -> Option<ThinkingEffort> {
         "off" | "none" | "disable" | "disabled" | "false" | "0" => Some(ThinkingEffort::Off),
         "low" | "minimal" | "think" => Some(ThinkingEffort::Low),
         "medium" | "mid" | "auto" | "on" | "true" => Some(ThinkingEffort::Medium),
-        "high" | "xhigh" | "max" | "ultra" | "ultrathink" => Some(ThinkingEffort::High),
+        "high" => Some(ThinkingEffort::High),
+        // xhigh / max / ultrathink 都归到最高扩展档（对标各家旗舰档位词表）
+        "xhigh" | "max" | "ultra" | "ultrathink" => Some(ThinkingEffort::Xhigh),
         _ => None,
     }
 }
@@ -165,10 +169,14 @@ fn family_minor(model: &str, prefix: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// `output_config.effort` 的支持范围：Fable 系列、Opus 4.5+、Sonnet 4.6+。
-/// Sonnet 4.5 / Haiku 4.5 收到这个字段会报错，所以只能白名单。
+/// `output_config.effort` 的支持范围：Fable 系列、Opus 4.5+、Sonnet 4.6+、
+/// Opus 5 / Sonnet 5 系列。Sonnet 4.5 / Haiku 4.5 收到这个字段会报错，
+/// 所以只能白名单。
 fn anthropic_effort_capable(model: &str) -> bool {
     if model.contains("fable") {
+        return true;
+    }
+    if model.starts_with("claude-opus-5") || model.starts_with("claude-sonnet-5") {
         return true;
     }
     if let Some(minor) = family_minor(model, "claude-opus-4") {
@@ -262,12 +270,48 @@ pub fn resolve_dialect(profile: &ProviderProfile<'_>) -> ThinkingDialect {
 
 // ── 档位 → 参数 ───────────────────────────────────────────────────
 
-/// `low` / `medium` / `high` 三档。`Off` 不会走到这里（调用点已判空）。
+/// `low` / `medium` / `high` / `xhigh` 四个词。`Off` 不会走到这里（调用点已判空）。
 fn effort_word(effort: &ThinkingEffort) -> &'static str {
     match effort {
         ThinkingEffort::Off | ThinkingEffort::Low => "low",
         ThinkingEffort::Medium => "medium",
         ThinkingEffort::High => "high",
+        ThinkingEffort::Xhigh => "xhigh",
+    }
+}
+
+/// `xhigh` 只有旗舰模型认（对标市面做法：扩展档不支持的模型一律 clamp 回
+/// `high`，宁可降档也不要整轮 400）：
+/// - OpenAI 系：`gpt-5.1-codex-max` 及之后（`gpt-6` 系按同规则放行）
+/// - Anthropic：Fable、Opus 4.7+、Opus 5、Sonnet 5+
+/// - 其余兼容端点：无从判断，一律 clamp
+fn supports_xhigh(kind: ProviderKind, model: &str) -> bool {
+    let m = canonical_model(model);
+    if m.contains("codex-max") || m.contains("gpt-6") {
+        return true;
+    }
+    match kind {
+        ProviderKind::Anthropic => {
+            if m.contains("fable") {
+                return true;
+            }
+            if let Some(minor) = family_minor(&m, "claude-opus-4") {
+                return minor >= 7;
+            }
+            if m.starts_with("claude-opus-5") || m.starts_with("claude-sonnet-5") {
+                return true;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// 发到请求体里的最终档位词：`Xhigh` 在不支持的模型上自动降为 `high`。
+fn effective_word(kind: ProviderKind, model: &str, effort: &ThinkingEffort) -> &'static str {
+    match effort {
+        ThinkingEffort::Xhigh if !supports_xhigh(kind, model) => "high",
+        other => effort_word(other),
     }
 }
 
@@ -279,6 +323,7 @@ fn budget_ladder(effort: &ThinkingEffort) -> (u64, u64) {
         ThinkingEffort::Off | ThinkingEffort::Low => (4_096, 16_384),
         ThinkingEffort::Medium => (10_000, 24_576),
         ThinkingEffort::High => (24_576, 32_000),
+        ThinkingEffort::Xhigh => (30_720, 32_000),
     }
 }
 
@@ -318,7 +363,7 @@ pub fn thinking_params(profile: &ProviderProfile<'_>, effort: &ThinkingEffort) -
                     .insert("thinking".to_string(), json!({ "type": "adaptive" }));
                 params.extra.insert(
                     "output_config".to_string(),
-                    json!({ "effort": effort_word(effort) }),
+                    json!({ "effort": effective_word(profile.kind, profile.model, effort) }),
                 );
             }
         }
@@ -334,16 +379,17 @@ pub fn thinking_params(profile: &ProviderProfile<'_>, effort: &ThinkingEffort) -
         }
         ThinkingDialect::OpenAiEffort => {
             if on {
-                params
-                    .extra
-                    .insert("reasoning_effort".to_string(), json!(effort_word(effort)));
+                params.extra.insert(
+                    "reasoning_effort".to_string(),
+                    json!(effective_word(profile.kind, profile.model, effort)),
+                );
             }
         }
         ThinkingDialect::OpenRouterReasoning => {
             if on {
                 params.extra.insert(
                     "reasoning".to_string(),
-                    json!({ "effort": effort_word(effort) }),
+                    json!({ "effort": effective_word(profile.kind, profile.model, effort) }),
                 );
             }
         }
@@ -404,8 +450,67 @@ mod tests {
         assert_eq!(parse_effort("OFF"), Some(ThinkingEffort::Off));
         assert_eq!(parse_effort(" none "), Some(ThinkingEffort::Off));
         assert_eq!(parse_effort("medium"), Some(ThinkingEffort::Medium));
-        assert_eq!(parse_effort("ultrathink"), Some(ThinkingEffort::High));
+        assert_eq!(parse_effort("high"), Some(ThinkingEffort::High));
+        assert_eq!(parse_effort("xhigh"), Some(ThinkingEffort::Xhigh));
+        assert_eq!(parse_effort("ultrathink"), Some(ThinkingEffort::Xhigh));
         assert_eq!(parse_effort("banana"), None);
+    }
+
+    /// `xhigh` 只有旗舰模型真正下发；其余一律 clamp 回 `high`，避免 400。
+    #[test]
+    fn xhigh_is_clamped_to_high_on_models_that_do_not_support_it() {
+        // OpenAI：codex-max 系放行，o3/gpt-5 clamp
+        assert_eq!(
+            params(
+                ProviderKind::OpenAi,
+                "gpt-5.1-codex-max",
+                "",
+                ThinkingEffort::Xhigh
+            )["reasoning_effort"],
+            "xhigh"
+        );
+        assert_eq!(
+            params(ProviderKind::OpenAi, "o3-mini", "", ThinkingEffort::Xhigh)["reasoning_effort"],
+            "high"
+        );
+        // Anthropic：Opus 4.7+ / Sonnet 5 放行，4.5/4.6 clamp
+        assert_eq!(
+            params(
+                ProviderKind::Anthropic,
+                "claude-opus-4-7",
+                "",
+                ThinkingEffort::Xhigh
+            )["output_config"]["effort"],
+            "xhigh"
+        );
+        assert_eq!(
+            params(
+                ProviderKind::Anthropic,
+                "claude-sonnet-5",
+                "",
+                ThinkingEffort::Xhigh
+            )["output_config"]["effort"],
+            "xhigh"
+        );
+        assert_eq!(
+            params(
+                ProviderKind::Anthropic,
+                "claude-opus-4-6",
+                "",
+                ThinkingEffort::Xhigh
+            )["output_config"]["effort"],
+            "high"
+        );
+        // 兼容端点无从判断 → clamp
+        assert_eq!(
+            params(
+                ProviderKind::Compatible,
+                "deepseek-r1",
+                "http://localhost:8000/v1",
+                ThinkingEffort::Xhigh
+            )["reasoning_effort"],
+            "high"
+        );
     }
 
     #[test]

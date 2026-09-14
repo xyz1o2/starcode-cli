@@ -1053,6 +1053,7 @@ pub enum ThinkingEffort {
     Low,    // 低努力：快速简单思考
     Medium, // 中等努力：平衡思考
     High,   // 高努力：深度思考
+    Xhigh,  // 超高努力：旗舰模型扩展档（对标 OpenAI/Anthropic 的 xhigh）
 }
 
 impl Default for ThinkingEffort {
@@ -1068,6 +1069,7 @@ impl ThinkingEffort {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::Xhigh => "xhigh",
         }
     }
 
@@ -1077,6 +1079,7 @@ impl ThinkingEffort {
             Self::Low => "Low",
             Self::Medium => "Medium",
             Self::High => "High",
+            Self::Xhigh => "Xhigh",
         }
     }
 
@@ -1085,7 +1088,8 @@ impl ThinkingEffort {
             Self::Off => Self::Low,
             Self::Low => Self::Medium,
             Self::Medium => Self::High,
-            Self::High => Self::Off,
+            Self::High => Self::Xhigh,
+            Self::Xhigh => Self::Off,
         }
     }
 
@@ -1093,13 +1097,15 @@ impl ThinkingEffort {
     /// `EFFORT_LOW='○' EFFORT_MEDIUM='◐' EFFORT_HIGH='●'`）。
     ///
     /// Claude Code 没有 Off 这一档，所以空心圈在那边是 low；这里 Off 用虚线圈
-    /// `◌`，把"关掉"和"低"区分开。
+    /// `◌`，把"关掉"和"低"区分开。Xhigh 是本市面通用刻度之上的旗舰扩展档，
+    /// 用实心菱形 `◆` 表示比 `●` 更进一步。
     pub fn symbol(&self) -> &'static str {
         match self {
             Self::Off => "◌",
             Self::Low => "○",
             Self::Medium => "◐",
             Self::High => "●",
+            Self::Xhigh => "◆",
         }
     }
 
@@ -1328,11 +1334,13 @@ mod thinking_effort_tests {
     }
 
     #[test]
-    fn cycling_four_gears_returns_to_the_start() {
+    fn cycling_all_gears_returns_to_the_start() {
         let mut gear = ThinkingEffort::Off;
-        for _ in 0..4 {
+        for _ in 0..5 {
             gear = gear.next();
         }
         assert!(matches!(gear, ThinkingEffort::Off));
+        // High 的下一档必须是新增的 Xhigh，不能跳回 Off
+        assert!(matches!(ThinkingEffort::High.next(), ThinkingEffort::Xhigh));
     }
 }

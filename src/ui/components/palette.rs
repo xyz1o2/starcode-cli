@@ -967,11 +967,12 @@ pub fn get_thinking_effort_palette_items(
         crate::types::ThinkingEffort::Low => "thinking_low",
         crate::types::ThinkingEffort::Medium => "thinking_medium",
         crate::types::ThinkingEffort::High => "thinking_high",
+        crate::types::ThinkingEffort::Xhigh => "thinking_xhigh",
     };
     // 选中标记不能再用 "●" —— 那正是 High 档的符号，`High ●` 读起来像两个东西。
     // 档位前缀直接用状态栏那套符号，用户在面板里选一次就认得状态栏上那一格了。
     let check = |id: &str| if id == current_id { "  (current)" } else { "" };
-    let sym = |e: crate::types::ThinkingEffort| e.symbol();
+    let sym = |e: &crate::types::ThinkingEffort| e.symbol();
 
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
@@ -990,7 +991,7 @@ pub fn get_thinking_effort_palette_items(
         id: "thinking_off".to_string(),
         label: format!(
             "{} Off{}",
-            sym(crate::types::ThinkingEffort::Off),
+            sym(&crate::types::ThinkingEffort::Off),
             check("thinking_off")
         ),
         description: i18n::t(
@@ -1002,91 +1003,66 @@ pub fn get_thinking_effort_palette_items(
         action: PaletteAction::SetThinkingEffort(crate::types::ThinkingEffort::Off),
     });
 
-    match cap {
-        crate::core::config::models::ThinkingCapability::Granular => {
-            // Full granular support: Low, Medium, High
+    // 档位统一为市面通用的思考力度刻度（对标 OpenAI reasoning effort 的
+    // Off/Low/Medium/High + 旗舰扩展档 Xhigh）：所有支持思考的模型都展示
+    // 同一套档位，不再按厂家/模型名区分展示，也不混入独立的 “On” 项。
+    // 请求层（thinking.rs）按方言自行映射 —— 精细档位发 reasoning_effort /
+    // budget_tokens，开/关型方言各档都等于“开启”，Xhigh 在不支持的模型上
+    // 自动 clamp 回 high。UI 无需关心差异。
+    if !matches!(cap, crate::core::config::models::ThinkingCapability::None) {
+        let levels = [
+            (
+                "thinking_low",
+                crate::types::ThinkingEffort::Low,
+                "palette.desc.thinking_low",
+                "Light thinking for simple tasks",
+            ),
+            (
+                "thinking_medium",
+                crate::types::ThinkingEffort::Medium,
+                "palette.desc.thinking_medium",
+                "Balanced thinking (recommended)",
+            ),
+            (
+                "thinking_high",
+                crate::types::ThinkingEffort::High,
+                "palette.desc.thinking_high",
+                "Deep thinking for complex tasks",
+            ),
+            (
+                "thinking_xhigh",
+                crate::types::ThinkingEffort::Xhigh,
+                "palette.desc.thinking_xhigh",
+                "Maximum thinking (falls back to High on models without xhigh support)",
+            ),
+        ];
+        for (id, effort, key, fallback) in levels {
+            let name = effort.display_name();
             items.push(PaletteItem {
-                id: "thinking_low".to_string(),
-                label: format!(
-                    "{} Low{}",
-                    sym(crate::types::ThinkingEffort::Low),
-                    check("thinking_low")
-                ),
-                description: i18n::t(
-                    "palette.desc.thinking_low",
-                    "Light thinking for simple tasks",
-                    "Light thinking for simple tasks",
-                ),
+                id: id.to_string(),
+                label: format!("{} {}{}", sym(&effort), name, check(id)),
+                description: i18n::t(key, fallback, fallback),
                 category: cat.clone(),
-                action: PaletteAction::SetThinkingEffort(crate::types::ThinkingEffort::Low),
-            });
-            items.push(PaletteItem {
-                id: "thinking_medium".to_string(),
-                label: format!(
-                    "{} Medium{}",
-                    sym(crate::types::ThinkingEffort::Medium),
-                    check("thinking_medium")
-                ),
-                description: i18n::t(
-                    "palette.desc.thinking_medium",
-                    "Balanced thinking (recommended)",
-                    "Balanced thinking (recommended)",
-                ),
-                category: cat.clone(),
-                action: PaletteAction::SetThinkingEffort(crate::types::ThinkingEffort::Medium),
-            });
-            items.push(PaletteItem {
-                id: "thinking_high".to_string(),
-                label: format!(
-                    "{} High{}",
-                    sym(crate::types::ThinkingEffort::High),
-                    check("thinking_high")
-                ),
-                description: i18n::t(
-                    "palette.desc.thinking_high",
-                    "Deep thinking for complex tasks",
-                    "Deep thinking for complex tasks",
-                ),
-                category: cat,
-                action: PaletteAction::SetThinkingEffort(crate::types::ThinkingEffort::High),
+                action: PaletteAction::SetThinkingEffort(effort),
             });
         }
-        crate::core::config::models::ThinkingCapability::Binary => {
-            // Binary support: just On (mapped to Medium internally)
-            items.push(PaletteItem {
-                id: "thinking_medium".to_string(),
-                label: format!(
-                    "{} On{}",
-                    sym(crate::types::ThinkingEffort::Medium),
-                    check("thinking_medium")
-                ),
-                description: i18n::t(
-                    "palette.desc.thinking_on",
-                    "Enable thinking/reasoning",
-                    "Enable thinking/reasoning",
-                ),
-                category: cat,
-                action: PaletteAction::SetThinkingEffort(crate::types::ThinkingEffort::Medium),
-            });
-        }
-        crate::core::config::models::ThinkingCapability::None => {
-            // No thinking support — show info only
-            items.push(PaletteItem {
-                id: "thinking_unavailable".to_string(),
-                label: i18n::t(
-                    "palette.thinking.unavailable",
-                    "Not supported by this model",
-                    "Not supported by this model",
-                ),
-                description: i18n::t(
-                    "palette.desc.thinking_unavailable",
-                    "Current model does not support thinking/reasoning",
-                    "Current model does not support thinking/reasoning",
-                ),
-                category: cat,
-                action: PaletteAction::SetThinkingEffort(crate::types::ThinkingEffort::Off),
-            });
-        }
+    } else {
+        // No thinking support — show info only
+        items.push(PaletteItem {
+            id: "thinking_unavailable".to_string(),
+            label: i18n::t(
+                "palette.thinking.unavailable",
+                "Not supported by this model",
+                "Not supported by this model",
+            ),
+            description: i18n::t(
+                "palette.desc.thinking_unavailable",
+                "Current model does not support thinking/reasoning",
+                "Current model does not support thinking/reasoning",
+            ),
+            category: cat,
+            action: PaletteAction::SetThinkingEffort(crate::types::ThinkingEffort::Off),
+        });
     }
 
     items
@@ -2293,6 +2269,46 @@ mod tests {
 
     fn ids(items: &[PaletteItem]) -> Vec<&str> {
         items.iter().map(|i| i.label.as_str()).collect()
+    }
+
+    /// 名字判定为“仅开/关”的模型也必须展示与精细档位模型完全一致的
+    /// Off/Low/Medium/High 刻度：UI 不区分厂家差异（请求层负责映射），
+    /// 更不能混入独立的 “On” 项打乱档位顺序。
+    #[test]
+    fn binary_thinking_models_use_the_same_uniform_scale() {
+        let binary =
+            get_thinking_effort_palette_items(&crate::types::ThinkingEffort::Off, "deepseek-r1");
+        let granular =
+            get_thinking_effort_palette_items(&crate::types::ThinkingEffort::Off, "claude-opus-5");
+
+        let binary_labels: Vec<String> = binary
+            .iter()
+            .filter(|i| i.id.starts_with("thinking_"))
+            .map(|i| i.label.clone())
+            .collect();
+        let granular_labels: Vec<String> = granular
+            .iter()
+            .filter(|i| i.id.starts_with("thinking_"))
+            .map(|i| i.label.clone())
+            .collect();
+
+        // 两个能力等级的面板完全一致
+        assert_eq!(binary_labels, granular_labels);
+        // 刻度固定为 Off → Low → Medium → High → Xhigh，没有 “On”
+        assert_eq!(
+            binary_labels,
+            vec!["◌ Off  (current)", "○ Low", "◐ Medium", "● High", "◆ Xhigh"]
+        );
+    }
+
+    /// 不支持思考的模型保持提示项，不展示档位。
+    #[test]
+    fn non_thinking_models_keep_the_unavailable_hint() {
+        let items =
+            get_thinking_effort_palette_items(&crate::types::ThinkingEffort::Off, "gpt-4o-mini");
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert!(ids.contains(&"thinking_unavailable"), "{ids:?}");
+        assert!(!ids.contains(&"thinking_high"), "{ids:?}");
     }
 
     /// 手动输入和显式刷新必须在列表最前面：中转站能返回几百个模型，

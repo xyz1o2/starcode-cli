@@ -213,7 +213,7 @@ const SETTING_ITEMS: &[SettingItem] = &[
                 _ => format!("{:?}", s.thinking_effort),
             }
         },
-        description: "Controls reasoning depth.\nGranular models: Off, Low, Medium, High\nBinary models: Off, On\nVaries by model capability",
+        description: "Controls reasoning depth.\nOff, Low, Medium, High, Xhigh\n(Xhigh falls back to High on models\nthat do not support it)",
     },
     SettingItem {
         id: "context_window",

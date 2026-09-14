@@ -1586,12 +1586,13 @@ pub async fn effort(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRe
         "off" | "none" | "disable" | "disabled" => crate::types::ThinkingEffort::Off,
         "low" => crate::types::ThinkingEffort::Low,
         "medium" | "auto" => crate::types::ThinkingEffort::Medium,
-        "high" | "xhigh" | "max" => crate::types::ThinkingEffort::High,
+        "high" => crate::types::ThinkingEffort::High,
+        "xhigh" | "max" | "ultra" | "ultrathink" => crate::types::ThinkingEffort::Xhigh,
         other => {
             push_msg(
                 &mut ctx,
                 format!(
-                    "❌ Unknown effort level: {}. Usage: /effort [off|low|medium|high]",
+                    "❌ Unknown effort level: {}. Usage: /effort [off|low|medium|high|xhigh]",
                     other
                 ),
             );
