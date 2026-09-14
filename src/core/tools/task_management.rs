@@ -213,10 +213,13 @@ impl ToolInvocation for TaskListInvocation {
                     _ => None,
                 };
 
-                let mut tasks: Vec<_> = manager
-                    .graph
-                    .nodes
-                    .values()
+                // 必须按清单顺序（root_ids DFS）回传：`nodes` 是 HashMap，
+                // 且 id 是随机 uuid——之前的 `sort_by(id)` 会把清单顺序完全打乱，
+                // 导致模型不按面板上从上往下的顺序执行。
+                let ordered: Vec<String> = manager.graph.ordered_ids();
+                let mut tasks: Vec<_> = ordered
+                    .iter()
+                    .filter_map(|id| manager.graph.nodes.get(id).cloned())
                     .filter(|t| {
                         if let Some(ref status) = status_filter {
                             std::mem::discriminant(&t.status) == std::mem::discriminant(status)
@@ -226,8 +229,6 @@ impl ToolInvocation for TaskListInvocation {
                     })
                     .take(params.limit)
                     .collect();
-
-                tasks.sort_by(|a, b| a.id.cmp(&b.id));
 
                 let lines: Vec<String> = tasks
                     .iter()

@@ -282,16 +282,21 @@ impl TaskPanel {
 
         if has_active {
             self.auto_hide_at = None;
-        } else if !self.task_manager.graph.nodes.is_empty() && self.is_visible {
-            // All tasks done - start auto-hide timer
+        } else if self.is_visible {
+            // All tasks done (or the list was cleared entirely — TodoWrite with
+            // all-completed wipes the graph): start auto-hide timer.
+            // 之前 `!nodes.is_empty()` 的前置条件让"清空后的空清单"永远
+            // 触发不了收起，框就一直挂在输入框上方。
             if self.auto_hide_at.is_none() {
                 self.auto_hide_at = Some(std::time::Instant::now());
             }
         }
 
-        // Auto-hide after 5 seconds
+        // Auto-hide after 5 seconds; an empty list collapses immediately
         if let Some(hide_at) = self.auto_hide_at {
-            if hide_at.elapsed() >= std::time::Duration::from_secs(5) {
+            let is_empty = self.task_manager.graph.nodes.is_empty();
+            let elapsed_long_enough = hide_at.elapsed() >= std::time::Duration::from_secs(5);
+            if is_empty || elapsed_long_enough {
                 self.is_visible = false;
                 self.auto_hide_at = None;
             }
@@ -957,17 +962,24 @@ fn find_next_task_hint(panel: &TaskPanel) -> Option<String> {
         .max_by_key(|n| n.completed_at)?;
 
     // 找被这个任务阻塞的 pending 任务
-    for node in graph.nodes.values() {
-        if node.status == TaskStatus::Pending && node.dependencies.contains(&recently_completed.id)
-        {
-            return Some(format!("Next: {}", node.title));
+    for id in graph.ordered_ids() {
+        if let Some(node) = graph.nodes.get(&id) {
+            if node.status == TaskStatus::Pending
+                && node.dependencies.contains(&recently_completed.id)
+            {
+                return Some(format!("Next: {}", node.title));
+            }
         }
     }
 
-    // 如果没有被阻塞的任务，找第一个 pending 任务
-    graph
-        .nodes
-        .values()
-        .find(|n| n.status == TaskStatus::Pending)
-        .map(|n| format!("Next: {}", n.title))
+    // 如果没有被阻塞的任务，按清单顺序找第一个 pending 任务
+    // （`nodes.values()` 是 HashMap 随机序，不能用于挑选"下一个"）
+    for id in graph.ordered_ids() {
+        if let Some(node) = graph.nodes.get(&id) {
+            if node.status == TaskStatus::Pending {
+                return Some(format!("Next: {}", node.title));
+            }
+        }
+    }
+    None
 }

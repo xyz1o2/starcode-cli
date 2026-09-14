@@ -146,6 +146,46 @@ impl TaskGraph {
         }
     }
 
+    /// 按清单顺序（root_ids → children DFS）返回所有任务 id。
+    ///
+    /// `nodes` 是 HashMap，直接 `.values()` 遍历顺序随机；agent 端任何
+    /// "列出任务"的路径都必须走这里，否则模型读到的清单与面板显示的
+    /// 顺序不一致，会不按清单从上往下执行。
+    /// 兜底：因图损坏游离在 root_ids/children 之外的节点按 id 追加在末尾。
+    pub fn ordered_ids(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::with_capacity(self.nodes.len());
+
+        fn walk(
+            id: &str,
+            nodes: &HashMap<String, TaskNode>,
+            seen: &mut std::collections::HashSet<String>,
+            out: &mut Vec<String>,
+        ) {
+            if !seen.insert(id.to_string()) {
+                return;
+            }
+            out.push(id.to_string());
+            if let Some(node) = nodes.get(id) {
+                for child in &node.children {
+                    walk(child, nodes, seen, out);
+                }
+            }
+        }
+
+        for root in &self.root_ids {
+            walk(root, &self.nodes, &mut seen, &mut out);
+        }
+
+        let mut orphans: Vec<&String> =
+            self.nodes.keys().filter(|id| !seen.contains(*id)).collect();
+        orphans.sort();
+        for id in orphans {
+            out.push(id.clone());
+        }
+        out
+    }
+
     pub fn add_task(&mut self, mut task: TaskNode) {
         if task.parent_id.is_none() {
             if !self.root_ids.contains(&task.id) {
@@ -169,5 +209,51 @@ impl TaskGraph {
             }
         }
         self.nodes.insert(task.id.clone(), task);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 清单必须按写入顺序返回：agent 依赖这个顺序从上往下执行。
+    /// 回归背景：id 是随机 uuid，任何按 id / HashMap 序的遍历都会打乱清单。
+    #[test]
+    fn ordered_ids_preserves_insertion_order() {
+        let mut g = TaskGraph::new();
+        let mut a = TaskNode::new("first".into());
+        let mut b = TaskNode::new("second".into());
+        let mut c = TaskNode::new("child of b".into());
+        c.parent_id = Some(b.id.clone());
+        b.children.push(c.id.clone());
+
+        // nodes 是 HashMap，故意乱序插入，验证遍历仍走 root_ids/children
+        g.nodes.insert(b.id.clone(), b.clone());
+        g.nodes.insert(c.id.clone(), c.clone());
+        g.nodes.insert(a.id.clone(), a.clone());
+        g.root_ids = vec![a.id.clone(), b.id.clone()];
+
+        let ids = g.ordered_ids();
+        let titles: Vec<&str> = ids
+            .iter()
+            .map(|id| g.nodes.get(id).unwrap().title.as_str())
+            .collect();
+        assert_eq!(titles, vec!["first", "second", "child of b"]);
+    }
+
+    /// 图损坏产生游离节点时，兜底追加且不 panic、不重复。
+    #[test]
+    fn ordered_ids_appends_orphans_without_duplicating() {
+        let mut g = TaskGraph::new();
+        let mut a = TaskNode::new("listed".into());
+        g.add_task(a.clone());
+        // 模拟损坏：直接插入一个不在 root_ids/children 里的节点
+        let orphan = TaskNode::new("orphan".into());
+        g.nodes.insert(orphan.id.clone(), orphan);
+
+        let ids = g.ordered_ids();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(g.nodes.get(&ids[0]).unwrap().title, "listed");
+        assert_eq!(g.nodes.get(&ids[1]).unwrap().title, "orphan");
     }
 }
