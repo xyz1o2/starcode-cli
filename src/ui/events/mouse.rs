@@ -48,6 +48,53 @@ fn map_mouse_to_chat_position(
 
     None
 }
+
+/// 单击（按下到松开未拖动）时的折叠/展开切换，返回是否发生了切换。
+/// 判定规则与旧版「Down 即切换」完全一致：
+/// - thinking 块：展开时点任意行折叠；折叠时点头部或预览行展开
+/// - 工具块：仅点头部行（row 0）切换
+fn try_toggle_on_click(state: &mut ChatState, entry_idx: usize, row: usize) -> bool {
+    let Some(entry) = state.chat_history.get(entry_idx) else {
+        return false;
+    };
+
+    if let Some(reasoning) = &entry.reasoning_content {
+        if !reasoning.is_empty() {
+            let is_expanded = state.expanded_thinking_indices.contains(&entry_idx);
+            let should_toggle = if is_expanded {
+                true
+            } else {
+                let preview_lines = reasoning.lines().take(3).count();
+                row <= preview_lines
+            };
+            if should_toggle {
+                if is_expanded {
+                    state.expanded_thinking_indices.remove(&entry_idx);
+                } else {
+                    state.expanded_thinking_indices.insert(entry_idx);
+                }
+                state.rendered_cache.remove(&entry_idx);
+                return true;
+            }
+            return false;
+        }
+    }
+
+    if let Some(tc) = &entry.tool_call {
+        if row == 0 {
+            if state.expanded_tool_call_ids.contains(&tc.id) {
+                state.expanded_tool_call_ids.remove(&tc.id);
+            } else {
+                state.expanded_tool_call_ids.insert(tc.id.clone());
+            }
+            state.rendered_cache.remove(&entry_idx);
+            return true;
+        }
+    }
+
+    false
+}
+
 pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
     match m.kind {
         MouseEventKind::ScrollUp => {
@@ -105,57 +152,12 @@ pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
             }
             if let Some((entry_idx, row, col)) = map_mouse_to_chat_position(state, m.column, m.row)
             {
-                // Check for Thinking Process Toggle
-                let mut toggled = false;
-                if let Some(entry) = state.chat_history.get(entry_idx) {
-                    if let Some(reasoning) = &entry.reasoning_content {
-                        if !reasoning.is_empty() {
-                            let is_expanded = state.expanded_thinking_indices.contains(&entry_idx);
-
-                            // 点击 thinking 块任意位置都可以切换展开/折叠
-                            // 展开时：点击任意行折叠
-                            // 折叠时：点击标题或预览行展开
-                            let should_toggle = if is_expanded {
-                                true // 展开时点击任意位置都折叠
-                            } else {
-                                let preview_lines = reasoning.lines().take(3).count();
-                                row <= preview_lines
-                            };
-
-                            if should_toggle {
-                                if is_expanded {
-                                    state.expanded_thinking_indices.remove(&entry_idx);
-                                } else {
-                                    state.expanded_thinking_indices.insert(entry_idx);
-                                }
-                                state.rendered_cache.remove(&entry_idx);
-                                toggled = true;
-                            }
-                        }
-                    }
-                }
-
-                // Check for Tool expand/collapse toggle
-                if !toggled {
-                    if let Some(entry) = state.chat_history.get(entry_idx) {
-                        if let Some(tc) = &entry.tool_call {
-                            // Click on header row toggles tool expansion
-                            if row == 0 {
-                                if state.expanded_tool_call_ids.contains(&tc.id) {
-                                    state.expanded_tool_call_ids.remove(&tc.id);
-                                } else {
-                                    state.expanded_tool_call_ids.insert(tc.id.clone());
-                                }
-                                state.rendered_cache.remove(&entry_idx);
-                                toggled = true;
-                            }
-                        }
-                    }
-                }
-
-                if !toggled {
-                    state.text_selection.start_selection(entry_idx, row, col);
-                }
+                // 一律先起选区。thinking / 工具头部的折叠切换延迟到松开且未拖动时
+                // 才执行（见 Up 分支的 try_toggle_on_click）。此前 Down 即切换：
+                // 1) 按在 thinking 标签上想拖选正文时选区永远起不来；
+                // 2) 按下瞬间折叠/展开内容、行号整体位移，正在显示的选区错位，
+                //    表现为“拖选总是断”。
+                state.text_selection.start_selection(entry_idx, row, col);
             } else {
                 state.text_selection.clear();
             }
@@ -189,14 +191,45 @@ pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
 
             if let Some((entry_idx, r, c)) = map_mouse_to_chat_position(state, col, row) {
                 state.text_selection.update_selection(entry_idx, r, c);
+            } else if let Some((last_idx, &last_h)) = state
+                .last_item_heights
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, &h)| h > 0)
+            {
+                // 拖到内容末尾之下时 map 会因超出总行数返回 None，锚点冻结在
+                // 原地导致选区“断”。钳制到最后一行，让选区跟随到底。
+                let rel_x = state
+                    .last_chat_area
+                    .map(|a| col.saturating_sub(a.x) as usize)
+                    .unwrap_or(0);
+                state
+                    .text_selection
+                    .update_selection(last_idx, last_h as usize - 1, rel_x);
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
             if m.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
                 return;
             }
-            // 如果有选中文本，自动复制到剪贴板
-            if state.text_selection.has_selection() {
+            // 未拖动 = 单击（起止锚点重合）：执行折叠/展开切换，并清掉单格
+            // 选区高亮。切换会改变条目行数，残留锚点会指向错误的行。
+            let clicked = match (
+                state.text_selection.start_entry_idx,
+                state.text_selection.end_entry_idx,
+                state.text_selection.start,
+                state.text_selection.end,
+            ) {
+                (Some(se), Some(ee), Some(s), Some(e)) if se == ee && s == e => Some((se, s.0)),
+                _ => None,
+            };
+
+            if let Some((entry_idx, row)) = clicked {
+                let _toggled = try_toggle_on_click(state, entry_idx, row);
+                state.text_selection.clear();
+            } else if state.text_selection.has_selection() {
+                // 如果有选中文本，自动复制到剪贴板
                 if let Some(selected_text) = state.get_selected_text() {
                     match Clipboard::new() {
                         Ok(mut clipboard) => {
@@ -222,5 +255,115 @@ pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
             state.text_selection.clear();
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::state::ChatState;
+    use ratatui::layout::Rect;
+
+    fn mouse_event(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        }
+    }
+
+    /// ChatState::new() 自带欢迎条目（高 1 行），思考条目在其后（3 行）。
+    /// 思考条目占文档第 1..=3 行。
+    fn setup_state() -> ChatState {
+        let mut state = ChatState::new();
+        let mut entry = crate::types::ChatEntry::assistant("");
+        entry.reasoning_content = Some("first step\n\nsecond step".to_string());
+        state.chat_history.push(entry);
+        state.last_chat_area = Some(Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        });
+        state.last_item_heights = vec![1, 3];
+        state.total_rendered_lines = 4;
+        state
+    }
+
+    /// 单击 thinking 头部：Down 只起选区不切换；Up（未拖动）才切换。
+    /// 此前 Down 即切换会吞掉拖选起点，且按下瞬间行号位移让选区错位。
+    #[test]
+    fn click_on_thinking_header_toggles_on_up_not_down() {
+        let mut state = setup_state();
+        let idx = state.chat_history.len() - 1;
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 1),
+        );
+        assert!(
+            !state.expanded_thinking_indices.contains(&idx),
+            "Down 不得立即切换"
+        );
+        assert!(state.text_selection.is_selecting, "按下必须能起选区");
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 0, 1),
+        );
+        assert!(state.expanded_thinking_indices.contains(&idx), "单击应展开");
+        assert!(!state.text_selection.is_selecting);
+        assert!(
+            state.text_selection.start.is_none(),
+            "单击后的单格选区必须清掉"
+        );
+    }
+
+    /// 按住拖动不触发切换，且从 thinking 头部起拖也能正常选区。
+    #[test]
+    fn drag_from_thinking_header_selects_without_toggling() {
+        let mut state = setup_state();
+        let idx = state.chat_history.len() - 1;
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 1),
+        );
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 10, 2),
+        );
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 10, 2),
+        );
+
+        assert!(
+            state.expanded_thinking_indices.is_empty(),
+            "拖动不得触发折叠/展开"
+        );
+        assert_eq!(state.text_selection.start_entry_idx, Some(idx));
+        assert_eq!(state.text_selection.start, Some((0, 0)));
+        assert_eq!(state.text_selection.end, Some((1, 10)));
+    }
+
+    /// 拖到内容末尾之下（超出总行数）时锚点钳制到最后一行，
+    /// 选区跟随到底而不是冻结在原地。
+    #[test]
+    fn drag_below_content_clamps_to_last_line() {
+        let mut state = setup_state();
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 1),
+        );
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 10, 20),
+        );
+
+        assert_eq!(state.text_selection.end_entry_idx, Some(1));
+        assert_eq!(state.text_selection.end, Some((2, 10)), "钳到最后一行");
     }
 }

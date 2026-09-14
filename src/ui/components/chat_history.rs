@@ -313,7 +313,10 @@ pub fn render_chat_lines(state: &mut ChatState, area_width: u16) -> Vec<Line<'st
             } else {
                 state.rendered_cache.remove(&idx);
                 state.last_rendered_stream_key.insert(idx, current_key);
-                all_lines.extend(lines); // streaming: use the freshly rendered lines
+                all_lines.extend(lines.clone()); // streaming: use the freshly rendered lines
+                // 拖选松开时 get_selected_text() 依赖 rendered_cache 取文本。
+                // 流式渲染每帧都会刷新，这里必须同步保留一份，否则左键选择永远取不到内容。
+                state.rendered_cache.insert(idx, (h, lines));
             }
         } else {
             // Not stale: use cached (non-streaming) or re-render (streaming)
@@ -649,7 +652,13 @@ fn render_teammate_view(state: &ChatState, area_width: u16) -> Option<Vec<Line<'
         } else {
             // `usize::MAX` 只用于 thinking 展开态的键；子条目不参与主历史的展开状态，
             // 传一个不会与真实下标碰撞的哨兵即可。子转录始终显示折叠头（不走隐藏规则）。
-            super::message_render::render_non_tool_entry_blocks(state, sub, usize::MAX, wrap_width, true)
+            super::message_render::render_non_tool_entry_blocks(
+                state,
+                sub,
+                usize::MAX,
+                wrap_width,
+                true,
+            )
         };
         for b in blocks {
             lines.extend(b);
@@ -659,7 +668,13 @@ fn render_teammate_view(state: &ChatState, area_width: u16) -> Option<Vec<Line<'
     Some(lines)
 }
 
-fn render_entry_lines(state: &ChatState, entry_idx: usize, area_width: u16) -> Vec<Line<'static>> {
+/// 渲染单个条目的完整行序列。`pub(crate)`：`store::get_selected_text` 在
+/// rendered_cache 缺失时用它兜底重渲染，否则复制会静默失败。
+pub(crate) fn render_entry_lines(
+    state: &ChatState,
+    entry_idx: usize,
+    area_width: u16,
+) -> Vec<Line<'static>> {
     let entry = &state.chat_history[entry_idx];
     let mut entry_lines: Vec<Line<'static>> = Vec::new();
 

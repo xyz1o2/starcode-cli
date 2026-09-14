@@ -272,6 +272,8 @@ pub(crate) async fn request_runtime_model_change(
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> bool {
     state.pending_model_change = None;
+    // 豁免是一次性的：无论这条切换走没走成，都不影响之后的普通确认门
+    state.waive_next_model_confirmation = false;
     request_runtime_settings(
         state,
         Some(crate::runtime::messages::RuntimeModelSelection { model, provider_id }),
@@ -553,7 +555,10 @@ pub(crate) async fn execute_palette_action(
                     && !entry.content.trim().is_empty()
             });
 
-            if has_history && !state.pending_model_confirmation {
+            if has_history
+                && !state.pending_model_confirmation
+                && !state.waive_next_model_confirmation
+            {
                 state.close_palette();
                 state.pending_model_change = Some(model.clone());
                 state.pending_model_confirmation = true;
@@ -570,6 +575,7 @@ pub(crate) async fn execute_palette_action(
 
             state.close_palette();
             state.pending_model_confirmation = false;
+            state.waive_next_model_confirmation = false;
             let provider_id = state
                 .model_provider_map
                 .get(&model)
@@ -662,6 +668,8 @@ pub(crate) async fn execute_palette_action(
         PaletteAction::SelectProvider(provider_id) => {
             state.available_models.clear();
             state.pending_model_provider = Some(provider_id.clone());
+            // 切 provider 是明确意图：紧接着的第一次模型选择免 (y/n) 确认
+            state.waive_next_model_confirmation = true;
             // 清除模型缓存，因为切换了 provider
             crate::agent::model_list::clear_model_cache();
             let store = crate::core::config::provider_store::ProviderStore::new();
@@ -3008,6 +3016,10 @@ async fn handle_input_modal(
                             state.pending_model_provider = Some(pid.clone());
                             state.pending_provider_selected_model = selected_model.clone();
                             state.current_provider_id = Some(pid.clone());
+                            // 刚配置完 provider，紧接着的第一次模型选择免 (y/n) 确认：
+                            // 配置动作本身就是明确的切换意图，再弹确认门会让用户以为
+                            // “切换不成功”，直到下一次选择才绕过门生效。
+                            state.waive_next_model_confirmation = true;
                             if let Some(model) = selected_model {
                                 state.current_model = model;
                             } else {
@@ -3055,6 +3067,7 @@ async fn handle_input_modal(
                                 .await;
 
                             state.available_models.clear();
+                            state.awaiting_models = true;
                             state.exit_input_modal();
                             close_quick_menus(state);
                             state.palette_history.clear();

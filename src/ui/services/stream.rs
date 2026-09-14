@@ -40,15 +40,16 @@ use crate::ui::utils::text::{
 fn finalize_entry_streaming(state: &mut ChatState, idx: usize) {
     if let Some(entry) = state.chat_history.get_mut(idx) {
         entry.is_streaming = Some(false);
-        // 冻结 thinking 计时器：只对有 reasoning 且未冻结的 entry 设置
-        if entry.reasoning_content.is_some() && entry.reasoning_finished_elapsed_ms.is_none() {
-            let frozen = state
-                .processing_started_at
-                .map(|t| t.elapsed().as_millis())
-                .unwrap_or(0);
-            entry.reasoning_finished_elapsed_ms = Some(frozen);
-            // 记录完成时刻：30 秒宽限窗口从这一刻起算
-            entry.reasoning_finished_at = Some(std::time::Instant::now());
+        // 冻结 thinking 计时器：只对有 reasoning 且未冻结的 entry 设置。
+        // 必须有真实请求（processing_started_at）才冻结——恢复的会话等场景
+        // 没有时钟基准，冻结成 0 会把每块都显示成 "Thought for 1s" 并错误
+        // 启动 30 秒隐藏窗口。
+        if let Some(started) = state.processing_started_at {
+            if entry.reasoning_content.is_some() && entry.reasoning_finished_elapsed_ms.is_none() {
+                entry.reasoning_finished_elapsed_ms = Some(started.elapsed().as_millis());
+                // 记录完成时刻：30 秒宽限窗口从这一刻起算
+                entry.reasoning_finished_at = Some(std::time::Instant::now());
+            }
         }
     }
     state.rendered_cache.remove(&idx);
@@ -1732,8 +1733,20 @@ async fn handle_error_message(
 /// 否则中插会让 rendered_cache、流式键、消息起止索引等全部错位。
 fn shift_index_caches_after_insert(state: &mut ChatState, pos: usize) {
     state.virtual_list.insert_at(pos);
-    // 选区按 entry 索引存储，中插后索引失效，直接清除
-    state.text_selection.clear();
+    // 选区按 entry 索引存储：中插后把锚点索引自适应 +1，保住进行中的拖选。
+    // 此前直接 clear——agent 流式期间每次插入条目（工具块等）选区就被清掉，
+    // 表现为“拖选总是断”。插入点之前的锚点不受影响；插入点落在选区中间时，
+    // 新条目按“中间条目”语义整体高亮，可接受。
+    if let Some(s) = state.text_selection.start_entry_idx.as_mut() {
+        if *s >= pos {
+            *s += 1;
+        }
+    }
+    if let Some(e) = state.text_selection.end_entry_idx.as_mut() {
+        if *e >= pos {
+            *e += 1;
+        }
+    }
     if state.last_item_heights.len() >= pos {
         state.last_item_heights.insert(pos, 0);
     } else {
@@ -1806,7 +1819,24 @@ fn remove_chat_entry_and_shift_indices(state: &mut ChatState, pos: usize) {
     state.chat_history.remove(pos);
     state.virtual_list.remove_at(pos);
     state.virtual_list.mark_dirty_all();
-    state.text_selection.clear();
+    // 选区锚点指向被删除条目时无法挽救，清除；否则索引自适应 -1，
+    // 保住其余部分的拖选（此前无条件 clear）。
+    let sel_hits_removed = matches!(state.text_selection.start_entry_idx, Some(i) if i == pos)
+        || matches!(state.text_selection.end_entry_idx, Some(i) if i == pos);
+    if sel_hits_removed {
+        state.text_selection.clear();
+    } else {
+        if let Some(s) = state.text_selection.start_entry_idx.as_mut() {
+            if *s > pos {
+                *s -= 1;
+            }
+        }
+        if let Some(e) = state.text_selection.end_entry_idx.as_mut() {
+            if *e > pos {
+                *e -= 1;
+            }
+        }
+    }
     state.expanded_thinking_indices = state
         .expanded_thinking_indices
         .drain()
@@ -3682,6 +3712,57 @@ mod tests {
 
         assert_eq!(state.cache_read_tokens, 0);
         assert_eq!(state.cache_creation_tokens, 0);
+    }
+
+    /// 流式期间中插条目（工具块等）不得清掉进行中的拖选：
+    /// 锚点索引自适应 +1，选区保住（此前直接 clear，表现为“拖选总是断”）。
+    #[test]
+    fn insert_shifts_selection_anchors_instead_of_clearing() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.text_selection.start_selection(1, 0, 0);
+        state.text_selection.update_selection(2, 3, 7);
+
+        shift_index_caches_after_insert(&mut state, 2);
+
+        assert_eq!(state.text_selection.start_entry_idx, Some(1));
+        assert_eq!(state.text_selection.end_entry_idx, Some(3));
+        assert_eq!(state.text_selection.end, Some((3, 7)));
+        assert!(state.text_selection.is_selecting, "拖选进行中不得被打断");
+    }
+
+    /// 插入点在选区之前：两个锚点都要 +1。
+    #[test]
+    fn insert_before_selection_shifts_both_anchors() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.text_selection.start_selection(2, 1, 0);
+        state.text_selection.update_selection(4, 0, 5);
+
+        shift_index_caches_after_insert(&mut state, 1);
+
+        assert_eq!(state.text_selection.start_entry_idx, Some(3));
+        assert_eq!(state.text_selection.end_entry_idx, Some(5));
+    }
+
+    /// 删除条目：锚点命中被删条目才清除，否则索引自适应 -1 保住选区。
+    #[test]
+    fn removal_keeps_selection_unless_anchor_entry_is_removed() {
+        let mut state = crate::ui::state::ChatState::new();
+        // 占位条目撑出足够的长度，避免触发 pos >= len 早退保护
+        while state.chat_history.len() < 5 {
+            state.chat_history.push(ChatEntry::assistant("pad"));
+        }
+        state.text_selection.start_selection(1, 0, 0);
+        state.text_selection.update_selection(3, 2, 4);
+
+        remove_chat_entry_and_shift_indices(&mut state, 2);
+        assert_eq!(state.text_selection.start_entry_idx, Some(1));
+        assert_eq!(state.text_selection.end_entry_idx, Some(2));
+
+        remove_chat_entry_and_shift_indices(&mut state, 1);
+        assert!(
+            state.text_selection.start.is_none(),
+            "锚点条目被删时选区必须清除"
+        );
     }
 }
 

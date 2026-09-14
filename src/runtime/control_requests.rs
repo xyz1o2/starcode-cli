@@ -48,25 +48,33 @@ pub async fn handle_request(
                 "[DEBUG] Worker: Handling ListModels request (force={})",
                 force
             ));
-            match agent.list_models_cached(force).await {
-                Ok(result) => {
-                    append_debug_log_line(&format!(
-                        "[DEBUG] Worker: ListModels success, count={}, cache_age={:?}",
-                        result.models.len(),
-                        result.cache_age_secs
-                    ));
-                    let _ = tx
-                        .send(StreamMessage::ModelsList {
-                            models: result.models,
-                            cache_age_secs: result.cache_age_secs,
-                        })
-                        .await;
+            // `/models` 可能触发网络请求（最长 8 秒超时），如果在主循环中 await，
+            // 这段时间内用户发送的 UpdateRuntimeSettings / UpdateProviderConfig 等
+            // 控制请求都会被积压在 channel 里，导致“切换模型卡住”。因此把列表拉取
+            // 放到后台任务，主循环立即继续处理后续请求。
+            let client = agent.client.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                match crate::agent::model_list::list_models_with_mode(&client, force).await {
+                    Ok(result) => {
+                        append_debug_log_line(&format!(
+                            "[DEBUG] Worker: ListModels success, count={}, cache_age={:?}",
+                            result.models.len(),
+                            result.cache_age_secs
+                        ));
+                        let _ = tx
+                            .send(StreamMessage::ModelsList {
+                                models: result.models,
+                                cache_age_secs: result.cache_age_secs,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        append_debug_log_line(&format!("[DEBUG] Worker: ListModels failed: {}", e));
+                        let _ = tx.send(StreamMessage::ModelsError(e)).await;
+                    }
                 }
-                Err(e) => {
-                    append_debug_log_line(&format!("[DEBUG] Worker: ListModels failed: {}", e));
-                    let _ = tx.send(StreamMessage::ModelsError(e)).await;
-                }
-            }
+            });
         }
         AgentRequest::PluginToolsRefresh => {
             agent.refresh_plugin_tools().await;

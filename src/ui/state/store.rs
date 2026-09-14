@@ -275,6 +275,20 @@ impl TextSelection {
     }
 }
 
+/// 把可视列号（鼠标坐标，CJK/宽字符占 2 列）换算成字符下标。
+/// 选区复制必须走这个换算：此前直接把可视列当字符数用，
+/// 中文文本会只复制到一半。
+fn char_index_at_visual_col(text: &str, visual_col: usize) -> usize {
+    let mut width = 0usize;
+    for (i, ch) in text.chars().enumerate() {
+        if width >= visual_col {
+            return i;
+        }
+        width += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+    }
+    text.chars().count()
+}
+
 /// 后台代理选择器最多列出的行数（不含 main 行）
 pub const MAX_BG_AGENT_ROWS: usize = 8;
 
@@ -407,6 +421,10 @@ pub struct ChatState {
     pub pending_model_change: Option<String>,
     pub pending_model_provider: Option<String>,
     pub pending_provider_selected_model: Option<String>,
+    /// 一次性豁免：provider 刚被配置/切换后，用户紧接着的第一次模型选择
+    /// 免 (y/n) 确认 —— 切 provider 本身已是明确意图，选模型是它的延续。
+    /// 在 `request_runtime_model_change` 统一消费清零。
+    pub waive_next_model_confirmation: bool,
     pub pending_palette_action: Option<crate::ui::state::palette::PaletteAction>,
     pub quick_menu_origin_palette: bool,
     pub quick_menu_back: Option<QuickMenuKind>,
@@ -879,6 +897,7 @@ impl ChatState {
             pending_model_change: None,
             pending_model_provider: None,
             pending_provider_selected_model: None,
+            waive_next_model_confirmation: false,
             pending_palette_action: None,
             quick_menu_origin_palette: false,
             quick_menu_back: None,
@@ -1294,13 +1313,22 @@ impl ChatState {
             self.text_selection.get_selection_range()?;
 
         let mut result = String::new();
+        let mut has_selected_line = false;
 
         for entry_idx in start_entry..=end_entry {
-            // 获取渲染后的行
-            let rendered_lines = if let Some((_, lines)) = self.rendered_cache.get(&entry_idx) {
-                lines
-            } else {
-                continue;
+            let rendered_lines: Vec<ratatui::text::Line> = match self.rendered_cache.get(&entry_idx)
+            {
+                Some((_, lines)) => lines.clone(),
+                None => {
+                    // 缓存缺失（流式更新刚清掉）时重渲染兜底，否则复制静默失败
+                    if entry_idx >= self.chat_history.len() {
+                        continue;
+                    }
+                    let width = self.last_chat_area.map(|a| a.width).unwrap_or(80);
+                    crate::ui::components::chat_history::render_entry_lines(
+                        self, entry_idx, width,
+                    )
+                }
             };
 
             let line_start = if entry_idx == start_entry {
@@ -1323,19 +1351,21 @@ impl ChatState {
                 // 将 Line 转换为纯文本
                 let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
 
+                // 鼠标锚点是可视列（CJK 占 2 列），切片必须先换算成字符下标，
+                // 否则中文文本只会复制到一半
                 let col_start = if i == start_row && entry_idx == start_entry {
-                    start_col.min(line_text.len())
+                    char_index_at_visual_col(&line_text, start_col)
                 } else {
                     0
                 };
+                // end_col 与高亮的 is_position_selected 语义一致（闭区间，<= end_col），
+                // 换算时 +1 才能包含末字符
                 let col_end = if i == end_row && entry_idx == end_entry {
-                    end_col.min(line_text.len())
+                    char_index_at_visual_col(&line_text, end_col.saturating_add(1))
                 } else {
-                    line_text.len()
+                    line_text.chars().count()
                 };
 
-                // Use char-based slicing to avoid byte-index panic with
-                // multi-byte characters (e.g., CJK at 3 bytes/char).
                 let selected: String = line_text
                     .chars()
                     .skip(col_start)
@@ -1346,15 +1376,12 @@ impl ChatState {
                         result.push('\n');
                     }
                     result.push_str(&selected);
+                    has_selected_line = true;
                 }
             }
         }
 
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
+        has_selected_line.then_some(result)
     }
 
     pub fn update_item_height(&mut self, index: usize, height: u16) {
@@ -1597,6 +1624,53 @@ mod tests {
         state.exit_teammate_view();
         assert!(state.viewing_agent_task_id.is_none());
         assert_eq!(state.bg_agent_selection, Some(1));
+    }
+
+    /// 左键拖选松开发生在下一次渲染之后。此时流式条目的缓存必须仍然可取，
+    /// 否则 `get_selected_text()` 拿不到选中文本，无法复制。
+    #[test]
+    fn selected_text_survives_render_after_drag() {
+        let mut state = ChatState::new();
+        state
+            .chat_history
+            .push(ChatEntry::assistant("hello streaming world"));
+
+        let line = ratatui::text::Line::from(vec![
+            ratatui::text::Span::raw("  "),
+            ratatui::text::Span::raw("hello streaming world"),
+        ]);
+        state.rendered_cache.insert(0, (1, vec![line]));
+        state.text_selection.start_selection(0, 0, 2);
+        state.text_selection.update_selection(0, 0, 23);
+
+        assert_eq!(
+            state.get_selected_text().as_deref(),
+            Some("hello streaming world")
+        );
+    }
+
+    /// 可视列锚点在 CJK 文本上必须先换算成字符下标再切片：
+    /// 鼠标列是可视列（中文一格占 2 列），直接当字符数用会只复制到一半。
+    #[test]
+    fn selected_text_handles_cjk_visual_columns() {
+        let mut state = ChatState::new();
+        state.chat_history.push(ChatEntry::assistant(""));
+
+        let line = ratatui::text::Line::from(vec![
+            ratatui::text::Span::raw("  "),
+            ratatui::text::Span::raw("分析问题"),
+        ]);
+        state.rendered_cache.insert(0, (1, vec![line]));
+
+        // 选中可视列 2..=9：覆盖全部 4 个中文字符
+        state.text_selection.start_selection(0, 0, 2);
+        state.text_selection.update_selection(0, 0, 9);
+        assert_eq!(state.get_selected_text().as_deref(), Some("分析问题"));
+
+        // 选中可视列 2..=5：只覆盖前两个字符
+        state.text_selection.start_selection(0, 0, 2);
+        state.text_selection.update_selection(0, 0, 5);
+        assert_eq!(state.get_selected_text().as_deref(), Some("分析"));
     }
 
     #[test]
