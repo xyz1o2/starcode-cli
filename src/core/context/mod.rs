@@ -21,3 +21,4 @@ pub mod symbol;
 pub mod symbols_for_read;
 pub mod tree_sitter_chunker;
 pub mod types;
+pub mod watcher;

@@ -194,7 +194,12 @@ impl ToolExecutor {
         ));
 
         match futures::FutureExt::catch_unwind(guarded).await {
-            Ok(result) => result,
+            Ok(result) => {
+                if result.success {
+                    Self::mark_edited_file_dirty(tool_call);
+                }
+                result
+            }
             Err(payload) => {
                 let detail = panic_payload_message(payload.as_ref());
                 let tool_name = tool_call.function.name.as_str();
@@ -231,6 +236,23 @@ impl ToolExecutor {
                 }
             }
         }
+    }
+
+    /// 编辑类工具成功执行后，把目标文件标记为脏 —— 后台索引协调器
+    /// （`context::watcher`）会在防抖窗口后做增量重建，语义搜索保持新鲜。
+    fn mark_edited_file_dirty(tool_call: &StarToolCall) {
+        const EDIT_TOOLS: [&str; 3] = ["Edit", "multi_edit", "Write"];
+        if !EDIT_TOOLS.contains(&Self::canonical_tool_name(&tool_call.function.name).as_str()) {
+            return;
+        }
+        let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
+        else {
+            return;
+        };
+        let Some(file_path) = args.get("file_path").and_then(|v| v.as_str()) else {
+            return;
+        };
+        crate::core::context::watcher::mark_files_dirty(std::iter::once(file_path.to_string()));
     }
 
     async fn execute_inner(

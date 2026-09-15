@@ -178,6 +178,11 @@ which = "6.0"
 shellexpand = "3.1"
 tracing = "0.1"
 
+# Background indexing: file watching (debounced incremental reindex)
+notify = "6.1"
+# Background indexing: low-priority worker threads (Windows THREAD_PRIORITY_LOWEST 等)
+thread-priority = "0.16"
+
 # Multi-provider LLM support (unified provider abstraction)
 # rig-core provides core provider abstractions without heavy companion dependencies
 # Disable default features to reduce dependencies (no epub, pdf, rayon, websocket, etc.)

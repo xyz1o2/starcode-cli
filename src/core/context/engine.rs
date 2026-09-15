@@ -18,16 +18,20 @@ use tokio::sync::RwLock;
 const INDEX_CACHE_REFRESH_SECS: u64 = 300; // 5分钟刷新间隔
 const PROJECT_CONTEXT_CACHE_SECS: u64 = 300; // 5分钟上下文缓存
 
+/// 后台索引默认开启：索引管线已改为免阻塞设计 ——
+/// (size,mtime) 增量跳过（`indexer.rs`）+ 低优先级 worker（`watcher.rs`）+
+/// serve-stale-while-rebuild 查询路径（`semantic_search.rs`），
+/// 启动与首任务不再被全量 IO 风暴拖慢。`STAR_CONTEXT_INDEX_BACKGROUND=0` 可关闭。
 fn background_indexing_enabled() -> bool {
     std::env::var("STAR_CONTEXT_INDEX_BACKGROUND")
         .ok()
         .map(|v| {
-            matches!(
+            !matches!(
                 v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "on" | "yes"
+                "0" | "false" | "off" | "no"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// 索引缓存状态
@@ -143,7 +147,11 @@ impl ContextEngine {
                 "[Context] Starting background index refresh",
             );
 
-            let refresh_result = tokio::task::spawn_blocking(move || indexer.index_project()).await;
+            let refresh_result = tokio::task::spawn_blocking(move || {
+                crate::core::context::watcher::lower_current_thread_priority();
+                indexer.index_project()
+            })
+            .await;
 
             match refresh_result {
                 Ok(Ok(result)) => {
@@ -192,6 +200,8 @@ impl ContextEngine {
 
     /// 预热索引缓存。
     ///
+    /// 免阻塞设计：延迟 3 秒（避开首任务的关键启动窗口）+ 后台线程降为
+    /// 最低优先级 —— 索引工作在任何前台活动面前都自动让路。
     /// 安全措施：如果调用时 Tokio runtime 尚未就绪 (Handle::try_current 失败)，
     /// 则在独立 std::thread 中同步执行索引，避免 panic。
     pub fn prewarm_index_cache(&self) {
@@ -208,6 +218,8 @@ impl ContextEngine {
             Ok(_handle) => {
                 // Runtime is active: spawn an async task
                 tokio::spawn(async move {
+                    // 延迟预热：等首任务的关键路径（首 token）先跑起来
+                    tokio::time::sleep(Duration::from_secs(3)).await;
                     let should_refresh = {
                         let cache = index_cache.read().await;
                         ContextEngine::should_refresh_cached(&cache, cache_refresh_secs)
@@ -230,6 +242,8 @@ impl ContextEngine {
                         if refresh_flag.swap(true, Ordering::SeqCst) {
                             return;
                         }
+                        crate::core::context::watcher::lower_current_thread_priority();
+                        std::thread::sleep(Duration::from_secs(3));
                         match indexer.index_project() {
                             Ok(result) => {
                                 // Note: cannot use .write().await without tokio.

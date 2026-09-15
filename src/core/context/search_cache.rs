@@ -65,6 +65,18 @@ impl SearchEngineCacheManager {
         })
     }
 
+    /// 取最近一次构建的引擎（无论 mtime 是否匹配），供 serve-stale-while-rebuild：
+    /// 索引过期时先拿旧引擎立即回答，后台重建完成后自然切换。
+    pub fn get_engine_stale(
+        &self,
+        key: &(PathBuf, String),
+    ) -> Option<(SearchEngine, Option<SystemTime>)> {
+        let cache = self.engine_cache.read();
+        cache
+            .get(key)
+            .map(|cached| (cached.engine.clone(), cached.index_mtime))
+    }
+
     /// Store a search engine in the cache. Evicts oldest entry if at capacity.
     pub fn put_engine(&self, key: (PathBuf, String), cached: CachedSearchEngine) {
         let mut cache = self.engine_cache.write();

@@ -106,51 +106,6 @@ fn index_mtime(project_root: &Path) -> Option<SystemTime> {
         .ok()
 }
 
-/// Returns a cached SearchEngine if the index hasn't changed, otherwise builds a new one.
-///
-/// Uses the `SearchEngineCacheManager` (parking_lot RwLock, no poisoning) when
-/// provided.  Falls back to building a fresh engine every call when `cache` is None.
-fn get_or_build_search_engine(
-    root: &Path,
-    limits: SemanticSearchLimits,
-    update_output: &Option<ProgressCallback>,
-    cache: Option<&Arc<SearchEngineCacheManager>>,
-) -> Result<(SearchEngine, SemanticSearchStats), Box<dyn std::error::Error + Send + Sync>> {
-    let cache_key = (
-        root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
-        limits.cache_key(),
-    );
-
-    let current_mtime = index_mtime(root);
-
-    // Fast path: check the parking_lot-based cache (no poisoning risk).
-    if let Some(manager) = cache {
-        if let Some(engine) = manager.get_engine(&cache_key, current_mtime) {
-            let stats = SemanticSearchStats {
-                indexed_files: 0,
-                ..Default::default()
-            };
-            return Ok((engine, stats));
-        }
-    }
-
-    // Slow path: (re)build the engine from filesystem.
-    let (engine, stats) = build_search_engine_from_fs(root, limits, update_output)?;
-
-    // Store in cache if available.
-    if let Some(manager) = cache {
-        manager.put_engine(
-            cache_key,
-            CachedSearchEngine {
-                engine: engine.clone(),
-                index_mtime: current_mtime,
-            },
-        );
-    }
-
-    Ok((engine, stats))
-}
-
 /// Error record for a single file that failed indexing (does not stop the batch).
 #[derive(Debug, Clone)]
 struct FileIndexError {
@@ -604,6 +559,93 @@ pub fn search_codebase(
     search_codebase_with_limits(root, query, update_output, semantic_search_limits(), None)
 }
 
+/// 后台重建引擎并写入缓存（watcher 协调器的 worker 线程调用）。
+/// 返回本次索引的文件数。
+pub fn build_engine_into_cache(
+    root: &Path,
+    cache: &Arc<SearchEngineCacheManager>,
+    update_output: Option<ProgressCallback>,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let limits = semantic_search_limits();
+    let (engine, stats) = build_search_engine_from_fs(root, limits, &update_output)?;
+    let key = (
+        root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+        limits.cache_key(),
+    );
+    cache.put_engine(
+        key,
+        CachedSearchEngine {
+            engine,
+            index_mtime: index_mtime(root),
+        },
+    );
+    Ok(stats.indexed_files)
+}
+
+/// 引擎来源：决定查询结果的标注与兜底策略。
+enum EngineSource {
+    /// 缓存命中且 mtime 匹配
+    Fresh,
+    /// mtime 不匹配，先拿旧版本回答，后台重建中
+    Stale,
+    /// 本会话还没有任何引擎（冷启动），后台构建中
+    Warming,
+}
+
+/// 三级引擎解析（serve-stale-while-rebuild）：
+/// 1. 新鲜缓存 → 直接用；
+/// 2. 过期缓存 → **立即**返回旧引擎继续回答，同时触发协调器后台重建；
+/// 3. 冷启动 → 触发后台构建并返回 Warming，让本次查询降级到 Grep，
+///    绝不在查询路径上同步做全量构建卡住 agent。
+/// 协调器不可用（未启动/上次后台重建失败）时回退旧的同步构建路径。
+fn resolve_engine(
+    root: &Path,
+    limits: SemanticSearchLimits,
+    update_output: &Option<ProgressCallback>,
+    cache: Option<&Arc<SearchEngineCacheManager>>,
+) -> Result<(SearchEngine, SemanticSearchStats, EngineSource), Box<dyn std::error::Error + Send + Sync>>
+{
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let current_mtime = index_mtime(root);
+    let cache_key = (canonical_root, limits.cache_key());
+
+    if let Some(manager) = cache {
+        if let Some(engine) = manager.get_engine(&cache_key, current_mtime) {
+            return Ok((engine, SemanticSearchStats::default(), EngineSource::Fresh));
+        }
+
+        if let Some((stale_engine, _)) = manager.get_engine_stale(&cache_key) {
+            crate::core::context::watcher::request_refresh(root);
+            return Ok((stale_engine, SemanticSearchStats::default(), EngineSource::Stale));
+        }
+
+        // 冷启动：协调器可用且未发生过失败 → 后台构建 + Warming 兜底
+        let coordinator_engaged = crate::core::context::watcher::is_started();
+        if coordinator_engaged && !crate::core::context::watcher::last_rebuild_failed() {
+            crate::core::context::watcher::request_refresh(root);
+            return Ok((
+                SearchEngine::new(),
+                SemanticSearchStats::default(),
+                EngineSource::Warming,
+            ));
+        }
+        // 协调器不可用 → 同步构建（旧行为）
+        let (engine, stats) = build_search_engine_from_fs(root, limits, update_output)?;
+        manager.put_engine(
+            cache_key,
+            CachedSearchEngine {
+                engine: engine.clone(),
+                index_mtime: current_mtime,
+            },
+        );
+        return Ok((engine, stats, EngineSource::Fresh));
+    }
+
+    // 无缓存（standalone/测试）：保持旧的同步构建行为
+    let (engine, stats) = build_search_engine_from_fs(root, limits, &update_output)?;
+    Ok((engine, stats, EngineSource::Fresh))
+}
+
 fn search_codebase_with_limits(
     root: &Path,
     query: &str,
@@ -624,12 +666,20 @@ fn search_codebase_with_limits(
         }
     }
 
-    // ── Build or reuse cached search engine ──────────────────────────────────
-    // Leverages the Indexer's .star/context/index.json mtime as a validity signal:
-    // if no files have changed since the last build, the in-memory index is reused.
-    let (engine, stats) = get_or_build_search_engine(root, limits, &update_output, cache)?;
+    // ── Resolve engine (fresh / stale / warming) ─────────────────────────────
+    let (engine, stats, source) = resolve_engine(root, limits, &update_output, cache)?;
 
-    let was_cached = stats.indexed_files == 0 && !stats.truncated;
+    if matches!(source, EngineSource::Warming) {
+        let mut output = String::new();
+        output.push_str(&format!(
+            "Semantic index is building in the background for '{}' (first build; typically finishes in seconds).\n",
+            root.display()
+        ));
+        output.push_str("No results available from the semantic index this turn. For exact symbols/strings use `Grep` now; re-run `SemanticSearch` shortly for conceptual queries.\n");
+        return Ok(output);
+    }
+
+    let was_cached = matches!(source, EngineSource::Fresh) && stats.indexed_files == 0 && !stats.truncated;
 
     // ── Hybrid Search (RRF) ───────────────────────────────────────────────────
     // P2: Two complementary search strategies are fused via RRF:
@@ -708,9 +758,14 @@ fn search_codebase_with_limits(
         reranked.len(),
         root.display(),
     ));
+    if matches!(source, EngineSource::Stale) {
+        output.push_str(
+            "Index: serving previous revision — files changed since; rebuild running in background (results may be slightly stale)\n",
+        );
+    }
     if was_cached {
         output.push_str("Index: cached (no files changed)\n");
-    } else {
+    } else if !matches!(source, EngineSource::Stale) {
         output.push_str(&format!(
             "Indexed files: {} / scanned text files: {} / skipped large files: {} / bytes: {}\n",
             stats.indexed_files,
