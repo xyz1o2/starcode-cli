@@ -257,6 +257,31 @@ fn code_block_lines(
     out
 }
 
+/// 思考块内的围栏代码段 → 完整渲染（顶框 + 高亮正文 + 底框）。
+///
+/// 思考内容整体走逐行紧凑排版，但模型在思考里贴的 ``` 代码块需要真正
+/// 渲染——语法高亮 + 围栏边框，与正文代码块同一视觉语言，而不是把
+/// ```bash 这类标记原样亮出来或整段藏掉。
+pub(crate) fn render_thinking_code_segment(
+    code: &str,
+    language: &str,
+    wrap_width: Option<usize>,
+) -> Vec<Line<'static>> {
+    let mut body = Vec::new();
+    let mut content_w = 0usize;
+    for src_line in code.lines() {
+        for l in code_block_lines(src_line, language, wrap_width) {
+            content_w = content_w.max(line_spans_display_width(&l.spans));
+            body.push(l);
+        }
+    }
+    let total = code_fence_width(content_w, language, wrap_width);
+    let mut out = vec![code_fence_top(language, total)];
+    out.extend(body);
+    out.push(code_fence_bottom(total));
+    out
+}
+
 /// 把累积的内联 spans 按显示宽度折行，样式与空格原样保留。
 ///
 /// 折行必须在"整行内联内容收齐之后"做，不能在每个 `Event::Text` 里各自折 ——

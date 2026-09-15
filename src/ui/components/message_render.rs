@@ -132,6 +132,8 @@ pub(crate) fn render_non_tool_entry_blocks(
                             // 会把每行渲染成独立段落、段间空一行，整块稀疏得没法看。
                             // 这里改回逐行渲染：保留每个思考步骤一行及其前导缩进；
                             // 长行折行时续行继承源行缩进，源空行不渲染，行间不额外加空行。
+                            // 行内标记（**粗体** 等）转样式；``` 围栏代码段走完整
+                            // 代码渲染（语法高亮 + 边框，与正文同一视觉语言）。
                             let content_width = wrap_width.saturating_sub(2);
                             let thinking_style = if is_streaming_now || cancelling {
                                 Style::default()
@@ -140,9 +142,34 @@ pub(crate) fn render_non_tool_entry_blocks(
                             } else {
                                 Style::default().fg(theme.inactive)
                             };
-                            let mut thinking_lines = Vec::new();
+                            let mut thinking_lines: Vec<Line<'static>> = Vec::new();
+                            let mut fence_lang: Option<String> = None;
+                            let mut fence_buf: Vec<String> = Vec::new();
                             for raw_line in reasoning_display.lines() {
                                 let line = raw_line.trim_end();
+
+                                // ``` 围栏：开段记语言，闭段整块渲染；围栏内的行
+                                // 攒进 buffer，不做行内 markdown 解析
+                                if let Some(rest) = line.trim_start().strip_prefix("```") {
+                                    if fence_lang.is_none() {
+                                        fence_lang = Some(rest.trim().to_string());
+                                    } else {
+                                        thinking_lines.extend(
+                                            crate::utils::markdown_parser::render_thinking_code_segment(
+                                                &fence_buf.join("\n"),
+                                                fence_lang.as_deref().unwrap_or(""),
+                                                Some(content_width),
+                                            ),
+                                        );
+                                        fence_lang = None;
+                                    }
+                                    continue;
+                                }
+                                if fence_lang.is_some() {
+                                    fence_buf.push(line.to_string());
+                                    continue;
+                                }
+
                                 if line.trim().is_empty() {
                                     continue;
                                 }
@@ -180,6 +207,17 @@ pub(crate) fn render_non_tool_entry_blocks(
                                         thinking_lines.push(Line::from(spans));
                                     }
                                 }
+                            }
+                            // 流式期间闭合 ``` 可能还没到：把攒着的半截代码段
+                            // 照常渲染，随流式增长逐帧补全
+                            if fence_lang.is_some() {
+                                thinking_lines.extend(
+                                    crate::utils::markdown_parser::render_thinking_code_segment(
+                                        &fence_buf.join("\n"),
+                                        fence_lang.as_deref().unwrap_or(""),
+                                        Some(content_width),
+                                    ),
+                                );
                             }
                             if thinking_lines.is_empty() {
                                 let mut spans = vec![Span::raw("  ")];
@@ -680,7 +718,7 @@ mod tests {
     }
 
     /// 思考内容的行内 markdown 不得原样显示：`**粗体**` 要转成加粗样式，
-    /// `##` 标题去标记后加粗，` ``` ` 围栏行整行隐藏。
+    /// `##` 标题去标记后加粗，``` 围栏代码段要真正渲染（边框 + 高亮）。
     #[test]
     fn thinking_inline_markdown_renders_styled_not_literal() {
         let mut state = crate::ui::state::ChatState::new();
@@ -708,7 +746,7 @@ mod tests {
             .collect();
         let texts: Vec<&str> = rendered.iter().map(|(t, _)| t.as_str()).collect();
 
-        // 无任何字面 markdown 标记残留
+        // 无任何字面 markdown 标记残留（围栏边框 ┌/└ 不是标记）
         for t in &texts {
             assert!(!t.contains("**"), "literal ** leaked: {:?}", texts);
             assert!(!t.contains("##"), "literal ## leaked: {:?}", texts);
@@ -716,14 +754,16 @@ mod tests {
             assert!(!t.contains("`"), "literal backtick leaked: {:?}", texts);
         }
 
-        // 标题行与粗体段都带 BOLD；围栏行被隐藏
+        // 围栏段渲染成边框 + 代码正文（正文 9 列宽 → 总宽 10）
         assert_eq!(
             texts,
             vec![
                 "  分析重点",
                 "  先查 缓存失效 的问题",
                 "  再看 retry 逻辑",
+                "  ┌ bash ─",
                 "  echo hi",
+                "  └───────",
             ],
             "rendered: {:?}",
             texts
@@ -733,7 +773,38 @@ mod tests {
             rendered[1].1,
             "bold segment line should carry BOLD modifier"
         );
-        assert!(!rendered[3].1, "plain code line should not be bold");
+        assert!(!rendered[2].1, "inline-code line should not be bold");
+        assert!(rendered[3].1, "fence language label should be bold");
+        assert!(!rendered[4].1, "code body line should not be bold");
+    }
+
+    /// 围栏未闭合（流式中途）：半截代码段也要渲染出来，不能整段消失。
+    #[test]
+    fn thinking_unclosed_fence_still_renders_partial_code() {
+        let mut state = crate::ui::state::ChatState::new();
+        let mut entry = crate::types::ChatEntry::assistant("");
+        entry.reasoning_content = Some("先跑一遍命令\n```bash\nnslookup example.com".to_string());
+        entry.is_streaming = Some(true);
+        state.chat_history.push(entry);
+        let idx = state.chat_history.len() - 1;
+        state.expanded_thinking_indices.insert(idx);
+
+        let blocks = render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, 70, false);
+        let texts: Vec<String> = blocks[1]
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        assert!(
+            texts.iter().any(|t| t.contains("nslookup example.com")),
+            "partial code body must render: {:?}",
+            texts
+        );
+        assert!(
+            texts.iter().any(|t| t.contains('┌')),
+            "fence top border must render: {:?}",
+            texts
+        );
     }
 
     /// 未闭合的 `**` 按字面保留，不能把后半段全部误染成粗体。
