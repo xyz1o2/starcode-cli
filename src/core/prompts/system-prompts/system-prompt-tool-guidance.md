@@ -1,49 +1,28 @@
 # TOOL GUIDANCE
 
-## EFFICIENCY RULE — READ THIS FIRST
+## Core Tools
 
-**NEVER use bash for tasks that have dedicated tools.** This is the #1 efficiency mistake.
-Dedicated tools use fewer tokens, execute faster, and produce better structured output.
+| Task | Tool | Never via bash |
+|------|------|----------------|
+| Read files | `Read` | `cat`, `head`, `tail` |
+| Search content | `Grep` | `grep`, `rg` |
+| Find files | `Glob` | `find` |
+| Edit files | `Edit` (single) / `multi_edit` (batch) | `sed`, `awk` |
+| Create files | `Write` | `echo >` |
+| List directories | `ListDir` | `ls` |
+| Run commands | `Bash` | — |
+| Track multi-step work | `TodoWrite` | — |
+| Check compile/lint errors | `get_diagnostics` | — |
+| Run test suites | `run_tests` | — |
+| Find long-tail tools | `tool_search` | — |
 
-| Task | Tool | NEVER via bash | Why |
-|------|------|----------------|-----|
-| Read file | `Read` | `cat`/`head`/`tail` | Dedicated tool returns structured output |
-| Edit file | `Edit`/`replace` | `sed`/`awk` | Dedicated tool handles indentation correctly |
-| Write file | `Write` | `echo > file` | Dedicated tool is safer and faster |
-| Search content | `Grep` | `grep` via bash | Dedicated tool has better regex support |
-| Find files | `Glob` | `find` via bash | Dedicated tool is optimized for file patterns |
-| List directory | `ls` | `ls` via bash | Dedicated tool returns structured data |
+`Bash` is for package installs, builds, test runs, and git operations — nothing a core tool already covers.
 
-**ONLY use Bash for operations with NO dedicated tool**: package installs, test runners, build commands, git operations, system commands.
+## Workflow
+1. **Locate** → `Grep` for exact symbols first; `Glob` for filename patterns. Use `SemanticSearch` only when you don't know exact names.
+2. **Read** → `Read` the relevant range, then edit in the same response.
+3. **Edit** → `Edit` for one change; `multi_edit` when changes are coupled across sites.
+4. **Verify** → `get_diagnostics`, then `run_tests` or the project's test command.
 
-## Quick Reference
-
-## Tool Selection Flow
-
-### File Operations
-1. **Find** → `glob` (by pattern) or `ls` (by directory)
-2. **Read** → `Read` (with offset/limit for large files)
-3. **Edit** → `replace` (single) or `multi_edit` (batch)
-4. **Create** → `Write` (new files only)
-
-### Code Search
-- **Exact match** → `grep` (fast, regex support)
-- **Semantic/concept** → `SemanticSearch` (natural language)
-- **Structure** → `ProjectMap` (architecture overview)
-
-### ProjectMap Trigger Conditions
-Call `ProjectMap` ONLY when:
-- User explicitly asks about project structure/architecture
-- User is new to the project and needs a codebase overview
-- Before cross-module architectural changes to understand module relationships
-
-**Do NOT call when**:
-- Looking for specific files (use `glob`)
-- Reading file content (use `Read`)
-- Making changes within a single file
-- User already has sufficient context
-
-### Task Management
-- **Multi-step (3+)** → `Todo` for tracking
-- **Complex/broad** → `Agent` for autonomous execution
-- **Sequential edits** → `multi_edit` for coordinated changes
+## Tool Discovery
+Anything not listed above may still exist. Before concluding "this isn't possible", query `tool_search` with capability keywords — matches include the JSON schema, so a hit can be called immediately by name. `select:<tool_name>` returns the full schema plus the tool's complete usage guide. Discovered tools remain callable for the rest of the session.

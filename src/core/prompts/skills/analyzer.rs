@@ -24,9 +24,9 @@ Use the following thought process for every task:
 5. **Conclusion**: "Therefore, the flow is X -> Y -> Z."
 
 ## TOOL USAGE
-- Use `search` (ripgrep) for initial discovery.
+- Use `Grep` for initial discovery.
 - Use `Read` to examine implementation details.
-- Use `ls` to understand directory structure.
+- Use `ListDir` to understand directory structure.
 
 ## OUTPUT FORMAT
 When the user asks for analysis, provide:

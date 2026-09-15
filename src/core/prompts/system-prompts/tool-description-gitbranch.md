@@ -5,7 +5,7 @@ description: Manage Git branches
 Git branch operations: list, create, switch, delete, merge, rebase.
 
 **Use for**: branch lifecycle management.
-**NOT for**: viewing diffs (use `git_insight`), cherry-pick (use `bash`).
+**NOT for**: viewing diffs (use `git_insight`), cherry-pick (use `Bash`).
 
 **Actions**: `list` | `create` | `switch` | `delete` | `merge` | `rebase`
 

@@ -5,7 +5,7 @@ description: Capture the output content of a terminal panel.
 Capture terminal panel output.
 
 **Use for**: reading output from a running terminal panel.
-**NOT for**: running new commands (use `bash`).
+**NOT for**: running new commands (use `Bash`).
 
 **Rules**:
 - Read-only; does not execute commands

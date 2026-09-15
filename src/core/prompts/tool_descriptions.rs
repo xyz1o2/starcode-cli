@@ -169,6 +169,34 @@ pub fn resolve_tool_description(tool_name: &str) -> Option<String> {
     parse_frontmatter_description(&content).or_else(|| Some(content.trim().to_string()))
 }
 
+/// 去掉 frontmatter 注释块的正文。
+fn strip_frontmatter(content: &str) -> &str {
+    if content.trim_start().starts_with("<!--") {
+        content
+            .split_once("-->")
+            .map(|(_, rest)| rest)
+            .unwrap_or(content)
+    } else {
+        content
+    }
+}
+
+/// 加载工具的完整使用说明正文（`tool-description-*.md` 去掉 frontmatter）。
+///
+/// 供 `tool_search` 的 `select:<name>` 模式动态加载：长尾工具不常驻系统提示词，
+/// 模型发现工具时随结果拿到详细用法 —— 使用说明走 tool result（消息尾部），
+/// 不触碰 prompt 缓存前缀。
+pub fn resolve_tool_body(tool_name: &str) -> Option<String> {
+    let filename = tool_description_filename(tool_name)?;
+    let content = crate::core::prompts::loader::try_load_prompt(&filename)?;
+    let body = strip_frontmatter(&content).trim();
+    if body.is_empty() {
+        None
+    } else {
+        Some(body.to_string())
+    }
+}
+
 /// 判断某个 `tool-description-<key>.md` 文件是否与当前激活工具集匹配。
 /// 供系统提示词 bundle 过滤使用，与 schema 描述共用同一映射（单一事实源）。
 pub fn description_key_matches_active_tools(
@@ -191,4 +219,31 @@ pub fn registered_tool_keys() -> Vec<(&'static str, &'static str)> {
         .iter()
         .map(|(tool, key)| (*tool, *key))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_body_strips_frontmatter_and_returns_prose() {
+        let body = resolve_tool_body("Edit").expect("Edit 必须有使用说明");
+        assert!(!body.contains("<!--"), "正文不得包含 frontmatter");
+        assert!(
+            body.contains("`Write`") && body.contains("`multi_edit`"),
+            "正文应是工具指引原文，而非空壳"
+        );
+    }
+
+    #[test]
+    fn tool_body_todos_use_managetasks_file() {
+        let body = resolve_tool_body("TodoWrite").expect("TodoWrite 映射到 managetasks");
+        assert!(!body.is_empty());
+    }
+
+    #[test]
+    fn tool_body_is_none_for_unmapped_tools() {
+        assert!(resolve_tool_body("definitely_not_a_tool").is_none());
+        assert!(resolve_tool_body("").is_none());
+    }
 }

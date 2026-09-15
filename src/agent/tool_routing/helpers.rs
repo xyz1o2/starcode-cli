@@ -356,13 +356,17 @@ fn resolved_discovered_tool_quota() -> usize {
 }
 
 /// 解析通用工具短名单限制
+///
+/// 默认值 = 核心工具数：短名单只常驻核心工具，长尾工具由 `tool_search` 发现后
+/// 经粘滞配额追加。评分填充随之成为空操作，tools 数组不再逐消息漂移，
+/// prompt 缓存前缀保持稳定（见 [`resolved_tool_shortlist_limit`] 的缓存稳定性说明）。
 fn resolved_general_tool_shortlist_limit() -> usize {
     static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| {
         std::env::var("STAR_TOOL_SHORTLIST_K")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(24)
+            .unwrap_or(CORE_TOOL_NAMES.len())
             .clamp(6, 64)
     })
 }
@@ -789,5 +793,28 @@ mod tests {
         ts::begin_message_epoch();
         let next_message = select_tools_for_turn_with_limit(&tools, input, 1, None);
         assert!(next_message.selected_names.contains(&target));
+    }
+
+    /// 默认短名单 = 核心工具全集：无评分填充、无逐消息漂移。
+    #[test]
+    fn default_shortlist_is_exactly_the_core_set() {
+        let _guard = isolated_sticky_state();
+        let tools = wide_tool_set();
+
+        let selection = select_tools_for_turn(&tools, "refactor parser and run tests", 1);
+        let mut names: Vec<&str> = selection
+            .tools
+            .iter()
+            .map(|t| t.function.name.as_str())
+            .collect();
+        names.sort_unstable();
+
+        let mut core: Vec<&str> = CORE_TOOL_NAMES.to_vec();
+        core.sort_unstable();
+
+        assert_eq!(
+            names, core,
+            "默认配置下 tools 数组必须恰好等于核心工具集（长尾靠 tool_search 发现）"
+        );
     }
 }

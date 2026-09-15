@@ -5,8 +5,8 @@ description: Interact with Language Server Protocol (LSP) for code navigation li
 Interact with Language Server Protocol (LSP) for code navigation.
 
 **Use for**: go-to-definition, find-references, hover information, workspace symbols.
-**NOT for**: plain text search (use `grep`/`glob`).
+**NOT for**: plain text search (use `Grep`/`Glob`).
 
 **Rules**:
 - Requires an active language server for the file's language
-- Prefer LSP over grep when you need semantic understanding (definitions, references)
+- Prefer LSP over `Grep` when you need semantic understanding (definitions, references)

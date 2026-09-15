@@ -5,7 +5,7 @@ description: Execute PowerShell commands (Windows)
 Run PowerShell commands on Windows. Includes danger detection.
 
 **Use for**: Windows system admin, automation, Windows-specific tasks.
-**NOT for**: Linux/macOS (use `bash`), high-risk commands (Format-Volume).
+**NOT for**: Linux/macOS (use `Bash`), high-risk commands (Format-Volume).
 
 **Params**: `command`, `timeout` (default: 30s)
 

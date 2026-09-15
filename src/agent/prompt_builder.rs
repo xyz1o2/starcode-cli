@@ -227,105 +227,9 @@ impl PromptBuilder {
         }
 
         let mut out = String::new();
-        out.push_str("\n\n# System Prompts Bundle (Dynamic)\n");
+        out.push_str("\n\n# Core Tool Usage Guides\n");
 
-        let mut all_filenames: Vec<String> = SystemPrompts::iter()
-            .map(|f| f.to_string())
-            .filter(|f| f.ends_with(".md"))
-            .collect();
-        all_filenames.sort_by(|a, b| {
-            let a_lower = a.to_lowercase();
-            let b_lower = b.to_lowercase();
-            embedded_prompt_dedupe_key(&a_lower)
-                .cmp(&embedded_prompt_dedupe_key(&b_lower))
-                .then_with(|| {
-                    prompt_version_priority(&a_lower).cmp(&prompt_version_priority(&b_lower))
-                })
-                .then_with(|| a_lower.cmp(&b_lower))
-        });
-
-        let mut selected_filenames: Vec<String> = Vec::new();
-        let mut selected_dedupe_keys = HashSet::new();
-
-        for filename in all_filenames {
-            let name = filename.to_lowercase();
-
-            if should_skip_embedded_prompt_file(&name) {
-                continue;
-            }
-
-            if name.starts_with("tool-description-") {
-                if let Some(tools) = active_tools {
-                    let tool_name_part = name
-                        .trim_start_matches("tool-description-")
-                        .trim_end_matches(".md")
-                        .split('-')
-                        .next()
-                        .unwrap_or("");
-
-                    // 与工具 schema 描述共用同一映射（tool_descriptions::tool_description_key_map）。
-                    // 该映射覆盖了旧版逐分支匹配（bash/grep/readfile/edit/websearch 等别名）。
-                    let is_active =
-                        crate::core::prompts::tool_descriptions::description_key_matches_active_tools(
-                            tool_name_part,
-                            tools,
-                        );
-
-                    if !is_active {
-                        continue;
-                    }
-                }
-            }
-
-            if name.contains("plan-mode") {
-                if mode != PromptMode::Plan {
-                    continue;
-                }
-            }
-
-            if name.contains("agent-prompt") {
-                if mode == PromptMode::Interactive {
-                    continue;
-                }
-
-                let specialist_prompts = [
-                    "agent-prompt-explore.md",
-                    "agent-prompt-star-guide-agent.md",
-                    "agent-prompt-starmd-creation.md",
-                    "agent-prompt-prompt-suggestion-generator-v2.md",
-                    "agent-prompt-session-search-assistant.md",
-                    "agent-prompt-update-magic-docs.md",
-                    "agent-prompt-bash-command-file-path-extraction.md",
-                    "agent-prompt-bash-command-prefix-detection.md",
-                    "agent-prompt-bash-output-summarization.md",
-                    "agent-prompt-conversation-summarization.md",
-                    "agent-prompt-conversation-summarization-with-additional-instructions.md",
-                    "agent-prompt-session-title-and-branch-generation.md",
-                    "agent-prompt-session-notes-template.md",
-                    "agent-prompt-session-notes-update-instructions.md",
-                    "agent-prompt-pr-comments-slash-command.md",
-                    "agent-prompt-review-pr-slash-command.md",
-                    "agent-prompt-security-review-slash.md",
-                    "agent-prompt-webfetch-summarizer.md",
-                    "agent-prompt-user-sentiment-analysis.md",
-                    "agent-prompt-prompt-hook-execution.md",
-                    "agent-prompt-agent-hook.md",
-                    "agent-prompt-agent-creation-architect.md",
-                ];
-
-                if specialist_prompts.iter().any(|&p| name.contains(p)) {
-                    continue;
-                }
-            }
-
-            let dedupe_key = embedded_prompt_dedupe_key(&name);
-            if !selected_dedupe_keys.insert(dedupe_key) {
-                continue;
-            }
-            selected_filenames.push(filename);
-        }
-
-        selected_filenames.sort();
+        let selected_filenames = Self::core_tool_description_filenames();
 
         for filename in selected_filenames {
             if out.len() >= max_chars {
@@ -358,6 +262,74 @@ impl PromptBuilder {
             .insert(cache_key, bundle.clone());
 
         bundle
+    }
+
+    /// Bundle 只收**核心工具**的使用说明正文：
+    /// - 模板类文件（scope-strategy / complexity-strategies / token-budget-warning /
+    ///   conversation-summary / auto-plan-injection / planner-system 等）都在各自的
+    ///   渲染点单独加载，原文进 system 纯属噪音；
+    /// - 长尾工具的使用说明由 `tool_search` 的 `select:<name>` 模式动态加载，
+    ///   随 tool result 下发（消息尾部），不进缓存前缀 —— 若按短名单 active 过滤，
+    ///   每发现一个工具 system 前缀就漂移一次，击穿 prompt 缓存。
+    ///
+    /// 纯函数：只依赖内嵌文件清单与核心工具常量，会话内恒定 → 缓存前缀稳定。
+    fn core_tool_description_filenames() -> Vec<String> {
+        let core_tools: HashSet<String> = crate::agent::tool_routing::CORE_TOOL_NAMES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let mut all_filenames: Vec<String> = SystemPrompts::iter()
+            .map(|f| f.to_string())
+            .filter(|f| f.ends_with(".md"))
+            .collect();
+        all_filenames.sort_by(|a, b| {
+            let a_lower = a.to_lowercase();
+            let b_lower = b.to_lowercase();
+            embedded_prompt_dedupe_key(&a_lower)
+                .cmp(&embedded_prompt_dedupe_key(&b_lower))
+                .then_with(|| {
+                    prompt_version_priority(&a_lower).cmp(&prompt_version_priority(&b_lower))
+                })
+                .then_with(|| a_lower.cmp(&b_lower))
+        });
+
+        let mut selected_dedupe_keys = HashSet::new();
+        let mut selected: Vec<String> = Vec::new();
+
+        for filename in all_filenames {
+            let name = filename.to_lowercase();
+
+            if should_skip_embedded_prompt_file(&name) || !name.starts_with("tool-description-") {
+                continue;
+            }
+
+            let tool_name_part = name
+                .trim_start_matches("tool-description-")
+                .trim_end_matches(".md")
+                .split('-')
+                .next()
+                .unwrap_or("");
+
+            // 与工具 schema 描述共用同一映射（tool_descriptions::tool_description_key_map）。
+            let is_core =
+                crate::core::prompts::tool_descriptions::description_key_matches_active_tools(
+                    tool_name_part,
+                    &core_tools,
+                );
+            if !is_core {
+                continue;
+            }
+
+            let dedupe_key = embedded_prompt_dedupe_key(&name);
+            if !selected_dedupe_keys.insert(dedupe_key) {
+                continue;
+            }
+            selected.push(filename);
+        }
+
+        selected.sort();
+        selected
     }
 
     pub fn build_system_prompt(
@@ -942,5 +914,44 @@ mod tests {
         let out = PromptBuilder::build_turn_context(Some(&long), None).unwrap();
         assert!(out.contains("turn context truncated"));
         assert!(out.chars().count() < 5000);
+    }
+
+    /// Bundle 只收核心工具的使用说明正文：会话内恒定 → 缓存前缀稳定。
+    #[test]
+    fn bundle_filenames_cover_core_tools_only() {
+        let files = PromptBuilder::core_tool_description_filenames();
+
+        assert!(
+            files.iter().all(|f| f.starts_with("tool-description-")),
+            "bundle 不得混入非工具描述文件：{files:?}"
+        );
+
+        let names: Vec<&String> = files.iter().collect();
+        for must_have in [
+            "tool-description-edit.md",
+            "tool-description-grep.md",
+            "tool-description-ls.md",
+            "tool-description-managetasks.md",
+            "tool-description-toolsearch.md",
+        ] {
+            assert!(
+                names.iter().any(|f| *f == must_have),
+                "缺少核心工具说明 {must_have}"
+            );
+        }
+
+        for must_not in [
+            "tool-description-goal.md",
+            "tool-description-gitbranch.md",
+            "tool-description-notebookedit.md",
+        ] {
+            assert!(
+                !names.iter().any(|f| *f == must_not),
+                "非核心工具说明不应进 bundle：{must_not}"
+            );
+        }
+
+        // 结果必须确定：两次调用一致（缓存前缀稳定的直接前提）。
+        assert_eq!(files, PromptBuilder::core_tool_description_filenames());
     }
 }

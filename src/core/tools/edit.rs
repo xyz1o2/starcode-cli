@@ -1094,7 +1094,7 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
                     // Allow creating a new file, but existing files must have been read.
                     if resolved_path.exists() {
                         let msg = format!(
-                            "Edit blocked [edit_file_not_read]: file '{}' must be read with `Read` before using `replace`. \
+                            "Edit blocked [edit_file_not_read]: file '{}' must be read with `Read` before using `Edit`. \
                              REQUIRED NEXT STEP: call `Read` with file_path='{}' first, then retry. \
                              Do NOT retry without reading the file first.",
                             params.file_path, params.file_path

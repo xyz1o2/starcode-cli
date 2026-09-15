@@ -5,7 +5,7 @@ description: Search the web for information
 Search the web for current information, documentation, solutions.
 
 **Use for**: latest docs, error solutions, API references, package info.
-**NOT for**: local code search (use `grep`), project files (use `glob`).
+**NOT for**: local code search (use `Grep`), project files (use `Glob`).
 
 **Params**: `query` (search terms), `num` (results, default 5, max 10)
 

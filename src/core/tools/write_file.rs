@@ -93,7 +93,7 @@ fn full_rewrite_guard_message(
 
     Some(format!(
         "Write blocked [full_file_rewrite_blocked]: existing file '{}' would be replaced almost entirely (changed ratio {:.1}%, {} lines). \
-Do not retry `write_file` with another full-file body. Read the file again and switch to `replace`, `smart_edit`, or `multi_edit` with targeted old/new hunks.",
+Do not retry `write_file` with another full-file body. Read the file again and switch to `Edit`, `smart_edit`, or `multi_edit` with targeted old/new hunks.",
         file_path.display(),
         ratio * 100.0,
         original_lines
@@ -445,7 +445,7 @@ impl ToolInvocation for WriteFileToolInvocation {
                     existing_file_verified_for_overwrite = true;
                 } else {
                     let message = format!(
-                        "Write blocked [edit_file_not_read]: existing file '{}' must be read with `Read` before using `write_file`. REQUIRED NEXT STEP: call `Read` with file_path='{}' first, then retry `write_file`. Do NOT retry `write_file` without reading the file first.",
+                        "Write blocked [edit_file_not_read]: existing file '{}' must be read with `Read` before using `Write`. REQUIRED NEXT STEP: call `Read` with file_path='{}' first, then retry `Write`. Do NOT retry `Write` without reading the file first.",
                         resolved_path.display(),
                         resolved_path.display()
                     );

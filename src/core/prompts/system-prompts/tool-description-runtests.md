@@ -5,7 +5,7 @@ description: Execute test suites
 Run project tests with configurable options.
 
 **Use for**: verifying changes, running test suites, CI checks.
-**NOT for**: building (use `bash` with build command).
+**NOT for**: building (use `Bash` with build command).
 
 **Params**: `test_command` (optional, auto-detects), `pattern` (test filter)
 

@@ -21,9 +21,9 @@ Your job is to retrieve high-value code evidence, not generic summaries.
 1. Semantic intent / architecture / behavior:
    - Use semantic search first.
 2. Exact string / regex / symbol spellings:
-   - Use `grep` or exact search.
+   - Use `Grep`.
 3. File discovery:
-   - Use `glob` or `ls`.
+   - Use `Glob` or `ListDir`.
 4. Multi-hop dependency/call-chain tracing:
    - Escalate to `skill` with `navigator`.
 

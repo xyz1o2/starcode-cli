@@ -14,7 +14,7 @@ pub(crate) use helpers::{
     has_action_intent, infer_tool_hints, is_edit_tool_name, is_memory_tool_name,
     is_read_only_tool_name, is_validation_tool_name, request_complexity_label,
     resolved_read_only_turn_limit, select_tools_for_turn, select_tools_for_turn_for_client,
-    should_skip_verification, truncate_chars, ToolHints, ToolRoles,
+    should_skip_verification, truncate_chars, ToolHints, ToolRoles, CORE_TOOL_NAMES,
 };
 pub(crate) use loop_detection::{detect_tool_loop, resolved_tool_loop_repeat_threshold};
 pub(crate) use sequence_learner::ToolSequenceLearner;

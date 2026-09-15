@@ -206,6 +206,10 @@ struct Hit {
     name: String,
     description: String,
     schema: serde_json::Value,
+    /// 完整使用说明正文（`tool-description-*.md` 去掉 frontmatter）。
+    /// 仅 `select:<name>` 模式加载 —— 使用说明随 tool result 下发（消息尾部），
+    /// 不进系统提示词，不触碰 prompt 缓存前缀。
+    usage_body: Option<String>,
 }
 
 pub struct ToolSearchTool {
@@ -217,13 +221,15 @@ impl ToolSearchTool {
         Self { registry }
     }
 
-    /// `select:<name>` 模式：精确取一个工具（经 `get_tool` 走 canonical 别名解析）。
+    /// `select:<name>` 模式：精确取一个工具（经 `get_tool` 走 canonical 别名解析），
+    /// 并动态加载其完整使用说明正文。
     fn select_tool(&self, name: &str) -> Option<Hit> {
         let tool = self.registry.get_tool(name)?;
         Some(Hit {
             name: tool.name().to_string(),
             description: tool.description().to_string(),
             schema: tool.parameter_schema(),
+            usage_body: crate::core::prompts::tool_descriptions::resolve_tool_body(tool.name()),
         })
     }
 
@@ -252,6 +258,7 @@ fn rank_entries(
                 name,
                 description,
                 schema,
+                usage_body: None,
             },
         ));
     }
@@ -380,12 +387,16 @@ impl ToolSearchInvocation {
         };
 
         record_discovered_tools(std::slice::from_ref(&hit.name));
-        let output = format!(
+        let mut output = format!(
             "**{}** — {}{}\n\nCall it directly by name; no further discovery step is needed.",
             hit.name,
             hit.description,
             render_schema(&hit.schema)
         );
+        if let Some(body) = &hit.usage_body {
+            output.push_str("\n\n--- Usage guide ---\n");
+            output.push_str(body);
+        }
         ToolResult {
             llm_content: Some(output.clone()),
             return_display: Some(format!("Tool schema: {}", hit.name)),
@@ -455,11 +466,15 @@ impl ToolSearchInvocation {
         if hits.len() > SCHEMA_DETAIL_LIMIT {
             lines.push(format!(
                 "\nSchemas shown for the first {} match(es). Query `select:<tool_name>` for the \
-                 rest.",
+                 rest, or to load a tool's full usage guide.",
                 SCHEMA_DETAIL_LIMIT
             ));
         }
-        lines.push("Every tool listed above can be called directly by name.".to_string());
+        lines.push(
+            "Every tool listed above can be called directly by name. Query \
+             `select:<tool_name>` to load its full usage guide."
+                .to_string(),
+        );
 
         let output = lines.join("\n");
         ToolResult {
@@ -696,10 +711,14 @@ mod tests {
             name,
             description,
             schema,
+            usage_body: Some("Create or rename branches with `command`.".to_string()),
         };
         let result = ToolSearchInvocation::render_select(Some(hit), "git_branch");
         assert!(result.output.contains("```json"));
         assert!(result.output.contains("\"target\""));
+        // 动态加载：select 模式必须把使用说明正文带回来。
+        assert!(result.output.contains("--- Usage guide ---"));
+        assert!(result.output.contains("Create or rename branches"));
         assert_eq!(result.data.expect("data present")["mode"], "select");
     }
 

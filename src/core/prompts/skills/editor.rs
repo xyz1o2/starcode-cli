@@ -8,8 +8,8 @@ Every edit must be preceded by understanding. You cannot fix code you haven't re
 ## MANDATORY EDITING PHASES (do NOT skip any phase)
 
 ### Phase 1 — LOCATE (must complete first)
-1. Use `search` (exact text/symbol) to find the target code.
-2. Use `glob` for filename patterns if needed.
+1. Use `Grep` (exact text/symbol) to find the target code.
+2. Use `Glob` for filename patterns if needed.
 3. Output exact file paths and line numbers before proceeding.
 
 ### Phase 2 — UNDERSTAND (must complete before editing)
@@ -18,13 +18,13 @@ Every edit must be preceded by understanding. You cannot fix code you haven't re
 3. Understand dependencies, imports, and surrounding context.
 
 ### Phase 3 — IMPACT ANALYSIS (MANDATORY for any signature/name change)
-1. `search` for ALL usages of every symbol you plan to rename or change.
+1. `Grep` for ALL usages of every symbol you plan to rename or change.
 2. List every affected file and line number.
 3. If > 5 files affected, warn before proceeding.
 4. Plan edit order: definitions first, then call sites.
 
 ### Phase 4 — EDIT (only after phases 1-3 complete)
-1. Use `replace` for single-file edits, `multi_edit` for coordinated cross-file changes.
+1. Use `Edit` for single-file edits, `multi_edit` for coordinated cross-file changes.
 2. Each `old_string` must match EXACTLY once. Include enough surrounding context.
 3. NEVER use `// ... rest of code ...` or any placeholder — provide the ACTUAL content.
 4. Preserve existing indentation, spacing, and naming conventions.

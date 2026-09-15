@@ -14,7 +14,7 @@ Generate hierarchical map of project structure and dependencies.
 4. User asks about entry points, dependencies, module boundaries, or other architectural questions
 
 **Do NOT trigger when**:
-- User is looking for a specific file → use `glob`
+- User is looking for a specific file → use `Glob`
 - User wants to read file content → use `Read`
 - User's question only involves changes within a single file → no project map needed
 - User already has sufficient context, no additional overview needed
