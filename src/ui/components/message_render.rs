@@ -169,17 +169,26 @@ pub(crate) fn render_non_tool_entry_blocks(
                                     } else {
                                         format!("  {}", &line[..indent])
                                     };
-                                    thinking_lines.push(Line::from(vec![
-                                        Span::raw(prefix),
-                                        Span::styled(w.to_string(), thinking_style),
-                                    ]));
+                                    let mut spans = vec![Span::raw(prefix)];
+                                    spans.extend(thinking_line_spans(
+                                        &w,
+                                        thinking_style,
+                                        line_idx == 0,
+                                    ));
+                                    // 围栏行等剥掉标记后为空：整行跳过，不留悬空行
+                                    if spans.len() > 1 {
+                                        thinking_lines.push(Line::from(spans));
+                                    }
                                 }
                             }
                             if thinking_lines.is_empty() {
-                                thinking_lines.push(Line::from(vec![
-                                    Span::raw("  "),
-                                    Span::styled(reasoning_trimmed.to_string(), thinking_style),
-                                ]));
+                                let mut spans = vec![Span::raw("  ")];
+                                spans.extend(thinking_line_spans(
+                                    reasoning_trimmed,
+                                    thinking_style,
+                                    true,
+                                ));
+                                thinking_lines.push(Line::from(spans));
                             }
                             blocks.push(thinking_lines);
                         } else {
@@ -330,6 +339,120 @@ pub(crate) fn render_non_tool_entry_blocks(
     }
 
     blocks
+}
+
+/// 思考内容的行内 markdown 轻量解析：`**粗体**`、`*斜体*`、`` `代码` ``
+/// 与行首 `#` 标题转成对应样式的 Span。思考块不走完整 markdown 排版
+/// （需要逐行紧凑渲染），但模型输出的行内标记也不该把 `**` 原样亮出来。
+/// 未闭合的标记按字面保留；`` ``` `` 围栏行剥掉标记后为空时返回空 Vec，
+/// 由调用方跳过该行。
+fn thinking_line_spans(chunk: &str, base: Style, at_line_start: bool) -> Vec<Span<'static>> {
+    let mut text = chunk;
+    let mut base = base;
+
+    if at_line_start {
+        let trimmed = text.trim_start();
+        let hashes = trimmed.len() - trimmed.trim_start_matches('#').len();
+        if (1..=6).contains(&hashes) {
+            let after = &trimmed[hashes..];
+            if after.is_empty() {
+                return Vec::new();
+            }
+            if let Some(rest) = after.strip_prefix(' ') {
+                // 标题：去标记、整行加粗（与正文的标题视觉语言一致）
+                text = rest.trim_start_matches(' ');
+                base = base.add_modifier(Modifier::BOLD);
+            }
+        }
+        // 代码围栏行（``` 或 ```lang）：整行隐藏，围栏内的代码行按普通
+        // 思考文本渲染。逐行解析无法跨行维护"代码段"状态，围栏标记
+        // 留着只会是噪音
+        if text.trim().starts_with("```") {
+            return Vec::new();
+        }
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut seg = String::new();
+    let (mut bold, mut italic, mut code) = (false, false, false);
+
+    macro_rules! flush {
+        () => {
+            if !seg.is_empty() {
+                let mut st = base;
+                if bold {
+                    st = st.add_modifier(Modifier::BOLD);
+                }
+                if italic {
+                    st = st.add_modifier(Modifier::ITALIC);
+                }
+                if code {
+                    st = st.remove_modifier(Modifier::ITALIC);
+                }
+                spans.push(Span::styled(std::mem::take(&mut seg), st));
+            }
+        };
+    }
+
+    let seg_ends_nonspace = |seg: &str| seg.chars().last().map_or(false, |c| !c.is_whitespace());
+
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '`' {
+            // 单反引号切换代码段；双反引号按字面保留（罕见）
+            let is_double = chars.get(i + 1) == Some(&'`');
+            if !is_double && !bold && !italic {
+                flush!();
+                code = !code;
+                i += 1;
+                continue;
+            }
+        } else if c == '*' && !code {
+            if chars.get(i + 1) == Some(&'*') {
+                if bold {
+                    if seg_ends_nonspace(&seg) {
+                        flush!();
+                        bold = false;
+                        i += 2;
+                        continue;
+                    }
+                } else if chars.get(i + 2).map_or(false, |n| !n.is_whitespace()) {
+                    // 开启粗体：`**` 后非空白。前面不设限——中文标点
+                    // （`：**重点**`）紧跟粗体是模型输出的大头
+                    flush!();
+                    bold = true;
+                    i += 2;
+                    continue;
+                }
+                seg.push('*');
+                seg.push('*');
+                i += 2;
+                continue;
+            }
+            if italic {
+                if seg_ends_nonspace(&seg) {
+                    flush!();
+                    italic = false;
+                    i += 1;
+                    continue;
+                }
+            } else if seg.is_empty()
+                && chars.get(i + 1).map_or(false, |n| !n.is_whitespace() && *n != '*')
+            {
+                // 单星斜体只在段首开启（前面是空白/标记边界），避免 `3 * 4` 误判
+                flush!();
+                italic = true;
+                i += 1;
+                continue;
+            }
+        }
+        seg.push(c);
+        i += 1;
+    }
+    flush!();
+    spans
 }
 
 fn recent_thinking_preview_lines(
@@ -553,6 +676,76 @@ mod tests {
             ],
             "rendered: {:?}",
             rendered
+        );
+    }
+
+    /// 思考内容的行内 markdown 不得原样显示：`**粗体**` 要转成加粗样式，
+    /// `##` 标题去标记后加粗，` ``` ` 围栏行整行隐藏。
+    #[test]
+    fn thinking_inline_markdown_renders_styled_not_literal() {
+        let mut state = crate::ui::state::ChatState::new();
+        let mut entry = crate::types::ChatEntry::assistant("");
+        entry.reasoning_content = Some(
+            "## 分析重点\n先查 **缓存失效** 的问题\n再看 `retry` 逻辑\n```bash\necho hi\n```"
+                .to_string(),
+        );
+        state.chat_history.push(entry);
+        let idx = state.chat_history.len() - 1;
+        state.expanded_thinking_indices.insert(idx);
+
+        let blocks = render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, 70, false);
+        let rendered: Vec<(String, bool)> = blocks[1]
+            .iter()
+            .map(|line| {
+                let text: String =
+                    line.spans.iter().map(|s| s.content.as_ref()).collect();
+                let has_bold = line
+                    .spans
+                    .iter()
+                    .any(|s| s.style.add_modifier.contains(Modifier::BOLD));
+                (text, has_bold)
+            })
+            .collect();
+        let texts: Vec<&str> = rendered.iter().map(|(t, _)| t.as_str()).collect();
+
+        // 无任何字面 markdown 标记残留
+        for t in &texts {
+            assert!(!t.contains("**"), "literal ** leaked: {:?}", texts);
+            assert!(!t.contains("##"), "literal ## leaked: {:?}", texts);
+            assert!(!t.contains("```"), "literal ``` leaked: {:?}", texts);
+            assert!(!t.contains("`"), "literal backtick leaked: {:?}", texts);
+        }
+
+        // 标题行与粗体段都带 BOLD；围栏行被隐藏
+        assert_eq!(
+            texts,
+            vec![
+                "  分析重点",
+                "  先查 缓存失效 的问题",
+                "  再看 retry 逻辑",
+                "  echo hi",
+            ],
+            "rendered: {:?}",
+            texts
+        );
+        assert!(rendered[0].1, "heading line should be bold");
+        assert!(
+            rendered[1].1,
+            "bold segment line should carry BOLD modifier"
+        );
+        assert!(!rendered[3].1, "plain code line should not be bold");
+    }
+
+    /// 未闭合的 `**` 按字面保留，不能把后半段全部误染成粗体。
+    #[test]
+    fn thinking_unclosed_bold_marker_stays_literal() {
+        let spans = thinking_line_spans("count 2 ** 3 is six", Style::default(), true);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "count 2 ** 3 is six");
+        assert!(
+            !spans.iter().any(|s| s.style.add_modifier.contains(Modifier::BOLD)),
+            "unclosed ** must not bold the rest: {:?}",
+            spans
         );
     }
 
