@@ -8,7 +8,7 @@ A powerful search tool built on ripgrep.
 **NOT for**: `grep`/`rg` via bash — this tool handles permissions and access.
 
 **Key params**:
-- `pattern` (alias `query`): the search string. Regex by default for content search; set `regex: false` for a literal match.
+- `pattern` (alias `query`): the search string. Literal by default; set `regex: true` to treat it as a regular expression.
 - `path` (alias `dir_path`): directory to search
 - `output_mode`: `content` (matching lines, default) | `files_with_matches` (unique paths only)
 - `search_type`: `text` (file contents) | `files` (file names) | `both`

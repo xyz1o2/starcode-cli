@@ -1325,9 +1325,7 @@ impl ChatState {
                         continue;
                     }
                     let width = self.last_chat_area.map(|a| a.width).unwrap_or(80);
-                    crate::ui::components::chat_history::render_entry_lines(
-                        self, entry_idx, width,
-                    )
+                    crate::ui::components::chat_history::render_entry_lines(self, entry_idx, width)
                 }
             };
 

@@ -1,25 +1,24 @@
 <!--
 name: 'Tool Description: ProjectMap'
-description: Generate codebase structure overview
+description: Generate a flat codebase structure inventory (languages, key files, top-level layout, optional symbols)
 -->
-Generate hierarchical map of project structure and dependencies.
+Generate a **flat inventory** of the project's structure: file counts by language, notable files, and the top-level directory layout.
 
-**Use for**: understanding codebase architecture, module relationships, entry points.
-**NOT for**: finding specific files (use `Glob`), reading file content (use `Read`).
+This is a statistical overview, **not** a dependency or call-graph analysis. It does not trace imports, module relationships, or entry points — for those use `SemanticSearch` (conceptual/flow questions) or `Read` on specific files.
 
-**Trigger conditions (call when ANY of these apply)**:
-1. User explicitly asks about project structure/architecture (e.g., "what's the project structure", "help me understand this codebase")
-2. User is new to the project and needs an overview (e.g., "what does this project do")
-3. Before making cross-module architectural changes, to understand module relationships
-4. User asks about entry points, dependencies, module boundaries, or other architectural questions
+**Output sections**:
+- Summary — scanned file count, depth, and limits reached
+- Languages / File Types — counts, top 12
+- Key Files — well-known filenames (main, lib, config, README, …)
+- Top-Level Layout — top 24 directories with sample files
+- Symbols — only when `include_symbols: true`; sampled class/function names
 
-**Do NOT trigger when**:
-- User is looking for a specific file → use `Glob`
-- User wants to read file content → use `Read`
-- User's question only involves changes within a single file → no project map needed
-- User already has sufficient context, no additional overview needed
+**Params**:
+- `path`: root directory to map (default: workspace)
+- `max_depth`: traversal depth (default 4)
+- `include_symbols`: set `true` to include sampled symbols (default false, faster)
+- `force_refresh`: bypass cache and rebuild
+- `max_files`: scan cap; raise it for large repos
 
-**Rules**:
-- Shows module hierarchy and key relationships
-- Useful for onboarding to new codebases
-- Run before making architectural changes
+**Use for**: onboarding to an unfamiliar codebase, confirming a project's shape before diving in.
+**NOT for**: finding a specific file (`Glob`), reading content (`Read`), or understanding how modules depend on each other (`SemanticSearch`).

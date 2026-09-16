@@ -757,7 +757,11 @@ fn cached_system_prompts_max_chars() -> usize {
         std::env::var("STAR_SYSTEM_PROMPTS_MAX_CHARS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(15_000)
+            // 必须容得下 CORE_TOOL_NAMES 全部 14 份指南（当前合计约 19.3k 字节）。
+            // 以前默认 15_000 会按文件名序静默截断尾部，把 SemanticSearch / Write /
+            // tool_search 的使用指南整份丢出系统提示词——而 schema 描述又是
+            // frontmatter 里的一行短句，模型于是对这几个工具既看不到详情也无人解释。
+            .unwrap_or(24_000)
     })
 }
 
@@ -953,5 +957,37 @@ mod tests {
 
         // 结果必须确定：两次调用一致（缓存前缀稳定的直接前提）。
         assert_eq!(files, PromptBuilder::core_tool_description_filenames());
+    }
+
+    /// 回归 F1：bundle 的 15k 字符上限曾按文件名序静默截断尾部，
+    /// 把 SemanticSearch / Write 等核心工具的使用指南整份丢掉，
+    /// 而它们给模型的 schema 描述只有 frontmatter 里一行短句。
+    /// 这里断言默认 cap 容得下全部核心指南，避免 cap 再次悄悄变窄。
+    #[test]
+    fn default_max_chars_covers_all_core_guides() {
+        let files = PromptBuilder::core_tool_description_filenames();
+        let cap = cached_system_prompts_max_chars();
+
+        let mut total = "\n\n# Core Tool Usage Guides\n".len();
+        let mut dropped = Vec::new();
+        for f in &files {
+            if total >= cap {
+                dropped.push(f.clone());
+                continue;
+            }
+            let body = crate::core::prompts::loader::try_load_prompt(f).unwrap_or_default();
+            let body = if body.trim_start().starts_with("<!--") {
+                body.split_once("-->").map(|(_, r)| r).unwrap_or(&body)
+            } else {
+                &body
+            };
+            total += body.len().min(cached_system_prompts_max_file_chars());
+        }
+
+        assert!(
+            dropped.is_empty(),
+            "默认 cap {cap} 装不下全部 {} 份核心指南，末尾被丢弃：{dropped:?}",
+            files.len()
+        );
     }
 }

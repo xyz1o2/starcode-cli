@@ -477,7 +477,9 @@ fn thinking_line_spans(chunk: &str, base: Style, at_line_start: bool) -> Vec<Spa
                     continue;
                 }
             } else if seg.is_empty()
-                && chars.get(i + 1).map_or(false, |n| !n.is_whitespace() && *n != '*')
+                && chars
+                    .get(i + 1)
+                    .map_or(false, |n| !n.is_whitespace() && *n != '*')
             {
                 // 单星斜体只在段首开启（前面是空白/标记边界），避免 `3 * 4` 误判
                 flush!();
@@ -735,8 +737,7 @@ mod tests {
         let rendered: Vec<(String, bool)> = blocks[1]
             .iter()
             .map(|line| {
-                let text: String =
-                    line.spans.iter().map(|s| s.content.as_ref()).collect();
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
                 let has_bold = line
                     .spans
                     .iter()
@@ -814,7 +815,9 @@ mod tests {
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "count 2 ** 3 is six");
         assert!(
-            !spans.iter().any(|s| s.style.add_modifier.contains(Modifier::BOLD)),
+            !spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::BOLD)),
             "unclosed ** must not bold the rest: {:?}",
             spans
         );

@@ -179,7 +179,9 @@ impl Agent {
 
             // 后台索引协调器：watcher + 低优先级增量重建（免阻塞，见 watcher.rs）。
             // 注入语义引擎缓存后启动，Edit/Write 的脏标记与文件监听统一由此驱动。
-            crate::core::context::watcher::set_engine_cache(self.context_engine.search_cache.clone());
+            crate::core::context::watcher::set_engine_cache(
+                self.context_engine.search_cache.clone(),
+            );
             crate::core::context::watcher::ensure_started(&cwd);
 
             if self.context_engine.has_dynamic_context_candidates(&cwd) {

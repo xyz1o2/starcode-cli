@@ -314,8 +314,8 @@ pub fn render_chat_lines(state: &mut ChatState, area_width: u16) -> Vec<Line<'st
                 state.rendered_cache.remove(&idx);
                 state.last_rendered_stream_key.insert(idx, current_key);
                 all_lines.extend(lines.clone()); // streaming: use the freshly rendered lines
-                // 拖选松开时 get_selected_text() 依赖 rendered_cache 取文本。
-                // 流式渲染每帧都会刷新，这里必须同步保留一份，否则左键选择永远取不到内容。
+                                                 // 拖选松开时 get_selected_text() 依赖 rendered_cache 取文本。
+                                                 // 流式渲染每帧都会刷新，这里必须同步保留一份，否则左键选择永远取不到内容。
                 state.rendered_cache.insert(idx, (h, lines));
             }
         } else {

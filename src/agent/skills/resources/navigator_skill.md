@@ -15,10 +15,18 @@ arguments:
     description: Starting point for navigation
     required: false
     default: "."
-  - name: depth
-    description: Navigation depth
+  - name: max_depth
+    description: Maximum directory depth to traverse (clamped 1-6)
     required: false
     default: "3"
+  - name: max_files
+    description: Cap on files listed in the map (clamped 4-80)
+    required: false
+    default: "24"
+  - name: max_refs_per_file
+    description: Cap on references shown per file (clamped 4-30)
+    required: false
+    default: "12"
 version: "1.0.0"
 ---
 

@@ -778,6 +778,62 @@ fn render_rich_tool_content(
                     )));
                     return lines;
                 }
+                // SemanticSearch: 折叠态显示命中文件数 + 首个结果。
+                // 输出头部是索引元数据（query/root/统计），直接预览前 8 行
+                // 会让用户看到一堆统计而看不到任何代码命中。
+                "SemanticSearch" => {
+                    // "File: <path>" 行即一个命中
+                    let hits = text.lines().filter(|l| l.starts_with("File: ")).count();
+                    lines.push(Line::from(vec![
+                        Span::raw("Semantic search · "),
+                        Span::styled(
+                            format!("{}", hits),
+                            Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" ranked results"),
+                    ]));
+                    if let Some(first) = text.lines().find(|l| l.starts_with("File: ")) {
+                        let path = first.trim_start_matches("File: ");
+                        // 去掉可能的 "(Score: ...)" 后缀
+                        let path = path.split(" (Score:").next().unwrap_or(path).trim();
+                        lines.push(Line::from(Span::styled(
+                            format!("  top: {}", path),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                    lines.push(Line::from(Span::styled(
+                        "  (Tab to expand)",
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::DIM),
+                    )));
+                    return lines;
+                }
+                // ProjectMap: 折叠态显示扫描概要
+                "ProjectMap" => {
+                    if let Some(scanned) = text
+                        .lines()
+                        .find_map(|l| l.strip_prefix("- scanned_files: "))
+                        .and_then(|s| s.split(" (limit").next())
+                    {
+                        lines.push(Line::from(vec![
+                            Span::raw("Project map · "),
+                            Span::styled(
+                                scanned.trim().to_string(),
+                                Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(" files scanned"),
+                        ]));
+                        lines.push(Line::from(Span::styled(
+                            "  (Tab to expand)",
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(Modifier::DIM),
+                        )));
+                        return lines;
+                    }
+                    // 解析失败则走通用预览
+                }
                 // 其他工具：维持预览逻辑
                 _ => {}
             }
@@ -982,5 +1038,96 @@ mod tests {
         assert!(render_todo_checklist(&tc, 80, &theme()).is_empty());
         let tc = todo_call("not json");
         assert!(render_todo_checklist(&tc, 80, &theme()).is_empty());
+    }
+
+    /// 回归：SemanticSearch 折叠态以前预览输出头部，那是索引元数据
+    /// （query/root/统计行），真正的代码命中一行看不见。
+    #[test]
+    fn semantic_search_collapsed_shows_hit_count_and_top_file() {
+        let output = concat!(
+            "Semantic Search Results for 'auth flow' (Top 3)\n",
+            "Root: /repo\n",
+            "Indexed files: 100 / scanned text files: 120\n",
+            "Search: RRF fusion (K=60)\n\n",
+            "File: src/auth.rs (Score: 0.92, Lines: 10-40)\n",
+            "```\ncode here\n```\n\n",
+            "File: src/session.rs (Score: 0.71, Lines: 5-9)\n\n",
+            "File: src/token.rs (Score: 0.66, Lines: 1-3)\n",
+        );
+        let entry = crate::types::ChatEntry::tool_result(
+            "",
+            crate::types::StarToolCall {
+                id: "c1".to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::StarToolCallFunction {
+                    name: "SemanticSearch".to_string(),
+                    arguments: r#"{"query":"auth flow"}"#.to_string(),
+                },
+            },
+            crate::types::ToolResult {
+                success: true,
+                output: Some(output.to_string()),
+                error: None,
+                data: None,
+            },
+        );
+
+        let lines = render_rich_tool_content(
+            &entry,
+            entry.tool_call.as_ref().unwrap(),
+            80,
+            false, // 折叠态
+            false,
+            &theme(),
+        );
+
+        let body: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+            .collect();
+        assert!(body.contains("3 ranked results"), "got: {body:?}");
+        assert!(body.contains("src/auth.rs"), "top file missing: {body:?}");
+        // 元数据头不应出现在折叠态
+        assert!(!body.contains("RRF fusion"), "metadata leaked: {body:?}");
+    }
+
+    /// ProjectMap 折叠态应显示扫描文件数，而非原始输出行。
+    #[test]
+    fn project_map_collapsed_shows_scanned_count() {
+        let entry = crate::types::ChatEntry::tool_result(
+            "",
+            crate::types::StarToolCall {
+                id: "c2".to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::StarToolCallFunction {
+                    name: "ProjectMap".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            },
+            crate::types::ToolResult {
+                success: true,
+                output: Some(
+                    "Summary\n- scanned_files: 88 (limit: 500)\n- max_depth: 4\n\nLanguages / File Types (top)\n- rust: 80\n"
+                        .to_string(),
+                ),
+                error: None,
+                data: None,
+            },
+        );
+
+        let lines = render_rich_tool_content(
+            &entry,
+            entry.tool_call.as_ref().unwrap(),
+            80,
+            false,
+            false,
+            &theme(),
+        );
+
+        let body: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+            .collect();
+        assert!(body.contains("88 files scanned"), "got: {body:?}");
     }
 }

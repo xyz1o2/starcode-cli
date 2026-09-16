@@ -6,6 +6,7 @@
 |------|------|----------------|
 | Read files | `Read` | `cat`, `head`, `tail` |
 | Search content | `Grep` | `grep`, `rg` |
+| Search by meaning | `SemanticSearch` | — |
 | Find files | `Glob` | `find` |
 | Edit files | `Edit` (single) / `multi_edit` (batch) | `sed`, `awk` |
 | Create files | `Write` | `echo >` |
@@ -19,7 +20,7 @@
 `Bash` is for package installs, builds, test runs, and git operations — nothing a core tool already covers.
 
 ## Workflow
-1. **Locate** → `Grep` for exact symbols first; `Glob` for filename patterns. Use `SemanticSearch` only when you don't know exact names.
+1. **Locate** → `SemanticSearch` for conceptual/functional questions ("how is X handled", "where does Y live"); `Grep` for exact symbols/strings; `Glob` for filename patterns.
 2. **Read** → `Read` the relevant range, then edit in the same response.
 3. **Edit** → `Edit` for one change; `multi_edit` when changes are coupled across sites.
 4. **Verify** → `get_diagnostics`, then `run_tests` or the project's test command.

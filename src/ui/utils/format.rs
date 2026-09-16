@@ -111,6 +111,8 @@ pub fn tool_display_name(name: &str) -> String {
         "TodoWrite" => "Update Todos".into(),
         "enter_plan_mode" | "exit_plan_mode" => "plan".into(),
         "ask_user" | "user_prompt" => "ask".into(),
+        "SemanticSearch" => "semantic search".into(),
+        "ProjectMap" => "project map".into(),
         _ => name.to_string(),
     }
 }
@@ -425,5 +427,24 @@ pub fn format_tool_result_with_saved_path(
             .replace("{first}", &first_with_path)
             .replace("{rest}", &rest)
             .replace("{path}", &path_display)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tool_display_name;
+
+    /// 回归：SemanticSearch / ProjectMap 以前落到 `_` 分支，
+    /// 聊天历史里显示原始注册名（与状态栏的 "semantic search" / "project map"
+    /// 和文档里的叫法都不一致）。
+    #[test]
+    fn search_tools_get_friendly_display_names() {
+        assert_eq!(tool_display_name("SemanticSearch"), "semantic search");
+        assert_eq!(tool_display_name("ProjectMap"), "project map");
+    }
+
+    #[test]
+    fn unknown_tools_fall_back_to_raw_name() {
+        assert_eq!(tool_display_name("SomeFutureTool"), "SomeFutureTool");
     }
 }

@@ -19,7 +19,10 @@ pub struct SearchAgent {
 impl SearchAgent {
     pub fn new(client: StarClient, config: Arc<Config>) -> Self {
         Self {
-            id: "Grep".to_string(),
+            // 不能叫 "Grep"：那是真工具的注册名，而 agent_ids() 会把它
+            // 拼进 SkillTool 的动态描述（"available: ..."），模型会以为
+            // 存在一个与 Grep 工具同名的技能。
+            id: "search".to_string(),
             client,
             config,
         }
@@ -269,7 +272,7 @@ impl SubAgent for SearchAgent {
 
     fn capabilities(&self) -> Vec<String> {
         vec![
-            "Grep".to_string(),
+            "search".to_string(),
             "find".to_string(),
             "query".to_string(),
             "locate".to_string(),

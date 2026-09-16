@@ -1,13 +1,25 @@
 <!--
 name: 'Tool Description: SemanticSearch'
-description: Natural language code search
+description: PRIMARY semantic code search. Use for conceptual/functional queries (architecture, flow, ownership, tests, config). Returns ranked code context with match signals.
 -->
-Search code by natural language meaning, not just keywords.
+Semantic (meaning-based) code search — the **PRIMARY tool for conceptual and functional questions** about the codebase.
 
-**Use for**: conceptual queries ("error handling", "auth flow"), finding by intent.
-**NOT for**: exact string matches (use `Grep`), file name search (use `Glob`).
+**Use for** (prefer this over keyword search):
+- "How is authentication handled?", "where are user settings stored?"
+- Architecture, data flow, ownership, cross-file behavior
+- Finding code by intent when you don't know the exact names
 
-**Rules**:
-- Returns ranked results by semantic relevance
-- Best for exploring unfamiliar codebases
-- Combine with `Grep` for precise matches
+**NOT for**:
+- Exact string/symbol matches → use `Grep`
+- File name lookup → use `Glob`
+- Reading a known file → use `Read`
+
+**Params**:
+- `query` (required): natural-language question
+- `path`: search root (default: workspace)
+- `budget_profile`: set to `"auto"` for a faster, more conservative scan
+
+**Behavior**:
+- Returns ranked results with score, matched terms, and signal breakdown
+- Backed by a semantic index; the first call in a session may build it (progress is shown)
+- If it returns nothing relevant, fall back to `Grep` for exact terms
