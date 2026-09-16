@@ -95,7 +95,7 @@ jobs:
 
       - name: Upload binary (Unix)
         if: runner.os != 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: starcode-cli-${{ runner.os }}-${{ runner.arch }}
           path: target/release/starcode-cli
@@ -103,7 +103,7 @@ jobs:
 
       - name: Upload binary (Windows)
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: starcode-cli-${{ runner.os }}-${{ runner.arch }}
           path: target/release/starcode-cli.exe
