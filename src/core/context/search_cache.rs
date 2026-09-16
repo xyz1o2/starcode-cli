@@ -220,7 +220,10 @@ mod tests {
                 index_mtime: Some(t0),
             },
         );
-        assert!(cache.get_engine(&k, Some(t1)).is_none(), "新 mtime 下不该命中");
+        assert!(
+            cache.get_engine(&k, Some(t1)).is_none(),
+            "新 mtime 下不该命中"
+        );
 
         // 闭包返回 false：没有任何实际改动。
         let outcome = cache.patch_engine(&k, Some(t0), Some(t1), |_| false);

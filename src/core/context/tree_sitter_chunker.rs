@@ -144,6 +144,14 @@ pub fn chunk_with_tree_sitter(content: &str, file_ext: &str) -> Vec<CodeChunk> {
         return SmartChunker::chunk(content, file_ext);
     };
 
+    // 空内容（或纯空白）必须在这里直接返回 —— 不能交给 tree-sitter。
+    // tree-sitter 的 C 解析器对空输入会递归到栈溢出（实测：`parser.parse("", None)`
+    // 在 8 MiB 栈的线程上直接爆栈，catch_unwind 抓不住 C 层的 abort）。
+    // 这不是"退化为启发式"，而是启发式对空输入的答案本来就是空。
+    if content.trim().is_empty() {
+        return Vec::new();
+    }
+
     let content_owned = content.to_string();
     let file_ext_owned = file_ext.to_string();
 

@@ -129,12 +129,10 @@ pub fn ensure_started(project_root: &Path) {
     // notify 的 recommended_watcher 在独立内部线程回调，这里只把
     // 变更路径塞进脏集合，完全不碰索引。
     let (tx, rx): (Sender<notify::Result<notify::Event>>, Receiver<_>) = mpsc::channel();
-    let watcher_result = notify::recommended_watcher(
-        move |res: notify::Result<notify::Event>| {
-            // channel 满了就丢弃（下一轮全量增量重建会补上），绝不阻塞回调线程
-            let _ = tx.send(res);
-        },
-    );
+    let watcher_result = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        // channel 满了就丢弃（下一轮全量增量重建会补上），绝不阻塞回调线程
+        let _ = tx.send(res);
+    });
     let Ok(mut watcher) = watcher_result else {
         crate::utils::logging::append_debug_log_line(
             "[Context] notify watcher init failed; falling back to query-triggered refresh",
@@ -142,11 +140,9 @@ pub fn ensure_started(project_root: &Path) {
         coord.started.store(false, Ordering::SeqCst);
         return;
     };
-    if let Err(err) = notify::Watcher::watch(
-        &mut watcher,
-        project_root,
-        notify::RecursiveMode::Recursive,
-    ) {
+    if let Err(err) =
+        notify::Watcher::watch(&mut watcher, project_root, notify::RecursiveMode::Recursive)
+    {
         crate::utils::logging::append_debug_log_line(&format!(
             "[Context] notify watch({}) failed: {}; falling back to query-triggered refresh",
             project_root.display(),
@@ -236,9 +232,7 @@ fn rebuild_worker_loop(root: PathBuf, rx: Receiver<notify::Result<notify::Event>
                 true
             } else {
                 // 等待脏信号或超时（超时后同样检查，watcher 事件由本线程自己收）
-                let _ = coord
-                    .dirty_signal
-                    .wait_for(&mut inner, DEBOUNCE);
+                let _ = coord.dirty_signal.wait_for(&mut inner, DEBOUNCE);
                 !inner.dirty.is_empty()
             }
         };
@@ -477,10 +471,10 @@ mod tests {
 
         let inner = coord.inner.lock();
         assert!(coord.started.load(Ordering::SeqCst));
-        assert!(inner
-            .dirty
-            .iter()
-            .any(|p| p.ends_with("a.rs")), "脏集合应包含标记的文件");
+        assert!(
+            inner.dirty.iter().any(|p| p.ends_with("a.rs")),
+            "脏集合应包含标记的文件"
+        );
     }
 
     #[test]

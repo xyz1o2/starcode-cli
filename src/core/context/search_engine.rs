@@ -285,8 +285,11 @@ impl SearchEngine {
     /// 测试用：doc_freqs 快照（有序，便于断言全量与增量口径一致）。
     #[cfg(test)]
     pub(crate) fn doc_freqs_snapshot(&self) -> Vec<(String, usize)> {
-        let mut out: Vec<(String, usize)> =
-            self.doc_freqs.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let mut out: Vec<(String, usize)> = self
+            .doc_freqs
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
         out.sort();
         out
     }
@@ -778,7 +781,10 @@ mod tests {
         assert_eq!(engine.total_docs(), 1);
         // 旧内容的词必须被清掉。漏清的症状是"改了文件还能搜到旧实现" ——
         // 而且 doc_freqs 会单向上漂，永不回落。
-        assert!(engine.search("alpha", 10).is_empty(), "替换后旧内容不该还能搜到");
+        assert!(
+            engine.search("alpha", 10).is_empty(),
+            "替换后旧内容不该还能搜到"
+        );
         assert_eq!(engine.search("beta", 10).len(), 1);
         engine.verify_invariants().unwrap();
     }

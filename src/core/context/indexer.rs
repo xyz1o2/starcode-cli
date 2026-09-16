@@ -63,7 +63,9 @@ pub struct ProjectIndex {
 /// `blobs` 字段的兼容反序列化：新格式 `HashMap<String, IndexEntry>`，
 /// 旧格式（v1）`HashMap<String, String>`。旧条目 size/mtime 记 0，
 /// 下一轮索引会读一次文件做元数据回填。
-fn deserialize_blobs_compat<'de, D>(deserializer: D) -> Result<HashMap<String, IndexEntry>, D::Error>
+fn deserialize_blobs_compat<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, IndexEntry>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -208,7 +210,10 @@ impl Indexer {
                 match result {
                     Ok(entry) => {
                         if entry.file_type().is_some_and(|t| t.is_file()) {
-                            files.lock().expect("index walk collector poisoned").push(entry.into_path());
+                            files
+                                .lock()
+                                .expect("index walk collector poisoned")
+                                .push(entry.into_path());
                         }
                     }
                     Err(err) => crate::utils::logging::append_debug_log_line(&format!(
@@ -445,5 +450,122 @@ mod tests {
         let raw = fs::read_to_string(dir.path().join(".star/context/index.json")).unwrap();
         assert!(!raw.contains("\n  "), "持久化必须是紧凑 JSON，非 pretty");
         assert!(!dir.path().join(".star/context/index.json.tmp").exists());
+    }
+
+    #[test]
+    fn empty_files_take_the_fast_path() {
+        // 以前快速路径要求 `size != 0`：空文件每次都被当变更文件重新读一遍。
+        // 现在只要 (size, mtime) 没变就直接跳过 —— 这条测的是"空文件也
+        // 走快速路径"，用的正是 indexer 自己的 index.json 做第二轮对照。
+        let (dir, indexer) = temp_project();
+        write(&dir, "empty.rs", "");
+
+        let first = indexer.index_project().unwrap();
+        assert_eq!(first.total_files, 1);
+
+        let second = indexer.index_project().unwrap();
+        assert!(
+            second.new_blobs.is_empty(),
+            "空文件元数据未变，不该出现在 new_blobs：{:?}",
+            second.new_blobs
+        );
+    }
+
+    #[test]
+    fn large_file_is_skipped_without_reading() {
+        let (dir, indexer) = temp_project();
+        // 超上限但不超 12 MiB 总预算：应当进 skipped_large，而不是被截断。
+        write(&dir, "big.rs", &"fn big() {}\n".repeat(50_000));
+
+        let result = indexer.index_project().unwrap();
+        assert!(result.skipped_large >= 1, "超大文件应计入 skipped_large");
+        assert!(!result.truncated, "单文件超限不该算预算耗尽");
+        assert!(
+            result.new_blobs.is_empty(),
+            "超大文件不该被读、不该进 new_blobs"
+        );
+        assert_eq!(result.total_files, 0, "超大文件不进索引条目");
+    }
+
+    #[test]
+    fn skipped_large_file_is_not_reported_as_removed() {
+        // 上一条的隐性后果：超大文件留在 found_paths 里，所以它**不会**被
+        // 当成删除。如果误报成 removed，语义引擎会跟着把它从索引里删掉 ——
+        // 一个用户能看见的文件突然从搜索结果里消失。
+        let (dir, indexer) = temp_project();
+        write(&dir, "small.rs", "fn small() {}");
+        write(&dir, "big.rs", &"fn big() {}\n".repeat(50_000));
+
+        let result = indexer.index_project().unwrap();
+        assert!(!result.removed_blobs.contains(&"big.rs".to_string()));
+    }
+
+    #[test]
+    fn binary_file_is_skipped() {
+        let (dir, indexer) = temp_project();
+        write(&dir, "binary.rs", "fn ok() {}\n\0\0\0not text\n");
+
+        let result = indexer.index_project().unwrap();
+        assert!(
+            result.new_blobs.iter().all(|b| b.path != "binary.rs"),
+            "二进制文件不该被索引：{:?}",
+            result.new_blobs
+        );
+    }
+
+    #[test]
+    fn budget_exhaustion_suppresses_removal_detection() {
+        // truncated 时 found_paths 只是预算耗尽前走到的那部分 ——
+        // 拿它做差集会把整棵没走到的树报成删除。必须跳过删除检测。
+        let (dir, indexer) = temp_project();
+        write(&dir, "src/a.rs", "fn a() {}");
+        indexer.index_project().unwrap();
+
+        // 第二轮：一批新文件把总预算撑爆（每个都超单文件上限，累计超总量）。
+        for i in 0..40 {
+            write(&dir, &format!("big{i}.rs"), &"fn big() {}\n".repeat(50_000));
+        }
+        let result = indexer.index_project().unwrap();
+
+        // 超限文件不读、不进 found_paths 的索引条目，但 total_files
+        // 应保持第一轮的 1（旧条目没被清掉）。
+        assert!(
+            result.removed_blobs.is_empty(),
+            "截断时不该报删除：{:?}",
+            result.removed_blobs
+        );
+    }
+
+    /// 并发 read-modify-write 的回归保护：两个 `index_project` 同时跑时，
+    /// 后写的那个会把先写的整批变更覆盖掉。进程内锁消除了这个竞争。
+    #[test]
+    fn concurrent_indexing_does_not_lose_updates() {
+        let (dir, indexer) = temp_project();
+
+        // 第一轮建立基线。
+        write(&dir, "src/a.rs", "fn a() {}");
+        indexer.index_project().unwrap();
+
+        // 两个不同的新文件，两条线程同时索引。
+        // （Indexer 只是两个 PathBuf，克隆几乎零成本。）
+        std::thread::scope(|s| {
+            let dir = &dir;
+            let b = indexer.clone();
+            let c = indexer.clone();
+            s.spawn(move || {
+                write(dir, "src/b.rs", "fn b() {}");
+                b.index_project().unwrap();
+            });
+            s.spawn(move || {
+                write(dir, "src/c.rs", "fn c() {}");
+                c.index_project().unwrap();
+            });
+        });
+
+        // 没有锁的话，两个线程各自的 load→改→save 只能活一个：
+        // b.rs 和 c.rs 里会少一个。
+        let index = indexer.load_index_public_for_test();
+        assert!(index.blobs.contains_key("src/b.rs"), "并发的更新不该被丢掉");
+        assert!(index.blobs.contains_key("src/c.rs"), "并发的更新不该被丢掉");
     }
 }

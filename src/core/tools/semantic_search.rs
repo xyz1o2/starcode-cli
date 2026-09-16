@@ -34,9 +34,8 @@ const SEMANTIC_SEARCH_PROGRESS_EVERY_FILES: usize = 120;
 /// 全量构建与增量补丁都必须经过 [`is_indexable_ext`]，白名单不可能再分叉。
 pub const SEMANTIC_INDEXABLE_EXTS: &[&str] = &[
     // tree-sitter 可解析
-    "rs", "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "tsx", "go", "java", "c", "h", "cpp",
-    "cc", "cxx", "hpp", "hxx",
-    // 纯文本 / 配置（走 SmartChunker 启发式分层）
+    "rs", "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "tsx", "go", "java", "c", "h", "cpp", "cc",
+    "cxx", "hpp", "hxx", // 纯文本 / 配置（走 SmartChunker 启发式分层）
     "md", "txt", "json", "toml", "yaml", "yml",
 ];
 
@@ -83,17 +82,17 @@ pub struct SemanticSearchInvocation {
     params: SemanticSearchParams,
 }
 
-#[derive(Clone, Copy)]
-struct SemanticSearchLimits {
-    max_files: usize,
-    max_file_bytes: u64,
-    max_total_bytes: u64,
-    timeout_ms: u64,
+#[derive(Clone, Copy, Debug)]
+pub struct SemanticSearchLimits {
+    pub max_files: usize,
+    pub max_file_bytes: u64,
+    pub max_total_bytes: u64,
+    pub timeout_ms: u64,
 }
 
 impl SemanticSearchLimits {
     /// A compact key for cache lookups, encoding the budget profile.
-    fn cache_key(&self) -> String {
+    pub fn cache_key(&self) -> String {
         format!(
             "f{}b{}t{}",
             self.max_files, self.max_total_bytes, self.timeout_ms
@@ -243,8 +242,14 @@ fn build_search_engine_from_fs(
 
                 // 与增量路径共用同一个接纳策略点（全量构建没有"替换"，
                 // 所以 replaced_bytes 恒为 0）。
-                let admission =
-                    admit_file(path, file_size, stats.indexed_files, stats.total_bytes, 0, limits);
+                let admission = admit_file(
+                    path,
+                    file_size,
+                    stats.indexed_files,
+                    stats.total_bytes,
+                    0,
+                    limits,
+                );
                 if admission != Admission::SkipExt {
                     stats.scanned_text_files += 1;
                 }
@@ -719,7 +724,8 @@ fn plan_patch_ops(
     index_result: &crate::core::context::indexer::IndexResult,
     limits: SemanticSearchLimits,
 ) -> Vec<PatchOp> {
-    let mut ops = Vec::with_capacity(index_result.new_blobs.len() + index_result.removed_blobs.len());
+    let mut ops =
+        Vec::with_capacity(index_result.new_blobs.len() + index_result.removed_blobs.len());
 
     // 删除先入队：先把预算释放掉，重命名（removed=[old] + new=[new]）才不会
     // 因为"旧的还没扣、新的就要加"而误触上限。
@@ -732,7 +738,9 @@ fn plan_patch_ops(
         let Ok(meta) = std::fs::metadata(&full_path) else {
             // 文件在 index_project 与这里之间消失了 —— 当作删除处理，
             // 否则会留下一个永远删不掉的陈旧文档。
-            ops.push(PatchOp::Remove { path: blob.path.clone() });
+            ops.push(PatchOp::Remove {
+                path: blob.path.clone(),
+            });
             continue;
         };
         let size = meta.len();
@@ -748,13 +756,17 @@ fn plan_patch_ops(
             // 原本就在索引里，只是刚刚涨过了上限。只跳过不删除，就会永久留下
             // 一个陈旧文档。这是本设计最容易被实现错的一条。
             Admission::SkipTooLarge | Admission::SkipBudget => {
-                ops.push(PatchOp::Remove { path: blob.path.clone() });
+                ops.push(PatchOp::Remove {
+                    path: blob.path.clone(),
+                });
                 continue;
             }
         }
 
         let Some(ext) = full_path.extension().and_then(|s| s.to_str()) else {
-            ops.push(PatchOp::Remove { path: blob.path.clone() });
+            ops.push(PatchOp::Remove {
+                path: blob.path.clone(),
+            });
             continue;
         };
 
@@ -765,7 +777,9 @@ fn plan_patch_ops(
             Ok(_) => {
                 // 分块结果为空（文件变空 / 纯空白 / 解析退化成零 chunk）：
                 // 同样必须表达成移除，不能留陈旧文档。
-                ops.push(PatchOp::Remove { path: blob.path.clone() });
+                ops.push(PatchOp::Remove {
+                    path: blob.path.clone(),
+                });
             }
             Err(_) => {
                 // 文件仍在，只是这轮解析失败 —— **保留旧版本**，
@@ -979,9 +993,7 @@ pub fn update_engine_in_cache_with_limits(
                 // 补丁已经落进去了，但结果不可信 —— 全量会整体覆盖掉。
                 return full_rebuild(&update_output);
             }
-            Ok(UpdateOutcome::Patched {
-                changed: ops.len(),
-            })
+            Ok(UpdateOutcome::Patched { changed: ops.len() })
         }
         // 引擎不在（被 LRU 逐出）或 mtime 变了（有别的构建抢先落地）：
         // 都不构成"失败"，回退全量即可。
@@ -1017,8 +1029,10 @@ fn resolve_engine(
     limits: SemanticSearchLimits,
     update_output: &Option<ProgressCallback>,
     cache: Option<&Arc<SearchEngineCacheManager>>,
-) -> Result<(SearchEngine, SemanticSearchStats, EngineSource), Box<dyn std::error::Error + Send + Sync>>
-{
+) -> Result<
+    (SearchEngine, SemanticSearchStats, EngineSource),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let current_mtime = index_mtime(root);
     let cache_key = (canonical_root, limits.cache_key());
@@ -1030,7 +1044,11 @@ fn resolve_engine(
 
         if let Some((stale_engine, _)) = manager.get_engine_stale(&cache_key) {
             crate::core::context::watcher::request_refresh(root);
-            return Ok((stale_engine, SemanticSearchStats::default(), EngineSource::Stale));
+            return Ok((
+                stale_engine,
+                SemanticSearchStats::default(),
+                EngineSource::Stale,
+            ));
         }
 
         // 冷启动：协调器可用且未发生过失败 → 后台构建 + Warming 兜底
@@ -1093,7 +1111,8 @@ fn search_codebase_with_limits(
         return Ok(output);
     }
 
-    let was_cached = matches!(source, EngineSource::Fresh) && stats.indexed_files == 0 && !stats.truncated;
+    let was_cached =
+        matches!(source, EngineSource::Fresh) && stats.indexed_files == 0 && !stats.truncated;
 
     // ── Hybrid Search (RRF) ───────────────────────────────────────────────────
     // P2: Two complementary search strategies are fused via RRF:
@@ -1503,7 +1522,11 @@ mod tests {
         cache
     }
 
-    fn cached_engine(root: &Path, limits: SemanticSearchLimits, cache: &SearchEngineCacheManager) -> SearchEngine {
+    fn cached_engine(
+        root: &Path,
+        limits: SemanticSearchLimits,
+        cache: &SearchEngineCacheManager,
+    ) -> SearchEngine {
         cache
             .get_engine_stale(&cache_key_for(root, limits))
             .expect("engine must be cached")
@@ -1823,7 +1846,10 @@ mod tests {
         write(
             root,
             "src/f09.rs",
-            &format!("pub fn fn09() -> u32 {{\n{}\n    0\n}}\n", "    // pad\n".repeat(120)),
+            &format!(
+                "pub fn fn09() -> u32 {{\n{}\n    0\n}}\n",
+                "    // pad\n".repeat(120)
+            ),
         );
 
         // ── 增量路径 ──────────────────────────────────────────────────────────
@@ -1867,13 +1893,22 @@ mod tests {
         );
 
         // 具体断言各条边界都落到了预期状态。
-        assert!(!patched.contains_document("src/f06.rs"), "删除的文件必须消失");
-        assert!(!patched.contains_document("src/f07.rs"), "重命名的旧路径必须消失");
+        assert!(
+            !patched.contains_document("src/f06.rs"),
+            "删除的文件必须消失"
+        );
+        assert!(
+            !patched.contains_document("src/f07.rs"),
+            "重命名的旧路径必须消失"
+        );
         assert!(
             patched.contains_document("src/f07_moved.rs"),
             "重命名的新路径必须进索引"
         );
-        assert!(patched.contains_document("src/added.rs"), "新增文件必须进索引");
+        assert!(
+            patched.contains_document("src/added.rs"),
+            "新增文件必须进索引"
+        );
         assert!(
             !patched.contains_document("src/f08.rs"),
             "清空的文件必须被移除，不能留下陈旧文档"
