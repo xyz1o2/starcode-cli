@@ -77,7 +77,7 @@ console = "0.15"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Directory handling
-dirs = "5.0"
+dirs = "6.0"
 
 # Glob pattern matching for file search
 glob = "0.3"
