@@ -8,6 +8,27 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
+/// 单文件索引上限：超过就不读不哈希。
+/// 与语义引擎的 `max_file_bytes` 同口径 —— 两个索引对"多大的文件算太大"
+/// 给不同答案，只会让人怀疑其中一个是 bug。
+const INDEX_MAX_FILE_BYTES: u64 = 512 * 1024;
+
+/// 单次索引的累计读取上限。超过后停止读新文件并标记 `truncated`。
+const INDEX_MAX_TOTAL_BYTES: u64 = 12 * 1024 * 1024;
+
+/// 二进制探测窗口（字节）。
+const INDEX_BINARY_PROBE_BYTES: usize = 8 * 1024;
+
+/// 串行化整个 read-modify-write。
+///
+/// `index_project()` 是"读 index.json → 改 → 写回"的非原子序列，
+/// 而它有两个并发调用方：watcher 的重建 worker 与 `ContextEngine` 的后台
+/// 刷新任务（`engine.rs:152` / `:307`）。两边同时跑就是经典的丢更新 ——
+/// 后写的那个把先写的整批变更覆盖掉，且不报错。
+///
+/// 跨进程不保证：同一仓库同时跑两个 StarCode 不是目标场景。
+static INDEX_IO_LOCK: Mutex<()> = Mutex::new(());
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Blob {
     pub hash: String,
@@ -78,6 +99,10 @@ pub struct IndexResult {
     /// 已删除文件的相对路径
     pub removed_blobs: Vec<String>,
     pub total_files: usize,
+    /// 因超过单文件上限而未读取的文件数
+    pub skipped_large: usize,
+    /// 是否因累计预算耗尽而提前停止。`true` 时 `removed_blobs` 恒为空。
+    pub truncated: bool,
 }
 
 #[derive(Clone)]
@@ -122,6 +147,18 @@ impl Indexer {
         Ok(())
     }
 
+    /// 快速路径判定：(size, mtime) 都没变就沿用旧 hash，不读文件、不重哈希。
+    ///
+    /// 这是**尽力而为的启发式，宁可多读一次也不漏检**：
+    /// - `mtime_ms == 0` 说明元数据不可信（v1 旧格式回填失败、或文件系统
+    ///   不提供 mtime），强制走慢路径，否则会永久沿用陈旧的 hash；
+    /// - 不再要求 `size != 0` —— 空文件同样应该享受快速路径；
+    /// - 同尺寸 + 同 mtime 粒度的修改确实会被漏检，这是这套机制的固有代价，
+    ///   watcher 事件与 agent 编辑钩子打脏是它的补偿路径。
+    fn is_unchanged_fast(entry: &IndexEntry, size: u64, mtime_ms: u64) -> bool {
+        entry.size == size && entry.mtime_ms == mtime_ms && mtime_ms != 0
+    }
+
     fn calculate_hash(&self, content: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(content);
@@ -133,11 +170,15 @@ impl Indexer {
     /// - 元数据变了才 read + SHA256；
     /// - 二次索引成本 ≈ 一次目录遍历 + 变更文件的读取。
     pub fn index_project(&self) -> Result<IndexResult, Box<dyn std::error::Error + Send + Sync>> {
+        let _io_guard = INDEX_IO_LOCK.lock().expect("index io lock poisoned");
+
         if !self.project_root.exists() {
             return Ok(IndexResult {
                 new_blobs: Vec::new(),
                 removed_blobs: Vec::new(),
                 total_files: 0,
+                skipped_large: 0,
+                truncated: false,
             });
         }
 
@@ -146,6 +187,9 @@ impl Indexer {
         let mut found_paths: HashSet<String> = HashSet::new();
         // 是否有索引条目被更新（含旧格式元数据回填）——决定是否需要写盘
         let mut entries_updated = false;
+        let mut skipped_large = 0usize;
+        let mut truncated = false;
+        let mut hashed_bytes = 0u64;
 
         // 三层 ignore（`~/.star/ignore` → `.starignore` → `.gitignore`，
         // `require_git(false)`）就是从 `utils::file_walk` 抽出来的，全树共用同一份口径。
@@ -202,17 +246,38 @@ impl Indexer {
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
 
+            // 单文件上限：不读不哈希。
+            // 注意这里**不能**顺手把 rel_path 从 found_paths 里去掉 ——
+            // 它早已入集，跳过读取恰好保证了"超限文件不会被误判为删除"。
+            if size > INDEX_MAX_FILE_BYTES {
+                skipped_large += 1;
+                continue;
+            }
+
             // 快速路径：元数据未变 → 沿用旧 hash，不读文件。
-            if let Some(entry) = current_index.blobs.get(&rel_path) {
-                if entry.size == size && entry.mtime_ms == mtime_ms && entry.size != 0 {
-                    continue;
-                }
+            if current_index
+                .blobs
+                .get(&rel_path)
+                .is_some_and(|entry| Self::is_unchanged_fast(entry, size, mtime_ms))
+            {
+                continue;
+            }
+
+            // 累计预算耗尽：停止读新文件。此时遍历不完整，`found_paths` 只是
+            // 前缀，下面必须跳过删除检测（否则会把还没走到的文件全报成删除）。
+            if hashed_bytes.saturating_add(size) > INDEX_MAX_TOTAL_BYTES {
+                truncated = true;
+                break;
             }
 
             // 慢路径：读 + 哈希（仅变更文件）。
             let Ok(content) = read_file_with_encoding(&path) else {
                 continue;
             };
+            if is_probably_binary(&content) {
+                continue;
+            }
+            hashed_bytes += size;
             let hash = self.calculate_hash(&content);
             let unchanged = current_index
                 .blobs
@@ -237,13 +302,19 @@ impl Indexer {
         }
 
         // Identify removed files
+        //
+        // `truncated` 时整段跳过：`found_paths` 只覆盖了预算耗尽前走到的那部分
+        // 目录，剩下的文件一个都没进去 —— 拿它做差集会把整棵未遍历的树报成
+        // 删除。宁可这轮不报删除（下一轮预算够时会补上），也不能谎报。
         let mut removed_blobs = Vec::new();
-        let old_paths: Vec<String> = current_index.blobs.keys().cloned().collect();
-        for path in old_paths {
-            if !found_paths.contains(&path) {
-                current_index.blobs.remove(&path);
-                removed_blobs.push(path);
-                entries_updated = true;
+        if !truncated {
+            let old_paths: Vec<String> = current_index.blobs.keys().cloned().collect();
+            for path in old_paths {
+                if !found_paths.contains(&path) {
+                    current_index.blobs.remove(&path);
+                    removed_blobs.push(path);
+                    entries_updated = true;
+                }
             }
         }
 
@@ -256,6 +327,8 @@ impl Indexer {
             new_blobs,
             removed_blobs,
             total_files: current_index.blobs.len(),
+            skipped_large,
+            truncated,
         })
     }
 
@@ -271,6 +344,16 @@ impl Indexer {
     pub(crate) fn load_index_public_for_test(&self) -> ProjectIndex {
         self.load_index()
     }
+}
+
+/// 二进制探测：解码后的前 8 KiB 仍含 NUL，说明这根本不是文本文件。
+///
+/// 对二进制做 lossy 解码再 SHA256 是纯浪费（而且哈希值毫无意义）。
+/// 只看前 8 KiB，避免在巨大的文本文件上做全量扫描。
+fn is_probably_binary(content: &str) -> bool {
+    let bytes = content.as_bytes();
+    let probe = &bytes[..bytes.len().min(INDEX_BINARY_PROBE_BYTES)];
+    probe.contains(&0)
 }
 
 #[cfg(test)]

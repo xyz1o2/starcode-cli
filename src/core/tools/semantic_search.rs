@@ -27,6 +27,24 @@ const DEFAULT_AUTO_SEMANTIC_SEARCH_MAX_TOTAL_BYTES: u64 = 4 * 1024 * 1024;
 const DEFAULT_AUTO_SEMANTIC_SEARCH_TIMEOUT_MS: u64 = 5_000;
 const SEMANTIC_SEARCH_PROGRESS_EVERY_FILES: usize = 120;
 
+/// 语义索引可纳入的**唯一权威**扩展名白名单。
+///
+/// 以前这个口径在四处各写了一份（本文件、`chunking.rs`、`integration.rs`、
+/// `commands/mod.rs`），任何一处改动都会让"哪些文件进了索引"分叉。
+/// 全量构建与增量补丁都必须经过 [`is_indexable_ext`]，白名单不可能再分叉。
+pub const SEMANTIC_INDEXABLE_EXTS: &[&str] = &[
+    // tree-sitter 可解析
+    "rs", "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "tsx", "go", "java", "c", "h", "cpp",
+    "cc", "cxx", "hpp", "hxx",
+    // 纯文本 / 配置（走 SmartChunker 启发式分层）
+    "md", "txt", "json", "toml", "yaml", "yml",
+];
+
+/// 该扩展名是否应进入语义索引（单一事实源）。
+pub fn is_indexable_ext(ext: &str) -> bool {
+    SEMANTIC_INDEXABLE_EXTS.contains(&ext)
+}
+
 #[derive(Clone)]
 pub struct SemanticSearchTool {
     config: Arc<crate::core::config::Config>,
@@ -113,6 +131,60 @@ struct FileIndexError {
     reason: String,
 }
 
+/// 单文件接纳决策 —— 全量构建与增量补丁的**唯一**策略点。
+///
+/// 以前"哪些文件进索引"这条规则散落在全量循环里，增量路径要再写一遍，
+/// 两边迟早分叉。现在所有"这个文件该不该进索引"的问题都只有这一个答案。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    /// 纳入索引。
+    Admit,
+    /// 扩展名不在白名单里。
+    SkipExt,
+    /// 超过单文件上限。
+    ///
+    /// **调用方注意**：在增量路径里这必须被处理成 `Remove` ——
+    /// 该文件可能**原本就在索引里**，只是刚刚涨过了上限。
+    /// 只"跳过"而不移除，会永久留下一个陈旧文档。
+    SkipTooLarge,
+    /// 文件数或字节预算耗尽。
+    ///
+    /// 全量构建把它当"截断"（有明确的截断语义）；增量补丁没有合理的
+    /// 逐出策略，调用方应回退全量重建。
+    SkipBudget,
+}
+
+/// 判断一个文件能否进入索引。
+///
+/// `replaced_bytes` 是**本次会先释放掉**的字节数（重写/重命名时旧文档的大小）。
+/// 预算核算必须先扣掉它：否则把一个 5 MB 文件重写成同样 5 MB，会因为
+/// "当前已用 5 MB，再加 5 MB 超上限"而被拒 —— 但它压根没让语料变大。
+fn admit_file(
+    path: &Path,
+    size: u64,
+    used_files: usize,
+    used_bytes: u64,
+    replaced_bytes: u64,
+    limits: SemanticSearchLimits,
+) -> Admission {
+    let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+        return Admission::SkipExt;
+    };
+    if !is_indexable_ext(ext) {
+        return Admission::SkipExt;
+    }
+    if size > limits.max_file_bytes {
+        return Admission::SkipTooLarge;
+    }
+    let effective_bytes = used_bytes.saturating_sub(replaced_bytes);
+    if used_files >= limits.max_files
+        || effective_bytes.saturating_add(size) > limits.max_total_bytes
+    {
+        return Admission::SkipBudget;
+    }
+    Admission::Admit
+}
+
 /// Build a fresh SearchEngine by traversing the filesystem (cold start).
 ///
 /// **Per-file isolation**: tree-sitter chunking is wrapped in `catch_unwind` on a
@@ -160,39 +232,57 @@ fn build_search_engine_from_fs(
                     continue;
                 }
 
-                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                    if ![
-                        "rs", "py", "js", "ts", "tsx", "go", "java", "c", "cpp", "md", "txt",
-                        "json", "toml",
-                    ]
-                    .contains(&ext)
-                    {
-                        continue;
-                    }
+                let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+                    continue;
+                };
 
+                let file_size = match std::fs::metadata(path) {
+                    Ok(meta) => meta.len(),
+                    Err(_) => continue,
+                };
+
+                // 与增量路径共用同一个接纳策略点（全量构建没有"替换"，
+                // 所以 replaced_bytes 恒为 0）。
+                let admission =
+                    admit_file(path, file_size, stats.indexed_files, stats.total_bytes, 0, limits);
+                if admission != Admission::SkipExt {
                     stats.scanned_text_files += 1;
-
-                    let file_size = match std::fs::metadata(path) {
-                        Ok(meta) => meta.len(),
-                        Err(_) => continue,
-                    };
-
-                    if file_size > limits.max_file_bytes {
+                }
+                match admission {
+                    Admission::Admit => {}
+                    Admission::SkipExt => continue,
+                    Admission::SkipTooLarge => {
                         stats.skipped_large_files += 1;
                         continue;
                     }
-
-                    if stats.total_bytes + file_size > limits.max_total_bytes {
+                    Admission::SkipBudget => {
                         stats.truncated = true;
+                        emit_semantic_progress(
+                            update_output,
+                            format!(
+                                "Reached scan budget · {} indexed files · {:.1} MB",
+                                stats.indexed_files,
+                                bytes_to_mb(stats.total_bytes)
+                            ),
+                        );
                         break;
                     }
+                }
 
+                {
                     match index_file_safe(path, ext, root) {
                         Ok((rel_path, chunks)) => {
                             if !chunks.is_empty() {
+                                // 预算口径必须是 **chunk 内容字节**，而不是文件字节。
+                                // 增量补丁在锁内用的是 `engine.total_bytes()`
+                                // （= 各 chunk content 长度之和）；全量这边若继续用
+                                // `file_size`，同一份语料在两条路径下就会算出不同的
+                                // "已用多少"，`admit_file` 这个单一策略点也就白设了。
+                                let chunk_bytes: u64 =
+                                    chunks.iter().map(|c| c.content.len() as u64).sum();
                                 engine.add_document(rel_path, chunks);
                                 stats.indexed_files += 1;
-                                stats.total_bytes += file_size;
+                                stats.total_bytes += chunk_bytes;
 
                                 if stats.indexed_files == 1
                                     || stats.indexed_files.saturating_sub(last_progress_indexed)
@@ -580,6 +670,330 @@ pub fn build_engine_into_cache(
         },
     );
     Ok(stats.indexed_files)
+}
+
+// ── 语义引擎增量更新 ──────────────────────────────────────────────────────────
+
+/// 增量补丁的单条操作。
+///
+/// `size` 随 `Upsert` 一起带着走：预算核算必须在**写锁内**用引擎的实时数字做，
+/// 而分块在锁外 —— 不带上原始大小，锁内就没法判预算。
+#[derive(Debug)]
+enum PatchOp {
+    Upsert {
+        path: String,
+        size: u64,
+        chunks: Vec<crate::core::context::chunking::CodeChunk>,
+    },
+    Remove {
+        path: String,
+    },
+}
+
+/// 语料小于这个数时，"变化比例"没有统计意义（3 个文件改 1 个就是 33%）。
+const INCREMENTAL_MIN_CORPUS: usize = 8;
+/// 小语料下的绝对阈值。
+const INCREMENTAL_MIN_CHANGED: usize = 4;
+/// 大语料下允许的变化比例上限。
+const INCREMENTAL_MAX_CHANGE_RATIO: f64 = 0.30;
+
+/// 变动太大时，逐条打补丁还不如从零重建 —— 两者都要扫全树，但重建没有
+/// 簿记风险。这三个是**调优旋钮**，不是正确性旋钮。
+fn should_full_rebuild(indexable_changed: usize, doc_count: usize) -> bool {
+    if doc_count < INCREMENTAL_MIN_CORPUS {
+        return indexable_changed >= INCREMENTAL_MIN_CHANGED;
+    }
+    (indexable_changed as f64) / (doc_count as f64) > INCREMENTAL_MAX_CHANGE_RATIO
+}
+
+/// 把权威变更集（`IndexResult`）翻译成补丁操作。
+///
+/// **分块在这里完成，也就是在锁外** —— tree-sitter 是纯 CPU 工作，
+/// 绝不能握着引擎的写锁跑。锁内只做 O(触及的 posting) 的簿记。
+///
+/// 这里的接纳判断用零预算调用 `admit_file`，只会命中 `SkipExt` / `SkipTooLarge`：
+/// 预算项在锁内用引擎的实时数字重判（`max_file_bytes < max_total_bytes`，
+/// 所以单个文件不可能在这里就撞上总预算）。
+fn plan_patch_ops(
+    root: &Path,
+    index_result: &crate::core::context::indexer::IndexResult,
+    limits: SemanticSearchLimits,
+) -> Vec<PatchOp> {
+    let mut ops = Vec::with_capacity(index_result.new_blobs.len() + index_result.removed_blobs.len());
+
+    // 删除先入队：先把预算释放掉，重命名（removed=[old] + new=[new]）才不会
+    // 因为"旧的还没扣、新的就要加"而误触上限。
+    for path in &index_result.removed_blobs {
+        ops.push(PatchOp::Remove { path: path.clone() });
+    }
+
+    for blob in &index_result.new_blobs {
+        let full_path = root.join(&blob.path);
+        let Ok(meta) = std::fs::metadata(&full_path) else {
+            // 文件在 index_project 与这里之间消失了 —— 当作删除处理，
+            // 否则会留下一个永远删不掉的陈旧文档。
+            ops.push(PatchOp::Remove { path: blob.path.clone() });
+            continue;
+        };
+        let size = meta.len();
+
+        match admit_file(&full_path, size, 0, 0, 0, limits) {
+            Admission::Admit => {}
+            // `SkipExt` 可以安全地**什么都不做**：扩展名是从路径派生的，
+            // `assets/logo.svg` 不可能曾经进过索引（否则当初就过不了白名单），
+            // 所以不存在需要清理的陈旧文档。发一条 Remove 只会让
+            // `changed` 计数虚高，还会白跑一次 remove_document。
+            Admission::SkipExt => continue,
+            // 而 `SkipTooLarge` 必须表达成 `Remove` —— 同一个 .rs 路径完全可能
+            // 原本就在索引里，只是刚刚涨过了上限。只跳过不删除，就会永久留下
+            // 一个陈旧文档。这是本设计最容易被实现错的一条。
+            Admission::SkipTooLarge | Admission::SkipBudget => {
+                ops.push(PatchOp::Remove { path: blob.path.clone() });
+                continue;
+            }
+        }
+
+        let Some(ext) = full_path.extension().and_then(|s| s.to_str()) else {
+            ops.push(PatchOp::Remove { path: blob.path.clone() });
+            continue;
+        };
+
+        match index_file_safe(&full_path, ext, root) {
+            Ok((path, chunks)) if !chunks.is_empty() => {
+                ops.push(PatchOp::Upsert { path, size, chunks });
+            }
+            Ok(_) => {
+                // 分块结果为空（文件变空 / 纯空白 / 解析退化成零 chunk）：
+                // 同样必须表达成移除，不能留陈旧文档。
+                ops.push(PatchOp::Remove { path: blob.path.clone() });
+            }
+            Err(_) => {
+                // 文件仍在，只是这轮解析失败 —— **保留旧版本**，
+                // 不发任何操作。解析失败是暂时的，删掉就丢了。
+            }
+        }
+    }
+
+    ops
+}
+
+/// 在写锁内应用补丁。返回 `false` 表示预算饱和 —— 调用方应回退全量重建。
+///
+/// 全量构建有明确的截断语义（扫到哪算哪，并把 `truncated` 告诉用户）；
+/// 补丁没有合理的逐出策略：中途撞上上限就既不能丢弃剩余文件（会留下
+/// 半新半旧的索引），也不能悄悄超出上限。所以这里只能如实上报，
+/// 让上层回退到全量。
+fn apply_patch_ops(
+    engine: &mut SearchEngine,
+    ops: &[PatchOp],
+    limits: SemanticSearchLimits,
+) -> bool {
+    // 1. 先把移除全部做完，并**重算**已用字节 —— 移除释放的预算必须先回到池子里，
+    //    否则重命名（删 5 MB 加 5 MB）会因为峰值而误判超限。
+    for op in ops {
+        if let PatchOp::Remove { path } = op {
+            engine.remove_document(path);
+        }
+    }
+
+    let mut used_files = engine.doc_count();
+    let mut used_bytes = engine.total_bytes();
+    // 一旦有任何一条因为预算被拒，整个补丁批次就不可信了 —— 见函数头的说明。
+    let mut budget_exceeded = false;
+
+    // 2. 再逐个 upsert，每步都用最新的已用数字判预算。
+    for op in ops {
+        let PatchOp::Upsert { path, size, chunks } = op else {
+            continue;
+        };
+        let was_present = engine.contains_document(path);
+        // 重写同一个文件时，它自己占的字节会先被替换掉，不算新增。
+        let replaced_bytes = if was_present {
+            engine.document_bytes(path)
+        } else {
+            0
+        };
+
+        let admission = admit_file(
+            Path::new(path),
+            *size,
+            used_files,
+            used_bytes,
+            replaced_bytes,
+            limits,
+        );
+        if admission != Admission::Admit {
+            // 预算不够或不再合格 —— 移除（可能本来就不在，remove 会返回 false，无副作用）。
+            engine.remove_document(path);
+            // `SkipExt` / `SkipTooLarge` 是**正常**结果：这些文件本来就不该在索引里
+            // （见 plan_patch_ops 的 skip==remove 不变式），不影响批次可信度。
+            // 但 `SkipBudget` 不是 —— 它是"我本来想加，但装不下"。
+            if admission == Admission::SkipBudget {
+                budget_exceeded = true;
+            }
+            continue;
+        }
+
+        engine.upsert_document(path.clone(), chunks.clone());
+        used_bytes = used_bytes.saturating_sub(replaced_bytes) + *size;
+        if !was_present {
+            used_files += 1;
+        }
+    }
+
+    // 3. 复核总预算：单条都合格不代表累计合格（每步的 used_bytes 都在涨）。
+    //    超了就交给上层全量重建 —— 全量会把语料截断到上限内，语义是明确的。
+    !budget_exceeded && used_bytes <= limits.max_total_bytes && used_files <= limits.max_files
+}
+
+/// 增量更新结果。
+#[derive(Debug)]
+pub enum UpdateOutcome {
+    /// 补丁已在锁内应用。`changed` 是实际发出的操作条数。
+    Patched { changed: usize },
+    /// 变化太大 / 引擎缺失 / mtime 不匹配 / 预算饱和 —— 已回退全量重建。
+    FullRebuild { files: usize },
+}
+
+/// 用 `IndexResult` 增量更新缓存里的语义引擎（watcher 的重建 worker 调用）。
+///
+/// 任何一条"补丁基底不可信"的情形都回退全量重建，且 **`FullRebuild` 是成功**：
+/// `resolve_engine` 依赖 `last_rebuild_failed` 决定是否回退同步构建，
+/// 误报失败会平白禁用 Warming 快路径。
+pub fn update_engine_in_cache(
+    root: &Path,
+    cache: &Arc<SearchEngineCacheManager>,
+    index_result: &crate::core::context::indexer::IndexResult,
+    update_output: Option<ProgressCallback>,
+) -> Result<UpdateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+    update_engine_in_cache_with_limits(
+        root,
+        cache,
+        index_result,
+        semantic_search_limits(),
+        update_output,
+    )
+}
+
+/// 与 [`update_engine_in_cache`] 相同，但显式传入 limits。
+///
+/// 测试必须用这个版本：`semantic_search_limits()` 读进程级环境变量，
+/// 而 Rust 测试并行跑，改 env 的测试会 flaky。
+pub fn update_engine_in_cache_with_limits(
+    root: &Path,
+    cache: &Arc<SearchEngineCacheManager>,
+    index_result: &crate::core::context::indexer::IndexResult,
+    limits: SemanticSearchLimits,
+    update_output: Option<ProgressCallback>,
+) -> Result<UpdateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let key = (canonical_root, limits.cache_key());
+    let current_mtime = index_mtime(root);
+
+    let full_rebuild = |update_output: &Option<ProgressCallback>|
+     -> Result<UpdateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        let (engine, stats) = build_search_engine_from_fs(root, limits, update_output)?;
+        cache.put_engine(
+            key.clone(),
+            CachedSearchEngine {
+                engine,
+                index_mtime: current_mtime,
+            },
+        );
+        Ok(UpdateOutcome::FullRebuild {
+            files: stats.indexed_files,
+        })
+    };
+
+    // ── 何时直接放弃补丁 ─────────────────────────────────────────────────────
+    // 1) index.json 从未写过 → 没有 mtime 令牌，无从校验并发。
+    // 2) 缓存里根本没有这个 key → 没有补丁基底。
+    let Some(meta) = cache.engine_meta(&key) else {
+        return full_rebuild(&update_output);
+    };
+    if meta.index_mtime.is_none() {
+        return full_rebuild(&update_output);
+    }
+
+    // 冷语料：引擎是空的，而文件系统上明明有文件。补丁会把它从 0 补成 1 个文件，
+    // 然后 get_engine 命中并**谎报 Fresh** —— 用户看到的"索引"只有一个文件。
+    // 这种情形必须走全量。
+    //
+    // 判据用 `total_files`（index.json 里的条目数）而不是 `new_blobs`：
+    // 冷启动时 index.json 往往**已经写好了**（文件索引先跑），此时
+    // `new_blobs` 是空的，用它判断等于永远不触发 —— 守卫形同虚设。
+    // `total_files` 才真正回答"文件系统上到底有没有东西"。
+    if meta.doc_count == 0 && index_result.total_files > 0 {
+        return full_rebuild(&update_output);
+    }
+
+    // 3) 变化太大，逐条补不如重建。
+    //    `indexable_changed` 只数**通过白名单**的新增/修改文件 ——
+    //    `git checkout` 碰 500 个 .lock/.svg 不该触发全量重建。
+    //    删除不计入分子：删除永远比重建便宜（见 apply_patch_ops）。
+    let indexable_changed = index_result
+        .new_blobs
+        .iter()
+        .filter(|blob| {
+            Path::new(&blob.path)
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(is_indexable_ext)
+        })
+        .count();
+    if should_full_rebuild(indexable_changed, meta.doc_count) {
+        emit_semantic_progress(
+            &update_output,
+            format!(
+                "Incremental patch skipped · {} of {} docs changed · rebuilding",
+                indexable_changed, meta.doc_count
+            ),
+        );
+        return full_rebuild(&update_output);
+    }
+
+    // ── 分块（锁外）→ 补丁（锁内） ───────────────────────────────────────────
+    let ops = plan_patch_ops(root, index_result, limits);
+    if ops.is_empty() {
+        // 变更文件全是不可索引类型 —— 但**仍然要把 mtime 盖上**，
+        // 否则 get_engine 永不命中，每轮查询都触发一次刷新，形成死循环。
+        // 这正是 patch_engine 里"Applied 时无条件盖 mtime"那条注释的由来。
+        let _ = cache.patch_engine(&key, meta.index_mtime, current_mtime, |_| false);
+        return Ok(UpdateOutcome::Patched { changed: 0 });
+    }
+
+    let mut budget_exceeded = false;
+    let outcome = cache.patch_engine(&key, meta.index_mtime, current_mtime, |engine| {
+        let ok = apply_patch_ops(engine, &ops, limits);
+        budget_exceeded = !ok;
+        true
+    });
+
+    match outcome {
+        crate::core::context::search_cache::PatchOutcome::Applied => {
+            if budget_exceeded {
+                emit_semantic_progress(
+                    &update_output,
+                    "Incremental patch hit the budget ceiling · rebuilding from scratch",
+                );
+                // 补丁已经落进去了，但结果不可信 —— 全量会整体覆盖掉。
+                return full_rebuild(&update_output);
+            }
+            Ok(UpdateOutcome::Patched {
+                changed: ops.len(),
+            })
+        }
+        // 引擎不在（被 LRU 逐出）或 mtime 变了（有别的构建抢先落地）：
+        // 都不构成"失败"，回退全量即可。
+        crate::core::context::search_cache::PatchOutcome::Missing
+        | crate::core::context::search_cache::PatchOutcome::Stale => {
+            emit_semantic_progress(
+                &update_output,
+                "Patch base unavailable (evicted or superseded) · rebuilding from scratch",
+            );
+            full_rebuild(&update_output)
+        }
+    }
 }
 
 /// 引擎来源：决定查询结果的标注与兜底策略。
@@ -1036,4 +1450,555 @@ pub fn trace_call_chain(
     }
 
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::context::chunking::CodeChunk;
+    use crate::core::context::indexer::{IndexResult, Indexer};
+    use crate::core::context::search_cache::{CachedSearchEngine, SearchEngineCacheManager};
+    use std::fs;
+
+    /// 测试用的显式预算。
+    ///
+    /// **绝不能**用 `semantic_search_limits()` —— 它读进程级环境变量，而 Rust
+    /// 测试并行跑，任何一个改 env 的测试都会让它 flaky。这正是拆出
+    /// `update_engine_in_cache_with_limits` 的原因。
+    fn test_limits() -> SemanticSearchLimits {
+        SemanticSearchLimits {
+            max_files: 1_000,
+            max_file_bytes: 512,
+            max_total_bytes: 200_000,
+            timeout_ms: 12_000,
+        }
+    }
+
+    fn write(root: &Path, rel: &str, content: &str) {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, content).unwrap();
+    }
+
+    fn cache_key_for(root: &Path, limits: SemanticSearchLimits) -> (PathBuf, String) {
+        (
+            root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+            limits.cache_key(),
+        )
+    }
+
+    /// 把"当前文件系统"的全量引擎放进缓存，模拟引擎已就绪的稳态。
+    fn seed_cache(root: &Path, limits: SemanticSearchLimits) -> Arc<SearchEngineCacheManager> {
+        let cache = Arc::new(SearchEngineCacheManager::new());
+        let (engine, _) = build_search_engine_from_fs(root, limits, &None).expect("seed build");
+        cache.put_engine(
+            cache_key_for(root, limits),
+            CachedSearchEngine {
+                engine,
+                index_mtime: index_mtime(root),
+            },
+        );
+        cache
+    }
+
+    fn cached_engine(root: &Path, limits: SemanticSearchLimits, cache: &SearchEngineCacheManager) -> SearchEngine {
+        cache
+            .get_engine_stale(&cache_key_for(root, limits))
+            .expect("engine must be cached")
+            .0
+    }
+
+    fn full_engine(root: &Path, limits: SemanticSearchLimits) -> SearchEngine {
+        build_search_engine_from_fs(root, limits, &None)
+            .expect("full rebuild")
+            .0
+    }
+
+    /// 探针查询的可观测结果：路径 + 行号 + 内容（排序后，顺序无关）。
+    fn probe(engine: &SearchEngine, query: &str) -> Vec<(String, usize, String)> {
+        let mut hits: Vec<(String, usize, String)> = engine
+            .search(query, 50)
+            .into_iter()
+            .map(|r| (r.file_path, r.chunk.start_line, r.chunk.content))
+            .collect();
+        hits.sort();
+        hits
+    }
+
+    // ── admit_file：单一策略点 ────────────────────────────────────────────────
+
+    #[test]
+    fn admit_file_covers_every_branch() {
+        let limits = test_limits();
+        let p = Path::new("src/a.rs");
+
+        assert_eq!(admit_file(p, 10, 0, 0, 0, limits), Admission::Admit);
+        // 扩展名不在白名单。
+        assert_eq!(
+            admit_file(Path::new("logo.svg"), 10, 0, 0, 0, limits),
+            Admission::SkipExt
+        );
+        // 没有扩展名。
+        assert_eq!(
+            admit_file(Path::new("Makefile"), 10, 0, 0, 0, limits),
+            Admission::SkipExt
+        );
+        // 超过单文件上限。
+        assert_eq!(
+            admit_file(p, limits.max_file_bytes + 1, 0, 0, 0, limits),
+            Admission::SkipTooLarge
+        );
+        // 文件数耗尽。
+        assert_eq!(
+            admit_file(p, 10, limits.max_files, 0, 0, limits),
+            Admission::SkipBudget
+        );
+        // 总字节耗尽。
+        assert_eq!(
+            admit_file(p, 10, 0, limits.max_total_bytes, 0, limits),
+            Admission::SkipBudget
+        );
+    }
+
+    /// `replaced_bytes` 的存在意义：把 5 MB 重写成同样 5 MB，不该因为
+    /// "已用 5 MB + 新增 5 MB 超上限"被拒 —— 语料压根没变大。
+    #[test]
+    fn admit_file_credits_bytes_that_the_rewrite_frees() {
+        let limits = SemanticSearchLimits {
+            max_total_bytes: 100,
+            ..test_limits()
+        };
+
+        // 已用 80，再写 30 → 超限。
+        assert_eq!(
+            admit_file(Path::new("a.rs"), 30, 0, 80, 0, limits),
+            Admission::SkipBudget
+        );
+        // 但若这 30 是替换掉自己原先占的 30，实际用量仍是 80。
+        assert_eq!(
+            admit_file(Path::new("a.rs"), 30, 0, 80, 30, limits),
+            Admission::Admit
+        );
+    }
+
+    // ── should_full_rebuild：调优旋钮 ────────────────────────────────────────
+
+    #[test]
+    fn should_full_rebuild_uses_absolute_threshold_for_small_corpora() {
+        // 3 个文件改 1 个是 33% —— 比例在这么小的语料上毫无意义，
+        // 必须用绝对阈值，否则每次编辑都在重建。
+        assert!(!should_full_rebuild(1, 3));
+        assert!(!should_full_rebuild(3, 5));
+        assert!(should_full_rebuild(4, 5));
+    }
+
+    #[test]
+    fn should_full_rebuild_uses_ratio_for_large_corpora() {
+        assert!(!should_full_rebuild(3, 100));
+        assert!(!should_full_rebuild(30, 100), "恰好 30% 不算超过");
+        assert!(should_full_rebuild(31, 100));
+    }
+
+    // ── apply_patch_ops：预算簿记 ────────────────────────────────────────────
+
+    fn op(path: &str, size: u64, content: &str) -> PatchOp {
+        PatchOp::Upsert {
+            path: path.to_string(),
+            size,
+            chunks: vec![CodeChunk {
+                content: content.to_string(),
+                start_line: 1,
+                end_line: 1,
+                context_header: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn apply_patch_ops_removals_are_settled_before_budget_is_checked() {
+        // 重命名的形状：删旧的 + 加新的，同批下发。
+        // 若移除释放的预算没先回到池子里，峰值会让整个批次被误判超限。
+        let limits = SemanticSearchLimits {
+            max_total_bytes: 60,
+            ..test_limits()
+        };
+        let mut engine = SearchEngine::new();
+        engine.add_document(
+            "old.rs".to_string(),
+            vec![CodeChunk {
+                content: "x".repeat(50),
+                start_line: 1,
+                end_line: 1,
+                context_header: None,
+            }],
+        );
+
+        let ops = vec![
+            PatchOp::Remove {
+                path: "old.rs".to_string(),
+            },
+            op("new.rs", 50, &"y".repeat(50)),
+        ];
+        assert!(
+            apply_patch_ops(&mut engine, &ops, limits),
+            "先释放旧预算后，同尺寸重命名必须放得下"
+        );
+        assert_eq!(engine.document_paths(), vec!["new.rs"]);
+        engine.verify_invariants().unwrap();
+    }
+
+    #[test]
+    fn apply_patch_ops_reports_budget_exhaustion_instead_of_lying() {
+        let limits = SemanticSearchLimits {
+            max_total_bytes: 10,
+            ..test_limits()
+        };
+        let mut engine = SearchEngine::new();
+
+        let ops = vec![op("a.rs", 100, &"z".repeat(100))];
+        assert!(
+            !apply_patch_ops(&mut engine, &ops, limits),
+            "超预算必须如实上报 false，让上层回退全量重建"
+        );
+    }
+
+    /// 增量路径里 "skip" 必须意味着 "remove" —— 这是最容易被实现错的一条。
+    #[test]
+    fn plan_patch_ops_turns_oversized_and_unknown_extension_into_removals() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let limits = test_limits();
+
+        // 一个超过单文件上限的 .rs，和一个不在白名单里的 .svg。
+        // 用**多行**填充：单行重复 200 次 `fn big() {}` 会让 tree-sitter 建出
+        // 极深的错误恢复树，把 8 MiB 的索引线程栈撑爆 —— 那是解析器自身的
+        // 隐患（`index_file_safe` 的 catch_unwind 正为它准备），不该由测试夹具触发。
+        let big: String = (0..200).map(|i| format!("fn big{i}() {{}}\n")).collect();
+        write(root, "big.rs", &big);
+        write(root, "logo.svg", "<svg/>");
+
+        let result = IndexResult {
+            new_blobs: vec![
+                crate::core::context::indexer::Blob {
+                    hash: "h1".into(),
+                    path: "big.rs".into(),
+                    content: None,
+                },
+                crate::core::context::indexer::Blob {
+                    hash: "h2".into(),
+                    path: "logo.svg".into(),
+                    content: None,
+                },
+            ],
+            removed_blobs: vec![],
+            total_files: 2,
+            skipped_large: 0,
+            truncated: false,
+        };
+
+        let ops = plan_patch_ops(root, &result, limits);
+
+        // 涨过上限的 .rs → Remove（它可能原本就在索引里）。
+        assert!(
+            ops.iter().any(|op| matches!(
+                op,
+                PatchOp::Remove { path } if path == "big.rs"
+            )),
+            "超限的 .rs 必须被移除，否则留下陈旧文档：{:?}",
+            ops
+        );
+
+        // 不可索引扩展名 → **不产生任何操作**。扩展名是从路径派生的，
+        // `logo.svg` 不可能曾经进过索引，发 Remove 只是让 changed 虚高。
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, PatchOp::Remove { ref path } if path == "logo.svg")),
+            "不可索引文件不该产生操作：{:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn plan_patch_ops_emits_upsert_for_a_normal_changed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/a.rs", "pub fn alpha() -> u32 { 1 }");
+
+        let result = IndexResult {
+            new_blobs: vec![crate::core::context::indexer::Blob {
+                hash: "h".into(),
+                path: "src/a.rs".into(),
+                content: None,
+            }],
+            removed_blobs: vec![],
+            total_files: 1,
+            skipped_large: 0,
+            truncated: false,
+        };
+
+        let ops = plan_patch_ops(root, &result, test_limits());
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            PatchOp::Upsert { path, size, chunks } => {
+                assert_eq!(path, "src/a.rs");
+                assert!(*size > 0);
+                assert!(!chunks.is_empty());
+            }
+            other => panic!("期望 Upsert，实际 {:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    /// **删掉的路径必须被显式移除**，而不是"文件不在就不管"。
+    #[test]
+    fn plan_patch_ops_removes_deleted_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = IndexResult {
+            new_blobs: vec![],
+            removed_blobs: vec!["gone.rs".into()],
+            total_files: 0,
+            skipped_large: 0,
+            truncated: false,
+        };
+
+        let ops = plan_patch_ops(dir.path(), &result, test_limits());
+        assert!(matches!(&ops[0], PatchOp::Remove { path } if path == "gone.rs"));
+    }
+
+    // ── 基石：差分测试 ───────────────────────────────────────────────────────
+
+    /// **本模块最重要的一个测试。**
+    ///
+    /// 全量构建 → 施加一批脚本化变更 → 走增量补丁 → 再把补丁结果与
+    /// "从变更后的文件系统全量重建"逐项对比。两者必须**观测等价**。
+    ///
+    /// 这比逐个测簿记函数强得多：它直接断言"用户看到的东西一样"，
+    /// 覆盖 swap-remove 重映射、doc_freqs 增减、预算口径、skip==remove
+    /// 等所有边界的组合效应。任何一处簿记写错，这里都会红。
+    #[test]
+    fn incremental_matches_full_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let limits = test_limits();
+
+        // 20 个文件：语料够大，5 处改动只有 25%，才会真正走补丁分支
+        // 而不是被 should_full_rebuild 拦回全量。
+        for i in 0..20 {
+            write(
+                root,
+                &format!("src/f{i:02}.rs"),
+                &format!("pub fn fn{i:02}() -> u32 {{\n    // marker{i:02}\n    {i}\n}}\n"),
+            );
+        }
+
+        // 先跑一次文件索引，让 index.json 存在（mtime 令牌的来源）。
+        Indexer::new(root).index_project().expect("first index");
+        let cache = seed_cache(root, limits);
+
+        // ── 脚本化变更 ────────────────────────────────────────────────────────
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        // 1. 改一个
+        write(
+            root,
+            "src/f05.rs",
+            "pub fn fn05() -> u32 {\n    // marker05_rewritten\n    55\n}\n",
+        );
+        // 2. 删一个
+        fs::remove_file(root.join("src/f06.rs")).unwrap();
+        // 3. 重命名一个（旧路径消失 + 新路径出现，同批下发）
+        fs::rename(root.join("src/f07.rs"), root.join("src/f07_moved.rs")).unwrap();
+        // 4. 加一个
+        write(
+            root,
+            "src/added.rs",
+            "pub fn added() -> u32 {\n    // marker_added\n    1\n}\n",
+        );
+        // 5. 清空一个（必须变成 Remove，不能留陈旧文档）
+        write(root, "src/f08.rs", "");
+        // 6. 加一个不可索引类型的文件（必须完全不影响引擎）
+        write(root, "assets/logo.svg", "<svg>marker_svg</svg>");
+        // 7. 一个 .rs 涨过单文件上限（必须变成 Remove）
+        write(
+            root,
+            "src/f09.rs",
+            &format!("pub fn fn09() -> u32 {{\n{}\n    0\n}}\n", "    // pad\n".repeat(120)),
+        );
+
+        // ── 增量路径 ──────────────────────────────────────────────────────────
+        let index_result = Indexer::new(root).index_project().expect("second index");
+        let outcome = update_engine_in_cache_with_limits(root, &cache, &index_result, limits, None)
+            .expect("incremental update must not error");
+
+        assert!(
+            matches!(outcome, UpdateOutcome::Patched { .. }),
+            "语料 20 个、改动 5 处，必须走补丁分支而非全量重建：{:?}",
+            outcome
+        );
+
+        // ── 对比 ──────────────────────────────────────────────────────────────
+        let patched = cached_engine(root, limits, &cache);
+        let rebuilt = full_engine(root, limits);
+
+        patched
+            .verify_invariants()
+            .expect("补丁后的引擎必须满足全部簿记不变量");
+
+        assert_eq!(
+            patched.doc_count(),
+            rebuilt.doc_count(),
+            "文档数必须与全量重建一致"
+        );
+        assert_eq!(
+            patched.document_paths(),
+            rebuilt.document_paths(),
+            "已索引路径集合必须与全量重建一致"
+        );
+        assert_eq!(
+            patched.total_bytes(),
+            rebuilt.total_bytes(),
+            "预算口径必须与全量重建一致"
+        );
+        assert_eq!(
+            patched.doc_freqs_snapshot(),
+            rebuilt.doc_freqs_snapshot(),
+            "词频必须与全量重建逐项一致 —— 任何漂移都会在此暴露"
+        );
+
+        // 具体断言各条边界都落到了预期状态。
+        assert!(!patched.contains_document("src/f06.rs"), "删除的文件必须消失");
+        assert!(!patched.contains_document("src/f07.rs"), "重命名的旧路径必须消失");
+        assert!(
+            patched.contains_document("src/f07_moved.rs"),
+            "重命名的新路径必须进索引"
+        );
+        assert!(patched.contains_document("src/added.rs"), "新增文件必须进索引");
+        assert!(
+            !patched.contains_document("src/f08.rs"),
+            "清空的文件必须被移除，不能留下陈旧文档"
+        );
+        assert!(
+            !patched.contains_document("assets/logo.svg"),
+            "不可索引类型不得进引擎"
+        );
+        assert!(
+            !patched.contains_document("src/f09.rs"),
+            "涨过单文件上限的文件必须被移除"
+        );
+
+        // 探针查询：路径、行号、内容逐项一致。
+        for query in ["marker00", "marker05_rewritten", "marker_added", "fn"] {
+            assert_eq!(
+                probe(&patched, query),
+                probe(&rebuilt, query),
+                "探针查询 {:?} 的结果必须与全量重建一致",
+                query
+            );
+        }
+
+        // 分数也必须一致 —— 它依赖 doc_freqs 与文档总数，是簿记正确性的
+        // 最敏感指标。
+        let p = patched.search("marker05_rewritten", 5);
+        let r = rebuilt.search("marker05_rewritten", 5);
+        assert_eq!(p.len(), r.len());
+        assert_eq!(p[0].file_path, r[0].file_path);
+        assert!(
+            (p[0].score - r[0].score).abs() < 1e-9,
+            "分数必须一致：补丁 {} vs 全量 {}",
+            p[0].score,
+            r[0].score
+        );
+    }
+
+    /// 变更全是不可索引类型时，补丁一条操作都不发 —— 但 **mtime 必须被盖上**，
+    /// 否则 `get_engine` 永不命中，查询路径每轮都触发一次刷新，形成活锁。
+    #[test]
+    fn no_indexable_changes_still_stamps_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let limits = test_limits();
+
+        write(root, "src/a.rs", "pub fn alpha() -> u32 { 1 }\n");
+        Indexer::new(root).index_project().unwrap();
+        let cache = seed_cache(root, limits);
+        let key = cache_key_for(root, limits);
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write(root, "assets/logo.svg", "<svg/>");
+
+        let index_result = Indexer::new(root).index_project().unwrap();
+        let outcome = update_engine_in_cache_with_limits(root, &cache, &index_result, limits, None)
+            .expect("must not error");
+
+        assert!(
+            matches!(outcome, UpdateOutcome::Patched { changed: 0 }),
+            "不可索引的变更不应产生任何补丁操作：{:?}",
+            outcome
+        );
+        assert!(
+            cache.get_engine(&key, index_mtime(root)).is_some(),
+            "无操作补丁后必须以当前 mtime 命中，否则查询路径会陷入刷新活锁"
+        );
+    }
+
+    /// 引擎是空的、而文件系统上有文件 —— 必须走全量。
+    /// 若打补丁，会把空引擎补成 1 个文件，然后 `get_engine` 命中并**谎报 Fresh**，
+    /// 用户看到的"索引"只有一个文件。
+    #[test]
+    fn cold_corpus_forces_full_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let limits = test_limits();
+
+        write(root, "src/a.rs", "pub fn alpha() -> u32 { 1 }\n");
+        Indexer::new(root).index_project().unwrap();
+
+        // 缓存里放一个**空**引擎，但 mtime 是有效的。
+        let cache = Arc::new(SearchEngineCacheManager::new());
+        cache.put_engine(
+            cache_key_for(root, limits),
+            CachedSearchEngine {
+                engine: SearchEngine::new(),
+                index_mtime: index_mtime(root),
+            },
+        );
+
+        let index_result = Indexer::new(root).index_project().unwrap();
+        let outcome = update_engine_in_cache_with_limits(root, &cache, &index_result, limits, None)
+            .expect("must not error");
+
+        assert!(
+            matches!(outcome, UpdateOutcome::FullRebuild { .. }),
+            "冷语料必须全量重建，否则会谎报 Fresh：{:?}",
+            outcome
+        );
+        let engine = cached_engine(root, limits, &cache);
+        assert_eq!(engine.doc_count(), 1, "全量重建后必须真的索引到那个文件");
+    }
+
+    /// `index.json` 从未写过（mtime 为 None）→ 没有并发令牌 → 全量重建。
+    #[test]
+    fn engine_without_mtime_token_forces_full_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let limits = test_limits();
+
+        write(root, "src/a.rs", "pub fn alpha() -> u32 { 1 }\n");
+
+        let cache = Arc::new(SearchEngineCacheManager::new());
+        cache.put_engine(
+            cache_key_for(root, limits),
+            CachedSearchEngine {
+                engine: SearchEngine::new(),
+                index_mtime: None,
+            },
+        );
+
+        let index_result = Indexer::new(root).index_project().unwrap();
+        let outcome = update_engine_in_cache_with_limits(root, &cache, &index_result, limits, None)
+            .expect("must not error");
+
+        assert!(matches!(outcome, UpdateOutcome::FullRebuild { .. }));
+    }
 }

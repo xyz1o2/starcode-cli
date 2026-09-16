@@ -259,12 +259,17 @@ impl std::fmt::Display for IndexResult {
     }
 }
 
+/// 是否是可索引文件 —— 委托 [`semantic_search::is_indexable_ext`]。
+///
+/// 这里以前自己写了一份 12 个扩展名的表，和语义索引的白名单互不相同：
+/// 改了那边忘了这边，`StructureIndex` 与语义引擎看到的"项目里有什么"就分叉了。
+/// 现在全树只有那一份权威白名单。
+///
+/// 注意白名单比 `StructureIndex::index_file` 真正能解析的语言更宽（多出
+/// md/json/yaml 等）：这类文件走到 `index_file` 是 no-op，只是白读一次。
+/// 宁可多读，也不要第二份会漂移的语言表。
 fn is_source_file(path: &str) -> bool {
-    let extensions = [
-        "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "cpp", "c", "h", "hpp",
-    ];
-    path.split('.')
-        .last()
-        .map(|ext| extensions.contains(&ext))
+    path.rsplit_once('.')
+        .map(|(_, ext)| crate::core::tools::semantic_search::is_indexable_ext(ext))
         .unwrap_or(false)
 }
