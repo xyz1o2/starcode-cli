@@ -150,7 +150,7 @@ zeroize = { version = "1.7", features = ["derive"] }
 rust-embed = "8.11.0"
 lsp-types = "0.97.0"
 image = "0.25.9"
-html2text = "0.16.5"
+html2text = "0.17.1"
 syn = { version = "2.0.114", features = ["full", "visit"] }
 proc-macro2 = "1.0.105"
 lazy_static = "1.5.0"
