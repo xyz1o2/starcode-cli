@@ -1,4 +1,4 @@
-use crate::core::tools::constants::GET_DIAGNOSTICS_TOOL_NAME;
+use crate::core::tools::constants::ToolName;
 use crate::core::tools::tools::{
     BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation, ToolResult,
 };
@@ -26,7 +26,7 @@ impl GetDiagnosticsTool {
 
 impl BaseDeclarativeTool for GetDiagnosticsTool {
     fn name(&self) -> &str {
-        GET_DIAGNOSTICS_TOOL_NAME
+        ToolName::GetDiagnostics.as_str()
     }
 
     fn display_name(&self) -> &str {

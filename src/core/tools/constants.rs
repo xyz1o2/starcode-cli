@@ -2,7 +2,6 @@
 //!
 //! 使用 `ToolName` 枚举管理所有工具名称，避免魔法字符串。
 
-use std::collections::HashSet;
 use std::fmt;
 
 // ── Tool Name Enum ──────────────────────────────────────────────────
@@ -454,124 +453,16 @@ impl AsRef<str> for ToolName {
     }
 }
 
-// ── Legacy Constants (deprecated, use ToolName instead) ──────────────
-// 保留这些常量用于向后兼容，但建议使用 ToolName 枚举
-
-pub const GLOB_TOOL_NAME: &str = "Glob";
-pub const WRITE_FILE_TOOL_NAME: &str = "Write";
-pub const ENTER_WORKTREE_TOOL_NAME: &str = "enter_worktree";
-pub const EXIT_WORKTREE_TOOL_NAME: &str = "exit_worktree";
-pub const WEB_SEARCH_TOOL_NAME: &str = "WebSearch";
-pub const WEB_FETCH_TOOL_NAME: &str = "WebFetch";
-pub const WEB_SCRAPER_TOOL_NAME: &str = "web_scraper";
-pub const EDIT_TOOL_NAME: &str = "Edit";
-pub const SMART_EDIT_TOOL_NAME: &str = "smart_edit";
-pub const MULTI_EDIT_TOOL_NAME: &str = "multi_edit";
-pub const NOTEBOOK_READ_TOOL_NAME: &str = "notebook_read";
-pub const NOTEBOOK_EDIT_TOOL_NAME: &str = "notebook_edit";
-pub const SHELL_TOOL_NAME: &str = "Bash";
-pub const POWERSHELL_TOOL_NAME: &str = "powershell";
-pub const WEB_BROWSER_TOOL_NAME: &str = "web_browser";
-pub const GREP_TOOL_NAME: &str = "Grep";
-pub const READ_MANY_FILES_TOOL_NAME: &str = "read_many_files";
-pub const READ_FILE_TOOL_NAME: &str = "Read";
-pub const LS_TOOL_NAME: &str = "ListDir";
-pub const MEMORY_TOOL_NAME: &str = "memory";
-pub const GET_INTERNAL_DOCS_TOOL_NAME: &str = "get_internal_docs";
-pub const SKILL_TOOL_NAME: &str = "skill";
-pub const ACTIVATE_SKILL_TOOL_NAME: &str = "activate_skill";
-pub const MANAGED_TASKS_TOOL_NAME: &str = "TodoWrite";
-pub const RUN_AGENT_TOOL_NAME: &str = "Agent";
-pub const DELEGATE_TO_AGENT_TOOL_NAME: &str = "delegate_to_agent";
-pub const LSP_TOOL_NAME: &str = "LSP";
-pub const GET_DIAGNOSTICS_TOOL_NAME: &str = "get_diagnostics";
-pub const CODEBASE_SEARCH_TOOL_NAME: &str = "CodebaseSearch";
-pub const RUN_TESTS_TOOL_NAME: &str = "run_tests";
-pub const PROJECT_MAP_TOOL_NAME: &str = "ProjectMap";
-pub const TOOL_SEARCH_TOOL_NAME: &str = "tool_search";
-pub const ASK_USER_QUESTION_TOOL_NAME: &str = "ask_user_question";
-pub const ENTER_PLAN_MODE_TOOL_NAME: &str = "enter_plan_mode";
-pub const EXIT_PLAN_MODE_TOOL_NAME: &str = "exit_plan_mode";
-pub const GIT_INSIGHT_TOOL_NAME: &str = "git_insight";
-pub const GH_PR_COMMENTS_TOOL_NAME: &str = "gh_pr_comments";
-pub const NEXT_EDIT_TOOL_NAME: &str = "next_edit";
-pub const WAIT_TOOL_NAME: &str = "wait";
-pub const CRON_CREATE_TOOL_NAME: &str = "cron_create";
-pub const CRON_LIST_TOOL_NAME: &str = "cron_list";
-pub const CRON_DELETE_TOOL_NAME: &str = "cron_delete";
-pub const BACKGROUND_TASK_TOOL_NAME: &str = "background_task";
-pub const REMOTE_TRIGGER_TOOL_NAME: &str = "remote_trigger";
-pub const SNIP_TOOL_NAME: &str = "snip";
-pub const SUGGEST_PR_TOOL_NAME: &str = "suggest_pr";
-pub const MCP_AUTH_TOOL_NAME: &str = "mcp_auth";
-pub const SCHEDULE_WAKEUP_TOOL_NAME: &str = "schedule_wakeup";
-pub const SEND_MESSAGE_TOOL_NAME: &str = "send_message";
-pub const TASK_GET_TOOL_NAME: &str = "task_get";
-pub const TASK_LIST_TOOL_NAME: &str = "task_list";
-pub const TASK_UPDATE_TOOL_NAME: &str = "task_update";
-pub const TASK_OUTPUT_TOOL_NAME: &str = "task_output";
-pub const MONITOR_TOOL_NAME: &str = "monitor";
-pub const BRIEF_TOOL_NAME: &str = "brief";
-pub const WORKFLOW_TOOL_NAME: &str = "workflow";
-pub const GIT_PR_SUBSCRIBE_TOOL_NAME: &str = "git_pr_subscribe";
-pub const GIT_REWIND_TOOL_NAME: &str = "git_rewind";
-pub const GIT_COMMIT_ATTRIBUTION_TOOL_NAME: &str = "git_commit_attribution";
-pub const GIT_AUTOFIX_PR_TOOL_NAME: &str = "git_autofix_pr";
-pub const GIT_BRANCH_TOOL_NAME: &str = "git_branch";
-pub const GITHUB_APP_TOOL_NAME: &str = "github_app";
-pub const GITHUB_ISSUE_TOOL_NAME: &str = "github_issue";
-pub const MCP_LIST_RESOURCES_TOOL_NAME: &str = "mcp_list_resources";
-pub const MCP_READ_RESOURCE_TOOL_NAME: &str = "mcp_read_resource";
-pub const SYNTHETIC_OUTPUT_TOOL_NAME: &str = "synthetic_output";
-pub const REPL_TOOL_NAME: &str = "repl";
-pub const LEGACY_EDIT_TOOL_NAME: &str = "str_replace_editor";
-pub const LEGACY_SHELL_TOOL_NAME: &str = "run_shell_command";
-pub const LEGACY_GREP_TOOL_NAME: &str = "search_file_content";
-
-pub const DISCOVERED_TOOL_PREFIX: &str = "discovered_tool_";
-
+/// 获取所有内置工具名称
 pub fn all_builtin_tool_names() -> Vec<&'static str> {
     ToolName::all_builtin().iter().map(|t| t.as_str()).collect()
 }
 
-/// 从字符串获取规范化的工具名称（使用 ToolName 枚举）
+/// 从字符串获取规范化的工具名称（别名归一到 `ToolName`）
 pub fn canonical_tool_name(name: &str) -> String {
     ToolName::from_str(name)
         .map(|t| t.as_str().to_string())
         .unwrap_or_else(|| name.to_string())
-}
-
-pub fn is_valid_tool_name(name: &str, options: &ValidationOptions) -> bool {
-    let builtin = all_builtin_tool_names();
-
-    if builtin.contains(&name) {
-        return true;
-    }
-
-    if options.allow_mcp_tools && name.starts_with("mcp__") {
-        return true;
-    }
-
-    if options.allow_discovered_tools && name.starts_with(DISCOVERED_TOOL_PREFIX) {
-        return true;
-    }
-
-    false
-}
-
-pub struct ValidationOptions {
-    pub allow_mcp_tools: bool,
-    pub allow_discovered_tools: bool,
-}
-
-pub fn edit_tool_names() -> HashSet<&'static str> {
-    let mut set = HashSet::new();
-    set.insert(EDIT_TOOL_NAME);
-    set.insert(LEGACY_EDIT_TOOL_NAME);
-    set.insert(MULTI_EDIT_TOOL_NAME);
-    set.insert(NOTEBOOK_EDIT_TOOL_NAME);
-    set.insert(WRITE_FILE_TOOL_NAME);
-    set
 }
 
 // ── Tool error types ─────────────────────────────────────────────────

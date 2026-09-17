@@ -197,7 +197,7 @@ StarCode 有 `McpListResourcesTool` 和 `McpReadResourceTool` 但无订阅机制
 ### 核心工具 (无测试)
 - `shell.rs`, `read_file.rs`, `write_file.rs`, `glob.rs`, `grep.rs`, `ls.rs`
 - `agent_tool.rs`, `multi_edit.rs`, `notebook_edit.rs`, `notebook_read.rs`
-- `project_map.rs`, `semantic_search.rs`, `workflow.rs`
+- `project_map.rs`, `codebase_search.rs`, `workflow.rs`
 
 ### 配置/基础设施 (无测试)
 - `settings_manager.rs`, `runtime_bootstrap.rs`, `provider_resolution.rs`

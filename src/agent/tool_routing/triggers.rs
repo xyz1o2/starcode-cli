@@ -396,7 +396,7 @@ pub(crate) fn dynamic_context_first_turn_enabled() -> bool {
 
 /// 检查是否启用自动语义搜索
 fn auto_codebase_search_enabled() -> bool {
-    bool_env_flag("STAR_ENABLE_AUTO_SEMANTIC_SEARCH", false)
+    bool_env_flag("STAR_ENABLE_AUTO_CODEBASE_SEARCH", false)
 }
 
 /// 检查是否启用自动技能回退
@@ -420,7 +420,7 @@ fn bool_env_flag(key: &str, default: bool) -> bool {
             static VALUE: OnceLock<bool> = OnceLock::new();
             *VALUE.get_or_init(|| read_bool_env_flag(key, default))
         }
-        "STAR_ENABLE_AUTO_SEMANTIC_SEARCH" => {
+        "STAR_ENABLE_AUTO_CODEBASE_SEARCH" => {
             static VALUE: OnceLock<bool> = OnceLock::new();
             *VALUE.get_or_init(|| read_bool_env_flag(key, default))
         }

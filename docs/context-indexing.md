@@ -11,7 +11,7 @@
 
 | 问题 | 位置 |
 |------|------|
-| 四份互不相同的扩展名白名单 | `semantic_search.rs:164`（13 个）、`chunking.rs:178`、`integration.rs:264`、`commands/mod.rs:901` |
+| 四份互不相同的扩展名白名单 | `codebase_search.rs:164`（13 个）、`chunking.rs:178`、`integration.rs:264`、`commands/mod.rs:901` |
 | `Indexer` 对任何文件都无上限地 `read` + SHA256，不看类型不看大小 | `indexer.rs:181` |
 | 两个线程并发 load-modify-save 同一个 `index.json`，会丢更新 | `watcher.rs:264` × `engine.rs:152` / `:307` |
 | 同尺寸 + 同秒的修改被快速路径漏检；空文件因 `entry.size != 0` 永远走慢路径 | `indexer.rs:207` |
@@ -34,7 +34,7 @@ exclude，跑一次 `cargo build` 会灌进几千个 `target/` 事件。
 
 ### 2.1 扩展名白名单：单一事实源
 
-在 `semantic_search.rs` 定义唯一权威：
+在 `codebase_search.rs` 定义唯一权威：
 
 ```rust
 pub const SEMANTIC_INDEXABLE_EXTS: &[&str] = &[
@@ -191,7 +191,7 @@ dirty 集合目前口径不一致（绝对路径 vs 相对路径混用），直�
    `resolve_engine` 依赖它决定是否回退同步构建，误报会禁用 Warming 快路径。
 5. **事件过滤**：用 `ignore::gitignore::GitignoreBuilder` 构建一次匹配器
    （项目 `.gitignore` + `.starignore` + `~/.star/ignore` + `VCS_DIRS` +
-   `SEMANTIC_SEARCH_EXCLUDES`），复用 `utils::file_walk` 的
+   `CODEBASE_SEARCH_EXCLUDES`），复用 `utils::file_walk` 的
    `global_ignore_file` / `project_ignore_file` 保持口径一致。
 
 `engine.rs` **无需改动** —— 它的后台刷新只碰 `IndexCache`，引擎缓存完全由 watcher
@@ -241,11 +241,11 @@ worker 驱动。`clear_index_cache` 与在途补丁的竞争是安全的（`Miss
 
 其余按模块：`search_engine`（swap-remove 重映射、upsert 去重、doc_freqs 递减到零）、
 `search_cache`（mtime 令牌、**无操作补丁仍盖 mtime** 的死循环回归）、
-`semantic_search`（`admit_file` 各分支、**涨过上限 → 移除** 的高风险用例）、
+`codebase_search`（`admit_file` 各分支、**涨过上限 → 移除** 的高风险用例）、
 `watcher`（重标记保留实际路径、哨兵路由、事件过滤）。
 
 > 注意：涉及 limits 的测试必须用 `update_engine_in_cache_with_limits`（显式 limits）。
-> `semantic_search_limits_for_profile` 读进程级环境变量，而 Rust 测试并行跑，
+> `codebase_search_limits_for_profile` 读进程级环境变量，而 Rust 测试并行跑，
 > 改 env 的测试会 flaky。这正是要拆成两个函数的原因。
 
 ---

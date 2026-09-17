@@ -899,7 +899,7 @@ async fn index_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult 
         // 扩展名白名单走单一事实源（以前这里自己写了一份六个扩展名的表，
         // 与语义索引的口径不一致）。
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !crate::core::tools::semantic_search::is_indexable_ext(ext) {
+        if !crate::core::tools::codebase_search::is_indexable_ext(ext) {
             continue;
         }
 

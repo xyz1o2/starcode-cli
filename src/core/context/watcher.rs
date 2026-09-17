@@ -7,7 +7,7 @@
 //!   300ms 内的连续变更合并为一次重建。
 //! - **增量重建**：重建入口是 `Indexer::index_project()` —— 得益于
 //!   (size, mtime) 快速跳过，它天然只读变更文件。
-//! - **单一事实源**：agent 的 Edit/Write 打脏、semantic_search 发现
+//! - **单一事实源**：agent 的 Edit/Write 打脏、codebase_search 发现
 //!   引擎过期、watcher 文件事件，三条路径都汇入同一个重建队列。
 
 use crate::core::context::indexer::Indexer;
@@ -94,7 +94,7 @@ pub fn mark_files_dirty(paths: impl IntoIterator<Item = String>) {
     }
 }
 
-/// 请求一次完整增量刷新（semantic_search 发现引擎过期时调用）。
+/// 请求一次完整增量刷新（codebase_search 发现引擎过期时调用）。
 /// 防抖合并，不会叠加执行。
 pub fn request_refresh(project_root: &Path) {
     let coord = coordinator();
@@ -298,7 +298,7 @@ fn run_incremental_rebuild(root: &Path, dirty: &[String]) {
     if let Some(cache) = cache {
         match &index_result {
             Ok(result) => {
-                match crate::core::tools::semantic_search::update_engine_in_cache(
+                match crate::core::tools::codebase_search::update_engine_in_cache(
                     root, &cache, result, None,
                 ) {
                     Ok(outcome) => {
@@ -306,10 +306,10 @@ fn run_incremental_rebuild(root: &Path, dirty: &[String]) {
                         // 逐条补不如重建，这是预期路径。误报成失败会让
                         // resolve_engine 平白禁用 Warming 快路径。
                         let detail = match &outcome {
-                            crate::core::tools::semantic_search::UpdateOutcome::Patched {
+                            crate::core::tools::codebase_search::UpdateOutcome::Patched {
                                 changed,
                             } => format!("patched {} ops", changed),
-                            crate::core::tools::semantic_search::UpdateOutcome::FullRebuild {
+                            crate::core::tools::codebase_search::UpdateOutcome::FullRebuild {
                                 files,
                             } => format!("full rebuild, {} files", files),
                         };

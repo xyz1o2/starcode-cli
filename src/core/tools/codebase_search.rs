@@ -16,23 +16,23 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 /// StarCode 自己的状态目录 —— 索引它纯属噪声，且用户的 `.gitignore` 未必写了。
-const SEMANTIC_SEARCH_EXCLUDES: &[&str] = &[".star/"];
-const DEFAULT_SEMANTIC_SEARCH_MAX_FILES: usize = 1200;
-const DEFAULT_SEMANTIC_SEARCH_MAX_FILE_BYTES: u64 = 512 * 1024;
-const DEFAULT_SEMANTIC_SEARCH_MAX_TOTAL_BYTES: u64 = 12 * 1024 * 1024;
-const DEFAULT_SEMANTIC_SEARCH_TIMEOUT_MS: u64 = 12_000;
-const DEFAULT_AUTO_SEMANTIC_SEARCH_MAX_FILES: usize = 320;
-const DEFAULT_AUTO_SEMANTIC_SEARCH_MAX_FILE_BYTES: u64 = 256 * 1024;
-const DEFAULT_AUTO_SEMANTIC_SEARCH_MAX_TOTAL_BYTES: u64 = 4 * 1024 * 1024;
-const DEFAULT_AUTO_SEMANTIC_SEARCH_TIMEOUT_MS: u64 = 5_000;
-const SEMANTIC_SEARCH_PROGRESS_EVERY_FILES: usize = 120;
+const CODEBASE_SEARCH_EXCLUDES: &[&str] = &[".star/"];
+const DEFAULT_CODEBASE_SEARCH_MAX_FILES: usize = 1200;
+const DEFAULT_CODEBASE_SEARCH_MAX_FILE_BYTES: u64 = 512 * 1024;
+const DEFAULT_CODEBASE_SEARCH_MAX_TOTAL_BYTES: u64 = 12 * 1024 * 1024;
+const DEFAULT_CODEBASE_SEARCH_TIMEOUT_MS: u64 = 12_000;
+const DEFAULT_AUTO_CODEBASE_SEARCH_MAX_FILES: usize = 320;
+const DEFAULT_AUTO_CODEBASE_SEARCH_MAX_FILE_BYTES: u64 = 256 * 1024;
+const DEFAULT_AUTO_CODEBASE_SEARCH_MAX_TOTAL_BYTES: u64 = 4 * 1024 * 1024;
+const DEFAULT_AUTO_CODEBASE_SEARCH_TIMEOUT_MS: u64 = 5_000;
+const CODEBASE_SEARCH_PROGRESS_EVERY_FILES: usize = 120;
 
 /// 语义索引可纳入的**唯一权威**扩展名白名单。
 ///
 /// 以前这个口径在四处各写了一份（本文件、`chunking.rs`、`integration.rs`、
 /// `commands/mod.rs`），任何一处改动都会让"哪些文件进了索引"分叉。
 /// 全量构建与增量补丁都必须经过 [`is_indexable_ext`]，白名单不可能再分叉。
-pub const SEMANTIC_INDEXABLE_EXTS: &[&str] = &[
+pub const CODEBASE_INDEXABLE_EXTS: &[&str] = &[
     // tree-sitter 可解析
     "rs", "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "tsx", "go", "java", "c", "h", "cpp", "cc",
     "cxx", "hpp", "hxx", // 纯文本 / 配置（走 SmartChunker 启发式分层）
@@ -41,7 +41,7 @@ pub const SEMANTIC_INDEXABLE_EXTS: &[&str] = &[
 
 /// 该扩展名是否应进入语义索引（单一事实源）。
 pub fn is_indexable_ext(ext: &str) -> bool {
-    SEMANTIC_INDEXABLE_EXTS.contains(&ext)
+    CODEBASE_INDEXABLE_EXTS.contains(&ext)
 }
 
 #[derive(Clone)]
@@ -70,27 +70,27 @@ impl CodebaseSearchTool {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct SemanticSearchParams {
+pub struct CodebaseSearchParams {
     pub query: String,
     pub path: Option<String>,
     #[serde(default)]
     pub budget_profile: Option<String>,
 }
 
-pub struct SemanticSearchInvocation {
+pub struct CodebaseSearchInvocation {
     tool: CodebaseSearchTool,
-    params: SemanticSearchParams,
+    params: CodebaseSearchParams,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct SemanticSearchLimits {
+pub struct CodebaseSearchLimits {
     pub max_files: usize,
     pub max_file_bytes: u64,
     pub max_total_bytes: u64,
     pub timeout_ms: u64,
 }
 
-impl SemanticSearchLimits {
+impl CodebaseSearchLimits {
     /// A compact key for cache lookups, encoding the budget profile.
     pub fn cache_key(&self) -> String {
         format!(
@@ -101,7 +101,7 @@ impl SemanticSearchLimits {
 }
 
 #[derive(Default)]
-struct SemanticSearchStats {
+struct IndexStats {
     indexed_files: usize,
     scanned_text_files: usize,
     skipped_large_files: usize,
@@ -164,7 +164,7 @@ fn admit_file(
     used_files: usize,
     used_bytes: u64,
     replaced_bytes: u64,
-    limits: SemanticSearchLimits,
+    limits: CodebaseSearchLimits,
 ) -> Admission {
     let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
         return Admission::SkipExt;
@@ -191,11 +191,11 @@ fn admit_file(
 /// stop the rest of the batch — partial results are always returned.
 fn build_search_engine_from_fs(
     root: &Path,
-    limits: SemanticSearchLimits,
+    limits: CodebaseSearchLimits,
     update_output: &Option<ProgressCallback>,
-) -> Result<(SearchEngine, SemanticSearchStats), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(SearchEngine, IndexStats), Box<dyn std::error::Error + Send + Sync>> {
     let mut engine = SearchEngine::new();
-    let mut stats = SemanticSearchStats::default();
+    let mut stats = IndexStats::default();
     let mut last_progress_indexed = 0usize;
     let mut file_errors: Vec<FileIndexError> = Vec::new();
 
@@ -203,9 +203,9 @@ fn build_search_engine_from_fs(
     // `.starignore`、`~/.star/ignore` 都生效，dotfile 可见。以前只有
     // `hidden(true) + git_ignore(true)`，没有 `require_git(false)` —— worktree
     // 和还没 `git init` 的项目里 `.gitignore` 直接失效。
-    let walker = crate::utils::file_walk::walk(root, &semantic_walk_options());
+    let walker = crate::utils::file_walk::walk(root, &walk_options());
 
-    emit_semantic_progress(
+    emit_progress(
         update_output,
         format!("Indexing codebase · root {}", root.display()),
     );
@@ -213,7 +213,7 @@ fn build_search_engine_from_fs(
     for result in walker {
         if stats.indexed_files >= limits.max_files || stats.total_bytes >= limits.max_total_bytes {
             stats.truncated = true;
-            emit_semantic_progress(
+            emit_progress(
                 update_output,
                 format!(
                     "Reached scan budget · {} indexed files · {:.1} MB",
@@ -262,7 +262,7 @@ fn build_search_engine_from_fs(
                     }
                     Admission::SkipBudget => {
                         stats.truncated = true;
-                        emit_semantic_progress(
+                        emit_progress(
                             update_output,
                             format!(
                                 "Reached scan budget · {} indexed files · {:.1} MB",
@@ -291,12 +291,12 @@ fn build_search_engine_from_fs(
 
                                 if stats.indexed_files == 1
                                     || stats.indexed_files.saturating_sub(last_progress_indexed)
-                                        >= SEMANTIC_SEARCH_PROGRESS_EVERY_FILES
+                                        >= CODEBASE_SEARCH_PROGRESS_EVERY_FILES
                                 {
                                     last_progress_indexed = stats.indexed_files;
-                                    emit_semantic_progress(
+                                    emit_progress(
                                         update_output,
-                                        format_semantic_progress(&stats),
+                                        format_progress(&stats),
                                     );
                                 }
                             } else {
@@ -314,7 +314,7 @@ fn build_search_engine_from_fs(
                 }
             }
             Err(err) => {
-                emit_semantic_progress(update_output, format!("Walk error (non-fatal): {}", err));
+                emit_progress(update_output, format!("Walk error (non-fatal): {}", err));
             }
         }
     }
@@ -330,7 +330,7 @@ fn build_search_engine_from_fs(
         if total_errs > 5 {
             msg.push_str(&format!("\n  ... and {} more", total_errs - 5));
         }
-        emit_semantic_progress(update_output, msg);
+        emit_progress(update_output, msg);
     }
 
     Ok((engine, stats))
@@ -405,51 +405,51 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-fn semantic_search_limits() -> SemanticSearchLimits {
-    semantic_search_limits_for_profile(None)
+fn codebase_search_limits() -> CodebaseSearchLimits {
+    codebase_search_limits_for_profile(None)
 }
 
-fn semantic_search_limits_for_profile(profile: Option<&str>) -> SemanticSearchLimits {
+fn codebase_search_limits_for_profile(profile: Option<&str>) -> CodebaseSearchLimits {
     let normalized = profile.map(|value| value.trim().to_ascii_lowercase());
     let is_auto_budget = matches!(normalized.as_deref(), Some("auto" | "fast" | "quick"));
 
     if is_auto_budget {
-        return SemanticSearchLimits {
+        return CodebaseSearchLimits {
             max_files: env_usize(
-                "STAR_AUTO_SEMANTIC_SEARCH_MAX_FILES",
-                DEFAULT_AUTO_SEMANTIC_SEARCH_MAX_FILES,
+                "STAR_AUTO_CODEBASE_SEARCH_MAX_FILES",
+                DEFAULT_AUTO_CODEBASE_SEARCH_MAX_FILES,
             ),
             max_file_bytes: env_u64(
-                "STAR_AUTO_SEMANTIC_SEARCH_MAX_FILE_BYTES",
-                DEFAULT_AUTO_SEMANTIC_SEARCH_MAX_FILE_BYTES,
+                "STAR_AUTO_CODEBASE_SEARCH_MAX_FILE_BYTES",
+                DEFAULT_AUTO_CODEBASE_SEARCH_MAX_FILE_BYTES,
             ),
             max_total_bytes: env_u64(
-                "STAR_AUTO_SEMANTIC_SEARCH_MAX_TOTAL_BYTES",
-                DEFAULT_AUTO_SEMANTIC_SEARCH_MAX_TOTAL_BYTES,
+                "STAR_AUTO_CODEBASE_SEARCH_MAX_TOTAL_BYTES",
+                DEFAULT_AUTO_CODEBASE_SEARCH_MAX_TOTAL_BYTES,
             ),
             timeout_ms: env_u64(
-                "STAR_AUTO_SEMANTIC_SEARCH_TIMEOUT_MS",
-                DEFAULT_AUTO_SEMANTIC_SEARCH_TIMEOUT_MS,
+                "STAR_AUTO_CODEBASE_SEARCH_TIMEOUT_MS",
+                DEFAULT_AUTO_CODEBASE_SEARCH_TIMEOUT_MS,
             ),
         };
     }
 
-    SemanticSearchLimits {
+    CodebaseSearchLimits {
         max_files: env_usize(
-            "STAR_SEMANTIC_SEARCH_MAX_FILES",
-            DEFAULT_SEMANTIC_SEARCH_MAX_FILES,
+            "STAR_CODEBASE_SEARCH_MAX_FILES",
+            DEFAULT_CODEBASE_SEARCH_MAX_FILES,
         ),
         max_file_bytes: env_u64(
-            "STAR_SEMANTIC_SEARCH_MAX_FILE_BYTES",
-            DEFAULT_SEMANTIC_SEARCH_MAX_FILE_BYTES,
+            "STAR_CODEBASE_SEARCH_MAX_FILE_BYTES",
+            DEFAULT_CODEBASE_SEARCH_MAX_FILE_BYTES,
         ),
         max_total_bytes: env_u64(
-            "STAR_SEMANTIC_SEARCH_MAX_TOTAL_BYTES",
-            DEFAULT_SEMANTIC_SEARCH_MAX_TOTAL_BYTES,
+            "STAR_CODEBASE_SEARCH_MAX_TOTAL_BYTES",
+            DEFAULT_CODEBASE_SEARCH_MAX_TOTAL_BYTES,
         ),
         timeout_ms: env_u64(
-            "STAR_SEMANTIC_SEARCH_TIMEOUT_MS",
-            DEFAULT_SEMANTIC_SEARCH_TIMEOUT_MS,
+            "STAR_CODEBASE_SEARCH_TIMEOUT_MS",
+            DEFAULT_CODEBASE_SEARCH_TIMEOUT_MS,
         ),
     }
 }
@@ -459,19 +459,19 @@ fn semantic_search_limits_for_profile(profile: Option<&str>) -> SemanticSearchLi
 /// 硬编码黑名单原来有 13 个目录名（`build`、`dist`、`target`、`node_modules`
 /// …），按**文件名**匹配，所以 `src/build/` 这种正常源码目录也会被整棵剪掉。
 /// 那些目录本来就在 `.gitignore` 里，交给 ignore 文件即可；只有
-/// [`SEMANTIC_SEARCH_EXCLUDES`] 里的 agent 自身状态目录需要显式排除。
-fn semantic_walk_options() -> crate::utils::file_walk::WalkOptions {
-    crate::utils::file_walk::WalkOptions::new().exclude(SEMANTIC_SEARCH_EXCLUDES.iter().copied())
+/// [`CODEBASE_SEARCH_EXCLUDES`] 里的 agent 自身状态目录需要显式排除。
+fn walk_options() -> crate::utils::file_walk::WalkOptions {
+    crate::utils::file_walk::WalkOptions::new().exclude(CODEBASE_SEARCH_EXCLUDES.iter().copied())
 }
 
-async fn run_semantic_search(
+async fn run_codebase_search(
     root_path: PathBuf,
     query: String,
     budget_profile: Option<String>,
     update_output: Option<ProgressCallback>,
     cache: Option<Arc<SearchEngineCacheManager>>,
 ) -> String {
-    let limits = semantic_search_limits_for_profile(budget_profile.as_deref());
+    let limits = codebase_search_limits_for_profile(budget_profile.as_deref());
     let budget_label = match budget_profile
         .as_deref()
         .map(|value| value.trim().to_ascii_lowercase())
@@ -480,7 +480,7 @@ async fn run_semantic_search(
         Some("auto" | "fast" | "quick") => "fast budget",
         _ => "default budget",
     };
-    emit_semantic_progress(
+    emit_progress(
         &update_output,
         format!(
             "Preparing semantic search · {} · {} · max {} files · {}s timeout",
@@ -515,7 +515,7 @@ async fn run_semantic_search(
             match result {
                 Ok(Ok(res)) => return res,
                 Ok(Err(e)) => {
-                    emit_semantic_progress(
+                    emit_progress(
                         &update_output,
                         "Semantic search failed · falling back to text search",
                     );
@@ -523,7 +523,7 @@ async fn run_semantic_search(
                     return format!("Semantic search error: {}\n\n{}", e, fallback);
                 }
                 Err(e) => {
-                    emit_semantic_progress(
+                    emit_progress(
                         &update_output,
                         "Semantic search worker crashed · falling back to text search",
                     );
@@ -533,7 +533,7 @@ async fn run_semantic_search(
             }
         }
         _ = &mut sleep => {
-            emit_semantic_progress(
+            emit_progress(
                 &update_output,
                 "Semantic search timed out · falling back to text search",
             );
@@ -546,11 +546,11 @@ async fn run_semantic_search(
     };
 }
 
-pub async fn run_semantic_search_for_skill(root_path: std::path::PathBuf, query: String) -> String {
-    run_semantic_search(root_path, query, None, None, None).await
+pub async fn run_codebase_search_for_skill(root_path: std::path::PathBuf, query: String) -> String {
+    run_codebase_search(root_path, query, None, None, None).await
 }
 
-impl ToolInvocation for SemanticSearchInvocation {
+impl ToolInvocation for CodebaseSearchInvocation {
     fn get_description(&self) -> String {
         format!("Semantic Search: {}", self.params.query)
     }
@@ -576,10 +576,10 @@ impl ToolInvocation for SemanticSearchInvocation {
         let cache = self.tool.search_cache.clone();
 
         Box::pin(async move {
-            let root_path = resolve_semantic_search_root(&self.tool.config, path.as_deref());
+            let root_path = resolve_codebase_search_root(&self.tool.config, path.as_deref());
 
             let results =
-                run_semantic_search(root_path, query, budget_profile, update_output, cache).await;
+                run_codebase_search(root_path, query, budget_profile, update_output, cache).await;
 
             Ok(CoreToolResult {
                 llm_content: Some(results.clone()),
@@ -634,8 +634,8 @@ impl BaseDeclarativeTool for CodebaseSearchTool {
         &self,
         params: serde_json::Value,
     ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
-        let params: SemanticSearchParams = serde_json::from_value(params)?;
-        Ok(Box::new(SemanticSearchInvocation {
+        let params: CodebaseSearchParams = serde_json::from_value(params)?;
+        Ok(Box::new(CodebaseSearchInvocation {
             tool: self.clone(),
             params,
         }))
@@ -651,7 +651,7 @@ pub fn search_codebase(
     query: &str,
     update_output: Option<ProgressCallback>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    search_codebase_with_limits(root, query, update_output, semantic_search_limits(), None)
+    search_codebase_with_limits(root, query, update_output, codebase_search_limits(), None)
 }
 
 /// 后台重建引擎并写入缓存（watcher 协调器的 worker 线程调用）。
@@ -661,7 +661,7 @@ pub fn build_engine_into_cache(
     cache: &Arc<SearchEngineCacheManager>,
     update_output: Option<ProgressCallback>,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    let limits = semantic_search_limits();
+    let limits = codebase_search_limits();
     let (engine, stats) = build_search_engine_from_fs(root, limits, &update_output)?;
     let key = (
         root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
@@ -722,7 +722,7 @@ fn should_full_rebuild(indexable_changed: usize, doc_count: usize) -> bool {
 fn plan_patch_ops(
     root: &Path,
     index_result: &crate::core::context::indexer::IndexResult,
-    limits: SemanticSearchLimits,
+    limits: CodebaseSearchLimits,
 ) -> Vec<PatchOp> {
     let mut ops =
         Vec::with_capacity(index_result.new_blobs.len() + index_result.removed_blobs.len());
@@ -800,7 +800,7 @@ fn plan_patch_ops(
 fn apply_patch_ops(
     engine: &mut SearchEngine,
     ops: &[PatchOp],
-    limits: SemanticSearchLimits,
+    limits: CodebaseSearchLimits,
 ) -> bool {
     // 1. 先把移除全部做完，并**重算**已用字节 —— 移除释放的预算必须先回到池子里，
     //    否则重命名（删 5 MB 加 5 MB）会因为峰值而误判超限。
@@ -884,20 +884,20 @@ pub fn update_engine_in_cache(
         root,
         cache,
         index_result,
-        semantic_search_limits(),
+        codebase_search_limits(),
         update_output,
     )
 }
 
 /// 与 [`update_engine_in_cache`] 相同，但显式传入 limits。
 ///
-/// 测试必须用这个版本：`semantic_search_limits()` 读进程级环境变量，
+/// 测试必须用这个版本：`default_limits()` 读进程级环境变量，
 /// 而 Rust 测试并行跑，改 env 的测试会 flaky。
 pub fn update_engine_in_cache_with_limits(
     root: &Path,
     cache: &Arc<SearchEngineCacheManager>,
     index_result: &crate::core::context::indexer::IndexResult,
-    limits: SemanticSearchLimits,
+    limits: CodebaseSearchLimits,
     update_output: Option<ProgressCallback>,
 ) -> Result<UpdateOutcome, Box<dyn std::error::Error + Send + Sync>> {
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
@@ -960,7 +960,7 @@ pub fn update_engine_in_cache_with_limits(
         })
         .count();
     if should_full_rebuild(indexable_changed, meta.doc_count) {
-        emit_semantic_progress(
+        emit_progress(
             &update_output,
             format!(
                 "Incremental patch skipped · {} of {} docs changed · rebuilding",
@@ -993,7 +993,7 @@ pub fn update_engine_in_cache_with_limits(
     match outcome {
         crate::core::context::search_cache::PatchOutcome::Applied => {
             if budget_exceeded {
-                emit_semantic_progress(
+                emit_progress(
                     &update_output,
                     "Incremental patch hit the budget ceiling · rebuilding from scratch",
                 );
@@ -1006,7 +1006,7 @@ pub fn update_engine_in_cache_with_limits(
         // 都不构成"失败"，回退全量即可。
         crate::core::context::search_cache::PatchOutcome::Missing
         | crate::core::context::search_cache::PatchOutcome::Stale => {
-            emit_semantic_progress(
+            emit_progress(
                 &update_output,
                 "Patch base unavailable (evicted or superseded) · rebuilding from scratch",
             );
@@ -1034,11 +1034,11 @@ enum EngineSource {
 /// 协调器不可用（未启动/上次后台重建失败）时回退旧的同步构建路径。
 fn resolve_engine(
     root: &Path,
-    limits: SemanticSearchLimits,
+    limits: CodebaseSearchLimits,
     update_output: &Option<ProgressCallback>,
     cache: Option<&Arc<SearchEngineCacheManager>>,
 ) -> Result<
-    (SearchEngine, SemanticSearchStats, EngineSource),
+    (SearchEngine, IndexStats, EngineSource),
     Box<dyn std::error::Error + Send + Sync>,
 > {
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
@@ -1047,14 +1047,14 @@ fn resolve_engine(
 
     if let Some(manager) = cache {
         if let Some(engine) = manager.get_engine(&cache_key, current_mtime) {
-            return Ok((engine, SemanticSearchStats::default(), EngineSource::Fresh));
+            return Ok((engine, IndexStats::default(), EngineSource::Fresh));
         }
 
         if let Some((stale_engine, _)) = manager.get_engine_stale(&cache_key) {
             crate::core::context::watcher::request_refresh(root);
             return Ok((
                 stale_engine,
-                SemanticSearchStats::default(),
+                IndexStats::default(),
                 EngineSource::Stale,
             ));
         }
@@ -1065,7 +1065,7 @@ fn resolve_engine(
             crate::core::context::watcher::request_refresh(root);
             return Ok((
                 SearchEngine::new(),
-                SemanticSearchStats::default(),
+                IndexStats::default(),
                 EngineSource::Warming,
             ));
         }
@@ -1090,7 +1090,7 @@ fn search_codebase_with_limits(
     root: &Path,
     query: &str,
     update_output: Option<ProgressCallback>,
-    limits: SemanticSearchLimits,
+    limits: CodebaseSearchLimits,
     cache: Option<&Arc<SearchEngineCacheManager>>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     // ── Query result cache ────────────────────────────────────────────────────
@@ -1101,7 +1101,7 @@ fn search_codebase_with_limits(
 
     if let Some(manager) = cache {
         if let Some(cached_output) = manager.get_query(&query_cache_key) {
-            emit_semantic_progress(&update_output, "Query cache hit · returning cached result");
+            emit_progress(&update_output, "Query cache hit · returning cached result");
             return Ok(cached_output);
         }
     }
@@ -1136,7 +1136,7 @@ fn search_codebase_with_limits(
     } else {
         "RRF hybrid search · expanded + exact strategies"
     };
-    emit_semantic_progress(&update_output, progress_msg);
+    emit_progress(&update_output, progress_msg);
 
     // Strategy A: full expansion, no diversity (preserves raw scores for RRF)
     let expanded_results = engine.search_with_options(
@@ -1260,7 +1260,7 @@ fn search_codebase_with_limits(
     Ok(output)
 }
 
-fn emit_semantic_progress(update_output: &Option<ProgressCallback>, message: impl Into<String>) {
+fn emit_progress(update_output: &Option<ProgressCallback>, message: impl Into<String>) {
     if let Some(cb) = update_output.as_ref() {
         cb(message.into());
     }
@@ -1270,7 +1270,7 @@ fn bytes_to_mb(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
 
-fn format_semantic_progress(stats: &SemanticSearchStats) -> String {
+fn format_progress(stats: &IndexStats) -> String {
     let mut message = format!(
         "Indexing codebase · {} indexed / {} scanned · {:.1} MB",
         stats.indexed_files,
@@ -1285,7 +1285,7 @@ fn format_semantic_progress(stats: &SemanticSearchStats) -> String {
     message
 }
 
-fn resolve_semantic_search_root(
+fn resolve_codebase_search_root(
     config: &Arc<crate::core::config::Config>,
     path: Option<&str>,
 ) -> PathBuf {
@@ -1372,7 +1372,7 @@ pub fn build_call_graph(
     let mut file_symbols: Vec<FileSymbols> = Vec::new();
     let mut next_id: symbol::SymbolId = 0;
 
-    for result in crate::utils::file_walk::walk(root, &semantic_walk_options()) {
+    for result in crate::utils::file_walk::walk(root, &walk_options()) {
         let entry = match result {
             Ok(e) => e,
             Err(_) => continue,
@@ -1489,11 +1489,11 @@ mod tests {
 
     /// 测试用的显式预算。
     ///
-    /// **绝不能**用 `semantic_search_limits()` —— 它读进程级环境变量，而 Rust
+    /// **绝不能**用 `default_limits()` —— 它读进程级环境变量，而 Rust
     /// 测试并行跑，任何一个改 env 的测试都会让它 flaky。这正是拆出
     /// `update_engine_in_cache_with_limits` 的原因。
-    fn test_limits() -> SemanticSearchLimits {
-        SemanticSearchLimits {
+    fn test_limits() -> CodebaseSearchLimits {
+        CodebaseSearchLimits {
             max_files: 1_000,
             max_file_bytes: 512,
             max_total_bytes: 200_000,
@@ -1509,7 +1509,7 @@ mod tests {
         fs::write(path, content).unwrap();
     }
 
-    fn cache_key_for(root: &Path, limits: SemanticSearchLimits) -> (PathBuf, String) {
+    fn cache_key_for(root: &Path, limits: CodebaseSearchLimits) -> (PathBuf, String) {
         (
             root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
             limits.cache_key(),
@@ -1517,7 +1517,7 @@ mod tests {
     }
 
     /// 把"当前文件系统"的全量引擎放进缓存，模拟引擎已就绪的稳态。
-    fn seed_cache(root: &Path, limits: SemanticSearchLimits) -> Arc<SearchEngineCacheManager> {
+    fn seed_cache(root: &Path, limits: CodebaseSearchLimits) -> Arc<SearchEngineCacheManager> {
         let cache = Arc::new(SearchEngineCacheManager::new());
         let (engine, _) = build_search_engine_from_fs(root, limits, &None).expect("seed build");
         cache.put_engine(
@@ -1532,7 +1532,7 @@ mod tests {
 
     fn cached_engine(
         root: &Path,
-        limits: SemanticSearchLimits,
+        limits: CodebaseSearchLimits,
         cache: &SearchEngineCacheManager,
     ) -> SearchEngine {
         cache
@@ -1541,7 +1541,7 @@ mod tests {
             .0
     }
 
-    fn full_engine(root: &Path, limits: SemanticSearchLimits) -> SearchEngine {
+    fn full_engine(root: &Path, limits: CodebaseSearchLimits) -> SearchEngine {
         build_search_engine_from_fs(root, limits, &None)
             .expect("full rebuild")
             .0
@@ -1597,7 +1597,7 @@ mod tests {
     /// "已用 5 MB + 新增 5 MB 超上限"被拒 —— 语料压根没变大。
     #[test]
     fn admit_file_credits_bytes_that_the_rewrite_frees() {
-        let limits = SemanticSearchLimits {
+        let limits = CodebaseSearchLimits {
             max_total_bytes: 100,
             ..test_limits()
         };
@@ -1651,7 +1651,7 @@ mod tests {
     fn apply_patch_ops_removals_are_settled_before_budget_is_checked() {
         // 重命名的形状：删旧的 + 加新的，同批下发。
         // 若移除释放的预算没先回到池子里，峰值会让整个批次被误判超限。
-        let limits = SemanticSearchLimits {
+        let limits = CodebaseSearchLimits {
             max_total_bytes: 60,
             ..test_limits()
         };
@@ -1682,7 +1682,7 @@ mod tests {
 
     #[test]
     fn apply_patch_ops_reports_budget_exhaustion_instead_of_lying() {
-        let limits = SemanticSearchLimits {
+        let limits = CodebaseSearchLimits {
             max_total_bytes: 10,
             ..test_limits()
         };
@@ -2057,7 +2057,7 @@ mod tests {
         std::fs::write(root.join("a.rs"), "fn auth() {}").unwrap();
 
         let cache = Arc::new(SearchEngineCacheManager::new());
-        let limits = SemanticSearchLimits {
+        let limits = CodebaseSearchLimits {
             max_files: 100,
             max_file_bytes: 64 * 1024,
             max_total_bytes: 1024 * 1024,
@@ -2134,7 +2134,7 @@ mod tests {
         std::fs::write(root.join("a.rs"), "fn auth() {}").unwrap();
 
         let cache = Arc::new(SearchEngineCacheManager::new());
-        let limits = SemanticSearchLimits {
+        let limits = CodebaseSearchLimits {
             max_files: 100,
             max_file_bytes: 64 * 1024,
             max_total_bytes: 1024 * 1024,

@@ -2,7 +2,7 @@ use super::{SubAgent, SubTask, SubTaskResult};
 use crate::agent::StarAgent;
 use crate::core::config::Config;
 use crate::core::prompts::skills::navigator::NAVIGATOR_SYSTEM_PROMPT;
-use crate::core::tools::semantic_search::search_codebase;
+use crate::core::tools::codebase_search::search_codebase;
 use crate::core::utils::paths::resolve_tool_path;
 use crate::llm::client::StarClient;
 use async_trait::async_trait;

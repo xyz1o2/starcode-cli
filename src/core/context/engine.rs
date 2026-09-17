@@ -20,7 +20,7 @@ const PROJECT_CONTEXT_CACHE_SECS: u64 = 300; // 5分钟上下文缓存
 
 /// 后台索引默认开启：索引管线已改为免阻塞设计 ——
 /// (size,mtime) 增量跳过（`indexer.rs`）+ 低优先级 worker（`watcher.rs`）+
-/// serve-stale-while-rebuild 查询路径（`semantic_search.rs`），
+/// serve-stale-while-rebuild 查询路径（`codebase_search`），
 /// 启动与首任务不再被全量 IO 风暴拖慢。`STAR_CONTEXT_INDEX_BACKGROUND=0` 可关闭。
 fn background_indexing_enabled() -> bool {
     std::env::var("STAR_CONTEXT_INDEX_BACKGROUND")

@@ -15,7 +15,7 @@
 //!
 //! 输入是外部网页，我们控制不了，也没法靠预先清洗穷举所有畸形标签。所以这里
 //! 用 `catch_unwind` 兜住，抽取失败退化成 `None`，调用方各自走 html2text 兜底。
-//! 同样的做法在 `core::context::tree_sitter_chunker` 和 `core::tools::semantic_search`
+//! 同样的做法在 `core::context::tree_sitter_chunker` 和 `core::tools::codebase_search`
 //! 里已经用过一次了。
 //!
 //! # 顺带解决的两件事

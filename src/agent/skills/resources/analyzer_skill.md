@@ -8,7 +8,7 @@ allowed_tools:
   - read_many_files
   - grep
   - glob
-  - semantic_search
+  - codebase_search
   - project_map
 arguments:
   - name: target

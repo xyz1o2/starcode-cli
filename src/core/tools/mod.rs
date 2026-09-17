@@ -45,7 +45,7 @@ pub mod ripgrep;
 pub mod rtk;
 pub mod run_tests;
 pub mod schedule_wakeup;
-pub mod semantic_search;
+pub mod codebase_search;
 pub mod shell;
 pub mod skill;
 pub mod sleep;

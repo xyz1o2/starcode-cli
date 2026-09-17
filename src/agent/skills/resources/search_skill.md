@@ -6,7 +6,7 @@ allowed_tools:
   - search
   - grep
   - glob
-  - semantic_search
+  - codebase_search
   - Read
 arguments:
   - name: query

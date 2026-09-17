@@ -195,7 +195,7 @@ impl Agent {
 
             if let Some(tool_registry) = self.runtime_tool_registry() {
                 let cached_tool =
-                    crate::core::tools::semantic_search::CodebaseSearchTool::with_cache(
+                    crate::core::tools::codebase_search::CodebaseSearchTool::with_cache(
                         self.config.clone(),
                         self.context_engine.search_cache.clone(),
                     );

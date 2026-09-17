@@ -1,6 +1,6 @@
 // ── Search Engine Cache Manager ──────────────────────────────────────────────
 //
-// Replaces the global static Mutex caches that were in semantic_search.rs.
+// Replaces the global static Mutex caches that were in codebase_search.
 // Uses parking_lot::RwLock (no poisoning) + LRU eviction for bounded memory.
 //
 // Architecture decision: caches are owned by ContextEngine and passed to

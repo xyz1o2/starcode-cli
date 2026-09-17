@@ -14,7 +14,7 @@
 //   tools/call          — invoke a tool
 //   ping                — health check
 
-use crate::core::tools::semantic_search;
+use crate::core::tools::codebase_search;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -237,7 +237,7 @@ async fn handle_tool_call(
             let query = query.to_string();
             match tokio::task::spawn_blocking(move || {
                 let no_progress: Option<Arc<dyn Fn(String) + Send + Sync>> = None;
-                semantic_search::search_codebase(&root, &query, no_progress)
+                codebase_search::search_codebase(&root, &query, no_progress)
             })
             .await
             {
@@ -268,7 +268,7 @@ async fn handle_tool_call(
             let root = get_root_path(arguments);
             let name_hint = name_hint.to_string();
             match tokio::task::spawn_blocking(move || {
-                semantic_search::trace_call_chain(&root, &name_hint)
+                codebase_search::trace_call_chain(&root, &name_hint)
             })
             .await
             {

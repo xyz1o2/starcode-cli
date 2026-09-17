@@ -9,7 +9,7 @@ allowed_tools:
   - grep
   - glob
   - project_map
-  - semantic_search
+  - codebase_search
 arguments:
   - name: target
     description: Starting point for navigation

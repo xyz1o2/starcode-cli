@@ -2,7 +2,7 @@ use super::{SubAgent, SubTask, SubTaskResult};
 use crate::agent::StarAgent;
 use crate::core::config::Config;
 use crate::core::prompts::skills::explore::EXPLORE_SYSTEM_PROMPT;
-use crate::core::tools::semantic_search::run_semantic_search_for_skill;
+use crate::core::tools::codebase_search::run_codebase_search_for_skill;
 use crate::core::utils::paths::resolve_tool_path;
 use crate::llm::client::StarClient;
 use async_trait::async_trait;
@@ -63,7 +63,7 @@ impl ExploreAgent {
         let search_root_display = root_path.display().to_string();
 
         let mut broad_search_results =
-            run_semantic_search_for_skill(root_path.clone(), query.clone()).await;
+            run_codebase_search_for_skill(root_path.clone(), query.clone()).await;
         if let Some(note) = root_note {
             broad_search_results = format!("{}\n\n{}", note, broad_search_results);
         }

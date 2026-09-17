@@ -1,6 +1,6 @@
 pub mod client;
 
-use crate::core::tools::constants::LSP_TOOL_NAME;
+use crate::core::tools::constants::ToolName;
 use crate::core::tools::tools::{
     BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation, ToolResult,
 };
@@ -107,7 +107,7 @@ impl LspTool {
 #[async_trait]
 impl BaseDeclarativeTool for LspTool {
     fn name(&self) -> &str {
-        LSP_TOOL_NAME
+        ToolName::LSP.as_str()
     }
 
     fn display_name(&self) -> &str {
