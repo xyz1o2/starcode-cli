@@ -1,6 +1,6 @@
 <!--
 name: 'Tool Description: Grep'
-description: Content search built on ripgrep. Searches file contents by regex or literal, with glob include/exclude filters. Respects .gitignore/.starignore; dotfiles are searched, VCS metadata directories are not.
+description: Content search on ripgrep. Regex or literal, glob include/exclude filters. Respects .gitignore/.starignore; dotfiles searched, VCS dirs skipped.
 -->
 A powerful search tool built on ripgrep.
 

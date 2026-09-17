@@ -46,7 +46,7 @@ fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str
         m.insert("Grep", "grep");
         m.insert("Glob", "glob");
         m.insert("ListDir", "ls");
-        m.insert("SemanticSearch", "semantic_search");
+        m.insert("CodebaseSearch", "codebase_search");
         m.insert("ProjectMap", "projectmap");
         m.insert("tool_search", "toolsearch");
         m.insert("get_diagnostics", "getdiagnostics");

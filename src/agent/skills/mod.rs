@@ -16,9 +16,9 @@ pub mod analyzer;
 pub mod auto_fix;
 pub mod custom;
 pub mod editor;
+pub mod explore;
 pub mod loader;
 pub mod navigator;
-pub mod search;
 pub mod verify;
 
 use async_trait::async_trait;
@@ -30,8 +30,8 @@ pub use analyzer::AnalyzerAgent;
 pub use auto_fix::AutoFixAgent;
 pub use custom::register_custom_subagents;
 pub use editor::EditorAgent;
+pub use explore::ExploreAgent;
 pub use navigator::NavigatorAgent;
-pub use search::SearchAgent;
 
 /// 子任务定义
 #[derive(Debug, Clone, Serialize, Deserialize)]

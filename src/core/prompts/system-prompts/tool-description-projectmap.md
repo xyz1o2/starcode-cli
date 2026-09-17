@@ -4,7 +4,7 @@ description: Generate a flat codebase structure inventory (languages, key files,
 -->
 Generate a **flat inventory** of the project's structure: file counts by language, notable files, and the top-level directory layout.
 
-This is a statistical overview, **not** a dependency or call-graph analysis. It does not trace imports, module relationships, or entry points — for those use `SemanticSearch` (conceptual/flow questions) or `Read` on specific files.
+This is a statistical overview, **not** a dependency or call-graph analysis. It does not trace imports, module relationships, or entry points — for those use `CodebaseSearch` (conceptual/flow questions) or `Read` on specific files.
 
 **Output sections**:
 - Summary — scanned file count, depth, and limits reached
@@ -21,4 +21,4 @@ This is a statistical overview, **not** a dependency or call-graph analysis. It 
 - `max_files`: scan cap; raise it for large repos
 
 **Use for**: onboarding to an unfamiliar codebase, confirming a project's shape before diving in.
-**NOT for**: finding a specific file (`Glob`), reading content (`Read`), or understanding how modules depend on each other (`SemanticSearch`).
+**NOT for**: finding a specific file (`Glob`), reading content (`Read`), or understanding how modules depend on each other (`CodebaseSearch`).

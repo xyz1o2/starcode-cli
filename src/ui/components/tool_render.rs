@@ -778,14 +778,14 @@ fn render_rich_tool_content(
                     )));
                     return lines;
                 }
-                // SemanticSearch: 折叠态显示命中文件数 + 首个结果。
+                // CodebaseSearch: 折叠态显示命中文件数 + 首个结果。
                 // 输出头部是索引元数据（query/root/统计），直接预览前 8 行
                 // 会让用户看到一堆统计而看不到任何代码命中。
-                "SemanticSearch" => {
+                "CodebaseSearch" => {
                     // "File: <path>" 行即一个命中
                     let hits = text.lines().filter(|l| l.starts_with("File: ")).count();
                     lines.push(Line::from(vec![
-                        Span::raw("Semantic search · "),
+                        Span::raw("Codebase search · "),
                         Span::styled(
                             format!("{}", hits),
                             Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
@@ -1040,10 +1040,10 @@ mod tests {
         assert!(render_todo_checklist(&tc, 80, &theme()).is_empty());
     }
 
-    /// 回归：SemanticSearch 折叠态以前预览输出头部，那是索引元数据
+    /// 回归：CodebaseSearch 折叠态以前预览输出头部，那是索引元数据
     /// （query/root/统计行），真正的代码命中一行看不见。
     #[test]
-    fn semantic_search_collapsed_shows_hit_count_and_top_file() {
+    fn codebase_search_collapsed_shows_hit_count_and_top_file() {
         let output = concat!(
             "Semantic Search Results for 'auth flow' (Top 3)\n",
             "Root: /repo\n",
@@ -1060,7 +1060,7 @@ mod tests {
                 id: "c1".to_string(),
                 call_type: "function".to_string(),
                 function: crate::types::StarToolCallFunction {
-                    name: "SemanticSearch".to_string(),
+                    name: "CodebaseSearch".to_string(),
                     arguments: r#"{"query":"auth flow"}"#.to_string(),
                 },
             },

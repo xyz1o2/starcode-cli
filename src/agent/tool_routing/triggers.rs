@@ -8,7 +8,7 @@ pub(crate) enum AutoTriggerKind {
     /// 验证（最高优先级——编辑后立即检查）
     Verification = 10,
     /// 语义搜索（概念性查询，最通用）
-    SemanticSearch = 5,
+    CodebaseSearch = 5,
     /// JSON回退（已检测到行动意图但无工具调用）
     JsonFallback = 4,
     /// 编辑器技能（最后手段——用于编辑类任务）
@@ -37,7 +37,7 @@ pub(crate) fn select_best_auto_trigger(
     user_input: &str,
     current_content: &str,
     active_tools: &HashSet<String>,
-    semantic_search_attempted: bool,
+    codebase_search_attempted: bool,
     navigator_skill_attempted: bool,
     analyzer_skill_attempted: bool,
     editor_skill_attempted: bool,
@@ -55,15 +55,15 @@ pub(crate) fn select_best_auto_trigger(
     }
 
     // 语义搜索 — 概念性查询的通用最佳选择
-    if should_trigger_semantic_search(
+    if should_trigger_codebase_search(
         user_input,
         current_content,
         active_tools,
-        semantic_search_attempted,
+        codebase_search_attempted,
     ) {
-        let score = score_semantic_search_relevance(user_input, current_content);
+        let score = score_codebase_search_relevance(user_input, current_content);
         candidates.push(TriggerEval {
-            kind: AutoTriggerKind::SemanticSearch,
+            kind: AutoTriggerKind::CodebaseSearch,
             score,
             reason: "conceptual_query_detected",
         });
@@ -83,7 +83,7 @@ pub(crate) fn select_best_auto_trigger(
         user_input,
         current_content,
         active_tools,
-        semantic_search_attempted,
+        codebase_search_attempted,
         navigator_skill_attempted,
     ) {
         candidates.push(TriggerEval {
@@ -127,7 +127,7 @@ pub(crate) fn select_best_auto_trigger(
         user_input,
         current_content,
         active_tools,
-        semantic_search_attempted,
+        codebase_search_attempted,
         navigator_skill_attempted,
         editor_skill_attempted,
     ) {
@@ -145,7 +145,7 @@ pub(crate) fn select_best_auto_trigger(
 }
 
 /// 评估语义搜索的相关性分数（0-10）
-fn score_semantic_search_relevance(user_input: &str, current_content: &str) -> u32 {
+fn score_codebase_search_relevance(user_input: &str, current_content: &str) -> u32 {
     let lower = user_input.to_lowercase();
     let combined = format!("{} {}", lower, current_content.to_lowercase());
     let mut score = 5u32; // 基准分
@@ -190,38 +190,38 @@ fn score_semantic_search_relevance(user_input: &str, current_content: &str) -> u
 // ── 原触发器条件检查函数（供 select_best_auto_trigger 和旧代码复用）──
 
 /// 检查是否应该触发语义搜索
-fn should_trigger_semantic_search(
+fn should_trigger_codebase_search(
     user_input: &str,
     current_content: &str,
     active_tools: &HashSet<String>,
     already_attempted: bool,
 ) -> bool {
-    should_trigger_semantic_search_with_flag(
+    should_trigger_codebase_search_with_flag(
         user_input,
         current_content,
         active_tools,
         already_attempted,
-        auto_semantic_search_enabled(),
+        auto_codebase_search_enabled(),
     )
 }
 
-fn should_trigger_semantic_search_with_flag(
+fn should_trigger_codebase_search_with_flag(
     _user_input: &str,
     _current_content: &str,
     active_tools: &HashSet<String>,
     already_attempted: bool,
     auto_enabled: bool,
 ) -> bool {
-    auto_enabled && !already_attempted && active_tools.contains("SemanticSearch")
+    auto_enabled && !already_attempted && active_tools.contains("CodebaseSearch")
 }
 
 /// 检查是否应该预取语义搜索
-pub(crate) fn should_prefetch_semantic_search(
+pub(crate) fn should_prefetch_codebase_search(
     user_input: &str,
     active_tools: &HashSet<String>,
     history_len: usize,
 ) -> bool {
-    should_prefetch_semantic_search_with_flag(
+    should_prefetch_codebase_search_with_flag(
         user_input,
         active_tools,
         history_len,
@@ -229,13 +229,13 @@ pub(crate) fn should_prefetch_semantic_search(
     )
 }
 
-fn should_prefetch_semantic_search_with_flag(
+fn should_prefetch_codebase_search_with_flag(
     _user_input: &str,
     active_tools: &HashSet<String>,
     history_len: usize,
     prefetch_enabled: bool,
 ) -> bool {
-    prefetch_enabled && history_len == 0 && active_tools.contains("SemanticSearch")
+    prefetch_enabled && history_len == 0 && active_tools.contains("CodebaseSearch")
 }
 
 /// 检查是否应该预取项目地图
@@ -266,14 +266,14 @@ fn should_trigger_navigator_skill(
     user_input: &str,
     current_content: &str,
     active_tools: &HashSet<String>,
-    semantic_search_attempted: bool,
+    codebase_search_attempted: bool,
     already_attempted: bool,
 ) -> bool {
     should_trigger_navigator_skill_with_flag(
         user_input,
         current_content,
         active_tools,
-        semantic_search_attempted,
+        codebase_search_attempted,
         already_attempted,
         auto_skill_fallbacks_enabled(),
     )
@@ -283,13 +283,13 @@ fn should_trigger_navigator_skill_with_flag(
     _user_input: &str,
     _current_content: &str,
     active_tools: &HashSet<String>,
-    semantic_search_attempted: bool,
+    codebase_search_attempted: bool,
     already_attempted: bool,
     auto_enabled: bool,
 ) -> bool {
     auto_enabled
         && !already_attempted
-        && semantic_search_attempted
+        && codebase_search_attempted
         && active_tools.contains("skill")
 }
 
@@ -353,7 +353,7 @@ fn should_trigger_editor_skill(
     user_input: &str,
     current_content: &str,
     active_tools: &HashSet<String>,
-    semantic_search_attempted: bool,
+    codebase_search_attempted: bool,
     navigator_skill_attempted: bool,
     already_attempted: bool,
 ) -> bool {
@@ -361,7 +361,7 @@ fn should_trigger_editor_skill(
         user_input,
         current_content,
         active_tools,
-        semantic_search_attempted,
+        codebase_search_attempted,
         navigator_skill_attempted,
         already_attempted,
         auto_skill_fallbacks_enabled(),
@@ -372,14 +372,14 @@ fn should_trigger_editor_skill_with_flag(
     _user_input: &str,
     _current_content: &str,
     active_tools: &HashSet<String>,
-    semantic_search_attempted: bool,
+    codebase_search_attempted: bool,
     navigator_skill_attempted: bool,
     already_attempted: bool,
     auto_enabled: bool,
 ) -> bool {
     auto_enabled
         && !already_attempted
-        && semantic_search_attempted
+        && codebase_search_attempted
         && navigator_skill_attempted
         && active_tools.contains("skill")
 }
@@ -395,7 +395,7 @@ pub(crate) fn dynamic_context_first_turn_enabled() -> bool {
 }
 
 /// 检查是否启用自动语义搜索
-fn auto_semantic_search_enabled() -> bool {
+fn auto_codebase_search_enabled() -> bool {
     bool_env_flag("STAR_ENABLE_AUTO_SEMANTIC_SEARCH", false)
 }
 

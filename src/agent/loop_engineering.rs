@@ -943,7 +943,7 @@ fn suggest_alternative_tool(tool_name: &str) -> Option<String> {
         "Write" | "create_file" => Some("Edit".to_string()),
         "Read" | "view_file" => Some("Grep".to_string()),
         "Grep" => Some("Glob".to_string()),
-        "SemanticSearch" => Some("Grep".to_string()),
+        "CodebaseSearch" => Some("Grep".to_string()),
         "multi_edit" => Some("Edit".to_string()),
         _ => None,
     }

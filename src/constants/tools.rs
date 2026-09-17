@@ -15,7 +15,7 @@ pub const TOOL_POWERSHELL: &str = "PowerShell";
 pub const TOOL_SHELL: &str = "Shell";
 
 /// 搜索工具
-pub const TOOL_SEMANTIC_SEARCH: &str = "SemanticSearch";
+pub const TOOL_CODEBASE_SEARCH: &str = "CodebaseSearch";
 pub const TOOL_PROJECT_MAP: &str = "ProjectMap";
 pub const TOOL_RIPGREP: &str = "Ripgrep";
 

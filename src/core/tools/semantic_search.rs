@@ -45,12 +45,12 @@ pub fn is_indexable_ext(ext: &str) -> bool {
 }
 
 #[derive(Clone)]
-pub struct SemanticSearchTool {
+pub struct CodebaseSearchTool {
     config: Arc<crate::core::config::Config>,
     search_cache: Option<Arc<SearchEngineCacheManager>>,
 }
 
-impl SemanticSearchTool {
+impl CodebaseSearchTool {
     pub fn new(config: Arc<crate::core::config::Config>) -> Self {
         Self {
             config,
@@ -78,7 +78,7 @@ pub struct SemanticSearchParams {
 }
 
 pub struct SemanticSearchInvocation {
-    tool: SemanticSearchTool,
+    tool: CodebaseSearchTool,
     params: SemanticSearchParams,
 }
 
@@ -592,17 +592,17 @@ impl ToolInvocation for SemanticSearchInvocation {
     }
 }
 
-impl BaseDeclarativeTool for SemanticSearchTool {
+impl BaseDeclarativeTool for CodebaseSearchTool {
     fn name(&self) -> &str {
-        "SemanticSearch"
+        "CodebaseSearch"
     }
 
     fn display_name(&self) -> &str {
-        "Semantic Search"
+        "Codebase Search"
     }
 
     fn description(&self) -> &str {
-        "ACE-POWERED Semantic Search. PRIMARY tool for conceptual/functional queries (architecture, flow, ownership, tests, config, permissions, providers, UI). Returns ranked code context with match signals."
+        "ACE-POWERED codebase search. PRIMARY tool for conceptual/functional queries (architecture, flow, ownership, tests, config, permissions, providers, UI). Returns ranked code context with match signals."
     }
 
     fn kind(&self) -> Kind {
@@ -902,16 +902,20 @@ pub fn update_engine_in_cache_with_limits(
 ) -> Result<UpdateOutcome, Box<dyn std::error::Error + Send + Sync>> {
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let key = (canonical_root, limits.cache_key());
-    let current_mtime = index_mtime(root);
 
     let full_rebuild = |update_output: &Option<ProgressCallback>|
      -> Result<UpdateOutcome, Box<dyn std::error::Error + Send + Sync>> {
         let (engine, stats) = build_search_engine_from_fs(root, limits, update_output)?;
+        // mtime 必须在写盘**之后**读：build 链路里的 index_project() 会写
+        // .star/context/index.json，令牌早于写盘读取就会过期，下一次
+        // resolve_engine 的 get_engine 比对必然失败 —— 引擎明明构建完了，
+        // 查询却永远命中 Warming/Stale，用户看到的就是"一直在构建"。
+        let stored_mtime = index_mtime(root);
         cache.put_engine(
             key.clone(),
             CachedSearchEngine {
                 engine,
-                index_mtime: current_mtime,
+                index_mtime: stored_mtime,
             },
         );
         Ok(UpdateOutcome::FullRebuild {
@@ -967,17 +971,20 @@ pub fn update_engine_in_cache_with_limits(
     }
 
     // ── 分块（锁外）→ 补丁（锁内） ───────────────────────────────────────────
+    // mtime 令牌必须在 index_project() 写盘**之后**读取，否则存进缓存的
+    // 是旧令牌，下次查询的 get_engine 比对必然失败（"一直在构建"的根因）。
+    let stored_mtime = index_mtime(root);
     let ops = plan_patch_ops(root, index_result, limits);
     if ops.is_empty() {
         // 变更文件全是不可索引类型 —— 但**仍然要把 mtime 盖上**，
         // 否则 get_engine 永不命中，每轮查询都触发一次刷新，形成死循环。
         // 这正是 patch_engine 里"Applied 时无条件盖 mtime"那条注释的由来。
-        let _ = cache.patch_engine(&key, meta.index_mtime, current_mtime, |_| false);
+        let _ = cache.patch_engine(&key, meta.index_mtime, stored_mtime, |_| false);
         return Ok(UpdateOutcome::Patched { changed: 0 });
     }
 
     let mut budget_exceeded = false;
-    let outcome = cache.patch_engine(&key, meta.index_mtime, current_mtime, |engine| {
+    let outcome = cache.patch_engine(&key, meta.index_mtime, stored_mtime, |engine| {
         let ok = apply_patch_ops(engine, &ops, limits);
         budget_exceeded = !ok;
         true
@@ -1009,6 +1016,7 @@ pub fn update_engine_in_cache_with_limits(
 }
 
 /// 引擎来源：决定查询结果的标注与兜底策略。
+#[derive(Debug)]
 enum EngineSource {
     /// 缓存命中且 mtime 匹配
     Fresh,
@@ -1107,7 +1115,7 @@ fn search_codebase_with_limits(
             "Semantic index is building in the background for '{}' (first build; typically finishes in seconds).\n",
             root.display()
         ));
-        output.push_str("No results available from the semantic index this turn. For exact symbols/strings use `Grep` now; re-run `SemanticSearch` shortly for conceptual queries.\n");
+        output.push_str("No results available from the semantic index this turn. For exact symbols/strings use `Grep` now; re-run `CodebaseSearch` shortly for conceptual queries.\n");
         return Ok(output);
     }
 
@@ -2035,5 +2043,141 @@ mod tests {
             .expect("must not error");
 
         assert!(matches!(outcome, UpdateOutcome::FullRebuild { .. }));
+    }
+
+    /// 回归"一直在构建"：后台重建完成后，下一次查询必须命中 Fresh。
+    ///
+    /// 链路是 resolve_engine（缓存空 → Warming/同步构建）→ 后台 worker 调
+    /// update_engine_in_cache 存引擎 → 下次 resolve_engine 的 get_engine
+    /// 比对 mtime。若存入的 mtime 与后续读到的对不上，会永远 Warming。
+    #[test]
+    fn engine_fresh_after_background_rebuild() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        std::fs::write(root.join("a.rs"), "fn auth() {}").unwrap();
+
+        let cache = Arc::new(SearchEngineCacheManager::new());
+        let limits = SemanticSearchLimits {
+            max_files: 100,
+            max_file_bytes: 64 * 1024,
+            max_total_bytes: 1024 * 1024,
+            timeout_ms: 5_000,
+        };
+
+        // 冷启动：缓存空，resolve_engine 必然构建一次（测试里 watcher 未启动，
+        // 走同步分支；真实会话里走 Warming 分支，两者随后都依赖同一条
+        // "重建→存引擎→下次命中"路径）。
+        let (_, _, src1) = resolve_engine(root, limits, &None, Some(&cache)).unwrap();
+        assert!(
+            matches!(src1, EngineSource::Fresh | EngineSource::Warming),
+            "cold start should build or warm, got {src1:?}"
+        );
+
+        // 后台 worker 的核心动作：indexer 增量重建并更新缓存引擎。
+        let indexer = crate::core::context::indexer::Indexer::new(root);
+        let idx = indexer.index_project().unwrap();
+        let outcome = update_engine_in_cache_with_limits(root, &cache, &idx, limits, None);
+        assert!(outcome.is_ok(), "engine update failed: {:?}", outcome.err());
+
+        // 关键断言：此后无文件变更，查询必须稳定命中 Fresh。
+        for i in 0..3 {
+            let (eng, _, src) = resolve_engine(root, limits, &None, Some(&cache)).unwrap();
+            assert!(
+                matches!(src, EngineSource::Fresh),
+                "query #{} after rebuild should be Fresh, got {src:?}",
+                i + 1
+            );
+            assert!(eng.doc_count() > 0, "engine should not be empty after rebuild");
+        }
+    }
+
+    /// 文件未变更时，indexer 不该重复写盘 —— 否则 index.json 的 mtime
+    /// 每轮都变，get_engine 的 mtime 比对永远失效，陷入"一直构建"。
+    #[test]
+    fn stable_index_does_not_rewrite_index_json() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        std::fs::write(root.join("a.rs"), "fn auth() {}").unwrap();
+
+        let indexer = crate::core::context::indexer::Indexer::new(root);
+        indexer.index_project().unwrap();
+
+        let m1 = std::fs::metadata(root.join(".star/context/index.json"))
+            .and_then(|m| m.modified())
+            .expect("index.json must exist after first index");
+
+        // 无任何文件变更，再跑一轮：不应写盘。
+        indexer.index_project().unwrap();
+
+        let m2 = std::fs::metadata(root.join(".star/context/index.json"))
+            .and_then(|m| m.modified())
+            .expect("index.json must still exist");
+
+        assert_eq!(
+            m1, m2,
+            "index.json was rewritten despite no changes — mtime churn breaks engine cache hits"
+        );
+    }
+
+
+    /// 回归"一直在构建"：update_engine_in_cache_with_limits 存入缓存的
+    /// mtime 令牌必须等于**写盘之后**的 index.json mtime。
+    ///
+    /// 以前令牌在函数开头读取，而 full_rebuild 内部的 index_project() 会写
+    /// .star/context/index.json —— 存入的是旧令牌，下次 resolve_engine 的
+    /// get_engine 比对必然失败，查询永远命中 Warming/Stale。用户看到的
+    /// 就是"索引一直在构建"。
+    #[test]
+    fn stored_mtime_matches_post_write_index_json() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        std::fs::write(root.join("a.rs"), "fn auth() {}").unwrap();
+
+        let cache = Arc::new(SearchEngineCacheManager::new());
+        let limits = SemanticSearchLimits {
+            max_files: 100,
+            max_file_bytes: 64 * 1024,
+            max_total_bytes: 1024 * 1024,
+            timeout_ms: 5_000,
+        };
+
+        // 让 index_project 先写一次盘（模拟 indexer 已跑过一轮）。
+        let indexer = crate::core::context::indexer::Indexer::new(root);
+        indexer.index_project().unwrap();
+        let mtime_after_first_write =
+            std::fs::metadata(root.join(".star/context/index.json"))
+                .and_then(|m| m.modified())
+                .expect("index.json must exist");
+
+        // 再跑一次（无变更，但可能仍写盘），随后更新引擎缓存。
+        let idx = indexer.index_project().unwrap();
+        update_engine_in_cache_with_limits(root, &cache, &idx, limits, None).unwrap();
+
+        let canonical = root.canonicalize().unwrap();
+        let key = (canonical, limits.cache_key());
+        let stored = cache.engine_meta(&key).expect("engine must be cached");
+
+        // 存入的令牌必须等于此刻磁盘上的真实 mtime —— 这正是下次查询
+        // resolve_engine 会读到的值。
+        let on_disk = std::fs::metadata(root.join(".star/context/index.json"))
+            .and_then(|m| m.modified())
+            .expect("index.json must still exist");
+
+        assert_eq!(
+            stored.index_mtime,
+            Some(on_disk),
+            "stored mtime token must match post-write index.json;\
+             stale token = {:?}, on disk = {:?}",
+            stored.index_mtime.unwrap_or(SystemTime::UNIX_EPOCH),
+            on_disk
+        );
+        let _ = mtime_after_first_write;
+
+        // 下次查询应当直接命中 Fresh。
+        let (_, _, src) = resolve_engine(root, limits, &None, Some(&cache)).unwrap();
+        assert!(
+            matches!(src, EngineSource::Fresh),
+            "query should be Fresh with a valid token, got {src:?}"
+        );
     }
 }

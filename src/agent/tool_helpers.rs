@@ -18,7 +18,7 @@ pub(crate) fn execute_single_tool_with_progress<'a>(
 
     let future = async move {
         let exec = tool_executor.execute_batch(vec![tool_call], Some(update_output), abort_signal);
-        // 兜底超时：防止工具（尤其 SemanticSearch/ProjectMap/Grep 等长运行工具）
+        // 兜底超时：防止工具（尤其 CodebaseSearch/ProjectMap/Grep 等长运行工具）
         // 内部挂起导致 emit_tool_finished 永不发出、UI 圆点永远闪烁。
         // 超时后返回带超时提示的 error result，调用方仍会 emit finished 停止闪烁。
         const TOOL_HARD_TIMEOUT_SECS: u64 = 600;

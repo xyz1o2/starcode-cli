@@ -1,7 +1,7 @@
 use super::{SubAgent, SubTask, SubTaskResult};
 use crate::agent::StarAgent;
 use crate::core::config::Config;
-use crate::core::prompts::skills::search::SEARCH_SYSTEM_PROMPT;
+use crate::core::prompts::skills::explore::EXPLORE_SYSTEM_PROMPT;
 use crate::core::tools::semantic_search::run_semantic_search_for_skill;
 use crate::core::utils::paths::resolve_tool_path;
 use crate::llm::client::StarClient;
@@ -10,19 +10,21 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub struct SearchAgent {
+pub struct ExploreAgent {
     id: String,
     client: StarClient,
     config: Arc<Config>,
 }
 
-impl SearchAgent {
+impl ExploreAgent {
     pub fn new(client: StarClient, config: Arc<Config>) -> Self {
         Self {
-            // 不能叫 "Grep"：那是真工具的注册名，而 agent_ids() 会把它
-            // 拼进 SkillTool 的动态描述（"available: ..."），模型会以为
-            // 存在一个与 Grep 工具同名的技能。
-            id: "search".to_string(),
+            // 叫 explore 而非 search：agent_ids() 会把它拼进 SkillTool 的动态
+            // 描述（"available: ..."），而工作区里已有一整族 *search 工具
+            // （CodebaseSearch/WebSearch/tool_search/…），同名会让模型以为
+            // 技能和工具是同一个东西。explore 也是 Claude Code / Copilot /
+            // Cursor 对「只读代码库检索子代理」的通用命名。
+            id: "explore".to_string(),
             client,
             config,
         }
@@ -36,7 +38,7 @@ impl SearchAgent {
         // Use objective as query; path should not pollute semantic terms.
         let query = task.objective.trim().to_string();
         crate::utils::logging::append_debug_log_line(&format!(
-            "🔍 SearchAgent: Executing Broad Search for '{}'",
+            "🔍 ExploreAgent: Executing Broad Search for '{}'",
             query
         ));
 
@@ -123,7 +125,7 @@ impl SearchAgent {
             Review them carefully. \
             1. If you see the answer directly in the snippets, extract it and answer the user.\n\
             2. If the snippets are truncated or you need more context, use `Read` with `offset` and `limit` to investigate specific files mentioned below.\n\
-            3. Do NOT call `semantic_search` again. Use the file paths provided below as starting points.\n\
+            3. Do NOT call `CodebaseSearch` again. Use the file paths provided below as starting points.\n\
             4. Prefer `Read` first. Use `Grep` or `Glob` only if the listed files are insufficient.\n\
             5. PARALLEL EXECUTION: If you need to read multiple files, generate multiple `Read` calls in a single turn.\n\
             6. Keep the answer concise and grounded in concrete file paths.\n\
@@ -131,7 +133,7 @@ impl SearchAgent {
             {}\n\
             --------------------------------------------------\n\
             ",
-            SEARCH_SYSTEM_PROMPT,
+            EXPLORE_SYSTEM_PROMPT,
             task.objective,
             search_root_display,
             task.params,
@@ -139,7 +141,7 @@ impl SearchAgent {
         );
 
         crate::utils::logging::append_debug_log_line(
-            "🔍 SearchAgent: Starting Deep Filter Analysis...",
+            "🔍 ExploreAgent: Starting Deep Filter Analysis...",
         );
 
         let entries = match tokio::time::timeout(
@@ -261,13 +263,13 @@ fn search_skill_deep_filter_timeout() -> Duration {
 }
 
 #[async_trait]
-impl SubAgent for SearchAgent {
+impl SubAgent for ExploreAgent {
     fn id(&self) -> &str {
         &self.id
     }
 
     fn name(&self) -> &str {
-        "Search Agent (检索专家)"
+        "Explore Agent (检索专家)"
     }
 
     fn capabilities(&self) -> Vec<String> {

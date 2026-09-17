@@ -129,7 +129,7 @@ impl ToolSequenceLearner {
             ("new", vec!["Write", "create_file"]),
             ("read", vec!["Read", "view_file"]),
             ("find", vec!["Grep", "Glob"]),
-            ("Grep", vec!["Grep", "Glob", "SemanticSearch"]),
+            ("Grep", vec!["Grep", "Glob", "CodebaseSearch"]),
             ("edit", vec!["Edit", "multi_edit"]),
             ("change", vec!["Edit", "multi_edit"]),
             ("update", vec!["Edit", "multi_edit"]),

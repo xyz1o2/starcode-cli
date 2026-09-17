@@ -216,7 +216,7 @@ fn agent_example_template() -> &'static str {
 id: reviewer
 name: Code Reviewer
 description: Review diffs for correctness, risk, and missing tests
-tools: view_file, search, semantic_search
+tools: view_file, Grep, CodebaseSearch
 aliases: review, qa
 model: gpt-5
 ---

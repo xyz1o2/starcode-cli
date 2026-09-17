@@ -105,14 +105,17 @@ pub enum ToolKindHint {
 }
 
 /// 判断工具属于哪一类（对标 `getSearchOrReadInfo` 的 isSearch/isRead/isRepl）
+///
+/// 内置工具的注册名是 PascalCase（`Grep`/`CodebaseSearch`），MCP 与插件工具
+/// 常用 snake_case，历史记录里两种写法都会出现。统一转小写后再匹配，同一种
+/// 工具只留一条 arm，不必把每个名字的大小写各写一遍。
 pub fn classify_tool(tool_name: &str) -> ToolKindHint {
-    match tool_name {
-        "Grep" | "Glob" | "grep" | "glob" | "SemanticSearch" | "semantic_search" | "Search"
-        | "search" | "WebSearch" | "ProjectMap" | "project_map" => ToolKindHint::Search,
-        "Read" | "read" | "ReadFile" | "read_file" | "NotebookRead" | "WebFetch" => {
-            ToolKindHint::Read
+    match tool_name.to_lowercase().as_str() {
+        "grep" | "glob" | "codebasesearch" | "search" | "explore" | "websearch" | "projectmap" => {
+            ToolKindHint::Search
         }
-        "REPL" | "Repl" | "repl" => ToolKindHint::Repl,
+        "read" | "read_file" | "notebookread" | "webfetch" => ToolKindHint::Read,
+        "repl" => ToolKindHint::Repl,
         _ => ToolKindHint::Other,
     }
 }
@@ -176,7 +179,7 @@ pub fn user_facing_tool_name(tool_name: &str) -> String {
         "bash" | "shell" | "run_command" => "Bash".to_string(),
         "grep" | "search_text" => "Grep".to_string(),
         "glob" | "find_files" => "Glob".to_string(),
-        "semantic_search" => "SemanticSearch".to_string(),
+        "codebase_search" => "CodebaseSearch".to_string(),
         "project_map" => "ProjectMap".to_string(),
         "todo_write" | "TodoWrite" => "TodoWrite".to_string(),
         other => {

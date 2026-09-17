@@ -12,9 +12,9 @@ pub(crate) fn build_navigator_skill_tool_call(user_input: &str, turn: i32) -> St
     build_skill_tool_call("navigator", user_input, turn)
 }
 
-pub(crate) fn build_semantic_search_tool_call(user_input: &str, turn: i32) -> StarToolCall {
+pub(crate) fn build_codebase_search_tool_call(user_input: &str, turn: i32) -> StarToolCall {
     build_tool_call(
-        "SemanticSearch",
+        "CodebaseSearch",
         &serde_json::json!({"query": user_input, "turn": turn}),
     )
 }

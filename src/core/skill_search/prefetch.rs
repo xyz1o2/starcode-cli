@@ -42,7 +42,7 @@ impl SkillPrefetchManager {
                     }
 
                     if content_lower.contains("search") || content_lower.contains("find") {
-                        predictions.push("semantic_search".to_string());
+                        predictions.push("CodebaseSearch".to_string());
                     }
                 }
             }

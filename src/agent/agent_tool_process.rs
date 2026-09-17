@@ -3,8 +3,8 @@ use crate::agent::agent_loop::TurnResult;
 use crate::agent::loop_engineering::{LoopState, LoopStrategy, StructuredError, ToolCallBudget};
 use crate::agent::nudges;
 use crate::agent::tool_routing::{
-    build_analyzer_skill_tool_call, build_editor_skill_tool_call, build_json_fallback_prompt,
-    build_navigator_skill_tool_call, build_project_map_tool_call, build_semantic_search_tool_call,
+    build_analyzer_skill_tool_call, build_codebase_search_tool_call, build_editor_skill_tool_call,
+    build_json_fallback_prompt, build_navigator_skill_tool_call, build_project_map_tool_call,
     build_tool_loop_signature, build_validation_tool_call, detect_tool_loop, has_action_intent,
     is_edit_tool_name, is_read_only_tool_name, is_validation_tool_name,
     json_fallback_extract_tool_call, resolved_read_only_turn_limit, select_best_auto_trigger,
@@ -29,7 +29,7 @@ impl Agent {
         reasoning_streamed: bool,
         current_turn: i32,
         all_active_tools: &HashSet<String>,
-        semantic_search_attempted: &mut bool,
+        codebase_search_attempted: &mut bool,
         navigator_skill_attempted: &mut bool,
         analyzer_skill_attempted: &mut bool,
         editor_skill_attempted: &mut bool,
@@ -118,9 +118,9 @@ impl Agent {
             // Track which tools were attempted
             if tool_calls
                 .iter()
-                .any(|tc| tc.function.name == "SemanticSearch")
+                .any(|tc| tc.function.name == "CodebaseSearch")
             {
-                *semantic_search_attempted = true;
+                *codebase_search_attempted = true;
             }
             if tool_calls.iter().any(|tc| tc.function.name == "ProjectMap") {
                 *project_map_attempted = true;
@@ -256,7 +256,7 @@ impl Agent {
                     content_trimmed,
                     all_active_tools,
                     current_turn,
-                    semantic_search_attempted,
+                    codebase_search_attempted,
                     navigator_skill_attempted,
                     analyzer_skill_attempted,
                     editor_skill_attempted,
@@ -785,7 +785,7 @@ impl Agent {
         current_content: &str,
         all_active_tools: &HashSet<String>,
         current_turn: i32,
-        semantic_search_attempted: &mut bool,
+        codebase_search_attempted: &mut bool,
         navigator_skill_attempted: &mut bool,
         analyzer_skill_attempted: &mut bool,
         editor_skill_attempted: &mut bool,
@@ -802,7 +802,7 @@ impl Agent {
             user_input,
             current_content,
             all_active_tools,
-            *semantic_search_attempted,
+            *codebase_search_attempted,
             *navigator_skill_attempted,
             *analyzer_skill_attempted,
             *editor_skill_attempted,
@@ -835,9 +835,9 @@ impl Agent {
                 )
                 .await
             }
-            AutoTriggerKind::SemanticSearch => {
-                *semantic_search_attempted = true;
-                let tool_call = build_semantic_search_tool_call(user_input, current_turn);
+            AutoTriggerKind::CodebaseSearch => {
+                *codebase_search_attempted = true;
+                let tool_call = build_codebase_search_tool_call(user_input, current_turn);
                 self.run_auto_trigger_tool(
                     user_input,
                     messages,
@@ -1060,7 +1060,7 @@ fn tool_execution_segments(tool_calls: &[StarToolCall]) -> Vec<ToolExecutionSegm
     for (index, tool_call) in tool_calls.iter().enumerate() {
         if matches!(
             tool_call.function.name.as_str(),
-            "SemanticSearch" | "ProjectMap"
+            "CodebaseSearch" | "ProjectMap"
         ) {
             if !batch.is_empty() {
                 segments.push(ToolExecutionSegment::Batch(std::mem::take(&mut batch)));
@@ -1203,7 +1203,7 @@ mod tests {
         let calls = [
             tool_call(0, "Read"),
             tool_call(1, "Grep"),
-            tool_call(2, "SemanticSearch"),
+            tool_call(2, "CodebaseSearch"),
             tool_call(3, "Read"),
             tool_call(4, "ProjectMap"),
             tool_call(5, "Glob"),
@@ -1229,7 +1229,7 @@ mod tests {
         );
 
         let edges = [
-            tool_call(0, "SemanticSearch"),
+            tool_call(0, "CodebaseSearch"),
             tool_call(1, "Read"),
             tool_call(2, "ProjectMap"),
         ];

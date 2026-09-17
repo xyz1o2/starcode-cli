@@ -12,7 +12,7 @@ pub const EXEMPT_TOOLS: &[&str] = &[
     "Grep",            // 搜索结果需要完整显示
     "Glob",            // 文件查找结果
     "ListDir",         // 目录列表
-    "SemanticSearch",  // 语义搜索结果
+    "CodebaseSearch",  // 语义搜索结果
     "ProjectMap",      // 项目地图
     "git_insight",     // Git洞察
     "git_branch",      // Git分支信息

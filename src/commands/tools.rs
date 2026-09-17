@@ -44,7 +44,7 @@ pub async fn stats(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult 
 }
 
 pub async fn tools(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
-    let content = "Available Tools (canonical names):\n- Bash\n- view_file\n- Read\n- Edit\n- Grep\n- Glob\n- ListDir\n- create_file\n- Write\n- SemanticSearch\n- ProjectMap\n- complete_task\n\nCompatibility aliases:\n- edit_file -> Edit\n- str_replace_editor -> Edit\n- search_file_content -> Grep\n- run_shell_command -> Bash";
+    let content = "Available Tools (canonical names):\n- Bash\n- view_file\n- Read\n- Edit\n- Grep\n- Glob\n- ListDir\n- create_file\n- Write\n- CodebaseSearch\n- ProjectMap\n- complete_task\n\nCompatibility aliases:\n- edit_file -> Edit\n- str_replace_editor -> Edit\n- search_file_content -> Grep\n- run_shell_command -> Bash";
 
     ctx.state
         .chat_history

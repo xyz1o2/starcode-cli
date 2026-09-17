@@ -43,7 +43,7 @@ pub enum ToolName {
 
     // 分析
     GetDiagnostics,
-    SemanticSearch,
+    CodebaseSearch,
     ProjectMap,
     NextEdit,
 
@@ -150,7 +150,7 @@ impl ToolName {
 
             // 分析
             ToolName::GetDiagnostics => "get_diagnostics",
-            ToolName::SemanticSearch => "SemanticSearch",
+            ToolName::CodebaseSearch => "CodebaseSearch",
             ToolName::ProjectMap => "ProjectMap",
             ToolName::NextEdit => "next_edit",
 
@@ -248,7 +248,7 @@ impl ToolName {
             "skill" => Some(ToolName::Skill),
             "TodoWrite" => Some(ToolName::Todo),
             "get_diagnostics" => Some(ToolName::GetDiagnostics),
-            "SemanticSearch" => Some(ToolName::SemanticSearch),
+            "CodebaseSearch" => Some(ToolName::CodebaseSearch),
             "ProjectMap" => Some(ToolName::ProjectMap),
             "next_edit" => Some(ToolName::NextEdit),
             "git_insight" => Some(ToolName::GitInsight),
@@ -338,7 +338,7 @@ impl ToolName {
             ToolName::Todo,
             // 分析
             ToolName::GetDiagnostics,
-            ToolName::SemanticSearch,
+            ToolName::CodebaseSearch,
             ToolName::ProjectMap,
             ToolName::NextEdit,
             // Git/GitHub
@@ -405,7 +405,7 @@ impl ToolName {
                 | ToolName::Grep
                 | ToolName::Glob
                 | ToolName::ListDir
-                | ToolName::SemanticSearch
+                | ToolName::CodebaseSearch
                 | ToolName::ProjectMap
                 | ToolName::GetDiagnostics
                 | ToolName::LSP
@@ -485,7 +485,7 @@ pub const RUN_AGENT_TOOL_NAME: &str = "Agent";
 pub const DELEGATE_TO_AGENT_TOOL_NAME: &str = "delegate_to_agent";
 pub const LSP_TOOL_NAME: &str = "LSP";
 pub const GET_DIAGNOSTICS_TOOL_NAME: &str = "get_diagnostics";
-pub const SEMANTIC_SEARCH_TOOL_NAME: &str = "SemanticSearch";
+pub const CODEBASE_SEARCH_TOOL_NAME: &str = "CodebaseSearch";
 pub const RUN_TESTS_TOOL_NAME: &str = "run_tests";
 pub const PROJECT_MAP_TOOL_NAME: &str = "ProjectMap";
 pub const TOOL_SEARCH_TOOL_NAME: &str = "tool_search";

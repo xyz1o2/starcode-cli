@@ -109,7 +109,7 @@ pub(crate) fn sticky_test_guard() -> std::sync::MutexGuard<'static, ()> {
 // ── 分词与打分 ──────────────────────────────────────────────────────────
 
 /// 把标识符拆成小写 token：下划线/连字符/非字母数字为分隔符，
-/// 同时在 camelCase 边界断开（`SemanticSearch` → `semantic` + `search`）。
+/// 同时在 camelCase 边界断开（`CodebaseSearch` → `codebase` + `search`）。
 fn tokenize(input: &str) -> Vec<String> {
     let mut tokens: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -589,7 +589,7 @@ mod tests {
                 "Restore the working tree to an earlier checkpoint.",
             ),
             entry(
-                "SemanticSearch",
+                "CodebaseSearch",
                 "Find code by meaning rather than exact text.",
             ),
             entry("Grep", "Search file contents with a regular expression."),
@@ -600,7 +600,7 @@ mod tests {
     #[test]
     fn tokenize_splits_snake_and_camel_case() {
         assert_eq!(tokenize("git_branch"), vec!["git", "branch"]);
-        assert_eq!(tokenize("SemanticSearch"), vec!["semantic", "search"]);
+        assert_eq!(tokenize("CodebaseSearch"), vec!["codebase", "search"]);
         assert_eq!(
             tokenize("mcp__server__do_thing"),
             vec!["mcp", "server", "do", "thing"]
@@ -624,11 +624,11 @@ mod tests {
 
     #[test]
     fn name_match_outranks_description_only_match() {
-        // "search" 命中 SemanticSearch 的名称（3.0），只命中 Grep 的描述（1.0）。
+        // "search" 命中 CodebaseSearch 的名称（3.0），只命中 Grep 的描述（1.0）。
         let hits = rank_entries(sample_entries(), "search", 10);
         assert_eq!(
             hits.first().map(|h| h.name.as_str()),
-            Some("SemanticSearch")
+            Some("CodebaseSearch")
         );
         assert!(hits.iter().any(|h| h.name == "Grep"));
     }

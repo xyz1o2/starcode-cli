@@ -1,6 +1,6 @@
 use crate::agent::skills::{
-    register_custom_subagents, AnalyzerAgent, AutoFixAgent, EditorAgent, NavigatorAgent,
-    SearchAgent, SubAgentManager, SubTask,
+    register_custom_subagents, AnalyzerAgent, AutoFixAgent, EditorAgent, ExploreAgent,
+    NavigatorAgent, SubAgentManager, SubTask,
 };
 use crate::core::tools::{
     BaseDeclarativeTool, Kind, ToolCallConfirmationDetails, ToolError, ToolInvocation,
@@ -34,7 +34,7 @@ impl SkillTool {
             client.clone(),
             sub_config.clone(),
         )));
-        manager.register(Box::new(SearchAgent::new(
+        manager.register(Box::new(ExploreAgent::new(
             client.clone(),
             sub_config.clone(),
         )));

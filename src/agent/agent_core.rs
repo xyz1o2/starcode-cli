@@ -183,6 +183,10 @@ impl Agent {
                 self.context_engine.search_cache.clone(),
             );
             crate::core::context::watcher::ensure_started(&cwd);
+            // 仅启动 watcher 不会触发首轮构建（ensure_started 不插脏标记）。
+            // 冷启动时必须主动请求一次，否则首次 CodebaseSearch 只能拿到
+            // 空引擎并返回 "index is building"，且本轮不会有任何重建发生。
+            crate::core::context::watcher::request_refresh(&cwd);
 
             if self.context_engine.has_dynamic_context_candidates(&cwd) {
                 crate::utils::logging::append_agent_log_line("[INIT-LAZY] prewarm_index_cache...");
@@ -191,7 +195,7 @@ impl Agent {
 
             if let Some(tool_registry) = self.runtime_tool_registry() {
                 let cached_tool =
-                    crate::core::tools::semantic_search::SemanticSearchTool::with_cache(
+                    crate::core::tools::semantic_search::CodebaseSearchTool::with_cache(
                         self.config.clone(),
                         self.context_engine.search_cache.clone(),
                     );

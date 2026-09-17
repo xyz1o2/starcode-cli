@@ -87,7 +87,7 @@ fn build_team_manager(client: StarClient, config: Arc<Config>) -> SubAgentManage
     let mut manager = SubAgentManager::new();
     manager.register(Box::new(AnalyzerAgent::new(client.clone(), config.clone())));
     manager.register(Box::new(EditorAgent::new(client.clone(), config.clone())));
-    manager.register(Box::new(SearchAgent::new(client.clone(), config.clone())));
+    manager.register(Box::new(ExploreAgent::new(client.clone(), config.clone())));
     manager.register(Box::new(NavigatorAgent::new(
         client.clone(),
         config.clone(),

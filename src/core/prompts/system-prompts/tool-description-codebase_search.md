@@ -1,8 +1,8 @@
 <!--
-name: 'Tool Description: SemanticSearch'
-description: PRIMARY semantic code search. Use for conceptual/functional queries (architecture, flow, ownership, tests, config). Returns ranked code context with match signals.
+name: 'Tool Description: CodebaseSearch'
+description: Codebase-wide semantic search. Use for conceptual queries (architecture, flow, ownership). Returns ranked code context with match signals.
 -->
-Semantic (meaning-based) code search — the **PRIMARY tool for conceptual and functional questions** about the codebase.
+Semantic (meaning-based) search across the whole codebase — the **PRIMARY tool for conceptual and functional questions**.
 
 **Use for** (prefer this over keyword search):
 - "How is authentication handled?", "where are user settings stored?"

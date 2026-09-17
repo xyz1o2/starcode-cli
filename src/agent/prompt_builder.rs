@@ -758,7 +758,7 @@ fn cached_system_prompts_max_chars() -> usize {
             .ok()
             .and_then(|v| v.parse().ok())
             // 必须容得下 CORE_TOOL_NAMES 全部 14 份指南（当前合计约 19.3k 字节）。
-            // 以前默认 15_000 会按文件名序静默截断尾部，把 SemanticSearch / Write /
+            // 以前默认 15_000 会按文件名序静默截断尾部，把 CodebaseSearch / Write /
             // tool_search 的使用指南整份丢出系统提示词——而 schema 描述又是
             // frontmatter 里的一行短句，模型于是对这几个工具既看不到详情也无人解释。
             .unwrap_or(24_000)
@@ -960,7 +960,7 @@ mod tests {
     }
 
     /// 回归 F1：bundle 的 15k 字符上限曾按文件名序静默截断尾部，
-    /// 把 SemanticSearch / Write 等核心工具的使用指南整份丢掉，
+    /// 把 CodebaseSearch / Write 等核心工具的使用指南整份丢掉，
     /// 而它们给模型的 schema 描述只有 frontmatter 里一行短句。
     /// 这里断言默认 cap 容得下全部核心指南，避免 cap 再次悄悄变窄。
     #[test]

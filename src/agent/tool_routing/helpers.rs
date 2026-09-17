@@ -13,7 +13,7 @@ pub(crate) fn is_read_only_tool_name(name: &str) -> bool {
         "Read"
             | "Grep"
             | "Glob"
-            | "SemanticSearch"
+            | "CodebaseSearch"
             | "ProjectMap"
             | "get_diagnostics"
             | "ListDir"
@@ -213,7 +213,7 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     "multi_edit",
     "Write",
     "Bash",
-    "SemanticSearch",
+    "CodebaseSearch",
     "ProjectMap",
     "TodoWrite",
     "get_diagnostics",
@@ -610,7 +610,7 @@ pub(crate) struct ToolRoles {
     pub(crate) is_edit: bool,
     pub(crate) is_execute: bool,
     pub(crate) is_project_map: bool,
-    pub(crate) is_semantic_search: bool,
+    pub(crate) is_codebase_search: bool,
 }
 
 /// 计算工具角色
@@ -622,7 +622,7 @@ pub(crate) fn compute_tool_roles(tool: &StarTool) -> ToolRoles {
         is_edit: is_edit_tool_name(name),
         is_execute: name == "Bash" || name == "run_tests",
         is_project_map: is_project_map_tool(tool),
-        is_semantic_search: is_semantic_search_tool(tool),
+        is_codebase_search: is_codebase_search_tool(tool),
     }
 }
 
@@ -638,7 +638,7 @@ fn is_read_tool(tool: &StarTool) -> bool {
 fn is_search_tool(tool: &StarTool) -> bool {
     matches!(
         tool.function.name.as_str(),
-        "Grep" | "Glob" | "rg" | "SemanticSearch"
+        "Grep" | "Glob" | "rg" | "CodebaseSearch"
     )
 }
 
@@ -648,8 +648,8 @@ fn is_project_map_tool(tool: &StarTool) -> bool {
 }
 
 /// 检查是否是语义搜索工具
-fn is_semantic_search_tool(tool: &StarTool) -> bool {
-    tool.function.name == "SemanticSearch"
+fn is_codebase_search_tool(tool: &StarTool) -> bool {
+    tool.function.name == "CodebaseSearch"
 }
 
 /// 检查是否匹配模式

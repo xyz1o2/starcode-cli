@@ -135,8 +135,8 @@ fn register_agent_execution_tools(
     use crate::core::tools::run_tests::RunTestsTool;
     tool_registry.register_tool(Arc::new(RunTestsTool::new(config.clone())));
 
-    use crate::core::tools::semantic_search::SemanticSearchTool;
-    tool_registry.register_tool(Arc::new(SemanticSearchTool::new(config.clone())));
+    use crate::core::tools::semantic_search::CodebaseSearchTool;
+    tool_registry.register_tool(Arc::new(CodebaseSearchTool::new(config.clone())));
 
     use crate::core::tools::shell::ShellTool;
     tool_registry.register_tool(Arc::new(ShellTool::new(

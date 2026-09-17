@@ -1237,7 +1237,7 @@ pub fn is_safe_query_tool(tool_name: &str) -> bool {
             | "Glob"
             | "Grep"
             | "search_file_content"
-            | "SemanticSearch"
+            | "CodebaseSearch"
             | "gh_pr_comments"
             | "task_search"
             | "TodoWrite"

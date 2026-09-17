@@ -133,7 +133,7 @@ impl Agent {
             let t = self.config.max_session_turns();
             (if t <= 0 { 200 } else { t }) as i32
         };
-        let mut semantic_search_attempted = false;
+        let mut codebase_search_attempted = false;
         let mut navigator_skill_attempted = false;
         let mut analyzer_skill_attempted = false;
         let mut editor_skill_attempted = false;
@@ -169,7 +169,7 @@ impl Agent {
             all_active_tools,
             history_len,
             &mut project_map_attempted,
-            &mut semantic_search_attempted,
+            &mut codebase_search_attempted,
         )
         .await;
 
@@ -291,7 +291,7 @@ impl Agent {
                     all_active_tools,
                     shortlist_profile,
                     current_turn,
-                    &mut semantic_search_attempted,
+                    &mut codebase_search_attempted,
                     &mut navigator_skill_attempted,
                     &mut analyzer_skill_attempted,
                     &mut editor_skill_attempted,
@@ -369,11 +369,11 @@ impl Agent {
         all_active_tools: &HashSet<String>,
         history_len: usize,
         project_map_attempted: &mut bool,
-        semantic_search_attempted: &mut bool,
+        codebase_search_attempted: &mut bool,
     ) {
         use crate::agent::tool_routing::{
-            build_project_map_tool_call, build_semantic_search_tool_call,
-            should_prefetch_project_map, should_prefetch_semantic_search,
+            build_codebase_search_tool_call, build_project_map_tool_call,
+            should_prefetch_codebase_search, should_prefetch_project_map,
         };
 
         if should_prefetch_project_map(user_input, all_active_tools, history_len) {
@@ -413,24 +413,24 @@ impl Agent {
                     ));
                 }
             }
-        } else if should_prefetch_semantic_search(user_input, all_active_tools, history_len) {
-            *semantic_search_attempted = true;
-            let semantic_tool_call = build_semantic_search_tool_call(user_input, 0);
+        } else if should_prefetch_codebase_search(user_input, all_active_tools, history_len) {
+            *codebase_search_attempted = true;
+            let codebase_tool_call = build_codebase_search_tool_call(user_input, 0);
 
             crate::utils::logging::append_debug_log_line(
-                "[ACE_PREFETCH] first-turn conceptual query detected; prefetching semantic_search before the first model call",
+                "[ACE_PREFETCH] first-turn conceptual query detected; prefetching codebase_search before the first model call",
             );
 
             messages.push(StarMessage::assistant_with_tool_calls(vec![
-                semantic_tool_call.clone(),
+                codebase_tool_call.clone(),
             ]));
 
-            match hooks::run_pre_tool_hooks(user_input, &semantic_tool_call).await {
+            match hooks::run_pre_tool_hooks(user_input, &codebase_tool_call).await {
                 Ok(()) => {
-                    let result = self.execute_single_tool(&semantic_tool_call).await;
-                    hooks::run_post_tool_hooks(user_input, &semantic_tool_call, &result).await;
+                    let result = self.execute_single_tool(&codebase_tool_call).await;
+                    hooks::run_post_tool_hooks(user_input, &codebase_tool_call, &result).await;
                     messages.push(StarMessage::tool(
-                        semantic_tool_call.id.clone(),
+                        codebase_tool_call.id.clone(),
                         result
                             .output
                             .clone()
@@ -445,7 +445,7 @@ impl Agent {
                         data: None,
                     };
                     messages.push(StarMessage::tool(
-                        semantic_tool_call.id.clone(),
+                        codebase_tool_call.id.clone(),
                         blocked_result.error.unwrap_or_default(),
                     ));
                 }
@@ -716,7 +716,7 @@ impl Agent {
         all_active_tools: &HashSet<String>,
         shortlist_profile: &str,
         current_turn: i32,
-        semantic_search_attempted: &mut bool,
+        codebase_search_attempted: &mut bool,
         navigator_skill_attempted: &mut bool,
         analyzer_skill_attempted: &mut bool,
         editor_skill_attempted: &mut bool,
@@ -907,7 +907,7 @@ impl Agent {
                         reasoning_streamed,
                         current_turn,
                         all_active_tools,
-                        semantic_search_attempted,
+                        codebase_search_attempted,
                         navigator_skill_attempted,
                         analyzer_skill_attempted,
                         editor_skill_attempted,

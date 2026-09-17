@@ -99,7 +99,7 @@ fn test_tool_catalog_skips_delegation_when_agent_tools_are_absent() {
     let active_tools = HashSet::from([
         "Read".to_string(),
         "Edit".to_string(),
-        "SemanticSearch".to_string(),
+        "CodebaseSearch".to_string(),
     ]);
 
     let output = tool_catalog::render_for_tools(false, Some(&active_tools));
@@ -177,7 +177,7 @@ fn test_description_key_matches_active_tools() {
 
 /// 每个映射键都必须对应磁盘上真实存在的 `.md`。
 ///
-/// `Grep`/`Glob`/`ListDir`/`SemanticSearch`/`ProjectMap` 五个键原来写的是工具
+/// `Grep`/`Glob`/`ListDir`/`CodebaseSearch`/`ProjectMap` 五个键原来写的是工具
 /// 注册名（`"Grep" => "Grep"`），而文件叫 `tool-description-grep.md` —— 大小写
 /// 不匹配，于是 schema 描述静默回退到 Rust 默认串，正文也进不了 bundle。
 #[test]
@@ -203,10 +203,10 @@ fn search_tool_bodies_reach_the_prompt_bundle() {
         "Grep".to_string(),
         "Glob".to_string(),
         "ListDir".to_string(),
-        "SemanticSearch".to_string(),
+        "CodebaseSearch".to_string(),
         "ProjectMap".to_string(),
     ]);
-    for key in ["grep", "glob", "ls", "semantic_search", "projectmap"] {
+    for key in ["grep", "glob", "ls", "codebase_search", "projectmap"] {
         assert!(
             tool_descriptions::description_key_matches_active_tools(key, &active),
             "{key} body should be included when its tool is active"
@@ -240,4 +240,29 @@ fn test_token_budget_warning_template() {
     assert!(rendered.contains("90%"));
     assert!(rendered.contains("72000"));
     assert!(!rendered.contains("{est}"));
+}
+
+/// 工具描述会被 compact_tool_definition 截断到 160 字符（默认）。
+/// frontmatter 里写得再好，超了就是 "..." 结尾，等于没写。
+/// 这条测试钉住 ACE 三个工具的描述长度。
+#[test]
+fn ace_tool_descriptions_fit_compact_limit() {
+    for (tool, key) in [
+        ("CodebaseSearch", "codebase_search"),
+        ("ProjectMap", "projectmap"),
+        ("Grep", "grep"),
+    ] {
+        let desc = tool_descriptions::resolve_tool_description(tool)
+            .unwrap_or_else(|| panic!("no description for {tool}"));
+        assert!(
+            desc.chars().count() <= 160,
+            "{tool} description is {} chars, exceeds the 160-char compact limit and gets truncated to \"...\": {desc:?}",
+            desc.chars().count()
+        );
+        assert!(
+            !desc.ends_with("..."),
+            "{tool} description must not be pre-truncated: {desc:?}"
+        );
+        let _ = key;
+    }
 }

@@ -104,9 +104,16 @@ pub fn request_refresh(project_root: &Path) {
             inner.project_root = Some(project_root.to_path_buf());
         }
         inner.dirty.insert("\0refresh-all".to_string());
-        coord.dirty_signal.notify_one();
     }
     ensure_started(project_root);
+
+    // 必须在 worker 线程 spawn 之后再 notify —— parking_lot 的 Condvar
+    // 不缓存 notify：在线程启动前发出的通知会被静默丢弃，worker 永远
+    // 收不到首轮重建信号，索引一直不构建，查询也就一直返回 Warming。
+    {
+        let inner = coord.inner.lock();
+        coord.dirty_signal.notify_one();
+    }
 }
 
 /// 启动 watcher + 重建 worker（幂等）。

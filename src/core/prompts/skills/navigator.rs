@@ -18,7 +18,7 @@ Your mission is to build a layered context map, then answer with evidence.
 ## TOOL PREFERENCE
 1. `Grep`: locate symbols, call sites, and references quickly.
 2. `Read`: verify implementation details with exact code.
-3. `SemanticSearch`: semantic recall when exact pattern is unknown.
+3. `CodebaseSearch`: semantic recall when exact pattern is unknown.
 
 ## OUTPUT REQUIREMENTS
 1. Show the trace path (which file led to which file).
