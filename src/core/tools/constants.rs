@@ -45,7 +45,6 @@ pub enum ToolName {
 
     // Git/GitHub
     GitInsight,
-    GitBranch,
     GitRewind,
     GitCommitAttribution,
     GitAutofixPr,
@@ -84,8 +83,6 @@ pub enum ToolName {
     Brief,
     Workflow,
     Memory,
-    SyntheticOutput,
-    Repl,
 
     // MCP
     McpListServers,
@@ -139,7 +136,6 @@ impl ToolName {
 
             // Git/GitHub
             ToolName::GitInsight => "git_insight",
-            ToolName::GitBranch => "git_branch",
             ToolName::GitRewind => "git_rewind",
             ToolName::GitCommitAttribution => "git_commit_attribution",
             ToolName::GitAutofixPr => "git_autofix_pr",
@@ -178,8 +174,6 @@ impl ToolName {
             ToolName::Brief => "brief",
             ToolName::Workflow => "workflow",
             ToolName::Memory => "memory",
-            ToolName::SyntheticOutput => "synthetic_output",
-            ToolName::Repl => "repl",
 
             // MCP
             ToolName::McpListServers => "mcp_list_servers",
@@ -228,7 +222,6 @@ impl ToolName {
             "ProjectMap" => Some(ToolName::ProjectMap),
             "next_edit" => Some(ToolName::NextEdit),
             "git_insight" => Some(ToolName::GitInsight),
-            "git_branch" => Some(ToolName::GitBranch),
             "git_rewind" => Some(ToolName::GitRewind),
             "git_commit_attribution" => Some(ToolName::GitCommitAttribution),
             "git_autofix_pr" => Some(ToolName::GitAutofixPr),
@@ -259,8 +252,6 @@ impl ToolName {
             "brief" => Some(ToolName::Brief),
             "workflow" => Some(ToolName::Workflow),
             "memory" => Some(ToolName::Memory),
-            "synthetic_output" => Some(ToolName::SyntheticOutput),
-            "repl" => Some(ToolName::Repl),
             "mcp_list_servers" => Some(ToolName::McpListServers),
             "mcp_list_tools" => Some(ToolName::McpListTools),
             "mcp_tool_info" => Some(ToolName::McpToolInfo),
@@ -309,7 +300,6 @@ impl ToolName {
             ToolName::NextEdit,
             // Git/GitHub
             ToolName::GitInsight,
-            ToolName::GitBranch,
             ToolName::GitRewind,
             ToolName::GitCommitAttribution,
             ToolName::GitAutofixPr,
@@ -344,8 +334,6 @@ impl ToolName {
             ToolName::Brief,
             ToolName::Workflow,
             ToolName::Memory,
-            ToolName::SyntheticOutput,
-            ToolName::Repl,
             // MCP
             ToolName::McpListServers,
             ToolName::McpListTools,

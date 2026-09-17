@@ -174,7 +174,7 @@ fn test_tool_description_resolution() {
     let no_desc: Vec<&str> = registered
         .difference(&mapped)
         .copied()
-        .filter(|name| !name.starts_with("mcp_") && *name != "repl")
+        .filter(|name| !name.starts_with("mcp_"))
         .collect();
     assert!(no_desc.is_empty(), "registered tools without a description key: {no_desc:?}");
 }

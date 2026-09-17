@@ -71,7 +71,6 @@ fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str
         m.insert("memory", "savememory");
         // Git/GitHub
         m.insert("git_insight", "gitinsight");
-        m.insert("git_branch", "gitbranch");
         m.insert("git_rewind", "gitrewind");
         m.insert("git_commit_attribution", "gitcommitattribution");
         m.insert("git_autofix_pr", "gitautofixpr");
@@ -92,7 +91,6 @@ fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str
         m.insert("exit_worktree", "exitworktree");
         // 其他
         m.insert("ask_user_question", "askuserquestion");
-        m.insert("synthetic_output", "syntheticoutput");
         m.insert("snip", "snip");
         m.insert("send_message", "sendmessage");
         m.insert("cron_create", "cron");
