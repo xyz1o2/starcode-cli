@@ -5,7 +5,7 @@ description: Analyze git repository state
 Analyze git repo: status, diff, log, branch info.
 
 **Use for**: understanding current repo state, reviewing changes before commit.
-**NOT for**: making commits (use `git_commit_attribution`), branch operations (use `git_branch`).
+**NOT for**: making commits (use `git_commit_attribution`), branch operations (use `git branch` via Bash).
 
 **Rules**:
 - Shows working tree status, staged/unstaged changes

@@ -9,7 +9,7 @@ Execute shell command in persistent bash session.
 
 IMPORTANT: Avoid using this tool to run `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user:
 
-  - File search: Use Glob (NOT find or ls)
+  - File search: Use Glob (NOT find); directory listing: Use ListDir (NOT ls)
   - Content search: Use Grep (NOT grep or rg)
   - Read files: Use Read (NOT cat/head/tail)
   - Edit files: Use Edit (NOT sed/awk)
@@ -19,10 +19,10 @@ IMPORTANT: Avoid using this tool to run `find`, `grep`, `cat`, `head`, `tail`, `
 While the Bash tool can do similar things, it's better to use the built-in tools as they provide a better user experience and make it easier to review tool calls and give permission.
 
 # Instructions
-- If your command will create new directories or files, first use this tool to run `ls` to verify the parent directory exists and is the correct location.
+- If your command will create new directories or files, first use `ListDir` to verify the parent directory exists and is the correct location.
 - Always quote file paths that contain spaces with double quotes in your command (e.g., cd "path with spaces/file.txt")
 - Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of `cd`. You may use `cd` if the User explicitly requests it.
-- You may specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). By default, your command will timeout after 120000ms (2 minutes).
+- Commands time out after 2 minutes by default (the limit is configured server-side, not per call). Hand long-running work to the `background_task` tool instead of blocking the session.
 - When issuing multiple commands:
   - If the commands are independent and can run in parallel, make multiple Bash tool calls in a single message.
   - If the commands depend on each other and must run sequentially, use a single Bash call with '&&' to chain them together.
@@ -42,7 +42,7 @@ While the Bash tool can do similar things, it's better to use the built-in tools
   - Do not use --no-edit with git rebase commands, as the --no-edit flag is not a valid option for git rebase.
 - Avoid unnecessary `sleep` commands:
   - Do not sleep between commands that can run immediately — just run them.
-  - For long-running commands, use `run_in_background` — you will be notified when it completes. Do not poll.
+  - For long-running commands, use the `background_task` tool — you will be notified when it completes. Do not poll.
   - Do not retry failing commands in a sleep loop — diagnose the root cause.
   - If you must sleep, keep the duration short (under 2 seconds) to avoid blocking the user.
 

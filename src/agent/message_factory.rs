@@ -1,5 +1,4 @@
 use crate::types::{StarMessage, StarToolCall};
-use serde_json::Value;
 
 /// 消息常量 - 对标claude-code的消息常量
 pub mod constants {
@@ -142,142 +141,6 @@ impl MessageFactory {
     }
 }
 
-/// 工具属性记录器
-pub struct ToolAttributeRecorder;
-
-impl ToolAttributeRecorder {
-    /// 记录工具属性（使用starcode-cli中的实际工具名称）
-    pub fn record_attributes(tool_name: &str, input: &Value) -> ToolAttributes {
-        let mut attributes = ToolAttributes::new();
-
-        if let Some(obj) = input.as_object() {
-            match tool_name {
-                "Read" => {
-                    if let Some(path) = obj.get("file_path").and_then(|v| v.as_str()) {
-                        attributes.set("file_path", path);
-                    }
-                    if let Some(offset) = obj.get("offset").and_then(|v| v.as_u64()) {
-                        attributes.set_number("offset", offset);
-                    }
-                    if let Some(limit) = obj.get("limit").and_then(|v| v.as_u64()) {
-                        attributes.set_number("limit", limit);
-                    }
-                }
-                "Edit" | "smart_edit" | "multi_edit" => {
-                    if let Some(path) = obj.get("file_path").and_then(|v| v.as_str()) {
-                        attributes.set("file_path", path);
-                    }
-                    if let Some(old) = obj.get("old_string").and_then(|v| v.as_str()) {
-                        attributes.set("old_string_preview", &old[..old.len().min(100)]);
-                    }
-                    if let Some(new) = obj.get("new_string").and_then(|v| v.as_str()) {
-                        attributes.set("new_string_preview", &new[..new.len().min(100)]);
-                    }
-                }
-                "Write" => {
-                    if let Some(path) = obj.get("file_path").and_then(|v| v.as_str()) {
-                        attributes.set("file_path", path);
-                    }
-                    if let Some(content) = obj.get("content").and_then(|v| v.as_str()) {
-                        attributes.set_number("content_length", content.len() as u64);
-                    }
-                }
-                "Bash" => {
-                    if let Some(command) = obj.get("command").and_then(|v| v.as_str()) {
-                        attributes.set("command", &command[..command.len().min(200)]);
-                        attributes.set("command_prefix", &command[..command.len().min(50)]);
-                    }
-                    if let Some(dir) = obj.get("working_dir").and_then(|v| v.as_str()) {
-                        attributes.set("working_dir", dir);
-                    }
-                }
-                "Grep" => {
-                    if let Some(query) = obj.get("query").and_then(|v| v.as_str()) {
-                        attributes.set("query", query);
-                    }
-                    if let Some(path) = obj
-                        .get("path")
-                        .or(obj.get("include_pattern"))
-                        .and_then(|v| v.as_str())
-                    {
-                        attributes.set("search_path", path);
-                    }
-                }
-                "Glob" => {
-                    if let Some(pattern) = obj.get("pattern").and_then(|v| v.as_str()) {
-                        attributes.set("pattern", pattern);
-                    }
-                    if let Some(dir) = obj.get("path").and_then(|v| v.as_str()) {
-                        attributes.set("search_dir", dir);
-                    }
-                }
-                _ => {
-                    // 通用属性记录
-                    for (key, value) in obj.iter().take(5) {
-                        if let Some(s) = value.as_str() {
-                            attributes.set(key, &s[..s.len().min(100)]);
-                        } else if let Some(n) = value.as_u64() {
-                            attributes.set_number(key, n);
-                        } else if let Some(b) = value.as_bool() {
-                            attributes.set_bool(key, b);
-                        }
-                    }
-                }
-            }
-        }
-
-        attributes
-    }
-}
-
-/// 工具属性
-#[derive(Debug, Clone)]
-pub struct ToolAttributes {
-    /// 字符串属性
-    pub string_attrs: std::collections::HashMap<String, String>,
-    /// 数字属性
-    pub number_attrs: std::collections::HashMap<String, u64>,
-    /// 布尔属性
-    pub bool_attrs: std::collections::HashMap<String, bool>,
-}
-
-impl ToolAttributes {
-    pub fn new() -> Self {
-        Self {
-            string_attrs: std::collections::HashMap::new(),
-            number_attrs: std::collections::HashMap::new(),
-            bool_attrs: std::collections::HashMap::new(),
-        }
-    }
-
-    pub fn set(&mut self, key: &str, value: &str) {
-        self.string_attrs.insert(key.to_string(), value.to_string());
-    }
-
-    pub fn set_number(&mut self, key: &str, value: u64) {
-        self.number_attrs.insert(key.to_string(), value);
-    }
-
-    pub fn set_bool(&mut self, key: &str, value: bool) {
-        self.bool_attrs.insert(key.to_string(), value);
-    }
-
-    /// 转换为JSON
-    pub fn to_json(&self) -> Value {
-        let mut obj = serde_json::Map::new();
-        for (k, v) in &self.string_attrs {
-            obj.insert(k.clone(), Value::String(v.clone()));
-        }
-        for (k, v) in &self.number_attrs {
-            obj.insert(k.clone(), Value::Number((*v).into()));
-        }
-        for (k, v) in &self.bool_attrs {
-            obj.insert(k.clone(), Value::Bool(*v));
-        }
-        Value::Object(obj)
-    }
-}
-
 /// 合成消息检测器
 pub struct SyntheticMessageDetector;
 
@@ -402,19 +265,6 @@ mod tests {
         let uuid = "550e8400-e29b-41d4-a716-446655440000";
         let short_id = MessageIdGenerator::derive_short_id(uuid);
         assert_eq!(short_id.len(), 6);
-    }
-
-    #[test]
-    fn test_tool_attributes() {
-        let mut attrs = ToolAttributes::new();
-        attrs.set("file_path", "/tmp/test.rs");
-        attrs.set_number("line", 42);
-        attrs.set_bool("success", true);
-
-        let json = attrs.to_json();
-        assert_eq!(json["file_path"], "/tmp/test.rs");
-        assert_eq!(json["line"], 42);
-        assert_eq!(json["success"], true);
     }
 
     #[test]

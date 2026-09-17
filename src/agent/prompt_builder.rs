@@ -944,11 +944,7 @@ mod tests {
             );
         }
 
-        for must_not in [
-            "tool-description-goal.md",
-            "tool-description-gitbranch.md",
-            "tool-description-notebookedit.md",
-        ] {
+        for must_not in ["tool-description-notebookedit.md"] {
             assert!(
                 !names.iter().any(|f| *f == must_not),
                 "非核心工具说明不应进 bundle：{must_not}"

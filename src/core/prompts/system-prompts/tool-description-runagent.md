@@ -9,17 +9,20 @@ The Agent tool launches specialized agents (subprocesses) that autonomously hand
 **Use for**: broad searches, complex refactors, multi-file operations, research tasks.
 **NOT for**: simple single-step tasks, precise sequential control needed, reading specific files (use Read), searching for specific classes/functions (use Grep/Glob).
 
-**Available agent types**:
-- `general-purpose`: General-purpose agent for researching complex questions, searching code, and executing multi-step tasks
-- `Explore`: Fast agent specialized for exploring codebases. Use when you need to quickly find files by patterns or search code for keywords
-- `Plan`: Software architect agent for designing implementation plans
+**Available agent types** (`subagent_type`):
+- `general_purpose` (default): researching complex questions, searching code, and executing multi-step tasks
+- `explorer`: fast codebase exploration — finding files by pattern, searching code for keywords
+- `analyzer`: focused analysis of one question or component
+- `editor`: targeted code edits
+- `code_reviewer`: reviewing changes for correctness and quality
 
 **Usage notes**:
 - Always include a short description (3-5 words) summarizing what the agent will do
 - When the agent is done, it will return a single message back to you. The result returned by the agent is NOT visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
-- You can optionally run agents in the background using `run_in_background: true`. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.
+- You can optionally run agents in the background using `background: true`. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.
 - **Foreground vs background**: Use foreground (default) when you need the agent's results before you can proceed. Use background when you have genuinely independent work to do in parallel.
 - To continue a previously spawned agent, use SendMessage with the agent's ID or name as the `to` field. The agent resumes with its full context preserved. Each Agent invocation starts fresh — provide a complete task description.
+- Set `name` to give the agent a stable handle so `send_message` can target it later.
 - The agent's outputs should generally be trusted
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks.

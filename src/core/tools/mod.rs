@@ -11,7 +11,6 @@ pub mod cross_agent;
 pub mod diagnostics;
 pub mod diff_options;
 pub mod edit;
-pub mod enhanced_tool;
 pub mod enter_plan_mode;
 pub mod enter_worktree;
 pub mod exit_plan_mode;

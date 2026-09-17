@@ -330,48 +330,6 @@ impl MessageSanitizer {
         tool_name.to_string()
     }
 
-    /// 提取工具输入用于遥测
-    pub fn extract_tool_input_for_telemetry(tool_name: &str, input: &Value) -> Option<Value> {
-        if let Some(obj) = input.as_object() {
-            let mut telemetry = serde_json::Map::new();
-
-            match tool_name {
-                "Bash" => {
-                    if let Some(command) = obj.get("command").and_then(|v| v.as_str()) {
-                        let parts: Vec<&str> = command.trim().split_whitespace().collect();
-                        if let Some(first) = parts.first() {
-                            telemetry.insert(
-                                "bash_command".to_string(),
-                                Value::String(first.to_string()),
-                            );
-                        }
-                    }
-                }
-                "Read" => {
-                    if let Some(path) = obj.get("file_path").and_then(|v| v.as_str()) {
-                        telemetry.insert("file_path".to_string(), Value::String(path.to_string()));
-                    }
-                }
-                "Edit" | "Write" => {
-                    if let Some(path) = obj.get("file_path").and_then(|v| v.as_str()) {
-                        telemetry.insert("file_path".to_string(), Value::String(path.to_string()));
-                    }
-                }
-                "Grep" => {
-                    if let Some(query) = obj.get("query").and_then(|v| v.as_str()) {
-                        telemetry.insert("query".to_string(), Value::String(query.to_string()));
-                    }
-                }
-                _ => {}
-            }
-
-            if !telemetry.is_empty() {
-                return Some(Value::Object(telemetry));
-            }
-        }
-        None
-    }
-
     /// 提取文件扩展名用于分析
     pub fn get_file_extension_for_analytics(path: &str) -> Option<String> {
         std::path::Path::new(path)

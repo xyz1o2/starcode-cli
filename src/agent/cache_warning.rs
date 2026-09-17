@@ -129,110 +129,6 @@ impl MissingToolResultGenerator {
 pub struct ToolParameterLogger;
 
 impl ToolParameterLogger {
-    /// 提取工具输入用于遥测（使用starcode-cli中的实际工具名称）
-    pub fn extract_tool_input_for_telemetry(tool_name: &str, input: &Value) -> Option<Value> {
-        if let Some(obj) = input.as_object() {
-            let mut telemetry = serde_json::Map::new();
-
-            match tool_name {
-                "Bash" => {
-                    if let Some(command) = obj.get("command").and_then(|v| v.as_str()) {
-                        let parts: Vec<&str> = command.trim().split_whitespace().collect();
-                        if let Some(first) = parts.first() {
-                            telemetry.insert(
-                                "bash_command".to_string(),
-                                Value::String(first.to_string()),
-                            );
-                        }
-                        telemetry.insert(
-                            "full_command".to_string(),
-                            Value::String(command.to_string()),
-                        );
-                    }
-                    if let Some(timeout) = obj.get("timeout").and_then(|v| v.as_u64()) {
-                        telemetry.insert("timeout".to_string(), Value::Number(timeout.into()));
-                    }
-                    if let Some(description) = obj.get("description").and_then(|v| v.as_str()) {
-                        telemetry.insert(
-                            "description".to_string(),
-                            Value::String(description.to_string()),
-                        );
-                    }
-                }
-                "Read" => {
-                    if let Some(path) = obj.get("file_path").and_then(|v| v.as_str()) {
-                        telemetry.insert("file_path".to_string(), Value::String(path.to_string()));
-                        if let Some(ext) = std::path::Path::new(path).extension() {
-                            telemetry.insert(
-                                "file_extension".to_string(),
-                                Value::String(ext.to_string_lossy().to_string()),
-                            );
-                        }
-                    }
-                }
-                "Edit" | "smart_edit" | "multi_edit" => {
-                    if let Some(path) = obj.get("file_path").and_then(|v| v.as_str()) {
-                        telemetry.insert("file_path".to_string(), Value::String(path.to_string()));
-                        if let Some(ext) = std::path::Path::new(path).extension() {
-                            telemetry.insert(
-                                "file_extension".to_string(),
-                                Value::String(ext.to_string_lossy().to_string()),
-                            );
-                        }
-                    }
-                }
-                "Write" => {
-                    if let Some(path) = obj.get("file_path").and_then(|v| v.as_str()) {
-                        telemetry.insert("file_path".to_string(), Value::String(path.to_string()));
-                        if let Some(ext) = std::path::Path::new(path).extension() {
-                            telemetry.insert(
-                                "file_extension".to_string(),
-                                Value::String(ext.to_string_lossy().to_string()),
-                            );
-                        }
-                    }
-                    if let Some(content) = obj.get("content").and_then(|v| v.as_str()) {
-                        telemetry.insert(
-                            "content_length".to_string(),
-                            Value::Number(content.len().into()),
-                        );
-                    }
-                }
-                "Grep" => {
-                    if let Some(query) = obj.get("query").and_then(|v| v.as_str()) {
-                        telemetry.insert("query".to_string(), Value::String(query.to_string()));
-                    }
-                    if let Some(path) = obj
-                        .get("path")
-                        .or(obj.get("include_pattern"))
-                        .and_then(|v| v.as_str())
-                    {
-                        telemetry
-                            .insert("search_path".to_string(), Value::String(path.to_string()));
-                    }
-                }
-                "Glob" => {
-                    if let Some(pattern) = obj.get("pattern").and_then(|v| v.as_str()) {
-                        telemetry.insert("pattern".to_string(), Value::String(pattern.to_string()));
-                    }
-                }
-                _ => {
-                    // 通用记录
-                    for (key, value) in obj.iter().take(3) {
-                        if let Some(s) = value.as_str() {
-                            telemetry.insert(key.clone(), Value::String(s.to_string()));
-                        }
-                    }
-                }
-            }
-
-            if !telemetry.is_empty() {
-                return Some(Value::Object(telemetry));
-            }
-        }
-        None
-    }
-
     /// 提取MCP工具详情
     pub fn extract_mcp_tool_details(tool_name: &str) -> Option<McpToolDetails> {
         if !tool_name.starts_with("mcp__") {
@@ -497,16 +393,6 @@ impl ToolDurationTracker {
     }
 }
 
-/// 代码编辑工具检测器
-pub struct CodeEditToolDetector;
-
-impl CodeEditToolDetector {
-    /// 检查是否是代码编辑工具（别名先归一，单一事实源见 `constants`）
-    pub fn is_code_editing_tool(tool_name: &str) -> bool {
-        crate::core::tools::constants::is_edit_tool_name(tool_name)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,16 +455,6 @@ mod tests {
         let uuid = "550e8400-e29b-41d4-a716-446655440000";
         let derived = MessageNormalizer::derive_uuid(uuid, 42);
         assert!(derived.starts_with(&uuid[..24]));
-    }
-
-    #[test]
-    fn test_code_edit_tool_detection() {
-        // 只认注册名：别名已由 canonical_tool_name 统一归一
-        assert!(CodeEditToolDetector::is_code_editing_tool("Edit"));
-        assert!(CodeEditToolDetector::is_code_editing_tool("Write"));
-        assert!(CodeEditToolDetector::is_code_editing_tool("smart_edit"));
-        assert!(!CodeEditToolDetector::is_code_editing_tool("Read"));
-        assert!(!CodeEditToolDetector::is_code_editing_tool("FileWrite"));
     }
 
     #[test]
