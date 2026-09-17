@@ -2,11 +2,14 @@ use crate::core::tools::tools::{
     BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation, ToolResult as CoreToolResult,
 };
 use anyhow::{Context, Result};
+use futures::future::select_all;
 use once_cell::sync::Lazy;
 use rand::seq::SliceRandom;
 use reqwest::{Client, ClientBuilder};
 use scraper::{Html, Selector};
 use serde::Deserialize;
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -275,8 +278,8 @@ impl ToolInvocation for WebSearchInvocation {
 
     fn execute(
         &self,
-        _signal: Option<&tokio_util::sync::CancellationToken>,
-        _update_output: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
+        signal: Option<&tokio_util::sync::CancellationToken>,
+        update_output: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<CoreToolResult, Box<dyn std::error::Error>>>
@@ -286,6 +289,9 @@ impl ToolInvocation for WebSearchInvocation {
     > {
         let query = self.params.query.clone();
         let num = self.params.num.unwrap_or(5).min(10);
+        // CancellationToken 内部是 Arc，clone 代价极低；放进 async block 才能
+        // 在返回的 future 里 await 它（trait 签名把 signal 的生命周期挡在了外面）。
+        let signal = signal.cloned();
 
         Box::pin(async move {
             // 离线模式：WebSearch 直接拒绝（对标 Claude Code /network）
@@ -311,62 +317,31 @@ impl ToolInvocation for WebSearchInvocation {
                 query, num
             ));
 
-            // Three-engine fallback chain: Brave → DuckDuckGo → Startpage
-            let mut search_results = vec![];
-            let mut source = "unknown".to_string();
-
-            // 1. Brave Search
-            match search_brave(&query, num).await {
-                Ok(results) if !results.is_empty() => {
-                    search_results = results;
-                    source = "Brave".to_string();
+            // 三台引擎并发竞速：谁先返回非空结果就用谁，其余随 select_all 的 drop 立即取消。
+            // 原来是 Brave → DuckDuckGo → Startpage 的串行回退链：任一台连不上就要
+            // 白等一个 connect_timeout(10s)，三台全挂时一次搜索卡 30s+ 且 Esc 无效
+            // —— 这就是"WebSearch 总是卡在那里不动"的根因。
+            let progress = |msg: String| {
+                crate::utils::logging::append_debug_log_line(&format!("[web_search] {msg}"));
+                if let Some(cb) = update_output.as_ref() {
+                    cb(msg);
                 }
-                _ => {
-                    crate::utils::logging::append_debug_log_line(
-                        "[web_search] Brave failed or no results, switching to DuckDuckGo",
-                    );
-                    // 2. DuckDuckGo
-                    match search_duckduckgo(&query, num).await {
-                        Ok(results) if !results.is_empty() => {
-                            search_results = results;
-                            source = "DuckDuckGo".to_string();
-                        }
-                        _ => {
-                            crate::utils::logging::append_debug_log_line(
-                                "[web_search] DuckDuckGo failed or no results, switching to Startpage",
-                            );
-                            // 3. Startpage
-                            match search_startpage(&query, num).await {
-                                Ok(results) if !results.is_empty() => {
-                                    search_results = results;
-                                    source = "Startpage".to_string();
-                                }
-                                Ok(_) => {}  // Empty results
-                                Err(_) => {} // Engine failed
-                            }
-                        }
-                    }
-                }
-            }
+            };
+            progress(format!(
+                "Searching the web (Brave / DuckDuckGo / Startpage): {query}"
+            ));
 
-            if search_results.is_empty() {
-                crate::utils::logging::append_debug_log_line(
-                    "[web_search] All engines returned no results",
-                );
-                return Ok(CoreToolResult {
-                    llm_content: None,
-                    return_display: None,
-                    output: format!(
-                        "No results for \"{}\". All three engines (Brave, DuckDuckGo, Startpage) \
-                         came back empty, which usually means the query is too narrow or the \
-                         engines are rate-limiting. Rephrase before trying again — repeating this \
-                         exact query will return nothing again.",
-                        query
-                    ),
-                    error: None,
-                    data: None,
-                });
-            }
+            let (found, errors) = race_engines(&query, num, signal.as_ref()).await;
+
+            let (search_results, source) = match found {
+                Some((results, name)) => (results, name.to_string()),
+                None => return Ok(no_results_result(&query, &errors)),
+            };
+
+            progress(format!(
+                "Used {source} to return {} results",
+                search_results.len()
+            ));
 
             crate::utils::logging::append_debug_log_line(&format!(
                 "[web_search] Used {} to return {} results",
@@ -441,6 +416,85 @@ impl ToolInvocation for WebSearchInvocation {
                 data: None,
             })
         })
+    }
+}
+
+/// 并发竞速三台引擎，取第一个非空结果。
+///
+/// 返回 `(结果, 引擎名)`；三台都空或失败时返回 `(None, 失败原因列表)`。
+/// 外层若收到取消信号，`select` 丢弃 `race`，三路请求随之 drop，不会继续空转。
+async fn race_engines(
+    query: &str,
+    num: u32,
+    signal: Option<&tokio_util::sync::CancellationToken>,
+) -> (Option<(Vec<SearchResult>, &'static str)>, Vec<String>) {
+    type Engine<'a> =
+        Pin<Box<dyn Future<Output = (&'static str, Result<Vec<SearchResult>>)> + Send + 'a>>;
+
+    let engines: Vec<Engine<'_>> = vec![
+        Box::pin(async move { ("Brave", search_brave(query, num).await) }),
+        Box::pin(async move { ("DuckDuckGo", search_duckduckgo(query, num).await) }),
+        Box::pin(async move { ("Startpage", search_startpage(query, num).await) }),
+    ];
+
+    let race = async move {
+        let mut engines = engines;
+        let mut errors = Vec::new();
+        while !engines.is_empty() {
+            let ((name, res), _, rest) = select_all(engines).await;
+            engines = rest;
+            match res {
+                Ok(results) if !results.is_empty() => return (Some((results, name)), errors),
+                Ok(_) => {} // 引擎给了空结果
+                Err(e) => errors.push(format!("{name}: {e:#}")),
+            }
+        }
+        (None, errors)
+    };
+
+    match signal {
+        Some(token) => tokio::select! {
+            _ = token.cancelled() => (None, vec!["aborted by user".to_string()]),
+            res = race => res,
+        },
+        None => race.await,
+    }
+}
+
+/// 三台引擎全部落空时的返回。
+///
+/// 区分两种情形：网络不通（三台全报连接错误）和引擎给了空结果（限流 / 查询太窄）。
+/// 前者重试一百次都一样，模型应当直接换思路而不是反复试。
+fn no_results_result(query: &str, errors: &[String]) -> CoreToolResult {
+    crate::utils::logging::append_debug_log_line("[web_search] All engines returned no results");
+
+    let network_down = errors
+        .iter()
+        .any(|e| e.contains("timed out") || e.contains("connect") || e.contains("dns"));
+
+    let hint = if network_down {
+        "All three search engines failed to connect — this network cannot reach \
+         search.brave.com / duckduckgo.com / startpage.com (no proxy configured, or they are \
+         blocked). Do not retry the same search: it will fail identically. Ask the user to check \
+         connectivity or configure a proxy."
+    } else {
+        "All three engines (Brave, DuckDuckGo, Startpage) came back empty, which usually means \
+         the query is too narrow or the engines are rate-limiting. Rephrase before trying again \
+         — repeating this exact query will return nothing again."
+    };
+
+    let detail = if errors.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nEngine errors:\n{}", errors.join("\n"))
+    };
+
+    CoreToolResult {
+        llm_content: None,
+        return_display: None,
+        output: format!("No results for \"{query}\". {hint}{detail}"),
+        error: None,
+        data: None,
     }
 }
 
@@ -773,5 +827,70 @@ mod tests {
             "x".repeat(150)
         );
         assert!(!is_boilerplate_line(&line));
+    }
+
+    /// 三台引擎全挂时，竞速必须很快结束而不是串行等满 3×connect_timeout，
+    /// 且返回的错误信息要能让 `no_results_result` 判定为"网络不通"。
+    #[tokio::test]
+    async fn race_reports_errors_when_all_engines_fail() {
+        // 指向一个必然不可达的地址：CLIENT 的 connect_timeout 兜底，不会真挂住。
+        let (found, errors) = race_engines("starcode-test-unreachable", 3, None).await;
+
+        assert!(found.is_none(), "engines should all fail: {found:?}");
+        assert_eq!(errors.len(), 3, "all three engines should report an error");
+    }
+
+    /// 取消信号必须立即中断竞速 —— 这是"卡住不动"最关键的一条：Esc 得有反应。
+    #[tokio::test]
+    async fn race_aborts_on_cancellation() {
+        let token = tokio_util::sync::CancellationToken::new();
+        let cancelled = token.clone();
+
+        let task =
+            tokio::spawn(
+                async move { race_engines("starcode-test-cancel", 3, Some(&token)).await },
+            );
+
+        // 给竞速一点时间真正起跑，再取消。
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancelled.cancel();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(15), task).await;
+
+        match outcome {
+            Ok(Ok((found, errors))) => {
+                // 要么被取消（无结果），要么自己快速失败 —— 都行，就是不能挂住。
+                assert!(
+                    found.is_none(),
+                    "cancellation must not leave a dangling result: {found:?}"
+                );
+                println!("race ended after cancel: {errors:?}");
+            }
+            Ok(Err(e)) => panic!("join error: {e}"),
+            Err(_) => panic!("race did not respond to cancellation within 15s"),
+        }
+    }
+
+    /// 网络不通和"引擎给了空结果"要给出不同的提示：前者重试无用，后者可以换措辞。
+    #[test]
+    fn no_results_hint_distinguishes_network_failure_from_empty() {
+        let net_err = vec!["Brave: error trying to connect: tcp connect error".to_string()];
+        let empty = vec![];
+
+        let net_out = no_results_result("test", &net_err).output;
+        let empty_out = no_results_result("test", &empty).output;
+
+        assert!(
+            net_out.contains("cannot reach"),
+            "network failure hint: {net_out}"
+        );
+        assert!(
+            net_out.contains("Brave:"),
+            "should name the failing engine: {net_out}"
+        );
+        assert!(
+            empty_out.contains("too narrow") || empty_out.contains("rate-limiting"),
+            "empty-result hint: {empty_out}"
+        );
     }
 }
