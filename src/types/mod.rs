@@ -1226,20 +1226,19 @@ pub enum ToolConfirmationOutcome {
 }
 // ============ 确认类型定义完成 ============
 
+/// 只读"查询类"工具：命中后可免确认直接执行（对标 Claude Code 的只读工具集）。
+///
+/// 只认注册名 —— 调用方在进入策略引擎前已由 `canonical_tool_name` 归一。
 pub fn is_safe_query_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "view_file"
-            | "Read"
+        "Read"
             | "read_many_files"
             | "ListDir"
-            | "list_directory"
             | "Glob"
             | "Grep"
-            | "search_file_content"
             | "CodebaseSearch"
             | "gh_pr_comments"
-            | "task_search"
             | "TodoWrite"
             | "mcp_list_servers"
             | "mcp_list_tools"

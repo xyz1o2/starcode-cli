@@ -93,7 +93,7 @@ impl PermissionRuleSpec {
         if self.tool.eq_ignore_ascii_case(tool) {
             return true;
         }
-        // 别名归一：规则写 `Read`，实际调用可能叫 `view_file`
+        // 名称归一：规则与调用都走 canonical_tool_name，大小写漂移在这里抹平
         let actual = canonical(tool);
         if self.tool.eq_ignore_ascii_case(&actual) || canonical(&self.tool) == actual {
             return true;
@@ -130,41 +130,20 @@ fn canonical(tool: &str) -> String {
 }
 
 /// 工具族：用户按 Claude Code 的口径写 `Read` / `Edit`，得覆盖 StarCode 里做同一件事的
-/// 全部工具名。否则 `deny: ["Edit(./secrets/**)"]` 会被 `smart_edit` 从旁边绕过去。
+/// 全部注册工具名。否则 `deny: ["Edit(./secrets/**)"]` 会被 `smart_edit` 从旁边绕过去。
 /// 方向是单向的 —— `Read` 覆盖 `read_many_files`，反过来不成立。
+///
+/// 对标 Claude Code：只列注册名。别名移除后不再有 `view_file` / `str_replace_editor` /
+/// `create_file` 之类的幽灵名经过这里，族成员全部是 schema 里真实存在的工具。
 const TOOL_FAMILIES: &[(&str, &[&str])] = &[
     (
         "Read",
-        &[
-            "view_file",
-            "read_many_files",
-            "notebook_read",
-            "Glob",
-            "ListDir",
-        ],
+        &["read_many_files", "notebook_read", "Glob", "ListDir"],
     ),
     (
         "Edit",
-        &[
-            "smart_edit",
-            "multi_edit",
-            "str_replace_editor",
-            "notebook_edit",
-            "next_edit",
-        ],
+        &["smart_edit", "multi_edit", "notebook_edit", "next_edit"],
     ),
-    ("Write", &["create_file", "write_file"]),
-    (
-        "Bash",
-        &[
-            "shell",
-            "run_shell_command",
-            "execute_command",
-            "powershell",
-        ],
-    ),
-    ("WebFetch", &["web_fetch", "web_browser"]),
-    ("WebSearch", &["web_search"]),
 ];
 
 fn family_covers(rule_tool: &str, tool: &str) -> bool {
@@ -174,11 +153,10 @@ fn family_covers(rule_tool: &str, tool: &str) -> bool {
     })
 }
 
+/// 是否是 shell 类工具（决定 allow 规则要不要按命令分段严格匹配）。
+/// 入口已由 `canonical` 归一到注册名，这里只认 `Bash`。
 fn is_shell_family(name: &str) -> bool {
-    matches!(
-        name,
-        "Bash" | "bash" | "shell" | "run_shell_command" | "execute_command" | "powershell"
-    )
+    name == "Bash"
 }
 
 fn command_specifier_matches(spec: &str, args: &Value, strict: bool) -> bool {
@@ -780,7 +758,7 @@ mod tests {
     fn tool_aliases_and_wildcards_resolve() {
         let p = perms(&[], &[], &["Read(.env)", "Edit(secrets/**)"]);
         assert!(p
-            .evaluate("view_file", &json!({"file_path": ".env"}))
+            .evaluate("read_many_files", &json!({"file_path": ".env"}))
             .is_some());
         assert!(p
             .evaluate("smart_edit", &json!({"file_path": "secrets/key.pem"}))
@@ -789,6 +767,10 @@ mod tests {
         let narrow = perms(&[], &[], &["read_many_files(.env)"]);
         assert!(narrow
             .evaluate("Read", &json!({"file_path": ".env"}))
+            .is_none());
+        // 别名已移除：未注册名原样穿过，不归一到任何内置工具
+        assert!(narrow
+            .evaluate("view_file", &json!({"file_path": ".env"}))
             .is_none());
 
         let star = perms(&["*"], &[], &[]);

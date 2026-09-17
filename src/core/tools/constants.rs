@@ -30,15 +30,12 @@ pub enum ToolName {
 
     // 执行
     Bash,
-    PowerShell,
-    WebBrowser,
     RunTests,
 
     // 代理/任务
     Agent,
     Skill,
     Todo,
-    ManageTasks, // 别名，映射到 Todo
 
     // 分析
     GetDiagnostics,
@@ -54,11 +51,7 @@ pub enum ToolName {
     GitAutofixPr,
     GitPrSubscribe,
     GhPrComments,
-    GitHubApp,
-    GitHubIssue,
     SuggestPr,
-    SubscribePr,
-    SuggestBackgroundPr,
 
     // 模式切换
     EnterPlanMode,
@@ -91,7 +84,6 @@ pub enum ToolName {
     Brief,
     Workflow,
     Memory,
-    LocalMemoryRecall,
     SyntheticOutput,
     Repl,
 
@@ -106,11 +98,6 @@ pub enum ToolName {
     McpReadResource,
     McpListPrompts,
     McpGetPrompt,
-
-    // 内部
-    Compaction,
-    Title,
-    Summary,
 }
 
 impl ToolName {
@@ -137,15 +124,12 @@ impl ToolName {
 
             // 执行
             ToolName::Bash => "Bash",
-            ToolName::PowerShell => "powershell",
-            ToolName::WebBrowser => "web_browser",
             ToolName::RunTests => "run_tests",
 
             // 代理/任务
             ToolName::Agent => "Agent",
             ToolName::Skill => "skill",
             ToolName::Todo => "TodoWrite",
-            ToolName::ManageTasks => "TodoWrite", // 别名
 
             // 分析
             ToolName::GetDiagnostics => "get_diagnostics",
@@ -161,11 +145,7 @@ impl ToolName {
             ToolName::GitAutofixPr => "git_autofix_pr",
             ToolName::GitPrSubscribe => "git_pr_subscribe",
             ToolName::GhPrComments => "gh_pr_comments",
-            ToolName::GitHubApp => "github_app",
-            ToolName::GitHubIssue => "github_issue",
             ToolName::SuggestPr => "suggest_pr",
-            ToolName::SubscribePr => "subscribe_pr",
-            ToolName::SuggestBackgroundPr => "suggest_background_pr",
 
             // 模式切换
             ToolName::EnterPlanMode => "enter_plan_mode",
@@ -198,7 +178,6 @@ impl ToolName {
             ToolName::Brief => "brief",
             ToolName::Workflow => "workflow",
             ToolName::Memory => "memory",
-            ToolName::LocalMemoryRecall => "local_memory_recall",
             ToolName::SyntheticOutput => "synthetic_output",
             ToolName::Repl => "repl",
 
@@ -213,15 +192,15 @@ impl ToolName {
             ToolName::McpReadResource => "mcp_read_resource",
             ToolName::McpListPrompts => "mcp_list_prompts",
             ToolName::McpGetPrompt => "mcp_get_prompt",
-
-            // 内部
-            ToolName::Compaction => "compaction",
-            ToolName::Title => "title",
-            ToolName::Summary => "summary",
         }
     }
 
-    /// 从字符串解析工具名称（用于向后兼容）
+    /// 从字符串解析工具名称。
+    ///
+    /// 对标 Claude Code：内置工具名即唯一名，`from_str` 只认注册名本身，
+    /// 不收任何别名（CC 的别名也仅限于它自己改名留下来的 legacy 名）。
+    /// LLM 只会发出 schema 里的注册名；用户输入的大小写漂移由
+    /// `commands::permissions::normalize_tool_name` 的兜底归一处理。
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             // 直接匹配
@@ -240,8 +219,6 @@ impl ToolName {
             "WebSearch" => Some(ToolName::WebSearch),
             "WebFetch" => Some(ToolName::WebFetch),
             "Bash" => Some(ToolName::Bash),
-            "powershell" => Some(ToolName::PowerShell),
-            "web_browser" => Some(ToolName::WebBrowser),
             "run_tests" => Some(ToolName::RunTests),
             "Agent" => Some(ToolName::Agent),
             "skill" => Some(ToolName::Skill),
@@ -257,11 +234,7 @@ impl ToolName {
             "git_autofix_pr" => Some(ToolName::GitAutofixPr),
             "git_pr_subscribe" => Some(ToolName::GitPrSubscribe),
             "gh_pr_comments" => Some(ToolName::GhPrComments),
-            "github_app" => Some(ToolName::GitHubApp),
-            "github_issue" => Some(ToolName::GitHubIssue),
             "suggest_pr" => Some(ToolName::SuggestPr),
-            "subscribe_pr" => Some(ToolName::SubscribePr),
-            "suggest_background_pr" => Some(ToolName::SuggestBackgroundPr),
             "enter_plan_mode" => Some(ToolName::EnterPlanMode),
             "exit_plan_mode" => Some(ToolName::ExitPlanMode),
             "enter_worktree" => Some(ToolName::EnterWorktree),
@@ -286,7 +259,6 @@ impl ToolName {
             "brief" => Some(ToolName::Brief),
             "workflow" => Some(ToolName::Workflow),
             "memory" => Some(ToolName::Memory),
-            "local_memory_recall" => Some(ToolName::LocalMemoryRecall),
             "synthetic_output" => Some(ToolName::SyntheticOutput),
             "repl" => Some(ToolName::Repl),
             "mcp_list_servers" => Some(ToolName::McpListServers),
@@ -299,9 +271,6 @@ impl ToolName {
             "mcp_read_resource" => Some(ToolName::McpReadResource),
             "mcp_list_prompts" => Some(ToolName::McpListPrompts),
             "mcp_get_prompt" => Some(ToolName::McpGetPrompt),
-            "compaction" => Some(ToolName::Compaction),
-            "title" => Some(ToolName::Title),
-            "summary" => Some(ToolName::Summary),
 
             _ => None,
         }
@@ -328,8 +297,6 @@ impl ToolName {
             ToolName::WebFetch,
             // 执行
             ToolName::Bash,
-            ToolName::PowerShell,
-            ToolName::WebBrowser,
             ToolName::RunTests,
             // 代理/任务
             ToolName::Agent,
@@ -348,8 +315,6 @@ impl ToolName {
             ToolName::GitAutofixPr,
             ToolName::GitPrSubscribe,
             ToolName::GhPrComments,
-            ToolName::GitHubApp,
-            ToolName::GitHubIssue,
             ToolName::SuggestPr,
             // 模式切换
             ToolName::EnterPlanMode,
@@ -416,7 +381,6 @@ impl ToolName {
                 | ToolName::Monitor
                 | ToolName::Brief
                 | ToolName::Memory
-                | ToolName::LocalMemoryRecall
         )
     }
 
@@ -436,7 +400,7 @@ impl ToolName {
     pub fn is_execute_tool(&self) -> bool {
         matches!(
             self,
-            ToolName::Bash | ToolName::PowerShell | ToolName::RunTests
+            ToolName::Bash | ToolName::RunTests
         )
     }
 }
@@ -463,6 +427,78 @@ pub fn canonical_tool_name(name: &str) -> String {
     ToolName::from_str(name)
         .map(|t| t.as_str().to_string())
         .unwrap_or_else(|| name.to_string())
+}
+
+/// 判断工具名是否属于编辑类工具（只认注册名）
+pub fn is_edit_tool_name(name: &str) -> bool {
+    ToolName::from_str(name).is_some_and(|t| t.is_edit_tool())
+}
+
+/// 判断工具名是否属于只读工具（只认注册名）
+pub fn is_read_only_tool_name(name: &str) -> bool {
+    ToolName::from_str(name).is_some_and(|t| t.is_read_only())
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+
+    #[test]
+    fn registered_names_are_their_own_canonical_form() {
+        // 对标 CC：内置工具名即唯一名，canonical_tool_name 对注册名是恒等变换
+        assert_eq!(canonical_tool_name("Read"), "Read");
+        assert_eq!(canonical_tool_name("Write"), "Write");
+        assert_eq!(canonical_tool_name("Edit"), "Edit");
+        assert_eq!(canonical_tool_name("Grep"), "Grep");
+        assert_eq!(canonical_tool_name("Glob"), "Glob");
+        assert_eq!(canonical_tool_name("Bash"), "Bash");
+        assert_eq!(canonical_tool_name("Agent"), "Agent");
+        assert_eq!(canonical_tool_name("CodebaseSearch"), "CodebaseSearch");
+        assert_eq!(canonical_tool_name("smart_edit"), "smart_edit");
+        assert_eq!(canonical_tool_name("TodoWrite"), "TodoWrite");
+    }
+
+    #[test]
+    fn unknown_names_pass_through_unchanged() {
+        // 没有别名表：未注册的名字原样返回，调用方拿不到对应工具，
+        // 符合"唯一名"语义
+        assert_eq!(canonical_tool_name("view_file"), "view_file");
+        assert_eq!(canonical_tool_name("create_file"), "create_file");
+        assert_eq!(canonical_tool_name("read"), "read");
+        assert_eq!(canonical_tool_name("task"), "task");
+        // MCP 工具名 mcp__server__tool 不应被改写
+        assert_eq!(
+            canonical_tool_name("mcp__github__create_issue"),
+            "mcp__github__create_issue"
+        );
+        assert_eq!(canonical_tool_name("some_future_tool"), "some_future_tool");
+    }
+
+    #[test]
+    fn edit_tool_detection_covers_all_registered_edit_tools() {
+        // 注册名
+        assert!(is_edit_tool_name("Edit"));
+        assert!(is_edit_tool_name("smart_edit"));
+        assert!(is_edit_tool_name("multi_edit"));
+        assert!(is_edit_tool_name("Write"));
+        assert!(is_edit_tool_name("notebook_edit"));
+        // 非编辑工具
+        assert!(!is_edit_tool_name("Read"));
+        assert!(!is_edit_tool_name("Grep"));
+    }
+
+    #[test]
+    fn read_only_detection_covers_navigation_tools() {
+        assert!(is_read_only_tool_name("Read"));
+        assert!(is_read_only_tool_name("Grep"));
+        assert!(is_read_only_tool_name("CodebaseSearch"));
+        assert!(is_read_only_tool_name("ProjectMap"));
+        assert!(is_read_only_tool_name("get_diagnostics"));
+        assert!(is_read_only_tool_name("ListDir"));
+        // 编辑工具不是只读
+        assert!(!is_read_only_tool_name("Edit"));
+        assert!(!is_read_only_tool_name("Write"));
+    }
 }
 
 // ── Tool error types ─────────────────────────────────────────────────

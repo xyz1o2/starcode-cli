@@ -247,7 +247,9 @@ impl ToolResultSummaryGenerator {
         input: &serde_json::Value,
         output: &str,
     ) -> Option<String> {
-        match tool_name {
+        // 入口归一：内部只匹配注册名，别名由 constants 统一处理
+        let tool_name = crate::core::tools::constants::canonical_tool_name(tool_name);
+        match tool_name.as_str() {
             "Bash" => {
                 if let Some(command) = input.get("command").and_then(|v| v.as_str()) {
                     let short_cmd = crate::utils::string_utils::truncate_with_ellipsis(command, 50);

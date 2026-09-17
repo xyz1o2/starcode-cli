@@ -294,7 +294,7 @@ pub struct SimulatedSedEditStripper;
 impl SimulatedSedEditStripper {
     /// 剥离_simulatedSedEdit字段
     pub fn strip(tool_name: &str, input: &mut Value) -> bool {
-        if tool_name != "Bash" && tool_name != "bash" {
+        if tool_name != "Bash" {
             return false;
         }
 
@@ -396,9 +396,13 @@ impl ToolAttributeExtractor {
     pub fn extract(tool_name: &str, input: &Value) -> HashMap<String, String> {
         let mut attributes = HashMap::new();
 
+        // 入口归一：内部只匹配注册名
+        let tool_name = crate::core::tools::constants::canonical_tool_name(tool_name);
+        let tool_name = tool_name.as_str();
+
         if let Some(obj) = input.as_object() {
             match tool_name {
-                "Read" | "view_file" => {
+                "Read" => {
                     if let Some(path) = obj
                         .get("file_path")
                         .or(obj.get("path"))
@@ -407,7 +411,7 @@ impl ToolAttributeExtractor {
                         attributes.insert("file_path".to_string(), path.to_string());
                     }
                 }
-                "Edit" | "edit_file" | "Write" | "create_file" => {
+                "Edit" | "Write" => {
                     if let Some(path) = obj
                         .get("file_path")
                         .or(obj.get("path"))
@@ -416,17 +420,17 @@ impl ToolAttributeExtractor {
                         attributes.insert("file_path".to_string(), path.to_string());
                     }
                 }
-                "Bash" | "bash" => {
+                "Bash" => {
                     if let Some(command) = obj.get("command").and_then(|v| v.as_str()) {
                         attributes.insert("full_command".to_string(), command.to_string());
                     }
                 }
-                "Grep" | "search_file_content" => {
+                "Grep" => {
                     if let Some(query) = obj.get("query").and_then(|v| v.as_str()) {
                         attributes.insert("query".to_string(), query.to_string());
                     }
                 }
-                "Glob" | "find_by_name" => {
+                "Glob" => {
                     if let Some(pattern) = obj.get("pattern").and_then(|v| v.as_str()) {
                         attributes.insert("pattern".to_string(), pattern.to_string());
                     }
@@ -765,7 +769,7 @@ impl EnhancedToolExecutor {
         self.span_manager.start_span(tool_name, attributes);
 
         // 4. 检查Bash分类器
-        if tool_name == "Bash" || tool_name == "bash" {
+        if tool_name == "Bash" {
             if let Some(command) = cleaned_input.get("command").and_then(|v| v.as_str()) {
                 self.bash_classifier
                     .start_speculative_check(command, "default");

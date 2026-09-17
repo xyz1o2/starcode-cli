@@ -203,7 +203,7 @@ pub fn format_result_for_ai(
              2. The file was already modified by previous edits\n\
              3. The file doesn't exist at the specified path\n\n\
              **What to do next:**\n\
-             1. Use `view_file` to check the current file content\n\
+             1. Use `Read` to check the current file content\n\
              2. Update your old_string to match the actual content\n\
              3. Make sure the file path is correct\n\n\
              **Original error:**\n\
@@ -234,7 +234,7 @@ pub fn generate_recovery_suggestions(
         "📖 First, view the file to see current content:\n\
          ```json\n\
          {{\n\
-           \"tool\": \"view_file\",\n\
+           \"tool\": \"Read\",\n\
            \"path\": \"{}\"\n\
          }}\n\
          ```",
@@ -263,8 +263,8 @@ pub fn generate_recovery_suggestions(
         suggestions.push(format!(
             "📂 The file '{}' doesn't exist.\n\
              - Check if the path is correct (typo?)\n\
-             - Maybe you need to create it first with `create_file`\n\
-             - Or search for the file with `search` tool",
+             - Maybe you need to create it first with `Write`\n\
+             - Or search for the file with `Glob`",
             file_path
         ));
     }

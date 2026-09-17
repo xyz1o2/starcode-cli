@@ -12,8 +12,10 @@ impl ToolUseSummaryGenerator {
         input: &Value,
         output: Option<&str>,
     ) -> Option<String> {
-        let summary = match tool_name {
-            "Bash" | "bash" => {
+        // 入口归一：内部只匹配注册名，别名由 constants 统一处理
+        let tool_name = crate::core::tools::constants::canonical_tool_name(tool_name);
+        let summary = match tool_name.as_str() {
+            "Bash" => {
                 if let Some(command) = input.get("command").and_then(|v| v.as_str()) {
                     let short_cmd = crate::utils::string_utils::truncate_with_ellipsis(command, 50);
                     format!("Running: {}", short_cmd)
@@ -21,35 +23,35 @@ impl ToolUseSummaryGenerator {
                     "Running bash command".to_string()
                 }
             }
-            "Read" | "view_file" => {
+            "Read" => {
                 if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
                     format!("Reading: {}", path)
                 } else {
                     "Reading file".to_string()
                 }
             }
-            "Edit" | "edit_file" => {
+            "Edit" => {
                 if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
                     format!("Editing: {}", path)
                 } else {
                     "Editing file".to_string()
                 }
             }
-            "Write" | "create_file" => {
+            "Write" => {
                 if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
                     format!("Writing: {}", path)
                 } else {
                     "Writing file".to_string()
                 }
             }
-            "Grep" | "search_file_content" => {
+            "Grep" => {
                 if let Some(query) = input.get("query").and_then(|v| v.as_str()) {
                     format!("Searching: {}", query)
                 } else {
                     "Searching".to_string()
                 }
             }
-            "Glob" | "find_by_name" => {
+            "Glob" => {
                 if let Some(pattern) = input.get("pattern").and_then(|v| v.as_str()) {
                     format!("Finding: {}", pattern)
                 } else {
@@ -112,8 +114,10 @@ impl ToolContentEventRecorder {
     pub fn record_event(&mut self, tool_name: &str, input: &Value, output: &Value) {
         let mut attributes = HashMap::new();
 
-        match tool_name {
-            "Read" | "view_file" => {
+        // 入口归一：内部只匹配注册名
+        let tool_name = crate::core::tools::constants::canonical_tool_name(tool_name);
+        match tool_name.as_str() {
+            "Read" => {
                 if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
                     attributes.insert("file_path".to_string(), path.to_string());
                 }
@@ -121,7 +125,7 @@ impl ToolContentEventRecorder {
                     attributes.insert("content_length".to_string(), content.len().to_string());
                 }
             }
-            "Edit" | "edit_file" | "Write" | "create_file" => {
+            "Edit" | "Write" => {
                 if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
                     attributes.insert("file_path".to_string(), path.to_string());
                 }
@@ -129,7 +133,7 @@ impl ToolContentEventRecorder {
                     attributes.insert("diff_length".to_string(), diff.len().to_string());
                 }
             }
-            "Bash" | "bash" => {
+            "Bash" => {
                 if let Some(command) = input.get("command").and_then(|v| v.as_str()) {
                     attributes.insert("bash_command".to_string(), command.to_string());
                 }
@@ -528,7 +532,7 @@ impl ToolExecutionEnhancer {
 
         // 5. 提取Git commit ID（如果是git commit）
         let mut git_commit_id = None;
-        if tool_name == "Bash" || tool_name == "bash" {
+        if tool_name == "Bash" {
             if let Some(command) = input.get("command").and_then(|v| v.as_str()) {
                 if command.contains("git commit") {
                     if let Some(output_str) = output.get("output").and_then(|v| v.as_str()) {

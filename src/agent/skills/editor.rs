@@ -8,7 +8,7 @@
 ///
 /// 使用的工具：
 /// - smart_edit（智能编辑）
-/// - create_file
+/// - Write
 /// - replace（降级）
 use super::{SubAgent, SubTask, SubTaskResult};
 use crate::agent::StarAgent;

@@ -501,20 +501,9 @@ impl ToolDurationTracker {
 pub struct CodeEditToolDetector;
 
 impl CodeEditToolDetector {
-    /// 代码编辑工具名称列表
-    const CODE_EDIT_TOOLS: &'static [&'static str] = &[
-        "Edit",
-        "edit_file",
-        "FileEdit",
-        "Write",
-        "create_file",
-        "FileWrite",
-        "NotebookEdit",
-    ];
-
-    /// 检查是否是代码编辑工具
+    /// 检查是否是代码编辑工具（别名先归一，单一事实源见 `constants`）
     pub fn is_code_editing_tool(tool_name: &str) -> bool {
-        Self::CODE_EDIT_TOOLS.contains(&tool_name)
+        crate::core::tools::constants::is_edit_tool_name(tool_name)
     }
 }
 
@@ -584,9 +573,12 @@ mod tests {
 
     #[test]
     fn test_code_edit_tool_detection() {
+        // 只认注册名：别名已由 canonical_tool_name 统一归一
         assert!(CodeEditToolDetector::is_code_editing_tool("Edit"));
-        assert!(CodeEditToolDetector::is_code_editing_tool("FileWrite"));
+        assert!(CodeEditToolDetector::is_code_editing_tool("Write"));
+        assert!(CodeEditToolDetector::is_code_editing_tool("smart_edit"));
         assert!(!CodeEditToolDetector::is_code_editing_tool("Read"));
+        assert!(!CodeEditToolDetector::is_code_editing_tool("FileWrite"));
     }
 
     #[test]

@@ -171,28 +171,19 @@ pub fn search_read_summary_text(
 }
 
 /// 工具的用户可见名称（对标 `tool.userFacingName()`）
+///
+/// 对标 Claude Code：内置工具名即唯一名，别名归一统一交给
+/// `canonical_tool_name`；这里只额外处理 MCP 工具的
+/// `mcp__server__tool → server:tool` 展示转换。
 pub fn user_facing_tool_name(tool_name: &str) -> String {
-    match tool_name {
-        "read" | "read_file" | "ReadFile" => "Read".to_string(),
-        "write" | "write_file" | "WriteFile" => "Write".to_string(),
-        "edit" | "edit_file" | "EditFile" => "Edit".to_string(),
-        "bash" | "shell" | "run_command" => "Bash".to_string(),
-        "grep" | "search_text" => "Grep".to_string(),
-        "glob" | "find_files" => "Glob".to_string(),
-        "codebase_search" => "CodebaseSearch".to_string(),
-        "project_map" => "ProjectMap".to_string(),
-        "todo_write" | "TodoWrite" => "TodoWrite".to_string(),
-        other => {
-            // MCP 工具 mcp__server__tool → server:tool
-            if let Some(rest) = other.strip_prefix("mcp__") {
-                let mut it = rest.splitn(2, "__");
-                if let (Some(server), Some(tool)) = (it.next(), it.next()) {
-                    return format!("{}:{}", server, tool);
-                }
-            }
-            other.to_string()
+    // MCP 工具 mcp__server__tool → server:tool
+    if let Some(rest) = tool_name.strip_prefix("mcp__") {
+        let mut it = rest.splitn(2, "__");
+        if let (Some(server), Some(tool)) = (it.next(), it.next()) {
+            return format!("{}:{}", server, tool);
         }
     }
+    crate::core::tools::constants::canonical_tool_name(tool_name)
 }
 
 /// 从工具参数里提取一行摘要（对标 `tool.getToolUseSummary()`）

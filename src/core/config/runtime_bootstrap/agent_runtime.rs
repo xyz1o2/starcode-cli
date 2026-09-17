@@ -281,10 +281,7 @@ fn ensure_fallback_core_tools(
     ));
 
     // Critical file tools - must always be available
-    if !tool_names
-        .iter()
-        .any(|name| name == "Read" || name == "view_file")
-    {
+    if !tool_names.iter().any(|name| name == "Read") {
         crate::utils::logging::append_debug_log_line(
             "Read/view_file missing, attempting manual registration.",
         );

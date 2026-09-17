@@ -241,8 +241,8 @@ impl ToolExecutor {
     /// 编辑类工具成功执行后，把目标文件标记为脏 —— 后台索引协调器
     /// （`context::watcher`）会在防抖窗口后做增量重建，语义搜索保持新鲜。
     fn mark_edited_file_dirty(tool_call: &StarToolCall) {
-        const EDIT_TOOLS: [&str; 3] = ["Edit", "multi_edit", "Write"];
-        if !EDIT_TOOLS.contains(&Self::canonical_tool_name(&tool_call.function.name).as_str()) {
+        // 走统一归一：覆盖 Edit/multi_edit/smart_edit/Write/NotebookEdit 及其别名
+        if !crate::core::tools::constants::is_edit_tool_name(&tool_call.function.name) {
             return;
         }
         let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
@@ -776,7 +776,7 @@ impl ToolExecutor {
             "Edit" => Self::normalize_replace_args(args),
             "multi_edit" => Self::normalize_multi_edit_args(args),
             "Grep" => Self::normalize_search_args(original_name, args),
-            "Read" | "view_file" => Self::normalize_read_file_args(args),
+            "Read" => Self::normalize_read_file_args(args),
             "Agent" => Self::normalize_agent_args(args),
             _ => args,
         }
@@ -992,16 +992,11 @@ impl ToolExecutor {
 
         Self::copy_string_arg(obj, "query", &["query", "pattern"]);
 
-        if obj.get("search_type").is_none()
-            && matches!(
-                original_name,
-                "search_file_content" | "grep_search" | "Grep"
-            )
-        {
+        if obj.get("search_type").is_none() && matches!(original_name, "Grep") {
             obj.insert("search_type".to_string(), Value::String("text".to_string()));
         }
 
-        if obj.get("regex").is_none() && matches!(original_name, "grep_search" | "Grep") {
+        if obj.get("regex").is_none() && matches!(original_name, "Grep") {
             obj.insert("regex".to_string(), Value::Bool(true));
         }
 

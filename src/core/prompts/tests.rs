@@ -157,8 +157,26 @@ fn test_tool_description_resolution() {
     let wait_desc = tool_descriptions::resolve_tool_description("wait");
     assert!(wait_desc.is_some(), "wait 应有 .md 描述");
 
-    // 映射覆盖所有已知工具
-    assert!(tool_descriptions::registered_tool_count() >= 80);
+    // 映射表与注册工具名必须一致：
+    // 1. 表里不能有没注册过的"幽灵名"（对标 Claude Code：内置工具名即唯一名）
+    // 2. 注册的内置工具不能漏了描述（MCP 元工具与 repl 由各自模块提供，不在此列）
+    use crate::core::tools::constants::ToolName;
+    let mapped: HashSet<&str> = tool_descriptions::registered_tool_keys()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    let registered: HashSet<&str> = ToolName::all_builtin()
+        .into_iter()
+        .map(|t| t.as_str())
+        .collect();
+    let phantoms: Vec<&str> = mapped.difference(&registered).copied().collect();
+    assert!(phantoms.is_empty(), "description map holds unregistered tool names (phantoms): {phantoms:?}");
+    let no_desc: Vec<&str> = registered
+        .difference(&mapped)
+        .copied()
+        .filter(|name| !name.starts_with("mcp_") && *name != "repl")
+        .collect();
+    assert!(no_desc.is_empty(), "registered tools without a description key: {no_desc:?}");
 }
 
 #[test]

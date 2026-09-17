@@ -58,10 +58,10 @@ fn register_core_file_tools(
         )));
     }
 
-    // Single registration for Read — canonical name is "Read",
-    // "view_file" is resolved via canonical_tool_name alias.
-    if is_core_tool_enabled(selection_config, "view_file")
-        || is_core_tool_enabled(selection_config, "Read")
+    // Read 只以注册名 "Read" 注册一次（对标 Claude Code：无别名）。
+    // selection 配置里若还写着旧的 "view_file" 键，下面按注册名兜底。
+    if is_core_tool_enabled(selection_config, "Read")
+        || is_core_tool_enabled(selection_config, "view_file")
     {
         registry.register_tool(Arc::new(ReadFileTool::new_with_name(
             registry_config.clone(),
@@ -102,9 +102,9 @@ fn register_core_command_tools(
         registry.register_tool(Arc::new(SearchTool::new(global_state.clone())));
     }
 
-    // `Bash` is registered in agent_runtime (with LLM client).
-    // `todo` is now an alias for `Todo`.
-    // See canonical_tool_name() in tool_names.rs.
+    // `Bash` 与 `TodoWrite` 在 agent_runtime 注册（需要 LLM client 等重装配）。
+    // 对标 Claude Code：内置工具名即唯一名，不再有别名，见
+    // `core::tools::constants::canonical_tool_name`。
 }
 
 fn register_core_runtime_support_tools(

@@ -771,6 +771,9 @@ fn format_display_path(path: &str) -> String {
 pub async fn build_confirmation_from_tool_call(
     tc: &crate::types::StarToolCall,
 ) -> crate::types::ToolConfirmation {
+    // 入口归一：内部只匹配注册名，别名由 constants 统一处理
+    let canonical_name = crate::core::tools::constants::canonical_tool_name(&tc.function.name);
+    let name = canonical_name.as_str();
     let args_value: serde_json::Value =
         serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::Value::Null);
     let get_str = |keys: &[&str]| -> Option<String> {
@@ -798,7 +801,7 @@ pub async fn build_confirmation_from_tool_call(
         None
     };
 
-    match tc.function.name.as_str() {
+    match name {
         "exit_plan_mode" => {
             let plan = get_str(&["plan"]).unwrap_or_else(|| {
                 i18n::t("ui.confirm.msg.empty_plan", "（空计划）", "(empty plan)")
@@ -824,7 +827,7 @@ pub async fn build_confirmation_from_tool_call(
                 outcome: None,
             }
         }
-        "Edit" | "str_replace_editor" => {
+        "Edit" => {
             let path = get_str(&["path", "file_path", "target_file"])
                 .unwrap_or_else(|| "unknown".to_string());
             let old_str = get_str(&["old_string", "old_str", "old", "oldString", "old_text"])
@@ -985,7 +988,7 @@ pub async fn build_confirmation_from_tool_call(
             };
 
             crate::types::ToolConfirmation {
-                tool_name: "smart_edit".to_string(),
+                tool_name: name.to_string(),
                 operation_type: crate::types::ConfirmationType::EditFile,
                 details: crate::types::ConfirmationDetails::EditFile {
                     file_path: path,
@@ -1118,7 +1121,7 @@ pub async fn build_confirmation_from_tool_call(
                 outcome: None,
             }
         }
-        "create_file" => {
+        "Write" => {
             let path = get_str(&["path", "file_path", "target_file"])
                 .unwrap_or_else(|| "unknown".to_string());
             let content = get_str(&["content"]).unwrap_or_default();
@@ -1137,7 +1140,7 @@ pub async fn build_confirmation_from_tool_call(
                 preview_lines.join("\n")
             };
             crate::types::ToolConfirmation {
-                tool_name: "create_file".to_string(),
+                tool_name: name.to_string(),
                 operation_type: crate::types::ConfirmationType::CreateFile,
                 details: crate::types::ConfirmationDetails::CreateFile {
                     file_path: path,
@@ -1147,35 +1150,36 @@ pub async fn build_confirmation_from_tool_call(
                 outcome: None,
             }
         }
-        "view_file" | "Read" => {
+        "Read" => {
             let path = get_str(&["path", "file_path", "target_file"])
                 .unwrap_or_else(|| "unknown".to_string());
 
-            let range = if tc.function.name == "view_file" {
-                let start_line = get_u64(&["start_line"]).map(|v| v as usize);
-                let end_line = get_u64(&["end_line"]).map(|v| v as usize);
-                match (start_line, end_line) {
-                    (Some(s), Some(e)) => format!(" [{}-{}]", s, e),
-                    (Some(s), None) => format!(" [{}-]", s),
-                    (None, Some(e)) => format!(" [-{}]", e),
-                    (None, None) => String::new(),
-                }
-            } else {
+            // Read 同时接受 offset/limit 与 start_line/end_line 两种范围写法
+            let range = {
                 let offset = get_u64(&["offset"]).map(|v| v as usize);
                 let limit = get_u64(&["limit"]).map(|v| v as usize);
                 match (offset, limit) {
                     (Some(o), Some(l)) => format!(" [offset: {}, limit: {}]", o, l),
                     (Some(o), None) => format!(" [offset: {}]", o),
                     (None, Some(l)) => format!(" [limit: {}]", l),
-                    (None, None) => String::new(),
+                    (None, None) => {
+                        let start_line = get_u64(&["start_line"]).map(|v| v as usize);
+                        let end_line = get_u64(&["end_line"]).map(|v| v as usize);
+                        match (start_line, end_line) {
+                            (Some(s), Some(e)) => format!(" [{}-{}]", s, e),
+                            (Some(s), None) => format!(" [{}-]", s),
+                            (None, Some(e)) => format!(" [-{}]", e),
+                            (None, None) => String::new(),
+                        }
+                    }
                 }
             };
 
             crate::types::ToolConfirmation {
-                tool_name: tc.function.name.clone(),
+                tool_name: name.to_string(),
                 operation_type: crate::types::ConfirmationType::ShellCommand,
                 details: crate::types::ConfirmationDetails::ShellCommand {
-                    command: format!("{} {}{}", tc.function.name, path, range),
+                    command: format!("{} {}{}", name, path, range),
                     working_dir: std::env::current_dir()
                         .ok()
                         .and_then(|p| p.to_str().map(|s| s.to_string()))

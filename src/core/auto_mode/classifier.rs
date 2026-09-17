@@ -217,10 +217,10 @@ impl AutoModeClassifier {
 
     /// 本地规则快速检查（零 LLM 开销）
     fn local_rule_check(&self, tool_name: &str, tool_params: &Value) -> Option<ClassifierResult> {
-        // 读取类工具直接放行
+        // 读取类工具直接放行（入口已由 canonical_tool_name 归一到注册名）
         if matches!(
             tool_name,
-            "Read" | "Grep" | "Glob" | "Search" | "LS" | "read_file" | "search" | "glob"
+            "Read" | "read_many_files" | "Grep" | "Glob" | "ListDir" | "CodebaseSearch"
         ) {
             return Some(ClassifierResult::allow(
                 "Read-only tool, always safe",
@@ -229,7 +229,7 @@ impl AutoModeClassifier {
         }
 
         // 检查 bash 命令的危险模式
-        if tool_name == "Bash" || tool_name == "shell" {
+        if tool_name == "Bash" {
             if let Some(cmd) = tool_params.get("command").and_then(|c| c.as_str()) {
                 if dangerous_patterns::is_dangerous_pattern(cmd) {
                     return Some(ClassifierResult::deny(
@@ -241,11 +241,7 @@ impl AutoModeClassifier {
         }
 
         // 写入当前目录内的文件 — 通常安全
-        if tool_name == "Edit"
-            || tool_name == "Write"
-            || tool_name == "edit"
-            || tool_name == "write_file"
-        {
+        if tool_name == "Edit" || tool_name == "Write" {
             if let Some(path) = tool_params
                 .get("file_path")
                 .or_else(|| tool_params.get("path"))

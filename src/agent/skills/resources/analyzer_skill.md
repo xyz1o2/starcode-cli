@@ -3,13 +3,12 @@ name: analyzer
 description: Code analysis expert - analyzes code structure, dependencies, and detects issues
 when_to_use: When the user asks to analyze code, understand architecture, find dependencies, or detect code issues
 allowed_tools:
-  - search
   - Read
   - read_many_files
-  - grep
-  - glob
-  - codebase_search
-  - project_map
+  - Grep
+  - Glob
+  - CodebaseSearch
+  - ProjectMap
 arguments:
   - name: target
     description: File or directory path to analyze

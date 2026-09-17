@@ -99,26 +99,30 @@ fn extract_value_from_kv_like(raw: &str, key: &str) -> Option<String> {
 }
 
 pub fn tool_display_name(name: &str) -> String {
-    match name {
-        "view_file" | "Read" => "view".into(),
+    // 入口归一：内部只匹配注册名，别名由 constants 统一处理
+    let name = crate::core::tools::constants::canonical_tool_name(name);
+    match name.as_str() {
+        "Read" => "view".into(),
         "Bash" => "bash".into(),
-        "ListDir" | "list_directory" => "ls".into(),
-        "Grep" | "search_file_content" | "grep_search" => "search".into(),
-        "find_by_name" => "glob".into(),
-        "Edit" | "str_replace_editor" | "edit_file" | "smart_edit" => "edit".into(),
-        "create_file" | "Write" => "write".into(),
+        "ListDir" => "ls".into(),
+        "Grep" => "search".into(),
+        "Glob" => "glob".into(),
+        "Edit" | "smart_edit" | "multi_edit" => "edit".into(),
+        "Write" => "write".into(),
         "complete_task" => "done".into(),
         "TodoWrite" => "Update Todos".into(),
         "enter_plan_mode" | "exit_plan_mode" => "plan".into(),
         "ask_user" | "user_prompt" => "ask".into(),
         "CodebaseSearch" => "codebase search".into(),
         "ProjectMap" => "project map".into(),
-        _ => name.to_string(),
+        _ => name,
     }
 }
 
 fn tool_call_brief(tc: &StarToolCall) -> String {
-    let name = tc.function.name.as_str();
+    // 入口归一：内部只匹配注册名，别名由 constants 统一处理
+    let canonical = crate::core::tools::constants::canonical_tool_name(&tc.function.name);
+    let name = canonical.as_str();
     let raw_args = tc.function.arguments.as_str();
 
     // Key fix: if args look like XML/DSML format (contain DSML tags), return brief tool name
@@ -147,7 +151,7 @@ fn tool_call_brief(tc: &StarToolCall) -> String {
         "TodoWrite" => {
             return String::new();
         }
-        "Edit" | "str_replace_editor" => {
+        "Edit" | "multi_edit" => {
             if let Some(p) = get_str("file_path").or_else(|| get_str("path")) {
                 let replace_all = v
                     .as_ref()
@@ -160,13 +164,8 @@ fn tool_call_brief(tc: &StarToolCall) -> String {
                 return s;
             }
         }
-        "create_file" => {
+        "Write" => {
             if let Some(p) = get_str("path") {
-                return shorten_path_for_display(&p);
-            }
-        }
-        "edit_file" => {
-            if let Some(p) = get_str("target_file") {
                 return shorten_path_for_display(&p);
             }
         }
@@ -195,7 +194,7 @@ fn tool_call_brief(tc: &StarToolCall) -> String {
             }
             return shorten_path_for_display(&p);
         }
-        "view_file" | "Read" => {
+        "Read" => {
             if let Some(p) = get_str("path").or_else(|| get_str("file_path")) {
                 let mut s = shorten_path_for_display(&p);
                 if let Some(off) = get_u64("offset") {
@@ -207,7 +206,7 @@ fn tool_call_brief(tc: &StarToolCall) -> String {
                 return s;
             }
         }
-        "grep_search" => {
+        "Grep" => {
             let q = get_str("Query").unwrap_or_else(|| "".to_string());
             let p = get_str("SearchPath").unwrap_or_else(|| "".to_string());
             if !q.is_empty() || !p.is_empty() {
@@ -221,7 +220,7 @@ fn tool_call_brief(tc: &StarToolCall) -> String {
                 );
             }
         }
-        "find_by_name" => {
+        "Glob" => {
             let pat = get_str("Pattern").unwrap_or_else(|| "".to_string());
             let dir = get_str("SearchDirectory").unwrap_or_else(|| "".to_string());
             if !pat.is_empty() || !dir.is_empty() {
@@ -235,7 +234,7 @@ fn tool_call_brief(tc: &StarToolCall) -> String {
                 );
             }
         }
-        "list_directory" | "ListDir" => {
+        "ListDir" => {
             if let Some(dir) = get_str("directory") {
                 return shorten_path_for_display(&dir);
             }

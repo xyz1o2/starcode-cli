@@ -44,7 +44,19 @@ pub async fn stats(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult 
 }
 
 pub async fn tools(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
-    let content = "Available Tools (canonical names):\n- Bash\n- view_file\n- Read\n- Edit\n- Grep\n- Glob\n- ListDir\n- create_file\n- Write\n- CodebaseSearch\n- ProjectMap\n- complete_task\n\nCompatibility aliases:\n- edit_file -> Edit\n- str_replace_editor -> Edit\n- search_file_content -> Grep\n- run_shell_command -> Bash";
+    // 对标 Claude Code：内置工具名即唯一名，不再维护别名表。
+    // 这里只列注册名（与 LLM schema 一致），用户输入的大小写漂移由
+    // permissions::normalize_tool_name 兜底归一。
+    let content = "Available tools (registered names):\n\
+- Files: Read, read_many_files, Write, Edit, MultiEdit, smart_edit, NotebookEdit, NotebookRead\n\
+- Search: Grep, Glob, ListDir, CodebaseSearch, ProjectMap\n\
+- Execution: Bash, RunTests, GetDiagnostics\n\
+- Agents & tasks: Agent, TodoWrite, tool_search\n\
+- Plan & worktree: EnterPlanMode, ExitPlanMode, EnterWorktree, ExitWorktree\n\
+- Web: WebFetch, WebSearch\n\
+- Git: GitInsight, gh_pr_comments\n\
+- Other: Memory, Skill, CronCreate, CronList, CronDelete\n\
+\nUse `tool_search` to find tools by capability.";
 
     ctx.state
         .chat_history

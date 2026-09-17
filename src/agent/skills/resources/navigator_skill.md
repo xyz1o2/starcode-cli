@@ -5,11 +5,10 @@ when_to_use: When the user needs to understand code context, explore project str
 allowed_tools:
   - Read
   - read_many_files
-  - search
-  - grep
-  - glob
-  - project_map
-  - codebase_search
+  - Grep
+  - Glob
+  - ProjectMap
+  - CodebaseSearch
 arguments:
   - name: target
     description: Starting point for navigation

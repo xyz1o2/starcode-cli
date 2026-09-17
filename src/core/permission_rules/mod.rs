@@ -253,14 +253,13 @@ impl PermissionRuleEngine {
 
     fn extract_path_from_args(&self, tool: &str, args: &serde_json::Value) -> Option<String> {
         match tool {
-            "Edit" | "str_replace_editor" | "smart_edit" | "create_file" | "Write" | "Read"
-            | "view_file" | "read_many_files" => args
+            "Edit" | "smart_edit" | "Write" | "Read" | "read_many_files" => args
                 .get("path")
                 .or_else(|| args.get("file_path"))
                 .or_else(|| args.get("target_file"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            "Bash" | "shell" => {
+            "Bash" => {
                 if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
                     self.extract_path_from_command(cmd)
                 } else {

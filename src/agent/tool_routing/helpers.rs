@@ -1,24 +1,17 @@
+use crate::core::tools::constants::{
+    is_edit_tool_name as canonical_is_edit, is_read_only_tool_name as canonical_is_read_only,
+};
 use crate::types::{StarTool, StarToolCall};
 use std::collections::HashSet;
 
-/// 检查是否是编辑工具
+/// 检查是否是编辑工具（别名先归一，单一事实源见 `constants`）
 pub(crate) fn is_edit_tool_name(name: &str) -> bool {
-    matches!(name, "Edit" | "multi_edit" | "Write" | "create_file")
+    canonical_is_edit(name)
 }
 
-/// 检查是否是只读工具
+/// 检查是否是只读工具（别名先归一，单一事实源见 `constants`）
 pub(crate) fn is_read_only_tool_name(name: &str) -> bool {
-    matches!(
-        name,
-        "Read"
-            | "Grep"
-            | "Glob"
-            | "CodebaseSearch"
-            | "ProjectMap"
-            | "get_diagnostics"
-            | "ListDir"
-            | "rg"
-    )
+    canonical_is_read_only(name)
 }
 
 /// 检查是否是验证工具
@@ -26,9 +19,9 @@ pub(crate) fn is_validation_tool_name(name: &str) -> bool {
     matches!(name, "get_diagnostics" | "run_tests")
 }
 
-/// 检查是否是记忆工具
+/// 检查是否是记忆工具（只认注册名；/remember、/recall 是斜杠命令，不是工具）
 pub(crate) fn is_memory_tool_name(name: &str) -> bool {
-    matches!(name, "memory" | "remember" | "recall")
+    matches!(name, "memory")
 }
 
 /// 获取只读轮次限制
@@ -445,7 +438,7 @@ fn score_tool_for_turn(tool: &StarTool, user_input: &str, _current_turn: i32) ->
 
     // 特定工具加分
     match tool_name.as_str() {
-        "Read" | "view_file" => {
+        "Read" => {
             if input_lower.contains("read")
                 || input_lower.contains("view")
                 || input_lower.contains("show")
@@ -628,17 +621,14 @@ pub(crate) fn compute_tool_roles(tool: &StarTool) -> ToolRoles {
 
 /// 检查是否是读取工具
 fn is_read_tool(tool: &StarTool) -> bool {
-    matches!(
-        tool.function.name.as_str(),
-        "Read" | "view_file" | "ListDir"
-    )
+    matches!(tool.function.name.as_str(), "Read" | "ListDir")
 }
 
 /// 检查是否是搜索工具
 fn is_search_tool(tool: &StarTool) -> bool {
     matches!(
         tool.function.name.as_str(),
-        "Grep" | "Glob" | "rg" | "CodebaseSearch"
+        "Grep" | "Glob" | "CodebaseSearch"
     )
 }
 

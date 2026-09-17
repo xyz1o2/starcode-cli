@@ -241,7 +241,8 @@ pub(crate) fn inject_directory_context_if_needed(
         return None;
     }
 
-    if tool_call.function.name != "view_file" {
+    // 注册名归一：注入只在 Read 调用上触发（view_file 别名已移除）
+    if tool_call.function.name != "Read" {
         return None;
     }
 

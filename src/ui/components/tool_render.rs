@@ -123,16 +123,10 @@ pub(crate) fn render_tool_entry_blocks(
         .map(|tc| {
             // ToolCall 默认展开
             // ToolResult: 编辑类工具默认展开，其他工具默认折叠
-            let is_edit_tool = matches!(
-                tc.function.name.as_str(),
-                "Edit"
-                    | "create_file"
-                    | "edit_file"
-                    | "str_replace_editor"
-                    | "smart_edit"
-                    | "Write"
-                    | "TodoWrite"
-            );
+            // 走统一归一，避免别名漏判（对标 constants::is_edit_tool_name）
+            let is_edit_tool =
+                crate::core::tools::constants::is_edit_tool_name(tc.function.name.as_str())
+                    || tc.function.name == "TodoWrite";
 
             let default_expanded = matches!(entry.entry_type, ChatEntryType::ToolCall)
                 || (matches!(entry.entry_type, ChatEntryType::ToolResult) && is_edit_tool);
@@ -390,6 +384,9 @@ fn build_tool_argument_display(
     tc: &crate::types::StarToolCall,
     verbose: bool,
 ) -> (String, Vec<String>) {
+    // 入口归一：内部只匹配注册名，别名由 constants 统一处理
+    let canonical_name = crate::core::tools::constants::canonical_tool_name(&tc.function.name);
+    let name = canonical_name.as_str();
     // verbose 模式不截断、不缩短路径（对标 Claude Code verbose 显示）
     let lim = |n: usize| if verbose { usize::MAX } else { n };
     let shorten = |p: &str| {
@@ -434,7 +431,7 @@ fn build_tool_argument_display(
     // extra_info: 展开时显示的额外信息（summary 中未包含的）
     let mut extra_info: Vec<String> = Vec::new();
 
-    let summary = match tc.function.name.as_str() {
+    let summary = match name {
         "enter_plan_mode" => {
             let reason = get_str(&["reason"]).unwrap_or_else(|| "No reason provided".to_string());
             extra_info.push(reason);
@@ -447,7 +444,7 @@ fn build_tool_argument_display(
             }
             "Exit plan mode".to_string()
         }
-        "view_file" | "Read" => {
+        "Read" => {
             let path = get_str(&["path", "file_path", "target_file"])
                 .map(|p| shorten(&p))
                 .unwrap_or_else(|| "(no path provided)".to_string());
@@ -472,7 +469,7 @@ fn build_tool_argument_display(
             }
             truncate_chars_with_ellipsis(&cmd, lim(180))
         }
-        "create_file" | "edit_file" | "Edit" | "str_replace_editor" | "smart_edit" => {
+        "Edit" | "smart_edit" => {
             let path = get_str(&["path", "target_file", "file_path"])
                 .map(|p| shorten(&p))
                 .unwrap_or_else(|| "(no path provided)".to_string());
@@ -481,7 +478,7 @@ fn build_tool_argument_display(
             }
             path
         }
-        "Grep" | "search_file_content" | "grep_search" => {
+        "Grep" => {
             let q = get_str(&["query", "Query", "pattern", "Pattern"]).unwrap_or_default();
             let p = get_str(&["path", "Path", "SearchPath", "glob", "include_pattern"])
                 .unwrap_or_default();
@@ -520,7 +517,7 @@ fn build_tool_argument_display(
                 format!("{} in {}", pat, shorten(&dir))
             }
         }
-        "list_directory" | "ListDir" => get_str(&["directory", "path"])
+        "ListDir" => get_str(&["directory", "path"])
             .map(|p| shorten(&p))
             .unwrap_or_else(|| ".".to_string()),
         _ => summarize_object_inline(obj),
@@ -603,8 +600,12 @@ fn render_rich_tool_content(
     _prev_is_confirmation: bool,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
+    // 入口归一：内部只匹配注册名，别名由 constants 统一处理
+    let canonical_name = crate::core::tools::constants::canonical_tool_name(&tc.function.name);
+    let name = canonical_name.as_str();
+
     // ===== TodoWrite：结果块直接渲染 todos 清单（对标 Claude Code TaskListV2） =====
-    if tc.function.name == "TodoWrite" {
+    if name == "TodoWrite" {
         if let Some(tr) = &entry.tool_result {
             if tr.success {
                 return render_todo_checklist(tc, tool_inner_width, theme);
@@ -627,8 +628,8 @@ fn render_rich_tool_content(
 
     let _tool_name = crate::ui::utils::format::tool_display_name(tc.function.name.as_str());
 
-    // ===== Write/create_file 工具：折叠态显示 Wrote N lines to path =====
-    if !expanded && matches!(tc.function.name.as_str(), "create_file" | "Write") {
+    // ===== Write 工具：折叠态显示 Wrote N lines to path =====
+    if !expanded && name == "Write" {
         if let Some(tr) = &entry.tool_result {
             if tr.success {
                 // 从 args 提取文件路径和内容行数
@@ -721,8 +722,8 @@ fn render_rich_tool_content(
         // ===== 查看类工具：折叠态只显示摘要行 =====
         if !expanded && !text.trim().is_empty() && tr.success {
             match tc.function.name.as_str() {
-                // Read/view_file: "Read N lines"
-                "view_file" | "Read" => {
+                // Read: "Read N lines"
+                "Read" => {
                     let line_count = text.lines().count();
                     lines.push(Line::from(vec![
                         Span::raw("Read "),
@@ -740,8 +741,8 @@ fn render_rich_tool_content(
                     )));
                     return lines;
                 }
-                // Grep/search: "Found N matches"
-                "Grep" | "search_file_content" | "grep_search" => {
+                // Grep: "Found N matches"
+                "Grep" => {
                     let match_count = text.lines().filter(|l| !l.trim().is_empty()).count();
                     lines.push(Line::from(vec![
                         Span::raw("Found "),
@@ -759,8 +760,8 @@ fn render_rich_tool_content(
                     )));
                     return lines;
                 }
-                // find_by_name/list_directory/ListDir: "Found N files"
-                "find_by_name" | "list_directory" | "ListDir" => {
+                // Glob/ListDir: "Found N files"
+                "Glob" | "ListDir" => {
                     let file_count = text.lines().filter(|l| !l.trim().is_empty()).count();
                     lines.push(Line::from(vec![
                         Span::raw("Found "),

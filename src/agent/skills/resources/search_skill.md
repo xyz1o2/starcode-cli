@@ -3,10 +3,9 @@ name: search
 description: Search expert - finds code patterns, files, and references across the codebase
 when_to_use: When the user asks to find code, search for patterns, locate files, or find references
 allowed_tools:
-  - search
-  - grep
-  - glob
-  - codebase_search
+  - Grep
+  - Glob
+  - CodebaseSearch
   - Read
 arguments:
   - name: query

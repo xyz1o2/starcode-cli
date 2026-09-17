@@ -79,7 +79,7 @@ impl StructuredError {
             ErrorCategory::NotFound
         } else if error_lower.contains("timeout") || error_lower.contains("timed out") {
             ErrorCategory::Timeout
-        } else if tool_name == "Bash" || tool_name == "powershell" {
+        } else if tool_name == "Bash" {
             ErrorCategory::Runtime
         } else {
             ErrorCategory::ToolExecution
@@ -131,7 +131,7 @@ impl StructuredError {
                 Some("Read the test output to understand what failed. Check if your changes broke existing behavior. Run the specific failing test to isolate the issue.".to_string())
             }
             ErrorCategory::NotFound => {
-                Some("Verify the file path exists. Use `glob` or `search` to find the correct path.".to_string())
+                Some("Verify the file path exists. Use `Glob` or `Grep` to find the correct path.".to_string())
             }
             ErrorCategory::Timeout => {
                 Some("The operation timed out. Try breaking it into smaller steps or increasing the timeout.".to_string())
@@ -938,10 +938,12 @@ fn extract_tool_name(signature: &str) -> String {
 
 /// 建议替代工具
 fn suggest_alternative_tool(tool_name: &str) -> Option<String> {
-    match tool_name {
-        "Bash" | "run_shell_command" => Some("Grep".to_string()),
-        "Write" | "create_file" => Some("Edit".to_string()),
-        "Read" | "view_file" => Some("Grep".to_string()),
+    // 入口归一：内部只匹配注册名
+    let tool_name = crate::core::tools::constants::canonical_tool_name(tool_name);
+    match tool_name.as_str() {
+        "Bash" => Some("Grep".to_string()),
+        "Write" => Some("Edit".to_string()),
+        "Read" => Some("Grep".to_string()),
         "Grep" => Some("Glob".to_string()),
         "CodebaseSearch" => Some("Grep".to_string()),
         "multi_edit" => Some("Edit".to_string()),
@@ -971,12 +973,8 @@ fn analyze_tool_error(tool_name: &str, error_msg: &str) -> String {
     }
 
     match tool_name {
-        "Bash" | "run_shell_command" => {
-            "Try a simpler command or break into multiple steps".to_string()
-        }
-        "Write" | "create_file" => {
-            "Ensure directory exists and you have write permissions".to_string()
-        }
+        "Bash" => "Try a simpler command or break into multiple steps".to_string(),
+        "Write" => "Ensure directory exists and you have write permissions".to_string(),
         "Edit" | "multi_edit" => "Verify the exact text to replace exists in the file".to_string(),
         _ => format!("Try a different approach for '{}'", tool_name),
     }

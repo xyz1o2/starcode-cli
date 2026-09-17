@@ -167,7 +167,7 @@ Full Output (Truncated):
 3.  **🔮 PREDICT**: If I change X, will it fix the test?
 4.  **🛠️ ACTION**:
     *   **Verify**: `Read` the broken code first.
-    *   **Edit**: Use `edit_file` to fix it.
+    *   **Edit**: Use `Edit` to fix it.
     *   **Anti-Laziness**: You MUST write the **FULL** code. No `// ...` placeholders.
 
 **Output Format**:

@@ -22,7 +22,7 @@
 use std::sync::OnceLock;
 
 /// 工具注册名 → `tool-description-*.md` 文件名键 的映射。
-/// 多个工具可共享同一份描述（如 Read/view_file/read_many_files → readfile）。
+/// 多个工具可共享同一份描述（如 Read/read_many_files → readfile）。
 fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str, &'static str> {
     static MAP: OnceLock<std::collections::HashMap<&'static str, &'static str>> = OnceLock::new();
     MAP.get_or_init(|| {
@@ -52,7 +52,6 @@ fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str
         m.insert("get_diagnostics", "getdiagnostics");
         // 执行
         m.insert("Bash", "bash");
-        m.insert("powershell", "powershell");
         m.insert("run_tests", "runtests");
         m.insert("background_task", "backgroundtask");
         m.insert("monitor", "monitor");
@@ -66,12 +65,10 @@ fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str
         // 代理/技能
         m.insert("Agent", "runagent");
         m.insert("skill", "skill");
-        m.insert("discover_skills", "skill");
         m.insert("brief", "brief");
         m.insert("workflow", "workflow");
         // 记忆
         m.insert("memory", "savememory");
-        m.insert("local_memory_recall", "savememory");
         // Git/GitHub
         m.insert("git_insight", "gitinsight");
         m.insert("git_branch", "gitbranch");
@@ -80,15 +77,10 @@ fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str
         m.insert("git_autofix_pr", "gitautofixpr");
         m.insert("git_pr_subscribe", "gitprsubscribe");
         m.insert("gh_pr_comments", "ghprcomments");
-        m.insert("github_app", "githubapp");
-        m.insert("github_issue", "githubissue");
         m.insert("suggest_pr", "suggestpr");
-        m.insert("subscribe_pr", "suggestpr");
-        m.insert("suggest_background_pr", "suggestpr");
         // Web
         m.insert("WebSearch", "websearch");
         m.insert("WebFetch", "webfetch");
-        m.insert("web_browser", "webfetch");
         // MCP
         m.insert("mcp_list_resources", "mcplistresources");
         m.insert("mcp_read_resource", "mcpreadresource");
@@ -98,8 +90,6 @@ fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str
         m.insert("exit_plan_mode", "exitplanmode");
         m.insert("enter_worktree", "enterworktree");
         m.insert("exit_worktree", "exitworktree");
-        // 计划/验证
-        m.insert("verify_plan_execution", "enterplanmode");
         // 其他
         m.insert("ask_user_question", "askuserquestion");
         m.insert("synthetic_output", "syntheticoutput");
@@ -110,24 +100,11 @@ fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str
         m.insert("cron_delete", "cron");
         // 扩展工具集
         m.insert("wait", "wait");
-        m.insert("config", "config");
-        m.insert("ctx_inspect", "ctx_inspect");
-        m.insert("search_extra_tools", "extra_tools");
-        m.insert("execute_extra_tool", "extra_tools");
-        m.insert("goal", "goal");
-        m.insert("team_create", "team");
-        m.insert("team_delete", "team");
-        m.insert("list_peers", "team");
         m.insert("LSP", "lsp");
         m.insert("mcp_auth", "mcp_auth");
         m.insert("notebook_read", "notebook_read");
-        m.insert("push_notification", "cross_agent");
-        m.insert("send_user_file", "cross_agent");
         m.insert("remote_trigger", "remote_trigger");
-        m.insert("review_artifact", "review_artifact");
         m.insert("schedule_wakeup", "schedule_wakeup");
-        m.insert("terminal_capture", "terminal_capture");
-        m.insert("vault_http_fetch", "vault_http_fetch");
         m
     })
 }
