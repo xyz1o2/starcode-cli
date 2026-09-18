@@ -40,11 +40,29 @@ use crate::ui::events::clipboard_paste::{
 };
 use crate::ui::state::{modal::Modal, ChatState};
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Minimum interval between two paste events — skips the second one when
 /// WSL2/Windows Terminal sends both Event::Paste and individual char events for a single paste action.
 const PASTE_DEBOUNCE_MS: u64 = 200;
+
+/// UI 事件循环是否已接管终端渲染。
+///
+/// panic hook 拆终端（离开 alternate screen、关 raw mode）是有副作用的：后台
+/// tokio 线程或阻塞池里的 panic 只会让那一个任务失败，UI 循环还在正常渲染，
+/// 这时候拆了终端，紧随其后的 panic 信息就会打到乱掉的画面上。所以运行期
+/// 只有渲染线程 panic 才拆。
+///
+/// 但初始化阶段不一样：`init_terminal()` 在阻塞池线程上 enter alternate screen
+/// + raw mode，此时任何线程 panic 都没有别的代码会清理终端（`run_app` 的等待
+/// 循环只处理 oneshot 结果，不兜底未捕获的 panic），用户会面对一个残留 alt
+/// screen 的乱码终端。所以"UI 循环尚未接管"时，任何线程的 panic 都拆。
+static UI_LOOP_STARTED: AtomicBool = AtomicBool::new(false);
+
+fn terminal_owned_by_ui_loop() -> bool {
+    UI_LOOP_STARTED.load(Ordering::Relaxed)
+}
 
 /// 返回需要因流输出停滞而结束 UI processing 的秒数。
 ///
@@ -1123,6 +1141,77 @@ fn sync_textarea(state: &mut ChatState, text: &str) {
     state.input_line_count = text.lines().count().max(1);
 }
 
+/// Robust terminal cleanup — safe to call multiple times.
+/// Handles partial initialization states (e.g. raw mode enabled but alt screen not entered).
+pub(crate) fn cleanup_terminal() {
+    use std::io::Write;
+    // Best-effort: ignore individual errors since we're cleaning up
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
+    let _ = std::io::stdout().write_all(b"\x1b[?25h"); // show cursor
+    let _ = std::io::stdout().write_all(b"\x1b[0m"); // reset attributes
+    let _ = std::io::stdout().flush();
+    // Leave alternate screen first, then disable raw mode
+    // (disabling raw mode first can cause issues if alt screen is still active)
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+    if crossterm::terminal::is_raw_mode_enabled().unwrap_or(false) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
+}
+
+/// 安装 panic hook：把 panic 记进 debug log，并在必要时拆掉终端。
+///
+/// 拆终端（离开 alternate screen、关 raw mode）是有副作用的：后台 tokio 线程或
+/// 阻塞池里的 panic 只会让那一个任务失败，UI 循环还在正常渲染；这时候拆了终端，
+/// 紧随其后的 panic 信息就会打到乱掉的画面上——用户看到的是"排版乱了"，而不是
+/// 任何有用的报错。典型来源是抓网页：readability-rust 会在畸形标签名上 `unwrap()`
+/// panic（见 core::tools::readability_safe，那里的 catch_unwind 能挡住展开，但
+/// 挡不住 hook 先跑一遍）。所以运行期只有渲染线程 panic 才拆。
+///
+/// 初始化阶段是例外：`init_terminal()` 已在阻塞池线程上 enter alternate screen +
+/// raw mode，而 UI 循环还没接管，任何线程 panic 都没有别的代码会清理终端。所以
+/// "UI 循环尚未接管"时（`UI_LOOP_STARTED` 为 false）一律拆。这就是 hook 必须在
+/// `init_terminal()` 之前安装的原因。
+///
+/// `run_app` 由 `#[tokio::main]` 的 block_on 直接驱动，跑在主线程上且不会迁移，
+/// 所以这里拿到的就是渲染线程的 id。
+fn install_panic_hook() {
+    let render_thread = std::thread::current().id();
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let thread = std::thread::current();
+        let is_render_thread = thread.id() == render_thread;
+        // 直接 downcast，不去写 PanicHookInfo/PanicInfo 的类型名（两者随 rustc 版本改名）
+        let payload = panic_info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic_info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[UI] panic on thread '{}'{}{} at {}: {}",
+            thread.name().unwrap_or("<unnamed>"),
+            if is_render_thread { " (render)" } else { "" },
+            if !terminal_owned_by_ui_loop() {
+                " (init)"
+            } else {
+                ""
+            },
+            panic_info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "<unknown>".to_string()),
+            payload,
+        ));
+
+        if is_render_thread || !terminal_owned_by_ui_loop() {
+            cleanup_terminal();
+            original_hook(panic_info);
+        }
+    }));
+}
+
 pub async fn run_app(
     init_rx: tokio::sync::oneshot::Receiver<
         Result<
@@ -1142,7 +1231,14 @@ pub async fn run_app(
     use crossterm::execute;
     use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
     use std::io::{stdout, Write};
-    use std::panic;
+
+    // ── panic hook 必须在进 alternate screen 之前装好 ──
+    //
+    // `init_terminal()` 紧接着就会 enable raw mode + enter alternate screen。
+    // hook 要是装在它之后，这中间的任何 panic（含 init_terminal 自己在阻塞
+    // 池线程上的 panic）都只能走到默认 hook，把 backtrace 打进 alternate
+    // screen 的缓冲区，随后没人拆终端，用户看到一屏乱码。
+    install_panic_hook();
 
     // ── 终端初始化（在独立线程执行，避免阻塞 tokio 运行时）──
     let terminal_result = tokio::task::spawn_blocking(|| init_terminal()).await?;
@@ -1229,64 +1325,9 @@ pub async fn run_app(
     #[cfg(windows)]
     let win32_guard = crate::ui::win32::CtrlCGuard::install();
 
-    /// Robust terminal cleanup — safe to call multiple times.
-    /// Handles partial initialization states (e.g. raw mode enabled but alt screen not entered).
-    fn cleanup_terminal() {
-        use std::io::Write;
-        // Best-effort: ignore individual errors since we're cleaning up
-        let _ = crossterm::execute!(stdout(), crossterm::event::DisableMouseCapture);
-        let _ = crossterm::execute!(stdout(), crossterm::event::DisableBracketedPaste);
-        let _ = stdout().write_all(b"\x1b[?25h"); // show cursor
-        let _ = stdout().write_all(b"\x1b[0m"); // reset attributes
-        let _ = stdout().flush();
-        // Leave alternate screen first, then disable raw mode
-        // (disabling raw mode first can cause issues if alt screen is still active)
-        let _ = execute!(stdout(), LeaveAlternateScreen);
-        if crossterm::terminal::is_raw_mode_enabled().unwrap_or(false) {
-            let _ = disable_raw_mode();
-        }
-        let _ = execute!(stdout(), crossterm::cursor::Show);
-    }
-
-    // 只有渲染线程自己 panic 才该拆终端 —— 那种情况进程正在死，用户必须看到消息。
-    //
-    // 后台 tokio 工作线程或阻塞池里的 panic 只会让那一个任务失败，UI 循环还在正常
-    // 渲染；这时候如果照旧跑 cleanup_terminal()，终端会被拽出 alternate screen、
-    // 关掉 raw mode，紧接着 original_hook 再往 stderr 打一段 panic 信息，画面就花了
-    // ——用户看到的是"排版乱了"，而不是任何有用的报错。典型来源是抓网页：
-    // readability-rust 会在畸形标签名上 `unwrap()` panic（见 core::tools::readability_safe，
-    // 那里的 catch_unwind 能挡住展开，但挡不住 hook 先跑一遍）。
-    //
-    // `run_app` 由 `#[tokio::main]` 的 block_on 直接驱动，跑在主线程上且不会迁移，
-    // 所以这里拿到的就是渲染线程的 id。
-    let render_thread = std::thread::current().id();
-    let original_hook = panic::take_hook();
-    panic::set_hook(Box::new(move |panic_info| {
-        let thread = std::thread::current();
-        let is_render_thread = thread.id() == render_thread;
-        // 直接 downcast，不去写 PanicHookInfo/PanicInfo 的类型名（两者随 rustc 版本改名）
-        let payload = panic_info
-            .payload()
-            .downcast_ref::<&str>()
-            .map(|s| s.to_string())
-            .or_else(|| panic_info.payload().downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "<non-string panic payload>".to_string());
-        crate::utils::logging::append_debug_log_line(&format!(
-            "[UI] panic on thread '{}'{} at {}: {}",
-            thread.name().unwrap_or("<unnamed>"),
-            if is_render_thread { " (render)" } else { "" },
-            panic_info
-                .location()
-                .map(|l| format!("{}:{}", l.file(), l.line()))
-                .unwrap_or_else(|| "<unknown>".to_string()),
-            payload,
-        ));
-
-        if is_render_thread {
-            cleanup_terminal();
-            original_hook(panic_info);
-        }
-    }));
+    // hook 已在进 alternate screen 之前装好（见上面的 install_panic_hook 调用），
+    // 这里只是把"由谁负责拆终端"的判据从初始化阶段翻到 UI 循环。
+    UI_LOOP_STARTED.store(true, Ordering::Relaxed);
 
     let (agent_tx, agent_rx) = mpsc::channel::<AgentRequest>(100);
     let (ui_tx, ui_rx) = mpsc::channel::<StreamMessage>(100);

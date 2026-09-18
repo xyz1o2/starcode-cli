@@ -170,13 +170,19 @@ fn test_tool_description_resolution() {
         .map(|t| t.as_str())
         .collect();
     let phantoms: Vec<&str> = mapped.difference(&registered).copied().collect();
-    assert!(phantoms.is_empty(), "description map holds unregistered tool names (phantoms): {phantoms:?}");
+    assert!(
+        phantoms.is_empty(),
+        "description map holds unregistered tool names (phantoms): {phantoms:?}"
+    );
     let no_desc: Vec<&str> = registered
         .difference(&mapped)
         .copied()
         .filter(|name| !name.starts_with("mcp_"))
         .collect();
-    assert!(no_desc.is_empty(), "registered tools without a description key: {no_desc:?}");
+    assert!(
+        no_desc.is_empty(),
+        "registered tools without a description key: {no_desc:?}"
+    );
 }
 
 #[test]

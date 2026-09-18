@@ -36,6 +36,11 @@ enum Commands {
     },
     /// Initialize a new project with STAR.md
     Init,
+    /// Diagnose environment: config files, provider credentials, toolchain, logs
+    ///
+    /// 不启动 TUI 也能跑——环境类失败恰恰发生在配置坏掉、TUI 起不来的时候。
+    /// 报告内容与 `/doctor` 完全一致（共用 build_report）。
+    Doctor,
     /// Run the eval harness (mechanism layer and/or live tasks)
     Eval {
         /// Path to the tasks JSON file
@@ -219,6 +224,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            return Ok(());
+        }
+        Some(Commands::Doctor) => {
+            // doctor 必须能在 TUI 起不来时用，所以这里不做任何终端初始化，
+            // 也不初始化 Config/StarAgent——那正是它要诊断的东西。
+            println!("{}", crate::commands::doctor::run_cli().await);
             return Ok(());
         }
         Some(Commands::Eval {
@@ -516,13 +527,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if let Some(prompt) = args.prompt {
-        // Headless mode: initialize config synchronously, then process prompt
+        // Headless mode: initialize config synchronously, then process prompt.
+        // 与交互模式同样有初始化超时：否则网络/文件系统卡住时 -p 会永久挂起，
+        // CI 里只能靠外层 timeout 强杀，拿不到任何错误信息。
         let mut config = core::config::Config::new(config_params);
-        config.initialize().await.map_err(|e| {
-            utils::logging::append_agent_log_line(&format!("Config 初始化失败: {}", e));
-            eprintln!("❌ Config 初始化失败: {}", e);
-            e as Box<dyn std::error::Error>
-        })?;
+        match tokio::time::timeout(init_timeout_duration(), config.initialize()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                utils::logging::append_agent_log_line(&format!("Config 初始化失败: {}", e));
+                return Err(format!("Config 初始化失败: {}", e).into());
+            }
+            Err(_) => {
+                let secs = init_timeout_duration().as_secs();
+                utils::logging::append_agent_log_line(&format!(
+                    "[INIT] Config::initialize timed out ({} seconds)",
+                    secs
+                ));
+                return Err(format!("Config 初始化超时（{} 秒）", secs).into());
+            }
+        }
         let config = Arc::new(config);
 
         if api_key == "API_KEY_NOT_SET" {
@@ -578,7 +601,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _cwd2 = cwd_clone;
         tokio::spawn(async move {
             // Overall timeout for initialization (30 seconds - reduced from 60)
-            let init_timeout = tokio::time::Duration::from_secs(30);
+            let init_timeout = init_timeout_duration();
 
             let result = tokio::time::timeout(init_timeout, async {
                 utils::logging::append_agent_log_line("[INIT] Starting Config::new...");
@@ -624,7 +647,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 utils::logging::append_agent_log_line("[INIT] StarAgent::new completed");
-                Ok((agent, config))
+                // 显式标注：oneshot 通道收的是 String 错误，下游只 format! 它，
+                // 不再能靠 Err(e) 的传递反推出类型。
+                Ok::<_, String>((agent, config))
             })
             .await;
 
@@ -640,13 +665,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "[INIT] Initialization failed: {}",
                         e
                     ));
-                    let _ = init_tx.send(Err(e));
+                    // 同超时分支：错误本身往往只是表象（"API key required" 之类），
+                    // 真正的来源链记在 agent.log 里，给用户一个可查的位置。
+                    let log_hint = init_log_hint();
+                    let _ = init_tx.send(Err(format!("{}。{}", e, log_hint)));
                 }
                 Err(_) => {
-                    utils::logging::append_agent_log_line(
-                        "[INIT] Initialization timed out (30 seconds)",
-                    );
-                    let _ = init_tx.send(Err("初始化超时（30秒）".to_string()));
+                    let secs = init_timeout_duration().as_secs();
+                    utils::logging::append_agent_log_line(&format!(
+                        "[INIT] Initialization timed out ({} seconds)",
+                        secs
+                    ));
+                    // 超时消息必须指向日志位置：否则用户只看到一句无信息的报错，
+                    // 不知道 [INIT] 面包屑记在哪里，而那里才有具体卡在哪一步。
+                    let log_hint = init_log_hint();
+                    let _ = init_tx.send(Err(format!("初始化超时（{} 秒）。{}", secs, log_hint)));
                 }
             }
         });
@@ -664,6 +697,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// 初始化超时：交互模式与 headless 模式共用，保证两条入口的容错口径一致。
+/// 默认 30 秒；排查慢启动时可设 `STAR_INIT_TIMEOUT_SECS` 临时放宽。
+fn init_timeout_duration() -> tokio::time::Duration {
+    const DEFAULT_SECS: u64 = 30;
+    let secs = std::env::var("STAR_INIT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v >= 5)
+        .unwrap_or(DEFAULT_SECS);
+    tokio::time::Duration::from_secs(secs)
+}
+
+/// 给用户的日志位置提示。日志被 STAR_LOG_ENABLED=0 关掉时不能指过去——
+/// 文件里什么都没有，指了也查不到东西。
+fn init_log_hint() -> String {
+    if utils::logging::is_log_enabled() {
+        format!("详见 {}", utils::logging::agent_log_path_display())
+    } else {
+        "日志已被 STAR_LOG_ENABLED=0 关闭，设置 STAR_LOG_ENABLED=1 后重试可获取详细信息".to_string()
+    }
 }
 
 fn parse_cli_approval_mode(
@@ -721,8 +776,16 @@ async fn process_prompt_headless(
         agent.replace_session_context(messages, pending_local_context);
     }
 
-    // Initialize MCP servers for headless mode (non-fatal)
-    let _ = agent.initialize_mcp().await;
+    // MCP 挂了不该让整个 headless 运行失败（用户可能根本没配 MCP），但完全
+    // 吞掉会让"工具突然不可用"无法排查——把失败记进 agent.log 并在输出里提示。
+    if let Err(e) = agent.initialize_mcp().await {
+        let msg = format!(
+            "[MCP] headless 初始化失败（继续运行，MCP 工具将不可用）: {}",
+            e
+        );
+        utils::logging::append_agent_log_line(&msg);
+        eprintln!("⚠️ MCP 初始化失败（已忽略，MCP 工具不可用）: {}", e);
+    }
 
     // Process the user message
     let (chat_entries, latest_usage) = agent

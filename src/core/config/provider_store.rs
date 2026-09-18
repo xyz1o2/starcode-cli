@@ -78,6 +78,15 @@ impl ProviderStore {
                 // Fallback: Try to parse as old ProviderConfig (providers.json format)
                 if let Ok(old_config) = parse_json_with_comments::<ProviderConfig>(&content) {
                     config = old_config;
+                    loaded_from_user_settings = true;
+                } else {
+                    // 两种格式都解析失败：文件存在但内容坏了。不能静默继续——
+                    // 否则用户只会看到 "API key required"，不知道配置文件本身
+                    // 已经损坏。记录到 agent.log，让 /doctor 与日志能指出来。
+                    crate::utils::logging::append_agent_log_line(&format!(
+                        "[CONFIG] Failed to parse {}: not valid as user-settings or providers.json. Provider config reset to defaults.",
+                        self.global_config_path.display()
+                    ));
                 }
             }
         }

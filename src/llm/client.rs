@@ -346,6 +346,17 @@ impl StarClient {
             .clone()
             .unwrap_or_else(|| OPENAI_DEFAULT_BASE_URL.to_string());
 
+        // 占位 base_url 必须在这里拦下。main.rs 在 provider 解析缺失时填入
+        // BASE_URL_NOT_SET 以便 TUI 能启动，但与 API_KEY_NOT_SET 不同，
+        // 它下游此前零校验，会一路流进 reqwest，直到第一次聊天才以
+        // URL 解析错误炸出来（"启动正常、用时才报错"）。
+        if url_str == crate::core::config::providers::PLACEHOLDER_BASE_URL {
+            logging::append_agent_log_line(&format!(
+                "[CONFIG] base_url is the placeholder {} — no provider endpoint configured. Requests will fail until STAR_BASE_URL is set.",
+                crate::core::config::providers::PLACEHOLDER_BASE_URL
+            ));
+        }
+
         let provider = infer_provider(
             &model_name,
             &url_str,

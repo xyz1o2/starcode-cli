@@ -7,18 +7,16 @@
 
 ## 一、已确认孤立 (CLAUDE.md 记录)
 
-### 1. ModelFallbackManager
+### 1. ~~ModelFallbackManager~~（已接线，此条作废）
 
 **位置**: `src/agent/model_fallback.rs`
 
-**问题**: 仅在 `#[cfg(test)]` 模块中构造。生产代码中无调用者。
+**修正**: 本条此前写的"仅在 `#[cfg(test)]` 中构造"是错的。生产路径
+`agent_core.rs` 会构造它，`agent_llm.rs` 在出错时调用 `is_fallback_eligible_error`
++ `try_fallback`。`STAR_MODEL_FALLBACK_*` 不是被忽略的。
 
-**影响**: `STAR_MODEL_FALLBACK_*` 环境变量被忽略。模型回退逻辑不存在。
-
-**接线方案**:
-- 在 `src/core/config/runtime_bootstrap/agent_runtime.rs` 中构造
-- 注入到 `Agent` 或 `StreamingSession`
-- 需要确定触发回退的条件: 错误类型、超时、限流
+> 教训：本仓库 `#![allow(dead_code)]` 全局开着，"读起来像没接线"和"真的
+> 没接线"之间只能靠 grep 构造函数区分。CLAUDE.md 里同一条结论也已同步修正。
 
 ---
 

@@ -21,8 +21,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // 默认确认超时 (毫秒)
 const DEFAULT_CONFIRM_TIMEOUT_MS: u64 = 600_000; // 10分钟（给用户充足确认时间）
 
-// 默认工具执行超时 (毫秒)
-const DEFAULT_TOOL_TIMEOUT_MS: u64 = 600_000; // 10分钟
+// 注：工具执行超时不在本结构上持有。它由 runtime/control_requests.rs 按
+// 工具类型分别施加（STAR_TOOL_TIMEOUT_SECS），统一字段会让所有工具共用
+// 一个上限，反而破坏了 240/120/180 的分档。
 
 /// 从 panic payload 里取出可读消息
 ///
@@ -51,8 +52,6 @@ pub struct ToolExecutor {
     permission_manager: Arc<SessionPermissionManager>,
     /// 工具确认超时 (毫秒)
     confirm_timeout_ms: u64,
-    /// 工具执行超时 (毫秒)
-    tool_timeout_ms: u64,
 }
 
 impl ToolExecutor {
@@ -72,11 +71,6 @@ impl ToolExecutor {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(DEFAULT_CONFIRM_TIMEOUT_MS);
 
-        let tool_timeout_ms = std::env::var("STAR_TOOL_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_TOOL_TIMEOUT_MS);
-
         let permission_manager = Arc::new(SessionPermissionManager::with_persistence(
             config.storage().project_permissions_path(),
         ));
@@ -88,7 +82,6 @@ impl ToolExecutor {
             cached_tool_definitions: RwLock::new(None),
             permission_manager,
             confirm_timeout_ms,
-            tool_timeout_ms,
         }
     }
 

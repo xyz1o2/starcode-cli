@@ -136,14 +136,17 @@ pub async fn env(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResu
     }
 
     out.push_str("\n## Config paths\n");
+    // 路径必须与代码实际读写的一致：provider_store 用的是 ~/.star/user-settings.json，
+    // 不是 settings.json。列错文件，用户照着改了也不生效，只会以为配置被吞了。
     let mut paths: Vec<PathBuf> = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        paths.push(home.join(".star").join("settings.json"));
-        paths.push(home.join(".star").join("skills"));
-    }
+    paths.push(crate::core::config::storage::Storage::global_star_dir().join("user-settings.json"));
     if let Ok(cwd) = std::env::current_dir() {
-        paths.push(cwd.join(".star"));
-        paths.push(cwd.join("config.toml"));
+        paths.push(
+            crate::core::config::storage::Storage::new(cwd.clone()).workspace_settings_path(),
+        );
+        if let Some(ctx_file) = crate::utils::project_context::find_project_context_file(&cwd) {
+            paths.push(ctx_file);
+        }
     }
     for p in paths {
         out.push_str(&format!(
@@ -152,6 +155,7 @@ pub async fn env(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResu
             if p.exists() { "✅" } else { "—" }
         ));
     }
+    out.push_str("_Run `starcode doctor` for a parse check of each file._\n");
 
     out.push_str("\n## Environment variables\n");
     let mut vars: Vec<(String, String)> = std::env::vars()
@@ -3708,8 +3712,9 @@ pub async fn rate_limit_options(mut ctx: CommandContext<'_>, _args: &[String]) -
          - No provider quota API is queried, so remaining allowance and reset time cannot be \
            shown here — check your provider dashboard.\n\
          - `STAR_MODEL_FALLBACK_ENABLED` / `STAR_FALLBACK_MODELS` / `STAR_FALLBACK_BASE_URLS` / \
-           `STAR_MODEL_FALLBACK_MAX_RETRIES` are read only by `ModelFallbackManager`, which is \
-           never constructed; the live path uses the two single-value variables above.\n",
+           `STAR_MODEL_FALLBACK_MAX_RETRIES` belong to the multi-model `ModelFallbackManager`, \
+           which is constructed but only reached via `STAR_MODEL_FALLBACK_*` gating; the live \
+           429 path uses the two single-value variables above.\n",
     );
 
     push_msg(&mut ctx, out);

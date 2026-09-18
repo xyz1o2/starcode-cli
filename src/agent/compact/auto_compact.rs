@@ -256,24 +256,34 @@ impl CompactStrategy for AutoCompactStrategy {
         let split_idx = messages.len() - keep_recent;
         let mut result = Vec::with_capacity(messages.len());
 
+        // CompactManager::compact() 会先剥离连续的 system 前缀再调用本策略，
+        // 此时 index 0 不再是 system prompt，而是第一条 user 消息（用户的原始
+        // 任务）。写死 1.. 会把原始任务整体丢弃，且它既不在保留的 user 消息里、
+        // 也不在最近窗口里。这里与 snip_compact 保持一致的动态起点。
+        let start_idx = if !messages.is_empty() && messages[0].role == "system" {
+            1
+        } else {
+            0
+        };
+
         // 保留系统消息
-        if !messages.is_empty() && messages[0].role == "system" {
+        if start_idx == 1 {
             result.push(messages[0].clone());
         }
 
         // 添加压缩提示（含关键信息提取摘要，避免压缩后丢失项目分析/文件路径/决策）
-        let omitted_msgs = &messages[..split_idx];
+        let omitted_msgs = &messages[start_idx..split_idx];
         let key_summary = Self::extract_key_summary(omitted_msgs);
         result.push(StarMessage::system(format!(
             "[COMPACT] Context compressed. Omitted {} messages. Kept recent {} messages.\n{}",
-            split_idx - 1,
+            split_idx - start_idx,
             keep_recent,
             key_summary
         )));
 
         // Preserve ALL user messages from the omitted portion
         // This ensures user requests are not lost after compression
-        for msg in &messages[1..split_idx] {
+        for msg in &messages[start_idx..split_idx] {
             if msg.role == "user" {
                 result.push(msg.clone());
             }
@@ -284,7 +294,7 @@ impl CompactStrategy for AutoCompactStrategy {
         // 误以为已读的文件/搜索结果仍在 —— 内容其实已被清空。
         // 这里只保留最近 MAX 条，避免完全抵消压缩的 token 收益。
         const MAX_KEEP_TOOL_MSGS: usize = 4;
-        let omitted_tools: Vec<StarMessage> = messages[1..split_idx]
+        let omitted_tools: Vec<StarMessage> = messages[start_idx..split_idx]
             .iter()
             .filter(|m| m.role == "tool")
             .rev()
@@ -412,5 +422,93 @@ impl AutoCompactManager {
     /// 获取配置
     pub fn config(&self) -> &CompactConfig {
         &self.strategy.config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strategy() -> AutoCompactStrategy {
+        AutoCompactStrategy::new(CompactConfig::default())
+    }
+
+    /// compact() 调用策略前会剥离连续的 system 前缀，所以 apply() 看到的
+    /// index 0 是第一条 user 消息（原始任务）。回归用例：原先写死 `1..`
+    /// 会把原始任务整体丢弃——它既不在保留的 user 消息里，也不在最近窗口里。
+    #[test]
+    fn apply_preserves_original_task_when_system_prefix_stripped() {
+        let strategy = strategy();
+        let keep = strategy.get_keep_recent_count();
+
+        // 前缀已被剥离：0 号是 user 的原始任务，不是 system prompt
+        let mut messages = vec![StarMessage::user("original task: rename foo to bar")];
+        for i in 0..(keep + 4) {
+            messages.push(StarMessage::user(format!("turn {}", i)));
+        }
+
+        let result = strategy.apply(&messages);
+        let preserved_user: Vec<_> = result
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| m.content.clone().unwrap_or_default())
+            .collect();
+
+        assert!(
+            preserved_user.iter().any(|c| c.contains("original task")),
+            "original task message was dropped by compaction: {:?}",
+            preserved_user
+        );
+        // 最近窗口必须完整保留
+        assert!(
+            preserved_user.iter().any(|c| c.contains("turn 9")),
+            "recent window was dropped by compaction: {:?}",
+            preserved_user
+        );
+    }
+
+    /// 未剥离前缀的调用路径（index 0 仍是 system）行为不变。
+    #[test]
+    fn apply_preserves_recent_window_with_system_prefix() {
+        let strategy = strategy();
+        let keep = strategy.get_keep_recent_count();
+
+        let mut messages = vec![StarMessage::system("system prompt")];
+        for i in 0..(keep + 4) {
+            messages.push(StarMessage::user(format!("turn {}", i)));
+        }
+
+        let result = strategy.apply(&messages);
+        assert_eq!(result[0].role, "system");
+        let last_user = result
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .and_then(|m| m.content.as_deref());
+        assert_eq!(last_user, Some("turn 9"));
+    }
+
+    /// 被省略的消息条数要按实际起点算，不是写死的 split_idx - 1。
+    #[test]
+    fn compact_summary_reports_correct_omitted_count() {
+        let strategy = strategy();
+        let keep = strategy.get_keep_recent_count();
+
+        let messages: Vec<_> = (0..(keep + 5))
+            .map(|i| StarMessage::user(format!("msg {}", i)))
+            .collect();
+
+        let result = strategy.apply(&messages);
+        let summary = result
+            .iter()
+            .find(|m| m.role == "system")
+            .and_then(|m| m.content.as_deref())
+            .expect("compaction summary missing");
+
+        assert!(
+            summary.contains(&format!("Omitted {} messages", 5)),
+            "summary: {}",
+            summary
+        );
     }
 }

@@ -3,10 +3,15 @@ use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub async fn run(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
+/// 构建完整的 doctor 报告，不依赖任何 UI 状态。
+///
+/// `/doctor`（TUI）和 `starcode doctor`（CLI）必须给出同一份内容——环境类
+/// 失败恰恰发生在 TUI 起不来的时候，那时用户只能用 CLI。所以诊断逻辑全部
+/// 放这里，两条入口只负责"往哪儿输出"。
+pub async fn build_report(transcript_path: Option<PathBuf>) -> String {
     let mut report = String::from("# 🩺 StarCode Doctor Report\n\n");
     let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
 
@@ -23,15 +28,11 @@ pub async fn run(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
         );
     }
 
-    // 2. Check API Key
-    // We can't easily access the private API key here without passing it down,
-    // but we can check if the environment variable is set.
-    if std::env::var("STAR_API_KEY").is_ok() {
-        report.push_str("✅ API Key: STAR_API_KEY is set\n");
-    } else {
-        // It might be in settings, but let's just warn about env var
-        report.push_str("ℹ️ API Key: STAR_API_KEY env var not set (might be in settings)\n");
-    }
+    // 2. 配置文件：能不能解析，比"存在不存在"重要得多。
+    //    provider_store 遇到坏文件会静默回退到默认值，用户 downstream 只会
+    //    看到 "API key required"。这里把解析结果直接摆出来。
+    report.push_str("\n## Configuration\n");
+    report.push_str(&render_config_section().await);
 
     // 3. Check Essential Tools
     let tools = [
@@ -40,6 +41,9 @@ pub async fn run(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
         ("node", "--version"),
         ("npm", "--version"),
         ("python", "--version"),
+        // 搜索工具依赖 ripgrep；grep/find 在大仓上不够用，缺了会让
+        // "跨文件定位"这一类任务直接降级。
+        ("rg", "--version"),
     ];
 
     report.push_str("\n## Toolchain Status\n");
@@ -60,10 +64,11 @@ pub async fn run(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
         }
     }
 
-    // 4. Check Permissions Mode
-    // We need to access config if possible, but CommandContext doesn't expose Config directly yet.
-    // However, we can check the process arguments or global state if we had access.
-    // For now, skip.
+    // 4. 日志可写性：日志目录不可写时，所有 "[INIT] 卡在哪一步" 的面包屑都落不了地，
+    //    用户和我们都失去唯一的诊断途径。
+    report.push_str("\n## Logging\n");
+    report.push_str(&render_logging_section());
+
     report.push_str("\n## Harness Health\n");
 
     let eval_path = cwd.join(".star").join("eval-results.json");
@@ -101,23 +106,8 @@ pub async fn run(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
         }
     }
 
-    let transcript_path = ctx
-        .state
-        .transcript_path
-        .clone()
+    let transcript_path = transcript_path
         .unwrap_or_else(|| crate::ui::utils::transcript::default_transcript_path(&cwd));
-    if ctx.state.transcript_enabled {
-        report.push_str(&format!(
-            "✅ Transcript Trace: Enabled at `{}`\n",
-            transcript_path.display()
-        ));
-    } else {
-        report.push_str(&format!(
-            "⚠️ Transcript Trace: Disabled (expected path `{}`)\n",
-            transcript_path.display()
-        ));
-    }
-
     match load_transcript_summary(&transcript_path) {
         Ok(Some(summary)) => {
             report.push_str(&format!(
@@ -151,11 +141,163 @@ pub async fn run(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
         }
     }
 
+    report
+}
+
+/// TUI 入口：`/doctor`。
+pub async fn run(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
+    let transcript_path = if ctx.state.transcript_enabled {
+        ctx.state.transcript_path.clone()
+    } else {
+        None
+    };
+    let report = build_report(transcript_path).await;
+
     ctx.state
         .chat_history
         .push(crate::types::ChatEntry::assistant(report).with_streaming(false));
 
     Ok(())
+}
+
+/// CLI 入口：`starcode doctor`。不经过 TUI，环境出问题时也能跑。
+pub async fn run_cli() -> String {
+    build_report(None).await
+}
+
+/// 检查全局/项目配置文件是否存在、内容是否可解析，并顺带报告生效的
+/// provider 凭据状态（只报"有没有"，绝不把 key 打出来）。
+async fn render_config_section() -> String {
+    use crate::core::config::json_with_comments::parse_json_with_comments;
+    use crate::core::config::models::ProviderConfig;
+    use crate::core::config::provider_store::ProviderStore;
+    use crate::core::config::settings_manager::UserSettings;
+    use crate::core::config::storage::Storage;
+
+    let mut out = String::new();
+
+    // 全局配置：provider_store 实际读写的那个文件
+    let global_path = Storage::global_star_dir().join("user-settings.json");
+    match std::fs::read_to_string(&global_path) {
+        Ok(content) => {
+            // 复用 provider_store 的两段式判定，保证这里报的口径和加载时一致
+            if parse_json_with_comments::<UserSettings>(&content).is_ok() {
+                out.push_str(&format!(
+                    "✅ Global Config: parses as user-settings at `{}`\n",
+                    global_path.display()
+                ));
+            } else if parse_json_with_comments::<ProviderConfig>(&content).is_ok() {
+                out.push_str(&format!(
+                    "⚠️ Global Config: `{}` is legacy providers.json format — it will be migrated on next start\n",
+                    global_path.display()
+                ));
+            } else {
+                out.push_str(&format!(
+                    "❌ Global Config: `{}` exists but is NOT valid JSON — provider config is being ignored. Fix or delete it.\n",
+                    global_path.display()
+                ));
+            }
+        }
+        Err(_) => {
+            out.push_str(&format!(
+                "ℹ️ Global Config: `{}` not found (providers may still come from env vars)\n",
+                global_path.display()
+            ));
+        }
+    }
+
+    // 项目级 settings
+    let project_path =
+        Storage::new(std::env::current_dir().unwrap_or_default()).workspace_settings_path();
+    match std::fs::read_to_string(&project_path) {
+        Ok(content) => match parse_json_with_comments::<UserSettings>(&content) {
+            Ok(_) => out.push_str(&format!(
+                "✅ Project Config: parses at `{}`\n",
+                project_path.display()
+            )),
+            Err(err) => out.push_str(&format!(
+                "❌ Project Config: `{}` is NOT valid JSON ({}): project settings ignored\n",
+                project_path.display(),
+                err
+            )),
+        },
+        Err(_) => out.push_str(&format!(
+            "ℹ️ Project Config: `{}` not found\n",
+            project_path.display()
+        )),
+    }
+
+    // 生效的凭据：env 优先于文件，和 provider_resolution 的优先级一致
+    match ProviderStore::new().load().await {
+        Ok(config) => {
+            let active = config.active_provider_id.clone();
+            let api_key = active
+                .as_deref()
+                .and_then(|id| config.providers.get(id).and_then(|p| p.api_key.as_ref()));
+            let base_url = active
+                .as_deref()
+                .and_then(|id| config.providers.get(id).and_then(|p| p.base_url.as_ref()));
+
+            out.push_str(&format!(
+                "- Active Provider: {}\n",
+                active.as_deref().unwrap_or("<none>")
+            ));
+            if std::env::var("STAR_API_KEY").is_ok() {
+                out.push_str("✅ API Key: STAR_API_KEY env var is set (overrides file)\n");
+            } else if api_key.is_some() {
+                out.push_str("✅ API Key: set in config file\n");
+            } else {
+                out.push_str("❌ API Key: not set — chat will fail with 'API key required'\n");
+            }
+            if std::env::var("STAR_BASE_URL").is_ok() {
+                out.push_str("✅ Base URL: STAR_BASE_URL env var is set (overrides file)\n");
+            } else if let Some(url) = base_url {
+                if url == crate::core::config::providers::PLACEHOLDER_BASE_URL {
+                    out.push_str("❌ Base URL: placeholder value in config — set STAR_BASE_URL or the provider base_url\n");
+                } else {
+                    out.push_str(&format!("✅ Base URL: {}\n", url));
+                }
+            } else {
+                out.push_str("⚠️ Base URL: not set (provider default will be used, if any)\n");
+            }
+        }
+        Err(err) => out.push_str(&format!("❌ Provider Config: failed to load ({})\n", err)),
+    }
+
+    out
+}
+
+/// 日志目录是否真的写得进去——is_log_enabled 只看开关，不验证落地。
+fn render_logging_section() -> String {
+    let mut out = String::new();
+    if !crate::utils::logging::is_log_enabled() {
+        out.push_str(
+            "⚠️ Logging: disabled by STAR_LOG_ENABLED=0 — no diagnostics will be recorded\n",
+        );
+        return out;
+    }
+    let dir = crate::utils::logging::agent_log_path();
+    let Some(parent) = dir.parent() else {
+        out.push_str("⚠️ Logging: cannot resolve log directory\n");
+        return out;
+    };
+    // 真写一次再删，比检查目录存在更可靠（只读挂载/权限不足时目录可能存在但写不了）
+    let probe = parent.join(".doctor_write_probe");
+    match std::fs::write(&probe, b"probe") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            out.push_str(&format!(
+                "✅ Logging: writable, agent log at `{}`\n",
+                dir.display()
+            ));
+        }
+        Err(err) => out.push_str(&format!(
+            "❌ Logging: cannot write to `{}` ({}) — diagnostics are being lost\n",
+            parent.display(),
+            err
+        )),
+    }
+    out
 }
 
 #[derive(Debug, PartialEq)]

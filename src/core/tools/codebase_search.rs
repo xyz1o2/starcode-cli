@@ -294,10 +294,7 @@ fn build_search_engine_from_fs(
                                         >= CODEBASE_SEARCH_PROGRESS_EVERY_FILES
                                 {
                                     last_progress_indexed = stats.indexed_files;
-                                    emit_progress(
-                                        update_output,
-                                        format_progress(&stats),
-                                    );
+                                    emit_progress(update_output, format_progress(&stats));
                                 }
                             } else {
                                 // tree-sitter returned empty chunks → log and skip
@@ -1037,10 +1034,7 @@ fn resolve_engine(
     limits: CodebaseSearchLimits,
     update_output: &Option<ProgressCallback>,
     cache: Option<&Arc<SearchEngineCacheManager>>,
-) -> Result<
-    (SearchEngine, IndexStats, EngineSource),
-    Box<dyn std::error::Error + Send + Sync>,
-> {
+) -> Result<(SearchEngine, IndexStats, EngineSource), Box<dyn std::error::Error + Send + Sync>> {
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let current_mtime = index_mtime(root);
     let cache_key = (canonical_root, limits.cache_key());
@@ -1052,11 +1046,7 @@ fn resolve_engine(
 
         if let Some((stale_engine, _)) = manager.get_engine_stale(&cache_key) {
             crate::core::context::watcher::request_refresh(root);
-            return Ok((
-                stale_engine,
-                IndexStats::default(),
-                EngineSource::Stale,
-            ));
+            return Ok((stale_engine, IndexStats::default(), EngineSource::Stale));
         }
 
         // 冷启动：协调器可用且未发生过失败 → 后台构建 + Warming 兜底
@@ -2087,7 +2077,10 @@ mod tests {
                 "query #{} after rebuild should be Fresh, got {src:?}",
                 i + 1
             );
-            assert!(eng.doc_count() > 0, "engine should not be empty after rebuild");
+            assert!(
+                eng.doc_count() > 0,
+                "engine should not be empty after rebuild"
+            );
         }
     }
 
@@ -2119,7 +2112,6 @@ mod tests {
         );
     }
 
-
     /// 回归"一直在构建"：update_engine_in_cache_with_limits 存入缓存的
     /// mtime 令牌必须等于**写盘之后**的 index.json mtime。
     ///
@@ -2144,10 +2136,9 @@ mod tests {
         // 让 index_project 先写一次盘（模拟 indexer 已跑过一轮）。
         let indexer = crate::core::context::indexer::Indexer::new(root);
         indexer.index_project().unwrap();
-        let mtime_after_first_write =
-            std::fs::metadata(root.join(".star/context/index.json"))
-                .and_then(|m| m.modified())
-                .expect("index.json must exist");
+        let mtime_after_first_write = std::fs::metadata(root.join(".star/context/index.json"))
+            .and_then(|m| m.modified())
+            .expect("index.json must exist");
 
         // 再跑一次（无变更，但可能仍写盘），随后更新引擎缓存。
         let idx = indexer.index_project().unwrap();

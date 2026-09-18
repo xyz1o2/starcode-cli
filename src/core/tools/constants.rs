@@ -386,10 +386,7 @@ impl ToolName {
 
     /// 判断是否是执行工具
     pub fn is_execute_tool(&self) -> bool {
-        matches!(
-            self,
-            ToolName::Bash | ToolName::RunTests
-        )
+        matches!(self, ToolName::Bash | ToolName::RunTests)
     }
 }
 

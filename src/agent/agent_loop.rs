@@ -178,6 +178,16 @@ impl Agent {
             current_turn += 1;
             loop_state.next_turn();
 
+            // 归零本结构的输出 token 计数与续写计数。
+            //
+            // 注意 LoopState 里那个同名的 ToolCallBudget::reset_turn 已经由
+            // 上面的 next_turn() 调过了——但那是"每轮工具调用次数"预算，与
+            // TokenBudgetTracker 的"输出 token / 续写次数"是两个独立结构。
+            // 本结构此前没有任何调用者，turn_output_tokens 会跨整个 session
+            // 单调累加，一旦累计续写达到 max_continuations（默认 5），
+            // "输出截断 → 注入续写指令继续"的机制对剩余整个会话永久失效。
+            self.token_budget_tracker.reset_turn();
+
             // Abort check
             if self
                 .abort_flag

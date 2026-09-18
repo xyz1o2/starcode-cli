@@ -10,11 +10,25 @@ pub struct AutoPlanGateDecision {
 }
 
 fn auto_plan_enabled_from_env(raw: Option<String>) -> bool {
-    raw.map(|value| {
-        let value = value.trim().to_lowercase();
-        value == "1" || value == "true" || value == "on"
-    })
-    .unwrap_or(false)
+    // 空串视同未设置（与 is_log_enabled / Router::env_model 的口径一致）：
+    // `export STAR_AUTO_PLAN=$UNDEFINED` 这类误写不该静默关掉计划。
+    let value = raw.and_then(|v| {
+        let v = v.trim();
+        if v.is_empty() {
+            None
+        } else {
+            Some(v.to_lowercase())
+        }
+    });
+
+    match value {
+        // 只有明确的假值才关：与 is_log_enabled 同口径，未识别值不静默关掉
+        // 一个默认开启的能力（否则 STAR_AUTO_PLAN=yes_typo 会悄悄禁用计划）。
+        Some(v) => !(v == "0" || v == "false" || v == "off" || v == "no" || v == "disabled"),
+        // 默认开启：跨文件/多步骤任务依赖前置计划锚定步骤，关掉时这类任务
+        // 一上来就缺规划，长程推理随轮次推进快速失焦。需要时可用 STAR_AUTO_PLAN=0 关闭。
+        None => true,
+    }
 }
 
 pub fn auto_plan_enabled() -> bool {
@@ -118,6 +132,59 @@ pub fn detect_skip_verification_pattern(input: &str) -> Option<&'static str> {
         "no verification",
     ];
     patterns.into_iter().find(|pattern| lower.contains(pattern))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 两个闸门必须同时开才会生成计划：enabled（默认开）× Complex。
+    /// 之前这两道闸对跨文件任务是同时关的——router 把短描述判成 Simple，
+    /// 而 STAR_AUTO_PLAN 默认 off——所以这类任务永远拿不到前置计划。
+    #[test]
+    fn complex_request_within_history_is_eligible() {
+        let decision = evaluate_auto_plan_gate_with_limits(true, 6, &RequestComplexity::Complex, 2);
+        assert!(decision.should_generate);
+        assert_eq!(decision.reason, "eligible");
+    }
+
+    #[test]
+    fn non_complex_request_never_plans_even_when_enabled() {
+        let decision = evaluate_auto_plan_gate_with_limits(true, 6, &RequestComplexity::Simple, 2);
+        assert!(!decision.should_generate);
+        assert_eq!(decision.reason, "non_complex_request");
+    }
+
+    #[test]
+    fn enabled_flag_short_circuits_before_complexity_check() {
+        let decision =
+            evaluate_auto_plan_gate_with_limits(false, 6, &RequestComplexity::Complex, 2);
+        assert!(!decision.should_generate);
+        assert_eq!(decision.reason, "disabled");
+    }
+
+    #[test]
+    fn long_history_blocks_planning() {
+        let decision =
+            evaluate_auto_plan_gate_with_limits(true, 6, &RequestComplexity::Complex, 12);
+        assert!(!decision.should_generate);
+        assert_eq!(decision.reason, "history_limit_exceeded");
+    }
+
+    /// 默认开启是本改动的核心：未设 STAR_AUTO_PLAN 时不能退回关闭。
+    #[test]
+    fn auto_plan_defaults_to_enabled_when_unset() {
+        assert!(auto_plan_enabled_from_env(None));
+        assert!(auto_plan_enabled_from_env(Some(String::new())));
+        assert!(auto_plan_enabled_from_env(Some("garbage".to_string())));
+    }
+
+    #[test]
+    fn auto_plan_can_be_disabled_explicitly() {
+        assert!(!auto_plan_enabled_from_env(Some("0".to_string())));
+        assert!(!auto_plan_enabled_from_env(Some("false".to_string())));
+        assert!(!auto_plan_enabled_from_env(Some("off".to_string())));
+    }
 }
 
 pub fn should_skip_verification(input: &str) -> bool {
