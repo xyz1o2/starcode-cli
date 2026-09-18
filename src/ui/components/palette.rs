@@ -52,8 +52,6 @@ pub fn get_items(mode: &PaletteMode, state: &ChatState) -> Vec<PaletteItem> {
         PaletteMode::ProviderOptions(pid) => {
             get_provider_options_items(pid, &state.configured_providers)
         }
-        PaletteMode::AddProvider => get_add_provider_items(),
-        PaletteMode::AddProviderId(provider_type) => get_add_provider_id_items(provider_type),
         PaletteMode::ProviderDelete(provider_id) => get_provider_delete_items(provider_id),
         PaletteMode::Memory => get_memory_palette_items(),
         PaletteMode::AgentMode => get_agent_mode_palette_items(),
@@ -129,8 +127,6 @@ pub fn palette_title(mode: &PaletteMode, query: &str) -> String {
             PaletteMode::ProviderOther => "Regional Providers",
             PaletteMode::ProviderLocal => "Local Providers",
             PaletteMode::ProviderOptions(_) => "Provider Setup",
-            PaletteMode::AddProvider => "Add Provider",
-            PaletteMode::AddProviderId(_) => "Add Provider",
             PaletteMode::ProviderDelete(_) => "Remove Provider",
             PaletteMode::Language => "Language",
             PaletteMode::OutputStyle => "Output Style",
@@ -195,7 +191,7 @@ fn get_global_search_palette_items(state: &ChatState) -> Vec<PaletteItem> {
     items
 }
 
-fn get_all_provider_search_items(configured: &HashSet<String>) -> Vec<PaletteItem> {
+fn get_all_provider_search_items(configured: &[String]) -> Vec<PaletteItem> {
     let builtin_ids: HashSet<&str> = ALL_PROVIDERS.iter().map(|p| p.id).collect();
     let mut items: Vec<PaletteItem> = ALL_PROVIDERS
         .iter()
@@ -272,12 +268,7 @@ fn palette_action_key(action: &PaletteAction) -> String {
         PaletteAction::ToggleUiVerbose => "toggle_ui_verbose".to_string(),
         PaletteAction::CreatePr => "create_pr".to_string(),
         PaletteAction::ToggleColorblindMode => "toggle_colorblind_mode".to_string(),
-        PaletteAction::InputProviderId(provider_type) => {
-            format!("add_provider_id:{}", provider_type)
-        }
-        PaletteAction::InputProviderName(provider_id) => {
-            format!("add_provider_name:{}", provider_id)
-        }
+        PaletteAction::OpenProviderForm => "open_provider_form".to_string(),
         PaletteAction::DeleteProvider(provider_id) => format!("delete_provider:{}", provider_id),
         PaletteAction::InputModelName => "input_model_name".to_string(),
         PaletteAction::RefreshModels => "refresh_models".to_string(),
@@ -311,8 +302,6 @@ fn palette_mode_key(mode: &PaletteMode) -> String {
         PaletteMode::ProviderOptions(provider_id) => format!("provider_options:{}", provider_id),
         PaletteMode::Language => "language".to_string(),
         PaletteMode::OutputStyle => "output_style".to_string(),
-        PaletteMode::AddProvider => "add_provider".to_string(),
-        PaletteMode::AddProviderId(provider_type) => format!("add_provider_id:{}", provider_type),
         PaletteMode::ProviderDelete(provider_id) => format!("provider_delete:{}", provider_id),
     }
 }
@@ -1200,9 +1189,7 @@ pub fn get_theme_palette_items(state: &ChatState) -> Vec<PaletteItem> {
     items
 }
 
-pub fn get_provider_palette_items(
-    configured: &std::collections::HashSet<String>,
-) -> Vec<PaletteItem> {
+pub fn get_provider_palette_items(configured: &[String]) -> Vec<PaletteItem> {
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
         label: i18n::t("palette.back.label", ".. Back", ".. Back"),
@@ -1215,27 +1202,24 @@ pub fn get_provider_palette_items(
         action: PaletteAction::Back,
     }];
 
-    // Built-in providers
     let builtin_ids: std::collections::HashSet<&str> = ALL_PROVIDERS.iter().map(|p| p.id).collect();
-    for provider in ALL_PROVIDERS.iter() {
-        items.push(build_provider_item_flat(provider, configured));
-    }
 
-    // Custom providers (configured but not built-in)
-    let mut custom_ids: Vec<&String> = configured
-        .iter()
-        .filter(|id| !builtin_ids.contains(id.as_str()))
-        .collect();
-    custom_ids.sort();
-    for id in custom_ids {
-        let label = format!("{} ✓", id);
+    // 自定义 provider 放在最前面：刚加的 provider 一定是用户下一步要选的那个。
+    // `configured` 的顺序由 ProviderSettings::order 降序决定（见
+    // ProviderStore::configured_provider_ids），这里直接沿用。
+    for id in configured.iter().filter(|id| !builtin_ids.contains(id.as_str())) {
         items.push(PaletteItem {
             id: format!("provider_{}", id),
-            label,
+            label: format!("{} ✓", id),
             description: "Custom provider — configure or remove".to_string(),
             category: Some("Custom".to_string()),
             action: PaletteAction::Navigate(PaletteMode::ProviderOptions(id.clone())),
         });
+    }
+
+    // Built-in providers
+    for provider in ALL_PROVIDERS.iter() {
+        items.push(build_provider_item_flat(provider, configured));
     }
 
     // Add new provider entry
@@ -1244,7 +1228,7 @@ pub fn get_provider_palette_items(
         label: "Add New Provider".to_string(),
         description: "Create a custom OpenAI/Anthropic compatible endpoint".to_string(),
         category: Some("Custom".to_string()),
-        action: PaletteAction::Navigate(PaletteMode::AddProvider),
+        action: PaletteAction::OpenProviderForm,
     });
 
     items
@@ -1252,9 +1236,9 @@ pub fn get_provider_palette_items(
 
 fn build_provider_item_flat(
     provider: &ProviderMetadata,
-    configured: &HashSet<String>,
+    configured: &[String],
 ) -> PaletteItem {
-    let is_configured = configured.contains(provider.id);
+    let is_configured = configured.iter().any(|id| id == provider.id);
     let uses_manual_base_url = provider_requires_manual_base_url(provider.id);
 
     let label = if is_configured {
@@ -1278,22 +1262,22 @@ fn build_provider_item_flat(
     }
 }
 
-pub fn get_provider_popular_items(configured: &HashSet<String>) -> Vec<PaletteItem> {
+pub fn get_provider_popular_items(configured: &[String]) -> Vec<PaletteItem> {
     get_provider_category_items(ProviderCategory::Popular, "Popular", configured)
 }
 
-pub fn get_provider_local_items(configured: &HashSet<String>) -> Vec<PaletteItem> {
+pub fn get_provider_local_items(configured: &[String]) -> Vec<PaletteItem> {
     get_provider_category_items(ProviderCategory::Local, "Local", configured)
 }
 
-pub fn get_provider_other_items(configured: &HashSet<String>) -> Vec<PaletteItem> {
+pub fn get_provider_other_items(configured: &[String]) -> Vec<PaletteItem> {
     get_provider_category_items(ProviderCategory::Chinese, "Regional", configured)
 }
 
 fn get_provider_category_items(
     category: ProviderCategory,
     category_label: &str,
-    configured: &HashSet<String>,
+    configured: &[String],
 ) -> Vec<PaletteItem> {
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
@@ -1314,66 +1298,8 @@ fn get_provider_category_items(
     items
 }
 
-pub fn get_add_provider_items() -> Vec<PaletteItem> {
-    vec![
-        PaletteItem {
-            id: "back".to_string(),
-            label: ".. Back".to_string(),
-            description: "Return to providers".to_string(),
-            category: None,
-            action: PaletteAction::Back,
-        },
-        PaletteItem {
-            id: "add_openai_compatible".to_string(),
-            label: "OpenAI Compatible".to_string(),
-            description: "Custom OpenAI-compatible endpoint (LM Studio, Ollama, vLLM, etc.)"
-                .to_string(),
-            category: Some("Choose Type".to_string()),
-            action: PaletteAction::Navigate(PaletteMode::AddProviderId(
-                "openai-compatible".to_string(),
-            )),
-        },
-        PaletteItem {
-            id: "add_anthropic_compatible".to_string(),
-            label: "Anthropic Compatible".to_string(),
-            description: "Custom Anthropic-compatible endpoint (Claude /v1/messages)".to_string(),
-            category: Some("Choose Type".to_string()),
-            action: PaletteAction::Navigate(PaletteMode::AddProviderId(
-                "anthropic-compatible".to_string(),
-            )),
-        },
-    ]
-}
-
-pub fn get_add_provider_id_items(provider_type: &str) -> Vec<PaletteItem> {
-    let type_label = if provider_type == "anthropic-compatible" {
-        "Anthropic Compatible"
-    } else {
-        "OpenAI Compatible"
-    };
-    vec![
-        PaletteItem {
-            id: "back".to_string(),
-            label: ".. Back".to_string(),
-            description: "Return to add provider".to_string(),
-            category: None,
-            action: PaletteAction::Back,
-        },
-        PaletteItem {
-            id: "input_provider_id".to_string(),
-            label: format!("Enter a unique ID for your {} provider", type_label),
-            description: "e.g. my-lmstudio, my-ollama, work-api".to_string(),
-            category: Some("Provider ID".to_string()),
-            action: PaletteAction::InputProviderId(provider_type.to_string()),
-        },
-    ]
-}
-
-pub fn get_provider_options_items(
-    provider_id: &str,
-    configured: &HashSet<String>,
-) -> Vec<PaletteItem> {
-    let is_configured = configured.contains(provider_id);
+pub fn get_provider_options_items(provider_id: &str, configured: &[String]) -> Vec<PaletteItem> {
+    let is_configured = configured.iter().any(|id| id == provider_id);
     let metadata = get_provider_by_id(provider_id);
     let uses_manual_base_url = provider_requires_manual_base_url(provider_id);
     let requires_api_key = metadata
@@ -1515,9 +1441,9 @@ pub fn get_provider_delete_items(provider_id: &str) -> Vec<PaletteItem> {
 fn build_provider_item(
     provider: &ProviderMetadata,
     category_label: &str,
-    configured: &HashSet<String>,
+    configured: &[String],
 ) -> PaletteItem {
-    let is_configured = configured.contains(provider.id);
+    let is_configured = configured.iter().any(|id| id == provider.id);
     let uses_manual_base_url = provider_requires_manual_base_url(provider.id);
     let label = if is_configured {
         format!("{} ✓", provider.name)
@@ -1577,7 +1503,7 @@ fn build_provider_item(
     }
 }
 
-pub fn get_provider_quick_items(configured: &HashSet<String>) -> Vec<PaletteItem> {
+pub fn get_provider_quick_items(configured: &[String]) -> Vec<PaletteItem> {
     let mut items = Vec::new();
     for (category, category_label) in [
         (ProviderCategory::Popular, "Popular"),

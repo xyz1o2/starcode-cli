@@ -20,6 +20,10 @@ impl Agent {
             // 中途新发现的工具要到下一条消息才进入 tools 数组，避免击穿 prompt 缓存前缀。
             crate::core::tools::tool_search::begin_message_epoch();
 
+            // 换一个干净的中断 token：CancellationToken 一旦 cancel 就不可撤销，
+            // 上一回合的 ESC 不能把本回合的流和工具一起废掉。
+            self.arm_abort_token();
+
             let history_len = self
                 .session_messages
                 .iter()

@@ -25,6 +25,9 @@ pub struct Agent {
     pub(crate) pending_local_context: Vec<String>,
     pub(crate) abort_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) abort_token: Option<tokio_util::sync::CancellationToken>,
+    /// 本回合 token 轮询任务的句柄。`CancellationToken::cancel()` 不可撤销，
+    /// 所以 token 必须每回合换新；上一回合没撞上中断的轮询任务靠它回收。
+    pub(crate) abort_watcher: Option<tokio::task::JoinHandle<()>>,
     pub(crate) approval_mode: crate::types::ApprovalMode,
     /// Optional event sender — when set, streaming events (TextDelta, ReasoningDelta,
     /// ToolStarted, ToolFinished) are sent through this channel during the agent loop.
@@ -123,6 +126,7 @@ impl Agent {
             pending_local_context: Vec::new(),
             abort_flag: None,
             abort_token: None,
+            abort_watcher: None,
             approval_mode: crate::types::ApprovalMode::Default,
             event_tx: None,
             stream_tx: None,
@@ -209,20 +213,44 @@ impl Agent {
     }
 
     pub fn set_abort_flag(&mut self, flag: Arc<std::sync::atomic::AtomicBool>) {
+        self.abort_flag = Some(flag);
+        self.arm_abort_token();
+    }
+
+    /// 挂一个尚未取消的中断 token，供本回合的 LLM 流和工具执行协作取消。
+    ///
+    /// `CancellationToken::cancel()` 是**永久**的，而 `set_abort_flag` 只在
+    /// `StarAgent::new` 调一次。若跨回合复用同一个 token，会话里第一次 ESC
+    /// 就会把它永远留在 cancelled 状态：
+    /// - `agent_llm.rs` 的流式 select 会在第一个 chunk 之前立刻命中中断分支，
+    ///   响应还没开始就被掐断，之后每条消息都回空内容；
+    /// - `tool_executor.rs` 的 `is_cancelled()` 预检会让之后所有工具直接失败。
+    ///
+    /// 所以每个用户回合开始前必须换一个新 token，并顺手回收上一回合没退出的
+    /// 轮询任务（否则每个回合攒一个永不结束的 sleep 循环）。
+    pub(crate) fn arm_abort_token(&mut self) {
+        if let Some(watcher) = self.abort_watcher.take() {
+            watcher.abort();
+        }
+        let Some(flag) = self.abort_flag.clone() else {
+            self.abort_token = None;
+            return;
+        };
         let token = tokio_util::sync::CancellationToken::new();
         let child = token.clone();
-        let f = flag.clone();
-        tokio::spawn(async move {
+        // 只活到本回合：撞上中断就 cancel 并退出，下一回合的 arm 会把还没退出的
+        // 旧任务 abort 掉，不会每个回合攒一个常驻 sleep 循环。
+        let watcher = tokio::spawn(async move {
             loop {
-                if f.load(std::sync::atomic::Ordering::SeqCst) {
+                if flag.load(std::sync::atomic::Ordering::SeqCst) {
                     child.cancel();
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             }
         });
         self.abort_token = Some(token);
-        self.abort_flag = Some(flag);
+        self.abort_watcher = Some(watcher);
     }
 
     /// Emit an event through the event channel if configured.

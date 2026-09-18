@@ -382,6 +382,188 @@ fn show_model_name_modal(state: &mut ChatState) {
     state.input_context = Some(crate::ui::state::palette::InputContext::ModelName);
 }
 
+/// 打开"新增 provider"单面板表单。
+///
+/// 五个字段共用一个 textarea：切字段时由 `switch_provider_form_field` 把内容
+/// 在 `ProviderFormState::values` 和 textarea 之间搬。初始焦点给 Name（下标 1），
+/// Type 默认就是 OpenAI Compatible，多数本地/中转端点直接用。
+pub(crate) fn open_provider_form(state: &mut ChatState) {
+    state.quick_menu_back = Some(crate::ui::state::QuickMenuKind::Provider);
+    state.quick_menu_origin_palette = true;
+    state.close_palette();
+    state.enter_input_modal();
+
+    state.provider_form = crate::ui::state::palette::ProviderFormState::new();
+    state.provider_form.active_field = 1;
+
+    sync_textarea_to_active_field(state);
+
+    state.input_context = Some(crate::ui::state::palette::InputContext::ProviderForm);
+}
+
+/// 把 `values[active]` 灌进 textarea，并按当前字段设占位符。
+fn sync_textarea_to_active_field(state: &mut ChatState) {
+    use crate::ui::state::palette::PROVIDER_FORM_FIELDS;
+
+    let mut textarea = TextArea::default();
+    textarea.set_cursor_line_style(ratatui::style::Style::default());
+    textarea.set_placeholder_text(" ");
+    textarea.set_cursor_style(
+        ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+    );
+
+    if let Some(value) = state.provider_form.values.get(state.provider_form.active_field) {
+        if !value.is_empty() {
+            textarea.insert_str(value);
+        }
+    }
+    if let Some((_, hint, _)) = PROVIDER_FORM_FIELDS.get(state.provider_form.active_field) {
+        textarea.set_placeholder_text(*hint);
+    }
+    state.modal_textarea = textarea;
+}
+
+/// 表单字段切换：当前 textarea 内容存回 `values[active]`，再切到目标字段。
+/// `forward = false` 时往上走。越界时不动（不循环，免得 Tab 跑到 Type 上
+/// 还以为自己在填 Base URL）。
+fn switch_provider_form_field(state: &mut ChatState, forward: bool) {
+    let next = if forward {
+        state.provider_form.active_field + 1
+    } else {
+        state.provider_form.active_field.saturating_sub(1)
+    };
+    if next >= crate::ui::state::palette::PROVIDER_FORM_FIELDS.len() {
+        return;
+    }
+    save_active_field_to_form(state);
+    state.provider_form.active_field = next;
+    state.provider_form.error = None;
+    sync_textarea_to_active_field(state);
+}
+
+/// 把当前 textarea 的内容存回 `values[active]`。Type 字段（下标 0）不是文本，
+/// textarea 里的东西不该覆盖它，直接跳过。
+fn save_active_field_to_form(state: &mut ChatState) {
+    if state.provider_form.active_field == 0 {
+        return;
+    }
+    let value = collect_modal_input(&state.modal_textarea);
+    if let Some(slot) = state.provider_form.values.get_mut(state.provider_form.active_field) {
+        *slot = value;
+    }
+}
+
+/// 提交"新增 provider"表单。
+///
+/// 保存 provider 配置（一次 load+save，见 `ProviderStore::add_custom_provider`），
+/// id 由名称或 URL host 派生。model 留空时走自动获取：发 `ListModels`（便宜路径，
+/// 先吃两级缓存），面板进 Model 列表等结果；网络结果回来时
+/// `list_models_with_mode` 会把列表写回内存缓存和磁盘缓存（`model_cache`），
+/// `StreamMessage::ModelsList` 再把 UI 列表换掉 —— 下次开面板就直接命中缓存，
+/// 不用再等网络。
+async fn submit_provider_form(
+    state: &mut ChatState,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    save_active_field_to_form(state);
+
+    let form = state.provider_form.clone();
+    let provider_type = form.provider_type().to_string();
+    let base_url = normalize_modal_base_url(form.base_url());
+    let name = form.name().trim().to_string();
+    let api_key = normalize_modal_api_key(form.api_key());
+    let model = form.model().trim().to_string();
+
+    if base_url.is_empty() {
+        state.provider_form.error = Some("Base URL is required.".to_string());
+        return Ok(true);
+    }
+
+    let store = crate::core::config::provider_store::ProviderStore::new();
+    let base_id = crate::core::config::provider_store::derive_provider_id(&name, &base_url);
+    let provider_id = store.resolve_unique_provider_id(&base_id).await;
+
+    store
+        .add_custom_provider(
+            &provider_id,
+            if name.is_empty() { None } else { Some(&name) },
+            &provider_type,
+            Some(&base_url),
+            if api_key.is_empty() { None } else { Some(&api_key) },
+            if model.is_empty() { None } else { Some(&model) },
+        )
+        .await
+        .map_err(|e| format!("Failed to save provider: {}", e))?;
+
+    // 激活新 provider
+    let _ = store.set_active_provider(&provider_id).await;
+    register_configured_provider(state, &provider_id);
+    state.current_provider_id = Some(provider_id.clone());
+
+    let resolved_key = crate::core::config::providers::resolve_runtime_api_key(
+        Some(&provider_id),
+        if api_key.is_empty() { None } else { Some(api_key) },
+    );
+    let is_openai_compat = provider_type == "openai-compatible";
+    let _ = agent_tx
+        .send(AgentRequest::UpdateProviderConfig {
+            provider_id: Some(provider_id.clone()),
+            api_key: resolved_key,
+            base_url: Some(base_url.clone()),
+            is_openai_compatible: Some(is_openai_compat),
+            model: if model.is_empty() { None } else { Some(model.clone()) },
+        })
+        .await;
+
+    state.exit_input_modal();
+    close_quick_menus(state);
+    state.provider_form = crate::ui::state::palette::ProviderFormState::new();
+
+    if model.is_empty() {
+        // 自动获取模型列表：先标 loading，面板立刻能开，不用等网络
+        state.awaiting_models = true;
+        state.available_models.clear();
+        state.available_models_info.clear();
+        state.model_provider_map.clear();
+        state.current_model.clear();
+        let _ = agent_tx
+            .send(AgentRequest::ListModels { force: false })
+            .await;
+        state.palette_history.clear();
+        state.open_palette(PaletteMode::Model);
+        crate::ui::app::logic::emit_status_text(
+            state,
+            0,
+            &format!(
+                "Created provider '{}' — fetching model list...",
+                if name.is_empty() { &provider_id } else { &name }
+            ),
+        );
+    } else {
+        state.current_model = model.clone();
+        let _ = agent_tx
+            .send(AgentRequest::SetModel {
+                model,
+                provider_id: Some(provider_id.clone()),
+            })
+            .await;
+        crate::ui::app::logic::emit_status_text(
+            state,
+            0,
+            &format!("Created provider '{}' with model set.", provider_id),
+        );
+    }
+
+    Ok(true)
+}
+
+/// 把一个 provider id 记进 UI 的已配置列表，已存在就提到最前（新的在前）。
+fn register_configured_provider(state: &mut ChatState, provider_id: &str) {
+    state.configured_providers.retain(|id| id != provider_id);
+    state.configured_providers.insert(0, provider_id.to_string());
+}
+
+
 /// 删除一个自定义 provider。
 ///
 /// 删除范围是本地配置里 `providers.<id>` 整项 —— endpoint、API key、选中的模型
@@ -425,7 +607,7 @@ async fn delete_custom_provider(
         return;
     }
 
-    state.configured_providers.remove(provider_id);
+    state.configured_providers.retain(|id| id != provider_id);
     state.available_models.clear();
     state.available_models_info.clear();
     state.model_provider_map.retain(|_, pid| pid != provider_id);
@@ -685,7 +867,7 @@ pub(crate) async fn execute_palette_action(
                 .map(|provider| !provider.requires_api_key)
                 .unwrap_or(false)
             {
-                state.configured_providers.insert(provider_id.clone());
+                register_configured_provider(state, &provider_id);
             }
 
             let pid = provider_id.clone();
@@ -773,28 +955,8 @@ pub(crate) async fn execute_palette_action(
             show_provider_base_url_modal(state, &provider_id, initial_value);
             crate::ui::app::logic::emit_status_text(state, 0, "Please enter Base URL...");
         }
-        PaletteAction::InputProviderId(provider_type) => {
-            state.quick_menu_back = Some(crate::ui::state::QuickMenuKind::Provider);
-            state.quick_menu_origin_palette = true;
-            state.close_palette();
-            state.enter_input_modal();
-            state.input_modal_title = "Add New Provider — Enter ID".to_string();
-            state.input_modal_prompt =
-                "Choose a unique ID for this provider (e.g. my-lmstudio, my-ollama):".to_string();
-            state.input_modal_value = String::new();
-            let mut textarea = TextArea::default();
-            textarea.set_cursor_line_style(ratatui::style::Style::default());
-            textarea.set_placeholder_text("e.g. my-lmstudio");
-            textarea.set_cursor_style(
-                ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
-            );
-            state.modal_textarea = textarea;
-            state.input_context = Some(crate::ui::state::palette::InputContext::AddProviderId {
-                provider_type: provider_type.to_string(),
-            });
-        }
-        PaletteAction::InputProviderName(_provider_id) => {
-            // This action is not directly used; the flow is handled via InputContext transitions
+        PaletteAction::OpenProviderForm => {
+            open_provider_form(state);
         }
         PaletteAction::DeleteProvider(provider_id) => {
             delete_custom_provider(state, &provider_id, agent_tx).await;
@@ -2954,7 +3116,36 @@ async fn handle_input_modal(
         return Ok(false);
     }
 
+    // "新增 provider" 表单：字段切换 / 类型切换 由这里接管，Type 字段（下标 0）
+    // 是选项不是文本，普通字符键必须吃掉，否则会灌进共享的 textarea 里。
+    let is_provider_form = matches!(
+        state.input_context,
+        Some(crate::ui::state::palette::InputContext::ProviderForm)
+    );
+    let form_on_type_field =
+        is_provider_form && state.provider_form.active_field == 0;
+
     match key.code {
+        KeyCode::Tab | KeyCode::Down if is_provider_form => {
+            switch_provider_form_field(state, true);
+            return Ok(true);
+        }
+        KeyCode::BackTab | KeyCode::Up if is_provider_form => {
+            switch_provider_form_field(state, false);
+            return Ok(true);
+        }
+        KeyCode::Left if form_on_type_field => {
+            state.provider_form.cycle_type(false);
+            return Ok(true);
+        }
+        KeyCode::Right if form_on_type_field => {
+            state.provider_form.cycle_type(true);
+            return Ok(true);
+        }
+        // Type 字段不接收自由文本，按键一律吞掉，避免污染共享 textarea
+        KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete if form_on_type_field => {
+            return Ok(true);
+        }
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Ok(mut clipboard) = Clipboard::new() {
                 if let Ok(text) = clipboard.get_text() {
@@ -3039,7 +3230,7 @@ async fn handle_input_modal(
                                     provider_id
                                 ),
                             );
-                            state.configured_providers.insert(pid.clone());
+                            register_configured_provider(state, &pid);
 
                             // Check is_openai_compatible: built-in check first, then custom provider type
                             let provider_config = store.load().await.unwrap_or_default();
@@ -3189,217 +3380,8 @@ async fn handle_input_modal(
                             );
                         }
                     }
-                    crate::ui::state::palette::InputContext::AddProviderId { provider_type } => {
-                        let provider_id = state
-                            .input_modal_value
-                            .trim()
-                            .to_lowercase()
-                            .replace(' ', "-");
-                        if provider_id.is_empty() {
-                            crate::ui::app::logic::emit_status_text(
-                                state,
-                                0,
-                                "Provider ID cannot be empty.",
-                            );
-                            state.input_context =
-                                Some(crate::ui::state::palette::InputContext::AddProviderId {
-                                    provider_type,
-                                });
-                            return Ok(true);
-                        }
-                        // Check for conflicts with built-in providers
-                        if crate::core::config::providers::get_provider_by_id(&provider_id)
-                            .is_some()
-                        {
-                            crate::ui::app::logic::emit_status_text(state, 0, &format!("'{}' conflicts with a built-in provider. Choose a different ID.", provider_id));
-                            state.input_context =
-                                Some(crate::ui::state::palette::InputContext::AddProviderId {
-                                    provider_type,
-                                });
-                            return Ok(true);
-                        }
-                        // Transition to name input
-                        state.enter_input_modal();
-                        state.input_modal_title = "Add New Provider — Enter Name".to_string();
-                        state.input_modal_prompt =
-                            format!("Enter a display name for '{}':", provider_id);
-                        state.input_modal_value = String::new();
-                        let mut textarea = TextArea::default();
-                        textarea.set_cursor_line_style(ratatui::style::Style::default());
-                        textarea.set_placeholder_text("e.g. My LM Studio");
-                        textarea.set_cursor_style(
-                            ratatui::style::Style::default()
-                                .add_modifier(ratatui::style::Modifier::REVERSED),
-                        );
-                        state.modal_textarea = textarea;
-                        state.input_context =
-                            Some(crate::ui::state::palette::InputContext::AddProviderName {
-                                provider_type,
-                                provider_id,
-                            });
-                        return Ok(true);
-                    }
-                    crate::ui::state::palette::InputContext::AddProviderName {
-                        provider_type,
-                        provider_id,
-                    } => {
-                        let name = state.input_modal_value.trim().to_string();
-                        if name.is_empty() {
-                            crate::ui::app::logic::emit_status_text(
-                                state,
-                                0,
-                                "Name cannot be empty.",
-                            );
-                            state.input_context =
-                                Some(crate::ui::state::palette::InputContext::AddProviderName {
-                                    provider_type,
-                                    provider_id,
-                                });
-                            return Ok(true);
-                        }
-                        // Transition to base URL input
-                        state.enter_input_modal();
-                        state.input_modal_title =
-                            format!("Add New Provider — Base URL for {}", provider_id);
-                        state.input_modal_prompt = "Enter the API endpoint base URL:".to_string();
-                        state.input_modal_value = String::new();
-                        let mut textarea = TextArea::default();
-                        textarea.set_cursor_line_style(ratatui::style::Style::default());
-                        textarea.set_placeholder_text("e.g. http://localhost:1234/v1");
-                        textarea.set_cursor_style(
-                            ratatui::style::Style::default()
-                                .add_modifier(ratatui::style::Modifier::REVERSED),
-                        );
-                        state.modal_textarea = textarea;
-                        state.input_context = Some(
-                            crate::ui::state::palette::InputContext::AddProviderBaseUrl {
-                                provider_type,
-                                provider_id,
-                                name,
-                            },
-                        );
-                        return Ok(true);
-                    }
-                    crate::ui::state::palette::InputContext::AddProviderBaseUrl {
-                        provider_type,
-                        provider_id,
-                        name,
-                    } => {
-                        let base_url = normalize_modal_base_url(&state.input_modal_value);
-                        if base_url.is_empty() {
-                            crate::ui::app::logic::emit_status_text(
-                                state,
-                                0,
-                                "Base URL cannot be empty.",
-                            );
-                            state.input_context = Some(
-                                crate::ui::state::palette::InputContext::AddProviderBaseUrl {
-                                    provider_type,
-                                    provider_id,
-                                    name,
-                                },
-                            );
-                            return Ok(true);
-                        }
-                        // Transition to API key input (optional)
-                        state.enter_input_modal();
-                        state.input_modal_title =
-                            format!("Add New Provider — API Key for {}", provider_id);
-                        state.input_modal_prompt =
-                            "Enter API key (leave empty to skip):".to_string();
-                        state.input_modal_value = String::new();
-                        let mut textarea = TextArea::default();
-                        textarea.set_cursor_line_style(ratatui::style::Style::default());
-                        textarea.set_placeholder_text("Optional — press Enter to skip");
-                        textarea.set_cursor_style(
-                            ratatui::style::Style::default()
-                                .add_modifier(ratatui::style::Modifier::REVERSED),
-                        );
-                        state.modal_textarea = textarea;
-                        state.input_context =
-                            Some(crate::ui::state::palette::InputContext::AddProviderApiKey {
-                                provider_type,
-                                provider_id,
-                                name,
-                                base_url,
-                            });
-                        return Ok(true);
-                    }
-                    crate::ui::state::palette::InputContext::AddProviderApiKey {
-                        provider_type,
-                        provider_id,
-                        name,
-                        base_url,
-                    } => {
-                        let api_key = normalize_modal_api_key(&state.input_modal_value);
-                        let pid = provider_id.clone();
-                        let store = crate::core::config::provider_store::ProviderStore::new();
-
-                        // Save provider settings
-                        let _ = store.set_base_url(&pid, &base_url).await;
-                        if !api_key.is_empty() {
-                            let _ = store.set_api_key(&pid, &api_key).await;
-                        }
-
-                        // Set provider type and name via a custom save
-                        {
-                            let mut config = store.load().await.unwrap_or_default();
-                            let settings = config.providers.entry(pid.clone()).or_insert(
-                                crate::core::config::models::ProviderSettings {
-                                    api_key: None,
-                                    base_url: None,
-                                    selected_model: None,
-                                    models: None,
-                                    name: None,
-                                    description: None,
-                                    r#type: None,
-                                },
-                            );
-                            settings.name = Some(name.clone());
-                            settings.r#type = Some(provider_type.clone());
-                            let _ = store.save(&config).await;
-                        }
-
-                        // Activate the provider
-                        let _ = store.set_active_provider(&pid).await;
-                        state.configured_providers.insert(pid.clone());
-                        state.current_provider_id = Some(pid.clone());
-                        state.current_model.clear();
-
-                        // Notify agent
-                        let resolved_key = crate::core::config::providers::resolve_runtime_api_key(
-                            Some(&pid),
-                            Some(api_key.clone()),
-                        );
-                        let is_openai_compat = provider_type == "openai-compatible";
-                        let _ = agent_tx
-                            .send(AgentRequest::UpdateProviderConfig {
-                                provider_id: Some(pid.clone()),
-                                api_key: resolved_key,
-                                base_url: Some(base_url.clone()),
-                                is_openai_compatible: Some(is_openai_compat),
-                                model: None,
-                            })
-                            .await;
-                        let _ = agent_tx
-                            .send(AgentRequest::ListModels { force: false })
-                            .await;
-
-                        state.available_models.clear();
-                        state.exit_input_modal();
-                        close_quick_menus(state);
-                        state.palette_history.clear();
-                        state.open_palette(PaletteMode::Model);
-
-                        crate::ui::app::logic::emit_status_text(
-                            state,
-                            0,
-                            &format!(
-                                "Created provider '{}' ({}) — now choose a model.",
-                                name, pid
-                            ),
-                        );
-                        return Ok(true);
+                    crate::ui::state::palette::InputContext::ProviderForm => {
+                        return submit_provider_form(state, agent_tx).await;
                     }
                     crate::ui::state::palette::InputContext::MarketplaceSource => {
                         let source = state.input_modal_value.trim().to_string();

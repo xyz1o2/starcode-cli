@@ -315,7 +315,12 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
         state.top_modal(),
         Some(crate::ui::state::modal::Modal::InputModal)
     ) {
-        crate::ui::components::input_modal::render_input_modal(f, f.area(), state);
+        // "新增 provider" 表单复用 InputModal 的开关，但画的是多字段面板
+        if crate::ui::components::provider_form::is_provider_form_active(state) {
+            crate::ui::components::provider_form::render_provider_form(f, f.area(), state);
+        } else {
+            crate::ui::components::input_modal::render_input_modal(f, f.area(), state);
+        }
     }
 
     // Draw status modal if needed

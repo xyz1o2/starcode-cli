@@ -1119,6 +1119,53 @@ mod tests {
             before_turn.thinking_effort
         );
     }
+
+    /// 回归：一次 ESC 不能废掉会话里后续的所有对话。
+    ///
+    /// 轮询任务把 abort_flag 翻译成 token.cancel()，而 `CancellationToken::cancel()`
+    /// 不可撤销；`reset_abort` 只清 flag。修复前 token 只在 `StarAgent::new` 建一次，
+    /// 于是第一个 ESC 之后每个回合都拿到已取消的 token —— LLM 流在第一个 chunk
+    /// 之前就被 select 的中断分支掐断（回空内容），工具被
+    /// "cancelled before start" 直接拒掉。
+    #[tokio::test]
+    async fn abort_token_is_rearmed_per_turn_after_user_abort() {
+        let mut agent = StarAgent::new_for_runtime_settings_test().await;
+        let flag = agent.abort_handle();
+
+        // 第一回合：模拟 ESC，等轮询任务（150ms 间隔）把 token cancel 掉
+        agent.abort();
+        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+        let aborted_token = agent
+            .abort_token
+            .clone()
+            .expect("set_abort_flag must install a token");
+        assert!(aborted_token.is_cancelled(), "ESC 必须能取消本回合的 token");
+
+        // 回合结束：worker 走 reset_abort，只清 flag
+        agent.reset_abort();
+        assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
+
+        // 下一回合开始：必须是一个干净的 token。旧 token 仍然 cancelled ——
+        // 这正是必须换新的原因。
+        agent.arm_abort_token();
+        let next_token = agent
+            .abort_token
+            .as_ref()
+            .expect("arm_abort_token must install a fresh token");
+        assert!(
+            !next_token.is_cancelled(),
+            "新回合不能继承上一回合的取消状态，否则 ESC 之后会话永久失效"
+        );
+        assert!(aborted_token.is_cancelled());
+
+        // 新 token 仍要对本回合的 ESC 有反应
+        agent.abort();
+        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+        assert!(
+            next_token.is_cancelled(),
+            "rearm 之后 ESC 仍必须能取消当前 token"
+        );
+    }
 }
 
 impl Deref for StarAgent {

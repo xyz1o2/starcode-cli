@@ -33,6 +33,9 @@ pub struct ProviderSettings {
     pub name: Option<String>,
     pub description: Option<String>,
     pub r#type: Option<String>,
+    /// 创建时刻的 Unix 秒，越新越靠前。`None` 是老条目（升级前就存在的配置），
+    /// 排在后面。provider 列表用它把新加的 provider 顶到最前面。
+    pub order: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

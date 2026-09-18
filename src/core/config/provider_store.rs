@@ -32,6 +32,61 @@ fn normalize_model_name(value: Option<String>) -> Option<String> {
     normalize_optional_string(value)
 }
 
+/// 把任意文本压成一个能当配置 key 的 provider id：小写、非 `[a-z0-9_-]` 的字符
+/// 折叠成单个 `-`、首尾不留 `-`。输入是空白时返回 `None`。
+fn slugify(value: &str) -> Option<String> {
+    let mut result = String::new();
+    let mut prev_dash = true; // 开头的 `-` 要跳过，所以先当"上一个已经是 -"
+    for ch in value.trim().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            result.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            result.push('-');
+            prev_dash = true;
+        }
+    }
+    while result.ends_with('-') {
+        result.pop();
+    }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// 从 URL 里取出 `host[:port]`，再压成 slug。解析不出 host 就返回 `None`。
+fn host_slug(url: &str) -> Option<String> {
+    let rest = url
+        .trim()
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url.trim());
+    // 去掉 path / query，只留 authority
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    slugify(authority)
+}
+
+/// 由名称（优先）或 base URL 的 host 派生 provider id。
+///
+/// 表单里用户只填一次名称，id 不再单独问。名称留空时退回 URL host，
+/// 比如 `http://localhost:1234/v1` → `localhost-1234`。两者都没有就给个兜底。
+pub fn derive_provider_id(name: &str, base_url: &str) -> String {
+    slugify(name)
+        .or_else(|| host_slug(base_url))
+        .unwrap_or_else(|| "custom-provider".to_string())
+}
+
+/// 当前 Unix 秒，用作新 provider 的 `order`。时钟取不到就退回 0（老条目也是 0，
+/// 排序时同级，顺序由 HashMap 迭代决定——只在取不到时间这种极端情况下发生）。
+fn now_order() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 impl ProviderStore {
     pub fn new() -> Self {
         // Unified Config: Use user-settings.json instead of providers.json
@@ -141,6 +196,7 @@ impl ProviderStore {
                             name: None,
                             description: None,
                             r#type: None,
+                            order: None,
                         });
 
                         if let Some(key) = settings.api_key {
@@ -214,6 +270,7 @@ impl ProviderStore {
                                 name: None,
                                 description: None,
                                 r#type: None,
+                                order: None,
                             });
                     settings.selected_model = Some(active_model);
                     let _ = self.save(&config).await;
@@ -324,6 +381,7 @@ impl ProviderStore {
                     name: None,
                     description: None,
                     r#type: None,
+                    order: None,
                 });
         settings.api_key = normalize_api_key(Some(api_key.to_string()));
         self.save(&config).await
@@ -343,6 +401,7 @@ impl ProviderStore {
                     name: None,
                     description: None,
                     r#type: None,
+                    order: None,
                 });
         settings.base_url = normalize_optional_string(Some(base_url.to_string()));
         self.save(&config).await
@@ -372,6 +431,7 @@ impl ProviderStore {
                     name: None,
                     description: None,
                     r#type: None,
+                    order: None,
                 });
         let normalized_model = normalize_model_name(Some(model.to_string()));
         settings.selected_model = normalized_model.clone();
@@ -406,6 +466,7 @@ impl ProviderStore {
                     name: None,
                     description: None,
                     r#type: None,
+                    order: None,
                 });
             settings.selected_model = normalize_model_name(Some(model.to_string()));
         }
@@ -433,6 +494,7 @@ impl ProviderStore {
                     name: None,
                     description: None,
                     r#type: None,
+                    order: None,
                 });
         settings.selected_model = normalize_model_name(Some(model.to_string()));
         self.save(&config).await
@@ -452,31 +514,185 @@ impl ProviderStore {
     pub async fn configured_provider_ids(&self) -> Result<Vec<String>, String> {
         let config = self.load().await?;
         let active_provider_id = config.active_provider_id.as_deref();
-        let mut ids = HashSet::new();
 
-        for provider in crate::core::config::providers::ALL_PROVIDERS {
-            let settings = config.providers.get(provider.id);
-            if crate::core::config::providers::provider_is_configured(
-                provider.id,
+        let builtin_ids: HashSet<&str> =
+            crate::core::config::providers::ALL_PROVIDERS.iter().map(|p| p.id).collect();
+
+        let is_configured = |id: &str, settings: Option<&ProviderSettings>| {
+            crate::core::config::providers::provider_is_configured(
+                id,
                 settings,
                 active_provider_id,
-            ) {
-                ids.insert(provider.id.to_string());
-            }
+            )
+        };
+
+        // 自定义 provider：order 降序（新的在前，老条目 None 当 0 垫底）。
+        // 调用方（provider 面板）把整段自定义 provider 放在内置之前，所以"刚加的"
+        // 一定排在列表最上面。
+        let mut custom: Vec<(u64, String)> = config
+            .providers
+            .iter()
+            .filter(|(id, _)| !builtin_ids.contains(id.as_str()))
+            .filter(|(id, settings)| is_configured(id, Some(settings)))
+            .map(|(id, settings)| (settings.order.unwrap_or(0), id.clone()))
+            .collect();
+        custom.sort_by(|(a, _), (b, _)| b.cmp(a));
+
+        // 内置 provider 按声明顺序排，顺序稳定、可预测
+        let builtin: Vec<String> = crate::core::config::providers::ALL_PROVIDERS
+            .iter()
+            .map(|p| p.id.to_string())
+            .filter(|id| is_configured(id, config.providers.get(id.as_str())))
+            .collect();
+
+        // 两段按是否内置分过桶，不会重叠
+        Ok(custom
+            .into_iter()
+            .map(|(_, id)| id)
+            .chain(builtin)
+            .collect())
+    }
+
+    /// 解决 id 冲突：和内置 id 或已存在的自定义 key 撞了就追加 `-2` / `-3` ……
+    pub async fn resolve_unique_provider_id(&self, base_id: &str) -> String {
+        let config = self.load().await.unwrap_or_default();
+        resolve_provider_id_conflicts(base_id, &config)
+    }
+
+    /// 一次 load+save 写完一个自定义 provider 的全部字段。
+    ///
+    /// 取代以前散在 UI 代码里的 set_base_url / set_api_key / load-entry-save 三段式：
+    /// 那种写法要读写配置三四遍，而且 `order`（新 provider 置顶用的）没法在
+    /// 分散的几次调用里原子地塞进去。
+    pub async fn add_custom_provider(
+        &self,
+        provider_id: &str,
+        name: Option<&str>,
+        provider_type: &str,
+        base_url: Option<&str>,
+        api_key: Option<&str>,
+        selected_model: Option<&str>,
+    ) -> Result<(), String> {
+        let mut config = self.load().await?;
+        let settings = config
+            .providers
+            .entry(provider_id.to_string())
+            .or_insert(ProviderSettings {
+                api_key: None,
+                base_url: None,
+                selected_model: None,
+                models: None,
+                name: None,
+                description: None,
+                r#type: None,
+                order: None,
+            });
+
+        settings.name = normalize_optional_string(name.map(str::to_string));
+        settings.r#type = Some(provider_type.to_string());
+        settings.base_url = normalize_optional_string(base_url.map(str::to_string));
+        settings.api_key = normalize_api_key(api_key.map(str::to_string));
+        settings.selected_model = normalize_model_name(selected_model.map(str::to_string));
+        // 只有在还没有 order 的情况下打时间戳：重新配置一个已存在的 provider
+        // 不该改变它在列表里的位置。
+        if settings.order.is_none() {
+            settings.order = Some(now_order());
         }
 
-        for (provider_id, settings) in &config.providers {
-            if crate::core::config::providers::provider_is_configured(
-                provider_id,
-                Some(settings),
-                active_provider_id,
-            ) {
-                ids.insert(provider_id.clone());
-            }
-        }
+        self.save(&config).await
+    }
+}
 
-        let mut ids: Vec<_> = ids.into_iter().collect();
-        ids.sort();
-        Ok(ids)
+/// `resolve_unique_provider_id` 的纯函数部分，方便单测（不用碰磁盘）。
+fn resolve_provider_id_conflicts(base_id: &str, config: &ProviderConfig) -> String {
+    let taken = |id: &str| {
+        crate::core::config::providers::get_provider_by_id(id).is_some()
+            || config.providers.contains_key(id)
+    };
+
+    if !taken(base_id) {
+        return base_id.to_string();
+    }
+
+    for suffix in 2..u64::MAX {
+        let candidate = format!("{}-{}", base_id, suffix);
+        if !taken(&candidate) {
+            return candidate;
+        }
+    }
+
+    // 几亿个 id 都撞了——实际到不了这里，但函数必须有个终点
+    format!("{}-conflict", base_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::models::ProviderConfig;
+
+    #[test]
+    fn derive_id_prefers_the_name() {
+        assert_eq!(derive_provider_id("My LM Studio", ""), "my-lm-studio");
+        assert_eq!(derive_provider_id("work-api", ""), "work-api");
+    }
+
+    #[test]
+    fn derive_id_falls_back_to_url_host() {
+        // 没有名称时从 URL 取 host[:port]，path/query 不要
+        assert_eq!(derive_provider_id("", "http://localhost:1234/v1"), "localhost-1234");
+        assert_eq!(
+            derive_provider_id("", "https://api.example.com/chat/completions"),
+            "api-example-com"
+        );
+        assert_eq!(derive_provider_id("   ", "https://gateway.io/?x=1"), "gateway-io");
+    }
+
+    #[test]
+    fn derive_id_collapses_junk_characters() {
+        // 非 [a-z0-9_-] 折叠成单个 -，首尾不留 -
+        assert_eq!(derive_provider_id("My!!!Provider###", ""), "my-provider");
+        assert_eq!(derive_provider_id("---weird---", ""), "weird");
+        assert_eq!(derive_provider_id("provider_2", ""), "provider_2");
+    }
+
+    #[test]
+    fn derive_id_has_a_last_resort() {
+        assert_eq!(derive_provider_id("", ""), "custom-provider");
+    }
+
+    #[test]
+    fn conflict_with_builtin_gets_a_suffix() {
+        // anthropic 是内置 id，得换个名字
+        let config = ProviderConfig::default();
+        let resolved = resolve_provider_id_conflicts("anthropic", &config);
+        assert_eq!(resolved, "anthropic-2");
+    }
+
+    #[test]
+    fn conflict_with_existing_custom_gets_next_free_suffix() {
+        let mut config = ProviderConfig::default();
+        config.providers.insert("work-api".to_string(), ProviderSettings::default());
+        config
+            .providers
+            .insert("work-api-2".to_string(), ProviderSettings::default());
+
+        assert_eq!(
+            resolve_provider_id_conflicts("work-api", &config),
+            "work-api-3"
+        );
+        // 没冲突时原样返回
+        assert_eq!(
+            resolve_provider_id_conflicts("other-api", &config),
+            "other-api"
+        );
+    }
+
+    #[test]
+    fn empty_config_resolves_any_fresh_id() {
+        let config = ProviderConfig::default();
+        assert_eq!(
+            resolve_provider_id_conflicts("fresh-id", &config),
+            "fresh-id"
+        );
     }
 }

@@ -590,8 +590,13 @@ pub struct ChatState {
     pub modal_textarea: TextArea<'static>,
     // Context for the input modal to determine action on completion
     pub input_context: Option<crate::ui::state::palette::InputContext>,
-    // Providers that are ready to use or have meaningful saved setup
-    pub configured_providers: HashSet<String>,
+    // Providers that are ready to use or have meaningful saved setup.
+    // 顺序有意义：新的自定义 provider 在前（`ProviderSettings::order` 降序），
+    // provider 面板直接按这个顺序渲染。
+    pub configured_providers: Vec<String>,
+    /// "新增 provider" 单面板表单的编辑状态。`input_context` 是
+    /// `ProviderForm` 时它才有效。
+    pub provider_form: crate::ui::state::palette::ProviderFormState,
     // ============ Task Panel State ============
     pub task_panel: crate::ui::components::task_panel::TaskPanel,
     // ============ 粘贴状态 ============
@@ -1007,7 +1012,8 @@ impl ChatState {
             input_modal_value: String::new(),
             modal_textarea: TextArea::default(),
             input_context: None,
-            configured_providers: HashSet::new(),
+            configured_providers: Vec::new(),
+            provider_form: crate::ui::state::palette::ProviderFormState::new(),
             task_panel: crate::ui::components::task_panel::TaskPanel::new(),
             paste_in_progress: false,
             paste_end_time: None,
