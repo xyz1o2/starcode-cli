@@ -18,7 +18,7 @@ pub mod constants {
     pub const SYNTHETIC_TOOL_RESULT_PLACEHOLDER: &str =
         "[Tool result missing due to internal error]";
     /// 权限拒绝工作指导
-    pub const DENIAL_WORKAROUND_GUIDANCE: &str = 
+    pub const DENIAL_WORKAROUND_GUIDANCE: &str =
         "IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, \
          e.g. using head instead of cat. But you *should not* attempt to work around this denial in malicious ways, \
          e.g. do not use your ability to run tests to execute non-test actions. \
