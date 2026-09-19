@@ -48,8 +48,9 @@ pub enum PaletteAction {
     TypeCommand(String),    // Type into input box (with trailing space if needed)
     SelectProvider(String),
     ToggleFeature(String),
-    InputApiKey(String),  // provider_id
-    InputBaseUrl(String), // provider_id
+    /// 打开表单编辑一个已存在的 provider（内置或自定义均可）：预填当前值，
+    /// 提交时 upsert 到同一个 id。
+    EditProvider(String),
     Back,
     // New actions
     SetModel(String),
@@ -80,12 +81,6 @@ pub enum PaletteAction {
 
 #[derive(Debug, Clone)]
 pub enum InputContext {
-    ProviderKey {
-        provider_id: String,
-    },
-    ProviderBaseUrl {
-        provider_id: String,
-    },
     ContextWindow,
     /// 手动录入模型名（不校验、不联网，直接切过去）
     ModelName,
@@ -110,12 +105,24 @@ impl Default for PaletteMode {
 /// 把当前内容存回 `values[active]`，再拿 `values[next]` 重建 textarea。
 /// Type 字段（下标 0）是选项而不是自由文本，它的值存在 `values[0]` 里，
 /// 由 `provider_type()` 解析，textarea 不渲染。
+///
+/// 填完字段 Tab 到底部的操作行（`on_actions`）：`‹ Back` 取消回上一层，
+/// `Save ›` 提交。`action_index` 是操作行里的选中项。
+///
+/// `editing_id` 为 `Some` 时是编辑模式：五个字段预填该 provider 的现值，
+/// 提交时 upsert 回同一个 id；为 `None` 是新增，id 由名称 / URL host 派生。
 #[derive(Debug, Clone)]
 pub struct ProviderFormState {
     /// 与 [`PROVIDER_FORM_FIELDS`] 下标对齐的字段值
     pub values: Vec<String>,
     /// 当前焦点的字段下标
     pub active_field: usize,
+    /// 焦点是否在底部的 Back/Save 操作行上
+    pub on_actions: bool,
+    /// 操作行选中项：0 = Back，1 = Save
+    pub action_index: usize,
+    /// 编辑模式：正在改的 provider id。`None` 是新增。
+    pub editing_id: Option<String>,
     /// 校验错误，显示在面板底部
     pub error: Option<String>,
 }
@@ -130,7 +137,11 @@ impl ProviderFormState {
                 String::new(),
                 String::new(),
             ],
-            active_field: 1,
+            active_field: 0,
+            on_actions: false,
+            // 默认落在 Save 上：填完五个字段后通常就是要保存
+            action_index: 1,
+            editing_id: None,
             error: None,
         }
     }
@@ -183,6 +194,16 @@ impl ProviderFormState {
 impl Default for ProviderFormState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// API Key 字段的提示：新增时空着是"不要 key"，编辑时空着是"保持原 key"
+/// （密钥不预填到表单里，见 `open_provider_form`）。
+pub fn api_key_field_hint(editing: bool) -> &'static str {
+    if editing {
+        "Leave empty to keep the current key"
+    } else {
+        "Leave empty to skip"
     }
 }
 

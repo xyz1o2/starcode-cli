@@ -248,8 +248,6 @@ fn palette_action_key(action: &PaletteAction) -> String {
         PaletteAction::TypeCommand(cmd) => format!("type:{}", cmd),
         PaletteAction::SelectProvider(provider_id) => format!("provider:{}", provider_id),
         PaletteAction::ToggleFeature(feature) => format!("toggle:{}", feature),
-        PaletteAction::InputApiKey(provider_id) => format!("api_key:{}", provider_id),
-        PaletteAction::InputBaseUrl(provider_id) => format!("base_url:{}", provider_id),
         PaletteAction::Back => "back".to_string(),
         PaletteAction::SetModel(model) => format!("model:{}", model),
         PaletteAction::SetAgentMode(mode) => format!("agent_mode:{}", mode),
@@ -268,6 +266,7 @@ fn palette_action_key(action: &PaletteAction) -> String {
         PaletteAction::ToggleUiVerbose => "toggle_ui_verbose".to_string(),
         PaletteAction::CreatePr => "create_pr".to_string(),
         PaletteAction::ToggleColorblindMode => "toggle_colorblind_mode".to_string(),
+        PaletteAction::EditProvider(provider_id) => format!("edit_provider:{}", provider_id),
         PaletteAction::OpenProviderForm => "open_provider_form".to_string(),
         PaletteAction::DeleteProvider(provider_id) => format!("delete_provider:{}", provider_id),
         PaletteAction::InputModelName => "input_model_name".to_string(),
@@ -1247,10 +1246,13 @@ fn build_provider_item_flat(provider: &ProviderMetadata, configured: &[String]) 
         provider.name.to_string()
     };
 
-    let action = if uses_manual_base_url {
+    let action = if is_configured || uses_manual_base_url {
+        // 已配置的走选项页（Use / Edit / 删除都在那）；需要先填 URL 的本地端点
+        // 也走选项页，那里一次说清还要干什么
         PaletteAction::Navigate(PaletteMode::ProviderOptions(provider.id.to_string()))
     } else {
-        PaletteAction::InputApiKey(provider.id.to_string())
+        // 没配置又只需一个 API Key 的云端 provider：直接开表单
+        PaletteAction::EditProvider(provider.id.to_string())
     };
 
     PaletteItem {
@@ -1301,15 +1303,6 @@ fn get_provider_category_items(
 pub fn get_provider_options_items(provider_id: &str, configured: &[String]) -> Vec<PaletteItem> {
     let is_configured = configured.iter().any(|id| id == provider_id);
     let metadata = get_provider_by_id(provider_id);
-    let uses_manual_base_url = provider_requires_manual_base_url(provider_id);
-    let requires_api_key = metadata
-        .map(|provider| provider.requires_api_key)
-        .unwrap_or(true);
-    let base_url_hint = if uses_manual_base_url {
-        "Required first for custom or local endpoints".to_string()
-    } else {
-        "Override the built-in endpoint URL".to_string()
-    };
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
         label: ".. Back".to_string(),
@@ -1318,27 +1311,8 @@ pub fn get_provider_options_items(provider_id: &str, configured: &[String]) -> V
         action: PaletteAction::Back,
     }];
 
+    // 已配置：进去就是启用它；没配置：进去就是填表单（endpoint / key / model 一屏）
     let (primary_label, primary_description, primary_action) = if is_configured {
-        (
-            "Use This Provider".to_string(),
-            "Activate this provider and choose a model".to_string(),
-            PaletteAction::SelectProvider(provider_id.to_string()),
-        )
-    } else if uses_manual_base_url {
-        (
-            if requires_api_key {
-                "Set Base URL First".to_string()
-            } else {
-                "Set Base URL & Choose Model".to_string()
-            },
-            if requires_api_key {
-                "Save endpoint URL, then continue to API key and model selection".to_string()
-            } else {
-                "Save endpoint URL, then continue directly to model selection".to_string()
-            },
-            PaletteAction::InputBaseUrl(provider_id.to_string()),
-        )
-    } else if !requires_api_key {
         (
             "Use This Provider".to_string(),
             "Activate this provider and choose a model".to_string(),
@@ -1346,9 +1320,9 @@ pub fn get_provider_options_items(provider_id: &str, configured: &[String]) -> V
         )
     } else {
         (
-            "Set API Key & Choose Model".to_string(),
-            "Save API key and continue to model selection".to_string(),
-            PaletteAction::InputApiKey(provider_id.to_string()),
+            "Configure This Provider".to_string(),
+            "Type, endpoint URL, API key and model in one form".to_string(),
+            PaletteAction::EditProvider(provider_id.to_string()),
         )
     };
 
@@ -1360,36 +1334,18 @@ pub fn get_provider_options_items(provider_id: &str, configured: &[String]) -> V
         action: primary_action,
     });
 
-    let api_key_item = PaletteItem {
-        id: "input_key".to_string(),
-        label: if requires_api_key {
-            "Set API Key".to_string()
-        } else {
-            "Set API Key (Optional)".to_string()
-        },
-        description: if requires_api_key {
-            "Save API key for this provider".to_string()
-        } else {
-            "Only needed when your local gateway expects a key".to_string()
-        },
-        category: Some("Config".to_string()),
-        action: PaletteAction::InputApiKey(provider_id.to_string()),
-    };
-
-    let base_url_item = PaletteItem {
-        id: "input_url".to_string(),
-        label: "Set Base URL".to_string(),
-        description: base_url_hint,
-        category: Some("Config".to_string()),
-        action: PaletteAction::InputBaseUrl(provider_id.to_string()),
-    };
-
-    if uses_manual_base_url {
-        items.push(base_url_item);
-        items.push(api_key_item);
-    } else {
-        items.push(api_key_item);
-        items.push(base_url_item);
+    // 增删查改里的"改"：Type / Name / Base URL / API Key / Model 都在表单里改，
+    // 取代以前 Set API Key + Set Base URL 两个串行弹窗。
+    // 没配置过的 provider 上面那一行"Configure This Provider"开的就是同一个
+    // 表单，这里不重复列。
+    if is_configured {
+        items.push(PaletteItem {
+            id: "edit_provider".to_string(),
+            label: "Edit Provider".to_string(),
+            description: "Change type, endpoint URL, API key or model".to_string(),
+            category: Some("Config".to_string()),
+            action: PaletteAction::EditProvider(provider_id.to_string()),
+        });
     }
 
     items.push(PaletteItem {
@@ -1491,7 +1447,8 @@ fn build_provider_item(
     let action = if uses_manual_base_url || is_configured {
         PaletteAction::Navigate(PaletteMode::ProviderOptions(provider.id.to_string()))
     } else {
-        PaletteAction::InputApiKey(provider.id.to_string())
+        // 没配置过：直接打开表单填 Base URL / API Key / Model
+        PaletteAction::EditProvider(provider.id.to_string())
     };
 
     PaletteItem {
@@ -2335,5 +2292,52 @@ mod tests {
 
         assert!(merged.iter().any(|i| i.id == "type_model"));
         assert!(merged.iter().any(|i| i.id == "refresh_models"));
+    }
+
+    /// provider 选项页的"改"只有 Edit Provider 一个入口（旧的 Set API Key +
+    /// Set Base URL 两个串行弹窗已下线），删入口只给自定义 provider。
+    #[test]
+    fn provider_options_page_has_one_edit_entry() {
+        // 已配置的内置 provider：主行是 Use This Provider，另有 Edit Provider
+        let items = get_provider_options_items("openai", &["openai".to_string()]);
+        assert!(items.iter().any(
+            |i| i.id == "use_provider" && matches!(i.action, PaletteAction::SelectProvider(_))
+        ));
+        assert_eq!(
+            items
+                .iter()
+                .filter(|i| matches!(i.action, PaletteAction::EditProvider(_)))
+                .count(),
+            1
+        );
+        // 内置 provider 不能删
+        assert!(!items.iter().any(|i| i.id == "remove_provider"));
+    }
+
+    /// 没配置过的 provider：主行就是 Configure This Provider（开表单），
+    /// 不再重复列一个作用相同的 Edit Provider 行。
+    #[test]
+    fn unconfigured_provider_does_not_duplicate_the_edit_entry() {
+        let items = get_provider_options_items("openai", &[]);
+        assert_eq!(
+            items
+                .iter()
+                .filter(|i| matches!(i.action, PaletteAction::EditProvider(_)))
+                .count(),
+            1,
+            "只有主行开表单，不该列两行同一个动作"
+        );
+        assert!(items.iter().any(|i| i.id == "use_provider"));
+        assert!(!items.iter().any(|i| i.id == "edit_provider"));
+    }
+
+    /// 列表里没配置的 provider 直接开表单，不再走只收 API Key 的旧弹窗。
+    #[test]
+    fn unconfigured_list_item_opens_the_form() {
+        let item = build_provider_item_flat(
+            get_provider_by_id("openai").expect("openai 是内置 provider"),
+            &[],
+        );
+        assert!(matches!(item.action, PaletteAction::EditProvider(_)));
     }
 }

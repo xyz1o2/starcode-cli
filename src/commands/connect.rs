@@ -31,15 +31,9 @@ pub async fn run(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
         return Ok(());
     }
 
-    // Assume provider configuration
-    // Trigger Input Modal
-    ctx.state.enter_input_modal();
-    ctx.state.input_modal_title = format!("Configure {}", target);
-    ctx.state.input_modal_prompt = format!("Enter API Key for {}:", target);
-    ctx.state.input_modal_value = String::new();
-    ctx.state.input_context = Some(crate::ui::state::palette::InputContext::ProviderKey {
-        provider_id: target,
-    });
+    // 走统一的 provider 表单：预填该 provider 的现值，Base URL / API Key /
+    // Model 一次改完（原来只弹一个 API Key 输入框的那套已经下线）
+    crate::ui::events::input::open_provider_form(ctx.state, Some(target)).await;
 
     Ok(())
 }

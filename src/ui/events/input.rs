@@ -1,9 +1,8 @@
 pub(crate) use super::clipboard_paste::push_cursor_off_sentinel_pub;
 use super::clipboard_paste::{
     collect_modal_input, detect_file_paths, insert_file_paste_block, insert_image_paste_block,
-    insert_paste_block, maybe_auto_fold_input, needs_manual_base_url_confirmation,
-    normalize_modal_api_key, normalize_modal_base_url, push_cursor_off_sentinel,
-    reset_main_textarea, save_clipboard_image, sync_input_from_textarea,
+    insert_paste_block, maybe_auto_fold_input, normalize_modal_api_key, normalize_modal_base_url,
+    push_cursor_off_sentinel, reset_main_textarea, save_clipboard_image, sync_input_from_textarea,
 };
 use super::clipboard_paste::{PASTE_ENTER_GUARD_MS, RAPID_PASTE_KEY_INTERVAL_MS};
 use arboard::Clipboard;
@@ -292,67 +291,6 @@ pub(crate) fn show_palette_mode(state: &mut ChatState, mode: PaletteMode) {
     state.open_palette(mode);
 }
 
-pub(crate) fn show_provider_api_key_modal(
-    state: &mut ChatState,
-    provider_id: &str,
-    edit_mode: bool,
-    has_saved_key: bool,
-) {
-    close_quick_menus(state);
-    state.close_palette();
-    state.enter_input_modal();
-    state.input_modal_title = if edit_mode {
-        format!("Edit API Key for {}", provider_id)
-    } else {
-        format!("Enter API Key for {}", provider_id)
-    };
-    state.input_modal_prompt = if has_saved_key {
-        "An API key is already saved. Paste a new key and press Enter to replace it:".to_string()
-    } else {
-        "Paste your API key below and press Enter:".to_string()
-    };
-    state.input_modal_value = String::new();
-
-    let mut textarea = TextArea::default();
-    textarea.set_cursor_line_style(ratatui::style::Style::default());
-    textarea.set_placeholder_text("Enter API Key...");
-    textarea.set_cursor_style(
-        ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
-    );
-    state.modal_textarea = textarea;
-
-    state.input_context = Some(crate::ui::state::palette::InputContext::ProviderKey {
-        provider_id: provider_id.to_string(),
-    });
-}
-
-fn show_provider_base_url_modal(state: &mut ChatState, provider_id: &str, initial_value: String) {
-    close_quick_menus(state);
-    state.close_palette();
-    state.enter_input_modal();
-    state.input_modal_title = format!("Set Base URL for {}", provider_id);
-    state.input_modal_prompt = if initial_value.trim().is_empty() {
-        "Enter Base URL:".to_string()
-    } else {
-        "Review or update the prefilled Base URL, then press Enter:".to_string()
-    };
-    state.input_modal_value = initial_value;
-
-    let mut textarea = TextArea::default();
-    textarea.set_cursor_line_style(ratatui::style::Style::default());
-    textarea.insert_str(&state.input_modal_value);
-    textarea.set_cursor_style(
-        ratatui::style::Style::default()
-            .bg(ratatui::style::Color::Blue)
-            .fg(ratatui::style::Color::White),
-    );
-    state.modal_textarea = textarea;
-
-    state.input_context = Some(crate::ui::state::palette::InputContext::ProviderBaseUrl {
-        provider_id: provider_id.to_string(),
-    });
-}
-
 /// 手动输入模型名的弹窗。刻意不做任何联网校验：中转站的 `/models` 常年不全，
 /// 拉不到不等于不能用；用户敲什么就切什么，错了从状态栏的报错里看得出来。
 fn show_model_name_modal(state: &mut ChatState) {
@@ -382,23 +320,102 @@ fn show_model_name_modal(state: &mut ChatState) {
     state.input_context = Some(crate::ui::state::palette::InputContext::ModelName);
 }
 
-/// 打开"新增 provider"单面板表单。
+/// 打开 provider 单面板表单。
+///
+/// `editing = Some(id)` 是编辑模式：五个字段预填该 provider 的现值（API Key
+/// 例外，密钥不往屏幕上画，留空表示"保持原 key"），提交时 upsert 回同一个 id。
+/// `None` 是新增，id 由名称 / URL host 派生。
 ///
 /// 五个字段共用一个 textarea：切字段时由 `switch_provider_form_field` 把内容
-/// 在 `ProviderFormState::values` 和 textarea 之间搬。初始焦点给 Name（下标 1），
-/// Type 默认就是 OpenAI Compatible，多数本地/中转端点直接用。
-pub(crate) fn open_provider_form(state: &mut ChatState) {
+/// 在 `ProviderFormState::values` 和 textarea 之间搬。初始焦点给 Type（下标 0），
+/// 让用户先定协议类型；Type 不渲染 textarea，←/→ 选完 Tab 就到 Name。
+pub(crate) async fn open_provider_form(state: &mut ChatState, editing: Option<String>) {
     state.quick_menu_back = Some(crate::ui::state::QuickMenuKind::Provider);
     state.quick_menu_origin_palette = true;
     state.close_palette();
     state.enter_input_modal();
 
-    state.provider_form = crate::ui::state::palette::ProviderFormState::new();
-    state.provider_form.active_field = 1;
+    let mut form = crate::ui::state::palette::ProviderFormState::new();
+    form.editing_id = editing.clone();
+
+    if let Some(id) = editing {
+        prefill_form_from_provider(&mut form, &id).await;
+    }
+
+    state.provider_form = form;
+    state.provider_form.active_field = 0;
 
     sync_textarea_to_active_field(state);
 
     state.input_context = Some(crate::ui::state::palette::InputContext::ProviderForm);
+}
+
+/// 用 provider 的现值预填表单。
+///
+/// 类型优先读已保存的设置，没有就按内置 provider 的协议推断；名称 / Base URL /
+/// Model 从设置或内置默认值来。API Key 故意不填（见 `open_provider_form`）。
+async fn prefill_form_from_provider(
+    form: &mut crate::ui::state::palette::ProviderFormState,
+    provider_id: &str,
+) {
+    use crate::core::config::provider_store::ProviderStore;
+    use crate::ui::state::palette::{
+        ANTHROPIC_COMPATIBLE_LABEL, OPENAI_COMPATIBLE_LABEL, PROVIDER_FORM_TYPES,
+    };
+
+    let settings = ProviderStore::new()
+        .load()
+        .await
+        .unwrap_or_default()
+        .providers
+        .get(provider_id)
+        .cloned();
+
+    // 类型：已保存的设置优先，否则按内置 provider 推断，再不行就默认 OpenAI
+    let type_label = settings
+        .as_ref()
+        .and_then(|s| s.r#type.as_deref())
+        .map(|saved_type| {
+            if saved_type == "anthropic-compatible" {
+                ANTHROPIC_COMPATIBLE_LABEL
+            } else {
+                OPENAI_COMPATIBLE_LABEL
+            }
+        });
+    let type_label = type_label.unwrap_or_else(|| {
+        match crate::core::config::providers::provider_openai_compatible_mode(provider_id) {
+            Some(false) => ANTHROPIC_COMPATIBLE_LABEL,
+            _ => OPENAI_COMPATIBLE_LABEL,
+        }
+    });
+    debug_assert!(
+        PROVIDER_FORM_TYPES.contains(&type_label),
+        "类型标签必须在候选列表里，否则 ←/→ 循环会失配"
+    );
+
+    let name = settings
+        .as_ref()
+        .and_then(|s| s.name.as_deref())
+        .or_else(|| crate::core::config::providers::get_provider_by_id(provider_id).map(|p| p.name))
+        .unwrap_or("");
+    let base_url = crate::core::config::providers::resolve_provider_base_url(
+        provider_id,
+        settings.as_ref().and_then(|s| s.base_url.clone()),
+    )
+    .unwrap_or_default();
+    let model = settings
+        .as_ref()
+        .and_then(|s| s.selected_model.as_deref())
+        .unwrap_or("");
+
+    form.values = vec![
+        type_label.to_string(),
+        name.to_string(),
+        base_url,
+        // API Key 留空：编辑时空着等于"保持原 key"，见 submit 的处理
+        String::new(),
+        model.to_string(),
+    ];
 }
 
 /// 把 `values[active]` 灌进 textarea，并按当前字段设占位符。
@@ -421,26 +438,43 @@ fn sync_textarea_to_active_field(state: &mut ChatState) {
             textarea.insert_str(value);
         }
     }
-    if let Some((_, hint, _)) = PROVIDER_FORM_FIELDS.get(state.provider_form.active_field) {
-        textarea.set_placeholder_text(*hint);
+    if let Some((label, hint, _)) = PROVIDER_FORM_FIELDS.get(state.provider_form.active_field) {
+        // 编辑模式下 API Key 的占位提示含义不同（空着 = 保持原 key）
+        let hint = if *label == "API Key" {
+            crate::ui::state::palette::api_key_field_hint(state.provider_form.editing_id.is_some())
+        } else {
+            *hint
+        };
+        textarea.set_placeholder_text(hint);
     }
     state.modal_textarea = textarea;
 }
 
 /// 表单字段切换：当前 textarea 内容存回 `values[active]`，再切到目标字段。
-/// `forward = false` 时往上走。越界时不动（不循环，免得 Tab 跑到 Type 上
-/// 还以为自己在填 Base URL）。
+/// `forward = false` 时往上走。字段区两端不循环，但末字段往下进操作行、
+/// 操作行往下回 Type（循环一圈，免得 Tab 到了底就卡住）。
 fn switch_provider_form_field(state: &mut ChatState, forward: bool) {
-    let next = if forward {
-        state.provider_form.active_field + 1
-    } else {
-        state.provider_form.active_field.saturating_sub(1)
+    use crate::ui::state::palette::PROVIDER_FORM_FIELDS;
+
+    let active = state.provider_form.active_field;
+    let on_actions = state.provider_form.on_actions;
+    let last = PROVIDER_FORM_FIELDS.len().saturating_sub(1);
+
+    let (next_field, next_on_actions) = match (forward, on_actions, active) {
+        (true, true, _) => (0, false),                 // 操作行 → Type
+        (true, false, a) if a >= last => (last, true), // 末字段 → 操作行
+        (true, false, a) => (a + 1, false),
+        (false, true, _) => (last, false), // 操作行 → 末字段
+        (false, false, 0) => return,       // Type 顶头：不循环，停住
+        (false, false, a) => (a - 1, false),
     };
-    if next >= crate::ui::state::palette::PROVIDER_FORM_FIELDS.len() {
-        return;
+
+    // 只要正离开一个文本字段，就得把 textarea 里的内容存走
+    if !on_actions && (next_field != active || next_on_actions) {
+        save_active_field_to_form(state);
     }
-    save_active_field_to_form(state);
-    state.provider_form.active_field = next;
+    state.provider_form.active_field = next_field;
+    state.provider_form.on_actions = next_on_actions;
     state.provider_form.error = None;
     sync_textarea_to_active_field(state);
 }
@@ -461,14 +495,26 @@ fn save_active_field_to_form(state: &mut ChatState) {
     }
 }
 
-/// 提交"新增 provider"表单。
+/// 取消表单、回上一层（Esc 和操作行上的 `‹ Back` 共用）。
 ///
-/// 保存 provider 配置（一次 load+save，见 `ProviderStore::add_custom_provider`），
-/// id 由名称或 URL host 派生。model 留空时走自动获取：发 `ListModels`（便宜路径，
-/// 先吃两级缓存），面板进 Model 列表等结果；网络结果回来时
-/// `list_models_with_mode` 会把列表写回内存缓存和磁盘缓存（`model_cache`），
-/// `StreamMessage::ModelsList` 再把 UI 列表换掉 —— 下次开面板就直接命中缓存，
-/// 不用再等网络。
+/// 底层若还压着别的模态（如 Plugins 弹窗），只关输入框留在那里；否则回到
+/// 打开表单前的 palette / quick menu。
+fn cancel_provider_form(state: &mut ChatState) {
+    state.input_context = None;
+    state.exit_input_modal();
+    if !state.is_modal_open() {
+        show_palette_mode(state, state.palette_mode.clone());
+    }
+}
+
+/// 提交 provider 表单（新增或编辑）。
+///
+/// 保存 provider 配置（一次 load+save，见 `ProviderStore::add_custom_provider`）：
+/// 编辑模式沿用原 id，新增模式由名称或 URL host 派生 id。model 留空时走自动
+/// 获取：发 `ListModels`（便宜路径，先吃两级缓存），面板进 Model 列表等结果；
+/// 网络结果回来时 `list_models_with_mode` 会把列表写回内存缓存和磁盘缓存
+/// （`model_cache`），`StreamMessage::ModelsList` 再把 UI 列表换掉 —— 下次开
+/// 面板就直接命中缓存，不用再等网络。
 async fn submit_provider_form(
     state: &mut ChatState,
     agent_tx: &mpsc::Sender<AgentRequest>,
@@ -476,10 +522,10 @@ async fn submit_provider_form(
     save_active_field_to_form(state);
 
     let form = state.provider_form.clone();
+    let is_editing = form.editing_id.is_some();
     let provider_type = form.provider_type().to_string();
     let base_url = normalize_modal_base_url(form.base_url());
     let name = form.name().trim().to_string();
-    let api_key = normalize_modal_api_key(form.api_key());
     let model = form.model().trim().to_string();
 
     if base_url.is_empty() {
@@ -488,8 +534,26 @@ async fn submit_provider_form(
     }
 
     let store = crate::core::config::provider_store::ProviderStore::new();
-    let base_id = crate::core::config::provider_store::derive_provider_id(&name, &base_url);
-    let provider_id = store.resolve_unique_provider_id(&base_id).await;
+
+    // 编辑模式沿用原 id；新增模式由名称 / URL host 派生并去重
+    let provider_id = match form.editing_id.clone() {
+        Some(id) => id,
+        None => {
+            let base_id = crate::core::config::provider_store::derive_provider_id(&name, &base_url);
+            store.resolve_unique_provider_id(&base_id).await
+        }
+    };
+
+    // 编辑模式下 API Key 留空 = 保持原 key。add_custom_provider 是整字段覆盖写，
+    // 传 None 会把已存的 key 抹掉，所以这里把存着的 key 读出来原样写回。
+    let mut api_key = normalize_modal_api_key(form.api_key());
+    if api_key.is_empty() && is_editing {
+        api_key = store
+            .get_api_key(&provider_id)
+            .await
+            .unwrap_or(None)
+            .unwrap_or_default();
+    }
 
     store
         .add_custom_provider(
@@ -507,7 +571,7 @@ async fn submit_provider_form(
         .await
         .map_err(|e| format!("Failed to save provider: {}", e))?;
 
-    // 激活新 provider
+    // 激活 provider
     let _ = store.set_active_provider(&provider_id).await;
     register_configured_provider(state, &provider_id);
     state.current_provider_id = Some(provider_id.clone());
@@ -539,6 +603,13 @@ async fn submit_provider_form(
     close_quick_menus(state);
     state.provider_form = crate::ui::state::palette::ProviderFormState::new();
 
+    let verb = if is_editing { "Updated" } else { "Created" };
+    let display_name = if name.is_empty() {
+        provider_id.as_str()
+    } else {
+        name.as_str()
+    };
+
     if model.is_empty() {
         // 自动获取模型列表：先标 loading，面板立刻能开，不用等网络
         state.awaiting_models = true;
@@ -555,8 +626,8 @@ async fn submit_provider_form(
             state,
             0,
             &format!(
-                "Created provider '{}' — fetching model list...",
-                if name.is_empty() { &provider_id } else { &name }
+                "{} provider '{}' — fetching model list...",
+                verb, display_name
             ),
         );
     } else {
@@ -570,7 +641,7 @@ async fn submit_provider_form(
         crate::ui::app::logic::emit_status_text(
             state,
             0,
-            &format!("Created provider '{}' with model set.", provider_id),
+            &format!("{} provider '{}' with model set.", verb, display_name),
         );
     }
 
@@ -951,33 +1022,11 @@ pub(crate) async fn execute_palette_action(
                 state.modal_stack.push(crate::ui::state::Modal::Palette);
             }
         }
-        PaletteAction::InputApiKey(provider_id) => {
-            state.quick_menu_back = Some(crate::ui::state::QuickMenuKind::Provider);
-            state.quick_menu_origin_palette = true;
-            let store = crate::core::config::provider_store::ProviderStore::new();
-            let has_saved_key = store
-                .get_api_key(&provider_id)
-                .await
-                .unwrap_or(None)
-                .is_some();
-            show_provider_api_key_modal(state, &provider_id, false, has_saved_key);
-            crate::ui::app::logic::emit_status_text(state, 0, "Please enter API Key...");
-        }
-        PaletteAction::InputBaseUrl(provider_id) => {
-            state.quick_menu_back = Some(crate::ui::state::QuickMenuKind::Provider);
-            state.quick_menu_origin_palette = true;
-            let store = crate::core::config::provider_store::ProviderStore::new();
-            let initial_value = crate::core::config::providers::resolve_provider_base_url(
-                &provider_id,
-                store.get_base_url(&provider_id).await.unwrap_or(None),
-            )
-            .unwrap_or_default();
-
-            show_provider_base_url_modal(state, &provider_id, initial_value);
-            crate::ui::app::logic::emit_status_text(state, 0, "Please enter Base URL...");
+        PaletteAction::EditProvider(provider_id) => {
+            open_provider_form(state, Some(provider_id)).await;
         }
         PaletteAction::OpenProviderForm => {
-            open_provider_form(state);
+            open_provider_form(state, None).await;
         }
         PaletteAction::DeleteProvider(provider_id) => {
             delete_custom_provider(state, &provider_id, agent_tx).await;
@@ -3137,13 +3186,15 @@ async fn handle_input_modal(
         return Ok(false);
     }
 
-    // "新增 provider" 表单：字段切换 / 类型切换 由这里接管，Type 字段（下标 0）
-    // 是选项不是文本，普通字符键必须吃掉，否则会灌进共享的 textarea 里。
+    // "新增 provider" 表单：字段切换 / 类型切换 / 操作行 由这里接管。Type 字段
+    // （下标 0）和操作行都是选项不是文本，普通字符键必须吃掉，否则会灌进
+    // 共享的 textarea 里。
     let is_provider_form = matches!(
         state.input_context,
         Some(crate::ui::state::palette::InputContext::ProviderForm)
     );
     let form_on_type_field = is_provider_form && state.provider_form.active_field == 0;
+    let form_on_actions = is_provider_form && state.provider_form.on_actions;
 
     match key.code {
         KeyCode::Tab | KeyCode::Down if is_provider_form => {
@@ -3162,8 +3213,30 @@ async fn handle_input_modal(
             state.provider_form.cycle_type(true);
             return Ok(true);
         }
-        // Type 字段不接收自由文本，按键一律吞掉，避免污染共享 textarea
-        KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete if form_on_type_field => {
+        // Type 是选项字段，回车不当提交用：确认当前类型并跳到 Name。不然焦点
+        // 落在 Type 上时按回车只会去提交一个空表单，报 "Base URL is required."
+        KeyCode::Enter if form_on_type_field => {
+            switch_provider_form_field(state, true);
+            return Ok(true);
+        }
+        // 操作行：←/→ 在 Back / Save 之间选
+        KeyCode::Left | KeyCode::Right if form_on_actions => {
+            state.provider_form.action_index = 1 - state.provider_form.action_index;
+            return Ok(true);
+        }
+        // 操作行回车：选中项是 Save 就提交，是 Back 就取消回上一层
+        KeyCode::Enter if form_on_actions => {
+            if state.provider_form.action_index == 1 {
+                state.input_context = Some(crate::ui::state::palette::InputContext::ProviderForm);
+                return submit_provider_form(state, agent_tx).await;
+            }
+            cancel_provider_form(state);
+            return Ok(true);
+        }
+        // Type 字段和操作行不接收自由文本，按键一律吞掉，避免污染共享 textarea
+        KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
+            if form_on_type_field || form_on_actions =>
+        {
             return Ok(true);
         }
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -3174,163 +3247,15 @@ async fn handle_input_modal(
             }
         }
         KeyCode::Esc => {
-            state.input_context = None;
-            state.exit_input_modal();
-            if state.is_modal_open() {
-                // 底层还有模态（如 Plugins 弹窗）：仅关闭输入框，回到该模态
-                return Ok(true);
-            }
-            show_palette_mode(state, state.palette_mode.clone());
+            // 底层还有模态（如 Plugins 弹窗）时 cancel 只关输入框，回到该模态
+            cancel_provider_form(state);
+            return Ok(true);
         }
         KeyCode::Enter => {
             state.input_modal_value = collect_modal_input(&state.modal_textarea);
 
             if let Some(ctx) = state.input_context.take() {
                 match ctx {
-                    crate::ui::state::palette::InputContext::ProviderKey { provider_id } => {
-                        let key = normalize_modal_api_key(&state.input_modal_value);
-
-                        if !key.is_empty() {
-                            let pid = provider_id.clone();
-                            let store = crate::core::config::provider_store::ProviderStore::new();
-                            let saved_base_url = store.get_base_url(&pid).await.unwrap_or(None);
-                            let _ = store.set_api_key(&pid, &key).await;
-
-                            if needs_manual_base_url_confirmation(&pid, saved_base_url.as_deref()) {
-                                let initial_value =
-                                    crate::core::config::providers::resolve_provider_base_url(
-                                        &pid,
-                                        saved_base_url,
-                                    )
-                                    .unwrap_or_default();
-
-                                crate::ui::app::logic::emit_status_text(
-                                    state,
-                                    0,
-                                    &format!(
-                                        "Saved API Key for {}. Now confirm Base URL.",
-                                        provider_id
-                                    ),
-                                );
-                                show_provider_base_url_modal(state, &pid, initial_value);
-                                return Ok(true);
-                            }
-
-                            let base_url =
-                                crate::core::config::providers::resolve_provider_base_url(
-                                    &pid,
-                                    saved_base_url,
-                                );
-                            let selected_model =
-                                store.get_selected_model(&pid).await.unwrap_or(None);
-                            let _ = store.set_active_provider(&pid).await;
-                            state.pending_model_provider = Some(pid.clone());
-                            state.pending_provider_selected_model = selected_model.clone();
-                            state.current_provider_id = Some(pid.clone());
-                            // 刚配置完 provider，紧接着的第一次模型选择免 (y/n) 确认：
-                            // 配置动作本身就是明确的切换意图，再弹确认门会让用户以为
-                            // “切换不成功”，直到下一次选择才绕过门生效。
-                            state.waive_next_model_confirmation = true;
-                            if let Some(model) = selected_model {
-                                state.current_model = model;
-                            } else {
-                                state.current_model.clear();
-                            }
-
-                            crate::ui::app::logic::emit_status_text(
-                                state,
-                                0,
-                                &format!(
-                                    "{} {}",
-                                    crate::core::i18n::t(
-                                        "provider.configured",
-                                        "已配置并切换到",
-                                        "Configured and switched to"
-                                    ),
-                                    provider_id
-                                ),
-                            );
-                            register_configured_provider(state, &pid);
-
-                            // Check is_openai_compatible: built-in check first, then custom provider type
-                            let provider_config = store.load().await.unwrap_or_default();
-                            let is_openai_compat =
-                                crate::core::config::providers::provider_openai_compatible_mode(
-                                    &pid,
-                                )
-                                .or_else(|| {
-                                    provider_config.providers.get(&pid).and_then(|s| {
-                                        s.r#type.as_deref().map(|t| t == "openai-compatible")
-                                    })
-                                });
-
-                            let _ = agent_tx
-                                .send(AgentRequest::UpdateProviderConfig {
-                                    provider_id: Some(pid.clone()),
-                                    api_key: Some(key),
-                                    base_url,
-                                    is_openai_compatible: is_openai_compat,
-                                    model: state.pending_provider_selected_model.clone(),
-                                })
-                                .await;
-                            let _ = agent_tx
-                                .send(AgentRequest::ListModels { force: false })
-                                .await;
-
-                            state.available_models.clear();
-                            state.awaiting_models = true;
-                            state.exit_input_modal();
-                            close_quick_menus(state);
-                            state.palette_history.clear();
-                            state.open_palette(PaletteMode::Model);
-                        } else {
-                            if matches!(
-                                state.quick_menu_back,
-                                Some(crate::ui::state::QuickMenuKind::Provider)
-                            ) || state.quick_menu_origin_palette
-                            {
-                                navigate_back_from_quick_menu(state);
-                            } else {
-                                show_palette_mode(state, state.palette_mode.clone());
-                            }
-                        }
-                    }
-                    crate::ui::state::palette::InputContext::ProviderBaseUrl { provider_id } => {
-                        let url = normalize_modal_base_url(&state.input_modal_value);
-                        let pid = provider_id.clone();
-
-                        let store = crate::core::config::provider_store::ProviderStore::new();
-                        let _ = store.set_base_url(&pid, &url).await;
-                        let base_url = crate::core::config::providers::resolve_provider_base_url(
-                            &pid,
-                            Some(url.clone()),
-                        );
-                        // Check if user has EXPLICITLY saved an API key (not from env vars)
-                        let has_explicit_key =
-                            store.get_api_key(&pid).await.unwrap_or(None).is_some();
-
-                        if base_url.is_none() {
-                            crate::ui::app::logic::emit_status_text(
-                                state,
-                                0,
-                                &format!("Base URL is required for {}", pid),
-                            );
-                            show_provider_base_url_modal(state, &pid, String::new());
-                            return Ok(true);
-                        }
-
-                        // Always jump to the API key modal after saving the URL, so the user
-                        // has a chance to configure / confirm the key before models are loaded.
-                        // The ProviderKey branch handles activation, UpdateProviderConfig and
-                        // model listing once a (possibly saved) key is confirmed.
-                        show_provider_api_key_modal(state, &pid, false, has_explicit_key);
-                        crate::ui::app::logic::emit_status_text(
-                            state,
-                            0,
-                            &format!("Saved Base URL for {}. Now enter API Key.", pid),
-                        );
-                        return Ok(true);
-                    }
                     crate::ui::state::palette::InputContext::ContextWindow => {
                         let input = state.input_modal_value.trim().to_string();
                         match crate::core::context_policy::ContextWindowSelection::parse(&input) {
@@ -3401,6 +3326,12 @@ async fn handle_input_modal(
                         }
                     }
                     crate::ui::state::palette::InputContext::ProviderForm => {
+                        // 提交校验失败时 submit 不关模态只设 error。context 被
+                        // take 走又没还回来的话，show_input_modal 还开着、
+                        // 渲染却退化成单字段的通用输入框（还带着别的弹窗残留的
+                        // title）。先还回去，失败时表单还在原地。
+                        state.input_context =
+                            Some(crate::ui::state::palette::InputContext::ProviderForm);
                         return submit_provider_form(state, agent_tx).await;
                     }
                     crate::ui::state::palette::InputContext::MarketplaceSource => {
@@ -3695,6 +3626,122 @@ mod tests {
         state.bg_agent_selection = Some(0);
         assert!(!press(&mut state, KeyCode::Down));
         assert!(state.bg_agent_selection.is_none());
+    }
+
+    /// Tab/↑↓ 在五个字段和底部操作行之间走：末字段往下进操作行，操作行往下
+    /// 循环回 Type；Type 顶头往上不动，操作行往上回末字段。
+    #[tokio::test]
+    async fn provider_form_navigation_cycles_through_fields_and_action_row() {
+        let mut state = ChatState::new();
+        open_provider_form(&mut state, None).await;
+        assert_eq!(state.provider_form.active_field, 0);
+
+        for expected in 1..=4 {
+            switch_provider_form_field(&mut state, true);
+            assert_eq!(state.provider_form.active_field, expected);
+            assert!(!state.provider_form.on_actions);
+        }
+        // 末字段再往下：进操作行（默认选中 Save）
+        switch_provider_form_field(&mut state, true);
+        assert!(state.provider_form.on_actions);
+        assert_eq!(state.provider_form.action_index, 1);
+        // 操作行再往下：循环回 Type
+        switch_provider_form_field(&mut state, true);
+        assert_eq!(state.provider_form.active_field, 0);
+        assert!(!state.provider_form.on_actions);
+
+        // Type 顶头往上：不动
+        switch_provider_form_field(&mut state, false);
+        assert_eq!(state.provider_form.active_field, 0);
+
+        // 操作行往上：回末字段
+        state.provider_form.on_actions = true;
+        switch_provider_form_field(&mut state, false);
+        assert!(!state.provider_form.on_actions);
+        assert_eq!(state.provider_form.active_field, 4);
+    }
+
+    /// 离开字段时 textarea 里的内容得存进 values——包括切到操作行的那一步
+    /// （Model 的值就是这时候存走的），否则填了也白填。
+    #[tokio::test]
+    async fn provider_form_saves_field_value_when_moving_on() {
+        let mut state = ChatState::new();
+        open_provider_form(&mut state, None).await;
+        switch_provider_form_field(&mut state, true); // → Name
+        state.modal_textarea.insert_str("My Provider");
+        switch_provider_form_field(&mut state, true); // → Base URL
+        assert_eq!(state.provider_form.values[1], "My Provider");
+
+        // 直接站到 Model 上填值，然后进操作行
+        state.provider_form.active_field = 4;
+        state.modal_textarea = TextArea::default();
+        state.modal_textarea.insert_str("gpt-5");
+        switch_provider_form_field(&mut state, true);
+        assert!(state.provider_form.on_actions);
+        assert_eq!(state.provider_form.values[4], "gpt-5");
+    }
+
+    /// 提交失败（Base URL 为空）时表单必须留在原地：模态不关、context 不丢。
+    /// context 一旦被拿走没还回来，`is_provider_form_active` 变 false，多字段
+    /// 面板就退化成通用单字段输入框（还带着别的弹窗残留的 title）。
+    #[tokio::test]
+    async fn enter_on_incomplete_form_keeps_the_panel_rendered() {
+        let mut state = ChatState::new();
+        open_provider_form(&mut state, None).await;
+        switch_provider_form_field(&mut state, true); // → Name，Base URL 留空
+        let (agent_tx, _rx) = mpsc::channel(1);
+
+        handle_input_modal(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &agent_tx,
+        )
+        .await
+        .expect("enter should be handled");
+
+        assert!(state.show_input_modal, "modal must stay open");
+        assert!(matches!(
+            state.input_context,
+            Some(crate::ui::state::palette::InputContext::ProviderForm)
+        ));
+        assert_eq!(
+            state.provider_form.error.as_deref(),
+            Some("Base URL is required.")
+        );
+    }
+
+    /// 操作行上 ←/→ 在 Back / Save 之间选，Enter 走选中项：Back 取消回上一层，
+    /// 不碰文件系统、不发请求。
+    #[tokio::test]
+    async fn action_row_enter_runs_the_selected_option() {
+        let mut state = ChatState::new();
+        open_provider_form(&mut state, None).await;
+        for _ in 0..5 {
+            switch_provider_form_field(&mut state, true);
+        }
+        assert!(state.provider_form.on_actions);
+        assert_eq!(state.provider_form.action_index, 1);
+
+        let (agent_tx, _rx) = mpsc::channel(1);
+        // ← 选到 Back
+        handle_input_modal(
+            &mut state,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            &agent_tx,
+        )
+        .await
+        .expect("left should choose Back");
+        assert_eq!(state.provider_form.action_index, 0);
+        // 回车：取消，模态关、context 清空
+        handle_input_modal(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &agent_tx,
+        )
+        .await
+        .expect("enter should cancel");
+        assert!(!state.show_input_modal);
+        assert!(state.input_context.is_none());
     }
 
     /// Session Browser 选择项必须经统一命令入口排队，不能发送已断开的 ResumeSession 请求。

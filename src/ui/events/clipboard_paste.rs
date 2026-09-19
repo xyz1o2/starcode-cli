@@ -240,16 +240,6 @@ pub(super) fn normalize_modal_base_url(value: &str) -> String {
     value.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-pub(super) fn needs_manual_base_url_confirmation(
-    provider_id: &str,
-    saved_base_url: Option<&str>,
-) -> bool {
-    crate::core::config::providers::provider_requires_manual_base_url(provider_id)
-        && saved_base_url
-            .map(|value| value.trim().is_empty())
-            .unwrap_or(true)
-}
-
 pub(crate) fn maybe_auto_fold_input(state: &mut ChatState) {
     state.input_line_count = state.textarea.lines().len();
     if state.paste_segments.is_empty()

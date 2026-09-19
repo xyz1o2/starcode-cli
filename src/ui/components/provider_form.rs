@@ -13,6 +13,12 @@
 //! `ui::events::input::handle_input_modal`）。
 //!
 //! Type 字段（下标 0）不是自由文本，不渲染 textarea，只显示当前选项和 `◀ ▶` 提示。
+//! 非活动的文本字段同样不渲染 textarea——textarea 只有一份内容，全画上去会让
+//! 所有框显示同一段文字。它们画 `values` 里已经存好的值（空字段画 hint，和
+//! textarea 的 placeholder 对齐，不然焦点移开时提示一闪一闪）。
+//!
+//! 面板底部是操作行：`‹ Back` 取消回上一层，`Save ›` 提交，←/→ 选、Enter 定。
+//! Tab/↓ 从末字段进操作行，再按继续循环回 Type。
 
 use crate::ui::state::palette::{ProviderFormState, PROVIDER_FORM_FIELDS, PROVIDER_FORM_TYPES};
 use crate::ui::state::ChatState;
@@ -40,8 +46,13 @@ pub fn render_provider_form(f: &mut Frame, area: Rect, state: &mut ChatState) {
 
     let area = centered_rect(72, 62, area);
 
+    let title = if state.provider_form.editing_id.is_some() {
+        " Edit Provider "
+    } else {
+        " Add New Provider "
+    };
     let block = Block::default()
-        .title(" Add New Provider ")
+        .title(title)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Cyan));
@@ -58,6 +69,7 @@ pub fn render_provider_form(f: &mut Frame, area: Rect, state: &mut ChatState) {
         constraints.push(Constraint::Length(3)); // 输入框
     }
     constraints.push(Constraint::Length(1)); // 空行
+    constraints.push(Constraint::Length(3)); // 操作行（‹ Back / Save ›）
     constraints.push(Constraint::Length(1)); // 快捷键提示
     if state.provider_form.error.is_some() {
         constraints.push(Constraint::Length(1)); // 错误
@@ -72,7 +84,17 @@ pub fn render_provider_form(f: &mut Frame, area: Rect, state: &mut ChatState) {
         let label_area = chunks[index * 2];
         let input_area = chunks[index * 2 + 1];
 
-        let is_active = state.provider_form.active_field == index;
+        // 操作行聚焦时没有任何字段是活动的（textarea 不渲染），否则末字段
+        // 会和操作行同时显示成选中态
+        let is_active =
+            !state.provider_form.on_actions && state.provider_form.active_field == index;
+        let editing = state.provider_form.editing_id.is_some();
+        // API Key 的提示在编辑模式下含义不同（空着 = 保持原 key）
+        let hint = if *label == "API Key" {
+            crate::ui::state::palette::api_key_field_hint(editing)
+        } else {
+            *hint
+        };
         let value = state
             .provider_form
             .values
@@ -100,21 +122,39 @@ pub fn render_provider_form(f: &mut Frame, area: Rect, state: &mut ChatState) {
                 }),
         ));
         label_line.push(Span::raw("  "));
-        label_line.push(Span::styled(*hint, Style::default().fg(Color::DarkGray)));
+        label_line.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
         f.render_widget(Paragraph::new(Line::from(label_line)), label_area);
 
         if *is_text {
-            // 文本字段：高亮活动字段的边框
-            let input_block = Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(if is_active {
-                    Color::Cyan
-                } else {
-                    Color::DarkGray
-                }));
-            state.modal_textarea.set_block(input_block);
-            f.render_widget(&state.modal_textarea, input_area);
+            // textarea 全表单共用一份，里面只有活动字段的内容。非活动字段要是也
+            // 画 textarea，四个文本框会同时显示同一段文字（联动 bug），所以它们
+            // 直接画 `values` 里存好的值。
+            if is_active {
+                let input_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Cyan));
+                state.modal_textarea.set_block(input_block);
+                f.render_widget(&state.modal_textarea, input_area);
+            } else {
+                let input_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::DarkGray));
+                // 空字段显示 hint，和活动字段 textarea 的 placeholder 一致；
+                // 不然焦点移开时框里提示突然消失，看起来像样式在闪
+                let is_placeholder = value.is_empty();
+                f.render_widget(
+                    Paragraph::new(if is_placeholder { hint } else { value }).style(
+                        Style::default().fg(if is_placeholder {
+                            Color::DarkGray
+                        } else {
+                            Color::Gray
+                        }),
+                    ),
+                    input_area,
+                );
+            }
         } else {
             // 选项字段：不接管 textarea，直接画当前值 + ◀ ▶
             let row = Line::from(vec![
@@ -145,21 +185,82 @@ pub fn render_provider_form(f: &mut Frame, area: Rect, state: &mut ChatState) {
         }
     }
 
-    let mut footer_index = PROVIDER_FORM_FIELDS.len() * 2;
-    // 空行已经占了一个 chunk，快捷键提示从下一个开始
-    footer_index += 1;
+    // 空行占了一个 chunk，操作行从下一个开始
+    let footer_index = PROVIDER_FORM_FIELDS.len() * 2 + 1;
+
+    // 操作行：‹ Back（取消回上一层）/ Save ›（提交）
+    let action_area = chunks[footer_index];
+    let box_width = action_area.width.saturating_sub(3) / 2;
+    let action_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(box_width),
+            Constraint::Length(1), // 两个按钮之间的间隙
+            Constraint::Length(box_width),
+            Constraint::Min(0),
+        ])
+        .split(action_area);
+    for (index, label) in ["‹ Back", "Save ›"].iter().enumerate() {
+        let selected = state.provider_form.on_actions && state.provider_form.action_index == index;
+        let action_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(if selected {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            }));
+        f.render_widget(
+            Paragraph::new(*label)
+                .block(action_block)
+                .alignment(Alignment::Center)
+                .style(
+                    Style::default()
+                        .fg(if selected { Color::White } else { Color::Gray })
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+            action_chunks[index * 2],
+        );
+    }
+
+    // 快捷键提示按焦点位置变：操作行上 ←/→ 是"选择"、Enter 是"确认"，
+    // Type 上 Enter 是"下一字段"，文本字段上才是"保存"
+    let hint_parts: &[(&str, &str)] = if state.provider_form.on_actions {
+        &[
+            (" Tab/↑↓", " back to fields"),
+            ("  ←/→", " choose"),
+            ("  Enter", " confirm"),
+            ("  Esc", " cancel"),
+        ]
+    } else if state.provider_form.active_field == 0 {
+        &[
+            (" Tab/↑↓", " next field"),
+            ("  ←/→", " switch type"),
+            ("  Enter", " next field"),
+            ("  Esc", " cancel"),
+        ]
+    } else {
+        &[
+            (" Tab/↑↓", " next field"),
+            ("  Enter", " save"),
+            ("  Esc", " cancel"),
+        ]
+    };
+    let mut hint_spans = Vec::new();
+    for (key_part, label_part) in hint_parts {
+        hint_spans.push(Span::styled(
+            *key_part,
+            Style::default().fg(Color::DarkGray),
+        ));
+        hint_spans.push(Span::styled(*label_part, Style::default().fg(Color::Gray)));
+    }
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" Tab/↑↓", Style::default().fg(Color::DarkGray)),
-            Span::styled(" next field", Style::default().fg(Color::Gray)),
-            Span::styled("  ←/→", Style::default().fg(Color::DarkGray)),
-            Span::styled(" switch type", Style::default().fg(Color::Gray)),
-            Span::styled("  Enter", Style::default().fg(Color::DarkGray)),
-            Span::styled(" save", Style::default().fg(Color::Gray)),
-            Span::styled("  Esc", Style::default().fg(Color::DarkGray)),
-            Span::styled(" cancel", Style::default().fg(Color::Gray)),
-        ])),
-        chunks[footer_index],
+        Paragraph::new(Line::from(hint_spans)),
+        chunks[footer_index + 1],
     );
 
     if let Some(error) = state.provider_form.error.clone() {
@@ -168,7 +269,7 @@ pub fn render_provider_form(f: &mut Frame, area: Rect, state: &mut ChatState) {
                 error,
                 Style::default().fg(Color::Red),
             )])),
-            chunks[footer_index + 1],
+            chunks[footer_index + 2],
         );
     }
 }
@@ -202,6 +303,14 @@ mod tests {
         let form = ProviderFormState::new();
         assert_eq!(form.provider_type(), "openai-compatible");
         assert_eq!(form.values[0], "OpenAI Compatible");
+    }
+
+    #[test]
+    fn form_opens_focused_on_type_field() {
+        // 打开表单先落在 Type（下标 0）：用户得先选协议类型，再 Tab 往下填，
+        // 不要一上来就默认替他选好 OpenAI Compatible。
+        let form = ProviderFormState::new();
+        assert_eq!(form.active_field, 0);
     }
 
     #[test]

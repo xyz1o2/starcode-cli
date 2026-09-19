@@ -151,8 +151,7 @@ async fn handle_palette(
                 if let Some(selected_item) = filtered_items.get(state.selected_palette_index) {
                     let provider_id = match &selected_item.action {
                         crate::ui::state::PaletteAction::SelectProvider(pid) => Some(pid.clone()),
-                        crate::ui::state::PaletteAction::InputApiKey(pid) => Some(pid.clone()),
-                        crate::ui::state::PaletteAction::InputBaseUrl(pid) => Some(pid.clone()),
+                        crate::ui::state::PaletteAction::EditProvider(pid) => Some(pid.clone()),
                         crate::ui::state::PaletteAction::Navigate(
                             crate::ui::state::PaletteMode::ProviderOptions(pid),
                         ) => Some(pid.clone()),
@@ -160,9 +159,7 @@ async fn handle_palette(
                     };
 
                     if let Some(pid) = provider_id {
-                        let store = crate::core::config::provider_store::ProviderStore::new();
-                        let has_saved_key = store.get_api_key(&pid).await.unwrap_or(None).is_some();
-                        super::input::show_provider_api_key_modal(state, &pid, true, has_saved_key);
+                        super::input::open_provider_form(state, Some(pid)).await;
                         return Ok(true);
                     }
                 }
