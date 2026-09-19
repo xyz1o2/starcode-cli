@@ -17,6 +17,11 @@
 //! 所有框显示同一段文字。它们画 `values` 里已经存好的值（空字段画 hint，和
 //! textarea 的 placeholder 对齐，不然焦点移开时提示一闪一闪）。
 //!
+//! 所有字段（含 Type）都画同一个圆角框：活动字段青色边框 + textarea，其余
+//! 灰色边框 + 已存值或占位 hint。选中与未选中几何完全一致，只差颜色——不然
+//! 焦点移开框就消失，看起来像输入框在忽隐忽现。hint 只出现在框内占位，标签行
+//! 不再重复一遍。
+//!
 //! 面板底部是操作行：`‹ Back` 取消回上一层，`Save ›` 提交，←/→ 选、Enter 定。
 //! Tab/↓ 从末字段进操作行，再按继续循环回 Type。
 
@@ -102,7 +107,9 @@ pub fn render_provider_form(f: &mut Frame, area: Rect, state: &mut ChatState) {
             .map(String::as_str)
             .unwrap_or("");
 
-        // 标签行：`▸ Name   hint`
+        // 标签行只画 `▸ Name`。hint 只在框内以占位符形式出现（活动字段由
+        // `sync_textarea_to_active_field` 设到 textarea 的 placeholder 上），
+        // 标签行不再重复一遍——不然相邻两行各显示一次同一段提示，既错位又像在闪。
         let mut label_line = vec![Span::styled(
             if is_active { "▸ " } else { "  " },
             Style::default().fg(if is_active {
@@ -121,42 +128,44 @@ pub fn render_provider_form(f: &mut Frame, area: Rect, state: &mut ChatState) {
                     Modifier::empty()
                 }),
         ));
-        label_line.push(Span::raw("  "));
-        label_line.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
         f.render_widget(Paragraph::new(Line::from(label_line)), label_area);
+
+        // 每个字段——包括 Type 选项字段——都画同一个圆角框。活动时青色边框，
+        // 非活动时灰色边框，几何（框大小、内容行位置）完全一致：这样焦点在
+        // 字段之间移动时只有颜色变化，不会出现框忽隐忽现、文本位置跳变。
+        let input_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(if is_active {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            }));
 
         if *is_text {
             // textarea 全表单共用一份，里面只有活动字段的内容。非活动字段要是也
             // 画 textarea，四个文本框会同时显示同一段文字（联动 bug），所以它们
             // 直接画 `values` 里存好的值。
             if is_active {
-                let input_block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::Cyan));
                 state.modal_textarea.set_block(input_block);
                 f.render_widget(&state.modal_textarea, input_area);
             } else {
-                let input_block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::DarkGray));
                 // 空字段显示 hint，和活动字段 textarea 的 placeholder 一致；
                 // 不然焦点移开时框里提示突然消失，看起来像样式在闪
                 let is_placeholder = value.is_empty();
                 f.render_widget(
-                    Paragraph::new(if is_placeholder { hint } else { value }).style(
-                        Style::default().fg(if is_placeholder {
+                    Paragraph::new(if is_placeholder { hint } else { value })
+                        .block(input_block)
+                        .style(Style::default().fg(if is_placeholder {
                             Color::DarkGray
                         } else {
                             Color::Gray
-                        }),
-                    ),
+                        })),
                     input_area,
                 );
             }
         } else {
-            // 选项字段：不接管 textarea，直接画当前值 + ◀ ▶
+            // 选项字段：不接管 textarea，直接画当前值 + ◀ ▶，同样套上框
             let row = Line::from(vec![
                 Span::styled(
                     "◀ ",
@@ -181,7 +190,12 @@ pub fn render_provider_form(f: &mut Frame, area: Rect, state: &mut ChatState) {
                     }),
                 ),
             ]);
-            f.render_widget(Paragraph::new(row).alignment(Alignment::Center), input_area);
+            f.render_widget(
+                Paragraph::new(row)
+                    .alignment(Alignment::Center)
+                    .block(input_block),
+                input_area,
+            );
         }
     }
 

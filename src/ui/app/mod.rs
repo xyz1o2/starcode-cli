@@ -137,6 +137,8 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
             &mut state.task_panel,
             theme,
             state.animation_tick,
+            // is_processing 在 agent 收到 Done 时回落 false（stream.rs），转圈跟着停
+            state.is_processing,
         );
     }
 

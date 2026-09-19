@@ -729,6 +729,7 @@ pub fn render_task_panel_mut(
     panel: &mut TaskPanel,
     theme: &Theme,
     animation_tick: u64,
+    agent_active: bool,
 ) {
     if !panel.is_visible {
         return;
@@ -743,25 +744,6 @@ pub fn render_task_panel_mut(
     f.render_widget(Clear, area);
 
     let flat_tasks = panel.flatten_tasks();
-
-    let mut total = 0usize;
-    let mut completed = 0usize;
-    let mut pending = 0usize;
-    let mut in_progress = 0usize;
-    let mut blocked = 0usize;
-
-    for node in panel.task_manager.graph.nodes.values() {
-        total += 1;
-        match node.status {
-            TaskStatus::Pending => pending += 1,
-            TaskStatus::InProgress => in_progress += 1,
-            TaskStatus::Completed => completed += 1,
-            TaskStatus::Blocked => blocked += 1,
-            TaskStatus::Skipped => {}
-        }
-    }
-
-    let active = pending + in_progress + blocked;
 
     let items: Vec<ListItem> = if flat_tasks.is_empty() {
         let label = if panel.view_mode == TaskViewMode::Active {
@@ -778,10 +760,16 @@ pub fn render_task_panel_mut(
             .iter()
             .map(|(node, prefix)| {
                 // 对标 Claude Code TaskListV2::getTaskIcon —— figures.tick / squareSmallFilled / squareSmall
-                // Spinner 帧：对标 Claude Code spinner 动画 (dots variant)
+                // Spinner 帧：对标 Claude Code spinner 动画 (dots variant)。只在 agent
+                // 真的在跑时转——agent 已经停了还留着 in_progress 项转圈，看起来像
+                // 卡住了（模型经常不在收尾时把最后一项标完成）。停着的时候用静止的
+                // ●，和状态行的 spinner 同一套字符。
                 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                let spinner_frame =
-                    SPINNER_FRAMES[(animation_tick as usize / 6) % SPINNER_FRAMES.len()];
+                let spinner_frame = if agent_active {
+                    SPINNER_FRAMES[(animation_tick as usize / 6) % SPINNER_FRAMES.len()]
+                } else {
+                    "●"
+                };
 
                 let (status_icon, icon_color) = match node.status {
                     TaskStatus::Pending => ("▫", None),
@@ -859,21 +847,15 @@ pub fn render_task_panel_mut(
             .collect()
     };
 
-    // 对标 Claude Code TaskListV2 standalone 头："<N> tasks (<K> done, <M> in progress, <P> open)"
-    let title = if total == 0 {
-        " Tasks ".to_string()
+    // 标题就叫 Todo，agent 在跑时把当前进行中项的 activeForm 跟在后面
+    // （` Todo · Running tests `）。计数不附——计数和实际状态经常对不上
+    // （agent 收尾时未必把最后一项标完成，"1 in progress" 就成了误导）。
+    let title = if agent_active {
+        current_activity(panel)
+            .map(|activity| format!(" Todo · {} ", activity))
+            .unwrap_or_else(|| " Todo ".to_string())
     } else {
-        let mut parts = vec![format!("{} done", completed)];
-        if in_progress > 0 {
-            parts.push(format!("{} in progress", in_progress));
-        }
-        parts.push(format!("{} open", pending));
-        format!(
-            " {} task{} ({}) ",
-            total,
-            if total == 1 { "" } else { "s" },
-            parts.join(", ")
-        )
+        " Todo ".to_string()
     };
 
     let block = Block::default()
@@ -943,6 +925,27 @@ pub fn render_task_panel_mut(
         f.render_widget(Clear, popup_area);
         f.render_widget(&panel.edit_input, popup_area);
     }
+}
+
+/// 取当前进行中任务的展示文案（activeForm 优先，回退 title），按 `ordered_ids()`
+/// 的清单顺序取第一个进行中项——和清单里看到的顺序一致。无进行中项返回 None。
+///
+/// 标题用它显示「正在干嘛」，逻辑和 `status_line::in_progress_todo_verb` 一样，
+/// 但这里不挑语言：清单行本身就原样显示 activeForm，标题跟着同一种语言不会更怪。
+fn current_activity(panel: &TaskPanel) -> Option<String> {
+    let graph = &panel.task_manager.graph;
+    for id in graph.ordered_ids() {
+        let node = graph.nodes.get(&id)?;
+        if node.status == TaskStatus::InProgress {
+            return Some(
+                node.active_form
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| node.title.clone()),
+            );
+        }
+    }
+    None
 }
 
 /// 找到下一个建议执行的任务（对标 Claude Code "Next task" 提示）
