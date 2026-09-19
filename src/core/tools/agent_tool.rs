@@ -291,6 +291,7 @@ impl ToolInvocation for AgentToolInvocation {
                         SubAgentRequest {
                             prompt: request.prompt,
                             max_rounds: request.max_rounds,
+                            subagent_type: request.subagent_type,
                         },
                         name.clone(),
                         input.description.clone(),
@@ -331,6 +332,7 @@ impl ToolInvocation for AgentToolInvocation {
                         SubAgentRequest {
                             prompt: request.prompt,
                             max_rounds: request.max_rounds,
+                            subagent_type: request.subagent_type,
                         },
                         None,
                         input.description.clone(),
@@ -385,6 +387,7 @@ impl ToolInvocation for AgentToolInvocation {
                         SubAgentRequest {
                             prompt: enriched_prompt,
                             max_rounds: request.base.max_rounds,
+                            subagent_type: request.base.subagent_type,
                         },
                         Some(format!("fork-{}", agent_id)),
                         request.description.clone(),

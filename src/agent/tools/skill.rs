@@ -1,6 +1,6 @@
 use crate::agent::skills::{
-    register_custom_subagents, AnalyzerAgent, AutoFixAgent, EditorAgent, ExploreAgent,
-    NavigatorAgent, SubAgentManager, SubTask,
+    register_custom_subagents, AnalyzerAgent, AutoFixAgent, EditorAgent, NavigatorAgent,
+    SubAgentManager, SubTask,
 };
 use crate::core::tools::{
     BaseDeclarativeTool, Kind, ToolCallConfirmationDetails, ToolError, ToolInvocation,
@@ -34,10 +34,8 @@ impl SkillTool {
             client.clone(),
             sub_config.clone(),
         )));
-        manager.register(Box::new(ExploreAgent::new(
-            client.clone(),
-            sub_config.clone(),
-        )));
+        // ExploreAgent 不在这里注册：它走 AgentTool 的 `subagent_type: explorer`
+        // 单轨（runner.rs 的 `run_explore` 派发），那条路径才有 UI 进度回流。
         manager.register(Box::new(NavigatorAgent::new(
             client.clone(),
             sub_config.clone(),

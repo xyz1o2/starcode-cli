@@ -6,7 +6,9 @@
 use crate::agent::subagent::notification::{
     NotificationQueue, NotificationStatus, NotificationUsage, TaskNotification,
 };
-use crate::agent::subagent::progress::{AgentProgressTracker, SubAgentProgressSink};
+use crate::agent::subagent::progress::{
+    AgentProgressTracker, SubAgentProgress, SubAgentProgressSink,
+};
 use crate::core::agents::{
     SharedSubAgentRunner, SubAgentError, SubAgentErrorKind, SubAgentRequest, SubAgentResult,
 };
@@ -49,6 +51,12 @@ impl StarAgentRunner {
     ///
     /// 之所以走 stream 而不是 `process_user_message`：后者只返回一条
     /// assistant 文本，工具调用与 token 用量全部丢失。
+    ///
+    /// 按 `request.subagent_type` 派发：`Explorer` 走确定性检索
+    /// （`ExploreAgent` 的 ACE 广搜 + 可选 deep filter），其余走下面的通用
+    /// LLM 循环。之前 `subagent_type` 只当 UI 标签用，`explorer` 实际跑的是
+    /// 通用 agent，真正检索专家要靠 `skill` 工具才能触发，而且那条路径不上
+    /// UI——现在两条路并成一条，AgentTool 的进度回流对 explorer 同样生效。
     pub async fn run_with_progress(
         &self,
         request: SubAgentRequest,
@@ -59,6 +67,11 @@ impl StarAgentRunner {
                 SubAgentErrorKind::RecursionLimitExceeded,
                 "Maximum SubAgent recursion depth reached (3). Cannot start another SubAgent.",
             ));
+        }
+
+        // Explorer 是确定性检索，不是 LLM 循环，单独走
+        if request.subagent_type == crate::core::agents::SubagentType::Explorer {
+            return self.run_explore(request, sink).await;
         }
 
         let mut sub_config = (*self.config).clone();
@@ -161,6 +174,118 @@ impl StarAgentRunner {
             total_tokens,
             last_tool_info,
         })
+    }
+
+    /// Explorer 派发：跑 `ExploreAgent` 的确定性检索（ACE 广搜 + 可选 deep
+    /// filter），把结果包成 `SubAgentResult`。检索本身不产生工具调用/ token
+    /// 统计，这里按 0 上报；开始时推一条进度，让 UI 行不只是"Initializing"。
+    async fn run_explore(
+        &self,
+        request: SubAgentRequest,
+        sink: Option<SubAgentProgressSink>,
+    ) -> Result<SubAgentResult, SubAgentError> {
+        use crate::agent::skills::{ExploreAgent, SubAgent, SubTask};
+
+        let mut sub_config = (*self.config).clone();
+        sub_config.recursion_depth = sub_config.recursion_depth.saturating_add(1);
+
+        if let Some(sink) = sink.as_ref() {
+            sink(SubAgentProgress {
+                last_tool_info: Some("Searching codebase…".to_string()),
+                ..Default::default()
+            });
+        }
+
+        let agent = ExploreAgent::new(self.client.clone(), Arc::new(sub_config));
+        let task = SubTask::new(
+            uuid::Uuid::new_v4().to_string(),
+            request.prompt,
+            "search".to_string(),
+            // target 留空 → ExploreAgent 回落到工作区根
+            String::new(),
+        );
+
+        let result = agent
+            .execute(task)
+            .await
+            .map_err(|e| SubAgentError::new(SubAgentErrorKind::ExecutionFailed, e.to_string()))?;
+
+        let output = if result.success {
+            // details 里是检索结果正文；summary 只是 "Search Complete" 之类
+            result.details.unwrap_or(result.summary)
+        } else {
+            result.error.unwrap_or(result.summary)
+        };
+
+        Ok(SubAgentResult {
+            output,
+            entries: Vec::new(),
+            tool_use_count: 0,
+            total_tokens: 0,
+            last_tool_info: Some("Search complete".to_string()),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 派发回归：Explorer 请求必须进 `run_explore`，不能走通用 LLM 循环。
+    /// deep_filter 默认关（`STAR_SEARCH_SKILL_ENABLE_DEEP_FILTER` 未设），
+    /// 所以这条路径只跑确定性广搜，不碰网络——用假 key 就能测。
+    #[tokio::test]
+    async fn explorer_dispatch_runs_search_not_llm() {
+        let client = StarClient::new(
+            "test-key-not-used",
+            Some("test-model".to_string()),
+            None,
+            Some(true),
+            None,
+        );
+        let mut params = crate::core::config::config_types::ConfigParameters::default();
+        params.target_dir = std::env::temp_dir().join("starcode-explore-dispatch-test");
+        let config = Arc::new(crate::core::config::Config::new(params));
+
+        let runner = StarAgentRunner::new(client, config);
+        let request = SubAgentRequest::new("where is auth handled")
+            .with_subagent_type(crate::core::agents::SubagentType::Explorer);
+
+        let result = runner.run_with_progress(request, None).await;
+        assert!(
+            result.is_ok(),
+            "explore dispatch should succeed: {:?}",
+            result.err()
+        );
+        let result = result.unwrap();
+        // 没走 LLM，所以没有 token 统计；广搜结果进 output
+        assert_eq!(result.total_tokens, 0);
+        assert!(
+            !result.output.is_empty(),
+            "search results should land in output"
+        );
+        assert_eq!(result.last_tool_info.as_deref(), Some("Search complete"),);
+    }
+
+    /// 派发判定本身：只有 Explorer 进检索分支。通用路径需要完整
+    /// runtime bootstrap（`StarAgent` 构造要 ToolRegistry），在单测里
+    /// 起不来，这里只验类型判定的输入侧——路由侧的覆盖见 `router.rs`。
+    #[test]
+    fn only_explorer_is_routed_to_search() {
+        // 默认是 GeneralPurpose，不能误判成 Explorer
+        let default = SubAgentRequest::new("anything");
+        assert_ne!(
+            default.subagent_type,
+            crate::core::agents::SubagentType::Explorer
+        );
+
+        // 显式标注才进检索
+        let explorer = SubAgentRequest::new("find auth")
+            .with_subagent_type(crate::core::agents::SubagentType::Explorer);
+        assert_eq!(
+            explorer.subagent_type,
+            crate::core::agents::SubagentType::Explorer
+        );
     }
 }
 

@@ -26,7 +26,9 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
 
     // Task panel auto-show/hide logic
     state.task_panel.auto_show_if_needed();
-    state.task_panel.check_auto_hide();
+    // is_processing 在 agent 收到 Done 时回落 false（stream.rs）——残留
+    // in_progress 的清单在 agent 停下后才能开始 5 秒收起计时
+    state.task_panel.check_auto_hide(state.is_processing);
 
     // Task panel above input (like openclaude's TaskListV2 above PromptInput)
     let task_panel_visible = state.task_panel.is_visible;

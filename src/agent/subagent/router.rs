@@ -156,6 +156,10 @@ fn build_request(input: &AgentToolFullInput) -> SubAgentRequest {
     SubAgentRequest {
         prompt: input.prompt.clone(),
         max_rounds: input.max_rounds,
+        subagent_type: input
+            .subagent_type
+            .clone()
+            .unwrap_or(SubagentType::GeneralPurpose),
     }
 }
 
@@ -186,6 +190,32 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// 回归：`subagent_type` 必须一路透到 `SubAgentRequest`，runner 靠它
+    /// 派发 explorer 到 `run_explore`。丢在路由上 explorer 就退回通用 agent。
+    #[test]
+    fn request_carries_subagent_type_through_route() {
+        let mut input = default_input();
+        input.subagent_type = Some(SubagentType::Explorer);
+        let route = route_agent_call(&input, false, false);
+        match route {
+            AgentRoute::SyncNamedAgent { request, .. } => {
+                assert_eq!(request.subagent_type, SubagentType::Explorer);
+            }
+            _ => panic!("explorer input must route to SyncNamedAgent"),
+        }
+    }
+
+    #[test]
+    fn request_defaults_to_general_purpose_type() {
+        let route = route_agent_call(&default_input(), false, false);
+        match route {
+            AgentRoute::SyncNamedAgent { request, .. } => {
+                assert_eq!(request.subagent_type, SubagentType::GeneralPurpose);
+            }
+            _ => panic!(),
+        }
     }
 
     #[test]

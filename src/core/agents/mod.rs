@@ -7,6 +7,9 @@ pub use types::*;
 pub struct SubAgentRequest {
     pub prompt: String,
     pub max_rounds: Option<u32>,
+    /// 命名子代理类型。runner 按它派发：`Explorer` 走确定性检索
+    /// （`ExploreAgent`），其余走通用 LLM 循环。
+    pub subagent_type: SubagentType,
 }
 
 impl SubAgentRequest {
@@ -14,11 +17,17 @@ impl SubAgentRequest {
         Self {
             prompt: prompt.into(),
             max_rounds: None,
+            subagent_type: SubagentType::GeneralPurpose,
         }
     }
 
     pub fn with_max_rounds(mut self, max_rounds: u32) -> Self {
         self.max_rounds = Some(max_rounds);
+        self
+    }
+
+    pub fn with_subagent_type(mut self, subagent_type: SubagentType) -> Self {
+        self.subagent_type = subagent_type;
         self
     }
 }

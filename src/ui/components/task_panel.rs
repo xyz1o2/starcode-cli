@@ -272,13 +272,24 @@ impl TaskPanel {
     }
 
     /// Check if we should auto-hide (all tasks completed, 5s delay)
-    pub fn check_auto_hide(&mut self) {
-        let has_active = self.task_manager.graph.nodes.values().any(|n| {
-            matches!(
-                n.status,
-                TaskStatus::Pending | TaskStatus::InProgress | TaskStatus::Blocked
-            )
-        });
+    ///
+    /// `agent_active` = agent 正在跑（`ChatState::is_processing`）。进行中的任务
+    /// 只有在 agent 真在跑时才算"活跃"——模型收尾经常不把最后一项标 completed，
+    /// 纯按数据状态判断的话这项会让 5 秒计时器永远启动不了，面板一直挂在输入框
+    /// 上方不收起。判定标准和面板 spinner 一致（`render_task_panel_mut` 的
+    /// `agent_active`），两处都由 turn 生命周期驱动而不是数据状态驱动
+    /// （对标 CCB issue #58297 的 v2.1.141 修复）。
+    pub fn check_auto_hide(&mut self, agent_active: bool) {
+        let has_active = self
+            .task_manager
+            .graph
+            .nodes
+            .values()
+            .any(|n| match n.status {
+                TaskStatus::Pending | TaskStatus::Blocked => true,
+                TaskStatus::InProgress => agent_active,
+                TaskStatus::Completed | TaskStatus::Skipped => false,
+            });
 
         if has_active {
             self.auto_hide_at = None;
@@ -599,7 +610,8 @@ impl TaskPanel {
     // Helper to flatten tree for display (DFS)
     pub fn flatten_tasks(&self) -> Vec<(&TaskNode, String)> {
         let mut result = Vec::new();
-        let root_ids = &self.task_manager.graph.root_ids;
+        // 根节点按 CCB 优先级重排；子树跟着父节点走，深度序不变
+        let root_ids = self.sorted_root_ids();
         for (i, root_id) in root_ids.iter().enumerate() {
             let is_last = i == root_ids.len() - 1;
             // For roots, we start with empty prefix?
@@ -608,6 +620,50 @@ impl TaskPanel {
             self.collect_nodes(root_id, "", is_last, &mut result);
         }
         result
+    }
+
+    /// 根节点优先级排序，对标 CCB `TaskListV2` 的 prioritized 列表：
+    /// 最近完成(≤30s) → 进行中 → 未阻塞 pending → 已阻塞 → 更早完成。
+    ///
+    /// 只在 `root_ids` 层面重排，子节点跟着父节点走（`collect_nodes` 的深度
+    /// 序不变），不然树的缩进结构会被打散。组内保持 root_ids 原序——CCB 用
+    /// `byIdAsc`，id 是创建序，和我们的 root_ids 顺序等价，不必再解析 id。
+    /// `sort_by_key` 是稳定排序，同优先级的条目不会来回跳。
+    fn sorted_root_ids(&self) -> Vec<String> {
+        let mut ids = self.task_manager.graph.root_ids.clone();
+        ids.sort_by_key(|id| {
+            self.task_manager
+                .graph
+                .nodes
+                .get(id)
+                .map(|n| self.priority_rank(n))
+                .unwrap_or(u8::MAX)
+        });
+        ids
+    }
+
+    fn priority_rank(&self, node: &TaskNode) -> u8 {
+        match node.status {
+            // 最近完成排最前，让用户看到刚做完的；超过 30s 的落回末尾
+            TaskStatus::Completed if !Self::is_completed_expired(node) => 0,
+            TaskStatus::InProgress => 1,
+            TaskStatus::Pending if !self.has_unresolved_dependency(node) => 2,
+            TaskStatus::Pending | TaskStatus::Blocked => 3,
+            TaskStatus::Completed | TaskStatus::Skipped => 4,
+        }
+    }
+
+    /// 是否还有未完成的依赖（对标 CCB `blockedBy.some(id => unresolved.has(id))`）。
+    /// 依赖条目不存在（`None`）按未解决算，和行渲染里的 `> blocked by` 判定一致。
+    fn has_unresolved_dependency(&self, node: &TaskNode) -> bool {
+        node.dependencies.iter().any(|dep_id| {
+            self.task_manager
+                .graph
+                .nodes
+                .get(dep_id)
+                .map(|n| n.status != TaskStatus::Completed)
+                .unwrap_or(true)
+        })
     }
 
     fn has_visible_descendant(&self, id: &str) -> bool {
@@ -745,6 +801,22 @@ pub fn render_task_panel_mut(
 
     let flat_tasks = panel.flatten_tasks();
 
+    // 对标 CCB TaskListV2 standalone 头："<N> tasks (<K> done, <M> in progress, <P> open)"
+    // in_progress 计数只在 >0 时出现，和参考实现一致
+    let mut total = 0usize;
+    let mut completed = 0usize;
+    let mut pending = 0usize;
+    let mut in_progress = 0usize;
+    for node in panel.task_manager.graph.nodes.values() {
+        total += 1;
+        match node.status {
+            TaskStatus::Pending => pending += 1,
+            TaskStatus::InProgress => in_progress += 1,
+            TaskStatus::Completed => completed += 1,
+            TaskStatus::Blocked | TaskStatus::Skipped => {}
+        }
+    }
+
     let items: Vec<ListItem> = if flat_tasks.is_empty() {
         let label = if panel.view_mode == TaskViewMode::Active {
             "No active tasks. Use Ctrl+N to add or /task add."
@@ -847,16 +919,29 @@ pub fn render_task_panel_mut(
             .collect()
     };
 
-    // 标题就叫 Todo，agent 在跑时把当前进行中项的 activeForm 跟在后面
-    // （` Todo · Running tests `）。计数不附——计数和实际状态经常对不上
-    // （agent 收尾时未必把最后一项标完成，"1 in progress" 就成了误导）。
-    let title = if agent_active {
-        current_activity(panel)
-            .map(|activity| format!(" Todo · {} ", activity))
-            .unwrap_or_else(|| " Todo ".to_string())
+    // 对标 CCB TaskListV2 standalone 头：` 5 tasks (2 done, 1 in progress, 2 open) `。
+    // 计数描述状态分布，agent 在跑时再跟上当前进行中项的 activeForm
+    // （` · Running tests `）描述动作——两者互补，和状态行的 spinner 动词不重复。
+    let mut title = if total == 0 {
+        " Tasks ".to_string()
     } else {
-        " Todo ".to_string()
+        let mut parts = vec![format!("{} done", completed)];
+        if in_progress > 0 {
+            parts.push(format!("{} in progress", in_progress));
+        }
+        parts.push(format!("{} open", pending));
+        format!(
+            " {} task{} ({}) ",
+            total,
+            if total == 1 { "" } else { "s" },
+            parts.join(", ")
+        )
     };
+    if agent_active {
+        if let Some(activity) = current_activity(panel) {
+            title = format!("{}· {} ", title.trim_end(), activity);
+        }
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -985,4 +1070,231 @@ fn find_next_task_hint(panel: &TaskPanel) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::tasks::models::{TaskNode, TaskStatus};
+    use chrono::Utc;
+
+    /// 空的内存面板。`TaskPanel::new()` 会读磁盘上的 `.star/tasks.json`，
+    /// 测试不能依赖 cwd（CI 里那个文件可能有内容）。
+    fn empty_panel() -> TaskPanel {
+        TaskPanel {
+            is_visible: true,
+            manually_hidden: false,
+            list_state: ListState::default(),
+            task_manager: TaskManager::new(),
+            editing_task_id: None,
+            edit_mode: EditMode::Title,
+            edit_input: TextArea::default(),
+            view_mode: TaskViewMode::All,
+            auto_hide_at: None,
+            tasks_modified_since_load: false,
+        }
+    }
+
+    /// 加一个根任务，返回 id
+    fn add_root(panel: &mut TaskPanel, node: TaskNode) -> String {
+        let id = node.id.clone();
+        panel.task_manager.graph.root_ids.push(id.clone());
+        panel.task_manager.graph.nodes.insert(id.clone(), node);
+        id
+    }
+
+    fn root_titles_in_order(panel: &TaskPanel) -> Vec<&str> {
+        panel
+            .sorted_root_ids()
+            .iter()
+            .map(|id| {
+                panel
+                    .task_manager
+                    .graph
+                    .nodes
+                    .get(id)
+                    .unwrap()
+                    .title
+                    .as_str()
+            })
+            .collect()
+    }
+
+    // ── A. 优先级排序 ──────────────────────────────────────────────
+
+    #[test]
+    fn sorted_root_ids_groups_by_status() {
+        // root_ids 故意乱排，验证输出按优先级分组
+        let mut panel = empty_panel();
+        let mut old = TaskNode::new("old done".into());
+        old.status = TaskStatus::Completed;
+        old.completed_at = Some(Utc::now() - chrono::Duration::seconds(31));
+        let mut running = TaskNode::new("running".into());
+        running.status = TaskStatus::InProgress;
+        let pending = TaskNode::new("pending".into());
+        let mut blocked = TaskNode::new("blocked".into());
+        blocked.status = TaskStatus::Blocked;
+        let mut fresh = TaskNode::new("fresh done".into());
+        fresh.status = TaskStatus::Completed;
+        fresh.completed_at = Some(Utc::now());
+
+        add_root(&mut panel, old);
+        add_root(&mut panel, running);
+        add_root(&mut panel, pending);
+        add_root(&mut panel, blocked);
+        add_root(&mut panel, fresh);
+
+        assert_eq!(
+            root_titles_in_order(&panel),
+            vec!["fresh done", "running", "pending", "blocked", "old done"],
+        );
+    }
+
+    #[test]
+    fn sort_is_stable_within_bucket() {
+        // 三个同优先级的 pending，组内顺序不能被打散（≈ CCB 的 byIdAsc）
+        let mut panel = empty_panel();
+        add_root(&mut panel, TaskNode::new("first".into()));
+        add_root(&mut panel, TaskNode::new("second".into()));
+        add_root(&mut panel, TaskNode::new("third".into()));
+
+        assert_eq!(
+            root_titles_in_order(&panel),
+            vec!["first", "second", "third"],
+        );
+    }
+
+    #[test]
+    fn sort_keeps_children_attached() {
+        // 父节点排序后子节点仍紧跟父节点，缩进前缀不变
+        let mut panel = empty_panel();
+        let mut parent = TaskNode::new("parent".into());
+        let mut child = TaskNode::new("child".into());
+        child.parent_id = Some(parent.id.clone());
+        parent.children.push(child.id.clone());
+        let mut running = TaskNode::new("running".into());
+        running.status = TaskStatus::InProgress;
+
+        let child_id = child.id.clone();
+        // running 排在 parent 前面（in_progress=1 < pending=2）
+        add_root(&mut panel, parent.clone());
+        add_root(&mut panel, running);
+        panel.task_manager.graph.nodes.insert(child_id, child);
+
+        assert_eq!(root_titles_in_order(&panel), vec!["running", "parent"]);
+
+        let flat = panel.flatten_tasks();
+        let titles: Vec<&str> = flat.iter().map(|(n, _)| n.title.as_str()).collect();
+        assert_eq!(titles, vec!["running", "parent", "child"]);
+        // 子节点缩进 2 空格，没被排序提到别处去
+        assert_eq!(flat[2].1, "  ");
+    }
+
+    #[test]
+    fn sort_respects_30s_recent_completed_window() {
+        // 31s 前完成的落回末尾，1s 前完成的排最前
+        let mut panel = empty_panel();
+        let mut stale = TaskNode::new("stale done".into());
+        stale.status = TaskStatus::Completed;
+        stale.completed_at = Some(Utc::now() - chrono::Duration::seconds(31));
+        let mut running = TaskNode::new("running".into());
+        running.status = TaskStatus::InProgress;
+        let mut fresh = TaskNode::new("fresh done".into());
+        fresh.status = TaskStatus::Completed;
+        fresh.completed_at = Some(Utc::now() - chrono::Duration::seconds(1));
+
+        add_root(&mut panel, stale);
+        add_root(&mut panel, running);
+        add_root(&mut panel, fresh);
+
+        assert_eq!(
+            root_titles_in_order(&panel),
+            vec!["fresh done", "running", "stale done"],
+        );
+    }
+
+    #[test]
+    fn blocked_pending_ranks_below_unblocked() {
+        // 有未完成依赖的 pending 排在无依赖的 pending 后面
+        let mut panel = empty_panel();
+        let mut blocker = TaskNode::new("blocker".into());
+        blocker.status = TaskStatus::InProgress;
+        let mut blocked = TaskNode::new("blocked".into());
+        blocked.dependencies.push(blocker.id.clone());
+        let unblocked = TaskNode::new("unblocked".into());
+
+        add_root(&mut panel, blocked);
+        add_root(&mut panel, unblocked);
+        add_root(&mut panel, blocker);
+
+        assert_eq!(
+            root_titles_in_order(&panel),
+            vec!["blocker", "unblocked", "blocked"],
+        );
+    }
+
+    // ── B. auto-hide 与 agent 活跃判定对齐 ──────────────────────────
+
+    #[test]
+    fn auto_hide_starts_when_agent_idle_with_stuck_in_progress() {
+        // 模型收尾没把最后一项标完成：agent 停了，这项不该再让面板挂着
+        let mut panel = empty_panel();
+        let mut stuck = TaskNode::new("left spinning".into());
+        stuck.status = TaskStatus::InProgress;
+        add_root(&mut panel, stuck);
+
+        panel.is_visible = true;
+        panel.check_auto_hide(false);
+        assert!(
+            panel.auto_hide_at.is_some(),
+            "agent 停了，残留 in_progress 该启动收起计时"
+        );
+        assert!(panel.is_visible, "5 秒还没到，不该立刻收起");
+    }
+
+    #[test]
+    fn auto_hide_held_while_agent_running() {
+        let mut panel = empty_panel();
+        let mut stuck = TaskNode::new("left spinning".into());
+        stuck.status = TaskStatus::InProgress;
+        add_root(&mut panel, stuck);
+
+        panel.is_visible = true;
+        panel.check_auto_hide(true);
+        assert!(
+            panel.auto_hide_at.is_none(),
+            "agent 还在跑，in_progress 是真活跃，不该启动收起计时"
+        );
+    }
+
+    #[test]
+    fn auto_hide_collapses_after_delay_with_stuck_in_progress() {
+        let mut panel = empty_panel();
+        let mut stuck = TaskNode::new("left spinning".into());
+        stuck.status = TaskStatus::InProgress;
+        add_root(&mut panel, stuck);
+
+        panel.is_visible = true;
+        // 计时器已在 6 秒前启动
+        panel.auto_hide_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(6));
+        panel.check_auto_hide(false);
+        assert!(!panel.is_visible, "超时后面板该收起");
+        assert!(panel.auto_hide_at.is_none());
+    }
+
+    #[test]
+    fn pending_blocks_auto_hide_in_both_agent_states() {
+        // 未完成的任务无论 agent 是否在跑都算活跃——收起只针对"agent 停了 +
+        // 只剩残留 in_progress"这一种情况
+        for agent_active in [false, true] {
+            let mut panel = empty_panel();
+            add_root(&mut panel, TaskNode::new("real work".into()));
+            panel.is_visible = true;
+            panel.check_auto_hide(agent_active);
+            assert!(
+                panel.auto_hide_at.is_none(),
+                "pending 任务在 agent_active={agent_active} 下都不该收起"
+            );
+        }
+    }
 }
