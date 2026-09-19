@@ -1207,7 +1207,10 @@ pub fn get_provider_palette_items(configured: &[String]) -> Vec<PaletteItem> {
     // 自定义 provider 放在最前面：刚加的 provider 一定是用户下一步要选的那个。
     // `configured` 的顺序由 ProviderSettings::order 降序决定（见
     // ProviderStore::configured_provider_ids），这里直接沿用。
-    for id in configured.iter().filter(|id| !builtin_ids.contains(id.as_str())) {
+    for id in configured
+        .iter()
+        .filter(|id| !builtin_ids.contains(id.as_str()))
+    {
         items.push(PaletteItem {
             id: format!("provider_{}", id),
             label: format!("{} ✓", id),
@@ -1234,10 +1237,7 @@ pub fn get_provider_palette_items(configured: &[String]) -> Vec<PaletteItem> {
     items
 }
 
-fn build_provider_item_flat(
-    provider: &ProviderMetadata,
-    configured: &[String],
-) -> PaletteItem {
+fn build_provider_item_flat(provider: &ProviderMetadata, configured: &[String]) -> PaletteItem {
     let is_configured = configured.iter().any(|id| id == provider.id);
     let uses_manual_base_url = provider_requires_manual_base_url(provider.id);
 

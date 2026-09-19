@@ -14,9 +14,7 @@
 //!
 //! Type 字段（下标 0）不是自由文本，不渲染 textarea，只显示当前选项和 `◀ ▶` 提示。
 
-use crate::ui::state::palette::{
-    ProviderFormState, PROVIDER_FORM_FIELDS, PROVIDER_FORM_TYPES,
-};
+use crate::ui::state::palette::{ProviderFormState, PROVIDER_FORM_FIELDS, PROVIDER_FORM_TYPES};
 use crate::ui::state::ChatState;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -85,13 +83,21 @@ pub fn render_provider_form(f: &mut Frame, area: Rect, state: &mut ChatState) {
         // 标签行：`▸ Name   hint`
         let mut label_line = vec![Span::styled(
             if is_active { "▸ " } else { "  " },
-            Style::default().fg(if is_active { Color::Cyan } else { Color::DarkGray }),
+            Style::default().fg(if is_active {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            }),
         )];
         label_line.push(Span::styled(
             *label,
             Style::default()
                 .fg(if is_active { Color::White } else { Color::Gray })
-                .add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
+                .add_modifier(if is_active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
         ));
         label_line.push(Span::raw("  "));
         label_line.push(Span::styled(*hint, Style::default().fg(Color::DarkGray)));
@@ -135,10 +141,7 @@ pub fn render_provider_form(f: &mut Frame, area: Rect, state: &mut ChatState) {
                     }),
                 ),
             ]);
-            f.render_widget(
-                Paragraph::new(row).alignment(Alignment::Center),
-                input_area,
-            );
+            f.render_widget(Paragraph::new(row).alignment(Alignment::Center), input_area);
         }
     }
 
@@ -147,10 +150,7 @@ pub fn render_provider_form(f: &mut Frame, area: Rect, state: &mut ChatState) {
     footer_index += 1;
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(
-                " Tab/↑↓",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(" Tab/↑↓", Style::default().fg(Color::DarkGray)),
             Span::styled(" next field", Style::default().fg(Color::Gray)),
             Span::styled("  ←/→", Style::default().fg(Color::DarkGray)),
             Span::styled(" switch type", Style::default().fg(Color::Gray)),
@@ -230,7 +230,22 @@ mod tests {
     }
 
     #[test]
-    fn type_labels_cover_exactly_two_options() {
-        assert_eq!(PROVIDER_FORM_TYPES.len(), PROVIDER_FORM_FIELDS.len() - 4);
+    fn form_state_and_field_table_stay_in_sync() {
+        // values 与 PROVIDER_FORM_FIELDS 下标对齐：长度不一致时 render 里的
+        // `values.get(index)` 会读到 None，字段就变成空白。
+        assert_eq!(
+            ProviderFormState::new().values.len(),
+            PROVIDER_FORM_FIELDS.len()
+        );
+        // 只有 Type 一个字段不是自由文本
+        assert_eq!(
+            PROVIDER_FORM_FIELDS
+                .iter()
+                .filter(|(_, _, is_text)| !is_text)
+                .count(),
+            1
+        );
+        // 类型选项固定两个，←/→ 才有地方循环
+        assert_eq!(PROVIDER_FORM_TYPES.len(), 2);
     }
 }

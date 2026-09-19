@@ -412,7 +412,11 @@ fn sync_textarea_to_active_field(state: &mut ChatState) {
         ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
     );
 
-    if let Some(value) = state.provider_form.values.get(state.provider_form.active_field) {
+    if let Some(value) = state
+        .provider_form
+        .values
+        .get(state.provider_form.active_field)
+    {
         if !value.is_empty() {
             textarea.insert_str(value);
         }
@@ -448,7 +452,11 @@ fn save_active_field_to_form(state: &mut ChatState) {
         return;
     }
     let value = collect_modal_input(&state.modal_textarea);
-    if let Some(slot) = state.provider_form.values.get_mut(state.provider_form.active_field) {
+    if let Some(slot) = state
+        .provider_form
+        .values
+        .get_mut(state.provider_form.active_field)
+    {
         *slot = value;
     }
 }
@@ -489,7 +497,11 @@ async fn submit_provider_form(
             if name.is_empty() { None } else { Some(&name) },
             &provider_type,
             Some(&base_url),
-            if api_key.is_empty() { None } else { Some(&api_key) },
+            if api_key.is_empty() {
+                None
+            } else {
+                Some(&api_key)
+            },
             if model.is_empty() { None } else { Some(&model) },
         )
         .await
@@ -502,7 +514,11 @@ async fn submit_provider_form(
 
     let resolved_key = crate::core::config::providers::resolve_runtime_api_key(
         Some(&provider_id),
-        if api_key.is_empty() { None } else { Some(api_key) },
+        if api_key.is_empty() {
+            None
+        } else {
+            Some(api_key)
+        },
     );
     let is_openai_compat = provider_type == "openai-compatible";
     let _ = agent_tx
@@ -511,7 +527,11 @@ async fn submit_provider_form(
             api_key: resolved_key,
             base_url: Some(base_url.clone()),
             is_openai_compatible: Some(is_openai_compat),
-            model: if model.is_empty() { None } else { Some(model.clone()) },
+            model: if model.is_empty() {
+                None
+            } else {
+                Some(model.clone())
+            },
         })
         .await;
 
@@ -560,9 +580,10 @@ async fn submit_provider_form(
 /// 把一个 provider id 记进 UI 的已配置列表，已存在就提到最前（新的在前）。
 fn register_configured_provider(state: &mut ChatState, provider_id: &str) {
     state.configured_providers.retain(|id| id != provider_id);
-    state.configured_providers.insert(0, provider_id.to_string());
+    state
+        .configured_providers
+        .insert(0, provider_id.to_string());
 }
-
 
 /// 删除一个自定义 provider。
 ///
@@ -3122,8 +3143,7 @@ async fn handle_input_modal(
         state.input_context,
         Some(crate::ui::state::palette::InputContext::ProviderForm)
     );
-    let form_on_type_field =
-        is_provider_form && state.provider_form.active_field == 0;
+    let form_on_type_field = is_provider_form && state.provider_form.active_field == 0;
 
     match key.code {
         KeyCode::Tab | KeyCode::Down if is_provider_form => {

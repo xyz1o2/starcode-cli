@@ -161,12 +161,14 @@ impl ProviderFormState {
 
     /// ←/→ 切换类型；循环。只在 Type 字段获得焦点时调用。
     pub fn cycle_type(&mut self, forward: bool) {
+        // `provider_type()` 返回的已经是类型串（"anthropic-compatible" 之类），
+        // 不能再当标签喂给 `provider_type_of_label`——它只认 "Anthropic Compatible"
+        // 这种标签，匹配不上就 fallback 成 openai-compatible，选中 Anthropic 后
+        // ←/→ 就卡住不动。
         let current = self.provider_type();
         let idx = PROVIDER_FORM_TYPES
             .iter()
-            .position(|label| {
-                provider_type_of_label(label) == provider_type_of_label(current)
-            })
+            .position(|label| provider_type_of_label(label) == current)
             .unwrap_or(0);
         let len = PROVIDER_FORM_TYPES.len();
         let next = if forward {
@@ -200,8 +202,16 @@ fn provider_type_of_label(label: &str) -> &'static str {
 /// 两边不用各维护一份硬编码列表。
 pub const PROVIDER_FORM_FIELDS: &[(&str, &str, bool)] = &[
     ("Type", "API protocol type", false),
-    ("Name", "Display name (optional — derived from URL host if empty)", true),
-    ("Base URL", "Endpoint URL, e.g. http://localhost:1234/v1", true),
+    (
+        "Name",
+        "Display name (optional — derived from URL host if empty)",
+        true,
+    ),
+    (
+        "Base URL",
+        "Endpoint URL, e.g. http://localhost:1234/v1",
+        true,
+    ),
     ("API Key", "Leave empty to skip", true),
     (
         "Model",

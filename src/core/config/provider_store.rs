@@ -515,15 +515,13 @@ impl ProviderStore {
         let config = self.load().await?;
         let active_provider_id = config.active_provider_id.as_deref();
 
-        let builtin_ids: HashSet<&str> =
-            crate::core::config::providers::ALL_PROVIDERS.iter().map(|p| p.id).collect();
+        let builtin_ids: HashSet<&str> = crate::core::config::providers::ALL_PROVIDERS
+            .iter()
+            .map(|p| p.id)
+            .collect();
 
         let is_configured = |id: &str, settings: Option<&ProviderSettings>| {
-            crate::core::config::providers::provider_is_configured(
-                id,
-                settings,
-                active_provider_id,
-            )
+            crate::core::config::providers::provider_is_configured(id, settings, active_provider_id)
         };
 
         // 自定义 provider：order 降序（新的在前，老条目 None 当 0 垫底）。
@@ -574,19 +572,20 @@ impl ProviderStore {
         selected_model: Option<&str>,
     ) -> Result<(), String> {
         let mut config = self.load().await?;
-        let settings = config
-            .providers
-            .entry(provider_id.to_string())
-            .or_insert(ProviderSettings {
-                api_key: None,
-                base_url: None,
-                selected_model: None,
-                models: None,
-                name: None,
-                description: None,
-                r#type: None,
-                order: None,
-            });
+        let settings =
+            config
+                .providers
+                .entry(provider_id.to_string())
+                .or_insert(ProviderSettings {
+                    api_key: None,
+                    base_url: None,
+                    selected_model: None,
+                    models: None,
+                    name: None,
+                    description: None,
+                    r#type: None,
+                    order: None,
+                });
 
         settings.name = normalize_optional_string(name.map(str::to_string));
         settings.r#type = Some(provider_type.to_string());
@@ -639,12 +638,18 @@ mod tests {
     #[test]
     fn derive_id_falls_back_to_url_host() {
         // 没有名称时从 URL 取 host[:port]，path/query 不要
-        assert_eq!(derive_provider_id("", "http://localhost:1234/v1"), "localhost-1234");
+        assert_eq!(
+            derive_provider_id("", "http://localhost:1234/v1"),
+            "localhost-1234"
+        );
         assert_eq!(
             derive_provider_id("", "https://api.example.com/chat/completions"),
             "api-example-com"
         );
-        assert_eq!(derive_provider_id("   ", "https://gateway.io/?x=1"), "gateway-io");
+        assert_eq!(
+            derive_provider_id("   ", "https://gateway.io/?x=1"),
+            "gateway-io"
+        );
     }
 
     #[test]
@@ -671,7 +676,9 @@ mod tests {
     #[test]
     fn conflict_with_existing_custom_gets_next_free_suffix() {
         let mut config = ProviderConfig::default();
-        config.providers.insert("work-api".to_string(), ProviderSettings::default());
+        config
+            .providers
+            .insert("work-api".to_string(), ProviderSettings::default());
         config
             .providers
             .insert("work-api-2".to_string(), ProviderSettings::default());

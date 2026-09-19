@@ -2426,7 +2426,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(state.configured_providers.contains("disk-provider"));
+        assert!(state
+            .configured_providers
+            .iter()
+            .any(|provider| provider == "disk-provider"));
         assert_eq!(state.current_model, model);
         assert_eq!(state.current_provider_id, provider);
         assert_eq!(state.thinking_effort, effort);
