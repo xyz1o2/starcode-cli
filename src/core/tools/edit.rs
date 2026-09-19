@@ -706,6 +706,24 @@ fn clip(s: &str, max_chars: usize) -> String {
 /// 再定位到具体是哪一行对不上 —— 旧实现只会说"首行部分匹配"，
 /// 而首行几乎总能匹配上，模型除了把整块重猜一遍别无选择。
 pub(crate) fn diagnose_replace_failure(file_path: &str, old_string: &str) -> String {
+    // 模型常把 Read 输出里的 `NN→` 行号前缀一并带进 old_string ——
+    // calculate_replacement 匹配前会先剥掉它们（见 strip_line_number_prefixes），
+    // 诊断若还拿原文逐行比对，每一行都会因为那个前缀在文件里查不到，
+    // Check 3/4 全部落空，最后只剩「No similar content found」这句空话。
+    // 跟匹配层一样先剥前缀，真正的差异才说得出来。
+    let (probe, had_line_prefixes) = strip_line_number_prefixes(old_string);
+    if had_line_prefixes && !probe.trim().is_empty() {
+        let inner = diagnose_replace_failure_body(file_path, &probe);
+        return format!(
+            "DIAGNOSIS: old_string included the `NN→` line-number prefixes that Read prints — \
+             those prefixes are not part of the file, which is why every line looked missing. \
+             Stripped them and re-checked: {inner}"
+        );
+    }
+    diagnose_replace_failure_body(file_path, old_string)
+}
+
+fn diagnose_replace_failure_body(file_path: &str, old_string: &str) -> String {
     let mut diagnosis = String::new();
 
     // Try to read the file
@@ -2071,6 +2089,28 @@ mod tests {
         let path = temp_file("nothing", "fn main() {}\n");
         let d = diagnose_replace_failure(path.to_str().unwrap(), "impl Display for Widget {}");
         assert!(d.contains("No similar content"), "{}", d);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn diagnosis_sees_through_line_number_prefixes() {
+        // calculate_replacement 匹配前会剥掉 Read 的 `NN→` 前缀，诊断必须同步：
+        // 否则每一行都因前缀查不到，只剩「No similar content found」。
+        // 这里第 2 行还故意改了一个词，剥掉前缀后应当能点名那一行。
+        let path = temp_file("prefixed", FILE);
+        let old = "  1→class Api {\n  2→  async testAlarm(): Promise<Alarm> {\n";
+        let d = diagnose_replace_failure(path.to_str().unwrap(), old);
+        assert!(
+            d.contains("line-number prefixes"),
+            "诊断必须指出 old_string 带了行号前缀: {}",
+            d
+        );
+        // 剥掉前缀后还要继续往下诊断，而不是停在套话上
+        assert!(
+            d.contains("testAlarm"),
+            "剥前缀后应点名真正对不上的那一行: {}",
+            d
+        );
         let _ = std::fs::remove_file(path);
     }
 

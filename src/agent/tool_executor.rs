@@ -271,6 +271,14 @@ impl ToolExecutor {
         if args.is_null() {
             args = Value::Object(serde_json::Map::new());
         }
+        // 部分 OpenAI-compatible 提供方把整段 arguments 再套一层 JSON 字符串
+        // （`"arguments": "{\"todos\": […]}"`）。第一层 from_str 会把它解成
+        // `Value::String`，原样下发的话每个工具都收到一个字符串，报
+        // `invalid type: string, expected struct …`——模型重试多少次都一样。
+        // 工具入参的顶层一律是对象，所以只剥「字符串化的 JSON 对象」这一层，
+        // 且必须是合法 JSON；剥不动的原样下发，交给各工具的严格解析报错
+        // （`tasks.rs` 的 strictObject 约定保持不变）。
+        args = Self::unwrap_stringified_args(args);
         let args = Self::normalize_tool_args(original_tool_name, name, args);
 
         // Check for cancellation before starting
@@ -757,6 +765,21 @@ impl ToolExecutor {
 
     fn canonical_tool_name(name: &str) -> String {
         crate::core::tools::constants::canonical_tool_name(name)
+    }
+
+    /// 剥掉「字符串化的 JSON」一层外壳（见上面的调用点注释）。
+    ///
+    /// 只剥一层、且只在解出来是对象时收手：工具入参顶层永远是对象，解出数字/
+    /// 布尔/裸串说明模型发的本来就不是参数对象，那种情况留给严格解析去报错。
+    fn unwrap_stringified_args(args: Value) -> Value {
+        let Value::String(s) = args else {
+            return args;
+        };
+        match serde_json::from_str::<Value>(&s) {
+            Ok(inner) if inner.is_object() => inner,
+            // 字符串里装的还是字符串（套了两层）或别的——不再猜，原样退回。
+            _ => Value::String(s),
+        }
     }
 
     fn normalize_tool_args(original_name: &str, canonical_name: &str, args: Value) -> Value {
@@ -2048,6 +2071,7 @@ async fn execute_mcp_dynamic_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     /// 静音 panic hook 跑一段代码：被捕获的 panic 不该往测试输出里打噪音。
     fn without_panic_output<T>(f: impl FnOnce() -> T) -> T {
@@ -2098,6 +2122,70 @@ mod tests {
         assert!(should_run_invocation_confirmation(false, false));
         assert!(!should_run_invocation_confirmation(true, false));
         assert!(should_run_invocation_confirmation(true, true));
+    }
+
+    /// 回归：部分 OpenAI-compatible 提供方把整段 arguments 套一层 JSON 字符串。
+    /// 不剥的话每个工具都收到 `Value::String`，TodoWrite 报
+    /// `invalid type: string, expected struct TodoWriteParams`，模型重试无效。
+    #[test]
+    fn stringified_json_args_are_unwrapped_to_object() {
+        // `"arguments": "{\"todos\": [{…}]}"` → 第一层 from_str 得到 String
+        let inner = r#"{"todos":[{"content":"Run tests","status":"in_progress","activeForm":"Running tests"}]}"#;
+        let args = ToolExecutor::unwrap_stringified_args(Value::String(inner.to_string()));
+        assert!(
+            args.is_object(),
+            "stringified JSON object must be unwrapped"
+        );
+        assert!(args["todos"][0]["activeForm"].as_str() == Some("Running tests"));
+    }
+
+    /// 只剥一层：套了两层字符串的不再往下猜，保持原样交给严格解析。
+    #[test]
+    fn double_stringified_args_left_alone() {
+        // 一个 JSON 字符串，里面又装了一个 JSON 字符串
+        let doubly = r#""{\"todos\":[]}"#;
+        let args = ToolExecutor::unwrap_stringified_args(Value::String(doubly.to_string()));
+        assert!(args.is_string(), "do not unwrap past one layer");
+    }
+
+    /// 字符串里装的不是对象（数字/裸串/数组）——工具入参顶层永远是对象，
+    /// 解不出对象就原样退回，由各工具的严格解析报错。
+    #[test]
+    fn non_object_stringified_args_left_alone() {
+        let args = ToolExecutor::unwrap_stringified_args(Value::String("123".to_string()));
+        assert!(args.is_string());
+        let args =
+            ToolExecutor::unwrap_stringified_args(Value::String("just some text".to_string()));
+        assert!(args.is_string());
+        let args = ToolExecutor::unwrap_stringified_args(Value::String("[1, 2]".to_string()));
+        assert!(args.is_string());
+    }
+
+    /// 对象/数组/裸值径直通过，不做任何变形。
+    #[test]
+    fn already_decoded_args_pass_through() {
+        let obj = json!({ "todos": [] });
+        assert_eq!(ToolExecutor::unwrap_stringified_args(obj.clone()), obj);
+        assert_eq!(ToolExecutor::unwrap_stringified_args(json!(42)), json!(42));
+    }
+
+    /// 端到端：`execute()` 的完整解码链（from_str → null→{} → 剥字符串壳 → 工具严格解析）
+    /// 对"字符串化的 arguments"必须走通，否则 TodoWrite 永远报 invalid type: string。
+    #[test]
+    fn decode_chain_parses_stringified_todo_write_payload() {
+        use crate::core::tools::tasks::parse_todo_write_params;
+
+        // 提供方发来的是 `{"todos": [{…}]}` 的**字符串字面量**
+        let raw = r#"{"todos":[{"content":"Run tests","status":"in_progress","activeForm":"Running tests"}]}"#;
+        let mut args = serde_json::from_str::<Value>(raw).expect("outer parse");
+        if args.is_null() {
+            args = Value::Object(serde_json::Map::new());
+        }
+        args = ToolExecutor::unwrap_stringified_args(args);
+
+        let parsed = parse_todo_write_params(&args).expect("TodoWrite must accept unwrapped args");
+        assert_eq!(parsed.todos.len(), 1);
+        assert_eq!(parsed.todos[0].content, "Run tests");
     }
 
     type ObservedConfirmation =

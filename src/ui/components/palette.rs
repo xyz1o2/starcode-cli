@@ -17,6 +17,10 @@ use ratatui::{
 };
 use std::collections::HashSet;
 
+/// 命令面板（Ctrl+P）占屏比例。宽度刻意压得比常见弹窗窄。
+const PALETTE_WIDTH_PERCENT: u16 = 58;
+const PALETTE_HEIGHT_PERCENT: u16 = 60;
+
 pub fn palette_item_matches_query(item: &PaletteItem, query_lower: &str) -> bool {
     if query_lower.is_empty() {
         return true;
@@ -1896,7 +1900,10 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
         .border_type(BorderType::Rounded)
         .title(palette_title(&state.palette_mode, &state.palette_filter));
 
-    let area = centered_rect(70, 60, area);
+    // 70% 太宽：行内 label + description 拉得过开，视觉上压住整个会话区。
+    // 收到 58% 后两侧留白足够，最长的描述行（删除 provider 的那句）在 120 列
+    // 终端上正好放得下。
+    let area = centered_rect(PALETTE_WIDTH_PERCENT, PALETTE_HEIGHT_PERCENT, area);
     f.render_widget(Clear, area);
     f.render_widget(block, area);
 

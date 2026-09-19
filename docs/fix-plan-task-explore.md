@@ -207,6 +207,7 @@ CCB 的做法（文档 + issue 佐证）：**只有一把 Agent/Task 工具**，
 | 2 | B. auto-hide 对齐 agent 活跃判定 | 低-中 | 无 | ✅ 已完成 |
 | 3 | C. 标题计数 | 低 | 已定：完备对标 CCB | ✅ 已完成 |
 | 4 | D. Explore 接线 | 中-高 | 已定：D3 单轨 | ✅ 已完成 |
+| 5 | E. TodoWrite `invalid type: string` | 低 | 无 | ✅ 已完成 |
 
 ### 已落地的改动
 
@@ -256,6 +257,56 @@ CCB 的做法（文档 + issue 佐证）：**只有一把 Agent/Task 工具**，
 - 通用路径（`GeneralPurpose` 等）的单测受 `ToolRegistry not initialized` 限制起不来，只覆盖了输入侧判定；explorer 派发本身是真跑通的
 - `run_explore` 上报 0 token / 0 tool_use——检索本身不产生这些统计，UI 行会显示检索开始/完成的 last_tool_info
 - `skill: "explore"` 不再注册到 SkillTool；想触发检索走 `Agent` 工具的 `subagent_type: "explorer"`
+
+---
+
+## E. TodoWrite 报 `invalid type: string` — 已修复
+
+### 症状与定位
+
+模型调 TodoWrite 时报 `invalid TodoWrite parameters: invalid type: string`，重试无效。
+
+`parse_todo_write_params`（`tasks.rs:52`）用的是 `serde_json::from_value::<TodoWriteParams>`。本地复现确认 `invalid type: string` 只有三种来源：
+
+| 模型发的 | serde 报错 |
+|---|---|
+| 顶层是字符串化的 JSON | `…, expected struct TodoWriteParams` |
+| `todos` 本身是字符串 | `…, expected a sequence` |
+| 数组元素是裸字符串 | `…, expected struct TodoItemInput` |
+
+前两种都不是"模型形状错了"，是**传输层多解了一层**：部分 OpenAI-compatible 提供方把整段
+`arguments` 再套一层 JSON 字符串（`"arguments": "{\"todos\": […]}"`）。
+`tool_executor.rs:268` 的第一层 `from_str` 把它解成 `Value::String`，原样下发，
+于是每个工具都收到一个字符串。第三种才是真的形状错，属于 strict 该拒的。
+
+### 改法
+
+修在传输层，不动工具的严格契约：
+
+- `src/agent/tool_executor.rs` — 新增 `unwrap_stringified_args()`，只剥「字符串化的
+  JSON 对象」**一层**，解不出对象（数字/裸串/数组/套了两层）就原样退回，交给各工具的
+  严格解析报错。在 `execute()` 里紧接 null→`{}` 归一化之后调用，对所有工具生效
+- `tasks.rs` 一行没动：`deny_unknown_fields` / strict 解析 / 
+  `double_encoded_content_stays_literal` 测试的契约都保持原样
+
+### 为什么不放宽 TodoWrite 自己
+
+`tasks.rs` 的模块文档明确写了"不做任何'字符串里解 JSON'的兜底（CC 的 strictObject 哲学：
+宁可报错也不猜）"，而且 86c5b85 引入的宽容兜底在对标重构时被**有意移除**，
+`double_encoded_content_stays_literal` 就是守这条线的回归。真正的 bug 在传输层：
+工具收到的就不该是字符串。在工具里兜底等于把传输 bug 永久焊进业务代码。
+
+### 测试（`agent::tool_executor::tests`）
+
+- `stringified_json_args_are_unwrapped_to_object` — 一层字符串化的对象被剥开
+- `double_stringified_args_left_alone` — 套两层的不往下猜
+- `non_object_stringified_args_left_alone` — 数字/裸串/数组不解，保持原样
+- `already_decoded_args_pass_through` — 对象/裸值径直通过
+
+**验证**：`cargo test --lib` 671 passed / 7 failed，失败全部是 CLAUDE.md 记录的既有失败
+（mcp_permission、otlp_logger、dangerous_patterns ×2、verify_edit、
+chat_input::test_border_color_default、checkpoint_manager——后者 cwd 依赖，上轮挂 4 个这轮挂 1 个）。
+`cargo fmt --all --check` 0 diff，clippy 在新代码上无新增命中。
 
 ---
 
