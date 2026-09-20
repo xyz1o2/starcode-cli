@@ -49,6 +49,30 @@ fn map_mouse_to_chat_position(
     None
 }
 
+/// 把屏幕坐标换算成选区终点并写入（Drag 与 Up 共用同一套映射与钳制规则）。
+///
+/// 坐标调用方负责先钳进聊天区。落在内容末尾之下时 `map_mouse_to_chat_position`
+/// 会因超出总行数返回 None，此时钳到最后一行，让选区跟随到底而不是冻结在原地。
+fn move_selection_end_to(state: &mut ChatState, col: u16, row: u16) {
+    if let Some((entry_idx, r, c)) = map_mouse_to_chat_position(state, col, row) {
+        state.text_selection.update_selection(entry_idx, r, c);
+    } else if let Some((last_idx, &last_h)) = state
+        .last_item_heights
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, &h)| h > 0)
+    {
+        let rel_x = state
+            .last_chat_area
+            .map(|a| col.saturating_sub(a.x) as usize)
+            .unwrap_or(0);
+        state
+            .text_selection
+            .update_selection(last_idx, last_h as usize - 1, rel_x);
+    }
+}
+
 /// 单击（按下到松开未拖动）时的折叠/展开切换，返回是否发生了切换。
 /// 判定规则与旧版「Down 即切换」完全一致：
 /// - thinking 块：展开时点任意行折叠；折叠时点头部或预览行展开
@@ -189,29 +213,31 @@ pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
                 row = row.max(area.y).min(area.y + area.height.saturating_sub(1));
             }
 
-            if let Some((entry_idx, r, c)) = map_mouse_to_chat_position(state, col, row) {
-                state.text_selection.update_selection(entry_idx, r, c);
-            } else if let Some((last_idx, &last_h)) = state
-                .last_item_heights
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(_, &h)| h > 0)
-            {
-                // 拖到内容末尾之下时 map 会因超出总行数返回 None，锚点冻结在
-                // 原地导致选区“断”。钳制到最后一行，让选区跟随到底。
-                let rel_x = state
-                    .last_chat_area
-                    .map(|a| col.saturating_sub(a.x) as usize)
-                    .unwrap_or(0);
-                state
-                    .text_selection
-                    .update_selection(last_idx, last_h as usize - 1, rel_x);
-            }
+            move_selection_end_to(state, col, row);
         }
         MouseEventKind::Up(MouseButton::Left) => {
             if m.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
                 return;
+            }
+            // 先用松开位置补一次选区终点，再判定单击/拖选。
+            // 终端经常不上报、或在上报途中丢失中间的 Drag 事件（tmux 转发、
+            // 非 SGR 鼠标模式、事件被节流/合并），此时终点还停在按下位置，
+            // 下面 start==end 的单击判定会把真正的拖选误判成单击并清掉选区——
+            // 表现就是「左键拖选永远选不中」。松开在聊天区之外（输入框、状态栏）
+            // 时不外推，保留拖动期间已记下的终点。
+            if state.text_selection.is_selecting {
+                let inside_chat = match state.last_chat_area {
+                    Some(area) => {
+                        m.column >= area.x
+                            && m.column < area.x + area.width
+                            && m.row >= area.y
+                            && m.row < area.y + area.height
+                    }
+                    None => true,
+                };
+                if inside_chat {
+                    move_selection_end_to(state, m.column, m.row);
+                }
             }
             // 未拖动 = 单击（起止锚点重合）：执行折叠/展开切换，并清掉单格
             // 选区高亮。切换会改变条目行数，残留锚点会指向错误的行。
@@ -365,5 +391,59 @@ mod tests {
 
         assert_eq!(state.text_selection.end_entry_idx, Some(1));
         assert_eq!(state.text_selection.end, Some((2, 10)), "钳到最后一行");
+    }
+
+    /// 终端只上报 Down/Up、不上报中间 Drag 事件时（tmux 转发、非 SGR 鼠标
+    /// 模式、事件被节流），松开位置只要与按下位置不同就必须算拖选。
+    /// 此前 Up 只看 Drag 留下的锚点，终点停在按下处 → start==end 被判成
+    /// 单击 → 选区被清空，表现为「左键拖选永远选不中」。
+    #[test]
+    fn drag_without_motion_events_still_selects() {
+        let mut state = setup_state();
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 1),
+        );
+        // 注意：完全没有 Drag 事件
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 10, 2),
+        );
+
+        assert!(
+            state.text_selection.has_selection(),
+            "缺 Drag 事件时也必须保留选区"
+        );
+        assert_eq!(state.text_selection.start, Some((0, 0)));
+        assert_eq!(state.text_selection.end, Some((1, 10)), "终点取自松开位置");
+        assert!(
+            state.expanded_thinking_indices.is_empty(),
+            "未拖动判定不得因补终点而误触发折叠/展开"
+        );
+    }
+
+    /// 松开位置落在聊天区之外（输入框/状态栏）时不外推终点，
+    /// 保留拖动期间已记下的位置。
+    #[test]
+    fn release_outside_chat_keeps_last_drag_end() {
+        let mut state = setup_state();
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 1),
+        );
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 5, 2),
+        );
+        // 松开在第 99 行——远在 24 行高的聊天区之外
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 5, 99),
+        );
+
+        assert!(state.text_selection.has_selection());
+        assert_eq!(state.text_selection.end, Some((1, 5)), "终点保持拖动时的值");
     }
 }
