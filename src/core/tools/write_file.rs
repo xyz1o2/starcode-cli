@@ -400,11 +400,7 @@ impl ToolInvocation for WriteFileToolInvocation {
                 .unwrap_or(true);
 
             if strict_read_check && tokio::fs::try_exists(&resolved_path).await.unwrap_or(false) {
-                let abs_path = resolved_path
-                    .canonicalize()
-                    .unwrap_or(resolved_path.clone())
-                    .to_string_lossy()
-                    .to_string();
+                let abs_path = crate::core::utils::paths::read_state_key(&resolved_path);
 
                 let file_state = {
                     let read_state = global_state.read_file_state.read().await;

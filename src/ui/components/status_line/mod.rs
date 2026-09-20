@@ -717,17 +717,21 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
         let token_pulse = ((state.animation_tick as f64 * 0.08).sin() * 0.15 + 0.85).max(0.7);
         let token_color_pulsed =
             lerp_color(token_color, theme.secondary_shimmer, token_pulse * 0.3);
-        // 显示 token 用量（紧凑模式）
-        let token_display = match &state.token_usage {
-            Some(u) if u.prompt_tokens > 0 => {
-                format!(" · {} tokens", format_token_count(u.prompt_tokens))
+        // 显示 token 用量（紧凑模式）。prompt_tokens 优先，provider 只报
+        // total_tokens 时退回它——两者与 token_count 同源，不搞第二套 `↓` 格式。
+        let usage_tokens = state.token_usage.as_ref().map(|u| {
+            if u.prompt_tokens > 0 {
+                u.prompt_tokens
+            } else {
+                u.total_tokens
             }
-            _ => format!(" · ↓ {}", format_token_count(state.token_count)),
-        };
-        spans.push(Span::styled(
-            token_display,
-            Style::default().fg(token_color_pulsed),
-        ));
+        });
+        if let Some(tokens) = usage_tokens {
+            spans.push(Span::styled(
+                format!(" · {} tokens", format_token_count(tokens)),
+                Style::default().fg(token_color_pulsed),
+            ));
+        }
     }
 
     // Show active tool name if available (with pulse), truncated to keep the line compact
@@ -867,6 +871,25 @@ fn format_token_count(n: u32) -> String {
     }
 }
 
+/// 状态栏显示的「上下文输入侧 token 数」。
+///
+/// 对标 Claude Code 的 `input + cache_creation + cache_read`，但不能照着三项相加：
+/// 两种 provider 语义相反——Anthropic 的 `input_tokens` 不含缓存读，三项相加才是
+/// 输入侧；OpenAI/DeepSeek 的 `prompt_tokens` 已含缓存命中（`cached_tokens` 是其
+/// 子集），再相加会重复计算。唯一在两侧都成立的表达式是 `total - completion`：
+/// Anthropic 侧它恰等于 `input + cache_read + cache_creation`，OpenAI 侧退回
+/// `prompt_tokens`。provider 只零散上报时，回退到 prompt_tokens，最后兜 total。
+fn input_context_tokens(usage: &crate::types::StarUsage) -> u32 {
+    let by_difference = usage.total_tokens.saturating_sub(usage.completion_tokens);
+    if by_difference > 0 {
+        by_difference
+    } else if usage.prompt_tokens > 0 {
+        usage.prompt_tokens
+    } else {
+        usage.total_tokens
+    }
+}
+
 /// 为 provider 明确上报的缓存计数生成状态栏文本；不计算跨 provider 的百分比。
 fn format_cache_telemetry(usage: Option<&crate::types::StarUsage>) -> Option<String> {
     let usage = usage.filter(|usage| usage.cache_telemetry_reported)?;
@@ -981,11 +1004,7 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
         spans.push(sep());
         match &state.token_usage {
             Some(usage) if usage.prompt_tokens > 0 || usage.total_tokens > 0 => {
-                let tokens = if usage.prompt_tokens > 0 {
-                    usage.prompt_tokens
-                } else {
-                    usage.total_tokens
-                };
+                let tokens = input_context_tokens(usage);
                 if let Some(ctx) = context_window_tokens(state) {
                     let pct = (tokens as f64 / ctx as f64) * 100.0;
 
@@ -1035,7 +1054,11 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
                 }
             }
             _ => {
-                // ── Fallback: 厂商未返回 usage 时，根据聊天历史估算 ──
+                // ── Fallback: 会话内尚未拿到任何 provider usage（首轮响应未结束）时，
+                // 根据聊天历史估算。新回合不再清空 token_usage，故基线一旦建立，
+                // 本分支在整个会话里都不会再被命中——估算与真实不再来回横跳。
+                // 真正的清空只发生在 /clear（见 ui/events/input.rs），届时历史为空，
+                // estimated 为 0，显示「⚡ —」。
                 let estimated: u32 = state
                     .chat_history
                     .iter()
@@ -1386,6 +1409,55 @@ mod tests {
         );
         assert!(format_cache_telemetry(None).is_none());
         assert!(format_cache_telemetry(Some(&crate::types::StarUsage::default())).is_none());
+    }
+
+    #[test]
+    fn input_context_tokens_counts_anthropic_cache_read_and_creation() {
+        // Anthropic：input_tokens 不含缓存读，total = input + read + creation + output。
+        // 上下文占用必须三者相加，只取 prompt_tokens 会系统性低估。
+        let anthropic = crate::types::StarUsage {
+            prompt_tokens: 8_000,
+            completion_tokens: 1_200,
+            total_tokens: 8_000 + 40_000 + 500 + 1_200,
+            cache_read_tokens: 40_000,
+            cache_creation_tokens: 500,
+            cache_telemetry_reported: true,
+        };
+        assert_eq!(input_context_tokens(&anthropic), 48_500);
+    }
+
+    #[test]
+    fn input_context_tokens_does_not_double_count_openai_cached_tokens() {
+        // OpenAI/DeepSeek：prompt_tokens 已含缓存命中，cached_tokens 是其子集。
+        // 仍然三项相加会把同一批 token 算两遍，必须走 total - completion。
+        let openai = crate::types::StarUsage {
+            prompt_tokens: 50_000,
+            completion_tokens: 900,
+            total_tokens: 50_900,
+            cache_read_tokens: 45_000,
+            cache_creation_tokens: 0,
+            cache_telemetry_reported: true,
+        };
+        assert_eq!(input_context_tokens(&openai), 50_000);
+    }
+
+    #[test]
+    fn input_context_tokens_falls_back_when_total_omits_input() {
+        // 只零散上报的 provider：total 与 completion 相等时回退 prompt_tokens，
+        // 全空时兜底 total_tokens，绝不让状态栏凭空归零。
+        let partial = crate::types::StarUsage {
+            prompt_tokens: 7_000,
+            completion_tokens: 7_000,
+            total_tokens: 7_000,
+            ..Default::default()
+        };
+        assert_eq!(input_context_tokens(&partial), 7_000);
+
+        let total_only = crate::types::StarUsage {
+            total_tokens: 333,
+            ..Default::default()
+        };
+        assert_eq!(input_context_tokens(&total_only), 333);
     }
 
     #[test]

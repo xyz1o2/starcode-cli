@@ -104,6 +104,27 @@ pub fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
+/// `GlobalState::read_file_state` 的键。
+///
+/// 所有读写这张表的工具（Read / Edit / Write / multi_edit / read_many /
+/// Glob / 搜索）必须用同一个函数算键。曾经各写各的：Read/Edit 走
+/// `canonicalize`，而 read_many / Glob / 搜索直接把原始路径字符串塞进去。
+/// 于是「Glob 浏览过 → Edit」这类流程在表里查不到记录，Edit 就报
+/// 「must be read with `Read` before using `Edit`」——明明读过，却拦下来
+/// 要求再读一遍。这种漏判是偶发的（只在绕过 Read 的路径下出现），所以
+/// 长期没被发现。
+///
+/// 优先 `canonicalize`：它解符号链接、折叠 `..`、在 Windows 上统一大小写，
+/// 是唯一能让「同一文件的不同写法」落到同一键上的手段。文件不存在或文件系统
+/// 不支持时退回 `normalize_path`（纯词法）——此时所有调用方拿到的仍是同一份
+/// 退化结果，键依然一致。
+pub fn read_state_key(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| normalize_path(path))
+        .to_string_lossy()
+        .to_string()
+}
+
 pub fn resolve_tool_path(base_dir: &Path, raw_path: &str) -> PathBuf {
     let normalized = normalize_cross_platform_path(raw_path);
     let resolved = if normalized.is_absolute() {
@@ -370,5 +391,33 @@ mod tests {
             resolve_tool_path(Path::new("/workspace/project"), "nested/../src/file.rs"),
             PathBuf::from("/workspace/project/src/file.rs")
         );
+    }
+
+    #[test]
+    fn read_state_key_maps_path_variants_to_one_key() {
+        // 同一文件的不同写法必须落到同一个键。Glob / 搜索 / read_many 写表时
+        // 拿到的可能是带 `..` 或相对基准目录的路径，Edit 查表时用的是规范化后的
+        // 路径；两者不一致就会明明读过却报 [edit_file_not_read]。
+        let direct = read_state_key(Path::new("/workspace/project/src/lib.rs"));
+        let with_dotdot =
+            read_state_key(Path::new("/workspace/project/src/nested/../sub/../lib.rs"));
+        assert_eq!(direct, with_dotdot);
+    }
+
+    #[test]
+    fn read_state_key_matches_after_resolve_tool_path() {
+        // 工具侧两步走：先 resolve_tool_path 补全成绝对路径，再 read_state_key
+        // 规范化。真实文件上这两步的结果要和直接 canonicalize 一致，否则
+        // 「Glob 浏览过 → Edit」的流程在表里仍然查不到记录。
+        let dir = std::env::temp_dir().join("starcode_read_state_key_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("lib.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+
+        let via_tool = read_state_key(&resolve_tool_path(&dir, "./nested/../lib.rs"));
+        let canonical = file.canonicalize().unwrap();
+        assert_eq!(via_tool, canonical.to_string_lossy().to_string());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

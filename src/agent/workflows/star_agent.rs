@@ -933,7 +933,9 @@ impl StarAgent {
                 }
             }
         };
-        let abs_path = resolved.to_string_lossy().to_string();
+        // 键必须和 Edit/Write 查表时用同一个函数算（见 paths::read_state_key），
+        // 否则 @ 内联过的文件仍会被 [edit_file_not_read] 拦下。
+        let abs_path = crate::core::utils::paths::read_state_key(&resolved);
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

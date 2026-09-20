@@ -590,6 +590,9 @@ impl ToolInvocation for SearchToolInvocation {
             });
             let include_hidden = params["include_hidden"].as_bool();
 
+            // 搜索根：结果路径以它为基准，下面补全相对结果时要用同一个根。
+            let search_base_dir = tool.resolve_search_base_dir(path.as_deref());
+
             let result = tool
                 .search(
                     &query,
@@ -618,8 +621,14 @@ impl ToolInvocation for SearchToolInvocation {
                         .unwrap_or_default()
                         .as_millis();
                     let mut state = global_state.read_file_state.write().await;
+                    let base_dir = Path::new(&search_base_dir);
                     for r in &results {
-                        state.entry(r.file.clone()).or_insert(ReadFileState {
+                        // 键必须和 Edit 查表时一致（read_state_key），否则搜索
+                        // 命中过的文件仍会被 [edit_file_not_read] 拦下。
+                        let resolved =
+                            crate::core::utils::paths::resolve_tool_path(base_dir, &r.file);
+                        let key = crate::core::utils::paths::read_state_key(&resolved);
+                        state.entry(key).or_insert(ReadFileState {
                             content: String::new(),
                             timestamp: now,
                             file_system_timestamp: now,

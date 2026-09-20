@@ -1051,11 +1051,7 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
                 }
             }
 
-            let abs_path = resolved_path
-                .canonicalize()
-                .unwrap_or_else(|_| resolved_path.clone())
-                .to_string_lossy()
-                .to_string();
+            let abs_path = crate::core::utils::paths::read_state_key(&resolved_path);
 
             // Disable strict read check if STAR_DISABLE_READ_CHECK is true
             let strict_read_check = std::env::var("STAR_DISABLE_READ_CHECK")

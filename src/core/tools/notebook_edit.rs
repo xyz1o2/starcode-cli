@@ -122,11 +122,9 @@ impl ToolInvocation for NotebookEditInvocation {
                 .unwrap_or(true);
 
             if strict_read_check {
-                let abs_path = path
-                    .canonicalize()
-                    .unwrap_or_else(|_| path.clone())
-                    .to_string_lossy()
-                    .to_string();
+                // 键必须和 star_agent::mark_file_as_read 写表时用同一个函数算
+                // （见 paths::read_state_key），否则读过的 notebook 仍会被拦下。
+                let abs_path = crate::core::utils::paths::read_state_key(&path);
 
                 {
                     let exec_state = global_state.execution_state.read().await;

@@ -334,7 +334,7 @@ impl ToolInvocation for ReadManyToolInvocation {
         >,
     > {
         let config = self.config.clone();
-        let tool = ReadManyFilesTool::new(config, self.global_state.clone());
+        let tool = ReadManyFilesTool::new(config.clone(), self.global_state.clone());
         let paths = self.params.file_paths.clone();
         let skip = self.params.skip_binary;
         let max = self.params.max_size_per_file;
@@ -356,15 +356,17 @@ impl ToolInvocation for ReadManyToolInvocation {
             {
                 let mut state = global_state.read_file_state.write().await;
                 for path_str in &paths {
-                    if let Ok(abs) = resolve_path(path_str) {
-                        let abs_str = abs.to_string_lossy().to_string();
-                        // 只用当前时间作为占位时间戳（read_many 不返回文件元数据）
-                        state.entry(abs_str).or_insert(ReadFileState {
-                            content: String::new(), // read_many 批量内容，单独缓存意义不大
-                            timestamp: now,
-                            file_system_timestamp: now,
-                        });
-                    }
+                    // 键必须和 Edit 查表时一致（read_state_key），否则 read_many
+                    // 读过的文件仍会被 [edit_file_not_read] 拦下。
+                    let resolved =
+                        crate::core::utils::paths::resolve_tool_path(config.target_dir(), path_str);
+                    let abs_str = crate::core::utils::paths::read_state_key(&resolved);
+                    // 只用当前时间作为占位时间戳（read_many 不返回文件元数据）
+                    state.entry(abs_str).or_insert(ReadFileState {
+                        content: String::new(), // read_many 批量内容，单独缓存意义不大
+                        timestamp: now,
+                        file_system_timestamp: now,
+                    });
                 }
             }
 

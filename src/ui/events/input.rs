@@ -1490,6 +1490,12 @@ pub async fn handle_key_event(
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 state.show_clear_confirmation = false;
                 state.chat_history.clear();
+                // 会话已重置，上下文读数必须一起归零：否则新会话首轮会顶着一个
+                // 与空历史矛盾的旧基线，直到下一次 provider usage 到来。
+                state.token_usage = None;
+                state.token_count = 0;
+                state.cache_read_tokens = 0;
+                state.cache_creation_tokens = 0;
                 let _ = agent_tx
                     .send(crate::runtime::messages::AgentRequest::ResetSession)
                     .await;

@@ -1052,16 +1052,14 @@ enum ToolExecutionSegment {
     Barrier(usize),
 }
 
-/// 将必须独占的检索工具作为 barrier，保留相邻普通调用的批处理并发。
+/// 将必须独占的检索工具、以及会流式产出进度的工具作为 barrier，保留相邻普通
+/// 调用的批处理并发。
 fn tool_execution_segments(tool_calls: &[StarToolCall]) -> Vec<ToolExecutionSegment> {
     let mut segments = Vec::new();
     let mut batch = Vec::new();
 
     for (index, tool_call) in tool_calls.iter().enumerate() {
-        if matches!(
-            tool_call.function.name.as_str(),
-            "CodebaseSearch" | "ProjectMap"
-        ) {
+        if is_barrier_tool(&tool_call.function.name) {
             if !batch.is_empty() {
                 segments.push(ToolExecutionSegment::Batch(std::mem::take(&mut batch)));
             }
@@ -1075,6 +1073,26 @@ fn tool_execution_segments(tool_calls: &[StarToolCall]) -> Vec<ToolExecutionSegm
     }
 
     segments
+}
+
+/// 走 Barrier（`execute_single_tool`）而非 Batch 的工具。
+///
+/// 两类工具必须独占执行：
+/// - 检索类（CodebaseSearch / ProjectMap）：占用索引引擎，批处理并发会互相踩。
+/// - 流式进度类（Bash / WebSearch）：只有 Barrier 路径会装 `update_output`
+///   回调并把进度事件转发给 UI（见 `execute_single_tool`）。走 Batch 的话回调
+///   是 `None`，命令运行期间界面上只有一个转圈图标、一点输出都看不到，
+///   用户只能干等到超时 —— 这就是「卡住无反应」的来源。
+///
+/// 入口的工具名已由 `canonical_tool_name` 归一，这里仍按小写匹配，模型偶尔
+/// 大小写写错也不会漏掉。Bash 是写工具，在 Batch 里本来就是串行执行的，
+/// 改成 Barrier 不损失并发，反而因此拿到 abort_token：ESC 能真正打断正在跑
+/// 的命令，而不是只打断 LLM 流。
+fn is_barrier_tool(name: &str) -> bool {
+    matches!(
+        name.to_lowercase().as_str(),
+        "codebasesearch" | "projectmap" | "bash" | "websearch"
+    )
 }
 
 /// Extract file path from tool call arguments
@@ -1241,5 +1259,34 @@ mod tests {
                 ToolExecutionSegment::Barrier(2),
             ]
         );
+    }
+
+    #[test]
+    fn tool_segments_isolate_streaming_tools_so_progress_reaches_the_ui() {
+        // Bash / WebSearch 必须走 Barrier：Batch 路径不装 update_output 回调，
+        // 命令运行期间 UI 收不到任何输出。Bash 夹在只读工具中间时，两侧的
+        // 只读调用仍应各自成批，保留并发。
+        let calls = [
+            tool_call(0, "Read"),
+            tool_call(1, "Grep"),
+            tool_call(2, "Bash"),
+            tool_call(3, "Read"),
+            tool_call(4, "WebSearch"),
+        ];
+        assert_eq!(
+            tool_execution_segments(&calls),
+            vec![
+                ToolExecutionSegment::Batch(vec![0, 1]),
+                ToolExecutionSegment::Barrier(2),
+                ToolExecutionSegment::Batch(vec![3]),
+                ToolExecutionSegment::Barrier(4),
+            ]
+        );
+
+        // 模型偶尔大小写写错，入口归一失败时也不能漏掉：Bash 卡在 Batch 里
+        // 就是「命令在跑但界面一动不动」。
+        assert!(is_barrier_tool("bash"));
+        assert!(is_barrier_tool("BASH"));
+        assert!(!is_barrier_tool("Read"));
     }
 }

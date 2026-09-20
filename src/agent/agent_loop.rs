@@ -472,10 +472,30 @@ impl Agent {
         );
         tokio::pin!(tool_future);
 
+        // 工具的实时输出（Bash 的 stdout/stderr 增量、检索引擎的索引进度）经
+        // `update_output` 回调流进 progress_rx。以前这里直接丢弃，于是命令跑得
+        // 再久界面上也只有一个转圈图标，表现就是「卡住无反应」。现在把每一段
+        // 输出包成 Running 状态的 ToolProgress 直发 UI（stream_tx），状态行
+        // 就能跟着命令一起刷新；headless 模式没有 stream_tx，跳过即可。
+        let stream_tx = self.stream_tx.clone();
+        let tool_name = tool_call.function.name.clone();
+        let tool_call_id = tool_call.id.clone();
+
         loop {
             tokio::select! {
-                Some(_progress) = progress_rx.recv() => {
-                    // Progress events are handled by the caller
+                Some(chunk) = progress_rx.recv() => {
+                    if let Some(tx) = &stream_tx {
+                        let _ = tx.send(crate::types::StreamingChunk::tool_progress(
+                            crate::types::ToolProgress {
+                                tool_name: tool_name.clone(),
+                                tool_call_id: Some(tool_call_id.clone()),
+                                status: crate::types::ToolProgressStatus::Running,
+                                message: chunk,
+                                current: None,
+                                total: None,
+                            },
+                        ));
+                    }
                 }
                 result = &mut tool_future => {
                     return result;

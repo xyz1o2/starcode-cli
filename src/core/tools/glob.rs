@@ -177,6 +177,7 @@ impl ToolInvocation for GlobToolInvocation {
         >,
     > {
         let config = self.config.clone();
+        let base_dir = config.target_dir().clone();
         let params = self.params.clone();
         let signal = signal.cloned();
         let global_state = self.global_state.clone();
@@ -335,8 +336,14 @@ impl ToolInvocation for GlobToolInvocation {
                                 .unwrap_or_default()
                                 .as_millis();
                             let mut state = global_state.read_file_state.write().await;
+                            let base_dir = base_dir.as_path();
                             for path in &paths {
-                                state.entry(path.clone()).or_insert(ReadFileState {
+                                // 键必须和 Edit 查表时一致（read_state_key），否则
+                                // glob 浏览过的文件仍会被 [edit_file_not_read] 拦下。
+                                let resolved =
+                                    crate::core::utils::paths::resolve_tool_path(base_dir, path);
+                                let key = crate::core::utils::paths::read_state_key(&resolved);
+                                state.entry(key).or_insert(ReadFileState {
                                     content: String::new(),
                                     timestamp: now,
                                     file_system_timestamp: now,

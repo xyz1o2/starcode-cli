@@ -293,12 +293,10 @@ impl ToolInvocation for ReadFileToolInvocation {
                     .unwrap_or_default()
                 };
 
-                // We need absolute path string for the key
-                let abs_path = resolved_path
-                    .canonicalize()
-                    .unwrap_or(resolved_path.clone())
-                    .to_string_lossy()
-                    .to_string();
+                // read_file_state 的键必须和 Edit/Write 查表时用同一个函数算
+                // （见 paths::read_state_key），否则读过的文件仍会被
+                // [edit_file_not_read] 拦下。
+                let abs_path = crate::core::utils::paths::read_state_key(&resolved_path);
 
                 {
                     let mut state = global_state.read_file_state.write().await;

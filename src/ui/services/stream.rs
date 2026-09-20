@@ -278,11 +278,12 @@ pub async fn handle_stream_update(
                 state.auto_continued_message_ids.remove(&message_id);
                 state.response_costs.remove(&message_id);
                 state.cache_warning_shown.clear();
-                // 不让上一回合的 provider 用量或缓存读数停留到新回合。
+                // 保留上一回合的 provider 用量与缓存读数作基线：新回合的真实 usage
+                // 要等响应结束才回来（agent_tool_process 只在回合末发 StatsUpdate），
+                // 若在这里清空，UI 只能退回字符数估算，等真实值一到就出现
+                // 「~估算 ↔ 真实」的格式与数值横跳。基线在下次 TokenCount 整体替换。
+                // token_count 是流内增量计数，语义不跨回合，仍归零。
                 state.token_count = 0;
-                state.token_usage = None;
-                state.cache_read_tokens = 0;
-                state.cache_creation_tokens = 0;
             }
             state
                 .stream_targets
@@ -3355,7 +3356,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_request_clears_usage_while_compression_stats_preserve_it() {
+    async fn new_request_keeps_usage_as_baseline_while_compression_stats_preserve_it() {
         let mut state = ChatState::new();
         let (agent_tx, _agent_rx) = mpsc::channel(1);
         let usage = crate::types::StarUsage {
@@ -3404,9 +3405,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(state.token_count, 0);
-        assert!(state.token_usage.is_none());
-        assert_eq!(state.cache_read_tokens, 0);
-        assert_eq!(state.cache_creation_tokens, 0);
+        // 上一回合用量保留为本回合基线，直到下次 TokenCount 整体替换：
+        // 真实 usage 只在回合末到达，清空它会让 UI 退回字符数估算并横跳。
+        assert_eq!(state.token_usage.as_ref().unwrap().total_tokens, 110);
+        assert_eq!(state.cache_read_tokens, 40);
+        assert_eq!(state.cache_creation_tokens, 3);
         assert!(state.cache_warning_shown.is_empty());
     }
 
