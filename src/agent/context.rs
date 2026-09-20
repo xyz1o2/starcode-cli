@@ -1,10 +1,5 @@
-use crate::agent::validator::Validator;
-use crate::types::{StarMessage, StarToolCall, ToolResult};
-use std::collections::hash_map::DefaultHasher;
-use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
+use crate::types::StarMessage;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
 pub(crate) fn truncate_chars_for_injection(s: &str, max_chars: usize) -> String {
     if max_chars == 0 {
@@ -211,160 +206,24 @@ pub(crate) fn build_compaction_summary(removed: &[StarMessage]) -> Option<String
     Some(clipped)
 }
 
-pub(crate) fn inject_plan_mode_reminder_if_needed(
+/// Plan mode 只读护栏的提醒文本。
+///
+/// 返回 `Some` 时由调用方包进当轮 user 消息的 `<system-reminder>` 里
+/// （见 `agent_run` 的 turn_extras 组装），**不**另起 system 消息：system
+/// 数组整体是缓存前缀，且 system 消息曾以 `[PLAN_MODE]` 开头，会被
+/// `normalize_messages_for_llm` 连体整条删掉，护栏从未真正送达模型。
+/// 对标 Claude Code 的 system-reminder-plan-mode-is-active.md。
+pub(crate) fn plan_mode_reminder_if_needed(
     approval_mode: &crate::types::ApprovalMode,
-    outbound_messages: &mut Vec<StarMessage>,
-) {
+) -> Option<String> {
     if matches!(approval_mode, crate::types::ApprovalMode::Plan) {
-        outbound_messages.push(StarMessage::system(
-            "[PLAN_MODE] Plan mode is active. You MUST NOT make any edits, run any non-readonly tools, or otherwise make changes. You may only read/search. You may use Todo to organize the task list since it does not change code. When ready, present a concise plan as a Markdown list (use - or numbered items; nest subtasks). This list will be used to populate the task panel. Then call exit_plan_mode with {plan: ...} to ask the user to exit plan mode and start coding."
-        ));
-    }
-}
-
-pub(crate) fn inject_file_security_warning_if_needed(
-    tool_call: &StarToolCall,
-    tool_result: &ToolResult,
-) -> Option<StarMessage> {
-    // Security warning is now in system-prompt-security-policy.md (one-time injection)
-    // No need to inject it every time a file is read
-    let _ = (tool_call, tool_result);
-    None
-}
-
-pub(crate) fn inject_directory_context_if_needed(
-    tool_call: &StarToolCall,
-    tool_result: &ToolResult,
-    injected_dir_context_hashes: &Arc<Mutex<HashSet<u64>>>,
-) -> Option<StarMessage> {
-    if !tool_result.success {
-        return None;
-    }
-
-    // 注册名归一：注入只在 Read 调用上触发（view_file 别名已移除）
-    if tool_call.function.name != "Read" {
-        return None;
-    }
-
-    let enabled = std::env::var("STAR_ENABLE_DIR_CONTEXT")
-        .ok()
-        .map(|v| {
-            let v = v.to_lowercase();
-            !(v == "0" || v == "false" || v == "off")
-        })
-        .unwrap_or(true);
-    if !enabled {
-        return None;
-    }
-
-    let max_chars = std::env::var("STAR_DIR_CTX_MAX_CHARS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(6000);
-    let file_list = std::env::var("STAR_DIR_CTX_FILES")
-        .ok()
-        .unwrap_or_else(|| "README.md,AGENTS.md".to_string());
-    let file_names: Vec<String> = file_list
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect();
-    if file_names.is_empty() {
-        return None;
-    }
-
-    let args = match Validator::parse_args(&tool_call.function.arguments) {
-        Ok(v) => v,
-        Err(_) => return None,
-    };
-    let path = match Validator::require_str(&args, "path") {
-        Ok(v) => v,
-        Err(_) => return None,
-    };
-    let resolved = match Path::new(&path).canonicalize() {
-        Ok(p) => p,
-        Err(_) => return None,
-    };
-    let mut dir = if resolved.is_dir() {
-        resolved
+        Some(
+            "Plan mode is active. You MUST NOT make any edits, run any non-readonly tools, or otherwise make changes. You may only read/search. You may use Todo to organize the task list since it does not change code. When ready, present a concise plan as a Markdown list (use - or numbered items; nest subtasks). This list will be used to populate the task panel. Then call exit_plan_mode with {plan: ...} to ask the user to exit plan mode and start coding."
+                .to_string(),
+        )
     } else {
-        match resolved.parent() {
-            Some(p) => p.to_path_buf(),
-            None => return None,
-        }
-    };
-
-    let root = crate::core::utils::paths::current_dir_cached();
-
-    let mut inject_blocks: Vec<String> = Vec::new();
-
-    loop {
-        if !dir.starts_with(&root) {
-            break;
-        }
-
-        for name in &file_names {
-            let p = dir.join(name);
-            if !p.is_file() {
-                continue;
-            }
-            let content = match std::fs::read_to_string(&p) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let trimmed = content.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let clipped = truncate_chars_for_injection(trimmed, max_chars);
-
-            let mut hasher = DefaultHasher::new();
-            p.to_string_lossy().hash(&mut hasher);
-            clipped.hash(&mut hasher);
-            let h = hasher.finish();
-
-            let already = {
-                let cache = injected_dir_context_hashes
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                cache.contains(&h)
-            };
-            if already {
-                continue;
-            }
-            {
-                let mut cache = injected_dir_context_hashes
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                cache.insert(h);
-            }
-
-            inject_blocks.push(format!(
-                "[Directory Context: {}]\n{}",
-                p.to_string_lossy(),
-                clipped
-            ));
-        }
-
-        if dir == *root {
-            break;
-        }
-        let Some(parent) = dir.parent() else {
-            break;
-        };
-        dir = parent.to_path_buf();
+        None
     }
-
-    if inject_blocks.is_empty() {
-        return None;
-    }
-
-    let merged = inject_blocks.join("\n\n");
-    Some(StarMessage::system(format!(
-        "目录上下文（自动注入，仅供参考）：\n{}",
-        merged
-    )))
 }
 
 pub(crate) fn trim_context_if_needed(messages: &mut Vec<StarMessage>) -> Option<(String, bool)> {
@@ -605,135 +464,4 @@ pub(crate) fn trim_context_if_needed(messages: &mut Vec<StarMessage>) -> Option<
         ),
         true,
     ))
-}
-
-pub(crate) fn find_rules_file(start_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut cur: Option<&std::path::Path> = Some(start_dir);
-    while let Some(p) = cur {
-        let cand1 = p.join(".star").join("rules.txt");
-        if cand1.is_file() {
-            return Some(cand1);
-        }
-        let cand2 = p.join(".cursorrules");
-        if cand2.is_file() {
-            return Some(cand2);
-        }
-        cur = p.parent();
-    }
-    None
-}
-
-pub(crate) fn inject_project_rules_if_needed(
-    messages: &mut Vec<StarMessage>,
-    injected_rules_hash: &Arc<Mutex<Option<u64>>>,
-) {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let enabled = std::env::var("STAR_ENABLE_RULES")
-        .ok()
-        .map(|v| {
-            let v = v.to_lowercase();
-            !(v == "0" || v == "false" || v == "off")
-        })
-        .unwrap_or(true);
-    if !enabled {
-        return;
-    }
-
-    let cwd = crate::core::utils::paths::current_dir_cached();
-
-    let Some(path) = find_rules_file(cwd) else {
-        return;
-    };
-
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
-    let content = content.trim();
-    if content.is_empty() {
-        return;
-    }
-
-    let mut hasher = DefaultHasher::new();
-    path.to_string_lossy().hash(&mut hasher);
-    content.hash(&mut hasher);
-    let hash = hasher.finish();
-
-    {
-        let mut last = injected_rules_hash
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if last.as_ref() == Some(&hash) {
-            return;
-        }
-        *last = Some(hash);
-    }
-
-    messages.push(StarMessage::system(format!(
-        "项目规则（请严格遵守；来源：{}）：\n{}",
-        path.to_string_lossy(),
-        content
-    )));
-}
-
-pub(crate) fn inject_project_memory_if_needed(
-    messages: &mut Vec<StarMessage>,
-    injected_memory_hash: &Arc<Mutex<Option<u64>>>,
-) {
-    use crate::core::tools::memory_tool::get_global_memory_file_path;
-    use crate::core::utils::paths::current_project_star_dir;
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::path::PathBuf;
-
-    let mut sections: Vec<String> = Vec::new();
-    let mut hasher = DefaultHasher::new();
-
-    let mut add_section = |label: &str, path: &PathBuf, content: &str| {
-        sections.push(format!(
-            "{} (from {}):\n{}",
-            label,
-            path.to_string_lossy(),
-            content
-        ));
-        path.to_string_lossy().hash(&mut hasher);
-        content.hash(&mut hasher);
-    };
-
-    let global_path = get_global_memory_file_path();
-    if global_path.exists() {
-        let content = std::fs::read_to_string(&global_path).unwrap_or_default();
-        let content = content.trim();
-        if !content.is_empty() {
-            add_section("Memory Context", &global_path, content);
-        }
-    }
-
-    let project_memory_path = current_project_star_dir().join("memory.md");
-    if project_memory_path.exists() {
-        let content = std::fs::read_to_string(&project_memory_path).unwrap_or_default();
-        let content = content.trim();
-        if !content.is_empty() {
-            add_section("Project Memory", &project_memory_path, content);
-        }
-    }
-
-    if sections.is_empty() {
-        return;
-    }
-
-    let hash = hasher.finish();
-    {
-        let mut last = injected_memory_hash
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if last.as_ref() == Some(&hash) {
-            return;
-        }
-        *last = Some(hash);
-    }
-
-    messages.push(StarMessage::system(format!(
-        "Memory Context:\n{}",
-        sections.join("\n\n")
-    )));
 }

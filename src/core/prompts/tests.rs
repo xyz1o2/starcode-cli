@@ -95,17 +95,14 @@ fn test_tool_catalog_render() {
 }
 
 #[test]
-fn test_tool_catalog_skips_delegation_when_agent_tools_are_absent() {
-    let active_tools = HashSet::from([
-        "Read".to_string(),
-        "Edit".to_string(),
-        "CodebaseSearch".to_string(),
-    ]);
-
-    let output = tool_catalog::render_for_tools(false, Some(&active_tools));
+fn test_tool_catalog_always_includes_delegation_guidance() {
+    // task-agent usage 段是静态文本，必须无条件纳入：它位于 system prompt 的
+    // static_parts（整个 system 数组是 Anthropic 缓存前缀），若按每轮
+    // active_tools 短名单条件渲染，短名单一变就击穿前缀。
+    let output = tool_catalog::render(false);
 
     assert!(output.contains("## Tools"));
-    assert!(!output.contains("Task Delegation Protocol"));
+    assert!(output.contains("Task Delegation Protocol"));
 }
 
 #[test]

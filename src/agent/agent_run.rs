@@ -262,22 +262,31 @@ impl Agent {
                 new_msgs.append(&mut existing);
                 new_msgs
             };
+            // auto-plan 与 plan-mode 提醒都是"每轮可能变化"的内容，不能进 system
+            // 数组：整个 system 数组就是 Anthropic 的缓存前缀（rig 只在最后一块
+            // system 上打断点），而 plan 文本每轮不同，放进去等于每轮击穿一次
+            // 4 万字符的前缀。对标 Claude Code 的
+            // system-reminder-plan-mode-is-active.md —— 它也是挂在 user 侧的
+            // <system-reminder> 里，而不是 system prompt。
+            //
+            // 顺带去掉了 [AUTO_PLAN] / [PLAN_MODE] 包裹标记：它们此前会被
+            // normalize_messages_for_llm 的 retain 连消息体一起整条删掉，导致
+            // plan 明明花了一次 LLM 调用生成，却从未送达模型；plan-mode 的
+            // 只读护栏同样因此失效。
+            let mut turn_extras: Vec<String> = Vec::new();
             if let Some(plan) = auto_plan_decision.plan {
                 let template =
                     crate::core::prompts::loader::load_prompt("auto-plan-injection.md");
-                messages.push(StarMessage::system(
-                    crate::core::prompts::loader::render_template(
-                        &template,
-                        &[("plan", &plan)],
-                    )
+                turn_extras.push(crate::core::prompts::loader::render_template(
+                    &template,
+                    &[("plan", &plan)],
                 ));
             }
-
-            // Inject plan mode reminder if currently in Plan mode
-            crate::agent::context::inject_plan_mode_reminder_if_needed(
-                &self.approval_mode,
-                &mut messages,
-            );
+            if let Some(reminder) =
+                crate::agent::context::plan_mode_reminder_if_needed(&self.approval_mode)
+            {
+                turn_extras.push(reminder);
+            }
 
             // 当轮上下文跟在用户输入后面（对标 Claude Code 的 <system-reminder> 位置：
             // 用户的话先说完，附加上下文再跟上），这样 system 前缀保持稳定。
@@ -291,6 +300,12 @@ impl Agent {
             if let Some(ctx) = &turn_context {
                 turn_message.push_str("\n\n");
                 turn_message.push_str(ctx);
+            }
+            for extra in turn_extras {
+                turn_message.push_str("\n\n");
+                turn_message.push_str("<system-reminder>\n");
+                turn_message.push_str(&extra);
+                turn_message.push_str("\n</system-reminder>");
             }
             messages.push(StarMessage::user(turn_message));
 
