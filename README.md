@@ -1,5 +1,6 @@
-# StarCode CLI  
-starcode.help 
+# StarCode CLI
+
+**[English](#english) · [简体中文](./README.zh-CN.md)**
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-0.3.0-blue" alt="version">
@@ -8,69 +9,34 @@ starcode.help
   <img src="https://img.shields.io/badge/platform-cross--platform-lightgrey" alt="platform">
 </p>
 
-<p align="center">
-  <strong>A powerful conversational AI CLI tool with text editor capabilities, built in Rust</strong>
-</p>
+## English
 
-<p align="center">
-  <a href="#features">Features</a> •
-  <a href="#installation">Installation</a> •
-  <a href="#quick-start">Quick Start</a> •
-  <a href="#configuration">Configuration</a> •
-  <a href="#commands">Commands</a> •
-  <a href="#contributing">Contributing</a> •
-  <a href="#license">License</a>
-</p>
+A conversational AI coding agent that runs in your terminal — written in 100% Rust, modeled on Claude Code. Built on ratatui 0.30 + crossterm + tokio, and talks to OpenAI-compatible and Anthropic-style providers.
 
----
+### Features
 
-## Features
+- **Multi-Provider** — OpenAI, Anthropic, and any OpenAI-compatible endpoint. Per-provider credentials with a provider store, switchable at runtime.
+- **Interactive TUI** — streaming responses, diffs, syntax highlighting, themes, mouse support.
+- **Headless Mode** — drive a prompt from a script and get JSONL or plain text back.
+- **Rich Toolchain** — read/write/edit/notebook tools, shell, ripgrep search, AST-aware codebase search, git insight, sub-agents, todos, cron, worktrees, MCP servers.
+- **Permissions** — every tool call can be confirmed interactively; plan mode restricts the agent to read-only actions.
+- **Project Context** — instructions are picked up from `STAR.md` / `STARCODE.md` / `CLAUDE.md` / `AGENTS.md` in your project.
+- **Sessions** — save, resume, and manage conversation history.
+- **Internationalization** — English and Chinese UI.
+- **Cross-Platform** — Linux, macOS, and Windows.
 
-- TPS is fast 
--  Rust is fast 
--  copy by claude code 
--  100% rust code 
-- **Multi-Provider AI Support** - Connect to OpenAI, Anthropic, and other OpenAI-compatible APIs
-- **Interactive TUI** - Beautiful terminal user interface with real-time streaming
-- **Tool Integration** - Execute commands, edit files, and interact with your codebase
-- **MCP Protocol** - Model Context Protocol support for extensible toolchains
-- **Git Integration** - AI-assisted git operations with intelligent suggestions
-- **Smart Search** - Fast code search using ripgrep with AST-aware chunking
-- **Syntax Highlighting** - Beautiful code highlighting with multiple themes
-- **Session Management** - Save, resume, and manage conversation sessions
-- **Internationalization** - Multi-language support (English, Chinese)
-- **Permission System** - Fine-grained control over tool execution permissions
-- **Headless Mode** - Process prompts without interactive UI for scripting
-- **Cross-Platform** - Works on Linux, macOS, and Windows
+### Installation
 
-## What Can It Do?
-
-StarCode CLI is your AI-powered coding assistant that can:
-
-- **Read and understand** your entire codebase
-- **Edit files** with intelligent suggestions and diff previews
-- **Execute commands** in a sandboxed environment
-- **Search code** using regex, glob patterns, or AST-aware search
-- **Manage Git** operations with AI assistance
-- **Work with MCP servers** for extensible functionality
-- **Resume sessions** to continue where you left off
-- **Process prompts** in headless mode for automation
-
-## Installation
-
-### From Source (Recommended)
+#### From Source (Recommended)
 
 ```bash
-# Clone the repository
 git clone https://github.com/xyz1o2/starcode-cli.git
 cd starcode-cli
 
-# Build and install into ~/.cargo/bin
 ./install.sh          # Windows: .\install.ps1
 ```
 
-`install.sh` installs one binary and adds two command aliases, so any of these
-starts the same program:
+`install.sh` builds **one** binary (`starcode-cli`) and symlinks two aliases next to it in `~/.cargo/bin`, so all three start the same program:
 
 ```bash
 sc              # short form
@@ -78,235 +44,221 @@ starcode
 starcode-cli
 ```
 
-To build by hand instead — note this only gives you the `starcode-cli` name:
+> Note: `cargo build --release` on its own only gives you the `starcode-cli` name — the `sc` / `starcode` aliases are created by the install script.
+
+#### Using Cargo
 
 ```bash
-cargo build --release
-cp target/release/starcode-cli /usr/local/bin/
-```
-
-### Using Cargo
-
-```bash
-# Install directly from the repository
 cargo install --git https://github.com/xyz1o2/starcode-cli.git starcode-cli
 ```
 
-### Pre-built Binaries
+#### Pre-built Binaries
 
 Download the latest release for your platform from the [Releases](https://github.com/xyz1o2/starcode-cli/releases) page.
 
-## Quick Start
+### Quick Start
 
-### 1. Set up your API key
+#### 1. Set up your API key
 
 ```bash
 # Option 1: Environment variable
 export STAR_API_KEY="your-api-key"
 
-# Option 2: Create a .env file
-echo "STAR_API_KEY=your-api-key" > .env
+# Option 2: Config file (see "Configuration" below)
+
+# Option 3: One-off CLI flag
+sc -k "your-api-key"
 ```
 
-### 2. Start the interactive session
+#### 2. Start an interactive session
 
 ```bash
-# Start interactive mode
-sc
-
-# Or with an initial message
-sc "Explain the structure of this project"
+sc                                    # interactive TUI
+sc "Explain the structure of this project"   # with an initial message
 ```
 
-### 3. Use headless mode for scripting
+#### 3. Go headless for scripting
 
 ```bash
-# Process a single prompt
 sc -p "What files are in the current directory?"
-
-# With specific output format
 sc -p "List all Rust files" --output-format text
 ```
 
-## Configuration
+### Configuration
 
-### Environment Variables
+Credentials and model settings resolve in this order (first wins): in-session override → CLI flag → `STAR_*` env vars → `ANTHROPIC_*` env vars → provider store → user settings file.
 
-```bash
-# API Configuration
-STAR_API_KEY=your-api-key          # Required: Your API key
-STAR_BASE_URL=https://api.openai.com/v1  # Optional: Custom API base URL
+#### User settings — `~/.star/user-settings.json`
 
-# Model Configuration
-STAR_MODEL=gpt-4                   # Optional: Default model to use
-```
-
-### Configuration File
-
-Create `~/.star/user-settings.json`:
-
-```json
+```jsonc
 {
   "apiKey": "your-api-key",
-  "model": "gpt-4",
   "baseUrl": "https://api.openai.com/v1",
-  "temperature": 0.2,
-  "maxTokens": 8192
+  "defaultModel": "gpt-5",
+  "isOpenAICompatible": true,
+  "uiLanguage": "en",            // "en" | "zh"
+  "thinkingEffort": "medium",
+  "outputStyle": "default",
+  "contextWindow": 200000
 }
 ```
 
-### Project Configuration
+#### Project settings — `.star/settings.json`
 
-StarCode looks for `STAR.md` in your project root for project-specific instructions:
+Searched from the current directory **upwards** to the project root (`.jsonc` with comments is supported). This is where shared, checked-in configuration lives. Global settings live at `~/.star/settings.json`.
 
-```markdown
-# Project: My Awesome Project
+#### Environment variables
 
-## Build Commands
-- `cargo build` - Build the project
-- `cargo test` - Run tests
+| Variable                 | Purpose                            |
+| ------------------------ | ---------------------------------- |
+| `STAR_API_KEY`           | API key                            |
+| `STAR_BASE_URL`          | Custom API base URL                |
+| `STAR_MODEL`             | Default model                      |
+| `STAR_CONTEXT_WINDOW`    | Context window size                |
+| `STAR_LLM_TIMEOUT`       | LLM request timeout                |
+| `STAR_TOOL_TIMEOUT_SECS` | Tool execution timeout             |
+| `STAR_LOG_DIR`           | Relocate the log directory         |
+| `STAR_LOG_ENABLED`       | Set to `0` to disable file logging |
 
-## Code Style
-- Use snake_case for variables
-- Add doc comments for public functions
+#### Project instructions
 
-## Architecture
-- Main entry point: src/main.rs
-- Core logic: src/core/
-```
+StarCode reads instructions from the first existing of `STAR.md`, `STARCODE.md`, `CLAUDE.md`, `AGENTS.md` at the project root (truncated to 8000 chars). Use `starcode init` to scaffold a `STAR.md`.
 
-## Commands
+### Commands
 
-### Interactive Mode
-
-```bash
-# Start interactive session
-starcode
-
-# With working directory
-starcode -d /path/to/project
-
-# Resume a session
-starcode --resume
-starcode --resume <session-id>
-
-# Skip permission prompts (use with caution!)
-starcode --dangerously-skip-permissions
-```
-
-### Headless Mode
+#### Interactive mode
 
 ```bash
-# Process a prompt and exit
+starcode                              # start interactive session
+starcode -d /path/to/project          # working directory
+starcode --resume                     # resume the latest session
+starcode --resume <session-id>        # resume a specific session
+starcode --dangerously-skip-permissions   # skip all prompts (dangerous!)
+```
+
+#### Headless mode
+
+```bash
 starcode -p "Your prompt here"
-
-# With specific output format
 starcode -p "Your prompt" --output-format jsonl
 starcode -p "Your prompt" --output-format text
+starcode -p "Your prompt" --max-turns 50 --max-tool-rounds 200
 ```
 
-### Subcommands
+#### Subcommands
 
 ```bash
-# Initialize a new project with STAR.md
-starcode init
-
-# MCP server management
-starcode mcp add <server-name> <command>
-starcode mcp remove <server-name>
-starcode mcp list
-
-# Git operations with AI assistance
-starcode git commit
+starcode init                          # scaffold STAR.md
+starcode doctor                        # diagnose config, credentials, toolchain, logs
+starcode mcp add <name> <command>      # register an MCP server
+starcode mcp list                      # list configured servers
+starcode mcp remove <name>             # remove a server
+starcode git commit                    # AI-assisted git operations
 starcode git diff
 starcode git status
 ```
 
-### Permission Modes
+#### Permission modes
 
 ```bash
-# Default mode - asks for permission
-starcode --permission-mode default
-
-# Plan mode - read-only operations only
-starcode --permission-mode plan
-
-# YOLO mode - bypass all permissions (dangerous!)
-starcode --permission-mode yolo
+starcode --permission-mode default     # ask for permission (default)
+starcode --permission-mode plan        # read-only; plans before touching anything
+starcode --permission-mode yolo        # bypass all permissions (dangerous!)
 ```
 
-## Available Tools
+`acceptEdits` and `bypassPermissions` are accepted as aliases for `default` and `yolo` respectively.
 
-StarCode CLI comes with a comprehensive set of built-in tools:
+#### Slash commands in the TUI
 
-- **Read** - Read file contents with line numbers
-- **Write** - Create or overwrite files
-- **Edit** - Make precise file edits
-- **Bash** - Execute shell commands
-- **Grep** - Search files using ripgrep
-- **Glob** - Find files by pattern
-- **Agent** - Spawn sub-agents for complex tasks
-- **WebFetch** - Fetch and analyze web pages
+Roughly 300 slash commands are available, grouped into Automation, Tools, Session, Config, Security, Git, Debug, MCP, Memory, and more. Type `/` to browse them, and `/help` for the full list.
 
-## MCP Support
+### Built-in Tools
 
-StarCode supports the Model Context Protocol (Model Context Protocol) for extending its capabilities:
+| Tool                                                  | What it does                                                                          |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `Read` / `Write` / `Edit` / `MultiEdit` / `SmartEdit` | File reading and precise editing (SmartEdit repairs malformed edits with an LLM pass) |
+| `NotebookRead` / `NotebookEdit`                       | Jupyter notebook support                                                              |
+| `Bash`                                                | Shell execution with sandboxing and timeouts                                          |
+| `Grep` / `Glob`                                       | ripgrep-backed search and file patterns                                               |
+| `CodebaseSearch`                                      | AST-aware semantic search over the codebase                                           |
+| `Agent` / `SendMessage`                               | Spawn and steer sub-agents                                                            |
+| `TodoWrite` / `TaskGet`                               | Task and todo tracking                                                                |
+| `WebFetch`                                            | Fetch and analyze web pages                                                           |
+| `GitInsight` / `GhPrComments`                         | Git history and GitHub PR context                                                     |
+| `EnterPlanMode` / `ExitPlanMode`                      | Plan-mode control                                                                     |
+| `EnterWorktree` / `ExitWorktree`                      | Isolated git worktrees                                                                |
+| `CronCreate` / `CronList` / `CronDelete`              | Scheduled tasks                                                                       |
+| `BackgroundTask` / `ScheduleWakeup` / `RemoteTrigger` | Background and deferred execution                                                     |
+| `Memory`                                              | Persistent agent memory                                                               |
+| `GetDiagnostics` / `RunTests` / `ProjectMap`          | LSP diagnostics, test runner, project overview                                        |
+| `Skill` / `ToolSearch`                                | Skill invocation and tool discovery                                                   |
+
+Plus any tools contributed by configured MCP servers.
+
+### MCP Support
+
+StarCode supports the Model Context Protocol for extensible toolchains:
 
 ```bash
-# Add an MCP server
-starcode mcp add filesystem "npx -y @modelcontextprotocol/server-filesystem /path/to/directory"
-
-# List configured servers
+starcode mcp add filesystem "npx -y @modelcontextprotocol/server-filesystem /path/to/dir"
 starcode mcp list
-
-# Remove a server
 starcode mcp remove filesystem
 ```
 
-## Development
-
-### Building from Source
+### Development
 
 ```bash
-# Clone the repository
-git clone https://github.com/xyz1o2/starcode-cli.git
-cd starcode-cli
-
-# Debug build
-cargo build
-
-# Release build
-cargo build --release
-
-# Run tests
-cargo test
-
-# Run with logging
-RUST_LOG=debug cargo run
+cargo check --all-targets      # fastest correctness gate — use while iterating
+cargo build --release          # → target/release/starcode-cli
+cargo test --lib               # unit tests live inside src/
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-### Project Structure
+#### Project structure
 
 ```
-starcode/
-├── starcode-cli/
-│   ├── src/
-│   │   ├── main.rs          # Entry point
-│   │   ├── agent/           # AI agent logic
-│   │   ├── commands/        # CLI commands
-│   │   ├── core/            # Core functionality
-│   │   ├── llm/             # LLM integration
-│   │   ├── runtime/         # Runtime environment
-│   │   ├── tools/           # Built-in tools
-│   │   ├── types/           # Type definitions
-│   │   ├── ui/              # Terminal UI
-│   │   └── utils/           # Utilities
-│   ├── eval/                # Evaluation harness
-│   ├── i18n/                # Internationalization
-│   └── Cargo.toml           # Rust dependencies
-├── README.md
-└── LICENSE
+starcode-cli/
+├── src/
+│   ├── main.rs         # binary entry: CLI parse, headless path, TUI bootstrap
+│   ├── lib.rs          # library root
+│   ├── agent/          # agent core, turn loop, compaction, tool routing, fallback
+│   ├── commands/       # slash commands and their dispatch
+│   ├── core/           # config, tools, policy, context engine, confirmation bus, i18n
+│   ├── llm/            # LLM clients and streaming
+│   ├── runtime/        # UI ↔ Agent protocol and the runtime seam
+│   ├── tools/          heavier tool implementations (bash, search, todo, git, lsp)
+│   ├── types/          # shared types
+│   ├── ui/             # terminal UI (ratatui): state, widgets, services
+│   └── utils/          # logging, paths, project context, misc
+├── eval/               # eval task definitions
+├── i18n/               # translations
+├── install.sh / .ps1 / .bat
+└── Cargo.toml
 ```
+
+#### Debugging the TUI
+
+You can't `println!` from a TUI. File logging is **on by default** and writes to `.star/logs/starcode_debug.log` and `.star/logs/agent.log`. Set `STAR_LOG_DIR` to relocate them, or `STAR_LOG_ENABLED=0` to disable. If the app starts but the loading screen never clears, `starcode doctor` reports what's wrong without launching the TUI.
+
+### Evaluation
+
+StarCode ships with a built-in eval harness:
+
+```bash
+starcode eval --tasks eval/tasks.json
+starcode eval --tasks eval/tasks.json --trials 3
+starcode eval --tasks eval/tasks.json --report-md eval-report.md
+starcode eval --baseline .star/eval-baseline.json
+```
+
+### Troubleshooting
+
+**API key not found** — `echo $STAR_API_KEY`, check `~/.star/user-settings.json`, or run `starcode doctor`.
+
+**Build fails** — make sure Rust is installed (`rustc --version`), then `rustup update` and `cargo clean && cargo build --release`.
+
+**Stuck on the loading screen** — startup failures don't crash, they hang the loading view. Check `.star/logs/agent.log` for `[INIT]` breadcrumbs, or run `starcode doctor`.
 
 ### Contributing
 
@@ -316,91 +268,17 @@ starcode/
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-## Evaluation
-
-StarCode includes a built-in evaluation harness for testing AI capabilities:
-
-```bash
-# Run the evaluation suite
-starcode eval --tasks eval/tasks.json
-
-# Run with multiple trials
-starcode eval --tasks eval/tasks.json --trials 3
-
-# Generate markdown report
-starcode eval --tasks eval/tasks.json --report-md eval-report.md
-
-# Compare against baseline
-starcode eval --baseline .star/eval-baseline.json
-```
-
-## Troubleshooting
-
-### Common Issues
-
-**API Key not found**
-```bash
-# Check if environment variable is set
-echo $STAR_API_KEY
-
-# Or verify the config file exists
-cat ~/.star/user-settings.json
-```
-
-**Build fails**
-```bash
-# Make sure you have Rust installed
-rustc --version
-
-# Update Rust toolchain
-rustup update
-
-# Clean and rebuild
-cargo clean && cargo build --release
-```
-
-**Permission denied**
-```bash
-# Make sure the binary is executable
-chmod +x target/release/starcode-cli
-
-# Or install to a directory in your PATH
-sudo cp target/release/starcode-cli /usr/local/bin/
-```
-
-## Changelog
-
-### v0.3.0 (Latest)
-- Added MCP (Model Context Protocol) support
-- Improved session management
-- Added Git integration commands
-- Performance optimizations
-- Bug fixes and stability improvements
-
-### v0.2.0
-- Added headless mode
-- Multi-provider support
-- Internationalization (i18n)
-- Permission system
-
-### v0.1.0
-- Initial release
-- Interactive TUI
-- Basic tool integration
-- File operations
-
-## Support
-
-- [Documentation](https://github.com/xyz1o2/starcode-cli/wiki)
-- [Report Issues](https://github.com/xyz1o2/starcode-cli/issues)
-- [Discussions](https://github.com/xyz1o2/starcode-cli/discussions)
-
-## Acknowledgments
+### Acknowledgments
 
 - Built with [Rust](https://www.rust-lang.org/)
-- Terminal UI powered by [Ratatui](https://github.com/fdehau/tui-rs)
+- Terminal UI powered by [Ratatui](https://github.com/ratatui/ratatui)
 - LLM integration via [Rig](https://github.com/0xPlaygrounds/rig)
-- MCP support following [Model Context Protocol](https://modelcontextprotocol.io/)
+- MCP support following the [Model Context Protocol](https://modelcontextprotocol.io/)
+
+### Support
+
+- [Report Issues](https://github.com/xyz1o2/starcode-cli/issues)
+- [Discussions](https://github.com/xyz1o2/starcode-cli/discussions)
 
 ---
 
