@@ -1,5 +1,6 @@
 use crate::core::tasks::manager::TaskManager;
 use crate::core::tasks::models::{TaskNode, TaskPriority, TaskStatus};
+use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -44,6 +45,8 @@ pub struct TaskPanel {
     pub view_mode: TaskViewMode,
     pub auto_hide_at: Option<std::time::Instant>, // When to auto-hide after all tasks complete
     pub tasks_modified_since_load: bool,          // Track if tasks were modified since startup
+    /// 上次装载数据时文件的 mtime。渲染每帧比对一次，发现文件更新就自动 reload。
+    pub last_loaded_mtime: Option<std::time::SystemTime>,
 }
 
 use std::path::PathBuf;
@@ -53,6 +56,9 @@ impl TaskPanel {
         let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let path = TaskManager::task_file_for_workspace(&workspace);
 
+        let mtime = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok());
         let task_manager =
             TaskManager::load_from_file(&path).unwrap_or_else(|_| TaskManager::new());
 
@@ -67,13 +73,20 @@ impl TaskPanel {
             view_mode: TaskViewMode::All,
             auto_hide_at: None,
             tasks_modified_since_load: false,
+            last_loaded_mtime: mtime,
         }
     }
 
-    fn save(&self) {
+    fn save(&mut self) {
         let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let path = TaskManager::task_file_for_workspace(&workspace);
-        let _ = self.task_manager.save_to_file(&path);
+        if self.task_manager.save_to_file(&path).is_ok() {
+            // 自己写完要记下 mtime，否则下一帧的自愈检查会把刚写的文件
+            // 当成"别人更新过"再无谓地 reload 一遍。
+            self.last_loaded_mtime = std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok());
+        }
     }
 
     pub fn reload(&mut self) {
@@ -81,6 +94,33 @@ impl TaskPanel {
         let path = TaskManager::task_file_for_workspace(&workspace);
         if let Ok(manager) = TaskManager::load_from_file(&path) {
             self.task_manager = manager;
+            self.last_loaded_mtime = std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok());
+        }
+    }
+
+    /// 渲染每帧调用：磁盘上的清单比内存里新就 reload。
+    ///
+    /// `reload()` 只在 `StreamMessage::ToolResult`、`/tasks`、面板按键等少数
+    /// 路径上触发；用户在 TodoWrite 执行中途按 Esc 打断、或别的进程改了文件，
+    /// 面板没人通知，就会一直显示旧清单（"更新不及时"）。这里按 mtime 自愈，
+    /// 一次 `stat` 的开销可以忽略。编辑中不 reload，否则正在改的行会被冲掉。
+    pub fn reload_if_stale(&mut self) {
+        if self.editing_task_id.is_some() {
+            return;
+        }
+        let path = TaskManager::task_file_for_workspace(
+            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        );
+        let Some(mtime) = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+        else {
+            return;
+        };
+        if self.last_loaded_mtime != Some(mtime) {
+            self.reload();
         }
     }
 
@@ -204,10 +244,7 @@ impl TaskPanel {
     pub fn toggle_status(&mut self) {
         if let Some(id) = self.get_selected_task_id() {
             if let Some(task) = self.task_manager.graph.nodes.get_mut(&id) {
-                task.status = match task.status {
-                    TaskStatus::Completed => TaskStatus::Pending,
-                    _ => TaskStatus::Completed,
-                };
+                toggle_task_status(task);
             }
             self.save();
         }
@@ -217,11 +254,36 @@ impl TaskPanel {
         if let Some(id) = self.get_selected_task_id() {
             if let Some(task) = self.task_manager.graph.nodes.get_mut(&id) {
                 task.status = TaskStatus::Skipped;
+                task.updated_at = Utc::now();
             }
             self.save();
         }
     }
+}
 
+/// 手动勾选完成/重开：`status` 和 `completed_at` 必须一起动。
+///
+/// 抽成自由函数是因为 `toggle_status` 末尾的 `save()` 会写 cwd 下的真实
+/// `.star/tasks.json`，单元测试走过去就把开发者的清单覆盖了；纯逻辑放这里，
+/// 测试不用落盘也能验。
+fn toggle_task_status(task: &mut TaskNode) {
+    // completed_at 不盖章，面板的 30s TTL（`is_completed_expired`）永远判
+    // false，✔ 项赖在清单最前下不去——就是"Todo 有残留"；反向把已完成项
+    // 重新打开时不清掉旧章，它又会被 TTL 当已完成项直接从清单里删掉。
+    match task.status {
+        TaskStatus::Completed => {
+            task.status = TaskStatus::Pending;
+            task.completed_at = None;
+        }
+        _ => {
+            task.status = TaskStatus::Completed;
+            task.completed_at = Some(Utc::now());
+        }
+    }
+    task.updated_at = Utc::now();
+}
+
+impl TaskPanel {
     pub fn toggle_visibility(&mut self) {
         self.is_visible = !self.is_visible;
         self.manually_hidden = !self.is_visible;
@@ -1092,6 +1154,7 @@ mod tests {
             view_mode: TaskViewMode::All,
             auto_hide_at: None,
             tasks_modified_since_load: false,
+            last_loaded_mtime: None,
         }
     }
 
@@ -1296,5 +1359,52 @@ mod tests {
                 "pending 任务在 agent_active={agent_active} 下都不该收起"
             );
         }
+    }
+
+    // ── C. 手动勾选与 TTL 盖章 ──────────────────────────────────────
+    // 走自由的 `toggle_task_status` 而不是 `TaskPanel::toggle_status`：
+    // 后者末尾 save() 会写 cwd 下的真实 .star/tasks.json，测试不能落盘。
+
+    /// 回归：手动勾完成必须同步盖 `completed_at`。`is_completed_expired` 只认
+    /// 这个字段，不盖章的话 ✔ 项永远不过期、永远排在清单最前——就是"Todo
+    /// 有残留"。
+    #[test]
+    fn toggling_to_completed_stamps_completed_at() {
+        let mut task = TaskNode::new("run tests".into());
+        toggle_task_status(&mut task);
+        assert_eq!(task.status, TaskStatus::Completed);
+        assert!(task.completed_at.is_some(), "勾完成要盖章，TTL 才走得动");
+    }
+
+    /// 回归：把已完成项重新打开，旧章必须清掉，否则 30s TTL 会把它当
+    /// 已完成项从清单里删掉（`collect_nodes` 直接 return）。
+    #[test]
+    fn toggling_back_to_pending_clears_completed_at() {
+        let mut task = TaskNode::new("run tests".into());
+        task.status = TaskStatus::Completed;
+        task.completed_at = Some(Utc::now() - chrono::Duration::seconds(120));
+
+        toggle_task_status(&mut task);
+
+        assert_eq!(task.status, TaskStatus::Pending);
+        assert!(
+            task.completed_at.is_none(),
+            "重开的项目必须清掉完成时间戳，否则会被 TTL 误删"
+        );
+    }
+
+    /// 编辑中不 reload，否则正在改的行会被磁盘数据冲掉。
+    #[test]
+    fn reload_if_stale_is_noop_while_editing() {
+        let mut panel = empty_panel();
+        panel.editing_task_id = Some("some-id".to_string());
+        // 哪怕把 mtime 改成"远比磁盘旧"（下一帧本应触发 reload），编辑中也锁住
+        panel.last_loaded_mtime = Some(std::time::UNIX_EPOCH);
+        panel.reload_if_stale();
+        assert_eq!(
+            panel.last_loaded_mtime,
+            Some(std::time::UNIX_EPOCH),
+            "编辑中不能 reload"
+        );
     }
 }

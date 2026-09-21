@@ -49,7 +49,35 @@ fn map_mouse_to_chat_position(
     None
 }
 
-/// 把屏幕坐标换算成选区终点并写入（Drag 与 Up 共用同一套映射与钳制规则）。
+/// 拖选的每一步：视口外自动滚屏 + 钳进视口 + 更新选区终点。
+///
+/// `Drag(Left)` 与拖选中的 `Moved` 共用这一条路径——后者是同一动作在不支持
+/// SGR 鼠标模式（`?1006h`）的终端上的另一种编码（见 `Moved` 分支）。
+fn drag_to(state: &mut ChatState, col: u16, row: u16) {
+    // Auto-scroll logic when dragging outside viewport (velocity-based)
+    if let Some(area) = state.last_chat_area {
+        if row < area.y {
+            let dist = area.y.saturating_sub(row) as i32;
+            let speed = (dist / 2 + 1).min(8);
+            scroll_chat_by_lines(state, -speed);
+        } else if row >= area.y + area.height {
+            let dist = row.saturating_sub(area.y + area.height.saturating_sub(1)) as i32;
+            let speed = (dist / 2 + 1).min(8);
+            scroll_chat_by_lines(state, speed);
+        }
+    }
+
+    // Map mouse position (clamped to viewport if necessary)
+    let (mut col, mut row) = (col, row);
+    if let Some(area) = state.last_chat_area {
+        col = col.max(area.x).min(area.x + area.width.saturating_sub(1));
+        row = row.max(area.y).min(area.y + area.height.saturating_sub(1));
+    }
+
+    move_selection_end_to(state, col, row);
+}
+
+/// 把屏幕坐标换算成选区终点并写入（drag_to 与 Up 共用同一套映射与钳制规则）。
 ///
 /// 坐标调用方负责先钳进聊天区。落在内容末尾之下时 `map_mouse_to_chat_position`
 /// 会因超出总行数返回 None，此时钳到最后一行，让选区跟随到底而不是冻结在原地。
@@ -120,6 +148,15 @@ fn try_toggle_on_click(state: &mut ChatState, entry_idx: usize, row: usize) -> b
 }
 
 pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
+    // 终端鼠标编码差异大（SGR / X10 / RXVT、tmux 转发），左键拖选失效时
+    // 先看这条轨迹确认到达的事件种类与坐标，而不是猜映射逻辑。
+    // 拖选期间 Moved 频率可达每秒数百条，默认不开，避免写盘开销拖慢渲染。
+    if std::env::var("STAR_MOUSE_TRACE").is_ok() {
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[MOUSE] {:?} at ({},{}) selecting={}",
+            m.kind, m.column, m.row, state.text_selection.is_selecting
+        ));
+    }
     match m.kind {
         MouseEventKind::ScrollUp => {
             // 检查鼠标是否在 input 区域
@@ -190,30 +227,25 @@ pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
             if m.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
                 return;
             }
-            // Auto-scroll logic when dragging outside viewport (velocity-based)
-            let mut _scrolled = false;
-            if let Some(area) = state.last_chat_area {
-                if m.row < area.y {
-                    let dist = area.y.saturating_sub(m.row) as i32;
-                    let speed = (dist / 2 + 1).min(8);
-                    scroll_chat_by_lines(state, -speed);
-                    _scrolled = true;
-                } else if m.row >= area.y + area.height {
-                    let dist = m.row.saturating_sub(area.y + area.height.saturating_sub(1)) as i32;
-                    let speed = (dist / 2 + 1).min(8);
-                    scroll_chat_by_lines(state, speed);
-                    _scrolled = true;
-                }
+            drag_to(state, m.column, m.row);
+        }
+        MouseEventKind::Moved => {
+            // Shift 修饰的移动同样交给终端原生选择，不接管。
+            if m.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                return;
             }
-
-            // Map mouse position (clamped to viewport if necessary)
-            let (mut col, mut row) = (m.column, m.row);
-            if let Some(area) = state.last_chat_area {
-                col = col.max(area.x).min(area.x + area.width.saturating_sub(1));
-                row = row.max(area.y).min(area.y + area.height.saturating_sub(1));
+            // 拖选进行中，把悬停移动当拖动处理。
+            //
+            // SGR 鼠标模式（?1006h）下按住左键移动编码为 button 0 + motion，
+            // crossterm 解成 Drag(Left)；但不支持 SGR 的终端（老 xterm、部分
+            // tmux 配置）把它编码成 button 3 + motion，crossterm 解成 Moved。
+            // 事件循环（runtime.rs / mod.rs 的 Moved 过滤）只放行拖选中的 Moved，
+            // 其余一律丢弃以避免悬停重绘风暴——所以能进到这里的 Moved 必定是
+            // 正在拖选。若这里也忽略，这类终端上选区终点永远停在按下处，
+            // 表现为「左键拖选选不中，一拖就失去焦点」。
+            if state.text_selection.is_selecting {
+                drag_to(state, m.column, m.row);
             }
-
-            move_selection_end_to(state, col, row);
         }
         MouseEventKind::Up(MouseButton::Left) => {
             if m.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
@@ -445,5 +477,73 @@ mod tests {
 
         assert!(state.text_selection.has_selection());
         assert_eq!(state.text_selection.end, Some((1, 5)), "终点保持拖动时的值");
+    }
+
+    /// 不支持 SGR 鼠标模式（?1006h）的终端把「按住左键移动」编码成
+    /// button 3 + motion，crossterm 解成 Moved 而非 Drag(Left)。
+    /// 事件循环只放行拖选中的 Moved，处理逻辑必须把它当拖动走，
+    /// 否则这类终端上选区终点永远停在按下处——正是「一拖就失去焦点」。
+    #[test]
+    fn moved_during_selection_is_treated_as_drag() {
+        let mut state = setup_state();
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 1),
+        );
+        // 注意：拖动事件全部以 Moved 形式到达，一个 Drag 都没有
+        handle_mouse_event(&mut state, mouse_event(MouseEventKind::Moved, 10, 2));
+        handle_mouse_event(&mut state, mouse_event(MouseEventKind::Moved, 15, 3));
+
+        assert!(
+            state.text_selection.has_selection(),
+            "Moved 必须能推进选区终点"
+        );
+        assert_eq!(state.text_selection.start, Some((0, 0)));
+        assert_eq!(
+            state.text_selection.end,
+            Some((2, 15)),
+            "终点跟随最后一个 Moved"
+        );
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 15, 3),
+        );
+        assert!(state.text_selection.has_selection());
+    }
+
+    /// 没有按下过的纯悬停 Moved 不得起选区——它是无按钮的移动事件。
+    #[test]
+    fn moved_without_press_does_not_start_selection() {
+        let mut state = setup_state();
+
+        handle_mouse_event(&mut state, mouse_event(MouseEventKind::Moved, 10, 2));
+        handle_mouse_event(&mut state, mouse_event(MouseEventKind::Moved, 20, 3));
+
+        assert!(
+            !state.text_selection.has_selection(),
+            "纯悬停 Moved 不得产生选区"
+        );
+        assert!(state.text_selection.start.is_none());
+    }
+
+    /// 拖选中的 Moved 越出聊天区下方时，和 Drag 一样钳到最后一行。
+    #[test]
+    fn moved_below_content_clamps_like_drag() {
+        let mut state = setup_state();
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 1),
+        );
+        handle_mouse_event(&mut state, mouse_event(MouseEventKind::Moved, 10, 20));
+
+        assert_eq!(state.text_selection.end_entry_idx, Some(1));
+        assert_eq!(
+            state.text_selection.end,
+            Some((2, 10)),
+            "Moved 越界与 Drag 走同一套钳制"
+        );
     }
 }

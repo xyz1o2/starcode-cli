@@ -25,6 +25,9 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     let token_warning_h = token_warning_lines.len() as u16;
 
     // Task panel auto-show/hide logic
+    // 先自愈：磁盘清单比内存新（TodoWrite 被打断、别的进程改了文件等没人
+    // 通知面板的路径）就 reload，下面的显隐判定才基于最新数据。
+    state.task_panel.reload_if_stale();
     state.task_panel.auto_show_if_needed();
     // is_processing 在 agent 收到 Done 时回落 false（stream.rs）——残留
     // in_progress 的清单在 agent 停下后才能开始 5 秒收起计时
@@ -594,8 +597,13 @@ pub async fn run_app(
                 }
                 Event::Mouse(mouse) => {
                     // 鼠标捕获开启时 Moved（悬停）事件高频产生，
-                    // 不处理也不触发重绘，避免重绘风暴
-                    if !matches!(mouse.kind, crossterm::event::MouseEventKind::Moved) {
+                    // 不处理也不触发重绘，避免重绘风暴。
+                    // 但拖选进行中的 Moved 必须放行：不支持 SGR 鼠标模式
+                    // （?1006h）的终端把「按住左键移动」编码成 button 3 + motion，
+                    // crossterm 解成 Moved 而非 Drag(Left)，一律丢弃会导致这类
+                    // 终端上左键拖选完全失效。
+                    let is_move = matches!(mouse.kind, crossterm::event::MouseEventKind::Moved);
+                    if !is_move || state.text_selection.is_selecting {
                         crate::ui::events::mouse::handle_mouse_event(&mut state, mouse);
                         needs_redraw = true;
                     }
@@ -636,7 +644,8 @@ pub async fn run_app(
                         needs_redraw = true;
                     }
                     Event::Mouse(mouse) => {
-                        if !matches!(mouse.kind, crossterm::event::MouseEventKind::Moved) {
+                        let is_move = matches!(mouse.kind, crossterm::event::MouseEventKind::Moved);
+                        if !is_move || state.text_selection.is_selecting {
                             crate::ui::events::mouse::handle_mouse_event(&mut state, mouse);
                             needs_redraw = true;
                         }

@@ -4,6 +4,7 @@ use ratatui::text::{Line, Span};
 use crate::types::{ChatEntryType, EntryStatus};
 use crate::ui::state::ChatState;
 use crate::ui::themes::theme::Theme;
+use crate::ui::utils::format::shorten_path_for_display;
 
 pub(crate) fn is_tool_entry(entry: &crate::types::ChatEntry) -> bool {
     entry.entry_type == ChatEntryType::ToolCall
@@ -198,17 +199,26 @@ pub(crate) fn render_tool_entry_blocks(
                 args_str
             };
 
-            vec![Line::from(vec![
-                Span::styled(
-                    tool_name,
-                    Style::default()
-                        .add_modifier(Modifier::BOLD)
-                        .fg(theme.primary),
-                ),
-                Span::raw("("),
-                Span::styled(display_args, Style::default()),
-                Span::raw(")"),
-            ])]
+            // 参数摘要为空时真正去掉括号 —— 上面 `full_line` 算了不带括号的形态，
+            // 但之前渲染那行永远硬写 "(" ")"，结果出来的是 "Update Todos()"、
+            // "ls()"，看上去像工具调用坏掉了。参数为空本身是有效语义：
+            // TodoWrite 只显工具名，ListDir 列当前目录时摘要已回落到 "."。
+            let name_span = Span::styled(
+                tool_name,
+                Style::default()
+                    .add_modifier(Modifier::BOLD)
+                    .fg(theme.primary),
+            );
+            if display_args.is_empty() {
+                vec![Line::from(vec![name_span])]
+            } else {
+                vec![Line::from(vec![
+                    name_span,
+                    Span::raw("("),
+                    Span::styled(display_args, Style::default()),
+                    Span::raw(")"),
+                ])]
+            }
         } else {
             vec![]
         }
@@ -337,19 +347,6 @@ fn truncate_chars_with_ellipsis(s: &str, max_chars: usize) -> String {
         out.push(ch);
     }
     out
-}
-
-fn shorten_path_for_display(path: &str) -> String {
-    if path.is_empty() {
-        return String::new();
-    }
-    let cwd = crate::core::utils::paths::current_dir_cached();
-    let p = std::path::Path::new(path);
-    if let Ok(rel) = p.strip_prefix(&cwd) {
-        rel.to_string_lossy().to_string()
-    } else {
-        path.to_string()
-    }
 }
 
 fn summarize_arg_value(v: &serde_json::Value, max_chars: usize) -> String {
@@ -1130,5 +1127,71 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
             .collect();
         assert!(body.contains("88 files scanned"), "got: {body:?}");
+    }
+
+    fn tool_call_entry(name: &str, arguments: &str) -> crate::types::ChatEntry {
+        let mut entry =
+            crate::types::ChatEntry::new(crate::types::ChatEntryType::ToolCall, String::new());
+        entry.tool_call = Some(crate::types::StarToolCall {
+            id: "t1".to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            },
+        });
+        entry
+    }
+
+    /// 把某个工具调用块的第一行拼成纯文本，便于整行断言
+    fn first_line_text(blocks: &[Vec<Line<'_>>]) -> String {
+        blocks
+            .first()
+            .and_then(|b| b.first())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 回归：ListDir 列的正是当前工作目录时，路径缩短函数返回空串，
+    /// 调用行显示成 `ls()` —— 看不出在列哪个目录。现在回落到 "."。
+    #[test]
+    fn listdir_on_the_cwd_shows_ls_dot_not_empty_parens() {
+        let mut state = ChatState::new();
+        state.ui_verbose = false;
+        let cwd = crate::core::utils::paths::current_dir_cached();
+        let args = serde_json::json!({ "directory": cwd.to_string_lossy() }).to_string();
+        let entry = tool_call_entry("ListDir", &args);
+
+        let blocks = render_tool_entry_blocks(&state, &entry, 0, 80, false, false, false);
+        assert_eq!(first_line_text(&blocks), "● ls(.)");
+    }
+
+    #[test]
+    fn listdir_under_the_cwd_shows_relative_path() {
+        let mut state = ChatState::new();
+        state.ui_verbose = false;
+        let dir = crate::core::utils::paths::current_dir_cached().join("src");
+        let args = serde_json::json!({ "directory": dir.to_string_lossy() }).to_string();
+        let entry = tool_call_entry("ListDir", &args);
+
+        let blocks = render_tool_entry_blocks(&state, &entry, 0, 80, false, false, false);
+        assert_eq!(first_line_text(&blocks), "● ls(src)");
+    }
+
+    /// 回归：参数摘要为空时渲染行仍硬写 "(" ")"，
+    /// 于是 TodoWrite 显示成 "Update Todos()"，像是工具调用坏掉了。
+    #[test]
+    fn tool_call_with_empty_summary_has_no_parens() {
+        let mut state = ChatState::new();
+        state.ui_verbose = false;
+        let entry = tool_call_entry("TodoWrite", r#"{"todos":[]}"#);
+
+        let blocks = render_tool_entry_blocks(&state, &entry, 0, 80, false, false, false);
+        assert_eq!(first_line_text(&blocks), "● Update Todos");
     }
 }

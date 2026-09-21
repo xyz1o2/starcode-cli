@@ -723,6 +723,50 @@ pub struct ChatState {
     // ========================================
 }
 
+/// 输入框草稿（还没发出去的内容）落盘在哪里。
+///
+/// 优先级：`STAR_DRAFT_FILE` 显式指定 > 按当前工作目录分桶的
+/// `~/.star/drafts/<cwd-hash>.txt`。按项目分桶和命令历史
+/// （`history_store`，同为 `<cwd-hash>.json`）一致：在 A 项目敲到一半退出，
+/// 不该在 B 项目启动时冒出来当「残留」。
+///
+/// 单元测试刻意指向临时目录下的独立文件。`save_draft` 在每次输入变化时同步写盘，
+/// 而测试用例的输入文本（"queued"、"half typed" 之类）绝不能写进用户真实的草稿 ——
+/// 否则下次启动 `restore_draft` 会把它原样填进输入框。
+fn resolve_draft_path() -> Option<std::path::PathBuf> {
+    if let Ok(path) = std::env::var("STAR_DRAFT_FILE") {
+        return Some(std::path::PathBuf::from(path));
+    }
+
+    #[cfg(test)]
+    {
+        // 每次调用一个独立文件：并行测试互不覆盖，也绝不碰用户真实草稿。
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        return Some(std::env::temp_dir().join(format!(
+            "starcode-test-draft-{}-{}.txt",
+            std::process::id(),
+            seq
+        )));
+    }
+
+    #[allow(unreachable_code)]
+    {
+        use std::hash::{Hash, Hasher};
+        let cwd = std::env::current_dir().ok()?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        cwd.hash(&mut hasher);
+        let key = format!("{:016x}", hasher.finish());
+        Some(
+            dirs::home_dir()?
+                .join(".star")
+                .join("drafts")
+                .join(format!("{key}.txt")),
+        )
+    }
+}
+
 impl ChatState {
     pub fn new() -> Self {
         // 不再同步阻塞获取 git status（大仓库中 git status 可能需要数秒），
@@ -775,6 +819,9 @@ impl ChatState {
         if let Some(ref path) = self.draft_path {
             let text = self.textarea.lines().join("\n");
             if !text.trim().is_empty() {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
                 let _ = std::fs::write(path, &text);
             } else {
                 let _ = std::fs::remove_file(path);
@@ -783,15 +830,50 @@ impl ChatState {
     }
 
     /// Restore draft from file
+    ///
+    /// 草稿排在前，输入框里已有的内容（初始化等待期间敲的字）接在后面 ——
+    /// 规则和 `restore_queued_messages_to_input` 一致：先敲的内容不能被后恢复的内容覆盖。
+    /// 草稿文件取完即删，不会连续两次启动都恢复同一段。
     pub fn restore_draft(&mut self) {
-        if let Some(ref path) = self.draft_path {
-            if let Ok(text) = std::fs::read_to_string(path) {
-                if !text.trim().is_empty() {
-                    self.textarea.insert_str(&text);
-                    let _ = std::fs::remove_file(path);
-                }
-            }
+        let Some(path) = self.draft_path.as_ref() else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        if text.trim().is_empty() {
+            let _ = std::fs::remove_file(path);
+            return;
         }
+        let _ = std::fs::remove_file(path);
+
+        let mut parts = vec![text];
+        if !self.input.trim().is_empty() {
+            parts.push(std::mem::take(&mut self.input));
+        }
+        self.set_input_text(&parts.join("\n"));
+    }
+
+    /// 把输入框整体重设为 `text`（重建 textarea，同步 `input` 与行数计数器）。
+    ///
+    /// 语义是「设」而不是「追加」：`calc_input_height` 只看 `input_line_count`，
+    /// 只动 textarea 的话多行内容会被压进一行高的输入框，`state.input` 也仍是旧值。
+    /// 所有需要整体重设输入框的地方都走这里，免得 textarea 和 `state.input` 走岔。
+    pub fn set_input_text(&mut self, text: &str) {
+        let mut textarea = TextArea::default();
+        textarea.set_placeholder_text(crate::ui::utils::text::input_placeholder_text());
+        textarea.set_cursor_line_style(ratatui::style::Style::default());
+        textarea.set_cursor_style(
+            ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+        );
+        if !text.is_empty() {
+            textarea.insert_str(text);
+        }
+        self.textarea = textarea;
+        self.input = text.to_string();
+        self.input_line_count = text.lines().count().max(1);
+        self.input_folded = false;
+        self.paste_segments.clear();
     }
 
     /// Clear saved draft
@@ -1084,12 +1166,7 @@ impl ChatState {
             colorblind_mode: false,
             toast_queue: VecDeque::new(),
             send_animation_since: None,
-            draft_path: {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                let star_dir = std::path::PathBuf::from(home).join(".star");
-                let _ = std::fs::create_dir_all(&star_dir);
-                Some(star_dir.join("draft.txt"))
-            },
+            draft_path: resolve_draft_path(),
             request_clear_screen: false,
             show_paste_confirmation: false,
             pending_paste: None,
@@ -1484,6 +1561,68 @@ pub fn bump_indices_after_insert(state: &mut ChatState, from: usize, delta: usiz
 mod tests {
     use super::*;
     use crate::types::{ChatEntry, ChatEntryType};
+
+    /// 测试用例的输入文本绝不能落进用户真实的草稿文件：`save_draft` 每次输入变化都写盘，
+    /// 一旦写到 `~/.star/draft.txt`，下次启动 `restore_draft` 就会把测试字符串
+    /// （"queued\nhalf typed" 之类）原样填进输入框。
+    #[test]
+    fn draft_path_in_tests_isolates_the_users_real_draft() {
+        let state = ChatState::new();
+        let path = state
+            .draft_path
+            .as_ref()
+            .expect("draft path should always be resolved");
+
+        assert!(
+            path.starts_with(std::env::temp_dir()),
+            "test draft must live in temp dir, got {}",
+            path.display()
+        );
+        assert!(
+            path.to_string_lossy().contains("starcode-test-draft"),
+            "unexpected draft path: {}",
+            path.display()
+        );
+    }
+
+    /// 草稿恢复必须同步 `input` 和行数计数器：只动 textarea 的话多行草稿会被
+    /// 压进按 0 行算的输入框，`state.input` 也仍是空的。
+    #[test]
+    fn restore_draft_syncs_input_and_line_count() {
+        let dir = std::env::temp_dir().join(format!("starcode-draft-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("draft.txt");
+        std::fs::write(&path, "line one\nline two\nline three").unwrap();
+
+        let mut state = ChatState::new();
+        state.draft_path = Some(path.clone());
+        state.restore_draft();
+
+        assert_eq!(state.input, "line one\nline two\nline three");
+        assert_eq!(state.input_line_count, 3);
+        assert_eq!(
+            state.textarea.lines().join("\n"),
+            "line one\nline two\nline three"
+        );
+        assert!(!path.exists(), "草稿取完应当即删除，避免重复恢复");
+    }
+
+    /// 草稿恢复发生在初始化完成之后，此时输入框可能已有等待期间敲的内容：
+    /// 草稿在前、已敲的内容接在后面，不能互相覆盖。
+    #[test]
+    fn restore_draft_appends_after_what_was_already_typed() {
+        let dir = std::env::temp_dir().join(format!("starcode-draft-{}-2", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("draft.txt");
+        std::fs::write(&path, "the draft").unwrap();
+
+        let mut state = ChatState::new();
+        state.draft_path = Some(path);
+        state.set_input_text("typed during loading");
+        state.restore_draft();
+
+        assert_eq!(state.input, "the draft\ntyped during loading");
+    }
 
     /// 列表年龄要按"拉取时刻"算，而不是"收到消息的时刻"：会话开着两小时后再看，
     /// 一份两小时前从磁盘缓存读出来的列表不能显示成"刚拉的"。

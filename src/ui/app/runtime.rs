@@ -595,8 +595,13 @@ pub async fn run_ui_loop(
                         }
                         Event::Mouse(m) => {
                             // 鼠标捕获开启时 Moved（悬停）事件高频产生，
-                            // 不处理也不触发重绘，避免重绘风暴
-                            if !matches!(m.kind, crossterm::event::MouseEventKind::Moved) {
+                            // 不处理也不触发重绘，避免重绘风暴。
+                            // 但拖选进行中的 Moved 必须放行：不支持 SGR 鼠标模式
+                            // （?1006h）的终端把「按住左键移动」编码成 button 3 +
+                            // motion，crossterm 解成 Moved 而非 Drag(Left)，
+                            // 一律丢弃会导致这类终端上左键拖选完全失效。
+                            let is_move = matches!(m.kind, crossterm::event::MouseEventKind::Moved);
+                            if !is_move || state.text_selection.is_selecting {
                                 crate::ui::events::mouse::handle_mouse_event(state, m);
                                 needs_redraw = true;
                             }
@@ -1125,20 +1130,7 @@ fn init_terminal() -> Result<
 /// 初始化等待期间要把 early_input 的快照反复镜像进真正的输入框，
 /// 追加语义会越写越长，所以这里按 repo 既有做法重建一个 TextArea 并补回样式。
 fn sync_textarea(state: &mut ChatState, text: &str) {
-    use tui_textarea::TextArea;
-
-    let mut textarea = TextArea::default();
-    textarea.set_placeholder_text(crate::ui::utils::text::input_placeholder_text());
-    textarea.set_cursor_line_style(ratatui::style::Style::default());
-    textarea.set_cursor_style(
-        ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
-    );
-    if !text.is_empty() {
-        textarea.insert_str(text);
-    }
-    state.textarea = textarea;
-    state.input = text.to_string();
-    state.input_line_count = text.lines().count().max(1);
+    state.set_input_text(text);
 }
 
 /// Robust terminal cleanup — safe to call multiple times.
@@ -1336,9 +1328,6 @@ pub async fn run_app(
     // worker 初始 acknowledgement，不能从 Config 或设置文件提前猜测。
     state.current_status_line = None;
 
-    // Restore draft from previous session
-    state.restore_draft();
-
     // 抬头由 `ChatState::new()` 建的那条 is_welcome 条目承载，渲染期现算
     // （见 ui::components::welcome_header）。这里不再另塞一条，否则主界面
     // 顶部会出现两个欢迎块。
@@ -1358,11 +1347,14 @@ pub async fn run_app(
     state.auto_follow = true;
 
     // 等待期间早期输入已镜像进 textarea，这里统一按最终文本重设一次，
-    // 不能再 insert_str —— 那会把已经显示出来的内容再追加一遍
+    // 不能再 insert_str —— 那会把已经显示出来的内容再追加一遍。
+    //
+    // `--message` 指定的内容是用户显式给的，优先；没有它时恢复草稿，
+    // 草稿在前、初始化期间敲的早期输入接在后面（见 `restore_draft`）。
     if !initial_message.is_empty() {
         sync_textarea(&mut state, &initial_message);
-    } else if !early_input_text.is_empty() {
-        sync_textarea(&mut state, &early_input_text);
+    } else {
+        state.restore_draft();
     }
 
     // Worker owns the canonical protocol transcript. Retain both its lifecycle sender and

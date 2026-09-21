@@ -1,14 +1,24 @@
 use crate::core::i18n;
 use crate::types::{StarToolCall, ToolResult};
 
-fn shorten_path_for_display(path: &str) -> String {
+/// 把绝对路径缩短成相对当前工作目录的形式，给工具调用行节省宽度。
+///
+/// 路径**就是** cwd 时 `strip_prefix` 得到的是空相对路径。直接返回空串的话，
+/// 调用行会变成 `ls()`，看不出在列哪个目录（ListDir 无 directory 参数时本就
+/// 用 `"."` 兜底，这里保持同一约定）。
+pub(crate) fn shorten_path_for_display(path: &str) -> String {
     if path.is_empty() {
         return String::new();
     }
     let cwd = crate::core::utils::paths::current_dir_cached();
     let p = std::path::Path::new(path);
     if let Ok(rel) = p.strip_prefix(&cwd) {
-        rel.to_string_lossy().to_string()
+        let rel = rel.to_string_lossy();
+        if rel.is_empty() {
+            ".".to_string()
+        } else {
+            rel.to_string()
+        }
     } else {
         path.to_string()
     }
@@ -431,7 +441,7 @@ pub fn format_tool_result_with_saved_path(
 
 #[cfg(test)]
 mod tests {
-    use super::tool_display_name;
+    use super::{shorten_path_for_display, tool_display_name};
 
     /// 回归：CodebaseSearch / ProjectMap 以前落到 `_` 分支，
     /// 聊天历史里显示原始注册名（与状态栏的 "codebase search" / "project map"
@@ -445,5 +455,36 @@ mod tests {
     #[test]
     fn unknown_tools_fall_back_to_raw_name() {
         assert_eq!(tool_display_name("SomeFutureTool"), "SomeFutureTool");
+    }
+
+    /// 回归：ListDir 列的正是当前工作目录时，`strip_prefix` 给出空相对路径，
+    /// 缩短函数返回空串，工具调用行就变成了看不懂的 `ls()`。这里必须回落到 "."。
+    #[test]
+    fn the_cwd_itself_shortens_to_dot_not_empty() {
+        let cwd = crate::core::utils::paths::current_dir_cached();
+        assert_eq!(
+            shorten_path_for_display(&cwd.to_string_lossy()),
+            ".",
+            "cwd = {}",
+            cwd.display()
+        );
+    }
+
+    #[test]
+    fn path_under_cwd_stays_relative() {
+        let cwd = crate::core::utils::paths::current_dir_cached();
+        let p = cwd.join("src").join("lib.rs");
+        assert_eq!(shorten_path_for_display(&p.to_string_lossy()), "src/lib.rs");
+    }
+
+    /// cwd 之外的路径原样保留，不能被误缩短成别的
+    #[test]
+    fn path_outside_cwd_is_kept_verbatim() {
+        let p = if cfg!(windows) {
+            "C:\\Other\\place"
+        } else {
+            "/other/place"
+        };
+        assert_eq!(shorten_path_for_display(p), p);
     }
 }
