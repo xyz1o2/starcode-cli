@@ -6,8 +6,8 @@ use crate::llm::{
     DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE, ENV_STAR_API_KEY, ENV_STAR_MAX_TOKENS,
     ENV_STAR_TEMPERATURE, HEADER_ANTHROPIC_VERSION, HEADER_AUTHORIZATION, HEADER_CONTENT_TYPE,
     HEADER_X_API_KEY, HTTP_STATUS_401, KIMI_CODE_URL_PATTERN, OPENAI_DEFAULT_BASE_URL,
-    PROVIDER_ENV_ID_ANTHROPIC, PROVIDER_ENV_ID_DEEPSEEK, PROVIDER_ENV_ID_XIAOMI,
-    PROVIDER_NAME_OPENAI_COMPATIBLE,
+    PROVIDER_ENV_ID_ANTHROPIC, PROVIDER_ENV_ID_DEEPSEEK, PROVIDER_ENV_ID_OPENCODE,
+    PROVIDER_ENV_ID_XIAOMI, PROVIDER_NAME_OPENAI_COMPATIBLE,
 };
 pub use crate::types::StarResponse;
 use crate::types::{StarMessage, StarTool};
@@ -89,6 +89,20 @@ fn infer_provider(
     is_openai_compatible: bool,
     provider_id: Option<&str>,
 ) -> LlmProvider {
+    use crate::core::config::providers as prov;
+
+    // OpenCode Zen：同一个 base_url 下混着多种上游协议，必须先按模型名分流，
+    // 否则 claude-*（Anthropic Messages）会被错误地发到 /chat/completions。
+    // 放在 openai-compatible 快捷返回之前 —— 用户可能勾了兼容模式，
+    // 但 Zen 的协议归属由模型决定，不由那个开关决定。
+    if prov::is_opencode_zen(provider_id, base_url) {
+        return match prov::zen_protocol_for_model(model_name) {
+            prov::ZenProtocol::AnthropicMessages => LlmProvider::Anthropic,
+            // 其余已支持的（ChatCompletions）走通用兼容客户端，保留 base_url。
+            _ => LlmProvider::Custom(PROVIDER_NAME_OPENAI_COMPATIBLE.to_string()),
+        };
+    }
+
     // 用户显式选择了 Anthropic 兼容第三方 → 直接按 Anthropic 协议走，保留自定义 base_url。
     // 与 openai-compatible 对称，避免把这网关误路由到 URL 推断（其 host 通常不含 "anthropic"）。
     if provider_id == Some("anthropic-compatible") {
@@ -118,7 +132,15 @@ fn infer_provider(
     }
 }
 
-fn provider_env_id(provider: &LlmProvider, _base_url: &str) -> Option<&'static str> {
+fn provider_env_id(provider: &LlmProvider, base_url: &str) -> Option<&'static str> {
+    use crate::core::config::providers as prov;
+    // Zen 的两种协议都要用 Zen 的 key —— claude-* 即使走 Anthropic 协议，
+    // 也不能去读 ANTHROPIC_API_KEY。
+    let is_zen_protocol = matches!(provider, LlmProvider::Anthropic)
+        || matches!(provider, LlmProvider::Custom(name) if name == PROVIDER_NAME_OPENAI_COMPATIBLE);
+    if is_zen_protocol && prov::is_opencode_zen(None, base_url) {
+        return Some(PROVIDER_ENV_ID_OPENCODE);
+    }
     match provider {
         LlmProvider::DeepSeek => Some(PROVIDER_ENV_ID_DEEPSEEK),
         LlmProvider::Anthropic => Some(PROVIDER_ENV_ID_ANTHROPIC),
@@ -535,6 +557,66 @@ impl StarClient {
         self.base_url.contains("api.kimi.com/coding")
     }
 
+    /// 真正要发给上游的 API key。
+    ///
+    /// rig 永远不会省略 `Authorization` 头 —— 实测（见
+    /// `probe_rig_omits_auth_header_when_key_is_placeholder`）传空串时它会发
+    /// `Authorization: Bearer`，传占位符时会发 `Bearer API_KEY_NOT_SET`。
+    /// 后者会被 OpenCode Zen 判成无效 key 直接 401，把免费模型也一起拖垮。
+    ///
+    /// Zen 的免费模型（实测 `space-bunny-free`）在**完全没有 key** 时即可返回 200，
+    /// 且空的 Bearer 头同样被接受，所以这里把占位符降级成空串而不是拦下请求。
+    fn upstream_api_key(&self) -> &str {
+        use crate::core::config::providers as prov;
+
+        let key = self.api_key.as_str();
+        if key == API_KEY_NOT_SET || key.trim().is_empty() {
+            if prov::is_opencode_zen(self.provider_id.as_deref(), &self.base_url) {
+                return "";
+            }
+        }
+        key
+    }
+
+    /// 当前模型若属于 Zen 上尚未接入的协议，返回一条说明为什么、以及能改用什么模型的提示。
+    ///
+    /// 与其把请求发到一个注定 404 的端点再让用户去猜，不如在这里说清楚。
+    fn unsupported_zen_protocol_message(&self) -> Option<String> {
+        use crate::core::config::providers as prov;
+
+        if !prov::is_opencode_zen(self.provider_id.as_deref(), &self.base_url) {
+            return None;
+        }
+        let protocol = prov::zen_protocol_for_model(&self.model);
+        if prov::zen_protocol_supported(protocol) {
+            return None;
+        }
+
+        let (endpoint, hint) = match protocol {
+            prov::ZenProtocol::OpenAiResponses => (
+                "/responses (OpenAI Responses API)",
+                "试试同为 Zen 模型的 `claude-*`、`deepseek-*`、`glm-*`、`kimi-*` 等。",
+            ),
+            prov::ZenProtocol::GeminiNative => (
+                "/models/{id} (Gemini 原生协议)",
+                "试试同为 Zen 模型的 `claude-*`、`deepseek-*`、`glm-*`、`kimi-*` 等。",
+            ),
+            prov::ZenProtocol::SystemOne => (
+                "/systemone (结构化决策接口)",
+                "Jev 返回的是概率评分而非对话文本，不能作为聊天模型使用。",
+            ),
+            // 已支持的分支不会走到这里。
+            _ => return None,
+        };
+
+        Some(format!(
+            "✦ 模型 `{}` 在 OpenCode Zen 上走的是 {} 端点，本版本尚未接入该协议。\n{}",
+            self.model.trim(),
+            endpoint,
+            hint
+        ))
+    }
+
     pub async fn chat(
         &self,
         mut messages: Vec<StarMessage>,
@@ -548,6 +630,10 @@ impl StarClient {
             self.supports_thinking(),
         );
         pipeline.run(&mut messages);
+
+        if let Some(msg) = self.unsupported_zen_protocol_message() {
+            return Err(msg.into());
+        }
 
         let provider_requires_key = self
             .provider_env_id
@@ -627,6 +713,10 @@ impl StarClient {
             self.supports_thinking(),
         );
         pipeline.run(&mut messages);
+
+        if let Some(msg) = self.unsupported_zen_protocol_message() {
+            return Err(Box::new(std::io::Error::other(msg)));
+        }
 
         let provider_requires_key = self
             .provider_env_id
@@ -1024,6 +1114,11 @@ impl StarClient {
 
     /// Detect provider name from base URL
     fn detect_provider(&self) -> String {
+        // Zen 下一个 provider 承载多种协议，显示真实网关名而不是内部的兼容客户端名。
+        if crate::core::config::providers::is_opencode_zen(self.provider_id.as_deref(), &self.base_url)
+        {
+            return "OpenCode Zen".to_string();
+        }
         match &self.provider {
             LlmProvider::OpenAi => "OpenAI".to_string(),
             LlmProvider::Anthropic => "Anthropic".to_string(),
@@ -1038,7 +1133,8 @@ impl StarClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_model_context_window, StarClient};
+    use super::{infer_provider, parse_model_context_window, provider_env_id, StarClient};
+    use crate::core::config::providers::OPENCODE_ZEN_BASE_URL as ZEN_BASE_URL;
     use crate::types::{StarChoice, StarMessage, StarResponse, StarUsage};
     use serde_json::json;
 
@@ -1106,6 +1202,232 @@ mod tests {
         assert!(json.get("cache_read_tokens").is_none());
         assert!(json.get("cache_creation_tokens").is_none());
         assert!(json.get("cache_telemetry_reported").is_none());
+    }
+
+    #[test]
+    fn zen_models_route_to_anthropic_protocol_by_name() {
+        use crate::llm::LlmProvider;
+        // 只靠 URL 推断的话，opencode.ai/zen 会被当成普通兼容网关，
+        // claude-* 就会被错发到 /chat/completions。
+        for m in ["claude-sonnet-5-5", "qwen3.5-plus"] {
+            assert_eq!(
+                infer_provider(m, ZEN_BASE_URL, false, Some("opencode")),
+                LlmProvider::Anthropic,
+                "model {m} must use the Anthropic protocol"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_rig_omits_auth_header_when_key_is_placeholder() {
+        // OpenCode Zen 的 `space-bunny-free` 实测在**完全不带** Authorization 头时
+        // 返回 200，而带占位/无效 key 时返回 401。所以必须确认 rig 在我们没有
+        // 真实 key 时不会自己塞一个 `Bearer API_KEY_NOT_SET` 出去。
+        //
+        // 用本地 mock server 回显请求头，直接观察真实行为。
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        fn spawn_probe_server() -> (String, mpsc::Receiver<Option<String>>) {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().unwrap();
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                while let Ok((mut stream, _)) = listener.accept() {
+                    let mut buf = [0u8; 16384];
+                    let Ok(n) = stream.read(&mut buf) else { continue };
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let auth = req
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("authorization"))
+                        .map(|l| l.trim().to_string());
+                    let _ = tx.send(auth);
+                    let body = r#"{"id":"1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                }
+            });
+            (format!("http://{}/v1", addr), rx)
+        }
+
+        for (label, key) in [
+            ("EMPTY_KEY", ""),
+            ("PLACEHOLDER_KEY", crate::llm::API_KEY_NOT_SET),
+            ("REAL_KEY", "sk-real-looking-key"),
+        ] {
+            let (base, rx) = spawn_probe_server();
+            let adapter = crate::llm::rig_adapter::RigAdapter::openai_compatible(
+                key.to_string(),
+                "m".to_string(),
+                base.clone(),
+                "probe".to_string(),
+            );
+            {
+                use crate::llm::LlmClient as _;
+                let _ = adapter.chat_completion(vec![StarMessage::user("hi")], None).await;
+            }
+            let observed = rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap_or(None);
+            println!("PROBE[{label}] authorization = {observed:?}");
+        }
+
+        // rig 总会带上 Authorization 头（哪怕值是空的）—— 这正是下面那条
+        // 降级规则存在的原因：占位符原样发出去会让免费模型 401。
+        let (base, rx) = spawn_probe_server();
+        let adapter = crate::llm::rig_adapter::RigAdapter::openai_compatible(
+            crate::llm::API_KEY_NOT_SET.to_string(),
+            "m".to_string(),
+            base,
+            "probe".to_string(),
+        );
+        {
+            use crate::llm::LlmClient as _;
+            let _ = adapter.chat_completion(vec![StarMessage::user("hi")], None).await;
+        }
+        let observed = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or(None);
+        assert_eq!(
+            observed.as_deref(),
+            Some("authorization: Bearer API_KEY_NOT_SET"),
+            "placeholder keys must be demoted before reaching rig — \
+             Zen rejects them with 401 and that would break free models"
+        );
+    }
+
+    #[test]
+    fn zen_without_a_key_downgrades_the_placeholder_to_empty() {
+        // 免费模型（space-bunny-free）在完全没有 key 时可用，但前提是
+        // 不能把 API_KEY_NOT_SET 当成真 key 发出去。
+        let c = StarClient::new(
+            crate::llm::API_KEY_NOT_SET,
+            Some("space-bunny-free".to_string()),
+            Some(ZEN_BASE_URL.to_string()),
+            Some(false),
+            Some("opencode".to_string()),
+        );
+        assert_eq!(c.upstream_api_key(), "");
+    }
+
+    #[test]
+    fn zen_keeps_a_real_key_when_one_is_configured() {
+        let c = StarClient::new(
+            "sk-real-key",
+            Some("deepseek-v4-pro".to_string()),
+            Some(ZEN_BASE_URL.to_string()),
+            Some(false),
+            Some("opencode".to_string()),
+        );
+        assert_eq!(c.upstream_api_key(), "sk-real-key");
+    }
+
+    #[test]
+    fn non_zen_providers_keep_the_placeholder_untouched() {
+        // 只有 Zen 需要降级 —— 其它 provider 仍然依赖占位符来提示"没配 key"。
+        let c = StarClient::new(
+            crate::llm::API_KEY_NOT_SET,
+            Some("gpt-4o".to_string()),
+            Some("https://api.openai.com/v1".to_string()),
+            Some(false),
+            Some("openai".to_string()),
+        );
+        assert_eq!(c.upstream_api_key(), crate::llm::API_KEY_NOT_SET);
+    }
+
+    #[test]
+    fn zen_chat_models_route_to_openai_compatible() {
+        use crate::llm::LlmProvider;
+        for m in ["deepseek-v4-pro", "glm-5.3", "space-bunny-free", "qwen3.8-max"] {
+            assert_eq!(
+                infer_provider(m, ZEN_BASE_URL, false, Some("opencode")),
+                LlmProvider::Custom("openai-compatible".to_string()),
+                "model {m} must use chat/completions"
+            );
+        }
+    }
+
+    #[test]
+    fn zen_routing_wins_over_the_openai_compatible_flag() {
+        use crate::llm::LlmProvider;
+        // 用户勾了"OpenAI 兼容"也不能把 claude-* 锁到 chat/completions。
+        assert_eq!(
+            infer_provider("claude-opus-5", ZEN_BASE_URL, true, Some("opencode")),
+            LlmProvider::Anthropic
+        );
+    }
+
+    #[test]
+    fn zen_routing_also_triggers_from_a_hand_written_base_url() {
+        use crate::llm::LlmProvider;
+        // provider_id 缺失时靠 base_url 识别。
+        assert_eq!(
+            infer_provider("claude-haiku-4-5", ZEN_BASE_URL, false, None),
+            LlmProvider::Anthropic
+        );
+    }
+
+    #[test]
+    fn zen_key_never_falls_back_to_anthropic_env() {
+        // Zen 的 claude-* 用的是 Zen 的 key，不能去读 ANTHROPIC_API_KEY。
+        let pid = provider_env_id(&crate::llm::LlmProvider::Anthropic, ZEN_BASE_URL);
+        assert_eq!(pid, Some("opencode"));
+        // 非 Zen 场景保持原样。
+        assert_eq!(
+            provider_env_id(
+                &crate::llm::LlmProvider::Anthropic,
+                "https://api.anthropic.com/v1"
+            ),
+            Some("anthropic")
+        );
+    }
+
+    #[test]
+    fn non_zen_providers_keep_their_existing_routing() {
+        use crate::llm::LlmProvider;
+        // 回归保护：Zen 的接入不能改变其它 provider 的推断结果。
+        assert_eq!(
+            infer_provider(
+                "gpt-4o",
+                "https://api.openai.com/v1",
+                false,
+                Some("openai")
+            ),
+            LlmProvider::OpenAi
+        );
+        assert_eq!(
+            infer_provider(
+                "claude-sonnet-4-5",
+                "https://api.anthropic.com/v1",
+                false,
+                Some("anthropic")
+            ),
+            LlmProvider::Anthropic
+        );
+        assert_eq!(
+            infer_provider(
+                "deepseek-chat",
+                "https://api.deepseek.com/v1",
+                false,
+                None
+            ),
+            LlmProvider::DeepSeek
+        );
+        // 用户手填的第三方 Anthropic 兼容网关仍走 Custom("anthropic-compatible")。
+        assert_eq!(
+            infer_provider(
+                "m",
+                "https://my-proxy.example.com",
+                false,
+                Some("anthropic-compatible")
+            ),
+            LlmProvider::Custom("anthropic-compatible".to_string())
+        );
     }
 
     #[test]

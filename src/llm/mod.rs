@@ -79,6 +79,7 @@ pub const PROVIDER_ENV_ID_DEEPSEEK: &str = "deepseek";
 pub const PROVIDER_ENV_ID_ANTHROPIC: &str = "anthropic";
 pub const PROVIDER_ENV_ID_XIAOMI: &str = "xiaomi";
 pub const PROVIDER_NAME_OPENAI_COMPATIBLE: &str = "openai-compatible";
+pub const PROVIDER_ENV_ID_OPENCODE: &str = "opencode";
 
 // ── Environment variable names ──
 pub const ENV_STAR_API_KEY: &str = "STAR_API_KEY";
@@ -232,27 +233,56 @@ pub struct LlmConfig {
 pub fn create_client(config: LlmConfig) -> Box<dyn LlmClient> {
     let base_url = config.base_url.clone();
 
+    // rig never omits the `Authorization` header: passing a placeholder makes it
+    // emit `Bearer API_KEY_NOT_SET`, which upstream rejects as an invalid key.
+    // OpenCode Zen's free models (`space-bunny-free`) work with no key at all and
+    // accept an empty Bearer header, so demote the placeholder to an empty string
+    // before the client is actually constructed.
+    let api_key = if config.api_key == API_KEY_NOT_SET
+        && base_url
+            .as_deref()
+            .is_some_and(|u| crate::core::config::providers::is_opencode_zen(None, u))
+    {
+        String::new()
+    } else {
+        config.api_key.clone()
+    };
+
     match &config.provider {
         LlmProvider::OpenAi => Box::new(rig_adapter::RigAdapter::openai(
-            config.api_key.clone(),
+            api_key.clone(),
             config.model.clone(),
         )),
-        LlmProvider::Anthropic => Box::new(rig_adapter::RigAdapter::anthropic(
-            config.api_key.clone(),
-            config.model.clone(),
-        )),
+        LlmProvider::Anthropic => {
+            // Respect an explicit base_url: OpenCode Zen serves `claude-*` from its
+            // own `/messages` endpoint, so ignoring base_url would send the request
+            // to api.anthropic.com and fail auth. Falls back to rig's default.
+            match base_url {
+                Some(u) if !u.trim().is_empty() => Box::new(
+                    rig_adapter::RigAdapter::anthropic_with_base_url(
+                        api_key.clone(),
+                        config.model.clone(),
+                        u.clone(),
+                    ),
+                ),
+                _ => Box::new(rig_adapter::RigAdapter::anthropic(
+                    api_key.clone(),
+                    config.model.clone(),
+                )),
+            }
+        }
         LlmProvider::DeepSeek => Box::new(rig_adapter::RigAdapter::deepseek(
-            config.api_key.clone(),
+            api_key.clone(),
             config.model.clone(),
         )),
         LlmProvider::MiniMax => Box::new(rig_adapter::RigAdapter::openai_compatible(
-            config.api_key.clone(),
+            api_key.clone(),
             config.model.clone(),
             base_url.unwrap_or_else(|| MINIMAX_DEFAULT_BASE_URL.to_string()),
             "minimax".to_string(),
         )),
         LlmProvider::Xiaomi => Box::new(rig_adapter::RigAdapter::openai_compatible(
-            config.api_key.clone(),
+            api_key.clone(),
             config.model.clone(),
             base_url.unwrap_or_else(|| XIAOMI_DEFAULT_BASE_URL.to_string()),
             "xiaomi".to_string(),
@@ -263,19 +293,19 @@ pub fn create_client(config: LlmConfig) -> Box<dyn LlmClient> {
                 match &base_url {
                     Some(u) if !u.trim().is_empty() => {
                         Box::new(rig_adapter::RigAdapter::anthropic_with_base_url(
-                            config.api_key.clone(),
+                            api_key.clone(),
                             config.model.clone(),
                             u.clone(),
                         ))
                     }
                     _ => Box::new(rig_adapter::RigAdapter::anthropic(
-                        config.api_key.clone(),
+                        api_key.clone(),
                         config.model.clone(),
                     )),
                 }
             } else {
                 Box::new(rig_adapter::RigAdapter::openai_compatible(
-                    config.api_key.clone(),
+                    api_key.clone(),
                     config.model.clone(),
                     base_url.unwrap_or_default(),
                     name.clone(),
