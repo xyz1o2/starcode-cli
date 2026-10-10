@@ -436,7 +436,10 @@ const CARGO_TECH_STACK_PACKAGES: &[&str] = &["tokio", "actix", "axum", "yew", "l
 /// 不读取 Cargo.lock 或解析 workspace 继承项：动态上下文匹配只需稳定、离线的
 /// 项目级信号。解析失败时由调用方保留 `rust`，但不猜测框架依赖。
 fn detect_cargo_tech_stack(content: &str) -> Vec<String> {
-    let Ok(manifest) = content.parse::<toml::Value>() else {
+    // toml 1.x 起 `str::parse::<toml::Value>()` 走的是 *value* 解析器，只接受裸值
+    // （`42`、`{a=1}`），遇到 `[table]` 会报 "unexpected content, expected nothing"。
+    // 清单始终是 document，必须用 `toml::from_str`（document 反序列化器）。
+    let Ok(manifest) = toml::from_str::<toml::Value>(content) else {
         return Vec::new();
     };
 

@@ -12,12 +12,11 @@ use std::pin::Pin;
 
 use rig_core::{
     completion::message::{
-        AssistantContent, Message, ReasoningContent, Text, ToolCall, ToolFunction, ToolResult,
-        ToolResultContent, UserContent,
+        AssistantContent, Message, ReasoningContent, Text, ToolCall, ToolCallId, ToolFunction,
+        ToolResult, ToolResultContent, UserContent,
     },
     completion::{self, CompletionModel, CompletionRequest},
     providers::{anthropic, deepseek, openai},
-    OneOrMany,
 };
 
 // ── Constants ──────────────────────────────────────────────────────
@@ -129,9 +128,9 @@ fn convert_one_message(msg: &StarMessage) -> Message {
             content: msg.content.clone().unwrap_or_default(),
         },
         ROLE_USER => Message::User {
-            content: OneOrMany::one(UserContent::Text(text(
+            content: vec![UserContent::Text(text(
                 &msg.content.clone().unwrap_or_default(),
-            ))),
+            ))],
         },
         ROLE_ASSISTANT => {
             let mut parts: Vec<AssistantContent> = Vec::new();
@@ -150,8 +149,10 @@ fn convert_one_message(msg: &StarMessage) -> Message {
                 for tc in tool_calls {
                     let args = serde_json::from_str(&tc.function.arguments)
                         .unwrap_or(Value::String(tc.function.arguments.clone()));
+                    // rig 0.42：ToolCallId 非空保证，空 id 走 mint。
+                    let call_id = ToolCallId::new_or_mint(tc.id.clone());
                     parts.push(AssistantContent::ToolCall(ToolCall::new(
-                        tc.id.clone(),
+                        call_id,
                         ToolFunction::new(tc.function.name.clone(), args),
                     )));
                 }
@@ -166,23 +167,23 @@ fn convert_one_message(msg: &StarMessage) -> Message {
             }
             Message::Assistant {
                 id: None,
-                content: OneOrMany::many(parts)
-                    .unwrap_or(OneOrMany::one(AssistantContent::Text(text("")))),
+                content: parts,
             }
         }
         ROLE_TOOL => Message::User {
-            content: OneOrMany::one(UserContent::ToolResult(ToolResult {
-                id: msg.tool_call_id.clone().unwrap_or_default(),
-                call_id: None,
-                content: OneOrMany::one(ToolResultContent::Text(text(
+            content: vec![UserContent::ToolResult(ToolResult {
+                call: ToolCallId::new_or_mint(msg.tool_call_id.clone().unwrap_or_default()),
+                provider: None,
+                name: String::new(),
+                content: vec![ToolResultContent::Text(text(
                     &msg.content.clone().unwrap_or_default(),
-                ))),
-            })),
+                ))],
+            })],
         },
         _ => Message::User {
-            content: OneOrMany::one(UserContent::Text(text(
+            content: vec![UserContent::Text(text(
                 &msg.content.clone().unwrap_or_default(),
-            ))),
+            ))],
         },
     }
 }
@@ -264,14 +265,19 @@ fn build_request(
     CompletionRequest {
         model: None,
         preamble: None,
-        chat_history: OneOrMany::many(convert_messages(messages)).unwrap_or(OneOrMany::one(
-            Message::User {
-                content: OneOrMany::one(UserContent::Text(Text {
-                    text: String::new(),
-                    additional_params: None,
-                })),
-            },
-        )),
+        chat_history: {
+            let history = convert_messages(messages);
+            if history.is_empty() {
+                vec![Message::User {
+                    content: vec![UserContent::Text(Text {
+                        text: String::new(),
+                        additional_params: None,
+                    })],
+                }]
+            } else {
+                history
+            }
+        },
         documents: vec![],
         tools: convert_tools(tools),
         temperature: None,
@@ -292,7 +298,7 @@ struct CompletionResult {
 }
 
 /// Extract all content types from a rig completion response choice.
-fn extract_response(contents: &OneOrMany<AssistantContent>) -> CompletionResult {
+fn extract_response(contents: &[AssistantContent]) -> CompletionResult {
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut tool_calls: Vec<crate::types::StarToolCall> = Vec::new();
@@ -317,11 +323,13 @@ fn extract_response(contents: &OneOrMany<AssistantContent>) -> CompletionResult 
                     other => other.to_string(),
                 };
                 tool_calls.push(crate::types::StarToolCall {
+                    // rig 0.42：ToolCallId 只能通过 as_str() 取值。
                     id: tc
                         .id
+                        .as_str()
                         .strip_prefix("call_function_")
                         .map(|s| s.to_string())
-                        .unwrap_or_else(|| tc.id.clone()),
+                        .unwrap_or_else(|| tc.id.as_str().to_string()),
                     call_type: CALL_TYPE_FUNCTION.to_string(),
                     function: crate::types::StarToolCallFunction {
                         name: tc.function.name.clone(),
@@ -470,7 +478,6 @@ macro_rules! rig_stream_with_url {
 macro_rules! rig_stream_from_model {
     ($label:expr, $model:expr, $request:expr) => {{
         use futures::StreamExt;
-        use rig_core::completion::request::GetTokenUsage;
         use rig_core::streaming::StreamedAssistantContent;
 
         let label: &str = $label;
@@ -484,7 +491,6 @@ macro_rules! rig_stream_from_model {
             let mut stream = stream;
             let mut last_usage: Option<crate::types::StarUsage> = None;
             let mut has_tool_calls = false;
-            let mut saved_finish_reason = FINISH_STOP.to_string();
 
             while let Some(item) = stream.next().await {
                 match item {
@@ -493,8 +499,9 @@ macro_rules! rig_stream_from_model {
                             return;
                         }
                     }
-                    Ok(StreamedAssistantContent::Reasoning(r)) => {
-                        for rc in r.content {
+                    // rig 0.42：Reasoning 变成 struct variant，正文在 .reasoning 里。
+                    Ok(StreamedAssistantContent::Reasoning { reasoning, .. }) => {
+                        for rc in reasoning.content {
                             match rc {
                                 ReasoningContent::Text { text, .. } => {
                                     if tx.send(Ok(LlmEvent::ReasoningChunk(text))).await.is_err() {
@@ -527,7 +534,8 @@ macro_rules! rig_stream_from_model {
                         };
                         if tx
                             .send(Ok(LlmEvent::ToolCall(crate::types::StarToolCall {
-                                id: tool_call.id,
+                                // rig 0.42：ToolCallId 需要显式转成字符串。
+                                    id: tool_call.id.as_str().to_string(),
                                 call_type: CALL_TYPE_FUNCTION.to_string(),
                                 function: crate::types::StarToolCallFunction {
                                     name: tool_call.function.name,
@@ -548,7 +556,8 @@ macro_rules! rig_stream_from_model {
                     // the complete ToolCall above; nothing to do here.
                     Ok(StreamedAssistantContent::ToolCallDelta { .. }) => {}
                     Ok(StreamedAssistantContent::Final(res)) => {
-                        let usage = res.token_usage();
+                        // rig 0.42：token_usage() 变成 StreamFinal 上的 pub usage 字段。
+                    let usage = &res.usage;
                         // 缓存命中时 `input_tokens` 会很小（大头记在 cached_input_tokens
                         // 上），所以判空必须把缓存计数也算进来，否则高命中率的那一轮
                         // 会被当成"没有 usage"而丢掉。
@@ -576,12 +585,12 @@ macro_rules! rig_stream_from_model {
                     return;
                 }
             }
-            saved_finish_reason = if has_tool_calls {
-                FINISH_TOOL_CALLS.to_string()
+            let finish = if has_tool_calls {
+                FINISH_TOOL_CALLS
             } else {
-                FINISH_STOP.to_string()
+                FINISH_STOP
             };
-            let _ = tx.send(Ok(LlmEvent::Finish(saved_finish_reason))).await;
+            let _ = tx.send(Ok(LlmEvent::Finish(finish.to_string()))).await;
         });
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
@@ -598,7 +607,6 @@ async fn rig_openai_stream(
 ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError> {
     use futures::StreamExt;
     use rig_core::client::CompletionClient;
-    use rig_core::completion::request::GetTokenUsage;
     use rig_core::streaming::StreamedAssistantContent;
 
     let mut builder = openai::CompletionsClient::builder().api_key(api_key);
@@ -628,8 +636,9 @@ async fn rig_openai_stream(
                         return;
                     }
                 }
-                Ok(StreamedAssistantContent::Reasoning(r)) => {
-                    for rc in r.content {
+                // rig 0.42：Reasoning 变成 struct variant。
+                Ok(StreamedAssistantContent::Reasoning { reasoning, .. }) => {
+                    for rc in reasoning.content {
                         match rc {
                             ReasoningContent::Text { text, .. } => {
                                 if tx.send(Ok(LlmEvent::ReasoningChunk(text))).await.is_err() {
@@ -662,7 +671,8 @@ async fn rig_openai_stream(
                     };
                     if tx
                         .send(Ok(LlmEvent::ToolCall(crate::types::StarToolCall {
-                            id: tool_call.id,
+                            // rig 0.42：ToolCallId 需要显式转成字符串。
+                                    id: tool_call.id.as_str().to_string(),
                             call_type: CALL_TYPE_FUNCTION.to_string(),
                             function: crate::types::StarToolCallFunction {
                                 name: tool_call.function.name,
@@ -681,7 +691,8 @@ async fn rig_openai_stream(
                 }
                 Ok(StreamedAssistantContent::ToolCallDelta { .. }) => {}
                 Ok(StreamedAssistantContent::Final(res)) => {
-                    let usage = res.token_usage();
+                    // rig 0.42：token_usage() 变成 StreamFinal 上的 pub usage 字段。
+                    let usage = &res.usage;
                     // 见 `rig_stream_with_url!` 里的同一段注释：缓存命中的那一轮
                     // `input_tokens` 很小，判空要连缓存计数一起看。
                     if usage.input_tokens > 0
@@ -708,12 +719,12 @@ async fn rig_openai_stream(
                 return;
             }
         }
-        saved_finish_reason = if has_tool_calls {
-            FINISH_TOOL_CALLS.to_string()
-        } else {
-            FINISH_STOP.to_string()
-        };
-        let _ = tx.send(Ok(LlmEvent::Finish(saved_finish_reason))).await;
+        let finish = if has_tool_calls {
+                FINISH_TOOL_CALLS
+            } else {
+                FINISH_STOP
+            };
+            let _ = tx.send(Ok(LlmEvent::Finish(finish.to_string()))).await;
     });
 
     Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))

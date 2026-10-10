@@ -110,9 +110,9 @@ impl AnalyticsConfig {
             return true;
         }
 
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        rng.gen::<f64>() < self.sampling_rate
+        use rand::{Rng, RngExt};
+        let mut rng = rand::rng();
+        rng.random::<f64>() < self.sampling_rate
     }
 
     /// 获取配置摘要

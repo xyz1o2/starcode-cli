@@ -55,11 +55,18 @@ impl JwtAuth {
         let payload =
             serde_json::to_string(&token).map_err(|e| JwtError::EncodeError(e.to_string()))?;
 
+        // base64 0.23 起自由函数 encode/decode 已废弃，改用 Engine。
+        // 保持 STANDARD（带 '+' '/' 与 '=' 填充）而非 URL_SAFE —— 与旧版
+        // `base64::encode` 字节级一致，且 '.' 不在标准字母表内，按 '.' 切分仍成立。
+        use base64::Engine as _;
+        const B64: base64::engine::general_purpose::GeneralPurpose =
+            base64::engine::general_purpose::STANDARD;
+
         Ok(format!(
             "{}.{}.{}",
-            base64::encode(&self.issuer),
-            base64::encode(&payload),
-            base64::encode("signature") // 简化的签名
+            B64.encode(&self.issuer),
+            B64.encode(&payload),
+            B64.encode("signature") // 简化的签名
         ))
     }
 
@@ -73,7 +80,8 @@ impl JwtAuth {
         }
 
         // 解码payload
-        if let Ok(payload) = base64::decode(parts[1]) {
+        use base64::Engine as _;
+        if let Ok(payload) = base64::engine::general_purpose::STANDARD.decode(parts[1]) {
             if let Ok(token_data) = serde_json::from_slice::<JwtToken>(&payload) {
                 let now = chrono::Utc::now().timestamp();
                 return token_data.exp > now && token_data.iss == self.issuer;
@@ -90,7 +98,10 @@ impl JwtAuth {
             return Err(JwtError::InvalidFormat);
         }
 
-        let payload = base64::decode(parts[1]).map_err(|e| JwtError::DecodeError(e.to_string()))?;
+        use base64::Engine as _;
+        let payload = base64::engine::general_purpose::STANDARD
+            .decode(parts[1])
+            .map_err(|e| JwtError::DecodeError(e.to_string()))?;
 
         let token_data: JwtToken =
             serde_json::from_slice(&payload).map_err(|e| JwtError::DecodeError(e.to_string()))?;

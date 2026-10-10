@@ -1,13 +1,18 @@
 # 依赖审计 —— 未使用项、升级项与精简项
 
-对 `Cargo.toml` 中全部 91 个直接依赖做的一次静态 + 编译验证审计。
+对 `Cargo.toml` 中全部 91 个直接依赖做的一次静态 + 编译验证审计，随后**执行了全量升级**（分支 `chore/deps-upgrade-all`）。
+
+> **本文档分两部分**：第一至六节是升级*前*的审计结论（保留作为判断依据）；第七节起是升级*后*的实际执行记录。第六节末尾的「建议处置顺序」已全部完成。
 
 **结论先行：**
 
 1. **11 个依赖完全未被使用**，已从 `Cargo.toml` 移除并通过编译 + 测试验证。直接依赖 91 → 80。
 2. **存在严重的版本分裂**：`reqwest` 编译了 3 个大版本、`crossterm` 2 个、`scraper` 2 个、`hyper` 2 个。这比"升级到最新版"更值得优先处理。
-3. **`jsonschema` 是死代码**，却拖进了一整套第二套 HTTP 栈。
+3. **`jsonschema` 曾是死代码**，却拖进了一整套第二套 HTTP 栈。
 4. `crossterm` 被 `crossterm_0_28` feature 钉死在旧版，与 ratatui 0.30.2 期望的 0.29 冲突。
+5. **除 `rig-core` 外的 79 个依赖已全部升级到最新稳定版**，`hyper` 与 `crossterm` 的版本分裂已消除。
+6. **升级暴露出一个真实的功能回归**：`toml` 1.x 改变了 `parse::<Value>()` 的语义，导致技术栈探测静默失效（详见 7.4）。
+7. **`rig-core` 停在 0.42.0**：0.43/0.44 是架构级重写，不是版本升级（详见第八节）。
 
 ---
 
@@ -212,3 +217,156 @@ CLAUDE.md 已记录，此处仅作汇总：
 - 其余文件未改动
 
 > 审计期间工作区已有未提交修改（`src/core/config/models.rs`、`src/core/config/providers.rs`、`src/llm/client.rs`），均未触碰。
+
+---
+
+# 七、升级执行结果
+
+分支 `chore/deps-upgrade-all`。除 `rig-core` 外的 79 个直接依赖已升到最新稳定版。
+
+## 7.1 验证结论
+
+| 检查项 | 结果 |
+|--------|------|
+| `cargo check --lib --bins` | **0 error** |
+| 新增 warning | **0**（仅剩 1 条升级前就存在的 `CachedSettings` 可见性告警） |
+| `cargo test --lib` | 736 passed / 14 failed |
+| 与升级前基线差分 | **无新增失败** |
+
+基线是 734 passed / 14 failed；现在 736 是因为新增了 2 个测试（见 7.5）。14 个失败项与基线**完全一致**，全部是 CLAUDE.md 已记录的既有问题。
+
+## 7.2 版本分裂的消除效果
+
+| crate | 升级前 | 升级后 |
+|-------|--------|--------|
+| `hyper` | 0.14.32 / 1.12.0 | **1.12.0（唯一）** ✅ |
+| `crossterm` | 0.28.1 / 0.29.0 | **0.29.0（唯一）** ✅ |
+| `reqwest` | 0.11.27 / 0.12.28 / 0.13.5 | 0.12.28 / 0.13.5（少一个） |
+| `scraper` | 0.18.1 / 0.22.0 | 0.18.1 / 0.27.0（无解） |
+| `windows-sys` | 5 个版本 | 3 个版本 |
+
+- **`hyper` 彻底收敛到单一版本**：这正是 `jsonschema` 0.17（已升 0.58，不再依赖 reqwest 0.11）带来的收益。
+- **`crossterm` 收敛**：`crossterm` 0.29 + `ratatui` 0.30（去掉 `crossterm_0_28` feature）+ `tui-textarea-2` 0.13 三者协同升级的结果。
+- **`reqwest` 剩两个版本是当前生态的硬上限**：`reqwest-eventsource` 最新版 0.6.0 依赖 `reqwest ^0.12`，而 `rig-core` 0.42 依赖 `reqwest ^0.13`。该 crate 尚无 0.13 兼容版本，无法进一步消除。好消息是 reqwest 0.12 在此图中已使用 hyper 1.x，不再引入第二套 hyper。
+- `scraper` 双版本无解：`readability-rust` 0.1.0 版本已锁死且不再更新，它依赖 `scraper ^0.18`。
+- 依赖图总包数 624。
+
+## 7.3 各 crate 的破坏性改动与处理
+
+| crate | 变更 | 处理 |
+|-------|------|------|
+| `sha2` 0.10→0.11 | `finalize()` 返回 `hybrid_array::Array`，不再实现 `LowerHex`，`format!("{:x}")` 失效 | 新增 `paths::to_hex_lower` / `sha256_hex`，替换 8 处调用 |
+| `rand` 0.8→0.10 | `thread_rng()`→`rng()`；`gen()`→`random()` 且移入新 trait `RngExt`；`SliceRandom`→`IndexedRandom` | 3 处 |
+| `windows-sys` 0.52→0.61 | `INVALID_HANDLE_VALUE` 仍是 `*mut c_void`，但裸指针与整数 `0` 不再可直接比较；`*mut c_void` 失去 `Send` | `is_null()`；跨线程改传 `usize` |
+| `zip` 2→9 | `entry.name()` 改为返回 `Result<Cow<str>, ZipError>` | 加 `map_err` |
+| `jsonschema` 0.17→0.58 | `JSONSchema`→`Validator`；`compile()`→`build()`；`validate()` 由返回错误迭代器改为返回单个错误 | 改用 `iter_errors()` 以保留「收集全部错误再拼接」的原有输出格式 |
+| `pulldown-cmark` 0.12→0.13 | 新增 `Tag::Superscript`/`Subscript` 与对应 `TagEnd` | 补 match 分支，按纯文本透传 |
+| `base64` 0.21→0.23 | 自由函数 `encode`/`decode` 废弃 | 改用 `Engine::STANDARD`。**刻意保留 STANDARD 而非 URL_SAFE**，以与旧版字节级一致 |
+| `reqwest` 0.12→0.13 | `rustls-tls` feature 更名为 `rustls` | 改名 |
+| `toml` 0.8→1.1 | **见 7.4，真实功能回归** | 修复两处生产代码 |
+| `rig-core` 0.41→0.42 | 见第八节 | 见第八节 |
+
+## 7.4 升级暴露出的真实功能回归（重要）
+
+`toml` 1.x 把 `Value`'s `FromStr` 实现从 **document 解析器**换成了 **value 解析器**：
+
+```rust
+// toml 0.8：解析整个文档
+content.parse::<toml::Value>()   // ✅
+
+// toml 1.1：只接受裸值（42 / "s" / {a=1}）
+content.parse::<toml::Value>()   // ❌ TOML parse error at line 1, column 1
+                                  //    unexpected content, expected nothing
+```
+
+任何含 `[table]` 的内容都会解析失败。两处生产代码受影响：
+
+| 位置 | 后果 |
+|------|------|
+| `src/core/context/selection.rs:439` `detect_cargo_tech_stack` | **静默失效** —— 技术栈探测永远返回空，`rust` 以外的项目级上下文信号全部丢失 |
+| `src/core/tools/verify_edit.rs:226` `verify_toml` | TOML 语法校验永远判定为「有错」 |
+
+两处都已改为 `toml::from_str::<toml::Value>(...)`（走 document 反序列化器）。
+
+这个回归是**测试先发现的**：`cargo_stack_detects_direct_dependencies` 与 `cargo_stack_detects_aliased_and_target_dependencies` 两个测试转为失败。**如果没有这两个测试，这个 bug 会静默上线** —— 因为失败路径是「返回空」而不是崩溃。
+
+> 教训：解析类依赖升级时，"更严格的解析"和"改变了输入形态"要分开验证。前者会暴露原有脏数据，后者会静默改变语义。
+
+## 7.5 新增测试
+
+`paths.rs` 新增 2 个测试，锁定手写十六进制编码的正确性：
+
+- `sha256_hex_matches_known_vectors` —— 用 3 个 FIPS 180-4 标准向量 + 空串
+- `to_hex_lower_is_lowercase_and_zero_padded`
+
+**为什么必须锁死**：checkpoint 备份文件名、skills 缓存目录名、后台索引 `index.json` 的键、文件快照哈希全部由这个函数派生。sha2 0.11 迁移时如果编码有任何偏差（大小写、补零、长度），**所有既有缓存会全部失效且不会报错**。向量测试是唯一能挡住这种静默破坏的手段。
+
+---
+
+# 八、rig-core：为什么停在 0.42.0
+
+这是本次升级唯一未达成"最新"的目标，原因是它不是版本升级，而是架构重写。
+
+## 8.1 事实
+
+`rig-core` 每周发一个版本。0.43.0（2026-09-30）和 0.44.0（2026-10-07）合计引入了大量 breaking change：
+
+- effect-bus 关键路径、统一 data layer、sans-IO run protocol
+- `OneOrMany` 移除、`CompletionClient` trait 移除
+- `Usage` 计数器改为 `Option<u64>`
+- 消息模型改为 item-shaped + provenance
+
+并用全新的 **Wire / Operation / Transport / Driver** 架构替换了原有的 `CompletionClient` trait。
+
+**0.42.0 是最后一个仍提供旧 API 的版本**（已通过 docs.rs 确认其 `client` 模块仍导出 `CompletionClient`）。
+
+## 8.2 实测代价
+
+| 目标版本 | 编译错误数 |
+|----------|-----------|
+| rig-core 0.44.0 | 47 |
+| rig-core 0.42.0 | 18 → **0** |
+
+0.44 的改动范围（`src/llm/rig_adapter.rs`，810 行）：
+
+| 旧 API（0.41） | 新 API（0.44） |
+|----------------|---------------|
+| `OneOrMany<T>` | `Vec<T>` |
+| `Message::Assistant { id, content }` | `Message::Assistant(AssistantMessage)` |
+| `ToolResult { id, call_id, content }` | `ToolResult { call: CallId, name, content, is_error }` |
+| `Reasoning { content: Vec<ReasoningContent> }` | `Reasoning { text: String, redacted, native }` |
+| `client.completion_model(m).completion(req)` | `OpenAI::new(k).completion(m).call(req)` |
+| `StreamedAssistantContent` | `StreamEvent`（需按 `Part` 自行聚合工具参数） |
+| `CompletionRequest.preamble` | 已移除，system 即首条消息 |
+
+## 8.3 为什么不直接做
+
+1. **在活跃的 LLM 主路径上**。`rig_adapter.rs` 是所有模型请求的唯一出口。
+2. **无测试覆盖**。现有 748 个单测没有一个发起真实 API 调用；写错了编译能过、行为静默错误，只有配了真实 API key 手动跑才会发现。
+3. **改动量与收益不匹配**。为了 rig-core 一个依赖重写整个 LLM 适配层，风险远大于"落后两个补丁版本"。
+
+## 8.4 0.42.0 迁移的 5 处改动
+
+已完成并验证：
+
+| 改动 | 说明 |
+|------|------|
+| `OneOrMany` → `Vec` | `chat_history` 空列表兜底逻辑改为显式 `if is_empty()` |
+| `ToolCallId` | 新增非空标识类型，`ToolCall::new` 改收 `ToolCallId`；用 `new_or_mint` 处理 provider 未发 id 的情况 |
+| `ToolResult` | `id`/`call_id` → `call`/`provider`/`name` |
+| `StreamedAssistantContent::Reasoning` | 元组变体 → struct 变体 |
+| `token_usage()` | → `StreamFinal.usage` 公有字段；`GetTokenUsage` trait 移除 |
+
+## 8.5 后续建议
+
+等 rig-core 的新架构稳定（预计 0.45+），单独开一个 PR 迁移，并**先补上 rig_adapter 的契约测试**（用 mock HTTP server 断言请求体形状与流式事件映射），再动生产代码。
+
+---
+
+# 九、遗留事项
+
+1. **`jsonschema` 仍是死代码**：`SchemaValidator::validate` 依然零调用点。升级只消除了它的传递依赖成本，没消除它本身。建议直接删掉 `src/core/utils/schema_validator.rs` 及其模块声明。
+2. **死的 `log::` 调用**：8 处 `log::warn!` 从未初始化 logger，诊断信息静默丢失。
+3. **`reqwest` 双版本**：`reqwest-eventsource` 上游跟进后才能消除。
+4. **TUI 交互未实测**：crossterm 0.28→0.29 覆盖全部渲染与输入路径，编译与单测无法覆盖，需手动验证交互。
+5. **`tokio` features 仍为 `full`**：可按实际用到的 `fs`/`sync`/`time`/`process`/`macros`/`rt` 精确化。

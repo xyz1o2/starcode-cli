@@ -223,7 +223,9 @@ fn verify_json(file_path: &str, content: &str) -> EditVerificationResult {
 
 /// TOML: parse validation
 fn verify_toml(file_path: &str, content: &str) -> EditVerificationResult {
-    match content.parse::<toml::Value>() {
+    // toml 1.x 起 `str::parse::<toml::Value>()` 只接受裸 value，遇到 `[table]` 一律
+    // 报错。.toml 文件是 document，必须走 `toml::from_str`。
+    match toml::from_str::<toml::Value>(content) {
         Ok(_) => EditVerificationResult {
             file_path: file_path.to_string(),
             syntax_ok: true,

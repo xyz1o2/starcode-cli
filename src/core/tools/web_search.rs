@@ -4,7 +4,7 @@ use crate::core::tools::tools::{
 use anyhow::{Context, Result};
 use futures::future::select_all;
 use once_cell::sync::Lazy;
-use rand::seq::SliceRandom;
+use rand::seq::IndexedRandom;
 use reqwest::{Client, ClientBuilder};
 use scraper::{Html, Selector};
 use serde::Deserialize;
@@ -53,7 +53,7 @@ fn inline_content_pages() -> usize {
 
 fn random_ua() -> &'static str {
     USER_AGENTS
-        .choose(&mut rand::thread_rng())
+        .choose(&mut rand::rng())
         .unwrap_or(&USER_AGENTS[0])
 }
 

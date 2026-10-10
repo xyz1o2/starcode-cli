@@ -26,7 +26,9 @@ const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
 #[cfg(windows)]
 fn stdin_handle() -> Option<HANDLE> {
     let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-    if handle == 0 || handle == INVALID_HANDLE_VALUE {
+    // windows-sys 0.61：INVALID_HANDLE_VALUE 本身就是 HANDLE（*mut c_void），
+    // 但整数 0 与裸指针比较不再成立，改用 is_null()。
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
         return None;
     }
     Some(handle)
@@ -153,9 +155,11 @@ impl CtrlCGuard {
 
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = stop.clone();
+        // *mut c_void 不再是 Send，改传 usize 进线程再还原。
+        let handle_usize = handle as usize;
         let thread = thread::spawn(move || {
             while !stop_flag.load(Ordering::Relaxed) {
-                enforce_processed_input_off(handle);
+                enforce_processed_input_off(handle_usize as HANDLE);
                 thread::sleep(Duration::from_millis(100));
             }
         });

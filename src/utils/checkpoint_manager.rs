@@ -119,11 +119,9 @@ fn resolve_backup_path(
 }
 
 fn get_backup_file_name(file_path: &str, version: u32) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(file_path.as_bytes());
-    // format!("{:x}", ..) on GenericArray yields full hex; slice to 16 chars
-    // (8 bytes) for a short, deterministic, collision-resistant key.
-    let hash_hex = format!("{:x}", hasher.finalize());
+    // full hex digest, sliced to 16 chars (8 bytes) for a short,
+    // deterministic, collision-resistant key.
+    let hash_hex = crate::core::utils::paths::sha256_hex(file_path.as_bytes());
     let short = &hash_hex[..16];
     format!("{}_v{}", short, version)
 }
@@ -138,9 +136,7 @@ fn resolve_session_id(provided: Option<&str>) -> String {
     }
     // Fallback: hash of current dir to keep snapshots scoped per project.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-    let mut hasher = Sha256::new();
-    hasher.update(cwd.to_string_lossy().as_bytes());
-    let hash_hex = format!("{:x}", hasher.finalize());
+    let hash_hex = crate::core::utils::paths::sha256_hex(cwd.to_string_lossy().as_bytes());
     format!("default_{}", &hash_hex[..8])
 }
 

@@ -7,6 +7,30 @@ use std::sync::{Mutex, OnceLock};
 pub const STAR_DIR: &str = ".star";
 pub const GOOGLE_ACCOUNTS_FILENAME: &str = "google_accounts.json";
 
+/// 小写十六进制编码。
+///
+/// sha2 0.11 / digest 0.11 的 `finalize()` 返回 `hybrid_array::Array`，
+/// 它不再实现 `LowerHex`，所以 `format!("{:x}", ..)` 编译不过。
+/// 这里手写编码以替代，保证输出与旧版 `GenericArray` 的 `{:x}` 完全一致
+/// （小写、无 `0x` 前缀）。
+pub fn to_hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
+}
+
+/// SHA-256 摘要的小写十六进制串。
+/// 等价于旧版的 `format!("{:x}", hasher.finalize())`。
+pub fn sha256_hex(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    to_hex_lower(&hasher.finalize())
+}
+
 pub fn tildeify_path(path: &str) -> String {
     if let Some(home) = dirs::home_dir() {
         if let Some(home_str) = home.to_str() {
@@ -58,9 +82,7 @@ pub fn unescape_path(path: &str) -> String {
 }
 
 pub fn get_project_hash(path: &Path) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(path.to_string_lossy().as_bytes());
-    format!("{:x}", hasher.finalize())
+    sha256_hex(path.to_string_lossy().as_bytes())
 }
 
 pub fn is_subpath(path: &Path, base: &Path) -> bool {
@@ -376,6 +398,32 @@ pub fn current_project_star_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// sha2 0.11 迁移后手写的十六进制编码必须与旧版
+    /// `format!("{:x}", Sha256::finalize())` 逐字节一致 —— checkpoint 文件名、
+    /// skills 缓存目录、index.json 的键都直接由它派生，改一位就会让旧缓存全部失效。
+    #[test]
+    fn sha256_hex_matches_known_vectors() {
+        // 三个 NIST/FIPS 180-4 标准向量 + 空串
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+    }
+
+    #[test]
+    fn to_hex_lower_is_lowercase_and_zero_padded() {
+        assert_eq!(to_hex_lower(&[0x00, 0x0f, 0xff]), "000fff");
+        assert_eq!(to_hex_lower(&[]), "");
+    }
 
     #[test]
     fn normalize_path_does_not_escape_an_absolute_root() {

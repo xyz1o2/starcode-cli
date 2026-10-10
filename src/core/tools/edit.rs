@@ -86,9 +86,7 @@ pub fn safe_literal_replace(content: &str, old: &str, new: &str) -> String {
 }
 
 pub fn hash_content(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    format!("{:x}", hasher.finalize())
+    crate::core::utils::paths::sha256_hex(content.as_bytes())
 }
 
 pub fn restore_trailing_newline(original: &str, modified: &str) -> String {
