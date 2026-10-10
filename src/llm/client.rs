@@ -115,6 +115,16 @@ fn infer_provider(
     if is_openai_compatible {
         return LlmProvider::Custom(PROVIDER_NAME_OPENAI_COMPATIBLE.to_string());
     }
+
+    // 聚合类网关：模型名里带别家厂商前缀（OpenRouter 上的 `deepseek/...`、
+    // `anthropic/claude-...`）会让下面的关键词推断命中官方 SDK 分支，而那些
+    // 分支不传 base_url —— 请求就被发到厂商官方地址，key 和网关配置全丢。
+    // 所以只要 provider 有自己的固定网关地址，就以 provider 为准走兼容客户端。
+    if let Some(pid) = provider_id {
+        if prov::is_aggregator_provider(pid) {
+            return LlmProvider::Custom(PROVIDER_NAME_OPENAI_COMPATIBLE.to_string());
+        }
+    }
     let url = base_url.to_ascii_lowercase();
     let model = model_name.to_ascii_lowercase();
     if url.contains("anthropic") {
@@ -132,7 +142,11 @@ fn infer_provider(
     }
 }
 
-fn provider_env_id(provider: &LlmProvider, base_url: &str) -> Option<&'static str> {
+fn provider_env_id(
+    provider: &LlmProvider,
+    base_url: &str,
+    provider_id: Option<&str>,
+) -> Option<&'static str> {
     use crate::core::config::providers as prov;
     // Zen 的两种协议都要用 Zen 的 key —— claude-* 即使走 Anthropic 协议，
     // 也不能去读 ANTHROPIC_API_KEY。
@@ -140,6 +154,16 @@ fn provider_env_id(provider: &LlmProvider, base_url: &str) -> Option<&'static st
         || matches!(provider, LlmProvider::Custom(name) if name == PROVIDER_NAME_OPENAI_COMPATIBLE);
     if is_zen_protocol && prov::is_opencode_zen(None, base_url) {
         return Some(PROVIDER_ENV_ID_OPENCODE);
+    }
+    // 聚合网关（OpenRouter 等）走通用兼容客户端，provider 字段看不出是哪家，
+    // 必须靠 provider_id 才能定位到对应的 key 环境变量。
+    if let Some(pid) = provider_id {
+        if prov::is_aggregator_provider(pid) {
+            return match prov::get_provider_by_id(pid).map(|p| p.id) {
+                Some(id) => Some(id),
+                None => None,
+            };
+        }
     }
     match provider {
         LlmProvider::DeepSeek => Some(PROVIDER_ENV_ID_DEEPSEEK),
@@ -385,7 +409,7 @@ impl StarClient {
             is_openai_compatible.unwrap_or(false),
             provider_id.as_deref(),
         );
-        let provider_env_id = provider_env_id(&provider, &url_str);
+        let provider_env_id = provider_env_id(&provider, &url_str, provider_id.as_deref());
         let resolved_api_key = resolve_api_key_details(api_key, provider_env_id);
 
         let config = LlmConfig {
@@ -487,7 +511,7 @@ impl StarClient {
             self.is_openai_compatible,
             self.provider_id.as_deref(),
         );
-        let provider_env_id = provider_env_id(&provider, &self.base_url);
+        let provider_env_id = provider_env_id(&provider, &self.base_url, self.provider_id.as_deref());
         let provider_requires_key = provider_env_id
             .and_then(|pid| crate::core::config::providers::get_provider_by_id(pid))
             .map(|p| p.requires_api_key)
@@ -1136,6 +1160,7 @@ impl StarClient {
 #[cfg(test)]
 mod tests {
     use super::{infer_provider, parse_model_context_window, provider_env_id, StarClient};
+    use crate::core::config::providers::api_key_env_candidates;
     use crate::core::config::providers::OPENCODE_ZEN_BASE_URL as ZEN_BASE_URL;
     use crate::types::{StarChoice, StarMessage, StarResponse, StarUsage};
     use serde_json::json;
@@ -1348,6 +1373,27 @@ mod tests {
         assert_eq!(c.upstream_api_key(), crate::llm::API_KEY_NOT_SET);
     }
 
+    /// OpenRouter 上的模型名带 `厂商/` 前缀，绝不能被关键词推断路由到官方 SDK
+    /// 分支 —— 那些分支不传 base_url，请求会飞到厂商官方地址。
+    #[test]
+    fn openrouter_keeps_its_gateway_even_for_vendor_prefixed_models() {
+        use crate::llm::LlmProvider;
+        const OR: &str = "https://openrouter.ai/api/v1";
+        // 三个都含别家关键词：deepseek / anthropic / minimax。
+        for model in [
+            "deepseek/deepseek-r1",
+            "anthropic/claude-sonnet-4.5",
+            "minimax/minimax-m2",
+            "meta-llama/llama-3.3-70b-instruct",
+        ] {
+            assert_eq!(
+                infer_provider(model, OR, false, Some("openrouter")),
+                LlmProvider::Custom("openai-compatible".to_string()),
+                "model {model} must stay on the OpenRouter gateway"
+            );
+        }
+    }
+
     #[test]
     fn zen_chat_models_route_to_openai_compatible() {
         use crate::llm::LlmProvider;
@@ -1388,16 +1434,34 @@ mod tests {
     #[test]
     fn zen_key_never_falls_back_to_anthropic_env() {
         // Zen 的 claude-* 用的是 Zen 的 key，不能去读 ANTHROPIC_API_KEY。
-        let pid = provider_env_id(&crate::llm::LlmProvider::Anthropic, ZEN_BASE_URL);
+        let pid = provider_env_id(
+            &crate::llm::LlmProvider::Anthropic,
+            ZEN_BASE_URL,
+            Some("opencode"),
+        );
         assert_eq!(pid, Some("opencode"));
         // 非 Zen 场景保持原样。
         assert_eq!(
             provider_env_id(
                 &crate::llm::LlmProvider::Anthropic,
-                "https://api.anthropic.com/v1"
+                "https://api.anthropic.com/v1",
+                Some("anthropic"),
             ),
             Some("anthropic")
         );
+    }
+
+    /// OpenRouter 的 key 要从 `OPENROUTER_API_KEY` 解析，不能因为它走通用
+    /// 兼容客户端就退化成"读不到任何环境变量"。
+    #[test]
+    fn openrouter_resolves_its_own_key_env() {
+        let pid = provider_env_id(
+            &crate::llm::LlmProvider::Custom("openai-compatible".to_string()),
+            "https://openrouter.ai/api/v1",
+            Some("openrouter"),
+        );
+        assert_eq!(pid, Some("openrouter"));
+        assert!(api_key_env_candidates("openrouter").contains(&"OPENROUTER_API_KEY"));
     }
 
     #[test]

@@ -30,7 +30,6 @@ serde_json = "1.0"
 # Terminal UI
 crossterm = { version = "0.28", features = ["use-dev-tty", "bracketed-paste"] }
 ratatui = { version = "0.30", features = ["crossterm_0_28"] }
-libc = "0.2"
 
 # Third-party widgets
 tui-textarea = { package = "tui-textarea-2", version = "0.11", features = ["crossterm_0_28"] }
@@ -38,26 +37,18 @@ tui-textarea = { package = "tui-textarea-2", version = "0.11", features = ["cros
 # Unicode width (for correct padding in TUI)
 unicode-width = "0.1"
 
-# Text wrapping
-textwrap = "0.16"
-
 # Markdown rendering
 pulldown-cmark = "0.12"
 
 # File operations
 tokio-util = "0.7"
-fs-err = "3.0"
 walkdir = "2.3"
 
 # Environment variables
 dotenvy = "0.15"
 
-# Configuration
-config = "0.14"
-
 # Logging
 log = "0.4"
-env_logger = "0.11"
 
 # Crypto for unique IDs
 uuid = { version = "1.0", features = ["v4"] }
@@ -69,9 +60,6 @@ reqwest-eventsource = "0.5"
 
 # Async trait support for trait methods
 async-trait = "0.1"
-
-# Terminal colors and formatting
-console = "0.15"
 
 # Date/time handling
 chrono = { version = "0.4", features = ["serde"] }
@@ -93,7 +81,6 @@ pathdiff = "0.2"
 
 # Ripgrep library for fast code search
 grep-searcher = "0.1"
-grep-matcher = "0.1"
 grep-regex = "0.1"
 ignore = "0.4"  # .gitignore support (used by ripgrep)
 globset = "0.4" # glob 匹配（ignore 的同族 crate，语义与 rg --glob 一致）
@@ -129,9 +116,6 @@ parking_lot = "0.12"
 # LRU cache for query result caching
 lru = "0.12"
 
-# Multi-pattern substring search with SIMD (hint keyword detection)
-aho-corasick = "1.1"
-
 # JSON Schema validation
 jsonschema = "0.17"
 
@@ -151,9 +135,6 @@ rust-embed = "8.11.0"
 lsp-types = "0.97.0"
 image = "0.25.9"
 html2text = "0.16.5"
-syn = { version = "2.0.114", features = ["full", "visit"] }
-proc-macro2 = "1.0.105"
-lazy_static = "1.5.0"
 readability-rust = "0.1.0"
 scraper = "0.22"
 mime_guess = "2.0.5"

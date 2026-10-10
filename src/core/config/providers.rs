@@ -81,6 +81,123 @@ pub const ALL_PROVIDERS: &[ProviderMetadata] = &[
         requires_api_key: false,
     },
     ProviderMetadata {
+        id: "openrouter",
+        name: "OpenRouter",
+        description: "One key for many vendors — Claude / GPT / Gemini / Llama / Qwen",
+        category: ProviderCategory::Popular,
+        default_base_url: Some("https://openrouter.ai/api/v1"),
+        api_key_env_var: Some("OPENROUTER_API_KEY"),
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "groq",
+        name: "Groq",
+        description: "Groq — very fast inference on open models",
+        category: ProviderCategory::Popular,
+        default_base_url: Some("https://api.groq.com/openai/v1"),
+        api_key_env_var: Some("GROQ_API_KEY"),
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "moonshot",
+        name: "Moonshot (Kimi)",
+        description: "Moonshot Kimi — kimi-k2 / kimi-k3, CN endpoint",
+        category: ProviderCategory::Chinese,
+        default_base_url: Some("https://api.moonshot.cn/v1"),
+        api_key_env_var: Some("MOONSHOT_API_KEY"),
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "zhipu",
+        name: "Zhipu (GLM)",
+        description: "智谱 GLM — glm-5 series, CN endpoint",
+        category: ProviderCategory::Chinese,
+        default_base_url: Some("https://open.bigmodel.cn/api/paas/v4"),
+        api_key_env_var: Some("ZHIPUAI_API_KEY"),
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "alibaba",
+        name: "Alibaba (DashScope / Qwen)",
+        description: "阿里云百炼 — qwen3 series, CN endpoint",
+        category: ProviderCategory::Chinese,
+        default_base_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        api_key_env_var: Some("DASHSCOPE_API_KEY"),
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "bytedance",
+        name: "ByteDance (Ark / Doubao)",
+        description: "火山方舟 doubao-seed, CN endpoint",
+        category: ProviderCategory::Chinese,
+        default_base_url: Some("https://ark.cn-beijing.volces.com/api/v3"),
+        api_key_env_var: Some("ARK_API_KEY"),
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "siliconflow",
+        name: "SiliconFlow",
+        description: "硅基流动 — 多种开源模型，CN endpoint",
+        category: ProviderCategory::Chinese,
+        default_base_url: Some("https://api.siliconflow.cn/v1"),
+        api_key_env_var: Some("SILICONFLOW_API_KEY"),
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "together",
+        name: "Together AI",
+        description: "Together AI — open model inference",
+        category: ProviderCategory::Popular,
+        default_base_url: Some("https://api.together.xyz/v1"),
+        api_key_env_var: Some("TOGETHER_API_KEY"),
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "fireworks",
+        name: "Fireworks AI",
+        description: "Fireworks AI — fast open model inference",
+        category: ProviderCategory::Popular,
+        default_base_url: Some("https://api.fireworks.ai/inference/v1"),
+        api_key_env_var: Some("FIREWORKS_API_KEY"),
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "cerebras",
+        name: "Cerebras",
+        description: "Cerebras — wafer-scale fast inference",
+        category: ProviderCategory::Popular,
+        default_base_url: Some("https://api.cerebras.ai/v1"),
+        api_key_env_var: Some("CEREBRAS_API_KEY"),
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "deepinfra",
+        name: "DeepInfra",
+        description: "DeepInfra — hosted open models",
+        category: ProviderCategory::Popular,
+        default_base_url: Some("https://api.deepinfra.com/v1/openai"),
+        api_key_env_var: Some("DEEPINFRA_API_KEY"),
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "lmstudio",
+        name: "LM Studio",
+        description: "LM Studio — local server on http://localhost:1234",
+        category: ProviderCategory::Local,
+        default_base_url: Some("http://localhost:1234/v1"),
+        api_key_env_var: None,
+        requires_api_key: false,
+    },
+    ProviderMetadata {
+        id: "ollama",
+        name: "Ollama",
+        description: "Ollama — local models on http://localhost:11434",
+        category: ProviderCategory::Local,
+        default_base_url: Some("http://localhost:11434/v1"),
+        api_key_env_var: None,
+        requires_api_key: false,
+    },
+    ProviderMetadata {
         id: "xiaomi",
         name: "Xiaomi (Pay-as-you-go)",
         description: "Xiaomi MiMo Global — pay-as-you-go, mimo-v2-flash etc.",
@@ -239,6 +356,23 @@ pub fn provider_requires_manual_base_url(provider_id: &str) -> bool {
 
 pub fn provider_forces_openai_compatible(provider_id: &str) -> bool {
     provider_openai_compatible_mode(provider_id).unwrap_or(false)
+}
+
+/// 这些 provider 是"聚合网关"：它们自己提供 base_url，模型名里又常带别家
+/// 厂商前缀（OpenRouter 上是 `deepseek/deepseek-r1`、`anthropic/claude-...`
+/// 这种 `厂商/模型` 形式）。
+///
+/// 请求层必须以 provider 为准走通用兼容客户端，不能按模型名里的关键词去选
+/// 官方 SDK 分支 —— 那些分支不传 base_url，请求会直接飞到厂商官方地址，
+/// 网关配置和 key 一起失效。
+///
+/// 不含 `opencode`（Zen）：它的协议归属由模型名决定，走 `zen_protocol_for_model`
+/// 分流，且它内部同样按别家前缀区分端点。
+pub fn is_aggregator_provider(provider_id: &str) -> bool {
+    matches!(
+        canonical_provider_id(provider_id).as_deref(),
+        Some("openrouter")
+    )
 }
 
 /// 该 provider 是否强制走 OpenAI Chat Completions 协议。
@@ -404,19 +538,35 @@ pub fn normalize_provider_id(input: &str) -> Option<String> {
         return Some(p.id.to_string());
     }
 
-    // Common aliases and formatting differences
+    // Common aliases and formatting differences.
+    //
+    // 这里返回的每个 id 都必须在 `ALL_PROVIDERS` 里真实存在 —— 别名规范化成
+    // 一个查不到元数据的 id，调用方拿到的是"幽灵 provider"，既没有 base_url
+    // 也没有环境变量名。历史上 `openrouter` / `kimi-code` / `alibaba` /
+    // `bytedance` / `zhipu` / `lmstudio` 全是这种幽灵（`opencode` 也是，
+    // 在补上 provider 条目之前同样指向虚空）。
     let compact = raw.to_lowercase().replace([' ', '-', '_'], "");
     match compact.as_str() {
-        "lmstudio" => Some("lmstudio".to_string()),
         "openaicompatible" => Some("openai-compatible".to_string()),
         "anthropiccompatible" => Some("anthropic-compatible".to_string()),
-        "openrouter" => Some("openrouter".to_string()),
-        "kimicode" | "kimi" => Some("kimi-code".to_string()),
-        "qwen" | "alibabacloud" | "dashscope" => Some("alibaba".to_string()),
-        "doubao" | "bytedance" | "ark" => Some("bytedance".to_string()),
-        "glm" | "bigmodel" | "zhipuai" => Some("zhipu".to_string()),
+        "openrouter" | "or" => Some("openrouter".to_string()),
+        // Moonshot 官方 API（api.moonshot.cn）就叫 moonshot；"kimi-code" 是
+        // 另一个厂商的编码订阅端点，不要和它混为一谈。
+        "kimi" | "moonshot" => Some("moonshot".to_string()),
+        "qwen" | "alibabacloud" | "dashscope" | "aliyun" | "bailian" => {
+            Some("alibaba".to_string())
+        }
+        "doubao" | "bytedance" | "ark" | "volcengine" | "volces" => Some("bytedance".to_string()),
+        "glm" | "bigmodel" | "zhipuai" | "zhipu" | "chatglm" => Some("zhipu".to_string()),
         "opencode" | "opencodezen" | "zen" => Some("opencode".to_string()),
         "xiaomi" | "mimo" | "milm" => Some("xiaomi".to_string()),
+        "siliconflow" | "silicon" => Some("siliconflow".to_string()),
+        "together" | "togetherai" => Some("together".to_string()),
+        "fireworks" | "fireworksai" | "fw" => Some("fireworks".to_string()),
+        "cerebras" | "cerebrasai" => Some("cerebras".to_string()),
+        "deepinfra" => Some("deepinfra".to_string()),
+        "groq" | "groqcloud" => Some("groq".to_string()),
+        "lmstudio" | "lmst" => Some("lmstudio".to_string()),
         _ => None,
     }
 }
@@ -675,6 +825,108 @@ mod tests {
         let vars = api_key_env_candidates("opencode");
         assert!(vars.contains(&"OPENCODE_API_KEY"));
         assert!(vars.contains(&"OPENCODE_ZEN_API_KEY"));
+    }
+
+    /// 别名必须规范化到**真实存在**的 provider。
+    ///
+    /// 回归点：别名表里曾经有一串指向虚空的 id —— `openrouter`、`kimi-code`、
+    /// `alibaba`、`bytedance`、`zhipu`、`lmstudio` 全都不在 `ALL_PROVIDERS` 里，
+    /// 规范化"成功"却拿到一个没有 base_url、没有 key 环境变量名的幽灵 provider
+    /// （`opencode` 当初也是这样）。逐个断言元数据真的查得到。
+    #[test]
+    fn every_alias_resolves_to_a_registered_provider() {
+        let aliases = [
+            "openrouter", "or", "OpenRouter", "groq", "moonshot", "kimi", "zhipu", "glm",
+            "bigmodel", "zhipuai", "chatglm", "alibaba", "qwen", "dashscope", "aliyun",
+            "bailian", "bytedance", "ark", "doubao", "volcengine", "volces", "siliconflow",
+            "silicon", "together", "togetherai", "fireworks", "fireworksai", "fw", "cerebras",
+            "cerebrasai", "deepinfra", "lmstudio", "lmst", "opencode", "opencodezen", "zen",
+            "xiaomi", "mimo", "milm", "openai-compatible", "anthropic-compatible",
+        ];
+        for alias in aliases {
+            let id = normalize_provider_id(alias)
+                .unwrap_or_else(|| panic!("alias {alias} should normalize to a provider id"));
+            assert!(
+                get_provider_by_id(&id).is_some(),
+                "alias {alias} normalized to {id}, which is not registered"
+            );
+        }
+    }
+
+    /// 新增网关的 base_url 与 key 环境变量。端点都实测过（`GET {base}/models`
+    /// 返回 401 说明端点存在，只差 key）。
+    #[test]
+    fn the_new_gateways_carry_their_verified_endpoints() {
+        let expected: &[(&str, &str, &str)] = &[
+            ("openrouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
+            ("groq", "https://api.groq.com/openai/v1", "GROQ_API_KEY"),
+            ("together", "https://api.together.xyz/v1", "TOGETHER_API_KEY"),
+            ("fireworks", "https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY"),
+            ("cerebras", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY"),
+            ("deepinfra", "https://api.deepinfra.com/v1/openai", "DEEPINFRA_API_KEY"),
+            ("siliconflow", "https://api.siliconflow.cn/v1", "SILICONFLOW_API_KEY"),
+            ("moonshot", "https://api.moonshot.cn/v1", "MOONSHOT_API_KEY"),
+            ("zhipu", "https://open.bigmodel.cn/api/paas/v4", "ZHIPUAI_API_KEY"),
+            (
+                "alibaba",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "DASHSCOPE_API_KEY",
+            ),
+            ("bytedance", "https://ark.cn-beijing.volces.com/api/v3", "ARK_API_KEY"),
+        ];
+        for (id, base_url, env_var) in expected {
+            let meta = get_provider_by_id(id).unwrap_or_else(|| panic!("{id} must be registered"));
+            assert_eq!(meta.default_base_url, Some(*base_url), "provider {id} base_url");
+            assert_eq!(meta.api_key_env_var, Some(*env_var), "provider {id} env var");
+            assert!(meta.requires_api_key, "provider {id} needs a key");
+            // base_url 也要能真正解析出来，否则配置完仍然发不出去。
+            assert_eq!(
+                resolve_provider_base_url(id, None).as_deref(),
+                Some(*base_url),
+                "provider {id} must resolve its default base_url"
+            );
+        }
+    }
+
+    /// 本地网关不要 key —— 它们通常连鉴权都不校验。
+    #[test]
+    fn local_gateways_do_not_require_a_key() {
+        for (id, base_url) in [
+            ("lmstudio", "http://localhost:1234/v1"),
+            ("ollama", "http://localhost:11434/v1"),
+        ] {
+            let meta = get_provider_by_id(id).unwrap_or_else(|| panic!("{id} must be registered"));
+            assert!(!meta.requires_api_key, "{id} is local, no key needed");
+            assert!(meta.api_key_env_var.is_none(), "{id} has no key env var");
+            assert_eq!(meta.default_base_url, Some(base_url), "{id} base_url");
+        }
+    }
+
+    /// Zen 走自己的按模型名分流，不算聚合网关 —— 否则会被通用兼容分支抢走，
+    /// claude-* 就会掉进 /chat/completions。
+    #[test]
+    fn zen_is_not_treated_as_a_plain_aggregator() {
+        assert!(is_aggregator_provider("openrouter"));
+        assert!(!is_aggregator_provider("opencode"));
+        assert!(!is_aggregator_provider("anthropic"));
+        assert!(!is_aggregator_provider("openai-compatible"));
+    }
+
+    /// 固定网关地址的 provider 不该要求用户手填 base_url。
+    #[test]
+    fn gateways_with_a_known_endpoint_do_not_ask_for_a_manual_base_url() {
+        for id in [
+            "openrouter", "groq", "together", "fireworks", "cerebras", "deepinfra",
+            "siliconflow", "moonshot", "zhipu", "alibaba", "bytedance", "opencode",
+        ] {
+            assert!(
+                !provider_requires_manual_base_url(id),
+                "{id} has a default base_url, don't ask the user to type it"
+            );
+        }
+        // 手填端点的两个仍然要问。
+        assert!(provider_requires_manual_base_url("openai-compatible"));
+        assert!(provider_requires_manual_base_url("anthropic-compatible"));
     }
 
     /// 拿 Zen 线上真实的模型 ID 快照跑一遍路由。
