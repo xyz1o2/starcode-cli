@@ -35,6 +35,56 @@ use crate::ui::utils::text::{
     should_save_tool_output,
 };
 
+/// 把一份模型列表灌进 UI state。
+///
+/// `StreamMessage::ModelsList` 和"打开面板前先读磁盘缓存"两条路径共用，
+/// 避免缓存命中时和网络返回时渲染出不一致的状态。
+pub(crate) fn apply_models_to_state(
+    state: &mut ChatState,
+    models: &[crate::types::ModelInfo],
+    cache_age_secs: Option<u64>,
+) {
+    state.available_models = models.iter().map(|m| m.id.clone()).collect();
+    state.available_models_info = models.to_vec(); // 保存完整的模型信息
+    state.set_models_list_age(cache_age_secs);
+    state.model_provider_map.clear();
+    for m in models {
+        if !m.provider.is_empty() {
+            state
+                .model_provider_map
+                .insert(m.id.clone(), m.provider.clone());
+        }
+    }
+    // 如果当前有模型，更新其 thinking 支持状态
+    if !state.current_model.is_empty() {
+        state.current_model_supports_thinking = models
+            .iter()
+            .find(|m| m.id == state.current_model)
+            .and_then(|m| m.supports_thinking);
+    }
+}
+
+/// 打开模型面板前，先用磁盘缓存把列表填上，让面板立刻有内容可显示。
+///
+/// 之前列表为空时 UI 先画 "Loading models..."，再等 `ListModels` 回来 ——
+/// 可这条请求走的是便宜路径（`force = false`），命中磁盘缓存时几乎立刻返回，
+/// 于是用户每次开面板都被闪一下假 loading，明明不需要任何网络等待。
+///
+/// 这里在发请求之前同步读一次磁盘缓存（纯文件读，不阻塞），面板打开即有真实
+/// 列表；随后那条 `ListModels` 仍照发，拿到新数据再覆盖。
+///
+/// 返回是否命中。已有列表时不做任何事（用户刚拉过的新列表比旧缓存新）。
+pub(crate) fn seed_models_from_disk_cache(state: &mut ChatState, provider_id: &str) -> bool {
+    if !state.available_models.is_empty() {
+        return false;
+    }
+    let Some(hit) = crate::agent::model_cache::load(provider_id) else {
+        return false;
+    };
+    apply_models_to_state(state, &hit.models, Some(hit.age_secs));
+    true
+}
+
 /// 结束 entry 的 streaming 状态，并冻结 thinking 计时器。
 /// 统一处理所有 is_streaming = false 的场景，避免遗漏 reasoning_finished_elapsed_ms。
 fn finalize_entry_streaming(state: &mut ChatState, idx: usize) {
@@ -909,24 +959,7 @@ pub async fn handle_stream_update(
             models,
             cache_age_secs,
         } => {
-            state.available_models = models.iter().map(|m| m.id.clone()).collect();
-            state.available_models_info = models.clone(); // 保存完整的模型信息
-            state.set_models_list_age(cache_age_secs);
-            state.model_provider_map.clear();
-            for m in &models {
-                if !m.provider.is_empty() {
-                    state
-                        .model_provider_map
-                        .insert(m.id.clone(), m.provider.clone());
-                }
-            }
-            // 如果当前有模型，更新其 thinking 支持状态
-            if !state.current_model.is_empty() {
-                state.current_model_supports_thinking = models
-                    .iter()
-                    .find(|m| m.id == state.current_model)
-                    .and_then(|m| m.supports_thinking);
-            }
+            apply_models_to_state(state, &models, cache_age_secs);
             if let Some(pid) = state.pending_model_provider.take() {
                 let remembered_model = state.pending_provider_selected_model.take();
 
@@ -2276,6 +2309,86 @@ fn handle_content_message(state: &mut ChatState, message_id: u64, content: &str)
 mod tests {
     use super::*;
     use crate::types::StarToolCallFunction;
+
+    /// 打开模型面板前应先用磁盘缓存把列表填上，而不是先画一个假 loading。
+    ///
+    /// 回归点：列表为空时 UI 立刻置 `awaiting_models`，用户每次开面板都被闪一下
+    /// "Loading models..."，可 `ListModels { force: false }` 走的是便宜路径，
+    /// 命中磁盘缓存时几乎立刻返回 —— 那个转圈状态并不代表任何真实的网络等待。
+    #[test]
+    fn seeding_from_disk_cache_fills_the_list_before_any_request() {
+        let path = std::env::temp_dir().join(format!(
+            "star-seed-models-{}-seedtest.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let cached = vec![
+            crate::types::ModelInfo::new("space-bunny-free", "opencode"),
+            crate::types::ModelInfo::new("deepseek-v4-pro", "opencode"),
+        ];
+        crate::agent::model_cache::save_to_path(&path, "opencode", &cached);
+
+        let mut state = ChatState::new();
+        assert!(
+            state.available_models.is_empty(),
+            "precondition: list starts empty"
+        );
+
+        let hit = crate::agent::model_cache::load_from_path(&path, "opencode")
+            .expect("cache written a moment ago must load");
+        apply_models_to_state(&mut state, &hit.models, Some(hit.age_secs));
+
+        assert_eq!(
+            state.available_models,
+            vec!["space-bunny-free".to_string(), "deepseek-v4-pro".to_string()],
+            "panel must be able to render a real list immediately"
+        );
+        assert_eq!(
+            state.model_provider_map.get("deepseek-v4-pro"),
+            Some(&"opencode".to_string()),
+            "provider map must be populated too"
+        );
+        // 有缓存可显示时就不该再标 loading，否则又会闪一下假转圈；
+        // 面板上的 "List cached Xh ago" 也依赖这个年龄。
+        assert!(
+            state.models_list_age_secs().is_some(),
+            "cache age must be recorded so the panel can say how old the list is"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 已有列表时不该被磁盘缓存覆盖 —— 用户刚拉过的新列表比旧缓存新。
+    #[test]
+    fn seeding_never_overwrites_an_existing_list() {
+        let path = std::env::temp_dir().join(format!(
+            "star-seed-models-{}-nooverwrite.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        crate::agent::model_cache::save_to_path(
+            &path,
+            "opencode",
+            &[crate::types::ModelInfo::new("stale-model", "opencode")],
+        );
+
+        let mut state = ChatState::new();
+        apply_models_to_state(
+            &mut state,
+            &[crate::types::ModelInfo::new("fresh-model", "opencode")],
+            None,
+        );
+
+        assert!(
+            !seed_models_from_disk_cache(&mut state, "opencode"),
+            "seeding must report no-op when a list is already present, \
+             and must not consult the real user cache file in a test"
+        );
+        assert_eq!(state.available_models, vec!["fresh-model".to_string()]);
+
+        let _ = std::fs::remove_file(&path);
+    }
 
     fn agent_tool_call() -> StarToolCall {
         StarToolCall {

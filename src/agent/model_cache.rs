@@ -144,14 +144,28 @@ pub fn load(provider_id: &str) -> Option<CachedModels> {
     hit
 }
 
-/// 写入某个 provider 的缓存。失败只记日志 —— 缓存写不进去不该影响模型切换。
-pub fn save(provider_id: &str, models: &[ModelInfo]) {
-    if let Err(e) = save_to(&cache_path(), provider_id, models) {
+/// 同 `load`，但缓存文件路径由调用方指定。
+///
+/// 给"先用缓存填 UI"这类路径用：那里需要在发请求之前同步读一次，
+/// 测试则可以指向临时文件，不必去动 `STAR_MODEL_CACHE_PATH` 这个进程级
+/// 环境变量（并行跑测试时会互相串味）。
+pub fn load_from_path(path: &Path, provider_id: &str) -> Option<CachedModels> {
+    load_from(path, provider_id)
+}
+
+/// 同 `save`，但缓存文件路径由调用方指定。
+pub fn save_to_path(path: &Path, provider_id: &str, models: &[ModelInfo]) {
+    if let Err(e) = save_to(path, provider_id, models) {
         crate::utils::logging::append_debug_log_line(&format!(
             "[ModelCache] failed to persist model list: {}",
             e
         ));
     }
+}
+
+/// 写入某个 provider 的缓存。失败只记日志 —— 缓存写不进去不该影响模型切换。
+pub fn save(provider_id: &str, models: &[ModelInfo]) {
+    save_to_path(&cache_path(), provider_id, models);
 }
 
 /// 删除整个缓存文件（`/model` 的显式刷新不需要它，留给排查问题时用）。

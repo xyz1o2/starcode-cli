@@ -611,12 +611,16 @@ async fn submit_provider_form(
     };
 
     if model.is_empty() {
-        // 自动获取模型列表：先标 loading，面板立刻能开，不用等网络
-        state.awaiting_models = true;
+        // 自动获取模型列表：面板立刻能开，不用等网络。
         state.available_models.clear();
         state.available_models_info.clear();
         state.model_provider_map.clear();
         state.current_model.clear();
+        // 先试磁盘缓存：这个 provider 以前拉过的话，面板打开就是完整列表，
+        // 既不用闪 "Loading models..."，也不必空等。缓存按 provider 分桶，
+        // 所以切回以前用过的 provider 是秒开。
+        let seeded = crate::ui::services::stream::seed_models_from_disk_cache(state, &provider_id);
+        state.awaiting_models = !seeded;
         let _ = agent_tx
             .send(AgentRequest::ListModels { force: false })
             .await;
@@ -626,8 +630,14 @@ async fn submit_provider_form(
             state,
             0,
             &format!(
-                "{} provider '{}' — fetching model list...",
-                verb, display_name
+                "{} provider '{}' — {}",
+                verb,
+                display_name,
+                if seeded {
+                    "model list restored from cache"
+                } else {
+                    "fetching model list..."
+                }
             ),
         );
     } else {
@@ -745,6 +755,15 @@ pub(crate) async fn execute_palette_action(
             state.palette_history.push(state.palette_mode.clone());
 
             if matches!(mode, PaletteMode::Model) && state.available_models.is_empty() {
+                // 先用磁盘缓存把列表填上：面板立刻能显示真实模型，
+                // 不会先闪一下 "Loading models..." 再等一个多半会命中
+                // 缓存的请求回来。随后那条请求照发，拿到新数据再覆盖。
+                let pid = state
+                    .current_provider_id
+                    .clone()
+                    .unwrap_or_else(|| crate::agent::model_cache::DEFAULT_BUCKET.to_string());
+                crate::ui::services::stream::seed_models_from_disk_cache(state, &pid);
+
                 let _ = agent_tx
                     .send(AgentRequest::ListModels { force: false })
                     .await;
@@ -768,7 +787,18 @@ pub(crate) async fn execute_palette_action(
         }
         PaletteAction::ShowModelMenu => {
             if state.available_models.is_empty() {
-                state.awaiting_models = true;
+                // 同上：先吃磁盘缓存，避免假 loading。
+                let pid = state
+                    .current_provider_id
+                    .clone()
+                    .unwrap_or_else(|| crate::agent::model_cache::DEFAULT_BUCKET.to_string());
+                let seeded =
+                    crate::ui::services::stream::seed_models_from_disk_cache(state, &pid);
+                // 只有缓存也没能给出列表时才标 loading —— 有缓存可显示时
+                // 面板已经是完整列表，不该再显示"正在获取"。
+                if !seeded {
+                    state.awaiting_models = true;
+                }
                 let _ = agent_tx
                     .send(AgentRequest::ListModels { force: false })
                     .await;
@@ -2185,7 +2215,14 @@ pub async fn handle_key_event(
                     reset_main_textarea(state);
 
                     if state.available_models.is_empty() {
-                        state.awaiting_models = true;
+                        // 先吃磁盘缓存：面板直接显示真实列表，不闪假 loading。
+                        let pid = state
+                            .current_provider_id
+                            .clone()
+                            .unwrap_or_else(|| crate::agent::model_cache::DEFAULT_BUCKET.to_string());
+                        let seeded =
+                            crate::ui::services::stream::seed_models_from_disk_cache(state, &pid);
+                        state.awaiting_models = !seeded;
                         // Trigger model list fetch
                         if let Err(_e) = agent_tx
                             .send(AgentRequest::ListModels { force: false })

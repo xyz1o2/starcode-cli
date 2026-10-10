@@ -146,10 +146,18 @@ pub async fn handle_command(
         "model" | "models" => match args.first().map(|s| s.as_str()) {
             None => {
                 ctx.state.palette_history.clear();
+                // 先吃磁盘缓存再开面板：列表立刻可见，也不闪假 loading。
+                let pid = ctx
+                    .state
+                    .current_provider_id
+                    .clone()
+                    .unwrap_or_else(|| crate::agent::model_cache::DEFAULT_BUCKET.to_string());
+                let seeded =
+                    crate::ui::services::stream::seed_models_from_disk_cache(ctx.state, &pid);
+                ctx.state.awaiting_models = !seeded;
                 ctx.state
                     .open_palette(crate::ui::state::palette::PaletteMode::Model);
                 if ctx.state.available_models.is_empty() {
-                    ctx.state.awaiting_models = true;
                     let _ = ctx
                         .agent_tx
                         .send(crate::runtime::messages::AgentRequest::ListModels { force: false })
