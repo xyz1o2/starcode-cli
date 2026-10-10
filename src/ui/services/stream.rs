@@ -994,6 +994,19 @@ pub async fn handle_stream_update(
                 }
             }
             state.awaiting_models = false;
+            // 自动开面板前先确认用户没有在别处输入。
+            //
+            // 此前只要模型列表回来了就无条件 open_palette(Model)，会把用户正填的
+            // API Key 输入框（Modal::InputModal）从栈顶顶掉却不走 exit_input_modal：
+            // 面板画出来了，但 handle_modal_key 见到 show_input_modal 就让位，
+            // handle_input_modal 继续吞掉所有按键 —— 「面板看得见、却什么都按不动」。
+            // 同理，已开着 Provider 页时也不该被异步响应换成 Model 页。
+            //
+            // 刻意**不**用 has_overlay_active()：它把 show_command_hints 也算进去，
+            // 而打 `/model` 时命令补全浮层必然是开着的，会把正常流程一起挡掉。
+            let user_is_elsewhere = !state.modal_stack.is_empty()
+                || state.show_input_modal
+                || state.is_awaiting_confirmation;
             // If Palette is open in Model mode, refresh the list
             if state.is_palette_open()
                 && matches!(
@@ -1010,7 +1023,7 @@ pub async fn handle_stream_update(
                 );
             }
             // Fallback: models arrived, open palette in Model mode for selection
-            else if !state.available_models.is_empty() {
+            else if !state.available_models.is_empty() && !user_is_elsewhere {
                 state.palette_history.clear();
                 state.open_palette(crate::ui::state::palette::PaletteMode::Model);
                 state.palette_items = crate::ui::components::palette::get_model_palette_items(
@@ -1156,36 +1169,15 @@ pub async fn handle_stream_update(
                 crate::types::ApprovalMode::Plan => i18n::t("ui.mode.plan", "Plan", "Plan"),
                 crate::types::ApprovalMode::Yolo => i18n::t("ui.mode.yolo", "YOLO", "YOLO"),
             };
-            let mode_desc = match mode {
-                crate::types::ApprovalMode::Default => i18n::t(
-                    "ui.mode.build.desc",
-                    "Build mode: confirm dangerous actions; manage tasks with Ctrl+T or /tasks",
-                    "Build mode: confirm dangerous actions; manage tasks with Ctrl+T or /tasks",
-                ),
-                crate::types::ApprovalMode::Plan => i18n::t(
-                    "ui.mode.plan.desc",
-                    "Plan mode: read-only research; manage plans with /tasks or Ctrl+T",
-                    "Plan mode: read-only research; manage plans with /tasks or Ctrl+T",
-                ),
-                crate::types::ApprovalMode::Yolo => i18n::t(
-                    "ui.mode.yolo.desc",
-                    "YOLO mode: all actions auto-run (dangerous!)",
-                    "YOLO mode: all actions auto-run (dangerous!)",
-                ),
-            };
-            state.chat_history.push(
-                ChatEntry::assistant(format!(
-                    "{}{}{}",
-                    i18n::t(
-                        "ui.approval.mode_changed.label",
-                        "Status: Approval mode changed to: ",
-                        "Status: Approval mode changed to: ",
-                    ),
-                    mode_name,
-                    mode_desc
-                ))
-                .with_streaming(false),
-            );
+            // 这里**不再**往 chat_history 推一条 assistant 条目。
+            //
+            // 之前推的那条是 `"...changed to: " + mode_name + mode_desc`，而
+            // `mode_desc` 本身又以 "Build mode: " 开头，于是渲染出来是
+            // `...changed to: BuildBuild mode: confirm dangerous actions; ...`
+            // —— 模式名重复，且整条近 80 字符，压在欢迎抬头下面很占版面。
+            //
+            // 模式是持续状态而不是一次对话，底部状态栏已经一直在显示它
+            // （见下面的 emit_status_text），聊天区再留一条纯属重复。
             emit_status_text(
                 state,
                 0,

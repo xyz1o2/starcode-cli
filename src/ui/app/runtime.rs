@@ -470,6 +470,31 @@ fn flush_input_batch(state: &mut ChatState, buf: &mut String) {
     }
 }
 
+/// 空闲时的周期重绘节拍：1Hz。
+///
+/// 只用来兜住「没有事件但 UI 仍会随时间变化」的情况 —— 状态栏耗时秒数、令牌
+/// 告警衰减、任务面板的 `reload_if_stale()` fs 轮询。真实的事件驱动重绘不受它影响。
+const PERIODIC_TICK_INTERVAL: Duration = Duration::from_millis(1000);
+
+/// 当前是否有动画在跑，决定 `animation_tick` 要不要推进。
+///
+/// `animation_tick` 驱动 spinner 字形、shimmer 光带、颜色脉动、工具调用 ● 闪烁、
+/// 任务面板 spinner（见 `components/status_line/mod.rs`、`tool_render.rs`、
+/// `task_panel.rs`）。只要这一帧它会变，帧内容就必然变，dirty 检查就永远不成立 ——
+/// 所以空闲时必须**停住**这个计数器，否则「没变化就不重绘」形同虚设。
+///
+/// 任务面板可见**不算**在动画：它的 spinner 由 `agent_active` 单独门控
+/// （`task_panel.rs`），agent 停下时渲染的是静止的 `●`，与 `animation_tick` 无关。
+/// 计进来只会让开着面板的空闲会话重新变成 30Hz 重绘。
+fn is_animating(state: &ChatState) -> bool {
+    // 处理中：状态栏 spinner + shimmer + 颜色脉动 + thinking 透明度
+    state.is_processing
+        // 流式输出中：token 计数脉动、工具调用 ● 闪烁
+        || state.is_streaming
+        // 平滑滚动的惯性尚未停下
+        || state.scroll_velocity.abs() > f64::EPSILON
+}
+
 #[allow(unused_assignments)]
 pub async fn run_ui_loop(
     terminal: &mut RatatuiTerminal<CrosstermBackend<std::io::Stdout>>,
@@ -541,9 +566,18 @@ pub async fn run_ui_loop(
     let mut last_stream_rate_check = Instant::now();
     let mut stream_msgs_per_sec: f64 = 0.0;
 
-    // Track layout changes for terminal clear (only on task panel toggle)
-    let mut last_scroll = state.scroll;
-    let mut last_task_panel_visible = state.task_panel.is_visible;
+    // 尾部 async 等待期间收到的输入事件。空闲时循环改为「阻塞等输入」而不是
+    // 空转轮询（见循环末尾），被唤醒时先把事件存这里，下一轮开头统一处理。
+    let mut pending_key_events: std::collections::VecDeque<crossterm::event::Event> =
+        std::collections::VecDeque::new();
+
+    // 周期重绘节拍（1Hz）。空闲时「无事件」不代表「无变化」——状态栏的耗时秒数、
+    // 令牌告警的衰减、任务面板的 fs 轮询都随时间走。1Hz 足够，且把空屏重绘
+    // 从 30Hz 降到 1Hz。
+    let mut last_periodic_tick = Instant::now();
+    // 键盘通道一旦关闭，`recv()` 会立刻返回 None —— 必须置位改走定时轮询，
+    // 否则循环变成满载自旋。见循环末尾的等待逻辑。
+    let mut key_channel_closed = false;
 
     // Initial load of configured providers and current model (non-blocking)
     let _ = agent_tx.try_send(AgentRequest::LoadConfiguredProviders);
@@ -571,12 +605,28 @@ pub async fn run_ui_loop(
         // Drain up to 64 events per iteration to prevent infinite loops on rapid input.
         const MAX_KEY_EVENTS_PER_TICK: usize = 64;
         let mut key_event_count = 0;
-        while key_event_count < MAX_KEY_EVENTS_PER_TICK {
-            match key_rx.try_recv() {
-                Ok(ev) => {
-                    key_event_count += 1;
-                    let ev_type = std::mem::discriminant(&ev);
-                    match ev {
+        loop {
+            if key_event_count >= MAX_KEY_EVENTS_PER_TICK {
+                break;
+            }
+            // 先取尾部 async 等待时已经收到的事件，再取键盘线程新投递的。
+            let ev = match pending_key_events.pop_front() {
+                Some(ev) => ev,
+                None => match key_rx.try_recv() {
+                    Ok(ev) => ev,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        crate::utils::logging::append_debug_log_line(
+                            "[KEY_RX] channel disconnected",
+                        );
+                        break;
+                    }
+                },
+            };
+            {
+                key_event_count += 1;
+                let ev_type = std::mem::discriminant(&ev);
+                match ev {
                         Event::Key(key) => {
                             if key.kind != KeyEventKind::Release {
                                 let (norm_code, norm_mods) = normalize_key(key.code, key.modifiers);
@@ -654,13 +704,7 @@ pub async fn run_ui_loop(
                         _ => {}
                     }
                 }
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    crate::utils::logging::append_debug_log_line("[KEY_RX] channel disconnected");
-                    break;
-                }
             }
-        }
 
         // Local Quick Open searches never await the modal key handler. Drain their
         // completions here so a slow `fd` walk cannot hold up terminal input.
@@ -672,21 +716,17 @@ pub async fn run_ui_loop(
             needs_redraw = true;
         }
 
-        // Only clear terminal on layout changes (task panel toggle), not on scroll.
-        // The buffer clearing in render_page (cell.reset()) handles CJK ghosting.
-        // terminal.clear() on scroll causes flickering.
-        let task_panel_changed = state.task_panel.is_visible != last_task_panel_visible;
-        if task_panel_changed {
-            // Use try-clear to avoid crashing on terminal errors
-            if let Err(e) = terminal.clear() {
-                crate::utils::logging::append_debug_log_line(&format!(
-                    "[UI] terminal.clear() failed: {}",
-                    e
-                ));
-            }
-        }
-        last_scroll = state.scroll;
-        last_task_panel_visible = state.task_panel.is_visible;
+        // 不再在任务面板显隐时 terminal.clear()。
+        //
+        // 1. 闪屏：ratatui 的 Terminal::clear() 发 ClearType::All 并重置后缓冲，
+        //    下一次 draw 要重绘 100% 的 cell。而 task_panel.is_visible 是在渲染过程中
+        //    被改的（app/mod.rs 的 auto_show_if_needed / check_auto_hide），所以每条
+        //    TodoWrite、每次完成 5 秒后的自动隐藏，都会全屏黑闪一次。
+        // 2. 卡顿：Terminal::clear() 内部先发 DSR(ESC[6n) 阻塞等光标位置回复，而键盘
+        //    读取线程此刻正在同一个 stdin 上 crossterm::event::read()，回复会被它吃掉，
+        //    于是 DSR 要等 crossterm 超时（最长约 2 秒）。
+        //
+        // CJK 残影原本就是靠 render_page 里的 cell.reset() 处理的，不依赖这一步。
 
         // Pet the watchdog at the start of each loop iteration
         watchdog.pet();
@@ -822,7 +862,31 @@ pub async fn run_ui_loop(
         } else {
             target_framerate
         };
-        if needs_redraw || last_draw.elapsed() > framerate {
+
+        // ── 重绘门控 ──
+        //
+        // 此前条件是 `needs_redraw || last_draw.elapsed() > framerate`，而循环尾部
+        // 会睡满剩余帧预算，所以下一轮 `elapsed() > framerate` **恒为真** ——
+        // `needs_redraw` 形同虚设，空屏也以 30fps 全量重绘。加上 animation_tick
+        // 曾在 draw_ui 内部自增（帧内容必变），这就是闪屏与满载 CPU 的来源。
+        //
+        // 现在只在三种情况下重绘：
+        //   1. needs_redraw —— 有输入/流式消息/状态变更（由各处理分支置位）
+        //   2. 有动画在跑   —— animation_tick 会推进，帧内容必然变
+        //   3. 1Hz 节拍到期 —— 覆盖纯时间驱动的 UI（耗时秒数、告警衰减、fs 轮询）
+        let animating = is_animating(state);
+        if last_periodic_tick.elapsed() >= PERIODIC_TICK_INTERVAL {
+            last_periodic_tick = Instant::now();
+            needs_redraw = true;
+        }
+        if animating {
+            // 动画时钟由事件循环推进，不再由 draw_ui 自增。空闲时停住，
+            // 帧内容才会真正稳定下来。
+            state.animation_tick = state.animation_tick.wrapping_add(1);
+            needs_redraw = true;
+        }
+
+        if needs_redraw {
             // Ctrl+L clear screen request
             if state.request_clear_screen {
                 terminal.clear()?;
@@ -878,14 +942,37 @@ pub async fn run_ui_loop(
             }
         }
 
-        // ── Frame budget sleep ──
-        // Sleep for the remaining frame budget. This yields CPU to the tokio
-        // runtime and the keyboard reader thread, preventing busy-waiting.
-        let elapsed_since_draw = last_draw.elapsed();
-        if elapsed_since_draw < framerate {
-            let sleep_duration = framerate - elapsed_since_draw;
-            // Use tokio::time::sleep so the runtime can schedule other tasks
-            tokio::time::sleep(sleep_duration).await;
+        // ── 等待下一次输入 / 下一帧 ──
+        //
+        // 空闲且无动画时改为**阻塞等输入事件**，而不是睡一个帧预算再空转一轮 ——
+        // 后者配合「恒为真的重绘门」等于 30Hz 满载轮询。
+        // 有动画时仍按帧预算节流，让 spinner 保持目标帧率。
+        let wait = if animating {
+            framerate.saturating_sub(last_draw.elapsed())
+        } else {
+            PERIODIC_TICK_INTERVAL.saturating_sub(last_periodic_tick.elapsed())
+        };
+        if !wait.is_zero() {
+            if key_channel_closed {
+                // 键盘线程已死：recv() 会立刻返回 None，不睡就是满载自旋。
+                // 这里继续轮询，好让上面的 key_thread_alive 检查把
+                // 「Input thread crashed」提示显示出来，让用户自己决定何时退出。
+                tokio::time::sleep(wait).await;
+            } else {
+                match tokio::time::timeout(wait, key_rx.recv()).await {
+                    // 期间有输入：存下来，下一轮开头处理。
+                    Ok(Some(ev)) => pending_key_events.push_back(ev),
+                    // 通道关闭（键盘线程死了）：不退出，退回定时轮询，
+                    // 否则下面每轮 recv() 立刻返回 None 会变成满载自旋。
+                    Ok(None) => {
+                        crate::utils::logging::append_debug_log_line(
+                            "[KEY_RX] channel closed, falling back to timed polling",
+                        );
+                        key_channel_closed = true;
+                    }
+                    Err(_) => {} // 超时，正常到期
+                }
+            }
         }
     }
 }

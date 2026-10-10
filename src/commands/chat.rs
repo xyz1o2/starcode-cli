@@ -95,7 +95,7 @@ async fn resume(ctx: CommandContext<'_>, args: &[String]) -> CommandResult {
             return Ok(());
         }
         ctx.state.close_palette();
-        ctx.state.show_session_menu = true;
+        ctx.state.open_session_menu();
         ctx.state.available_sessions = sessions;
         ctx.state.selected_session_index = 0;
         return Ok(());

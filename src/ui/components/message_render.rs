@@ -5,6 +5,13 @@ use crate::types::ChatEntryType;
 use crate::ui::state::ChatState;
 use crate::ui::themes::theme::Theme;
 
+/// thinking 展开态正文的最大折行宽度（显示列）。
+///
+/// 此前正文按 `终端宽 - 2` 折行，宽屏下一行能拉到 200+ 列：眼睛从行首扫到行尾
+/// 的距离超出单行可读范围，读一段话要来回横跳，整块读不下去。封顶后宽屏上正文
+/// 稳定在 ~100 列，右侧留白；终端本身比它窄时仍按终端宽折行，窄窗口行为不变。
+const MAX_CONTENT_WIDTH: usize = 100;
+
 /// 渲染非工具条目（assistant / user）的文本块。
 ///
 /// `is_sub_transcript`：agent 组展开视图里的子转录条目。thinking 折叠头一旦
@@ -119,14 +126,18 @@ pub(crate) fn render_non_tool_entry_blocks(
                             Span::styled(header_text, label_style),
                         ])]);
 
-                        // 内容：dim 色 + 缩进 2 列，不走 markdown 段落排版。
-                        // 思考文本（尤其中文模型）行间普遍用空行分隔，markdown
-                        // 会把每行渲染成独立段落、段间空一行，整块稀疏得没法看。
-                        // 这里改回逐行渲染：保留每个思考步骤一行及其前导缩进；
-                        // 长行折行时续行继承源行缩进，源空行不渲染，行间不额外加空行。
-                        // 行内标记（**粗体** 等）转样式；``` 围栏代码段走完整
-                        // 代码渲染（语法高亮 + 边框，与正文同一视觉语言）。
-                        let content_width = wrap_width.saturating_sub(2);
+                        // 内容：dim 色 + 缩进 2 列，逐行渲染不走 markdown 段落排版。
+                        //
+                        // 宽度上限：正文折行宽度此前直接吃满终端宽（`wrap_width` =
+                        // 终端宽 - 2），宽屏下一行能拉到 200+ 列，眼睛扫不到行尾，
+                        // 整块读不下去。这里封顶 `MAX_CONTENT_WIDTH`：终端比它窄时
+                        // 仍按终端宽折行，所以窄窗口行为不变，只是宽屏不再无限拉长。
+                        let content_width = wrap_width.min(MAX_CONTENT_WIDTH).saturating_sub(2);
+
+                        // 折行续行比首行多缩进 `HANGING_INDENT` 列：续行此前与源新行
+                        // 前缀完全相同（都是 2 空格），长行折行后看不出哪里是断点，
+                        // 读起来像一长条没有换行的面条。
+                        const HANGING_INDENT: &str = "  ";
                         let thinking_style = if is_streaming_now || cancelling {
                             Style::default()
                                 .fg(theme.primary)
@@ -137,12 +148,21 @@ pub(crate) fn render_non_tool_entry_blocks(
                         let mut thinking_lines: Vec<Line<'static>> = Vec::new();
                         let mut fence_lang: Option<String> = None;
                         let mut fence_buf: Vec<String> = Vec::new();
+                        let mut pending_blank = false;
                         for raw_line in reasoning_display.lines() {
                             let line = raw_line.trim_end();
 
                             // ``` 围栏：开段记语言，闭段整块渲染；围栏内的行
                             // 攒进 buffer，不做行内 markdown 解析
                             if let Some(rest) = line.trim_start().strip_prefix("```") {
+                                // 延迟补空行：连续源空行折叠成一个，且只在下一行
+                                // 真的有内容时补 —— 块尾的空行因此不会被渲染出来
+                                if pending_blank {
+                                    pending_blank = false;
+                                    if !thinking_lines.is_empty() {
+                                        thinking_lines.push(Line::from(""));
+                                    }
+                                }
                                 if fence_lang.is_none() {
                                     fence_lang = Some(rest.trim().to_string());
                                 } else {
@@ -163,13 +183,27 @@ pub(crate) fn render_non_tool_entry_blocks(
                             }
 
                             if line.trim().is_empty() {
+                                // 源空行 = 段落分隔。只置标记、不立刻落行：真正的
+                                // 空行在"下一行有内容时"才补，这样尾部连续空行不会在
+                                // 块尾留下悬空行。围栏内的空行由上面的
+                                // `fence_lang.is_some()` 分支接管，不走这里。
+                                pending_blank = true;
                                 continue;
+                            }
+                            if pending_blank {
+                                pending_blank = false;
+                                if !thinking_lines.is_empty() {
+                                    thinking_lines.push(Line::from(""));
+                                }
                             }
                             let indent = line.len() - line.trim_start().len();
                             let indent_width =
                                 crate::ui::utils::render::display_width(&line[..indent]);
                             let first_width = content_width.saturating_sub(indent_width);
-                            let rest_width = first_width.max(2);
+                            // 续行要多让出 `HANGING_INDENT` 的宽度，否则加上缩进
+                            // 后会超出 `content_width`
+                            let rest_width =
+                                first_width.saturating_sub(HANGING_INDENT.len()).max(2);
                             let wrapped = crate::ui::utils::render::wrap_char_ranges(
                                 &line.chars().collect::<Vec<_>>(),
                                 first_width,
@@ -186,7 +220,7 @@ pub(crate) fn render_non_tool_entry_blocks(
                                 let prefix = if line_idx == 0 {
                                     "  ".to_string()
                                 } else {
-                                    format!("  {}", &line[..indent])
+                                    format!("  {}{}", &line[..indent], HANGING_INDENT)
                                 };
                                 let mut spans = vec![Span::raw(prefix)];
                                 spans.extend(thinking_line_spans(
@@ -638,14 +672,15 @@ mod tests {
         );
     }
 
-    /// 思考文本行间普遍是空行（`\n\n`）。markdown 段落排版会把每行变成独立
-    /// 段落、段间空一行，整块稀疏得没法看 —— 必须逐行渲染且行间无空行。
+    /// 源空行 = 段落分隔，必须保留一个：模型思考里的分步结构靠它区分，丢掉就
+    /// 塌成一堵没有层次的墙。但也不能照搬源空行数量 —— 连续多个空行折叠成一个，
+    /// 且不在块首/块尾留下悬空行。
     #[test]
-    fn thinking_lines_render_compactly_without_paragraph_gaps() {
+    fn thinking_lines_keep_paragraph_breaks_without_extra_padding() {
         let mut state = crate::ui::state::ChatState::new();
         let mut entry = crate::types::ChatEntry::assistant("");
         entry.reasoning_content =
-            Some("先分析用户的问题\n\n拆解成三个子任务\n\n逐个检查边界情况".to_string());
+            Some("先分析用户的问题\n\n拆解成三个子任务\n\n\n\n逐个检查边界情况\n\n".to_string());
         state.chat_history.push(entry);
         let idx = state.chat_history.len() - 1;
         state.expanded_thinking_indices.insert(idx);
@@ -662,12 +697,14 @@ mod tests {
             })
             .collect();
 
-        // 三行各自渲染，不合并（softbreak 不吞行）也不插空行
+        // 三行各一行、段间恰好一个空行；连续空行折叠，尾部空行不留
         assert_eq!(
             rendered,
             vec![
                 "  先分析用户的问题".to_string(),
+                "".to_string(),
                 "  拆解成三个子任务".to_string(),
+                "".to_string(),
                 "  逐个检查边界情况".to_string(),
             ],
             "rendered: {:?}",
@@ -675,8 +712,9 @@ mod tests {
         );
     }
 
-    /// thinking 里的源行前导缩进必须保留；长行软折行后，续行也要继承缩进，
-    /// 否则结构化思考内容会变成同一列的“面条文本”。
+    /// thinking 里的源行前导缩进必须保留；长行软折行后，续行既要继承源行缩进，
+    /// 还要比首行多缩进一档 —— 此前两者前缀完全相同（都是 2 空格），长行折行后
+    /// 看不出哪里是断点，结构化思考内容会变成同一列的「面条文本」。
     #[test]
     fn thinking_lines_preserve_indentation_across_wrapping() {
         let mut state = crate::ui::state::ChatState::new();
@@ -703,10 +741,53 @@ mod tests {
                 "  root".to_string(),
                 "    nested item".to_string(),
                 "      deeper".to_string(),
-                "      value".to_string(),
+                // 续行 = 2 列块缩进 + 4 列源缩进 + 2 列悬挂缩进
+                "        value".to_string(),
             ],
             "rendered: {:?}",
             rendered
+        );
+    }
+
+    /// 宽终端上正文不得无限拉长：此前折行宽度直接吃满 `终端宽 - 2`，200 列宽屏
+    /// 里一行能拉到 200+，眼睛扫不到行尾。折行宽度必须封顶 `MAX_CONTENT_WIDTH`，
+    /// 且任何一行的显示宽度都不许超出该上限（含围栏边框）。
+    #[test]
+    fn thinking_body_width_is_capped_on_wide_terminals() {
+        let long = "word ".repeat(80);
+        let render_at = |w: usize| -> Vec<(String, usize)> {
+            let mut state = crate::ui::state::ChatState::new();
+            let mut entry = crate::types::ChatEntry::assistant("");
+            entry.reasoning_content = Some(format!("{}\n```\n{}\n```", long.trim(), long.trim()));
+            state.chat_history.push(entry);
+            let idx = state.chat_history.len() - 1;
+            state.expanded_thinking_indices.insert(idx);
+            render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, w, false)
+                .into_iter()
+                .flatten()
+                .map(|l| {
+                    let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                    let width = crate::ui::utils::render::line_spans_display_width(&l.spans);
+                    (text, width)
+                })
+                .collect()
+        };
+
+        let cap = MAX_CONTENT_WIDTH;
+        for w in [cap + 40, cap * 3] {
+            for (text, width) in render_at(w) {
+                assert!(
+                    width <= cap,
+                    "wrap_width={w}: line exceeds cap ({width} > {cap}): {text:?}"
+                );
+            }
+        }
+
+        // 窄终端行为不变：仍按终端宽折行，不因为封顶而提前换行
+        let narrow = render_at(40);
+        assert!(
+            narrow.iter().any(|(_, width)| *width > 20),
+            "narrow terminal should still fill its width: {narrow:?}"
         );
     }
 

@@ -243,6 +243,11 @@ impl ChatState {
         if matches!(modal, Some(Modal::QuickOpen)) {
             self.quick_open_state.cancel_search();
         }
+        // 保持 show_status_modal 与 modal_stack 同步：flag 残留会让下一次
+        // open_status_modal 之前的窗口状态判断失真。
+        if matches!(modal, Some(Modal::StatusModal)) {
+            self.show_status_modal = false;
+        }
         modal
     }
 
@@ -273,6 +278,10 @@ impl ChatState {
         // 输入框的 flag 也要一起清 —— 留着它会让按键继续被
         // `handle_input_modal` 吞掉，而屏幕上已经没有输入框了。
         self.show_input_modal = false;
+        self.show_status_modal = false;
+        // 后台代理选择器也是一个按键层。不清的话，开一次 modal 再 Esc 之后，
+        // ↑/↓/Enter 仍然被选择器分支接走，输入框失去方向键。
+        self.bg_agent_selection = None;
     }
 
     pub fn is_modal_open(&self) -> bool {
@@ -520,19 +529,68 @@ impl ChatState {
         self.modal_stack.retain(|m| !matches!(m, Modal::InputModal));
     }
 
+    /// 打开 provider 快捷菜单。
+    ///
+    /// 必须走这个方法而不是直接置 `show_provider_menu`：两个快捷菜单是互斥的，
+    /// 直接置位会留下「两个同时 true」的非法状态，此后 ↑/↓/Enter 该听谁的只能靠
+    /// `command_suggestions` 里一份没有文档的优先级顺序来裁决。
+    pub fn open_provider_menu(&mut self) {
+        self.show_session_menu = false;
+        self.show_provider_menu = true;
+        self.selected_provider_index = 0;
+    }
+
+    /// 打开 session 快捷菜单（同 [`ChatState::open_provider_menu`]，互斥）。
+    pub fn open_session_menu(&mut self) {
+        self.show_provider_menu = false;
+        self.show_session_menu = true;
+    }
+
+    /// 关闭两个快捷菜单。
+    pub fn close_quick_menus(&mut self) {
+        self.show_provider_menu = false;
+        self.show_session_menu = false;
+    }
+
     /// 状态模态
+    ///
+    /// 必须同时置 `show_status_modal`：`render_status_modal` 在
+    /// `!state.show_status_modal` 时直接 return（`components/status_modal.rs`），
+    /// 而 `handle_overlay_input` 却无条件消费 Esc/↑/↓/Enter。只 push 不置 flag 的
+    /// 症状是「按 Ctrl+P → Status 之后什么窗口都没出现，但按键全被吃掉」。
+    /// 该 flag 全仓库只被赋 `false`，此前从未赋 `true`，于是 Settings 一直隐形。
     pub fn open_status_modal(&mut self) {
         self.close_all_modals();
+        self.show_status_modal = true;
         self.modal_stack.push(Modal::StatusModal);
     }
 
     /// 检查是否有任何覆盖层打开（替代旧的 show_X 链）
+    ///
+    /// 这个谓词被用在两处最需要它的地方：vim 按键门控（`events/input.rs` 的
+    /// `vim_enabled && !has_overlay_active()`）和双 Esc 退出判定。清单**必须完整**
+    /// —— 漏掉任何一层都会让 vim 把弹窗的 y/n/Esc/i 当成 normal 模式的命令吞掉。
+    ///
+    /// 覆盖：modal 栈、轻量浮层（help / 命令与 @ 补全）、工具审批、
+    /// 模型切换确认、provider / session 快捷菜单、内联确认提示（清屏 / 大段粘贴）、
+    /// 后台代理选择器、输入对话框。
+    ///
+    /// **刻意不含** `task_panel.is_visible`：它是个常驻面板而非遮挡层，只吃掉
+    /// Ctrl/Alt 组合键与 ↑/↓/Enter，普通字符（vim 的 j/k/i 等）仍要落到输入框。
+    /// 计进来的话，开着任务面板时 vim 会被整个关掉，双 Esc 退出也会失灵。
     pub fn has_overlay_active(&self) -> bool {
         !self.modal_stack.is_empty()
             || self.show_help
             || self.show_command_hints
             || self.show_mention_hints
             || self.is_awaiting_confirmation
+            || self.pending_model_confirmation
+            || self.show_provider_menu
+            || self.show_session_menu
+            || self.show_clear_confirmation
+            || self.show_paste_confirmation
+            || self.bg_agent_selection.is_some()
+            || self.show_input_modal
     }
 
     /// 检查是否有任何对话框打开（不含 help/autocomplete 等轻量覆盖层）

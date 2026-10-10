@@ -32,9 +32,9 @@ fn clear_suggestion_overlays(state: &mut ChatState) {
     state.mention_hints.clear();
 }
 
+/// 关闭 provider / session 两个快捷菜单（薄封装，实现见 `ChatState`）。
 fn close_quick_menus(state: &mut ChatState) {
-    state.show_provider_menu = false;
-    state.show_session_menu = false;
+    state.close_quick_menus();
 }
 
 /// 压入 kill ring（容量 10，Claude Code readline 风格）
@@ -132,11 +132,10 @@ fn open_provider_selection_menu(
     clear_suggestion_overlays(state);
     state.close_palette();
     state.exit_input_modal();
-    close_quick_menus(state);
     state.quick_menu_back = back;
     state.quick_menu_origin_palette = origin_palette;
-    state.show_provider_menu = true;
-    state.selected_provider_index = 0;
+    // open_provider_menu 内部保证与 session 菜单互斥
+    state.open_provider_menu();
 }
 
 fn open_session_selection_menu(
@@ -147,11 +146,10 @@ fn open_session_selection_menu(
     clear_suggestion_overlays(state);
     state.close_palette();
     state.exit_input_modal();
-    close_quick_menus(state);
     state.quick_menu_back = None;
     state.quick_menu_origin_palette = origin_palette;
     state.available_sessions = sessions;
-    state.show_session_menu = true;
+    state.open_session_menu();
     state.selected_session_index = 0;
 }
 
@@ -1713,16 +1711,39 @@ pub async fn handle_key_event(
 
     // Handle Ctrl+C (Copy selected text / Cancel / double-press Exit)
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
-        // Priority 1: If there's selected text, copy to clipboard
+        // Priority 1: If there's selected text, copy to clipboard.
+        //
+        // 只要有选区，Ctrl+C 就**只**是复制，绝不往下落到取消生成/双击退出。
+        // 此前 get_selected_text() 返回 None 时会静默继续往下走，用户想复制结果把
+        // 正在输出的内容 Abort 掉了。
         if state.text_selection.has_selection() {
-            if let Some(selected_text) = state.get_selected_text() {
-                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                    let _ = clipboard.set_text(&selected_text);
+            let copied = match state.get_selected_text() {
+                Some(selected_text) => match arboard::Clipboard::new() {
+                    Ok(mut clipboard) => clipboard
+                        .set_text(&selected_text)
+                        .map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                },
+                None => Err("选区为空".to_string()),
+            };
+            match copied {
+                Ok(()) => {
+                    state.text_selection.clear();
+                    state.current_status_line = Some("Copied".to_string());
                 }
-                state.text_selection.clear();
-                state.current_status_line = Some("Copied".to_string());
-                return Ok(());
+                Err(e) => {
+                    // 剪贴板写不进去（WSL/SSH/headless、被其他进程占用）时必须说真话，
+                    // 并且**保留选区** —— 此前这里无条件宣告 "Copied" 并清掉选区，
+                    // 用户粘出来的是上次的旧内容，且再也无法重试。
+                    state.current_status_line =
+                        Some(format!("Copy failed: {e} — press Ctrl+C to retry"));
+                    crate::utils::logging::append_debug_log_line(&format!(
+                        "[COPY] failed: {}",
+                        e
+                    ));
+                }
             }
+            return Ok(());
         }
 
         // Check if streaming is "stale" — cancelling grace period has expired but
@@ -1771,13 +1792,16 @@ pub async fn handle_key_event(
     }
 
     // Handle Ctrl+D (Exit)
+    //
+    // 命中即 return：此前只在「任务面板关闭 + 输入框为空」这条路径上 return，
+    // 其余情况会继续往下落到 handle_overlay_input 的权限调试面板
+    // （见本文件 toggle_permission_debug）和任务描述编辑分支，
+    // 同一个键被处理三次。
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('d')) {
-        if !state.task_panel.is_visible {
-            if state.input.is_empty() {
-                state.should_exit = true;
-                return Ok(());
-            }
+        if !state.task_panel.is_visible && state.input.is_empty() {
+            state.should_exit = true;
         }
+        return Ok(());
     }
 
     // Handle Ctrl+L (Clear screen)
@@ -2979,8 +3003,11 @@ async fn handle_overlay_input(
                             state.rendered_cache.remove(&idx);
                         }
                     }
+                    // 权限调试面板。绑 Ctrl+Shift+D 而不是 Ctrl+D —— Ctrl+D 现在唯一表示
+                    // 「退出」（见本文件上方的 Ctrl+D 分支），同一个键挂三种语义必然打架。
                     KeyCode::Char('d') | KeyCode::Char('D')
-                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && key.modifiers.contains(KeyModifiers::SHIFT) =>
                     {
                         state.show_permission_debug = !state.show_permission_debug;
                         if let Some(idx) = state.pending_confirmation_entry_idx {
@@ -3130,7 +3157,15 @@ async fn handle_overlay_input(
         return Ok(true);
     }
 
-    if state.task_panel.is_visible {
+    // 任务面板必须排在 modal 之后。API Key / Base URL 输入框由更靠后的
+    // handle_input_modal 分支处理（events/input.rs），而本函数在它之前无条件
+    // 吞键，导致 Ctrl+J / Ctrl+S / Alt+←→ 等在填表时被任务面板截走。
+    // 紧邻的 bg-agent 选择器分支就有同样的 `&& !state.show_input_modal` 守卫。
+    let modal_open = !state.modal_stack.is_empty()
+        || state.show_input_modal
+        || state.show_help
+        || state.is_awaiting_confirmation;
+    if state.task_panel.is_visible && !modal_open {
         if state.task_panel.is_editing() {
             state.task_panel.handle_edit_input(key);
             return Ok(true);
@@ -3143,7 +3178,11 @@ async fn handle_overlay_input(
             return Ok(true);
         }
 
-        if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        // 与权限调试面板一致：Ctrl+D 归「退出」，任务描述编辑改用 Ctrl+Shift+D。
+        if key.code == KeyCode::Char('d')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.modifiers.contains(KeyModifiers::SHIFT)
+        {
             state
                 .task_panel
                 .enter_edit_mode(crate::ui::components::task_panel::EditMode::Description);

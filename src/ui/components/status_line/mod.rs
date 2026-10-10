@@ -1240,7 +1240,11 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
 
     // ── 7. Sandbox indicator (only when unavailable — warning state) ──────────
     if state.sandbox_enabled {
-        let avail = crate::core::sandbox::SandboxManager::is_available();
+        // 探测结果缓存：Windows 上首次探测要 spawn `wsl` 子进程（300ms~2s），
+        // 每帧重探测会把渲染线程拖垮。见 ChatState::sandbox_available。
+        let avail = state
+            .sandbox_available
+            .get_or_init(crate::core::sandbox::SandboxManager::is_available);
         if !avail {
             spans.push(sep());
             spans.push(Span::styled("[!SBX]", Style::default().fg(theme.warning)));

@@ -627,6 +627,13 @@ pub struct ChatState {
     pub last_yank_len: usize,
     // ============ Sandbox State ============
     pub sandbox_enabled: bool,
+    /// 沙箱可用性探测结果（进程内只算一次）。
+    ///
+    /// `SandboxManager::is_available()` 在 Windows 上会 spawn `wsl -- which bwrap`
+    /// 子进程（`core/sandbox/bubblewrap_windows.rs`），单次 300ms~2s。状态栏每帧都要
+    /// 问一次可用性，此前会把子进程塞进渲染线程 —— 实测每秒 30 次 spawn，表现为闪屏与卡顿。
+    /// 该探测的语义是「本机有没有 bwrap」，不随时间变化，缓存无副作用。
+    pub sandbox_available: std::cell::OnceCell<bool>,
     /// 动画帧计数器 — 每帧 +1，用于旋转指示器和闪烁效果
     pub animation_tick: u64,
     /// 鼠标滚轮检测：待处理的箭头键事件
@@ -665,30 +672,25 @@ pub struct ChatState {
     // ============ Code Structure Index ============
     pub structure_index: Option<crate::core::context::structure_index::StructureIndex>,
     // ============ Highlight/Dialog States ============
-    pub show_global_search: bool,
+    //
+    // 这些 `show_*` 曾经各配一个 bool，但窗口早已迁到 `modal_stack` 表达，
+    // bool 只剩下声明与初始化、从不写入也从不读取 —— 是一层假状态：任何
+    // 「if state.show_xxx 就……」的守卫都会恒为假，而窗口其实开着。
+    // 可见性一律看 `modal_stack`（见 `top_modal()` / `is_modal_open()`）。
     pub global_search_state: crate::ui::components::highlight::search::GlobalSearchState,
     /// 全局搜索请求序列号，跨弹窗生命周期单调递增，防止旧结果命中新弹窗。
     next_global_search_request_id: u64,
-    pub show_quick_open: bool,
     pub quick_open_state: crate::ui::components::highlight::quick_open::QuickOpenState,
-    pub show_history_search: bool,
     pub history_search_state: crate::ui::components::highlight::history::HistorySearchState,
-    pub show_theme_picker: bool,
     pub selected_theme_index: usize,
     /// 进入主题选择器前的主题名（Esc 取消时恢复）
     pub theme_picker_prev: Option<String>,
-    pub show_usage_stats: bool,
     pub usage_stats: crate::ui::components::highlight::stats::UsageStats,
-    pub show_export_dialog: bool,
     pub export_state: crate::ui::components::highlight::export::ExportState,
-    pub show_compression_status: bool,
     pub compression_state: crate::ui::components::highlight::compression::CompressionState,
     // ============ New Feature States ============
-    pub show_context_viz: bool,
     pub context_breakdown: crate::ui::components::highlight::context_viz::TokenBreakdown,
-    pub show_error_overlay: bool,
     pub error_overlay_state: crate::ui::components::error_overlay::ErrorOverlayState,
-    pub show_log_selector: bool,
     pub log_selector_state: crate::ui::components::log_selector::LogSelectorState,
     pub diff_preview_scroll: usize,
     pub pending_model_confirmation: bool,
@@ -1112,6 +1114,7 @@ impl ChatState {
             streaming_height_floor: std::collections::HashMap::new(),
             last_yank_len: 0,
             sandbox_enabled: SandboxManager::is_available(),
+            sandbox_available: std::cell::OnceCell::new(),
             animation_tick: 0,
             scroll_velocity: 0.0,
             last_scroll_time: None,
@@ -1129,31 +1132,21 @@ impl ChatState {
             mdm: crate::core::mdm::MdmManager::new(),
             structure_index: None,
             // ============ Highlight/Dialog States ============
-            show_global_search: false,
             global_search_state: crate::ui::components::highlight::search::GlobalSearchState::new(),
             next_global_search_request_id: 1,
-            show_quick_open: false,
             quick_open_state: crate::ui::components::highlight::quick_open::QuickOpenState::new(),
-            show_history_search: false,
             history_search_state:
                 crate::ui::components::highlight::history::HistorySearchState::new(),
-            show_theme_picker: false,
             selected_theme_index: 0,
             theme_picker_prev: None,
-            show_usage_stats: false,
             usage_stats: crate::ui::components::highlight::stats::UsageStats::default(),
-            show_export_dialog: false,
             export_state: crate::ui::components::highlight::export::ExportState::new(),
-            show_compression_status: false,
             compression_state:
                 crate::ui::components::highlight::compression::CompressionState::default(),
             // ============ New Feature States ============
-            show_context_viz: false,
             context_breakdown:
                 crate::ui::components::highlight::context_viz::TokenBreakdown::default(),
-            show_error_overlay: false,
             error_overlay_state: crate::ui::components::error_overlay::ErrorOverlayState::default(),
-            show_log_selector: false,
             log_selector_state: crate::ui::components::log_selector::LogSelectorState::default(),
             diff_preview_scroll: 0,
             pending_model_confirmation: false,

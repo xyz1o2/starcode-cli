@@ -275,8 +275,12 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
 }
 
 pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
-    state.animation_tick = state.animation_tick.wrapping_add(1);
-
+    // 注意：**不要**在这里自增 `animation_tick`。
+    //
+    // 此前 draw_ui 每次调用都 `animation_tick += 1`，导致帧与帧之间 buffer 必然不同，
+    // ratatui 的 diff 永远非空 —— 于是「内容没变就不重绘」在物理上不可能成立，
+    // 空屏也要 30fps 全量刷屏。动画时钟改由事件循环按需推进，见
+    // `super::runtime` 里的 `is_animating` / `advance_animation`。
     let input_area = render_page(f, state, f.area());
     if state.show_command_hints
         || state.show_mention_hints

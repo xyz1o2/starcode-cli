@@ -79,8 +79,16 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
                     "Ctrl+C".to_string(),
                     i18n::t(
                         "ui.help.control.cancel",
-                        "中断生成/清空输入",
-                        "Interrupt generation / clear input",
+                        "复制选区 / 中断生成 / 清空输入（连按两次退出）",
+                        "Copy selection / interrupt / clear input (press twice to exit)",
+                    ),
+                ),
+                (
+                    "Ctrl+Shift+D".to_string(),
+                    i18n::t(
+                        "ui.help.control.perm_debug",
+                        "切换权限调试面板（审批时）",
+                        "Toggle permission debug panel (while approving)",
                     ),
                 ),
                 (

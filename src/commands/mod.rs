@@ -96,8 +96,7 @@ pub async fn handle_command(
         // /provider 无参数或 select 缺 id：打开提供商选择菜单（交互优先于报错）
         "provider" if args.is_empty() || (args[0] == "select" && args.len() < 2) => {
             ctx.state.close_palette();
-            ctx.state.show_provider_menu = true;
-            ctx.state.selected_provider_index = 0;
+            ctx.state.open_provider_menu();
             Ok(())
         }
         "provider" => provider_wrapper(ctx, args).await,

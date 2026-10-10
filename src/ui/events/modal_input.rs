@@ -14,7 +14,33 @@ use tokio::sync::mpsc;
 
 type Err = Box<dyn std::error::Error>;
 
-/// Returns `Ok(true)` when the key was consumed by a modal.
+/// 无论当前开着哪个 modal 都必须生效的全局键。
+///
+/// modal handler 的按键匹配不带修饰键判断（`match key.code`），所以
+/// `Ctrl+C` 会被当成 `Char('c')` 打进过滤框。返回 `true` 表示该键应当
+/// 跳过 modal 层、交回 `handle_key_event` 的全局分支。
+///
+/// 刻意**不含** `Esc` / `↑` / `↓` / `Enter` —— 那是 modal 自己的语义。
+pub fn is_global_key(key: crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        // 中断生成 / 复制选区 / 双击退出
+        KeyCode::Char('c') => ctrl,
+        // 清屏
+        KeyCode::Char('l') => ctrl,
+        // 开关命令面板
+        KeyCode::Char('p') => ctrl,
+        // 帮助
+        KeyCode::F(1) => true,
+        _ => false,
+    }
+}
+
+/// 分发给栈顶 modal 的按键处理。
+///
+/// 返回 `Ok(true)` 表示该键已被消费。全局键（`is_global_key`）会先被放行给
+/// `input.rs` 的全局分支。
 pub async fn handle_modal_key(
     state: &mut ChatState,
     key: crossterm::event::KeyEvent,
@@ -29,6 +55,16 @@ pub async fn handle_modal_key(
         return Ok(false);
     }
 
+    // 全局键优先于 modal。
+    //
+    // 各 modal handler 的 `match key.code` 不看修饰键，且结尾无条件 `Ok(true)`
+    // —— 于是 `Ctrl+P` 被当成字符 'p' 打进过滤框，`Ctrl+C` 被吃掉导致流式输出
+    // 无法中断，`F1` 被 `_ => {}` 静默吞掉。这里前置放行，让这些键回落到
+    // input.rs 的全局分支处理；modal 自身的 Esc/↑/↓/Enter 语义不受影响。
+    if is_global_key(key) {
+        return Ok(false);
+    }
+
     match top {
         Modal::Palette => handle_palette(state, key, agent_tx).await,
         Modal::Mcp { view } => handle_mcp(state, key, view, agent_tx).await,
@@ -37,6 +73,22 @@ pub async fn handle_modal_key(
         Modal::GlobalSearch => handle_global_search(state, key, agent_tx).await,
         Modal::QuickOpen => handle_quick_open(state, key, agent_tx).await,
         Modal::HistorySearch => handle_history_search(state, key, agent_tx).await,
+        // 只读展示型对话框：没有专属按键处理分支，此前它们落进 `_ => Ok(false)`，
+        // 按键一路掉到 input.rs 的主 match —— 在这些窗口开着时按 Enter 会**直接把
+        // 输入框里的消息发出去**，Esc 也关不掉窗口。这里兜底：Esc/Enter/q 关掉，
+        // 其余按键消费掉但不做任何事。
+        Modal::UsageStats | Modal::Export | Modal::CompressionStatus | Modal::ContextViz => {
+            match key.code {
+                crossterm::event::KeyCode::Esc
+                | crossterm::event::KeyCode::Enter
+                | crossterm::event::KeyCode::Char('q')
+                | crossterm::event::KeyCode::Char('Q') => {
+                    state.pop_modal();
+                }
+                _ => {}
+            }
+            Ok(true)
+        }
         // 其余 modal 变体暂由 input.rs 的 handle_overlay_input 处理
         _ => Ok(false),
     }

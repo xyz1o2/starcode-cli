@@ -26,6 +26,15 @@ const LEFT_PAD: &str = " ";
 /// 标记与右侧文字之间的间隔。
 const GAP: &str = "   ";
 
+/// 抬头底部的快捷键提示行。
+///
+/// Ctrl+P 此前完全没出现在这里 —— 它是唯一能打开命令面板的键，help 弹窗里
+/// 列了但抬头不列，用户只能靠猜。
+///
+/// 整行连同 `LEFT_PAD` 必须控制在 80 列以内：再长就会在 80x24 这种窄终端上
+/// 折行，把抬头下面第一块内容顶下去。
+const HINT_LINE: &str = "/help for help  ·  Ctrl+P commands  ·  Esc to interrupt  ·  --resume <id>";
+
 /// 组装抬头的行。返回值直接进 `chat_history` 的渲染块。
 pub fn welcome_header_lines(state: &ChatState) -> Vec<Line<'static>> {
     let theme = state.theme_manager.current();
@@ -80,10 +89,7 @@ pub fn welcome_header_lines(state: &ChatState) -> Vec<Line<'static>> {
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        format!(
-            "{}/help for help  ·  Esc to interrupt  ·  --resume <id> to resume",
-            LEFT_PAD
-        ),
+        format!("{}{}", LEFT_PAD, HINT_LINE),
         Style::default().fg(theme.secondary),
     )));
 
@@ -150,6 +156,23 @@ fn compact_home(path: &str) -> String {
 mod tests {
     use super::*;
     use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn hint_line_advertises_the_command_palette() {
+        // Ctrl+P 是唯一打开命令面板的入口，help 弹窗里有、抬头里曾经没有
+        assert!(HINT_LINE.contains("Ctrl+P"));
+    }
+
+    #[test]
+    fn hint_line_fits_an_eighty_column_terminal() {
+        let line = format!("{}{}", LEFT_PAD, HINT_LINE);
+        assert!(
+            line.width() <= 80,
+            "提示行 {} 列，超过 80 列会在窄终端上折行: {:?}",
+            line.width(),
+            line
+        );
+    }
 
     #[test]
     fn mark_rows_all_have_the_same_display_width() {

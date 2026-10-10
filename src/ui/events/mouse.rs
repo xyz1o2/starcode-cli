@@ -289,18 +289,25 @@ pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
             } else if state.text_selection.has_selection() {
                 // 如果有选中文本，自动复制到剪贴板
                 if let Some(selected_text) = state.get_selected_text() {
-                    match Clipboard::new() {
-                        Ok(mut clipboard) => {
-                            if let Err(e) = clipboard.set_text(&selected_text) {
-                                crate::utils::logging::append_debug_log_line(&format!(
-                                    "[COPY] clipboard set_text failed: {}",
-                                    e
-                                ));
-                            }
+                    let copied = match Clipboard::new() {
+                        Ok(mut clipboard) => clipboard
+                            .set_text(&selected_text)
+                            .map_err(|e| e.to_string()),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    match copied {
+                        Ok(()) => {
+                            // 刻意**不**清选区：保留高亮，用户能看到复制了哪一段，
+                            // 剪贴板被占用时还能按 Ctrl+C 重试。
+                            state.current_status_line = Some("Copied".to_string());
                         }
                         Err(e) => {
+                            // 失败要说给用户听，且保留选区好让用户重试（Ctrl+C）。
+                            // 此前这里只写日志文件，界面上毫无反馈。
+                            state.current_status_line =
+                                Some(format!("Copy failed: {e} — press Ctrl+C to retry"));
                             crate::utils::logging::append_debug_log_line(&format!(
-                                "[COPY] clipboard init failed: {}",
+                                "[COPY] failed: {}",
                                 e
                             ));
                         }
