@@ -42,13 +42,10 @@ fn finalize_entry_streaming(state: &mut ChatState, idx: usize) {
         entry.is_streaming = Some(false);
         // 冻结 thinking 计时器：只对有 reasoning 且未冻结的 entry 设置。
         // 必须有真实请求（processing_started_at）才冻结——恢复的会话等场景
-        // 没有时钟基准，冻结成 0 会把每块都显示成 "Thought for 1s" 并错误
-        // 启动 30 秒隐藏窗口。
+        // 没有时钟基准，冻结成 0 会把每块都显示成 "Thought for 1s"。
         if let Some(started) = state.processing_started_at {
             if entry.reasoning_content.is_some() && entry.reasoning_finished_elapsed_ms.is_none() {
                 entry.reasoning_finished_elapsed_ms = Some(started.elapsed().as_millis());
-                // 记录完成时刻：30 秒宽限窗口从这一刻起算
-                entry.reasoning_finished_at = Some(std::time::Instant::now());
             }
         }
     }

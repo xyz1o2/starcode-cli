@@ -70,7 +70,8 @@ pub const ALL_PROVIDERS: &[ProviderMetadata] = &[
     ProviderMetadata {
         id: "opencode",
         name: "OpenCode Zen",
-        description: "OpenCode Zen — curated coding models. Key optional: free models work without one.",
+        description:
+            "OpenCode Zen — curated coding models. Key optional: free models work without one.",
         category: ProviderCategory::Popular,
         default_base_url: Some(OPENCODE_ZEN_BASE_URL),
         api_key_env_var: Some("OPENCODE_API_KEY"),
@@ -197,10 +198,7 @@ pub fn zen_protocol_for_model(model: &str) -> ZenProtocol {
     if m.starts_with("qwen") && !m.starts_with("qwen3.8-max") {
         return ZenProtocol::AnthropicMessages;
     }
-    if m.starts_with("gpt-")
-        || m.starts_with("grok-")
-        || m.starts_with("muse-spark-")
-    {
+    if m.starts_with("gpt-") || m.starts_with("grok-") || m.starts_with("muse-spark-") {
         return ZenProtocol::OpenAiResponses;
     }
     ZenProtocol::ChatCompletions
@@ -514,7 +512,13 @@ mod tests {
     fn opencode_aliases_resolve_to_a_real_registered_provider() {
         // 曾经的 bug：别名映射到 "opencode"，但 ALL_PROVIDERS 里没有这条记录，
         // 规范化成功却拿到一个查不到元数据的幽灵 id。
-        for alias in ["opencode", "opencodezen", "zen", "OpenCode Zen", "open-code"] {
+        for alias in [
+            "opencode",
+            "opencodezen",
+            "zen",
+            "OpenCode Zen",
+            "open-code",
+        ] {
             let id = normalize_provider_id(alias)
                 .unwrap_or_else(|| panic!("alias {alias} should normalize"));
             assert_eq!(id, "opencode", "alias {alias}");
@@ -546,7 +550,10 @@ mod tests {
         assert!(is_opencode_zen(None, "https://OpenCode.AI/zen/v1"));
         assert!(!is_opencode_zen(None, "https://api.anthropic.com/v1"));
         assert!(!is_opencode_zen(None, "https://opencode.ai/other"));
-        assert!(!is_opencode_zen(Some("anthropic"), "https://api.anthropic.com/v1"));
+        assert!(!is_opencode_zen(
+            Some("anthropic"),
+            "https://api.anthropic.com/v1"
+        ));
         assert!(!is_opencode_zen(None, ""));
 
         // base_url 是权威信号：即使 provider_id 写的是 anthropic，只要实际
@@ -600,7 +607,10 @@ mod tests {
         for m in ["gpt-5.5", "gpt-6-astra", "grok-4.7", "muse-spark-1.3"] {
             let p = zen_protocol_for_model(m);
             assert_eq!(p, ZenProtocol::OpenAiResponses, "model {m}");
-            assert!(!zen_protocol_supported(p), "model {m} must not be supported yet");
+            assert!(
+                !zen_protocol_supported(p),
+                "model {m} must not be supported yet"
+            );
         }
         for m in ["gemini-3.1-pro", "gemini-3.8-flash"] {
             let p = zen_protocol_for_model(m);
@@ -635,9 +645,9 @@ mod tests {
             zen_protocol_for_model("some-model-nobody-has-heard-of"),
             ZenProtocol::ChatCompletions
         );
-        assert!(zen_protocol_supported(
-            zen_protocol_for_model("some-model-nobody-has-heard-of")
-        ));
+        assert!(zen_protocol_supported(zen_protocol_for_model(
+            "some-model-nobody-has-heard-of"
+        )));
     }
 
     #[test]
@@ -649,7 +659,10 @@ mod tests {
         // 但 base_url 不该要求用户手填。
         assert!(!provider_requires_manual_base_url("opencode"));
         // 其它 provider 的行为不受影响。
-        assert_eq!(provider_openai_compatible_mode("openai-compatible"), Some(true));
+        assert_eq!(
+            provider_openai_compatible_mode("openai-compatible"),
+            Some(true)
+        );
         assert_eq!(
             provider_openai_compatible_mode("anthropic-compatible"),
             Some(false)
@@ -710,7 +723,10 @@ mod tests {
             ("grok-4.7", ZenProtocol::OpenAiResponses),
             ("grok-build-0.1", ZenProtocol::OpenAiResponses),
             ("muse-spark-1.3", ZenProtocol::OpenAiResponses),
-            ("muse-spark-1.3-contributor-free", ZenProtocol::OpenAiResponses),
+            (
+                "muse-spark-1.3-contributor-free",
+                ZenProtocol::OpenAiResponses,
+            ),
             ("gemini-3.1-pro", ZenProtocol::GeminiNative),
             ("gemini-3.8-flash", ZenProtocol::GeminiNative),
             ("jev-1.13", ZenProtocol::SystemOne),

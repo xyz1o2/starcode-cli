@@ -1495,8 +1495,10 @@ pub(crate) fn format_cache_age(age_secs: Option<u64>) -> Option<String> {
 
 /// 手动输入模型名 + 显式刷新。
 ///
-/// 这两项放在列表最前面（紧跟 `.. Back`）是有意的：模型多的中转站一屏放不下，
-/// 放在末尾等于用户找不到。用户要的就是"要么自己敲模型名，要么明确让它去拉一次"。
+/// 这两项**不参与分组**：模型列表才是这个面板的主体，之前给它们套一个
+/// "Manual" 一级标题，会让用户找一个模型时先穿过两个与模型无关的分组标题。
+/// 平铺在顶部的理由仍然成立（模型多的中转站一屏放不下，放末尾等于找不到），
+/// 只是不再额外付出标题的视线成本。
 fn push_model_entry_options(
     items: &mut Vec<PaletteItem>,
     current: &str,
@@ -1511,7 +1513,7 @@ fn push_model_entry_options(
         } else {
             format!("Type any model ID (prefilled with {})", current)
         },
-        category: Some("Manual".to_string()),
+        category: None,
         action: PaletteAction::InputModelName,
     });
 
@@ -1531,7 +1533,7 @@ fn push_model_entry_options(
         id: "refresh_models".to_string(),
         label,
         description,
-        category: Some("Manual".to_string()),
+        category: None,
         action: PaletteAction::RefreshModels,
     });
 }
@@ -1547,6 +1549,8 @@ pub fn get_model_palette_items(
         id: "back".to_string(),
         label: ".. Back".to_string(),
         description: "Return to main menu".to_string(),
+        // `None` 而非某个分组名：导航项不该被提升成一个只含它自己的
+        // "Other" 一级分组标题。
         category: None,
         action: PaletteAction::Back,
     }];
@@ -1959,9 +1963,17 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
         ))));
     } else if grouped {
         let mut groups: Vec<(String, Vec<&PaletteItem>)> = Vec::new();
+        // `category: None` 的条目（导航项、面板级操作）不参与分组，
+        // 保持它们在 filtered 里的原始顺序平铺在分组内容之后。
+        let mut loose_items: Vec<&PaletteItem> = Vec::new();
 
         for item in filtered.iter() {
-            let category = item.category.clone().unwrap_or_else(|| "Other".to_string());
+            // 关键：`None` 不再被兜底成 "Other"。否则单独一条返回项会被
+            // 提升成一个只含它自己的 "Other" 一级分组标题。
+            let Some(category) = item.category.clone() else {
+                loose_items.push(*item);
+                continue;
+            };
 
             if let Some((_, items)) = groups.iter_mut().find(|(name, _)| name == &category) {
                 items.push(*item);
@@ -1996,6 +2008,24 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
                 list_items.push(ListItem::new(Line::from(spans)));
                 selectable_indices.push(list_items.len() - 1);
             }
+        }
+
+        // 未分组的条目：无标题、无缩进，直接平铺。
+        for item in loose_items {
+            let mut spans = Vec::new();
+            spans.push(Span::styled(
+                item.label.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            if !item.description.is_empty() {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    item.description.clone(),
+                    Style::default().fg(Color::Gray),
+                ));
+            }
+            list_items.push(ListItem::new(Line::from(spans)));
+            selectable_indices.push(list_items.len() - 1);
         }
     } else {
         for item in filtered.iter() {
@@ -2159,6 +2189,62 @@ mod tests {
 
     fn ids(items: &[PaletteItem]) -> Vec<&str> {
         items.iter().map(|i| i.label.as_str()).collect()
+    }
+
+    /// 模型面板不该凭空造出 "Other" / "Manual" 之类的分组层级。
+    ///
+    /// 回归点：`.. Back`、`Enter model name...`、`Fetch model list from API`
+    /// 三项原本要么被兜底进 "Other" 组、要么被塞进 "Manual" 组，于是用户找一个
+    /// 模型时得先穿过两个与模型无关的分组标题。现在它们一律 `category: None`，
+    /// 渲染时平铺、不带标题，模型分组直接顶上来。
+    #[test]
+    fn model_panel_keeps_navigation_and_actions_out_of_any_group() {
+        let models = vec!["claude-opus-5".to_string(), "deepseek-v4-pro".to_string()];
+        let mut map = std::collections::HashMap::new();
+        map.insert("claude-opus-5".to_string(), "opencode".to_string());
+        map.insert("deepseek-v4-pro".to_string(), "opencode".to_string());
+
+        let items = get_model_palette_items(&models, "claude-opus-5", false, &map, Some(3600));
+
+        let ungrouped: Vec<&str> = items
+            .iter()
+            .filter(|i| i.category.is_none())
+            .map(|i| i.label.as_str())
+            .collect();
+        assert!(
+            ungrouped.contains(&".. Back"),
+            "back must be ungrouped, got {:?}",
+            ungrouped
+        );
+        assert!(
+            ungrouped.iter().any(|l| l.contains("Enter model name")),
+            "manual entry must be ungrouped, got {:?}",
+            ungrouped
+        );
+        assert!(
+            ungrouped.iter().any(|l| l.contains("Fetch model list")),
+            "refresh action must be ungrouped, got {:?}",
+            ungrouped
+        );
+
+        // 关键：不能再出现任何 "Other" / "Manual" 分组。
+        for item in &items {
+            let cat = item.category.clone().unwrap_or_default();
+            assert!(
+                cat != "Other" && cat != "Manual",
+                "unexpected group {:?} on item {:?}",
+                cat,
+                item.label
+            );
+        }
+
+        // 模型仍然带 provider 分组（这是真正有用的标题）。
+        assert!(
+            items
+                .iter()
+                .any(|i| i.category.as_deref() == Some("opencode")),
+            "models must stay grouped by provider"
+        );
     }
 
     /// 名字判定为“仅开/关”的模型也必须展示与精细档位模型完全一致的

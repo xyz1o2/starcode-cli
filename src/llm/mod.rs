@@ -258,13 +258,13 @@ pub fn create_client(config: LlmConfig) -> Box<dyn LlmClient> {
             // own `/messages` endpoint, so ignoring base_url would send the request
             // to api.anthropic.com and fail auth. Falls back to rig's default.
             match base_url {
-                Some(u) if !u.trim().is_empty() => Box::new(
-                    rig_adapter::RigAdapter::anthropic_with_base_url(
+                Some(u) if !u.trim().is_empty() => {
+                    Box::new(rig_adapter::RigAdapter::anthropic_with_base_url(
                         api_key.clone(),
                         config.model.clone(),
                         u.clone(),
-                    ),
-                ),
+                    ))
+                }
                 _ => Box::new(rig_adapter::RigAdapter::anthropic(
                     api_key.clone(),
                     config.model.clone(),

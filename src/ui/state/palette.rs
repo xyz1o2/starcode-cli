@@ -33,6 +33,11 @@ pub struct PaletteItem {
     pub id: String,
     pub label: String,
     pub description: String,
+    /// 分组标题。`None` = 不参与分组，渲染时平铺且不带任何标题行。
+    ///
+    /// 导航类条目（`.. Back`）和面板级操作项都用 `None`：给它们套一个
+    /// "Other" 之类的兜底标题，会凭空造出一个语义为空的分组层级，
+    /// 让用户找一个真正的条目时先穿过无意义的标题。
     pub category: Option<String>,
     pub action: PaletteAction,
 }

@@ -7,8 +7,8 @@ use crate::ui::themes::theme::Theme;
 
 /// 渲染非工具条目（assistant / user）的文本块。
 ///
-/// `is_sub_transcript`：agent 组展开视图里的子转录条目不走「完成后隐藏」规则，
-/// thinking 折叠头始终可见（它们不参与主历史的 30 秒宽限窗口）。
+/// `is_sub_transcript`：agent 组展开视图里的子转录条目。thinking 折叠头一旦
+/// 有实质内容就渲染，不按"完成多久"自动隐藏。
 pub(crate) fn render_non_tool_entry_blocks(
     state: &ChatState,
     entry: &crate::types::ChatEntry,
@@ -45,212 +45,203 @@ pub(crate) fn render_non_tool_entry_blocks(
                     && reasoning_trimmed.len() > 5; // 至少 5 个字符才算有意义
 
                 if is_meaningful {
-                    // 对标 Claude Code：本进程内完成的 thinking 块只在 30 秒宽限窗口内
-                    // 可见，之后隐藏；transcript 模式（Ctrl+O）或手动展开时重新显示。
-                    // 恢复的历史条目没有完成时刻（serde skip），不适用隐藏窗口——
-                    // 否则重启后所有思考块会直接消失。
-                    let within_grace = entry
-                        .reasoning_finished_at
-                        .map(|t| t.elapsed() < std::time::Duration::from_secs(30))
-                        .unwrap_or(false);
+                    // thinking 折叠头（含 `∴ Thought for Xs` 耗时标签）一旦出现就保留
+                    // 在会话里，不再按"完成多久"自动隐藏。
+                    //
+                    // 旧行为靠一个 30 秒宽限窗口判断可见性，完成 30 秒后整块连带耗时
+                    // 标签一起消失；可重启读回历史时又一直可见（完成时刻 serde skip，
+                    // 恢复出来是 None）——同一条历史里前后表现不一致，用户没法预期它
+                    // 在哪。窗口移除后统一为"始终可见"。
+                    //
+                    // 折叠态只占一行；想看正文用 Ctrl+O / Tab 切展开模式。
                     let is_expanded = state.is_transcript_mode
                         || state.expanded_thinking_indices.contains(&entry_idx);
-                    let is_persistent_history = entry.reasoning_finished_at.is_none();
-                    let is_visible = is_expanded
-                        || is_sub_transcript
-                        || is_streaming_now
-                        || is_persistent_history
-                        || within_grace;
 
                     // 间距规则（对标 Claude Code：只有"块的顶部 margin"一个所有者）：
                     // thinking 块前不另加空行 — entry 级 leading blank 已提供分隔，
                     // 此处再加会叠加成双空行
 
-                    if is_visible {
-                        // 标签颜色随状态变化（对标 Claude Code：思考中亮、完成后
-                        // 降为弱化色）。思考中用 primary + 加粗 + 斜体：
-                        // - primary 各主题都是鲜艳强调色（secondary 在 10/13 套
-                        //   主题里和 inactive 同色，不能用）
-                        // - 加粗是主题无关的兜底：就算某主题色值接近，粗细差异
-                        //   也肉眼可见
-                        // 与流式光标 ▌（primary+BOLD）同一视觉语言。
-                        let label_style = if is_streaming_now || cancelling {
+                    // 标签颜色随状态变化（对标 Claude Code：思考中亮、完成后
+                    // 降为弱化色）。思考中用 primary + 加粗 + 斜体：
+                    // - primary 各主题都是鲜艳强调色（secondary 在 10/13 套
+                    //   主题里和 inactive 同色，不能用）
+                    // - 加粗是主题无关的兜底：就算某主题色值接近，粗细差异
+                    //   也肉眼可见
+                    // 与流式光标 ▌（primary+BOLD）同一视觉语言。
+                    let label_style = if is_streaming_now || cancelling {
+                        Style::default()
+                            .fg(theme.primary)
+                            .add_modifier(Modifier::ITALIC | Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.inactive)
+                    };
+
+                    // 头部随状态变化（对标 Claude Code）：
+                    // 思考中   → `∴ Thinking…`（不带展开提示，结束时才出现）
+                    // 已完成   → `∴ Thought for 14s`（折叠态补展开提示）
+                    // 取消中   → `∴ Canceling…`
+                    let header_text = if cancelling {
+                        format!(
+                            "{}…",
+                            crate::core::i18n::t(
+                                "ui.thinking.cancelling",
+                                "Canceling",
+                                "Canceling"
+                            )
+                        )
+                    } else if is_streaming_now {
+                        format!(
+                            "{}…",
+                            crate::core::i18n::t("ui.thinking.label", "Thinking", "Thinking")
+                        )
+                    } else {
+                        match entry.reasoning_finished_elapsed_ms {
+                            Some(ms) => format!(
+                                "{} {}",
+                                crate::core::i18n::t(
+                                    "ui.thinking.thought_for",
+                                    "思考了",
+                                    "Thought for"
+                                ),
+                                format_thinking_duration(ms),
+                            ),
+                            // 历史会话恢复的条目没有冻结耗时，退回普通标签
+                            None => {
+                                crate::core::i18n::t("ui.thinking.label", "Thinking", "Thinking")
+                            }
+                        }
+                    };
+
+                    if is_expanded {
+                        // 展开态：头部（不重复展开提示）
+                        blocks.push(vec![Line::from(vec![
+                            Span::styled("∴ ", label_style),
+                            Span::styled(header_text, label_style),
+                        ])]);
+
+                        // 内容：dim 色 + 缩进 2 列，不走 markdown 段落排版。
+                        // 思考文本（尤其中文模型）行间普遍用空行分隔，markdown
+                        // 会把每行渲染成独立段落、段间空一行，整块稀疏得没法看。
+                        // 这里改回逐行渲染：保留每个思考步骤一行及其前导缩进；
+                        // 长行折行时续行继承源行缩进，源空行不渲染，行间不额外加空行。
+                        // 行内标记（**粗体** 等）转样式；``` 围栏代码段走完整
+                        // 代码渲染（语法高亮 + 边框，与正文同一视觉语言）。
+                        let content_width = wrap_width.saturating_sub(2);
+                        let thinking_style = if is_streaming_now || cancelling {
                             Style::default()
                                 .fg(theme.primary)
-                                .add_modifier(Modifier::ITALIC | Modifier::BOLD)
+                                .add_modifier(Modifier::ITALIC)
                         } else {
                             Style::default().fg(theme.inactive)
                         };
+                        let mut thinking_lines: Vec<Line<'static>> = Vec::new();
+                        let mut fence_lang: Option<String> = None;
+                        let mut fence_buf: Vec<String> = Vec::new();
+                        for raw_line in reasoning_display.lines() {
+                            let line = raw_line.trim_end();
 
-                        // 头部随状态变化（对标 Claude Code）：
-                        // 思考中   → `∴ Thinking…`（不带展开提示，结束时才出现）
-                        // 已完成   → `∴ Thought for 14s`（折叠态补展开提示）
-                        // 取消中   → `∴ Canceling…`
-                        let header_text = if cancelling {
-                            format!(
-                                "{}…",
-                                crate::core::i18n::t(
-                                    "ui.thinking.cancelling",
-                                    "Canceling",
-                                    "Canceling"
-                                )
-                            )
-                        } else if is_streaming_now {
-                            format!(
-                                "{}…",
-                                crate::core::i18n::t("ui.thinking.label", "Thinking", "Thinking")
-                            )
-                        } else {
-                            match entry.reasoning_finished_elapsed_ms {
-                                Some(ms) => format!(
-                                    "{} {}",
-                                    crate::core::i18n::t(
-                                        "ui.thinking.thought_for",
-                                        "思考了",
-                                        "Thought for"
-                                    ),
-                                    format_thinking_duration(ms),
-                                ),
-                                // 历史会话恢复的条目没有冻结耗时，退回普通标签
-                                None => crate::core::i18n::t(
-                                    "ui.thinking.label",
-                                    "Thinking",
-                                    "Thinking",
-                                ),
+                            // ``` 围栏：开段记语言，闭段整块渲染；围栏内的行
+                            // 攒进 buffer，不做行内 markdown 解析
+                            if let Some(rest) = line.trim_start().strip_prefix("```") {
+                                if fence_lang.is_none() {
+                                    fence_lang = Some(rest.trim().to_string());
+                                } else {
+                                    thinking_lines.extend(
+                                        crate::utils::markdown_parser::render_thinking_code_segment(
+                                            &fence_buf.join("\n"),
+                                            fence_lang.as_deref().unwrap_or(""),
+                                            Some(content_width),
+                                        ),
+                                    );
+                                    fence_lang = None;
+                                }
+                                continue;
                             }
-                        };
-
-                        if is_expanded {
-                            // 展开态：头部（不重复展开提示）
-                            blocks.push(vec![Line::from(vec![
-                                Span::styled("∴ ", label_style),
-                                Span::styled(header_text, label_style),
-                            ])]);
-
-                            // 内容：dim 色 + 缩进 2 列，不走 markdown 段落排版。
-                            // 思考文本（尤其中文模型）行间普遍用空行分隔，markdown
-                            // 会把每行渲染成独立段落、段间空一行，整块稀疏得没法看。
-                            // 这里改回逐行渲染：保留每个思考步骤一行及其前导缩进；
-                            // 长行折行时续行继承源行缩进，源空行不渲染，行间不额外加空行。
-                            // 行内标记（**粗体** 等）转样式；``` 围栏代码段走完整
-                            // 代码渲染（语法高亮 + 边框，与正文同一视觉语言）。
-                            let content_width = wrap_width.saturating_sub(2);
-                            let thinking_style = if is_streaming_now || cancelling {
-                                Style::default()
-                                    .fg(theme.primary)
-                                    .add_modifier(Modifier::ITALIC)
-                            } else {
-                                Style::default().fg(theme.inactive)
-                            };
-                            let mut thinking_lines: Vec<Line<'static>> = Vec::new();
-                            let mut fence_lang: Option<String> = None;
-                            let mut fence_buf: Vec<String> = Vec::new();
-                            for raw_line in reasoning_display.lines() {
-                                let line = raw_line.trim_end();
-
-                                // ``` 围栏：开段记语言，闭段整块渲染；围栏内的行
-                                // 攒进 buffer，不做行内 markdown 解析
-                                if let Some(rest) = line.trim_start().strip_prefix("```") {
-                                    if fence_lang.is_none() {
-                                        fence_lang = Some(rest.trim().to_string());
-                                    } else {
-                                        thinking_lines.extend(
-                                            crate::utils::markdown_parser::render_thinking_code_segment(
-                                                &fence_buf.join("\n"),
-                                                fence_lang.as_deref().unwrap_or(""),
-                                                Some(content_width),
-                                            ),
-                                        );
-                                        fence_lang = None;
-                                    }
-                                    continue;
-                                }
-                                if fence_lang.is_some() {
-                                    fence_buf.push(line.to_string());
-                                    continue;
-                                }
-
-                                if line.trim().is_empty() {
-                                    continue;
-                                }
-                                let indent = line.len() - line.trim_start().len();
-                                let indent_width =
-                                    crate::ui::utils::render::display_width(&line[..indent]);
-                                let first_width = content_width.saturating_sub(indent_width);
-                                let rest_width = first_width.max(2);
-                                let wrapped = crate::ui::utils::render::wrap_char_ranges(
-                                    &line.chars().collect::<Vec<_>>(),
-                                    first_width,
-                                    rest_width,
-                                )
-                                .into_iter()
-                                .map(|(start, end)| {
-                                    line.chars()
-                                        .skip(start)
-                                        .take(end - start)
-                                        .collect::<String>()
-                                });
-                                for (line_idx, w) in wrapped.into_iter().enumerate() {
-                                    let prefix = if line_idx == 0 {
-                                        "  ".to_string()
-                                    } else {
-                                        format!("  {}", &line[..indent])
-                                    };
-                                    let mut spans = vec![Span::raw(prefix)];
-                                    spans.extend(thinking_line_spans(
-                                        &w,
-                                        thinking_style,
-                                        line_idx == 0,
-                                    ));
-                                    // 围栏行等剥掉标记后为空：整行跳过，不留悬空行
-                                    if spans.len() > 1 {
-                                        thinking_lines.push(Line::from(spans));
-                                    }
-                                }
-                            }
-                            // 流式期间闭合 ``` 可能还没到：把攒着的半截代码段
-                            // 照常渲染，随流式增长逐帧补全
                             if fence_lang.is_some() {
-                                thinking_lines.extend(
-                                    crate::utils::markdown_parser::render_thinking_code_segment(
-                                        &fence_buf.join("\n"),
-                                        fence_lang.as_deref().unwrap_or(""),
-                                        Some(content_width),
-                                    ),
-                                );
+                                fence_buf.push(line.to_string());
+                                continue;
                             }
-                            if thinking_lines.is_empty() {
-                                let mut spans = vec![Span::raw("  ")];
+
+                            if line.trim().is_empty() {
+                                continue;
+                            }
+                            let indent = line.len() - line.trim_start().len();
+                            let indent_width =
+                                crate::ui::utils::render::display_width(&line[..indent]);
+                            let first_width = content_width.saturating_sub(indent_width);
+                            let rest_width = first_width.max(2);
+                            let wrapped = crate::ui::utils::render::wrap_char_ranges(
+                                &line.chars().collect::<Vec<_>>(),
+                                first_width,
+                                rest_width,
+                            )
+                            .into_iter()
+                            .map(|(start, end)| {
+                                line.chars()
+                                    .skip(start)
+                                    .take(end - start)
+                                    .collect::<String>()
+                            });
+                            for (line_idx, w) in wrapped.into_iter().enumerate() {
+                                let prefix = if line_idx == 0 {
+                                    "  ".to_string()
+                                } else {
+                                    format!("  {}", &line[..indent])
+                                };
+                                let mut spans = vec![Span::raw(prefix)];
                                 spans.extend(thinking_line_spans(
-                                    reasoning_trimmed,
+                                    &w,
                                     thinking_style,
-                                    true,
+                                    line_idx == 0,
                                 ));
-                                thinking_lines.push(Line::from(spans));
+                                // 围栏行等剥掉标记后为空：整行跳过，不留悬空行
+                                if spans.len() > 1 {
+                                    thinking_lines.push(Line::from(spans));
+                                }
                             }
-                            blocks.push(thinking_lines);
-                        } else {
-                            // 折叠态：完成的块补展开提示；思考中不显示提示
-                            // （进行中的耗时由状态行 `· thinking Xs` 负责）
-                            let mut header_spans = vec![
-                                Span::styled("∴ ", label_style),
-                                Span::styled(header_text, label_style),
-                            ];
-                            if !is_streaming_now && !cancelling {
-                                header_spans.push(Span::styled(
-                                    format!(
-                                        " {}",
-                                        crate::core::i18n::t(
-                                            "ui.thinking.expand_hint",
-                                            "(ctrl+o 展开思考)",
-                                            "(ctrl+o to expand)",
-                                        )
-                                    ),
-                                    Style::default().fg(theme.subtle),
-                                ));
-                            }
-                            blocks.push(vec![Line::from(header_spans)]);
                         }
+                        // 流式期间闭合 ``` 可能还没到：把攒着的半截代码段
+                        // 照常渲染，随流式增长逐帧补全
+                        if fence_lang.is_some() {
+                            thinking_lines.extend(
+                                crate::utils::markdown_parser::render_thinking_code_segment(
+                                    &fence_buf.join("\n"),
+                                    fence_lang.as_deref().unwrap_or(""),
+                                    Some(content_width),
+                                ),
+                            );
+                        }
+                        if thinking_lines.is_empty() {
+                            let mut spans = vec![Span::raw("  ")];
+                            spans.extend(thinking_line_spans(
+                                reasoning_trimmed,
+                                thinking_style,
+                                true,
+                            ));
+                            thinking_lines.push(Line::from(spans));
+                        }
+                        blocks.push(thinking_lines);
+                    } else {
+                        // 折叠态：完成的块补展开提示；思考中不显示提示
+                        // （进行中的耗时由状态行 `· thinking Xs` 负责）
+                        let mut header_spans = vec![
+                            Span::styled("∴ ", label_style),
+                            Span::styled(header_text, label_style),
+                        ];
+                        if !is_streaming_now && !cancelling {
+                            header_spans.push(Span::styled(
+                                format!(
+                                    " {}",
+                                    crate::core::i18n::t(
+                                        "ui.thinking.expand_hint",
+                                        "(ctrl+o 展开思考)",
+                                        "(ctrl+o to expand)",
+                                    )
+                                ),
+                                Style::default().fg(theme.subtle),
+                            ));
+                        }
+                        blocks.push(vec![Line::from(header_spans)]);
                     }
                     // 顶部 margin 规则：正文块的"顶部空行"是 thinking 与正文之间
                     // 唯一的间隔来源；只在正文确实会渲染时才加，避免条目尾部悬空行
@@ -831,8 +822,6 @@ mod tests {
         let mut entry = crate::types::ChatEntry::assistant("");
         entry.reasoning_content = Some("first step\n\nsecond step".to_string());
         entry.reasoning_finished_elapsed_ms = Some(14_000);
-        // 30 秒宽限窗口内可见
-        entry.reasoning_finished_at = Some(std::time::Instant::now());
         state.chat_history.push(entry);
         let idx = state.chat_history.len() - 1;
 
@@ -865,14 +854,13 @@ mod tests {
 
     /// 恢复的历史思考块（serde skip → finished_at/elapsed 均为 None）：
     /// 必须保持折叠可见、头部是普通 "Thinking"，绝不能被冻结成
-    /// "Thought for 1s"（finalize 无时钟基准时的旧 bug）也不能被 30 秒窗口隐藏。
+    /// "Thought for 1s"（finalize 无时钟基准时的旧 bug）。
     #[test]
     fn restored_history_thinking_blocks_stay_visible_without_bogus_duration() {
         let mut state = crate::ui::state::ChatState::new();
         let mut entry = crate::types::ChatEntry::assistant("");
         entry.reasoning_content = Some("restored reasoning content here".to_string());
-        // 模拟 serde 恢复：两个时间字段都是 None
-        assert!(entry.reasoning_finished_at.is_none());
+        // 模拟 serde 恢复：耗时尚未冻结
         assert!(entry.reasoning_finished_elapsed_ms.is_none());
         state.chat_history.push(entry);
         let idx = state.chat_history.len() - 1;
@@ -904,5 +892,41 @@ mod tests {
         assert_eq!(format_thinking_duration(500), "1s");
         assert_eq!(format_thinking_duration(14_000), "14s");
         assert_eq!(format_thinking_duration(65_000), "1m 5s");
+    }
+
+    /// 完成的 thinking 折叠头必须始终可见，`∴ Thought for Xs` 不得因为
+    /// "完成得够久"而消失。
+    ///
+    /// 旧行为靠 30 秒宽限窗口判断可见性，于是同一条历史里"刚完成能看到、
+    /// 跑一会儿消失、重启读回后又出现"，用户无法预期。窗口已移除。
+    #[test]
+    fn completed_thinking_label_stays_visible_for_the_rest_of_the_session() {
+        let mut state = crate::ui::state::ChatState::new();
+        let mut entry = crate::types::ChatEntry::assistant("");
+        entry.reasoning_content = Some("reasoning that outlives the old grace window".to_string());
+        entry.reasoning_finished_elapsed_ms = Some(3_000);
+        state.chat_history.push(entry);
+        let idx = state.chat_history.len() - 1;
+
+        let blocks = render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, 70, false);
+        assert!(
+            !blocks.is_empty(),
+            "completed thinking block must stay visible"
+        );
+        let header: String = blocks[0]
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            header.contains("Thought for 3s"),
+            "duration label must not disappear: {:?}",
+            header
+        );
+        assert!(header.contains("(ctrl+o to expand)"), "{:?}", header);
     }
 }

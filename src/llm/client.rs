@@ -1115,8 +1115,10 @@ impl StarClient {
     /// Detect provider name from base URL
     fn detect_provider(&self) -> String {
         // Zen 下一个 provider 承载多种协议，显示真实网关名而不是内部的兼容客户端名。
-        if crate::core::config::providers::is_opencode_zen(self.provider_id.as_deref(), &self.base_url)
-        {
+        if crate::core::config::providers::is_opencode_zen(
+            self.provider_id.as_deref(),
+            &self.base_url,
+        ) {
             return "OpenCode Zen".to_string();
         }
         match &self.provider {
@@ -1236,7 +1238,9 @@ mod tests {
             std::thread::spawn(move || {
                 while let Ok((mut stream, _)) = listener.accept() {
                     let mut buf = [0u8; 16384];
-                    let Ok(n) = stream.read(&mut buf) else { continue };
+                    let Ok(n) = stream.read(&mut buf) else {
+                        continue;
+                    };
                     let req = String::from_utf8_lossy(&buf[..n]).to_string();
                     let auth = req
                         .lines()
@@ -1269,7 +1273,9 @@ mod tests {
             );
             {
                 use crate::llm::LlmClient as _;
-                let _ = adapter.chat_completion(vec![StarMessage::user("hi")], None).await;
+                let _ = adapter
+                    .chat_completion(vec![StarMessage::user("hi")], None)
+                    .await;
             }
             let observed = rx
                 .recv_timeout(std::time::Duration::from_secs(10))
@@ -1288,7 +1294,9 @@ mod tests {
         );
         {
             use crate::llm::LlmClient as _;
-            let _ = adapter.chat_completion(vec![StarMessage::user("hi")], None).await;
+            let _ = adapter
+                .chat_completion(vec![StarMessage::user("hi")], None)
+                .await;
         }
         let observed = rx
             .recv_timeout(std::time::Duration::from_secs(10))
@@ -1343,7 +1351,12 @@ mod tests {
     #[test]
     fn zen_chat_models_route_to_openai_compatible() {
         use crate::llm::LlmProvider;
-        for m in ["deepseek-v4-pro", "glm-5.3", "space-bunny-free", "qwen3.8-max"] {
+        for m in [
+            "deepseek-v4-pro",
+            "glm-5.3",
+            "space-bunny-free",
+            "qwen3.8-max",
+        ] {
             assert_eq!(
                 infer_provider(m, ZEN_BASE_URL, false, Some("opencode")),
                 LlmProvider::Custom("openai-compatible".to_string()),
@@ -1392,12 +1405,7 @@ mod tests {
         use crate::llm::LlmProvider;
         // 回归保护：Zen 的接入不能改变其它 provider 的推断结果。
         assert_eq!(
-            infer_provider(
-                "gpt-4o",
-                "https://api.openai.com/v1",
-                false,
-                Some("openai")
-            ),
+            infer_provider("gpt-4o", "https://api.openai.com/v1", false, Some("openai")),
             LlmProvider::OpenAi
         );
         assert_eq!(
@@ -1410,12 +1418,7 @@ mod tests {
             LlmProvider::Anthropic
         );
         assert_eq!(
-            infer_provider(
-                "deepseek-chat",
-                "https://api.deepseek.com/v1",
-                false,
-                None
-            ),
+            infer_provider("deepseek-chat", "https://api.deepseek.com/v1", false, None),
             LlmProvider::DeepSeek
         );
         // 用户手填的第三方 Anthropic 兼容网关仍走 Custom("anthropic-compatible")。
