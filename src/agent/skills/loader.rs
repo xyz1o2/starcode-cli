@@ -90,9 +90,7 @@ impl SkillLoader {
         repo_url: &str,
         path_in_repo: Option<&str>,
     ) -> Option<SkillDefinition> {
-        let mut hasher = Sha256::new();
-        hasher.update(repo_url.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
+        let hash = crate::core::utils::paths::sha256_hex(repo_url.as_bytes());
 
         let cache_base = Storage::global_star_dir().join("skills_cache");
         let cache_dir = cache_base.join(&hash);

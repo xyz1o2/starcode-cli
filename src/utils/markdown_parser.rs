@@ -537,6 +537,9 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                 Tag::MetadataBlock(_) => {}
                 Tag::HtmlBlock => {}
                 Tag::DefinitionList | Tag::DefinitionListTitle | Tag::DefinitionListDefinition => {}
+                // pulldown-cmark 0.13 新增：sup/sub 内联标记，TUI 无对应样式，
+                // 按纯文本透传（与上方无样式标签同一处理）。
+                Tag::Superscript | Tag::Subscript => {}
             },
             Event::End(tag_end) => match tag_end {
                 TagEnd::Paragraph => {
@@ -638,6 +641,8 @@ fn render_markdown(text: &str, wrap_width: Option<usize>) -> Vec<Line<'static>> 
                 TagEnd::DefinitionList
                 | TagEnd::DefinitionListTitle
                 | TagEnd::DefinitionListDefinition => {}
+                // 与 Start 侧对称：sup/sub 透传，不做样式收尾。
+                TagEnd::Superscript | TagEnd::Subscript => {}
             },
             Event::Code(text) => {
                 if in_code_block {

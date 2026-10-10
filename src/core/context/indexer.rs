@@ -162,9 +162,7 @@ impl Indexer {
     }
 
     fn calculate_hash(&self, content: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(content);
-        format!("{:x}", hasher.finalize())
+        crate::core::utils::paths::sha256_hex(content.as_bytes())
     }
 
     /// 全库索引（天然增量）：并行遍历目录收集文件清单后逐个检测变更。

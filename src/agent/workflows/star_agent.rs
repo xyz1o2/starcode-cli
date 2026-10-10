@@ -951,9 +951,7 @@ impl StarAgent {
             .await
             .unwrap_or_default();
         let hash = {
-            let mut hasher = Sha256::new();
-            hasher.update(content.as_bytes());
-            format!("{:x}", hasher.finalize())
+            crate::core::utils::paths::sha256_hex(content.as_bytes())
         };
 
         {

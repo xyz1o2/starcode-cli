@@ -698,7 +698,11 @@ pub async fn fetch_official_marketplace_from_gcs(
             let mut entry = archive
                 .by_index(i)
                 .map_err(|e| format!("zip entry {}: {}", i, e))?;
-            let name = entry.name().to_string();
+            // zip 9 起 entry.name() 返回 Result<Cow<str>, ZipError>（文件名需解码）
+            let name = entry
+                .name()
+                .map_err(|e| format!("zip entry {} name: {}", i, e))?
+                .to_string();
             if !name.starts_with(GCS_ARC_PREFIX) {
                 continue;
             }
