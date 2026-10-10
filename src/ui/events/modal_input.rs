@@ -14,28 +14,7 @@ use tokio::sync::mpsc;
 
 type Err = Box<dyn std::error::Error>;
 
-/// 无论当前开着哪个 modal 都必须生效的全局键。
-///
-/// modal handler 的按键匹配不带修饰键判断（`match key.code`），所以
-/// `Ctrl+C` 会被当成 `Char('c')` 打进过滤框。返回 `true` 表示该键应当
-/// 跳过 modal 层、交回 `handle_key_event` 的全局分支。
-///
-/// 刻意**不含** `Esc` / `↑` / `↓` / `Enter` —— 那是 modal 自己的语义。
-pub fn is_global_key(key: crossterm::event::KeyEvent) -> bool {
-    use crossterm::event::{KeyCode, KeyModifiers};
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    match key.code {
-        // 中断生成 / 复制选区 / 双击退出
-        KeyCode::Char('c') => ctrl,
-        // 清屏
-        KeyCode::Char('l') => ctrl,
-        // 开关命令面板
-        KeyCode::Char('p') => ctrl,
-        // 帮助
-        KeyCode::F(1) => true,
-        _ => false,
-    }
-}
+
 
 /// 分发给栈顶 modal 的按键处理。
 ///
@@ -61,7 +40,9 @@ pub async fn handle_modal_key(
     // —— 于是 `Ctrl+P` 被当成字符 'p' 打进过滤框，`Ctrl+C` 被吃掉导致流式输出
     // 无法中断，`F1` 被 `_ => {}` 静默吞掉。这里前置放行，让这些键回落到
     // input.rs 的全局分支处理；modal 自身的 Esc/↑/↓/Enter 语义不受影响。
-    if is_global_key(key) {
+    //
+    // 放行名单由 `keymap::is_global_key` 从全局绑定注册表推导，与帮助文案同源。
+    if super::keymap::is_global_key(&key) {
         return Ok(false);
     }
 

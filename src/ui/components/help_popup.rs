@@ -54,70 +54,28 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
         ),
         (
             i18n::t("ui.help.section.control", "控制", "Control"),
+            // 由按键注册表生成，不要在这里手抄 —— 此前两份清单已经漂移出
+            // 「有键没文档」和「文档写了键却没有」的多处不一致。
+            // 新增全局绑定只需改 `events/keymap.rs` 的 GLOBAL_BINDINGS。
+            crate::ui::events::keymap::GLOBAL_BINDINGS
+                .iter()
+                .map(|d| (d.binding.label().to_string(), i18n::t("ui.help.control", d.zh, d.en)))
+                .collect(),
+        ),
+        (
+            i18n::t("ui.help.section.confirm", "审批时", "While approving"),
             vec![
                 (
-                    "Ctrl+P".to_string(),
-                    i18n::t(
-                        "ui.help.control.palette",
-                        "打开命令面板",
-                        "Open command palette",
-                    ),
-                ),
-                (
-                    "Ctrl+T".to_string(),
-                    i18n::t("ui.help.control.tasks", "切换任务面板", "Toggle tasks"),
-                ),
-                (
-                    "Ctrl+O".to_string(),
-                    i18n::t(
-                        "ui.help.control.transcript",
-                        "切换详细输出（transcript）",
-                        "Verbose output (transcript)",
-                    ),
-                ),
-                (
-                    "Ctrl+C".to_string(),
-                    i18n::t(
-                        "ui.help.control.cancel",
-                        "复制选区 / 中断生成 / 清空输入（连按两次退出）",
-                        "Copy selection / interrupt / clear input (press twice to exit)",
-                    ),
+                    "1/2/3/4".to_string(),
+                    i18n::t("ui.help.approve.choose", "选择处理方式", "Choose an action"),
                 ),
                 (
                     "Ctrl+Shift+D".to_string(),
                     i18n::t(
                         "ui.help.control.perm_debug",
-                        "切换权限调试面板（审批时）",
-                        "Toggle permission debug panel (while approving)",
+                        "切换权限调试面板",
+                        "Toggle permission debug panel",
                     ),
-                ),
-                (
-                    "Ctrl+D".to_string(),
-                    i18n::t("ui.help.control.exit", "退出程序", "Exit"),
-                ),
-                (
-                    "ESC".to_string(),
-                    i18n::t("ui.help.control.esc", "取消/关闭弹窗", "Cancel/close"),
-                ),
-                (
-                    "Shift+Tab".to_string(),
-                    i18n::t(
-                        "ui.help.control.plan",
-                        "切换 Plan/Build",
-                        "Toggle Plan/Build",
-                    ),
-                ),
-                (
-                    "Alt+T".to_string(),
-                    i18n::t(
-                        "ui.help.control.thinking",
-                        "切换思考深度（◌/○/◐/●）",
-                        "Cycle thinking depth (◌/○/◐/●)",
-                    ),
-                ),
-                (
-                    "Alt+Shift+T".to_string(),
-                    i18n::t("ui.help.control.theme", "切换主题", "Cycle theme"),
                 ),
             ],
         ),
