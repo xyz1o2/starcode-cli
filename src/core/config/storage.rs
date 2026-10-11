@@ -82,6 +82,26 @@ impl Storage {
         self.target_dir.join(STAR_DIR)
     }
 
+    /// StarLens 认知层目录 `.star/lens/`。
+    pub fn lens_dir(&self) -> PathBuf {
+        self.star_dir().join("lens")
+    }
+
+    /// Whole-Index 根文件（开工前注入模型的那份）。
+    pub fn lens_index_path(&self) -> PathBuf {
+        self.lens_dir().join("lens.txt")
+    }
+
+    /// 漂移检测的权威基线：object → source_sha256。
+    pub fn lens_baseline_path(&self) -> PathBuf {
+        self.lens_dir().join("baseline.json")
+    }
+
+    /// Managed Scope 规则快照。
+    pub fn lens_scope_path(&self) -> PathBuf {
+        self.lens_dir().join("scope.json")
+    }
+
     pub fn project_temp_dir(&self) -> PathBuf {
         self.star_dir().join(TMP_DIR_NAME)
     }

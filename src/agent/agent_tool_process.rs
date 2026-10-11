@@ -395,9 +395,23 @@ impl Agent {
         }
 
         let mut runnable_tool_calls: Vec<StarToolCall> = Vec::new();
+        let mut lens_grep_nudged = false;
         for tool_call in tool_calls {
             match hooks::run_pre_tool_hooks(user_input, tool_call).await {
                 Ok(()) => {
+                    // StarLens：首个 Grep 前轻推一次"先回想系统认知"（默认关，不拦截 grep）。
+                    if !lens_grep_nudged
+                        && tool_call.function.name == "Grep"
+                        && crate::core::context::lens_service::is_enabled()
+                    {
+                        messages.push(StarMessage::system(
+                            "StarLens: before grepping for where something lives or what calls what, \
+                             recall the injected System Cognition (StarLens) overview — it may already \
+                             name the file/owner. Grep stays correct for exact strings."
+                                .to_string(),
+                        ));
+                        lens_grep_nudged = true;
+                    }
                     runnable_tool_calls.push(tool_call.clone());
                 }
                 Err(reason) => {

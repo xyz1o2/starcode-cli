@@ -1499,6 +1499,13 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         sub_commands: &[],
     },
     SlashCommand {
+        name: "lens",
+        alt_names: &[],
+        description: "StarLens code cognition: build the index or show drift status",
+        category: "Tools",
+        sub_commands: &[],
+    },
+    SlashCommand {
         name: "fast",
         alt_names: &[],
         description: "Toggle fast/low-latency mode",

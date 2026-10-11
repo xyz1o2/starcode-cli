@@ -20,6 +20,38 @@ fn push_msg(ctx: &mut CommandContext<'_>, content: impl Into<String>) {
         .push(ChatEntry::assistant(content).with_streaming(false));
 }
 
+/// `/lens` —— StarLens 代码认知层：`build`（结构重建+落盘）/ `status`（漂移报告，默认）。
+pub async fn lens(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    use crate::core::config::storage::Storage;
+    use crate::core::context::lens_service;
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let storage = Storage::new(cwd);
+    let profile = lens_service::scope_profile();
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
+
+    let out = match sub {
+        "build" => match lens_service::rebuild(&storage, profile) {
+            Ok(r) => format!(
+                "# StarLens build\n\n- indexed: {}\n- observed: {}\n- excluded: {}\n- skipped_large: {}\n\n已写入 `.star/lens/lens.txt` 与 `baseline.json`（结构-only；语义 F/R/S 需带 model 的增强路径）。",
+                r.stats.indexed, r.stats.observed, r.stats.excluded, r.stats.skipped_large
+            ),
+            Err(e) => format!("# StarLens build 失败\n\n{e}"),
+        },
+        "status" | "" => match lens_service::check_drift(&storage, profile) {
+            Some(d) if d.is_aligned() => "# StarLens status\n\n✅ 对齐，无漂移。".to_string(),
+            Some(d) => format!(
+                "# StarLens status\n\n⚠️ 漂移 {} 项\n- stale: {:?}\n- missing: {:?}\n- orphan: {:?}\n- unbaselined: {:?}",
+                d.total(), d.stale, d.missing, d.orphan, d.unbaselined
+            ),
+            None => "# StarLens status\n\n尚无索引，先运行 `/lens build`。".to_string(),
+        },
+        _ => "用法：`/lens [build|status]`".to_string(),
+    };
+    push_msg(&mut ctx, out);
+    Ok(())
+}
+
 /// 把提示交给主对话回路（与 /git-status 等命令一致）
 async fn ask_agent(ctx: &mut CommandContext<'_>, prompt: String) -> CommandResult {
     let message_id = ctx.state.next_message_id;

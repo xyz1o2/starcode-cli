@@ -405,6 +405,20 @@ impl PromptBuilder {
             ));
         }
 
+        // StarLens 系统认知：开工前注入 overview（默认关，STAR_LENS_ENABLED 开启后生效）。
+        if crate::core::context::lens_service::is_enabled() {
+            let storage = crate::core::config::storage::Storage::new(cwd_path.to_path_buf());
+            let max_chars = std::env::var("STAR_LENS_MAX_CHARS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(8000);
+            if let Some(ov) =
+                crate::core::context::lens_service::overview_for_injection(&storage, max_chars)
+            {
+                semi_static_parts.push(format!("### System Cognition (StarLens)\n\n{}", ov));
+            }
+        }
+
         // Output style: 用户通过 /output-style 设置的响应风格
         if let Some(style) = output_style {
             let instruction = match style {

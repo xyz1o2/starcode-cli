@@ -599,7 +599,7 @@ impl BaseDeclarativeTool for CodebaseSearchTool {
     }
 
     fn description(&self) -> &str {
-        "ACE-POWERED codebase search. PRIMARY tool for conceptual/functional queries (architecture, flow, ownership, tests, config, permissions, providers, UI). Returns ranked code context with match signals."
+        "Ranked lexical codebase search (TF-IDF + query expansion + rank fusion). Best for ranked keyword/structural locate across files; returns ranked snippets with match signals. Lexical, NOT meaning-based — for exact strings use Grep, for filenames use Glob."
     }
 
     fn kind(&self) -> Kind {
@@ -612,7 +612,7 @@ impl BaseDeclarativeTool for CodebaseSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Natural language query (e.g. 'how is authentication handled', 'where are user settings stored')"
+                    "description": "Keywords or a short phrase whose terms appear in the code (e.g. 'retry backoff', 'parse config toml')"
                 },
                 "path": {
                     "type": "string",

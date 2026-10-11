@@ -303,6 +303,7 @@ pub async fn handle_command(
         "recap" | "away" | "catchup" => extended::recap(ctx, args).await,
         // ── 对标 Claude Code：parity.rs 里补齐的实现 ─────────────────────
         "env" => parity::env(ctx, args).await,
+        "lens" => parity::lens(ctx, args).await,
         "release-notes" => parity::release_notes(ctx, args).await,
         "history" => parity::history(ctx, args).await,
         "mode" => parity::mode(ctx, args).await,
