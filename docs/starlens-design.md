@@ -236,7 +236,9 @@ sym: AgentRequest, StreamMessage, AgentTaskUpdate
   - `/lens [build [--enrich]|status|update]` 命令：`parity.rs` + `mod.rs` 分支 + `system.rs` ALL_COMMANDS（category `Tools`）。
   - **语义增强已接线**：`AgentRequest::LensRebuild{message_id, enrich}`（`messages.rs`）→ `control_requests.rs` 用 `StarAgent::get_client()` 跑 `rebuild_enriched`，结果经 `StreamMessage` 回显；`session.rs` 对流式回合内到达的该请求安全跳过并回执。`/lens build --enrich` 触发真实 F/R/S。
 
-待做：P4（把 CodeGraph `build_call_graph`/`trace_call_chain` 提升为显式工具）、P5（重型治理）。
+- **P4** CodeGraph 提升为一等公民工具：`code_graph_tool.rs`（`CodeGraph` 工具，`symbol`→who-calls/callees/调用链，底层复用 `trace_call_chain`，只读、spawn_blocking）；注册于 `agent_runtime.rs`、入 `ToolName` 枚举（`constants.rs`）+ `CORE_TOOL_NAMES`、带 `tool-description-code_graph.md`。
+
+待做：P5（重型治理：baseline CAS / Ledger 审计 / scope 变更事务，按需）。
 
 ## 12. 成功指标（怎么知道做成了）
 

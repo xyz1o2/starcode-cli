@@ -110,15 +110,25 @@ fn hash_file(path: &Path) -> Option<String> {
     std::fs::read(path).ok().map(|b| sha256_hex(&b))
 }
 
-/// 落盘：写 `lens.txt` + `baseline.json` 到 `.star/lens/`（目录自动创建）。
+/// 落盘：原子写 `lens.txt` + `baseline.json` 到 `.star/lens/`（目录自动创建）。
+/// 原子写（临时文件 + rename）避免崩溃中途把已提交的索引写坏成半截。
 pub fn persist(
     storage: &crate::core::config::storage::Storage,
     result: &BuildResult,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(storage.lens_dir())?;
-    std::fs::write(storage.lens_index_path(), result.index.to_text())?;
-    std::fs::write(storage.lens_baseline_path(), result.baseline.to_json())?;
+    atomic_write(&storage.lens_index_path(), &result.index.to_text())?;
+    atomic_write(&storage.lens_baseline_path(), &result.baseline.to_json())?;
     Ok(())
+}
+
+/// 原子写：先写同目录临时文件再 rename，保证读者永远看到完整内容。
+pub fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, content)?;
+    // Windows 下 rename 覆盖已存在目标会失败；先尽力删除旧文件。
+    let _ = std::fs::remove_file(path);
+    std::fs::rename(&tmp, path)
 }
 
 #[cfg(test)]
@@ -183,6 +193,23 @@ mod tests {
         let mut b = Baseline { version: 1, objects: BTreeMap::new() };
         b.objects.insert("a.rs".into(), "deadbeef".into());
         assert_eq!(Baseline::from_json(&b.to_json()).unwrap(), b);
+    }
+
+    #[test]
+    fn scratch_real_repo_runtime_build() {
+        // 临时真机验证：拿本仓真实 src/runtime 跑结构 build（Full 让其下源码全 Index）。
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime");
+        let r = build_structural_index(&root, ScopeProfile::Full);
+        eprintln!(
+            "[SCRATCH] indexed={} observed={} excluded={} skipped_large={}",
+            r.stats.indexed, r.stats.observed, r.stats.excluded, r.stats.skipped_large
+        );
+        if let Some(e) = r.index.entries.iter().find(|e| e.object.contains("messages")) {
+            eprintln!("[SCRATCH] sample entry:\n{}", e.to_block());
+        } else if let Some(e) = r.index.entries.first() {
+            eprintln!("[SCRATCH] sample entry:\n{}", e.to_block());
+        }
+        assert!(r.stats.indexed > 0);
     }
 }
 

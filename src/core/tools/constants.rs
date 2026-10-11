@@ -41,6 +41,7 @@ pub enum ToolName {
     GetDiagnostics,
     CodebaseSearch,
     ProjectMap,
+    CodeGraph,
     NextEdit,
 
     // Git/GitHub
@@ -132,6 +133,7 @@ impl ToolName {
             ToolName::GetDiagnostics => "get_diagnostics",
             ToolName::CodebaseSearch => "CodebaseSearch",
             ToolName::ProjectMap => "ProjectMap",
+            ToolName::CodeGraph => "CodeGraph",
             ToolName::NextEdit => "next_edit",
 
             // Git/GitHub
@@ -220,6 +222,7 @@ impl ToolName {
             "get_diagnostics" => Some(ToolName::GetDiagnostics),
             "CodebaseSearch" => Some(ToolName::CodebaseSearch),
             "ProjectMap" => Some(ToolName::ProjectMap),
+            "CodeGraph" => Some(ToolName::CodeGraph),
             "next_edit" => Some(ToolName::NextEdit),
             "git_insight" => Some(ToolName::GitInsight),
             "git_rewind" => Some(ToolName::GitRewind),
@@ -297,6 +300,7 @@ impl ToolName {
             ToolName::GetDiagnostics,
             ToolName::CodebaseSearch,
             ToolName::ProjectMap,
+            ToolName::CodeGraph,
             ToolName::NextEdit,
             // Git/GitHub
             ToolName::GitInsight,
@@ -359,6 +363,7 @@ impl ToolName {
                 | ToolName::ListDir
                 | ToolName::CodebaseSearch
                 | ToolName::ProjectMap
+                | ToolName::CodeGraph
                 | ToolName::GetDiagnostics
                 | ToolName::LSP
                 | ToolName::WebSearch
@@ -478,6 +483,7 @@ mod alias_tests {
         assert!(is_read_only_tool_name("Grep"));
         assert!(is_read_only_tool_name("CodebaseSearch"));
         assert!(is_read_only_tool_name("ProjectMap"));
+        assert!(is_read_only_tool_name("CodeGraph"));
         assert!(is_read_only_tool_name("get_diagnostics"));
         assert!(is_read_only_tool_name("ListDir"));
         // 编辑工具不是只读

@@ -37,6 +37,50 @@ pub enum LlmErrorKind {
     Unknown,
 }
 
+/// 错误文本里是否**作为一个独立的 token** 出现了某个 HTTP 状态码。
+///
+/// # 为什么要卡边界
+///
+/// 早先这里直接 `contains("401")` / `contains("403")`，而 provider 错误文本
+/// 是自由文本，里面到处是数字：毫秒数、token 数、端口号、请求 ID、字节偏移。
+/// 于是
+///
+/// ```text
+/// "operation timed out after 40130ms"   // 含 "401" → 被判成 Auth
+/// "prompt is too long: 250403 tokens"   // 含 "403" → 被判成 Auth
+/// "error sending request for url (https://api.example.com:4013/v1)"
+/// ```
+///
+/// 全部落进 `Auth`。而 `Auth` 是**终止类**（见 [`LlmErrorKind::is_terminal`]）：
+/// agent 立刻停止重试，并把一条网络超时渲染成"The API key was rejected"。
+/// 用户被指向 `/provider` 去换一个完全正确的 key —— 既没人能修，也没人知道
+/// 真正该看的是超时。这比误报本身更糟。
+///
+/// 判定规则：出现位置的前后都不能是字母或数字。JSON 里的 `"code":"403"`
+/// 两侧是引号，仍然算命中。
+pub fn mentions_status_code(error: &str, code: u16) -> bool {
+    let lower = error.to_lowercase();
+    let needle = code.to_string();
+    let bytes = lower.as_bytes();
+    let mut search_from = 0usize;
+
+    while let Some(rel) = lower[search_from..].find(&needle) {
+        let start = search_from + rel;
+        let end = start + needle.len();
+        let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let after_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        // 不是独立 token（"40130" 里的 "401"），从下一个字节继续找。
+        search_from = start + 1;
+        if search_from >= lower.len() {
+            break;
+        }
+    }
+    false
+}
+
 impl LlmErrorKind {
     /// 按子串分类。调用方传原始错误文本即可，大小写不敏感。
     pub fn classify(error: &str) -> Self {
@@ -45,7 +89,7 @@ impl LlmErrorKind {
         // ── 先判"重试也没用"的，这些必须优先于宽泛的网络关键词 ──
         // 欠费文案各家不同：OpenAI 是 insufficient_quota，DeepSeek 是
         // Insufficient Balance，硅基/阿里系常见 arrearage（欠费）。
-        if lower.contains("402")
+        if mentions_status_code(&lower, 402)
             || lower.contains("payment required")
             || lower.contains("insufficient balance")
             || lower.contains("insufficient_quota")
@@ -58,8 +102,8 @@ impl LlmErrorKind {
         {
             return Self::Quota;
         }
-        if lower.contains("401")
-            || lower.contains("403")
+        if mentions_status_code(&lower, 401)
+            || mentions_status_code(&lower, 403)
             || lower.contains("unauthorized")
             || lower.contains("incorrect api key")
             || lower.contains("invalid api key")
@@ -71,13 +115,19 @@ impl LlmErrorKind {
         }
 
         // ── 可退避重试的 ──
-        if lower.contains("429") || lower.contains("rate limit") || lower.contains("rate_limit") {
+        if mentions_status_code(&lower, 429)
+            || lower.contains("rate limit")
+            || lower.contains("rate_limit")
+        {
             return Self::RateLimit;
         }
         if lower.contains("too many requests") {
             return Self::RateLimit;
         }
-        if lower.contains("529") || lower.contains("overloaded") || lower.contains("capacity") {
+        if mentions_status_code(&lower, 529)
+            || lower.contains("overloaded")
+            || lower.contains("capacity")
+        {
             return Self::Overloaded;
         }
 
@@ -92,10 +142,10 @@ impl LlmErrorKind {
             return Self::ContextWindow;
         }
 
-        if lower.contains("500")
-            || lower.contains("502")
-            || lower.contains("503")
-            || lower.contains("504")
+        if mentions_status_code(&lower, 500)
+            || mentions_status_code(&lower, 502)
+            || mentions_status_code(&lower, 503)
+            || mentions_status_code(&lower, 504)
             || lower.contains("internal server error")
             || lower.contains("bad gateway")
             || lower.contains("service unavailable")
@@ -123,8 +173,8 @@ impl LlmErrorKind {
             return Self::Network;
         }
 
-        if lower.contains("400")
-            || lower.contains("422")
+        if mentions_status_code(&lower, 400)
+            || mentions_status_code(&lower, 422)
             || lower.contains("invalid_request")
             || lower.contains("bad request")
         {
@@ -310,6 +360,78 @@ mod tests {
         assert_eq!(retry_after_secs("no hint here"), None);
         // 上限保护：别让服务端一个离谱的值把 UI 挂住一小时。
         assert_eq!(retry_after_secs("retry-after: 99999"), Some(120));
+    }
+
+    // ── 状态码必须按独立 token 匹配 ──
+    // 下面是 `contains("401")` / `contains("403")` 时代的真实回归：provider
+    // 错误文本里到处是数字，裸子串匹配会把网络超时、token 数、端口号当成
+    // 认证失败。而 Auth 是终止类 —— agent 会停止重试，并让用户去换一个
+    // 根本没坏的 key。
+    #[test]
+    fn digits_inside_other_numbers_are_not_status_codes() {
+        assert_eq!(
+            LlmErrorKind::classify("operation timed out after 40130ms"),
+            LlmErrorKind::Network,
+            "a timeout must not be reported as an auth failure"
+        );
+        assert_eq!(
+            LlmErrorKind::classify("operation timed out after 40300ms"),
+            LlmErrorKind::Network
+        );
+        assert_eq!(
+            LlmErrorKind::classify(
+                "400 invalid_request_error: prompt is too long: 250403 tokens > 200000 maximum"
+            ),
+            LlmErrorKind::ContextWindow,
+            "token counts must not be read as status codes"
+        );
+        assert_eq!(
+            LlmErrorKind::classify("error sending request for url (https://api.example.com:4013/v1)"),
+            LlmErrorKind::Network,
+            "a port number must not be read as a status code"
+        );
+    }
+
+    #[test]
+    fn a_timeout_must_stay_retryable() {
+        // 误报的实际代价在这里：Auth 是终止类，超时是可退避重试的。
+        let kind = LlmErrorKind::classify("operation timed out after 40130ms");
+        assert!(kind.is_retryable());
+        assert!(!kind.is_terminal(), "a timeout must never be terminal");
+    }
+
+    #[test]
+    fn standalone_status_codes_still_match() {
+        // 边界收紧后，真正的 401/403/429/502 一个都不能漏判 —— 这是修复的红线。
+        for (err, want) in [
+            (
+                "Provider error: rig openai stream error: ProviderResponseError: status 403 Forbidden",
+                LlmErrorKind::Auth,
+            ),
+            ("401 Unauthorized", LlmErrorKind::Auth),
+            ("HTTP/1.1 429 Too Many Requests", LlmErrorKind::RateLimit),
+            ("502 Bad Gateway", LlmErrorKind::ServerError),
+            (
+                r#"{"error":{"code":"403","message":"forbidden"}}"#,
+                LlmErrorKind::Auth,
+            ),
+            ("Error 529: overloaded_error", LlmErrorKind::Overloaded),
+            ("402 Payment Required", LlmErrorKind::Quota),
+        ] {
+            assert_eq!(LlmErrorKind::classify(err), want, "for {err}");
+        }
+    }
+
+    #[test]
+    fn mentions_status_code_respects_token_boundaries() {
+        assert!(mentions_status_code("status 403 Forbidden", 403));
+        assert!(mentions_status_code("HTTP/1.1 401", 401));
+        assert!(mentions_status_code("503", 503));
+        // 非独立 token 一律不算
+        assert!(!mentions_status_code("after 40130ms", 401));
+        assert!(!mentions_status_code("250403 tokens", 403));
+        assert!(!mentions_status_code("localhost:4013", 401));
+        assert!(!mentions_status_code("no numbers here", 401));
     }
 
     #[test]

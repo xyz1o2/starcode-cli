@@ -208,6 +208,7 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     "Bash",
     "CodebaseSearch",
     "ProjectMap",
+    "CodeGraph",
     "TodoWrite",
     // 任务列表回读：TodoWrite 是只写的——模型写下计划后，若无法读回，
     // 长程任务在压缩或轮次推进后就失去了外部记忆锚点。这里把读回工具

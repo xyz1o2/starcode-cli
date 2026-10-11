@@ -693,7 +693,7 @@ impl StarClient {
             }
             Err(e) => {
                 let err_str = e.to_string();
-                if err_str.contains(HTTP_STATUS_401)
+                if crate::llm::error_kind::mentions_status_code(&err_str, 401)
                     || err_str.contains(AUTH_ERROR_UNAUTHORIZED)
                     || err_str.contains(AUTH_ERROR_INCORRECT_KEY)
                 {
@@ -795,7 +795,7 @@ impl StarClient {
                 }
                 let err_str = e.to_string();
                 let kind = crate::llm::error_kind::LlmErrorKind::classify(&err_str);
-                if err_str.contains(HTTP_STATUS_401)
+                if crate::llm::error_kind::mentions_status_code(&err_str, 401)
                     || err_str.contains(AUTH_ERROR_UNAUTHORIZED)
                     || err_str.contains(AUTH_ERROR_INCORRECT_KEY)
                 {

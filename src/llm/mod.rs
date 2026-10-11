@@ -8,7 +8,7 @@ pub mod rig_adapter;
 pub mod thinking;
 
 pub use crate::core::config::models::ModelInfo;
-pub use error_kind::{diagnose, retry_after_secs, LlmErrorKind};
+pub use error_kind::{diagnose, mentions_status_code, retry_after_secs, LlmErrorKind};
 pub use mock::MockClient;
 pub use openai_compatible::OpenAiCompatibleClient;
 pub use providers::{BedrockProvider, GeminiProvider, GrokProvider, VertexProvider};

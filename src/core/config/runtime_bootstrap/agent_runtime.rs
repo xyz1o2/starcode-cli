@@ -137,6 +137,7 @@ fn register_agent_execution_tools(
 
     use crate::core::tools::codebase_search::CodebaseSearchTool;
     tool_registry.register_tool(Arc::new(CodebaseSearchTool::new(config.clone())));
+    tool_registry.register_tool(Arc::new(crate::core::tools::code_graph_tool::CodeGraphTool::new()));
 
     use crate::core::tools::shell::ShellTool;
     tool_registry.register_tool(Arc::new(ShellTool::new(
