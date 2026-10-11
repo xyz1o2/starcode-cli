@@ -372,6 +372,11 @@ pub enum AgentRequest {
         message_id: u64,
     },
     ResetSession,
+    /// StarLens：重建代码认知索引并落盘。`enrich=true` 时用模型补 F/R/S（消耗 token）。
+    LensRebuild {
+        message_id: u64,
+        enrich: bool,
+    },
     UpdateGitStatus(String),
     ToolConfirmationResponse {
         tool_calls: Vec<StarToolCall>,

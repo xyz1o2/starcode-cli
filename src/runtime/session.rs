@@ -249,6 +249,19 @@ pub async fn handle_streaming_request(
                 .push_back(DeferredContextAction::Reset);
             StreamingRequestOutcome::Continue
         }
+        Some(AgentRequest::LensRebuild { message_id, .. }) => {
+            // 重建可能很重（带 --enrich 时是一批模型调用），不在流式回合内跑；
+            // 回执一句提示让用户空闲时再触发。空闲路径走 control_requests::handle_request。
+            let _ = context
+                .tx
+                .send(StreamMessage::AssistantNote {
+                    message_id,
+                    content: "StarLens: 当前回合进行中，已跳过本次重建；请在空闲时再运行 /lens build。"
+                        .to_string(),
+                })
+                .await;
+            StreamingRequestOutcome::Continue
+        }
         Some(AgentRequest::SetApprovalMode(mode)) => {
             deferred.pending_set_approval_mode = Some(mode);
             StreamingRequestOutcome::Continue

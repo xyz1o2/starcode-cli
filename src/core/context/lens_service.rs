@@ -4,10 +4,13 @@
 //! PreToolUse nudge 由调用方在确认 `is_enabled()` 后接入。
 
 use super::lens::WholeIndex;
-use super::lens_build::{build_structural_index, persist, Baseline, BuildResult};
+use super::lens_build::{build_structural_index, persist, Baseline, BuildResult, BuildStats};
 use super::lens_drift::{detect_drift, DriftReport};
-use super::lens_scope::ScopeProfile;
+use super::lens_extract::extract_structural;
+use super::lens_scope::{evaluate, ScopeProfile};
 use crate::core::config::storage::Storage;
+use crate::core::context::lens::ScopeRole;
+use crate::core::utils::paths::sha256_hex;
 use std::collections::BTreeSet;
 
 fn parse_enabled(v: Option<&str>) -> bool {
@@ -79,6 +82,48 @@ pub fn check_drift(storage: &Storage, profile: ScopeProfile) -> Option<DriftRepo
     let (index, baseline) = load(storage)?;
     let objs: BTreeSet<String> = index.entries.iter().map(|e| e.object.clone()).collect();
     Some(detect_drift(&storage.project_root(), profile, &baseline, &objs))
+}
+
+/// 增量更新：检测漂移 → 只重算受影响对象（结构-only）→ 落盘。完成 §6 的"检测→标脏→重算"闭环。
+/// 返回更新前检测到的漂移报告（已对齐则 index/baseline 不动）。无索引返回 None。
+pub fn update(storage: &Storage, profile: ScopeProfile) -> Option<DriftReport> {
+    let (mut index, mut baseline) = load(storage)?;
+    let root = storage.project_root();
+    let objs: BTreeSet<String> = index.entries.iter().map(|e| e.object.clone()).collect();
+    let drift = detect_drift(&root, profile, &baseline, &objs);
+    if drift.is_aligned() {
+        return Some(drift);
+    }
+
+    // 删除 Missing + Orphan：entry 清掉；Missing 还要从 baseline 移除。
+    let gone: BTreeSet<&String> = drift.missing.iter().chain(drift.orphan.iter()).collect();
+    index.entries.retain(|e| !gone.contains(&e.object));
+    for obj in &drift.missing {
+        baseline.objects.remove(obj);
+    }
+
+    // 重算 Stale + Unbaselined：按当前角色处理。
+    for obj in drift.stale.iter().chain(drift.unbaselined.iter()) {
+        let Ok(bytes) = std::fs::read(root.join(obj)) else { continue };
+        let sha = sha256_hex(&bytes);
+        baseline.objects.insert(obj.clone(), sha.clone());
+        if evaluate(obj, profile) == ScopeRole::Index {
+            if let Ok(content) = String::from_utf8(bytes) {
+                let fresh = extract_structural(obj, &content, ScopeRole::Index, sha);
+                match index.entries.iter_mut().find(|e| &e.object == obj) {
+                    Some(slot) => *slot = fresh,
+                    None => index.entries.push(fresh),
+                }
+            }
+        } else {
+            // 降级为非 Index：确保不残留旧 entry。
+            index.entries.retain(|e| &e.object != obj);
+        }
+    }
+
+    let result = BuildResult { index, baseline, stats: BuildStats::default() };
+    persist(storage, &result).ok()?;
+    Some(drift)
 }
 
 /// 取注入用的 Overview 文本，按预算截断。无索引/空返回 None。
@@ -156,6 +201,34 @@ mod tests {
         assert!(full.contains("@src/runtime/a.rs"));
         let clipped = overview_for_injection(&storage, 20).unwrap();
         assert!(clipped.contains("truncated at 20 chars"));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn update_refreshes_only_affected_and_realigns() {
+        let root = tmp_root();
+        fs::create_dir_all(root.join("src/runtime")).unwrap();
+        fs::write(root.join("src/runtime/a.rs"), "pub fn a() {}\n").unwrap();
+        fs::write(root.join("src/runtime/d.rs"), "pub fn d() {}\n").unwrap();
+        let storage = Storage::new(root.clone());
+        rebuild(&storage, ScopeProfile::Core).unwrap();
+
+        // 改 a.rs（stale）、删 d.rs（missing+orphan）、增 c.rs（unbaselined）。
+        fs::write(root.join("src/runtime/a.rs"), "pub fn a() { let x = 1; }\n").unwrap();
+        fs::remove_file(root.join("src/runtime/d.rs")).unwrap();
+        fs::write(root.join("src/runtime/c.rs"), "pub fn c() {}\n").unwrap();
+
+        let pre = update(&storage, ScopeProfile::Core).expect("update");
+        assert!(!pre.is_aligned(), "更新前应检测到漂移");
+
+        // 更新后重新检测应已对齐。
+        assert!(check_drift(&storage, ScopeProfile::Core).unwrap().is_aligned());
+
+        let (idx, base) = load(&storage).unwrap();
+        assert!(idx.entries.iter().any(|e| e.object == "src/runtime/c.rs"));
+        assert!(!idx.entries.iter().any(|e| e.object == "src/runtime/d.rs"));
+        assert!(!base.objects.contains_key("src/runtime/d.rs"));
 
         fs::remove_dir_all(&root).ok();
     }

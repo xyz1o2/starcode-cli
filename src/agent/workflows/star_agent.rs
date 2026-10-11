@@ -56,6 +56,11 @@ pub struct StarAgent {
 }
 
 impl StarAgent {
+    /// 旁路功能（如 StarLens 语义增强）复用的 client 克隆。
+    pub fn get_client(&self) -> StarClient {
+        self.client.clone()
+    }
+
     fn initial_approval_mode(config: &Config) -> ApprovalMode {
         match config.approval_mode() {
             crate::core::policy::ApprovalMode::Default => ApprovalMode::Default,

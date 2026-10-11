@@ -229,13 +229,14 @@ sym: AgentRequest, StreamMessage, AgentTaskUpdate
 
 - **P0** codebase_search 描述消除错配：`tool-description-codebase_search.md` + `codebase_search.rs` 的 `description()`/query schema 改为诚实的"ranked lexical"。
 - **P1** StarLens 库核心：`src/core/context/lens.rs`（模型/紧凑格式）、`lens_scope.rs`（Managed Scope + secret 红线）、`lens_extract.rs`（tree-sitter 结构抽取）、`lens_build.rs`（全仓组装 + `.star/lens/` 落盘 + baseline）、`lens_enrich.rs`（prompt/parse/apply + 实时 `StarClient` 适配 `enrich_entry_with_client`）、`lens_service.rs`（门面 + `STAR_LENS_*` 门控 + `rebuild_enriched`）。
-- **P2** 漂移检测：`lens_drift.rs`（Stale/Missing/Orphan/Unbaselined）。
+- **P2** 漂移检测 + 增量闭环：`lens_drift.rs`（Stale/Missing/Orphan/Unbaselined）+ `lens_service::update`（只重算受影响对象并落盘，完成"检测→标脏→重算"闭环）。
 - **P3** agent 接线（全部 `STAR_LENS_ENABLED` 门控，默认关，不碰默认行为）：
   - 开工前注入 overview：`prompt_builder.rs` 的 `semi_static_parts` 处；
   - `PreToolUse(Grep)` nudge：`agent_tool_process.rs` 的 `Ok(())` 分支，每批一次；
-  - `/lens [build|status]` 命令：`parity.rs` + `mod.rs` 分支 + `system.rs` ALL_COMMANDS（category `Tools`）。
+  - `/lens [build [--enrich]|status|update]` 命令：`parity.rs` + `mod.rs` 分支 + `system.rs` ALL_COMMANDS（category `Tools`）。
+  - **语义增强已接线**：`AgentRequest::LensRebuild{message_id, enrich}`（`messages.rs`）→ `control_requests.rs` 用 `StarAgent::get_client()` 跑 `rebuild_enriched`，结果经 `StreamMessage` 回显；`session.rs` 对流式回合内到达的该请求安全跳过并回执。`/lens build --enrich` 触发真实 F/R/S。
 
-待做：P4（把 CodeGraph `build_call_graph`/`trace_call_chain` 提升为显式工具）、P5（重型治理）、以及把 `rebuild_enriched` 接到会话启动/命令以跑真实 F/R/S 增强。
+待做：P4（把 CodeGraph `build_call_graph`/`trace_call_chain` 提升为显式工具）、P5（重型治理）。
 
 ## 12. 成功指标（怎么知道做成了）
 

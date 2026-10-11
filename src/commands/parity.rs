@@ -20,33 +20,47 @@ fn push_msg(ctx: &mut CommandContext<'_>, content: impl Into<String>) {
         .push(ChatEntry::assistant(content).with_streaming(false));
 }
 
-/// `/lens` —— StarLens 代码认知层：`build`（结构重建+落盘）/ `status`（漂移报告，默认）。
+/// `/lens` —— StarLens 代码认知层：`build [--enrich]` / `status`（默认）/ `update`。
 pub async fn lens(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     use crate::core::config::storage::Storage;
     use crate::core::context::lens_service;
 
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
+
+    // build 走 agent（可带 --enrich 用模型补 F/R/S），结果经 StreamMessage 异步回显。
+    if sub == "build" {
+        let enrich = args.iter().any(|a| a == "--enrich" || a == "enrich");
+        let message_id = ctx.state.next_message_id;
+        ctx.state.next_message_id += 1;
+        ctx.agent_tx
+            .send(AgentRequest::LensRebuild { message_id, enrich })
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    // status / update 本地直接算（不需模型）。
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let storage = Storage::new(cwd);
     let profile = lens_service::scope_profile();
-    let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
-
     let out = match sub {
-        "build" => match lens_service::rebuild(&storage, profile) {
-            Ok(r) => format!(
-                "# StarLens build\n\n- indexed: {}\n- observed: {}\n- excluded: {}\n- skipped_large: {}\n\n已写入 `.star/lens/lens.txt` 与 `baseline.json`（结构-only；语义 F/R/S 需带 model 的增强路径）。",
-                r.stats.indexed, r.stats.observed, r.stats.excluded, r.stats.skipped_large
-            ),
-            Err(e) => format!("# StarLens build 失败\n\n{e}"),
-        },
         "status" | "" => match lens_service::check_drift(&storage, profile) {
             Some(d) if d.is_aligned() => "# StarLens status\n\n✅ 对齐，无漂移。".to_string(),
             Some(d) => format!(
-                "# StarLens status\n\n⚠️ 漂移 {} 项\n- stale: {:?}\n- missing: {:?}\n- orphan: {:?}\n- unbaselined: {:?}",
+                "# StarLens status\n\n⚠️ 漂移 {} 项\n- stale: {:?}\n- missing: {:?}\n- orphan: {:?}\n- unbaselined: {:?}\n\n运行 `/lens update` 增量重算。",
                 d.total(), d.stale, d.missing, d.orphan, d.unbaselined
             ),
             None => "# StarLens status\n\n尚无索引，先运行 `/lens build`。".to_string(),
         },
-        _ => "用法：`/lens [build|status]`".to_string(),
+        "update" => match lens_service::update(&storage, profile) {
+            Some(d) if d.is_aligned() => "# StarLens update\n\n✅ 本已对齐，无需重算。".to_string(),
+            Some(d) => format!(
+                "# StarLens update\n\n已增量重算 {} 项（stale {} / unbaselined {} 刷新，missing {} / orphan {} 清理）。",
+                d.total(), d.stale.len(), d.unbaselined.len(), d.missing.len(), d.orphan.len()
+            ),
+            None => "# StarLens update\n\n尚无索引，先运行 `/lens build`。".to_string(),
+        },
+        _ => "用法：`/lens [build|build --enrich|status|update]`".to_string(),
     };
     push_msg(&mut ctx, out);
     Ok(())

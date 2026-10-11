@@ -200,6 +200,49 @@ pub async fn handle_request(
         AgentRequest::ResetSession => {
             agent.clear_session_context();
         }
+        AgentRequest::LensRebuild { message_id, enrich } => {
+            let _ = tx
+                .send(StreamMessage::Start {
+                    message_id,
+                    kind: StreamStartKind::Operation,
+                })
+                .await;
+            let storage = crate::core::config::storage::Storage::new(
+                std::env::current_dir().unwrap_or_default(),
+            );
+            let profile = crate::core::context::lens_service::scope_profile();
+            let outcome = if enrich {
+                let client = agent.get_client();
+                crate::core::context::lens_service::rebuild_enriched(&storage, profile, &client)
+                    .await
+                    .map(|(r, n)| {
+                        format!(
+                            "# StarLens build (enriched)\n\n- indexed: {}\n- enriched (F/R/S): {}\n- observed: {}\n- excluded: {}",
+                            r.stats.indexed, n, r.stats.observed, r.stats.excluded
+                        )
+                    })
+            } else {
+                crate::core::context::lens_service::rebuild(&storage, profile).map(|r| {
+                    format!(
+                        "# StarLens build\n\n- indexed: {}\n- observed: {}\n- excluded: {}",
+                        r.stats.indexed, r.stats.observed, r.stats.excluded
+                    )
+                })
+            };
+            match outcome {
+                Ok(msg) => {
+                    let _ = tx
+                        .send(StreamMessage::Content { message_id, content: msg })
+                        .await;
+                    let _ = tx.send(StreamMessage::Done { message_id }).await;
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(StreamMessage::Error { message_id, error: e.to_string() })
+                        .await;
+                }
+            }
+        }
         AgentRequest::LoadConfiguredProviders => {
             // 这里只加载 provider 菜单元数据。启动时的 model/provider 已在构造 StarAgent
             // 前按 CLI/env/settings 优先级解析；绝不能在初始 runtime acknowledgement 后再
