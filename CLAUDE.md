@@ -21,9 +21,10 @@ cargo test --lib commands::parity           # one module
 cargo test --lib detects_cargo_verifiers    # one test by name
 cargo test --lib -- --nocapture             # see println! from tests
 
-# CI gates (.github/workflows/ci.yml, runs with -Dwarnings)
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+# CI gates (.github/workflows/ci.yml) — the first two are informational, see "Gate state"
+cargo check --workspace --all-targets --locked   # the real blocking gate
+cargo fmt --all -- --check                       # currently red on pre-existing code
+cargo clippy --workspace --all-targets -- -D warnings   # currently red on pre-existing code
 cargo test --workspace --lib
 cargo test --workspace --doc
 cargo test --workspace --test eval_harness_live -- --test-threads=1
@@ -33,9 +34,11 @@ cargo test --workspace --test eval_harness_live -- --test-threads=1
 
 Both lint gates fail on pre-existing code, so a green run isn't the bar; *not adding new problems* is.
 
-- `cargo fmt --check`: 43 files differ.
-- `cargo clippy`: 615 lib warnings. Scope to your work: `cargo clippy --lib 2>&1 | rg <your_file>`.
+- `cargo fmt --check`: 120 files differ.
+- `cargo clippy --workspace --all-targets`: 542 warnings + 3 errors. Scope to your work: `cargo clippy --lib 2>&1 | rg <your_file>`.
 - `cargo test --lib`: 170 pass, 6–8 fail. Pre-existing failures are `agent::mcp_permission`, `agent::tool_enhanced::tests::test_otlp_logger`, `core::auto_mode::dangerous_patterns` (×2), `core::tools::verify_edit::tests::test_extract_line_number`, `ui::components::chat_input::tests::test_border_color_default`, and `utils::checkpoint_manager` (cwd-dependent, flaky). Check a failing test at HEAD before concluding your change broke it.
+
+Because of this debt, the lint job in `ci.yml` is `continue-on-error: true` and gates nothing — including releases. The blocking gates are `cargo check --workspace --all-targets --locked` plus the test/build jobs. Delete that one line to make lint hard again once the debt is cleared.
 
 ## Architecture
 
@@ -124,10 +127,10 @@ You cannot print — ratatui owns the terminal. File logging is **on by default*
 
 **Counter-example worth remembering:** `ModelFallbackManager` (`src/agent/model_fallback.rs`) was long listed here as dead ("only built in `#[cfg(test)]`"). That was wrong — `agent_core.rs` constructs it and `agent_llm.rs` calls `is_fallback_eligible_error`/`try_fallback` on the live path, so `STAR_MODEL_FALLBACK_*` does take effect. Because `#![allow(dead_code)]` is on, plausibility is not evidence; only a constructor grep is.
 
-**`tests/` is mostly dead.** Cargo builds only `tests/lib.rs` and `tests/eval_harness_live.rs`. `tests/lib.rs` declares just `mod core;`, and `tests/core/mod.rs` declares just `test_deferred` + `test_permissions` — so `tests/agent/`, `tests/config/`, `tests/llm/`, `tests/scenarios/`, `tests/tools/`, `tests/common/`, and `tests/core/{context,tasks,tools}_test.rs` are never compiled. Worse, `.gitignore:28` is `**/test_*.rs`, so the two files `tests/core/mod.rs` *does* declare are untracked and `cargo test` cannot build `tests/lib.rs` from a fresh clone. Put new tests in a `#[cfg(test)] mod tests` inside the `src/` file under test — that is where all 176 working tests live — and avoid naming any new file `test_*.rs`.
+**`tests/` is mostly dead.** Cargo compiles only the top-level `tests/*.rs` files as integration targets: `eval_harness_live.rs` (the one CI actually runs) plus the scratch probes `zz_accuracy_probe.rs` / `zz_quality_probe.rs`. Everything in a subdirectory — `agent/`, `config/`, `llm/`, `scenarios/`, `tools/`, `common/`, `core/` — is only compiled if a `tests/*.rs` declares it, and none does. A `tests/lib.rs` used to declare `mod core` → `mod test_deferred` + `test_permissions`, but those two files were never committed, so `cargo test --workspace` could not compile from a fresh clone; that target has been deleted. Put new tests in a `#[cfg(test)] mod tests` inside the `src/` file under test — that is where all 176 working tests live. `.gitignore` anchors the scratch-file patterns to the repo root (`/test_*.rs`) precisely because the old `**/test_*.rs` used to swallow files under `tests/`.
 
 **Orphaned directories.** `src/constants/` and `src/sdk/` are declared by neither `lib.rs` nor `main.rs`; editing them changes nothing. Root `config.toml` is read by no code (its `[ui.system_prompts] dir` even points at a path that does not exist) — real configuration is `~/.star/settings.json`, `./.star/settings.json`, and env vars.
 
-**`Cargo.lock` is gitignored and untracked** despite this being a binary crate, so dependency versions re-resolve on every fresh checkout and CI run.
+**`Cargo.lock` is committed** — it used to be gitignored despite this being a binary crate, so dependency versions re-resolved on every fresh checkout and every `--locked` build in CI/release failed. Build and release jobs now all pass `--locked`. Keep the lockfile in sync with `Cargo.toml` in the same commit when bumping dependencies.
 
 **README drift.** The README describes a nested `starcode-cli/` layout (`src/` is at the repo root) and calls the binary `starcode` (it is `starcode-cli`; `install.sh` does not rename it).

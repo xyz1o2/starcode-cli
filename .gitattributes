@@ -1,0 +1,23 @@
+# 统一换行符，避免跨平台打包/执行出问题。
+# 没有这一节时，Windows 上 checkout 会把 shell 脚本转成 CRLF，
+# 导致 Linux/macOS 上 `./install.sh` 直接失败（/bin/sh^M: bad interpreter）。
+
+* text=auto
+
+*.sh text eol=lf
+*.bash text eol=lf
+*.rs   text eol=lf
+*.toml text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.md   text eol=lf
+Cargo.lock text eol=lf
+
+# 二进制资源，不做换行转换
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.pdf binary

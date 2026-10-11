@@ -1,5 +1,12 @@
 name: Release
 
+# 发布流程：打 tag → 自动校验/测试 → 8 个平台并行打包 → 汇总校验和并创建 Release。
+# 完整说明见 docs/build-release.md。
+#
+# 注意：lint（fmt/clippy）故意不在这里做门禁。本仓库当前有大量历史 lint 债务
+# （见 CLAUDE.md "Gate state"），把 lint 设为门禁会让任何 tag 都发不出版。
+# lint 债务在 ci.yml 里以非阻断方式跟踪。
+
 on:
   push:
     tags:
@@ -7,121 +14,253 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v0.3.0)'
+        description: '要发布的 tag（例如 v0.3.0）'
         required: true
+        type: string
 
 permissions:
   contents: write
 
+# 同一条流水线不并发：两个发布任务同时写同一个 Release 会互相覆盖。
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   validate:
-    name: Validate Version
+    name: 校验版本号
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check tag matches Cargo.toml version
+      # workflow_dispatch 时 GITHUB_REF 是分支而不是 tag，必须回退到输入值。
+      - name: 解析 tag
+        id: version
         run: |
-          TAG_VERSION=${GITHUB_REF#refs/tags/v}
-          CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 | \
-            jq -r '.packages[0].version')
-          echo "Tag: $TAG_VERSION, Cargo: $CARGO_VERSION"
-          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
-            echo "::error::Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+            echo "使用手动输入的 tag: $TAG"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+            echo "使用推送的 tag: $TAG"
+          fi
+
+          case "$TAG" in
+            v*) ;;
+            *) echo "::error::tag 必须以 v 开头（当前: $TAG）"; exit 1 ;;
+          esac
+
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "tag=$TAG cargo=$VERSION"
+          if [ "${TAG#v}" != "$VERSION" ]; then
+            echo "::error::tag ($TAG) 与 Cargo.toml 版本 ($VERSION) 不一致"
+            echo "::error::请同步修改 Cargo.toml 后重新打 tag"
             exit 1
           fi
 
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
   test:
-    name: Pre-release Tests
+    name: 发布前测试
     needs: validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace -- -D warnings
-      - run: cargo test --workspace
+
+      - name: 单元测试
+        run: cargo test --workspace --lib
+
+      - name: 文档测试
+        run: cargo test --workspace --doc
+
+      # eval 任务集不需要联网：CI 里 STAR_API_KEY 为空时全部走 skip 分支。
+      - name: eval harness 测试
+        run: cargo test --workspace --test eval_harness_live -- --test-threads=1
+        env:
+          STAR_API_KEY: ""
 
   build:
-    name: Build (${{ matrix.target }})
+    name: 打包 ${{ matrix.target }}
     needs: test
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
+      # 单个平台失败不影响其他平台，最后汇总 job 会把失败平台如实暴露出来。
       fail-fast: false
       matrix:
         include:
+          # ---- Linux (glibc / musl 静态) ----
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            native: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            native: false
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            native: false
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            native: false
+          # ---- macOS ----
+          # macos-latest 已经是 arm64，所以 x86_64 用 macos-13 原生构建，
+          # 避免交叉编译带来的 SDK/链接问题。
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-13
+            native: true
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-14
+            native: true
+          # ---- Windows ----
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            native: true
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            native: false
+
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装 Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
 
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
+      # ---- Linux 原生：需要 cmake + C 编译器（rustls -> aws-lc-sys 会编译 C/汇编）----
+      - name: 安装 Linux 原生构建依赖
+        if: runner.os == 'Linux' && matrix.native
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev
+          sudo apt-get install -y cmake pkg-config build-essential
 
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      # ---- Linux 交叉编译：cargo-zigbuild 用 zig cc 统一解决 gnu/musl 交叉链接器 ----
+      - name: 安装 cargo-zigbuild
+        if: runner.os == 'Linux' && !matrix.native
+        uses: taiki-e/install-action@cargo-zigbuild
 
-      - name: Package (Unix)
+      # ---- Windows ARM64 交叉编译：cargo-xwin 自带 Windows SDK / MSVC CRT ----
+      - name: 安装 cargo-xwin
+        if: runner.os == 'Windows' && !matrix.native
+        uses: taiki-e/install-action@cargo-xwin
+
+      - name: 编译 release（Linux 交叉）
+        if: runner.os == 'Linux' && !matrix.native
+        run: cargo zigbuild --release --locked --bin starcode-cli --target ${{ matrix.target }}
+
+      - name: 编译 release（Windows 交叉）
+        if: runner.os == 'Windows' && !matrix.native
+        run: cargo xwin build --release --locked --bin starcode-cli --target ${{ matrix.target }}
+
+      - name: 编译 release（原生）
+        if: matrix.native
+        run: cargo build --release --locked --bin starcode-cli --target ${{ matrix.target }}
+
+      # 原生平台可以做冒烟测试；交叉编译出来的二进制在本机跑不了。
+      - name: 冒烟测试
+        if: matrix.native
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release/starcode-cli"
+          [ "${RUNNER_OS}" = "Windows" ] && BIN="${BIN}.exe"
+          "$BIN" --version
+          "$BIN" --help > /dev/null
+
+      - name: 整理产物目录
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="starcode-cli-${{ needs.validate.outputs.version }}-${{ matrix.target }}"
+          STAGE="dist/$NAME"
+          mkdir -p "$STAGE"
+
+          BIN="target/${{ matrix.target }}/release/starcode-cli"
+          [ "${RUNNER_OS}" = "Windows" ] && BIN="${BIN}.exe"
+          cp "$BIN" "$STAGE/"
+
+          cp LICENSE README.md "$STAGE/"
+
+          if [ "${RUNNER_OS}" != "Windows" ]; then
+            chmod +x "$STAGE/starcode-cli"
+          fi
+
+          echo "staged: $STAGE"
+          ls -l "$STAGE"
+
+      - name: 打包 tar.gz
         if: runner.os != 'Windows'
+        shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../starcode-cli-${{ matrix.target }}.tar.gz starcode-cli
-          cd ../../..
+          set -euo pipefail
+          NAME="starcode-cli-${{ needs.validate.outputs.version }}-${{ matrix.target }}"
+          tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
 
-      - name: Package (Windows)
+      - name: 打包 zip
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          cd target/${{ matrix.target }}/release
-          7z a ../../../starcode-cli-${{ matrix.target }}.zip starcode-cli.exe
-          cd ../../..
+          $ErrorActionPreference = "Stop"
+          $name = "starcode-cli-${{ needs.validate.outputs.version }}-${{ matrix.target }}"
+          # Windows 自带的 Compress-Archive 产生的 zip 在部分工具里兼容性一般，
+          # 这里用 tar（Windows 10+ 自带 bsdtar，行为和 Unix 一致）。
+          tar -a -cf "dist/$name.zip" -C dist $name
 
-      - name: Upload artifact
+      - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
-          path: starcode-cli-${{ matrix.target }}.*
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
 
   release:
-    name: Create GitHub Release
-    needs: build
+    name: 创建 GitHub Release
+    needs: [validate, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: 下载全部产物
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: dist
           merge-multiple: true
 
-      - name: Generate checksums
+      - name: 生成校验和
         run: |
-          cd artifacts
-          sha256sum starcode-cli-* > SHA256SUMS.txt
+          set -euo pipefail
+          cd dist
+          # upload-artifact 只上传了压缩包，这里兜底清掉可能存在的中间目录
+          rm -rf starcode-cli-*/
+          ls -l
+          # 去掉 "./" 前缀，校验文件里是裸文件名，`sha256sum -c` 在任意目录下都能用
+          sha256sum ./*.tar.gz ./*.zip | sed 's| \./| |' > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - name: Create GitHub Release
+      - name: 创建 Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.validate.outputs.tag }}
+          name: ${{ needs.validate.outputs.tag }}
           generate_release_notes: true
-          files: artifacts/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS.txt

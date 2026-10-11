@@ -54,7 +54,20 @@ cargo install --git https://github.com/xyz1o2/starcode-cli.git starcode-cli
 
 #### Pre-built Binaries
 
-Download the latest release for your platform from the [Releases](https://github.com/xyz1o2/starcode-cli/releases) page.
+Download the latest release for your platform from the [Releases](https://github.com/xyz1o2/starcode-cli/releases) page. Each release ships archives for Linux (x64/ARM64, glibc and static musl), macOS (Intel/Apple Silicon), and Windows (x64/ARM64), plus a `SHA256SUMS.txt`.
+
+```bash
+# Linux (x86_64)
+curl -fsSL -O https://github.com/xyz1o2/starcode-cli/releases/latest/download/starcode-cli-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf starcode-cli-x86_64-unknown-linux-gnu.tar.gz
+install -m755 starcode-cli-x86_64-unknown-linux-gnu/starcode-cli ~/.cargo/bin/
+```
+
+On Alpine or any musl-only distro, use the `x86_64-unknown-linux-musl` build instead — it is statically linked and needs no glibc.
+
+On Windows, download the `.zip` and move `starcode-cli.exe` onto your `PATH`.
+
+See [docs/build-release.md](docs/build-release.md) for the full platform matrix and how releases are produced.
 
 ### Quick Start
 
@@ -211,9 +224,22 @@ starcode mcp remove filesystem
 cargo check --all-targets      # fastest correctness gate — use while iterating
 cargo build --release          # → target/release/starcode-cli
 cargo test --lib               # unit tests live inside src/
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+`cargo fmt --all -- --check` and `cargo clippy -- -D warnings` are currently **red on
+pre-existing code** (120 files unformatted, 542 warnings). They run in CI as an
+informational, non-blocking job and do not gate releases — so make sure your own
+changes don't add new problems rather than assuming a green run.
+
+Building needs `cmake`, `pkg-config`, and a C compiler on Linux, because `rustls`
+defaults to `aws-lc-rs`, which compiles C and assembly:
+
+```bash
+sudo apt-get install -y cmake pkg-config build-essential
+```
+
+Releases are tag-driven — bump `version` in `Cargo.toml`, then `git tag v0.4.0 && git push origin main --tags`.
+Full details in [docs/build-release.md](docs/build-release.md).
 
 #### Project structure
 
@@ -233,6 +259,8 @@ starcode-cli/
 │   └── utils/          # logging, paths, project context, misc
 ├── eval/               # eval task definitions
 ├── i18n/               # translations
+├── .github/workflows/  # ci.yml (check/test/build) + release.yml (tag → 多平台发布)
+├── docs/build-release.md   # 构建与发布说明
 ├── install.sh / .ps1 / .bat
 └── Cargo.toml
 ```

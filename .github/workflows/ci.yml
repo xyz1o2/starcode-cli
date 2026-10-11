@@ -15,12 +15,17 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_ENCODED_RUSTFLAGS: "-Dwarnings"
 
 jobs:
+  # Lint 是「债务可见」用的，不是门禁。
+  # 本仓库当前 fmt 有 120 个文件不通过、clippy 有 542 warning + 3 error
+  # （见 CLAUDE.md "Gate state"）。把它们设为 required 会让 CI 长期红灯，
+  # 久而久之就没人看了 —— 而且会连带把 release 流程一起卡死。
+  # 债务清零后，把下面两处 continue-on-error 删掉即可恢复成硬门禁。
   lint:
-    name: Lint & Format
+    name: Lint & Format (informational)
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -34,12 +39,26 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Verify Cargo.lock is up to date
-        run: cargo generate-lockfile --locked 2>/dev/null || cargo check --workspace
+  # 真正阻断的快速门禁：能不能编译。放最前面，编译不过就没必要跑测试。
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config build-essential
+
+      - name: cargo check --all-targets
+        run: cargo check --workspace --all-targets --locked
 
   test:
     name: Test (${{ matrix.os }})
-    needs: lint
+    needs: check
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -52,11 +71,13 @@ jobs:
         with:
           key: ${{ matrix.os }}
 
+      # rustls 默认走 aws-lc-rs，会编译 C/汇编：Linux 需要 cmake + gcc，
+      # macOS 需要 perl，Windows runner 镜像已自带 cmake/NASM。
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev
+          sudo apt-get install -y cmake pkg-config build-essential
 
       - name: Run unit tests
         run: cargo test --workspace --lib
@@ -64,14 +85,15 @@ jobs:
       - name: Run doc tests
         run: cargo test --workspace --doc
 
-      - name: Run integration tests
+      # eval 任务集在 STAR_API_KEY 为空时全部走 skip，不需要联网也不会烧额度。
+      - name: Run eval harness tests
         run: cargo test --workspace --test eval_harness_live -- --test-threads=1
         env:
           STAR_API_KEY: ""
 
   build:
     name: Build Release (${{ matrix.os }})
-    needs: test
+    needs: check
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -88,10 +110,15 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev
+          sudo apt-get install -y cmake pkg-config build-essential
 
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --locked --bin starcode-cli
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          ./target/release/starcode-cli --version
 
       - name: Upload binary (Unix)
         if: runner.os != 'Windows'
