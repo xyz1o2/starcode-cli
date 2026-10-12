@@ -557,6 +557,25 @@ impl StarClient {
                 r
             }
         };
+
+        // OpenCode Zen 免费档要求固定公共令牌 `public`（官方 opencode 客户端在无 key 时
+        // 发的就是它）。没配真实 key 时注入它，否则空/占位符 key 会被 Zen 判成 403 Forbidden。
+        let resolved_api_key = if crate::core::config::providers::is_opencode_zen(
+            self.provider_id.as_deref(),
+            &self.base_url,
+        ) && (resolved_api_key.value == API_KEY_NOT_SET
+            || resolved_api_key.value.trim().is_empty())
+        {
+            self.api_key = "public".to_string();
+            ResolvedApiKey {
+                value: "public".to_string(),
+                source: Some("opencode_zen_public".to_string()),
+                preview: Some("public (Zen free tier)".to_string()),
+            }
+        } else {
+            resolved_api_key
+        };
+
         self.provider = provider.clone();
         self.provider_env_id = provider_env_id;
         self.api_key_source = resolved_api_key.source.clone();
@@ -586,17 +605,17 @@ impl StarClient {
     /// rig 永远不会省略 `Authorization` 头 —— 实测（见
     /// `probe_rig_omits_auth_header_when_key_is_placeholder`）传空串时它会发
     /// `Authorization: Bearer`，传占位符时会发 `Bearer API_KEY_NOT_SET`。
-    /// 后者会被 OpenCode Zen 判成无效 key 直接 401，把免费模型也一起拖垮。
     ///
-    /// Zen 的免费模型（实测 `space-bunny-free`）在**完全没有 key** 时即可返回 200，
-    /// 且空的 Bearer 头同样被接受，所以这里把占位符降级成空串而不是拦下请求。
+    /// OpenCode Zen 的免费档要求固定公共令牌 `public`（官方客户端在无 key 时发的就是它）。
+    /// `recreate_inner` 已把无 key 的 Zen 规范成 `public`，这里再兜一次底，确保占位符/空
+    /// key 永远不会以空 Bearer 的形式发给 Zen（那会 403）。
     fn upstream_api_key(&self) -> &str {
         use crate::core::config::providers as prov;
 
         let key = self.api_key.as_str();
         if key == API_KEY_NOT_SET || key.trim().is_empty() {
             if prov::is_opencode_zen(self.provider_id.as_deref(), &self.base_url) {
-                return "";
+                return "public";
             }
         }
         key
@@ -1335,9 +1354,9 @@ mod tests {
     }
 
     #[test]
-    fn zen_without_a_key_downgrades_the_placeholder_to_empty() {
-        // 免费模型（space-bunny-free）在完全没有 key 时可用，但前提是
-        // 不能把 API_KEY_NOT_SET 当成真 key 发出去。
+    fn zen_without_a_key_sends_public() {
+        // 免费档要求固定公共令牌 `public`：无 key 时必须规范成它，否则空/占位符
+        // Bearer 会被 Zen 判成 403。
         let c = StarClient::new(
             crate::llm::API_KEY_NOT_SET,
             Some("space-bunny-free".to_string()),
@@ -1345,7 +1364,7 @@ mod tests {
             Some(false),
             Some("opencode".to_string()),
         );
-        assert_eq!(c.upstream_api_key(), "");
+        assert_eq!(c.upstream_api_key(), "public");
     }
 
     #[test]
