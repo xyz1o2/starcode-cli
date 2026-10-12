@@ -19,15 +19,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Lint 是「债务可见」用的，不是门禁。
-  # 本仓库当前 fmt 有 120 个文件不通过、clippy 有 542 warning + 3 error
-  # （见 CLAUDE.md "Gate state"）。把它们设为 required 会让 CI 长期红灯，
-  # 久而久之就没人看了 —— 而且会连带把 release 流程一起卡死。
-  # 债务清零后，把下面两处 continue-on-error 删掉即可恢复成硬门禁。
+  # fmt 是硬门禁（债务已清零）。
+  # clippy 只作建议：仓库还有 ~470 条存量警告（lib target 471 条，0 error），
+  # 用 `-D warnings` 门禁会让 CI 长期红灯。警告照常打在日志里。
+  # 清完之后把 `-- -D warnings` 加回 clippy 那一步即可恢复成硬门禁。
   lint:
-    name: Lint & Format (informational)
+    name: Lint & Format
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -35,11 +33,17 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
 
+      # clippy --all-targets 会把 build.rs 和所有 target 编一遍，同样要 C 工具链。
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake pkg-config build-essential
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy (advisory)
+        run: cargo clippy --workspace --all-targets --locked
 
   # 真正阻断的快速门禁：能不能编译。放最前面，编译不过就没必要跑测试。
   check:
@@ -81,8 +85,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake pkg-config build-essential
 
+      # checkpoint_manager 的测试共用全局环境变量（STAR_FILE_HISTORY_DIR_OVERRIDE 等），
+      # 并行跑会互相把对方的 override 删掉，必须串行。
       - name: Run unit tests
-        run: cargo test --workspace --lib
+        run: cargo test --workspace --lib -- --test-threads=1
 
       - name: Run doc tests
         run: cargo test --workspace --doc
@@ -117,10 +123,14 @@ jobs:
       - name: Build release
         run: cargo build --release --locked --bin starcode-cli
 
+      # Windows 上产物是 starcode-cli.exe，直接写死无扩展名的路径必然 Not Found。
       - name: Smoke test
         shell: bash
         run: |
-          ./target/release/starcode-cli --version
+          BIN="./target/release/starcode-cli"
+          [ "${RUNNER_OS}" = "Windows" ] && BIN="${BIN}.exe"
+          "$BIN" --version
+          "$BIN" --help > /dev/null
 
       - name: Upload binary (Unix)
         if: runner.os != 'Windows'

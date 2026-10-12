@@ -38,7 +38,10 @@ pub fn scope_profile() -> ScopeProfile {
 pub fn load(storage: &Storage) -> Option<(WholeIndex, Baseline)> {
     let text = std::fs::read_to_string(storage.lens_index_path()).ok()?;
     let baseline_raw = std::fs::read_to_string(storage.lens_baseline_path()).ok()?;
-    Some((WholeIndex::from_text(&text), Baseline::from_json(&baseline_raw)?))
+    Some((
+        WholeIndex::from_text(&text),
+        Baseline::from_json(&baseline_raw)?,
+    ))
 }
 
 /// 结构-only 重建并落盘。
@@ -81,7 +84,12 @@ pub async fn rebuild_enriched(
 pub fn check_drift(storage: &Storage, profile: ScopeProfile) -> Option<DriftReport> {
     let (index, baseline) = load(storage)?;
     let objs: BTreeSet<String> = index.entries.iter().map(|e| e.object.clone()).collect();
-    Some(detect_drift(&storage.project_root(), profile, &baseline, &objs))
+    Some(detect_drift(
+        &storage.project_root(),
+        profile,
+        &baseline,
+        &objs,
+    ))
 }
 
 /// 增量更新：检测漂移 → 只重算受影响对象（结构-only）→ 落盘。完成 §6 的"检测→标脏→重算"闭环。
@@ -104,7 +112,9 @@ pub fn update(storage: &Storage, profile: ScopeProfile) -> Option<DriftReport> {
 
     // 重算 Stale + Unbaselined：按当前角色处理。
     for obj in drift.stale.iter().chain(drift.unbaselined.iter()) {
-        let Ok(bytes) = std::fs::read(root.join(obj)) else { continue };
+        let Ok(bytes) = std::fs::read(root.join(obj)) else {
+            continue;
+        };
         let sha = sha256_hex(&bytes);
         baseline.objects.insert(obj.clone(), sha.clone());
         if evaluate(obj, profile) == ScopeRole::Index {
@@ -121,7 +131,11 @@ pub fn update(storage: &Storage, profile: ScopeProfile) -> Option<DriftReport> {
         }
     }
 
-    let result = BuildResult { index, baseline, stats: BuildStats::default() };
+    let result = BuildResult {
+        index,
+        baseline,
+        stats: BuildStats::default(),
+    };
     persist(storage, &result).ok()?;
     Some(drift)
 }
@@ -153,9 +167,19 @@ mod tests {
         let uniq = format!(
             "lens_service_{}_{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         );
-        std::env::temp_dir().join(uniq)
+        let root = std::env::temp_dir().join(uniq);
+        // 必须自带 .star：`Storage::new` 会从传入目录向上找第一个已存在的 .star
+        // 并把 project_root 改成它的父目录。临时目录通常挂在 %TEMP% 下，而开发机上
+        // ~/（家目录）几乎一定有 .star，于是 project_root 被吸附到家目录，
+        // rebuild 就去遍历整个 home —— 本地跑到天荒地老，CI 上因为 runner 干净
+        // 才侥幸通过。放一个 .star 进去就能把查找截断在这个临时项目里。
+        std::fs::create_dir_all(root.join(".star")).unwrap();
+        root
     }
 
     #[test]
@@ -195,6 +219,11 @@ mod tests {
         fs::create_dir_all(root.join("src/runtime")).unwrap();
         fs::write(root.join("src/runtime/a.rs"), "pub fn a() {}\n").unwrap();
         let storage = Storage::new(root.clone());
+        assert_eq!(
+            storage.project_root(),
+            root,
+            "测试必须隔离在临时项目里，不能被上层目录的 .star 改写"
+        );
         rebuild(&storage, ScopeProfile::Core).unwrap();
 
         let full = overview_for_injection(&storage, 100_000).unwrap();
@@ -223,7 +252,9 @@ mod tests {
         assert!(!pre.is_aligned(), "更新前应检测到漂移");
 
         // 更新后重新检测应已对齐。
-        assert!(check_drift(&storage, ScopeProfile::Core).unwrap().is_aligned());
+        assert!(check_drift(&storage, ScopeProfile::Core)
+            .unwrap()
+            .is_aligned());
 
         let (idx, base) = load(&storage).unwrap();
         assert!(idx.entries.iter().any(|e| e.object == "src/runtime/c.rs"));
@@ -233,4 +264,3 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 }
-

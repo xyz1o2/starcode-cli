@@ -818,8 +818,7 @@ pub(crate) async fn execute_palette_action(
                     .current_provider_id
                     .clone()
                     .unwrap_or_else(|| crate::agent::model_cache::DEFAULT_BUCKET.to_string());
-                let seeded =
-                    crate::ui::services::stream::seed_models_from_disk_cache(state, &pid);
+                let seeded = crate::ui::services::stream::seed_models_from_disk_cache(state, &pid);
                 // 只有缓存也没能给出列表时才标 loading —— 有缓存可显示时
                 // 面板已经是完整列表，不该再显示"正在获取"。
                 if !seeded {
@@ -1761,10 +1760,7 @@ pub async fn handle_key_event(
                     // 用户粘出来的是上次的旧内容，且再也无法重试。
                     state.current_status_line =
                         Some(format!("Copy failed: {e} — press Ctrl+C to retry"));
-                    crate::utils::logging::append_debug_log_line(&format!(
-                        "[COPY] failed: {}",
-                        e
-                    ));
+                    crate::utils::logging::append_debug_log_line(&format!("[COPY] failed: {}", e));
                 }
             }
             return Ok(());
@@ -2256,10 +2252,9 @@ pub async fn handle_key_event(
 
                     if state.available_models.is_empty() {
                         // 先吃磁盘缓存：面板直接显示真实列表，不闪假 loading。
-                        let pid = state
-                            .current_provider_id
-                            .clone()
-                            .unwrap_or_else(|| crate::agent::model_cache::DEFAULT_BUCKET.to_string());
+                        let pid = state.current_provider_id.clone().unwrap_or_else(|| {
+                            crate::agent::model_cache::DEFAULT_BUCKET.to_string()
+                        });
                         let seeded =
                             crate::ui::services::stream::seed_models_from_disk_cache(state, &pid);
                         state.awaiting_models = !seeded;

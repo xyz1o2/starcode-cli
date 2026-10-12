@@ -14,8 +14,6 @@ use tokio::sync::mpsc;
 
 type Err = Box<dyn std::error::Error>;
 
-
-
 /// 分发给栈顶 modal 的按键处理。
 ///
 /// 返回 `Ok(true)` 表示该键已被消费。全局键（`is_global_key`）会先被放行给

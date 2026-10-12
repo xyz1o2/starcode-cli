@@ -274,13 +274,19 @@ mod tests {
 
     #[test]
     fn plain_char_is_not_a_global_binding() {
-        assert_eq!(binding_for(&key(KeyCode::Char('a'), KeyModifiers::NONE)), None);
+        assert_eq!(
+            binding_for(&key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            None
+        );
     }
 
     #[test]
     fn ctrl_shift_f_is_global_search_not_plain_f() {
         assert_eq!(
-            binding_for(&key(KeyCode::Char('f'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
+            binding_for(&key(
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
             Some(GlobalBinding::GlobalSearch)
         );
         // 普通 Ctrl+F 不绑定（留给终端/输入框）
@@ -356,7 +362,8 @@ mod tests {
     #[test]
     fn registry_covers_every_documented_binding() {
         // 帮助文案必须覆盖全部已定义绑定，否则又会出现「有键没文档」的漂移
-        let mut in_registry: Vec<GlobalBinding> = GLOBAL_BINDINGS.iter().map(|b| b.binding).collect();
+        let mut in_registry: Vec<GlobalBinding> =
+            GLOBAL_BINDINGS.iter().map(|b| b.binding).collect();
         in_registry.sort_by_key(|b| b.label());
         let mut declared = vec![
             GlobalBinding::TogglePalette,

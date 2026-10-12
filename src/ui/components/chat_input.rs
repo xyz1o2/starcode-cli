@@ -344,7 +344,12 @@ mod tests {
     #[test]
     fn test_border_color_default() {
         let state = make_state(ApprovalMode::Default, "");
-        assert_eq!(resolve_border_color(&state), Color::DarkGray);
+        // Default 模式的边框色来自主题（theme.input_border），硬编码具体色值
+        // 会在换主题时再次失效，所以直接对当前主题断言。
+        assert_eq!(
+            resolve_border_color(&state),
+            state.theme_manager.current().input_border
+        );
     }
 
     #[test]

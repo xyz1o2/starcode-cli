@@ -315,9 +315,8 @@ impl ToolInvocation for ReadFileToolInvocation {
                     use crate::core::state::FileSnapshot;
                     use sha2::{Digest, Sha256};
 
-                    let content_hash = {
-                        crate::core::utils::paths::sha256_hex(result.llm_content.as_bytes())
-                    };
+                    let content_hash =
+                        { crate::core::utils::paths::sha256_hex(result.llm_content.as_bytes()) };
 
                     let snapshot = FileSnapshot {
                         content: result.llm_content.clone(),

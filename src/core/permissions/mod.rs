@@ -205,3 +205,42 @@ pub mod legacy {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::legacy::SessionPermissionManager;
+    use std::path::PathBuf;
+
+    /// 回归：点一次"总是允许"不能摧毁手写的权限规则。
+    ///
+    /// 两种格式曾共用 `.star/permissions.json`：授权签名写 JSON 数组，
+    /// 而 `PermissionRuleEngine` 按 `{"rules":[...]}` 对象读。写入方整份覆盖，
+    /// 读取方解析失败又被 `let _ =` 吞掉 —— 用户的手写 deny 规则无声消失。
+    /// 现在写入方只碰 `permission_grants.json`，规则文件原封不动。
+    #[test]
+    fn always_allow_never_overwrites_hand_written_rules() {
+        let temp = tempfile::tempdir().expect("create temporary directory");
+        let star_dir = temp.path().join(".star");
+        std::fs::create_dir_all(&star_dir).expect("create .star");
+
+        let rules_path: PathBuf = star_dir.join("permissions.json");
+        let grants_path: PathBuf = star_dir.join("permission_grants.json");
+
+        let handwritten = r#"{"rules":[{"tool":"Bash","action":"deny","path":null,"priority":10}]}"#;
+        std::fs::write(&rules_path, handwritten).expect("seed hand-written rules");
+
+        // 用户点击"3. 永久允许"。
+        let manager = SessionPermissionManager::with_persistence(grants_path.clone());
+        manager.allow_tool_persisted("Bash");
+
+        assert_eq!(
+            std::fs::read_to_string(&rules_path).expect("rules file still readable"),
+            handwritten,
+            "hand-written rules must be untouched"
+        );
+
+        let grants = std::fs::read_to_string(&grants_path).expect("grants file written");
+        let parsed: Vec<String> = serde_json::from_str(&grants).expect("grants is a string array");
+        assert!(parsed.iter().any(|s| s.contains("Bash")));
+    }
+}

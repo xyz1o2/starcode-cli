@@ -77,8 +77,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # rustls -> aws-lc-sys 要编 C/汇编，ubuntu 镜像虽然预装了 cmake，
+      # 但显式装一遍可以让这套流程在 self-hosted / 容器 runner 上同样成立。
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake pkg-config build-essential
+
       - name: 单元测试
-        run: cargo test --workspace --lib
+        # checkpoint_manager 的测试共用全局环境变量，并行会互相串味。
+        run: cargo test --workspace --lib -- --test-threads=1
 
       - name: 文档测试
         run: cargo test --workspace --doc
@@ -141,12 +149,14 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
-      # ---- Linux 原生：需要 cmake + C 编译器（rustls -> aws-lc-sys 会编译 C/汇编）----
-      - name: 安装 Linux 原生构建依赖
-        if: runner.os == 'Linux' && matrix.native
+      # ---- Linux（原生 + 交叉）：都要 cmake + C 编译器 ----
+      # 原生编译走系统 gcc；交叉走 zigbuild，但 aws-lc-sys 的构建脚本仍要 cmake，
+      # 所以这一步不再区分 matrix.native。
+      - name: 安装 Linux 构建依赖
+        if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake pkg-config build-essential
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake pkg-config build-essential
 
       # ---- Linux 交叉编译：cargo-zigbuild 用 zig cc 统一解决 gnu/musl 交叉链接器 ----
       - name: 安装 cargo-zigbuild

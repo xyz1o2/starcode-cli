@@ -672,7 +672,7 @@ async fn rig_openai_stream(
                     if tx
                         .send(Ok(LlmEvent::ToolCall(crate::types::StarToolCall {
                             // rig 0.42：ToolCallId 需要显式转成字符串。
-                                    id: tool_call.id.as_str().to_string(),
+                            id: tool_call.id.as_str().to_string(),
                             call_type: CALL_TYPE_FUNCTION.to_string(),
                             function: crate::types::StarToolCallFunction {
                                 name: tool_call.function.name,
@@ -720,11 +720,11 @@ async fn rig_openai_stream(
             }
         }
         let finish = if has_tool_calls {
-                FINISH_TOOL_CALLS
-            } else {
-                FINISH_STOP
-            };
-            let _ = tx.send(Ok(LlmEvent::Finish(finish.to_string()))).await;
+            FINISH_TOOL_CALLS
+        } else {
+            FINISH_STOP
+        };
+        let _ = tx.send(Ok(LlmEvent::Finish(finish.to_string()))).await;
     });
 
     Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))

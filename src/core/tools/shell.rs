@@ -816,7 +816,7 @@ impl ToolInvocation for ShellToolInvocation {
             let external_paths =
                 Self::external_paths_in_command(command, &path, config.target_dir());
             if !external_paths.is_empty() {
-                let persist_path = config.storage().project_permissions_path();
+                let persist_path = config.storage().project_permission_grants_path();
                 let persisted = Self::load_permission_signatures(&persist_path);
                 let session_allowed = EXTERNAL_DIR_ALLOW_SESSION
                     .lock()

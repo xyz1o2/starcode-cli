@@ -16,11 +16,10 @@ impl SchemaValidator {
 
         // jsonschema 0.58：JSONSchema 更名为 Validator，compile() 改为 build()，
         // 且类型上多了一个默认泛型参数 F: Json。
-        let compiled_schema: Validator =
-            jsonschema::options()
-                .with_draft(Draft::Draft7)
-                .build(schema)
-                .map_err(|e| format!("Failed to compile schema: {}", e))?;
+        let compiled_schema: Validator = jsonschema::options()
+            .with_draft(Draft::Draft7)
+            .build(schema)
+            .map_err(|e| format!("Failed to compile schema: {}", e))?;
 
         // 0.58 起 validate() 只回首个错误；要保留旧版「收集全部错误再拼接」的
         // 行为与输出格式，用 iter_errors()。

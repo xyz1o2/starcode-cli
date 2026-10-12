@@ -15,11 +15,12 @@ use crate::agent::StarAgent;
 use crate::core::config::Config;
 use crate::core::confirmation_bus::MessageBus;
 use crate::core::policy::PolicyEngine;
+use crate::core::policy::{FunctionCall, PolicyDecision};
 use crate::core::prompts::skills::editor::EDITOR_SYSTEM_PROMPT;
 use crate::core::state::GlobalState;
 use crate::core::tools::edit::{EditTool, EditToolParams};
 use crate::core::tools::multi_edit::{MultiEditTool, MultiEditToolParams, SingleFileEdit};
-use crate::core::tools::tools::{BaseDeclarativeTool, ToolResult};
+use crate::core::tools::tools::{BaseDeclarativeTool, ToolInvocation, ToolResult};
 use crate::core::tools::write_file::{WriteFileTool, WriteFileToolParams};
 use crate::llm::client::StarClient;
 use async_trait::async_trait;
@@ -66,11 +67,17 @@ impl EditorAgent {
 
         let result = match request {
             EditorFastPathRequest::Single(params) => {
-                let tool = EditTool::new(self.config.clone(), message_bus, global_state);
-                let invocation = tool
-                    .create_invocation(json!(params.clone()))
-                    .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
-                let tool_result = invocation.execute(None, None).await?;
+                let args = json!(params.clone());
+                let tool_result = authorize_then_execute(&message_bus, "smart_edit", &args, || {
+                    EditTool::new(
+                        self.config.clone(),
+                        message_bus.clone(),
+                        global_state.clone(),
+                    )
+                    .create_invocation(args.clone())
+                    .map_err(|e| e.to_string())
+                })
+                .await?;
                 build_fast_path_result(
                     task,
                     "Edit",
@@ -83,11 +90,15 @@ impl EditorAgent {
                 )
             }
             EditorFastPathRequest::Multi(params) => {
-                let tool = MultiEditTool::new(self.config.clone(), global_state);
-                let invocation = tool
-                    .create_invocation(json!(params.clone()))
-                    .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
-                let tool_result = invocation.execute(None, None).await?;
+                let args = json!(params.clone());
+                // multi_edit 不带 `Edit` 的 policy 名字，但同样要过 deny/ask，
+                // 否则 `deny: ["Edit(**)"]` 会被它从旁边绕过去。
+                let tool_result = authorize_then_execute(&message_bus, "multi_edit", &args, || {
+                    MultiEditTool::new(self.config.clone(), global_state.clone())
+                        .create_invocation(args.clone())
+                        .map_err(|e| e.to_string())
+                })
+                .await?;
                 build_fast_path_result(
                     task,
                     "multi_edit",
@@ -104,11 +115,17 @@ impl EditorAgent {
                 )
             }
             EditorFastPathRequest::Write(params) => {
-                let tool = WriteFileTool::new(self.config.clone(), message_bus, global_state);
-                let invocation = tool
-                    .create_invocation(json!(params.clone()))
-                    .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
-                let tool_result = invocation.execute(None, None).await?;
+                let args = json!(params.clone());
+                let tool_result = authorize_then_execute(&message_bus, "Write", &args, || {
+                    WriteFileTool::new(
+                        self.config.clone(),
+                        message_bus.clone(),
+                        global_state.clone(),
+                    )
+                    .create_invocation(args.clone())
+                    .map_err(|e| e.to_string())
+                })
+                .await?;
                 build_fast_path_result(
                     task,
                     "Write",
@@ -165,6 +182,59 @@ impl EditorAgent {
                 .with_details(response),
         )
     }
+}
+
+/// 先过策略引擎，再执行 —— skill 快路径的授权闸门。
+///
+/// 这条路径不经过 `ToolExecutor`，历史上直接 `invocation.execute()`，于是
+/// `deny: ["Write(...)"]`、Plan 模式和"总是允许"缓存在这条路上全部失效：
+/// 模型只要把编辑请求包成 `skill` 子任务就能绕过用户在 settings.json 里写的规则。
+/// 唯一能真正堵住旁路的地方就是这里 —— 每条直达工具的路径都必须自己过闸门。
+///
+/// `policy_tool_name` 决定拿哪条规则去匹配：`EditTool` 注册名是 `smart_edit`，
+/// 但用户写的是 `Edit`，由 settings_rules 的工具族负责归一。
+///
+/// invocation 的构造放在闸门之后：构造失败用的是非 Send 的 `Box<dyn Error>`，
+/// 把它跨过 `.await` 会让整个 subagent future 失去 `Send`。
+async fn authorize_then_execute(
+    bus: &MessageBus,
+    policy_tool_name: &str,
+    args: &Value,
+    make_invocation: impl FnOnce() -> Result<Box<dyn ToolInvocation>, String>,
+) -> Result<ToolResult, String> {
+    let call = FunctionCall {
+        name: policy_tool_name.to_string(),
+        args: Some(args.clone()),
+    };
+
+    match bus.check_tool_policy(&call, None).await.decision {
+        PolicyDecision::Deny => {
+            return Err(format!(
+                "Tool `{}` denied by permission rules.",
+                policy_tool_name
+            ))
+        }
+        PolicyDecision::DenyWithReason(reason) => {
+            return Err(format!("Tool `{}` denied: {}", policy_tool_name, reason))
+        }
+        PolicyDecision::Allow => {}
+        // AskUser 不能在这里就地弹窗：skill 是子代理上下文，没有 UI 事件循环
+        // 在等这条确认。放它过去等于把"必须确认"降级成"直接执行"，
+        // 所以只能拒绝并把决定权交回主 agent —— 由它在有 UI 的路径上重新发起。
+        PolicyDecision::AskUser => {
+            return Err(format!(
+            "Tool `{}` requires user confirmation, which the skill fast path cannot prompt for. \
+                 Re-issue this edit as a direct tool call so the user can approve it.",
+            policy_tool_name
+        ))
+        }
+    }
+
+    let invocation = make_invocation()?;
+    invocation
+        .execute(None, None)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 fn build_fast_path_result(

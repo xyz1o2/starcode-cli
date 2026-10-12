@@ -511,7 +511,8 @@ impl StarClient {
             self.is_openai_compatible,
             self.provider_id.as_deref(),
         );
-        let provider_env_id = provider_env_id(&provider, &self.base_url, self.provider_id.as_deref());
+        let provider_env_id =
+            provider_env_id(&provider, &self.base_url, self.provider_id.as_deref());
         let provider_requires_key = provider_env_id
             .and_then(|pid| crate::core::config::providers::get_provider_by_id(pid))
             .map(|p| p.requires_api_key)
@@ -1345,9 +1346,12 @@ mod tests {
         let observed = rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .unwrap_or(None);
+        // 头名大小写由 HTTP 实现决定（hyper 在 Linux 上统一小写，Windows 上保留原样），
+        // 这里只关心"发出去的是不是降级后的占位符"，所以两边都小写再比。
+        let observed = observed.map(|s| s.to_lowercase());
         assert_eq!(
             observed.as_deref(),
-            Some("authorization: Bearer API_KEY_NOT_SET"),
+            Some("authorization: bearer api_key_not_set"),
             "placeholder keys must be demoted before reaching rig — \
              Zen rejects them with 401 and that would break free models"
         );

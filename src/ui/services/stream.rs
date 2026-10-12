@@ -2337,7 +2337,10 @@ mod tests {
 
         assert_eq!(
             state.available_models,
-            vec!["space-bunny-free".to_string(), "deepseek-v4-pro".to_string()],
+            vec![
+                "space-bunny-free".to_string(),
+                "deepseek-v4-pro".to_string()
+            ],
             "panel must be able to render a real list immediately"
         );
         assert_eq!(

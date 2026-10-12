@@ -117,7 +117,10 @@ impl KeyContext {
     /// vim 只在没有遮挡层时接管普通字符。任务面板是常驻面板而非遮挡层（只吃
     /// Ctrl/Alt 组合键与 ↑/↓/Enter），开着它时 `j`/`k`/`i` 仍要落到输入框。
     pub fn vim_enabled(&self) -> bool {
-        matches!(self, KeyContext::Vim | KeyContext::TextInput | KeyContext::TaskPanel)
+        matches!(
+            self,
+            KeyContext::Vim | KeyContext::TextInput | KeyContext::TaskPanel
+        )
     }
 }
 

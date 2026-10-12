@@ -474,7 +474,13 @@ mod tests {
     fn path_under_cwd_stays_relative() {
         let cwd = crate::core::utils::paths::current_dir_cached();
         let p = cwd.join("src").join("lib.rs");
-        assert_eq!(shorten_path_for_display(&p.to_string_lossy()), "src/lib.rs");
+        // strip_prefix 保留平台原生分隔符，Windows 上就是反斜杠。
+        let expected = if cfg!(windows) {
+            r"src\lib.rs"
+        } else {
+            "src/lib.rs"
+        };
+        assert_eq!(shorten_path_for_display(&p.to_string_lossy()), expected);
     }
 
     /// cwd 之外的路径原样保留，不能被误缩短成别的

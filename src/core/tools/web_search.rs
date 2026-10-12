@@ -428,28 +428,13 @@ async fn race_engines(
     num: u32,
     signal: Option<&tokio_util::sync::CancellationToken>,
 ) -> (Option<(Vec<SearchResult>, &'static str)>, Vec<String>) {
-    type Engine<'a> =
-        Pin<Box<dyn Future<Output = (&'static str, Result<Vec<SearchResult>>)> + Send + 'a>>;
-
-    let engines: Vec<Engine<'_>> = vec![
-        Box::pin(async move { ("Brave", search_brave(query, num).await) }),
-        Box::pin(async move { ("DuckDuckGo", search_duckduckgo(query, num).await) }),
-        Box::pin(async move { ("Startpage", search_startpage(query, num).await) }),
-    ];
-
     let race = async move {
-        let mut engines = engines;
-        let mut errors = Vec::new();
-        while !engines.is_empty() {
-            let ((name, res), _, rest) = select_all(engines).await;
-            engines = rest;
-            match res {
-                Ok(results) if !results.is_empty() => return (Some((results, name)), errors),
-                Ok(_) => {} // 引擎给了空结果
-                Err(e) => errors.push(format!("{name}: {e:#}")),
-            }
-        }
-        (None, errors)
+        race_first_success(vec![
+            Box::pin(async move { ("Brave", search_brave(query, num).await) }),
+            Box::pin(async move { ("DuckDuckGo", search_duckduckgo(query, num).await) }),
+            Box::pin(async move { ("Startpage", search_startpage(query, num).await) }),
+        ])
+        .await
     };
 
     match signal {
@@ -459,6 +444,30 @@ async fn race_engines(
         },
         None => race.await,
     }
+}
+
+/// 竞速逻辑本体：并发跑所有引擎，返回第一个非空结果；全落空时收集每台的错误。
+///
+/// 与具体的搜索引擎解耦，这样"三台全挂"这条契约可以用注入的假引擎测，
+/// 不必真去连 search.brave.com（那里多半返回 200 + 反爬页面 → Ok(空结果)，
+/// 根本走不到 Err 分支，断言"三台都报错"就永远不成立）。
+async fn race_first_success<'a>(
+    engines: Vec<
+        Pin<Box<dyn Future<Output = (&'static str, Result<Vec<SearchResult>>)> + Send + 'a>>,
+    >,
+) -> (Option<(Vec<SearchResult>, &'static str)>, Vec<String>) {
+    let mut engines = engines;
+    let mut errors = Vec::new();
+    while !engines.is_empty() {
+        let ((name, res), _, rest) = select_all(engines).await;
+        engines = rest;
+        match res {
+            Ok(results) if !results.is_empty() => return (Some((results, name)), errors),
+            Ok(_) => {} // 引擎给了空结果
+            Err(e) => errors.push(format!("{name}: {e:#}")),
+        }
+    }
+    (None, errors)
 }
 
 /// 三台引擎全部落空时的返回。
@@ -829,15 +838,84 @@ mod tests {
         assert!(!is_boilerplate_line(&line));
     }
 
-    /// 三台引擎全挂时，竞速必须很快结束而不是串行等满 3×connect_timeout，
-    /// 且返回的错误信息要能让 `no_results_result` 判定为"网络不通"。
-    #[tokio::test]
-    async fn race_reports_errors_when_all_engines_fail() {
-        // 指向一个必然不可达的地址：CLIENT 的 connect_timeout 兜底，不会真挂住。
-        let (found, errors) = race_engines("starcode-test-unreachable", 3, None).await;
+    /// 三台引擎全挂时，竞速必须收集到 3 条错误，且错误信息要让
+    /// `no_results_result` 判定为"网络不通"。
+    ///
+    /// 注意：这条断言**不能**靠真去请求 brave/duckduckgo/startpage 来做——
+    /// 这些站点对 CI 出口 IP 通常返回 200 + 反爬页，解析出来是 `Ok(空结果)`，
+    /// 于是 `errors` 为空、断言必然失败。改用注入的假引擎测竞速逻辑本体。
+    fn fake_result(title: &str) -> SearchResult {
+        SearchResult {
+            title: title.to_string(),
+            url: format!("https://example.test/{title}"),
+            snippet: String::new(),
+        }
+    }
 
-        assert!(found.is_none(), "engines should all fail: {found:?}");
+    type Engine = Pin<Box<dyn Future<Output = (&'static str, Result<Vec<SearchResult>>)> + Send>>;
+
+    #[tokio::test]
+    async fn race_collects_an_error_per_failed_engine() {
+        let engines: Vec<Engine> = vec![
+            Box::pin(async {
+                (
+                    "Brave",
+                    Err::<Vec<SearchResult>, _>(anyhow::anyhow!("operation timed out")),
+                )
+            }),
+            Box::pin(async {
+                (
+                    "DuckDuckGo",
+                    Err::<Vec<SearchResult>, _>(anyhow::anyhow!("dns error")),
+                )
+            }),
+            Box::pin(async {
+                (
+                    "Startpage",
+                    Err::<Vec<SearchResult>, _>(anyhow::anyhow!("connection refused")),
+                )
+            }),
+        ];
+
+        let (found, errors) = race_first_success(engines).await;
+        assert!(found.is_none(), "engines should all fail");
         assert_eq!(errors.len(), 3, "all three engines should report an error");
+
+        // 三条连接类错误都要能触发 no_results_result 的"网络不通"分支
+        let down = no_results_result("q", &errors).output;
+        assert!(down.contains("failed to connect"), "{down}");
+    }
+
+    /// 空结果不算失败：引擎正常返回空列表时不产生 error 条目。
+    #[tokio::test]
+    async fn race_empty_results_are_not_errors() {
+        let engines: Vec<Engine> = vec![
+            Box::pin(async { ("Brave", Ok(vec![])) }),
+            Box::pin(async { ("DuckDuckGo", Err(anyhow::anyhow!("boom"))) }),
+        ];
+
+        let (found, errors) = race_first_success(engines).await;
+        assert!(found.is_none());
+        assert_eq!(errors.len(), 1);
+    }
+
+    /// 第一个非空结果胜出，返回它而不继续等后面的引擎。
+    #[tokio::test]
+    async fn race_returns_first_non_empty_result() {
+        let engines: Vec<Engine> = vec![
+            Box::pin(async {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                ("Slow", Ok(vec![fake_result("slow")]))
+            }),
+            Box::pin(async { ("Fast", Ok(vec![fake_result("fast")])) }),
+        ];
+
+        let (found, errors) = race_first_success(engines).await;
+        assert_eq!(
+            found.map(|(results, name)| (results[0].title.clone(), name)),
+            Some(("fast".to_string(), "Fast"))
+        );
+        assert!(errors.is_empty());
     }
 
     /// 取消信号必须立即中断竞速 —— 这是"卡住不动"最关键的一条：Esc 得有反应。

@@ -964,9 +964,7 @@ impl StarAgent {
         let content = tokio::fs::read_to_string(&resolved)
             .await
             .unwrap_or_default();
-        let hash = {
-            crate::core::utils::paths::sha256_hex(content.as_bytes())
-        };
+        let hash = { crate::core::utils::paths::sha256_hex(content.as_bytes()) };
 
         {
             let mut read_state = global_state.read_file_state.write().await;
@@ -1243,7 +1241,10 @@ mod tests {
             first.reason
         );
         assert_eq!(
-            agent.current_runtime_model_selection().provider_id.as_deref(),
+            agent
+                .current_runtime_model_selection()
+                .provider_id
+                .as_deref(),
             Some("openai")
         );
 

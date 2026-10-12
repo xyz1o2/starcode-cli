@@ -230,8 +230,36 @@ pub struct LlmConfig {
     pub model: String,
 }
 
+/// 用户显式配置了可用的 base_url 时，请求必须发往那里。
+///
+/// # 为什么 vendor 分支不能丢 base_url
+///
+/// `LlmProvider` 的变体按厂商命名，但它实际承载的是**两个独立决定**：用哪套
+/// wire 协议，以及发到哪里。`infer_provider`（`client.rs`）会用**模型名**关键词
+/// 命中 `DeepSeek` / `OpenAi` 这类官方分支 —— 而官方分支一旦不传 base_url，
+/// rig 就回落到厂商硬编码的官方地址。
+///
+/// 后果是：一个把 DeepSeek 模型挂在自建网关上的用户，只要模型名里带
+/// "deepseek"，请求就会静默飞到 `api.deepseek.com`，网关配置和 key 一起失效，
+/// 表现为 401。`is_aggregator_provider` 的白名单挡不住这种情况——它枚举的是
+/// 网关 id，新增一个网关就重新失效，而它要挡的根本不是某个网关，是**这条规则
+/// 本身**。
+///
+/// 正确的不变量：**模型名只决定协议，base_url 决定目的地。** 任何分支都不得
+/// 用前者覆盖后者。
+///
+/// `BASE_URL_NOT_SET` 是占位符，不是地址 —— 把它拼进 URL 会得到
+/// `BASE_URL_NOT_SET/v1`，比回落到官方地址更糟，必须在这里就排除掉。
+fn explicit_base_url(base_url: Option<&String>) -> Option<String> {
+    base_url
+        .map(|u| u.trim())
+        .filter(|u| !u.is_empty() && *u != crate::core::config::providers::PLACEHOLDER_BASE_URL)
+        .map(str::to_string)
+}
+
 pub fn create_client(config: LlmConfig) -> Box<dyn LlmClient> {
     let base_url = config.base_url.clone();
+    let explicit_url = explicit_base_url(base_url.as_ref());
 
     // rig never omits the `Authorization` header: passing a placeholder makes it
     // emit `Bearer API_KEY_NOT_SET`, which upstream rejects as an invalid key.
@@ -249,56 +277,70 @@ pub fn create_client(config: LlmConfig) -> Box<dyn LlmClient> {
     };
 
     match &config.provider {
-        LlmProvider::OpenAi => Box::new(rig_adapter::RigAdapter::openai(
-            api_key.clone(),
-            config.model.clone(),
-        )),
+        LlmProvider::OpenAi => match explicit_url {
+            Some(u) => Box::new(rig_adapter::RigAdapter::openai_with_base_url(
+                api_key.clone(),
+                config.model.clone(),
+                u,
+            )),
+            None => Box::new(rig_adapter::RigAdapter::openai(
+                api_key.clone(),
+                config.model.clone(),
+            )),
+        },
         LlmProvider::Anthropic => {
             // Respect an explicit base_url: OpenCode Zen serves `claude-*` from its
             // own `/messages` endpoint, so ignoring base_url would send the request
             // to api.anthropic.com and fail auth. Falls back to rig's default.
-            match base_url {
-                Some(u) if !u.trim().is_empty() => {
-                    Box::new(rig_adapter::RigAdapter::anthropic_with_base_url(
-                        api_key.clone(),
-                        config.model.clone(),
-                        u.clone(),
-                    ))
-                }
-                _ => Box::new(rig_adapter::RigAdapter::anthropic(
+            match explicit_url {
+                Some(u) => Box::new(rig_adapter::RigAdapter::anthropic_with_base_url(
+                    api_key.clone(),
+                    config.model.clone(),
+                    u,
+                )),
+                None => Box::new(rig_adapter::RigAdapter::anthropic(
                     api_key.clone(),
                     config.model.clone(),
                 )),
             }
         }
-        LlmProvider::DeepSeek => Box::new(rig_adapter::RigAdapter::deepseek(
-            api_key.clone(),
-            config.model.clone(),
-        )),
+        LlmProvider::DeepSeek => match explicit_url {
+            Some(u) => Box::new(rig_adapter::RigAdapter::deepseek_with_base_url(
+                api_key.clone(),
+                config.model.clone(),
+                u,
+            )),
+            None => Box::new(rig_adapter::RigAdapter::deepseek(
+                api_key.clone(),
+                config.model.clone(),
+            )),
+        },
         LlmProvider::MiniMax => Box::new(rig_adapter::RigAdapter::openai_compatible(
             api_key.clone(),
             config.model.clone(),
-            base_url.unwrap_or_else(|| MINIMAX_DEFAULT_BASE_URL.to_string()),
+            explicit_url
+                .clone()
+                .unwrap_or_else(|| MINIMAX_DEFAULT_BASE_URL.to_string()),
             "minimax".to_string(),
         )),
         LlmProvider::Xiaomi => Box::new(rig_adapter::RigAdapter::openai_compatible(
             api_key.clone(),
             config.model.clone(),
-            base_url.unwrap_or_else(|| XIAOMI_DEFAULT_BASE_URL.to_string()),
+            explicit_url
+                .clone()
+                .unwrap_or_else(|| XIAOMI_DEFAULT_BASE_URL.to_string()),
             "xiaomi".to_string(),
         )),
         LlmProvider::Mock => Box::new(MockClient::new(None)),
         LlmProvider::Custom(name) => {
             if name == "anthropic-compatible" {
-                match &base_url {
-                    Some(u) if !u.trim().is_empty() => {
-                        Box::new(rig_adapter::RigAdapter::anthropic_with_base_url(
-                            api_key.clone(),
-                            config.model.clone(),
-                            u.clone(),
-                        ))
-                    }
-                    _ => Box::new(rig_adapter::RigAdapter::anthropic(
+                match explicit_url.clone() {
+                    Some(u) => Box::new(rig_adapter::RigAdapter::anthropic_with_base_url(
+                        api_key.clone(),
+                        config.model.clone(),
+                        u,
+                    )),
+                    None => Box::new(rig_adapter::RigAdapter::anthropic(
                         api_key.clone(),
                         config.model.clone(),
                     )),
@@ -307,6 +349,10 @@ pub fn create_client(config: LlmConfig) -> Box<dyn LlmClient> {
                 Box::new(rig_adapter::RigAdapter::openai_compatible(
                     api_key.clone(),
                     config.model.clone(),
+                    // 注意这里**不能**换成 explicit_url：OpenAiCompatible 的
+                    // base_url 是 String 而非 Option，没有地址时 rig 会拿到空串，
+                    // 构建出一个指向 "" 的客户端。保持原有行为，缺失地址由
+                    // client.rs 的 PLACEHOLDER 告警负责报出来。
                     base_url.unwrap_or_default(),
                     name.clone(),
                 ))
@@ -333,4 +379,101 @@ pub trait LlmClient: Send + Sync + std::fmt::Debug {
     }
 
     fn get_model_info(&self) -> Option<ModelInfo>;
+}
+
+#[cfg(test)]
+mod create_client_tests {
+    use super::*;
+
+    fn cfg(provider: LlmProvider, base_url: Option<&str>) -> LlmConfig {
+        LlmConfig {
+            provider,
+            api_key: "test-key".to_string(),
+            base_url: base_url.map(str::to_string),
+            model: "deepseek-v4.1-flash:free".to_string(),
+        }
+    }
+
+    /// Debug 输出里带 `RigAdapter` 的全部字段（含 base_url），用它观察接线结果，
+    /// 免得为了测试给 `LlmClient` 再加一个只为断言存在的 downcast 方法。
+    fn debug_of(client: &Box<dyn LlmClient>) -> String {
+        format!("{:?}", client)
+    }
+
+    #[test]
+    fn explicit_base_url_rejects_missing_empty_and_placeholder() {
+        assert_eq!(explicit_base_url(None), None);
+        assert_eq!(explicit_base_url(Some(&String::new())), None);
+        assert_eq!(explicit_base_url(Some(&"   ".to_string())), None);
+        // 占位符不是地址：放行它会拼出 `BASE_URL_NOT_SET/v1` 这种请求 URL。
+        assert_eq!(
+            explicit_base_url(Some(
+                &crate::core::config::providers::PLACEHOLDER_BASE_URL.to_string()
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_base_url_accepts_and_trims_real_urls() {
+        assert_eq!(
+            explicit_base_url(Some(&"  https://tokenharbor.ai/v1  ".to_string())),
+            Some("https://tokenharbor.ai/v1".to_string())
+        );
+    }
+
+    /// 回归：自建网关上挂着别家厂商命名的模型时，请求必须留在网关上。
+    ///
+    /// 这是 401 的根因——`deepseek-v4.1-flash:free` 挂在 tokenharbor.ai，
+    /// 但 DeepSeek 分支曾丢弃 base_url，请求飞到 api.deepseek.com，
+    /// 网关的 key 自然不被承认。
+    #[test]
+    fn deepseek_branch_keeps_a_configured_gateway_base_url() {
+        let client = create_client(cfg(
+            LlmProvider::DeepSeek,
+            Some("https://tokenharbor.ai/v1"),
+        ));
+        assert!(
+            debug_of(&client).contains("https://tokenharbor.ai/v1"),
+            "DeepSeek 分支吞掉了显式配置的 base_url: {}",
+            debug_of(&client)
+        );
+    }
+
+    /// 同样的静默丢失也存在于 OpenAi 分支，一并钉住。
+    #[test]
+    fn openai_branch_keeps_a_configured_gateway_base_url() {
+        let client = create_client(cfg(LlmProvider::OpenAi, Some("https://gateway.example/v1")));
+        assert!(
+            debug_of(&client).contains("https://gateway.example/v1"),
+            "OpenAi 分支吞掉了显式配置的 base_url: {}",
+            debug_of(&client)
+        );
+    }
+
+    /// 占位符必须退回 rig 的官方默认地址，而不是把占位符当地址发出去。
+    #[test]
+    fn placeholder_base_url_falls_back_to_the_vendor_default() {
+        let client = create_client(cfg(
+            LlmProvider::DeepSeek,
+            Some(crate::core::config::providers::PLACEHOLDER_BASE_URL),
+        ));
+        let debug = debug_of(&client);
+        assert!(
+            !debug.contains("BASE_URL_NOT_SET"),
+            "占位符被当成了真实地址: {}",
+            debug
+        );
+    }
+
+    /// 没有配置地址时行为不变：交给 rig 用厂商官方地址。
+    #[test]
+    fn absent_base_url_still_uses_the_vendor_default() {
+        let client = create_client(cfg(LlmProvider::DeepSeek, None));
+        assert!(
+            debug_of(&client).contains("base_url: None"),
+            "无地址时不该构造出自定义端点: {}",
+            debug_of(&client)
+        );
+    }
 }

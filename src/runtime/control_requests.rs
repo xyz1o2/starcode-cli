@@ -232,13 +232,19 @@ pub async fn handle_request(
             match outcome {
                 Ok(msg) => {
                     let _ = tx
-                        .send(StreamMessage::Content { message_id, content: msg })
+                        .send(StreamMessage::Content {
+                            message_id,
+                            content: msg,
+                        })
                         .await;
                     let _ = tx.send(StreamMessage::Done { message_id }).await;
                 }
                 Err(e) => {
                     let _ = tx
-                        .send(StreamMessage::Error { message_id, error: e.to_string() })
+                        .send(StreamMessage::Error {
+                            message_id,
+                            error: e.to_string(),
+                        })
                         .await;
                 }
             }

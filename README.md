@@ -223,13 +223,13 @@ starcode mcp remove filesystem
 ```bash
 cargo check --all-targets      # fastest correctness gate — use while iterating
 cargo build --release          # → target/release/starcode-cli
-cargo test --lib               # unit tests live inside src/
+cargo test --lib -- --test-threads=1   # unit tests live inside src/
 ```
 
-`cargo fmt --all -- --check` and `cargo clippy -- -D warnings` are currently **red on
-pre-existing code** (120 files unformatted, 542 warnings). They run in CI as an
-informational, non-blocking job and do not gate releases — so make sure your own
-changes don't add new problems rather than assuming a green run.
+`cargo fmt --all -- --check` is a **blocking** CI gate and is currently green.
+`cargo clippy` still carries ~470 warnings on pre-existing code, so it runs in CI
+without `-D warnings` — keep your own changes warning-free rather than assuming a
+green run.
 
 Building needs `cmake`, `pkg-config`, and a C compiler on Linux, because `rustls`
 defaults to `aws-lc-rs`, which compiles C and assembly:

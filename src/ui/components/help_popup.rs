@@ -59,7 +59,12 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
             // 新增全局绑定只需改 `events/keymap.rs` 的 GLOBAL_BINDINGS。
             crate::ui::events::keymap::GLOBAL_BINDINGS
                 .iter()
-                .map(|d| (d.binding.label().to_string(), i18n::t("ui.help.control", d.zh, d.en)))
+                .map(|d| {
+                    (
+                        d.binding.label().to_string(),
+                        i18n::t("ui.help.control", d.zh, d.en),
+                    )
+                })
                 .collect(),
         ),
         (

@@ -78,11 +78,7 @@ pub trait SemanticEnricher {
 
 /// 对一个 entry 执行完整增强：构造 prompt → 调模型 → 解析 → 回填。
 /// 任一步失败则 entry 保持结构-only，返回 `false`（诚实降级）。
-pub fn enrich_entry(
-    entry: &mut LensEntry,
-    content: &str,
-    enricher: &dyn SemanticEnricher,
-) -> bool {
+pub fn enrich_entry(entry: &mut LensEntry, content: &str, enricher: &dyn SemanticEnricher) -> bool {
     let prompt = build_prompt(entry, content);
     let Some(resp) = enricher.enrich(&prompt) else {
         return false;
@@ -166,7 +162,9 @@ mod tests {
     #[test]
     fn enrich_fills_entry_on_good_response() {
         let mut e = structural_entry();
-        let m = Mock(Some("F: UI↔Agent 协议\nR: worker.rs\nS: mpsc, cap-100\n".into()));
+        let m = Mock(Some(
+            "F: UI↔Agent 协议\nR: worker.rs\nS: mpsc, cap-100\n".into(),
+        ));
         assert!(enrich_entry(&mut e, "code", &m));
         assert_eq!(e.f_role, "UI↔Agent 协议");
         assert_eq!(e.r_related, vec!["worker.rs".to_string()]);
@@ -181,8 +179,11 @@ mod tests {
         assert!(e.f_role.is_empty());
         // 响应缺 F → 也视为失败，不回填。
         let mut e2 = structural_entry();
-        assert!(!enrich_entry(&mut e2, "code", &Mock(Some("S: foo\n".into()))));
+        assert!(!enrich_entry(
+            &mut e2,
+            "code",
+            &Mock(Some("S: foo\n".into()))
+        ));
         assert!(e2.f_role.is_empty() && e2.s_signals.is_empty());
     }
 }
-

@@ -115,7 +115,11 @@ pub fn normalize_path(path: &Path) -> PathBuf {
                     .is_some_and(|component| matches!(component, std::path::Component::Normal(..)))
                 {
                     normalized.pop();
-                } else if !normalized.is_absolute() {
+                } else if !normalized.has_root() {
+                    // 只有"连根都没有"的相对路径才保留 `..`。
+                    // 用 has_root() 而不是 is_absolute()：Windows 上 `\foo` 没有盘符，
+                    // is_absolute() 是 false，于是 `/../../x` 里的 `..` 不会被截断在根上，
+                    // 结果变成 `\..\..\x`，可以爬到根外面去。
                     normalized.push(component);
                 }
             }

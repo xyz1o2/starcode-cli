@@ -553,9 +553,7 @@ pub fn normalize_provider_id(input: &str) -> Option<String> {
         // Moonshot 官方 API（api.moonshot.cn）就叫 moonshot；"kimi-code" 是
         // 另一个厂商的编码订阅端点，不要和它混为一谈。
         "kimi" | "moonshot" => Some("moonshot".to_string()),
-        "qwen" | "alibabacloud" | "dashscope" | "aliyun" | "bailian" => {
-            Some("alibaba".to_string())
-        }
+        "qwen" | "alibabacloud" | "dashscope" | "aliyun" | "bailian" => Some("alibaba".to_string()),
         "doubao" | "bytedance" | "ark" | "volcengine" | "volces" => Some("bytedance".to_string()),
         "glm" | "bigmodel" | "zhipuai" | "zhipu" | "chatglm" => Some("zhipu".to_string()),
         "opencode" | "opencodezen" | "zen" => Some("opencode".to_string()),
@@ -836,12 +834,47 @@ mod tests {
     #[test]
     fn every_alias_resolves_to_a_registered_provider() {
         let aliases = [
-            "openrouter", "or", "OpenRouter", "groq", "moonshot", "kimi", "zhipu", "glm",
-            "bigmodel", "zhipuai", "chatglm", "alibaba", "qwen", "dashscope", "aliyun",
-            "bailian", "bytedance", "ark", "doubao", "volcengine", "volces", "siliconflow",
-            "silicon", "together", "togetherai", "fireworks", "fireworksai", "fw", "cerebras",
-            "cerebrasai", "deepinfra", "lmstudio", "lmst", "opencode", "opencodezen", "zen",
-            "xiaomi", "mimo", "milm", "openai-compatible", "anthropic-compatible",
+            "openrouter",
+            "or",
+            "OpenRouter",
+            "groq",
+            "moonshot",
+            "kimi",
+            "zhipu",
+            "glm",
+            "bigmodel",
+            "zhipuai",
+            "chatglm",
+            "alibaba",
+            "qwen",
+            "dashscope",
+            "aliyun",
+            "bailian",
+            "bytedance",
+            "ark",
+            "doubao",
+            "volcengine",
+            "volces",
+            "siliconflow",
+            "silicon",
+            "together",
+            "togetherai",
+            "fireworks",
+            "fireworksai",
+            "fw",
+            "cerebras",
+            "cerebrasai",
+            "deepinfra",
+            "lmstudio",
+            "lmst",
+            "opencode",
+            "opencodezen",
+            "zen",
+            "xiaomi",
+            "mimo",
+            "milm",
+            "openai-compatible",
+            "anthropic-compatible",
         ];
         for alias in aliases {
             let id = normalize_provider_id(alias)
@@ -858,26 +891,62 @@ mod tests {
     #[test]
     fn the_new_gateways_carry_their_verified_endpoints() {
         let expected: &[(&str, &str, &str)] = &[
-            ("openrouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
+            (
+                "openrouter",
+                "https://openrouter.ai/api/v1",
+                "OPENROUTER_API_KEY",
+            ),
             ("groq", "https://api.groq.com/openai/v1", "GROQ_API_KEY"),
-            ("together", "https://api.together.xyz/v1", "TOGETHER_API_KEY"),
-            ("fireworks", "https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY"),
+            (
+                "together",
+                "https://api.together.xyz/v1",
+                "TOGETHER_API_KEY",
+            ),
+            (
+                "fireworks",
+                "https://api.fireworks.ai/inference/v1",
+                "FIREWORKS_API_KEY",
+            ),
             ("cerebras", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY"),
-            ("deepinfra", "https://api.deepinfra.com/v1/openai", "DEEPINFRA_API_KEY"),
-            ("siliconflow", "https://api.siliconflow.cn/v1", "SILICONFLOW_API_KEY"),
+            (
+                "deepinfra",
+                "https://api.deepinfra.com/v1/openai",
+                "DEEPINFRA_API_KEY",
+            ),
+            (
+                "siliconflow",
+                "https://api.siliconflow.cn/v1",
+                "SILICONFLOW_API_KEY",
+            ),
             ("moonshot", "https://api.moonshot.cn/v1", "MOONSHOT_API_KEY"),
-            ("zhipu", "https://open.bigmodel.cn/api/paas/v4", "ZHIPUAI_API_KEY"),
+            (
+                "zhipu",
+                "https://open.bigmodel.cn/api/paas/v4",
+                "ZHIPUAI_API_KEY",
+            ),
             (
                 "alibaba",
                 "https://dashscope.aliyuncs.com/compatible-mode/v1",
                 "DASHSCOPE_API_KEY",
             ),
-            ("bytedance", "https://ark.cn-beijing.volces.com/api/v3", "ARK_API_KEY"),
+            (
+                "bytedance",
+                "https://ark.cn-beijing.volces.com/api/v3",
+                "ARK_API_KEY",
+            ),
         ];
         for (id, base_url, env_var) in expected {
             let meta = get_provider_by_id(id).unwrap_or_else(|| panic!("{id} must be registered"));
-            assert_eq!(meta.default_base_url, Some(*base_url), "provider {id} base_url");
-            assert_eq!(meta.api_key_env_var, Some(*env_var), "provider {id} env var");
+            assert_eq!(
+                meta.default_base_url,
+                Some(*base_url),
+                "provider {id} base_url"
+            );
+            assert_eq!(
+                meta.api_key_env_var,
+                Some(*env_var),
+                "provider {id} env var"
+            );
             assert!(meta.requires_api_key, "provider {id} needs a key");
             // base_url 也要能真正解析出来，否则配置完仍然发不出去。
             assert_eq!(
@@ -916,8 +985,18 @@ mod tests {
     #[test]
     fn gateways_with_a_known_endpoint_do_not_ask_for_a_manual_base_url() {
         for id in [
-            "openrouter", "groq", "together", "fireworks", "cerebras", "deepinfra",
-            "siliconflow", "moonshot", "zhipu", "alibaba", "bytedance", "opencode",
+            "openrouter",
+            "groq",
+            "together",
+            "fireworks",
+            "cerebras",
+            "deepinfra",
+            "siliconflow",
+            "moonshot",
+            "zhipu",
+            "alibaba",
+            "bytedance",
+            "opencode",
         ] {
             assert!(
                 !provider_requires_manual_base_url(id),

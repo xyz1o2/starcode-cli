@@ -1699,10 +1699,21 @@ mod tests {
             .expect("新 Edit 执行失败");
         assert!(fresh_result.error.is_none());
 
+        // 不能直接对原始文本做 contains：JSON 会把 Windows 路径里的 `\` 转义成 `\\`，
+        // 拿单反斜杠去匹配永远匹配不上。解析成结构再比键。
         let persisted = std::fs::read_to_string(temp.path().join("trustedFolders.json"))
             .expect("应写入隔离 trust 配置");
+        let parsed: crate::core::config::trusted_folders::TrustedFoldersConfig =
+            serde_json::from_str(&persisted).expect("trust 配置应是合法 JSON");
         let trusted_parent = temp.path().join("nested");
-        assert!(persisted.contains(trusted_parent.to_string_lossy().as_ref()));
+        assert!(
+            parsed
+                .config
+                .keys()
+                .any(|k| k == &*trusted_parent.to_string_lossy()),
+            "落盘的信任路径应包含父目录 {trusted_parent:?}，实际: {:?}",
+            parsed.config.keys().collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]

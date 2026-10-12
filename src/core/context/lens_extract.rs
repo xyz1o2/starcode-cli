@@ -166,7 +166,8 @@ fn import_module(line: &str, ext: &str) -> Option<String> {
             .map(|r| r.trim_end_matches(';').trim().to_string()),
         "py" | "pyi" => {
             if let Some(rest) = line.strip_prefix("from ") {
-                rest.split_once(" import ").map(|(m, _)| m.trim().to_string())
+                rest.split_once(" import ")
+                    .map(|(m, _)| m.trim().to_string())
             } else {
                 line.strip_prefix("import ")
                     .map(|r| r.split([' ', ',']).next().unwrap_or("").to_string())
@@ -211,10 +212,21 @@ mod tests {
         let content = "use std::fmt;\npub struct Foo { x: i32 }\npub fn bar() {}\nfn helper() {}\n";
         let e = extract_structural("src/x.rs", content, ScopeRole::Index, "abc".into());
         assert_eq!(e.lang, "rust");
-        assert!(e.symbols.contains(&"Foo".to_string()), "symbols={:?}", e.symbols);
+        assert!(
+            e.symbols.contains(&"Foo".to_string()),
+            "symbols={:?}",
+            e.symbols
+        );
         assert!(e.symbols.contains(&"bar".to_string()));
-        assert!(e.imports.contains(&"std::fmt".to_string()), "imports={:?}", e.imports);
-        assert!(!e.a_api.is_empty(), "a_api should capture public signatures");
+        assert!(
+            e.imports.contains(&"std::fmt".to_string()),
+            "imports={:?}",
+            e.imports
+        );
+        assert!(
+            !e.a_api.is_empty(),
+            "a_api should capture public signatures"
+        );
         // 结构半扇填好，语义半扇留空待模型。
         assert!(e.f_role.is_empty() && e.r_related.is_empty() && e.s_signals.is_empty());
         assert_eq!(e.source_sha256, "abc");
@@ -226,9 +238,17 @@ mod tests {
         let content = "from os import path\nimport sys\n\ndef go():\n    return path\n";
         let e = extract_structural("m.py", content, ScopeRole::Index, "s".into());
         assert_eq!(e.lang, "python");
-        assert!(e.imports.contains(&"os".to_string()), "imports={:?}", e.imports);
+        assert!(
+            e.imports.contains(&"os".to_string()),
+            "imports={:?}",
+            e.imports
+        );
         assert!(e.imports.contains(&"sys".to_string()));
-        assert!(e.symbols.contains(&"go".to_string()), "symbols={:?}", e.symbols);
+        assert!(
+            e.symbols.contains(&"go".to_string()),
+            "symbols={:?}",
+            e.symbols
+        );
     }
 
     #[test]
@@ -249,7 +269,10 @@ mod tests {
             "s".into(),
         );
         assert_eq!(e.lang, "typescript");
-        assert!(e.imports.contains(&"./bar".to_string()), "imports={:?}", e.imports);
+        assert!(
+            e.imports.contains(&"./bar".to_string()),
+            "imports={:?}",
+            e.imports
+        );
     }
 }
-

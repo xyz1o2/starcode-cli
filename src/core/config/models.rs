@@ -310,7 +310,13 @@ mod tests {
         }
 
         // chat/completions 系：开关型。
-        for m in ["deepseek-v4-pro", "glm-5.3", "kimi-k3", "minimax-m3", "qwen3.8-max"] {
+        for m in [
+            "deepseek-v4-pro",
+            "glm-5.3",
+            "kimi-k3",
+            "minimax-m3",
+            "qwen3.8-max",
+        ] {
             assert_eq!(
                 thinking_capability(m),
                 ThinkingCapability::Binary,

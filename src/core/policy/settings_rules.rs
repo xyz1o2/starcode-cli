@@ -397,6 +397,20 @@ fn extract_path_arg(args: &Value) -> Option<String> {
     .map(|v| v.to_string())
 }
 
+/// 一层设置文件及其可信度。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionSourceFile {
+    pub path: PathBuf,
+    /// 个人层（不会被提交进仓库）才允许决定审批模式。
+    pub trusted: bool,
+}
+
+impl PermissionSourceFile {
+    pub fn new(path: PathBuf, trusted: bool) -> Self {
+        Self { path, trusted }
+    }
+}
+
 /// settings.json `permissions` 段的解析结果（多层设置合并后的并集）。
 #[derive(Debug, Clone, Default)]
 pub struct SettingsPermissions {
@@ -411,43 +425,78 @@ pub struct SettingsPermissions {
 
 impl SettingsPermissions {
     /// 收集全部 settings 层的权限规则。判定时 deny > ask > allow，所以各层取并集即可，
-    /// 不需要"后面的层覆盖前面的层"。
+    /// 不需要"后面的层覆盖前面的层"。审批模式另算：只有个人层算数。
     pub fn from_project(cwd: &Path) -> Self {
-        Self::from_paths(&Self::candidate_files(cwd))
+        Self::from_entries(Self::candidate_files_with_trust(cwd))
     }
 
     /// 只读给定文件，不碰全局设置 —— 单测靠这个入口保持与运行机器无关。
     pub fn from_paths(paths: &[PathBuf]) -> Self {
+        Self::from_entries(
+            paths
+                .iter()
+                .map(|p| PermissionSourceFile::new(p.clone(), true))
+                .collect(),
+        )
+    }
+
+    fn from_entries(entries: Vec<PermissionSourceFile>) -> Self {
         let mut out = Self::default();
-        for path in paths {
-            out.merge_file(path);
+        for entry in entries {
+            out.merge_file(&entry.path, entry.trusted);
         }
         out
     }
 
     /// 从低优先级到高优先级；`defaultMode` 后写的赢。
     pub fn candidate_files(cwd: &Path) -> Vec<PathBuf> {
+        Self::candidate_files_with_trust(cwd)
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect()
+    }
+
+    /// 带上"这一层是否可信"的设置文件清单。
+    ///
+    /// 规则（allow/ask/deny）取并集，各层都安全 —— 项目里写 deny 只会更安全。
+    /// 但 `defaultMode` 是覆盖语义：签入版本库的 `.star/settings.json`
+    /// 一旦写了 `bypassPermissions`，任何人 clone 下来就自动获得免确认权限，
+    /// 而 `is_yolo_mode_disabled()` 在这条启动路径上根本没被调用。
+    /// 因此把可提交的 `settings.json` 标为不可信，只允许个人层
+    /// （`settings.local.json`、全局 `~/.star/`、`STAR_PERMISSIONS_FILE`）
+    /// 决定审批模式。
+    pub fn candidate_files_with_trust(cwd: &Path) -> Vec<PermissionSourceFile> {
         let mut files = Vec::new();
         if let Some(explicit) = std::env::var("STAR_PERMISSIONS_FILE")
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
         {
-            files.push(PathBuf::from(explicit));
+            // 显式指定 = 用户自己指路，视为个人层。
+            files.push(PermissionSourceFile::new(PathBuf::from(explicit), true));
         }
-        files.push(crate::core::config::storage::Storage::global_star_dir().join("settings.json"));
+        files.push(PermissionSourceFile::new(
+            crate::core::config::storage::Storage::global_star_dir().join("settings.json"),
+            true,
+        ));
         let project = crate::core::config::storage::Storage::new(cwd.to_path_buf()).star_dir();
-        files.push(project.join("settings.json"));
-        files.push(project.join("settings.local.json"));
+        // 可提交进仓库的项目层：只影响规则，不影响审批模式。
+        files.push(PermissionSourceFile::new(project.join("settings.json"), false));
+        files.push(PermissionSourceFile::new(
+            project.join("settings.local.json"),
+            true,
+        ));
         files
     }
 
-    fn merge_file(&mut self, path: &Path) {
+    /// 读一层设置文件。`trusted` 决定该层的 `defaultMode` 是否算数 ——
+    /// 可提交进仓库的项目层只能加规则，不能抬升审批模式。
+    fn merge_file(&mut self, path: &Path, trusted: bool) {
         let Ok(content) = std::fs::read_to_string(path) else {
             return;
         };
         match crate::core::config::json_with_comments::parse_json_with_comments::<Value>(&content) {
-            Ok(value) => self.merge_json(&value),
+            Ok(value) => self.merge_json_with_trust(&value, trusted),
             Err(e) => crate::utils::logging::append_debug_log_line(&format!(
                 "[Policy] Skipping unparsable settings {}: {}",
                 path.display(),
@@ -457,7 +506,14 @@ impl SettingsPermissions {
     }
 
     /// 从一个 settings JSON 对象里合并 `permissions` 段。
+    ///
+    /// `trusted_source` 为 false 时忽略 `defaultMode`：仓库里签入的
+    /// `bypassPermissions` 不该让每个 clone 下来的人都自动免确认。
     pub fn merge_json(&mut self, settings: &Value) {
+        self.merge_json_with_trust(settings, true);
+    }
+
+    fn merge_json_with_trust(&mut self, settings: &Value, trusted_source: bool) {
         let Some(perms) = settings.get("permissions") else {
             return;
         };
@@ -465,7 +521,14 @@ impl SettingsPermissions {
         push_rules(&mut self.ask, perms.get("ask"));
         push_rules(&mut self.deny, perms.get("deny"));
         if let Some(mode) = pick(perms, &["defaultMode", "default_mode"]).and_then(|v| v.as_str()) {
-            self.default_mode = Some(mode.trim().to_string());
+            if trusted_source {
+                self.default_mode = Some(mode.trim().to_string());
+            } else {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[Policy] Ignoring `defaultMode: {}` from an untrusted settings layer",
+                    mode.trim()
+                ));
+            }
         }
         if let Some(dirs) = pick(perms, &["additionalDirectories", "additional_directories"])
             .and_then(|v| v.as_array())
@@ -819,6 +882,73 @@ mod tests {
             Some(ApprovalMode::Yolo)
         );
         assert_eq!(approval_mode_from_str("nonsense"), None);
+    }
+
+    /// 回归：签入版本库的 `.star/settings.json` 不能把审批模式抬到 yolo。
+    ///
+    /// `defaultMode` 是覆盖语义，而项目层文件会随仓库分发 ——
+    /// 一个 `bypassPermissions` 就让每个 clone 下来的人自动免确认，
+    /// 且这条启动路径上 `is_yolo_mode_disabled()` 根本没被调用。
+    /// 可提交层只允许加规则（deny 只会更安全），不允许放宽审批。
+    #[test]
+    fn untrusted_project_layer_cannot_escalate_the_approval_mode() {
+        let settings = json!({"permissions": {"defaultMode": "bypassPermissions"}});
+
+        let mut untrusted = SettingsPermissions::default();
+        untrusted.merge_json_with_trust(&settings, false);
+        assert_eq!(
+            untrusted.default_mode, None,
+            "an untrusted layer must not set defaultMode"
+        );
+
+        let mut trusted = SettingsPermissions::default();
+        trusted.merge_json_with_trust(&settings, true);
+        assert_eq!(trusted.default_mode.as_deref(), Some("bypassPermissions"));
+    }
+
+    /// 反向保证：不可信层写 deny 规则仍然生效 —— 那是让它更安全，不是放宽。
+    #[test]
+    fn untrusted_project_layer_can_still_add_rules() {
+        let mut p = SettingsPermissions::default();
+        p.merge_json_with_trust(
+            &json!({"permissions": {"deny": ["Read(.env)"], "allow": ["Bash"]}}),
+            false,
+        );
+        assert_eq!(
+            p.evaluate("Read", &json!({"file_path": ".env"}))
+                .map(|(v, _)| v),
+            Some(RuleVerdict::Deny)
+        );
+        assert_eq!(p.allow.len(), 1);
+    }
+
+    /// 项目 `settings.local.json` 是个人层（按惯例不入库），必须仍能设置模式。
+    #[test]
+    fn project_settings_list_marks_only_the_committable_layer_untrusted() {
+        let dir = std::env::temp_dir().join(format!("starcode-perm-src-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".star")).unwrap();
+
+        let entries = SettingsPermissions::candidate_files_with_trust(&dir);
+        let trusted = |name: &str| {
+            entries
+                .iter()
+                .find(|e| e.path.ends_with(name))
+                .map(|e| e.trusted)
+        };
+
+        assert_eq!(
+            trusted("settings.json"),
+            Some(false),
+            "可提交的项目 settings.json 必须标为不可信"
+        );
+        assert_eq!(
+            trusted("settings.local.json"),
+            Some(true),
+            "settings.local.json 是个人层，应当可信"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// `/permissions allow|deny|remove` 的落盘往返：写进 settings.local.json 再读回来

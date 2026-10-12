@@ -2335,9 +2335,7 @@ fn command_candidates(input: &str) -> (String, Vec<&'static SlashCommand>) {
 ///
 /// 这里带上 `category`，面板才会按分类渲染出分组标题；`Pending` 分组是刻意保留的：
 /// 它如实告诉用户哪些命令声明了但还没实现。
-pub fn command_palette_items(
-    input: &str,
-) -> Vec<crate::ui::state::PaletteItem> {
+pub fn command_palette_items(input: &str) -> Vec<crate::ui::state::PaletteItem> {
     let (prefix, candidates) = command_candidates(input);
     if candidates.is_empty() {
         return Vec::new();

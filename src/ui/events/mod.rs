@@ -27,7 +27,6 @@ pub mod clipboard_paste;
 ///
 /// 在模态对话框打开时仍然生效的键，由 [`keymap::is_global_key`] 从同一张表推导 ——
 /// 因为各模态的 `match key.code` 不看修饰键，`Ctrl+C` 会被当成字符打进过滤框。
-
 pub mod input;
 pub mod key_context;
 pub mod keymap;

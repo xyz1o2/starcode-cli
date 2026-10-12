@@ -270,7 +270,12 @@ impl ToolErrorClassifier {
         let error_lower = error.to_lowercase();
 
         // 检查是否是文件系统错误
-        if error_lower.contains("enoent") || error_lower.contains("not found") {
+        // "no such file or directory" 是 OS 的 ENOENT 文案（Linux/macOS），
+        // 必须在这里吃掉：下面 ShellError 分支的 "no such file" 会把它抢走。
+        if error_lower.contains("enoent")
+            || error_lower.contains("not found")
+            || error_lower.contains("no such file or directory")
+        {
             return "Error:ENOENT".to_string();
         }
         if error_lower.contains("eacces") || error_lower.contains("permission denied") {
@@ -281,7 +286,9 @@ impl ToolErrorClassifier {
         }
 
         // 检查是否是Shell错误
-        if error_lower.contains("command not found") || error_lower.contains("no such file") {
+        // 只认 "command not found"（`bash: foo: command not found`）；
+        // 裸的 "no such file" 已在上面的 ENOENT 分支处理。
+        if error_lower.contains("command not found") {
             return "ShellError".to_string();
         }
 

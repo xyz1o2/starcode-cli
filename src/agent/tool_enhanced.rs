@@ -647,11 +647,21 @@ mod tests {
 
     #[test]
     fn test_otlp_logger() {
-        let mut logger = OTLPLogger::new();
-        let mut attributes = HashMap::new();
-        attributes.insert("key".to_string(), "value".to_string());
-
-        logger.log_event("test_event", attributes);
-        assert_eq!(logger.get_logs().len(), 1);
+        // enabled 由 OTEL_EXPORTER_OTLP_ENDPOINT 决定；不设置的话 log_event
+        // 直接 return，这条断言永远拿不到日志。测试自己控制这个变量。
+        let previous = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
+        std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318");
+        let result = std::panic::catch_unwind(|| {
+            let mut logger = OTLPLogger::new();
+            let mut attributes = HashMap::new();
+            attributes.insert("key".to_string(), "value".to_string());
+            logger.log_event("test_event", attributes);
+            logger.get_logs().len()
+        });
+        match previous {
+            Some(v) => std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", v),
+            None => std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT"),
+        }
+        assert_eq!(result.expect("OTLPLogger 不应 panic"), 1);
     }
 }

@@ -21,24 +21,29 @@ cargo test --lib commands::parity           # one module
 cargo test --lib detects_cargo_verifiers    # one test by name
 cargo test --lib -- --nocapture             # see println! from tests
 
-# CI gates (.github/workflows/ci.yml) — the first two are informational, see "Gate state"
+# CI gates (.github/workflows/ci.yml) — see "Gate state"
 cargo check --workspace --all-targets --locked   # the real blocking gate
-cargo fmt --all -- --check                       # currently red on pre-existing code
-cargo clippy --workspace --all-targets -- -D warnings   # currently red on pre-existing code
-cargo test --workspace --lib
+cargo fmt --all -- --check                       # blocking gate, currently green
+cargo clippy --workspace --all-targets          # advisory in CI, no -D warnings yet
+cargo test --workspace --lib -- --test-threads=1
 cargo test --workspace --doc
 cargo test --workspace --test eval_harness_live -- --test-threads=1
 ```
 
 ### Gate state — verify, don't assume
 
-Both lint gates fail on pre-existing code, so a green run isn't the bar; *not adding new problems* is.
+- `cargo fmt --check`: green (debt cleared 2026-10-13).
+- `cargo clippy --workspace --all-targets`: ~470 warnings, 0 errors. Not gated: CI runs it
+  without `-D warnings`. Scope to your work: `cargo clippy --lib 2>&1 | rg <your_file>`.
+- `cargo test --workspace --lib -- --test-threads=1`: green as of 2026-10-13.
 
-- `cargo fmt --check`: 120 files differ.
-- `cargo clippy --workspace --all-targets`: 542 warnings + 3 errors. Scope to your work: `cargo clippy --lib 2>&1 | rg <your_file>`.
-- `cargo test --lib`: 170 pass, 6–8 fail. Pre-existing failures are `agent::mcp_permission`, `agent::tool_enhanced::tests::test_otlp_logger`, `core::auto_mode::dangerous_patterns` (×2), `core::tools::verify_edit::tests::test_extract_line_number`, `ui::components::chat_input::tests::test_border_color_default`, and `utils::checkpoint_manager` (cwd-dependent, flaky). Check a failing test at HEAD before concluding your change broke it.
+`--test-threads=1` is mandatory for the lib tests: `utils::checkpoint_manager` mutates the
+process-global `STAR_FILE_HISTORY_DIR_OVERRIDE`, so parallel tests delete each other's
+state and fail. Six of its tests fail without it.
 
-Because of this debt, the lint job in `ci.yml` is `continue-on-error: true` and gates nothing — including releases. The blocking gates are `cargo check --workspace --all-targets --locked` plus the test/build jobs. Delete that one line to make lint hard again once the debt is cleared.
+The blocking gates are `cargo check --workspace --all-targets --locked`, the test jobs and
+the build jobs. Once the clippy debt is cleared, add `-- -D warnings` back to the clippy
+step in `ci.yml`.
 
 ## Architecture
 

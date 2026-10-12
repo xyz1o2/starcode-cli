@@ -48,7 +48,7 @@ fn format_tokens(count: u32) -> String {
 /// 渲染Agent进度行
 ///
 /// 输出格式：
-/// ```
+/// ```text
 /// ├─ AgentType (Description)
 /// │   ├─ Initializing…
 /// │   └─ Done · 12 tools · 45k tokens

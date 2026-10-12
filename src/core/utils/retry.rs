@@ -210,8 +210,7 @@ where
 
 /// 计算带 jitter 的延迟 (±JITTER_FACTOR)
 fn compute_delay_with_jitter(base_delay_ms: u64) -> u64 {
-    let jitter =
-        base_delay_ms as f64 * JITTER_FACTOR * (rand::rng().random::<f64>() * 2.0 - 1.0);
+    let jitter = base_delay_ms as f64 * JITTER_FACTOR * (rand::rng().random::<f64>() * 2.0 - 1.0);
     (base_delay_ms as f64 + jitter).max(0.0) as u64
 }
 

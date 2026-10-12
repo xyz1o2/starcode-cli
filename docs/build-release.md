@@ -115,16 +115,17 @@ GitHub 托管 runner 只有 x86_64，所以非本机架构需要交叉编译：
 
 ## 三、lint 的现状
 
-`cargo fmt --all -- --check` 当前有 120 个文件不通过，`cargo clippy` 有 542 条
-warning 加 3 个 error。这些都是历史存量，不是新引入的。
+`cargo fmt --all -- --check` 现在是**硬门禁**，债务已清零。
 
-因此 `ci.yml` 里的 lint job 标了 `continue-on-error: true`，**只做可见性，不做
-门禁**，并且**不阻断 release**。真正的阻断门禁是 `cargo check --all-targets`
-和各平台的测试 / 构建。
+`cargo clippy --workspace --all-targets` 还有约 470 条存量警告（lib target 471 条，
+0 error），因此**没有**加 `-D warnings` —— 那样 CI 会长期红灯。这一步只作建议，
+警告照常打进日志。清完之后把 `-- -D warnings` 加回 `ci.yml` 就能恢复成硬门禁。
 
-把存量清零之后，删掉 `ci.yml` 里 lint job 上的 `continue-on-error: true` 就能
-恢复成硬门禁。注意不要用全局 `RUSTFLAGS=-Dwarnings`：它会连依赖 crate 的警告
-一起变成错误，而且会让所有依赖被迫重新编译。
+不要用全局 `RUSTFLAGS=-Dwarnings`：它会连依赖 crate 的警告一起变成错误，而且会让
+所有依赖被迫重新编译。
+
+另外，lib 测试必须串行跑（`-- --test-threads=1`）：`utils::checkpoint_manager` 的测试
+共用全局环境变量，并行执行时它们会互相把对方的 override 删掉。
 
 ## 四、常见问题
 

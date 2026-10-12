@@ -48,7 +48,10 @@ pub struct BuildResult {
 /// 遍历 `root`，按 profile 组装结构-only 索引与基线。纯确定性，不调用模型。
 pub fn build_structural_index(root: &Path, profile: ScopeProfile) -> BuildResult {
     let mut index = WholeIndex::default();
-    let mut baseline = Baseline { version: 1, objects: BTreeMap::new() };
+    let mut baseline = Baseline {
+        version: 1,
+        objects: BTreeMap::new(),
+    };
     let mut stats = BuildStats::default();
 
     let opts = crate::utils::file_walk::WalkOptions::new();
@@ -84,7 +87,9 @@ pub fn build_structural_index(root: &Path, profile: ScopeProfile) -> BuildResult
                     }
                     continue;
                 }
-                let Ok(bytes) = std::fs::read(path) else { continue };
+                let Ok(bytes) = std::fs::read(path) else {
+                    continue;
+                };
                 match String::from_utf8(bytes) {
                     Ok(content) => {
                         let sha = sha256_hex(content.as_bytes());
@@ -103,7 +108,11 @@ pub fn build_structural_index(root: &Path, profile: ScopeProfile) -> BuildResult
             }
         }
     }
-    BuildResult { index, baseline, stats }
+    BuildResult {
+        index,
+        baseline,
+        stats,
+    }
 }
 
 fn hash_file(path: &Path) -> Option<String> {
@@ -141,7 +150,10 @@ mod tests {
         let uniq = format!(
             "lens_build_{}_{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         );
         std::env::temp_dir().join(uniq)
     }
@@ -160,10 +172,18 @@ mod tests {
         let r = build_structural_index(&root, ScopeProfile::Core);
 
         // 核心子系统文件进 index。
-        assert!(r.index.entries.iter().any(|e| e.object == "src/runtime/messages.rs"));
+        assert!(r
+            .index
+            .entries
+            .iter()
+            .any(|e| e.object == "src/runtime/messages.rs"));
         // 非核心源码只进 baseline（observe），不进 index。
         assert!(r.baseline.objects.contains_key("src/utils/helper.rs"));
-        assert!(!r.index.entries.iter().any(|e| e.object == "src/utils/helper.rs"));
+        assert!(!r
+            .index
+            .entries
+            .iter()
+            .any(|e| e.object == "src/utils/helper.rs"));
         // target/ 被排除，既不进 index 也不进 baseline。
         assert!(!r.baseline.objects.keys().any(|k| k.contains("target/")));
         assert!(r.stats.indexed >= 1 && r.stats.excluded >= 1);
@@ -190,9 +210,11 @@ mod tests {
 
     #[test]
     fn baseline_json_round_trips() {
-        let mut b = Baseline { version: 1, objects: BTreeMap::new() };
+        let mut b = Baseline {
+            version: 1,
+            objects: BTreeMap::new(),
+        };
         b.objects.insert("a.rs".into(), "deadbeef".into());
         assert_eq!(Baseline::from_json(&b.to_json()).unwrap(), b);
     }
 }
-

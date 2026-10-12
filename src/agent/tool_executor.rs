@@ -44,6 +44,32 @@ fn should_run_invocation_confirmation(
     !approved || requires_invocation_confirmation
 }
 
+/// `ask` 规则命中、但工具自身没有确认要求时补出来的确认卡片。
+///
+/// 用户在 settings.json 里写 `ask` 就是想要一次"我看看再决定"的机会，
+/// 工具层返回 `Ok(None)` 只是说它没有额外顾虑，不能把这个机会吞掉。
+fn policy_confirmation_details(
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> crate::core::tools::tools::ToolCallConfirmationDetails {
+    let summary = args
+        .get("command")
+        .and_then(|v| v.as_str())
+        .or_else(|| args.get("file_path").and_then(|v| v.as_str()))
+        .map(|v| format!("\n\n{command_or_path}", command_or_path = v))
+        .unwrap_or_default();
+
+    crate::core::tools::tools::ToolCallConfirmationDetails {
+        confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
+        title: format!("Permission required: {}", tool_name),
+        prompt: format!(
+            "`{}` matches an `ask` rule in your permission settings.{}",
+            tool_name, summary
+        ),
+        on_confirm: std::sync::Arc::new(|_, _feedback| {}),
+    }
+}
+
 pub struct ToolExecutor {
     tool_registry: Arc<ToolRegistry>,
     config: Arc<Config>,
@@ -72,7 +98,7 @@ impl ToolExecutor {
             .unwrap_or(DEFAULT_CONFIRM_TIMEOUT_MS);
 
         let permission_manager = Arc::new(SessionPermissionManager::with_persistence(
-            config.storage().project_permissions_path(),
+            config.storage().project_permission_grants_path(),
         ));
 
         Self {
@@ -361,6 +387,10 @@ impl ToolExecutor {
                 Ok(invocation) => {
                     // 1. Check Policy / Confirmation
                     let mut approved = false;
+                    // 策略引擎要求弹窗时（`ask` 规则命中），必须真的走到用户面前。
+                    // 工具自己的 `should_confirm_execute` 返回 `Ok(None)` 只表示
+                    // "这个工具没有额外顾虑"，不能用来否决一条显式的 `ask` 规则。
+                    let mut policy_requires_confirmation = false;
 
                     if let Some(bus) = &self.message_bus {
                         let check = bus
@@ -405,11 +435,19 @@ impl ToolExecutor {
                             PolicyDecision::Allow => {
                                 approved = true;
                             }
-                            PolicyDecision::AskUser => {}
+                            PolicyDecision::AskUser => {
+                                policy_requires_confirmation = true;
+                            }
                         }
                     }
 
-                    if !approved && !requires_invocation_confirmation {
+                    // 会话/持久缓存只在策略没有点名要求确认时才生效。
+                    // 用户写 `ask: ["Bash(git push:*)"]` 的语义是"每次都问我"，
+                    // 一次"总是允许"不该把它降级成此后静默放行。
+                    if !approved
+                        && !requires_invocation_confirmation
+                        && !policy_requires_confirmation
+                    {
                         let permission_hit = self.permission_manager.check_allowed_with_identity(
                             name,
                             &args,
@@ -440,6 +478,15 @@ impl ToolExecutor {
                             let should_confirm = invocation
                                 .should_confirm_execute(abort_signal.as_ref())
                                 .await;
+
+                            // 工具没提出自己的确认要求，但策略要求确认：补一个最小的确认卡片，
+                            // 让 `ask` 规则真正兑现到用户面前。
+                            let should_confirm = match should_confirm {
+                                Ok(None) if policy_requires_confirmation => {
+                                    Ok(Some(policy_confirmation_details(name, &args)))
+                                }
+                                other => other,
+                            };
 
                             match should_confirm {
                                 Ok(Some(details)) => {
@@ -2477,5 +2524,217 @@ mod tests {
             .expect("第二个未受信任 Edit 必须再次请求确认")
             .expect("确认响应任务失败");
         assert_eq!(file_paths, ["first.txt", "second.txt"]);
+    }
+
+    /// 回归：`ask` 规则必须真的弹窗。
+    ///
+    /// 此前 `PolicyDecision::AskUser` 只把 `approved` 置为 false，随后工具自身的
+    /// `should_confirm_execute()` 返回 `Ok(None)` 又把它翻回 true —— 于是
+    /// `ask: ["Bash(git push:*)"]` 对普通 `git push` 静默放行。
+    /// `SilentTool` 刻意不要求任何确认，正是这个 bug 的触发条件。
+    struct SilentTool;
+
+    impl crate::core::tools::tools::BaseDeclarativeTool for SilentTool {
+        fn name(&self) -> &str {
+            "SilentTool"
+        }
+        fn display_name(&self) -> &str {
+            "Silent tool"
+        }
+        fn description(&self) -> &str {
+            "test-only tool that never asks for confirmation"
+        }
+        fn kind(&self) -> crate::core::tools::tools::Kind {
+            crate::core::tools::tools::Kind::Other
+        }
+        fn parameter_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn create_invocation(
+            &self,
+            _params: serde_json::Value,
+        ) -> Result<
+            Box<dyn crate::core::tools::tools::ToolInvocation>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            Ok(Box::new(SilentInvocation))
+        }
+    }
+
+    struct SilentInvocation;
+
+    impl crate::core::tools::tools::ToolInvocation for SilentInvocation {
+        fn get_description(&self) -> String {
+            "Silent".to_string()
+        }
+        fn tool_locations(&self) -> Vec<crate::core::tools::tools::ToolLocation> {
+            Vec::new()
+        }
+        // 刻意不实现 should_confirm_execute：走默认的 Ok(None)。
+        fn execute(
+            &self,
+            _signal: Option<&tokio_util::sync::CancellationToken>,
+            _update_output: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            crate::core::tools::tools::ToolResult,
+                            Box<dyn std::error::Error>,
+                        >,
+                    > + Send
+                    + 'static,
+            >,
+        > {
+            Box::pin(async {
+                Ok(crate::core::tools::tools::ToolResult {
+                    output: "ran".to_string(),
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn ask_rule_forces_a_prompt_even_when_the_tool_asks_for_nothing() {
+        use crate::core::config::ConfigParameters;
+        use crate::core::policy::settings_rules::{PermissionRuleSpec, SettingsPermissions};
+        use crate::core::policy::PolicyEngine;
+        use crate::types::StarToolCallFunction;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().expect("create temporary directory");
+        let mut params = ConfigParameters::default();
+        params.target_dir = temp.path().to_path_buf();
+        params.cwd = temp.path().to_path_buf();
+        let config = Arc::new(Config::new(params));
+
+        let mut engine = PolicyEngine::new(Default::default());
+        let mut perms = SettingsPermissions::default();
+        perms
+            .ask
+            .push(PermissionRuleSpec::parse("SilentTool").expect("parse rule"));
+        engine.set_settings_permissions(perms);
+        let bus = Arc::new(MessageBus::new(engine, false));
+
+        let registry = Arc::new(ToolRegistry::new(config.clone()));
+        registry.register_tool(Arc::new(SilentTool));
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            registry,
+            Some(bus.clone()),
+            config,
+        );
+
+        let mut requests = bus.subscribe();
+        let responder_bus = bus.clone();
+        let responder = tokio::spawn(async move {
+            let request = loop {
+                if let Message::ToolConfirmationRequest(request) =
+                    requests.recv().await.expect("confirmation channel closed")
+                {
+                    break request;
+                }
+            };
+            responder_bus
+                .publish(Message::ToolConfirmationResponse(
+                    ToolConfirmationResponse::from_user_decision(
+                        request.correlation_id,
+                        crate::types::ToolConfirmationOutcome::ProceedOnce,
+                        None,
+                    ),
+                ))
+                .await
+                .expect("publish confirmation response");
+        });
+
+        let result = executor
+            .execute(
+                &StarToolCall {
+                    id: "silent-call".to_string(),
+                    call_type: "function".to_string(),
+                    function: StarToolCallFunction {
+                        name: "SilentTool".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                },
+                None,
+                None,
+            )
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(5), responder)
+            .await
+            .expect("`ask` rule must have produced a confirmation prompt")
+            .expect("confirmation responder task failed");
+        assert!(result.success);
+    }
+
+    /// 反向保证：这个修复只加固"显式 `ask` 规则"，不会把默认路径变成"每次都弹窗"。
+    ///
+    /// 默认决策本来就是 `AskUser`，但它**可以**被工具自身的 `Ok(None)` 放行；
+    /// 只有用户在 settings.json 里写下的 `ask` 规则才是不可否决的。
+    /// 这里给引擎装一个 `allow` 规则，让决策变成 Allow，验证确认卡片不会发出。
+    #[tokio::test]
+    async fn an_allow_rule_short_circuits_without_prompting() {
+        use crate::core::config::ConfigParameters;
+        use crate::core::policy::settings_rules::{PermissionRuleSpec, SettingsPermissions};
+        use crate::core::policy::PolicyEngine;
+        use crate::types::StarToolCallFunction;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().expect("create temporary directory");
+        let mut params = ConfigParameters::default();
+        params.target_dir = temp.path().to_path_buf();
+        params.cwd = temp.path().to_path_buf();
+        let config = Arc::new(Config::new(params));
+
+        let mut engine = PolicyEngine::new(Default::default());
+        let mut perms = SettingsPermissions::default();
+        perms
+            .allow
+            .push(PermissionRuleSpec::parse("SilentTool").expect("parse rule"));
+        engine.set_settings_permissions(perms);
+        let bus = Arc::new(MessageBus::new(engine, false));
+
+        let registry = Arc::new(ToolRegistry::new(config.clone()));
+        registry.register_tool(Arc::new(SilentTool));
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            registry,
+            Some(bus.clone()),
+            config,
+        );
+
+        let mut requests = bus.subscribe();
+        let result = executor
+            .execute(
+                &StarToolCall {
+                    id: "silent-call".to_string(),
+                    call_type: "function".to_string(),
+                    function: StarToolCallFunction {
+                        name: "SilentTool".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                },
+                None,
+                None,
+            )
+            .await;
+
+        assert!(result.success);
+        // ToolStarted / ToolFinished 也会走这条广播，只断言"没有确认请求"。
+        let mut saw_confirmation = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+        while let Ok(Ok(msg)) = tokio::time::timeout_at(deadline, requests.recv()).await {
+            if matches!(msg, Message::ToolConfirmationRequest(_)) {
+                saw_confirmation = true;
+                break;
+            }
+        }
+        assert!(
+            !saw_confirmation,
+            "an `allow` rule must not produce a confirmation prompt"
+        );
     }
 }

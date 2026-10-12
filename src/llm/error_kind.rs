@@ -386,7 +386,9 @@ mod tests {
             "token counts must not be read as status codes"
         );
         assert_eq!(
-            LlmErrorKind::classify("error sending request for url (https://api.example.com:4013/v1)"),
+            LlmErrorKind::classify(
+                "error sending request for url (https://api.example.com:4013/v1)"
+            ),
             LlmErrorKind::Network,
             "a port number must not be read as a status code"
         );

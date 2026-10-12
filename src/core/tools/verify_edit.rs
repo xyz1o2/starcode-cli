@@ -403,10 +403,13 @@ fn extract_line_number(error_msg: &str) -> Option<usize> {
     for pattern in &["line ", "Line ", "LINE "] {
         if let Some(pos) = error_msg.find(pattern) {
             let rest = &error_msg[pos + pattern.len()..];
-            if let Some(end) = rest.find(|c: char| !c.is_ascii_digit()) {
-                if let Ok(line) = rest[..end].parse::<usize>() {
-                    return Some(line);
-                }
+            // 取紧跟其后的连续数字。
+            // 注意不能靠 `rest.find(|c| !c.is_ascii_digit())` 找结束位置：
+            // 行号在字符串末尾时（"SyntaxError at line 42"）find 返回 None，
+            // 整段逻辑被跳过，行号就永远提取不到。
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(line) = digits.parse::<usize>() {
+                return Some(line);
             }
         }
     }

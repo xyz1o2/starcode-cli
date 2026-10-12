@@ -256,8 +256,9 @@ pub async fn handle_streaming_request(
                 .tx
                 .send(StreamMessage::AssistantNote {
                     message_id,
-                    content: "StarLens: 当前回合进行中，已跳过本次重建；请在空闲时再运行 /lens build。"
-                        .to_string(),
+                    content:
+                        "StarLens: 当前回合进行中，已跳过本次重建；请在空闲时再运行 /lens build。"
+                            .to_string(),
                 })
                 .await;
             StreamingRequestOutcome::Continue

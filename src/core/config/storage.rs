@@ -162,8 +162,19 @@ impl Storage {
         self.project_temp_dir().join("shell_history")
     }
 
+    /// 手写权限规则文件（`{"rules":[...]}`），由 `PermissionRuleEngine` 读取。
     pub fn project_permissions_path(&self) -> PathBuf {
         self.star_dir().join("permissions.json")
+    }
+
+    /// "总是允许"授权签名（JSON 字符串数组）。
+    ///
+    /// 必须与 [`Self::project_permissions_path`] 分开：两者曾共用
+    /// `permissions.json`，但格式互不兼容（数组 vs 对象），一次"总是允许"
+    /// 就会把手写规则整份覆盖掉，且解析错误被吞掉、用户毫无察觉。
+    /// 拆成独立文件后，写入方与读取方各自拥有自己的格式。
+    pub fn project_permission_grants_path(&self) -> PathBuf {
+        self.star_dir().join("permission_grants.json")
     }
 
     /// 会话消息持久化路径，按会话 ID 隔离（对标 Claude Code 的
@@ -209,6 +220,21 @@ mod tests {
         assert_eq!(
             path.parent().map(|p| p.to_path_buf()),
             Some(sessions_dir.join("sess-1"))
+        );
+    }
+
+    /// "总是允许"的授权签名必须写在自己的文件里。
+    ///
+    /// 回归：两种格式曾共用 `permissions.json` —— 授权签名写 JSON 数组，
+    /// 手写规则读 `{"rules":[...]}` 对象。用户点一次"总是允许"，
+    /// 手写的 deny 规则就被整份覆盖且无任何报错。
+    #[test]
+    fn permission_grants_do_not_share_a_file_with_hand_written_rules() {
+        let storage = Storage::new(std::env::temp_dir());
+        assert_ne!(
+            storage.project_permissions_path(),
+            storage.project_permission_grants_path(),
+            "grant 存储与手写规则文件必须分离，否则一次写入就会清空另一方"
         );
     }
 }

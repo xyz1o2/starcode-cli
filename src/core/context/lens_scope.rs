@@ -48,15 +48,30 @@ pub fn is_secret_path(path: &str) -> bool {
     let lower = name.to_ascii_lowercase();
 
     const SECRET_NAMES: &[&str] = &[
-        ".env", "credentials", "credentials.json", "id_rsa", "id_ed25519", ".netrc", ".npmrc",
-        ".pgpass", "secring.gpg",
+        ".env",
+        "credentials",
+        "credentials.json",
+        "id_rsa",
+        "id_ed25519",
+        ".netrc",
+        ".npmrc",
+        ".pgpass",
+        "secring.gpg",
     ];
     if SECRET_NAMES.contains(&name) || name.starts_with(".env.") {
         return true;
     }
 
-    const SECRET_SUFFIXES: &[&str] =
-        &[".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".crt", ".secret"];
+    const SECRET_SUFFIXES: &[&str] = &[
+        ".pem",
+        ".key",
+        ".p12",
+        ".pfx",
+        ".keystore",
+        ".jks",
+        ".crt",
+        ".secret",
+    ];
     if SECRET_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
         return true;
     }
@@ -148,31 +163,63 @@ mod tests {
     #[test]
     fn secret_gate_overrides_profile() {
         // 即便落在 core 前缀下，secret 也必须 Exclude。
-        assert_eq!(evaluate("src/core/config/credentials.json", ScopeProfile::Full), ScopeRole::Exclude);
+        assert_eq!(
+            evaluate("src/core/config/credentials.json", ScopeProfile::Full),
+            ScopeRole::Exclude
+        );
     }
 
     #[test]
     fn core_profile_indexes_core_subsystems_only() {
-        assert_eq!(evaluate("src/runtime/messages.rs", ScopeProfile::Core), ScopeRole::Index);
-        assert_eq!(evaluate("src/agent/compact/token_counter.rs", ScopeProfile::Core), ScopeRole::Index);
+        assert_eq!(
+            evaluate("src/runtime/messages.rs", ScopeProfile::Core),
+            ScopeRole::Index
+        );
+        assert_eq!(
+            evaluate("src/agent/compact/token_counter.rs", ScopeProfile::Core),
+            ScopeRole::Index
+        );
         assert_eq!(evaluate("Cargo.toml", ScopeProfile::Core), ScopeRole::Index);
         // 非核心子系统的源码只 Observe。
-        assert_eq!(evaluate("src/utils/helpers.rs", ScopeProfile::Core), ScopeRole::Observe);
-        assert_eq!(evaluate("README.md", ScopeProfile::Core), ScopeRole::Observe);
+        assert_eq!(
+            evaluate("src/utils/helpers.rs", ScopeProfile::Core),
+            ScopeRole::Observe
+        );
+        assert_eq!(
+            evaluate("README.md", ScopeProfile::Core),
+            ScopeRole::Observe
+        );
     }
 
     #[test]
     fn full_profile_indexes_all_source() {
-        assert_eq!(evaluate("src/utils/helpers.rs", ScopeProfile::Full), ScopeRole::Index);
+        assert_eq!(
+            evaluate("src/utils/helpers.rs", ScopeProfile::Full),
+            ScopeRole::Index
+        );
     }
 
     #[test]
     fn structural_and_nonsource_exclusions() {
-        assert_eq!(evaluate("target/debug/build.rs", ScopeProfile::Full), ScopeRole::Exclude);
-        assert_eq!(evaluate("node_modules/x/index.js", ScopeProfile::Full), ScopeRole::Exclude);
-        assert_eq!(evaluate("study_or_copy_projects/claude-code-main/a.ts", ScopeProfile::Full), ScopeRole::Exclude);
+        assert_eq!(
+            evaluate("target/debug/build.rs", ScopeProfile::Full),
+            ScopeRole::Exclude
+        );
+        assert_eq!(
+            evaluate("node_modules/x/index.js", ScopeProfile::Full),
+            ScopeRole::Exclude
+        );
+        assert_eq!(
+            evaluate(
+                "study_or_copy_projects/claude-code-main/a.ts",
+                ScopeProfile::Full
+            ),
+            ScopeRole::Exclude
+        );
         // 非候选扩展（如图片）→ Observe，只测漂移。
-        assert_eq!(evaluate("assets/logo.png", ScopeProfile::Full), ScopeRole::Observe);
+        assert_eq!(
+            evaluate("assets/logo.png", ScopeProfile::Full),
+            ScopeRole::Observe
+        );
     }
 }
-

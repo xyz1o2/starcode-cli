@@ -73,6 +73,7 @@ enum HeadlessOutputFormat {
 #[derive(Parser)]
 // name/bin_name 在 main() 里按 argv[0] 覆盖（见 utils::invocation）；这里给的是兜底值。
 #[command(name = crate::utils::invocation::CANONICAL_PROGRAM_NAME)]
+#[command(version)] // 没有这行 clap 不认 --version，`sc --version` 会以退出码 2 失败
 #[command(
     about = "A conversational AI CLI tool powered by star (OpenAI-compatible) with text editor capabilities"
 )]

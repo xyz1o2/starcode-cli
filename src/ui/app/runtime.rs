@@ -627,84 +627,82 @@ pub async fn run_ui_loop(
                 key_event_count += 1;
                 let ev_type = std::mem::discriminant(&ev);
                 match ev {
-                        Event::Key(key) => {
-                            if key.kind != KeyEventKind::Release {
-                                let (norm_code, norm_mods) = normalize_key(key.code, key.modifiers);
-                                let norm_key =
-                                    crossterm::event::KeyEvent::new(norm_code, norm_mods);
-                                crate::ui::events::input::handle_key_event(
-                                    state,
-                                    norm_key,
-                                    &agent_tx,
-                                    last_processed_key_time,
-                                )
-                                .await?;
-                                last_processed_key_time = Some(Instant::now());
-                                needs_redraw = true;
-                            }
-                        }
-                        Event::Mouse(m) => {
-                            // 鼠标捕获开启时 Moved（悬停）事件高频产生，
-                            // 不处理也不触发重绘，避免重绘风暴。
-                            // 但拖选进行中的 Moved 必须放行：不支持 SGR 鼠标模式
-                            // （?1006h）的终端把「按住左键移动」编码成 button 3 +
-                            // motion，crossterm 解成 Moved 而非 Drag(Left)，
-                            // 一律丢弃会导致这类终端上左键拖选完全失效。
-                            let is_move = matches!(m.kind, crossterm::event::MouseEventKind::Moved);
-                            if !is_move || state.text_selection.is_selecting {
-                                crate::ui::events::mouse::handle_mouse_event(state, m);
-                                needs_redraw = true;
-                            }
-                        }
-                        Event::Paste(pasted_text) => {
-                            crate::utils::logging::append_debug_log_line(&format!(
-                                "[BRACKETED_PASTE] Received {} chars",
-                                pasted_text.len()
-                            ));
-                            // Handle bracketed paste event from supported terminals
-                            state.paste_in_progress = true;
-                            state.paste_end_time = Some(Instant::now());
-
-                            // Route paste to the correct target:
-                            // 1. Input modal (provider key/base URL) → modal_textarea
-                            // 2. Palette filter → palette_filter
-                            // 3. Main input → main textarea
-                            if state.show_input_modal {
-                                let normalized =
-                                    pasted_text.replace("\r\n", "\n").replace('\r', "\n");
-                                state.modal_textarea.insert_str(&normalized);
-                                state.input_modal_value =
-                                    crate::ui::events::clipboard_paste::collect_modal_input(
-                                        &state.modal_textarea,
-                                    );
-                            } else if state.is_palette_open() {
-                                for c in pasted_text.chars() {
-                                    if !c.is_control() {
-                                        state.palette_filter.push(c);
-                                    }
-                                }
-                                state.selected_palette_index = 0;
-                            } else {
-                                // Bracketed paste already carries the text content —
-                                // skip image clipboard check (which can hang on WSL2/SSH).
-                                // Image paste is handled by the Ctrl+V path instead.
-                                if let Some(file_paths) = detect_file_paths(&pasted_text) {
-                                    insert_file_paste_block(state, file_paths);
-                                } else {
-                                    insert_paste_block(state, pasted_text);
-                                    if state.paste_segments.is_empty() {
-                                        maybe_auto_fold_input(state);
-                                    }
-                                }
-                                sync_input_from_textarea(state);
-                                crate::ui::components::command_suggestions::on_input_changed(state);
-                            }
+                    Event::Key(key) => {
+                        if key.kind != KeyEventKind::Release {
+                            let (norm_code, norm_mods) = normalize_key(key.code, key.modifiers);
+                            let norm_key = crossterm::event::KeyEvent::new(norm_code, norm_mods);
+                            crate::ui::events::input::handle_key_event(
+                                state,
+                                norm_key,
+                                &agent_tx,
+                                last_processed_key_time,
+                            )
+                            .await?;
+                            last_processed_key_time = Some(Instant::now());
                             needs_redraw = true;
                         }
-                        _ => {}
                     }
+                    Event::Mouse(m) => {
+                        // 鼠标捕获开启时 Moved（悬停）事件高频产生，
+                        // 不处理也不触发重绘，避免重绘风暴。
+                        // 但拖选进行中的 Moved 必须放行：不支持 SGR 鼠标模式
+                        // （?1006h）的终端把「按住左键移动」编码成 button 3 +
+                        // motion，crossterm 解成 Moved 而非 Drag(Left)，
+                        // 一律丢弃会导致这类终端上左键拖选完全失效。
+                        let is_move = matches!(m.kind, crossterm::event::MouseEventKind::Moved);
+                        if !is_move || state.text_selection.is_selecting {
+                            crate::ui::events::mouse::handle_mouse_event(state, m);
+                            needs_redraw = true;
+                        }
+                    }
+                    Event::Paste(pasted_text) => {
+                        crate::utils::logging::append_debug_log_line(&format!(
+                            "[BRACKETED_PASTE] Received {} chars",
+                            pasted_text.len()
+                        ));
+                        // Handle bracketed paste event from supported terminals
+                        state.paste_in_progress = true;
+                        state.paste_end_time = Some(Instant::now());
+
+                        // Route paste to the correct target:
+                        // 1. Input modal (provider key/base URL) → modal_textarea
+                        // 2. Palette filter → palette_filter
+                        // 3. Main input → main textarea
+                        if state.show_input_modal {
+                            let normalized = pasted_text.replace("\r\n", "\n").replace('\r', "\n");
+                            state.modal_textarea.insert_str(&normalized);
+                            state.input_modal_value =
+                                crate::ui::events::clipboard_paste::collect_modal_input(
+                                    &state.modal_textarea,
+                                );
+                        } else if state.is_palette_open() {
+                            for c in pasted_text.chars() {
+                                if !c.is_control() {
+                                    state.palette_filter.push(c);
+                                }
+                            }
+                            state.selected_palette_index = 0;
+                        } else {
+                            // Bracketed paste already carries the text content —
+                            // skip image clipboard check (which can hang on WSL2/SSH).
+                            // Image paste is handled by the Ctrl+V path instead.
+                            if let Some(file_paths) = detect_file_paths(&pasted_text) {
+                                insert_file_paste_block(state, file_paths);
+                            } else {
+                                insert_paste_block(state, pasted_text);
+                                if state.paste_segments.is_empty() {
+                                    maybe_auto_fold_input(state);
+                                }
+                            }
+                            sync_input_from_textarea(state);
+                            crate::ui::components::command_suggestions::on_input_changed(state);
+                        }
+                        needs_redraw = true;
+                    }
+                    _ => {}
                 }
             }
+        }
 
         // Local Quick Open searches never await the modal key handler. Drain their
         // completions here so a slow `fd` walk cannot hold up terminal input.

@@ -205,7 +205,10 @@ mod tests {
             symbols: vec!["AgentRequest".into(), "StreamMessage".into()],
             imports: vec!["tokio::sync::mpsc".into()],
             f_role: "UI↔Agent 消息协议".into(),
-            r_related: vec!["ui/services/worker.rs".into(), "ui/services/stream.rs".into()],
+            r_related: vec![
+                "ui/services/worker.rs".into(),
+                "ui/services/stream.rs".into(),
+            ],
             a_api: vec!["enum AgentRequest{SendMessage,Abort}".into()],
             s_signals: vec!["mpsc".into(), "cap-100".into()],
         }
@@ -220,7 +223,9 @@ mod tests {
 
     #[test]
     fn whole_index_round_trips_and_skips_rules_header() {
-        let idx = WholeIndex { entries: vec![sample(), sample()] };
+        let idx = WholeIndex {
+            entries: vec![sample(), sample()],
+        };
         let text = idx.to_text();
         assert!(text.contains("# StarLens Whole-Index"));
         let parsed = WholeIndex::from_text(&text);

@@ -108,7 +108,10 @@ mod tests {
         let uniq = format!(
             "lens_drift_{}_{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         );
         std::env::temp_dir().join(uniq)
     }
@@ -146,10 +149,12 @@ mod tests {
         assert!(r.stale.contains(&"src/runtime/a.rs".to_string()), "{r:?}");
         assert!(r.missing.contains(&"src/runtime/d.rs".to_string()), "{r:?}");
         assert!(r.orphan.contains(&"src/runtime/d.rs".to_string()), "{r:?}");
-        assert!(r.unbaselined.contains(&"src/runtime/c.rs".to_string()), "{r:?}");
+        assert!(
+            r.unbaselined.contains(&"src/runtime/c.rs".to_string()),
+            "{r:?}"
+        );
         assert!(!r.is_aligned());
 
         fs::remove_dir_all(&root).ok();
     }
 }
-
