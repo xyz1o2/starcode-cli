@@ -565,38 +565,13 @@ impl ChatState {
         self.modal_stack.push(Modal::StatusModal);
     }
 
-    /// 检查是否有任何覆盖层打开（替代旧的 show_X 链）
-    ///
-    /// 这个谓词被用在两处最需要它的地方：vim 按键门控（`events/input.rs` 的
-    /// `vim_enabled && !has_overlay_active()`）和双 Esc 退出判定。清单**必须完整**
-    /// —— 漏掉任何一层都会让 vim 把弹窗的 y/n/Esc/i 当成 normal 模式的命令吞掉。
-    ///
-    /// 覆盖：modal 栈、轻量浮层（help / 命令与 @ 补全）、工具审批、
-    /// 模型切换确认、provider / session 快捷菜单、内联确认提示（清屏 / 大段粘贴）、
-    /// 后台代理选择器、输入对话框。
-    ///
-    /// **刻意不含** `task_panel.is_visible`：它是个常驻面板而非遮挡层，只吃掉
-    /// Ctrl/Alt 组合键与 ↑/↓/Enter，普通字符（vim 的 j/k/i 等）仍要落到输入框。
-    /// 计进来的话，开着任务面板时 vim 会被整个关掉，双 Esc 退出也会失灵。
-    pub fn has_overlay_active(&self) -> bool {
-        !self.modal_stack.is_empty()
-            || self.show_help
-            || self.show_command_hints
-            || self.show_mention_hints
-            || self.is_awaiting_confirmation
-            || self.pending_model_confirmation
-            || self.show_provider_menu
-            || self.show_session_menu
-            || self.show_clear_confirmation
-            || self.show_paste_confirmation
-            || self.bg_agent_selection.is_some()
-            || self.show_input_modal
-    }
-
-    /// 检查是否有任何对话框打开（不含 help/autocomplete 等轻量覆盖层）
-    pub fn has_dialog_active(&self) -> bool {
-        !self.modal_stack.is_empty() || self.show_help
-    }
+    // ── 模式判断不在这里 ──
+    //
+    // 这里曾有一份手维护的「有没有覆盖层」清单（`has_overlay_active`）和一份死掉的
+    // `has_dialog_active`。两处真实调用点（vim 门控、双 Esc、任务面板守卫）都已改用
+    // [`crate::ui::events::key_context::KeyContext`]，它们还各有 `is_exclusive()`
+    // / `is_dialog()` 两个派生谓词。清单留在 ChatState 上只会成为第 N+1 份需要同步
+    // 维护的模式定义 —— 新增模式请改 `KeyContext::of`，不要在这里加字段。
 
     // ---- Discover tab 实时过滤：按 `plugin_search`（不区分大小写）匹配
     /// 插件名 / marketplace / 描述，返回命中的 `plugin_discover` 下标。

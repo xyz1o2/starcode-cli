@@ -17,6 +17,12 @@
 //! 现在模式只在这里算一次（[`KeyContext::of`]），各层用 [`KeyContext`] 查询而不是
 //! 各写一份 `if state.show_xxx || state.modal_stack...`。新增模式只改这一处。
 //!
+//! **这不是一句口号**：原先 `handle_key_event` 里的 25 层阶梯、`has_overlay_active()`、
+//! `has_dialog_active()`、`stream.rs` 的 `user_is_elsewhere` 各自推导过一次「现在是什么
+//! 模式」，四份清单互不一致 —— 漏一项就表现为「弹窗开着却按键穿透」或「按键被看不见的
+//! 层吞掉」。它们现在都由这里的两个派生谓词给出，见 [`KeyContext::is_exclusive`] 与
+//! [`KeyContext::is_dialog`]。
+//!
 //! # 优先级
 //!
 //! [`KeyContext`] 按「离用户越近越优先」排序，与原阶梯的书写顺序一致：
@@ -24,7 +30,10 @@
 
 use crate::ui::state::{modal::Modal, ChatState};
 
-/// 当前按键所处的上下文。按 [`KeyContext::of`] 返回值的**声明顺序**即优先级。
+/// 当前按键所处的上下文。
+///
+/// 优先级 = [`KeyContext::of`] 里的**判断顺序**（模态栈最优先，最后才是输入框），
+/// 不是声明顺序：模态栈上的多个变体在声明上分散、在判断上是一段。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyContext {
     /// 模态对话框独占（palette / mcp / plugins / 搜索 / 只读展示窗 …）
@@ -37,6 +46,12 @@ pub enum KeyContext {
     InlineConfirm,
     /// 模型切换 y/n 确认
     ModelConfirm,
+    /// 快捷键帮助浮层（`F1` / 空输入时的 `?`）
+    ///
+    /// 之前这个状态在 `has_overlay_active()` 里算作覆盖层，却不在本枚举里 ——
+    /// 于是「判断模式只写一处」是假的：vim 门控按 `KeyContext` 推导时会把帮助
+    /// 窗口当成普通输入，弹窗开着 vim 照样接管按键。
+    Help,
     /// 主题选择器（Enter 应用 / Esc 回滚）
     ThemePicker,
     /// 只读展示型对话框（Settings 状态、LogSelector、ErrorOverlay …）
@@ -82,6 +97,11 @@ impl KeyContext {
         if state.is_awaiting_confirmation {
             return KeyContext::ToolConfirmation;
         }
+        // 帮助浮层排在模态之后：draw_ui 里 help 先画、模态后画，模态在上面，
+        // 判定必须与绘制顺序一致，否则顶层窗口的按键会落到下一层去。
+        if state.show_help {
+            return KeyContext::Help;
+        }
         if state.show_clear_confirmation || state.show_paste_confirmation {
             return KeyContext::InlineConfirm;
         }
@@ -107,9 +127,38 @@ impl KeyContext {
         KeyContext::TextInput
     }
 
-    /// 该上下文是否完全独占键盘 —— 打开时全局键之外的键都不该漏到底层输入框。
+    /// 是否有遮挡层占住了键盘。
+    ///
+    /// 「普通输入 + vim + 常驻任务面板」都不算遮挡层：面板只吃 Ctrl/Alt 组合键与
+    /// ↑/↓/Enter，普通字符仍要落到输入框（与 `has_overlay_active()` 刻意不含
+    /// `task_panel.is_visible` 的口径一致）。
+    ///
+    /// 取代三份手写清单：`events/input.rs` 的 vim 门控与双 Esc 判定、
+    /// `services/stream.rs` 的「用户是不是在别处」。注意 `TextInput` **不**是
+    /// 独占状态 —— 它是基线。
     pub fn is_exclusive(&self) -> bool {
-        !matches!(self, KeyContext::TaskPanel | KeyContext::Vim)
+        !matches!(
+            self,
+            KeyContext::TextInput | KeyContext::Vim | KeyContext::TaskPanel
+        )
+    }
+
+    /// 是否是「独占屏幕的对话框」：模态栈上的窗口、输入框、工具审批。
+    ///
+    /// 轻量浮层（建议菜单、补全提示、快捷帮助）与任务面板都不算。
+    /// `services/stream.rs` 决定要不要自动弹出模型面板时用它 —— 那里**不能**用
+    /// [`KeyContext::is_exclusive`]：打 `/model` 时命令补全浮层必然开着，用
+    /// `is_exclusive` 会把正常流程一起挡掉。
+    pub fn is_dialog(&self) -> bool {
+        matches!(
+            self,
+            KeyContext::Modal
+                | KeyContext::InputModal
+                | KeyContext::Palette
+                | KeyContext::ThemePicker
+                | KeyContext::ReadOnlyDialog
+                | KeyContext::ToolConfirmation
+        )
     }
 
     /// 该上下文下 vim 键是否应当让位。
@@ -170,5 +219,47 @@ mod tests {
         state.task_panel.is_visible = true;
         state.is_awaiting_confirmation = true;
         assert_eq!(KeyContext::of(&state), KeyContext::ToolConfirmation);
+    }
+
+    /// 帮助浮层以前不在枚举里，「模式只写一处」是假的：弹窗开着 vim 照样接管。
+    #[test]
+    fn help_overlay_is_a_context_and_yields_to_a_modal() {
+        let mut state = ChatState::new();
+        state.show_help = true;
+        assert_eq!(KeyContext::of(&state), KeyContext::Help);
+        assert!(KeyContext::of(&state).is_exclusive());
+        assert!(!KeyContext::of(&state).vim_enabled());
+        assert!(!KeyContext::of(&state).is_dialog());
+
+        // 模态画在帮助之上，判定顺序必须跟着绘制顺序。
+        state.open_palette(crate::ui::state::palette::PaletteMode::Main);
+        assert_eq!(KeyContext::of(&state), KeyContext::Palette);
+    }
+
+    #[test]
+    fn only_real_dialogs_count_as_dialog() {
+        let mut state = ChatState::new();
+        assert!(!KeyContext::of(&state).is_dialog());
+
+        // 打 /model 时命令补全浮层必然开着，不能算对话框。
+        state.show_command_hints = true;
+        assert!(!KeyContext::of(&state).is_dialog());
+        assert!(KeyContext::of(&state).is_exclusive());
+
+        state.show_command_hints = false;
+        state.enter_input_modal();
+        assert!(KeyContext::of(&state).is_dialog());
+    }
+
+    #[test]
+    fn base_contexts_are_not_exclusive() {
+        let mut state = ChatState::new();
+        assert!(!KeyContext::of(&state).is_exclusive());
+
+        state.vim_enabled = true;
+        assert!(!KeyContext::of(&state).is_exclusive());
+
+        state.task_panel.is_visible = true;
+        assert!(!KeyContext::of(&state).is_exclusive());
     }
 }

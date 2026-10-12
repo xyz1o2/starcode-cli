@@ -1002,11 +1002,10 @@ pub async fn handle_stream_update(
             // handle_input_modal 继续吞掉所有按键 —— 「面板看得见、却什么都按不动」。
             // 同理，已开着 Provider 页时也不该被异步响应换成 Model 页。
             //
-            // 刻意**不**用 has_overlay_active()：它把 show_command_hints 也算进去，
+            // 刻意**不**用 `KeyContext::is_exclusive()`：它把建议浮层也算成遮挡层，
             // 而打 `/model` 时命令补全浮层必然是开着的，会把正常流程一起挡掉。
-            let user_is_elsewhere = !state.modal_stack.is_empty()
-                || state.show_input_modal
-                || state.is_awaiting_confirmation;
+            // `is_dialog()` 只认真正占屏幕的对话框：模态栈上的窗口、输入框、工具审批。
+            let user_is_elsewhere = crate::ui::events::key_context::KeyContext::of(state).is_dialog();
             // If Palette is open in Model mode, refresh the list
             if state.is_palette_open()
                 && matches!(

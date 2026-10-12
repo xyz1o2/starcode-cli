@@ -14,6 +14,8 @@ use tui_textarea::TextArea;
 
 use crate::runtime::messages::AgentRequest;
 use crate::types::{ApprovalMode, ChatEntryType};
+use crate::ui::events::key_context::KeyContext;
+use crate::ui::events::keymap::GlobalBinding;
 use crate::ui::state::palette::{PaletteAction, PaletteMode};
 use crate::ui::state::ChatState;
 
@@ -1507,6 +1509,282 @@ async fn submit_ask_user_question_answer(
     Ok(())
 }
 
+/// Shift+Tab（`TogglePlanMode`）：Default → Plan → Yolo → Default（对标 app:cycleMode）。
+///
+/// `handle_key_event` 里有一个**排在它前面**的调用点（必须抢在两个行内确认之前），
+/// 注册表分发器里也有一份 —— 两者共用这个函数，避免同一套模式循环写两遍。
+async fn cycle_approval_mode(state: &mut ChatState, agent_tx: &mpsc::Sender<AgentRequest>) {
+    state.approval_mode = match state.approval_mode {
+        ApprovalMode::Default => ApprovalMode::Plan,
+        ApprovalMode::Plan => ApprovalMode::Yolo,
+        ApprovalMode::Yolo => ApprovalMode::Default,
+    };
+
+    let _ = agent_tx
+        .send(AgentRequest::SetApprovalMode(state.approval_mode.clone()))
+        .await;
+}
+
+/// 分发一个全局按键绑定。
+///
+/// 返回 `false` 表示「该绑定在当前模式下不适用」（守卫不满足），调用方继续走后续
+/// 处理层 —— 与重构前 `if ... { return Ok(()) }` 守卫不满足就落下去的行为一致。
+///
+/// **只处理命令类全局键**，且只在 `handle_overlay_input` 之前的那一段生效：
+///
+/// - [`GlobalBinding::Paste`]（`Ctrl+V`）必须在 `handle_input_modal` **之后**：
+///   输入框自己处理 `Ctrl+V`（把剪贴板填进 modal textarea，填 API Key 靠它）。
+/// - [`GlobalBinding::ToggleHelp`]（`F1`）仍在主 `match` 里，与 `?` 的帮助开关
+///   放在一起，保持原顺序。
+///
+/// 这两个在这里返回 `Ok(false)` 而不是被"顺手处理掉"，是为了不改动既有的键序。
+pub async fn dispatch_global_binding(
+    state: &mut ChatState,
+    binding: GlobalBinding,
+    key: KeyEvent,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match binding {
+        // 已经在 `handle_key_event` 开头处理过（要抢在行内确认之前），这里只是
+        // 保证注册表里每个绑定都有唯一实现。
+        GlobalBinding::TogglePlanMode => {
+            cycle_approval_mode(state, agent_tx).await;
+            Ok(true)
+        }
+        // Ctrl+P：开关命令面板
+        GlobalBinding::TogglePalette => {
+            if state.is_palette_open() {
+                state.close_palette();
+            } else {
+                state.show_help = false;
+                state.exit_input_modal();
+                close_quick_menus(state);
+                state.quick_menu_back = None;
+                state.quick_menu_origin_palette = false;
+                state.palette_history.clear();
+                state.open_palette(PaletteMode::Main);
+            }
+            Ok(true)
+        }
+        // Ctrl+O：全局切换 transcript / verbose 输出（对标 Claude Code 的
+        // app:toggleTranscript，同为 Global 作用域）。必须早于 handle_overlay_input，
+        // 否则又会退回到「只有任务面板可见时才生效」的老行为。
+        GlobalBinding::ToggleTranscript => {
+            let on = state.toggle_transcript_mode();
+            // 直接写 current_status_line：emit_status_text 只放行 i18n::status_prefixes()
+            // 允许的前缀，"Verbose output: …" 会被它静默丢掉。
+            state.current_status_line = Some(if on {
+                "Verbose output: ON".to_string()
+            } else {
+                "Verbose output: OFF".to_string()
+            });
+            Ok(true)
+        }
+        // Ctrl+T：任务面板（对标 app:toggleTodos）。Ctrl+B 不在此列 —— Claude Code
+        // 把它留给 task:background（仅前台有任务可转后台时才拦截），空闲时归输入框。
+        GlobalBinding::ToggleTasks => {
+            state.task_panel.toggle_visibility();
+            if state.task_panel.is_visible {
+                // 打开时重读任务文件，和 /tasks 一样避免显示旧快照。
+                state.task_panel.reload();
+            }
+            Ok(true)
+        }
+        // Ctrl+Shift+F：全局搜索（对标 Claude Code app:globalSearch）
+        GlobalBinding::GlobalSearch => {
+            state.open_global_search();
+            Ok(true)
+        }
+        // Ctrl+Shift+P：快速打开文件（对标 Claude Code app:quickOpen）
+        GlobalBinding::QuickOpen => {
+            state.open_quick_open();
+            Ok(true)
+        }
+        // Ctrl+R：历史搜索（对标 Claude Code history:search）
+        GlobalBinding::HistorySearch => {
+            if state.is_awaiting_confirmation || state.is_palette_open() {
+                return Ok(false);
+            }
+            state.open_history_search();
+            Ok(true)
+        }
+        // Alt 系绑定的共同前置：审批中 / 面板开着 / 输入模态打开时不抢键，
+        // 与重构前那个包住三个分支的 `if` 完全一致。
+        GlobalBinding::FoldInput
+        | GlobalBinding::CycleThinking
+        | GlobalBinding::CycleTheme => {
+            if state.is_awaiting_confirmation || state.is_palette_open() || state.show_input_modal
+            {
+                return Ok(false);
+            }
+            match binding {
+                GlobalBinding::FoldInput => {
+                    let line_count = state.input_line_count;
+                    if line_count >= crate::ui::state::INPUT_FOLD_MIN_LINES {
+                        state.input_folded = !state.input_folded;
+                        state.current_status_line = Some(if state.input_folded {
+                            format!("Input folded ({} lines), press Alt+P to expand", line_count)
+                        } else {
+                            "Input expanded, press Alt+P to fold again".to_string()
+                        });
+                    } else {
+                        state.input_folded = false;
+                        state.current_status_line = Some("Content is too short to fold".to_string());
+                    }
+                }
+                GlobalBinding::CycleTheme => next_theme(state),
+                // Alt+T：循环思考深度。
+                //
+                // 兼容不上报 SHIFT 的终端：它们把 Alt+Shift+T 送成大写 'T'。注册表
+                // 按 shift 位判定（见 `keymap` 的同名测试，因为字符大小写对非字母键和
+                // 部分终端并不可靠），这里再兜一次，否则这类终端上再也切不了主题。
+                GlobalBinding::CycleThinking => {
+                    if matches!(key.code, KeyCode::Char(c) if c.is_uppercase()) {
+                        next_theme(state);
+                    } else {
+                        cycle_thinking_effort(state, agent_tx).await?;
+                    }
+                }
+                _ => unreachable!("三个 Alt 绑定已在上一层收拢"),
+            }
+            Ok(true)
+        }
+        // Ctrl+C：复制选区 / 中断生成 / 连按两次退出
+        GlobalBinding::CopyOrInterrupt => {
+            copy_selection_or_interrupt(state, agent_tx).await;
+            Ok(true)
+        }
+        // Ctrl+D：退出。
+        //
+        // 命中即 return：此前只在「任务面板关闭 + 输入框为空」这条路径上 return，
+        // 其余情况会继续往下落到 handle_overlay_input 的权限调试面板
+        // （见本文件 toggle_permission_debug）和任务描述编辑分支，
+        // 同一个键被处理三次。
+        GlobalBinding::Exit => {
+            if !state.task_panel.is_visible && state.input.is_empty() {
+                state.should_exit = true;
+            }
+            Ok(true)
+        }
+        // Ctrl+L：清屏
+        GlobalBinding::ClearScreen => {
+            state.request_clear_screen = true;
+            Ok(true)
+        }
+        // 见函数文档：这两个键必须留在各自原来的处理层。
+        GlobalBinding::Paste | GlobalBinding::ToggleHelp => Ok(false),
+    }
+}
+
+/// Alt+Shift+T：切到下一个主题（`CycleTheme` 与大写-T 兜底共用）。
+fn next_theme(state: &mut ChatState) {
+    state.theme_manager.next_theme();
+    let theme_name = state.theme_manager.current().name.clone();
+    state.current_status_line = Some(format!("Theme: {}", theme_name));
+}
+
+/// Alt+T：循环思考力度档位，并把请求发给 runtime。
+async fn cycle_thinking_effort(
+    state: &mut ChatState,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cap = crate::core::config::models::thinking_capability(&state.current_model);
+    let effort = match cap {
+        crate::core::config::models::ThinkingCapability::Binary => {
+            // Binary models: Off ↔ Medium (On)
+            match state.thinking_effort {
+                crate::types::ThinkingEffort::Off => crate::types::ThinkingEffort::Medium,
+                _ => crate::types::ThinkingEffort::Off,
+            }
+        }
+        _ => state.thinking_effort.next(),
+    };
+    // 当前模型根本没有思考开关时说清楚，否则用户会以为档位没生效。
+    let unsupported = matches!(cap, crate::core::config::models::ThinkingCapability::None);
+    if request_runtime_settings(state, None, None, Some(effort.clone()), agent_tx).await {
+        state.current_status_line = Some(format!(
+            "Requesting {}{}",
+            effort.notification_text(),
+            if unsupported {
+                " · current model has no thinking mode"
+            } else {
+                ""
+            }
+        ));
+    }
+    Ok(())
+}
+
+/// Ctrl+C：复制选区 → 中断生成 → 连按两次退出，按这个优先级依次尝试。
+///
+/// 有选区时**只**是复制，绝不往下落到取消生成/双击退出：此前 `get_selected_text()`
+/// 返回 None 时会静默继续往下走，用户想复制结果把正在输出的内容 Abort 掉了。
+async fn copy_selection_or_interrupt(state: &mut ChatState, agent_tx: &mpsc::Sender<AgentRequest>) {
+    if state.text_selection.has_selection() {
+        let copied = match state.get_selected_text() {
+            Some(selected_text) => match arboard::Clipboard::new() {
+                Ok(mut clipboard) => clipboard.set_text(&selected_text).map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            },
+            None => Err("选区为空".to_string()),
+        };
+        match copied {
+            Ok(()) => {
+                state.text_selection.clear();
+                state.current_status_line = Some("Copied".to_string());
+            }
+            Err(e) => {
+                // 剪贴板写不进去（WSL/SSH/headless、被其他进程占用）时必须说真话，
+                // 并且**保留选区** —— 此前这里无条件宣告 "Copied" 并清掉选区，
+                // 用户粘出来的是上次的旧内容，且再也无法重试。
+                state.current_status_line =
+                    Some(format!("Copy failed: {e} — press Ctrl+C to retry"));
+                crate::utils::logging::append_debug_log_line(&format!("[COPY] failed: {}", e));
+            }
+        }
+        return;
+    }
+
+    // 流输出"僵住"：取消宽限期已过但 is_streaming 没复位（例如 Done 落在宽限窗口里）。
+    let cancelling_stale = state.is_streaming
+        && state
+            .cancelling_since
+            .map(|t| t.elapsed() > Duration::from_millis(1500))
+            .unwrap_or(false);
+    if cancelling_stale {
+        state.is_streaming = false;
+        state.is_processing = false;
+        state.cancelling_since = None;
+    }
+
+    if state.is_streaming || state.is_processing {
+        // Cancel streaming; first Ctrl+C resets the double-press timer
+        let _ = agent_tx.send(AgentRequest::Abort).await;
+        state.current_status_line = Some("Cancelling...".to_string());
+        state.is_processing = false;
+        state.last_ctrl_c = None;
+        state.cancelling_since = Some(Instant::now());
+        return;
+    }
+
+    // Double-press detection: two Ctrl+C within 1.5 s exits
+    let now = Instant::now();
+    if let Some(prev) = state.last_ctrl_c {
+        if now.duration_since(prev) <= Duration::from_millis(1500) {
+            state.should_exit = true;
+            return;
+        }
+    }
+    state.last_ctrl_c = Some(now);
+
+    if !state.input.is_empty() {
+        // First press: clear input
+        reset_main_textarea(state);
+        crate::ui::components::command_suggestions::on_input_changed(state);
+    }
+    state.current_status_line = Some("Press Ctrl+C again to exit".to_string());
+}
+
 pub async fn handle_key_event(
     state: &mut ChatState,
     key: KeyEvent,
@@ -1521,17 +1799,13 @@ pub async fn handle_key_event(
 
     // Handle Shift+Tab for mode cycle: Default → Plan → Yolo → Default
     // (Shift+Tab is normalized to BackTab by the runtime event loop before reaching here)
+    //
+    // 位置是刻意的：它是**唯一**排在两个行内确认之前的全局绑定。`/clear` 与大段
+    // 粘贴的确认分支会吞掉所有键（`_ => return Ok(())`），放在它们之后，模式切换
+    // 在确认框开着时就按不到了。其余全局键统一交给下面的注册表分发。
     // 输入模态打开时 Shift+Tab 不能触发模式切换（会吞掉输入框里的按键）
     if key.code == KeyCode::BackTab && !state.show_input_modal && !state.is_awaiting_confirmation {
-        state.approval_mode = match state.approval_mode {
-            ApprovalMode::Default => ApprovalMode::Plan,
-            ApprovalMode::Plan => ApprovalMode::Yolo,
-            ApprovalMode::Yolo => ApprovalMode::Default,
-        };
-
-        let _ = agent_tx
-            .send(AgentRequest::SetApprovalMode(state.approval_mode.clone()))
-            .await;
+        cycle_approval_mode(state, agent_tx).await;
         return Ok(());
     }
 
@@ -1583,146 +1857,15 @@ pub async fn handle_key_event(
         }
     }
 
-    // Handle Ctrl+P for Palette
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('p')) {
-        if state.is_palette_open() {
-            state.close_palette();
-        } else {
-            state.show_help = false;
-            state.exit_input_modal();
-            close_quick_menus(state);
-            state.quick_menu_back = None;
-            state.quick_menu_origin_palette = false;
-            state.palette_history.clear();
-            state.open_palette(PaletteMode::Main);
-        }
-        return Ok(());
-    }
-
-    // Ctrl+O：全局切换 transcript / verbose 输出（对标 Claude Code 的 app:toggleTranscript，
-    // 同为 Global 作用域）。这里必须在 handle_overlay_input 之前，否则又会退回到
-    // 「只有任务面板可见时才生效」的老行为。
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('o')) {
-        let on = state.toggle_transcript_mode();
-        // 直接写 current_status_line：emit_status_text 只放行 i18n::status_prefixes()
-        // 允许的前缀，"Verbose output: …" 会被它静默丢掉。
-        state.current_status_line = Some(if on {
-            "Verbose output: ON".to_string()
-        } else {
-            "Verbose output: OFF".to_string()
-        });
-        return Ok(());
-    }
-
-    // Ctrl+T：全局切换任务面板（对标 Claude Code 的 app:toggleTodos）。
-    // Ctrl+T：任务面板（对标 app:toggleTodos）。Ctrl+B 不在此列 —— Claude Code 把它
-    // 留给 task:background（仅前台有任务可转后台时才拦截），空闲时归输入框。
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('t')) {
-        state.task_panel.toggle_visibility();
-        if state.task_panel.is_visible {
-            // 打开时重读任务文件，和 /tasks 一样避免显示旧快照。
-            state.task_panel.reload();
-        }
-        return Ok(());
-    }
-
-    // Ctrl+Shift+F：全局搜索（对标 Claude Code app:globalSearch）。
-    if key
-        .modifiers
-        .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
-        && matches!(key.code, KeyCode::Char('F'))
-    {
-        state.open_global_search();
-        return Ok(());
-    }
-
-    // Ctrl+Shift+P：快速打开文件（对标 Claude Code app:quickOpen）。
-    if key
-        .modifiers
-        .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
-        && matches!(key.code, KeyCode::Char('P'))
-    {
-        state.open_quick_open();
-        return Ok(());
-    }
-
-    // Ctrl+R：历史搜索（对标 Claude Code history:search）。
-    if key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('r'))
-        && !state.is_awaiting_confirmation
-        && !state.is_palette_open()
-    {
-        state.open_history_search();
-        return Ok(());
-    }
-
-    // Handle Alt+P for folded pasted input preview
-    if !state.is_awaiting_confirmation
-        && !state.is_palette_open()
-        && !state.show_input_modal
-        && key.modifiers.contains(KeyModifiers::ALT)
-    {
-        if let KeyCode::Char(ch) = key.code {
-            if ch.eq_ignore_ascii_case(&'p') {
-                let line_count = state.input_line_count;
-                if line_count >= crate::ui::state::INPUT_FOLD_MIN_LINES {
-                    state.input_folded = !state.input_folded;
-                    state.current_status_line = Some(if state.input_folded {
-                        format!("Input folded ({} lines), press Alt+P to expand", line_count)
-                    } else {
-                        "Input expanded, press Alt+P to fold again".to_string()
-                    });
-                } else {
-                    state.input_folded = false;
-                    state.current_status_line = Some("Content is too short to fold".to_string());
-                }
-                return Ok(());
-            }
-            // Alt+Shift+T: Cycle theme
-            //
-            // 必须排在下面的 Alt+T 之前：`eq_ignore_ascii_case` 连大写 'T' 一起吃掉，
-            // 原来主题分支写在后面，永远走不到。
-            // 判据不能只看 SHIFT —— 传统终端对字符键压根不上报 SHIFT，只把字符本身变成
-            // 大写（只有 kitty 键盘协议才会同时给 SHIFT），所以两个条件都认。
-            if ch.eq_ignore_ascii_case(&'t')
-                && (ch.is_uppercase() || key.modifiers.contains(KeyModifiers::SHIFT))
-            {
-                state.theme_manager.next_theme();
-                let theme_name = state.theme_manager.current().name.clone();
-                state.current_status_line = Some(format!("Theme: {}", theme_name));
-                return Ok(());
-            }
-            if ch.eq_ignore_ascii_case(&'t') {
-                let cap = crate::core::config::models::thinking_capability(&state.current_model);
-                let effort = match cap {
-                    crate::core::config::models::ThinkingCapability::Binary => {
-                        // Binary models: Off ↔ Medium (On)
-                        match state.thinking_effort {
-                            crate::types::ThinkingEffort::Off => {
-                                crate::types::ThinkingEffort::Medium
-                            }
-                            _ => crate::types::ThinkingEffort::Off,
-                        }
-                    }
-                    _ => state.thinking_effort.next(),
-                };
-                // 当前模型根本没有思考开关时说清楚，否则用户会以为档位没生效。
-                let unsupported =
-                    matches!(cap, crate::core::config::models::ThinkingCapability::None);
-                if request_runtime_settings(state, None, None, Some(effort.clone()), agent_tx).await
-                {
-                    state.current_status_line = Some(format!(
-                        "Requesting {}{}",
-                        effort.notification_text(),
-                        if unsupported {
-                            " · current model has no thinking mode"
-                        } else {
-                            ""
-                        }
-                    ));
-                }
-                return Ok(());
-            }
+    // ── 全局键分发 ──
+    //
+    // 「哪个键对应哪个绑定」只有 `keymap::binding_for` 一处定义，帮助文案与 modal
+    // 的放行名单都由它派生。这里不再手写 `if CONTROL && Char('p')` —— 注册表与实际
+    // 行为一旦各写一份就会漂移（此前 `Ctrl+R` 的守卫、`Shift+Tab` 的例外就各自漂
+    // 过一次），而且没有任何测试能发现。
+    if let Some(binding) = crate::ui::events::keymap::binding_for(&key) {
+        if dispatch_global_binding(state, binding, key, agent_tx).await? {
+            return Ok(());
         }
     }
 
@@ -1731,104 +1874,6 @@ pub async fn handle_key_event(
     // starcode 目前没有「把正在跑的前台任务转后台」的运行时能力（run_in_background 只在
     // 工具描述里许诺过，Rust 侧没有实现），所以这里同样不拦截，交给 textarea 当左移光标用。
     // 任务面板改由 Ctrl+T 切换（对标 app:toggleTodos）。
-
-    // Handle Ctrl+C (Copy selected text / Cancel / double-press Exit)
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
-        // Priority 1: If there's selected text, copy to clipboard.
-        //
-        // 只要有选区，Ctrl+C 就**只**是复制，绝不往下落到取消生成/双击退出。
-        // 此前 get_selected_text() 返回 None 时会静默继续往下走，用户想复制结果把
-        // 正在输出的内容 Abort 掉了。
-        if state.text_selection.has_selection() {
-            let copied = match state.get_selected_text() {
-                Some(selected_text) => match arboard::Clipboard::new() {
-                    Ok(mut clipboard) => clipboard
-                        .set_text(&selected_text)
-                        .map_err(|e| e.to_string()),
-                    Err(e) => Err(e.to_string()),
-                },
-                None => Err("选区为空".to_string()),
-            };
-            match copied {
-                Ok(()) => {
-                    state.text_selection.clear();
-                    state.current_status_line = Some("Copied".to_string());
-                }
-                Err(e) => {
-                    // 剪贴板写不进去（WSL/SSH/headless、被其他进程占用）时必须说真话，
-                    // 并且**保留选区** —— 此前这里无条件宣告 "Copied" 并清掉选区，
-                    // 用户粘出来的是上次的旧内容，且再也无法重试。
-                    state.current_status_line =
-                        Some(format!("Copy failed: {e} — press Ctrl+C to retry"));
-                    crate::utils::logging::append_debug_log_line(&format!("[COPY] failed: {}", e));
-                }
-            }
-            return Ok(());
-        }
-
-        // Check if streaming is "stale" — cancelling grace period has expired but
-        // is_streaming was never reset (e.g. Done arrived during grace window).
-        let cancelling_stale = state.is_streaming
-            && state
-                .cancelling_since
-                .map(|t| t.elapsed() > Duration::from_millis(1500))
-                .unwrap_or(false);
-        if cancelling_stale {
-            // Force-reset the streaming state so Ctrl+C can proceed to exit logic.
-            state.is_streaming = false;
-            state.is_processing = false;
-            state.cancelling_since = None;
-        }
-
-        if state.is_streaming || state.is_processing {
-            // Cancel streaming; first Ctrl+C resets the double-press timer
-            let _ = agent_tx.send(AgentRequest::Abort).await;
-            state.current_status_line = Some("Cancelling...".to_string());
-            state.is_processing = false;
-            state.last_ctrl_c = None;
-            state.cancelling_since = Some(Instant::now());
-            return Ok(());
-        }
-
-        // Double-press detection: two Ctrl+C within 1.5 s exits
-        let now = Instant::now();
-        if let Some(prev) = state.last_ctrl_c {
-            if now.duration_since(prev) <= Duration::from_millis(1500) {
-                state.should_exit = true;
-                return Ok(());
-            }
-        }
-        state.last_ctrl_c = Some(now);
-
-        if !state.input.is_empty() {
-            // First press: clear input
-            reset_main_textarea(state);
-            crate::ui::components::command_suggestions::on_input_changed(state);
-            state.current_status_line = Some("Press Ctrl+C again to exit".to_string());
-        } else {
-            state.current_status_line = Some("Press Ctrl+C again to exit".to_string());
-        }
-        return Ok(());
-    }
-
-    // Handle Ctrl+D (Exit)
-    //
-    // 命中即 return：此前只在「任务面板关闭 + 输入框为空」这条路径上 return，
-    // 其余情况会继续往下落到 handle_overlay_input 的权限调试面板
-    // （见本文件 toggle_permission_debug）和任务描述编辑分支，
-    // 同一个键被处理三次。
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('d')) {
-        if !state.task_panel.is_visible && state.input.is_empty() {
-            state.should_exit = true;
-        }
-        return Ok(());
-    }
-
-    // Handle Ctrl+L (Clear screen)
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('l')) {
-        state.request_clear_screen = true;
-        return Ok(());
-    }
 
     if handle_overlay_input(state, key, agent_tx).await? {
         return Ok(());
@@ -1865,7 +1910,7 @@ pub async fn handle_key_event(
     }
 
     // Vim mode intercept
-    if state.vim_enabled && !state.has_overlay_active() {
+    if state.vim_enabled && KeyContext::of(state).vim_enabled() {
         use crate::ui::vim::VimMode;
         if let KeyCode::Char(c) = key.code {
             match state.vim_state.mode {
@@ -2370,8 +2415,11 @@ pub async fn handle_key_event(
                 close_quick_menus(state);
             }
 
-            // Claude Code 风格：无任何覆盖层时，双击 Esc 清空输入并存入历史
-            let overlay_open = state.has_overlay_active() || state.pending_model_confirmation;
+            // Claude Code 风格：无任何覆盖层时，双击 Esc 清空输入并存入历史。
+            //
+            // 「有没有覆盖层」由 `KeyContext` 判定（取代手写的 `has_overlay_active()`
+            // 清单）：任务面板与 vim 不算覆盖层，其余都算。
+            let overlay_open = KeyContext::of(state).is_exclusive();
 
             // 本轮已经停了但队列还压着东西：Esc 先把它取回输入框，
             // 让用户能改词或直接删掉（对标 popAllEditable 绑在 Esc 上）
@@ -3168,10 +3216,10 @@ async fn handle_overlay_input(
     // handle_input_modal 分支处理（events/input.rs），而本函数在它之前无条件
     // 吞键，导致 Ctrl+J / Ctrl+S / Alt+←→ 等在填表时被任务面板截走。
     // 紧邻的 bg-agent 选择器分支就有同样的 `&& !state.show_input_modal` 守卫。
-    let modal_open = !state.modal_stack.is_empty()
-        || state.show_input_modal
-        || state.show_help
-        || state.is_awaiting_confirmation;
+    //
+    // 守卫条件改由 `KeyContext::is_dialog()` 给出：模态栈上的窗口、输入框、工具
+    // 审批、以及快捷帮助浮层（`F1`）。与重构前那份内联清单逐项等价。
+    let modal_open = KeyContext::of(state).is_dialog() || state.show_help;
     if state.task_panel.is_visible && !modal_open {
         if state.task_panel.is_editing() {
             state.task_panel.handle_edit_input(key);
@@ -3625,6 +3673,141 @@ fn apply_vim_motion(state: &mut ChatState, motion: &crate::ui::vim::motions::Mot
 mod tests {
     use super::*;
     use crate::ui::state::store::AgentTaskInfo;
+
+    /// 注册表里的每个绑定都必须有实现。
+    ///
+    /// 这条测试是「键位注册表」这件事成立的前提：新增一行 `GLOBAL_BINDINGS` 却忘了
+    /// 在 [`dispatch_global_binding`] 里加 arm 时，帮助文案会列出这个键，按下去却
+    /// 没有任何反应 —— 改动前没有任何测试能发现这种漂移（`Ctrl+R` 与 `Shift+Tab`
+    /// 各漂过一次）。
+    ///
+    /// 刻意留在分发器之外的只有 `Ctrl+V` 与 `F1`（见分发器文档：前者必须排在
+    /// `handle_input_modal` 之后，后者仍由主 `match` 处理）。
+    #[tokio::test]
+    async fn every_registered_binding_is_either_dispatched_or_documented_as_deferred() {
+        use crate::ui::events::keymap::GLOBAL_BINDINGS;
+
+        for entry in GLOBAL_BINDINGS {
+            let mut state = ChatState::new();
+            let (tx, _rx) = mpsc::channel(16);
+            let handled = dispatch_global_binding(&mut state, entry.binding, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE), &tx)
+                .await
+                .expect("dispatch must not fail");
+            let deferred = matches!(
+                entry.binding,
+                GlobalBinding::Paste | GlobalBinding::ToggleHelp
+            );
+            assert!(
+                handled || deferred,
+                "{:?} 既没被分发也没被登记为「留给后面的层」",
+                entry.binding
+            );
+        }
+    }
+
+    /// `Ctrl+P` 走注册表分发：开 → 关，两次都真的落到 palette 上。
+    #[tokio::test]
+    async fn ctrl_p_toggles_palette_through_the_registry() {
+        let mut state = ChatState::new();
+        let (tx, _rx) = mpsc::channel(16);
+        let ctrl_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+
+        handle_key_event(&mut state, ctrl_p, &tx, None).await.unwrap();
+        assert!(state.is_palette_open(), "Ctrl+P 应当打开命令面板");
+
+        handle_key_event(&mut state, ctrl_p, &tx, None).await.unwrap();
+        assert!(!state.is_palette_open(), "再按一次 Ctrl+P 应当关闭");
+    }
+
+    /// 守卫不满足时必须**让位**（返回 false），不能吞掉：此前 modal 层放行全局键
+    /// 之后落进一个不满足的守卫，用户看到的就是「键没反应」。
+    #[tokio::test]
+    async fn ctrl_r_defers_while_waiting_for_confirmation() {
+        let mut state = ChatState::new();
+        let (tx, _rx) = mpsc::channel(16);
+        state.is_awaiting_confirmation = true;
+
+        let handled = dispatch_global_binding(
+            &mut state,
+            GlobalBinding::HistorySearch,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            &tx,
+        )
+        .await
+        .unwrap();
+
+        assert!(!handled, "审批中 Ctrl+R 应当让位给后续层");
+        assert!(!state.is_modal_open(), "让位时不该打开历史搜索");
+    }
+
+    /// `Alt+Shift+T` 在不上报 SHIFT 的终端上表现为大写 `'T'` —— 注册表按 shift 位判定
+    /// 会把它当成 `CycleThinking`，分发器必须再兜一次，否则这类终端再也切不了主题。
+    #[tokio::test]
+    async fn alt_shift_t_falls_back_to_uppercase_char() {
+        let (tx, _rx) = mpsc::channel(16);
+
+        let mut with_shift = ChatState::new();
+        let before = with_shift.theme_manager.current().name.clone();
+        dispatch_global_binding(
+            &mut with_shift,
+            GlobalBinding::CycleTheme,
+            KeyEvent::new(KeyCode::Char('T'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert_ne!(with_shift.theme_manager.current().name, before);
+
+        let mut without_shift = ChatState::new();
+        let before = without_shift.theme_manager.current().name.clone();
+        let handled = dispatch_global_binding(
+            &mut without_shift,
+            GlobalBinding::CycleThinking,
+            KeyEvent::new(KeyCode::Char('T'), KeyModifiers::ALT),
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(handled);
+        assert_ne!(
+            without_shift.theme_manager.current().name, before,
+            "大写 T（终端没上报 SHIFT）应当仍然切主题，而不是循环思考深度"
+        );
+    }
+
+    /// `Ctrl+V` / `F1` 必须留在原来的处理层：输入框自己消费 `Ctrl+V`（填 API Key 靠它）。
+    #[tokio::test]
+    async fn paste_and_help_are_left_to_their_original_layers() {
+        let (tx, _rx) = mpsc::channel(16);
+        for binding in [GlobalBinding::Paste, GlobalBinding::ToggleHelp] {
+            let mut state = ChatState::new();
+            let handled = dispatch_global_binding(
+                &mut state,
+                binding,
+                KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+                &tx,
+            )
+            .await
+            .unwrap();
+            assert!(!handled, "{binding:?} 不该在这一层被消费");
+        }
+    }
+
+    /// 任务面板的 modal 守卫由 `KeyContext::is_dialog()` 给出：输入框打开时面板不得
+    /// 截走按键（API Key 表单里的 Ctrl+S / Alt+←→），任务面板自己开着时仍然工作。
+    #[tokio::test]
+    async fn task_panel_is_blocked_while_a_dialog_owns_the_keyboard() {
+        let mut state = ChatState::new();
+        state.task_panel.is_visible = true;
+        state.enter_input_modal();
+        assert!(
+            KeyContext::of(&state).is_dialog(),
+            "输入框必须是独占对话框"
+        );
+
+        state.exit_input_modal();
+        assert_eq!(KeyContext::of(&state), KeyContext::TaskPanel);
+    }
 
     /// `resolve_provider_for_model` 的可测两步：UI 映射优先，其次当前 provider。
     ///

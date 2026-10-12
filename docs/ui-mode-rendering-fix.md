@@ -30,7 +30,7 @@
 | P0 | 止血：沙箱探测记忆化、去掉 clear()、Ctrl+C 回落 | ✅ 完成 |
 | P1 | 修已验证的确定性 bug：隐形弹窗、modal 吞全局键、Ctrl+D 双处理 | ✅ 完成 |
 | P2 | 引入 dirty 检查 + 动画门控 | ✅ 完成 |
-| P3 | 模式分层收敛 | 🟡 部分完成（见下） |
+| P3 | 模式分层收敛 | 🟡 接线完成，双真相源待收（见下） |
 
 ### P3 已完成
 
@@ -41,11 +41,35 @@
 - 快捷菜单互斥收口到 `open_provider_menu` / `open_session_menu`
 - 删除 10 个只声明不写入的死 `show_*` 字段
 
+### P3 第四步（2026-10-13）：接线，而不是再加一层
+
+前三步把 modal 栈、按键白名单、dirty 门控都补齐了，但**「模式只写一处」当时仍是一句空话**：
+`events/key_context.rs` 的 `KeyContext` 自 `c2be502` 引入后零调用方，`is_exclusive()` /
+`vim_enabled()` 无人问津，真正跑的还是 `input.rs` 的 25 层阶梯 + 四份手写的模式清单
+（`has_overlay_active()`、`has_dialog_active()`、`handle_overlay_input` 内联的 `modal_open`、
+`stream.rs` 的 `user_is_elsewhere`）。本次把它们接上：
+
+| 改动 | 位置 |
+|---|---|
+| 模式判定统一到 `KeyContext::of`，派生 `is_exclusive()` / `is_dialog()` 两个谓词 | `events/key_context.rs` |
+| `KeyContext::Help` 补齐 —— 帮助浮层此前不在枚举里，按 `KeyContext` 推导 vim 门控会漏掉它 | `events/key_context.rs` |
+| 全局键改为「查表 → 按 `GlobalBinding` 分派」，删掉 9 处手写 `if CONTROL && Char(..)` | `events/input.rs` |
+| `handle_key_event` 的三份模式清单换成 `KeyContext` 谓词 | `events/input.rs`、`services/stream.rs` |
+| 删除 `ChatState::has_overlay_active()` 与零调用的 `has_dialog_active()` | `state/modal.rs` |
+
+刻意**没动**的两处键序：`Ctrl+V` 必须排在 `handle_input_modal` 之后（输入框自己消费它，
+填 API Key 靠它），`F1` 仍在主 `match` 里与 `?` 的帮助开关放在一起。两者在
+`dispatch_global_binding` 里显式返回 `Ok(false)`，并由
+`every_registered_binding_is_either_dispatched_or_documented_as_deferred` 锁住 ——
+以后往 `GLOBAL_BINDINGS` 加一行却忘了实现，会直接测试失败。
+
 ### P3 未完成（建议后续单独 PR）
 
-- `handle_key_event` 的 25 层阶梯 → `KeyContext` 优先级表（改动面最大，风险最高）
+- `handle_key_event` 本身仍是长阶梯：现在每层查询的是 `KeyContext`，但分发顺序仍靠书写
+  位置表达。改成查表分发（每个 `KeyContext` 一个 handler）收益已经不大了，可延后
 - `show_input_modal` 与 `Modal::InputModal` 双真相源合并
-- 按键注册表 + help 文案由注册表生成
+- 按键注册表只覆盖**全局**键；modal 内部的键仍是各自的 `match key.code`（`modal_input.rs`
+  的 `_ => Ok(false)` 会把新变体的按键静默漏到主输入框）
 - vim 的 `operators.rs` / `text_objects.rs` 是死模块，`VimMode::Command` 是空壳
 
 ---
