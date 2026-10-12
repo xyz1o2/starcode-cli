@@ -1723,7 +1723,11 @@ async fn handle_error_message(
         );
     }
 
-    let first_line = error.lines().next().unwrap_or(&error).trim().to_string();
+    // 状态栏只放一行精简信息：标签 + 下一步提示；原始错误全文另进 chat_history
+    // （可换行查看）。按 "Original error:" 显式切开，即便上游把换行吞了，也不会
+    // 让状态栏拖出一长串 "…then retry.Original error: …"。
+    let concise = error.split("Original error:").next().unwrap_or(&error);
+    let first_line = concise.lines().next().unwrap_or(concise).trim().to_string();
     emit_status_text(
         state,
         message_id,

@@ -259,7 +259,7 @@ pub fn diagnose(error: &str) -> String {
         Some(hint) => out.push_str(hint),
         None => out.push_str("The model call failed."),
     }
-    out.push_str("\nOriginal error: ");
+    out.push_str("\n\nOriginal error: ");
     out.push_str(error);
     out
 }

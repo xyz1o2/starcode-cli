@@ -194,22 +194,5 @@ mod tests {
         b.objects.insert("a.rs".into(), "deadbeef".into());
         assert_eq!(Baseline::from_json(&b.to_json()).unwrap(), b);
     }
-
-    #[test]
-    fn scratch_real_repo_runtime_build() {
-        // 临时真机验证：拿本仓真实 src/runtime 跑结构 build（Full 让其下源码全 Index）。
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime");
-        let r = build_structural_index(&root, ScopeProfile::Full);
-        eprintln!(
-            "[SCRATCH] indexed={} observed={} excluded={} skipped_large={}",
-            r.stats.indexed, r.stats.observed, r.stats.excluded, r.stats.skipped_large
-        );
-        if let Some(e) = r.index.entries.iter().find(|e| e.object.contains("messages")) {
-            eprintln!("[SCRATCH] sample entry:\n{}", e.to_block());
-        } else if let Some(e) = r.index.entries.first() {
-            eprintln!("[SCRATCH] sample entry:\n{}", e.to_block());
-        }
-        assert!(r.stats.indexed > 0);
-    }
 }
 
