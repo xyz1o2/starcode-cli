@@ -250,14 +250,19 @@ const CONTEXT_FILE_CANDIDATES: &[&str] = &["STAR.md", "STARCODE.md", "CLAUDE.md"
 
 另外 StarCode 的 8000 字符截断（`CLAUDE.md:111`）与 CC 的「4 MiB 全量」不是一回事。
 
-**② 全局 settings 有两个不同文件名。**
+**② 全局层有两个 settings 文件名 —— 但不是 bug，是命名不一致。** ✅ 已查（2026-10-13）
 
-| 读取方 | 路径 |
-|---|---|
-| `SettingsManager` | `~/.star/user-settings.json` ⚠️ |
-| `PermissionRuleSet` / `Storage::global_settings_path` | `~/.star/settings.json` ✅ |
+| 读取方 | 路径 | 管的 key |
+|---|---|---|
+| `SettingsManager` | `~/.star/user-settings.json` | `defaultModel`、force model、system settings |
+| `provider_store` / `doctor` / `/config` | `~/.star/user-settings.json` | provider 列表、API key |
+| `PermissionRuleSet` | `~/.star/settings.json`（内联拼接，`settings_rules.rs:479`） | `permissions` 段 |
 
-即用户在全局层写 `settings.json` 里的 allow/deny 可能不生效（走的是另一个文件名）。需动手前用 `settings_manager` 确认加载顺序。
+三者**互不重叠**，所以「用户在全局层写 allow/deny 不生效」这个猜测**不成立** —— permissions 走的确实是 `~/.star/settings.json`，有 `settings_rules.rs:479` 明确读它。
+
+真正的问题是可维护性：同一个「全局设置」概念分裂在两个文件名下，未来加 key 时不知道该往哪个写。改 P0 时顺手统一即可，不是阻塞项。
+
+**`Storage::global_settings_path()`（`storage.rs:36`）是死函数** ✅ —— 全仓无调用方。`settings_rules.rs:479` 是内联拼的同名路径，不是调它。别按「有封装函数」去理解这条链路。
 
 ### 2.3 确认缺失
 
@@ -278,6 +283,10 @@ const CONTEXT_FILE_CANDIDATES: &[&str] = &["STAR.md", "STARCODE.md", "CLAUDE.md"
 | 无 auto 模式分类器 | — | ❌ |
 | 无 sandbox | — | ❌ |
 | 无 managed 层 | 只有 `STAR_PERMISSIONS_FILE` 一个显式入口 | ❌ |
+| 无 `disableAllHooks` / `allowManagedHooksOnly` | `hooks_maybe_enabled_for_event`（`agent/hooks.rs:36`）只是有无 hook 的短路优化，fail-open，不是策略门控 | ❌ |
+| 无 settings 文件监听 | 纯 300s TTL 缓存；权限规则靠 `reload_permission_rules` 命令式触发 | ❌ `config/settings_manager.rs:337` |
+| 兜底路径丢审批模式 | 3 处 `unwrap_or_else` 用 `PolicyEngineConfig::default()` 构造，不带 `approval_mode` | ❌ 见 §5 A |
+| `.star/` 缺 CC 对应目录 | 无 `rules/` `output-styles/` `workflows/` `themes/` `keybindings.json` `agent-memory/` | ❌ 见 §5 ④ |
 | MCP 只读 `.star/mcp.json` | 不读项目根 `.mcp.json` | ❌ `core/utils/paths.rs:337`、`storage.rs:130` |
 | 无 tool search | 缓存的 `Vec<FunctionDeclaration>` **全量注入**模型 | ❌ `core/tools/tool_registry.rs:121-153` |
 | subagent 字段薄 | 无 `omitClaudeMd` / `maxTurns` / `permissionMode` / `effort` / `isolation` / `background` / description token 预算 | ❌ `commands/agents/custom_agents.rs` |
@@ -335,14 +344,41 @@ P2 的 workflows 虽然价值最高（把子 agent 并行从消耗主 context �
 
 ## 5. 未验证 / 待查清单
 
-本文没做到的事，动手前需要先查：
+本文初版列的 6 项待查已于 2026-10-13 全部查完，结论如下。
 
-- [ ] `SettingsManager` 的 `change_listeners` 字段（`settings_manager.rs:306`）是否有真实文件监听注册，还是死字段
-- [ ] `SettingsManager` 与 `PermissionRuleSet` 的加载顺序 —— 用户在全局层写 `allow` 到底哪个先生效
-- [ ] `hooks_maybe_enabled_for_event`（`agent/hooks.rs:125`）的门控语义是否与 CC 的 managed 约束对齐
-- [ ] StarCode 全量读取的 `.star/` 文件清单（本文只覆盖了权限、hooks、mcp、skills、commands、agents、settings、context、sessions、logs、file-history、lens、memory）
-- [ ] `storage.rs:37 global_settings_path()` 的实际调用方 —— 是否有第三条读 `~/.star/settings.json` 的路径
-- [ ] `study_or_copy_projects/claude-code-main` 的快照日期与对应 CC 版本，判断还能作为 UI 层参考用多久
+**① `change_listeners` 是死字段。** `settings_manager.rs:306` 定义、`:338` 初始化为空，全仓无注册、无 notify。`SettingsManager` 是纯 300s TTL 缓存（`:337`），**没有任何文件监听**。权限规则的"热更新"靠 `MessageBus::reload_permission_rules`（`confirmation_bus/message_bus.rs:46`）由命令显式触发 —— `control_requests.rs:685` 的注释说的就是这件事。
+
+**② 全局层 settings 无冲突。** 见 §2.2 ② —— 三方读两个文件名，但 key 不重叠。
+
+**③ `hooks_maybe_enabled_for_event` 门控**（`agent/hooks.rs:36`）只是"该事件有没有启用 hook"的短路优化，`Err(_) => true` 为 fail-open。**它不是 managed 策略门控** —— CC 的 `disableAllHooks` / `allowManagedHooksOnly` 在 StarCode 完全没有对应物。这一项从「待查」转为 §2.3 的缺失项。
+
+**④ `.star/` 实际文件清单**（`.claude/` 回落改造时必须知道的全部落点）：
+
+| 层 | 文件 / 目录 |
+|---|---|
+| `~/.star/` | `user-settings.json` `settings.json` `providers.json`(legacy) `installation_id` `model-cache.json` `mcp-oauth-tokens.json` `memory.md` `ignore` `commands/` `skills/` `agents/` `policies/` `i18n/` `extensions/` `marketplace/` `history/` `teams/` `transcripts/` `tmp/` `bin/` |
+| `.star/`（项目） | `settings.json` `settings.local.json` `settings.jsonc` `permissions.json`(legacy) `permission_grants.json` `mcp.json` `hooks.json` `commands/` `skills/` `agents/` `i18n/` `lens/` `sessions/` `logs/` `history/` `tmp/checkpoints/` `file-history/` `images/` `extensions/` `agent-teams.json` `agent-teams/runs/` `pr_subscriptions/` `session_tags.json` `eval-results.json` `eval-baseline.json` `auto_compact.jsonl` `STAR.md`(legacy context) |
+
+对照 CC 的 `.claude/` 布局，**完全没有对应物**的是：`rules/` `output-styles/` `workflows/` `themes/` `keybindings.json` `agent-memory/`。这些就是 §3 里缺失项要补的位置。
+
+**⑤ `global_settings_path()` 无调用方。** 见 §2.2 ②。
+
+**⑥ `study_or_copy_projects/claude-code-main` 是 Claude Code v2.8.2**，包内文件 mtime 全为 2026-07-05 03:12（整包拷贝，时间戳无意义，以 `package.json` 版本为准）。落后当前文档约 3 个月。**结论：可用于 UI 层渲染参考，不可用于任何架构判断。**
+
+### 查完后新发现的两个问题
+
+**A. 兜底路径丢审批模式。** `PolicyEngine::with_project_rules` 有 4 个构造点：
+
+| 位置 | 配置 |
+|---|---|
+| `runtime_bootstrap.rs:40` | `approval_mode: config.approval_mode()` ✅ 正确 |
+| `ui/services/worker.rs:39` | `PolicyEngineConfig::default()` ⚠️ |
+| `runtime/control_requests.rs:708` | `PolicyEngineConfig::default()` ⚠️ |
+| `agent/skills/editor.rs:56` | `Default::default()` ⚠️ |
+
+后三处都是 `runtime_message_bus()` 缺席时的 `unwrap_or_else` 兜底，**不传审批模式**。即用户选 yolo/plan，runtime 一旦缺席，确认判断就退回 Default。`worker.rs:36` 的注释只想到「要装载规则」，没想到「还要带审批模式」。修 P0 时一并处理。
+
+**B. `permissions.json` 与 `settings.json` 双格式并存。** `policy_engine.rs:66` 注释写明「装载 `.star/permissions.json`（旧格式）+ settings.json 的 `permissions` 段（新格式）」，对应 `storage.rs:167`。迁移到 `.claude/settings.json` 时要保住旧格式读取，否则老用户配置静默失效。
 
 ---
 

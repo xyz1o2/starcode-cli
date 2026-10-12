@@ -11,6 +11,10 @@ const DEFAULT_PROJECT_CONTEXT_MAX_CHARS: usize = 8000;
 /// AGENTS.md 排在 CLAUDE.md 之后：既认社区正在收敛的 AGENTS.md 标准，
 /// 又不改变已有仓库（多数只有 CLAUDE.md）的行为。
 const CONTEXT_FILE_CANDIDATES: &[&str] = &["STAR.md", "STARCODE.md", "CLAUDE.md", "AGENTS.md"];
+/// 注意：这个列表只服务于「首个命中」路径（`find_context_file_in_dir`），
+/// 用于判断目录算不算项目根、以及单文件展示。**实际加载路径走
+/// `collect_context_files_in_dir`**，那里会把 `CLAUDE.local.md` 和
+/// `.claude/CLAUDE.md` 也一并收进来，且 `AGENTS.md` 受全局判定控制。
 const CONTEXT_FILE_LEGACY: &str = ".star/STAR.md";
 /// 覆盖文件：某个目录里存在它时，**只用它**，忽略同目录其它候选文件。
 /// 用途是在不动团队共享的 CLAUDE.md 的前提下本地改写指令（对标 pi 的 override 语义）。
@@ -132,24 +136,87 @@ fn find_project_root(start_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// 单个目录内按加载顺序收集**全部**上下文文件（对标 Claude Code）
+///
+/// 与 `find_context_file_in_dir` 的区别：后者是「首个命中」，只用于判断
+/// 「这个目录算不算项目根」和单文件展示；这里必须收全部，因为 CC 是**拼接**
+/// 语义而非**遮蔽**语义 —— 一层目录里的 CLAUDE.md 不会让同目录的
+/// CLAUDE.local.md 失效。
+///
+/// 顺序（先加载 → 后加载，即低优先级 → 高优先级）：
+///   STAR.md → STARCODE.md → CLAUDE.md → .claude/CLAUDE.md → CLAUDE.local.md
+///
+/// 两处刻意的偏差，都写在这里以免后来人「修正」回去：
+/// 1. `STAR.md` / `STARCODE.md` 是 StarCode 自有指令，排在 `CLAUDE.md` **之前**
+///    而不是遮蔽它。旧实现用 first-hit 导致同时存在 STARCODE.md 和 CLAUDE.md 时
+///    只读前者，而 CC 会读 CLAUDE.md —— 同一个仓库两边看到不同指令。
+/// 2. `AGENTS.md` 的收不收由调用方全局判定（见 `collect_context_files`），
+///    CC 的规则是「CWD 或其任一上层存在 CLAUDE.md / CLAUDE.local.md 就不读
+///    AGENTS.md」，这是跨目录的全局判断，不是每目录各自决定。
+fn collect_context_files_in_dir(dir: &Path, include_agents: bool) -> Vec<PathBuf> {
+    // AGENTS.override.md 存在即独占该目录 —— StarCode 既有语义，保留。
+    let override_path = dir.join(CONTEXT_FILE_OVERRIDE);
+    if override_path.exists() {
+        return vec![override_path];
+    }
+
+    let mut files = Vec::new();
+    for name in ["STAR.md", "STARCODE.md"] {
+        let p = dir.join(name);
+        if p.exists() {
+            files.push(p);
+        }
+    }
+    // CC 原生位置：根目录 CLAUDE.md 与 .claude/CLAUDE.md 等价，两者都收。
+    let claude_md = dir.join("CLAUDE.md");
+    if claude_md.exists() {
+        files.push(claude_md);
+    }
+    let claude_dir_md = dir.join(".claude").join("CLAUDE.md");
+    if claude_dir_md.exists() {
+        files.push(claude_dir_md);
+    }
+    // 个人层：同目录内排在 CLAUDE.md 之后（CC 语义）。
+    let claude_local_md = dir.join("CLAUDE.local.md");
+    if claude_local_md.exists() {
+        files.push(claude_local_md);
+    }
+    if include_agents {
+        let agents_md = dir.join("AGENTS.md");
+        if agents_md.exists() {
+            files.push(agents_md);
+        }
+    }
+    // legacy：老版本把指令放在 .star/STAR.md
+    let legacy = dir.join(CONTEXT_FILE_LEGACY);
+    if legacy.exists() {
+        files.push(legacy);
+    }
+    files
+}
+
 /// 收集多级上下文文件路径（对标 Claude Code 的 getClaudeMds）
 ///
-/// 层级（从低到高优先级，合并时后面的覆盖前面的）：
-/// 1. 用户全局: ~/.star/STAR.md 或 ~/.star/CLAUDE.md
-/// 2. 从 CWD 向上遍历到项目根，每级目录的 STAR.md/CLAUDE.md
+/// 加载顺序（CC 语义）：
+/// 1. 用户全局：`~/.star/*` 与 `~/.claude/CLAUDE.md`
+/// 2. 项目各层目录，**从文件系统根向下到 CWD**
 ///
-/// 返回的 Vec 按层级从高（用户全局）到低（CWD 附近）排列，
-/// 合并时后面的条目优先级更高。
+/// 关键：CC 是**拼接**不是**覆盖** —— 所有层的内容全部进 context，顺序从根到
+/// CWD，越靠近启动目录的越晚读到（因此事实上「最后读的赢」）。
+/// 旧实现把 `collect_context_files` 的返回顺序写成「从高到低」但循环实际是
+/// CWD 优先，等于反着来。
 fn collect_context_files(start_dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
-    // 1. 用户全局上下文
+    // 1. 用户全局上下文（最低优先级，最先加载）
     if let Some(home) = dirs::home_dir() {
-        let user_star_dir = home.join(".star");
-        if let Some(found) = find_context_file_in_dir(&user_star_dir) {
-            files.push(found);
+        files.extend(collect_context_files_in_dir(&home.join(".star"), true));
+        // CC 的用户层。排在 ~/.star/ 之后。
+        let user_claude_md = home.join(".claude").join("CLAUDE.md");
+        if user_claude_md.exists() {
+            files.push(user_claude_md);
         }
-        // 也检查 ~/.CLAUDE.md 等直接放 home 下的
+        // home 根下的裸文件（~/.CLAUDE.md 等直接放 home 下的）
         for candidate in CONTEXT_FILE_CANDIDATES {
             let p = home.join(candidate);
             if p.exists() {
@@ -159,29 +226,18 @@ fn collect_context_files(start_dir: &Path) -> Vec<PathBuf> {
         }
     }
 
-    // 2. 从 CWD 向上遍历，收集每一级的上下文文件
-    // 但只收集到项目根（.git 所在目录）为止
+    // 2. 先把目录链收集出来（CWD → 上层），供 AGENTS.md 的全局判定使用
     let project_root = find_project_root(start_dir);
-
+    let mut dirs: Vec<PathBuf> = Vec::new();
     let mut current = start_dir.to_path_buf();
-    let mut collected_dirs: Vec<PathBuf> = Vec::new();
-
     loop {
-        if let Some(found) = find_context_file_in_dir(&current) {
-            // 避免重复（同一路径只收集一次）
-            if !files.iter().any(|f| f == &found) {
-                collected_dirs.push(current.clone());
-                files.push(found);
-            }
-        }
-
+        dirs.push(current.clone());
         // 到达项目根就停止向上遍历
         if let Some(ref root) = project_root {
             if current == *root {
                 break;
             }
         }
-
         match current.parent() {
             Some(p) => {
                 // 安全检查：防止无限循环
@@ -194,14 +250,34 @@ fn collect_context_files(start_dir: &Path) -> Vec<PathBuf> {
         }
     }
 
+    // CC 默认语义：只要 CWD 或其任一上层存在 CLAUDE.md / .claude/CLAUDE.md /
+    // CLAUDE.local.md，就完全不读 AGENTS.md。注意 `~/.claude/CLAUDE.md`
+    // 与 managed CLAUDE.md **不计入**这个判定（上面已在项目目录外处理）。
+    let has_claude_md = dirs.iter().any(|d| {
+        d.join("CLAUDE.md").exists()
+            || d.join(".claude").join("CLAUDE.md").exists()
+            || d.join("CLAUDE.local.md").exists()
+    });
+    let include_agents = !has_claude_md;
+
+    // 3. 从文件系统根向下到 CWD 遍历
+    for dir in dirs.iter().rev() {
+        for found in collect_context_files_in_dir(dir, include_agents) {
+            // 避免重复（同一路径只收集一次）
+            if !files.iter().any(|f| f == &found) {
+                files.push(found);
+            }
+        }
+    }
+
     files
 }
 
 /// 读取并合并多级上下文文件内容
 ///
 /// 合并策略（对标 Claude Code）：
-/// - 每个级别的内容用分隔符标注来源
-/// - 后面的级别（更靠近 CWD）优先级更高
+/// - 全部文件内容按 `collect_context_files` 给出的顺序拼接，每段标注来源
+/// - 顺序是「文件系统根 → CWD」，所以**越晚出现的（越靠近 CWD）越优先**
 /// - 总字符数受 STAR_PROJECT_CONTEXT_MAX_CHARS 限制
 fn load_and_merge_context_files(files: &[PathBuf]) -> Option<String> {
     if files.is_empty() {
@@ -487,6 +563,79 @@ mod tests {
         assert_eq!(
             find_context_file_in_dir(&dir),
             Some(dir.join("AGENTS.override.md"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── 以下覆盖 `collect_context_files_in_dir`：拼接语义，不是遮蔽语义 ──
+
+    #[test]
+    fn dir_collects_claude_md_and_local_md_in_cc_order() {
+        let dir = tmp_dir("order");
+        std::fs::write(dir.join("CLAUDE.md"), "c").unwrap();
+        std::fs::write(dir.join("CLAUDE.local.md"), "l").unwrap();
+        let got = collect_context_files_in_dir(&dir, false);
+        assert_eq!(
+            got,
+            vec![dir.join("CLAUDE.md"), dir.join("CLAUDE.local.md")],
+            "CLAUDE.local.md 必须排在 CLAUDE.md 之后（CC：个人层最后读到）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dot_claude_claude_md_is_collected() {
+        let dir = tmp_dir("dot-claude");
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        std::fs::write(dir.join(".claude").join("CLAUDE.md"), "dc").unwrap();
+        assert_eq!(
+            collect_context_files_in_dir(&dir, false),
+            vec![dir.join(".claude").join("CLAUDE.md")]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn starcode_md_no_longer_shadows_claude_md() {
+        // 语义分歧的核心：旧实现 first-hit 时 STARCODE.md 会顶掉 CLAUDE.md，
+        // 导致同一个仓库 StarCode 与 CC 读到不同指令。
+        let dir = tmp_dir("no-shadow");
+        std::fs::write(dir.join("STARCODE.md"), "s").unwrap();
+        std::fs::write(dir.join("CLAUDE.md"), "c").unwrap();
+        let got = collect_context_files_in_dir(&dir, false);
+        assert_eq!(
+            got,
+            vec![dir.join("STARCODE.md"), dir.join("CLAUDE.md")],
+            "STARCODE.md 与 CLAUDE.md 应并列收集，顺序在前者"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn override_file_still_shadows_whole_dir() {
+        let dir = tmp_dir("override2");
+        std::fs::write(dir.join("CLAUDE.md"), "c").unwrap();
+        std::fs::write(dir.join("CLAUDE.local.md"), "l").unwrap();
+        std::fs::write(dir.join("AGENTS.override.md"), "o").unwrap();
+        assert_eq!(
+            collect_context_files_in_dir(&dir, false),
+            vec![dir.join("AGENTS.override.md")]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agents_md_gated_by_caller() {
+        let dir = tmp_dir("agents-gate");
+        std::fs::write(dir.join("AGENTS.md"), "a").unwrap();
+        assert_eq!(
+            collect_context_files_in_dir(&dir, false),
+            Vec::<PathBuf>::new(),
+            "include_agents=false 时不应收 AGENTS.md"
+        );
+        assert_eq!(
+            collect_context_files_in_dir(&dir, true),
+            vec![dir.join("AGENTS.md")]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
