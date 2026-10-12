@@ -8,6 +8,8 @@ StarCode CLI (`starcode-cli`) — a Rust terminal-UI coding agent (ratatui 0.30 
 
 The codebase is deliberately modeled on Claude Code — comments say "对标 Claude Code" throughout. Read-only reference copies live in `study_or_copy_projects/` (gitignored): `claude-code-main`, `claude-code-rust`, `claude-code-system-prompts-main`, `tuie-main`. Consult them when matching behavior or terminal rendering; `docs/ui-tool-render.md` is a worked example of that comparison.
 
+**对标文档看 `docs/claude-code-alignment.md`**（2026-10-13 快照，source of truth 是官方文档 v2.1.2xx）。不要用 `docs/parity-*.md` 系列做架构决策：那批文档基于泄漏源码 v2.1.88，已过期，且含已被证伪的「未接线」结论（PolicyEngine、ModelFallbackManager、Workflow）—— 具体作废原因见各文件顶部声明与新文档 §6。`study_or_copy_projects/` 下的副本只适合做 UI 层参考。
+
 ## Commands
 
 ```bash

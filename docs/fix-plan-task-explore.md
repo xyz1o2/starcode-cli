@@ -162,6 +162,8 @@ pub fn check_auto_hide(&mut self, agent_active: bool) {
 
 ### 现状回顾（详见 `docs/parity-agent.md` + 上一轮评估）
 
+> ℹ️ `parity-agent.md` 已于 2026-10-13 作废（基于过期的泄漏源码 v2.1.88），仅作历史参考。当前 harness 架构基线见 [`claude-code-alignment.md`](claude-code-alignment.md) §1.6 Subagent。
+
 两条互不相通的路径：
 
 | | Path A: `AgentTool`（`Task`） | Path B: `SkillTool`（`skill`） |
