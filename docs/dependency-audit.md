@@ -189,9 +189,10 @@ CLAUDE.md 已记录，此处仅作汇总：
 - `src/constants/` 与 `src/sdk/` 未被 `lib.rs` 或 `main.rs` 声明，改动不产生任何效果
 - 根目录 `config.toml` 无任何代码读取（其 `[ui.system_prompts] dir` 甚至指向不存在的路径）
 - `tests/` 大部分是死代码，`.gitignore:28` 的 `**/test_*.rs` 规则导致 `tests/lib.rs` 声明的两个文件未被跟踪，`cargo test --all-targets` 必然失败
-- `PolicyEngine::load_permission_rules` 零调用点 —— `.star/permissions.json` 规则实为咨询性质
-- `WebBrowserTool::new` 从未被调用 —— 模型无法触达该工具
-- analytics HTTP sink 只打印 `"[Analytics HTTP] Would send …"`，并未真正发送
+- ~~`PolicyEngine::load_permission_rules` 零调用点~~ —— **已订正（2026-10-13）**：实为活路径。`PolicyEngine::with_project_rules`（`policy_engine.rs:60`）在 `runtime_bootstrap.rs:40` 是唯一构造点，经 `load_project_permissions` → `load_permission_rules`（`policy_engine.rs:91`）装载磁盘规则
+- ~~`WebBrowserTool::new` 从未被调用~~ —— **已订正（2026-10-13）**：`WebBrowserTool` 已从源码树移除，只剩 `TOOL_WEB_BROWSER` 常量（`constants/tools.rs:42`）
+- analytics HTTP sink 只打印 `"[Analytics HTTP] Would send …"`，并未真正发送（`core/analytics/sink.rs:133`）
+- Langfuse client 同样只打印 `"[Langfuse] Would send …"`（`core/langfuse/client.rs:315`）—— 此前漏列
 
 ---
 

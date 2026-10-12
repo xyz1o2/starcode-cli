@@ -142,10 +142,10 @@ classifier: 基于工具名 + 参数判断是否安全
 ```
 
 **Starcode 需实现**:
-- `PolicyEngine::check` 增加自动审批规则 (当前 `load_permission_rules` 未接线)
+- `PolicyEngine::check` 增加自动审批规则
 - 或: 简单规则引擎 — 匹配工具名 + 参数模式
 - UI: 自动审批时显示绿色 "Auto-approved" 标记
-- 需要先接线 `PolicyEngine` (见 `parity-agent.md` §12)
+- ~~需要先接线 `PolicyEngine`~~ —— 已接上：`PolicyEngine::with_project_rules`（`policy_engine.rs:60`）在 `runtime_bootstrap.rs:40` 是唯一构造点，并经 `load_project_permissions` 装载了 `settings.json` 的 `permissions` 段。详见 [`claude-code-alignment.md`](claude-code-alignment.md)。
 
 **涉及文件**: `src/core/policy/policy_engine.rs`, `confirmation_dialog.rs`
 

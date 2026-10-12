@@ -2,7 +2,7 @@
 
 > 快照日期：2026-10-13
 > Source of truth：Claude Code 官方文档（`code.claude.com/docs`），版本线 v2.1.2xx
-> 适用范围：本文替代 `docs/parity-overview.md` 及其系列作为**架构对标的唯一依据**
+> 适用范围：本文是**架构对标的唯一依据**，取代 2026-10-13 删除的 `docs/parity-*.md` 架构系列
 
 ---
 
@@ -289,7 +289,7 @@ const CONTEXT_FILE_CANDIDATES: &[&str] = &["STAR.md", "STARCODE.md", "CLAUDE.md"
 
 **死代码确认**：`agent/system_prompt_merge.rs:120-166` 的 `load_claudemd_files` 会读 `.claude/CLAUDE.md`、`.claude/commands/*.md`、`~/.claude/CLAUDE.md`，但 `SystemPromptMerger` 全仓只有 `agent/mod.rs:46` 的 mod 声明，无任何构造或调用点。**看着能用，实际不走。** 修 `.claude/` 记忆兼容时不要基于它扩展，直接在 `project_context.rs` 上改。
 
-**workflows 确认**：`WorkflowManager`（`core/workflow/mod.rs:113`）除自身定义外无引用；`WorkflowTool` 在 `runtime_bootstrap/agent_runtime.rs:205` 注册，是活的。旧 `parity-orphaned.md` 把 Workflow 整体列为桩实现，**结论过宽**。
+**workflows 确认**：`WorkflowManager`（`core/workflow/mod.rs:113`）除自身定义外无引用；`WorkflowTool` 在 `runtime_bootstrap/agent_runtime.rs:205` 注册，是活的。已删除的 `parity-orphaned.md` 曾把 Workflow 整体列为桩实现，**结论过宽**。
 
 ---
 
@@ -350,7 +350,7 @@ P2 的 workflows 虽然价值最高（把子 agent 并行从消耗主 context �
 
 `docs/parity-*.md` 系列（生成于 2026-09-06，基于 HEAD `80c5eb3` + 泄漏源码）**不再作为对标依据**，原因：
 
-1. **结论已错**。`parity-orphaned.md` 把 `PolicyEngine` 和 `ModelFallbackManager` 列为「从未构造」，但 `runtime_bootstrap.rs:40` 是 PolicyEngine 的唯一构造点并接了项目规则；`CLAUDE.md:133` 也已证伪 ModelFallbackManager。
+1. **结论已错**。已删除的 `parity-orphaned.md` 把 `PolicyEngine` 和 `ModelFallbackManager` 列为「从未构造」，但 `runtime_bootstrap.rs:40` 是 PolicyEngine 的唯一构造点，且经 `with_project_rules`（`policy_engine.rs:60`）→ `load_project_permissions` → `load_permission_rules`（`policy_engine.rs:91`）真实装载了磁盘规则。仓库 `CLAUDE.md` 当时也写着「`load_permission_rules` 零调用者」，同样已修正。
 2. **对着上一代架构**。泄漏源码是 v2.1.88（2026-03），官方文档已到 v2.1.2xx，中间 dynamic workflows、auto mode 默认化、tool search 默认开启、35+ hook 事件、`.claude/rules/` 条件加载等全是新的。
 3. **完成度自评不可信**。标着 ✅ 100% 的项（如 Explore UI、Tool 渲染）是 UI 渲染格式，与 harness 架构对标是两件事。
 
@@ -358,7 +358,7 @@ P2 的 workflows 虽然价值最高（把子 agent 并行从消耗主 context �
 
 **已执行的处置（2026-10-13）**：
 
-- `parity-overview.md` / `parity-agent.md` / `parity-commands.md` / `parity-orphaned.md` / `parity-edge-cases.md` —— 顶部加**作废声明**，逐条写明原因；`parity-orphaned.md` 直接列出被证伪的三项。
-- `parity-permission.md` / `parity-task.md` / `parity-progress.md` / `parity-tool-render-gaps.md` / `parity-ui-framework.md` —— 顶部加**范围声明**（仅覆盖 UI 层），并指向本文。`parity-permission.md` 另标注了 `PolicyEngine` 的错误说法，以及新增的 `PermissionRequest` / `PermissionDenied` 事件和 `auto` 默认模式。
-- `CLAUDE.md` 的 Project 段落加了对标文档指针，并写明不要用 `parity-*.md` 做架构决策。
+- **已删除 5 份整体作废的**：`parity-overview.md`、`parity-agent.md`、`parity-commands.md`、`parity-orphaned.md`、`parity-edge-cases.md`。删除前逐条写明作废原因，其中 `parity-orphaned.md` 列出了被证伪的三项（PolicyEngine、ModelFallbackManager、Workflow）。git 历史中仍可取回。
+- **保留 5 份 UI 层的**：`parity-task.md`、`parity-progress.md`、`parity-permission.md`、`parity-tool-render-gaps.md`、`parity-ui-framework.md`。它们只覆盖终端渲染与 UI 框架结构，不受配置架构变化影响。`parity-permission.md` 中「需要先接线 `PolicyEngine`」的错误说法已就地改正为指向本文。
+- **`CLAUDE.md`** 的 Project 段落加了对标文档指针；「Not everything is wired up」一节订正了两条错误判断（`PolicyEngine::load_permission_rules` 实为活路径；`WebBrowserTool` 已从树中移除），并补记了 `core/langfuse/client.rs:315` 这条此前漏列的 stub。
 - `README.md` 未引用 `parity-*.md`，无需改动。
