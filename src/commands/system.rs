@@ -2263,10 +2263,14 @@ fn format_command_hint(prefix: &str, cmd: &SlashCommand) -> String {
     format!("{}{} - {}", prefix, cmd.name, cmd.description)
 }
 
-/// 获取命令补全提示
-pub fn get_command_hints(input: &str) -> Vec<String> {
+/// 按当前输入算出「该补全哪些命令」——命中前缀 + 已排序的候选列表。
+///
+/// 内联浮层（`get_command_hints`）和命令面板（`command_palette_items`）共用这一份，
+/// 否则两条入口会给出不同的排序或不同的子命令层级。返回的 `prefix` 是已消费路径
+/// 拼出的完整前缀（`/mcp ` 之类），候选里的 `cmd` 只需要接在它后面。
+fn command_candidates(input: &str) -> (String, Vec<&'static SlashCommand>) {
     if !input.starts_with('/') {
-        return Vec::new();
+        return (String::new(), Vec::new());
     }
 
     let without_slash = &input[1..];
@@ -2274,10 +2278,7 @@ pub fn get_command_hints(input: &str) -> Vec<String> {
 
     if parts.is_empty() {
         // 显示所有顶级命令
-        return ALL_COMMANDS
-            .iter()
-            .map(|cmd| format_command_hint("/", cmd))
-            .collect();
+        return ("/".to_string(), ALL_COMMANDS.iter().collect());
     }
 
     // 解析已输入的命令路径
@@ -2295,52 +2296,78 @@ pub fn get_command_hints(input: &str) -> Vec<String> {
                 // Leaf command: no sub-commands exist.
                 // Whether there is more text after it (arguments) or it is an
                 // exact match, there are no further completions to offer.
-                return Vec::new();
+                return (String::new(), Vec::new());
             }
         } else {
             break;
         }
     }
 
+    let prefix = if consumed > 0 {
+        format!("/{} ", parts[..consumed].join(" "))
+    } else {
+        "/".to_string()
+    };
     let partial = parts.get(consumed).unwrap_or(&"");
     let partial_lower = partial.to_lowercase();
 
     // 加权 fuzzy 匹配排序（对标 Claude Code fuse.js 权重）：
     // 精确名 1000 > 前缀 800 > 名称分段 600 > alias 500/450 > 子序列 300 > 描述词 100
-    let mut scored: Vec<(i32, &SlashCommand)> = current_commands
+    let mut scored: Vec<(i32, &'static SlashCommand)> = current_commands
         .iter()
         .filter_map(|cmd| fuzzy_score(cmd, &partial_lower).map(|s| (s, cmd)))
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0));
 
-    let filtered: Vec<String> = scored
-        .into_iter()
-        .map(|(_, cmd)| {
-            let prefix = if consumed > 0 {
-                format!("/{} ", parts[..consumed].join(" "))
-            } else {
-                "/".to_string()
-            };
-            format_command_hint(&prefix, cmd)
-        })
-        .collect();
-
-    if filtered.is_empty() {
-        // 显示当前级别所有命令
-        current_commands
-            .iter()
-            .map(|cmd| {
-                let prefix = if consumed > 0 {
-                    format!("/{} ", parts[..consumed].join(" "))
-                } else {
-                    "/".to_string()
-                };
-                format_command_hint(&prefix, cmd)
-            })
-            .collect()
+    if scored.is_empty() {
+        // 没有模糊命中时退回"当前层级全部命令"。
+        (prefix, current_commands.to_vec())
     } else {
-        filtered
+        (prefix, scored.into_iter().map(|(_, cmd)| cmd).collect())
     }
+}
+
+/// 命令面板（Ctrl+P 同款窗口）里的命令条目。
+///
+/// 按 [`crate::ui::state::PaletteItem`] 产出，好让 `/` 和 Ctrl+P 共用同一个窗口、
+/// 同一套配色和同一个选中行为——以前 `/` 是一块贴在输入框上方的小浮层，颜色和
+/// 选中态都跟面板对不上，两套列表看着像两个应用。
+///
+/// 这里带上 `category`，面板才会按分类渲染出分组标题；`Pending` 分组是刻意保留的：
+/// 它如实告诉用户哪些命令声明了但还没实现。
+pub fn command_palette_items(
+    input: &str,
+) -> Vec<crate::ui::state::PaletteItem> {
+    let (prefix, candidates) = command_candidates(input);
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    candidates
+        .into_iter()
+        .map(|cmd| {
+            let full = format!("{}{}", prefix, cmd.name);
+            crate::ui::state::PaletteItem {
+                id: format!("command_{}", full.replace(' ', "_")),
+                label: full,
+                description: cmd.description.clone(),
+                category: Some(cmd.category.clone()),
+                // Enter 回填输入框并补一个空格，由用户接着敲参数再回车执行。
+                action: crate::ui::state::PaletteAction::TypeCommand(format!("{} ", full)),
+            }
+        })
+        .collect()
+}
+
+/// 获取命令补全提示
+pub fn get_command_hints(input: &str) -> Vec<String> {
+    let (prefix, candidates) = command_candidates(input);
+    if candidates.is_empty() && !prefix.is_empty() {
+        return Vec::new();
+    }
+    candidates
+        .into_iter()
+        .map(|cmd| format_command_hint(&prefix, cmd))
+        .collect()
 }
 
 /// 加权 fuzzy 评分；None 表示不匹配。权重参考 Claude Code 的 fuse.js 配置

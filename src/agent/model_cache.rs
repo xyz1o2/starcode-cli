@@ -168,6 +168,50 @@ pub fn save(provider_id: &str, models: &[ModelInfo]) {
     save_to_path(&cache_path(), provider_id, models);
 }
 
+/// 在**所有** provider 桶里查某个模型名归谁，返回 provider id。
+///
+/// # 为什么必须跨桶查
+///
+/// 模型列表是按 provider 分桶存的，所以一次全表扫描就能回答"这个名字归谁"。
+/// 切换模型时缺了这一步很致命：`model_provider_map` 只装**当前列表**的映射，
+/// 面板之外手输的名字（例如 OpenRouter 的 `xiaomi/mimo-v2.6-flash`）查不到就
+/// 兜底到"当前 provider"，于是 OpenRouter 的模型名被发给了 Zen，上游回
+/// `Model is unavailable` / `is not a valid model ID` —— 表现为"切换模型没反应"。
+///
+/// `DEFAULT_BUCKET` 不参与：那是"没配 provider 时的兜底桶"，不是真正的归属。
+/// 同名模型命中多个 provider 时优先 `preferred`（通常是当前 provider），否则按
+/// id 排序取第一个，保证结果稳定、可复现。
+pub fn find_provider_for_model_from(
+    path: &Path,
+    model: &str,
+    preferred: Option<&str>,
+) -> Option<String> {
+    let cache = read_all(path);
+    let mut candidates: Vec<&String> = cache
+        .providers
+        .iter()
+        .filter(|(provider_id, entry)| {
+            provider_id.as_str() != DEFAULT_BUCKET && entry.models.iter().any(|m| m.id == model)
+        })
+        .map(|(provider_id, _)| provider_id)
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort();
+    if let Some(preferred) = preferred {
+        if let Some(exact) = candidates.iter().find(|id| id.as_str() == preferred) {
+            return Some((*exact).clone());
+        }
+    }
+    Some(candidates[0].clone())
+}
+
+/// 同 [`find_provider_for_model_from`]，但路径取默认的缓存文件。
+pub fn find_provider_for_model(model: &str, preferred: Option<&str>) -> Option<String> {
+    find_provider_for_model_from(&cache_path(), model, preferred)
+}
+
 /// 删除整个缓存文件（`/model` 的显式刷新不需要它，留给排查问题时用）。
 pub fn clear() {
     let path = cache_path();
@@ -269,5 +313,67 @@ mod tests {
 
         save_to(&path, "openai", &[]).unwrap();
         assert!(!path.exists(), "an empty list should not write a file");
+    }
+
+    /// 回归：跨网关的模型名必须查到真正拥有它的 provider。
+    ///
+    /// 真实事故：当前 provider 是 Zen（OpenCode），用户在 `/model` 里敲了
+    /// OpenRouter 的 `xiaomi/mimo-v2.6-flash`。只查当前列表就查不到，于是兜底
+    /// 留在 Zen，Zen 回 `Model is unavailable` —— 表现为"切换模型没反应"。
+    #[test]
+    fn finds_the_owning_provider_across_buckets_not_just_the_current_one() {
+        let path = temp_path("cross-bucket");
+        let _ = std::fs::remove_file(&path);
+
+        save_to(
+            &path,
+            "openrouter",
+            &[ModelInfo::new("xiaomi/mimo-v2.6-flash", "openrouter")],
+        )
+        .unwrap();
+        save_to(
+            &path,
+            "opencode",
+            &[ModelInfo::new("mimo-v2.6-flash-free", "opencode")],
+        )
+        .unwrap();
+
+        // 当前 provider 是 opencode，但这个名字归 openrouter。
+        assert_eq!(
+            find_provider_for_model_from(&path, "xiaomi/mimo-v2.6-flash", Some("opencode"))
+                .as_deref(),
+            Some("openrouter"),
+            "必须路由到真正拥有该模型的网关，而不是留在当前 provider"
+        );
+        // 反向同理。
+        assert_eq!(
+            find_provider_for_model_from(&path, "mimo-v2.6-flash-free", Some("openrouter"))
+                .as_deref(),
+            Some("opencode")
+        );
+        // 谁都没有的名字才返回 None，交给调用方兜底到当前 provider。
+        assert_eq!(
+            find_provider_for_model_from(&path, "totally-unknown-model", Some("openrouter")),
+            None
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_default_bucket_is_not_treated_as_a_real_owner() {
+        let path = temp_path("default-owner");
+        let _ = std::fs::remove_file(&path);
+
+        save_to(&path, "", &[ModelInfo::new("some-local-model", "local")]).unwrap();
+
+        // `__default` 只是"没配 provider"时的兜底桶，不能当成归属，
+        // 否则会把模型名路由到一个根本不存在的 provider。
+        assert_eq!(
+            find_provider_for_model_from(&path, "some-local-model", None),
+            None
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }

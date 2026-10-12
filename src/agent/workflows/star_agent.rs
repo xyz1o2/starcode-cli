@@ -342,9 +342,18 @@ impl StarAgent {
             }
         }
 
+        // `provider_id: None` 的语义是"沿用当前 provider"，不是"provider 变成 None"：
+        // `set_model_with_provider` 的 else 分支只调 `set_model`，而 `StarClient::set_model`
+        // 不动 `provider_id`。所以期望值必须取调用前的 provider，否则一次已经真正生效的
+        // 切换会仅仅因为 client 上还留着上一个 provider 而被判成 did-not-activate，
+        // UI 于是显示 "Runtime settings not applied"，模型其实已经换了。
+        let expected_provider = provider_id
+            .map(|id| id.to_string())
+            .or_else(|| self.client.provider_id.clone());
+
         self.set_model_with_provider(model, provider_id).await;
         let active = self.current_runtime_model_selection();
-        if active.model != model || active.provider_id.as_deref() != provider_id {
+        if active.model != model || active.provider_id != expected_provider {
             return Err(format!(
                 "Provider/model transition did not activate '{}'.",
                 model
@@ -1098,6 +1107,7 @@ impl StarAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::messages::RuntimeSettingsPersistencePolicy;
 
     #[tokio::test]
     async fn superseded_acknowledgement_does_not_mutate_runtime_settings() {
@@ -1169,6 +1179,89 @@ mod tests {
         assert!(
             next_token.is_cancelled(),
             "rearm 之后 ESC 仍必须能取消当前 token"
+        );
+    }
+
+    fn model_mutation(
+        ui_revision: u64,
+        model: &str,
+        provider_id: Option<&str>,
+    ) -> RuntimeSettingsMutation {
+        RuntimeSettingsMutation {
+            ui_revision,
+            persistence: RuntimeSettingsPersistencePolicy::Persistent,
+            model: Some(RuntimeModelSelection {
+                model: model.to_string(),
+                provider_id: provider_id.map(|id| id.to_string()),
+            }),
+            context_window: None,
+            thinking_effort: None,
+        }
+    }
+
+    /// 回归：从模型面板选一个模型必须真的切换成功。
+    ///
+    /// `PaletteAction::SetModel` 在拿不到 provider 归属时会发出 `provider_id: None`
+    /// （`model_provider_map` 只收录带 provider 的条目，回退是 `current_provider_id`，
+    /// 两者都可能为空）。这条路径以前会让 `apply_model_selection` 判定
+    /// "transition did not activate" 而把切换整体拒绝掉。
+    #[tokio::test]
+    async fn model_switch_without_provider_id_activates_model() {
+        let mut agent = StarAgent::new_for_runtime_settings_test().await;
+        assert_eq!(agent.current_runtime_model_selection().model, "test-model");
+
+        let acknowledgement = agent
+            .apply_runtime_settings(model_mutation(1, "next-model", None))
+            .await;
+
+        assert_eq!(
+            acknowledgement.outcome,
+            RuntimeSettingOutcome::Applied,
+            "reason: {:?}",
+            acknowledgement.reason
+        );
+        assert_eq!(acknowledgement.snapshot.active.model.model, "next-model");
+        assert_eq!(agent.current_runtime_model_selection().model, "next-model");
+    }
+
+    /// 回归：先切到带 provider 的模型，再用 `provider_id: None` 切模型。
+    ///
+    /// `StarClient::set_model` 只改 model、不动 `provider_id`，所以 client 上仍留着
+    /// 上一个 provider。此时"保留当前 provider"和"provider 未变化"必须都成立，
+    /// 否则这次切换会被误判成没有生效。
+    #[tokio::test]
+    async fn model_switch_without_provider_id_keeps_active_provider() {
+        let mut agent = StarAgent::new_for_runtime_settings_test().await;
+
+        let first = agent
+            .apply_runtime_settings(model_mutation(1, "gpt-4o-mini", Some("openai")))
+            .await;
+        assert_eq!(
+            first.outcome,
+            RuntimeSettingOutcome::Applied,
+            "built-in provider must be accepted; reason: {:?}",
+            first.reason
+        );
+        assert_eq!(
+            agent.current_runtime_model_selection().provider_id.as_deref(),
+            Some("openai")
+        );
+
+        let second = agent
+            .apply_runtime_settings(model_mutation(2, "gpt-4o", None))
+            .await;
+
+        assert_eq!(
+            second.outcome,
+            RuntimeSettingOutcome::Applied,
+            "provider_id: None must mean 'keep current provider'; reason: {:?}",
+            second.reason
+        );
+        assert_eq!(second.snapshot.active.model.model, "gpt-4o");
+        assert_eq!(
+            second.snapshot.active.model.provider_id.as_deref(),
+            Some("openai"),
+            "沿用当前 provider，不能因为请求里没写就丢掉归属"
         );
     }
 }

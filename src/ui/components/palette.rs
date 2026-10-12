@@ -46,6 +46,10 @@ pub fn palette_item_matches_query(item: &PaletteItem, query_lower: &str) -> bool
 pub fn get_items(mode: &PaletteMode, state: &ChatState) -> Vec<PaletteItem> {
     match mode {
         PaletteMode::Main => get_main_palette_items_for_state(Some(state)),
+        // 过滤词由 `state.palette_filter` 提供（`get_items` 没有 query 参数，
+        // 所以这里只出全部条目，真正的过滤统一在 `get_search_items` /
+        // `palette_item_matches_query` 里做，和其它模式完全一致）。
+        PaletteMode::Command => crate::commands::system::command_palette_items("/"),
         PaletteMode::Session => get_session_palette_items(),
         PaletteMode::System => get_system_palette_items(),
         PaletteMode::Agent => get_agent_palette_items(),
@@ -111,6 +115,7 @@ pub fn palette_title(mode: &PaletteMode, query: &str) -> String {
     } else {
         match mode {
             PaletteMode::Main => "Actions",
+            PaletteMode::Command => "Commands",
             PaletteMode::Provider => "Providers",
             PaletteMode::Session => "Session",
             PaletteMode::System => "Settings",
@@ -143,6 +148,7 @@ pub fn palette_title(mode: &PaletteMode, query: &str) -> String {
 pub fn palette_placeholder(mode: &PaletteMode) -> &'static str {
     match mode {
         PaletteMode::Main => "Search actions, models, providers",
+        PaletteMode::Command => "Search commands",
         PaletteMode::Provider => "Search providers by name or endpoint type",
         PaletteMode::Model => "Search models",
         PaletteMode::Language => "Select UI language",
@@ -1899,10 +1905,25 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
         return;
     }
 
+    // 与 `/` 浮层（`command_suggestions::render_command_hints_overlay`）取同一套
+    // 主题色。之前这里写死 Blue/Gray/Yellow/DarkGray，而 `/` 那边走 theme，
+    // 于是同一个应用里两套列表长得不一样，换主题时命令浮层会跟着变、面板不会。
+    //
+    // `current()` 是借用 `state` 的，而本函数后面还要写 `state.selected_palette_index`，
+    // 所以颜色在这里逐个拷出来（`Color` 是 Copy），别把借用带过可变访问。
+    let theme = state.theme_manager.current();
+    let border_color = theme.border;
+    let primary_color = theme.primary;
+    let inactive_color = theme.inactive;
+    let foreground_color = theme.foreground;
+    let selection_bg = theme.selection_bg;
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(palette_title(&state.palette_mode, &state.palette_filter));
+        .border_style(Style::default().fg(border_color))
+        .title(palette_title(&state.palette_mode, &state.palette_filter))
+        .title_style(Style::default().fg(primary_color));
 
     // 70% 太宽：行内 label + description 拉得过开，视觉上压住整个会话区。
     // 收到 58% 后两侧留白足够，最长的描述行（删除 provider 的那句）在 120 列
@@ -1928,9 +1949,9 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
         state.palette_filter.as_str()
     };
     let input_style = if is_empty {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(inactive_color)
     } else {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(foreground_color)
     };
 
     let input = Paragraph::new(Line::from(vec![
@@ -1941,7 +1962,9 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .title(" Search "),
+            .border_style(Style::default().fg(border_color))
+            .title(" Search ")
+            .title_style(Style::default().fg(primary_color)),
     );
     f.render_widget(input, chunks[0]);
 
@@ -1959,7 +1982,7 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
     if filtered.is_empty() {
         list_items.push(ListItem::new(Line::from(Span::styled(
             "No results",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(inactive_color),
         ))));
     } else if grouped {
         let mut groups: Vec<(String, Vec<&PaletteItem>)> = Vec::new();
@@ -1986,7 +2009,7 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
             list_items.push(ListItem::new(Line::from(Span::styled(
                 category,
                 Style::default()
-                    .fg(Color::Blue)
+                    .fg(primary_color)
                     .add_modifier(Modifier::BOLD),
             ))));
 
@@ -2001,7 +2024,7 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
                     spans.push(Span::raw("  "));
                     spans.push(Span::styled(
                         item.description.clone(),
-                        Style::default().fg(Color::Gray),
+                        Style::default().fg(inactive_color),
                     ));
                 }
 
@@ -2021,7 +2044,7 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
                 spans.push(Span::raw("  "));
                 spans.push(Span::styled(
                     item.description.clone(),
-                    Style::default().fg(Color::Gray),
+                    Style::default().fg(inactive_color),
                 ));
             }
             list_items.push(ListItem::new(Line::from(spans)));
@@ -2038,7 +2061,7 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
                 spans.push(Span::raw("  "));
                 spans.push(Span::styled(
                     item.description.clone(),
-                    Style::default().fg(Color::Gray),
+                    Style::default().fg(inactive_color),
                 ));
             }
 
@@ -2060,7 +2083,7 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
     let list = List::new(list_items)
         .highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
+                .bg(selection_bg)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("> ");

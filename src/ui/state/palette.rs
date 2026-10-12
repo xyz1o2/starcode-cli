@@ -1,6 +1,9 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteMode {
     Main,
+    /// `/` 打开的命令面板。与 `Main` 共用同一个窗口、配色和选中行为，
+    /// 只是条目来源换成 slash 命令（`commands::system::command_palette_items`）。
+    Command,
     Provider,
     Session,
     System,

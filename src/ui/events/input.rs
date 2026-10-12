@@ -260,6 +260,34 @@ pub(crate) async fn request_runtime_settings_with_persistence_revision(
     }
 }
 
+/// 决定一次模型切换要用哪个 provider。
+///
+/// 顺序：**当前已知的映射 → 磁盘上所有 provider 桶 → 当前 provider**。
+///
+/// 中间那一步是修"切换模型没反应"的关键。以前只查 `model_provider_map`，而它
+/// 只装**当前列表**的映射（`apply_models_to_state` 每次都 `clear()` 再重建）。
+/// 于是一个属于别的网关的名字（OpenRouter 的 `xiaomi/mimo-v2.6-flash`）必然查不
+/// 到，直接兜底发给当前 provider —— Zen 收到 OpenRouter 的模型 id，回
+/// `Model is unavailable`；反过来则是 `is not a valid model ID`。两种都表现为
+/// "选了模型但没切成功"，而用户无从知道模型被发去了另一家。
+///
+/// 兜底到 `current_provider_id` 本身没有错 —— 用户手敲一个谁都没有的模型名时，
+/// 仍该留在当前 provider 上试一次（注释见 `show_model_name_modal`：中转站的
+/// `/models` 常年不全，拉不到不等于不能用）。关键是不能**在能查到的情况下**
+/// 还去兜底。
+pub(crate) fn resolve_provider_for_model(state: &ChatState, model: &str) -> Option<String> {
+    if let Some(provider_id) = state.model_provider_map.get(model) {
+        return Some(provider_id.clone());
+    }
+    if let Some(provider_id) = crate::agent::model_cache::find_provider_for_model(
+        model,
+        state.current_provider_id.as_deref(),
+    ) {
+        return Some(provider_id);
+    }
+    state.current_provider_id.clone()
+}
+
 /// 从 UI 发起模型切换时只记录 requested intent；实际 active model 只能由 worker
 /// acknowledgement 写回，避免 provider 失败时界面提前谎报成功。
 pub(crate) async fn request_runtime_model_change(
@@ -878,11 +906,7 @@ pub(crate) async fn execute_palette_action(
             state.close_palette();
             state.pending_model_confirmation = false;
             state.waive_next_model_confirmation = false;
-            let provider_id = state
-                .model_provider_map
-                .get(&model)
-                .cloned()
-                .or_else(|| state.current_provider_id.clone());
+            let provider_id = resolve_provider_for_model(state, &model);
             if request_runtime_model_change(state, model.clone(), provider_id, agent_tx).await {
                 state.current_status_line = Some(format!("Switching to model {}…", model));
             }
@@ -2023,11 +2047,7 @@ pub async fn handle_key_event(
                         execute_palette_action(state, action, agent_tx).await?;
                     }
                     if let Some(model) = state.pending_model_change.take() {
-                        let provider_id = state
-                            .model_provider_map
-                            .get(&model)
-                            .cloned()
-                            .or_else(|| state.current_provider_id.clone());
+                        let provider_id = resolve_provider_for_model(state, &model);
                         if request_runtime_model_change(state, model.clone(), provider_id, agent_tx)
                             .await
                         {
@@ -2057,11 +2077,7 @@ pub async fn handle_key_event(
                 // Confirm model switch
                 if let Some(model) = state.pending_model_change.clone() {
                     state.pending_model_confirmation = false;
-                    let provider_id = state
-                        .model_provider_map
-                        .get(&model)
-                        .cloned()
-                        .or_else(|| state.current_provider_id.clone());
+                    let provider_id = resolve_provider_for_model(state, &model);
                     if request_runtime_model_change(
                         state,
                         model.clone(),
@@ -2266,12 +2282,8 @@ pub async fn handle_key_event(
                     let model_name = model_name.trim();
                     if !model_name.is_empty() {
                         reset_main_textarea(state);
-                        // 与 palette 路径同口径：优先用 model_provider_map 解析提供商。
-                        let provider_id = state
-                            .model_provider_map
-                            .get(model_name)
-                            .cloned()
-                            .or_else(|| state.current_provider_id.clone());
+                        // 与 palette 路径同口径：映射 → 跨桶查找 → 当前 provider。
+                        let provider_id = resolve_provider_for_model(state, model_name);
                         // 已获取过模型列表时做校验提示（仍允许自定义名称）。
                         let known = state.available_models.is_empty()
                             || state.available_models.iter().any(|m| m == model_name);
@@ -3381,12 +3393,8 @@ async fn handle_input_modal(
                         close_quick_menus(state);
                         state.close_palette();
 
-                        // 手敲的模型名不一定在 model_provider_map 里，那就留在当前 provider 上。
-                        let provider_id = state
-                            .model_provider_map
-                            .get(&model)
-                            .cloned()
-                            .or_else(|| state.current_provider_id.clone());
+                        // 手敲的模型名不一定在 model_provider_map 里；跨桶查过仍查不到才留在当前 provider。
+                        let provider_id = resolve_provider_for_model(state, &model);
                         state.pending_model_confirmation = false;
                         if request_runtime_model_change(
                             state,
@@ -3622,6 +3630,34 @@ fn apply_vim_motion(state: &mut ChatState, motion: &crate::ui::vim::motions::Mot
 mod tests {
     use super::*;
     use crate::ui::state::store::AgentTaskInfo;
+
+    /// `resolve_provider_for_model` 的可测两步：UI 映射优先，其次当前 provider。
+    ///
+    /// 跨桶查找那一步要读磁盘缓存，`ui` 这层不注入路径，所以它的行为由
+    /// `agent::model_cache::tests::finds_the_owning_provider_across_buckets_not_just_the_current_one`
+    /// 逐条覆盖；这里只锁定"查得到就听映射、查不到才兜底"这个顺序不被改回去。
+    #[test]
+    fn provider_resolution_prefers_the_map_then_falls_back_to_the_current_provider() {
+        let mut state = ChatState::new();
+        state.current_provider_id = Some("opencode".to_string());
+        state
+            .model_provider_map
+            .insert("mimo-v2.6-flash-free".to_string(), "opencode".to_string());
+
+        // 映射命中时，行为不变。
+        assert_eq!(
+            resolve_provider_for_model(&state, "mimo-v2.6-flash-free").as_deref(),
+            Some("opencode")
+        );
+        // 谁都没有的名字才兜底到当前 provider（手敲自定义模型名的既有行为）。
+        assert_eq!(
+            resolve_provider_for_model(&state, "some-unlisted-model").as_deref(),
+            Some("opencode")
+        );
+        // 连当前 provider 都没有时是 None，交给下游按"沿用"处理。
+        let bare = ChatState::new();
+        assert_eq!(resolve_provider_for_model(&bare, "any-model"), None);
+    }
 
     fn bg_task(id: &str) -> AgentTaskInfo {
         AgentTaskInfo {
