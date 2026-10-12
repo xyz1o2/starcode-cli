@@ -1,10 +1,12 @@
 name: CI
 
+# PR base 是 dev-m（也是仓库默认分支）。push 仍只监听 main：
+# dev-m 上的提交通过 PR 合入，main 只在发布/合并时被动更新。
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [dev-m]
 
 permissions:
   contents: read

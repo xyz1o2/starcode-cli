@@ -1,10 +1,11 @@
 name: Security
 
+# 与 ci.yml 保持一致：PR base 为 dev-m（默认分支）。
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [dev-m]
   schedule:
     - cron: '0 6 * * 1'  # Weekly Monday 6am UTC
 

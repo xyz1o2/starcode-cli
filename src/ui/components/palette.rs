@@ -289,6 +289,7 @@ fn palette_action_key(action: &PaletteAction) -> String {
 fn palette_mode_key(mode: &PaletteMode) -> String {
     match mode {
         PaletteMode::Main => "main".to_string(),
+        PaletteMode::Command => "command".to_string(),
         PaletteMode::Provider => "provider".to_string(),
         PaletteMode::Session => "session".to_string(),
         PaletteMode::System => "system".to_string(),

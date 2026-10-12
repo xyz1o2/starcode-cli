@@ -2321,7 +2321,7 @@ fn command_candidates(input: &str) -> (String, Vec<&'static SlashCommand>) {
 
     if scored.is_empty() {
         // 没有模糊命中时退回"当前层级全部命令"。
-        (prefix, current_commands.to_vec())
+        (prefix, current_commands.iter().collect())
     } else {
         (prefix, scored.into_iter().map(|(_, cmd)| cmd).collect())
     }
@@ -2348,9 +2348,9 @@ pub fn command_palette_items(
             let full = format!("{}{}", prefix, cmd.name);
             crate::ui::state::PaletteItem {
                 id: format!("command_{}", full.replace(' ', "_")),
-                label: full,
-                description: cmd.description.clone(),
-                category: Some(cmd.category.clone()),
+                label: full.clone(),
+                description: cmd.description.to_string(),
+                category: Some(cmd.category.to_string()),
                 // Enter 回填输入框并补一个空格，由用户接着敲参数再回车执行。
                 action: crate::ui::state::PaletteAction::TypeCommand(format!("{} ", full)),
             }

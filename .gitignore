@@ -42,3 +42,4 @@ study_or_copy_projects/
 
 # Tool data (agent session memory/logs)
 .workbuddy/
+.empryo/
