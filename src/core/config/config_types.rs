@@ -294,6 +294,9 @@ pub struct ConfigParameters {
     pub experimental_jit_context: Option<bool>,
     pub mcp_enabled: Option<bool>,
     pub recursion_depth: Option<usize>,
+    /// `-p` 单次执行（headless）。此时没有 UI 订阅消息总线，
+    /// 需要确认的工具没人应答，必须快速拒绝而不是等满确认超时。
+    pub headless: Option<bool>,
 }
 
 impl Default for ConfigParameters {
@@ -380,6 +383,7 @@ impl Default for ConfigParameters {
             experimental_jit_context: None,
             mcp_enabled: None,
             recursion_depth: None,
+            headless: None,
         }
     }
 }

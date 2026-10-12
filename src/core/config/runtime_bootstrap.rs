@@ -33,10 +33,14 @@ pub async fn build_runtime_services(
         .unwrap_or_else(|| {
             // 唯一真正参与运行时的 PolicyEngine 构造点：审批模式和磁盘上的权限规则
             // 都得在这里灌进去，否则用户在 settings.json 里配的 allow/deny 形同废纸。
+            //
+            // headless 必须开 non_interactive：`-p` 没有 UI 订阅消息总线，
+            // `AskUser` 没人应答，调用方会一直等到确认超时（默认 10 分钟）才失败。
             Arc::new(MessageBus::new(
                 PolicyEngine::with_project_rules(
                     PolicyEngineConfig {
                         approval_mode: Some(config.approval_mode().clone()),
+                        non_interactive: config.is_headless().then_some(true),
                         ..Default::default()
                     },
                     config.project_root(),

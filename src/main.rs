@@ -525,6 +525,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         disabled_skills: None,
         experimental_jit_context: None,
         recursion_depth: None,
+        // `-p` 没有 UI 订阅确认总线，策略引擎据此把 AskUser 直接判成拒绝。
+        headless: args.prompt.is_some().then_some(true),
     };
 
     if let Some(prompt) = args.prompt {

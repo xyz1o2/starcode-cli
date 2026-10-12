@@ -930,10 +930,11 @@ mod tests {
         std::fs::create_dir_all(dir.join(".star")).unwrap();
 
         let entries = SettingsPermissions::candidate_files_with_trust(&dir);
+        let project_dir = crate::core::config::storage::Storage::new(dir.clone()).star_dir();
         let trusted = |name: &str| {
             entries
                 .iter()
-                .find(|e| e.path.ends_with(name))
+                .find(|e| e.path == project_dir.join(name))
                 .map(|e| e.trusted)
         };
 

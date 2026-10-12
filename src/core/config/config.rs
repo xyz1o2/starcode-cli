@@ -98,6 +98,8 @@ pub struct Config {
     pub(crate) experimental_jit_context: bool,
     pub(crate) file_filtering: FileFiltering,
     pub recursion_depth: usize,
+    /// `-p` 单次执行（headless）：没有 UI 订阅确认总线。
+    pub headless: bool,
     pub policy_engine_approval_mode: ApprovalMode,
     pub runtime_services: Option<Arc<RuntimeServices>>,
     pub trusted_folders_manager: Option<TrustedFolders>,
@@ -230,6 +232,7 @@ impl Config {
                 disable_fuzzy_search: Some(false),
             }),
             recursion_depth: params.recursion_depth.unwrap_or(0),
+            headless: params.headless.unwrap_or(false),
             policy_engine_approval_mode: params.approval_mode.unwrap_or(ApprovalMode::Default),
             runtime_services: None,
         }
@@ -488,6 +491,12 @@ impl Config {
     }
     pub fn is_yolo_mode_disabled(&self) -> bool {
         self.disable_yolo_mode || !self.is_trusted_folder()
+    }
+
+    /// headless（`-p`）下没有 UI 订阅消息总线：需要确认的工具没人应答。
+    /// 引擎据此把 `AskUser` 直接判成拒绝，而不是让调用方空等确认超时。
+    pub fn is_headless(&self) -> bool {
+        self.headless
     }
     pub fn output_format(&self) -> &OutputFormat {
         self.output_settings

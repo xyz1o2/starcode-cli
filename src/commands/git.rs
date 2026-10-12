@@ -256,6 +256,7 @@ async fn handle_commit_and_push(
         disabled_skills: None,
         experimental_jit_context: None,
         recursion_depth: None,
+        headless: None,
     };
 
     let mut config = core::config::Config::new(config_params);

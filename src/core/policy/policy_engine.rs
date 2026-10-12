@@ -367,3 +367,86 @@ impl Default for PolicyEngineConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::policy::settings_rules::{PermissionRuleSpec, SettingsPermissions};
+
+    fn call(name: &str, args: serde_json::Value) -> FunctionCall {
+        FunctionCall {
+            name: name.to_string(),
+            args: Some(args),
+        }
+    }
+
+    /// 回归：headless（`-p`）下 `AskUser` 必须立刻变成拒绝。
+    ///
+    /// `-p` 没有 UI 订阅消息总线，`AskUser` 没人应答，调用方会一直等到
+    /// 确认超时（默认 600 秒）才失败 —— CI 里表现为每个未授权工具卡十分钟。
+    #[tokio::test]
+    async fn non_interactive_denies_instead_of_asking() {
+        let engine = PolicyEngine::new(PolicyEngineConfig {
+            non_interactive: Some(true),
+            ..Default::default()
+        });
+
+        let decision = engine
+            .check(&call("Bash", serde_json::json!({"command": "git push"})), None)
+            .await
+            .decision;
+        assert_eq!(
+            decision,
+            PolicyDecision::Deny,
+            "headless 下没人能回答确认，必须立刻拒绝"
+        );
+    }
+
+    /// 反向保证：交互模式保持弹窗，deny 规则依然最优先。
+    #[tokio::test]
+    async fn interactive_still_asks_and_deny_still_wins() {
+        let engine = PolicyEngine::new(PolicyEngineConfig::default());
+
+        assert_eq!(
+            engine
+                .check(&call("Bash", serde_json::json!({"command": "git push"})), None)
+                .await
+                .decision,
+            PolicyDecision::AskUser
+        );
+
+        let mut with_deny = PolicyEngine::new(PolicyEngineConfig {
+            non_interactive: Some(true),
+            ..Default::default()
+        });
+        let mut perms = SettingsPermissions::default();
+        perms
+            .deny
+            .push(PermissionRuleSpec::parse("Bash(rm:*)").expect("parse"));
+        with_deny.set_settings_permissions(perms);
+        assert!(matches!(
+            with_deny
+                .check(&call("Bash", serde_json::json!({"command": "rm -rf build"})), None)
+                .await
+                .decision,
+            PolicyDecision::DenyWithReason(_)
+        ));
+    }
+
+    /// yolo 在 headless 下仍然放行 —— 用户显式要求免确认时不该被 non_interactive 推翻。
+    #[tokio::test]
+    async fn yolo_still_allows_in_non_interactive_mode() {
+        let engine = PolicyEngine::new(PolicyEngineConfig {
+            non_interactive: Some(true),
+            approval_mode: Some(ApprovalMode::Yolo),
+            ..Default::default()
+        });
+        assert_eq!(
+            engine
+                .check(&call("Bash", serde_json::json!({"command": "git push"})), None)
+                .await
+                .decision,
+            PolicyDecision::Allow
+        );
+    }
+}
