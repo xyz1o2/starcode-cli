@@ -108,6 +108,7 @@ pub async fn handle_command(
         "terminal-setup" => compat::terminal_setup(ctx, args).await,
         "mdm" => mdm_wrapper(ctx, args).await,
         "vim" => compat::vim(ctx, args).await,
+        "mouse" => compat::mouse(ctx, args).await,
         "login" => compat::login(ctx, args).await,
         "logout" => compat::logout(ctx, args).await,
         // ── New compat commands ──────────────────────────────

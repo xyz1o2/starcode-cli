@@ -688,6 +688,13 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         sub_commands: &[],
     },
     SlashCommand {
+        name: "mouse",
+        alt_names: &[],
+        description: "Toggle mouse capture (off restores terminal text selection)",
+        category: "General",
+        sub_commands: &[],
+    },
+    SlashCommand {
         name: "sandbox",
         alt_names: &[],
         description: "Sandbox mode management",

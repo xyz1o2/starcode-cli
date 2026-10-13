@@ -702,6 +702,13 @@ pub struct ChatState {
     pub last_code_block_content: Option<String>,
     pub vim_enabled: bool,
     pub vim_state: crate::ui::vim::VimState,
+    /// 鼠标捕获是否开着。
+    ///
+    /// 开着时滚轮以真实滚轮事件到达（不再被终端转成箭头键污染输入历史），
+    /// 代价是**终端在整个会话期间不再自己做选区** —— 而本应用只在聊天区实现了
+    /// 左键拖选。关掉它原生选区就回来了（滚轮改由终端转成箭头键）。
+    /// 启动初值来自 `STARCODE_ENABLE_MOUSE`。
+    pub mouse_capture_enabled: bool,
     pub settings_selected_index: usize,
     pub show_scroll_to_bottom: bool,
     pub show_clear_confirmation: bool,
@@ -1156,6 +1163,7 @@ impl ChatState {
             last_code_block_content: None,
             vim_enabled: false,
             vim_state: crate::ui::vim::VimState::new(),
+            mouse_capture_enabled: !crate::ui::utils::term_recovery::mouse_capture_disabled_by_env(),
             settings_selected_index: 0,
             show_scroll_to_bottom: false,
             show_clear_confirmation: false,
@@ -1306,6 +1314,16 @@ impl ChatState {
         // is_processing 在 agent 收到 Done 时回落 false（stream.rs）——残留
         // in_progress 的清单在 agent 停下后才能开始 5 秒收起计时
         self.task_panel.check_auto_hide(self.is_processing);
+    }
+
+    /// 清掉过期 toast。
+    ///
+    /// 此前这一步在 `render_toasts` 里：绘制过程中删队列元素，意味着「画没画过」
+    /// 会改变状态。现在与任务面板一起挂在事件循环的 1Hz 节拍上。
+    pub fn expire_toasts(&mut self) {
+        let now = std::time::Instant::now();
+        self.toast_queue
+            .retain(|t| now.duration_since(t.created_at).as_secs() < t.duration_secs);
     }
 
     /// 思考阶段结束：把进行中的计时器结算成「结束后回顾」状态。

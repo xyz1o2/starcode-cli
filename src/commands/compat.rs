@@ -290,6 +290,50 @@ pub async fn vim(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResu
     Ok(())
 }
 
+/// `/mouse` — 开关鼠标捕获。
+///
+/// 开：滚轮以真实滚轮事件到达，不被终端转成箭头键污染输入历史。
+/// 关：**终端原生选区恢复**（捕获开着时终端整个会话都不再自己做选区，而本应用
+/// 只在聊天区实现了左键拖选）。
+pub async fn mouse(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    let want = match args.first().map(|a| a.to_ascii_lowercase()) {
+        Some(v) if v == "on" || v == "1" || v == "true" => Some(true),
+        Some(v) if v == "off" || v == "0" || v == "false" => Some(false),
+        _ => None,
+    }
+    .unwrap_or(!ctx.state.mouse_capture_enabled);
+
+    if want == ctx.state.mouse_capture_enabled {
+        push_assistant(
+            &mut ctx,
+            if want {
+                "Mouse capture already ON"
+            } else {
+                "Mouse capture already OFF"
+            },
+        );
+        return Ok(());
+    }
+
+    match crate::ui::utils::term_recovery::set_mouse_capture(want) {
+        Ok(()) => {
+            ctx.state.mouse_capture_enabled = want;
+            push_assistant(
+                &mut ctx,
+                if want {
+                    "Mouse capture: ON — wheel scrolls directly; terminal text selection is unavailable while it is on (/mouse off to restore)"
+                } else {
+                    "Mouse capture: OFF — terminal text selection restored; wheel now arrives as arrow keys"
+                },
+            );
+        }
+        Err(e) => {
+            return Err(format!("Mouse capture toggle failed: {e}"));
+        }
+    }
+    Ok(())
+}
+
 struct LoginArgs {
     api_key: String,
     base_url: Option<String>,

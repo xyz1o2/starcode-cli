@@ -1,9 +1,13 @@
+/// vim 模式。
+///
+/// 只有 Normal / Insert / Visual 三个：**Command 是空壳** —— 按 `:` 会切进去，
+/// 下一个键无论是什么都直接回 Normal（`events/input.rs`），`:` 之后的命令解析
+/// 从未实现。与其留一个会骗人的模式，不如把分支删掉，让 `:` 落回未知键处理。
 #[derive(Debug, Clone, PartialEq)]
 pub enum VimMode {
     Normal,
     Insert,
     Visual,
-    Command,
 }
 
 pub struct VimState {
@@ -40,9 +44,5 @@ impl VimState {
 
     pub fn is_visual_mode(&self) -> bool {
         self.mode == VimMode::Visual
-    }
-
-    pub fn is_command_mode(&self) -> bool {
-        self.mode == VimMode::Command
     }
 }

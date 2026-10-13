@@ -847,9 +847,10 @@ pub async fn run_ui_loop(
         let animating = is_animating(state);
         if last_periodic_tick.elapsed() >= PERIODIC_TICK_INTERVAL {
             last_periodic_tick = Instant::now();
-            // 任务面板的磁盘自愈与自动显隐挂在这个节拍上，而不是每帧一次
-            // （见 `ChatState::tick_task_panel` 的说明）。
+            // 任务面板的磁盘自愈与自动显隐、toast 的过期清理挂在这个节拍上，
+            // 而不是每帧一次（见 `ChatState::tick_task_panel` / `expire_toasts`）。
             state.tick_task_panel();
+            state.expire_toasts();
             needs_redraw = true;
         }
         if animating {
@@ -1116,9 +1117,15 @@ fn init_terminal() -> Result<
     let _ = crossterm::execute!(stdout(), crossterm::event::EnableBracketedPaste);
     // 默认启用鼠标捕获：滚轮以真实鼠标事件到达，直接滚动聊天区，
     // 不再经终端转成 Up/Down 箭头键污染输入历史。
-    // 应用自带拖选复制（events/mouse.rs），Shift+点击仍可用终端原生选择。
-    // 若终端鼠标支持异常，可设 STARCODE_ENABLE_MOUSE=0 关闭——此时滚轮会被
-    // 终端转成箭头键，由 input.rs 的时间启发式尽力区分（不保证可靠）。
+    //
+    // **代价要说清楚**：终端一旦开始接收鼠标上报，整个会话期间就不再自己做选区
+    // —— 而本应用只实现了「聊天区内的左键拖选」。仓库里曾有一处注释声称
+    // 「Shift+Click 仍可用终端原生选择」，**那是错的**：没有任何终端会因修饰键
+    // 豁免鼠标上报，Shift 拖选时应用不处理、终端也不处理，两条路都断。
+    //
+    // 用户可以用 `/mouse` 或 Settings 里的 Mouse Capture 关掉捕获（关掉后终端原生
+    // 选区恢复，滚轮由终端转成箭头键，聊天区仍能滚）；`STARCODE_ENABLE_MOUSE=0`
+    // 可以在启动前定死。
     if !crate::ui::utils::term_recovery::mouse_capture_disabled_by_env() {
         let _ = crossterm::execute!(stdout(), crossterm::event::EnableMouseCapture);
     }

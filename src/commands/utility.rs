@@ -69,17 +69,8 @@ pub async fn copy(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult 
     if let Some(msg) = last_assistant_msg {
         let content_to_copy = &msg.content;
 
-        match Clipboard::new() {
-            Ok(mut clipboard) => {
-                if let Err(e) = clipboard.set_text(content_to_copy.clone()) {
-                    let prefix = i18n::t(
-                        "cmd.copy.error",
-                        "无法访问剪贴板: ",
-                        "Failed to copy to clipboard: ",
-                    );
-                    return Err(format!("{}{}", prefix, e));
-                }
-
+        match crate::ui::utils::clipboard::copy_to_clipboard(content_to_copy) {
+            Ok(()) => {
                 ctx.state.chat_history.push(
                     ChatEntry::assistant(i18n::t(
                         "cmd.copy.success",

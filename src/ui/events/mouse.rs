@@ -289,12 +289,7 @@ pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
             } else if state.text_selection.has_selection() {
                 // 如果有选中文本，自动复制到剪贴板
                 if let Some(selected_text) = state.get_selected_text() {
-                    let copied = match Clipboard::new() {
-                        Ok(mut clipboard) => clipboard
-                            .set_text(&selected_text)
-                            .map_err(|e| e.to_string()),
-                        Err(e) => Err(e.to_string()),
-                    };
+                    let copied = crate::ui::utils::clipboard::copy_to_clipboard(&selected_text);
                     match copied {
                         Ok(()) => {
                             // 刻意**不**清选区：保留高亮，用户能看到复制了哪一段，

@@ -1,3 +1,4 @@
+pub mod clipboard;
 pub mod cost;
 pub mod format;
 pub mod render;

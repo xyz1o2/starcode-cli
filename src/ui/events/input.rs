@@ -1150,6 +1150,30 @@ pub(crate) async fn execute_palette_action(
                 &format!("Vim mode: {}", if state.vim_enabled { "ON" } else { "OFF" }),
             );
         }
+        PaletteAction::ToggleMouseCapture => {
+            state.close_palette();
+            // 真的去改终端模式：转义序列直接写 stdout。失败要说真话，
+            // 并且把 state 里的标志回滚 —— 否则下次启动会带着错误的初值。
+            let want = !state.mouse_capture_enabled;
+            match crate::ui::utils::term_recovery::set_mouse_capture(want) {
+                Ok(()) => {
+                    state.mouse_capture_enabled = want;
+                    state.current_status_line = Some(if want {
+                        "Mouse capture: ON (terminal text selection unavailable)".to_string()
+                    } else {
+                        "Mouse capture: OFF (terminal text selection restored; wheel = arrow keys)"
+                            .to_string()
+                    });
+                }
+                Err(e) => {
+                    crate::utils::logging::append_debug_log_line(&format!(
+                        "[MOUSE] toggle failed: {}",
+                        e
+                    ));
+                    state.current_status_line = Some(format!("Mouse capture toggle failed: {e}"));
+                }
+            }
+        }
         PaletteAction::ToggleUiVerbose => {
             state.close_palette();
             state.ui_verbose = !state.ui_verbose;
@@ -1509,6 +1533,147 @@ async fn submit_ask_user_question_answer(
     Ok(())
 }
 
+/// 建议浮层（provider / session 快捷菜单、命令与 @ 补全）：↑↓ 选择、Enter 采纳、
+/// Tab 采纳补全。
+///
+/// 按键表来自 `keymap::map_key`（只对浮层可见的键有意义）。返回 `false` 表示这个键
+/// 不属于浮层 —— 例如 `AcceptCompletion` 在没有补全项时会「处理失败」，此时应当
+/// 继续往下落到输入框。
+async fn handle_suggestion_overlay(
+    state: &mut ChatState,
+    key: KeyEvent,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    use crate::ui::events::keymap::UiAction;
+
+    let Some(action) = crate::ui::events::keymap::map_key(state, &key) else {
+        return Ok(false);
+    };
+    match action {
+        UiAction::SelectPrev => {
+            crate::ui::components::command_suggestions::handle_up(state);
+            Ok(true)
+        }
+        UiAction::SelectNext => {
+            crate::ui::components::command_suggestions::handle_down(state);
+            Ok(true)
+        }
+        UiAction::AcceptSuggestion => {
+            if !crate::ui::components::command_suggestions::handle_enter(state) {
+                return Ok(false);
+            }
+            if let Some(action) = state.pending_palette_action.take() {
+                execute_palette_action(state, action, agent_tx).await?;
+            }
+            if let Some(model) = state.pending_model_change.take() {
+                let provider_id = resolve_provider_for_model(state, &model);
+                if request_runtime_model_change(state, model.clone(), provider_id, agent_tx).await {
+                    state.current_status_line = Some(format!("Switching to model {}…", model));
+                }
+            }
+            Ok(true)
+        }
+        UiAction::AcceptCompletion => Ok(crate::ui::components::command_suggestions::handle_tab(
+            state,
+        )),
+    }
+}
+
+/// 行内确认：`/clear` 与大段粘贴的「确定吗」。
+///
+/// 两个确认都吃掉**所有**键（`_ => {}`），所以它们必须在上下文分发表里独占一个
+/// 分支 —— 排在别处的话，任何新加的层都可能从它们手里漏走按键。
+async fn handle_inline_confirm(
+    state: &mut ChatState,
+    key: KeyEvent,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if state.show_clear_confirmation {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                state.show_clear_confirmation = false;
+                state.chat_history.clear();
+                // 会话已重置，上下文读数必须一起归零：否则新会话首轮会顶着一个
+                // 与空历史矛盾的旧基线，直到下一次 provider usage 到来。
+                state.token_usage = None;
+                state.token_count = 0;
+                state.cache_read_tokens = 0;
+                state.cache_creation_tokens = 0;
+                let _ = agent_tx
+                    .send(crate::runtime::messages::AgentRequest::ResetSession)
+                    .await;
+                state.current_status_line = Some(
+                    crate::core::i18n::t("ui.status.cleared", "对话已清除", "Conversation cleared")
+                        .to_string(),
+                );
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                state.show_clear_confirmation = false;
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    if state.show_paste_confirmation {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                state.show_paste_confirmation = false;
+                if let Some(text) = state.pending_paste.take() {
+                    super::clipboard_paste::insert_paste_block_confirmed(state, text);
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                state.show_paste_confirmation = false;
+                state.pending_paste = None;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// 模型切换 y/n 确认。确认外的键一律吞掉 —— 换模型是破坏性的，不能被别的键顶掉。
+async fn handle_model_confirmation(
+    state: &mut ChatState,
+    key: KeyEvent,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            if let Some(model) = state.pending_model_change.clone() {
+                state.pending_model_confirmation = false;
+                let provider_id = resolve_provider_for_model(state, &model);
+                if request_runtime_model_change(
+                    state,
+                    model.clone(),
+                    provider_id.clone(),
+                    agent_tx,
+                )
+                .await
+                {
+                    crate::ui::app::logic::emit_status_text(
+                        state,
+                        0,
+                        &format!(
+                            "Requesting model {} (provider {})…",
+                            model,
+                            provider_id.as_deref().unwrap_or("default")
+                        ),
+                    );
+                }
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            state.pending_model_confirmation = false;
+            state.pending_model_change = None;
+            state.current_status_line = None;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Shift+Tab（`TogglePlanMode`）：Default → Plan → Yolo → Default（对标 app:cycleMode）。
 ///
 /// `handle_key_event` 里有一个**排在它前面**的调用点（必须抢在两个行内确认之前），
@@ -1721,11 +1886,10 @@ async fn cycle_thinking_effort(
 /// 返回 None 时会静默继续往下走，用户想复制结果把正在输出的内容 Abort 掉了。
 async fn copy_selection_or_interrupt(state: &mut ChatState, agent_tx: &mpsc::Sender<AgentRequest>) {
     if state.text_selection.has_selection() {
+        // 系统剪贴板优先，失败自动退回 OSC 52（SSH/WSL 下 arboard 写的是远端
+        // 剪贴板，那条环境里能用的正是 OSC 52）。
         let copied = match state.get_selected_text() {
-            Some(selected_text) => match arboard::Clipboard::new() {
-                Ok(mut clipboard) => clipboard.set_text(&selected_text).map_err(|e| e.to_string()),
-                Err(e) => Err(e.to_string()),
-            },
+            Some(selected_text) => crate::ui::utils::clipboard::copy_to_clipboard(&selected_text),
             None => Err("选区为空".to_string()),
         };
         match copied {
@@ -1809,52 +1973,10 @@ pub async fn handle_key_event(
         return Ok(());
     }
 
-    // Handle /clear confirmation (y/n/Enter/Esc)
-    if state.show_clear_confirmation {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                state.show_clear_confirmation = false;
-                state.chat_history.clear();
-                // 会话已重置，上下文读数必须一起归零：否则新会话首轮会顶着一个
-                // 与空历史矛盾的旧基线，直到下一次 provider usage 到来。
-                state.token_usage = None;
-                state.token_count = 0;
-                state.cache_read_tokens = 0;
-                state.cache_creation_tokens = 0;
-                let _ = agent_tx
-                    .send(crate::runtime::messages::AgentRequest::ResetSession)
-                    .await;
-                state.current_status_line = Some(
-                    crate::core::i18n::t("ui.status.cleared", "对话已清除", "Conversation cleared")
-                        .to_string(),
-                );
-                return Ok(());
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                state.show_clear_confirmation = false;
-                return Ok(());
-            }
-            _ => return Ok(()),
-        }
-    }
-
-    // Handle large paste confirmation (y/n/Enter/Esc)
-    if state.show_paste_confirmation {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                state.show_paste_confirmation = false;
-                if let Some(text) = state.pending_paste.take() {
-                    super::clipboard_paste::insert_paste_block_confirmed(state, text);
-                }
-                return Ok(());
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                state.show_paste_confirmation = false;
-                state.pending_paste = None;
-                return Ok(());
-            }
-            _ => return Ok(()),
-        }
+    // Handle /clear confirmation (y/n/Enter/Esc) 与大段粘贴确认
+    if state.show_clear_confirmation || state.show_paste_confirmation {
+        handle_inline_confirm(state, key, agent_tx).await?;
+        return Ok(());
     }
 
     // ── 全局键分发 ──
@@ -1875,36 +1997,83 @@ pub async fn handle_key_event(
     // 工具描述里许诺过，Rust 侧没有实现），所以这里同样不拦截，交给 textarea 当左移光标用。
     // 任务面板改由 Ctrl+T 切换（对标 app:toggleTodos）。
 
-    if handle_overlay_input(state, key, agent_tx).await? {
-        return Ok(());
-    }
-
-    // 后台代理选择器：焦点在选择器上时独占 ↑/↓/Enter/Esc。
-    // 位置刻意在 handle_overlay_input **之后** —— 任何弹窗仍然优先，选择器只跟输入框抢键。
-    if state.bg_agent_selection.is_some()
-        && !state.is_input_modal_open()
-        && handle_bg_agent_selector_key(state, key)
-    {
-        return Ok(());
+    // ── 上下文查表分发 ──
+    //
+    // 阶梯剩下的每一层现在都由 `KeyContext::of` 决定归属：守卫不再写在调用点，
+    // 而是「这个键此刻处在哪个上下文」的唯一推导结果（`events/key_context.rs`）。
+    // 换来的不只是可读性 —— 此前「选择器 vs 任务面板」这类优先级只能靠书写顺序
+    // 表达，现在由 `of()` 里的判断顺序显式给出。
+    match KeyContext::of(state) {
+        // 工具审批 / 权限说明 / 权限调试面板
+        KeyContext::ToolConfirmation => {
+            handle_tool_approval(state, key, agent_tx).await?;
+            return Ok(());
+        }
+        // 任务面板（常驻面板，不独占键盘）：未命中的组合键继续往下走。
+        KeyContext::TaskPanel => {
+            if handle_task_panel_key(state, key) {
+                return Ok(());
+            }
+        }
+        // 后台代理选择器：焦点在选择器上时独占 ↑/↓/Enter/Esc。
+        // `BgAgentSelector` 已蕴含「没有模态、没有行内确认」，不需要额外守卫。
+        KeyContext::BgAgentSelector => {
+            if handle_bg_agent_selector_key(state, key) {
+                return Ok(());
+            }
+        }
+        // 建议浮层：↑↓ 选择、Enter 采纳、Tab 采纳补全。
+        KeyContext::SuggestionOverlay => {
+            if handle_suggestion_overlay(state, key, agent_tx).await? {
+                return Ok(());
+            }
+        }
+        // 输入框：`Ctrl+V` 是全局键，但注册表里刻意把它留给这一层（填 API Key、
+        // Base URL 靠它粘剪贴板）。其余全局键已经在上面分发过了。
+        KeyContext::InputModal => {
+            if crate::ui::events::keymap::binding_for(&key) == Some(GlobalBinding::Paste) {
+                crate::ui::events::input::handle_input_modal(state, key, agent_tx).await?;
+            }
+            return Ok(());
+        }
+        // 这些上下文已经在阶梯更早处被独占处理（它们吃掉所有键），走到这里
+        // 说明处理完了但键没被消费 —— 直接结束，别漏进主输入框。
+        KeyContext::InlineConfirm
+        | KeyContext::ModelConfirm
+        | KeyContext::Modal
+        | KeyContext::ThemePicker
+        | KeyContext::ReadOnlyDialog
+        | KeyContext::Palette
+        | KeyContext::Help => return Ok(()),
+        KeyContext::Vim | KeyContext::TextInput => {}
     }
 
     // Code block copy: press 'c' when no overlay is active to copy last code block
     if key.code == KeyCode::Char('c') && key.modifiers.is_empty() {
         if state.input.is_empty() {
             if let Some(ref code) = state.last_code_block_content {
-                // Copy to clipboard
-                if let Ok(mut ctx) = arboard::Clipboard::new() {
-                    let _ = ctx.set_text(code.clone());
-                    state.push_toast(
+                // Copy to clipboard（含 OSC 52 兜底）
+                match crate::ui::utils::clipboard::copy_to_clipboard(code) {
+                    Ok(()) => state.push_toast(
                         &crate::core::i18n::t(
                             "ui.status.copied_code_block",
                             "已复制代码块到剪贴板",
                             "Code block copied to clipboard",
                         ),
                         crate::ui::state::store::ToastKind::Success,
-                    );
-                    return Ok(());
+                    ),
+                    Err(e) => {
+                        // 此前这里只 `if let Ok(...)`，失败时什么都不发生 ——
+                        // 用户按了 'c' 却毫无反馈。失败要说出来。
+                        state.current_status_line =
+                            Some(format!("Copy failed: {e} — press 'c' to retry"));
+                        crate::utils::logging::append_debug_log_line(&format!(
+                            "[COPY] code block failed: {}",
+                            e
+                        ));
+                    }
                 }
+                return Ok(());
             }
         }
     }
@@ -1980,11 +2149,6 @@ pub async fn handle_key_event(
                             state.vim_state.reset();
                             return Ok(());
                         }
-                        ':' => {
-                            state.vim_state.mode = VimMode::Command;
-                            state.vim_state.reset();
-                            return Ok(());
-                        }
                         'x' => {
                             // Delete character under cursor
                             state.textarea.delete_next_char();
@@ -2029,18 +2193,6 @@ pub async fn handle_key_event(
                     state.vim_state.reset();
                     return Ok(());
                 }
-                VimMode::Command => {
-                    // Command mode: Escape returns to Normal, Enter executes
-                    if key.code == KeyCode::Esc {
-                        state.vim_state.mode = VimMode::Normal;
-                        state.vim_state.reset();
-                        return Ok(());
-                    }
-                    // For now, just return to normal on any key
-                    state.vim_state.mode = VimMode::Normal;
-                    state.vim_state.reset();
-                    return Ok(());
-                }
             }
         } else {
             // Non-char keys in vim modes
@@ -2055,7 +2207,7 @@ pub async fn handle_key_event(
                 VimMode::Insert => {
                     // Fall through to normal input handling for non-char keys
                 }
-                VimMode::Visual | VimMode::Command => {
+                VimMode::Visual => {
                     if key.code == KeyCode::Esc {
                         state.vim_state.mode = VimMode::Normal;
                         state.vim_state.reset();
@@ -2066,97 +2218,16 @@ pub async fn handle_key_event(
         }
     }
 
-    // Handle Input Modal
-    if handle_input_modal(state, key, agent_tx).await? {
-        return Ok(());
-    }
-
-    if let Some(action) = crate::ui::events::keymap::map_key(state, &key) {
-        use crate::ui::events::keymap::UiAction;
-        match action {
-            UiAction::SelectPrev => {
-                crate::ui::components::command_suggestions::handle_up(state);
-                return Ok(());
-            }
-            UiAction::SelectNext => {
-                crate::ui::components::command_suggestions::handle_down(state);
-                return Ok(());
-            }
-            UiAction::AcceptSuggestion => {
-                if crate::ui::components::command_suggestions::handle_enter(state) {
-                    if let Some(action) = state.pending_palette_action.take() {
-                        execute_palette_action(state, action, agent_tx).await?;
-                    }
-                    if let Some(model) = state.pending_model_change.take() {
-                        let provider_id = resolve_provider_for_model(state, &model);
-                        if request_runtime_model_change(state, model.clone(), provider_id, agent_tx)
-                            .await
-                        {
-                            state.current_status_line =
-                                Some(format!("Switching to model {}…", model));
-                        }
-                    }
-                    return Ok(());
-                }
-            }
-            UiAction::AcceptCompletion => {
-                if crate::ui::components::command_suggestions::handle_tab(state) {
-                    return Ok(());
-                }
-            }
-        }
-    }
+    // 建议浮层（provider / session 菜单、命令与 @ 补全）的按键由上下文分发表接管；
+    // 粘贴与主输入区的键在这里处理。
 
     if handle_paste(state, key).await? {
         return Ok(());
     }
 
-    // Handle model switching confirmation (y/n)
-    if state.pending_model_confirmation {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                // Confirm model switch
-                if let Some(model) = state.pending_model_change.clone() {
-                    state.pending_model_confirmation = false;
-                    let provider_id = resolve_provider_for_model(state, &model);
-                    if request_runtime_model_change(
-                        state,
-                        model.clone(),
-                        provider_id.clone(),
-                        agent_tx,
-                    )
-                    .await
-                    {
-                        crate::ui::app::logic::emit_status_text(
-                            state,
-                            0,
-                            &format!(
-                                "Requesting model {} (provider {})…",
-                                model,
-                                provider_id.as_deref().unwrap_or("default")
-                            ),
-                        );
-                    }
-                }
-                return Ok(());
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                // Cancel model switch
-                state.pending_model_confirmation = false;
-                state.pending_model_change = None;
-                state.current_status_line = None;
-                return Ok(());
-            }
-            _ => {
-                // Ignore other keys during confirmation
-                return Ok(());
-            }
-        }
-    }
-
     // 模态栈上的窗口一律由 `modal_input::handle_modal_key` 分发（LogSelector、
-    // ErrorOverlay、StatusModal、ThemePicker、InputModal 都在那张表里）。这里只剩
-    // **非模态**的覆盖层：模型切换确认、后台代理选择器、任务面板、vim。
+    // ErrorOverlay、StatusModal、ThemePicker、InputModal 都在那张表里），
+    // 非模态的上下文也已在上文的查表分发里处理完。这里只剩主输入区。
 
     match key.code {
         KeyCode::Enter => {
@@ -2952,7 +3023,14 @@ pub(crate) fn handle_theme_picker_key(state: &mut ChatState, key: KeyEvent) -> b
     true
 }
 
-async fn handle_overlay_input(
+/// 工具审批（AskUserQuestion / 权限确认）与权限说明、权限调试面板。
+///
+/// 只处理 [`KeyContext::ToolConfirmation`]：这个上下文本身就意味着「模态栈空、
+/// 没有行内确认」，因此这里不必再重复判断，也就不存在「漏写一个守卫就穿透」
+/// 的可能（那正是 `has_overlay_active()` 时代的毛病）。
+///
+/// 主题选择器、状态弹窗、任务面板都已在自己的分发表项里，不再经过本函数。
+async fn handle_tool_approval(
     state: &mut ChatState,
     key: KeyEvent,
     agent_tx: &mpsc::Sender<AgentRequest>,
@@ -3215,106 +3293,105 @@ async fn handle_overlay_input(
         return Ok(true);
     }
 
-    // 任务面板必须排在 modal 之后。API Key / Base URL 输入框由
-    // `modal_input::handle_modal_key` 在更早的位置处理，而本函数在它之前无条件
-    // 吞键，导致 Ctrl+J / Ctrl+S / Alt+←→ 等在填表时被任务面板截走。
-    // 紧邻的 bg-agent 选择器分支就有同样的 `&& !state.is_input_modal_open()` 守卫。
-    //
-    // 守卫条件改由 `KeyContext::is_dialog()` 给出：模态栈上的窗口、输入框、工具
-    // 审批、以及快捷帮助浮层（`F1`）。与重构前那份内联清单逐项等价。
-    let modal_open = KeyContext::of(state).is_dialog() || state.show_help;
-    if state.task_panel.is_visible && !modal_open {
-        if state.task_panel.is_editing() {
-            state.task_panel.handle_edit_input(key);
-            return Ok(true);
-        }
+    Ok(false)
+}
 
-        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
-            state
-                .task_panel
-                .enter_edit_mode(crate::ui::components::task_panel::EditMode::Title);
-            return Ok(true);
-        }
+/// 任务面板（常驻）：编辑、上下移动、状态切换、层级调整。
+///
+/// 由 [`handle_key_event`] 的上下文分发表在 `KeyContext::TaskPanel` 时调用。
+/// 面板只吃 Ctrl/Alt 组合键与 ↑/↓/Enter，普通字符落到输入框 —— 这条规则现在
+/// 由 `KeyContext` 表达，不再需要各处手写 `&& !modal_open` 守卫。
+pub(crate) fn handle_task_panel_key(state: &mut ChatState, key: KeyEvent) -> bool {
+    if state.task_panel.is_editing() {
+        state.task_panel.handle_edit_input(key);
+        return true;
+    }
 
-        // 与权限调试面板一致：Ctrl+D 归「退出」，任务描述编辑改用 Ctrl+Shift+D。
-        if key.code == KeyCode::Char('d')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-            && key.modifiers.contains(KeyModifiers::SHIFT)
-        {
-            state
-                .task_panel
-                .enter_edit_mode(crate::ui::components::task_panel::EditMode::Description);
-            return Ok(true);
-        }
+    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
+        state
+            .task_panel
+            .enter_edit_mode(crate::ui::components::task_panel::EditMode::Title);
+        return true;
+    }
 
-        if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('v') {
-            state.task_panel.cycle_view_mode();
-            crate::ui::app::logic::emit_status_text(
-                state,
-                0,
-                &format!("View: {}", state.task_panel.view_mode),
-            );
-            return Ok(true);
-        }
+    // 与权限调试面板一致：Ctrl+D 归「退出」，任务描述编辑改用 Ctrl+Shift+D。
+    if key.code == KeyCode::Char('d')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.modifiers.contains(KeyModifiers::SHIFT)
+    {
+        state
+            .task_panel
+            .enter_edit_mode(crate::ui::components::task_panel::EditMode::Description);
+        return true;
+    }
 
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            match key.code {
-                KeyCode::Char('j') => {
-                    state.task_panel.next();
-                    return Ok(true);
-                }
-                KeyCode::Char('k') => {
-                    state.task_panel.previous();
-                    return Ok(true);
-                }
-                KeyCode::Char(' ') => {
-                    state.task_panel.toggle_status();
-                    crate::ui::app::logic::emit_status_text(state, 0, "Task status toggled");
-                    return Ok(true);
-                }
-                KeyCode::Char('s') => {
-                    state.task_panel.skip_task();
-                    crate::ui::app::logic::emit_status_text(state, 0, "Task skipped");
-                    return Ok(true);
-                }
-                KeyCode::Char('n') => {
-                    state.task_panel.add_new_task();
-                    crate::ui::app::logic::emit_status_text(state, 0, "New task added");
-                    return Ok(true);
-                }
-                KeyCode::Delete => {
-                    state.task_panel.delete_selected();
-                    crate::ui::app::logic::emit_status_text(state, 0, "Task deleted");
-                    return Ok(true);
-                }
-                KeyCode::Up => {
-                    state.task_panel.move_up();
-                    return Ok(true);
-                }
-                KeyCode::Down => {
-                    state.task_panel.move_down();
-                    return Ok(true);
-                }
-                _ => {}
+    if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('v') {
+        state.task_panel.cycle_view_mode();
+        crate::ui::app::logic::emit_status_text(
+            state,
+            0,
+            &format!("View: {}", state.task_panel.view_mode),
+        );
+        return true;
+    }
+
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('j') => {
+                state.task_panel.next();
+                return true;
             }
-        }
-
-        if key.modifiers.contains(KeyModifiers::ALT) {
-            match key.code {
-                KeyCode::Right => {
-                    state.task_panel.indent();
-                    return Ok(true);
-                }
-                KeyCode::Left => {
-                    state.task_panel.outdent();
-                    return Ok(true);
-                }
-                _ => {}
+            KeyCode::Char('k') => {
+                state.task_panel.previous();
+                return true;
             }
+            KeyCode::Char(' ') => {
+                state.task_panel.toggle_status();
+                crate::ui::app::logic::emit_status_text(state, 0, "Task status toggled");
+                return true;
+            }
+            KeyCode::Char('s') => {
+                state.task_panel.skip_task();
+                crate::ui::app::logic::emit_status_text(state, 0, "Task skipped");
+                return true;
+            }
+            KeyCode::Char('n') => {
+                state.task_panel.add_new_task();
+                crate::ui::app::logic::emit_status_text(state, 0, "New task added");
+                return true;
+            }
+            KeyCode::Delete => {
+                state.task_panel.delete_selected();
+                crate::ui::app::logic::emit_status_text(state, 0, "Task deleted");
+                return true;
+            }
+            KeyCode::Up => {
+                state.task_panel.move_up();
+                return true;
+            }
+            KeyCode::Down => {
+                state.task_panel.move_down();
+                return true;
+            }
+            _ => {}
         }
     }
 
-    Ok(false)
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        match key.code {
+            KeyCode::Right => {
+                state.task_panel.indent();
+                return true;
+            }
+            KeyCode::Left => {
+                state.task_panel.outdent();
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    false
 }
 
 /// 通用输入对话框（API Key / Base URL / 重命名）与 provider 多字段表单。
@@ -3851,6 +3928,47 @@ mod tests {
                 .await
                 .unwrap(),
             "全局键不应被输入框消费"
+        );
+    }
+
+    /// 输入框开着时，普通字符**不得**漏进主输入框。
+    ///
+    /// 锁的是上下文分发表：`InputModal` 那一臂只放行 `Ctrl+V`（注册表里刻意
+    /// deferred 的那一个），其余键一律结束。输入框此前由阶梯中段的独立分支处理，
+    /// 改成分发表时若把 `InputModal` 混进「已处理」的兜底臂，字符就会掉进主框。
+    #[tokio::test]
+    async fn input_modal_swallows_typing_instead_of_leaking_to_the_main_input() {
+        let mut state = ChatState::new();
+        let (tx, _rx) = mpsc::channel(16);
+        state.enter_input_modal();
+        state.input_modal_title = "API Key".to_string();
+
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+
+        assert!(
+            state.input.is_empty(),
+            "输入框开着时普通字符不得落到主输入框（实际：{:?}）",
+            state.input
+        );
+    }
+
+    /// 建议浮层开着时 ↑↓ 必须作用在浮层上：分发表把 `SuggestionOverlay` 交给
+    /// `handle_suggestion_overlay`，不能落进主输入框。
+    #[tokio::test]
+    async fn suggestion_overlay_arrows_are_handled_by_the_overlay() {
+        let mut state = ChatState::new();
+        let (tx, _rx) = mpsc::channel(16);
+        state.show_command_hints = true;
+        state.command_hints = vec!["/help".to_string(), "/clear".to_string()];
+        state.selected_hint = 0;
+
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        handle_key_event(&mut state, down, &tx, None).await.unwrap();
+
+        assert_eq!(
+            state.selected_hint, 1,
+            "↓ 应当移动浮层选中项，而不是被主输入框吃掉"
         );
     }
 

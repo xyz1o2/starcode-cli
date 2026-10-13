@@ -245,6 +245,18 @@ const SETTING_ITEMS: &[SettingItem] = &[
         description: "Toggle vim keybindings for the input area",
     },
     SettingItem {
+        id: "mouse_capture",
+        label: "Mouse Capture",
+        get_value: |s| {
+            if s.mouse_capture_enabled {
+                "ON".to_string()
+            } else {
+                "OFF".to_string()
+            }
+        },
+        description: "On: wheel scrolls the chat directly,\nterminal text selection is unavailable.\nOff: terminal selection works again,\nwheel arrives as arrow keys.",
+    },
+    SettingItem {
         id: "language",
         label: "Language",
         get_value: |_| "auto".to_string(),
@@ -393,6 +405,7 @@ pub fn get_settings_action(state: &ChatState) -> Option<crate::ui::state::palett
             crate::ui::state::palette::PaletteMode::OutputStyle,
         )),
         "vim_mode" => Some(crate::ui::state::palette::PaletteAction::ToggleVimMode),
+        "mouse_capture" => Some(crate::ui::state::palette::PaletteAction::ToggleMouseCapture),
         "colorblind" => Some(crate::ui::state::palette::PaletteAction::ToggleColorblindMode),
         "language" => Some(crate::ui::state::palette::PaletteAction::Navigate(
             crate::ui::state::palette::PaletteMode::Language,

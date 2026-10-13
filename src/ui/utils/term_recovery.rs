@@ -31,6 +31,26 @@ pub fn mouse_capture_disabled_by_env() -> bool {
 ///
 /// 恢复流程中 `disable_raw_mode` 会还原初始控制台模式，连带丢失 Windows
 /// 控制台的鼠标输入标志——不补启用的话滚轮会再次被终端转成箭头键。
+/// 启用/禁用鼠标捕获，结果落到 stdout。
+///
+/// 切换走转义序列而不经过 ratatui：`Terminal` 不持有这层状态，而命令侧
+/// （`/mouse`、Settings 弹窗）也拿不到 `&mut Terminal`。
+///
+/// 代价要记清楚：捕获开着时**终端在整个会话期间不再自己做选区**，而本应用只在
+/// 聊天区实现了左键拖选；关掉后原生选区恢复，滚轮改由终端转成箭头键。
+pub fn set_mouse_capture(enabled: bool) -> Result<(), String> {
+    let result = if enabled {
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)
+    } else {
+        crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)
+    };
+    result.map_err(|e| e.to_string())
+}
+
+/// 按默认开启的策略（重新）启用鼠标捕获。
+///
+/// 恢复流程中 `disable_raw_mode` 会还原初始控制台模式，连带丢失 Windows
+/// 控制台的鼠标输入标志——不补启用的话滚轮会再次被终端转成箭头键。
 pub fn reenable_mouse_capture() {
     if mouse_capture_disabled_by_env() {
         return;

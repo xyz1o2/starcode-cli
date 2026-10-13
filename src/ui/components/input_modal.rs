@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-pub fn render_input_modal(f: &mut Frame, area: Rect, state: &mut ChatState) {
+pub fn render_input_modal(f: &mut Frame, area: Rect, state: &ChatState) {
     // 「开没开」由模态栈表达，调用方已保证它在栈顶；这里不再有平行的 flag 门控。
     if !state.is_input_modal_open() {
         return;
@@ -37,12 +37,8 @@ pub fn render_input_modal(f: &mut Frame, area: Rect, state: &mut ChatState) {
         Paragraph::new(state.input_modal_prompt.as_str()).style(Style::default().fg(Color::Gray));
     f.render_widget(prompt, chunks[0]);
 
-    let input_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::White));
-
-    state.modal_textarea.set_block(input_block);
+    // textarea 的边框由 `ChatState::enter_input_modal` 设好，这里只画 ——
+    // 渲染函数对状态只读。
     f.render_widget(&state.modal_textarea, chunks[1]);
 }
 

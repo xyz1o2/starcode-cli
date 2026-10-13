@@ -1239,3 +1239,50 @@ fn open_marketplace_source_input(state: &mut ChatState) {
     state.modal_textarea = textarea;
     state.input_context = Some(crate::ui::state::palette::InputContext::MarketplaceSource);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::state::modal::Modal;
+
+    /// 每个模态变体都必须**吃掉**按键。
+    ///
+    /// 这条测试是 `handle_modal_key` 穷尽分发表的兜底：此前 `match` 末尾是
+    /// `_ => Ok(false)`，新加的变体编译得过、弹窗也画得出来，按键却落到主输入框
+    /// —— 只读弹窗上按 Enter 会直接把消息发出去。这里逐个变体断言「Enter 被消费」。
+    ///
+    /// 覆盖的是**不依赖外部数据**的那些变体（其余变体需要 marketplace / 会话列表
+    /// 等准备数据，但它们同样在穷尽 `match` 里，漏写就是编译错误）。
+    #[tokio::test]
+    async fn read_only_modals_swallow_enter_instead_of_sending_the_message() {
+        let (tx, _rx) = mpsc::channel(16);
+        let enter = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        );
+
+        for open in [
+            Modal::UsageStats,
+            Modal::Export,
+            Modal::CompressionStatus,
+            Modal::ContextViz,
+            Modal::StatusModal,
+            Modal::LogSelector,
+            Modal::ErrorOverlay,
+            Modal::GlobalSearch,
+            Modal::QuickOpen,
+            Modal::HistorySearch,
+            Modal::ThemePicker { prev_theme: None },
+        ] {
+            let mut state = ChatState::new();
+            state.push_modal(open.clone());
+
+            let consumed = handle_modal_key(&mut state, enter, &tx).await.unwrap();
+
+            assert!(
+                consumed,
+                "{open:?} 开着时按 Enter 必须被消费，不能落到主输入框"
+            );
+        }
+    }
+}

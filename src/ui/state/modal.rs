@@ -228,6 +228,20 @@ pub enum PluginConfirmKind {
 
 // ============ ChatState helpers: stack ops ============
 
+/// 通用输入框的边框样式。
+///
+/// 在 [`ChatState::enter_input_modal`] 里设置一次即可 —— 此前 `render_input_modal`
+/// 每帧都重设一次，纯粹是「渲染顺手改状态」。
+pub fn modal_textarea_block() -> ratatui::widgets::Block<'static> {
+    use ratatui::style::{Color, Style};
+    use ratatui::widgets::{Block, BorderType, Borders};
+
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::White))
+}
+
 impl ChatState {
     // ---- generic stack ----
 
@@ -516,6 +530,9 @@ impl ChatState {
         if !self.is_input_modal_open() {
             self.modal_stack.push(Modal::InputModal);
         }
+        // 输入框的边框样式在这里设一次，而不是每帧在渲染里 `set_block` ——
+        // 渲染过程不该改状态（`render_input_modal` 因此只需要 `&ChatState`）。
+        self.modal_textarea.set_block(modal_textarea_block());
     }
 
     /// 关闭输入对话框：把栈里的 `InputModal` 摘掉。

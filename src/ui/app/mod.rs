@@ -13,9 +13,20 @@ use ratatui::widgets::Block;
 /// 赋值（滚动夹取、总行数、各区域 rect）散在 `render_page` 内部，副作用藏在绘制
 /// 过程中：想回答「这一帧改了什么」只能通读整个函数。
 ///
-/// **渲染还不是纯函数**：`render_chat_lines` 与 `render_task_panel_mut` 需要
-/// `&mut ChatState`（前者写入 `rendered_cache` 记忆化，后者要动 ratatui 的
-/// `ListState`）。彻底纯化要先把这些缓存挪出 state，不在本次范围内。
+/// **渲染还不是纯函数，原因和还差什么**：
+///
+/// - 任务面板的磁盘自愈与自动显隐 → 已移到事件循环的 1Hz 节拍
+///   （[`ChatState::tick_task_panel`]）；
+/// - toast 的过期清理 → 已移到同一个节拍（[`ChatState::expire_toasts`]）；
+/// - `modal_textarea` 的 block 设置 → 已移到 [`ChatState::enter_input_modal`]，
+///   打开时设置一次即可，不必每帧重设。
+///
+/// 剩下的是**记忆化与测量**：`render_chat_lines` 要写 `rendered_cache`（避免每帧
+/// 重排 Markdown），还要把测出来的行高写进 `virtual_list` / `total_rendered_lines`。
+/// 后两者不是渲染私有的 —— 滚动计算（`scroll_chat`）和鼠标命中（`mouse.rs`）在
+/// 渲染之外读它们。要让渲染真正只读 state，得把虚拟列表与几何测量整体移出
+/// `ChatState`、由渲染侧持有并向外暴露只读快照；那是滚动模型的重新设计，风险与
+/// 体量都超出「顺手改一下」的范围，先在这里记清楚，避免反复讨论。
 #[derive(Debug, Clone, Copy)]
 pub struct RenderOutput {
     /// 夹取后的滚动位置。
@@ -439,11 +450,7 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
 fn render_toasts(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
     use crate::ui::state::store::ToastKind;
 
-    // Remove expired toasts
-    let now = std::time::Instant::now();
-    state
-        .toast_queue
-        .retain(|t| now.duration_since(t.created_at).as_secs() < t.duration_secs);
+    // 过期清理不在这里做 —— 见 `ChatState::expire_toasts`：绘制过程不该改队列。
 
     if state.toast_queue.is_empty() {
         return;

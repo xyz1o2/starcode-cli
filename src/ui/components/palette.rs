@@ -273,6 +273,7 @@ fn palette_action_key(action: &PaletteAction) -> String {
         PaletteAction::ShowLogSelector => "show_log_selector".to_string(),
         PaletteAction::ShowContextViz => "show_context_viz".to_string(),
         PaletteAction::ToggleVimMode => "toggle_vim_mode".to_string(),
+        PaletteAction::ToggleMouseCapture => "toggle_mouse_capture".to_string(),
         PaletteAction::ToggleUiVerbose => "toggle_ui_verbose".to_string(),
         PaletteAction::CreatePr => "create_pr".to_string(),
         PaletteAction::ToggleColorblindMode => "toggle_colorblind_mode".to_string(),
@@ -450,6 +451,31 @@ fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec<PaletteIte
             },
             category: Some(i18n::t("palette.cat.settings", "Settings", "Settings")),
             action: PaletteAction::ToggleVimMode,
+        },
+        PaletteItem {
+            id: "mouse_capture".to_string(),
+            label: i18n::t(
+                "palette.label.mouse_capture",
+                "Mouse Capture",
+                "Mouse Capture",
+            ),
+            description: match state.map(|s| s.mouse_capture_enabled) {
+                Some(true) => i18n::t(
+                    "palette.desc.mouse_on",
+                    "On — wheel scrolls directly; terminal text selection is off",
+                    "On — wheel scrolls directly; terminal text selection is off",
+                )
+                .to_string(),
+                Some(false) => i18n::t(
+                    "palette.desc.mouse_off",
+                    "Off — terminal selection works; wheel arrives as arrow keys",
+                    "Off — terminal selection works; wheel arrives as arrow keys",
+                )
+                .to_string(),
+                None => String::new(),
+            },
+            category: Some(i18n::t("palette.cat.settings", "Settings", "Settings")),
+            action: PaletteAction::ToggleMouseCapture,
         },
         PaletteItem {
             id: "ui_verbose".to_string(),

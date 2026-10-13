@@ -72,6 +72,8 @@ pub enum PaletteAction {
     ShowLogSelector,
     ShowContextViz,
     ToggleVimMode,
+    /// 开关鼠标捕获。开：滚轮是真滚轮事件；关：终端原生选区恢复。
+    ToggleMouseCapture,
     ToggleUiVerbose,
     CreatePr,
     ToggleColorblindMode,

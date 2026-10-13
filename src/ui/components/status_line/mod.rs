@@ -1213,13 +1213,11 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
             crate::ui::vim::VimMode::Normal => "-- NORMAL --",
             crate::ui::vim::VimMode::Insert => "-- INSERT --",
             crate::ui::vim::VimMode::Visual => "-- VISUAL --",
-            crate::ui::vim::VimMode::Command => "-- COMMAND --",
         };
         let vim_color = match state.vim_state.mode {
             crate::ui::vim::VimMode::Normal => theme.success,
             crate::ui::vim::VimMode::Insert => theme.info,
             crate::ui::vim::VimMode::Visual => theme.secondary,
-            crate::ui::vim::VimMode::Command => theme.warning,
         };
         spans.push(Span::styled(
             vim_label,
