@@ -1719,48 +1719,63 @@ fn chat_search_haystack(state: &ChatState) -> Vec<String> {
     lines
 }
 
-/// 搜索面板的按键处理。面板打开期间吞掉除下面这些键以外的一切 ——
-/// 漏一个就会表现为"打一个字进了主输入框"。
-fn handle_chat_search_key(state: &mut ChatState, key: KeyEvent) {
+/// 搜索面板的按键处理。返回 `true` 表示这个键已被面板消费；`false` 表示应当
+/// 继续走后面的处理层（目前只有 `Ctrl+Shift+F`：先收面板，再开全局文件搜索）。
+///
+/// 面板打开期间吞掉除下面这些键以外的一切 —— 漏一个就会表现为"打一个字进了主输入框"。
+fn handle_chat_search_key(state: &mut ChatState, key: KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Esc => close_chat_search(state),
+        KeyCode::Esc => {
+            close_chat_search(state);
+            true
+        }
+        // Ctrl+F 再按一次关掉自己；带 Shift 时顺手让全局文件搜索接手
+        KeyCode::Char('f') if ctrl => {
+            close_chat_search(state);
+            !key.modifiers.contains(KeyModifiers::SHIFT)
+        }
         KeyCode::Enter => {
             if state.chat_search.step(true).is_some() {
                 reveal_chat_search_match(state);
             }
+            true
         }
         KeyCode::Backspace => {
             if state.chat_search.cursor > 0 {
                 let cursor = state.chat_search.cursor - 1;
-                let ch = state.chat_search.query.remove(cursor);
+                state.chat_search.query.remove(cursor);
                 state.chat_search.cursor = cursor;
-                // 按词退格：连着退到分隔符之前（与 CC / 编辑器一致）
-                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    let head: String = state.chat_search.query[..cursor].to_string();
+                // Ctrl+Backspace 按词退格：连着退到分隔符之前（与编辑器一致）
+                if ctrl {
+                    let head = state.chat_search.query[..cursor].to_string();
                     let trimmed = head.trim_end();
                     let removed = head.len() - trimmed.len();
                     state.chat_search.query.truncate(cursor - removed);
                     state.chat_search.cursor = cursor - removed;
                 }
-                let _ = ch;
                 rerun_chat_search(state);
             }
+            true
         }
         KeyCode::Char(c) => {
             state.chat_search.query.insert(state.chat_search.cursor, c);
             state.chat_search.cursor += 1;
             rerun_chat_search(state);
+            true
         }
         KeyCode::Tab | KeyCode::Down => {
             if state.chat_search.step(true).is_some() {
                 reveal_chat_search_match(state);
             }
+            true
         }
         KeyCode::Up => {
             state.chat_search.step(false);
             reveal_chat_search_match(state);
+            true
         }
-        _ => {}
+        _ => true,
     }
 }
 
@@ -2071,12 +2086,12 @@ pub async fn handle_key_event(
     // ── 对话内搜索面板（Ctrl+F）──────────────────────────────────────────
     //
     // 位置在 modal 栈**之后**、全局键注册表**之前**：
-    // - 必须在注册表之前 —— 否则 Ctrl+F 面板开着时再按 Ctrl+F 会把它关掉两次，
-    //   而面板打开期间输入框不该拿到这些键；
-    // - 不能进 modal 栈 —— 它是一个常驻在聊天区顶部的横条，不是居中对话框，
-    //   而 modal 栈会连带夺走 Enter/Esc 之外的按键。
-    if state.chat_search.active {
-        handle_chat_search_key(state, key);
+    // - 必须在注册表之前 —— 面板打开期间输入框不该拿到这些键；
+    // - 不能进 modal 栈 —— 它是一个常驻在聊天区顶部的横条，不是居中对话框。
+    //
+    // 例外交给 `handle_chat_search_key` 自己决定：它返回 false 时继续往下走
+    // （`Ctrl+Shift+F` 先收面板再开全局文件搜索），其余键一律被面板吞掉。
+    if state.chat_search.active && handle_chat_search_key(state, key) {
         return Ok(());
     }
 
@@ -3887,10 +3902,10 @@ mod tests {
 
         open_chat_search(&mut state);
         for c in "cargo".chars() {
-            handle_chat_search_key(
+            assert!(handle_chat_search_key(
                 &mut state,
                 KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
-            );
+            ));
         }
         assert!(!state.chat_search.matches.is_empty(), "应当命中");
 
@@ -3906,10 +3921,10 @@ mod tests {
         );
 
         // Enter 换到下一处命中，行号必须真的变大（升序）
-        handle_chat_search_key(
+        assert!(handle_chat_search_key(
             &mut state,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        );
+        ));
         let second = state.chat_search.current_match().expect("second match");
         assert!(second > first, "第二个命中应排在更后面");
         let second_text: String = lines[second]
@@ -3925,11 +3940,40 @@ mod tests {
         assert!(state.chat_search.matches.is_empty());
         assert_eq!(state.chat_search.current_match(), None);
 
+        // 面板吞掉所有键：漏一个就会表现为"打一个字进了主输入框"
+        for code in [
+            KeyCode::Char('q'),
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Tab,
+            KeyCode::PageUp,
+        ] {
+            assert!(
+                handle_chat_search_key(&mut state, KeyEvent::new(code, KeyModifiers::NONE)),
+                "{code:?} 应被面板吞掉"
+            );
+        }
+        // Ctrl+Shift+F 放行给全局文件搜索（先收面板），Ctrl+F 只收面板
+        assert!(!handle_chat_search_key(
+            &mut state,
+            KeyEvent::new(
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        ));
+        assert!(
+            !state.chat_search.active,
+            "放行之前要先收掉面板，否则全局搜索叠在上面"
+        );
+
         // Esc 关闭并还原打开前的滚动位置
         state.scroll = 42;
         state.chat_search.active = true;
         state.chat_search.restore_scroll = 42;
-        close_chat_search(&mut state);
+        assert!(handle_chat_search_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        ));
         assert!(!state.chat_search.active);
         assert_eq!(state.chat_search.restore_scroll, 42);
     }

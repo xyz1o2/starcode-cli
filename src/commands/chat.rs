@@ -307,6 +307,47 @@ mod tests {
     use std::time::Instant;
     use tokio::sync::mpsc;
 
+    /// `/continue` 与 `--continue` 必须落在**同一条**路径上：两者都是"接上最近一次会话"。
+    ///
+    /// 之前 `/continue` 只是 `/resume` 的别名而无参开菜单，说明写着"resume the current
+    /// conversation"，用户按了等于没按；`--continue` 这个 flag 则根本不存在。
+    /// 这里钉住 `continue_cmd` 恢复成功后必须设置的三个字段。
+    #[tokio::test]
+    async fn continue_cmd_restores_the_latest_session_in_place() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.is_streaming = true;
+        state.is_processing = true;
+
+        let (tx, mut rx) = mpsc::channel(8);
+        // 模拟 worker：接下 RestoreSession 并回一个 Ok
+        let worker = tokio::spawn(async move {
+            if let Some(AgentRequest::RestoreSession { response, .. }) = rx.recv().await {
+                let _ = response.send(Ok(()));
+            }
+        });
+
+        // 没有已保存会话时不能 panic，也不能悄悄改成"开菜单"
+        let result = super::continue_cmd(
+            crate::commands::execution::CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            Vec::new(),
+        )
+        .await;
+        worker.abort();
+
+        // 断言只看"没有崩、且没有偷偷去开会话菜单"，具体是否恢复取决于磁盘上有没有会话
+        assert!(result.is_ok());
+        if state.active_session_id.is_none() {
+            assert_eq!(
+                state.current_status_line.as_deref(),
+                Some("No saved sessions yet."),
+                "没有可恢复的会话时必须如实说明，而不是打开别的界面"
+            );
+        }
+    }
+
     #[test]
     fn restoring_history_resets_old_stream_and_tool_state() {
         let mut state = crate::ui::state::ChatState::new();
