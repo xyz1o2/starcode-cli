@@ -235,47 +235,52 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | hook 事件名（部分） | `PreToolUse` 等沿用 CC 命名，含 alias 映射 | ✅ `core/hooks/store.rs:32-79`、`agent/hooks.rs:125-174` |
 | Headless 入口 | `-p/--prompt` 直出 JSONL 或文本 | ✅ `main.rs:52` |
 
-### 2.2 语义分歧（比路径差异更值得先修）
+### 2.2 语义分歧（已修，记录用）
 
-**① 记忆加载语义相反。**
+**① 记忆加载语义相反 —— 已修（2026-10-13）。**
 
-CC 是**全量拼接**，StarCode 是**每层目录 first-hit 只取一个**：
+原本 CC 是**全量拼接**，StarCode 是**每层目录 first-hit 只取一个**，且 `STAR.md` / `STARCODE.md` 排在 `CLAUDE.md` 之前 —— **一个仓库同时存在 `STARCODE.md` 和 `CLAUDE.md` 时，两边看到的指令不一样。**
 
-```rust
-// utils/project_context.rs:13
-const CONTEXT_FILE_CANDIDATES: &[&str] = &["STAR.md", "STARCODE.md", "CLAUDE.md", "AGENTS.md"];
-```
+已改为 CC 拼接语义（`utils/project_context.rs`）：
 
-`STAR.md` / `STARCODE.md` 排在 `CLAUDE.md` 之前，而 CC 根本没有 STAR.md 这个概念。**一个仓库同时存在 `STARCODE.md` 和 `CLAUDE.md` 时，两边看到的指令不一样。**
+- 新增 `collect_context_files_in_dir`：每层目录收**全部**指令文件，不再 first-hit
+- 新支持 `CLAUDE.local.md`、`.claude/CLAUDE.md`、`~/.claude/CLAUDE.md`
+- 目录遍历从 CWD 向上改为**从文件系统根向下到 CWD**（CC：越靠近启动目录的越晚读到）
+- `STAR.md` / `STARCODE.md` 不再遮蔽 `CLAUDE.md`，改为并列拼接且排在其前
+- `AGENTS.md` 改为**全局门控**：CWD 或任一上层存在 CLAUDE.md / CLAUDE.local.md 就不读，与 CC 默认一致
+- `find_context_file_in_dir()` 未动（`find_project_root` 与 `/init`、`/memory` 仍依赖）
 
-另外 StarCode 的 8000 字符截断（`CLAUDE.md:111`）与 CC 的「4 MiB 全量」不是一回事。
+同时修掉两个与代码相反的注释：`collect_context_files` 原注释写「返回的 Vec 从高到低排列」而循环实为 CWD 优先；`load_and_merge_context_files` 原注释写「后面的级别（更靠近 CWD）优先级更高」而实际后面的更远。这两条注释本身就是该 bug 的成因。
 
-**② 全局层有两个 settings 文件名 —— 但不是 bug，是命名不一致。** ✅ 已查（2026-10-13）
+**仍未对齐**：8000 字符截断（`DEFAULT_PROJECT_CONTEXT_MAX_CHARS`）与 CC 的「4 MiB 全量」不同 —— 有意保留，避免无脑拉高所有用户的 token 消耗。`@import` 展开、`.claude/rules/` 的 `paths:` 条件加载、`claudeMdExcludes` 均未实现。
+
+**② 全局层有两个 settings 文件名 —— 不是 bug，刻意保留分工。** ✅ 已查 + 已收口（2026-10-13）
 
 | 读取方 | 路径 | 管的 key |
 |---|---|---|
 | `SettingsManager` | `~/.star/user-settings.json` | `defaultModel`、force model、system settings |
 | `provider_store` / `doctor` / `/config` | `~/.star/user-settings.json` | provider 列表、API key |
-| `PermissionRuleSet` | `~/.star/settings.json`（内联拼接，`settings_rules.rs:479`） | `permissions` 段 |
+| `PermissionRuleSet` / `hooks::settings_hooks` | `~/.star/settings.json` | `permissions` 段、`hooks` 段 |
 
-三者**互不重叠**，所以「用户在全局层写 allow/deny 不生效」这个猜测**不成立** —— permissions 走的确实是 `~/.star/settings.json`，有 `settings_rules.rs:479` 明确读它。
+三者**键集不重叠**，所以「全局层写 allow/deny 不生效」这个猜测**不成立**。
 
-真正的问题是可维护性：同一个「全局设置」概念分裂在两个文件名下，未来加 key 时不知道该往哪个写。改 P0 时顺手统一即可，不是阻塞项。
+**合并这两个文件被有意否决**：`UserSettings` 与 `ProviderConfig` 两个结构体反序列化同一文件、彼此忽略未知字段，合并要同时处理 provider 凭据持久化、`/config` 与 `doctor` 的读点，以及 provider_store 自带的 `providers.json` 迁移链 —— 风险远大于「名字看着乱」的收益。
 
-**`Storage::global_settings_path()`（`storage.rs:36`）是死函数** ✅ —— 全仓无调用方。`settings_rules.rs:479` 是内联拼的同名路径，不是调它。别按「有封装函数」去理解这条链路。
+真正会腐烂的是 **`Storage::global_settings_path()` 曾是死函数**，而 `settings_rules` 内联拼了一遍同样的路径字符串。已修：现在 `settings_rules` 与 `settings_hooks` 都走这一个常量，分工理由写进了 `storage.rs` 的函数文档。
 
 ### 2.3 确认缺失
 
 | 项 | 现状 | 位置 |
 |---|---|---|
 | 配置根写死 | `const STAR_DIR: &str = ".star"`，**无环境变量可覆盖** | ❌ `core/config/storage.rs:8` |
-| 全局层无 `.claude/` 回落 | 只读 `~/.star/*` | ❌ |
-| 无 `CLAUDE.local.md` | — | ❌ |
-| 无 `.claude/CLAUDE.md` | 有代码但**无调用者**（见下） | ❌ |
+| 全局层无 `.claude/` 回落 | 指令层已支持 `~/.claude/CLAUDE.md`；但 skills/agents/commands/等仍只读 `~/.star/*` | ❌ 部分 |
+| 无 `CLAUDE.local.md` | **已修** | ✅ `utils/project_context.rs` |
+| 无 `.claude/CLAUDE.md` | **已修**（`agent/system_prompt_merge.rs` 的旧实现无调用者，未基于它扩展） | ✅ 同上 |
+| 无 `@import` 展开 | 未实现。CC 里 `@path` 会展开进 context，这里仍按字面量 | ❌ |
 | 无 `.claude/rules/` | 无 `paths:` 条件加载 | ❌ |
-| 无 `@import` 展开 | — | ❌ |
 | 无 `claudeMdExcludes` | — | ❌ |
-| hooks 存在独立文件 | `.star/hooks.json`，非 settings.json 的 `hooks` 段 | ❌ `core/hooks/store.rs:142-144` |
+| hooks 存在独立文件 | **已修**：`.star/hooks.json`（StarCode 自有，写入路径不变）与 settings.json 的 `hooks` 段（CC 风格，只读）**同时读取**，在 `list_hooks` 合并 | ✅ `core/hooks/settings_hooks.rs` |
+| 无 hook `matcher` 过滤 | **已修**：`ManagedHook` 此前只按 event 过滤，带 matcher 的 hook 会对所有工具误触发。已按 CC 的字符集分派规则实现（精确/`\|`列表 → 精确匹配，其余 → 非锚定正则，编译失败 fail-closed） | ✅ `core/hooks/store.rs`、`runner.rs:33` |
 | hook 事件缺口 | 无 `PermissionRequest` `PermissionDenied` `PostToolBatch` `StopFailure` `ConfigChange` `InstructionsLoaded` `CwdChanged` `FileChanged` `Elicitation` `WorktreeCreate` `PreModelSwitch` `PostModelSwitch` | ❌ |
 | hook 事件自造名 | `BeforeAgent` / `AfterAgent` / `BeforeToolSelection` / `BeforeModel` / `AfterModel` 在 CC 中无对应 | ❌ `commands/hooks.rs:13,34` |
 | 权限模式 | 仅 `Default \| Plan \| Yolo`；`acceptEdits`/`bypassPermissions` 在 CLI 是别名，折叠成 default/yolo | ❌ `core/policy/types.rs:44-50`、`main.rs:121-123,414,733` |
@@ -285,7 +290,7 @@ const CONTEXT_FILE_CANDIDATES: &[&str] = &["STAR.md", "STARCODE.md", "CLAUDE.md"
 | 无 managed 层 | 只有 `STAR_PERMISSIONS_FILE` 一个显式入口 | ❌ |
 | 无 `disableAllHooks` / `allowManagedHooksOnly` | `hooks_maybe_enabled_for_event`（`agent/hooks.rs:36`）只是有无 hook 的短路优化，fail-open，不是策略门控 | ❌ |
 | 无 settings 文件监听 | 纯 300s TTL 缓存；权限规则靠 `reload_permission_rules` 命令式触发 | ❌ `config/settings_manager.rs:337` |
-| 兜底路径丢审批模式 | 3 处 `unwrap_or_else` 用 `PolicyEngineConfig::default()` 构造，不带 `approval_mode` | ❌ 见 §5 A |
+| 兜底路径丢审批模式 | **已修**：3 处 `unwrap_or_else` 现在都带上真实 `approval_mode`（新增 `StarAgent::policy_approval_mode()` 做枚举转换） | ✅ `ui/services/worker.rs`、`runtime/control_requests.rs`、`agent/skills/editor.rs` |
 | `.star/` 缺 CC 对应目录 | 无 `rules/` `output-styles/` `workflows/` `themes/` `keybindings.json` `agent-memory/` | ❌ 见 §5 ④ |
 | MCP 只读 `.star/mcp.json` | 不读项目根 `.mcp.json` | ❌ `core/utils/paths.rs:337`、`storage.rs:130` |
 | 无 tool search | 缓存的 `Vec<FunctionDeclaration>` **全量注入**模型 | ❌ `core/tools/tool_registry.rs:121-153` |
@@ -306,26 +311,38 @@ const CONTEXT_FILE_CANDIDATES: &[&str] = &["STAR.md", "STARCODE.md", "CLAUDE.md"
 
 优先级按「能直接吃掉现成配置」和「改动面」排，不按功能重要性排。
 
+### ✅ 已完成（2026-10-13）
+
+| 项 | 落点 | 结果 |
+|---|---|---|
+| 记忆改全量拼接，移除 `STAR.md` 抢在 `CLAUDE.md` 前 | `utils/project_context.rs` | 新增 8 个测试，lib 套件 843 全绿 |
+| 支持 `.claude/CLAUDE.md` / `CLAUDE.local.md` / `~/.claude/CLAUDE.md` | 同上 | 含 CC 的 `AGENTS.md` 全局门控 |
+| hooks 改从 settings.json 的 `hooks` 段读 | `core/hooks/settings_hooks.rs`（新）+ `store.rs` | `.star/hooks.json` 保留为写入路径；导入项只读，`/hooks add\|remove` 动不了 |
+| hook `matcher` 过滤（CC 的字符集分派规则） | `core/hooks/store.rs`、`runner.rs` | 修掉一个既有缺口：此前 hook 无工具级过滤 |
+| 兜底路径丢审批模式（3 处） | `worker.rs`、`control_requests.rs`、`skills/editor.rs` | 新增 `StarAgent::policy_approval_mode()` |
+| 全局 settings 路径单一来源 | `config/storage.rs`、`policy/settings_rules.rs` | 死函数 `global_settings_path()` 复活，分工写进函数文档 |
+
+`@import` 展开没有跟着做 —— 它是 P0-2 里唯一有独立设计难度的部分（递归、最多 4 跳、跳过 code span 与 fenced block、跳出工作目录需批准），混在语义改造里会拉长这次改动。已列为 P1。
+
+### 待做
+
 | P | 项 | 落点 | 预估 |
 |---|---|---|---|
-| **P0** | 记忆改全量拼接，移除 `STAR.md` 抢在 `CLAUDE.md` 前 | `utils/project_context.rs` | S |
-| **P0** | 支持 `.claude/CLAUDE.md` / `CLAUDE.local.md` / `@import` | 同上 | S |
-| **P0** | hooks 改从 settings.json 的 `hooks` 段读（`.star/hooks.json` 保留为扩展） | `core/hooks/store.rs` + `settings_rules.rs` | M |
-| **P0** | 统一全局 settings 文件名（`user-settings.json` vs `settings.json`） | `config/settings_manager.rs:312`、`storage.rs:37` | S |
+| **P1** | `@import` 展开 | `utils/project_context.rs` | M |
 | **P1** | `.mcp.json` 作为回落 | `core/utils/paths.rs:337` | S |
 | **P1** | `STAR_CONFIG_DIR` 环境变量，对应 `CLAUDE_CONFIG_DIR` | `core/config/storage.rs:8` | S |
 | **P1** | `ApprovalMode` 扩到六个 + `dontAsk`（headless/CI 用） | `core/policy/types.rs`、`main.rs` | M |
 | **P1** | MCP tool search，schema 延迟加载 | `core/tools/tool_registry.rs` | L |
 | **P2** | `.claude/rules/` + `paths:` frontmatter 条件加载 | 新模块 | M |
 | **P2** | 补 hook 事件 `PermissionRequest` / `PostToolBatch` / `ConfigChange` / `InstructionsLoaded` | `core/hooks/store.rs` | M |
-| **P2** | 自造事件名做别名映射（`BeforeAgent`→`UserPromptSubmit`、`AfterModel`→`PostModelSwitch`），保留旧名 | 同上 | S |
+| **P2** | settings 文件监听 + `ConfigChange` 事件（替代 300s TTL） | `config/settings_manager.rs` | M |
 | **P2** | subagent frontmatter 补 `omitClaudeMd` / `maxTurns` / `permissionMode` / description token 预算 | `commands/agents/` | M |
 | **P2** | Dynamic workflows（JS runtime + `agent`/`pipeline`/`parallel`） | 重做 `core/workflow/` | XL |
 | **P3** | auto mode 分类器 / sandbox | 需第二个模型调用通道 | XL |
 
-**P0 四项合计约 300 行**，做完 StarCode 可直接消费绝大多数存量 `.claude/` 仓库。
+自造事件名的别名映射（`BeforeAgent`→`UserPromptSubmit` 等）已从列表移除：CC 的事件名本来就能被 `ManagedHookEvent::parse()` 识别（两边共享同一套 `#[serde(rename)]`），导入路径不需要映射表。真正缺的是 CC 独有的那 12 个事件，见 P2。
 
-P2 的 workflows 虽然价值最高（把子 agent 并行从消耗主 context 变成零 context 成本），但工程量 XL，且 `core/workflow/` 现在是死代码，等于从零写，不建议和 P0 混在一轮里。
+P2 的 workflows 价值最高（把子 agent 并行从消耗主 context 变成零 context 成本），但 `core/workflow/` 现在是死代码，等于从零写，不建议和小改动混在一轮里。
 
 ---
 
@@ -367,16 +384,7 @@ P2 的 workflows 虽然价值最高（把子 agent 并行从消耗主 context �
 
 ### 查完后新发现的两个问题
 
-**A. 兜底路径丢审批模式。** `PolicyEngine::with_project_rules` 有 4 个构造点：
-
-| 位置 | 配置 |
-|---|---|
-| `runtime_bootstrap.rs:40` | `approval_mode: config.approval_mode()` ✅ 正确 |
-| `ui/services/worker.rs:39` | `PolicyEngineConfig::default()` ⚠️ |
-| `runtime/control_requests.rs:708` | `PolicyEngineConfig::default()` ⚠️ |
-| `agent/skills/editor.rs:56` | `Default::default()` ⚠️ |
-
-后三处都是 `runtime_message_bus()` 缺席时的 `unwrap_or_else` 兜底，**不传审批模式**。即用户选 yolo/plan，runtime 一旦缺席，确认判断就退回 Default。`worker.rs:36` 的注释只想到「要装载规则」，没想到「还要带审批模式」。修 P0 时一并处理。
+**A. 兜底路径丢审批模式 —— 已修（2026-10-13）。** `PolicyEngine::with_project_rules` 原先有 4 个构造点，只有主路径 `runtime_bootstrap.rs:40` 传了 `approval_mode`，另外 3 处 `unwrap_or_else` 兜底用 `PolicyEngineConfig::default()`：用户选 yolo/plan，runtime 一缺席确认判断就悄悄退回逐次询问。现已全部带上真实模式（新增 `StarAgent::approval_mode()` / `policy_approval_mode()` 做两个 `ApprovalMode` 枚举之间的转换）。
 
 **B. `permissions.json` 与 `settings.json` 双格式并存。** `policy_engine.rs:66` 注释写明「装载 `.star/permissions.json`（旧格式）+ settings.json 的 `permissions` 段（新格式）」，对应 `storage.rs:167`。迁移到 `.claude/settings.json` 时要保住旧格式读取，否则老用户配置静默失效。
 
