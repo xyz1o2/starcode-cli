@@ -1,0 +1,8 @@
+─── 72x4 ───
+  0│● bash(cargo test --lib)                                                │
+  1│                                                                        │
+  2│                                                                        │
+  3│                                                                        │
+
+─── styles ───
+  0│0-1 bold,fg:rgb(80,220,100) · 2-5 bold,fg:cyan · 6-71 plain│

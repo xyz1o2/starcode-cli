@@ -970,6 +970,7 @@ fn render_tool_result_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::test_support::assert_lines_render;
 
     fn todo_call(args: &str) -> crate::types::StarToolCall {
         crate::types::StarToolCall {
@@ -1193,5 +1194,41 @@ mod tests {
 
         let blocks = render_tool_entry_blocks(&state, &entry, 0, 80, false, false, false);
         assert_eq!(first_line_text(&blocks), "● Update Todos");
+    }
+
+    // ── 渲染快照 ────────────────────────────────────────────────────────────
+    //
+    // 上面那些断言都是"某段文字在不在"，既对不上位置，也对不上颜色。工具条目是
+    // 整个 UI 里样式最密的地方（状态图标色、工具名按状态取色、缩进、截断、删除
+    // 线），最适合当快照的样板：改任何一处样式都会变成一条 diff。
+
+    /// TodoWrite 三种状态：▫ / ▪ / ✔ 三种符号、三种颜色，completed 带删除线。
+    /// 宽度压到 52 是为了把 CJK 截断也一起钉进基线。
+    #[test]
+    fn snapshot_todo_checklist_states() {
+        let tc = todo_call(
+            r#"{"todos":[
+                {"content":"安装 recharts 图表库","status":"pending","activeForm":"安装中"},
+                {"content":"跑回测","status":"in_progress","activeForm":"跑回测中"},
+                {"content":"接入真实历史数据并校验口径","status":"completed","activeForm":"接入中"}
+            ]}"#,
+        );
+        let lines = render_todo_checklist(&tc, 52, &theme());
+        assert_lines_render!("tool_render_todo_checklist", 52, 5, &lines);
+    }
+
+    /// 工具调用条目本体：工具名按状态取色，参数摘要跟在后面。
+    #[test]
+    fn snapshot_tool_call_entry() {
+        let mut state = ChatState::test_fixture();
+        state.ui_verbose = false;
+        let entry = tool_call_entry(
+            "Bash",
+            r#"{"command":"cargo test --lib","description":"跑单元测试"}"#,
+        );
+
+        let blocks = render_tool_entry_blocks(&state, &entry, 0, 72, false, false, false);
+        let flat: Vec<Line> = blocks.iter().flat_map(|b| b.iter()).cloned().collect();
+        assert_lines_render!("tool_render_tool_call", 72, 4, &flat);
     }
 }

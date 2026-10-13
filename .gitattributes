@@ -11,6 +11,11 @@
 *.yml  text eol=lf
 *.yaml text eol=lf
 *.md   text eol=lf
+
+# 渲染快照基线。序列化器固定产出 LF；没有这一行时 Windows checkout 会把基线
+# 转成 CRLF，`similar` 的逐行比较会认为每行都变了，于是每条快照测试都红。
+*.snap text eol=lf
+
 Cargo.lock text eol=lf
 
 # 二进制资源，不做换行转换
