@@ -1,6 +1,7 @@
 pub mod config;
 pub mod config_init;
 pub mod config_types;
+pub mod external_configs;
 pub mod history_store;
 pub mod json_with_comments;
 pub mod migration;
