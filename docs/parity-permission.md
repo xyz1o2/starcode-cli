@@ -99,7 +99,7 @@ Shift+Tab: 立即批准, 跳过选项列表
 - Shift+Tab 在非对话框状态下循环模式
 
 **Starcode 需实现**:
-- `status_line.rs` 增加权限模式指示区
+- `status_line/mod.rs` 增加权限模式指示区
 - 显示: `⏵⏵ {mode_name}` + 颜色
 - 模式映射:
   - `Default` → "default" (白色)
@@ -107,7 +107,7 @@ Shift+Tab: 立即批准, 跳过选项列表
   - `Yolo` → "yolo" (红色)
 - 非对话框状态下 Shift+Tab 循环模式
 
-**涉及文件**: `src/ui/components/status_line.rs`, `src/ui/events/input.rs`
+**涉及文件**: `src/ui/components/status_line/mod.rs`, `src/ui/events/input.rs`
 
 ---
 
@@ -198,7 +198,7 @@ WorkerPendingPermission:
 |------|------|--------|--------|------|
 | 1 | Feedback Input (Tab 切换) | P0 | 中 | messages.rs 增加字段 |
 | 2 | Shift+Tab 快速批准 | P1 | 小 | 无 |
-| 3 | 底部模式指示器 | P1 | 小 | status_line.rs |
+| 3 | 底部模式指示器 | P1 | 小 | status_line/mod.rs |
 | 4 | 按工具分发组件 | P1 | 大 | 重构 confirmation_dialog |
 | 5 | AI 风险解释 Ctrl+E | P2 | 中 | LLM 调用 |
 | 6 | 分类器自动审批 | P2 | 中 | PolicyEngine 接线 |

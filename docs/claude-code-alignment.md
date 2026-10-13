@@ -354,7 +354,11 @@ P2 的 workflows 价值最高（把子 agent 并行从消耗主 context 变成�
 2. **`if` 字段复用权限规则语法** 再收一层，但明确声明「best-effort，硬阻止用 permissions」。`settings_rules.rs` 里 allow 匹配更严（`&&`/`;`/管道每段都要命中、命令替换不给 allow）正是同一思路，可以把这个边界写进文档。
 3. **hooks exec form vs shell form** —— 设了 `args` 就不过 shell。
 4. **auto memory 硬预算 + 超限报错让模型重写索引**，而非静默截断。`project_context.rs` 现在的 8000 字符硬截断会让模型以为文件就这么多内容，是有损的。
-5. **可观测性作为产品功能** —— `/context` 列加载了哪些记忆、`/status` 列加载了哪些 settings、`/mcp` 列 server 健康态、`/tasks` 列 subagent 跑的哪个模型。`commands/doctor.rs` 已有雏形（`## Harness Health`），可扩。
+5. **可观测性作为产品功能。** StarCode 现状：`/context` 已用 `get_context_file_paths()` + `load_merged_project_context()` 列出加载了哪些记忆文件（对标 CC 的 `/context` ✓）；`/mcp` 列 server 健康态；`/tasks` 列 subagent；`/doctor` 输出工具可用性 + 日志可写性 + transcript 摘要。
+
+   **真正缺的是「加载了哪些配置源」** —— CC 的 `/status` 有一行 `Setting sources`，列出本次会话读了哪些 settings 文件、有没有 managed 层。StarCode 的 `/status` 没有这一层，而 §2.2 ② 那个 `settings.json` / `user-settings.json` 分工问题恰恰只能靠它暴露：用户把 `permissions` 写进了其中一个文件却被另一个的同名 key 盖住时，没有任何界面能看出这回事。补这一行的成本远低于排查成本。
+
+   > `commands/doctor.rs` 曾有一节 `## Harness Health` 读 `.star/eval-results.json`，已随 eval 评测体系一起删除（commit `76a0262`）。本条不再引用它。
 6. **settings 列表 vs 标量的两类合并语义**，写进文档比隐含在代码里好。
 
 ---

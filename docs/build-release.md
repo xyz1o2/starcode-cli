@@ -59,7 +59,7 @@ gh workflow run release.yml -f tag=v0.3.1
 ```
 validate   校验 tag 与 Cargo.toml 版本一致
    ↓
-test       单元测试 + 文档测试 + eval harness（不联网）
+test       单元测试 + 文档测试
    ↓
 build      8 个平台并行编译、打包、上传
    ↓

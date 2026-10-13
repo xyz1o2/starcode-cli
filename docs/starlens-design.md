@@ -242,7 +242,7 @@ sym: AgentRequest, StreamMessage, AgentTaskUpdate
 
 ## 12. 成功指标（怎么知道做成了）
 
-前提是"快准省"，就得能量。建议在 eval 里固定一组任务，对比 StarLens 开/关：
+前提是"快准省"，就得能量。固定一组任务，对比 StarLens 开/关：
 
 | 指标 | 怎么测 | 目标方向 |
 |---|---|---|
@@ -252,7 +252,9 @@ sym: AgentRequest, StreamMessage, AgentTaskUpdate
 | codebase_search 误触发率 | 调用后被回退到 Grep 的占比 | 下降 |
 | L0 漂移率 | `Stale` entry 占比随时间 | 低且可控（验证 §6 闭环有效） |
 
-没有这组数，"快准省"只是口号；P1 完成即接入 eval，P2/P3 每期回归。
+没有这组数，"快准省"只是口号。
+
+> ⚠️ **这套评测基础设施已随 eval 体系删除（2026-10-13）。** 上表的"每任务工具调用数""token 计数""首次定位正确率"需要一套固定任务集来跑，而 `starcode eval`、`eval/tasks.json`、`src/agent/eval_*.rs` 都已被删除（理由见 `CLAUDE.md` 的 "The eval harness is gone"）。**要落地这张表，必须先重建评测基座** —— 否则 P1 之后的每一期都只能靠感觉判断有没有变快。这不是本文能顺手带过的缺口，是 StarLens 整条路线当前最大的阻塞项。
 
 ## 13. 参考
 

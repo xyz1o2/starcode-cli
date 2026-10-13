@@ -94,9 +94,9 @@ const RECENT_COMPLETED_TTL_MS = 30_000;
 - `Next: {subject}` 提示已实现 (`find_next_task_hint`)
 - `active_form` 字段已实现 ("Running tests" vs "Run tests")
 - 列表底部或末尾显示 "Next: {subject}"
-- Spinner 帧来源: `status_line.rs` 已有 spinner 逻辑可复用
+- Spinner 帧来源: `status_line/mod.rs` 已有 spinner 逻辑可复用
 
-**涉及文件**: `task_panel.rs`, `src/ui/components/status_line.rs` (复用 spinner)
+**涉及文件**: `task_panel.rs`, `src/ui/components/status_line/mod.rs` (复用 spinner)
 
 ---
 
@@ -149,7 +149,7 @@ BackgroundTasksDialog:
 - 数据来源: 当前活跃的 agent / teammate 列表
 - 仅在多 agent 模式下显示
 
-**涉及文件**: `src/ui/components/status_line.rs`
+**涉及文件**: `src/ui/components/status_line/mod.rs`
 
 ---
 

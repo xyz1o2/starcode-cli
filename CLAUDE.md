@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-StarCode CLI (`starcode-cli`) — a Rust terminal-UI coding agent (ratatui 0.30 + crossterm + tokio) that talks to OpenAI-compatible and Anthropic-style providers. One crate: lib (`src/lib.rs`) plus one bin (`src/main.rs`), ~190k lines across `src/`.
+StarCode CLI (`starcode-cli`) — a Rust terminal-UI coding agent (ratatui 0.30 + crossterm + tokio) that talks to OpenAI-compatible and Anthropic-style providers. One crate: lib (`src/lib.rs`) plus one bin (`src/main.rs`), ~188k lines across 696 files in `src/`.
 
 The codebase is deliberately modeled on Claude Code — comments say "对标 Claude Code" throughout. Read-only reference copies live in `study_or_copy_projects/` (gitignored): `claude-code-main`, `claude-code-rust`, `claude-code-system-prompts-main`, `tuie-main`. Consult them when matching behavior or terminal rendering; `docs/ui-tool-render.md` is a worked example of that comparison.
 
@@ -18,7 +18,7 @@ cargo build --release           # → target/release/starcode-cli
 cargo run                       # start the TUI
 
 # tests
-cargo test --lib                            # the real suite: 176 unit tests inside src/
+cargo test --lib                            # the real suite: ~850 unit tests inside src/
 cargo test --lib commands::parity           # one module
 cargo test --lib detects_cargo_verifiers    # one test by name
 cargo test --lib -- --nocapture             # see println! from tests
@@ -33,10 +33,12 @@ cargo test --workspace --doc
 
 ### Gate state — verify, don't assume
 
-- `cargo fmt --check`: green (debt cleared 2026-10-13).
+- `cargo fmt --check`: **red as of 2026-10-13** — the "debt cleared" note below was wrong.
+  Run it before claiming green; the outstanding files are a handful of `core/permission*`
+  and `ui/events/*` modules left over from the UI refactors.
 - `cargo clippy --workspace --all-targets`: ~470 warnings, 0 errors. Not gated: CI runs it
   without `-D warnings`. Scope to your work: `cargo clippy --lib 2>&1 | rg <your_file>`.
-- `cargo test --workspace --lib -- --test-threads=1`: green as of 2026-10-13.
+- `cargo test --workspace --lib -- --test-threads=1`: green as of 2026-10-13, 852 tests.
 
 `--test-threads=1` is mandatory for the lib tests: `utils::checkpoint_manager` mutates the
 process-global `STAR_FILE_HISTORY_DIR_OVERRIDE`, so parallel tests delete each other's
@@ -57,7 +59,7 @@ Subcommands bypass both paths: `mcp`, `git`, `init`.
 
 ### UI ↔ Agent: two channels, one worker
 
-The entire runtime is two capacity-100 `mpsc` channels (`src/ui/app/runtime.rs:1132`) and one tokio task:
+The entire runtime is two capacity-100 `mpsc` channels (`src/ui/app/runtime.rs:1390`) and one tokio task:
 
 ```
 UI  --AgentRequest-->  agent_worker  --StreamMessage-->  UI
@@ -68,7 +70,7 @@ UI  --AgentRequest-->  agent_worker  --StreamMessage-->  UI
 - `src/runtime/` — the seam: `agent_runtime` (per message: preflight hooks → streaming session → after-agent hooks → deferred actions), `streaming_session`, `control_requests`, `confirmation_bridge`, `hooks`, `checkpoints`.
 - `src/ui/services/stream.rs` — `handle_stream_update`, the single `match` translating every `StreamMessage` into `ChatState` mutations, processed by the UI loop in 8ms batches.
 
-Threading model is documented at `src/ui/app/runtime.rs:1-28`: tokio main thread renders, a dedicated `std::thread` reads keys from `/dev/tty`, the agent worker is a task, plus a watchdog for ANR detection. All UI state is one struct — `ChatState` in `src/ui/state/store.rs`, 228 public fields.
+Threading model is documented at `src/ui/app/runtime.rs:1-28`: tokio main thread renders, a dedicated `std::thread` reads keys from `/dev/tty`, the agent worker is a task, plus a watchdog for ANR detection. All UI state is one struct — `ChatState` in `src/ui/state/store.rs`, ~190 public fields (the exact count keeps drifting with every UI refactor; grep it rather than trusting a number).
 
 ### Input routing (`src/ui/app/logic.rs`, `enqueue_user_message`)
 
@@ -113,7 +115,7 @@ Settings live in `~/.star/settings.json` (global) and `./.star/settings.json` (p
 
 ### Behavior is env-var-gated to an unusual degree
 
-337 distinct `STAR_*` variables are read across the tree, almost always inline at the point of use (`std::env::var("STAR_…").ok().and_then(…).unwrap_or(default)`), with no central registry. When runtime behavior diverges from what the code appears to do, grep `STAR_` in that file. Frequently relevant: `STAR_API_KEY`, `STAR_BASE_URL`, `STAR_MODEL`, `STAR_CONTEXT_WINDOW`, `STAR_AUTO_COMPACT`, `STAR_LLM_TIMEOUT`, `STAR_TOOL_TIMEOUT_SECS`, `STAR_LOG_ENABLED`, `STAR_LOG_DIR`, `STAR_PROMPT_DIR`.
+342 distinct `STAR_*` variables are read across the tree, almost always inline at the point of use (`std::env::var("STAR_…").ok().and_then(…).unwrap_or(default)`), with no central registry. When runtime behavior diverges from what the code appears to do, grep `STAR_` in that file. Frequently relevant: `STAR_API_KEY`, `STAR_BASE_URL`, `STAR_MODEL`, `STAR_CONTEXT_WINDOW`, `STAR_AUTO_COMPACT`, `STAR_LLM_TIMEOUT`, `STAR_TOOL_TIMEOUT_SECS`, `STAR_LOG_ENABLED`, `STAR_LOG_DIR`, `STAR_PROMPT_DIR`.
 
 ### Debugging a TUI
 
@@ -144,9 +146,11 @@ You cannot print — ratatui owns the terminal. File logging is **on by default*
 
 **Harness architecture baseline:** `docs/claude-code-alignment.md` is the single source of truth for Claude Code parity (snapshot 2026-10-13, built from official docs v2.1.2xx). The `docs/parity-*.md` files that used to carry architecture claims have been deleted; the five that remain cover UI rendering and UI framework structure only.
 
-**`tests/` is mostly dead.** Cargo compiles only the top-level `tests/*.rs` files as integration targets, and only the scratch probes `zz_accuracy_probe.rs` / `zz_quality_probe.rs` remain there (the `eval_harness_live.rs` target was deleted with the eval harness on 2026-10-13). Everything in a subdirectory — `agent/`, `config/`, `llm/`, `scenarios/`, `tools/`, `common/`, `core/` — is only compiled if a `tests/*.rs` declares it, and none does. A `tests/lib.rs` used to declare `mod core` → `mod test_deferred` + `test_permissions`, but those two files were never committed, so `cargo test --workspace` could not compile from a fresh clone; that target has been deleted. Put new tests in a `#[cfg(test)] mod tests` inside the `src/` file under test — that is where all 176 working tests live. `.gitignore` anchors the scratch-file patterns to the repo root (`/test_*.rs`) precisely because the old `**/test_*.rs` used to swallow files under `tests/`.
+**`tests/` is mostly dead.** Cargo compiles only the top-level `tests/*.rs` files as integration targets, and only the scratch probes `zz_accuracy_probe.rs` / `zz_quality_probe.rs` remain there (the `eval_harness_live.rs` target was deleted with the eval harness on 2026-10-13). Everything in a subdirectory — `agent/`, `config/`, `llm/`, `scenarios/`, `tools/`, `common/`, `core/` — is only compiled if a `tests/*.rs` declares it, and none does. A `tests/lib.rs` used to declare `mod core` → `mod test_deferred` + `test_permissions`, but those two files were never committed, so `cargo test --workspace` could not compile from a fresh clone; that target has been deleted. Put new tests in a `#[cfg(test)] mod tests` inside the `src/` file under test — that is where all ~850 working tests live. `.gitignore` anchors the scratch-file patterns to the repo root (`/test_*.rs`) precisely because the old `**/test_*.rs` used to swallow files under `tests/`.
 
-**The eval harness is gone (2026-10-13).** `starcode eval`, `/eval`, `eval/`, and `src/agent/eval_*.rs` were deleted. Two independent reasons: the mechanism layer's behavior rules validated `simulate_tool_calls_from_prompt` — which echoes the expected `tool_sequence` back as "simulated calls" — so it could not fail; and the live layer's fixture had been vendored as a gitlink without `.gitmodules`, so every fresh clone got an empty `eval/fixtures/rust-lab` and all ten live tasks silently skipped. The CI test asserted "everything is skipped", which is why the breakage went unnoticed. Consequence worth knowing: `Router::classify` and the skill heuristic now have **no** test coverage.
+**The eval harness is gone (2026-10-13).** `starcode eval`, `eval/`, and `src/agent/eval_*.rs` were deleted. Two independent reasons: the mechanism layer's behavior rules validated `simulate_tool_calls_from_prompt` — which echoes the expected `tool_sequence` back as "simulated calls" — so it could not fail; and the live layer's fixture had been vendored as a gitlink without `.gitmodules`, so every fresh clone got an empty `eval/fixtures/rust-lab` and all ten live tasks silently skipped. The CI test asserted "everything is skipped", which is why the breakage went unnoticed. Consequence worth knowing: `Router::classify` and the skill heuristic now have **no** test coverage.
+
+**`/eval` is a dangling declaration (2026-10-13).** `src/commands/system.rs:987` still declares `name: "eval"` in `ALL_COMMANDS` with `category: "Automation"`, but `src/commands/mod.rs` has **no `"eval" =>` dispatch arm** — the handler went with the eval harness. Result: `/eval` shows in `/help` and in `/` autocomplete, and typing it falls through to `plugin_command_fallback` and errors with `Unknown command: /eval`. It is a code leftover, not a doc one; removing the declaration from `ALL_COMMANDS` is the fix (note `is_declared_pending()` only catches `category: "Pending"`, so nothing warns about this today).
 
 **Orphaned directories.** `src/constants/` and `src/sdk/` are declared by neither `lib.rs` nor `main.rs`; editing them changes nothing. Root `config.toml` is read by no code (its `[ui.system_prompts] dir` even points at a path that does not exist) — real configuration is `~/.star/settings.json`, `./.star/settings.json`, and env vars.
 

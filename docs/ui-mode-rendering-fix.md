@@ -1,5 +1,12 @@
 # 修复设计 — TUI 模式分层 / 复制 / 闪屏
 
+> ⚠️ **行号大面积漂移（2026-10-13 核实）。** 本文是**动工前的设计稿**，而它描述的 P0/P3/P4 修复已经执行完毕 —— 部分被引用的代码正是被这份文档自己删掉的。读者按行号跳转会落空：
+> - 引用了**已删除代码**：`:130` `runtime.rs:678`（`terminal.clear()`）、`:143` `runtime.rs:676-677`、`:367` `modal.rs:530`（`has_overlay_active()` 已删，现为解释"为何删掉"的注释块）
+> - 行号漂移约 15 处：`store.rs:1114`(实为 1126)、`store.rs:347`、`store.rs:1465`(已漂进测试区)、`app/mod.rs:31/34/278/321`、`modal.rs:503-521`(实为 529/542)、`input.rs:1774/3133/3228`、`runtime.rs:825/884`
+> - **仍然精确命中的"稳定区"**：`:343` 的 7 处动画行号（`status_line/mod.rs:585/622/643/675/717`、`tool_render.rs:253`、`task_panel.rs:903`）、`:104` `bubblewrap_windows.rs:201`、`:446` `mouse.rs:210-212`、`:448` `commands/git.rs:276-406`
+>
+> 结论：**别把本文的行号当索引用**，要定位请 grep 符号名。需要看修复后的真实现状，请读代码本身。
+
 > 日期：2026-10-10
 > 涉及：`src/ui/events/input.rs`、`src/ui/events/modal_input.rs`、`src/ui/state/modal.rs`、`src/ui/events/mouse.rs`、`src/ui/app/runtime.rs`、`src/ui/app/mod.rs`、`src/ui/components/status_line/mod.rs`
 > 症状：① TUI 输出复制总是不行 ② 会闪屏 ③ 快捷键有时候会冲突
