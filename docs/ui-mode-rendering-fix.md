@@ -30,7 +30,7 @@
 | P0 | 止血：沙箱探测记忆化、去掉 clear()、Ctrl+C 回落 | ✅ 完成 |
 | P1 | 修已验证的确定性 bug：隐形弹窗、modal 吞全局键、Ctrl+D 双处理 | ✅ 完成 |
 | P2 | 引入 dirty 检查 + 动画门控 | ✅ 完成 |
-| P3 | 模式分层收敛 | 🟡 接线完成，双真相源待收（见下） |
+| P3 | 模式分层收敛 | ✅ 完成（接线 + 双真相源 + 穷尽分发） |
 
 ### P3 已完成
 
@@ -63,13 +63,25 @@
 `every_registered_binding_is_either_dispatched_or_documented_as_deferred` 锁住 ——
 以后往 `GLOBAL_BINDINGS` 加一行却忘了实现，会直接测试失败。
 
+### P3 第五步（2026-10-13）：双真相源与穷尽分发
+
+| 改动 | 位置 |
+|---|---|
+| 删除 `ChatState::show_input_modal`，输入框开没开只看 `Modal::InputModal`（新增 `is_input_modal_open()`） | `state/modal.rs`、`store.rs` |
+| 删除 `ChatState::show_status_modal`，Settings 弹窗只看 `Modal::StatusModal` | `state/modal.rs`、`status_modal.rs` |
+| 输入框的按键处理收进 `handle_modal_key` 的分发表，不再排在阶梯中段 | `events/modal_input.rs`、`events/input.rs` |
+| `StatusModal` / `LogSelector` / `ErrorOverlay` / `ThemePicker` 从阶梯里抽成独立函数，由分发表调用 | `events/input.rs` |
+| `handle_modal_key` 与 `draw_ui` 的弹窗渲染都改成**穷尽 `match`**（无 `_` 分支） | `events/modal_input.rs`、`app/mod.rs` |
+
+最后一条是这一步真正的价值：此前新增一个 `Modal` 变体要改 4 处，漏掉的那处不报编译错误 ——
+弹窗能打开、能画出来，按键却落到主输入框（只读弹窗上按 Enter 直接把消息发出去）。
+现在漏写就是编译错误。
+
 ### P3 未完成（建议后续单独 PR）
 
 - `handle_key_event` 本身仍是长阶梯：现在每层查询的是 `KeyContext`，但分发顺序仍靠书写
   位置表达。改成查表分发（每个 `KeyContext` 一个 handler）收益已经不大了，可延后
-- `show_input_modal` 与 `Modal::InputModal` 双真相源合并
-- 按键注册表只覆盖**全局**键；modal 内部的键仍是各自的 `match key.code`（`modal_input.rs`
-  的 `_ => Ok(false)` 会把新变体的按键静默漏到主输入框）
+- 按键注册表只覆盖**全局**键；modal 内部的键仍是各自的 `match key.code`
 - vim 的 `operators.rs` / `text_objects.rs` 是死模块，`VimMode::Command` 是空壳
 
 ---
@@ -368,11 +380,64 @@ pub fn draw_ui(...) {
 
 高。建议拆成多个 PR，每步单独可回滚。
 
-> 注意：不要把 `task_panel.is_visible` 算进 `has_overlay_active()`。它是常驻面板而非
+> 注意：不要把 `task_panel.is_visible` 算进覆盖层判定。它是常驻面板而非
 > 遮挡层，只吃 Ctrl/Alt 组合键与 ↑/↓/Enter，普通字符仍要落到输入框 —— 计进来的话，
 > 开着任务面板时 vim 会被整个关掉，双 Esc 退出也会失灵。
+> 现在这条规则写在 `KeyContext::is_exclusive()` 里，不再由各处手抄。
 
 ---
+
+# P4：渲染路径与轮询（2026-10-13）
+
+前四步都在「事件分发」这一侧。渲染路径上还剩两处把 I/O 和定时器放在了不该在的地方。
+
+## J. 渲染里每帧一次 `fs::metadata`，并在绘制过程中改状态
+
+### 根因
+
+```rust
+// 改动前：src/ui/app/mod.rs 的 render_page 开头
+state.task_panel.reload_if_stale();      // current_dir() + fs::metadata
+state.task_panel.auto_show_if_needed();  // 改 is_visible
+state.task_panel.check_auto_hide(state.is_processing);  // 5 秒收起计时
+```
+
+流式输出时每秒 20~30 帧，也就是每秒 20~30 次 `stat`；而 `is_visible` 是在**绘制过程中**
+被改的，dirty 门控因此建立在「画过没画过」之上。
+
+### 改法
+
+- 三步合并为 [`ChatState::tick_task_panel`]，由事件循环的 1Hz 节拍调用
+  （`runtime.rs` 的 `PERIODIC_TICK_INTERVAL` 分支）。清单变更是 TodoWrite 驱动的、
+  收起计时本身也是秒级，1Hz 足够。
+- `render_page` 的返回值从 `Rect` 变成 [`RenderOutput`]：滚动夹取、总行数、各区域
+  rect 都在里面算，由 `draw_ui` 渲染完统一回写。渲染函数内部不再直接改这几项。
+
+> **渲染还不是纯函数**：`render_chat_lines` 与 `render_task_panel_mut` 需要
+> `&mut ChatState`（前者写 `rendered_cache` 记忆化，后者要动 ratatui 的 `ListState`）。
+> 彻底纯化要先把这些缓存挪出 state，不在本次范围内。
+
+## K. 轮询 `await` 在事件循环里
+
+### 根因
+
+`/loop` 与 `/remote` 两个轮询各带 500ms 超时，直接 `await` 在 UI 循环里，每秒各一次。
+慢盘/网络盘上循环会整个停在超时里，键盘线程投递的事件要等它返回才被处理。
+
+### 改法
+
+`runtime::background` 拆成两半：
+
+- **I/O 半**：`spawn_schedule_pollers` 起两个 tokio 任务，只读文件并把
+  [`BackgroundEvent`] 送回 channel，不碰 UI 状态；
+- **应用半**：`apply_background_event` 在 UI 循环里跑，是唯一写 `ChatState` 的地方。
+
+于是 `ChatState` 始终只在一个任务里被改，不需要跨任务加锁。
+
+## J + K 风险
+
+中。J 的行为变化是「面板自愈从每帧变成每秒」；K 的行为变化是「轮询结果晚最多一个
+tick 到达」。两者都需要实机确认 `/loop`、`/remote`、任务面板自动显隐三条路径。
 
 # 未纳入本次修复
 
@@ -381,7 +446,7 @@ pub fn draw_ui(...) {
 | **鼠标捕获导致终端原生选区永久失效** | `EnableMouseCapture` 发 `?1003h`（any-event tracking），终端整个会话不再自己做选区。而代码注释声称 `Shift+Click` 可绕过（`events/mouse.rs:210-212`、`app/runtime.rs:1059`）——**这是错的**，没有终端会因修饰键豁免鼠标上报，导致 Shift 拖选时应用不处理、终端也不处理，两条路都断。输出又只存在于 alternate screen（`app/runtime.rs:1055`），滚轮回溯也不可能。彻底解法需要引入自己的输出回滚缓冲（inline viewport），属于独立特性，不适合混进本次修复。 |
 | **OSC 52 兜底** | crossterm 0.29 自带 `crossterm::clipboard::CopyToClipboard`（OSC 52），仓库从未引用。SSH/WSL 下 `arboard` 写的是远端剪贴板，必然失败——这是那条环境下的正解。改动小，建议单独提交。 |
 | **`/commit` 在 UI 线程上 `println!`** | `commands/git.rs:276-406` 直接写 stdout，会把字节注入活动屏幕造成错乱。属独立缺陷。 |
-| **渲染循环内的阻塞 await** | `runtime.rs:765-810` 的 `/loop` + `/remote` 轮询各有 500ms 超时，每秒各阻塞一次；`logic.rs:400-414` 的 `!cmd` shell 执行会阻塞整个事件循环。应移出渲染任务。 |
+| **渲染循环内的阻塞 await** | ✅ 已修（见 P4-K）：`/loop` + `/remote` 的 I/O 移到独立 tokio 任务。`logic.rs` 的 `!cmd` shell 执行仍会阻塞事件循环，未处理。 |
 | **crossterm 0.28 → 0.29** | 见 [`dependency-audit.md`](dependency-audit.md) §4.3。独立议题。 |
 
 ---
@@ -403,17 +468,28 @@ pub fn draw_ui(...) {
 - [ ] `Ctrl+D` 只退出；权限调试面板改用 `Ctrl+Shift+D`
 - [ ] 上下文可视化窗口开着时按 Enter 不会把消息发出去
 
+## P3~P5 追加（P3 接线 / P3 双真相源 / P4 渲染与轮询）
+
+TUI 无法用单测覆盖的部分，尤其这几条：
+
+- [ ] 填 API Key 的输入框里：`Ctrl+V` 粘贴、`Ctrl+P` 跳面板、`Ctrl+C` 中断都还在
+- [ ] `Ctrl+P → Status` 的 Settings 弹窗可见、可上下移动、回车生效
+- [ ] 日志选择器（`/chat resume` 窗口）回车能恢复会话，Esc 能关
+- [ ] 错误覆盖层：`r` 重试、`s` 换 provider、`Esc` 关闭
+- [ ] 主题选择器：上下移动实时预览、Enter 应用、Esc 回滚到进入前的主题
+- [ ] 任务面板：TodoWrite 后弹出、全部完成后 5 秒收起（现在是 1Hz 节拍推进）
+- [ ] `/loop` 定时任务能按分钟触发；`/remote` inbox 能被消费（改动后各晚最多 1s）
+- [ ] 网络盘 / WSL 下按键不再出现周期性延迟
+
 ---
 
 # 回归情况
 
-`cargo test --lib`：**738 passed / 15 failed**。
+最近一次（2026-10-13，P3 接线 + 双真相源 + P4 渲染与轮询）：
 
-失败项全部为改动前既有失败，集中在 `utils::checkpoint_manager`、
-`core::auto_mode::dangerous_patterns`、`core::tools::*`、`core::utils::paths`、
-`ui::utils::format` 等与本次改动无关的模块（Windows 路径分隔符与环境相关；
-`checkpoint_manager` 一组在多次运行间数量还会漂移，属并行/顺序敏感）。
-已用 `git stash` 对照基线逐项确认。
+`cargo test --lib`：**846 passed / 1 failed**。唯一失败项
+`utils::checkpoint_manager::tests::test_can_restore_returns_true_for_existing_snapshot`
+属既有问题：单独跑该模块时 6 个用例失败且数量在多次运行间漂移（并行/顺序敏感），
+与本次改动无关。`ui::` 下 235 个用例全绿。
 
-`ui::events::mouse` 的 8 个测试曾因中途一版改动（松开鼠标复制后清选区）失败，
-已改为保留选区，现全部通过。
+`cargo clippy --lib`：与基线同集合（按本次触及的文件逐条对照 stash 基线，无新增告警）。

@@ -3815,6 +3815,45 @@ mod tests {
         assert_eq!(KeyContext::of(&state), KeyContext::TaskPanel);
     }
 
+    /// 任务面板的自动显隐由 `tick_task_panel` 推进（事件循环的 1Hz 节拍），不再靠
+    /// 「画一帧就重算一次」。这条测试同时锁住新入口的行为等价性。
+    #[test]
+    fn task_panel_tick_shows_new_tasks_without_any_render() {
+        use crate::core::tasks::models::TaskNode;
+
+        let mut state = ChatState::new();
+        state.task_panel.mark_modified();
+        let node = TaskNode::new("写代码".into());
+        let id = node.id.clone();
+        state.task_panel.task_manager.graph.root_ids.push(id.clone());
+        state.task_panel.task_manager.graph.nodes.insert(id, node);
+
+        assert!(!state.task_panel.is_visible, "初始不应自动弹出");
+        state.tick_task_panel();
+        assert!(
+            state.task_panel.is_visible,
+            "TodoWrite 之后由节拍弹出面板，不依赖是否渲染过"
+        );
+    }
+
+    /// 填 API Key 时全局键仍然放行：Ctrl+P 要能跳去命令面板（这是用户的逃生口），
+    /// Ctrl+C 仍能中断生成。输入框的 handler 只该吃普通字符与 Enter/Esc。
+    #[tokio::test]
+    async fn global_keys_still_pass_through_the_input_modal() {
+        let mut state = ChatState::new();
+        let (tx, _rx) = mpsc::channel(16);
+        state.enter_input_modal();
+        state.input_modal_title = "API Key".to_string();
+
+        let ctrl_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert!(
+            !super::super::modal_input::handle_modal_key(&mut state, ctrl_p, &tx)
+                .await
+                .unwrap(),
+            "全局键不应被输入框消费"
+        );
+    }
+
     /// `resolve_provider_for_model` 的可测两步：UI 映射优先，其次当前 provider。
     ///
     /// 跨桶查找那一步要读磁盘缓存，`ui` 这层不注入路径，所以它的行为由

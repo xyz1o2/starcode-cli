@@ -1008,4 +1008,48 @@ mod tests {
         assert!(state.modal_stack.is_empty());
         assert!(state.quick_open_state.search_generation > generation);
     }
+
+    /// 输入框的「开没开」只有模态栈一个真相源。平行的 `show_input_modal` flag 已删除
+    /// —— 靠 `enter`/`exit` 手工同步两个状态时，异步 ModelsList 一打穿就是
+    /// 「面板看得见、按键却全被隐形输入框吞掉」。
+    #[test]
+    fn input_modal_openness_is_derived_from_the_stack() {
+        let mut state = ChatState::new();
+        assert!(!state.is_input_modal_open());
+
+        state.enter_input_modal();
+        assert!(state.is_input_modal_open());
+        // 重复 enter 不会叠两个（provider 表单有多条路径会调它）
+        state.enter_input_modal();
+        assert_eq!(
+            state.modal_stack.iter().filter(|m| **m == Modal::InputModal).count(),
+            1
+        );
+
+        // 输入框叠在别的模态之上：按键仍归输入框，但栈顶是后来者。
+        state.push_modal(Modal::Palette);
+        assert_eq!(state.top_modal(), Some(&Modal::Palette));
+        assert!(state.is_input_modal_open());
+
+        // exit 用 retain：不能把底下别人的模态一起带走
+        state.exit_input_modal();
+        assert!(!state.is_input_modal_open());
+        assert_eq!(state.top_modal(), Some(&Modal::Palette));
+
+        state.close_all_modals();
+        assert!(state.modal_stack.is_empty());
+        assert!(!state.is_input_modal_open());
+    }
+
+    /// 状态弹窗只由栈表达：曾经有一个只被赋 `false` 的 `show_status_modal` flag，
+    /// 渲染侧拿它当门控、按键侧照常消费，于是「看不见的窗口把按键全吃掉」。
+    #[test]
+    fn status_modal_lifecycle_is_the_stack() {
+        let mut state = ChatState::new();
+        state.open_status_modal();
+        assert_eq!(state.top_modal(), Some(&Modal::StatusModal));
+
+        state.pop_modal();
+        assert!(state.modal_stack.is_empty());
+    }
 }

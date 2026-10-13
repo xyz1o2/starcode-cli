@@ -16,8 +16,12 @@ type Err = Box<dyn std::error::Error>;
 
 /// 分发给栈顶 modal 的按键处理。
 ///
-/// 返回 `Ok(true)` 表示该键已被消费。全局键（`is_global_key`）会先被放行给
-/// `input.rs` 的全局分支。
+/// 返回 `Ok(true)` 表示该键已被消费。
+///
+/// **全局键先放行。** 各 modal handler 的 `match key.code` 不看修饰键，且结尾
+/// 无条件 `Ok(true)` —— 于是 `Ctrl+P` 被当成字符 'p' 打进过滤框，`Ctrl+C` 被吃掉
+/// 导致流式输出无法中断，`F1` 被 `_ => {}` 静默吞掉。放行名单由
+/// [`keymap::is_global_key`] 从全局绑定注册表推导，与帮助文案同源。
 ///
 /// **这张表必须穷尽 [`Modal`] 的全部变体。** 此前这里是 `match top { … _ => Ok(false) }`：
 /// 新加一个变体编译得过、弹窗也画得出来，按键却会静默漏到主输入框 —— 在只读弹窗
@@ -33,23 +37,18 @@ pub async fn handle_modal_key(
     };
 
     // 输入框叠在别的模态之上打开时未必在栈顶（见 `exit_input_modal` 用 retain
-    // 而不是 pop 的原因）。它是模态栈的一员，因此这里同样要让位给输入框 ——
-    // 以前这个判断读的是一个平行的 `show_input_modal` flag，才会出现两个真相源
-    // 不同步时的「面板看得见、却什么都按不动」。
-    if state.is_input_modal_open() {
-        return crate::ui::events::input::handle_input_modal(state, key, agent_tx).await;
-    }
-
-    // 全局键优先于 modal。
+    // 而不是 pop 的原因）。以前这个判断读的是一个平行的 `show_input_modal` flag，
+    // 现在它就是栈本身 —— 两个真相源不同步时的「面板看得见、却什么都按不动」
+    // 随之消失。
     //
-    // 各 modal handler 的 `match key.code` 不看修饰键，且结尾无条件 `Ok(true)`
-    // —— 于是 `Ctrl+P` 被当成字符 'p' 打进过滤框，`Ctrl+C` 被吃掉导致流式输出
-    // 无法中断，`F1` 被 `_ => {}` 静默吞掉。这里前置放行，让这些键回落到
-    // input.rs 的全局分支处理；modal 自身的 Esc/↑/↓/Enter 语义不受影响。
-    //
-    // 放行名单由 `keymap::is_global_key` 从全局绑定注册表推导，与帮助文案同源。
+    // 位置在全局键放行**之后**：填 API Key 时按 Ctrl+P 仍能跳去命令面板、Ctrl+C
+    // 仍能中断生成，与重构前一致。
     if super::keymap::is_global_key(&key) {
         return Ok(false);
+    }
+
+    if state.is_input_modal_open() {
+        return crate::ui::events::input::handle_input_modal(state, key, agent_tx).await;
     }
 
     match top {
