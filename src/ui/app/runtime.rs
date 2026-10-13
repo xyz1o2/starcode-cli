@@ -776,12 +776,19 @@ pub async fn run_ui_loop(
             state.end_thinking();
             state.last_token_time = None;
             // 取消后不会有 Done 到来，entry 上的流式标记得在这里清掉
+            let mut partial_kept = false;
             for entry in state.chat_history.iter_mut() {
                 if entry.is_streaming == Some(true) {
                     entry.is_streaming = Some(false);
+                    partial_kept |= !entry.content.trim().is_empty();
                 }
             }
             state.rendered_cache.clear();
+            // 中断提示行（对标 CC 的 "Interrupted · What should Claude do instead?"）。
+            //
+            // 位置就在这里：这是**唯一**知道"用户刚按了 Esc"的地方（Done 在取消后
+            // 不会到来）。没有它，用户只看到输入框恢复可用，不知道刚才那半句话算不算数。
+            crate::ui::components::interrupted::push_interrupted_notice(state, partial_kept);
             // Clear confirmation state to unblock queued messages
             state.is_awaiting_confirmation = false;
             state.pending_confirmation_entry_idx = None;

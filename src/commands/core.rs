@@ -134,10 +134,88 @@ pub async fn status(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResul
         lines.push(format!("**已配置供应商:** {} 个", store.providers.len()));
     }
 
+    lines.extend(setting_sources_section(&ctx.state));
+
     ctx.state
         .chat_history
         .push(ChatEntry::assistant(lines.join("\n")).with_streaming(false));
     Ok(())
+}
+
+/// `/status` 的 **Setting sources** 段（对标 CC `/status` 的同名一行）。
+///
+/// 存在的理由不是"列个路径好看"，而是 StarCode 的全局层**有两个** settings 文件名：
+/// `user-settings.json` 管 model/provider/凭据，`settings.json` 管 `permissions`
+/// 与 `hooks`（见 `Storage::global_settings_path` 的函数文档）。用户把 allow/deny
+/// 写进其中一个文件却被另一个的同名 key 盖住时，没有任何界面能看出这回事 ——
+/// `/status` 是唯一能一眼看出"我这次到底读了哪些文件、哪些存在"的地方。
+fn setting_sources_section(state: &crate::ui::state::ChatState) -> Vec<String> {
+    use crate::core::config::storage::Storage;
+
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let storage = Storage::new(cwd.clone());
+
+    // (标签, 路径, 这一层负责什么)
+    let sources: Vec<(&str, std::path::PathBuf, &str)> = vec![
+        (
+            "user",
+            Storage::global_settings_path(),
+            "permissions / hooks",
+        ),
+        (
+            "user",
+            Storage::global_star_dir().join("user-settings.json"),
+            "defaultModel / providers / apiKey",
+        ),
+        (
+            "project",
+            storage.workspace_settings_path(),
+            "committable project settings",
+        ),
+        (
+            "local",
+            storage.star_dir().join("settings.local.json"),
+            "personal overrides (gitignored)",
+        ),
+    ];
+
+    let mut out = vec![String::new(), "**Setting sources**".to_string()];
+    let mut any = false;
+    for (scope, path, owns) in sources {
+        let exists = path.exists();
+        any |= exists;
+        out.push(format!(
+            "- [{}] `{}`{} — {}",
+            scope,
+            path.display(),
+            if exists { "" } else { " (missing)" },
+            owns
+        ));
+    }
+
+    // 权限规则的来源与数量：与上面的文件清单同一套 `SettingsPermissions`
+    let perms = crate::core::policy::SettingsPermissions::from_project(&cwd);
+    out.push(format!(
+        "- 生效的权限规则: allow={} ask={} deny={}",
+        perms.allow.len(),
+        perms.ask.len(),
+        perms.deny.len()
+    ));
+    if perms.default_mode.is_some() {
+        out.push(format!(
+            "- settings `defaultMode`: `{}`（本次启动：{}）",
+            perms.default_mode.as_deref().unwrap_or(""),
+            state
+                .current_status_line
+                .as_deref()
+                .unwrap_or("以状态栏为准"),
+        ));
+    }
+    if !any {
+        out.push("- 提示：没有任何配置文件存在，所有行为走内置默认值。".to_string());
+    }
+
+    out
 }
 
 pub async fn about(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {

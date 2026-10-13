@@ -105,6 +105,10 @@ struct CliArgs {
     #[arg(long = "resume", short = 'r', num_args = 0..=1, default_missing_value = "latest")]
     resume: Option<String>,
 
+    /// Continue the most recent session (shortcut for `--resume latest`)
+    #[arg(long = "continue", short = 'c', conflicts_with = "resume")]
+    continue_session: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -315,7 +319,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(crate::core::policy::approval_mode_from_str)
     };
 
-    let resumed_session = match args.resume.as_deref() {
+    // `--continue` 是 `--resume latest` 的别名（对标 CC 的 `-c`）。
+    // 之前只有 `-r`，而"接着上次继续"恰恰是最常用的那条路径 —— 用户被迫先知道
+    // 自己的 session id 才能续上。
+    let requested_resume = if args.continue_session {
+        Some("latest")
+    } else {
+        args.resume.as_deref()
+    };
+    let resumed_session = match requested_resume {
         Some(requested_id) => Some(resolve_resume_session(requested_id).await.map_err(
             |error| {
                 eprintln!("{}", error);

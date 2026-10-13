@@ -32,7 +32,14 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
             vec![
                 (
                     "Tab".to_string(),
-                    i18n::t("ui.help.input.tab", "补全/接受建议", "Autocomplete/accept"),
+                    // 这里此前写的是「补全/接受建议」，实际主输入区的 Tab 是折叠/展开
+                    // 当前视口中心的工具输出块（`input.rs` 的 `KeyCode::Tab` 分支）。
+                    // 补全走的是提示浮层的 ↑/↓ + Enter，写错等于教用户按一个不存在的键。
+                    i18n::t(
+                        "ui.help.input.tab",
+                        "折叠/展开工具输出",
+                        "Expand/collapse tool output",
+                    ),
                 ),
                 (
                     "Enter".to_string(),

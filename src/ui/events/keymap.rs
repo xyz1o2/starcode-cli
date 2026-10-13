@@ -11,6 +11,10 @@
 //! 现在：绑定只有 [`GlobalBinding`] 一处定义，帮助文案与「哪些键在 modal 里
 //! 仍然生效」都由它生成，杜绝第三份副本。
 //!
+//! 键位分工上刻意区分两个搜索：[`GlobalBinding::GlobalSearch`]（`Ctrl+Shift+F`）
+//! 搜仓库里的文件，[`GlobalBinding::SearchChat`]（`Ctrl+F`）搜已经发生的对话。
+//! 长会话里"刚才那条命令是什么"只有后者能回答，两者不能共用一个键。
+//!
 //! # 与 modal 层的关系
 //!
 //! 各 modal handler 的 `match key.code` **不看修饰键**，`Ctrl+C` 会被当成
@@ -28,8 +32,10 @@ pub enum GlobalBinding {
     ToggleTranscript,
     /// Ctrl+T — 切换任务面板
     ToggleTasks,
-    /// Ctrl+Shift+F — 全局搜索
+    /// Ctrl+Shift+F — 全局搜索（搜仓库文件）
     GlobalSearch,
+    /// Ctrl+F — 对话内搜索（搜已发生的对话，与上面那个不是一回事）
+    SearchChat,
     /// Ctrl+Shift+P — 快速打开文件
     QuickOpen,
     /// Ctrl+R — 历史搜索
@@ -62,6 +68,7 @@ impl GlobalBinding {
             Self::ToggleTranscript => "Ctrl+O",
             Self::ToggleTasks => "Ctrl+T",
             Self::GlobalSearch => "Ctrl+Shift+F",
+            Self::SearchChat => "Ctrl+F",
             Self::QuickOpen => "Ctrl+Shift+P",
             Self::HistorySearch => "Ctrl+R",
             Self::CopyOrInterrupt => "Ctrl+C",
@@ -108,6 +115,11 @@ pub const GLOBAL_BINDINGS: &[BindingDoc] = &[
         binding: GlobalBinding::GlobalSearch,
         zh: "全局搜索代码",
         en: "Search across files",
+    },
+    BindingDoc {
+        binding: GlobalBinding::SearchChat,
+        zh: "在本对话中搜索",
+        en: "Search this conversation",
     },
     BindingDoc {
         binding: GlobalBinding::QuickOpen,
@@ -184,6 +196,7 @@ pub fn binding_for(key: &KeyEvent) -> Option<GlobalBinding> {
             KeyCode::Char('o') => GlobalBinding::ToggleTranscript,
             KeyCode::Char('t') => GlobalBinding::ToggleTasks,
             KeyCode::Char('f') if shift => GlobalBinding::GlobalSearch,
+            KeyCode::Char('f') => GlobalBinding::SearchChat,
             KeyCode::Char('p') if shift => GlobalBinding::QuickOpen,
             KeyCode::Char('r') => GlobalBinding::HistorySearch,
             KeyCode::Char('c') => GlobalBinding::CopyOrInterrupt,
@@ -281,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_shift_f_is_global_search_not_plain_f() {
+    fn ctrl_f_and_ctrl_shift_f_are_distinct() {
         assert_eq!(
             binding_for(&key(
                 KeyCode::Char('f'),
@@ -289,10 +302,10 @@ mod tests {
             )),
             Some(GlobalBinding::GlobalSearch)
         );
-        // 普通 Ctrl+F 不绑定（留给终端/输入框）
+        // Ctrl+F 搜对话，Ctrl+Shift+F 搜仓库文件 —— 两个不同的东西，不能共用一个键
         assert_eq!(
             binding_for(&key(KeyCode::Char('f'), KeyModifiers::CONTROL)),
-            None
+            Some(GlobalBinding::SearchChat)
         );
     }
 
@@ -370,6 +383,7 @@ mod tests {
             GlobalBinding::ToggleTranscript,
             GlobalBinding::ToggleTasks,
             GlobalBinding::GlobalSearch,
+            GlobalBinding::SearchChat,
             GlobalBinding::QuickOpen,
             GlobalBinding::HistorySearch,
             GlobalBinding::CopyOrInterrupt,

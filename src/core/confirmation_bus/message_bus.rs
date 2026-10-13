@@ -341,7 +341,7 @@ mod tests {
     ) -> impl std::future::Future<
         Output = Result<ToolConfirmationResponse, Box<dyn std::error::Error>>,
     > + Send
-    + 'a {
+           + 'a {
         bus.request_cancellable(request_for("Edit"), 600_000, Some(token))
     }
 
@@ -363,10 +363,11 @@ mod tests {
             token.cancel();
         };
 
-        let (result, ()) =
-            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(wait, canceller) })
-                .await
-                .expect("abort 后必须立刻返回，不能等 600 秒超时");
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(wait, canceller)
+        })
+        .await
+        .expect("abort 后必须立刻返回，不能等 600 秒超时");
 
         assert!(result.is_err(), "被中断的等待必须返回错误而不是确认通过");
     }
@@ -433,22 +434,25 @@ mod tests {
                     _ => continue,
                 }
             };
-            bus.publish(Message::ToolConfirmationResponse(ToolConfirmationResponse {
-                message_type: MessageBusType::ToolConfirmationResponse,
-                correlation_id: id,
-                confirmed: true,
-                requires_user_confirmation: None,
-                outcome: Some(crate::types::ToolConfirmationOutcome::ProceedOnce),
-                feedback: None,
-            }))
+            bus.publish(Message::ToolConfirmationResponse(
+                ToolConfirmationResponse {
+                    message_type: MessageBusType::ToolConfirmationResponse,
+                    correlation_id: id,
+                    confirmed: true,
+                    requires_user_confirmation: None,
+                    outcome: Some(crate::types::ToolConfirmationOutcome::ProceedOnce),
+                    feedback: None,
+                },
+            ))
             .await
             .ok();
         };
 
-        let (result, ()) =
-            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(wait, responder) })
-                .await
-                .expect("应答后必须返回");
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(wait, responder)
+        })
+        .await
+        .expect("应答后必须返回");
         assert!(
             result.expect("应答应被匹配上").confirmed,
             "用户点了允许却拿到取消"

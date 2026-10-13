@@ -139,6 +139,88 @@ pub enum QuickMenuKind {
     Session,
 }
 
+/// 对话内搜索状态（对标 Claude Code 的 Ctrl+F）。
+///
+/// 与 `GlobalSearchState`（ripgrep 搜文件）**不是一回事**：那个搜仓库里的文件，
+/// 这个搜已经发生过的对话 —— 长会话里"刚才那条命令是什么"只能靠它。
+///
+/// 命中位置用**渲染行号**记录（`rendered_cache` 按 entry 下标展开后的行下标），
+/// 不是 entry 下标：滚动、跳转、高亮都以屏幕行为单位，entry 下标在这三件事上都不够用。
+#[derive(Debug, Clone, Default)]
+pub struct ChatSearchState {
+    /// 面板是否打开
+    pub active: bool,
+    /// 查询串
+    pub query: String,
+    /// 命中的渲染行号，升序
+    pub matches: Vec<usize>,
+    /// 当前命中的下标（指向 `matches`）
+    pub selected: usize,
+    /// 输入光标在 query 里的位置
+    pub cursor: usize,
+    /// 面板出现前的滚动位置，关闭时还原
+    pub restore_scroll: usize,
+    /// 上一次搜索的结果数，用于"无匹配"提示的翻转
+    pub last_result_count: usize,
+}
+
+impl ChatSearchState {
+    pub fn open(&mut self, current_scroll: usize) {
+        if !self.active {
+            self.restore_scroll = current_scroll;
+        }
+        self.active = true;
+    }
+
+    pub fn close(&mut self) {
+        self.active = false;
+        self.query.clear();
+        self.matches.clear();
+        self.selected = 0;
+        self.cursor = 0;
+        self.last_result_count = 0;
+    }
+
+    pub fn is_empty_query(&self) -> bool {
+        self.query.is_empty()
+    }
+
+    /// 当前命中的渲染行号。
+    pub fn current_match(&self) -> Option<usize> {
+        self.matches.get(self.selected).copied()
+    }
+
+    /// 跳到下一个/上一个命中，到头则绕回。
+    pub fn step(&mut self, forward: bool) -> Option<usize> {
+        if self.matches.is_empty() {
+            return None;
+        }
+        self.selected = if forward {
+            (self.selected + 1) % self.matches.len()
+        } else if self.selected == 0 {
+            self.matches.len() - 1
+        } else {
+            self.selected - 1
+        };
+        self.current_match()
+    }
+
+    /// 用新的查询词重跑搜索。`haystack` 是逐条目的纯文本（与渲染行一一对应）。
+    pub fn run(&mut self, haystack: &[String]) {
+        self.matches.clear();
+        self.selected = 0;
+        let needle = self.query.to_lowercase();
+        if !needle.is_empty() {
+            for (row, text) in haystack.iter().enumerate() {
+                if text.to_lowercase().contains(&needle) {
+                    self.matches.push(row);
+                }
+            }
+        }
+        self.last_result_count = self.matches.len();
+    }
+}
+
 /// 文本选择状态
 #[derive(Debug, Clone)]
 pub struct TextSelection {
@@ -502,6 +584,8 @@ pub struct ChatState {
     // ============ 文本选择和复制功能 ============
     pub text_selection: TextSelection,
     pub copy_status: Option<std::time::Instant>, // 复制状态显示时间
+    // ============ 对话内搜索（Ctrl+F）============
+    pub chat_search: ChatSearchState,
     // ============ Git Status ============
     pub git_branch: Option<String>,
     pub git_status: Option<String>,
@@ -1046,6 +1130,7 @@ impl ChatState {
             pending_confirmation_feedback: String::new(),
             last_confirmation_message_id: None,
             text_selection: TextSelection::new(),
+            chat_search: ChatSearchState::default(),
             copy_status: None,
             git_branch,
             git_status,

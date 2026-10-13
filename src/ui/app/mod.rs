@@ -80,9 +80,13 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     let queued_panel_h =
         crate::ui::components::queued_input::queued_panel_height(state, viewport.width);
 
+    // 对话内搜索横条（Ctrl+F）：贴在聊天区正上方，恒 1 行。
+    let search_bar_h = crate::ui::components::chat_search::search_bar_height(state);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(search_bar_h),
             Constraint::Min(0),
             Constraint::Length(token_warning_h),
             Constraint::Length(spinner_h),
@@ -92,15 +96,29 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
             Constraint::Length(footer_h),
         ])
         .split(viewport);
-    let chat_area = chunks[0];
-    let token_warning_area = chunks[1];
-    let spinner_area = chunks[2];
-    let task_area = chunks[3];
-    let bg_panel_area = chunks[4];
-    let queued_panel_area = chunks[5];
-    let footer_area = chunks[6];
+    let search_bar_area = chunks[0];
+    let chat_area = chunks[1];
+    let token_warning_area = chunks[2];
+    let spinner_area = chunks[3];
+    let task_area = chunks[4];
+    let bg_panel_area = chunks[5];
+    let queued_panel_area = chunks[6];
+    let footer_area = chunks[7];
 
-    let chat_lines = crate::ui::components::chat_history::render_chat_lines(state, chat_area.width);
+    // 右侧永远留 1 列给滚动条。
+    //
+    // 为什么不是"能滚了才留"：聊天区宽度决定 `render_chat_lines` 的折行结果，
+    // 而能不能滚又取决于折行后的总行数 —— 按"能滚才收窄"会让宽度和行数互相触发，
+    // 在临界点上逐帧抖动。所以宽度是常量（稳定命中 `last_terminal_width` 缓存），
+    // 滚动条只在真的溢出时才画。
+    let chat_content_width = chat_area.width.saturating_sub(1).max(1);
+    let chat_content_area = Rect {
+        width: chat_content_width,
+        ..chat_area
+    };
+
+    let chat_lines =
+        crate::ui::components::chat_history::render_chat_lines(state, chat_content_width);
     let total = chat_lines.len();
     let max_scroll = total.saturating_sub(chat_area.height as usize);
     let scroll = if state.auto_follow || state.scroll > max_scroll {
@@ -140,7 +158,45 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     //
     // 用本帧算出来的 `scroll`，不是 `state.scroll`：后者要到 `draw_ui` 渲染完之后
     // 才回写（`auto_follow` 时每帧都变），读它等于用上一帧的位置画这一帧。
-    crate::ui::utils::render::write_lines_to_buffer(f.buffer_mut(), chat_area, &chat_lines, scroll);
+    crate::ui::utils::render::write_lines_to_buffer(
+        f.buffer_mut(),
+        chat_content_area,
+        &chat_lines,
+        scroll,
+    );
+
+    // 当前搜索命中行的高亮。画在写入聊天文本**之后**，否则会被内容覆盖。
+    if let Some(row) = state.chat_search.current_match() {
+        crate::ui::components::chat_search::highlight_current_match(
+            f,
+            &chat_lines,
+            chat_content_area,
+            scroll,
+            row,
+        );
+    }
+
+    // 滚动条（对标 CC 的右侧滑块）：长会话里唯一能看出"我离底部多远"的东西。
+    //
+    // 之前这条逻辑只存在于 `render_chat_history` 里，而那个函数全仓没有调用点 ——
+    // 活路径走的是 `render_chat_lines` + `write_lines_to_buffer`，于是滚动条从未画出来。
+    state.chat_scrollbar_state = state
+        .chat_scrollbar_state
+        .content_length(total)
+        .position(scroll);
+    if total > chat_area.height as usize && chat_area.width > 2 {
+        let scrollbar_area = Rect {
+            x: chat_area.x + chat_content_width,
+            y: chat_area.y,
+            width: 1,
+            height: chat_area.height,
+        };
+        f.render_stateful_widget(
+            ratatui::widgets::Scrollbar::new(ratatui::widgets::ScrollbarOrientation::VerticalRight),
+            scrollbar_area,
+            &mut state.chat_scrollbar_state,
+        );
+    }
 
     // Render token warning (context window usage)
     if !token_warning_lines.is_empty() {
@@ -167,6 +223,10 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
             // is_processing 在 agent 收到 Done 时回落 false（stream.rs），转圈跟着停
             state.is_processing,
         );
+    }
+
+    if search_bar_h > 0 {
+        crate::ui::components::chat_search::render_chat_search_bar(f, state, search_bar_area);
     }
 
     if bg_panel_h > 0 {

@@ -983,13 +983,10 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         category: "Git",
         sub_commands: &[],
     },
-    SlashCommand {
-        name: "eval",
-        alt_names: &[],
-        description: "Run agent evaluation suite",
-        category: "Automation",
-        sub_commands: &[],
-    },
+    // `/eval` 的声明随 eval harness 一起删除（2026-10-13）。
+    // 它留着的时候 `/help` 与 `/` 补全都列着它，输入却报 Unknown command ——
+    // `is_declared_pending()` 只认 `category: "Pending"`，所以没有任何东西会提醒。
+    // 保留一条"看得见但打不开"的命令比不声明更糟。
     // === Debug ===
     SlashCommand {
         name: "test",
@@ -1530,7 +1527,7 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "continue",
         alt_names: &[],
-        description: "Resume the current conversation (alias of /resume)",
+        description: "Continue the most recent session (same as --continue)",
         category: "Session",
         sub_commands: &[],
     },
@@ -2590,5 +2587,22 @@ mod tests {
             .map(|c| c.name)
             .collect();
         assert!(pending.is_empty(), "still marked Pending: {:?}", pending);
+    }
+
+    /// 声明了却没有 dispatch 的命令会**静默失败**：`is_declared_pending()` 只认
+    /// `category: "Pending"`，一条 `category: "Automation"` 的悬空声明既出现在
+    /// `/help` 与补全里，输入时又报 `Unknown command` —— `/eval` 就是这么烂掉的。
+    ///
+    /// 这个断言只能靠人维护白名单（没有反射能证明某个 `match` 分支存在），
+    /// 但它至少保证"白名单里的都真的接上了"，新增悬空声明时会在这里提醒补名单。
+    #[test]
+    fn known_dangling_declarations_are_gone() {
+        // 历史上出现过的悬空声明：声明在 ALL_COMMANDS，handler 已随子系统删除
+        for name in ["eval"] {
+            assert!(
+                !ALL_COMMANDS.iter().any(|c| c.name == name),
+                "`/{name}` 仍被声明但没有 handler，/help 与补全会把它列出来",
+            );
+        }
     }
 }

@@ -537,7 +537,10 @@ mod tests {
         let engine = engine_in(ApprovalMode::Default);
         for tool in ["Read", "Grep", "Glob", "ListDir", "TodoWrite"] {
             let result = engine
-                .check(&call(tool, serde_json::json!({"file_path": "src/main.rs"})), None)
+                .check(
+                    &call(tool, serde_json::json!({"file_path": "src/main.rs"})),
+                    None,
+                )
                 .await;
             assert_eq!(
                 result.decision,
@@ -561,7 +564,10 @@ mod tests {
         });
         assert_eq!(
             engine
-                .check(&call("Read", serde_json::json!({"file_path": "Cargo.toml"})), None)
+                .check(
+                    &call("Read", serde_json::json!({"file_path": "Cargo.toml"})),
+                    None
+                )
                 .await
                 .decision,
             PolicyDecision::Allow
@@ -584,7 +590,10 @@ mod tests {
             ("Write", serde_json::json!({"path": "a.txt"})),
             ("Edit", serde_json::json!({"file_path": "a.txt"})),
             ("Bash", serde_json::json!({"command": "git push"})),
-            ("WebFetch", serde_json::json!({"url": "https://example.com"})),
+            (
+                "WebFetch",
+                serde_json::json!({"url": "https://example.com"}),
+            ),
         ] {
             assert_eq!(
                 engine.check(&call(tool, args), None).await.decision,
@@ -605,7 +614,10 @@ mod tests {
         engine.set_settings_permissions(perms);
 
         let result = engine
-            .check(&call("Read", serde_json::json!({"file_path": "a.txt"})), None)
+            .check(
+                &call("Read", serde_json::json!({"file_path": "a.txt"})),
+                None,
+            )
             .await;
         assert_eq!(result.decision, PolicyDecision::AskUser);
         assert!(
@@ -621,7 +633,10 @@ mod tests {
         with_deny.set_settings_permissions(perms);
         assert!(matches!(
             with_deny
-                .check(&call("Read", serde_json::json!({"file_path": "a.txt"})), None)
+                .check(
+                    &call("Read", serde_json::json!({"file_path": "a.txt"})),
+                    None
+                )
                 .await
                 .decision,
             PolicyDecision::DenyWithReason(_)
@@ -652,10 +667,19 @@ mod tests {
 
         for (tool, args) in [
             ("Bash", serde_json::json!({"command": "git push"})),
-            ("Bash", serde_json::json!({"command": "ls && rm -rf target"})),
+            (
+                "Bash",
+                serde_json::json!({"command": "ls && rm -rf target"}),
+            ),
             ("Bash", serde_json::json!({"command": "cat a.txt > b.txt"})),
-            ("Bash", serde_json::json!({"command": "/usr/bin/env sh -c 'rm -rf x'"})),
-            ("WebFetch", serde_json::json!({"url": "https://example.com"})),
+            (
+                "Bash",
+                serde_json::json!({"command": "/usr/bin/env sh -c 'rm -rf x'"}),
+            ),
+            (
+                "WebFetch",
+                serde_json::json!({"url": "https://example.com"}),
+            ),
         ] {
             assert_eq!(
                 engine.check(&call(tool, args.clone()), None).await.decision,
@@ -670,7 +694,10 @@ mod tests {
             serde_json::json!({"command": "ls `rm -rf target`"}),
         ] {
             assert_ne!(
-                engine.check(&call("Bash", args.clone()), None).await.decision,
+                engine
+                    .check(&call("Bash", args.clone()), None)
+                    .await
+                    .decision,
                 PolicyDecision::Allow,
                 "{args} 绝不能被 acceptEdits 静默放行"
             );

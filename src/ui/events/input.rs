@@ -1634,6 +1634,137 @@ async fn handle_model_confirmation(
     Ok(())
 }
 
+/// 打开对话内搜索面板（Ctrl+F）。
+///
+/// 搜的是**已经渲染出来的对话行**，不是 `chat_history` 里的结构化条目 ——
+/// 用户记得的是"屏幕上那行写着 `cargo test`"，让他按渲染行去搜才对得上。
+/// 命中行号落在 `ChatSearchState::matches` 里，与滚动/高亮共用一套坐标。
+pub fn open_chat_search(state: &mut ChatState) {
+    let scroll = state.scroll;
+    state.chat_search.open(scroll);
+    rerun_chat_search(state);
+    // 面板是叠加层，不抢输入焦点：主输入框保持可打字
+    state.auto_follow = false;
+}
+
+/// 关闭面板并回到打开前的滚动位置。
+pub fn close_chat_search(state: &mut ChatState) {
+    let restore = state.chat_search.restore_scroll;
+    state.chat_search.close();
+    let max_scroll = state
+        .total_rendered_lines
+        .saturating_sub(state.last_chat_height as usize);
+    state.scroll = restore.min(max_scroll);
+    // 只有原本就贴着底部才恢复跟随，否则会把用户正在读的历史拽走
+    state.auto_follow = restore >= max_scroll;
+}
+
+/// 用当前 query 重跑搜索，并跳到视口内的第一个命中。
+fn rerun_chat_search(state: &mut ChatState) {
+    let haystack = chat_search_haystack(state);
+    state.chat_search.run(&haystack);
+
+    let height = state.last_chat_height as usize;
+    let top = state.scroll;
+    let bottom = top + height;
+    let viewport = |row: usize| row >= top && row < bottom;
+    // 视口内没有命中时跳第一个，否则跳第一个落在视口里的
+    let target = state
+        .chat_search
+        .matches
+        .iter()
+        .position(|row| viewport(*row))
+        .unwrap_or(0);
+    state.chat_search.selected = target;
+    reveal_chat_search_match(state);
+}
+
+/// 把命中行滚进视口中央。
+fn reveal_chat_search_match(state: &mut ChatState) {
+    let Some(row) = state.chat_search.current_match() else {
+        return;
+    };
+    let height = state.last_chat_height as usize;
+    if height == 0 {
+        return;
+    }
+    state.scroll = row.saturating_sub(height / 3);
+    let max_scroll = state.total_rendered_lines.saturating_sub(height);
+    state.scroll = state.scroll.min(max_scroll);
+    state.auto_follow = false;
+}
+
+/// 搜索用的逐行文本：与 `render_chat_lines` 的输出逐行对齐。
+///
+/// 必须与渲染同源，否则命中行号会整体错位（用户跳过去看到的是隔壁那条）。
+/// 因此这里**按 entry 下标顺序**遍历 `rendered_cache` —— 它是 `HashMap`，
+/// 直接 `.values()` 拿到的是任意顺序，命中会全落到错误的行上。
+fn chat_search_haystack(state: &ChatState) -> Vec<String> {
+    let mut lines = Vec::with_capacity(state.total_rendered_lines);
+    for idx in 0..state.chat_history.len() {
+        // 缓存里没有的条目（尚未渲染过）当空行跳过：它们的行数在缓存缺失时不可知，
+        // 猜一个高度只会让后面的行号全错。
+        let Some((_, entry_lines)) = state.rendered_cache.get(&idx) else {
+            continue;
+        };
+        for line in entry_lines {
+            lines.push(
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>(),
+            );
+        }
+    }
+    lines
+}
+
+/// 搜索面板的按键处理。面板打开期间吞掉除下面这些键以外的一切 ——
+/// 漏一个就会表现为"打一个字进了主输入框"。
+fn handle_chat_search_key(state: &mut ChatState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => close_chat_search(state),
+        KeyCode::Enter => {
+            if state.chat_search.step(true).is_some() {
+                reveal_chat_search_match(state);
+            }
+        }
+        KeyCode::Backspace => {
+            if state.chat_search.cursor > 0 {
+                let cursor = state.chat_search.cursor - 1;
+                let ch = state.chat_search.query.remove(cursor);
+                state.chat_search.cursor = cursor;
+                // 按词退格：连着退到分隔符之前（与 CC / 编辑器一致）
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    let head: String = state.chat_search.query[..cursor].to_string();
+                    let trimmed = head.trim_end();
+                    let removed = head.len() - trimmed.len();
+                    state.chat_search.query.truncate(cursor - removed);
+                    state.chat_search.cursor = cursor - removed;
+                }
+                let _ = ch;
+                rerun_chat_search(state);
+            }
+        }
+        KeyCode::Char(c) => {
+            state.chat_search.query.insert(state.chat_search.cursor, c);
+            state.chat_search.cursor += 1;
+            rerun_chat_search(state);
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            if state.chat_search.step(true).is_some() {
+                reveal_chat_search_match(state);
+            }
+        }
+        KeyCode::Up => {
+            if state.chat_search.step(false).is_some() {
+                reveal_chat_search_match(state);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Shift+Tab（`TogglePlanMode`）：Default → AcceptEdits → Plan → Yolo → Default
 /// （对标 app:cycleMode / CC 的 shift+tab）。
 ///
@@ -1720,6 +1851,20 @@ pub async fn dispatch_global_binding(
         // Ctrl+Shift+F：全局搜索（对标 Claude Code app:globalSearch）
         GlobalBinding::GlobalSearch => {
             state.open_global_search();
+            Ok(true)
+        }
+        // Ctrl+F：对话内搜索（对标 Claude Code conversation search）。
+        // 与 Ctrl+Shift+F 的区别：那个搜仓库里的文件，这个搜已经发生过的对话 ——
+        // 长会话里"刚才那条命令到底写的什么"只能靠它。
+        GlobalBinding::SearchChat => {
+            if state.is_awaiting_confirmation || state.is_input_modal_open() {
+                return Ok(false);
+            }
+            if state.chat_search.active {
+                close_chat_search(state);
+            } else {
+                open_chat_search(state);
+            }
             Ok(true)
         }
         // Ctrl+Shift+P：快速打开文件（对标 Claude Code app:quickOpen）
@@ -1921,6 +2066,18 @@ pub async fn handle_key_event(
     // ── Unified modal stack takes priority over everything else ──
     // Palette / MCP / Market modals consume keys first; Esc pops one level.
     if super::modal_input::handle_modal_key(state, key, agent_tx).await? {
+        return Ok(());
+    }
+
+    // ── 对话内搜索面板（Ctrl+F）──────────────────────────────────────────
+    //
+    // 位置在 modal 栈**之后**、全局键注册表**之前**：
+    // - 必须在注册表之前 —— 否则 Ctrl+F 面板开着时再按 Ctrl+F 会把它关掉两次，
+    //   而面板打开期间输入框不该拿到这些键；
+    // - 不能进 modal 栈 —— 它是一个常驻在聊天区顶部的横条，不是居中对话框，
+    //   而 modal 栈会连带夺走 Enter/Esc 之外的按键。
+    if state.chat_search.active {
+        handle_chat_search_key(state, key);
         return Ok(());
     }
 
@@ -2437,8 +2594,12 @@ pub async fn handle_key_event(
                                 state.expanded_tool_call_ids.insert(tc.id.clone());
                             }
                             state.rendered_cache.remove(&idx);
+                            state.virtual_list.mark_dirty(idx);
                         }
                     }
+                    // 展开/折叠会改变该块的高度，视口锚点必须跟着重算，
+                    // 否则用户展开的是当前屏幕中央那块，看的却是别处的滚动位置。
+                    state.auto_follow = false;
                 }
             }
         }
@@ -3605,26 +3766,43 @@ async fn handle_paste(
 fn find_focused_tool_entry(state: &ChatState) -> Option<usize> {
     use crate::types::ChatEntryType;
 
-    let viewport_center = state.scroll + (state.last_chat_height as usize / 2);
+    let viewport_height = state.last_chat_height as usize;
+    if viewport_height == 0 {
+        return None;
+    }
+    // 用本帧算出来的 scroll，而不是 state.scroll：后者要到渲染完才回写，
+    // auto_follow 时每帧都在变（与 app/mod.rs 里 chat 区的取法同一个理由）。
+    let max_scroll = state.total_rendered_lines.saturating_sub(viewport_height);
+    let scroll = if state.auto_follow || state.scroll > max_scroll {
+        max_scroll
+    } else {
+        state.scroll
+    };
+    let viewport_center = scroll + viewport_height / 2;
 
-    // Only search for ToolCall entries (ToolResult has no tool_call field to toggle)
+    // 关键：条目的**屏幕行区间**由 `virtual_list` 记录的真实高度累加得到。
+    //
+    // 原实现拿 entry 下标跟 `scroll / 2` 比距离 —— entry 下标是序号不是行号，
+    // 一个 30 行的工具块和一个 1 行的回复在下标空间里等价，于是 Tab 经常展开
+    // 视口里根本看不见的那一块，用户看到的是"什么都没发生"。
     let mut best_idx: Option<usize> = None;
     let mut best_distance: usize = usize::MAX;
-
+    let mut top = 0usize;
     for (idx, entry) in state.chat_history.iter().enumerate() {
-        if entry.entry_type != ChatEntryType::ToolCall {
-            continue;
+        let height = state.virtual_list.item_height(idx) as usize;
+        let bottom = top + height;
+        if entry.entry_type == ChatEntryType::ToolCall && height > 0 {
+            // 条目覆盖视口中心才算是"焦点所在"
+            if viewport_center >= top && viewport_center < bottom {
+                let mid = top + height / 2;
+                let distance = mid.abs_diff(viewport_center);
+                if distance < best_distance {
+                    best_distance = distance;
+                    best_idx = Some(idx);
+                }
+            }
         }
-        // Approximate: use entry index as rough position indicator
-        let distance = if idx > viewport_center / 2 {
-            idx.saturating_sub(viewport_center / 2)
-        } else {
-            (viewport_center / 2).saturating_sub(idx)
-        };
-        if distance < best_distance {
-            best_distance = distance;
-            best_idx = Some(idx);
-        }
+        top = bottom;
     }
 
     best_idx
@@ -3686,6 +3864,76 @@ fn apply_vim_motion(state: &mut ChatState, motion: &crate::ui::vim::motions::Mot
 mod tests {
     use super::*;
     use crate::ui::state::store::AgentTaskInfo;
+
+    /// 对话内搜索：命中行号必须与 `render_chat_lines` 的输出一致。
+    ///
+    /// 这一致性是全部功能的前提 —— 跳到"第 N 行"而高亮画在第 M 行，用户就再也
+    /// 找不到那句话了。所以这里用真实渲染结果当 haystack，不自己拼一份假数据。
+    #[test]
+    fn chat_search_matches_rendered_lines_and_jumps_there() {
+        let mut state = ChatState::test_fixture();
+        state.chat_history = vec![
+            crate::types::ChatEntry::user("cargo test --lib"),
+            crate::types::ChatEntry::assistant("跑一遍测试"),
+            crate::types::ChatEntry::user("再跑一次 cargo test"),
+        ];
+        state.rendered_cache.clear();
+
+        // 走真实渲染，让缓存与行高与线上一致
+        let width = 80u16;
+        let lines = crate::ui::components::chat_history::render_chat_lines(&mut state, width);
+        assert!(!lines.is_empty());
+        state.total_rendered_lines = lines.len();
+        state.last_chat_height = 5;
+
+        open_chat_search(&mut state);
+        for c in "cargo".chars() {
+            handle_chat_search_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            );
+        }
+        assert!(!state.chat_search.matches.is_empty(), "应当命中");
+
+        let first = state.chat_search.current_match().expect("first match");
+        let first_text: String = lines[first]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            first_text.to_lowercase().contains("cargo"),
+            "跳到的行必须真的含有查询词，实际 {first_text:?}"
+        );
+
+        // Enter 换到下一处命中，行号必须真的变大（升序）
+        handle_chat_search_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        let second = state.chat_search.current_match().expect("second match");
+        assert!(second > first, "第二个命中应排在更后面");
+        let second_text: String = lines[second]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(second_text.to_lowercase().contains("cargo"));
+
+        // 无匹配时要如实报告 0，而不是沿用上一次的命中
+        state.chat_search.query = "zzz-not-present".to_string();
+        state.chat_search.run(&chat_search_haystack(&state));
+        assert!(state.chat_search.matches.is_empty());
+        assert_eq!(state.chat_search.current_match(), None);
+
+        // Esc 关闭并还原打开前的滚动位置
+        state.scroll = 42;
+        state.chat_search.active = true;
+        state.chat_search.restore_scroll = 42;
+        close_chat_search(&mut state);
+        assert!(!state.chat_search.active);
+        assert_eq!(state.chat_search.restore_scroll, 42);
+    }
 
     /// 注册表里的每个绑定都必须有实现。
     ///

@@ -366,7 +366,7 @@ pub async fn handle_command(
         "think-back" => parity::think_back(ctx, &args).await,
         "weekly-report" => parity::weekly_report(ctx, &args).await,
         // ── 对标 Claude Code 的别名 / 补齐命令（command gaps）─────────────
-        "continue" => chat::resume_cmd(ctx, args).await,
+        "continue" => chat::continue_cmd(ctx, args).await,
         "quit" => core::exit(ctx, args).await,
         "hist" => parity::history(ctx, args).await,
         "mem" => memory_wrapper(ctx, args).await,

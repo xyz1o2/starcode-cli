@@ -2,7 +2,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, Wrap},
+    widgets::Block,
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
@@ -352,199 +352,17 @@ pub fn render_chat_lines(state: &mut ChatState, area_width: u16) -> Vec<Line<'st
     all_lines
 }
 
-pub fn render_chat_history(
-    f: &mut Frame,
-    state: &mut ChatState,
-    chat_area: Rect,
-    _scrollbar_area: Rect,
-) {
-    // ============ UX improvement: render cache ============
-    // Clear cache if terminal width changes
-    if state.last_terminal_width != chat_area.width {
-        state.clear_cache();
-        state.last_terminal_width = chat_area.width;
-    }
-    // =========================================
-
-    // ── VirtualList: per-entry dirty tracking + viewport clipping ──
-    let history_len = state.chat_history.len();
-    state.virtual_list.auto_follow = state.auto_follow;
-    state.virtual_list.resize(history_len);
-
-    // 抬头是渲染期现算的，缓存却只认 dirty 标记 —— 详见 `render_chat_lines` 里的同一句
-    super::welcome_header::refresh_if_stale(state);
-
-    // Save scroll anchor when not auto-following
-    let anchor_idx = if !state.auto_follow && state.virtual_list.total_lines() > 0 {
-        state.virtual_list.item_at_scroll(state.scroll)
-    } else {
-        None
-    };
-
-    // Re-render dirty entries
-    for idx in 0..history_len {
-        let entry = &state.chat_history[idx];
-        let is_streaming = entry.is_streaming == Some(true);
-        let reasoning_len = entry
-            .reasoning_content
-            .as_ref()
-            .map(|r| r.len())
-            .unwrap_or(0);
-        let content_len = entry.content.len();
-        let current_key = (reasoning_len, content_len);
-
-        // Per-entry dirty: streaming OR content changed OR first render
-        let stale = if is_streaming {
-            state.virtual_list.item_height(idx) == 0
-                || state
-                    .last_rendered_stream_key
-                    .get(&idx)
-                    .map(|k| *k != current_key)
-                    .unwrap_or(true)
-        } else {
-            state.virtual_list.is_dirty(idx) || !state.rendered_cache.contains_key(&idx)
-        };
-
-        if !stale {
-            continue;
-        }
-
-        let lines = render_entry_lines(state, idx, chat_area.width);
-        let h = lines.len().min(u16::MAX as usize) as u16;
-        state.virtual_list.set_height(idx, h);
-        // Sync legacy height tracking
-        if idx < state.last_item_heights.len() {
-            state.last_item_heights[idx] = h;
-        }
-
-        if is_streaming {
-            state.rendered_cache.remove(&idx);
-            state.last_rendered_stream_key.insert(idx, current_key);
-        } else {
-            state.rendered_cache.insert(idx, (h, lines));
-            state.last_rendered_stream_key.remove(&idx);
-            state.virtual_list.mark_dirty(idx); // will be cleaned after this frame
-        }
-    }
-
-    state.total_rendered_lines = state.virtual_list.total_lines();
-
-    // Scroll: auto-follow or anchor-preserve.
-    // Subtract 1 from viewport so the last chat line doesn't touch the input.
-    let viewport_height = chat_area.height.saturating_sub(1) as usize;
-    let max_scroll = state
-        .virtual_list
-        .total_lines()
-        .saturating_sub(viewport_height);
-    if !state.auto_follow {
-        if let Some(entry_idx) = anchor_idx {
-            state.scroll = state
-                .virtual_list
-                .anchor_scroll(entry_idx, 0)
-                .min(max_scroll);
-        }
-    }
-    if state.auto_follow {
-        state.scroll = max_scroll;
-    } else if state.scroll > max_scroll {
-        state.scroll = max_scroll;
-    }
-
-    // Use VirtualList's visible range for viewport clipping
-    let (start_idx, end_idx, _skip) = state
-        .virtual_list
-        .visible_range(chat_area.height, state.scroll);
-    let scroll_top = state.scroll;
-    let scroll_bottom = scroll_top + viewport_height;
-
-    let mut visible_lines: Vec<Line> = Vec::with_capacity(viewport_height);
-    let mut current_y = 0usize;
-    // Calculate y-offset up to start_idx
-    for i in 0..start_idx {
-        current_y += state.virtual_list.item_height(i) as usize;
-    }
-
-    for entry_idx in start_idx..end_idx.min(history_len) {
-        let height = state.virtual_list.item_height(entry_idx) as usize;
-        let entry_start = current_y;
-
-        if entry_start < scroll_bottom {
-            let is_streaming = state
-                .chat_history
-                .get(entry_idx)
-                .map(|e| e.is_streaming == Some(true))
-                .unwrap_or(false);
-
-            let lines_cow = if !is_streaming {
-                if let Some((_, lines)) = state.rendered_cache.get(&entry_idx) {
-                    std::borrow::Cow::Borrowed(lines)
-                } else {
-                    let lines = render_entry_lines(state, entry_idx, chat_area.width);
-                    std::borrow::Cow::Owned(lines)
-                }
-            } else {
-                let lines = render_entry_lines(state, entry_idx, chat_area.width);
-                std::borrow::Cow::Owned(lines)
-            };
-
-            let skip = if scroll_top > entry_start {
-                scroll_top - entry_start
-            } else {
-                0
-            };
-            let take = (scroll_bottom - (entry_start + skip)).min(height - skip);
-            let chunk_iter = lines_cow.iter().skip(skip).take(take);
-
-            if state.text_selection.has_selection() {
-                let mut chunk: Vec<Line> = chunk_iter.cloned().collect();
-                apply_selection_highlight(&mut chunk, entry_idx, skip, state);
-                visible_lines.extend(chunk);
-            } else {
-                visible_lines.extend(chunk_iter.cloned());
-            }
-        } else {
-            break;
-        }
-        current_y += height;
-    }
-
-    // Bottom-up fill: insert empty lines at the top so content
-    // sits at the bottom (near the input area), like Claude Code.
-    while visible_lines.len() < viewport_height {
-        visible_lines.insert(0, Line::from(""));
-    }
-
-    let paragraph = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
-
-    f.render_widget(paragraph, chat_area);
-
-    // Update state for next frame calculations
-    state.last_chat_area = Some(chat_area);
-    state.last_chat_height = chat_area.height;
-    state.last_max_scroll = 0;
-
-    // Update Scrollbar
-    state.chat_scrollbar_state = state
-        .chat_scrollbar_state
-        .content_length(state.total_rendered_lines)
-        .position(state.scroll);
-
-    // Render scrollbar indicator on the right edge
-    if chat_area.width > 2 && state.total_rendered_lines > chat_area.height as usize {
-        let scrollbar_area = Rect {
-            x: chat_area.x + chat_area.width - 1,
-            y: chat_area.y,
-            width: 1,
-            height: chat_area.height,
-        };
-        f.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight),
-            scrollbar_area,
-            &mut state.chat_scrollbar_state,
-        );
-    }
-}
-
+/// ⚠️ 曾经的死函数 `render_chat_history` 已于 2026-10-13 删除。**不要在这里找聊天区的渲染逻辑。**
+///
+/// 它是 `render_chat_lines` + `write_lines_to_buffer` 之前的旧实现，`ui/app/mod.rs`
+/// 里真正跑的是那条路径。它内部唯一值得留的逻辑 —— 右侧滚动条与
+/// `chat_scrollbar_state` 的更新 —— 也跟着一起落下了，于是长会话里没有任何位置指示。
+/// 现在这段逻辑在 `ui/app/mod.rs` 的活路径上（见那里的"滚动条"注释）。
+///
+/// `#![allow(dead_code)]` 让它能一直躺在树里不被发现：上面那条 bug 就是这么来的。
+/// 同类待查对象：`interrupted.rs`（6 个函数零调用）、`global_search.rs`、
+/// `theme_picker.rs`、`memory_usage.rs`、`pr_badge.rs`、`cache_pill.rs`。
+///
 /// 渲染某个后台代理的详情视图（对标 teammate view）。
 ///
 /// `viewing_agent_task_id` 命中 `active_agent_tasks` 时返回「标题行 + 该任务的 sub_entries」，

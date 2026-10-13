@@ -883,8 +883,14 @@ mod tests {
             approval_mode_from_str("acceptEdits"),
             Some(ApprovalMode::AcceptEdits)
         );
-        assert_eq!(approval_mode_from_str("accept-edits"), Some(ApprovalMode::AcceptEdits));
-        assert_eq!(approval_mode_from_str("default"), Some(ApprovalMode::Default));
+        assert_eq!(
+            approval_mode_from_str("accept-edits"),
+            Some(ApprovalMode::AcceptEdits)
+        );
+        assert_eq!(
+            approval_mode_from_str("default"),
+            Some(ApprovalMode::Default)
+        );
         assert_eq!(
             approval_mode_from_str("bypassPermissions"),
             Some(ApprovalMode::Yolo)

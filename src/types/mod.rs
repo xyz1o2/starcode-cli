@@ -1037,8 +1037,8 @@ pub enum ApprovalMode {
     #[default]
     Default, // 默认模式：写操作与命令需要确认，只读工具免确认 (Build)
     AcceptEdits, // 接受编辑：文件改动与只读命令免确认，其余仍问
-    Plan, // Plan 模式：只读研究/规划，禁止非只读工具
-    Yolo, // YOLO 模式：所有操作自动执行（危险！）
+    Plan,        // Plan 模式：只读研究/规划，禁止非只读工具
+    Yolo,        // YOLO 模式：所有操作自动执行（危险！）
 }
 
 // ============ UX 改进: ThinkingEffort（思考努力级别）============
@@ -1259,8 +1259,8 @@ pub fn is_file_edit_tool(tool_name: &str) -> bool {
 /// - `;` `&&` `|` 分隔的**每一段**都得是只读程序 —— `ls && rm -rf /` 不能算只读
 pub fn is_readonly_fs_command(tool_name: &str, args: &serde_json::Value) -> bool {
     const READONLY_FS_COMMANDS: &[&str] = &[
-        "pwd", "ls", "ll", "cat", "head", "tail", "wc", "file", "stat", "find", "fd", "grep",
-        "rg", "ag", "tree", "diff", "cmp", "which", "type", "du", "df", "basename", "dirname",
+        "pwd", "ls", "ll", "cat", "head", "tail", "wc", "file", "stat", "find", "fd", "grep", "rg",
+        "ag", "tree", "diff", "cmp", "which", "type", "du", "df", "basename", "dirname",
         "realpath", "readlink", "sort", "uniq", "cut", "column",
     ];
 
@@ -1274,7 +1274,10 @@ pub fn is_readonly_fs_command(tool_name: &str, args: &serde_json::Value) -> bool
     if command.is_empty() {
         return false;
     }
-    if command.contains('>') || command.contains('<') || command.contains('`') || command.contains("$(")
+    if command.contains('>')
+        || command.contains('<')
+        || command.contains('`')
+        || command.contains("$(")
     {
         return false;
     }

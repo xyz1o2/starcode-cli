@@ -492,9 +492,26 @@ fn build_tool_argument_display(
             }
             String::new()
         }
-        "Agent" | "agent" => {
-            // 对标 CC：Agent 调用行只显示 description，不倾倒 prompt 全文
-            get_str(&["description"]).unwrap_or_default()
+        "Agent" | "agent" | "Task" => {
+            // 对标 CC：子代理调用行只显示 description，不倾倒 prompt 全文
+            let desc = get_str(&["description"]).unwrap_or_default();
+            if let Some(kind) = get_str(&["subagent_type", "agent_type"]) {
+                extra_info.push(format!("type: {}", kind));
+            }
+            desc
+        }
+        // 网络类：URL / query 是这行唯一有决策价值的信息，
+        // 落进 summarize_object_inline 会得到 `{"url": "…", "prompt": "…"}` 这种倾倒。
+        "WebFetch" | "web_fetch" => {
+            let url = get_str(&["url"]).unwrap_or_default();
+            if let Some(p) = get_str(&["prompt"]) {
+                extra_info.push(truncate_chars_with_ellipsis(&p, lim(160)));
+            }
+            shorten(&url)
+        }
+        "WebSearch" | "web_search" => {
+            let q = get_str(&["query", "q"]).unwrap_or_default();
+            truncate_chars_with_ellipsis(&q, lim(180))
         }
         "complete_task" => {
             let first = get_str(&["result"])
@@ -517,6 +534,18 @@ fn build_tool_argument_display(
         "ListDir" => get_str(&["directory", "path"])
             .map(|p| shorten(&p))
             .unwrap_or_else(|| ".".to_string()),
+        // MCP：`mcp__<server>__<tool>`，参数结构由外部 server 决定，
+        // 通用倾倒对它是唯一合理的选择，但 server 名值得单独标出来 ——
+        // 用户判断"这次调用可不可信"看的就是它。
+        _ if name.starts_with("mcp__") => {
+            let parts: Vec<&str> = name.splitn(3, "__").collect();
+            if parts.len() == 3 {
+                extra_info.push(format!("server: {}", parts[1]));
+                summarize_object_inline(obj)
+            } else {
+                summarize_object_inline(obj)
+            }
+        }
         _ => summarize_object_inline(obj),
     };
 
@@ -832,6 +861,65 @@ fn render_rich_tool_content(
                     }
                     // 解析失败则走通用预览
                 }
+                // WebFetch/WebSearch：折叠态给"抓了多少内容"而不是倾倒全文。
+                // 折叠态还看不出抓到了什么，是这两类工具此前最大的问题 ——
+                // 调用行是 URL/查询，结果块却是通用 JSON 倾倒。
+                "WebFetch" | "web_fetch" | "WebSearch" | "web_search" => {
+                    let bytes = text.len();
+                    let preview = crate::ui::utils::render::truncate_to_display_width(
+                        text.trim(),
+                        tool_inner_width.saturating_sub(2),
+                    );
+                    lines.push(Line::from(vec![
+                        Span::raw(if tc.function.name.contains("Fetch") {
+                            "Fetched "
+                        } else {
+                            "Found "
+                        }),
+                        Span::styled(
+                            format!("{} bytes", bytes),
+                            Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                    if !preview.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {}", preview),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                    lines.push(Line::from(Span::styled(
+                        "  (Tab to expand)",
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::DIM),
+                    )));
+                    return lines;
+                }
+                // 子代理：折叠态显示它最终交回了什么，而不是一段 JSON。
+                // 子代理的工作全在这个结果里，不给摘要用户就只能全程等它跑完。
+                "Agent" | "agent" | "Task" => {
+                    let body = text.trim();
+                    if !body.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            format!(
+                                "  {}",
+                                crate::ui::utils::render::truncate_to_display_width(
+                                    body.lines().next().unwrap_or(""),
+                                    tool_inner_width.saturating_sub(2)
+                                )
+                            ),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                        lines.push(Line::from(Span::styled(
+                            "  (Tab to expand)",
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(Modifier::DIM),
+                        )));
+                        return lines;
+                    }
+                    // 没有正文时退回通用预览，不返回空块
+                }
                 // 其他工具：维持预览逻辑
                 _ => {}
             }
@@ -1037,6 +1125,62 @@ mod tests {
         assert!(render_todo_checklist(&tc, 80, &theme()).is_empty());
         let tc = todo_call("not json");
         assert!(render_todo_checklist(&tc, 80, &theme()).is_empty());
+    }
+
+    fn call_for(name: &str, args: &str) -> crate::types::StarToolCall {
+        crate::types::StarToolCall {
+            id: "t1".to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: name.to_string(),
+                arguments: args.to_string(),
+            },
+        }
+    }
+
+    /// WebFetch/WebSearch/Task/MCP 的调用行此前全部落进通用 JSON 倾倒，
+    /// 结果块也没有专属摘要 —— 这些工具"干了什么"在屏幕上不可读。
+    #[test]
+    fn network_and_agent_tools_get_a_readable_call_summary() {
+        let cases: Vec<(&str, &str, &str)> = vec![
+            (
+                "WebFetch",
+                r#"{"url":"https://example.com/docs/api","prompt":"总结 API"}"#,
+                "example.com",
+            ),
+            (
+                "WebSearch",
+                r#"{"query":"rust tokio select abort"}"#,
+                "tokio",
+            ),
+            (
+                "Task",
+                r#"{"description":"找出所有调用点","subagent_type":"Explore"}"#,
+                "找出所有调用点",
+            ),
+        ];
+        for (name, args, needle) in cases {
+            let (summary, _) = build_tool_argument_display(&call_for(name, args), false);
+            assert!(
+                summary.contains(needle),
+                "{name} 的调用行摘要应包含 {needle:?}，实际 {summary:?}"
+            );
+            assert!(
+                !summary.contains('{'),
+                "{name} 的调用行不该倾倒 JSON，实际 {summary:?}"
+            );
+        }
+
+        // MCP：参数结构由外部 server 决定，倾倒是合理的，但 server 名要标出来
+        let (summary, extra) = build_tool_argument_display(
+            &call_for("mcp__github__create_issue", r#"{"title":"x"}"#),
+            false,
+        );
+        assert!(
+            extra.iter().any(|e| e.contains("github")),
+            "MCP 调用行应标出 server 名，实际 {extra:?}"
+        );
+        assert!(!summary.is_empty());
     }
 
     /// 回归：CodebaseSearch 折叠态以前预览输出头部，那是索引元数据

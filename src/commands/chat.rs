@@ -499,6 +499,43 @@ async fn delete(ctx: CommandContext<'_>, args: &[String]) -> CommandResult {
     Ok(())
 }
 
+/// `/resume` —— 开菜单挑一个会话恢复。
 pub async fn resume_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     resume(ctx, &args).await
+}
+
+/// `/continue` —— 接着**最近**一次会话继续（对标 CC 的 `/continue` 与 `--continue`）。
+///
+/// 与 `/resume` 的分工：`/resume` 无参数时开菜单（要挑），`/continue` 无参数时直接
+/// 接上最近的那个。此前 `/continue` 的描述写着"resume the current conversation"，
+/// 实现却转手去开了菜单 —— 命令说明与行为不一致，用户按了等于没按。
+pub async fn continue_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    let latest = if args.is_empty() {
+        crate::utils::session_manager::read_latest_session_id()
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        Some(args[0].clone())
+    };
+
+    let Some(tag) = latest else {
+        ctx.state.current_status_line = Some("No saved sessions yet.".to_string());
+        return Ok(());
+    };
+
+    let session = session_manager::load_session(&tag)
+        .await
+        .map_err(|e| e.to_string())?;
+    let messages = session_manager::agent_messages_for_restore(&session);
+    let pending_local_context = session.pending_local_context.clone().unwrap_or_default();
+    request_session_restore(ctx.agent_tx, messages, pending_local_context).await?;
+    restore_session_history(
+        ctx.state,
+        session.chat_history,
+        session.last_usage,
+        &format!("'{}'", tag),
+    );
+    ctx.state.active_session_id = Some(tag.clone());
+    ctx.state.current_status_line = Some(format!("Continued session '{}'", tag));
+    Ok(())
 }

@@ -1632,7 +1632,9 @@ mod tests {
             "hunk 头必须出现在 diff 块里，实际渲染: {rendered:#?}"
         );
         assert!(
-            !rendered.iter().any(|l| l.contains("diff --git") || l.contains("+++ b/")),
+            !rendered
+                .iter()
+                .any(|l| l.contains("diff --git") || l.contains("+++ b/")),
             "文件头不进 diff 块，实际渲染: {rendered:#?}"
         );
         assert!(

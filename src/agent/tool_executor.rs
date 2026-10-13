@@ -628,7 +628,7 @@ impl ToolExecutor {
                                             };
                                             return Self::error_result(
                                                 format!("{}: {}", message, e).into(),
-                                            )
+                                            );
                                         }
                                     }
                                 }
