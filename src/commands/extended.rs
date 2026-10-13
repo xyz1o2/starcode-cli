@@ -1535,7 +1535,6 @@ pub fn add_working_dir_to_state(
 pub async fn add_dir(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     if args.is_empty() {
         // 打开输入弹窗（Enter 后走 InputContext::AddWorkingDir 分支）
-        ctx.state.show_status_modal = false;
         ctx.state.close_palette();
         ctx.state.enter_input_modal();
         ctx.state.input_modal_title = "Add Working Directory".to_string();

@@ -1,4 +1,4 @@
-use super::store::{list_hooks, ManagedHookEvent};
+use super::store::{list_hooks, matcher_matches, ManagedHookEvent};
 use std::process::Stdio;
 
 #[derive(Debug, Clone)]
@@ -33,6 +33,9 @@ pub async fn run_hooks(
     let selected: Vec<_> = hooks
         .into_iter()
         .filter(|h| h.enabled && h.event == event)
+        // matcher 是 Claude Code 配置带来的过滤条件。`/hooks add` 建的 hook
+        // matcher 为 None，即不过滤 —— 保持既有行为不变。
+        .filter(|h| matcher_matches(h.matcher.as_deref(), context.tool_name.as_deref()))
         .collect();
 
     let mut out = Vec::new();

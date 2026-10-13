@@ -323,11 +323,13 @@ fn build_detail_lines(state: &ChatState, selected: usize) -> Vec<Line<'static>> 
     ]
 }
 
+/// 画设置弹窗。
+///
+/// 调用方（`app::draw_ui`）只在这个弹窗位于模态栈顶时调用 —— 「开没开」由栈
+/// 表达。曾经这里还有一道 `if !state.show_status_modal { return; }`，而那个 flag
+/// 全仓库只被赋 `false`：按键侧照常消费 Esc/↑/↓/Enter，渲染侧却什么都不画，
+/// 于是「看不见的窗口把按键全吃掉」。
 pub fn render_status_modal(f: &mut Frame, area: Rect, state: &ChatState) {
-    if !state.show_status_modal {
-        return;
-    }
-
     let area = centered_rect(70, 50, area);
     let block = Block::default()
         .title(" Settings ")

@@ -69,6 +69,30 @@ impl StarAgent {
         }
     }
 
+    /// 当前生效的审批模式。
+    ///
+    /// 存在的理由：`runtime_message_bus()` 返回 None 时的兜底构造要重新建一个
+    /// `PolicyEngine`，而 `PolicyEngineConfig::default()` 只会给出 `Default` ——
+    /// 用户选了 yolo/plan，runtime 一缺席确认判断就悄悄退回逐次询问。
+    pub fn approval_mode(&self) -> ApprovalMode {
+        self.approval_mode_lock
+            .lock()
+            .map(|m| m.clone())
+            .unwrap_or(ApprovalMode::Default)
+    }
+
+    /// 把 session 侧的 `ApprovalMode` 转成 `PolicyEngine` 侧的那个。
+    ///
+    /// 两个枚举是分开的（session 要给 UI 显示，policy 要给规则引擎），转换只在这里
+    /// 做一次，避免三个兜底构造点各写一遍 match。
+    pub fn policy_approval_mode(&self) -> crate::core::policy::ApprovalMode {
+        match self.approval_mode() {
+            ApprovalMode::Plan => crate::core::policy::ApprovalMode::Plan,
+            ApprovalMode::Yolo => crate::core::policy::ApprovalMode::Yolo,
+            ApprovalMode::Default => crate::core::policy::ApprovalMode::Default,
+        }
+    }
+
     const MAX_RECURSION_DEPTH: usize = 3;
 
     pub async fn new(

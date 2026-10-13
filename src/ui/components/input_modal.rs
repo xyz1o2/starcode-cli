@@ -7,7 +7,8 @@ use ratatui::{
 };
 
 pub fn render_input_modal(f: &mut Frame, area: Rect, state: &mut ChatState) {
-    if !state.show_input_modal {
+    // 「开没开」由模态栈表达，调用方已保证它在栈顶；这里不再有平行的 flag 门控。
+    if !state.is_input_modal_open() {
         return;
     }
 

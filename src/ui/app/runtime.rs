@@ -437,7 +437,7 @@ fn flush_input_batch(state: &mut ChatState, buf: &mut String) {
     let line_count = text.chars().filter(|&c| c == '\n').count() + 1;
     let is_large = line_count >= crate::ui::state::INPUT_FOLD_MIN_LINES
         || text.len() >= crate::ui::events::clipboard_paste::PASTE_CHAR_THRESHOLD;
-    if !state.show_input_modal && is_large {
+    if !state.is_input_modal_open() && is_large {
         state.paste_in_progress = true;
         state.paste_end_time = Some(Instant::now());
         let id = state.paste_segments.len();
@@ -459,7 +459,7 @@ fn flush_input_batch(state: &mut ChatState, buf: &mut String) {
             id + 1,
             line_count
         ));
-    } else if state.show_input_modal {
+    } else if state.is_input_modal_open() {
         state.modal_textarea.insert_str(&text);
     } else {
         crate::ui::events::input::push_cursor_off_sentinel_pub(state);
@@ -560,8 +560,6 @@ pub async fn run_ui_loop(
     let target_framerate_streaming_slow = Duration::from_millis(50); // 20fps when idle
     let mut last_draw;
     let mut needs_redraw;
-    let mut last_loop_tick = Instant::now();
-    let mut last_remote_tick = Instant::now();
     let mut stream_msg_count: u64 = 0;
     let mut last_stream_rate_check = Instant::now();
     let mut stream_msgs_per_sec: f64 = 0.0;
@@ -579,6 +577,13 @@ pub async fn run_ui_loop(
     // 否则循环变成满载自旋。见循环末尾的等待逻辑。
     let mut key_channel_closed = false;
 
+    // `/loop` 与 `/remote` 的轮询通道。I/O 在独立任务里做（见
+    // `runtime::background::spawn_schedule_pollers`），事件循环只在收到结果时回写
+    // `ChatState` —— 状态因此始终只在一个任务里被改，不需要跨任务加锁。
+    let (bg_events_tx, mut bg_events_rx) = mpsc::channel::<
+        crate::runtime::background::BackgroundEvent,
+    >(16);
+
     // Initial load of configured providers and current model (non-blocking)
     let _ = agent_tx.try_send(AgentRequest::LoadConfiguredProviders);
     // Trigger async MCP server initialization — loads .star/mcp.json,
@@ -592,6 +597,11 @@ pub async fn run_ui_loop(
     needs_redraw = false;
 
     crate::runtime::background::spawn_git_status_loop(agent_tx.clone(), ui_cwd.clone());
+    crate::runtime::background::spawn_schedule_pollers(
+        ui_cwd.clone(),
+        bg_events_tx,
+        Duration::from_secs(1),
+    );
 
     crate::utils::logging::append_debug_log_line("[UI] Event loop started");
     loop {
@@ -668,7 +678,7 @@ pub async fn run_ui_loop(
                         // 1. Input modal (provider key/base URL) → modal_textarea
                         // 2. Palette filter → palette_filter
                         // 3. Main input → main textarea
-                        if state.show_input_modal {
+                        if state.is_input_modal_open() {
                             let normalized = pasted_text.replace("\r\n", "\n").replace('\r', "\n");
                             state.modal_textarea.insert_str(&normalized);
                             state.input_modal_value =
@@ -798,52 +808,14 @@ pub async fn run_ui_loop(
             state.current_status_line = Some("✓ Done (timeout)".to_string());
         }
 
-        // Poll /loop scheduled tasks (once per second)
-        // Use timeout to prevent slow filesystem (network drives) from blocking the UI
-        if last_loop_tick.elapsed() >= Duration::from_secs(1) {
-            last_loop_tick = Instant::now();
-            match tokio::time::timeout(
-                Duration::from_millis(500),
-                crate::runtime::background::poll_loop_tasks(state, &agent_tx, &ui_cwd),
-            )
-            .await
-            {
-                Ok(Ok(redraw)) => {
-                    needs_redraw |= redraw;
-                }
-                Ok(Err(err)) => {
-                    state.current_status_line = Some(format!("/loop scheduling failed: {}", err));
-                }
-                Err(_) => {
-                    crate::utils::logging::append_debug_log_line(
-                        "[LOOP] poll_loop_tasks timed out (slow filesystem?)",
-                    );
-                }
-            }
-        }
-
-        // Poll remote control inbox (once per second)
-        // Use timeout to prevent slow filesystem (network drives) from blocking the UI
-        if last_remote_tick.elapsed() >= Duration::from_secs(1) {
-            last_remote_tick = Instant::now();
-            match tokio::time::timeout(
-                Duration::from_millis(500),
-                crate::runtime::background::poll_remote_requests(state, &agent_tx, &ui_cwd),
-            )
-            .await
-            {
-                Ok(Ok(redraw)) => {
-                    needs_redraw |= redraw;
-                }
-                Ok(Err(err)) => {
-                    state.current_status_line =
-                        Some(format!("/remote consumption failed: {}", err));
-                }
-                Err(_) => {
-                    crate::utils::logging::append_debug_log_line(
-                        "[REMOTE] poll_remote_requests timed out (slow filesystem?)",
-                    );
-                }
+        // 后台轮询结果：`/loop` 与 `/remote` 的 I/O 跑在独立任务里（见
+        // `runtime::background::spawn_schedule_pollers`），这里只负责回写状态。
+        //
+        // 此前是两个各带 500ms 超时的 `await` 直接写在循环里，每秒各一次：慢盘/
+        // 网络盘上循环会整个停在超时里，键盘线程投递的事件要等它返回才被处理。
+        while let Ok(event) = bg_events_rx.try_recv() {
+            if crate::runtime::background::apply_background_event(state, &agent_tx, event).await {
+                needs_redraw = true;
             }
         }
 
@@ -875,6 +847,9 @@ pub async fn run_ui_loop(
         let animating = is_animating(state);
         if last_periodic_tick.elapsed() >= PERIODIC_TICK_INTERVAL {
             last_periodic_tick = Instant::now();
+            // 任务面板的磁盘自愈与自动显隐挂在这个节拍上，而不是每帧一次
+            // （见 `ChatState::tick_task_panel` 的说明）。
+            state.tick_task_panel();
             needs_redraw = true;
         }
         if animating {

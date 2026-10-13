@@ -243,11 +243,6 @@ impl ChatState {
         if matches!(modal, Some(Modal::QuickOpen)) {
             self.quick_open_state.cancel_search();
         }
-        // 保持 show_status_modal 与 modal_stack 同步：flag 残留会让下一次
-        // open_status_modal 之前的窗口状态判断失真。
-        if matches!(modal, Some(Modal::StatusModal)) {
-            self.show_status_modal = false;
-        }
         modal
     }
 
@@ -257,6 +252,22 @@ impl ChatState {
 
     pub fn top_modal_mut(&mut self) -> Option<&mut Modal> {
         self.modal_stack.last_mut()
+    }
+
+    /// 输入对话框是否打开。
+    ///
+    /// **模态栈是唯一真相源** —— 此前还有一个平行的 `show_input_modal` flag，
+    /// 靠 [`ChatState::enter_input_modal`] / [`ChatState::exit_input_modal`] 手工
+    /// 同步两边。异步 stream 消息（`ServicesList` 回来后自动开模型面板）一打穿就
+    /// 出现「面板画得出来、按键却全被隐形输入框吞掉」。
+    ///
+    /// 用 `any` 而非只看栈顶：输入框是叠在别的模态**之上**打开的，栈顶未必是它
+    /// （见 [`ChatState::exit_input_modal`] 里用 `retain` 而不是 `pop` 的原因）。
+    /// 渲染与按键分发各自按栈顶走，这个谓词只回答「有没有开着」。
+    pub fn is_input_modal_open(&self) -> bool {
+        self.modal_stack
+            .iter()
+            .any(|modal| matches!(modal, Modal::InputModal))
     }
 
     pub fn close_all_modals(&mut self) {
@@ -275,10 +286,6 @@ impl ChatState {
             self.quick_open_state.cancel_search();
         }
         self.modal_stack.clear();
-        // 输入框的 flag 也要一起清 —— 留着它会让按键继续被
-        // `handle_input_modal` 吞掉，而屏幕上已经没有输入框了。
-        self.show_input_modal = false;
-        self.show_status_modal = false;
         // 后台代理选择器也是一个按键层。不清的话，开一次 modal 再 Esc 之后，
         // ↑/↓/Enter 仍然被选择器分支接走，输入框失去方向键。
         self.bg_agent_selection = None;
@@ -500,32 +507,22 @@ impl ChatState {
         self.enter_input_modal();
     }
 
-    /// 标记输入对话框为打开状态 —— `show_input_modal` 与栈上的
-    /// [`Modal::InputModal`] **必须同时更新**。
+    /// 标记输入对话框为打开状态 —— 把 [`Modal::InputModal`] 压栈。
     ///
-    /// 渲染看栈顶（`ui/app/mod.rs` 的 `draw_ui`），按键分发看这个 flag
-    /// （`modal_input::handle_modal_key` 见到它就让位给 `input.rs` 里的
-    /// 输入框分支）。只设一半的症状是「回车之后弹窗整个消失，按键却还在被
-    /// 吞掉」—— modal stack 迁移时改了渲染这一侧，provider 配置那一串
-    /// `show_input_modal = true` 没跟上，于是 API Key / Base URL 弹窗全成了
-    /// 隐形窗口。调用方只负责填 title / prompt / textarea。
+    /// 栈是唯一真相源：渲染看栈顶（`ui/app/mod.rs` 的 `draw_ui`），按键分发看
+    /// [`ChatState::is_input_modal_open`]，两边读的是同一个状态。调用方只负责填
+    /// title / prompt / textarea。
     pub fn enter_input_modal(&mut self) {
-        self.show_input_modal = true;
-        if !self
-            .modal_stack
-            .iter()
-            .any(|m| matches!(m, Modal::InputModal))
-        {
+        if !self.is_input_modal_open() {
             self.modal_stack.push(Modal::InputModal);
         }
     }
 
-    /// 关闭输入对话框：清 flag 并把栈里的 `InputModal` 摘掉。
+    /// 关闭输入对话框：把栈里的 `InputModal` 摘掉。
     ///
     /// 用 `retain` 而不是 `pop`：输入框未必在栈顶（底下可能压着 Plugins
     /// 之类的模态），pop 会把别人的模态误关掉。
     pub fn exit_input_modal(&mut self) {
-        self.show_input_modal = false;
         self.modal_stack.retain(|m| !matches!(m, Modal::InputModal));
     }
 
@@ -554,14 +551,12 @@ impl ChatState {
 
     /// 状态模态
     ///
-    /// 必须同时置 `show_status_modal`：`render_status_modal` 在
-    /// `!state.show_status_modal` 时直接 return（`components/status_modal.rs`），
-    /// 而 `handle_overlay_input` 却无条件消费 Esc/↑/↓/Enter。只 push 不置 flag 的
-    /// 症状是「按 Ctrl+P → Status 之后什么窗口都没出现，但按键全被吃掉」。
-    /// 该 flag 全仓库只被赋 `false`，此前从未赋 `true`，于是 Settings 一直隐形。
+    /// 只压栈即可：渲染（`app/mod.rs`）与按键（`modal_input::handle_modal_key`）
+    /// 都以 `modal_stack` 为准。曾经还有一个只被赋 `false`、却又在
+    /// `render_status_modal` 里当门控的 `show_status_modal` flag，症状是
+    /// 「按 Ctrl+P → Status 之后什么窗口都没出现，但按键全被吃掉」。
     pub fn open_status_modal(&mut self) {
         self.close_all_modals();
-        self.show_status_modal = true;
         self.modal_stack.push(Modal::StatusModal);
     }
 

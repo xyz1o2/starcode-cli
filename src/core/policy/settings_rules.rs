@@ -476,12 +476,15 @@ impl SettingsPermissions {
             files.push(PermissionSourceFile::new(PathBuf::from(explicit), true));
         }
         files.push(PermissionSourceFile::new(
-            crate::core::config::storage::Storage::global_star_dir().join("settings.json"),
+            crate::core::config::storage::Storage::global_settings_path(),
             true,
         ));
         let project = crate::core::config::storage::Storage::new(cwd.to_path_buf()).star_dir();
         // 可提交进仓库的项目层：只影响规则，不影响审批模式。
-        files.push(PermissionSourceFile::new(project.join("settings.json"), false));
+        files.push(PermissionSourceFile::new(
+            project.join("settings.json"),
+            false,
+        ));
         files.push(PermissionSourceFile::new(
             project.join("settings.local.json"),
             true,

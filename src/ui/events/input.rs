@@ -1613,7 +1613,7 @@ pub async fn dispatch_global_binding(
         GlobalBinding::FoldInput
         | GlobalBinding::CycleThinking
         | GlobalBinding::CycleTheme => {
-            if state.is_awaiting_confirmation || state.is_palette_open() || state.show_input_modal
+            if state.is_awaiting_confirmation || state.is_palette_open() || state.is_input_modal_open()
             {
                 return Ok(false);
             }
@@ -1804,7 +1804,7 @@ pub async fn handle_key_event(
     // 粘贴的确认分支会吞掉所有键（`_ => return Ok(())`），放在它们之后，模式切换
     // 在确认框开着时就按不到了。其余全局键统一交给下面的注册表分发。
     // 输入模态打开时 Shift+Tab 不能触发模式切换（会吞掉输入框里的按键）
-    if key.code == KeyCode::BackTab && !state.show_input_modal && !state.is_awaiting_confirmation {
+    if key.code == KeyCode::BackTab && !state.is_input_modal_open() && !state.is_awaiting_confirmation {
         cycle_approval_mode(state, agent_tx).await;
         return Ok(());
     }
@@ -1882,7 +1882,7 @@ pub async fn handle_key_event(
     // 后台代理选择器：焦点在选择器上时独占 ↑/↓/Enter/Esc。
     // 位置刻意在 handle_overlay_input **之后** —— 任何弹窗仍然优先，选择器只跟输入框抢键。
     if state.bg_agent_selection.is_some()
-        && !state.show_input_modal
+        && !state.is_input_modal_open()
         && handle_bg_agent_selector_key(state, key)
     {
         return Ok(());
@@ -2154,102 +2154,9 @@ pub async fn handle_key_event(
         }
     }
 
-    // Handle log selector input
-    if state.top_modal() == Some(&crate::ui::state::modal::Modal::LogSelector) {
-        match key.code {
-            KeyCode::Enter => {
-                if state.log_selector_state.is_loading {
-                    return Ok(());
-                }
-
-                // 走统一命令入口，保留流式中的排队保护，并复用 /chat resume 的状态清理。
-                if let Some(session) = state.log_selector_state.get_selected_session() {
-                    let command = format!("/chat resume {}", session.id);
-                    state.pop_modal();
-                    crate::ui::app::logic::enqueue_user_message(state, command, agent_tx).await?;
-                }
-                return Ok(());
-            }
-            KeyCode::Esc => {
-                state.pop_modal();
-                return Ok(());
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if !state.log_selector_state.is_loading {
-                    state.log_selector_state.select_prev();
-                }
-                return Ok(());
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if !state.log_selector_state.is_loading {
-                    state.log_selector_state.select_next();
-                }
-                return Ok(());
-            }
-            KeyCode::Char('/') => {
-                if !state.log_selector_state.is_loading {
-                    // Focus search
-                    state.log_selector_state.search_query.clear();
-                }
-                return Ok(());
-            }
-            KeyCode::Backspace => {
-                if !state.log_selector_state.is_loading {
-                    state.log_selector_state.search_query.pop();
-                    state.log_selector_state.selected_index = 0;
-                }
-                return Ok(());
-            }
-            KeyCode::Char(c) => {
-                if !state.log_selector_state.is_loading {
-                    state.log_selector_state.search_query.push(c);
-                    state.log_selector_state.selected_index = 0;
-                }
-                return Ok(());
-            }
-            _ => return Ok(()),
-        }
-    }
-
-    // Handle error overlay input
-    if state.top_modal() == Some(&crate::ui::state::modal::Modal::ErrorOverlay) {
-        match key.code {
-            KeyCode::Char('r') | KeyCode::Char('R') => {
-                // Retry
-                state.pop_modal();
-                // Re-send last user message
-                if let Some(last_user) = state
-                    .chat_history
-                    .iter()
-                    .rev()
-                    .find(|e| e.entry_type == ChatEntryType::User)
-                {
-                    let msg = last_user.content.clone();
-                    crate::ui::app::logic::enqueue_user_message(state, msg, agent_tx).await?;
-                }
-                return Ok(());
-            }
-            KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
-                state.pop_modal();
-                return Ok(());
-            }
-            KeyCode::Char('s') | KeyCode::Char('S') => {
-                // Switch provider
-                state.pop_modal();
-                state.open_palette(PaletteMode::Provider);
-                return Ok(());
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                state.error_overlay_state.select_prev();
-                return Ok(());
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                state.error_overlay_state.select_next();
-                return Ok(());
-            }
-            _ => return Ok(()),
-        }
-    }
+    // 模态栈上的窗口一律由 `modal_input::handle_modal_key` 分发（LogSelector、
+    // ErrorOverlay、StatusModal、ThemePicker、InputModal 都在那张表里）。这里只剩
+    // **非模态**的覆盖层：模型切换确认、后台代理选择器、任务面板、vim。
 
     match key.code {
         KeyCode::Enter => {
@@ -2469,7 +2376,7 @@ pub async fn handle_key_event(
         KeyCode::F(1) => {
             state.show_help = !state.show_help;
         }
-        KeyCode::Char('?') if !state.is_palette_open() && !state.show_input_modal => {
+        KeyCode::Char('?') if !state.is_palette_open() && !state.is_input_modal_open() => {
             // ? when input is empty: show help (like Claude Code)
             if state.textarea.lines().iter().all(|l| l.is_empty()) {
                 state.show_help = !state.show_help;
@@ -2865,63 +2772,191 @@ fn handle_bg_agent_selector_key(state: &mut ChatState, key: KeyEvent) -> bool {
     }
 }
 
+/// 状态弹窗（Settings）：↑↓ 选设置项、Enter 执行、Esc 关闭。
+pub(crate) async fn handle_status_modal_key(
+    state: &mut ChatState,
+    key: KeyEvent,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match key.code {
+        KeyCode::Esc => {
+            state.pop_modal();
+        }
+        KeyCode::Up => {
+            let count = crate::ui::components::status_modal::settings_item_count();
+            state.settings_selected_index =
+                state.settings_selected_index.saturating_add(count).saturating_sub(1) % count;
+        }
+        KeyCode::Down => {
+            let count = crate::ui::components::status_modal::settings_item_count();
+            state.settings_selected_index = (state.settings_selected_index + 1) % count;
+        }
+        KeyCode::Enter => {
+            // Get the action for the selected setting and execute it
+            if let Some(action) = crate::ui::components::status_modal::get_settings_action(state) {
+                state.pop_modal();
+                // Re-dispatch the action through execute_palette_action
+                execute_palette_action(state, action, agent_tx).await?;
+            }
+        }
+        _ => {}
+    }
+    Ok(true)
+}
+
+/// 日志/会话选择器：↑↓ 选择、输入过滤、Enter 恢复会话、Esc 关闭。
+pub(crate) async fn handle_log_selector_key(
+    state: &mut ChatState,
+    key: KeyEvent,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match key.code {
+        KeyCode::Enter => {
+            if state.log_selector_state.is_loading {
+                return Ok(true);
+            }
+
+            // 走统一命令入口，保留流式中的排队保护，并复用 /chat resume 的状态清理。
+            if let Some(session) = state.log_selector_state.get_selected_session() {
+                let command = format!("/chat resume {}", session.id);
+                state.pop_modal();
+                crate::ui::app::logic::enqueue_user_message(state, command, agent_tx).await?;
+            }
+        }
+        KeyCode::Esc => {
+            state.pop_modal();
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if !state.log_selector_state.is_loading {
+                state.log_selector_state.select_prev();
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if !state.log_selector_state.is_loading {
+                state.log_selector_state.select_next();
+            }
+        }
+        KeyCode::Char('/') => {
+            if !state.log_selector_state.is_loading {
+                // Focus search
+                state.log_selector_state.search_query.clear();
+            }
+        }
+        KeyCode::Backspace => {
+            if !state.log_selector_state.is_loading {
+                state.log_selector_state.search_query.pop();
+                state.log_selector_state.selected_index = 0;
+            }
+        }
+        KeyCode::Char(c) => {
+            if !state.log_selector_state.is_loading {
+                state.log_selector_state.search_query.push(c);
+                state.log_selector_state.selected_index = 0;
+            }
+        }
+        _ => {}
+    }
+    // 未匹配也消费：选择器是模态，键不该漏到下面的输入框。
+    Ok(true)
+}
+
+/// 错误覆盖层：r 重试上一条、s 换 provider、c/Esc 关闭、↑↓ 切换选项。
+pub(crate) async fn handle_error_overlay_key(
+    state: &mut ChatState,
+    key: KeyEvent,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match key.code {
+        KeyCode::Char('r') | KeyCode::Char('R') => {
+            // Retry
+            state.pop_modal();
+            // Re-send last user message
+            if let Some(last_user) = state
+                .chat_history
+                .iter()
+                .rev()
+                .find(|e| e.entry_type == ChatEntryType::User)
+            {
+                let msg = last_user.content.clone();
+                crate::ui::app::logic::enqueue_user_message(state, msg, agent_tx).await?;
+            }
+        }
+        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
+            state.pop_modal();
+        }
+        KeyCode::Char('s') | KeyCode::Char('S') => {
+            // Switch provider
+            state.pop_modal();
+            state.open_palette(PaletteMode::Provider);
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.error_overlay_state.select_prev();
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.error_overlay_state.select_next();
+        }
+        _ => {}
+    }
+    Ok(true)
+}
+
+/// 主题选择器：↑↓ 导航（实时预览）、Enter 应用、Esc 取消。
+///
+/// 从 `handle_overlay_input` 抽出来的独立处理器：模态的按键处理应当住在
+/// `modal_input::handle_modal_key` 那张表里，而不是散落在阶梯的中段。
+pub(crate) fn handle_theme_picker_key(state: &mut ChatState, key: KeyEvent) -> bool {
+    let themes = crate::ui::components::highlight::theme_picker::available_themes();
+    let count = themes.len();
+    let prev_index = state.selected_theme_index;
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.selected_theme_index = if state.selected_theme_index == 0 {
+                count.saturating_sub(1)
+            } else {
+                state.selected_theme_index - 1
+            };
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.selected_theme_index = (state.selected_theme_index + 1) % count.max(1);
+        }
+        KeyCode::Enter => {
+            let name = themes
+                .get(state.selected_theme_index)
+                .map(|t| t.name.clone())
+                .unwrap_or_default();
+            if state.theme_manager.set_theme(&name) {
+                state.current_status_line = Some(format!("Theme: {}", name));
+            }
+            state.pop_modal();
+            return true;
+        }
+        KeyCode::Esc => {
+            // 取消：恢复进入 picker 前的主题
+            if let Some(crate::ui::state::modal::Modal::ThemePicker { prev_theme }) =
+                state.pop_modal()
+            {
+                if let Some(prev) = prev_theme {
+                    state.theme_manager.set_theme(&prev);
+                }
+            }
+            return true;
+        }
+        _ => {}
+    }
+    // 实时预览：光标移动即切换主题
+    if prev_index != state.selected_theme_index {
+        if let Some(t) = themes.get(state.selected_theme_index) {
+            state.theme_manager.set_theme(&t.name);
+        }
+    }
+    true
+}
+
 async fn handle_overlay_input(
     state: &mut ChatState,
     key: KeyEvent,
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    // ── 主题选择器：↑↓ 导航（实时预览）、Enter 应用、Esc 取消 ──
-    if matches!(
-        state.top_modal(),
-        Some(crate::ui::state::modal::Modal::ThemePicker { .. })
-    ) {
-        let themes = crate::ui::components::highlight::theme_picker::available_themes();
-        let count = themes.len();
-        let prev_index = state.selected_theme_index;
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                state.selected_theme_index = if state.selected_theme_index == 0 {
-                    count.saturating_sub(1)
-                } else {
-                    state.selected_theme_index - 1
-                };
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                state.selected_theme_index = (state.selected_theme_index + 1) % count.max(1);
-            }
-            KeyCode::Enter => {
-                let name = themes
-                    .get(state.selected_theme_index)
-                    .map(|t| t.name.clone())
-                    .unwrap_or_default();
-                if state.theme_manager.set_theme(&name) {
-                    state.current_status_line = Some(format!("Theme: {}", name));
-                }
-                state.pop_modal();
-                return Ok(true);
-            }
-            KeyCode::Esc => {
-                // 取消：恢复进入 picker 前的主题
-                if let Some(crate::ui::state::modal::Modal::ThemePicker { prev_theme }) =
-                    state.pop_modal()
-                {
-                    if let Some(prev) = prev_theme {
-                        state.theme_manager.set_theme(&prev);
-                    }
-                }
-                return Ok(true);
-            }
-            _ => {}
-        }
-        // 实时预览：光标移动即切换主题
-        if prev_index != state.selected_theme_index {
-            if let Some(t) = themes.get(state.selected_theme_index) {
-                state.theme_manager.set_theme(&t.name);
-            }
-        }
-        return Ok(true);
-    }
-
     if state.is_awaiting_confirmation {
         if let Some(id) = state.pending_tool_call_id.clone() {
             let is_ask = state
@@ -3180,42 +3215,10 @@ async fn handle_overlay_input(
         return Ok(true);
     }
 
-    if state.top_modal() == Some(&crate::ui::state::modal::Modal::StatusModal) {
-        match key.code {
-            KeyCode::Esc => {
-                state.pop_modal();
-            }
-            KeyCode::Up => {
-                let count = crate::ui::components::status_modal::settings_item_count();
-                state.settings_selected_index = state
-                    .settings_selected_index
-                    .saturating_add(count)
-                    .saturating_sub(1)
-                    % count;
-            }
-            KeyCode::Down => {
-                let count = crate::ui::components::status_modal::settings_item_count();
-                state.settings_selected_index = (state.settings_selected_index + 1) % count;
-            }
-            KeyCode::Enter => {
-                // Get the action for the selected setting and execute it
-                if let Some(action) =
-                    crate::ui::components::status_modal::get_settings_action(state)
-                {
-                    state.pop_modal();
-                    // Re-dispatch the action through execute_palette_action
-                    execute_palette_action(state, action, agent_tx).await?;
-                }
-            }
-            _ => {}
-        }
-        return Ok(true);
-    }
-
-    // 任务面板必须排在 modal 之后。API Key / Base URL 输入框由更靠后的
-    // handle_input_modal 分支处理（events/input.rs），而本函数在它之前无条件
+    // 任务面板必须排在 modal 之后。API Key / Base URL 输入框由
+    // `modal_input::handle_modal_key` 在更早的位置处理，而本函数在它之前无条件
     // 吞键，导致 Ctrl+J / Ctrl+S / Alt+←→ 等在填表时被任务面板截走。
-    // 紧邻的 bg-agent 选择器分支就有同样的 `&& !state.show_input_modal` 守卫。
+    // 紧邻的 bg-agent 选择器分支就有同样的 `&& !state.is_input_modal_open()` 守卫。
     //
     // 守卫条件改由 `KeyContext::is_dialog()` 给出：模态栈上的窗口、输入框、工具
     // 审批、以及快捷帮助浮层（`F1`）。与重构前那份内联清单逐项等价。
@@ -3314,12 +3317,15 @@ async fn handle_overlay_input(
     Ok(false)
 }
 
-async fn handle_input_modal(
+/// 通用输入对话框（API Key / Base URL / 重命名）与 provider 多字段表单。
+///
+/// 由 `modal_input::handle_modal_key` 在栈顶是 [`Modal::InputModal`] 时调用。
+pub(crate) async fn handle_input_modal(
     state: &mut ChatState,
     key: KeyEvent,
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    if !state.show_input_modal {
+    if !state.is_input_modal_open() {
         return Ok(false);
     }
 
@@ -3995,7 +4001,7 @@ mod tests {
         .await
         .expect("enter should be handled");
 
-        assert!(state.show_input_modal, "modal must stay open");
+        assert!(state.is_input_modal_open(), "modal must stay open");
         assert!(matches!(
             state.input_context,
             Some(crate::ui::state::palette::InputContext::ProviderForm)
@@ -4036,7 +4042,7 @@ mod tests {
         )
         .await
         .expect("enter should cancel");
-        assert!(!state.show_input_modal);
+        assert!(!state.is_input_modal_open());
         assert!(state.input_context.is_none());
     }
 

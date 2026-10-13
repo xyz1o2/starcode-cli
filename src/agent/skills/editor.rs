@@ -52,9 +52,15 @@ impl EditorAgent {
         };
 
         let message_bus = self.config.runtime_message_bus().unwrap_or_else(|| {
+            // 兜底要带上 config 里真实的审批模式：`Default::default()` 会让
+            // runtime 缺席时把 yolo/plan 悄悄降级成逐次询问。
+            let approval_mode = Some(self.config.approval_mode().clone());
             Arc::new(MessageBus::new(
                 crate::core::policy::PolicyEngine::with_project_rules(
-                    Default::default(),
+                    crate::core::policy::PolicyEngineConfig {
+                        approval_mode,
+                        ..Default::default()
+                    },
                     self.config.project_root(),
                 ),
                 false,

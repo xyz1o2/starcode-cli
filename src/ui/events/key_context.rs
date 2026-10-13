@@ -73,10 +73,10 @@ pub enum KeyContext {
 impl KeyContext {
     /// 由状态推导当前上下文。**这是唯一该写模式判断的地方。**
     pub fn of(state: &ChatState) -> KeyContext {
-        // 模态栈优先。`show_input_modal` 与 `Modal::InputModal` 是两个真相源，
-        // 异步路径（stream.rs 的 ModelsList）可能让它们不同步 —— 这里以 flag 为准，
-        // 与 modal_input.rs 的分发口径保持一致。
-        if state.show_input_modal {
+        // 模态栈优先。输入框同样是栈上的一个 `Modal::InputModal`，不再是平行的
+        // flag —— 曾经两个真相源靠手工同步，异步 ModelsList 一打穿就出现
+        // 「面板画得出来、按键却全被隐形输入框吞掉」。
+        if state.is_input_modal_open() {
             return KeyContext::InputModal;
         }
         match state.top_modal() {
@@ -205,11 +205,12 @@ mod tests {
 
     #[test]
     fn input_modal_wins_over_modal_stack() {
-        // 异步 ModelsList 曾经把 Palette 压在 InputModal 之上，两个真相源不同步。
-        // 分发口径以 show_input_modal 为准，这里锁死该行为。
+        // 输入框叠在别的模态之上打开时，栈顶未必是它（exit_input_modal 因此用
+        // retain 而不是 pop），但按键仍归输入框。这里锁死该行为。
         let mut state = ChatState::new();
         state.enter_input_modal();
         state.open_palette(crate::ui::state::palette::PaletteMode::Main);
+        assert!(state.is_input_modal_open());
         assert_eq!(KeyContext::of(&state), KeyContext::InputModal);
     }
 

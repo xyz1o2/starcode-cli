@@ -37,7 +37,7 @@ use ratatui::{
 
 /// 表单是不是在编辑状态（`InputContext::ProviderForm` 且输入模态开着）。
 pub fn is_provider_form_active(state: &ChatState) -> bool {
-    state.show_input_modal
+    state.is_input_modal_open()
         && matches!(
             state.input_context,
             Some(crate::ui::state::palette::InputContext::ProviderForm)

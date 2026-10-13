@@ -18,6 +18,11 @@ type Err = Box<dyn std::error::Error>;
 ///
 /// 返回 `Ok(true)` 表示该键已被消费。全局键（`is_global_key`）会先被放行给
 /// `input.rs` 的全局分支。
+///
+/// **这张表必须穷尽 [`Modal`] 的全部变体。** 此前这里是 `match top { … _ => Ok(false) }`：
+/// 新加一个变体编译得过、弹窗也画得出来，按键却会静默漏到主输入框 —— 在只读弹窗
+/// 上按 Enter 会直接把消息发出去，正是 [`parity-ui-framework.md`] 记过的那类 bug。
+/// 现在漏写就是编译错误。
 pub async fn handle_modal_key(
     state: &mut ChatState,
     key: crossterm::event::KeyEvent,
@@ -27,9 +32,12 @@ pub async fn handle_modal_key(
         return Ok(false);
     };
 
-    // 输入模态（老体系）优先：由 input.rs 的 input-modal 分支处理
-    if state.show_input_modal {
-        return Ok(false);
+    // 输入框叠在别的模态之上打开时未必在栈顶（见 `exit_input_modal` 用 retain
+    // 而不是 pop 的原因）。它是模态栈的一员，因此这里同样要让位给输入框 ——
+    // 以前这个判断读的是一个平行的 `show_input_modal` flag，才会出现两个真相源
+    // 不同步时的「面板看得见、却什么都按不动」。
+    if state.is_input_modal_open() {
+        return crate::ui::events::input::handle_input_modal(state, key, agent_tx).await;
     }
 
     // 全局键优先于 modal。
@@ -68,8 +76,22 @@ pub async fn handle_modal_key(
             }
             Ok(true)
         }
-        // 其余 modal 变体暂由 input.rs 的 handle_overlay_input 处理
-        _ => Ok(false),
+        // 其余变体在 input.rs 里实现（它们的处理要用到阶梯里的私有辅助函数），
+        // 但入口统一在这里，模态栈上的键不会再漏到主输入框。
+        Modal::ThemePicker { .. } => {
+            Ok(crate::ui::events::input::handle_theme_picker_key(state, key))
+        }
+        Modal::StatusModal => {
+            crate::ui::events::input::handle_status_modal_key(state, key, agent_tx).await
+        }
+        Modal::LogSelector => {
+            crate::ui::events::input::handle_log_selector_key(state, key, agent_tx).await
+        }
+        Modal::ErrorOverlay => {
+            crate::ui::events::input::handle_error_overlay_key(state, key, agent_tx).await
+        }
+        // 已在上面提前返回（输入框未必在栈顶）。
+        Modal::InputModal => Ok(false),
     }
 }
 
@@ -1203,7 +1225,7 @@ fn refresh_history_search(state: &mut ChatState) {
 
 /// 打开输入模态录入 marketplace 来源（git URL / owner/repo / 本地路径）。
 fn open_marketplace_source_input(state: &mut ChatState) {
-    state.show_status_modal = false;
+    
     state.enter_input_modal();
     state.input_modal_title = "Add Marketplace".to_string();
     state.input_modal_prompt =

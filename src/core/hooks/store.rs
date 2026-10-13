@@ -99,6 +99,54 @@ pub struct ManagedHook {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<PathBuf>,
+    /// Claude Code 的 `matcher`：限定这条 hook 在哪些工具上触发。
+    /// `None` / `None` 以外的空串 / `"*"` 视为匹配全部 —— 与 CC 一致。
+    /// 从 settings.json 导入时带上；`/hooks add` 建的一律 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matcher: Option<String>,
+}
+
+/// 按 Claude Code 的 matcher 语义判断某条工具事件是否命中。
+///
+/// CC 的规则是**按字符集分派**的，简单到能背下来：
+/// - `"*"` / 空串 / `None` → 全部命中
+/// - 只含字母数字 `_ -` 空格 `,` `|` → 精确串，或 `|` / `,` 分隔的精确串列表
+/// - 含其他任何字符 → **非锚定**正则（`Regex::is_match`，即任意位置子串命中）
+///
+/// 第三条意味着 `Edit.*` 同时匹配 `Edit` 和 `NotebookEdit`；需要整串匹配就自己写
+/// `^...$`。这里忠实复刻，不加锚点。
+pub fn matcher_matches(matcher: Option<&str>, tool_name: Option<&str>) -> bool {
+    let Some(raw) = matcher else {
+        return true;
+    };
+    let pattern = raw.trim();
+    if pattern.is_empty() || pattern == "*" {
+        return true;
+    }
+    // 无工具名可匹配时，只有「匹配全部」的 matcher 才能通过
+    let Some(tool_name) = tool_name else {
+        return false;
+    };
+
+    const EXACT_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_- ,|";
+    if pattern.chars().all(|c| EXACT_CHARS.contains(c)) {
+        pattern
+            .split(['|', ','])
+            .map(|s| s.trim())
+            .any(|exact| !exact.is_empty() && exact == tool_name)
+    } else {
+        match regex::Regex::new(pattern) {
+            Ok(re) => re.is_match(tool_name),
+            // 编译失败：宁可不放行未知规则，也不让它拦下所有工具。
+            Err(e) => {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[Hooks] matcher `{}` 不是合法正则，已忽略该 hook（{}）",
+                    pattern, e
+                ));
+                false
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -271,6 +319,10 @@ pub async fn list_hooks(project_root: &Path) -> Result<Vec<ManagedHook>, String>
     let store = load_store(project_root).await?;
     let mut hooks = store.hooks;
 
+    // Claude Code 风格的 hooks：写在 settings.json 的 `hooks` 段里。
+    // 只读，不进 `store`，所以 `/hooks add|remove` 动不了它们，用户自己维护。
+    hooks.extend(super::settings_hooks::load_settings_hooks(project_root));
+
     for plugin_hook in crate::core::plugins::discover_plugin_hooks(project_root).await? {
         let Some(event) = ManagedHookEvent::parse(&plugin_hook.event) else {
             continue;
@@ -287,6 +339,7 @@ pub async fn list_hooks(project_root: &Path) -> Result<Vec<ManagedHook>, String>
             updated_at: 0,
             source: Some(plugin_hook.source),
             working_dir: Some(plugin_hook.working_dir),
+            matcher: None,
         });
     }
 
@@ -335,6 +388,7 @@ pub async fn add_hook(
         updated_at: now,
         source: None,
         working_dir: None,
+        matcher: None,
     };
 
     store.hooks.push(hook.clone());

@@ -85,7 +85,6 @@ pub async fn handle_command(
         // /mcp 无参数：打开 MCP 管理弹窗（对标 Claude Code 的 /mcp 设置界面）
         "mcp" => {
             if args.is_empty() {
-                ctx.state.show_status_modal = false;
                 ctx.state.open_mcp_modal();
                 crate::ui::state::modal::load_mcp_server_rows(ctx.state).await;
                 return Ok(());

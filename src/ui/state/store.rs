@@ -576,14 +576,19 @@ pub struct ChatState {
     pub plugin_message: Option<String>,
     pub plugin_confirm: Option<crate::ui::state::modal::PluginConfirm>,
     // ============ Status Modal State ============
-    pub show_status_modal: bool,
+    // 状态弹窗是否打开由 `modal_stack` 里的 `Modal::StatusModal` 表达
+    // （`ChatState::open_status_modal`）。曾经还有一个平行的 `show_status_modal`
+    // flag，只被赋 `false`、渲染侧又拿它当门控，于是出现过「看不见的窗口吃掉按键」。
     pub show_provider_menu: bool,
     pub selected_provider_index: usize,
     pub show_session_menu: bool,
     pub selected_session_index: usize,
     pub available_sessions: Vec<crate::utils::session_manager::SessionSummary>,
     // ============ Input Modal State ============
-    pub show_input_modal: bool,
+    // 输入框是否打开同样由 `modal_stack` 里的 `Modal::InputModal` 表达
+    // （`ChatState::is_input_modal_open`）。平行的 `show_input_modal` flag 已删除：
+    // 两个真相源靠 `enter_input_modal`/`exit_input_modal` 手工同步，异步 stream
+    // 消息（ModelsList）一打穿就会让「面板画得出来、按键却全被隐形输入框吞掉」。
     pub input_modal_title: String,
     pub input_modal_prompt: String,
     pub input_modal_value: String,
@@ -1084,13 +1089,11 @@ impl ChatState {
             palette_mode: crate::ui::state::palette::PaletteMode::Main,
             palette_history: Vec::new(),
             palette_filter: String::new(),
-            show_status_modal: false,
             show_provider_menu: false,
             selected_provider_index: 0,
             show_session_menu: false,
             selected_session_index: 0,
             available_sessions: Vec::new(),
-            show_input_modal: false,
             input_modal_title: String::new(),
             input_modal_prompt: String::new(),
             input_modal_value: String::new(),
@@ -1286,6 +1289,23 @@ impl ChatState {
         self.last_rendered_stream_key.clear();
         self.streaming_height_floor.clear();
         self.virtual_list.mark_all_dirty();
+    }
+
+    /// 推进任务面板的时间相关状态：磁盘自愈、自动显隐、完成后 5 秒收起计时。
+    ///
+    /// **由事件循环的周期节拍调用，不在渲染里。** 此前这段在 `render_page` 开头，
+    /// 于是每帧一次 `current_dir()` + `fs::metadata`（流式时 30 次/秒），而且
+    /// 显隐判定会在绘制过程中改 `is_visible` —— 「画没画过」变成了状态的一部分。
+    ///
+    /// 1Hz 足够：清单变更是 TodoWrite 驱动的，收起计时本身也是秒级。
+    pub fn tick_task_panel(&mut self) {
+        // 先自愈：磁盘清单比内存新（TodoWrite 被打断、别的进程改了文件等没人
+        // 通知面板的路径）就 reload，下面的显隐判定才基于最新数据。
+        self.task_panel.reload_if_stale();
+        self.task_panel.auto_show_if_needed();
+        // is_processing 在 agent 收到 Done 时回落 false（stream.rs）——残留
+        // in_progress 的清单在 agent 停下后才能开始 5 秒收起计时
+        self.task_panel.check_auto_hide(self.is_processing);
     }
 
     /// 思考阶段结束：把进行中的计时器结算成「结束后回顾」状态。

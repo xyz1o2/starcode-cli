@@ -31,12 +31,19 @@ pub async fn agent_worker(
     let worker_cwd = std::env::current_dir().ok();
 
     let message_bus = agent.runtime_message_bus().unwrap_or_else(|| {
-        use crate::core::policy::PolicyEngine;
-        use crate::core::policy::PolicyEngineConfig;
-        // 兜底路径也要装载权限规则：不然 runtime 缺席时规则会静默失效
+        use crate::core::policy::{PolicyEngine, PolicyEngineConfig};
+        // 兜底路径要同时带上**权限规则**和**审批模式**：前者不装规则会静默失效，
+        // 后者不传的话用户选的 yolo/plan 在 runtime 缺席时会悄悄退回逐次询问。
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let approval_mode = agent.policy_approval_mode();
         std::sync::Arc::new(crate::core::confirmation_bus::MessageBus::new(
-            PolicyEngine::with_project_rules(PolicyEngineConfig::default(), &cwd),
+            PolicyEngine::with_project_rules(
+                PolicyEngineConfig {
+                    approval_mode: Some(approval_mode),
+                    ..Default::default()
+                },
+                &cwd,
+            ),
             false,
         ))
     });

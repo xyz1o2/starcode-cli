@@ -33,6 +33,20 @@ impl Storage {
         Self::global_star_dir().join("mcp-oauth-tokens.json")
     }
 
+    /// 全局「设置」文件：`~/.star/settings.json`
+    ///
+    /// 这里只放 settings 语义的键：`permissions`（见
+    /// `policy::settings_rules`）、`hooks`（见 `hooks::settings_hooks`）、
+    /// 以及后续的 model / effort 之类。
+    ///
+    /// **注意与 `user-settings.json` 的分工**：后者存 provider 列表、API key 和模型
+    /// 缓存，由 `SettingsManager` 与 `ProviderStore` 共用（两个结构体反序列化同一
+    /// 文件、彼此忽略未知字段），且自带一条 `providers.json` 的迁移链。两者键集
+    /// 不重叠，所以**不是**重复，而是两种关注点。合并它们需要同时处理 provider 凭据
+    /// 的持久化、`/config` 与 `doctor` 的读点，风险远大于「名字看着乱」的收益。
+    ///
+    /// 曾经这个函数没有任何调用方，`settings_rules` 内联拼了一遍同样的路径字符串 ——
+    /// 那是真正会腐烂的地方。现在两边都走这里。
     pub fn global_settings_path() -> PathBuf {
         Self::global_star_dir().join("settings.json")
     }

@@ -7,7 +7,28 @@ use ratatui::prelude::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::widgets::Block;
 
-fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect) -> Rect {
+/// 渲染算出来、需要写回 [`ChatState`] 的布局结果。
+///
+/// 渲染函数对状态的写入集中在这里，由 [`draw_ui`] 在渲染结束后统一回写。此前这些
+/// 赋值（滚动夹取、总行数、各区域 rect）散在 `render_page` 内部，副作用藏在绘制
+/// 过程中：想回答「这一帧改了什么」只能通读整个函数。
+///
+/// **渲染还不是纯函数**：`render_chat_lines` 与 `render_task_panel_mut` 需要
+/// `&mut ChatState`（前者写入 `rendered_cache` 记忆化，后者要动 ratatui 的
+/// `ListState`）。彻底纯化要先把这些缓存挪出 state，不在本次范围内。
+#[derive(Debug, Clone, Copy)]
+pub struct RenderOutput {
+    /// 夹取后的滚动位置。
+    pub scroll: usize,
+    /// 对话区渲染出来的总行数（滚动条与 PageUp/PageDown 靠它）。
+    pub total_rendered_lines: usize,
+    /// 对话区矩形：滚轮回溯与鼠标命中测试都按它换算。
+    pub chat_area: Rect,
+    /// 输入框矩形：点击聚焦输入框靠它。
+    pub input_area: Rect,
+}
+
+fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect) -> RenderOutput {
     use ratatui::layout::{Constraint, Direction, Layout};
 
     let input_height = crate::ui::components::chat_input::calc_input_height(state);
@@ -24,14 +45,10 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     let token_warning_lines = crate::ui::components::status_line::token_warning_line(state);
     let token_warning_h = token_warning_lines.len() as u16;
 
-    // Task panel auto-show/hide logic
-    // 先自愈：磁盘清单比内存新（TodoWrite 被打断、别的进程改了文件等没人
-    // 通知面板的路径）就 reload，下面的显隐判定才基于最新数据。
-    state.task_panel.reload_if_stale();
-    state.task_panel.auto_show_if_needed();
-    // is_processing 在 agent 收到 Done 时回落 false（stream.rs）——残留
-    // in_progress 的清单在 agent 停下后才能开始 5 秒收起计时
-    state.task_panel.check_auto_hide(state.is_processing);
+    // 任务面板的显隐/定时器**不在渲染里**：那是状态推进。此前 `reload_if_stale()`
+    // 每帧一次 `current_dir()` + `fs::metadata`（流式时 30 次/秒），显隐判定又在
+    // 绘制过程中改 `is_visible`，副作用会被 dirty 门控放大成「画没画过不一样」。
+    // 现在由事件循环的 1Hz 节拍调用 `ChatState::tick_task_panel` 推进。
 
     // Task panel above input (like openclaude's TaskListV2 above PromptInput)
     let task_panel_visible = state.task_panel.is_visible;
@@ -75,15 +92,11 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     let chat_lines = crate::ui::components::chat_history::render_chat_lines(state, chat_area.width);
     let total = chat_lines.len();
     let max_scroll = total.saturating_sub(chat_area.height as usize);
-    if state.auto_follow {
-        state.scroll = max_scroll;
-    } else if state.scroll > max_scroll {
-        state.scroll = max_scroll;
-    }
-    state.total_rendered_lines = total;
-    // Update chat area for mouse event coordinate mapping
-    state.last_chat_area = Some(chat_area);
-    state.last_chat_height = chat_area.height;
+    let scroll = if state.auto_follow || state.scroll > max_scroll {
+        max_scroll
+    } else {
+        state.scroll
+    };
 
     // Empty state placeholder when no chat history
     let chat_lines = if total == 0 && !state.is_processing {
@@ -181,9 +194,6 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
         footer_chunks[1],
     );
 
-    // 保存 input 区域位置信息，用于鼠标事件处理
-    state.last_input_area = Some(input_area);
-
     // 滚动到底部浮动指示器 — 当用户向上滚动且有新内容时显示
     if state.show_scroll_to_bottom && !state.auto_follow {
         let indicator_text = ratatui::text::Line::from(ratatui::text::Span::styled(
@@ -271,7 +281,12 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
         }
     }
 
-    input_area
+    RenderOutput {
+        scroll,
+        total_rendered_lines: total,
+        chat_area,
+        input_area,
+    }
 }
 
 pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
@@ -281,7 +296,17 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
     // ratatui 的 diff 永远非空 —— 于是「内容没变就不重绘」在物理上不可能成立，
     // 空屏也要 30fps 全量刷屏。动画时钟改由事件循环按需推进，见
     // `super::runtime` 里的 `is_animating` / `advance_animation`。
-    let input_area = render_page(f, state, f.area());
+    let out = render_page(f, state, f.area());
+
+    // 渲染结果统一回写：滚动夹取与各区域 rect 属于事件层（滚动计算、鼠标命中测试
+    // 都在渲染之外读它们），由这里一处落库，渲染函数内部不再直接改状态。
+    state.scroll = out.scroll;
+    state.total_rendered_lines = out.total_rendered_lines;
+    state.last_chat_area = Some(out.chat_area);
+    state.last_chat_height = out.chat_area.height;
+    state.last_input_area = Some(out.input_area);
+
+    let input_area = out.input_area;
     if state.show_command_hints
         || state.show_mention_hints
         || state.show_provider_menu
@@ -295,180 +320,113 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
         crate::ui::components::help_popup::render_help_popup(f, f.area());
     }
 
-    // Draw palette if needed (via unified modal stack)
+    // Palette 是唯一可以在「不在栈顶」时也要画的弹窗：输入框会叠在它上面
+    // （见 `exit_input_modal` 用 retain 而不是 pop）。先画它，后画的栈顶弹窗
+    // 盖在上面 —— 层级与模态栈顺序一致。
     if state.is_palette_open() {
         crate::ui::components::palette::render_palette(f, f.area(), state);
     }
 
-    // Draw MCP manager modal if on top of the modal stack
-    if matches!(state.top_modal(), Some(crate::ui::state::Modal::Mcp { .. })) {
-        crate::ui::components::modal::render_mcp_modal(f, f.area(), state);
-    }
-
-    // Draw extension marketplace modal if on top of the modal stack
-    if matches!(
-        state.top_modal(),
-        Some(crate::ui::state::Modal::Market { .. })
-    ) {
-        crate::ui::components::modal::render_market_modal(f, f.area(), state);
-    }
-
-    // Draw plugin manager modal (Claude Code style /plugin) if on top
-    if matches!(
-        state.top_modal(),
-        Some(crate::ui::state::Modal::Plugins { .. })
-    ) {
-        crate::ui::components::modal::render_plugins_modal(f, f.area(), state);
-    }
-
-    // Draw input modal if needed
-    if matches!(
-        state.top_modal(),
-        Some(crate::ui::state::modal::Modal::InputModal)
-    ) {
-        // "新增 provider" 表单复用 InputModal 的开关，但画的是多字段面板
-        if crate::ui::components::provider_form::is_provider_form_active(state) {
-            crate::ui::components::provider_form::render_provider_form(f, f.area(), state);
-        } else {
-            crate::ui::components::input_modal::render_input_modal(f, f.area(), state);
+    // 其余弹窗按栈顶单点分发。**这张表必须穷尽 [`Modal`]**：此前是 14 个
+    // `if matches!(state.top_modal(), …)`，漏写一个变体编译照过、按键照落主输入框。
+    // 先 clone 再 match —— 渲染函数要 `&mut state`，`top_modal()` 只借不借出。
+    if let Some(modal) = state.top_modal().cloned() {
+        use crate::ui::state::modal::Modal;
+        match modal {
+            Modal::Palette => { /* 上面已画（栈里即可见） */ }
+            Modal::Mcp { .. } => {
+                crate::ui::components::modal::render_mcp_modal(f, f.area(), state);
+            }
+            Modal::Market { .. } => {
+                crate::ui::components::modal::render_market_modal(f, f.area(), state);
+            }
+            Modal::Plugins { .. } => {
+                crate::ui::components::modal::render_plugins_modal(f, f.area(), state);
+            }
+            // "新增 provider" 表单复用 InputModal 的开关，但画的是多字段面板
+            Modal::InputModal => {
+                if crate::ui::components::provider_form::is_provider_form_active(state) {
+                    crate::ui::components::provider_form::render_provider_form(f, f.area(), state);
+                } else {
+                    crate::ui::components::input_modal::render_input_modal(f, f.area(), state);
+                }
+            }
+            Modal::StatusModal => {
+                crate::ui::components::status_modal::render_status_modal(f, f.area(), state);
+            }
+            Modal::GlobalSearch => crate::ui::components::highlight::search::render_global_search(
+                f,
+                &state.global_search_state,
+                f.area(),
+            ),
+            Modal::QuickOpen => crate::ui::components::highlight::quick_open::render_quick_open(
+                f,
+                &state.quick_open_state,
+                f.area(),
+            ),
+            Modal::HistorySearch => {
+                crate::ui::components::highlight::history::render_history_search(
+                    f,
+                    &state.history_search_state,
+                    f.area(),
+                )
+            }
+            Modal::ThemePicker { .. } => {
+                let themes = crate::ui::components::highlight::theme_picker::available_themes();
+                crate::ui::components::highlight::theme_picker::render_theme_picker(
+                    f,
+                    &themes,
+                    state.selected_theme_index,
+                    f.area(),
+                );
+            }
+            Modal::UsageStats => {
+                let theme = state.theme_manager.current();
+                crate::ui::components::highlight::stats::render_usage_stats(
+                    f,
+                    &state.usage_stats,
+                    f.area(),
+                    theme,
+                );
+            }
+            Modal::Export => crate::ui::components::highlight::export::render_export_dialog(
+                f,
+                &state.export_state,
+                f.area(),
+            ),
+            Modal::CompressionStatus => {
+                crate::ui::components::highlight::compression::render_compression_status(
+                    f,
+                    &state.compression_state,
+                    f.area(),
+                )
+            }
+            Modal::ContextViz => {
+                crate::ui::components::highlight::context_viz::render_context_visualization(
+                    f,
+                    &state.context_breakdown,
+                    f.area(),
+                )
+            }
+            Modal::ErrorOverlay => {
+                let theme = state.theme_manager.current();
+                crate::ui::components::error_overlay::render_error_overlay(
+                    f,
+                    &state.error_overlay_state,
+                    f.area(),
+                    theme,
+                );
+            }
+            Modal::LogSelector => {
+                let theme = state.theme_manager.current();
+                crate::ui::components::log_selector::render_log_selector(
+                    f,
+                    &state.log_selector_state,
+                    f.area(),
+                    theme,
+                );
+            }
         }
-    }
-
-    // Draw status modal if needed
-    if matches!(
-        state.top_modal(),
-        Some(crate::ui::state::modal::Modal::StatusModal)
-    ) {
-        crate::ui::components::status_modal::render_status_modal(f, f.area(), state);
-    }
-
-    // Draw global search dialog if active
-    if matches!(
-        state.top_modal(),
-        Some(crate::ui::state::modal::Modal::GlobalSearch)
-    ) {
-        crate::ui::components::highlight::search::render_global_search(
-            f,
-            &state.global_search_state,
-            f.area(),
-        );
-    }
-
-    // Draw quick open dialog if active
-    if matches!(
-        state.top_modal(),
-        Some(crate::ui::state::modal::Modal::QuickOpen)
-    ) {
-        crate::ui::components::highlight::quick_open::render_quick_open(
-            f,
-            &state.quick_open_state,
-            f.area(),
-        );
-    }
-
-    // Draw history search dialog if active
-    if matches!(
-        state.top_modal(),
-        Some(crate::ui::state::modal::Modal::HistorySearch)
-    ) {
-        crate::ui::components::highlight::history::render_history_search(
-            f,
-            &state.history_search_state,
-            f.area(),
-        );
-    }
-
-    // Draw theme picker if active
-    if matches!(
-        state.top_modal(),
-        Some(crate::ui::state::modal::Modal::ThemePicker { .. })
-    ) {
-        let themes = crate::ui::components::highlight::theme_picker::available_themes();
-        crate::ui::components::highlight::theme_picker::render_theme_picker(
-            f,
-            &themes,
-            state.selected_theme_index,
-            f.area(),
-        );
-    }
-
-    // Draw usage stats if active
-    if matches!(
-        state.top_modal(),
-        Some(crate::ui::state::modal::Modal::UsageStats)
-    ) {
-        let theme = state.theme_manager.current();
-        crate::ui::components::highlight::stats::render_usage_stats(
-            f,
-            &state.usage_stats,
-            f.area(),
-            theme,
-        );
-    }
-
-    // Draw export dialog if active
-    if matches!(
-        state.top_modal(),
-        Some(crate::ui::state::modal::Modal::Export)
-    ) {
-        crate::ui::components::highlight::export::render_export_dialog(
-            f,
-            &state.export_state,
-            f.area(),
-        );
-    }
-
-    // Draw compression status if active
-    if matches!(
-        state.top_modal(),
-        Some(crate::ui::state::modal::Modal::CompressionStatus)
-    ) {
-        crate::ui::components::highlight::compression::render_compression_status(
-            f,
-            &state.compression_state,
-            f.area(),
-        );
-    }
-
-    // Draw context visualization if active
-    if matches!(
-        state.top_modal(),
-        Some(crate::ui::state::modal::Modal::ContextViz)
-    ) {
-        let theme = state.theme_manager.current();
-        crate::ui::components::highlight::context_viz::render_context_visualization(
-            f,
-            &state.context_breakdown,
-            f.area(),
-        );
-    }
-
-    // Draw error overlay if active
-    if matches!(
-        state.top_modal(),
-        Some(crate::ui::state::modal::Modal::ErrorOverlay)
-    ) {
-        let theme = state.theme_manager.current();
-        crate::ui::components::error_overlay::render_error_overlay(
-            f,
-            &state.error_overlay_state,
-            f.area(),
-            theme,
-        );
-    }
-
-    // Draw log selector if active
-    if matches!(
-        state.top_modal(),
-        Some(crate::ui::state::modal::Modal::LogSelector)
-    ) {
-        let theme = state.theme_manager.current();
-        crate::ui::components::log_selector::render_log_selector(
-            f,
-            &state.log_selector_state,
-            f.area(),
-            theme,
-        );
     }
 
     // Draw toast notifications (top-right, stacked)
