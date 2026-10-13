@@ -11,6 +11,7 @@
 //!   引擎过期、watcher 文件事件，三条路径都汇入同一个重建队列。
 
 use crate::core::context::indexer::Indexer;
+use notify::Watcher as _;
 use parking_lot::{Condvar, Mutex};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -116,6 +117,106 @@ pub fn request_refresh(project_root: &Path) {
     }
 }
 
+/// 已注册的目录 watch 集合。
+///
+/// 以前这里是 `std::mem::forget(watcher)` —— 整个 watcher 被泄漏掉，换取「它
+/// 一直活着」，代价是**没人能再碰它**：既不能在新建目录时补 watch，也不能在
+/// 目录删除时回收。改成 `Arc<Mutex<…>>` 之后 worker 线程拿得到它，增删目录才
+/// 维护得动。
+struct DirWatches {
+    watcher: notify::RecommendedWatcher,
+    /// 已注册目录（绝对路径），用于去重。
+    watched: HashSet<PathBuf>,
+}
+
+impl DirWatches {
+    /// 注册单个目录；已注册过则跳过。返回是否**真的**注册了。
+    fn add(&mut self, dir: &Path) -> bool {
+        if !self.watched.insert(dir.to_path_buf()) {
+            return false;
+        }
+        if let Err(err) = self.watcher.watch(dir, notify::RecursiveMode::NonRecursive) {
+            // 注册失败必须把占位撤掉：否则这个目录永远处于「已注册」状态，
+            // 之后同名目录重建出来也不会再试一次。
+            self.watched.remove(dir);
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[Context] watch({}) failed: {}",
+                dir.display(),
+                err
+            ));
+            return false;
+        }
+        true
+    }
+
+    /// 目录被删除或改名：撤掉它下面的所有 watch。
+    ///
+    /// 不撤的话，目录没了而 watch 还在，白占内核预算 ——
+    /// `fs.inotify.max_user_watches` 是**按真实 uid 全局共享**的，你的编辑器、
+    /// dev server、别的 watch 工具都从这一个池子里取。
+    fn remove_subtree(&mut self, dir: &Path) {
+        let stale: Vec<PathBuf> = self
+            .watched
+            .iter()
+            .filter(|watched| watched.starts_with(dir))
+            .cloned()
+            .collect();
+        for path in stale {
+            let _ = self.watcher.unwatch(&path);
+            self.watched.remove(&path);
+        }
+    }
+}
+
+/// 只给「能进索引」的目录注册 watch。
+///
+/// inotify 的 watch 是**按目录**的（`inotify(7)`：*"Inotify monitoring of
+/// directories is not recursive: to monitor subdirectories under a directory,
+/// additional watches must be created. This can take a significant amount time
+/// for large directory trees."*）。`RecursiveMode::Recursive` 于是会把整棵树的
+/// 每个目录都注册一遍 —— 包括那些事件随后会被 [`EventFilter`] 丢掉目录。
+///
+/// 本仓库 `target/` 下有 6,000+ 个目录，而 `Indexer` 根本不索引它们。注册
+/// 6,600 次而只有一百多个有用，这就是慢盘（WSL 的 `/mnt/d`）上首次启动那 80
+/// 多秒的来源。
+///
+/// 这里用 `file_walk::walk` 走一遍 —— 和 `Indexer::index_project()` 同一个
+/// 函数、同一套 `.gitignore` 口径。所以「能进索引」不是另立的标准，而是构造上
+/// 就成立的：walk 不会 descend 进被忽略的目录，我们拿到的必然是 indexer 也会
+/// 看到的那些。
+fn register_indexed_dirs(watches: &Arc<Mutex<DirWatches>>, root: &Path) -> usize {
+    let opts = crate::utils::file_walk::WalkOptions::new();
+    let mut guard = watches.lock();
+    // root 自己必须注册：直接建在根下的文件，其父目录事件来自 root。
+    let mut count = guard.add(root) as usize;
+    for entry in crate::utils::file_walk::walk(root, &opts).flatten() {
+        if entry.file_type().is_some_and(|kind| kind.is_dir()) {
+            count += guard.add(entry.path()) as usize;
+        }
+    }
+    count
+}
+
+/// 新建目录：补注册它和它下面幸存的子目录。
+///
+/// `inotify(7)` 明确提醒过这个竞态：*"by the time you create a watch for the new
+/// subdirectory, new files (and subdirectories) may already exist inside the
+/// subdirectory"* —— 补上 watch 之前塞进去的文件不会产生事件。
+///
+/// 这里能接受那个窗口，是因为重建入口 `Indexer::index_project()` 自己会全量走
+/// 一遍树（靠 `(size, mtime)` 跳过未变文件）：漏掉的事件只会让重建**晚**一轮，
+/// 不会让索引漏文件。
+fn add_watch_tree(watches: &Arc<Mutex<DirWatches>>, dir: &Path) {
+    let opts = crate::utils::file_walk::WalkOptions::new();
+    let mut guard = watches.lock();
+    guard.add(dir);
+    for entry in crate::utils::file_walk::walk(dir, &opts).flatten() {
+        if entry.file_type().is_some_and(|kind| kind.is_dir()) {
+            guard.add(entry.path());
+        }
+    }
+}
+
 /// 启动 watcher + 重建 worker（幂等）。
 pub fn ensure_started(project_root: &Path) {
     let coord = coordinator();
@@ -140,31 +241,28 @@ pub fn ensure_started(project_root: &Path) {
         // channel 满了就丢弃（下一轮全量增量重建会补上），绝不阻塞回调线程
         let _ = tx.send(res);
     });
-    let Ok(mut watcher) = watcher_result else {
+    let Ok(watcher) = watcher_result else {
         crate::utils::logging::append_debug_log_line(
             "[Context] notify watcher init failed; falling back to query-triggered refresh",
         );
         coord.started.store(false, Ordering::SeqCst);
         return;
     };
-    if let Err(err) =
-        notify::Watcher::watch(&mut watcher, project_root, notify::RecursiveMode::Recursive)
-    {
-        crate::utils::logging::append_debug_log_line(&format!(
-            "[Context] notify watch({}) failed: {}; falling back to query-triggered refresh",
-            project_root.display(),
-            err
-        ));
-        coord.started.store(false, Ordering::SeqCst);
-        return;
-    }
-    // watcher 实例必须保活
-    std::mem::forget(watcher);
+
+    let watches = Arc::new(Mutex::new(DirWatches {
+        watcher,
+        watched: HashSet::new(),
+    }));
+
+    // 注册必须在 spawn worker **之前**做完：worker 一起来就可能收到事件并需要
+    // 访问 `watches`，顺序反了会出现「worker 已在跑、watch 却还没建好」的窗口。
+    let registered = register_indexed_dirs(&watches, &root);
 
     // ── 重建 worker：防抖合并 + 低优先级增量重建 ────────────────────────
+    let worker_watches = Arc::clone(&watches);
     std::thread::Builder::new()
         .name("star-index-worker".into())
-        .spawn(move || rebuild_worker_loop(root, rx))
+        .spawn(move || rebuild_worker_loop(root, rx, worker_watches))
         .map(|_| ())
         .unwrap_or_else(|e| {
             crate::utils::logging::append_debug_log_line(&format!(
@@ -175,15 +273,20 @@ pub fn ensure_started(project_root: &Path) {
         });
 
     crate::utils::logging::append_debug_log_line(&format!(
-        "[Context] index coordinator started (watching {})",
-        project_root.display()
+        "[Context] index coordinator started (watching {}, {} dirs)",
+        project_root.display(),
+        registered
     ));
 }
 
 /// worker 主循环：收集事件 → 防抖 → 增量重建。
 /// notify 事件的接收超时就是防抖窗口 —— 窗口内新事件持续刷新，
 /// 静默满 300ms 才执行一次重建。
-fn rebuild_worker_loop(root: PathBuf, rx: Receiver<notify::Result<notify::Event>>) {
+fn rebuild_worker_loop(
+    root: PathBuf,
+    rx: Receiver<notify::Result<notify::Event>>,
+    watches: Arc<Mutex<DirWatches>>,
+) {
     lower_current_thread_priority();
     let coord = coordinator();
     let filter = build_event_filter(&root);
@@ -195,6 +298,23 @@ fn rebuild_worker_loop(root: PathBuf, rx: Receiver<notify::Result<notify::Event>
             match rx.try_recv() {
                 Ok(Ok(event)) => {
                     got_event = true;
+                    // 目录增删要维护 watch 集合：注册是 NonRecursive 的，
+                    // 所以没人会替我们递归下去。
+                    match event.kind {
+                        notify::EventKind::Create(_) => {
+                            for path in &event.paths {
+                                if path.is_dir() && !filter.is_ignored(path) {
+                                    add_watch_tree(&watches, path);
+                                }
+                            }
+                        }
+                        notify::EventKind::Remove(_) => {
+                            for path in &event.paths {
+                                watches.lock().remove_subtree(path);
+                            }
+                        }
+                        _ => {}
+                    }
                     let mut inner = coord.inner.lock();
                     for path in event.paths {
                         if let Ok(rel) = path.strip_prefix(&root) {
@@ -454,6 +574,141 @@ pub fn status_text() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 造一棵带 `target/` 的小树，模拟真实仓库的目录构成。
+    fn repo_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        for path in [
+            "src",
+            "src/nested",
+            "target",
+            "target/debug",
+            "target/debug/deps",
+        ] {
+            std::fs::create_dir_all(root.join(path)).unwrap();
+        }
+        std::fs::write(root.join("src/lib.rs"), "").unwrap();
+        std::fs::write(root.join("target/debug/deps/big.bin"), "").unwrap();
+        dir
+    }
+
+    /// 本地 watcher —— **不**碰全局协调器。
+    ///
+    /// 用例只验证注册集合本身，所以直接构造一个 `DirWatches`，绕开
+    /// `ensure_started`：那会写进 `OnceLock` 单例，污染同进程里其他用例。
+    fn local_watches() -> Arc<Mutex<DirWatches>> {
+        let (_tx, _rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
+        let watcher = notify::recommended_watcher(move |res| {
+            let _ = _tx.send(res);
+        })
+        .expect("watcher");
+        Arc::new(Mutex::new(DirWatches {
+            watcher,
+            watched: HashSet::new(),
+        }))
+    }
+
+    /// 回归的核心：被 `.gitignore` 忽略的目录**不得**进 watch 集合。
+    ///
+    /// 以前这里是 `watch(root, Recursive)`：整棵树的每个目录都注册一遍 ——
+    /// 本仓库 `target/` 下有 6,000+ 个，而它们的事件随后会被 `EventFilter`
+    /// 丢掉。注册量 6,600 而有用的一百多个，慢盘上就是那 80 多秒。
+    #[test]
+    fn ignored_directories_never_get_a_watch() {
+        let dir = repo_fixture();
+        let root = dir.path();
+        let watches = local_watches();
+
+        register_indexed_dirs(&watches, root);
+
+        let watched: Vec<String> = watches
+            .lock()
+            .watched
+            .iter()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect();
+
+        // 要监视的
+        assert!(
+            watched.iter().any(|p| p.ends_with("/src")),
+            "源目录必须在监视集合里: {watched:?}"
+        );
+        assert!(
+            watched.iter().any(|p| p.ends_with("/src/nested")),
+            "嵌套源目录也必须在: {watched:?}"
+        );
+        assert!(
+            watched
+                .iter()
+                .any(|p| p == &root.to_string_lossy().replace('\\', "/")),
+            "根目录必须自己注册，否则直接建在根下的文件收不到事件: {watched:?}"
+        );
+        // 不该监视的
+        assert!(
+            !watched.iter().any(|p| p.contains("/target")),
+            "target/ 被 gitignore，Indexer 不看它，也不该给它 watch: {watched:?}"
+        );
+    }
+
+    /// 新建目录必须补上 watch —— 注册是 NonRecursive 的，没人会替我们递归。
+    /// 漏了这一步，「新建文件夹里的文件不触发重建」会很难查。
+    #[test]
+    fn a_newly_created_directory_gets_watched() {
+        let dir = repo_fixture();
+        let root = dir.path();
+        let watches = local_watches();
+        register_indexed_dirs(&watches, root);
+
+        let fresh = root.join("src").join("brand-new");
+        std::fs::create_dir_all(fresh.join("deep")).unwrap();
+
+        add_watch_tree(&watches, &fresh);
+
+        let watched = watches.lock();
+        assert!(watched.watched.contains(&fresh));
+        assert!(
+            watched.watched.contains(&fresh.join("deep")),
+            "新目录下的子目录也要注册"
+        );
+    }
+
+    /// 目录删除后必须撤 watch：`fs.inotify.max_user_watches` 按真实 uid 全局
+    /// 共享，不撤等于白占你编辑器 / dev server 的预算。
+    #[test]
+    fn deleting_a_directory_releases_its_watches() {
+        let dir = repo_fixture();
+        let root = dir.path();
+        let watches = local_watches();
+        register_indexed_dirs(&watches, root);
+
+        let doomed = root.join("src").join("nested");
+        assert!(watches.lock().watched.contains(&doomed));
+
+        watches.lock().remove_subtree(&doomed);
+
+        let watched = watches.lock();
+        assert!(!watched.watched.contains(&doomed));
+        assert!(
+            watched.watched.contains(&root.join("src")),
+            "只撤子树，兄弟目录不能被误伤"
+        );
+    }
+
+    /// 注册失败不能留下「已注册」的占位，否则同名目录重建后永远补不上 watch。
+    #[test]
+    fn a_failed_registration_does_not_leave_a_phantom_entry() {
+        let watches = local_watches();
+        let missing = PathBuf::from("/definitely/not/a/real/dir");
+        assert!(!watches.lock().add(&missing));
+        assert!(
+            !watches.lock().watched.contains(&missing),
+            "失败必须把占位撤掉"
+        );
+        // 幂等：同一个路径不会重复注册。
+        assert!(!watches.lock().add(&missing));
+    }
 
     /// 涉及全局协调器脏集合的测试共用这一把锁。
     ///
