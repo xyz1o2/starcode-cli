@@ -88,10 +88,7 @@ impl<'a> AdoptedExternalProfile<'a> {
 ///
 /// 字段缺失时返回 `None`，调用方继续沿自己的优先级链往下找 —— **不**去另一个
 /// 工具那里借：Claude Code 的模型配 Codex 的网关，那种组合两边都不认。
-fn adopted(
-    external: &ExternalConfigs,
-    field: ExternalField,
-) -> Option<(String, SourceRef)> {
+fn adopted(external: &ExternalConfigs, field: ExternalField) -> Option<(String, SourceRef)> {
     let profile = external.adopted()?;
     let value = profile.get(field)?.trim();
     if value.is_empty() {
@@ -321,11 +318,6 @@ fn resolve_model(
         return ResolvedValue::present(model, SourceRef::new(SRC_ENV_ANTHROPIC_MODEL));
     }
 
-    // Claude Code / Codex 的配置文件（fallback）。
-    if let Some((model, source)) = adopted(external, ExternalField::Model) {
-        return ResolvedValue::present(model, source);
-    }
-
     if let Some(active_provider_id) = provider_config.active_provider_id.as_deref() {
         if let Some(model) = provider_config
             .providers
@@ -338,6 +330,11 @@ fn resolve_model(
 
     if let Some(model) = trimmed_non_empty(provider_config.active_model.clone()) {
         return ResolvedValue::present(model, SourceRef::new(SRC_PROVIDER_STORE_ACTIVE_MODEL));
+    }
+
+    // Claude Code / Codex 的配置文件（fallback），见 `external_configs`。
+    if let Some((model, source)) = adopted(external, ExternalField::Model) {
+        return ResolvedValue::present(model, source);
     }
 
     if let Some(model) = trimmed_non_empty(settings.default_model.clone()) {
@@ -357,10 +354,7 @@ fn resolve_small_fast_model(env: &EnvSnapshot, external: &ExternalConfigs) -> Re
     }
 
     if let Some(model) = trimmed_non_empty(env.anthropic_small_fast_model.clone()) {
-        return ResolvedValue::present(
-            model,
-            SourceRef::new(SRC_ENV_ANTHROPIC_SMALL_FAST_MODEL),
-        );
+        return ResolvedValue::present(model, SourceRef::new(SRC_ENV_ANTHROPIC_SMALL_FAST_MODEL));
     }
 
     if let Some((model, source)) = adopted(external, ExternalField::SmallFastModel) {
@@ -391,15 +385,18 @@ fn resolve_base_url(
         return ResolvedValue::present(base_url, SourceRef::new(SRC_ENV_ANTHROPIC_BASE_URL));
     }
 
-    // Claude Code / Codex 的配置文件（fallback），见 `external_configs`。
-    if let Some((base_url, source)) = adopted(external, ExternalField::BaseUrl) {
-        return ResolvedValue::present(base_url, source);
-    }
-
     if let Some(base_url) =
         stored_settings.and_then(|settings| trimmed_non_empty(settings.base_url.clone()))
     {
         return ResolvedValue::present(base_url, SourceRef::new(SRC_PROVIDER_STORE_BASE_URL));
+    }
+
+    // Claude Code / Codex 的配置文件（fallback），见 `external_configs`。
+    // 排在 provider store 之下、provider 内建默认之上：用户显式存过的端点比
+    // 「别的工具顺手留下的文件」更像当前意图，而内建默认（api.anthropic.com
+    // 之类）只是兜底元数据，不该盖掉一个真的配好的网关。
+    if let Some((base_url, source)) = adopted(external, ExternalField::BaseUrl) {
+        return ResolvedValue::present(base_url, source);
     }
 
     if let Some(provider_id) = provider_id {
@@ -588,8 +585,32 @@ mod tests {
         external: ExternalConfigs,
     ) -> EffectiveProviderResolution {
         resolve_effective_provider_settings_with_env_and_external(
-            inputs, &provider_config, &settings, &env, &external,
+            inputs,
+            &provider_config,
+            &settings,
+            &env,
+            &external,
         )
+    }
+
+    /// 一个「用户自己加的自定义 provider」，且刻意**不**用 `openai` 这类内建 id：
+    /// 内建 provider 会让 `resolve_api_key_from_env_with_source` 去读
+    /// `OPENAI_API_KEY` 之类的真实环境变量，那用例就在依赖跑测试那台机器的
+    /// 环境了 —— 这正是并行单测里最难查的那种偶发失败。
+    fn provider_store_fixture(model: &str) -> StoredProviderConfig {
+        StoredProviderConfig {
+            active_provider_id: Some("my-gateway".to_string()),
+            active_model: Some(model.to_string()),
+            providers: HashMap::from([(
+                "my-gateway".to_string(),
+                StoredProviderSettings {
+                    base_url: Some("https://store.example.com".to_string()),
+                    api_key: Some("store-key".to_string()),
+                    selected_model: Some(model.to_string()),
+                    ..Default::default()
+                },
+            )]),
+        }
     }
 
     /// 全部照抄在 Claude Code 里配置过的人，starcode 必须能直接起 ——
@@ -606,7 +627,10 @@ mod tests {
 
         assert_eq!(resolution.model.value.as_deref(), Some("claude-sonnet-4-5"));
         assert_eq!(resolution.model.source.kind, SRC_CLAUDE_CODE_MODEL);
-        assert_eq!(resolution.base_url.value.as_deref(), Some("https://cc.example.com"));
+        assert_eq!(
+            resolution.base_url.value.as_deref(),
+            Some("https://cc.example.com")
+        );
         assert_eq!(resolution.base_url.source.kind, SRC_CLAUDE_CODE_BASE_URL);
         assert_eq!(resolution.api_key.value.as_deref(), Some("cc-token"));
         assert_eq!(resolution.api_key.source.kind, SRC_CLAUDE_CODE_API_KEY);
@@ -694,23 +718,19 @@ mod tests {
         assert_eq!(resolution.model.source.kind, SRC_ENV_ANTHROPIC_MODEL);
     }
 
-    /// 兼容层填的是空档，不是抢位置：starcode 自己存的 provider 配置
-    /// （`selected_model` / `baseUrl` / `apiKey`）必须照旧生效。
+    /// 兼容层排在 provider store **之下**，和三条链里的其余来源对齐。
+    ///
+    /// 依据：starcode 自己存的 provider 配置是「用户为 starcode 存的」，而磁盘上
+    /// 另一个工具的配置文件是「顺手留下的」。前者该赢——否则这次加兼容就是给
+    /// 所有已配置的用户悄悄换掉端点和 key。要盖住它，`STAR_MODEL` / `STAR_BASE_URL`
+    /// / `STAR_API_KEY` / `--model` 都在更上面，用户随时能钉死。
+    ///
+    /// 三条链（model / base_url / api_key）必须停在**同一档**：只让其中两条越过
+    /// provider store，就会出现「Claude 的模型 + Claude 的网关 + store 里的旧 key」
+    /// 这种两边都不认的组合。
     #[test]
-    fn the_provider_store_still_wins_over_the_compat_layer() {
-        let provider_config = StoredProviderConfig {
-            active_provider_id: Some("openai".to_string()),
-            active_model: Some("store-model".to_string()),
-            providers: HashMap::from([(
-                "openai".to_string(),
-                StoredProviderSettings {
-                    base_url: Some("https://store.example.com".to_string()),
-                    api_key: Some("store-key".to_string()),
-                    selected_model: Some("store-model".to_string()),
-                    ..Default::default()
-                },
-            )]),
-        };
+    fn the_provider_store_outranks_the_compat_layer() {
+        let provider_config = provider_store_fixture("store-model");
 
         let resolution = resolve(
             ProviderResolutionInputs::default(),
@@ -721,7 +741,60 @@ mod tests {
         );
 
         assert_eq!(resolution.model.value.as_deref(), Some("store-model"));
-        assert_eq!(resolution.model.source.kind, SRC_PROVIDER_STORE_ACTIVE_MODEL);
+        assert_eq!(
+            resolution.model.source.kind,
+            SRC_PROVIDER_STORE_ACTIVE_MODEL
+        );
+        assert_eq!(
+            resolution.base_url.value.as_deref(),
+            Some("https://store.example.com")
+        );
+        assert_eq!(resolution.base_url.source.kind, SRC_PROVIDER_STORE_BASE_URL);
+        assert_eq!(resolution.api_key.value.as_deref(), Some("store-key"));
+        assert_eq!(resolution.api_key.source.kind, SRC_PROVIDER_STORE_API_KEY);
+    }
+
+    /// 配了 provider 却没存过 key（`normalize_api_key_value` 认占位值）时，
+    /// 兼容层仍然能补上 —— store 那一条没命中就不占位。
+    #[test]
+    fn a_provider_store_without_a_key_still_lets_the_compat_layer_through() {
+        let mut provider_config = provider_store_fixture("store-model");
+        if let Some(settings) = provider_config.providers.get_mut("my-gateway") {
+            settings.api_key = Some("API_KEY_NOT_SET".to_string());
+        }
+
+        let resolution = resolve(
+            ProviderResolutionInputs::default(),
+            provider_config,
+            UserSettings::default(),
+            empty_env(),
+            full_claude(),
+        );
+
+        assert_eq!(resolution.model.value.as_deref(), Some("store-model"));
+        assert_eq!(resolution.api_key.value.as_deref(), Some("cc-token"));
+        assert_eq!(resolution.api_key.source.kind, SRC_CLAUDE_CODE_API_KEY);
+    }
+
+    /// 什么都没配兼容层时，provider store 照旧照用 —— 上一条只是换了优先级，
+    /// 不是把 store 废掉了。
+    #[test]
+    fn the_provider_store_still_resolves_without_the_compat_layer() {
+        let provider_config = provider_store_fixture("store-model");
+
+        let resolution = resolve(
+            ProviderResolutionInputs::default(),
+            provider_config,
+            UserSettings::default(),
+            empty_env(),
+            empty_external(),
+        );
+
+        assert_eq!(resolution.model.value.as_deref(), Some("store-model"));
+        assert_eq!(
+            resolution.model.source.kind,
+            SRC_PROVIDER_STORE_ACTIVE_MODEL
+        );
         assert_eq!(
             resolution.base_url.value.as_deref(),
             Some("https://store.example.com")
@@ -803,7 +876,10 @@ mod tests {
             env,
             full_claude(),
         );
-        assert_eq!(resolution.small_fast_model.value.as_deref(), Some("star-fast"));
+        assert_eq!(
+            resolution.small_fast_model.value.as_deref(),
+            Some("star-fast")
+        );
         assert_eq!(
             resolution.small_fast_model.source.kind,
             SRC_ENV_STAR_SMALL_FAST_MODEL
@@ -842,16 +918,24 @@ mod tests {
             default_model: Some("user-settings-model".to_string()),
             ..Default::default()
         };
+        // 只配了模型的 Claude Code —— 端点与 key 它压根没写。
+        let external = ExternalConfigs {
+            claude: Some(ClaudeCodeConfig {
+                model: Some("claude-sonnet-4-5".to_string()),
+                ..Default::default()
+            }),
+            codex: None,
+        };
 
         let resolution = resolve(
             ProviderResolutionInputs::default(),
             StoredProviderConfig::default(),
             settings,
             empty_env(),
-            full_claude(),
+            external,
         );
 
-        // 模型来自兼容层，端点与 key 没配到那儿 —— 落到用户设置。
+        assert_eq!(resolution.model.value.as_deref(), Some("claude-sonnet-4-5"));
         assert_eq!(resolution.model.source.kind, SRC_CLAUDE_CODE_MODEL);
         assert_eq!(
             resolution.base_url.value.as_deref(),
@@ -890,7 +974,10 @@ mod tests {
             external,
         );
 
-        assert_eq!(resolution.api_key.value.as_deref(), Some("user-settings-key"));
+        assert_eq!(
+            resolution.api_key.value.as_deref(),
+            Some("user-settings-key")
+        );
         assert_eq!(resolution.api_key.source.kind, SRC_USER_SETTINGS_API_KEY);
     }
 

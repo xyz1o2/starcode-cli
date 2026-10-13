@@ -4,8 +4,12 @@ use crate::core::config::models::{
 };
 use crate::core::config::provider_resolution::{
     resolve_effective_provider_settings, ProviderResolutionInputs, ResolvedValue, SourceRef,
-    SRC_CLI_MODEL, SRC_ENV_STAR_API_KEY, SRC_ENV_STAR_BASE_URL, SRC_ENV_STAR_MODEL,
-    SRC_ENV_STAR_OPENAI_COMPATIBLE, SRC_PROVIDER_DEFAULT_BASE_URL, SRC_PROVIDER_ENV_API_KEY,
+    SRC_CLAUDE_CODE_API_KEY, SRC_CLAUDE_CODE_BASE_URL, SRC_CLAUDE_CODE_MODEL,
+    SRC_CLAUDE_CODE_SMALL_FAST_MODEL, SRC_CLI_MODEL, SRC_CODEX_API_KEY, SRC_CODEX_BASE_URL,
+    SRC_CODEX_MODEL, SRC_ENV_ANTHROPIC_API_KEY, SRC_ENV_ANTHROPIC_BASE_URL,
+    SRC_ENV_ANTHROPIC_MODEL, SRC_ENV_ANTHROPIC_SMALL_FAST_MODEL, SRC_ENV_STAR_API_KEY,
+    SRC_ENV_STAR_BASE_URL, SRC_ENV_STAR_MODEL, SRC_ENV_STAR_OPENAI_COMPATIBLE,
+    SRC_ENV_STAR_SMALL_FAST_MODEL, SRC_PROVIDER_DEFAULT_BASE_URL, SRC_PROVIDER_ENV_API_KEY,
     SRC_PROVIDER_RULE_OPENAI_COMPATIBLE, SRC_PROVIDER_STORE_ACTIVE_MODEL,
     SRC_PROVIDER_STORE_ACTIVE_PROVIDER, SRC_PROVIDER_STORE_API_KEY, SRC_PROVIDER_STORE_BASE_URL,
     SRC_RUNTIME_DEFAULT_OPENAI_COMPATIBLE, SRC_SESSION_MODEL, SRC_SESSION_PROVIDER,
@@ -56,6 +60,8 @@ struct ProviderDoctorDiagnosis {
     model: ResolvedValue,
     base_url: ResolvedValue,
     api_key: ResolvedValue,
+    /// 「小而快」副模型。`/fast` 开不开得动、切到哪个，全看它。
+    small_fast_model: ResolvedValue,
     openai_compatible: bool,
     openai_compatible_source: SourceRef,
     api_key_env_hint: Option<String>,
@@ -430,6 +436,7 @@ fn build_provider_doctor_diagnosis(
         model: resolution.model,
         base_url: resolution.base_url,
         api_key: resolution.api_key,
+        small_fast_model: resolution.small_fast_model,
         openai_compatible: resolution.openai_compatible,
         openai_compatible_source: resolution.openai_compatible_source,
         api_key_env_hint: resolution
@@ -702,6 +709,26 @@ fn render_provider_doctor_report(diagnosis: &ProviderDoctorDiagnosis) -> String 
         ),
         describe_source(&diagnosis.base_url.source),
     ));
+    // `/fast` 为什么切/没切模型，答案在这两行：副模型没配成 `missing`
+    // 就说明它只能按名字猜，而不是有人指定过。
+    report.push_str(&format!(
+        "- {}: {}\n",
+        i18n::t(
+            "cmd.provider.doctor.fast_model",
+            "Fast model (used by `/fast`)",
+            "Fast model (used by `/fast`)",
+        ),
+        format_optional_code(diagnosis.small_fast_model.value.as_deref()),
+    ));
+    report.push_str(&format!(
+        "- {}: {}\n",
+        i18n::t(
+            "cmd.provider.doctor.fast_model_source",
+            "Fast model source",
+            "Fast model source",
+        ),
+        describe_source(&diagnosis.small_fast_model.source),
+    ));
     report.push_str(&format!(
         "- {}: `{}`\n",
         i18n::t(
@@ -878,6 +905,23 @@ fn status_label(kind: &str) -> String {
     }
 }
 
+/// 兼容层（Claude Code / Codex 配置文件）来源的一行说明。
+///
+/// 只打字段名，不打工具名：SourceRef 的 kind 里已经带了（`claude_code.model` /
+/// `codex.model`），而这行是给人读的，「model from external CLI config」已经够了。
+/// 兜底的 `_ =>` 分支仍会打印原始 kind，所以这里拼错字段名不会静默藏住。
+fn external_config_source(field: &str) -> String {
+    format!(
+        "{} `{}`",
+        i18n::t(
+            "cmd.provider.doctor.source.external_config",
+            "external CLI config",
+            "external CLI config",
+        ),
+        field
+    )
+}
+
 fn describe_source(source: &SourceRef) -> String {
     match source.kind {
         SRC_SESSION_PROVIDER => i18n::t(
@@ -901,17 +945,26 @@ fn describe_source(source: &SourceRef) -> String {
             "CLI `--model`",
         ),
         SRC_ENV_STAR_MODEL => "`STAR_MODEL`".to_string(),
+        SRC_ENV_ANTHROPIC_MODEL => "`ANTHROPIC_MODEL`".to_string(),
+        SRC_CLAUDE_CODE_MODEL | SRC_CODEX_MODEL => external_config_source("model"),
         SRC_PROVIDER_STORE_ACTIVE_MODEL => i18n::t(
             "cmd.provider.doctor.source.active_model",
             "saved `activeModel`",
             "saved `activeModel`",
         ),
+        SRC_ENV_STAR_SMALL_FAST_MODEL => "`STAR_SMALL_FAST_MODEL`".to_string(),
+        SRC_ENV_ANTHROPIC_SMALL_FAST_MODEL => "`ANTHROPIC_SMALL_FAST_MODEL`".to_string(),
+        SRC_CLAUDE_CODE_SMALL_FAST_MODEL => {
+            external_config_source("env.ANTHROPIC_SMALL_FAST_MODEL")
+        }
         SRC_USER_SETTINGS_DEFAULT_MODEL => i18n::t(
             "cmd.provider.doctor.source.default_model",
             "`user-settings.defaultModel`",
             "`user-settings.defaultModel`",
         ),
         SRC_ENV_STAR_BASE_URL => "`STAR_BASE_URL`".to_string(),
+        SRC_ENV_ANTHROPIC_BASE_URL => "`ANTHROPIC_BASE_URL`".to_string(),
+        SRC_CLAUDE_CODE_BASE_URL | SRC_CODEX_BASE_URL => external_config_source("base_url"),
         SRC_PROVIDER_STORE_BASE_URL => i18n::t(
             "cmd.provider.doctor.source.provider_base_url",
             "provider config base URL",
@@ -928,6 +981,8 @@ fn describe_source(source: &SourceRef) -> String {
             "`user-settings.baseUrl`",
         ),
         SRC_ENV_STAR_API_KEY => "`STAR_API_KEY`".to_string(),
+        SRC_ENV_ANTHROPIC_API_KEY => "`ANTHROPIC_API_KEY`".to_string(),
+        SRC_CLAUDE_CODE_API_KEY | SRC_CODEX_API_KEY => external_config_source("api_key"),
         SRC_PROVIDER_STORE_API_KEY => i18n::t(
             "cmd.provider.doctor.source.provider_key",
             "provider config key",

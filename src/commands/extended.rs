@@ -1624,11 +1624,43 @@ pub async fn effort(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRe
 /// /fast — 快速模式开关（对标 Claude Code fast mode）：
 /// 开启时切换到同一 provider 的轻量模型，关闭时精确恢复原模型/provider。
 /// 会话级开关：通过 session-only revisioned runtime mutation 生效，不写设置文件。
+///
+/// 选谁当「轻量模型」有两条路，先看显式配置再看名字猜：
+/// 1. `STAR_SMALL_FAST_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL` / Claude Code
+///    `settings.json` 的 `ANTHROPIC_SMALL_FAST_MODEL`（见 `provider_resolution`）。
+///    用户点名了就照办，不用猜。
+/// 2. 都没配，才退回按名字含 `mini` / `flash` / `lite` 之类的启发式猜。
+///
+/// 显式配置的那个也必须出现在 `available_models_info` 里、且属于当前 provider：
+/// 反过来说就等于把一个该端点不认识的模型名发出去，而失败发生在几秒后的请求里，
+/// 用户只会看到一句莫名的 404。
 fn pick_fast_model(
     state: &crate::ui::state::ChatState,
+    configured_fast_model: Option<&str>,
 ) -> Option<crate::runtime::messages::RuntimeModelSelection> {
     const FAST_HINTS: [&str; 7] = ["mini", "flash", "lite", "fast", "small", "turbo", "instant"];
     let current_provider = state.current_provider_id.as_deref();
+    let belongs_to_current_provider = |model: &crate::types::ModelInfo| {
+        match current_provider {
+            Some(provider) => model.provider == provider,
+            None => true,
+        }
+    };
+
+    if let Some(configured) = configured_fast_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        return state
+            .available_models_info
+            .iter()
+            .find(|model| model.id == configured && belongs_to_current_provider(model))
+            .map(|model| crate::runtime::messages::RuntimeModelSelection {
+                model: model.id.clone(),
+                provider_id: Some(model.provider.clone()),
+            });
+    }
+
     state
         .available_models_info
         .iter()
@@ -1636,16 +1668,37 @@ fn pick_fast_model(
             let id = model.id.to_lowercase();
             model.id != state.current_model
                 && FAST_HINTS.iter().any(|hint| id.contains(hint))
-                && match current_provider {
-                    Some(provider) => model.provider == provider,
-                    None => true,
-                }
+                && belongs_to_current_provider(model)
         })
         .map(|model| crate::runtime::messages::RuntimeModelSelection {
             model: model.id.clone(),
             provider_id: Some(model.provider.clone()),
         })
         .min_by(|left, right| left.model.cmp(&right.model))
+}
+
+/// 读一次配置解析结果，取出显式的「小而快」副模型。
+///
+/// 单独包一层是因为 `/fast` 是纯 UI 侧的会话开关，不值得为它把 provider store
+/// 和 user settings 都读一遍再丢掉 —— 读不到就返回 `None`，让 `pick_fast_model`
+/// 退回名字启发式，跟加这一层之前的行为一致。
+async fn configured_fast_model() -> Option<String> {
+    let settings_manager = crate::core::config::settings_manager::get_settings_manager()
+        .await
+        .ok()?;
+    let settings = settings_manager.load_user_settings().await.ok()?;
+    let provider_config = crate::core::config::provider_store::ProviderStore::new()
+        .load()
+        .await
+        .unwrap_or_default();
+
+    crate::core::config::provider_resolution::resolve_effective_provider_settings(
+        crate::core::config::provider_resolution::ProviderResolutionInputs::default(),
+        &provider_config,
+        &settings,
+    )
+    .small_fast_model
+    .value
 }
 
 pub async fn fast(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
@@ -1691,7 +1744,7 @@ pub async fn fast(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
                 provider_id: ctx.state.current_provider_id.clone(),
             }
         });
-        match pick_fast_model(ctx.state) {
+        match pick_fast_model(ctx.state, configured_fast_model().await.as_deref()) {
             Some(fast_model) => {
                 let status = format!("Requesting fast mode · model {}…", fast_model.model);
                 (Some(fast_model), previous_model, status)
@@ -1792,6 +1845,82 @@ mod runtime_settings_tests {
             state.runtime_settings_persistence,
             Some(crate::ui::state::store::RuntimeSettingsPersistence::Pending { ui_revision: 1 })
         ));
+    }
+
+    /// 用户点名了副模型就该照办，哪怕名字里没有 `mini` / `flash` 之类的特征 ——
+    /// 名字启发式永远猜不到 `gpt-5-codex` 这种。
+    #[test]
+    fn a_configured_fast_model_beats_the_name_heuristic() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.current_model = "standard-model".into();
+        state.current_provider_id = Some("provider-a".into());
+        state.available_models_info = vec![
+            crate::types::ModelInfo::new("aaa-mini", "provider-a"),
+            crate::types::ModelInfo::new("picked-exactly", "provider-a"),
+        ];
+
+        let picked = pick_fast_model(&state, Some("picked-exactly"));
+        assert_eq!(
+            picked.map(|selection| selection.model).as_deref(),
+            Some("picked-exactly")
+        );
+    }
+
+    /// 配的模型不在列表里（provider 那边压根没这个模型）就不能用：发出去
+    /// 只会换一个几秒后才炸的 404。退回名字启发式。
+    #[test]
+    fn a_configured_fast_model_the_provider_does_not_offer_is_skipped() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.current_model = "standard-model".into();
+        state.current_provider_id = Some("provider-a".into());
+        state.available_models_info = vec![crate::types::ModelInfo::new("aaa-mini", "provider-a")];
+
+        let picked = pick_fast_model(&state, Some("not-offered-anywhere"));
+        assert_eq!(
+            picked.map(|selection| selection.model).as_deref(),
+            Some("aaa-mini")
+        );
+    }
+
+    /// 同名但属于别的 provider 的模型也不能选 —— `/fast` 必须是同 provider
+    /// 内的切换，否则顺带把端点和凭据也换了。
+    #[test]
+    fn a_configured_fast_model_from_another_provider_is_skipped() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.current_model = "standard-model".into();
+        state.current_provider_id = Some("provider-a".into());
+        state.available_models_info = vec![
+            crate::types::ModelInfo::new("shared-name", "provider-a"),
+            crate::types::ModelInfo::new("shared-name", "provider-b"),
+        ];
+
+        // 同名两条：只能取当前 provider 那条。
+        let picked = pick_fast_model(&state, Some("shared-name"));
+        assert_eq!(
+            picked.and_then(|selection| selection.provider_id).as_deref(),
+            Some("provider-a")
+        );
+    }
+
+    /// 没配副模型时行为与加这一层之前逐字一致。
+    #[test]
+    fn without_a_configured_model_the_name_heuristic_still_decides() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.current_model = "standard-model".into();
+        state.current_provider_id = Some("provider-a".into());
+        state.available_models_info = vec![
+            crate::types::ModelInfo::new("model-mini", "provider-a"),
+            crate::types::ModelInfo::new("other-mini", "provider-b"),
+        ];
+
+        for configured in [None, Some(""), Some("   ")] {
+            let picked = pick_fast_model(&state, configured);
+            assert_eq!(
+                picked.map(|selection| selection.model).as_deref(),
+                Some("model-mini"),
+                "configured = {configured:?}"
+            );
+        }
     }
 
     #[tokio::test]

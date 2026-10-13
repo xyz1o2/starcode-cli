@@ -51,7 +51,6 @@ use std::sync::OnceLock;
 use serde::Deserialize;
 
 use crate::core::config::json_with_comments::parse_json_with_comments;
-use crate::core::utils::paths::find_project_file_upwards;
 
 /// Claude Code 用户级配置目录的环境变量（Claude Code 自己认这个）。
 const ENV_CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
@@ -352,13 +351,11 @@ fn load_claude_code(
     if let Some(path) = claude_user_settings_path(home, config_dir_override) {
         layers.push(path);
     }
-    // 项目级这两层用 `find_project_file_upwards` 定位，而不是就地 join：它按
-    // 「最近的 .git 根」收敛，从子目录启动时不会读到仓库外面那个项目的配置。
-    for candidate in [
+    for relative in [
         format!("{CLAUDE_PROJECT_DIR}/{CLAUDE_SETTINGS_FILE}"),
         format!("{CLAUDE_PROJECT_DIR}/{CLAUDE_LOCAL_SETTINGS_FILE}"),
     ] {
-        if let Some(path) = find_project_file_upwards(project_dir, &[candidate.as_str()]) {
+        if let Some(path) = find_project_settings(project_dir, &relative) {
             layers.push(path);
         }
     }
@@ -413,6 +410,37 @@ fn read_claude_settings(path: &Path) -> Option<RawClaudeSettings> {
     // 走 `parse_json_with_comments`：CC 的 settings 是给人手改的，留注释很常见，
     // 而 starcode 自己的 settings 解析器已经处理过这件事，直接复用。
     parse_json_with_comments::<RawClaudeSettings>(&content).ok()
+}
+
+/// 从 `start` 向上找**项目级** settings：到最近的 `.git` 为止，且不看 home 目录本身。
+///
+/// 这里没有复用 `core::utils::paths::find_project_file_upwards`：它在整条祖先链上
+/// 都没有 `.git` 时会一路走到 `$HOME` 再收手，于是 `~/.claude/settings.json` 会被
+/// 当成**项目级**配置再读一遍。它和用户级是同一个文件，值上碰巧一样 —— 但那属于
+/// 碰巧。层级覆盖顺序一旦依赖它，`CLAUDE_CONFIG_DIR` 指到别处、或 home 下换个布局
+/// 时就会静默按错的优先级解析。
+fn find_project_settings(start: &Path, relative: &str) -> Option<PathBuf> {
+    let home = dirs::home_dir();
+    let git_root = start
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .map(Path::to_path_buf);
+
+    for dir in start.ancestors() {
+        // home 里的 `.claude/` 是用户级，已经单独读过了。
+        if Some(dir) == home.as_deref() {
+            return None;
+        }
+        let path = dir.join(relative);
+        if path.exists() {
+            return Some(path);
+        }
+        if git_root.as_deref() == Some(dir) {
+            break;
+        }
+    }
+
+    None
 }
 
 fn load_codex(home: Option<&Path>, home_override: Option<&Path>) -> Option<CodexConfig> {
@@ -513,12 +541,18 @@ mod tests {
         // 用户在 Claude Code 里配了什么，starcode 就该拿到什么 —— 这是整个
         // 兼容层存在的理由。
         assert_eq!(claude.model.as_deref(), Some("claude-sonnet-4-5"));
-        assert_eq!(claude.base_url.as_deref(), Some("https://gateway.example.com"));
+        assert_eq!(
+            claude.base_url.as_deref(),
+            Some("https://gateway.example.com")
+        );
         // AUTH_TOKEN 才是 CC 接第三方网关时用的键，只认 API_KEY 的实现读不到。
         assert_eq!(claude.api_key.as_deref(), Some("cc-token"));
         // SMALL_FAST_MODEL 没写时退到 DEFAULT_HAIKU。
         assert_eq!(claude.small_fast_model.as_deref(), Some("claude-haiku-4-5"));
-        assert_eq!(claude.tier_models.haiku.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(
+            claude.tier_models.haiku.as_deref(),
+            Some("claude-haiku-4-5")
+        );
     }
 
     #[test]
@@ -813,7 +847,10 @@ wire_api = "responses"
     fn claude_config_dir_override_redirects_the_user_level_file() {
         let temp = tempfile::tempdir().expect("tempdir");
         let custom = temp.path().join("custom-claude");
-        write(&custom.join("settings.json"), r#"{ "model": "from-custom-dir" }"#);
+        write(
+            &custom.join("settings.json"),
+            r#"{ "model": "from-custom-dir" }"#,
+        );
 
         // home 里放一份会被误读的，确认自定义目录真的优先。
         let decoy_home = temp.path().join("home");

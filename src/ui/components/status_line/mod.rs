@@ -734,13 +734,6 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
         ));
     }
 
-    if width >= INTERRUPT_HINT_MIN_WIDTH {
-        spans.push(Span::styled(
-            INTERRUPT_HINT,
-            Style::default().fg(theme.inactive),
-        ));
-    }
-
     // Show thinking state with sine wave opacity
     if let Some(thinking_start) = state.thinking_started_at {
         let thinking_secs = thinking_start.elapsed().as_secs();
@@ -800,29 +793,14 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
         }
     }
 
-    // Show active tool name if available (with pulse), truncated to keep the line compact
-    if let Some(tool_name) = state.current_tool_name.as_ref() {
-        let tool_color = if stall > 0.5 {
-            lerp_color(theme.info, theme.error, stall * 0.5)
-        } else {
-            pulse_color(theme.info, state.animation_tick, 4)
-        };
-        let short: String = tool_name.chars().take(30).collect();
-        let label = if tool_name.chars().count() > 30 {
-            format!(" · {}...", short)
-        } else {
-            format!(" · {}", short)
-        };
-        spans.push(Span::styled(label, Style::default().fg(tool_color)));
-
-        // Show cancel hint when tool is running too long
-        if stall > 0.3 {
-            let hint_color = lerp_color(theme.secondary, theme.error, stall);
-            spans.push(Span::styled(
-                " · press Ctrl+C to cancel",
-                Style::default().fg(hint_color),
-            ));
-        }
+    // 中断提示放在**行尾**。它是一次性的操作指引，不是状态；夹在状态中间会让
+    // 后面还在追加的 `· thinking 12s` / `· 1.2k tokens` 跑到它后面去，行尾就
+    // 不再是行尾了。Claude Code 也是把它当 footer 提示放在最后。
+    if width >= INTERRUPT_HINT_MIN_WIDTH {
+        spans.push(Span::styled(
+            INTERRUPT_HINT,
+            Style::default().fg(theme.inactive),
+        ));
     }
 
     vec![
