@@ -578,9 +578,9 @@ pub struct ChatState {
     /// 回答问题必须用它；这个用来和 `ToolResult` 里的 `tool_call.id` 比对，
     /// 两者混用会导致卡片永远等不到"我这次已经结束了"的信号。
     pub pending_confirmation_originating_id: Option<String>,
-    pub pending_question_selections: Vec<usize>,       // 多选问题的已选选项索引
-    pub pending_other_input: String,                   // "Other" 文本输入值
-    pub pending_question_other_focused: bool,          // "Other" 输入框是否聚焦
+    pub pending_question_selections: Vec<usize>, // 多选问题的已选选项索引
+    pub pending_other_input: String,             // "Other" 文本输入值
+    pub pending_question_other_focused: bool,    // "Other" 输入框是否聚焦
     pub last_confirmation_message_id: Option<u64>,
     /// 对标 Claude Code: Tab 切换到反馈输入模式
     pub confirmation_feedback_mode: bool,

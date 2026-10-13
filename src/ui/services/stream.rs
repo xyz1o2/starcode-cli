@@ -1221,7 +1221,7 @@ pub async fn handle_stream_update(
                             if entry.outcome.is_none() {
                                 entry.outcome = Some(i18n::t(
                                     "ui.confirm.superseded",
-                                    "Superseded — a newer request is waiting",
+                                    "已被更新的请求取代 · 不再等待你的决定",
                                     "Superseded — a newer request is waiting",
                                 ));
                             }
@@ -3360,7 +3360,10 @@ mod tests {
                 data: None,
             },
         );
-        assert!(!state.is_awaiting_confirmation, "自己那次调用的结果必须收掉卡片");
+        assert!(
+            !state.is_awaiting_confirmation,
+            "自己那次调用的结果必须收掉卡片"
+        );
         assert!(state.pending_tool_call_id.is_none());
         assert!(state.pending_confirmation_originating_id.is_none());
     }
@@ -3415,7 +3418,12 @@ mod tests {
             "旧卡的内容不能被新请求换掉：{first_prompt}"
         );
         assert!(
-            first.confirmation.as_ref().expect("确认卡").outcome.is_some(),
+            first
+                .confirmation
+                .as_ref()
+                .expect("确认卡")
+                .outcome
+                .is_some(),
             "被顶掉的卡必须标成已作废，不能看起来还能按"
         );
 

@@ -499,11 +499,8 @@ mod tests {
         let mut rx = bus.subscribe();
         let mut observer = bus.subscribe();
 
-        let wait = bus.request_cancellable::<_, ToolConfirmationResponse>(
-            request_for("Edit"),
-            50,
-            None,
-        );
+        let wait =
+            bus.request_cancellable::<_, ToolConfirmationResponse>(request_for("Edit"), 50, None);
         let driver = async {
             loop {
                 match rx.recv().await.expect("应收到确认请求") {

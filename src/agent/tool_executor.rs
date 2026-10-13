@@ -2801,11 +2801,10 @@ mod tests {
             )
             .await;
 
-        let originating_tool_call_id =
-            tokio::time::timeout(Duration::from_secs(5), responder)
-                .await
-                .expect("应产生一次确认请求")
-                .expect("confirmation responder task failed");
+        let originating_tool_call_id = tokio::time::timeout(Duration::from_secs(5), responder)
+            .await
+            .expect("应产生一次确认请求")
+            .expect("confirmation responder task failed");
         assert!(result.success);
         assert_eq!(
             originating_tool_call_id.as_deref(),

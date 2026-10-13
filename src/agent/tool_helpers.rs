@@ -27,10 +27,9 @@ pub(crate) fn execute_single_tool_with_progress<'a>(
         // 于是每一次没批准的 Bash 都报"执行超时 600s"，而真正的原因（没人点同意）
         // 被吞掉 —— 门控看上去像是坏了，实际是计时器互相踩。
         const TOOL_HARD_TIMEOUT_MARGIN_SECS: u64 = 120;
-        let hard_timeout_secs = tool_executor.confirm_timeout_ms() / 1000 + TOOL_HARD_TIMEOUT_MARGIN_SECS;
-        match tokio::time::timeout(std::time::Duration::from_secs(hard_timeout_secs), exec)
-            .await
-        {
+        let hard_timeout_secs =
+            tool_executor.confirm_timeout_ms() / 1000 + TOOL_HARD_TIMEOUT_MARGIN_SECS;
+        match tokio::time::timeout(std::time::Duration::from_secs(hard_timeout_secs), exec).await {
             Ok(results) => results.into_iter().next().unwrap_or(ToolResult {
                 success: false,
                 output: None,

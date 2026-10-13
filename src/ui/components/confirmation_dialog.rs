@@ -148,6 +148,27 @@ fn render_edit_diff_preview(diff: &str, wrap_width: usize) -> Vec<Line<'static>>
     lines
 }
 
+/// 已裁决的确认卡该配什么颜色和图标。
+///
+/// 默认是绿色 ✓（= 放行）。**任何没走到"用户同意"这一步的结局都不能穿绿勾** ——
+/// 审批卡上的 ✓ 只有"已批准"一个读法，被顶掉（superseded）、超时这类"根本没问到"
+/// 的状态如果也画成 ✓，用户回头扫一眼历史就会以为那条命令已经获批了。
+fn outcome_style(outcome: &str) -> (Color, &'static str) {
+    let lowered = outcome.to_lowercase();
+    let refused = lowered.eq_ignore_ascii_case("cancelled")
+        || lowered.contains("cancel")
+        || lowered.contains("reject")
+        || lowered.contains("denied")
+        || lowered.contains("superseded")
+        || outcome.contains("作废")
+        || outcome.contains("取代");
+    if refused {
+        (ERROR_COLOR, "✗")
+    } else {
+        (SUCCESS_COLOR, "✓")
+    }
+}
+
 pub fn build_confirmation_card_block(
     confirmation: &crate::types::ToolConfirmation,
     wrap_width: usize,
@@ -161,11 +182,7 @@ pub fn build_confirmation_card_block(
 
     // If already resolved, show outcome (Claude Code style: compact single line)
     if let Some(outcome) = &confirmation.outcome {
-        let rejected = outcome.eq_ignore_ascii_case("Cancelled")
-            || outcome.to_lowercase().contains("cancel")
-            || outcome.to_lowercase().contains("rejected");
-        let color = if rejected { ERROR_COLOR } else { SUCCESS_COLOR };
-        let icon = if rejected { "✗" } else { "✓" };
+        let (color, icon) = outcome_style(outcome);
         let detail = match &confirmation.details {
             ConfirmationDetails::EditFile { file_path, .. } => format_display_path(file_path),
             ConfirmationDetails::CreateFile { file_path, .. } => format_display_path(file_path),
@@ -579,11 +596,7 @@ pub fn build_ask_user_question_card(
 
     // Already resolved — show outcome
     if let Some(outcome) = &confirmation.outcome {
-        let rejected = outcome.eq_ignore_ascii_case("Cancelled")
-            || outcome.to_lowercase().contains("cancel")
-            || outcome.to_lowercase().contains("rejected");
-        let color = if rejected { ERROR_COLOR } else { SUCCESS_COLOR };
-        let icon = if rejected { "✗" } else { "✓" };
+        let (color, icon) = outcome_style(outcome);
         let outcome_text = outcome.clone();
         return vec![Line::from(vec![
             Span::styled(
