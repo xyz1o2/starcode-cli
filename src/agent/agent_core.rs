@@ -186,11 +186,32 @@ impl Agent {
             crate::core::context::watcher::set_engine_cache(
                 self.context_engine.search_cache.clone(),
             );
-            crate::core::context::watcher::ensure_started(&cwd);
-            // 仅启动 watcher 不会触发首轮构建（ensure_started 不插脏标记）。
-            // 冷启动时必须主动请求一次，否则首次 CodebaseSearch 只能拿到
-            // 空引擎并返回 "index is building"，且本轮不会有任何重建发生。
-            crate::core::context::watcher::request_refresh(&cwd);
+
+            // 装 watcher + 请求首轮重建**必须**离开这条关键路径。
+            //
+            // `watcher::ensure_started` 里的
+            // `notify::Watcher::watch(.., RecursiveMode::Recursive)` 是**同步**的：
+            // 它要把整棵目录树逐个登记一遍。而这段代码位于 `lazy_init`，也就是
+            // 第一条用户消息在发出第一个 LLM 请求**之前**必须走完的路。
+            //
+            // 在 WSL 的 `/mnt/d`（Windows 盘）上实测 83.7 秒 —— 也就是用户看到的
+            // 「首次特别慢」：首轮白等 80 多秒，而且整个 agent worker 都被占住，
+            // Esc 只能排在后面。而 `git status` 的轮询在同一时间还在抢同一块慢
+            // I/O（见 `core::services::git_service`）。
+            //
+            // 放后台没有任何语义损失：重建本来就是后台增量做的，早 10 秒开始
+            // 只早 10 秒就绪；真用到索引时（CodebaseSearch）它要么已经建好，
+            // 要么如实返回 "index is building"，与同步等待的结果一致。
+            let root = cwd.clone();
+            let _ = std::thread::Builder::new()
+                .name("star-index-watch-setup".into())
+                .spawn(move || {
+                    crate::core::context::watcher::ensure_started(&root);
+                    // 仅启动 watcher 不会触发首轮构建（ensure_started 不插脏标记）。
+                    // 冷启动时必须主动请求一次，否则首次 CodebaseSearch 只能拿到
+                    // 空引擎并返回 "index is building"，且本轮不会有任何重建发生。
+                    crate::core::context::watcher::request_refresh(&root);
+                });
 
             if self.context_engine.has_dynamic_context_candidates(&cwd) {
                 crate::utils::logging::append_agent_log_line("[INIT-LAZY] prewarm_index_cache...");

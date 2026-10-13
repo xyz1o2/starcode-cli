@@ -28,107 +28,97 @@ fn recent_changes_cache() -> &'static Mutex<HashMap<String, GitCacheEntry>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub async fn get_git_status<P: AsRef<Path>>(cwd: P) -> Option<GitStatus> {
-    let mut status = GitStatus::default();
+/// 一次轮询的**总**时间预算，不是每个子进程各给一份。
+///
+/// 以前这里是三条命令连着跑（`symbolic-ref` → 失败再 `rev-parse` →
+/// `status --porcelain`），每条各自一个 10s 超时，最坏 30s 才返回一次
+/// 「拿不到状态」。而状态栏要的三样东西 `git status --porcelain --branch`
+/// 一次就给全了 —— 分支名就在输出第一行 `## `。
+const GIT_POLL_BUDGET: Duration = Duration::from_secs(10);
 
-    // Add timeout to prevent blocking on slow filesystems (e.g., WSL2 network drives)
-    const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// 跑一条 git 命令，最多给 `budget`。
+///
+/// **`kill_on_drop(true)` 是这里的关键，不是保险起见。** tokio 的默认值是
+/// `false`：也就是说 `tokio::time::timeout` 超时只是把 future 丢掉，**子进程
+/// 还在跑**。慢盘上（WSL 的 `/mnt/d`）`git status` 自己就超过 10s，于是每一轮
+/// 超时都留下一个仍在扫整个工作区的 `git status`，而轮询几秒后又启新的。几个
+/// 并存的 `git status` 抢同一块慢 I/O —— 这就是「首次特别慢」不但没修好、还会
+/// 越拖越长、且日志里反复出现 `status --porcelain timed out` 的原因。
+async fn run_git(cwd: &Path, args: &[&str], budget: Duration) -> Option<std::process::Output> {
+    let mut command = tokio::process::Command::new("git");
+    command.args(args).current_dir(cwd).kill_on_drop(true);
 
-    let branch_output = tokio::time::timeout(
-        GIT_TIMEOUT,
-        tokio::process::Command::new("git")
-            .args(["symbolic-ref", "--short", "HEAD"])
-            .current_dir(&cwd)
-            .output(),
-    )
-    .await;
-
-    let branch_output = match branch_output {
-        Ok(result) => result,
+    match tokio::time::timeout(budget, command.output()).await {
+        Ok(Ok(output)) if output.status.success() => Some(output),
+        Ok(Ok(_)) => None,
+        Ok(Err(_)) => None,
         Err(_) => {
-            crate::utils::logging::append_debug_log_line("[GIT] symbolic-ref timed out");
-            return None;
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[GIT] `git {}` timed out after {}s",
+                args.join(" "),
+                budget.as_secs()
+            ));
+            None
         }
-    };
+    }
+}
 
-    if let Ok(output) = branch_output {
-        if output.status.success() {
-            status.branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        } else {
-            let rev_output = tokio::time::timeout(
-                GIT_TIMEOUT,
-                tokio::process::Command::new("git")
-                    .args(["rev-parse", "--short", "HEAD"])
-                    .current_dir(&cwd)
-                    .output(),
-            )
-            .await;
+/// `## main...origin/main [ahead 1]` → `main`；detached HEAD 原样保留。
+fn branch_name(header: &str) -> String {
+    // 空仓库的头是 `## No commits yet on master`，把前缀砍掉。
+    let header = header.strip_prefix("No commits yet on ").unwrap_or(header);
+    let name = header.split("...").next().unwrap_or(header);
+    let name = name.split('[').next().unwrap_or(name);
+    name.trim().to_string()
+}
 
-            let rev_output = match rev_output {
-                Ok(result) => result,
-                Err(_) => {
-                    crate::utils::logging::append_debug_log_line("[GIT] rev-parse timed out");
-                    return None;
-                }
-            };
+/// 解析 `git status --porcelain --branch` 的输出。
+///
+/// 返回 `None` = 「这里不是工作树」，调用方据此停止轮询，而不是上报一个空白分支。
+fn parse_status_output(stdout: &str) -> Option<GitStatus> {
+    let mut status = GitStatus::default();
+    let mut saw_branch_header = false;
 
-            if let Ok(rev) = rev_output {
-                if rev.status.success() {
-                    status.branch = String::from_utf8_lossy(&rev.stdout).trim().to_string();
-                } else {
-                    return None;
-                }
-            } else {
-                return None;
-            }
+    for line in stdout.lines() {
+        if let Some(header) = line.strip_prefix("## ") {
+            status.branch = branch_name(header);
+            saw_branch_header = true;
+            continue;
         }
-    } else {
+
+        if line.len() < 2 {
+            continue;
+        }
+        let (staged, modified) = line.split_at(1);
+        let (modified, _) = modified.split_at(1);
+
+        match staged {
+            "M" | "A" | "D" | "R" | "C" => status.has_staged = true,
+            "?" => status.has_untracked = true,
+            _ => {}
+        }
+
+        match modified {
+            "M" | "D" => status.has_modified = true,
+            "?" => status.has_untracked = true,
+            _ => {}
+        }
+    }
+
+    if !saw_branch_header || status.branch.is_empty() {
         return None;
     }
-
-    let status_output = tokio::time::timeout(
-        GIT_TIMEOUT,
-        tokio::process::Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(&cwd)
-            .output(),
-    )
-    .await;
-
-    let status_output = match status_output {
-        Ok(result) => result,
-        Err(_) => {
-            crate::utils::logging::append_debug_log_line("[GIT] status --porcelain timed out");
-            return None;
-        }
-    };
-
-    if let Ok(output) = status_output {
-        if output.status.success() {
-            let out_str = String::from_utf8_lossy(&output.stdout);
-            for line in out_str.lines() {
-                if line.len() < 2 {
-                    continue;
-                }
-                let (staged, modified) = line.split_at(1);
-                let (modified, _) = modified.split_at(1);
-
-                match staged {
-                    "M" | "A" | "D" | "R" | "C" => status.has_staged = true,
-                    "?" => status.has_untracked = true,
-                    _ => {}
-                }
-
-                match modified {
-                    "M" | "D" => status.has_modified = true,
-                    "?" => status.has_untracked = true,
-                    _ => {}
-                }
-            }
-        }
-    }
-
     Some(status)
+}
+
+pub async fn get_git_status<P: AsRef<Path>>(cwd: P) -> Option<GitStatus> {
+    let output = run_git(
+        cwd.as_ref(),
+        &["status", "--porcelain", "--branch"],
+        GIT_POLL_BUDGET,
+    )
+    .await?;
+    parse_status_output(&String::from_utf8_lossy(&output.stdout))
 }
 
 pub fn get_file_history(path: &Path, n: usize) -> Option<String> {
@@ -410,6 +400,66 @@ fn get_cached_value(
     }
     guard.remove(key);
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `git status --porcelain --branch` 的输出里，分支名独占第一行 `## `。
+    /// 解析必须跳过它 —— 否则 `##` 会被当成一条「已暂存」记录，
+    /// 状态栏永远显示「有暂存改动」。
+    #[test]
+    fn the_branch_header_is_not_counted_as_a_change() {
+        let status = parse_status_output("## main...origin/main [ahead 1]\n").expect("parsed");
+        assert_eq!(status.branch, "main");
+        assert!(!status.has_staged, "分支头不是改动");
+        assert!(!status.has_modified);
+        assert!(!status.has_untracked);
+    }
+
+    #[test]
+    fn branch_name_drops_the_upstream_and_divergence_suffix() {
+        assert_eq!(branch_name("main...origin/main [ahead 1]"), "main");
+        assert_eq!(branch_name("main"), "main");
+        // detached HEAD 没有 `...`，也没有 upstream —— 原样保留，
+        // 比退化成一段 commit sha 有用。
+        assert_eq!(branch_name("HEAD (no branch)"), "HEAD (no branch)");
+        // 空仓库的头多一层前缀。
+        assert_eq!(branch_name("No commits yet on master"), "master");
+    }
+
+    #[test]
+    fn staged_modified_and_untracked_are_all_reported() {
+        let status = parse_status_output(
+            "## feature/x\nM  staged.rs\n M modified.rs\n?? new.rs\nA  added.rs\n",
+        )
+        .expect("parsed");
+
+        assert_eq!(status.branch, "feature/x");
+        assert!(status.has_staged, "`M ` 是已暂存");
+        assert!(status.has_modified, "` M` 是已修改未暂存");
+        assert!(status.has_untracked, "`??` 是未跟踪");
+    }
+
+    #[test]
+    fn a_clean_worktree_reports_only_the_branch() {
+        let status = parse_status_output("## main\n").expect("parsed");
+        assert_eq!(status.branch, "main");
+        assert!(!status.has_staged);
+        assert!(!status.has_modified);
+        assert!(!status.has_untracked);
+    }
+
+    /// 没有 `## ` 头 = 不是工作树（或者 git 报错了）。必须返回 `None` 让轮询
+    /// 停止，而不是上报一个空分支 —— 后者会让状态栏显示一个空白分支，
+    /// 看起来像「在一个真的仓库里但没分支」。
+    #[test]
+    fn output_without_a_branch_header_is_rejected() {
+        assert!(parse_status_output("").is_none());
+        assert!(parse_status_output("fatal: not a git repository\n").is_none());
+        assert!(parse_status_output(" M src/main.rs\n").is_none());
+    }
 }
 
 fn set_cached_value(
