@@ -366,20 +366,6 @@ pub fn render_chat_history(
     }
     // =========================================
 
-    // ── Cancel transition expiry cleanup: auto-clear is_streaming 1.5s after ESC/Ctrl+C ──
-    if let Some(t) = state.cancelling_since {
-        if t.elapsed() >= std::time::Duration::from_millis(1500) {
-            for e in state.chat_history.iter_mut() {
-                if e.is_streaming == Some(true) {
-                    e.is_streaming = Some(false);
-                }
-            }
-            state.cancelling_since = None;
-            state.is_streaming = false;
-            state.current_status_line = None;
-        }
-    }
-
     // ── VirtualList: per-entry dirty tracking + viewport clipping ──
     let history_len = state.chat_history.len();
     state.virtual_list.auto_follow = state.auto_follow;

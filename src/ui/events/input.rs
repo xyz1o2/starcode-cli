@@ -68,7 +68,7 @@ fn yank_from_ring(state: &mut ChatState, idx: usize) {
         state.last_yank_len = 0;
     }
     sync_input_from_textarea(state);
-    crate::ui::components::command_suggestions::on_input_changed(state);
+    crate::ui::services::suggestions::on_input_changed(state);
 }
 
 /// 把排队中的输入全部取回输入框 —— 对标 Claude Code 的 `popAllEditable`
@@ -89,7 +89,7 @@ pub(crate) fn restore_queued_messages_to_input(state: &mut ChatState) -> bool {
     reset_main_textarea(state);
     state.textarea.insert_str(&text);
     sync_input_from_textarea(state);
-    crate::ui::components::command_suggestions::on_input_changed(state);
+    crate::ui::services::suggestions::on_input_changed(state);
     true
 }
 
@@ -1518,15 +1518,15 @@ async fn handle_suggestion_overlay(
     };
     match action {
         UiAction::SelectPrev => {
-            crate::ui::components::command_suggestions::handle_up(state);
+            crate::ui::services::suggestions::handle_up(state);
             Ok(true)
         }
         UiAction::SelectNext => {
-            crate::ui::components::command_suggestions::handle_down(state);
+            crate::ui::services::suggestions::handle_down(state);
             Ok(true)
         }
         UiAction::AcceptSuggestion => {
-            if !crate::ui::components::command_suggestions::handle_enter(state) {
+            if !crate::ui::services::suggestions::handle_enter(state) {
                 return Ok(false);
             }
             if let Some(action) = state.pending_palette_action.take() {
@@ -1540,9 +1540,7 @@ async fn handle_suggestion_overlay(
             }
             Ok(true)
         }
-        UiAction::AcceptCompletion => Ok(crate::ui::components::command_suggestions::handle_tab(
-            state,
-        )),
+        UiAction::AcceptCompletion => Ok(crate::ui::services::suggestions::handle_tab(state)),
     }
 }
 
@@ -1907,7 +1905,7 @@ async fn copy_selection_or_interrupt(state: &mut ChatState, agent_tx: &mpsc::Sen
     if !state.input.is_empty() {
         // First press: clear input
         reset_main_textarea(state);
-        crate::ui::components::command_suggestions::on_input_changed(state);
+        crate::ui::services::suggestions::on_input_changed(state);
     }
     state.current_status_line = Some("Press Ctrl+C again to exit".to_string());
 }
@@ -2215,7 +2213,7 @@ pub async fn handle_key_event(
                 if last_time.elapsed() < Duration::from_millis(RAPID_PASTE_KEY_INTERVAL_MS) {
                     state.textarea.insert_newline();
                     sync_input_from_textarea(state);
-                    crate::ui::components::command_suggestions::on_input_changed(state);
+                    crate::ui::services::suggestions::on_input_changed(state);
                     return Ok(());
                 }
             }
@@ -2227,7 +2225,7 @@ pub async fn handle_key_event(
                 {
                     state.textarea.insert_newline();
                     sync_input_from_textarea(state);
-                    crate::ui::components::command_suggestions::on_input_changed(state);
+                    crate::ui::services::suggestions::on_input_changed(state);
                     return Ok(());
                 }
 
@@ -2258,7 +2256,7 @@ pub async fn handle_key_event(
 
                     state.palette_history.clear();
                     state.open_palette(PaletteMode::Model);
-                    crate::ui::components::command_suggestions::on_input_changed(state);
+                    crate::ui::services::suggestions::on_input_changed(state);
                     return Ok(());
                 }
 
@@ -2305,13 +2303,13 @@ pub async fn handle_key_event(
                     // Important: Clear textarea BEFORE enqueueing message to prevent UI glitch
                     // where Enter keeps triggering and input remains.
                     reset_main_textarea(state);
-                    crate::ui::components::command_suggestions::on_input_changed(state);
+                    crate::ui::services::suggestions::on_input_changed(state);
 
                     crate::ui::app::logic::enqueue_user_message(state, input, agent_tx).await?;
                 } else {
                     // Clear empty input if any (e.g. just newlines)
                     reset_main_textarea(state);
-                    crate::ui::components::command_suggestions::on_input_changed(state);
+                    crate::ui::services::suggestions::on_input_changed(state);
                 }
             } else {
                 state.show_help = false;
@@ -2398,7 +2396,7 @@ pub async fn handle_key_event(
                         crate::core::config::history_store::save_history(&state.command_history);
                     }
                     reset_main_textarea(state);
-                    crate::ui::components::command_suggestions::on_input_changed(state);
+                    crate::ui::services::suggestions::on_input_changed(state);
                     state.last_esc_at = None;
                     state.current_status_line =
                         Some("Input cleared (saved to history)".to_string());
@@ -2531,12 +2529,12 @@ pub async fn handle_key_event(
                         state.textarea.delete_str(state.input.len());
                         state.textarea.insert_str(&hist_entry);
                         sync_input_from_textarea(state);
-                        crate::ui::components::command_suggestions::on_input_changed(state);
+                        crate::ui::services::suggestions::on_input_changed(state);
                     }
                 }
             } else if state.textarea.input(key) {
                 sync_input_from_textarea(state);
-                crate::ui::components::command_suggestions::on_input_changed(state);
+                crate::ui::services::suggestions::on_input_changed(state);
             }
         }
         KeyCode::Down => {
@@ -2578,7 +2576,7 @@ pub async fn handle_key_event(
                     state.textarea.delete_str(state.input.len());
                     state.textarea.insert_str(&snapshot);
                     sync_input_from_textarea(state);
-                    crate::ui::components::command_suggestions::on_input_changed(state);
+                    crate::ui::services::suggestions::on_input_changed(state);
                 } else {
                     let new_idx = idx.saturating_sub(1);
                     state.history_index = Some(new_idx);
@@ -2587,7 +2585,7 @@ pub async fn handle_key_event(
                     state.textarea.delete_str(state.input.len());
                     state.textarea.insert_str(&hist_entry);
                     sync_input_from_textarea(state);
-                    crate::ui::components::command_suggestions::on_input_changed(state);
+                    crate::ui::services::suggestions::on_input_changed(state);
                 }
             } else if cursor_row + 1 >= line_count
                 && state.bg_agent_selection.is_none()
@@ -2599,14 +2597,14 @@ pub async fn handle_key_event(
                 state.bg_agent_selection = Some(0);
             } else if state.textarea.input(key) {
                 sync_input_from_textarea(state);
-                crate::ui::components::command_suggestions::on_input_changed(state);
+                crate::ui::services::suggestions::on_input_changed(state);
             }
         }
         KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             // Ctrl+Z: Undo
             if state.textarea.input(key) {
                 sync_input_from_textarea(state);
-                crate::ui::components::command_suggestions::on_input_changed(state);
+                crate::ui::services::suggestions::on_input_changed(state);
             }
         }
         KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -2614,7 +2612,7 @@ pub async fn handle_key_event(
             if state.kill_ring.is_empty() {
                 if state.textarea.input(key) {
                     sync_input_from_textarea(state);
-                    crate::ui::components::command_suggestions::on_input_changed(state);
+                    crate::ui::services::suggestions::on_input_changed(state);
                 }
             } else {
                 let idx = state.kill_ring.len() - 1;
@@ -2637,7 +2635,7 @@ pub async fn handle_key_event(
             // Ctrl+X: Cut selected text
             if state.textarea.input(key) {
                 sync_input_from_textarea(state);
-                crate::ui::components::command_suggestions::on_input_changed(state);
+                crate::ui::services::suggestions::on_input_changed(state);
             }
         }
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -2648,7 +2646,7 @@ pub async fn handle_key_event(
             }
             state.textarea.delete_line_by_head();
             sync_input_from_textarea(state);
-            crate::ui::components::command_suggestions::on_input_changed(state);
+            crate::ui::services::suggestions::on_input_changed(state);
         }
         KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             // Ctrl+K: Delete from cursor to end of line (Unix readline)
@@ -2658,7 +2656,7 @@ pub async fn handle_key_event(
             }
             state.textarea.delete_line_by_end();
             sync_input_from_textarea(state);
-            crate::ui::components::command_suggestions::on_input_changed(state);
+            crate::ui::services::suggestions::on_input_changed(state);
         }
         KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             // Ctrl+W: Delete word backward (Unix readline)
@@ -2718,7 +2716,7 @@ pub async fn handle_key_event(
                         .move_cursor(tui_textarea::CursorMove::Forward);
                 }
                 sync_input_from_textarea(state);
-                crate::ui::components::command_suggestions::on_input_changed(state);
+                crate::ui::services::suggestions::on_input_changed(state);
             }
         }
         _ => {
@@ -2743,7 +2741,7 @@ pub async fn handle_key_event(
                         state.input_folded = false;
                     }
                     sync_input_from_textarea(state);
-                    crate::ui::components::command_suggestions::on_input_changed(state);
+                    crate::ui::services::suggestions::on_input_changed(state);
                 }
             }
         }
@@ -3574,7 +3572,7 @@ async fn handle_paste(
         Ok(Ok(Ok(ClipboardResult::Image(path, w, h)))) => {
             insert_image_paste_block(state, path, w, h);
             sync_input_from_textarea(state);
-            crate::ui::components::command_suggestions::on_input_changed(state);
+            crate::ui::services::suggestions::on_input_changed(state);
         }
         Ok(Ok(Ok(ClipboardResult::Text(text)))) => {
             if let Some(file_paths) = detect_file_paths(&text) {
@@ -3586,7 +3584,7 @@ async fn handle_paste(
                 }
             }
             sync_input_from_textarea(state);
-            crate::ui::components::command_suggestions::on_input_changed(state);
+            crate::ui::services::suggestions::on_input_changed(state);
         }
         Err(_) => {
             // Timeout — clipboard access hung (common on WSL2/SSH)

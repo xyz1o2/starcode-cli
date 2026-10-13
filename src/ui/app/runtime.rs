@@ -466,7 +466,7 @@ fn flush_input_batch(state: &mut ChatState, buf: &mut String) {
         state.textarea.insert_str(&text);
         state.input_line_count = state.textarea.lines().len();
         state.input = state.textarea.lines().join("\n");
-        crate::ui::components::command_suggestions::on_input_changed(state);
+        crate::ui::services::suggestions::on_input_changed(state);
     }
 }
 
@@ -704,7 +704,7 @@ pub async fn run_ui_loop(
                                 }
                             }
                             sync_input_from_textarea(state);
-                            crate::ui::components::command_suggestions::on_input_changed(state);
+                            crate::ui::services::suggestions::on_input_changed(state);
                         }
                         needs_redraw = true;
                     }
@@ -757,10 +757,12 @@ pub async fn run_ui_loop(
             }
         }
 
-        // Safety: auto-reset is_streaming after cancelling grace period expires.
-        // Without this, is_streaming can stay true indefinitely if Done arrived
-        // during the grace window (which keeps is_streaming=true for the animation),
-        // preventing Ctrl+C from ever exiting.
+        // 取消宽限期到期后的收尾（1.5s）。**这是业务状态机，不在渲染里做** ——
+        // 此前 `render_chat_lines` 里有第二份实现（`chat_history.rs`），渲染一遍
+        // 就把流式状态消化掉了。两份实现的条件还不一样：渲染那份只要
+        // `cancelling_since` 有值就执行，且**顺带清每条 entry 的 is_streaming
+        // 标记**（事件循环那份没做这件事 —— 取消后没有 Done 到达，标记会永远
+        // 留着、界面一直转圈）。现在合成一处。
         if state.is_streaming
             && state
                 .cancelling_since
@@ -773,6 +775,13 @@ pub async fn run_ui_loop(
             state.current_tool_name = None;
             state.end_thinking();
             state.last_token_time = None;
+            // 取消后不会有 Done 到来，entry 上的流式标记得在这里清掉
+            for entry in state.chat_history.iter_mut() {
+                if entry.is_streaming == Some(true) {
+                    entry.is_streaming = Some(false);
+                }
+            }
+            state.rendered_cache.clear();
             // Clear confirmation state to unblock queued messages
             state.is_awaiting_confirmation = false;
             state.pending_confirmation_entry_idx = None;

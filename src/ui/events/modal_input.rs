@@ -261,7 +261,7 @@ async fn handle_mcp(
                     state.input.push(' ');
                 }
                 state.input.push_str("/mcp add ");
-                crate::ui::components::command_suggestions::on_input_changed(state);
+                crate::ui::services::suggestions::on_input_changed(state);
             }
             Enter => {
                 if let Some(row) = state.mcp_modal_servers.get(state.mcp_modal_index).cloned() {

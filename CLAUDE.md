@@ -72,6 +72,28 @@ UI  --AgentRequest-->  agent_worker  --StreamMessage-->  UI
 
 Threading model is documented at `src/ui/app/runtime.rs:1-28`: tokio main thread renders, a dedicated `std::thread` reads keys from `/dev/tty`, the agent worker is a task, plus a watchdog for ANR detection. All UI state is one struct — `ChatState` in `src/ui/state/store.rs`, ~190 public fields (the exact count keeps drifting with every UI refactor; grep it rather than trusting a number).
 
+### UI architecture: TEA (Model–Update–View)
+
+`src/ui/` follows the Elm Architecture, ratified here because ratatui officially offers it alongside the Component pattern and this codebase's central key dispatch is already TEA-shaped (`ui/events/key_context.rs::KeyContext` is the update dispatcher). The rule:
+
+- **`src/ui/events/`** — Update. Key/mouse in, `ChatState` mutated, nothing drawn.
+- **`src/ui/components/`** — View. Read `ChatState`, draw a buffer. No `handle_*` functions, no key decoding.
+- **`src/ui/services/`** — state machines and logic that Update drives (`stream.rs`, `suggestions.rs`, `worker.rs`, `at_processor.rs`).
+- **`src/ui/state/`** — data plus its own methods.
+
+**A `render_*` function may write exactly two kinds of state**, and nothing else:
+
+1. **Layout memory** — `last_terminal_width`, `last_chat_area`, `last_chat_height`, `last_max_scroll`. ratatui's rendering docs call this out as *the* standard immediate-mode workaround: the view only learns its area at draw time, so it remembers last frame's area and corrects on the next one, at the cost of one frame of drift.
+2. **Memoization** — `rendered_cache`, `virtual_list`, `total_rendered_lines`.
+
+Anything that is a *business* state machine — a timer, a mode transition, anything deciding what state becomes next — does not belong in a render path, even though `render_*` takes `&mut ChatState`. That signature is deliberate and sanctioned: `List`, `Table`, and `Scrollbar` are `StatefulWidget`s, so ratatui explicitly permits `fn view(model: &mut Model, f: &mut Frame)`.
+
+The 1.5s post-interrupt grace period is the worked example. It used to be implemented **twice** — once correctly in `runtime.rs`, once inside `render_chat_lines`, where merely drawing the chat area consumed the timer and cleared `is_streaming`. Both copies are now one block in the event loop. Anything shaped like it belongs on the 1Hz tick alongside `tick_task_panel` / `expire_toasts`, not in a component.
+
+**Component-pattern exception:** a few widgets own genuinely private state, so their input handling stays beside their render code rather than moving to `events/`. That is the officially blessed alternative, not a leak: `task_panel::handle_edit_input`, `theme_picker::handle_theme_picker_input`, `global_search::handle_global_search_input`. Add to this list only for a struct that owns its own state end to end — not as a way to park key handling in `components/`.
+
+Refs: <https://ratatui.rs/concepts/rendering/> (immediate vs retained), <https://ratatui.rs/concepts/application-patterns/the-elm-architecture/> (the `&mut` view sanction), <https://ratatui.rs/concepts/application-patterns/component-architecture/>.
+
 ### Input routing (`src/ui/app/logic.rs`, `enqueue_user_message`)
 
 Every submitted line funnels through here and is dispatched by prefix before anything reaches the model: `/` → `commands::handle_command`; `#` → `/memory add`; `!` → direct shell via `ShellExecutionService` (refused in Plan mode); `@` → `at_processor` inlines file contents and fires `MarkFilesAsRead`. Only then does `AgentRequest::SendMessage` go out.
