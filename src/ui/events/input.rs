@@ -1644,13 +1644,8 @@ async fn handle_model_confirmation(
             if let Some(model) = state.pending_model_change.clone() {
                 state.pending_model_confirmation = false;
                 let provider_id = resolve_provider_for_model(state, &model);
-                if request_runtime_model_change(
-                    state,
-                    model.clone(),
-                    provider_id.clone(),
-                    agent_tx,
-                )
-                .await
+                if request_runtime_model_change(state, model.clone(), provider_id.clone(), agent_tx)
+                    .await
                 {
                     crate::ui::app::logic::emit_status_text(
                         state,
@@ -1775,10 +1770,10 @@ pub async fn dispatch_global_binding(
         }
         // Alt 系绑定的共同前置：审批中 / 面板开着 / 输入模态打开时不抢键，
         // 与重构前那个包住三个分支的 `if` 完全一致。
-        GlobalBinding::FoldInput
-        | GlobalBinding::CycleThinking
-        | GlobalBinding::CycleTheme => {
-            if state.is_awaiting_confirmation || state.is_palette_open() || state.is_input_modal_open()
+        GlobalBinding::FoldInput | GlobalBinding::CycleThinking | GlobalBinding::CycleTheme => {
+            if state.is_awaiting_confirmation
+                || state.is_palette_open()
+                || state.is_input_modal_open()
             {
                 return Ok(false);
             }
@@ -1794,7 +1789,8 @@ pub async fn dispatch_global_binding(
                         });
                     } else {
                         state.input_folded = false;
-                        state.current_status_line = Some("Content is too short to fold".to_string());
+                        state.current_status_line =
+                            Some("Content is too short to fold".to_string());
                     }
                 }
                 GlobalBinding::CycleTheme => next_theme(state),
@@ -1968,7 +1964,10 @@ pub async fn handle_key_event(
     // 粘贴的确认分支会吞掉所有键（`_ => return Ok(())`），放在它们之后，模式切换
     // 在确认框开着时就按不到了。其余全局键统一交给下面的注册表分发。
     // 输入模态打开时 Shift+Tab 不能触发模式切换（会吞掉输入框里的按键）
-    if key.code == KeyCode::BackTab && !state.is_input_modal_open() && !state.is_awaiting_confirmation {
+    if key.code == KeyCode::BackTab
+        && !state.is_input_modal_open()
+        && !state.is_awaiting_confirmation
+    {
         cycle_approval_mode(state, agent_tx).await;
         return Ok(());
     }
@@ -2855,8 +2854,11 @@ pub(crate) async fn handle_status_modal_key(
         }
         KeyCode::Up => {
             let count = crate::ui::components::status_modal::settings_item_count();
-            state.settings_selected_index =
-                state.settings_selected_index.saturating_add(count).saturating_sub(1) % count;
+            state.settings_selected_index = state
+                .settings_selected_index
+                .saturating_add(count)
+                .saturating_sub(1)
+                % count;
         }
         KeyCode::Down => {
             let count = crate::ui::components::status_modal::settings_item_count();
@@ -3773,9 +3775,14 @@ mod tests {
         for entry in GLOBAL_BINDINGS {
             let mut state = ChatState::new();
             let (tx, _rx) = mpsc::channel(16);
-            let handled = dispatch_global_binding(&mut state, entry.binding, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE), &tx)
-                .await
-                .expect("dispatch must not fail");
+            let handled = dispatch_global_binding(
+                &mut state,
+                entry.binding,
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+                &tx,
+            )
+            .await
+            .expect("dispatch must not fail");
             let deferred = matches!(
                 entry.binding,
                 GlobalBinding::Paste | GlobalBinding::ToggleHelp
@@ -3795,10 +3802,14 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
         let ctrl_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
 
-        handle_key_event(&mut state, ctrl_p, &tx, None).await.unwrap();
+        handle_key_event(&mut state, ctrl_p, &tx, None)
+            .await
+            .unwrap();
         assert!(state.is_palette_open(), "Ctrl+P 应当打开命令面板");
 
-        handle_key_event(&mut state, ctrl_p, &tx, None).await.unwrap();
+        handle_key_event(&mut state, ctrl_p, &tx, None)
+            .await
+            .unwrap();
         assert!(!state.is_palette_open(), "再按一次 Ctrl+P 应当关闭");
     }
 
@@ -3853,7 +3864,8 @@ mod tests {
         .unwrap();
         assert!(handled);
         assert_ne!(
-            without_shift.theme_manager.current().name, before,
+            without_shift.theme_manager.current().name,
+            before,
             "大写 T（终端没上报 SHIFT）应当仍然切主题，而不是循环思考深度"
         );
     }
@@ -3883,10 +3895,7 @@ mod tests {
         let mut state = ChatState::new();
         state.task_panel.is_visible = true;
         state.enter_input_modal();
-        assert!(
-            KeyContext::of(&state).is_dialog(),
-            "输入框必须是独占对话框"
-        );
+        assert!(KeyContext::of(&state).is_dialog(), "输入框必须是独占对话框");
 
         state.exit_input_modal();
         assert_eq!(KeyContext::of(&state), KeyContext::TaskPanel);
@@ -3902,7 +3911,12 @@ mod tests {
         state.task_panel.mark_modified();
         let node = TaskNode::new("写代码".into());
         let id = node.id.clone();
-        state.task_panel.task_manager.graph.root_ids.push(id.clone());
+        state
+            .task_panel
+            .task_manager
+            .graph
+            .root_ids
+            .push(id.clone());
         state.task_panel.task_manager.graph.nodes.insert(id, node);
 
         assert!(!state.task_panel.is_visible, "初始不应自动弹出");

@@ -140,12 +140,7 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     //
     // 用本帧算出来的 `scroll`，不是 `state.scroll`：后者要到 `draw_ui` 渲染完之后
     // 才回写（`auto_follow` 时每帧都变），读它等于用上一帧的位置画这一帧。
-    crate::ui::utils::render::write_lines_to_buffer(
-        f.buffer_mut(),
-        chat_area,
-        &chat_lines,
-        scroll,
-    );
+    crate::ui::utils::render::write_lines_to_buffer(f.buffer_mut(), chat_area, &chat_lines, scroll);
 
     // Render token warning (context window usage)
     if !token_warning_lines.is_empty() {

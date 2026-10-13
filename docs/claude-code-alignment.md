@@ -374,7 +374,7 @@ P2 的 workflows 价值最高（把子 agent 并行从消耗主 context 变成�
 | 层 | 文件 / 目录 |
 |---|---|
 | `~/.star/` | `user-settings.json` `settings.json` `providers.json`(legacy) `installation_id` `model-cache.json` `mcp-oauth-tokens.json` `memory.md` `ignore` `commands/` `skills/` `agents/` `policies/` `i18n/` `extensions/` `marketplace/` `history/` `teams/` `transcripts/` `tmp/` `bin/` |
-| `.star/`（项目） | `settings.json` `settings.local.json` `settings.jsonc` `permissions.json`(legacy) `permission_grants.json` `mcp.json` `hooks.json` `commands/` `skills/` `agents/` `i18n/` `lens/` `sessions/` `logs/` `history/` `tmp/checkpoints/` `file-history/` `images/` `extensions/` `agent-teams.json` `agent-teams/runs/` `pr_subscriptions/` `session_tags.json` `eval-results.json` `eval-baseline.json` `auto_compact.jsonl` `STAR.md`(legacy context) |
+| `.star/`（项目） | `settings.json` `settings.local.json` `settings.jsonc` `permissions.json`(legacy) `permission_grants.json` `mcp.json` `hooks.json` `commands/` `skills/` `agents/` `i18n/` `lens/` `sessions/` `logs/` `history/` `tmp/checkpoints/` `file-history/` `images/` `extensions/` `agent-teams.json` `agent-teams/runs/` `pr_subscriptions/` `session_tags.json` `auto_compact.jsonl` `STAR.md`(legacy context) |
 
 对照 CC 的 `.claude/` 布局，**完全没有对应物**的是：`rules/` `output-styles/` `workflows/` `themes/` `keybindings.json` `agent-memory/`。这些就是 §3 里缺失项要补的位置。
 

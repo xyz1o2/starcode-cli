@@ -1039,7 +1039,11 @@ mod tests {
         // 重复 enter 不会叠两个（provider 表单有多条路径会调它）
         state.enter_input_modal();
         assert_eq!(
-            state.modal_stack.iter().filter(|m| **m == Modal::InputModal).count(),
+            state
+                .modal_stack
+                .iter()
+                .filter(|m| **m == Modal::InputModal)
+                .count(),
             1
         );
 

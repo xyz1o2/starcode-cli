@@ -231,7 +231,6 @@ starcode-cli/
 │   ├── types/          # 共享类型
 │   ├── ui/             # 终端 UI（ratatui）：状态、组件、服务
 │   └── utils/          # 日志、路径、项目上下文、杂项
-├── eval/               # 评测任务定义
 ├── i18n/               # 翻译
 ├── install.sh / .ps1 / .bat
 └── Cargo.toml
@@ -240,17 +239,6 @@ starcode-cli/
 #### 调试 TUI
 
 TUI 里没法 `println!`。文件日志**默认开启**，写入 `.star/logs/starcode_debug.log` 和 `.star/logs/agent.log`。用 `STAR_LOG_DIR` 重定位，或 `STAR_LOG_ENABLED=0` 关闭。如果程序起来了但加载界面一直不消失，`starcode doctor` 可以在不启动 TUI 的情况下报告问题所在。
-
-### 评测
-
-StarCode 内置评测框架：
-
-```bash
-starcode eval --tasks eval/tasks.json
-starcode eval --tasks eval/tasks.json --trials 3
-starcode eval --tasks eval/tasks.json --report-md eval-report.md
-starcode eval --baseline .star/eval-baseline.json
-```
 
 ### 常见问题
 

@@ -580,9 +580,8 @@ pub async fn run_ui_loop(
     // `/loop` 与 `/remote` 的轮询通道。I/O 在独立任务里做（见
     // `runtime::background::spawn_schedule_pollers`），事件循环只在收到结果时回写
     // `ChatState` —— 状态因此始终只在一个任务里被改，不需要跨任务加锁。
-    let (bg_events_tx, mut bg_events_rx) = mpsc::channel::<
-        crate::runtime::background::BackgroundEvent,
-    >(16);
+    let (bg_events_tx, mut bg_events_rx) =
+        mpsc::channel::<crate::runtime::background::BackgroundEvent>(16);
 
     // Initial load of configured providers and current model (non-blocking)
     let _ = agent_tx.try_send(AgentRequest::LoadConfiguredProviders);

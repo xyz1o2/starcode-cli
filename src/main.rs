@@ -41,27 +41,6 @@ enum Commands {
     /// 不启动 TUI 也能跑——环境类失败恰恰发生在配置坏掉、TUI 起不来的时候。
     /// 报告内容与 `/doctor` 完全一致（共用 build_report）。
     Doctor,
-    /// Run the eval harness (mechanism layer and/or live tasks)
-    Eval {
-        /// Path to the tasks JSON file
-        #[arg(long, default_value = "eval/tasks.json")]
-        tasks: String,
-        /// Path to write the JSON report to
-        #[arg(long, default_value = ".star/eval-results.json")]
-        out: String,
-        /// Path to write a markdown report to (optional)
-        #[arg(long)]
-        report_md: Option<String>,
-        /// Number of trials per task
-        #[arg(long, default_value = "1")]
-        trials: usize,
-        /// Save baseline to path (optional, defaults to .star/eval-baseline.json)
-        #[arg(long)]
-        save_baseline: Option<String>,
-        /// Compare against a baseline file (optional)
-        #[arg(long)]
-        baseline: Option<String>,
-    },
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -231,95 +210,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // doctor 必须能在 TUI 起不来时用，所以这里不做任何终端初始化，
             // 也不初始化 Config/StarAgent——那正是它要诊断的东西。
             println!("{}", crate::commands::doctor::run_cli().await);
-            return Ok(());
-        }
-        Some(Commands::Eval {
-            tasks,
-            out,
-            report_md,
-            trials,
-            save_baseline,
-            baseline,
-        }) => {
-            let cwd = std::env::current_dir()?;
-            let tasks_path = cwd.join(tasks);
-            let out_path = cwd.join(out);
-            let report =
-                crate::agent::eval_harness::run_eval(&tasks_path, &out_path, trials).await?;
-
-            let mut lines = vec![format!(
-                "Eval: {} total, {} passed, {} failed ({:.1}% pass)",
-                report.summary.total,
-                report.summary.passed,
-                report.summary.failed,
-                report.summary.pass_rate * 100.0
-            )];
-
-            if let Some(live) = &report.live_results {
-                let passed = live.iter().filter(|r| r.passed).count();
-                let skipped = live.iter().filter(|r| !r.executed).count();
-                lines.push(format!(
-                    "Live: {}/{} passed, {} skipped",
-                    passed,
-                    live.len(),
-                    skipped
-                ));
-                for r in live.iter().filter(|r| r.executed && !r.passed) {
-                    lines.push(format!("  ❌ {} — {}", r.id, r.failed_rules.join(", ")));
-                }
-            }
-
-            if let Some(md) = &report_md {
-                let md_path = cwd.join(md);
-                if let Some(parent) = md_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let md_text = crate::agent::eval_harness::eval_report_to_markdown(&report);
-                std::fs::write(&md_path, md_text)?;
-                lines.push(format!("Report: {}", md_path.display()));
-            }
-
-            if let Some(bl) = &baseline {
-                let bl_path = cwd.join(bl);
-                match crate::agent::eval_harness::compare_baseline(&report, &bl_path).await {
-                    Ok(deltas) if deltas.is_empty() => {
-                        lines.push("Baseline: no regressions.".to_string())
-                    }
-                    Ok(deltas) => {
-                        let changes: Vec<String> = deltas
-                            .iter()
-                            .map(|d| {
-                                let tag = match &d.change {
-                                    crate::agent::eval_harness::BaselineChange::Regression {
-                                        ..
-                                    } => "REGRESSION",
-                                    crate::agent::eval_harness::BaselineChange::Removed => {
-                                        "REMOVED"
-                                    }
-                                    crate::agent::eval_harness::BaselineChange::New => "NEW",
-                                };
-                                format!("{}({})", d.task_id, tag)
-                            })
-                            .collect();
-                        lines.push(format!(
-                            "Baseline: {} changes — {}",
-                            deltas.len(),
-                            changes.join(", ")
-                        ));
-                    }
-                    Err(e) => lines.push(format!("Baseline compare failed: {e}")),
-                }
-            }
-
-            if let Some(sb) = &save_baseline {
-                let sb_path = cwd.join(sb);
-                match crate::agent::eval_harness::save_baseline(&report, &sb_path).await {
-                    Ok(_) => lines.push(format!("Baseline saved: {}", sb_path.display())),
-                    Err(e) => lines.push(format!("Baseline save failed: {e}")),
-                }
-            }
-
-            println!("{}", lines.join("\n"));
             return Ok(());
         }
         None => {}

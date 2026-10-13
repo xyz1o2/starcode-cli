@@ -77,9 +77,9 @@ pub async fn handle_modal_key(
         }
         // 其余变体在 input.rs 里实现（它们的处理要用到阶梯里的私有辅助函数），
         // 但入口统一在这里，模态栈上的键不会再漏到主输入框。
-        Modal::ThemePicker { .. } => {
-            Ok(crate::ui::events::input::handle_theme_picker_key(state, key))
-        }
+        Modal::ThemePicker { .. } => Ok(crate::ui::events::input::handle_theme_picker_key(
+            state, key,
+        )),
         Modal::StatusModal => {
             crate::ui::events::input::handle_status_modal_key(state, key, agent_tx).await
         }
@@ -1224,7 +1224,6 @@ fn refresh_history_search(state: &mut ChatState) {
 
 /// 打开输入模态录入 marketplace 来源（git URL / owner/repo / 本地路径）。
 fn open_marketplace_source_input(state: &mut ChatState) {
-    
     state.enter_input_modal();
     state.input_modal_title = "Add Marketplace".to_string();
     state.input_modal_prompt =

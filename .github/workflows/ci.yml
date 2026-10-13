@@ -93,12 +93,6 @@ jobs:
       - name: Run doc tests
         run: cargo test --workspace --doc
 
-      # eval 任务集在 STAR_API_KEY 为空时全部走 skip，不需要联网也不会烧额度。
-      - name: Run eval harness tests
-        run: cargo test --workspace --test eval_harness_live -- --test-threads=1
-        env:
-          STAR_API_KEY: ""
-
   build:
     name: Build Release (${{ matrix.os }})
     needs: check

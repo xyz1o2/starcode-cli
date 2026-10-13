@@ -8,7 +8,7 @@ pub mod config;
 pub mod connect;
 pub mod core;
 pub mod doctor;
-pub mod eval;
+
 pub mod execution;
 pub mod extended;
 pub mod extension;
@@ -210,7 +210,6 @@ pub async fn handle_command(
         "test" => test::run(ctx, args).await,
         "index" => index_ext_wrapper(ctx, args).await,
         "doctor" => doctor::run(ctx, args).await,
-        "eval" => eval::run(ctx, args).await,
         "connect" => connect::run(ctx, args).await,
         "deep-link" => features::deep_link(ctx, args).await,
         "teleport" => features::teleport(ctx, args).await,

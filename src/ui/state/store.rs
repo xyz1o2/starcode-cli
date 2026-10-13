@@ -1163,7 +1163,8 @@ impl ChatState {
             last_code_block_content: None,
             vim_enabled: false,
             vim_state: crate::ui::vim::VimState::new(),
-            mouse_capture_enabled: !crate::ui::utils::term_recovery::mouse_capture_disabled_by_env(),
+            mouse_capture_enabled: !crate::ui::utils::term_recovery::mouse_capture_disabled_by_env(
+            ),
             settings_selected_index: 0,
             show_scroll_to_bottom: false,
             show_clear_confirmation: false,

@@ -91,12 +91,6 @@ jobs:
       - name: 文档测试
         run: cargo test --workspace --doc
 
-      # eval 任务集不需要联网：CI 里 STAR_API_KEY 为空时全部走 skip 分支。
-      - name: eval harness 测试
-        run: cargo test --workspace --test eval_harness_live -- --test-threads=1
-        env:
-          STAR_API_KEY: ""
-
   build:
     name: 打包 ${{ matrix.target }}
     needs: test

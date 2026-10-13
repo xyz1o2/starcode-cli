@@ -257,7 +257,6 @@ starcode-cli/
 │   ├── types/          # shared types
 │   ├── ui/             # terminal UI (ratatui): state, widgets, services
 │   └── utils/          # logging, paths, project context, misc
-├── eval/               # eval task definitions
 ├── i18n/               # translations
 ├── .github/workflows/  # ci.yml (check/test/build) + release.yml (tag → 多平台发布)
 ├── docs/build-release.md   # 构建与发布说明
@@ -268,17 +267,6 @@ starcode-cli/
 #### Debugging the TUI
 
 You can't `println!` from a TUI. File logging is **on by default** and writes to `.star/logs/starcode_debug.log` and `.star/logs/agent.log`. Set `STAR_LOG_DIR` to relocate them, or `STAR_LOG_ENABLED=0` to disable. If the app starts but the loading screen never clears, `starcode doctor` reports what's wrong without launching the TUI.
-
-### Evaluation
-
-StarCode ships with a built-in eval harness:
-
-```bash
-starcode eval --tasks eval/tasks.json
-starcode eval --tasks eval/tasks.json --trials 3
-starcode eval --tasks eval/tasks.json --report-md eval-report.md
-starcode eval --baseline .star/eval-baseline.json
-```
 
 ### Troubleshooting
 

@@ -1005,7 +1005,8 @@ pub async fn handle_stream_update(
             // 刻意**不**用 `KeyContext::is_exclusive()`：它把建议浮层也算成遮挡层，
             // 而打 `/model` 时命令补全浮层必然是开着的，会把正常流程一起挡掉。
             // `is_dialog()` 只认真正占屏幕的对话框：模态栈上的窗口、输入框、工具审批。
-            let user_is_elsewhere = crate::ui::events::key_context::KeyContext::of(state).is_dialog();
+            let user_is_elsewhere =
+                crate::ui::events::key_context::KeyContext::of(state).is_dialog();
             // If Palette is open in Model mode, refresh the list
             if state.is_palette_open()
                 && matches!(

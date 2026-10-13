@@ -100,17 +100,17 @@ pub fn spawn_schedule_pollers(
         loop {
             ticker.tick().await;
             let now_ts = chrono::Utc::now().timestamp();
-            let event = match crate::core::loops::tick_and_collect_due_tasks(&loop_cwd, now_ts).await
-            {
-                Ok(due) => BackgroundEvent::LoopTasksDue(due),
-                Err(err) => {
-                    crate::utils::logging::append_debug_log_line(&format!(
-                        "[LOOP] poll failed: {}",
-                        err
-                    ));
-                    BackgroundEvent::LoopFailed(err)
-                }
-            };
+            let event =
+                match crate::core::loops::tick_and_collect_due_tasks(&loop_cwd, now_ts).await {
+                    Ok(due) => BackgroundEvent::LoopTasksDue(due),
+                    Err(err) => {
+                        crate::utils::logging::append_debug_log_line(&format!(
+                            "[LOOP] poll failed: {}",
+                            err
+                        ));
+                        BackgroundEvent::LoopFailed(err)
+                    }
+                };
             if loop_events.send(event).await.is_err() {
                 // UI 循环没了（退出中），跟着收工。
                 break;
@@ -150,9 +150,7 @@ pub async fn apply_background_event(
     event: BackgroundEvent,
 ) -> bool {
     match event {
-        BackgroundEvent::LoopTasksDue(tasks) => {
-            apply_loop_tasks(state, agent_tx, tasks).await
-        }
+        BackgroundEvent::LoopTasksDue(tasks) => apply_loop_tasks(state, agent_tx, tasks).await,
         BackgroundEvent::LoopFailed(err) => {
             state.current_status_line = Some(format!("/loop 调度失败: {}", err));
             false

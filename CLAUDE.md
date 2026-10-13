@@ -29,7 +29,6 @@ cargo fmt --all -- --check                       # blocking gate, currently gree
 cargo clippy --workspace --all-targets          # advisory in CI, no -D warnings yet
 cargo test --workspace --lib -- --test-threads=1
 cargo test --workspace --doc
-cargo test --workspace --test eval_harness_live -- --test-threads=1
 ```
 
 ### Gate state — verify, don't assume
@@ -54,7 +53,7 @@ step in `ci.yml`.
 - **Headless** (`-p/--prompt`): builds `Config` + `StarAgent` synchronously, calls `StarAgent::process_user_message`, prints JSONL or text. No UI.
 - **Interactive**: enters the TUI *immediately* with a loading screen while `Config::initialize()` + `StarAgent::new()` run in a spawned task under a 30s timeout, arriving over a `oneshot` channel (`main.rs:548-629`). Startup failures therefore look like a stuck loading screen, not a crash — the `[INIT]` breadcrumbs in `.star/logs/agent.log` are how you diagnose them.
 
-Subcommands bypass both paths: `mcp`, `git`, `init`, `eval`.
+Subcommands bypass both paths: `mcp`, `git`, `init`.
 
 ### UI ↔ Agent: two channels, one worker
 
@@ -141,7 +140,9 @@ You cannot print — ratatui owns the terminal. File logging is **on by default*
 
 **Harness architecture baseline:** `docs/claude-code-alignment.md` is the single source of truth for Claude Code parity (snapshot 2026-10-13, built from official docs v2.1.2xx). The `docs/parity-*.md` files that used to carry architecture claims have been deleted; the five that remain cover UI rendering and UI framework structure only.
 
-**`tests/` is mostly dead.** Cargo compiles only the top-level `tests/*.rs` files as integration targets: `eval_harness_live.rs` (the one CI actually runs) plus the scratch probes `zz_accuracy_probe.rs` / `zz_quality_probe.rs`. Everything in a subdirectory — `agent/`, `config/`, `llm/`, `scenarios/`, `tools/`, `common/`, `core/` — is only compiled if a `tests/*.rs` declares it, and none does. A `tests/lib.rs` used to declare `mod core` → `mod test_deferred` + `test_permissions`, but those two files were never committed, so `cargo test --workspace` could not compile from a fresh clone; that target has been deleted. Put new tests in a `#[cfg(test)] mod tests` inside the `src/` file under test — that is where all 176 working tests live. `.gitignore` anchors the scratch-file patterns to the repo root (`/test_*.rs`) precisely because the old `**/test_*.rs` used to swallow files under `tests/`.
+**`tests/` is mostly dead.** Cargo compiles only the top-level `tests/*.rs` files as integration targets, and only the scratch probes `zz_accuracy_probe.rs` / `zz_quality_probe.rs` remain there (the `eval_harness_live.rs` target was deleted with the eval harness on 2026-10-13). Everything in a subdirectory — `agent/`, `config/`, `llm/`, `scenarios/`, `tools/`, `common/`, `core/` — is only compiled if a `tests/*.rs` declares it, and none does. A `tests/lib.rs` used to declare `mod core` → `mod test_deferred` + `test_permissions`, but those two files were never committed, so `cargo test --workspace` could not compile from a fresh clone; that target has been deleted. Put new tests in a `#[cfg(test)] mod tests` inside the `src/` file under test — that is where all 176 working tests live. `.gitignore` anchors the scratch-file patterns to the repo root (`/test_*.rs`) precisely because the old `**/test_*.rs` used to swallow files under `tests/`.
+
+**The eval harness is gone (2026-10-13).** `starcode eval`, `/eval`, `eval/`, and `src/agent/eval_*.rs` were deleted. Two independent reasons: the mechanism layer's behavior rules validated `simulate_tool_calls_from_prompt` — which echoes the expected `tool_sequence` back as "simulated calls" — so it could not fail; and the live layer's fixture had been vendored as a gitlink without `.gitmodules`, so every fresh clone got an empty `eval/fixtures/rust-lab` and all ten live tasks silently skipped. The CI test asserted "everything is skipped", which is why the breakage went unnoticed. Consequence worth knowing: `Router::classify` and the skill heuristic now have **no** test coverage.
 
 **Orphaned directories.** `src/constants/` and `src/sdk/` are declared by neither `lib.rs` nor `main.rs`; editing them changes nothing. Root `config.toml` is read by no code (its `[ui.system_prompts] dir` even points at a path that does not exist) — real configuration is `~/.star/settings.json`, `./.star/settings.json`, and env vars.
 
