@@ -1,0 +1,11 @@
+─── 52x5 ───
+  0│  ▫ 安装 recharts 图表库                            │
+  1│  ▪ 跑回测中                                        │
+  2│  ✔ 接入真实历史数据并校验口径                      │
+  3│                                                    │
+  4│                                                    │
+
+─── styles ───
+  0│0-1 plain · 2-3 fg:gray · 4-23 fg:white · 24-51 plain│
+  1│0-1 plain · 2-3 fg:cyan · 4-11 bold,fg:cyan · 12-51 plain│
+  2│0-1 plain · 2-3 fg:green · 4-29 dim,strikethrough,fg:rgb(153,153,153) · 30-51 plain│

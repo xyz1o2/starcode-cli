@@ -60,6 +60,19 @@ pub fn current_language() -> UiLanguage {
     state().read().map(|g| g.lang).unwrap_or_default()
 }
 
+/// 测试专用：把进程级 i18n 状态复位成「英文 + 空词典」。
+///
+/// `I18N_STATE` 是 `OnceLock<RwLock<…>>` 的进程级全局量，任何一个测试调过
+/// `init` / `reload_for_language` 都会改变之后所有 `t()` 的落点，而渲染快照
+/// 基线要求同一个 key 永远解析成同一句文案。空词典下 `t()` 会退回调用点写死
+/// 的 `en` 参数 —— 那才是基线该依赖的东西，不该依赖机器上碰巧装了哪份词典。
+#[cfg(test)]
+pub fn reset_for_tests() {
+    if let Ok(mut guard) = state().write() {
+        *guard = I18nState::default();
+    }
+}
+
 pub fn t(key: &str, zh: &str, en: &str) -> String {
     if let Ok(guard) = state().read() {
         if let Some(value) = guard.dict.get(key) {

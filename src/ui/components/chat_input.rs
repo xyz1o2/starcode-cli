@@ -312,11 +312,14 @@ mod tests {
     use super::*;
     use crate::types::ApprovalMode;
     use crate::ui::state::ChatState;
+    use crate::ui::test_support::assert_render;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
     fn make_state(mode: ApprovalMode, input: &str) -> ChatState {
-        let mut state = ChatState::new();
+        // test_fixture 而非 new()：new() 会读 ~/.star/history.json 和环境变量，
+        // 同一份断言在不同机器上结果可能不同。
+        let mut state = ChatState::test_fixture();
         state.approval_mode = mode;
         state.textarea.insert_str(input);
         state.input_line_count = state.textarea.lines().len();
@@ -401,5 +404,60 @@ mod tests {
             }
         }
         assert!(found_hello, "Text 'hello' should appear in rendered output");
+    }
+
+    // ── 渲染快照 ────────────────────────────────────────────────────────────
+    //
+    // `resolve_border_color` 随 approval mode 给三种边框色，底下 4 个
+    // `test_border_color_*` 只能断言"取到了某个 Color"，看不出这个颜色实际
+    // 落在哪几格。快照把 cell 位置和样式都钉进基线：边框色改动、多行输入的
+    // 框高、placeholder 的落位，任何一处偏移都会变成一条 diff。
+
+    /// 空输入 —— 框架与 placeholder。
+    #[test]
+    fn snapshot_default_placeholder() {
+        let state = make_state(ApprovalMode::Default, "");
+        assert_render!("chat_input_default_empty", 44, 5, |f| {
+            render_input(f, &state, f.area())
+        });
+    }
+
+    /// 单行输入 —— Plan 模式边框为 cyan。
+    #[test]
+    fn snapshot_plan_single_line() {
+        let state = make_state(ApprovalMode::Plan, "hello world");
+        assert_render!("chat_input_plan_single", 44, 5, |f| {
+            render_input(f, &state, f.area())
+        });
+    }
+
+    /// 多行输入 —— 框高随行数增长（`calc_input_height`），Yolo 模式边框为 red。
+    #[test]
+    fn snapshot_yolo_multiline() {
+        let state = make_state(ApprovalMode::Yolo, "first line\nsecond line\nthird");
+        assert_render!("chat_input_yolo_multiline", 44, 9, |f| {
+            render_input(f, &state, f.area())
+        });
+    }
+
+    /// `!` 前缀触发 shell 配色（magenta 边框）。
+    #[test]
+    fn snapshot_bash_prefix() {
+        let state = make_state(ApprovalMode::Default, "!ls -la");
+        assert_render!("chat_input_prefix_bash", 44, 5, |f| {
+            render_input(f, &state, f.area())
+        });
+    }
+
+    /// `/` 前缀触发命令配色（blue 边框）。
+    ///
+    /// 和 `snapshot_bash_prefix` 拆成两个测试而不是一个循环：基线缺失时断言会先失败
+    /// 一次（好让人先看过内容再接受），一个测试管两份基线就得跑三轮才转绿。
+    #[test]
+    fn snapshot_command_prefix() {
+        let state = make_state(ApprovalMode::Default, "/help");
+        assert_render!("chat_input_prefix_command", 44, 5, |f| {
+            render_input(f, &state, f.area())
+        });
     }
 }

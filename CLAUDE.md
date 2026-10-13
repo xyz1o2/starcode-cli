@@ -94,6 +94,34 @@ The 1.5s post-interrupt grace period is the worked example. It used to be implem
 
 Refs: <https://ratatui.rs/concepts/rendering/> (immediate vs retained), <https://ratatui.rs/concepts/application-patterns/the-elm-architecture/> (the `&mut` view sanction), <https://ratatui.rs/concepts/application-patterns/component-architecture/>.
 
+### TUI snapshot tests (`src/ui/test_support/`)
+
+There are two ways to assert what a component *looks* like. Logic assertions stay in the component's own `#[cfg(test)] mod tests`; appearance goes through a snapshot.
+
+```rust
+use crate::ui::test_support::{assert_lines_render, assert_render, ChatState::test_fixture};
+
+// Components that take a &mut Frame.
+let state = ChatState::test_fixture();
+assert_render!("chat_input_plan_single", 44, 5, |f| {
+    render_input(f, &state, f.area())
+});
+
+// Components that only produce Vec<Line>.
+let lines = render_todo_checklist(&tc, 52, &theme());
+assert_lines_render!("tool_render_todo_checklist", 52, 5, &lines);
+```
+
+Three things to know before writing one:
+
+- **Use `ChatState::test_fixture()`, never `ChatState::new()`.** `new()` reads `~/.star/history.json` and `STAR_TRANSCRIPT*` from the environment, so a baseline built on it is only valid on the machine that built it. The fixture pins every such field; its doc comment table lists them. `ThemeManager::new()` is already pure (13 hardcoded presets), so themes need no pinning.
+- **Colors are in the baseline.** Ratatui's official `assert_snapshot!(terminal.backend())` serializes characters only (upstream issue ratatui#1402), so a refactor that recolors a selected row passes it silently. Ours encodes each cell's `fg`/`bg`/`modifier` as positional runs, so a recolor is a diff.
+- **A missing baseline fails once on purpose.** It is written to `tests/snapshots/ui/<name>.snap` and the rendered output is printed in the panic, so you read what it actually drew *before* accepting it. A second run turns it green. Deliberate changes go through `UPDATE_SNAPSHOTS=1 cargo test --lib`. Keep one snapshot per test — a test that creates two baselines needs two extra runs to settle.
+
+Still not snapshot-able: anything whose output depends on the wall clock. `session_started_at` is `Instant::now()` and cannot be pinned, so the status bar's uptime and the thinking/spinner timers will not produce a stable baseline. Assert those fields directly instead, until the clock gets a seam.
+
+Refs: <https://ratatui.rs/concepts/snapshots/> (the official recipe, and why it is not enough here).
+
 ### Input routing (`src/ui/app/logic.rs`, `enqueue_user_message`)
 
 Every submitted line funnels through here and is dispatched by prefix before anything reaches the model: `/` → `commands::handle_command`; `#` → `/memory add`; `!` → direct shell via `ShellExecutionService` (refused in Plan mode); `@` → `at_processor` inlines file contents and fires `MarkFilesAsRead`. Only then does `AgentRequest::SendMessage` go out.
