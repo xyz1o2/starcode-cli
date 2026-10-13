@@ -1035,7 +1035,8 @@ pub enum StreamingChunkType {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum ApprovalMode {
     #[default]
-    Default, // 默认模式：高风险操作需要确认 (Build)
+    Default, // 默认模式：写操作与命令需要确认，只读工具免确认 (Build)
+    AcceptEdits, // 接受编辑：文件改动与只读命令免确认，其余仍问
     Plan, // Plan 模式：只读研究/规划，禁止非只读工具
     Yolo, // YOLO 模式：所有操作自动执行（危险！）
 }
@@ -1240,6 +1241,57 @@ pub fn is_safe_query_tool(tool_name: &str) -> bool {
             | "mcp_tool_info"
             | "mcp_refresh"
     )
+}
+
+/// 文件改动类工具 —— `acceptEdits` 模式下免确认（对标 CC：读 + 文件编辑）。
+pub fn is_file_edit_tool(tool_name: &str) -> bool {
+    crate::core::tools::constants::is_edit_tool_name(tool_name)
+}
+
+/// `acceptEdits` 模式下免确认的**只读** shell 命令。
+///
+/// 刻意比 CC 的 "common filesystem commands" 保守：只放行纯读命令，少放行的代价
+/// 只是多一次确认，不会凭空多出一个风险面。
+///
+/// 三条硬性拒绝条件，因为它们都能把"只读"变成写入：
+/// - 重定向 `>` / `<`：能改文件
+/// - 命令替换 `` ` `` / `$(`：真实命令藏在参数里，静态拆不出来
+/// - `;` `&&` `|` 分隔的**每一段**都得是只读程序 —— `ls && rm -rf /` 不能算只读
+pub fn is_readonly_fs_command(tool_name: &str, args: &serde_json::Value) -> bool {
+    const READONLY_FS_COMMANDS: &[&str] = &[
+        "pwd", "ls", "ll", "cat", "head", "tail", "wc", "file", "stat", "find", "fd", "grep",
+        "rg", "ag", "tree", "diff", "cmp", "which", "type", "du", "df", "basename", "dirname",
+        "realpath", "readlink", "sort", "uniq", "cut", "column",
+    ];
+
+    if tool_name != "Bash" {
+        return false;
+    }
+    let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let command = command.trim();
+    if command.is_empty() {
+        return false;
+    }
+    if command.contains('>') || command.contains('<') || command.contains('`') || command.contains("$(")
+    {
+        return false;
+    }
+    command
+        .split(|c| c == ';' || c == '&' || c == '|' || c == '\n')
+        // `&&` 被拆成两个 '&'，中间产生空段；空段不是命令，跳过。
+        .filter(|segment| !segment.trim().is_empty())
+        .all(|segment| {
+            let program = segment.split_whitespace().next().unwrap_or_default();
+            // `/usr/bin/ls`、`.\ls.exe` 都取最后一段路径
+            let program = program
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(program)
+                .trim_end_matches(".exe");
+            READONLY_FS_COMMANDS.contains(&program)
+        })
 }
 
 /// Model information with provider details

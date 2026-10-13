@@ -597,7 +597,8 @@ fn push_rules(out: &mut Vec<PermissionRuleSpec>, value: Option<&Value>) {
 pub fn approval_mode_from_str(raw: &str) -> Option<ApprovalMode> {
     let normalized = raw.trim().to_ascii_lowercase().replace(['-', '_'], "");
     match normalized.as_str() {
-        "default" | "acceptedits" | "ask" => Some(ApprovalMode::Default),
+        "default" | "ask" => Some(ApprovalMode::Default),
+        "acceptedits" => Some(ApprovalMode::AcceptEdits),
         "plan" | "readonly" => Some(ApprovalMode::Plan),
         "yolo" | "bypasspermissions" | "dangerouslyskippermissions" => Some(ApprovalMode::Yolo),
         _ => None,
@@ -876,10 +877,14 @@ mod tests {
         let mut p = SettingsPermissions::default();
         p.merge_json(&json!({"permissions": {"defaultMode": "acceptEdits"}}));
         assert_eq!(p.default_mode.as_deref(), Some("acceptEdits"));
+        // `acceptEdits` 曾被折叠成 `Default`：文档和 CLI 都写着这个模式，
+        // 实际给的是"写操作照样弹框"，等于对用户撒谎。现在它是独立一档。
         assert_eq!(
             approval_mode_from_str("acceptEdits"),
-            Some(ApprovalMode::Default)
+            Some(ApprovalMode::AcceptEdits)
         );
+        assert_eq!(approval_mode_from_str("accept-edits"), Some(ApprovalMode::AcceptEdits));
+        assert_eq!(approval_mode_from_str("default"), Some(ApprovalMode::Default));
         assert_eq!(
             approval_mode_from_str("bypassPermissions"),
             Some(ApprovalMode::Yolo)

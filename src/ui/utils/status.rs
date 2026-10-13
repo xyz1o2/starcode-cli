@@ -14,6 +14,7 @@ fn non_empty(value: &str) -> Option<&str> {
 pub fn approval_mode_label(mode: &ApprovalMode) -> &'static str {
     match mode {
         ApprovalMode::Default => "Auto",
+        ApprovalMode::AcceptEdits => "Accept edits",
         ApprovalMode::Plan => "Plan",
         ApprovalMode::Yolo => "Yolo",
     }

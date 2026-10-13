@@ -369,6 +369,7 @@ fn mode_from_verb(verb: &str) -> Option<ApprovalMode> {
     use crate::core::policy::types::ApprovalMode as PolicyMode;
     match settings_rules::approval_mode_from_str(verb)? {
         PolicyMode::Default => Some(ApprovalMode::Default),
+        PolicyMode::AcceptEdits => Some(ApprovalMode::AcceptEdits),
         PolicyMode::Plan => Some(ApprovalMode::Plan),
         PolicyMode::Yolo => Some(ApprovalMode::Yolo),
     }
@@ -377,6 +378,7 @@ fn mode_from_verb(verb: &str) -> Option<ApprovalMode> {
 fn mode_label(mode: &ApprovalMode) -> &'static str {
     match mode {
         ApprovalMode::Default => "default",
+        ApprovalMode::AcceptEdits => "acceptEdits",
         ApprovalMode::Plan => "plan",
         ApprovalMode::Yolo => "yolo",
     }

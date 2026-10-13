@@ -45,6 +45,7 @@ pub fn set_approval_mode(
     let mb = message_bus.clone();
     let mode_clone = match mode {
         ApprovalMode::Default => PolicyApprovalMode::Default,
+        ApprovalMode::AcceptEdits => PolicyApprovalMode::AcceptEdits,
         ApprovalMode::Yolo => PolicyApprovalMode::Yolo,
         ApprovalMode::Plan => PolicyApprovalMode::Plan,
     };
@@ -70,6 +71,7 @@ pub fn toggle_yolo_mode(
     let mb = message_bus.clone();
     let mode_clone = match new_mode {
         ApprovalMode::Default => PolicyApprovalMode::Default,
+        ApprovalMode::AcceptEdits => PolicyApprovalMode::AcceptEdits,
         ApprovalMode::Yolo => PolicyApprovalMode::Yolo,
         ApprovalMode::Plan => PolicyApprovalMode::Plan,
     };

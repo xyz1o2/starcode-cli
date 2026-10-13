@@ -178,6 +178,7 @@ fn describe_active_provider(config: &crate::core::config::models::ProviderConfig
 fn approval_mode_label(mode: &crate::types::ApprovalMode) -> &'static str {
     match mode {
         crate::types::ApprovalMode::Default => "Auto",
+        crate::types::ApprovalMode::AcceptEdits => "Accept edits",
         crate::types::ApprovalMode::Plan => "Plan",
         crate::types::ApprovalMode::Yolo => "Yolo",
     }

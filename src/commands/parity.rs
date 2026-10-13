@@ -114,6 +114,7 @@ fn star_dir() -> Result<PathBuf, String> {
 fn approval_label(mode: &crate::types::ApprovalMode) -> &'static str {
     match mode {
         crate::types::ApprovalMode::Default => "default",
+        crate::types::ApprovalMode::AcceptEdits => "acceptEdits",
         crate::types::ApprovalMode::Plan => "plan",
         crate::types::ApprovalMode::Yolo => "yolo",
     }
@@ -333,7 +334,8 @@ pub async fn mode(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
         let current = approval_label(&ctx.state.approval_mode);
         let out = format!(
             "# Permission mode\n\nCurrent: **{}**\n\n\
-             - `/mode default` — ask before risky writes/commands (Claude Code: acceptEdits)\n\
+             - `/mode default` — ask before risky writes/commands; read-only tools run free\n\
+             - `/mode accept-edits` — also apply file edits and read-only shell commands without asking\n\
              - `/mode plan` — read-only research & planning, no mutating tools\n\
              - `/mode bypass` — run everything without asking (Claude Code: bypassPermissions)\n\n\
              _Rules and the deny log live under `/permissions`._",
@@ -345,14 +347,15 @@ pub async fn mode(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
 
     let arg = args[0].to_lowercase();
     let mapped = match arg.as_str() {
-        "default" | "build" | "acceptedits" | "accept-edits" => "default",
+        "default" | "build" => "default",
+        "acceptedits" | "accept-edits" => "acceptEdits",
         "plan" | "readonly" | "read-only" => "plan",
         "bypass" | "yolo" | "auto" | "bypasspermissions" | "bypass-permissions" => "yolo",
         other => {
             push_msg(
                 &mut ctx,
                 format!(
-                    "❌ Unknown mode: `{}`. Usage: /mode [default|plan|bypass]",
+                    "❌ Unknown mode: `{}`. Usage: /mode [default|accept-edits|plan|bypass]",
                     other
                 ),
             );

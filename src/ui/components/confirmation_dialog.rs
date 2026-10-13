@@ -81,6 +81,73 @@ fn estimate_details_risk(confirmation: &crate::types::ToolConfirmation) -> crate
     }
 }
 
+/// 确认卡里 diff 的最大行数。
+///
+/// 审批是"看一眼就决定"的动作，卡片高度必须让下面的选项留在屏幕内；
+/// 整份 diff 在工具结果块里有完整版。
+const EDIT_DIFF_PREVIEW_LINES: usize = 24;
+
+/// 从 unified diff 数出增删行；工具已经给出行数时用工具的。
+fn diff_line_counts(diff: &str, old_lines: usize, new_lines: usize) -> (usize, usize) {
+    if old_lines != 0 || new_lines != 0 {
+        return (
+            new_lines.saturating_sub(old_lines),
+            old_lines.saturating_sub(new_lines),
+        );
+    }
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for line in diff.lines() {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            added += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            removed += 1;
+        }
+    }
+    (added, removed)
+}
+
+/// 编辑类确认卡的 diff 预览（`+` 绿 / `-` 红 / `@@` 亮），超出上限折叠成一行计数。
+fn render_edit_diff_preview(diff: &str, wrap_width: usize) -> Vec<Line<'static>> {
+    let diff = diff.trim();
+    if diff.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            "  {}",
+            i18n::t("ui.confirm.label.diff", "变更预览:", "Diff preview:")
+        ),
+        Style::default().fg(INACTIVE_COLOR),
+    ))];
+
+    let all: Vec<&str> = diff.lines().collect();
+    let shown = all.len().min(EDIT_DIFF_PREVIEW_LINES);
+    for raw in &all[..shown] {
+        let color = if raw.starts_with('+') && !raw.starts_with("+++") {
+            Color::Green
+        } else if raw.starts_with('-') && !raw.starts_with("---") {
+            Color::Red
+        } else if raw.starts_with("@@") || raw.starts_with("diff --git") {
+            Color::Cyan
+        } else {
+            Color::Gray
+        };
+        lines.push(Line::from(Span::styled(
+            format!("  {}", truncate_str(raw, wrap_width.saturating_sub(4))),
+            Style::default().fg(color),
+        )));
+    }
+    if all.len() > shown {
+        lines.push(Line::from(Span::styled(
+            format!("  … +{} more diff lines", all.len() - shown),
+            Style::default().fg(SUBTLE_COLOR),
+        )));
+    }
+    lines
+}
+
 pub fn build_confirmation_card_block(
     confirmation: &crate::types::ToolConfirmation,
     wrap_width: usize,
@@ -170,13 +237,13 @@ pub fn build_confirmation_card_block(
         ConfirmationType::EditFile => {
             if let ConfirmationDetails::EditFile {
                 file_path,
+                diff,
                 old_lines,
                 new_lines,
-                ..
             } = &confirmation.details
             {
-                let added = new_lines.saturating_sub(*old_lines);
-                let removed = old_lines.saturating_sub(*new_lines);
+                // 行数优先用工具给的；DIFF_VIEW 那条路径给的是 0，就现算。
+                let (added, removed) = diff_line_counts(diff, *old_lines, *new_lines);
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default()),
                     Span::styled(file_path.clone(), Style::default().fg(Color::Yellow)),
@@ -185,6 +252,9 @@ pub fn build_confirmation_card_block(
                         Style::default().fg(INACTIVE_COLOR),
                     ),
                 ]));
+                // 审批前必须看得到将写入什么 —— CC 在这里给完整 diff。
+                // 只给 `path (+N -M)` 的话，用户只能盲批，"要不要看"这个问题就没了。
+                lines.extend(render_edit_diff_preview(diff, wrap_width));
             }
         }
         ConfirmationType::ShellCommand => {

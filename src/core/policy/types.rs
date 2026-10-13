@@ -44,6 +44,8 @@ pub fn get_hook_source(input: &HashMap<String, serde_json::Value>) -> HookSource
 pub enum ApprovalMode {
     #[serde(rename = "default")]
     Default, // Ask for permission
+    #[serde(rename = "acceptEdits")]
+    AcceptEdits, // Accept file edits automatically
     #[serde(rename = "yolo")]
     Yolo, // Skip permission
     #[serde(rename = "plan")]

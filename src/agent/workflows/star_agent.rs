@@ -64,6 +64,7 @@ impl StarAgent {
     fn initial_approval_mode(config: &Config) -> ApprovalMode {
         match config.approval_mode() {
             crate::core::policy::ApprovalMode::Default => ApprovalMode::Default,
+            crate::core::policy::ApprovalMode::AcceptEdits => ApprovalMode::AcceptEdits,
             crate::core::policy::ApprovalMode::Plan => ApprovalMode::Plan,
             crate::core::policy::ApprovalMode::Yolo => ApprovalMode::Yolo,
         }
@@ -89,6 +90,7 @@ impl StarAgent {
         match self.approval_mode() {
             ApprovalMode::Plan => crate::core::policy::ApprovalMode::Plan,
             ApprovalMode::Yolo => crate::core::policy::ApprovalMode::Yolo,
+            ApprovalMode::AcceptEdits => crate::core::policy::ApprovalMode::AcceptEdits,
             ApprovalMode::Default => crate::core::policy::ApprovalMode::Default,
         }
     }

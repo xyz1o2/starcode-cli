@@ -1166,10 +1166,12 @@ pub fn build_diff_block(diff_content: &str, wrap_width: usize) -> Vec<Line<'stat
     let mut last_line_num: Option<usize> = None;
     let _max_context_lines_without_gap = 5;
 
-    // Filter out hunks/others for display
+    // 文件头（type 0，如 `diff --git` / `---` / `+++`）不显示，但 **hunk 头要留**
+    // （type 1）：`@@ -12,7 +12,9 @@` 是唯一告诉用户"改动落在第几行"的东西，
+    // 之前它和文件头一起被过滤掉了。
     let displayable_lines: Vec<&DiffLine> = parsed_lines
         .iter()
-        .filter(|l| l.line_type == 2 || l.line_type == 3 || l.line_type == 4)
+        .filter(|l| l.line_type == 1 || l.line_type == 2 || l.line_type == 3 || l.line_type == 4)
         .collect();
 
     if displayable_lines.is_empty() {
@@ -1188,6 +1190,23 @@ pub fn build_diff_block(diff_content: &str, wrap_width: usize) -> Vec<Line<'stat
     let render_limit = total_lines.min(MAX_RENDER_LINES);
 
     for (_idx, line) in displayable_lines.iter().enumerate().take(render_limit) {
+        // hunk 头单独渲染：它自己就是位置标记，所以清掉 `last_line_num` ——
+        // 否则紧随其后的内容行还会补一条 `═` 间隔线，同一个跳跃出现两个指示器。
+        if line.line_type == 1 {
+            last_line_num = None;
+            // 内容行的前缀是 `" {num} │ {marker} "`（gutter_width + 6 列），
+            // hunk 头缩进同样的宽度，视觉上就在同一列。
+            let indent = gutter_width + 6;
+            lines.push(Line::from(vec![
+                Span::styled(" ".repeat(indent), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    truncate_to_display_width(&line.content, wrap_width.saturating_sub(indent)),
+                    Style::default().fg(Color::Cyan),
+                ),
+            ]));
+            continue;
+        }
+
         // Gap Indicator
         let relevant_line_num = if line.line_type == 3 {
             line.old_line
@@ -1589,6 +1608,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn diff_block_keeps_hunk_headers_so_the_location_is_visible() {
+        // 回归：`@@` 头此前和文件头一起被过滤，用户只看到颜色块，不知道改在哪一段
+        let diff = "diff --git a/src/main.rs b/src/main.rs\n\
+--- a/src/main.rs\n\
++++ b/src/main.rs\n\
+@@ -12,3 +12,4 @@ fn main() {\n\
+     let x = 1;\n\
+-    let y = 2;\n\
++    let y = 3;\n\
++    let z = 4;\n";
+        let lines = build_diff_block(diff, 80);
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        assert!(
+            rendered.iter().any(|l| l.contains("@@ -12,3 +12,4 @@")),
+            "hunk 头必须出现在 diff 块里，实际渲染: {rendered:#?}"
+        );
+        assert!(
+            !rendered.iter().any(|l| l.contains("diff --git") || l.contains("+++ b/")),
+            "文件头不进 diff 块，实际渲染: {rendered:#?}"
+        );
+        assert!(
+            rendered.iter().any(|l| l.contains("let z = 4;")),
+            "新增行必须在，实际渲染: {rendered:#?}"
+        );
+        for line in &lines {
+            assert!(
+                line_spans_display_width(&line.spans) <= 80,
+                "diff 行不得超宽: {:?}",
+                line
+            );
+        }
+    }
+
+    /// 有 `@@` 头就不再补 `═` 间隔线 —— 同一个跳跃只该有一个指示器。
+    #[test]
+    fn hunk_headers_replace_the_gap_separator() {
+        let diff = "@@ -1,2 +1,2 @@\n a\n-b\n+B\n\
+@@ -40,2 +40,2 @@\n c\n-d\n+D\n";
+        let lines = build_diff_block(diff, 80);
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert!(!rendered.iter().any(|l| l.contains('═')));
+        assert_eq!(
+            rendered.iter().filter(|l| l.contains("@@")).count(),
+            2,
+            "两个 hunk 头都要渲染: {rendered:#?}"
+        );
     }
 
     #[test]

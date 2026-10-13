@@ -1166,6 +1166,9 @@ pub async fn handle_stream_update(
             state.approval_mode = mode.clone();
             let mode_name = match mode {
                 crate::types::ApprovalMode::Default => i18n::t("ui.mode.build", "Build", "Build"),
+                crate::types::ApprovalMode::AcceptEdits => {
+                    i18n::t("ui.mode.accept_edits", "Accept edits", "Accept edits")
+                }
                 crate::types::ApprovalMode::Plan => i18n::t("ui.mode.plan", "Plan", "Plan"),
                 crate::types::ApprovalMode::Yolo => i18n::t("ui.mode.yolo", "YOLO", "YOLO"),
             };

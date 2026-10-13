@@ -463,6 +463,7 @@ pub async fn debug_state(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Com
     lines.push(format!("  Sandbox: {}", ctx.state.sandbox_enabled));
     let mode = match ctx.state.approval_mode {
         crate::types::ApprovalMode::Default => "default",
+        crate::types::ApprovalMode::AcceptEdits => "acceptEdits",
         crate::types::ApprovalMode::Plan => "plan",
         crate::types::ApprovalMode::Yolo => "yolo",
     };

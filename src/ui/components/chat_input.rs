@@ -45,6 +45,7 @@ pub fn resolve_border_color(state: &ChatState) -> Color {
         .unwrap_or("");
     let base_color = match state.approval_mode {
         crate::types::ApprovalMode::Default => theme.input_border,
+        crate::types::ApprovalMode::AcceptEdits => Color::LightGreen,
         crate::types::ApprovalMode::Plan => Color::Cyan,
         crate::types::ApprovalMode::Yolo => Color::Red,
     };

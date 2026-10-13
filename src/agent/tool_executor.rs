@@ -542,13 +542,14 @@ impl ToolExecutor {
                                         prompt: Some(details.prompt),
                                     };
 
-                                    // Use bus.request to wait for response (Policy Check + User Confirmation if needed)
-                                    // Timeout from config (default 1 minute)
+                                    // 等确认，并把 abort 一起竞速进去：用户中断这一轮时
+                                    // 不能在这里挂到 600 秒超时（`request_cancellable`
+                                    // 放弃前会补发取消应答，把 UI 上的确认卡一并收掉）。
                                     let response_result: Result<ToolConfirmationResponse, _> = bus
-                                        .request(
+                                        .request_cancellable(
                                             request,
-                                            MessageBusType::ToolConfirmationResponse,
                                             self.confirm_timeout_ms,
+                                            abort_signal.as_ref(),
                                         )
                                         .await;
 
@@ -615,9 +616,18 @@ impl ToolExecutor {
                                             }
                                         }
                                         Err(e) => {
+                                            // 中断与超时是两回事：前者是用户主动取消，
+                                            // 报成"超时"会让模型以为可以换个写法重试。
+                                            let cancelled = abort_signal
+                                                .as_ref()
+                                                .is_some_and(|token| token.is_cancelled());
+                                            let message = if cancelled {
+                                                "Tool execution cancelled by the user while waiting for permission."
+                                            } else {
+                                                "Confirmation timeout or error"
+                                            };
                                             return Self::error_result(
-                                                format!("Confirmation timeout or error: {}", e)
-                                                    .into(),
+                                                format!("{}: {}", message, e).into(),
                                             )
                                         }
                                     }

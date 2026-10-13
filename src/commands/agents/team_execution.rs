@@ -10,6 +10,9 @@ fn map_ui_approval_mode(
 ) -> crate::core::policy::types::ApprovalMode {
     match mode {
         crate::types::ApprovalMode::Default => crate::core::policy::types::ApprovalMode::Default,
+        crate::types::ApprovalMode::AcceptEdits => {
+            crate::core::policy::types::ApprovalMode::AcceptEdits
+        }
         crate::types::ApprovalMode::Plan => crate::core::policy::types::ApprovalMode::Plan,
         crate::types::ApprovalMode::Yolo => crate::core::policy::types::ApprovalMode::Yolo,
     }

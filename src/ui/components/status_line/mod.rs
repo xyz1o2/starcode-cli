@@ -1156,6 +1156,12 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
                     Style::default().fg(theme.subtle),
                 ));
             }
+            ApprovalMode::AcceptEdits => {
+                spans.push(Span::styled(
+                    "⏵⏵ accept-edits",
+                    Style::default().fg(Color::LightGreen),
+                ));
+            }
             ApprovalMode::Plan => {
                 spans.push(Span::styled(
                     "⏸ plan",

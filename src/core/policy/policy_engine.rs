@@ -127,11 +127,32 @@ impl PolicyEngine {
         self.approval_mode.clone()
     }
 
+    /// 审批模式**自带**的免确认集合（对标 Claude Code 的模式语义表）。
+    ///
+    /// 这是模式语义的一部分，不是用户写下的规则，所以不进 `settings_permissions`：
+    /// - `default` = Manual —— 只读工具免确认，写与命令才问
+    /// - `acceptEdits` —— 再加上文件改动工具与只读 shell 命令
+    ///
+    /// `Yolo` / `Plan` 在 `check` 里各自 return，不走这里。
+    /// deny 与显式 `ask` 的优先级由 `check` 的调用顺序保证（deny 第 1 步、
+    /// ask 由 `check` 在调用本方法前查过），本方法只回答"模式承诺放行吗"。
+    fn mode_auto_allows(&self, tool_name: &str, args: &serde_json::Value) -> bool {
+        match self.approval_mode {
+            ApprovalMode::Default => crate::types::is_safe_query_tool(tool_name),
+            ApprovalMode::AcceptEdits => {
+                crate::types::is_safe_query_tool(tool_name)
+                    || crate::types::is_file_edit_tool(tool_name)
+                    || crate::types::is_readonly_fs_command(tool_name, args)
+            }
+            ApprovalMode::Yolo | ApprovalMode::Plan => false,
+        }
+    }
+
     /// 判定顺序（对标 Claude Code）：
     ///
     /// 1. `deny` 规则 —— 连 yolo 和"本会话总是允许"都压不住，用户写 deny 就是要绝对拦住；
     /// 2. 会话内的"总是允许"；
-    /// 3. 审批模式（yolo 全放 / plan 只放只读）；
+    /// 3. 审批模式（yolo 全放 / plan 只放只读 / default 与 acceptEdits 放各自的只读集合）；
     /// 4. `allow` 规则 —— 命中即免确认，这是 allow 存在的唯一意义；
     /// 5. `ask` 规则 —— 命中则强制弹确认，哪怕默认是放行；
     /// 6. 旧的 `PolicyRule` 列表，最后落到 `default_decision`。
@@ -184,7 +205,22 @@ impl PolicyEngine {
                     explicit_rule: false,
                 };
             }
-            ApprovalMode::Default => {}
+            // Default / AcceptEdits 不在这里 return：模式内置的放行集合（只读工具、
+            // acceptEdits 再加文件编辑与只读命令）要排在显式 `ask` 规则之后生效 ——
+            // 用户写 `ask: ["Read"]` 就是"每次都问我"，模式默认值不能把它吃掉。
+            ApprovalMode::Default | ApprovalMode::AcceptEdits => {
+                let asked_by_rule = [&settings_verdict, &legacy_verdict]
+                    .into_iter()
+                    .flatten()
+                    .any(|(verdict, _)| *verdict == RuleVerdict::Ask);
+                if !asked_by_rule && self.mode_auto_allows(&tool_call.name, &args) {
+                    return CheckResult {
+                        decision: PolicyDecision::Allow,
+                        rule: None,
+                        explicit_rule: false,
+                    };
+                }
+            }
         }
 
         // 4./5. allow 命中就免确认；ask 命中就强制确认
@@ -481,6 +517,183 @@ mod tests {
                 .await
                 .decision,
             PolicyDecision::Allow
+        );
+    }
+
+    fn engine_in(mode: ApprovalMode) -> PolicyEngine {
+        PolicyEngine::new(PolicyEngineConfig {
+            approval_mode: Some(mode),
+            ..Default::default()
+        })
+    }
+
+    /// 回归（P0-1）：`default` = CC 的 Manual —— 只读工具免确认。
+    ///
+    /// 修复前 `default_decision = AskUser` 会把 Read/Grep/Glob 也弹框，用户跑一个
+    /// 任务被打断十几次；headless 更糟：`non_interactive` 把 AskUser 翻成 Deny，
+    /// 于是 `-p` 模式下**每个**工具都被拒，agent 连文件都读不了。
+    #[tokio::test]
+    async fn default_mode_allows_read_only_tools_without_asking() {
+        let engine = engine_in(ApprovalMode::Default);
+        for tool in ["Read", "Grep", "Glob", "ListDir", "TodoWrite"] {
+            let result = engine
+                .check(&call(tool, serde_json::json!({"file_path": "src/main.rs"})), None)
+                .await;
+            assert_eq!(
+                result.decision,
+                PolicyDecision::Allow,
+                "{tool} 是只读工具，default 模式不该弹确认"
+            );
+            assert!(
+                !result.explicit_rule,
+                "模式内置放行不是规则命中，`explicit_rule` 必须为 false，否则「本会话允许」会失效"
+            );
+        }
+    }
+
+    /// 同一修复在 headless 下的意义：`-p` 遇只读工具必须是放行而不是拒绝。
+    #[tokio::test]
+    async fn headless_default_mode_can_read_files() {
+        let engine = PolicyEngine::new(PolicyEngineConfig {
+            non_interactive: Some(true),
+            approval_mode: Some(ApprovalMode::Default),
+            ..Default::default()
+        });
+        assert_eq!(
+            engine
+                .check(&call("Read", serde_json::json!({"file_path": "Cargo.toml"})), None)
+                .await
+                .decision,
+            PolicyDecision::Allow
+        );
+        // 写操作仍然直接拒绝（headless 没人能回答）
+        assert_eq!(
+            engine
+                .check(&call("Write", serde_json::json!({"path": "a.txt"})), None)
+                .await
+                .decision,
+            PolicyDecision::Deny
+        );
+    }
+
+    /// `default` 模式对写与命令仍然要问 —— 不能因为放行了只读就把闸门全拆了。
+    #[tokio::test]
+    async fn default_mode_still_asks_for_writes_and_commands() {
+        let engine = engine_in(ApprovalMode::Default);
+        for (tool, args) in [
+            ("Write", serde_json::json!({"path": "a.txt"})),
+            ("Edit", serde_json::json!({"file_path": "a.txt"})),
+            ("Bash", serde_json::json!({"command": "git push"})),
+            ("WebFetch", serde_json::json!({"url": "https://example.com"})),
+        ] {
+            assert_eq!(
+                engine.check(&call(tool, args), None).await.decision,
+                PolicyDecision::AskUser,
+                "{tool} 必须在 default 模式下弹确认"
+            );
+        }
+    }
+
+    /// 显式 `ask` 规则压得住模式内置放行 —— 用户写 `ask: ["Read"]` 就是"每次都问我"。
+    #[tokio::test]
+    async fn explicit_ask_rule_beats_the_mode_default_allow() {
+        let mut engine = engine_in(ApprovalMode::Default);
+        let mut perms = SettingsPermissions::default();
+        perms
+            .ask
+            .push(PermissionRuleSpec::parse("Read").expect("parse"));
+        engine.set_settings_permissions(perms);
+
+        let result = engine
+            .check(&call("Read", serde_json::json!({"file_path": "a.txt"})), None)
+            .await;
+        assert_eq!(result.decision, PolicyDecision::AskUser);
+        assert!(
+            result.explicit_rule,
+            "ask 规则命中时 `explicit_rule` 必须为 true，否则「本会话允许」会把它降级"
+        );
+        // deny 依然最高优先
+        let mut with_deny = engine_in(ApprovalMode::Default);
+        let mut perms = SettingsPermissions::default();
+        perms
+            .deny
+            .push(PermissionRuleSpec::parse("Read").expect("parse"));
+        with_deny.set_settings_permissions(perms);
+        assert!(matches!(
+            with_deny
+                .check(&call("Read", serde_json::json!({"file_path": "a.txt"})), None)
+                .await
+                .decision,
+            PolicyDecision::DenyWithReason(_)
+        ));
+    }
+
+    /// `acceptEdits` = 读 + 文件编辑 + 只读命令免确认，其余仍问。
+    #[tokio::test]
+    async fn accept_edits_allows_edits_and_readonly_commands_only() {
+        let engine = engine_in(ApprovalMode::AcceptEdits);
+
+        for (tool, args) in [
+            ("Read", serde_json::json!({"file_path": "a.rs"})),
+            ("Edit", serde_json::json!({"file_path": "a.rs"})),
+            ("Write", serde_json::json!({"path": "a.rs"})),
+            ("Bash", serde_json::json!({"command": "ls -la src"})),
+            (
+                "Bash",
+                serde_json::json!({"command": "grep -rn TODO src | head -20"}),
+            ),
+        ] {
+            assert_eq!(
+                engine.check(&call(tool, args.clone()), None).await.decision,
+                PolicyDecision::Allow,
+                "{tool}({args}) 在 acceptEdits 下不该弹确认"
+            );
+        }
+
+        for (tool, args) in [
+            ("Bash", serde_json::json!({"command": "git push"})),
+            ("Bash", serde_json::json!({"command": "ls && rm -rf target"})),
+            ("Bash", serde_json::json!({"command": "cat a.txt > b.txt"})),
+            ("Bash", serde_json::json!({"command": "/usr/bin/env sh -c 'rm -rf x'"})),
+            ("WebFetch", serde_json::json!({"url": "https://example.com"})),
+        ] {
+            assert_eq!(
+                engine.check(&call(tool, args.clone()), None).await.decision,
+                PolicyDecision::AskUser,
+                "{tool}({args}) 在 acceptEdits 下必须仍然弹确认"
+            );
+        }
+
+        // 命令替换类：旧的危险命令检查器直接拒，比弹框更强，所以只断言"绝不静默放行"
+        for args in [
+            serde_json::json!({"command": "echo $(rm -rf /)"}),
+            serde_json::json!({"command": "ls `rm -rf target`"}),
+        ] {
+            assert_ne!(
+                engine.check(&call("Bash", args.clone()), None).await.decision,
+                PolicyDecision::Allow,
+                "{args} 绝不能被 acceptEdits 静默放行"
+            );
+        }
+    }
+
+    /// plan 模式对只读工具放行、对写操作直接拒（不是弹框）—— 语义没被新分支改掉。
+    #[tokio::test]
+    async fn plan_mode_keeps_deny_for_writes() {
+        let engine = engine_in(ApprovalMode::Plan);
+        assert_eq!(
+            engine
+                .check(&call("Grep", serde_json::json!({"pattern": "x"})), None)
+                .await
+                .decision,
+            PolicyDecision::Allow
+        );
+        assert_eq!(
+            engine
+                .check(&call("Write", serde_json::json!({"path": "a.txt"})), None)
+                .await
+                .decision,
+            PolicyDecision::Deny
         );
     }
 }

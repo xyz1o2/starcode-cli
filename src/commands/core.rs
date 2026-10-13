@@ -104,6 +104,7 @@ pub async fn status(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResul
     // 审批模式
     let mode = match ctx.state.approval_mode {
         crate::types::ApprovalMode::Default => "默认",
+        crate::types::ApprovalMode::AcceptEdits => "接受编辑 (Accept edits)",
         crate::types::ApprovalMode::Plan => "Plan (计划模式)",
         crate::types::ApprovalMode::Yolo => "YOLO (自动审批)",
     };
