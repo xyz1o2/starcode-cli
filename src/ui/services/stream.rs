@@ -1198,6 +1198,7 @@ pub async fn handle_stream_update(
         StreamMessage::ToolConfirmationRequest {
             message_id,
             tool_call_id,
+            originating_tool_call_id,
             confirmation,
         } => {
             let awaiting = confirmation.outcome.is_none();
@@ -1205,26 +1206,28 @@ pub async fn handle_stream_update(
                 confirmation.operation_type,
                 crate::types::ConfirmationType::AskUserQuestion
             );
+            // 已经有一张没人回答的卡时，**不许把它的内容换成新的请求**。
+            //
+            // 换掉之后卡片上写的是新命令、等着回答的却是新 id，而用户是照着刚
+            // 读到的那条命令按的 1 —— 于是"允许"落到一条他没看过的命令上。
+            // 门控拦不住的不是命令，是"用户批准的那一条"和"实际执行的那一条"
+            // 之间的对应关系。改成另起一张卡，并把旧的那张标成已作废。
             if awaiting && state.is_awaiting_confirmation {
                 if let Some(idx) = state.pending_confirmation_entry_idx {
                     if idx < state.chat_history.len()
                         && state.chat_history[idx].entry_type == ChatEntryType::ToolConfirmation
                     {
-                        state.chat_history[idx].confirmation = Some(confirmation);
+                        if let Some(entry) = state.chat_history[idx].confirmation.as_mut() {
+                            if entry.outcome.is_none() {
+                                entry.outcome = Some(i18n::t(
+                                    "ui.confirm.superseded",
+                                    "Superseded — a newer request is waiting",
+                                    "Superseded — a newer request is waiting",
+                                ));
+                            }
+                        }
                         state.chat_history[idx].is_streaming = Some(false);
-                        state.pending_message_id = Some(message_id);
-                        state.pending_tool_call_id = Some(tool_call_id);
-                        state.confirmation_feedback_mode = false;
-                        state.pending_confirmation_feedback.clear();
-                        if state.pending_confirmation_choice == 0 {
-                            state.pending_confirmation_choice = 1;
-                        }
                         state.rendered_cache.remove(&idx);
-                        state.chat_list_state.select(Some(idx));
-                        if state.auto_follow {
-                            // Force scroll to bottom calculation in next render
-                        }
-                        return Ok(());
                     }
                 }
             }
@@ -1240,6 +1243,7 @@ pub async fn handle_stream_update(
                 state.pending_message_id = Some(message_id);
                 state.is_awaiting_confirmation = true;
                 state.pending_tool_call_id = Some(tool_call_id);
+                state.pending_confirmation_originating_id = originating_tool_call_id;
                 state.confirmation_feedback_mode = false;
                 state.pending_confirmation_feedback.clear();
                 state.pending_confirmation_choice = if is_ask {
@@ -1251,6 +1255,7 @@ pub async fn handle_stream_update(
                 state.pending_confirmation_entry_idx = Some(idx);
                 state.pending_message_id = Some(message_id);
                 state.pending_tool_call_id = None;
+                state.pending_confirmation_originating_id = None;
                 state.pending_confirmation_choice = 0;
             }
 
@@ -1939,14 +1944,16 @@ fn handle_tool_result_message(
     tool_call: StarToolCall,
     tool_result: ToolResult,
 ) {
+    // 这条结果属于当前等待确认的那次调用吗？必须比**模型侧**的 id
+    // （`pending_confirmation_originating_id`）。早先这里比的是
+    // `pending_tool_call_id`，那是 bus 的 correlation id，永远不等于
+    // `tool_call.id`：于是工具超时/失败之后卡片收不到任何收尾信号，
+    // `is_awaiting_confirmation` 一直为真，后面每一次确认请求都被当成
+    // "已有一张卡"而被顶掉。
     if state.is_awaiting_confirmation {
-        if let Some(pending_id) = state.pending_tool_call_id.as_deref() {
-            if pending_id == tool_call.id {
-                state.is_awaiting_confirmation = false;
-                state.pending_tool_call_id = None;
-                state.pending_confirmation_entry_idx = None;
-                state.confirmation_feedback_mode = false;
-                state.pending_confirmation_feedback.clear();
+        if let Some(originating) = state.pending_confirmation_originating_id.as_deref() {
+            if originating == tool_call.id {
+                state.clear_pending_confirmation();
             }
         }
     }
@@ -3251,7 +3258,8 @@ mod tests {
             &mut state,
             StreamMessage::ToolConfirmationRequest {
                 message_id: 1,
-                tool_call_id: "call-1".to_string(),
+                tool_call_id: "corr-1".to_string(),
+                originating_tool_call_id: Some("call-1".to_string()),
                 confirmation,
             },
             &agent_tx,
@@ -3293,6 +3301,148 @@ mod tests {
         );
         assert!(!state.confirmation_feedback_mode);
         assert!(state.pending_confirmation_feedback.is_empty());
+    }
+
+    /// 回归：工具结束了，等待确认的卡片必须跟着收掉。
+    ///
+    /// 之前这里比的是 `pending_tool_call_id`（bus 的 correlation id，UUID）和
+    /// `tool_call.id`（模型侧 id），两个命名空间永远比不相等。于是确认过期 /
+    /// 执行失败之后 `is_awaiting_confirmation` 一直为真：按键全被喂给一张已经
+    /// 没有接收者的卡片，提示框也打不了字，后面每一次确认请求都会被当成
+    /// "已有一张卡"而被顶掉。
+    #[tokio::test]
+    async fn tool_result_for_the_awaited_call_clears_the_pending_confirmation() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::ToolConfirmationRequest {
+                message_id: 1,
+                tool_call_id: "corr-1".to_string(),
+                originating_tool_call_id: Some("call-1".to_string()),
+                confirmation: shell_confirmation("grep -n 604800 dump.sql"),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        assert!(state.is_awaiting_confirmation);
+
+        // 别的工具先结束，不该动这张卡。
+        handle_tool_result_message(
+            &mut state,
+            1,
+            StarToolCall {
+                id: "call-other".to_string(),
+                ..agent_tool_call()
+            },
+            ToolResult {
+                success: true,
+                output: None,
+                error: None,
+                data: None,
+            },
+        );
+        assert!(state.is_awaiting_confirmation, "无关工具的结果不该收掉卡片");
+
+        handle_tool_result_message(
+            &mut state,
+            1,
+            StarToolCall {
+                id: "call-1".to_string(),
+                ..agent_tool_call()
+            },
+            ToolResult {
+                success: false,
+                output: None,
+                error: Some("Confirmation timeout or error".to_string()),
+                data: None,
+            },
+        );
+        assert!(!state.is_awaiting_confirmation, "自己那次调用的结果必须收掉卡片");
+        assert!(state.pending_tool_call_id.is_none());
+        assert!(state.pending_confirmation_originating_id.is_none());
+    }
+
+    /// 回归：新的确认请求不许把用户正在看的那张卡换成别的命令。
+    ///
+    /// 之前是把旧卡的内容就地替换成新请求：用户照着刚读到的那条命令按"1"，
+    /// 批准到的却是另一条命令 —— 门控拦不住的不是命令，是"用户批准的那一条"
+    /// 和"实际执行的那一条"之间的对应关系。
+    #[tokio::test]
+    async fn a_new_confirmation_never_retargets_a_pending_card() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::ToolConfirmationRequest {
+                message_id: 1,
+                tool_call_id: "corr-1".to_string(),
+                originating_tool_call_id: Some("call-1".to_string()),
+                confirmation: shell_confirmation("grep -n 604800 dump.sql"),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        let first_idx = state
+            .pending_confirmation_entry_idx
+            .expect("第一张卡应当是待确认状态");
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::ToolConfirmationRequest {
+                message_id: 1,
+                tool_call_id: "corr-2".to_string(),
+                originating_tool_call_id: Some("call-2".to_string()),
+                confirmation: shell_confirmation("ls -la /mnt/d/ai-workspace"),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+
+        // 旧卡必须原样保留，且不再是可以回答的那一张。
+        let first = &state.chat_history[first_idx];
+        let first_prompt = match &first.confirmation.as_ref().expect("确认卡").details {
+            crate::types::ConfirmationDetails::Generic { prompt, .. } => prompt.clone(),
+            other => panic!("期望 Generic 确认卡，实际 {other:?}"),
+        };
+        assert!(
+            first_prompt.contains("grep -n 604800"),
+            "旧卡的内容不能被新请求换掉：{first_prompt}"
+        );
+        assert!(
+            first.confirmation.as_ref().expect("确认卡").outcome.is_some(),
+            "被顶掉的卡必须标成已作废，不能看起来还能按"
+        );
+
+        // 新的那张才是当前等待回答的。
+        assert_eq!(state.pending_tool_call_id.as_deref(), Some("corr-2"));
+        assert_eq!(
+            state.pending_confirmation_originating_id.as_deref(),
+            Some("call-2")
+        );
+        assert_ne!(
+            state.pending_confirmation_entry_idx,
+            Some(first_idx),
+            "新请求必须另起一张卡，不能复用旧的索引"
+        );
+    }
+
+    fn shell_confirmation(command: &str) -> crate::types::ToolConfirmation {
+        crate::types::ToolConfirmation {
+            tool_name: "Bash".to_string(),
+            operation_type: crate::types::ConfirmationType::Generic,
+            details: crate::types::ConfirmationDetails::Generic {
+                title: "Permission required: Bash".to_string(),
+                prompt: format!("`Bash` needs approval before it can run.\n\n{command}"),
+            },
+            is_dangerous: true,
+            outcome: None,
+        }
     }
 
     #[tokio::test]

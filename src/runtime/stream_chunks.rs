@@ -149,14 +149,17 @@ pub async fn handle_stream_chunk(
         }
         StreamingChunkType::ToolConfirmation => {
             if let Some(confirmation) = chunk.confirmation {
-                let tool_call_id = chunk
-                    .tool_call
-                    .map(|tc| tc.id)
+                let originating_tool_call_id = chunk.tool_call.as_ref().map(|tc| tc.id.clone());
+                let tool_call_id = originating_tool_call_id
+                    .clone()
                     .unwrap_or_else(|| confirmation.tool_name.clone());
                 let _ = tx
                     .send(StreamMessage::ToolConfirmationRequest {
                         message_id,
                         tool_call_id,
+                        // chunk 上的 id 本身就是模型侧 tool_call.id，回去时它同时
+                        // 能当 correlation 用；仍然标出来源，免得下游按"缺失"处理。
+                        originating_tool_call_id,
                         confirmation,
                     })
                     .await;

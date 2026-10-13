@@ -249,11 +249,8 @@ fn restore_session_history(
     state.pending_tool_calls = None;
     state.pending_message_id = None;
     state.pending_confirmation = None;
-    state.pending_confirmation_entry_idx = None;
     state.pending_confirmation_choice = 0;
-    state.pending_confirmation_feedback.clear();
-    state.is_awaiting_confirmation = false;
-    state.pending_tool_call_id = None;
+    state.clear_pending_confirmation();
     state.current_tool_name = None;
     state.tool_started_at.clear();
     state.tool_call_args_cache.clear();

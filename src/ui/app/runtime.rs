@@ -790,10 +790,7 @@ pub async fn run_ui_loop(
             // 不会到来）。没有它，用户只看到输入框恢复可用，不知道刚才那半句话算不算数。
             crate::ui::components::interrupted::push_interrupted_notice(state, partial_kept);
             // Clear confirmation state to unblock queued messages
-            state.is_awaiting_confirmation = false;
-            state.pending_confirmation_entry_idx = None;
-            state.pending_confirmation_feedback.clear();
-            state.confirmation_feedback_mode = false;
+            state.clear_pending_confirmation();
 
             // 用户刚按下 Esc 打断，这时候把排队的输入自动发出去等于没打断成功。
             // 对标 Claude Code 取消时的 `handleQueuedCommandOnCancel`：

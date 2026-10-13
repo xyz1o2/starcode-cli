@@ -1245,12 +1245,7 @@ async fn handle_ask_user_question_input(
                         feedback: None,
                     })
                     .await;
-                state.is_awaiting_confirmation = false;
-                state.pending_tool_call_id = None;
-                state.pending_confirmation_entry_idx = None;
-                state.pending_question_other_focused = false;
-                state.pending_other_input.clear();
-                state.pending_question_selections.clear();
+                state.clear_pending_confirmation();
             }
             KeyCode::Tab => {
                 // Switch back to option navigation
@@ -1301,12 +1296,7 @@ async fn handle_ask_user_question_input(
                         feedback: None,
                     })
                     .await;
-                state.is_awaiting_confirmation = false;
-                state.pending_tool_call_id = None;
-                state.pending_confirmation_entry_idx = None;
-                state.pending_question_other_focused = false;
-                state.pending_other_input.clear();
-                state.pending_question_selections.clear();
+                state.clear_pending_confirmation();
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 if state.pending_confirmation_choice > 0 {
@@ -1490,12 +1480,7 @@ async fn submit_ask_user_question_answer(
         })
         .await;
 
-    state.is_awaiting_confirmation = false;
-    state.pending_tool_call_id = None;
-    state.pending_confirmation_entry_idx = None;
-    state.pending_question_other_focused = false;
-    state.pending_other_input.clear();
-    state.pending_question_selections.clear();
+    state.clear_pending_confirmation();
 
     Ok(())
 }
@@ -3256,13 +3241,9 @@ async fn handle_tool_approval(
                                 feedback,
                             })
                             .await;
-                        state.is_awaiting_confirmation = false;
-                        state.pending_tool_call_id = None;
                         state.show_permission_explanation = false;
                         state.show_permission_debug = false;
-                        state.pending_confirmation_feedback.clear();
-                        state.confirmation_feedback_mode = false;
-                        state.pending_confirmation_entry_idx = None;
+                        state.clear_pending_confirmation();
                     }
                     KeyCode::Char(ch) => {
                         state.pending_confirmation_feedback.push(ch);
@@ -3298,13 +3279,9 @@ async fn handle_tool_approval(
                                 feedback: None,
                             })
                             .await;
-                        state.is_awaiting_confirmation = false;
-                        state.pending_tool_call_id = None;
                         state.show_permission_explanation = false;
                         state.show_permission_debug = false;
-                        state.pending_confirmation_feedback.clear();
-                        state.confirmation_feedback_mode = false;
-                        state.pending_confirmation_entry_idx = None;
+                        state.clear_pending_confirmation();
                     }
                     // Ctrl+E: 切换权限解释区 / Ctrl+D: 切换 debug 详情（Claude Code 风格）
                     KeyCode::Char('e') | KeyCode::Char('E')
@@ -3359,16 +3336,14 @@ async fn handle_tool_approval(
                                 feedback: None,
                             })
                             .await;
-                        state.is_awaiting_confirmation = false;
-                        state.pending_tool_call_id = None;
-                        state.show_permission_explanation = false;
-                        state.show_permission_debug = false;
-                        state.pending_confirmation_feedback.clear();
-                        state.confirmation_feedback_mode = false;
-                        if let Some(idx) = state.pending_confirmation_entry_idx {
+                        // 先取索引再清状态：`clear_pending_confirmation` 会把
+                        // `pending_confirmation_entry_idx` 置空，卡片上的 "Denied"
+                        // 就没机会作废重绘了。
+                        let rendered_idx = state.pending_confirmation_entry_idx;
+                        state.clear_pending_confirmation();
+                        if let Some(idx) = rendered_idx {
                             state.rendered_cache.remove(&idx);
                         }
-                        state.pending_confirmation_entry_idx = None;
                     }
                     KeyCode::Up => {
                         if state.pending_confirmation_choice > 1 {
@@ -3420,19 +3395,17 @@ async fn handle_tool_approval(
                                 feedback,
                             })
                             .await;
-                        state.is_awaiting_confirmation = false;
-                        state.pending_tool_call_id = None;
                         state.show_permission_explanation = false;
                         state.show_permission_debug = false;
-                        state.pending_confirmation_feedback.clear();
-                        state.confirmation_feedback_mode = false;
-                        state.pending_confirmation_entry_idx = None;
+                        state.clear_pending_confirmation();
                     }
                     _ => {}
                 }
             }
         } else {
-            state.is_awaiting_confirmation = false;
+            // 没有可回答的 id 却还挂着等待态：这是状态已经错乱的表现，
+            // 只翻一个标志位会把 `pending_*` 留在半清不楚的状态上。
+            state.clear_pending_confirmation();
         }
         return Ok(true);
     }

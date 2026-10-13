@@ -135,6 +135,15 @@ impl ToolExecutor {
         }
     }
 
+    /// 一次确认最多等用户多久（毫秒）。
+    ///
+    /// 调用方（`tool_helpers` 的兜底超时）必须把它算进去：外层兜底是用来抓
+    /// **工具卡死**的，不是抓**用户在读命令**的。两个都用 600s 的话，外层先到期，
+    /// 内层的"确认已过期"永远轮不到说出口，用户只看到一句笼统的 timed out。
+    pub fn confirm_timeout_ms(&self) -> u64 {
+        self.confirm_timeout_ms
+    }
+
     pub fn get_tool_definitions(&self) -> Vec<StarTool> {
         let generation = self.tool_registry.generation();
         if let Ok(cache) = self.cached_tool_definitions.read() {
@@ -540,6 +549,10 @@ impl ToolExecutor {
                                         server_name: None,
                                         title: Some(details.title),
                                         prompt: Some(details.prompt),
+                                        // UI 手上只有模型侧的 tool_call.id，靠它把
+                                        // "这张卡"和稍后到达的 ToolResult 对上；不带上
+                                        // 的话卡片收不到自己那次调用的结局。
+                                        originating_tool_call_id: Some(tool_call.id.clone()),
                                     };
 
                                     // 等确认，并把 abort 一起竞速进去：用户中断这一轮时
@@ -2718,6 +2731,87 @@ mod tests {
             .expect("`ask` rule must have produced a confirmation prompt")
             .expect("confirmation responder task failed");
         assert!(result.success);
+    }
+
+    /// 确认请求必须带上模型侧的 tool_call id。
+    ///
+    /// UI 手上只有 correlation id（bus 生成的 UUID）和工具结果里的 `tool_call.id`，
+    /// 两者不是同一个命名空间。没有 originating id，UI 就分不清"这张卡对应的
+    /// 工具已经结束了"，卡片永远停在等待态，后续每次确认请求都会被顶掉。
+    #[tokio::test]
+    async fn confirmation_request_carries_the_originating_tool_call_id() {
+        use crate::core::config::ConfigParameters;
+        use crate::core::policy::PolicyEngine;
+        use crate::types::StarToolCallFunction;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().expect("create temporary directory");
+        let mut params = ConfigParameters::default();
+        params.target_dir = temp.path().to_path_buf();
+        params.cwd = temp.path().to_path_buf();
+        let config = Arc::new(Config::new(params));
+
+        let bus = Arc::new(MessageBus::new(
+            PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let registry = Arc::new(ToolRegistry::new(config.clone()));
+        registry.register_tool(Arc::new(SilentTool));
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            registry,
+            Some(bus.clone()),
+            config,
+        );
+
+        let mut requests = bus.subscribe();
+        let responder_bus = bus.clone();
+        let responder = tokio::spawn(async move {
+            let request = loop {
+                match requests.recv().await.expect("confirmation channel closed") {
+                    Message::ToolConfirmationRequest(request) => break request,
+                    _ => continue,
+                }
+            };
+            let originating_tool_call_id = request.originating_tool_call_id.clone();
+            let _ = responder_bus
+                .publish(Message::ToolConfirmationResponse(
+                    ToolConfirmationResponse::from_user_decision(
+                        request.correlation_id,
+                        crate::types::ToolConfirmationOutcome::ProceedOnce,
+                        None,
+                    ),
+                ))
+                .await;
+            originating_tool_call_id
+        });
+
+        let result = executor
+            .execute(
+                &StarToolCall {
+                    id: "call-42".to_string(),
+                    call_type: "function".to_string(),
+                    function: StarToolCallFunction {
+                        name: "SilentTool".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                },
+                None,
+                None,
+            )
+            .await;
+
+        let originating_tool_call_id =
+            tokio::time::timeout(Duration::from_secs(5), responder)
+                .await
+                .expect("应产生一次确认请求")
+                .expect("confirmation responder task failed");
+        assert!(result.success);
+        assert_eq!(
+            originating_tool_call_id.as_deref(),
+            Some("call-42"),
+            "确认请求必须带上模型侧的 tool_call id，否则 UI 的卡片收不到结局"
+        );
     }
 
     /// 「本会话允许」必须真的生效：选过一次之后，同一工具不该再弹框。

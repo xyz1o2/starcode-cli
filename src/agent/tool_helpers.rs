@@ -21,8 +21,14 @@ pub(crate) fn execute_single_tool_with_progress<'a>(
         // 兜底超时：防止工具（尤其 CodebaseSearch/ProjectMap/Grep 等长运行工具）
         // 内部挂起导致 emit_tool_finished 永不发出、UI 圆点永远闪烁。
         // 超时后返回带超时提示的 error result，调用方仍会 emit finished 停止闪烁。
-        const TOOL_HARD_TIMEOUT_SECS: u64 = 600;
-        match tokio::time::timeout(std::time::Duration::from_secs(TOOL_HARD_TIMEOUT_SECS), exec)
+        //
+        // 它必须**盖过确认窗口**，否则这道兜底会替用户把确认超时吃掉：
+        // execute_batch 里含着等用户点确认的那段时间，两者都写 600s 时外层先到期，
+        // 于是每一次没批准的 Bash 都报"执行超时 600s"，而真正的原因（没人点同意）
+        // 被吞掉 —— 门控看上去像是坏了，实际是计时器互相踩。
+        const TOOL_HARD_TIMEOUT_MARGIN_SECS: u64 = 120;
+        let hard_timeout_secs = tool_executor.confirm_timeout_ms() / 1000 + TOOL_HARD_TIMEOUT_MARGIN_SECS;
+        match tokio::time::timeout(std::time::Duration::from_secs(hard_timeout_secs), exec)
             .await
         {
             Ok(results) => results.into_iter().next().unwrap_or(ToolResult {
@@ -36,7 +42,7 @@ pub(crate) fn execute_single_tool_with_progress<'a>(
                 output: None,
                 error: Some(format!(
                     "Tool execution timed out after {}s",
-                    TOOL_HARD_TIMEOUT_SECS
+                    hard_timeout_secs
                 )),
                 data: None,
             },

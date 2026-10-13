@@ -92,18 +92,17 @@ impl MessageBus {
                     .await;
 
                 match check_result.decision {
+                    // 这里**不能**因为复查结果是 Allow 就自己回一条 `confirmed: true`。
+                    //
+                    // 能走到 publish 的请求，调用方（ToolExecutor）已经判过"要问用户"
+                    // 才把它发出来的；在 publish 里再判一次并且**只允许它抬高**判定，
+                    // 等于开了一条"没有任何人点过同意就执行"的旁路：两次判定之间只要
+                    // 状态动过（`/permissions` 重载规则、审批模式被切到 yolo、
+                    // 子代理并发），命令就会在 UI 一张卡都没画的情况下跑掉。
+                    //
+                    // publish 这一层的职责是**收紧**（deny 仍然生效），不是放宽。
                     PolicyDecision::Allow => {
-                        self.emit_message(Message::ToolConfirmationResponse(
-                            ToolConfirmationResponse {
-                                message_type: MessageBusType::ToolConfirmationResponse,
-                                correlation_id: req.correlation_id,
-                                confirmed: true,
-                                requires_user_confirmation: None,
-                                outcome: None,
-                                feedback: None,
-                            },
-                        ))
-                        .await;
+                        self.emit_message(original_message).await;
                     }
                     PolicyDecision::Deny => {
                         self.emit_message(Message::ToolPolicyRejection(ToolPolicyRejection {
@@ -206,6 +205,27 @@ impl MessageBus {
         Ok(())
     }
 
+    /// 把"这条请求已经作废"广播出去，再返回放弃的原因。
+    ///
+    /// 只丢本地 future 是不够的 —— UI 上的确认卡是按 correlation_id 等应答的，
+    /// 没有这条广播它就永远停在"Allow once / Deny"上，而这次调用的等待方早就
+    /// 没了。用户随后按下的 1/4 发给一个没有接收者的 id：卡片还在、命令却已经
+    /// 按超时结束，谁也说不清刚才那次批准算不算数 —— 表现上就是"门控拦不住"。
+    async fn expire_request(&self, correlation_id: String, reason: &'static str) -> &'static str {
+        self.emit_message(Message::ToolConfirmationResponse(
+            ToolConfirmationResponse {
+                message_type: MessageBusType::ToolConfirmationResponse,
+                correlation_id,
+                confirmed: false,
+                requires_user_confirmation: None,
+                outcome: Some(crate::types::ToolConfirmationOutcome::Cancel),
+                feedback: None,
+            },
+        ))
+        .await;
+        reason
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<Message> {
         self.sender.subscribe()
     }
@@ -269,12 +289,14 @@ impl MessageBus {
 
         // 内部错误用 `&'static str` 而不是 `Box<dyn Error>`：等待 future 会被
         // `select!` 跨线程 await，对外那个非 Send 的错误类型进不了这个 future。
-        let timeout_err = || -> Box<dyn std::error::Error> { "Confirmation timed out".into() };
 
         match abort {
             None => match timeout.await {
                 Ok(result) => result.map_err(|e| -> Box<dyn std::error::Error> { e.into() }),
-                Err(_) => Err(timeout_err()),
+                Err(_) => Err(self
+                    .expire_request(correlation_id, "Confirmation timed out")
+                    .await
+                    .into()),
             },
             Some(token) => {
                 tokio::select! {
@@ -283,22 +305,16 @@ impl MessageBus {
                         Ok(result) => {
                             result.map_err(|e| -> Box<dyn std::error::Error> { e.into() })
                         }
-                        Err(_) => Err(timeout_err()),
+                        Err(_) => Err(self
+                            .expire_request(correlation_id, "Confirmation timed out")
+                            .await
+                            .into()),
                     },
                     _ = token.cancelled() => {
-                        // 用同一个 correlation_id 广播取消，别让 UI 的确认卡一直挂着
-                        self.emit_message(Message::ToolConfirmationResponse(
-                            ToolConfirmationResponse {
-                                message_type: MessageBusType::ToolConfirmationResponse,
-                                correlation_id,
-                                confirmed: false,
-                                requires_user_confirmation: None,
-                                outcome: Some(crate::types::ToolConfirmationOutcome::Cancel),
-                                feedback: None,
-                            },
-                        ))
-                        .await;
-                        Err("Request cancelled".to_string().into())
+                        Err(self
+                            .expire_request(correlation_id, "Request cancelled")
+                            .await
+                            .into())
                     }
                 }
             }
@@ -331,6 +347,7 @@ mod tests {
             server_name: None,
             title: Some("t".to_string()),
             prompt: Some("p".to_string()),
+            originating_tool_call_id: None,
         }
     }
 
@@ -419,7 +436,106 @@ mod tests {
         );
     }
 
-    /// 反向保证：正常回答仍然按 correlation_id 匹配回来（`select!` 没把应答吃掉）。
+    /// 回归：确认请求**不能**在 publish 里被策略的第二次判定自动放行。
+    ///
+    /// 能走到 `publish` 的请求，调用方已经判过"要问用户"。这里再判一次、而且只
+    /// 允许它抬高判定，于是两次判定之间只要状态动过（切 yolo、`/permissions`
+    /// 重载规则、子代理并发），命令就会在 UI 一张卡都没画的情况下跑掉 ——
+    /// 也就是"还没同意就执行了"。
+    ///
+    /// 这条用 yolo 构造最容易复现：策略此刻说 Allow，而请求本身已经带着
+    /// "要问用户"的决定走到这里。
+    #[tokio::test]
+    async fn publish_never_self_approves_a_confirmation_request() {
+        let bus = MessageBus::new(
+            PolicyEngine::new(crate::core::policy::PolicyEngineConfig {
+                approval_mode: Some(crate::core::policy::types::ApprovalMode::Yolo),
+                ..Default::default()
+            }),
+            false,
+        );
+        let mut rx = bus.subscribe();
+
+        let mut request = request_for("Bash");
+        request.correlation_id = "corr-auto-approve".to_string();
+        bus.publish(Message::ToolConfirmationRequest(request))
+            .await
+            .expect("publish confirmation request");
+
+        let msg = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("应收到广播")
+            .expect("通道不应关闭");
+        match msg {
+            Message::ToolConfirmationRequest(req) => {
+                assert_eq!(req.correlation_id, "corr-auto-approve");
+            }
+            Message::ToolConfirmationResponse(resp) => panic!(
+                "没有任何人点过同意就回了应答（confirmed={}）",
+                resp.confirmed
+            ),
+            other => panic!("期望确认请求，实际 {other:?}"),
+        }
+
+        // 请求之后不该再有第二条消息 —— 特别是那条自动生成的 confirmed=true。
+        if let Ok(extra) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+            match extra {
+                Ok(Message::ToolConfirmationResponse(resp)) => panic!(
+                    "没有任何人点过同意就回了应答（confirmed={}）",
+                    resp.confirmed
+                ),
+                Ok(_) | Err(_) => {}
+            }
+        }
+    }
+
+    /// 回归：确认等待超时也要像 abort 一样补发取消应答。
+    ///
+    /// 修复前只有 abort 分支广播，用户放着不管的那一路会把 UI 的卡片永久留在
+    /// 屏幕上，而等待方已经没了 —— 之后按下的 1/4 发给一个没有接收者的 id。
+    #[tokio::test]
+    async fn confirmation_timeout_broadcasts_a_cancel_response() {
+        let bus = asking_bus();
+        let mut rx = bus.subscribe();
+        let mut observer = bus.subscribe();
+
+        let wait = bus.request_cancellable::<_, ToolConfirmationResponse>(
+            request_for("Edit"),
+            50,
+            None,
+        );
+        let driver = async {
+            loop {
+                match rx.recv().await.expect("应收到确认请求") {
+                    Message::ToolConfirmationRequest(req) => break req.correlation_id,
+                    _ => continue,
+                }
+            }
+        };
+
+        let (result, requested_id) =
+            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(wait, driver) })
+                .await
+                .expect("超时后必须立刻返回");
+
+        assert!(result.is_err(), "没人回答就不能当成确认通过");
+
+        let cancel = loop {
+            match tokio::time::timeout(Duration::from_secs(2), observer.recv())
+                .await
+                .expect("超时后应补发一条应答")
+                .expect("通道不应关闭")
+            {
+                Message::ToolConfirmationResponse(resp) if resp.correlation_id == requested_id => {
+                    break resp;
+                }
+                _ => continue,
+            }
+        };
+        assert!(!cancel.confirmed);
+    }
+
+    /// 回归：正常回答仍然按 correlation_id 匹配回来（`select!` 没把应答吃掉）。
     #[tokio::test]
     async fn confirmation_still_resolves_when_answered() {
         let bus = asking_bus();

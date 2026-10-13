@@ -65,6 +65,15 @@ pub struct ToolConfirmationRequest {
     pub server_name: Option<String>,
     pub title: Option<String>,
     pub prompt: Option<String>,
+    /// 发起这次确认的**模型侧** tool_call id。
+    ///
+    /// `correlation_id` 是 bus 生成的 UUID，只有等答复的那一方认它；UI 拿到
+    /// `ToolResult` 时手上是模型侧的 id。两者不是同一个命名空间，拿
+    /// `correlation_id` 去和 `tool_call.id` 比永远比不相等 —— 于是"这张卡对应的
+    /// 工具已经结束了"这条信息到不了 UI，卡片就永远停在等待态。带上原始 id，
+    /// UI 才能把卡片和它的工具结果对上。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub originating_tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

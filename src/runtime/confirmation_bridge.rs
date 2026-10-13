@@ -73,6 +73,7 @@ pub async fn relay_confirmation_bus_message(
                 .send(StreamMessage::ToolConfirmationRequest {
                     message_id,
                     tool_call_id: req.correlation_id,
+                    originating_tool_call_id: req.originating_tool_call_id.clone(),
                     confirmation,
                 })
                 .await;
@@ -106,6 +107,7 @@ pub async fn relay_confirmation_bus_message(
                 .send(StreamMessage::ToolConfirmationRequest {
                     message_id,
                     tool_call_id,
+                    originating_tool_call_id: None,
                     confirmation,
                 })
                 .await;

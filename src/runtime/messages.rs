@@ -204,7 +204,11 @@ pub enum StreamMessage {
     },
     ToolConfirmationRequest {
         message_id: u64,
+        /// 等答复用的 correlation id（bus 生成）。UI 回答案时必须原样带回。
         tool_call_id: String,
+        /// 发起这次确认的模型侧 tool_call id。UI 靠它和 `ToolResult` 对上，
+        /// 没有它就分不清"这张卡对应的工具已经结束了"。
+        originating_tool_call_id: Option<String>,
         confirmation: crate::types::ToolConfirmation,
     },
     ModelsList {

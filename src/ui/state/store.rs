@@ -572,6 +572,12 @@ pub struct ChatState {
     pub pending_confirmation_choice: usize,            // 当前选中项：1/2/3
     pub is_awaiting_confirmation: bool,                // 新增：是否处于等待键盘确认状态
     pub pending_tool_call_id: Option<String>,          // 新增：当前等待确认的工具调用ID
+    /// 当前等待确认的那次调用在**模型侧**的 tool_call id。
+    ///
+    /// 和上面的 `pending_tool_call_id` 不是一回事：后者是 bus 的 correlation id，
+    /// 回答问题必须用它；这个用来和 `ToolResult` 里的 `tool_call.id` 比对，
+    /// 两者混用会导致卡片永远等不到"我这次已经结束了"的信号。
+    pub pending_confirmation_originating_id: Option<String>,
     pub pending_question_selections: Vec<usize>,       // 多选问题的已选选项索引
     pub pending_other_input: String,                   // "Other" 文本输入值
     pub pending_question_other_focused: bool,          // "Other" 输入框是否聚焦
@@ -1123,6 +1129,7 @@ impl ChatState {
             pending_confirmation_choice: 0,
             is_awaiting_confirmation: false,
             pending_tool_call_id: None,
+            pending_confirmation_originating_id: None,
             pending_question_selections: Vec::new(),
             pending_other_input: String::new(),
             pending_question_other_focused: false,
@@ -1671,6 +1678,25 @@ pub fn bump_indices_after_insert(state: &mut ChatState, from: usize, delta: usiz
         if *idx >= from {
             *idx += delta;
         }
+    }
+}
+
+impl ChatState {
+    /// 结束"正在等用户确认"的状态。
+    ///
+    /// 所有收尾点都必须走这里。原来这些字段散在十几处手工清，其中一处漏掉
+    /// `is_awaiting_confirmation`（或者漏掉新加的 originating id），UI 就会永远
+    /// 卡在等待态：按键全被喂给一张已经没有接收者的卡片，提示框也打不了字。
+    pub fn clear_pending_confirmation(&mut self) {
+        self.is_awaiting_confirmation = false;
+        self.pending_tool_call_id = None;
+        self.pending_confirmation_originating_id = None;
+        self.pending_confirmation_entry_idx = None;
+        self.pending_confirmation_feedback.clear();
+        self.confirmation_feedback_mode = false;
+        self.pending_question_other_focused = false;
+        self.pending_other_input.clear();
+        self.pending_question_selections.clear();
     }
 }
 
