@@ -273,10 +273,9 @@ pub(crate) async fn request_runtime_settings_with_persistence_revision(
 /// `Model is unavailable`；反过来则是 `is not a valid model ID`。两种都表现为
 /// "选了模型但没切成功"，而用户无从知道模型被发去了另一家。
 ///
-/// 兜底到 `current_provider_id` 本身没有错 —— 用户手敲一个谁都没有的模型名时，
-/// 仍该留在当前 provider 上试一次（注释见 `show_model_name_modal`：中转站的
-/// `/models` 常年不全，拉不到不等于不能用）。关键是不能**在能查到的情况下**
-/// 还去兜底。
+/// 兜底到 `current_provider_id` 本身没有错 —— 用户切到一个谁都没有的模型名时，
+/// 仍该留在当前 provider 上试一次（中转站的 `/models` 常年不全，拉不到不等于
+/// 不能用）。关键是不能**在能查到的情况下**还去兜底。
 pub(crate) fn resolve_provider_for_model(state: &ChatState, model: &str) -> Option<String> {
     if let Some(provider_id) = state.model_provider_map.get(model) {
         return Some(provider_id.clone());
@@ -317,35 +316,6 @@ pub(crate) fn show_palette_mode(state: &mut ChatState, mode: PaletteMode) {
     state.quick_menu_origin_palette = false;
     state.exit_input_modal();
     state.open_palette(mode);
-}
-
-/// 手动输入模型名的弹窗。刻意不做任何联网校验：中转站的 `/models` 常年不全，
-/// 拉不到不等于不能用；用户敲什么就切什么，错了从状态栏的报错里看得出来。
-fn show_model_name_modal(state: &mut ChatState) {
-    close_quick_menus(state);
-    state.close_palette();
-    state.enter_input_modal();
-    state.input_modal_title = "Enter Model Name".to_string();
-    state.input_modal_prompt = match state.current_provider_id.as_deref() {
-        Some(pid) if !pid.trim().is_empty() => {
-            format!("Model ID to use with provider '{}', then press Enter:", pid)
-        }
-        _ => "Type the model ID and press Enter:".to_string(),
-    };
-    state.input_modal_value = state.current_model.clone();
-
-    let mut textarea = TextArea::default();
-    textarea.set_cursor_line_style(ratatui::style::Style::default());
-    textarea.insert_str(&state.input_modal_value);
-    textarea.set_placeholder_text("e.g. claude-opus-5");
-    textarea.set_cursor_style(
-        ratatui::style::Style::default()
-            .bg(ratatui::style::Color::Blue)
-            .fg(ratatui::style::Color::White),
-    );
-    state.modal_textarea = textarea;
-
-    state.input_context = Some(crate::ui::state::palette::InputContext::ModelName);
 }
 
 /// 打开 provider 单面板表单。
@@ -834,9 +804,6 @@ pub(crate) async fn execute_palette_action(
             if !state.is_palette_open() {
                 state.modal_stack.push(crate::ui::state::Modal::Palette);
             }
-        }
-        PaletteAction::InputModelName => {
-            show_model_name_modal(state);
         }
         PaletteAction::RefreshModels => {
             // 显式刷新：跳过内存/磁盘缓存，扇出到所有已配置 provider。
@@ -3502,45 +3469,6 @@ pub(crate) async fn handle_input_modal(
                                 state.current_status_line =
                                     Some(format!("Invalid context window size: {}.", error));
                             }
-                        }
-                    }
-                    crate::ui::state::palette::InputContext::ModelName => {
-                        let model = state.input_modal_value.trim().to_string();
-                        if model.is_empty() {
-                            crate::ui::app::logic::emit_status_text(
-                                state,
-                                0,
-                                "Model name cannot be empty.",
-                            );
-                            state.input_context =
-                                Some(crate::ui::state::palette::InputContext::ModelName);
-                            return Ok(true);
-                        }
-
-                        state.exit_input_modal();
-                        close_quick_menus(state);
-                        state.close_palette();
-
-                        // 手敲的模型名不一定在 model_provider_map 里；跨桶查过仍查不到才留在当前 provider。
-                        let provider_id = resolve_provider_for_model(state, &model);
-                        state.pending_model_confirmation = false;
-                        if request_runtime_model_change(
-                            state,
-                            model.clone(),
-                            provider_id.clone(),
-                            agent_tx,
-                        )
-                        .await
-                        {
-                            crate::ui::app::logic::emit_status_text(
-                                state,
-                                0,
-                                &format!(
-                                    "Requesting model {} (provider {})…",
-                                    model,
-                                    provider_id.as_deref().unwrap_or("default")
-                                ),
-                            );
                         }
                     }
                     crate::ui::state::palette::InputContext::ProviderForm => {

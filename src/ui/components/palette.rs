@@ -280,7 +280,6 @@ fn palette_action_key(action: &PaletteAction) -> String {
         PaletteAction::EditProvider(provider_id) => format!("edit_provider:{}", provider_id),
         PaletteAction::OpenProviderForm => "open_provider_form".to_string(),
         PaletteAction::DeleteProvider(provider_id) => format!("delete_provider:{}", provider_id),
-        PaletteAction::InputModelName => "input_model_name".to_string(),
         PaletteAction::RefreshModels => "refresh_models".to_string(),
         PaletteAction::OpenMcpModal => "open_mcp_modal".to_string(),
         PaletteAction::OpenMarketModal => "open_market_modal".to_string(),
@@ -1526,51 +1525,43 @@ pub(crate) fn format_cache_age(age_secs: Option<u64>) -> Option<String> {
     })
 }
 
-/// 手动输入模型名 + 显式刷新。
+/// 显式刷新（不在加载中时才作为可选项出现）。
 ///
-/// 这两项**不参与分组**：模型列表才是这个面板的主体，之前给它们套一个
-/// "Manual" 一级标题，会让用户找一个模型时先穿过两个与模型无关的分组标题。
-/// 平铺在顶部的理由仍然成立（模型多的中转站一屏放不下，放末尾等于找不到），
-/// 只是不再额外付出标题的视线成本。
-fn push_model_entry_options(
+/// **加载中不产生任何行**：此前这一行会把 label 换成 "⟳ Fetching model list..."、
+/// 另有一条 action 为 `Back` 的 "⏳ Loading models..." 占位 —— 两条状态伪装成菜单项，
+/// 用户能选中一个"正在加载"的条目，回车却只是后退。状态不该占用选择位，见
+/// `render_palette` 里那条不可选的提示行。
+fn push_model_refresh_option(
     items: &mut Vec<PaletteItem>,
-    current: &str,
     is_loading: bool,
     cache_age_secs: Option<u64>,
 ) {
-    items.push(PaletteItem {
-        id: "type_model".to_string(),
-        label: "⌨ Enter model name...".to_string(),
-        description: if current.is_empty() {
-            "Type any model ID your provider accepts — no network call".to_string()
-        } else {
-            format!("Type any model ID (prefilled with {})", current)
-        },
-        category: None,
-        action: PaletteAction::InputModelName,
-    });
-
-    let (label, description) = if is_loading {
-        (
-            "⟳ Fetching model list...".to_string(),
-            "Querying every configured provider".to_string(),
-        )
-    } else {
-        let hint = match format_cache_age(cache_age_secs) {
-            Some(age) => format!("List cached {} · queries every configured provider", age),
-            None => "Queries every configured provider (can take a few seconds)".to_string(),
-        };
-        ("⟳ Fetch model list from API".to_string(), hint)
+    if is_loading {
+        return;
+    }
+    let hint = match format_cache_age(cache_age_secs) {
+        Some(age) => format!("List cached {} · queries every configured provider", age),
+        None => "Queries every configured provider (can take a few seconds)".to_string(),
     };
     items.push(PaletteItem {
         id: "refresh_models".to_string(),
-        label,
-        description,
+        label: "⟳ Fetch model list from API".to_string(),
+        description: hint,
         category: None,
         action: PaletteAction::RefreshModels,
     });
 }
 
+/// 模型面板：**只有模型**（加上空闲时的刷新入口）。
+///
+/// 这里曾经平铺着四条与"选一个模型"无关的行：
+///
+/// - `.. Back` —— 与 Esc 完全等价。`PaletteAction::Back` 和 `handle_palette` 的
+///   Esc 分支都是「pop `palette_history`，空了才关面板」，选它没有任何额外能力，
+///   ���是让用户在模型列表上方先跨过一行才能碰到第一个模型。
+/// - `⌨ Enter model name...` —— 手动输入任意模型 ID 的入口（原
+///   `PaletteAction::InputModelName`，连同它打开的输入框一起已下线）。
+/// - `⟳ Fetching model list...` / `⏳ Loading models...` —— 加载态伪装成可选项。
 pub fn get_model_palette_items(
     models: &[String],
     current: &str,
@@ -1578,30 +1569,13 @@ pub fn get_model_palette_items(
     model_provider_map: &std::collections::HashMap<String, String>,
     cache_age_secs: Option<u64>,
 ) -> Vec<PaletteItem> {
-    let mut items = vec![PaletteItem {
-        id: "back".to_string(),
-        label: ".. Back".to_string(),
-        description: "Return to main menu".to_string(),
-        // `None` 而非某个分组名：导航项不该被提升成一个只含它自己的
-        // "Other" 一级分组标题。
-        category: None,
-        action: PaletteAction::Back,
-    }];
+    let mut items = Vec::new();
 
-    push_model_entry_options(&mut items, current, is_loading, cache_age_secs);
+    push_model_refresh_option(&mut items, is_loading, cache_age_secs);
 
     if models.is_empty() {
-        if is_loading {
-            items.push(PaletteItem {
-                id: "loading".to_string(),
-                label: "⏳ Loading models...".to_string(),
-                description: "Fetching from remote API".to_string(),
-                category: None,
-                action: PaletteAction::Back,
-            });
-            return items;
-        }
-        if !current.is_empty() {
+        // 加载中：返回空列表，由 `render_palette` 画一条不可选的 "Loading models…"。
+        if !is_loading && !current.is_empty() {
             items.push(PaletteItem {
                 id: format!("model_{}", current),
                 label: format!("{} (current)", current),
@@ -2007,8 +1981,15 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
     let mut selectable_indices: Vec<usize> = Vec::new();
 
     if filtered.is_empty() {
+        // 空列表只出一条**不可选**的提示。模型面板加载中时说明原因，而不是
+        // 摆一条 action=Back 的"加载中"菜单项让人去选。
+        let hint = if matches!(state.palette_mode, PaletteMode::Model) && state.awaiting_models {
+            "⏳ Loading models… (Esc to close)"
+        } else {
+            "No results"
+        };
         list_items.push(ListItem::new(Line::from(Span::styled(
-            "No results",
+            hint,
             Style::default().fg(inactive_color),
         ))));
     } else if grouped {
@@ -2245,7 +2226,7 @@ mod tests {
     ///
     /// 回归点：`.. Back`、`Enter model name...`、`Fetch model list from API`
     /// 三项原本要么被兜底进 "Other" 组、要么被塞进 "Manual" 组，于是用户找一个
-    /// 模型时得先穿过两个与模型无关的分组标题。现在它们一律 `category: None`，
+    /// 模型时得先穿过两个与模型无关的分组标题。现在只剩刷新入口且它 `category: None`，
     /// 渲染时平铺、不带标题，模型分组直接顶上来。
     #[test]
     fn model_panel_keeps_navigation_and_actions_out_of_any_group() {
@@ -2256,25 +2237,11 @@ mod tests {
 
         let items = get_model_palette_items(&models, "claude-opus-5", false, &map, Some(3600));
 
-        let ungrouped: Vec<&str> = items
-            .iter()
-            .filter(|i| i.category.is_none())
-            .map(|i| i.label.as_str())
-            .collect();
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
         assert!(
-            ungrouped.contains(&".. Back"),
-            "back must be ungrouped, got {:?}",
-            ungrouped
-        );
-        assert!(
-            ungrouped.iter().any(|l| l.contains("Enter model name")),
-            "manual entry must be ungrouped, got {:?}",
-            ungrouped
-        );
-        assert!(
-            ungrouped.iter().any(|l| l.contains("Fetch model list")),
-            "refresh action must be ungrouped, got {:?}",
-            ungrouped
+            !labels.iter().any(|l| l.contains("Back")),
+            "Back 与 Esc 等价，不该占一行：{labels:?}"
         );
 
         // 关键：不能再出现任何 "Other" / "Manual" 分组。
@@ -2337,29 +2304,73 @@ mod tests {
         assert!(!ids.contains(&"thinking_high"), "{ids:?}");
     }
 
-    /// 手动输入和显式刷新必须在列表最前面：中转站能返回几百个模型，
-    /// 放在末尾等于用户翻不到。
+    /// 模型面板里只有模型（外加空闲时的刷新入口）。
+    ///
+    /// 回归点：这里曾平铺着 `.. Back`、`⌨ Enter model name...` 以及两条加载态
+    /// 伪装的菜单项。`.. Back` 与 Esc 的实现完全相同（都走
+    /// `palette_history.pop()`，空了才关面板），其余三条与"选一个模型"无关 ——
+    /// 其中两条状态项甚至能被选中，回车却只是后退。
     #[test]
-    fn manual_entry_and_refresh_come_before_the_models() {
-        let models: Vec<String> = (0..40).map(|i| format!("model-{}", i)).collect();
+    fn model_panel_lists_models_and_nothing_else() {
+        let models = vec!["claude-opus-5".to_string(), "deepseek-v4-pro".to_string()];
+        let mut map = std::collections::HashMap::new();
+        map.insert("claude-opus-5".to_string(), "opencode".to_string());
+        map.insert("deepseek-v4-pro".to_string(), "opencode".to_string());
+
+        let items = get_model_palette_items(&models, "claude-opus-5", false, &map, Some(3600));
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+        assert!(
+            !labels.iter().any(|l| l.contains("Back")),
+            "Back 与 Esc 等价，不该占一行：{labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l.contains("Enter model name")),
+            "手动输入模型名入口已移除：{labels:?}"
+        );
+        assert!(
+            labels
+                .iter()
+                .all(|l| !l.contains("Loading") && !l.contains("Fetching")),
+            "加载状态不该是可选条目：{labels:?}"
+        );
+
+        // 空闲时保留刷新入口，且它不参与 provider 分组（分组标题只服务于模型本身）
+        assert_eq!(labels[0], "⟳ Fetch model list from API", "{labels:?}");
+        assert!(
+            items[0].category.is_none(),
+            "刷新入口不应被提升成一级分组标题"
+        );
+
+        // 模型仍带 provider 分组（这是真正有用的标题）
+        assert!(
+            items
+                .iter()
+                .any(|i| i.category.as_deref() == Some("opencode")),
+            "models must stay grouped by provider"
+        );
+    }
+
+    /// 加载中：既不产出刷新项、也不产出占位项，返回空列表让渲染层画不可选提示。
+    #[test]
+    fn loading_yields_no_items_at_all() {
         let items = get_model_palette_items(
-            &models,
-            "model-0",
-            false,
+            &[],
+            "claude-opus-5",
+            true,
             &std::collections::HashMap::new(),
             None,
         );
-
-        let labels = ids(&items);
-        assert_eq!(labels[0], ".. Back");
-        assert!(labels[1].contains("Enter model name"), "{:?}", labels[1]);
-        assert!(labels[2].contains("Fetch model list"), "{:?}", labels[2]);
-        assert_eq!(items.len(), 3 + models.len());
+        assert!(
+            items.is_empty(),
+            "加载中不该有任何可选项（此前是「正在加载」的菜单项）：{:?}",
+            ids(&items)
+        );
     }
 
-    /// 空列表时同样给出两个出口 —— 拉不到模型不该是死路。
+    /// 空列表（已加载完但一个模型都没拿到）仍要给出当前模型与刷新出口。
     #[test]
-    fn an_empty_list_still_offers_both_ways_forward() {
+    fn an_empty_list_still_offers_a_way_forward() {
         let items = get_model_palette_items(
             &[],
             "claude-opus-5",
@@ -2369,14 +2380,23 @@ mod tests {
         );
 
         let labels = ids(&items);
-        assert!(labels.iter().any(|l| l.contains("Enter model name")));
-        assert!(labels.iter().any(|l| l.contains("Fetch model list")));
+        assert!(
+            labels.iter().any(|l| l.contains("Fetch model list")),
+            "{labels:?}"
+        );
         // 当前模型即使不在列表里也要能选回来
-        assert!(labels.iter().any(|l| l.starts_with("claude-opus-5")));
+        assert!(
+            labels.iter().any(|l| l.starts_with("claude-opus-5")),
+            "{labels:?}"
+        );
     }
 
+    /// 加载中不再有刷新项 —— 状态不该伪装成可点的东西。
+    ///
+    /// 回归点：此前这条会把刷新项的 label 换成 "⟳ Fetching model list..."，用户
+    /// 能选中一条"正在拉取"的菜单项，回车只是再触发一次请求。
     #[test]
-    fn refresh_item_reports_progress_while_fetching() {
+    fn loading_removes_the_refresh_item_instead_of_relabelling_it() {
         let items = get_model_palette_items(
             &["a".to_string()],
             "a",
@@ -2384,11 +2404,16 @@ mod tests {
             &std::collections::HashMap::new(),
             None,
         );
-        let refresh = items
-            .iter()
-            .find(|i| i.id == "refresh_models")
-            .expect("refresh item should always be present");
-        assert!(refresh.label.contains("Fetching"), "{}", refresh.label);
+        assert!(
+            !items.iter().any(|i| i.id == "refresh_models"),
+            "加载中不该有可选的刷新项：{:?}",
+            ids(&items)
+        );
+        assert!(
+            items.iter().all(|i| !i.label.contains("Fetching")),
+            "没有任何条目该显示加载文案：{:?}",
+            ids(&items)
+        );
     }
 
     #[test]
@@ -2419,9 +2444,9 @@ mod tests {
         assert_eq!(format_cache_age(Some(86_400)).unwrap(), "1d ago");
     }
 
-    /// 主面板搜索列表里两个入口都要有，且 key 不能撞（撞了会被去重掉一个）。
+    /// 主面板搜索列表里模型面板的条目 key 不能撞（撞了会被去重掉一个）。
     #[test]
-    fn the_two_entry_points_have_distinct_dedup_keys() {
+    fn model_entries_have_distinct_dedup_keys() {
         let items = get_model_palette_items(
             &["a".to_string()],
             "a",
@@ -2433,8 +2458,13 @@ mod tests {
         let mut merged = Vec::new();
         push_unique_actionable_items(&mut merged, &mut seen, items);
 
-        assert!(merged.iter().any(|i| i.id == "type_model"));
         assert!(merged.iter().any(|i| i.id == "refresh_models"));
+        assert_eq!(
+            seen.len(),
+            merged.len(),
+            "去重后条目数应当不变：{:?}",
+            merged.iter().map(|i| &i.id).collect::<Vec<_>>()
+        );
     }
 
     /// provider 选项页的"改"只有 Edit Provider 一个入口（旧的 Set API Key +

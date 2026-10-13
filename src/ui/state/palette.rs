@@ -81,8 +81,6 @@ pub enum PaletteAction {
     OpenProviderForm,
     /// 删除一个自定义 provider（内置 provider 不可删）
     DeleteProvider(String),
-    /// 手动输入模型名：打开输入框，不发任何网络请求
-    InputModelName,
     /// 显式刷新模型列表（跳过缓存，扇出到所有已配置 provider）
     RefreshModels,
     OpenMcpModal,    // open the unified /mcp manager modal
@@ -92,8 +90,6 @@ pub enum PaletteAction {
 #[derive(Debug, Clone)]
 pub enum InputContext {
     ContextWindow,
-    /// 手动录入模型名（不校验、不联网，直接切过去）
-    ModelName,
     /// 单面板"新增 provider"表单。数据在 `ChatState::provider_form` 里，
     /// 这里只是 input-modal 走哪种提交逻辑的标记。
     ProviderForm,
