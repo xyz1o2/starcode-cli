@@ -64,6 +64,24 @@ fn terminal_owned_by_ui_loop() -> bool {
     UI_LOOP_STARTED.load(Ordering::Relaxed)
 }
 
+/// UI processing 看门狗的静默上限（秒）。
+///
+/// 此前写死 30s —— 那是**模型出首 token 的正常等待量级**，不是"agent 死了"的
+/// 量级：agent 侧自己的下限就是 `STAR_LLM_TIMEOUT`（默认 120s）的整段请求，
+/// 首轮还要叠上冷缓存与���下文重建。于是每逢一个慢回合，UI 在第 30 秒就把
+/// `is_processing` 清掉、spinner 停转、并写下 "✓ Done (timeout)" —— 而 agent
+/// 还在干活。用户看到的就是"计时器还在走、界面上什么都没有"，等第一个 chunk
+/// 到达时所有内容又整块冒出来。
+///
+/// 现在只保留它真正的用途：agent 侧彻底失联（既没有 Done 也没有 Error）时把 UI
+/// 救回来。阈值取到 10 分钟，与确认窗口同量级，且可由 `STAR_UI_STALL_SECS` 覆盖。
+fn ui_stall_limit_secs() -> u64 {
+    std::env::var("STAR_UI_STALL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600)
+}
+
 /// 返回需要因流输出停滞而结束 UI processing 的秒数。
 ///
 /// 已登记的工具仍由执行器和 `ToolResult` 负责生命周期，不能被纯 UI 空闲计时误判为完成。
@@ -73,7 +91,7 @@ fn stalled_processing_secs_without_active_tool(state: &ChatState) -> Option<u64>
     }
 
     let stall_secs = state.last_token_time?.elapsed().as_secs();
-    (stall_secs > 30).then_some(stall_secs)
+    (stall_secs > ui_stall_limit_secs()).then_some(stall_secs)
 }
 
 #[cfg(test)]
@@ -810,14 +828,20 @@ pub async fn run_ui_loop(
         // Done/Error、取消或执行器自身超时，不把 UI 空闲误报成完成。
         if let Some(stall_secs) = stalled_processing_secs_without_active_tool(state) {
             crate::utils::logging::append_debug_log_line(&format!(
-                "[STALL] is_processing stuck for {}s, auto-clearing",
+                "[STALL] no stream activity for {}s, releasing the UI spinner",
                 stall_secs
             ));
             state.is_processing = false;
             state.is_streaming = false;
             state.current_tool_name = None;
             state.end_thinking();
-            state.current_status_line = Some("✓ Done (timeout)".to_string());
+            // 不能写 "✓ Done"：走到这里只说明 UI 没等到信号，agent 是否还在跑
+            // 并不知道。谎报完成正是"界面上什么都不剩"的最后一环。
+            let zh = format!("⚠ 已静默 {stall_secs}s，回合可能卡住（Esc 可中断）");
+            let en = format!(
+                "⚠ No stream activity for {stall_secs}s — the turn may be stuck (Esc to interrupt)"
+            );
+            state.current_status_line = Some(crate::core::i18n::t("ui.status.stalled", &zh, &en));
         }
 
         // 后台轮询结果：`/loop` 与 `/remote` 的 I/O 跑在独立任务里（见

@@ -920,6 +920,19 @@ fn format_elapsed(secs: u64) -> String {
 }
 
 /// Build the styled status line as a Vec<Line> for full-page rendering.
+/// 本回合已经跑了多久（秒）。没有活跃回合时返回 `None`。
+///
+/// 只有 `is_processing` 为真才算"在跑"：`processing_started_at` 在每个回合开始时
+/// 刷新，但回合结束后仍然留着旧值，直接用它会让空闲会话一直显示上一回合的耗时。
+fn turn_elapsed_secs(state: &ChatState) -> Option<u64> {
+    if !state.is_processing {
+        return None;
+    }
+    state
+        .processing_started_at
+        .map(|t| t.elapsed().as_secs())
+}
+
 pub fn build_status_lines(state: &ChatState, width: u16) -> Vec<Line<'static>> {
     let spans: Vec<Span> = build_status_spans(state, width);
     if spans.is_empty() {
@@ -1111,10 +1124,18 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
 
     // ── 5. Cost + elapsed ────────────────────────────────────────────────────
     // 对标 Claude Code 状态栏的 running cost & duration。成本已由 stream.rs 累计
-    // 到 state.total_cost；耗时用会话创建时刻计算。成本为 0（尚未产生 usage）时
-    // 只显示耗时。
+    // 到 state.total_cost。成本为 0（尚未产生 usage）时只显示耗时。
+    //
+    // 计时口径：**回合进行中显示本回合耗时，回合之间显示会话时长**。
+    //
+    // 此前固定显示 `session_started_at` 的差值，也就是会话年龄。那是一个跟"现在
+    // 有没有在干活"毫无关系的数：用户看到它在跳，就把它当成了回合计时器，于是一
+    // 个卡住的回合看起来像"还在运行"，而真正在跑的回合反倒没有任何指示 —— 界面
+    // 上唯一在动的东西在说谎。
     if !compact {
-        let elapsed = format_elapsed(state.session_started_at.elapsed().as_secs());
+        let elapsed_secs = turn_elapsed_secs(state)
+            .unwrap_or_else(|| state.session_started_at.elapsed().as_secs());
+        let elapsed = format_elapsed(elapsed_secs);
         if state.total_cost > 0.0 {
             let cost_label = format!("${:.2}", state.total_cost);
             spans.push(sep());
