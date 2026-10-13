@@ -1640,18 +1640,16 @@ fn pick_fast_model(
 ) -> Option<crate::runtime::messages::RuntimeModelSelection> {
     const FAST_HINTS: [&str; 7] = ["mini", "flash", "lite", "fast", "small", "turbo", "instant"];
     let current_provider = state.current_provider_id.as_deref();
-    let belongs_to_current_provider = |model: &crate::types::ModelInfo| {
-        match current_provider {
-            Some(provider) => model.provider == provider,
-            None => true,
-        }
+    let belongs_to_current_provider = |model: &crate::types::ModelInfo| match current_provider {
+        Some(provider) => model.provider == provider,
+        None => true,
     };
 
     if let Some(configured) = configured_fast_model
         .map(str::trim)
         .filter(|model| !model.is_empty())
     {
-        return state
+        let matched = state
             .available_models_info
             .iter()
             .find(|model| model.id == configured && belongs_to_current_provider(model))
@@ -1659,6 +1657,11 @@ fn pick_fast_model(
                 model: model.id.clone(),
                 provider_id: Some(model.provider.clone()),
             });
+        if matched.is_some() {
+            return matched;
+        }
+        // 配的那个模型这个 provider 列表里没有。不在这里 return —— 否则下面
+        // 按名字猜的那条路永远走不到，用户配了个无效值就彻底没法 /fast 了。
     }
 
     state
@@ -1897,7 +1900,9 @@ mod runtime_settings_tests {
         // 同名两条：只能取当前 provider 那条。
         let picked = pick_fast_model(&state, Some("shared-name"));
         assert_eq!(
-            picked.and_then(|selection| selection.provider_id).as_deref(),
+            picked
+                .and_then(|selection| selection.provider_id)
+                .as_deref(),
             Some("provider-a")
         );
     }
