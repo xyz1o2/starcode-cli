@@ -84,6 +84,8 @@ pub enum ToolName {
     Brief,
     Workflow,
     Memory,
+    /// 模型自调自身运行期设置的工具，见 `core::self_tuning`。
+    SelfConfig,
 
     // MCP
     McpListServers,
@@ -176,6 +178,7 @@ impl ToolName {
             ToolName::Brief => "brief",
             ToolName::Workflow => "workflow",
             ToolName::Memory => "memory",
+            ToolName::SelfConfig => "self_config",
 
             // MCP
             ToolName::McpListServers => "mcp_list_servers",
@@ -255,6 +258,7 @@ impl ToolName {
             "brief" => Some(ToolName::Brief),
             "workflow" => Some(ToolName::Workflow),
             "memory" => Some(ToolName::Memory),
+            "self_config" => Some(ToolName::SelfConfig),
             "mcp_list_servers" => Some(ToolName::McpListServers),
             "mcp_list_tools" => Some(ToolName::McpListTools),
             "mcp_tool_info" => Some(ToolName::McpToolInfo),
@@ -338,6 +342,7 @@ impl ToolName {
             ToolName::Brief,
             ToolName::Workflow,
             ToolName::Memory,
+            ToolName::SelfConfig,
             // MCP
             ToolName::McpListServers,
             ToolName::McpListTools,

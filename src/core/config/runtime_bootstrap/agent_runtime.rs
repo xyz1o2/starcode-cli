@@ -164,6 +164,13 @@ fn register_agent_execution_tools(
     use crate::core::tools::snip::SnipTool;
     tool_registry.register_tool(Arc::new(SnipTool::new(config.clone())));
 
+    // ── Self-tuning ──────────────────────────────────────────
+    // 让模型在运行中调自己的运行期设置，见 `core::self_tuning`。
+    // 刻意**不进** CORE_TOOL_NAMES：常驻工具列表会持续诱导模型去调参数，而它
+    // 只该在确实观察到问题（上下文吃紧、输出被截断）时通过 tool_search 找到它。
+    use crate::core::tools::self_config::SelfConfigTool;
+    tool_registry.register_tool(Arc::new(SelfConfigTool::new(config.clone())));
+
     // ── PR Suggestions ───────────────────────────────────────
     use crate::core::tools::suggest_pr::SuggestBackgroundPRTool;
     tool_registry.register_tool(Arc::new(SuggestBackgroundPRTool::new(config.clone())));

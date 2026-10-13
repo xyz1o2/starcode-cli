@@ -93,6 +93,7 @@ fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str
         // 其他
         m.insert("ask_user_question", "askuserquestion");
         m.insert("snip", "snip");
+        m.insert("self_config", "selfconfig");
         m.insert("send_message", "sendmessage");
         m.insert("cron_create", "cron");
         m.insert("cron_list", "cron");

@@ -60,6 +60,15 @@ impl Storage {
         Self::global_star_dir().join("model-cache.json")
     }
 
+    /// 模型自调覆盖层的持久化落点，见 `core::self_tuning`。
+    ///
+    /// 刻意与 `settings.json` 分开：覆盖层是**运行中**生效的临时覆盖，
+    /// 而 `settings.json` 是用户的正式配置。让模型自调写进正式配置文件，
+    /// 会把一次会话内的临时决策变成用户的长期设置。
+    pub fn self_tuning_path() -> PathBuf {
+        Self::global_star_dir().join("self-tuning.json")
+    }
+
     pub fn user_commands_dir() -> PathBuf {
         Self::global_star_dir().join("commands")
     }

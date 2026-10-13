@@ -587,10 +587,9 @@ async fn handle_tool_confirmation_response(
                 _ => 180,
             };
 
-            let timeout_secs = std::env::var("STAR_TOOL_TIMEOUT_SECS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(default_timeout_secs);
+            let timeout_secs =
+                crate::core::self_tuning::u64_value("tools.confirmed_call_timeout_secs")
+                    .unwrap_or(default_timeout_secs);
 
             let exec_fut = agent.execute_tool(tool_call);
             match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), exec_fut).await

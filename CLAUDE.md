@@ -117,6 +117,19 @@ Settings live in `~/.star/settings.json` (global) and `./.star/settings.json` (p
 
 342 distinct `STAR_*` variables are read across the tree, almost always inline at the point of use (`std::env::var("STAR_…").ok().and_then(…).unwrap_or(default)`), with no central registry. When runtime behavior diverges from what the code appears to do, grep `STAR_` in that file. Frequently relevant: `STAR_API_KEY`, `STAR_BASE_URL`, `STAR_MODEL`, `STAR_CONTEXT_WINDOW`, `STAR_AUTO_COMPACT`, `STAR_LLM_TIMEOUT`, `STAR_TOOL_TIMEOUT_SECS`, `STAR_LOG_ENABLED`, `STAR_LOG_DIR`, `STAR_PROMPT_DIR`.
 
+### Ten of those knobs the model can now turn itself
+
+`core/self_tuning` adds an **override layer above env** for the settings that are read at the point of use or rebuilt per turn: the 8 compaction knobs (`agent/compact/mod.rs::from_env`), `tools.max_result_chars` (`result_budget.rs`), and `tools.confirmed_call_timeout_secs` (`control_requests.rs`). Resolution is `override > env > default`, so existing `STAR_*` configuration is untouched and still wins over defaults. The model's entry point is the `self_config` tool (`inspect` / `set` / `reset`).
+
+Four constraints, all deliberate:
+
+- **Only genuinely live knobs are listed.** `knobs.rs` admits a setting only if its read site parses on use. `STAR_LLM_TIMEOUT` is baked into `reqwest::Client`'s `.timeout()` and `Config`'s `context_window` is frozen in `Config::new` — giving the model a write surface for those would make it believe it had tuned something.
+- **No `std::env::set_var`.** tokio is multi-threaded, so writing process env from a tool races other threads' `getenv`. The `RwLock` table also keeps "the user set this" distinguishable from "the model set this", which `inspect` must report.
+- **`STAR_SELFTUNING_LOCKED`** (comma-separated keys) is an operator lock; the model cannot write a locked knob. Without it the override layer's "override wins" would silently defeat a value someone deliberately pinned.
+- **`STAR_SELFTUNING_MAX_SETS`** (default 12) caps successful writes per session. `reset` never spends budget, so a model can always undo a bad change.
+
+Model and context window are still **not** self-tunable: `agent_run.rs` freezes them into the per-message fresh `Agent` at turn start, so they apply to the next user message via the existing `RuntimeSettingsMutation` path. `inspect` lists them as read-only and points at `/model` and `/context`. Persisted overrides land in `~/.star/self-tuning.json` (`Storage::self_tuning_path`), deliberately **not** `settings.json` — a within-session adjustment should not become the user's permanent configuration.
+
 ### Debugging a TUI
 
 You cannot print — ratatui owns the terminal. File logging is **on by default** and writes to `.star/logs/starcode_debug.log` and `.star/logs/agent.log` via `utils::logging::{append_debug_log_line, append_agent_log_line}`; `STAR_LOG_DIR` relocates it and `STAR_LOG_ENABLED=0` disables it. Existing call sites tag lines `[Worker]`, `[AgentRuntime]`, `[INIT]`, `[UI]` — follow that.

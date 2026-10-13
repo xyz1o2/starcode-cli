@@ -33,11 +33,12 @@ fn overflow_dir() -> PathBuf {
         .join("tool-outputs")
 }
 
-/// 环境变量覆盖默认限制
+/// 自调覆盖或环境变量覆盖默认限制。
+///
+/// 走 `core::self_tuning`：本函数在每次工具产出结果时调用，因此模型在运行中
+/// 调 `tools.max_result_chars` 后，下一次结果就用新上限 —— 不用重启。
 fn env_max_result_size() -> Option<usize> {
-    std::env::var("STAR_MAX_TOOL_RESULT_SIZE")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
+    crate::core::self_tuning::usize_value("tools.max_result_chars")
 }
 
 /// 获取工具的默认结果大小限制

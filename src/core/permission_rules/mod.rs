@@ -92,7 +92,8 @@ impl PermissionRuleEngine {
             if let Ok(content) = std::fs::read_to_string(&project_rules) {
                 // 解析失败必须留下痕迹：这里的错误曾被 `let _ =` 吞掉，
                 // 手写规则文件一旦格式不对就静默失效，用户看不到任何提示。
-                if let Err(e) = self.load_rules_from_json_with_source(&content, RuleSource::Project) {
+                if let Err(e) = self.load_rules_from_json_with_source(&content, RuleSource::Project)
+                {
                     crate::utils::logging::append_debug_log_line(&format!(
                         "[Policy] Failed to parse {}: {}",
                         project_rules.display(),
@@ -105,7 +106,8 @@ impl PermissionRuleEngine {
         let project_toml = project_dir.join(".star").join("permissions.toml");
         if project_toml.exists() {
             if let Ok(content) = std::fs::read_to_string(&project_toml) {
-                if let Err(e) = self.load_rules_from_toml_with_source(&content, RuleSource::Project) {
+                if let Err(e) = self.load_rules_from_toml_with_source(&content, RuleSource::Project)
+                {
                     crate::utils::logging::append_debug_log_line(&format!(
                         "[Policy] Failed to parse {}: {}",
                         project_toml.display(),

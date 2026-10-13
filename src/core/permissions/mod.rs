@@ -226,7 +226,8 @@ mod tests {
         let rules_path: PathBuf = star_dir.join("permissions.json");
         let grants_path: PathBuf = star_dir.join("permission_grants.json");
 
-        let handwritten = r#"{"rules":[{"tool":"Bash","action":"deny","path":null,"priority":10}]}"#;
+        let handwritten =
+            r#"{"rules":[{"tool":"Bash","action":"deny","path":null,"priority":10}]}"#;
         std::fs::write(&rules_path, handwritten).expect("seed hand-written rules");
 
         // 用户点击"3. 永久允许"。

@@ -28,6 +28,11 @@ pub async fn build_runtime_services(
     config: &Config,
     existing_runtime: Option<&Arc<RuntimeServices>>,
 ) -> Result<RuntimeBootstrapArtifacts, Box<dyn std::error::Error>> {
+    // 读回模型上一轮自己调出来的覆盖值。这是交互与 headless 两条入口都会经过的
+    // 公共路径，所以自调的配置对两种模式同样跨会话存活。放在这里而不是 main.rs，
+    // 是因为 headless 路径不经过 main.rs 的那段初始化。
+    crate::core::self_tuning::overrides::load_persisted();
+
     let message_bus = existing_runtime
         .map(|runtime| runtime.message_bus())
         .unwrap_or_else(|| {

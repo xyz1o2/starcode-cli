@@ -52,71 +52,40 @@ impl Default for CompactConfig {
 }
 
 impl CompactConfig {
-    fn positive_env_tokens(name: &str) -> Option<usize> {
-        std::env::var(name)
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|tokens| *tokens > 0)
-    }
-
-    /// 从环境变量加载配置
+    /// 从环境变量与自调覆盖层加载配置。
+    ///
+    /// 走 `core::self_tuning` 而不是直接读 env，是为了让模型能在运行中改这些值：
+    /// 本函数由 `apply_runtime_snapshot` 每轮调用一次，所以覆盖层的写入会在
+    /// 当前进程的下一次迭代生效，不需要重启。解析语义与改造前逐项保持一致
+    /// （正整数过滤、"false"/"0" 为假、权重不设区间），因此用户既有的
+    /// `STAR_*` 配置行为不变。
     pub fn from_env() -> Self {
-        let max_tokens = Self::positive_env_tokens("STAR_COMPACT_MAX_TOKENS").unwrap_or(150_000);
-
-        let target_tokens =
-            Self::positive_env_tokens("STAR_COMPACT_TARGET_TOKENS").unwrap_or(100_000);
-
-        let auto_compact_enabled = std::env::var("STAR_AUTO_COMPACT_ENABLED")
-            .ok()
-            .map(|v| v.to_lowercase() != "false" && v != "0")
-            .unwrap_or(true);
-
-        let micro_compact_threshold = std::env::var("STAR_MICRO_COMPACT_THRESHOLD")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(100);
-
-        let semantic_relevance_enabled = std::env::var("STAR_SEMANTIC_RELEVANCE_ENABLED")
-            .ok()
-            .map(|v| v.to_lowercase() != "false" && v != "0")
-            .unwrap_or(true);
-
-        let recency_weight = std::env::var("STAR_COMPACT_RECENCY_WEIGHT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.4);
-
-        let relevance_weight = std::env::var("STAR_COMPACT_RELEVANCE_WEIGHT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.4);
-
-        let tool_result_weight = std::env::var("STAR_COMPACT_TOOL_RESULT_WEIGHT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.2);
+        use crate::core::self_tuning as tuning;
 
         Self {
-            max_tokens,
-            target_tokens,
-            auto_compact_enabled,
-            micro_compact_threshold,
-            semantic_relevance_enabled,
-            recency_weight,
-            relevance_weight,
-            tool_result_weight,
+            max_tokens: tuning::positive_usize("compact.max_tokens").unwrap_or(150_000),
+            target_tokens: tuning::positive_usize("compact.target_tokens").unwrap_or(100_000),
+            auto_compact_enabled: tuning::bool_value("compact.auto_enabled").unwrap_or(true),
+            micro_compact_threshold: tuning::usize_value("compact.micro_threshold").unwrap_or(100),
+            semantic_relevance_enabled: tuning::bool_value("compact.semantic_relevance")
+                .unwrap_or(true),
+            recency_weight: tuning::f64_value("compact.weight.recency").unwrap_or(0.4),
+            relevance_weight: tuning::f64_value("compact.weight.relevance").unwrap_or(0.4),
+            tool_result_weight: tuning::f64_value("compact.weight.tool_result").unwrap_or(0.2),
         }
     }
 
-    /// 以会话上下文策略为默认值构造压缩配置。显式环境变量依然优先，
-    /// 这样运维调优不会被一次 UI 选择悄悄覆盖。
+    /// 以会话上下文策略为默认值构造压缩配置。显式设置（自调覆盖或环境变量）
+    /// 依然优先，这样运维调优不会被一次 UI 选择悄悄覆盖。
     pub fn from_context_policy(
         policy: &crate::core::context_policy::ResolvedContextPolicy,
     ) -> Self {
+        use crate::core::self_tuning as tuning;
+
         let mut config = Self::from_env();
-        config.max_tokens = Self::positive_env_tokens("STAR_COMPACT_MAX_TOKENS")
+        config.max_tokens = tuning::positive_usize("compact.max_tokens")
             .unwrap_or(policy.compact_max_tokens as usize);
-        config.target_tokens = Self::positive_env_tokens("STAR_COMPACT_TARGET_TOKENS")
+        config.target_tokens = tuning::positive_usize("compact.target_tokens")
             .unwrap_or(policy.compact_target_tokens as usize);
         config
     }

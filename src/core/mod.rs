@@ -46,6 +46,7 @@ pub mod remote;
 pub mod remote_settings;
 pub mod sandbox;
 pub mod secure_storage;
+pub mod self_tuning;
 pub mod services;
 pub mod session_memory;
 pub mod session_persistence;
