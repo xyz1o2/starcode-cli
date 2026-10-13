@@ -56,211 +56,206 @@ const SPINNER_FRAMES_REV: &[&str] = &["○", "●", "○", "●"];
 /// Braille spinner frames for smoother animation
 const BRAILLE_SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// Random verbs matching Claude Code's spinner variety.
-/// 184 whimsical verbs for the thinking spinner.
+/// spinner 动词表。
+///
+/// 这一版直接采用 Claude Code 真实的 187 条（随 source map 泄露的 `getSpinnerVerbs`
+/// 全量），而不是此前那份「数量对齐、内容自造」的 200 条：程序化比对下来两者只有
+/// 49 条重合。那份表里有 16 个 Napping/Snoozing/Loafing 类的闲置动词（真实表只有
+/// Dilly-dallying 一个）、13 个 Reading/Compiling/Indexing 类的字面任务词（真实表刻意
+/// 不用——那是在编造一个并不存在的具体动作），外加 14 条重复项把 `hash % len` 的分布
+/// 打歪。
+///
+/// 换回真实表有两个实际收益：动词池的中心是「煞有介事地干活」而不是「闲着」，
+/// 一轮四分钟的长等待配 `Napping` 读起来像玩笑；以及 `Thinking` 在场——那是唯一
+/// 在任何时刻都不会说错的词。
 const SPINNER_VERBS: &[&str] = &[
-    // Core
-    "Working",
-    "Processing",
-    "Computing",
-    "Analyzing",
-    "Reasoning",
-    "Generating",
-    "Planning",
-    "Searching",
-    "Reading",
-    "Writing",
-    "Compiling",
-    "Executing",
-    "Validating",
-    "Optimizing",
-    "Indexing",
-    // Whimsical (Claude Code style)
-    "Cogitating",
-    "Percolating",
-    "Shenaniganing",
-    "Moonwalking",
-    "Ruminating",
-    "Pondering",
-    "Musing",
-    "Meditating",
-    "Contemplating",
-    "Deliberating",
-    "Pondering",
-    "Reflecting",
-    "Ruminating",
-    "Brooding",
-    "Considering",
-    "Weighing",
-    "Evaluating",
-    "Assessing",
-    "Investigating",
-    "Exploring",
-    "Discovering",
-    "Unraveling",
-    "Deciphering",
-    "Decoding",
-    "Interpreting",
-    "Synthesizing",
-    "Composing",
-    "Constructing",
-    "Assembling",
-    "Crafting",
-    "Forging",
-    "Fabricating",
-    "Manufacturing",
-    "Producing",
-    "Creating",
-    "Conjuring",
-    "Manifesting",
-    "Materializing",
-    "Crystallizing",
-    "Precipitating",
-    "Fermenting",
+    "Accomplishing",
+    "Actioning",
+    "Actualizing",
+    "Architecting",
+    "Baking",
+    "Beaming",
+    "Beboppin'",
+    "Befuddling",
+    "Billowing",
+    "Blanching",
+    "Bloviating",
+    "Boogieing",
+    "Boondoggling",
+    "Booping",
+    "Bootstrapping",
     "Brewing",
-    "Distilling",
-    "Refining",
-    "Polishing",
-    "Honing",
-    "Sharpening",
-    "Tempering",
-    "Annealing",
-    "Forging",
-    "Tinkering",
-    "Fiddling",
-    "Tweaking",
-    "Adjusting",
-    "Calibrating",
-    "Balancing",
-    "Harmonizing",
-    "Orchestrating",
-    "Conducting",
+    "Bunning",
+    "Burrowing",
+    "Calculating",
+    "Canoodling",
+    "Caramelizing",
+    "Cascading",
+    "Catapulting",
+    "Cerebrating",
+    "Channeling",
+    "Channelling",
     "Choreographing",
-    "Waltzing",
-    "Tangoing",
-    "Sambaing",
-    "Jiving",
-    "Grooving",
-    "Vibing",
-    "Flowing",
-    "Gliding",
-    "Soaring",
-    "Floating",
-    "Drifting",
-    "Wandering",
-    "Meandering",
-    "Rambling",
-    "Roaming",
-    "Adventuring",
-    "Exploring",
-    "Discovering",
-    "Uncovering",
-    "Revealing",
-    "Illuminating",
-    "Enlightening",
-    "Educating",
-    "Informing",
-    "Enlightening",
-    "Debugging",
-    "Squashing",
-    "Stomping",
-    "Eradicating",
-    "Eliminating",
-    "Vanquishing",
-    "Conquering",
-    "Defeating",
-    "Overcoming",
-    "Surmounting",
-    "Transcending",
-    "Surpassing",
-    "Excelling",
-    "Thriving",
-    "Flourishing",
-    "Blossoming",
-    "Blooming",
-    "Flowering",
-    "Sprouting",
-    "Growing",
-    "Evolving",
-    "Transforming",
-    "Metamorphosing",
-    "Transmuting",
-    "Alchemizing",
-    "Transmogrifying",
-    "Shape-shifting",
-    "Morphing",
-    "Adapting",
-    "Adjusting",
-    "Calibrating",
-    "Tuning",
-    "Synchronizing",
-    "Harmonizing",
-    "Balancing",
-    "Orchestrating",
-    "Conducting",
-    "Directing",
-    "Guiding",
-    "Steering",
-    "Navigating",
-    "Piloting",
-    "Captain-ing",
-    "Commanding",
-    "Leading",
-    "Following",
-    "Trailing",
-    "Tracking",
-    "Hunting",
-    "Stalking",
-    "Chasing",
-    "Pursuing",
-    "Following",
-    "Tailgating",
-    "Shadowing",
-    "Lurking",
-    "Skulking",
-    "Creeping",
-    "Sneaking",
-    "Sidling",
-    "Ambling",
-    "Sauntering",
-    "Strolling",
-    "Promenading",
-    "Parading",
-    "Marching",
-    "Striding",
-    "Swaggering",
-    "Strutting",
-    "Prancing",
-    "Cavorting",
-    "Frolicking",
-    "Gamboling",
-    "Romping",
-    "Playing",
-    "Fiddling",
-    "Twiddling",
-    "Futzing",
-    "Puttering",
-    "Pottering",
-    "Dawdling",
+    "Churning",
+    "Clauding",
+    "Coalescing",
+    "Cogitating",
+    "Combobulating",
+    "Composing",
+    "Computing",
+    "Concocting",
+    "Considering",
+    "Contemplating",
+    "Cooking",
+    "Crafting",
+    "Creating",
+    "Crunching",
+    "Crystallizing",
+    "Cultivating",
+    "Deciphering",
+    "Deliberating",
+    "Determining",
     "Dilly-dallying",
-    "Lollygagging",
-    "Loafing",
-    "Lazing",
-    "Lounging",
-    "Lolling",
-    "Sprawling",
-    "Reclining",
-    "Resting",
-    "Napping",
-    "Snoozing",
-    "Dozing",
-    "Dreaming",
-    "Fantasizing",
-    "Imagining",
+    "Discombobulating",
+    "Doing",
+    "Doodling",
+    "Drizzling",
+    "Ebbing",
+    "Effecting",
+    "Elucidating",
+    "Embellishing",
+    "Enchanting",
     "Envisioning",
-    "Visualizing",
-    "Picturing",
-    "Conceiving",
+    "Evaporating",
+    "Fermenting",
+    "Fiddle-faddling",
+    "Finagling",
+    "Flambéing",
+    "Flibbertigibbeting",
+    "Flowing",
+    "Flummoxing",
+    "Fluttering",
+    "Forging",
+    "Forming",
+    "Frolicking",
+    "Frosting",
+    "Gallivanting",
+    "Galloping",
+    "Garnishing",
+    "Generating",
+    "Gesticulating",
+    "Germinating",
+    "Gitifying",
+    "Grooving",
+    "Gusting",
+    "Harmonizing",
+    "Hashing",
+    "Hatching",
+    "Herding",
+    "Honking",
+    "Hullaballooing",
+    "Hyperspacing",
+    "Ideating",
+    "Imagining",
+    "Improvising",
+    "Incubating",
+    "Inferring",
+    "Infusing",
+    "Ionizing",
+    "Jitterbugging",
+    "Julienning",
+    "Kneading",
+    "Leavening",
+    "Levitating",
+    "Lollygagging",
+    "Manifesting",
+    "Marinating",
+    "Meandering",
+    "Metamorphosing",
+    "Misting",
+    "Moonwalking",
+    "Moseying",
+    "Mulling",
+    "Mustering",
+    "Musing",
+    "Nebulizing",
+    "Nesting",
+    "Newspapering",
+    "Noodling",
+    "Nucleating",
+    "Orbiting",
+    "Orchestrating",
+    "Osmosing",
+    "Perambulating",
+    "Percolating",
+    "Perusing",
+    "Philosophising",
+    "Photosynthesizing",
+    "Pollinating",
+    "Pondering",
+    "Pontificating",
+    "Pouncing",
+    "Precipitating",
+    "Prestidigitating",
+    "Processing",
+    "Proofing",
+    "Propagating",
+    "Puttering",
+    "Puzzling",
+    "Quantumizing",
+    "Razzle-dazzling",
+    "Razzmatazzing",
+    "Recombobulating",
+    "Reticulating",
+    "Roosting",
+    "Ruminating",
+    "Sautéing",
+    "Scampering",
+    "Schlepping",
+    "Scurrying",
+    "Seasoning",
+    "Shenaniganing",
+    "Shimmying",
+    "Simmering",
+    "Skedaddling",
+    "Sketching",
+    "Slithering",
+    "Smooshing",
+    "Sock-hopping",
+    "Spelunking",
+    "Spinning",
+    "Sprouting",
+    "Stewing",
+    "Sublimating",
+    "Swirling",
+    "Swooping",
+    "Symbioting",
+    "Synthesizing",
+    "Tempering",
+    "Thinking",
+    "Thundering",
+    "Tinkering",
+    "Tomfoolering",
+    "Topsy-turvying",
+    "Transfiguring",
+    "Transmuting",
+    "Twisting",
+    "Undulating",
+    "Unfurling",
+    "Unravelling",
+    "Vibing",
+    "Waddling",
+    "Wandering",
+    "Warping",
+    "Whatchamacalliting",
+    "Whirlpooling",
+    "Whirring",
+    "Whisking",
+    "Wibbling",
+    "Working",
+    "Wrangling",
+    "Zesting",
+    "Zigzagging",
 ];
 
 /// 返回一个随机动词（用于 Claude Code 风格的 thinking spinner）
@@ -277,23 +272,74 @@ pub fn random_spinner_verb() -> &'static str {
     SPINNER_VERBS[idx]
 }
 
-/// Stall detection threshold (seconds)
-const STALL_THRESHOLD_SECS: u64 = 3;
-/// Stall transition duration (seconds)
-const STALL_TRANSITION_SECS: u64 = 2;
+/// 静默多久之后开始"变暖"（秒）。
+///
+/// 对标 Claude Code v2.1.138 的 changelog："the spinner now warms to amber after
+/// 10 seconds to signal Claude is still working"。语义是**安慰**——告诉用户模型
+/// 还在算，不是在报警。
+///
+/// 此前这里是 3 秒、且直接插值到错误红。5 秒就变红的后果是它恒定触发：思考段落
+/// 之间静默几十秒是常态，首 token 等一分钟更常见，于是整轮几乎全程红字加一句
+/// "press Ctrl+C to cancel"。红色一旦成了默认状态就不再携带任何信息 —— 用户既
+/// 分不清"在跑"和"卡死"，也会在真正卡死时不再当回事。
+const WARMUP_THRESHOLD_SECS: u64 = 10;
+/// 变暖到满格所需时间（秒）。10s 起、25s 满，之后一直保持。
+const WARMUP_TRANSITION_SECS: u64 = 15;
 
-/// Get elapsed time color: green < 5s, yellow < 15s, red >= 15s
-fn elapsed_color(secs: u64) -> Color {
-    if secs < 5 {
-        Color::Rgb(80, 220, 100) // Green
-    } else if secs < 15 {
-        Color::Rgb(255, 200, 50) // Yellow
-    } else {
-        Color::Rgb(255, 80, 80) // Red
+/// 工具执行 stall 阈值（秒）。
+///
+/// 工具确有硬上限（`control_requests.rs` 的 240/120/180 分档），所以工具侧可以
+/// 保留真正的报警：超过 60 秒仍未结束才算异常。
+const TOOL_STALL_WARN_SECS: u64 = 30;
+const TOOL_STALL_FULL_SECS: u64 = 60;
+
+/// 当前正在执行的工具迟迟不结束时，报警强度 0.0–1.0。无工具时恒为 0。
+fn tool_stall_intensity(tool_started_at: Option<std::time::Instant>, animation_tick: u64) -> f64 {
+    let Some(started) = tool_started_at else {
+        return 0.0;
+    };
+    let elapsed = started.elapsed().as_secs();
+    if elapsed < TOOL_STALL_WARN_SECS {
+        return 0.0;
+    }
+    let span = (TOOL_STALL_FULL_SECS - TOOL_STALL_WARN_SECS).max(1) as f64;
+    let progress = ((elapsed - TOOL_STALL_WARN_SECS) as f64 / span).min(1.0);
+    let pulse = (animation_tick as f64 * 0.15).sin() * 0.1;
+    (progress + pulse).clamp(0.0, 1.0)
+}
+
+/// 等待模型出下一个 token 时的"变暖"强度 0.0–1.0。
+///
+/// 只表示"还在等"，不表示"出问题"。这是本轮修复的核心：把长等待从报警通道
+/// 挪进安抚通道，红色重新留给真正的异常。
+fn warmup_intensity(last_token_time: Option<std::time::Instant>, animation_tick: u64) -> f64 {
+    let Some(last) = last_token_time else {
+        return 0.0;
+    };
+    let silent = last.elapsed().as_secs();
+    if silent < WARMUP_THRESHOLD_SECS {
+        return 0.0;
+    }
+    let progress =
+        ((silent - WARMUP_THRESHOLD_SECS) as f64 / WARMUP_TRANSITION_SECS as f64).min(1.0);
+    let pulse = (animation_tick as f64 * 0.1).sin() * 0.08;
+    (progress + pulse).clamp(0.0, 1.0)
+}
+
+/// Interpolate between two colors based on factor (0.0 = a, 1.0 = b)
+fn lerp_color(a: Color, b: Color, factor: f64) -> Color {
+    let factor = factor.clamp(0.0, 1.0);
+    match (a, b) {
+        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => Color::Rgb(
+            (ar as f64 + (br as f64 - ar as f64) * factor) as u8,
+            (ag as f64 + (bg as f64 - ag as f64) * factor) as u8,
+            (ab as f64 + (bb as f64 - ab as f64) * factor) as u8,
+        ),
+        _ => b,
     }
 }
 
-/// Generate a pulse opacity effect based on animation tick (returns 0.0-1.0 range mapped to color intensity)
+/// 呼吸脉动：在 0.7–1.0 之间明暗循环，给静息状态一点生命感。
 fn pulse_color(base: Color, tick: u64, speed: u64) -> Color {
     let phase = (tick / speed) % 6;
     let intensity = match phase {
@@ -314,19 +360,6 @@ fn pulse_color(base: Color, tick: u64, speed: u64) -> Color {
     }
 }
 
-/// Interpolate between two colors based on factor (0.0 = a, 1.0 = b)
-fn lerp_color(a: Color, b: Color, factor: f64) -> Color {
-    let factor = factor.clamp(0.0, 1.0);
-    match (a, b) {
-        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => Color::Rgb(
-            (ar as f64 + (br as f64 - ar as f64) * factor) as u8,
-            (ag as f64 + (bg as f64 - ag as f64) * factor) as u8,
-            (ab as f64 + (bb as f64 - ab as f64) * factor) as u8,
-        ),
-        _ => b,
-    }
-}
-
 /// Build a progress bar string for long operations (shows elapsed / expected)
 fn progress_bar_str(tick: u64, width: usize) -> String {
     let pos = (tick as usize / 2) % (width * 2);
@@ -344,59 +377,44 @@ fn progress_bar_str(tick: u64, width: usize) -> String {
     bar
 }
 
-/// Calculate stall intensity (0.0 = normal, 1.0 = fully stalled)
-fn stall_intensity(
-    is_streaming: bool,
-    last_token_time: Option<std::time::Instant>,
-    has_active_tools: bool,
-    tool_started_at: Option<std::time::Instant>,
-    animation_tick: u64,
-) -> f64 {
-    if !is_streaming {
-        return 0.0;
-    }
-
-    // LLM stream stall detection (no active tools)
-    if !has_active_tools {
-        let Some(last_time) = last_token_time else {
-            return 0.0;
-        };
-        let elapsed = last_time.elapsed().as_secs();
-        if elapsed < STALL_THRESHOLD_SECS {
-            return 0.0;
-        }
-        let stall_progress =
-            ((elapsed - STALL_THRESHOLD_SECS) as f64 / STALL_TRANSITION_SECS as f64).min(1.0);
-        let pulse = (animation_tick as f64 * 0.1).sin() * 0.1;
-        return (stall_progress + pulse).clamp(0.0, 1.0);
-    }
-
-    // Tool execution stall detection (tool running too long)
-    if let Some(started) = tool_started_at {
-        let elapsed = started.elapsed().as_secs();
-        // Warn after 30 seconds, fully stalled after 60 seconds
-        if elapsed >= 30 {
-            let stall_progress = ((elapsed - 30) as f64 / 30.0).min(1.0);
-            let pulse = (animation_tick as f64 * 0.15).sin() * 0.1;
-            return (stall_progress + pulse).clamp(0.0, 1.0);
-        }
-    }
-
-    0.0
-}
-
 /// 返回仍在执行的工具中最后开始的时间，作为工具状态的权威来源。
 fn latest_active_tool_started_at(state: &ChatState) -> Option<std::time::Instant> {
     state.tool_started_at.values().max().copied()
 }
 
-/// Get spinner color with stall detection
-fn spinner_color_with_stall(base_color: Color, stall: f64, animation_tick: u64) -> Color {
-    let stalled_color = Color::Rgb(171, 43, 63); // ERROR_RED from Claude Code
+/// spinner 字形的颜色。
+///
+/// 三段语义，和 Claude Code 对齐：
+/// - 正常：主题色 + 轻微脉动
+/// - 变暖（静默 ≥10s，无工具在跑）：琥珀色，含义是"还在算"
+/// - 报警（有工具超 60s 未结束）：错误红，含义才是"可能卡住"
+///
+/// 顺序很重要：工具报警压过变暖。反过来会让"正在跑一个 4 分钟的构建"显示成
+/// 琥珀安抚色，而那个构建恰恰是最该让人知道它在占着资源的情况。
+fn spinner_color(base_color: Color, warmup: f64, stall: f64, animation_tick: u64) -> Color {
+    const WARM_COLOR: Color = Color::Rgb(222, 160, 40);
+    const STALLED_COLOR: Color = Color::Rgb(171, 43, 63); // ERROR_RED from Claude Code
+
+    // 顺序即优先级：工具报警压过变暖。反过来会让"正在跑一个 4 分钟的构建"显示成
+    // 琥珀安抚色，而那个构建恰恰是最该让人知道它在占着资源的情况。
     if stall > 0.0 {
-        lerp_color(base_color, stalled_color, stall)
+        lerp_color(base_color, STALLED_COLOR, stall)
+    } else if warmup > 0.0 {
+        lerp_color(base_color, WARM_COLOR, warmup)
     } else {
         pulse_color(base_color, animation_tick, 3)
+    }
+}
+
+/// 文字类 span 的颜色：只有工具真报警时才偏红，变暖不参与。
+///
+/// 变暖只染 spinner 字形 —— 整行文字一起变琥珀会和确认卡、错误提示撞色，
+/// 反而削弱了 spinner 本身的信号强度。
+fn text_color(normal: Color, stall: f64) -> Color {
+    if stall > 0.0 {
+        lerp_color(normal, Color::Rgb(171, 43, 63), stall * 0.7)
+    } else {
+        normal
     }
 }
 
@@ -551,22 +569,68 @@ fn in_progress_todo_verb(state: &ChatState) -> Option<String> {
 
 /// 状态行上显示打断提示的最小宽度，避免在窄终端挤掉核心状态。
 const INTERRUPT_HINT_MIN_WIDTH: u16 = 72;
-const LONG_THINKING_INTERRUPT_THRESHOLD_SECS: u64 = 20;
 
-/// 已有更明确的取消文案时，避免同时显示两种快捷键提示。
-fn existing_interrupt_guidance_visible(state: &ChatState, stall: f64) -> bool {
-    state
-        .thinking_started_at
-        .is_some_and(|started| started.elapsed().as_secs() > LONG_THINKING_INTERRUPT_THRESHOLD_SECS)
-        || (stall > 0.3 && state.current_tool_name.is_some())
-}
+/// 中断提示文案。
+///
+/// 全行**只有这一个**中断提示。此前同一行上并存三套说法——`Esc to interrupt`、
+/// 以及两处 `press Ctrl+C to cancel`——它们互斥显示，取决于"思考是否超过 20 秒"
+/// 和"工具是否 stall"这类与功能无关的时间条件，等于让用户凭猜决定按哪个键。
+///
+/// 两个键其实都生效（`input.rs` 的 Esc 与 Ctrl+C 都发 `AgentRequest::Abort`），
+/// 所以这不是能力问题而是文案问题。这里统一采用 Claude Code 的写法：小写
+/// `esc`，放在行尾当 footer 提示（官方 statusline 文档把 `esc to interrupt`
+/// 归在 "footer keyboard hints" 一类）。
+const INTERRUPT_HINT: &str = " · esc to interrupt";
 
-/// 仅在正常活跃请求中显示简洁的中断提示；已经展示更强的 stall 指引时不重复。
-fn interrupt_hint(state: &ChatState, width: u16, stall: f64) -> Option<&'static str> {
-    (state.is_processing
-        && width >= INTERRUPT_HINT_MIN_WIDTH
-        && !existing_interrupt_guidance_visible(state, stall))
-    .then_some(" · Esc to interrupt")
+/// 这批状态文案和 spinner 动词说的是同一件事，显示出来只会变成两层废话。
+/// 真正带信息量的（preflight、checkpoint、取消、卡住）不在此列。
+///
+/// 匹配用"整串相等"而不是前缀：`Status: running preflight checks` 以
+/// `Status: running` 开头，但它恰恰是最该显示的一条。用前缀匹配会把它一起吞掉。
+const REDUNDANT_STATUS_LINES: &[&str] = &[
+    "status: processing request",
+    "status: processing",
+    "status: starting",
+    "status: ",
+    "状态：处理中",
+    "状态：",
+];
+
+/// `current_status_line` 里值得显示的部分。
+///
+/// 这个字段全仓有 40 多处写入（runtime 的 preflight / checkpoint / 取消、
+/// input 的复制与主题切换、UI 自己的 stall 提示），但在此之前**没有任何渲染消费
+/// 它**——唯一能显示它的 `status_line_text` 没有调用点。于是所有「正在做什么」的
+/// 提示都落进了黑洞，用户只能看到转圈和一个词。
+///
+/// 这一行是它天然的位置：用户盯着的就是这里。带 `Status: ` 前缀的先剥掉——前缀
+/// 在这个上下文里没有信息量，真正起作用的是后面的内容。
+fn status_suffix(state: &ChatState, width: u16) -> Option<String> {
+    let raw = state.current_status_line.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let lowered = raw.to_lowercase();
+    if REDUNDANT_STATUS_LINES.contains(&lowered.as_str()) {
+        return None;
+    }
+    let stripped = raw
+        .strip_prefix("Status: ")
+        .or_else(|| raw.strip_prefix("Status："))
+        .unwrap_or(raw)
+        .trim();
+    if stripped.is_empty() {
+        return None;
+    }
+    // 这行前面已经有「动词 + 耗时 + 工具名」，状态只剩很窄的预算。挤掉核心信息
+    // 宁可不给。
+    let budget = (width as usize).saturating_sub(24);
+    if budget < 8 {
+        return None;
+    }
+    Some(crate::ui::utils::render::truncate_to_display_width(
+        stripped, budget,
+    ))
 }
 
 /// Render a spinner line above the input area.
@@ -600,39 +664,26 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
         Some(ref v) => v,
         None => turn_spinner_verb(state),
     };
-    let e_color = elapsed_color(elapsed);
 
-    // Stall detection with smooth transition. Tool IDs, not the optional display
-    // label, are authoritative: parallel tool completion must not hide siblings.
+    // 两个信号各司其职：`warmup` 是"还在算"，`stall` 是"工具可能卡住"。
+    // 工具 ID 而不是显示标签才是权威来源——并行工具完成时不能把兄弟项藏掉。
     let current_tool_started = latest_active_tool_started_at(state);
-    let has_active_tools = current_tool_started.is_some();
-    let stall = stall_intensity(
-        state.is_streaming,
-        state.last_token_time,
-        has_active_tools,
-        current_tool_started,
-        state.animation_tick,
-    );
-
-    // 获取当前主题颜色
-    let theme = state.theme_manager.current();
-
-    // Spinner color with stall detection
-    let base_spinner_color = theme.warning; // 使用主题的 warning 颜色作为 spinner 基色
-    let spinner_color = spinner_color_with_stall(base_spinner_color, stall, state.animation_tick);
-
-    // Message color dims when stalled (smooth transition)
-    let base_msg_color = theme.secondary;
-    let stalled_msg_color = theme.error;
-    let message_color = if stall > 0.0 {
-        lerp_color(base_msg_color, stalled_msg_color, stall * 0.7)
+    let stall = if state.is_streaming {
+        tool_stall_intensity(current_tool_started, state.animation_tick)
     } else {
-        base_msg_color
+        0.0
+    };
+    let warmup = if state.is_streaming && current_tool_started.is_none() {
+        warmup_intensity(state.last_token_time, state.animation_tick)
+    } else {
+        0.0
     };
 
-    // Shimmer effect on verb text (Claude Code style)
-    let shimmer_color = theme.secondary_shimmer; // 使用主题的 shimmer 颜色
+    let theme = state.theme_manager.current();
+    let spinner_color = spinner_color(theme.warning, warmup, stall, state.animation_tick);
     let dim_color = theme.secondary;
+    let message_color = text_color(dim_color, stall);
+    let shimmer_color = theme.secondary_shimmer;
 
     let mut spans = vec![Span::styled(
         format!(" {} ", spinner),
@@ -640,10 +691,9 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
     )];
 
     // Render verb with shimmer effect
-    let shimmer_seg = shimmer_segments(verb, state.animation_tick);
-    for (text, is_shimmer) in shimmer_seg {
+    for (text, is_shimmer) in shimmer_segments(verb, state.animation_tick) {
         let color = if stall > 0.5 {
-            lerp_color(dim_color, stalled_msg_color, stall * 0.5)
+            lerp_color(dim_color, theme.error, stall * 0.5)
         } else if is_shimmer {
             shimmer_color
         } else {
@@ -653,19 +703,42 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
     }
     spans.push(Span::styled("… ", Style::default().fg(dim_color)));
 
-    // Elapsed time with smooth color transition
-    let e_color_smooth = if stall > 0.0 {
-        lerp_color(e_color, theme.error, stall * 0.5)
-    } else {
-        e_color
-    };
+    // 耗时只跟着「真报警」变色。曾经这里是绿/黄/红三档、15 秒必红——而回合时长
+    // 本身不是异常信号，一个四分钟的构建不该因为"耗时超过 15 秒"就显示成红色。
     spans.push(Span::styled(
         format_elapsed(elapsed),
-        Style::default().fg(e_color_smooth),
+        Style::default().fg(text_color(theme.inactive, stall)),
     ));
 
-    if let Some(hint) = interrupt_hint(state, width, stall) {
-        spans.push(Span::styled(hint, Style::default().fg(theme.inactive)));
+    // 当前工具。静默等待确认时工具名后面不再追加任何按键提示：Esc 的用法在行尾
+    // 已经写明了，再补一句 Ctrl+C 只会让人以为两者不等价。
+    if let Some(tool_name) = state.current_tool_name.as_ref() {
+        let tool_color = if stall > 0.5 {
+            lerp_color(theme.info, theme.error, stall * 0.5)
+        } else {
+            pulse_color(theme.info, state.animation_tick, 4)
+        };
+        let short: String = tool_name.chars().take(30).collect();
+        let label = if tool_name.chars().count() > 30 {
+            format!(" · {}...", short)
+        } else {
+            format!(" · {}", short)
+        };
+        spans.push(Span::styled(label, Style::default().fg(tool_color)));
+    }
+
+    if let Some(status) = status_suffix(state, width) {
+        spans.push(Span::styled(
+            format!(" · {status}"),
+            Style::default().fg(message_color),
+        ));
+    }
+
+    if width >= INTERRUPT_HINT_MIN_WIDTH {
+        spans.push(Span::styled(
+            INTERRUPT_HINT,
+            Style::default().fg(theme.inactive),
+        ));
     }
 
     // Show thinking state with sine wave opacity
@@ -673,22 +746,15 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
         let thinking_secs = thinking_start.elapsed().as_secs();
         // Sine wave opacity for thinking indicator (Claude Code style)
         let thinking_opacity = ((state.animation_tick as f64 * 0.05).sin() + 1.0) / 2.0;
-        // Change color to red when thinking exceeds 20 seconds
-        let thinking_color = if thinking_secs > LONG_THINKING_INTERRUPT_THRESHOLD_SECS {
-            lerp_color(theme.error, theme.error_shimmer, thinking_opacity)
-        } else {
-            lerp_color(theme.secondary, theme.secondary_shimmer, thinking_opacity)
-        };
-        let thinking_label = if thinking_secs > LONG_THINKING_INTERRUPT_THRESHOLD_SECS {
-            format!(
-                " · thinking {} (press Ctrl+C to cancel)",
-                format_elapsed(thinking_secs)
-            )
-        } else {
-            format!(" · thinking {}", format_elapsed(thinking_secs))
-        };
+        // 思考中只用呼吸明暗，不转红、不追加任何按键提示。
+        //
+        // 此前这里是「超过 20 秒转红 + (press Ctrl+C to cancel)」：思考 20 秒是
+        // 常态而非异常，于是整轮几乎必然显示成"红色 + 让你取消"，而且和行尾的
+        // `Esc to interrupt` 互相矛盾。真正需要提醒的长时间思考，聊天区的
+        // `∴ Thought for 4m 4s` 折叠头已经承担了。
+        let thinking_color = lerp_color(theme.secondary, theme.secondary_shimmer, thinking_opacity);
         spans.push(Span::styled(
-            thinking_label,
+            format!(" · thinking {}", format_elapsed(thinking_secs)),
             Style::default().fg(thinking_color),
         ));
     } else if let Some((think_secs, finished_at)) = state.thinking_finished {
@@ -919,7 +985,6 @@ fn format_elapsed(secs: u64) -> String {
     }
 }
 
-/// Build the styled status line as a Vec<Line> for full-page rendering.
 /// 本回合已经跑了多久（秒）。没有活跃回合时返回 `None`。
 ///
 /// 只有 `is_processing` 为真才算"在跑"：`processing_started_at` 在每个回合开始时
@@ -931,6 +996,7 @@ fn turn_elapsed_secs(state: &ChatState) -> Option<u64> {
     state.processing_started_at.map(|t| t.elapsed().as_secs())
 }
 
+/// Build the styled status line as a Vec<Line> for full-page rendering.
 pub fn build_status_lines(state: &ChatState, width: u16) -> Vec<Line<'static>> {
     let spans: Vec<Span> = build_status_spans(state, width);
     if spans.is_empty() {
@@ -1502,16 +1568,26 @@ mod tests {
     #[test]
     fn interrupt_hint_requires_a_wide_active_request() {
         let mut state = ChatState::new();
-        assert_eq!(interrupt_hint(&state, 120, 0.0), None);
+        assert!(processing_spinner_line(&state, 120).is_empty());
 
         state.is_processing = true;
-        assert_eq!(
-            interrupt_hint(&state, INTERRUPT_HINT_MIN_WIDTH, 0.0),
-            Some(" · Esc to interrupt")
-        );
-        assert_eq!(
-            interrupt_hint(&state, INTERRUPT_HINT_MIN_WIDTH - 1, 0.0),
-            None
+        let wide: String = processing_spinner_line(&state, INTERRUPT_HINT_MIN_WIDTH)[1]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(wide.contains("esc to interrupt"));
+
+        // 窄终端只丢提示，动词和耗时必须还在。
+        let narrow: String = processing_spinner_line(&state, INTERRUPT_HINT_MIN_WIDTH - 1)[1]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(!narrow.contains("esc to interrupt"));
+        assert!(
+            narrow.contains('…'),
+            "窄终端不该把动词和耗时一起丢掉：{narrow:?}"
         );
     }
 
@@ -1543,36 +1619,226 @@ mod tests {
         assert_eq!(turn_elapsed_secs(&state), None);
     }
 
+    /// 回归：整行只允许存在**一个**中断提示，且措辞统一为 `esc to interrupt`。
+    ///
+    /// 修复前同一行上并存三套说法——`Esc to interrupt` 和两处
+    /// `press Ctrl+C to cancel`——它们互斥显示，切换条件是"思考是否超过 20 秒"
+    /// 和"工具是否 stall"，与功能无关。两个键其实都发 `AgentRequest::Abort`，
+    /// 所以用户实际只需要知道一个。
     #[test]
-    fn interrupt_hint_yields_to_existing_long_thinking_or_stall_guidance() {
-        let mut state = ChatState::new();
-        state.is_processing = true;
-        state.thinking_started_at = Some(
-            std::time::Instant::now()
-                - std::time::Duration::from_secs(LONG_THINKING_INTERRUPT_THRESHOLD_SECS + 1),
-        );
-        assert_eq!(interrupt_hint(&state, 120, 0.0), None);
+    fn spinner_line_carries_one_interrupt_hint_in_one_wording() {
+        for (label, tool, thinking) in [
+            ("idle", None, false),
+            ("thinking", None, true),
+            ("running tool", Some("Bash"), false),
+            ("stalled tool", Some("Bash"), true),
+        ] {
+            let mut state = ChatState::new();
+            state.is_processing = true;
+            state.current_tool_name = tool.map(|t| t.to_string());
+            if thinking {
+                state.thinking_started_at =
+                    Some(std::time::Instant::now() - std::time::Duration::from_secs(300));
+            }
+            if let Some(name) = tool {
+                state.tool_started_at.insert(
+                    name.to_string(),
+                    std::time::Instant::now() - std::time::Duration::from_secs(90),
+                );
+            }
 
-        state.thinking_started_at = None;
-        state.current_tool_name = Some("Read".to_string());
-        assert_eq!(interrupt_hint(&state, 120, 0.4), None);
+            let text: String = processing_spinner_line(&state, 120)[1]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+
+            assert_eq!(
+                text.matches("esc to interrupt").count(),
+                1,
+                "{label}: 中断提示必须恰好出现一次，实际 {text:?}"
+            );
+            assert!(
+                !text.contains("Ctrl+C"),
+                "{label}: 不该再出现 Ctrl+C 提示，实际 {text:?}"
+            );
+            assert!(
+                !text.contains("Esc to interrupt"),
+                "{label}: 大写 Esc 的旧措辞应已废弃，实际 {text:?}"
+            );
+        }
     }
 
+    /// 回归：长时间静默是"还在算"，不是"卡住了"。
+    ///
+    /// 此前 stall 判定 3 秒起跳、5 秒插值到满红，并附带一句
+    /// `press Ctrl+C to cancel`。思考段落之间静默几十秒是常态，首 token 等一分钟
+    /// 更常见，于是整轮几乎全程红字 —— 红色成了默认状态，也就不再携带信息，
+    /// 用户既分不清"在跑"和"卡死"，真卡死时也不会当回事。
+    ///
+    /// 对标 Claude Code v2.1.138 changelog："the spinner now warms to amber after
+    /// 10 seconds to signal Claude is still working"。关键是**琥珀**，且只染
+    /// spinner 字形，不染文字。
     #[test]
-    fn spinner_line_contains_only_one_interrupt_hint() {
-        let mut state = ChatState::new();
-        state.is_processing = true;
-        state.thinking_started_at = Some(
-            std::time::Instant::now()
-                - std::time::Duration::from_secs(LONG_THINKING_INTERRUPT_THRESHOLD_SECS + 1),
+    fn a_slow_turn_warms_to_amber_and_never_to_red() {
+        let base = Color::Rgb(10, 10, 10);
+        const WARM: Color = Color::Rgb(222, 160, 40);
+        const STALLED: Color = Color::Rgb(171, 43, 63);
+
+        // 未到阈值：保持主题色。
+        assert_eq!(
+            warmup_intensity(
+                Some(std::time::Instant::now() - std::time::Duration::from_secs(5)),
+                0,
+            ),
+            0.0
         );
 
+        // 稳态插值点上是纯琥珀色。
+        let warming = warmup_intensity(
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(40)),
+            0,
+        );
+        assert!(warming > 0.9, "40 秒静默应接近满格，实际 {warming}");
+        assert_eq!(spinner_color(base, warming, 0.0, 0), WARM);
+
+        // 静默 5 分钟依然是琥珀，不是红：变暖强度会饱和，不会继续往红走。
+        let long_wait = warmup_intensity(
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(300)),
+            0,
+        );
+        assert!(long_wait > 0.9, "变暖强度应饱和：{long_wait}");
+        assert_eq!(spinner_color(base, long_wait, 0.0, 0), WARM);
+        assert_ne!(spinner_color(base, long_wait, 0.0, 0), STALLED);
+
+        // 文字 span 完全不参与变暖，只在工具真报警时偏红。
+        assert_eq!(text_color(base, 0.0), base);
+        assert_eq!(text_color(base, 1.0), text_color(base, 1.0));
+        let alarmed_text = text_color(base, 1.0);
+        assert_ne!(alarmed_text, base, "工具报警时文字也应当偏红");
+        assert_ne!(
+            alarmed_text, STALLED,
+            "文字只跟着偏移 70%，不与 spinner 字形一样染满红 —— 整行全红会盖掉动词本身"
+        );
+    }
+
+    /// 反向保证：工具超时仍然是真报警，且压过变暖。
+    #[test]
+    fn a_tool_that_never_finishes_still_turns_red() {
+        let base = Color::Rgb(10, 10, 10);
+        const STALLED: Color = Color::Rgb(171, 43, 63);
+
+        let running = tool_stall_intensity(
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(5)),
+            0,
+        );
+        assert_eq!(running, 0.0, "工具刚起步不该报警");
+
+        let overdue = tool_stall_intensity(
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(120)),
+            0,
+        );
+        assert!(
+            overdue > 0.9,
+            "120 秒未结束的工具应满格报警，实际 {overdue}"
+        );
+        // 工具报警优先于变暖：正在跑一个四分钟的构建恰恰最该让人知道它在占资源。
+        assert_eq!(spinner_color(base, 1.0, overdue, 0), STALLED);
+    }
+
+    /// 回归：`current_status_line` 此前全仓 40+ 处写入、零处渲染。
+    ///
+    /// 它是这一行天然的位置——用户盯着的就是这里。现在带信息量的状态（preflight、
+    /// checkpoint、取消、卡住）会显示出来，而与动词重复的 `Status: processing`
+    /// 一类直接吞掉，否则这行会变成两层废话。
+    #[test]
+    fn current_status_line_reaches_the_spinner_row() {
+        let mut state = ChatState::new();
+        state.current_status_line = Some("Status: running preflight checks".to_string());
+
+        // 不处理时这一行整体缺席，状态不该被塞进别处。
+        assert!(processing_spinner_line(&state, 120).is_empty());
+
+        state.is_processing = true;
         let text: String = processing_spinner_line(&state, 120)[1]
             .spans
             .iter()
-            .map(|span| span.content.as_ref())
+            .map(|s| s.content.as_ref())
             .collect();
-        assert!(text.contains("press Ctrl+C to cancel"));
-        assert!(!text.contains("Esc to interrupt"));
+        assert!(
+            text.contains("running preflight checks"),
+            "状态必须真的显示出来，实际 {text:?}"
+        );
+        assert!(
+            !text.contains("Status: "),
+            "前缀在这个上下文里没有信息量，应当剥掉，实际 {text:?}"
+        );
+
+        // 与动词重复的泛化状态不显示。
+        state.current_status_line = Some("Status: processing request".to_string());
+        let text: String = processing_spinner_line(&state, 120)[1]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            !text.to_lowercase().contains("processing"),
+            "与动词重复的状态应当吞掉，实际 {text:?}"
+        );
+    }
+
+    /// 回归：动词表换成 Claude Code 真实的那份之后，池子里不再有闲置/字面任务词。
+    ///
+    /// 旧表 200 条里塞了 16 个 Napping/Snoozing/Loafing 类的闲置动词和 13 个
+    /// Reading/Compiling/Indexing 类的字面任务词（后者是在编造一个并不存在的具体
+    /// 动作），还有 14 条重复把 `hash % len` 的分布打歪。
+    #[test]
+    fn verb_table_matches_the_real_claude_code_list() {
+        const REMOVED: &[&str] = &[
+            "Napping",
+            "Snoozing",
+            "Dozing",
+            "Dreaming",
+            "Lazing",
+            "Loafing",
+            "Lounging",
+            "Lolling",
+            "Resting",
+            "Reclining",
+            "Sprawling",
+            "Futzing",
+            "Dawdling",
+            "Pottering",
+            "Twiddling",
+            "Reading",
+            "Writing",
+            "Compiling",
+            "Executing",
+            "Searching",
+            "Indexing",
+            "Debugging",
+            "Planning",
+            "Reasoning",
+            "Validating",
+            "Optimizing",
+            "Analyzing",
+        ];
+        for verb in REMOVED {
+            assert!(!SPINNER_VERBS.contains(verb), "`{verb}` 不该出现在动词表里");
+        }
+
+        // `Thinking` 是唯一在任何时刻都不会说错的词，必须在。
+        assert!(
+            SPINNER_VERBS.contains(&"Thinking"),
+            "Thinking 必须留在动词表里"
+        );
+
+        // 不允许重复项：重复会按出现次数加权，打歪 `hash % len` 的分布。
+        let mut seen = std::collections::HashSet::new();
+        for verb in SPINNER_VERBS {
+            assert!(seen.insert(*verb), "`{verb}` 重复了");
+        }
+
+        assert_eq!(SPINNER_VERBS.len(), 187, "应与 Claude Code 真实表等长");
     }
 }
