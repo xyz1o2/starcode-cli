@@ -1757,9 +1757,8 @@ fn handle_chat_search_key(state: &mut ChatState, key: KeyEvent) {
             }
         }
         KeyCode::Up => {
-            if state.chat_search.step(false).is_some() {
-                reveal_chat_search_match(state);
-            }
+            state.chat_search.step(false);
+            reveal_chat_search_match(state);
         }
         _ => {}
     }

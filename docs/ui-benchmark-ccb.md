@@ -158,16 +158,21 @@ PermissionRequest (路由器)
 
 **差距分析**：
 
-| 特性 | CCB | Starcode | 差距 |
+> 快照勘误（2026-10-13）：本表原有 5 行结论已过时。`Shift+Tab` 快速批准、反馈输入
+> （Tab 进反馈模式）、`Ctrl+E` 解释、模式指示器都已实现（`ui/events/input.rs:3101-3253`、
+> `status_line/mod.rs:1149`），modal 也已统一到 `components/modal.rs`。下表按现状重写。
+
+| 特性 | CCB | Starcode（2026-10-13） | 差距 |
 |------|-----|----------|------|
-| 按工具分发组件 | ✅ 12+ 专用组件 | ❌ 统一对话框 | 工具特化缺失 |
-| 反馈输入系统 | ✅ Tab 切换 | ❌ 无 | 重要 UX |
-| AI 风险解释 Ctrl+E | ✅ lazy-load | ❌ 无 | 高级功能 |
-| Shift+Tab 快速批准 | ✅ | ❌ 无 | 快捷操作 |
-| 分类器自动审批 | ✅ | ❌ 无 | 智能审批 |
+| 按工具分发组件 | ✅ 12+ 专用组件 | ⚠️ 分类型卡片（diff / shell / 通用 / ask_user_question），无 CC 那样的按工具定制 | 部分 |
+| 反馈输入系统 | ✅ Tab 切换 | ✅ Tab 进反馈模式，Ctrl+Shift+D | — |
+| AI 风险解释 Ctrl+E | ✅ lazy-load | ✅ | — |
+| Shift+Tab 快速批准 | ✅ | ✅ | — |
+| **审批前看 diff** | ✅ Edit 卡给完整 diff | ✅ 补齐（此前只有 `path (+N -M)`，用户只能盲批） | — |
+| 分类器自动审批 | ✅ | ❌ 无（`auto` 模式未实现） | 智能审批 |
 | WorkerBadge | ✅ @agentName | ❌ 无 | 多 agent |
-| TrustDialog | ✅ 首次信任 | ❌ 无 | 安全 |
-| 模式底部指示器 | ✅ ⏵⏵ auto on | ❌ 无 | 可见性 |
+| TrustDialog | ✅ 首次信任 | ⚠️ 有 `core/config/trusted_folders` 但无独立对话框 | 安全 |
+| 模式底部指示器 | ✅ ⏵⏵ auto on | ✅ 四档（default / accept-edits / plan / yolo） | — |
 
 ---
 

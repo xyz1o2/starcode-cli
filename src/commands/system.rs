@@ -2598,11 +2598,9 @@ mod tests {
     #[test]
     fn known_dangling_declarations_are_gone() {
         // 历史上出现过的悬空声明：声明在 ALL_COMMANDS，handler 已随子系统删除
-        for name in ["eval"] {
-            assert!(
-                !ALL_COMMANDS.iter().any(|c| c.name == name),
-                "`/{name}` 仍被声明但没有 handler，/help 与补全会把它列出来",
-            );
-        }
+        assert!(
+            !ALL_COMMANDS.iter().any(|c| c.name == "eval"),
+            "`/eval` 仍被声明但没有 handler，/help 与补全会把它列出来",
+        );
     }
 }

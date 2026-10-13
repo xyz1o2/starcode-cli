@@ -283,7 +283,8 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | 无 hook `matcher` 过滤 | **已修**：`ManagedHook` 此前只按 event 过滤，带 matcher 的 hook 会对所有工具误触发。已按 CC 的字符集分派规则实现（精确/`\|`列表 → 精确匹配，其余 → 非锚定正则，编译失败 fail-closed） | ✅ `core/hooks/store.rs`、`runner.rs:33` |
 | hook 事件缺口 | 无 `PermissionRequest` `PermissionDenied` `PostToolBatch` `StopFailure` `ConfigChange` `InstructionsLoaded` `CwdChanged` `FileChanged` `Elicitation` `WorktreeCreate` `PreModelSwitch` `PostModelSwitch` | ❌ |
 | hook 事件自造名 | `BeforeAgent` / `AfterAgent` / `BeforeToolSelection` / `BeforeModel` / `AfterModel` 在 CC 中无对应 | ❌ `commands/hooks.rs:13,34` |
-| 权限模式 | 仅 `Default \| Plan \| Yolo`；`acceptEdits`/`bypassPermissions` 在 CLI 是别名，折叠成 default/yolo | ❌ `core/policy/types.rs:44-50`、`main.rs:121-123,414,733` |
+| 权限模式 | **已修（2026-10-13）**：`acceptEdits` 曾被折叠成 `Default`（CLI 与文档都写这个模式，实际给的是"写操作照样弹框"）。现在是独立一档：只读工具 + 文件编辑 + 只读 shell 命令免确认 | ✅ `core/policy/types.rs`、`policy_engine.rs::mode_auto_allows` |
+| `default` 档只读也弹框 | **已修**：`default_decision = AskUser` 曾把 `Read`/`Grep`/`Glob` 也弹框；headless 下 `non_interactive` 再把它翻成 Deny，于是 `-p` 模式**每个工具都被拒**。现在按 CC 语义表放行只读工具 | ✅ `policy_engine.rs::check` 第 3 步 |
 | 无 `dontAsk` 模式 | CI / headless 场景缺一个「其余直接拒」的档位 | ❌ |
 | 无 auto 模式分类器 | — | ❌ |
 | 无 sandbox | — | ❌ |
@@ -322,7 +323,29 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | 兜底路径丢审批模式（3 处） | `worker.rs`、`control_requests.rs`、`skills/editor.rs` | 新增 `StarAgent::policy_approval_mode()` |
 | 全局 settings 路径单一来源 | `config/storage.rs`、`policy/settings_rules.rs` | 死函数 `global_settings_path()` 复活，分工写进函数文档 |
 
-`@import` 展开没有跟着做 —— 它是 P0-2 里唯一有独立设计难度的部分（递归、最多 4 跳、跳过 code span 与 fenced block、跳出工作目录需批准），混在语义改造里会拉长这次改动。已列为 P1。
+### ✅ 核心工作流 / UI 第二轮（2026-10-13，同日）
+
+这一轮只处理「用户能不能把一个活干完」，按 §2 的现场核验结果逐条修，附加能力
+（workflows / teams / plugins / sandbox / tool search）一律不动。
+
+| 项 | 落点 | 结果 |
+|---|---|---|
+| `default` 档把只读工具也弹确认 | `core/policy/policy_engine.rs`（新增 `mode_auto_allows`）、`types/mod.rs` | 5 个新测试锁住语义；连带修好 headless `-p` 下"每个工具都被拒" |
+| `acceptEdits` 被折叠成 `default` | `policy/types.rs`、`types/mod.rs`（两处枚举）、`settings_rules.rs`、`parity.rs` 的 `/mode` | Shift+Tab 循环扩为四档；显式 `ask` 规则仍压得住模式内置放行 |
+| 确认等待不响应 abort（600s 静默） | `confirmation_bus/message_bus.rs`（新增 `request_cancellable`）、`agent/tool_executor.rs` | 3 个新测试；放弃等待时补发取消应答，把 UI 上的确认卡一并收掉 |
+| Edit/Write 审批卡不显示 diff | `ui/components/confirmation_dialog.rs` | 卡片内联 diff 预览（上限 24 行）+ 现算增删行数 |
+| diff 丢掉 `@@` hunk 头 | `ui/utils/render.rs::build_diff_block` | 2 个新测试；有 `@@` 就不再补 `═` 间隔线 |
+| 滚动条从未渲染 | `ui/app/mod.rs`（活路径） | 死函数 `render_chat_history` 删除，滚动条挪进真正绘制的那条路径 |
+| Tab 展开折叠的工具块选错条目 | `ui/events/input.rs::find_focused_tool_entry` | 按 `virtual_list` 的真实行高判断"覆盖视口中心"，不再拿 entry 下标与 `scroll/2` 比 |
+| WebFetch / WebSearch / Task / MCP 无专属渲染 | `ui/components/tool_render.rs` | 调用行摘要 + 结果块摘要，MCP 标出 server 名 |
+| 无对话内搜索 | 新增 `ui/components/chat_search.rs`、`ChatSearchState`、`Ctrl+F` | 与 `Ctrl+Shift+F`（搜仓库文件）分工；命中坐标与 `render_chat_lines` 同行号，有测试守着一致性 |
+| 无 `--continue`，`/continue` 打开的是菜单 | `main.rs`、`commands/chat.rs::continue_cmd` | `-c/--continue` = `--resume latest`；`/continue` 无参直接接最近会话 |
+| `/status` 不报配置来源 | `commands/core.rs::setting_sources_section` | 列出 4 个 settings 文件（是否存在、各自负责什么）+ 生效规则数 |
+| 中断后没有提示行 | `ui/components/interrupted.rs` 复活 + `ui/app/runtime.rs` 宽限期 | 在唯一知道"用户按了 Esc"的地方推 `Interrupted · What should I do instead?` |
+| 帮助文案把 Tab 说成补全 | `ui/components/help_popup.rs`、`events/keymap.rs` | 按真实行为改写；键表文档补上"两个搜索键的分工" |
+| `/eval` 是悬空声明 | `commands/system.rs` | 声明删除，并加测试记录历史悬空命令名单 |
+
+lib 套件 914 全绿，`cargo fmt --check` 绿，本次改动范围内 clippy 无新增告警。
 
 ### 待做
 
@@ -331,7 +354,7 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | **P1** | `@import` 展开 | `utils/project_context.rs` | M |
 | **P1** | `.mcp.json` 作为回落 | `core/utils/paths.rs:337` | S |
 | **P1** | `STAR_CONFIG_DIR` 环境变量，对应 `CLAUDE_CONFIG_DIR` | `core/config/storage.rs:8` | S |
-| **P1** | `ApprovalMode` 扩到六个 + `dontAsk`（headless/CI 用） | `core/policy/types.rs`、`main.rs` | M |
+| **P1** | `ApprovalMode` 补 `dontAsk`（headless/CI 用）。`acceptEdits` 已于 2026-10-13 独立成档，剩下三档（`auto`/`dontAsk`/`bypassPermissions` 中的 `auto` 与 `dontAsk`）仍缺 | `core/policy/types.rs`、`main.rs` | M |
 | **P1** | MCP tool search，schema 延迟加载 | `core/tools/tool_registry.rs` | L |
 | **P2** | `.claude/rules/` + `paths:` frontmatter 条件加载 | 新模块 | M |
 | **P2** | 补 hook 事件 `PermissionRequest` / `PostToolBatch` / `ConfigChange` / `InstructionsLoaded` | `core/hooks/store.rs` | M |
@@ -356,7 +379,7 @@ P2 的 workflows 价值最高（把子 agent 并行从消耗主 context 变成�
 4. **auto memory 硬预算 + 超限报错让模型重写索引**，而非静默截断。`project_context.rs` 现在的 8000 字符硬截断会让模型以为文件就这么多内容，是有损的。
 5. **可观测性作为产品功能。** StarCode 现状：`/context` 已用 `get_context_file_paths()` + `load_merged_project_context()` 列出加载了哪些记忆文件（对标 CC 的 `/context` ✓）；`/mcp` 列 server 健康态；`/tasks` 列 subagent；`/doctor` 输出工具可用性 + 日志可写性 + transcript 摘要。
 
-   **真正缺的是「加载了哪些配置源」** —— CC 的 `/status` 有一行 `Setting sources`，列出本次会话读了哪些 settings 文件、有没有 managed 层。StarCode 的 `/status` 没有这一层，而 §2.2 ② 那个 `settings.json` / `user-settings.json` 分工问题恰恰只能靠它暴露：用户把 `permissions` 写进了其中一个文件却被另一个的同名 key 盖住时，没有任何界面能看出这回事。补这一行的成本远低于排查成本。
+   **「加载了哪些配置源」已于 2026-10-13 补上** —— `/status` 现在有 `Setting sources` 段（`commands/core.rs::setting_sources_section`）：列出 4 个 settings 文件（是否存在、各自负责什么键）+ 生效的 allow/ask/deny 条数。理由与本节原判断一致 —— §2.2 ② 那个 `settings.json` / `user-settings.json` 分工问题只能靠它暴露。
 
    > `commands/doctor.rs` 曾有一节 `## Harness Health` 读 `.star/eval-results.json`，已随 eval 评测体系一起删除（commit `76a0262`）。本条不再引用它。
 6. **settings 列表 vs 标量的两类合并语义**，写进文档比隐含在代码里好。

@@ -33,12 +33,11 @@ cargo test --workspace --doc
 
 ### Gate state — verify, don't assume
 
-- `cargo fmt --check`: **red as of 2026-10-13** — the "debt cleared" note below was wrong.
-  Run it before claiming green; the outstanding files are a handful of `core/permission*`
-  and `ui/events/*` modules left over from the UI refactors.
+- `cargo fmt --check`: **green as of 2026-10-13** (re-verified after the core-workflow pass).
+  Run it before claiming green anyway; earlier notes here were wrong twice.
 - `cargo clippy --workspace --all-targets`: ~470 warnings, 0 errors. Not gated: CI runs it
   without `-D warnings`. Scope to your work: `cargo clippy --lib 2>&1 | rg <your_file>`.
-- `cargo test --workspace --lib -- --test-threads=1`: green as of 2026-10-13, 852 tests.
+- `cargo test --workspace --lib -- --test-threads=1`: green as of 2026-10-13, 914 tests.
 
 `--test-threads=1` is mandatory for the lib tests: `utils::checkpoint_manager` mutates the
 process-global `STAR_FILE_HISTORY_DIR_OVERRIDE`, so parallel tests delete each other's
@@ -151,7 +150,7 @@ Implementations are split between `src/core/tools/` (~60 files) and `src/tools/`
 
 ### Permission / confirmation flow
 
-A tool needing approval publishes `ToolConfirmationRequest` to `MessageBus` (`src/core/confirmation_bus/`), which consults `PolicyEngine::check` (`src/core/policy/policy_engine.rs`). Allow and Deny resolve immediately; ask-user broadcasts, the worker's `bus_rx` picks it up, `runtime/confirmation_bridge.rs` renders it into a `StreamMessage::ToolConfirmationRequest` (diff view, generic dialog, or `ask_user_question` options), and the answer returns as `AgentRequest::ConfirmTool`. `ApprovalMode` is only `Default | Plan | Yolo` (`src/core/policy/types.rs`); `--permission-mode acceptEdits` and `bypassPermissions` are aliases for `default` and `yolo` (`main.rs:637`), not distinct modes.
+A tool needing approval publishes `ToolConfirmationRequest` to `MessageBus` (`src/core/confirmation_bus/`), which consults `PolicyEngine::check` (`src/core/policy/policy_engine.rs`). Allow and Deny resolve immediately; ask-user broadcasts, the worker's `bus_rx` picks it up, `runtime/confirmation_bridge.rs` renders it into a `StreamMessage::ToolConfirmationRequest` (diff view, generic dialog, or `ask_user_question` options), and the answer returns as `AgentRequest::ConfirmTool`. `ApprovalMode` has four variants — `Default | AcceptEdits | Plan | Yolo` (`src/core/policy/types.rs`, plus a parallel `types::ApprovalMode` for the UI side). Each mode carries a built-in allow set in `policy_engine.rs::mode_auto_allows`: `default` = read-only tools, `acceptEdits` = read-only + file edits + read-only shell commands (`types::is_readonly_fs_command`, deliberately stricter than CC's list), `plan` = read-only only but **denies** the rest, `yolo` = everything. An explicit `ask` rule beats the mode's built-in set; an explicit `deny` beats everything including yolo. The confirmation wait is `MessageBus::request_cancellable`, not `request` — the plain `request` ignores the abort signal and would hang for 600s after the user interrupts.
 
 ### Agent internals
 
@@ -204,6 +203,12 @@ You cannot print — ratatui owns the terminal. File logging is **on by default*
 **Counter-example worth remembering:** `ModelFallbackManager` (`src/agent/model_fallback.rs`) was long listed here as dead ("only built in `#[cfg(test)]`"). That was wrong — `agent_core.rs` constructs it and `agent_llm.rs` calls `is_fallback_eligible_error`/`try_fallback` on the live path, so `STAR_MODEL_FALLBACK_*` does take effect. Because `#![allow(dead_code)]` is on, plausibility is not evidence; only a constructor grep is.
 
 **Writing a test that answers a confirmation prompt — use `if let`, not `while let`.** The message bus carries more than one message type. A responder written as `while let Ok(Message::ToolConfirmationRequest(r)) = rx.recv().await` **exits the loop** the moment any other variant arrives, and then every later `bus.request(...)` has nobody to answer it and blocks until the confirmation timeout (default 10 minutes). The symptom is misleading: the test looks like it fails on its *first* assertion and takes exactly 600s. Use `while let Ok(msg) = rx.recv().await { if let Message::ToolConfirmationRequest(r) = msg { … } }`. `agent::tool_executor::tests::allow_for_session_prevents_the_second_prompt` is the worked example.
+
+**`request_cancellable` returns `Box<dyn Error>`, which is not `Send`.** A test that needs concurrency has to `tokio::join!` the wait against a driver future; `tokio::spawn` fails to compile because the output type can't cross the spawn boundary. The bus's own error type is `&'static str` internally for exactly that reason — do not "clean it up" to `Box<dyn Error>` inside the `select!`.
+
+**The live chat render path is `render_chat_lines` + `write_lines_to_buffer` in `ui/app/mod.rs`,** not `render_chat_history` (deleted 2026-10-13 — it was a 190-line zero-caller duplicate, and the only thing worth keeping in it, the scrollbar, had silently never drawn). Same trap for the other zero-call render modules: `interrupted.rs` was dead until the abort grace period in `ui/app/runtime.rs` started calling it, and `global_search.rs` / `theme_picker.rs` / `memory_usage.rs` / `pr_badge.rs` / `cache_pill.rs` are still unverified. Adding UI to a *new* file that nothing calls produces exactly the same bug with no test failure.
+
+**Chat-area width is one column narrower than the terminal, always** (`ui/app/mod.rs`), because the scrollbar owns the last column. Deciding the width from "is the content scrollable?" makes width and line count trigger each other and the layout flickers on the boundary.
 
 **`PolicyDecision::AskUser` has two sources; do not conflate them.** An explicit `ask` rule in `settings.json` means "ask me every time", and it must outrank a session grant. But `PolicyEngine::new`'s fallback `default_decision` is also `AskUser` (`policy_engine.rs`), which only means "no rule matched, be conservative". When the two were conflated, `tool_executor` set `policy_requires_confirmation` for both, which made its `!policy_requires_confirmation` gate permanently false — so **"Allow for session" and "Always allow" never took effect for any tool**, and every confirmation dialog claimed to match an `ask` rule that didn't exist. `CheckResult::explicit_rule` now carries the provenance; only a real matched rule sets that flag. If you add another `AskUser` return path in `PolicyEngine::check`, you must decide which side of that flag it belongs on.
 

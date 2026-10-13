@@ -1282,7 +1282,7 @@ pub fn is_readonly_fs_command(tool_name: &str, args: &serde_json::Value) -> bool
         return false;
     }
     command
-        .split(|c| c == ';' || c == '&' || c == '|' || c == '\n')
+        .split([';', '&', '|', '\n'])
         // `&&` 被拆成两个 '&'，中间产生空段；空段不是命令，跳过。
         .filter(|segment| !segment.trim().is_empty())
         .all(|segment| {

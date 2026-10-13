@@ -134,7 +134,7 @@ pub async fn status(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResul
         lines.push(format!("**已配置供应商:** {} 个", store.providers.len()));
     }
 
-    lines.extend(setting_sources_section(&ctx.state));
+    lines.extend(setting_sources_section(ctx.state));
 
     ctx.state
         .chat_history
