@@ -347,25 +347,27 @@ pub fn build_confirmation_card_block(
         Line::from(vec![indicator, num, text])
     };
 
+    // 文案里不要再写 "1. " —— option() 自己会加序号和当前项的 `>` 标记，
+    // 写了就渲染成 "1. 1. Allow once"（见 confirmation_dialog 的历史截图）。
     lines.push(option(
         1,
-        &i18n::t("ui.confirm.option.once", "1. 允许一次", "1. Allow once"),
+        &i18n::t("ui.confirm.option.once", "允许一次", "Allow once"),
     ));
     lines.push(option(
         2,
         &i18n::t(
             "ui.confirm.option.session",
-            "2. 本会话允许",
-            "2. Allow for session",
+            "本会话允许",
+            "Allow for session",
         ),
     ));
     lines.push(option(
         3,
-        &i18n::t("ui.confirm.option.always", "3. 永久允许", "3. Always allow"),
+        &i18n::t("ui.confirm.option.always", "永久允许", "Always allow"),
     ));
     lines.push(option(
         4,
-        &i18n::t("ui.confirm.option.deny", "4. 拒绝", "4. Deny"),
+        &i18n::t("ui.confirm.option.deny", "拒绝", "Deny"),
     ));
 
     // ── Feedback input (Tab) ──

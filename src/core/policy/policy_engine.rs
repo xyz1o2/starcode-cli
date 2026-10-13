@@ -13,6 +13,16 @@ pub struct FunctionCall {
 pub struct CheckResult {
     pub decision: PolicyDecision,
     pub rule: Option<PolicyRule>,
+    /// 判定是否来自一条**真正命中的规则**（settings 的 allow/ask/deny、旧
+    /// `permissions.json` 规则、或 `PolicyEngineConfig.rules`）。
+    ///
+    /// 存在的理由：`AskUser` 有两个来源，语义完全不同，不能混。
+    /// - 显式 `ask` 规则 —— 用户写下"每次都问我"，会话里的"本会话允许"不该把它降级
+    /// - 兜底 `default_decision`（默认 `AskUser`）—— 只是没命中任何规则时的保守起见
+    ///
+    /// 两者混为一谈的后果：没有任何 settings 的普通用户点「本会话允许」后，
+    /// 下一次仍然弹框，因为兜底 AskUser 一直被当成"策略点名要求确认"。
+    pub explicit_rule: bool,
 }
 
 pub struct PolicyEngine {
@@ -136,6 +146,7 @@ impl PolicyEngine {
                 return CheckResult {
                     decision: PolicyDecision::DenyWithReason(reason.clone()),
                     rule: None,
+                    explicit_rule: true,
                 };
             }
         }
@@ -145,6 +156,7 @@ impl PolicyEngine {
             return CheckResult {
                 decision: PolicyDecision::Allow,
                 rule: None,
+                explicit_rule: false,
             };
         }
 
@@ -154,6 +166,7 @@ impl PolicyEngine {
                 return CheckResult {
                     decision: PolicyDecision::Allow,
                     rule: None,
+                    explicit_rule: false,
                 };
             }
             ApprovalMode::Plan => {
@@ -168,6 +181,7 @@ impl PolicyEngine {
                         PolicyDecision::Deny
                     },
                     rule: None,
+                    explicit_rule: false,
                 };
             }
             ApprovalMode::Default => {}
@@ -180,12 +194,16 @@ impl PolicyEngine {
                     return CheckResult {
                         decision: PolicyDecision::Allow,
                         rule: None,
+                        explicit_rule: true,
                     };
                 }
                 RuleVerdict::Ask => {
+                    // 显式 ask 规则：用户写下的"每次都问我"。`explicit_rule` 为 true，
+                    // 调用方据此让会话里的"本会话允许"失效。
                     return CheckResult {
                         decision: self.apply_non_interactive_mode(PolicyDecision::AskUser),
                         rule: None,
+                        explicit_rule: true,
                     };
                 }
                 RuleVerdict::Deny => {}
@@ -210,12 +228,16 @@ impl PolicyEngine {
         }
 
         if decision.is_none() {
+            // 兜底：没命中任何规则。默认是 AskUser，但那是"保守起见问一下"，
+            // 不是用户写下的规则 —— `explicit_rule` 必须为 false，否则「本会话允许」
+            // 会永久失效（这正是本函数原先没有区分、导致的问题）。
             decision = Some(self.apply_non_interactive_mode(self.default_decision.clone()));
         }
 
         CheckResult {
             decision: decision.unwrap(),
-            rule: matched_rule,
+            rule: matched_rule.clone(),
+            explicit_rule: matched_rule.is_some(),
         }
     }
 
@@ -392,7 +414,10 @@ mod tests {
         });
 
         let decision = engine
-            .check(&call("Bash", serde_json::json!({"command": "git push"})), None)
+            .check(
+                &call("Bash", serde_json::json!({"command": "git push"})),
+                None,
+            )
             .await
             .decision;
         assert_eq!(
@@ -409,7 +434,10 @@ mod tests {
 
         assert_eq!(
             engine
-                .check(&call("Bash", serde_json::json!({"command": "git push"})), None)
+                .check(
+                    &call("Bash", serde_json::json!({"command": "git push"})),
+                    None
+                )
                 .await
                 .decision,
             PolicyDecision::AskUser
@@ -426,7 +454,10 @@ mod tests {
         with_deny.set_settings_permissions(perms);
         assert!(matches!(
             with_deny
-                .check(&call("Bash", serde_json::json!({"command": "rm -rf build"})), None)
+                .check(
+                    &call("Bash", serde_json::json!({"command": "rm -rf build"})),
+                    None
+                )
                 .await
                 .decision,
             PolicyDecision::DenyWithReason(_)
@@ -443,7 +474,10 @@ mod tests {
         });
         assert_eq!(
             engine
-                .check(&call("Bash", serde_json::json!({"command": "git push"})), None)
+                .check(
+                    &call("Bash", serde_json::json!({"command": "git push"})),
+                    None
+                )
                 .await
                 .decision,
             PolicyDecision::Allow

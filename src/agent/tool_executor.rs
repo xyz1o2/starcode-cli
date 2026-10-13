@@ -52,19 +52,43 @@ fn policy_confirmation_details(
     tool_name: &str,
     args: &serde_json::Value,
 ) -> crate::core::tools::tools::ToolCallConfirmationDetails {
-    let summary = args
-        .get("command")
-        .and_then(|v| v.as_str())
-        .or_else(|| args.get("file_path").and_then(|v| v.as_str()))
-        .map(|v| format!("\n\n{command_or_path}", command_or_path = v))
-        .unwrap_or_default();
-
     crate::core::tools::tools::ToolCallConfirmationDetails {
         confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
         title: format!("Permission required: {}", tool_name),
         prompt: format!(
             "`{}` matches an `ask` rule in your permission settings.{}",
-            tool_name, summary
+            tool_name,
+            confirmation_summary(args)
+        ),
+        on_confirm: std::sync::Arc::new(|_, _feedback| {}),
+    }
+}
+
+/// 确认卡片里附带的命令或路径摘要。
+fn confirmation_summary(args: &serde_json::Value) -> String {
+    args.get("command")
+        .and_then(|v| v.as_str())
+        .or_else(|| args.get("file_path").and_then(|v| v.as_str()))
+        .map(|v| format!("\n\n{}", v))
+        .unwrap_or_default()
+}
+
+/// 没有命中任何规则、只是兜底 `AskUser` 时的确认卡片。
+///
+/// 与 `policy_confirmation_details` 的区别只在文案：这里**没有** ask 规则命中，
+/// 说"matches an `ask` rule in your permission settings"是凭空捏造的 —— 用户会去
+/// settings 里找一条根本不存在的规则。兜底弹框是保守行为，不是用户配置的结果。
+fn default_confirmation_details(
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> crate::core::tools::tools::ToolCallConfirmationDetails {
+    crate::core::tools::tools::ToolCallConfirmationDetails {
+        confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
+        title: format!("Permission required: {}", tool_name),
+        prompt: format!(
+            "`{}` needs approval before it can run. No allow rule covers it yet.{}",
+            tool_name,
+            confirmation_summary(args)
         ),
         on_confirm: std::sync::Arc::new(|_, _feedback| {}),
     }
@@ -390,6 +414,14 @@ impl ToolExecutor {
                     // 策略引擎要求弹窗时（`ask` 规则命中），必须真的走到用户面前。
                     // 工具自己的 `should_confirm_execute` 返回 `Ok(None)` 只表示
                     // "这个工具没有额外顾虑"，不能用来否决一条显式的 `ask` 规则。
+                    // `AskUser` 有两个来源，语义不同，必须分开：
+                    // - `requires_prompt`：不管怎样都要弹一次框
+                    // - `policy_requires_confirmation`：**显式 ask 规则**命中。会话里的
+                    //   「本会话允许」不该把它降级 —— 用户写 `ask: [...]` 的语义就是
+                    //   「每次都问我」。
+                    // 兜底 default（默认 AskUser）只置前者。之前两者混为一谈，导致
+                    // 没有任何 settings 的用户点「本会话允许」后下一次照样弹框。
+                    let mut requires_prompt = false;
                     let mut policy_requires_confirmation = false;
 
                     if let Some(bus) = &self.message_bus {
@@ -436,7 +468,10 @@ impl ToolExecutor {
                                 approved = true;
                             }
                             PolicyDecision::AskUser => {
-                                policy_requires_confirmation = true;
+                                requires_prompt = true;
+                                if check.explicit_rule {
+                                    policy_requires_confirmation = true;
+                                }
                             }
                         }
                     }
@@ -479,11 +514,16 @@ impl ToolExecutor {
                                 .should_confirm_execute(abort_signal.as_ref())
                                 .await;
 
-                            // 工具没提出自己的确认要求，但策略要求确认：补一个最小的确认卡片，
-                            // 让 `ask` 规则真正兑现到用户面前。
+                            // 工具没提出自己的确认要求，但策略判定要问：补一个确认卡片。
+                            // 两张卡片文案必须不同 —— 显式 ask 规则才配说
+                            // "matches an `ask` rule"；兜底 default 没有规则可指。
                             let should_confirm = match should_confirm {
-                                Ok(None) if policy_requires_confirmation => {
-                                    Ok(Some(policy_confirmation_details(name, &args)))
+                                Ok(None) if requires_prompt => {
+                                    Ok(Some(if policy_requires_confirmation {
+                                        policy_confirmation_details(name, &args)
+                                    } else {
+                                        default_confirmation_details(name, &args)
+                                    }))
                                 }
                                 other => other,
                             };
@@ -2668,6 +2708,103 @@ mod tests {
             .expect("`ask` rule must have produced a confirmation prompt")
             .expect("confirmation responder task failed");
         assert!(result.success);
+    }
+
+    /// 「本会话允许」必须真的生效：选过一次之后，同一工具不该再弹框。
+    ///
+    /// 这条锁的是一个真实 bug：兜底 `default_decision` 是 `AskUser`，而 `AskUser`
+    /// 此前被无条件当成"策略点名要求确认"，于是 executor 里
+    /// `!policy_requires_confirmation` 这个闸门永远为假，会话授权**根本不会被读**。
+    /// 结果是任何没有 settings 文件的用户点「本会话允许」都白点。
+    ///
+    /// 断言方式：统计确认请求的条数。修复前是 2，修复后必须是 1。
+    #[tokio::test]
+    async fn allow_for_session_prevents_the_second_prompt() {
+        use crate::core::config::ConfigParameters;
+        use crate::core::policy::PolicyEngine;
+        use crate::types::StarToolCallFunction;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().expect("create temporary directory");
+        let mut params = ConfigParameters::default();
+        params.target_dir = temp.path().to_path_buf();
+        params.cwd = temp.path().to_path_buf();
+        let config = Arc::new(Config::new(params));
+
+        // 刻意不装任何规则 —— 复现"用户根本没配过 settings"的真实场景
+        let bus = Arc::new(MessageBus::new(
+            PolicyEngine::new(Default::default()),
+            false,
+        ));
+
+        let registry = Arc::new(ToolRegistry::new(config.clone()));
+        registry.register_tool(Arc::new(SilentTool));
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            registry,
+            Some(bus.clone()),
+            config,
+        );
+
+        let prompts = Arc::new(AtomicUsize::new(0));
+        let mut requests = bus.subscribe();
+        let responder_bus = bus.clone();
+        let responder_prompts = prompts.clone();
+        let responder = tokio::spawn(async move {
+            // 注意用 `if let` 而不是 `while let`：总线上还有别的消息类型，
+            // 遇到非确认消息就退出循环会让后续 execute 一直等到确认超时。
+            while let Ok(message) = requests.recv().await {
+                if let Message::ToolConfirmationRequest(request) = message {
+                    responder_prompts.fetch_add(1, Ordering::SeqCst);
+                    let _ = responder_bus
+                        .publish(Message::ToolConfirmationResponse(
+                            ToolConfirmationResponse::from_user_decision(
+                                request.correlation_id,
+                                crate::types::ToolConfirmationOutcome::AllowSession,
+                                None,
+                            ),
+                        ))
+                        .await;
+                }
+            }
+        });
+
+        let call = || StarToolCall {
+            id: "silent-call".to_string(),
+            call_type: "function".to_string(),
+            function: StarToolCallFunction {
+                name: "SilentTool".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+
+        let first = executor.execute(&call(), None, None).await;
+        assert!(
+            first.success,
+            "第一次调用应成功，实际输出：{:?}",
+            first.output
+        );
+        assert_eq!(
+            prompts.load(Ordering::SeqCst),
+            1,
+            "没有任何规则时也应弹一次框（兜底 AskUser 是保守行为），实际弹了 {} 次",
+            prompts.load(Ordering::SeqCst)
+        );
+
+        let second = executor.execute(&call(), None, None).await;
+        responder.abort();
+
+        assert!(
+            second.success,
+            "第二次调用应成功，实际输出：{:?}",
+            second.output
+        );
+        assert_eq!(
+            prompts.load(Ordering::SeqCst),
+            1,
+            "「本会话允许」后不该再弹第二次框"
+        );
     }
 
     /// 反向保证：这个修复只加固"显式 `ask` 规则"，不会把默认路径变成"每次都弹窗"。
