@@ -106,7 +106,8 @@ mod tests {
         state.last_token_time = Some(Instant::now() - Duration::from_secs(31));
         assert_eq!(
             stalled_processing_secs_without_active_tool(&state),
-            Some(31)
+            None,
+            "登记在册的工具由执行器负责生命周期，UI 不该替它宣布超时"
         );
 
         state.tool_started_at.insert(
@@ -122,6 +123,41 @@ mod tests {
         state.is_processing = true;
         state.last_token_time = None;
         assert_eq!(stalled_processing_secs_without_active_tool(&state), None);
+    }
+
+    /// 回归：等待模型出首 token **不能**被判成"回合已结束"。
+    ///
+    /// 看门狗此前卡在 30s，于是每个慢回合都会在第 30 秒被 UI 判死：`is_processing`
+    /// 被清掉 → spinner 停转，`current_status_line` 被写成 "✓ Done (timeout)" →
+    /// 界面上什么都不剩，而 agent 还在跑。用户看到的正是"任务还在运行中，指示却
+    /// 消失了"。30s 是模型出首 token 的正常量级（agent 侧自己的请求超时默认就有
+    /// 120s），拿它当"agent 死了"的判据必然误杀。
+    #[test]
+    fn slow_first_token_does_not_release_the_spinner() {
+        let mut state = ChatState::new();
+        state.is_processing = true;
+
+        for silent_secs in [5u64, 31, 90, 240] {
+            state.last_token_time = Some(Instant::now() - Duration::from_secs(silent_secs));
+            assert_eq!(
+                stalled_processing_secs_without_active_tool(&state),
+                None,
+                "静默 {silent_secs}s 仍在正常等待范围内，spinner 不能消失"
+            );
+        }
+    }
+
+    /// 反向保证：agent 侧彻底失联时，UI 仍要能把 spinner 收回来。
+    #[test]
+    fn a_truly_dead_agent_still_releases_the_spinner() {
+        let mut state = ChatState::new();
+        state.is_processing = true;
+        let beyond_limit = ui_stall_limit_secs() + 30;
+        state.last_token_time = Some(Instant::now() - Duration::from_secs(beyond_limit));
+        assert_eq!(
+            stalled_processing_secs_without_active_tool(&state),
+            Some(beyond_limit)
+        );
     }
 
     #[test]

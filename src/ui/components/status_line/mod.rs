@@ -928,9 +928,7 @@ fn turn_elapsed_secs(state: &ChatState) -> Option<u64> {
     if !state.is_processing {
         return None;
     }
-    state
-        .processing_started_at
-        .map(|t| t.elapsed().as_secs())
+    state.processing_started_at.map(|t| t.elapsed().as_secs())
 }
 
 pub fn build_status_lines(state: &ChatState, width: u16) -> Vec<Line<'static>> {
@@ -1515,6 +1513,34 @@ mod tests {
             interrupt_hint(&state, INTERRUPT_HINT_MIN_WIDTH - 1, 0.0),
             None
         );
+    }
+
+    /// 回归：状态栏那个秒数在回合进行中必须是**本回合**耗时。
+    ///
+    /// 它此前固定显示会话年龄（`session_started_at`），也就是"这个进程开了多久"。
+    /// 那是一个跟"现在有没有在干活"毫无关系的数，却是界面上唯一一直在动的东西：
+    /// 用户自然把它读成回合计时器 —— 于是"任务还在运行中"和"什么都没有发生"这两
+    /// 种真实状态，在界面上长得一模一样。
+    #[test]
+    fn elapsed_counter_tracks_the_turn_while_processing() {
+        let mut state = ChatState::new();
+        // 会话已经开了很久，但这一回合刚开始。
+        state.session_started_at = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        state.processing_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(7));
+
+        assert_eq!(turn_elapsed_secs(&state), None, "空闲时没有回合计时");
+
+        state.is_processing = true;
+        assert_eq!(
+            turn_elapsed_secs(&state),
+            Some(7),
+            "回合进行中必须报本回合耗时，而不是一小时前的会话年龄"
+        );
+
+        // 回合结束：回合计时让位给会话年龄，不能把 7s 继续挂在那里。
+        state.is_processing = false;
+        assert_eq!(turn_elapsed_secs(&state), None);
     }
 
     #[test]
