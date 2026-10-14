@@ -249,22 +249,16 @@ fn route_score_threshold() -> u32 {
 /// "all places" 而漏判——标记词表写得再全也会被一个冠词击穿。
 fn normalize_for_markers(input: &str) -> String {
     let lower = input.to_lowercase();
-    let mut out = String::with_capacity(lower.len());
-    let mut prev_was_article = false;
+    let mut out: Vec<&str> = Vec::new();
     for token in lower.split_whitespace() {
-        let is_article = matches!(token, "the" | "a" | "an");
-        // 句首的冠词也摘掉：它后面通常紧跟标记词，留着只会让首词匹配失败。
-        if is_article && (out.is_empty() || prev_was_article) {
-            prev_was_article = true;
+        // 冠词一律摘掉：它出现在标记词前面只会挡住匹配（"all **the** places" 匹配不上
+        // `all place`），而在别处对判分也没有判别力。
+        if matches!(token, "the" | "a" | "an") {
             continue;
         }
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(token);
-        prev_was_article = is_article;
+        out.push(token);
     }
-    out
+    out.join(" ")
 }
 
 /// 判分词表。提到模块级是因为**打分**和**解释**必须用同一份——
@@ -452,28 +446,45 @@ fn names_another_tool(lower: &str) -> bool {
 }
 
 /// 把判分依据写成人能读的一句话，进 debug log。
+///
+/// 这是当下唯一能回答"它为什么触发 / 为什么没触发"的出口——eval 基座已随
+/// eval 体系删除（见 docs/starlens-design.md §12 末），所以每条判定都必须可被人复核。
+/// **被否决的输入要报出否决理由**，否则排障时只看到 "no strong signal"，
+/// 分不清是词表没覆盖还是被硬否决拒了。
 fn describe_rank_locate_route(user_input: &str) -> String {
     let lower = user_input.to_lowercase();
-    let mut why: Vec<&str> = Vec::new();
-    if SWEEP_MARKERS.iter().any(|m| lower.contains(*m)) {
-        why.push("cross-file sweep phrasing");
-    }
-    if user_input.contains('?') || user_input.contains('？') {
-        why.push("question shape");
-    }
-    if FUNCTIONAL_VERBS.iter().any(|v| lower.contains(*v)) {
-        why.push("functional verb");
+    let norm = normalize_for_markers(user_input);
+
+    // 先报否决原因。
+    if names_another_tool(&lower) {
+        return format!("veto: named another tool => [{lower}]");
     }
     if has_exact_identifier_shape(user_input) {
-        why.push("-exact-token shape");
+        return format!("veto: exact-token shape (Grep/Glob/CodeGraph owns this) => [{lower}]");
     }
-    if names_another_tool(&lower) {
-        why.push("-named another tool");
+    if let Some(m) = CONCEPTUAL_MARKERS.iter().find(|m| lower.contains(*m)) {
+        return format!(
+            "veto: conceptual QA ({m:?}) — lexical search cannot answer it => [{lower}]"
+        );
+    }
+
+    let mut why: Vec<String> = Vec::new();
+    if let Some(m) = SWEEP_MARKERS.iter().find(|m| norm.contains(**m)) {
+        // 报出具体命中的标记：调词表时要知道是哪一条在起作用。
+        why.push(format!("sweep({m:?})"));
+    }
+    if user_input.contains('?') || user_input.contains('？') {
+        why.push("question".to_string());
+    }
+    if FUNCTIONAL_VERBS.iter().any(|v| norm.contains(*v)) {
+        why.push("functional-verb".to_string());
     }
     if why.is_empty() {
-        why.push("no strong signal");
+        why.push(
+            "insufficient signal (need sweep phrasing, or question + functional verb)".to_string(),
+        );
     }
-    format!("{} => [{}]", why.join(", "), lower)
+    format!("{} => [{lower}]", why.join(" + "))
 }
 
 /// 自动触发闸门。
@@ -941,8 +952,13 @@ mod tests {
         let picked = picked.expect("强扫面信号应产生候选");
         assert_eq!(picked.kind, AutoTriggerKind::CodebaseSearch);
         assert!(
-            picked.detail.contains("cross-file sweep phrasing"),
+            picked.detail.contains("sweep("),
             "判分依据要能解释这次触发：{}",
+            picked.detail
+        );
+        assert!(
+            !picked.detail.starts_with("veto:"),
+            "被触发的东西不该带否决理由：{}",
             picked.detail
         );
     }
