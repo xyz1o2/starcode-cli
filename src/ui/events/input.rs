@@ -2140,7 +2140,7 @@ pub async fn handle_key_event(
     // 判断顺序就是优先级表（模态 > 工具审批 > help > 行内确认 > 模型确认），
     // 直接拿它当条件，两处就不会各自漂移。裸读标志会把"工具审批和模型确认同时
     // 挂着"的情况判给模型确认，与 `of()` 声明的顺序相反。
-    if false && KeyContext::of(state) == KeyContext::ModelConfirm {
+    if KeyContext::of(state) == KeyContext::ModelConfirm {
         handle_model_confirmation(state, key, agent_tx).await?;
         return Ok(());
     }
