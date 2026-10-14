@@ -227,10 +227,27 @@ fn code_fence_bottom(total: usize) -> Line<'static> {
     ])
 }
 
+/// 单行源码的 OOM 护栏，与 `wrap_text_to_width` 同口径。
+const MAX_CODE_LINE_CHARS: usize = 5000;
+
 /// 代码块正文的一行 → 渲染行（可能因折行变成多行）。
 ///
-/// 左侧统一缩进 2 列，与 `  ┌` / `  └` 边框对齐（此前正文顶到第 0 列，
+/// 左侧统一缩进 2 列（GUTTER），与 `  ┌` / `  └` 边框对齐（此前正文顶到第 0 列，
 /// 边框却从第 2 列开始，看起来像框歪了）。折行宽度相应减 2。
+///
+/// **折行续行必须重复源行的前导缩进。** 旧实现直接用 `wrap_text_to_width`，
+/// 而它只在首行保留缩进、续行一律顶到最左边：
+///
+/// ```text
+///   function f() {
+///       const
+///   averyveryverylongvariablename =
+///   someCall(alpha, beta, gamma, delta);
+///   }
+/// ```
+///
+/// 一条被折断的语句在框里看着像三条语句 —— 代码块的缩进正是语义，丢掉它比
+/// 折行本身更容易误导（见 code_block_wrap_keeps_indent）。
 fn code_block_lines(
     line_str: &str,
     language: &str,
@@ -242,15 +259,43 @@ fn code_block_lines(
         out.push(Line::from(""));
         return out;
     }
-    let pieces = match wrap_width {
+
+    // 前导缩进：折行预算里要给它留位，续行还要原样补回来
+    let chars: Vec<char> = line_str.chars().take(MAX_CODE_LINE_CHARS).collect();
+    let indent: String = chars
+        .iter()
+        .take_while(|c| **c == ' ' || **c == '\t')
+        .collect();
+    let indent_w = display_width(&indent);
+
+    let pieces: Vec<String> = match wrap_width {
         Some(max_w) => {
-            crate::ui::utils::render::wrap_text_to_width(line_str, max_w.saturating_sub(2))
+            // 正文区宽度 = 总宽 - GUTTER；再减掉缩进，缩进本身占的那几列
+            // 对首行和续行都要预留给它
+            let body_w = max_w.saturating_sub(GUTTER.len()).saturating_sub(indent_w);
+            if body_w <= 2 {
+                // 缩进本身就把一行占满了（或终端窄得没法折）：原样输出，
+                // 总比把缩进单独折成一行、内容甩到右边强
+                vec![chars.iter().collect()]
+            } else {
+                // 首行与续行同宽：两者的前缀都是 GUTTER + 源行缩进
+                crate::ui::utils::render::wrap_char_ranges(&chars, body_w, body_w)
+                    .into_iter()
+                    .map(|(s, e)| chars[s..e].iter().collect())
+                    .collect()
+            }
         }
-        None => vec![line_str.to_string()],
+        None => vec![chars.iter().collect()],
     };
-    for piece in pieces {
+
+    for (i, piece) in pieces.into_iter().enumerate() {
         let highlighted = highlight_code_line(&piece, language);
-        let mut line_spans: Vec<Span<'static>> = vec![Span::raw(GUTTER)];
+        let prefix = if i == 0 {
+            GUTTER.to_string()
+        } else {
+            format!("{}{}", GUTTER, indent)
+        };
+        let mut line_spans: Vec<Span<'static>> = vec![Span::raw(prefix)];
         line_spans.extend(highlighted.spans.iter().cloned());
         out.push(Line::from(line_spans));
     }
@@ -1281,6 +1326,69 @@ mod table_render_tests {
             "row {:?} vs border {:?}",
             row,
             border
+        );
+    }
+}
+
+#[cfg(test)]
+mod code_block_tests {
+    use super::*;
+
+    fn rendered(md: &str, width: usize) -> Vec<String> {
+        render_markdown(md, Some(width))
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect()
+    }
+
+    /// 折行后的代码行必须仍然读作**一条**语句：续行重复源行的前导缩进。
+    /// 旧实现续行顶到最左边，`const xxx = someCall(...)` 在框里看着像三条语句。
+    #[test]
+    fn code_block_wrap_keeps_indent() {
+        let md = "```\nfunction f() {\n    const averyveryverylongvariablename = someCall(alpha, beta, gamma, delta);\n}\n```\n";
+        let lines = rendered(md, 40);
+
+        // 找到被折行的那条语句的所有片段（它不含换行，是纯代码行）
+        let body: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("const") || l.contains("averyvery") || l.contains("someCall"))
+            .collect();
+        assert!(body.len() >= 2, "该行必须真的折行了，实际片段: {:?}", body);
+        for l in &body {
+            assert!(
+                l.starts_with("      "),
+                "折行续行丢了 4 列缩进（源行缩进 4 + GUTTER 2）: {:?}",
+                l
+            );
+        }
+    }
+
+    /// 折行也不能把行顶出可用宽度：围栏右端之外的字符会被右边界直接截掉。
+    #[test]
+    fn code_block_wrap_never_exceeds_width() {
+        let md = "```\n        const x = alpha + beta + gamma + delta + epsilon + zeta + eta + theta;\n```\n";
+        for w in [20usize, 24, 30, 40, 60, 80] {
+            for l in rendered(md, w) {
+                assert!(
+                    display_width(&l) <= w,
+                    "宽度 {} 下渲染出 {} 列的行: {:?}",
+                    w,
+                    display_width(&l),
+                    l
+                );
+            }
+        }
+    }
+
+    /// 缩进本身就顶满一行时不能把缩进自己折成一行（内容会被甩到右边）。
+    #[test]
+    fn code_block_deep_indent_is_not_split() {
+        let md = "```\n                return 1;\n```\n";
+        let lines = rendered(md, 20);
+        assert!(
+            lines.iter().any(|l| l.contains("return 1;")),
+            "深缩进行必须完整出现: {:?}",
+            lines
         );
     }
 }
