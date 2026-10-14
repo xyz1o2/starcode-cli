@@ -102,12 +102,13 @@ async fn handle_palette(
     use crossterm::event::KeyCode::*;
 
     let query = state.palette_filter.trim().to_lowercase();
-    let search_items =
-        crate::ui::components::palette::get_search_items(&state.palette_mode, state, &query);
-    let items_len = search_items
-        .iter()
-        .filter(|item| crate::ui::components::palette::palette_item_matches_query(item, &query))
-        .count();
+    // 下标只能解释成"画出来的顺序"：`palette_display_items` 是那一份定义，
+    // `render_palette` 用它画高亮，这里用它解析 Enter。两者曾经各按各的顺序
+    // 解释 `selected_palette_index`（渲染序 vs 过滤序），模型面板上二者差一条
+    // —— 高亮在模型上、Enter 却触发了"刷新模型列表"。
+    let display_items =
+        crate::ui::components::palette::palette_display_items(&state.palette_mode, state, &query);
+    let items_len = display_items.len();
 
     match key.code {
         Esc => {
@@ -157,14 +158,7 @@ async fn handle_palette(
             }
         }
         Enter => {
-            let filtered_items: Vec<_> = search_items
-                .iter()
-                .filter(|item| {
-                    crate::ui::components::palette::palette_item_matches_query(item, &query)
-                })
-                .collect();
-
-            if let Some(selected_item) = filtered_items.get(state.selected_palette_index) {
+            if let Some(selected_item) = display_items.get(state.selected_palette_index) {
                 let action = selected_item.action.clone();
                 super::input::execute_palette_action(state, action, agent_tx).await?;
             }
@@ -193,14 +187,7 @@ async fn handle_palette(
         }
         Char(c) => {
             if state.palette_mode == crate::ui::state::PaletteMode::Provider && c == 'e' {
-                let filtered_items: Vec<_> = search_items
-                    .iter()
-                    .filter(|item| {
-                        crate::ui::components::palette::palette_item_matches_query(item, &query)
-                    })
-                    .collect();
-
-                if let Some(selected_item) = filtered_items.get(state.selected_palette_index) {
+                if let Some(selected_item) = display_items.get(state.selected_palette_index) {
                     let provider_id = match &selected_item.action {
                         crate::ui::state::PaletteAction::SelectProvider(pid) => Some(pid.clone()),
                         crate::ui::state::PaletteAction::EditProvider(pid) => Some(pid.clone()),

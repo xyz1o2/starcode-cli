@@ -109,6 +109,70 @@ pub fn get_search_items(mode: &PaletteMode, state: &ChatState, query: &str) -> V
     }
 }
 
+/// 面板是否按分组渲染（分组项在前、无标题的散项在后）。
+pub fn palette_is_grouped(mode: &PaletteMode, query: &str) -> bool {
+    !query.trim().is_empty() || matches!(mode, PaletteMode::Model)
+}
+
+/// 面板里**真正画出来的顺序**，也是 `selected_palette_index` 唯一该解释的顺序。
+///
+/// # 为什么必须有这一个函数
+///
+/// 渲染和按键曾经各自按**不同**的顺序解释 `selected_palette_index`：
+///
+/// - `render_palette` 先画带 `category` 的条目、再画 `category: None` 的散项，
+///   于是 `selectable_indices` 是**渲染序**；
+/// - `handle_palette` 的 Enter 直接 `filtered[index]`，是**过滤序**。
+///
+/// 模型面板正好同时有两种：`⟳ Fetch model list from API` 是 `category: None`
+/// 且被 `push_model_refresh_option` 放在**第一位**，其余模型按 provider 分组。
+///
+/// 于是渲染序 = `[模型…, 刷新]`，过滤序 = `[刷新, 模型…]` —— **同一个下标指向两个
+/// 不同的条目**。用户把高亮移到某个模型上按 Enter，触发的是刷新模型列表；列表
+/// 重新拉一遍、模型没换，表现就是"这个模型怎么都切不上去"。
+///
+/// 返回值按渲染序排列，且**只含可选项**（标题行不算），所以
+/// `display_items[i]` 就是第 `i` 个可选项 —— 画高亮和响应 Enter 必须都用它。
+pub fn palette_display_items(
+    mode: &PaletteMode,
+    state: &ChatState,
+    query: &str,
+) -> Vec<PaletteItem> {
+    let query_lower = query.trim().to_lowercase();
+    let filtered: Vec<PaletteItem> = get_search_items(mode, state, query)
+        .into_iter()
+        .filter(|item| palette_item_matches_query(item, &query_lower))
+        .collect();
+
+    if !palette_is_grouped(mode, query) {
+        return filtered;
+    }
+
+    let total = filtered.len();
+
+    // 分组项在前（按首次出现顺序），`category: None` 的散项平铺在后面。
+    let mut groups: Vec<(String, Vec<PaletteItem>)> = Vec::new();
+    let mut loose: Vec<PaletteItem> = Vec::new();
+    for item in filtered {
+        match item.category.clone() {
+            // `None` 不兜底成 "Other"：否则单条返回项会被提升成一个只含自己的
+            // "Other" 分组标题。
+            None => loose.push(item),
+            Some(category) => match groups.iter_mut().find(|(name, _)| *name == category) {
+                Some((_, items)) => items.push(item),
+                None => groups.push((category, vec![item])),
+            },
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(total);
+    for (_, items) in groups {
+        ordered.extend(items);
+    }
+    ordered.extend(loose);
+    ordered
+}
+
 pub fn palette_title(mode: &PaletteMode, query: &str) -> String {
     let scope = if !query.trim().is_empty() && matches!(mode, PaletteMode::Main) {
         "Search All"
@@ -1969,18 +2033,20 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
     );
     f.render_widget(input, chunks[0]);
 
-    let search_items = get_search_items(&state.palette_mode, state, query);
-    let filtered: Vec<&PaletteItem> = search_items
-        .iter()
-        .filter(|item| palette_item_matches_query(item, &query_lower))
-        .collect();
-
-    let grouped = !query.is_empty() || matches!(state.palette_mode, PaletteMode::Model);
+    // 顺序只在 `palette_display_items` 里定义一次（见它的文档注释）。这里和
+    // `handle_palette` 用的是同一个 vec，所以高亮画在第 `selected_palette_index`
+    // 项上、按 Enter 触发的也是第 `selected_palette_index` 项。
+    let grouped = palette_is_grouped(&state.palette_mode, query);
+    let display_items = palette_display_items(&state.palette_mode, state, query);
 
     let mut list_items: Vec<ListItem> = Vec::new();
-    let mut selectable_indices: Vec<usize> = Vec::new();
+    // `display_items[i]` 对应 `list_items` 里的哪一行（标题行不占位）。
+    let mut row_of_item: Vec<usize> = Vec::with_capacity(display_items.len());
+    // 已经发过标题的分组名；`category: None` 的散项没有标题，直接平铺。
+    let mut last_header: Option<String> = None;
+    let mut past_loose = false;
 
-    if filtered.is_empty() {
+    if display_items.is_empty() {
         // 空列表只出一条**不可选**的提示。模型面板加载中时说明原因，而不是
         // 摆一条 action=Back 的"加载中"菜单项让人去选。
         let hint = if matches!(state.palette_mode, PaletteMode::Model) && state.awaiting_models {
@@ -1992,75 +2058,29 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
             hint,
             Style::default().fg(inactive_color),
         ))));
-    } else if grouped {
-        let mut groups: Vec<(String, Vec<&PaletteItem>)> = Vec::new();
-        // `category: None` 的条目（导航项、面板级操作）不参与分组，
-        // 保持它们在 filtered 里的原始顺序平铺在分组内容之后。
-        let mut loose_items: Vec<&PaletteItem> = Vec::new();
-
-        for item in filtered.iter() {
-            // 关键：`None` 不再被兜底成 "Other"。否则单独一条返回项会被
-            // 提升成一个只含它自己的 "Other" 一级分组标题。
-            let Some(category) = item.category.clone() else {
-                loose_items.push(*item);
-                continue;
-            };
-
-            if let Some((_, items)) = groups.iter_mut().find(|(name, _)| name == &category) {
-                items.push(*item);
-            } else {
-                groups.push((category, vec![*item]));
-            }
-        }
-
-        for (category, items) in groups {
-            list_items.push(ListItem::new(Line::from(Span::styled(
-                category,
-                Style::default()
-                    .fg(primary_color)
-                    .add_modifier(Modifier::BOLD),
-            ))));
-
-            for item in items {
-                let mut spans = Vec::new();
-                spans.push(Span::raw("  "));
-                spans.push(Span::styled(
-                    item.label.clone(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ));
-                if !item.description.is_empty() {
-                    spans.push(Span::raw("  "));
-                    spans.push(Span::styled(
-                        item.description.clone(),
-                        Style::default().fg(inactive_color),
-                    ));
-                }
-
-                list_items.push(ListItem::new(Line::from(spans)));
-                selectable_indices.push(list_items.len() - 1);
-            }
-        }
-
-        // 未分组的条目：无标题、无缩进，直接平铺。
-        for item in loose_items {
-            let mut spans = Vec::new();
-            spans.push(Span::styled(
-                item.label.clone(),
-                Style::default().add_modifier(Modifier::BOLD),
-            ));
-            if !item.description.is_empty() {
-                spans.push(Span::raw("  "));
-                spans.push(Span::styled(
-                    item.description.clone(),
-                    Style::default().fg(inactive_color),
-                ));
-            }
-            list_items.push(ListItem::new(Line::from(spans)));
-            selectable_indices.push(list_items.len() - 1);
-        }
     } else {
-        for item in filtered.iter() {
+        for item in &display_items {
+            let indented = item.category.is_some();
+            if !indented {
+                past_loose = true;
+            } else if !past_loose {
+                if let Some(category) = &item.category {
+                    if last_header.as_deref() != Some(category.as_str()) {
+                        list_items.push(ListItem::new(Line::from(Span::styled(
+                            category.clone(),
+                            Style::default()
+                                .fg(primary_color)
+                                .add_modifier(Modifier::BOLD),
+                        ))));
+                        last_header = Some(category.clone());
+                    }
+                }
+            }
+
             let mut spans = Vec::new();
+            if indented {
+                spans.push(Span::raw("  "));
+            }
             spans.push(Span::styled(
                 item.label.clone(),
                 Style::default().add_modifier(Modifier::BOLD),
@@ -2074,18 +2094,16 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
             }
 
             list_items.push(ListItem::new(Line::from(spans)));
-            selectable_indices.push(list_items.len() - 1);
+            row_of_item.push(list_items.len() - 1);
         }
     }
 
     let mut list_state = ListState::default();
-    let filtered_len = filtered.len();
-    if filtered_len > 0 {
-        if state.selected_palette_index >= filtered_len {
-            state.selected_palette_index = filtered_len - 1;
+    if !row_of_item.is_empty() {
+        if state.selected_palette_index >= row_of_item.len() {
+            state.selected_palette_index = row_of_item.len() - 1;
         }
-        let selected_index = selectable_indices[state.selected_palette_index];
-        list_state.select(Some(selected_index));
+        list_state.select(Some(row_of_item[state.selected_palette_index]));
     }
 
     let list = List::new(list_items)
@@ -2220,6 +2238,118 @@ mod tests {
 
     fn ids(items: &[PaletteItem]) -> Vec<&str> {
         items.iter().map(|i| i.label.as_str()).collect()
+    }
+
+    /// 回归：高亮画在第几行，Enter 必须触发**同一个**条目。
+    ///
+    /// 真实事故：用户在模型面板把高亮移到 `opencode-zen/space-bunny-free` 上按
+    /// Enter，模型没换 —— 反而把模型列表重新拉了一遍。原因是同一个
+    /// `selected_palette_index` 被两边按**不同顺序**解释：
+    ///
+    /// - `render_palette` 先画带 `category` 的、再画 `category: None` 的散项，
+    ///   所以高亮下标是**渲染序**；
+    /// - `handle_palette` 的 Enter 直接 `filtered[index]`，是**过滤序**。
+    ///
+    /// 模型面板正好两种都有：`⟳ Fetch model list from API` 是 `category: None`
+    /// 且排在**第一位**。于是渲染序 `[模型…, 刷新]` 与过滤序 `[刷新, 模型…]`
+    /// 差一条 —— 下标 0 在渲染时是第一个模型、在 Enter 时是"刷新列表"。
+    #[test]
+    fn the_model_panels_highlight_order_is_the_order_enter_uses() {
+        let models = vec![
+            "opencode-zen/longcat-2.5-preview-free".to_string(),
+            "opencode-zen/space-bunny-free".to_string(),
+        ];
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "opencode-zen/longcat-2.5-preview-free".to_string(),
+            "magpie".to_string(),
+        );
+        map.insert(
+            "opencode-zen/space-bunny-free".to_string(),
+            "magpie".to_string(),
+        );
+
+        // 刷新入口确实排在第一位且没有分组 —— 这正是错位的来源，必须锁住。
+        let raw = get_model_palette_items(
+            &models,
+            "opencode-zen/longcat-2.5-preview-free",
+            false,
+            &map,
+            Some(60),
+        );
+        assert!(
+            raw.first().map(|i| i.category.is_none()) == Some(true),
+            "刷新入口应当是 category: None 且排在最前，实际：{:?}",
+            raw.first().map(|i| i.label.clone())
+        );
+
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        state.palette_mode = crate::ui::state::PaletteMode::Model;
+        state.available_models = models;
+        state.model_provider_map = map;
+        state.current_model = "opencode-zen/longcat-2.5-preview-free".to_string();
+
+        let display =
+            palette_display_items(&state.palette_mode, &state, state.palette_filter.trim());
+
+        // 渲染序：分组项在前（都属 magpie），刷新入口平铺在最后。
+        assert_eq!(display.len(), raw.len(), "可选项数量不能因为重排而变化");
+        assert!(
+            display.last().map(|i| i.category.is_none()) == Some(true),
+            "渲染序里刷新入口必须在最后，实际：{:?}",
+            display.last().map(|i| i.label.clone())
+        );
+
+        // 关键断言：渲染序与过滤序只在"刷新入口"这一条上不同，
+        // 因此每个模型的下标两者必须一致。
+        let raw_models: Vec<&str> = raw
+            .iter()
+            .filter(|i| i.category.is_some())
+            .map(|i| i.label.as_str())
+            .collect();
+        let display_models: Vec<&str> = display
+            .iter()
+            .filter(|i| i.category.is_some())
+            .map(|i| i.label.as_str())
+            .collect();
+        assert_eq!(
+            raw_models, display_models,
+            "分组模型之间的相对顺序不能被重排改变"
+        );
+
+        // 下标 0：渲染时是第一个模型（magpie 分组第一行），Enter 也必须是它，
+        // 不能是"刷新模型列表"。
+        assert!(
+            display[0].category.is_some(),
+            "下标 0 应当是模型而不是刷新入口，实际：{:?}",
+            display[0].label
+        );
+    }
+
+    /// 模型面板没开筛选时，`palette_display_items` 的顺序就是屏幕上的顺序。
+    #[test]
+    fn display_items_are_grouped_then_loose_in_every_palette() {
+        let models = vec!["m-a".to_string(), "m-b".to_string()];
+        let mut map = std::collections::HashMap::new();
+        map.insert("m-a".to_string(), "alpha".to_string());
+        map.insert("m-b".to_string(), "beta".to_string());
+
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        state.palette_mode = crate::ui::state::PaletteMode::Model;
+        state.available_models = models;
+        state.model_provider_map = map;
+
+        let display = palette_display_items(&state.palette_mode, &state, "");
+        assert!(palette_is_grouped(&state.palette_mode, ""));
+
+        // 最后一个一定是 category: None 的散项（刷新入口），中间全是分组模型。
+        assert!(display.last().unwrap().category.is_none());
+        assert!(
+            display[..display.len() - 1]
+                .iter()
+                .all(|i| i.category.is_some()),
+            "只有散项可以没有分组，其余都该在某个 provider 分组下"
+        );
     }
 
     /// 模型面板不该凭空造出 "Other" / "Manual" 之类的分组层级。
