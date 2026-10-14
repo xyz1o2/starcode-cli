@@ -1,6 +1,7 @@
 <!--
 name: 'Tool Description: MultiEdit'
 description: Multiple edits in single operation
+routing: edit-many
 -->
 Apply multiple edits across one or more files in a single operation.
 

@@ -1,6 +1,7 @@
 <!--
 name: 'Tool Description: Write'
 description: Create or overwrite files
+routing: create-file
 -->
 Writes a file to the local filesystem.
 

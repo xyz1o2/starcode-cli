@@ -116,16 +116,27 @@ fn tool_description_key(tool_name: &str) -> Option<&'static str> {
 
 /// 解析 `.md` frontmatter 中的 `description` 字段（`<!-- key: value -->` 块）
 fn parse_frontmatter_description(content: &str) -> Option<String> {
+    parse_frontmatter_field(content, "description")
+}
+
+/// 解析 frontmatter 里的任意标量字段。
+fn parse_frontmatter_field(content: &str, key: &str) -> Option<String> {
     let block = content
         .strip_prefix("<!--")
         .and_then(|rest| rest.split("-->").next())?;
     for line in block.lines() {
         let line = line.trim();
-        if let Some(value) = line.strip_prefix("description:") {
-            let value = value.trim().trim_matches('\'').trim_matches('"').trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
+        // 必须精确匹配 `key:`：只 strip_prefix(key) 会让 `description_hint:`
+        // 这类同前缀的键被误当成 `description`，而 `?` 会把整段扫描提前返回。
+        let Some(rest) = line.strip_prefix(key) else {
+            continue;
+        };
+        let Some(value) = rest.strip_prefix(':') else {
+            continue;
+        };
+        let value = value.trim().trim_matches('\'').trim_matches('"').trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
         }
     }
     None
@@ -134,6 +145,53 @@ fn parse_frontmatter_description(content: &str) -> Option<String> {
 /// 获取工具描述文件的完整文件名（`tool-description-<key>.md`）
 pub fn tool_description_filename(tool_name: &str) -> Option<String> {
     tool_description_key(tool_name).map(|key| format!("tool-description-{}.md", key))
+}
+
+/// 该工具在 frontmatter 里**主张的职责槽**（`routing:` 字段）。
+///
+/// 这是"这个活儿归谁"的**声明端**。权威名单在
+/// [`crate::core::prompts::routing_matrix::ROUTING_MATRIX`]；这里的取值必须与之一致，
+/// 由 `routing_matrix_is_the_only_authority` 等测试强制。
+///
+/// 没写 `routing:` 返回 `None`——绝大多数长尾工具不参与职责分工，属于正常情况。
+pub fn resolve_tool_routing(tool_name: &str) -> Option<String> {
+    let filename = tool_description_filename(tool_name)?;
+    let content = crate::core::prompts::loader::try_load_prompt(&filename)?;
+    parse_frontmatter_field(&content, "routing")
+}
+
+/// 列出**磁盘上**所有声明了 `routing:` 的描述文件：
+/// `[(文件名, 槽 id, 映射到该文件的工具注册名…)]`。
+///
+/// 一个描述文件可以服务多个工具（如 `readfile` 同时喂 `Read` 和 `read_many_files`），
+/// 所以第三项是列表（已排序——`tool_description_key_map` 是 HashMap，迭代序不稳定）。
+/// 拿不到任何注册名的条目由测试判为孤儿描述。
+pub fn declared_routing_claims() -> Vec<(String, String, Vec<String>)> {
+    let mut files: Vec<String> = super::SystemPrompts::iter()
+        .filter(|f| f.starts_with("tool-description-") && f.ends_with(".md"))
+        .map(|f| f.to_string())
+        .collect();
+    files.sort();
+
+    files
+        .into_iter()
+        .filter_map(|filename| {
+            let content = crate::core::prompts::loader::try_load_prompt(&filename)?;
+            let routing = parse_frontmatter_field(&content, "routing")?;
+            let key = filename
+                .strip_prefix("tool-description-")
+                .and_then(|rest| rest.strip_suffix(".md"))
+                .unwrap_or_default()
+                .to_string();
+            let mut tools: Vec<String> = tool_description_key_map()
+                .iter()
+                .filter(|(_, v)| **v == key)
+                .map(|(k, _)| (*k).to_string())
+                .collect();
+            tools.sort();
+            Some((filename, routing, tools))
+        })
+        .collect()
 }
 
 /// 加载工具的 schema 描述（frontmatter `description` 字段）

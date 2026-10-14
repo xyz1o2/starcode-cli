@@ -1,6 +1,7 @@
 <!--
 name: 'Tool Description: Edit'
 description: Exact string replacement in files
+routing: edit-one
 -->
 Performs exact string replacements in files.
 

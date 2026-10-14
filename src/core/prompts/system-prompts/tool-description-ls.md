@@ -1,6 +1,7 @@
 <!--
 name: 'Tool Description: ListDir'
 description: List directory contents with sizes and modification times. Dotfiles are listed; VCS metadata directories and paths ignored by .gitignore/.starignore are not. Capped at 1000 entries.
+routing: list-directory
 -->
 List directory contents with file details.
 

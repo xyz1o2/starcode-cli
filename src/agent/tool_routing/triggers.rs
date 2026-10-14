@@ -2,12 +2,21 @@ use crate::agent::tool_routing::has_action_intent;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-/// 自动触发器类型——按优先级从高到低排列
+/// 自动触发器类型——**同分时的**优先级（从高到低排列）。
+///
+/// # 排序规则改了：分数优先，kind 只做平手裁决
+///
+/// 以前这里是 `b.kind.cmp(&a.kind).then(b.score.cmp(&a.score))`——kind 是固定
+/// 优先级枚举、每个 kind 又最多只 push 一个候选，于是 `score` **永远打不破任何
+/// 平局**，`score_codebase_search_relevance` 那一整套关键词打分是死代码。
+/// 现在 [`TriggerEval::score`] 是第一排序键（`RouteScore`，0..=100，跨 kind 可比），
+/// kind 退化为第二键。两个工具抢同一个活儿时，分数高的赢；只有真的打平时
+/// 才按 Verification > CodebaseSearch > … 的安全序兜底。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum AutoTriggerKind {
-    /// 验证（最高优先级——编辑后立即检查）
+    /// 验证（编辑后必须检查，语义上最硬）
     Verification = 10,
-    /// 语义搜索（概念性查询，最通用）
+    /// 语义搜索
     CodebaseSearch = 5,
     /// JSON回退（已检测到行动意图但无工具调用）
     JsonFallback = 4,
@@ -21,16 +30,45 @@ pub(crate) enum AutoTriggerKind {
     ProjectMap = 0,
 }
 
-/// 触发器评估结果
+/// 触发器评估结果。
+#[derive(Debug, Clone)]
 pub(crate) struct TriggerEval {
     pub kind: AutoTriggerKind,
-    /// 0-10 的相关性分数，越高越应该触发
+    /// 0-100 的路由分，**跨 kind 可比**，是 `select_best_auto_trigger` 的主排序键。
     pub score: u32,
     pub reason: &'static str,
+    /// 人类可读的判分依据，写进 debug log——这是唯一能回答"它到底为什么触发/
+    /// 为什么没触发"的地方。eval 基座已删（见 docs/starlens-design.md §12 末），
+    /// 所以这行日志是当下唯一的可观测面，别省。
+    pub detail: String,
 }
 
-/// 评估所有可用的自动触发器，返回最高优先级+最高分的那个。
-/// 替代原来的串行 if-else 链，确保每轮只触发最相关的操作。
+/// 三个自动触发开关的取值。
+///
+/// 把它们从 [`select_best_auto_trigger`] 的参数里抽出来，是为了能在测试里直接指定
+/// 组合——以前三个开关各自散在函数体里读环境变量，测试只能依赖进程环境（Rust 单测
+/// 并行跑 + `OnceLock` 缓存，基本没法测），于是路由逻辑长期处于"看起来在跑、
+/// 实际没被测过"的状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RouteFlags {
+    pub auto_codebase_search: bool,
+    pub auto_skill_fallbacks: bool,
+    pub json_fallback: bool,
+}
+
+impl RouteFlags {
+    pub(crate) fn from_env() -> Self {
+        Self {
+            auto_codebase_search: auto_codebase_search_enabled(),
+            auto_skill_fallbacks: auto_skill_fallbacks_enabled(),
+            json_fallback: json_fallback_enabled(),
+        }
+    }
+}
+
+/// 评估所有可用的自动触发器，返回**分数最高**的那个。
+///
+/// `verification_required` 走短路：编辑后必须验证，不是打分能压过去的。
 pub(crate) fn select_best_auto_trigger(
     verification_required: bool,
     skip_verification: bool,
@@ -43,168 +81,342 @@ pub(crate) fn select_best_auto_trigger(
     editor_skill_attempted: bool,
     project_map_attempted: bool,
 ) -> Option<TriggerEval> {
-    let mut candidates: Vec<TriggerEval> = Vec::new();
-
-    // 验证触发器 — 最高优先级（编辑后必须检查）
-    if verification_required && !skip_verification {
-        candidates.push(TriggerEval {
-            kind: AutoTriggerKind::Verification,
-            score: 10,
-            reason: "edits_detected_requires_verification",
-        });
-    }
-
-    // 语义搜索 — 概念性查询的通用最佳选择
-    if should_trigger_codebase_search(
-        user_input,
-        current_content,
-        active_tools,
-        codebase_search_attempted,
-    ) {
-        let score = score_codebase_search_relevance(user_input, current_content);
-        candidates.push(TriggerEval {
-            kind: AutoTriggerKind::CodebaseSearch,
-            score,
-            reason: "conceptual_query_detected",
-        });
-    }
-
-    // JSON回退 — 检测到行动意图但模型没返回工具调用
-    if json_fallback_enabled() && has_action_intent(current_content) {
-        candidates.push(TriggerEval {
-            kind: AutoTriggerKind::JsonFallback,
-            score: 4,
-            reason: "action_intent_without_tool_calls",
-        });
-    }
-
-    // 导航器技能 — 需要代码结构理解
-    if should_trigger_navigator_skill(
+    select_best_auto_trigger_with_flags(
+        verification_required,
+        skip_verification,
         user_input,
         current_content,
         active_tools,
         codebase_search_attempted,
         navigator_skill_attempted,
+        analyzer_skill_attempted,
+        editor_skill_attempted,
+        project_map_attempted,
+        RouteFlags::from_env(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn select_best_auto_trigger_with_flags(
+    verification_required: bool,
+    skip_verification: bool,
+    user_input: &str,
+    current_content: &str,
+    active_tools: &HashSet<String>,
+    codebase_search_attempted: bool,
+    navigator_skill_attempted: bool,
+    analyzer_skill_attempted: bool,
+    editor_skill_attempted: bool,
+    project_map_attempted: bool,
+    flags: RouteFlags,
+) -> Option<TriggerEval> {
+    let mut candidates: Vec<TriggerEval> = Vec::new();
+
+    // 验证触发器 — 短路：安全约束优先于任何相关性打分
+    if verification_required && !skip_verification {
+        candidates.push(TriggerEval {
+            kind: AutoTriggerKind::Verification,
+            score: 100,
+            reason: "edits_detected_requires_verification",
+            detail: "verification_required && !skip_verification".to_string(),
+        });
+    }
+
+    // 语义搜索 — 只有真的像"跨文件排序定位"时才进候选
+    if let Some(score) = score_rank_locate_route(user_input) {
+        if should_trigger_codebase_search_with_flag(
+            user_input,
+            current_content,
+            active_tools,
+            codebase_search_attempted,
+            flags.auto_codebase_search,
+        ) {
+            candidates.push(TriggerEval {
+                kind: AutoTriggerKind::CodebaseSearch,
+                score,
+                reason: "ranked_cross_file_locate_shape",
+                detail: describe_rank_locate_route(user_input),
+            });
+        }
+    }
+
+    // JSON回退 — 检测到行动意图但模型没返回工具调用
+    if flags.json_fallback && has_action_intent(current_content) {
+        candidates.push(TriggerEval {
+            kind: AutoTriggerKind::JsonFallback,
+            score: 40,
+            reason: "action_intent_without_tool_calls",
+            detail: "has_action_intent(current_content)".to_string(),
+        });
+    }
+
+    // 导航器技能 — 需要代码结构理解
+    if should_trigger_navigator_skill_with_flag(
+        user_input,
+        current_content,
+        active_tools,
+        codebase_search_attempted,
+        navigator_skill_attempted,
+        flags.auto_skill_fallbacks,
     ) {
         candidates.push(TriggerEval {
             kind: AutoTriggerKind::NavigatorSkill,
-            score: 3,
+            score: 30,
             reason: "dependency_tracing_needed",
+            detail: "downstream of codebase_search".to_string(),
         });
     }
 
     // 项目地图 — 需要项目结构总览
-    if should_trigger_project_map(
+    if should_trigger_project_map_with_flag(
         user_input,
         current_content,
         active_tools,
         project_map_attempted,
+        flags.auto_skill_fallbacks,
     ) {
         candidates.push(TriggerEval {
             kind: AutoTriggerKind::ProjectMap,
-            score: 2,
+            score: 20,
             reason: "project_overview_needed",
+            detail: "downstream of auto_skill_fallbacks".to_string(),
         });
     }
 
     // 分析器技能 — 需要结构化分析
-    if should_trigger_analyzer_skill(
+    if should_trigger_analyzer_skill_with_flag(
         user_input,
         current_content,
         active_tools,
         project_map_attempted,
         analyzer_skill_attempted,
+        flags.auto_skill_fallbacks,
     ) {
         candidates.push(TriggerEval {
             kind: AutoTriggerKind::AnalyzerSkill,
-            score: 1,
+            score: 10,
             reason: "broad_analysis_needed",
+            detail: "downstream of project_map".to_string(),
         });
     }
 
     // 编辑器技能 — 最后手段
-    if should_trigger_editor_skill(
+    if should_trigger_editor_skill_with_flag(
         user_input,
         current_content,
         active_tools,
         codebase_search_attempted,
         navigator_skill_attempted,
         editor_skill_attempted,
+        flags.auto_skill_fallbacks,
     ) {
         candidates.push(TriggerEval {
             kind: AutoTriggerKind::EditorSkill,
-            score: 1,
+            score: 5,
             reason: "edit_context_insufficient",
+            detail: "downstream of codebase_search + navigator".to_string(),
         });
     }
 
-    // 按优先级排序：先比 kind 的固有优先级（Ord），再比相关性分数
-    candidates.sort_by(|a, b| b.kind.cmp(&a.kind).then(b.score.cmp(&a.score)));
+    // 分数优先，kind 只在同分时兜底（见 AutoTriggerKind 的文档）。
+    candidates.sort_by(|a, b| b.score.cmp(&a.score).then(b.kind.cmp(&a.kind)));
 
     candidates.into_iter().next()
 }
 
-/// 评估语义搜索的相关性分数（0-10）
-fn score_codebase_search_relevance(user_input: &str, current_content: &str) -> u32 {
+// ── 「跨文件排序定位」路由打分 ─────────────────────────────────────────────
+//
+// 这是 `ranked-cross-file-locate` 槽（`core::prompts::routing_matrix`）在
+// **自动触发路径**上的判分器。描述文件告诉模型"什么时候自己调"，这里决定
+// "模型不说话时我们替它调不调"——两边必须指向同一个活儿，否则又是一次错配。
+//
+// 判的是**句子的形状**，不是主题词：主题词永远是代码里的词，我们看不到。
+
+/// 分数低于这个值的候选根本不进 `candidates`。
+fn route_score_threshold() -> u32 {
+    static THRESHOLD: OnceLock<u32> = OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        std::env::var("STARCODE_ROUTE_SCORE_MIN")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(60)
+    })
+}
+
+/// 判分词表。提到模块级是因为**打分**和**解释**必须用同一份——
+/// 以前"看起来在路由"的打分函数和真正的谓词是各写各的，现在两者共用下列常量。
+const SWEEP_MARKERS: &[&str] = &[
+    "where is",
+    "where are",
+    "which file",
+    "which files",
+    "what files",
+    "all places",
+    "every place",
+    "across the repo",
+    "across the codebase",
+    "whole codebase",
+    "where does",
+    "where do",
+    "where did",
+    "where can i find",
+    "where should i",
+    "在哪",
+    "哪里",
+    "哪些文件",
+    "哪些地方",
+    "都哪里",
+    "在哪儿",
+    "何处",
+];
+
+/// 「找的是干这件事的地方，而不是某个符号」的功能动词。
+const FUNCTIONAL_VERBS: &[&str] = &[
+    "handle",
+    "handled",
+    "handling",
+    "implement",
+    "implemented",
+    "implementation",
+    "responsible",
+    "responsibility",
+    "process",
+    "processed",
+    "managed",
+    "enforced",
+    "处理",
+    "实现",
+    "负责",
+    "相关",
+    "逻辑",
+];
+
+/// 给出「像不像跨文件排序定位」的 0-100 分；低于阈值返回 `None`。
+///
+/// 形状特征（命中即加分）：
+/// - 跨文件扫面的说法（见 [`SWEEP_MARKERS`]）
+/// - 非祈使的疑问句（模型此时最可能直接给文字答案而不调工具）
+/// - 功能动词（见 [`FUNCTIONAL_VERBS`]）
+///
+/// 反向特征（命中即减分，精确工具更合适）：
+/// - 精确标识符形状：`snake_case` / `::` / `foo.bar()` / 路径 / glob / 正则元字符
+/// - 明确点名了别的工具（用户已经指定了工具，就别替他选）
+fn score_rank_locate_route(user_input: &str) -> Option<u32> {
+    let raw = user_input.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let lower = raw.to_lowercase();
+
+    let mut score: i32 = 20; // 基准：只是个问句就有一点可能
+
+    // ── 正向：跨文件扫面 ──
+    if SWEEP_MARKERS.iter().any(|m| lower.contains(m)) {
+        score += 35;
+    }
+
+    // 疑问句形状：模型最容易在这里直接作答而不调工具，正是自动触发该出手的时刻。
+    if raw.contains('?') || raw.contains('？') {
+        score += 15;
+    }
+
+    // 「处理 / 实现 / 相关」这类功能动词，说明找的是"干这件事的地方"而非某个符号。
+    if FUNCTIONAL_VERBS.iter().any(|v| lower.contains(v)) {
+        score += 15;
+    }
+
+    // 多个实词 = 可能有多个候选词要一起排序。
+    let words: Vec<&str> = raw
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != ':' && c != '.')
+        .filter(|w| w.chars().count() >= 3)
+        .collect();
+    if words.len() >= 3 {
+        score += 10;
+    }
+
+    // ── 反向：精确形状交给 Grep / Glob / CodeGraph ──
+    if has_exact_identifier_shape(raw) {
+        score -= 55;
+    }
+    if names_another_tool(&lower) {
+        score -= 45;
+    }
+
+    let score = score.clamp(0, 100);
+    (score >= route_score_threshold() as i32).then_some(score as u32)
+}
+
+/// 这句话里是否含"精确 token"——是的话 Grep 才是对的那个工具。
+fn has_exact_identifier_shape(raw: &str) -> bool {
+    // glob / 正则 / 路径
+    if raw.contains("::")
+        || raw.contains('/')
+        || raw.contains('*')
+        || raw.contains('\\')
+        || raw.contains(".*")
+        || raw.contains("^")
+        || raw.contains("$")
+    {
+        return true;
+    }
+    // snake_case 或 CamelCase 标识符（要求长度 ≥ 8，避免 "codebase_search" 之外的
+    // 普通下划线词误判成标识符 —— 下划线词常常本身就是关键词）
+    raw.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|w| {
+            w.chars().count() >= 8
+                && ((w.contains('_') && w.chars().any(|c| c.is_uppercase()))
+                    || (w.chars().any(|c| c.is_uppercase())
+                        && w.chars().any(|c| c.is_lowercase())
+                        && !w.chars().all(|c| c.is_alphanumeric())))
+        })
+}
+
+/// 用户是否点名了别的工具——他指定了，就别替他改。
+fn names_another_tool(lower: &str) -> bool {
+    const TOOL_WORDS: &[&str] = &[
+        "grep",
+        "glob",
+        "read ",
+        " codebase_search",
+        "codegraph",
+        "projectmap",
+        "sed ",
+        "awk ",
+    ];
+    TOOL_WORDS.iter().any(|t| lower.contains(t))
+}
+
+/// 把判分依据写成人能读的一句话，进 debug log。
+fn describe_rank_locate_route(user_input: &str) -> String {
     let lower = user_input.to_lowercase();
-    let combined = format!("{} {}", lower, current_content.to_lowercase());
-    let mut score = 5u32; // 基准分
-
-    let high_indicators = [
-        "how",
-        "why",
-        "what",
-        "explain",
-        "understand",
-        "概念",
-        "原理",
-        "怎么",
-        "为什么",
-        "是什么",
-        "理解",
-        "架构",
-        "architecture",
-        "design",
-        "pattern",
-    ];
-    let medium_indicators = [
-        "find", "Grep", "locate", "where", "找", "搜索", "定位", "哪里",
-    ];
-
-    for kw in &high_indicators {
-        if combined.contains(kw) {
-            score += 3;
-            break;
-        }
+    let mut why: Vec<&str> = Vec::new();
+    if SWEEP_MARKERS.iter().any(|m| lower.contains(*m)) {
+        why.push("cross-file sweep phrasing");
     }
-    for kw in &medium_indicators {
-        if combined.contains(kw) {
-            score += 1;
-            break;
-        }
+    if user_input.contains('?') || user_input.contains('？') {
+        why.push("question shape");
     }
-
-    score.min(10)
+    if FUNCTIONAL_VERBS.iter().any(|v| lower.contains(*v)) {
+        why.push("functional verb");
+    }
+    if has_exact_identifier_shape(user_input) {
+        why.push("-exact-token shape");
+    }
+    if names_another_tool(&lower) {
+        why.push("-named another tool");
+    }
+    if why.is_empty() {
+        why.push("no strong signal");
+    }
+    format!("{} => [{}]", why.join(", "), lower)
 }
 
-// ── 原触发器条件检查函数（供 select_best_auto_trigger 和旧代码复用）──
-
-/// 检查是否应该触发语义搜索
-fn should_trigger_codebase_search(
-    user_input: &str,
-    current_content: &str,
-    active_tools: &HashSet<String>,
-    already_attempted: bool,
-) -> bool {
-    should_trigger_codebase_search_with_flag(
-        user_input,
-        current_content,
-        active_tools,
-        already_attempted,
-        auto_codebase_search_enabled(),
-    )
-}
-
+/// 自动触发闸门。
+///
+/// 注意这次 `_user_input` **不再是下划线参数** —— 以前它带下划线是因为谓词压根不看
+/// 提问内容（真表达式只有 `enabled && !attempted && tool_present`），于是"概念性查询
+/// 检测"是一句空话，开关一打开就是每轮盲打。现在判分在
+/// [`score_rank_locate_route`] 里做，这里只做廉价的旁路检查。
 fn should_trigger_codebase_search_with_flag(
     _user_input: &str,
     _current_content: &str,
@@ -229,13 +441,20 @@ pub(crate) fn should_prefetch_codebase_search(
     )
 }
 
+/// 首轮预取：只有在首轮、开关开着、且提问**确实像**跨文件排序定位时才预取。
+///
+/// 以前 `user_input` 同样没被读，`history_len == 0` 就无条件预取一遍——那不是预取，
+/// 那是在每次新会话的开头强塞一次昂贵的全仓搜索。
 fn should_prefetch_codebase_search_with_flag(
-    _user_input: &str,
+    user_input: &str,
     active_tools: &HashSet<String>,
     history_len: usize,
     prefetch_enabled: bool,
 ) -> bool {
-    prefetch_enabled && history_len == 0 && active_tools.contains("CodebaseSearch")
+    prefetch_enabled
+        && history_len == 0
+        && active_tools.contains("CodebaseSearch")
+        && score_rank_locate_route(user_input).is_some()
 }
 
 /// 检查是否应该预取项目地图
@@ -253,32 +472,42 @@ pub(crate) fn should_prefetch_project_map(
 }
 
 fn should_prefetch_project_map_with_flag(
-    _user_input: &str,
+    user_input: &str,
     active_tools: &HashSet<String>,
     history_len: usize,
     prefetch_enabled: bool,
 ) -> bool {
-    prefetch_enabled && history_len == 0 && active_tools.contains("ProjectMap")
+    prefetch_enabled
+        && history_len == 0
+        && active_tools.contains("ProjectMap")
+        && looks_like_overview_question(user_input)
+}
+
+/// 「这个仓大概是什么样」——ProjectMap 预取的唯一正当理由。
+fn looks_like_overview_question(user_input: &str) -> bool {
+    let lower = user_input.to_lowercase();
+    const MARKERS: &[&str] = &[
+        "overview",
+        "structure",
+        "layout",
+        "what is this repo",
+        "what's this repo",
+        "get started",
+        "onboard",
+        "familiar",
+        "big picture",
+        "high level",
+        "架构",
+        "结构",
+        "概览",
+        "这个项目",
+        "这个仓库",
+        "上手",
+    ];
+    MARKERS.iter().any(|m| lower.contains(m))
 }
 
 /// 检查是否应该触发导航技能
-fn should_trigger_navigator_skill(
-    user_input: &str,
-    current_content: &str,
-    active_tools: &HashSet<String>,
-    codebase_search_attempted: bool,
-    already_attempted: bool,
-) -> bool {
-    should_trigger_navigator_skill_with_flag(
-        user_input,
-        current_content,
-        active_tools,
-        codebase_search_attempted,
-        already_attempted,
-        auto_skill_fallbacks_enabled(),
-    )
-}
-
 fn should_trigger_navigator_skill_with_flag(
     _user_input: &str,
     _current_content: &str,
@@ -294,23 +523,6 @@ fn should_trigger_navigator_skill_with_flag(
 }
 
 /// 检查是否应该触发分析器技能
-fn should_trigger_analyzer_skill(
-    user_input: &str,
-    current_content: &str,
-    active_tools: &HashSet<String>,
-    project_map_attempted: bool,
-    already_attempted: bool,
-) -> bool {
-    should_trigger_analyzer_skill_with_flag(
-        user_input,
-        current_content,
-        active_tools,
-        project_map_attempted,
-        already_attempted,
-        auto_skill_fallbacks_enabled(),
-    )
-}
-
 fn should_trigger_analyzer_skill_with_flag(
     _user_input: &str,
     _current_content: &str,
@@ -323,51 +535,20 @@ fn should_trigger_analyzer_skill_with_flag(
 }
 
 /// 检查是否应该触发项目地图
-fn should_trigger_project_map(
-    user_input: &str,
-    current_content: &str,
-    active_tools: &HashSet<String>,
-    already_attempted: bool,
-) -> bool {
-    should_trigger_project_map_with_flag(
-        user_input,
-        current_content,
-        active_tools,
-        already_attempted,
-        auto_skill_fallbacks_enabled(),
-    )
-}
-
 fn should_trigger_project_map_with_flag(
-    _user_input: &str,
+    user_input: &str,
     _current_content: &str,
     active_tools: &HashSet<String>,
     already_attempted: bool,
     auto_enabled: bool,
 ) -> bool {
-    auto_enabled && !already_attempted && active_tools.contains("ProjectMap")
+    auto_enabled
+        && !already_attempted
+        && active_tools.contains("ProjectMap")
+        && looks_like_overview_question(user_input)
 }
 
 /// 检查是否应该触发编辑器技能
-fn should_trigger_editor_skill(
-    user_input: &str,
-    current_content: &str,
-    active_tools: &HashSet<String>,
-    codebase_search_attempted: bool,
-    navigator_skill_attempted: bool,
-    already_attempted: bool,
-) -> bool {
-    should_trigger_editor_skill_with_flag(
-        user_input,
-        current_content,
-        active_tools,
-        codebase_search_attempted,
-        navigator_skill_attempted,
-        already_attempted,
-        auto_skill_fallbacks_enabled(),
-    )
-}
-
 fn should_trigger_editor_skill_with_flag(
     _user_input: &str,
     _current_content: &str,
@@ -394,9 +575,15 @@ pub(crate) fn dynamic_context_first_turn_enabled() -> bool {
     bool_env_flag("STAR_DYNAMIC_CONTEXT_FIRST_TURN", false)
 }
 
-/// 检查是否启用自动语义搜索
+/// 自动语义搜索闸门，**默认开**。
+///
+/// 以前默认 `false`，而 `should_trigger_codebase_search_with_flag` 又不看提问内容——
+/// 也就是说这套机制唯一的实际状态就是"永远关着"，整条 skill 回退梯（navigator 依赖
+/// `codebase_search_attempted`、editor 依赖 navigator）因此全是死代码。现在谓词会
+/// 真的判分（[`score_rank_locate_route`]），默认开着才是安全的。
+/// 需要恢复旧行为时 `STAR_ENABLE_AUTO_CODEBASE_SEARCH=0`。
 fn auto_codebase_search_enabled() -> bool {
-    bool_env_flag("STAR_ENABLE_AUTO_CODEBASE_SEARCH", false)
+    bool_env_flag("STAR_ENABLE_AUTO_CODEBASE_SEARCH", true)
 }
 
 /// 检查是否启用自动技能回退
@@ -447,4 +634,312 @@ fn read_bool_env_flag(key: &str, default: bool) -> bool {
             )
         })
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tools(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 测试用开关：语义搜索开、技能回退开、JSON 回退开。
+    /// 真实取值走 [`RouteFlags::from_env`]，与测试无关。
+    const FLAGS_ON: RouteFlags = RouteFlags {
+        auto_codebase_search: true,
+        auto_skill_fallbacks: true,
+        json_fallback: true,
+    };
+
+    const FLAGS_OFF: RouteFlags = RouteFlags {
+        auto_codebase_search: false,
+        auto_skill_fallbacks: false,
+        json_fallback: false,
+    };
+
+    /// 跨文件排序定位的**正向**样本：应该进候选。
+    ///
+    /// 这批样本就是"判定集"里 codebase_search 的那一类。它锁的是**路由契约**
+    /// （这类问题归 CodebaseSearch），不测量真实模型行为——eval 基座已删，
+    /// 真正的行为度量得先重建评测基座，见 docs/starlens-design.md §12 末。
+    #[test]
+    fn cross_file_locate_questions_score_above_threshold() {
+        for q in [
+            "where is retry handled?",
+            "where are rate limits enforced?",
+            "which files touch the config parsing?",
+            "how does the compaction flow work across the codebase?",
+            "配置解析的代码在哪些文件里？",
+            "所有用了 cache 的地方都在哪？",
+        ] {
+            assert!(
+                score_rank_locate_route(q).is_some(),
+                "应该被判为跨文件排序定位，却没进候选：{q:?}  detail={}",
+                describe_rank_locate_route(q)
+            );
+        }
+    }
+
+    /// 纯概念问答**不**进候选——这正是本次修复的核心立场。
+    ///
+    /// 它曾经被当成 CodebaseSearch 的主战场（描述里写 "Search by meaning"），
+    /// 而工具实际是词法 TF-IDF：问句的词一个都不会出现在代码里，
+    /// 一次必然零命中的检索只会白白烧掉一个回合。现在它归 StarLens（未开）
+    /// 或 Read/Glob，不归 CodebaseSearch。
+    #[test]
+    fn conceptual_qa_does_not_route_to_a_lexical_engine() {
+        for q in [
+            "token 预算是怎么算的？",
+            "这个项目的整体架构是怎样的？",
+            "why does the watcher use a debounce?",
+        ] {
+            assert!(
+                score_rank_locate_route(q).is_none(),
+                "概念问答不该路由到词法引擎：{q:?}  detail={}",
+                describe_rank_locate_route(q)
+            );
+        }
+    }
+
+    /// 精确 token 的**反向**样本：Grep / Glob / CodeGraph 才是对的那个工具。
+    ///
+    /// 这一条是本次修复的核心守卫：以前谓词根本不读提问内容，打开开关就对
+    /// 这些问题也盲打一发。
+    #[test]
+    fn exact_token_questions_do_not_score_above_threshold() {
+        for q in [
+            "grep for parse_toml_config",
+            "find src/**/*.rs",
+            "where is crate::core::tools::codebase_search::search_codebase defined?",
+            "run cargo test for the triggers module",
+        ] {
+            assert!(
+                score_rank_locate_route(q).is_none(),
+                "精确 token 查询不该触发排序定位：{q:?}  detail={}",
+                describe_rank_locate_route(q)
+            );
+        }
+    }
+
+    #[test]
+    fn empty_input_never_scores() {
+        assert!(score_rank_locate_route("").is_none());
+        assert!(score_rank_locate_route("   ").is_none());
+    }
+
+    /// 回归：分数必须真的影响选择。
+    ///
+    /// 以前 `sort_by(|a,b| b.kind.cmp(&a.kind).then(b.score.cmp(&a.score)))` 里 kind 是
+    /// 唯一键、每个 kind 又只出现一次，于是 score 恒为死字段。
+    ///
+    /// 这里造两个能同时进候选的：AnalyzerSkill（分 10、kind=1）与 EditorSkill
+    /// （分 5、kind=3）。**kind 更低的那个必须赢**——旧排序会选 EditorSkill。
+    #[test]
+    fn score_beats_kind_priority() {
+        let picked = select_best_auto_trigger_with_flags(
+            false,
+            false,
+            "随便一句",
+            "",
+            &tools(&["skill"]),
+            true,  // codebase_search_attempted → EditorSkill 的前置满足
+            true,  // navigator_skill_attempted → EditorSkill 的前置满足
+            false, // analyzer 未尝试
+            false, // editor 未尝试
+            true,  // project_map_attempted → AnalyzerSkill 的前置满足
+            FLAGS_ON,
+        );
+        let picked = picked.expect("两个候选都该进池");
+        assert_eq!(
+            picked.kind,
+            AutoTriggerKind::AnalyzerSkill,
+            "分数 10 必须压过 kind 更高的分数 5：{picked:?}"
+        );
+        assert_eq!(picked.score, 10);
+    }
+
+    /// 回归：编辑后必须验证，短路优先级不能被分数压过去。
+    #[test]
+    fn verification_short_circuits_scoring() {
+        let picked = select_best_auto_trigger_with_flags(
+            true,
+            false,
+            "where is retry handled?",
+            "",
+            &tools(&["CodebaseSearch"]),
+            false,
+            false,
+            false,
+            false,
+            false,
+            FLAGS_ON,
+        );
+        assert_eq!(
+            picked.as_ref().map(|p| p.kind),
+            Some(AutoTriggerKind::Verification)
+        );
+        assert_eq!(picked.map(|p| p.score), Some(100));
+    }
+
+    /// 强扫面信号 + 模型沉默 → 选 CodebaseSearch，且带可解释的 detail。
+    #[test]
+    fn strong_sweep_signal_selects_codebase_search() {
+        let picked = select_best_auto_trigger_with_flags(
+            false,
+            false,
+            "where is retry handled across the codebase?",
+            "",
+            &tools(&["CodebaseSearch"]),
+            false,
+            false,
+            false,
+            false,
+            false,
+            FLAGS_ON,
+        );
+        let picked = picked.expect("强扫面信号应产生候选");
+        assert_eq!(picked.kind, AutoTriggerKind::CodebaseSearch);
+        assert!(
+            picked.detail.contains("cross-file sweep phrasing"),
+            "判分依据要能解释这次触发：{}",
+            picked.detail
+        );
+    }
+
+    /// 弱信号 + JSON 回退开着 → 选回退，而不是排序定位。
+    /// 这是"score 压过 kind"的另一个面：kind 更高的 CodebaseSearch 也会落选。
+    #[test]
+    fn json_fallback_wins_when_no_sweep_signal() {
+        let picked = select_best_auto_trigger_with_flags(
+            false,
+            false,
+            "find the thing",
+            "I will update this file",
+            &tools(&["CodebaseSearch"]),
+            false,
+            false,
+            false,
+            false,
+            false,
+            FLAGS_ON,
+        );
+        assert_eq!(
+            picked.as_ref().map(|p| p.kind),
+            Some(AutoTriggerKind::JsonFallback),
+            "没有扫面信号时不该触发 CodebaseSearch：{picked:?}"
+        );
+    }
+
+    /// 已经搜过一次就不再自动搜（避免每轮重复消费同一份索引）。
+    #[test]
+    fn already_attempted_disables_the_route() {
+        let picked = select_best_auto_trigger_with_flags(
+            false,
+            false,
+            "where is retry handled across the codebase?",
+            "",
+            &tools(&["CodebaseSearch"]),
+            true, // attempted
+            false,
+            false,
+            false,
+            false,
+            FLAGS_ON,
+        );
+        assert!(picked.is_none(), "已尝试过就不该再选：{picked:?}");
+    }
+
+    #[test]
+    fn tool_must_be_active() {
+        let picked = select_best_auto_trigger_with_flags(
+            false,
+            false,
+            "where is retry handled across the codebase?",
+            "",
+            &tools(&["Grep"]),
+            false,
+            false,
+            false,
+            false,
+            false,
+            FLAGS_ON,
+        );
+        assert!(picked.is_none(), "工具没激活就不该选：{picked:?}");
+    }
+
+    /// 回归：`STAR_ENABLE_AUTO_CODEBASE_SEARCH` 曾默认 false，等于这套机制唯一的
+    /// 实际状态就是"永远关着"，整条 skill 回退梯全是死代码。
+    #[test]
+    fn auto_codebase_search_is_on_by_default() {
+        assert!(
+            RouteFlags::from_env().auto_codebase_search,
+            "语义搜索自动触发必须默认开；恢复旧行为请显式设 \
+             STAR_ENABLE_AUTO_CODEBASE_SEARCH=0"
+        );
+    }
+
+    /// 逃生门仍然有效：显式写 0 就是关。
+    ///
+    /// 这里测 [`read_bool_env_flag`] 而不是 [`bool_env_flag`]——后者按 key 用
+    /// `OnceLock` 缓存**首次**读取的结果，同进程内第二次调用拿到的是上一次的答案。
+    /// 开关一旦被缓存，测试就既测不了"默认值"也测不了"显式关闭"（本文件踩过）。
+    #[test]
+    fn auto_flags_are_documented_as_escapable() {
+        assert!(read_bool_env_flag(
+            "STAR_ENABLE_AUTO_CODEBASE_SEARCH_UNSET",
+            true
+        ));
+        assert!(!read_bool_env_flag(
+            "STAR_ENABLE_AUTO_CODEBASE_SEARCH_UNSET",
+            false
+        ));
+        assert_eq!(
+            RouteFlags::from_env().json_fallback,
+            json_fallback_enabled()
+        );
+    }
+
+    /// 预取只有在首轮**且**提问像扫面时才发生——以前是无条件预取。
+    #[test]
+    fn prefetch_requires_sweep_shape_and_first_turn() {
+        let active = tools(&["CodebaseSearch"]);
+        assert!(should_prefetch_codebase_search_with_flag(
+            "where is retry handled across the codebase?",
+            &active,
+            0,
+            true
+        ));
+        assert!(!should_prefetch_codebase_search_with_flag(
+            "grep for parse_toml_config",
+            &active,
+            0,
+            true
+        ));
+        assert!(!should_prefetch_codebase_search_with_flag(
+            "where is retry handled across the codebase?",
+            &active,
+            3, // 非首轮
+            true
+        ));
+    }
+
+    #[test]
+    fn project_map_route_requires_overview_question() {
+        let active = tools(&["ProjectMap"]);
+        assert!(should_trigger_project_map_with_flag(
+            "give me an overview of this repo",
+            "",
+            &active,
+            false,
+            true
+        ));
+        assert!(!should_trigger_project_map_with_flag(
+            "where is retry handled?",
+            "",
+            &active,
+            false,
+            true
+        ));
+    }
 }

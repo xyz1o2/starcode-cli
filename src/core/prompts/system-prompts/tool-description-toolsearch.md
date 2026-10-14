@@ -1,6 +1,7 @@
 <!--
 name: 'Tool Description: ToolSearch'
 description: Discover tools outside the current tool list — keyword query returns ranked matches with JSON schemas, `select:<tool_name>` returns one tool's full schema and usage guide. Tools found here are callable directly by name.
+routing: discover-long-tail
 -->
 Discover tools that are not in the current tool list (long-tail built-ins and MCP tools).
 

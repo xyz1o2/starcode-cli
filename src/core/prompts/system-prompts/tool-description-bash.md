@@ -1,6 +1,7 @@
 <!--
 name: 'Tool Description: Bash'
 description: Execute shell commands in persistent session
+routing: run-command
 -->
 Execute shell command in persistent bash session.
 

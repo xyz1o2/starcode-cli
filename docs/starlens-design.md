@@ -11,9 +11,17 @@
 
 现状问题（已核实）：
 - `codebase_search` 的 "ACE-POWERED/semantic" 是**词法 TF-IDF**，对真正的概念查询（词汇不匹配）召回弱。
-- 自动触发开关 `STAR_ENABLE_AUTO_CODEBASE_SEARCH` 默认 `false`（`triggers.rs:399`），
-  且描述把它圈死在"概念查询"，模型几乎只在最不擅长的场景调用它 → 触发少 + 体验差。
+- 自动触发开关 `STAR_ENABLE_AUTO_CODEBASE_SEARCH` 默认 `false`，且触发谓词**根本不读提问内容**，
+  于是这套机制唯一的实际状态就是"永远关着" → 触发少 + 体验差。
 - `ProjectMap`（`project_map.rs`）与 `codebase_search` 在"理解架构"的定位上撞车。
+- **（2026-10-14 定位）"何时用哪个工具"没有单一决策点。** 这句话被手抄在四处
+  （`system-prompt-tool-guidance.md` 的表格+Workflow、`tool-description-codebase_search.md`、
+  `code_base_graph.md` 的 `NOT for`、`tool-description-projectmap.md` 的 `NOT for`），四处互不校验。
+  最致命的一次漂移：目录表写 `Search **by meaning** | CodebaseSearch`，而工具自己的 schema
+  描述写 `Lexical, **NOT** meaning-based — exact strings use Grep`。模型在同一段 system prompt 里
+  同时被告知两件相反的事，裁决权归**离调用点最近**的那份（schema），于是它选 Grep，
+  而 bundle 里 `tool-description-grep.md` 还挂着一条无条件的 `ALWAYS use Grep for search tasks`。
+  **结果是：`codebase_search` 不是"触发条件太严"，而是架构上从来没有过触发器。**
 
 设计目标：**快、准、省 token、无向量库、随代码在 Git 里演进**。做法依据是业界同类工具
 （codemap/agentmap/L-SDF/CodeGraph）与 AOCI 规范收敛出的"解析器出结构、cheap model 出语义、
@@ -228,6 +236,15 @@ sym: AgentRequest, StreamMessage, AgentTaskUpdate
 已落地并通过测试（26 个 lens 单测 + 命令分类守卫，全绿；新增代码零 clippy 警告）：
 
 - **P0** codebase_search 描述消除错配：`tool-description-codebase_search.md` + `codebase_search.rs` 的 `description()`/query schema 改为诚实的"ranked lexical"。
+  > ⚠️ **P0 半途而废，且做反了（2026-10-14 修正）**：它只改了被指向的那一份描述，
+  > 另外三份（目录表 / code_graph / projectmap）一个字没动，于是"错配"没消除、被制造了。
+  > 正确做法见下面的 **P0'**。
+- **P0' 路由契约收成单一事实源**（2026-10-14 落地，见 §14）：新增 `src/core/prompts/routing_matrix.rs`
+  作为"某个活儿归谁"的**唯一**权威；目录表与 Workflow 段由它渲染（md 里的手写表格已删，
+  换成 `{{ROUTING_MATRIX}}` / `{{TOOL_WORKFLOW}}` 占位符）；每个 `tool-description-*.md`
+  在 frontmatter 里用 `routing: <slot.id>` 声明自己主张的槽，测试强制"一个槽有且只有一个主张者"。
+  另把 Grep 的 `ALWAYS use Grep for search tasks` 收窄为 `ALWAYS use Grep for **exact** content search`
+  —— 它原本在指令强度上压过所有竞争者。
 - **P1** StarLens 库核心：`src/core/context/lens.rs`（模型/紧凑格式）、`lens_scope.rs`（Managed Scope + secret 红线）、`lens_extract.rs`（tree-sitter 结构抽取）、`lens_build.rs`（全仓组装 + `.star/lens/` 落盘 + baseline）、`lens_enrich.rs`（prompt/parse/apply + 实时 `StarClient` 适配 `enrich_entry_with_client`）、`lens_service.rs`（门面 + `STAR_LENS_*` 门控 + `rebuild_enriched`）。
 - **P2** 漂移检测 + 增量闭环：`lens_drift.rs`（Stale/Missing/Orphan/Unbaselined）+ `lens_service::update`（只重算受影响对象并落盘，完成"检测→标脏→重算"闭环）。
 - **P3** agent 接线（全部 `STAR_LENS_ENABLED` 门控，默认关，不碰默认行为）：
@@ -239,6 +256,22 @@ sym: AgentRequest, StreamMessage, AgentTaskUpdate
 - **P4** CodeGraph 提升为一等公民工具：`code_graph_tool.rs`（`CodeGraph` 工具，`symbol`→who-calls/callees/调用链，底层复用 `trace_call_chain`，只读、spawn_blocking）；注册于 `agent_runtime.rs`、入 `ToolName` 枚举（`constants.rs`）+ `CORE_TOOL_NAMES`、带 `tool-description-code_graph.md`。
 
 待做：P5（重型治理：baseline CAS / Ledger 审计 / scope 变更事务，按需）。
+
+## 11.1 触发链路修复（2026-10-14，与 P0' 同批落地）
+
+文案收成单一事实源只能解决"模型读到矛盾指令"。**另一半是：模型不说话时谁来替它调。**
+那条链路此前是四重死法，逐条修掉：
+
+| 原状 | 现在 |
+|---|---|
+| `should_trigger_codebase_search_with_flag(_user_input, _current_content, …)` —— 两个提问参数都带下划线，谓词压根不读提问。真表达式只有 `enabled && !attempted && tool_present`，"概念性查询检测"是一句空话 | `score_rank_locate_route(user_input)` 真判分（跨文件扫面措辞 +35 / 疑问句 +15 / 功能动词 +15 / 多实词 +10；精确标识符形状 −55、用户点名别的工具 −45），阈值 `STARCODE_ROUTE_SCORE_MIN`（默认 60） |
+| `sort_by(\|a,b\| b.kind.cmp(&a.kind).then(b.score.cmp(&a.score)))` —— kind 是固定枚举且每个 kind 最多 push 一次，**`score` 永远打不破平局**，那一整套关键词打分是死代码 | 分数是**第一**排序键、跨 kind 可比（0..=100），kind 退化为同分兜底。`TriggerEval` 新增 `detail` 字段把判分依据写进 debug log |
+| `STAR_ENABLE_AUTO_CODEBASE_SEARCH` 默认 `false` → 整套机制唯一实际状态是"永远关着"，下游 navigator/editor 梯（都依赖 `codebase_search_attempted`）全是死代码 | 默认**开**（`STAR_ENABLE_AUTO_CODEBASE_SEARCH=0` 仍是逃生门）。谓词会判分了，默认开才安全 |
+| `build_codebase_search_tool_call(user_input, …)` 把**整句自然语言**塞给词法 TF-IDF 引擎，而 schema 要求 keywords；`codebase_search_attempted` 在**调用前**置位，于是冷启动那次 `Warming` 空结果把闸门永久关上，工具自己给的"稍后重跑"被自家 flag 当场否掉 | `extract_search_keywords()` 抽关键词（英文停用词 + CJK bigram 分词，保 `snake_case`/`::`/路径）；闸门改由 `tool_helpers::tool_result_is_usable()` **事后**判定，`Warming`/失败/空输出都不算"已搜过" |
+| `ToolSequenceLearner`（186 行）导出但全仓零调用，且自带一张把 CodebaseSearch 排在第三顺位的关键词表 —— 一份从不生效的竞争性路由意见 | 删除 |
+
+自动触发仍在**"模型有话但没调工具"**的分支里跑（`process_llm_response` 的 `else`）。这是有意的：
+模型已经调了 Grep 就说明它做了选择，此时插队是噪音。要改的是"模型该选什么"，不是"抢模型的轮次"。
 
 ## 12. 成功指标（怎么知道做成了）
 
@@ -255,6 +288,26 @@ sym: AgentRequest, StreamMessage, AgentTaskUpdate
 没有这组数，"快准省"只是口号。
 
 > ⚠️ **这套评测基础设施已随 eval 体系删除（2026-10-13）。** 上表的"每任务工具调用数""token 计数""首次定位正确率"需要一套固定任务集来跑，而 `starcode eval`、`eval/tasks.json`、`src/agent/eval_*.rs` 都已被删除（理由见 `CLAUDE.md` 的 "The eval harness is gone"）。**要落地这张表，必须先重建评测基座** —— 否则 P1 之后的每一期都只能靠感觉判断有没有变快。这不是本文能顺手带过的缺口，是 StarLens 整条路线当前最大的阻塞项。
+
+### 12.1 现在有什么、没有什么（2026-10-14 诚实交代）
+
+本次 P0'/触发链路修复**没有**重建评测基座，因此：
+
+**有了**
+- **路由契约守卫**（`core::prompts::routing_matrix` 的 6 个测试）：钉死"一个职责槽有且只有一个主张者"、
+  "没有描述文件能声明矩阵外的槽"、"槽的主管工具必须存在描述文件"。这类**文案漂移**从此让 CI 变红。
+- **路由判分的判定集**（`tool_routing::triggers` 的 8 个测试）：约 20 条真实提问，正向样本
+  （跨文件扫面）必须进候选、反向样本（精确 token、纯概念问答）必须不进。
+- **可观测性**：`[ACE_AUTO] selected trigger … detail=[…]` 与 `[ACE_AUTO] CodebaseSearch auto-run satisfied=…`
+  两行 debug log，是当下唯一能回答"它为什么触发/为什么没触发"的出口。
+
+**没有**
+- **行为度量**：上面这些测试锁的是**契约**（这类问题归哪个工具），**不是**真实模型的路由行为。
+  没有任何东西能告诉你"改了描述之后触发率是升是降"——那需要跑真实任务集。
+- **A/B 对照**：阈值 60、`STAR_ENABLE_AUTO_CODEBASE_SEARCH` 默认开，都是按形状判据拍的，
+  没有用数据校准过。
+
+所以：**契约不会再漂了，但"漂得对不对"仍然要靠人判断**。要真正闭环，还是得重建评测基座。
 
 ## 13. 参考
 

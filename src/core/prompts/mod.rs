@@ -6,6 +6,7 @@ pub mod loader;
 pub mod main_system;
 pub mod prompt_cache;
 pub mod reminders;
+pub mod routing_matrix;
 pub mod security_policy;
 pub mod skills;
 pub mod summary;

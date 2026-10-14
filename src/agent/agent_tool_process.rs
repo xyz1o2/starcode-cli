@@ -711,6 +711,12 @@ impl Agent {
     }
 
     /// 执行通用的自动触发器——构建工具调用、推送助手消息、执行工具、推送结果
+    ///
+    /// `usable_flag`：可选的"这次调用真的给出了可用结果"回写槽。
+    /// 只有 [`AutoTriggerKind::CodebaseSearch`] 用它——它的冷启动首查会返回
+    /// `Warming`（空结果 + "稍后重跑"），若把闸门当成"调用过"就置位，
+    /// 工具自己给出的重跑建议会被自家 flag 否掉。
+    #[allow(clippy::too_many_arguments)]
     async fn run_auto_trigger_tool(
         &mut self,
         user_input: &str,
@@ -719,11 +725,15 @@ impl Agent {
         verification_required: &mut bool,
         skip_verification: bool,
         loop_state: &mut LoopState,
+        usable_flag: Option<&mut bool>,
     ) -> TurnResult {
         if let Err(exhausted) =
             accept_tool_calls(&mut loop_state.budget, std::slice::from_ref(&tool_call))
         {
             messages.push(StarMessage::system(exhausted.recovery_message(1)));
+            if let Some(flag) = usable_flag {
+                *flag = false;
+            }
             return TurnResult::Continue;
         }
         messages.push(StarMessage::assistant_with_tool_calls(vec![
@@ -737,6 +747,9 @@ impl Agent {
         match hooks::run_pre_tool_hooks(user_input, &tool_call).await {
             Ok(()) => {
                 let result = self.execute_single_tool(&tool_call).await;
+                if let Some(flag) = usable_flag {
+                    *flag = tool_helpers::tool_result_is_usable(&result);
+                }
                 tool_helpers::update_verification_state(
                     &tool_call,
                     &result,
@@ -759,6 +772,10 @@ impl Agent {
                 TurnResult::Continue
             }
             Err(reason) => {
+                // 被 PreToolUse 钩子拦下 = 这次调用什么都没产出，不能算"已搜过"。
+                if let Some(flag) = usable_flag {
+                    *flag = false;
+                }
                 // Denial tracking for auto-trigger tools too
                 if let Some(nudge_msg) = self
                     .denial_tracker
@@ -828,8 +845,8 @@ impl Agent {
         };
 
         crate::utils::logging::append_debug_log_line(&format!(
-            "[ACE_AUTO] selected trigger {:?} (score={}, reason={}) turn={}",
-            selected.kind, selected.score, selected.reason, current_turn,
+            "[ACE_AUTO] selected trigger {:?} (score={}, reason={}) detail=[{}] turn={}",
+            selected.kind, selected.score, selected.reason, selected.detail, current_turn,
         ));
 
         match selected.kind {
@@ -846,21 +863,33 @@ impl Agent {
                     verification_required,
                     skip_verification,
                     loop_state,
+                    None,
                 )
                 .await
             }
             AutoTriggerKind::CodebaseSearch => {
-                *codebase_search_attempted = true;
+                // 闸门**不**在这里置位——它在工具真给出可用结果之后才置。
+                // 冷启动首查几乎必然是 Warming（后台建索引与首轮 LLM 请求并发），
+                // 以前在这里一刀切置 true，于是工具自己给出的"稍后重跑"建议
+                // 被自家 flag 当场否掉，这一轮再也补不上那次搜索。
+                let mut satisfied = false;
                 let tool_call = build_codebase_search_tool_call(user_input, current_turn);
-                self.run_auto_trigger_tool(
-                    user_input,
-                    messages,
-                    tool_call,
-                    verification_required,
-                    skip_verification,
-                    loop_state,
-                )
-                .await
+                let result = self
+                    .run_auto_trigger_tool(
+                        user_input,
+                        messages,
+                        tool_call,
+                        verification_required,
+                        skip_verification,
+                        loop_state,
+                        Some(&mut satisfied),
+                    )
+                    .await;
+                *codebase_search_attempted = satisfied;
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[ACE_AUTO] CodebaseSearch auto-run satisfied={satisfied} turn={current_turn}"
+                ));
+                result
             }
             AutoTriggerKind::NavigatorSkill => {
                 *navigator_skill_attempted = true;
@@ -872,6 +901,7 @@ impl Agent {
                     verification_required,
                     skip_verification,
                     loop_state,
+                    None,
                 )
                 .await
             }
@@ -885,6 +915,7 @@ impl Agent {
                     verification_required,
                     skip_verification,
                     loop_state,
+                    None,
                 )
                 .await
             }
@@ -898,6 +929,7 @@ impl Agent {
                     verification_required,
                     skip_verification,
                     loop_state,
+                    None,
                 )
                 .await
             }
@@ -934,6 +966,7 @@ impl Agent {
                                     verification_required,
                                     skip_verification,
                                     loop_state,
+                                    None,
                                 )
                                 .await;
                         }
@@ -967,6 +1000,7 @@ impl Agent {
                     verification_required,
                     skip_verification,
                     loop_state,
+                    None,
                 )
                 .await
             }

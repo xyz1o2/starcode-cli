@@ -1,6 +1,7 @@
 <!--
 name: 'Tool Description: Glob'
 description: Find files by name pattern. Returns up to 100 paths, most recently modified first. Bare patterns like `*.rs` match at any depth; `*` does not cross `/`. Paths ignored by .gitignore/.starignore are skipped unless respect_git_ignore is false.
+routing: file-name
 -->
 Fast file pattern matching tool that works with any codebase size.
 

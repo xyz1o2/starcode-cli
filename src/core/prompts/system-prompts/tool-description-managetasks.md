@@ -1,6 +1,7 @@
 <!--
 name: 'Tool Description: TodoWrite'
 description: Update the todo list for the current session. To be used proactively and often to track progress and pending tasks. Make sure that at least one task is in_progress at all times. Always provide both content (imperative) and activeForm (present continuous) for each task.
+routing: track-work
 -->
 Use this tool to create and manage a structured task list for the current coding session. This helps track progress, organize complex tasks, and demonstrate thoroughness to the user.
 

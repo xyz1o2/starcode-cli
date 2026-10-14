@@ -1,6 +1,7 @@
 <!--
 name: 'Tool Description: ReadFile'
 description: Read file from filesystem
+routing: read-known-file
 -->
 Reads a file from the local filesystem. You can access any file directly by using this tool.
 

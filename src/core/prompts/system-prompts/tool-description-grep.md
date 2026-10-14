@@ -1,6 +1,7 @@
 <!--
 name: 'Tool Description: Grep'
 description: Content search on ripgrep. Regex or literal, glob include/exclude filters. Respects .gitignore/.starignore; dotfiles searched, VCS dirs skipped.
+routing: exact-content
 -->
 A powerful search tool built on ripgrep.
 
@@ -17,7 +18,12 @@ A powerful search tool built on ripgrep.
 - `case_sensitive`, `whole_word`, `max_results`, `include_hidden`
 
 **Rules**:
-- ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.
+- ALWAYS use Grep for **exact** content search — you know the literal string, symbol or regex.
+  NEVER invoke `grep` or `rg` as a Bash command; this tool handles permissions and access.
+- When you only know the rough domain words (not the literal token) and want the top-ranked
+  regions across many files rather than every match, that is `CodebaseSearch` — it is the
+  better first pass in exactly that case. The difference is ranking, not correctness: either
+  tool will do.
 - Supports full regex syntax (e.g., `log.*Error`, `function\s+\w+`). Patterns match within a single line.
 - Dotfiles are searched by default (`.github/workflows/`, `.env.example` are reachable); `.git`, `.svn`, `.hg`, `.bzr`, `.jj` and `.sl` are always skipped, as is anything ignored by `.gitignore`, `.starignore`, `.ignore`/`.rgignore` or `~/.star/ignore`.
 - Use `exclude_pattern` to leave out tests or generated code — nothing is filtered out on your behalf.

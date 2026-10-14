@@ -549,7 +549,9 @@ pub async fn run_codebase_search_for_skill(root_path: std::path::PathBuf, query:
 
 impl ToolInvocation for CodebaseSearchInvocation {
     fn get_description(&self) -> String {
-        format!("Semantic Search: {}", self.params.query)
+        // 别再叫 "Semantic Search"：这个词和"按语义检索"的承诺一起出现在 UI 上，
+        // 会让使用者以为它答的是概念问题，而它其实是词法排序。
+        format!("Ranked cross-file search: {}", self.params.query)
     }
 
     fn tool_locations(&self) -> Vec<ToolLocation> {
@@ -599,7 +601,14 @@ impl BaseDeclarativeTool for CodebaseSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Ranked lexical codebase search (TF-IDF + query expansion + rank fusion). Best for ranked keyword/structural locate across files; returns ranked snippets with match signals. Lexical, NOT meaning-based — for exact strings use Grep, for filenames use Glob."
+        // 与 `tool-description-codebase_search.md` 的 frontmatter 同一句话。
+        // 两份各写一遍时它们漂移过：schema 说"按语义"，指南说"按词法"，
+        // 模型收到矛盾指令后退回 Grep，这个工具就永远不触发。
+        // 权威分工见 `core::prompts::routing_matrix::ROUTING_MATRIX`
+        // （槽 `ranked-cross-file-locate`）。
+        // 注意长度受 `compact_tool_definition` 的 160 字符上限约束，
+        // `core::prompts::tests::ace_tool_descriptions_fit_compact_limit` 会盯着。
+        "Ranked cross-file search — top relevant regions with match signals, not every raw match. Use when you know roughly the code's words; for exact strings use Grep."
     }
 
     fn kind(&self) -> Kind {
@@ -612,7 +621,7 @@ impl BaseDeclarativeTool for CodebaseSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Keywords or a short phrase whose terms appear in the code (e.g. 'retry backoff', 'parse config toml')"
+                    "description": "Keywords or a short phrase whose terms appear in the code (e.g. 'retry backoff', 'parse config toml'). Pass keywords, not a full natural-language question — a sentence dilutes the ranking."
                 },
                 "path": {
                     "type": "string",
@@ -1102,10 +1111,15 @@ fn search_codebase_with_limits(
     if matches!(source, EngineSource::Warming) {
         let mut output = String::new();
         output.push_str(&format!(
-            "Semantic index is building in the background for '{}' (first build; typically finishes in seconds).\n",
+            "The cross-file search index for '{}' is still building in the background (first build; typically finishes in seconds).\n",
             root.display()
         ));
-        output.push_str("No results available from the semantic index this turn. For exact symbols/strings use `Grep` now; re-run `CodebaseSearch` shortly for conceptual queries.\n");
+        // 措辞要"再试一次"，而不是"去用 Grep"：上次这里写的是
+        // "No results available ... use `Grep` now"，等于在模型第一次调用这个工具时
+        // 就教它别再用——第一次几乎必然是空的（lazy_init 的后台构建和首轮 LLM 请求并发）。
+        output.push_str(
+            "No hits this turn — this is a cold index, not an empty result. Re-run `CodebaseSearch` with the same keywords once before giving up on it.\n",
+        );
         return Ok(output);
     }
 

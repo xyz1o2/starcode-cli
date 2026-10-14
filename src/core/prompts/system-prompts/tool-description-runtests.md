@@ -1,6 +1,7 @@
 <!--
 name: 'Tool Description: RunTests'
 description: Execute test suites
+routing: run-tests
 -->
 Run project tests with configurable options.
 

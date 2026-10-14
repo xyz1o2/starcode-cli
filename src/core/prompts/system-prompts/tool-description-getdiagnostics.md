@@ -1,6 +1,7 @@
 <!--
 name: 'Tool Description: GetDiagnostics'
 description: Get code diagnostics and errors
+routing: check-compile
 -->
 Retrieve code diagnostics: errors, warnings, linting issues.
 

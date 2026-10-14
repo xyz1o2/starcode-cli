@@ -3,6 +3,31 @@ use crate::agent::tool_routing::{is_edit_tool_name, is_validation_tool_name};
 use crate::types::{StarToolCall, ToolResult};
 use std::sync::Arc;
 
+/// 这次工具调用算不算"给出了可用结果"。
+///
+/// 只用于驱动 `codebase_search_attempted` 这类**一次性闸门**。区别很重要：
+/// 冷启动时 `CodebaseSearch` 第一次调用几乎必然返回 `Warming`——空结果 + 一句
+/// "稍后重跑"。把它算成"已搜过"的话，闸门就永久关上了，工具自己给的重跑建议
+/// 被自家 flag 当场否掉，这次搜索永远补不上。
+///
+/// 认输（`success == false`）当然也不算——错误不代表拿到了答案。
+pub(crate) fn tool_result_is_usable(result: &ToolResult) -> bool {
+    if !result.success {
+        return false;
+    }
+    let text = result.output.as_deref().unwrap_or_default();
+    if text.trim().is_empty() {
+        return false;
+    }
+    // 索引还在预热：内容是解释性文字而非检索结果。
+    const COLD_MARKERS: &[&str] = &[
+        "is still building",
+        "is building in the background",
+        "no hits this turn",
+    ];
+    !COLD_MARKERS.iter().any(|m| text.contains(m))
+}
+
 pub(crate) fn execute_single_tool_with_progress<'a>(
     tool_executor: Arc<ToolExecutor>,
     tool_call: StarToolCall,
@@ -332,5 +357,47 @@ mod tests {
     fn cjk_reasoning_passes_through_unchanged() {
         let out = sanitize_stream(&["用户", "想要", "修复", "这个 bug"]);
         assert_eq!(out, "用户想要修复这个 bug");
+    }
+
+    // ── tool_result_is_usable ──────────────────────────────────────────────
+
+    fn result(success: bool, output: &str) -> ToolResult {
+        ToolResult {
+            success,
+            output: Some(output.to_string()),
+            error: None,
+            data: None,
+        }
+    }
+
+    /// 回归：`codebase_search_attempted` 曾是"调用过"语义，于是冷启动那次
+    /// Warming 空结果把闸门永久关上，工具自己给的"稍后重跑"被自家 flag 否掉。
+    #[test]
+    fn warming_result_is_not_usable() {
+        let warming = result(
+            true,
+            "The cross-file search index for '/repo' is still building in the background \
+             (first build; typically finishes in seconds).\nNo hits this turn — this is a cold \
+             index, not an empty result. Re-run `CodebaseSearch` with the same keywords once \
+             before giving up on it.",
+        );
+        assert!(
+            !tool_result_is_usable(&warming),
+            "预热空结果不能让闸门关闭，否则那次重跑永远补不上"
+        );
+    }
+
+    #[test]
+    fn real_hits_are_usable() {
+        assert!(tool_result_is_usable(&result(
+            true,
+            "## src/core/tools/codebase_search.rs (score 8.2)\n..."
+        )));
+    }
+
+    #[test]
+    fn failures_and_empties_are_not_usable() {
+        assert!(!tool_result_is_usable(&result(false, "boom")));
+        assert!(!tool_result_is_usable(&result(true, "   ")));
     }
 }

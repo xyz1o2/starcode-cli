@@ -1,6 +1,7 @@
 <!--
 name: 'Tool Description: CodeGraph'
 description: Precise call-graph query — who-calls / callees / call chains for a symbol via tree-sitter + resolved edges. For structural "what calls X" questions.
+routing: call-structure
 -->
 Precise **call-graph** query over the project. Give it a symbol name; it returns who-calls, callees, and resolved call chains built from tree-sitter parsing — the structural relationships `Grep` can't follow across dynamic dispatch.
 
@@ -10,7 +11,8 @@ Precise **call-graph** query over the project. Give it a symbol name; it returns
 
 **NOT for**:
 - Exact string / regex matches → use `Grep`
-- Conceptual / keyword "where is this handled" → use `CodebaseSearch`
+- You don't know the symbol name yet, only rough domain words, and want ranked regions across the
+  repo → use `CodebaseSearch` first to find candidate symbols, then come back here with the name
 - Reading a known file → use `Read`
 
 **Params**:
