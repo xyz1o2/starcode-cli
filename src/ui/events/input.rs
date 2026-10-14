@@ -1828,13 +1828,25 @@ pub async fn dispatch_global_binding(
         // 否则又会退回到「只有任务面板可见时才生效」的老行为。
         GlobalBinding::ToggleTranscript => {
             let on = state.toggle_transcript_mode();
-            // 直接写 current_status_line：emit_status_text 只放行 i18n::status_prefixes()
-            // 允许的前缀，"Verbose output: …" 会被它静默丢掉。
-            state.current_status_line = Some(if on {
-                "Verbose output: ON".to_string()
-            } else {
-                "Verbose output: OFF".to_string()
-            });
+            // 走 toast，不走 `current_status_line`。
+            //
+            // `current_status_line` 是**实时状态**槽，渲染在活动 spinner 行里；
+            // "Verbose output: ON/OFF" 是一条用过即弃的通知，塞进去会占用一个
+            // `·` 分隔位、与回合计时并排显示成 `18s · Verbose output: OFF`
+            // ——一条过期通知伪装成了"现在正在发生的事"。
+            //
+            // （此前写这里是因为 `emit_status_text` 只放行
+            // `i18n::status_prefixes()` 允许的前缀、"Verbose output: …" 会被它
+            // 静默丢掉；那是个绕过白名单的 workaround，仓里 `Auto-compact on/off`
+            // 早就是用 toast 的。）
+            state.push_toast(
+                if on {
+                    "Verbose output: ON"
+                } else {
+                    "Verbose output: OFF"
+                },
+                crate::ui::state::store::ToastKind::Info,
+            );
             Ok(true)
         }
         // Ctrl+T：任务面板（对标 app:toggleTodos）。Ctrl+B 不在此列 —— Claude Code

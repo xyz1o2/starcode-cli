@@ -47,13 +47,17 @@ fn parse_count_after(s: &str, keyword: &str) -> Option<u32> {
         .and_then(|n| n.parse().ok())
 }
 
-/// Claude Code style spinner characters - 使用固定宽度字符避免行移动
-/// ● 和 ○ 同属 East Asian Ambiguous 宽度类，在任何终端下宽度一致；
-/// 不能用空格 —— CJK 终端下 ● 是双宽、空格是单宽，交替会导致行内文字左右移动。
-const SPINNER_FRAMES: &[&str] = &["●", "○", "●", "○"];
-const SPINNER_FRAMES_REV: &[&str] = &["○", "●", "○", "●"];
-
-/// Braille spinner frames for smoother animation
+/// spinner 字形：会转的十帧 braille。
+///
+/// 此前是 `●`/`○` 正反交替。两态、整圈 8 帧 ≈ 300ms，在终端里读起来是「抖」
+/// 而不是「转」；更糟的是 `○` 那个空心圈本身传达的是"空闲"，而它恰恰是
+/// "正在干活"时最常停住的那一帧。
+///
+/// 换 braille 还有一层安全性：`●`/`○` 是 East Asian **Ambiguous** 宽度类，
+/// 当初要小心翼翼正是怕 CJK 终端里变成双宽、与单宽字符交替时把整行文字推来推去
+/// （Alternating wide/narrow glyphs move subsequent text）。braille pattern
+/// (U+2800..U+28FF) 是 **Neutral**，任何终端下都是单宽，比被替换掉的两个字符
+/// 更不容易出问题。
 const BRAILLE_SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// spinner 动词表。
@@ -570,7 +574,7 @@ fn in_progress_todo_verb(state: &ChatState) -> Option<String> {
 /// 状态行上显示打断提示的最小宽度，避免在窄终端挤掉核心状态。
 const INTERRUPT_HINT_MIN_WIDTH: u16 = 72;
 
-/// 中断提示文案。
+/// 中断提示文案（不含分隔符，分隔符由调用方在括号内补）。
 ///
 /// 全行**只有这一个**中断提示。此前同一行上并存三套说法——`Esc to interrupt`、
 /// 以及两处 `press Ctrl+C to cancel`——它们互斥显示，取决于"思考是否超过 20 秒"
@@ -580,7 +584,7 @@ const INTERRUPT_HINT_MIN_WIDTH: u16 = 72;
 /// 所以这不是能力问题而是文案问题。这里统一采用 Claude Code 的写法：小写
 /// `esc`，放在行尾当 footer 提示（官方 statusline 文档把 `esc to interrupt`
 /// 归在 "footer keyboard hints" 一类）。
-const INTERRUPT_HINT: &str = " · esc to interrupt";
+const INTERRUPT_HINT: &str = "esc to interrupt";
 
 /// 这批状态文案和 spinner 动词说的是同一件事，显示出来只会变成两层废话。
 /// 真正带信息量的（preflight、checkpoint、取消、卡住）不在此列。
@@ -596,6 +600,39 @@ const REDUNDANT_STATUS_LINES: &[&str] = &[
     "状态：",
 ];
 
+/// 这批是**通知**，不是状态：描述的是"刚刚发生过的一件事"，而且说完就没用了。
+///
+/// `current_status_line` 全仓有 60 多处写入，混着两类东西——runtime 写的"现在成立"
+/// 的阶段（preflight / checkpoint / 卡住）和本地 UI 对一次按键的反应
+/// （`Copied` / `Theme: Dracula` / `Press Esc again to clear input` / Ctrl+O 的
+/// `Verbose output: ON`）。两类都往活动 spinner 行里塞，于是通知占掉一个 `·`
+/// 分隔位、与回合计时并排显示成 `18s · Verbose output: OFF`——一条过期通知
+/// 伪装成"现在正在发生的事"，而且和左侧耗时读起来像同一句话的两个宾语。
+///
+/// 通知侧正在逐个迁往 `push_toast`（`input.rs` 的 `ToggleTranscript` 是第一处）。
+/// 这里再堵一道渲染侧，是为了让约定对**尚未迁移**的写入点同样成立——只迁写入点
+/// 的话，下一个写 `current_status_line` 的人会再踩一次。
+///
+/// 这里用**前缀**匹配，和上面 `REDUNDANT_STATUS_LINES` 的整串相等不同：这些条目的
+/// 尾巴是变的（`Theme: Dracula`、`Press Ctrl+C again to exit`），要拦的是整类形状。
+/// 每一条都是本地交互的回声，不存在"runtime 正在 preflight"长这样的实时状态。
+const TRANSIENT_NOTIFICATION_PREFIXES: &[&str] = &[
+    "copied",
+    "theme: ",
+    "press ",
+    "switching to model ",
+    "verbose output",
+];
+
+/// 单条实时状态文案的显示上限（列）。
+///
+/// 这里**不再**按终端宽度做预算：装不下时由 `fit_meta_groups` 整组丢弃，让退场的
+/// 是"有实时状态"这个语义，而不是半个词。此前按 `width - 24` 截断，窄屏下必然
+/// 切出 `Verbose outp…` 这类残词。
+///
+/// 这个上限只拦病态输入（超长路径、整段报错），保证一行状态不会吃掉整行。
+const MAX_STATUS_WIDTH: usize = 40;
+
 /// `current_status_line` 里值得显示的部分。
 ///
 /// 这个字段全仓有 40 多处写入（runtime 的 preflight / checkpoint / 取消、
@@ -605,13 +642,21 @@ const REDUNDANT_STATUS_LINES: &[&str] = &[
 ///
 /// 这一行是它天然的位置：用户盯着的就是这里。带 `Status: ` 前缀的先剥掉——前缀
 /// 在这个上下文里没有信息量，真正起作用的是后面的内容。
-fn status_suffix(state: &ChatState, width: u16) -> Option<String> {
+fn status_suffix(state: &ChatState) -> Option<String> {
     let raw = state.current_status_line.as_deref()?.trim();
     if raw.is_empty() {
         return None;
     }
     let lowered = raw.to_lowercase();
     if REDUNDANT_STATUS_LINES.contains(&lowered.as_str()) {
+        return None;
+    }
+    // 通知不是状态：说过即弃的东西不该占住实时状态位（见
+    // TRANSIENT_NOTIFICATION_PREFIXES）。
+    if TRANSIENT_NOTIFICATION_PREFIXES
+        .iter()
+        .any(|prefix| lowered.starts_with(prefix))
+    {
         return None;
     }
     let stripped = raw
@@ -622,20 +667,65 @@ fn status_suffix(state: &ChatState, width: u16) -> Option<String> {
     if stripped.is_empty() {
         return None;
     }
-    // 这行前面已经有「动词 + 耗时 + 工具名」，状态只剩很窄的预算。挤掉核心信息
-    // 宁可不给。
-    let budget = (width as usize).saturating_sub(24);
-    if budget < 8 {
-        return None;
-    }
     Some(crate::ui::utils::render::truncate_to_display_width(
-        stripped, budget,
+        stripped,
+        MAX_STATUS_WIDTH,
     ))
 }
 
+/// 括号内元数据之间的分隔符。
+///
+/// 刻意**不用**本文件的 `SEP`（`" │ "`）：那是底部状态栏给并列字段用的，框线太重，
+/// 放进括号里会把这行从"一行附注"变成"一张表格"。原来这一行用的是 `·`。
+const META_SEP: &str = " · ";
+
+/// 按优先级把元数据装进括号里，装不下就**整组**丢弃。
+///
+/// `groups` 已经按优先级从高到低排好。每一组的代价是 `META_SEP` 加正文宽度；
+/// 装不下的跳过而不是截断——于是窄屏退场的是"有工具名"/"有实时状态"这种语义，
+/// 不会在行尾留下 `· Verbose outp…` 这样的半个单词。
+///
+/// 用 `continue` 而不是 `break`：低优先级的短组（`18s`）常常比高优先级但很长的组
+/// （一个 30 字符的工具名）更该留下。
+fn fit_meta_groups(groups: &[(Color, String)], budget: usize) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    for (color, text) in groups {
+        let need = text.width() + META_SEP.width();
+        if used + need > budget {
+            continue;
+        }
+        if !spans.is_empty() {
+            spans.push(meta_sep());
+        }
+        spans.push(Span::styled(text.clone(), Style::default().fg(*color)));
+        used += need;
+    }
+    spans
+}
+
+fn meta_sep() -> Span<'static> {
+    Span::styled(META_SEP, Style::default().fg(Color::DarkGray))
+}
+
+/// 工具名在状态行里的显示上限（字符数）。
+const TOOL_NAME_MAX_CHARS: usize = 30;
+
+/// 回合进行多久之后才开始报 token 用量（秒）。
+///
+/// 对标 Claude Code：30 秒之前用户还不关心上下文，数字反而挤掉动词。
+const TOKEN_DISPLAY_AFTER_SECS: u64 = 30;
+
 /// Render a spinner line above the input area.
-/// `width` gates optional status text so narrow terminals keep the main progress label.
-/// Only shows when processing WITHOUT active thinking (thinking block handles itself).
+///
+/// 这是回合期间**唯一**的实时面。同一件事此前在正文里还有一份 live 折叠头
+/// （`∴ Thinking…`，primary + 粗斜体），于是"思考中"被说了两遍、两套权重、两种
+/// 措辞同时在屏上。实时状态归这一行，正文只留完成后的记录
+/// （`∴ Thought for 14s`）。
+///
+/// 构图：`⠹ 动词… (元数据 · esc to interrupt)`。
+/// 动词是主角（主题强调色 + 流光），括号里全部退到 `secondary`，提示退到
+/// `inactive`。元数据装不下时整组丢弃，绝不切出半个单词。
 pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::text::Line<'static>> {
     if !state.is_processing {
         return vec![];
@@ -645,15 +735,7 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
         .map(|t| t.elapsed().as_secs())
         .unwrap_or(0);
 
-    // Claude Code style spinner: forward + reverse cycle
-    let frame_idx = state.animation_tick as usize;
-    let total_frames = SPINNER_FRAMES.len() + SPINNER_FRAMES_REV.len();
-    let cycle_frame = frame_idx % total_frames;
-    let spinner = if cycle_frame < SPINNER_FRAMES.len() {
-        SPINNER_FRAMES[cycle_frame]
-    } else {
-        SPINNER_FRAMES_REV[cycle_frame - SPINNER_FRAMES.len()]
-    };
+    let spinner = BRAILLE_SPINNER[state.animation_tick as usize % BRAILLE_SPINNER.len()];
 
     // 对标 Claude Code Spinner 的动词优先级：
     // `overrideMessage ?? currentTodo?.activeForm ?? currentTodo?.subject ?? randomVerb`。
@@ -680,128 +762,138 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
     };
 
     let theme = state.theme_manager.current();
-    let spinner_color = spinner_color(theme.warning, warmup, stall, state.animation_tick);
-    let dim_color = theme.secondary;
-    let message_color = text_color(dim_color, stall);
-    let shimmer_color = theme.secondary_shimmer;
+    // spinner 字形基色取 **primary**，不是 warning。
+    //
+    // 此前取的是 `theme.warning`，而 13 套主题里 warning 全是 `Yellow` 或琥珀，
+    // `spinner_color` 的"静默 10 秒变暖"目标色又恰好是琥珀 `Rgb(222,160,40)`
+    // —— 起点即终点，那套写了三段注释论证的安抚通道在真实主题下一个像素都不会
+    // 变（`a_slow_turn_warms_to_amber_and_never_to_red` 之所以是绿的，是因为它
+    // 传进去的 base 是 `Rgb(10,10,10)` 而不是 `theme.warning`）。
+    let spinner_color = spinner_color(theme.primary, warmup, stall, state.animation_tick);
+    // 元数据一律 `secondary` 退后。此前工具名独占 `info` 蓝并自带脉动，于是全行
+    // 最亮的东西既不是动词也不是时钟，而是一个 trivia。
+    let meta_color = text_color(theme.secondary, stall);
 
     let mut spans = vec![Span::styled(
         format!(" {} ", spinner),
         Style::default().fg(spinner_color),
     )];
 
-    // Render verb with shimmer effect
+    // 动词是这一行的主角：主题强调色 + 全行唯一的流光。
     for (text, is_shimmer) in shimmer_segments(verb, state.animation_tick) {
         let color = if stall > 0.5 {
-            lerp_color(dim_color, theme.error, stall * 0.5)
+            lerp_color(theme.primary, theme.error, stall * 0.5)
         } else if is_shimmer {
-            shimmer_color
+            theme.primary_shimmer
         } else {
-            dim_color
+            theme.primary
         };
         spans.push(Span::styled(text.to_string(), Style::default().fg(color)));
     }
-    spans.push(Span::styled("… ", Style::default().fg(dim_color)));
+    spans.push(Span::styled("…", Style::default().fg(theme.primary)));
 
-    // 耗时只跟着「真报警」变色。曾经这里是绿/黄/红三档、15 秒必红——而回合时长
-    // 本身不是异常信号，一个四分钟的构建不该因为"耗时超过 15 秒"就显示成红色。
-    spans.push(Span::styled(
-        format_elapsed(elapsed),
-        Style::default().fg(text_color(theme.inactive, stall)),
-    ));
+    // 元数据按优先级从高到低排。括号让它们读成"附注"而不是句子的一部分 ——
+    // `Spelunking… 18s · Verbose output: OFF` 里，通知和耗时挤在同一串 `·` 里，
+    // 读起来像是同一句话的两个宾语。
+    let mut groups: Vec<(Color, String)> = Vec::with_capacity(5);
 
-    // 当前工具。静默等待确认时工具名后面不再追加任何按键提示：Esc 的用法在行尾
-    // 已经写明了，再补一句 Ctrl+C 只会让人以为两者不等价。
+    // 1) 时钟：这行唯一恒定不变的东西，回答"还卡着吗"。只跟着「真报警」变色 ——
+    //    回合时长本身不是异常信号，一个四分钟的构建不该因为"超过 15 秒"就变红。
+    groups.push((meta_color, format_elapsed(elapsed)));
+
+    // 2) 当前工具。静默等待确认时工具名后面不再追加任何按键提示：Esc 的用法在行尾
+    //    已经写明了，再补一句 Ctrl+C 只会让人以为两者不等价。
     if let Some(tool_name) = state.current_tool_name.as_ref() {
-        let tool_color = if stall > 0.5 {
-            lerp_color(theme.info, theme.error, stall * 0.5)
-        } else {
-            pulse_color(theme.info, state.animation_tick, 4)
-        };
-        let short: String = tool_name.chars().take(30).collect();
-        let label = if tool_name.chars().count() > 30 {
-            format!(" · {}...", short)
-        } else {
-            format!(" · {}", short)
-        };
-        spans.push(Span::styled(label, Style::default().fg(tool_color)));
-    }
-
-    if let Some(status) = status_suffix(state, width) {
-        spans.push(Span::styled(
-            format!(" · {status}"),
-            Style::default().fg(message_color),
+        let chars: Vec<char> = tool_name.chars().collect();
+        let short: String = chars.iter().take(TOOL_NAME_MAX_CHARS).collect();
+        groups.push((
+            meta_color,
+            if chars.len() > TOOL_NAME_MAX_CHARS {
+                format!("{short}…")
+            } else {
+                short
+            },
         ));
     }
 
-    // Show thinking state with sine wave opacity
-    if let Some(thinking_start) = state.thinking_started_at {
-        let thinking_secs = thinking_start.elapsed().as_secs();
-        // Sine wave opacity for thinking indicator (Claude Code style)
-        let thinking_opacity = ((state.animation_tick as f64 * 0.05).sin() + 1.0) / 2.0;
-        // 思考中只用呼吸明暗，不转红、不追加任何按键提示。
-        //
-        // 此前这里是「超过 20 秒转红 + (press Ctrl+C to cancel)」：思考 20 秒是
-        // 常态而非异常，于是整轮几乎必然显示成"红色 + 让你取消"，而且和行尾的
-        // `Esc to interrupt` 互相矛盾。真正需要提醒的长时间思考，聊天区的
-        // `∴ Thought for 4m 4s` 折叠头已经承担了。
-        let thinking_color = lerp_color(theme.secondary, theme.secondary_shimmer, thinking_opacity);
-        spans.push(Span::styled(
-            format!(" · thinking {}", format_elapsed(thinking_secs)),
-            Style::default().fg(thinking_color),
-        ));
-    } else if let Some((think_secs, finished_at)) = state.thinking_finished {
-        // 思考结束后的回顾标签（对标 Claude Code `thought for Xs`），
-        // 驻留 2 秒后随 spinner 行一起消失
+    // 3) 实时状态。`current_status_line` 上约有 40 处写入，其中混着两类东西：
+    //    "现在成立"的状态（preflight / checkpoint / 卡住）和"刚刚发生过的通知"
+    //    （Copied / Theme: X / Verbose output: ON）。两者都往这一行里塞，
+    //    于是 Ctrl+O 的提示会和回合计时并排显示成 `18s · Verbose output: OFF`
+    //    —— 一条过期通知占据了实时状态的位置。通知侧已迁到 `push_toast`，
+    //    这里只留真正描述"现在"的那部分。
+    if let Some(status) = status_suffix(state) {
+        groups.push((meta_color, status));
+    }
+
+    // 4) 思考结束后的回顾标签（对标 Claude Code `thought for Xs`），驻留 2 秒
+    //    后随 spinner 行一起消失。
+    //
+    //    这是过去时记录，不是实时声明，所以**保留**：思考正文短到不成块时
+    //    （`message_render` 的 `len() > 5` 过滤），正文的 `∴ Thought for 14s`
+    //    折叠头不会出现，这里是那个时长唯一的出口。
+    //
+    //    与之相对，"思考中"的 `· thinking 12s` 已删除：同一个"思考中"此前在屏上
+    //    说了三遍（正文 `Thinking…` + 动词 + 这段计时），而删掉正文那份之后，动词
+    //    已经是状态、时钟已经在走，这段既不新增信息、又把括号撑长。
+    if let Some((think_secs, finished_at)) = state.thinking_finished {
         if finished_at.elapsed() < std::time::Duration::from_secs(2) {
+            groups.push((meta_color, format!("thought for {}s", think_secs.max(1))));
+        }
+    }
+
+    // 5) token 用量（紧凑模式）。prompt_tokens 优先，provider 只报 total_tokens
+    //    时退回它——两者与 token_count 同源，不搞第二套 `↓` 格式。
+    //    对标 Claude Code：30 秒之前用户还不关心上下文，数字反而挤掉动词。
+    if state.token_count > 0 && elapsed >= TOKEN_DISPLAY_AFTER_SECS {
+        if let Some(usage) = state.token_usage.as_ref() {
+            let tokens = if usage.prompt_tokens > 0 {
+                usage.prompt_tokens
+            } else {
+                usage.total_tokens
+            };
+            if tokens > 0 {
+                let color = if stall > 0.5 {
+                    lerp_color(theme.secondary, theme.error, stall * 0.3)
+                } else {
+                    theme.secondary
+                };
+                groups.push((color, format!("{} tokens", format_token_count(tokens))));
+            }
+        }
+    }
+
+    // 预算：行首缩进 1 + 字形 1 + 空格 1 + 动词 + "…" 1 + 空格 1 + "(" 1 + ")" 1
+    let lead_width = 6 + verb.width();
+    let show_hint = width >= INTERRUPT_HINT_MIN_WIDTH;
+    let fixed = lead_width
+        + 2
+        + if show_hint {
+            META_SEP.width() + INTERRUPT_HINT.width()
+        } else {
+            0
+        };
+    let meta = fit_meta_groups(&groups, (width as usize).saturating_sub(fixed));
+
+    if !meta.is_empty() {
+        let paren = Style::default().fg(meta_color);
+        spans.push(Span::styled(" (", paren));
+        spans.extend(meta);
+        // 中断提示放在**行尾**。它是一次性的操作指引，不是状态；夹在状态中间会让
+        // 后面还在追加的元数据跑到它后面去，行尾就不再是行尾了。Claude Code 也是
+        // 把它当 footer 提示放在最后。
+        if show_hint {
+            spans.push(meta_sep());
             spans.push(Span::styled(
-                format!(" · thought for {}s", think_secs.max(1)),
+                INTERRUPT_HINT,
                 Style::default().fg(theme.inactive),
             ));
         }
+        spans.push(Span::styled(")", paren));
     }
 
     // 对标 Claude Code：spinner 行只显示动词 + 耗时，不显示模型名。
     // 模型名由底部状态栏（build_status_spans 的 "⊙ model"）负责展示。
-
-    // Token count with smooth increment effect
-    // (Claude Code only shows the token counter after 30s of processing)
-    if state.token_count > 0 && elapsed >= 30 {
-        let token_color = if stall > 0.5 {
-            lerp_color(theme.secondary, theme.error, stall * 0.3)
-        } else {
-            theme.secondary
-        };
-        // Pulse effect on token count
-        let token_pulse = ((state.animation_tick as f64 * 0.08).sin() * 0.15 + 0.85).max(0.7);
-        let token_color_pulsed =
-            lerp_color(token_color, theme.secondary_shimmer, token_pulse * 0.3);
-        // 显示 token 用量（紧凑模式）。prompt_tokens 优先，provider 只报
-        // total_tokens 时退回它——两者与 token_count 同源，不搞第二套 `↓` 格式。
-        let usage_tokens = state.token_usage.as_ref().map(|u| {
-            if u.prompt_tokens > 0 {
-                u.prompt_tokens
-            } else {
-                u.total_tokens
-            }
-        });
-        if let Some(tokens) = usage_tokens {
-            spans.push(Span::styled(
-                format!(" · {} tokens", format_token_count(tokens)),
-                Style::default().fg(token_color_pulsed),
-            ));
-        }
-    }
-
-    // 中断提示放在**行尾**。它是一次性的操作指引，不是状态；夹在状态中间会让
-    // 后面还在追加的 `· thinking 12s` / `· 1.2k tokens` 跑到它后面去，行尾就
-    // 不再是行尾了。Claude Code 也是把它当 footer 提示放在最后。
-    if width >= INTERRUPT_HINT_MIN_WIDTH {
-        spans.push(Span::styled(
-            INTERRUPT_HINT,
-            Style::default().fg(theme.inactive),
-        ));
-    }
 
     vec![
         ratatui::text::Line::from(""),
@@ -1358,6 +1450,7 @@ pub fn render_status_bar(f: &mut Frame, state: &ChatState, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::themes::ThemeManager;
 
     /// 把分段还原成"高亮起止列"，方便断言光带位置。
     fn shimmer_columns(text: &str, tick: u64) -> Option<(usize, usize)> {
@@ -1529,6 +1622,128 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(input_context_tokens(&total_only), 333);
+    }
+
+    /// 回归：变暖通道必须真的有地方可走。
+    ///
+    /// `spinner_color` 的基色此前取 `theme.warning`，而 13 套主题里 warning 全是
+    /// `Yellow` 或琥珀，变暖目标色又恰好是琥珀 `Rgb(222,160,40)` —— 起点即终点，
+    /// "静默 10 秒变暖"在任何真实主题下都不会产生任何可见变化。
+    ///
+    /// 上一条 `a_slow_turn_warms_to_amber_and_never_to_red` 之所以是绿的，是因为它
+    /// 喂进去的 base 是 `Rgb(10,10,10)`，绕开了这个 bug。这里直接拿真实主题值当
+    /// 基色断言"确实变了"，免得它再回来一次。
+    #[test]
+    fn warmup_actually_moves_the_spinner_in_a_real_theme() {
+        let manager = ThemeManager::new();
+        let theme = manager.current();
+
+        // 冷态与暖态必须可区分。暖态取 40 秒静默（满格）。
+        let cold = spinner_color(theme.primary, 0.0, 0.0, 0);
+        let warm = spinner_color(theme.primary, 1.0, 0.0, 0);
+        assert_ne!(
+            cold, warm,
+            "spinner 必须真的从基色走到琥珀；两者相同说明变暖通道断了"
+        );
+        assert_eq!(warm, Color::Rgb(222, 160, 40));
+    }
+
+    /// 回归：`current_status_line` 里的**通知**不该出现在活动 spinner 行上。
+    ///
+    /// 该字段上混着两类东西："现在成立"的状态，和"刚刚发生过的通知"
+    /// （`Copied` / `Theme: X` / **Verbose output: ON**）。两类都往这一行里塞，
+    /// 于是 Ctrl+O 的提示会占住一个 `·` 分隔位、与回合计时并排显示成
+    /// `18s · Verbose output: OFF` —— 一条过期通知伪装成了"现在正在发生的事"，
+    /// 而且和左侧的耗时读起来像同一句话的两个宾语。
+    ///
+    /// 通知侧已迁到 `push_toast`（见 `input.rs` 的 `ToggleTranscript`）；这里守的是
+    /// 渲染侧那道拦网，好让尚未迁移的写入点（`Copied`、`Theme:`、
+    /// `Press Esc again to …`）同样不漏。真状态必须照常显示。
+    #[test]
+    fn notifications_never_leak_into_the_live_line() {
+        let mut state = ChatState::new();
+        state.is_processing = true;
+        state.processing_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(18));
+
+        // 对照：真状态要显示。
+        state.current_status_line = Some("Status: running preflight checks".to_string());
+        let live: String = processing_spinner_line(&state, 120)[1]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(live.contains("running preflight checks"), "{live:?}");
+
+        // 通知类文案：一条都不许漏进来。
+        for notification in [
+            "Verbose output: OFF",
+            "Copied",
+            "Theme: Dracula",
+            "Press Esc again to clear input",
+            "Press Ctrl+C again to exit",
+            "Switching to model gpt-4o…",
+        ] {
+            state.current_status_line = Some(notification.to_string());
+            let line: String = processing_spinner_line(&state, 120)[1]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            assert!(
+                !line.contains(notification),
+                "通知 {notification:?} 又漏回活动行了：{line:?}"
+            );
+        }
+    }
+
+    /// 回归：元数据装不下时**整组**丢弃，不切出半个单词。
+    ///
+    /// 此前是逐段 `width - 24` 截断，窄屏必然切出 `Verbose outp…` 这种残词。
+    /// 分组之后退场的是"有工具名"/"有实时状态"这种语义。
+    #[test]
+    fn narrow_terminals_drop_whole_meta_groups_never_half_a_word() {
+        let mut state = ChatState::new();
+        state.is_processing = true;
+        state.processing_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(64));
+        state.current_tool_name = Some("Bash".to_string());
+        state.current_status_line = Some("Status: running preflight checks".to_string());
+
+        // 宽屏：两段都在。
+        let wide = processing_spinner_line(&state, 120);
+        let wide_text: String = wide[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(wide_text.contains("Bash"), "{wide_text:?}");
+        assert!(wide_text.contains("preflight"), "{wide_text:?}");
+
+        // 逐级收窄：任何一段都不许出现被切断的残词，且任何宽度下都不许溢出。
+        let status = "running preflight checks";
+        for width in 40..120u16 {
+            let line = processing_spinner_line(&state, width);
+            let text: String = line[1].spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                text.width() <= width as usize,
+                "{width} 列下渲染了 {} 列，会溢出：{text:?}",
+                text.width()
+            );
+            // 出现即整段：` · ` 分隔符 + 完整文案。绝不会是半截。
+            let present = text.contains(status);
+            assert_eq!(
+                present,
+                text.contains(&format!(" · {status}")),
+                "{width} 列下实时状态只该整段在或整段不在：{text:?}"
+            );
+            assert!(
+                !text.contains("..."),
+                "{width} 列下不该出现旧的逐段截断标记：{text:?}"
+            );
+            // 动词和时钟在任何宽度下都必须还在
+            assert!(
+                text.contains("Combobulating") || text.contains('…'),
+                "{width} 列下动词不该消失：{text:?}"
+            );
+            assert!(text.contains("1m 4s"), "{width} 列下时钟不该消失：{text:?}");
+        }
     }
 
     #[test]

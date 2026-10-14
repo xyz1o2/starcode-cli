@@ -243,47 +243,77 @@ fn route_score_threshold() -> u32 {
     })
 }
 
+/// 归一化：小写 + 去掉冠词，让 `all the places` 能匹配上 `all places` 这类标记。
+///
+/// 上一版按原样子串匹配，于是 "all the places that build the prompt" 不含
+/// "all places" 而漏判——标记词表写得再全也会被一个冠词击穿。
+fn normalize_for_markers(input: &str) -> String {
+    let lower = input.to_lowercase();
+    let mut out = String::with_capacity(lower.len());
+    let mut prev_was_article = false;
+    for token in lower.split_whitespace() {
+        let is_article = matches!(token, "the" | "a" | "an");
+        // 句首的冠词也摘掉：它后面通常紧跟标记词，留着只会让首词匹配失败。
+        if is_article && (out.is_empty() || prev_was_article) {
+            prev_was_article = true;
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(token);
+        prev_was_article = is_article;
+    }
+    out
+}
+
 /// 判分词表。提到模块级是因为**打分**和**解释**必须用同一份——
 /// 以前"看起来在路由"的打分函数和真正的谓词是各写各的，现在两者共用下列常量。
+///
+/// 注意这些都跑在 [`normalize_for_markers`] 的输出上：冠词已被摘掉，
+/// 因此这里写 `all places` 就能命中 "all the places"。
 const SWEEP_MARKERS: &[&str] = &[
+    // ── 跨文件定位：问的是"在哪 / 有哪些地方" ──
     "where is",
     "where are",
-    "which file",
-    "which files",
-    "what files",
-    "all places",
-    "every place",
-    "across the repo",
-    "across the codebase",
-    "whole codebase",
     "where does",
     "where do",
     "where did",
     "where can i find",
     "where should i",
+    "which file",
+    "what file",
+    "all place",
+    "every place",
+    "across repo",
+    "across codebase",
+    "whole codebase",
+    "how does",
+    "how do",
+    "how is",
+    "how are",
+    // 中文：「在哪 / 哪里 / 哪些」
     "在哪",
     "哪里",
-    "哪些文件",
-    "哪些地方",
-    "都哪里",
-    "在哪儿",
+    "哪儿",
     "何处",
+    "哪些",
+    "几个地方",
+    "都哪里",
 ];
 
 /// 「找的是干这件事的地方，而不是某个符号」的功能动词。
 const FUNCTIONAL_VERBS: &[&str] = &[
     "handle",
-    "handled",
-    "handling",
     "implement",
-    "implemented",
-    "implementation",
     "responsible",
     "responsibility",
     "process",
-    "processed",
     "managed",
     "enforced",
+    "wired",
+    "plumbed",
+    "configured",
     "处理",
     "实现",
     "负责",
@@ -291,59 +321,94 @@ const FUNCTIONAL_VERBS: &[&str] = &[
     "逻辑",
 ];
 
-/// 给出「像不像跨文件排序定位」的 0-100 分；低于阈值返回 `None`。
+/// 概念问答：**词法引擎结构上答不了**的形状。
 ///
-/// 形状特征（命中即加分）：
-/// - 跨文件扫面的说法（见 [`SWEEP_MARKERS`]）
-/// - 非祈使的疑问句（模型此时最可能直接给文字答案而不调工具）
-/// - 功能动词（见 [`FUNCTIONAL_VERBS`]）
+/// 这些不是"分数低"，而是"检索必然零命中"——提问里的词一个都不会出现在代码里
+///（"为什么" "架构是什么" "解释一下"）。硬否决，不参与打分。
+const CONCEPTUAL_MARKERS: &[&str] = &[
+    "why ",
+    "why?",
+    "explain",
+    "what is the architecture",
+    "what's the architecture",
+    "understand the",
+    "make sense",
+    "是什么",
+    "为什么",
+    "怎么回事",
+    "怎么理解",
+    "解释",
+    "原理",
+    "架构是",
+    "凭什么",
+];
+
+/// 判断「像不像跨文件排序定位」，返回 0-100；不适用返回 `None`。
 ///
-/// 反向特征（命中即减分，精确工具更合适）：
-/// - 精确标识符形状：`snake_case` / `::` / `foo.bar()` / 路径 / glob / 正则元字符
-/// - 明确点名了别的工具（用户已经指定了工具，就别替他选）
+/// # 为什么不是"加分求和"
+///
+/// 上一版是 `基准20 + 扫面35 + 疑问15 + 动词15 + 多词10 − 精确55 − 点名45`，
+/// 结果**最典型的措辞正好卡在阈值下面**：`where is retry handled` = 20+35 = 55，
+/// 阈值 60 → 不触发。也就是说那个打分器的主要作用是漏判，而不是拦住不该触发的。
+/// 而且标记词按原样子串匹配，"all the places" 匹配不上 `all places`。
+///
+/// 现在改成 **硬否决 + 分档**：先排除结构上不该管的，剩下的按证据强度落到两档之一。
+/// 档位（75 / 62）离阈值（60）都有富余，任何单条规则的波动都不会把常见问法打出界。
+/// 加成只用于同档内排序，不参与"够不够格"的判定。
 fn score_rank_locate_route(user_input: &str) -> Option<u32> {
     let raw = user_input.trim();
     if raw.is_empty() {
         return None;
     }
     let lower = raw.to_lowercase();
+    let norm = normalize_for_markers(raw);
 
-    let mut score: i32 = 20; // 基准：只是个问句就有一点可能
-
-    // ── 正向：跨文件扫面 ──
-    if SWEEP_MARKERS.iter().any(|m| lower.contains(m)) {
-        score += 35;
+    // ── 一、硬否决：这些有更合适的工具，或这个引擎结构上答不了 ──
+    // 用户点名了别的工具：他指定了，别替他改。
+    if names_another_tool(&lower) {
+        return None;
+    }
+    // 精确标识符形状（`::`、路径、glob、正则、snake_case）→ Grep / Glob / CodeGraph。
+    if has_exact_identifier_shape(raw) {
+        return None;
+    }
+    // 纯概念问答 → 词法检索必然零命中，白烧一个回合。
+    if CONCEPTUAL_MARKERS.iter().any(|m| lower.contains(m)) {
+        return None;
     }
 
-    // 疑问句形状：模型最容易在这里直接作答而不调工具，正是自动触发该出手的时刻。
-    if raw.contains('?') || raw.contains('？') {
-        score += 15;
-    }
-
-    // 「处理 / 实现 / 相关」这类功能动词，说明找的是"干这件事的地方"而非某个符号。
-    if FUNCTIONAL_VERBS.iter().any(|v| lower.contains(v)) {
-        score += 15;
-    }
-
-    // 多个实词 = 可能有多个候选词要一起排序。
-    let words: Vec<&str> = raw
+    let is_question = raw.contains('?') || raw.contains('？');
+    let has_sweep = SWEEP_MARKERS.iter().any(|m| norm.contains(m));
+    let has_verb = FUNCTIONAL_VERBS.iter().any(|v| norm.contains(v));
+    let word_count = raw
         .split(|c: char| !c.is_alphanumeric() && c != '_' && c != ':' && c != '.')
         .filter(|w| w.chars().count() >= 3)
-        .collect();
-    if words.len() >= 3 {
-        score += 10;
+        .count();
+
+    // ── 二、分档 ──
+    // 每档给一个远高于阈值的分：`STARCODE_ROUTE_SCORE_MIN` 仍可整体调高/调低，
+    // 但档内不会因为某条规则差几分就掉出触发范围。
+    let mut score: u32 = if has_sweep {
+        // 一档：明确的跨文件定位问法。这一个信号就够，不必再叠加别的。
+        75
+    } else if is_question && has_verb {
+        // 二档：问句 + 功能动词（"限流怎么处理？"）——同样是"找干这件事的地方"。
+        62
+    } else {
+        // 三档：证据不足，不够格。宁可漏一次，也不要在无关提问上白烧一轮检索。
+        return None;
+    };
+
+    // 加成只用来在同一档内排序，不参与"够不够格"的判定。
+    if is_question && !has_sweep {
+        score += 5;
+    }
+    if word_count >= 3 {
+        score += 5;
     }
 
-    // ── 反向：精确形状交给 Grep / Glob / CodeGraph ──
-    if has_exact_identifier_shape(raw) {
-        score -= 55;
-    }
-    if names_another_tool(&lower) {
-        score -= 45;
-    }
-
-    let score = score.clamp(0, 100);
-    (score >= route_score_threshold() as i32).then_some(score as u32)
+    let score = score.min(100);
+    (score >= route_score_threshold()).then_some(score)
 }
 
 /// 这句话里是否含"精确 token"——是的话 Grep 才是对的那个工具。
@@ -681,25 +746,71 @@ mod tests {
         }
     }
 
-    /// 纯概念问答**不**进候选——这正是本次修复的核心立场。
+    /// 回归：上一版是 `基准20 + 扫面35 + …` 的加法，阈值 60。
+    /// 于是**最典型的措辞正好卡在阈值下面**：
+    /// `where is retry handled` = 20 + 35 = 55 → 不触发。
+    /// 也就是说那个打分器的主要作用是漏判，而不是拦住不该触发的。
     ///
-    /// 它曾经被当成 CodebaseSearch 的主战场（描述里写 "Search by meaning"），
-    /// 而工具实际是词法 TF-IDF：问句的词一个都不会出现在代码里，
-    /// 一次必然零命中的检索只会白白烧掉一个回合。现在它归 StarLens（未开）
-    /// 或 Read/Glob，不归 CodebaseSearch。
+    /// 这批样本全部**不带问号、不带冠词以外的加分**，是"有需要就触发"这条要求
+    /// 的最低门槛。任何一条掉出去，都意味着最常见的问法用不上这个工具。
     #[test]
-    fn conceptual_qa_does_not_route_to_a_lexical_engine() {
+    fn canonical_locate_phrasings_all_trigger() {
         for q in [
-            "token 预算是怎么算的？",
-            "这个项目的整体架构是怎样的？",
-            "why does the watcher use a debounce?",
+            // 无问号的最简形式
+            "where is retry handled",
+            "where is auth",
+            "where is retry",
+            "where are rate limits enforced",
+            "where does compaction get triggered",
+            "where do we validate user input",
+            "where is the tool routing logic",
+            // 冠词把标记词打断的情况（"all the places" vs 标记 "all places"）
+            "all the places that build the prompt",
+            "every place that touches the filesystem",
+            // 同义问法
+            "how does the watcher work",
+            "how do we handle cancellation",
+            "across the codebase, where is retry handled",
+            // 中文
+            "哪里处理限流",
+            "限流在哪里处理",
+            "配置解析在哪些文件",
+            "错误处理在哪里处理",
         ] {
             assert!(
-                score_rank_locate_route(q).is_none(),
-                "概念问答不该路由到词法引擎：{q:?}  detail={}",
+                score_rank_locate_route(q).is_some(),
+                "最典型的定位问法漏判了：{q:?}  detail={}",
                 describe_rank_locate_route(q)
             );
         }
+    }
+
+    /// 触发也不能变成"什么都触发"——证据不足的短陈述句不该烧一轮检索。
+    #[test]
+    fn weak_signals_do_not_trigger() {
+        for q in [
+            "retry",
+            "fix it",
+            "update the config",
+            "rate limiting",
+            "把这个跑一下",
+            "优化性能",
+        ] {
+            assert!(
+                score_rank_locate_route(q).is_none(),
+                "证据不足，不该触发：{q:?}  detail={}",
+                describe_rank_locate_route(q)
+            );
+        }
+    }
+
+    /// 归一化必须真的摘掉冠词，否则标记词表会被一个 "the" 击穿。
+    #[test]
+    fn markers_survive_articles() {
+        assert_eq!(normalize_for_markers("all the places"), "all places");
+        assert_eq!(normalize_for_markers("in a repo"), "in repo");
+        assert_eq!(normalize_for_markers("where is x"), "where is x");
+        assert_eq!(normalize_for_markers("the where is x"), "where is x");
     }
 
     /// 精确 token 的**反向**样本：Grep / Glob / CodeGraph 才是对的那个工具。
@@ -713,11 +824,40 @@ mod tests {
             "find src/**/*.rs",
             "where is crate::core::tools::codebase_search::search_codebase defined?",
             "run cargo test for the triggers module",
+            // 用户点名了别的工具：他指定了，别替他改。
+            "use glob to find where the config files are",
+            "grep 一下 token budget 的实现",
         ] {
             assert!(
                 score_rank_locate_route(q).is_none(),
-                "精确 token 查询不该触发排序定位：{q:?}  detail={}",
+                "精确 token / 点名别的工具，不该触发排序定位：{q:?}  detail={}",
                 describe_rank_locate_route(q)
+            );
+        }
+    }
+
+    /// 概念问答是**硬否决**，不是"分数低"。
+    ///
+    /// 这些提问里的词一个都不会出现在代码里（为什么 / 是什么 / 解释），
+    /// 词法检索必然零命中 —— 触发它只是白烧一个回合。
+    /// 注意 `token 预算是怎么算的` 带问号也进不来，正因为否决发生在打分之前。
+    #[test]
+    fn conceptual_qa_is_vetoed_not_merely_low_scored() {
+        for q in [
+            "why does the watcher use a debounce",
+            "explain the tool routing architecture",
+            "为什么这里用 OnceLock",
+            "架构是怎样的",
+            "解释一下 compaction",
+        ] {
+            let detail = describe_rank_locate_route(q);
+            assert!(
+                score_rank_locate_route(q).is_none(),
+                "概念问答不该路由到词法引擎：{q:?}  detail={detail}"
+            );
+            assert!(
+                detail.starts_with("veto:"),
+                "被拒的 query 必须在 detail 里说明否决理由，否则没法排障：{detail}"
             );
         }
     }

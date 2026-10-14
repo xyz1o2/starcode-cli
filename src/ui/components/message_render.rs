@@ -83,10 +83,15 @@ pub(crate) fn render_non_tool_entry_blocks(
                         Style::default().fg(theme.inactive)
                     };
 
-                    // 头部随状态变化（对标 Claude Code）：
-                    // 思考中   → `∴ Thinking…`（不带展开提示，结束时才出现）
+                    // 头部随状态变化。这里只剩两种形态：
                     // 已完成   → `∴ Thought for 14s`（折叠态补展开提示）
-                    // 取消中   → `∴ Canceling…`
+                    // 取消中   → `∴ Canceling…`（展开态用）
+                    //
+                    // "思考中 → `∴ Thinking…`" 这一支已被删掉：实时状态由紧贴输入框的
+                    // spinner 行独家承担（`⠹ Spelunking… (18s · esc to interrupt)`），
+                    // 而这一行此前是 primary + 粗斜体、比状态行响得多。同一个"思考中"
+                    // 在屏上说了两遍、两套权重、两种措辞，而用户只需要一个"现在"。
+                    // 正文该留下的，是思考**结束后**的记录。
                     let header_text = if cancelling {
                         format!(
                             "{}…",
@@ -95,11 +100,6 @@ pub(crate) fn render_non_tool_entry_blocks(
                                 "Canceling",
                                 "Canceling"
                             )
-                        )
-                    } else if is_streaming_now {
-                        format!(
-                            "{}…",
-                            crate::core::i18n::t("ui.thinking.label", "Thinking", "Thinking")
                         )
                     } else {
                         match entry.reasoning_finished_elapsed_ms {
@@ -255,15 +255,18 @@ pub(crate) fn render_non_tool_entry_blocks(
                             thinking_lines.push(Line::from(spans));
                         }
                         blocks.push(thinking_lines);
-                    } else {
-                        // 折叠态：完成的块补展开提示；思考中不显示提示
-                        // （进行中的耗时由状态行 `· thinking Xs` 负责）
-                        let mut header_spans = vec![
+                    } else if !is_streaming_now && !cancelling {
+                        // 折叠态 + 已完成：这一块唯一的形态 —— 一条记录。
+                        // `∴ Thought for 14s  (ctrl+o to expand)`
+                        //
+                        // 折叠 + 进行中时这里**什么都不渲染**（整块不出声）。此前的
+                        // `∴ Thinking…` 与输入框上方的 spinner 行说的是同一件事，
+                        // 却用两套权重两种措辞同时占着用户的注意力；而记录本来
+                        // 就不该抢实时状态的活。正文只负责"事后发生了什么"。
+                        let header_spans = vec![
                             Span::styled("∴ ", label_style),
-                            Span::styled(header_text, label_style),
-                        ];
-                        if !is_streaming_now && !cancelling {
-                            header_spans.push(Span::styled(
+                            Span::styled(header_text.clone(), label_style),
+                            Span::styled(
                                 format!(
                                     " {}",
                                     crate::core::i18n::t(
@@ -273,8 +276,8 @@ pub(crate) fn render_non_tool_entry_blocks(
                                     )
                                 ),
                                 Style::default().fg(theme.subtle),
-                            ));
-                        }
+                            ),
+                        ];
                         blocks.push(vec![Line::from(header_spans)]);
                     }
                     // 顶部 margin 规则：正文块的"顶部空行"是 thinking 与正文之间
@@ -286,29 +289,10 @@ pub(crate) fn render_non_tool_entry_blocks(
                 }
             }
 
-            // Only show "Thinking..." placeholder when the model is actually
-            // producing thinking content (thinking_started_at is set by the
-            // Thinking message handler). This prevents non-thinking models
-            // from briefly flashing "Thinking..." before text arrives.
-            if entry.content.trim().is_empty()
-                && (is_streaming_now || cancelling)
-                && entry.reasoning_content.is_none()
-                && state.thinking_started_at.is_some()
-            {
-                // 流式占位：对标 Claude Code 流式期 thinking 头 `∴ Thinking…`
-                let label = if cancelling {
-                    crate::core::i18n::t("ui.thinking.cancelling", "Canceling", "Canceling")
-                } else {
-                    crate::core::i18n::t("ui.thinking.label", "Thinking", "Thinking")
-                };
-                let label_style = Style::default()
-                    .fg(theme.thinking_fg)
-                    .add_modifier(Modifier::ITALIC);
-                blocks.push(vec![Line::from(vec![
-                    Span::styled("∴ ", label_style),
-                    Span::styled(format!("{}…", label), label_style),
-                ])]);
-            } else if is_status_line(&display_content) {
+            // 此前这里在"还没有正文、模型正在思考"时先渲染一条 `∴ Thinking…` 占位。
+            // 已删除：那同样是在正文里抢实时状态的活，而输入框上方的 spinner 行
+            // 就在两行之下说着同一句话。此处 content 为空，正文分支自然什么都不出。
+            if is_status_line(&display_content) {
                 blocks.push(vec![Line::from(Span::styled(
                     display_content.trim().to_string(),
                     Style::default().fg(theme.secondary),
@@ -384,22 +368,9 @@ pub(crate) fn render_non_tool_entry_blocks(
         _ => {}
     }
 
-    // Only show "Thinking..." when the model actually supports thinking
-    // (detected from model list or model name). For non-thinking models, don't show any placeholder.
-    let is_thinking = state
-        .current_model_supports_thinking
-        .unwrap_or_else(|| crate::core::config::models::is_thinking_model(&state.current_model));
-    if blocks.is_empty() && is_streaming_now && is_thinking {
-        // 兜底占位：对标 Claude Code 流式期 thinking 头 `∴ Thinking…`
-        let label = crate::core::i18n::t("ui.thinking.label", "Thinking", "Thinking");
-        let label_style = Style::default()
-            .fg(theme.thinking_fg)
-            .add_modifier(Modifier::ITALIC);
-        blocks.push(vec![Line::from(vec![
-            Span::styled("∴ ", label_style),
-            Span::styled(format!("{}…", label), label_style),
-        ])]);
-    }
+    // 兜底占位 `∴ Thinking…`（"整条消息都还没渲染出任何东西"时补一行）同样已删除。
+    // 少一行占位不是问题：spinner 行就贴在输入框上方，"现在"由它独家承担。
+    // （`current_model_supports_thinking` 不再被这里消费，但仍有其他调用点。）
 
     blocks
 }
@@ -895,10 +866,16 @@ mod tests {
         );
     }
 
-    /// 完成后折叠头必须从 "Thinking…" 变为 "Thought for Xs"（对标 Claude Code
-    /// 完成态），并带展开提示；流式期间显示 "Thinking…" 且无提示。
+    /// 思考完成态的折叠头是 `∴ Thought for 14s  (ctrl+o to expand)`；
+    /// 而**思考进行中，正文整块不出声**。
+    ///
+    /// 此前是"流式期 `∴ Thinking…` → 完成期 `∴ Thought for Xs`"两态。这条回归现在
+    /// 守住的是另一半约定：实时状态由输入框上方的 spinner 行独家承担
+    /// （`⠹ Spelunking… (18s · esc to interrupt)`），正文再喊一遍"Thinking…" 就成了
+    /// 同一个"思考中"在屏上说了两遍 —— 而且正文那遍还是 primary + 粗斜体，比状态行
+    /// 响得多，用户第一眼读到的反而不是那行。
     #[test]
-    fn thinking_header_changes_between_streaming_and_completed_states() {
+    fn thinking_header_is_the_completed_record_only() {
         let mut state = crate::ui::state::ChatState::new();
         let mut entry = crate::types::ChatEntry::assistant("");
         entry.reasoning_content = Some("first step\n\nsecond step".to_string());
@@ -909,15 +886,20 @@ mod tests {
         let header_of = |state: &crate::ui::state::ChatState| {
             let blocks =
                 render_non_tool_entry_blocks(state, &state.chat_history[idx], idx, 70, false);
-            blocks[0]
-                .iter()
-                .map(|line| {
-                    line.spans
+            blocks
+                .first()
+                .map(|block| {
+                    block
                         .iter()
-                        .map(|s| s.content.as_ref())
+                        .map(|line| {
+                            line.spans
+                                .iter()
+                                .map(|s| s.content.as_ref())
+                                .collect::<String>()
+                        })
                         .collect::<String>()
                 })
-                .collect::<String>()
+                .unwrap_or_default()
         };
 
         // 完成态：Thought for 14s + 展开提示
@@ -925,12 +907,24 @@ mod tests {
         assert!(completed.contains("Thought for 14s"), "{:?}", completed);
         assert!(completed.contains("(ctrl+o to expand)"), "{:?}", completed);
 
-        // 流式态：Thinking… 且无展开提示
+        // 流式态：折叠中的思考块不出声 —— 既没有头部，也没有正文。
         state.chat_history[idx].is_streaming = Some(true);
         state.chat_history[idx].reasoning_finished_elapsed_ms = None;
         let streaming = header_of(&state);
-        assert!(streaming.contains("Thinking…"), "{:?}", streaming);
+        assert!(
+            streaming.is_empty(),
+            "思考进行中正文不该出声，实际 {:?}",
+            streaming
+        );
+        assert!(!streaming.contains("Thinking"), "{:?}", streaming);
         assert!(!streaming.contains("ctrl+o"), "{:?}", streaming);
+
+        let blocks = render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, 70, false);
+        assert!(
+            blocks.is_empty(),
+            "折叠 + 流式时整个思考块都不该渲染，实际 {:?}",
+            blocks
+        );
     }
 
     /// 恢复的历史思考块（serde skip → finished_at/elapsed 均为 None）：

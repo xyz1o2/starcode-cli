@@ -264,7 +264,7 @@ sym: AgentRequest, StreamMessage, AgentTaskUpdate
 
 | 原状 | 现在 |
 |---|---|
-| `should_trigger_codebase_search_with_flag(_user_input, _current_content, …)` —— 两个提问参数都带下划线，谓词压根不读提问。真表达式只有 `enabled && !attempted && tool_present`，"概念性查询检测"是一句空话 | `score_rank_locate_route(user_input)` 真判分（跨文件扫面措辞 +35 / 疑问句 +15 / 功能动词 +15 / 多实词 +10；精确标识符形状 −55、用户点名别的工具 −45），阈值 `STARCODE_ROUTE_SCORE_MIN`（默认 60） |
+| `should_trigger_codebase_search_with_flag(_user_input, _current_content, …)` —— 两个提问参数都带下划线，谓词压根不读提问。真表达式只有 `enabled && !attempted && tool_present`，"概念性查询检测"是一句空话 | `score_rank_locate_route(user_input)` 真判分。**硬否决 + 分档**：先排除点名别的工具 / 精确标识符形状 / 概念问答（词法引擎结构上答不了，触发即零命中），剩下的按证据强度落到 75（有扫面措辞）或 62（问句 + 功能动词）两档；加成只用于同档排序。阈值 `STARCODE_ROUTE_SCORE_MIN`（默认 60） |
 | `sort_by(\|a,b\| b.kind.cmp(&a.kind).then(b.score.cmp(&a.score)))` —— kind 是固定枚举且每个 kind 最多 push 一次，**`score` 永远打不破平局**，那一整套关键词打分是死代码 | 分数是**第一**排序键、跨 kind 可比（0..=100），kind 退化为同分兜底。`TriggerEval` 新增 `detail` 字段把判分依据写进 debug log |
 | `STAR_ENABLE_AUTO_CODEBASE_SEARCH` 默认 `false` → 整套机制唯一实际状态是"永远关着"，下游 navigator/editor 梯（都依赖 `codebase_search_attempted`）全是死代码 | 默认**开**（`STAR_ENABLE_AUTO_CODEBASE_SEARCH=0` 仍是逃生门）。谓词会判分了，默认开才安全 |
 | `build_codebase_search_tool_call(user_input, …)` 把**整句自然语言**塞给词法 TF-IDF 引擎，而 schema 要求 keywords；`codebase_search_attempted` 在**调用前**置位，于是冷启动那次 `Warming` 空结果把闸门永久关上，工具自己给的"稍后重跑"被自家 flag 当场否掉 | `extract_search_keywords()` 抽关键词（英文停用词 + CJK bigram 分词，保 `snake_case`/`::`/路径）；闸门改由 `tool_helpers::tool_result_is_usable()` **事后**判定，`Warming`/失败/空输出都不算"已搜过" |
@@ -272,6 +272,28 @@ sym: AgentRequest, StreamMessage, AgentTaskUpdate
 
 自动触发仍在**"模型有话但没调工具"**的分支里跑（`process_llm_response` 的 `else`）。这是有意的：
 模型已经调了 Grep 就说明它做了选择，此时插队是噪音。要改的是"模型该选什么"，不是"抢模型的轮次"。
+
+### 11.2 打分器返工：加法模型本身是漏判的（2026-10-14）
+
+第一版判分写完就交付了，用真实措辞一跑才发现它**主要作用是漏判**：
+
+```
+-  where is retry handled          ← 基准20 + 扫面35 = 55，阈值 60 → 漏
+-  where is auth                   ← 同上，连最简形式都进不来
+-  all the places that build …     ← 标记词 "all places" 匹配不上 "all the places"
+-  how does the watcher work       ← 同一类活儿，"which files touch config" 却过
+```
+
+根因是**加法模型 + 近阈值**：`where is retry handled` 是这个槽**最典型的措辞**，它离阈值只差 5 分。
+标记词再加也救不回来——漏判的不是某条规则，是整个设计。
+
+改成 **硬否决 + 分档**：否决项（点名别的工具 / 精确标识符 / 概念问答）在打分**之前**返回 `None`，
+剩下的只落两档（75 / 62），档位离阈值都有富余。标记匹配改跑在 `normalize_for_markers()` 上（摘冠词），
+"all the places" 这类被打断的措辞不再漏。`describe_rank_locate_route()` 对被否决的输入报
+`veto: <原因>`，排障时能直接看到是哪一条拒的。
+
+回归测试锁住这批真实措辞（`canonical_locate_phrasings_all_trigger`，17 条）以及它们的反面
+（`weak_signals_do_not_trigger` 6 条、`conceptual_qa_is_vetoed_not_merely_low_scored` 5 条）。
 
 ## 12. 成功指标（怎么知道做成了）
 
@@ -296,16 +318,20 @@ sym: AgentRequest, StreamMessage, AgentTaskUpdate
 **有了**
 - **路由契约守卫**（`core::prompts::routing_matrix` 的 6 个测试）：钉死"一个职责槽有且只有一个主张者"、
   "没有描述文件能声明矩阵外的槽"、"槽的主管工具必须存在描述文件"。这类**文案漂移**从此让 CI 变红。
-- **路由判分的判定集**（`tool_routing::triggers` 的 8 个测试）：约 20 条真实提问，正向样本
-  （跨文件扫面）必须进候选、反向样本（精确 token、纯概念问答）必须不进。
+- **路由判分的判定集**（`tool_routing::triggers`，12 个测试）：约 40 条真实提问分四类——
+  跨文件扫面必进、无问号的最简形式必进（17 条，锁 §11.2 那个漏判）、
+  精确 token / 点名别的工具 / 概念问答必不进、证据不足的短陈述句必不进。
 - **可观测性**：`[ACE_AUTO] selected trigger … detail=[…]` 与 `[ACE_AUTO] CodebaseSearch auto-run satisfied=…`
   两行 debug log，是当下唯一能回答"它为什么触发/为什么没触发"的出口。
 
 **没有**
 - **行为度量**：上面这些测试锁的是**契约**（这类问题归哪个工具），**不是**真实模型的路由行为。
   没有任何东西能告诉你"改了描述之后触发率是升是降"——那需要跑真实任务集。
-- **A/B 对照**：阈值 60、`STAR_ENABLE_AUTO_CODEBASE_SEARCH` 默认开，都是按形状判据拍的，
-  没有用数据校准过。
+- **A/B 对照**：阈值 60 与两档分值（75 / 62）是按"档位离阈值留富余"这个理由定的，
+  **不是**用真实分布校准的。§11.2 已经证明过"拍脑袋定一个数"会出事（加法模型漏判最典型措辞），
+  这两档同样可能偏松或偏紧——只是现在偏松偏紧都不会让常见问法掉出界。
+- **中英文覆盖不对等**：标记词表里 `how does` / `where is` 等英文变体明显比中文细，
+  中文只覆盖了"在哪/哪里/哪些/几个地方"。真实语料里没统计过各语言的措辞分布。
 
 所以：**契约不会再漂了，但"漂得对不对"仍然要靠人判断**。要真正闭环，还是得重建评测基座。
 
