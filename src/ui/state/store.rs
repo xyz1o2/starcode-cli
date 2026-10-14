@@ -499,6 +499,18 @@ pub struct ChatState {
     /// 当前模型是否支持 thinking/reasoning 功能（从模型列表中获取）
     pub current_model_supports_thinking: Option<bool>,
     pub current_provider_id: Option<String>,
+    /// 最近一个回合是否以错误收场。
+    ///
+    /// 为什么不靠 `content` 开头是不是 `"Error: "`：
+    /// 错误条目在 `chat_history` 里就是一条普通 assistant 文本，没有可查询的标记，
+    /// 于是"上一轮是不是失败了"这件事谁也答不上来 —— Esc 只能落到 no-op 分支
+    /// （`input.rs`），错误浮层又只对可重试错误弹。用户换完 provider 之后唯一
+    /// 合理的动作就是"重发一次"，而界面上没有任何键能触发它。
+    ///
+    /// 置位点只有 `handle_error_message`；正常收尾（`handle_done_message`）和真正
+    /// 发起新回合（`enqueue_user_message`）会清掉，所以它精确表示"**当前**这条
+    /// 对话正卡在一个失败回合上"。
+    pub last_turn_failed: bool,
     pub pending_confirmation: Option<String>,
     pub pending_model_change: Option<String>,
     pub pending_model_provider: Option<String>,
@@ -1084,6 +1096,7 @@ impl ChatState {
             current_model: String::new(),
             current_model_supports_thinking: None,
             current_provider_id: None,
+            last_turn_failed: false,
             pending_confirmation: None,
             pending_model_change: None,
             pending_model_provider: None,

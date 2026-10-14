@@ -392,7 +392,19 @@ impl ToolExecutor {
                                 .await;
                         }
 
-                        return cached.result.clone();
+                        // 命中缓存时 `execute()` 被整个跳过了，而"读过的文件要登记
+                        // 进 read state"正是写在工具 `execute()` 里的副作用。于是同
+                        // 一个 `Read` 第二次命中缓存时：内容返回给模型了，登记却
+                        // 没有发生。配合 5 分钟 TTL，`Read` → `Edit` → `Read` →
+                        // `Edit` 可以无限循环在 `[edit_file_not_read]` 上。
+                        //
+                        // 缓存省的是重复读盘，不是这个登记，所以命中时把它补回来。
+                        // 先 clone 再释放读锁：`rerecord_read_paths` 自己也要拿锁。
+                        let cached_result = cached.result.clone();
+                        drop(cache);
+                        self.rerecord_read_paths(name, &args).await;
+
+                        return cached_result;
                     }
                     // else: stale — don't use, fall through to re-execute
                 }
@@ -854,6 +866,75 @@ impl ToolExecutor {
             output: Some(structured.format_display()),
             error: Some(error_msg),
             data: Some(serde_json::Value::Object(data)),
+        }
+    }
+
+    /// 缓存命中后补做"读过的文件要登记"这一步。
+    ///
+    /// 只处理两个"读"类工具，因为只有它们把路径交给模型、也只有它们的登记会被
+    /// `Edit`/`Write`/`multi_edit`/`notebook_edit` 的前置检查消费。登记的是**当前
+    /// 磁盘内容**，不是缓存里那份：缓存里的内容可能已经过时，而登记过期内容等于
+    /// 放行一次基于旧版本的编辑。
+    async fn rerecord_read_paths(&self, name: &str, args: &Value) {
+        let paths: Vec<String> = match Self::canonical_tool_name(name).as_str() {
+            "Read" | "read_file" => args
+                .get("file_path")
+                .and_then(Value::as_str)
+                .map(|p| vec![p.to_string()])
+                .or_else(|| {
+                    args.get("file_paths")
+                        .and_then(Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect()
+                        })
+                })
+                .unwrap_or_default(),
+            "notebook_read" => args
+                .get("file_path")
+                .and_then(Value::as_str)
+                .map(|p| vec![p.to_string()])
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        if paths.is_empty() {
+            return;
+        }
+        let Some(global_state) = self.tool_registry.get_config().runtime_global_state() else {
+            return;
+        };
+        let config = self.tool_registry.get_config();
+        let base_dir = config.target_dir();
+        // 显式成 `&Path`：`resolve_tool_path` 要的是 `&Path`，传 `&PathBuf` 会
+        // 触发 clippy 的 needless_borrow 误报（它看不出这是解引用强制转换）。
+        let base: &std::path::Path = base_dir.as_path();
+        for raw in &paths {
+            let resolved = crate::core::utils::paths::resolve_tool_path(base, raw);
+            let Ok(content) =
+                crate::core::utils::file_utils::read_file_with_encoding_async(&resolved).await
+            else {
+                continue;
+            };
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let file_system_timestamp = tokio::fs::metadata(&resolved)
+                .await
+                .and_then(|m| m.modified())
+                .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis())
+                .unwrap_or(timestamp);
+            crate::core::tools::read_file::record_file_read(
+                &global_state,
+                &crate::core::utils::paths::read_state_key(&resolved),
+                crate::core::tools::edit::normalize_line_endings(&content),
+                timestamp,
+                file_system_timestamp,
+            )
+            .await;
         }
     }
 

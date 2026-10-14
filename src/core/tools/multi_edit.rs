@@ -1,4 +1,5 @@
 use crate::core::state::GlobalState;
+use crate::core::tools::constants::ToolErrorType;
 use crate::core::tools::edit::{
     apply_replacement, calculate_replacement, diagnose_replace_failure,
 };
@@ -93,17 +94,21 @@ impl ToolInvocation for MultiEditToolInvocation {
 
             if strict_read_check {
                 {
-                    let exec_state = global_state.execution_state.read().await;
+                    let read_state = global_state.read_file_state.read().await;
                     let mut unread: Vec<&str> = Vec::new();
                     for edit in &params.edits {
                         let path = config.target_dir().join(&edit.file_path);
-                        let abs_path = path
-                            .canonicalize()
-                            .unwrap_or_else(|_| path.clone())
-                            .to_string_lossy()
-                            .to_string();
+                        // 键必须和写入端（`read_file::record_file_read`）用同一个
+                        // 函数算。这里原来自己 canonicalize 一次、失败就退回未
+                        // 规范化的原路径，于是 `src/../lib.rs` 这类路径在 Read
+                        // 侧被折叠成 `lib.rs`、在这里却保持原样，查询必然落空。
+                        // 更要紧的是查错了表：Glob / Grep / read_many / 批量 Read
+                        // 都只写 `read_file_state`，只有单个 `Read` 才顺带写
+                        // `execution_state`。查 `execution_state` 的话，
+                        // "Grep 完再 multi_edit" 是 100% 误报。
+                        let abs_path = crate::core::utils::paths::read_state_key(&path);
 
-                        if path.exists() && !exec_state.was_file_read(&abs_path) {
+                        if path.exists() && !read_state.contains_key(&abs_path) {
                             unread.push(&edit.file_path);
                         }
                     }
@@ -131,7 +136,7 @@ impl ToolInvocation for MultiEditToolInvocation {
                             return_display: Some(msg.clone()),
                             output: msg.clone(),
                             error: Some(ToolError {
-                                error_type: "file_has_not_been_read".to_string(),
+                                error_type: ToolErrorType::EditFileNotRead.to_string(),
                                 message: msg,
                             }),
                             data: None,

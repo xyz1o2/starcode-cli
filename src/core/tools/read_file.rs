@@ -21,6 +21,58 @@ pub struct ReadFileToolParams {
     pub limit: Option<usize>,
 }
 
+/// 读一份"和 `Edit`/`Write` 比对时读到的东西完全一致"的原文。
+///
+/// 换行必须按 `\r\n → \n` 归一，否则 Windows 上 CRLF 文件永远比对不相等，
+/// 那道"内容没变就别拦"的逃生口就又废了。读失败退回空串：调用方只需要一个
+/// 保守的基线，而 `Edit` 对空基线的处理是"当成没有基线"，不会误放行。
+async fn read_current_content(path: &std::path::Path) -> String {
+    match crate::core::utils::file_utils::read_file_with_encoding_async(path).await {
+        Ok(content) => super::edit::normalize_line_endings(&content),
+        Err(_) => String::new(),
+    }
+}
+
+/// 把一次成功读取登记进两份 read state。
+///
+/// 两份都要写，因为 `Edit`/`Write` 查的是 `read_file_state`（`edit.rs`、
+/// `write_file.rs`），而 `multi_edit`/`notebook_edit` 查的是 `execution_state`。
+///
+/// `abs_path` 必须由调用方用 [`crate::core::utils::paths::read_state_key`] 算：
+/// 这里只负责写，不负责规范化，否则写入端和查询端的键会分叉，明明读过也报
+/// `[edit_file_not_read]`。
+pub(crate) async fn record_file_read(
+    global_state: &Arc<GlobalState>,
+    abs_path: &str,
+    content: String,
+    timestamp: u128,
+    file_system_timestamp: u128,
+) {
+    {
+        let mut state = global_state.read_file_state.write().await;
+        state.insert(
+            abs_path.to_string(),
+            ReadFileState {
+                content: content.clone(),
+                timestamp,
+                file_system_timestamp,
+            },
+        );
+    }
+
+    {
+        use crate::core::state::FileSnapshot;
+        let hash = crate::core::utils::paths::sha256_hex(content.as_bytes());
+        let snapshot = FileSnapshot {
+            content,
+            timestamp,
+            hash,
+        };
+        let mut exec_state = global_state.execution_state.write().await;
+        exec_state.mark_file_read(abs_path.to_string(), snapshot);
+    }
+}
+
 pub struct ReadFileToolInvocation {
     config: Arc<crate::core::config::Config>,
     params: ReadFileToolParams,
@@ -196,6 +248,47 @@ impl ToolInvocation for ReadFileToolInvocation {
                     }
                 }
 
+                // 批量读**同样要登记 read state**。
+                //
+                // 之前这条分支直接 return，一个文件都没记。于是
+                // `Read(file_paths=[a, b])` → 内容完整返回给模型 → `Edit(a)` 被
+                // `[edit_file_not_read]` 拦下，100% 复现。更糟的是
+                // `Read`/`Glob` 标着 read-only，命中 5 分钟工具结果缓存时
+                // `execute()` 根本不执行，这里也就再也不会被跑到 ——
+                // 同一个批次参数可以无限次"读到了内容却始终没被登记"。
+                for (path, file_result) in &results {
+                    if file_result.error.is_some() {
+                        continue;
+                    }
+                    let abs_path = crate::core::utils::paths::read_state_key(path);
+                    let timestamp = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis();
+                    let file_system_timestamp = {
+                        let probe = path.clone();
+                        tokio::task::spawn_blocking(move || {
+                            std::fs::metadata(&probe)
+                                .and_then(|m| m.modified())
+                                .unwrap_or(SystemTime::UNIX_EPOCH)
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis()
+                        })
+                        .await
+                        .unwrap_or_default()
+                    };
+                    // 同上：登记磁盘原文，而不是 `--- path ---` 拼出来的批处理转储。
+                    record_file_read(
+                        &global_state,
+                        &abs_path,
+                        read_current_content(path).await,
+                        timestamp,
+                        file_system_timestamp,
+                    )
+                    .await;
+                }
+
                 // 合并结果
                 let mut combined_output = String::new();
                 let mut has_errors = false;
@@ -298,35 +391,29 @@ impl ToolInvocation for ReadFileToolInvocation {
                 // [edit_file_not_read] 拦下。
                 let abs_path = crate::core::utils::paths::read_state_key(&resolved_path);
 
-                {
-                    let mut state = global_state.read_file_state.write().await;
-                    state.insert(
-                        abs_path.clone(),
-                        ReadFileState {
-                            content: result.llm_content.clone(),
-                            timestamp,
-                            file_system_timestamp,
-                        },
-                    );
-                }
+                // 登记的必须是**磁盘原文**，不能是给模型看的那份。
+                //
+                // `process_file_read_blocking` 返回的是 `lines.join("\n")`：行尾
+                // 换行没了、被截断时只剩一个窗口、prompt-injection 标签也被剥掉了。
+                // 而 `Edit`/`Write` 判断"文件在读之后有没有被改"时，是拿
+                // `read_file_with_encoding_async` 的**原始全文**去和登记内容比：
+                //
+                //     current_content != file_state.content
+                //
+                // 两者结构上永远不可能相等（光是行尾换行就足够），于是那道
+                // "mtime 变了但内容没变就别拦"的逃生口**一次都进不去** ——
+                // 只要构建、格式化器、`git checkout` 或上一次 bash 编辑动过 mtime，
+                // 就报 `[edit_file_modified]`。这就是那个"时不时"冒出来的红色报错。
+                let raw_content = read_current_content(&resolved_path).await;
 
-                // ============ P1.1 改进：更新 execution_state ============
-                {
-                    use crate::core::state::FileSnapshot;
-                    use sha2::{Digest, Sha256};
-
-                    let content_hash =
-                        { crate::core::utils::paths::sha256_hex(result.llm_content.as_bytes()) };
-
-                    let snapshot = FileSnapshot {
-                        content: result.llm_content.clone(),
-                        timestamp,
-                        hash: content_hash,
-                    };
-
-                    let mut exec_state = global_state.execution_state.write().await;
-                    exec_state.mark_file_read(abs_path.clone(), snapshot);
-                }
+                record_file_read(
+                    &global_state,
+                    &abs_path,
+                    raw_content,
+                    timestamp,
+                    file_system_timestamp,
+                )
+                .await;
 
                 let mut llm_content =
                     if result.is_truncated.unwrap_or(false) {
@@ -543,5 +630,138 @@ impl BaseDeclarativeTool for ReadFileTool {
 
     fn is_read_only(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("star-readfile-{}-{}", tag, std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    async fn test_config(dir: &std::path::Path) -> Arc<crate::core::config::Config> {
+        let mut parameters = crate::core::config::ConfigParameters::default();
+        parameters.model = "test-model".to_string();
+        parameters.core_tools = Some(Vec::new());
+        parameters.mcp_enabled = Some(false);
+        parameters.enable_agents = Some(false);
+        let mut config = crate::core::config::Config::new(parameters);
+        config.cwd = dir.to_path_buf();
+        config
+            .initialize()
+            .await
+            .expect("test config must initialize");
+        Arc::new(config)
+    }
+
+    fn test_bus() -> Arc<crate::core::confirmation_bus::MessageBus> {
+        Arc::new(crate::core::confirmation_bus::MessageBus::new(
+            Default::default(),
+            false,
+        ))
+    }
+
+    /// 回归：批量 `Read` 也要登记 read state。
+    ///
+    /// 之前这条分支一个文件都不记，于是 `Read(file_paths=[a, b])` 完整返回内容
+    /// 之后，紧跟着的 `Edit(a)` 100% 被 `[edit_file_not_read]` 拦下。
+    #[tokio::test]
+    async fn a_batch_read_records_every_file_it_returned() {
+        let dir = temp_dir("batch");
+        let a = dir.join("a.rs");
+        let b = dir.join("b.rs");
+        std::fs::write(&a, "fn a() {}\n").unwrap();
+        std::fs::write(&b, "fn b() {}\n").unwrap();
+
+        let config = test_config(&dir).await;
+        let global_state = Arc::new(GlobalState::new());
+        let tool = ReadFileTool::new(config, test_bus(), global_state.clone());
+        let result = tool
+            .create_invocation(serde_json::json!({
+                "file_paths": [a.to_string_lossy(), b.to_string_lossy()],
+            }))
+            .unwrap()
+            .execute(None, None)
+            .await
+            .unwrap();
+        assert!(result.error.is_none(), "批量读必须成功：{result:?}");
+
+        let read_state = global_state.read_file_state.read().await;
+        for path in [&a, &b] {
+            let key = crate::core::utils::paths::read_state_key(path);
+            assert!(
+                read_state.contains_key(&key),
+                "批量读返回了 {} 的内容却没登记，Edit 会被 [edit_file_not_read] 拦下",
+                path.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 登记的内容必须和磁盘原文一致。
+    ///
+    /// 这是 `Edit`/`Write` 那道"mtime 变了但内容没变就别拦"的逃生口的前提：
+    /// 它们拿此刻读到的**原文**和登记内容比。登记成给模型看的
+    /// `lines.join("\n")`（行尾换行没了、可能被截断、标签被剥掉）就永远比不相等，
+    /// 逃生口一次都进不去，只要文件被谁碰过 mtime 就报 `[edit_file_modified]`。
+    #[tokio::test]
+    async fn the_recorded_content_is_the_verbatim_file_content() {
+        let dir = temp_dir("content");
+        let a = dir.join("only.rs");
+        let body = "fn only() {}\n";
+        std::fs::write(&a, body).unwrap();
+
+        let config = test_config(&dir).await;
+        let global_state = Arc::new(GlobalState::new());
+        let tool = ReadFileTool::new(config, test_bus(), global_state.clone());
+        tool.create_invocation(serde_json::json!({ "file_path": a.to_string_lossy() }))
+            .unwrap()
+            .execute(None, None)
+            .await
+            .unwrap();
+
+        let key = crate::core::utils::paths::read_state_key(&a);
+        let read_state = global_state.read_file_state.read().await;
+        assert_eq!(
+            read_state.get(&key).map(|s| s.content.as_str()),
+            Some(body),
+            "登记的必须是磁盘原文（含行尾换行），否则内容比对永远判'变了'"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 截断读取登记的也必须是**全文**：模型只看到窗口，但后续 `Edit` 的内容比对
+    /// 是拿全文比的，登记窗口等于登记了一个必然对不上的基线。
+    #[tokio::test]
+    async fn a_truncated_read_still_records_the_whole_file() {
+        let dir = temp_dir("truncated");
+        let a = dir.join("long.rs");
+        let body: String = (0..500).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&a, &body).unwrap();
+
+        let config = test_config(&dir).await;
+        let global_state = Arc::new(GlobalState::new());
+        let tool = ReadFileTool::new(config, test_bus(), global_state.clone());
+        let result = tool
+            .create_invocation(serde_json::json!({ "file_path": a.to_string_lossy(), "limit": 10 }))
+            .unwrap()
+            .execute(None, None)
+            .await
+            .unwrap();
+        assert!(result.error.is_none());
+
+        let key = crate::core::utils::paths::read_state_key(&a);
+        let read_state = global_state.read_file_state.read().await;
+        assert_eq!(
+            read_state.get(&key).map(|s| s.content.as_str()),
+            Some(body.as_str()),
+            "截断只该影响给模型看的窗口，不能影响登记的比对基线"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

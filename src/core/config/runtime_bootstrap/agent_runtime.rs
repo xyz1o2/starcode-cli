@@ -42,7 +42,13 @@ fn register_agent_editing_tools(
     )));
 
     use crate::core::tools::notebook_read::NotebookReadTool;
-    tool_registry.register_tool(Arc::new(NotebookReadTool::new(config.clone())));
+    // 必须传 global_state：没有它 notebook_read 无从登记 read state，而
+    // notebook_edit 的前置检查会因此永远为真，`notebook_read` → `notebook_edit`
+    // 这条被工具说明写死的路径 100% 被 [edit_file_not_read] 拦下。
+    tool_registry.register_tool(Arc::new(NotebookReadTool::new(
+        config.clone(),
+        global_state.clone(),
+    )));
 
     crate::utils::logging::append_debug_log_line(
         "SmartEditTool registered (LLM fix strategy enabled).",

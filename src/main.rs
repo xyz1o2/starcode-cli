@@ -465,6 +465,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             model,
             args.max_tool_rounds,
             is_openai_compatible,
+            effective_provider_id.clone(),
             config.clone(),
             resumed_session,
             args.output_format.clone(),
@@ -504,6 +505,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let config_params2 = config_params.clone();
         let restored_context2 = restored_context.clone();
         let _cwd2 = cwd_clone;
+        let effective_provider_id2 = effective_provider_id.clone();
         tokio::spawn(async move {
             // Overall timeout for initialization (30 seconds - reduced from 60)
             let init_timeout = init_timeout_duration();
@@ -530,13 +532,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }?;
 
                 utils::logging::append_agent_log_line("[INIT] Starting StarAgent::new...");
-                let mut agent = agent::StarAgent::new(
+                let mut agent = agent::StarAgent::new_with_provider(
                     &api_key2,
                     model2,
                     base_url2,
                     Some(args.max_tool_rounds),
                     is_openai_compatible,
                     Some(config.clone()),
+                    // provider id 必须一起进 client：Settings 面板靠它显示供应商，
+                    // 协议推断和 key 环境变量解析也都靠它，缺了会静默走错网关。
+                    effective_provider_id2,
                 )
                 .await
                 .map_err(|e| {
@@ -645,6 +650,7 @@ async fn process_prompt_headless(
     model: Option<String>,
     max_tool_rounds: u32,
     is_openai_compatible: Option<bool>,
+    provider_id: Option<String>,
     config: Arc<core::config::Config>,
     resumed_session: Option<ResolvedResumeSession>,
     output_format: HeadlessOutputFormat,
@@ -660,13 +666,14 @@ async fn process_prompt_headless(
         .as_ref()
         .and_then(|resolved| resolved.session.last_usage.clone());
 
-    let mut agent = agent::StarAgent::new(
+    let mut agent = agent::StarAgent::new_with_provider(
         api_key,
         model,
         base_url,
         Some(max_tool_rounds),
         is_openai_compatible,
         Some(config),
+        provider_id,
     )
     .await
     .map_err(|e| e as Box<dyn std::error::Error>)?;

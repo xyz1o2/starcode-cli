@@ -143,12 +143,17 @@ pub fn render_error_overlay(f: &mut Frame, state: &ErrorOverlayState, area: Rect
     lines.push(Line::from(""));
 
     // Error message (truncated)
-    let max_msg_len = (width as usize).saturating_sub(4);
-    let msg = if state.error_message.len() > max_msg_len {
-        format!(
-            "{}...",
-            &state.error_message[..max_msg_len.saturating_sub(3)]
-        )
+    //
+    // 按 **字符** 而不是字节截断：provider 的错误里混着中文是常事，按字节切会落在
+    // 非 UTF-8 边界上直接 panic，而这个函数正在渲染一个"出错了"的浮层。
+    let max_msg_chars = (width as usize).saturating_sub(4);
+    let msg = if state.error_message.chars().count() > max_msg_chars {
+        let head: String = state
+            .error_message
+            .chars()
+            .take(max_msg_chars.saturating_sub(3))
+            .collect();
+        format!("{}...", head)
     } else {
         state.error_message.clone()
     };

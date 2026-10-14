@@ -1541,6 +1541,8 @@ async fn handle_done_message(
     ));
     recover_missing_tool_results(state, message_id, "stream_done");
     let assistant_idx = state.stream_targets.get(&message_id).copied();
+    // 这一轮正常收尾，Esc 重发的判据随之作废。
+    state.last_turn_failed = false;
 
     let cancelling_graceful = state
         .cancelling_since
@@ -1714,22 +1716,27 @@ async fn handle_error_message(
     }
 
     let error_type = crate::ui::components::error_overlay::classify_error(&error);
-    if crate::ui::components::error_overlay::is_retryable(&error_type) {
-        state.error_overlay_state = crate::ui::components::error_overlay::ErrorOverlayState {
-            error_message: error.clone(),
-            error_type: error_type.clone(),
-            retry_count: 0,
-            max_retries: 10,
-            is_retrying: false,
-            selected_action: crate::ui::components::error_overlay::ErrorAction::Retry,
-        };
-        state.open_error_overlay();
-    } else {
-        state.push_toast(
-            &crate::ui::components::error_overlay::error_type_title(&error_type),
-            ToastKind::Error,
-        );
-    }
+    // 每一类错误都弹浮层，不只"可重试"的那几类。
+    //
+    // 以前 Auth / Quota / Provider 错误只弹一条 3 秒 toast 就消失，于是 401/403
+    // 之后界面上**什么都不剩**：没有浮层的 `r`（唯一能重发的入口），也没有别的
+    // 重试键（`/retry` 不存在，Esc 与重试无关）。而这恰恰是最需要"改完 provider
+    // 再试一次"的错误 —— 浮层上的 `s` 直接开 provider 面板，`r` 直接重发。
+    state.error_overlay_state = crate::ui::components::error_overlay::ErrorOverlayState {
+        error_message: error.clone(),
+        error_type: error_type.clone(),
+        retry_count: 0,
+        max_retries: 10,
+        is_retrying: false,
+        // 不可重试的错误（401/403、余额耗尽）默认高亮"切换提供商"：原地重试
+        // 只会复现同一个错，先把 key / 网关改对才是有用的下一步。
+        selected_action: if crate::ui::components::error_overlay::is_retryable(&error_type) {
+            crate::ui::components::error_overlay::ErrorAction::Retry
+        } else {
+            crate::ui::components::error_overlay::ErrorAction::SwitchProvider
+        },
+    };
+    state.open_error_overlay();
 
     // 状态栏只放一行精简信息：标签 + 下一步提示；原始错误全文另进 chat_history
     // （可换行查看）。按 "Original error:" 显式切开，即便上游把换行吞了，也不会
@@ -1752,6 +1759,12 @@ async fn handle_error_message(
     let error_idx = state.chat_history.len() - 1;
     settle_response_cost(state, message_id, Some(error_idx));
     finish_terminal_stream(state, message_id, cancelling_graceful);
+    // Esc 重发的判据。见 `ChatState::last_turn_failed`。
+    state.last_turn_failed = true;
+    // 错误可能正好落在一个待确认的工具上。不清掉 `is_awaiting_confirmation` 的
+    // 话，`enqueue_user_message` 会一直往 `pending_user_messages` 里排队，而
+    // `dequeue_pending_user_input` 又拒绝出队 —— 之后每一条消息都被静默吞掉。
+    state.clear_pending_confirmation();
 
     append_transcript_event(
         state,

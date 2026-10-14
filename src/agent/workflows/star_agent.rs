@@ -105,6 +105,46 @@ impl StarAgent {
         is_openai_compatible: Option<bool>,
         config: Option<Arc<Config>>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::new_with_provider(
+            api_key,
+            model,
+            base_url,
+            max_subagent_rounds,
+            is_openai_compatible,
+            config,
+            None,
+        )
+        .await
+    }
+
+    /// 同 [`Self::new`]，但调用方知道当前生效的 provider id。
+    ///
+    /// # 为什么必须把 provider id 一路带进 client
+    ///
+    /// `StarClient::new(.., provider_id = None)` 不是"缺省"，而是**主动关掉**了三件事
+    /// （见 `llm/client.rs`）：
+    ///
+    /// 1. `infer_provider` 的聚合网关短路（`is_aggregator_provider(pid)`）要靠
+    ///    provider_id。缺了它，OpenRouter 上的 `deepseek-…` 会按模型名关键字命中
+    ///    `LlmProvider::DeepSeek` 分支，请求走错协议/端点。
+    /// 2. `provider_env_id` 靠 provider_id 定位该家的 key 环境变量。缺了它会退回
+    ///    `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` 等**别家**的变量，而
+    ///    `resolve_runtime_api_key_with_source` 里环境变量优先级高于用户在
+    ///    `/provider` 里存下的 key —— 表现为"配置换了却仍然 401/403"。
+    /// 3. `current_runtime_model_selection()` 报出来的 provider 是 `None`，UI 的
+    ///    Settings 面板于是把 Provider 显示成 `Not set`，而 Model 却有值。
+    ///
+    /// 调用方应当传自己那份 client 的 `provider_id`（子 agent/skills 直接继承父
+    /// client 的），只有真正无从得知时才传 `None`。
+    pub async fn new_with_provider(
+        api_key: &str,
+        model: Option<String>,
+        base_url: impl Into<Option<String>>,
+        max_subagent_rounds: Option<u32>,
+        is_openai_compatible: Option<bool>,
+        config: Option<Arc<Config>>,
+        provider_id: Option<String>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let config = config.ok_or_else(|| "Config not initialized".to_string())?;
 
         if config.recursion_depth >= Self::MAX_RECURSION_DEPTH {
@@ -126,7 +166,16 @@ impl StarAgent {
             _ => config,
         };
 
-        let client = StarClient::new(api_key, model, base_url.into(), is_openai_compatible, None);
+        let client = StarClient::new(
+            api_key,
+            model,
+            base_url.into(),
+            is_openai_compatible,
+            provider_id.and_then(|id| {
+                let trimmed = id.trim().to_string();
+                (!trimmed.is_empty()).then_some(trimmed)
+            }),
+        );
         let initial_mode = Self::initial_approval_mode(config.as_ref());
         let abort_flag = Arc::new(AtomicBool::new(false));
 
@@ -449,7 +498,10 @@ impl StarAgent {
             ));
 
             let is_openai_compatible =
-                crate::core::config::providers::provider_openai_compatible_mode(pid);
+                crate::core::config::providers::resolve_openai_compatible_mode(
+                    pid,
+                    settings.and_then(|settings| settings.r#type.as_deref()),
+                );
             self.inner.switch_provider(
                 model,
                 &base_url,
@@ -1103,6 +1155,13 @@ impl StarAgent {
 
     #[cfg(test)]
     pub(crate) async fn new_for_runtime_settings_test() -> Self {
+        Self::new_for_runtime_settings_test_with_provider(None).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn new_for_runtime_settings_test_with_provider(
+        provider_id: Option<String>,
+    ) -> Self {
         let mut parameters = crate::core::config::ConfigParameters::default();
         parameters.model = "test-model".to_string();
         parameters.core_tools = Some(Vec::new());
@@ -1115,13 +1174,14 @@ impl StarAgent {
             .await
             .expect("runtime settings test config must initialize");
 
-        Self::new(
+        Self::new_with_provider(
             "test-api-key",
             Some("test-model".to_string()),
             Some("http://127.0.0.1:9".to_string()),
             None,
             None,
             Some(Arc::new(config)),
+            provider_id,
         )
         .await
         .expect("runtime settings test agent must initialize")
@@ -1132,6 +1192,57 @@ impl StarAgent {
 mod tests {
     use super::*;
     use crate::runtime::messages::RuntimeSettingsPersistencePolicy;
+
+    /// 回归：启动时 client 必须带着 provider id。
+    ///
+    /// 真实事故：用户在 OpenRouter 上跑 `deepseek-…:free`，启动时
+    /// `StarClient::new(.., provider_id = None)`。于是
+    /// - `infer_provider` 的聚合网关短路失效，模型名里的 "deepseek" 命中官方
+    ///   SDK 分支；
+    /// - `provider_env_id` 定位不到 OpenRouter 的 key 环境变量，反而去读
+    ///   `DEEPSEEK_API_KEY`，而环境变量在 `resolve_runtime_api_key_with_source`
+    ///   里**优先于**用户在 `/provider` 存下的 key；
+    /// - Settings 面板的 Provider 一栏显示 `Not set`。
+    ///
+    /// 三条症状同一个根因，所以用一条断言把 provider id 钉在 client 上。
+    #[tokio::test]
+    async fn startup_client_carries_the_provider_id() {
+        let agent =
+            StarAgent::new_for_runtime_settings_test_with_provider(Some("openrouter".to_string()))
+                .await;
+
+        assert_eq!(
+            agent.client.provider_id.as_deref(),
+            Some("openrouter"),
+            "启动 client 必须带 provider id，否则协议推断、key 环境变量解析和 \
+             Settings 面板的 Provider 一栏同时失灵"
+        );
+        assert_eq!(
+            agent
+                .runtime_settings_snapshot()
+                .active
+                .model
+                .provider_id
+                .as_deref(),
+            Some("openrouter"),
+            "初始 runtime 快照报出来的 provider 也要是它 —— UI 的 Settings 面板 \
+             就是读这个字段的"
+        );
+    }
+
+    /// 空白/全空格的 provider id 必须归一成 `None`，不能变成一个查不到元数据的
+    /// 幽灵 id（`get_provider_by_id("")` 查不到，但 `provider_id: Some("")` 会
+    /// 让 `provider_env_id` 走进一条永远解析不出 key 的分支）。
+    #[tokio::test]
+    async fn a_blank_provider_id_normalizes_to_none() {
+        let agent =
+            StarAgent::new_for_runtime_settings_test_with_provider(Some("   ".to_string())).await;
+
+        assert_eq!(
+            agent.client.provider_id, None,
+            "空白 provider id 应当按“没有 provider”处理"
+        );
+    }
 
     #[tokio::test]
     async fn superseded_acknowledgement_does_not_mutate_runtime_settings() {

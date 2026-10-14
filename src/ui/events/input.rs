@@ -1001,13 +1001,12 @@ pub(crate) async fn execute_palette_action(
                 // Check is_openai_compatible: built-in check first, then custom provider type
                 let provider_config = store.load().await.unwrap_or_default();
                 let is_openai_compat =
-                    crate::core::config::providers::provider_openai_compatible_mode(&pid).or_else(
-                        || {
-                            provider_config
-                                .providers
-                                .get(&pid)
-                                .and_then(|s| s.r#type.as_deref().map(|t| t == "openai-compatible"))
-                        },
+                    crate::core::config::providers::resolve_openai_compatible_mode(
+                        &pid,
+                        provider_config
+                            .providers
+                            .get(&pid)
+                            .and_then(|s| s.r#type.as_deref()),
                     );
 
                 let _ = tx
@@ -2533,6 +2532,20 @@ pub async fn handle_key_event(
             // 清单）：任务面板与 vim 不算覆盖层，其余都算。
             let overlay_open = KeyContext::of(state).is_exclusive();
 
+            // 本轮以错误收场且没有别的遮挡时，Esc 重发上一条用户消息。
+            //
+            // 放在排队消息和双击清空之前：那两条的前提都是"上一轮已经结束"，而
+            // 失败回合恰好是最需要"按一下就好"的那一刻 —— 用户刚在 `/provider`
+            // 里换好 key，界面上却没有任何键能把刚才那条再发一遍，Esc 只能走到
+            // 最下面的 `else { state.last_esc_at = None; }` 变成彻底的 no-op。
+            if !overlay_open && state.last_turn_failed && state.input.trim().is_empty() {
+                if retry_last_user_message(state, agent_tx).await? {
+                    state.last_esc_at = None;
+                    state.current_status_line = Some("Retrying last message…".to_string());
+                    return Ok(());
+                }
+            }
+
             // 本轮已经停了但队列还压着东西：Esc 先把它取回输入框，
             // 让用户能改词或直接删掉（对标 popAllEditable 绑在 Esc 上）
             if !overlay_open && !state.pending_user_messages.is_empty() {
@@ -3072,29 +3085,68 @@ pub(crate) async fn handle_log_selector_key(
     Ok(true)
 }
 
-/// 错误覆盖层：r 重试上一条、s 换 provider、c/Esc 关闭、↑↓ 切换选项。
+/// 重发最近一条用户消息。
+///
+/// 只在**当前回合确实失败**时返回 `Some`：一个正常收尾的会话里按 Esc 不该凭空
+/// 多出一条消息。`last_turn_failed` 由 `handle_error_message` 置位，由
+/// `handle_done_message` 和真正发起新回合时清掉，所以它同时也是"当前输入框是空的
+/// 且没有别的理由不发消息"这一约束的判据。
+pub(crate) async fn retry_last_user_message(
+    state: &mut ChatState,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if !state.last_turn_failed {
+        return Ok(false);
+    }
+    let Some(last_user) = state
+        .chat_history
+        .iter()
+        .rev()
+        .find(|e| e.entry_type == ChatEntryType::User)
+    else {
+        // 失败回合之前没有用户消息（例如恢复出来的半截会话）：没有可重发的内容，
+        // 但要把状态清掉，否则 Esc 会永远卡在这个分支里。
+        state.last_turn_failed = false;
+        return Ok(false);
+    };
+    let msg = last_user.content.clone();
+    crate::ui::app::logic::enqueue_user_message(state, msg, agent_tx).await?;
+    Ok(true)
+}
+
+/// 错误覆盖层：Enter 执行选中项、r 重试上一条、s 换 provider、c/Esc 关闭、↑↓ 切换选项。
 pub(crate) async fn handle_error_overlay_key(
     state: &mut ChatState,
     key: KeyEvent,
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    // Enter 执行当前高亮的选项。之前界面画着 "Enter 确认" 却没有 Enter 分支，
+    // `_ => {}` + `Ok(true)` 把按键吞掉 —— 高亮的那一项按下去什么都不会发生。
+    if key.code == KeyCode::Enter {
+        match state.error_overlay_state.selected_action {
+            crate::ui::components::error_overlay::ErrorAction::Retry => {
+                state.pop_modal();
+                retry_last_user_message(state, agent_tx).await?;
+            }
+            crate::ui::components::error_overlay::ErrorAction::SwitchProvider => {
+                state.pop_modal();
+                state.open_palette(PaletteMode::Provider);
+            }
+            crate::ui::components::error_overlay::ErrorAction::Cancel => {
+                state.pop_modal();
+            }
+        }
+        return Ok(true);
+    }
     match key.code {
         KeyCode::Char('r') | KeyCode::Char('R') => {
-            // Retry
             state.pop_modal();
-            // Re-send last user message
-            if let Some(last_user) = state
-                .chat_history
-                .iter()
-                .rev()
-                .find(|e| e.entry_type == ChatEntryType::User)
-            {
-                let msg = last_user.content.clone();
-                crate::ui::app::logic::enqueue_user_message(state, msg, agent_tx).await?;
-            }
+            retry_last_user_message(state, agent_tx).await?;
         }
         KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
             state.pop_modal();
+            // 关掉浮层不等于放弃这次重试机会：Esc 之后在输入框按 Esc 仍然能重发。
+            // 只有用户发了新消息或跑完一轮，这个标志才会被清掉。
         }
         KeyCode::Char('s') | KeyCode::Char('S') => {
             // Switch provider
@@ -4216,6 +4268,63 @@ mod tests {
         // 连当前 provider 都没有时是 None，交给下游按"沿用"处理。
         let bare = ChatState::new();
         assert_eq!(resolve_provider_for_model(&bare, "any-model"), None);
+    }
+
+    /// 失败回合之后 Esc 必须重发上一条，而不是静默 no-op。
+    ///
+    /// 真实场景：provider 配额耗尽 → 用户去 `/provider` 换 key → 回到输入框按
+    /// Esc。此前 Esc 落到 `else { state.last_esc_at = None; }`，什么都不发生。
+    #[tokio::test]
+    async fn esc_retries_the_last_message_after_a_failed_turn() {
+        let mut state = ChatState::new();
+        let (tx, mut rx) = mpsc::channel(16);
+        state.chat_history.push(crate::types::ChatEntry::user("hi"));
+        state.last_turn_failed = true;
+
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        handle_key_event(&mut state, esc, &tx, None).await.unwrap();
+
+        assert!(
+            !state.last_turn_failed,
+            "重发已经发起，失败标记就该清掉，否则连按两次 Esc 会重发两条"
+        );
+        let sent = rx.try_recv().expect("Esc 应当把上一条消息重新发给 worker");
+        assert!(
+            matches!(sent, AgentRequest::SendMessage { .. }),
+            "重发走的是正常的 SendMessage 通道，不是某个旁路"
+        );
+    }
+
+    /// 正常收尾的会话里按 Esc 不能凭空多出一条消息。
+    #[tokio::test]
+    async fn esc_does_not_resend_when_the_last_turn_succeeded() {
+        let mut state = ChatState::new();
+        let (tx, mut rx) = mpsc::channel(16);
+        state.chat_history.push(crate::types::ChatEntry::user("hi"));
+        state.last_turn_failed = false;
+
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        handle_key_event(&mut state, esc, &tx, None).await.unwrap();
+
+        assert!(
+            rx.try_recv().is_err(),
+            "没有失败回合时 Esc 不该发出任何请求"
+        );
+    }
+
+    /// 失败回合之前根本没有用户消息（恢复出来的半截会话）时，Esc 必须把标志
+    /// 清掉，否则它会永远卡在这个分支里，后面再也走不到正常逻辑。
+    #[tokio::test]
+    async fn esc_clears_the_failure_flag_when_there_is_nothing_to_resend() {
+        let mut state = ChatState::new();
+        let (tx, mut rx) = mpsc::channel(16);
+        state.last_turn_failed = true;
+
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        handle_key_event(&mut state, esc, &tx, None).await.unwrap();
+
+        assert!(!state.last_turn_failed);
+        assert!(rx.try_recv().is_err());
     }
 
     fn bg_task(id: &str) -> AgentTaskInfo {

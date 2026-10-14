@@ -112,13 +112,14 @@ impl NavigatorAgent {
             })));
         }
 
-        let mut agent = StarAgent::new(
+        let mut agent = StarAgent::new_with_provider(
             &self.client.api_key,
             Some(self.client.model.clone()),
             self.client.base_url.clone(),
             Some(12),
             Some(self.client.is_openai_compatible),
             Some(self.config.clone()),
+            self.client.provider_id.clone(),
         )
         .await
         .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;

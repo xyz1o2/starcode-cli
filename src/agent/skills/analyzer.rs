@@ -94,13 +94,14 @@ impl AnalyzerAgent {
         }
 
         // 创建一个专注于分析的 Agent
-        let mut agent = StarAgent::new(
+        let mut agent = StarAgent::new_with_provider(
             &self.client.api_key,
             Some(self.client.model.clone()),
             self.client.base_url.clone(),
             Some(10), // Limit turns for sub-task
             Some(self.client.is_openai_compatible),
             Some(self.config.clone()),
+            self.client.provider_id.clone(),
         )
         .await
         .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;

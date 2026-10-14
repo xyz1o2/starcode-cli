@@ -1,4 +1,5 @@
 use crate::core::state::GlobalState;
+use crate::core::tools::constants::ToolErrorType;
 use crate::core::tools::tools::{
     BaseDeclarativeTool, Kind, ToolError, ToolInvocation, ToolLocation, ToolResult,
 };
@@ -127,8 +128,12 @@ impl ToolInvocation for NotebookEditInvocation {
                 let abs_path = crate::core::utils::paths::read_state_key(&path);
 
                 {
-                    let exec_state = global_state.execution_state.read().await;
-                    if !exec_state.was_file_read(&abs_path) {
+                    // 查 `read_file_state`（而不是 `execution_state`）：`notebook_read`
+                    // 写的是前者，后者只有单个 `Read` 和 `@` 内联会写。查错表的结果
+                    // 是 `notebook_read` → `notebook_edit` 这条被工具说明明确要求的
+                    // 路径 100% 被拦下。
+                    let read_state = global_state.read_file_state.read().await;
+                    if !read_state.contains_key(&abs_path) {
                         let msg = format!(
                             "Edit blocked [edit_file_not_read]: notebook '{}' must be read with `notebook_read` before using `notebook_edit`. \
                              REQUIRED NEXT STEP: call `notebook_read` with file_path='{}' first, then retry `notebook_edit`. \
@@ -140,7 +145,7 @@ impl ToolInvocation for NotebookEditInvocation {
                             return_display: Some(msg.clone()),
                             output: msg.clone(),
                             error: Some(ToolError {
-                                error_type: "file_has_not_been_read".to_string(),
+                                error_type: ToolErrorType::EditFileNotRead.to_string(),
                                 message: msg,
                             }),
                             data: None,

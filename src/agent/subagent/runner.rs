@@ -77,13 +77,16 @@ impl StarAgentRunner {
         let mut sub_config = (*self.config).clone();
         sub_config.recursion_depth = sub_config.recursion_depth.saturating_add(1);
 
-        let mut agent = crate::agent::StarAgent::new(
+        let mut agent = crate::agent::StarAgent::new_with_provider(
             &self.client.api_key,
             Some(self.client.model.clone()),
             Some(self.client.base_url.clone()),
             request.max_rounds,
             Some(self.client.is_openai_compatible),
             Some(Arc::new(sub_config)),
+            // 继承父 client 的 provider id：否则子 agent 的协议推断和 key 环境变量
+            // 解析都会退回按模型名猜，聚合网关上的模型会被发去厂商官方端点。
+            self.client.provider_id.clone(),
         )
         .await
         .map_err(|e| {

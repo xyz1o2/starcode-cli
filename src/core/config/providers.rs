@@ -389,6 +389,35 @@ pub fn provider_openai_compatible_mode(provider_id: &str) -> Option<bool> {
     normalize_provider_id(provider_id).map(|id| id == "openai-compatible")
 }
 
+/// 同 [`provider_openai_compatible_mode`]，但会回退到 `providers.json` 里存下的协议类型。
+///
+/// `provider_openai_compatible_mode` 只认内建 provider：自定义 id 规范化不到，
+/// 返回 `None`。而 `StarClient::switch_provider(.., None, ..)` 的语义是
+/// **"保持原值"**（`llm/client.rs`），不是"用 OpenAI 兼容"。于是从内建 provider
+/// 切到自定义 provider 时，新 provider 的协议类型被静默丢掉，请求继续按上一个
+/// provider 的协议发出去 —— 表现就是"provider 换了却像没换"。
+///
+/// `stored_type` 取 `ProviderSettings::r#type`（`"openai-compatible"` /
+/// `"anthropic-compatible"`）。
+///
+/// **内建 provider 一律不看 `stored_type`**：对它们来说 `None` 不是"不知道"，
+/// 而是"这个 provider 的协议归属不由类型字段决定，交给 `infer_provider` 按模型名
+/// 分流"（Zen 就是这样，`providers.rs` 里显式返回 `None`）。拿一个过期或无关的
+/// `type` 字段去覆盖它，恰好会毁掉 Zen 的分流逻辑。
+pub fn resolve_openai_compatible_mode(
+    provider_id: &str,
+    stored_type: Option<&str>,
+) -> Option<bool> {
+    if let Some(mode) = provider_openai_compatible_mode(provider_id) {
+        return Some(mode);
+    }
+    if get_provider_by_id(provider_id).is_some() {
+        // 已注册的内建 provider 主动返回 None = 让 infer_provider 决定，别插手。
+        return None;
+    }
+    stored_type.map(|value| value == "openai-compatible")
+}
+
 pub fn resolve_provider_base_url(
     provider_id: &str,
     stored_base_url: Option<String>,
@@ -655,6 +684,46 @@ pub fn api_key_env_hint(provider_id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回归：自定义 provider 的协议类型不能因为"查不到内建元数据"就丢掉。
+    ///
+    /// `StarClient::switch_provider(.., None, ..)` 的语义是**保持原值**，所以丢掉
+    /// 协议类型等于让新 provider 继续用上一个 provider 的协议发请求 ——
+    /// 表现就是"provider 换了却像没换"。
+    #[test]
+    fn a_custom_providers_protocol_type_falls_back_to_what_was_stored() {
+        assert_eq!(
+            resolve_openai_compatible_mode("my-gateway", Some("openai-compatible")),
+            Some(true),
+            "自定义 provider 存了 openai-compatible，就必须真的按兼容协议走"
+        );
+        assert_eq!(
+            resolve_openai_compatible_mode("my-gateway", Some("anthropic-compatible")),
+            Some(false),
+            "anthropic-compatible 不能退化成 None（= 沿用上一个 provider）"
+        );
+        assert_eq!(
+            resolve_openai_compatible_mode("my-gateway", None),
+            None,
+            "既没有内建元数据也没有存过类型时，保持 None 让调用方按沿用处理"
+        );
+    }
+
+    /// 内建判断优先于存下来的类型，Zen 的"按模型名分流"不能被一个过期的
+    /// `type` 字段覆盖。
+    #[test]
+    fn a_built_in_providers_protocol_type_is_not_overridden_by_stored_config() {
+        assert_eq!(
+            resolve_openai_compatible_mode("anthropic-compatible", Some("openai-compatible")),
+            Some(false),
+            "内建 provider 的协议归属是固定的"
+        );
+        assert_eq!(
+            resolve_openai_compatible_mode("opencode", Some("anthropic-compatible")),
+            None,
+            "Zen 一个 provider 下混着多种协议，必须交给 infer_provider 按模型名判断"
+        );
+    }
 
     #[test]
     fn opencode_aliases_resolve_to_a_real_registered_provider() {

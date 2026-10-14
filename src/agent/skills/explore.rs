@@ -91,13 +91,14 @@ impl ExploreAgent {
         // Prefer using the current model to maintain consistency with user's choice
         let model = self.client.model.clone();
 
-        let mut agent = match StarAgent::new(
+        let mut agent = match StarAgent::new_with_provider(
             &self.client.api_key,
             Some(model),
             self.client.base_url.clone(),
             Some(10),
             Some(self.client.is_openai_compatible),
             Some(self.config.clone()),
+            self.client.provider_id.clone(),
         )
         .await
         {

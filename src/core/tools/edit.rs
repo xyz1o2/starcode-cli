@@ -1074,9 +1074,32 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
                                     // cargo check metadata writes, filesystem timestamp quirks,
                                     // touch, or assistant's own prior edits via bash/write_file).
                                     // Read current content and compare before blocking.
-                                    let content_changed = match crate::core::utils::file_utils::read_file_with_encoding_async(&resolved_path).await {
-                                        Ok(current_content) => current_content != file_state.content,
-                                        Err(_) => true, // can't read — assume changed
+                                    //
+                                    // 比对之前先归一换行：存的是 `Read` 登记的原文，
+                                    // 取的是此刻的原文，两边都必须是同一个 CRLF/LF
+                                    // 约定，否则 Windows 上每个 CRLF 文件都判"内容变了"。
+                                    let current_content =
+                                        crate::core::utils::file_utils::read_file_with_encoding_async(
+                                            &resolved_path,
+                                        )
+                                        .await
+                                        .map(|c| normalize_line_endings(&c))
+                                        .ok();
+                                    // 空基线 = 这个文件只是被 `Glob`/`Grep`/`read_many`
+                                    // **列出来过**，从来没读过内容。它们登记的是
+                                    // `content: String::new()` 占位符，拿它去和真实
+                                    // 内容比必然"变了"，于是这些工具列过的文件只要
+                                    // 被碰一下 mtime 就报 `[edit_file_modified]` ——
+                                    // 一个 100% 的假阳性。这里没有基线可比，把
+                                    // 时间戳推到当前当作"以此刻为准"，而不是拦下。
+                                    let has_baseline = !file_state.content.is_empty();
+                                    let content_changed = match current_content {
+                                        Some(ref current) if has_baseline => {
+                                            *current != file_state.content
+                                        }
+                                        // 读不出来：没有确证就保守处理。
+                                        Some(_) => false,
+                                        None => true,
                                     };
                                     if content_changed {
                                         let msg = format!("File '{}' has been modified since you last read it. Please read the file again to ensure you are editing the latest version.", params.file_path);
@@ -1092,11 +1115,16 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
                                             data: None,
                                         });
                                     }
-                                    // Content unchanged — update the recorded timestamp to suppress
-                                    // future false positives, then proceed with the edit.
+                                    // Content unchanged (or there was no baseline to
+                                    // compare against) — refresh the recorded timestamp to
+                                    // suppress future false positives, then proceed.
                                     let mut state = global_state.read_file_state.write().await;
                                     if let Some(fs) = state.get_mut(&abs_path) {
                                         fs.file_system_timestamp = current_mtime;
+                                        // 有原文可存就顺手补上，让下次比对有个真基线。
+                                        if !has_baseline {
+                                            fs.content = current_content.unwrap_or_default();
+                                        }
                                     }
                                 }
                             }

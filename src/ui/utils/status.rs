@@ -36,6 +36,21 @@ pub fn describe_provider_id(provider_id: &str) -> String {
     }
 }
 
+/// 当前生效的 provider id，供状态栏 / Settings 面板 / 命令行提示共用。
+///
+/// 顺序：worker 确认的 active snapshot → `current_provider_id` → 当前模型在
+/// `model_provider_map` 里的归属 → 磁盘缓存的跨桶归属 → `pending_model_provider`。
+///
+/// # 为什么最后两步不能省
+///
+/// `model_provider_map` 只装**当前那份列表**的映射（`apply_models_to_state` 每次
+/// 都 `clear()` 再重建），所以一个属于别的网关的模型名在这里查不到。而真正决定
+/// 请求发给谁的是 [`crate::ui::events::input::resolve_provider_for_model`]，它多走
+/// 一步 `model_cache::find_provider_for_model` 全桶扫描。两侧顺序不一致的直接后果
+/// 就是截图里那个画面：Model 有值、Provider 写着 `Not set`，用户无从判断模型到底
+/// 被发去了哪一家。
+///
+/// 跨桶那一查要读磁盘，所以只在前面都没命中时才做。
 pub fn current_provider_id(state: &ChatState) -> Option<String> {
     state
         .confirmed_runtime_settings
@@ -56,6 +71,14 @@ pub fn current_provider_id(state: &ChatState) -> Option<String> {
                 .and_then(|provider_id| non_empty(provider_id))
                 .map(str::to_string)
         })
+        .or_else(|| {
+            current_model_id(state).and_then(|model| {
+                crate::agent::model_cache::find_provider_for_model(
+                    model,
+                    state.current_provider_id.as_deref(),
+                )
+            })
+        })
         // Provider provisioning is not an active runtime transition. Keep it only as a
         // display fallback before the worker has supplied an active provider snapshot.
         .or_else(|| {
@@ -65,6 +88,7 @@ pub fn current_provider_id(state: &ChatState) -> Option<String> {
                 .and_then(non_empty)
                 .map(str::to_string)
         })
+        .filter(|provider_id| !provider_id.trim().is_empty())
 }
 
 pub fn current_provider_display(state: &ChatState) -> String {

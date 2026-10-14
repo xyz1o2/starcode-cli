@@ -263,13 +263,14 @@ async fn handle_commit_and_push(
     config.initialize().await?;
     let config = Arc::new(config);
 
-    let mut agent = agent::StarAgent::new(
+    let mut agent = agent::StarAgent::new_with_provider(
         &api_key,
         model,
         base_url,
         Some(max_tool_rounds),
         is_openai_compatible,
         Some(config),
+        effective_provider_id,
     )
     .await
     .map_err(|e| e as Box<dyn std::error::Error>)?;

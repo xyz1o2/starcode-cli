@@ -637,6 +637,9 @@ pub async fn enqueue_user_message(
         ..ChatEntry::assistant("")
     });
 
+    // 新回合真的发出去了，之前那次失败不再是"当前状态"。
+    state.last_turn_failed = false;
+
     let response_idx = state.chat_history.len() - 1;
     state.stream_targets.insert(message_id, response_idx);
     state.message_start_indices.insert(message_id, start_idx);

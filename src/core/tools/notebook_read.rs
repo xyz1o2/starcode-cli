@@ -31,11 +31,20 @@ struct Notebook {
 pub struct NotebookReadInvocation {
     config: Arc<crate::core::config::Config>,
     params: NotebookReadParams,
+    global_state: Arc<crate::core::state::GlobalState>,
 }
 
 impl NotebookReadInvocation {
-    pub fn new(config: Arc<crate::core::config::Config>, params: NotebookReadParams) -> Self {
-        Self { config, params }
+    pub fn new(
+        config: Arc<crate::core::config::Config>,
+        params: NotebookReadParams,
+        global_state: Arc<crate::core::state::GlobalState>,
+    ) -> Self {
+        Self {
+            config,
+            params,
+            global_state,
+        }
     }
 }
 
@@ -65,6 +74,7 @@ impl ToolInvocation for NotebookReadInvocation {
     > {
         let config = self.config.clone();
         let params = self.params.clone();
+        let global_state = self.global_state.clone();
         // Clone self to call format_notebook method, or move logic to associated function.
         // To avoid lifetime issues with 'self' in async block, we'll just copy the format logic or move it.
         // Actually, we can't easily call self.format_notebook inside the async block if we move self.params.
@@ -167,6 +177,38 @@ impl ToolInvocation for NotebookReadInvocation {
                 output.push_str("--------------------------------------------------\n");
             }
 
+            // 登记 read state，否则紧随其后的 `notebook_edit` 必然被
+            // `[edit_file_not_read]` 拦下 —— 而"先 notebook_read 再 notebook_edit"
+            // 正是 `notebook_edit` 的工具说明要求模型走的路径。
+            //
+            // 登记的是**原始 JSON 文本**而不是上面拼给人看的转储：`Edit`/`Write`
+            // 之后会用存下来的 content 和磁盘内容比对来判断文件是否被改过，
+            // 塞一份转储进去会让每一次比对都判定"内容变了"。
+            {
+                let abs_path = crate::core::utils::paths::read_state_key(&path);
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                let file_system_timestamp = tokio::fs::metadata(&path)
+                    .await
+                    .and_then(|m| m.modified())
+                    .map(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                    })
+                    .unwrap_or(timestamp);
+                crate::core::tools::read_file::record_file_read(
+                    &global_state,
+                    &abs_path,
+                    content,
+                    timestamp,
+                    file_system_timestamp,
+                )
+                .await;
+            }
+
             Ok(ToolResult {
                 llm_content: Some(output.clone()),
                 return_display: Some(output.clone()),
@@ -180,11 +222,18 @@ impl ToolInvocation for NotebookReadInvocation {
 
 pub struct NotebookReadTool {
     config: Arc<crate::core::config::Config>,
+    global_state: Arc<crate::core::state::GlobalState>,
 }
 
 impl NotebookReadTool {
-    pub fn new(config: Arc<crate::core::config::Config>) -> Self {
-        Self { config }
+    pub fn new(
+        config: Arc<crate::core::config::Config>,
+        global_state: Arc<crate::core::state::GlobalState>,
+    ) -> Self {
+        Self {
+            config,
+            global_state,
+        }
     }
 }
 
@@ -230,6 +279,7 @@ impl BaseDeclarativeTool for NotebookReadTool {
         Ok(Box::new(NotebookReadInvocation::new(
             self.config.clone(),
             params,
+            self.global_state.clone(),
         )))
     }
 }

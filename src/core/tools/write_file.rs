@@ -419,21 +419,60 @@ impl ToolInvocation for WriteFileToolInvocation {
 
                                 // Use 2000ms buffer to account for filesystem timestamp granularity
                                 if current_mtime > file_state.file_system_timestamp + 2000 {
-                                    let message = format!(
-                                        "Write blocked [edit_file_modified]: file '{}' changed after it was read. Use `Read` again before overwriting it.",
-                                        resolved_path.display()
-                                    );
+                                    // Mtime 变了不代表内容变了：`cargo check` 写
+                                    // metadata、格式化器、`touch`、构建产物都会只动
+                                    // mtime。原来这里只看时间戳，于是隔得越久越容易
+                                    // 误报 —— 这就是那个"时不时"冒出来的红色报错。
+                                    // `Edit` 早就有这道内容比对（见 edit.rs），
+                                    // `Write` 却没有，两边的判据不一致。
+                                    let current_content =
+                                        crate::core::utils::file_utils::read_file_with_encoding_async(
+                                            &resolved_path,
+                                        )
+                                        .await
+                                        .ok()
+                                        .map(|c| super::edit::normalize_line_endings(&c));
+                                    let has_baseline = !file_state.content.is_empty();
+                                    let content_changed = match current_content {
+                                        Some(ref current) if has_baseline => {
+                                            *current != file_state.content
+                                        }
+                                        // 空基线 = 文件只是被 Glob/Grep 之类列出来过，
+                                        // 从来没读过内容，没有基线可比（见 edit.rs 同处注释）。
+                                        Some(_) => false,
+                                        None => true,
+                                    };
 
-                                    return Ok(ToolResult {
-                                        llm_content: Some(message.clone()),
-                                        return_display: Some(message.clone()),
-                                        output: message.clone(),
-                                        error: Some(crate::core::tools::tools::ToolError {
-                                            error_type: ToolErrorType::EditFileModified.to_string(),
-                                            message,
-                                        }),
-                                        data: None,
-                                    });
+                                    if content_changed {
+                                        let message = format!(
+                                            "Write blocked [edit_file_modified]: file '{}' changed after it was read. Use `Read` again before overwriting it.",
+                                            resolved_path.display()
+                                        );
+
+                                        return Ok(ToolResult {
+                                            llm_content: Some(message.clone()),
+                                            return_display: Some(message.clone()),
+                                            output: message.clone(),
+                                            error: Some(crate::core::tools::tools::ToolError {
+                                                error_type: ToolErrorType::EditFileModified
+                                                    .to_string(),
+                                                message,
+                                            }),
+                                            data: None,
+                                        });
+                                    }
+
+                                    // 内容没变（或压根没有基线）就把记录推到当前，
+                                    // 消掉后续误报；有原文就顺手补成真基线。
+                                    {
+                                        let mut state = global_state.read_file_state.write().await;
+                                        if let Some(entry) = state.get_mut(&abs_path) {
+                                            entry.file_system_timestamp = current_mtime;
+                                            if !has_baseline {
+                                                entry.content = current_content.unwrap_or_default();
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -555,6 +594,37 @@ impl ToolInvocation for WriteFileToolInvocation {
             }
 
             write_content_atomically(&resolved_path, &content_to_write).await?;
+
+            // 写完之后登记 read state。
+            //
+            // 不登记的话有两个后果：`Write` 新建的文件随后 `Edit` 它会被
+            // `[edit_file_not_read]` 拦下（键根本不存在），而覆写已有文件之后
+            // 再 `Write` 一次会因为记录还停在旧内容而报 `[edit_file_modified]`。
+            // `Edit` 成功后本来就有这一步（edit.rs），`Write` 之前漏了。
+            {
+                let abs_path = crate::core::utils::paths::read_state_key(&resolved_path);
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                let file_system_timestamp = tokio::fs::metadata(&resolved_path)
+                    .await
+                    .and_then(|m| m.modified())
+                    .map(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                    })
+                    .unwrap_or(timestamp);
+                crate::core::tools::read_file::record_file_read(
+                    &global_state,
+                    &abs_path,
+                    content_to_write.clone(),
+                    timestamp,
+                    file_system_timestamp,
+                )
+                .await;
+            }
 
             let line_count = content_to_write.lines().count();
             let rel_path = resolved_path

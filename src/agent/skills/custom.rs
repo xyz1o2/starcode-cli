@@ -123,7 +123,7 @@ impl SubAgent for CustomSubAgent {
 
     async fn execute(&self, task: SubTask) -> Result<SubTaskResult, Box<dyn std::error::Error>> {
         let max_turns = (task.max_steps.max(2) as u32).saturating_add(2);
-        let mut agent = StarAgent::new(
+        let mut agent = StarAgent::new_with_provider(
             &self.client.api_key,
             self.definition
                 .model
@@ -133,6 +133,7 @@ impl SubAgent for CustomSubAgent {
             Some(max_turns),
             Some(self.client.is_openai_compatible),
             Some(self.config.clone()),
+            self.client.provider_id.clone(),
         )
         .await
         .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
