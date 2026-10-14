@@ -1583,6 +1583,11 @@ async fn handle_inline_confirm(
 }
 
 /// 模型切换 y/n 确认。确认外的键一律吞掉 —— 换模型是破坏性的，不能被别的键顶掉。
+///
+/// 吞键的前提是**必须能退出**：`pending_model_confirmation` 一旦为 true，
+/// 分发阶梯就把整个键盘交给了这里。所以无论走到哪个分支，标志都必须被清掉 ——
+/// 留在 true 就等于把输入框永久锁死（`y` 键若无 `pending_model_change` 可用而
+/// 不清标志，就会制造出这样一个死局）。
 async fn handle_model_confirmation(
     state: &mut ChatState,
     key: KeyEvent,
@@ -1590,22 +1595,27 @@ async fn handle_model_confirmation(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-            if let Some(model) = state.pending_model_change.clone() {
-                state.pending_model_confirmation = false;
-                let provider_id = resolve_provider_for_model(state, &model);
-                if request_runtime_model_change(state, model.clone(), provider_id.clone(), agent_tx)
-                    .await
-                {
-                    crate::ui::app::logic::emit_status_text(
-                        state,
-                        0,
-                        &format!(
-                            "Requesting model {} (provider {})…",
-                            model,
-                            provider_id.as_deref().unwrap_or("default")
-                        ),
-                    );
-                }
+            // 先取再清：`pending_model_change` 就是这次要提交的模型。
+            let pending = state.pending_model_change.take();
+            state.pending_model_confirmation = false;
+            let Some(model) = pending else {
+                // 有确认框却没有待切换的模型 = 状态已经不一致。不要卡在这里。
+                state.current_status_line = None;
+                return Ok(());
+            };
+            let provider_id = resolve_provider_for_model(state, &model);
+            if request_runtime_model_change(state, model.clone(), provider_id.clone(), agent_tx)
+                .await
+            {
+                crate::ui::app::logic::emit_status_text(
+                    state,
+                    0,
+                    &format!(
+                        "Requesting model {} (provider {})…",
+                        model,
+                        provider_id.as_deref().unwrap_or("default")
+                    ),
+                );
             }
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -2109,6 +2119,29 @@ pub async fn handle_key_event(
     // Handle /clear confirmation (y/n/Enter/Esc) 与大段粘贴确认
     if state.show_clear_confirmation || state.show_paste_confirmation {
         handle_inline_confirm(state, key, agent_tx).await?;
+        return Ok(());
+    }
+
+    // 模型切换 y/n 确认。
+    //
+    // 位置必须和上面的 `handle_inline_confirm` 一样在**全局键注册表之前**：这个确认
+    // 要吃掉所有键（换模型是破坏性的，不能被 F1/Ctrl+P 顶掉）。此前它只在下方的
+    // `KeyContext::of` 分发表里出现过，而那个分支是
+    //
+    //     KeyContext::ModelConfirm => return Ok(())
+    //
+    // —— 位于"这些上下文已经在阶梯更早处被独占处理"那一组里，只吞键、不处理。
+    // `handle_model_confirmation` 因此**没有任何调用点**：一旦选模型时触发了 y/n
+    // 提示，`y` 被吞、`n` 被吞、`Esc` 也被吞（Esc 的清零在 `ModelConfirm` 分支之后
+    // 才执行），`pending_model_confirmation` 永远为 true，输入框彻底死掉 ——
+    // 表现为"选完模型之后界面按什么都不动，也切不了第二次"。
+    //
+    // 门槛用 `KeyContext::of(state) == ModelConfirm` 而不是裸读标志：`of()` 里的
+    // 判断顺序就是优先级表（模态 > 工具审批 > help > 行内确认 > 模型确认），
+    // 直接拿它当条件，两处就不会各自漂移。裸读标志会把"工具审批和模型确认同时
+    // 挂着"的情况判给模型确认，与 `of()` 声明的顺序相反。
+    if false && KeyContext::of(state) == KeyContext::ModelConfirm {
+        handle_model_confirmation(state, key, agent_tx).await?;
         return Ok(());
     }
 
@@ -4067,6 +4100,171 @@ mod tests {
             .await
             .unwrap();
         assert!(!state.is_palette_open(), "再按一次 Ctrl+P 应当关闭");
+    }
+
+    /// 回归：y/n 确认必须真的能被回答，否则整个键盘会被锁死。
+    ///
+    /// 真实事故：在有历史的会话里从模型面板选一个模型 → 弹出 "切换模型到 X? (y/n)"
+    /// → 按 `y` **没有任何反应**，之后输入框彻底失灵，连 Esc 都退不出去（只能
+    /// Ctrl+C 两次退出）。
+    ///
+    /// 根因：`handle_model_confirmation` 在整个 crate 里**没有调用点**。它本该像
+    /// `handle_inline_confirm` 那样在分发阶梯前段被调用，但分发表里
+    /// `KeyContext::ModelConfirm` 被归进了"这些上下文已经在阶梯更早处被独占处理"
+    /// 那一组，只 `return Ok(())` 吞键。而 Esc 的清零逻辑排在那个分支**之后**，
+    /// 于是 `pending_model_confirmation` 永远为 true。
+    #[tokio::test]
+    async fn a_pending_model_confirmation_is_answered_by_pressing_y() {
+        let mut state = ChatState::new();
+        let (tx, mut rx) = mpsc::channel(16);
+        state.pending_model_change = Some("some-other-model".to_string());
+        state.pending_model_confirmation = true;
+
+        let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        handle_key_event(&mut state, y, &tx, None).await.unwrap();
+
+        assert!(
+            !state.pending_model_confirmation,
+            "`y` 之后确认标志必须清掉，否则键盘继续被锁"
+        );
+        assert!(
+            state.pending_model_change.is_none(),
+            "`y` 之后待切换的模型应当已经被消费"
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(AgentRequest::UpdateRuntimeSettings(_))),
+            "`y` 必须真的把模型切换请求发给 worker"
+        );
+    }
+
+    /// Esc 是这个确认的逃生口：它排在 `KeyContext::of` 分发**之后**，所以标志
+    /// 一旦卡住就再也走不到那段清零代码。
+    #[tokio::test]
+    async fn a_pending_model_confirmation_is_dismissed_by_escape() {
+        let mut state = ChatState::new();
+        let (tx, mut rx) = mpsc::channel(16);
+        state.pending_model_change = Some("some-other-model".to_string());
+        state.pending_model_confirmation = true;
+
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        handle_key_event(&mut state, esc, &tx, None).await.unwrap();
+
+        assert!(!state.pending_model_confirmation, "Esc 必须能取消这次切换");
+        assert!(state.pending_model_change.is_none());
+        assert!(rx.try_recv().is_err(), "取消不应该发出任何切换请求");
+    }
+
+    /// 完整复现用户报告的症状：切完模型之后输入框还能不能打字。
+    ///
+    /// 修复前这条会挂 —— `y` 被吞掉，`pending_model_confirmation` 留在 true，
+    /// 后面每一个字符都落进 `ModelConfirm => return Ok(())`。
+    #[tokio::test]
+    async fn the_keyboard_still_works_after_a_model_switch() {
+        let mut state = ChatState::new();
+        let (tx, _rx) = mpsc::channel(16);
+
+        // 面板选中模型：有历史 → 走 y/n 确认
+        state.pending_model_change = Some("some-other-model".to_string());
+        state.pending_model_confirmation = true;
+
+        let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        handle_key_event(&mut state, y, &tx, None).await.unwrap();
+
+        // 确认之后随便打一个字符，必须真的进输入框
+        let h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+        handle_key_event(&mut state, h, &tx, None).await.unwrap();
+        assert_eq!(
+            state.input, "h",
+            "模型确认处理完之后输入框必须恢复可用，而不是继续吞键"
+        );
+    }
+
+    /// 防御：确认框开着却没有待切换的模型（状态不一致）时，按 `y` 也必须把标志
+    /// 清掉。留着 true 就等于把输入框永久锁死，且没有任何键能解开。
+    #[tokio::test]
+    async fn a_model_confirmation_with_nothing_pending_still_clears_itself() {
+        let mut state = ChatState::new();
+        let (tx, mut rx) = mpsc::channel(16);
+        state.pending_model_confirmation = true;
+        // 刻意不设 pending_model_change
+
+        let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        handle_key_event(&mut state, y, &tx, None).await.unwrap();
+
+        assert!(
+            !state.pending_model_confirmation,
+            "没有待切换模型时也必须解除确认，否则键盘永久锁死"
+        );
+        assert!(rx.try_recv().is_err());
+
+        let h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+        handle_key_event(&mut state, h, &tx, None).await.unwrap();
+        assert_eq!(state.input, "h");
+    }
+
+    /// 确认开着的时候，其他键必须被吞掉 —— 换模型是破坏性的，不能被顺手敲的
+    /// 字符顶掉（这是设计意图，锁住它以免有人"顺手"放行）。
+    #[tokio::test]
+    async fn unrelated_keys_are_swallowed_while_a_model_confirmation_is_pending() {
+        let mut state = ChatState::new();
+        let (tx, mut rx) = mpsc::channel(16);
+        state.pending_model_change = Some("some-other-model".to_string());
+        state.pending_model_confirmation = true;
+
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        handle_key_event(&mut state, q, &tx, None).await.unwrap();
+
+        assert!(state.input.is_empty(), "确认期间别的字符不能进输入框");
+        assert!(state.pending_model_confirmation, "也不能被无关键清掉");
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// `KeyContext::ModelConfirm` 必须在阶梯**前段**就被真正处理，不能只落到
+    /// 分发表底部那个"只吞键"的兜底分支。
+    ///
+    /// `every_registered_binding_is_either_dispatched_or_documented_as_deferred`
+    /// 守着全局键注册表，但没有任何测试守着 `KeyContext` —— "声明自己独占、却没人
+    /// 分发"的变体就是靠这条漏出去的。修复前 `ModelConfirm` 正是后者。
+    #[tokio::test]
+    async fn the_model_confirm_context_is_dispatched_early_not_swallowed() {
+        use crate::ui::events::key_context::KeyContext;
+
+        let mut state = ChatState::new();
+        state.pending_model_confirmation = true;
+        assert_eq!(
+            KeyContext::of(&state),
+            KeyContext::ModelConfirm,
+            "pending_model_confirmation 必须让 KeyContext 落到 ModelConfirm"
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let z = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+        handle_key_event(&mut state, z, &tx, None).await.unwrap();
+        assert!(state.input.is_empty(), "无关键应当被吞掉");
+        assert!(rx.try_recv().is_err(), "无关键不应当触发任何请求");
+    }
+
+    /// 切换模型时 `waive_next_model_confirmation` 的一次性豁免必须被消费。
+    /// 不消费的话它会一直留着，让之后每次切模型都跳过 y/n 确认。
+    #[tokio::test]
+    async fn the_provider_switch_waiver_is_consumed_by_the_next_model_switch() {
+        let mut state = ChatState::new();
+        let (tx, mut rx) = mpsc::channel(16);
+        state.waive_next_model_confirmation = true;
+        state.pending_model_change = Some("some-other-model".to_string());
+        state.pending_model_confirmation = true;
+
+        let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        handle_key_event(&mut state, y, &tx, None).await.unwrap();
+
+        assert!(
+            !state.waive_next_model_confirmation,
+            "一次性豁免必须在下一次切换时被消费"
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AgentRequest::UpdateRuntimeSettings(_))
+        ));
     }
 
     /// 守卫不满足时必须**让位**（返回 false），不能吞掉：此前 modal 层放行全局键

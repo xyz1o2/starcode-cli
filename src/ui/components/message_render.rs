@@ -293,10 +293,39 @@ pub(crate) fn render_non_tool_entry_blocks(
             // 已删除：那同样是在正文里抢实时状态的活，而输入框上方的 spinner 行
             // 就在两行之下说着同一句话。此处 content 为空，正文分支自然什么都不出。
             if is_status_line(&display_content) {
-                blocks.push(vec![Line::from(Span::styled(
-                    display_content.trim().to_string(),
-                    Style::default().fg(theme.secondary),
-                ))]);
+                // 状态行**也要折行**。
+                //
+                // 这里原来只推一条 `Line` + 一个装着全文的 `Span`：不折行、不封顶、
+                // 也不处理内嵌换行。而 `"Error: "` 正在 `i18n::status_prefixes` 里 ——
+                // 也就是说，整个应用里最长的那种单行字符串（provider 错误全文，
+                // 常常几百个字符）恰好是唯一一条永不折行的路径。它一路冲出右边界，
+                // 在半个单词上被截掉（"…status 429 Too M"）。
+                //
+                // 仍然不走去 markdown 排版：状态行里常有 `*`、`_`、反引号和 URL，
+                // 当正文解析会把它们吃成斜体/代码/链接。但折行必须和正文同一套，
+                // 否则窄窗口下同一条消息里的两种文本宽度上限还不一样。
+                let status_style = Style::default().fg(theme.secondary);
+                let status_text = display_content.trim();
+                // 续行比首行多缩进 2 列：折行后看不出哪里是断点，错误全文读起来
+                // 会像一长条没有换行的面条（与 thinking 展开态同一个理由）。
+                const STATUS_HANGING_INDENT: &str = "  ";
+                let first_width = wrap_width.min(MAX_CONTENT_WIDTH);
+                // 续行要多让出缩进的宽度，否则加上缩进后会超出 `first_width`
+                let rest_width = first_width
+                    .saturating_sub(STATUS_HANGING_INDENT.len())
+                    .max(2);
+                let chars: Vec<char> = status_text.chars().collect();
+                for (idx, (start, end)) in
+                    crate::ui::utils::render::wrap_char_ranges(&chars, first_width, rest_width)
+                        .into_iter()
+                        .enumerate()
+                {
+                    let lead = if idx == 0 { "" } else { STATUS_HANGING_INDENT };
+                    blocks.push(vec![Line::from(Span::styled(
+                        format!("{lead}{}", chars[start..end].iter().collect::<String>()),
+                        status_style,
+                    ))]);
+                }
             } else if !display_content.trim().is_empty() {
                 // 流式光标 "▌" 是在折行之后追加的，必须先给它留出 1 列，
                 // 否则正好排满的那一行会超出可用宽度、末字被右边界截掉，
@@ -603,6 +632,119 @@ mod tests {
             "found {} cells with black background",
             black_bg
         );
+    }
+
+    /// 回归：状态行（尤其是 `Error: ` 全文）必须折行，不能冲出右边界。
+    ///
+    /// `"Error: "` 在 `i18n::status_prefixes` 里，所以 provider 错误全文走的是
+    /// 状态行分支。此前该分支只推一条装着全文的 `Line`，不折行也不封顶 ——
+    /// 全应用最长的单行字符串恰好是唯一永不折行的那条，一路冲出屏幕在半个单词
+    /// 上被截掉。
+    #[test]
+    fn a_long_error_status_line_wraps_instead_of_running_off_screen() {
+        let mut state = crate::ui::state::ChatState::new();
+        let error = "Error: Quota / Billing: The account is out of balance or has exhausted \
+                     its quota. Top up or wait for the quota to reset. Original error: \
+                     Provider error: rig openai stream error: status 429 Too Many Requests";
+        let entry = crate::types::ChatEntry::assistant(error);
+        state.chat_history.push(entry);
+        let idx = state.chat_history.len() - 1;
+
+        let wrap_width = 60usize;
+        let blocks =
+            render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, wrap_width, false);
+
+        let rendered: Vec<String> = blocks
+            .iter()
+            .flatten()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+
+        assert!(
+            rendered.len() > 1,
+            "这么长的错误只渲染成一行，说明根本没折行：{rendered:?}"
+        );
+        let cap = wrap_width.min(MAX_CONTENT_WIDTH);
+        for line in &rendered {
+            let width = crate::ui::utils::render::display_width(line);
+            assert!(
+                width <= cap,
+                "行宽 {width} 超出上限 {cap}，仍会被右边界截断：{line:?}"
+            );
+        }
+
+        // 折行不能丢词：拼回去的词序列必须和原文一致。
+        let rejoined = rendered.join(" ");
+        let normalize = |s: &str| {
+            s.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .replace(' ', "")
+        };
+        assert_eq!(
+            normalize(&rejoined),
+            normalize(error),
+            "折行后词序列变了 —— 有内容被吞掉或重复了"
+        );
+    }
+
+    /// 状态行仍然不走 markdown 排版：错误里的 `*` / 反引号 / URL 不能被吃成
+    /// 斜体、代码或链接。
+    #[test]
+    fn error_status_lines_stay_literal_text() {
+        let mut state = crate::ui::state::ChatState::new();
+        let error = "Error: upstream said `*panic*` at https://example.com/a/b while retrying";
+        state
+            .chat_history
+            .push(crate::types::ChatEntry::assistant(error));
+        let idx = state.chat_history.len() - 1;
+
+        let blocks = render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, 40, false);
+        let rejoined: String = blocks
+            .iter()
+            .flatten()
+            .flat_map(|line| line.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+
+        assert!(
+            rejoined.contains('`') && rejoined.contains("https://example.com/a/b"),
+            "markdown 标记必须原样保留：{rejoined:?}"
+        );
+        assert!(
+            rejoined.contains("*panic*"),
+            "星号不能被当成斜体标记吃掉：{rejoined:?}"
+        );
+    }
+
+    /// 短状态行（`Status: …` / `Done: …`）折行后必须仍然是原来那一行，
+    /// 续行缩进不能凭空出现。
+    #[test]
+    fn a_short_status_line_stays_a_single_unindented_line() {
+        let mut state = crate::ui::state::ChatState::new();
+        state
+            .chat_history
+            .push(crate::types::ChatEntry::assistant("Status: ready"));
+        let idx = state.chat_history.len() - 1;
+
+        let blocks = render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, 60, false);
+        let rendered: Vec<String> = blocks
+            .iter()
+            .flatten()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+
+        assert_eq!(rendered, vec!["Status: ready".to_string()]);
     }
 
     /// 折行不得吞掉词间空格：思考块渲染后的词序列必须与原文一致。
