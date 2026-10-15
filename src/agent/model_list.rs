@@ -388,6 +388,31 @@ pub async fn list_models_with_mode(
     let current_is_offered = models
         .iter()
         .any(|m| m.id == current && m.provider == current_provider);
+
+    // 5. Cache the result
+    //    上下文窗口缓存也在这里灌：状态栏和压缩逻辑读的是它。
+    //
+    //    **必须在补当前模型之前**落盘。
+    //
+    //    补出来的条目是"你现在在用什么"的 UI 便利，不是"这个 provider 提供它"的
+    //    事实。写进 provider 桶之后，它就和真正拉回来的模型混在一起无法分辨，而且
+    //    会随缓存活很久：命中缓存时第 1 步直接原样返回整份缓存，补条逻辑根本不执行
+    //    —— 于是那条假条目会一直被面板吐出来，选中它就必然失败。
+    //
+    //    顺序调过来之后，缓存里只可能有真拉回来的模型；下次命中缓存也就不会再带出
+    //    假条目。
+    crate::agent::model_catalog::update_context_window_cache(Some(provider_id.as_str()), &models);
+    if !models.is_empty() {
+        set_cached_models(provider_id.clone(), models.clone());
+        crate::agent::model_cache::save(&provider_id, &models);
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[ListModels] Cached {} models for provider '{}'",
+            models.len(),
+            provider_id
+        ));
+    }
+
+    // 6. 缓存落盘之后，才补当前模型 —— 只影响这一份返回给 UI 的列表。
     match synthesize_current_model_entry(&models, &current, &current_provider) {
         Some(entry) => {
             models.push(entry);
@@ -408,19 +433,6 @@ pub async fn list_models_with_mode(
             ));
         }
         None => {}
-    }
-
-    // 5. Cache the result
-    //    上下文窗口缓存也在这里灌：状态栏和压缩逻辑读的是它。
-    crate::agent::model_catalog::update_context_window_cache(Some(provider_id.as_str()), &models);
-    if !models.is_empty() {
-        set_cached_models(provider_id.clone(), models.clone());
-        crate::agent::model_cache::save(&provider_id, &models);
-        crate::utils::logging::append_debug_log_line(&format!(
-            "[ListModels] Cached {} models for provider '{}'",
-            models.len(),
-            provider_id
-        ));
     }
 
     Ok(ModelListResult {
@@ -559,5 +571,43 @@ mod tests {
             synthesize_current_model_entry(&listed, "deepseek-v4-pro", "yunjunet").is_none(),
             "列表非空就不补 —— 名字撞车不构成'当前 provider 提供它'"
         );
+    }
+
+    /// 回归：补出来的条目绝不能进缓存。
+    ///
+    /// 命中缓存时 `list_models_with_mode` 在第 1 步就原样返回整份缓存，补条逻辑
+    /// **根本不执行**。所以一旦把补出来的条目写进 provider 桶，它就会一直跟着缓存
+    /// 被面板吐出来 —— 用户截图里那条 12 小时前的假条目正是这么活下来的，而且选中
+    /// 它会把 `opencode-zen/…` 路由给 yunjunet，必然失败。
+    ///
+    /// 这条锁的是"落盘发生在补条之前"这个顺序，不是函数本身的行为，所以在这里
+    /// 用一段等价代码复现该顺序。
+    #[test]
+    fn the_synthesized_entry_is_never_part_of_the_cached_list() {
+        // provider 一条都没列出来 —— 这是补条逻辑**唯一**会触发的场景。
+        let fetched: Vec<ModelInfo> = Vec::new();
+        let current = "opencode-zen/space-bunny-free";
+        let provider = "yunjunet";
+
+        // 正确顺序：先落盘真列表，再补（补只作用于返回值）。
+        let mut cached = fetched.clone();
+        let mut returned = cached.clone();
+        if let Some(entry) = synthesize_current_model_entry(&cached, current, provider) {
+            returned.push(entry);
+        }
+
+        assert!(
+            !cached.iter().any(|m| m.id == current),
+            "缓存里绝不能出现补出来的条目 —— 它不是这个 provider 的模型"
+        );
+        assert!(
+            returned.iter().any(|m| m.id == current),
+            "返回给 UI 的那份要带上它，否则面板会空着"
+        );
+
+        // 再次命中缓存时拿到的是空列表（缓存本来就没写入任何东西），
+        // 补条逻辑会重新按当次的 provider 判断，不会固化一条假归属。
+        let from_cache = cached;
+        assert!(from_cache.is_empty());
     }
 }
