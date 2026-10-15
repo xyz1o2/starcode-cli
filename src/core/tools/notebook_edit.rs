@@ -158,8 +158,29 @@ impl ToolInvocation for NotebookEditInvocation {
             let content = tokio::fs::read_to_string(&path)
                 .await
                 .map_err(|e| e.to_string())?;
-            let mut notebook: Notebook = serde_json::from_str(&content)
-                .map_err(|e| format!("Failed to parse notebook JSON: {}", e))?;
+            // 和 `notebook_read` 对齐：解析失败必须走 `ToolResult.error`，不能裸
+            // `Err` 出去。裸 `Err` 在执行器里拿不到文件名和解析器的列号，模型只看到
+            // 一句没有上下文的字符串，只能反复重试同一个坏文件。
+            let mut notebook: Notebook = match serde_json::from_str(&content) {
+                Ok(notebook) => notebook,
+                Err(error) => {
+                    let message = format!(
+                        "Failed to parse notebook JSON in '{}': {}",
+                        path.display(),
+                        error
+                    );
+                    return Ok(ToolResult {
+                        llm_content: Some(message.clone()),
+                        return_display: Some(message.clone()),
+                        output: message.clone(),
+                        error: Some(ToolError {
+                            error_type: "invalid_notebook_json".to_string(),
+                            message,
+                        }),
+                        data: None,
+                    });
+                }
+            };
 
             // Modify
             let message;
@@ -349,5 +370,217 @@ impl BaseDeclarativeTool for NotebookEditTool {
             Some(self.display_name().to_string()),
             self.global_state.clone(),
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn notebook_json() -> String {
+        json!({
+            "cells": [
+                { "cell_type": "code", "execution_count": null, "metadata": {},
+                  "outputs": [], "source": ["print('one')"] },
+                { "cell_type": "markdown", "metadata": {},
+                  "source": ["# heading"] }
+            ],
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5
+        })
+        .to_string()
+    }
+
+    async fn harness() -> (
+        tempfile::TempDir,
+        Arc<crate::core::config::Config>,
+        Arc<crate::core::state::GlobalState>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut params = crate::core::config::ConfigParameters::default();
+        params.model = "test-model".to_string();
+        params.core_tools = Some(Vec::new());
+        params.mcp_enabled = Some(false);
+        params.enable_agents = Some(false);
+        // 工具用 `config.target_dir()` 解析相对路径，不是 `cwd`。
+        params.target_dir = dir.path().to_path_buf();
+        let mut config = crate::core::config::Config::new(params);
+        config
+            .initialize()
+            .await
+            .expect("test config must initialize");
+        // 这个断言是硬防线：`notebook_edit` 会真的往磁盘写。`target_dir` 一旦没指对
+        // （比如只设了 `cwd`），测试就会把改动写进**用户的真实仓库**而不是临时目录，
+        // 而且不会有任何报错。设错时的实际后果：仓库根目录多出一个 `nb.ipynb`。
+        assert_eq!(
+            config.target_dir(),
+            dir.path(),
+            "harness 必须把 target_dir 指到临时目录，否则测试会写进真实仓库"
+        );
+        (
+            dir,
+            Arc::new(config),
+            Arc::new(crate::core::state::GlobalState::new()),
+        )
+    }
+
+    async fn run(
+        config: &Arc<crate::core::config::Config>,
+        gs: &Arc<GlobalState>,
+        params: serde_json::Value,
+    ) -> ToolResult {
+        NotebookEditTool::new(config.clone(), gs.clone())
+            .create_invocation(params)
+            .expect("create_invocation should accept these params")
+            .execute(None, None)
+            .await
+            .expect("execute should not return a bare Err")
+    }
+
+    async fn mark_read(gs: &Arc<GlobalState>, path: &std::path::Path, content: &str) {
+        let key = crate::core::utils::paths::read_state_key(path);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        crate::core::tools::read_file::record_file_read(gs, &key, content.to_string(), now, now)
+            .await;
+    }
+
+    /// 判别式回归：门必须查 `read_file_state`。
+    ///
+    /// `notebook_read` 只写那张表；查 `execution_state` 的话
+    /// "notebook_read → notebook_edit" 这条被工具说明写死的路径 100% 被拦下。
+    #[tokio::test]
+    async fn a_read_notebook_can_then_be_edited() {
+        let (dir, config, gs) = harness().await;
+        let nb = dir.path().join("nb.ipynb");
+        std::fs::write(&nb, notebook_json()).unwrap();
+        mark_read(&gs, &nb, &notebook_json()).await;
+
+        let result = run(
+            &config,
+            &gs,
+            json!({
+                "file_path": "nb.ipynb",
+                "edit_type": "update_cell",
+                "cell_index": 0,
+                "content": "print('two')"
+            }),
+        )
+        .await;
+
+        assert!(
+            result.error.is_none(),
+            "读过的 notebook 必须放行：{:?}",
+            result.error
+        );
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&nb).unwrap()).unwrap();
+        assert_eq!(
+            after["cells"][0]["source"][0], "print('two')",
+            "cell 内容必须真的被改到磁盘"
+        );
+    }
+
+    /// 没读过的 notebook 必须被拦下，且错误可执行。
+    #[tokio::test]
+    async fn an_unread_notebook_is_blocked_with_a_read_instruction() {
+        let (dir, config, gs) = harness().await;
+        let nb = dir.path().join("nb.ipynb");
+        std::fs::write(&nb, notebook_json()).unwrap();
+
+        let result = run(
+            &config,
+            &gs,
+            json!({
+                "file_path": "nb.ipynb",
+                "edit_type": "delete_cell",
+                "cell_index": 0
+            }),
+        )
+        .await;
+
+        let error = result.error.expect("未读取必须报错");
+        assert_eq!(
+            error.error_type,
+            crate::core::tools::constants::EDIT_FILE_NOT_READ_MARKER,
+            "error_type 必须是 agent 识别的标记"
+        );
+        assert!(
+            error.message.contains("notebook_read"),
+            "必须点名 notebook_read：{:?}",
+            error.message
+        );
+        assert_eq!(
+            std::fs::read_to_string(&nb).unwrap(),
+            notebook_json(),
+            "被拦下时磁盘不能被改"
+        );
+    }
+
+    /// 越界的 cell_index 必须报错，不能 panic（`notebook.cells[i]` 是直接索引）。
+    #[tokio::test]
+    async fn an_out_of_range_cell_index_errors_instead_of_panicking() {
+        let (dir, config, gs) = harness().await;
+        let nb = dir.path().join("nb.ipynb");
+        std::fs::write(&nb, notebook_json()).unwrap();
+        mark_read(&gs, &nb, &notebook_json()).await;
+
+        let result = run(
+            &config,
+            &gs,
+            json!({ "file_path": "nb.ipynb", "edit_type": "delete_cell", "cell_index": 99 }),
+        )
+        .await;
+
+        let error = result.error.expect("越界必须报错");
+        assert!(
+            error.message.contains("out of range"),
+            "错误要说清是越界：{:?}",
+            error.message
+        );
+    }
+
+    /// 插入 cell 后 notebook 仍是合法 JSON，且 cell 数 +1。
+    #[tokio::test]
+    async fn inserting_a_cell_keeps_the_notebook_valid_and_grows_it() {
+        let (dir, config, gs) = harness().await;
+        let nb = dir.path().join("nb.ipynb");
+        std::fs::write(&nb, notebook_json()).unwrap();
+        mark_read(&gs, &nb, &notebook_json()).await;
+
+        let result = run(
+            &config,
+            &gs,
+            json!({
+                "file_path": "nb.ipynb",
+                "edit_type": "insert_cell",
+                "cell_index": 1,
+                "content": "new cell",
+                "cell_type": "code"
+            }),
+        )
+        .await;
+
+        assert!(result.error.is_none(), "不该报错：{:?}", result.error);
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&nb).unwrap()).unwrap();
+        assert_eq!(after["cells"].as_array().unwrap().len(), 3);
+        assert_eq!(after["cells"][1]["source"][0], "new cell");
+    }
+
+    /// 缺 required 参数在 `create_invocation` 就被拒。
+    #[tokio::test]
+    async fn missing_required_params_are_rejected_at_creation() {
+        let (_dir, config, gs) = harness().await;
+        assert!(
+            NotebookEditTool::new(config, gs)
+                .create_invocation(json!({ "file_path": "nb.ipynb" }))
+                .is_err(),
+            "缺 edit_type/cell_index 必须在建 invocation 时报错"
+        );
     }
 }

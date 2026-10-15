@@ -101,7 +101,11 @@ impl SearchTool {
         if search_type == "text" || search_type == "both" {
             let file_types_ref = file_types.as_ref();
             let exclude_files_ref = exclude_files.as_ref();
-            if let Ok(text_results) = self
+            // 错误必须冒出来。以前这里是 `if let Ok(...)` —— 正则编译失败
+            // （`RegexMatcherBuilder::build` 对非法 pattern 返回 `Err`）被整个
+            // 吞掉，然后落到下面的 `"No results found"`。于是一个写错的正则和
+            // "确实没有匹配"在界面上完全一样，模型只会一遍遍换个写法重试。
+            let text_results = self
                 .execute_ripgrep(
                     query,
                     &base_dir,
@@ -115,22 +119,34 @@ impl SearchTool {
                     exclude_files_ref.map(|v| v),
                     include_hidden_flag,
                 )
-                .await
-            {
-                let text_results_formatted: Vec<UnifiedSearchResult> = text_results
-                    .into_iter()
-                    .map(|r| UnifiedSearchResult {
-                        result_type: "text".to_string(),
-                        file: r.file,
-                        line: r.line,
-                        column: r.column,
-                        text: r.text,
-                        match_content: r.match_content,
-                        score: None,
-                    })
-                    .collect();
-                results.extend(text_results_formatted);
-            }
+                .await;
+
+            let text_results = match text_results {
+                Ok(results) => results,
+                Err(error) => {
+                    let message = format!(
+                        "Grep could not run pattern \"{}\": {}. Check the pattern's regex syntax, \
+                         or set `regex: false` to search for it literally.",
+                        query, error
+                    );
+                    return Ok(ToolResult {
+                        success: false,
+                        output: Some(message.clone()),
+                        error: Some(message),
+                        data: None,
+                    });
+                }
+            };
+
+            results.extend(text_results.into_iter().map(|r| UnifiedSearchResult {
+                result_type: "text".to_string(),
+                file: r.file,
+                line: r.line,
+                column: r.column,
+                text: r.text,
+                match_content: r.match_content,
+                score: None,
+            }));
         }
 
         if should_search_files {
@@ -220,6 +236,14 @@ impl SearchTool {
             file_types: file_types.cloned(),
             exclude_patterns: None,
             include_patterns: include_pattern.map(|p| vec![p.to_string()]),
+            // `include_pattern` 由 `tool_executor::normalize_search_args` 生成，
+            // 而 `normalize_search_scope` 会把绝对路径剥成相对 cwd —— 所以这个
+            // glob 是相对 **cwd** 写的，不是相对 `base_dir`。
+            //
+            // `path` 已经被 `resolve_search_base_dir` 用来把 walker 的根收窄成
+            // `<cwd>/src` 了；两个基再不一致，`Grep(pattern, path="src")` 会一个
+            // 文件都匹配不上（结果恒为空，且不报错）。
+            include_base: Some(crate::core::utils::paths::current_dir_cached().clone()),
             include_hidden,
             max_file_size: Some(2 * 1024 * 1024),
         };

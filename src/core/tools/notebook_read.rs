@@ -103,9 +103,33 @@ impl ToolInvocation for NotebookReadInvocation {
                 .await
                 .map_err(|e| e.to_string())?;
 
-            // Logic duplicated here to avoid self capture issues
-            let notebook: Notebook = serde_json::from_str(&content)
-                .map_err(|e| format!("Failed to parse notebook JSON: {}", e))?;
+            // 解析失败必须走和上面"文件不存在"一样的 `ToolResult.error`，不能裸
+            // `Err` 出去。
+            //
+            // 裸 `Err` 在执行器里和"工具内部错误"是两条不同的路：它拿不到这里的
+            // 文件名和解析器给出的列号，模型看到的是一句没有上下文的字符串，
+            // 只能反复重试同一个坏文件。而"文件损坏"恰恰是模型**可以据此行动**的
+            // 情况（换个文件 / 告诉用户这个 notebook 已损坏）。
+            let notebook: Notebook = match serde_json::from_str(&content) {
+                Ok(notebook) => notebook,
+                Err(error) => {
+                    let message = format!(
+                        "Failed to parse notebook JSON in '{}': {}",
+                        path.display(),
+                        error
+                    );
+                    return Ok(ToolResult {
+                        llm_content: Some(message.clone()),
+                        return_display: Some(message.clone()),
+                        output: message.clone(),
+                        error: Some(ToolError {
+                            error_type: "invalid_notebook_json".to_string(),
+                            message,
+                        }),
+                        data: None,
+                    });
+                }
+            };
 
             let mut output = String::new();
             output.push_str(&format!("Notebook: {}\n", file_path_str));
@@ -281,5 +305,158 @@ impl BaseDeclarativeTool for NotebookReadTool {
             params,
             self.global_state.clone(),
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 一个最小但结构完整的 notebook（nbformat 4 需要 cells/metadata/nbformat/nbformat_minor）。
+    fn notebook_json() -> String {
+        serde_json::json!({
+            "cells": [
+                { "cell_type": "code", "execution_count": 1, "metadata": {},
+                  "outputs": [], "source": ["print('one')"] },
+                { "cell_type": "markdown", "metadata": {},
+                  "source": ["# heading"] }
+            ],
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5
+        })
+        .to_string()
+    }
+
+    async fn harness(
+        tag: &str,
+    ) -> (
+        tempfile::TempDir,
+        Arc<crate::core::config::Config>,
+        Arc<crate::core::state::GlobalState>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut params = crate::core::config::ConfigParameters::default();
+        params.model = "test-model".to_string();
+        params.core_tools = Some(Vec::new());
+        params.mcp_enabled = Some(false);
+        params.enable_agents = Some(false);
+        // 工具用 `config.target_dir()` 解析相对路径，不是 `cwd`。
+        params.target_dir = dir.path().to_path_buf();
+        let mut config = crate::core::config::Config::new(params);
+        config
+            .initialize()
+            .await
+            .expect("test config must initialize");
+        (
+            dir,
+            Arc::new(config),
+            Arc::new(crate::core::state::GlobalState::new()),
+        )
+    }
+
+    async fn run(
+        config: &Arc<crate::core::config::Config>,
+        global_state: &Arc<crate::core::state::GlobalState>,
+        params: serde_json::Value,
+    ) -> crate::core::tools::tools::ToolResult {
+        NotebookReadTool::new(config.clone(), global_state.clone())
+            .create_invocation(params)
+            .expect("create_invocation should accept these params")
+            .execute(None, None)
+            .await
+            .expect("execute should not return Err")
+    }
+
+    /// 完整读取：返回每个 cell 的内容，错误为空。
+    #[tokio::test]
+    async fn reads_every_cell_and_reports_no_error() {
+        let (dir, config, gs) = harness("nb-read-ok").await;
+        std::fs::write(dir.path().join("nb.ipynb"), notebook_json()).unwrap();
+
+        let result = run(&config, &gs, json!({ "file_path": "nb.ipynb" })).await;
+
+        assert!(result.error.is_none(), "不该报错：{:?}", result.error);
+        let out = result.llm_content.expect("成功必须有 llm_content");
+        assert!(out.contains("Total Cells: 2"), "应当数出 2 个 cell：{out}");
+        assert!(out.contains("print('one')"), "代码内容必须在：{out}");
+        assert!(out.contains("# heading"), "markdown 内容必须在：{out}");
+        assert!(out.contains("Format: v4.5"), "nbformat 要报出来：{out}");
+    }
+
+    /// 回归：读完之后必须登记 read state，否则紧随其后的 `notebook_edit`
+    /// 必然被 `[edit_file_not_read]` 拦下 —— 而"先 notebook_read 再
+    /// notebook_edit"正是 `notebook_edit` 的工具说明要求模型走的路径。
+    ///
+    /// 修复前 `NotebookReadTool` 压根没有 `GlobalState`，这条路径 100% 走不通。
+    #[tokio::test]
+    async fn a_read_notebook_is_registered_in_the_read_state() {
+        let (dir, config, gs) = harness("nb-read-records").await;
+        let nb = dir.path().join("nb.ipynb");
+        std::fs::write(&nb, notebook_json()).unwrap();
+
+        run(&config, &gs, json!({ "file_path": "nb.ipynb" })).await;
+
+        let key = crate::core::utils::paths::read_state_key(&nb);
+        let state = gs.read_file_state.read().await;
+        let recorded = state
+            .get(&key)
+            .unwrap_or_else(|| panic!("notebook 读过之后必须在 read_file_state 里，键：{key}"));
+        assert_eq!(
+            recorded.content,
+            notebook_json(),
+            "登记的必须是原始 JSON 全文 —— Edit/Write 之后靠它和磁盘比对，\
+             塞一份转储进去会让每次比对都判'内容变了'"
+        );
+    }
+
+    /// 文件不存在要报错，不能返回空成功。
+    #[tokio::test]
+    async fn a_missing_notebook_errors_instead_of_returning_empty() {
+        let (_dir, config, gs) = harness("nb-read-missing").await;
+
+        let result = run(&config, &gs, json!({ "file_path": "nope.ipynb" })).await;
+
+        assert!(result.error.is_some(), "文件不存在必须报错");
+        assert!(
+            result
+                .error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("File not found"),
+            "错误要说清是找不到文件：{:?}",
+            result.error
+        );
+    }
+
+    /// 损坏的 JSON 要报错（`Failed to parse notebook JSON`），不能 panic 也不能空成功。
+    #[tokio::test]
+    async fn a_corrupt_notebook_reports_a_parse_error() {
+        let (dir, config, gs) = harness("nb-read-corrupt").await;
+        std::fs::write(dir.path().join("bad.ipynb"), "{ not json").unwrap();
+
+        let result = run(&config, &gs, json!({ "file_path": "bad.ipynb" })).await;
+
+        let error = result
+            .error
+            .expect("坏 JSON 必须以错误形式失败，不能 panic 或空成功");
+        assert!(
+            error.message.contains("Failed to parse notebook JSON"),
+            "错误要说清是解析失败：{error:?}"
+        );
+    }
+
+    /// 缺 required 参数在 `create_invocation` 就被拒。
+    #[tokio::test]
+    async fn missing_required_params_are_rejected_at_creation() {
+        let (_dir, config, gs) = harness("nb-read-badparams").await;
+        assert!(
+            NotebookReadTool::new(config, gs)
+                .create_invocation(json!({}))
+                .is_err(),
+            "缺 file_path 必须在建 invocation 时报错"
+        );
     }
 }

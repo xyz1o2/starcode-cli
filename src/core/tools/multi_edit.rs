@@ -98,10 +98,11 @@ impl ToolInvocation for MultiEditToolInvocation {
                     let mut unread: Vec<&str> = Vec::new();
                     for edit in &params.edits {
                         let path = config.target_dir().join(&edit.file_path);
-                        // 键必须和写入端（`read_file::record_file_read`）用同一个
-                        // 函数算。这里原来自己 canonicalize 一次、失败就退回未
-                        // 规范化的原路径，于是 `src/../lib.rs` 这类路径在 Read
-                        // 侧被折叠成 `lib.rs`、在这里却保持原样，查询必然落空。
+                        // 键必须和写入端（`read_file::record_file_read`、`Glob` 的
+                        // 浏览登记）用同一个函数算。这里原来自己 canonicalize 一次、
+                        // 失败就退回未规范化的原路径，于是 `src/../lib.rs` 这类路径
+                        // 在 Read 侧被折叠成 `lib.rs`、在这里却保持原样，查询必然落空。
+                        //
                         // 更要紧的是查错了表：Glob / Grep / read_many / 批量 Read
                         // 都只写 `read_file_state`，只有单个 `Read` 才顺带写
                         // `execution_state`。查 `execution_state` 的话，
@@ -441,5 +442,303 @@ impl BaseDeclarativeTool for MultiEditTool {
             Some(self.display_name().to_string()),
             self.global_state.clone(),
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 生命周期测试的公共底座：临时目录 + 指向它的真实 `Config` + 真实
+    /// `GlobalState`，并在结束时清掉自己造出来的所有东西。
+    ///
+    /// 刻意走 `create_invocation` + `execute` 的完整链路，而不是直接 new 一个
+    /// Invocation：只有这样才会经过 serde 反序列化（`edits` 少字段要报错）、
+    /// 前置 read-state 门、以及最终写盘。绕过 Invocation 层的测试，测的是内部
+    /// 函数而不是工具。
+    struct Harness {
+        dir: tempfile::TempDir,
+        config: Arc<crate::core::config::Config>,
+        global_state: Arc<GlobalState>,
+    }
+
+    impl Harness {
+        async fn new(tag: &str) -> Self {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut params = crate::core::config::ConfigParameters::default();
+            params.model = "test-model".to_string();
+            params.core_tools = Some(Vec::new());
+            params.mcp_enabled = Some(false);
+            params.enable_agents = Some(false);
+            // 必须是 `target_dir` 而不是 `cwd`：所有工具都用 `config.target_dir()`
+            // 解析相对路径，`cwd` 是另一个字段，设了它 target_dir 仍然是真实仓库目录。
+            params.target_dir = dir.path().to_path_buf();
+            let mut config = crate::core::config::Config::new(params);
+            config
+                .initialize()
+                .await
+                .expect("test config must initialize");
+            assert_eq!(
+                config.target_dir(),
+                dir.path(),
+                "harness 必须把 target_dir 指到临时目录，否则工具会在真实仓库里读写"
+            );
+            Self {
+                dir,
+                config: Arc::new(config),
+                global_state: Arc::new(GlobalState::new()),
+            }
+        }
+
+        fn write(&self, rel: &str, body: &str) -> std::path::PathBuf {
+            let path = self.dir.path().join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create parent dir");
+            }
+            std::fs::write(&path, body).expect("write fixture file");
+            path
+        }
+
+        fn read(&self, rel: &str) -> String {
+            std::fs::read_to_string(self.dir.path().join(rel)).expect("read back")
+        }
+
+        /// 模拟"这个文件被 Read 过"：走真实的登记函数，和工具内部写表的是同一条路。
+        async fn mark_read(&self, rel: &str) {
+            let path = self.dir.path().join(rel);
+            let key = crate::core::utils::paths::read_state_key(&path);
+            let content = std::fs::read_to_string(&path).expect("read for mark_read");
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            crate::core::tools::read_file::record_file_read(
+                &self.global_state,
+                &key,
+                content,
+                now,
+                now,
+            )
+            .await;
+        }
+
+        /// 模拟 `Glob` 登记：只写 `read_file_state`，**不写** `execution_state`，
+        /// 且 content 是空占位符（"列出来过"而不是"读过内容"）。
+        ///
+        /// 这个形状是判别式用例：前面那个 `mark_read` 两张表都写，所以哪怕门查错了
+        /// 表也能过 —— 只有走这条路的文件（`Glob` / `Grep` / 批量 `Read` /
+        /// `read_many_files`）才能区分门到底查的是哪张表。
+        async fn mark_browsed(&self, rel: &str) {
+            let path = self.dir.path().join(rel);
+            let key = crate::core::utils::paths::read_state_key(&path);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let mut state = self.global_state.read_file_state.write().await;
+            state.insert(
+                key,
+                crate::core::state::ReadFileState {
+                    content: String::new(),
+                    timestamp: now,
+                    file_system_timestamp: now,
+                },
+            );
+        }
+
+        async fn run(&self, params: serde_json::Value) -> ToolResult {
+            let tool = MultiEditTool::new(self.config.clone(), self.global_state.clone());
+            tool.create_invocation(params)
+                .expect("create_invocation must accept valid params")
+                .execute(None, None)
+                .await
+                .expect("execute must not return Err for a valid call")
+        }
+    }
+
+    /// 完整成功路径：前置门放行 → 真正改到磁盘 → 结果里带上改动摘要。
+    #[tokio::test]
+    async fn a_read_file_is_edited_on_disk_and_reported() {
+        let h = Harness::new("multi-edit-ok").await;
+        h.write("a.rs", "fn a() {}\n");
+        h.mark_read("a.rs").await;
+
+        let result = h
+            .run(json!({
+                "edits": [{
+                    "file_path": "a.rs",
+                    "old_string": "fn a() {}",
+                    "new_string": "fn a() { todo!() }"
+                }]
+            }))
+            .await;
+
+        assert!(result.error.is_none(), "不该报错：{:?}", result.error);
+        assert_eq!(h.read("a.rs"), "fn a() { todo!() }\n", "磁盘必须真被改了");
+        let output = result.llm_content.expect("成功结果必须有 llm_content");
+        assert!(
+            output.contains("a.rs") || output.contains("1 file"),
+            "结果里应当说明改了什么：{output:?}"
+        );
+    }
+
+    /// 前置门：**读过的文件放行**。
+    ///
+    /// 这条在改动前就会挂 —— 门查的是 `execution_state`，而登记只写
+    /// `read_file_state`，所以 `Read` → `multi_edit` 是 100% 误报。
+    #[tokio::test]
+    async fn a_read_file_passes_the_gate() {
+        let h = Harness::new("multi-edit-gate-ok").await;
+        h.write("a.rs", "alpha\n");
+        h.mark_read("a.rs").await;
+
+        let result = h
+            .run(json!({
+                "edits": [{ "file_path": "a.rs", "old_string": "alpha", "new_string": "beta" }]
+            }))
+            .await;
+
+        assert!(
+            result.error.is_none(),
+            "登记过的文件必须放行：{:?}",
+            result.error
+        );
+        assert_eq!(h.read("a.rs"), "beta\n");
+    }
+
+    /// 前置门：**没读过的文件拦下**，且错误里带得上模型能照做的下一步。
+    #[tokio::test]
+    async fn an_unread_file_is_blocked_with_an_actionable_message() {
+        let h = Harness::new("multi-edit-gate-blocked").await;
+        h.write("a.rs", "alpha\n");
+        // 刻意不 mark_read
+
+        let result = h
+            .run(json!({
+                "edits": [{ "file_path": "a.rs", "old_string": "alpha", "new_string": "beta" }]
+            }))
+            .await;
+
+        let err = result.error.expect("未读取必须报错");
+        assert_eq!(
+            err.error_type,
+            crate::core::tools::constants::EDIT_FILE_NOT_READ_MARKER,
+            "error_type 必须是 agent 那边的标记，否则它识别不出要补哪一步"
+        );
+        let message = result.output.clone();
+        assert!(
+            message.contains("[edit_file_not_read]"),
+            "正文要带标记：{message:?}"
+        );
+        assert!(
+            message.contains("Read('a.rs')"),
+            "必须告诉模型具体要读哪个文件：{message:?}"
+        );
+        assert_eq!(h.read("a.rs"), "alpha\n", "被拦下时磁盘不能被改");
+    }
+
+    /// 判别式回归：门必须查 `read_file_state`，不能查 `execution_state`。
+    ///
+    /// `Glob` / `Grep` / 批量 `Read` / `read_many_files` **只**写 `read_file_state`；
+    /// 只有单个 `Read` 和 `@` 内联会顺带写 `execution_state`。门查错表的后果是
+    /// "Glob 完再 multi_edit" 100% 误报 `[edit_file_not_read]` —— 而这正是
+    /// agent 最常见的用法：先搜出文件，再批量改。
+    ///
+    /// 这条在修复前会挂；同文件里 `a_read_file_passes_the_gate` 挂不了（它走
+    /// `record_file_read`，两张表都写），所以两条缺一不可。
+    #[tokio::test]
+    async fn a_file_only_glob_browsed_passes_the_gate() {
+        let h = Harness::new("multi-edit-gate-glob").await;
+        h.write("a.rs", "alpha\n");
+        h.mark_browsed("a.rs").await;
+
+        let result = h
+            .run(json!({
+                "edits": [{ "file_path": "a.rs", "old_string": "alpha", "new_string": "beta" }]
+            }))
+            .await;
+
+        assert!(
+            result.error.is_none(),
+            "只被 Glob 列出的文件也必须放行（门只能查 read_file_state）：{:?}",
+            result.error
+        );
+        assert_eq!(h.read("a.rs"), "beta\n");
+    }
+
+    /// `STAR_DISABLE_READ_CHECK=1` 是逃生口，必须真的关掉这道门。
+    #[tokio::test]
+    async fn the_read_gate_can_be_disabled_by_env() {
+        let h = Harness::new("multi-edit-gate-off").await;
+        h.write("a.rs", "alpha\n");
+
+        std::env::set_var("STAR_DISABLE_READ_CHECK", "true");
+        let result = h
+            .run(json!({
+                "edits": [{ "file_path": "a.rs", "old_string": "alpha", "new_string": "beta" }]
+            }))
+            .await;
+        std::env::remove_var("STAR_DISABLE_READ_CHECK");
+
+        assert!(
+            result.error.is_none(),
+            "逃生口打开后不该再拦：{:?}",
+            result.error
+        );
+        assert_eq!(h.read("a.rs"), "beta\n");
+    }
+
+    /// 多文件批量：一次调用改多个文件，全部都要落盘。
+    #[tokio::test]
+    async fn several_files_are_edited_in_one_call() {
+        let h = Harness::new("multi-edit-multi").await;
+        h.write("a.rs", "alpha\n");
+        h.write("nested/b.rs", "beta\n");
+        h.mark_read("a.rs").await;
+        h.mark_read("nested/b.rs").await;
+
+        let result = h
+            .run(json!({ "edits": [
+                { "file_path": "a.rs", "old_string": "alpha", "new_string": "A" },
+                { "file_path": "nested/b.rs", "old_string": "beta", "new_string": "B" }
+            ]}))
+            .await;
+
+        assert!(result.error.is_none(), "不该报错：{:?}", result.error);
+        assert_eq!(h.read("a.rs"), "A\n");
+        assert_eq!(h.read("nested/b.rs"), "B\n");
+    }
+
+    /// 参数校验属于生命周期的一部分：缺 `edits` 必须在 `create_invocation` 就被拒。
+    #[tokio::test]
+    async fn missing_required_params_are_rejected_at_creation() {
+        let h = Harness::new("multi-edit-badparams").await;
+        let tool = MultiEditTool::new(h.config.clone(), h.global_state.clone());
+        assert!(
+            tool.create_invocation(json!({})).is_err(),
+            "缺 required 字段必须在建 invocation 时就报错"
+        );
+        assert!(
+            tool.create_invocation(json!({ "edits": [{ "file_path": "a.rs" }] }))
+                .is_err(),
+            "edits 里少 old_string/new_string 也必须报错"
+        );
+    }
+
+    /// `old_string` 匹配不上必须报错，且磁盘保持原样 —— 不能"半成功"。
+    #[tokio::test]
+    async fn a_non_matching_old_string_errors_without_touching_the_file() {
+        let h = Harness::new("multi-edit-nomatch").await;
+        h.write("a.rs", "alpha\n");
+        h.mark_read("a.rs").await;
+
+        let result = h
+            .run(json!({
+                "edits": [{ "file_path": "a.rs", "old_string": "zzz-not-there", "new_string": "x" }]
+            }))
+            .await;
+
+        assert!(result.error.is_some(), "匹配不上必须报错");
+        assert_eq!(h.read("a.rs"), "alpha\n", "失败时磁盘必须原封不动");
     }
 }
