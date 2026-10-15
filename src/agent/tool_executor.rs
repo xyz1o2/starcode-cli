@@ -18,12 +18,28 @@ use crate::core::state::CachedToolResult;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-// 默认确认超时 (毫秒)
-const DEFAULT_CONFIRM_TIMEOUT_MS: u64 = 600_000; // 10分钟（给用户充足确认时间）
+// 注：确认等待没有超时。等多久是用户的事，不是计时器的事——见
+// `MessageBus::await_tool_decision`。
+//
+// 注：工具执行兜底时限不在本结构上持有（见 `with_watchdog`）。
 
-// 注：工具执行超时不在本结构上持有。它由 runtime/control_requests.rs 按
-// 工具类型分别施加（STAR_TOOL_TIMEOUT_SECS），统一字段会让所有工具共用
-// 一个上限，反而破坏了 240/120/180 的分档。
+/// 工具自己跑多久算卡死。
+///
+/// 这道兜底量的是"工具跑了多久"，**不是**"这次调用过了多久"。门禁等用户的时间
+/// 算在 `pass_gate` 里、在这道兜底之外 —— 用户思考十分钟不该把工具判成卡死。
+///
+/// 默认值给得很宽（30 分钟）：工具大多自带更紧的时限（Shell 有
+/// `STAR_SHELL_TIMEOUT` 和不活动超时），这里只接"内置工具集体失联"这种情况。
+const DEFAULT_TOOL_WATCHDOG_SECS: u64 = 1800;
+
+fn tool_watchdog() -> std::time::Duration {
+    let secs = std::env::var("STAR_TOOL_WATCHDOG_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_TOOL_WATCHDOG_SECS);
+    std::time::Duration::from_secs(secs)
+}
 
 /// 从 panic payload 里取出可读消息
 ///
@@ -42,6 +58,27 @@ fn should_run_invocation_confirmation(
     requires_invocation_confirmation: bool,
 ) -> bool {
     !approved || requires_invocation_confirmation
+}
+
+/// 门禁的结论。`Closed` 一定带着理由 —— 模型需要知道是被规则拒了、被用户拒了，
+/// 还是这一轮被中断了，这三者的下一步完全不同。
+enum Gate {
+    Open,
+    Closed(String),
+}
+
+/// [`ToolExecutor::pass_gate`] 的入参。参数多到不适合逐个传递，
+/// 但它们全是这次调用的既有事实，不该重新计算。
+struct GateInput<'a> {
+    tool_name: &'a str,
+    args: &'a Value,
+    tool: &'a dyn crate::core::tools::tools::BaseDeclarativeTool,
+    invocation: &'a dyn crate::core::tools::tools::ToolInvocation,
+    permission_identity: Option<&'a str>,
+    requires_invocation_confirmation: bool,
+    /// 模型侧的 `tool_call.id`，UI 靠它把确认卡和工具结果对上。
+    originating_tool_call_id: &'a str,
+    abort_signal: Option<&'a tokio_util::sync::CancellationToken>,
 }
 
 /// `ask` 规则命中、但工具自身没有确认要求时补出来的确认卡片。
@@ -100,8 +137,6 @@ pub struct ToolExecutor {
     message_bus: Option<Arc<MessageBus>>,
     cached_tool_definitions: RwLock<Option<(u64, Vec<StarTool>)>>,
     permission_manager: Arc<SessionPermissionManager>,
-    /// 工具确认超时 (毫秒)
-    confirm_timeout_ms: u64,
 }
 
 impl ToolExecutor {
@@ -116,11 +151,6 @@ impl ToolExecutor {
         message_bus: Option<Arc<MessageBus>>,
         config: Arc<Config>,
     ) -> Self {
-        let confirm_timeout_ms = std::env::var("STAR_CONFIRM_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_CONFIRM_TIMEOUT_MS);
-
         let permission_manager = Arc::new(SessionPermissionManager::with_persistence(
             config.storage().project_permission_grants_path(),
         ));
@@ -131,17 +161,7 @@ impl ToolExecutor {
             message_bus,
             cached_tool_definitions: RwLock::new(None),
             permission_manager,
-            confirm_timeout_ms,
         }
-    }
-
-    /// 一次确认最多等用户多久（毫秒）。
-    ///
-    /// 调用方（`tool_helpers` 的兜底超时）必须把它算进去：外层兜底是用来抓
-    /// **工具卡死**的，不是抓**用户在读命令**的。两个都用 600s 的话，外层先到期，
-    /// 内层的"确认已过期"永远轮不到说出口，用户只看到一句笼统的 timed out。
-    pub fn confirm_timeout_ms(&self) -> u64 {
-        self.confirm_timeout_ms
     }
 
     pub fn get_tool_definitions(&self) -> Vec<StarTool> {
@@ -307,6 +327,269 @@ impl ToolExecutor {
         crate::core::context::watcher::mark_files_dirty(std::iter::once(file_path.to_string()));
     }
 
+    /// 给工具的执行加一道兜底时限，超时后转成一条普通的工具错误。
+    ///
+    /// 必须由调用方自己收窄作用域：这道计时器只该套在 `invocation.execute(...)`
+    /// 上。套在更外层（比如整个 `execute_batch`）就会把用户思考的时间也算成
+    /// 工具的执行时间，于是用户离开一会儿回来，看到的是一句"执行超时"，
+    /// 真正的原因 —— 没人点同意 —— 被彻底吞掉。
+    async fn with_watchdog<F>(
+        tool_name: &str,
+        exec: F,
+    ) -> Result<crate::core::tools::tools::ToolResult, Box<dyn std::error::Error>>
+    where
+        F: std::future::Future<
+            Output = Result<crate::core::tools::tools::ToolResult, Box<dyn std::error::Error>>,
+        >,
+    {
+        let limit = tool_watchdog();
+        match tokio::time::timeout(limit, exec).await {
+            Ok(result) => result,
+            Err(_) => {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "⏱ Tool {} exceeded the {}s watchdog",
+                    tool_name,
+                    limit.as_secs()
+                ));
+                Err(format!(
+                    "Tool `{}` did not finish within {}s and was stopped. This is a defect or an \
+                     unreasonably long-running tool, not a permission decision — narrow the work \
+                     and try again.",
+                    tool_name,
+                    limit.as_secs()
+                )
+                .into())
+            }
+        }
+    }
+
+    /// 门禁：这次工具调用能不能往下走。
+    ///
+    /// 只有两种结局，**没有第三种**。尤其没有"等太久了就当拒绝"：等待时长由
+    /// 用户决定，不由计时器决定（真正的等待在 [`MessageBus::await_tool_decision`]，
+    /// 它没有超时）。
+    async fn pass_gate(&self, input: GateInput<'_>) -> Gate {
+        let GateInput {
+            tool_name,
+            args,
+            tool,
+            invocation,
+            permission_identity,
+            requires_invocation_confirmation,
+            originating_tool_call_id,
+            abort_signal,
+        } = input;
+
+        // 策略引擎要求弹窗时（`ask` 规则命中），必须真的走到用户面前。
+        // 工具自己的 `should_confirm_execute` 返回 `Ok(None)` 只表示
+        // "这个工具没有额外顾虑"，不能用来否决一条显式的 `ask` 规则。
+        // `AskUser` 有两个来源，语义不同，必须分开：
+        // - `requires_prompt`：不管怎样都要弹一次框
+        // - `policy_requires_confirmation`：**显式 ask 规则**命中。会话里的
+        //   「本会话允许」不该把它降级 —— 用户写 `ask: [...]` 的语义就是
+        //   「每次都问我」。
+        // 兜底 default（默认 AskUser）只置前者。之前两者混为一谈，导致
+        // 没有任何 settings 的用户点「本会话允许」后下一次照样弹框。
+        let mut requires_prompt = false;
+        let mut policy_requires_confirmation = false;
+        let mut approved = false;
+
+        if let Some(bus) = &self.message_bus {
+            let check = bus
+                .check_tool_policy(
+                    &FunctionCall {
+                        name: tool_name.to_string(),
+                        args: Some(args.clone()),
+                    },
+                    None,
+                )
+                .await;
+
+            match check.decision {
+                PolicyDecision::Deny => {
+                    Self::publish_policy_rejection(bus, tool_name, args).await;
+                    return Gate::Closed("Tool execution denied by policy.".to_string());
+                }
+                PolicyDecision::DenyWithReason(reason) => {
+                    Self::publish_policy_rejection(bus, tool_name, args).await;
+                    return Gate::Closed(format!("Tool execution denied: {}", reason));
+                }
+                PolicyDecision::Allow => approved = true,
+                PolicyDecision::AskUser => {
+                    requires_prompt = true;
+                    if check.explicit_rule {
+                        policy_requires_confirmation = true;
+                    }
+                }
+            }
+        }
+
+        // 会话/持久缓存只在策略没有点名要求确认时才生效。
+        // 用户写 `ask: ["Bash(git push:*)"]` 的语义是"每次都问我"，
+        // 一次"总是允许"不该把它降级成此后静默放行。
+        if !approved && !requires_invocation_confirmation && !policy_requires_confirmation {
+            let permission_hit = self.permission_manager.check_allowed_with_identity(
+                tool_name,
+                args,
+                permission_identity,
+            );
+            if permission_hit != PermissionHit::None {
+                let source = match permission_hit {
+                    PermissionHit::ToolSession => "tool_session",
+                    PermissionHit::ToolPersisted => "tool_persisted",
+                    PermissionHit::SignatureSession => "signature_session",
+                    PermissionHit::SignaturePersisted => "signature_persisted",
+                    PermissionHit::None => "none",
+                };
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "✅ Permission: Allowing {} without prompt (source={})",
+                    tool_name, source
+                ));
+                approved = true;
+            }
+        }
+
+        if !should_run_invocation_confirmation(approved, requires_invocation_confirmation) {
+            return Gate::Open;
+        }
+
+        let Some(bus) = &self.message_bus else {
+            // 没有总线（legacy/test 模式）：没人能问，也没人能拒。
+            return Gate::Open;
+        };
+
+        let should_confirm = invocation.should_confirm_execute(abort_signal).await;
+        // 工具没提出自己的确认要求，但策略判定要问：补一个确认卡片。
+        // 两张卡片文案必须不同 —— 显式 ask 规则才配说 "matches an `ask` rule"；
+        // 兜底 default 没有规则可指。
+        let should_confirm = match should_confirm {
+            Ok(None) if requires_prompt => Ok(Some(if policy_requires_confirmation {
+                policy_confirmation_details(tool_name, args)
+            } else {
+                default_confirmation_details(tool_name, args)
+            })),
+            other => other,
+        };
+
+        let details = match should_confirm {
+            Ok(Some(details)) => details,
+            Ok(None) => return Gate::Open,
+            Err(e) => return Gate::Closed(e.to_string()),
+        };
+        let on_confirm = details.on_confirm.clone();
+
+        let request = ToolConfirmationRequest {
+            message_type: MessageBusType::ToolConfirmationRequest,
+            tool_call: FunctionCall {
+                name: tool_name.to_string(),
+                args: Some(args.clone()),
+            },
+            // correlation_id 由 bus 在发出去之前填。
+            correlation_id: String::new(),
+            server_name: None,
+            title: Some(details.title),
+            prompt: Some(details.prompt),
+            // UI 手上只有模型侧的 tool_call.id，靠它把"这张卡"和稍后到达的
+            // ToolResult 对上；不上的话卡片收不到自己那次调用的结局。
+            originating_tool_call_id: Some(originating_tool_call_id.to_string()),
+        };
+
+        // 唯一的等待点。没有超时：用户没回答就一直等，用户中断就立刻收手。
+        let response = match bus.await_tool_decision(request, abort_signal).await {
+            Ok(response) => response,
+            Err(e) => return Gate::Closed(e.to_string()),
+        };
+
+        if !response.confirmed {
+            // 用户明确拒绝（含 ESC 取消）。这是一次决定，不是错误、更不是超时。
+            return Gate::Closed(format!(
+                "The user declined to run `{}`. Do not retry the same call — say what you wanted \
+                 to do, or ask the user how to proceed.",
+                tool_name
+            ));
+        }
+
+        self.record_approval(
+            tool,
+            tool_name,
+            args,
+            permission_identity,
+            &response,
+            &on_confirm,
+        );
+        Gate::Open
+    }
+
+    /// 记下"用户批准了这一次"，并把「本会话允许 / 总是允许」落到权限缓存上。
+    fn record_approval(
+        &self,
+        tool: &dyn crate::core::tools::tools::BaseDeclarativeTool,
+        tool_name: &str,
+        args: &Value,
+        permission_identity: Option<&str>,
+        response: &ToolConfirmationResponse,
+        on_confirm: &Arc<
+            dyn Fn(crate::types::ToolConfirmationOutcome, Option<String>) + Send + Sync,
+        >,
+    ) {
+        let requested_outcome = response
+            .outcome
+            .clone()
+            .unwrap_or(crate::types::ToolConfirmationOutcome::ProceedOnce);
+        let outcome = tool.normalize_confirmation_outcome(requested_outcome.clone());
+        if outcome != requested_outcome {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "🔐 Permission outcome normalized for {}: {:?} -> {:?}",
+                tool_name, requested_outcome, outcome
+            ));
+        }
+        on_confirm(outcome.clone(), response.feedback.clone());
+
+        match outcome {
+            crate::types::ToolConfirmationOutcome::AllowSession => {
+                self.permission_manager
+                    .allow_tool_session_with_identity(tool_name, permission_identity);
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "🔐 Permission Granted: Allowing tool {} for session",
+                    tool_name
+                ));
+            }
+            crate::types::ToolConfirmationOutcome::ProceedAlways => {
+                self.permission_manager.allow_action_with_identity(
+                    tool_name,
+                    args,
+                    permission_identity,
+                );
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "🔐 Permission Granted: Allowing {} for session (signature)",
+                    tool_name
+                ));
+            }
+            crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave => {
+                self.permission_manager
+                    .allow_tool_persisted_with_identity(tool_name, permission_identity);
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "🔐 Permission Granted: Persisted allow for tool {}",
+                    tool_name
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    /// 策略拒绝也要让 UI 画得出来：只回一条给模型的错误，界面上看不出是规则拦的。
+    async fn publish_policy_rejection(bus: &MessageBus, tool_name: &str, args: &Value) {
+        let _ = bus
+            .publish(Message::ToolPolicyRejection(ToolPolicyRejection {
+                message_type: MessageBusType::ToolPolicyRejection,
+                tool_call: FunctionCall {
+                    name: tool_name.to_string(),
+                    args: Some(args.clone()),
+                },
+            }))
+            .await;
+    }
+
     async fn execute_inner(
         &self,
         tool_call: &StarToolCall,
@@ -430,250 +713,32 @@ impl ToolExecutor {
             let requires_invocation_confirmation = tool.requires_invocation_confirmation();
             match tool.create_invocation(args.clone()) {
                 Ok(invocation) => {
-                    // 1. Check Policy / Confirmation
-                    let mut approved = false;
-                    // 策略引擎要求弹窗时（`ask` 规则命中），必须真的走到用户面前。
-                    // 工具自己的 `should_confirm_execute` 返回 `Ok(None)` 只表示
-                    // "这个工具没有额外顾虑"，不能用来否决一条显式的 `ask` 规则。
-                    // `AskUser` 有两个来源，语义不同，必须分开：
-                    // - `requires_prompt`：不管怎样都要弹一次框
-                    // - `policy_requires_confirmation`：**显式 ask 规则**命中。会话里的
-                    //   「本会话允许」不该把它降级 —— 用户写 `ask: [...]` 的语义就是
-                    //   「每次都问我」。
-                    // 兜底 default（默认 AskUser）只置前者。之前两者混为一谈，导致
-                    // 没有任何 settings 的用户点「本会话允许」后下一次照样弹框。
-                    let mut requires_prompt = false;
-                    let mut policy_requires_confirmation = false;
-
-                    if let Some(bus) = &self.message_bus {
-                        let check = bus
-                            .check_tool_policy(
-                                &FunctionCall {
-                                    name: name.to_string(),
-                                    args: Some(args.clone()),
-                                },
-                                None,
-                            )
-                            .await;
-
-                        match check.decision {
-                            PolicyDecision::Deny => {
-                                let _ = bus
-                                    .publish(Message::ToolPolicyRejection(ToolPolicyRejection {
-                                        message_type: MessageBusType::ToolPolicyRejection,
-                                        tool_call: FunctionCall {
-                                            name: name.to_string(),
-                                            args: Some(args.clone()),
-                                        },
-                                    }))
-                                    .await;
-                                return Self::error_result(
-                                    "Tool execution denied by policy.".to_string().into(),
-                                );
-                            }
-                            PolicyDecision::DenyWithReason(reason) => {
-                                let _ = bus
-                                    .publish(Message::ToolPolicyRejection(ToolPolicyRejection {
-                                        message_type: MessageBusType::ToolPolicyRejection,
-                                        tool_call: FunctionCall {
-                                            name: name.to_string(),
-                                            args: Some(args.clone()),
-                                        },
-                                    }))
-                                    .await;
-                                return Self::error_result(
-                                    format!("Tool execution denied: {}", reason).into(),
-                                );
-                            }
-                            PolicyDecision::Allow => {
-                                approved = true;
-                            }
-                            PolicyDecision::AskUser => {
-                                requires_prompt = true;
-                                if check.explicit_rule {
-                                    policy_requires_confirmation = true;
-                                }
-                            }
-                        }
-                    }
-
-                    // 会话/持久缓存只在策略没有点名要求确认时才生效。
-                    // 用户写 `ask: ["Bash(git push:*)"]` 的语义是"每次都问我"，
-                    // 一次"总是允许"不该把它降级成此后静默放行。
-                    if !approved
-                        && !requires_invocation_confirmation
-                        && !policy_requires_confirmation
+                    // 门禁先行：没批准就一步都不许往下走。
+                    match self
+                        .pass_gate(GateInput {
+                            tool_name: name,
+                            args: &args,
+                            tool: tool.as_ref(),
+                            invocation: invocation.as_ref(),
+                            permission_identity: permission_identity.as_deref(),
+                            requires_invocation_confirmation,
+                            originating_tool_call_id: &tool_call.id,
+                            abort_signal: abort_signal.as_ref(),
+                        })
+                        .await
                     {
-                        let permission_hit = self.permission_manager.check_allowed_with_identity(
+                        Gate::Open => {}
+                        Gate::Closed(reason) => return Self::error_result(reason.into()),
+                    }
+
+                    {
+                        // First execution. The watchdog wraps **only** the tool run:
+                        // it bounds a hung tool, not the time a human spends deciding.
+                        let first_result = match Self::with_watchdog(
                             name,
-                            &args,
-                            permission_identity.as_deref(),
-                        );
-                        if permission_hit != PermissionHit::None {
-                            let source = match permission_hit {
-                                PermissionHit::ToolSession => "tool_session",
-                                PermissionHit::ToolPersisted => "tool_persisted",
-                                PermissionHit::SignatureSession => "signature_session",
-                                PermissionHit::SignaturePersisted => "signature_persisted",
-                                PermissionHit::None => "none",
-                            };
-                            crate::utils::logging::append_debug_log_line(&format!(
-                                "✅ Permission: Allowing {} without prompt (source={})",
-                                name, source
-                            ));
-                            approved = true;
-                        }
-                    }
-
-                    if should_run_invocation_confirmation(
-                        approved,
-                        requires_invocation_confirmation,
-                    ) {
-                        if let Some(bus) = &self.message_bus {
-                            // Pass cancellation token to confirmation check if needed (though it's usually fast)
-                            let should_confirm = invocation
-                                .should_confirm_execute(abort_signal.as_ref())
-                                .await;
-
-                            // 工具没提出自己的确认要求，但策略判定要问：补一个确认卡片。
-                            // 两张卡片文案必须不同 —— 显式 ask 规则才配说
-                            // "matches an `ask` rule"；兜底 default 没有规则可指。
-                            let should_confirm = match should_confirm {
-                                Ok(None) if requires_prompt => {
-                                    Ok(Some(if policy_requires_confirmation {
-                                        policy_confirmation_details(name, &args)
-                                    } else {
-                                        default_confirmation_details(name, &args)
-                                    }))
-                                }
-                                other => other,
-                            };
-
-                            match should_confirm {
-                                Ok(Some(details)) => {
-                                    let request = ToolConfirmationRequest {
-                                        message_type: MessageBusType::ToolConfirmationRequest,
-                                        tool_call: FunctionCall {
-                                            name: name.to_string(),
-                                            args: Some(args.clone()),
-                                        },
-                                        correlation_id: "".to_string(), // Will be filled by bus.request
-                                        server_name: None,
-                                        title: Some(details.title),
-                                        prompt: Some(details.prompt),
-                                        // UI 手上只有模型侧的 tool_call.id，靠它把
-                                        // "这张卡"和稍后到达的 ToolResult 对上；不带上
-                                        // 的话卡片收不到自己那次调用的结局。
-                                        originating_tool_call_id: Some(tool_call.id.clone()),
-                                    };
-
-                                    // 等确认，并把 abort 一起竞速进去：用户中断这一轮时
-                                    // 不能在这里挂到 600 秒超时（`request_cancellable`
-                                    // 放弃前会补发取消应答，把 UI 上的确认卡一并收掉）。
-                                    let response_result: Result<ToolConfirmationResponse, _> = bus
-                                        .request_cancellable(
-                                            request,
-                                            self.confirm_timeout_ms,
-                                            abort_signal.as_ref(),
-                                        )
-                                        .await;
-
-                                    match response_result {
-                                        Ok(resp) => {
-                                            if resp.confirmed {
-                                                approved = true;
-
-                                                // Trigger callback (e.g. for trusted folders)
-                                                let requested_outcome = resp.outcome.clone().unwrap_or(
-                                                    crate::types::ToolConfirmationOutcome::ProceedOnce,
-                                                );
-                                                let outcome_val = tool
-                                                    .normalize_confirmation_outcome(
-                                                        requested_outcome.clone(),
-                                                    );
-                                                if outcome_val != requested_outcome {
-                                                    crate::utils::logging::append_debug_log_line(&format!(
-                                                        "🔐 Permission outcome normalized for {}: {:?} -> {:?}",
-                                                        name, requested_outcome, outcome_val
-                                                    ));
-                                                }
-                                                (details.on_confirm)(
-                                                    outcome_val.clone(),
-                                                    resp.feedback.clone(),
-                                                );
-
-                                                if resp.outcome.is_some() {
-                                                    match outcome_val {
-                                                        crate::types::ToolConfirmationOutcome::AllowSession => {
-                                                            self.permission_manager.allow_tool_session_with_identity(
-                                                                name,
-                                                                permission_identity.as_deref(),
-                                                            );
-                                                            crate::utils::logging::append_debug_log_line(&format!(
-                                                                "🔐 Permission Granted: Allowing tool {} for session",
-                                                                name
-                                                            ));
-                                                        }
-                                                        crate::types::ToolConfirmationOutcome::ProceedAlways => {
-                                                            self.permission_manager.allow_action_with_identity(
-                                                                name,
-                                                                &args,
-                                                                permission_identity.as_deref(),
-                                                            );
-                                                            crate::utils::logging::append_debug_log_line(&format!(
-                                                                "🔐 Permission Granted: Allowing {} for session (signature)",
-                                                                name
-                                                            ));
-                                                        }
-                                                        crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave => {
-                                                            self.permission_manager.allow_tool_persisted_with_identity(
-                                                                name,
-                                                                permission_identity.as_deref(),
-                                                            );
-                                                            crate::utils::logging::append_debug_log_line(&format!(
-                                                                "🔐 Permission Granted: Persisted allow for tool {}",
-                                                                name
-                                                            ));
-                                                        }
-                                                        _ => {}
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            // 中断与超时是两回事：前者是用户主动取消，
-                                            // 报成"超时"会让模型以为可以换个写法重试。
-                                            let cancelled = abort_signal
-                                                .as_ref()
-                                                .is_some_and(|token| token.is_cancelled());
-                                            let message = if cancelled {
-                                                "Tool execution cancelled by the user while waiting for permission."
-                                            } else {
-                                                "Confirmation timeout or error"
-                                            };
-                                            return Self::error_result(
-                                                format!("{}: {}", message, e).into(),
-                                            );
-                                        }
-                                    }
-                                }
-                                Ok(None) => {
-                                    // No confirmation needed
-                                    approved = true;
-                                }
-                                Err(e) => return Self::error_result(e),
-                            }
-                        } else {
-                            // No message bus (legacy/test mode), assume allowed unless tool invocation fails later
-                            approved = true;
-                        }
-                    }
-
-                    if approved {
-                        // First execution
-                        let first_result = match invocation
-                            .execute(abort_signal.as_ref(), update_output.clone())
-                            .await
+                            invocation.execute(abort_signal.as_ref(), update_output.clone()),
+                        )
+                        .await
                         {
                             Ok(core_result) => {
                                 let success = core_result.error.is_none();
@@ -753,9 +818,14 @@ impl ToolExecutor {
                                             if let Ok(retry_invocation) =
                                                 tool.create_invocation(retry_args)
                                             {
-                                                match retry_invocation
-                                                    .execute(abort_signal.as_ref(), update_output)
-                                                    .await
+                                                match Self::with_watchdog(
+                                                    name,
+                                                    retry_invocation.execute(
+                                                        abort_signal.as_ref(),
+                                                        update_output,
+                                                    ),
+                                                )
+                                                .await
                                                 {
                                                     Ok(retry_result) => {
                                                         return ToolResult {
@@ -783,8 +853,6 @@ impl ToolExecutor {
                         }
 
                         first_result
-                    } else {
-                        Self::error_result("Tool execution denied.".into())
                     }
                 }
                 Err(e) => Self::error_result(e),
@@ -3056,6 +3124,265 @@ mod tests {
         assert!(
             !saw_confirmation,
             "an `allow` rule must not produce a confirmation prompt"
+        );
+    }
+
+    // ── 门禁：没批准就不许动 ──────────────────────────────────────────────
+
+    /// 门禁夹具：一枚只在 `execute` 里记账的计数器，用来证明"没批准时工具没跑"。
+    struct CountingTool {
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::core::tools::tools::BaseDeclarativeTool for CountingTool {
+        fn name(&self) -> &str {
+            "CountingTool"
+        }
+        fn display_name(&self) -> &str {
+            "Counting tool"
+        }
+        fn description(&self) -> &str {
+            "test-only tool that counts how many times it actually ran"
+        }
+        fn kind(&self) -> crate::core::tools::tools::Kind {
+            crate::core::tools::tools::Kind::Other
+        }
+        fn parameter_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn create_invocation(
+            &self,
+            _params: serde_json::Value,
+        ) -> Result<
+            Box<dyn crate::core::tools::tools::ToolInvocation>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            Ok(Box::new(CountingInvocation {
+                runs: self.runs.clone(),
+            }))
+        }
+    }
+
+    struct CountingInvocation {
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::core::tools::tools::ToolInvocation for CountingInvocation {
+        fn get_description(&self) -> String {
+            "counting invocation".to_string()
+        }
+        fn tool_locations(&self) -> Vec<crate::core::tools::tools::ToolLocation> {
+            Vec::new()
+        }
+        fn execute(
+            &self,
+            _signal: Option<&tokio_util::sync::CancellationToken>,
+            _update_output: Option<Arc<dyn Fn(String) + Send + Sync>>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            crate::core::tools::tools::ToolResult,
+                            Box<dyn std::error::Error>,
+                        >,
+                    > + Send,
+            >,
+        > {
+            self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async {
+                Ok(crate::core::tools::tools::ToolResult {
+                    output: "ran".to_string(),
+                    return_display: Some("ran".to_string()),
+                    error: None,
+                    data: None,
+                    llm_content: None,
+                })
+            })
+        }
+    }
+
+    /// 门禁夹具：装配一个必然会被兜底 `AskUser` 拦下的 executor。
+    ///
+    /// 返回 executor、总线和"工具实际跑了多少次"的计数器。临时目录被 executor
+    /// 的 `Arc<Config>` 持有，生命周期与测试同在。
+    fn counting_gate() -> (
+        ToolExecutor,
+        Arc<MessageBus>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use crate::core::config::ConfigParameters;
+        use crate::core::policy::PolicyEngine;
+
+        let temp = tempfile::tempdir().expect("create temporary directory");
+        let mut params = ConfigParameters::default();
+        params.target_dir = temp.path().to_path_buf();
+        params.cwd = temp.path().to_path_buf();
+        let config = Arc::new(Config::new(params));
+
+        // 刻意不装任何规则：兜底 `AskUser` 一定会弹一次框。
+        let bus = Arc::new(MessageBus::new(
+            PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = Arc::new(ToolRegistry::new(config.clone()));
+        registry.register_tool(Arc::new(CountingTool { runs: runs.clone() }));
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            registry,
+            Some(bus.clone()),
+            config,
+        );
+        (executor, bus, runs)
+    }
+
+    fn counting_call() -> StarToolCall {
+        StarToolCall {
+            id: "counting-call".to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: "CountingTool".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    /// 订阅总线，拿到下一次确认请求的 correlation_id。
+    ///
+    /// 订阅必须在**调用方线程上**先建好再 spawn：broadcast 只缓冲订阅之后的消息，
+    /// 在任务里现订阅会漏掉已经发出去的请求，于是应答永远等不到。
+    fn watch_for_confirmation(
+        bus: Arc<MessageBus>,
+        outcome: crate::types::ToolConfirmationOutcome,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut rx = bus.subscribe();
+        async move {
+            let id = loop {
+                match rx.recv().await.expect("应收到确认请求") {
+                    Message::ToolConfirmationRequest(req) => break req.correlation_id,
+                    _ => continue,
+                }
+            };
+            bus.publish(Message::ToolConfirmationResponse(
+                ToolConfirmationResponse::from_user_decision(id, outcome, None),
+            ))
+            .await
+            .ok();
+        }
+    }
+
+    /// 回归（用户报的那个现象）：没人批准时，等待**必须继续挂着**，工具也一步不许跑。
+    ///
+    /// 修复前这里是 `timeout(600s, …)`：用户只是离开了一会儿，回来就看到
+    /// `Confirmation timeout or error: Confirmation timed out`，模型据此宣布这个工具
+    /// 不可用 —— 一次没人否决的请求，在用户眼前自己变成了失败。
+    #[tokio::test]
+    async fn an_unanswered_confirmation_never_turns_into_a_failure() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let (executor, _bus, runs) = counting_gate();
+        let call = counting_call();
+        let waiting = executor.execute(&call, None, None);
+        tokio::pin!(waiting);
+
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+            early = &mut waiting => panic!(
+                "没人回答，等待就结束了：{early:?} —— 计时器把'还没决定'写成了'被拒绝'"
+            ),
+        }
+
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "没批准就执行了工具");
+    }
+
+    /// 用户按 ESC 取消之后：不再等，工具也绝不能跑，报错里不许出现"超时"。
+    #[tokio::test]
+    async fn a_cancelled_confirmation_never_runs_the_tool() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let (executor, bus, runs) = counting_gate();
+        let responder = tokio::spawn(watch_for_confirmation(
+            bus.clone(),
+            crate::types::ToolConfirmationOutcome::Cancel,
+        ));
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            executor.execute(&counting_call(), None, None),
+        )
+        .await
+        .expect("用户取消后必须立刻返回");
+        responder.await.expect("responder task");
+
+        assert!(!result.success, "被拒绝的调用不能报成功");
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "用户没批准，工具却跑了");
+        let error = result.error.unwrap_or_default();
+        assert!(
+            !error.contains("timed out"),
+            "取消不是超时，报错里不该出现 timed out：{error}"
+        );
+        assert!(
+            error.contains("declined"),
+            "报错要说明是用户拒绝了，而不是笼统的失败：{error}"
+        );
+    }
+
+    /// 用户批准之后照常执行 —— 门禁没有把路堵死。
+    #[tokio::test]
+    async fn an_approved_confirmation_runs_the_tool() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let (executor, bus, runs) = counting_gate();
+        let responder = tokio::spawn(watch_for_confirmation(
+            bus.clone(),
+            crate::types::ToolConfirmationOutcome::ProceedOnce,
+        ));
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            executor.execute(&counting_call(), None, None),
+        )
+        .await
+        .expect("批准之后必须立刻返回");
+        responder.await.expect("responder task");
+
+        assert!(result.success, "批准后应当执行成功：{:?}", result.error);
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "批准后工具应当恰好跑一次");
+    }
+
+    /// 中断这一轮必须让等待立刻收手：用户不想等了，剩下的就不该继续挂着。
+    #[tokio::test]
+    async fn interrupting_the_turn_unblocks_the_gate_and_skips_the_tool() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let (executor, _bus, runs) = counting_gate();
+        let token = tokio_util::sync::CancellationToken::new();
+
+        let call = counting_call();
+        let waiting = executor.execute(&call, None, Some(token.clone()));
+        tokio::pin!(waiting);
+
+        let interrupter = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            token.cancel();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(waiting, interrupter)
+        })
+        .await
+        .expect("中断后必须立刻返回");
+
+        assert!(!result.success, "被中断的调用不能报成功");
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "中断时工具不该跑");
+        let error = result.error.unwrap_or_default();
+        assert!(
+            error.contains("interrupted"),
+            "报错要如实说是被中断，别让模型以为换个写法就能过：{error}"
         );
     }
 }

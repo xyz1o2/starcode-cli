@@ -333,6 +333,7 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | `default` 档把只读工具也弹确认 | `core/policy/policy_engine.rs`（新增 `mode_auto_allows`）、`types/mod.rs` | 5 个新测试锁住语义；连带修好 headless `-p` 下"每个工具都被拒" |
 | `acceptEdits` 被折叠成 `default` | `policy/types.rs`、`types/mod.rs`（两处枚举）、`settings_rules.rs`、`parity.rs` 的 `/mode` | Shift+Tab 循环扩为四档；显式 `ask` 规则仍压得住模式内置放行 |
 | 确认等待不响应 abort（600s 静默） | `confirmation_bus/message_bus.rs`（新增 `request_cancellable`）、`agent/tool_executor.rs` | 3 个新测试；放弃等待时补发取消应答，把 UI 上的确认卡一并收掉 |
+| 确认等待 600s 后自己超时，把「没回答」写成「被拒绝」 | `confirmation_bus/message_bus.rs`（`await_tool_decision`，去掉 `request_cancellable`/`request`）、`agent/tool_executor.rs`（新增 `pass_gate`/`Gate`，删掉 `STAR_CONFIRM_TIMEOUT`）、`agent/tool_helpers.rs`（删掉按确认超时推导的兜底） | 等待只剩三种结局：用户拍板、用户中断、总线关闭；工具兜底时限改挂在 `invocation.execute()` 上，不再把用户思考的时间算进工具预算 |
 | Edit/Write 审批卡不显示 diff | `ui/components/confirmation_dialog.rs` | 卡片内联 diff 预览（上限 24 行）+ 现算增删行数 |
 | diff 丢掉 `@@` hunk 头 | `ui/utils/render.rs::build_diff_block` | 2 个新测试；有 `@@` 就不再补 `═` 间隔线 |
 | 滚动条从未渲染 | `ui/app/mod.rs`（活路径） | 死函数 `render_chat_history` 删除，滚动条挪进真正绘制的那条路径 |

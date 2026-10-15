@@ -94,6 +94,45 @@ pub async fn list_models(
 }
 
 /// 列出模型。`force = true` 时跳过缓存并扇出到所有已配置 provider。
+/// 要不要为"当前模型"补一条列表里没有的条目？补的话归给谁。
+///
+/// 单独抽出来是因为 `list_models_with_mode` 要发网络请求，没法直接测；而这条规则
+/// 恰恰是"模型面板把别家 provider 的模型贴上当前 provider 标签"的唯一来源，
+/// 必须能脱离网络验证。
+///
+/// # 为什么不是"当前模型不在列表里就补"
+///
+/// 补出来的条目会被 `apply_models_to_state` 写进 `model_provider_map`，于是
+/// `resolve_provider_for_model` 会照着它把模型 id 路由给这个 provider。换过
+/// provider 之后，旧 provider 时代的模型名（`opencode-zen/…` 这种带网关前缀的
+/// id）就会被贴上**新** provider 的标签顶在列表第一位 —— 选中它必然失败。
+///
+/// 所以只有"这次一条都没列出来"才补：那时当前模型是我们唯一掌握的事实，标成
+/// 当前 provider 是最后手段；provider 明明列出了模型，就不凭猜往里塞。
+pub(crate) fn synthesize_current_model_entry(
+    listed: &[ModelInfo],
+    current: &str,
+    current_provider: &str,
+) -> Option<ModelInfo> {
+    if current.trim().is_empty() {
+        return None;
+    }
+    let offered = listed
+        .iter()
+        .any(|m| m.id == current && m.provider == current_provider);
+    if offered {
+        return None;
+    }
+    if !listed.is_empty() {
+        // provider 确实列了模型，只是没有当前那个 —— 不补。
+        return None;
+    }
+    Some(ModelInfo::new(
+        current.to_string(),
+        current_provider.to_string(),
+    ))
+}
+
 pub async fn list_models_with_mode(
     star_client: &crate::llm::client::StarClient,
     force: bool,
@@ -316,7 +355,22 @@ pub async fn list_models_with_mode(
         }
     }
 
-    // 4. Ensure current model is in the list
+    // 4. 当前模型：只在**这次一条都没列出来**时才补进去
+    //
+    // 原来是无条件补 —— 只要当前模型不在列表里，就拿**当前激活的 provider**
+    // 给它贴标签，然后 `insert(0)` 顶到列表第一位。
+    //
+    // 真实后果（用户截图）：从 magpie 切到 yunjunet 之后，面板第一行是
+    // `opencode-zen/space-bunny-free   Provider: yunjunet` —— magpie 时代的
+    // OpenRouter 风格 id 被贴成了 yunjunet 的模型，而 yunjunet 根本没有它。
+    //
+    // 危害不止于显示难看：`apply_models_to_state` 会据此写下
+    // `model_provider_map["opencode-zen/space-bunny-free"] = "yunjunet"`，
+    // `resolve_provider_for_model` 于是把这个 id 路由给 yunjunet。选中它必然失败
+    // —— 正是"怎么切都切不对"那一类症状。
+    //
+    // 补它的本意是"拉不到列表时别让面板空着"，那就只在这个前提下补：provider
+    // 明明列出了模型，就不该凭猜往里塞一个它并不提供的。
     let current = star_client.model.clone();
     let provider_id = active_pid_for_list
         .or_else(|| {
@@ -331,12 +385,29 @@ pub async fn list_models_with_mode(
     } else {
         provider_id.clone()
     };
-    if !models
+    let current_is_offered = models
         .iter()
-        .any(|m| m.id == current && m.provider == current_provider)
-        && !current.is_empty()
-    {
-        models.insert(0, ModelInfo::new(current, current_provider));
+        .any(|m| m.id == current && m.provider == current_provider);
+    match synthesize_current_model_entry(&models, &current, &current_provider) {
+        Some(entry) => {
+            models.push(entry);
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[ListModels] provider '{}' listed nothing; showing the current model '{}' alone",
+                current_provider, current
+            ));
+        }
+        None if !current.is_empty() && !current_is_offered => {
+            // provider 确实列了模型，只是里面没有当前那个。不补，但留日志 ——
+            // 这通常意味着换过 provider 而旧模型还挂在 client 上，是个真问题。
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[ListModels] current model '{}' is not offered by provider '{}' ({} model(s) listed) \
+                 — not fabricating an entry for it",
+                current,
+                current_provider,
+                models.len()
+            ));
+        }
+        None => {}
     }
 
     // 5. Cache the result
@@ -413,5 +484,80 @@ pub fn clear_model_cache() {
             *cache = None;
             crate::utils::logging::append_debug_log_line("[ListModels] Model cache cleared");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(id: &str, provider: &str) -> ModelInfo {
+        ModelInfo::new(id.to_string(), provider.to_string())
+    }
+
+    /// 回归：provider 明明列出了模型，就**不能**把当前模型贴上它的标签塞进去。
+    ///
+    /// 用户报告的真实画面：从 magpie 切到 yunjunet 之后，模型面板第一行是
+    /// `opencode-zen/space-bunny-free   Provider: yunjunet` —— magpie 时代的
+    /// OpenRouter 风格 id 被贴成了 yunjunet 的模型。
+    ///
+    /// 危害不止于显示：`apply_models_to_state` 会把它写进 `model_provider_map`，
+    /// `resolve_provider_for_model` 于是把 `opencode-zen/…` 路由给 yunjunet，
+    /// 选中它必然失败。
+    #[test]
+    fn a_current_model_the_provider_does_not_offer_is_never_fabricated() {
+        let listed = vec![
+            info("deepseek-v4-pro", "yunjunet"),
+            info("glm-5.2", "yunjunet"),
+        ];
+        assert!(
+            synthesize_current_model_entry(&listed, "opencode-zen/space-bunny-free", "yunjunet")
+                .is_none(),
+            "provider 列了 2 个模型却不含当前那个 —— 绝不能凭猜补一条并贴上它的标签"
+        );
+    }
+
+    /// provider 确实提供当前模型时，本来就有一条，不该重复补。
+    #[test]
+    fn a_current_model_already_offered_is_not_duplicated() {
+        let listed = vec![info("glm-5.2", "yunjunet")];
+        assert!(
+            synthesize_current_model_entry(&listed, "glm-5.2", "yunjunet").is_none(),
+            "已经在列表里了，不该重复补"
+        );
+    }
+
+    /// 一条都没列出来时仍然要补 —— 面板不能空着，否则用户连"我现在在用哪个"
+    /// 都看不到。
+    #[test]
+    fn the_current_model_is_shown_alone_when_the_provider_listed_nothing() {
+        let entry =
+            synthesize_current_model_entry(&[], "opencode-zen/space-bunny-free", "yunjunet")
+                .expect("空列表时应当补出当前模型");
+        assert_eq!(entry.id, "opencode-zen/space-bunny-free");
+        assert_eq!(
+            entry.provider, "yunjunet",
+            "这时归给当前 provider 是最后手段，不是猜测 —— 面板已经空了"
+        );
+    }
+
+    /// 空模型名不补：补出来的空条目会在面板上显示成一行空白。
+    #[test]
+    fn a_blank_current_model_is_never_synthesized() {
+        assert!(
+            synthesize_current_model_entry(&[], "  ", "yunjunet").is_none(),
+            "空模型名补出来就是一行空白"
+        );
+    }
+
+    /// 同名模型但属于别的 provider，不算"被提供" —— 这是换 provider 后最典型的
+    /// 残留形状（两家都卖 `deepseek-v4-pro`，但当前模型属于上一个）。
+    #[test]
+    fn a_same_named_model_owned_by_another_provider_does_not_count_as_offered() {
+        let listed = vec![info("deepseek-v4-pro", "magpie")];
+        assert!(
+            synthesize_current_model_entry(&listed, "deepseek-v4-pro", "yunjunet").is_none(),
+            "列表非空就不补 —— 名字撞车不构成'当前 provider 提供它'"
+        );
     }
 }

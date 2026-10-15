@@ -349,6 +349,15 @@ impl PolicyEngine {
         true
     }
 
+    /// 这个引擎是否处于「没有人能回答问题」的运行模式（`-p` headless）。
+    ///
+    /// 策略层已经用它把 `AskUser` 翻成 `Deny`，但工具自己提出的确认要求
+    /// （未信任目录之类的）走的是另一条路，不经过这里。等待那一层需要单独问一句：
+    /// 没有人能回答时，**根本不该开始等**。
+    pub fn is_non_interactive(&self) -> bool {
+        self.non_interactive
+    }
+
     fn apply_non_interactive_mode(&self, decision: PolicyDecision) -> PolicyDecision {
         if self.non_interactive && decision == PolicyDecision::AskUser {
             PolicyDecision::Deny
