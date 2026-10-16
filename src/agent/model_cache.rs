@@ -18,7 +18,7 @@
 //!   磁盘上各家的列表都留着，来回切换都是秒开。
 
 use crate::types::ModelInfo;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// 磁盘缓存文件格式。`version` 用于以后改结构时直接丢弃旧文件。
@@ -181,17 +181,29 @@ pub fn save(provider_id: &str, models: &[ModelInfo]) {
 /// `DEFAULT_BUCKET` 不参与：那是"没配 provider 时的兜底桶"，不是真正的归属。
 /// 同名模型命中多个 provider 时优先 `preferred`（通常是当前 provider），否则按
 /// id 排序取第一个，保证结果稳定、可复现。
+/// # `allowed` 为什么必须有
+///
+/// 磁盘缓存**没有生命周期**：删掉 provider 时程序不会顺手删掉它那个桶（外部工具
+/// 直接改配置、进程在删除与冲刷之间崩掉，都会留下残留）。于是全桶扫描会把一个
+/// 早已删除的 provider 认领走，调用方拿它去发切换请求，worker 校验时以
+/// `Provider '<x>' is not configured.` 拒掉 —— 表现为"模型切不动"。
+///
+/// `allowed` 是调用方手上"仍然算数的 provider"集合，命中不了它的桶一律跳过。
+/// `None` = 不限制（仅供测试与"缓存就是权威"的场景）。
 pub fn find_provider_for_model_from(
     path: &Path,
     model: &str,
     preferred: Option<&str>,
+    allowed: Option<&HashSet<String>>,
 ) -> Option<String> {
     let cache = read_all(path);
     let mut candidates: Vec<&String> = cache
         .providers
         .iter()
         .filter(|(provider_id, entry)| {
-            provider_id.as_str() != DEFAULT_BUCKET && entry.models.iter().any(|m| m.id == model)
+            provider_id.as_str() != DEFAULT_BUCKET
+                && entry.models.iter().any(|m| m.id == model)
+                && allowed.is_none_or(|set| set.contains(provider_id.as_str()))
         })
         .map(|(provider_id, _)| provider_id)
         .collect();
@@ -208,8 +220,57 @@ pub fn find_provider_for_model_from(
 }
 
 /// 同 [`find_provider_for_model_from`]，但路径取默认的缓存文件。
-pub fn find_provider_for_model(model: &str, preferred: Option<&str>) -> Option<String> {
-    find_provider_for_model_from(&cache_path(), model, preferred)
+pub fn find_provider_for_model(
+    model: &str,
+    preferred: Option<&str>,
+    allowed: Option<&HashSet<String>>,
+) -> Option<String> {
+    find_provider_for_model_from(&cache_path(), model, preferred, allowed)
+}
+
+/// 删掉某个 provider 的桶。
+///
+/// 桶的寿命必须和 provider 本身一致。留下已删除 provider 的桶，后果不是"多占
+/// 一点磁盘"，而是 `find_provider_for_model_from` 的全桶扫描会把里面的模型名
+/// 认领给那个已经不存在的 provider，切换请求因此被 worker 以
+/// `Provider '<x>' is not configured.` 拒掉 —— 用户看到的就是"模型切不动"。
+///
+/// 外部工具直接改配置时同样会留下残留，所以 `find_provider_for_model_*` 还带了
+/// `allowed` 过滤做第二道防线；这里是第一道，把已知的情况清干净。
+pub fn purge_from(path: &Path, provider_id: &str) {
+    let mut cache = read_all(path);
+    if cache.providers.remove(bucket(provider_id)).is_none() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string_pretty(&cache) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(path, json) {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[ModelCache] failed to purge bucket '{}': {}",
+                    bucket(provider_id),
+                    e
+                ));
+            } else {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[ModelCache] purged bucket '{}' for removed provider",
+                    bucket(provider_id)
+                ));
+            }
+        }
+        Err(e) => crate::utils::logging::append_debug_log_line(&format!(
+            "[ModelCache] could not serialise cache while purging '{}': {}",
+            bucket(provider_id),
+            e
+        )),
+    }
+}
+
+/// 同 [`purge_from`]，但路径取默认的缓存文件。
+pub fn purge(provider_id: &str) {
+    purge_from(&cache_path(), provider_id);
 }
 
 /// 删除整个缓存文件（`/model` 的显式刷新不需要它，留给排查问题时用）。
@@ -340,20 +401,20 @@ mod tests {
 
         // 当前 provider 是 opencode，但这个名字归 openrouter。
         assert_eq!(
-            find_provider_for_model_from(&path, "xiaomi/mimo-v2.6-flash", Some("opencode"))
+            find_provider_for_model_from(&path, "xiaomi/mimo-v2.6-flash", Some("opencode"), None)
                 .as_deref(),
             Some("openrouter"),
             "必须路由到真正拥有该模型的网关，而不是留在当前 provider"
         );
         // 反向同理。
         assert_eq!(
-            find_provider_for_model_from(&path, "mimo-v2.6-flash-free", Some("openrouter"))
+            find_provider_for_model_from(&path, "mimo-v2.6-flash-free", Some("openrouter"), None)
                 .as_deref(),
             Some("opencode")
         );
         // 谁都没有的名字才返回 None，交给调用方兜底到当前 provider。
         assert_eq!(
-            find_provider_for_model_from(&path, "totally-unknown-model", Some("openrouter")),
+            find_provider_for_model_from(&path, "totally-unknown-model", Some("openrouter"), None),
             None
         );
 
@@ -370,9 +431,106 @@ mod tests {
         // `__default` 只是"没配 provider"时的兜底桶，不能当成归属，
         // 否则会把模型名路由到一个根本不存在的 provider。
         assert_eq!(
-            find_provider_for_model_from(&path, "some-local-model", None),
+            find_provider_for_model_from(&path, "some-local-model", None, None),
             None
         );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 残留桶必须被 `allowed` 挡掉 —— 这正是"刚删掉 provider 就切不动模型"的成因：
+    /// 桶还在磁盘上，全桶扫描认领走一个已经不存在的 provider，worker 以
+    /// `Provider 'x' is not configured.` 静默拒绝。
+    #[test]
+    fn buckets_of_removed_providers_are_never_returned() {
+        let path = temp_path("removed-owner");
+        let _ = std::fs::remove_file(&path);
+
+        save_to(
+            &path,
+            "magpie",
+            &[ModelInfo::new("deepseek-v4.1-flash", "magpie")],
+        )
+        .unwrap();
+        save_to(
+            &path,
+            "yunjunet",
+            &[ModelInfo::new("deepseek-v4.1-pro", "yunjunet")],
+        )
+        .unwrap();
+
+        let live: HashSet<String> = ["yunjunet".to_string()].into_iter().collect();
+
+        // magpie 已从配置里删除 —— 它的桶不能再认领任何模型。
+        assert_eq!(
+            find_provider_for_model_from(&path, "deepseek-v4.1-flash", None, Some(&live)),
+            None,
+            "已删除 provider 的残留桶不得再被认领"
+        );
+        // 还活着的照常。
+        assert_eq!(
+            find_provider_for_model_from(&path, "deepseek-v4.1-pro", None, Some(&live)).as_deref(),
+            Some("yunjunet")
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `preferred` 也必须在 `allowed` 之内 —— 否则"当前 provider 恰好是那个残留桶"
+    /// 会把死 provider 顶上来。
+    #[test]
+    fn preferred_cannot_resurrect_a_removed_provider() {
+        let path = temp_path("removed-preferred");
+        let _ = std::fs::remove_file(&path);
+
+        save_to(
+            &path,
+            "magpie",
+            &[ModelInfo::new("deepseek-v4.1-flash", "magpie")],
+        )
+        .unwrap();
+        save_to(
+            &path,
+            "yunjunet",
+            &[ModelInfo::new("deepseek-v4.1-flash", "yunjunet")],
+        )
+        .unwrap();
+
+        // magpie 和 yunjunet 都提供这个名字，但 magpie 已删除。
+        let live: HashSet<String> = ["yunjunet".to_string()].into_iter().collect();
+        assert_eq!(
+            find_provider_for_model_from(&path, "deepseek-v4.1-flash", Some("magpie"), Some(&live))
+                .as_deref(),
+            Some("yunjunet"),
+            "preferred 指向已删除 provider 时不能把它顶上来"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `purge` 必须让桶真的消失，而不只是把它从内存里摘掉。
+    #[test]
+    fn purge_removes_the_bucket_from_disk() {
+        let path = temp_path("purge");
+        let _ = std::fs::remove_file(&path);
+
+        save_to(&path, "magpie", &[ModelInfo::new("a-model", "magpie")]).unwrap();
+        save_to(&path, "yunjunet", &[ModelInfo::new("b-model", "yunjunet")]).unwrap();
+
+        purge_from(&path, "magpie");
+
+        assert!(
+            load_from(&path, "magpie").is_none(),
+            "删掉 provider 后它的桶不能再被读到"
+        );
+        assert!(
+            load_from(&path, "yunjunet").is_some(),
+            "删一个桶不能连带删掉别人的"
+        );
+
+        // 再 purge 一次不该出错，也不该清空别人的桶。
+        purge_from(&path, "magpie");
+        assert!(load_from(&path, "yunjunet").is_some());
 
         let _ = std::fs::remove_file(&path);
     }

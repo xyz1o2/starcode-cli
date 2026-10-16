@@ -61,7 +61,21 @@ pub enum PaletteAction {
     EditProvider(String),
     Back,
     // New actions
-    SetModel(String),
+    /// 选中一个模型。
+    ///
+    /// `provider_id` 是这个选项**自带的**归属，来自当前列表的
+    /// `model_provider_map`（哪份列表给出的条目，归属就是那份列表说的，不猜）。
+    /// `None` 表示当前列表没给出归属 —— 此时才回退到 `resolve_provider_for_model`
+    /// 那套兜底推导。
+    ///
+    /// 为什么必须带：同一个模型名可以被多个 provider 提供，而 provider 决定请求
+    /// 发往哪个 base_url。以前这里只带模型名，按下 Enter 再回头猜归属，猜错就
+    /// 静默失败。`palette_action_key` 也因此用 `model + provider` 做去重键 ——
+    /// 只用模型名的话，两个 provider 的同名条目会被去重成一个，另一个永远选不到。
+    SetModel {
+        model: String,
+        provider_id: Option<String>,
+    },
     SetAgentMode(String),
     SetThinkingEffort(crate::types::ThinkingEffort),
     SetContextWindow(crate::core::context_policy::ContextWindowSelection),

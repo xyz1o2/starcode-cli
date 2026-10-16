@@ -240,12 +240,41 @@ fn apply_runtime_settings_acknowledgement(
                 .unwrap_or_default()
         ),
         crate::core::context_policy::RuntimeSettingOutcome::Rejected
-        | crate::core::context_policy::RuntimeSettingOutcome::Failed => format!(
-            "Runtime settings not applied{}",
-            detail
-                .map(|reason| format!(" · {}", reason))
-                .unwrap_or_default()
-        ),
+        | crate::core::context_policy::RuntimeSettingOutcome::Failed => {
+            // 模型切换失败要指名道姓，不能只说 "Runtime settings not applied"。
+            // 用户刚按下 Enter、切的是哪个模型、为什么没成 —— 三件事必须一次说清，
+            // 否则状态栏那一行等于没说话（这正是"切不动"却查不出原因的那一段）。
+            //
+            // 判据用 worker 自己报回来的两份状态：`requested` 是用户要的，`active`
+            // 是真正生效的。模型切换没成时前者停在用户选的那个、后者仍是原来的，
+            // 两者不等即说明"没切过去的那个"就是这次失败的标的 —— 比在 UI 侧
+            // 另存一份意图可靠，不用担心两边对不上。
+            let requested_model = &acknowledgement.snapshot.requested.model;
+            let active_model = &acknowledgement.snapshot.active.model;
+            let switch_did_not_take = requested_model.model != active_model.model;
+            let failed_model = if switch_did_not_take {
+                Some(requested_model.model.as_str())
+            } else {
+                None
+            };
+            match failed_model {
+                Some(model) => format!(
+                    "{} · {}",
+                    crate::core::i18n::t(
+                        "ui.model.switch_failed",
+                        &format!("切换模型到 {} 失败", model),
+                        &format!("Switch to model {} failed", model),
+                    ),
+                    detail.unwrap_or("unknown reason"),
+                ),
+                None => format!(
+                    "Runtime settings not applied{}",
+                    detail
+                        .map(|reason| format!(" · {}", reason))
+                        .unwrap_or_default()
+                ),
+            }
+        }
         crate::core::context_policy::RuntimeSettingOutcome::Superseded => {
             "Runtime settings request superseded by a newer update.".to_string()
         }
@@ -2494,6 +2523,67 @@ mod tests {
             .active
             .context_policy
             .effective_tokens
+    }
+
+    /// 回归：模型切换失败时状态栏必须**指名道姓**。
+    ///
+    /// 真实事故：用户在模型面板选了模型，什么都没发生，状态栏也没给出任何线索 ——
+    /// 只在日志深处有一条没人会看的记录。原来的文案是泛泛的
+    /// "Runtime settings not applied"，用户看不出是模型没切过去，更看不出为什么。
+    ///
+    /// 判据用 worker 报回来的 `requested` vs `active`：切换没成时前者停在用户选的
+    /// 模型、后者仍是原来的那个。
+    #[tokio::test]
+    async fn a_failed_model_switch_says_which_model_and_why() {
+        use crate::core::context_policy::{
+            ContextWindowSelection, ContextWindowSource, ResolvedContextPolicy,
+            RuntimeSettingOutcome,
+        };
+
+        let mut state = ChatState::new();
+        let selection = ContextWindowSelection::default();
+
+        // requested = 用户选的 deepseek；active = 仍然生效的旧模型 —— 切换没成。
+        let mut ack = runtime_acknowledgement(1, RuntimeSettingOutcome::Failed, selection, 100_000);
+        ack.reason = Some("Provider 'magpie' is not configured.".to_string());
+        ack.snapshot.requested.model.model = "deepseek-v4.1-flash".to_string();
+        ack.snapshot.requested.model.provider_id = Some("magpie".to_string());
+        ack.snapshot.active.model.model = "some-other-model".to_string();
+        ack.snapshot.active.model.provider_id = Some("yunjunet".to_string());
+
+        apply_runtime_settings_acknowledgement(&mut state, ack);
+
+        let line = state.current_status_line.expect("失败必须留下状态栏文案");
+        assert!(
+            line.contains("deepseek-v4.1-flash"),
+            "必须点名没切过去的那个模型：{line}"
+        );
+        assert!(line.contains("magpie"), "必须给出原因：{line}");
+    }
+
+    /// 反向：切换成功（requested == active）时不该被说成"模型切换失败"。
+    /// context / thinking 之类设置出问题仍走原来那条泛化文案。
+    #[tokio::test]
+    async fn a_failed_context_setting_is_not_reported_as_a_model_switch_failure() {
+        use crate::core::context_policy::{ContextWindowSelection, RuntimeSettingOutcome};
+
+        let mut state = ChatState::new();
+        let mut ack = runtime_acknowledgement(
+            1,
+            RuntimeSettingOutcome::Failed,
+            ContextWindowSelection::default(),
+            100_000,
+        );
+        ack.reason = Some("Context window size must be greater than zero.".to_string());
+
+        apply_runtime_settings_acknowledgement(&mut state, ack);
+
+        let line = state.current_status_line.expect("失败必须留下状态栏文案");
+        assert!(
+            !line.contains("test-model"),
+            "模型其实没变，不该被说成模型切换失败：{line}"
+        );
+        assert!(line.contains("Runtime settings not applied"), "{line}");
     }
 
     #[tokio::test]

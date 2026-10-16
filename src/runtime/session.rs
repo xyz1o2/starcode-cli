@@ -881,6 +881,12 @@ pub async fn apply_deferred_runtime_actions(
     if let Some(force) = deferred.pending_models_request.take() {
         match agent.list_models_cached(force).await {
             Ok(result) => {
+                // 和非流式的 ListModels 一样：列表是刚从 store 扇出来的，provider
+                // 名单要跟着一起刷，否则 UI 手里的 `configured_providers` 会停在启动
+                // 那一刻，把外部刚加的 provider 判成已死。
+                let store = crate::core::config::provider_store::ProviderStore::new();
+                let ids = store.configured_provider_ids().await.unwrap_or_default();
+                let _ = tx.send(StreamMessage::ConfiguredProviders(ids)).await;
                 let _ = tx
                     .send(StreamMessage::ModelsList {
                         models: result.models,

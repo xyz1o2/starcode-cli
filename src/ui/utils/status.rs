@@ -66,17 +66,11 @@ pub fn current_provider_id(state: &ChatState) -> Option<String> {
                 .map(str::to_string)
         })
         .or_else(|| {
-            current_model_id(state)
-                .and_then(|model| state.model_provider_map.get(model))
-                .and_then(|provider_id| non_empty(provider_id))
-                .map(str::to_string)
-        })
-        .or_else(|| {
+            // 归属和"切换请求会用哪个 provider"必须同源，否则面板写着 Provider A
+            // 而请求实际发去了 B。两边都走 `resolve_provider_for_model`，里面已经
+            // 过滤掉了已删除的 provider（`ChatState::live_providers`）。
             current_model_id(state).and_then(|model| {
-                crate::agent::model_cache::find_provider_for_model(
-                    model,
-                    state.current_provider_id.as_deref(),
-                )
+                crate::ui::events::input::resolve_provider_for_model(state, model)
             })
         })
         // Provider provisioning is not an active runtime transition. Keep it only as a

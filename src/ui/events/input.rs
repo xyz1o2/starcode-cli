@@ -264,25 +264,40 @@ pub(crate) async fn request_runtime_settings_with_persistence_revision(
 
 /// 决定一次模型切换要用哪个 provider。
 ///
-/// 顺序：**当前已知的映射 → 磁盘上所有 provider 桶 → 当前 provider**。
+/// 顺序：**当前列表给出的归属 → 磁盘缓存的跨桶归属 → 当前 provider**，每一级都
+/// 只考虑**还活着的** provider（`ChatState::provider_is_live` / `live_providers`）。
 ///
-/// 中间那一步是修"切换模型没反应"的关键。以前只查 `model_provider_map`，而它
-/// 只装**当前列表**的映射（`apply_models_to_state` 每次都 `clear()` 再重建）。
-/// 于是一个属于别的网关的名字（OpenRouter 的 `xiaomi/mimo-v2.6-flash`）必然查不
-/// 到，直接兜底发给当前 provider —— Zen 收到 OpenRouter 的模型 id，回
-/// `Model is unavailable`；反过来则是 `is not a valid model ID`。两种都表现为
-/// "选了模型但没切成功"，而用户无从知道模型被发去了另一家。
+/// # 为什么每级都要过滤
+///
+/// 磁盘缓存的桶和 provider 的寿命是脱钩的：删掉 provider 时程序不会顺手删桶，
+/// 外部工具直接改配置同样留残留，全桶扫描就会把模型名认领给一个已经不存在、
+/// 也从未配置过的 provider。`apply_model_selection` 随后以
+/// `Provider '<x>' is not configured.` 拒掉，而那个 reason 只落到状态栏、不写
+/// 日志 —— 用户看到的就只是"选了模型但没反应"，而且**刚改完 provider 时必现**
+/// （此时内存列表刚被 `clear()` 过，兜底全都掉到磁盘扫描那一步）。
+///
+/// # 中间那一步仍然不能删
+///
+/// `model_provider_map` 只装**当前列表**的映射（`apply_models_to_state` 每次都
+/// `clear()` 再重建）。于是一个属于别的网关的名字（OpenRouter 的
+/// `xiaomi/mimo-v2.6-flash`）必然查不到，直接兜底发给当前 provider —— Zen 收到
+/// OpenRouter 的模型 id，回 `Model is unavailable`；反过来则是
+/// `is not a valid model ID`。两种都表现为"选了模型但没切成功"，而用户无从
+/// 知道模型被发去了另一家。
 ///
 /// 兜底到 `current_provider_id` 本身没有错 —— 用户切到一个谁都没有的模型名时，
 /// 仍该留在当前 provider 上试一次（中转站的 `/models` 常年不全，拉不到不等于
 /// 不能用）。关键是不能**在能查到的情况下**还去兜底。
 pub(crate) fn resolve_provider_for_model(state: &ChatState, model: &str) -> Option<String> {
     if let Some(provider_id) = state.model_provider_map.get(model) {
-        return Some(provider_id.clone());
+        if state.provider_is_live(provider_id) {
+            return Some(provider_id.clone());
+        }
     }
     if let Some(provider_id) = crate::agent::model_cache::find_provider_for_model(
         model,
         state.current_provider_id.as_deref(),
+        Some(&state.live_providers()),
     ) {
         return Some(provider_id);
     }
@@ -711,6 +726,11 @@ async fn delete_custom_provider(
     state.available_models.clear();
     state.available_models_info.clear();
     state.model_provider_map.retain(|_, pid| pid != provider_id);
+    // 磁盘缓存里那个桶必须一起删掉。留着的话，全桶扫描会把里面的模型名认领给
+    // 这个已经不存在的 provider，切换请求被 worker 以 "Provider '<x>' is not
+    // configured." 拒掉 —— 而那个 reason 只落到状态栏、不写日志，用户看到的就是
+    // "刚删完 provider，模型就切不动了"。
+    crate::agent::model_cache::purge(provider_id);
     if was_active || state.current_provider_id.as_deref() == Some(provider_id) {
         state.current_provider_id = None;
         state.current_model.clear();
@@ -841,7 +861,7 @@ pub(crate) async fn execute_palette_action(
                 .unwrap_or_default();
             open_session_selection_menu(state, true, sessions);
         }
-        PaletteAction::SetModel(model) => {
+        PaletteAction::SetModel { model, provider_id } => {
             // If conversation has history, preserve the existing confirmation gate. Only the
             // eventual worker acknowledgement may change the active model display.
             let has_history = state.chat_history.iter().any(|entry| {
@@ -858,7 +878,13 @@ pub(crate) async fn execute_palette_action(
                 && !state.waive_next_model_confirmation
             {
                 state.close_palette();
-                state.pending_model_change = Some(model.clone());
+                // 归属随这次意图一起存下。确认框是有延迟的，等按 `y` 时列表和
+                // 磁盘缓存都可能已经变了，那时再推导就可能推到一个已被删除的
+                // provider 身上（见 `PendingModelChange`）。
+                state.pending_model_change = Some(crate::ui::state::store::PendingModelChange {
+                    model: model.clone(),
+                    provider_id: provider_id.clone(),
+                });
                 state.pending_model_confirmation = true;
                 state.current_status_line = Some(format!(
                     "{} (y/n)",
@@ -874,7 +900,9 @@ pub(crate) async fn execute_palette_action(
             state.close_palette();
             state.pending_model_confirmation = false;
             state.waive_next_model_confirmation = false;
-            let provider_id = resolve_provider_for_model(state, &model);
+            let provider_id = provider_id
+                .clone()
+                .or_else(|| resolve_provider_for_model(state, &model));
             if request_runtime_model_change(state, model.clone(), provider_id, agent_tx).await {
                 state.current_status_line = Some(format!("Switching to model {}…", model));
             }
@@ -1516,10 +1544,16 @@ async fn handle_suggestion_overlay(
             if let Some(action) = state.pending_palette_action.take() {
                 execute_palette_action(state, action, agent_tx).await?;
             }
-            if let Some(model) = state.pending_model_change.take() {
-                let provider_id = resolve_provider_for_model(state, &model);
-                if request_runtime_model_change(state, model.clone(), provider_id, agent_tx).await {
-                    state.current_status_line = Some(format!("Switching to model {}…", model));
+            if let Some(pending) = state.pending_model_change.take() {
+                // 归属已经在确认框里存下来了，这里不再重新推导。
+                let provider_id = pending
+                    .provider_id
+                    .or_else(|| resolve_provider_for_model(state, &pending.model));
+                if request_runtime_model_change(state, pending.model.clone(), provider_id, agent_tx)
+                    .await
+                {
+                    state.current_status_line =
+                        Some(format!("Switching to model {}…", pending.model));
                 }
             }
             Ok(true)
@@ -1595,24 +1629,33 @@ async fn handle_model_confirmation(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-            // 先取再清：`pending_model_change` 就是这次要提交的模型。
+            // 先取再清：`pending_model_change` 就是这次要提交的模型及其归属。
             let pending = state.pending_model_change.take();
             state.pending_model_confirmation = false;
-            let Some(model) = pending else {
+            let Some(pending) = pending else {
                 // 有确认框却没有待切换的模型 = 状态已经不一致。不要卡在这里。
                 state.current_status_line = None;
                 return Ok(());
             };
-            let provider_id = resolve_provider_for_model(state, &model);
-            if request_runtime_model_change(state, model.clone(), provider_id.clone(), agent_tx)
-                .await
+            // 归属来自当初按下 Enter 时那个选项自带的值，不是现在重新推的 ——
+            // 确认框可能有延迟，磁盘缓存在这期间已经变了。
+            let provider_id = pending
+                .provider_id
+                .or_else(|| resolve_provider_for_model(state, &pending.model));
+            if request_runtime_model_change(
+                state,
+                pending.model.clone(),
+                provider_id.clone(),
+                agent_tx,
+            )
+            .await
             {
                 crate::ui::app::logic::emit_status_text(
                     state,
                     0,
                     &format!(
                         "Requesting model {} (provider {})…",
-                        model,
+                        pending.model,
                         provider_id.as_deref().unwrap_or("default")
                     ),
                 );
@@ -4102,7 +4145,147 @@ mod tests {
         assert!(!state.is_palette_open(), "再按一次 Ctrl+P 应当关闭");
     }
 
-    /// 回归：y/n 确认必须真的能被回答，否则整个键盘会被锁死。
+    /// 回归：已删除 provider 的残留缓存桶不得劫持模型路由。
+    ///
+    /// 真实事故：用户在 provider 面板删掉 `magpie`，随后去模型面板切模型 ——
+    /// 切不动。日志里能看到切换请求到了 worker，但没有 `[SetModel]`。
+    ///
+    /// 成因链条：删 provider 时内存列表被 `clear()` 了，磁盘上 `magpie` 那个桶
+    /// 却留着 → 面板选中的模型不在当前列表里 → `resolve_provider_for_model`
+    /// 掉到全桶扫描 → 认领走 `magpie` → worker 以
+    /// `Provider 'magpie' is not configured.` 静默拒绝。
+    ///
+    /// 这个测试必须真的走磁盘（`find_provider_for_model` 读文件），所以用
+    /// `STAR_MODEL_CACHE_PATH` 把缓存指向临时文件 —— 否则它会去读用户真实的
+    /// `~/.star/model-cache.json`，既测不到东西又会污染用户环境。
+    #[test]
+    fn a_removed_providers_cached_bucket_cannot_hijack_model_routing() {
+        let cache =
+            std::env::temp_dir().join(format!("star-resolve-provider-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&cache);
+        crate::agent::model_cache::save_to_path(
+            &cache,
+            "magpie",
+            &[crate::types::ModelInfo::new(
+                "deepseek-v4.1-flash",
+                "magpie",
+            )],
+        );
+        std::env::set_var("STAR_MODEL_CACHE_PATH", &cache);
+
+        let mut state = ChatState::new();
+        // magpie 已从配置里删除；当前 provider 是 yunjunet。
+        state.configured_providers = vec!["yunjunet".to_string()];
+        state.current_provider_id = Some("yunjunet".to_string());
+        // 刚删完 provider，内存列表被清空了 —— 这正是必现场景。
+        state.model_provider_map.clear();
+
+        assert_eq!(
+            resolve_provider_for_model(&state, "deepseek-v4.1-flash").as_deref(),
+            Some("yunjunet"),
+            "已删除 provider 的残留桶不得把模型劫持走；应留在当前 provider 上"
+        );
+
+        std::env::remove_var("STAR_MODEL_CACHE_PATH");
+        let _ = std::fs::remove_file(&cache);
+    }
+
+    /// 回归：`model_provider_map` 本身也可能指向已删除的 provider
+    /// （外部工具直接改配置时它不会跟着刷新），同样不得被采信。
+    #[test]
+    fn a_stale_model_provider_map_entry_is_not_trusted() {
+        let mut state = ChatState::new();
+        state.configured_providers = vec!["yunjunet".to_string()];
+        state.current_provider_id = Some("yunjunet".to_string());
+        state
+            .model_provider_map
+            .insert("deepseek-v4.1-flash".to_string(), "magpie".to_string());
+
+        assert_eq!(
+            resolve_provider_for_model(&state, "deepseek-v4.1-flash").as_deref(),
+            Some("yunjunet"),
+            "内存映射指向已删除 provider 时必须回退，不能照单全收"
+        );
+    }
+
+    /// 正常路径不能被这个修复误伤：还活着的 provider 必须照旧生效。
+    #[test]
+    fn a_live_provider_in_the_map_is_still_used() {
+        let mut state = ChatState::new();
+        state.configured_providers = vec!["yunjunet".to_string()];
+        state.current_provider_id = Some("magpie".to_string());
+        state
+            .model_provider_map
+            .insert("deepseek-v4.1-pro".to_string(), "yunjunet".to_string());
+
+        assert_eq!(
+            resolve_provider_for_model(&state, "deepseek-v4.1-pro").as_deref(),
+            Some("yunjunet"),
+            "活着的映射必须优先于当前 provider"
+        );
+    }
+
+    /// 内建 provider 不在 `configured_providers` 里，但它们永远"活着" ——
+    /// 否则活该被认成已死，模型永远切不到 Zen / OpenAI。
+    ///
+    /// 直接遍历 `ALL_PROVIDERS` 而不是点名某一个 id，免得以后新增内建 provider 时
+    /// 这个测试还守着某个已不存在的 id 绿着。
+    #[test]
+    fn builtin_providers_count_as_live() {
+        let state = ChatState::new();
+        assert!(
+            !crate::core::config::providers::ALL_PROVIDERS.is_empty(),
+            "内建表不该是空的，否则这个测试等于没测"
+        );
+        for p in crate::core::config::providers::ALL_PROVIDERS {
+            assert!(
+                state.provider_is_live(p.id),
+                "内建 provider {} 必须始终算数，不能因为没进 configured_providers 就被当成已死",
+                p.id
+            );
+        }
+    }
+
+    /// 回归：`y` 之后发出去的切换请求必须带着确认框存下来的那个 provider，
+    /// 而不是按 `y` 的那一刻重新推导出来的另一个。
+    ///
+    /// 确认框是有延迟的：弹出 → 用户看一眼 → 按 `y`。这段时间里磁盘缓存可能已经
+    /// 变了，重新推导就可能给出一个不一样的（甚至是已删除的）provider。
+    #[tokio::test]
+    async fn pressing_y_reuses_the_provider_stored_with_the_confirmation() {
+        let mut state = ChatState::new();
+        let (tx, mut rx) = mpsc::channel(16);
+        state.pending_model_change = Some(crate::ui::state::store::PendingModelChange {
+            model: "deepseek-v4.1-flash".to_string(),
+            provider_id: Some("yunjunet".to_string()),
+        });
+        state.pending_model_confirmation = true;
+        // 当前 provider 是另一个 —— 如果按 `y` 时重新推导，请求就会发去 magpie。
+        state.current_provider_id = Some("magpie".to_string());
+        state.configured_providers = vec!["yunjunet".to_string(), "magpie".to_string()];
+        state
+            .model_provider_map
+            .insert("deepseek-v4.1-flash".to_string(), "magpie".to_string());
+
+        let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        handle_key_event(&mut state, y, &tx, None).await.unwrap();
+
+        let sent = rx.try_recv().expect("必须发出切换请求");
+        match sent {
+            AgentRequest::UpdateRuntimeSettings(mutation) => {
+                let selected = mutation.model.expect("请求必须带模型");
+                assert_eq!(selected.model, "deepseek-v4.1-flash");
+                assert_eq!(
+                    selected.provider_id.as_deref(),
+                    Some("yunjunet"),
+                    "必须用确认框存下来的 provider，不能按 `y` 时重新推导"
+                );
+            }
+            other => panic!("预期 UpdateRuntimeSettings，实际 {:?}", other),
+        }
+    }
+
+    /// 回归：`y/n` 确认必须真的能被回答，否则整个键盘会被锁死。
     ///
     /// 真实事故：在有历史的会话里从模型面板选一个模型 → 弹出 "切换模型到 X? (y/n)"
     /// → 按 `y` **没有任何反应**，之后输入框彻底失灵，连 Esc 都退不出去（只能
@@ -4117,7 +4300,10 @@ mod tests {
     async fn a_pending_model_confirmation_is_answered_by_pressing_y() {
         let mut state = ChatState::new();
         let (tx, mut rx) = mpsc::channel(16);
-        state.pending_model_change = Some("some-other-model".to_string());
+        state.pending_model_change = Some(crate::ui::state::store::PendingModelChange {
+            model: "some-other-model".to_string(),
+            provider_id: None,
+        });
         state.pending_model_confirmation = true;
 
         let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
@@ -4143,7 +4329,10 @@ mod tests {
     async fn a_pending_model_confirmation_is_dismissed_by_escape() {
         let mut state = ChatState::new();
         let (tx, mut rx) = mpsc::channel(16);
-        state.pending_model_change = Some("some-other-model".to_string());
+        state.pending_model_change = Some(crate::ui::state::store::PendingModelChange {
+            model: "some-other-model".to_string(),
+            provider_id: None,
+        });
         state.pending_model_confirmation = true;
 
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
@@ -4164,7 +4353,10 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
 
         // 面板选中模型：有历史 → 走 y/n 确认
-        state.pending_model_change = Some("some-other-model".to_string());
+        state.pending_model_change = Some(crate::ui::state::store::PendingModelChange {
+            model: "some-other-model".to_string(),
+            provider_id: None,
+        });
         state.pending_model_confirmation = true;
 
         let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
@@ -4208,7 +4400,10 @@ mod tests {
     async fn unrelated_keys_are_swallowed_while_a_model_confirmation_is_pending() {
         let mut state = ChatState::new();
         let (tx, mut rx) = mpsc::channel(16);
-        state.pending_model_change = Some("some-other-model".to_string());
+        state.pending_model_change = Some(crate::ui::state::store::PendingModelChange {
+            model: "some-other-model".to_string(),
+            provider_id: None,
+        });
         state.pending_model_confirmation = true;
 
         let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
@@ -4251,7 +4446,10 @@ mod tests {
         let mut state = ChatState::new();
         let (tx, mut rx) = mpsc::channel(16);
         state.waive_next_model_confirmation = true;
-        state.pending_model_change = Some("some-other-model".to_string());
+        state.pending_model_change = Some(crate::ui::state::store::PendingModelChange {
+            model: "some-other-model".to_string(),
+            provider_id: None,
+        });
         state.pending_model_confirmation = true;
 
         let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);

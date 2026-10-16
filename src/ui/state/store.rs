@@ -55,6 +55,19 @@ pub struct PendingFastModeTransition {
     pub target_model: crate::runtime::messages::RuntimeModelSelection,
 }
 
+/// 一次**等待 y/n 确认**的模型切换。
+///
+/// provider 必须在这里一起存下来，不能等到按 `y` 时再回头推导 —— 那条推导路径
+/// （`resolve_provider_for_model`）会去翻磁盘缓存里**所有**桶，包括已被删除的
+/// provider，于是把模型发给一个不存在的 provider，切换静默失败。确认框是延迟
+/// 的，延迟期间列表和缓存都可能已经变了，只有存下来的归属是可信的。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingModelChange {
+    pub model: String,
+    /// 选项自带的归属；`None` 表示列表没给，回退到推导。
+    pub provider_id: Option<String>,
+}
+
 /// 粘贴块类型
 #[derive(Debug, Clone)]
 pub enum PasteKind {
@@ -512,7 +525,7 @@ pub struct ChatState {
     /// 对话正卡在一个失败回合上"。
     pub last_turn_failed: bool,
     pub pending_confirmation: Option<String>,
-    pub pending_model_change: Option<String>,
+    pub pending_model_change: Option<PendingModelChange>,
     pub pending_model_provider: Option<String>,
     pub pending_provider_selected_model: Option<String>,
     /// 一次性豁免：provider 刚被配置/切换后，用户紧接着的第一次模型选择
@@ -532,9 +545,21 @@ pub struct ChatState {
     pub active_message_id: Option<u64>,
     pub awaiting_models: bool,
     /// `available_models` 里那份列表是**什么时候从 API 拉下来的**（可能是上一个进程
-    /// 拉的 —— 磁盘缓存见 `agent::model_cache`）。模型面板用它显示"多久之前拉的"，
-    /// 所以存的是拉取时刻而不是收到消息时的年龄：会话开着好几个小时也不会显示成"刚拉的"。
+    /// 拉的 —— 磁盘缓存见 `agent::model_cache`）。模型面板用它显示"多久之前拉的"。
+    ///
+    /// 这里刻意存两个量而不是"拉取时刻那个 `Instant`"：
+    ///
+    /// - `models_listed_at` 是**本进程**观察到这份列表的时刻，永远用得上。
+    /// - `models_list_age_at_set` 是那一刻它就已经多老了（0 = 刚拉的）。
+    ///
+    /// 以前是把 `Instant::now()` 往回减 `age_secs` 得到"拉取时刻"。`Instant` 的
+    /// 可回溯范围有限，机器刚重启不到 `age_secs` 秒时 `checked_sub` 直接返回
+    /// `None`，于是 `or(Some(now))` 把一份两小时前的缓存显示成"刚拉的"—— 正是这条
+    /// 注释要防的事。缓存年龄可以远大于机器已开机时长，所以这个减法在真实使用中
+    /// 会经常失效，而不是只��测试里。
     pub models_listed_at: Option<Instant>,
+    /// 观察时刻那一刻，列表已经多老了（秒）。见 `models_listed_at`。
+    pub models_list_age_at_set: u64,
     pub mcp_ready: bool,
     pub auto_continue_enabled: bool,
     pub auto_continue_remaining: u32,
@@ -890,9 +915,43 @@ impl ChatState {
         Self::with_git_info(None)
     }
 
+    /// 全部仍然算数的 provider id：自定义的（`configured_providers`，由 worker 从
+    /// 配置同步过来）+ 内建的。
+    ///
+    /// 这是"provider 还在不在"的**唯一定义**，UI 侧所有需要按这个判断过滤的地方都
+    /// 必须用它 —— 切换请求（`input::resolve_provider_for_model`）和状态栏显示
+    /// （`utils::status::current_provider_id`）各有各的推导链，两边判据一旦不一致，
+    /// 就会出现"面板写着 Provider A、实际发给 B"，或者"发给一个已删除的 provider、
+    /// 被 worker 静默拒绝"。
+    ///
+    /// 判据本身刻意和 worker 侧 `StarAgent::apply_model_selection` 的校验一致。
+    ///
+    /// `configured_providers` 尚未加载时（刚启动还没收到 `ConfiguredProviders`）
+    /// 它会是空的，此时自定义 provider 全部被当成已死 —— 这比"当成全活着"安全：
+    /// 前者退到 `current_provider_id`（那本来就是当前 provider，切换照样生效），
+    /// 后者才会把模型发给一个可能不存在的 provider，然后静默失败。
+    pub fn live_providers(&self) -> HashSet<String> {
+        let mut live: HashSet<String> = self.configured_providers.iter().cloned().collect();
+        live.extend(
+            crate::core::config::providers::ALL_PROVIDERS
+                .iter()
+                .map(|p| p.id.to_string()),
+        );
+        live
+    }
+
+    /// 单个 provider 是否仍然算数。见 [`ChatState::live_providers`]。
+    pub fn provider_is_live(&self, provider_id: &str) -> bool {
+        crate::core::config::providers::get_provider_by_id(provider_id).is_some()
+            || self.configured_providers.iter().any(|id| id == provider_id)
+    }
+
     /// 模型列表的年龄（秒）。`None` = 这个会话里还没拿到过列表。
+    ///
+    /// 拆成"观察时刻 + 当时已多老"来算，全程单调递增，不做任何可能回退的时间减法。
     pub fn models_list_age_secs(&self) -> Option<u64> {
-        self.models_listed_at.map(|at| at.elapsed().as_secs())
+        let since_seen = self.models_listed_at?.elapsed().as_secs();
+        Some(self.models_list_age_at_set.saturating_add(since_seen))
     }
 
     /// 分配一个不在同一进程中复用的全局搜索请求 ID。
@@ -906,14 +965,12 @@ impl ChatState {
     }
 
     /// 记下"这份列表是 `age_secs` 秒前拉的"。`None` 表示刚从 API 拉的。
+    ///
+    /// 只记录、不回推算时刻 —— 见 `models_listed_at` 的说明：`Instant` 未必能回溯
+    /// 那么久，回推会把缓存年龄悄悄压成 0。
     pub fn set_models_list_age(&mut self, age_secs: Option<u64>) {
-        let now = Instant::now();
-        self.models_listed_at = match age_secs {
-            Some(age) => now
-                .checked_sub(std::time::Duration::from_secs(age))
-                .or(Some(now)),
-            None => Some(now),
-        };
+        self.models_listed_at = Some(Instant::now());
+        self.models_list_age_at_set = age_secs.unwrap_or(0);
     }
 
     /// Push a toast notification (auto-dismisses after duration)
@@ -1115,6 +1172,7 @@ impl ChatState {
             active_message_id: None,
             awaiting_models: false,
             models_listed_at: None,
+            models_list_age_at_set: 0,
             mcp_ready: false,
             auto_continue_enabled: false,
             auto_continue_remaining: 0,
@@ -1797,14 +1855,40 @@ mod tests {
         assert!((7_200..7_205).contains(&age), "age was {}", age);
     }
 
-    /// 进程刚起来时 `Instant::now()` 减不出那么早的时刻，不能 panic 也不能丢状态。
+    /// 荒谬的缓存年龄既不能 panic 也不能被悄悄压成"刚拉的"。
+    ///
+    /// 以前这个位置会退化成"现在"（`checked_sub` 失败 → `or(Some(now))`），等于把
+    /// 一份明显很旧的列表报成刚拉的。现在是饱和加法：保留原值，`u64::MAX` 加 elapsed
+    /// 停在 `u64::MAX`，既不溢出也不回退。
     #[test]
-    fn an_absurd_cache_age_degrades_to_now() {
+    fn an_absurd_cache_age_is_kept_rather_than_reset_to_now() {
         let mut state = ChatState::new();
         state.set_models_list_age(Some(u64::MAX));
+        assert_eq!(
+            state.models_list_age_secs(),
+            Some(u64::MAX),
+            "荒谬年龄应原样保留，而不是被悄悄改成 0（显示成刚拉的）"
+        );
+
+        // 已经观察了一段时间时也必须饱和，而不是绕回。
+        state.set_models_list_age(Some(u64::MAX));
+        assert!(state.models_list_age_secs().is_some());
+    }
+
+    /// 缓存年龄大于机器已开机时长时必须照报 —— 这正是旧实现静默归零的场景。
+    ///
+    /// 回归：`Instant::now().checked_sub(Duration::from_secs(age))` 在 `Instant`
+    /// 可回溯范围不足时返回 `None`（机器刚重启时必然如此），于是任何"比开机时长更
+    /// 旧"的缓存都被显示成刚拉的。`model_list_age_counts_from_the_fetch_not_from_
+    /// receipt` 用 7200 秒覆盖了这条路径；这里把上限再抬高一档并钉住语义。
+    #[test]
+    fn a_cache_older_than_uptime_is_still_reported_honestly() {
+        let mut state = ChatState::new();
+        let absurd_but_plausible = 30 * 24 * 60 * 60; // 30 天
+        state.set_models_list_age(Some(absurd_but_plausible));
         assert!(
-            state.models_list_age_secs().is_some(),
-            "the list should still be marked as seen"
+            state.models_list_age_secs().unwrap() >= absurd_but_plausible,
+            "比进程/机器寿命长得多的缓存年龄必须照报，不能塌成 0"
         );
     }
 

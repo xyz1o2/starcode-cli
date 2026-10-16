@@ -513,6 +513,14 @@ impl ProviderStore {
 
     pub async fn configured_provider_ids(&self) -> Result<Vec<String>, String> {
         let config = self.load().await?;
+        Ok(Self::configured_provider_ids_from(&config))
+    }
+
+    /// 已经加载好的配置里，哪些 provider 算数、按什么顺序排。
+    ///
+    /// 抽成纯函数是为了能直接测排序：`load()` 的路径来自 `Storage::global_star_dir()`
+    /// （进程级环境变量），测试去动它会串味，而顺序恰恰是这里最需要盯住的行为。
+    pub fn configured_provider_ids_from(config: &ProviderConfig) -> Vec<String> {
         let active_provider_id = config.active_provider_id.as_deref();
 
         let builtin_ids: HashSet<&str> = crate::core::config::providers::ALL_PROVIDERS
@@ -527,6 +535,11 @@ impl ProviderStore {
         // 自定义 provider：order 降序（新的在前，老条目 None 当 0 垫底）。
         // 调用方（provider 面板）把整段自定义 provider 放在内置之前，所以"刚加的"
         // 一定排在列表最上面。
+        //
+        // order 相同时必须再按 id 兜一次底：`config.providers` 是 HashMap，迭代
+        // 顺序不确定，`sort_by` 又是稳定排序，所以只按 order 排的话，同 order 的
+        // 那批 provider 每次读盘都会换一个顺序 —— 面板上的 provider 列表会自己
+        // 跳位。这个列表在每次刷模型时都会重发，跳位会变得非常显眼。
         let mut custom: Vec<(u64, String)> = config
             .providers
             .iter()
@@ -534,7 +547,7 @@ impl ProviderStore {
             .filter(|(id, settings)| is_configured(id, Some(settings)))
             .map(|(id, settings)| (settings.order.unwrap_or(0), id.clone()))
             .collect();
-        custom.sort_by(|(a, _), (b, _)| b.cmp(a));
+        custom.sort_by(|(a, a_id), (b, b_id)| b.cmp(a).then_with(|| a_id.cmp(b_id)));
 
         // 内置 provider 按声明顺序排，顺序稳定、可预测
         let builtin: Vec<String> = crate::core::config::providers::ALL_PROVIDERS
@@ -544,11 +557,11 @@ impl ProviderStore {
             .collect();
 
         // 两段按是否内置分过桶，不会重叠
-        Ok(custom
+        custom
             .into_iter()
             .map(|(_, id)| id)
             .chain(builtin)
-            .collect())
+            .collect()
     }
 
     /// 解决 id 冲突：和内置 id 或已存在的自定义 key 撞了就追加 `-2` / `-3` ……
@@ -628,6 +641,73 @@ fn resolve_provider_id_conflicts(base_id: &str, config: &ProviderConfig) -> Stri
 mod tests {
     use super::*;
     use crate::core::config::models::ProviderConfig;
+
+    /// 回归：`configured_provider_ids` 必须在多次调用之间给出**完全相同**的顺序。
+    ///
+    /// `config.providers` 是 HashMap，同 `order` 的那批 provider 的迭代顺序随机；
+    /// 而 `sort_by` 是稳定排序，只按 order 排就等于把随机顺序原样透出来。UI 每次
+    /// 刷模型列表都会重发这个列表（provider 名单必须和刚扇出来的模型列表看到同一份
+    /// 配置），顺序一抖，面板上的 provider 就会自己跳位。
+    #[test]
+    fn configured_provider_ids_are_stable_across_repeated_reads() {
+        // 三个 provider 同一个 order —— 正好落在"必须靠 id 兜底"的那一档。
+        let mut providers = std::collections::HashMap::new();
+        for id in ["zeta", "alpha", "mid"] {
+            providers.insert(
+                id.to_string(),
+                ProviderSettings {
+                    order: Some(1),
+                    api_key: Some("k".to_string()),
+                    base_url: Some("http://127.0.0.1:9/v1".to_string()),
+                    r#type: Some("openai-compatible".to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut config = ProviderConfig::default();
+        config.providers = providers;
+
+        let first = ProviderStore::configured_provider_ids_from(&config);
+        for _ in 0..8 {
+            assert_eq!(
+                ProviderStore::configured_provider_ids_from(&config),
+                first,
+                "同一份配置反复读取必须给出同一个顺序"
+            );
+        }
+        // 而且同 order 时必须按 id 升序，不能是随便什么顺序。
+        assert_eq!(
+            first,
+            vec!["alpha", "mid", "zeta"],
+            "order 相同时应按 id 升序兜底"
+        );
+    }
+
+    /// 回归：刚加的 provider 必须排在最前（`order` 更大），不能被 id 兜底打乱。
+    #[test]
+    fn a_newer_provider_still_outranks_the_older_ones() {
+        let mut providers = std::collections::HashMap::new();
+        for (id, order) in [("alpha", 1), ("zeta", 2), ("mid", 1)] {
+            providers.insert(
+                id.to_string(),
+                ProviderSettings {
+                    order: Some(order),
+                    api_key: Some("k".to_string()),
+                    base_url: Some("http://127.0.0.1:9/v1".to_string()),
+                    r#type: Some("openai-compatible".to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut config = ProviderConfig::default();
+        config.providers = providers;
+
+        assert_eq!(
+            ProviderStore::configured_provider_ids_from(&config),
+            vec!["zeta", "alpha", "mid"],
+            "order 降序优先于 id 升序"
+        );
+    }
 
     #[test]
     fn derive_id_prefers_the_name() {

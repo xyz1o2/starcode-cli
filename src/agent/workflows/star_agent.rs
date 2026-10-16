@@ -305,6 +305,29 @@ impl StarAgent {
         &mut self,
         mutation: RuntimeSettingsMutation,
     ) -> RuntimeSettingsAcknowledgement {
+        let acknowledgement = self.apply_runtime_settings_inner(mutation).await;
+        // 结果一定要进日志。
+        //
+        // 之前每条拒绝/失败路径都只把 `reason` 塞进 acknowledgement —— 那个字段
+        // 最终只渲染到状态栏那一行，而且会被下一次设置覆盖。日志里一个字都没有，
+        // 于是"模型切不动"这件事在 worker 侧**完全不可观测**：只能看到
+        // `[Worker] Received control request: Discriminant(4)`，看不到它到底成功
+        // 了、被拒了、还是失败了，更看不到原因。排查一个"切不动"只能靠猜。
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[RuntimeSettings] rev={} outcome={:?} reason={:?} active_model={} active_provider={:?}",
+            acknowledgement.ui_revision,
+            acknowledgement.outcome,
+            acknowledgement.reason,
+            acknowledgement.snapshot.active.model.model,
+            acknowledgement.snapshot.active.model.provider_id,
+        ));
+        acknowledgement
+    }
+
+    async fn apply_runtime_settings_inner(
+        &mut self,
+        mutation: RuntimeSettingsMutation,
+    ) -> RuntimeSettingsAcknowledgement {
         if !mutation.has_changes() {
             return RuntimeSettingsAcknowledgement {
                 ui_revision: mutation.ui_revision,
@@ -487,6 +510,18 @@ impl StarAgent {
                     .unwrap_or_else(|| self.client.api_key.clone());
                 (url, key)
             } else {
+                // 既没有该 provider 的配置、也没有内建元数据：只改模型名，不切 provider。
+                //
+                // 走到这里说明 `apply_model_selection` 的校验和这里的查找对"这个
+                // provider 存不存在"给出了不同答案（它查的是 `eq_ignore_ascii_case`
+                // 加内建表，这里是 `get(pid)` 加同样的大小写兜底）。静默只 set_model
+                // 的话，请求会继续发往上一次那个 provider —— 表现为"切了没反应"。
+                // 所以必须留痕。
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[SetModel] provider '{}' has neither stored config nor built-in metadata; \
+                     setting model '{}' WITHOUT switching provider",
+                    pid, model
+                ));
                 self.inner.set_model(model);
                 self.client = self.inner.get_client();
                 return;

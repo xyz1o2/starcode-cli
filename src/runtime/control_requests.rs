@@ -62,6 +62,18 @@ pub async fn handle_request(
                             result.models.len(),
                             result.cache_age_secs
                         ));
+                        // 列表是刚从 store 扇出来的，所以顺手把 provider 名单也
+                        // 同步一次，两者必须看到同一份配置。
+                        //
+                        // 不发的话，UI 手里的 `configured_providers` 会停在启动那一刻：
+                        // 外部工具（cc switch 之类）直接改配置新增的 provider，它的模型
+                        // 会出现在列表里、归属也写得清清楚楚，但 `ChatState::
+                        // provider_is_live` 却判它是已死的 —— 于是那个本来能用的模型
+                        // 反而不被采信，退到当前 provider 上。这就是"刚加完 provider
+                        // 就切不过去"的来源。
+                        let store = crate::core::config::provider_store::ProviderStore::new();
+                        let ids = store.configured_provider_ids().await.unwrap_or_default();
+                        let _ = tx.send(StreamMessage::ConfiguredProviders(ids)).await;
                         let _ = tx
                             .send(StreamMessage::ModelsList {
                                 models: result.models,

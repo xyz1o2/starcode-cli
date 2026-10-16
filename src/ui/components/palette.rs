@@ -323,7 +323,13 @@ fn palette_action_key(action: &PaletteAction) -> String {
         PaletteAction::SelectProvider(provider_id) => format!("provider:{}", provider_id),
         PaletteAction::ToggleFeature(feature) => format!("toggle:{}", feature),
         PaletteAction::Back => "back".to_string(),
-        PaletteAction::SetModel(model) => format!("model:{}", model),
+        // 去重键必须含 provider：两个 provider 可以合法地提供同名模型，只用
+        // 模型名会把其中一条去重掉，另一个就永远选不到（`get_model_palette_items`
+        // 里同理，`id` 也带上了 owner）。
+        PaletteAction::SetModel { model, provider_id } => match provider_id {
+            Some(owner) => format!("model:{}@{}", model, owner),
+            None => format!("model:{}", model),
+        },
         PaletteAction::SetAgentMode(mode) => format!("agent_mode:{}", mode),
         PaletteAction::SetThinkingEffort(effort) => {
             format!("thinking_effort:{}", effort.as_str())
@@ -1645,7 +1651,10 @@ pub fn get_model_palette_items(
                 label: format!("{} (current)", current),
                 description: "Using configured model".to_string(),
                 category: Some("Models".to_string()),
-                action: PaletteAction::SetModel(current.to_string()),
+                action: PaletteAction::SetModel {
+                    model: current.to_string(),
+                    provider_id: model_provider_map.get(current).cloned(),
+                },
             });
         }
         return items;
@@ -1674,11 +1683,24 @@ pub fn get_model_palette_items(
             };
 
             items.push(PaletteItem {
-                id: format!("model_{}", model),
+                // 身份是 (provider, model) 这一对，不是光模型名 —— 两个 provider
+                // 合法地提供同名模型时，光用模型名会让去重键撞车，其中一个永远
+                // 选不到。provider 为空说明当前列表没给出归属，去重键退回模型名。
+                id: match model_provider_map.get(*model) {
+                    Some(owner) => format!("model_{}@{}", model, owner),
+                    None => format!("model_{}", model),
+                },
                 label,
                 description: format!("Provider: {}", provider_label),
                 category: Some(provider_label.clone()),
-                action: PaletteAction::SetModel(model.to_string()),
+                action: PaletteAction::SetModel {
+                    model: model.to_string(),
+                    // 只带**列表给出的**归属。分组用的 `infer_provider_from_model`
+                    // 是按名字前缀瞎猜的（认不出来还一律返回 "other"），那是给
+                    // 标题用的，拿去当 provider_id 只会让 worker 以
+                    // "Provider 'other' is not configured." 拒掉。
+                    provider_id: model_provider_map.get(*model).cloned(),
+                },
             });
         }
     }
@@ -2391,6 +2413,84 @@ mod tests {
                 .iter()
                 .any(|i| i.category.as_deref() == Some("opencode")),
             "models must stay grouped by provider"
+        );
+    }
+
+    /// 回归：模型选项必须**自带**它的 provider。
+    ///
+    /// 真实事故：面板里明明显示着 "Provider: yunjunet"，按下 Enter 却切不动 ——
+    /// 因为 action 里只带了模型名，provider 得靠事后重新推导，而那条推导会去翻
+    /// 磁盘缓存里的残留桶，推到一个已删除的 provider 身上，于是 worker 静默拒绝。
+    ///
+    /// 选项自带归属之后，这条推导路径对面板选中项**根本不会被调用**。
+    #[test]
+    fn model_palette_items_carry_their_own_provider() {
+        let models = vec!["deepseek-v4.1-flash".to_string()];
+        let mut map = std::collections::HashMap::new();
+        map.insert("deepseek-v4.1-flash".to_string(), "yunjunet".to_string());
+
+        let items = get_model_palette_items(&models, "", false, &map, Some(60));
+        let model_item = items
+            .iter()
+            .find(|i| i.label == "deepseek-v4.1-flash")
+            .expect("应当有这个模型项");
+
+        match &model_item.action {
+            PaletteAction::SetModel { model, provider_id } => {
+                assert_eq!(model, "deepseek-v4.1-flash");
+                assert_eq!(
+                    provider_id.as_deref(),
+                    Some("yunjunet"),
+                    "选项必须带着列表给出的归属，而不是让下游去猜"
+                );
+            }
+            other => panic!("预期 SetModel，实际 {:?}", other),
+        }
+    }
+
+    /// 分组用的名字猜测（`infer_provider_from_model`，认不出来一律返回
+    /// "other"）**绝不能**当成 provider_id 传下去 —— 那会让 worker 以
+    /// `Provider 'other' is not configured.` 拒掉一次本来能用的切换。
+    #[test]
+    fn an_inferred_group_is_never_sent_as_a_provider_id() {
+        // 故意不给 map：面板只能靠名字前缀猜分组。
+        let models = vec!["deepseek-v4.1-flash".to_string()];
+        let items = get_model_palette_items(&models, "", false, &Default::default(), Some(60));
+
+        let model_item = items
+            .iter()
+            .find(|i| i.label == "deepseek-v4.1-flash")
+            .expect("应当有这个模型项");
+        match &model_item.action {
+            PaletteAction::SetModel { provider_id, .. } => assert_eq!(
+                provider_id, &None,
+                "按名字猜出来的分组只是标题，不能当成归属发出去"
+            ),
+            other => panic!("预期 SetModel，实际 {:?}", other),
+        }
+        // 但分组标题仍然要显示出来（按名字猜的 DeepSeek 组）。
+        assert_eq!(model_item.category.as_deref(), Some("DeepSeek"));
+    }
+
+    /// 回归：去重键必须是 (provider, model) 这一对。
+    ///
+    /// 两个 provider 可以合法地提供同名模型（同一个模型名挂在不同 base_url 下，
+    /// OpenClaude 为此专门把 profileId 编进了选项 value）。只用模型名做键，两条
+    /// 会被去重成一个，另一个永远选不到 —— 于是"我明明看到它却选不上"。
+    #[test]
+    fn same_model_name_under_two_providers_gets_distinct_action_keys() {
+        let a = PaletteAction::SetModel {
+            model: "shared-model".to_string(),
+            provider_id: Some("magpie".to_string()),
+        };
+        let b = PaletteAction::SetModel {
+            model: "shared-model".to_string(),
+            provider_id: Some("yunjunet".to_string()),
+        };
+        assert_ne!(
+            palette_action_key(&a),
+            palette_action_key(&b),
+            "同名模型在不同 provider 下必须是两个可区分的选项"
         );
     }
 
