@@ -252,13 +252,25 @@ pub async fn list_models_with_mode(
 
         for (pid, provider) in &config.providers {
             // A. Explicitly configured models（本地读，永远做）
-            if let Some(configured_models) = &provider.models {
+            //
+            // 走 `candidate_models()` 而不是直接遍历 `provider.models`：后者是
+            // HashMap，键序随机，而这份列表会直接进模型面板 —— 每次刷新换一次
+            // 排列，用户会以为程序在乱跳。`candidate_models()` 还把
+            // `selected_model` 放在首位，那才是用户钦定的默认项。
+            let configured_models = provider.candidate_models();
+            if configured_models.is_empty() {
                 crate::utils::logging::append_debug_log_line(&format!(
-                    "[ListModels] Provider '{}' has {} models.",
-                    pid,
-                    configured_models.len()
+                    "[ListModels] Provider '{}' has no models configured.",
+                    pid
                 ));
-                for (model_id, _) in configured_models {
+            } else {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[ListModels] Provider '{}' has {} configured models (default '{}').",
+                    pid,
+                    configured_models.len(),
+                    configured_models[0]
+                ));
+                for model_id in &configured_models {
                     if !models
                         .iter()
                         .any(|m| m.id == *model_id && m.provider == *pid)
@@ -266,15 +278,28 @@ pub async fn list_models_with_mode(
                         models.push(ModelInfo::new(model_id.clone(), pid.clone()));
                     }
                 }
-            } else {
-                crate::utils::logging::append_debug_log_line(&format!(
-                    "[ListModels] Provider '{}' has no models configured.",
-                    pid
-                ));
             }
 
             // B. Dynamic Parallel Fetching —— 只在显式刷新时扇出，这是原来最慢的一步
             if !force {
+                continue;
+            }
+
+            // 空密钥的 provider 不参与扇出。
+            //
+            // 它打过去必然 401/403，等多久都不会成功，但每个 provider 都带一个
+            // 3 秒超时，而 `join_all` 是等**最慢**的那个 —— 一个没填 key 的 provider
+            // 就能把整次刷新的耗时顶满。跳过它，用户看到的 panel 也不会塞满
+            // 一批永远用不了的模型。
+            //
+            // 它并没有从 UI 消失：Provider 菜单里仍然列出（标"未配置密钥"），
+            // 手输 `/model 名字` 也仍然可用，只是会在本地校验就被拦下。
+            if !crate::core::config::providers::provider_has_usable_credentials(pid, Some(provider))
+            {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[ListModels] Skipping fan-out for provider '{}': no usable credentials.",
+                    pid
+                ));
                 continue;
             }
 

@@ -38,6 +38,95 @@ pub struct ProviderSettings {
     pub order: Option<u64>,
 }
 
+/// 一个 `model 文本` 输入解析出来的结果：`selected_model` 取第一个，其余进 `models`。
+///
+/// 返回 `None` 表示"用户什么都没填" —— 那是"完全交给 API 自动发现"，不是错误。
+pub type ModelCandidates = Option<(String, HashMap<String, ModelConfig>)>;
+
+/// 把逗号 / 换行 / 分号分隔的模型名解析成 `[首项, 其余…]`。
+///
+/// 只做机械清洗，不判断名字是否合法 —— 上游到底认不认这个名字只有请求能回答，
+/// 在这里校验等于凭空拒绝用户。逐项 `trim`、丢空项、按首次出现去重。
+pub fn split_model_names(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in text.split([',', '\n', '\r', ';', ' ']) {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|seen| seen == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+impl ProviderSettings {
+    /// 这个 provider 声明的候选模型，**按确定顺序**返回，第一个是默认项。
+    ///
+    /// 返回空列表 = 没有手工声明，完全交给 API 自动发现（模型面板会自己去拉）。
+    ///
+    /// # 为什么顺序必须是现算的
+    ///
+    /// `models` 是 `HashMap`，迭代顺序不确定。直接拿它当有序列表，模型面板每次
+    /// 刷新换一次顺序 —— `provider_store::configured_provider_ids_from` 里已经踩过
+    /// 同一个坑（`providers` 也是 `HashMap`）。所以顺序由"默认项优先 + 键名升序"
+    /// 这条规则现算，任何写法（哪怕 `models` 写得毫无顺序）都得到稳定结果。
+    ///
+    /// # 为什么不用 Vec
+    ///
+    /// 加 `model_list: Vec<…>` 字段需要迁移所有已有配置，而 `models` + `selected_model`
+    /// 已经在配置文件里了，只是 `models` 此前无人读。让它生效比再加一个字段划算得多。
+    pub fn candidate_models(&self) -> Vec<String> {
+        let default = self
+            .selected_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+
+        // 键名升序 —— 字节序，确定性来源。`selected_model` 之外的按这个排。
+        let mut rest: Vec<String> = self
+            .models
+            .as_ref()
+            .map(|models| models.keys().cloned().collect())
+            .unwrap_or_default();
+        rest.sort();
+
+        let mut out = Vec::with_capacity(rest.len() + 1);
+        if let Some(default) = default {
+            out.push(default.to_string());
+        }
+        out.extend(
+            rest.into_iter()
+                .filter(|name| Some(name.as_str()) != default),
+        );
+        out
+    }
+
+    /// 用一个 `model 文本` 输入装配 `selected_model` + `models`。
+    ///
+    /// - 空输入 → 两个字段都清成 `None`（自动发现）。
+    /// - 恰好一个名字 → 只写 `selected_model`，**不造 `models` map**。单值场景保持
+    ///   与旧配置一模一样的形状，避免把简单配置写复杂。
+    /// - 多个名字 → 第一个当默认，其余进 `models`；`models` 里已存在的
+    ///   `ModelConfig`（`context_window` / `alias` / `name`）**原样保留**，
+    ///   不被默认值覆盖。
+    pub fn set_candidate_models_from_text(&mut self, text: &str) {
+        let names = split_model_names(text);
+        self.selected_model = names.first().cloned();
+        if names.len() <= 1 {
+            self.models = None;
+            return;
+        }
+        let models = self.models.get_or_insert_with(HashMap::new);
+        // 只增不删：手写的 `context_window` / `alias` 是用户花力气配的，
+        // 从文本里看不到这个信息，删掉等于静默丢配置。
+        for name in names.iter().skip(1) {
+            models.entry(name.clone()).or_default();
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub name: &'static str,
@@ -383,6 +472,138 @@ mod tests {
             ThinkingCapability::None
         );
         assert!(!is_thinking_model("some-unknown-model"));
+    }
+
+    // ---- candidate_models / set_candidate_models_from_text ----
+
+    fn settings(default: Option<&str>, models: &[&str]) -> ProviderSettings {
+        ProviderSettings {
+            selected_model: default.map(str::to_string),
+            models: (!models.is_empty()).then(|| {
+                models
+                    .iter()
+                    .map(|m| (m.to_string(), ModelConfig::default()))
+                    .collect()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn candidate_models_puts_the_default_first() {
+        let s = settings(Some("deepseek-v4.1-flash"), &["glm-5.3", "deepseek-v4-pro"]);
+        assert_eq!(
+            s.candidate_models(),
+            vec!["deepseek-v4.1-flash", "deepseek-v4-pro", "glm-5.3"]
+        );
+    }
+
+    /// 顺序必须只取决于配置内容，不取决于 `HashMap` 的迭代顺序。
+    /// `models` 是 HashMap，直接用它的键序会让面板每次刷新换一次排列。
+    #[test]
+    fn candidate_models_are_deterministically_ordered() {
+        let s = settings(
+            None,
+            &["m9", "m1", "m5", "m3", "m7", "m2", "m8", "m4", "m6"],
+        );
+        let first = s.candidate_models();
+        for _ in 0..20 {
+            assert_eq!(s.candidate_models(), first, "顺序必须可复现");
+        }
+        assert_eq!(
+            first,
+            vec!["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9"]
+        );
+    }
+
+    /// 默认项同时也在 `models` 里时，尾部不能重复出现它。
+    #[test]
+    fn candidate_models_skip_the_default_in_the_sorted_tail() {
+        let s = settings(Some("b"), &["a", "b", "c"]);
+        assert_eq!(s.candidate_models(), vec!["b", "a", "c"]);
+    }
+
+    /// 什么都没配 = 交给 API 自动发现，调用方靠空列表判断。
+    #[test]
+    fn candidate_models_is_empty_when_nothing_is_configured() {
+        assert!(ProviderSettings::default().candidate_models().is_empty());
+        // 空白串不算配了。
+        assert!(settings(Some("   "), &[]).candidate_models().is_empty());
+    }
+
+    #[test]
+    fn candidate_models_trims_the_default() {
+        let s = settings(Some("  gpt-5  "), &[]);
+        assert_eq!(s.candidate_models(), vec!["gpt-5"]);
+    }
+
+    #[test]
+    fn split_model_names_accepts_commas_newlines_and_dedupes() {
+        assert_eq!(
+            split_model_names("a, b\nc\r\nd; e  a"),
+            vec!["a", "b", "c", "d", "e"],
+            "逗号/换行/分号/空格都算分隔，且按首次出现去重"
+        );
+        assert!(split_model_names("  \n , ; ").is_empty());
+    }
+
+    /// 单值场景保持与旧配置一模一样的形状：不为了"看起来完整"造一个单键 map。
+    #[test]
+    fn a_single_configured_model_writes_no_models_map() {
+        let mut s = ProviderSettings::default();
+        s.set_candidate_models_from_text("gpt-5");
+        assert_eq!(s.selected_model.as_deref(), Some("gpt-5"));
+        assert!(s.models.is_none(), "只配一个模型时不该造 models map");
+    }
+
+    #[test]
+    fn multiple_names_split_into_default_plus_map() {
+        let mut s = ProviderSettings::default();
+        s.set_candidate_models_from_text("a, b, c");
+        assert_eq!(s.selected_model.as_deref(), Some("a"));
+        let keys: Vec<&String> = s.models.as_ref().unwrap().keys().collect();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&&"b".to_string()));
+        assert!(keys.contains(&&"c".to_string()));
+    }
+
+    /// `ModelConfig` 里的 `context_window` / `alias` 是用户花力气配的，
+    /// 文本里看不到这个信息 —— 重新提交表单不能静默抹掉。
+    #[test]
+    fn rewriting_the_model_text_preserves_hand_written_model_config() {
+        let mut s = ProviderSettings::default();
+        s.models = Some(
+            [(
+                "b".to_string(),
+                ModelConfig {
+                    name: Some("B 名称".to_string()),
+                    context_window: Some(128_000),
+                    alias: Some(vec!["bee".to_string()]),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        s.set_candidate_models_from_text("a, b, c");
+        let b = &s.models.as_ref().unwrap()["b"];
+        assert_eq!(b.name.as_deref(), Some("B 名称"));
+        assert_eq!(b.context_window, Some(128_000));
+        assert_eq!(b.alias.as_ref().unwrap(), &vec!["bee".to_string()]);
+    }
+
+    /// 清空模型字段 = 回到"自动发现"，必须把 `models` 一起清掉，
+    /// 否则删掉的那个名字会从 `models` 里复活。
+    #[test]
+    fn clearing_the_model_text_clears_both_fields() {
+        let mut s = ProviderSettings::default();
+        s.set_candidate_models_from_text("a, b, c");
+        s.set_candidate_models_from_text("  ");
+        assert!(s.selected_model.is_none());
+        assert!(
+            s.models.is_none(),
+            "清空后 models 必须一起清，否则删掉的名字会复活"
+        );
+        assert!(s.candidate_models().is_empty());
     }
 
     /// 上一版把 Zen 的 gpt 规则写成 `starts_with("gpt-")`，把不推理的

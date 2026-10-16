@@ -416,10 +416,15 @@ async fn prefill_form_from_provider(
         settings.as_ref().and_then(|s| s.base_url.clone()),
     )
     .unwrap_or_default();
+    // 预填整个候选列表（默认项在最前，见 `ProviderSettings::candidate_models`），
+    // 逗号分隔进一个字段 —— 用户能一眼看出"这家配了哪几个模型"，也能直接改。
+    // 只读 `selected_model` 的话，配了多个模型的用户打开编辑框只会看到一个，
+    // 剩下的悄悄"消失"了。
     let model = settings
         .as_ref()
-        .and_then(|s| s.selected_model.as_deref())
-        .unwrap_or("");
+        .map(|s| s.candidate_models())
+        .unwrap_or_default()
+        .join(", ");
 
     form.values = vec![
         type_label.to_string(),
@@ -427,7 +432,7 @@ async fn prefill_form_from_provider(
         base_url,
         // API Key 留空：编辑时空着等于"保持原 key"，见 submit 的处理
         String::new(),
-        model.to_string(),
+        model,
     ];
 }
 
@@ -568,6 +573,12 @@ async fn submit_provider_form(
             .unwrap_or_default();
     }
 
+    // 模型字段是多值的：先取出解析后的名字列表，`add_custom_provider` 只拿首项当
+    // 默认（它对 `selected_model` 是整体覆盖），其余交给下面的
+    // `set_candidate_models` 写进 `models`。
+    let model_names = crate::core::config::models::split_model_names(&model);
+    let default_model = model_names.first().map(String::as_str);
+
     store
         .add_custom_provider(
             &provider_id,
@@ -579,10 +590,28 @@ async fn submit_provider_form(
             } else {
                 Some(&api_key)
             },
-            if model.is_empty() { None } else { Some(&model) },
+            default_model,
         )
         .await
         .map_err(|e| format!("Failed to save provider: {}", e))?;
+
+    // 必须在 add_custom_provider 之后：那个方法会整体覆盖 `selected_model`，
+    // 而 `models` 里的手写 `context_window` / `alias` 要原样留着。
+    if !store
+        .set_candidate_models(&provider_id, &model)
+        .await
+        .map_err(|e| format!("Failed to save provider models: {}", e))?
+    {
+        crate::ui::app::logic::emit_status_text(
+            state,
+            0,
+            &format!(
+                "Error: provider '{}' vanished while saving models.",
+                provider_id
+            ),
+        );
+        return Ok(true);
+    }
 
     // 激活 provider
     let _ = store.set_active_provider(&provider_id).await;
@@ -604,11 +633,8 @@ async fn submit_provider_form(
             api_key: resolved_key,
             base_url: Some(base_url.clone()),
             is_openai_compatible: Some(is_openai_compat),
-            model: if model.is_empty() {
-                None
-            } else {
-                Some(model.clone())
-            },
+            // worker 只认一个"当前模型"，多出来的那些由 `models` 负责（面板）。
+            model: default_model.map(str::to_string),
         })
         .await;
 
@@ -623,8 +649,8 @@ async fn submit_provider_form(
         name.as_str()
     };
 
-    if model.is_empty() {
-        // 自动获取模型列表：面板立刻能开，不用等网络。
+    if model_names.is_empty() {
+        // 一个模型都没配 = 完全交给 API 自动发现。面板立刻能开，不用等网络。
         state.available_models.clear();
         state.available_models_info.clear();
         state.model_provider_map.clear();
@@ -654,17 +680,37 @@ async fn submit_provider_form(
             ),
         );
     } else {
-        state.current_model = model.clone();
+        // 配了名字：面板直接列出候选集，不必等网络 —— 候选集是用户自己声明的，
+        // 它就是权威答案。API 返回的全量列表更完整时，面板里的刷新按钮会补上。
+        state.available_models = model_names.clone();
+        state.model_provider_map = model_names
+            .iter()
+            .map(|model| (model.clone(), provider_id.clone()))
+            .collect();
+        state.available_models_info.clear();
+        state.awaiting_models = false;
+        // 默认项（列表第一项）立刻生效，不用等用户再去面板点一次。
+        let default_model = model_names[0].clone();
+        state.current_model = default_model.clone();
         let _ = agent_tx
             .send(AgentRequest::SetModel {
-                model,
+                model: default_model.clone(),
                 provider_id: Some(provider_id.clone()),
             })
             .await;
+        state.palette_history.clear();
+        state.open_palette(PaletteMode::Model);
         crate::ui::app::logic::emit_status_text(
             state,
             0,
-            &format!("{} provider '{}' with model set.", verb, display_name),
+            &format!(
+                "{} provider '{}' — default '{}', {} model{} configured.",
+                verb,
+                display_name,
+                default_model,
+                model_names.len(),
+                if model_names.len() == 1 { "" } else { "s" }
+            ),
         );
     }
 

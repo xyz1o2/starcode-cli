@@ -332,7 +332,12 @@ pub fn zen_protocol_supported(protocol: ZenProtocol) -> bool {
     )
 }
 
-fn canonical_provider_id(input: &str) -> Option<String> {
+/// 把用户写的东西规范成一个内建 provider id（认 id、显示名、已知别名）。
+///
+/// `pub` 是因为调用方需要"这一串到底是不是某个内建 provider"这个判断 ——
+/// 例如 `commands::model::split_provider_qualified_model` 要靠它决定
+/// `foo/bar` 是"provider foo + 模型 bar"还是"一个带命名空间的模型 id"。
+pub fn canonical_provider_id(input: &str) -> Option<String> {
     normalize_provider_id(input).or_else(|| {
         let trimmed = input.trim();
         if trimmed.is_empty() {
@@ -543,6 +548,42 @@ pub fn provider_is_configured(
     )
 }
 
+/// 这个 provider 现在**能不能发请求**（区别于"该不该出现在菜单里"）。
+///
+/// # 为什么不能和 `provider_is_configured` 合并
+///
+/// 两个函数回答的是不同问题：
+///
+/// - `provider_is_configured` 回答"这个 provider 该不该列出来"。对自定义 provider
+///   它是 `has_api_key || has_base_url || is_active` —— 只要填了 URL 就算配好。
+/// - 本函数回答"发了请求会不会直接 401"。它要求真的有凭证。
+///
+/// 合并的后果是二选一：要么空 key 的 provider 从菜单里消失（用户明明填了
+/// URL，只是没填 key，却凭空少一个分组），要么它继续出现在模型扇出里，
+/// 每个 provider 白等一个 3 秒超时，最后收到一个 401。
+///
+/// # 免鉴权内建必须排在最前
+///
+/// Ollama / LM Studio 这类本地 provider `requires_api_key == false`，压根不需要
+/// 凭证。漏掉这条会把它们判成"未配置密钥"，于是本地模型永远拉不到列表 ——
+/// 那比"多列一个用不了的 provider"严重得多。
+pub fn provider_has_usable_credentials(
+    provider_id: &str,
+    settings: Option<&ProviderSettings>,
+) -> bool {
+    if let Some(metadata) =
+        canonical_provider_id(provider_id).and_then(|id| get_provider_by_id(&id))
+    {
+        if !metadata.requires_api_key {
+            return true;
+        }
+    }
+    let from_settings = settings
+        .and_then(|value| normalize_api_key_value(value.api_key.clone()))
+        .is_some();
+    from_settings || resolve_api_key_from_env(provider_id).is_some()
+}
+
 /// Normalize provider identifier to a canonical built-in ID when possible.
 /// Returns None if the input doesn't match any built-in provider.
 pub fn normalize_provider_id(input: &str) -> Option<String> {
@@ -683,6 +724,93 @@ pub fn api_key_env_hint(provider_id: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// 空密钥的自定义 provider 不能发请求 —— 这正是它之前**不该**出现在模型扇出里
+    /// 的原因：扇出去必然 401，而每个 provider 带 3 秒超时且 `join_all` 等最慢的。
+    #[test]
+    fn a_keyless_custom_provider_has_no_usable_credentials() {
+        let settings = ProviderSettings {
+            base_url: Some("https://gw.example.com/v1".to_string()),
+            api_key: None,
+            ..Default::default()
+        };
+        assert!(
+            !provider_has_usable_credentials("my-gateway", Some(&settings)),
+            "没有 key 就不能发请求"
+        );
+        // 但它"已配置"—— 有 URL 就算配好了，所以仍会出现在 Provider 菜单里。
+        assert!(provider_is_configured("my-gateway", Some(&settings), None));
+    }
+
+    /// 回归：免鉴权的本地 provider 必须被放行。
+    ///
+    /// 这条漏掉的话后果远重于"多列一个用不了的 provider"：Ollama / LM Studio
+    /// 会被判成未配置密钥，于是**本地模型永远拉不到列表**，功能直接没了。
+    #[test]
+    fn a_keyless_local_provider_is_not_treated_as_keyless() {
+        for id in ["ollama", "lmstudio"] {
+            let settings = ProviderSettings {
+                base_url: Some("http://localhost:11434/v1".to_string()),
+                api_key: None,
+                ..Default::default()
+            };
+            assert!(
+                provider_has_usable_credentials(id, Some(&settings)),
+                "{id} 是免鉴权本地 provider，必须放行"
+            );
+        }
+    }
+
+    /// 填了 key 就能发请求 —— 别把上一条写成"永远 false"。
+    #[test]
+    fn a_custom_provider_with_a_key_has_usable_credentials() {
+        let settings = ProviderSettings {
+            api_key: Some("sk-test".to_string()),
+            base_url: Some("https://gw.example.com/v1".to_string()),
+            ..Default::default()
+        };
+        assert!(provider_has_usable_credentials(
+            "my-gateway",
+            Some(&settings)
+        ));
+    }
+
+    /// 占位符 key 不算凭证 —— 否则用户把模板里的 `your-api-key` 原样留着，扇出会照打
+    /// 不误，收到 401 之后才发现。
+    ///
+    /// `is_placeholder_api_key` 是**精确匹配**一张固定表（大小写不敏感、`_`/`-`
+    /// 归一）。这是既有行为，不在本期放宽成子串匹配 —— 那有误伤真实 key 的风险。
+    /// 这里钉的就是"表里那些确实不算凭证"。
+    #[test]
+    fn a_placeholder_key_is_not_a_credential() {
+        for placeholder in [
+            "your-api-key",
+            "API_KEY_NOT_SET",
+            "replace-with-your-api-key",
+        ] {
+            let settings = ProviderSettings {
+                api_key: Some(placeholder.to_string()),
+                base_url: Some("https://gw.example.com/v1".to_string()),
+                ..Default::default()
+            };
+            assert!(
+                !provider_has_usable_credentials("my-gateway", Some(&settings)),
+                "{placeholder:?} 是占位符，不该算凭证"
+            );
+        }
+    }
+
+    /// 完全没配置的 provider 自然也没有凭证。
+    #[test]
+    fn an_unconfigured_provider_has_no_usable_credentials() {
+        assert!(!provider_has_usable_credentials("never-configured", None));
+    }
+
+    /// 要认证的内建 provider 在没 key 时同样不能发请求。
+    #[test]
+    fn a_keyless_builtin_that_requires_a_key_is_blocked() {
+        assert!(!provider_has_usable_credentials("openai", None));
+        assert!(!provider_has_usable_credentials("anthropic", None));
+    }
     use super::*;
 
     /// 回归：自定义 provider 的协议类型不能因为"查不到内建元数据"就丢掉。

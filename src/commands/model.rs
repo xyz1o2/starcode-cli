@@ -113,20 +113,63 @@ async fn list_models(mut ctx: CommandContext<'_>) -> CommandResult {
     Ok(())
 }
 
+/// 把用户输入拆成 `(provider_id, model_name)`。
+///
+/// # 为什么不能看见 `/` 就拆
+///
+/// 带命名空间的模型 id 是真实存在的（`opencode-zen/space-bunny-free`、
+/// `openrouter/xiaomi/mimo-v2.6-flash`），无条件按第一个 `/` 拆会把
+/// `opencode-zen/space-bunny-free` 读成"provider 是 opencode-zen" —— 而那根本不是
+/// 一个已知的 provider id，于是要么报错、要么静默落到当前 provider，用户完全
+/// 不知道自己写的东西被曲解了。
+///
+/// 规则：**只有左边那一段确实是已知 provider 时才按 `provider/model` 拆，
+/// 否则整串当模型名。** 这样两种写法都成立，且不必用户记住该用哪种。
+pub(crate) fn split_provider_qualified_model(
+    input: &str,
+    configured_providers: &[String],
+) -> (Option<String>, String) {
+    let raw = input.trim();
+    let Some((head, tail)) = raw.split_once('/') else {
+        return (None, raw.to_string());
+    };
+    let head = head.trim();
+    let tail = tail.trim();
+    if head.is_empty() || tail.is_empty() {
+        return (None, raw.to_string());
+    }
+    // 左边必须是一个**真实的** provider：内建的，或用户配过的自定义 id。
+    //
+    // 不能用 `canonical_provider_id` —— 它对任意非空串都返回 `Some(小写)`，
+    // 那是个"规范化"函数，不是"认不认识"函数，用它当判据等于永远为真，规则就废了。
+    // `normalize_provider_id` 才是真的在查表（id / 显示名 / 别名），认不出来的返回
+    // `None`。自定义 id 由调用方另判（见 `use_model`）。
+    let known = crate::core::config::providers::normalize_provider_id(head).is_some()
+        || configured_providers.iter().any(|id| id == head);
+    if known {
+        (Some(head.to_string()), tail.to_string())
+    } else {
+        (None, raw.to_string())
+    }
+}
+
 async fn use_model(mut ctx: CommandContext<'_>, model_id: String) -> CommandResult {
     // Bare model names resolve against the worker-confirmed active provider. Disk settings are
     // persistence output, not runtime authority, so they must not select this transition.
-    let parts: Vec<&str> = model_id.splitn(2, '/').collect();
-    let (provider_id, model_name) = if parts.len() == 2 {
-        (parts[0].to_string(), parts[1].to_string())
-    } else if let Some(provider_id) = ctx.state.current_provider_id.clone() {
-        (provider_id, parts[0].to_string())
-    } else {
-        return Err(
-            "No active provider is confirmed yet. Specify `provider/model` or wait for startup to finish."
-                .to_string(),
-        );
-    };
+    let (qualified_provider, model_name) =
+        split_provider_qualified_model(&model_id, &ctx.state.configured_providers);
+    let (provider_id, model_name) =
+        match qualified_provider {
+            Some(provider_id) => (provider_id, model_name),
+            None => match ctx.state.current_provider_id.clone() {
+                Some(provider_id) => (provider_id, model_name),
+                None => return Err(
+                    "No active provider is confirmed yet. Specify `provider/model` or wait for \
+                     startup to finish."
+                        .to_string(),
+                ),
+            },
+        };
 
     let accepted = crate::ui::events::input::request_runtime_model_change(
         ctx.state,
@@ -155,6 +198,83 @@ mod tests {
     use super::*;
     use crate::runtime::messages::AgentRequest;
     use tokio::sync::mpsc;
+
+    /// 回归：带命名空间、但那段**不是**已知 provider 的模型 id，必须整串当模型名。
+    ///
+    /// 真实事故：`/model acme-internal/claude-x` 这类写法，被读成"provider 是
+    /// acme-internal"，于是要么报"provider 未配置"、要么静默落到当前 provider，
+    /// 用户完全不知道自己写的东西被曲解了。
+    #[test]
+    fn namespaced_model_ids_are_not_split_as_provider_model() {
+        for input in [
+            "acme-internal/claude-x",
+            "my-gateway/qwen-max",
+            "not-a-provider/gpt-5",
+        ] {
+            let (provider, model) = split_provider_qualified_model(input, &[]);
+            assert_eq!(provider, None, "{input:?} 的左半段不是 provider");
+            assert_eq!(model, input, "{input:?} 必须整串当模型名");
+        }
+    }
+
+    /// `opencode-zen` 看着像命名空间，其实是 `opencode` 的别名（`normalize_provider_id`
+    /// 把 `-`/`_`/空格都压掉再匹配别名表）。所以 `opencode-zen/space-bunny-free`
+    /// **应当**被拆成 provider=opencode + model=space-bunny-free —— 这一条钉住的
+    /// 是"别名也算已知 provider"，别让上面的规则把它一起误伤。
+    #[test]
+    fn a_provider_alias_prefix_still_splits() {
+        let (provider, model) =
+            split_provider_qualified_model("opencode-zen/space-bunny-free", &[]);
+        assert_eq!(
+            provider.as_deref(),
+            Some("opencode-zen"),
+            "别名是合法 provider 前缀，必须拆"
+        );
+        assert_eq!(model, "space-bunny-free");
+    }
+
+    /// 反向：真正的 provider 前缀仍然要拆 —— 免鉴权内建也在内。
+    #[test]
+    fn an_actual_provider_prefix_is_still_split() {
+        for head in ["opencode", "openai", "anthropic", "deepseek"] {
+            let (provider, model) =
+                split_provider_qualified_model(&format!("{head}/some-model"), &[]);
+            assert_eq!(
+                provider.as_deref(),
+                Some(head),
+                "{head} 是内建 provider，必须能拆"
+            );
+            assert_eq!(model, "some-model");
+        }
+    }
+
+    /// 没有 `/` 的名字照旧不带 provider（由调用方落到当前 provider）。
+    #[test]
+    fn a_bare_name_carries_no_provider() {
+        let (provider, model) = split_provider_qualified_model("gpt-5", &[]);
+        assert_eq!(provider, None);
+        assert_eq!(model, "gpt-5");
+    }
+
+    /// 两段以上（`openrouter/xiaomi/mimo`）只在第一段是 provider 时才拆，
+    /// 剩下的整段是模型名 —— OpenRouter 风格的 id 本来就带斜杠。
+    #[test]
+    fn a_multi_segment_id_keeps_its_tail_intact() {
+        let (provider, model) =
+            split_provider_qualified_model("openrouter/xiaomi/mimo-v2.6-flash", &[]);
+        assert_eq!(provider.as_deref(), Some("openrouter"));
+        assert_eq!(model, "xiaomi/mimo-v2.6-flash");
+    }
+
+    /// 前后缺段时不该吞掉用户输入。
+    #[test]
+    fn a_malformed_qualified_name_is_taken_literally() {
+        for input in ["/model", "provider/", "  /x  "] {
+            let (provider, model) = split_provider_qualified_model(input, &[]);
+            assert_eq!(provider, None, "不该从 {input:?} 里拆出 provider");
+            assert_eq!(model, input.trim());
+        }
+    }
 
     #[tokio::test]
     async fn bare_model_uses_confirmed_provider_without_changing_active_state() {

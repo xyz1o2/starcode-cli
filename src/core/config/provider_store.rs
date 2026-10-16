@@ -613,6 +613,38 @@ impl ProviderStore {
 
         self.save(&config).await
     }
+
+    /// 把表单里那串模型名写进 `selected_model` + `models`。
+    ///
+    /// 单独一个方法而不是给 `add_custom_provider` 加参数：那个方法对
+    /// `selected_model` 是**整体覆盖**（`normalize_model_name(None)` 会清空），
+    /// 而多模型场景需要在写默认项的同时保留 `models` 里手写的
+    /// `context_window` / `alias`。两件事混在一个方法里迟早互相踩。
+    ///
+    /// provider 不存在时返回 `Ok(false)` 而不是报错 —— 那是调用方的顺序问题
+    /// （应该先 `add_custom_provider`），不该变成一条吓人的错误信息。
+    pub async fn set_candidate_models(
+        &self,
+        provider_id: &str,
+        model_text: &str,
+    ) -> Result<bool, String> {
+        let mut config = self.load().await?;
+        let Some(settings) = config.providers.get_mut(provider_id) else {
+            return Ok(false);
+        };
+        settings.set_candidate_models_from_text(model_text);
+        self.save(&config).await.map(|()| true)
+    }
+
+    /// provider 声明的候选模型（见 `ProviderSettings::candidate_models`）。
+    pub async fn candidate_models(&self, provider_id: &str) -> Result<Vec<String>, String> {
+        let config = self.load().await?;
+        Ok(config
+            .providers
+            .get(provider_id)
+            .map(|settings| settings.candidate_models())
+            .unwrap_or_default())
+    }
 }
 
 /// `resolve_unique_provider_id` 的纯函数部分，方便单测（不用碰磁盘）。

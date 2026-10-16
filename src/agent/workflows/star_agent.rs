@@ -53,6 +53,12 @@ pub struct StarAgent {
     runtime_settings_revision: u64,
     /// 下一条用户回合要复制进 fresh Agent 的不可变设置快照。
     turn_runtime_snapshot: TurnRuntimeSnapshot,
+    /// 刚装上的 provider 没有可用凭证（key 可能来自环境变量，也可能还没填）。
+    ///
+    /// **只用来生成一句警告，不阻止切换** —— 硬拒会把一次本来合法的切换变成
+    /// "切不动"。消费点是把 acknowledgement 的 outcome 降级成 `Degraded`，
+    /// 让界面显示"已切换，但这家还没密钥"。
+    credential_warning: Option<String>,
 }
 
 impl StarAgent {
@@ -232,6 +238,7 @@ impl StarAgent {
             active_runtime_settings,
             runtime_settings_revision: 0,
             turn_runtime_snapshot,
+            credential_warning: None,
         })
     }
 
@@ -397,11 +404,28 @@ impl StarAgent {
         };
         self.runtime_settings_revision = self.runtime_settings_revision.saturating_add(1);
 
+        // 装好了、但 provider 没凭证：降级而不是报错。
+        //
+        // `Degraded` 在 UI 上会显示成"已应用 · <原因>"，用户能立刻看到"切过去了
+        // 但这家没密钥"。不上报的话，上游只会回一个没有上下文的 401，而界面上
+        // 只剩"发不出去"。
+        let (outcome, reason) = match self.credential_warning.take() {
+            Some(provider_id) => (
+                RuntimeSettingOutcome::Degraded,
+                Some(format!(
+                    "Provider '{}' has no API key configured; the model was switched but \
+                     requests will fail until a key is set.",
+                    provider_id
+                )),
+            ),
+            None => (policy.outcome, policy.reason.clone()),
+        };
+
         RuntimeSettingsAcknowledgement {
             ui_revision: mutation.ui_revision,
-            outcome: policy.outcome,
+            outcome,
             snapshot: self.runtime_settings_snapshot(),
-            reason: policy.reason,
+            reason,
         }
     }
 
@@ -438,6 +462,33 @@ impl StarAgent {
             if !configured && !built_in {
                 return Err(format!("Provider '{}' is not configured.", provider_id));
             }
+
+            // 空密钥：**不拦下切换**，只降级并说清楚。
+            //
+            // 这里曾经想直接 `Err` 拒掉（这样至少能立刻解释失败），但那是错的：
+            // key 完全可能来自环境变量、别的进程、或者用户马上就要补上的操作，
+            // 硬拒会把一次本来合法的切换变成"切不动"。免鉴权的本地 provider
+            // （Ollama / LM Studio）由 `provider_has_usable_credentials` 放行。
+            //
+            // 真正的浪费在**扇出**那一步（白等一个注定 401 的 3 秒超时），那边已经
+            // 跳过了。这里只需要让"切过去了但发不出去"在界面上可见 —— 上游只会回
+            // 一个没有上下文的 401。
+            let settings = config.providers.iter().find_map(|(id, settings)| {
+                id.eq_ignore_ascii_case(provider_id).then_some(settings)
+            });
+            if !crate::core::config::providers::provider_has_usable_credentials(
+                provider_id,
+                settings,
+            ) {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[SetModel] WARNING: provider '{}' has no usable credentials; switching \
+                     anyway, but requests will fail until a key is configured",
+                    provider_id
+                ));
+                self.credential_warning = Some(provider_id.to_string());
+            }
+        } else {
+            self.credential_warning = None;
         }
 
         // `provider_id: None` 的语义是"沿用当前 provider"，不是"provider 变成 None"：

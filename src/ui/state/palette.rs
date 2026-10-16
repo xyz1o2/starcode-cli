@@ -255,8 +255,8 @@ pub const PROVIDER_FORM_FIELDS: &[(&str, &str, bool)] = &[
     ),
     ("API Key", "Leave empty to skip", true),
     (
-        "Model",
-        "Leave empty to auto-fetch the model list (cached)",
+        "Models",
+        "Comma / newline separated · first is the default · leave empty to auto-fetch",
         true,
     ),
 ];
