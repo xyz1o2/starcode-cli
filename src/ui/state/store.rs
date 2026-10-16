@@ -726,6 +726,16 @@ pub struct ChatState {
     // 顺序有意义：新的自定义 provider 在前（`ProviderSettings::order` 降序），
     // provider 面板直接按这个顺序渲染。
     pub configured_providers: Vec<String>,
+    /// `configured_providers` 里**没有可用凭证**的那些 id。
+    ///
+    /// 由 `StreamMessage::ConfiguredProviders` 的处理分支从 provider store 现算
+    /// （那个分支本来就是 async，所以能读盘）。Provider 菜单拿它打"⚠ no API key"
+    /// 标记 —— 有了凭证随时会变，所以必须是现算的，不能存成配置里的字段。
+    ///
+    /// 注意这与"该不该出现在菜单里"（`provider_is_configured`：有 Base URL 就算
+    /// 配好了）是两回事：留空密钥的 provider 依然列出，只是被标出来。见
+    /// `providers::provider_has_usable_credentials`。
+    pub keyless_providers: Vec<String>,
     /// "新增 provider" 单面板表单的编辑状态。`input_context` 是
     /// `ProviderForm` 时它才有效。
     pub provider_form: crate::ui::state::palette::ProviderFormState,
@@ -1270,6 +1280,7 @@ impl ChatState {
             modal_textarea: TextArea::default(),
             input_context: None,
             configured_providers: Vec::new(),
+            keyless_providers: Vec::new(),
             provider_form: crate::ui::state::palette::ProviderFormState::new(),
             task_panel: crate::ui::components::task_panel::TaskPanel::new(),
             paste_in_progress: false,

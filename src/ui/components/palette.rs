@@ -53,7 +53,9 @@ pub fn get_items(mode: &PaletteMode, state: &ChatState) -> Vec<PaletteItem> {
         PaletteMode::Session => get_session_palette_items(),
         PaletteMode::System => get_system_palette_items(),
         PaletteMode::Agent => get_agent_palette_items(),
-        PaletteMode::Provider => get_provider_palette_items(&state.configured_providers),
+        PaletteMode::Provider => {
+            get_provider_palette_items(&state.configured_providers, &state.keyless_providers)
+        }
         PaletteMode::ProviderPopular => get_provider_popular_items(&state.configured_providers),
         PaletteMode::ProviderOther => get_provider_other_items(&state.configured_providers),
         PaletteMode::ProviderLocal => get_provider_local_items(&state.configured_providers),
@@ -1294,7 +1296,10 @@ pub fn get_theme_palette_items(state: &ChatState) -> Vec<PaletteItem> {
     items
 }
 
-pub fn get_provider_palette_items(configured: &[String]) -> Vec<PaletteItem> {
+pub fn get_provider_palette_items(
+    configured: &[String],
+    keyless_providers: &[String],
+) -> Vec<PaletteItem> {
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
         label: i18n::t("palette.back.label", ".. Back", ".. Back"),
@@ -1316,10 +1321,30 @@ pub fn get_provider_palette_items(configured: &[String]) -> Vec<PaletteItem> {
         .iter()
         .filter(|id| !builtin_ids.contains(id.as_str()))
     {
+        // 没填密钥的自定义 provider 要**留在列表里并被标出来**，而不是消失。
+        //
+        // 隐藏它，用户明明配了 Base URL 却在面板上凭空少一个分组，只会以为自己没
+        // 配好；而且"已配置"与"能发请求"是两个不同的问题（见
+        // `provider_has_usable_credentials` 的说明）。模型列表扇出那边已经跳过它了，
+        // 这枚常驻标记就是它在界面上唯一的、且持续可见的存在方式 ——
+        // 比一次性的状态栏提示管用。
+        //
+        // 判定来自 `ChatState::keyless_providers`，由 `StreamMessage::ConfiguredProviders`
+        // 的处理分支从 provider store 现算（那个分支本来就是 async）。
+        let has_key = !keyless_providers.contains(id);
         items.push(PaletteItem {
             id: format!("provider_{}", id),
-            label: format!("{} ✓", id),
-            description: "Custom provider — configure or remove".to_string(),
+            label: if has_key {
+                format!("{} ✓", id)
+            } else {
+                format!("{} ✓ ⚠ no API key", id)
+            },
+            description: if has_key {
+                "Custom provider — configure or remove".to_string()
+            } else {
+                "Custom provider — no API key set, requests will fail until one is added"
+                    .to_string()
+            },
             category: Some("Custom".to_string()),
             action: PaletteAction::Navigate(PaletteMode::ProviderOptions(id.clone())),
         });
@@ -2477,6 +2502,59 @@ mod tests {
     /// 两个 provider 可以合法地提供同名模型（同一个模型名挂在不同 base_url 下，
     /// OpenClaude 为此专门把 profileId 编进了选项 value）。只用模型名做键，两条
     /// 会被去重成一个，另一个永远选不到 —— 于是"我明明看到它却选不上"。
+    /// 回归：没填密钥的 provider 必须**留在列表里并被标出来**，不能消失。
+    ///
+    /// 隐藏它，用户明明配了 Base URL 却在面板上凭空少一个分组，只会以为自己没配好。
+    /// 而模型列表扇出那边已经跳过它了，这枚标记就是它在界面上唯一的持续可见线索。
+    #[test]
+    fn a_keyless_provider_is_listed_and_flagged_rather_than_hidden() {
+        let configured = vec!["has-key".to_string(), "no-key".to_string()];
+        let keyless = vec!["no-key".to_string()];
+
+        let items = get_provider_palette_items(&configured, &keyless);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+        assert!(
+            labels.iter().any(|l| l.starts_with("no-key")),
+            "没密钥的 provider 必须仍然出现在列表里：{labels:?}"
+        );
+        let flagged = items
+            .iter()
+            .find(|i| i.label.starts_with("no-key"))
+            .expect("no-key 应在列表中");
+        assert!(
+            flagged.label.contains("no API key"),
+            "必须被标出缺密钥：{}",
+            flagged.label
+        );
+        assert!(
+            flagged.description.contains("requests will fail"),
+            "说明行要说清后果：{}",
+            flagged.description
+        );
+
+        let ok = items
+            .iter()
+            .find(|i| i.label.starts_with("has-key"))
+            .expect("has-key 应在列表中");
+        assert!(
+            !ok.label.contains("no API key"),
+            "有密钥的 provider 不该被误标：{}",
+            ok.label
+        );
+    }
+
+    /// 空密钥列表（还没从 worker 收到凭证状态）不能把所有人都标成缺密钥。
+    #[test]
+    fn an_unknown_credential_state_flags_nobody() {
+        let configured = vec!["a".to_string(), "b".to_string()];
+        let items = get_provider_palette_items(&configured, &[]);
+        assert!(
+            items.iter().all(|i| !i.label.contains("no API key")),
+            "凭证状态未知时不能瞎标"
+        );
+    }
+
     #[test]
     fn same_model_name_under_two_providers_gets_distinct_action_keys() {
         let a = PaletteAction::SetModel {

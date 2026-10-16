@@ -1165,6 +1165,26 @@ pub async fn handle_stream_update(
         }
         StreamMessage::ConfiguredProviders(ids) => {
             state.configured_providers = ids.into_iter().collect();
+            // 顺手算出"没填密钥"的那批。必须现算：key 可能来自环境变量，也可能
+            // 刚在 provider 表单里补上，存成配置里的字段会立刻过期。
+            //
+            // 读盘失败时退化成"全都算有凭证"—— 那只是少一个标记，不能反过来把
+            // 所有 provider 都标成缺密钥、让用户以为配置全坏了。
+            let store = crate::core::config::provider_store::ProviderStore::new();
+            state.keyless_providers = match store.load().await {
+                Ok(config) => state
+                    .configured_providers
+                    .iter()
+                    .filter(|id| {
+                        !crate::core::config::providers::provider_has_usable_credentials(
+                            id,
+                            config.providers.get(id.as_str()),
+                        )
+                    })
+                    .cloned()
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
         }
         StreamMessage::CurrentModelChanged { model, provider_id } => {
             // Legacy startup/provider-listing notifications cannot overwrite a newer
