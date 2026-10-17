@@ -13,8 +13,13 @@ pub struct Storage {
 }
 
 impl Storage {
+    /// 解析项目状态目录。
+    ///
+    /// 从工作目录上溯找项目自己的 `.star`（子目录要能继承仓库根的状态），
+    /// 但**跳过全局的 `~/.star`** —— 它是全局配置目录，不是某个项目的状态目录。
+    /// 认错了它，项目的「总是允许」授权就会写进 home，在别的项目里一起放行。
     pub fn new(target_dir: PathBuf) -> Self {
-        let target_dir = crate::core::utils::paths::find_nearest_existing_star_dir(&target_dir)
+        let target_dir = crate::core::utils::paths::find_nearest_project_star_dir(&target_dir)
             .and_then(|star_dir| star_dir.parent().map(|parent| parent.to_path_buf()))
             .unwrap_or(target_dir);
 
@@ -216,6 +221,39 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回归：项目状态目录不能是全局的 `~/.star`。
+    ///
+    /// `Storage` 会从工作目录上溯找 `.star`，好让子目录继承仓库根的状态。但
+    /// 项目建在 home 之下时（Linux 的 `~/code/foo` 尤其常见），上溯会直接撞上
+    /// `~/.star` —— 那是全局配置目录。于是：
+    ///
+    /// - 「总是允许」的授权写进 home，在**别的**项目里同样生效；
+    /// - 反过来，home 下任意一个项目点一次「总是允许」，全部一起放行。
+    ///
+    /// 授权的爆炸半径必须等于当前项目。
+    #[test]
+    fn project_storage_never_adopts_the_global_star_dir() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        // 模拟 home 下没有项目自己的 `.star`：只有全局那个。
+        let nested = home.join(".star-storage-probe").join("project");
+        std::fs::create_dir_all(&nested).expect("create probe project dir");
+
+        let storage = Storage::new(nested.clone());
+        assert_ne!(
+            storage.target_dir, home,
+            "项目状态不能落在 home 上，否则授权会跨项目泄漏"
+        );
+        assert_eq!(
+            storage.star_dir(),
+            nested.join(".star"),
+            "找不到项目自己的 `.star` 时，应当就在项目目录下建一个"
+        );
+
+        std::fs::remove_dir_all(nested.parent().expect("probe parent")).ok();
+    }
 
     /// 会话消息路径必须按会话 ID 隔离：不同会话读写不同文件，
     /// 否则新会话会继承上一个会话的完整上下文（对标 Claude Code

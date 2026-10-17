@@ -394,9 +394,26 @@ pub fn find_nearest_existing_star_dir(start: &Path) -> Option<PathBuf> {
     find_project_file_upwards(start, &[STAR_DIR])
 }
 
+/// 向上找**项目自己**的 `.star`，跳过全局的那一个。
+///
+/// `~/.star` 是全局配置目录（settings、model cache、user-settings、权限授权），
+/// 不是任何项目的状态目录。`Storage` 从工作目录上溯找 `.star` 是为了让子目录
+/// 继承仓库根的状态（monorepo），但当项目建在 home 之下时（Linux 的
+/// `~/code/foo` 尤其常见）上溯会直接撞上 `~/.star` —— 于是：
+///
+/// - 项目的「总是允许」授权写进了全局目录，在**别的**项目里同样生效；
+/// - 反过来，任何一个项目点一次「总是允许」，home 下的所有项目一起放行。
+///
+/// 授权的爆炸半径必须是当前项目，所以这里把全局目录排除掉：找不到项目自己的
+/// `.star` 就用 `start` 本身，让项目在自己的目录下建一个。
+pub fn find_nearest_project_star_dir(start: &Path) -> Option<PathBuf> {
+    let global = dirs::home_dir().map(|home| home.join(STAR_DIR));
+    find_nearest_existing_star_dir(start).filter(|found| Some(found) != global.as_ref())
+}
+
 pub fn current_project_star_dir() -> PathBuf {
     let cwd = current_dir_cached().clone();
-    find_nearest_existing_star_dir(&cwd).unwrap_or_else(|| cwd.join(STAR_DIR))
+    find_nearest_project_star_dir(&cwd).unwrap_or_else(|| cwd.join(STAR_DIR))
 }
 
 #[cfg(test)]

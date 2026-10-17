@@ -424,10 +424,16 @@ impl ToolExecutor {
             }
         }
 
-        // 会话/持久缓存只在策略没有点名要求确认时才生效。
-        // 用户写 `ask: ["Bash(git push:*)"]` 的语义是"每次都问我"，
-        // 一次"总是允许"不该把它降级成此后静默放行。
-        if !approved && !requires_invocation_confirmation && !policy_requires_confirmation {
+        // 会话/持久授权：用户按下「本会话允许 / 总是允许」时给**这个工具**的授权，
+        // 必须读回来。
+        //
+        // 曾经这里挂着 `&& !requires_invocation_confirmation`：工具只要自带逐次确认
+        // （`Edit` 在 `folder_trust` 打开时就是），整块就被跳过 —— 授权写进了
+        // `SessionPermissionManager` 却永远读不回来，用户点完「允许本会话」，下一次
+        // 编辑照样弹框。授权必须是**读的**，写了不读等于没写。
+        //
+        // 仍然压得住的只有一件事：用户自己写下的 `ask` 规则，语义就是"每次都问我"。
+        if !policy_requires_confirmation {
             let permission_hit = self.permission_manager.check_allowed_with_identity(
                 tool_name,
                 args,
@@ -449,6 +455,8 @@ impl ToolExecutor {
             }
         }
 
+        // 工具自己的逐次检查：它知道参数级/路径级的顾虑（`Edit` 关心未信任目录），
+        // 通用授权不该替它做主，所以这条路径不受上面的 `approved` 影响。
         if !should_run_invocation_confirmation(approved, requires_invocation_confirmation) {
             return Gate::Open;
         }
@@ -459,20 +467,20 @@ impl ToolExecutor {
         };
 
         let should_confirm = invocation.should_confirm_execute(abort_signal).await;
-        // 工具没提出自己的确认要求，但策略判定要问：补一个确认卡片。
-        // 两张卡片文案必须不同 —— 显式 ask 规则才配说 "matches an `ask` rule"；
-        // 兜底 default 没有规则可指。
-        let should_confirm = match should_confirm {
-            Ok(None) if requires_prompt => Ok(Some(if policy_requires_confirmation {
-                policy_confirmation_details(tool_name, args)
-            } else {
-                default_confirmation_details(tool_name, args)
-            })),
-            other => other,
-        };
-
         let details = match should_confirm {
             Ok(Some(details)) => details,
+            // 工具自己没话说。兜底卡片只在**没有人授权过**的时候才需要：一旦策略
+            // 放行、或用户已经给过会话/持久授权，就不该再弹。
+            //
+            // 卡片文案两种要分开：显式 ask 规则才配说 "matches an `ask` rule"，
+            // 兜底 default 没有规则可指。
+            Ok(None) if requires_prompt && !approved => {
+                if policy_requires_confirmation {
+                    policy_confirmation_details(tool_name, args)
+                } else {
+                    default_confirmation_details(tool_name, args)
+                }
+            }
             Ok(None) => return Gate::Open,
             Err(e) => return Gate::Closed(e.to_string()),
         };
@@ -3210,10 +3218,31 @@ mod tests {
         Arc<MessageBus>,
         Arc<std::sync::atomic::AtomicUsize>,
     ) {
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool = Arc::new(CountingTool { runs: runs.clone() });
+        gate_with(tool, runs)
+    }
+
+    /// 通用门禁夹具：`tool` 决定工具本身要不要说话，策略一律"没规则 → AskUser"。
+    ///
+    /// `runs` 由调用方建好并交给工具，夹具只把它原样还回去。夹具自己再造一个
+    /// 计数器的话，返回的就不是工具在写的那一个，断言会读到恒为 0 的值。
+    fn gate_with(
+        tool: Arc<dyn crate::core::tools::tools::BaseDeclarativeTool>,
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> (
+        ToolExecutor,
+        Arc<MessageBus>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
         use crate::core::config::ConfigParameters;
         use crate::core::policy::PolicyEngine;
 
         let temp = tempfile::tempdir().expect("create temporary directory");
+        // 先把 `.star` 建好，`Storage` 的上溯就会停在临时目录里。少了这一步，
+        // 临时目录（通常在 home 之下）会一路找到用户真实的 `~/.star`：测试点一次
+        // 「总是允许」就写进用户目录，还会反过来把后续调用的第一次也放行。
+        std::fs::create_dir_all(temp.path().join(".star")).expect("seed project .star dir");
         let mut params = ConfigParameters::default();
         params.target_dir = temp.path().to_path_buf();
         params.cwd = temp.path().to_path_buf();
@@ -3224,9 +3253,8 @@ mod tests {
             PolicyEngine::new(Default::default()),
             false,
         ));
-        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let registry = Arc::new(ToolRegistry::new(config.clone()));
-        registry.register_tool(Arc::new(CountingTool { runs: runs.clone() }));
+        registry.register_tool(tool);
         let executor = ToolExecutor::new(
             StarClient::new("", None, None, None, None),
             registry,
@@ -3234,6 +3262,260 @@ mod tests {
             config,
         );
         (executor, bus, runs)
+    }
+
+    /// `EditTool` 在 `folder_trust` 打开时的形状：工具要求"每次都再确认一次"，
+    /// 但它自己那次检查在目录已被信任之后是 `Ok(None)`。
+    ///
+    /// 这正是"允许本会话 / 总是允许"失效的现场：授权写进了
+    /// `SessionPermissionManager`，却因为 `!requires_invocation_confirmation` 那一句
+    /// 永远读不回来，于是每次编辑都重新弹框。
+    struct ReconfirmingTool {
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::core::tools::tools::BaseDeclarativeTool for ReconfirmingTool {
+        fn name(&self) -> &str {
+            "ReconfirmingTool"
+        }
+        fn display_name(&self) -> &str {
+            "Reconfirming tool"
+        }
+        fn description(&self) -> &str {
+            "test-only tool that demands a per-invocation check"
+        }
+        fn kind(&self) -> crate::core::tools::tools::Kind {
+            crate::core::tools::tools::Kind::Other
+        }
+        fn parameter_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn requires_invocation_confirmation(&self) -> bool {
+            true
+        }
+        fn create_invocation(
+            &self,
+            _params: serde_json::Value,
+        ) -> Result<
+            Box<dyn crate::core::tools::tools::ToolInvocation>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            Ok(Box::new(CountingInvocation {
+                runs: self.runs.clone(),
+            }))
+        }
+    }
+
+    fn reconfirming_call() -> StarToolCall {
+        StarToolCall {
+            id: "reconfirming-call".to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: "ReconfirmingTool".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    fn reconfirming_gate() -> (
+        ToolExecutor,
+        Arc<MessageBus>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool = Arc::new(ReconfirmingTool { runs: runs.clone() });
+        gate_with(tool, runs)
+    }
+
+    /// `requires_invocation_confirmation()` 为真、**并且**自己真的要说话的工具。
+    ///
+    /// 对照 `ReconfirmingTool`（会说话但 check 返回 `Ok(None)`）：这条要锁的是
+    /// 「用户给了通用授权之后，工具自己的那条意见仍然算数」。
+    struct SelfPromptingTool {
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::core::tools::tools::BaseDeclarativeTool for SelfPromptingTool {
+        fn name(&self) -> &str {
+            "SelfPromptingTool"
+        }
+        fn display_name(&self) -> &str {
+            "Self-prompting tool"
+        }
+        fn description(&self) -> &str {
+            "test-only tool that always speaks up"
+        }
+        fn kind(&self) -> crate::core::tools::tools::Kind {
+            crate::core::tools::tools::Kind::Other
+        }
+        fn parameter_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn requires_invocation_confirmation(&self) -> bool {
+            true
+        }
+        fn create_invocation(
+            &self,
+            _params: serde_json::Value,
+        ) -> Result<
+            Box<dyn crate::core::tools::tools::ToolInvocation>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            Ok(Box::new(SelfPromptingInvocation {
+                runs: self.runs.clone(),
+            }))
+        }
+    }
+
+    struct SelfPromptingInvocation {
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::core::tools::tools::ToolInvocation for SelfPromptingInvocation {
+        fn get_description(&self) -> String {
+            "self-prompting invocation".to_string()
+        }
+        fn tool_locations(&self) -> Vec<crate::core::tools::tools::ToolLocation> {
+            Vec::new()
+        }
+        fn should_confirm_execute(
+            &self,
+            _abort_signal: Option<&tokio_util::sync::CancellationToken>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            Option<crate::core::tools::tools::ToolCallConfirmationDetails>,
+                            Box<dyn std::error::Error + Send + Sync>,
+                        >,
+                    > + Send,
+            >,
+        > {
+            Box::pin(async {
+                Ok(Some(
+                    crate::core::tools::tools::ToolCallConfirmationDetails {
+                        confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
+                        title: "Permission required: SelfPromptingTool".to_string(),
+                        prompt: "the tool always has something to say".to_string(),
+                        on_confirm: std::sync::Arc::new(|_outcome, _feedback| {}),
+                    },
+                ))
+            })
+        }
+        fn execute(
+            &self,
+            _signal: Option<&tokio_util::sync::CancellationToken>,
+            _update_output: Option<Arc<dyn Fn(String) + Send + Sync>>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            crate::core::tools::tools::ToolResult,
+                            Box<dyn std::error::Error>,
+                        >,
+                    > + Send,
+            >,
+        > {
+            self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async {
+                Ok(crate::core::tools::tools::ToolResult {
+                    output: "ran".to_string(),
+                    return_display: Some("ran".to_string()),
+                    error: None,
+                    data: None,
+                    llm_content: None,
+                })
+            })
+        }
+    }
+
+    fn self_prompting_call() -> StarToolCall {
+        StarToolCall {
+            id: "self-prompting-call".to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: "SelfPromptingTool".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    /// 数一数这轮里弹了几次确认框。
+    async fn count_prompts(bus: &MessageBus, within: std::time::Duration) -> usize {
+        let mut rx = bus.subscribe();
+        let deadline = tokio::time::Instant::now() + within;
+        let mut count = 0;
+        while let Ok(Ok(msg)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+            if matches!(msg, Message::ToolConfirmationRequest(_)) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// 对每一次确认按 `plan` 依次作答，plan 用完后一律重复最后一项。
+    ///
+    /// 订阅必须在**调用方线程**上完成再 spawn：`broadcast::Receiver` 只缓冲订阅
+    /// 之后的消息，在任务里现订阅会漏掉已经发出去的请求，于是测试会挂住。
+    fn respond_to_each_confirmation(
+        bus: Arc<MessageBus>,
+        plan: Vec<crate::types::ToolConfirmationOutcome>,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut rx = bus.subscribe();
+        async move {
+            let mut seen = 0usize;
+            loop {
+                match rx.recv().await {
+                    Ok(Message::ToolConfirmationRequest(req)) => {
+                        let outcome = plan
+                            .get(seen)
+                            .or_else(|| plan.last())
+                            .cloned()
+                            .unwrap_or(crate::types::ToolConfirmationOutcome::ProceedOnce);
+                        seen += 1;
+                        let _ = bus
+                            .publish(Message::ToolConfirmationResponse(
+                                ToolConfirmationResponse::from_user_decision(
+                                    req.correlation_id,
+                                    outcome,
+                                    None,
+                                ),
+                            ))
+                            .await;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => return,
+                }
+            }
+        }
+    }
+
+    /// 给挂在总线上的后台任务一次把缓冲区排空的机会。
+    ///
+    /// `broadcast::Receiver` 收到的东西先进缓冲区，被 poll 一次才算数。计数任务
+    /// 如果在断言前就被 abort，统计出来的是"还没排队的条数"，不是"弹了几次框"。
+    async fn settle() {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    /// 统计弹了几次确认框。订阅同样在调用方线程上完成 —— 否则会漏掉早于它发出的那些。
+    fn count_each_confirmation(
+        bus: Arc<MessageBus>,
+        prompts: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        use std::sync::atomic::Ordering;
+        let mut rx = bus.subscribe();
+        async move {
+            loop {
+                match rx.recv().await {
+                    Ok(Message::ToolConfirmationRequest(_)) => {
+                        prompts.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Ok(_) => continue,
+                    Err(_) => return,
+                }
+            }
+        }
     }
 
     fn counting_call() -> StarToolCall {
@@ -3352,6 +3634,133 @@ mod tests {
 
         assert!(result.success, "批准后应当执行成功：{:?}", result.error);
         assert_eq!(runs.load(Ordering::SeqCst), 1, "批准后工具应当恰好跑一次");
+    }
+
+    /// 回归（用户报的现象）：「允许本会话」必须真的生效。
+    ///
+    /// `ReconfirmingTool` 是 `EditTool` 在 `folder_trust` 打开时的形状 ——
+    /// `requires_invocation_confirmation() == true`。修复前门禁里有这么一句：
+    ///
+    /// ```ignore
+    /// if !approved && !requires_invocation_confirmation && … { /* 查授权 */ }
+    /// ```
+    ///
+    /// 工具只要自带逐次确认，这块就被整块跳过；于是「允许本会话」把授权**写进去
+    /// 了却永远读不回来**，用户点完还是每次弹框。
+    #[tokio::test]
+    async fn allow_for_session_survives_a_tool_that_demands_a_per_invocation_check() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let (executor, bus, runs) = reconfirming_gate();
+        let prompts = Arc::new(AtomicUsize::new(0));
+        let responder = tokio::spawn(respond_to_each_confirmation(
+            bus.clone(),
+            vec![crate::types::ToolConfirmationOutcome::AllowSession],
+        ));
+        let counting = tokio::spawn(count_each_confirmation(bus.clone(), prompts.clone()));
+
+        for _ in 0..3 {
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                executor.execute(&reconfirming_call(), None, None),
+            )
+            .await
+            .expect("批准之后必须立刻返回");
+            assert!(result.success, "每次调用都应成功：{:?}", result.error);
+        }
+        // 让计数任务把缓冲区里最后几条确认请求排空再收工，否则读到的数字偏小。
+        settle().await;
+        responder.abort();
+        counting.abort();
+
+        assert_eq!(
+            prompts.load(Ordering::SeqCst),
+            1,
+            "点了「允许本会话」之后不该再弹第二次"
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 3, "三次调用都应真正执行");
+    }
+
+    /// 回归：「总是允许」也一样要生效 —— 它落到磁盘，跨会话读回来。
+    #[tokio::test]
+    async fn always_allow_survives_a_tool_that_demands_a_per_invocation_check() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let (executor, bus, _runs) = reconfirming_gate();
+        let prompts = Arc::new(AtomicUsize::new(0));
+        let responder = tokio::spawn(respond_to_each_confirmation(
+            bus.clone(),
+            vec![crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave],
+        ));
+        let counting = tokio::spawn(count_each_confirmation(bus.clone(), prompts.clone()));
+
+        for _ in 0..3 {
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                executor.execute(&reconfirming_call(), None, None),
+            )
+            .await
+            .expect("批准之后必须立刻返回");
+            assert!(result.success, "每次调用都应成功：{:?}", result.error);
+        }
+        settle().await;
+        responder.abort();
+        counting.abort();
+
+        assert_eq!(
+            prompts.load(Ordering::SeqCst),
+            1,
+            "点了「总是允许」之后不该再弹第二次"
+        );
+    }
+
+    /// 反向保证：工具自己的逐次检查仍然有话语权 —— 通用授权不能让它闭嘴。
+    ///
+    /// 这条锁的是 `requires_invocation_confirmation` 真正的用途：工具知道
+    /// 参数级/路径级的顾虑（Edit 关心未信任目录），通用授权不该替它做主。
+    /// 放宽的只是"它能否否决用户的授权"，不是"它能否说话"。
+    #[tokio::test]
+    async fn a_per_invocation_check_still_outranks_a_session_grant() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let (executor, bus, _runs) = gate_with(
+            Arc::new(SelfPromptingTool {
+                runs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        let prompts = Arc::new(AtomicUsize::new(0));
+        // 第一次只批准这一次；第二次给一个「本会话」授权。
+        let responder = tokio::spawn(respond_to_each_confirmation(
+            bus.clone(),
+            vec![
+                crate::types::ToolConfirmationOutcome::ProceedOnce,
+                crate::types::ToolConfirmationOutcome::AllowSession,
+            ],
+        ));
+        let counting = tokio::spawn(count_each_confirmation(bus.clone(), prompts.clone()));
+
+        for _ in 0..3 {
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                executor.execute(&self_prompting_call(), None, None),
+            )
+            .await
+            .expect("批准之后必须立刻返回");
+            assert!(result.success, "每次调用都应成功：{:?}", result.error);
+        }
+        settle().await;
+        responder.abort();
+        counting.abort();
+
+        assert_eq!(
+            prompts.load(Ordering::SeqCst),
+            3,
+            "工具自己提出的确认不能被「本会话允许」吞掉"
+        );
     }
 
     /// 中断这一轮必须让等待立刻收手：用户不想等了，剩下的就不该继续挂着。
