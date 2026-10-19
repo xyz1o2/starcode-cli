@@ -251,11 +251,22 @@ impl ProviderStore {
         }
 
         if let Some(active_provider_id) = config.active_provider_id.clone() {
+            // 只给**升级前的老配置**补种一次。
+            //
+            // 判据必须包含 `models.is_none()`：单看 `selected_model` 为空的话，用户
+            // 刚刚手动清空 Models 保存下来，同样是空的，紧接着 `set_active_provider()`
+            // → `load()` 又把全局 `active_model` 抄回去 —— 清空操作被静默撤销，
+            // 下次打开表单又是原来的模型名。表单保存时总会写出一个 `models` 键
+            // （空 map 也算，见 `ProviderSettings::set_candidate_models_from_text`），
+            // 所以"用户主动清空"不会被误判成"老配置"。
             let should_migrate_active_model = config
                 .providers
                 .get(&active_provider_id)
-                .and_then(|settings| normalize_model_name(settings.selected_model.clone()))
-                .is_none();
+                .map(|settings| {
+                    settings.models.is_none()
+                        && normalize_model_name(settings.selected_model.clone()).is_none()
+                })
+                .unwrap_or(false);
             if should_migrate_active_model {
                 if let Some(active_model) = normalize_model_name(config.active_model.clone()) {
                     let settings =
@@ -540,11 +551,20 @@ impl ProviderStore {
         // 顺序不确定，`sort_by` 又是稳定排序，所以只按 order 排的话，同 order 的
         // 那批 provider 每次读盘都会换一个顺序 —— 面板上的 provider 列表会自己
         // 跳位。这个列表在每次刷模型时都会重发，跳位会变得非常显眼。
+        // 自定义 provider：**只要配置里有这一项就列出来**，哪怕它"没配全"。
+        //
+        // 以前这里按 `is_configured` 过滤，而对自定义 provider 那个判据是
+        // `has_api_key || has_base_url || is_active`。于是"两项都被清空"的 provider
+        // 会从面板里彻底消失 —— 但它的配置项还在 `user-settings.json` 里、磁盘缓存
+        // 桶也还在，于是模型面板照端不误（端出几十个 `Provider: <僵尸>` 的模型）。
+        // **看不见、删不掉、还在往列表里喂数据**，用户只能去手改 JSON。
+        //
+        // 可见即可删。面板那一侧会根据 `provider_has_usable_credentials` 标出
+        // "未配置密钥"，两者配合就不会再产生这种死角。
         let mut custom: Vec<(u64, String)> = config
             .providers
             .iter()
             .filter(|(id, _)| !builtin_ids.contains(id.as_str()))
-            .filter(|(id, settings)| is_configured(id, Some(settings)))
             .map(|(id, settings)| (settings.order.unwrap_or(0), id.clone()))
             .collect();
         custom.sort_by(|(a, a_id), (b, b_id)| b.cmp(a).then_with(|| a_id.cmp(b_id)));

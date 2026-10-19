@@ -105,25 +105,45 @@ impl ProviderSettings {
 
     /// 用一个 `model 文本` 输入装配 `selected_model` + `models`。
     ///
-    /// - 空输入 → 两个字段都清成 `None`（自动发现）。
-    /// - 恰好一个名字 → 只写 `selected_model`，**不造 `models` map**。单值场景保持
-    ///   与旧配置一模一样的形状，避免把简单配置写复杂。
-    /// - 多个名字 → 第一个当默认，其余进 `models`；`models` 里已存在的
-    ///   `ModelConfig`（`context_window` / `alias` / `name`）**原样保留**，
-    ///   不被默认值覆盖。
+    /// - 空输入 → `selected_model = None`，`models` 收成一个**空 map**（**不是 None**，见下）。
+    /// - 恰好一个名字 → 只写 `selected_model`，`models` 不留条目。
+    /// - 多个名字 → 第一个当默认，其余进 `models`。
+    ///
+    /// # 元数据要"跟着名字走"
+    ///
+    /// `ModelConfig` 里的 `context_window` / `alias` / `name` 是用户在文本框里看不到、
+    /// 也写不出来的东西。所以：**仍在文本里的名字，保留它原有的 `ModelConfig`**；
+    /// **已经从文本里删掉的名字，连同它的元数据一起删掉**。
+    ///
+    /// 只保留不删除是不对的：用户把 `b` 从文本里删掉就是在移除这个模型，它却还留在
+    /// `models` 里，下次打开表单（`prefill_form_from_provider` 读候选集）会冒出来，
+    /// 看起来像"删不掉"。只删除不保留也不对：那会静默丢掉手写的 `context_window`。
+    ///
+    /// # 为什么 `models` 永远不是 `None`
+    ///
+    /// `ProviderStore::load` 里有一段"把全局 `active_model` 补种成当前 provider 的
+    /// `selected_model`"的一次性迁移，本意是照顾升级前的老配置。但它没有"已迁移"
+    /// 标记，所以**只要** `selected_model` 是 `None` 就会跑 —— 于是用户手动清空
+    /// Models 保存之后，紧接着的 `set_active_provider()` → `load()` 又把旧值抄回来，
+    /// 清空操作被静默撤销（表单里再打开又是原来的模型名）。
+    ///
+    /// 让表单保存**总是**写出一个 `models` 键（哪怕是空 map），就等于给这个 provider
+    /// 打上"模型选择已由用户决定"的标记：迁移的判据加上 `models.is_none()` 之后，
+    /// 只有**根本没这个字段的老配置**才会被补种，而"用户主动清空"不会被误判。
+    /// 空 map 与 `None` 对所有消费方等价（候选列表都是空的 = 交给 API 自动发现）。
     pub fn set_candidate_models_from_text(&mut self, text: &str) {
         let names = split_model_names(text);
         self.selected_model = names.first().cloned();
-        if names.len() <= 1 {
-            self.models = None;
-            return;
-        }
-        let models = self.models.get_or_insert_with(HashMap::new);
-        // 只增不删：手写的 `context_window` / `alias` 是用户花力气配的，
-        // 从文本里看不到这个信息，删掉等于静默丢配置。
+
+        let previous = self.models.take().unwrap_or_default();
+        let mut models = HashMap::with_capacity(previous.len());
         for name in names.iter().skip(1) {
-            models.entry(name.clone()).or_default();
+            // 还在文本里 → 沿用它原有的元数据，没有就用默认值。
+            models
+                .entry(name.clone())
+                .or_insert_with(|| previous.get(name).cloned().unwrap_or_default());
         }
+        self.models = Some(models);
     }
 }
 
@@ -547,13 +567,26 @@ mod tests {
         assert!(split_model_names("  \n , ; ").is_empty());
     }
 
-    /// 单值场景保持与旧配置一模一样的形状：不为了"看起来完整"造一个单键 map。
+    /// 单值场景**不往 `models` 里塞条目** —— 但那个键必须存在。
+    ///
+    /// 键存在（哪怕是空 map）是刻意的：它是"这个 provider 的模型选择已由用户决定"
+    /// 的标记，`ProviderStore::load` 的补种逻辑靠它区分"用户主动清空"和
+    /// "升级前的老配置"。见 `set_candidate_models_from_text`。
     #[test]
-    fn a_single_configured_model_writes_no_models_map() {
+    fn a_single_configured_model_leaves_the_models_map_empty() {
         let mut s = ProviderSettings::default();
         s.set_candidate_models_from_text("gpt-5");
         assert_eq!(s.selected_model.as_deref(), Some("gpt-5"));
-        assert!(s.models.is_none(), "只配一个模型时不该造 models map");
+        assert_eq!(
+            s.models.as_ref().map(|m| m.len()),
+            Some(0),
+            "只配一个模型时 models 应当存在但是空的"
+        );
+        assert_eq!(
+            s.candidate_models(),
+            vec!["gpt-5"],
+            "消费方看到的仍然只是那一个模型"
+        );
     }
 
     #[test]
@@ -599,11 +632,102 @@ mod tests {
         s.set_candidate_models_from_text("a, b, c");
         s.set_candidate_models_from_text("  ");
         assert!(s.selected_model.is_none());
-        assert!(
-            s.models.is_none(),
-            "清空后 models 必须一起清，否则删掉的名字会复活"
+        assert_eq!(
+            s.models.as_ref().map(|m| m.len()),
+            Some(0),
+            "清空后 models 必须清空（键保留，那是'用户已决定'的标记），\
+             否则删掉的名字会复活"
         );
         assert!(s.candidate_models().is_empty());
+    }
+
+    /// 从文本里删掉一个名字，必须真的删掉 —— 连同它的元数据。
+    ///
+    /// 只保留不删除是不对的：用户把 `b` 删掉就是在移除这个模型，它却还留在 `models`
+    /// 里，下次打开表单（预填读的就是候选集）会冒出来，看起来像"删不掉"。
+    #[test]
+    fn removing_a_name_from_the_text_removes_it_and_its_metadata() {
+        let mut s = ProviderSettings::default();
+        s.models = Some(
+            [(
+                "b".to_string(),
+                ModelConfig {
+                    context_window: Some(128_000),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        s.selected_model = Some("a".to_string());
+
+        // 这次文本里没有 b 了。
+        s.set_candidate_models_from_text("a, c");
+
+        let models = s.models.as_ref().expect("models 键必须仍在");
+        assert!(
+            !models.contains_key("b"),
+            "已从文本里删除的 b 必须连同它的 context_window 一起消失"
+        );
+        assert!(models.contains_key("c"));
+        assert_eq!(s.candidate_models(), vec!["a", "c"]);
+    }
+
+    /// 反向：仍在文本里的名字，元数据必须原样保住（文本框里写不出 context_window）。
+    #[test]
+    fn a_name_still_in_the_text_keeps_its_metadata() {
+        let mut s = ProviderSettings::default();
+        s.models = Some(
+            [(
+                "b".to_string(),
+                ModelConfig {
+                    context_window: Some(256_000),
+                    alias: Some(vec!["bee".to_string()]),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        s.set_candidate_models_from_text("a, b, c");
+
+        let b = &s.models.as_ref().unwrap()["b"];
+        assert_eq!(
+            b.context_window,
+            Some(256_000),
+            "手写的 context_window 不能被一次表单保存静默抹掉"
+        );
+        assert_eq!(b.alias.as_ref().unwrap(), &vec!["bee".to_string()]);
+    }
+
+    /// 回归：手动清空模型**必须能留住**，不能被 `ProviderStore::load` 的补种撤销。
+    ///
+    /// 真实事故：编辑 provider，把 Models 字段清空，保存 —— 下次打开表单又是原来的
+    /// 模型名。成因是那段补种只看 `selected_model` 是否为空，而"用户刚清空"和
+    /// "升级前没配过"在它眼里一模一样。
+    ///
+    /// 这里钉住判据：清空之后 `models` **键仍然存在**，所以补种不会误触发。
+    #[test]
+    fn clearing_the_models_field_is_distinguishable_from_a_legacy_config() {
+        let mut cleared = ProviderSettings::default();
+        cleared.set_candidate_models_from_text("a, b, c");
+        cleared.set_candidate_models_from_text("");
+        assert!(
+            cleared.models.is_some(),
+            "清空后 models 键必须仍在 —— 这正是补种逻辑的'已初始化'凭据"
+        );
+
+        // 升级前的老配置：根本没有这个键。
+        let legacy = ProviderSettings {
+            selected_model: None,
+            models: None,
+            ..Default::default()
+        };
+        assert!(
+            legacy.models.is_none(),
+            "老配置没有该键，补种逻辑据此识别并只对它生效"
+        );
     }
 
     /// 上一版把 Zen 的 gpt 规则写成 `starts_with("gpt-")`，把不推理的

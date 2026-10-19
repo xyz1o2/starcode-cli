@@ -72,6 +72,12 @@ pub struct Agent {
     /// 等列表式回退配置（单值 STAR_FALLBACK_MODEL / STAR_FALLBACK_BASE_URL 仍由
     /// agent_llm.rs 优先生效）。
     pub(crate) model_fallback: crate::agent::model_fallback::ModelFallbackManager,
+    /// 会话级日期（YYYY-MM-DD），首次 `run_stream` 时固定，之后整场会话不再变。
+    ///
+    /// 它进 system prompt，而 system 数组整体就是 Anthropic 的缓存前缀。若每轮重取
+    /// `Local::now()`，一场跨零点的会话会在 00:00 把整段前缀（约 4 万字符）按原价
+    /// 重算一次 —— 为了一行日期赔上整个缓存。空串 = 尚未固定。
+    pub(crate) session_today: String,
 }
 
 impl Agent {
@@ -147,6 +153,7 @@ impl Agent {
             context_policy,
             thinking_effort: crate::types::ThinkingEffort::default(),
             model_fallback: crate::agent::model_fallback::ModelFallbackManager::new(),
+            session_today: String::new(),
         };
         // 原生会话由启动解析器或 UI→worker RestoreSession 显式安装。
         // 不在构造期间读取旧 sidecar，避免它覆盖用户明确选择的 canonical JSON 会话。

@@ -1023,6 +1023,7 @@ pub async fn handle_stream_update(
                 }
             }
             state.awaiting_models = false;
+            state.awaiting_models_since = None;
             // 自动开面板前先确认用户没有在别处输入。
             //
             // 此前只要模型列表回来了就无条件 open_palette(Model)，会把用户正填的
@@ -1068,6 +1069,7 @@ pub async fn handle_stream_update(
         }
         StreamMessage::ModelsError(err) => {
             state.awaiting_models = false;
+            state.awaiting_models_since = None;
             state.chat_history.push(
                 ChatEntry::assistant(
                     i18n::t("ui.status.error", "Error: {error}", "Error: {error}")

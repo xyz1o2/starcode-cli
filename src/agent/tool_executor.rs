@@ -393,6 +393,8 @@ impl ToolExecutor {
         let mut requires_prompt = false;
         let mut policy_requires_confirmation = false;
         let mut approved = false;
+        // 卡片是谁要求弹的，只用于面包屑。
+        let mut card_source = "unknown";
 
         if let Some(bus) = &self.message_bus {
             let check = bus
@@ -468,13 +470,21 @@ impl ToolExecutor {
 
         let should_confirm = invocation.should_confirm_execute(abort_signal).await;
         let details = match should_confirm {
-            Ok(Some(details)) => details,
+            Ok(Some(details)) => {
+                card_source = "tool";
+                details
+            }
             // 工具自己没话说。兜底卡片只在**没有人授权过**的时候才需要：一旦策略
             // 放行、或用户已经给过会话/持久授权，就不该再弹。
             //
             // 卡片文案两种要分开：显式 ask 规则才配说 "matches an `ask` rule"，
             // 兜底 default 没有规则可指。
             Ok(None) if requires_prompt && !approved => {
+                card_source = if policy_requires_confirmation {
+                    "ask_rule"
+                } else {
+                    "fallback_default"
+                };
                 if policy_requires_confirmation {
                     policy_confirmation_details(tool_name, args)
                 } else {
@@ -485,6 +495,18 @@ impl ToolExecutor {
             Err(e) => return Gate::Closed(e.to_string()),
         };
         let on_confirm = details.on_confirm.clone();
+
+        // 每次弹框都留一条面包屑。
+        //
+        // 这条缺失让"允许本会话为什么没生效"根本查不下去：授权命中时日志里有
+        // "Allowing X without prompt"，可**弹框本身一声不吭**，于是日志里出现
+        // "刚放行过，下一个调用却又弹了"这种自相矛盾的现象，却拿不到任何证据
+        // 说明第二次到底是谁要求弹的。卡片来源（工具自己 / ask 规则 / 兜底）正是
+        // 判断依据，缺了它就只能靠猜。
+        crate::utils::logging::append_debug_log_line(&format!(
+            "🔔 Asking for approval: {} (source={}, granted={}, policy_ask={}, explicit_rule={})",
+            tool_name, card_source, approved, requires_prompt, policy_requires_confirmation
+        ));
 
         let request = ToolConfirmationRequest {
             message_type: MessageBusType::ToolConfirmationRequest,
@@ -509,6 +531,10 @@ impl ToolExecutor {
         };
 
         if !response.confirmed {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "🚫 Approval declined for {} (source={})",
+                tool_name, card_source
+            ));
             // 用户明确拒绝（含 ESC 取消）。这是一次决定，不是错误、更不是超时。
             return Gate::Closed(format!(
                 "The user declined to run `{}`. Do not retry the same call — say what you wanted \
@@ -2744,6 +2770,269 @@ mod tests {
             .expect("第二个未受信任 Edit 必须再次请求确认")
             .expect("确认响应任务失败");
         assert_eq!(file_paths, ["first.txt", "second.txt"]);
+    }
+
+    /// 端到端复现用户截图里的场景：**真的 `EditTool`** + 「允许本会话」。
+    ///
+    /// `folder_trust` 关闭（默认值），所以 `EditTool::requires_invocation_confirmation()`
+    /// 为假、`should_confirm_execute()` 返回 `Ok(None)` —— 弹出来的正是截图里那张
+    /// "`Edit` needs approval before it can run. No allow rule covers it yet."，
+    /// 也就是兜底卡片。用了合成工具的回归测试锁不住这一条：真实的 `Edit` 还带着
+    /// 参数校验、read-state 检查、`permission_cache_identity` 这些附加条件。
+    #[tokio::test]
+    async fn the_real_edit_tool_honours_allow_for_session() {
+        use crate::core::config::trusted_folders::TrustedFolders;
+        use crate::core::config::ConfigParameters;
+        use crate::core::state::GlobalState;
+        use crate::core::tools::edit::EditTool;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        std::fs::create_dir_all(temp.path().join(".star")).expect("seed project .star dir");
+        let mut params = ConfigParameters::default();
+        params.target_dir = temp.path().to_path_buf();
+        params.cwd = temp.path().to_path_buf();
+        params.folder_trust = Some(false);
+        let mut config = Config::new(params);
+        config.trusted_folders_manager = Some(
+            TrustedFolders::new_for_test(temp.path().join("trustedFolders.json"))
+                .expect("创建隔离 trust 配置失败"),
+        );
+        let config = Arc::new(config);
+
+        let file = temp.path().join("main.py");
+        std::fs::write(&file, "END\n").expect("seed target file");
+
+        let bus = Arc::new(MessageBus::new(
+            crate::core::policy::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let global_state = Arc::new(GlobalState::new());
+        let registry = Arc::new(ToolRegistry::new(config.clone()));
+        // `Edit` 要求先读过同一个文件，所以这里也得装上真的 `Read`。
+        registry.register_tool(Arc::new(crate::core::tools::read_file::ReadFileTool::new(
+            config.clone(),
+            bus.clone(),
+            global_state.clone(),
+        )));
+        registry.register_tool(Arc::new(EditTool::new(
+            config.clone(),
+            bus.clone(),
+            global_state,
+        )));
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            registry,
+            Some(bus.clone()),
+            config,
+        );
+
+        // 先读一次：只读工具在 `default` 档下自动放行，不会打扰计数。
+        let read = executor
+            .execute(
+                &StarToolCall {
+                    id: "read-1".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::types::StarToolCallFunction {
+                        name: "Read".to_string(),
+                        arguments: serde_json::json!({"file_path": file.to_string_lossy()})
+                            .to_string(),
+                    },
+                },
+                None,
+                None,
+            )
+            .await;
+        assert!(read.success, "预读失败：{:?}", read.error);
+
+        let prompts = Arc::new(AtomicUsize::new(0));
+        let _ = &prompts;
+        let responder = tokio::spawn(respond_to_each_confirmation(
+            bus.clone(),
+            vec![crate::types::ToolConfirmationOutcome::AllowSession],
+        ));
+        let counting = tokio::spawn(count_each_confirmation(bus.clone(), prompts.clone()));
+
+        let call = |id: &str| StarToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: "Edit".to_string(),
+                arguments: serde_json::json!({
+                    "file_path": file.to_string_lossy(),
+                    "old_string": "END",
+                    "new_string": format!("END\nline {id}"),
+                    "expected_replacements": 1,
+                })
+                .to_string(),
+            },
+        };
+
+        for i in 1..=3 {
+            // 每次编辑前重读一次：`Edit` 的 read-state 记的是内容，文件被自己改过
+            // 之后就失效了。只读工具自动放行，不会计进确认框。
+            let read = executor
+                .execute(
+                    &StarToolCall {
+                        id: format!("read-{i}"),
+                        call_type: "function".to_string(),
+                        function: crate::types::StarToolCallFunction {
+                            name: "Read".to_string(),
+                            arguments: serde_json::json!({"file_path": file.to_string_lossy()})
+                                .to_string(),
+                        },
+                    },
+                    None,
+                    None,
+                )
+                .await;
+            assert!(read.success, "第 {i} 次预读失败：{:?}", read.error);
+
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                executor.execute(&call(&format!("one{i}")), None, None),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("第 {i} 次调用挂住了"));
+            assert!(
+                result.success,
+                "第 {i} 次 Edit 应当成功：{:?}",
+                result.error
+            );
+        }
+        settle().await;
+        responder.abort();
+        counting.abort();
+
+        assert_eq!(
+            prompts.load(Ordering::SeqCst),
+            1,
+            "点了「允许本会话」之后，Edit 不该再弹第二次"
+        );
+    }
+
+    /// 端到端复现用户截图：`folder_trust` 打开、目录已受信任时的 `Edit`。
+    ///
+    /// 这才是那张截图的形状：`folder_trust` 打开 → `EditTool::
+    /// requires_invocation_confirmation()` 为真；目录已信任 →
+    /// `should_confirm_execute()` 返回 `Ok(None)`。于是弹出来的是兜底卡片
+    /// （"No allow rule covers it yet."），而不是"未信任目录"那张 ——
+    /// 看起来像通用批准失效了，其实是授权压根没被读。
+    ///
+    /// 修复前门禁里的 `!requires_invocation_confirmation` 把整块读授权跳过了，
+    /// 三次编辑弹三次框。
+    #[tokio::test]
+    async fn a_trusted_folder_edit_honours_allow_for_session() {
+        use crate::core::config::trusted_folders::{TrustLevel, TrustedFolders};
+        use crate::core::config::ConfigParameters;
+        use crate::core::state::GlobalState;
+        use crate::core::tools::edit::EditTool;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        std::fs::create_dir_all(temp.path().join(".star")).expect("seed project .star dir");
+        let mut params = ConfigParameters::default();
+        params.target_dir = temp.path().to_path_buf();
+        params.cwd = temp.path().to_path_buf();
+        params.folder_trust = Some(true);
+        let mut config = Config::new(params);
+        let trusted = TrustedFolders::new_for_test(temp.path().join("trustedFolders.json"))
+            .expect("创建隔离 trust 配置失败");
+        trusted
+            .set_trust_level(temp.path(), TrustLevel::TrustFolder)
+            .expect("把临时目录标为受信任");
+        config.trusted_folders_manager = Some(trusted);
+        let config = Arc::new(config);
+
+        let file = temp.path().join("main.py");
+        std::fs::write(&file, "END\n").expect("seed target file");
+
+        let bus = Arc::new(MessageBus::new(
+            crate::core::policy::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let global_state = Arc::new(GlobalState::new());
+        let registry = Arc::new(ToolRegistry::new(config.clone()));
+        registry.register_tool(Arc::new(crate::core::tools::read_file::ReadFileTool::new(
+            config.clone(),
+            bus.clone(),
+            global_state.clone(),
+        )));
+        registry.register_tool(Arc::new(EditTool::new(
+            config.clone(),
+            bus.clone(),
+            global_state,
+        )));
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            registry,
+            Some(bus.clone()),
+            config,
+        );
+
+        let prompts = Arc::new(AtomicUsize::new(0));
+        let responder = tokio::spawn(respond_to_each_confirmation(
+            bus.clone(),
+            vec![crate::types::ToolConfirmationOutcome::AllowSession],
+        ));
+        let counting = tokio::spawn(count_each_confirmation(bus.clone(), prompts.clone()));
+
+        let call = |id: &str| StarToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: "Edit".to_string(),
+                arguments: serde_json::json!({
+                    "file_path": file.to_string_lossy(),
+                    "old_string": "END",
+                    "new_string": format!("END\nline {id}"),
+                    "expected_replacements": 1,
+                })
+                .to_string(),
+            },
+        };
+
+        for i in 1..=3 {
+            let read = executor
+                .execute(
+                    &StarToolCall {
+                        id: format!("read-{i}"),
+                        call_type: "function".to_string(),
+                        function: crate::types::StarToolCallFunction {
+                            name: "Read".to_string(),
+                            arguments: serde_json::json!({"file_path": file.to_string_lossy()})
+                                .to_string(),
+                        },
+                    },
+                    None,
+                    None,
+                )
+                .await;
+            assert!(read.success, "第 {i} 次预读失败：{:?}", read.error);
+
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                executor.execute(&call(&format!("one{i}")), None, None),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("第 {i} 次调用挂住了"));
+            assert!(
+                result.success,
+                "第 {i} 次 Edit 应当成功：{:?}",
+                result.error
+            );
+        }
+        settle().await;
+        responder.abort();
+        counting.abort();
+
+        assert_eq!(
+            prompts.load(Ordering::SeqCst),
+            1,
+            "受信任目录里点了「允许本会话」，Edit 不该再弹第二次"
+        );
     }
 
     /// 回归：`ask` 规则必须真的弹窗。

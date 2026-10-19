@@ -154,6 +154,11 @@ pub async fn handle_command(
                 let seeded =
                     crate::ui::services::stream::seed_models_from_disk_cache(ctx.state, &pid);
                 ctx.state.awaiting_models = !seeded;
+                ctx.state.awaiting_models_since = if seeded {
+                    None
+                } else {
+                    Some(std::time::Instant::now())
+                };
                 ctx.state
                     .open_palette(crate::ui::state::palette::PaletteMode::Model);
                 if ctx.state.available_models.is_empty() {

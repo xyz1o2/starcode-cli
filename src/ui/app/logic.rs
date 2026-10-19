@@ -478,28 +478,41 @@ pub async fn enqueue_user_message(
             .unwrap_or(false)
     {
         state.palette_history.clear();
+        let was_already_open = state.is_palette_open()
+            && state.palette_mode == crate::ui::state::palette::PaletteMode::Model;
         state.open_palette(crate::ui::state::palette::PaletteMode::Model);
         if state.available_models.is_empty() {
             state.awaiting_models = true;
+            state.awaiting_models_since = Some(std::time::Instant::now());
             let _ = agent_tx
                 .send(AgentRequest::ListModels { force: false })
                 .await;
         }
-        state.chat_history.push(ChatEntry {
-            is_streaming: Some(false),
-            ..ChatEntry::assistant(
-                &i18n::t(
-                    "ui.provider.no_model_selected",
-                    "当前 Provider 尚未选择模型。请先选择该 Provider 的模型后再发送消息。",
-                    "No model selected for the current provider. Please select a model before sending a message.",
-                ),
-            )
-        });
+        // 已经在模型面板上、而且上一条就是这条提示时，**不要再推一条一模一样的**。
+        //
+        // 没有这个去重就会形成死循环：Esc 重发上一条 → 这里挡住并开面板 → 用户再按
+        // Esc → 再重发 → 再推一条 …… 屏幕上一排相同的 "No model selected"，而且
+        // 一次真正的问题（为什么模型是空的）被完全淹没。真实事故里这个循环转了 6 次。
+        if !was_already_open {
+            state.chat_history.push(ChatEntry {
+                is_streaming: Some(false),
+                ..ChatEntry::assistant(
+                    &i18n::t(
+                        "ui.provider.no_model_selected",
+                        "当前 Provider 尚未选择模型。请先选择该 Provider 的模型后再发送消息。",
+                        "No model selected for the current provider. Please select a model before sending a message.",
+                    ),
+                )
+            });
+        }
         state.current_status_line = Some(i18n::t(
             "ui.provider.no_model_selected.status",
             "请先选择当前 Provider 的模型",
             "Please select a model for the current provider",
         ));
+        // 清掉失败标志：这条消息不可能成功，`last_turn_failed` 再留着只会让 Esc
+        // 继续无意义地重发（每次都撞回这里）。
+        state.last_turn_failed = false;
         return Ok(());
     }
 
@@ -671,6 +684,78 @@ pub async fn enqueue_user_message(
         })
         .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod no_model_guard_tests {
+    /// 回归："没选模型"的保护不能形成死循环。
+    ///
+    /// 真实事故：apinex 余额耗尽报错 → 用户按 Esc 重发 → `current_model` 是空的
+    /// → `enqueue_user_message` 的保护代为打开模型面板并推一条 "No model
+    /// selected…" → 再按 Esc → 再重发 → 再推一条 …… 屏幕上 6 行一模一样的报错，
+    /// 而真正的问题（模型为什么是空的）被完全淹没。
+    ///
+    /// 面板已经开着、且上一条就是这条提示时，必须安静下来：不开第二次、不推第二条。
+    #[tokio::test]
+    async fn the_no_model_guard_does_not_repeat_itself() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.current_provider_id = Some("apinex".to_string());
+        state.current_model = String::new();
+        state.last_turn_failed = true;
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+
+        crate::ui::app::logic::enqueue_user_message(&mut state, "hi".to_string(), &tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .chat_history
+                .iter()
+                .filter(|e| e.content.contains("No model selected"))
+                .count(),
+            1,
+            "第一次应当推一条提示"
+        );
+        assert!(state.is_palette_open(), "第一次应当打开模型面板");
+
+        // 再来一次（模拟用户再按 Esc 重发）
+        crate::ui::app::logic::enqueue_user_message(&mut state, "hi".to_string(), &tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .chat_history
+                .iter()
+                .filter(|e| e.content.contains("No model selected"))
+                .count(),
+            1,
+            "提示不能重复推 —— 这正是那 6 行重复报错的成因"
+        );
+        assert!(
+            !state.last_turn_failed,
+            "这条消息不可能成功，别再让 Esc 重发它"
+        );
+    }
+
+    /// 选了模型时不受影响 —— 保护只针对"必然失败"这一种情况。
+    #[tokio::test]
+    async fn the_no_model_guard_does_not_fire_when_a_model_is_selected() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.current_provider_id = Some("apinex".to_string());
+        state.current_model = "free/deepseek-v4.1-flash".to_string();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+
+        crate::ui::app::logic::enqueue_user_message(&mut state, "hi".to_string(), &tx)
+            .await
+            .unwrap();
+
+        assert!(!state.is_palette_open(), "有模型时不该被劫持去开模型面板");
+        assert!(!state
+            .chat_history
+            .iter()
+            .any(|e| e.content.contains("No model selected")));
+        assert!(rx.try_recv().is_ok(), "消息应当真的被发出去");
+    }
 }
 
 #[cfg(test)]

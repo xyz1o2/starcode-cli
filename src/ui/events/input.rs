@@ -660,6 +660,11 @@ async fn submit_provider_form(
         // 所以切回以前用过的 provider 是秒开。
         let seeded = crate::ui::services::stream::seed_models_from_disk_cache(state, &provider_id);
         state.awaiting_models = !seeded;
+        state.awaiting_models_since = if seeded {
+            None
+        } else {
+            Some(std::time::Instant::now())
+        };
         let _ = agent_tx
             .send(AgentRequest::ListModels { force: false })
             .await;
@@ -689,6 +694,7 @@ async fn submit_provider_form(
             .collect();
         state.available_models_info.clear();
         state.awaiting_models = false;
+        state.awaiting_models_since = None;
         // 默认项（列表第一项）立刻生效，不用等用户再去面板点一次。
         let default_model = model_names[0].clone();
         state.current_model = default_model.clone();
@@ -723,6 +729,105 @@ fn register_configured_provider(state: &mut ChatState, provider_id: &str) {
     state
         .configured_providers
         .insert(0, provider_id.to_string());
+}
+
+/// 清空某个 provider 已保存的 API Key。
+///
+/// # 为什么必须立刻通知 worker
+///
+/// 磁盘上的 key 和运行中的 client 是两份状态。只改磁盘的话，正在跑的 client 还会
+/// 继续用旧 key 发请求 —— 用户明明点了"清空"，行为却一点没变。`UpdateProviderConfig`
+/// 的 `api_key: None` 表示"不变"，所以这里传 `Some(String::new())`：经过
+/// `normalize_api_key_value` 之后正好落成 `None`，语义就是"没有 key"。
+///
+/// # 环境变量不受影响
+///
+/// `provider_has_usable_credentials` 会回落到 `resolve_api_key_from_env`。清掉存储值
+/// 之后，如果对应环境变量还在，请求依然会带上它 —— 这是**正确**的：用户能自己决定
+/// 要不要 `unset`。状态栏必须把这件事说清楚，否则"我明明清了，怎么还认证通过"
+/// 会变成下一个查不到原因的问题。
+async fn clear_provider_key(
+    state: &mut ChatState,
+    provider_id: &str,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) {
+    let store = crate::core::config::provider_store::ProviderStore::new();
+    let mut config = match store.load().await {
+        Ok(config) => config,
+        Err(e) => {
+            crate::ui::app::logic::emit_status_text(
+                state,
+                0,
+                &format!("Error: could not read provider config: {}", e),
+            );
+            return;
+        }
+    };
+    let Some(settings) = config.providers.get_mut(provider_id) else {
+        crate::ui::app::logic::emit_status_text(
+            state,
+            0,
+            &format!(
+                "Error: provider '{}' has no stored configuration.",
+                provider_id
+            ),
+        );
+        return;
+    };
+
+    let had_key = settings
+        .api_key
+        .as_deref()
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+    settings.api_key = None;
+
+    if let Err(e) = store.save(&config).await {
+        crate::ui::app::logic::emit_status_text(
+            state,
+            0,
+            &format!("Error: Failed to clear the API key: {}", e),
+        );
+        return;
+    }
+
+    // 运行中的 client 也要换掉，否则旧 key 会一直发出去。
+    let _ = agent_tx
+        .send(AgentRequest::UpdateProviderConfig {
+            provider_id: Some(provider_id.to_string()),
+            // `None` 在这里表示"保持不变"，所以要给一个空串让它归一化成"没有 key"。
+            api_key: Some(String::new()),
+            base_url: None,
+            is_openai_compatible: None,
+            model: None,
+        })
+        .await;
+
+    // Provider 菜单上那枚"⚠ no API key"标记是现算的，重新拉一次名单让它更新。
+    let _ = agent_tx.send(AgentRequest::LoadConfiguredProviders).await;
+
+    crate::utils::logging::append_debug_log_line(&format!(
+        "[ProviderKey] Cleared the stored API key for '{}' (had one: {})",
+        provider_id, had_key
+    ));
+    crate::ui::app::logic::emit_status_text(
+        state,
+        0,
+        &format!(
+            "{}",
+            crate::core::i18n::t(
+                "provider.key_cleared",
+                &format!(
+                    "已清空 '{}' 保存的 API Key（环境变量仍可能生效）",
+                    provider_id
+                ),
+                &format!(
+                    "Cleared the stored API key for '{}' (environment variables still apply)",
+                    provider_id
+                ),
+            )
+        ),
+    );
 }
 
 /// 删除一个自定义 provider。
@@ -1035,6 +1140,14 @@ pub(crate) async fn execute_palette_action(
         }
         PaletteAction::SelectProvider(provider_id) => {
             state.available_models.clear();
+            // 列表被清空了，但模型面板**马上**就要打开（见本分支末尾的
+            // `push_palette_mode(Model)`）。不给 `awaiting_models` 置位，那个面板就会
+            // 以"空列表 + 没有加载态"的样子弹出来 —— 用户看到的是一片空白、既没有
+            // 模型可选、也没有任何说明在加载。按 Enter 挑不了任何东西，体感就是
+            // "彻底没反应"。
+            //
+            // 这条路径以前**没有**置位，而 `submit_provider_form` 那条有 —— 同一个
+            // "打开模型面板"的场景，两条路径的表现不一致。
             state.pending_model_provider = Some(provider_id.clone());
             // 切 provider 是明确意图：紧接着的第一次模型选择免 (y/n) 确认
             state.waive_next_model_confirmation = true;
@@ -1110,6 +1223,17 @@ pub(crate) async fn execute_palette_action(
                     )
                 ),
             );
+            // 先用磁盘缓存把面板填上：这个 provider 以前拉过的话，一按就是完整列表，
+            // 既不用空白闪一下，也不必等网络。缓存按 provider 分桶，切回用过的
+            // provider 是秒开。缓存为空才真的进入"加载中"。
+            let seeded =
+                crate::ui::services::stream::seed_models_from_disk_cache(state, &provider_id);
+            state.awaiting_models = !seeded;
+            state.awaiting_models_since = if seeded {
+                None
+            } else {
+                Some(std::time::Instant::now())
+            };
             state.push_palette_mode(PaletteMode::Model);
             if !state.is_palette_open() {
                 state.modal_stack.push(crate::ui::state::Modal::Palette);
@@ -1123,6 +1247,9 @@ pub(crate) async fn execute_palette_action(
         }
         PaletteAction::DeleteProvider(provider_id) => {
             delete_custom_provider(state, &provider_id, agent_tx).await;
+        }
+        PaletteAction::ClearProviderKey(provider_id) => {
+            clear_provider_key(state, &provider_id, agent_tx).await;
         }
         PaletteAction::ToggleFeature(feature) => match feature.as_str() {
             "context_viz" => {
@@ -2536,6 +2663,11 @@ pub async fn handle_key_event(
                         let seeded =
                             crate::ui::services::stream::seed_models_from_disk_cache(state, &pid);
                         state.awaiting_models = !seeded;
+                        state.awaiting_models_since = if seeded {
+                            None
+                        } else {
+                            Some(std::time::Instant::now())
+                        };
                         // Trigger model list fetch
                         if let Err(_e) = agent_tx
                             .send(AgentRequest::ListModels { force: false })
@@ -2660,7 +2792,25 @@ pub async fn handle_key_event(
             // 失败回合恰好是最需要"按一下就好"的那一刻 —— 用户刚在 `/provider`
             // 里换好 key，界面上却没有任何键能把刚才那条再发一遍，Esc 只能走到
             // 最下面的 `else { state.last_esc_at = None; }` 变成彻底的 no-op。
-            if !overlay_open && state.last_turn_failed && state.input.trim().is_empty() {
+            //
+            // 但**这次重发注定会被"没选模型"的保护挡下**时不重发。那个保护会**代为
+            // 打开模型面板**，于是 Esc → 重发 → 开面板 → Esc → 重发 → 又一条同样的
+            // 报错，循环往复，屏幕上一排相同的提示。真实事故里转了 6 次。
+            //
+            // 判据必须和 `enqueue_user_message` 里那道保护**逐字一致**：模型为空
+            // **且**有 provider。只看"模型为空"是不够的 —— 没有 provider 时那条
+            // 消息仍然发得出去，agent 能自己解析默认模型，Esc 重发照样有意义。
+            let blocked_by_no_model_guard = state.current_model.trim().is_empty()
+                && state
+                    .current_provider_id
+                    .as_deref()
+                    .map(|provider_id| !provider_id.trim().is_empty())
+                    .unwrap_or(false);
+            if !overlay_open
+                && state.last_turn_failed
+                && !blocked_by_no_model_guard
+                && state.input.trim().is_empty()
+            {
                 if retry_last_user_message(state, agent_tx).await? {
                     state.last_esc_at = None;
                     state.current_status_line = Some("Retrying last message…".to_string());
@@ -4342,6 +4492,57 @@ mod tests {
     /// `KeyContext::ModelConfirm` 被归进了"这些上下文已经在阶梯更早处被独占处理"
     /// 那一组，只 `return Ok(())` 吞键。而 Esc 的清零逻辑排在那个分支**之后**，
     /// 于是 `pending_model_confirmation` 永远为 true。
+    /// 回归：Esc 不得把用户送进"重发 → 开模型面板 → 再重发"的死循环。
+    ///
+    /// 真实事故：apinex 余额耗尽报错 → Esc 重发 → `current_model` 为空 →
+    /// `enqueue_user_message` 的保护代为打开模型面板并再推一条 "No model
+    /// selected…" → 再按 Esc → 再重发 → 再推一条 …… 屏幕上 6 行一模一样的报错，
+    /// 而真正的原因（模型为什么是空的）被完全淹没。
+    ///
+    /// 这种状态下 Esc **不该**重发：这次重发注定撞回同一道墙。让错误浮层或模型面板
+    /// 说话，比反复撞墙有用。
+    #[tokio::test]
+    async fn esc_does_not_resend_into_the_no_model_guard() {
+        let mut state = ChatState::new();
+        let (tx, mut rx) = mpsc::channel(16);
+        state.current_provider_id = Some("apinex".to_string());
+        state.current_model = String::new();
+        state.last_turn_failed = true;
+        state.chat_history.push(crate::types::ChatEntry::user("hi"));
+
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        handle_key_event(&mut state, esc, &tx, None).await.unwrap();
+
+        assert!(
+            rx.try_recv().is_err(),
+            "注定被'没选模型'挡下的重发不该发出去 —— 那正是死循环的来源"
+        );
+        assert!(
+            !state.is_palette_open(),
+            "Esc 不该替用户打开模型面板；该由错误浮层说话"
+        );
+    }
+
+    /// 反向：没有 provider 时，"模型为空"不代表重发没意义 —— agent 仍能自己解析
+    /// 默认模型。判据必须和那道保护**逐字一致**，不能只看模型名是否为空。
+    #[tokio::test]
+    async fn esc_still_resends_when_there_is_no_provider_to_block_it() {
+        let mut state = ChatState::new();
+        let (tx, mut rx) = mpsc::channel(16);
+        state.current_provider_id = None;
+        state.current_model = String::new();
+        state.last_turn_failed = true;
+        state.chat_history.push(crate::types::ChatEntry::user("hi"));
+
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        handle_key_event(&mut state, esc, &tx, None).await.unwrap();
+
+        assert!(
+            matches!(rx.try_recv(), Ok(AgentRequest::SendMessage { .. })),
+            "没有 provider 时重发仍然有意义，必须照发"
+        );
+    }
+
     #[tokio::test]
     async fn a_pending_model_confirmation_is_answered_by_pressing_y() {
         let mut state = ChatState::new();

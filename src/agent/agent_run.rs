@@ -219,7 +219,6 @@ impl Agent {
             let include_extended_bundle =
                 crate::agent::prompt_builder::PromptBuilder::include_extended_bundle_for_history_len(history_len);
             let cwd_str = cwd.to_string_lossy().to_string();
-            let selected_names = initial_tool_selection.selected_names.clone();
             let dynamic_ctx = dynamic_context;
             // 每轮都会变的两样（复杂度提示 + 检索到的动态上下文）不再进 system prompt，
             // 而是挂到当轮 user 消息上。system 数组整体就是 Anthropic 的缓存前缀
@@ -229,9 +228,13 @@ impl Agent {
                 dynamic_ctx.as_deref(),
                 complexity_hint.as_deref(),
             );
-            // Fix date string at session start to ensure deterministic serialization
-            // for LLM prompt caching. The date should not change between turns.
-            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            // 日期在会话第一条用户消息时固定一次，之后整场会话复用。
+            // 每轮重取 `Local::now()` 会让跨零点的会话白白重建一次整个缓存前缀
+            // —— 为了 system prompt 里的一行日期赔上约 4 万字符的缓存。
+            if self.session_today.is_empty() {
+                self.session_today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            }
+            let today = self.session_today.clone();
             let output_style_clone = output_style.clone();
             let cached_system_msgs = tokio::task::spawn_blocking(move || {
                 crate::agent::prompt_builder::PromptBuilder::build_cached_system_messages(
@@ -239,7 +242,6 @@ impl Agent {
                     &today,
                     std::env::consts::OS,
                     &cwd_str,
-                    Some(&selected_names),
                     None,
                     None,
                     is_thinking_model,

@@ -41,6 +41,58 @@ const ACTIVE_FETCH_TIMEOUT_SECS: u64 = 8;
 /// 其余 provider 并发拉取的超时（仅显式刷新时用到）。
 const OTHER_FETCH_TIMEOUT_SECS: u64 = 3;
 
+/// 整条"拉一次模型列表"的硬上限（含读配置、缓存、落盘）。
+///
+/// `active_fetch_timeout()` 只罩住了 `/models` 那一次网络请求。围绕它的还有
+/// `ProviderStore::load()`（读 user-settings.json + 从 cwd 往上找项目级覆盖）、
+/// 上下文窗口缓存灌盘、模型列表落盘 —— 那些**都没有超时**。在 WSL 的 `/mnt/h`
+/// 上任何一次文件 I/O 卡住，整条链路就永远不返回，UI 的模型面板就一直转圈。
+///
+/// 所以要有这个上限：超时后走 `stale_snapshot_for`，把磁盘缓存里那份交回去，
+/// 面板照样有东西看。宁可显示一份旧列表，也不要让用户对着转圈等。
+const WHOLE_LIST_TIMEOUT_SECS: u64 = 20;
+
+/// 同 [`WHOLE_LIST_TIMEOUT_SECS`]，可用环境变量调小以便排查。
+pub fn whole_list_timeout() -> Duration {
+    let secs = std::env::var("STAR_MODEL_LIST_WHOLE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(WHOLE_LIST_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// 超时兜底：从磁盘缓存里翻出这个 provider 上次成功拉到的列表。
+///
+/// 这是"降级"而不是"报错" —— 磁盘缓存刻意不设过期（见模块说明），所以哪怕是
+/// 几天前的列表，对"面板里现在该有哪些模型"这个问题也仍然有参考价值，远好过
+/// 一个转不掉的圈。拿不到返回空列表，调用方会显示"拉取失败"。
+pub fn stale_snapshot_for(client: &crate::llm::client::StarClient) -> ModelListResult {
+    let provider_id = client
+        .provider_id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| detect_provider_name(&client.base_url));
+    match crate::agent::model_cache::load(&provider_id) {
+        Some(hit) => {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[ListModels] Serving {} cached models for '{}' after the deadline",
+                hit.models.len(),
+                provider_id
+            ));
+            ModelListResult {
+                models: hit.models,
+                // 标成"有缓存年龄"而不是"刚拉的" —— 用户要能看出这不是最新结果。
+                cache_age_secs: Some(hit.age_secs),
+            }
+        }
+        None => ModelListResult {
+            models: Vec::new(),
+            cache_age_secs: None,
+        },
+    }
+}
+
 fn active_fetch_timeout() -> Duration {
     let secs = std::env::var("STAR_MODEL_LIST_TIMEOUT_SECS")
         .ok()
@@ -58,9 +110,24 @@ pub struct ModelListResult {
 }
 
 /// 获取缓存的模型列表
+///
+/// # 为什么是 `try_read` 而不是 `read`
+///
+/// 这是 `list_models_with_mode` 里**紧跟着 `provider-store-load` 打点之后的第一句**，
+/// 所以它一旦阻塞，后面所有日志点（包括那个 20 秒兜底）全部哑掉。
+///
+/// `read()` 是阻塞式的：只要有别的任务正持有写锁而它自己又卡住了，这里就把整个
+/// tokio worker 线程 park 住 —— 线程一被 park，`tokio::time::timeout` 的定时器就没人
+/// poll，于是外层兜底**跟着一起失效**，模型面板永远转圈。
+///
+/// 真实事故：日志停在 `step 'provider-store-load' done in 107µs` 之后再无下文，
+/// 连 `[ModelCache] disk hit` 都没打出来 —— 说明卡在"去读缓存"这一步本身。
+///
+/// `try_read` 拿不到就当作"没命中"，继续往下走真实拉取。缓存本来就是加速手段，
+/// 拿不到只慢一点，绝不能把界面挂住。
 fn get_cached_models(provider_id: &str) -> Option<(Vec<ModelInfo>, u64)> {
     let cache_lock = MODEL_CACHE.get_or_init(|| RwLock::new(None));
-    let cache = cache_lock.read().ok()?;
+    let cache = cache_lock.try_read().ok()?;
     let cached = cache.as_ref()?;
 
     // 检查缓存是否有效（同一 provider 且未过期）
@@ -146,8 +213,43 @@ pub async fn list_models_with_mode(
     ));
 
     // providers.json 只读一次：原来这里前后 load 了三四遍。
+    //
+    // 从这里开始的每一段都打点。整条链路的硬上限在 `whole_list_timeout`，但只靠
+    // 上限只能知道"卡了"，不知道卡在哪 —— 真实事故里日志停在 `Client state`
+    // 之后 70 多秒没有下文，只能靠猜到底是网络、配置读盘还是落盘。有了点号，
+    // 下一次再卡，日志会直接指认是第几步。
+    let step_start = std::time::Instant::now();
+    let mark = |what: &str| {
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[ListModels] step '{}' done in {:?}",
+            what,
+            step_start.elapsed()
+        ));
+    };
     let store = crate::core::config::provider_store::ProviderStore::new();
     let config = store.load().await.ok();
+    mark("provider-store-load");
+
+    // 一次全量清扫：把**所有**已删除 provider 留下的桶删掉。
+    //
+    // 只在"读当前 provider 的桶"时顺手清那一个是不够的 —— 没被访问到的桶永远清不到。
+    // 实测现场：配置里只有 `local` + `opencode`，缓存里却躺着 `apinex` / `dev` /
+    // `magpie` 三个孤儿桶（`dev` 和 `local` 模型数一样，是改名时留下的）。它们的模型
+    // 会混进模型面板，用户看到一个自己早就删掉、面板里也找不到的 provider 名。
+    //
+    // 每次拉列表都扫一遍很便宜（就是个 HashMap 的 keys 过滤），换"残留永远不存在"。
+    {
+        let mut live: std::collections::HashSet<String> = config
+            .as_ref()
+            .map(|config| config.providers.keys().cloned().collect())
+            .unwrap_or_default();
+        live.extend(
+            crate::core::config::providers::ALL_PROVIDERS
+                .iter()
+                .map(|p| p.id.to_string()),
+        );
+        crate::agent::model_cache::purge_orphans(&live);
+    }
     let current_provider_id = star_client
         .provider_id
         .clone()
@@ -156,30 +258,101 @@ pub async fn list_models_with_mode(
         .unwrap_or_default();
 
     // 1. 便宜路径：先内存缓存，再磁盘缓存，命中就直接返回，一个网络请求都不发。
+    //
+    // 两条命中路径都必须先确认**这个 provider 还存在**。缓存的寿命和 provider 是
+    // 脱钩的，而 `current_provider_id` 可能还指着一个早已删除的 id —— 于是模型面板
+    // 会端出一整组属于已删除 provider 的模型，而 Providers 面板里根本找不到它，
+    // 两个面板对不上。详见磁盘缓存那条分支里的说明。
     if !force {
-        if let Some((cached_models, age)) = get_cached_models(&current_provider_id) {
+        let provider_still_exists = config
+            .as_ref()
+            .map(|config| {
+                let is_builtin =
+                    crate::core::config::providers::get_provider_by_id(&current_provider_id)
+                        .is_some();
+                // 判据必须和 Providers 面板逐字一致，也就是 `provider_is_configured`。
+                //
+                // 单看 `providers` 里有没有这一项不够：自定义 provider 只要 key 和
+                // URL 都被清空，`provider_is_configured` 就判它"未配置"，面板里已经
+                // 看不见了 —— 可配置项和磁盘缓存桶都还在，模型面板照端不误，用户面对
+                // 一个找不到也删不掉的 provider 名。
+                is_builtin
+                    || config
+                        .providers
+                        .get(&current_provider_id)
+                        .map(|settings| {
+                            crate::core::config::providers::provider_is_configured(
+                                &current_provider_id,
+                                Some(settings),
+                                config.active_provider_id.as_deref(),
+                            )
+                        })
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false);
+
+        if !provider_still_exists
+            && (!current_provider_id.is_empty())
+            && (get_cached_models(&current_provider_id).is_some()
+                || crate::agent::model_cache::load(&current_provider_id).is_some())
+        {
             crate::utils::logging::append_debug_log_line(&format!(
-                "[ListModels] Using in-memory cache for provider '{}', count={}",
-                current_provider_id,
-                cached_models.len()
+                "[ListModels] Discarding cached models for '{}': that provider no longer exists",
+                current_provider_id
             ));
-            return Ok(ModelListResult {
-                models: cached_models,
-                cache_age_secs: Some(age),
-            });
+            crate::agent::model_cache::purge(&current_provider_id);
+            clear_model_cache();
+        }
+
+        if provider_still_exists {
+            if let Some((cached_models, age)) = get_cached_models(&current_provider_id) {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[ListModels] Using in-memory cache for provider '{}', count={}",
+                    current_provider_id,
+                    cached_models.len()
+                ));
+                return Ok(ModelListResult {
+                    models: cached_models,
+                    cache_age_secs: Some(age),
+                });
+            }
         }
 
         if let Some(hit) = crate::agent::model_cache::load(&current_provider_id) {
-            // 顺手把内存缓存和上下文窗口缓存热起来，后面的状态栏/压缩逻辑都要用。
-            crate::agent::model_catalog::update_context_window_cache(
-                Some(current_provider_id.as_str()),
-                &hit.models,
-            );
-            set_cached_models(current_provider_id.clone(), hit.models.clone());
-            return Ok(ModelListResult {
-                models: hit.models,
-                cache_age_secs: Some(hit.age_secs),
-            });
+            // 桶里还留着，但**这个 provider 可能早就被删了**。
+            //
+            // 磁盘缓存的寿命和 provider 是脱钩的：删掉 provider 时程序不一定会顺手
+            // 删桶，外部工具直接改配置同样留残留。`current_provider_id` 又可能还指着
+            // 那个已删除的 id，于是模型面板照着桶把一整个已删除 provider 的模型全端
+            // 出来，而 Providers 面板（数据来自 `configured_providers`，已按配置过滤）
+            // 里根本找不到它 —— **两个面板对不上**。
+            //
+            // 真实事故：用户早就删掉了 `astrdark`，模型面板里却还挂着 36 个
+            // `Provider: astrdark` 的模型。
+            //
+            // 这里把桶清掉并继续往下走（走真实拉取），宁可"没有列表"也不要端一份
+            // 属于已删除 provider 的幽灵数据。
+            let still_exists = provider_still_exists;
+            if !still_exists {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[ListModels] Dropping cached models for '{}': that provider no longer exists",
+                    current_provider_id
+                ));
+                crate::agent::model_cache::purge(&current_provider_id);
+                // 内存那份同样作废，否则下一次 force=false 还会命中它。
+                clear_model_cache();
+            } else {
+                // 顺手把内存缓存和上下文窗口缓存热起来，后面的状态栏/压缩逻辑都要用。
+                crate::agent::model_catalog::update_context_window_cache(
+                    Some(current_provider_id.as_str()),
+                    &hit.models,
+                );
+                set_cached_models(current_provider_id.clone(), hit.models.clone());
+                return Ok(ModelListResult {
+                    models: hit.models,
+                    cache_age_secs: Some(hit.age_secs),
+                });
+            }
         }
     }
 
@@ -216,6 +389,7 @@ pub async fn list_models_with_mode(
             fetch_with_timeout(star_client).await
         }
     };
+    mark("active-provider-fetch");
 
     match list_result {
         Ok(mut remote_models) => {
@@ -427,15 +601,45 @@ pub async fn list_models_with_mode(
     //    顺序调过来之后，缓存里只可能有真拉回来的模型；下次命中缓存也就不会再带出
     //    假条目。
     crate::agent::model_catalog::update_context_window_cache(Some(provider_id.as_str()), &models);
+    mark("context-window-cache");
     if !models.is_empty() {
         set_cached_models(provider_id.clone(), models.clone());
-        crate::agent::model_cache::save(&provider_id, &models);
-        crate::utils::logging::append_debug_log_line(&format!(
-            "[ListModels] Cached {} models for provider '{}'",
-            models.len(),
-            provider_id
-        ));
+
+        // 不变量：**缓存桶只能为配置里真实存在的 provider 存在。**
+        //
+        // 只在读的一侧清扫孤儿是不够的 —— 写的一侧从不检查，于是"某个东西自认为当前
+        // provider 是 X"就会把 X 的桶写回去，删掉也会再回来。实测：`user-settings.json`
+        // 里只有 `local` + `opencode`，缓存里却坐着 `apinex` / `dev` / `magpie`，删干净
+        // 重启后又冒出 `astrdark`。
+        //
+        // `provider_id` 来自 `active_pid_for_list` / client / `detect_provider_name`
+        // 三处回退，其中 client 那条可能带着会话恢复时的旧 id。所以这里必须以配置为
+        // 准：配置里没有的 provider，不给它留桶。命中不了就只写内存缓存（进程内，
+        // 活不过本次会话）。
+        let may_persist = config
+            .as_ref()
+            .map(|config| {
+                crate::core::config::providers::get_provider_by_id(&provider_id).is_some()
+                    || config.providers.contains_key(&provider_id)
+            })
+            .unwrap_or(false);
+
+        if may_persist {
+            crate::agent::model_cache::save(&provider_id, &models);
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[ListModels] Cached {} models for provider '{}'",
+                models.len(),
+                provider_id
+            ));
+        } else {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[ListModels] Refusing to persist models for '{}': not in the provider config \
+                 (in-memory cache only; the list is still returned)",
+                provider_id
+            ));
+        }
     }
+    mark("model-cache-disk-write");
 
     // 6. 缓存落盘之后，才补当前模型 —— 只影响这一份返回给 UI 的列表。
     match synthesize_current_model_entry(&models, &current, &current_provider) {

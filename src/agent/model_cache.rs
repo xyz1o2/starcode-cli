@@ -273,6 +273,78 @@ pub fn purge(provider_id: &str) {
     purge_from(&cache_path(), provider_id);
 }
 
+/// 删掉**所有**不在 `live_providers` 里的桶，返回被删掉的 id。
+///
+/// # 为什么不能只查当前 provider 的桶
+///
+/// 之前只在"要读当前 provider 的缓存"时顺手清那一个桶。问题是**没被访问到的桶永远
+/// 清不到**：`current_provider_id` 是 `local`，那 `apinex` / `dev` / `magpie` 三个桶
+/// 就一直躺着。它们的模型会通过 provider 归属混进模型面板，用户看到一个自己早就
+/// 删掉、面板里也找不到的 provider 名。
+///
+/// 实测过的一个完整残留现场（`user-settings.json` 只有 `local` + `opencode`，缓存里
+/// 却有 5 个桶）：
+///
+/// ```
+/// [ORPHAN] apinex  132 models
+/// [ORPHAN] dev     158 models
+/// [ORPHAN] magpie   88 models
+/// [OK    ] local   158 models
+/// [OK    ] opencode 84 models
+/// ```
+///
+/// `dev` 和 `local` 模型数一模一样 —— 那是把 `dev` 改名成 `local` 时留下的旧桶。
+/// 所以这里做一次**全量清扫**，而不是逐个去碰。
+///
+/// `live_providers` 应包含内建 provider（它们可能根本没被配置过，只是列在
+/// `ALL_PROVIDERS` 里），调用方负责把两者并起来。
+pub fn purge_orphans_from(path: &Path, live_providers: &HashSet<String>) -> Vec<String> {
+    let mut cache = read_all(path);
+    if cache.providers.is_empty() {
+        return Vec::new();
+    }
+    let orphans: Vec<String> = cache
+        .providers
+        .keys()
+        .filter(|id| id.as_str() != DEFAULT_BUCKET && !live_providers.contains(id.as_str()))
+        .cloned()
+        .collect();
+    if orphans.is_empty() {
+        return Vec::new();
+    }
+    for id in &orphans {
+        cache.providers.remove(id);
+    }
+    let serialized = match serde_json::to_string_pretty(&cache) {
+        Ok(json) => json,
+        Err(e) => {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[ModelCache] could not serialise cache while purging orphans: {}",
+                e
+            ));
+            return Vec::new();
+        }
+    };
+    if let Err(e) = std::fs::write(path, serialized) {
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[ModelCache] failed to purge orphan buckets {:?}: {}",
+            orphans, e
+        ));
+        return Vec::new();
+    }
+    crate::utils::logging::append_debug_log_line(&format!(
+        "[ModelCache] purged {} orphan bucket(s) for removed providers: {:?}",
+        orphans.len(),
+        orphans
+    ));
+    orphans
+}
+
+/// 同 [`purge_orphans_from`]，但路径取默认的缓存文件。
+pub fn purge_orphans(live_providers: &HashSet<String>) -> Vec<String> {
+    purge_orphans_from(&cache_path(), live_providers)
+}
+
 /// 删除整个缓存文件（`/model` 的显式刷新不需要它，留给排查问题时用）。
 pub fn clear() {
     let path = cache_path();
@@ -504,6 +576,60 @@ mod tests {
             Some("yunjunet"),
             "preferred 指向已删除 provider 时不能把它顶上来"
         );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 全量清扫必须把**所有**孤儿桶一次清掉 —— 只查当前 provider 那一个是不够的。
+    ///
+    /// 实测现场：`user-settings.json` 只有 `local` + `opencode`，缓存里却坐着
+    /// `apinex` / `dev` / `magpie` 三个桶。而 `current_provider_id` 是 `local`，那三个
+    /// 永远不会被访问到，也就永远清不掉。
+    #[test]
+    fn purge_orphans_removes_every_bucket_not_in_the_live_set() {
+        let path = temp_path("purge-orphans");
+        let _ = std::fs::remove_file(&path);
+
+        for id in ["local", "opencode", "apinex", "dev", "magpie", "astrdark"] {
+            save_to(&path, id, &[ModelInfo::new("some-model", id)]).unwrap();
+        }
+
+        let live: HashSet<String> = ["local".to_string(), "opencode".to_string()]
+            .into_iter()
+            .collect();
+        let removed = purge_orphans_from(&path, &live);
+
+        assert_eq!(
+            removed.len(),
+            4,
+            "四个不属于任何存活 provider 的桶都该被清掉，实际清掉 {removed:?}"
+        );
+        assert!(load_from(&path, "local").is_some(), "local 必须留下");
+        assert!(load_from(&path, "opencode").is_some(), "opencode 必须留下");
+        for gone in ["apinex", "dev", "magpie", "astrdark"] {
+            assert!(
+                load_from(&path, gone).is_none(),
+                "{gone} 是孤儿桶，必须消失"
+            );
+        }
+
+        // 再跑一次应当是空操作（幂等）。
+        assert!(purge_orphans_from(&path, &live).is_empty());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 内建 provider 的桶不能被当成孤儿 —— 它们可能压根没进过配置。
+    #[test]
+    fn purge_orphans_keeps_builtin_buckets_when_the_caller_lists_them_as_live() {
+        let path = temp_path("purge-orphans-builtin");
+        let _ = std::fs::remove_file(&path);
+        save_to(&path, "opencode", &[ModelInfo::new("m", "opencode")]).unwrap();
+
+        // 调用方把内建 id 并进 live 集合 —— 这正是 `list_models_with_mode` 的做法。
+        let live: HashSet<String> = ["opencode".to_string()].into_iter().collect();
+        assert!(purge_orphans_from(&path, &live).is_empty());
+        assert!(load_from(&path, "opencode").is_some());
 
         let _ = std::fs::remove_file(&path);
     }

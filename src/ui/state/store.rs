@@ -439,6 +439,9 @@ impl AgentTaskInfo {
     }
 }
 
+/// 模型列表"还在拉"的最长时间。见 [`ChatState::models_loading`]。
+pub const MODELS_LOADING_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
+
 pub struct ChatState {
     pub chat_history: Vec<ChatEntry>,
     pub input: String,
@@ -544,6 +547,16 @@ pub struct ChatState {
     pub message_start_indices: HashMap<u64, usize>,
     pub active_message_id: Option<u64>,
     pub awaiting_models: bool,
+    /// `awaiting_models` 是在**什么时候**被置位的。
+    ///
+    /// 存在的唯一理由是给这个标志加一个上限。`awaiting_models` 只有收到
+    /// `ModelsList` / `ModelsError` 才会被清掉，而那两条消息由 worker 里一个
+    /// `tokio::spawn` 发出 —— 那个 future 一旦 panic，spawn 的 JoinHandle 没人管，
+    /// **一条消息都不会发出去**，标志就永远停在 true，模型面板的转圈也就永远
+    /// 不停（用户截图里那个 `◎ …`）。
+    ///
+    /// 所以它不能是个裸 bool：得能问"等够久了吗"。见 `models_loading`。
+    pub awaiting_models_since: Option<Instant>,
     /// `available_models` 里那份列表是**什么时候从 API 拉下来的**（可能是上一个进程
     /// 拉的 —— 磁盘缓存见 `agent::model_cache`）。模型面板用它显示"多久之前拉的"。
     ///
@@ -925,6 +938,25 @@ impl ChatState {
         Self::with_git_info(None)
     }
 
+    /// 模型列表现在**还**在拉吗？
+    ///
+    /// 超过 [`MODELS_LOADING_DEADLINE`] 就算是"没在拉了"，不管标志本身是不是还挂着。
+    /// 宁可提前显示一个空列表 + 一句错误，也不要让转圈永远停不下来 —— 后者让
+    /// 整个面板看上去卡死，而且用户没有任何办法从中恢复。
+    ///
+    /// 上限取 15s：worker 侧活动 provider 的拉取上限是 8s、其余 provider 各 3s
+    /// 并发扇出，都留有余量；真的超了就是 worker 那边出问题了，那本来就该显示错误。
+    pub fn models_loading(&self) -> bool {
+        if !self.awaiting_models {
+            return false;
+        }
+        match self.awaiting_models_since {
+            // 超时了就当作没在拉 —— 宁可显示空列表 + 错误，也不要让转圈停不下来。
+            Some(since) if since.elapsed() >= MODELS_LOADING_DEADLINE => false,
+            _ => true,
+        }
+    }
+
     /// 全部仍然算数的 provider id：自定义的（`configured_providers`，由 worker 从
     /// 配置同步过来）+ 内建的。
     ///
@@ -1181,6 +1213,7 @@ impl ChatState {
             message_start_indices: HashMap::new(),
             active_message_id: None,
             awaiting_models: false,
+            awaiting_models_since: None,
             models_listed_at: None,
             models_list_age_at_set: 0,
             mcp_ready: false,
@@ -1784,6 +1817,59 @@ impl ChatState {
 
 #[cfg(test)]
 mod tests {
+    /// 回归：模型列表的"正在拉"状态**不能**永远挂着。
+    ///
+    /// 真实事故（用户截图里那个转不掉的 `◎ …`）：日志里只留下一条
+    /// `[ListModels] Client state: …` 就再没有后续，worker 那个 spawn 什么消息都
+    /// 没发出来，于是 `awaiting_models` 永远停在 true，模型面板的转圈也就永远
+    /// 停不下来 —— 用户没有任何办法从中恢复。
+    ///
+    /// UI 侧现在靠 `models_loading()` 的上限兜底：宁可显示空列表 + 错误。
+    #[test]
+    fn a_lost_reply_cannot_latch_the_loading_state_forever() {
+        let mut state = ChatState::new();
+        assert!(!state.models_loading());
+
+        state.awaiting_models = true;
+        state.awaiting_models_since = Some(std::time::Instant::now());
+        assert!(state.models_loading(), "刚置位时当然还在拉");
+
+        // 模拟"回复丢了 + 时间过去了"：把起点往回拨，绕过真实等待。
+        state.awaiting_models_since = Some(std::time::Instant::now() - MODELS_LOADING_DEADLINE);
+        assert!(
+            !state.models_loading(),
+            "超过上限后必须判定为不再等待，否则转圈停不下来"
+        );
+    }
+
+    /// 没记时刻时按"仍在拉"处理 —— 否则旧代码路径里直接置位的地方会误判。
+    #[test]
+    fn a_loading_flag_without_a_timestamp_still_counts_as_loading() {
+        let mut state = ChatState::new();
+        state.awaiting_models = true;
+        state.awaiting_models_since = None;
+        assert!(state.models_loading());
+    }
+
+    /// 收到回复后必须立刻不再转圈 —— 上限只是兜底，不是延后。
+    #[test]
+    fn a_reply_clears_the_loading_state_immediately() {
+        let mut state = ChatState::new();
+        state.awaiting_models = true;
+        state.awaiting_models_since = Some(std::time::Instant::now());
+        state.awaiting_models = false;
+        state.awaiting_models_since = None;
+        assert!(!state.models_loading());
+    }
+
+    /// 标志没置位时，无论时刻是什么都不该转圈。
+    #[test]
+    fn no_flag_means_not_loading_even_with_a_stale_timestamp() {
+        let mut state = ChatState::new();
+        state.awaiting_models = false;
+        state.awaiting_models_since = Some(std::time::Instant::now() - MODELS_LOADING_DEADLINE);
+        assert!(!state.models_loading());
+    }
     use super::*;
     use crate::types::{ChatEntry, ChatEntryType};
 

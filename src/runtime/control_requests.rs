@@ -3,6 +3,8 @@ use crate::runtime::messages::{
     AgentRequest, PendingCheckpointAction, RuntimeSettingsMutation, StreamMessage, StreamStartKind,
 };
 use crate::utils::logging::append_debug_log_line;
+use futures::FutureExt;
+use std::panic::AssertUnwindSafe;
 use tokio::sync::mpsc;
 
 pub async fn handle_request(
@@ -54,9 +56,51 @@ pub async fn handle_request(
             // 放到后台任务，主循环立即继续处理后续请求。
             let client = agent.client.clone();
             let tx = tx.clone();
+            // 这个 spawn 的结果**必须**回到 UI —— `awaiting_models` 只在收到
+            // `ModelsList` / `ModelsError` 时清掉。所以下面必须保证任何退出路径
+            // 都发得出消息：panic 被 catch 住并补一条 `ModelsError`。
+            //
+            // 以前裸 `tokio::spawn` + `match`：future 一旦 panic，JoinHandle 没人
+            // await，**一条日志、一条消息都没有**，UI 那边 `awaiting_models` 就永远
+            // 停在 true，模型面板的转圈停不下来。真实事故：日志里出现
+            // `[ListModels] Client state: …` 却再也没有后续，而进程本身活得很好。
             tokio::spawn(async move {
-                match crate::agent::model_list::list_models_with_mode(&client, force).await {
-                    Ok(result) => {
+                // 整条链路的**硬上限**。
+                //
+                // `active_fetch_timeout()` 只罩住了 `/models` 这一次网络请求。围绕它的
+                // 还有 `ProviderStore::load()`（读 user-settings.json + 从 cwd 往上找
+                // 项目级覆盖）、上下文窗口缓存灌盘、模型列表落盘 —— 这些**都没有超时**。
+                // 在 WSL 的 `/mnt/h` 上，任何一次文件 I/O 卡住，整条链路就永远不返回：
+                // 真实事故里日志停在 `[ListModels] Client state: …` 之后 70 多秒毫无
+                // 动静，而进程本身活得好好的（`base_url=https://api.apinex.bond`，8 秒
+                // 的网络超时早该生效了，卡的是别处）。
+                //
+                // 所以把"拉一次模型列表"整体圈进一个 deadline：超时也要**带着已经拿到的
+                // 结果回去**，而不是让 UI 干等。
+                let reply = AssertUnwindSafe(async {
+                    match tokio::time::timeout(
+                        crate::agent::model_list::whole_list_timeout(),
+                        crate::agent::model_list::list_models_with_mode(&client, force),
+                    )
+                    .await
+                    {
+                        Ok(inner) => inner,
+                        Err(_) => {
+                            append_debug_log_line(&format!(
+                                "[DEBUG] Worker: ListModels exceeded the whole-request \
+                                 deadline ({}s); returning whatever was gathered",
+                                crate::agent::model_list::whole_list_timeout().as_secs()
+                            ));
+                            // 超时不是"没有结果"：把磁盘缓存里的那份交回去，面板照样
+                            // 有东西看。拿不到才让调用方去显示错误。
+                            Ok(crate::agent::model_list::stale_snapshot_for(&client))
+                        }
+                    }
+                })
+                .catch_unwind()
+                .await;
+                match reply {
+                    Ok(Ok(result)) => {
                         append_debug_log_line(&format!(
                             "[DEBUG] Worker: ListModels success, count={}, cache_age={:?}",
                             result.models.len(),
@@ -81,9 +125,20 @@ pub async fn handle_request(
                             })
                             .await;
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         append_debug_log_line(&format!("[DEBUG] Worker: ListModels failed: {}", e));
                         let _ = tx.send(StreamMessage::ModelsError(e)).await;
+                    }
+                    Err(_) => {
+                        append_debug_log_line(
+                            "[DEBUG] Worker: ListModels panicked; replying with ModelsError so \
+                             the UI stops waiting",
+                        );
+                        let _ = tx
+                            .send(StreamMessage::ModelsError(
+                                "Model list request failed unexpectedly.".to_string(),
+                            ))
+                            .await;
                     }
                 }
             });

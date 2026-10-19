@@ -95,6 +95,16 @@ pub enum PaletteAction {
     OpenProviderForm,
     /// 删除一个自定义 provider（内置 provider 不可删）
     DeleteProvider(String),
+    /// 清空某个 provider 已保存的 API Key。
+    ///
+    /// 为什么必须是独立动作、而不能靠"编辑时把 Key 留空"：留空在编辑模式里**已经有
+    /// 含义**了 —— 它是「保持原 key」（见 `submit_provider_form`），因为密钥从不往
+    /// 屏幕上画、不预填。所以没有任何输入能表达"我要清掉它"。
+    ///
+    /// 内置 provider 尤其需要：它们没有 Delete 入口（删掉整项配置没有意义），于是
+    /// "清空 key"曾经是唯一做不了的操作 —— key 过期了、想切回环境变量、或者纯粹想
+    /// 确认它到底存不存在，都只能去手改 `user-settings.json`。
+    ClearProviderKey(String),
     /// 显式刷新模型列表（跳过缓存，扇出到所有已配置 provider）
     RefreshModels,
     OpenMcpModal,    // open the unified /mcp manager modal

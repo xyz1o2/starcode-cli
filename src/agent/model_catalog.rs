@@ -79,21 +79,42 @@ pub fn get_provider_safe_context_cap(provider_id: Option<&str>, model_name: &str
 }
 
 /// 更新指定 provider 的模型上下文窗口缓存。
+///
+/// # 为什么用 `try_write` 而不是 `write`
+///
+/// 这是 `list_models_with_mode` **磁盘缓存命中路径上的第一句话**，也就是说：只要
+/// 磁盘缓存命中（它不设过期，实际等于永远命中），每次开模型面板都会走到这里。
+///
+/// 而 `write()` 是**阻塞式**的：只要有别的线程正持有同一把锁的读锁且自己卡住，
+/// 这里就把整个线程 park 住。调用方是 tokio worker 线程 —— 线程一旦被 park，
+/// `tokio::time::timeout` 的定时器就再也没人 poll，于是外层那个 20 秒兜底
+/// **也跟着失效**。真实事故：日志停在 `[ModelCache] disk hit for 'opencode'` 之后
+/// 53 秒没有任何后续，整个模型面板卡死，只能按 Esc 取消。
+///
+/// `try_write` 拿不到锁就直接跳过：这份缓存只是**预热**，丢一次毫无后果 ——
+/// 下次调用会再写一遍，而状态栏、压缩逻辑这些读者拿不到就退回到别的来源。
+/// 宁可少预热一次，也不能为了预热把用户界面挂住。
 pub fn update_context_window_cache(provider_id: Option<&str>, models: &[ModelInfo]) {
-    if let Ok(mut guard) = MODEL_CONTEXT_WINDOW_CACHE.write() {
-        let cache = guard.get_or_insert_with(HashMap::new);
-        for model in models {
-            if let Some(context_window) = model.context_window {
-                let resolved_provider = if model.provider.is_empty() {
-                    provider_id
-                } else {
-                    Some(model.provider.as_str())
-                };
-                cache.insert(
-                    ModelCapabilityKey::new(resolved_provider, &model.id),
-                    context_window,
-                );
-            }
+    // 没有任何模型带 context_window 时不必去抢那把锁。
+    if !models.iter().any(|m| m.context_window.is_some()) {
+        return;
+    }
+    let Ok(mut guard) = MODEL_CONTEXT_WINDOW_CACHE.try_write() else {
+        // 有人在读（或已经卡在读上）。跳过这次预热。
+        return;
+    };
+    let cache = guard.get_or_insert_with(HashMap::new);
+    for model in models {
+        if let Some(context_window) = model.context_window {
+            let resolved_provider = if model.provider.is_empty() {
+                provider_id
+            } else {
+                Some(model.provider.as_str())
+            };
+            cache.insert(
+                ModelCapabilityKey::new(resolved_provider, &model.id),
+                context_window,
+            );
         }
     }
 }
@@ -377,5 +398,42 @@ mod tests {
             get_provider_safe_context_cap(Some(provider), model),
             Some(16_000)
         );
+    }
+}
+
+#[cfg(test)]
+mod non_blocking_tests {
+    use super::*;
+
+    /// 回归：缓存预热**绝不能**阻塞调用方。
+    ///
+    /// 真实事故：模型面板卡死 53 秒，日志停在 `[ModelCache] disk hit for
+    /// 'opencode': 84 models` 之后毫无后续，只能按 Esc 取消。而外层那个 20 秒
+    /// 兜底也没生效 —— 因为 `write()` 把 tokio worker 线程整个 park 住了，定时器
+    /// 再没人 poll。
+    ///
+    /// 这里用一把**被故意占住的写锁**来复现那个形状：旧的 `write()` 在这里会直接
+    /// 死锁（测试超时），`try_write()` 则必须立刻返回。
+    #[test]
+    fn cache_warmup_never_blocks_even_when_the_lock_is_held() {
+        // 先占住写锁，制造"有别的线程卡在这把锁上"的局面。
+        let _held = MODEL_CONTEXT_WINDOW_CACHE.write();
+
+        let mut model = ModelInfo::new("some-model".to_string(), "some-provider".to_string());
+        model.context_window = Some(128_000);
+        let models = vec![model];
+
+        // 这一句在旧实现下会永久阻塞；现在必须立刻返回。
+        update_context_window_cache(Some("some-provider"), &models);
+    }
+
+    /// 没有模型带 context_window 时不该去抢锁 —— 一次没必要的抢锁就是一次
+    /// 潜在的等待。
+    #[test]
+    fn a_list_without_context_windows_does_not_touch_the_lock() {
+        let models = vec![ModelInfo::new("no-window".to_string(), "p".to_string())];
+        // 正常路径不能坏：能拿锁时照写不误。
+        update_context_window_cache(Some("p"), &models);
+        assert_eq!(get_cached_context_window(Some("p"), "no-window"), None);
     }
 }

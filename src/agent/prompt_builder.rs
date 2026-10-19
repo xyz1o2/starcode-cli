@@ -202,11 +202,11 @@ impl PromptFlags {
 pub struct PromptBuilder;
 
 impl PromptBuilder {
-    /// 动态加载 Prompt Bundle，支持根据工具和模式按需加载
-    fn load_selective_system_prompts(
-        mode: PromptMode,
-        active_tools: Option<&HashSet<String>>,
-    ) -> Option<String> {
+    /// 动态加载 Prompt Bundle：按模式取核心工具的使用说明。
+    ///
+    /// 刻意**不接收**当轮短名单 —— bundle 正文是 `CORE_TOOL_NAMES` 的纯函数，
+    /// 与 `active_tools` 无关，这样"发现一个新工具"才不会击穿缓存前缀。
+    fn load_selective_system_prompts(mode: PromptMode) -> Option<String> {
         let enabled = cached_system_prompts_dir_enabled();
 
         if !enabled {
@@ -216,7 +216,7 @@ impl PromptBuilder {
         let max_chars = cached_system_prompts_max_chars();
         let max_file_chars = cached_system_prompts_max_file_chars();
 
-        let cache_key = build_bundle_cache_key(mode, active_tools, max_chars, max_file_chars);
+        let cache_key = build_bundle_cache_key(mode, max_chars, max_file_chars);
         if let Some(cached) = system_prompt_bundle_cache()
             .lock()
             .expect("system prompt bundle cache lock poisoned")
@@ -371,7 +371,6 @@ impl PromptBuilder {
         today: &str,
         platform: &str,
         cwd: &str,
-        active_tools: Option<&HashSet<String>>,
         active_files: Option<&[String]>,
         project_context_override: Option<String>,
         is_thinking_model: bool,
@@ -509,7 +508,7 @@ impl PromptBuilder {
         }
 
         if include_extended_bundle {
-            if let Some(bundle) = Self::load_selective_system_prompts(mode, active_tools) {
+            if let Some(bundle) = Self::load_selective_system_prompts(mode) {
                 if !bundle.trim().is_empty() {
                     static_parts.push(bundle);
                 }
@@ -648,27 +647,15 @@ fn cached_system_prompts_max_file_chars() -> usize {
     })
 }
 
-fn build_bundle_cache_key(
-    mode: PromptMode,
-    active_tools: Option<&HashSet<String>>,
-    max_chars: usize,
-    max_file_chars: usize,
-) -> String {
-    let mut tool_names = active_tools
-        .map(|tools| {
-            tools
-                .iter()
-                .map(|tool| tool.to_lowercase())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    tool_names.sort();
-    tool_names.dedup();
-
-    format!(
-        "mode={mode:?};max_chars={max_chars};max_file_chars={max_file_chars};tools={}",
-        tool_names.join(",")
-    )
+/// Bundle 缓存 key。
+///
+/// **刻意不含 `active_tools`**：bundle 的正文由 [`PromptBuilder::core_tool_description_filenames`]
+/// 决定，而那份清单是纯函数——只看 `CORE_TOOL_NAMES`，与当轮短名单无关
+/// （见 `core_tool_description_filenames` 的注释：按短名单过滤会让"发现一个新工具"
+/// 击穿一次缓存前缀）。既然正文不随短名单变，把短名单拼进 key 就只是让每次工具
+/// 路由结果变动都白白重建一份约 2.5 万字符的字符串。
+fn build_bundle_cache_key(mode: PromptMode, max_chars: usize, max_file_chars: usize) -> String {
+    format!("mode={mode:?};max_chars={max_chars};max_file_chars={max_file_chars}")
 }
 
 fn should_skip_embedded_prompt_file(filename: &str) -> bool {

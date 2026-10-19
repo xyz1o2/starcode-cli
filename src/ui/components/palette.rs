@@ -84,7 +84,9 @@ pub fn get_items(mode: &PaletteMode, state: &ChatState) -> Vec<PaletteItem> {
         PaletteMode::Model => get_model_palette_items(
             &state.available_models,
             &state.current_model,
-            state.awaiting_models,
+            // 走 `models_loading()` 而不是裸标志：worker 那边的回复一旦丢���，
+            // 裸标志会永远停在 true，转圈停不下来。
+            state.models_loading(),
             &state.model_provider_map,
             state.models_list_age_secs(),
         ),
@@ -352,6 +354,9 @@ fn palette_action_key(action: &PaletteAction) -> String {
         PaletteAction::EditProvider(provider_id) => format!("edit_provider:{}", provider_id),
         PaletteAction::OpenProviderForm => "open_provider_form".to_string(),
         PaletteAction::DeleteProvider(provider_id) => format!("delete_provider:{}", provider_id),
+        PaletteAction::ClearProviderKey(provider_id) => {
+            format!("clear_provider_key:{}", provider_id)
+        }
         PaletteAction::RefreshModels => "refresh_models".to_string(),
         PaletteAction::OpenMcpModal => "open_mcp_modal".to_string(),
         PaletteAction::OpenMarketModal => "open_market_modal".to_string(),
@@ -1487,6 +1492,25 @@ pub fn get_provider_options_items(provider_id: &str, configured: &[String]) -> V
         action: PaletteAction::ExecuteCommand("/provider doctor".to_string()),
     });
 
+    // 清空 key 对**内置和自定义都**给。
+    //
+    // 内置 provider 没有 Delete 入口（"删掉整项配置"对它没有意义，它的配置只是
+    // key 和 URL），于是清空 key 曾是它**唯一**做不了的操作：key 过期了、想切回
+    // 环境变量、或者只是想确认它到底存不存在，都只能去手改 `user-settings.json`。
+    //
+    // 编辑表单给不了这个能力 —— 那里留空 = "保持原 key"（密钥不预填、不上屏），
+    // 任何输入都无法表达"清掉它"。所以只能是一个独立、显式的动作。
+    if is_configured {
+        items.push(PaletteItem {
+            id: format!("clear_key_{}", provider_id),
+            label: "Clear Stored API Key".to_string(),
+            description: "Forget the saved API key for this provider (env vars still apply)"
+                .to_string(),
+            category: Some("Config".to_string()),
+            action: PaletteAction::ClearProviderKey(provider_id.to_string()),
+        });
+    }
+
     // 自定义 provider 才给删除入口 —— 内置 provider 只是"未配置"，没有可删的记录。
     if metadata.is_none() {
         items.push(PaletteItem {
@@ -2552,6 +2576,65 @@ mod tests {
         assert!(
             items.iter().all(|i| !i.label.contains("no API key")),
             "凭证状态未知时不能瞎标"
+        );
+    }
+
+    /// 回归：内置 provider 必须有"清空 key"的入口。
+    ///
+    /// 它没有 Delete（"删掉整项配置"对内置没有意义，它的配置只是 key 和 URL），
+    /// 而编辑表单里留空 = "保持原 key"（密钥不预填、不上屏）。所以在这个组合下
+    /// **没有任何输入能清掉 key** —— 配错了、过期了、想切回环境变量，都只能去手改
+    /// `user-settings.json`。
+    #[test]
+    fn a_builtin_provider_still_offers_clearing_its_key() {
+        let builtin = "openai";
+        assert!(
+            get_provider_by_id(builtin).is_some(),
+            "测试前提：{builtin} 必须是内建 provider"
+        );
+        // 内建 provider 一般不在 configured 列表里；给一个 configured 的场景，
+        // 断言"有 Delete 却没有 Clear"这种不对称已经消失。
+        let configured = vec![builtin.to_string()];
+        let items = get_provider_options_items(builtin, &configured);
+        let has_clear = items
+            .iter()
+            .any(|i| matches!(i.action, PaletteAction::ClearProviderKey(ref id) if id == builtin));
+        assert!(
+            has_clear,
+            "内建 provider 必须能清空已保存的 key：{:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+    }
+
+    /// 没配置过的 provider 不必给这一项（没什么可清）。
+    #[test]
+    fn clearing_the_key_is_offered_only_when_the_provider_is_configured() {
+        let items = get_provider_options_items("some-unconfigured-gateway", &[]);
+        assert!(
+            !items
+                .iter()
+                .any(|i| matches!(i.action, PaletteAction::ClearProviderKey(_))),
+            "未配置的 provider 不该显示清空 key"
+        );
+    }
+
+    /// 自定义 provider 同样要有（它虽然能整体删掉，但"只想换 key"不必删）。
+    #[test]
+    fn a_custom_configured_provider_also_offers_clearing_its_key() {
+        let id = "my-gateway";
+        let items = get_provider_options_items(id, &[id.to_string()]);
+        assert!(items
+            .iter()
+            .any(|i| matches!(i.action, PaletteAction::ClearProviderKey(ref x) if x == id)));
+    }
+
+    /// 清空 key 不能和"删除 provider"撞成同一个去重键。
+    #[test]
+    fn clearing_and_deleting_are_distinct_actions() {
+        let id = "my-gateway";
+        assert_ne!(
+            palette_action_key(&PaletteAction::ClearProviderKey(id.to_string())),
+            palette_action_key(&PaletteAction::DeleteProvider(id.to_string())),
         );
     }
 
