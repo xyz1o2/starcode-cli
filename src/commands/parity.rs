@@ -231,6 +231,132 @@ pub async fn env(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResu
     Ok(())
 }
 
+/// Parse the token budget accepted by `/autocompact` (`200k`, `1m`, `500000`).
+fn parse_autocompact_tokens(raw: &str) -> Result<usize, String> {
+    let lower = raw.trim().to_ascii_lowercase();
+    let without_unit = lower.strip_suffix("tokens").unwrap_or(&lower).trim();
+    let cleaned = without_unit.replace(',', "").replace('_', "");
+
+    let (number, multiplier) = if let Some(number) = cleaned.strip_suffix('k') {
+        (number, 1_000f64)
+    } else if let Some(number) = cleaned.strip_suffix('m') {
+        (number, 1_000_000f64)
+    } else {
+        (cleaned.as_str(), 1f64)
+    };
+
+    let value = number
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| "Expected a token count such as `200k`, `1m`, or `500000`.".to_string())?;
+    if !value.is_finite() || value <= 0.0 {
+        return Err("Token count must be a positive number.".to_string());
+    }
+
+    let tokens = value * multiplier;
+    if !tokens.is_finite() || tokens < 10_000.0 {
+        return Err("Auto-compact needs at least 10,000 tokens.".to_string());
+    }
+    if tokens > 10_000_000.0 {
+        return Err("Token count is unreasonably large (maximum 10,000,000).".to_string());
+    }
+    Ok(tokens.round() as usize)
+}
+
+fn format_token_count(tokens: usize) -> String {
+    let digits = tokens.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(character);
+    }
+    out
+}
+
+/// `/autocompact [auto|on|off|<tokens>]` — control the automatic compaction
+/// threshold. Values are stored in the self-tuning overlay, which the compact
+/// manager reads on the next loop iteration, so no restart is needed.
+pub async fn autocompact(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    use crate::core::self_tuning::{overrides, ValueSource};
+
+    if args.is_empty() {
+        let enabled = crate::agent::context::auto_compact_enabled();
+        let (raw_threshold, source) = overrides::resolve("compact.max_tokens");
+        let threshold = match source {
+            ValueSource::SelfTuned => raw_threshold
+                .as_deref()
+                .and_then(|value| value.parse::<usize>().ok())
+                .map(|tokens| {
+                    format!(
+                        "{} tokens (set by `/autocompact`)",
+                        format_token_count(tokens)
+                    )
+                })
+                .unwrap_or_else(|| "invalid override".to_string()),
+            ValueSource::Environment => raw_threshold
+                .as_deref()
+                .map(|value| format!("{} tokens (`STAR_COMPACT_MAX_TOKENS`)", value))
+                .unwrap_or_else(|| "environment override".to_string()),
+            ValueSource::Default => "model context policy (auto)".to_string(),
+        };
+
+        push_msg(
+            &mut ctx,
+            format!(
+                "## Auto-compact\n\n\
+                 - Status: **{}**\n\
+                 - Threshold: {}\n\n\
+                 Usage: `/autocompact auto|on|off|<tokens>` (for example `/autocompact 200k`).\n\
+                 Changes take effect on the next loop iteration.",
+                on_off(enabled),
+                threshold
+            ),
+        );
+        return Ok(());
+    }
+
+    let request = args.join(" ");
+    let request = request.trim();
+    let lower = request.to_ascii_lowercase();
+    let result = (|| -> Result<String, String> {
+        match lower.as_str() {
+            "auto" | "default" | "reset" => {
+                overrides::reset(Some("compact.max_tokens"))?;
+                overrides::set_user("compact.auto_enabled", "true", true)?;
+                Ok("Auto-compact restored to the model context policy and enabled.".to_string())
+            }
+            "on" | "enable" | "true" => {
+                overrides::set_user("compact.auto_enabled", "true", true)?;
+                Ok("Auto-compact enabled.".to_string())
+            }
+            "off" | "disable" | "false" => {
+                overrides::set_user("compact.auto_enabled", "false", true)?;
+                Ok("Auto-compact disabled.".to_string())
+            }
+            _ => {
+                let tokens = parse_autocompact_tokens(request)?;
+                overrides::set_user("compact.max_tokens", &tokens.to_string(), true)?;
+                overrides::set_user("compact.auto_enabled", "true", true)?;
+                Ok(format!(
+                    "Auto-compact enabled; threshold set to {} tokens.",
+                    format_token_count(tokens)
+                ))
+            }
+        }
+    })();
+
+    match result {
+        Ok(message) => push_msg(
+            &mut ctx,
+            format!("{}\n\nIt takes effect on the next loop iteration.", message),
+        ),
+        Err(error) => push_msg(&mut ctx, format!("❌ {}", error)),
+    }
+    Ok(())
+}
+
 /// `/release-notes` — 当前版本信息 + 自上一个 tag 起的提交。
 pub async fn release_notes(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
     let version = env!("CARGO_PKG_VERSION");
@@ -5905,6 +6031,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn autocompact_tokens_accept_compact_units_and_separators() {
+        assert_eq!(parse_autocompact_tokens("200k").unwrap(), 200_000);
+        assert_eq!(parse_autocompact_tokens("200K tokens").unwrap(), 200_000);
+        assert_eq!(parse_autocompact_tokens("1m").unwrap(), 1_000_000);
+        assert_eq!(parse_autocompact_tokens("500000").unwrap(), 500_000);
+        assert_eq!(parse_autocompact_tokens("50,000").unwrap(), 50_000);
+        assert_eq!(parse_autocompact_tokens("50_000").unwrap(), 50_000);
+        assert_eq!(parse_autocompact_tokens("12.5k").unwrap(), 12_500);
+    }
+
+    #[test]
+    fn autocompact_tokens_reject_small_or_invalid_values() {
+        assert!(parse_autocompact_tokens("9k").is_err());
+        assert!(parse_autocompact_tokens("0").is_err());
+        assert!(parse_autocompact_tokens("-5").is_err());
+        assert!(parse_autocompact_tokens("lots").is_err());
+        assert!(parse_autocompact_tokens("11m").is_err());
+        assert!(parse_autocompact_tokens("").is_err());
+    }
+
+    #[test]
+    fn autocompact_status_formats_thousands_periods() {
+        assert_eq!(format_token_count(999), "999");
+        assert_eq!(format_token_count(1_000), "1,000");
+        assert_eq!(format_token_count(200_000), "200,000");
+        assert_eq!(format_token_count(1_000_000), "1,000,000");
+    }
+
+    #[tokio::test]
+    async fn autocompact_without_arguments_reports_the_live_policy() {
+        let mut state = crate::ui::state::ChatState::new();
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+        autocompact(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        let output = &state.chat_history.last().expect("status message").content;
+        assert!(output.contains("Auto-compact"), "{output}");
+        assert!(output.contains("Threshold"), "{output}");
+        assert!(output.contains("/autocompact auto|on|off"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn autocompact_reports_an_invalid_size() {
+        let mut state = crate::ui::state::ChatState::new();
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+        autocompact(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            vec!["banana".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let output = &state.chat_history.last().expect("error message").content;
+        assert!(output.contains("Expected a token count"), "{output}");
+    }
+
+    #[test]
     fn detects_cargo_verifiers() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
@@ -6505,7 +6698,7 @@ pub async fn thinkback_play(mut ctx: CommandContext<'_>, _args: Vec<String>) -> 
 
 /// `/force-snip` — 立即触发一次上下文压缩（对标 Claude Code /force-snip）。
 /// 复用 `/compress` 的底层压缩，并显示压缩前后的 token 变化。
-pub async fn force_snip(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
+pub async fn force_snip(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     let before_tokens = ctx
         .state
         .chat_history
@@ -6519,7 +6712,10 @@ pub async fn force_snip(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Comm
     ctx.state.next_message_id += 1;
     let _ = ctx
         .agent_tx
-        .send(crate::runtime::messages::AgentRequest::Compress { message_id })
+        .send(crate::runtime::messages::AgentRequest::Compress {
+            message_id,
+            instructions: crate::commands::utility::compact_instructions(&args),
+        })
         .await;
     ctx.state.current_status_line = Some("Compressing context...".to_string());
     push_msg(

@@ -1,3 +1,4 @@
+mod activity;
 mod agent_team_presets;
 mod agent_team_render;
 mod agent_team_support;
@@ -13,8 +14,10 @@ pub mod execution;
 pub mod extended;
 pub mod extension;
 pub mod features;
+pub mod fewer_permissions;
 pub mod git;
 pub mod hooks;
+pub mod import;
 pub mod init;
 
 pub mod loop_cmd;
@@ -29,6 +32,7 @@ pub mod provider;
 pub mod remote;
 pub mod skills;
 pub mod system;
+pub mod team_onboarding;
 pub mod test;
 pub mod tools;
 pub mod utility;
@@ -91,7 +95,10 @@ pub async fn handle_command(
             }
             mcp_wrapper(ctx, args).await
         }
-        "memory" => memory_wrapper(ctx, args).await,
+        "memory" => {
+            let args = system::default_subcommand_args("memory", args);
+            memory_wrapper(ctx, args).await
+        }
         // /provider 无参数或 select 缺 id：打开提供商选择菜单（交互优先于报错）
         "provider" if args.is_empty() || (args[0] == "select" && args.len() < 2) => {
             ctx.state.close_palette();
@@ -116,6 +123,7 @@ pub async fn handle_command(
         "security-review" => compat::security_review(ctx, args).await,
         "simplify" => compat::simplify(ctx, args).await,
         "run" => compat::run(ctx, args).await,
+        "verify" => compat::verify(ctx, args).await,
         "feedback" => compat::feedback(ctx, args).await,
         "tasks" => compat::tasks(ctx, args).await,
         "workflows" => compat::workflows(ctx, args).await,
@@ -126,7 +134,7 @@ pub async fn handle_command(
         "ide" => compat::ide(ctx, args).await,
         // ── Aliases ─────────────────────────────────────────
         "version" => core::about(ctx, args).await,
-        "config" => config::settings(ctx, args).await,
+        "config" => config::config(ctx, args).await,
         "compact" => utility::compress(ctx, args).await,
         "tokens" => compat::cost(ctx, args).await,
         "usage" => compat::cost(ctx, args).await,
@@ -179,7 +187,7 @@ pub async fn handle_command(
             }
         },
 
-        "settings" => config::settings(ctx, args).await,
+        "settings" => config::config(ctx, args).await,
         "lang" => config::lang(ctx, args).await,
         "theme" => config::theme(ctx, args).await,
         "copy" => utility::copy(ctx, args).await,
@@ -188,8 +196,14 @@ pub async fn handle_command(
         "init" => init::run(ctx, args).await,
         "plan" => plan::run(ctx, args).await,
         "loop" => loop_wrapper(ctx, args).await,
-        "agents" => agents_wrapper(ctx, args).await,
-        "hooks" => hooks_wrapper(ctx, args).await,
+        "agents" => {
+            let args = system::default_subcommand_args("agents", args);
+            agents_wrapper(ctx, args).await
+        }
+        "hooks" => {
+            let args = system::default_subcommand_args("hooks", args);
+            hooks_wrapper(ctx, args).await
+        }
         // /plugin 无参数：打开插件管理弹窗（对标 Claude Code /plugin）；
         // 带子命令（install/remove/...）仍走文本命令
         "plugin" => {
@@ -200,7 +214,10 @@ pub async fn handle_command(
             }
             plugin_wrapper(ctx, args).await
         }
-        "skills" => skills_wrapper(ctx, args).await,
+        "skills" => {
+            let args = system::default_subcommand_args("skills", args);
+            skills_wrapper(ctx, args).await
+        }
         // /extension 与 /extension market：打开市场弹窗（其余子命令保持文本输出）
         "extension" | "ext" => {
             if args.is_empty() || matches!(args[0].as_str(), "market" | "marketplace") {
@@ -212,9 +229,10 @@ pub async fn handle_command(
         }
         "remote" => remote_wrapper(ctx, args).await,
         "permissions" => permissions::run(ctx, args).await,
+        "fewer-permission-prompts" => fewer_permissions::run(ctx, args).await,
         "test" => test::run(ctx, args).await,
         "index" => index_ext_wrapper(ctx, args).await,
-        "doctor" => doctor::run(ctx, args).await,
+        "doctor" | "checkup" => doctor::run(ctx, args).await,
         "connect" => connect::run(ctx, args).await,
         "deep-link" => features::deep_link(ctx, args).await,
         "teleport" => features::teleport(ctx, args).await,
@@ -294,12 +312,20 @@ pub async fn handle_command(
         "notifications" => extended::notifications_cmd(ctx, args).await,
         // ── Conversation (Claude Code parity) ───────────────────
         "export" => extended::export_conversation(ctx, args).await,
+        "import" => import::run(ctx, args).await,
         "diff" => extended::diff_top(ctx, args).await,
         "files" => extended::files_in_context(ctx, args).await,
         "rewind" | "checkpoint" => extended::rewind(ctx, args).await,
         "rename" => extended::rename_session(ctx, args).await,
         // ── Claude Code parity: newly implemented commands ──────
         "add-dir" => extended::add_dir(ctx, args).await,
+        "cd" => extended::cd(ctx, args).await,
+        "branch" => extended::branch_conversation(ctx, args).await,
+        "list-agents" => extended::list_agents(ctx, args).await,
+        "subtask" => extended::subtask(ctx, args).await,
+        "reload-skills" => skills::reload(ctx, args).await,
+        "team-onboarding" => team_onboarding::run(ctx, args).await,
+        "autocompact" => parity::autocompact(ctx, args).await,
         "effort" => extended::effort(ctx, args).await,
         "fast" => extended::fast(ctx, args).await,
         "fork" => extended::fork(ctx, args).await,
@@ -374,8 +400,10 @@ pub async fn handle_command(
         "continue" => chat::continue_cmd(ctx, args).await,
         "quit" => core::exit(ctx, args).await,
         "hist" => parity::history(ctx, args).await,
-        "mem" => memory_wrapper(ctx, args).await,
-        "mstore" => memory_wrapper(ctx, args).await,
+        "mem" | "mstore" => {
+            let args = system::default_subcommand_args("memory", args);
+            memory_wrapper(ctx, args).await
+        }
         "allowed-tools" => permissions::run(ctx, args).await,
         "watch-pr" => parity::subscribe_pr(ctx, args).await,
         "api" => provider_wrapper(ctx, args).await,
@@ -1108,4 +1136,105 @@ async fn mdm_wrapper(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResul
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use crate::runtime::messages::AgentRequest;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn compact_forwards_focus_instructions_to_the_agent() {
+        let mut state = crate::ui::state::ChatState::new();
+        let (agent_tx, mut agent_rx) = mpsc::channel(4);
+
+        handle_command(
+            "compact",
+            vec![
+                "focus".to_string(),
+                "on".to_string(),
+                "the".to_string(),
+                "API".to_string(),
+            ],
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+        )
+        .await
+        .unwrap();
+
+        match agent_rx.try_recv().expect("compress request") {
+            AgentRequest::Compress {
+                instructions,
+                message_id,
+            } => {
+                assert_eq!(instructions.as_deref(), Some("focus on the API"));
+                assert!(message_id > 0);
+            }
+            other => panic!("expected Compress, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bare_memory_shows_the_current_memory_instead_of_clap_usage() {
+        let mut state = crate::ui::state::ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+
+        handle_command(
+            "memory",
+            Vec::new(),
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+        )
+        .await
+        .unwrap();
+
+        let reply = &state.chat_history.last().expect("memory output").content;
+        assert!(reply.contains("memory"), "got: {reply}");
+        assert!(!reply.contains("Usage:"), "clap error leaked: {reply}");
+    }
+
+    #[tokio::test]
+    async fn quit_is_wired_to_the_same_handler_as_exit() {
+        let mut state = crate::ui::state::ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+
+        handle_command(
+            "quit",
+            Vec::new(),
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(state.should_exit);
+    }
+
+    #[tokio::test]
+    async fn unknown_config_subcommands_explain_the_syntax_without_touching_settings() {
+        let mut state = crate::ui::state::ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+
+        handle_command(
+            "config",
+            vec!["definitely-not-a-subcommand".to_string()],
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+        )
+        .await
+        .unwrap();
+
+        let reply = &state.chat_history.last().expect("config response").content;
+        assert!(reply.contains("Unknown config subcommand"));
+        assert!(reply.contains("/config set"));
+    }
 }

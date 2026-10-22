@@ -287,15 +287,11 @@ pub async fn enqueue_user_message(
     if user_input.trim().starts_with('#') {
         let content = user_input.trim()[1..].trim();
         if !content.is_empty() {
-            let cmd_str = format!("/memory add {}", content);
-            if let Some(parsed) = crate::commands::system::parse_command(&cmd_str) {
-                let mut args_vec = Vec::new();
-                if parsed.path.len() > 1 {
-                    args_vec.extend_from_slice(&parsed.path[1..]);
-                }
-                if !parsed.args.is_empty() {
-                    args_vec.extend(parsed.args.split_whitespace().map(|s| s.to_string()));
-                }
+            if let Some(parsed) = crate::commands::system::parse_command("/memory add") {
+                // Keep the tagged text opaque: `#foo/bar` is memory content,
+                // not a command path or a quoted argument.
+                let mut args_vec = crate::commands::system::parsed_command_args(&parsed);
+                args_vec.push(content.to_string());
 
                 // Show the command in history as user message (preserving original input)
                 state.chat_history.push(ChatEntry::user(user_input.clone()));
@@ -320,13 +316,7 @@ pub async fn enqueue_user_message(
     if user_input.trim().starts_with('/') {
         let (command_name, args_vec) =
             if let Some(parsed) = crate::commands::system::parse_command(&user_input) {
-                let mut args_vec = Vec::new();
-                if parsed.path.len() > 1 {
-                    args_vec.extend_from_slice(&parsed.path[1..]);
-                }
-                if !parsed.args.is_empty() {
-                    args_vec.extend(parsed.args.split_whitespace().map(|s| s.to_string()));
-                }
+                let args_vec = crate::commands::system::parsed_command_args(&parsed);
                 (parsed.path[0].clone(), args_vec)
             } else {
                 let without_slash = user_input.trim()[1..].trim();

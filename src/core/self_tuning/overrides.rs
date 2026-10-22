@@ -149,6 +149,25 @@ pub fn set(
     persist: bool,
     rationale: Option<&str>,
 ) -> Result<String, String> {
+    set_internal(key, value, persist, rationale, true)
+}
+
+/// Write an explicit user setting, bypassing the model's self-tuning budget.
+///
+/// `/autocompact` and similar slash commands are deliberate user actions; they
+/// must still work after the model has spent its reconfiguration budget. The
+/// operator lock and value validation are identical to [`set`].
+pub fn set_user(key: &str, value: &str, persist: bool) -> Result<String, String> {
+    set_internal(key, value, persist, Some("user command"), false)
+}
+
+fn set_internal(
+    key: &str,
+    value: &str,
+    persist: bool,
+    rationale: Option<&str>,
+    spend_budget: bool,
+) -> Result<String, String> {
     let knob = Knob::by_key(key).ok_or_else(|| unknown_key(key))?;
 
     if is_locked(knob.key) {
@@ -165,15 +184,17 @@ pub fn set(
 
     // 预算在合法性校验之后才扣：一次被拒的写入不该消耗预算，否则模型对着
     // 一个永远改不对的值会很快把预算烧光。
-    if remaining_budget() == 0 {
-        return Err(format!(
-            "Self-tuning budget for this session is exhausted ({} successful changes). \
-             The current value of `{}` stays as it is. You can still use the `reset` action to \
-             undo earlier changes, and you can describe the situation to the user instead of \
-             tuning further.",
-            budget(),
-            knob.key
-        ));
+    if spend_budget {
+        if remaining_budget() == 0 {
+            return Err(format!(
+                "Self-tuning budget for this session is exhausted ({} successful changes). \
+                 The current value of `{}` stays as it is. You can still use the `reset` action to \
+                 undo earlier changes, and you can describe the situation to the user instead of \
+                 tuning further.",
+                budget(),
+                knob.key
+            ));
+        }
     }
 
     if let Ok(mut map) = table().write() {
@@ -184,10 +205,17 @@ pub fn set(
             knob.key
         ));
     }
-    consume_budget();
+    if spend_budget {
+        consume_budget();
+    }
 
     crate::utils::logging::append_agent_log_line(&format!(
-        "[SelfTuning] `{}` -> {} (persist={}, budget {}/{}){}",
+        "[{}] `{}` -> {} (persist={}, budget {}/{}){}",
+        if spend_budget {
+            "SelfTuning"
+        } else {
+            "UserSetting"
+        },
         knob.key,
         normalized,
         persist,
@@ -595,6 +623,32 @@ mod tests {
         // 撤销永远可用：预算不该把模型锁在自己调坏的配置上。
         assert!(reset(Some("compact.max_tokens")).is_ok());
         assert!(!is_overridden("compact.max_tokens"));
+    }
+
+    #[test]
+    fn user_set_bypasses_the_model_budget_but_not_validation() {
+        let _serial = guard();
+        reset(None).expect("reset");
+        std::env::set_var(ENV_MAX_SETS, "0");
+        let _cap = EnvGuard::new(ENV_MAX_SETS);
+
+        assert!(set("compact.max_tokens", "70000", false, None).is_err());
+        assert_eq!(remaining_budget(), 0, "failed model set stays blocked");
+        assert_eq!(
+            set_user("compact.max_tokens", "70000", false).expect("user write"),
+            "70000"
+        );
+        assert_eq!(usize_value("compact.max_tokens"), Some(70_000));
+        assert_eq!(
+            remaining_budget(),
+            0,
+            "user write must not spend model budget"
+        );
+
+        assert!(
+            set_user("compact.max_tokens", "banana", false).is_err(),
+            "explicit user writes still validate the value"
+        );
     }
 
     #[test]

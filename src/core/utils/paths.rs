@@ -2,7 +2,7 @@ use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 pub const STAR_DIR: &str = ".star";
 pub const GOOGLE_ACCOUNTS_FILENAME: &str = "google_accounts.json";
@@ -89,9 +89,66 @@ pub fn is_subpath(path: &Path, base: &Path) -> bool {
     path.starts_with(base)
 }
 
+static CURRENT_DIR_CACHE: OnceLock<RwLock<&'static PathBuf>> = OnceLock::new();
+
+fn current_dir_cache() -> &'static RwLock<&'static PathBuf> {
+    CURRENT_DIR_CACHE.get_or_init(|| {
+        let initial = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        RwLock::new(Box::leak(Box::new(initial)))
+    })
+}
+
+/// Process working directory, cached for callers that need a cheap `&'static`
+/// path on hot rendering/tool paths.
+///
+/// The cache is intentionally mutable: `/cd` changes the process directory
+/// while the TUI is running, and every tool, hook and status-line read must see
+/// the new root immediately. `set_current_dir` is the only supported way to
+/// change it; it keeps the OS directory and this cache in lockstep.
 pub fn current_dir_cached() -> &'static PathBuf {
-    static CWD: OnceLock<PathBuf> = OnceLock::new();
-    CWD.get_or_init(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    *current_dir_cache()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Change the process working directory and refresh every path cache that is
+/// derived from it.
+///
+/// Changes are serialized because the process directory is global. Tests that
+/// only need path resolution should call the pure helpers instead of moving the
+/// real process directory.
+pub fn set_current_dir(path: &Path) -> Result<PathBuf, String> {
+    static CHANGE_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = CHANGE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    std::env::set_current_dir(path).map_err(|error| {
+        format!(
+            "Failed to change directory to {}: {}",
+            path.display(),
+            error
+        )
+    })?;
+
+    // `current_dir` resolves the final path (including platform-specific
+    // normalization). If it unexpectedly fails after a successful chdir, keep
+    // the caller-supplied path rather than leaving the cache stale.
+    let actual = std::env::current_dir().unwrap_or_else(|_| path.to_path_buf());
+    let leaked: &'static PathBuf = Box::leak(Box::new(actual.clone()));
+    *current_dir_cache()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = leaked;
+
+    // `.star` discovery and project-file lookups cache results by starting
+    // directory. Old-project entries are still valid for their own keys, but
+    // clearing them keeps a moved session from inheriting stale ancestor state.
+    PROJECT_FILE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+
+    Ok(actual)
 }
 
 pub fn normalize_cross_platform_path(raw_path: &str) -> PathBuf {

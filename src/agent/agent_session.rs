@@ -18,6 +18,7 @@ impl Agent {
 
     pub async fn force_compress_session_messages(
         &mut self,
+        instructions: Option<&str>,
     ) -> Result<
         crate::agent::workflows::context_compression::CompressionResult,
         Box<dyn std::error::Error + Send + Sync>,
@@ -37,7 +38,11 @@ impl Agent {
 
         let result = self
             .context_compressor
-            .force_compress(self.session_messages.clone(), Some(&self.client))
+            .force_compress(
+                self.session_messages.clone(),
+                Some(&self.client),
+                instructions,
+            )
             .await?;
         self.session_messages = result.messages.clone();
         Ok(result)

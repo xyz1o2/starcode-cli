@@ -32,6 +32,13 @@ enum DeferredContextAction {
         pending_local_context: Vec<String>,
         response: mpsc::Sender<Result<(), String>>,
     },
+    /// `/subtask` 在流式回合中到达时不能读 agent 的最终上下文；排到回合结束后
+    /// 启动，fork 才能看到本轮完整产出。
+    RunSubtask {
+        task: String,
+        description: String,
+        response: mpsc::Sender<Result<crate::agent::subagent::runner::AsyncLaunchResult, String>>,
+    },
     /// 此项必须排在 save/restore 等上下文变更之后执行，确保快照拿到流结束同步的原生消息。
     Shutdown {
         response: mpsc::Sender<Result<(), String>>,
@@ -61,7 +68,7 @@ pub struct DeferredRuntimeActions {
         Option<bool>,
         Option<String>,
     )>,
-    pub pending_compress_request: Option<u64>,
+    pub pending_compress_request: Option<(u64, Option<String>)>,
     pub pending_generate_note: Option<(crate::runtime::messages::NoteKind, u64, Option<String>)>,
     pub pending_mark_as_read: Vec<String>,
     /// 流式过程中收到的会话上下文变更。必须按接收顺序串行执行，避免
@@ -231,8 +238,11 @@ pub async fn handle_streaming_request(
             deferred.pending_toggle_yolo = true;
             StreamingRequestOutcome::Continue
         }
-        Some(AgentRequest::Compress { message_id }) => {
-            deferred.pending_compress_request = Some(message_id);
+        Some(AgentRequest::Compress {
+            message_id,
+            instructions,
+        }) => {
+            deferred.pending_compress_request = Some((message_id, instructions));
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::GenerateNote {
@@ -247,6 +257,22 @@ pub async fn handle_streaming_request(
             deferred
                 .pending_context_actions
                 .push_back(DeferredContextAction::Reset);
+            StreamingRequestOutcome::Continue
+        }
+        Some(AgentRequest::RunSubtask {
+            task,
+            description,
+            response,
+        }) => {
+            // The streaming path does not own `StarAgent`; the fork must be
+            // created after the turn has synced its final native messages.
+            deferred
+                .pending_context_actions
+                .push_back(DeferredContextAction::RunSubtask {
+                    task,
+                    description,
+                    response,
+                });
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::LensRebuild { message_id, .. }) => {
@@ -369,6 +395,17 @@ pub async fn handle_streaming_request(
                 });
             StreamingRequestOutcome::Continue
         }
+        Some(AgentRequest::ChangeWorkingDirectory { response, .. }) => {
+            // Moving the root while tools are in flight could split one turn
+            // across two projects. `/cd` already refuses during a turn; keep
+            // this guard for any other caller and fail fast instead of queueing.
+            let _ = response
+                .send(Err(
+                    "Cannot change the working directory while a turn is running.".to_string(),
+                ))
+                .await;
+            StreamingRequestOutcome::Continue
+        }
         None => {
             context.abort_flag.store(true, Ordering::SeqCst);
             StreamingRequestOutcome::Return
@@ -432,6 +469,14 @@ pub async fn apply_deferred_context_actions(
             } => {
                 agent.replace_session_context(messages, pending_local_context);
                 let _ = response.send(Ok(())).await;
+            }
+            DeferredContextAction::RunSubtask {
+                task,
+                description,
+                response,
+            } => {
+                let result = agent.spawn_forked_background_subtask(task, description);
+                let _ = response.send(result).await;
             }
             DeferredContextAction::Shutdown { response } => return Some(response),
         }
@@ -766,6 +811,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_subtask_waits_for_the_turn_before_forking_context() {
+        let mut deferred = DeferredRuntimeActions::default();
+        let (tx, _rx) = mpsc::channel(1);
+        let steering_queue = Arc::new(AsyncMessageQueue::new());
+        let steering_signal = Arc::new(Notify::new());
+        let message_bus = Arc::new(crate::core::confirmation_bus::MessageBus::new(
+            crate::core::policy::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let abort_flag = Arc::new(AtomicBool::new(false));
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+
+        let outcome = handle_streaming_request(
+            &mut deferred,
+            Some(AgentRequest::RunSubtask {
+                task: "check the regression".to_string(),
+                description: "check the regression".to_string(),
+                response: response_tx,
+            }),
+            StreamingRequestContext {
+                tx: &tx,
+                message_id: 9,
+                user_message: "test",
+                current_model_snapshot: "active-model",
+                project_root: None,
+                abort_flag: &abort_flag,
+                steering_queue: &steering_queue,
+                steering_signal: &steering_signal,
+                message_bus: &message_bus,
+            },
+        )
+        .await;
+
+        assert_eq!(outcome, StreamingRequestOutcome::Continue);
+        assert!(
+            response_rx.try_recv().is_err(),
+            "a streaming subtask must not launch before the turn syncs its context"
+        );
+        assert_eq!(deferred.pending_context_actions.len(), 1);
+        assert!(matches!(
+            deferred.pending_context_actions.front(),
+            Some(DeferredContextAction::RunSubtask { task, .. })
+                if task == "check the regression"
+        ));
+    }
+
+    #[tokio::test]
     async fn configured_provider_loading_emits_metadata_only() {
         let mut deferred = DeferredRuntimeActions::default();
         let (tx, mut rx) = mpsc::channel(1);
@@ -915,7 +1007,7 @@ pub async fn apply_deferred_runtime_actions(
         return;
     }
 
-    if let Some(message_id) = deferred.pending_compress_request.take() {
+    if let Some((message_id, instructions)) = deferred.pending_compress_request.take() {
         let _ = tx
             .send(StreamMessage::Start {
                 message_id,
@@ -944,7 +1036,7 @@ pub async fn apply_deferred_runtime_actions(
                 .await;
             let _ = tx.send(StreamMessage::Done { message_id }).await;
         } else {
-            match agent.compress_context().await {
+            match agent.compress_context(instructions.as_deref()).await {
                 Ok(msg) => {
                     let _ = tx
                         .send(StreamMessage::Content {

@@ -13,12 +13,15 @@ use tokio::sync::mpsc;
 /// - Sends git status updates to UI via agent_tx
 /// - Gracefully handles git errors (e.g. not a git repo)
 /// - Uses exponential backoff on repeated failures to avoid log spam
-pub fn spawn_git_status_loop(agent_tx: mpsc::Sender<AgentRequest>, cwd: PathBuf) {
+pub fn spawn_git_status_loop(agent_tx: mpsc::Sender<AgentRequest>, _initial_cwd: PathBuf) {
     tokio::spawn(async move {
         let mut consecutive_errors = 0u32;
         const MAX_BACKOFF_SECS: u64 = 60;
 
         loop {
+            // Follow the live process root so `/cd` refreshes the status line
+            // without restarting the loop or recreating the UI.
+            let cwd = crate::core::utils::paths::current_dir_cached().clone();
             match crate::core::services::git_service::get_git_status(&cwd).await {
                 Some(status) => {
                     consecutive_errors = 0; // Reset on success

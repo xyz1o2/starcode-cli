@@ -391,6 +391,28 @@ impl Agent {
         }
     }
 
+    /// Move the agent to a new project root after the UI has validated the
+    /// path. This runs on the worker thread and updates all process-scoped and
+    /// agent-scoped state in one place.
+    pub async fn change_working_directory(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let actual = crate::core::utils::paths::set_current_dir(path)?;
+        crate::agent::hooks::clear_project_root_override();
+
+        // Memory and project context are resolved per project. Reset the
+        // lazy-init marker so the next turn rebuilds the watcher, plugin tools
+        // and context components against the new root.
+        self.memory_manager = crate::core::memory::MemoryManager::new(&actual);
+        self.context_engine_initialized = false;
+        self.tool_schema_len_cache.clear();
+        self.refresh_plugin_tools().await;
+
+        crate::utils::logging::append_agent_log_line(&format!(
+            "[CWD] Session moved to {}",
+            actual.display()
+        ));
+        Ok(())
+    }
+
     pub fn model(&self) -> String {
         self.client.model.clone()
     }

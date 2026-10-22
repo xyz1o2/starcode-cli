@@ -1,5 +1,145 @@
 use crate::commands::execution::{CommandContext, CommandResult};
 use clap::Subcommand;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SkillReloadSnapshot {
+    #[serde(default)]
+    skills: Vec<String>,
+}
+
+fn diff_skill_names(
+    previous: &BTreeSet<String>,
+    current: &BTreeSet<String>,
+) -> (Vec<String>, Vec<String>) {
+    let added = current.difference(previous).cloned().collect();
+    let removed = previous.difference(current).cloned().collect();
+    (added, removed)
+}
+
+async fn skill_names_in_dir(dir: &Path) -> BTreeSet<String> {
+    crate::agent::skills::loader::SkillLoader::load_skills_from_dir(dir)
+        .await
+        .into_iter()
+        .filter(|skill| !skill.disabled)
+        .map(|skill| skill.name)
+        .collect()
+}
+
+fn reload_snapshot_path(star_dir: &Path) -> PathBuf {
+    star_dir.join("skills-reload.json")
+}
+
+async fn read_reload_snapshot(path: &Path) -> Option<SkillReloadSnapshot> {
+    let contents = tokio::fs::read_to_string(path).await.ok()?;
+    serde_json::from_str(&contents).ok()
+}
+
+async fn write_reload_snapshot(
+    path: &Path,
+    skills: &BTreeSet<String>,
+) -> Result<(), std::io::Error> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let snapshot = SkillReloadSnapshot {
+        skills: skills.iter().cloned().collect(),
+    };
+    let json = serde_json::to_string_pretty(&snapshot)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    tokio::fs::write(path, json).await
+}
+
+/// `/reload-skills` — rescan project and user skill directories and report
+/// what changed since the previous reload. Skill discovery reads disk directly,
+/// so the rescan immediately reflects added/removed files in `/skills list`
+/// and `/skills show`.
+pub async fn reload(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let storage = crate::core::config::storage::Storage::new(cwd);
+    let project_dir = storage.project_skills_dir();
+    let user_dir = crate::core::config::storage::Storage::user_skills_dir();
+
+    let project_skills = skill_names_in_dir(&project_dir).await;
+    let user_skills = skill_names_in_dir(&user_dir).await;
+    let current: BTreeSet<String> = project_skills.union(&user_skills).cloned().collect();
+
+    let snapshot_path = reload_snapshot_path(&storage.star_dir());
+    let previous = read_reload_snapshot(&snapshot_path).await;
+    let (added, removed) = previous
+        .as_ref()
+        .map(|snapshot| {
+            let previous_names: BTreeSet<String> = snapshot.skills.iter().cloned().collect();
+            diff_skill_names(&previous_names, &current)
+        })
+        .unwrap_or_default();
+    let baseline = previous.is_none();
+    let write_error = write_reload_snapshot(&snapshot_path, &current)
+        .await
+        .err()
+        .map(|error| error.to_string());
+
+    let mut out = String::from("## Skills reloaded\n\n");
+    if baseline {
+        out.push_str("- Baseline recorded for the next `/reload-skills` diff.\n");
+    } else {
+        out.push_str(&format!(
+            "- Added since last reload: {}\n- Removed since last reload: {}\n",
+            added.len(),
+            removed.len()
+        ));
+    }
+    out.push_str(&format!(
+        "- Available: {} (project {}, user {})\n",
+        current.len(),
+        project_skills.len(),
+        user_skills.len()
+    ));
+
+    if !added.is_empty() {
+        out.push_str("\n**Added**\n");
+        for name in &added {
+            out.push_str(&format!("- `{}`\n", name));
+        }
+    }
+    if !removed.is_empty() {
+        out.push_str("\n**Removed**\n");
+        for name in &removed {
+            out.push_str(&format!("- `{}`\n", name));
+        }
+    }
+
+    if current.is_empty() {
+        out.push_str(
+            "\nNo skills found. Create one with `/skills new <name>` or place a `SKILL.md` under `.star/skills/<name>/`.",
+        );
+    } else {
+        out.push_str("\n**Available skills**\n");
+        for name in current.iter().take(100) {
+            out.push_str(&format!("- `{}`\n", name));
+        }
+        if current.len() > 100 {
+            out.push_str(&format!("- … and {} more\n", current.len() - 100));
+        }
+        out.push_str(
+            "\nSkill discovery reads disk directly; `/skills list` and `/skills show` reflect this scan.",
+        );
+    }
+
+    if let Some(error) = write_error {
+        out.push_str(&format!(
+            "\n\n⚠ Could not persist the reload snapshot: {}",
+            error
+        ));
+    }
+
+    ctx.state
+        .chat_history
+        .push(crate::types::ChatEntry::assistant(out).with_streaming(false));
+    Ok(())
+}
 
 #[derive(Subcommand)]
 pub enum SkillsCommand {
@@ -324,7 +464,7 @@ pub async fn execute_skills_command(ctx: CommandContext<'_>, cmd: SkillsCommand)
     }
 }
 
-fn slugify(s: &str) -> String {
+pub(crate) fn slugify(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
@@ -339,4 +479,104 @@ fn slugify(s: &str) -> String {
         .collect::<String>()
         .trim_matches('-')
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "starcode-skills-{}-{}-{}",
+            label,
+            std::process::id(),
+            nonce
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    async fn write_skill(root: &Path, name: &str, description: &str) {
+        let dir = root.join(name);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(
+            dir.join("SKILL.md"),
+            format!(
+                "---\nname: {}\ndescription: {}\n---\n\nDo the {} task.\n",
+                name, description, name
+            ),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn reload_diff_is_sorted_and_exact() {
+        let previous: BTreeSet<String> = ["alpha", "beta", "old"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let current: BTreeSet<String> = ["alpha", "beta", "new"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        let (added, removed) = diff_skill_names(&previous, &current);
+        assert_eq!(added, vec!["new".to_string()]);
+        assert_eq!(removed, vec!["old".to_string()]);
+        assert!(diff_skill_names(&current, &current).0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reload_scan_detects_real_added_and_removed_skills() {
+        let root = unique_temp_dir("scan");
+        write_skill(&root, "alpha", "Alpha skill").await;
+        let first = skill_names_in_dir(&root).await;
+        assert_eq!(first, ["alpha".to_string()].into_iter().collect());
+
+        tokio::fs::remove_dir_all(root.join("alpha")).await.unwrap();
+        write_skill(&root, "beta", "Beta skill").await;
+        let second = skill_names_in_dir(&root).await;
+        assert_eq!(second, ["beta".to_string()].into_iter().collect());
+
+        let (added, removed) = diff_skill_names(&first, &second);
+        assert_eq!(added, vec!["beta".to_string()]);
+        assert_eq!(removed, vec!["alpha".to_string()]);
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[test]
+    fn reload_snapshot_lives_under_project_star_dir() {
+        let star = Path::new("C:/work/project/.star");
+        assert_eq!(
+            reload_snapshot_path(star),
+            star.join("skills-reload.json"),
+            "the diff baseline must stay project-scoped"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_snapshot_round_trips_for_the_next_diff() {
+        let root = unique_temp_dir("snapshot");
+        let path = reload_snapshot_path(&root);
+        let skills: BTreeSet<String> = ["alpha", "beta"].into_iter().map(String::from).collect();
+
+        write_reload_snapshot(&path, &skills).await.unwrap();
+        let snapshot = read_reload_snapshot(&path).await.unwrap();
+        let stored: BTreeSet<String> = snapshot.skills.into_iter().collect();
+        assert_eq!(stored, skills);
+
+        tokio::fs::write(&path, "{not json").await.unwrap();
+        assert!(
+            read_reload_snapshot(&path).await.is_none(),
+            "a corrupt baseline must fall back to a fresh baseline, not fail the command"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
 }

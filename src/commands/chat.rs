@@ -138,6 +138,63 @@ pub(crate) async fn request_session_save(
     wait_for_session_response(&mut response_rx, "save").await
 }
 
+/// Save the conversation before `/clear` removes it from the UI.
+///
+/// Claude Code keeps the previous conversation resumable; StarCode otherwise
+/// only persists on exit, so clearing an unsaved session would lose it. The
+/// label from `/clear <name>` becomes the session ID, while a bare `/clear`
+/// reuses the active ID or creates a timestamped one.
+pub(crate) async fn save_conversation_for_clear(
+    state: &mut crate::ui::state::ChatState,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<Option<String>, String> {
+    let history: Vec<ChatEntry> = state
+        .chat_history
+        .iter()
+        .filter(|entry| !entry.is_welcome)
+        .cloned()
+        .collect();
+    if history.is_empty() {
+        return Ok(None);
+    }
+
+    let existing: std::collections::HashSet<String> = session_manager::list_sessions()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let active = state.active_session_id.clone();
+    let requested = state
+        .pending_clear_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+
+    let id = match requested {
+        Some(name) => {
+            let base = crate::commands::extended::sanitize_session_atom(name);
+            if active.as_deref() == Some(base.as_str()) {
+                base
+            } else {
+                crate::commands::extended::unique_session_id(&base, &existing, active.as_deref())
+            }
+        }
+        None => match active {
+            Some(id) => id,
+            None => crate::commands::extended::unique_session_id(
+                &format!("clear-{}", timestamp),
+                &existing,
+                None,
+            ),
+        },
+    };
+
+    let usage = state.token_usage.clone();
+    request_session_save(agent_tx, id.clone(), history, usage).await?;
+    Ok(Some(id))
+}
+
 /// 只在 worker 成功替换原生上下文后，调用方才能替换可见 transcript。
 pub(crate) async fn request_session_restore(
     agent_tx: &mpsc::Sender<AgentRequest>,
@@ -298,7 +355,8 @@ fn restore_session_history(
 #[cfg(test)]
 mod tests {
     use super::{
-        request_session_restore, request_session_save, restore_session_history, AgentRequest,
+        request_session_restore, request_session_save, restore_session_history,
+        save_conversation_for_clear, AgentRequest,
     };
     use crate::types::{ChatEntry, StarMessage};
     use std::time::Instant;
@@ -499,6 +557,134 @@ mod tests {
         assert_eq!(pending_local_context, vec!["local command output"]);
         response.send(Ok(())).await.unwrap();
         assert!(restore_task.await.unwrap().is_ok());
+    }
+
+    fn unique_label(prefix: &str) -> String {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{}-{}-{}", prefix, std::process::id(), nonce)
+    }
+
+    #[tokio::test]
+    async fn clear_save_uses_requested_name_and_preserves_history_until_called() {
+        let mut state = crate::ui::state::ChatState::new();
+        state
+            .chat_history
+            .push(ChatEntry::user("previous question"));
+        state
+            .chat_history
+            .push(ChatEntry::assistant("previous answer"));
+        let label = unique_label("checkpoint");
+        state.pending_clear_name = Some(label.clone());
+        state.active_session_id = Some("active-session".to_string());
+        state.token_usage = Some(crate::types::StarUsage {
+            total_tokens: 42,
+            ..Default::default()
+        });
+
+        let (agent_tx, mut agent_rx) = mpsc::channel(2);
+        let worker = tokio::spawn(async move {
+            let request = agent_rx.recv().await.expect("save request");
+            let AgentRequest::SaveSession {
+                id,
+                history,
+                last_usage,
+                response,
+            } = request
+            else {
+                panic!("expected SaveSession");
+            };
+            assert!(id.starts_with("checkpoint-"));
+            assert_ne!(id, "active-session");
+            assert_eq!(history.len(), 2);
+            assert_eq!(last_usage.map(|usage| usage.total_tokens), Some(42));
+            response.send(Ok(())).await.unwrap();
+        });
+
+        let history_len = state.chat_history.len();
+        let saved = save_conversation_for_clear(&mut state, &agent_tx)
+            .await
+            .unwrap();
+        assert_eq!(saved.as_deref(), Some(label.as_str()));
+        assert_eq!(
+            state.chat_history.len(),
+            history_len,
+            "saving must not clear the UI"
+        );
+        assert_eq!(state.pending_clear_name.as_deref(), Some(label.as_str()));
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clear_save_reuses_the_active_id_when_no_name_is_given() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.chat_history.push(ChatEntry::user("active work"));
+        state.active_session_id = Some("active-session".to_string());
+
+        let (agent_tx, mut agent_rx) = mpsc::channel(2);
+        let worker = tokio::spawn(async move {
+            let request = agent_rx.recv().await.expect("save request");
+            let AgentRequest::SaveSession { id, response, .. } = request else {
+                panic!("expected SaveSession");
+            };
+            assert_eq!(id, "active-session");
+            response.send(Ok(())).await.unwrap();
+        });
+
+        let saved = save_conversation_for_clear(&mut state, &agent_tx)
+            .await
+            .unwrap();
+        assert_eq!(saved.as_deref(), Some("active-session"));
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clear_save_creates_a_timestamped_id_for_an_unnamed_session() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.chat_history.push(ChatEntry::user("unsaved work"));
+
+        let (agent_tx, mut agent_rx) = mpsc::channel(2);
+        let worker = tokio::spawn(async move {
+            let request = agent_rx.recv().await.expect("save request");
+            let AgentRequest::SaveSession { id, response, .. } = request else {
+                panic!("expected SaveSession");
+            };
+            assert!(id.starts_with("clear-"), "got id: {id}");
+            response.send(Ok(())).await.unwrap();
+        });
+
+        let saved = save_conversation_for_clear(&mut state, &agent_tx)
+            .await
+            .unwrap();
+        assert!(saved.as_deref().unwrap().starts_with("clear-"));
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clear_save_propagates_failure_and_keeps_the_conversation() {
+        let mut state = crate::ui::state::ChatState::new();
+        state
+            .chat_history
+            .push(ChatEntry::user("must not disappear"));
+
+        let (agent_tx, mut agent_rx) = mpsc::channel(2);
+        let worker = tokio::spawn(async move {
+            let request = agent_rx.recv().await.expect("save request");
+            let AgentRequest::SaveSession { response, .. } = request else {
+                panic!("expected SaveSession");
+            };
+            response.send(Err("disk full".to_string())).await.unwrap();
+        });
+
+        let history_len = state.chat_history.len();
+        let error = save_conversation_for_clear(&mut state, &agent_tx)
+            .await
+            .unwrap_err();
+        assert!(error.contains("disk full"));
+        assert_eq!(state.chat_history.len(), history_len);
+        worker.await.unwrap();
     }
 }
 

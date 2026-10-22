@@ -22,6 +22,19 @@ use tokio::sync::Mutex;
 
 // ── StarAgentRunner（迁入，逻辑不变）──────────────────────────────────────
 
+/// 把 `/subtask` 的父会话装进刚创建的子代理。
+///
+/// 单独抽出来是为了让“结构化上下文 + pending 本地输出”这条 fork 语义
+/// 能在不调用真实 LLM 的情况下被单测钉住。
+fn install_parent_context(agent: &mut crate::agent::StarAgent, request: &SubAgentRequest) {
+    if !request.parent_messages.is_empty() || !request.parent_pending_context.is_empty() {
+        agent.replace_session_context(
+            request.parent_messages.clone(),
+            request.parent_pending_context.clone(),
+        );
+    }
+}
+
 /// 同步 SubAgent 执行器
 pub struct StarAgentRunner {
     client: StarClient,
@@ -95,6 +108,11 @@ impl StarAgentRunner {
                 format!("Failed to create SubAgent: {}", e),
             )
         })?;
+
+        // `/subtask` forks the current conversation rather than starting from a
+        // blank child. Install the parent's native provider context before the
+        // new task prompt is appended, so tool calls/results survive intact.
+        install_parent_context(&mut agent, &request);
 
         let mut tracker = AgentProgressTracker::new(sink);
         let mut final_text = String::new();
@@ -273,6 +291,31 @@ mod tests {
     /// 派发判定本身：只有 Explorer 进检索分支。通用路径需要完整
     /// runtime bootstrap（`StarAgent` 构造要 ToolRegistry），在单测里
     /// 起不来，这里只验类型判定的输入侧——路由侧的覆盖见 `router.rs`。
+    #[tokio::test]
+    async fn forked_subtask_installs_parent_messages_and_pending_context() {
+        let mut agent = crate::agent::StarAgent::new_for_runtime_settings_test().await;
+        let parent_messages = vec![
+            crate::types::StarMessage::new("user", Some("fix the login flow".to_string())),
+            crate::types::StarMessage::new(
+                "assistant",
+                Some("The auth module is in src/auth.rs".to_string()),
+            ),
+        ];
+        let request = SubAgentRequest::new("add the regression test")
+            .with_parent_context(parent_messages, vec!["cargo test: all passed".to_string()]);
+
+        install_parent_context(&mut agent, &request);
+        let (messages, pending) = agent.session_context_snapshot();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(
+            messages[1].content.as_deref(),
+            Some("The auth module is in src/auth.rs")
+        );
+        assert_eq!(pending, vec!["cargo test: all passed"]);
+    }
+
     #[test]
     fn only_explorer_is_routed_to_search() {
         // 默认是 GeneralPurpose，不能误判成 Explorer

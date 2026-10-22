@@ -17,6 +17,12 @@ pub(crate) fn truncate_chars_for_injection(s: &str, max_chars: usize) -> String 
 }
 
 pub(crate) fn auto_compact_enabled() -> bool {
+    // `/autocompact` writes the same knob used by CompactConfig. Check it first
+    // so the command controls both the compact manager and the legacy summary
+    // path instead of only half of the pipeline.
+    if let Some(enabled) = crate::core::self_tuning::bool_value("compact.auto_enabled") {
+        return enabled;
+    }
     std::env::var("STAR_ENABLE_AUTO_COMPACT")
         .ok()
         .map(|v| {

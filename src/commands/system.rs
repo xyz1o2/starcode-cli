@@ -87,6 +87,13 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         sub_commands: &[],
     },
     SlashCommand {
+        name: "import",
+        alt_names: &[],
+        description: "Preview or import config from Codex, Gemini CLI, or Cursor",
+        category: "Config",
+        sub_commands: &[],
+    },
+    SlashCommand {
         name: "rename",
         alt_names: &[],
         description: "Rename the current session",
@@ -616,6 +623,13 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         sub_commands: &[],
     },
     SlashCommand {
+        name: "verify",
+        alt_names: &[],
+        description: "Drive the real app or service and verify the change with evidence",
+        category: "Tools",
+        sub_commands: &[],
+    },
+    SlashCommand {
         name: "lint",
         alt_names: &[],
         description: "Run linting/static analysis",
@@ -781,6 +795,13 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         ],
     },
     SlashCommand {
+        name: "fewer-permission-prompts",
+        alt_names: &[],
+        description: "Suggest a safe project allowlist from recent read-only tool calls",
+        category: "Security",
+        sub_commands: &[],
+    },
+    SlashCommand {
         name: "hooks",
         alt_names: &[],
         description: "Hook management and testing",
@@ -910,15 +931,6 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         sub_commands: &[],
     },
     SlashCommand {
-        name: "settings",
-        // `config` 不放在这里当别名：它自己就是一条顶层命令（带 get/set/... 子命令），
-        // 重复声明会让 /help 把同一个名字列两次。
-        alt_names: &[],
-        description: "Open settings editor",
-        category: "Configuration",
-        sub_commands: &[],
-    },
-    SlashCommand {
         name: "lang",
         alt_names: &[],
         description: "View or switch UI language (auto / en / zh-CN)",
@@ -997,7 +1009,8 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "doctor",
-        alt_names: &[],
+        // Official Claude Code alias.
+        alt_names: &["checkup"],
         description: "诊断环境与配置问题",
         category: "Debug",
         sub_commands: &[],
@@ -1137,7 +1150,8 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
     // === Config Subcommands ===
     SlashCommand {
         name: "config",
-        alt_names: &[],
+        // Official Claude Code alias: `/settings` opens the same command.
+        alt_names: &["settings"],
         description: "Configuration management",
         category: "Config",
         sub_commands: &[
@@ -1149,23 +1163,44 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
                 sub_commands: &[],
             },
             SlashCommand {
+                name: "get",
+                alt_names: &[],
+                description: "Show one config value",
+                category: "Config",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "lang",
+                alt_names: &["language"],
+                description: "View or switch UI language",
+                category: "Config",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "help",
+                alt_names: &[],
+                description: "Show the /config usage",
+                category: "Config",
+                sub_commands: &[],
+            },
+            SlashCommand {
                 name: "set",
                 alt_names: &[],
-                description: "Set config value (key value)",
+                description: "Set config value (key value or key=value)",
                 category: "Config",
                 sub_commands: &[],
             },
             SlashCommand {
                 name: "reset",
                 alt_names: &[],
-                description: "Reset to defaults",
+                description: "Reset preferences (keeps credentials)",
                 category: "Config",
                 sub_commands: &[],
             },
             SlashCommand {
                 name: "export",
                 alt_names: &[],
-                description: "Export config",
+                description: "Export a redacted config snapshot",
                 category: "Config",
                 sub_commands: &[],
             },
@@ -1479,6 +1514,55 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         alt_names: &[],
         description: "Add an extra working directory to the session",
         category: "Session",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "cd",
+        alt_names: &[],
+        description: "Move this session to a new working directory, keeping the conversation",
+        category: "Session",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "branch",
+        alt_names: &[],
+        description: "Branch the current conversation and switch into the new branch",
+        category: "Session",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "list-agents",
+        alt_names: &[],
+        description: "List subagents and background agents with their status",
+        category: "Automation",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "subtask",
+        alt_names: &[],
+        description: "Fork this conversation into a background subagent",
+        category: "Automation",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "reload-skills",
+        alt_names: &[],
+        description: "Rescan project and user skills and report added or removed ones",
+        category: "Automation",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "team-onboarding",
+        alt_names: &[],
+        description: "Build a team onboarding guide from recent local history",
+        category: "Automation",
+        sub_commands: &[],
+    },
+    SlashCommand {
+        name: "autocompact",
+        alt_names: &[],
+        description: "Show or set the automatic compaction threshold",
+        category: "Config",
         sub_commands: &[],
     },
     SlashCommand {
@@ -2201,6 +2285,21 @@ pub fn is_declared_pending(name: &str) -> bool {
         .any(|c| c.name == name && c.category == "Pending")
 }
 
+/// Bare subcommand-style commands should do something useful instead of
+/// printing a clap "subcommand required" error. Claude Code opens a manager for
+/// these; our text-mode equivalent is the read-only listing (or memory view).
+pub(crate) fn default_subcommand_args(name: &str, args: Vec<String>) -> Vec<String> {
+    if !args.is_empty() {
+        return args;
+    }
+    let default = match name {
+        "memory" => "show",
+        "agents" | "hooks" | "skills" => "list",
+        _ => return args,
+    };
+    vec![default.to_string()]
+}
+
 /// 命令解析结果
 #[derive(Debug, Clone)]
 pub struct ParsedCommand {
@@ -2253,14 +2352,182 @@ pub fn parse_command(input: &str) -> Option<ParsedCommand> {
         }
     }
 
-    found_command.map(|cmd| {
-        let args = parts
-            .get(consumed_parts..)
-            .map(|s| s.join(" "))
-            .unwrap_or_default();
-
+    found_command.map(|_cmd| {
+        // Keep the *original* remainder instead of re-joining split words.
+        // Re-joining collapsed runs of spaces and kept quotes attached, so
+        // `/memory add "fact  with  spaces"` could never reach the command
+        // intact even though Claude Code treats the trailing text as arguments.
+        let args = remainder_after_words(without_slash, consumed_parts).to_string();
         ParsedCommand { path, args }
     })
+}
+
+/// Return the substring after the first `words` whitespace-delimited words,
+/// preserving the original spacing and quoting of the remainder.
+fn remainder_after_words(input: &str, words: usize) -> &str {
+    let mut remaining = input;
+    for _ in 0..words {
+        remaining = remaining.trim_start();
+        match remaining.find(char::is_whitespace) {
+            Some(index) => remaining = &remaining[index..],
+            None => return "",
+        }
+    }
+    remaining.trim_start()
+}
+
+/// Split command arguments the way a shell would for the common cases:
+/// whitespace separates tokens, single/double quotes group text, and an empty
+/// quoted string is a real (empty) argument. Backslashes are left alone so
+/// Windows paths such as `C:\work\file.rs` survive.
+///
+/// A quote in the middle of a word only opens a quoted section when a matching
+/// closing quote exists. Natural-language args such as `/memory add don't
+/// forget users' notes` therefore keep their apostrophes instead of treating
+/// the rest of the line as an unterminated shell quote.
+pub fn split_command_args(args: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut token_started = false;
+
+    for (index, ch) in args.char_indices() {
+        match quote {
+            Some(delimiter) if ch == delimiter => {
+                quote = None;
+                token_started = true;
+            }
+            Some(_) => {
+                current.push(ch);
+                token_started = true;
+            }
+            None if ch == '\'' || ch == '"' => {
+                let rest = &args[index + ch.len_utf8()..];
+                let previous = current.chars().next_back();
+                // An apostrophe inside a word is almost always a contraction
+                // (`don't`, `user's`) rather than the start of a quoted arg.
+                // Allow it only after an assignment/separator, or at token start.
+                let can_open = ch == '"'
+                    || previous.is_none()
+                    || matches!(previous, Some('=') | Some(':') | Some(','));
+                if rest.contains(ch) && (!token_started || can_open) {
+                    quote = Some(ch);
+                } else {
+                    // No closing quote: keep it as literal text instead of
+                    // swallowing the rest of the line.
+                    current.push(ch);
+                }
+                token_started = true;
+            }
+            None if ch.is_whitespace() => {
+                if token_started {
+                    result.push(std::mem::take(&mut current));
+                    token_started = false;
+                }
+            }
+            None => {
+                current.push(ch);
+                token_started = true;
+            }
+        }
+    }
+
+    if token_started {
+        result.push(current);
+    }
+    result
+}
+
+/// Convert a parsed command into the argument vector `handle_command` expects.
+///
+/// Subcommand path segments (`config set`) are arguments too, because dispatch
+/// only looks at `path[0]`. The raw trailing text is quote-aware.
+pub fn parsed_command_args(parsed: &ParsedCommand) -> Vec<String> {
+    let mut args = parsed.path[1..].to_vec();
+    args.extend(split_command_args(&parsed.args));
+    args
+}
+
+/// Resolve a command path (`["config", "set"]`) against `ALL_COMMANDS`.
+///
+/// Both canonical names and aliases are accepted at every level, so
+/// `/help compact` finds `compress` and `/help ?` finds `help`.
+pub(crate) fn find_command_path(
+    parts: &[String],
+) -> Option<(&'static SlashCommand, Vec<&'static str>)> {
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut current = ALL_COMMANDS;
+    let mut found = None;
+    let mut path = Vec::new();
+
+    for part in parts {
+        let matched = current.iter().find(|cmd| {
+            cmd.name.eq_ignore_ascii_case(part)
+                || cmd
+                    .alt_names
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(part))
+        })?;
+        found = Some(matched);
+        path.push(matched.name);
+        current = matched.sub_commands;
+    }
+
+    found.map(|cmd| (cmd, path))
+}
+
+/// Detailed help for one command. Previously `/help <command>` ignored the
+/// argument and just reopened the palette, so there was no way to ask what a
+/// command does or which subcommands it has.
+pub(crate) fn render_command_help(cmd: &SlashCommand, path: &[&str]) -> String {
+    let usage_path = if path.is_empty() {
+        cmd.name.to_string()
+    } else {
+        path.join(" ")
+    };
+    let mut lines = vec![
+        format!("# /{}", usage_path),
+        String::new(),
+        cmd.description.to_string(),
+        String::new(),
+        format!("**Category:** {}", cmd.category),
+        format!(
+            "**Usage:** `/{}{}`",
+            usage_path,
+            if cmd.sub_commands.is_empty() {
+                " [args]"
+            } else {
+                " <subcommand>"
+            }
+        ),
+    ];
+
+    if !cmd.alt_names.is_empty() {
+        lines.push(format!(
+            "**Aliases:** {}",
+            cmd.alt_names
+                .iter()
+                .map(|alias| format!("`/{}`", alias))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    if !cmd.sub_commands.is_empty() {
+        lines.push(String::new());
+        lines.push("**Subcommands:**".to_string());
+        for sub in cmd.sub_commands {
+            lines.push(format!(
+                "- `/{} {}` — {}",
+                usage_path, sub.name, sub.description
+            ));
+        }
+    }
+
+    lines.join("\n")
 }
 
 fn format_command_hint(prefix: &str, cmd: &SlashCommand) -> String {
@@ -2290,7 +2557,11 @@ fn command_candidates(input: &str) -> (String, Vec<&'static SlashCommand>) {
     let mut consumed = 0;
 
     for (idx, part) in parts.iter().enumerate() {
-        let matched = current_commands.iter().find(|cmd| cmd.name == *part);
+        // Mirror parse_command: aliases are real command spellings, so
+        // `/remember ` must descend into memory's subcommands too.
+        let matched = current_commands
+            .iter()
+            .find(|cmd| cmd.name == *part || cmd.alt_names.iter().any(|alias| alias == part));
 
         if let Some(cmd) = matched {
             consumed = idx + 1;
@@ -2560,6 +2831,35 @@ mod tests {
         );
     }
 
+    /// 声明在 `ALL_COMMANDS` 却没有 dispatch 的命令会出现在 `/help` 与补全里，
+    /// 输入时却报 `Unknown command`。这里嵌入顶层 dispatch 源码做静态检查：
+    /// 每个名字（或别名）都必须出现在一个非注释、带 `=>` 的 match 行里。
+    #[test]
+    fn every_top_level_command_has_a_dispatch_literal() {
+        const DISPATCH_SOURCE: &str = include_str!("mod.rs");
+        let missing: Vec<&str> = ALL_COMMANDS
+            .iter()
+            .filter(|command| {
+                let labels = std::iter::once(command.name).chain(command.alt_names.iter().copied());
+                !labels.into_iter().any(|label| {
+                    let literal = format!("\"{}\"", label);
+                    DISPATCH_SOURCE.lines().any(|line| {
+                        let trimmed = line.trim_start();
+                        !trimmed.starts_with("//")
+                            && line.contains(&literal)
+                            && (line.contains("=>") || line.contains("simple_command_wrapper"))
+                    })
+                })
+            })
+            .map(|command| command.name)
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "declared but not dispatched in commands/mod.rs: {:?}",
+            missing
+        );
+    }
+
     /// 曾经被误放进 `/chat` 的 sub_commands 里的那批命令必须留在顶层：`chat::run`
     /// 只认 save/resume/list/delete/share，放在那里既补全出死路径又在 /help 里隐身。
     #[test]
@@ -2576,6 +2876,254 @@ mod tests {
                 name
             );
         }
+    }
+
+    /// 裸 `/memory`、`/agents`、`/hooks`、`/skills` 在 Claude Code 里都会打开
+    /// 对应的管理界面，至少不能掉进 clap 的 "subcommand required" 报错。
+    #[test]
+    fn bare_subcommand_commands_get_a_safe_default() {
+        assert_eq!(
+            default_subcommand_args("memory", Vec::new()),
+            vec!["show".to_string()]
+        );
+        for name in ["agents", "hooks", "skills"] {
+            assert_eq!(
+                default_subcommand_args(name, Vec::new()),
+                vec!["list".to_string()],
+                "{name}"
+            );
+        }
+        assert_eq!(
+            default_subcommand_args("agents", vec!["create".to_string()]),
+            vec!["create".to_string()],
+            "explicit args must pass through untouched"
+        );
+        assert!(
+            default_subcommand_args("model", Vec::new()).is_empty(),
+            "commands without a default stay untouched"
+        );
+    }
+
+    /// Claude Code 的主要 `/` 指令必须都能被解析到，而且别名要落到真实 handler
+    /// 对应的规范名上。否则补全里看得见、输入后却报 Unknown command。
+    #[test]
+    fn main_claude_code_commands_resolve_to_canonical_names() {
+        let cases = [
+            ("/help", "help"),
+            ("/clear", "clear"),
+            ("/new", "clear"),
+            ("/reset", "clear"),
+            ("/compact", "compress"),
+            ("/config", "config"),
+            ("/settings", "config"),
+            ("/model", "models"),
+            ("/permissions", "permissions"),
+            ("/memory", "memory"),
+            ("/init", "init"),
+            ("/status", "status"),
+            ("/cost", "cost"),
+            ("/usage", "cost"),
+            ("/context", "context"),
+            ("/doctor", "doctor"),
+            ("/checkup", "doctor"),
+            ("/review", "review"),
+            ("/plan", "plan"),
+            ("/resume", "resume"),
+            ("/export", "export"),
+            ("/import", "import"),
+            ("/rewind", "rewind"),
+            ("/agents", "agents"),
+            ("/hooks", "hooks"),
+            ("/skills", "skills"),
+            ("/plugin", "plugin"),
+            ("/theme", "theme"),
+            ("/login", "login"),
+            ("/logout", "logout"),
+            ("/add-dir", "add-dir"),
+            ("/cd", "cd"),
+            ("/branch", "branch"),
+            ("/list-agents", "list-agents"),
+            ("/reload-skills", "reload-skills"),
+            ("/autocompact", "autocompact"),
+            ("/todos", "tasks"),
+            ("/continue", "continue"),
+            ("/fork", "fork"),
+            ("/recap", "recap"),
+            ("/summary", "summary"),
+            ("/output-style", "output-style"),
+            ("/effort", "effort"),
+            ("/fast", "fast"),
+            ("/goal", "goal"),
+            ("/insights", "insights"),
+            ("/tui", "tui"),
+            ("/bug", "bug"),
+            ("/feedback", "feedback"),
+            ("/release-notes", "release-notes"),
+            ("/statusline", "statusline"),
+            ("/pr-comments", "pr-comments"),
+            ("/security-review", "security-review"),
+            ("/simplify", "simplify"),
+            ("/run", "run"),
+            ("/tasks", "tasks"),
+            ("/workflows", "workflows"),
+            ("/bashes", "bashes"),
+            ("/lint", "lint"),
+            ("/upgrade", "upgrade"),
+            ("/ide", "ide"),
+            ("/teleport", "teleport"),
+            ("/sandbox", "sandbox"),
+            ("/schedule", "schedule"),
+            ("/tag", "tag"),
+            ("/keybindings", "keybindings"),
+            ("/reload-plugins", "reload-plugins"),
+            ("/env", "env"),
+            ("/history", "history"),
+            ("/mode", "mode"),
+            ("/quit", "quit"),
+            ("/copy", "copy"),
+            ("/diff", "diff"),
+            ("/files", "files"),
+            ("/rename", "rename"),
+            ("/mcp", "mcp"),
+        ];
+
+        for (input, canonical) in cases {
+            let parsed =
+                parse_command(input).unwrap_or_else(|| panic!("`{input}` is not recognized"));
+            assert_eq!(
+                parsed.path.first().map(String::as_str),
+                Some(canonical),
+                "`{input}` must dispatch as `/{canonical}`"
+            );
+        }
+    }
+
+    /// `/branch` is now a top-level conversation command, while `/git branch`
+    /// must keep resolving to the nested Git command instead of being shadowed.
+    #[test]
+    fn conversation_branch_does_not_shadow_git_branch() {
+        let conversation = parse_command("/branch try-a-different-approach").unwrap();
+        assert_eq!(
+            conversation.path,
+            vec!["branch".to_string()],
+            "`/branch` must dispatch to the conversation branch command"
+        );
+
+        let git = parse_command("/git branch").unwrap();
+        assert_eq!(
+            git.path,
+            vec!["git".to_string(), "branch".to_string()],
+            "`/git branch` must keep resolving to the nested Git command"
+        );
+    }
+
+    /// Claude Code 把命令名之后的原文当作参数；引号要成组，多个空格不能被压平。
+    #[test]
+    fn command_arguments_preserve_quotes_and_spacing() {
+        assert_eq!(
+            split_command_args("one  two"),
+            vec!["one".to_string(), "two".to_string()]
+        );
+        assert_eq!(
+            split_command_args("\"fact  with  spaces\" tail"),
+            vec!["fact  with  spaces".to_string(), "tail".to_string()]
+        );
+        assert_eq!(
+            split_command_args("'single quoted' C:\\work\\file.rs"),
+            vec!["single quoted".to_string(), "C:\\work\\file.rs".to_string()]
+        );
+        assert_eq!(
+            split_command_args("\"\""),
+            vec![String::new()],
+            "an explicitly empty argument must not disappear"
+        );
+        assert_eq!(
+            split_command_args("unclosed \"rest of text"),
+            vec![
+                "unclosed".to_string(),
+                "\"rest".to_string(),
+                "of".to_string(),
+                "text".to_string()
+            ],
+            "an unmatched quote must stay literal instead of eating the line"
+        );
+        assert_eq!(
+            split_command_args("don't break the user's API"),
+            vec![
+                "don't".to_string(),
+                "break".to_string(),
+                "the".to_string(),
+                "user's".to_string(),
+                "API".to_string()
+            ],
+            "apostrophes in contractions and possessives are not shell quotes"
+        );
+        assert_eq!(
+            split_command_args("output=\"two words\""),
+            vec!["output=two words".to_string()],
+            "quoted values still group, including after ="
+        );
+
+        let parsed = parse_command("/config set model gpt-5").unwrap();
+        assert_eq!(parsed.path, vec!["config", "set"]);
+        assert_eq!(parsed.args, "model gpt-5");
+        assert_eq!(
+            parsed_command_args(&parsed),
+            vec!["set".to_string(), "model".to_string(), "gpt-5".to_string()]
+        );
+
+        let parsed = parse_command("/memory add \"fact  with  spaces\"").unwrap();
+        assert_eq!(
+            parsed_command_args(&parsed),
+            vec!["add".to_string(), "fact  with  spaces".to_string()],
+            "memory text must reach the writer exactly as typed"
+        );
+
+        let parsed = parse_command("/export \"my notes.md\"").unwrap();
+        assert_eq!(parsed.path, vec!["export"]);
+        assert_eq!(
+            parsed_command_args(&parsed),
+            vec!["my notes.md".to_string()]
+        );
+    }
+
+    /// 补全和解析必须用同一套别名规则：`/remember ` 是 `/memory` 的别名，
+    /// 应该继续提示 show/add/refresh，而不是把 "remember" 当模糊搜索词。
+    #[test]
+    fn completion_descends_through_aliases() {
+        let (prefix, candidates) = command_candidates("/remember ");
+        assert_eq!(prefix, "/remember ");
+        let names: Vec<&str> = candidates.iter().map(|cmd| cmd.name).collect();
+        assert!(names.contains(&"add"), "got: {names:?}");
+        assert!(names.contains(&"show"), "got: {names:?}");
+
+        let (prefix, candidates) = command_candidates("/config ");
+        assert_eq!(prefix, "/config ");
+        let names: Vec<&str> = candidates.iter().map(|cmd| cmd.name).collect();
+        assert!(names.contains(&"get"), "got: {names:?}");
+        assert!(names.contains(&"set"), "got: {names:?}");
+    }
+
+    /// 子命令路径也要按别名解析，`/help compact` 才能看到 `/compress` 的说明，
+    /// `/config set` 也才能被 `/help config set` 找到。
+    #[test]
+    fn command_paths_follow_aliases_and_subcommands() {
+        let parts = vec!["compact".to_string()];
+        let (command, path) = find_command_path(&parts).expect("alias resolves");
+        assert_eq!(command.name, "compress");
+        assert_eq!(path, vec!["compress"]);
+
+        let parts = vec!["config".to_string(), "set".to_string()];
+        let (command, path) = find_command_path(&parts).expect("nested subcommand resolves");
+        assert_eq!(command.name, "set");
+        assert_eq!(path, vec!["config", "set"]);
+
+        let parts = vec![
+            "config".to_string(),
+            "definitely-not-a-subcommand".to_string(),
+        ];
+        assert!(find_command_path(&parts).is_none());
+        assert!(find_command_path(&[]).is_none());
     }
 
     /// `category: "Pending"` 是"已声明未实现"的哨兵；本轮补齐后不应再有残留。

@@ -8,6 +8,21 @@ pub async fn help(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
         return Ok(());
     }
 
+    // /help <command> — 打印该命令的说明与子命令；裸 /help 仍打开命令面板。
+    if !args.is_empty() {
+        let message = match crate::commands::system::find_command_path(&args) {
+            Some((command, path)) => crate::commands::system::render_command_help(command, &path),
+            None => format!(
+                "Unknown command: `{}`.\n\nRun `/help` to browse all commands.",
+                args.join(" ")
+            ),
+        };
+        ctx.state
+            .chat_history
+            .push(ChatEntry::assistant(message).with_streaming(false));
+        return Ok(());
+    }
+
     // 默认：打开可搜索的命令面板（分类 + 描述），替代 150 行文字倾倒
     ctx.state.show_help = false;
     ctx.state.palette_history.clear();
@@ -16,11 +31,166 @@ pub async fn help(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
     Ok(())
 }
 
-pub async fn clear(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn bare_help_opens_the_command_palette() {
+        let mut state = crate::ui::state::ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        help(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            state.palette_mode,
+            crate::ui::state::palette::PaletteMode::Help
+        );
+        assert!(
+            state.chat_history.iter().all(|entry| entry.is_welcome),
+            "bare /help must not append a text dump"
+        );
+    }
+
+    #[tokio::test]
+    async fn help_with_a_command_prints_details_instead_of_opening_the_palette() {
+        let mut state = crate::ui::state::ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        help(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            vec!["config".to_string()],
+        )
+        .await
+        .unwrap();
+
+        assert_ne!(
+            state.palette_mode,
+            crate::ui::state::palette::PaletteMode::Help
+        );
+        let reply = state
+            .chat_history
+            .last()
+            .expect("command details")
+            .content
+            .clone();
+        assert!(reply.contains("# /config"));
+        assert!(reply.contains("**Subcommands:**"));
+        assert!(reply.contains("/config set"));
+    }
+
+    #[tokio::test]
+    async fn help_with_an_alias_resolves_to_the_canonical_command() {
+        let mut state = crate::ui::state::ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        help(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            vec!["compact".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let reply = &state.chat_history.last().expect("command details").content;
+        assert!(reply.contains("# /compress"), "got: {reply}");
+        assert!(reply.contains("`/compact`"));
+    }
+
+    #[tokio::test]
+    async fn help_with_an_unknown_command_explains_the_mistake() {
+        let mut state = crate::ui::state::ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        help(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            vec!["definitely-not-a-command".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let reply = &state.chat_history.last().expect("error message").content;
+        assert!(reply.contains("Unknown command"));
+        assert!(reply.contains("/help"));
+    }
+
+    #[tokio::test]
+    async fn clear_remembers_the_requested_name_only_until_confirmation() {
+        let mut state = crate::ui::state::ChatState::new();
+        state
+            .chat_history
+            .push(crate::types::ChatEntry::user("keep this"));
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        clear(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            vec!["my".to_string(), "checkpoint".to_string()],
+        )
+        .await
+        .unwrap();
+
+        assert!(state.show_clear_confirmation);
+        assert_eq!(state.pending_clear_name.as_deref(), Some("my checkpoint"));
+
+        state.show_clear_confirmation = false;
+        clear(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.pending_clear_name, None);
+        assert!(state.show_clear_confirmation);
+    }
+
+    #[tokio::test]
+    async fn clear_on_an_empty_session_does_not_open_confirmation() {
+        let mut state = crate::ui::state::ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        clear(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            vec!["ignored".to_string()],
+        )
+        .await
+        .unwrap();
+
+        assert!(!state.show_clear_confirmation);
+        assert_eq!(state.pending_clear_name, None);
+    }
+}
+
+pub async fn clear(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     // Show confirmation before clearing (like Claude Code)
     if ctx.state.chat_history.iter().any(|e| !e.is_welcome) {
+        ctx.state.pending_clear_name = if args.is_empty() {
+            None
+        } else {
+            Some(args.join(" "))
+        };
         ctx.state.show_clear_confirmation = true;
     } else {
+        ctx.state.pending_clear_name = None;
         // Nothing to clear
         ctx.state.current_status_line = Some(
             crate::core::i18n::t(

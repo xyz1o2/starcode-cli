@@ -1748,6 +1748,21 @@ async fn handle_inline_confirm(
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 state.show_clear_confirmation = false;
+                let saved =
+                    match crate::commands::chat::save_conversation_for_clear(state, agent_tx).await
+                    {
+                        Ok(saved) => saved,
+                        Err(error) => {
+                            state.current_status_line = Some(format!(
+                                "Conversation kept: it could not be saved before clearing ({})",
+                                error
+                            ));
+                            return Ok(());
+                        }
+                    };
+                state.pending_clear_name = None;
+                state.active_session_id = None;
+                state.current_session_title = None;
                 state.chat_history.clear();
                 // 会话已重置，上下文读数必须一起归零：否则新会话首轮会顶着一个
                 // 与空历史矛盾的旧基线，直到下一次 provider usage 到来。
@@ -1758,13 +1773,19 @@ async fn handle_inline_confirm(
                 let _ = agent_tx
                     .send(crate::runtime::messages::AgentRequest::ResetSession)
                     .await;
-                state.current_status_line = Some(
-                    crate::core::i18n::t("ui.status.cleared", "对话已清除", "Conversation cleared")
-                        .to_string(),
-                );
+                state.current_status_line = Some(match saved {
+                    Some(id) => format!("Conversation cleared. Previous saved as `{}`.", id),
+                    None => crate::core::i18n::t(
+                        "ui.status.cleared",
+                        "对话已清除",
+                        "Conversation cleared",
+                    )
+                    .to_string(),
+                });
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 state.show_clear_confirmation = false;
+                state.pending_clear_name = None;
             }
             _ => {}
         }
@@ -5300,5 +5321,89 @@ mod tests {
             "fast-model"
         );
         assert!(state.runtime_settings_persistence.is_none());
+    }
+
+    #[tokio::test]
+    async fn confirming_clear_saves_the_label_then_resets_identity() {
+        let mut state = ChatState::test_fixture();
+        state.chat_history = vec![crate::types::ChatEntry::user("previous turn")];
+        state.show_clear_confirmation = true;
+        state.pending_clear_name = Some(format!(
+            "clear-checkpoint-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        state.active_session_id = Some("active-session".to_string());
+        state.current_session_title = Some("Active".to_string());
+        state.token_usage = Some(crate::types::StarUsage {
+            total_tokens: 17,
+            ..Default::default()
+        });
+
+        let (agent_tx, mut agent_rx) = mpsc::channel(4);
+        let worker = tokio::spawn(async move {
+            match agent_rx.recv().await.expect("save request") {
+                AgentRequest::SaveSession {
+                    id,
+                    history,
+                    last_usage,
+                    response,
+                } => {
+                    assert!(id.starts_with("clear-checkpoint-"), "got {id}");
+                    assert_eq!(history.len(), 1);
+                    assert_eq!(last_usage.map(|usage| usage.total_tokens), Some(17));
+                    response.send(Ok(())).await.unwrap();
+                }
+                request => panic!("expected SaveSession, got {request:?}"),
+            }
+            assert!(matches!(
+                agent_rx.recv().await.expect("reset request"),
+                AgentRequest::ResetSession
+            ));
+        });
+
+        handle_inline_confirm(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+
+        assert!(!state.show_clear_confirmation);
+        assert!(state.chat_history.is_empty());
+        assert_eq!(state.active_session_id, None);
+        assert_eq!(state.current_session_title, None);
+        assert_eq!(state.pending_clear_name, None);
+        assert!(state.token_usage.is_none());
+        assert!(state
+            .current_status_line
+            .as_deref()
+            .unwrap()
+            .contains("Previous saved as"));
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_clear_keeps_history_and_drops_the_pending_label() {
+        let mut state = ChatState::test_fixture();
+        state.chat_history = vec![crate::types::ChatEntry::user("keep me")];
+        state.show_clear_confirmation = true;
+        state.pending_clear_name = Some("unused".to_string());
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+
+        handle_inline_confirm(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+
+        assert!(!state.show_clear_confirmation);
+        assert_eq!(state.chat_history.len(), 1);
+        assert_eq!(state.pending_clear_name, None);
     }
 }

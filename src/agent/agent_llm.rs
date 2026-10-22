@@ -152,7 +152,7 @@ impl Agent {
                 let original_messages = request_messages.clone();
                 match self
                     .context_compressor
-                    .force_compress(request_messages.clone(), Some(&self.client))
+                    .force_compress(request_messages.clone(), Some(&self.client), None)
                     .await
                 {
                     Ok(compression_result) => {

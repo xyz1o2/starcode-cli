@@ -348,7 +348,54 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | 帮助文案把 Tab 说成补全 | `ui/components/help_popup.rs`、`events/keymap.rs` | 按真实行为改写；键表文档补上"两个搜索键的分工" |
 | `/eval` 是悬空声明 | `commands/system.rs` | 声明删除，并加测试记录历史悬空命令名单 |
 
-lib 套件 914 全绿，`cargo fmt --check` 绿，本次改动范围内 clippy 无新增告警。
+lib 套件 1244 全绿，`cargo fmt --check` 绿，本次改动范围内 clippy 无新增告警。
+
+### ✅ 斜杠命令主路径（2026-10-22）
+
+这一轮按官方 Commands reference 对齐**本地主命令**，不照搬 bundled skills、云会话和
+平台集成。原则是：命令必须落到真实状态变更，不能只回一段占位文案；每条新增行为
+都要有 handler 级测试，而不只是解析测试。
+
+| 命令 | 实现语义 | 测试覆盖 |
+|---|---|---|
+| `/autocompact [auto\|on\|off\|<tokens>]` | 写入 self-tuning 覆盖层（`compact.max_tokens` / `compact.auto_enabled`），压缩管理器和 legacy auto-summary 都读同一开关；下一次 loop 生效，跨会话持久化。用户写入绕过模型自调预算，但仍受 operator lock 和取值校验约束 | 单位解析（`200k` / `1m` / 分隔符 / 越界）、状态格式、`set_user` 不消耗模型预算 |
+| `/clear [name]`（别名 `/new`、`/reset`） | 确认后先把上一段对话保存为 `<name>`（或复用 active ID / 时间戳 ID），再清空 UI、清掉会话身份并 `ResetSession`。保存失败则保留对话并提示，避免静默丢历史 | 命名、active ID、自动 ID、失败保留、y/n 确认与状态重置 |
+| `/cd <path>` | worker 侧原子切换 OS cwd、缓存根、memory manager、插件工具；下一轮懒重建 context engine。turn 进行中拒绝；旧项目 active session 身份释放，避免保存到新项目 | 相对/绝对路径、文件/不存在/空参数、worker 成功与拒绝、状态释放 |
+| `/branch [name]` | 先保存 original，再保存 branch，随后切到 branch；名字经过文件名安全化并避开已有会话和 active ID。branch 保存失败时不切换，并在必要时恢复 original 身份 | 两次 SaveSession 顺序、ID 冲突、active 冲突、失败不切换、名字边界 |
+| `/list-agents [all]` | 默认列 background agent，`all` 包含前台 subagent；输出 name/type、任务、状态、耗时、工具数、tokens，并指向 `/tasks` 与 `/peers` | background 过滤、`all` 前后台合并、字段渲染 |
+| `/subtask <task>` | worker 侧 fork 当前会话：把父会话的完整 `StarMessage` 上下文和 pending 本地输出装进后台子代理，再追加任务 prompt。结果写入 `.star/subagent_outputs/<agent>.txt`，通过既有 `<task-notification>` 回注下一轮，UI 走 AgentTaskUpdate。回合进行中到达时延迟到回合结束后启动，避免 fork 到半截上下文 | 父上下文与 pending 输出透传、命令请求/响应、空任务、启动失败、流式回合延迟启动 |
+| `/reload-skills` | 直接重扫 project/user skill 目录，基线写入 `.star/skills-reload.json`；之后报告 added/removed。发现本身不缓存，重扫后 `/skills list`/`show` 立即反映磁盘 | 真实临时 skill 目录增删、排序 diff、snapshot round-trip、损坏基线回退 |
+| `/compact [instructions]` | 焦点文本随 `AgentRequest::Compress` 送入压缩器，自动压缩仍传 `None`；保留规则/记忆/skills 的既有语义 | dispatch 参数、压缩 prompt |
+| `/config`（别名 `/settings`） | `show/get/set/key=value/reset/export/import/lang/help`；export 递归脱敏，reset/import 只作用于偏好，不碰 provider 密钥 | 命令解析、脱敏、导入导出、别名与帮助 |
+| `/copy [N]` | 1-based 选择最近第 N 条 assistant 回复；无参数复制最后一条 | 选择与空历史 |
+| `/import [codex\|gemini\|cursor] [--dry-run] [--yes]` | 发现并导入其他 CLI 的配置：MCP server 合并进项目 `.star/mcp.json`；全局/项目指令写入 `~/.star/STAR.md` 或 `.star/STAR.md` 的 source 标记块；prompt/command 转成 `.star/skills/<name>/SKILL.md`；skill 目录保留原有 frontmatter 并复制 `references/`、`scripts/` 等附属文件；agent 定义写入 `.star/agents/<name>.md`。默认只预览，`--yes` 才写入；同名 MCP/skill/agent 不覆盖，重复导入幂等，预览不打印 MCP 环境变量 | Codex TOML / Gemini+Cursor JSON MCP 解析、Codex TOML agent、Gemini/Cursor Markdown agent、skill 目录附属文件、managed block 替换、dry-run 不落盘、二次导入幂等、用户改过的 skill 不覆盖、密钥不进预览 |
+| `/memory add <text>` | 直接写入 `.star/memory.md`，不经过 clap 的 subcommand 报错 | 写入与 bare `/memory` 默认视图 |
+| `/fewer-permission-prompts [--days N] [--min-count N] [--yes]` | 扫描本项目的 saved session / `.star/transcript.jsonl`，只统计重复出现的只读 Bash 与 MCP 调用；排除复合命令、重定向、命令替换、`find -exec`、`grep --pre` 与带写动词的 MCP 工具。默认预览，`--yes` 才写入 `.star/settings.local.json` 并发送 `ReloadPermissions`；已有 allow 只报告，ask/deny 覆盖的候选不提出 | 参数解析、Bash/MCP 分类器、ask/deny/allow 过滤与排序、预览不泄露命令参数、apply 只写 local 层且幂等 |
+| `/team-onboarding [--days N] [--write]` | 从项目 marker 识别 Cargo/Node/Python/Go/Maven/Gradle/Make/CMake 的安装、构建、测试、lint、运行命令；复用活动扫描器汇总 slash command、MCP server、工具与高频文件，生成可直接粘贴的首条消息。默认只输出，`--write` 写 `.star/team-onboarding.md`；绝对路径和项目外路径不会进入指南 | 项目类型识别、活动聚合、无历史降级、首条消息、路径脱敏、写入文件 |
+| `/verify [target]` | 向 agent 发送端到端验证 prompt：要求实际启动 app/service、驱动改动路径并记录可观察证据，不能只读代码或跑静态检查；无法启动时报告准确阻塞并回退到最接近的可执行检查；除非用户要求不修改文件 | prompt 必须包含运行时证据/阻塞/PASS-FAIL 约束，handler 确认发送 `SendMessage` 并显示 started 状态 |
+
+**刻意保留的差异**（不是待办占位）：
+
+- `/background`、`/bg`、`/stop`、`/fork` 的完整形态依赖后台 daemon / attach 生命周期；
+  StarCode 目前只有进程内 fork 快照，`/detach` 也仍是诚实占位。没有 daemon 就宣称
+  “已转后台”会制造第二个真相。`/fork` 仍是保存会话快照，不会创建新的 agent 进程。
+- `/subtask` 已经是真实的 forked subagent：继承完整会话、后台执行、结果回注。它与官方
+  的差异在会话所有权：StarCode 在同一个进程内复用 `AsyncSubagentRunner`，不会创建
+  独立 OS 进程或 git worktree；完成通知在父会话下一轮开始时注入。
+- `.star/skills` 下的自定义 markdown 目前是 authoring/list 资源；agent 的 `SkillTool`
+  暴露内建与 `.star/agents` 自定义 subagent，也支持按本地路径加载外部 skill，但不会
+  把 `.star/skills` 自动注入系统提示。因此 `/reload-skills` 是真实的 rescan + diff，
+  不是热更新 agent 工具 schema。
+- `/focus` 是 fullscreen 渲染专属；`/batch`、`/deep-research`、`/design*` 等仍是
+  bundled/cloud workflow，不由本地内置命令冒充。`/verify` 与 `/simplify` 已作为本地
+  agent prompt 实现；`/verify` 只负责驱动与取证，不依赖云端 verify 服务。
+- `/fewer-permission-prompts` 与 `/team-onboarding` 在官方是 bundled skill，这里改成
+  可离线运行的确定性实现：前者只提出可审计的本地规则，后者只汇总本地历史与项目
+  marker，都不把项目内容上传给模型。
+- `/import` 只导入可验证的本地配置（MCP、指令、Codex prompt / Gemini & Cursor command）。
+  它不复制凭据，也不假装导入 provider 登录态；同名冲突保留 StarCode 现有定义。
+- `/list-agents` 只列 StarCode 自己追踪的 subagent；跨会话 mailbox 仍由 `/peers` 负责，
+  输出里明确指向它，避免把两类“agent”混成一张表。
 
 ### 待做
 

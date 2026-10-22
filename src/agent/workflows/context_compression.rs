@@ -57,6 +57,30 @@ pub struct ContextCompressor {
     buffer_tokens: usize,
 }
 
+/// Build the summarization prompt. `/compact <instructions>` asks the model to
+/// keep specific details (for example "focus on the API changes"); automatic
+/// compaction passes `None` and gets exactly the old prompt.
+fn build_summary_prompt(
+    au2_prompt: &str,
+    history_text: &str,
+    instructions: Option<&str>,
+) -> String {
+    let focus = instructions
+        .map(str::trim)
+        .filter(|instructions| !instructions.is_empty())
+        .map(|instructions| {
+            format!(
+                "\n\n## Focus for This Compression:\n{}\nPreserve all details relevant to this focus.",
+                instructions
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "{}{}\n\n## Conversation History:\n{}",
+        au2_prompt, focus, history_text
+    )
+}
+
 impl ContextCompressor {
     /// 直接使用已解析的会话策略；调用方负责选择 Auto / Fixed 和 capability 证据。
     pub fn from_context_policy(
@@ -210,6 +234,7 @@ impl ContextCompressor {
         &self,
         messages: &[StarMessage],
         client: &StarClient,
+        instructions: Option<&str>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let au2_prompt = crate::core::prompts::summary::summary_prompt();
         // Build prompt message
@@ -225,9 +250,10 @@ impl ContextCompressor {
             history_text.push_str(&format!("\n{}: {}{}\n", role, content, tool_info));
         }
 
-        let prompt_message = StarMessage::user(format!(
-            "{}\n\n## Conversation History:\n{}",
-            au2_prompt, history_text
+        let prompt_message = StarMessage::user(build_summary_prompt(
+            &au2_prompt,
+            &history_text,
+            instructions,
         ));
 
         let response = client.chat(vec![prompt_message], None, None, None).await?;
@@ -246,6 +272,7 @@ impl ContextCompressor {
         &self,
         messages: Vec<StarMessage>,
         client: Option<&StarClient>,
+        instructions: Option<&str>,
     ) -> Result<CompressionResult, Box<dyn std::error::Error + Send + Sync + 'static>> {
         let total_tokens = self.calculate_tokens(&messages);
 
@@ -284,7 +311,7 @@ impl ContextCompressor {
         if let Some(client) = client {
             let messages_to_summarize = &messages[0..split_idx];
             if let Ok(generated_summary) = self
-                .generate_au2_summary(messages_to_summarize, client)
+                .generate_au2_summary(messages_to_summarize, client, instructions)
                 .await
             {
                 summary_text = generated_summary;
@@ -432,7 +459,7 @@ impl ContextCompressor {
         if let Some(client) = client {
             let messages_to_summarize = &messages_l1[0..split_idx];
             if let Ok(generated_summary) = self
-                .generate_au2_summary(messages_to_summarize, client)
+                .generate_au2_summary(messages_to_summarize, client, None)
                 .await
             {
                 summary_text = generated_summary;
@@ -485,5 +512,46 @@ impl ContextCompressor {
             threshold_tokens: threshold,
             decision: "level2_summary",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SUMMARY_PROMPT: &str = "Summarize this conversation.";
+    const HISTORY: &str = "user: hello\nassistant: hi";
+
+    #[test]
+    fn automatic_compaction_uses_the_original_prompt() {
+        let prompt = build_summary_prompt(SUMMARY_PROMPT, HISTORY, None);
+        assert_eq!(
+            prompt,
+            "Summarize this conversation.\n\n## Conversation History:\nuser: hello\nassistant: hi"
+        );
+        assert!(!prompt.contains("Focus"));
+    }
+
+    #[test]
+    fn manual_compaction_carries_the_focus_instructions() {
+        let prompt = build_summary_prompt(
+            SUMMARY_PROMPT,
+            HISTORY,
+            Some("  keep the database migration details  "),
+        );
+        assert!(prompt.contains("## Focus for This Compression:"));
+        assert!(prompt.contains("keep the database migration details"));
+        assert!(prompt.contains(HISTORY));
+        assert!(
+            prompt.find("Focus for This Compression").unwrap()
+                < prompt.find("Conversation History").unwrap(),
+            "focus must be stated before the transcript"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_instructions_do_not_add_an_empty_section() {
+        let prompt = build_summary_prompt(SUMMARY_PROMPT, HISTORY, Some("   \n\t"));
+        assert_eq!(prompt, build_summary_prompt(SUMMARY_PROMPT, HISTORY, None));
     }
 }

@@ -862,6 +862,9 @@ pub struct ChatState {
     pub settings_selected_index: usize,
     pub show_scroll_to_bottom: bool,
     pub show_clear_confirmation: bool,
+    /// Optional `/clear <name>` label. Applied only after the user confirms, so
+    /// cancelling does not create a stray session snapshot.
+    pub pending_clear_name: Option<String>,
     pub colorblind_mode: bool,
     pub toast_queue: VecDeque<Toast>,
     pub send_animation_since: Option<Instant>,
@@ -1375,6 +1378,7 @@ impl ChatState {
             settings_selected_index: 0,
             show_scroll_to_bottom: false,
             show_clear_confirmation: false,
+            pending_clear_name: None,
             colorblind_mode: false,
             toast_queue: VecDeque::new(),
             send_animation_since: None,

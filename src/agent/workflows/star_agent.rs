@@ -61,6 +61,35 @@ impl StarAgent {
         self.client.clone()
     }
 
+    /// `/subtask`：fork 当前会话并放到后台执行。
+    ///
+    /// 与普通 AgentTool 后台任务的区别是父会话的 `StarMessage` 会被完整
+    /// 安装到子代理，而不是把历史截断成一段 prompt。子代理使用同一份
+    /// client/provider 与运行时通知队列，因此结果会通过现有的
+    /// `<task-notification>` 通道回到下一轮对话，UI 也能收到 AgentTaskUpdate。
+    pub fn spawn_forked_background_subtask(
+        &self,
+        task: String,
+        description: String,
+    ) -> Result<crate::agent::subagent::runner::AsyncLaunchResult, String> {
+        let config = self.inner.config.clone();
+        let notification_queue = config.runtime_notification_queue().ok_or_else(|| {
+            "Subtask requires an initialized runtime notification queue.".to_string()
+        })?;
+
+        let (messages, pending_context) = self.session_context_snapshot();
+        let request = crate::core::agents::SubAgentRequest::new(task)
+            .with_parent_context(messages, pending_context);
+        let runner = Arc::new(crate::agent::subagent::runner::StarAgentRunner::new(
+            self.client.clone(),
+            config,
+        ));
+        let async_runner =
+            crate::agent::subagent::runner::AsyncSubagentRunner::new(runner, notification_queue);
+
+        Ok(async_runner.spawn_background(request, None, description, "Fork".to_string()))
+    }
+
     fn initial_approval_mode(config: &Config) -> ApprovalMode {
         match config.approval_mode() {
             crate::core::policy::ApprovalMode::Default => ApprovalMode::Default,
@@ -621,8 +650,12 @@ impl StarAgent {
 
     pub async fn compress_context(
         &mut self,
+        instructions: Option<&str>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let result = self.inner.force_compress_session_messages().await?;
+        let result = self
+            .inner
+            .force_compress_session_messages(instructions)
+            .await?;
         if result.messages.is_empty() {
             return Ok("Session context is empty; no compression needed.".to_string());
         }

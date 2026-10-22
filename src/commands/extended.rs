@@ -2,6 +2,7 @@ use crate::commands::execution::{CommandContext, CommandResult};
 use crate::runtime::messages::AgentRequest;
 use crate::types::ChatEntry;
 use arboard::Clipboard;
+use std::path::PathBuf;
 
 fn push_msg(ctx: &mut CommandContext<'_>, content: impl Into<String>) {
     ctx.state
@@ -248,7 +249,10 @@ pub async fn config_show(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Com
         .load_user_settings()
         .await
         .map_err(|e| e.to_string())?;
-    let json = serde_json::to_string_pretty(&settings).unwrap_or_else(|_| "{}".to_string());
+    // Never dump credentials into chat. The snapshot keeps the shape of the
+    // config but replaces API keys/passwords with `[redacted]`.
+    let json = crate::commands::config::redacted_settings_json(&settings)
+        .unwrap_or_else(|_| "{}".to_string());
     push_msg(
         &mut ctx,
         format!("Current configuration:\n```json\n{}\n```", json),
@@ -256,56 +260,32 @@ pub async fn config_show(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Com
     Ok(())
 }
 
-pub async fn config_set(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
-    if args.len() < 2 {
-        push_msg(&mut ctx, "Usage: /config set <key> <value>");
-        return Ok(());
-    }
-    let key = &args[0];
-    let value = &args[1..].join(" ");
-    push_msg(
-        &mut ctx,
-        format!("Set `{}` = `{}`\nNote: Use the settings file at ~/.star/user-settings.json to persist changes.", key, value),
-    );
-    Ok(())
+pub async fn config_set(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    crate::commands::config::set_from_args(ctx, args).await
 }
 
-pub async fn config_reset(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
-    push_msg(
-        &mut ctx,
-        "Configuration reset to defaults.\nNote: Edit ~/.star/user-settings.json to customize.",
-    );
-    Ok(())
+pub async fn config_reset(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
+    crate::commands::config::reset_preferences(ctx).await
 }
 
 pub async fn config_export(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
-    let settings_path = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".star")
-        .join("user-settings.json");
-    if settings_path.exists() {
-        let content = std::fs::read_to_string(&settings_path).unwrap_or_default();
-        push_msg(
-            &mut ctx,
-            format!("Exported configuration:\n```json\n{}\n```", content),
-        );
-    } else {
-        push_msg(&mut ctx, "No configuration file found.");
-    }
+    let settings_mgr = crate::core::config::settings_manager::get_settings_manager()
+        .await
+        .map_err(|e| e.to_string())?;
+    let settings = settings_mgr
+        .load_user_settings()
+        .await
+        .map_err(|e| e.to_string())?;
+    let json = crate::commands::config::redacted_settings_json(&settings)?;
+    push_msg(
+        &mut ctx,
+        format!("Exported configuration (redacted):\n```json\n{}\n```", json),
+    );
     Ok(())
 }
 
-pub async fn config_import(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
-    if args.is_empty() {
-        push_msg(&mut ctx, "Usage: /config import <path>");
-        return Ok(());
-    }
-    let path = &args[0];
-    push_msg(
-        &mut ctx,
-        format!("Import configuration from: {}\nNote: Copy the file to ~/.star/user-settings.json manually.", path),
-    );
-    Ok(())
+pub async fn config_import(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    crate::commands::config::import_snapshot(ctx, args).await
 }
 
 // ── Session Commands ──────────────────────────────────────────────
@@ -612,12 +592,15 @@ pub async fn clear_screen(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Co
     Ok(())
 }
 
-pub async fn compact_cmd(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
+pub async fn compact_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     let message_id = ctx.state.next_message_id;
     ctx.state.next_message_id += 1;
     let _ = ctx
         .agent_tx
-        .send(AgentRequest::Compress { message_id })
+        .send(AgentRequest::Compress {
+            message_id,
+            instructions: crate::commands::utility::compact_instructions(&args),
+        })
         .await;
     Ok(())
 }
@@ -1561,6 +1544,373 @@ pub async fn add_dir(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandR
     Ok(())
 }
 
+/// Expand a leading `~` without invoking a shell. Only the current user's home
+/// is supported; `~other` is treated as a literal relative path.
+fn expand_cd_home(raw: &str) -> PathBuf {
+    if raw == "~" || raw.starts_with("~/") || raw.starts_with("~\\") {
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            let mut path = std::path::PathBuf::from(home);
+            if raw.len() > 1 {
+                path.push(raw[2..].trim_start_matches(|c| c == '/' || c == '\\'));
+            }
+            return path;
+        }
+    }
+    std::path::PathBuf::from(raw)
+}
+
+/// Resolve `/cd` input against the current directory and require a real
+/// directory. Kept pure so tests do not need to move the process cwd.
+fn resolve_cd_target(raw: &str, base: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Usage: `/cd <path>`".to_string());
+    }
+
+    let expanded = expand_cd_home(trimmed);
+    let candidate = if expanded.is_absolute() {
+        expanded
+    } else {
+        base.join(expanded)
+    };
+
+    if !candidate.exists() {
+        return Err(format!("Directory not found: {}", candidate.display()));
+    }
+    if !candidate.is_dir() {
+        return Err(format!("Not a directory: {}", candidate.display()));
+    }
+
+    candidate.canonicalize().map_err(|error| {
+        format!(
+            "Could not resolve directory {}: {}",
+            candidate.display(),
+            error
+        )
+    })
+}
+
+/// `/cd <path>` — move the live session to another working directory while
+/// keeping the conversation. Project-scoped resources (sessions, memory,
+/// skills, context index) are rebuilt from the new root.
+pub async fn cd(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    if args.is_empty() {
+        push_msg(
+            &mut ctx,
+            format!(
+                "Usage: `/cd <path>`\n\nCurrent directory: `{}`",
+                crate::core::utils::paths::current_dir_cached().display()
+            ),
+        );
+        return Ok(());
+    }
+
+    if ctx.state.is_processing || ctx.state.is_streaming {
+        push_msg(
+            &mut ctx,
+            "❌ Cannot change the working directory while a turn is running. Wait for the reply to finish, then run `/cd` again.",
+        );
+        return Ok(());
+    }
+
+    let base = crate::core::utils::paths::current_dir_cached().clone();
+    let target = match resolve_cd_target(&args.join(" "), &base) {
+        Ok(target) => target,
+        Err(error) => {
+            push_msg(&mut ctx, format!("❌ {}", error));
+            return Ok(());
+        }
+    };
+
+    let current = base.canonicalize().unwrap_or_else(|_| base.clone());
+    if target == current {
+        push_msg(
+            &mut ctx,
+            format!("Already in `{}`. Nothing changed.", target.display()),
+        );
+        return Ok(());
+    }
+
+    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel(1);
+    if ctx
+        .agent_tx
+        .send(AgentRequest::ChangeWorkingDirectory {
+            path: target.clone(),
+            response: response_tx,
+        })
+        .await
+        .is_err()
+    {
+        push_msg(
+            &mut ctx,
+            "❌ Agent worker is unavailable; the working directory was not changed.",
+        );
+        return Ok(());
+    }
+
+    match response_rx.recv().await {
+        Some(Ok(())) => {
+            let released_session = ctx.state.active_session_id.take();
+            ctx.state.current_session_title = None;
+            // The status-line poller follows the live root, but clear the old
+            // project's values immediately so the next frame cannot show them.
+            ctx.state.git_branch = None;
+            ctx.state.git_status = None;
+
+            let mut message = format!(
+                "✅ Session moved to `{}`.\n\nThe conversation is unchanged. Sessions, memory, skills and the context index now resolve from this directory and refresh on the next turn.",
+                target.display()
+            );
+            if let Some(id) = released_session {
+                message.push_str(&format!(
+                    "\n\nThe previous project's session `{}` stays on disk there; the next save uses the new project.",
+                    id
+                ));
+            }
+            push_msg(&mut ctx, message);
+        }
+        Some(Err(error)) => {
+            push_msg(
+                &mut ctx,
+                format!("❌ Could not change directory: {}", error),
+            );
+        }
+        None => {
+            push_msg(
+                &mut ctx,
+                "❌ Agent worker dropped the directory-change request.",
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Session IDs are filename atoms: letters/digits plus `-` and `_`, at most
+/// 128 bytes. Keep a readable label and collapse unsafe punctuation to `-`.
+pub(crate) fn sanitize_session_atom(raw: &str) -> String {
+    let mut out = String::new();
+    let mut pending_dash = false;
+    for character in raw.trim().chars() {
+        if character.is_alphanumeric() {
+            if pending_dash && !out.is_empty() {
+                out.push('-');
+            }
+            pending_dash = false;
+            if out.len() + character.len_utf8() > 96 {
+                break;
+            }
+            out.push(character);
+        } else if character == '-' || character == '_' {
+            if !out.is_empty() && !out.ends_with('-') && !out.ends_with('_') {
+                out.push(character);
+            }
+            pending_dash = false;
+        } else if !out.is_empty() {
+            pending_dash = true;
+        }
+    }
+
+    let trimmed = out.trim_end_matches(|c| c == '-' || c == '_');
+    if trimmed.is_empty() {
+        "branch".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Return a session ID that does not overwrite an existing file or the active
+/// session. Numeric suffixes are deterministic, so `/branch feature` becomes
+/// `feature-2` when `feature` is already taken.
+pub(crate) fn unique_session_id(
+    base: &str,
+    existing: &std::collections::HashSet<String>,
+    reserved: Option<&str>,
+) -> String {
+    let mut candidate = base.to_string();
+    let mut suffix = 2u32;
+    while existing.contains(&candidate) || reserved == Some(candidate.as_str()) {
+        candidate = format!("{}-{}", base, suffix);
+        suffix += 1;
+    }
+    candidate
+}
+
+/// `/branch [name]` — save the current conversation as the original, save a
+/// copy as the branch, and switch the active session identity to the branch.
+/// The original remains resumable and is not overwritten after the switch.
+pub async fn branch_conversation(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    if ctx.state.is_processing || ctx.state.is_streaming {
+        push_msg(
+            &mut ctx,
+            "❌ Cannot branch while a turn is running. Wait for the reply to finish, then run `/branch` again.",
+        );
+        return Ok(());
+    }
+
+    let history: Vec<ChatEntry> = ctx
+        .state
+        .chat_history
+        .iter()
+        .filter(|entry| !entry.is_welcome)
+        .cloned()
+        .collect();
+    if history.is_empty() {
+        push_msg(&mut ctx, "Nothing to branch yet — the session is empty.");
+        return Ok(());
+    }
+
+    let existing: std::collections::HashSet<String> =
+        crate::utils::session_manager::list_sessions()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let requested_name = args.join(" ");
+    let requested_name = requested_name.trim();
+    let base = if requested_name.is_empty() {
+        format!("branch-{}", timestamp)
+    } else {
+        sanitize_session_atom(requested_name)
+    };
+
+    let active = ctx.state.active_session_id.clone();
+    let branch_id = unique_session_id(&base, &existing, active.as_deref());
+    let original_id = match active {
+        Some(id) => id,
+        None => unique_session_id(&format!("auto-{}", timestamp), &existing, Some(&branch_id)),
+    };
+
+    let usage = ctx.state.token_usage.clone();
+    if let Err(error) = crate::commands::chat::request_session_save(
+        &ctx.agent_tx,
+        original_id.clone(),
+        history.clone(),
+        usage.clone(),
+    )
+    .await
+    {
+        push_msg(
+            &mut ctx,
+            format!(
+                "❌ Could not save the original conversation before branching: {}. Nothing changed.",
+                error
+            ),
+        );
+        return Ok(());
+    }
+
+    if let Err(error) = crate::commands::chat::request_session_save(
+        &ctx.agent_tx,
+        branch_id.clone(),
+        history.clone(),
+        usage,
+    )
+    .await
+    {
+        // The original save already moved the latest-session marker. If this
+        // session had no ID before, adopt the original so exiting does not
+        // invent a third identity.
+        if ctx.state.active_session_id.is_none() {
+            ctx.state.active_session_id = Some(original_id.clone());
+        }
+        push_msg(
+            &mut ctx,
+            format!(
+                "❌ Original saved as `{}`, but the branch could not be saved: {}. The session was not switched.",
+                original_id, error
+            ),
+        );
+        return Ok(());
+    }
+
+    ctx.state.active_session_id = Some(branch_id.clone());
+    ctx.state.current_session_title = Some(branch_id.clone());
+    push_msg(
+        &mut ctx,
+        format!(
+            "🌿 Branched conversation as `{}` ({} messages).\n\n\
+             Original preserved as `{}`.\n\
+             Future snapshots go to the branch. Return with `/resume {}`.",
+            branch_id,
+            history.len(),
+            original_id,
+            original_id
+        ),
+    );
+
+    Ok(())
+}
+
+/// `/list-agents [all]` — show subagent tasks that StarCode tracks. Without
+/// `all`, only tasks that have moved to the background are listed.
+pub async fn list_agents(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    let include_all = args
+        .iter()
+        .any(|arg| arg.eq_ignore_ascii_case("all") || arg == "--all");
+
+    let out = {
+        let mut rows: Vec<&crate::ui::state::AgentTaskInfo> = if include_all {
+            ctx.state.active_agent_tasks.values().collect()
+        } else {
+            ctx.state.background_agent_rows()
+        };
+        rows.sort_by_key(|task| task.started_at);
+
+        if rows.is_empty() {
+            if include_all {
+                "## Agents\n\nNo subagent tasks have been recorded in this session.\n\n\
+                 Use `/subtask` or the Agent tool to start one; `/peers` lists cross-session mailboxes."
+                    .to_string()
+            } else {
+                "## Agents\n\nNo background agents are running.\n\n\
+                 Use `/list-agents all` to include foreground tasks, and `/peers` for cross-session mailboxes."
+                    .to_string()
+            }
+        } else {
+            let mut out = format!("## Agents ({})\n\n", rows.len());
+            out.push_str("| agent | task | status | elapsed | tools | tokens |\n");
+            out.push_str("|---|---|---|---:|---:|---:|\n");
+            for task in rows {
+                let agent = task
+                    .name
+                    .as_deref()
+                    .map(|name| format!("@{} ({})", name, task.agent_type))
+                    .unwrap_or_else(|| task.agent_type.clone());
+                let summary = task
+                    .task_description
+                    .as_deref()
+                    .unwrap_or(&task.description)
+                    .replace('\n', " ")
+                    .replace('|', "\\|");
+                let status = if task.is_error {
+                    format!("{:?} ⚠", task.status)
+                } else {
+                    format!("{:?}", task.status)
+                };
+                out.push_str(&format!(
+                    "| {} | {} | {} | {:.1}s | {} | {} |\n",
+                    agent,
+                    summary,
+                    status,
+                    task.elapsed().as_secs_f64(),
+                    task.tool_use_count,
+                    task.tokens
+                ));
+            }
+            out.push_str(
+                "\nUse `/tasks` for the full task panel. `/peers` lists cross-session mailboxes.",
+            );
+            out
+        }
+    };
+
+    push_msg(&mut ctx, out);
+    Ok(())
+}
+
 /// /effort — 设置思考努力档位（对标 Claude Code effort）。
 /// 无参数打开 ThinkingEffort 选择面板；带参数直接设置。
 pub async fn effort(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
@@ -2059,6 +2409,101 @@ pub async fn fork(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
     Ok(())
 }
 
+/// `/subtask` 的任务预览：取第一条非空行，按字符数截断，避免把整段任务
+/// 塞进 agent 选择器；`chars()` 保证 CJK 不会被截在字节中间。
+fn subtask_description(task: &str) -> String {
+    let first_line = task
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(task)
+        .trim();
+    let description: String = first_line.chars().take(80).collect();
+    if description.is_empty() {
+        "Subtask".to_string()
+    } else {
+        description
+    }
+}
+
+/// `/subtask <task>` — fork 当前会话到后台子代理（对标 Claude Code subtask）。
+///
+/// 命令层没有 `StarAgent`，所以启动动作交给 worker：worker 取出当前
+/// provider 上下文和运行时通知队列，创建一个继承完整会话的后台 Fork。
+/// 子代理完成后走既有 `<task-notification>` 通道回注，不需要另建会话模型。
+pub async fn subtask(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    let task = args.join(" ").trim().to_string();
+    if task.is_empty() {
+        push_msg(
+            &mut ctx,
+            "Usage: `/subtask <task>`\n\n\
+             Starts a background forked subagent that inherits this conversation.",
+        );
+        return Ok(());
+    }
+
+    let description = subtask_description(&task);
+    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel(1);
+
+    if ctx
+        .agent_tx
+        .send(AgentRequest::RunSubtask {
+            task: task.clone(),
+            description: description.clone(),
+            response: response_tx,
+        })
+        .await
+        .is_err()
+    {
+        push_msg(
+            &mut ctx,
+            "❌ Subtask could not reach the agent worker. Is the session still running?",
+        );
+        return Ok(());
+    }
+
+    let launch =
+        match tokio::time::timeout(std::time::Duration::from_secs(5), response_rx.recv()).await {
+            Ok(Some(Ok(launch))) => launch,
+            Ok(Some(Err(error))) => {
+                push_msg(&mut ctx, format!("❌ Subtask failed to start: {}", error));
+                return Ok(());
+            }
+            Ok(None) => {
+                push_msg(
+                    &mut ctx,
+                    "❌ Subtask failed to start: the agent worker closed the response channel.",
+                );
+                return Ok(());
+            }
+            Err(_) => {
+                push_msg(
+                    &mut ctx,
+                    "⏳ Subtask was queued behind the current turn and was not acknowledged \
+                 within 5 seconds. It will start when the turn finishes; check `/list-agents` \
+                 before retrying.",
+                );
+                return Ok(());
+            }
+        };
+
+    push_msg(
+        &mut ctx,
+        format!(
+            "## Subtask started\n\n\
+             - Agent: `{}`\n\
+             - Task: {}\n\
+             - Output: `{}`\n\n\
+             The forked agent inherits this conversation and runs in the background. \
+             Its task notification is delivered on your next turn; watch it with \
+             `/list-agents` or `/tasks`.",
+            launch.agent_id,
+            description,
+            launch.output_file.display(),
+        ),
+    );
+    Ok(())
+}
+
 /// /summary、/recap、/btw 共用：请求 agent 旁路生成笔记
 pub(crate) async fn request_note(
     ctx: &mut CommandContext<'_>,
@@ -2110,4 +2555,544 @@ pub async fn summary_cmd(ctx: CommandContext<'_>, _args: Vec<String>) -> Command
 pub async fn recap(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
     let mut ctx = ctx;
     request_note(&mut ctx, crate::runtime::messages::NoteKind::Recap, None).await
+}
+
+#[cfg(test)]
+mod conversation_parity_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "starcode-extended-{}-{}-{}",
+            label,
+            std::process::id(),
+            nonce
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn cd_resolves_relative_directories_and_rejects_bad_targets() {
+        let base = unique_temp_dir("cd");
+        let nested = base.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let file = base.join("note.txt");
+        std::fs::write(&file, "hello").unwrap();
+
+        let resolved = resolve_cd_target("nested", &base).unwrap();
+        assert_eq!(resolved, nested.canonicalize().unwrap());
+
+        let file_error = resolve_cd_target("note.txt", &base).unwrap_err();
+        assert!(file_error.contains("Not a directory"), "{}", file_error);
+
+        let missing_error = resolve_cd_target("does-not-exist", &base).unwrap_err();
+        assert!(
+            missing_error.contains("Directory not found"),
+            "{}",
+            missing_error
+        );
+
+        let empty_error = resolve_cd_target("   ", &base).unwrap_err();
+        assert!(empty_error.contains("Usage"), "{}", empty_error);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn cd_dispatches_to_worker_and_releases_old_project_session() {
+        let target = unique_temp_dir("cd-handler");
+        let mut state = crate::ui::state::ChatState::new();
+        state.active_session_id = Some("old-project-session".to_string());
+        state.current_session_title = Some("Old project".to_string());
+        state.git_branch = Some("main".to_string());
+        state.git_status = Some("+".to_string());
+
+        let (agent_tx, mut agent_rx) = mpsc::channel(2);
+        let requested = Arc::new(Mutex::new(None::<std::path::PathBuf>));
+        let requested_for_worker = requested.clone();
+        let worker = tokio::spawn(async move {
+            if let Some(AgentRequest::ChangeWorkingDirectory { path, response }) =
+                agent_rx.recv().await
+            {
+                *requested_for_worker.lock().unwrap() = Some(path);
+                let _ = response.send(Ok(())).await;
+            }
+        });
+
+        crate::commands::handle_command(
+            "cd",
+            vec![target.to_string_lossy().to_string()],
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            requested.lock().unwrap().as_ref().unwrap(),
+            &target.canonicalize().unwrap()
+        );
+        assert_eq!(state.active_session_id, None);
+        assert_eq!(state.current_session_title, None);
+        assert_eq!(state.git_branch, None);
+        assert_eq!(state.git_status, None);
+        assert!(state
+            .chat_history
+            .last()
+            .unwrap()
+            .content
+            .contains("Session moved"));
+
+        worker.abort();
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[tokio::test]
+    async fn cd_keeps_state_when_worker_rejects_the_move() {
+        let target = unique_temp_dir("cd-reject");
+        let mut state = crate::ui::state::ChatState::new();
+        state.active_session_id = Some("keep-me".to_string());
+
+        let (agent_tx, mut agent_rx) = mpsc::channel(2);
+        let worker = tokio::spawn(async move {
+            if let Some(AgentRequest::ChangeWorkingDirectory { response, .. }) =
+                agent_rx.recv().await
+            {
+                let _ = response.send(Err("permission denied".to_string())).await;
+            }
+        });
+
+        crate::commands::handle_command(
+            "cd",
+            vec![target.to_string_lossy().to_string()],
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.active_session_id, Some("keep-me".to_string()));
+        assert!(state
+            .chat_history
+            .last()
+            .unwrap()
+            .content
+            .contains("Could not change directory"));
+
+        worker.abort();
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn branch_names_are_safe_and_bounded() {
+        assert_eq!(sanitize_session_atom("My Feature / v2"), "My-Feature-v2");
+        assert_eq!(sanitize_session_atom("  ...  "), "branch");
+        assert_eq!(sanitize_session_atom("a__b"), "a_b");
+
+        let long = "a".repeat(200);
+        let sanitized = sanitize_session_atom(&long);
+        assert_eq!(sanitized.len(), 96);
+
+        let unicode = "会".repeat(40);
+        let sanitized = sanitize_session_atom(&unicode);
+        assert!(sanitized.len() <= 96);
+        assert!(!sanitized.is_empty());
+    }
+
+    #[test]
+    fn branch_ids_avoid_existing_and_active_sessions() {
+        let mut existing = std::collections::HashSet::new();
+        existing.insert("feature".to_string());
+        existing.insert("feature-2".to_string());
+
+        assert_eq!(
+            unique_session_id("feature", &existing, Some("feature")),
+            "feature-3"
+        );
+        assert_eq!(
+            unique_session_id("fresh", &existing, Some("feature")),
+            "fresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn branch_saves_original_then_branch_and_switches_active_session() {
+        let mut state = crate::ui::state::ChatState::new();
+        state
+            .chat_history
+            .push(crate::types::ChatEntry::user("keep this conversation"));
+        state
+            .chat_history
+            .push(crate::types::ChatEntry::assistant("original reply").with_streaming(false));
+
+        let (agent_tx, mut agent_rx) = mpsc::channel(8);
+        let saved = Arc::new(Mutex::new(Vec::<(String, usize)>::new()));
+        let saved_for_worker = saved.clone();
+        let worker = tokio::spawn(async move {
+            while let Some(request) = agent_rx.recv().await {
+                if let AgentRequest::SaveSession {
+                    id,
+                    history,
+                    response,
+                    ..
+                } = request
+                {
+                    saved_for_worker.lock().unwrap().push((id, history.len()));
+                    let _ = response.send(Ok(())).await;
+                }
+            }
+        });
+
+        crate::commands::handle_command(
+            "branch",
+            vec!["feature".to_string()],
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+        )
+        .await
+        .unwrap();
+
+        let saved = saved.lock().unwrap().clone();
+        assert_eq!(saved.len(), 2, "original and branch must both be saved");
+        assert!(saved[0].0.starts_with("auto-"));
+        assert!(saved[1].0.starts_with("feature"));
+        assert_ne!(saved[0].0, saved[1].0);
+        assert_eq!(saved[0].1, saved[1].1);
+        assert_eq!(state.active_session_id, Some(saved[1].0.clone()));
+
+        let last = state.chat_history.last().unwrap();
+        assert!(last.content.contains("Branched conversation"));
+        assert!(last.content.contains(&saved[0].0));
+        assert!(last.content.contains(&saved[1].0));
+
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn branch_never_overwrites_the_active_session_name() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.active_session_id = Some("feature".to_string());
+        state
+            .chat_history
+            .push(crate::types::ChatEntry::user("branch point"));
+
+        let (agent_tx, mut agent_rx) = mpsc::channel(8);
+        let saved = Arc::new(Mutex::new(Vec::<String>::new()));
+        let saved_for_worker = saved.clone();
+        let worker = tokio::spawn(async move {
+            while let Some(request) = agent_rx.recv().await {
+                if let AgentRequest::SaveSession { id, response, .. } = request {
+                    saved_for_worker.lock().unwrap().push(id);
+                    let _ = response.send(Ok(())).await;
+                }
+            }
+        });
+
+        crate::commands::handle_command(
+            "branch",
+            vec!["feature".to_string()],
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+        )
+        .await
+        .unwrap();
+
+        let saved = saved.lock().unwrap().clone();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0], "feature");
+        assert_ne!(saved[1], "feature");
+        assert!(saved[1].starts_with("feature-"));
+
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn branch_save_failure_does_not_switch_sessions() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.active_session_id = Some("stable".to_string());
+        state
+            .chat_history
+            .push(crate::types::ChatEntry::user("branch point"));
+
+        let (agent_tx, mut agent_rx) = mpsc::channel(2);
+        let worker = tokio::spawn(async move {
+            if let Some(AgentRequest::SaveSession { response, .. }) = agent_rx.recv().await {
+                let _ = response.send(Err("disk full".to_string())).await;
+            }
+        });
+
+        crate::commands::handle_command(
+            "branch",
+            vec!["attempt".to_string()],
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.active_session_id, Some("stable".to_string()));
+        assert!(state
+            .chat_history
+            .last()
+            .unwrap()
+            .content
+            .contains("Nothing changed"));
+
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn list_agents_reports_background_task_details() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.active_agent_tasks.insert(
+            "task-1".to_string(),
+            crate::ui::state::AgentTaskInfo {
+                task_id: "task-1".to_string(),
+                agent_type: "fork".to_string(),
+                description: "Investigate login".to_string(),
+                status: crate::types::AgentTaskStatus::Running,
+                tool_use_count: 3,
+                tokens: 42,
+                is_async: true,
+                is_resolved: false,
+                is_error: false,
+                last_tool_info: Some("Read".to_string()),
+                name: Some("scout".to_string()),
+                task_description: None,
+                started_at: std::time::Instant::now(),
+                finished_at: None,
+                sub_entries: Vec::new(),
+                entry_idx: 0,
+            },
+        );
+
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        crate::commands::handle_command(
+            "list-agents",
+            Vec::new(),
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+        )
+        .await
+        .unwrap();
+
+        let output = &state.chat_history.last().unwrap().content;
+        assert!(output.contains("@scout (fork)"), "{}", output);
+        assert!(output.contains("Investigate login"), "{}", output);
+        assert!(output.contains("Running"), "{}", output);
+        assert!(output.contains("| 3 | 42 |"), "{}", output);
+    }
+
+    #[test]
+    fn subtask_preview_uses_the_first_nonempty_line_and_bounds_utf8() {
+        assert_eq!(
+            subtask_description("\n  Investigate login  \nand report back"),
+            "Investigate login"
+        );
+
+        let long_cjk = "修复".repeat(60);
+        let preview = subtask_description(&long_cjk);
+        assert_eq!(preview.chars().count(), 80);
+        assert!(preview.starts_with("修复"));
+        assert_eq!(subtask_description("\n\n"), "Subtask");
+    }
+
+    #[tokio::test]
+    async fn subtask_forks_the_conversation_in_the_worker_and_reports_the_launch() {
+        let mut state = crate::ui::state::ChatState::new();
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
+        let captured = Arc::new(Mutex::new(None::<(String, String)>));
+        let captured_for_worker = captured.clone();
+        let worker = tokio::spawn(async move {
+            if let Some(AgentRequest::RunSubtask {
+                task,
+                description,
+                response,
+            }) = agent_rx.recv().await
+            {
+                *captured_for_worker.lock().unwrap() = Some((task, description.clone()));
+                let _ = response
+                    .send(Ok(crate::agent::subagent::runner::AsyncLaunchResult {
+                        agent_id: "agent-abc12345".to_string(),
+                        output_file: PathBuf::from(".star/subagent_outputs/agent-abc12345.txt"),
+                        description,
+                    }))
+                    .await;
+            }
+        });
+
+        crate::commands::handle_command(
+            "subtask",
+            vec![
+                "Investigate".to_string(),
+                "the login flow".to_string(),
+                "and report back".to_string(),
+            ],
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+        )
+        .await
+        .unwrap();
+
+        let captured = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(captured.0, "Investigate the login flow and report back");
+        assert_eq!(captured.1, "Investigate the login flow and report back");
+
+        let output = &state.chat_history.last().unwrap().content;
+        assert!(output.contains("Subtask started"), "{}", output);
+        assert!(output.contains("agent-abc12345"), "{}", output);
+        assert!(output.contains("Investigate the login flow"), "{}", output);
+        assert!(
+            output.contains(".star/subagent_outputs/agent-abc12345.txt"),
+            "{}",
+            output
+        );
+
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn subtask_without_a_task_does_not_start_a_worker_request() {
+        let mut state = crate::ui::state::ChatState::new();
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
+
+        crate::commands::handle_command(
+            "subtask",
+            Vec::new(),
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            agent_rx.try_recv().is_err(),
+            "an empty subtask must not launch a background agent"
+        );
+        assert!(state
+            .chat_history
+            .last()
+            .unwrap()
+            .content
+            .contains("Usage: `/subtask <task>`"));
+    }
+
+    #[tokio::test]
+    async fn subtask_surfaces_worker_startup_errors() {
+        let mut state = crate::ui::state::ChatState::new();
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
+        let worker = tokio::spawn(async move {
+            if let Some(AgentRequest::RunSubtask { response, .. }) = agent_rx.recv().await {
+                let _ = response
+                    .send(Err(
+                        "Subtask requires an initialized runtime notification queue.".to_string(),
+                    ))
+                    .await;
+            }
+        });
+
+        crate::commands::handle_command(
+            "subtask",
+            vec!["Do the thing".to_string()],
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+        )
+        .await
+        .unwrap();
+
+        let output = &state.chat_history.last().unwrap().content;
+        assert!(output.contains("failed to start"), "{}", output);
+        assert!(output.contains("notification queue"), "{}", output);
+
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn list_agents_all_includes_foreground_tasks() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.active_agent_tasks.insert(
+            "task-foreground".to_string(),
+            crate::ui::state::AgentTaskInfo {
+                task_id: "task-foreground".to_string(),
+                agent_type: "general-purpose".to_string(),
+                description: "Foreground check".to_string(),
+                status: crate::types::AgentTaskStatus::Running,
+                tool_use_count: 1,
+                tokens: 7,
+                is_async: false,
+                is_resolved: false,
+                is_error: false,
+                last_tool_info: None,
+                name: None,
+                task_description: None,
+                started_at: std::time::Instant::now(),
+                finished_at: None,
+                sub_entries: Vec::new(),
+                entry_idx: 0,
+            },
+        );
+
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        crate::commands::handle_command(
+            "list-agents",
+            Vec::new(),
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            !state
+                .chat_history
+                .last()
+                .unwrap()
+                .content
+                .contains("Foreground check"),
+            "foreground tasks are hidden by default"
+        );
+
+        crate::commands::handle_command(
+            "list-agents",
+            vec!["all".to_string()],
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(state
+            .chat_history
+            .last()
+            .unwrap()
+            .content
+            .contains("Foreground check"));
+    }
 }

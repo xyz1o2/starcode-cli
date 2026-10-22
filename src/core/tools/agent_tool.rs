@@ -288,11 +288,7 @@ impl ToolInvocation for AgentToolInvocation {
                     let type_label = agent_type_label(input.subagent_type.as_ref()).to_string();
 
                     let launch = async_runner.spawn_background(
-                        SubAgentRequest {
-                            prompt: request.prompt,
-                            max_rounds: request.max_rounds,
-                            subagent_type: request.subagent_type,
-                        },
+                        request,
                         name.clone(),
                         input.description.clone(),
                         type_label.clone(),
@@ -329,11 +325,7 @@ impl ToolInvocation for AgentToolInvocation {
 
                     let type_label = "Worker".to_string();
                     let launch = async_runner.spawn_background(
-                        SubAgentRequest {
-                            prompt: request.prompt,
-                            max_rounds: request.max_rounds,
-                            subagent_type: request.subagent_type,
-                        },
+                        request,
                         None,
                         input.description.clone(),
                         type_label.clone(),
@@ -388,6 +380,8 @@ impl ToolInvocation for AgentToolInvocation {
                             prompt: enriched_prompt,
                             max_rounds: request.base.max_rounds,
                             subagent_type: request.base.subagent_type,
+                            parent_messages: request.base.parent_messages,
+                            parent_pending_context: request.base.parent_pending_context,
                         },
                         Some(format!("fork-{}", agent_id)),
                         request.description.clone(),

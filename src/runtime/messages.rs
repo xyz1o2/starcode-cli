@@ -374,6 +374,9 @@ pub enum AgentRequest {
     LoadConfiguredProviders,
     Compress {
         message_id: u64,
+        /// Optional `/compact <instructions>` focus text. `None` keeps the
+        /// ordinary summary prompt used by automatic compaction.
+        instructions: Option<String>,
     },
     ResetSession,
     /// StarLens：重建代码认知索引并落盘。`enrich=true` 时用模型补 F/R/S（消耗 token）。
@@ -408,6 +411,13 @@ pub enum AgentRequest {
         pending_local_context: Vec<String>,
         response: tokio::sync::mpsc::Sender<Result<(), String>>,
     },
+    /// Move the session to another working directory. Handled on the agent
+    /// worker so the OS cwd, cached path, memory manager and project-scoped
+    /// resources change as one operation.
+    ChangeWorkingDirectory {
+        path: std::path::PathBuf,
+        response: tokio::sync::mpsc::Sender<Result<(), String>>,
+    },
     /// 完成已排队的会话操作后结束 worker。用于 TUI 退出时等待终态快照和 session-end hooks。
     Shutdown {
         response: tokio::sync::mpsc::Sender<Result<(), String>>,
@@ -419,6 +429,17 @@ pub enum AgentRequest {
         message_id: u64,
         /// /btw 的问题；/summary、/recap 为 `None`
         question: Option<String>,
+    },
+    /// `/subtask <task>`：在 worker 侧 fork 当前会话并启动后台子代理。
+    ///
+    /// 启动动作需要 `StarAgent` 的 client/config 与会话上下文，命令层拿不到
+    /// 这些资源；因此请求交给 worker，并通过 response 回传启动结果。
+    RunSubtask {
+        task: String,
+        description: String,
+        response: tokio::sync::mpsc::Sender<
+            Result<crate::agent::subagent::runner::AsyncLaunchResult, String>,
+        >,
     },
     /// 插件市场后台操作（git clone / 删除仓库目录等耗时操作，避免阻塞 UI 事件循环）
     PluginOp {

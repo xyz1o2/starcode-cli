@@ -209,6 +209,14 @@ pub async fn handle_request(
         AgentRequest::AppendContext { content } => {
             agent.append_session_context(content);
         }
+        AgentRequest::RunSubtask {
+            task,
+            description,
+            response,
+        } => {
+            let result = agent.spawn_forked_background_subtask(task, description);
+            let _ = response.send(result).await;
+        }
         AgentRequest::SendMessage { .. } => {
             // Handled in worker main loop
         }
@@ -237,14 +245,17 @@ pub async fn handle_request(
             )
             .await;
         }
-        AgentRequest::Compress { message_id } => {
+        AgentRequest::Compress {
+            message_id,
+            instructions,
+        } => {
             let _ = tx
                 .send(StreamMessage::Start {
                     message_id,
                     kind: StreamStartKind::Operation,
                 })
                 .await;
-            match agent.compress_context().await {
+            match agent.compress_context(instructions.as_deref()).await {
                 Ok(msg) => {
                     let _ = tx
                         .send(StreamMessage::Content {
@@ -380,6 +391,10 @@ pub async fn handle_request(
         } => {
             agent.replace_session_context(messages, pending_local_context);
             let _ = response.send(Ok(())).await;
+        }
+        AgentRequest::ChangeWorkingDirectory { path, response } => {
+            let result = agent.change_working_directory(&path).await;
+            let _ = response.send(result).await;
         }
         AgentRequest::GenerateNote {
             kind,

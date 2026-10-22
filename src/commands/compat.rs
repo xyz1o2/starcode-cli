@@ -580,6 +580,44 @@ pub async fn run(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResul
     Ok(())
 }
 
+// ── /verify — drive the real app and observe the change ────────
+
+pub(crate) fn verify_prompt(target: &str) -> String {
+    format!(
+        "Verify that the change actually works end to end: {}.\n\
+         Do not stop at reading code or running static checks. Find the project's run/verify skill \
+         or the canonical local run path, launch the app or service, drive the changed behavior, \
+         and record what you observed (commands, input, output, logs, screenshots when available).\n\
+         If the app cannot be launched, report the exact blocker and fall back to the closest \
+         executable check; do not claim success without evidence.\n\
+         Do not modify files unless the user explicitly asked for a fix. End with PASS/FAIL, the \
+         evidence, and any remaining risk.",
+        target
+    )
+}
+
+pub async fn verify(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    let target = if args.is_empty() {
+        "the current change".to_string()
+    } else {
+        args.join(" ")
+    };
+    let message_id = ctx.state.next_message_id;
+    ctx.state.next_message_id += 1;
+    ctx.agent_tx
+        .send(AgentRequest::SendMessage {
+            message_id,
+            message: verify_prompt(&target),
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    push_assistant(
+        &mut ctx,
+        "Started verification. I will report the observed behavior, evidence, and any blocker.",
+    );
+    Ok(())
+}
+
 // ── /feedback — feedback template ──────────────────────────────
 
 pub async fn feedback(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
@@ -846,4 +884,47 @@ pub async fn logout(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRe
         push_assistant(&mut ctx, "Logged out (API key removed from user settings).");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn verify_prompt_requires_runtime_evidence_not_just_static_checks() {
+        let prompt = verify_prompt("the login form");
+        assert!(prompt.contains("the login form"));
+        assert!(prompt.contains("launch the app or service"));
+        assert!(prompt.contains("Do not stop at reading code or running static checks"));
+        assert!(prompt.contains("Do not modify files"));
+        assert!(prompt.contains("PASS/FAIL"));
+    }
+
+    #[tokio::test]
+    async fn verify_sends_the_prompt_and_reports_started_state() {
+        let mut state = crate::ui::state::ChatState::new();
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
+
+        verify(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            vec!["src/login.rs".to_string()],
+        )
+        .await
+        .unwrap();
+
+        match agent_rx.recv().await {
+            Some(AgentRequest::SendMessage { message, .. }) => {
+                assert!(message.contains("src/login.rs"));
+                assert!(message.contains("end to end"));
+            }
+            other => panic!("expected SendMessage, got {:?}", other),
+        }
+        let reply = &state.chat_history.last().unwrap().content;
+        assert!(reply.contains("Started verification"));
+        assert!(reply.contains("observed behavior"));
+    }
 }

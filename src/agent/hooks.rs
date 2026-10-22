@@ -20,17 +20,31 @@ fn hook_result_reason(result: &crate::core::hooks::runner::HookRunResult) -> Str
 /// 注意：这是一个进程级全局，默认取启动时的 cwd。多项目/eval 场景下
 /// 应先调用 [`override_project_root`] 切换，避免缓存指向错误目录。
 pub(crate) fn cached_project_root() -> Option<PathBuf> {
-    static ROOT: OnceLock<std::sync::Mutex<Option<PathBuf>>> = OnceLock::new();
-    let lock = ROOT.get_or_init(|| std::sync::Mutex::new(None));
-    let cached = lock.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let cached = project_root_override()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
     cached.or_else(|| std::env::current_dir().ok())
+}
+
+fn project_root_override() -> &'static std::sync::Mutex<Option<PathBuf>> {
+    static ROOT: OnceLock<std::sync::Mutex<Option<PathBuf>>> = OnceLock::new();
+    ROOT.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 /// 覆盖进程级项目根目录缓存（供 eval 夹具副本等场景使用）。
 pub(crate) fn override_project_root(path: PathBuf) {
-    static ROOT: OnceLock<std::sync::Mutex<Option<PathBuf>>> = OnceLock::new();
-    let lock = ROOT.get_or_init(|| std::sync::Mutex::new(None));
-    *lock.lock().unwrap_or_else(|p| p.into_inner()) = Some(path);
+    *project_root_override()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = Some(path);
+}
+
+/// Drop an explicit project-root override after the session moves to a new
+/// working directory, so hooks resolve against the new process cwd again.
+pub(crate) fn clear_project_root_override() {
+    *project_root_override()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = None;
 }
 
 async fn hooks_maybe_enabled_for_event(
