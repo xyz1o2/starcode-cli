@@ -261,9 +261,9 @@ fn aggregate_history(scan: &ActivityScan, root: &Path) -> TeamHistory {
             .filter(|(tool, _)| activity::split_mcp_tool(tool).is_none()),
         8,
     );
-    let top_commands = top_entries(scan.slash_command_counts().into_iter(), 8);
-    let mcp_servers = top_entries(scan.mcp_server_counts().into_iter(), 8);
-    let skills = top_entries(scan.skill_invocations().into_iter(), 8);
+    let top_commands = top_entries(scan.slash_command_counts(), 8);
+    let mcp_servers = top_entries(scan.mcp_server_counts(), 8);
+    let skills = top_entries(scan.skill_invocations(), 8);
     let top_files = top_entries(count_file_paths(&scan.tool_calls, root), 8);
 
     TeamHistory {
@@ -708,6 +708,37 @@ mod tests {
         assert!(guide.contains("First message to paste"));
         assert!(guide.contains("src/main.rs"));
         assert!(guide.contains("```text"));
+    }
+
+    #[test]
+    fn guide_lists_existing_instruction_files_and_skill_directories() {
+        let root = temp_dir("read-first");
+        std::fs::write(root.join("STAR.md"), "# instructions\n").unwrap();
+        std::fs::create_dir_all(root.join(".star/skills/review")).unwrap();
+        let guide = render_guide(
+            &root,
+            &ProjectProfile::unknown(),
+            &TeamHistory::default(),
+            30,
+        );
+        assert!(guide.contains("`STAR.md`"));
+        assert!(guide.contains("`.star/skills/`"));
+        assert!(guide.contains("No local history was found yet"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn absolute_paths_inside_the_project_are_rendered_relative() {
+        let root = temp_dir("absolute");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let file = root.join("src/main.rs");
+        assert_eq!(
+            normalize_project_path(&file.to_string_lossy(), &root),
+            Some("src/main.rs".to_string())
+        );
+        assert_eq!(normalize_project_path("src/*.rs", &root), None);
+        assert_eq!(normalize_project_path("../escape.rs", &root), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -2,10 +2,12 @@
 //! transcripts (`/fewer-permission-prompts`, `/team-onboarding`).
 //!
 //! The scanner deliberately reads JSON values instead of deserializing the
-//! session model: old snapshots, UI transcripts (`.star/transcript.jsonl`) and
-//! the global session journal (`~/.star/transcripts/*.jsonl`) all use slightly
-//! different shapes, and a single unknown field must not make the whole history
-//! unreadable. Anything that cannot be parsed is counted and skipped.
+//! session model: saved session snapshots under `.star/sessions` and the UI
+//! transcript (`.star/transcript.jsonl`) use slightly different shapes, and a
+//! single unknown field must not make the whole history unreadable. Anything
+//! that cannot be parsed is counted and skipped. Both sources are project-local
+//! on purpose: commands that write project state must not learn defaults from
+//! another repository's history.
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;

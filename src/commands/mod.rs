@@ -30,6 +30,7 @@ pub mod plan;
 pub mod plugin;
 pub mod provider;
 pub mod remote;
+pub mod skill_doctor;
 pub mod skills;
 pub mod system;
 pub mod team_onboarding;
@@ -218,6 +219,7 @@ pub async fn handle_command(
             let args = system::default_subcommand_args("skills", args);
             skills_wrapper(ctx, args).await
         }
+        "skill-doctor" => skill_doctor::run(ctx, args).await,
         // /extension 与 /extension market：打开市场弹窗（其余子命令保持文本输出）
         "extension" | "ext" => {
             if args.is_empty() || matches!(args[0].as_str(), "market" | "marketplace") {

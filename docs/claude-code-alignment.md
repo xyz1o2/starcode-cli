@@ -348,7 +348,7 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | 帮助文案把 Tab 说成补全 | `ui/components/help_popup.rs`、`events/keymap.rs` | 按真实行为改写；键表文档补上"两个搜索键的分工" |
 | `/eval` 是悬空声明 | `commands/system.rs` | 声明删除，并加测试记录历史悬空命令名单 |
 
-lib 套件 1244 全绿，`cargo fmt --check` 绿，本次改动范围内 clippy 无新增告警。
+lib 套件 1260 全绿，`cargo fmt --check` 绿，本次改动范围内 clippy 无新增告警。
 
 ### ✅ 斜杠命令主路径（2026-10-22）
 
@@ -373,6 +373,7 @@ lib 套件 1244 全绿，`cargo fmt --check` 绿，本次改动范围内 clippy 
 | `/fewer-permission-prompts [--days N] [--min-count N] [--yes]` | 扫描本项目的 saved session / `.star/transcript.jsonl`，只统计重复出现的只读 Bash 与 MCP 调用；排除复合命令、重定向、命令替换、`find -exec`、`grep --pre` 与带写动词的 MCP 工具。默认预览，`--yes` 才写入 `.star/settings.local.json` 并发送 `ReloadPermissions`；已有 allow 只报告，ask/deny 覆盖的候选不提出 | 参数解析、Bash/MCP 分类器、ask/deny/allow 过滤与排序、预览不泄露命令参数、apply 只写 local 层且幂等 |
 | `/team-onboarding [--days N] [--write]` | 从项目 marker 识别 Cargo/Node/Python/Go/Maven/Gradle/Make/CMake 的安装、构建、测试、lint、运行命令；复用活动扫描器汇总 slash command、MCP server、工具与高频文件，生成可直接粘贴的首条消息。默认只输出，`--write` 写 `.star/team-onboarding.md`；绝对路径和项目外路径不会进入指南 | 项目类型识别、活动聚合、无历史降级、首条消息、路径脱敏、写入文件 |
 | `/verify [target]` | 向 agent 发送端到端验证 prompt：要求实际启动 app/service、驱动改动路径并记录可观察证据，不能只读代码或跑静态检查；无法启动时报告准确阻塞并回退到最接近的可执行检查；除非用户要求不修改文件 | prompt 必须包含运行时证据/阻塞/PASS-FAIL 约束，handler 确认发送 `SendMessage` 并显示 started 状态 |
+| `/skill-doctor [--all]` | 校验 `.star/skills`（`--all` 再加用户级目录）的 skill 文件：frontmatter 是否完整、name/description/body、name 与目录是否一致、`disabled: true`、重复 name、超过 64 KiB 的文件；按 healthy/warning/error 汇总。报告明确说明自定义 skill 目前只用于 authoring/list，不会自动注入上下文，因此不虚报“上下文成本” | frontmatter 缺失/未闭合、缺 name/description/body、name 目录不一致、disabled、目录与 `*.skill.md` 发现、重复 name、报告计数与免责声明 |
 
 **刻意保留的差异**（不是待办占位）：
 
@@ -385,7 +386,8 @@ lib 套件 1244 全绿，`cargo fmt --check` 绿，本次改动范围内 clippy 
 - `.star/skills` 下的自定义 markdown 目前是 authoring/list 资源；agent 的 `SkillTool`
   暴露内建与 `.star/agents` 自定义 subagent，也支持按本地路径加载外部 skill，但不会
   把 `.star/skills` 自动注入系统提示。因此 `/reload-skills` 是真实的 rescan + diff，
-  不是热更新 agent 工具 schema。
+  不是热更新 agent 工具 schema。`/skill-doctor` 同样不虚报 context cost，只校验
+  authoring 契约并明确标注这一限制。
 - `/focus` 是 fullscreen 渲染专属；`/batch`、`/deep-research`、`/design*` 等仍是
   bundled/cloud workflow，不由本地内置命令冒充。`/verify` 与 `/simplify` 已作为本地
   agent prompt 实现；`/verify` 只负责驱动与取证，不依赖云端 verify 服务。

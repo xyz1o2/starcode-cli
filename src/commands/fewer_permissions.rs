@@ -315,13 +315,14 @@ fn classify_git(words: &[&str]) -> Option<String> {
     let subcommand = words.get(1)?.to_ascii_lowercase();
     let prefix = match subcommand.as_str() {
         // `git diff` accepts `--output`; it cannot execute a command, but it can
-        // write a file. Keep it read-only by rejecting that flag on the observed
-        // invocation. The prefix covers normal uses.
+        // write a file. Do not learn this prefix from an invocation that already
+        // writes. As with every prefix rule, future arguments are covered, so
+        // the preview repeats that warning.
         "diff" if !has_flag(words, "--output") => "git diff",
         // These subcommands inspect repository state and have no command-exec
         // flags. `git status` is the common source of repeated prompts.
         "status" | "log" | "show" | "rev-parse" | "ls-files" => {
-            return Some(format!("Bash({}:*)", format!("git {}", subcommand)))
+            return Some(format!("Bash(git {}:*)", subcommand))
         }
         _ => return None,
     };
@@ -336,8 +337,8 @@ fn has_flag(words: &[&str], flag: &str) -> bool {
 }
 
 /// Conservative MCP read-only heuristic. A tool is only suggested when its name
-/// starts with a known inspection verb and contains no mutating verb. This is a
-/// heuristic, so the command always previews before writing.
+/// contains a known inspection verb and no mutating verb. This is a heuristic,
+/// so the command always previews before writing.
 fn classify_mcp_tool(name: &str) -> Option<String> {
     let (_server, tool) = activity::split_mcp_tool(name)?;
     let tool = tool.to_ascii_lowercase();
@@ -411,17 +412,28 @@ fn classify_mcp_tool(name: &str) -> Option<String> {
         return None;
     }
 
-    let safe_prefix = [
-        "get", "list", "search", "read", "fetch", "find", "query", "lookup", "count", "describe",
-        "status", "info", "whoami", "resolve", "preview", "inspect",
+    const READ_ONLY: &[&str] = &[
+        "count",
+        "describe",
+        "fetch",
+        "find",
+        "get",
+        "info",
+        "inspect",
+        "list",
+        "lookup",
+        "preview",
+        "query",
+        "read",
+        "resolve",
+        "screenshot",
+        "search",
+        "snapshot",
+        "status",
+        "whoami",
     ];
-    let starts_safe = safe_prefix
-        .iter()
-        .any(|prefix| tool == *prefix || tool.starts_with(&format!("{}_", prefix)));
-    let ends_safe = ["snapshot", "screenshot"]
-        .iter()
-        .any(|suffix| tool == *suffix || tool.ends_with(&format!("_{}", suffix)));
-    if starts_safe || ends_safe {
+    let has_read_only_verb = tokens.iter().any(|token| READ_ONLY.contains(token));
+    if has_read_only_verb {
         Some(name.to_string())
     } else {
         None
@@ -705,6 +717,11 @@ mod tests {
         assert_eq!(
             classify_mcp_tool("mcp__browser__take_snapshot"),
             Some("mcp__browser__take_snapshot".to_string())
+        );
+        assert_eq!(
+            classify_mcp_tool("mcp__exa__web_search_exa"),
+            Some("mcp__exa__web_search_exa".to_string()),
+            "read-only verbs do not have to be the first token"
         );
         assert_eq!(classify_mcp_tool("mcp__github__create_issue"), None);
         assert_eq!(classify_mcp_tool("mcp__github__update_issue"), None);

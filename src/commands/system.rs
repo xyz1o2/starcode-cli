@@ -421,6 +421,13 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         ],
     },
     SlashCommand {
+        name: "skill-doctor",
+        alt_names: &[],
+        description: "Validate project skill files and report authoring issues",
+        category: "Automation",
+        sub_commands: &[],
+    },
+    SlashCommand {
         name: "remote",
         alt_names: &[],
         description: "Remote control protocol and inbox",
