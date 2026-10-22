@@ -150,7 +150,6 @@ impl SeatbeltRuntime {
     }
 }
 
-#[async_trait::async_trait]
 impl SeatbeltRuntime {
     async fn execute_internal(
         &self,
