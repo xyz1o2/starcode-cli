@@ -31,6 +31,8 @@ pub struct StreamingSessionContext<'a> {
     pub steering_queue: &'a Arc<AsyncMessageQueue<(u64, String)>>,
     pub steering_signal: &'a Arc<Notify>,
     pub message_bus: &'a Arc<crate::core::confirmation_bus::MessageBus>,
+    /// 运行中切模型的交接槽（见 `agent::model_switch`）。
+    pub model_switch_cell: &'a crate::agent::model_switch::ModelSwitchCell,
 }
 
 /// Run a streaming session with the agent.
@@ -108,6 +110,7 @@ pub async fn run_streaming_session(
                                 steering_queue: context.steering_queue,
                                 steering_signal: context.steering_signal,
                                 message_bus: context.message_bus,
+                                model_switch_cell: context.model_switch_cell,
                             },
                         ).await {
                             StreamingRequestOutcome::Continue => {}

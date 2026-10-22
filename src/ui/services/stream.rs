@@ -87,7 +87,7 @@ pub(crate) fn seed_models_from_disk_cache(state: &mut ChatState, provider_id: &s
 
 /// 结束 entry 的 streaming 状态，并冻结 thinking 计时器。
 /// 统一处理所有 is_streaming = false 的场景，避免遗漏 reasoning_finished_elapsed_ms。
-fn finalize_entry_streaming(state: &mut ChatState, idx: usize) {
+pub(crate) fn finalize_entry_streaming(state: &mut ChatState, idx: usize) {
     if let Some(entry) = state.chat_history.get_mut(idx) {
         entry.is_streaming = Some(false);
         // 冻结 thinking 计时器：只对有 reasoning 且未冻结的 entry 设置。

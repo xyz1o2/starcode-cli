@@ -232,6 +232,134 @@ fn truncate_local_command_output(output: &str) -> String {
     )
 }
 
+/// 运行中输入的内容是不是一条「需求」。
+///
+/// `/command`、`#memory`、`!shell` 都有各自的处理路径（开面板 / 改会话 / 直接跑
+/// 命令），不能当需求插进对话。`![` 是 markdown 图片语法，与 `!shell` 无关，
+/// 按需求处理。
+fn is_plain_requirement(input: &str) -> bool {
+    let trimmed = input.trim_start();
+    if trimmed.starts_with('/') || trimmed.starts_with('#') {
+        return false;
+    }
+    !(trimmed.starts_with('!') && !trimmed.starts_with("!["))
+}
+
+/// 把运行中输入的需求插进**当前这一轮**。
+///
+/// 之前的行为是排队进 `pending_user_messages`，等本轮跑完才发出去 —— 用户在
+/// agent 还在跑时提的补充要求，模型要等到整轮结束才看得见；这期间它可能已经
+/// 沿着错误的方向跑完了，用户还得再等一整轮才看得到自己的补充被采纳。
+///
+/// 现在这条需求立刻进入对话：runtime 侧把回合中的 `SendMessage` 收进 steering
+/// 队列，agent 侧在每轮开始时消费它、作为 user 消息插进对话。
+///
+/// 聊天区里的顺序是「助手已输出的前半 / 用户这条 / 助手还没写完的后半」。
+/// 前半在这里被收尾，后半另起一条继续流 —— 切点必须落在 markdown 的安全边界
+/// 上，否则前半的代码块没闭合，渲染时会把用户这条一起当成代码。
+async fn steer_user_message(
+    state: &mut ChatState,
+    user_input: String,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // `@file` 引用与普通发送走同一套处理：插进对话的必须是展开后的正文。
+    let workspace_root = if at_processor::may_contain_at_command(&user_input) {
+        Some(crate::core::utils::paths::current_dir_cached().as_path())
+    } else {
+        None
+    };
+    let processed =
+        at_processor::process_at_command(&user_input, workspace_root, &state.extra_working_dirs);
+    let final_message = at_processor::format_processed_message(&processed);
+
+    // 助手正在输出的那段正文要在这里切开：前半留在用户消息之前，还没写完的
+    // 后半挪到用户消息之后接着流。
+    //
+    // 切点必须落在 markdown 的安全边界上，否则前半的代码块没闭合，渲染时会把
+    // 用户那条消息一起当成代码 —— 消息就"插到 markdown 里面"了。
+    //
+    // `stream_targets` **可能是悬空的**：工具调用之后它指向 `chat_history.len()`
+    // （等下一段内容再建一条助手条目，见 stream.rs 的 ToolCalls 分支）。那种
+    // 时候没有可切的助手条目，硬切就越界了。
+    let mut resumed_entry: Option<(u64, String)> = None;
+    if let Some(turn_id) = state.active_message_id {
+        if let Some(&idx) = state.stream_targets.get(&turn_id) {
+            if idx < state.chat_history.len()
+                && state.chat_history[idx].entry_type == ChatEntryType::Assistant
+            {
+                let (head, tail) = crate::utils::markdown_parser::split_markdown_at_safe_boundary(
+                    &state.chat_history[idx].content,
+                );
+                state.chat_history[idx].content = head;
+                crate::ui::services::stream::finalize_entry_streaming(state, idx);
+                resumed_entry = Some((turn_id, tail));
+            }
+        }
+    }
+
+    // 用户输入照常显示在聊天区。
+    state.chat_history.push(ChatEntry::user(user_input.clone()));
+
+    // 助手那条要么被切走（后半另起一条继续流），要么本来就不存在/是悬空的 ——
+    // 两种情况都得把流的落点挪到用户消息**之后**，否则下一段助手内容会被追加
+    // 到用户这条上（`handle_content_message` 只认助手/工具条目）。
+    if let Some(turn_id) = state.active_message_id {
+        match resumed_entry {
+            Some((tid, tail)) if !tail.is_empty() => {
+                let tail_idx = state.chat_history.len();
+                state
+                    .chat_history
+                    .push(ChatEntry::assistant(tail).with_streaming(true));
+                state.stream_targets.insert(tid, tail_idx);
+                state.rendered_cache.remove(&tail_idx);
+                state.virtual_list.mark_dirty(tail_idx);
+            }
+            _ => {
+                // 指向末尾：下一段内容会在这里另起一条助手条目。
+                state
+                    .stream_targets
+                    .insert(turn_id, state.chat_history.len());
+            }
+        }
+    }
+
+    // 这条属于**当前这一轮**，但要用自己的 message_id：万一当前这轮在 agent
+    // 消费它之前就结束了，runtime 会把它当成新的一条用户消息起新一轮 ——
+    // 沿用当前回合的 id 会让那一轮的 Done 被当成重复消息吞掉。
+    let message_id = state.next_message_id;
+    state.next_message_id += 1;
+
+    append_transcript_event(
+        state,
+        "user",
+        Some(message_id),
+        build_user_transcript_payload(&user_input, &final_message, processed.file_contents.len()),
+    );
+
+    crate::utils::logging::append_debug_log_line(&format!(
+        "[UI] Steering user message into the running turn: id={}, raw_chars={}, final_chars={}",
+        message_id,
+        user_input.chars().count(),
+        final_message.chars().count(),
+    ));
+
+    // 发出：runtime 在回合进行中会把它收进 steering 队列，agent 在下一轮开始时消费。
+    let _ = agent_tx
+        .send(AgentRequest::SendMessage {
+            message_id,
+            message: final_message,
+        })
+        .await;
+
+    state.current_status_line = Some(crate::core::i18n::t(
+        "ui.status.steered",
+        "已插入当前回合",
+        "Added to the running turn",
+    ));
+
+    Ok(())
+}
+
 pub async fn enqueue_user_message(
     state: &mut ChatState,
     user_input: String,
@@ -269,7 +397,13 @@ pub async fn enqueue_user_message(
     // 等待工具确认 / 本轮还在跑 —— 输入进队列，由输入框上方的排队面板
     // （queued_input，对标 PromptInputQueuedCommands）原样显示出来，
     // 所以这里不再往状态栏塞 "⏳ N pending" 这种看不出内容的提示。
+    //
+    // 需求是个例外：它插进当前这一轮（模型下一次调用就能看到），不用等本轮
+    // 跑完 —— 工具在等审批时用户补充的说明，正是要赶在下一轮之前送达的。
     if state.pending_confirmation_entry_idx.is_some() {
+        if is_plain_requirement(&user_input) {
+            return steer_user_message(state, user_input, agent_tx).await;
+        }
         state.pending_user_messages.push_back(user_input);
         return Ok(());
     }
@@ -279,6 +413,11 @@ pub async fn enqueue_user_message(
     let is_safe_command_during_stream = is_streaming_safe_command(user_input.trim());
 
     if (state.is_processing || state.is_streaming) && !is_safe_command_during_stream {
+        // 需求插进当前这一轮（模型下一次调用就能看到），不用等本轮跑完。
+        // 命令类（/ # !）仍排队 —— 它们各有各的处理路径，不是需求。
+        if is_plain_requirement(&user_input) {
+            return steer_user_message(state, user_input, agent_tx).await;
+        }
         state.pending_user_messages.push_back(user_input);
         return Ok(());
     }
@@ -745,6 +884,218 @@ mod no_model_guard_tests {
             .iter()
             .any(|e| e.content.contains("No model selected")));
         assert!(rx.try_recv().is_ok(), "消息应当真的被发出去");
+    }
+}
+
+#[cfg(test)]
+mod steering_tests {
+    use crate::types::ChatEntryType;
+    use crate::ui::state::ChatState;
+
+    /// 运行中插入的需求会把助手正在写的那段输出切成两半：前半在用户消息之前，
+    /// 后半在之后。**代码块不能被劈开** —— 前半的 ``` 没闭合时，渲染会把后面
+    /// 整段（含用户那条消息）当成代码，消息就"插到 markdown 里面"了。
+    #[tokio::test]
+    async fn steering_splits_an_open_code_block_cleanly() {
+        let mut state = ChatState::new();
+        state.is_streaming = true;
+        state.is_processing = true;
+        state.active_message_id = Some(7);
+
+        // 助手正在写一个代码块，围栏还没闭合
+        let streaming = "说明文字\n\n```rust\nfn main() {\n";
+        let assistant_idx = state.chat_history.len();
+        state
+            .chat_history
+            .push(crate::types::ChatEntry::assistant(streaming.to_string()).with_streaming(true));
+        state.stream_targets.insert(7, assistant_idx);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        super::steer_user_message(&mut state, "顺便补个测试".to_string(), &tx)
+            .await
+            .expect("steering should succeed");
+
+        // 顺序：助手前半 / 用户消息 / 助手后半
+        assert_eq!(
+            state.chat_history.len(),
+            assistant_idx + 3,
+            "{:?}",
+            state.chat_history
+        );
+        assert_eq!(
+            state.chat_history[assistant_idx].entry_type,
+            ChatEntryType::Assistant
+        );
+        assert_eq!(state.chat_history[assistant_idx].content, "说明文字\n\n");
+        assert_eq!(
+            state.chat_history[assistant_idx + 1].entry_type,
+            ChatEntryType::User
+        );
+        assert_eq!(
+            state.chat_history[assistant_idx + 2].entry_type,
+            ChatEntryType::Assistant
+        );
+
+        // 代码块整体在后半，前半不留下没闭合的围栏
+        let tail = &state.chat_history[assistant_idx + 2].content;
+        assert!(
+            tail.starts_with("```rust") && tail.contains("fn main() {"),
+            "代码块应完整留在后半: {:?}",
+            tail
+        );
+        assert!(
+            !state.chat_history[assistant_idx].content.contains("```"),
+            "前半不能留下没闭合的围栏: {:?}",
+            state.chat_history[assistant_idx].content
+        );
+
+        // 后续输出继续落到后半那条
+        assert_eq!(
+            state.stream_targets.get(&7),
+            Some(&(assistant_idx + 2)),
+            "后续输出要接着后半那条"
+        );
+
+        // 需求确实发出去了
+        assert!(rx.try_recv().is_ok(), "需求应当真的被发出去");
+    }
+
+    /// 正文不在代码块里时，按段落边界切，两半都是完整段落。
+    #[tokio::test]
+    async fn steering_splits_at_a_paragraph_boundary() {
+        let mut state = ChatState::new();
+        state.is_streaming = true;
+        state.is_processing = true;
+        state.active_message_id = Some(3);
+
+        let assistant_idx = state.chat_history.len();
+        state.chat_history.push(
+            crate::types::ChatEntry::assistant("第一段。\n\n第二段。\n\n第三段".to_string())
+                .with_streaming(true),
+        );
+        state.stream_targets.insert(3, assistant_idx);
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        super::steer_user_message(&mut state, "补充".to_string(), &tx)
+            .await
+            .expect("steering should succeed");
+
+        assert_eq!(state.chat_history.len(), assistant_idx + 3);
+        assert_eq!(
+            state.chat_history[assistant_idx].content,
+            "第一段。\n\n第二段。\n\n"
+        );
+        assert_eq!(state.chat_history[assistant_idx + 2].content, "第三段");
+    }
+
+    /// 端到端：画出来的画面里，用户那条消息**不在代码块里面**。
+    ///
+    /// 这是用户看到的那个现象：围栏没闭合时，渲染会把后面整段（含用户消息）
+    /// 都当成代码，消息就"插到 markdown 里面"了。
+    #[tokio::test]
+    async fn the_steered_message_is_not_rendered_inside_the_code_block() {
+        let mut state = ChatState::test_fixture();
+        state.is_streaming = true;
+        state.is_processing = true;
+        state.active_message_id = Some(7);
+
+        let assistant_idx = state.chat_history.len();
+        state.chat_history.push(
+            crate::types::ChatEntry::assistant("说明文字\n\n```rust\nfn main() {\n".to_string())
+                .with_streaming(true),
+        );
+        state.stream_targets.insert(7, assistant_idx);
+        state.rendered_cache.clear();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        super::steer_user_message(&mut state, "顺便补个测试".to_string(), &tx)
+            .await
+            .expect("steering should succeed");
+        state.rendered_cache.clear();
+
+        let lines = crate::ui::components::chat_history::render_chat_lines(&mut state, 80);
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        let user_line = texts
+            .iter()
+            .position(|t| t.contains("顺便补个测试"))
+            .expect("用户消息要出现在画面上");
+        let code_top = texts
+            .iter()
+            .position(|t| t.contains('┌'))
+            .expect("代码块要有上边框");
+        let code_bottom = texts
+            .iter()
+            .position(|t| t.contains('└'))
+            .expect("代码块要有下边框");
+
+        assert!(
+            user_line < code_top,
+            "用户消息不该落在代码块里（它应该在代码块之前）: {:?}",
+            texts
+        );
+        assert!(code_top < code_bottom, "代码块要完整: {:?}", texts);
+    }
+
+    /// 回归：工具调用之后 `stream_targets` 是**悬空**的（指向
+    /// `chat_history.len()`，等下一段内容再建一条助手条目）。
+    /// 那个窗口里插入需求会越界 panic（index out of bounds）。
+    #[tokio::test]
+    async fn steering_while_the_stream_target_dangles_does_not_panic() {
+        let mut state = ChatState::test_fixture();
+        state.is_streaming = true;
+        state.is_processing = true;
+        state.active_message_id = Some(11);
+
+        // 助手那条已经收尾，工具调用条目也进去了；流的落点悬空在末尾
+        state.chat_history.push(
+            crate::types::ChatEntry::assistant("我要先看看这个文件".to_string())
+                .with_streaming(false),
+        );
+        state.chat_history.push(crate::types::ChatEntry::tool_call(
+            "Read",
+            crate::types::StarToolCall {
+                id: "call-1".to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::StarToolCallFunction {
+                    name: "Read".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            },
+        ));
+        state.stream_targets.insert(11, state.chat_history.len());
+        assert_eq!(
+            state.stream_targets.get(&11),
+            Some(&state.chat_history.len()),
+            "前提：落点是悬空的"
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        super::steer_user_message(&mut state, "顺便补个测试".to_string(), &tx)
+            .await
+            .expect("steering should not panic");
+
+        // 需求照常显示，也照常发出去
+        assert!(state
+            .chat_history
+            .iter()
+            .any(|e| e.content == "顺便补个测试"));
+        assert!(rx.try_recv().is_ok());
+
+        // 流的落点必须挪到用户消息之后 —— 否则下一段助手内容会被追加到用户那条上
+        let user_idx = state
+            .chat_history
+            .iter()
+            .position(|e| e.content == "顺便补个测试")
+            .expect("用户消息在");
+        assert!(
+            state.stream_targets.get(&11).copied().unwrap_or(0) > user_idx,
+            "落点必须在用户消息之后: {:?}",
+            state.stream_targets
+        );
     }
 }
 

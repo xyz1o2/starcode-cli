@@ -50,6 +50,25 @@ pub struct Agent {
     pub(crate) denial_tracker: crate::core::permission_rules::deny_log::DenialTracker,
     /// 异步 SubAgent 通知队列：每轮 turn 开始前消费后台 agent 的完成通知。
     pub(crate) async_notification_queue: Option<Arc<Mutex<NotificationQueue>>>,
+    /// 运行中插入的需求（steering）。
+    ///
+    /// 用户在 agent 还在跑的时候又提了一条要求，这条要进**当前这一轮**的对话，
+    /// 而不是等本轮跑完才发出去 —— 否则 agent 可能已经沿着错误的方向跑完了，
+    /// 用户还得再等一整轮才看得到自己的补充被采纳。
+    ///
+    /// runtime 侧（`runtime/session.rs`）把回合期间收到的 `SendMessage` 收进这个
+    /// 队列；这里在每轮 turn 开始时消费，把它们作为 user 消息插进对话。
+    pub(crate) steering_queue:
+        Option<Arc<crate::agent::messaging::AsyncMessageQueue<(u64, String)>>>,
+    /// 运行中切模型的交接槽（见 `agent::model_switch`）。
+    ///
+    /// 用户在 agent 还在跑的时候切模型：改动落在**下一次请求**上（Claude Code
+    /// / OpenCode 的做法），不是等整轮结束。运行时把用户选中的那对
+    /// (model, provider) 放进这个槽，回合在每次发请求前取走它。
+    ///
+    /// 长寿命 agent 与每回合派生的 fresh agent **共用同一个槽** —— 运行时够不到
+    /// 任何一个（回合跑起来之后 `StarAgent` 被独占借出），槽就是唯一的通道。
+    pub(crate) model_switch_cell: crate::agent::model_switch::ModelSwitchCell,
     /// Current task complexity level (Simple/Medium/Complex) set by the router.
     /// Used to dynamically adjust thinking limits and other parameters.
     pub(crate) task_complexity: crate::core::routing::RequestComplexity,
@@ -141,6 +160,8 @@ impl Agent {
             tool_schema_len_cache: HashMap::new(),
             denial_tracker: crate::core::permission_rules::deny_log::DenialTracker::new(),
             async_notification_queue: None,
+            steering_queue: None,
+            model_switch_cell: crate::agent::model_switch::new_cell(),
             task_complexity: crate::core::routing::RequestComplexity::Medium,
             memory_manager: crate::core::memory::MemoryManager::new(
                 &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -318,6 +339,14 @@ impl Agent {
     /// 注入异步通知队列（启用后台 SubAgent 完成通知的回流）
     pub fn set_notification_queue(&mut self, queue: Arc<Mutex<NotificationQueue>>) {
         self.async_notification_queue = Some(queue);
+    }
+
+    /// 注入 steering 队列：运行中插入的需求从这里进对话。
+    pub fn set_steering_queue(
+        &mut self,
+        queue: Arc<crate::agent::messaging::AsyncMessageQueue<(u64, String)>>,
+    ) {
+        self.steering_queue = Some(queue);
     }
 
     pub fn set_approval_mode(&mut self, mode: crate::types::ApprovalMode) {

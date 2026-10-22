@@ -524,88 +524,45 @@ impl StarAgent {
         self.client = self.inner.get_client();
     }
 
+    /// 解析并安装一次模型选择。
+    ///
+    /// 解析规则只有一份（`agent::model_switch::resolve`）—— 运行中切模型走的是
+    /// 同一套，两条路径给出的 base_url / key 必须一致，否则"运行中切过去"和
+    /// "轮末切过去"会落在不同的 provider 上。
     pub async fn set_model_with_provider(&mut self, model: &str, provider_id: Option<&str>) {
-        if let Some(pid) = provider_id {
-            let store = crate::core::config::provider_store::ProviderStore::new();
-            let config = store.load().await.unwrap_or_default();
-
-            // Try exact match first, then case-insensitive fallback
-            let settings = config.providers.get(pid).or_else(|| {
-                config.providers.iter().find_map(|(k, v)| {
-                    if k.eq_ignore_ascii_case(pid) {
-                        Some(v)
-                    } else {
-                        None
-                    }
-                })
-            });
-            let (base_url, api_key) = if let Some(settings) = settings {
-                // Use the provider's configured base_url, falling back to the
-                // current client's URL rather than a hardcoded default. This
-                // prevents OpenAI's URL from being injected for custom providers.
-                let url = settings
-                    .base_url
-                    .clone()
-                    .or_else(|| {
-                        crate::core::config::providers::get_provider_by_id(pid)
-                            .and_then(|m| m.default_base_url)
-                            .map(|s| s.to_string())
-                    })
-                    .unwrap_or_else(|| self.client.base_url.clone());
-                let key = crate::core::config::providers::resolve_runtime_api_key(
-                    Some(pid),
-                    settings.api_key.clone(),
-                )
-                .unwrap_or_else(|| self.client.api_key.clone());
-                (url, key)
-            } else if let Some(meta) = crate::core::config::providers::get_provider_by_id(pid) {
-                let url = meta
-                    .default_base_url
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| self.client.base_url.clone());
-                let key = crate::core::config::providers::resolve_runtime_api_key(Some(pid), None)
-                    .unwrap_or_else(|| self.client.api_key.clone());
-                (url, key)
-            } else {
-                // 既没有该 provider 的配置、也没有内建元数据：只改模型名，不切 provider。
-                //
-                // 走到这里说明 `apply_model_selection` 的校验和这里的查找对"这个
-                // provider 存不存在"给出了不同答案（它查的是 `eq_ignore_ascii_case`
-                // 加内建表，这里是 `get(pid)` 加同样的大小写兜底）。静默只 set_model
-                // 的话，请求会继续发往上一次那个 provider —— 表现为"切了没反应"。
-                // 所以必须留痕。
-                crate::utils::logging::append_debug_log_line(&format!(
-                    "[SetModel] provider '{}' has neither stored config nor built-in metadata; \
-                     setting model '{}' WITHOUT switching provider",
-                    pid, model
-                ));
-                self.inner.set_model(model);
-                self.client = self.inner.get_client();
-                return;
+        let resolved =
+            match crate::agent::model_switch::resolve(model, provider_id, &self.client).await {
+                Ok(resolved) => resolved,
+                Err(reason) => {
+                    // 到这里说明 provider 既没有配置也没有内建元数据 —— 上游的
+                    // `apply_model_selection` 已经拒过这种 provider，这里只改模型名。
+                    crate::utils::logging::append_debug_log_line(&format!(
+                        "[SetModel] {}; setting model '{}' WITHOUT switching provider",
+                        reason, model
+                    ));
+                    self.inner.set_model(model);
+                    self.client = self.inner.get_client();
+                    return;
+                }
             };
 
-            crate::utils::logging::append_debug_log_line(&format!(
-                "[SetModel] Switching to model={}, provider={}, base_url={}",
-                model, pid, base_url
-            ));
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[SetModel] Switching to model={}, provider={:?}, base_url={}",
+            resolved.model, resolved.provider_id, resolved.base_url
+        ));
 
-            let is_openai_compatible =
-                crate::core::config::providers::resolve_openai_compatible_mode(
-                    pid,
-                    settings.and_then(|settings| settings.r#type.as_deref()),
-                );
+        if resolved.switch_provider {
             self.inner.switch_provider(
-                model,
-                &base_url,
-                &api_key,
-                is_openai_compatible,
-                Some(pid.to_string()),
+                &resolved.model,
+                &resolved.base_url,
+                &resolved.api_key,
+                resolved.is_openai_compatible,
+                resolved.provider_id.clone(),
             );
-            self.client = self.inner.get_client();
         } else {
-            self.inner.set_model(model);
-            self.client = self.inner.get_client();
+            self.inner.set_model(&resolved.model);
         }
+        self.client = self.inner.get_client();
     }
 
     pub async fn process_user_message(
@@ -1242,11 +1199,22 @@ impl StarAgent {
     }
 
     pub fn set_steering_queue(&mut self, queue: Arc<AsyncMessageQueue<(u64, String)>>) {
-        self.steering_queue = Some(queue);
+        self.steering_queue = Some(queue.clone());
+        // 真正跑工具循环的是 `inner`（每条用户消息再派生一个 fresh Agent），
+        // 队列必须一路传下去，否则运行中插入的需求没人消费。
+        self.inner.set_steering_queue(queue);
     }
 
     pub fn set_steering_signal(&mut self, signal: Arc<Notify>) {
         self.steering_signal = Some(signal);
+    }
+
+    /// 运行中切模型的交接槽（见 `agent::model_switch`）。
+    ///
+    /// 回合跑起来之后 `StarAgent` 被独占借出，运行时够不到 agent 的 client ——
+    /// 靠这个槽把用户选中的模型递进去。
+    pub fn model_switch_cell(&self) -> crate::agent::model_switch::ModelSwitchCell {
+        self.inner.model_switch_cell.clone()
     }
 
     #[cfg(test)]

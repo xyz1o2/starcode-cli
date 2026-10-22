@@ -23,6 +23,7 @@
   "ui.status.done_tool": "完成：{tool}",
   "ui.status.error_tool": "异常：{tool}",
   "ui.status.continue": "状态：继续生成最终回答",
+  "ui.status.steered": "已插入当前回合",
   "ui.status.queue.processing": "正在处理队列中的请求...",
   "ui.status.error": "异常：{error}",
   "ui.status.approval.current": "状态：审批模式 {name}",

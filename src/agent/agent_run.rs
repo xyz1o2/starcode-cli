@@ -4,6 +4,31 @@ use crate::types::StarMessage;
 use futures::Stream;
 use std::pin::Pin;
 
+/// 把当轮的用户消息并进对话。
+///
+/// **紧跟在另一条 user 消息后面时合并成一条。** 运行中插入的需求（steering）
+/// 如果赶在这一轮开始前被用户打断，就给会话留下一个"没人回答过的 user 消息"；
+/// 下一条用户消息再追加上去就成了连续两条 user。Anthropic 会把连续的 user 轮
+/// 合并（没事），AWS Bedrock 则直接报 `roles must alternate`。
+///
+/// 返回 `true` 表示合并进了上一条，`false` 表示新起了一条。
+fn push_or_merge_user_message(messages: &mut Vec<StarMessage>, turn_message: String) -> bool {
+    let merged = match messages.last_mut() {
+        Some(last) if last.role == "user" && last.content.is_some() => {
+            if let Some(content) = last.content.as_mut() {
+                content.push_str("\n\n");
+                content.push_str(&turn_message);
+            }
+            true
+        }
+        _ => false,
+    };
+    if !merged {
+        messages.push(StarMessage::user(turn_message));
+    }
+    merged
+}
+
 impl Agent {
     pub fn run_stream<'a>(
         &'a mut self,
@@ -309,7 +334,8 @@ impl Agent {
                 turn_message.push_str(&extra);
                 turn_message.push_str("\n</system-reminder>");
             }
-            messages.push(StarMessage::user(turn_message));
+            // 紧跟在另一条 user 消息后面时合并成一条（见 `push_or_merge_user_message`）。
+            push_or_merge_user_message(&mut messages, turn_message);
 
             // Create the event bridging channel and wire it on the agent.
             // Events are emitted through this channel via emit_event().
@@ -332,6 +358,12 @@ impl Agent {
             agent_for_loop.abort_flag = self.abort_flag.clone();
             agent_for_loop.abort_token = self.abort_token.clone();
             agent_for_loop.task_complexity = self.task_complexity.clone();
+            // steering 队列要一路传到这个 fresh Agent —— 运行中插入的需求
+            // 是在这里被消费、插进对话的。
+            agent_for_loop.steering_queue = self.steering_queue.clone();
+            // 运行中切模型的交接槽也要传下去 —— 运行中的回合靠它在下一次请求前
+            // 换上用户刚选的模型。
+            agent_for_loop.model_switch_cell = self.model_switch_cell.clone();
 
             let (result_tx, result_rx) =
                 tokio::sync::oneshot::channel::<(Result<Vec<StarMessage>, (Vec<StarMessage>, AgentEvent)>, Vec<StarMessage>)>();
@@ -452,5 +484,52 @@ impl Agent {
         }
 
         Ok((final_response, latest_usage))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 上一条是 user 消息时合并，不留连续两条 user。
+    #[test]
+    fn consecutive_user_messages_are_merged() {
+        let mut messages = vec![StarMessage::user("第一条".to_string())];
+        let merged = push_or_merge_user_message(&mut messages, "第二条".to_string());
+
+        assert!(merged, "应当合并进上一条");
+        assert_eq!(messages.len(), 1, "不能多出一条 user");
+        assert_eq!(
+            messages[0].content.as_deref(),
+            Some("第一条\n\n第二条"),
+            "两条内容都要在"
+        );
+    }
+
+    /// 上一条不是 user（助手回答过）时新起一条 —— 这是常规路径。
+    #[test]
+    fn a_new_user_message_is_pushed_after_an_assistant_reply() {
+        let mut messages = vec![
+            StarMessage::user("需求".to_string()),
+            StarMessage::assistant("回答".to_string()),
+        ];
+        let merged = push_or_merge_user_message(&mut messages, "追问".to_string());
+
+        assert!(!merged, "上一条是助手回答，不该合并");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[2].role, "user");
+        assert_eq!(messages[2].content.as_deref(), Some("追问"));
+    }
+
+    /// 空对话时新起一条。
+    #[test]
+    fn the_first_user_message_is_pushed() {
+        let mut messages: Vec<StarMessage> = Vec::new();
+        assert!(!push_or_merge_user_message(
+            &mut messages,
+            "第一句".to_string()
+        ));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
     }
 }

@@ -543,6 +543,12 @@ pub struct ChatState {
     pub last_chat_height: u16,
     pub last_max_scroll: u16,
     pub next_message_id: u64,
+    /// 每一轮流式输出落在 `chat_history` 的哪一条。
+    ///
+    /// **值可能是悬空的**（== `chat_history.len()`）：工具调用之后、下一段正文
+    /// 到达之前，落点就指着"下一条新建的助手条目"（见 `services/stream.rs` 的
+    /// ToolCalls 分支）。所以读它的人**必须**先判 `idx < chat_history.len()`，
+    /// 直接 `chat_history[idx]` 会 panic（index out of bounds）。
     pub stream_targets: HashMap<u64, usize>,
     pub message_start_indices: HashMap<u64, usize>,
     pub active_message_id: Option<u64>,

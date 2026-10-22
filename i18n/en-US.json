@@ -23,6 +23,7 @@
   "ui.status.done_tool": "Done: {tool}",
   "ui.status.error_tool": "Error: {tool}",
   "ui.status.continue": "Status: continuing final response",
+  "ui.status.steered": "Added to the running turn",
   "ui.status.queue.processing": "Processing queued request...",
   "ui.status.error": "Error: {error}",
   "ui.status.approval.current": "Status: approval mode {name}",

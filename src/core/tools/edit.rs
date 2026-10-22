@@ -109,6 +109,21 @@ pub fn detect_line_ending(content: &str) -> LineEnding {
     }
 }
 
+/// 生成工具结果里展示的 unified diff。
+///
+/// **两边必须是同一套行尾。** `old_content` 是读盘后归一化成 LF 的内容，
+/// 而写回磁盘的 `new_content` 按原文件的行尾还原过（CRLF 文件写回 CRLF）。
+/// 拿 CRLF 的新内容去比 LF 的旧内容，每一行都多出一个 `\r`，于是**整个文件**
+/// 被算成「删掉再新增」——界面上几百行删除、下面全是新增，而磁盘上其实只改
+/// 了几行（SourceTree 里看得一清二楚）。这就是这个 diff 必须归一化的原因。
+///
+/// 只影响展示：写盘的内容仍是按原行尾还原过的 `new_content`。
+pub fn build_edit_diff(file_path: &str, old_content: &str, new_content: &str) -> String {
+    let normalized_new = normalize_line_endings(new_content);
+    let diff = TextDiff::from_lines(old_content, &normalized_new);
+    format!("{}", diff.unified_diff().header(file_path, file_path))
+}
+
 pub fn normalize_line_endings(content: &str) -> String {
     content.replace("\r\n", "\n")
 }
@@ -1357,12 +1372,11 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
                 // Generate Diff
-                let diff = TextDiff::from_lines(current, &final_content);
-                let diff_output = format!(
-                    "{}",
-                    diff.unified_diff()
-                        .header(&params.file_path, &params.file_path)
-                );
+                //
+                // 旧内容是归一化过的 LF，新内容按原文件行尾还原过 —— 交给
+                // `build_edit_diff` 统一归一化，否则 CRLF 文件的每一行都会被
+                // 算成改动（整文件"删掉再新增"）。
+                let diff_output = build_edit_diff(&params.file_path, current, &final_content);
 
                 let added = params.new_string.lines().count();
                 let removed = params.old_string.lines().count();
@@ -2051,6 +2065,71 @@ mod tests {
         let r = calculate_replacement(FILE, "", "x");
         assert_eq!(r.occurrences, 0);
         assert_eq!(r.new_content, FILE);
+    }
+
+    /// CRLF 文件的 diff 必须只显示真正改动的那几行。
+    ///
+    /// 回归：旧内容是归一化后的 LF，新内容按原文件行尾还原成 CRLF，两边直接
+    /// 去比，每行都多一个 `\r` —— 整个文件被算成"删掉再新增"，界面上几百行
+    /// 删除、下面全是新增，而磁盘上其实只改了几行。
+    #[test]
+    fn crlf_file_diff_only_shows_the_changed_lines() {
+        let original_lf = "fn main() {\n    println!(\"hello\");\n}\n";
+        let original_crlf = original_lf.replace('\n', "\r\n");
+
+        // 改一行，然后按原文件行尾（CRLF）还原 —— 这正是写盘前的那份内容。
+        let new_lf = original_lf.replace("hello", "world");
+        let new_crlf = new_lf.replace('\n', "\r\n");
+
+        let diff = build_edit_diff("main.rs", original_lf, &new_crlf);
+
+        let removed = diff
+            .lines()
+            .filter(|l| l.starts_with('-') && !l.starts_with("---"))
+            .count();
+        let added = diff
+            .lines()
+            .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+            .count();
+
+        assert_eq!(removed, 1, "只应删掉改动的那一行: {}", diff);
+        assert_eq!(added, 1, "只应新增改动的那一行: {}", diff);
+        assert!(!diff.contains('\r'), "diff 里不该混进裸 \\r: {:?}", diff);
+    }
+
+    /// LF 文件的行为不变：改动几行就只显示几行。
+    #[test]
+    fn lf_file_diff_only_shows_the_changed_lines() {
+        let original = "fn main() {\n    println!(\"hello\");\n}\n";
+        let new_content = original.replace("hello", "world");
+
+        let diff = build_edit_diff("main.rs", original, &new_content);
+
+        let removed = diff
+            .lines()
+            .filter(|l| l.starts_with('-') && !l.starts_with("---"))
+            .count();
+        let added = diff
+            .lines()
+            .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+            .count();
+
+        assert_eq!((removed, added), (1, 1), "{}", diff);
+    }
+
+    /// 新内容整体换行尾（CRLF ↔ LF）时，diff 不该把每一行都算成改动。
+    #[test]
+    fn diff_ignores_line_ending_only_changes() {
+        let original = "a\nb\nc\n";
+        let same_but_crlf = "a\r\nb\r\nc\r\n";
+
+        let diff = build_edit_diff("x.txt", original, same_but_crlf);
+
+        assert!(
+            !diff.contains("\n-") && !diff.contains("\n+"),
+            "只有行尾不同时不该出现增删行: {:?}",
+            diff
+        );
     }
 
     #[test]

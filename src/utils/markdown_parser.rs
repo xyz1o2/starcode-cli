@@ -304,9 +304,9 @@ fn code_block_lines(
 
 /// 思考块内的围栏代码段 → 完整渲染（顶框 + 高亮正文 + 底框）。
 ///
-/// 思考内容整体走逐行紧凑排版，但模型在思考里贴的 ``` 代码块需要真正
-/// 渲染——语法高亮 + 围栏边框，与正文代码块同一视觉语言，而不是把
-/// ```bash 这类标记原样亮出来或整段藏掉。
+/// 思考内容整体走逐行紧凑排版，但模型在思考里贴的代码块需要真正渲染——语法
+/// 高亮 + 围栏边框，与正文代码块同一视觉语言，而不是把围栏标记（比如 `bash`）
+/// 原样亮出来或整段藏掉。
 pub(crate) fn render_thinking_code_segment(
     code: &str,
     language: &str,
@@ -1127,6 +1127,82 @@ fn starts_list_item(s: &str) -> bool {
     false
 }
 
+/// 判断文本开头是否是 markdown 表格行
+///
+/// 表格被切成两半同样会坏掉：后半没了表头，会被当成普通段落渲染。
+fn starts_table_row(s: &str) -> bool {
+    s.lines()
+        .next()
+        .map(|l| l.trim_start().starts_with('|'))
+        .unwrap_or(false)
+}
+
+/// 把一段正在流式输出的 markdown 切成两半，返回 `(前半, 后半)`。
+///
+/// **为什么需要切**：会话运行中插入的需求，会把助手正在写的这段输出切成两半
+/// —— 前半在用户消息之前，后半在之后。切点必须落在 markdown 的安全边界上，
+/// 否则两半都不是合法 markdown：最常见的是**代码块被劈开**，前半的 ``` 没
+/// 闭合，渲染时会把后面整段（含用户那条消息）都当成代码，用户的消息就
+/// "插到 markdown 里面"了。
+///
+/// 规则：
+/// - 正文此刻在代码块**外面**：切在最后一个段落边界（空行）之后，两半各自
+///   都是完整段落；列表项中间不切（与 `last_paragraph_boundary` 同一口径）。
+/// - 正文此刻在代码块**里面**：切在那个代码块的**开头**之前 —— 代码块整体
+///   留在后半，前半是干净的正文，代码块不会被劈开。
+/// - 找不到任何安全边界：前半是全部内容，后半为空（后续输出另起一条）。
+///
+/// 切点永远是 UTF-8 字符边界（按行取，不会切进多字节字符中间）。
+pub fn split_markdown_at_safe_boundary(content: &str) -> (String, String) {
+    let bytes = content.as_bytes();
+    let mut line_start = 0usize;
+    let mut in_fence = false;
+    // 当前代码块围栏所在行的起始偏移
+    let mut fence_start: Option<usize> = None;
+    // 段落边界（空行之后的字节偏移）
+    let mut boundaries: Vec<usize> = Vec::new();
+
+    for i in 0..=bytes.len() {
+        if i == bytes.len() || bytes[i] == b'\n' {
+            let line = &content[line_start..i];
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+                if in_fence {
+                    in_fence = false;
+                    fence_start = None;
+                } else {
+                    in_fence = true;
+                    fence_start = Some(line_start);
+                }
+            } else if !in_fence && line.trim().is_empty() && line_start > 0 && i < bytes.len() {
+                boundaries.push(i + 1);
+            }
+            line_start = i + 1;
+        }
+    }
+
+    let split_at = if in_fence {
+        // 正在代码块中间：切在代码块开头之前，代码块整体留在后半
+        fence_start.unwrap_or(0)
+    } else {
+        boundaries
+            .iter()
+            .rev()
+            .find(|&&b| !starts_list_item(&content[b..]) && !starts_table_row(&content[b..]))
+            .copied()
+            .unwrap_or(content.len())
+    };
+
+    if split_at == 0 || split_at >= content.len() {
+        return (content.to_string(), String::new());
+    }
+
+    (
+        content[..split_at].to_string(),
+        content[split_at..].to_string(),
+    )
+}
+
 /// Render markdown content incrementally by splitting into stable and unstable parts.
 ///
 /// During streaming, content grows token by token. Instead of re-parsing the
@@ -1327,6 +1403,86 @@ mod table_render_tests {
             row,
             border
         );
+    }
+}
+
+#[cfg(test)]
+mod safe_split_tests {
+    use super::*;
+
+    /// 段落边界：切在最后一个空行之后，两半各自都是完整段落。
+    #[test]
+    fn splits_at_the_last_paragraph_boundary() {
+        let content = "第一段。\n\n第二段。\n\n第三段还在写";
+        let (head, tail) = split_markdown_at_safe_boundary(content);
+
+        assert_eq!(head, "第一段。\n\n第二段。\n\n");
+        assert_eq!(tail, "第三段还在写");
+    }
+
+    /// **代码块不能被劈开。** 这是整件事的核心：切在代码块中间会让前半的
+    /// ``` 没闭合，渲染时把后面整段（含用户那条消息）当成代码。
+    #[test]
+    fn an_open_code_block_is_never_cut_in_half() {
+        let content = "说明文字\n\n```rust\nfn main() {\n    println!(\"hi\");\n";
+        let (head, tail) = split_markdown_at_safe_boundary(content);
+
+        assert_eq!(head, "说明文字\n\n", "前半应是代码块之前的干净正文");
+        assert!(
+            tail.starts_with("```rust"),
+            "代码块整体要留在后半: {:?}",
+            tail
+        );
+        assert!(tail.contains("fn main()"), "代码块内容不能丢: {:?}", tail);
+    }
+
+    /// 已闭合的代码块可以正常按段落边界切。
+    #[test]
+    fn a_closed_code_block_splits_normally() {
+        let content = "前面\n\n```rust\nfn a() {}\n```\n\n后面";
+        let (head, tail) = split_markdown_at_safe_boundary(content);
+
+        assert!(head.contains("```rust"), "前半应包含完整的代码块");
+        assert!(head.contains("fn a() {}"));
+        assert_eq!(tail, "后面");
+    }
+
+    /// 没有段落边界时不做切分（前半是全部内容，后半为空）。
+    #[test]
+    fn content_without_a_boundary_is_not_split() {
+        let content = "只有一行，还没有结束";
+        let (head, tail) = split_markdown_at_safe_boundary(content);
+
+        assert_eq!(head, content);
+        assert_eq!(tail, "");
+    }
+
+    /// 空内容不切。
+    #[test]
+    fn empty_content_is_not_split() {
+        let (head, tail) = split_markdown_at_safe_boundary("");
+        assert_eq!(head, "");
+        assert_eq!(tail, "");
+    }
+
+    /// 列表项中间不切 —— 否则后半的列表会从中间开始。
+    #[test]
+    fn a_list_is_not_cut_in_the_middle() {
+        let content = "说明\n\n- 第一项\n- 第二项\n";
+        let (head, tail) = split_markdown_at_safe_boundary(content);
+
+        assert_eq!(head, content, "列表前面没有可切的边界就不切");
+        assert_eq!(tail, "");
+    }
+
+    /// 表格也不切 —— 后半没了表头会被当成普通段落。
+    #[test]
+    fn a_table_is_not_cut_in_the_middle() {
+        let content = "说明\n\n| A | B |\n|---|---|\n| 1 | 2 |\n";
+        let (head, tail) = split_markdown_at_safe_boundary(content);
+
+        assert_eq!(head, content, "表格前面没有可切的边界就不切");
+        assert_eq!(tail, "");
     }
 }
 

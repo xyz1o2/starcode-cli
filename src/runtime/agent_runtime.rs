@@ -131,6 +131,10 @@ pub async fn process_message(
     let mut deferred = crate::runtime::session::DeferredRuntimeActions::default();
 
     append_debug_log_line("[AgentRuntime] Starting streaming session");
+    // 运行中切模型的交接槽：回合跑起来之后 `StarAgent` 被独占借出，运行时
+    // 够不到它的 client —— 靠这个共享槽把用户选中的模型递进去。
+    let model_switch_cell = agent.model_switch_cell();
+
     match crate::runtime::streaming_session::run_streaming_session(
         agent,
         &mut deferred,
@@ -146,6 +150,7 @@ pub async fn process_message(
             steering_queue: context.steering_queue,
             steering_signal: context.steering_signal,
             message_bus: context.message_bus,
+            model_switch_cell: &model_switch_cell,
         },
     )
     .await

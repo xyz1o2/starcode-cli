@@ -988,12 +988,19 @@ pub fn status_line_text(state: &ChatState) -> String {
     if let Some(ref line) = state.current_status_line {
         line.clone()
     } else {
-        let model = if state.current_model.is_empty() {
+        let (model, pending) = status_model(state);
+        let model = if model.is_empty() {
             "..."
         } else {
-            state.current_model.as_str()
+            model.as_str()
         };
-        format!("⊙ {}", model)
+        if pending {
+            // 待生效的切换：显示用户选中的那个并标出来，别让状态栏还停在旧模型上
+            // —— 那看起来就是"切了没反应"。
+            format!("⊙ {} ⏳", model)
+        } else {
+            format!("⊙ {}", model)
+        }
     }
 }
 
@@ -1068,11 +1075,64 @@ fn turn_elapsed_secs(state: &ChatState) -> Option<u64> {
 
 /// Build the styled status line as a Vec<Line> for full-page rendering.
 pub fn build_status_lines(state: &ChatState, width: u16) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // ── 模型切换确认框：必须**一直**看得见 ──────────────────────────────
+    //
+    // 它原先只写进 `current_status_line`，而那一行只在**回合进行中**渲染
+    // （`processing_spinner_line` 在 `is_processing` 为假时返回空行）。于是空闲
+    // 状态下按回车选模型 → 面板关掉 → 屏幕上什么都不出现 → 用户看到的现象就是
+    // "切不动"，只能重开面板再按一次回车。
+    if state.pending_model_confirmation {
+        let model = state
+            .pending_model_change
+            .as_ref()
+            .map(|pending| pending.model.clone())
+            .unwrap_or_default();
+        let theme = state.theme_manager.current();
+        lines.push(Line::from(vec![
+            Span::styled(" ⚠ ", Style::default().fg(theme.warning)),
+            Span::styled(
+                crate::core::i18n::t(
+                    "ui.model.confirm_switch",
+                    &format!("切换模型到 {}? (y/n)", model),
+                    &format!("Switch model to {}? (y/n)", model),
+                ),
+                Style::default().fg(theme.warning),
+            ),
+        ]));
+    }
+
     let spans: Vec<Span> = build_status_spans(state, width);
     if spans.is_empty() {
-        return vec![Line::from("")];
+        lines.push(Line::from(""));
+    } else {
+        lines.push(Line::from(spans));
     }
-    vec![Line::from(spans)]
+    lines
+}
+
+/// 状态栏要显示的模型，以及它是否**待生效**。
+///
+/// worker 回执之前 `current_model` 还是旧模型。这时状态栏若照旧显示旧模型，
+/// 用户看到的现象就是"选了半天没反应" —— "切不动"的观感大半来自这里，而不是
+/// 切换真的没生效。所以有待生效的模型切换时显示**用户选的那个**并标上 ⏳；
+/// 回执到了（生效或被拒）队列就空了，状态栏自动回到实际值。
+pub fn status_model(state: &ChatState) -> (String, bool) {
+    let pending = state
+        .pending_runtime_settings
+        .iter()
+        .rev()
+        .find_map(|mutation| {
+            mutation
+                .model
+                .as_ref()
+                .map(|selection| selection.model.clone())
+        });
+    match pending {
+        Some(model) if model != state.current_model => (model, true),
+        _ => (state.current_model.clone(), false),
+    }
 }
 
 /// Build the styled spans for the status bar (shared by both renderers).
@@ -1087,10 +1147,11 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
     let theme = state.theme_manager.current();
 
     // ── 1. Model  ⊙ model-name ──────────────────────────────────────────────
-    let model = if state.current_model.is_empty() {
+    let (model_text, model_pending) = status_model(state);
+    let model = if model_text.is_empty() {
         "..."
     } else {
-        &state.current_model
+        &model_text
     };
     let model_color = theme.success; // 使用主题的 success 颜色
     spans.push(Span::styled(" ⊙ ", Style::default().fg(model_color)));
@@ -1098,6 +1159,11 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
         model.to_string(),
         Style::default().fg(model_color),
     ));
+    if model_pending {
+        // 待生效：worker 回执之前显示的是用户选的那个模型，旁边标出来 ——
+        // 否则状态栏还显示旧模型，用户看到的现象就是"切了没反应"。
+        spans.push(Span::styled(" ⏳", Style::default().fg(theme.warning)));
+    }
 
     // ── 2. Directory  ▸ dirname ──────────────────────────────────────────────
     if !minimal {
@@ -1464,6 +1530,88 @@ mod tests {
             col += w;
         }
         found
+    }
+
+    /// 模型切换的 y/n 确认框必须**一直看得见**。
+    ///
+    /// 它原先只写进 `current_status_line`，而那一行只在回合进行中渲染 ——
+    /// 空闲时按回车选模型，面板关掉后屏幕上什么都不出现，用户看到的现象
+    /// 就是"切不动"。
+    #[test]
+    fn the_model_switch_confirmation_is_always_visible() {
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        state.is_processing = false;
+        state.pending_model_confirmation = true;
+        state.pending_model_change = Some(crate::ui::state::store::PendingModelChange {
+            model: "model-b".to_string(),
+            provider_id: Some("local".to_string()),
+        });
+
+        let lines = build_status_lines(&state, 100);
+        let text: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+
+        assert!(
+            text.contains("model-b") && text.contains("(y/n)"),
+            "确认框必须看得见: {:?}",
+            text
+        );
+    }
+
+    /// 没有待确认的切换时，状态栏就是原来那一行。
+    #[test]
+    fn no_confirmation_adds_no_extra_line() {
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        state.pending_model_confirmation = false;
+        let lines = build_status_lines(&state, 100);
+        assert_eq!(lines.len(), 1, "不该多出一行: {:?}", lines);
+    }
+
+    /// 状态栏要显示用户**选中的**模型，并标出它还没生效 ——
+    /// worker 回执之前 `current_model` 还是旧模型，照旧显示的话用户看到的
+    /// 就是"切了没反应"。
+    #[test]
+    fn a_pending_model_switch_is_shown_as_pending() {
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        state.current_model = "model-a".to_string();
+        state.pending_runtime_settings.push_back(
+            crate::runtime::messages::RuntimeSettingsMutation {
+                ui_revision: 1,
+                persistence:
+                    crate::runtime::messages::RuntimeSettingsPersistencePolicy::SessionOnly,
+                model: Some(crate::runtime::messages::RuntimeModelSelection {
+                    model: "model-b".to_string(),
+                    provider_id: Some("local".to_string()),
+                }),
+                context_window: None,
+                thinking_effort: None,
+            },
+        );
+
+        let (model, pending) = status_model(&state);
+        assert_eq!(model, "model-b", "要显示用户选中的那个");
+        assert!(pending, "并且标出还没生效");
+
+        let text = status_line_text(&state);
+        assert!(
+            text.contains("model-b") && text.contains('⏳'),
+            "状态栏要显示待生效的模型: {}",
+            text
+        );
+    }
+
+    /// 没有待生效的切换时，状态栏显示实际在用的模型，不带标记。
+    #[test]
+    fn an_applied_model_switch_is_shown_without_a_pending_marker() {
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        state.current_model = "model-b".to_string();
+
+        let (model, pending) = status_model(&state);
+        assert_eq!(model, "model-b");
+        assert!(!pending, "已经生效就不该再标记");
     }
 
     #[test]

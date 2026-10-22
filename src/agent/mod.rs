@@ -26,6 +26,7 @@ pub(crate) mod model_cache;
 pub mod model_catalog;
 mod model_fallback;
 pub(crate) mod model_list;
+pub(crate) mod model_switch;
 pub(crate) mod nudges;
 mod planner;
 pub(crate) mod policies;

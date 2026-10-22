@@ -125,6 +125,12 @@ Refs: <https://ratatui.rs/concepts/snapshots/> (the official recipe, and why it 
 
 Every submitted line funnels through here and is dispatched by prefix before anything reaches the model: `/` → `commands::handle_command`; `#` → `/memory add`; `!` → direct shell via `ShellExecutionService` (refused in Plan mode); `@` → `at_processor` inlines file contents and fires `MarkFilesAsRead`. Only then does `AgentRequest::SendMessage` go out.
 
+**While a turn is running, a plain requirement is steered into that turn, not queued.** `steer_user_message` sends it as `AgentRequest::SendMessage`; `runtime/session.rs` routes a mid-turn `SendMessage` into the steering queue, and `agent_loop.rs` drains that queue at each turn boundary, injecting the text as a user-role message. The model sees it on its next call instead of after the whole turn finishes. Commands (`/`, `#`, `!`) are exempt — they have their own dispatch paths, so they still queue in `pending_user_messages` and show up in the queued panel above the prompt.
+
+Two invariants the steering path depends on: the injected message carries its own `message_id` (reusing the running turn's id would make the next turn's `Done` look like a duplicate and get swallowed), and `agent_run.rs` merges a new user turn into a trailing user message (`push_or_merge_user_message`) so a steered message left unanswered by an interrupt cannot leave two consecutive user turns behind.
+
+**The assistant's output gets cut in half at the steering point, and the cut has to land on a markdown boundary.** The user's message goes between the two halves, so a cut in the middle of a fenced code block leaves the first half with an unclosed ` ``` ` — the renderer then treats everything after it, *including the user's own message*, as code. `markdown_parser::split_markdown_at_safe_boundary` picks the cut: at the last paragraph boundary outside any fence, or — when the text is inside a fence — before that fence's opening line, so the code block stays whole in the second half. Lists and tables are never cut either.
+
 ### Slash commands — four touch points
 
 Adding or changing a command means editing all of these:
@@ -157,6 +163,22 @@ A tool needing approval publishes `ToolConfirmationRequest` to `MessageBus` (`sr
 - `requires_invocation_confirmation()` is *not* a veto. It means "consult this tool's own check every time". It once gated the permission-cache read itself (`if !approved && !requires_invocation_confirmation && …`), so for any tool that declares it — `Edit` whenever `folder_trust` is on — 「本会话允许 / 总是允许」 was recorded and never read back, and every edit re-prompted forever. A write with no read is a bug, not a policy.
 - The only thing that outranks a session/persisted grant is an **explicit `ask` rule**: the user wrote it down, so it means "ask me every time".
 - Project state must resolve to `<project>/.star`, never `~/.star`. `Storage::new` walks upwards so subdirectories inherit a monorepo root, but a project under `$HOME` used to adopt the global directory, which put 「总是允许」 in scope for every sibling project. `paths::find_nearest_project_star_dir` is the filter that prevents it.
+
+### Switching the model while a turn is running
+
+A model switch requested mid-turn is **not** blocked, and it does not wait for the turn to end. That matches the three references:
+
+- **Claude Code** — "/model … Claude Code applies the change without waiting for the current response to finish" (since v2.1.242; before that it was feature-flagged and always queued on third-party providers).
+- **OpenCode** — "the model is sampled at the start of a provider turn. Any changes to the model selection admitted after this boundary will apply to the *next* provider turn and will not interrupt or restart the current turn."
+- **Codex** — `/model` is `available_during_task`; the change applies to the next task, and the running turn keeps the current model's policies for its pending calls.
+
+So the change lands on the **next provider request**, not "after the whole turn" and not "never".
+
+Mechanics: `agent::model_switch` owns the shared cell. `runtime/session.rs` publishes the user's `(model, provider)` into it when `UpdateRuntimeSettings` arrives mid-turn; `Agent::execute_turn` drains it before every provider request and resolves it against the provider store (`model_switch::resolve` — one implementation, shared with `StarAgent::set_model_with_provider`, so both paths land on the same endpoint). The long-lived agent's client and the UI acknowledgement still install at the end of the turn — the cell is what makes the *running* turn pick the new model up.
+
+Two UI rules that keep it from looking broken:
+- The status bar shows the **requested** model with a `⏳` marker while the worker's acknowledgement is outstanding (`status_line::status_model`). `current_model` only moves on the acknowledgement, so showing it alone reads as "切不动".
+- The y/n switch confirmation renders on its own always-visible status line. It used to live only in `current_status_line`, which is drawn by `processing_spinner_line` — and that returns nothing when `is_processing` is false, so on an idle session the prompt never appeared.
 
 ### Agent internals
 

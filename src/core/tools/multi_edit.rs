@@ -8,7 +8,7 @@ use crate::core::tools::tools::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -95,7 +95,14 @@ impl ToolInvocation for MultiEditToolInvocation {
             if strict_read_check {
                 {
                     let read_state = global_state.read_file_state.read().await;
+                    // 按**文件**去重，不是按编辑条目。
+                    //
+                    // 一次 multi_edit 常常对同一个文件做十几处替换（8 处很常见）。
+                    // 按条目统计的话，未读的文件会被列出 8 遍、报错说"8 个文件"，
+                    // 下一��还让模型连着调 8 次一模一样的 `Read` —— 看起来像 8 个
+                    // 文件，其实只有 1 个。
                     let mut unread: Vec<&str> = Vec::new();
+                    let mut seen_unread: HashSet<String> = HashSet::new();
                     for edit in &params.edits {
                         let path = config.target_dir().join(&edit.file_path);
                         // 键必须和写入端（`read_file::record_file_read`、`Glob` 的
@@ -109,7 +116,10 @@ impl ToolInvocation for MultiEditToolInvocation {
                         // "Grep 完再 multi_edit" 是 100% 误报。
                         let abs_path = crate::core::utils::paths::read_state_key(&path);
 
-                        if path.exists() && !read_state.contains_key(&abs_path) {
+                        if path.exists()
+                            && !read_state.contains_key(&abs_path)
+                            && seen_unread.insert(abs_path.clone())
+                        {
                             unread.push(&edit.file_path);
                         }
                     }
@@ -449,6 +459,16 @@ impl BaseDeclarativeTool for MultiEditTool {
 mod tests {
     use super::*;
 
+    /// 这组测试共用一个**进程级**环境变量（`STAR_DISABLE_READ_CHECK`）。
+    ///
+    /// `set_var` 是进程全局的：并行跑时"把门关掉"那个测试的窗口会漏给别的
+    /// 测试，于是"该拦的没拦"——看起来像前置门坏了，其实是环境变量串了。
+    /// 碰这个变量的测试必须拿同一把锁。
+    fn env_gate() -> &'static tokio::sync::Mutex<()> {
+        static GATE: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        GATE.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
     /// 生命周期测试的公共底座：临时目录 + 指向它的真实 `Config` + 真实
     /// `GlobalState`，并在结束时清掉自己造出来的所有东西。
     ///
@@ -606,9 +626,52 @@ mod tests {
         assert_eq!(h.read("a.rs"), "beta\n");
     }
 
+    /// 同一个文件被改多处时，未读清单**只列一次**。
+    ///
+    /// 回归：清单是按**编辑条目**统计的，一次 multi_edit 对同一个文件做 8 处
+    /// 替换（很常见），清单就把同一个路径列 8 遍、报错说"8 个文件"，下一步还
+    /// 让模型连着调 8 次一模一样的 `Read` —— 看起来像 8 个文件，其实只有 1 个。
+    #[tokio::test]
+    async fn repeated_edits_to_one_file_are_listed_once() {
+        let _guard = env_gate().lock().await;
+        let h = Harness::new("multi-edit-gate-dedup").await;
+        h.write("a.rs", "alpha\nbeta\ngamma\n");
+        // 刻意不 mark_read
+
+        let edits: Vec<serde_json::Value> = ["alpha", "beta", "gamma"]
+            .iter()
+            .map(|token| {
+                serde_json::json!({
+                    "file_path": "a.rs",
+                    "old_string": token,
+                    "new_string": format!("{}!", token),
+                })
+            })
+            .collect();
+
+        let result = h.run(serde_json::json!({ "edits": edits })).await;
+
+        let message = result.output.clone();
+        assert!(
+            message.contains("1 file(s)"),
+            "只该算 1 个文件：{message:?}"
+        );
+        assert_eq!(
+            message.matches("  - a.rs").count(),
+            1,
+            "同一个路径只能列一次：{message:?}"
+        );
+        assert_eq!(
+            message.matches("Read('a.rs')").count(),
+            1,
+            "下一步也只能调一次 Read：{message:?}"
+        );
+    }
+
     /// 前置门：**没读过的文件拦下**，且错误里带得上模型能照做的下一步。
     #[tokio::test]
     async fn an_unread_file_is_blocked_with_an_actionable_message() {
+        let _guard = env_gate().lock().await;
         let h = Harness::new("multi-edit-gate-blocked").await;
         h.write("a.rs", "alpha\n");
         // 刻意不 mark_read
@@ -669,6 +732,7 @@ mod tests {
     /// `STAR_DISABLE_READ_CHECK=1` 是逃生口，必须真的关掉这道门。
     #[tokio::test]
     async fn the_read_gate_can_be_disabled_by_env() {
+        let _guard = env_gate().lock().await;
         let h = Harness::new("multi-edit-gate-off").await;
         h.write("a.rs", "alpha\n");
 
