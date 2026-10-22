@@ -10,6 +10,7 @@ use crate::agent::tool_routing::{
 use crate::agent::{hooks, tool_helpers};
 use crate::types::{StarMessage, StarToolCall, ToolResult};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 /// 主 agentic 循环的执行结果
 type LoopResult = Result<Vec<StarMessage>, (Vec<StarMessage>, AgentEvent)>;
@@ -114,7 +115,76 @@ fn release_stale_tool_results_in(messages: &mut Vec<StarMessage>) -> (usize, usi
     (released_count, released_chars)
 }
 
+/// 把运行中插入的需求取出来，插进对话（作为 user 角色消息）。
+///
+/// 返回真正插进去的条数。空白的忽略 —— 那不是需求。
+///
+/// 队列里的每条消息只会被取走一次（`try_next`），所以同一条不会既被当前这轮
+/// 消费、又被下一轮重复消费。
+fn drain_steering_messages(
+    queue: Option<&Arc<crate::agent::messaging::AsyncMessageQueue<(u64, String)>>>,
+    messages: &mut Vec<StarMessage>,
+) -> usize {
+    let Some(queue) = queue else {
+        return 0;
+    };
+    let mut injected = 0usize;
+    while let Some((steer_id, steer_text)) = queue.try_next() {
+        let steer_text = steer_text.trim();
+        if steer_text.is_empty() {
+            continue;
+        }
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[AGENT] Steering message injected (id={}): {}",
+            steer_id,
+            steer_text.chars().take(120).collect::<String>()
+        ));
+        messages.push(StarMessage::user(steer_text.to_string()));
+        injected += 1;
+    }
+    injected
+}
+
 impl Agent {
+    /// 取走运行中切进来的模型选择，套到本回合的 client 上。
+    ///
+    /// 用户在 agent 还在跑的时候切模型：改动落在**下一次请求**上 ——
+    /// 对标 Claude Code（"/model … applies the change without waiting for the
+    /// current response to finish"）与 OpenCode（"changes admitted after the
+    /// provider-turn boundary apply to the next provider turn"）。既不是等整轮
+    /// 结束，也不是打断当前请求。
+    ///
+    /// 解析失败（provider 不存在之类）不在这里报错：权威的判定在轮末由
+    /// `apply_runtime_settings` 给出并回执给 UI。这里只跳过，让这一轮继续用
+    /// 旧模型跑完 —— 报错会把整个回合打断，代价太大。
+    pub(crate) async fn adopt_pending_model_switch(&mut self) {
+        let Some(pending) = crate::agent::model_switch::take(&self.model_switch_cell).await else {
+            return;
+        };
+
+        match crate::agent::model_switch::resolve(
+            &pending.model,
+            pending.provider_id.as_deref(),
+            &self.client,
+        )
+        .await
+        {
+            Ok(resolved) => {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[ModelSwitch] applied mid-turn: model={} provider={:?}",
+                    resolved.model, resolved.provider_id
+                ));
+                crate::agent::model_switch::apply_to_client(&mut self.client, &resolved);
+            }
+            Err(reason) => {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[ModelSwitch] mid-turn switch skipped: {}",
+                    reason
+                ));
+            }
+        }
+    }
+
     /// 执行主 agentic 循环。
     ///
     /// 事件通过 `event_tx` 实时发送，由调用方通过 `event_rx` 接收。
@@ -202,6 +272,16 @@ impl Agent {
                 ));
                 return Err((messages.clone(), AgentEvent::Done));
             }
+
+            // 消费运行中插入的需求（steering）
+            //
+            // 用户在 agent 还在跑的时候又提了一条要求，这条必须进**当前这一轮**
+            // 的对话，而不是等本轮跑完才发出去 —— 否则 agent 可能已经沿着错误
+            // 的方向跑完了，用户还要再等一整轮才看得到自己的补充被采纳。
+            //
+            // 位置：每轮 turn 的开头，紧挨着 SubAgent 通知的注入点。插进去的
+            // 是 user 角色消息，下一次调用模型时就在请求里。
+            drain_steering_messages(self.steering_queue.as_ref(), messages);
 
             // 消费异步 SubAgent 完成通知（注入为 user-role 消息）
             if let Some(ref queue) = self.async_notification_queue {
@@ -763,6 +843,11 @@ impl Agent {
         loop_state: &mut LoopState,
         history_len: usize,
     ) -> TurnResult {
+        // 运行中切模型：用户在 agent 还在跑的时候换了模型，这个改动落在
+        // **下一次请求**上（Claude Code / OpenCode 的做法），不是等整轮结束。
+        // 位置在工具选择之前 —— 模型变了，工具短名单和 thinking 判定都该按新模型算。
+        self.adopt_pending_model_switch().await;
+
         // Tool Selection
         if let Err(reason) = hooks::run_stage_hooks(
             user_input,
@@ -1142,5 +1227,50 @@ mod tests {
         // 每轮开头都会跑一次，第二次不该再啃一口。
         assert_eq!(release_stale_tool_results_in(&mut messages).0, 0);
         assert_eq!(tool_content(&messages, 1), after_first);
+    }
+
+    /// 运行中插入的需求必须进对话 —— 这是「会话运行中我输入需求，它不追加进去」
+    /// 的正解：它不是排到本轮结束才发，而是下一轮就出现在请求里。
+    #[test]
+    fn steering_messages_are_injected_into_the_conversation() {
+        let queue = Arc::new(crate::agent::messaging::AsyncMessageQueue::new());
+        queue.enqueue((1, "顺便把测试也改了".to_string())).unwrap();
+        queue.enqueue((2, "   ".to_string())).unwrap();
+        queue.enqueue((3, "还有 README".to_string())).unwrap();
+
+        let mut messages = vec![StarMessage::user("最初的需求".to_string())];
+        let injected = drain_steering_messages(Some(&queue), &mut messages);
+
+        assert_eq!(injected, 2, "空白的不是需求，不该插进去");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1].role, "user");
+        assert_eq!(tool_content(&messages, 1), "顺便把测试也改了");
+        assert_eq!(tool_content(&messages, 2), "还有 README");
+    }
+
+    /// 队列里的每条消息只能被取走一次：不能既被当前这轮消费、又被下一轮重复消费。
+    #[test]
+    fn steering_messages_are_consumed_only_once() {
+        let queue = Arc::new(crate::agent::messaging::AsyncMessageQueue::new());
+        queue.enqueue((1, "只应插一次".to_string())).unwrap();
+
+        let mut first = Vec::new();
+        assert_eq!(drain_steering_messages(Some(&queue), &mut first), 1);
+
+        let mut second = Vec::new();
+        assert_eq!(
+            drain_steering_messages(Some(&queue), &mut second),
+            0,
+            "同一条不能被插两遍"
+        );
+        assert!(second.is_empty());
+    }
+
+    /// 没有队列时是 no-op。
+    #[test]
+    fn draining_without_a_queue_is_a_noop() {
+        let mut messages = vec![StarMessage::user("原有对话".to_string())];
+        assert_eq!(drain_steering_messages(None, &mut messages), 0);
+        assert_eq!(messages.len(), 1);
     }
 }

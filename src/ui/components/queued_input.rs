@@ -1,16 +1,21 @@
 //! 排队输入面板 —— 对标 Claude Code 的 `PromptInputQueuedCommands`。
 //!
 //! 参照 `study_or_copy_projects/claude-code-main/src/components/PromptInput/PromptInputQueuedCommands.tsx`
-//! 与 `src/context/QueuedMessageContext.tsx`：agent 还在跑时用户继续敲的需求，
+//! 与 `src/context/QueuedMessageContext.tsx`：agent 还在跑时用户继续敲的内容，
 //! 不该从屏幕上凭空消失，而应该以「暗色的用户消息」原样停在输入框正上方
 //! （参考实现是 `paddingX={2}` 的一块，排队消息按 `subtle` 上色），
 //! 等本轮结束再依次发出。
 //!
 //! ```text
-//!   > fix the failing test in agent_llm.rs
+//!   > /compact
 //!   > then update the docs
 //!   2 queued · ↑ to edit
 //! ```
+//!
+//! **普通需求不走这里**：运行中输入的需求会直接插进当前这一轮
+//! （见 `ui::app::logic::steer_user_message`），模型下一次调用就能看到。
+//! 排队的只有命令类输入（`/compact` 这类），它们各有各的处理路径，
+//! 不能当需求插进对话。
 //!
 //! 数据来源单一：[`ChatState::pending_user_messages`] —— 也就是真正会被发出去的
 //! 那个队列。屏幕上看到的就是待发的，不存在第二份「展示用」副本会和它走岔。

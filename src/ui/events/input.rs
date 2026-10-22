@@ -1037,13 +1037,12 @@ pub(crate) async fn execute_palette_action(
                     provider_id: provider_id.clone(),
                 });
                 state.pending_model_confirmation = true;
-                state.current_status_line = Some(format!(
-                    "{} (y/n)",
-                    crate::core::i18n::t(
-                        "ui.model.confirm_switch",
-                        &format!("切换模型到 {}? (y/n)", model),
-                        &format!("Switch model to {}? (y/n)", model),
-                    )
+                // 提示本体由状态栏那一行常驻渲染（见 status_line::build_status_lines）——
+                // 只写进 `current_status_line` 的话，空闲状态下它根本不显示。
+                state.current_status_line = Some(crate::core::i18n::t(
+                    "ui.model.confirm_switch",
+                    &format!("切换模型到 {}? (y/n)", model),
+                    &format!("Switch model to {}? (y/n)", model),
                 ));
                 return Ok(());
             }
@@ -5243,6 +5242,83 @@ mod tests {
 
         assert!(!restore_queued_messages_to_input(&mut state));
         assert_eq!(state.input, "draft");
+    }
+
+    /// 会话运行中输入的需求必须**插进当前这一轮**，不能被丢掉、也不能排到
+    /// 本轮结束才发。
+    #[tokio::test]
+    async fn requirement_typed_while_streaming_is_steered_into_the_running_turn() {
+        let mut state = ChatState::new();
+        state.is_streaming = true;
+        state.is_processing = true;
+        state.active_message_id = Some(7);
+
+        let (agent_tx, mut agent_rx) = mpsc::channel(4);
+
+        for ch in "fix the bug".chars() {
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &agent_tx,
+                None,
+            )
+            .await
+            .expect("typing should be handled");
+        }
+
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &agent_tx,
+            None,
+        )
+        .await
+        .expect("enter should be handled");
+
+        assert!(
+            state.pending_user_messages.is_empty(),
+            "需求不该再排队 —— 排队要等本轮跑完才发"
+        );
+        assert!(
+            state
+                .chat_history
+                .iter()
+                .any(|e| e.content == "fix the bug"),
+            "需求要出现在聊天区里"
+        );
+        match agent_rx.try_recv() {
+            Ok(AgentRequest::SendMessage { message, .. }) => {
+                assert_eq!(message, "fix the bug", "发出去的必须是这条需求");
+            }
+            other => panic!("应当发出 SendMessage，实际是 {:?}", other),
+        }
+    }
+
+    /// 运行中按 Esc：发出 Abort，并且**不清掉输入框里已经敲了一半的内容**。
+    #[tokio::test]
+    async fn esc_while_streaming_aborts_and_keeps_the_draft() {
+        let mut state = ChatState::new();
+        state.is_streaming = true;
+        state.is_processing = true;
+        state.textarea.insert_str("half typed");
+        sync_input_from_textarea(&mut state);
+
+        let (agent_tx, mut agent_rx) = mpsc::channel(4);
+
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &agent_tx,
+            None,
+        )
+        .await
+        .expect("esc should be handled");
+
+        assert!(
+            matches!(agent_rx.try_recv(), Ok(AgentRequest::Abort)),
+            "Esc 应发出 Abort"
+        );
+        assert_eq!(state.input, "half typed", "Esc 不该清掉输入框内容");
     }
 
     #[tokio::test]

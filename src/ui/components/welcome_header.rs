@@ -40,16 +40,22 @@ pub fn welcome_header_lines(state: &ChatState) -> Vec<Line<'static>> {
     let theme = state.theme_manager.current();
     let mark_style = Style::default().fg(theme.primary);
 
-    let model = if state.current_model.is_empty() {
+    let (model_text, model_pending) = crate::ui::components::status_line::status_model(state);
+    let model = if model_text.is_empty() {
         "...".to_string()
     } else {
-        state.current_model.clone()
+        model_text
     };
     let effort = effort_label(&state.thinking_effort, &state.current_model);
-    let model_line = match effort {
+    let mut model_line = match effort {
         Some(label) => format!("{} · {}", model, label),
         None => model,
     };
+    if model_pending {
+        // 待生效的模型切换：标出来。worker 回执之前状态栏和抬头都还显示旧模型，
+        // 用户看到的现象就是"切了没反应"。
+        model_line.push_str(" · ⏳");
+    }
 
     let cwd = std::env::current_dir()
         .map(|p| compact_home(&p.to_string_lossy()))

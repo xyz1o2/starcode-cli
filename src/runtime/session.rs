@@ -90,6 +90,9 @@ pub struct StreamingRequestContext<'a> {
     pub steering_queue: &'a Arc<AsyncMessageQueue<(u64, String)>>,
     pub steering_signal: &'a Arc<Notify>,
     pub message_bus: &'a Arc<crate::core::confirmation_bus::MessageBus>,
+    /// 运行中切模型的交接槽。回合跑起来之后 `StarAgent` 是被独占借出的，
+    /// 运行时够不到它的 client —— 靠这个槽把用户选中的模型递进去。
+    pub model_switch_cell: &'a crate::agent::model_switch::ModelSwitchCell,
 }
 
 pub async fn handle_streaming_request(
@@ -154,6 +157,25 @@ pub async fn handle_streaming_request(
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::UpdateRuntimeSettings(mutation)) => {
+            // 运行中切模型：改动落在**下一次请求**上（Claude Code / OpenCode 的
+            // 做法），不是等整轮结束。
+            //
+            // 原来这里只把 mutation 排队，轮末才生效 —— 于是"切不动"：一轮跑得
+            // 久、或者卡住时，切换就一直不落地，用户看起来像按了没反应。
+            //
+            // 回合跑起来之后 `StarAgent` 是被借走的，运行时够不到它的 client，
+            // 所以把用户选中的那对 (model, provider) 递进共享槽；回合在每次发
+            // 请求前取走它、解析并套到自己的 client 上。
+            if let Some(selection) = mutation.model.as_ref() {
+                crate::agent::model_switch::publish(
+                    context.model_switch_cell,
+                    crate::agent::model_switch::PendingModelSwitch {
+                        model: selection.model.clone(),
+                        provider_id: selection.provider_id.clone(),
+                    },
+                )
+                .await;
+            }
             deferred.pending_runtime_settings.push_back(mutation);
             StreamingRequestOutcome::Continue
         }
@@ -765,6 +787,68 @@ mod tests {
         );
     }
 
+    /// 运行中切模型：改动要被递进共享槽 —— 运行中的回合靠它在下一次请求前换上
+    /// 新模型（Claude Code / OpenCode 的做法）。原来这里只排队等轮末生效，于是
+    /// "切不动"：一轮跑得久、或者卡住时，切换就一直不落地。
+    #[tokio::test]
+    async fn a_model_change_during_a_turn_reaches_the_running_turn() {
+        use crate::runtime::messages::{
+            RuntimeModelSelection, RuntimeSettingsMutation, RuntimeSettingsPersistencePolicy,
+        };
+
+        let mut deferred = DeferredRuntimeActions::default();
+        let (tx, _rx) = mpsc::channel(1);
+        let steering_queue = Arc::new(AsyncMessageQueue::new());
+        let steering_signal = Arc::new(Notify::new());
+        let message_bus = Arc::new(crate::core::confirmation_bus::MessageBus::new(
+            crate::core::policy::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let abort_flag = Arc::new(AtomicBool::new(false));
+        let model_switch_cell = crate::agent::model_switch::new_cell();
+
+        let outcome = handle_streaming_request(
+            &mut deferred,
+            Some(AgentRequest::UpdateRuntimeSettings(
+                RuntimeSettingsMutation {
+                    ui_revision: 1,
+                    persistence: RuntimeSettingsPersistencePolicy::SessionOnly,
+                    model: Some(RuntimeModelSelection {
+                        model: "model-b".to_string(),
+                        provider_id: Some("local".to_string()),
+                    }),
+                    context_window: None,
+                    thinking_effort: None,
+                },
+            )),
+            StreamingRequestContext {
+                tx: &tx,
+                message_id: 7,
+                user_message: "test",
+                current_model_snapshot: "active-model",
+                project_root: None,
+                abort_flag: &abort_flag,
+                steering_queue: &steering_queue,
+                steering_signal: &steering_signal,
+                message_bus: &message_bus,
+                model_switch_cell: &model_switch_cell,
+            },
+        )
+        .await;
+
+        assert_eq!(outcome, StreamingRequestOutcome::Continue);
+
+        let published = crate::agent::model_switch::take(&model_switch_cell)
+            .await
+            .expect("切换应当被递进槽里");
+        assert_eq!(published.model, "model-b");
+        assert_eq!(published.provider_id.as_deref(), Some("local"));
+
+        // 轮末的权威安装与回执仍要排队 —— 长寿命 agent 的 client 和 UI 的
+        // acknowledgement 都由它负责。
+        assert_eq!(deferred.pending_runtime_settings.len(), 1);
+    }
+
     #[tokio::test]
     async fn configured_provider_loading_emits_metadata_only() {
         let mut deferred = DeferredRuntimeActions::default();
@@ -776,6 +860,7 @@ mod tests {
             false,
         ));
         let abort_flag = Arc::new(AtomicBool::new(false));
+        let model_switch_cell = crate::agent::model_switch::new_cell();
 
         let outcome = handle_streaming_request(
             &mut deferred,
@@ -790,6 +875,7 @@ mod tests {
                 steering_queue: &steering_queue,
                 steering_signal: &steering_signal,
                 message_bus: &message_bus,
+                model_switch_cell: &model_switch_cell,
             },
         )
         .await;

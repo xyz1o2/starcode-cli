@@ -148,6 +148,60 @@ fn render_edit_diff_preview(diff: &str, wrap_width: usize) -> Vec<Line<'static>>
     lines
 }
 
+/// 生成编辑类工具（`Edit` / `smart_edit`）审批卡里的 diff 预览。
+///
+/// **不能按行号逐行对比。** 那是位置对齐：插入或删除一行之后，后面所有行
+/// 都会"错位"，于是每一行都被标成先删后加 —— 一张几百行的假 diff，实际
+/// 只改了几行。这里改成调用真正的匹配与 diff 实现：
+///
+/// - 匹配走 [`crate::core::tools::edit::calculate_replacement`]，与工具真正
+///   落盘时用的规则一致（含 CRLF 归一化，CRLF 文件不再"匹配不上"）；
+/// - diff 走 [`crate::core::tools::edit::build_edit_diff`]，两边行尾统一，
+///   插入行也不会把后续行带成整片改动。
+async fn build_edit_preview_diff(path: &str, old_str: &str, new_str: &str) -> String {
+    if path == "unknown" || old_str.is_empty() {
+        let raw_preview = old_str.lines().take(6).collect::<Vec<_>>().join("\n");
+        let new_preview = new_str.lines().take(6).collect::<Vec<_>>().join("\n");
+        let tpl = i18n::t(
+            "ui.confirm.msg.preview_mode",
+            "（预览模式: 参数不完整）\n- {0}\n+ {1}",
+            "(preview mode: incomplete parameters)\n- {0}\n+ {1}",
+        );
+        return tpl
+            .replace("{0}", &raw_preview)
+            .replace("{1}", &new_preview);
+    }
+
+    let content = match tokio::fs::read_to_string(path).await {
+        Ok(content) => content,
+        Err(e) => {
+            let tpl = i18n::t(
+                "ui.confirm.msg.failed_read",
+                "（无法读取文件，无法生成差异: {0}）\n- {1}\n+ {2}",
+                "(failed to read file, cannot generate diff: {0})\n- {1}\n+ {2}",
+            );
+            return tpl
+                .replace("{0}", &e.to_string())
+                .replace("{1}", old_str)
+                .replace("{2}", new_str);
+        }
+    };
+
+    let normalized = crate::core::tools::edit::normalize_line_endings(&content);
+    let replacement =
+        crate::core::tools::edit::calculate_replacement(&normalized, old_str, new_str);
+
+    if replacement.occurrences == 0 {
+        return i18n::t(
+            "ui.confirm.msg.no_diff",
+            "（无差异或替换未匹配）\n",
+            "(no differences or replacement not matched)\n",
+        );
+    }
+
+    crate::core::tools::edit::build_edit_diff(path, &normalized, &replacement.new_content)
+}
+
 /// 已裁决的确认卡该配什么颜色和图标。
 ///
 /// 默认是绿色 ✓（= 放行）。**任何没走到"用户同意"这一步的结局都不能穿绿勾** ——
@@ -919,74 +973,8 @@ pub async fn build_confirmation_from_tool_call(
                 .unwrap_or_default();
             let new_str = get_str(&["new_string", "new_str", "new", "newString", "new_text"])
                 .unwrap_or_default();
-            let replace_all = get_bool(&["replace_all", "ReplaceAll"]).unwrap_or(false);
 
-            let diff = if path != "unknown" && !old_str.is_empty() {
-                match tokio::fs::read_to_string(&path).await {
-                    Ok(content) => {
-                        let new_content = if replace_all {
-                            content.replace(&old_str, &new_str)
-                        } else {
-                            content.replacen(&old_str, &new_str, 1)
-                        };
-                        let old_lines: Vec<&str> = content.lines().collect();
-                        let new_lines: Vec<&str> = new_content.lines().collect();
-                        let max_len = old_lines.len().max(new_lines.len());
-                        let mut out = String::new();
-                        out.push_str(&format!("--- a/{}\n", path));
-                        out.push_str(&format!("+++ b/{}\n", path));
-                        let mut shown = 0usize;
-                        for i in 0..max_len {
-                            let o = old_lines.get(i).copied().unwrap_or("");
-                            let n = new_lines.get(i).copied().unwrap_or("");
-                            if o != n {
-                                out.push_str(&format!("@@ -{},{} +{},{} @@\n", i + 1, 1, i + 1, 1));
-                                out.push_str(&format!("-{}\n", o));
-                                out.push_str(&format!("+{}\n", n));
-                                shown += 1;
-                                if shown >= 20 {
-                                    out.push_str(&i18n::t(
-                                        "ui.confirm.msg.diff_truncated",
-                                        "...（差异已截断）\n",
-                                        "... (diff truncated)\n",
-                                    ));
-                                    break;
-                                }
-                            }
-                        }
-                        if shown == 0 {
-                            out.push_str(&i18n::t(
-                                "ui.confirm.msg.no_diff",
-                                "（无差异或替换未匹配）\n",
-                                "(no differences or replacement not matched)\n",
-                            ));
-                        }
-                        out
-                    }
-                    Err(e) => {
-                        let tpl = i18n::t(
-                            "ui.confirm.msg.failed_read",
-                            "（无法读取文件，无法生成差异: {0}）\n- {1}\n+ {2}",
-                            "(failed to read file, cannot generate diff: {0})\n- {1}\n+ {2}",
-                        );
-                        tpl.replace("{0}", &e.to_string())
-                            .replace("{1}", &old_str)
-                            .replace("{2}", &new_str)
-                    }
-                }
-            } else {
-                let raw = tc.function.arguments.chars().take(800).collect::<String>();
-                {
-                    let tpl = i18n::t(
-                        "ui.confirm.msg.missing_params",
-                        "（无法生成差异: 缺少参数）\nargs={0}\n- {1}\n+ {2}",
-                        "(unable to generate diff: missing parameters)\nargs={0}\n- {1}\n+ {2}",
-                    );
-                    tpl.replace("{0}", &raw)
-                        .replace("{1}", &old_str)
-                        .replace("{2}", &new_str)
-                }
-            };
+            let diff = build_edit_preview_diff(&path, &old_str, &new_str).await;
 
             crate::types::ToolConfirmation {
                 tool_name: tc.function.name.clone(),
@@ -1009,68 +997,7 @@ pub async fn build_confirmation_from_tool_call(
             let new_str =
                 get_str(&["new_string", "new_str", "new", "new_text"]).unwrap_or_default();
 
-            let diff = if path != "unknown" && !old_str.is_empty() {
-                match tokio::fs::read_to_string(&path).await {
-                    Ok(content) => {
-                        let new_content = content.replacen(&old_str, &new_str, 1);
-                        let old_lines: Vec<&str> = content.lines().collect();
-                        let new_lines: Vec<&str> = new_content.lines().collect();
-                        let max_len = old_lines.len().max(new_lines.len());
-                        let mut out = String::new();
-                        out.push_str(&format!("--- a/{}\n", path));
-                        out.push_str(&format!("+++ b/{}\n", path));
-                        let mut shown = 0usize;
-                        for i in 0..max_len {
-                            let o = old_lines.get(i).copied().unwrap_or("");
-                            let n = new_lines.get(i).copied().unwrap_or("");
-                            if o != n {
-                                out.push_str(&format!("@@ -{},{} +{},{} @@\n", i + 1, 1, i + 1, 1));
-                                out.push_str(&format!("-{}\n", o));
-                                out.push_str(&format!("+{}\n", n));
-                                shown += 1;
-                                if shown >= 20 {
-                                    out.push_str(&i18n::t(
-                                        "ui.confirm.msg.diff_truncated",
-                                        "...（差异已截断）\n",
-                                        "... (diff truncated)\n",
-                                    ));
-                                    break;
-                                }
-                            }
-                        }
-                        if shown == 0 {
-                            out.push_str(&i18n::t(
-                                "ui.confirm.msg.no_diff",
-                                "（无差异或替换未匹配）\n",
-                                "(no differences or replacement not matched)\n",
-                            ));
-                        }
-                        out
-                    }
-                    Err(e) => {
-                        let tpl = i18n::t(
-                            "ui.confirm.msg.failed_read",
-                            "（无法读取文件，无法生成差异: {0}）\n- {1}\n+ {2}",
-                            "(failed to read file, cannot generate diff: {0})\n- {1}\n+ {2}",
-                        );
-                        tpl.replace("{0}", &e.to_string())
-                            .replace("{1}", &old_str)
-                            .replace("{2}", &new_str)
-                    }
-                }
-            } else {
-                let old_preview = old_str.lines().take(6).collect::<Vec<_>>().join("\n");
-                let new_preview = new_str.lines().take(6).collect::<Vec<_>>().join("\n");
-                {
-                    let tpl = i18n::t(
-                        "ui.confirm.msg.preview_mode",
-                        "（预览模式: 参数不完整）\n- {0}\n+ {1}",
-                        "(preview mode: incomplete parameters)\n- {0}\n+ {1}",
-                    );
-                    tpl.replace("{0}", &old_preview)
-                        .replace("{1}", &new_preview)
-                }
-            };
+            let diff = build_edit_preview_diff(&path, &old_str, &new_str).await;
 
             crate::types::ToolConfirmation {
                 tool_name: name.to_string(),
