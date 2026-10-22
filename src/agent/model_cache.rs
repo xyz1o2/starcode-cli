@@ -285,7 +285,7 @@ pub fn purge(provider_id: &str) {
 /// 实测过的一个完整残留现场（`user-settings.json` 只有 `local` + `opencode`，缓存里
 /// 却有 5 个桶）：
 ///
-/// ```
+/// ```text
 /// [ORPHAN] apinex  132 models
 /// [ORPHAN] dev     158 models
 /// [ORPHAN] magpie   88 models
