@@ -348,7 +348,7 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | 帮助文案把 Tab 说成补全 | `ui/components/help_popup.rs`、`events/keymap.rs` | 按真实行为改写；键表文档补上"两个搜索键的分工" |
 | `/eval` 是悬空声明 | `commands/system.rs` | 声明删除，并加测试记录历史悬空命令名单 |
 
-lib 套件 1260 全绿，`cargo fmt --check` 绿，本次改动范围内 clippy 无新增告警。
+lib 套件 1293 全绿，`cargo fmt --check` 绿，本次改动范围内 clippy 无新增告警。
 
 ### ✅ 斜杠命令主路径（2026-10-22）
 

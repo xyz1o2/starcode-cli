@@ -905,6 +905,7 @@ mod tests {
             false,
         ));
         let abort_flag = Arc::new(AtomicBool::new(false));
+        let model_switch_cell = crate::agent::model_switch::new_cell();
         let (response_tx, mut response_rx) = mpsc::channel(1);
 
         let outcome = handle_streaming_request(
@@ -924,6 +925,7 @@ mod tests {
                 steering_queue: &steering_queue,
                 steering_signal: &steering_signal,
                 message_bus: &message_bus,
+                model_switch_cell: &model_switch_cell,
             },
         )
         .await;
