@@ -123,20 +123,20 @@ fn is_skill_tool(name: &str) -> bool {
 
 fn normalize_skill_name(raw: &str) -> String {
     let trimmed = raw.trim().trim_end_matches(['/', '\\']);
-    let path = Path::new(trimmed);
-    if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
-        if let Some(parent) = path.parent().and_then(Path::file_name) {
-            let parent = parent.to_string_lossy();
+    // Transcripts can contain Windows paths even when the scanner runs on Unix
+    // (and vice versa), so split both separators instead of relying on the host
+    // platform's Path semantics.
+    let mut segments = trimmed.rsplit(['/', '\\']);
+    let file = segments.next().unwrap_or(trimmed);
+    if file.to_ascii_lowercase().ends_with(".md") {
+        if let Some(parent) = segments.next() {
             if !parent.is_empty() {
                 return parent.to_string();
             }
         }
-        if let Some(stem) = path.file_stem() {
-            return stem
-                .to_string_lossy()
-                .trim_end_matches(".skill")
-                .to_string();
-        }
+        return file[..file.len() - 3]
+            .trim_end_matches(".skill")
+            .to_string();
     }
     trimmed.to_string()
 }
@@ -628,6 +628,11 @@ mod tests {
             normalize_skill_name("C:\\work\\.star\\skills\\review\\SKILL.md"),
             "review"
         );
+        assert_eq!(
+            normalize_skill_name("/home/me/.star/skills/review/SKILL.md"),
+            "review"
+        );
+        assert_eq!(normalize_skill_name("review.skill.md"), "review");
         assert_eq!(normalize_skill_name("review"), "review");
     }
 }
