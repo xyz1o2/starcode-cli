@@ -467,7 +467,13 @@ pub struct StarMessage {
     /// When set to `{"type": "ephemeral"}`, this content block will be
     /// cached server-side for reuse across turns, reducing input token
     /// costs by 30-50% for repeated system prompts.
-    /// Providers that don't support cache_control will silently ignore it.
+    ///
+    /// 这个字段**不参与请求构造** —— 请求侧的断点由两条路径各自打：
+    /// Anthropic 走 rig 的 `with_prompt_caching()`，OpenAI 兼容走
+    /// `llm::prompt_cache_ext::PromptCacheExt`。所以「provider 不支持」不是
+    /// 「静默忽略」，而是「根本没发出去」。
+    ///
+    /// 它保留下来是为了让 prompt builder 一侧能区分静态段与准静态段。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<serde_json::Value>,
 }

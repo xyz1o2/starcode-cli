@@ -462,9 +462,33 @@ impl StarClient {
     }
 
     /// Update the runtime detection result for thinking support.
+    ///
+    /// **只升不降。** 这个值会被 [`Self::supports_thinking`] 读去决定 system prompt
+    /// 里 `is_thinking_model` 分支渲染哪一句（`prompts::core_identity::render` 等
+    /// 8 处，见 `prompt_builder.rs:474,479,480,483,484,495,507,742`）。而 Anthropic
+    /// 风格的缓存是**前缀**缓存：整段约 4 万字符的 system prompt 里换一个字节，
+    /// 整段就要按原价重算。
+    ///
+    /// 原实现每次响应都直接覆写，于是「这一条响应恰好没带 `reasoning_content`」
+    /// 就能把判定打回 false —— 而那根本不是能力证据：模型这次选择不思考、网关
+    /// 剥掉了 reasoning、或采样时 `reasoning_effort: none`，观测到的都是同一个
+    /// 结果。反过来「出现了 reasoning」才是能力存在的有力证据。所以这里只接受
+    /// 升级，让判定在一次会话内单调。
+    ///
+    /// 流式路径本来就只写 `Some(true)`，但它与本函数共享同一个 cell
+    /// （`chat_stream_events` 克隆的是同一个 `Arc`），所以非流式原本能把流式刚
+    /// 设的 true 打回 false —— 那正是这个缺陷的完整形态。
+    ///
+    /// 合法的降级场景由 [`Self::reset_thinking_detection`] 覆盖（`set_model` /
+    /// `switch_provider`），语义依然正确。
     fn update_thinking_detection(&self, has_reasoning: bool) {
+        if !has_reasoning {
+            return;
+        }
         if let Ok(mut detected) = self.detected_thinking_support.write() {
-            *detected = Some(has_reasoning);
+            if detected.is_none() {
+                *detected = Some(true);
+            }
         }
     }
 
@@ -1553,5 +1577,53 @@ mod tests {
         assert_eq!(usage["cache_read_tokens"], 0);
         assert_eq!(usage["cache_creation_tokens"], 0);
         assert_eq!(usage["cache_telemetry_reported"], true);
+    }
+
+    /// thinking 判定必须单调：一次「没带 reasoning」的响应不能把它打回 false。
+    ///
+    /// 这个值经 `supports_thinking()` 决定 system prompt 里 `is_thinking_model`
+    /// 分支渲染哪一句，而前缀缓存下一字节变化就让整段 ~4 万字符重算。
+    #[test]
+    fn thinking_detection_never_downgrades() {
+        let c = StarClient::new(
+            "k",
+            Some("gpt-4o".to_string()),
+            Some("https://example.invalid/v1".to_string()),
+            Some(false),
+            None,
+        );
+
+        // 未探测过：回落到按模型名判断（gpt-4o 非 thinking）。
+        assert!(!c.supports_thinking());
+
+        // 一次「没有 reasoning」的响应不应写入任何值 —— 缺失不是能力证据。
+        c.update_thinking_detection(false);
+        assert!(!c.supports_thinking(), "缺失的弱证据不应改变判定");
+
+        // 出现 reasoning：升级为 true。
+        c.update_thinking_detection(true);
+        assert!(c.supports_thinking());
+
+        // 此后任何「没有 reasoning」都不能降级。
+        c.update_thinking_detection(false);
+        c.update_thinking_detection(false);
+        assert!(c.supports_thinking(), "已确认的能力不能被后续响应打回");
+    }
+
+    /// 换模型是合法的降级场景：`reset_thinking_detection` 必须照常清空。
+    #[test]
+    fn thinking_detection_resets_on_model_change() {
+        let mut c = StarClient::new(
+            "k",
+            Some("gpt-4o".to_string()),
+            Some("https://example.invalid/v1".to_string()),
+            Some(false),
+            None,
+        );
+        c.update_thinking_detection(true);
+        assert!(c.supports_thinking());
+
+        c.set_model("gpt-4o-mini");
+        assert!(!c.supports_thinking(), "换模型后应回到按名字判断");
     }
 }

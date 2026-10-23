@@ -221,11 +221,18 @@ fn build_request(
     // 数组直接反序列化失败，于是**每一次 Anthropic 请求都在发出之前就报
     // `Invalid Anthropic additional_params.cache_control payload`**。
     //
-    // 缓存断点现在交给 rig 自己打（见 `rig_anthropic_complete` /
-    // `rig_anthropic_stream` 里的 `with_prompt_caching().with_automatic_caching()`）：
-    // system 与 tools 各占一个显式断点，会话历史的移动断点由 Anthropic 服务端
-    // 自己往后推。`StarMessage::cache_control` 保留下来只用于 prompt builder 侧
-    // 区分静态/动态段落，不再参与请求构造。
+    // 断点改由两条路径各自负责，都不经过这里：
+    //
+    // - **Anthropic**：rig 自己打（`anthropic_caching_model` 里的
+    //   `with_prompt_caching().with_automatic_caching()`），system 与 tools 各占一个
+    //   显式断点，会话历史的移动断点由 Anthropic 服务端自己往后推。
+    // - **OpenAI 兼容**：`prompt_cache_ext::PromptCacheExt` 在
+    //   `finalize_request_body` 里对已序列化的 body 打点（tools 末项 + system 末块）。
+    //   之所以不能走 `additional_params`：那个字段带 `#[serde(flatten)]` 展平到**顶层**，
+    //   往里塞 `messages` 会整体覆盖整个消息数组。
+    //
+    // `StarMessage::cache_control` 保留下来只用于 prompt builder 侧区分静态/动态
+    // 段落；它由上面的两条路径各自消费，不参与请求构造。
 
     // 思考力度 —— 档位由 UI 侧（Alt+T / `/effort` / 命令面板）经
     // `AgentRequest::SetThinkingEffort` 存进 `llm::thinking` 的会话状态，
@@ -425,11 +432,17 @@ macro_rules! rig_complete_with_url {
 /// The Responses API requires an OpenAI-generated ID for reasoning items,
 /// which we don't have for historical messages with reasoning_content.
 /// The Completions API silently skips reasoning content, avoiding the error.
+/// 非流式 OpenAI 兼容补全。
+///
+/// `prompt_cache` 由调用方按 provider 类型给出:`Self::OpenAI` 恒传 `false`
+/// （官方 `api.openai.com` 严格校验 content part，会拒绝规范外的 `cache_control`），
+/// 只有 `Self::OpenAiCompatible` 才可能打开。
 async fn rig_openai_complete(
     api_key: &str,
     model: &str,
     base_url: Option<&str>,
     request: CompletionRequest,
+    prompt_cache: bool,
 ) -> Result<CompletionResult, LlmError> {
     use rig_core::client::CompletionClient;
     let mut builder = openai::CompletionsClient::builder().api_key(api_key);
@@ -439,11 +452,15 @@ async fn rig_openai_complete(
     let client = builder
         .build()
         .map_err(|e| LlmError::ProviderError(format!("rig openai client: {e}")))?;
-    let model_client = client.completion_model(model);
-    let r = model_client
-        .completion(request)
-        .await
-        .map_err(|e| LlmError::ProviderError(format!("rig openai completion: {e}")))?;
+    let r = if prompt_cache {
+        // `with_ext` 保留 base_url / headers / HTTP backend，只换掉 provider 扩展，
+        // 于是 rig 的传输、流式、遥测逻辑全部照常复用。
+        let cached = client.with_ext(crate::llm::prompt_cache_ext::PromptCacheExt::new(true));
+        cached.completion_model(model).completion(request).await
+    } else {
+        client.completion_model(model).completion(request).await
+    }
+    .map_err(|e| LlmError::ProviderError(format!("rig openai completion: {e}")))?;
     let mut result = extract_response(&r.choice);
     result.usage = Some(convert_usage(&r.usage));
     Ok(result)
@@ -599,11 +616,16 @@ macro_rules! rig_stream_from_model {
 
 /// True streaming for OpenAI / OpenAI-compatible providers via
 /// rig-core's OpenAI CompletionsClient.
+///
+/// `prompt_cache` 的语义与 [`rig_openai_complete`] 相同：官方 OpenAI 恒为 `false`，
+/// 断点只对明确支持的聚合网关打开。两条路径共用 `finalize_request_body` 钩子，
+/// 所以流式与非流式打出的断点完全一致。
 async fn rig_openai_stream(
     api_key: &str,
     model: &str,
     base_url: Option<&str>,
     request: CompletionRequest,
+    prompt_cache: bool,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError> {
     use futures::StreamExt;
     use rig_core::client::CompletionClient;
@@ -616,11 +638,16 @@ async fn rig_openai_stream(
     let client = builder
         .build()
         .map_err(|e| LlmError::ProviderError(format!("rig openai client: {e}")))?;
-    let model_client = client.completion_model(model);
-    let stream = model_client
-        .stream(request)
-        .await
-        .map_err(|e| LlmError::ProviderError(format!("rig openai stream: {e}")))?;
+    let stream = if prompt_cache {
+        client
+            .with_ext(crate::llm::prompt_cache_ext::PromptCacheExt::new(true))
+            .completion_model(model)
+            .stream(request)
+            .await
+    } else {
+        client.completion_model(model).stream(request).await
+    }
+    .map_err(|e| LlmError::ProviderError(format!("rig openai stream: {e}")))?;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<LlmEvent, LlmError>>(64);
     tokio::spawn(async move {
@@ -887,7 +914,11 @@ impl RigAdapter {
                 api_key,
                 model,
                 base_url,
-            } => rig_openai_complete(api_key, model, base_url.as_deref(), request).await,
+            } => {
+                // 官方 OpenAI 严格校验 content part，`cache_control` 是规范外字段，
+                // 这里恒定关掉——它只在明确支持的聚合网关上打开。
+                rig_openai_complete(api_key, model, base_url.as_deref(), request, false).await
+            }
             Self::Anthropic {
                 api_key,
                 model,
@@ -912,7 +943,16 @@ impl RigAdapter {
                 model,
                 base_url,
                 provider_name: _,
-            } => rig_openai_complete(api_key, model, Some(base_url.as_str()), request).await,
+            } => {
+                rig_openai_complete(
+                    api_key,
+                    model,
+                    Some(base_url.as_str()),
+                    request,
+                    crate::llm::prompt_cache_ext::enabled_from_env(),
+                )
+                .await
+            }
         }
     }
 
@@ -929,13 +969,22 @@ impl RigAdapter {
                 api_key,
                 model,
                 base_url,
-            } => rig_openai_stream(api_key, model, base_url.as_deref(), request).await,
+            } => rig_openai_stream(api_key, model, base_url.as_deref(), request, false).await,
             Self::OpenAiCompatible {
                 api_key,
                 model,
                 base_url,
                 ..
-            } => rig_openai_stream(api_key, model, Some(base_url.as_str()), request).await,
+            } => {
+                rig_openai_stream(
+                    api_key,
+                    model,
+                    Some(base_url.as_str()),
+                    request,
+                    crate::llm::prompt_cache_ext::enabled_from_env(),
+                )
+                .await
+            }
             Self::Anthropic {
                 api_key,
                 model,
