@@ -566,6 +566,7 @@ mod tests {
                     output: Some("import x".to_string()),
                     error: None,
                     data: None,
+                    llm_content: None,
                 },
             ));
         }
@@ -593,6 +594,7 @@ mod tests {
                     output: Some("out".to_string()),
                     error: None,
                     data: None,
+                    llm_content: None,
                 },
             ));
         }

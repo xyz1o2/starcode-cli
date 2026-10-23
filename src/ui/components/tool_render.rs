@@ -1212,6 +1212,7 @@ mod tests {
                 output: Some(output.to_string()),
                 error: None,
                 data: None,
+                llm_content: None,
             },
         );
 
@@ -1255,6 +1256,7 @@ mod tests {
                 ),
                 error: None,
                 data: None,
+                llm_content: None,
             },
         );
 

@@ -191,6 +191,7 @@ impl StreamingToolExecutor {
             output: None,
             error: Some(error_msg),
             data: None,
+            llm_content: None,
         }
     }
 
@@ -288,6 +289,7 @@ impl StreamingToolExecutor {
                         output: None,
                         error: Some("Semaphore closed".to_string()),
                         data: None,
+                        llm_content: None,
                     });
                     return;
                 }
@@ -300,6 +302,7 @@ impl StreamingToolExecutor {
                     output: None,
                     error: Some("Cancelled by sibling error".to_string()),
                     data: None,
+                    llm_content: None,
                 });
                 return;
             }
@@ -372,6 +375,7 @@ impl StreamingToolExecutor {
                         output: None,
                         error: Some("Tool execution channel closed".to_string()),
                         data: None,
+                        llm_content: None,
                     })
                 }
             }
@@ -407,6 +411,7 @@ impl StreamingToolExecutor {
                         output: None,
                         error: Some("Tool execution channel closed".to_string()),
                         data: None,
+                        llm_content: None,
                     })
                 }
             }
@@ -508,6 +513,7 @@ impl StreamingToolExecutor {
             output: None,
             error: Some("Not executed".to_string()),
             data: None,
+            llm_content: None,
         });
 
         // 并发执行只读工具

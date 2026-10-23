@@ -175,6 +175,44 @@ fn query_tokens(query: &str) -> Vec<String> {
         .collect()
 }
 
+/// 判断 `haystack` 是否包含 `needle` 这个**词**（而非任意子串）。
+///
+/// 为什么要词边界：短 token 的裸子串匹配会把毫不相干的工具拉进来。
+/// `exa` 是 `exact` / `example` / `execute` 的子串 —— 查 "exa" 时，
+/// 凡是描述里带 "exact" 的工具全都得分 1.0，真实答案被淹在噪声里。
+/// 短 token（≤3 字符）必须落在词边界上才算命中。
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.len() > 3 {
+        return haystack.contains(needle);
+    }
+    let mut from = 0usize;
+    while let Some(idx) = haystack[from..].find(needle) {
+        let start = from + idx;
+        let end = start + needle.len();
+        let before_ok = start == 0
+            || !haystack[..start]
+                .chars()
+                .next_back()
+                .map(|c| c.is_alphanumeric())
+                .unwrap_or(false);
+        let after_ok = end == haystack.len()
+            || !haystack[end..]
+                .chars()
+                .next()
+                .map(|c| c.is_alphanumeric())
+                .unwrap_or(false);
+        if before_ok && after_ok {
+            return true;
+        }
+        // 继续找下一个出现位置。
+        from = start + 1;
+        if from >= haystack.len() {
+            break;
+        }
+    }
+    false
+}
+
 /// 给单个工具打分。字段权重对齐参考设计：名称 3.0 > 描述 1.0。
 fn score_entry(name: &str, description: &str, tokens: &[String]) -> f64 {
     if tokens.is_empty() {
@@ -192,7 +230,7 @@ fn score_entry(name: &str, description: &str, tokens: &[String]) -> f64 {
         } else if token.len() >= 3 && name_lower.contains(token.as_str()) {
             score += 1.5;
         }
-        if desc_lower.contains(token.as_str()) {
+        if contains_word(&desc_lower, token) {
             score += 1.0;
         }
     }
@@ -233,10 +271,60 @@ impl ToolSearchTool {
         })
     }
 
+    /// `select:<name>` 模式的宽松解析：精确名字找不到时，按"唯一后缀匹配"再试一次。
+    ///
+    /// 为什么需要：MCP 工具的注册名是 `mcp__<server>__<tool>`，模型却只记得
+    /// `<server>` 和 `<tool>` 两段（`select:web_search` / `select:exa`）。
+    /// 精确匹配必然落空，于是模型收到 "No such tool" —— 检索其实是对的，
+    /// 只是名字没拼全。
+    ///
+    /// 只在**唯一**匹配时才认：命中多个就说明模型指的是哪一个并不确定，
+    /// 这时必须把候选列出来让模型选，而不是替它挑一个。
+    fn select_tool_lenient(&self, name: &str) -> SelectOutcome {
+        if let Some(hit) = self.select_tool(name) {
+            return SelectOutcome::Found(hit);
+        }
+
+        let wanted = name.to_lowercase();
+        let candidates: Vec<Hit> = self
+            .registry
+            .get_all_tool_entries()
+            .into_iter()
+            .filter(|(tool_name, _, _)| {
+                let tool_name = tool_name.to_lowercase();
+                tool_name == wanted
+                    || tool_name.ends_with(&format!("__{}", wanted))
+                    || tool_name.ends_with(&format!("_{}", wanted))
+            })
+            .map(|(tool_name, description, schema)| Hit {
+                name: tool_name,
+                description,
+                schema,
+                usage_body: None,
+            })
+            .collect();
+
+        match candidates.len() {
+            0 => SelectOutcome::NotFound,
+            1 => SelectOutcome::Found(candidates.into_iter().next().unwrap()),
+            _ => SelectOutcome::Ambiguous(candidates),
+        }
+    }
+
     /// 关键词模式：分词打分，按分数降序、同分按名称升序。
     fn search_ranked(&self, query: &str, max_results: usize) -> Vec<Hit> {
         rank_entries(self.registry.get_all_tool_entries(), query, max_results)
     }
+}
+
+/// `select:` 模式的解析结果。
+enum SelectOutcome {
+    /// 唯一命中。
+    Found(Hit),
+    /// 没有匹配。
+    NotFound,
+    /// 多个候选 —— 名字不完整，交给模型选。
+    Ambiguous(Vec<Hit>),
 }
 
 /// 打分与排序的纯函数部分：不依赖 `ToolRegistry`，便于单元测试。
@@ -316,7 +404,10 @@ impl BaseDeclarativeTool for ToolSearchTool {
         "Discover tools that are not in the current tool list (built-in long-tail tools and MCP \
          tools). Two query modes: plain keywords (\"rename a git branch\") return a ranked list \
          with JSON schemas for the top matches; `select:<tool_name>` returns the full parameter \
-         schema for one tool. Any tool returned here can be called directly by name."
+         schema for one tool. Any tool returned here can be called directly by name. \
+         MCP server tools are named `mcp__<server>__<tool>`: search by the server name \
+         (\"exa\") or the tool name (\"web_search_exa\") and call the full name the result shows; \
+         `select:` also accepts the trailing part when it identifies exactly one tool."
     }
 
     fn kind(&self) -> Kind {
@@ -365,53 +456,89 @@ pub struct ToolSearchInvocation {
 
 impl ToolSearchInvocation {
     /// 组装 `select:<name>` 模式的结果。
-    fn render_select(hit: Option<Hit>, wanted: &str) -> ToolResult {
-        let Some(hit) = hit else {
-            let message = format!(
-                "No tool named `{}` is registered. Retry with plain keywords to search by \
-                 capability.",
-                wanted
-            );
-            return ToolResult {
-                llm_content: Some(message.clone()),
-                return_display: Some(format!("No such tool: {}", wanted)),
-                output: message,
-                error: None,
-                data: Some(serde_json::json!({
-                    "mode": "select",
-                    "matched_tools": [],
-                    "total": 0,
-                    "query": wanted,
-                })),
-            };
-        };
-
-        record_discovered_tools(std::slice::from_ref(&hit.name));
-        let mut output = format!(
-            "**{}** — {}{}\n\nCall it directly by name; no further discovery step is needed.",
-            hit.name,
-            hit.description,
-            render_schema(&hit.schema)
-        );
-        if let Some(body) = &hit.usage_body {
-            output.push_str("\n\n--- Usage guide ---\n");
-            output.push_str(body);
-        }
-        ToolResult {
-            llm_content: Some(output.clone()),
-            return_display: Some(format!("Tool schema: {}", hit.name)),
-            output,
-            error: None,
-            data: Some(serde_json::json!({
-                "mode": "select",
-                "matched_tools": [{
-                    "name": hit.name,
-                    "description": hit.description,
-                    "parameter_schema": hit.schema,
-                }],
-                "total": 1,
-                "query": wanted,
-            })),
+    fn render_select(outcome: SelectOutcome, wanted: &str) -> ToolResult {
+        match outcome {
+            SelectOutcome::NotFound => {
+                let message = format!(
+                    "No tool named `{}` is registered. Retry with plain keywords to search by \
+                     capability.",
+                    wanted
+                );
+                ToolResult {
+                    llm_content: Some(message.clone()),
+                    return_display: Some(format!("No such tool: {}", wanted)),
+                    output: message,
+                    error: None,
+                    data: Some(serde_json::json!({
+                        "mode": "select",
+                        "matched_tools": [],
+                        "total": 0,
+                        "query": wanted,
+                    })),
+                }
+            }
+            SelectOutcome::Ambiguous(candidates) => {
+                // 名字不完整且命中多个：把候选列出来，别替模型挑。
+                // MCP 工具的注册名是 `mcp__<server>__<tool>`，模型常常只记得
+                // 后半段 —— 猜一个比列出来更糟。
+                let names: Vec<String> = candidates.iter().map(|c| c.name.clone()).collect();
+                let mut output = format!(
+                    "`{}` matches {} registered tools. Use the full name:\n",
+                    wanted,
+                    candidates.len()
+                );
+                for name in &names {
+                    output.push_str(&format!("- {}\n", name));
+                }
+                output.push_str(
+                    "\nCall one of them directly by its full name, or query \
+                                `select:<full_name>` to load its schema.",
+                );
+                ToolResult {
+                    llm_content: Some(output.clone()),
+                    return_display: Some(format!("Ambiguous tool name: {}", wanted)),
+                    output,
+                    error: None,
+                    data: Some(serde_json::json!({
+                        "mode": "select_ambiguous",
+                        "matched_tools": names
+                            .iter()
+                            .map(|n| serde_json::json!({"name": n}))
+                            .collect::<Vec<_>>(),
+                        "total": candidates.len(),
+                        "query": wanted,
+                    })),
+                }
+            }
+            SelectOutcome::Found(hit) => {
+                record_discovered_tools(std::slice::from_ref(&hit.name));
+                let mut output = format!(
+                    "**{}** — {}{}\n\nCall it directly by name; no further discovery step is needed.",
+                    hit.name,
+                    hit.description,
+                    render_schema(&hit.schema)
+                );
+                if let Some(body) = &hit.usage_body {
+                    output.push_str("\n\n--- Usage guide ---\n");
+                    output.push_str(body);
+                }
+                ToolResult {
+                    llm_content: Some(output.clone()),
+                    return_display: Some(format!("Tool schema: {}", hit.name)),
+                    output,
+                    error: None,
+                    data: Some(serde_json::json!({
+                        "mode": "select",
+                        "matched_tools": [{
+                            "name": hit.name,
+                            "description": hit.description,
+                            "parameter_schema": hit.schema,
+                        }],
+                        "total": 1,
+                        "query": wanted,
+                    })),
+                }
+            }
         }
     }
 
@@ -546,13 +673,12 @@ impl ToolInvocation for ToolSearchInvocation {
         let max_results = self.params.max_results.unwrap_or(DEFAULT_MAX_RESULTS);
 
         Box::pin(async move {
-            // `select:<name>` 走精确查找，其余一律当关键词处理。
+            // `select:<name>` 走精确查找（名字不完整时退到唯一后缀匹配），
+            // 其余一律当关键词处理。
             // 前缀大小写不敏感：模型偶尔会写成 `Select:`。
             if let Some(wanted) = strip_select_prefix(&query) {
-                return Ok(ToolSearchInvocation::render_select(
-                    tool.select_tool(wanted),
-                    wanted,
-                ));
+                let outcome = tool.select_tool_lenient(wanted);
+                return Ok(ToolSearchInvocation::render_select(outcome, wanted));
             }
             let hits = tool.search_ranked(&query, max_results);
             Ok(ToolSearchInvocation::render_keyword(hits, &query))
@@ -595,6 +721,72 @@ mod tests {
             entry("Grep", "Search file contents with a regular expression."),
             entry("cron", "Schedule a recurring prompt."),
         ]
+    }
+
+    /// 构造一个指向临时目录的 `Config`（`ToolRegistry` 需要它，但不读它）。
+    fn test_config() -> Arc<crate::core::config::Config> {
+        // `TempDir::keep` 让目录活到进程结束 —— `Config` 只持有路径，
+        // 但临时目录若在此处被 drop，路径就指向了不存在的地方。
+        let temp = tempfile::tempdir()
+            .expect("create temporary directory")
+            .keep();
+        let mut params = crate::core::config::ConfigParameters::default();
+        params.target_dir = temp.clone();
+        params.cwd = temp.clone();
+        Arc::new(crate::core::config::Config::new(params))
+    }
+
+    /// 一个最小的 MCP 风格工具，用来验证 registry 里的 `mcp__<server>__<tool>`
+    /// 名字能被 `select:` 模式解析。
+    pub(super) struct FakeMcpTool {
+        name: String,
+        description: String,
+    }
+
+    impl FakeMcpTool {
+        pub(super) fn new(name: &str, description: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                description: description.to_string(),
+            }
+        }
+    }
+
+    impl BaseDeclarativeTool for FakeMcpTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn display_name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            &self.description
+        }
+
+        fn kind(&self) -> Kind {
+            Kind::Read
+        }
+
+        fn is_read_only(&self) -> bool {
+            true
+        }
+
+        fn parameter_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"]
+            })
+        }
+
+        fn create_invocation(
+            &self,
+            _params: serde_json::Value,
+        ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
+            unimplemented!("测试辅助工具不执行")
+        }
     }
 
     #[test]
@@ -713,7 +905,7 @@ mod tests {
             schema,
             usage_body: Some("Create or rename branches with `command`.".to_string()),
         };
-        let result = ToolSearchInvocation::render_select(Some(hit), "git_branch");
+        let result = ToolSearchInvocation::render_select(SelectOutcome::Found(hit), "git_branch");
         assert!(result.output.contains("```json"));
         assert!(result.output.contains("\"target\""));
         // 动态加载：select 模式必须把使用说明正文带回来。
@@ -740,10 +932,113 @@ mod tests {
         let _guard = sticky_guard();
         reset_discovered_tools();
 
-        let result = ToolSearchInvocation::render_select(None, "no_such_tool");
+        let result = ToolSearchInvocation::render_select(SelectOutcome::NotFound, "no_such_tool");
         assert!(result.error.is_none());
         assert!(result.output.contains("no_such_tool"));
         assert_eq!(result.data.expect("data present")["total"], 0);
+    }
+
+    /// 回归：`select:<name>` 以前只接受**完整注册名**。MCP 工具的注册名是
+    /// `mcp__<server>__<tool>`，模型只记得后半段，于是必然 "No such tool"。
+    /// 现在名字不完整时按唯一后缀匹配救回来。
+    #[test]
+    fn select_mode_resolves_a_partial_mcp_tool_name() {
+        let _guard = sticky_guard();
+        reset_discovered_tools();
+
+        let registry = Arc::new(crate::core::tools::ToolRegistry::new(test_config()));
+        registry.register_tool(Arc::new(
+            crate::core::tools::tool_search::tests::FakeMcpTool::new(
+                "mcp__exa__web_search_exa",
+                "Search the web with Exa.",
+            ),
+        ));
+
+        let tool = ToolSearchTool::new(registry.clone());
+        let outcome = tool.select_tool_lenient("web_search_exa");
+        match outcome {
+            SelectOutcome::Found(hit) => {
+                assert_eq!(hit.name, "mcp__exa__web_search_exa");
+            }
+            other => panic!(
+                "expected a unique match, got {:?}",
+                match other {
+                    SelectOutcome::NotFound => "not found",
+                    SelectOutcome::Ambiguous(_) => "ambiguous",
+                    SelectOutcome::Found(_) => unreachable!(),
+                }
+            ),
+        }
+    }
+
+    /// 多个候选时**不替模型挑**：把候选列出来让它选。
+    #[test]
+    fn select_mode_lists_candidates_when_the_name_is_ambiguous() {
+        let _guard = sticky_guard();
+        reset_discovered_tools();
+
+        let registry = Arc::new(crate::core::tools::ToolRegistry::new(test_config()));
+        registry.register_tool(Arc::new(
+            crate::core::tools::tool_search::tests::FakeMcpTool::new(
+                "mcp__exa__search",
+                "Search with Exa.",
+            ),
+        ));
+        registry.register_tool(Arc::new(
+            crate::core::tools::tool_search::tests::FakeMcpTool::new(
+                "mcp__other__search",
+                "Search with something else.",
+            ),
+        ));
+
+        let tool = ToolSearchTool::new(registry.clone());
+        let outcome = tool.select_tool_lenient("search");
+        let candidate_count = match &outcome {
+            SelectOutcome::Ambiguous(candidates) => candidates.len(),
+            _ => panic!("expected ambiguous outcome"),
+        };
+        assert_eq!(candidate_count, 2);
+
+        let result = ToolSearchInvocation::render_select(outcome, "search");
+        assert!(result.output.contains("mcp__exa__search"));
+        assert!(result.output.contains("mcp__other__search"));
+    }
+
+    /// 回归：短 token 的裸子串匹配会把 "exact" / "example" 当成 "exa" 的命中，
+    /// 真实答案被噪声淹没。短 token 必须落在词边界上。
+    #[test]
+    fn short_tokens_only_match_on_word_boundaries() {
+        // "exact" 里的 "exa" 不是词 —— 不得算命中。
+        assert!(!contains_word("use the exact string", "exa"));
+        assert!(!contains_word("example of usage", "exa"));
+        // 独立成词的 "exa" 才算命中。
+        assert!(contains_word("exa search", "exa"));
+        assert!(contains_word("search with exa.", "exa"));
+        // 长 token 仍然是普通子串匹配。
+        assert!(contains_word("web_search_exa", "search"));
+        // 下划线是词分隔符，所以 "web_search_exa" 里的 "exa" 确实是一个词 ——
+        // 这正是 `mcp__exa__web_search_exa` 能被 "exa" 搜到的原因。
+        assert!(contains_word("web_search_exa", "exa"));
+        assert!(contains_word("mcp__exa__web_search_exa", "exa"));
+    }
+
+    /// 回归：MCP server 名在工具名里（`mcp__exa__web_search_exa`），
+    /// 查 "exa" 必须命中它，而不是被 "exact" 之类的噪声挤掉。
+    #[test]
+    fn a_mcp_server_name_is_searchable() {
+        let entries = vec![
+            entry(
+                "mcp__exa__web_search_exa",
+                "Search the web and return page content.",
+            ),
+            entry("CodebaseSearch", "Find the exact string in the codebase."),
+        ];
+        let hits = rank_entries(entries, "exa", 10);
+        assert_eq!(
+            hits.first().map(|h| h.name.as_str()),
+            Some("mcp__exa__web_search_exa"),
+            "server 名必须能直接搜到"
+        );
     }
 
     /// 缓存稳定性的核心不变量：消息进行中发现的工具不会立刻改变短名单，

@@ -127,6 +127,7 @@ pub fn recover_missing_tool_results(state: &mut ChatState, message_id: u64, reas
             output: None,
             error: Some("stream ended before result".to_string()),
             data: None,
+            llm_content: None,
         });
         state.chat_history[i].is_streaming = Some(false);
 

@@ -706,6 +706,7 @@ async fn handle_tool_confirmation_response(
                         output: None,
                         error: Some(e.to_string()),
                         data: None,
+                        llm_content: None,
                     };
                     agent.append_tool_result_message(tool_call, &result);
                     let _ = tx
@@ -731,6 +732,7 @@ async fn handle_tool_confirmation_response(
                         data: Some(serde_json::json!({
                             "error_type": "timeout"
                         })),
+                        llm_content: None,
                     };
                     agent.append_tool_result_message(tool_call, &result);
                     let _ = tx

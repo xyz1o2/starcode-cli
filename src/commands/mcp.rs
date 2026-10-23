@@ -280,7 +280,8 @@ async fn render_tools_snapshot(
 }
 
 async fn render_status_snapshot() -> Result<String, crate::core::mcp::McpError> {
-    let cfg = crate::core::mcp::load_project_mcp_config().await?;
+    // 统计**生效**的配置（user + project 合并）—— agent 连的是这一份。
+    let cfg = crate::core::mcp::load_effective_mcp_config().await?;
     let configured_total = cfg.mcp_servers.len();
     let configured_enabled = cfg
         .mcp_servers
@@ -382,8 +383,10 @@ pub async fn execute_mcp_command(
 ) -> Result<String, crate::core::mcp::McpError> {
     match command {
         McpCommand::List => {
-            let config = crate::core::mcp::load_project_mcp_config().await?;
-            if config.mcp_servers.is_empty() {
+            // 列出**生效**的配置（user + project 合并），不是只列项目级 ——
+            // agent 实际连的就是这份，只显示项目级会让用户以为 server 没配。
+            let servers = crate::core::mcp::load_effective_mcp_servers().await?;
+            if servers.is_empty() {
                 return Ok(i18n::t(
                     "cmd.mcp.list.empty",
                     "No MCP servers configured.",
@@ -396,20 +399,23 @@ pub async fn execute_mcp_command(
                 "Configured MCP Servers:\n",
                 "Configured MCP Servers:\n",
             ));
-            for (name, server) in config.mcp_servers {
+            for entry in servers {
+                let server = entry.server;
                 out.push_str(
                     &i18n::t(
                         "cmd.mcp.list.item",
                         "- {name}: {command} ({transport})\n",
                         "- {name}: {command} ({transport})\n",
                     )
-                    .replace("{name}", &name)
+                    .replace("{name}", &entry.name)
                     .replace("{command}", server.command.as_deref().unwrap_or("-"))
                     .replace(
                         "{transport}",
                         server.transport_type.as_deref().unwrap_or("-"),
                     ),
                 );
+                // 标出来源：同名 server 可能同时存在于多个作用域。
+                out.push_str(&format!("  (from {})\n", entry.scope.label()));
                 if let Some(args) = &server.args {
                     out.push_str(
                         &i18n::t("cmd.mcp.list.args", "  Args: {args}\n", "  Args: {args}\n")

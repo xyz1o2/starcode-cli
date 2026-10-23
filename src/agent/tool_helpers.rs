@@ -28,6 +28,28 @@ pub(crate) fn tool_result_is_usable(result: &ToolResult) -> bool {
     !COLD_MARKERS.iter().any(|m| text.contains(m))
 }
 
+/// 工具结果里**给模型看**的那份正文。
+///
+/// 工具结果有两个通道：
+/// - `output` —— 给人看的摘要（UI 把它渲染成折叠结果里的一行）；
+/// - `llm_content` —— 给模型看的完整正文（工具名清单、参数 schema、使用说明）。
+///
+/// 两者**不同时**只发 `output` 等于把发现结果整个丢掉：`tool_search` 就是
+/// 这个形状 —— 它给 UI 的是一句 "Found 3 tool(s) for 'exa'"，给模型的才是
+/// 那三个工具名和 schema。模型拿不到后者就只能反复瞎猜工具名。
+///
+/// 这里是唯一的取值口：所有把工具结果写进对话的地方都必须走它，否则某条
+/// 路径漏掉 `llm_content`，同样的 bug 就会从别的入口复现。
+pub(crate) fn llm_facing_content(result: &ToolResult) -> String {
+    result
+        .llm_content
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| result.output.clone())
+        .or_else(|| result.error.clone())
+        .unwrap_or_default()
+}
+
 pub(crate) fn execute_single_tool_with_progress<'a>(
     tool_executor: Arc<ToolExecutor>,
     tool_call: StarToolCall,
@@ -55,6 +77,7 @@ pub(crate) fn execute_single_tool_with_progress<'a>(
             output: None,
             error: Some("tool executor returned no result".to_string()),
             data: None,
+            llm_content: None,
         })
     };
 
@@ -352,7 +375,50 @@ mod tests {
             output: Some(output.to_string()),
             error: None,
             data: None,
+            llm_content: None,
         }
+    }
+
+    // ── llm_facing_content ─────────────────────────────────────────────────
+
+    /// 回归：`tool_search` 给 UI 的是一句摘要，给模型的才是工具名和 schema。
+    /// 只发 `output` 的话，模型永远看不到搜到了什么。
+    #[test]
+    fn llm_content_wins_over_the_human_facing_summary() {
+        let mut r = result(true, "Found 3 tool(s) for 'exa'");
+        r.llm_content = Some("1. **mcp__exa__web_search_exa** — Search the web".to_string());
+        assert_eq!(
+            llm_facing_content(&r),
+            "1. **mcp__exa__web_search_exa** — Search the web"
+        );
+    }
+
+    /// 没有 `llm_content` 时退回 `output` —— 大多数工具两个通道是同一份内容。
+    #[test]
+    fn output_is_the_fallback_when_there_is_no_llm_content() {
+        let r = result(true, "plain output");
+        assert_eq!(llm_facing_content(&r), "plain output");
+    }
+
+    /// 空的 `llm_content` 等于没有 —— 不能让模型收到一个空消息。
+    #[test]
+    fn a_blank_llm_content_falls_back_to_output() {
+        let mut r = result(true, "plain output");
+        r.llm_content = Some("   \n  ".to_string());
+        assert_eq!(llm_facing_content(&r), "plain output");
+    }
+
+    /// 两条通道都空时退回错误信息。
+    #[test]
+    fn the_error_is_the_last_resort() {
+        let r = ToolResult {
+            success: false,
+            output: None,
+            error: Some("boom".to_string()),
+            data: None,
+            llm_content: None,
+        };
+        assert_eq!(llm_facing_content(&r), "boom");
     }
 
     /// 回归：`codebase_search_attempted` 曾是"调用过"语义，于是冷启动那次

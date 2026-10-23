@@ -435,6 +435,7 @@ impl Agent {
                         output: None,
                         error: Some(reason),
                         data: None,
+                        llm_content: None,
                     };
                     reflection::maybe_write_reflection_memory(
                         user_input,
@@ -648,9 +649,11 @@ impl Agent {
             }
         }
 
-        let tool_msg_content = result
-            .output
-            .unwrap_or_else(|| result.error.unwrap_or_default());
+        // 模型看到的正文优先用 `llm_content`：那是工具专门写给模型的一份
+        // （工具名清单、参数 schema、使用说明），而 `output` 只是给人看的一行
+        // 摘要。两者不同时，只发 `output` 等于把发现结果整个丢掉 ——
+        // `tool_search` 就是这样让模型拿到 "Found 3 tool(s)" 却不知道是哪三个。
+        let tool_msg_content = tool_helpers::llm_facing_content(&result);
         messages.push(StarMessage::tool(
             tool_call.id.clone(),
             tool_msg_content.clone(),
@@ -760,10 +763,8 @@ impl Agent {
                 reflection::maybe_write_reflection_memory(user_input, &tool_call, &result).await;
                 messages.push(StarMessage::tool(
                     tool_call.id.clone(),
-                    result
-                        .output
-                        .clone()
-                        .unwrap_or_else(|| result.error.clone().unwrap_or_default()),
+                    // 同 `consume_tool_result`：`llm_content` 才是给模型的那份正文。
+                    tool_helpers::llm_facing_content(&result),
                 ));
                 self.emit_event(crate::agent::messaging::AgentEvent::ToolFinished {
                     tool_call: tool_call.clone(),
@@ -793,6 +794,7 @@ impl Agent {
                     output: None,
                     error: Some(reason),
                     data: None,
+                    llm_content: None,
                 };
                 reflection::maybe_write_reflection_memory(user_input, &tool_call, &blocked).await;
                 self.emit_event(crate::agent::messaging::AgentEvent::ToolFinished {

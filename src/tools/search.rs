@@ -84,6 +84,7 @@ impl SearchTool {
                 output: None,
                 error: Some(format!("Search path is not a directory: {}", base_dir)),
                 data: None,
+                llm_content: None,
             });
         }
         let mut results = Vec::new();
@@ -134,6 +135,7 @@ impl SearchTool {
                         output: Some(message.clone()),
                         error: Some(message),
                         data: None,
+                        llm_content: None,
                     });
                 }
             };
@@ -197,6 +199,7 @@ impl SearchTool {
                 output: Some(format!("No results found for \"{}\"", query)),
                 error: None,
                 data: None,
+                llm_content: None,
             });
         }
 
@@ -211,6 +214,7 @@ impl SearchTool {
             output: Some(formatted_output),
             error: None,
             data: Some(serde_json::to_value(&results)?),
+            llm_content: None,
         })
     }
 

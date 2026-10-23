@@ -230,6 +230,7 @@ impl SmartEditTool {
                                     "strategy": result.strategy,
                                     "file_path": file_path
                                 })),
+                                llm_content: None,
                             });
                         }
 
@@ -272,6 +273,7 @@ impl SmartEditTool {
             output: None,
             error: Some("Edit failed: no strategy matched the target content".to_string()),
             data: None,
+            llm_content: None,
         })
     }
 
@@ -308,6 +310,7 @@ impl SmartEditTool {
                 "file_path": file_path,
                 "diff": diff_output
             })),
+            llm_content: None,
         }
     }
 
@@ -321,6 +324,7 @@ impl SmartEditTool {
                 result.details.as_deref().unwrap_or("edit failed")
             )),
             data: None,
+            llm_content: None,
         }
     }
 

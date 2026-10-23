@@ -15,3 +15,7 @@ model never picked it. Per-tool details live in Core Tool Usage Guides.
 ## Tool Discovery
 
 Anything not listed above may still exist. Before concluding "this isn't possible", query `tool_search` with capability keywords — matches include the JSON schema, so a hit can be called immediately by name. `select:<tool_name>` returns the full schema plus the tool's complete usage guide. Discovered tools remain callable for the rest of the session.
+
+### MCP tools
+
+Tools exposed by an MCP server are named `mcp__<server>__<tool>` — for example `mcp__exa__web_search_exa`. A server's tools are reached by its **server name** (`exa`) or by the tool's own name (`web_search_exa`); both are searchable with `tool_search`, and the result shows the full name to call. `select:` accepts the full name, or the trailing part when it identifies exactly one tool.

@@ -593,6 +593,7 @@ impl StarAgent {
             output: None,
             error: Some("tool executor returned no result".to_string()),
             data: None,
+            llm_content: None,
         }))
     }
 

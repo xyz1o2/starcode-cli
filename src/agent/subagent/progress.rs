@@ -447,6 +447,7 @@ mod tests {
             output: Some("ok".to_string()),
             error: None,
             data: None,
+            llm_content: None,
         };
         t.on_tool_finished(&call("1", "Grep"), &ok);
         t.on_tool_finished(&call("2", "Read"), &ok);

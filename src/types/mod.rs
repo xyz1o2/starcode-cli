@@ -24,6 +24,17 @@ pub struct ToolResult {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    /// 给模型看的正文，与 `output` 分离。
+    ///
+    /// `output` 是**给人看**的摘要：UI 把它渲染成那一行折叠结果，模型不该读它。
+    /// `llm_content` 是**给模型看**的完整正文：工具名列表、参数 schema、使用说明。
+    ///
+    /// 曾经这两个通道只有 `output` 一条，于是 `tool_search` 这类"摘要一行、
+    /// 正文另存"的工具，模型只收到 `"Found 3 tool(s) for 'exa'"` —— 工具名和
+    /// schema 全丢，模型只能反复瞎猜工具名。`llm_content` 存在却没人读，
+    /// 等于把发现工具的唯一途径堵死了。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1240,6 +1251,10 @@ pub fn is_safe_query_tool(tool_name: &str) -> bool {
             | "mcp_search_tools"
             | "mcp_tool_info"
             | "mcp_refresh"
+            // `tool_search` 只读 registry，不改任何状态：它存在的意义就是让
+            // 模型发现工具，每问一次都要人点一次"允许"会让这个工具形同虚设
+            // （截图里每一次 tool_search 调用都卡在 "Permission required"）。
+            | "tool_search"
     )
 }
 

@@ -305,6 +305,7 @@ impl ToolExecutor {
                     )),
                     error: Some(format!("tool panicked: {}", detail)),
                     data: None,
+                    llm_content: None,
                 }
             }
         }
@@ -783,6 +784,22 @@ impl ToolExecutor {
                                     .clone()
                                     .unwrap_or_else(|| core_result.output.clone());
 
+                                // 给模型的正文：工具自己的 `llm_content` 优先，
+                                // 没有就退回 `output`。
+                                //
+                                // 曾经这里只取 `output`，而 `llm_content` 被整个
+                                // 丢掉 —— `tool_search` 那种"摘要一行、正文另存"的
+                                // 工具，模型收到的只有 `"Found 3 tool(s) for 'exa'"`，
+                                // 工具名和 schema 全丢，于是只能反复瞎猜名字。
+                                // `shell.rs` 里那段注释（"llm_content 根本没人读"）
+                                // 描述的就是这个状态。
+                                let llm_content = core_result
+                                    .llm_content
+                                    .clone()
+                                    .filter(|s| !s.trim().is_empty())
+                                    .or_else(|| Some(output.clone()))
+                                    .filter(|s| !s.trim().is_empty());
+
                                 // Enrich error with structured error info
                                 if !success {
                                     if let Some(ref err) = error_msg {
@@ -803,6 +820,7 @@ impl ToolExecutor {
                                             output: Some(structured.format_display()),
                                             error: error_msg,
                                             data: Some(data),
+                                            llm_content: None,
                                         }
                                     } else {
                                         ToolResult {
@@ -810,6 +828,7 @@ impl ToolExecutor {
                                             output: Some(output),
                                             error: error_msg,
                                             data: core_result.data.clone(),
+                                            llm_content: None,
                                         }
                                     }
                                 } else {
@@ -818,6 +837,7 @@ impl ToolExecutor {
                                         output: Some(output),
                                         error: None,
                                         data: core_result.data.clone(),
+                                        llm_content,
                                     }
                                 }
                             }
@@ -873,6 +893,7 @@ impl ToolExecutor {
                                                                 .error
                                                                 .map(|e| e.message),
                                                             data: retry_result.data,
+                                                            llm_content: None,
                                                         };
                                                     }
                                                     Err(e) => {
@@ -968,6 +989,7 @@ impl ToolExecutor {
             output: Some(structured.format_display()),
             error: Some(error_msg),
             data: Some(serde_json::Value::Object(data)),
+            llm_content: None,
         }
     }
 
@@ -1946,6 +1968,7 @@ async fn execute_mcp_management_tool(
             output: None,
             error: Some("MCP not initialized".to_string()),
             data: None,
+            llm_content: None,
         };
     };
 
@@ -1961,6 +1984,7 @@ async fn execute_mcp_management_tool(
                 output: None,
                 error: Some(format!("Missing required argument: {}", key)),
                 data: None,
+                llm_content: None,
             })
         } else {
             Ok(value)
@@ -1975,6 +1999,7 @@ async fn execute_mcp_management_tool(
                 output: Some(servers.join("\n")),
                 error: None,
                 data: Some(serde_json::json!(servers)),
+                llm_content: None,
             }
         }
         "mcp_list_tools" => {
@@ -1993,6 +2018,7 @@ async fn execute_mcp_management_tool(
                         output: Some(names.join("\n")),
                         error: None,
                         data: Some(serde_json::json!(tools)),
+                        llm_content: None,
                     }
                 }
                 Err(e) => ToolResult {
@@ -2000,6 +2026,7 @@ async fn execute_mcp_management_tool(
                     output: None,
                     error: Some(e.to_string()),
                     data: None,
+                    llm_content: None,
                 },
             }
         }
@@ -2029,6 +2056,7 @@ async fn execute_mcp_management_tool(
                             ),
                             error: None,
                             data: Some(payload),
+                            llm_content: None,
                         }
                     }
                     None => ToolResult {
@@ -2036,6 +2064,7 @@ async fn execute_mcp_management_tool(
                         output: None,
                         error: Some(format!("Tool {} not found in server {}", tool, server)),
                         data: None,
+                        llm_content: None,
                     },
                 },
                 Err(e) => ToolResult {
@@ -2043,6 +2072,7 @@ async fn execute_mcp_management_tool(
                     output: None,
                     error: Some(e.to_string()),
                     data: None,
+                    llm_content: None,
                 },
             }
         }
@@ -2102,6 +2132,7 @@ async fn execute_mcp_management_tool(
                 ),
                 error: None,
                 data: Some(payload),
+                llm_content: None,
             }
         }
         "mcp_restart_server" => {
@@ -2132,6 +2163,7 @@ async fn execute_mcp_management_tool(
                         ),
                         error: None,
                         data: Some(payload),
+                        llm_content: None,
                     }
                 }
                 Err(e) => ToolResult {
@@ -2139,6 +2171,7 @@ async fn execute_mcp_management_tool(
                     output: None,
                     error: Some(e.to_string()),
                     data: None,
+                    llm_content: None,
                 },
             }
         }
@@ -2149,6 +2182,7 @@ async fn execute_mcp_management_tool(
                     output: None,
                     error: Some(e.to_string()),
                     data: None,
+                    llm_content: None,
                 };
             }
 
@@ -2168,6 +2202,7 @@ async fn execute_mcp_management_tool(
                 ),
                 error: None,
                 data: Some(payload),
+                llm_content: None,
             }
         }
         "mcp_list_resources" => {
@@ -2191,6 +2226,7 @@ async fn execute_mcp_management_tool(
                         }),
                         error: None,
                         data: Some(serde_json::json!(resources)),
+                        llm_content: None,
                     }
                 }
                 Err(e) => ToolResult {
@@ -2198,6 +2234,7 @@ async fn execute_mcp_management_tool(
                     output: None,
                     error: Some(e.to_string()),
                     data: None,
+                    llm_content: None,
                 },
             }
         }
@@ -2222,6 +2259,7 @@ async fn execute_mcp_management_tool(
                         output: Some(text),
                         error: None,
                         data: Some(serde_json::json!(contents)),
+                        llm_content: None,
                     }
                 }
                 Err(e) => ToolResult {
@@ -2229,6 +2267,7 @@ async fn execute_mcp_management_tool(
                     output: None,
                     error: Some(e.to_string()),
                     data: None,
+                    llm_content: None,
                 },
             }
         }
@@ -2260,6 +2299,7 @@ async fn execute_mcp_management_tool(
                         }),
                         error: None,
                         data: Some(serde_json::json!(prompts)),
+                        llm_content: None,
                     }
                 }
                 Err(e) => ToolResult {
@@ -2267,6 +2307,7 @@ async fn execute_mcp_management_tool(
                     output: None,
                     error: Some(e.to_string()),
                     data: None,
+                    llm_content: None,
                 },
             }
         }
@@ -2289,6 +2330,7 @@ async fn execute_mcp_management_tool(
                         output: Some(text),
                         error: None,
                         data: Some(result),
+                        llm_content: None,
                     }
                 }
                 Err(e) => ToolResult {
@@ -2296,6 +2338,7 @@ async fn execute_mcp_management_tool(
                     output: None,
                     error: Some(e.to_string()),
                     data: None,
+                    llm_content: None,
                 },
             }
         }
@@ -2304,6 +2347,7 @@ async fn execute_mcp_management_tool(
             output: None,
             error: Some(format!("Unknown MCP management tool: {}", name)),
             data: None,
+            llm_content: None,
         },
     }
 }
@@ -2324,6 +2368,7 @@ async fn execute_mcp_dynamic_tool(
             output: None,
             error: Some(format!("Invalid MCP tool name: {}", name)),
             data: None,
+            llm_content: None,
         };
     }
 
@@ -2334,6 +2379,7 @@ async fn execute_mcp_dynamic_tool(
             output: None,
             error: Some("MCP not initialized".to_string()),
             data: None,
+            llm_content: None,
         };
     };
 
@@ -2351,12 +2397,14 @@ async fn execute_mcp_dynamic_tool(
             ),
             error: None,
             data: Some(value),
+            llm_content: None,
         },
         Err(e) => ToolResult {
             success: false,
             output: None,
             error: Some(e.to_string()),
             data: None,
+            llm_content: None,
         },
     }
 }
@@ -2373,6 +2421,129 @@ mod tests {
         let out = f();
         std::panic::set_hook(hook);
         out
+    }
+
+    /// 一个"摘要一行、正文另存"的工具 —— `tool_search` 就是这个形状。
+    struct TwoChannelTool;
+
+    impl crate::core::tools::tools::BaseDeclarativeTool for TwoChannelTool {
+        fn name(&self) -> &str {
+            "two_channel"
+        }
+
+        fn display_name(&self) -> &str {
+            "Two Channel"
+        }
+
+        fn description(&self) -> &str {
+            "Reports a summary to the user and the details to the model."
+        }
+
+        fn kind(&self) -> crate::core::tools::tools::Kind {
+            crate::core::tools::tools::Kind::Read
+        }
+
+        fn is_read_only(&self) -> bool {
+            true
+        }
+
+        fn parameter_schema(&self) -> serde_json::Value {
+            json!({"type": "object", "properties": {}})
+        }
+
+        fn create_invocation(
+            &self,
+            _params: serde_json::Value,
+        ) -> Result<
+            Box<dyn crate::core::tools::tools::ToolInvocation>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            Ok(Box::new(TwoChannelInvocation))
+        }
+    }
+
+    struct TwoChannelInvocation;
+
+    impl crate::core::tools::tools::ToolInvocation for TwoChannelInvocation {
+        fn get_description(&self) -> String {
+            "Two channel".to_string()
+        }
+
+        fn tool_locations(&self) -> Vec<crate::core::tools::tools::ToolLocation> {
+            Vec::new()
+        }
+
+        fn execute(
+            &self,
+            _signal: Option<&tokio_util::sync::CancellationToken>,
+            _update_output: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            crate::core::tools::tools::ToolResult,
+                            Box<dyn std::error::Error>,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async move {
+                Ok(crate::core::tools::tools::ToolResult {
+                    // 给 UI 的一行摘要。
+                    llm_content: Some("the full body the model needs".to_string()),
+                    return_display: Some("Found 1 tool(s)".to_string()),
+                    output: "Found 1 tool(s)".to_string(),
+                    error: None,
+                    data: None,
+                })
+            })
+        }
+    }
+
+    /// 回归：工具的 `llm_content` 曾经被整个丢掉 —— executor 只取
+    /// `return_display`，于是模型收到的是 "Found 1 tool(s)"，工具名和 schema
+    /// 全不在里面。`tool_search` 靠这条通道把发现结果交给模型，通道一断，
+    /// 模型就只能反复瞎猜工具名。
+    #[tokio::test]
+    async fn llm_content_reaches_the_agent_level_result() {
+        use crate::core::config::ConfigParameters;
+        use crate::types::StarToolCallFunction;
+
+        let temp = tempfile::tempdir().expect("create temporary directory");
+        let mut params = ConfigParameters::default();
+        params.target_dir = temp.path().to_path_buf();
+        params.cwd = temp.path().to_path_buf();
+        let config = Arc::new(Config::new(params));
+
+        let registry = Arc::new(ToolRegistry::new(config.clone()));
+        registry.register_tool(Arc::new(TwoChannelTool));
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            registry,
+            None,
+            config,
+        );
+
+        let call = crate::types::StarToolCall {
+            id: "call-1".to_string(),
+            call_type: "function".to_string(),
+            function: StarToolCallFunction {
+                name: "two_channel".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+
+        let result = executor.execute(&call, None, None).await;
+
+        // 给 UI 的摘要不变。
+        assert_eq!(result.output.as_deref(), Some("Found 1 tool(s)"));
+        // 给模型的正文必须到位。
+        assert_eq!(
+            result.llm_content.as_deref(),
+            Some("the full body the model needs"),
+            "llm_content 必须在 executor 里被保留下来"
+        );
     }
 
     #[test]

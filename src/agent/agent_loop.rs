@@ -484,10 +484,7 @@ impl Agent {
                     hooks::run_post_tool_hooks(user_input, &project_map_tool_call, &result).await;
                     messages.push(StarMessage::tool(
                         project_map_tool_call.id.clone(),
-                        result
-                            .output
-                            .clone()
-                            .unwrap_or_else(|| result.error.clone().unwrap_or_default()),
+                        crate::agent::tool_helpers::llm_facing_content(&result),
                     ));
                 }
                 Err(reason) => {
@@ -496,6 +493,7 @@ impl Agent {
                         output: None,
                         error: Some(reason),
                         data: None,
+                        llm_content: None,
                     };
                     messages.push(StarMessage::tool(
                         project_map_tool_call.id.clone(),
@@ -521,10 +519,7 @@ impl Agent {
                     hooks::run_post_tool_hooks(user_input, &codebase_tool_call, &result).await;
                     messages.push(StarMessage::tool(
                         codebase_tool_call.id.clone(),
-                        result
-                            .output
-                            .clone()
-                            .unwrap_or_else(|| result.error.clone().unwrap_or_default()),
+                        crate::agent::tool_helpers::llm_facing_content(&result),
                     ));
                 }
                 Err(reason) => {
@@ -533,6 +528,7 @@ impl Agent {
                         output: None,
                         error: Some(reason),
                         data: None,
+                        llm_content: None,
                     };
                     messages.push(StarMessage::tool(
                         codebase_tool_call.id.clone(),

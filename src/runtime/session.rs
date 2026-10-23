@@ -1210,6 +1210,7 @@ pub async fn apply_deferred_runtime_actions(
                             output: None,
                             error: Some(e.to_string()),
                             data: None,
+                            llm_content: None,
                         };
                         agent.append_tool_result_message(&tool_call, &result);
                         let _ = tx

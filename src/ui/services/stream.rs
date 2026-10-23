@@ -2485,6 +2485,7 @@ mod tests {
                 "agent_type": "Explore",
                 "description": "scan",
             })),
+            llm_content: None,
         }
     }
 
@@ -3285,6 +3286,7 @@ mod tests {
             output: None,
             error: None,
             data: None,
+            llm_content: None,
         };
         handle_tool_result_message(&mut state, message_id, first.clone(), success.clone());
         assert!(!state.tool_started_at.contains_key(&first.id));
@@ -3405,6 +3407,7 @@ mod tests {
                 output: None,
                 error: None,
                 data: None,
+                llm_content: None,
             },
         );
         assert!(state.confirmation_feedback_mode);
@@ -3422,6 +3425,7 @@ mod tests {
                 output: None,
                 error: None,
                 data: None,
+                llm_content: None,
             },
         );
         assert!(!state.confirmation_feedback_mode);
@@ -3467,6 +3471,7 @@ mod tests {
                 output: None,
                 error: None,
                 data: None,
+                llm_content: None,
             },
         );
         assert!(state.is_awaiting_confirmation, "无关工具的结果不该收掉卡片");
@@ -3483,6 +3488,7 @@ mod tests {
                 output: None,
                 error: Some("Confirmation timeout or error".to_string()),
                 data: None,
+                llm_content: None,
             },
         );
         assert!(

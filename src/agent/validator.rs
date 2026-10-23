@@ -274,6 +274,7 @@ impl Validator {
                         e, original_err, repaired
                     )),
                     data: None,
+                    llm_content: None,
                 })
             }
         }
@@ -288,6 +289,7 @@ impl Validator {
                 output: None,
                 error: Some(format!("Missing or invalid '{}' argument", key)),
                 data: None,
+                llm_content: None,
             })
     }
 

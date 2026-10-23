@@ -9,10 +9,10 @@
 //! Palette keeps its existing `palette_mode`/`palette_history` view state;
 //! the stack only tracks that it is open (`Modal::Palette`).
 
-use crate::core::mcp::load_project_mcp_config;
 use crate::core::mcp::save_project_mcp_config;
 use crate::core::mcp::types::MCPTool;
 use crate::core::mcp::MCPManager;
+use crate::core::mcp::{load_effective_mcp_servers, load_project_mcp_config};
 use crate::ui::state::palette::PaletteMode;
 use crate::ui::state::ChatState;
 use std::time::Duration;
@@ -818,21 +818,19 @@ pub async fn load_mcp_server_rows(state: &mut ChatState) {
 
     let mut rows: Vec<McpServerRow> = Vec::new();
 
-    match load_project_mcp_config().await {
-        Ok(cfg) => {
-            let mut names: Vec<&String> = cfg.mcp_servers.keys().collect();
-            names.sort();
-
+    // 用**生效**配置（user + project 合并）：模态里应该显示的是 agent
+    // 实际会连的那些 server。只显示项目级的话，用户会看着一个空白的
+    // 列表而以为自己没配 exa 之类的 server。
+    match load_effective_mcp_servers().await {
+        Ok(entries) => {
             let manager = MCPManager::new();
             // Best effort: initialize only spawns configured processes; errors
             // surface per-server below via list_tools failures.
             let _ = manager.initialize_mcp_servers().await;
 
-            for name in names {
-                let server = match cfg.mcp_servers.get(name) {
-                    Some(s) => s.clone(),
-                    None => continue,
-                };
+            for entry in entries {
+                let name = &entry.name;
+                let server = entry.server;
                 let disabled = server.disabled.unwrap_or(false);
                 let transport = server.transport_type.clone().unwrap_or_else(|| {
                     if server.url.is_some() {

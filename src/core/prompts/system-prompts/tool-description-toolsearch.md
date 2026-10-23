@@ -14,5 +14,6 @@ Discover tools that are not in the current tool list (long-tail built-ins and MC
 - Keyword mode: describe the capability, not the tool name — "rename a git branch", "subscribe to PR comments". Matching is per-word, so natural phrasing works.
 - Ranked matches come back with name, description, and a full JSON Schema for the top few.
 - `select:<tool_name>` returns the full schema plus the complete usage guide for one tool.
+- MCP server tools are named `mcp__<server>__<tool>` (e.g. `mcp__exa__web_search_exa`). Search by the server name ("exa") or the tool name ("web_search_exa") and call the full name the result shows. `select:` also accepts the trailing part when it identifies exactly one tool.
 - Anything returned here can be called directly by name in the same turn — there is no separate "execute discovered tool" step.
 - Tools you find stay available for the remainder of the session; you do not need to search for the same tool twice.

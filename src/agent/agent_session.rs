@@ -65,11 +65,9 @@ impl Agent {
             ]));
         self.session_messages.push(StarMessage::tool(
             tool_call.id.clone(),
-            tool_result
-                .output
-                .clone()
-                .or_else(|| tool_result.error.clone())
-                .unwrap_or_default(),
+            // `llm_content` 优先：那是工具写给模型的那份正文（`output` 只是
+            // 给 UI 看的摘要）。两者不同时只发 `output` 等于把结果丢掉。
+            crate::agent::tool_helpers::llm_facing_content(tool_result),
         ));
     }
 }
