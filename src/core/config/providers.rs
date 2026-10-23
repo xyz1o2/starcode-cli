@@ -1,5 +1,9 @@
+use crate::core::config::external_configs::{self, ExternalTool};
 use crate::core::config::models::ProviderSettings;
 use serde::{Deserialize, Serialize};
+
+/// 兼容层合成的 Claude Code provider（见 `external_configs`）。
+pub use crate::core::config::external_configs::CLAUDE_CODE_PROVIDER_ID;
 
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 pub const PLACEHOLDER_API_KEY: &str = "API_KEY_NOT_SET";
@@ -38,6 +42,21 @@ pub const ALL_PROVIDERS: &[ProviderMetadata] = &[
         category: ProviderCategory::Popular,
         default_base_url: Some("https://api.anthropic.com/v1"),
         api_key_env_var: Some("ANTHROPIC_API_KEY"),
+        requires_api_key: true,
+    },
+    // 兼容层合成的 provider：模型 / 端点 / 凭证全部来自 Claude Code 自己的
+    // `~/.claude/settings.json`（以及它注入的 `ANTHROPIC_*` 变量），starcode
+    // 这边不落库、不必再抄一遍。见 `external_configs`。
+    //
+    // 没有 `default_base_url`：端点是 CC 配的那个（可能是第三方网关），
+    // 给个官方默认值只会在 CC 没写 base_url 时把人骗到 api.anthropic.com。
+    ProviderMetadata {
+        id: external_configs::CLAUDE_CODE_PROVIDER_ID,
+        name: "Claude Code",
+        description: "Reuse the model, endpoint and credentials configured for Claude Code",
+        category: ProviderCategory::Popular,
+        default_base_url: None,
+        api_key_env_var: Some("ANTHROPIC_AUTH_TOKEN"),
         requires_api_key: true,
     },
     ProviderMetadata {
@@ -350,7 +369,14 @@ pub fn canonical_provider_id(input: &str) -> Option<String> {
 
 pub fn provider_requires_manual_base_url(provider_id: &str) -> bool {
     match canonical_provider_id(provider_id).as_deref() {
-        Some("openai-compatible" | "anthropic-compatible" | "ollama" | "lmstudio") => true,
+        Some(
+            "openai-compatible"
+            | "anthropic-compatible"
+            | "ollama"
+            | "lmstudio"
+            // 端点来自 Claude Code 的配置，没有内建默认值可用。
+            | external_configs::CLAUDE_CODE_PROVIDER_ID,
+        ) => true,
         // Zen 的 base_url 由网关固定（多协议共用一个根地址），不需要用户手填。
         Some("opencode") => false,
         Some(id) if get_provider_by_id(id).is_some() => false,
@@ -385,6 +411,13 @@ pub fn is_aggregator_provider(provider_id: &str) -> bool {
 /// 返回 `None` 表示"不由 provider 决定"，调用方应另行推断（例如 Zen 需要按模型名分流）。
 pub fn provider_openai_compatible_mode(provider_id: &str) -> Option<bool> {
     if normalize_provider_id(provider_id).as_deref() == Some("anthropic-compatible") {
+        return Some(false);
+    }
+    // Claude Code 只会说 Anthropic Messages 协议（`/v1/messages`），哪怕它的
+    // base_url 指向第三方网关。按 OpenAI 兼容发出去必然 404。
+    if normalize_provider_id(provider_id).as_deref()
+        == Some(external_configs::CLAUDE_CODE_PROVIDER_ID)
+    {
         return Some(false);
     }
     // Zen 一个 provider 下混着多种协议，必须交给 infer_provider 按模型名判断。
@@ -535,6 +568,18 @@ fn provider_is_configured_with_env_state(
     has_api_key || has_saved_base_url || is_active
 }
 
+/// 兼容层（Claude Code）当前是否有一份**能用**的配置：既有模型，也有凭证。
+///
+/// 「能出现在面板里」和「能真的发请求」是两个问题（见
+/// [`provider_has_usable_credentials`]），这里回答后者 —— 只有模型没有 key 的
+/// settings.json 不该让 `claude-code` 显得可用。
+pub fn claude_code_profile_available() -> bool {
+    external_configs::load()
+        .adopted()
+        .filter(|profile| profile.tool == ExternalTool::ClaudeCode)
+        .is_some_and(|profile| profile.api_key.is_some_and(|key| !key.trim().is_empty()))
+}
+
 pub fn provider_is_configured(
     provider_id: &str,
     settings: Option<&ProviderSettings>,
@@ -577,6 +622,12 @@ pub fn provider_has_usable_credentials(
         if !metadata.requires_api_key {
             return true;
         }
+    }
+    // 凭证可能来自 Claude Code 的配置文件而不是环境变量，普通判据看不到。
+    if provider_matches_id(provider_id, external_configs::CLAUDE_CODE_PROVIDER_ID)
+        && claude_code_profile_available()
+    {
+        return true;
     }
     let from_settings = settings
         .and_then(|value| normalize_api_key_value(value.api_key.clone()))
@@ -663,6 +714,12 @@ pub fn api_key_env_candidates(provider_id: &str) -> Vec<&'static str> {
     // Additional env var aliases for popular CLI tools
     match pid.as_str() {
         "anthropic" => push_env_var(&mut vars, "CLAUDE_API_KEY"),
+        // 内建条目给的候选是 `ANTHROPIC_AUTH_TOKEN`（CC 接第三方网关时用的那个）；
+        // 官方 key 与历史别名一并收下，两种配法都能用。
+        "claude-code" => {
+            push_env_var(&mut vars, "ANTHROPIC_API_KEY");
+            push_env_var(&mut vars, "CLAUDE_API_KEY");
+        }
         "openai" => push_env_var(&mut vars, "CODEX_API_KEY"),
         "google" => push_env_var(&mut vars, "GEMINI_API_KEY"),
         // Zen 文档里也写作 OPENCODE_ZEN_API_KEY，两个都收。
@@ -1277,5 +1334,43 @@ mod tests {
                 "support flag for {model} must match the implemented protocols"
             );
         }
+    }
+
+    /// `claude-code` 是兼容层合成的 provider，两件事必须固定住：
+    /// 端点必须留给外部配置（不能悄悄回落到 api.anthropic.com），
+    /// 协议必须锁成 Anthropic Messages（CC 只会说这一种）。
+    #[test]
+    fn the_claude_code_provider_defers_its_endpoint_and_speaks_anthropic() {
+        let meta = get_provider_by_id(CLAUDE_CODE_PROVIDER_ID).expect("必须注册为内建 provider");
+        assert!(
+            meta.default_base_url.is_none(),
+            "端点来自 CC 的配置，给默认值会在它没写 base_url 时把人骗到官方地址"
+        );
+        assert!(
+            provider_requires_manual_base_url(CLAUDE_CODE_PROVIDER_ID),
+            "端点不是内建的，必须按外部配置解析"
+        );
+        assert_eq!(
+            provider_openai_compatible_mode(CLAUDE_CODE_PROVIDER_ID),
+            Some(false),
+            "按 OpenAI 兼容发出去必然 404"
+        );
+    }
+
+    /// AUTH_TOKEN 是 CC 接第三方网关时的键，官方 key 与历史别名也要认。
+    #[test]
+    fn the_claude_code_provider_accepts_the_claude_code_env_names() {
+        let candidates = api_key_env_candidates(CLAUDE_CODE_PROVIDER_ID);
+        for env_var in [
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_API_KEY",
+        ] {
+            assert!(
+                candidates.contains(&env_var),
+                "{env_var} 必须被认作 claude-code 的凭证来源，实际候选：{candidates:?}"
+            );
+        }
+        assert_eq!(candidates[0], "ANTHROPIC_AUTH_TOKEN", "AUTH_TOKEN 优先");
     }
 }

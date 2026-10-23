@@ -151,9 +151,13 @@ impl ToolExecutor {
         message_bus: Option<Arc<MessageBus>>,
         config: Arc<Config>,
     ) -> Self {
-        let permission_manager = Arc::new(SessionPermissionManager::with_persistence(
-            config.storage().project_permission_grants_path(),
-        ));
+        let grants_path = config.storage().project_permission_grants_path();
+        // 有运行时共享状态时复用它：`Agent::run_stream` 每条消息都会重建
+        // `ToolExecutor`，会话级授予不能跟着 executor 一起重建。
+        let permission_manager = match config.runtime_global_state() {
+            Some(global_state) => global_state.session_permission_manager(grants_path),
+            None => Arc::new(SessionPermissionManager::with_persistence(grants_path)),
+        };
 
         Self {
             tool_registry,

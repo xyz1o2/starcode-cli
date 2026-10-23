@@ -524,7 +524,22 @@ impl ProviderStore {
 
     pub async fn configured_provider_ids(&self) -> Result<Vec<String>, String> {
         let config = self.load().await?;
-        Ok(Self::configured_provider_ids_from(&config))
+        let mut ids = Self::configured_provider_ids_from(&config);
+
+        // 兼容层合成的 `claude-code` 不在 store 里，但采纳到配置时它确实可用，
+        // 面板必须看得见 —— 否则「模型变量进了提供商」这件事在 UI 上等于没发生。
+        //
+        // 只加在**这个**入口，不加进 `configured_provider_ids_from`：那个纯函数
+        // 是给单测盯着排序用的，让它去读 `~/.claude/settings.json` 就等于让用例
+        // 依赖跑测试那台机器上装没装 Claude Code。
+        let virtual_id = crate::core::config::providers::CLAUDE_CODE_PROVIDER_ID;
+        if crate::core::config::providers::claude_code_profile_available()
+            && !ids.iter().any(|id| id == virtual_id)
+        {
+            ids.insert(0, virtual_id.to_string());
+        }
+
+        Ok(ids)
     }
 
     /// 已经加载好的配置里，哪些 provider 算数、按什么顺序排。

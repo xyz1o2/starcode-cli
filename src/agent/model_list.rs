@@ -359,34 +359,50 @@ pub async fn list_models_with_mode(
     // 2. 拉活动 provider（带超时）
     let mut active_pid_for_list: Option<String> = None;
     let list_result = {
-        let active = config
-            .as_ref()
-            .and_then(|c| c.active_provider_id.as_ref().map(|pid| (c, pid)));
+        // 客户端可能指着一个**不在 store 里**的内建 provider（目前只有兼容层合成
+        // 的 `claude-code`）：端点由那份外部配置决定，这时必须直接用客户端去拉，
+        // 不能退回 store 里的 active provider —— 那会把 A 的模型贴上 B 的标签。
+        let client_virtual_pid = star_client
+            .provider_id
+            .clone()
+            .filter(|pid| !pid.trim().is_empty())
+            .filter(|pid| {
+                crate::core::config::providers::get_provider_by_id(pid).is_some()
+                    && config
+                        .as_ref()
+                        .map(|c| !c.providers.contains_key(pid))
+                        .unwrap_or(true)
+            });
 
-        if let Some((config, active_pid)) = active {
-            active_pid_for_list = Some(active_pid.clone());
-            if let Some(p) = config.providers.get(active_pid) {
-                let base_url = p
-                    .base_url
-                    .clone()
-                    .unwrap_or_else(|| star_client.base_url.clone());
+        let active_pid = client_virtual_pid
+            .or_else(|| config.as_ref().and_then(|c| c.active_provider_id.clone()));
 
-                // IMPORTANT: do not let empty api_key override env-based resolution.
-                let api_key = p.api_key.clone().filter(|k| !k.trim().is_empty());
+        match active_pid {
+            Some(pid) => {
+                active_pid_for_list = Some(pid.clone());
+                match config.as_ref().and_then(|c| c.providers.get(&pid)) {
+                    Some(p) => {
+                        let base_url = p
+                            .base_url
+                            .clone()
+                            .unwrap_or_else(|| star_client.base_url.clone());
 
-                let tmp = crate::llm::client::StarClient::new(
-                    api_key.as_deref().unwrap_or("API_KEY_NOT_SET"),
-                    None,
-                    Some(base_url),
-                    None,
-                    Some(active_pid.clone()),
-                );
-                fetch_with_timeout(&tmp).await
-            } else {
-                fetch_with_timeout(star_client).await
+                        // IMPORTANT: do not let empty api_key override env-based resolution.
+                        let api_key = p.api_key.clone().filter(|k| !k.trim().is_empty());
+
+                        let tmp = crate::llm::client::StarClient::new(
+                            api_key.as_deref().unwrap_or("API_KEY_NOT_SET"),
+                            None,
+                            Some(base_url),
+                            None,
+                            Some(pid),
+                        );
+                        fetch_with_timeout(&tmp).await
+                    }
+                    None => fetch_with_timeout(star_client).await,
+                }
             }
-        } else {
-            fetch_with_timeout(star_client).await
+            None => fetch_with_timeout(star_client).await,
         }
     };
     mark("active-provider-fetch");

@@ -37,6 +37,23 @@ pub struct Toast {
     pub duration_secs: u64,
 }
 
+/// 已经到达、但还没轮到回答的确认请求。
+///
+/// 工具是并发执行的，一次可能同时发出多张确认卡。UI 一次只展示/回答一张，
+/// 其余必须排队 —— 丢掉它们等于让对应的门禁永远等一个不会到来的答复，
+/// 整轮就卡死在这里。
+#[derive(Debug, Clone)]
+pub struct QueuedConfirmation {
+    pub entry_idx: usize,
+    pub message_id: u64,
+    /// bus 侧的 correlation id：回答时必须用它。
+    pub tool_call_id: String,
+    /// 模型侧的 tool call id：工具结束时靠它把卡片收掉。
+    pub originating_tool_call_id: Option<String>,
+    /// `ask_user_question` 的选择项从 0 开始，其余确认卡从 1 开始。
+    pub is_ask: bool,
+}
+
 /// UI 侧用户设置文件写入的独立结果；它不能代替 worker runtime acknowledgement。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeSettingsPersistence {
@@ -642,6 +659,8 @@ pub struct ChatState {
     pub confirmation_feedback_mode: bool,
     /// 对标 Claude Code: 确认时附加的反馈文本
     pub pending_confirmation_feedback: String,
+    /// 同时到达、还没轮到回答的确认请求（先进后出：刚被顶下去的那张先答）。
+    pub pending_confirmation_queue: VecDeque<QueuedConfirmation>,
     // ============================================
     // ============ 文本选择和复制功能 ============
     pub text_selection: TextSelection,
@@ -1258,6 +1277,7 @@ impl ChatState {
             pending_question_other_focused: false,
             confirmation_feedback_mode: false,
             pending_confirmation_feedback: String::new(),
+            pending_confirmation_queue: VecDeque::new(),
             last_confirmation_message_id: None,
             text_selection: TextSelection::new(),
             chat_search: ChatSearchState::default(),
@@ -1804,14 +1824,98 @@ pub fn bump_indices_after_insert(state: &mut ChatState, from: usize, delta: usiz
             *idx += delta;
         }
     }
+    for queued in state.pending_confirmation_queue.iter_mut() {
+        if queued.entry_idx >= from {
+            queued.entry_idx += delta;
+        }
+    }
 }
 
 impl ChatState {
-    /// 结束"正在等用户确认"的状态。
+    /// 把排队中的下一张确认卡设为当前等待回答的卡。
     ///
-    /// 所有收尾点都必须走这里。原来这些字段散在十几处手工清，其中一处漏掉
-    /// `is_awaiting_confirmation`（或者漏掉新加的 originating id），UI 就会永远
-    /// 卡在等待态：按键全被喂给一张已经没有接收者的卡片，提示框也打不了字。
+    /// 返回 `false` 表示队列已空。调用方通常是 [`Self::clear_pending_confirmation`]：
+    /// 一张卡刚被回答/拒绝/取消，下一条并发请求要接上，否则它的门禁会一直等。
+    pub fn activate_next_queued_confirmation(&mut self) -> bool {
+        let Some(queued) = self.pending_confirmation_queue.pop_front() else {
+            return false;
+        };
+        if queued.entry_idx >= self.chat_history.len() {
+            // 卡片所属的回合已经被清掉了，继续找下一张。
+            return self.activate_next_queued_confirmation();
+        }
+
+        // 排队时把 outcome 写成占位文案，现在要恢复成可回答的选项列表。
+        if let Some(confirmation) = self.chat_history[queued.entry_idx].confirmation.as_mut() {
+            confirmation.outcome = None;
+        }
+        self.chat_history[queued.entry_idx].is_streaming = Some(false);
+        self.rendered_cache.remove(&queued.entry_idx);
+        self.virtual_list.mark_dirty(queued.entry_idx);
+
+        self.pending_confirmation_entry_idx = Some(queued.entry_idx);
+        self.pending_message_id = Some(queued.message_id);
+        self.pending_tool_call_id = Some(queued.tool_call_id);
+        self.pending_confirmation_originating_id = queued.originating_tool_call_id;
+        self.is_awaiting_confirmation = true;
+        self.confirmation_feedback_mode = false;
+        self.pending_confirmation_feedback.clear();
+        self.pending_confirmation_choice = if queued.is_ask { 0 } else { 1 };
+        self.pending_question_selections.clear();
+        self.pending_other_input.clear();
+        self.pending_question_other_focused = false;
+        self.chat_list_state.select(Some(queued.entry_idx));
+        true
+    }
+
+    /// 整个回合结束/中断：队列里的请求不再有意义，把卡片标成已取消。
+    ///
+    /// 注意顺序：先清队列再 [`Self::clear_pending_confirmation`]，否则清当前卡时
+    /// 会把一张已经失效的请求重新变成等待态。
+    pub fn discard_pending_confirmation_queue(&mut self, reason: &str) {
+        let queued: Vec<QueuedConfirmation> = self.pending_confirmation_queue.drain(..).collect();
+        for item in queued {
+            if let Some(entry) = self.chat_history.get_mut(item.entry_idx) {
+                if let Some(confirmation) = entry.confirmation.as_mut() {
+                    if confirmation.outcome.is_none() {
+                        confirmation.outcome = Some(reason.to_string());
+                    }
+                }
+            }
+            self.rendered_cache.remove(&item.entry_idx);
+            self.virtual_list.mark_dirty(item.entry_idx);
+        }
+    }
+
+    /// 把一张排队中的确认卡从队列里摘掉（对应工具已经有结果/已取消）。
+    pub fn remove_queued_confirmation_by_originating_id(&mut self, originating_id: &str) {
+        let mut removed = Vec::new();
+        self.pending_confirmation_queue.retain(|item| {
+            if item.originating_tool_call_id.as_deref() == Some(originating_id) {
+                removed.push(item.entry_idx);
+                false
+            } else {
+                true
+            }
+        });
+        for idx in removed {
+            if let Some(entry) = self.chat_history.get_mut(idx) {
+                if let Some(confirmation) = entry.confirmation.as_mut() {
+                    if confirmation.outcome.is_none() {
+                        confirmation.outcome = Some(crate::core::i18n::t(
+                            "ui.confirm.cancelled_turn",
+                            "已取消 · 对应工具已有结果",
+                            "Cancelled — the tool already finished",
+                        ));
+                    }
+                }
+            }
+            self.rendered_cache.remove(&idx);
+            self.virtual_list.mark_dirty(idx);
+        }
+    }
+
+    /// 当前这张卡处理完了，接上下一张排队的卡。
     pub fn clear_pending_confirmation(&mut self) {
         self.is_awaiting_confirmation = false;
         self.pending_tool_call_id = None;
@@ -1822,6 +1926,7 @@ impl ChatState {
         self.pending_question_other_focused = false;
         self.pending_other_input.clear();
         self.pending_question_selections.clear();
+        self.activate_next_queued_confirmation();
     }
 }
 

@@ -843,6 +843,13 @@ pub async fn run_ui_loop(
             // 位置就在这里：这是**唯一**知道"用户刚按了 Esc"的地方（Done 在取消后
             // 不会到来）。没有它，用户只看到输入框恢复可用，不知道刚才那半句话算不算数。
             crate::ui::components::interrupted::push_interrupted_notice(state, partial_kept);
+            // 中断后排队中的确认请求也失效了，必须先清队列再清当前卡，
+            // 否则 clear 会把一张没人在等的卡重新激活。
+            state.discard_pending_confirmation_queue(&crate::core::i18n::t(
+                "ui.confirm.cancelled_interrupt",
+                "已取消 · 回合被中断",
+                "Cancelled — the turn was interrupted",
+            ));
             // Clear confirmation state to unblock queued messages
             state.clear_pending_confirmation();
 
