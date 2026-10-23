@@ -654,39 +654,29 @@ async fn execute_round_pipeline(
     outcomes
 }
 
-pub(super) async fn run_agent_team(
-    ctx: CommandContext<'_>,
-    args: AgentTeamRunArgs,
-) -> CommandResult {
-    let command_cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let storage = crate::core::config::storage::Storage::new(command_cwd.clone());
+/// 运行前的全部解析结果。
+///
+/// 单测只需要这一层：真正跑子代理要网络和 provider，但「用哪个预设、
+/// 几轮、并行度几、dry_run 是否生效」这些决定全部落在 `plan_team_run`
+/// 里，可以离线验证。
+#[derive(Debug)]
+pub(super) struct TeamRunPlan {
+    pub(super) objective: String,
+    pub(super) selected: Vec<&'static TeamAgentDef>,
+    pub(super) max_steps: usize,
+    pub(super) run_mode: TeamRunMode,
+    pub(super) rounds: usize,
+    pub(super) effective_parallelism: usize,
+    pub(super) timeout_secs: Option<u64>,
+    pub(super) target: String,
+    pub(super) dry_run: bool,
+}
 
-    let preset = if let Some(team_name) = args.team.as_ref() {
-        resolve_team_preset(&storage, team_name)
-            .await?
-            .ok_or_else(|| format!("team preset '{}' not found", team_name))?
-            .0
-    } else {
-        TeamPreset {
-            name: "inline".to_string(),
-            description: None,
-            agents: vec![
-                "Grep".to_string(),
-                "analyzer".to_string(),
-                "editor".to_string(),
-            ],
-            target: Some(".".to_string()),
-            max_steps: Some(5),
-            parallelism: Some(3),
-            mode: Some("parallel".to_string()),
-            rounds: Some(1),
-            timeout_secs: None,
-            dry_run: Some(false),
-            objective: None,
-            updated_at: 0,
-        }
-    };
-
+/// 命令行参数优先，其次预设，最后是内联默认值。
+pub(super) fn plan_team_run(
+    args: &AgentTeamRunArgs,
+    preset: &TeamPreset,
+) -> Result<TeamRunPlan, String> {
     let objective = {
         let inline = args.objective.join(" ").trim().to_string();
         if !inline.is_empty() {
@@ -720,6 +710,7 @@ pub(super) async fn run_agent_team(
     if raw_parallelism == 0 {
         return Err("parallelism must be >= 1".to_string());
     }
+    // 并行度超过成员数没有意义，直接夹到成员数。
     let parallelism = raw_parallelism.min(selected.len()).max(1);
     let effective_parallelism = if matches!(run_mode, TeamRunMode::Pipeline) {
         1
@@ -728,13 +719,81 @@ pub(super) async fn run_agent_team(
     };
 
     let timeout_secs = args.timeout_secs.or(preset.timeout_secs);
-    let timeout = timeout_secs.map(Duration::from_secs);
     let target = args
         .target
         .clone()
         .or(preset.target.clone())
         .unwrap_or_else(|| ".".to_string());
+    // dry_run 是「或」关系：预设开了就一直是开的，命令行无法关掉它。
     let dry_run = args.dry_run || preset.dry_run.unwrap_or(false);
+
+    Ok(TeamRunPlan {
+        objective,
+        selected,
+        max_steps,
+        run_mode,
+        rounds,
+        effective_parallelism,
+        timeout_secs,
+        target,
+        dry_run,
+    })
+}
+
+/// `--team` 指定预设时从存储里取；否则用内联默认预设。
+pub(super) async fn resolve_team_run_preset(
+    storage: &crate::core::config::storage::Storage,
+    team_name: Option<&str>,
+) -> Result<TeamPreset, String> {
+    let Some(team_name) = team_name else {
+        return Ok(TeamPreset {
+            name: "inline".to_string(),
+            description: None,
+            agents: vec![
+                "explore".to_string(),
+                "analyzer".to_string(),
+                "editor".to_string(),
+            ],
+            target: Some(".".to_string()),
+            max_steps: Some(5),
+            parallelism: Some(3),
+            mode: Some("parallel".to_string()),
+            rounds: Some(1),
+            timeout_secs: None,
+            dry_run: Some(false),
+            objective: None,
+            updated_at: 0,
+        });
+    };
+
+    Ok(resolve_team_preset(storage, team_name)
+        .await?
+        .ok_or_else(|| format!("team preset '{}' not found", team_name))?
+        .0)
+}
+
+pub(super) async fn run_agent_team(
+    ctx: CommandContext<'_>,
+    args: AgentTeamRunArgs,
+) -> CommandResult {
+    let command_cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let storage = crate::core::config::storage::Storage::new(command_cwd.clone());
+
+    let preset = resolve_team_run_preset(&storage, args.team.as_deref()).await?;
+
+    let TeamRunPlan {
+        objective,
+        selected,
+        max_steps,
+        run_mode,
+        rounds,
+        effective_parallelism,
+        timeout_secs,
+        target,
+        dry_run,
+    } = plan_team_run(&args, &preset)?;
+
+    let timeout = timeout_secs.map(Duration::from_secs);
 
     let current_model = Some(ctx.state.current_model.clone()).filter(|m| !m.trim().is_empty());
     let approval_mode = ctx.state.approval_mode.clone();
@@ -1062,4 +1121,525 @@ pub(super) async fn run_agent_team(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::agents::team_definitions::TEAM_AGENT_CATALOG;
+
+    fn outcome(member: &str, success: bool, summary: &str) -> TeamTaskOutcome {
+        let result = if success {
+            SubTaskResult::success(format!("task-{member}"), summary.to_string())
+        } else {
+            SubTaskResult::failure(format!("task-{member}"), summary.to_string())
+        };
+        TeamTaskOutcome {
+            member_name: member.to_string(),
+            member_internal_id: member.to_string(),
+            round: 1,
+            duration_ms: 7,
+            result,
+            work_dir: PathBuf::from("/tmp/w"),
+            target: ".".to_string(),
+            isolation_mode: "shared".to_string(),
+            patch_path: PathBuf::from("/tmp/w.patch"),
+            has_changes: false,
+            changed_files: 0,
+        }
+    }
+
+    fn run_args() -> AgentTeamRunArgs {
+        AgentTeamRunArgs {
+            team: None,
+            agents: None,
+            target: None,
+            max_steps: None,
+            parallelism: None,
+            mode: None,
+            rounds: None,
+            timeout_secs: None,
+            dry_run: false,
+            objective: Vec::new(),
+        }
+    }
+
+    fn inline_preset() -> TeamPreset {
+        TeamPreset {
+            name: "inline".to_string(),
+            description: None,
+            agents: vec!["explore".to_string(), "editor".to_string()],
+            target: None,
+            max_steps: None,
+            parallelism: None,
+            mode: None,
+            rounds: None,
+            timeout_secs: None,
+            dry_run: None,
+            objective: None,
+            updated_at: 0,
+        }
+    }
+
+    // ── truncate_chars ──────────────────────────────────────────
+
+    /// 按字符而不是字节截断：中文提示词被腰斩会 panic。
+    #[test]
+    fn truncate_counts_characters_not_bytes() {
+        assert_eq!(truncate_chars("abc", 10), "abc");
+        assert_eq!(truncate_chars("abc", 3), "abc");
+        let cut = truncate_chars("重构一下这个模块", 3);
+        assert!(cut.starts_with("重构一"), "{cut}");
+        assert!(cut.ends_with("...[truncated]"), "{cut}");
+    }
+
+    // ── 轮次目标 ────────────────────────────────────────────────
+
+    /// 单轮、无共享内存时必须原样返回目标 —— 否则首轮就带着一段
+    /// "[Team Collaboration] round 1/1" 的噪音发给每个成员。
+    #[test]
+    fn a_single_round_without_memory_keeps_the_objective_untouched() {
+        assert_eq!(
+            build_round_objective("fix the build", 1, 1, &[], None),
+            "fix the build"
+        );
+    }
+
+    #[test]
+    fn multi_round_objectives_carry_the_round_header_and_shared_memory() {
+        let memory = vec!["[r1:editor:ok] patched lib.rs".to_string()];
+        let out = build_round_objective("fix the build", 2, 3, &memory, None);
+        assert!(out.starts_with("fix the build"), "{out}");
+        assert!(out.contains("[Team Collaboration] round 2/3"), "{out}");
+        assert!(
+            out.contains("Team shared memory (latest 1 items):"),
+            "{out}"
+        );
+        assert!(out.contains("- [r1:editor:ok] patched lib.rs"), "{out}");
+    }
+
+    /// 多轮的第一轮也要带轮次头 —— 成员需要知道这是 1/3 而不是一次性任务。
+    #[test]
+    fn the_first_round_of_a_multi_round_run_is_still_labelled() {
+        let out = build_round_objective("fix the build", 1, 3, &[], None);
+        assert!(out.contains("round 1/3"), "{out}");
+    }
+
+    // ── 上下文摘要 ──────────────────────────────────────────────
+
+    #[test]
+    fn round_context_marks_success_and_failure_and_respects_the_cap() {
+        let outcomes = vec![
+            outcome("explore", true, "found 3 call sites"),
+            outcome("editor", false, "compile error"),
+            outcome("analyzer", true, "nothing to add"),
+        ];
+        let ctx = summarize_round_context(&outcomes, 2);
+        assert_eq!(
+            ctx,
+            vec![
+                "explore [ok]: found 3 call sites".to_string(),
+                // `SubTaskResult::failure` 会给摘要加 "Task failed: " 前缀
+                "editor [fail]: Task failed: compile error".to_string(),
+            ]
+        );
+    }
+
+    // ── 共享内存 ────────────────────────────────────────────────
+
+    #[test]
+    fn memory_entries_collapse_whitespace_and_truncate() {
+        assert_eq!(
+            normalize_memory_entry("  a   b \n c ", 50).as_deref(),
+            Some("a b c")
+        );
+        assert_eq!(normalize_memory_entry("   ", 50), None);
+        let long = normalize_memory_entry("abcdefgh", 3).unwrap();
+        assert_eq!(long, "abc...");
+    }
+
+    #[test]
+    fn round_memory_records_summary_next_action_and_error() {
+        let mut ok = outcome("explore", true, "mapped the call graph");
+        ok.result = ok.result.with_next_action("inspect src/lib.rs".to_string());
+        let bad = outcome("editor", false, "compile error");
+
+        let memory = summarize_round_memory(&[ok, bad], 2, 10);
+        assert!(
+            memory[0].starts_with("[r2:explore:ok] mapped the call graph"),
+            "{memory:?}"
+        );
+        assert!(
+            memory[1].starts_with("[r2:explore:ok] next: inspect src/lib.rs"),
+            "{memory:?}"
+        );
+        assert!(
+            memory
+                .iter()
+                .any(|m| m.starts_with("[r2:editor:fail] error: compile error")),
+            "{memory:?}"
+        );
+    }
+
+    #[test]
+    fn round_memory_stops_at_the_item_cap() {
+        let outcomes = vec![
+            outcome("a", true, "one"),
+            outcome("b", true, "two"),
+            outcome("c", true, "three"),
+        ];
+        assert_eq!(summarize_round_memory(&outcomes, 1, 2).len(), 2);
+        assert!(summarize_round_memory(&outcomes, 1, 0).is_empty());
+    }
+
+    #[test]
+    fn round_memory_records_the_changed_file_count() {
+        let mut o = outcome("editor", true, "patched things");
+        o.has_changes = true;
+        o.changed_files = 4;
+        let memory = summarize_round_memory(&[o], 1, 10);
+        assert!(memory[0].ends_with("(changed_files=4)"), "{memory:?}");
+    }
+
+    /// 共享内存是一个滑动窗口：超了就丢最旧的，不是丢最新的。
+    #[test]
+    fn shared_memory_keeps_the_newest_items() {
+        let mut memory = vec!["a".to_string(), "b".to_string()];
+        append_shared_memory(
+            &mut memory,
+            vec!["c".to_string(), "  ".to_string(), "d".to_string()],
+            3,
+        );
+        assert_eq!(
+            memory,
+            vec!["b".to_string(), "c".to_string(), "d".to_string()]
+        );
+    }
+
+    /// `max_items == 0` 是「关掉共享内存」的开关。
+    #[test]
+    fn a_zero_cap_disables_shared_memory_entirely() {
+        let mut memory = vec!["a".to_string()];
+        append_shared_memory(&mut memory, vec!["b".to_string()], 0);
+        assert!(memory.is_empty());
+    }
+
+    // ── 结果排序 ────────────────────────────────────────────────
+
+    /// 输出顺序必须跟用户选的成员顺序一致；并行执行完的顺序是随机的。
+    #[test]
+    fn outcomes_are_reordered_to_match_the_requested_members() {
+        let selected = resolve_team_agents(vec![
+            "search".to_string(),
+            "analyzer".to_string(),
+            "editor".to_string(),
+        ])
+        .unwrap();
+        let mut outcomes = vec![
+            outcome("editor", true, "e"),
+            outcome("unknown", true, "u"),
+            outcome("explore", true, "s"),
+            outcome("analyzer", true, "a"),
+        ];
+        sort_outcomes_by_member_order(&mut outcomes, &selected);
+        let names: Vec<&str> = outcomes.iter().map(|o| o.member_name.as_str()).collect();
+        assert_eq!(names, vec!["explore", "analyzer", "editor", "unknown"]);
+    }
+
+    // ── 结构化上下文 ────────────────────────────────────────────
+
+    #[test]
+    fn structured_context_accumulates_files_and_counts() {
+        let mut ctx = StructuredTeamContext::new();
+        let mut changed = outcome("editor", true, "patched src/lib.rs and tests/mod.rs");
+        changed.has_changes = true;
+        changed.changed_files = 2;
+        ctx.update_from_round(&[changed, outcome("analyzer", false, "cannot parse")], 1);
+
+        assert_eq!(ctx.round_summaries.len(), 1);
+        let digest = &ctx.round_summaries[0];
+        assert_eq!(digest.round, 1);
+        assert_eq!(digest.total_outcomes, 2);
+        assert_eq!(digest.success_count, 1);
+        assert_eq!(digest.changed_files, 2);
+        assert_eq!(digest.summary, "editor:ok, analyzer:fail");
+        assert_eq!(
+            ctx.files_changed.get("src/lib.rs").map(Vec::as_slice),
+            Some(["editor".to_string()].as_slice())
+        );
+        assert_eq!(ctx.unresolved_errors, vec!["cannot parse".to_string()]);
+    }
+
+    /// 只有真正改过文件的成员才贡献文件列表 —— 否则「提到过某个路径」
+    /// 会被当成「改过它」。
+    #[test]
+    fn unchanged_members_do_not_register_files() {
+        let mut ctx = StructuredTeamContext::new();
+        ctx.update_from_round(&[outcome("explore", true, "read src/lib.rs")], 1);
+        assert!(ctx.files_changed.is_empty());
+    }
+
+    #[test]
+    fn round_summaries_keep_only_the_last_eight_rounds() {
+        let mut ctx = StructuredTeamContext::new();
+        for round in 1..=11 {
+            ctx.update_from_round(&[outcome("editor", true, "ok")], round);
+        }
+        assert_eq!(ctx.round_summaries.len(), 8);
+        assert_eq!(ctx.round_summaries[0].round, 4);
+        assert_eq!(ctx.round_summaries[7].round, 11);
+    }
+
+    #[test]
+    fn unresolved_errors_are_deduped_sorted_and_capped() {
+        let mut ctx = StructuredTeamContext::new();
+        let mut outcomes = Vec::new();
+        for i in 0..15 {
+            outcomes.push(outcome("editor", false, &format!("error-{i:02}")));
+        }
+        outcomes.push(outcome("editor", false, "error-00"));
+        ctx.update_from_round(&outcomes, 1);
+
+        assert_eq!(ctx.unresolved_errors.len(), 10);
+        // 排序 + 去重后保留的是字典序最大的 10 条
+        assert_eq!(ctx.unresolved_errors[0], "error-05");
+        assert_eq!(ctx.unresolved_errors[9], "error-14");
+    }
+
+    #[test]
+    fn long_errors_are_clipped_to_120_characters() {
+        let mut ctx = StructuredTeamContext::new();
+        let long = "x".repeat(300);
+        ctx.update_from_round(&[outcome("editor", false, &long)], 1);
+        let stored = &ctx.unresolved_errors[0];
+        assert_eq!(stored.chars().count(), 123, "{stored}");
+        assert!(stored.ends_with("..."));
+    }
+
+    // ── plan_team_run ───────────────────────────────────────────
+
+    /// 全都不填时，用的是文档里写的内联默认值。
+    #[test]
+    fn plan_falls_back_to_the_inline_defaults() {
+        let mut args = run_args();
+        args.objective = vec!["fix".to_string(), "the".to_string(), "build".to_string()];
+        let plan = plan_team_run(&args, &inline_preset()).unwrap();
+
+        assert_eq!(plan.objective, "fix the build");
+        assert_eq!(plan.max_steps, 5);
+        assert!(matches!(plan.run_mode, TeamRunMode::Parallel));
+        assert_eq!(plan.rounds, 1);
+        // 默认并行度 3，但只有 2 个成员 → 夹到 2
+        assert_eq!(plan.effective_parallelism, 2);
+        assert_eq!(plan.target, ".");
+        assert!(!plan.dry_run);
+        assert_eq!(plan.timeout_secs, None);
+        assert_eq!(
+            plan.selected.iter().map(|d| d.cli_name).collect::<Vec<_>>(),
+            vec!["explore", "editor"]
+        );
+    }
+
+    #[test]
+    fn the_preset_objective_is_used_when_the_command_line_has_none() {
+        let mut preset = inline_preset();
+        preset.objective = Some("sweep the TODOs".to_string());
+        let plan = plan_team_run(&run_args(), &preset).unwrap();
+        assert_eq!(plan.objective, "sweep the TODOs");
+    }
+
+    /// 命令行目标优先于预设目标，哪怕预设里也写了。
+    #[test]
+    fn the_command_line_objective_wins_over_the_preset() {
+        let mut preset = inline_preset();
+        preset.objective = Some("preset text".to_string());
+        let mut args = run_args();
+        args.objective = vec!["inline".to_string(), "text".to_string()];
+        assert_eq!(
+            plan_team_run(&args, &preset).unwrap().objective,
+            "inline text"
+        );
+    }
+
+    /// 只有空白的预设目标等同于没设，不能变成空目标跑起来。
+    #[test]
+    fn a_blank_preset_objective_counts_as_missing() {
+        let mut preset = inline_preset();
+        preset.objective = Some("   ".to_string());
+        let err = plan_team_run(&run_args(), &preset).unwrap_err();
+        assert!(err.starts_with("objective is required"), "{err}");
+    }
+
+    #[test]
+    fn command_line_controls_override_the_preset() {
+        let mut preset = inline_preset();
+        preset.max_steps = Some(2);
+        preset.parallelism = Some(1);
+        preset.mode = Some("pipeline".to_string());
+        preset.rounds = Some(1);
+        preset.timeout_secs = Some(30);
+        preset.target = Some("src".to_string());
+
+        let mut args = run_args();
+        args.objective = vec!["do".to_string(), "it".to_string()];
+        args.max_steps = Some(9);
+        args.parallelism = Some(2);
+        args.mode = Some(TeamRunMode::Parallel);
+        args.rounds = Some(4);
+        args.timeout_secs = Some(90);
+        args.target = Some("tests".to_string());
+
+        let plan = plan_team_run(&args, &preset).unwrap();
+        assert_eq!(plan.max_steps, 9);
+        assert_eq!(plan.effective_parallelism, 2);
+        assert!(matches!(plan.run_mode, TeamRunMode::Parallel));
+        assert_eq!(plan.rounds, 4);
+        assert_eq!(plan.timeout_secs, Some(90));
+        assert_eq!(plan.target, "tests");
+    }
+
+    /// 预设里存的是字符串，解析失败时退回默认值而不是报错 ——
+    /// 手改坏的 `agent-teams.json` 不该让团队完全跑不起来。
+    #[test]
+    fn an_unparseable_preset_mode_falls_back_to_parallel() {
+        let mut preset = inline_preset();
+        preset.mode = Some("shuffle".to_string());
+        let mut args = run_args();
+        args.objective = vec!["go".to_string()];
+        assert!(matches!(
+            plan_team_run(&args, &preset).unwrap().run_mode,
+            TeamRunMode::Parallel
+        ));
+    }
+
+    /// pipeline 是串行执行的，并行度必须是 1 —— 否则日志会声称并行了。
+    #[test]
+    fn pipeline_always_reports_a_parallelism_of_one() {
+        let mut preset = inline_preset();
+        preset.mode = Some("pipeline".to_string());
+        preset.parallelism = Some(4);
+        let mut args = run_args();
+        args.objective = vec!["go".to_string()];
+        let plan = plan_team_run(&args, &preset).unwrap();
+        assert!(matches!(plan.run_mode, TeamRunMode::Pipeline));
+        assert_eq!(plan.effective_parallelism, 1);
+    }
+
+    /// 预设里开了 dry_run，命令行就没法关掉 —— 「或」而不是「覆盖」。
+    #[test]
+    fn preset_dry_run_cannot_be_turned_off_from_the_command_line() {
+        let mut preset = inline_preset();
+        preset.dry_run = Some(true);
+        let mut args = run_args();
+        args.objective = vec!["go".to_string()];
+        assert!(plan_team_run(&args, &preset).unwrap().dry_run);
+    }
+
+    #[test]
+    fn plan_rejects_out_of_range_numbers() {
+        type Mutation = fn(&mut AgentTeamRunArgs);
+        let cases: [(Mutation, &str); 3] = [
+            (
+                |a| a.max_steps = Some(31),
+                "max_steps must be between 1 and 30",
+            ),
+            (|a| a.rounds = Some(0), "rounds must be between 1 and 8"),
+            (|a| a.parallelism = Some(0), "parallelism must be >= 1"),
+        ];
+        for (mutate, expected) in cases {
+            let mut args = run_args();
+            args.objective = vec!["go".to_string()];
+            mutate(&mut args);
+            assert_eq!(
+                plan_team_run(&args, &inline_preset()).unwrap_err(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn plan_rejects_unknown_members() {
+        let mut args = run_args();
+        args.objective = vec!["go".to_string()];
+        args.agents = Some(vec!["ghost".to_string()]);
+        let err = plan_team_run(&args, &inline_preset()).unwrap_err();
+        assert!(err.contains("unknown team agents: ghost"), "{err}");
+    }
+
+    /// `--agents all` 展开成整个目录，并行度也随之夹到目录大小。
+    #[test]
+    fn selecting_all_members_expands_the_catalog() {
+        let mut args = run_args();
+        args.objective = vec!["go".to_string()];
+        args.agents = Some(vec!["all".to_string()]);
+        args.parallelism = Some(16);
+        let plan = plan_team_run(&args, &inline_preset()).unwrap();
+        assert_eq!(plan.selected.len(), TEAM_AGENT_CATALOG.len());
+        assert_eq!(plan.effective_parallelism, TEAM_AGENT_CATALOG.len());
+    }
+
+    // ── resolve_team_run_preset ─────────────────────────────────
+
+    #[tokio::test]
+    async fn a_missing_team_name_yields_the_inline_preset() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::core::config::storage::Storage::new(dir.path().to_path_buf());
+        let preset = resolve_team_run_preset(&storage, None).await.unwrap();
+        assert_eq!(preset.name, "inline");
+        assert_eq!(
+            preset.agents,
+            vec![
+                "explore".to_string(),
+                "analyzer".to_string(),
+                "editor".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_saved_preset_is_loaded_by_name() {
+        use crate::commands::agent_team_presets::{
+            save_team_preset_store, team_preset_file_path, TeamPresetScope, TeamPresetStore,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::core::config::storage::Storage::new(dir.path().to_path_buf());
+        let path = team_preset_file_path(TeamPresetScope::Project, &storage);
+        save_team_preset_store(
+            &path,
+            &TeamPresetStore {
+                teams: vec![TeamPreset {
+                    name: "rust-refactor".to_string(),
+                    description: None,
+                    agents: vec!["explore".to_string()],
+                    target: Some("src".to_string()),
+                    max_steps: Some(4),
+                    parallelism: None,
+                    mode: None,
+                    rounds: None,
+                    timeout_secs: None,
+                    dry_run: None,
+                    objective: Some("sweep".to_string()),
+                    updated_at: 1,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let preset = resolve_team_run_preset(&storage, Some("Rust-Refactor"))
+            .await
+            .unwrap();
+        assert_eq!(preset.name, "rust-refactor");
+        assert_eq!(preset.max_steps, Some(4));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_team_name_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::core::config::storage::Storage::new(dir.path().to_path_buf());
+        let err = resolve_team_run_preset(&storage, Some("ghost"))
+            .await
+            .unwrap_err();
+        assert_eq!(err, "team preset 'ghost' not found");
+    }
 }

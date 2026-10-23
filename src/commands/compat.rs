@@ -334,6 +334,7 @@ pub async fn mouse(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRes
     Ok(())
 }
 
+#[derive(Debug)]
 struct LoginArgs {
     api_key: String,
     base_url: Option<String>,
@@ -659,10 +660,14 @@ pub async fn tasks(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandRe
 // ── /workflows — list workflow definitions ─────────────────────
 
 pub async fn workflows(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
-    let workflows_dir = std::env::current_dir()
-        .unwrap_or_default()
-        .join(".claude")
-        .join("workflows");
+    let cwd = std::env::current_dir().unwrap_or_default();
+    workflows_in(&mut ctx, &cwd);
+    Ok(())
+}
+
+/// `cwd` 走参数：单测要能对着临时目录验证"有/没有 workflow 文件"两种输出。
+fn workflows_in(ctx: &mut CommandContext<'_>, cwd: &std::path::Path) {
+    let workflows_dir = cwd.join(".claude").join("workflows");
     let mut lines = vec!["Workflows".to_string()];
     if workflows_dir.exists() {
         match std::fs::read_dir(&workflows_dir) {
@@ -670,7 +675,7 @@ pub async fn workflows(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Comma
                 let mut found = false;
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.extension().map_or(false, |e| e == "md" || e == "js") {
+                    if path.extension().is_some_and(|e| e == "md" || e == "js") {
                         lines.push(format!(
                             "- {} ({})",
                             path.file_stem()
@@ -691,8 +696,7 @@ pub async fn workflows(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Comma
         lines.push("No .claude/workflows directory found in project.".to_string());
     }
     lines.push("\nAgent workflows are also available via the Workflow tool.".to_string());
-    push_assistant(&mut ctx, lines.join("\n"));
-    Ok(())
+    push_assistant(ctx, lines.join("\n"));
 }
 
 // ── /context — show context stats ──────────────────────────────
@@ -890,6 +894,705 @@ pub async fn logout(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRe
 mod tests {
     use super::*;
     use tokio::sync::mpsc;
+
+    fn ctx_parts() -> (
+        crate::ui::state::ChatState,
+        mpsc::Sender<AgentRequest>,
+        mpsc::Receiver<AgentRequest>,
+    ) {
+        let (tx, rx) = mpsc::channel(4);
+        (crate::ui::state::ChatState::test_fixture(), tx, rx)
+    }
+
+    fn last(state: &crate::ui::state::ChatState) -> String {
+        state
+            .chat_history
+            .last()
+            .map(|entry| entry.content.clone())
+            .unwrap_or_default()
+    }
+
+    /// 走到模型的命令必须：先递增 message_id 再发送，且只发一条 SendMessage。
+    /// 复用 id 会让下一轮的 `Done` 被当成重复而吞掉。
+    ///
+    /// `expected_id` 由调用方在构造 future **之前**取，因为构造之后
+    /// `state` 就被可变借走了。
+    async fn expect_single_send(
+        fut: impl std::future::Future<Output = CommandResult>,
+        rx: &mut mpsc::Receiver<AgentRequest>,
+        expected_id: u64,
+    ) -> String {
+        fut.await.unwrap();
+        match rx.try_recv() {
+            Ok(AgentRequest::SendMessage {
+                message_id,
+                message,
+            }) => {
+                assert_eq!(
+                    message_id, expected_id,
+                    "the id must be taken before sending"
+                );
+                assert!(rx.try_recv().is_err(), "exactly one request per command");
+                message
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+    }
+
+    // ── mask_secret ──────────────────────────────────────────────
+
+    #[test]
+    fn short_secrets_are_fully_masked() {
+        assert_eq!(mask_secret(""), "********");
+        assert_eq!(mask_secret("abc"), "********");
+        // 8 个字符还是会把大半露出来，所以边界定在 8
+        assert_eq!(mask_secret("12345678"), "********");
+    }
+
+    #[test]
+    fn long_secrets_keep_only_the_ends() {
+        let masked = mask_secret("sk-ant-api03-abcdefghijklmnop");
+        assert!(masked.starts_with("sk-a"), "{masked}");
+        assert!(masked.ends_with("mnop"), "{masked}");
+        assert!(masked.contains("..."), "{masked}");
+        assert!(!masked.contains("api03"), "{masked}");
+    }
+
+    // ── /cost & /stats 的口径 ───────────────────────────────────
+
+    #[tokio::test]
+    async fn cost_reports_token_usage_and_estimated_cost() {
+        let (mut state, tx, _rx) = ctx_parts();
+        state.token_usage = Some(crate::types::StarUsage {
+            prompt_tokens: 1000,
+            completion_tokens: 250,
+            total_tokens: 1250,
+            ..Default::default()
+        });
+        state.total_cost = 0.0123456;
+
+        cost(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        let out = last(&state);
+        assert!(out.contains("- Prompt tokens: 1000"), "{out}");
+        assert!(out.contains("- Completion tokens: 250"), "{out}");
+        assert!(out.contains("- Total tokens: 1250"), "{out}");
+        assert!(out.contains("- Estimated cost: $0.012346"), "{out}");
+        assert!(out.contains("/stats session"), "{out}");
+    }
+
+    /// 没有用量时不能印出 "0 tokens"，那会被读成"这次真的没花 token"。
+    #[tokio::test]
+    async fn cost_says_unavailable_when_nothing_was_measured() {
+        let (mut state, tx, _rx) = ctx_parts();
+        state.token_usage = None;
+        state.total_cost = 0.0;
+
+        cost(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        let out = last(&state);
+        assert!(out.contains("Token usage: unavailable"), "{out}");
+        assert!(out.contains("Estimated cost: unavailable"), "{out}");
+    }
+
+    // ── 走模型的评审类命令 ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn review_defaults_to_repository_changes_and_accepts_a_target() {
+        let (mut state, tx, mut rx) = ctx_parts();
+        let expected_id = state.next_message_id;
+
+        let prompt = expect_single_send(
+            review(
+                CommandContext {
+                    state: &mut state,
+                    agent_tx: &tx,
+                },
+                Vec::new(),
+            ),
+            &mut rx,
+            expected_id,
+        )
+        .await;
+        assert!(
+            prompt.contains("the current repository changes"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Do not modify files"), "{prompt}");
+        assert!(last(&state).contains("Started code review"));
+
+        let (mut state, tx, mut rx) = ctx_parts();
+        let expected_id = state.next_message_id;
+
+        let prompt = expect_single_send(
+            review(
+                CommandContext {
+                    state: &mut state,
+                    agent_tx: &tx,
+                },
+                vec!["src".to_string(), "auth.rs".to_string()],
+            ),
+            &mut rx,
+            expected_id,
+        )
+        .await;
+        assert!(prompt.contains("src auth.rs"), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn code_review_demands_file_and_line_references() {
+        let (mut state, tx, mut rx) = ctx_parts();
+        let expected_id = state.next_message_id;
+
+        let prompt = expect_single_send(
+            code_review(
+                CommandContext {
+                    state: &mut state,
+                    agent_tx: &tx,
+                },
+                Vec::new(),
+            ),
+            &mut rx,
+            expected_id,
+        )
+        .await;
+        assert!(
+            prompt.contains("critical > high > medium > low"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("file path, line range"), "{prompt}");
+        assert!(prompt.contains("Do not modify files"), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn security_review_names_the_attack_classes_to_check() {
+        let (mut state, tx, mut rx) = ctx_parts();
+        let expected_id = state.next_message_id;
+
+        let prompt = expect_single_send(
+            security_review(
+                CommandContext {
+                    state: &mut state,
+                    agent_tx: &tx,
+                },
+                Vec::new(),
+            ),
+            &mut rx,
+            expected_id,
+        )
+        .await;
+        for needle in [
+            "injection risks",
+            "authentication bypass",
+            "exposed secrets",
+            "supply chain",
+            "Do not modify files",
+        ] {
+            assert!(prompt.contains(needle), "missing {needle}:\n{prompt}");
+        }
+        assert!(last(&state).contains("Started security review"));
+    }
+
+    #[tokio::test]
+    async fn simplify_asks_for_before_after_and_preserved_behavior() {
+        let (mut state, tx, mut rx) = ctx_parts();
+        let expected_id = state.next_message_id;
+
+        let prompt = expect_single_send(
+            simplify(
+                CommandContext {
+                    state: &mut state,
+                    agent_tx: &tx,
+                },
+                Vec::new(),
+            ),
+            &mut rx,
+            expected_id,
+        )
+        .await;
+        assert!(
+            prompt.contains("show the current code and the simplified version"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("preserve behavior"), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn run_and_lint_forward_their_prompts() {
+        let (mut state, tx, mut rx) = ctx_parts();
+        let expected_id = state.next_message_id;
+
+        let prompt = expect_single_send(
+            run(
+                CommandContext {
+                    state: &mut state,
+                    agent_tx: &tx,
+                },
+                vec!["the web app".to_string()],
+            ),
+            &mut rx,
+            expected_id,
+        )
+        .await;
+        assert!(prompt.contains("the web app"), "{prompt}");
+        assert!(last(&state).contains("Running project"));
+
+        let (mut state, tx, mut rx) = ctx_parts();
+        let expected_id = state.next_message_id;
+
+        let prompt = expect_single_send(
+            lint(
+                CommandContext {
+                    state: &mut state,
+                    agent_tx: &tx,
+                },
+                Vec::new(),
+            ),
+            &mut rx,
+            expected_id,
+        )
+        .await;
+        assert!(prompt.contains("clippy for Rust"), "{prompt}");
+        assert!(prompt.contains("eslint"), "{prompt}");
+        assert!(last(&state).contains("Running lint analysis"));
+    }
+
+    /// `/forget` 不带关键词时不能把"清空所有记忆"发出去 —— 那是一条不可逆指令。
+    #[tokio::test]
+    async fn forget_without_a_keyword_never_reaches_the_model() {
+        let (mut state, tx, mut rx) = ctx_parts();
+        forget(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(rx.try_recv().is_err(), "no request expected");
+        let out = last(&state);
+        assert!(out.contains("Usage: /forget <keyword or topic>"), "{out}");
+        assert!(out.contains("/memory show"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn forget_with_a_keyword_asks_for_a_scoped_removal() {
+        let (mut state, tx, mut rx) = ctx_parts();
+        let expected_id = state.next_message_id;
+
+        let prompt = expect_single_send(
+            forget(
+                CommandContext {
+                    state: &mut state,
+                    agent_tx: &tx,
+                },
+                vec!["deploy".to_string(), "steps".to_string()],
+            ),
+            &mut rx,
+            expected_id,
+        )
+        .await;
+        assert!(prompt.contains("\"deploy steps\""), "{prompt}");
+        assert!(
+            prompt.contains("Only remove the specific entries"),
+            "{prompt}"
+        );
+        assert!(last(&state).contains("Forgetting: deploy steps"));
+    }
+
+    // ── /tasks & /context ───────────────────────────────────────
+
+    /// `/tasks` 打开交互面板，不往聊天里倾倒 JSON。
+    #[tokio::test]
+    async fn tasks_opens_the_panel_instead_of_printing_a_list() {
+        let (mut state, tx, _rx) = ctx_parts();
+        state.task_panel.is_visible = false;
+        state.task_panel.manually_hidden = true;
+        let before = state.chat_history.len();
+
+        tasks(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(state.task_panel.is_visible);
+        assert!(!state.task_panel.manually_hidden);
+        assert_eq!(state.chat_history.len(), before, "no chat entry expected");
+        assert!(state
+            .current_status_line
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Task panel opened"));
+    }
+
+    #[tokio::test]
+    async fn context_reports_history_and_token_usage() {
+        let (mut state, tx, _rx) = ctx_parts();
+        state.chat_history.push(ChatEntry::user("hi"));
+        // 命令自己会再追加一条报告，所以先记下它看到的长度
+        let expected_messages = state.chat_history.len();
+        state.current_model = "claude-sonnet-5-5".to_string();
+        state.token_usage = Some(crate::types::StarUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            ..Default::default()
+        });
+
+        context(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        let out = last(&state);
+        assert!(
+            out.contains(&format!("Messages in history: {expected_messages}")),
+            "{out}"
+        );
+        assert!(out.contains("Current model: claude-sonnet-5-5"), "{out}");
+        assert!(out.contains("Total tokens: 15"), "{out}");
+        assert!(out.contains("/compress"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn context_degrades_to_a_placeholder_model_name() {
+        let (mut state, tx, _rx) = ctx_parts();
+        state.current_model.clear();
+        state.token_usage = None;
+
+        context(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        let out = last(&state);
+        assert!(out.contains("Current model: <default>"), "{out}");
+        assert!(out.contains("Token usage: not yet available"), "{out}");
+    }
+
+    // ── /workflows ──────────────────────────────────────────────
+
+    #[test]
+    fn workflows_reports_a_missing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, tx, _rx) = ctx_parts();
+        let mut ctx = CommandContext {
+            state: &mut state,
+            agent_tx: &tx,
+        };
+        workflows_in(&mut ctx, dir.path());
+        let out = last(&state);
+        assert!(
+            out.contains("No .claude/workflows directory found"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn workflows_lists_markdown_and_js_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let wf = dir.path().join(".claude").join("workflows");
+        std::fs::create_dir_all(&wf).unwrap();
+        std::fs::write(wf.join("deploy.md"), "steps").unwrap();
+        std::fs::write(wf.join("build.js"), "steps").unwrap();
+        std::fs::write(wf.join("notes.txt"), "ignored").unwrap();
+
+        let (mut state, tx, _rx) = ctx_parts();
+        let mut ctx = CommandContext {
+            state: &mut state,
+            agent_tx: &tx,
+        };
+        workflows_in(&mut ctx, dir.path());
+        let out = last(&state);
+        assert!(out.contains("- deploy ("), "{out}");
+        assert!(out.contains("- build ("), "{out}");
+        assert!(!out.contains("notes"), "{out}");
+    }
+
+    #[test]
+    fn an_empty_workflows_directory_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".claude").join("workflows")).unwrap();
+
+        let (mut state, tx, _rx) = ctx_parts();
+        let mut ctx = CommandContext {
+            state: &mut state,
+            agent_tx: &tx,
+        };
+        workflows_in(&mut ctx, dir.path());
+        assert!(last(&state).contains("(no workflow files found)"));
+    }
+
+    // ── /pr_comments 参数解析 ───────────────────────────────────
+
+    #[test]
+    fn pr_comments_accepts_flags_and_positional_forms() {
+        assert_eq!(parse_pr_comments_args(&[]).unwrap(), (None, None));
+        assert_eq!(
+            parse_pr_comments_args(&["--pr".into(), "42".into()]).unwrap(),
+            (Some(42), None)
+        );
+        assert_eq!(
+            parse_pr_comments_args(&["-p".into(), "42".into()]).unwrap(),
+            (Some(42), None)
+        );
+        assert_eq!(
+            parse_pr_comments_args(&["--pr=42".into()]).unwrap(),
+            (Some(42), None)
+        );
+        // 位置参数：纯数字是 PR 号，含 `/` 的是仓库
+        assert_eq!(
+            parse_pr_comments_args(&["42".into(), "org/repo".into()]).unwrap(),
+            (Some(42), Some("org/repo".to_string()))
+        );
+        assert_eq!(
+            parse_pr_comments_args(&["--repo=org/repo".into()]).unwrap(),
+            (None, Some("org/repo".to_string()))
+        );
+    }
+
+    #[test]
+    fn pr_comments_rejects_bad_input_with_a_usage_hint() {
+        let err = parse_pr_comments_args(&["--help".into()]).unwrap_err();
+        assert!(err.starts_with("Usage: /pr_comments"), "{err}");
+
+        let err = parse_pr_comments_args(&["--pr".into()]).unwrap_err();
+        assert!(err.contains("missing value for --pr"), "{err}");
+
+        let err = parse_pr_comments_args(&["--pr".into(), "abc".into()]).unwrap_err();
+        assert!(err.contains("invalid PR number: abc"), "{err}");
+
+        // 第二个非数字/非仓库参数没法解释，必须报错而不是静默丢弃
+        let err =
+            parse_pr_comments_args(&["42".into(), "org/repo".into(), "extra".into()]).unwrap_err();
+        assert!(err.contains("unknown argument: extra"), "{err}");
+    }
+
+    // ── /login 参数解析 ─────────────────────────────────────────
+
+    #[test]
+    fn login_parses_key_url_and_model_in_every_form() {
+        let a = parse_login_args(&["sk-123".into()]).unwrap();
+        assert_eq!(a.api_key, "sk-123");
+        assert!(a.base_url.is_none() && a.model.is_none());
+
+        let a = parse_login_args(&[
+            "--api-key".into(),
+            "sk-123".into(),
+            "--base-url".into(),
+            "https://api.example.com".into(),
+            "--model".into(),
+            "m1".into(),
+        ])
+        .unwrap();
+        assert_eq!(a.api_key, "sk-123");
+        assert_eq!(a.base_url.as_deref(), Some("https://api.example.com"));
+        assert_eq!(a.model.as_deref(), Some("m1"));
+
+        let a = parse_login_args(&[
+            "--api-key=sk-9".into(),
+            "--base-url=https://x".into(),
+            "--model=m2".into(),
+        ])
+        .unwrap();
+        assert_eq!(a.api_key, "sk-9");
+        assert_eq!(a.base_url.as_deref(), Some("https://x"));
+        assert_eq!(a.model.as_deref(), Some("m2"));
+    }
+
+    #[test]
+    fn login_without_a_key_explains_the_syntax() {
+        let err = parse_login_args(&[]).unwrap_err();
+        assert!(err.contains("missing API key"), "{err}");
+        assert!(err.contains("Usage: /login --api-key <key>"), "{err}");
+
+        let err = parse_login_args(&["--api-key".into()]).unwrap_err();
+        assert!(err.contains("missing value for --api-key"), "{err}");
+
+        // 两个位置参数里第二个没人认领
+        let err = parse_login_args(&["sk-1".into(), "extra".into()]).unwrap_err();
+        assert!(err.contains("unknown argument: extra"), "{err}");
+    }
+
+    /// 帮助入口不能用 "missing API key" 敷衍过去 —— 那是错误，不是帮助。
+    #[test]
+    fn login_help_returns_the_usage_line() {
+        let err = parse_login_args(&["-h".into()]).unwrap_err();
+        assert!(err.starts_with("Usage: /login"), "{err}");
+    }
+
+    // ── /logout 参数校验 ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn logout_rejects_unknown_flags_before_touching_settings() {
+        let (mut state, tx, _rx) = ctx_parts();
+        let err = logout(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            vec!["--everything".to_string()],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, "Usage: /logout [--all]");
+    }
+
+    // ── 静态文本类命令 ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn bug_renders_a_fillable_report_with_environment_details() {
+        let (mut state, tx, _rx) = ctx_parts();
+        state.current_model = "claude-sonnet-5-5".to_string();
+
+        bug(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            vec!["crash".to_string(), "on".to_string(), "start".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let out = last(&state);
+        assert!(out.contains("Bug Report Template"), "{out}");
+        assert!(out.contains("Summary: crash on start"), "{out}");
+        assert!(out.contains(env!("CARGO_PKG_VERSION")), "{out}");
+        assert!(out.contains("Model: claude-sonnet-5-5"), "{out}");
+        assert!(out.contains("Debug log:"), "{out}");
+        assert!(out.contains("Repro Steps:"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn feedback_and_upgrade_report_the_build_identity() {
+        let (mut state, tx, _rx) = ctx_parts();
+        feedback(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let out = last(&state);
+        assert!(out.contains("Feedback & Suggestions"), "{out}");
+        assert!(out.contains(env!("CARGO_PKG_VERSION")), "{out}");
+        assert!(out.contains(std::env::consts::OS), "{out}");
+
+        upgrade(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let out = last(&state);
+        assert!(out.contains("To upgrade:"), "{out}");
+        assert!(out.contains("Current binary:"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn terminal_setup_and_ide_explain_how_to_configure() {
+        let (mut state, tx, _rx) = ctx_parts();
+        terminal_setup(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let out = last(&state);
+        assert!(out.contains("Terminal Setup"), "{out}");
+        assert!(out.contains("Detected shell:"), "{out}");
+        assert!(out.contains("/terminal-setup install"), "{out}");
+        assert!(out.contains("STAR_API_KEY"), "{out}");
+
+        ide(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let out = last(&state);
+        assert!(out.contains("IDE Integration"), "{out}");
+        assert!(out.contains("starcode-cli mcp serve"), "{out}");
+    }
+
+    /// `/vim` 是开关：开的时候必须同时把模式切回 Normal，否则光标停在上次的
+    /// Insert 里，用户按 Esc 才有反应。
+    #[tokio::test]
+    async fn vim_toggles_and_resets_to_normal_mode() {
+        let (mut state, tx, _rx) = ctx_parts();
+        state.vim_enabled = false;
+        state.vim_state.mode = crate::ui::vim::VimMode::Insert;
+
+        vim(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert!(state.vim_enabled);
+        assert_eq!(state.vim_state.mode, crate::ui::vim::VimMode::Normal);
+        assert!(last(&state).contains("Vim mode: ON"));
+
+        vim(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert!(!state.vim_enabled);
+        assert!(last(&state).contains("Vim mode: OFF"));
+    }
 
     #[test]
     fn verify_prompt_requires_runtime_evidence_not_just_static_checks() {

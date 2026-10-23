@@ -357,3 +357,264 @@ async fn execute_agent_team_command(
         AgentTeamCommand::Clean(args) => team_runs::clean_team_runs(ctx, args).await,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{CommandFactory, FromArgMatches};
+
+    /// 与 `commands/mod.rs` 的 `simple_command_wrapper!` 走同一条 clap 路径：
+    /// `augment_subcommands` + `from_arg_matches`。
+    fn parse(args: &[&str]) -> Result<AgentsCommand, clap::Error> {
+        let cmd = AgentsCommand::augment_subcommands(clap::Command::new("agents"));
+        let argv = std::iter::once("agents".to_string())
+            .chain(args.iter().map(|s| s.to_string()))
+            .collect::<Vec<_>>();
+        let matches = cmd.try_get_matches_from(argv)?;
+        AgentsCommand::from_arg_matches(&matches)
+    }
+
+    fn parse_team_save(args: &[&str]) -> AgentTeamSaveArgs {
+        match parse(args).expect("save must parse") {
+            AgentsCommand::Team {
+                command: AgentTeamCommand::Save(a),
+            } => a,
+            other => panic!(
+                "expected team save, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    // ── clap 解析 ───────────────────────────────────────────────
+
+    /// `--agents` 的默认值是文档里承诺的三个成员；改了它等于改了
+    /// `/agents team save` 的语义。
+    #[test]
+    fn team_save_defaults_to_the_documented_members() {
+        let args = parse_team_save(&["team", "save", "my-team"]);
+        assert_eq!(args.name, "my-team");
+        assert_eq!(
+            args.agents,
+            vec![
+                "search".to_string(),
+                "analyzer".to_string(),
+                "editor".to_string()
+            ]
+        );
+        assert!(!args.user);
+        assert!(!args.dry_run);
+        assert!(args.mode.is_none());
+        assert!(args.max_steps.is_none());
+    }
+
+    #[test]
+    fn team_save_splits_comma_separated_agents_and_parses_the_mode() {
+        let args = parse_team_save(&[
+            "team",
+            "save",
+            "rust-refactor",
+            "--agents",
+            "explore,editor",
+            "--mode",
+            "pipeline",
+            "--max-steps",
+            "5",
+            "--parallelism",
+            "3",
+            "--rounds",
+            "2",
+            "--timeout-secs",
+            "90",
+            "--dry-run",
+            "--user",
+            "--target",
+            "src",
+            "--description",
+            "refactor helpers",
+        ]);
+        assert_eq!(
+            args.agents,
+            vec!["explore".to_string(), "editor".to_string()]
+        );
+        assert!(matches!(args.mode, Some(TeamRunMode::Pipeline)));
+        assert_eq!(args.max_steps, Some(5));
+        assert_eq!(args.parallelism, Some(3));
+        assert_eq!(args.rounds, Some(2));
+        assert_eq!(args.timeout_secs, Some(90));
+        assert!(args.dry_run);
+        assert!(args.user);
+        assert_eq!(args.target.as_deref(), Some("src"));
+        assert_eq!(args.description.as_deref(), Some("refactor helpers"));
+    }
+
+    #[test]
+    fn team_save_rejects_an_unknown_mode() {
+        let err = parse(&["team", "save", "x", "--mode", "shuffle"])
+            .err()
+            .expect("unknown mode must fail");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    /// 目标文本是「剩下的所有词」，不是 `--objective` 选项 —— 用户是
+    /// 按自然语言敲进来的。
+    #[test]
+    fn team_run_keeps_the_objective_as_trailing_words() {
+        let parsed = parse(&[
+            "team",
+            "run",
+            "--agents",
+            "search,editor",
+            "fix",
+            "the",
+            "build",
+        ])
+        .expect("run must parse");
+        match parsed {
+            AgentsCommand::Team {
+                command: AgentTeamCommand::Run(args),
+            } => {
+                assert_eq!(args.agents.unwrap(), vec!["search", "editor"]);
+                assert_eq!(args.objective, vec!["fix", "the", "build"]);
+            }
+            _ => panic!("expected team run"),
+        }
+    }
+
+    /// `show` / `remove` / `apply` 都标了 `arg_required_else_help`：少了
+    /// 名字应该打印用法，而不是跑一个空名字的查询。
+    #[test]
+    fn commands_that_need_an_identifier_print_help_without_one() {
+        for argv in [
+            vec!["team", "show"],
+            vec!["team", "remove"],
+            vec!["team", "apply"],
+            vec!["team", "save"],
+        ] {
+            let err = parse(&argv).err().expect("missing identifier must fail");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// `clean` 的两种形式互斥：要么指定 run_id，要么 `--all`。
+    #[test]
+    fn clean_accepts_a_run_id_or_all_but_not_both() {
+        match parse(&["team", "clean", "run-123"]).unwrap() {
+            AgentsCommand::Team {
+                command: AgentTeamCommand::Clean(args),
+            } => {
+                assert_eq!(args.run_id.as_deref(), Some("run-123"));
+                assert!(!args.all);
+            }
+            _ => panic!("expected team clean"),
+        }
+
+        let err = parse(&["team", "clean", "run-123", "--all"])
+            .err()
+            .expect("--all conflicts with run_id");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    // ── 分发覆盖 ────────────────────────────────────────────────
+
+    fn source() -> &'static str {
+        include_str!("mod.rs")
+    }
+
+    /// 取出某个 match 臂的源码（含续行）。
+    ///
+    /// 必须做**边界**匹配：`AgentTeamCommand::Run` 是
+    /// `AgentTeamCommand::Runs` 的前缀，纯 `find` 会先撞上 `Runs`，于是
+    /// 一条本来正确的分发被误判成「接错了处理函数」。
+    fn arm_source(body: &str, enum_name: &str, variant: &str) -> Option<String> {
+        let marker = format!("{enum_name}::{variant}");
+        let lines: Vec<&str> = body.lines().collect();
+        for (idx, line) in lines.iter().enumerate() {
+            let Some(pos) = line.find(&marker) else {
+                continue;
+            };
+            let after = line[pos + marker.len()..].chars().next();
+            let is_boundary = matches!(after, None | Some('(') | Some(' ') | Some('{') | Some(','));
+            if !is_boundary {
+                continue;
+            }
+            let tail = lines[idx..lines.len().min(idx + 4)].join("\n");
+            return Some(tail);
+        }
+        None
+    }
+
+    /// 枚举变体一旦加进来却没有 match 臂，编译器会报错；但反过来，
+    /// 一个变体接错了处理函数（比如 `Show` 接到 `Remove`）编译器不会
+    /// 吭声。这里逐条把变体名和它后面紧跟的处理函数钉住。
+    #[test]
+    fn every_team_subcommand_reaches_its_own_handler() {
+        let body = {
+            let start = source()
+                .find("async fn execute_agent_team_command(")
+                .expect("execute_agent_team_command must exist");
+            let rest = &source()[start..];
+            let end = rest.find("\n}\n").expect("body end");
+            &rest[..end]
+        };
+
+        let expected = [
+            ("List", "team_runs::list_agent_team_catalog"),
+            ("Runs", "team_runs::list_team_runs"),
+            ("ShowRun", "team_runs::show_team_run"),
+            ("Run", "team_execution::run_agent_team"),
+            ("Save", "team_presets::save_team_preset"),
+            ("Show", "team_presets::show_team_preset"),
+            ("Remove", "team_presets::remove_team_preset"),
+            ("Apply", "team_apply::apply_team_run"),
+            ("Clean", "team_runs::clean_team_runs"),
+        ];
+
+        for (variant, handler) in expected {
+            let arm = arm_source(body, "AgentTeamCommand", variant).unwrap_or_else(|| {
+                panic!("variant {variant} has no dispatch arm in execute_agent_team_command")
+            });
+            assert!(
+                arm.contains(handler),
+                "`{variant}` dispatches to the wrong handler: {arm}"
+            );
+        }
+    }
+
+    /// 同上，但针对 `/agents` 这一层。
+    #[test]
+    fn every_agents_subcommand_reaches_its_own_handler() {
+        let body = {
+            let start = source()
+                .find("pub(crate) async fn execute_agents_command(")
+                .expect("execute_agents_command must exist");
+            let rest = &source()[start..];
+            let end = rest.find("\n}\n").expect("body end");
+            &rest[..end]
+        };
+
+        let expected = [
+            ("List", "custom_agents::list_agents"),
+            ("Create", "custom_agents::create_agent"),
+            ("Edit", "custom_agents::edit_agent"),
+            ("Delete", "custom_agents::delete_agent"),
+            ("Add", "custom_agents::add_agent"),
+            ("Remove", "custom_agents::remove_agent"),
+            ("Team", "execute_agent_team_command"),
+        ];
+
+        for (variant, handler) in expected {
+            let arm = arm_source(body, "AgentsCommand", variant).unwrap_or_else(|| {
+                panic!("variant {variant} has no dispatch arm in execute_agents_command")
+            });
+            assert!(
+                arm.contains(handler),
+                "`{variant}` dispatches to the wrong handler: {arm}"
+            );
+        }
+    }
+}
