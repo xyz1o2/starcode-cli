@@ -1244,6 +1244,7 @@ pub fn is_safe_query_tool(tool_name: &str) -> bool {
             | "Glob"
             | "Grep"
             | "CodebaseSearch"
+            | "tool_search"
             | "gh_pr_comments"
             | "TodoWrite"
             | "mcp_list_servers"
@@ -1405,5 +1406,14 @@ mod thinking_effort_tests {
         assert!(matches!(gear, ThinkingEffort::Off));
         // High 的下一档必须是新增的 Xhigh，不能跳回 Off
         assert!(matches!(ThinkingEffort::High.next(), ThinkingEffort::Xhigh));
+    }
+
+    /// `tool_search` 是只读的发现工具，不该每次调用都弹确认。
+    ///
+    /// 它不在安全查询集里时，策略兜底的 `AskUser` 会让模型每搜一次工具就问
+    /// 用户一次；并发搜索时还会堆出多张确认卡。
+    #[test]
+    fn tool_search_is_a_safe_query_tool() {
+        assert!(crate::types::is_safe_query_tool("tool_search"));
     }
 }

@@ -26,7 +26,9 @@ use crate::types::{ChatEntry, ChatEntryType, StarToolCall, ToolResult};
 use crate::ui::app::logic::{
     emit_status_text, enqueue_user_message, recover_missing_tool_results, save_tool_output,
 };
-use crate::ui::state::store::{ChatState, RuntimeSettingsPersistence, ToastKind};
+use crate::ui::state::store::{
+    ChatState, QueuedConfirmation, RuntimeSettingsPersistence, ToastKind,
+};
 use crate::ui::utils::format::{
     format_tool_call, format_tool_result, format_tool_result_with_saved_path,
 };
@@ -1262,23 +1264,52 @@ pub async fn handle_stream_update(
             // 换掉之后卡片上写的是新命令、等着回答的却是新 id，而用户是照着刚
             // 读到的那条命令按的 1 —— 于是"允许"落到一条他没看过的命令上。
             // 门控拦不住的不是命令，是"用户批准的那一条"和"实际执行的那一条"
-            // 之间的对应关系。改成另起一张卡，并把旧的那张标成已作废。
+            // 之间的对应关系。
+            //
+            // 但旧的请求**不能丢**：并发工具（`join_all`）可能同时发出多张卡，
+            // 每张背后都有一个正在等待答复的门禁。以前把旧卡标成 superseded 就
+            // 不管了，于是那几条调用永远等下去 —— 整轮卡死在 "Canoodling..."。
+            // 现在把旧卡放进队列，新的这张先问；回答完再一张张接上。
             if awaiting && state.is_awaiting_confirmation {
                 if let Some(idx) = state.pending_confirmation_entry_idx {
                     if idx < state.chat_history.len()
                         && state.chat_history[idx].entry_type == ChatEntryType::ToolConfirmation
                     {
+                        let active_is_ask = state.chat_history[idx]
+                            .confirmation
+                            .as_ref()
+                            .map(|c| {
+                                matches!(
+                                    c.operation_type,
+                                    crate::types::ConfirmationType::AskUserQuestion
+                                )
+                            })
+                            .unwrap_or(false);
                         if let Some(entry) = state.chat_history[idx].confirmation.as_mut() {
                             if entry.outcome.is_none() {
                                 entry.outcome = Some(i18n::t(
-                                    "ui.confirm.superseded",
-                                    "已被更新的请求取代 · 不再等待你的决定",
-                                    "Superseded — a newer request is waiting",
+                                    "ui.confirm.queued",
+                                    "排队中 · 回答完当前请求后继续",
+                                    "Queued — will ask after the current decision",
                                 ));
                             }
                         }
                         state.chat_history[idx].is_streaming = Some(false);
                         state.rendered_cache.remove(&idx);
+                        state.virtual_list.mark_dirty(idx);
+                        if let Some(tool_call_id) = state.pending_tool_call_id.clone() {
+                            state
+                                .pending_confirmation_queue
+                                .push_front(QueuedConfirmation {
+                                    entry_idx: idx,
+                                    message_id: state.pending_message_id.unwrap_or(message_id),
+                                    tool_call_id,
+                                    originating_tool_call_id: state
+                                        .pending_confirmation_originating_id
+                                        .clone(),
+                                    is_ask: active_is_ask,
+                                });
+                        }
                     }
                 }
             }
@@ -1712,6 +1743,13 @@ async fn handle_done_message(
 
 /// 终态状态仅允许结算一次；错误和完成路径共享清理逻辑。
 fn finish_terminal_stream(state: &mut ChatState, message_id: u64, cancelling_graceful: bool) {
+    // 回合结束（正常 Done 或错误）后，排队中的确认请求不可能再被回答；
+    // 留着它们只会让下一轮收到新请求时把它们当成有效队列项。
+    state.discard_pending_confirmation_queue(&i18n::t(
+        "ui.confirm.cancelled_turn",
+        "已取消 · 回合已结束",
+        "Cancelled — the turn ended",
+    ));
     state.is_processing = false;
     state.current_tool_name = None;
     state.end_thinking();
@@ -1892,6 +1930,11 @@ fn shift_index_caches_after_insert(state: &mut ChatState, pos: usize) {
             *idx += 1;
         }
     }
+    for queued in state.pending_confirmation_queue.iter_mut() {
+        if queued.entry_idx >= pos {
+            queued.entry_idx += 1;
+        }
+    }
 }
 
 fn shift_indexed_cache_after_removal<T>(
@@ -1975,6 +2018,14 @@ fn remove_chat_entry_and_shift_indices(state: &mut ChatState, pos: usize) {
             state.pending_confirmation_entry_idx = None;
         }
     }
+    state
+        .pending_confirmation_queue
+        .retain(|queued| queued.entry_idx != pos);
+    for queued in state.pending_confirmation_queue.iter_mut() {
+        if queued.entry_idx > pos {
+            queued.entry_idx -= 1;
+        }
+    }
     if let Some(idx) = state.preview_last_entry_idx.as_mut() {
         if *idx > pos {
             *idx -= 1;
@@ -2014,6 +2065,10 @@ fn handle_tool_result_message(
     // `tool_call.id`：于是工具超时/失败之后卡片收不到任何收尾信号，
     // `is_awaiting_confirmation` 一直为真，后面每一次确认请求都被当成
     // "已有一张卡"而被顶掉。
+    //
+    // 排队中的请求也可能先等到结果（中断/取消）。先把它们摘掉，避免轮到它们
+    // 时激活一张已经没有门禁在等的卡。
+    state.remove_queued_confirmation_by_originating_id(&tool_call.id);
     if state.is_awaiting_confirmation {
         if let Some(originating) = state.pending_confirmation_originating_id.as_deref() {
             if originating == tool_call.id {
@@ -3554,8 +3609,16 @@ mod tests {
                 .as_ref()
                 .expect("确认卡")
                 .outcome
-                .is_some(),
-            "被顶掉的卡必须标成已作废，不能看起来还能按"
+                .as_deref()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains("queued"),
+            "被顶下去的卡必须标成排队中，不能看起来还能按"
+        );
+        assert_eq!(
+            state.pending_confirmation_queue.len(),
+            1,
+            "被顶下去的请求必须留在队列里，否则它的门禁会永远等"
         );
 
         // 新的那张才是当前等待回答的。
@@ -3568,6 +3631,119 @@ mod tests {
             state.pending_confirmation_entry_idx,
             Some(first_idx),
             "新请求必须另起一张卡，不能复用旧的索引"
+        );
+
+        // 回答完新的那张，旧请求必须接上 —— 不能像以前那样被丢掉。
+        state.clear_pending_confirmation();
+        assert!(
+            state.is_awaiting_confirmation,
+            "队列里还有请求时必须继续等待回答"
+        );
+        assert_eq!(state.pending_tool_call_id.as_deref(), Some("corr-1"));
+        assert_eq!(state.pending_confirmation_entry_idx, Some(first_idx));
+        assert!(
+            state.chat_history[first_idx]
+                .confirmation
+                .as_ref()
+                .expect("确认卡")
+                .outcome
+                .is_none(),
+            "重新激活的卡必须恢复成可回答状态"
+        );
+    }
+
+    /// 三张并发确认卡必须一张不漏地问完。
+    ///
+    /// 工具批量执行时每张卡背后都有一个门禁在等答复；UI 一次只问一张，
+    /// 其余必须排队。旧实现把被顶下去的卡标成 superseded 后直接丢弃，
+    /// 那些门禁就永远等不到答复 —— 整轮卡在 "Canoodling..."。
+    #[tokio::test]
+    async fn concurrent_confirmations_are_asked_in_turn_without_losing_any() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+
+        for i in 1..=3 {
+            handle_stream_update(
+                &mut state,
+                StreamMessage::ToolConfirmationRequest {
+                    message_id: 1,
+                    tool_call_id: format!("corr-{i}"),
+                    originating_tool_call_id: Some(format!("call-{i}")),
+                    confirmation: shell_confirmation(&format!("echo {i}")),
+                },
+                &agent_tx,
+            )
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(state.pending_tool_call_id.as_deref(), Some("corr-3"));
+        assert_eq!(
+            state.pending_confirmation_queue.len(),
+            2,
+            "另外两张必须排队，不能丢"
+        );
+
+        let mut asked = Vec::new();
+        while state.is_awaiting_confirmation {
+            asked.push(state.pending_tool_call_id.clone().unwrap_or_default());
+            state.clear_pending_confirmation();
+        }
+
+        assert_eq!(
+            asked,
+            vec!["corr-3", "corr-2", "corr-1"],
+            "最近被顶下去的那张先答，三张都要轮到"
+        );
+        assert!(state.pending_confirmation_queue.is_empty());
+    }
+
+    /// 排队中的请求如果先等到工具结果（中断/取消），必须从队列摘掉，
+    /// 不能再被激活成一张没有接收者的卡。
+    #[tokio::test]
+    async fn a_tool_result_removes_its_queued_confirmation() {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+
+        for i in 1..=2 {
+            handle_stream_update(
+                &mut state,
+                StreamMessage::ToolConfirmationRequest {
+                    message_id: 1,
+                    tool_call_id: format!("corr-{i}"),
+                    originating_tool_call_id: Some(format!("call-{i}")),
+                    confirmation: shell_confirmation(&format!("echo {i}")),
+                },
+                &agent_tx,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(state.pending_confirmation_queue.len(), 1);
+
+        handle_tool_result_message(
+            &mut state,
+            1,
+            StarToolCall {
+                id: "call-1".to_string(),
+                ..agent_tool_call()
+            },
+            ToolResult {
+                success: false,
+                output: None,
+                error: Some("cancelled".to_string()),
+                data: None,
+            },
+        );
+
+        assert!(
+            state.pending_confirmation_queue.is_empty(),
+            "已经有结果的请求不该继续排队"
+        );
+        assert_eq!(
+            state.pending_tool_call_id.as_deref(),
+            Some("corr-2"),
+            "当前这张不受影响"
         );
     }
 

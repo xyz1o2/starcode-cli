@@ -209,6 +209,10 @@ async fn build_edit_preview_diff(path: &str, old_str: &str, new_str: &str) -> St
 /// 的状态如果也画成 ✓，用户回头扫一眼历史就会以为那条命令已经获批了。
 fn outcome_style(outcome: &str) -> (Color, &'static str) {
     let lowered = outcome.to_lowercase();
+    // 排队中的请求既不是批准也不是拒绝；用灰色省略号，避免和"已放行"的绿勾混淆。
+    if lowered.contains("queued") || outcome.contains("排队") {
+        return (INACTIVE_COLOR, "…");
+    }
     let refused = lowered.eq_ignore_ascii_case("cancelled")
         || lowered.contains("cancel")
         || lowered.contains("reject")

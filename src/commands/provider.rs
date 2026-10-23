@@ -5,12 +5,12 @@ use crate::core::config::models::{
 use crate::core::config::provider_resolution::{
     resolve_effective_provider_settings, ProviderResolutionInputs, ResolvedValue, SourceRef,
     SRC_CLAUDE_CODE_API_KEY, SRC_CLAUDE_CODE_BASE_URL, SRC_CLAUDE_CODE_MODEL,
-    SRC_CLAUDE_CODE_SMALL_FAST_MODEL, SRC_CLI_MODEL, SRC_CODEX_API_KEY, SRC_CODEX_BASE_URL,
-    SRC_CODEX_MODEL, SRC_ENV_ANTHROPIC_API_KEY, SRC_ENV_ANTHROPIC_BASE_URL,
-    SRC_ENV_ANTHROPIC_MODEL, SRC_ENV_ANTHROPIC_SMALL_FAST_MODEL, SRC_ENV_STAR_API_KEY,
-    SRC_ENV_STAR_BASE_URL, SRC_ENV_STAR_MODEL, SRC_ENV_STAR_OPENAI_COMPATIBLE,
-    SRC_ENV_STAR_SMALL_FAST_MODEL, SRC_PROVIDER_DEFAULT_BASE_URL, SRC_PROVIDER_ENV_API_KEY,
-    SRC_PROVIDER_RULE_OPENAI_COMPATIBLE, SRC_PROVIDER_STORE_ACTIVE_MODEL,
+    SRC_CLAUDE_CODE_PROVIDER, SRC_CLAUDE_CODE_SMALL_FAST_MODEL, SRC_CLI_MODEL, SRC_CODEX_API_KEY,
+    SRC_CODEX_BASE_URL, SRC_CODEX_MODEL, SRC_ENV_ANTHROPIC_API_KEY, SRC_ENV_ANTHROPIC_AUTH_TOKEN,
+    SRC_ENV_ANTHROPIC_BASE_URL, SRC_ENV_ANTHROPIC_MODEL, SRC_ENV_ANTHROPIC_SMALL_FAST_MODEL,
+    SRC_ENV_STAR_API_KEY, SRC_ENV_STAR_BASE_URL, SRC_ENV_STAR_MODEL,
+    SRC_ENV_STAR_OPENAI_COMPATIBLE, SRC_ENV_STAR_SMALL_FAST_MODEL, SRC_PROVIDER_DEFAULT_BASE_URL,
+    SRC_PROVIDER_ENV_API_KEY, SRC_PROVIDER_RULE_OPENAI_COMPATIBLE, SRC_PROVIDER_STORE_ACTIVE_MODEL,
     SRC_PROVIDER_STORE_ACTIVE_PROVIDER, SRC_PROVIDER_STORE_API_KEY, SRC_PROVIDER_STORE_BASE_URL,
     SRC_RUNTIME_DEFAULT_OPENAI_COMPATIBLE, SRC_SESSION_MODEL, SRC_SESSION_PROVIDER,
     SRC_USER_SETTINGS_API_KEY, SRC_USER_SETTINGS_BASE_URL, SRC_USER_SETTINGS_DEFAULT_MODEL,
@@ -137,7 +137,10 @@ async fn select_provider(
     if let Some(metadata) = built_in {
         if metadata.requires_api_key {
             let env_key = providers::resolve_api_key_from_env(&provider_id);
-            if env_key.is_none() {
+            // Claude Code 的凭证在它自己的配置文件里，环境变量里可能什么都没有。
+            let from_compat = provider_id == providers::CLAUDE_CODE_PROVIDER_ID
+                && providers::claude_code_profile_available();
+            if env_key.is_none() && !from_compat {
                 let stored_key = store
                     .get_api_key(&provider_id)
                     .await
@@ -234,6 +237,10 @@ async fn list_providers(ctx: CommandContext<'_>) -> CommandResult {
             "Not Required"
         } else if providers::resolve_api_key_from_env(id).is_some() {
             "✅ Env"
+        } else if id == providers::CLAUDE_CODE_PROVIDER_ID
+            && providers::claude_code_profile_available()
+        {
+            "✅ Claude Code"
         } else if let Some(settings) = config.providers.get(id) {
             if providers::normalize_api_key_value(settings.api_key.clone()).is_some() {
                 "✅ Config"
@@ -947,6 +954,14 @@ fn describe_source(source: &SourceRef) -> String {
         SRC_ENV_STAR_MODEL => "`STAR_MODEL`".to_string(),
         SRC_ENV_ANTHROPIC_MODEL => "`ANTHROPIC_MODEL`".to_string(),
         SRC_CLAUDE_CODE_MODEL | SRC_CODEX_MODEL => external_config_source("model"),
+        SRC_CLAUDE_CODE_PROVIDER => match source.detail.as_deref() {
+            Some(detail) => external_config_source(detail),
+            None => i18n::t(
+                "cmd.provider.doctor.source.claude_code_provider",
+                "Claude Code configuration",
+                "Claude Code configuration",
+            ),
+        },
         SRC_PROVIDER_STORE_ACTIVE_MODEL => i18n::t(
             "cmd.provider.doctor.source.active_model",
             "saved `activeModel`",
@@ -982,6 +997,7 @@ fn describe_source(source: &SourceRef) -> String {
         ),
         SRC_ENV_STAR_API_KEY => "`STAR_API_KEY`".to_string(),
         SRC_ENV_ANTHROPIC_API_KEY => "`ANTHROPIC_API_KEY`".to_string(),
+        SRC_ENV_ANTHROPIC_AUTH_TOKEN => "`ANTHROPIC_AUTH_TOKEN`".to_string(),
         SRC_CLAUDE_CODE_API_KEY | SRC_CODEX_API_KEY => external_config_source("api_key"),
         SRC_PROVIDER_STORE_API_KEY => i18n::t(
             "cmd.provider.doctor.source.provider_key",

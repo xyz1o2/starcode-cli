@@ -25,6 +25,9 @@ pub const SRC_USER_SETTINGS_BASE_URL: &str = "user_settings.base_url";
 pub const SRC_CLI_STAR_API_KEY: &str = "cli.STAR_API_KEY";
 pub const SRC_ENV_STAR_API_KEY: &str = "env.STAR_API_KEY";
 pub const SRC_ENV_ANTHROPIC_API_KEY: &str = "env.ANTHROPIC_API_KEY";
+/// Claude Code 接第三方网关时用的是 `ANTHROPIC_AUTH_TOKEN`，不是 `API_KEY` ——
+/// 同一个 shell 里两个都可能存在，前者才是生效的那个。
+pub const SRC_ENV_ANTHROPIC_AUTH_TOKEN: &str = "env.ANTHROPIC_AUTH_TOKEN";
 pub const SRC_PROVIDER_STORE_API_KEY: &str = "provider_store.api_key";
 pub const SRC_PROVIDER_ENV_API_KEY: &str = "provider_env.api_key";
 pub const SRC_USER_SETTINGS_API_KEY: &str = "user_settings.api_key";
@@ -35,6 +38,8 @@ pub const SRC_RUNTIME_DEFAULT_OPENAI_COMPATIBLE: &str = "runtime_default.openai_
 
 /// 兼容层贡献的 SourceRef。命名沿用「来源_字段」，与上面那批保持一致。
 pub const SRC_CLAUDE_CODE_MODEL: &str = "claude_code.model";
+/// provider 归属来自 Claude Code 的配置（`claude-code` 这个内建 provider）。
+pub const SRC_CLAUDE_CODE_PROVIDER: &str = "claude_code.provider";
 pub const SRC_CLAUDE_CODE_BASE_URL: &str = "claude_code.base_url";
 pub const SRC_CLAUDE_CODE_API_KEY: &str = "claude_code.api_key";
 pub const SRC_CLAUDE_CODE_SMALL_FAST_MODEL: &str = "claude_code.small_fast_model";
@@ -177,6 +182,7 @@ struct EnvSnapshot {
     anthropic_model: Option<String>,
     anthropic_base_url: Option<String>,
     anthropic_api_key: Option<String>,
+    anthropic_auth_token: Option<String>,
     anthropic_small_fast_model: Option<String>,
 }
 
@@ -192,6 +198,7 @@ impl EnvSnapshot {
             anthropic_model: std::env::var("ANTHROPIC_MODEL").ok(),
             anthropic_base_url: std::env::var("ANTHROPIC_BASE_URL").ok(),
             anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            anthropic_auth_token: std::env::var("ANTHROPIC_AUTH_TOKEN").ok(),
             anthropic_small_fast_model: std::env::var("ANTHROPIC_SMALL_FAST_MODEL").ok(),
         }
     }
@@ -228,9 +235,13 @@ fn resolve_effective_provider_settings_with_env_and_external(
         .active_provider_id
         .as_deref()
         .and_then(normalize_provider_id_or_keep);
+    // 模型先解析：provider 的归属要跟着**真正生效的那份来源**走（见
+    // `resolve_effective_provider_id`），否则会拿 A 的模型去配 B 的网关。
+    let model = resolve_model(&inputs, provider_config, settings, env, external);
     let (provider_id, provider_source) = resolve_effective_provider_id(
         session_provider_id.clone(),
         stored_active_provider_id.clone(),
+        &model,
     );
     // When no explicit active provider is set but providers are configured,
     // auto-select the first one so its API key / base URL can be resolved.
@@ -252,7 +263,7 @@ fn resolve_effective_provider_settings_with_env_and_external(
         provider_source,
         session_provider_id,
         stored_active_provider_id,
-        model: resolve_model(&inputs, provider_config, settings, env, external),
+        model,
         base_url: resolve_base_url(
             &inputs,
             provider_id.as_deref(),
@@ -279,9 +290,26 @@ fn resolve_effective_provider_settings_with_env_and_external(
 fn resolve_effective_provider_id(
     session_provider_id: Option<String>,
     stored_active_provider_id: Option<String>,
+    model: &ResolvedValue,
 ) -> (Option<String>, SourceRef) {
     if let Some(provider_id) = session_provider_id {
         return (Some(provider_id), SourceRef::new(SRC_SESSION_PROVIDER));
+    }
+
+    // 模型来自 Claude Code 的配置文件：那份文件是**成套**的（模型、端点、凭证
+    // 出自同一份 settings），归属就该记到 `claude-code` 头上。不这么做就会出现
+    // 「模型是 CC 的、provider 写着用户自配的网关」—— 面板与 `--model` 都解释不通。
+    //
+    // 只认配置文件、不认 `ANTHROPIC_MODEL` 环境变量：后者常常是残留（从别的
+    // 工具继承来的一个 shell 变量），并不代表端点与凭证也属于同一套；那种情况
+    // 交给下面的 store 归属，行为不变。
+    if model.source.kind == SRC_CLAUDE_CODE_MODEL {
+        if let Some(provider_id) = external_configs::ExternalTool::ClaudeCode.provider_id() {
+            return (
+                Some(provider_id.to_string()),
+                SourceRef::new(SRC_CLAUDE_CODE_PROVIDER),
+            );
+        }
     }
 
     if let Some(provider_id) = stored_active_provider_id {
@@ -289,6 +317,17 @@ fn resolve_effective_provider_id(
             Some(provider_id),
             SourceRef::new(SRC_PROVIDER_STORE_ACTIVE_PROVIDER),
         );
+    }
+
+    // 一个 provider 都没配过、但 shell 里导出了 `ANTHROPIC_MODEL`：这时没有别的
+    // 归属可写，`claude-code` 是唯一能解释这组配置的 id。
+    if model.source.kind == SRC_ENV_ANTHROPIC_MODEL {
+        if let Some(provider_id) = external_configs::ExternalTool::ClaudeCode.provider_id() {
+            return (
+                Some(provider_id.to_string()),
+                SourceRef::with_detail(SRC_CLAUDE_CODE_PROVIDER, "env.ANTHROPIC_MODEL"),
+            );
+        }
     }
 
     (None, SourceRef::new(SRC_MISSING))
@@ -428,7 +467,27 @@ fn resolve_api_key(
     }
 
     if let Some(provider_id) = provider_id {
-        if let Some((api_key, env_var)) =
+        // `claude-code` 的凭证来自 CC 那套变量。这里刻意读**快照**而不是
+        // `std::env`：本函数其余部分都吃 `EnvSnapshot`，单测才能精确控制
+        // 「这个 shell 到底导出了什么」；直接摸进程环境会让用例被跑测试那台
+        // 机器的 shell 影响（真实事故：本机导出了 ANTHROPIC_AUTH_TOKEN，
+        // 于是几个用空快照构造的用例全被真实 key 顶掉）。
+        if providers::canonical_provider_id(provider_id).as_deref()
+            == Some(providers::CLAUDE_CODE_PROVIDER_ID)
+        {
+            if let Some(api_key) =
+                providers::normalize_api_key_value(env.anthropic_auth_token.clone())
+            {
+                return ResolvedValue::present(
+                    api_key,
+                    SourceRef::new(SRC_ENV_ANTHROPIC_AUTH_TOKEN),
+                );
+            }
+            if let Some(api_key) = providers::normalize_api_key_value(env.anthropic_api_key.clone())
+            {
+                return ResolvedValue::present(api_key, SourceRef::new(SRC_ENV_ANTHROPIC_API_KEY));
+            }
+        } else if let Some((api_key, env_var)) =
             providers::resolve_api_key_from_env_with_source(provider_id)
         {
             return ResolvedValue::present(
@@ -449,6 +508,13 @@ fn resolve_api_key(
     }
 
     // Claude Code compatible env var (fallback)
+    //
+    // AUTH_TOKEN 在前：CC 接第三方网关时导出的是它，同一 shell 里的
+    // ANTHROPIC_API_KEY 往往还是 Anthropic 官方那把旧 key，先认它必然 401。
+    if let Some(api_key) = providers::normalize_api_key_value(env.anthropic_auth_token.clone()) {
+        return ResolvedValue::present(api_key, SourceRef::new(SRC_ENV_ANTHROPIC_AUTH_TOKEN));
+    }
+
     if let Some(api_key) = providers::normalize_api_key_value(env.anthropic_api_key.clone()) {
         return ResolvedValue::present(api_key, SourceRef::new(SRC_ENV_ANTHROPIC_API_KEY));
     }
@@ -996,5 +1062,110 @@ mod tests {
         assert_eq!(resolution.base_url.source.kind, SRC_MISSING);
         assert_eq!(resolution.api_key.source.kind, SRC_MISSING);
         assert_eq!(resolution.small_fast_model.source.kind, SRC_MISSING);
+        assert_eq!(resolution.provider_id, None);
+    }
+
+    /// 采纳了 Claude Code 的配置，provider 归属就该落在 `claude-code` 上 ——
+    /// 模型、端点、凭证全是 CC 的，provider 一栏却写别的，面板解释不通。
+    #[test]
+    fn an_adopted_claude_profile_owns_the_provider_slot() {
+        let resolution = resolve(
+            ProviderResolutionInputs::default(),
+            StoredProviderConfig::default(),
+            UserSettings::default(),
+            empty_env(),
+            full_claude(),
+        );
+
+        assert_eq!(
+            resolution.provider_id.as_deref(),
+            Some(crate::core::config::external_configs::CLAUDE_CODE_PROVIDER_ID)
+        );
+        assert_eq!(resolution.provider_source.kind, SRC_CLAUDE_CODE_PROVIDER);
+    }
+
+    /// 反过来：用户自己的 provider 赢了模型解析，归属就留在它身上。
+    #[test]
+    fn a_saved_provider_keeps_the_attribution_when_its_model_wins() {
+        let resolution = resolve(
+            ProviderResolutionInputs::default(),
+            provider_store_fixture("store-model"),
+            UserSettings::default(),
+            empty_env(),
+            full_claude(),
+        );
+
+        assert_eq!(resolution.provider_id.as_deref(), Some("my-gateway"));
+        assert_eq!(
+            resolution.provider_source.kind,
+            SRC_PROVIDER_STORE_ACTIVE_PROVIDER
+        );
+    }
+
+    /// 一个 provider 都没配、只有 `ANTHROPIC_*` 环境变量时，`claude-code` 是
+    /// 唯一能解释这组配置的归属。
+    #[test]
+    fn anthropic_env_vars_alone_attribute_to_the_claude_code_provider() {
+        let env = EnvSnapshot {
+            anthropic_model: Some("group/auto-deepseek-v4-1-flash-free".to_string()),
+            anthropic_base_url: Some("http://127.0.0.1:3425".to_string()),
+            anthropic_auth_token: Some("gateway-token".to_string()),
+            ..Default::default()
+        };
+
+        let resolution = resolve(
+            ProviderResolutionInputs::default(),
+            StoredProviderConfig::default(),
+            UserSettings::default(),
+            env,
+            empty_external(),
+        );
+
+        assert_eq!(
+            resolution.provider_id.as_deref(),
+            Some(crate::core::config::external_configs::CLAUDE_CODE_PROVIDER_ID)
+        );
+        assert_eq!(resolution.api_key.value.as_deref(), Some("gateway-token"));
+        assert_eq!(resolution.api_key.source.kind, SRC_ENV_ANTHROPIC_AUTH_TOKEN);
+    }
+
+    /// `ANTHROPIC_AUTH_TOKEN` 才是 CC 接第三方网关时用的那个；同一 shell 里
+    /// 往往还留着一把过期的 `ANTHROPIC_API_KEY`，先认它必然 401。
+    #[test]
+    fn auth_token_wins_over_the_stale_api_key_in_the_snapshot() {
+        let env = EnvSnapshot {
+            anthropic_api_key: Some("stale-official-key".to_string()),
+            anthropic_auth_token: Some("gateway-token".to_string()),
+            ..Default::default()
+        };
+
+        let resolution = resolve(
+            ProviderResolutionInputs::default(),
+            StoredProviderConfig::default(),
+            UserSettings::default(),
+            env,
+            empty_external(),
+        );
+
+        assert_eq!(resolution.api_key.value.as_deref(), Some("gateway-token"));
+        assert_eq!(resolution.api_key.source.kind, SRC_ENV_ANTHROPIC_AUTH_TOKEN);
+    }
+
+    /// 会话里显式选的 provider 永远赢 —— 那是用户刚刚点的，不能被兼容层顶掉。
+    #[test]
+    fn an_explicit_session_provider_beats_the_compat_attribution() {
+        let resolution = resolve(
+            ProviderResolutionInputs {
+                session_provider_id: Some("my-gateway".to_string()),
+                ..Default::default()
+            },
+            StoredProviderConfig::default(),
+            UserSettings::default(),
+            empty_env(),
+            full_claude(),
+        );
+
+        assert_eq!(resolution.provider_id.as_deref(), Some("my-gateway"));
+        assert_eq!(resolution.provider_source.kind, SRC_SESSION_PROVIDER);
     }
 }

@@ -185,10 +185,27 @@ pub mod legacy {
                 return;
             }
             if let Some(path) = &self.persist_path {
-                if let Ok(data) = std::fs::read_to_string(path) {
-                    if let Ok(set) = serde_json::from_str::<HashSet<String>>(&data) {
-                        let mut persisted = self.persisted_actions.write().unwrap();
-                        *persisted = set;
+                match std::fs::read_to_string(path) {
+                    Ok(data) => match serde_json::from_str::<HashSet<String>>(&data) {
+                        Ok(set) => {
+                            let mut persisted = self.persisted_actions.write().unwrap();
+                            *persisted = set;
+                        }
+                        Err(err) => {
+                            crate::utils::logging::append_debug_log_line(&format!(
+                                "[PERMISSIONS] failed to parse {}: {}",
+                                path.display(),
+                                err
+                            ));
+                        }
+                    },
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => {
+                        crate::utils::logging::append_debug_log_line(&format!(
+                            "[PERMISSIONS] failed to read {}: {}",
+                            path.display(),
+                            err
+                        ));
                     }
                 }
             }
@@ -196,11 +213,36 @@ pub mod legacy {
         }
 
         fn save_persisted(&self) {
-            if let Some(path) = &self.persist_path {
-                let set = self.persisted_actions.read().unwrap();
-                if let Ok(data) = serde_json::to_string(&*set) {
-                    let _ = std::fs::write(path, data);
+            let Some(path) = &self.persist_path else {
+                return;
+            };
+            let set = self.persisted_actions.read().unwrap();
+            let Ok(data) = serde_json::to_string(&*set) else {
+                crate::utils::logging::append_debug_log_line(
+                    "[PERMISSIONS] failed to serialize persisted grants",
+                );
+                return;
+            };
+            // 项目还没有 `.star/` 时，直接 `fs::write` 会失败；以前错误被
+            // `let _ =` 吞掉，用户看到 "Always allow" 成功、下一次却照样弹窗。
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    if let Err(err) = std::fs::create_dir_all(parent) {
+                        crate::utils::logging::append_debug_log_line(&format!(
+                            "[PERMISSIONS] failed to create {}: {}",
+                            parent.display(),
+                            err
+                        ));
+                        return;
+                    }
                 }
+            }
+            if let Err(err) = std::fs::write(path, data) {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[PERMISSIONS] failed to write {}: {}",
+                    path.display(),
+                    err
+                ));
             }
         }
     }

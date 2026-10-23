@@ -108,6 +108,12 @@ fn infer_provider(
     if provider_id == Some("anthropic-compatible") {
         return LlmProvider::Custom("anthropic-compatible".to_string());
     }
+    // 兼容层合成的 Claude Code provider：端点通常是第三方网关（URL 里没有
+    // "anthropic" 字样），但协议永远是 Anthropic Messages。交给 URL 推断会落进
+    // OpenAI 兼容分支，`/chat/completions` 必然 404。
+    if provider_id == Some(crate::core::config::external_configs::CLAUDE_CODE_PROVIDER_ID) {
+        return LlmProvider::Custom("anthropic-compatible".to_string());
+    }
     // 用户明确配置了 openai-compatible provider → 跳过所有 URL/模型名推断，
     // 直接使用 OpenAiCompatibleClient，保留用户配置的 base_url。
     // 避免第三方代理（如 api.183399.xyz 提供 deepseek 模型）被错误路由到

@@ -1,6 +1,8 @@
+use crate::core::permissions::SessionPermissionManager;
 use crate::types::ToolResult;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
@@ -155,6 +157,12 @@ pub struct GlobalState {
     /// before calling `checkpoint_manager::track_edit`. None when the tool
     /// runs outside a message context (e.g. tests, headless).
     pub current_message_id: Arc<RwLock<Option<u64>>>,
+    /// 会话级权限授予（"Allow for session" / "Always allow" 的内存态）。
+    ///
+    /// 必须活在运行时共享状态里：`Agent::run_stream` 每条用户消息都会新建一个
+    /// `Agent` → 新 `ToolExecutor`，如果管理器跟着 executor 走，用户上一轮点过的
+    /// "Allow for session" 到下一轮就没了，于是同一个命令反复弹确认。
+    permission_manager: Arc<OnceLock<Arc<SessionPermissionManager>>>,
 }
 
 impl GlobalState {
@@ -164,7 +172,21 @@ impl GlobalState {
             tool_cache: Arc::new(RwLock::new(HashMap::new())),
             execution_state: Arc::new(RwLock::new(ExecutionState::new())),
             current_message_id: Arc::new(RwLock::new(None)),
+            permission_manager: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// 取得运行时共享的会话权限管理器。
+    ///
+    /// 第一次调用决定持久化路径（当前项目的 `.star/permission_grants.json`）。
+    /// 同一运行时里的主 Agent、子 Agent、每条消息新建的 Agent 都拿到同一个 Arc。
+    pub fn session_permission_manager(
+        &self,
+        persist_path: PathBuf,
+    ) -> Arc<SessionPermissionManager> {
+        self.permission_manager
+            .get_or_init(|| Arc::new(SessionPermissionManager::with_persistence(persist_path)))
+            .clone()
     }
 
     /// Read the current message id (best-effort; None if not in a message round).

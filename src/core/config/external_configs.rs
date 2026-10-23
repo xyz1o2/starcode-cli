@@ -18,7 +18,10 @@
 //! # 各读什么
 //!
 //! Claude Code `settings.json`：
-//! - 顶层 `model`；
+//! - 顶层 `model`，其次 `env.ANTHROPIC_MODEL`。**只认顶层会让一部分用户整份配置
+//!   都被丢掉** —— `adopted()` 要求有模型才采纳，而把模型写在 `env` 块里很常见；
+//!   顶层值可能还是档位别名（`sonnet` / `opus[1m]`），要按 `env.ANTHROPIC_DEFAULT_*_MODEL`
+//!   展开成真实模型名；
 //! - `env.ANTHROPIC_BASE_URL`；
 //! - `env.ANTHROPIC_AUTH_TOKEN`。**注意是 AUTH_TOKEN 不是 API_KEY** —— CC 接第三方
 //!   网关时写的就是 `ANTHROPIC_AUTH_TOKEN`，只认 `API_KEY` 的实现读不到，这正是
@@ -63,6 +66,13 @@ const CLAUDE_PROJECT_DIR: &str = ".claude";
 const CODEX_CONFIG_FILE: &str = "config.toml";
 const CODEX_AUTH_FILE: &str = "auth.json";
 
+/// 兼容层合成的 provider id（见 `providers.rs` 的同名内建条目）。
+///
+/// 它不是「另一个 Anthropic」：端点和密钥都来自 Claude Code 自己的配置，用户
+/// 在 starcode 里不必再抄一遍，也不会被写回 `~/.star/user-settings.json`。
+pub const CLAUDE_CODE_PROVIDER_ID: &str = "claude-code";
+
+const CLAUDE_ENV_MODEL: &str = "ANTHROPIC_MODEL";
 const CLAUDE_ENV_BASE_URL: &str = "ANTHROPIC_BASE_URL";
 const CLAUDE_ENV_AUTH_TOKEN: &str = "ANTHROPIC_AUTH_TOKEN";
 const CLAUDE_ENV_API_KEY: &str = "ANTHROPIC_API_KEY";
@@ -81,7 +91,8 @@ const CLAUDE_ENV_SMALL_FAST_MODEL: &str = "ANTHROPIC_SMALL_FAST_MODEL";
 pub struct ClaudeCodeConfig {
     /// 生效优先级最高的那份 settings.json 的路径（诊断信息用）。
     pub source_path: PathBuf,
-    /// 顶层 `model`。
+    /// 顶层 `model`（档位别名会按 `env.ANTHROPIC_DEFAULT_*_MODEL` 展开），
+    /// 其次 `env.ANTHROPIC_MODEL`。
     pub model: Option<String>,
     /// `env.ANTHROPIC_BASE_URL`。
     pub base_url: Option<String>,
@@ -149,6 +160,21 @@ impl ExternalTool {
         match self {
             ExternalTool::ClaudeCode => "claude_code",
             ExternalTool::Codex => "codex",
+        }
+    }
+
+    /// 被采纳的配置该落成哪个内建 provider id。
+    ///
+    /// Claude Code 有对应的内建条目（`providers.rs`），采纳它的配置就该把归属
+    /// 记到它头上 —— 否则模型、端点、密钥全是 CC 的，provider 一栏却写着用户
+    /// 自己配的另一个 gateway，两边对不上。
+    ///
+    /// Codex 暂时返回 `None`：它的 `wire_api` 还没映射到本项目的协议推断，
+    /// 造一个路由不到正确协议的 id 只会更糟。
+    pub fn provider_id(self) -> Option<&'static str> {
+        match self {
+            ExternalTool::ClaudeCode => Some(CLAUDE_CODE_PROVIDER_ID),
+            ExternalTool::Codex => None,
         }
     }
 }
@@ -370,9 +396,21 @@ fn load_claude_code(
     }
 
     let source_path = source_path?;
+    let tier_models = ClaudeTierModels {
+        opus: merged.env_string(CLAUDE_ENV_OPUS),
+        sonnet: merged.env_string(CLAUDE_ENV_SONNET),
+        haiku: merged.env_string(CLAUDE_ENV_HAIKU),
+    };
     Some(ClaudeCodeConfig {
         source_path,
-        model: RawClaudeSettings::string_field(merged.model.as_ref()),
+        // 顶层 `model` 可能是档位别名（`sonnet` / `opus[1m]`），CC 自己会按
+        // `env.ANTHROPIC_DEFAULT_*_MODEL` 展开；照抄别名会把一个 CC 内部记号
+        // 当成模型名发给网关。展开不了就原样保留 —— 用户写的字总比空着强。
+        model: RawClaudeSettings::string_field(merged.model.as_ref())
+            .map(|model| expand_tier_alias(&model, &tier_models))
+            // 模型只写在 `env.ANTHROPIC_MODEL` 里也算数：`adopted()` 要求有模型才
+            // 采纳整份配置，漏掉这个键会连 base_url / token 一起被丢掉。
+            .or_else(|| merged.env_string(CLAUDE_ENV_MODEL)),
         base_url: merged.env_string(CLAUDE_ENV_BASE_URL),
         // AUTH_TOKEN 在前：接第三方网关时 CC 用的就是它，而同一场景下
         // ANTHROPIC_API_KEY 往往还留着 Anthropic 官方的旧值。
@@ -382,12 +420,28 @@ fn load_claude_code(
         small_fast_model: merged
             .env_string(CLAUDE_ENV_SMALL_FAST_MODEL)
             .or_else(|| merged.env_string(CLAUDE_ENV_HAIKU)),
-        tier_models: ClaudeTierModels {
-            opus: merged.env_string(CLAUDE_ENV_OPUS),
-            sonnet: merged.env_string(CLAUDE_ENV_SONNET),
-            haiku: merged.env_string(CLAUDE_ENV_HAIKU),
-        },
+        tier_models,
     })
+}
+
+/// 把 `sonnet` / `opus[1m]` / `haiku` 这类档位别名展开成
+/// `env.ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` 里的真实模型名。
+///
+/// `[1m]` 是 CC 用来标记「百万上下文变体」的后缀，展开成档位模型时一并去掉 ——
+/// 它是 CC 自己的记号，网关不认。
+fn expand_tier_alias(model: &str, tiers: &ClaudeTierModels) -> String {
+    let lowered = model.trim().to_ascii_lowercase();
+    let base = lowered.strip_suffix("[1m]").unwrap_or(&lowered).trim();
+    let tier = match base {
+        "opus" => tiers.opus.as_deref(),
+        "sonnet" => tiers.sonnet.as_deref(),
+        "haiku" => tiers.haiku.as_deref(),
+        _ => None,
+    };
+    tier.map(str::trim)
+        .filter(|tier| !tier.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| model.trim().to_string())
 }
 
 fn claude_user_settings_path(
@@ -553,6 +607,72 @@ mod tests {
             claude.tier_models.haiku.as_deref(),
             Some("claude-haiku-4-5")
         );
+    }
+
+    #[test]
+    fn a_model_written_only_in_the_env_block_is_still_adopted() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path();
+        // 只把模型写在 `env` 里是很常见的配法。`adopted()` 要求有模型才采纳整份
+        // 配置，只认顶层 `model` 会把 base_url / AUTH_TOKEN 一起丢掉 —— 用户明明
+        // 在 CC 里配好了，starcode 却「什么都没配」。
+        write(
+            &home.join(".claude").join("settings.json"),
+            r#"{
+              "env": {
+                "ANTHROPIC_MODEL": "group/auto-deepseek-v4-1-flash-free",
+                "ANTHROPIC_BASE_URL": "http://127.0.0.1:3425",
+                "ANTHROPIC_AUTH_TOKEN": "gateway-token"
+              }
+            }"#,
+        );
+
+        let configs = load_default(home, home);
+        let claude = configs.claude.as_ref().expect("claude config");
+        assert_eq!(
+            claude.model.as_deref(),
+            Some("group/auto-deepseek-v4-1-flash-free")
+        );
+
+        let adopted = configs.adopted().expect("整份配置都该被采纳");
+        assert_eq!(adopted.tool, ExternalTool::ClaudeCode);
+        assert_eq!(adopted.base_url, Some("http://127.0.0.1:3425"));
+        assert_eq!(adopted.api_key, Some("gateway-token"));
+    }
+
+    #[test]
+    fn a_tier_alias_is_expanded_to_the_configured_model() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path();
+        // `sonnet[1m]` 是 CC 自己的档位记号，不是模型名；网关不认。
+        write(
+            &home.join(".claude").join("settings.json"),
+            r#"{
+              "model": "sonnet[1m]",
+              "env": {
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-5-20250929"
+              }
+            }"#,
+        );
+
+        let configs = load_default(home, home);
+        let claude = configs.claude.expect("claude config");
+        assert_eq!(claude.model.as_deref(), Some("claude-sonnet-4-5-20250929"));
+    }
+
+    #[test]
+    fn an_unexpandable_alias_is_kept_verbatim() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path();
+        write(
+            &home.join(".claude").join("settings.json"),
+            r#"{ "model": "opus" }"#,
+        );
+
+        let configs = load_default(home, home);
+        let claude = configs.claude.expect("claude config");
+        // 没有对应档位变量时别把它换成空串：用户写的字总比空着强。
+        assert_eq!(claude.model.as_deref(), Some("opus"));
     }
 
     #[test]
