@@ -412,6 +412,90 @@ impl AsRef<str> for ToolName {
     }
 }
 
+impl ToolName {
+    /// 面向用户的工具分组（`/tools` 的展示顺序由调用方的分组表决定）。
+    ///
+    /// 这个 `match` 必须穷尽：新增一个工具时编译器会逼你给它归类，
+    /// 而不是让 `/tools` 静默漏掉它 —— 手写清单已经漂移过不止一次。
+    pub fn category(&self) -> &'static str {
+        match self {
+            // 文件操作
+            ToolName::Read
+            | ToolName::ReadManyFiles
+            | ToolName::Write
+            | ToolName::Edit
+            | ToolName::SmartEdit
+            | ToolName::MultiEdit
+            | ToolName::NotebookRead
+            | ToolName::NotebookEdit => "Files",
+            // 搜索/导航
+            ToolName::Grep
+            | ToolName::Glob
+            | ToolName::ListDir
+            | ToolName::LSP
+            | ToolName::CodebaseSearch
+            | ToolName::ProjectMap
+            | ToolName::CodeGraph
+            | ToolName::NextEdit
+            | ToolName::ToolSearch
+            | ToolName::Snip => "Search",
+            // 执行
+            ToolName::Bash | ToolName::RunTests | ToolName::GetDiagnostics => "Execution",
+            // 代理/任务
+            ToolName::Agent
+            | ToolName::Skill
+            | ToolName::Todo
+            | ToolName::TaskGet
+            | ToolName::TaskList
+            | ToolName::TaskUpdate
+            | ToolName::TaskOutput
+            | ToolName::SendMessage
+            | ToolName::Brief => "Agents & tasks",
+            // 模式切换
+            ToolName::EnterPlanMode
+            | ToolName::ExitPlanMode
+            | ToolName::EnterWorktree
+            | ToolName::ExitWorktree => "Plan & worktree",
+            // Web
+            ToolName::WebFetch | ToolName::WebSearch => "Web",
+            // Git/GitHub
+            ToolName::GitInsight
+            | ToolName::GitRewind
+            | ToolName::GitCommitAttribution
+            | ToolName::GitAutofixPr
+            | ToolName::GitPrSubscribe
+            | ToolName::GhPrComments
+            | ToolName::SuggestPr => "Git",
+            // 调度
+            ToolName::Wait
+            | ToolName::CronCreate
+            | ToolName::CronList
+            | ToolName::CronDelete
+            | ToolName::BackgroundTask
+            | ToolName::RemoteTrigger
+            | ToolName::ScheduleWakeup
+            | ToolName::Monitor => "Scheduling",
+            // MCP
+            ToolName::McpAuth
+            | ToolName::McpListServers
+            | ToolName::McpListTools
+            | ToolName::McpToolInfo
+            | ToolName::McpSearchTools
+            | ToolName::McpRestartServer
+            | ToolName::McpRefresh
+            | ToolName::McpListResources
+            | ToolName::McpReadResource
+            | ToolName::McpListPrompts
+            | ToolName::McpGetPrompt => "MCP",
+            // 其他
+            ToolName::AskUserQuestion
+            | ToolName::Workflow
+            | ToolName::Memory
+            | ToolName::SelfConfig => "Other",
+        }
+    }
+}
+
 /// 获取所有内置工具名称
 pub fn all_builtin_tool_names() -> Vec<&'static str> {
     ToolName::all_builtin().iter().map(|t| t.as_str()).collect()

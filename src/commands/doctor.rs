@@ -356,3 +356,155 @@ fn is_decision_trace_event(event: &str) -> bool {
             | "auto_verification_injected"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_transcript(lines: &[&str]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let mut file = File::create(&path).unwrap();
+        for line in lines {
+            writeln!(file, "{}", line).unwrap();
+        }
+        (dir, path)
+    }
+
+    #[test]
+    fn a_missing_transcript_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nope.jsonl");
+        assert_eq!(load_transcript_summary(&path), Ok(None));
+    }
+
+    /// 摘要只描述**最近一次** run。混进来的旧 run 事件会让 `events_in_run`
+    /// 虚高，用户会以为本次会话真的跑了几百步。
+    #[test]
+    fn summary_only_counts_events_from_the_latest_run() {
+        let (_dir, path) = write_transcript(&[
+            r#"{"run_id":"old","event":"tool_shortlist_selected","ts":"2026-01-01T00:00:00Z"}"#,
+            r#"{"run_id":"old","event":"context_compression","ts":"2026-01-01T00:00:01Z"}"#,
+            r#"{"run_id":"new","event":"routing_context_resolved","ts":"2026-01-02T00:00:00Z"}"#,
+            r#"{"run_id":"new","event":"text_delta","ts":"2026-01-02T00:00:02Z"}"#,
+        ]);
+
+        let summary = load_transcript_summary(&path).unwrap().expect("summary");
+        assert_eq!(summary.latest_run_id, "new");
+        assert_eq!(summary.events_in_run, 2);
+        assert_eq!(summary.decision_events, 1);
+        assert_eq!(summary.last_event, "text_delta");
+        assert_eq!(summary.last_ts, "2026-01-02T00:00:02Z");
+        assert_eq!(
+            summary
+                .decision_counts
+                .get("routing_context_resolved")
+                .copied(),
+            Some(1)
+        );
+    }
+
+    /// 坏行只跳过，不能把整份 trace 判成解析失败 —— 一次写盘中断就足以
+    /// 留下半行 JSON，而丢掉后面的全部证据恰恰是诊断最需要的时候。
+    #[test]
+    fn malformed_lines_are_skipped_not_fatal() {
+        let (_dir, path) = write_transcript(&[
+            "{not json",
+            r#"{"run_id":"run-1","event":"auto_plan_decision","ts":"2026-01-01T00:00:00Z"}"#,
+            "",
+            "[]",
+            r#"{"run_id":"run-1","event":"verification_required","ts":"2026-01-01T00:00:01Z"}"#,
+        ]);
+
+        let summary = load_transcript_summary(&path).unwrap().expect("summary");
+        assert_eq!(summary.events_in_run, 2);
+        assert_eq!(summary.decision_events, 2);
+    }
+
+    /// 没有任何 `run_id` 的事件（老版本 trace、别人的 JSON）不算一次 run。
+    #[test]
+    fn events_without_a_run_id_yield_no_summary() {
+        let (_dir, path) = write_transcript(&[
+            r#"{"event":"text_delta","ts":"2026-01-01T00:00:00Z"}"#,
+            r#"{"event":"done"}"#,
+        ]);
+        assert_eq!(load_transcript_summary(&path), Ok(None));
+    }
+
+    #[test]
+    fn an_empty_transcript_yields_no_summary() {
+        let (_dir, path) = write_transcript(&["", "   "]);
+        assert_eq!(load_transcript_summary(&path), Ok(None));
+    }
+
+    /// 只回读尾部 400 行：transcript 会一直增长，doctor 不该把它整个读进内存。
+    /// 断言方式是把一段很长的旧 run 放在前面、新 run 放在尾部，旧 run 必须
+    /// 完全看不见。
+    #[test]
+    fn only_the_transcript_tail_is_considered() {
+        let mut lines: Vec<String> = Vec::new();
+        for i in 0..450 {
+            lines.push(format!(
+                r#"{{"run_id":"old","event":"text_delta","ts":"2026-01-01T00:00:{:02}Z","i":{}}}"#,
+                i % 60,
+                i
+            ));
+        }
+        lines.push(
+            r#"{"run_id":"new","event":"context_compression","ts":"2026-01-02T00:00:00Z"}"#
+                .to_string(),
+        );
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (_dir, path) = write_transcript(&refs);
+
+        let summary = load_transcript_summary(&path).unwrap().expect("summary");
+        assert_eq!(summary.latest_run_id, "new");
+        assert_eq!(summary.events_in_run, 1, "old run must have scrolled out");
+    }
+
+    #[test]
+    fn the_decision_event_set_is_explicit() {
+        for event in [
+            "routing_context_resolved",
+            "dynamic_context_resolved",
+            "auto_plan_decision",
+            "context_compression",
+            "tool_shortlist_selected",
+            "verification_required",
+            "auto_verification_injected",
+        ] {
+            assert!(is_decision_trace_event(event), "{event} should count");
+        }
+        for event in ["text_delta", "done", "", "ToolCalls", "tool-result"] {
+            assert!(!is_decision_trace_event(event), "{event} must not count");
+        }
+    }
+
+    #[tokio::test]
+    async fn doctor_pushes_a_report_into_the_chat_history() {
+        use crate::commands::execution::CommandContext;
+
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+
+        run(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        let report = &state.chat_history.last().expect("doctor report").content;
+        assert!(
+            report.starts_with("# 🩺 StarCode Doctor Report"),
+            "{report}"
+        );
+        for section in ["## Configuration", "## Toolchain Status", "## Logging"] {
+            assert!(report.contains(section), "missing {section}:\n{report}");
+        }
+    }
+}

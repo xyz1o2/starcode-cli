@@ -83,7 +83,7 @@ pub struct McpServerEntry {
     pub scope: McpConfigScope,
 }
 
-fn project_star_mcp_path() -> PathBuf {
+pub fn project_star_mcp_path() -> PathBuf {
     crate::core::utils::paths::get_mcp_config_path()
 }
 

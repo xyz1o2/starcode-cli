@@ -1053,3 +1053,146 @@ fn format_optional_code(value: Option<&str>) -> String {
         .map(|value| format!("`{}`", value))
         .unwrap_or_else(|| "-".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secrets_are_masked_but_still_recognizable() {
+        // 短到无法安全露头尾的一律全遮
+        assert_eq!(mask_secret("abc"), "***");
+        assert_eq!(mask_secret("   "), "-");
+        assert_eq!(mask_secret(""), "-");
+        // 7–10 字符：露 2+2
+        assert_eq!(mask_secret("abcdefg"), "ab...fg");
+        // 长 key：露 4+4，中段永远不见
+        let long = "sk-ant-api03-abcdefghijklmnop";
+        let masked = mask_secret(long);
+        assert_eq!(masked, "sk-a...mnop");
+        assert!(!masked.contains("api03"));
+        assert_eq!(masked.chars().count(), 11);
+    }
+
+    /// `doctor` 输出会贴到 issue 里，任何路径都不能把完整 key 带出去。
+    #[test]
+    fn doctor_never_prints_a_full_secret() {
+        let line = secret_input_line("API Key", Some("sk-secret-value-1234".to_string()));
+        assert!(!line.contains("secret-value"), "{line}");
+        assert!(line.contains("set"), "{line}");
+        assert!(line.contains("sk-s...1234"), "{line}");
+
+        let missing = secret_input_line("API Key", None);
+        assert!(missing.contains("missing"), "{missing}");
+
+        let blank = secret_input_line("API Key", Some("  ".to_string()));
+        assert!(blank.contains("missing"), "{blank}");
+
+        let placeholder = secret_input_line(
+            "API Key",
+            Some(crate::core::config::providers::PLACEHOLDER_API_KEY.to_string()),
+        );
+        assert!(placeholder.contains("placeholder/empty"), "{placeholder}");
+    }
+
+    #[test]
+    fn blank_values_are_reported_as_missing() {
+        assert_eq!(trimmed_non_empty(None), None);
+        assert_eq!(trimmed_non_empty(Some("   ".to_string())), None);
+        assert_eq!(
+            trimmed_non_empty(Some("  https://x  ".to_string())),
+            Some("https://x".to_string())
+        );
+
+        assert!(value_input_line("Base URL", Some("   ".to_string())).contains("missing"));
+        let set = value_input_line("Base URL", Some("https://api.example.com".to_string()));
+        assert!(set.contains("`https://api.example.com`"), "{set}");
+    }
+
+    #[test]
+    fn provider_labels_include_the_id_only_when_known() {
+        assert_eq!(
+            format_provider_label(Some("anthropic"), "Anthropic"),
+            "Anthropic (`anthropic`)"
+        );
+        assert_eq!(format_provider_label(None, "Not set"), "Not set");
+        assert_eq!(format_optional_code(Some("gpt-5")), "`gpt-5`");
+        assert_eq!(format_optional_code(None), "-");
+    }
+
+    #[test]
+    fn provider_command_ids_resolve_aliases_and_stored_case() {
+        let mut config = StoredProviderConfig::default();
+        config
+            .providers
+            .insert("MyProvider".to_string(), StoredProviderSettings::default());
+
+        // 内建 id / 显示名都归一
+        assert_eq!(
+            resolve_provider_command_id("  Anthropic ", &config),
+            "anthropic"
+        );
+        // 存储里的大小写漂移按实际 key 回填
+        assert_eq!(
+            resolve_provider_command_id("myprovider", &config),
+            "MyProvider"
+        );
+        // 都没命中就原样（去掉空白）交给上层报错
+        assert_eq!(resolve_provider_command_id("nope", &config), "nope");
+    }
+
+    #[test]
+    fn provider_display_names_prefer_builtin_metadata() {
+        assert_eq!(provider_display_name(Some("anthropic"), None), "Anthropic");
+
+        let mut settings = StoredProviderSettings::default();
+        settings.name = Some("  My Gateway  ".to_string());
+        assert_eq!(
+            provider_display_name(Some("my-gateway"), Some(&settings)),
+            "My Gateway"
+        );
+        assert_eq!(
+            provider_display_name(Some("my-gateway"), None),
+            "my-gateway"
+        );
+        assert_eq!(provider_display_name(None, None), "Not set");
+    }
+
+    #[test]
+    fn source_descriptions_name_the_actual_knob() {
+        use crate::core::config::provider_resolution::SourceRef;
+
+        let cases = [
+            (SRC_ENV_STAR_MODEL, "`STAR_MODEL`"),
+            (SRC_ENV_ANTHROPIC_MODEL, "`ANTHROPIC_MODEL`"),
+            (SRC_ENV_ANTHROPIC_API_KEY, "`ANTHROPIC_API_KEY`"),
+            (SRC_ENV_ANTHROPIC_AUTH_TOKEN, "`ANTHROPIC_AUTH_TOKEN`"),
+            (SRC_ENV_STAR_BASE_URL, "`STAR_BASE_URL`"),
+        ];
+        for (kind, expected) in cases {
+            let described = describe_source(&SourceRef::new(kind));
+            assert_eq!(described, expected, "kind = {kind}");
+        }
+    }
+
+    /// 兼容层的来源只报字段名，不把整条 CC 配置说成"当前会话设置"。
+    #[test]
+    fn external_config_sources_are_attributed_to_the_external_file() {
+        let described = describe_source(&SourceRef::new(SRC_CLAUDE_CODE_MODEL));
+        assert!(described.contains("external CLI config"), "{described}");
+        assert!(described.contains("model"), "{described}");
+
+        let with_detail = describe_source(&SourceRef::with_detail(
+            SRC_CLAUDE_CODE_PROVIDER,
+            "claude_code.provider",
+        ));
+        assert!(
+            with_detail.contains("claude_code.provider"),
+            "{with_detail}"
+        );
+
+        // 未知 kind 不能静默变成空白
+        let unknown = describe_source(&SourceRef::new("something.new"));
+        assert!(!unknown.trim().is_empty());
+    }
+}

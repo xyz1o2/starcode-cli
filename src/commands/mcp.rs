@@ -170,7 +170,16 @@ pub async fn add_mcp_server(
 
 pub async fn remove_mcp_server(name: &str) -> Result<String, crate::core::mcp::McpError> {
     let mut project_cfg = crate::core::mcp::load_project_mcp_config().await?;
-    project_cfg.mcp_servers.remove(name);
+    if project_cfg.mcp_servers.remove(name).is_none() {
+        // 删一个不存在的 server 不能回 "Removed"：用户会以为它被删掉了，
+        // 实际可能是拼错名字，或者它根本在 user 作用域（那份不归这条命令改）。
+        return Err(format!(
+            "No MCP server named `{}` in the project config ({}). Use /mcp list to see the effective scopes.",
+            name,
+            crate::core::mcp::project_star_mcp_path().display()
+        )
+        .into());
+    }
     crate::core::mcp::save_project_mcp_config(&project_cfg).await?;
     Ok(i18n::t(
         "cmd.mcp.remove.success",
@@ -178,6 +187,72 @@ pub async fn remove_mcp_server(name: &str) -> Result<String, crate::core::mcp::M
         "Removed MCP server: {name}",
     )
     .replace("{name}", name))
+}
+
+/// `--env KEY=VALUE` 的解析。`add` 和 `install` 曾经各抄一份，于是
+/// `install` 少了空 key 校验 —— 同一面旗子两种行为，这里只留一份。
+fn parse_env_pairs(
+    items: &[String],
+) -> Result<Option<std::collections::HashMap<String, String>>, String> {
+    let mut env_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for item in items {
+        let s = item.trim();
+        if s.is_empty() {
+            continue;
+        }
+        let Some((k, v)) = s.split_once('=') else {
+            return Err(i18n::t(
+                "cmd.mcp.error.invalid_env",
+                "invalid --env value: {value}",
+                "invalid --env value: {value}",
+            )
+            .replace("{value}", s));
+        };
+        let k = k.trim();
+        if k.is_empty() {
+            return Err(i18n::t(
+                "cmd.mcp.error.invalid_env_key",
+                "invalid --env key: {value}",
+                "invalid --env key: {value}",
+            )
+            .replace("{value}", s));
+        }
+        env_map.insert(k.to_string(), v.to_string());
+    }
+    Ok(if env_map.is_empty() {
+        None
+    } else {
+        Some(env_map)
+    })
+}
+
+/// `install` 没给 `--name` 时的默认名：包名最后一段，去掉常见的
+/// `server-` / `mcp-` 前缀，好让 `/mcp tools memory` 这种用法可预测。
+fn server_name_for_package(package: &str) -> String {
+    let last = package.split('/').next_back().unwrap_or(package).trim();
+    last.replace("server-", "").replace("mcp-", "")
+}
+
+/// 任何一种 transport 缺了它唯一的必需品都得在落盘前拒绝 —— 写出一个
+/// 连不上的 server，用户下次只会看到一条翻译不通的握手错误。
+fn validate_transport(
+    transport: &str,
+    command: Option<&str>,
+    url: Option<&str>,
+) -> Result<(), String> {
+    match transport {
+        "stdio" if command.unwrap_or("").trim().is_empty() => Err(i18n::t(
+            "cmd.mcp.error.stdio_requires_command",
+            "stdio transport requires --command",
+            "stdio transport requires --command",
+        )),
+        "http" | "streamable_http" | "sse" if url.unwrap_or("").trim().is_empty() => Err(i18n::t(
+            "cmd.mcp.error.http_requires_url",
+            "http/sse/streamable_http transport requires --url",
+            "http/sse/streamable_http transport requires --url",
+        )),
+        _ => Ok(()),
+    }
 }
 
 async fn build_live_mcp_manager() -> Result<crate::core::mcp::MCPManager, crate::core::mcp::McpError>
@@ -483,40 +558,7 @@ pub async fn execute_mcp_command(
                     .map(|v| v.to_string())
                     .collect::<Vec<_>>()
             });
-
-            let mut env_map: std::collections::HashMap<String, String> =
-                std::collections::HashMap::new();
-            for item in env {
-                let s = item.trim();
-                if s.is_empty() {
-                    continue;
-                }
-                let Some((k, v)) = s.split_once('=') else {
-                    return Err(i18n::t(
-                        "cmd.mcp.error.invalid_env",
-                        "invalid --env value: {value}",
-                        "invalid --env value: {value}",
-                    )
-                    .replace("{value}", s)
-                    .into());
-                };
-                let k = k.trim();
-                if k.is_empty() {
-                    return Err(i18n::t(
-                        "cmd.mcp.error.invalid_env_key",
-                        "invalid --env key: {value}",
-                        "invalid --env key: {value}",
-                    )
-                    .replace("{value}", s)
-                    .into());
-                }
-                env_map.insert(k.to_string(), v.to_string());
-            }
-            let env_opt = if env_map.is_empty() {
-                None
-            } else {
-                Some(env_map)
-            };
+            let env_opt = parse_env_pairs(&env)?;
 
             let transport_cfg = TransportConfig {
                 transport_type: transport_type.clone(),
@@ -527,31 +569,11 @@ pub async fn execute_mcp_command(
                 headers: None,
             };
 
-            if transport_type == "stdio"
-                && transport_cfg
-                    .command
-                    .as_deref()
-                    .unwrap_or("")
-                    .trim()
-                    .is_empty()
-            {
-                return Err(i18n::t(
-                    "cmd.mcp.error.stdio_requires_command",
-                    "stdio transport requires --command",
-                    "stdio transport requires --command",
-                )
-                .into());
-            }
-            if (transport_type == "http" || transport_type == "streamable_http")
-                && transport_cfg.url.as_deref().unwrap_or("").trim().is_empty()
-            {
-                return Err(i18n::t(
-                    "cmd.mcp.error.http_requires_url",
-                    "http/streamable_http transport requires --url",
-                    "http/streamable_http transport requires --url",
-                )
-                .into());
-            }
+            validate_transport(
+                &transport_type,
+                transport_cfg.command.as_deref(),
+                transport_cfg.url.as_deref(),
+            )?;
 
             let config = MCPServerConfig {
                 name: name.clone(),
@@ -568,38 +590,11 @@ pub async fn execute_mcp_command(
         McpCommand::Import { path, strip_env } => import_windsurf_config(&path, strip_env).await,
         McpCommand::Export { path, strip_env } => export_windsurf_config(&path, strip_env).await,
         McpCommand::Install { package, name, env } => {
-            let server_name = name.unwrap_or_else(|| {
-                let parts: Vec<&str> = package.split('/').collect();
-                let pkg_str = package.as_str();
-                let last = parts.last().unwrap_or(&pkg_str);
-                last.replace("server-", "").replace("mcp-", "").to_string()
-            });
+            let server_name = name.unwrap_or_else(|| server_name_for_package(&package));
 
             let args_vec = Some(vec!["-y".to_string(), package]);
 
-            let mut env_map: std::collections::HashMap<String, String> =
-                std::collections::HashMap::new();
-            for item in env {
-                let s = item.trim();
-                if s.is_empty() {
-                    continue;
-                }
-                let Some((k, v)) = s.split_once('=') else {
-                    return Err(i18n::t(
-                        "cmd.mcp.error.invalid_env",
-                        "invalid --env value: {value}",
-                        "invalid --env value: {value}",
-                    )
-                    .replace("{value}", s)
-                    .into());
-                };
-                env_map.insert(k.trim().to_string(), v.to_string());
-            }
-            let env_opt = if env_map.is_empty() {
-                None
-            } else {
-                Some(env_map)
-            };
+            let env_opt = parse_env_pairs(&env)?;
 
             let transport_cfg = TransportConfig {
                 transport_type: "stdio".to_string(),
@@ -621,5 +616,110 @@ pub async fn execute_mcp_command(
 
             add_mcp_server(server_name, config).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn env_pairs_are_optional_and_blank_entries_ignored() {
+        assert_eq!(parse_env_pairs(&[]).unwrap(), None);
+        assert_eq!(parse_env_pairs(&env(&["", "   "])).unwrap(), None);
+
+        let parsed = parse_env_pairs(&env(&[" API_KEY=abc ", "DEBUG=true"]))
+            .unwrap()
+            .expect("map");
+        assert_eq!(parsed.get("API_KEY").map(String::as_str), Some("abc"));
+        assert_eq!(parsed.get("DEBUG").map(String::as_str), Some("true"));
+    }
+
+    /// 值里可以再出现 `=`（token、base64、URL query 都常见），只按第一个切分。
+    #[test]
+    fn env_values_may_contain_equals_signs() {
+        let parsed = parse_env_pairs(&env(&["URL=https://x/y?a=b"]))
+            .unwrap()
+            .expect("map");
+        assert_eq!(
+            parsed.get("URL").map(String::as_str),
+            Some("https://x/y?a=b")
+        );
+    }
+
+    #[test]
+    fn malformed_env_entries_are_rejected() {
+        let err = parse_env_pairs(&env(&["NO_EQUALS"])).unwrap_err();
+        assert!(err.contains("invalid --env value: NO_EQUALS"), "{err}");
+
+        let err = parse_env_pairs(&env(&["=orphan-value"])).unwrap_err();
+        assert!(err.contains("invalid --env key: =orphan-value"), "{err}");
+    }
+
+    /// `install` 以前对空 key 放行，`add` 拒绝 —— 同一个旗子不能有两种语义。
+    #[tokio::test]
+    async fn both_add_and_install_share_one_env_parser() {
+        let result = execute_mcp_command(McpCommand::Install {
+            package: "@scope/server-x".to_string(),
+            name: None,
+            env: env(&["=v"]),
+        })
+        .await;
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("invalid --env key"), "{err}");
+    }
+
+    #[test]
+    fn package_names_derive_a_predictable_server_name() {
+        assert_eq!(
+            server_name_for_package("@modelcontextprotocol/server-memory"),
+            "memory"
+        );
+        assert_eq!(server_name_for_package("mcp-server-fetch"), "fetch");
+        assert_eq!(server_name_for_package("plain"), "plain");
+        assert_eq!(server_name_for_package("  @a/b  "), "b");
+    }
+
+    #[test]
+    fn stdio_transport_requires_a_command() {
+        assert!(validate_transport("stdio", None, None).is_err());
+        assert!(validate_transport("stdio", Some("   "), None).is_err());
+        assert!(validate_transport("stdio", Some("npx"), None).is_ok());
+    }
+
+    #[test]
+    fn url_transports_require_a_url() {
+        for transport in ["http", "sse", "streamable_http"] {
+            let err = validate_transport(transport, None, None).unwrap_err();
+            assert!(err.contains("requires --url"), "{transport}: {err}");
+            assert!(validate_transport(transport, None, Some("https://example.com")).is_ok());
+        }
+    }
+
+    #[test]
+    fn unknown_transports_are_not_failed_here() {
+        // 兼容层可能有别的名字；真正的握手错误在 initialize 时出现，
+        // 这里只拦"必定连不上"的那两种必需品。
+        assert!(validate_transport("wasm", None, None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn adding_a_stdio_server_without_a_command_fails_before_writing() {
+        let result = execute_mcp_command(McpCommand::Add {
+            name: "bad".to_string(),
+            transport: "stdio".to_string(),
+            command: None,
+            args: None,
+            url: None,
+            env: Vec::new(),
+            disabled: false,
+        })
+        .await;
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("requires --command"), "{err}");
     }
 }

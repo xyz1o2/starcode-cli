@@ -1071,3 +1071,246 @@ fn summarize_runtime_warnings(plugin: &crate::core::plugins::ResolvedPlugin) -> 
     }
     lines.join("\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::plugins::{
+        PluginEntry, PluginLifecycleExecution, PluginRuntimeCommand, PluginRuntimeManifest,
+        PluginRuntimeTool, ResolvedPlugin,
+    };
+
+    fn plugin(name: &str) -> ResolvedPlugin {
+        ResolvedPlugin {
+            entry: PluginEntry {
+                name: name.to_string(),
+                source: "local:./plugins/demo".to_string(),
+                install_type: "local".to_string(),
+                installed_at: 1_700_000_000,
+                enabled: true,
+                scope: "project".to_string(),
+            },
+            root: PathBuf::from("/tmp/demo-plugin"),
+            root_exists: true,
+            manifest_path: Some(PathBuf::from("/tmp/demo-plugin/plugin.json")),
+            runtime_manifest: None,
+            runtime_error: None,
+            runtime_warnings: Vec::new(),
+        }
+    }
+
+    fn runtime_with_one_command_and_tool() -> PluginRuntimeManifest {
+        PluginRuntimeManifest {
+            name: Some("demo".to_string()),
+            commands: vec![PluginRuntimeCommand {
+                name: "deploy".to_string(),
+                description: "Ship it".to_string(),
+                command: "echo deploy".to_string(),
+                timeout: None,
+                enabled: None,
+            }],
+            tools: vec![PluginRuntimeTool {
+                name: "lookup".to_string(),
+                description: "Look something up".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                command: "echo lookup".to_string(),
+                args: Vec::new(),
+                required_permission: Default::default(),
+                enabled: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn lifecycle(name: &str, success: bool) -> PluginLifecycleExecution {
+        PluginLifecycleExecution {
+            name: name.to_string(),
+            stage: crate::core::plugins::PluginLifecycleStage::Init,
+            plugin_name: "demo".to_string(),
+            source: "local".to_string(),
+            command: "true".to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(if success { 0 } else { 1 }),
+            success,
+            timed_out: false,
+            error: None,
+        }
+    }
+
+    /// 运行状态是 `/plugin list` 唯一的健康信号，四种情况必须互不混淆。
+    #[test]
+    fn runtime_status_distinguishes_the_four_states() {
+        let mut missing = plugin("demo");
+        missing.root_exists = false;
+        assert_eq!(
+            describe_runtime_status(&missing),
+            "missing plugin directory"
+        );
+
+        let mut broken = plugin("demo");
+        broken.runtime_error = Some("bad json".to_string());
+        assert_eq!(describe_runtime_status(&broken), "manifest error");
+
+        assert_eq!(
+            describe_runtime_status(&plugin("demo")),
+            "no runtime manifest"
+        );
+
+        let mut healthy = plugin("demo");
+        healthy.runtime_manifest = Some(runtime_with_one_command_and_tool());
+        assert_eq!(
+            describe_runtime_status(&healthy),
+            "manifest detected, 0 hook(s), 1 command(s), 1 tool(s), 0 lifecycle command(s)"
+        );
+
+        healthy.runtime_warnings = vec!["a".to_string(), "b".to_string()];
+        assert!(describe_runtime_status(&healthy).ends_with("2 warning(s)"));
+    }
+
+    #[test]
+    fn validation_report_counts_and_groups_problems() {
+        let mut clean = plugin("clean");
+        clean.runtime_manifest = Some(PluginRuntimeManifest::default());
+
+        let mut warn = plugin("warn");
+        warn.runtime_warnings = vec!["timeout too large".to_string()];
+
+        let mut broken = plugin("broken");
+        broken.entry.enabled = false;
+        broken.runtime_error = Some("manifest is not valid JSON".to_string());
+
+        let report = render_plugin_validation_report(&[clean, warn, broken], None);
+        assert!(report.starts_with("# Plugin Validation\n"), "{report}");
+        assert!(report.contains("- plugins: 3"), "{report}");
+        assert!(report.contains("- healthy: 1"), "{report}");
+        assert!(report.contains("- plugins_with_errors: 1"), "{report}");
+        assert!(report.contains("- plugins_with_warnings: 1"), "{report}");
+        assert!(report.contains("- total_warnings: 1"), "{report}");
+        assert!(report.contains("- disabled: 1"), "{report}");
+        assert!(report.contains("## Problems"), "{report}");
+        assert!(
+            report.contains("`broken` | status=error | enabled=false"),
+            "{report}"
+        );
+        assert!(
+            report.contains("`warn` | status=warning | enabled=true"),
+            "{report}"
+        );
+        assert!(
+            !report.contains("`clean` |"),
+            "healthy plugins stay out of Problems:\n{report}"
+        );
+    }
+
+    /// 全部健康时不该出现空的 Problems 小节 —— 空标题会让用户以为输出被截断了。
+    #[test]
+    fn a_clean_validation_report_says_so_and_is_scoped_by_name() {
+        let report = render_plugin_validation_report(&[plugin("demo")], Some("demo"));
+        assert!(report.starts_with("# Plugin Validation `demo`"), "{report}");
+        assert!(report.contains("- plugins_with_errors: 0"), "{report}");
+        assert!(report.contains("未发现 runtime 问题"), "{report}");
+        assert!(!report.contains("## Problems"), "{report}");
+    }
+
+    #[test]
+    fn lifecycle_summaries_count_successes_and_failures() {
+        assert_eq!(summarize_lifecycle_result(None, "init"), "");
+        assert_eq!(summarize_lifecycle_result(Some(&[]), "init"), "");
+
+        let all_ok = vec![lifecycle("a", true), lifecycle("b", true)];
+        assert_eq!(
+            summarize_lifecycle_result(Some(&all_ok), "init"),
+            "\n- lifecycle_init: 2 command(s) ok"
+        );
+
+        let mixed = vec![lifecycle("a", true), lifecycle("b", false)];
+        assert_eq!(
+            summarize_lifecycle_result(Some(&mixed), "shutdown"),
+            "\n- lifecycle_shutdown: 1 ok, 1 failed"
+        );
+    }
+
+    #[test]
+    fn warning_summaries_are_capped_with_a_remainder() {
+        let mut demo = plugin("demo");
+        assert_eq!(summarize_runtime_warnings(&demo), "");
+
+        demo.runtime_warnings = (0..6).map(|i| format!("w{i}")).collect();
+        let summary = summarize_runtime_warnings(&demo);
+        assert!(summary.contains("- runtime_warnings: 6"), "{summary}");
+        assert!(summary.contains("- warning: w0"), "{summary}");
+        assert!(summary.contains("- warning: w3"), "{summary}");
+        assert!(!summary.contains("- warning: w4"), "{summary}");
+        assert!(summary.contains("还有 2 条"), "{summary}");
+    }
+
+    #[test]
+    fn optional_display_collapses_blank_values() {
+        assert_eq!(optional_display(None), "-");
+        assert_eq!(optional_display(Some("   ")), "-");
+        assert_eq!(optional_display(Some("  hello ")), "hello");
+    }
+
+    #[test]
+    fn trim_line_flattens_newlines_and_caps_length() {
+        assert_eq!(trim_line("a\nb"), "a b");
+        let long = "y".repeat(400);
+        assert_eq!(trim_line(&long).chars().count(), 183);
+        assert!(trim_line(&long).ends_with("..."));
+    }
+
+    /// detail 是人用来判断"这个插件到底加载了什么"的视图，字段一个都不能少。
+    #[test]
+    fn plugin_detail_reports_identity_and_runtime_sections() {
+        let mut demo = plugin("demo");
+        demo.runtime_manifest = Some(runtime_with_one_command_and_tool());
+        demo.runtime_warnings = vec!["unknown key: foo".to_string()];
+
+        let detail = render_plugin_detail(&demo);
+        assert!(detail.starts_with("# Plugin `demo`"), "{detail}");
+        assert!(detail.contains("- enabled: true"), "{detail}");
+        assert!(detail.contains("- install_type: local"), "{detail}");
+        assert!(detail.contains("- runtime: manifest detected"), "{detail}");
+        assert!(detail.contains("- runtime_warning_count: 1"), "{detail}");
+        assert!(detail.contains("## Manifest"), "{detail}");
+
+        let mut missing = plugin("gone");
+        missing.root_exists = false;
+        missing.manifest_path = None;
+        let detail = render_plugin_detail(&missing);
+        assert!(detail.contains("root_exists: false"), "{detail}");
+        assert!(detail.contains("missing plugin directory"), "{detail}");
+    }
+
+    #[test]
+    fn update_results_report_success_and_failure_without_dumping_multiline_output() {
+        let ok = crate::core::plugins::UpdatePluginResult {
+            plugin_name: "demo".to_string(),
+            install_type: "git".to_string(),
+            success: true,
+            output: "Already up to date.\n".to_string(),
+            error: None,
+        };
+        let rendered = render_update_result(&ok);
+        assert!(
+            rendered.starts_with("✅ `demo` [git] updated"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains('\n') || rendered.lines().count() == 2);
+
+        let failed = crate::core::plugins::UpdatePluginResult {
+            plugin_name: "demo".to_string(),
+            install_type: "git".to_string(),
+            success: false,
+            output: String::new(),
+            error: Some("network\ndown".to_string()),
+        };
+        let rendered = render_update_result(&failed);
+        assert!(
+            rendered.starts_with("❌ `demo` [git] update failed"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("network down"), "{rendered}");
+    }
+}

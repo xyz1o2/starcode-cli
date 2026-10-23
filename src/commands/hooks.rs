@@ -41,10 +41,19 @@ pub enum HooksCommand {
 
 pub async fn execute_hooks_command(ctx: CommandContext<'_>, cmd: HooksCommand) -> CommandResult {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    execute_hooks_command_in(ctx, cmd, &cwd).await
+}
 
+/// 真正的实现。`cwd` 走参数而不是 `current_dir()`，单测才能在临时目录里
+/// 增删 hook —— 否则测一次就污染了开发者自己的 `.star/hooks.json`。
+pub(crate) async fn execute_hooks_command_in(
+    ctx: CommandContext<'_>,
+    cmd: HooksCommand,
+    cwd: &std::path::Path,
+) -> CommandResult {
     match cmd {
         HooksCommand::List => {
-            let hooks = crate::core::hooks::store::list_hooks(&cwd)
+            let hooks = crate::core::hooks::store::list_hooks(cwd)
                 .await
                 .map_err(|e| format!("failed to list hooks: {}", e))?;
 
@@ -88,7 +97,7 @@ pub async fn execute_hooks_command(ctx: CommandContext<'_>, cmd: HooksCommand) -
                 .ok_or("invalid event, expected SessionStart|SessionEnd|BeforeAgent|AfterAgent|Notification|UserPromptSubmit|Stop|PreCompact|BeforeToolSelection|BeforeModel|AfterModel|PreToolUse|PostToolUse|SubagentStop")?;
             let command = command.join(" ").trim().to_string();
             let hook =
-                crate::core::hooks::store::add_hook(&cwd, name, event, command, timeout, blocking)
+                crate::core::hooks::store::add_hook(cwd, name, event, command, timeout, blocking)
                     .await
                     .map_err(|e| format!("failed to add hook: {}", e))?;
 
@@ -106,7 +115,7 @@ pub async fn execute_hooks_command(ctx: CommandContext<'_>, cmd: HooksCommand) -
             Ok(())
         }
         HooksCommand::Remove { name } => {
-            let removed = crate::core::hooks::store::remove_hook(&cwd, &name)
+            let removed = crate::core::hooks::store::remove_hook(cwd, &name)
                 .await
                 .map_err(|e| format!("failed to remove hook: {}", e))?;
 
@@ -125,7 +134,7 @@ pub async fn execute_hooks_command(ctx: CommandContext<'_>, cmd: HooksCommand) -
                 .ok_or("invalid event, expected SessionStart|SessionEnd|BeforeAgent|AfterAgent|Notification|UserPromptSubmit|Stop|PreCompact|BeforeToolSelection|BeforeModel|AfterModel|PreToolUse|PostToolUse|SubagentStop")?;
 
             let results = crate::core::hooks::runner::run_hooks(
-                &cwd,
+                cwd,
                 event.clone(),
                 &crate::core::hooks::runner::HookRunContext {
                     user_message: message,
@@ -186,5 +195,208 @@ fn trim_line(s: &str) -> String {
         one_line
     } else {
         format!("{}...", one_line.chars().take(180).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::execution::CommandContext;
+    use crate::ui::state::ChatState;
+
+    /// 每次调用都新建 state + channel：命令只往 `chat_history` 末尾追加一条，
+    /// 断言最后一条就是这条命令的输出。
+    async fn run_in(cwd: &std::path::Path, cmd: HooksCommand) -> Result<String, String> {
+        let mut state = ChatState::test_fixture();
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+        execute_hooks_command_in(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            cmd,
+            cwd,
+        )
+        .await?;
+        Ok(state
+            .chat_history
+            .last()
+            .map(|entry| entry.content.clone())
+            .unwrap_or_default())
+    }
+
+    fn add(name: &str, event: &str, command: &str) -> HooksCommand {
+        HooksCommand::Add {
+            name: name.to_string(),
+            event: event.to_string(),
+            command: command.split(' ').map(str::to_string).collect(),
+            timeout: 20,
+            blocking: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn list_without_configuration_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run_in(dir.path(), HooksCommand::List).await.unwrap();
+        assert_eq!(out, "No hooks configured.");
+    }
+
+    #[tokio::test]
+    async fn add_persists_and_list_reports_every_field() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let added = run_in(dir.path(), add("guard", "PreToolUse", "echo guard"))
+            .await
+            .unwrap();
+        assert!(added.contains("- name: `guard`"), "{added}");
+        assert!(added.contains("- event: PreToolUse"), "{added}");
+        assert!(added.contains("- timeout: 20s"), "{added}");
+        assert!(added.contains("- blocking: no"), "{added}");
+        assert!(added.contains("- command: echo guard"), "{added}");
+
+        let listed = run_in(dir.path(), HooksCommand::List).await.unwrap();
+        assert!(listed.starts_with("# Hooks"), "{listed}");
+        assert!(listed.contains("- `guard` [PreToolUse]"), "{listed}");
+        assert!(listed.contains("source: managed"), "{listed}");
+        assert!(listed.contains("command: echo guard"), "{listed}");
+    }
+
+    #[tokio::test]
+    async fn remove_reports_whether_the_hook_existed() {
+        let dir = tempfile::tempdir().unwrap();
+        run_in(dir.path(), add("guard", "PreToolUse", "echo guard"))
+            .await
+            .unwrap();
+
+        let removed = run_in(
+            dir.path(),
+            HooksCommand::Remove {
+                name: "guard".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(removed, "Hook `guard` removed");
+
+        let again = run_in(
+            dir.path(),
+            HooksCommand::Remove {
+                name: "guard".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(again, "Hook `guard` not found");
+    }
+
+    /// 事件名的大小写/下划线漂移由 `ManagedHookEvent::parse` 吸收；
+    /// 真正非法的名字必须在落盘前被拒绝。
+    #[tokio::test]
+    async fn event_names_are_normalized_and_invalid_ones_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let added = run_in(dir.path(), add("s", "session_start", "true"))
+            .await
+            .unwrap();
+        assert!(added.contains("- event: SessionStart"), "{added}");
+
+        let err = run_in(dir.path(), add("bad", "on-everything", "true"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("invalid event"), "{err}");
+
+        let listed = run_in(dir.path(), HooksCommand::List).await.unwrap();
+        assert!(
+            !listed.contains("bad"),
+            "rejected hook must not persist:\n{listed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn adding_a_hook_without_a_command_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = run_in(
+            dir.path(),
+            HooksCommand::Add {
+                name: "empty".to_string(),
+                event: "Stop".to_string(),
+                command: vec!["   ".to_string()],
+                timeout: 5,
+                blocking: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("failed to add hook"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn run_without_matching_hooks_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run_in(
+            dir.path(),
+            HooksCommand::Run {
+                event: "Stop".to_string(),
+                message: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "No enabled hooks found for event Stop.");
+    }
+
+    #[tokio::test]
+    async fn run_executes_matching_hooks_and_reports_their_output() {
+        let dir = tempfile::tempdir().unwrap();
+        run_in(dir.path(), add("say-hi", "SessionStart", "echo hi"))
+            .await
+            .unwrap();
+
+        let out = run_in(
+            dir.path(),
+            HooksCommand::Run {
+                event: "SessionStart".to_string(),
+                message: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(out.contains("# Hook Run Results (SessionStart)"), "{out}");
+        assert!(out.contains("`say-hi`: ok"), "{out}");
+        assert!(out.contains("stdout: hi"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn run_reports_failing_hooks_instead_of_hiding_them() {
+        let dir = tempfile::tempdir().unwrap();
+        run_in(
+            dir.path(),
+            add("boom", "Stop", "sh -c 'echo bad >&2; exit 3'"),
+        )
+        .await
+        .unwrap();
+
+        let out = run_in(
+            dir.path(),
+            HooksCommand::Run {
+                event: "Stop".to_string(),
+                message: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(out.contains("`boom`: failed"), "{out}");
+        assert!(out.contains("exit=Some(3)"), "{out}");
+        assert!(out.contains("stderr: bad"), "{out}");
+    }
+
+    #[test]
+    fn trim_line_flattens_newlines_and_caps_length() {
+        assert_eq!(trim_line("a\nb\r\nc"), "a b  c");
+        let long = "x".repeat(300);
+        let trimmed = trim_line(&long);
+        assert_eq!(trimmed.chars().count(), 183, "180 chars + ellipsis");
+        assert!(trimmed.ends_with("..."));
     }
 }

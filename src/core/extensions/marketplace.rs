@@ -46,7 +46,9 @@ const DEFAULT_INDEX_URL: &str =
 const BUILTIN_SKILLS: &[(&str, &str, &str)] = &[
     ("analyzer", "Code analysis expert", "skills/analyzer"),
     ("editor", "Batch editing expert", "skills/editor"),
-    ("Grep", "Search expert", "skills/search"),
+    // 名字必须和 `search_skill.md` 的 frontmatter `name: search` 一致，
+    // 否则装出来的目录、注册表条目和技能本体是三套名字。
+    ("search", "Search expert", "skills/search"),
     (
         "navigator",
         "Recursive context navigator",
@@ -69,12 +71,19 @@ pub struct Marketplace {
 impl Marketplace {
     pub fn new() -> Self {
         let marketplace_dir = ExtensionRegistryManager::marketplace_dir();
-        let index_path = marketplace_dir.join("index.json");
-        let packages_dir = marketplace_dir.join("packages");
+        Self::with_roots(
+            &ExtensionRegistryManager::global_extensions_dir(),
+            &marketplace_dir,
+        )
+    }
+
+    /// 显式指定两个根目录：`extensions_dir` 是安装落点，`marketplace_dir`
+    /// 放索引与下载包。单测靠它把安装动作关进临时目录。
+    pub fn with_roots(extensions_dir: &Path, marketplace_dir: &Path) -> Self {
         Self {
-            registry: ExtensionRegistryManager::new(),
-            index_path,
-            packages_dir,
+            registry: ExtensionRegistryManager::with_root(extensions_dir),
+            index_path: marketplace_dir.join("index.json"),
+            packages_dir: marketplace_dir.join("packages"),
         }
     }
 
@@ -241,8 +250,11 @@ impl Marketplace {
         &self,
         entry: &MarketplaceEntry,
     ) -> Result<InstallResult, String> {
-        let extensions_dir = ExtensionRegistryManager::global_extensions_dir();
-        let skills_dir = extensions_dir.join("skills").join(&entry.name);
+        let skills_dir = self
+            .registry
+            .extensions_dir()
+            .join("skills")
+            .join(&entry.name);
 
         // Check if already installed
         if self.registry.is_installed(&entry.name) {
@@ -304,8 +316,11 @@ impl Marketplace {
 
     /// Install a plugin
     async fn install_plugin(&self, entry: &MarketplaceEntry) -> Result<InstallResult, String> {
-        let extensions_dir = ExtensionRegistryManager::global_extensions_dir();
-        let plugin_dir = extensions_dir.join("plugins").join(&entry.name);
+        let plugin_dir = self
+            .registry
+            .extensions_dir()
+            .join("plugins")
+            .join(&entry.name);
 
         if self.registry.is_installed(&entry.name) {
             return Ok(InstallResult {
@@ -337,8 +352,7 @@ impl Marketplace {
         }
 
         // For git-based MCP servers
-        let extensions_dir = ExtensionRegistryManager::global_extensions_dir();
-        let mcp_dir = extensions_dir.join("mcp").join(&entry.name);
+        let mcp_dir = self.registry.extensions_dir().join("mcp").join(&entry.name);
         self.install_from_git(entry, &mcp_dir).await
     }
 
@@ -529,7 +543,7 @@ impl Marketplace {
                 include_str!("../../agent/skills/resources/editor_skill.md"),
             ),
             (
-                "Grep",
+                "search",
                 include_str!("../../agent/skills/resources/search_skill.md"),
             ),
             (

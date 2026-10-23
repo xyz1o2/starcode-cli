@@ -74,7 +74,7 @@ pub async fn handle_command(
     ctx: CommandContext<'_>,
 ) -> CommandResult {
     match name {
-        "help" => core::help(ctx, args).await,
+        "help" | "?" => core::help(ctx, args).await,
         "clear" | "new" | "reset" => core::clear(ctx, args).await,
         "exit" => core::exit(ctx, args).await,
         "about" => core::about(ctx, args).await,
@@ -238,6 +238,9 @@ pub async fn handle_command(
         "connect" => connect::run(ctx, args).await,
         "deep-link" => features::deep_link(ctx, args).await,
         "teleport" => features::teleport(ctx, args).await,
+        // `teleport` 的声明别名。`alt_names` 只喂给 /help 与补全，输入 `/tp`
+        // 仍然只有这里能接住 —— 漏一次就变成"看得见、用不了"。
+        "tp" => features::teleport(ctx, args).await,
         "wiki" => features::wiki(ctx, args).await,
         "buddy" => features::buddy(ctx, args).await,
         "commit-and-push" => git_wrapper(args).await,
@@ -1238,5 +1241,79 @@ mod dispatch_tests {
         let reply = &state.chat_history.last().expect("config response").content;
         assert!(reply.contains("Unknown config subcommand"));
         assert!(reply.contains("/config set"));
+    }
+
+    /// `handle_command` 的函数体源码。
+    ///
+    /// 为什么要读源码：`ALL_COMMANDS` 里的命令一旦漏了 `match` 分支，行为是
+    /// **静默**的 —— `is_declared_pending()` 只认 `category == "Pending"`，
+    /// 其余孤儿会照常出现在 `/help` 和补全里，敲下去才报 Unknown command。
+    /// `/eval` 就这样活了很久。这条规则没法用"调一遍"来测（`/commit`、
+    /// `/login` 之类真的会跑 git、开浏览器），所以退一步守住"声明必须有分支"
+    /// 这个可静态判定的部分。
+    fn handle_command_body() -> &'static str {
+        const SOURCE: &str = include_str!("mod.rs");
+        let start = SOURCE
+            .find("pub async fn handle_command(")
+            .expect("handle_command must exist");
+        let rest = &SOURCE[start..];
+        let end = rest.find("\n}\n").expect("handle_command body end");
+        &rest[..end]
+    }
+
+    /// 从 `match` 分支里抠出所有字符串字面量（命令名没有转义字符）。
+    fn dispatched_names() -> Vec<&'static str> {
+        let body = handle_command_body();
+        let mut names = Vec::new();
+        let mut rest = body;
+        while let Some(open) = rest.find('"') {
+            let after = &rest[open + 1..];
+            let Some(close) = after.find('"') else {
+                break;
+            };
+            names.push(&after[..close]);
+            rest = &after[close + 1..];
+        }
+        names
+    }
+
+    #[test]
+    fn every_declared_command_reaches_a_dispatch_arm() {
+        let names = dispatched_names();
+        let mut missing = Vec::new();
+        for cmd in crate::commands::system::ALL_COMMANDS {
+            for name in std::iter::once(cmd.name).chain(cmd.alt_names.iter().copied()) {
+                if !names.contains(&name) {
+                    missing.push(format!("{} (declared as `{}`)", name, cmd.name));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "declared but never dispatched — these would answer Unknown command:\n  {}",
+            missing.join("\n  ")
+        );
+    }
+
+    /// 悬空声明只是"用不了"，写错命令名则连线索都没有 —— 这里确认
+    /// typo 会指向真正的命令（`/perm` → `/permissions`）。
+    #[tokio::test]
+    async fn unknown_commands_suggest_the_closest_declared_name() {
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+
+        let err = handle_command(
+            "perm",
+            Vec::new(),
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.contains("Unknown command: /perm"), "{err}");
+        assert!(err.contains("did you mean /permissions?"), "{err}");
     }
 }

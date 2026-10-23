@@ -12,12 +12,24 @@ pub struct ExtensionRegistryManager {
 
 impl ExtensionRegistryManager {
     pub fn new() -> Self {
-        let extensions_dir = Self::global_extensions_dir();
-        let registry_path = extensions_dir.join("registry.json");
+        Self::with_root(&Self::global_extensions_dir())
+    }
+
+    /// 以 `extensions_dir` 为根构造。单测用它指向临时目录 ——
+    /// 否则每跑一次测试都会往开发者自己的 `~/.star/extensions/registry.json`
+    /// 里写条目，而且测试之间会互相看见对方装的扩展。
+    pub fn with_root(extensions_dir: &Path) -> Self {
         Self {
-            registry_path,
-            extensions_dir,
+            registry_path: extensions_dir.join("registry.json"),
+            extensions_dir: extensions_dir.to_path_buf(),
         }
+    }
+
+    /// 本实例的安装根目录。安装流程必须走这里而不是
+    /// `global_extensions_dir()`，否则用 `with_root` 构造的实例照样往
+    /// `~/.star` 里写。
+    pub fn extensions_dir(&self) -> &Path {
+        &self.extensions_dir
     }
 
     /// Get the global extensions directory (~/.star/extensions)

@@ -3733,6 +3733,7 @@ mod tests {
                 output: None,
                 error: Some("cancelled".to_string()),
                 data: None,
+                llm_content: None,
             },
         );
 

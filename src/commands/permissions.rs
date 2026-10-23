@@ -125,7 +125,11 @@ fn reply(state: &mut crate::ui::state::store::ChatState, msg: String) {
 /// 当前生效的模式 + 规则 + 来源文件。规则是 settings 各层的并集，
 /// 所以逐个文件再解析一遍才能标出每条规则是哪来的。
 fn render_overview(cwd: &Path, mode: &ApprovalMode) -> String {
-    let merged = SettingsPermissions::from_project(cwd);
+    render_overview_with(cwd, mode, SettingsPermissions::from_project(cwd))
+}
+
+/// `merged` 由调用方给：单测不该被开发机 `~/.star/settings.json` 里的规则左右。
+fn render_overview_with(cwd: &Path, mode: &ApprovalMode, merged: SettingsPermissions) -> String {
     let mut out = format!("**Approval mode:** `{}`\n", mode_label(mode));
 
     if let Some(default_mode) = merged.default_mode.as_ref() {
@@ -381,5 +385,343 @@ fn mode_label(mode: &ApprovalMode) -> &'static str {
         ApprovalMode::AcceptEdits => "acceptEdits",
         ApprovalMode::Plan => "plan",
         ApprovalMode::Yolo => "yolo",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 规则文件是 `.star/settings.local.json`；单测只碰临时目录，绝不落到仓库里。
+    fn perms_with_raw(allow: &[&str], ask: &[&str], deny: &[&str]) -> SettingsPermissions {
+        let mut perms = SettingsPermissions::default();
+        perms.allow = allow
+            .iter()
+            .filter_map(|raw| PermissionRuleSpec::parse(raw))
+            .collect();
+        perms.ask = ask
+            .iter()
+            .filter_map(|raw| PermissionRuleSpec::parse(raw))
+            .collect();
+        perms.deny = deny
+            .iter()
+            .filter_map(|raw| PermissionRuleSpec::parse(raw))
+            .collect();
+        perms
+    }
+
+    fn local_rule_buckets(cwd: &Path) -> Vec<(String, String)> {
+        let local = SettingsPermissions::from_paths(&[settings_rules::local_settings_path(cwd)]);
+        let mut out = Vec::new();
+        for (bucket, rules) in [
+            ("allow", &local.allow),
+            ("ask", &local.ask),
+            ("deny", &local.deny),
+        ] {
+            for rule in rules {
+                out.push((bucket.to_string(), rule.raw.clone()));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn overview_states_the_mode_and_where_rules_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = render_overview_with(
+            dir.path(),
+            &ApprovalMode::AcceptEdits,
+            SettingsPermissions::default(),
+        );
+
+        assert!(out.contains("**Approval mode:** `acceptEdits`"), "{out}");
+        assert!(out.contains("No permission rules configured."), "{out}");
+        assert!(
+            out.contains("Rules added here land in"),
+            "the overview must say where writes go:\n{out}"
+        );
+        assert!(
+            out.contains("/permissions allow|ask|deny <rule>"),
+            "the overview is also the command's mini-help:\n{out}"
+        );
+    }
+
+    /// 展示顺序即优先级：deny 在最前面，用户从上往下读就是判定顺序。
+    #[test]
+    fn overview_groups_rules_in_precedence_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let merged = perms_with_raw(&["Read(src/**)"], &["Bash(git push:*)"], &["Edit(.env)"]);
+
+        let out = render_overview_with(dir.path(), &ApprovalMode::Default, merged);
+        let deny_at = out.find("**Deny").expect("deny group");
+        let ask_at = out.find("**Ask").expect("ask group");
+        let allow_at = out.find("**Allow").expect("allow group");
+        assert!(deny_at < ask_at && ask_at < allow_at, "{out}");
+        assert!(out.contains("Precedence: deny > ask > allow"), "{out}");
+    }
+
+    #[test]
+    fn overview_only_reports_settings_default_mode_when_one_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let without = render_overview_with(
+            dir.path(),
+            &ApprovalMode::Default,
+            SettingsPermissions::default(),
+        );
+        assert!(!without.contains("settings `defaultMode`"), "{without}");
+
+        let mut merged = SettingsPermissions::default();
+        merged.default_mode = Some("plan".to_string());
+        let with = render_overview_with(dir.path(), &ApprovalMode::Plan, merged);
+        assert!(
+            with.contains("**settings `defaultMode`:** `plan`"),
+            "{with}"
+        );
+    }
+
+    #[test]
+    fn join_rule_reassembles_split_specifiers() {
+        assert_eq!(
+            join_rule(&["Bash(cargo".to_string(), "test:*)".to_string()]),
+            Some("Bash(cargo test:*)".to_string())
+        );
+        assert_eq!(
+            join_rule(&["\"Read(./.env)\"".to_string()]),
+            Some("Read(./.env)".to_string()),
+            "shell quotes are the user's, not part of the rule"
+        );
+        assert_eq!(join_rule(&[]), None);
+        assert_eq!(join_rule(&["   ".to_string()]), None);
+    }
+
+    #[test]
+    fn adding_a_rule_writes_the_local_layer() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let msg = add_rule(dir.path(), RuleVerdict::Allow, "Bash(cargo test:*)").unwrap();
+        assert!(msg.contains("Added `Bash(cargo test:*)`"), "{msg}");
+        assert!(msg.contains("permissions.allow"), "{msg}");
+        assert_eq!(
+            local_rule_buckets(dir.path()),
+            vec![("allow".to_string(), "Bash(cargo test:*)".to_string())]
+        );
+    }
+
+    /// 同一规则只能有一个裁决：用户先说 allow、后说 deny，就是在改口。
+    #[test]
+    fn re_adding_a_rule_moves_it_between_buckets() {
+        let dir = tempfile::tempdir().unwrap();
+        add_rule(dir.path(), RuleVerdict::Allow, "Edit(src/**)").unwrap();
+
+        let msg = add_rule(dir.path(), RuleVerdict::Deny, "Edit(src/**)").unwrap();
+        assert!(msg.contains("Removed it from `permissions.allow`"), "{msg}");
+        assert_eq!(
+            local_rule_buckets(dir.path()),
+            vec![("deny".to_string(), "Edit(src/**)".to_string())],
+            "the old allow entry must not survive"
+        );
+
+        let again = add_rule(dir.path(), RuleVerdict::Deny, "Edit(src/**)").unwrap();
+        assert!(
+            again.contains("is already in `permissions.deny`"),
+            "{again}"
+        );
+        assert_eq!(local_rule_buckets(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn adding_an_invalid_rule_is_rejected_before_touching_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = add_rule(dir.path(), RuleVerdict::Allow, "   ").unwrap_err();
+        assert!(err.contains("Invalid rule"), "{err}");
+        assert!(!settings_rules::local_settings_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn removing_a_missing_rule_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let msg = remove_rule(dir.path(), "Bash(rm:*)").unwrap();
+        assert!(msg.contains("is not in any permission rule list"), "{msg}");
+    }
+
+    #[test]
+    fn removing_a_local_rule_reports_the_bucket() {
+        let dir = tempfile::tempdir().unwrap();
+        add_rule(dir.path(), RuleVerdict::Ask, "Bash(git push:*)").unwrap();
+
+        let msg = remove_rule(dir.path(), "Bash(git push:*)").unwrap();
+        assert!(msg.contains("Removed `Bash(git push:*)`"), "{msg}");
+        assert!(msg.contains("permissions.ask"), "{msg}");
+        assert!(local_rule_buckets(dir.path()).is_empty());
+    }
+
+    /// 共享层的规则不替用户改，但要指明确切出处，否则用户会以为命令没生效。
+    #[test]
+    fn removing_a_rule_from_a_shared_layer_points_at_that_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let star = dir.path().join(".star");
+        std::fs::create_dir_all(&star).unwrap();
+        std::fs::write(
+            star.join("settings.json"),
+            r#"{"permissions":{"deny":["Bash(rm:*)"]}}"#,
+        )
+        .unwrap();
+
+        let msg = remove_rule(dir.path(), "Bash(rm:*)").unwrap();
+        assert!(msg.contains("is not in `settings.local.json`"), "{msg}");
+        assert!(msg.contains("settings.json"), "{msg}");
+        assert!(msg.contains("permissions.deny"), "{msg}");
+        assert!(msg.contains("/permissions reload"), "{msg}");
+    }
+
+    #[test]
+    fn tool_names_are_normalized_to_registered_spelling() {
+        assert_eq!(normalize_tool_name("bash"), "Bash");
+        assert_eq!(normalize_tool_name("Read"), "Read");
+        assert_eq!(normalize_tool_name("todowrite"), "TodoWrite");
+        // 对标 CC：内置工具名即唯一名，不再维护 `view_file` → `Read` 这类别名表，
+        // 所以旧写法会原样落盘（规则匹配不到任何调用，用户能立刻看出来）。
+        assert_eq!(normalize_tool_name("view_file"), "view_file");
+        // 未知名字原样保留：MCP 的 `mcp__server` 之类不在内建表里。
+        assert_eq!(normalize_tool_name("mcp__github"), "mcp__github");
+    }
+
+    #[test]
+    fn mode_verbs_accept_claude_code_spellings() {
+        assert_eq!(mode_from_verb("default"), Some(ApprovalMode::Default));
+        assert_eq!(mode_from_verb("ask"), Some(ApprovalMode::Default));
+        assert_eq!(
+            mode_from_verb("acceptEdits"),
+            Some(ApprovalMode::AcceptEdits)
+        );
+        assert_eq!(mode_from_verb("readonly"), Some(ApprovalMode::Plan));
+        assert_eq!(
+            mode_from_verb("bypassPermissions"),
+            Some(ApprovalMode::Yolo)
+        );
+        assert_eq!(mode_from_verb("nonsense"), None);
+    }
+
+    #[test]
+    fn mode_labels_round_trip_through_the_verbs() {
+        for mode in [
+            ApprovalMode::Default,
+            ApprovalMode::AcceptEdits,
+            ApprovalMode::Plan,
+            ApprovalMode::Yolo,
+        ] {
+            let label = mode_label(&mode);
+            assert_eq!(
+                mode_from_verb(label),
+                Some(mode.clone()),
+                "`{label}` must parse back to the same mode"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_arguments_are_errors_not_silent_no_ops() {
+        use crate::commands::execution::CommandContext;
+
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+        let before = state.chat_history.len();
+
+        let err = run(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            vec!["frobnicate".to_string()],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.contains("Unknown /permissions argument"), "{err}");
+        assert_eq!(
+            state.chat_history.len(),
+            before,
+            "a rejected argument must not leave a half-written message"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_rule_after_a_bucket_is_a_usage_error() {
+        use crate::commands::execution::CommandContext;
+
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+
+        let err = run(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            vec!["allow".to_string()],
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("Usage: /permissions allow <rule>"), "{err}");
+    }
+
+    /// 旧写法 `/permissions add <tool> <action> [spec]` 必须继续可用，
+    /// 并且把 `bash` 之类的写法归一到注册名。
+    #[tokio::test]
+    async fn the_legacy_add_form_still_works() {
+        use crate::commands::execution::CommandContext;
+
+        // 这里只验证参数校验失败的那一侧（不落盘）：动作名非法。
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+
+        let err = run(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            vec!["add".to_string(), "bash".to_string(), "maybe".to_string()],
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("Unknown action `maybe`"), "{err}");
+
+        let err = run(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            vec!["add".to_string(), "bash".to_string()],
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("Usage: /permissions add"), "{err}");
+    }
+
+    #[test]
+    fn deny_log_rendering_caps_at_twenty_records() {
+        let engine = crate::core::permission_rules::PermissionRuleEngine::new();
+        for i in 0..25 {
+            engine.get_deny_log().record(
+                "Bash",
+                &serde_json::json!({ "command": format!("cmd-{i}") }),
+                "test",
+                None,
+            );
+        }
+
+        let out = render_deny_log(&engine);
+        assert!(out.contains("**Deny log** (25 record(s))"), "{out}");
+        assert!(out.contains("cmd-0"), "{out}");
+        assert!(out.contains("cmd-19"), "{out}");
+        assert!(!out.contains("cmd-20"), "{out}");
+        assert!(out.contains("... 5 more record(s)"), "{out}");
+    }
+
+    #[test]
+    fn the_deny_log_is_empty_by_default() {
+        let engine = crate::core::permission_rules::PermissionRuleEngine::new();
+        let out = render_deny_log(&engine);
+        assert!(out.contains("No denied tool calls recorded."), "{out}");
     }
 }

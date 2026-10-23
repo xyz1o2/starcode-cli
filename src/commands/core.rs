@@ -178,6 +178,116 @@ mod tests {
         assert!(!state.show_clear_confirmation);
         assert_eq!(state.pending_clear_name, None);
     }
+
+    /// `/status` 是用户被告知"这次启动到底读了哪些配置"的唯一地方，
+    /// 段标题与四个 settings 源一个都不能少。
+    #[tokio::test]
+    async fn status_reports_state_and_every_setting_source() {
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        state.current_model = "claude-sonnet-5-5".to_string();
+        state.approval_mode = crate::types::ApprovalMode::Plan;
+        state.git_branch = Some("dev-m".to_string());
+        state.sandbox_enabled = true;
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+
+        status(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        let report = &state.chat_history.last().expect("status report").content;
+        assert!(report.starts_with("# 应用状态"), "{report}");
+        assert!(report.contains("**模型:** claude-sonnet-5-5"), "{report}");
+        assert!(report.contains("**Git:** dev-m"), "{report}");
+        assert!(report.contains("Plan"), "{report}");
+        assert!(report.contains("**沙箱:** 启用"), "{report}");
+
+        // 四个 settings 文件必须逐个列出（存在与否是机器状态，不做断言）
+        assert_eq!(
+            report
+                .lines()
+                .filter(|line| line.starts_with("- ["))
+                .count(),
+            4,
+            "{report}"
+        );
+        assert!(report.contains("user-settings.json"), "{report}");
+        assert!(report.contains("settings.local.json"), "{report}");
+        assert!(report.contains("生效的权限规则: allow="), "{report}");
+    }
+
+    /// 没有 token 数据、没有 git 仓库时也要给出明确说法，而不是留空白。
+    #[tokio::test]
+    async fn status_degrades_gracefully_without_usage_or_git() {
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        state.current_model.clear();
+        state.token_usage = None;
+        state.git_branch = None;
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+
+        status(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        let report = &state.chat_history.last().expect("status report").content;
+        assert!(report.contains("**模型:** 未设置"), "{report}");
+        assert!(report.contains("**Token:** 暂无数据"), "{report}");
+        assert!(report.contains("**Git:** 无仓库"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn exit_only_flags_the_session_for_shutdown() {
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
+
+        exit(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(state.should_exit);
+        // 保存/关闭必须由 run_app 编排；命令自己发 Shutdown 会让 SessionEnd hook
+        // 和原生会话保存各跑两遍。
+        assert!(
+            agent_rx.try_recv().is_err(),
+            "exit must not talk to the worker directly"
+        );
+    }
+
+    #[tokio::test]
+    async fn about_reports_the_crate_version() {
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+
+        about(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        let reply = &state.chat_history.last().expect("about").content;
+        assert!(reply.contains(env!("CARGO_PKG_VERSION")), "{reply}");
+    }
 }
 
 pub async fn clear(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {

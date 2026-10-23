@@ -358,10 +358,7 @@ async fn handle_commit_and_push(
     println!("✅ Generated commit message: \"{}\"", clean_commit_message);
 
     // Execute the commit
-    let commit_command = format!(
-        "git commit -m \"{}\"",
-        clean_commit_message.replace('"', "\\\"")
-    );
+    let commit_command = format!("git commit -m {}", shell_single_quote(clean_commit_message));
     let commit_prompt = format!("Execute this command: {}", commit_command);
     let commit_entries = agent
         .process_user_message(&commit_prompt)
@@ -371,8 +368,7 @@ async fn handle_commit_and_push(
     let mut commit_success = false;
     for entry in &commit_entries {
         if entry.entry_type == types::ChatEntryType::ToolResult
-            && !entry.content.contains("error")
-            && !entry.content.contains("Error")
+            && !tool_result_failed(&entry.content)
         {
             commit_success = true;
             println!("✅ git commit: Commit created successfully");
@@ -395,8 +391,7 @@ async fn handle_commit_and_push(
     let mut push_success = false;
     for entry in &push_entries {
         if entry.entry_type == types::ChatEntryType::ToolResult
-            && !entry.content.contains("error")
-            && !entry.content.contains("Error")
+            && !tool_result_failed(&entry.content)
         {
             push_success = true;
             println!("✅ git push: Push successful");
@@ -410,4 +405,92 @@ async fn handle_commit_and_push(
     }
 
     Ok(())
+}
+
+/// 工具结果是否意味着命令失败了。
+///
+/// 旧判据是 `!content.contains("error")`，两头都错：一条正常输出里只要出现
+/// "0 errors" 就被判成失败；而 `fatal: not a git repository` 里没有 "error"，
+/// 反倒被判成成功，于是流程会继续去 push 一个不存在的仓库。这里认 git 自己
+/// 的失败写法（`fatal:` / `error:` 前缀、`Command failed` 之类），不吃统计行。
+fn tool_result_failed(content: &str) -> bool {
+    content.lines().any(|line| {
+        let lower = line.trim_start().to_ascii_lowercase();
+        lower.starts_with("fatal:")
+            || lower.starts_with("error:")
+            || lower.starts_with("error ")
+            || lower.starts_with("failed ")
+            || lower.contains("command failed")
+    })
+}
+
+/// 提交信息来自模型，必须按数据而不是按 shell 代码对待。
+///
+/// 用单引号整体包住（单引号里 `$`、反引号、反斜杠都不展开），内部的 `'`
+/// 用 `'\''` 断开再接回去。
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn successful_outputs_are_not_mistaken_for_failures() {
+        assert!(!tool_result_failed(""));
+        assert!(!tool_result_failed(
+            "[dev-m 1a2b3c4] fix: thing\n 1 file changed"
+        ));
+        // 统计行里的 "errors" 不是失败
+        assert!(!tool_result_failed("Build succeeded: 0 errors, 2 warnings"));
+        assert!(!tool_result_failed(
+            "Everything up-to-date\nTo github.com:org/repo.git"
+        ));
+    }
+
+    /// `fatal:` 是 git 表达失败的方式，必须被认出来 —— 旧判据在
+    /// `fatal: not a git repository` 上会报告"提交成功"。
+    #[test]
+    fn git_failures_are_detected_by_their_own_phrasing() {
+        assert!(tool_result_failed("fatal: not a git repository"));
+        assert!(tool_result_failed("  fatal: unable to access remote"));
+        assert!(tool_result_failed("error: pathspec 'x' did not match"));
+        assert!(tool_result_failed("error: failed to push some refs"));
+        assert!(tool_result_failed("Failed to execute command"));
+        assert!(tool_result_failed("exit code 1\nCommand failed"));
+        // 只有其中一行失败也算失败
+        assert!(tool_result_failed(
+            "pushing...\nfatal: repository not found"
+        ));
+    }
+
+    #[test]
+    fn commit_messages_are_quoted_as_data() {
+        assert_eq!(shell_single_quote("feat: add thing"), "'feat: add thing'");
+        // 双引号无需转义，单引号按 POSIX 规则断开
+        assert_eq!(shell_single_quote("it's fine"), "'it'\\''s fine'");
+        assert_eq!(shell_single_quote("fix: say \"hi\""), "'fix: say \"hi\"'");
+    }
+
+    /// 真正执行一次 shell，确认模型写进提交信息的命令替换不会被展开。
+    #[cfg(unix)]
+    #[test]
+    fn a_hostile_commit_message_is_not_executed() {
+        use std::process::Command;
+
+        let message = "chore: test $(touch /tmp/starcode-pwned) `id` $HOME";
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf '%s' {}", shell_single_quote(message)))
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), message);
+        assert!(
+            !std::path::Path::new("/tmp/starcode-pwned").exists(),
+            "the message must never be evaluated by the shell"
+        );
+    }
 }

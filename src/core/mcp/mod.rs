@@ -10,7 +10,8 @@ pub mod types;
 
 pub use config::{
     load_effective_mcp_config, load_effective_mcp_servers, load_project_mcp_config,
-    save_project_mcp_config, McpConfigScope, McpServerEntry, WindsurfMcpConfig, WindsurfMcpServer,
+    project_star_mcp_path, save_project_mcp_config, McpConfigScope, McpServerEntry,
+    WindsurfMcpConfig, WindsurfMcpServer,
 };
 pub use manager::MCPManager;
 pub use types::{load_mcp_config, MCPConfig, MCPServerConfig, McpError, TransportConfig};
