@@ -110,6 +110,26 @@ impl ProviderStore {
         }
     }
 
+    /// 指定配置文件路径构造 store —— **只给测试用**。
+    ///
+    /// 端到端测试要真的走一遍「写配置 → 读配置 → 改候选集 → 再读」的完整
+    /// 流程（`ProviderSettings` 上的纯函数测不到序列化那一层），但它不能碰
+    /// 用户真实的 `~/.star/user-settings.json`，也不能靠改 `HOME` 来隔离 ——
+    /// `set_var` 在多线程测试里会漏给同进程里的其它用例。
+    ///
+    /// 所以这里给一条显式的路径注入口子：测试写自己的临时目录，串行跑，
+    /// 互不干扰，也不用动进程环境。
+    #[cfg(test)]
+    pub(crate) fn with_paths(
+        global_config_path: std::path::PathBuf,
+        project_config_path: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            global_config_path,
+            project_config_path,
+        }
+    }
+
     pub async fn load(&self) -> Result<ProviderConfig, String> {
         let mut config = ProviderConfig::default();
         let legacy_path = Storage::global_star_dir().join("providers.json");
@@ -192,6 +212,7 @@ impl ProviderStore {
                             api_key: None,
                             base_url: None,
                             selected_model: None,
+                            default_model: None,
                             models: None,
                             name: None,
                             description: None,
@@ -246,6 +267,31 @@ impl ProviderStore {
                 }
             }
         }
+        // ── 一次性迁移：给老配置补 `default_model` ──
+        //
+        // `default_model` 是"候选列表的头"，`selected_model` 是"当前正在用的
+        // 模型"。升级前这两个角色由同一个字段兼任，于是用户在 `/models` 面板里
+        // 选了列表里的第二项，声明的默认模型就从候选列表里消失了（见
+        // `ProviderSettings::default_model` 的注释）。
+        //
+        // 迁移把老配置里的 `selected_model` 抄一份进 `default_model`，抄完
+        // 这个 provider 的列表头就**固定**下来，再也不跟着 `selected_model` 走。
+        //
+        // 判据是 `default_model` 为空 —— 迁移过一次之后它非空，就不会再跑。
+        // 这里**不能**用"读取时回落"代替迁移：回落会让列表头继续跟着
+        // `selected_model` 变，等于什么都没修。
+        //
+        // 迁移**只在内存里做，不落盘**：`load()` 是读操作，让它写文件会让
+        // 任何一次"读一下配置"都变成"改一下配置"（连测试跑一遍都会动用户的
+        // 配置文件）。真正需要落盘的是下一次写操作 —— 那时 `default_model`
+        // 已经在内存里了，会被一起写下去。迁移是幂等的推导，漏写一次不影响
+        // 正确性：下次 `load()` 还会再推导一遍。
+        for settings in config.providers.values_mut() {
+            if settings.default_model.is_none() {
+                settings.default_model = normalize_model_name(settings.selected_model.clone());
+            }
+        }
+
         if needs_save {
             let _ = self.save(&config).await;
         }
@@ -277,13 +323,19 @@ impl ProviderStore {
                                 api_key: None,
                                 base_url: None,
                                 selected_model: None,
+                                default_model: None,
                                 models: None,
                                 name: None,
                                 description: None,
                                 r#type: None,
                                 order: None,
                             });
-                    settings.selected_model = Some(active_model);
+                    settings.selected_model = Some(active_model.clone());
+                    // 补种的同时给候选列表一个头 —— 老配置的列表头就是
+                    // `selected_model`，不补的话候选列表会是空的。
+                    if settings.default_model.is_none() {
+                        settings.default_model = Some(active_model);
+                    }
                     let _ = self.save(&config).await;
                 }
             }
@@ -388,6 +440,7 @@ impl ProviderStore {
                     api_key: None,
                     base_url: None,
                     selected_model: None,
+                    default_model: None,
                     models: None,
                     name: None,
                     description: None,
@@ -408,6 +461,7 @@ impl ProviderStore {
                     api_key: None,
                     base_url: None,
                     selected_model: None,
+                    default_model: None,
                     models: None,
                     name: None,
                     description: None,
@@ -438,6 +492,7 @@ impl ProviderStore {
                     api_key: None,
                     base_url: None,
                     selected_model: None,
+                    default_model: None,
                     models: None,
                     name: None,
                     description: None,
@@ -473,12 +528,15 @@ impl ProviderStore {
                     api_key: None,
                     base_url: None,
                     selected_model: None,
+                    default_model: None,
                     models: None,
                     name: None,
                     description: None,
                     r#type: None,
                     order: None,
                 });
+            // 同 `set_active_provider_and_model`：只改当前选中项，不动候选列表。
+            // 老配置的 `default_model` 已由 `load()` 的一次性迁移补好。
             settings.selected_model = normalize_model_name(Some(model.to_string()));
         }
         self.save(&config).await
@@ -501,12 +559,23 @@ impl ProviderStore {
                     api_key: None,
                     base_url: None,
                     selected_model: None,
+                    default_model: None,
                     models: None,
                     name: None,
                     description: None,
                     r#type: None,
                     order: None,
                 });
+        // 只改「当前选中项」，**不动** `default_model` / `models` ——
+        // 候选列表是用户声明的，改一次当前选中不该把它改没了。
+        //
+        // 修复前这里写的是 `selected_model`，而 `selected_model` 同时兼任
+        // 「候选列表首项」—— 于是用户在面板里选了第二项，首项（用户声明的默认
+        // 模型）就从列表里消失，保存一次之后彻底丢失。
+        //
+        // 老配置没有 `default_model`：**上面那次 `load()` 已经迁移过了**
+        // （见 `load()` 里的一次性迁移），所以这里不需要、也不应该再补种 ——
+        // 那会把耦合又装回去。
         settings.selected_model = normalize_model_name(Some(model.to_string()));
         self.save(&config).await
     }
@@ -617,7 +686,7 @@ impl ProviderStore {
         provider_type: &str,
         base_url: Option<&str>,
         api_key: Option<&str>,
-        selected_model: Option<&str>,
+        default_model: Option<&str>,
     ) -> Result<(), String> {
         let mut config = self.load().await?;
         let settings =
@@ -628,6 +697,7 @@ impl ProviderStore {
                     api_key: None,
                     base_url: None,
                     selected_model: None,
+                    default_model: None,
                     models: None,
                     name: None,
                     description: None,
@@ -639,7 +709,10 @@ impl ProviderStore {
         settings.r#type = Some(provider_type.to_string());
         settings.base_url = normalize_optional_string(base_url.map(str::to_string));
         settings.api_key = normalize_api_key(api_key.map(str::to_string));
-        settings.selected_model = normalize_model_name(selected_model.map(str::to_string));
+        // 这一步写的是**候选列表的头**（`default_model`），不是"当前选中项"
+        // （`selected_model`）。后者由 `set_candidate_models` 一并落盘 ——
+        // 用户在 `/models` 面板里选的模型不该被"编辑 provider"这个动作改掉。
+        settings.default_model = normalize_model_name(default_model.map(str::to_string));
         // 只有在还没有 order 的情况下打时间戳：重新配置一个已存在的 provider
         // 不该改变它在列表里的位置。
         if settings.order.is_none() {
@@ -848,5 +921,218 @@ mod tests {
             resolve_provider_id_conflicts("fresh-id", &config),
             "fresh-id"
         );
+    }
+
+    // ---- 端到端：候选列表 vs 当前选中项（走真实磁盘）----
+
+    /// 迁移的结果必须在下一次**写操作**时落到磁盘。
+    ///
+    /// `load()` 是读操作，不该写用户的文件；但迁移的结果不能只活在内存里 ——
+    /// 否则下次启动又是老配置，列表头又变回 `selected_model`。所以：读的时候
+    /// 只在内存里推导，写的时候顺手带出去。
+    #[tokio::test]
+    async fn the_default_model_migration_lands_on_the_next_write() {
+        let dir = std::env::temp_dir().join(format!("star-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("user-settings.json");
+
+        // 写一份**老配置**：没有 default_model
+        let legacy = serde_json::json!({
+            "providers": {
+                "e2e": {
+                    "api_key": "k",
+                    "base_url": "http://x/v1",
+                    "selected_model": "alpha",
+                    "models": {},
+                    "name": "e2e",
+                    "type": "openai-compatible"
+                }
+            },
+            "active_provider_id": "e2e",
+            "active_model": "alpha"
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).expect("write legacy");
+
+        let store = ProviderStore::with_paths(path.clone(), None);
+
+        // 读 —— 不该写盘
+        let loaded = store.load().await.expect("load");
+        assert_eq!(
+            loaded.providers["e2e"].default_model.as_deref(),
+            Some("alpha"),
+            "读的时候应当已经在内存里推导出列表头"
+        );
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !on_disk.contains("default_model"),
+            "load() 是读操作，不该改用户的文件"
+        );
+
+        // 写 —— 迁移的结果要跟着落盘
+        store
+            .set_active_provider_and_model("e2e", "beta")
+            .await
+            .expect("write");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("default_model"),
+            "下一次写操作必须把迁移结果落盘: {after}"
+        );
+        let reloaded: ProviderConfig = serde_json::from_str(&after).expect("config parses back");
+        assert_eq!(
+            reloaded.providers["e2e"].default_model.as_deref(),
+            Some("alpha"),
+            "落盘后列表头仍是 alpha —— 当前选中项改了，列表头不该跟着改"
+        );
+        assert_eq!(
+            reloaded.providers["e2e"].selected_model.as_deref(),
+            Some("beta"),
+            "当前选中项确实改了"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 端到端复现用户报告的场景，全程走真实文件：
+    ///
+    /// 1. 只配 url + apikey，不配模型；
+    /// 2. 在 `/models` 面板里选了 provider 的一个模型（写入 `selected_model`）；
+    /// 3. 打开编辑 provider —— Model 字段必须显示这个模型，**不能变成"默认的"**；
+    /// 4. 原样保存 —— 候选集不能被这次编辑弄丢。
+    ///
+    /// 修复前第 3 步会显示成别的（`selected_model` 一度兼任"候选列表首项"，
+    /// 而 `models` 里存的又是"除首项之外"，两头对不上）。
+    #[tokio::test]
+    async fn editing_a_provider_keeps_the_model_the_user_picked() {
+        let dir = std::env::temp_dir().join(format!("star-provider-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("user-settings.json");
+
+        let store = ProviderStore::with_paths(path.clone(), None);
+
+        // 1. 只配 url + apikey
+        store
+            .add_custom_provider(
+                "e2e",
+                Some("E2E"),
+                "openai-compatible",
+                Some("http://x/v1"),
+                Some("k"),
+                None,
+            )
+            .await
+            .expect("provider created");
+
+        // 2. 在模型面板里选了一个模型
+        store
+            .set_active_provider_and_model("e2e", "alpha")
+            .await
+            .expect("model selected");
+
+        // 3. 打开编辑表单 —— Model 字段显示的就是用户选的那个
+        let settings = store
+            .load()
+            .await
+            .expect("load")
+            .providers
+            .get("e2e")
+            .cloned()
+            .expect("provider exists");
+        let candidates = settings.candidate_models();
+        assert_eq!(
+            candidates,
+            vec!["alpha".to_string()],
+            "编辑表单必须显示用户选中的模型，而不是某个默认值"
+        );
+
+        // 4. 原样保存 —— 候选集与当前选中都不该变
+        let text = candidates.join(", ");
+        store
+            .set_candidate_models("e2e", &text)
+            .await
+            .expect("save models");
+
+        let after = store
+            .load()
+            .await
+            .expect("load")
+            .providers
+            .get("e2e")
+            .cloned()
+            .expect("provider exists");
+        assert_eq!(
+            after.candidate_models(),
+            vec!["alpha".to_string()],
+            "编辑保存之后候选集必须原样还在"
+        );
+        // 关键：候选列表头必须仍然是 alpha —— 它既是列表的头，也是当前选中项。
+        // 修复前 `selected_model` 兼任两个角色，面板里选中别的模型之后，
+        // 列表头就被改写掉了。
+        assert_eq!(
+            after.default_model.as_deref(),
+            Some("alpha"),
+            "候选列表的头必须独立于当前选中项"
+        );
+        assert_eq!(
+            after.selected_model.as_deref(),
+            Some("alpha"),
+            "编辑保存不该改掉当前选中的模型"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 候选列表里有多个模型时，在面板里选了其中一个，**其余的必须还在列表里**。
+    ///
+    /// 这是用户报告的"编辑 provider 时它把我选中的回显示成默认的了"的另一半 ——
+    /// 修复前，首项会在面板选中动作之后从候选列表里消失。
+    #[tokio::test]
+    async fn picking_one_candidate_does_not_erase_the_others() {
+        let dir = std::env::temp_dir().join(format!("star-provider-e2e2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("user-settings.json");
+
+        let store = ProviderStore::with_paths(path.clone(), None);
+        store
+            .add_custom_provider(
+                "e2e",
+                Some("E2E"),
+                "openai-compatible",
+                Some("http://x/v1"),
+                Some("k"),
+                None,
+            )
+            .await
+            .expect("provider created");
+        // 表单里写了两个候选
+        store
+            .set_candidate_models("e2e", "zeta, alpha")
+            .await
+            .expect("candidates saved");
+
+        // 面板里选了第二个
+        store
+            .set_active_provider_and_model("e2e", "alpha")
+            .await
+            .expect("model selected");
+
+        let settings = store
+            .load()
+            .await
+            .expect("load")
+            .providers
+            .get("e2e")
+            .cloned()
+            .expect("provider exists");
+        assert_eq!(
+            settings.candidate_models(),
+            vec!["zeta".to_string(), "alpha".to_string()],
+            "面板里选了其中一个之后，其余候选必须还在"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -87,6 +87,46 @@ pub(crate) fn seed_models_from_disk_cache(state: &mut ChatState, provider_id: &s
     true
 }
 
+/// 把「磁盘缓存里这个 provider 的模型」与「用户声明的候选集」**合并**成面板列表。
+///
+/// # 为什么要合而不是取一个
+///
+/// 用户只配了 url + apikey（没配模型），provider 的候选集是空的，一切靠 API
+/// 自动发现 —— 这条路上模型面板显示的是完整列表，没问题。
+///
+/// 但只要用户在表单里写了哪怕一个模型名，之前那段代码就把 `available_models`
+/// 整个**替换**成了声明的那几个：API 明明还返回了另外十几个模型，面板上却只看得到
+/// 用户写的那一个，得再点一次刷新才补得回来。用户描述的"下次再选时候它会只有
+/// 这一个模型"就是这个。
+///
+/// 声明的候选集是「用户钦定要用这些」，API 的列表是「这家实际提供这些」——
+/// 两者是**并集**，不是二选一。声明的排在前面（用户的优先级），API 发现的补在后面。
+pub(crate) fn merge_declared_and_discovered_models(
+    state: &mut ChatState,
+    provider_id: &str,
+    declared: &[String],
+) {
+    let mut merged: Vec<String> = declared.to_vec();
+    let mut seen: std::collections::HashSet<String> = merged.iter().cloned().collect();
+
+    // 磁盘缓存里这个 provider 曾经拉到的模型 —— 大多数情况下不用等网络。
+    if let Some(hit) = crate::agent::model_cache::load(provider_id) {
+        for model in &hit.models {
+            if model.provider == provider_id && seen.insert(model.id.clone()) {
+                merged.push(model.id.clone());
+            }
+        }
+    }
+
+    state.available_models = merged.clone();
+    state.model_provider_map = merged
+        .iter()
+        .map(|model| (model.clone(), provider_id.to_string()))
+        .collect();
+    state.awaiting_models = false;
+    state.awaiting_models_since = None;
+}
+
 /// 结束 entry 的 streaming 状态，并冻结 thinking 计时器。
 /// 统一处理所有 is_streaming = false 的场景，避免遗漏 reasoning_finished_elapsed_ms。
 pub(crate) fn finalize_entry_streaming(state: &mut ChatState, idx: usize) {
@@ -4378,5 +4418,87 @@ fn extract_last_code_block(content: &str) -> Option<String> {
     match (last_block_start, last_block_end) {
         (Some(start), Some(end)) if end > start => Some(lines[start..end].join("\n")),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod cache_merge_tests {
+    use super::merge_declared_and_discovered_models;
+    use crate::ui::state::store::ChatState;
+
+    /// 面板列表必须是「声明的候选」与「API 发现的」的**并集**。
+    ///
+    /// 用户只配了 url + apikey 时候选集是空的，一切靠 API 自动发现；但只要
+    /// 他在表单里写了哪怕一个模型名，之前那段代码就把整个列表**替换**成了声明
+    /// 的那几个 —— API 明明还返回了另外十几个模型，面板上却只看得到一个，
+    /// 得再点一次刷新才补得回来。
+    #[test]
+    fn the_panel_lists_declared_and_discovered_models_together() {
+        let cache = std::env::temp_dir().join(format!("star-merge-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&cache);
+        crate::agent::model_cache::save_to_path(
+            &cache,
+            "e2e",
+            &[
+                crate::types::ModelInfo::new("discovered-a", "e2e"),
+                crate::types::ModelInfo::new("discovered-b", "e2e"),
+            ],
+        );
+        std::env::set_var("STAR_MODEL_CACHE_PATH", &cache);
+
+        let mut state = ChatState::new();
+        merge_declared_and_discovered_models(&mut state, "e2e", &["declared".to_string()]);
+
+        assert!(
+            state.available_models.contains(&"declared".to_string()),
+            "声明的候选必须在列表里: {:?}",
+            state.available_models
+        );
+        assert!(
+            state.available_models.contains(&"discovered-a".to_string()),
+            "API 发现的模型也必须在列表里: {:?}",
+            state.available_models
+        );
+        assert!(
+            state.available_models.contains(&"discovered-b".to_string()),
+            "API 发现的模型也必须在列表里: {:?}",
+            state.available_models
+        );
+        // 声明的排前面 —— 那是用户钦定的优先级。
+        assert_eq!(
+            state.available_models.first().map(String::as_str),
+            Some("declared"),
+            "声明的候选必须排在最前"
+        );
+
+        std::env::remove_var("STAR_MODEL_CACHE_PATH");
+        let _ = std::fs::remove_file(&cache);
+    }
+
+    /// 别家 provider 的模型不能混进来 —— 缓存是按 provider 分桶的。
+    #[test]
+    fn only_this_providers_discovered_models_are_merged_in() {
+        let cache = std::env::temp_dir().join(format!("star-merge2-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&cache);
+        crate::agent::model_cache::save_to_path(
+            &cache,
+            "other",
+            &[crate::types::ModelInfo::new("someone-elses-model", "other")],
+        );
+        std::env::set_var("STAR_MODEL_CACHE_PATH", &cache);
+
+        let mut state = ChatState::new();
+        merge_declared_and_discovered_models(&mut state, "e2e", &[]);
+
+        assert!(
+            !state
+                .available_models
+                .contains(&"someone-elses-model".to_string()),
+            "别家 provider 的模型不该进来: {:?}",
+            state.available_models
+        );
+
+        std::env::remove_var("STAR_MODEL_CACHE_PATH");
+        let _ = std::fs::remove_file(&cache);
     }
 }

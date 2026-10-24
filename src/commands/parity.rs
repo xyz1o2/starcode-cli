@@ -5928,6 +5928,15 @@ pub async fn passes(mut ctx: CommandContext<'_>, _args: &[String]) -> CommandRes
                     Some(k) => format!("set, {} chars", k.chars().count()),
                     None => "absent".to_string(),
                 };
+                // 候选列表的数量也要显示 —— 只看到当前模型时，用户会以为这家
+                // provider 只能选这一个（而实际上 API 可能还返回了别的）。
+                let candidate_count = p.candidate_models().len();
+                let model_cell = match (p.selected_model.as_deref(), candidate_count) {
+                    (Some(model), count) if count > 1 => format!("{model} (+{count} candidates)"),
+                    (Some(model), _) => model.to_string(),
+                    (None, 0) => "—".to_string(),
+                    (None, count) => format!("— ({count} candidates)"),
+                };
                 out.push_str(&format!(
                     "| {}`{}` | {} | {} | {} |\n",
                     if c.active_provider_id.as_deref() == Some(id.as_str()) {
@@ -5938,7 +5947,7 @@ pub async fn passes(mut ctx: CommandContext<'_>, _args: &[String]) -> CommandRes
                     id,
                     key,
                     p.base_url.as_deref().unwrap_or("provider default"),
-                    p.selected_model.as_deref().unwrap_or("—")
+                    model_cell
                 ));
             }
             out.push_str(

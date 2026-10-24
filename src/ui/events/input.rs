@@ -371,12 +371,25 @@ async fn prefill_form_from_provider(
     form: &mut crate::ui::state::palette::ProviderFormState,
     provider_id: &str,
 ) {
-    use crate::core::config::provider_store::ProviderStore;
+    prefill_form_from_provider_with(
+        form,
+        provider_id,
+        &crate::core::config::provider_store::ProviderStore::new(),
+    )
+    .await
+}
+
+/// 预填的真正实现 —— store 由调用方给，便于测试注入隔离路径。
+async fn prefill_form_from_provider_with(
+    form: &mut crate::ui::state::palette::ProviderFormState,
+    provider_id: &str,
+    store: &crate::core::config::provider_store::ProviderStore,
+) {
     use crate::ui::state::palette::{
         ANTHROPIC_COMPATIBLE_LABEL, OPENAI_COMPATIBLE_LABEL, PROVIDER_FORM_TYPES,
     };
 
-    let settings = ProviderStore::new()
+    let settings = store
         .load()
         .await
         .unwrap_or_default()
@@ -574,8 +587,12 @@ async fn submit_provider_form(
     }
 
     // 模型字段是多值的：先取出解析后的名字列表，`add_custom_provider` 只拿首项当
-    // 默认（它对 `selected_model` 是整体覆盖），其余交给下面的
-    // `set_candidate_models` 写进 `models`。
+    // **候选列表的头**（`default_model`），其余交给下面的 `set_candidate_models`
+    // 写进 `models`。
+    //
+    // 注意这里写的是 `default_model` 而不是 `selected_model` —— 后者是"当前正在
+    // 用的模型"，用户可能在 `/models` 面板里选了列表里的第二项。编辑 provider
+    // 是在改**这张表**，不该顺手把用户当前用的模型改回列表头。
     let model_names = crate::core::config::models::split_model_names(&model);
     let default_model = model_names.first().map(String::as_str);
 
@@ -595,7 +612,7 @@ async fn submit_provider_form(
         .await
         .map_err(|e| format!("Failed to save provider: {}", e))?;
 
-    // 必须在 add_custom_provider 之后：那个方法会整体覆盖 `selected_model`，
+    // 必须在 add_custom_provider 之后：那个方法会整体覆盖 `default_model`，
     // 而 `models` 里的手写 `context_window` / `alias` 要原样留着。
     if !store
         .set_candidate_models(&provider_id, &model)
@@ -685,18 +702,29 @@ async fn submit_provider_form(
             ),
         );
     } else {
-        // 配了名字：面板直接列出候选集，不必等网络 —— 候选集是用户自己声明的，
-        // 它就是权威答案。API 返回的全量列表更完整时，面板里的刷新按钮会补上。
-        state.available_models = model_names.clone();
-        state.model_provider_map = model_names
-            .iter()
-            .map(|model| (model.clone(), provider_id.clone()))
-            .collect();
+        // 配了名字：面板列出「声明的候选集 + API 实际提供的」，不必等网络 ——
+        // 声明的排前面（用户的优先级），API 发现的补在后面。
+        //
+        // 之前这里是把 `available_models` 整个**替换**成声明的那几个，于是 API
+        // 明明还返回了另外十几个模型，面板上却只看得到用户写的那一个 —— 得再点
+        // 一次刷新才补得回来。用户描述的"下次再选时候它会只有这一个模型"就是这个。
+        crate::ui::services::stream::merge_declared_and_discovered_models(
+            state,
+            &provider_id,
+            &model_names,
+        );
         state.available_models_info.clear();
-        state.awaiting_models = false;
-        state.awaiting_models_since = None;
-        // 默认项（列表第一项）立刻生效，不用等用户再去面板点一次。
-        let default_model = model_names[0].clone();
+
+        // 「当前正在用的模型」**不**因为编辑了表单就被改回列表头 ——
+        // 用户可能刚在 `/models` 面板里选了列表里的第二项。只有当前模型压根
+        // 不在候选集里（用户把它删了）才回落。
+        let current_still_valid =
+            !state.current_model.is_empty() && model_names.contains(&state.current_model);
+        let default_model = if current_still_valid {
+            state.current_model.clone()
+        } else {
+            model_names[0].clone()
+        };
         state.current_model = default_model.clone();
         let _ = agent_tx
             .send(AgentRequest::SetModel {
@@ -5502,5 +5530,100 @@ mod tests {
         assert!(!state.show_clear_confirmation);
         assert_eq!(state.chat_history.len(), 1);
         assert_eq!(state.pending_clear_name, None);
+    }
+
+    /// 编辑 provider 时，Model 字段必须回显**用户选中的那个模型**，
+    /// 不能变成某个"默认的"。
+    ///
+    /// 用户的原始场景：只配 url + apikey（不配模型），在 `/models` 面板里选了
+    /// 该 provider 的一个模型，之后打开编辑 provider —— 显示成默认的了。
+    ///
+    /// 修复前 `selected_model` 一度兼任"候选列表首项"，于是面板里那次选中
+    /// 动作把列表头改掉了，表单回显出来的就不是用户选的那个了。
+    #[tokio::test]
+    async fn editing_a_provider_shows_the_model_the_user_picked() {
+        use crate::core::config::provider_store::ProviderStore;
+
+        let dir =
+            std::env::temp_dir().join(format!("star-prefill-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("user-settings.json");
+        let store = ProviderStore::with_paths(path.clone(), None);
+
+        // 只配 url + apikey
+        store
+            .add_custom_provider(
+                "e2e",
+                Some("E2E"),
+                "openai-compatible",
+                Some("http://x/v1"),
+                Some("k"),
+                None,
+            )
+            .await
+            .expect("provider created");
+        // 在模型面板里选了一个模型
+        store
+            .set_active_provider_and_model("e2e", "picked-model")
+            .await
+            .expect("model selected");
+
+        let mut form = crate::ui::state::palette::ProviderFormState::new();
+        prefill_form_from_provider_with(&mut form, "e2e", &store).await;
+
+        assert_eq!(
+            form.model(),
+            "picked-model",
+            "编辑表单的 Model 字段必须回显用户选中的模型"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 候选列表里有多个模型时，编辑表单要**全部**列出，且声明的默认项排在最前 ——
+    /// 不能只显示当前选中的那一个（其余的会显得"消失"了）。
+    #[tokio::test]
+    async fn editing_a_provider_lists_every_candidate() {
+        use crate::core::config::provider_store::ProviderStore;
+
+        let dir =
+            std::env::temp_dir().join(format!("star-prefill2-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("user-settings.json");
+        let store = ProviderStore::with_paths(path.clone(), None);
+
+        store
+            .add_custom_provider(
+                "e2e",
+                Some("E2E"),
+                "openai-compatible",
+                Some("http://x/v1"),
+                Some("k"),
+                None,
+            )
+            .await
+            .expect("provider created");
+        store
+            .set_candidate_models("e2e", "zeta, alpha")
+            .await
+            .expect("candidates saved");
+        // 面板里选了第二个
+        store
+            .set_active_provider_and_model("e2e", "alpha")
+            .await
+            .expect("model selected");
+
+        let mut form = crate::ui::state::palette::ProviderFormState::new();
+        prefill_form_from_provider_with(&mut form, "e2e", &store).await;
+
+        assert_eq!(
+            form.model(),
+            "zeta, alpha",
+            "候选列表必须完整列出，默认项在最前"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

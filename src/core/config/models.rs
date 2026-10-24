@@ -18,6 +18,15 @@ pub struct ModelConfig {
     #[serde(alias = "contextWindow")]
     pub context_window: Option<usize>,
     pub alias: Option<Vec<String>>,
+    /// 用户在表单里写这个模型时的序号（0 是列表头）。
+    ///
+    /// `models` 是 `HashMap`，迭代顺序随机 —— 候选列表要按**用户声明的顺序**
+    /// 呈现，而不是按名字的字母序。字母序在"gpt-4, claude-3"这种组合下会把
+    /// 用户排在第一位的模型挪到中间，看起来像程序乱排。
+    ///
+    /// 老配置没有这个字段：`None` 时回落到按名字排序，行为与升级前一致。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -29,6 +38,30 @@ pub struct ProviderSettings {
     pub base_url: Option<String>,
     #[serde(alias = "selectedModel", alias = "currentModel")]
     pub selected_model: Option<String>,
+    /// 候选列表的**头**（用户在表单里写的第一个模型）。
+    ///
+    /// # 为什么必须有它
+    ///
+    /// `selected_model` 曾经同时承担两个角色：「候选列表的第一个」和「当前正在
+    /// 用的那个」。这两个角色会打架 —— 在 `/models` 面板里选了列表里的第二项，
+    /// `selected_model` 就被改写成它，而 `models` 里存的仍是"除首项之外的其余"。
+    /// 于是首项（用户声明的默认模型）从候选列表里消失：
+    ///
+    /// ```text
+    /// 配了 "zeta, alpha"      → selected=zeta, models=[alpha]
+    /// 面板里选了 alpha        → selected=alpha, models=[alpha]
+    /// 打开编辑表单            → 只剩 "alpha"，zeta 不见了
+    /// 保存一次                → models=[]，zeta 彻底丢失
+    /// ```
+    ///
+    /// 拆成两个字段后，选中动作只动 `selected_model`，候选列表由
+    /// `default_model` + `models` 决定，不会被选中动作破坏 —— 这也是
+    /// Cherry Studio（`models[]` + 顶层 `defaultModel`）和 OpenCode 的做法。
+    ///
+    /// 老配置没有这个字段：`None` 时 `default_model` 回落到 `selected_model`，
+    /// 行为与升级前一致（见 [`ProviderSettings::effective_default_model`]）。
+    #[serde(default, alias = "defaultModel")]
+    pub default_model: Option<String>,
     pub models: Option<HashMap<String, ModelConfig>>,
     pub name: Option<String>,
     pub description: Option<String>,
@@ -62,6 +95,22 @@ pub fn split_model_names(text: &str) -> Vec<String> {
 }
 
 impl ProviderSettings {
+    /// 候选列表的**头**（默认项）。
+    ///
+    /// **不做回落。** 回落到 `selected_model` 会让"当前选中项"重新变回"列表头"，
+    /// 那个耦合正是本次要拆掉的东西 —— 一旦回落，用户在 `/models` 面板里选了
+    /// 别的模型，列表头就跟着变，声明的默认模型又从列表里消失了。
+    ///
+    /// 老配置没有这个字段，由 `ProviderStore::load` 在**加载时**做一次性迁移
+    /// （把老的 `selected_model` 抄进 `default_model`）。迁移之后就再也不会
+    /// 跟着 `selected_model` 变了。
+    pub fn effective_default_model(&self) -> Option<&str> {
+        self.default_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
     /// 这个 provider 声明的候选模型，**按确定顺序**返回，第一个是默认项。
     ///
     /// 返回空列表 = 没有手工声明，完全交给 API 自动发现（模型面板会自己去拉）。
@@ -73,24 +122,35 @@ impl ProviderSettings {
     /// 同一个坑（`providers` 也是 `HashMap`）。所以顺序由"默认项优先 + 键名升序"
     /// 这条规则现算，任何写法（哪怕 `models` 写得毫无顺序）都得到稳定结果。
     ///
+    /// # 为什么默认项和当前选中项要分开
+    ///
+    /// `selected_model` 是"当前正在用的那个"，可以随时被用户在 `/models` 面板里
+    /// 改。它**不能**再兼任"候选列表的第一个"—— 否则在面板里选了第二项，默认项
+    /// 就会从列表里消失（详见 [`ProviderSettings::default_model`] 的注释）。
+    ///
     /// # 为什么不用 Vec
     ///
     /// 加 `model_list: Vec<…>` 字段需要迁移所有已有配置，而 `models` + `selected_model`
     /// 已经在配置文件里了，只是 `models` 此前无人读。让它生效比再加一个字段划算得多。
     pub fn candidate_models(&self) -> Vec<String> {
-        let default = self
-            .selected_model
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty());
+        let default = self.effective_default_model();
 
-        // 键名升序 —— 字节序，确定性来源。`selected_model` 之外的按这个排。
-        let mut rest: Vec<String> = self
+        // 按用户声明的序号排 —— `models` 是 HashMap，直接迭代会让候选列表
+        // 每次刷新换一次排列。缺序号的（老配置）回落到按名字排序，
+        // 保证「顺序确定」这条性质对任何配置都成立。
+        let mut rest: Vec<(usize, String)> = self
             .models
             .as_ref()
-            .map(|models| models.keys().cloned().collect())
+            .map(|models| {
+                let mut entries: Vec<(usize, String)> = models
+                    .iter()
+                    .map(|(name, config)| (config.order.unwrap_or(usize::MAX), name.clone()))
+                    .collect();
+                // 序号相同时按名字排（HashMap 顺序随机，必须有确定性的 tiebreak）。
+                entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+                entries
+            })
             .unwrap_or_default();
-        rest.sort();
 
         let mut out = Vec::with_capacity(rest.len() + 1);
         if let Some(default) = default {
@@ -98,16 +158,22 @@ impl ProviderSettings {
         }
         out.extend(
             rest.into_iter()
+                .map(|(_, name)| name)
                 .filter(|name| Some(name.as_str()) != default),
         );
         out
     }
 
-    /// 用一个 `model 文本` 输入装配 `selected_model` + `models`。
+    /// 用一个 `model 文本` 输入装配 `default_model` + `models` + `selected_model`。
     ///
-    /// - 空输入 → `selected_model = None`，`models` 收成一个**空 map**（**不是 None**，见下）。
-    /// - 恰好一个名字 → 只写 `selected_model`，`models` 不留条目。
-    /// - 多个名字 → 第一个当默认，其余进 `models`。
+    /// - 空输入 → `default_model = None`，`selected_model = None`，
+    ///   `models` 收成一个**空 map**（**不是 None**，见下）。
+    /// - 恰好一个名字 → `default_model` 和 `selected_model` 都是它，`models` 不留条目。
+    /// - 多个名字 → 第一个当默认（`default_model`），其余进 `models`。
+    ///
+    /// `selected_model`（当前正在用的模型）**只在它从新列表里消失时**才被重置成
+    /// 首项 —— 用户在表单里重新编排候选集，不该把 `/models` 面板里选好的模型
+    /// 悄悄改回表头；只有当用户把那个模型从表里删掉了，它才真的不该再被选中。
     ///
     /// # 元数据要"跟着名字走"
     ///
@@ -122,7 +188,7 @@ impl ProviderSettings {
     /// # 为什么 `models` 永远不是 `None`
     ///
     /// `ProviderStore::load` 里有一段"把全局 `active_model` 补种成当前 provider 的
-    /// `selected_model`"的一次性迁移，本意是照顾升级前的老配置。但它没有"已迁移"
+    /// `selected_model`"的一次性迁移,本意是照顾升级前的老配置。但它没有"已迁移"
     /// 标记，所以**只要** `selected_model` 是 `None` 就会跑 —— 于是用户手动清空
     /// Models 保存之后，紧接着的 `set_active_provider()` → `load()` 又把旧值抄回来，
     /// 清空操作被静默撤销（表单里再打开又是原来的模型名）。
@@ -133,15 +199,33 @@ impl ProviderSettings {
     /// 空 map 与 `None` 对所有消费方等价（候选列表都是空的 = 交给 API 自动发现）。
     pub fn set_candidate_models_from_text(&mut self, text: &str) {
         let names = split_model_names(text);
-        self.selected_model = names.first().cloned();
+        self.default_model = names.first().cloned();
+
+        // 「当前选中的模型」只在它**从新列表里消失**时才重置。
+        //
+        // 编辑 provider 是在改**这张候选表**，不该顺手把用户当前正在用的模型
+        // 改回表头 —— 那会让人在 `/models` 面板里选好的模型被一次无关的
+        // "编辑并保存"悄悄改掉。只有当用户把那个模型从表里删掉了，它才真的
+        // 不该再被选中（此时回落到新的表头）。
+        let keep_selection = self
+            .selected_model
+            .as_deref()
+            .map(|current| names.iter().any(|name| name == current))
+            .unwrap_or(false);
+        if !keep_selection {
+            self.selected_model = names.first().cloned();
+        }
 
         let previous = self.models.take().unwrap_or_default();
         let mut models = HashMap::with_capacity(previous.len());
-        for name in names.iter().skip(1) {
+        for (index, name) in names.iter().enumerate().skip(1) {
             // 还在文本里 → 沿用它原有的元数据，没有就用默认值。
-            models
-                .entry(name.clone())
-                .or_insert_with(|| previous.get(name).cloned().unwrap_or_default());
+            // 序号记的是**它在整份列表里的位置**（0 是列表头，已由
+            // `default_model` 承担），用来把 HashMap 的随机迭代顺序还原成
+            // 用户声明的顺序。
+            let mut config = previous.get(name).cloned().unwrap_or_default();
+            config.order = Some(index);
+            models.insert(name.clone(), config);
         }
         self.models = Some(models);
     }
@@ -496,9 +580,13 @@ mod tests {
 
     // ---- candidate_models / set_candidate_models_from_text ----
 
+    /// 新配置的形态：`default_model` 是候选列表的头，`selected_model` 是当前
+    /// 正在用的那个。老配置只有 `selected_model`（两者合一），由
+    /// `ProviderStore::load` 做一次性迁移。
     fn settings(default: Option<&str>, models: &[&str]) -> ProviderSettings {
         ProviderSettings {
             selected_model: default.map(str::to_string),
+            default_model: default.map(str::to_string),
             models: (!models.is_empty()).then(|| {
                 models
                     .iter()
@@ -612,6 +700,7 @@ mod tests {
                     name: Some("B 名称".to_string()),
                     context_window: Some(128_000),
                     alias: Some(vec!["bee".to_string()]),
+                    order: None,
                 },
             )]
             .into_iter()
@@ -622,6 +711,117 @@ mod tests {
         assert_eq!(b.name.as_deref(), Some("B 名称"));
         assert_eq!(b.context_window, Some(128_000));
         assert_eq!(b.alias.as_ref().unwrap(), &vec!["bee".to_string()]);
+    }
+
+    // ---- 默认项 vs 当前选中项（两者必须分开）----
+
+    /// 回归：`/models` 面板里选了候选列表的第二项之后，**默认项不能从候选列表里
+    /// 消失**。
+    ///
+    /// 成因是 `selected_model` 一度同时兼任"候选列表的首项"和"当前正在用的
+    /// 模型"。在面板里选了第二项，`selected_model` 就被改写成它，而 `models` 里
+    /// 存的仍是"除首项之外的其余"—— 于是首项（用户声明的默认模型）从列表里
+    /// 消失，保存一次之后彻底丢失：
+    ///
+    /// ```text
+    /// 配了 "zeta, alpha"   → selected=zeta, models=[alpha]
+    /// 面板里选了 alpha     → selected=alpha, models=[alpha]
+    /// 打开编辑表单         → 只剩 "alpha"，zeta 不见了
+    /// 保存一次             → models=[]，zeta 彻底丢失
+    /// ```
+    ///
+    /// 拆成 `default_model`（列表头）+ `selected_model`（当前选中）之后，
+    /// 选中动作只动后者，候选列表纹丝不动。
+    #[test]
+    fn selecting_another_model_d_not_hide_the_default_from_the_candidate_list() {
+        let mut s = ProviderSettings::default();
+        s.set_candidate_models_from_text("zeta, alpha");
+
+        // 模拟 `set_active_provider_and_model`：只改当前选中项。
+        assert_eq!(s.default_model.as_deref(), Some("zeta"));
+        s.selected_model = Some("alpha".into());
+
+        assert_eq!(
+            s.candidate_models(),
+            vec!["zeta".to_string(), "alpha".to_string()],
+            "选了列表第二项之后，默认项必须还在候选列表里"
+        );
+    }
+
+    /// 编辑 provider（重新编排候选表）**不该**改掉当前正在用的模型。
+    ///
+    /// 用户在 `/models` 面板里选好了列表里的第二项，然后顺手打开编辑框改了
+    /// 点别的再保存 —— 当前模型被改回表头是纯粹的意外。
+    #[test]
+    fn editing_the_candidate_list_keeps_the_current_selection() {
+        let mut s = ProviderSettings::default();
+        s.set_candidate_models_from_text("zeta, alpha");
+        // 用户在面板里选了 alpha
+        s.selected_model = Some("alpha".into());
+
+        // 编辑表单里重新编排候选表（内容没变，只是保存了一次）
+        s.set_candidate_models_from_text("zeta, alpha");
+
+        assert_eq!(
+            s.selected_model.as_deref(),
+            Some("alpha"),
+            "编辑候选表不该改掉当前选中的模型"
+        );
+        assert_eq!(s.default_model.as_deref(), Some("zeta"));
+    }
+
+    /// 但如果用户把当前选中的模型从表里删了，它必须被重置 —— 不能选一个
+    /// 已经不在候选列表里的模型。
+    #[test]
+    fn removing_the_selected_model_resets_the_selection() {
+        let mut s = ProviderSettings::default();
+        s.set_candidate_models_from_text("zeta, alpha");
+        s.selected_model = Some("alpha".into());
+
+        s.set_candidate_models_from_text("zeta, mid");
+
+        assert_eq!(
+            s.selected_model.as_deref(),
+            Some("zeta"),
+            "当前模型被删掉后必须回落到列表头"
+        );
+    }
+
+    /// 候选列表要按**用户声明的顺序**呈现，不是按名字的字母序。
+    ///
+    /// `models` 是 HashMap，迭代顺序随机 —— 不显式记序号的话，候选列表每次刷新
+    /// 换一次排列，用户会以为程序在乱跳。
+    #[test]
+    fn candidate_models_follow_the_declared_order() {
+        let mut s = ProviderSettings::default();
+        s.set_candidate_models_from_text("zeta, alpha, mid");
+        assert_eq!(
+            s.candidate_models(),
+            vec!["zeta".to_string(), "alpha".to_string(), "mid".to_string()],
+            "候选列表必须按用户写下的顺序呈现"
+        );
+    }
+
+    /// 老配置没有 `default_model` —— 迁移由 `ProviderStore::load` 负责，
+    /// 迁移**之前** `candidate_models()` 不再回落到 `selected_model`。
+    ///
+    /// 为什么不回落：回落会让"候选列表的头"继续跟着"当前选中的模型"变 ——
+    /// 那正是本次要拆掉的耦合。用户在面板里选了第二项，声明的默认模型就会
+    /// 又从列表里消失。
+    #[test]
+    fn a_legacy_config_relies_on_the_load_time_migration() {
+        let mut s = ProviderSettings::default();
+        s.selected_model = Some("zeta".into());
+        s.models = Some(
+            [("alpha".to_string(), ModelConfig::default())]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            s.candidate_models(),
+            vec!["alpha".to_string()],
+            "迁移前不该靠回落拼出列表头 —— 那是 load() 的活"
+        );
     }
 
     /// 清空模型字段 = 回到"自动发现"，必须把 `models` 一起清掉，
