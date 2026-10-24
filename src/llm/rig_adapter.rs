@@ -414,7 +414,9 @@ fn convert_usage(usage: &rig_core::completion::Usage) -> StarUsage {
 macro_rules! rig_complete_with_url {
     ($mod:ident, $api_key:expr, $model:expr, $base_url:expr, $request:expr) => {{
         use rig_core::client::CompletionClient;
-        let mut builder = $mod::Client::builder().api_key($api_key);
+        let mut builder = $mod::Client::builder()
+            .api_key($api_key)
+            .http_client(crate::llm::build_rig_http_client());
         if let Some(url) = $base_url {
             builder = builder.base_url(url);
         }
@@ -445,7 +447,9 @@ async fn rig_openai_complete(
     prompt_cache: bool,
 ) -> Result<CompletionResult, LlmError> {
     use rig_core::client::CompletionClient;
-    let mut builder = openai::CompletionsClient::builder().api_key(api_key);
+    let mut builder = openai::CompletionsClient::builder()
+        .api_key(api_key)
+        .http_client(crate::llm::build_rig_http_client());
     if let Some(url) = base_url {
         builder = builder.base_url(url);
     }
@@ -480,7 +484,9 @@ macro_rules! rig_stream_with_url {
     ($mod:ident, $api_key:expr, $model:expr, $base_url:expr, $request:expr) => {{
         use rig_core::client::CompletionClient;
 
-        let mut builder = $mod::Client::builder().api_key($api_key);
+        let mut builder = $mod::Client::builder()
+            .api_key($api_key)
+            .http_client(crate::llm::build_rig_http_client());
         if let Some(url) = $base_url {
             builder = builder.base_url(url);
         }
@@ -631,7 +637,9 @@ async fn rig_openai_stream(
     use rig_core::client::CompletionClient;
     use rig_core::streaming::StreamedAssistantContent;
 
-    let mut builder = openai::CompletionsClient::builder().api_key(api_key);
+    let mut builder = openai::CompletionsClient::builder()
+        .api_key(api_key)
+        .http_client(crate::llm::build_rig_http_client());
     if let Some(url) = base_url {
         builder = builder.base_url(url);
     }
@@ -792,7 +800,9 @@ async fn rig_anthropic_complete(
 ) -> Result<CompletionResult, LlmError> {
     use rig_core::client::CompletionClient;
 
-    let mut builder = anthropic::Client::builder().api_key(api_key);
+    let mut builder = anthropic::Client::builder()
+        .api_key(api_key)
+        .http_client(crate::llm::build_rig_http_client());
     if let Some(url) = base_url {
         builder = builder.base_url(url);
     }
@@ -818,7 +828,9 @@ async fn rig_anthropic_stream(
 ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError> {
     use rig_core::client::CompletionClient;
 
-    let mut builder = anthropic::Client::builder().api_key(api_key);
+    let mut builder = anthropic::Client::builder()
+        .api_key(api_key)
+        .http_client(crate::llm::build_rig_http_client());
     if let Some(url) = base_url {
         builder = builder.base_url(url);
     }

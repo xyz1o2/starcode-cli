@@ -4408,8 +4408,26 @@ mod tests {
 
     /// 回归：`model_provider_map` 本身也可能指向已删除的 provider
     /// （外部工具直接改配置时它不会跟着刷新），同样不得被采信。
+    ///
+    /// 必须隔离磁盘缓存：`find_provider_for_model` 会读
+    /// `~/.star/model-cache.json`，用户真实配置里若恰好有同名模型（哪怕挂在
+    /// 另一个 provider 下），全桶扫描就会先命中它，断言随之失败 —— 那是用户
+    /// 配置，不是这个测试要测的东西。上一条测试已经这么做了，这里跟上。
     #[test]
     fn a_stale_model_provider_map_entry_is_not_trusted() {
+        let cache =
+            std::env::temp_dir().join(format!("star-stale-map-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&cache);
+        crate::agent::model_cache::save_to_path(
+            &cache,
+            "magpie",
+            &[crate::types::ModelInfo::new(
+                "deepseek-v4.1-flash",
+                "magpie",
+            )],
+        );
+        std::env::set_var("STAR_MODEL_CACHE_PATH", &cache);
+
         let mut state = ChatState::new();
         state.configured_providers = vec!["yunjunet".to_string()];
         state.current_provider_id = Some("yunjunet".to_string());
@@ -4422,6 +4440,9 @@ mod tests {
             Some("yunjunet"),
             "内存映射指向已删除 provider 时必须回退，不能照单全收"
         );
+
+        std::env::remove_var("STAR_MODEL_CACHE_PATH");
+        let _ = std::fs::remove_file(&cache);
     }
 
     /// 正常路径不能被这个修复误伤：还活着的 provider 必须照旧生效。

@@ -895,12 +895,12 @@ impl Agent {
                                 "[MODEL_FALLBACK] No fallback: {}",
                                 reason
                             ));
-                            self.fallback_cooldown().await;
+                            self.fallback_cooldown(&err_str).await;
                         }
                     }
                 } else {
                     // 错误不可回退（如认证失败）：冷却等待后重试
-                    self.fallback_cooldown().await;
+                    self.fallback_cooldown(&err_str).await;
                 }
                 LlmResult::Retry
             }
@@ -1034,17 +1034,47 @@ impl Agent {
         });
     }
 
-    /// 无回退可用时的冷却等待（应对临时限流 429），保持原有行为
-    async fn fallback_cooldown(&self) {
+    /// 无回退可用时的冷却等待（应对临时限流 429）。
+    ///
+    /// # 为什么不能直接 `tokio::time::sleep`
+    ///
+    /// 两个问题：
+    ///
+    /// 1. **不可中断** —— 用户按了 ESC，UI 已经收手，这里还在傻等。同一文件里
+    ///    的 `backoff_retry` 是可中断的（分片睡眠 + 检查 abort flag），两处行为
+    ///    不一致，用户会觉得「Ctrl+C 有时不管用」。
+    /// 2. **不尊重 `Retry-After`** —— 服务端说等 30 秒就等 30 秒，比本地猜的准；
+    ///    等少了会立刻再撞一次限流，等多了纯属浪费。这个文件里的
+    ///    `CircuitBreakerCooldown` 分支已经这么做了（取 `max`），这里没跟上。
+    async fn fallback_cooldown(&self, err_str: &str) {
         let wait_secs = std::env::var("STAR_RATE_LIMIT_RETRY_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10u64);
+        // 服务端建议优先（只在比本地更长时采纳 —— 更短的值往往会立刻再撞一次）。
+        let wait_secs = match crate::llm::error_kind::retry_after_secs(err_str) {
+            Some(secs) => wait_secs.max(secs),
+            None => wait_secs,
+        };
         crate::utils::logging::append_debug_log_line(&format!(
             "[RECOVERY] No fallback configured, waiting {}s before retry",
             wait_secs
         ));
-        tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+
+        // 分片睡眠，每秒检查一次 abort —— 用户随时能打断等待。
+        let mut remaining = std::time::Duration::from_secs(wait_secs);
+        let tick = std::time::Duration::from_secs(1);
+        while !remaining.is_zero() {
+            if self.is_aborted() {
+                crate::utils::logging::append_debug_log_line(
+                    "[RECOVERY] Cancelled during rate-limit cooldown",
+                );
+                return;
+            }
+            let step = remaining.min(tick);
+            tokio::time::sleep(step).await;
+            remaining -= step;
+        }
     }
 
     /// 用户是否按了中断。退避等待可能长达数十秒，期间必须能被打断，

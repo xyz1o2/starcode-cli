@@ -96,17 +96,35 @@ impl ModelFallbackManager {
     }
 
     /// 检查是否是可回退的错误
+    ///
+    /// # 为什么复用 `LlmErrorKind` 而不是自己再匹配一遍关键词
+    ///
+    /// 原来这里有一套自己的关键词表，而 `llm::error_kind` 里另有一套。两套口径
+    /// 会不一致，最典型的后果是**裸状态码**：
+    ///
+    /// ```text
+    /// "429 Too Many Requests"   → error_kind 认得（RateLimit），这里也认得
+    /// "HTTP 429"                → error_kind 认得（RateLimit），这里**不认得**
+    /// ```
+    ///
+    /// 后者是很多网关的标准文案（尤其是 nginx / 代理层转发的错误）。判成
+    /// "不可回退"之后，回退路径会被整个跳过，agent 退化成固定 10 秒的冷却
+    /// 重试 —— 那条路既不尊重服务端的 `Retry-After`，等待期间还**不可中断**
+    /// （用户按了 ESC 仍在傻等）。
+    ///
+    /// `error_kind::mentions_status_code` 已经处理好了「状态码必须作为独立
+    /// token 出现」这件事（避免把 `40130ms` 里的 401 当成认证失败），复用它
+    /// 就不会引入新的一类误判。
     pub fn is_fallback_eligible_error(&self, error: &str) -> bool {
-        let error_lower = error.to_lowercase();
-        // 高负载、速率限制、服务不可用等错误可以回退
-        error_lower.contains("overloaded")
-            || error_lower.contains("rate_limit")
-            || error_lower.contains("rate limit")
-            || error_lower.contains("529")
-            || error_lower.contains("503")
-            || error_lower.contains("502")
-            || error_lower.contains("service_unavailable")
-            || error_lower.contains("too many requests")
+        use crate::llm::error_kind::LlmErrorKind;
+        match LlmErrorKind::classify(error) {
+            // 限流 / 过载 / 上游故障 —— 换个模型或等一会儿就能好。
+            LlmErrorKind::RateLimit | LlmErrorKind::Overloaded | LlmErrorKind::ServerError => true,
+            // 认不出来时保守回退：一次尝试的代价是几秒，收益是绕过一次瞬时故障。
+            LlmErrorKind::Unknown => true,
+            // 认证 / 欠费 / 请求非法 —— 换个模型也一样失败。
+            _ => false,
+        }
     }
 
     /// 尝试回退到下一个模型
@@ -221,5 +239,47 @@ mod tests {
         assert!(manager.is_fallback_eligible_error("rate_limit_exceeded"));
         assert!(manager.is_fallback_eligible_error("529 Too Many Requests"));
         assert!(!manager.is_fallback_eligible_error("invalid_api_key"));
+    }
+
+    /// 裸状态码必须和 `error_kind` 的判定一致。
+    ///
+    /// 回归：这里的关键词表不认识裸 `429`，而 `llm::error_kind` 认识。两套口径
+    /// 不一致的后果是 —— 网关返回标准的 `HTTP 429` 时，回退路径被整个跳过，
+    /// agent 退化成固定 10 秒的冷却重试（既不尊重 Retry-After，等待期间还
+    /// 不可中断）。
+    #[test]
+    fn bare_status_codes_match_the_shared_error_classification() {
+        let manager = ModelFallbackManager::new();
+        for err in [
+            "HTTP 429",
+            "429",
+            "status 429 too many requests",
+            "HTTP/1.1 503 Service Unavailable",
+            "502 Bad Gateway",
+            "HTTP 529",
+        ] {
+            assert!(
+                manager.is_fallback_eligible_error(err),
+                "裸状态码应可回退: {err}"
+            );
+        }
+    }
+
+    /// 终止类错误换个模型也一样失败，不该回退。
+    #[test]
+    fn terminal_errors_are_not_fallback_eligible() {
+        let manager = ModelFallbackManager::new();
+        for err in [
+            "401 Unauthorized",
+            "HTTP 403 Forbidden",
+            "402 Payment Required",
+            "Insufficient Balance",
+            "400 invalid_request_error: unsupported parameter",
+        ] {
+            assert!(
+                !manager.is_fallback_eligible_error(err),
+                "终止类错误不该回退: {err}"
+            );
+        }
     }
 }

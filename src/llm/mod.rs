@@ -120,6 +120,24 @@ pub const API_KEY_SOURCE_ENV_STAR: &str = "env:STAR_API_KEY";
 pub const API_KEY_SOURCE_UNKNOWN: &str = "unknown";
 pub const API_KEY_SOURCE_PROVIDER_ENV_PREFIX: &str = "provider_env:";
 
+/// 本项目的 User-Agent。
+///
+/// # 为什么必须显式设置
+///
+/// reqwest 的默认 UA 是空的，于是下游网关只能靠**端点 + 其它信号**猜客户端是谁。
+/// 实测在 magpie 上就是这样：starcode 发 `/v1/chat/completions`，因为不带 UA，
+/// 请求被归到 `Python-urllib` 桶里（真正的 Python 客户端也在那个桶），
+/// 和 opencode、Claude Code 混在一起。于是：
+///
+/// - 面板上的「可靠性 / 命中率」按客户端聚合时，starcode 的数字失真；
+/// - 用户看到自己的统计被别人的流量稀释，没法判断自己是否健康；
+/// - 排查问题时无法区分「这是 starcode 发的」还是「这是脚本发的」。
+///
+/// 带上 UA 之后，网关能精确归类，统计口径才对得上。
+///
+/// 格式沿用常见惯例 `name/version`，网关通常按第一段识别客户端。
+pub const USER_AGENT: &str = concat!("starcode-cli/", env!("CARGO_PKG_VERSION"));
+
 /// Shared HTTP client builder for all LLM providers.
 /// Forces HTTP/1.1 (SSE over HTTP/2 is unreliable on many LLM APIs)
 /// and enables gzip/brotli decompression.
@@ -132,8 +150,27 @@ pub fn build_http_client(timeout_secs: u64, connect_timeout_secs: u64) -> reqwes
         .pool_max_idle_per_host(HTTP_POOL_MAX_IDLE_PER_HOST)
         .tcp_keepalive(std::time::Duration::from_secs(TCP_KEEPALIVE_SECS))
         .tcp_nodelay(true)
+        .user_agent(USER_AGENT)
         .build()
         .unwrap_or_default()
+}
+
+/// 构造带本项目 User-Agent 的 HTTP client，供 rig 的 client 注入。
+///
+/// # 为什么必须注入而不是让 rig 自建
+///
+/// rig 的 `ClientBuilder::build()` 默认用 `reqwest::Client::default()` ——
+/// 没有 User-Agent，也没有超时。下游网关于是只能靠端点猜客户端是谁：
+/// 实测在 magpie 上，starcode 的请求因为不带 UA 被归到 `Python-urllib` 桶，
+/// 和真正的 Python 客户端混在一起，面板上的统计口径直接失真。
+///
+/// 同时 rig 默认**没有超时**，一次卡死的请求会挂到 TCP 层超时（可到数分钟）。
+/// 注入我们自己建的 client 就同时解决了这两件事：UA 正确、超时可配。
+///
+/// 复用了 [`build_http_client`] 的全部传输配置（HTTP/1.1、连接池、keepalive），
+/// 所以 rig 路径和非 rig 路径（`list_models`）行为一致。
+pub fn build_rig_http_client() -> reqwest::Client {
+    build_http_client(default_timeout(), default_connect_timeout())
 }
 
 fn default_timeout() -> u64 {
