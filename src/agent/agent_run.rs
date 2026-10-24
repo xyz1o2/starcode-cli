@@ -245,13 +245,19 @@ impl Agent {
                 crate::agent::prompt_builder::PromptBuilder::include_extended_bundle_for_history_len(history_len);
             let cwd_str = cwd.to_string_lossy().to_string();
             let dynamic_ctx = dynamic_context;
-            // 每轮都会变的两样（复杂度提示 + 检索到的动态上下文）不再进 system prompt，
-            // 而是挂到当轮 user 消息上。system 数组整体就是 Anthropic 的缓存前缀
-            // （rig 只在最后一块上打断点），放进去等于每条消息都把 4 万字符的前缀
-            // 击穿一次。见 PromptBuilder::build_turn_context。
+            // 每轮都会变的三样（复杂度提示 + 检索到的动态上下文 + git 快照）不再进
+            // system prompt，而是挂到当轮 user 消息上。system 数组整体就是 Anthropic
+            // 的缓存前缀（rig 只在最后一块上打断点），放进去等于每条消息都把 4 万
+            // 字符的前缀击穿一次。git 快照尤其关键：它的 300s TTL 一到，`git status`
+            // 的文件数就变，system 前缀整段重算 —— 实测把命中率从 ~99% 打到 ~1%。
+            // 见 PromptBuilder::build_turn_context。
+            let git_snapshot = crate::agent::prompt_builder::PromptBuilder::render_git_snapshot(
+                &cwd,
+            );
             let turn_context = crate::agent::prompt_builder::PromptBuilder::build_turn_context(
                 dynamic_ctx.as_deref(),
                 complexity_hint.as_deref(),
+                git_snapshot.as_deref(),
             );
             // 日期在会话第一条用户消息时固定一次，之后整场会话复用。
             // 每轮重取 `Local::now()` 会让跨零点的会话白白重建一次整个缓存前缀

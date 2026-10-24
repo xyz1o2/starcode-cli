@@ -1033,10 +1033,14 @@ fn input_context_tokens(usage: &crate::types::StarUsage) -> u32 {
     }
 }
 
-/// 为 provider 明确上报的缓存计数生成状态栏文本；不计算跨 provider 的百分比。
+/// 为 provider 明确上报的缓存计数生成状态栏文本。
+///
+/// 命中率由 [`crate::types::cache_hit_rate`] 计算，用的是跨 provider 的分母
+/// （输入侧总量），不是 `cache_read / prompt_tokens` —— 后者在 Anthropic 侧
+/// 语义不同，会算出 >100% 的值。
 fn format_cache_telemetry(usage: Option<&crate::types::StarUsage>) -> Option<String> {
     let usage = usage.filter(|usage| usage.cache_telemetry_reported)?;
-    let mut parts = Vec::with_capacity(2);
+    let mut parts = Vec::with_capacity(3);
     if usage.cache_read_tokens > 0 {
         parts.push(format!(
             "read {}",
@@ -1048,6 +1052,9 @@ fn format_cache_telemetry(usage: Option<&crate::types::StarUsage>) -> Option<Str
             "write {}",
             format_token_count(usage.cache_creation_tokens)
         ));
+    }
+    if let Some(rate) = crate::types::cache_hit_rate(usage) {
+        parts.push(format!("{rate:.0}%"));
     }
     (!parts.is_empty()).then(|| format!("Cache {}", parts.join(" · ")))
 }
@@ -1699,7 +1706,8 @@ mod tests {
     }
 
     #[test]
-    fn cache_telemetry_shows_raw_counts_without_percentage() {
+    fn cache_telemetry_shows_raw_counts_and_a_cross_provider_hit_rate() {
+        // 分母为 0 时不显示百分比（无法计算），只显示原始计数。
         let read_only = crate::types::StarUsage {
             cache_read_tokens: 12_345,
             cache_telemetry_reported: true,
@@ -1721,6 +1729,62 @@ mod tests {
         );
         assert!(format_cache_telemetry(None).is_none());
         assert!(format_cache_telemetry(Some(&crate::types::StarUsage::default())).is_none());
+    }
+
+    /// OpenAI 语义：`prompt_tokens` 已含缓存命中，命中率就是 cached / prompt。
+    #[test]
+    #[test]
+    fn cache_hit_rate_uses_input_side_denominator_for_openai_semantics() {
+        let usage = crate::types::StarUsage {
+            prompt_tokens: 10_000,
+            completion_tokens: 100,
+            total_tokens: 10_100,
+            cache_read_tokens: 9_000,
+            cache_creation_tokens: 0,
+            cache_telemetry_reported: true,
+        };
+        let rate = crate::types::cache_hit_rate(&usage).expect("rate should be computed");
+        assert!((rate - 90.0).abs() < 0.1, "got {rate}");
+        assert_eq!(
+            format_cache_telemetry(Some(&usage)).as_deref(),
+            Some("Cache read 9.0k · 90%")
+        );
+    }
+
+    /// Anthropic 语义：`input_tokens` 不含缓存读，输入侧总量是
+    /// `total - completion`，绝不能拿 `prompt_tokens` 当分母（会算出 >100%）。
+    #[test]
+    #[test]
+    fn cache_hit_rate_does_not_exceed_100_for_anthropic_semantics() {
+        let usage = crate::types::StarUsage {
+            prompt_tokens: 1_000,
+            completion_tokens: 500,
+            total_tokens: 10_500,
+            cache_read_tokens: 9_000,
+            cache_creation_tokens: 500,
+            cache_telemetry_reported: true,
+        };
+        let rate = crate::types::cache_hit_rate(&usage).expect("rate should be computed");
+        assert!(
+            rate <= 100.0,
+            "Anthropic 语义下命中率不得超过 100%，得到 {rate}"
+        );
+        assert!((rate - 90.0).abs() < 0.1, "got {rate}");
+    }
+
+    /// provider 没上报缓存遥测时不该编一个命中率出来。
+    #[test]
+    #[test]
+    fn cache_hit_rate_is_none_without_reported_telemetry() {
+        let usage = crate::types::StarUsage {
+            prompt_tokens: 10_000,
+            total_tokens: 10_100,
+            completion_tokens: 100,
+            cache_read_tokens: 9_000,
+            cache_creation_tokens: 0,
+            cache_telemetry_reported: false,
+        };
+        assert!(crate::types::cache_hit_rate(&usage).is_none());
     }
 
     #[test]

@@ -679,6 +679,46 @@ pub struct StarUsage {
     pub cache_telemetry_reported: bool,
 }
 
+/// 计算 prompt cache 命中率（0-100）。
+///
+/// # 为什么不能直接相除
+///
+/// 两种 provider 的 `prompt_tokens` 语义相反：
+///
+/// - **Anthropic**：`input_tokens` **不含**缓存读，缓存读是额外的 `cache_read_input_tokens`。
+/// - **OpenAI / DeepSeek / 聚合网关**：`prompt_tokens` **已含**缓存命中
+///   （`prompt_tokens_details.cached_tokens` 是它的子集）。
+///
+/// 直接拿 `cache_read / prompt_tokens` 在 Anthropic 侧会算出大于 100% 的值，在
+/// OpenAI 侧才是对的。唯一的跨 provider 分母是「输入侧总量」：
+///
+/// ```text
+/// input_side = total_tokens - completion_tokens
+/// ```
+///
+/// Anthropic 侧它恰等于 `input + cache_read + cache_creation`，OpenAI 侧退回
+/// `prompt_tokens`。这也是状态栏 `input_context_tokens` 用的同一个表达式。
+///
+/// provider 没有上报缓存遥测时返回 `None` —— 零计数无法区分「没缓存」和
+/// 「这个 adapter 根本不报缓存」，不该编一个命中率出来。
+pub fn cache_hit_rate(usage: &StarUsage) -> Option<f64> {
+    if !usage.cache_telemetry_reported {
+        return None;
+    }
+    let input_side = usage.total_tokens.saturating_sub(usage.completion_tokens);
+    let denominator = if input_side > 0 {
+        input_side
+    } else if usage.prompt_tokens > 0 {
+        usage.prompt_tokens
+    } else {
+        usage.total_tokens
+    };
+    if denominator == 0 {
+        return None;
+    }
+    Some((usage.cache_read_tokens as f64 / denominator as f64) * 100.0)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StarChoice {
     pub message: StarMessage,

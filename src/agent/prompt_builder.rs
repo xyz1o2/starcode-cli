@@ -515,15 +515,17 @@ impl PromptBuilder {
             }
         }
 
-        // ── Git 快照（准静态：TTL 内逐字节稳定）──
-        let git = cached_git_snapshot(cwd_path);
-        if git.is_repo {
-            semi_static_parts.push(prompts::env_info::render_dynamic_git_info(
-                git.branch.as_deref(),
-                git.status.as_deref(),
-                git.recent_commits.as_deref(),
-            ));
-        }
+        // ── Git 快照：已移出 system ──
+        //
+        // 它曾经是「准静态段」的一部分，靠 300s TTL 让它在缓存窗口内逐字节稳定。
+        // 但 TTL 只保证**窗口内**稳定，窗口一过 `git status` 的文件数一变，
+        // 整段 system prompt（约 4 万字符）就要按原价重算 —— 实测在 magpie 上
+        // 这会把命中率从 ~99% 打到 ~1%（上游的前缀缓存是 tools → system →
+        // messages 的整体，system 一动，tools 断点也一起废掉）。
+        //
+        // 所以 git 信息现在跟复杂度提示、检索上下文一样，挂在当轮 user 消息上
+        // （见 [`PromptBuilder::build_turn_context`]）。system prompt 因此
+        // **逐字节恒定**，整个会话共用一个缓存前缀。
 
         // ── Assemble messages ──
         // 静态 + 准静态合成**一条** system 消息：rig 只会在 system 数组最后一块上打
@@ -558,12 +560,16 @@ impl PromptBuilder {
     /// 一次就换一批。这两样只要放进 system 数组，缓存前缀就每轮都被击穿。对标 Claude
     /// Code 的做法：挂到当轮 user 消息上，用 `<system-reminder>` 包起来。
     ///
+    /// **Git 快照也在这里**（原来在 system 里）：`git status` 的文件数每 300s TTL
+    /// 就会变一次，一变就击穿整个 system 前缀。放到 user 侧后 system 逐字节恒定。
+    ///
     /// 返回 `None` 表示这一轮没有额外上下文，调用方直接发原始输入即可。
     /// 总长度受 `STAR_TURN_CONTEXT_MAX_CHARS` 限制（默认 4000），避免长会话里
     /// 一轮一轮堆积。
     pub fn build_turn_context(
         dynamic_context: Option<&str>,
         complexity_hint: Option<&str>,
+        git_snapshot: Option<&str>,
     ) -> Option<String> {
         let mut blocks: Vec<String> = Vec::new();
 
@@ -575,6 +581,9 @@ impl PromptBuilder {
         }
         if let Some(ctx) = dynamic_context.map(str::trim).filter(|s| !s.is_empty()) {
             blocks.push(format!("### Retrieved Project Context\n\n{}", ctx));
+        }
+        if let Some(git) = git_snapshot.map(str::trim).filter(|s| !s.is_empty()) {
+            blocks.push(git.to_string());
         }
 
         if blocks.is_empty() {
@@ -598,6 +607,22 @@ impl PromptBuilder {
         }
 
         Some(format!("<system-reminder>\n{}\n</system-reminder>", body))
+    }
+
+    /// 渲染当轮的 git 快照文本（供 [`PromptBuilder::build_turn_context`] 使用）。
+    ///
+    /// 单独成函数是因为它要读 cwd，而 `build_turn_context` 的其余输入都是纯字符串。
+    pub fn render_git_snapshot(cwd: &Path) -> Option<String> {
+        let git = cached_git_snapshot(cwd);
+        if !git.is_repo {
+            return None;
+        }
+        let rendered = prompts::env_info::render_dynamic_git_info(
+            git.branch.as_deref(),
+            git.status.as_deref(),
+            git.recent_commits.as_deref(),
+        );
+        (!rendered.trim().is_empty()).then_some(rendered)
     }
 }
 
@@ -754,14 +779,16 @@ mod tests {
 
     #[test]
     fn turn_context_is_none_when_nothing_to_say() {
-        assert!(PromptBuilder::build_turn_context(None, None).is_none());
-        assert!(PromptBuilder::build_turn_context(Some("  "), Some("\n")).is_none());
+        assert!(PromptBuilder::build_turn_context(None, None, None).is_none());
+        assert!(PromptBuilder::build_turn_context(Some("  "), Some("\n"), None).is_none());
+        assert!(PromptBuilder::build_turn_context(None, None, Some("  ")).is_none());
     }
 
     #[test]
     fn turn_context_wraps_blocks_in_system_reminder() {
-        let out = PromptBuilder::build_turn_context(Some("retrieved doc"), Some("plan first"))
-            .expect("both blocks present");
+        let out =
+            PromptBuilder::build_turn_context(Some("retrieved doc"), Some("plan first"), None)
+                .expect("both blocks present");
         assert!(out.starts_with("<system-reminder>"));
         assert!(out.ends_with("</system-reminder>"));
         // 复杂度提示排在检索上下文之前
@@ -770,12 +797,48 @@ mod tests {
         assert!(hint_at < ctx_at);
     }
 
+    /// git 快照必须挂在 user 侧 —— 它进 system 就会每 300s 击穿整个缓存前缀。
+    #[test]
+    fn turn_context_carries_the_git_snapshot() {
+        let out = PromptBuilder::build_turn_context(
+            None,
+            None,
+            Some("# Git Status\n  Current branch: dev-m"),
+        )
+        .expect("git snapshot present");
+        assert!(out.starts_with("<system-reminder>"));
+        assert!(out.contains("Current branch: dev-m"));
+    }
+
+    /// system prompt 里不能再出现 git 段落 —— 它是每 300s 变一次的那一段。
+    #[test]
+    fn system_prompt_excludes_the_git_snapshot() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let cwd_str = cwd.to_string_lossy().to_string();
+        let msgs = PromptBuilder::build_cached_system_messages(
+            PromptMode::Agent,
+            "2026-10-24",
+            "linux",
+            &cwd_str,
+            None,
+            None,
+            true,
+            true,
+            None,
+        );
+        let content = msgs[0].content.as_deref().unwrap_or_default();
+        assert!(
+            !content.contains("# Git Status"),
+            "git 快照必须留在 user 侧；它进 system 会击穿整个缓存前缀"
+        );
+    }
+
     #[test]
     fn turn_context_respects_char_budget() {
         // 不动环境变量：默认上限 4000，直接喂一段更长的进去。
         // （单测并行跑，set_var 会漏给同文件里的其它测试。）
         let long = "x".repeat(9000);
-        let out = PromptBuilder::build_turn_context(Some(&long), None).unwrap();
+        let out = PromptBuilder::build_turn_context(Some(&long), None, None).unwrap();
         assert!(out.contains("turn context truncated"));
         assert!(out.chars().count() < 5000);
     }

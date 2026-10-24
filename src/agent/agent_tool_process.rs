@@ -47,9 +47,19 @@ impl Agent {
     ) -> TurnResult {
         // Emit stats update
         if let Some(ref usage) = usage {
+            // 命中率用跨 provider 的分母（见 `types::cache_hit_rate`）—— 直接拿
+            // cache_read / prompt_tokens 在 Anthropic 侧会算出 >100% 的荒谬值。
+            let hit = crate::types::cache_hit_rate(usage)
+                .map(|p| format!(" ({p:.1}%)"))
+                .unwrap_or_default();
             crate::utils::logging::append_debug_log_line(&format!(
-                "[TOKEN-API] Turn {} actual: prompt={}, completion={}, total={}",
-                current_turn, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
+                "[TOKEN-API] Turn {} actual: prompt={}, completion={}, total={}, cache_read={}, cache_write={}{hit}",
+                current_turn,
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.total_tokens,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
             ));
             // Surface usage to consumers (eval harness, UI, cost tracking).
             self.emit_event(crate::agent::messaging::AgentEvent::StatsUpdate {

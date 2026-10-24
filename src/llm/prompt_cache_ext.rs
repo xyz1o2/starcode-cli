@@ -456,6 +456,77 @@ mod tests {
         assert!(!ext.requires_modern_output_cap("gpt-4o"));
     }
 
+    /// 端到端形态：走 rig 真实的 OpenAI 线格式序列化，再打断点。
+    ///
+    /// 这条锁住最重要的契约 —— 断点必须真的落在**发上线的那个 JSON** 里，
+    /// 而不是某个中间结构上。前面的测试都是手搓 `serde_json::Value`，可能
+    /// 与 rig 实际生成的形状脱节。
+    #[test]
+    fn breakpoints_land_in_the_real_openai_wire_format() {
+        use rig_core::completion::message::{Message, UserContent};
+        use rig_core::completion::request::CompletionRequest as CoreCompletionRequest;
+        use rig_core::providers::openai::completion::{
+            CompletionModelOptions, CompletionRequest as WireRequest,
+        };
+
+        let core = CoreCompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: vec![
+                Message::System {
+                    content: "You are a coding agent.".to_string(),
+                },
+                Message::User {
+                    content: vec![UserContent::text("hello")],
+                },
+            ],
+            documents: vec![],
+            tools: vec![],
+            temperature: None,
+            max_tokens: Some(16),
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+            record_telemetry_content: false,
+        };
+
+        let ext = PromptCacheExt::new(true);
+        let wire = ext
+            .build_completion_request(
+                "some-model".to_string(),
+                core,
+                CompletionModelOptions::default(),
+            )
+            .expect("wire request should build");
+
+        // 序列化得到真实线格式 body。
+        let mut body = serde_json::to_value(&wire).expect("wire request should serialize");
+
+        // rig 的 system 消息在 OpenAI 线格式里是**块数组**（无 serialize_with），
+        // 不是裸字符串 —— 这一点如果变了，断点就会落空。
+        assert!(
+            body["messages"][0]["content"].as_array().is_some(),
+            "rig 序列化 system content 时必须用块数组（没有 serialize_with），\
+             否则断点会落空"
+        );
+
+        finalize(true, &mut body).expect("finalize should succeed");
+
+        let system_content = body["messages"][0]["content"]
+            .as_array()
+            .expect("system content stays an array");
+        assert_eq!(
+            system_content
+                .last()
+                .expect("system content has a block")
+                .get("cache_control")
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str()),
+            Some("ephemeral"),
+            "断点必须落在 system 最后一个块上"
+        );
+    }
+
     #[test]
     fn env_gate_defaults_to_off() {
         // 未设置时必须是关的——官方 OpenAI 端点会拒绝这个规范外字段。
