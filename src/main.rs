@@ -45,8 +45,16 @@ enum Commands {
 
 #[derive(Debug, Clone, ValueEnum)]
 enum HeadlessOutputFormat {
+    /// 每行一条最终对话条目（`ChatEntry` 的 JSON）。信息量有限：只有助手正文。
     Jsonl,
+    /// 纯文本，只有助手正文。
     Text,
+    /// 每行一条**事件**（agent 的完整过程：工具轨迹、增量文本、token 用量、
+    /// 错误），最后跟一条 `result` 终态事件（带 usage / cost / is_error）。
+    ///
+    /// 这是给外部 harness 用的格式 —— `jsonl` 只有最终答案，没法知道 agent
+    /// 中间做了什么。
+    StreamJson,
 }
 
 #[derive(Parser)]
@@ -82,6 +90,13 @@ struct CliArgs {
     prompt: Option<String>,
 
     /// Output format for headless mode
+    ///
+    /// - `jsonl`（默认）：每行一条最终对话条目。只有助手正文，工具轨迹和
+    ///   token 用量都拿不到。
+    /// - `text`：纯文本，只有助手正文。
+    /// - `stream-json`：每行一条**事件**（工具轨迹、逐字增量、token 用量、错误），
+    ///   最后跟一条 `result` 终态行（带 usage / cost / is_error / session_id）。
+    ///   这是给外部 harness（CI、编排器、IDE 插件）用的格式。
     #[arg(long = "output-format", default_value = "jsonl", value_enum)]
     output_format: HeadlessOutputFormat,
 
@@ -644,6 +659,484 @@ fn parse_cli_approval_mode(
 }
 
 /// Headless mode: process a single prompt and output results
+/// headless 的 `--output-format stream-json` 执行路径。
+///
+/// # 输出契约
+///
+/// 每行一个 JSON 对象：
+///
+/// - **事件行** —— agent 的完整过程。`type` 取值见
+///   `agent::messaging::events::AgentEvent` 的手写序列化器：`text_delta` /
+///   `reasoning_delta` / `trace` / `tool_started` / `tool_finished` /
+///   `tool_progress` / `message` / `error` / `turn_finished` / `done` /
+///   `stats_update`。
+/// - **`result` 行** —— 终态，**总是最后一行**。带 `usage`（token 用量）、
+///   `cost_usd`（估算费用）、`is_error`、`duration_ms`、`session_id`。
+///   外部 harness 靠这一行判断"跑完了没有"——它不需要猜"最后一个事件是不是
+///   结束"。
+///
+/// # 为什么要有 `result` 行
+///
+/// `jsonl` 格式只输出最终助手正文，外部拿不到 token 数、成本，也分不清
+/// "正常结束"和"跑一半崩了"。终态行把这三件事一次说清。
+///
+/// # 为什么事件要**流式**输出
+///
+/// agent 的工具调用可能持续几十秒。等整轮跑完再一次性吐出来，外部 harness
+/// 就没法实时展示进度 —— 那和没有事件流没区别。
+async fn run_headless_stream_json(
+    agent: &mut agent::StarAgent,
+    prompt: &str,
+    resumed_session_id: Option<&str>,
+    snapshot_history: &mut Vec<ChatEntry>,
+    restored_usage: Option<crate::types::StarUsage>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use futures::StreamExt;
+
+    let started = std::time::Instant::now();
+    // 模型名要在流开始**之前**取走：流持有 `agent` 的可变借用，之后再借
+    // `agent`（算费用、取会话快照）就冲突了。
+    let model_name = agent.get_client().model.clone();
+
+    // 用 `StarAgent` 的**合并流**（`StreamingChunk`），不是 `Agent` 的
+    // `AgentEvent` 流 —— 后者只有 Branch A，缺实时文本增量。
+    //
+    // agent 内部有两条并行分支：Branch A 是 `AgentEvent`（工具轨迹、错误、
+    // 最终消息），Branch B 是 `StreamingChunk` 直接流（逐字文本、思考增量）。
+    // UI 消费的是 `select()` 合并后的结果，headless 必须消费同一个合并流，
+    // 否则外部拿到的只有工具轨迹、没有模型说了什么。
+    // 起一个后台 inbox 消费器 —— headless 没有 UI 事件循环，TUI 那边的
+    // `spawn_schedule_pollers` 在这里不存在。外部 harness 往 inbox 写的
+    // 消息、批准的工具、取消请求，都由它处理。
+    //
+    // 顺带把总线标成"有人能回答"：没有它，等待层会认为没有订阅者而直接
+    // 拒绝工具确认，外部 harness 的批准就永远送不到。
+    let abort_flag = agent.abort_handle();
+    let bus = agent.runtime_message_bus();
+    if let Some(bus) = bus.as_ref() {
+        bus.set_external_responder(true);
+    }
+    let remote_session_id = resumed_session_id.map(str::to_string);
+    // 消费器**不后台跑** —— headless 是一次性执行的，后台任务活不过主流程
+    // （主流程 5 秒就结束，任务随之被取消，外部消息永远等不到响应）。
+    //
+    // 所以改成：主流程跑完后，**同步**再收几轮 inbox。外部 harness 的
+    // 「发消息 / 批准工具 / 取消」在这个窗口里生效。
+    let remote_ctx = HeadlessRemoteContext {
+        cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        abort_flag,
+        bus,
+        session_id: remote_session_id,
+    };
+
+    let mut stream = agent.process_user_message_streaming(prompt);
+    let mut final_response = String::new();
+    let mut latest_usage: Option<crate::types::StarUsage> = None;
+    let mut entries: Vec<ChatEntry> = Vec::new();
+    let mut is_error = false;
+    let mut error_detail: Option<String> = None;
+    // 从增量累积的助手正文（纯文本回答没有 `Message` 事件）。
+    let mut streamed_text = String::new();
+
+    while let Some(chunk_result) = stream.next().await {
+        match chunk_result {
+            Ok(event) => {
+                match &event {
+                    crate::agent::messaging::AgentEvent::Message(content) => {
+                        final_response = content.clone();
+                    }
+                    // 纯文本回答没有 `Message` 事件 —— 那个只在有工具调用时发。
+                    // 正文要从 `TextDelta` 累积。
+                    crate::agent::messaging::AgentEvent::TextDelta(content) => {
+                        streamed_text.push_str(content);
+                    }
+                    crate::agent::messaging::AgentEvent::StatsUpdate { token_usage } => {
+                        if token_usage.is_some() {
+                            latest_usage = token_usage.clone();
+                        }
+                    }
+                    crate::agent::messaging::AgentEvent::Error(err) => {
+                        is_error = true;
+                        error_detail = Some(err.clone());
+                    }
+                    _ => {}
+                }
+                println!("{}", serde_json::to_string(&event)?);
+            }
+            Err(err) => {
+                is_error = true;
+                error_detail = Some(err.to_string());
+                let payload = serde_json::json!({
+                    "type": "error",
+                    "content": err.to_string(),
+                });
+                println!("{}", payload);
+                break;
+            }
+        }
+    }
+
+    // 流已经跑完，显式放掉它对 `agent` 的可变借用。
+    drop(stream);
+
+    // `Message` 事件（有工具调用时）优先；否则用增量累积出来的正文。
+    if final_response.trim().is_empty() {
+        final_response = streamed_text.clone();
+    }
+    if !final_response.trim().is_empty() {
+        entries.push(ChatEntry::assistant(final_response.clone()));
+    }
+
+    let usage = latest_usage.or(restored_usage);
+    let cost_usd = usage
+        .as_ref()
+        .map(|u| crate::ui::utils::cost::compute_response_cost(u, &model_name));
+
+    // 会话落盘：headless 之前只有 `--resume` 时才写。
+    //
+    // 现在默认**也**写 —— 外部 harness 跑完一次就能 `--resume` 接着聊，或者事后
+    // 读回完整对话。这是外部 harness 场景下最基本的能力。
+    //
+    // 但它有个副作用：headless 的会话会混进用户的会话列表，`/continue` 可能
+    // 捡到一次 headless 运行。所以**新建**的 headless 会话默认不落盘，需要
+    // 显式开 `STAR_HEADLESS_SESSION=1`；`--resume` 指定的会话照旧写回
+    // （那是用户点名要续的）。
+    let persist_new_session = std::env::var("STAR_HEADLESS_SESSION")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_lowercase();
+            !(v == "0" || v == "false" || v == "off")
+        })
+        .unwrap_or(false);
+
+    let session_id = resumed_session_id.map(str::to_string).or_else(|| {
+        persist_new_session.then(|| format!("headless-{}", chrono::Local::now().timestamp()))
+    });
+    if let Some(id) = session_id.as_deref() {
+        snapshot_history.push(ChatEntry::user(prompt.to_string()));
+        snapshot_history.extend(entries.iter().cloned());
+        let (messages, pending_local_context) = agent.session_context_snapshot();
+        let _ = crate::utils::session_manager::save_session_snapshot(
+            id,
+            snapshot_history,
+            Some(messages),
+            Some(pending_local_context),
+            usage.clone(),
+        )
+        .await;
+    }
+
+    // 主流程跑完后再收几轮 inbox —— 外部 harness 批准工具 / 追加消息的窗口。
+    // 必须**在** result 行之前：result 是终态信号，harness 看到它就知道
+    // "跑完了"，之后的响应就没意义了。
+    // 远程消息的用量要**替换**掉主流程的用量 —— result 是终态信号，
+    // 它必须反映"这一整次 headless 运行"的真实消耗，而不是主 prompt 那一轮。
+    let remote_usage = drain_headless_remote_window(&remote_ctx, agent).await;
+    if let Some(remote) = remote_usage {
+        latest_usage = Some(remote);
+    }
+
+    let mut result = serde_json::json!({
+        "type": "result",
+        "is_error": is_error,
+        "duration_ms": started.elapsed().as_millis() as u64,
+        "usage": usage,
+        "cost_usd": cost_usd,
+        "session_id": session_id,
+    });
+    if let Some(detail) = error_detail {
+        result["error"] = serde_json::Value::String(detail);
+    }
+    println!("{}", result);
+
+    Ok(())
+}
+
+/// headless 模式下的远程 inbox 消费上下文。
+struct HeadlessRemoteContext {
+    cwd: std::path::PathBuf,
+    abort_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    bus: Option<std::sync::Arc<crate::core::confirmation_bus::MessageBus>>,
+    session_id: Option<String>,
+}
+
+/// headless 模式下的远程 inbox 消费。
+///
+/// # 为什么 headless 需要自己处理
+///
+/// TUI 那边有 `runtime::background::spawn_schedule_pollers` 在轮询 inbox，
+/// 但它只在**UI 事件循环**里启动（`ui/app/runtime.rs:653`）。headless 走
+/// 的是另一条路，压根没有那个循环 —— 所以外部 harness 往 inbox 写消息，
+/// headless 永远看不见。
+///
+/// # 为什么是**同步**收尾而不是后台任务
+///
+/// headless 是一次性执行的：主流程跑完进程就退出。后台任务活不过主流程
+/// （主流程 5 秒结束，任务随之被取消，外部消息永远等不到响应）。
+///
+/// 所以改成：主流程跑完后，**同步**再收几轮 inbox。外部 harness 的
+/// 「发消息 / 批准工具 / 取消」在这个窗口里生效。
+///
+/// # 四个动作
+///
+/// - `send_message` —— 用独立 agent 跑一轮，结果写进 session。
+/// - `approve_tool` —— 往消息总线发 `ToolConfirmationResponse`（主 agent
+///   正在等的那个确认）。
+/// - `cancel` —— 置位主 agent 的 abort 标志。
+/// - `ping` —— 回一条 `pong`。
+async fn drain_headless_remote_once(
+    ctx: &HeadlessRemoteContext,
+    agent: &mut agent::StarAgent,
+) -> (usize, Option<crate::types::StarUsage>) {
+    use crate::core::remote::{
+        RemoteResponse, ACTION_APPROVE_TOOL, ACTION_CANCEL, ACTION_PING, ACTION_SEND_MESSAGE,
+    };
+    use std::sync::atomic::Ordering;
+
+    let drained = match crate::core::remote::drain_requests(&ctx.cwd).await {
+        Ok(drained) => drained,
+        Err(err) => {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[REMOTE] headless poll failed: {err}"
+            ));
+            return (0, None);
+        }
+    };
+
+    let count = drained.accepted.len();
+    let mut usage: Option<crate::types::StarUsage> = None;
+    if count > 0 || !drained.rejected.is_empty() {
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[REMOTE] headless poll: {count} accepted, {} rejected",
+            drained.rejected.len()
+        ));
+    }
+
+    for req in drained.accepted {
+        let response = match req.action.as_str() {
+            ACTION_PING => {
+                RemoteResponse::ok(&req.protocol, req.request_id.clone(), ACTION_PING, "pong")
+            }
+            ACTION_CANCEL => {
+                ctx.abort_flag.store(true, Ordering::SeqCst);
+                RemoteResponse::ok(
+                    &req.protocol,
+                    req.request_id.clone(),
+                    ACTION_CANCEL,
+                    "已请求中止",
+                )
+            }
+            ACTION_APPROVE_TOOL => {
+                let tool_call_id = req.message.trim().to_string();
+                let approved = req.approved.unwrap_or(true);
+                match approve_via_bus(ctx.bus.as_ref(), &tool_call_id, approved).await {
+                    Ok(detail) => RemoteResponse::ok(
+                        &req.protocol,
+                        req.request_id.clone(),
+                        ACTION_APPROVE_TOOL,
+                        detail,
+                    ),
+                    Err(detail) => RemoteResponse::error(
+                        &req.protocol,
+                        req.request_id.clone(),
+                        ACTION_APPROVE_TOOL,
+                        detail,
+                    ),
+                }
+            }
+            ACTION_SEND_MESSAGE => {
+                let (detail, turn_usage) =
+                    run_remote_message(agent, ctx.session_id.as_deref(), &req.message).await;
+                if turn_usage.is_some() {
+                    usage = turn_usage;
+                }
+                RemoteResponse::ok(
+                    &req.protocol,
+                    req.request_id.clone(),
+                    ACTION_SEND_MESSAGE,
+                    detail,
+                )
+            }
+            other => RemoteResponse::error(
+                &req.protocol,
+                req.request_id.clone(),
+                other,
+                "headless 执行层不认识这个动作",
+            ),
+        };
+        let _ = crate::core::remote::append_response(&ctx.cwd, &response).await;
+    }
+
+    (count, usage)
+}
+
+/// 主流程结束后，同步收几轮 inbox。
+///
+/// 窗口默认 3 秒（3 轮 × 1 秒）。想更长就设 `STAR_REMOTE_DRAIN_SECS`。
+///
+/// # 为什么要留这个窗口
+///
+/// 外部 harness 的典型用法是：启动 headless → 往 inbox 写「批准这个工具」
+/// → 等 agent 继续。如果 headless 跑完就退出，批准永远送不到。
+///
+/// 窗口是**尽力而为**的：agent 跑得快时它已经结束了，批准就没有意义了
+/// （工具已经执行或已被拒）。要真正等批准，应该用 `--dangerously-skip-permissions`
+/// 或者在 TUI 里跑。
+async fn drain_headless_remote_window(
+    ctx: &HeadlessRemoteContext,
+    agent: &mut agent::StarAgent,
+) -> Option<crate::types::StarUsage> {
+    let rounds = std::env::var("STAR_REMOTE_DRAIN_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(3)
+        .min(120);
+
+    if rounds == 0 {
+        return None;
+    }
+    let mut latest_usage: Option<crate::types::StarUsage> = None;
+    for _ in 0..rounds {
+        let (count, usage) = drain_headless_remote_once(ctx, agent).await;
+        if usage.is_some() {
+            latest_usage = usage;
+        }
+        if count == 0 {
+            // inbox 空了再等一轮就收工 —— 没有消息时不必耗满整个窗口。
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
+    latest_usage
+}
+
+/// 通过消息总线应答一次挂起的工具确认。
+async fn approve_via_bus(
+    bus: Option<&std::sync::Arc<crate::core::confirmation_bus::MessageBus>>,
+    correlation_id: &str,
+    approved: bool,
+) -> Result<String, String> {
+    use crate::core::confirmation_bus::types::{Message, MessageBusType, ToolConfirmationResponse};
+    use crate::types::ToolConfirmationOutcome;
+
+    let Some(bus) = bus else {
+        return Err("没有消息总线 —— 工具确认无法应答".to_string());
+    };
+    if correlation_id.is_empty() {
+        return Err("缺少 correlation_id".to_string());
+    }
+
+    bus.respond_external(Message::ToolConfirmationResponse(
+        ToolConfirmationResponse {
+            message_type: MessageBusType::ToolConfirmationResponse,
+            correlation_id: correlation_id.to_string(),
+            confirmed: approved,
+            requires_user_confirmation: None,
+            outcome: Some(if approved {
+                ToolConfirmationOutcome::ProceedOnce
+            } else {
+                ToolConfirmationOutcome::Cancel
+            }),
+            feedback: None,
+        },
+    ))
+    .await;
+
+    Ok(if approved { "已批准" } else { "已拒绝" }.to_string())
+}
+
+/// 用**主 agent** 跑一轮远程消息，结果写进 session。
+///
+/// # 为什么复用主 agent 而不是新造一个
+///
+/// 早先这里新造一个 `StarAgent` —— 但它的 `build_agent_runtime_artifacts` 会
+/// 重新注册整套工具（含 MCP 工具），既慢又容易在工具注册阶段卡住。
+///
+/// 复用主 agent 没有这个问题：`Agent::session_messages` 是持久的，`run_stream`
+/// 每次调用都会把 system 消息重建好、把上一轮的历史接上，所以连续调用就是
+/// 连续的多轮对话。而且远程消息**本来就应该**接在当前会话后面 ——
+/// 外部 harness 发的消息是对话的一部分，不是另起一段。
+async fn run_remote_message(
+    agent: &mut agent::StarAgent,
+    session_id: Option<&str>,
+    message: &str,
+) -> (String, Option<crate::types::StarUsage>) {
+    use futures::StreamExt;
+
+    crate::utils::logging::append_debug_log_line(
+        "[REMOTE] running remote message on the main agent",
+    );
+
+    let mut stream = agent.process_user_message_streaming(message);
+    let mut final_response = String::new();
+    let mut streamed_text = String::new();
+    let mut entries: Vec<ChatEntry> = Vec::new();
+    let mut failed: Option<String> = None;
+    let mut usage: Option<crate::types::StarUsage> = None;
+
+    while let Some(event_result) = stream.next().await {
+        match event_result {
+            Ok(event) => {
+                match &event {
+                    crate::agent::messaging::AgentEvent::Message(content) => {
+                        final_response = content.clone();
+                    }
+                    crate::agent::messaging::AgentEvent::StatsUpdate { token_usage } => {
+                        if token_usage.is_some() {
+                            usage = token_usage.clone();
+                        }
+                    }
+                    crate::agent::messaging::AgentEvent::TextDelta(content) => {
+                        streamed_text.push_str(content);
+                    }
+                    crate::agent::messaging::AgentEvent::Error(err) => {
+                        failed = Some(err.clone());
+                    }
+                    _ => {}
+                }
+                match serde_json::to_string(&event) {
+                    Ok(line) => println!("{line}"),
+                    // 序列化失败不该让远程消息整条失败 —— 事件本身已经拿到了。
+                    Err(err) => {
+                        crate::utils::logging::append_debug_log_line(&format!(
+                            "[REMOTE] failed to serialize event: {err}"
+                        ));
+                    }
+                }
+            }
+            Err(err) => {
+                failed = Some(err.to_string());
+                break;
+            }
+        }
+    }
+
+    if let Some(err) = failed {
+        return (format!("处理失败: {err}"), usage);
+    }
+
+    if final_response.trim().is_empty() {
+        final_response = streamed_text.clone();
+    }
+    if !final_response.trim().is_empty() {
+        entries.push(ChatEntry::assistant(final_response.clone()));
+    }
+
+    if let Some(id) = session_id {
+        let mut history = vec![ChatEntry::user(message.to_string())];
+        history.extend(entries);
+        let _ =
+            crate::utils::session_manager::save_session_snapshot(id, &history, None, None, None)
+                .await;
+    }
+
+    let detail = if final_response.trim().is_empty() {
+        "已处理（无输出）".to_string()
+    } else {
+        final_response
+    };
+    (detail, usage)
+}
+
 async fn process_prompt_headless(
     api_key: &str,
     base_url: String,
@@ -699,6 +1192,22 @@ async fn process_prompt_headless(
         eprintln!("⚠️ MCP 初始化失败（已忽略，MCP 工具不可用）: {}", e);
     }
 
+    // `stream-json` 走自己的路径：边跑边把事件吐出去，而不是等整轮跑完。
+    //
+    // 这条路径必须**先于**下面的非流式分支分流 —— 非流式那条会把除最终
+    // 助手正文以外的事件全丢掉（`Agent::run` 的 `_ => {}`），正是 stream-json
+    // 要提供的东西。
+    if matches!(output_format, HeadlessOutputFormat::StreamJson) {
+        return run_headless_stream_json(
+            &mut agent,
+            prompt,
+            resumed_session_id.as_deref(),
+            &mut snapshot_history,
+            restored_usage,
+        )
+        .await;
+    }
+
     // Process the user message
     let (chat_entries, latest_usage) = agent
         .process_user_message_with_usage(prompt)
@@ -725,6 +1234,10 @@ async fn process_prompt_headless(
             for entry in &chat_entries {
                 println!("{}", serde_json::to_string(entry)?);
             }
+        }
+        // `StreamJson` 在上面就分流走了 —— 到这里说明控制流出错了。
+        HeadlessOutputFormat::StreamJson => {
+            eprintln!("internal error: stream-json should have been handled earlier");
         }
         HeadlessOutputFormat::Text => {
             let mut has_assistant = false;

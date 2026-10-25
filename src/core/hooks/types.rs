@@ -1,3 +1,21 @@
+//! Hook 事件与配置的**类型定义**。
+//!
+//! # ⚠️ 这个模块没有接线 —— 真正生效的是 `store.rs`
+//!
+//! 本文件定义了 `HookEvent`（15 个 Claude Code 事件名）、`HookDefinition`、
+//! `HookType`、`HookDecision` 等类型。它们**只被同目录下的 `async_hooks` /
+//! `chain` / `function_hooks` 引用**，而那三个模块自己也**零外部调用方**。
+//!
+//! 真正跑起来的是 [`super::store::ManagedHookEvent`]（`store.rs`）—— 它有
+//! 真实的触发点、真实的 settings.json 解析、真实的 shell 执行。
+//!
+//! **所以：看到本文件里的 `HookEvent` 枚举，不要以为那 15 个事件已经生效。**
+//! 生效的事件列表看 `store.rs` 的 `ManagedHookEvent`，以及
+//! `docs/harness-integration.md`。
+//!
+//! 本模块保留是因为它的类型定义还有参考价值（CC 事件名的权威清单），
+//! 接线它属于独立的一步工作。
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

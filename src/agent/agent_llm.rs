@@ -143,10 +143,18 @@ impl Agent {
                 context_window,
             ));
 
+            let before_tokens = estimated_tokens;
             let compact_result = self.compact_manager.compact(request_messages);
 
             if compact_result.was_compacted {
                 *request_messages = compact_result.messages;
+                // 压缩完成 —— 外部 harness 靠这个事件知道上下文被裁过
+                // （以及裁了多少），否则它看到的 token 曲线会毫无征兆地掉一截。
+                crate::agent::hooks::run_post_compact_hook(
+                    before_tokens,
+                    crate::agent::compact::token_counter::count_tokens(request_messages),
+                )
+                .await;
             } else {
                 // Clone messages before compression attempt so we can recover on failure
                 let original_messages = request_messages.clone();
@@ -462,6 +470,22 @@ impl Agent {
                                             crate::types::StreamingChunk::text_delta(content),
                                         );
                                         content_streamed = self.stream_tx.is_some();
+                                        // 没有 UI 通道时（headless），Branch B 的
+                                        // 增量没人收 —— 这里补发一份 Branch A 事件，
+                                        // 否则 `AgentEvent::TextDelta` 永远没有
+                                        // 生产者，外部消费者（headless 的
+                                        // stream-json）就看不到模型在说什么。
+                                        //
+                                        // UI 在场时不发：UI 消费的是
+                                        // `select()` 合并流，两边都发会让文本
+                                        // 渲染两遍（`star_agent.rs` 里对
+                                        // `AgentEvent::TextDelta` 显式跳过正是
+                                        // 为了这个）。
+                                        if self.stream_tx.is_none() {
+                                            self.emit_event(AgentEvent::TextDelta(
+                                                content.to_string(),
+                                            ));
+                                        }
                                         current_content.push_str(content);
                                     }
                                 }
@@ -504,6 +528,13 @@ impl Agent {
                                                     ),
                                                 );
                                                 reasoning_streamed = self.stream_tx.is_some();
+                                                // 同上：headless 没有 UI 通道，
+                                                // Branch B 的思考增量没人收。
+                                                if self.stream_tx.is_none() {
+                                                    self.emit_event(AgentEvent::ReasoningDelta(
+                                                        reasoning.clone(),
+                                                    ));
+                                                }
                                                 current_reasoning.push_str(&reasoning);
                                             }
                                         }
@@ -812,9 +843,15 @@ impl Agent {
                 crate::utils::logging::append_debug_log_line(
                     "[RECOVERY] Attempting context compression and retry",
                 );
+                let before_tokens = recovery_context.current_tokens as usize;
                 let compact_result = self.compact_manager.compact(messages);
                 if compact_result.was_compacted {
                     *messages = compact_result.messages;
+                    crate::agent::hooks::run_post_compact_hook(
+                        before_tokens,
+                        crate::agent::compact::token_counter::count_tokens(messages),
+                    )
+                    .await;
                 }
                 LlmResult::Retry
             }

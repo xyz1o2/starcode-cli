@@ -1,5 +1,21 @@
 //! Sandbox module for command execution isolation
 //!
+//! # ⚠️ 未接线 —— 模块完整，但没有任何调用方
+//!
+//! 本模块实现了完整的隔离运行时（bubblewrap / Seatbelt / WSL2 / OpenSandbox
+//! 四条平台路径 + 代理 + 资源限制），**但**：
+//!
+//! - `SandboxManager::new` 全仓**零调用方**；
+//! - `core/tools/shell.rs` 的 `execute()` 里**零** sandbox 调用 —— 只有
+//!   `dangerously_disable_sandbox` 这个字段定义；
+//! - `agent/tool_executor.rs` 里有「sandbox 限制 → 自动降级重试」的**消费方**
+//!   逻辑，但**生产方不存在** —— 那个降级路径永远不会触发。
+//!
+//! 也就是说：sandbox 的能力是**纸面上的**。命令目前**不经任何隔离**执行。
+//!
+//! 接线它是一个独立工作项（要处理平台探测、降级策略、与确认流程的交互），
+//! 与 harness 接入面无关。
+//!
 //! Provides a hybrid sandbox solution:
 //! - Linux: bubblewrap (namespace isolation)
 //! - macOS: Seatbelt (sandbox-exec)
@@ -9,15 +25,6 @@
 //! # Architecture
 //! ```text
 //! ┌─────────────────────────────────────────────┐
-//! │           SandboxRuntime (trait)            │
-//! ├─────────────────────────────────────────────┤
-//! │  Linux: BubblewrapRuntime                   │
-//! │  macOS: SeatbeltRuntime                     │
-//! │  Windows: WSL2 + Bubblewrap (same as Linux) │
-//! │  Any: OpenSandboxRuntime (optional)         │
-//! └─────────────────────────────────────────────┘
-//! ```
-
 pub mod config;
 pub mod network;
 pub mod proxy;

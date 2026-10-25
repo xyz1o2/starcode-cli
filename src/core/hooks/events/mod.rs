@@ -1,3 +1,18 @@
+//! Hook **执行过程**的事件广播（`HookExecutionEvent::Started` /
+//! `Progress` / `Response`）。
+//!
+//! # ⚠️ 这个模块没有接线 —— 它不参与编译
+//!
+//! `super::mod`（`core/hooks/mod.rs`）**没有** `pub mod events;` 这一行，
+//! 所以本目录下的代码**从来不会被编译**。它描述的是"hook 脚本跑到哪一步了"
+//! 这类内部进度事件，与 `store::ManagedHookEvent`（hook 的**触发点**）是两回事。
+//!
+//! 留着它是个陷阱：审查时看到 `HookEventType` 里列了 22 个 Claude Code 事件，
+//! 很容易得出"事件覆盖了 22 个"的结论 —— 而实际生效的只有
+//! `store::ManagedHookEvent` 里的那些（见 `docs/harness-integration.md`）。
+//!
+//! 要么接线它，要么删掉它。接线是一个独立的工作项。
+
 /// Hook事件系统
 /// 
 /// 对标claude-code-main的src/utils/hooks/hookEvents.ts

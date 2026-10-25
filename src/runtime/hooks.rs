@@ -29,6 +29,7 @@ pub async fn run_session_start(project_root: Option<&Path>) {
             tool_success: None,
             stop_reason: None,
             stop_hook_active: false,
+            tool_call_id: None,
         },
     )
     .await;
@@ -50,6 +51,7 @@ pub async fn run_session_end(project_root: Option<&Path>, stop_reason: &str) {
             tool_success: None,
             stop_reason: Some(stop_reason.to_string()),
             stop_hook_active: false,
+            tool_call_id: None,
         },
     )
     .await;
@@ -98,6 +100,7 @@ pub async fn run_preflight_hooks(
                 tool_success: None,
                 stop_reason: None,
                 stop_hook_active: false,
+                tool_call_id: None,
             },
         )
         .await
@@ -140,12 +143,28 @@ pub async fn run_preflight_hooks(
     summary
 }
 
-pub async fn run_stop_hooks(project_root: Option<&Path>, user_message: &str, stop_reason: &str) {
+/// 停止钩子。
+///
+/// # 为什么返回结果、并且失败时另发一个事件
+///
+/// 之前这里把 `run_hooks` 的结果整个丢掉（`let _ =`）—— 于是 stop hook 失败
+/// （比如脚本退出码非 0、或者它想阻止停止但失败了）这件事**外部完全看不见**。
+///
+/// 现在：
+///
+/// - 返回 `HookRunSummary`，调用方能拿到失败明细；
+/// - 失败时另发 `StopFailure` 事件 —— Claude Code 有这个事件，外部 harness
+///   靠它区分「正常停���」和「停不下来」。
+pub async fn run_stop_hooks(
+    project_root: Option<&Path>,
+    user_message: &str,
+    stop_reason: &str,
+) -> Vec<String> {
     let Some(project_root) = project_root else {
-        return;
+        return Vec::new();
     };
 
-    let _ = run_hooks(
+    let outcome = run_hooks(
         project_root,
         ManagedHookEvent::Stop,
         &HookRunContext {
@@ -156,9 +175,43 @@ pub async fn run_stop_hooks(project_root: Option<&Path>, user_message: &str, sto
             tool_success: None,
             stop_reason: Some(stop_reason.to_string()),
             stop_hook_active: false,
+            tool_call_id: None,
         },
     )
     .await;
+
+    // 停不下来 —— 单独发一个事件。
+    let failures: Vec<String> = match &outcome {
+        Ok(results) => results
+            .iter()
+            .filter(|r| !r.success)
+            .map(|r| format!("{}: {}", r.name, hook_failure_reason(r)))
+            .collect(),
+        Err(err) => vec![format!("hook engine failed: {err}")],
+    };
+    if !failures.is_empty() {
+        let details = serde_json::json!({
+            "stop_reason": stop_reason,
+            "failures": failures,
+        });
+        let _ = run_hooks(
+            project_root,
+            ManagedHookEvent::StopFailure,
+            &HookRunContext {
+                user_message: user_message.to_string(),
+                status: "stop_failure".to_string(),
+                tool_name: None,
+                tool_arguments: Some(details.to_string()),
+                tool_success: Some(false),
+                stop_reason: Some(stop_reason.to_string()),
+                stop_hook_active: false,
+                tool_call_id: None,
+            },
+        )
+        .await;
+    }
+
+    failures
 }
 
 pub async fn run_after_agent_hooks(project_root: Option<&Path>, user_message: &str) -> Vec<String> {
@@ -178,6 +231,7 @@ pub async fn run_after_agent_hooks(project_root: Option<&Path>, user_message: &s
             tool_success: None,
             stop_reason: None,
             stop_hook_active: false,
+            tool_call_id: None,
         },
     )
     .await
@@ -222,6 +276,7 @@ pub async fn run_pre_compact_hooks(project_root: Option<&Path>) -> HookExecution
             tool_success: None,
             stop_reason: None,
             stop_hook_active: false,
+            tool_call_id: None,
         },
     )
     .await
@@ -271,6 +326,7 @@ pub async fn emit_notification_hook(message: &str, status: &str) {
             tool_success: None,
             stop_reason: None,
             stop_hook_active: false,
+            tool_call_id: None,
         },
     )
     .await;

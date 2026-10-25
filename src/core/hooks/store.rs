@@ -35,6 +35,25 @@ pub enum ManagedHookEvent {
     PostToolUse,
     #[serde(rename = "SubagentStop")]
     SubagentStop,
+    // ── Claude Code 兼容事件（2026-10-25 接入）──
+    //
+    // 之前这些事件名只在 `core/hooks/types.rs`（一个从未被任何 `mod` 声明引用、
+    // 因而不参与编译的文件）里出现过。看得见、用不着的枚举比没有更糟 ——
+    // 审查时会得出「CC 35 个事件覆盖了 22 个」的错误结论。
+    //
+    // 现在它们进了**真正生效**的注册表，每个都有真实的触发点。
+    #[serde(rename = "PermissionRequest")]
+    PermissionRequest,
+    #[serde(rename = "PermissionDenied")]
+    PermissionDenied,
+    #[serde(rename = "PostToolUseFailure")]
+    PostToolUseFailure,
+    #[serde(rename = "StopFailure")]
+    StopFailure,
+    #[serde(rename = "SubagentStart")]
+    SubagentStart,
+    #[serde(rename = "PostCompact")]
+    PostCompact,
 }
 
 impl ManagedHookEvent {
@@ -54,6 +73,12 @@ impl ManagedHookEvent {
             Self::PreToolUse => "PreToolUse",
             Self::PostToolUse => "PostToolUse",
             Self::SubagentStop => "SubagentStop",
+            Self::PermissionRequest => "PermissionRequest",
+            Self::PermissionDenied => "PermissionDenied",
+            Self::PostToolUseFailure => "PostToolUseFailure",
+            Self::StopFailure => "StopFailure",
+            Self::SubagentStart => "SubagentStart",
+            Self::PostCompact => "PostCompact",
         }
     }
 
@@ -79,6 +104,18 @@ impl ManagedHookEvent {
             "pretooluse" | "pre_tool_use" | "beforetool" | "before_tool" => Some(Self::PreToolUse),
             "posttooluse" | "post_tool_use" | "aftertool" | "after_tool" => Some(Self::PostToolUse),
             "subagentstop" | "subagent_stop" | "agent_stop" => Some(Self::SubagentStop),
+            "permissionrequest" | "permission_request" | "perm_request" => {
+                Some(Self::PermissionRequest)
+            }
+            "permissiondenied" | "permission_denied" | "perm_denied" => {
+                Some(Self::PermissionDenied)
+            }
+            "posttoolusefailure" | "post_tool_use_failure" | "tool_failure" => {
+                Some(Self::PostToolUseFailure)
+            }
+            "stopfailure" | "stop_failure" => Some(Self::StopFailure),
+            "subagentstart" | "subagent_start" | "agent_start" => Some(Self::SubagentStart),
+            "postcompact" | "post_compact" | "compress_after" => Some(Self::PostCompact),
             _ => None,
         }
     }
@@ -408,4 +445,68 @@ pub async fn remove_hook(project_root: &Path, name: &str) -> Result<bool, String
 
     save_store(project_root, &store).await?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ManagedHookEvent;
+
+    /// 事件名是对外契约 —— 外部 harness 的 settings.json 按这些名字挂 hook。
+    /// 改名会让已配置的 hook 静默失效。
+    #[test]
+    fn event_names_are_stable() {
+        for (event, expected) in [
+            (ManagedHookEvent::PermissionRequest, "PermissionRequest"),
+            (ManagedHookEvent::PermissionDenied, "PermissionDenied"),
+            (ManagedHookEvent::PostToolUseFailure, "PostToolUseFailure"),
+            (ManagedHookEvent::StopFailure, "StopFailure"),
+            (ManagedHookEvent::SubagentStart, "SubagentStart"),
+            (ManagedHookEvent::PostCompact, "PostCompact"),
+        ] {
+            assert_eq!(event.as_str(), expected);
+        }
+    }
+
+    /// Claude Code 兼容的事件名必须能被 `parse` 认出来 ——
+    /// 否则用户在 settings.json 里写 "PermissionRequest" 会被静默忽略。
+    #[test]
+    fn claude_code_event_names_parse() {
+        for name in [
+            "PermissionRequest",
+            "permission_request",
+            "PermissionDenied",
+            "PostToolUseFailure",
+            "StopFailure",
+            "SubagentStart",
+            "PostCompact",
+        ] {
+            assert!(
+                ManagedHookEvent::parse(name).is_some(),
+                "事件名 {name} 解析不出来"
+            );
+        }
+    }
+
+    /// 反序列化也要认（settings.json 里的事件名走这条路）。
+    #[test]
+    fn claude_code_event_names_deserialize() {
+        for name in [
+            "PermissionRequest",
+            "PermissionDenied",
+            "PostToolUseFailure",
+            "StopFailure",
+            "SubagentStart",
+            "PostCompact",
+        ] {
+            let parsed: Result<ManagedHookEvent, _> =
+                serde_json::from_value(serde_json::json!(name));
+            assert!(parsed.is_ok(), "事件名 {name} 反序列化失败");
+        }
+    }
+
+    /// 未知事件名仍然要被拒 —— 不能变成"什么都接受"。
+    #[test]
+    fn unknown_event_names_are_rejected() {
+        assert!(ManagedHookEvent::parse("NoSuchEvent").is_none());
+    }
 }

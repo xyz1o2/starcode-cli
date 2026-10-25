@@ -63,6 +63,17 @@ pub(crate) async fn run_stage_hooks(
     status: &str,
     details: Option<Value>,
 ) -> Result<(), String> {
+    run_stage_hooks_with_call_id(user_input, event, status, details, None).await
+}
+
+/// 同上，但能带上确认请求的 id —— 外部 harness 靠它应答 `approve_tool`。
+pub(crate) async fn run_stage_hooks_with_call_id(
+    user_input: &str,
+    event: crate::core::hooks::store::ManagedHookEvent,
+    status: &str,
+    details: Option<Value>,
+    tool_call_id: Option<String>,
+) -> Result<(), String> {
     let Some(cwd_owned) = cached_project_root() else {
         return Ok(());
     };
@@ -86,6 +97,7 @@ pub(crate) async fn run_stage_hooks(
             tool_success: None,
             stop_reason: None,
             stop_hook_active: false,
+            tool_call_id,
         },
     )
     .await
@@ -127,6 +139,97 @@ pub(crate) async fn run_stage_hooks(
     }
 }
 
+/// 工具确认请求**发出**时触发 `PermissionRequest`。
+///
+/// 外部 harness 靠这个事件知道「有一个工具在等人批准」—— 拿到 tool_call_id 之后
+/// 才能用 remote inbox 的 `approve_tool` 动作应答。
+pub(crate) async fn run_permission_request_hook(tool_call: &StarToolCall, source: &str) {
+    let details = Some(serde_json::json!({
+        "tool_name": tool_call.function.name,
+        "tool_arguments": tool_call.function.arguments,
+        "source": source,
+    }));
+    // 通知型事件：不阻塞 —— 它只是告诉外部"来人了"。
+    let _ = run_stage_hooks_with_call_id(
+        "",
+        crate::core::hooks::store::ManagedHookEvent::PermissionRequest,
+        "permission_request",
+        details,
+        Some(tool_call.id.clone()),
+    )
+    .await;
+}
+
+/// 工具确认被**拒绝**时触发 `PermissionDenied`。
+pub(crate) async fn run_permission_denied_hook(tool_call: &StarToolCall, reason: &str) {
+    let details = Some(serde_json::json!({
+        "tool_name": tool_call.function.name,
+        "tool_arguments": tool_call.function.arguments,
+        "reason": reason,
+    }));
+    let _ = run_stage_hooks(
+        "",
+        crate::core::hooks::store::ManagedHookEvent::PermissionDenied,
+        "permission_denied",
+        details,
+    )
+    .await;
+}
+
+/// 工具执行**失败**时触发 `PostToolUseFailure`。
+///
+/// 之前有个 `run_post_tool_use_failure_hooks` 是空壳（循环体只填 `success: true`，
+/// 从不执行命令），而且没有调用方。这里给它一个真的实现和真的调用点。
+pub(crate) async fn run_post_tool_failure_hooks(tool_call: &StarToolCall, error: &str) {
+    let details = Some(serde_json::json!({
+        "tool_name": tool_call.function.name,
+        "tool_arguments": tool_call.function.arguments,
+        "error": error,
+    }));
+    let _ = run_stage_hooks(
+        "",
+        crate::core::hooks::store::ManagedHookEvent::PostToolUseFailure,
+        "post_tool_use_failure",
+        details,
+    )
+    .await;
+}
+
+/// 子代理**开始**时触发 `SubagentStart`。
+pub(crate) async fn run_subagent_start_hook(
+    agent_id: &str,
+    description: &str,
+    subagent_type: &str,
+) {
+    let details = Some(serde_json::json!({
+        "agent_id": agent_id,
+        "description": description,
+        "subagent_type": subagent_type,
+    }));
+    let _ = run_stage_hooks(
+        "",
+        crate::core::hooks::store::ManagedHookEvent::SubagentStart,
+        "subagent_start",
+        details,
+    )
+    .await;
+}
+
+/// 上下文压缩**完成**后触发 `PostCompact`。
+pub(crate) async fn run_post_compact_hook(before_tokens: usize, after_tokens: usize) {
+    let details = Some(serde_json::json!({
+        "before_tokens": before_tokens,
+        "after_tokens": after_tokens,
+    }));
+    let _ = run_stage_hooks(
+        "",
+        crate::core::hooks::store::ManagedHookEvent::PostCompact,
+        "post_compact",
+        details,
+    )
+    .await;
+}
+
 pub(crate) async fn run_pre_tool_hooks(
     user_input: &str,
     tool_call: &StarToolCall,
@@ -153,6 +256,7 @@ pub(crate) async fn run_pre_tool_hooks(
             tool_success: None,
             stop_reason: None,
             stop_hook_active: false,
+            tool_call_id: Some(tool_call.id.clone()),
         },
     )
     .await
@@ -223,6 +327,7 @@ pub(crate) async fn run_post_tool_hooks(
             tool_success: Some(result.success),
             stop_reason: result.error.clone(),
             stop_hook_active: false,
+            tool_call_id: None,
         },
     )
     .await

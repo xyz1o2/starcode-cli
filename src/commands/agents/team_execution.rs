@@ -488,7 +488,13 @@ async fn execute_team_workspace_task(
         }
     }
 
-    if !result.success {
+    {
+        // 成功和失败**都要**触发 `SubagentStop`。
+        //
+        // 之前它挂在 `if !result.success` 里面 —— 子代理正常跑完时静悄悄的，
+        // 外部 harness 只能看到"开始了"（`SubagentStart`）却等不到"结束了"，
+        // 于是无法判断一个子任务是真的完成还是卡住了。`tool_success` 字段
+        // 区分两种结局。
         if let Ok(cwd) = std::env::current_dir() {
             let _ = crate::core::hooks::runner::run_hooks(
                 &cwd,
@@ -498,9 +504,10 @@ async fn execute_team_workspace_task(
                     status: "subagent_stop".to_string(),
                     tool_name: Some(workspace.member_name.clone()),
                     tool_arguments: task_params_json.clone(),
-                    tool_success: Some(false),
+                    tool_success: Some(result.success),
                     stop_reason: result.error.clone(),
                     stop_hook_active: false,
+                    tool_call_id: None,
                 },
             )
             .await;

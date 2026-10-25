@@ -75,6 +75,16 @@ impl StarAgentRunner {
         request: SubAgentRequest,
         sink: Option<SubAgentProgressSink>,
     ) -> Result<SubAgentResult, SubAgentError> {
+        // 子代理开始 —— 外部 harness 靠这个事件知道"多了一个干活的"。
+        // 之前 `SubagentStop` 只在**失败**时触发，成功路径静悄悄，外部看不到
+        // 子代理的完整生命周期。
+        crate::agent::hooks::run_subagent_start_hook(
+            "",
+            &request.prompt,
+            request.subagent_type.as_str(),
+        )
+        .await;
+
         if self.config.recursion_depth >= 3 {
             return Err(SubAgentError::new(
                 SubAgentErrorKind::RecursionLimitExceeded,

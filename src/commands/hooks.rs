@@ -144,6 +144,7 @@ pub(crate) async fn execute_hooks_command_in(
                     tool_success: None,
                     stop_reason: None,
                     stop_hook_active: false,
+                    tool_call_id: None,
                 },
             )
             .await

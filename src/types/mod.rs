@@ -1060,6 +1060,7 @@ pub enum ToolProgressStatus {
 // ============ 进度信息结构完成 ============
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum StreamingChunkType {
     #[default]
     Content,

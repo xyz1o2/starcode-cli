@@ -642,6 +642,17 @@ impl Agent {
             skip_verification,
         );
         hooks::run_post_tool_hooks(user_input, tool_call, &result).await;
+        // 失败单独走一个事件 —— 外部 harness 常要按"工具失败了"做不同处理
+        // （重试、告警、换策略），而 `PostToolUse` 的 `tool_success=false`
+        // 太笼统。
+        if !result.success {
+            let reason = result
+                .error
+                .clone()
+                .or_else(|| result.output.clone())
+                .unwrap_or_else(|| "tool failed".to_string());
+            hooks::run_post_tool_failure_hooks(tool_call, &reason).await;
+        }
         reflection::maybe_write_reflection_memory(user_input, tool_call, &result).await;
         if let Some(instruction) =
             record_tool_outcome(loop_state, &tool_call.function.name, &result)

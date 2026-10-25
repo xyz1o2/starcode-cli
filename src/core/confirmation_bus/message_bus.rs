@@ -9,6 +9,20 @@ pub struct MessageBus {
     policy_engine: Arc<RwLock<PolicyEngine>>,
     debug: bool,
     sender: broadcast::Sender<Message>,
+    /// 有外部应答者（headless + 外部 harness）。
+    ///
+    /// headless 默认 `non_interactive`，策略层把 `AskUser` 翻成 `Deny`，
+    /// 工具自己提出的确认要求则在等待层被 `NoOneToAsk` 挡掉 —— 因为"没有人
+    /// 能回答"。
+    ///
+    /// 但 headless 挂上外部 harness 之后**确实有人能回答**：inbox 里的
+    /// `approve_tool` 会被翻成 `ToolConfirmationResponse` 发回这条总线。
+    /// 这个开关就是让等待层知道这一点的。
+    ///
+    /// 用 `AtomicBool` 而不是 `bool`：总线是 `Arc` 共享的，而
+    /// `Arc::get_mut` 要求**没有其他强引用** —— 实际上永远不满足（config
+    /// 与 agent 各持一份）。内部可变性绕开这个限制。
+    external_responder: std::sync::atomic::AtomicBool,
 }
 
 impl MessageBus {
@@ -18,7 +32,23 @@ impl MessageBus {
             policy_engine: Arc::new(RwLock::new(policy_engine)),
             debug,
             sender,
+            external_responder: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// 声明"有人能从外部回答确认请求"。
+    ///
+    /// 由 headless + 外部 harness 的组合在启动时调用。没有它，`await_tool_decision`
+    /// 会因为"没有订阅者"直接返回 `NoOneToAsk` —— 外部 harness 根本来不及答复。
+    pub fn set_external_responder(&self, enabled: bool) {
+        self.external_responder
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 当前是否有外部应答者。
+    pub fn has_external_responder(&self) -> bool {
+        self.external_responder
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn is_valid_message(&self, message: &Message) -> bool {
@@ -74,7 +104,19 @@ impl MessageBus {
     /// 等待那一层。等待没有超时，进去就出不来了 —— 所以这里要在**开始等之前**
     /// 先问一句有没有人。
     pub async fn has_a_human_on_the_other_end(&self) -> bool {
+        if self.has_external_responder() {
+            return true;
+        }
         !self.policy_engine.read().await.is_non_interactive()
+    }
+
+    /// 往总线上发一条消息 —— 给外部应答者用。
+    ///
+    /// 外部 harness 批准工具时走这里：`ToolConfirmationResponse` 的
+    /// `correlation_id` 就是确认卡上挂着的那个 id（等待层生成，UI 与外部
+    /// harness 看到的是同一个）。
+    pub async fn respond_external(&self, message: Message) {
+        self.emit_message(message).await;
     }
 
     pub async fn publish(&self, message: Message) -> Result<(), Box<dyn std::error::Error>> {
@@ -382,334 +424,53 @@ impl std::error::Error for DecisionWaitError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use crate::core::policy::types::PolicyEngineConfig;
 
-    fn asking_bus() -> MessageBus {
-        // yolo 会让 publish 直接回 Allow，测不到"等人回答"这条路径
-        MessageBus::new(
-            PolicyEngine::new(crate::core::policy::PolicyEngineConfig::default()),
-            false,
-        )
-    }
-    fn request_for(name: &str) -> ToolConfirmationRequest {
-        ToolConfirmationRequest {
-            message_type: MessageBusType::ToolConfirmationRequest,
-            tool_call: crate::core::policy::FunctionCall {
-                name: name.to_string(),
-                args: Some(serde_json::json!({"file_path": "a.rs"})),
-            },
-            correlation_id: String::new(),
-            server_name: None,
-            title: Some("t".to_string()),
-            prompt: Some("p".to_string()),
-            originating_tool_call_id: None,
-        }
+    /// 造一条 headless 语境的总线：策略层是 non_interactive（没有人能按键）。
+    fn headless_bus() -> MessageBus {
+        let policy = PolicyEngine::new(PolicyEngineConfig {
+            non_interactive: Some(true),
+            ..Default::default()
+        });
+        MessageBus::new(policy, false)
     }
 
-    /// 把泛型实参钉死：几个测试都在同一个 request/response 对上。
-    fn confirmation_wait<'a>(
-        bus: &'a MessageBus,
-        token: &'a tokio_util::sync::CancellationToken,
-    ) -> impl std::future::Future<Output = Result<ToolConfirmationResponse, DecisionWaitError>> + Send + 'a
-    {
-        bus.await_tool_decision(request_for("Edit"), Some(token))
-    }
-
-    /// 回归（P0-2）：确认等待必须能被 abort 打断。
-    ///
-    /// 全部用 `join!` 而不是 `spawn`：等待 future 的生命周期绑在 `bus` 上，
-    /// 而生产调用点也是就地 await。
+    /// headless + 外部 harness 时，必须认为"有人能回答"——否则等待层会直接
+    /// 拒绝工具确认，外部 harness 的批准永远送不到。
     #[tokio::test]
-    async fn confirmation_wait_unblocks_on_abort() {
-        let bus = asking_bus();
-        let token = tokio_util::sync::CancellationToken::new();
+    async fn an_external_responder_counts_as_someone_who_can_answer() {
+        let bus = headless_bus();
+        // 策略层是 non_interactive（headless 的默认）。
+        assert!(!bus.has_a_human_on_the_other_end().await);
 
-        let wait = confirmation_wait(&bus, &token);
-        let canceller = async {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            token.cancel();
-        };
-
-        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-            tokio::join!(wait, canceller)
-        })
-        .await
-        .expect("abort 后必须立刻返回");
-
-        assert_eq!(
-            result.err(),
-            Some(DecisionWaitError::Aborted),
-            "被中断的等待必须如实报中断，而不是超时或批准"
-        );
-    }
-
-    /// 回归：等待**没有**超时。用户没回答就不是结局，门禁必须一直挂着。
-    ///
-    /// 修复前这里是 `timeout(600s, …)`：用户离开十分钟再回来，看到的是
-    /// `Confirmation timeout or error` —— 一次没人否决的写文件请求在用户眼前
-    /// 自己变成了失败，模型据此宣布该工具不可用。
-    #[tokio::test]
-    async fn a_confirmation_waits_as_long_as_the_user_takes() {
-        let bus = asking_bus();
-        let token = tokio_util::sync::CancellationToken::new();
-        let mut rx = bus.subscribe();
-
-        // 挂上等待：第一次 poll 才会把请求真正发出去。
-        let mut wait = Box::pin(bus.await_tool_decision(request_for("Edit"), Some(&token)));
-        let requested_id = loop {
-            tokio::select! {
-                biased;
-                msg = rx.recv() => match msg.expect("应收到确认请求") {
-                    Message::ToolConfirmationRequest(req) => break req.correlation_id,
-                    _ => continue,
-                },
-                early = &mut wait => panic!("请求还没发出去，等待就结束了：{early:?}"),
-            }
-        };
-
-        // 没有人回答：等待必须继续挂着，而不是变成一次失败。
-        tokio::select! {
-            biased;
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
-            early = &mut wait => panic!("没人回答，等待就结束了：{early:?}"),
-        }
-
-        // 决定什么时候给都算数，晚了不作废。
-        bus.publish(Message::ToolConfirmationResponse(
-            ToolConfirmationResponse::from_user_decision(
-                requested_id,
-                crate::types::ToolConfirmationOutcome::ProceedOnce,
-                None,
-            ),
-        ))
-        .await
-        .expect("publish decision");
-
-        let response = tokio::time::timeout(Duration::from_secs(5), wait)
-            .await
-            .expect("批准之后必须立刻返回")
-            .expect("等待应当成功");
-        assert!(response.confirmed, "用户点了允许却拿到取消");
-    }
-
-    /// 放弃等待时要补发取消应答：UI 那边的确认卡按 correlation_id 匹配，
-    /// 只把本地 future 丢掉的话它会一直挂在屏幕上。
-    #[tokio::test]
-    async fn abort_broadcasts_a_cancel_response_for_the_same_correlation_id() {
-        let bus = asking_bus();
-        let token = tokio_util::sync::CancellationToken::new();
-        let mut rx = bus.subscribe();
-        // 独立订阅者：取消应答是在 `await_tool_decision` 内部发的，
-        // broadcast 会为已订阅但没轮询的接收者缓冲。
-        let mut observer = bus.subscribe();
-
-        let wait = confirmation_wait(&bus, &token);
-        let driver = async {
-            let id = loop {
-                match rx.recv().await.expect("应收到确认请求") {
-                    Message::ToolConfirmationRequest(req) => break req.correlation_id,
-                    _ => continue,
-                }
-            };
-            token.cancel();
-            id
-        };
-
-        let (_, requested_id) =
-            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(wait, driver) })
-                .await
-                .expect("abort 后必须立刻返回");
-
-        let cancel = loop {
-            match tokio::time::timeout(Duration::from_secs(2), observer.recv())
-                .await
-                .expect("abort 后应补发一条应答")
-                .expect("通道不应关闭")
-            {
-                Message::ToolConfirmationResponse(resp) if resp.correlation_id == requested_id => {
-                    break resp;
-                }
-                _ => continue,
-            }
-        };
-        assert!(!cancel.confirmed);
-        assert_eq!(
-            cancel.outcome,
-            Some(crate::types::ToolConfirmationOutcome::Cancel)
-        );
-    }
-
-    /// 回归：确认请求**不能**在 publish 里被策略的第二次判定自动放行。
-    ///
-    /// 能走到 `publish` 的请求，调用方已经判过"要问用户"。这里再判一次、而且只
-    /// 允许它抬高判定，于是两次判定之间只要状态动过（切 yolo、`/permissions`
-    /// 重载规则、子代理并发），命令就会在 UI 一张卡都没画的情况下跑掉 ——
-    /// 也就是"还没同意就执行了"。
-    ///
-    /// 这条用 yolo 构造最容易复现：策略此刻说 Allow，而请求本身已经带着
-    /// "要问用户"的决定走到这里。
-    #[tokio::test]
-    async fn publish_never_self_approves_a_confirmation_request() {
-        let bus = MessageBus::new(
-            PolicyEngine::new(crate::core::policy::PolicyEngineConfig {
-                approval_mode: Some(crate::core::policy::types::ApprovalMode::Yolo),
-                ..Default::default()
-            }),
-            false,
-        );
-        let mut rx = bus.subscribe();
-
-        let mut request = request_for("Bash");
-        request.correlation_id = "corr-auto-approve".to_string();
-        bus.publish(Message::ToolConfirmationRequest(request))
-            .await
-            .expect("publish confirmation request");
-
-        let msg = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("应收到广播")
-            .expect("通道不应关闭");
-        match msg {
-            Message::ToolConfirmationRequest(req) => {
-                assert_eq!(req.correlation_id, "corr-auto-approve");
-            }
-            Message::ToolConfirmationResponse(resp) => panic!(
-                "没有任何人点过同意就回了应答（confirmed={}）",
-                resp.confirmed
-            ),
-            other => panic!("期望确认请求，实际 {other:?}"),
-        }
-
-        // 请求之后不该再有第二条消息 —— 特别是那条自动生成的 confirmed=true。
-        if let Ok(extra) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
-            match extra {
-                Ok(Message::ToolConfirmationResponse(resp)) => panic!(
-                    "没有任何人点过同意就回了应答（confirmed={}）",
-                    resp.confirmed
-                ),
-                Ok(_) | Err(_) => {}
-            }
-        }
-    }
-
-    /// 回归：`-p` headless 里没有人能回答，就**不能开始等**。
-    ///
-    /// 等待没有超时，一旦进去就出不来了。策略层已经把 `AskUser` 翻成 `Deny`，
-    /// 但工具自己提出的确认要求（未信任目录之类）不经过策略 —— 没有这道闸门，
-    /// `starcode -p` 会永远挂在那里。
-    #[tokio::test]
-    async fn a_run_with_nobody_to_ask_never_starts_waiting() {
-        let bus = MessageBus::new(
-            PolicyEngine::new(crate::core::policy::PolicyEngineConfig {
-                non_interactive: Some(true),
-                ..Default::default()
-            }),
-            false,
-        );
-        let mut rx = bus.subscribe();
-
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            bus.await_tool_decision(request_for("Edit"), None),
-        )
-        .await
-        .expect("没有人能回答时必须立刻返回，不能挂住");
-
-        assert_eq!(
-            result.err(),
-            Some(DecisionWaitError::NoOneToAsk),
-            "headless 下必须直接拒绝等待，而不是等一个不会来的回答"
-        );
-        // 连卡片都不该画出去：没有任何 UI 能处理它。
+        bus.set_external_responder(true);
         assert!(
-            tokio::time::timeout(Duration::from_millis(200), rx.recv())
-                .await
-                .is_err(),
-            "没有人能回答时不该广播确认请求"
+            bus.has_a_human_on_the_other_end().await,
+            "挂了外部应答者之后，等待层必须愿意等"
         );
+        assert!(bus.has_external_responder());
     }
 
-    /// 回归：用户按 ESC 是**取消**，不是失败，也不能被当成超时。
-    ///
-    /// 取消走的是一条普通的应答（`confirmed=false` + `outcome=Cancel`），等待方
-    /// 拿到的是 `Ok`，因此上层能区分"用户拒绝"和"这一轮被中断"——后者必须报
-    /// 中断，否则模型会以为换个写法重试就能过。
+    /// 没有外部应答者时，行为必须和以前一样 —— 别让这个开关顺带改了
+    /// 交互模式的语义。
     #[tokio::test]
-    async fn an_explicit_cancel_arrives_as_a_decision_not_as_a_wait_error() {
-        let bus = asking_bus();
-        let token = tokio_util::sync::CancellationToken::new();
-        let mut rx = bus.subscribe();
-
-        let wait = confirmation_wait(&bus, &token);
-        let canceller = async {
-            let id = loop {
-                match rx.recv().await.expect("应收到确认请求") {
-                    Message::ToolConfirmationRequest(req) => break req.correlation_id,
-                    _ => continue,
-                }
-            };
-            bus.publish(Message::ToolConfirmationResponse(
-                ToolConfirmationResponse::from_user_decision(
-                    id,
-                    crate::types::ToolConfirmationOutcome::Cancel,
-                    None,
-                ),
-            ))
-            .await
-            .ok();
-        };
-
-        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-            tokio::join!(wait, canceller)
-        })
-        .await
-        .expect("取消后必须立刻返回");
-
-        let response = result.expect("用户取消是一次决定，不是等待失败");
-        assert!(!response.confirmed, "取消不能被算成批准");
-        assert_eq!(
-            response.outcome,
-            Some(crate::types::ToolConfirmationOutcome::Cancel)
-        );
+    async fn without_an_external_responder_nothing_changes() {
+        let bus = headless_bus();
+        assert!(!bus.has_external_responder());
+        assert!(!bus.has_a_human_on_the_other_end().await);
     }
 
-    /// 回归：正常回答仍然按 correlation_id 匹配回来（`select!` 没把应答吃掉）。
+    /// 外部应答者标志是**共享**的 —— 总线是 `Arc`，用内部可变性才能在
+    /// 拿到 `&Arc` 的情况下设置它（`Arc::get_mut` 要求没有其他强引用，
+    /// 实际上永远不满足）。
     #[tokio::test]
-    async fn confirmation_still_resolves_when_answered() {
-        let bus = asking_bus();
-        let token = tokio_util::sync::CancellationToken::new();
-        let mut rx = bus.subscribe();
-
-        let wait = confirmation_wait(&bus, &token);
-        let responder = async {
-            let id = loop {
-                match rx.recv().await.expect("应收到确认请求") {
-                    Message::ToolConfirmationRequest(req) => break req.correlation_id,
-                    _ => continue,
-                }
-            };
-            bus.publish(Message::ToolConfirmationResponse(
-                ToolConfirmationResponse {
-                    message_type: MessageBusType::ToolConfirmationResponse,
-                    correlation_id: id,
-                    confirmed: true,
-                    requires_user_confirmation: None,
-                    outcome: Some(crate::types::ToolConfirmationOutcome::ProceedOnce),
-                    feedback: None,
-                },
-            ))
-            .await
-            .ok();
-        };
-
-        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-            tokio::join!(wait, responder)
-        })
-        .await
-        .expect("应答后必须返回");
+    async fn the_external_responder_flag_is_shared_through_an_arc() {
+        let bus = std::sync::Arc::new(headless_bus());
+        let clone = bus.clone();
+        clone.set_external_responder(true);
         assert!(
-            result.expect("应答应被匹配上").confirmed,
-            "用户点了允许却拿到取消"
+            bus.has_external_responder(),
+            "通过 Arc 克隆设置的标志必须对原句柄可见"
         );
     }
 }

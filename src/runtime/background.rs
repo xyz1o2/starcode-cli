@@ -78,7 +78,11 @@ pub enum BackgroundEvent {
     /// `/loop`：轮询本身失败（磁盘/网络）。
     LoopFailed(String),
     /// `/remote`：远程控制 inbox 里这一轮取到的请求。
-    RemoteRequests(crate::core::remote::RemoteDrainResult),
+    ///
+    /// 带上 cwd —— 响应必须写回**轮询时用的那个**目录。轮询用 `ui_cwd`
+    /// （随 `/cd` 变），若写回进程启动目录，`/cd` 之后外部 harness 就读不到
+    /// outbox 了。
+    RemoteRequests(crate::core::remote::RemoteDrainResult, std::path::PathBuf),
     /// `/remote`：轮询本身失败。
     RemoteFailed(String),
 }
@@ -121,13 +125,14 @@ pub fn spawn_schedule_pollers(
         }
     });
 
+    let remote_cwd = cwd.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            let event = match crate::core::remote::drain_requests(&cwd).await {
-                Ok(drained) => BackgroundEvent::RemoteRequests(drained),
+            let event = match crate::core::remote::drain_requests(&remote_cwd).await {
+                Ok(drained) => BackgroundEvent::RemoteRequests(drained, remote_cwd.clone()),
                 Err(err) => {
                     crate::utils::logging::append_debug_log_line(&format!(
                         "[REMOTE] poll failed: {}",
@@ -158,8 +163,8 @@ pub async fn apply_background_event(
             state.current_status_line = Some(format!("/loop 调度失败: {}", err));
             false
         }
-        BackgroundEvent::RemoteRequests(drained) => {
-            apply_remote_requests(state, agent_tx, drained).await
+        BackgroundEvent::RemoteRequests(drained, cwd) => {
+            apply_remote_requests(state, agent_tx, drained, &cwd).await
         }
         BackgroundEvent::RemoteFailed(err) => {
             state.current_status_line = Some(format!("/remote 消费失败: {}", err));
@@ -212,39 +217,105 @@ async fn apply_loop_tasks(
     needs_redraw
 }
 
-/// 把远程控制请求转成消息送进 agent。
+/// 把远程控制请求转成对应的 agent 动作。
+///
+/// # 协议
+///
+/// `crate::core::remote` 定义的四个动作：
+///
+/// - `send_message` —— 往会话里投一条消息（v1 就有的那个）
+/// - `approve_tool` —— 批准 / 拒绝一次挂起的工具确认
+/// - `cancel` —— 中止当前回合
+/// - `ping` —— 探活，回一条 `pong`，不动会话
+///
+/// 每个动作都会往 `.star/remote/outbox.jsonl` 写一条响应，把 `request_id`
+/// 原样带回 —— 外部 harness 靠它把响应和请求配对。
 async fn apply_remote_requests(
     state: &mut ChatState,
     agent_tx: &mpsc::Sender<AgentRequest>,
     drained: crate::core::remote::RemoteDrainResult,
+    cwd: &std::path::Path,
 ) -> bool {
+    use crate::core::remote::{
+        RemoteResponse, ACTION_APPROVE_TOOL, ACTION_CANCEL, ACTION_PING, ACTION_SEND_MESSAGE,
+    };
+
     let mut needs_redraw = false;
+    // cwd 由调用方给 —— **必须**和轮询时用的是同一个。轮询用 `ui_cwd`（随 `/cd`
+    // 变），进程启动目录是另一回事：用后者写响应，`/cd` 之后外部 harness 就
+    // 读不到 outbox 了。
 
     for req in drained.accepted {
-        let message_id = state.next_message_id;
-        state.next_message_id += 1;
-
         let source = if req.source.trim().is_empty() {
             "remote".to_string()
         } else {
             req.source.trim().to_string()
         };
 
-        state.chat_history.push(ChatEntry::user(format!(
-            "[remote:{}] {}",
-            source, req.message
-        )));
+        let response = match req.action.as_str() {
+            ACTION_SEND_MESSAGE => {
+                let message_id = state.next_message_id;
+                state.next_message_id += 1;
 
-        let message = format!("[Remote Control: {}]\n{}", source, req.message);
-        let _ = agent_tx
-            .send(AgentRequest::SendMessage {
-                message_id,
-                message,
-            })
-            .await;
+                state.chat_history.push(ChatEntry::user(format!(
+                    "[remote:{}] {}",
+                    source, req.message
+                )));
 
-        state.current_status_line = Some(format!("已接收远程请求: {}", source));
-        needs_redraw = true;
+                let message = format!("[Remote Control: {}]\n{}", source, req.message);
+                let _ = agent_tx
+                    .send(AgentRequest::SendMessage {
+                        message_id,
+                        message,
+                    })
+                    .await;
+
+                state.current_status_line = Some(format!("已接收远程请求: {}", source));
+                needs_redraw = true;
+                RemoteResponse::ok(
+                    &req.protocol,
+                    req.request_id.clone(),
+                    ACTION_SEND_MESSAGE,
+                    "已接收",
+                )
+            }
+            ACTION_APPROVE_TOOL => {
+                let approved = req.approved.unwrap_or(true);
+                apply_remote_tool_decision(
+                    state,
+                    agent_tx,
+                    &req.message,
+                    approved,
+                    &req.protocol,
+                    req.request_id.clone(),
+                )
+                .await
+            }
+            ACTION_CANCEL => {
+                let _ = agent_tx.send(AgentRequest::Abort).await;
+                state.current_status_line = Some(format!("远程请求中止当前回合: {}", source));
+                needs_redraw = true;
+                RemoteResponse::ok(
+                    &req.protocol,
+                    req.request_id.clone(),
+                    ACTION_CANCEL,
+                    "已发送中止",
+                )
+            }
+            ACTION_PING => {
+                RemoteResponse::ok(&req.protocol, req.request_id.clone(), ACTION_PING, "pong")
+            }
+            // `drain_requests` 已经过滤过未知动作，走到这里说明协议层和执行层
+            // 不同步了 —— 回一条 error 而不是静默丢弃，让外部 harness 看得见。
+            other => RemoteResponse::error(
+                &req.protocol,
+                req.request_id.clone(),
+                other,
+                "执行层不认识这个动作",
+            ),
+        };
+
+        let _ = crate::core::remote::append_response(cwd, &response).await;
     }
 
     if !drained.rejected.is_empty() {
@@ -256,4 +327,80 @@ async fn apply_remote_requests(
     }
 
     needs_redraw
+}
+
+/// 外部 harness 批准 / 拒绝一次挂起的工具确认。
+///
+/// # 为什么按 correlation id 匹配
+///
+/// 确认请求的 id 是 bus 的 `correlation_id`（`state.pending_tool_call_id` 和
+/// `pending_confirmation_queue` 里每一项的 `tool_call_id` 都是它）。外部 harness
+/// 看到的就是这个 id —— 它同时出现在 `StreamMessage::ToolConfirmationRequest`
+/// 和 transcript 的事件里，所以两边对得上。
+///
+/// # 为什么走 `AgentRequest::ConfirmTool` 而不是直接发 bus 消息
+///
+/// `ConfirmTool` 是 UI 用户按键走的同一条路（`ui/events/input.rs:1469`），
+/// worker 侧统一处理。直接往 bus 发消息会绕过 worker 的状态清理（确认卡不会
+/// 从 UI 上收掉），留下一张永远等不到回答的卡。
+async fn apply_remote_tool_decision(
+    state: &mut ChatState,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+    tool_call_id: &str,
+    approved: bool,
+    protocol: &str,
+    request_id: Option<String>,
+) -> crate::core::remote::RemoteResponse {
+    use crate::core::remote::RemoteResponse;
+    use crate::types::ToolConfirmationOutcome;
+
+    let tool_call_id = tool_call_id.trim();
+    if tool_call_id.is_empty() {
+        return RemoteResponse::error(
+            protocol,
+            request_id,
+            crate::core::remote::ACTION_APPROVE_TOOL,
+            "缺少 tool_call_id",
+        );
+    }
+
+    // 确认请求是不是真的挂着 —— 不挂着的 id 批准了也没用。
+    let known = state.pending_tool_call_id.as_deref() == Some(tool_call_id)
+        || state
+            .pending_confirmation_queue
+            .iter()
+            .any(|q| q.tool_call_id == tool_call_id);
+    if !known {
+        return RemoteResponse::error(
+            protocol,
+            request_id,
+            crate::core::remote::ACTION_APPROVE_TOOL,
+            format!("没有挂起的确认请求: {tool_call_id}"),
+        );
+    }
+
+    let outcome = if approved {
+        ToolConfirmationOutcome::ProceedOnce
+    } else {
+        ToolConfirmationOutcome::Cancel
+    };
+    let _ = agent_tx
+        .send(AgentRequest::ConfirmTool {
+            tool_call_id: tool_call_id.to_string(),
+            outcome,
+            feedback: None,
+        })
+        .await;
+
+    state.current_status_line = Some(format!(
+        "远程{}了工具确认: {}",
+        if approved { "批准" } else { "拒绝" },
+        tool_call_id
+    ));
+    RemoteResponse::ok(
+        protocol,
+        request_id,
+        crate::core::remote::ACTION_APPROVE_TOOL,
+        if approved { "已批准" } else { "已拒绝" },
+    )
 }

@@ -56,6 +56,34 @@ step in `ci.yml`.
 
 Subcommands bypass both paths: `mcp`, `git`, `init`.
 
+### External harness integration
+
+`docs/harness-integration.md` is the reference for driving StarCode from an external
+process (CI script, orchestrator, IDE plugin). Three surfaces:
+
+- **`--output-format stream-json`** — a line-per-event stream of the whole agent
+  process (tool calls, text deltas, token usage, errors) ending in a `result` line
+  carrying usage / cost / `is_error` / `session_id`. The event `type` names are an
+  **external contract** — they are hand-serialized in
+  `src/agent/messaging/events.rs` because serde's internally-tagged enums cannot
+  carry newtype variants.
+- **`.star/remote/inbox.jsonl` → `.star/remote/outbox.jsonl`** — a file-based
+  bidirectional control channel: `send_message` / `approve_tool` / `cancel` /
+  `ping`, with `request_id` pairing. Headless drains it for a few rounds after
+  the main turn (`STAR_REMOTE_DRAIN_SECS`).
+- **`starcode-cli mcp serve`** — StarCode as an MCP server, but exposing only
+  `search_code` / `trace_call_chain`, not the agent tool set.
+
+Two things that look available and are not: `src/core/bridge/` (WebSocket control
+plane, 1447 lines, **no call sites**) and `src/sdk/` (not declared in any `mod`,
+so it never compiles). See `docs/harness-integration.md` §8.
+
+`docs/harness-testing.md` is the hands-on manual: how to exercise every one of
+those surfaces from the TUI input box (`/remote protocol` / `/remote status` /
+`remote send`) and from a second terminal writing `.star/remote/inbox.jsonl`,
+plus the `PermissionRequest` → `approve_tool` round trip that lets an external
+script answer a tool confirmation.
+
 ### UI ↔ Agent: two channels, one worker
 
 The entire runtime is two capacity-100 `mpsc` channels (`src/ui/app/runtime.rs:1390`) and one tokio task:

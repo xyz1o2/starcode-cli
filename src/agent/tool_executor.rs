@@ -415,10 +415,36 @@ impl ToolExecutor {
             match check.decision {
                 PolicyDecision::Deny => {
                     Self::publish_policy_rejection(bus, tool_name, args).await;
+                    // 外部 harness 需要区分「被策略拒绝」和「被用户拒绝」——
+                    // 前者是配置问题，后者是一次性决定。
+                    crate::agent::hooks::run_permission_denied_hook(
+                        &crate::types::StarToolCall {
+                            id: originating_tool_call_id.to_string(),
+                            call_type: "function".to_string(),
+                            function: crate::types::StarToolCallFunction {
+                                name: tool_name.to_string(),
+                                arguments: args.to_string(),
+                            },
+                        },
+                        "denied by policy",
+                    )
+                    .await;
                     return Gate::Closed("Tool execution denied by policy.".to_string());
                 }
                 PolicyDecision::DenyWithReason(reason) => {
                     Self::publish_policy_rejection(bus, tool_name, args).await;
+                    crate::agent::hooks::run_permission_denied_hook(
+                        &crate::types::StarToolCall {
+                            id: originating_tool_call_id.to_string(),
+                            call_type: "function".to_string(),
+                            function: crate::types::StarToolCallFunction {
+                                name: tool_name.to_string(),
+                                arguments: args.to_string(),
+                            },
+                        },
+                        &reason,
+                    )
+                    .await;
                     return Gate::Closed(format!("Tool execution denied: {}", reason));
                 }
                 PolicyDecision::Allow => approved = true,
@@ -512,6 +538,21 @@ impl ToolExecutor {
             "🔔 Asking for approval: {} (source={}, granted={}, policy_ask={}, explicit_rule={})",
             tool_name, card_source, approved, requires_prompt, policy_requires_confirmation
         ));
+
+        // 通知外部 harness「有一个工具在等人批准」—— 它需要 tool_call_id 才能
+        // 用 remote inbox 的 `approve_tool` 应答。
+        crate::agent::hooks::run_permission_request_hook(
+            &crate::types::StarToolCall {
+                id: originating_tool_call_id.to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::StarToolCallFunction {
+                    name: tool_name.to_string(),
+                    arguments: args.to_string(),
+                },
+            },
+            card_source,
+        )
+        .await;
 
         let request = ToolConfirmationRequest {
             message_type: MessageBusType::ToolConfirmationRequest,

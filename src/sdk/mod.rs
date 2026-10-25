@@ -1,3 +1,33 @@
+//! SDK 编程接口 —— **⚠️ 未接线，不参与编译**
+//!
+//! # 为什么说它不参与编译
+//!
+//! `src/lib.rs` 和 `src/main.rs` 的 `mod` 列表里**都没有 `sdk`**。Rust 只编译
+//! 被 `mod` 声明引用到的模块，所以本目录下的四个文件（`mod.rs` / `client.rs` /
+//! `config.rs` / `types.rs`，共 330 行）**从来不会被编译**。
+//! 全仓 grep `crate::sdk` 与 `mod sdk` 均为零命中。
+//!
+//! # 为什么它还留着
+//!
+//! 它长得**非常像** Claude Code 的 `src/entrypoints/sdk/`（`SDKRequest` /
+//! `SDKResponse` / `SDKManager` / `STAR_SDK_ENABLED` / `STAR_SDK_PORT`），
+//! 于是很容易被当成"已经有 SDK 了"。
+//!
+//! 但 `StarCodeClient` 只有 `id()` / `name()` / `connect()` / `disconnect()` /
+//! `is_connected()` —— **没有任何执行请求的方法**。它连 wire protocol 都不是
+//! （`SDKRequest` 只是个结构体，没有传输层）。
+//!
+//! # 外部 harness 现在该用什么
+//!
+//! `docs/harness-integration.md`：
+//!
+//! - `--output-format stream-json` —— 拿完整事件流 + 终态 `result` 行
+//! - `.star/remote/inbox.jsonl` → `outbox.jsonl` —— 双向控制
+//! - `starcode-cli mcp serve` —— 作为 MCP server（只暴露 2 个代码检索工具）
+//!
+//! 要真正的 SDK，得先把本模块接到 `lib.rs` 并补上真实的请求执行与传输层 ——
+//! 那是一个独立的工作项，不是「已具备的能力」。
+
 /// SDK编程接口
 /// 
 /// 对标claude-code-main的src/entrypoints/sdk/

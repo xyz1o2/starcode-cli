@@ -1,3 +1,37 @@
+//! Bridge 远程控制系统 —— **⚠️ 未接线**
+//!
+//! # 状态
+//!
+//! 本模块 1447 行，包含完整的 WebSocket 传输、JWT 认证、Web UI、会话管理与
+//! 消息队列。**内部自洽，但外部零调用方** —— `BridgeManager`、`BridgeApi`、
+//! `WebSocketTransport`、`WebUiServer`、`JwtAuth`、`SessionManager` 全部只在
+//! `core/bridge/` 内部被引用。
+//!
+//! 唯一沾边的是 `commands/parity.rs` 的 `/remote status`：它读 `BridgeConfig`
+//! 来**显示** bridge 的配置状态，但**不启动**任何东西。
+//!
+//! # 外部 harness 现在该用什么
+//!
+//! 文件协议（`core/remote`）—— 见 `docs/harness-integration.md`：
+//!
+//! - `.star/remote/inbox.jsonl` → `outbox.jsonl`，`send_message` /
+//!   `approve_tool` / `cancel` / `ping`，带 `request_id` 配对。
+//!
+//! 文件协议的价值是**零依赖、跨平台、没有鉴权面**；WebSocket 的价值是低延迟
+//! 和能主动推事件。两者可以共存 —— 但在 bridge 真正跑起来之前，它是纸面能力。
+//!
+//! # 要接线它需要做什么
+//!
+//! 1. 在 `runtime/background.rs` 那一层起一个 WebSocket 服务（复用
+//!    `spawn_schedule_pollers` 的模式）；
+//! 2. 把 `BridgeMessage` 映射到 `AgentRequest`（桥 → 消息）与 `StreamMessage`
+//!    （agent → 桥）；
+//! 3. 鉴权走 `JwtAuth`，但**必须**有明确的"谁能连"策略 —— 文件协议至少还
+//!    靠文件系统权限兜底，WebSocket 暴露到网络上就必须有真的鉴权；
+//! 4. 补并发/重连/背压的测试。
+//!
+//! 这是一个独立的工作项，不是「已具备的能力」。
+
 /// Bridge远程控制系统
 ///
 /// 对标claude-code-main的src/bridge/

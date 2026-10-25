@@ -1,3 +1,23 @@
+//! Auto Mode 模块 —— **⚠️ 未接线**
+//!
+//! # 状态
+//!
+//! 本模块实现了 AI 分类器驱动的自主执行模式（两阶段分类流水线、危险权限剥离、
+//! Circuit Breaker），**但**：
+//!
+//! - `AutoModeManager` 全仓**无实例化** —— 唯一的构造点在 `auto_mode/mod.rs`
+//!   自己的 impl 块里；
+//! - `core/permissions/yolo_classifier/` 同理（`YoloClassifierManager` 无构造点）；
+//! - 没有第二个模型调用通道接到权限判定上。
+//!
+//! 结果：Claude Code 的 `auto` 模式在本项目**不存在**。权限只有 4 档
+//! （`default` / `acceptEdits` / `plan` / `yolo`），缺 `auto` 与 `dontAsk`。
+//! `dangerous_patterns.rs` 里的 `DANGEROUS_BASH_PATTERNS` 因为整条链路没通而
+//! 不生效。
+//!
+//! 接线它需要一个**独立的模型调用通道**（在权限判定里再调一次 LLM），
+//! 成本和风险都不小 —— 是一个独立工作项，与 harness 接入面无关。
+//!
 //! Auto Mode 模块
 //!
 //! 对标 Claude Code 的 Auto Mode：
@@ -5,7 +25,6 @@
 //! - 两阶段分类流水线（fast + thinking）
 //! - 危险权限剥离与恢复
 //! - Circuit Breaker 机制
-
 pub mod classifier;
 pub mod dangerous_patterns;
 pub mod prompts;

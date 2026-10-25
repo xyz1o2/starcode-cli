@@ -22,7 +22,10 @@ pub enum RemoteCommand {
 }
 
 pub async fn execute_remote_command(ctx: CommandContext<'_>, cmd: RemoteCommand) -> CommandResult {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    // 用 `current_dir_cached()` 而不是 `current_dir()` —— 它是 UI 那边 `ui_cwd`
+    // 的同一个来源，`/cd` 之后两者必然一致（`set_current_dir` 会同时刷新这个
+    // 缓存和进程 cwd，但缓存是 UI 实际用的那个）。
+    let cwd = crate::core::utils::paths::current_dir_cached().clone();
     execute_remote_command_in(ctx, cmd, &cwd).await
 }
 
@@ -72,12 +75,12 @@ pub(crate) async fn execute_remote_command_in(
             Ok(())
         }
         RemoteCommand::Protocol => {
+            // 协议说明住在 core::remote 里 —— 协议升级时说明跟着走，
+            // 不会像以前那样这里写死 "v1" 而实际协议已经是 v2。
             let path = crate::core::remote::inbox_file_path(cwd);
-            let msg = format!(
-                "# Remote Protocol v1\n\n写入文件（每行一个 JSON 对象）:\n- `{}`\n\n示例:\n```json\n{}\n```",
-                path.display(),
-                crate::core::remote::protocol_example()
-            );
+            let msg = crate::core::remote::protocol_help()
+                .replace("{{project}}", &cwd.display().to_string());
+            let _ = path;
             ctx.state
                 .chat_history
                 .push(crate::types::ChatEntry::assistant(msg).with_streaming(false));
@@ -199,14 +202,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protocol_shows_the_v1_envelope_and_the_inbox_path() {
+    async fn protocol_shows_the_envelope_and_the_inbox_path() {
         let dir = tempfile::tempdir().unwrap();
         let out = run_in(dir.path(), RemoteCommand::Protocol).await.unwrap();
 
-        assert!(out.contains("# Remote Protocol v1"), "{out}");
-        assert!(out.contains("starcode.remote.v1"), "{out}");
+        // 协议说明住在 core::remote —— 这里断言它提到的协议版本是**当前**那个，
+        // 免得协议升级了而说明还写着旧版本。
+        assert!(
+            out.contains(crate::core::remote::REMOTE_PROTOCOL_V2),
+            "{out}"
+        );
+        // v1 仍然接受，说明里要点出来。
+        assert!(
+            out.contains(crate::core::remote::REMOTE_PROTOCOL_V1),
+            "{out}"
+        );
         assert!(out.contains("inbox.jsonl"), "{out}");
         assert!(out.contains("send_message"), "{out}");
+        // 四个动作都要在说明里。
+        for action in crate::core::remote::SUPPORTED_ACTIONS {
+            assert!(out.contains(action), "说明里缺动作 {action}: {out}");
+        }
+        // 出站通道也要写明 —— 外部 harness 得知道去哪儿读响应。
+        assert!(out.contains("outbox.jsonl"), "{out}");
     }
 
     #[tokio::test]

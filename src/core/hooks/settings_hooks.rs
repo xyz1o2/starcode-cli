@@ -307,21 +307,65 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("starcode-hooks-ev-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        // 用一个**真的**不存在的��件名 —— 断言的是「未知事件被跳过，
+        // 且不连累同文件的合法条目」这件事本身，不是「哪个事件名不存在」。
+        //
+        // 早先这里写的是 `PermissionRequest`，那是在 PermissionRequest 还不
+        // 支持的年代写的；事件补齐之后它变成了合法事件，断言就翻了。
         write_settings(
             &dir,
-            r#"{"hooks":{"PermissionRequest":[{"hooks":[
+            r#"{"hooks":{"NoSuchEvent":[{"hooks":[
                  {"type":"command","command":"nope.sh"}]}],
                      "PreToolUse":[{"hooks":[{"type":"command","command":"ok.sh"}]}]}}"#,
         );
         let hooks = load_settings_hooks(&dir);
         assert!(
             !hooks.iter().any(|h| h.command == "nope.sh"),
-            "StarCode 没有 PermissionRequest 事件，应跳过"
+            "未知事件名应被跳过"
         );
         assert!(
             hooks.iter().any(|h| h.command == "ok.sh"),
             "同文件里的合法事件不该被坏条目连累"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 补齐的 Claude Code 兼容事件必须真的能被 settings.json 认出来 ——
+    /// 它们之前只存在于一个不参与编译的文件里，看着像支持，实际不是。
+    #[test]
+    fn claude_code_compatible_events_are_loadable() {
+        let dir = std::env::temp_dir().join(format!(
+            "starcode-hooks-cc-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_settings(
+            &dir,
+            r#"{"hooks":{
+                 "PermissionRequest":[{"hooks":[{"type":"command","command":"perm.sh"}]}],
+                 "PermissionDenied":[{"hooks":[{"type":"command","command":"denied.sh"}]}],
+                 "PostToolUseFailure":[{"hooks":[{"type":"command","command":"fail.sh"}]}],
+                 "StopFailure":[{"hooks":[{"type":"command","command":"stopfail.sh"}]}],
+                 "SubagentStart":[{"hooks":[{"type":"command","command":"substart.sh"}]}],
+                 "PostCompact":[{"hooks":[{"type":"command","command":"compact.sh"}]}]
+               }}"#,
+        );
+        let hooks = load_settings_hooks(&dir);
+        for command in [
+            "perm.sh",
+            "denied.sh",
+            "fail.sh",
+            "stopfail.sh",
+            "substart.sh",
+            "compact.sh",
+        ] {
+            assert!(
+                hooks.iter().any(|h| h.command == command),
+                "事件 {command} 没被加载：{hooks:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

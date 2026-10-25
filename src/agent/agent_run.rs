@@ -29,6 +29,17 @@ fn push_or_merge_user_message(messages: &mut Vec<StarMessage>, turn_message: Str
     merged
 }
 
+/// [`Agent::run_collecting_events`] 的返回值。
+#[derive(Debug, Clone)]
+pub struct RunOutcome {
+    /// 最终的助手正文。
+    pub final_response: String,
+    /// 最后一次上报的 token 用量。
+    pub usage: Option<crate::types::StarUsage>,
+    /// 全部事件，按发生顺序。
+    pub events: Vec<crate::agent::messaging::events::AgentEvent>,
+}
+
 impl Agent {
     pub fn run_stream<'a>(
         &'a mut self,
@@ -452,6 +463,60 @@ impl Agent {
 
             // 通知 UI 处理完成
             yield AgentEvent::Done;
+        })
+    }
+
+    /// 跑一轮并**收集全部事件**。
+    ///
+    /// # 为什么需要这个变体
+    ///
+    /// [`Self::run`] 只留最终文本和 token 用量，其余事件（工具调用轨迹、进度、
+    /// 逐字增量、错误分类）全被 `_ => {}` 丢掉。headless 的 `--output-format
+    /// stream-json` 需要完整事件流才能给外部 harness —— 少了工具轨迹，外部
+    /// 根本没法知道 agent 做了什么。
+    ///
+    /// 返回值里的事件顺序就是发生顺序，外部 harness 可以据此重建整个过程。
+    pub async fn run_collecting_events(
+        &mut self,
+        user_input: &str,
+    ) -> Result<RunOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        use futures::StreamExt;
+        let mut stream = self.run_stream(user_input.to_string());
+        let mut final_response = String::new();
+        let mut latest_usage = None;
+        let mut events = Vec::new();
+
+        while let Some(event_result) = stream.next().await {
+            match event_result {
+                Ok(event) => {
+                    match &event {
+                        crate::agent::messaging::events::AgentEvent::Message(content) => {
+                            final_response = content.clone();
+                        }
+                        crate::agent::messaging::events::AgentEvent::StatsUpdate {
+                            token_usage,
+                        } => {
+                            if token_usage.is_some() {
+                                latest_usage = token_usage.clone();
+                            }
+                        }
+                        crate::agent::messaging::events::AgentEvent::Error(err) => {
+                            let message = err.clone();
+                            events.push(event);
+                            return Err(message.into());
+                        }
+                        _ => {}
+                    }
+                    events.push(event);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(RunOutcome {
+            final_response,
+            usage: latest_usage,
+            events,
         })
     }
 

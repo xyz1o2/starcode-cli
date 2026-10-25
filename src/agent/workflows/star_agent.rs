@@ -1,5 +1,20 @@
 use crate::agent::messaging::queue::AsyncMessageQueue;
 use crate::agent::messaging::AgentEvent;
+
+/// 一轮运行的完整结果 —— 给 headless 的 `stream-json` 输出用。
+///
+/// 事件流是**额外**的通道：`entries` 仍然只有最终助手正文（和
+/// `process_user_message_with_usage` 一致），而 `events` 带上了工具轨迹、
+/// 逐字增量、token 用量、错误分类 —— 这些以前在 `Agent::run` 里被丢掉了。
+#[derive(Debug, Clone)]
+pub struct AgentRunOutcome {
+    /// 最终对话条目（目前只有一条 assistant）。
+    pub entries: Vec<ChatEntry>,
+    /// 最后一次上报的 token 用量。
+    pub usage: Option<crate::types::StarUsage>,
+    /// 全部事件，按发生顺序。
+    pub events: Vec<AgentEvent>,
+}
 use crate::agent::Agent;
 use crate::core::config::Config;
 use crate::core::context_policy::{
@@ -583,6 +598,53 @@ impl StarAgent {
         Ok((vec![ChatEntry::assistant(text)], usage))
     }
 
+    /// 跑一轮并把**全部事件**带回来 —— headless 的 `--output-format stream-json`
+    /// 用它把 agent 的完整过程（工具轨迹、逐字增量、token 用量、错误）吐给外部
+    /// harness。
+    ///
+    /// 返回的 `ChatEntry` 仍然只有最终助手正文（和 `process_user_message_with_usage`
+    /// 一致），事件流是额外的通道 —— 两者不互相取代。
+    pub async fn process_user_message_collecting_events(
+        &mut self,
+        prompt: &str,
+    ) -> Result<AgentRunOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        let outcome = self.inner.run_collecting_events(prompt).await?;
+        Ok(AgentRunOutcome {
+            entries: vec![ChatEntry::assistant(outcome.final_response.clone())],
+            usage: outcome.usage.clone(),
+            events: outcome.events,
+        })
+    }
+
+    /// 跑一轮并把**事件流**交给调用方 —— headless 的 `--output-format stream-json`
+    /// 用它边跑边输出，而不是等整轮跑完再一次性吐。
+    ///
+    /// # 为什么不用 [`Self::process_user_message_stream`]（合并流）
+    ///
+    /// 那个把 Branch A（`AgentEvent`）和 Branch B（`StreamingChunk` 直接流）
+    /// 用 `select()` 合并。`select()` 要等**两个分支都结束**才返回，而
+    /// Branch B 的接收端只有在所有 sender 被 drop 时才结束 —— sender 存在
+    /// `Agent::stream_tx` 里，而 agent 一直活着，于是**流永不结束**。
+    ///
+    /// UI 侧没这个问题：它由外部的退出条件（用户 Ctrl+C / 事件循环退出）
+    /// 收尾。headless 没有那层。
+    ///
+    /// 所以这里走 Branch A 单流。缺的那部分（实时文本 / 思考增量）由
+    /// `agent_llm.rs` 在**没有 UI 通道时**补发 `AgentEvent::TextDelta` /
+    /// `ReasoningDelta` 补上 —— 事件流因此是完整的。
+    pub fn process_user_message_streaming<'a>(
+        &'a mut self,
+        prompt: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn futures::Stream<Item = Result<AgentEvent, Box<dyn std::error::Error + Send + Sync>>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.inner.run_stream(prompt.to_string())
+    }
+
     pub async fn execute_tool(
         &mut self,
         tool_call: &StarToolCall,
@@ -793,6 +855,17 @@ impl StarAgent {
 
     pub fn reset_abort(&self) {
         crate::agent::abort::reset_abort(&self.abort_flag);
+    }
+
+    /// 运行时消息总线（工具确认的应答通道）。
+    ///
+    /// headless 挂外部 harness 时，外部 harness 批准工具要往这条总线上发
+    /// `ToolConfirmationResponse` —— 没有它，等待层会认为"没人能回答"而直接
+    /// 拒绝。
+    pub fn runtime_message_bus(
+        &self,
+    ) -> Option<std::sync::Arc<crate::core::confirmation_bus::MessageBus>> {
+        self.inner.runtime_message_bus()
     }
 
     pub fn clear_session_context(&mut self) {
