@@ -29,6 +29,9 @@ const FINISH_STOP: &str = "stop";
 const FINISH_TOOL_CALLS: &str = "tool_calls";
 const EMPTY_JSON: &str = "{}";
 
+/// Anthropic 协议要求显式 `max_tokens`，rig 不代填时的兜底值。
+const DEFAULT_ANTHROPIC_MAX_TOKENS: u64 = 8192;
+
 /// A unified LLM client wrapping rig-core for native providers.
 #[derive(Debug, Clone)]
 pub enum RigAdapter {
@@ -252,16 +255,24 @@ fn build_request(
         extra_params.insert(key, value);
     }
 
-    // budget 方言要求 `max_tokens > budget_tokens`，而 rig 只在请求没给
-    // `max_tokens` 时才填自己的默认值（老模型上是 2048，比 budget 还小），
-    // 所以这里必须显式给出；用户自己配了更大的值就听用户的。
-    let max_tokens = thinking.max_tokens.map(|need| {
-        std::env::var(crate::llm::ENV_STAR_MAX_TOKENS)
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .filter(|configured| *configured > need)
-            .unwrap_or(need)
-    });
+    // Anthropic 协议要求请求必须带 `max_tokens`（rig 不会代填默认值，
+    // 缺了会报 "max_tokens must be set for Anthropic"），所以即使不在
+    // budget 方言下也要显式给出。budget 方言要求 `max_tokens > budget_tokens`，
+    // 而 rig 只在请求没给 `max_tokens` 时才填自己的默认值（老模型上是 2048，
+    // 比 budget 还小），所以同样必须显式给出；用户自己配了更大的值就听用户的。
+    let env_max_tokens = std::env::var(crate::llm::ENV_STAR_MAX_TOKENS)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok());
+    let max_tokens = match thinking.max_tokens {
+        Some(need) => Some(env_max_tokens.filter(|configured| *configured > need).unwrap_or(need)),
+        None => {
+            if matches!(profile.kind, crate::llm::thinking::ProviderKind::Anthropic) {
+                Some(env_max_tokens.unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS))
+            } else {
+                None
+            }
+        }
+    };
 
     let additional_params = if extra_params.is_empty() {
         None
