@@ -1313,7 +1313,7 @@ pub async fn files_in_context(mut ctx: CommandContext<'_>, _args: Vec<String>) -
         }
         let Some(tc) = &e.tool_call else { continue };
         let name = tc.function.name.as_str();
-        let is_file_tool = matches!(name, "Read" | "Edit" | "Write" | "smart_edit");
+        let is_file_tool = matches!(name, "Read" | "Edit" | "Write" | "SmartEdit");
         if !is_file_tool {
             continue;
         }

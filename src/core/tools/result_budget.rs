@@ -50,8 +50,8 @@ pub fn default_max_result_size(tool_name: &str) -> usize {
     match tool_name {
         "Bash" | "Shell" | "PowerShell" => BASH_MAX_RESULT_SIZE_CHARS,
         "Skill" | "SkillTool" => SKILL_MAX_RESULT_SIZE_CHARS,
-        "Read" | "ReadFile" | "ReadMany" => FILE_READ_MAX_RESULT_SIZE_CHARS,
-        "Grep" | "Glob" | "Search" | "Ripgrep" | "CodebaseSearch" => SEARCH_MAX_RESULT_SIZE_CHARS,
+        "Read" | "ReadManyFiles" | "NotebookRead" => FILE_READ_MAX_RESULT_SIZE_CHARS,
+        "Grep" | "Glob" | "Search" | "CodebaseSearch" | "LS" => SEARCH_MAX_RESULT_SIZE_CHARS,
         _ => DEFAULT_MAX_RESULT_SIZE_CHARS,
     }
 }

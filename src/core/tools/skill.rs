@@ -82,7 +82,7 @@ impl ToolInvocation for SkillInvocation {
 
 impl BaseDeclarativeTool for SkillTool {
     fn name(&self) -> &str {
-        "skill"
+        "Skill"
     }
 
     fn display_name(&self) -> &str {

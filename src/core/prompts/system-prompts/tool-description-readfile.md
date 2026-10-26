@@ -14,7 +14,7 @@ Reads a file from the local filesystem. You can access any file directly by usin
 - `offset`: 0-based start line (requires `limit`)
 - `limit`: max lines to read
 
-**Key params** (`read_many_files` — same tool family, batch-oriented):
+**Key params** (`ReadManyFiles` — same tool family, batch-oriented):
 - `items`: list of paths to read
 - `max_size_per_file` / `skip_binary` / `truncate_lines`: optional size and binary control
 
@@ -23,7 +23,7 @@ Reads a file from the local filesystem. You can access any file directly by usin
 - By default, it reads up to 2000 lines starting at the beginning of the file
 - Results are returned using cat -n format, with line numbers starting at 1
 - Handles images (PNG, JPG, GIF, WEBP, SVG, BMP) and PDFs as well as text
-- Jupyter notebooks (`.ipynb`) have a dedicated tool: `notebook_read`
-- This tool reads files, not directories — use `ListDir` for a directory listing
+- Jupyter notebooks (`.ipynb`) have a dedicated tool: `NotebookRead`
+- This tool reads files, not directories — use `LS` for a directory listing
 - To jump to a grep match: line numbers are 1-based but `offset` is 0-based, so pass `offset = line - 11` with `limit: 60` to start ~10 lines before the match
 - Avoid tiny slices — read 60-100 lines for context

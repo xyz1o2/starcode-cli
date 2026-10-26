@@ -128,15 +128,15 @@ impl ToolInvocation for NotebookEditInvocation {
                 let abs_path = crate::core::utils::paths::read_state_key(&path);
 
                 {
-                    // 查 `read_file_state`（而不是 `execution_state`）：`notebook_read`
+                    // 查 `read_file_state`（而不是 `execution_state`）：`NotebookRead`
                     // 写的是前者，后者只有单个 `Read` 和 `@` 内联会写。查错表的结果
-                    // 是 `notebook_read` → `notebook_edit` 这条被工具说明明确要求的
+                    // 是 `NotebookRead` → `NotebookEdit` 这条被工具说明明确要求的
                     // 路径 100% 被拦下。
                     let read_state = global_state.read_file_state.read().await;
                     if !read_state.contains_key(&abs_path) {
                         let msg = format!(
-                            "Edit blocked [edit_file_not_read]: notebook '{}' must be read with `notebook_read` before using `notebook_edit`. \
-                             REQUIRED NEXT STEP: call `notebook_read` with file_path='{}' first, then retry `notebook_edit`. \
+                            "Edit blocked [edit_file_not_read]: notebook '{}' must be read with `NotebookRead` before using `NotebookEdit`. \
+                             REQUIRED NEXT STEP: call `NotebookRead` with file_path='{}' first, then retry `NotebookEdit`. \
                              Do NOT retry without reading the notebook first.",
                             params.file_path, params.file_path
                         );
@@ -158,7 +158,7 @@ impl ToolInvocation for NotebookEditInvocation {
             let content = tokio::fs::read_to_string(&path)
                 .await
                 .map_err(|e| e.to_string())?;
-            // 和 `notebook_read` 对齐：解析失败必须走 `ToolResult.error`，不能裸
+            // 和 `NotebookRead` 对齐：解析失败必须走 `ToolResult.error`，不能裸
             // `Err` 出去。裸 `Err` 在执行器里拿不到文件名和解析器的列号，模型只看到
             // 一句没有上下文的字符串，只能反复重试同一个坏文件。
             let mut notebook: Notebook = match serde_json::from_str(&content) {
@@ -312,7 +312,7 @@ impl NotebookEditTool {
 
 impl BaseDeclarativeTool for NotebookEditTool {
     fn name(&self) -> &str {
-        "notebook_edit"
+        "NotebookEdit"
     }
 
     fn display_name(&self) -> &str {
@@ -411,7 +411,7 @@ mod tests {
             .initialize()
             .await
             .expect("test config must initialize");
-        // 这个断言是硬防线：`notebook_edit` 会真的往磁盘写。`target_dir` 一旦没指对
+        // 这个断言是硬防线：`NotebookEdit` 会真的往磁盘写。`target_dir` 一旦没指对
         // （比如只设了 `cwd`），测试就会把改动写进**用户的真实仓库**而不是临时目录，
         // 而且不会有任何报错。设错时的实际后果：仓库根目录多出一个 `nb.ipynb`。
         assert_eq!(
@@ -451,7 +451,7 @@ mod tests {
 
     /// 判别式回归：门必须查 `read_file_state`。
     ///
-    /// `notebook_read` 只写那张表；查 `execution_state` 的话
+    /// `NotebookRead` 只写那张表；查 `execution_state` 的话
     /// "notebook_read → notebook_edit" 这条被工具说明写死的路径 100% 被拦下。
     #[tokio::test]
     async fn a_read_notebook_can_then_be_edited() {
@@ -510,7 +510,7 @@ mod tests {
             "error_type 必须是 agent 识别的标记"
         );
         assert!(
-            error.message.contains("notebook_read"),
+            error.message.contains("NotebookRead"),
             "必须点名 notebook_read：{:?}",
             error.message
         );

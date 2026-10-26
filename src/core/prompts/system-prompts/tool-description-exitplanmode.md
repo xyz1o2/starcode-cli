@@ -8,6 +8,6 @@ Exit plan mode and begin executing the approved plan.
 **NOT for**: when no plan exists, abandoning plan.
 
 **Rules**:
-- Only callable after `enter_plan_mode`
+- Only callable after `EnterPlanMode`
 - Executes approved plan steps
 - Reports progress as steps complete

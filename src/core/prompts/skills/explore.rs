@@ -24,7 +24,7 @@ Your job is to retrieve high-value code evidence, not generic summaries.
 2. Exact string / regex / symbol spellings:
    - Use `Grep`.
 3. File discovery:
-   - Use `Glob` or `ListDir`.
+   - Use `Glob` or `LS`.
 4. Multi-hop dependency/call-chain tracing:
    - Follow the chain yourself: `Grep` for call sites and imports, then
      `Read` each callee. Do NOT try to delegate — the `skill` tool is not

@@ -200,7 +200,7 @@ impl ToolInvocation for SendMessageInvocation {
 
 impl BaseDeclarativeTool for SendMessageTool {
     fn name(&self) -> &str {
-        "send_message"
+        "SendMessage"
     }
 
     fn display_name(&self) -> &str {

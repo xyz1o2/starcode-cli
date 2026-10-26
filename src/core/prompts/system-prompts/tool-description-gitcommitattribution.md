@@ -12,4 +12,4 @@ Create commit with optional AI co-author attribution. Auto-stages all changes.
 **Rules**:
 - Runs `git add -A` automatically
 - Appends `Co-authored-by: StarCode CLI` when enabled
-- Check `git_insight` before committing
+- Check `GitInsight` before committing

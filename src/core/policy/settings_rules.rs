@@ -130,19 +130,16 @@ fn canonical(tool: &str) -> String {
 }
 
 /// 工具族：用户按 Claude Code 的口径写 `Read` / `Edit`，得覆盖 StarCode 里做同一件事的
-/// 全部注册工具名。否则 `deny: ["Edit(./secrets/**)"]` 会被 `smart_edit` 从旁边绕过去。
-/// 方向是单向的 —— `Read` 覆盖 `read_many_files`，反过来不成立。
+/// 全部注册工具名。否则 `deny: ["Edit(./secrets/**)"]` 会被 `SmartEdit` 从旁边绕过去。
+/// 方向是单向的 —— `Read` 覆盖 `ReadManyFiles`，反过来不成立。
 ///
 /// 对标 Claude Code：只列注册名。别名移除后不再有 `view_file` / `str_replace_editor` /
 /// `create_file` 之类的幽灵名经过这里，族成员全部是 schema 里真实存在的工具。
 const TOOL_FAMILIES: &[(&str, &[&str])] = &[
-    (
-        "Read",
-        &["read_many_files", "notebook_read", "Glob", "ListDir"],
-    ),
+    ("Read", &["ReadManyFiles", "NotebookRead", "Glob", "LS"]),
     (
         "Edit",
-        &["smart_edit", "multi_edit", "notebook_edit", "next_edit"],
+        &["SmartEdit", "MultiEdit", "NotebookEdit", "NextEdit"],
     ),
 ];
 
@@ -825,13 +822,13 @@ mod tests {
     fn tool_aliases_and_wildcards_resolve() {
         let p = perms(&[], &[], &["Read(.env)", "Edit(secrets/**)"]);
         assert!(p
-            .evaluate("read_many_files", &json!({"file_path": ".env"}))
+            .evaluate("ReadManyFiles", &json!({"file_path": ".env"}))
             .is_some());
         assert!(p
-            .evaluate("smart_edit", &json!({"file_path": "secrets/key.pem"}))
+            .evaluate("SmartEdit", &json!({"file_path": "secrets/key.pem"}))
             .is_some());
-        // 反向不成立：写 `read_many_files` 不该顺带覆盖 `Read`
-        let narrow = perms(&[], &[], &["read_many_files(.env)"]);
+        // 反向不成立：写 `ReadManyFiles` 不该顺带覆盖 `Read`
+        let narrow = perms(&[], &[], &["ReadManyFiles(.env)"]);
         assert!(narrow
             .evaluate("Read", &json!({"file_path": ".env"}))
             .is_none());

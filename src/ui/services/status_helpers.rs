@@ -14,7 +14,7 @@ pub(super) fn should_suppress_redundant_result_after_confirmation(
     tool_result.success
         && matches!(
             tool_call.function.name.as_str(),
-            "enter_plan_mode" | "exit_plan_mode"
+            "EnterPlanMode" | "ExitPlanMode"
         )
 }
 
@@ -36,9 +36,9 @@ pub(super) fn format_tool_name_for_status(name: &str) -> String {
         "ProjectMap" => "project map".to_string(),
         "Write" => "write file".to_string(),
         "Read" => "read file".to_string(),
-        "multi_edit" => "multi edit".to_string(),
-        "enter_plan_mode" => "enter plan mode".to_string(),
-        "exit_plan_mode" => "exit plan mode".to_string(),
+        "MultiEdit" => "multi edit".to_string(),
+        "EnterPlanMode" => "enter plan mode".to_string(),
+        "ExitPlanMode" => "exit plan mode".to_string(),
         _ => name.replace(['_', '-'], " "),
     }
 }

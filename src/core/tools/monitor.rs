@@ -180,7 +180,7 @@ impl ToolInvocation for MonitorInvocation {
 
 impl BaseDeclarativeTool for MonitorTool {
     fn name(&self) -> &str {
-        "monitor"
+        "Monitor"
     }
 
     fn display_name(&self) -> &str {

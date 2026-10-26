@@ -119,7 +119,7 @@ impl ToolInvocation for SmartEditToolInvocation {
 
 impl BaseDeclarativeTool for SmartEditTool {
     fn name(&self) -> &str {
-        "smart_edit"
+        "SmartEdit"
     }
 
     fn display_name(&self) -> &str {

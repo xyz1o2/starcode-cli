@@ -14,7 +14,7 @@
 //! # 做法
 //!
 //! 增加一层位于 env 之上的**进程级覆盖表**，并把可自调的设置收进
-//! [`knobs`] 目录。模型的入口是 `self_config` 工具（`inspect` / `set` / `reset`）。
+//! [`knobs`] 目录。模型的入口是 `SelfConfig` 工具（`inspect` / `set` / `reset`）。
 //!
 //! ```text
 //!   override（模型自调，可溯源、可撤销）

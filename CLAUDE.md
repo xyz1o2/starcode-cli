@@ -174,7 +174,17 @@ Signature is `async fn name(ctx: CommandContext<'_>, args: …) -> CommandResult
 
 `ToolRegistry` (`src/core/tools/tool_registry.rs`) is a `HashMap<String, Arc<dyn BaseDeclarativeTool>>` behind a generation counter, with a cached `Vec<FunctionDeclaration>` — that cache is what the LLM sees. Two traits in `src/core/tools/tools.rs`: `BaseDeclarativeTool` (name / description / schema / `create_invocation`) and `ToolInvocation` (`should_confirm_execute` → `execute`).
 
-Registration is centralized in `src/core/config/runtime_bootstrap/`: `core_runtime.rs` (file, search, navigation tools, each gated by `is_core_tool_enabled`) and `agent_runtime.rs` (the ~54 needing the LLM client or heavier wiring). Plugin tools are swapped in via `sync_plugin_tools`, which refuses names colliding with built-ins. Aliases resolve through `canonical_tool_name` (`src/core/tools/constants.rs`) — e.g. `view_file` → `Read`.
+Registration is centralized in `src/core/config/runtime_bootstrap/`: `core_runtime.rs` (file, search, navigation tools, each gated by `is_core_tool_enabled`) and `agent_runtime.rs` (the ~54 needing the LLM client or heavier wiring). Plugin tools are swapped in via `sync_plugin_tools`, which refuses names colliding with built-ins.
+
+**Built-in tool names are PascalCase, Claude Code style** (`Read` `Write` `Edit` `MultiEdit` `SmartEdit` `LS` `Grep` `Glob` `Bash` `Agent` `Skill` `TodoWrite` `AskUserQuestion` `EnterPlanMode` `ExitPlanMode` `TaskGet` `TaskList` `TaskUpdate` `TaskOutput` `CronCreate` `CronList` `CronDelete` `ToolSearch` `SendMessage` `WorkflowTool` `Mcp*` …). No snake_case and no `Tool` suffix — `LS`, not `ListDir`; `WorkflowTool` is the one exception because CC itself names it that way.
+
+`ToolName` (`src/core/tools/constants.rs`) is the single source of truth: `as_str()` is the registered name, `from_str()` accepts only that exact spelling. There is **no alias table** — the old snake_case spellings (`smart_edit`, `multi_edit`, `tool_search`, …) are *not* aliases, and `canonical_tool_name` passes them through unchanged. That is deliberate: keeping them as aliases would mean a user renames a tool while their old config keeps working, and the resulting bug is impossible to diagnose.
+
+Two narrow folding rules exist, and neither accepts the old snake_case spelling:
+- `find_builtin_tool_name` folds **case only** (`todowrite` → `TodoWrite`) — used where a human types a tool name (`/permissions add`).
+- `is_core_tool_enabled` and the hook `matcher` compare **case-insensitively** — used where the user wrote a config value.
+
+`src/core/tools/tool_name_consistency.rs` scans the source and fails if any tool's `fn name()` drifts from the `ToolName` enum — the failure mode there is a model calling a tool that exists in the schema but not in the registry.
 
 Implementations are split between `src/core/tools/` (~60 files) and `src/tools/` (bash, search, todo, git_insight, lsp, …). Presence in the tree does not mean a tool is live — see "Not everything is wired up".
 

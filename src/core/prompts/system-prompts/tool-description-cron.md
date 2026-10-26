@@ -8,6 +8,6 @@ Create, list, delete scheduled tasks that run at intervals.
 **NOT for**: one-time tasks, very short intervals.
 
 **Sub-tools**:
-- `cron_create`: `name`, `prompt`, `interval_minutes`
-- `cron_list`: no params
-- `cron_delete`: `name`
+- `CronCreate`: `name`, `prompt`, `interval_minutes`
+- `CronList`: no params
+- `CronDelete`: `name`

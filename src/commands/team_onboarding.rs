@@ -641,7 +641,7 @@ mod tests {
                 call("mcp__github__list_issues", json!({})),
                 call("mcp__github__list_issues", json!({})),
                 call("mcp__exa__search", json!({})),
-                call("skill", json!({"skill":"review"})),
+                call("Skill", json!({"skill":"review"})),
             ],
             user_prompts: vec![
                 activity::UserPromptRecord {

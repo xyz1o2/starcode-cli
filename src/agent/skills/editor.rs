@@ -74,7 +74,7 @@ impl EditorAgent {
         let result = match request {
             EditorFastPathRequest::Single(params) => {
                 let args = json!(params.clone());
-                let tool_result = authorize_then_execute(&message_bus, "smart_edit", &args, || {
+                let tool_result = authorize_then_execute(&message_bus, "SmartEdit", &args, || {
                     EditTool::new(
                         self.config.clone(),
                         message_bus.clone(),
@@ -99,7 +99,7 @@ impl EditorAgent {
                 let args = json!(params.clone());
                 // multi_edit 不带 `Edit` 的 policy 名字，但同样要过 deny/ask，
                 // 否则 `deny: ["Edit(**)"]` 会被它从旁边绕过去。
-                let tool_result = authorize_then_execute(&message_bus, "multi_edit", &args, || {
+                let tool_result = authorize_then_execute(&message_bus, "MultiEdit", &args, || {
                     MultiEditTool::new(self.config.clone(), global_state.clone())
                         .create_invocation(args.clone())
                         .map_err(|e| e.to_string())
@@ -107,10 +107,10 @@ impl EditorAgent {
                 .await?;
                 build_fast_path_result(
                     task,
-                    "multi_edit",
+                    "MultiEdit",
                     json!({
                         "mode": "fast_path",
-                        "tool": "multi_edit",
+                        "tool": "MultiEdit",
                         "files": params
                             .edits
                             .iter()
@@ -198,7 +198,7 @@ impl EditorAgent {
 /// 模型只要把编辑请求包成 `skill` 子任务就能绕过用户在 settings.json 里写的规则。
 /// 唯一能真正堵住旁路的地方就是这里 —— 每条直达工具的路径都必须自己过闸门。
 ///
-/// `policy_tool_name` 决定拿哪条规则去匹配：`EditTool` 注册名是 `smart_edit`，
+/// `policy_tool_name` 决定拿哪条规则去匹配：`EditTool` 注册名是 `SmartEdit`，
 /// 但用户写的是 `Edit`，由 settings_rules 的工具族负责归一。
 ///
 /// invocation 的构造放在闸门之后：构造失败用的是非 Send 的 `Box<dyn Error>`，

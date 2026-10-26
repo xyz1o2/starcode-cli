@@ -50,7 +50,7 @@ pub struct QueuedConfirmation {
     pub tool_call_id: String,
     /// 模型侧的 tool call id：工具结束时靠它把卡片收掉。
     pub originating_tool_call_id: Option<String>,
-    /// `ask_user_question` 的选择项从 0 开始，其余确认卡从 1 开始。
+    /// `AskUserQuestion` 的选择项从 0 开始，其余确认卡从 1 开始。
     pub is_ask: bool,
 }
 

@@ -170,7 +170,9 @@ pub fn matcher_matches(matcher: Option<&str>, tool_name: Option<&str>) -> bool {
         pattern
             .split(['|', ','])
             .map(|s| s.trim())
-            .any(|exact| !exact.is_empty() && exact == tool_name)
+            // 折叠大小写：注册名是 PascalCase，hook 配置里写 `edit` 很常见。
+            // 逐字相等会让用户的 hook 静默不触发，而 hook 不触发没有任何提示。
+            .any(|exact| !exact.is_empty() && exact.eq_ignore_ascii_case(tool_name))
     } else {
         match regex::Regex::new(pattern) {
             Ok(re) => re.is_match(tool_name),

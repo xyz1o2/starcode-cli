@@ -92,7 +92,7 @@ impl ToolInvocation for TaskGetInvocation {
 
 impl BaseDeclarativeTool for TaskGetTool {
     fn name(&self) -> &str {
-        "task_get"
+        "TaskGet"
     }
 
     fn display_name(&self) -> &str {
@@ -269,7 +269,7 @@ impl ToolInvocation for TaskListInvocation {
 
 impl BaseDeclarativeTool for TaskListTool {
     fn name(&self) -> &str {
-        "task_list"
+        "TaskList"
     }
 
     fn display_name(&self) -> &str {
@@ -561,7 +561,7 @@ impl ToolInvocation for TaskUpdateInvocation {
 
 impl BaseDeclarativeTool for TaskUpdateTool {
     fn name(&self) -> &str {
-        "task_update"
+        "TaskUpdate"
     }
 
     fn display_name(&self) -> &str {
@@ -736,7 +736,7 @@ impl ToolInvocation for TaskOutputInvocation {
 
 impl BaseDeclarativeTool for TaskOutputTool {
     fn name(&self) -> &str {
-        "task_output"
+        "TaskOutput"
     }
 
     fn display_name(&self) -> &str {

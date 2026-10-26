@@ -4,7 +4,7 @@ use crate::types::{StarToolCall, ToolResult};
 /// 把绝对路径缩短成相对当前工作目录的形式，给工具调用行节省宽度。
 ///
 /// 路径**就是** cwd 时 `strip_prefix` 得到的是空相对路径。直接返回空串的话，
-/// 调用行会变成 `ls()`，看不出在列哪个目录（ListDir 无 directory 参数时本就
+/// 调用行会变成 `ls()`，看不出在列哪个目录（LS 无 directory 参数时本就
 /// 用 `"."` 兜底，这里保持同一约定）。
 pub(crate) fn shorten_path_for_display(path: &str) -> String {
     if path.is_empty() {
@@ -114,14 +114,14 @@ pub fn tool_display_name(name: &str) -> String {
     match name.as_str() {
         "Read" => "view".into(),
         "Bash" => "bash".into(),
-        "ListDir" => "ls".into(),
+        "LS" => "ls".into(),
         "Grep" => "search".into(),
         "Glob" => "glob".into(),
-        "Edit" | "smart_edit" | "multi_edit" => "edit".into(),
+        "Edit" | "SmartEdit" | "MultiEdit" => "edit".into(),
         "Write" => "write".into(),
         "complete_task" => "done".into(),
         "TodoWrite" => "Update Todos".into(),
-        "enter_plan_mode" | "exit_plan_mode" => "plan".into(),
+        "EnterPlanMode" | "ExitPlanMode" => "plan".into(),
         "ask_user" | "user_prompt" => "ask".into(),
         "CodebaseSearch" => "codebase search".into(),
         "ProjectMap" => "project map".into(),
@@ -161,7 +161,7 @@ fn tool_call_brief(tc: &StarToolCall) -> String {
         "TodoWrite" => {
             return String::new();
         }
-        "Edit" | "multi_edit" => {
+        "Edit" | "MultiEdit" => {
             if let Some(p) = get_str("file_path").or_else(|| get_str("path")) {
                 let replace_all = v
                     .as_ref()
@@ -179,7 +179,7 @@ fn tool_call_brief(tc: &StarToolCall) -> String {
                 return shorten_path_for_display(&p);
             }
         }
-        "smart_edit" => {
+        "SmartEdit" => {
             let p = get_str("file_path")
                 .or_else(|| get_str("path"))
                 .or_else(|| get_str("target_file"))
@@ -244,7 +244,7 @@ fn tool_call_brief(tc: &StarToolCall) -> String {
                 );
             }
         }
-        "ListDir" => {
+        "LS" => {
             if let Some(dir) = get_str("directory") {
                 return shorten_path_for_display(&dir);
             }
@@ -254,14 +254,14 @@ fn tool_call_brief(tc: &StarToolCall) -> String {
                 return summarize_bash_command(&cmd);
             }
         }
-        "enter_plan_mode" => {
+        "EnterPlanMode" => {
             let reason = get_str("reason").unwrap_or_else(|| "".to_string());
             if !reason.is_empty() {
                 return truncate_text(&reason, 220);
             }
             return "".to_string();
         }
-        "exit_plan_mode" => {
+        "ExitPlanMode" => {
             if let Some(plan) = get_str("plan") {
                 let first = plan.lines().next().unwrap_or("").trim();
                 if !first.is_empty() {
@@ -457,7 +457,7 @@ mod tests {
         assert_eq!(tool_display_name("SomeFutureTool"), "SomeFutureTool");
     }
 
-    /// 回归：ListDir 列的正是当前工作目录时，`strip_prefix` 给出空相对路径，
+    /// 回归：LS 列的正是当前工作目录时，`strip_prefix` 给出空相对路径，
     /// 缩短函数返回空串，工具调用行就变成了看不懂的 `ls()`。这里必须回落到 "."。
     #[test]
     fn the_cwd_itself_shortens_to_dot_not_empty() {

@@ -152,7 +152,7 @@ impl ToolInvocation for MemoryToolInvocation {
 
 impl BaseDeclarativeTool for MemoryTool {
     fn name(&self) -> &str {
-        "memory"
+        "Memory"
     }
 
     fn display_name(&self) -> &str {

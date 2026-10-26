@@ -6,16 +6,16 @@ use async_trait::async_trait;
 /// 这些工具的输出需要完整保留，因为模型需要完整内容来理解文件
 /// 注意：使用starcode-cli中的实际工具名称
 pub const EXEMPT_TOOLS: &[&str] = &[
-    "Read",            // 主要的文件读取工具
-    "read_many_files", // 批量读取文件
-    "NotebookRead",    // Notebook读取
-    "Grep",            // 搜索结果需要完整显示
-    "Glob",            // 文件查找结果
-    "ListDir",         // 目录列表
-    "CodebaseSearch",  // 语义搜索结果
-    "ProjectMap",      // 项目地图
-    "git_insight",     // Git洞察
-    "git_branch",      // Git分支信息
+    "Read",           // 主要的文件读取工具
+    "ReadManyFiles",  // 批量读取文件
+    "NotebookRead",   // Notebook读取
+    "Grep",           // 搜索结果需要完整显示
+    "Glob",           // 文件查找结果
+    "LS",             // 目录列表
+    "CodebaseSearch", // 语义搜索结果
+    "ProjectMap",     // 项目地图
+    "GitInsight",     // Git洞察
+    "git_branch",     // Git分支信息
 ];
 
 /// 工具结果预算

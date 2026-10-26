@@ -289,7 +289,7 @@ impl MemoryTool {
     }
 
     pub fn name(&self) -> &str {
-        "memory"
+        "Memory"
     }
 
     pub fn display_name(&self) -> &str {

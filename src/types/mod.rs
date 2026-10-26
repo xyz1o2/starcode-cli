@@ -29,7 +29,7 @@ pub struct ToolResult {
     /// `output` 是**给人看**的摘要：UI 把它渲染成那一行折叠结果，模型不该读它。
     /// `llm_content` 是**给模型看**的完整正文：工具名列表、参数 schema、使用说明。
     ///
-    /// 曾经这两个通道只有 `output` 一条，于是 `tool_search` 这类"摘要一行、
+    /// 曾经这两个通道只有 `output` 一条，于是 `ToolSearch` 这类"摘要一行、
     /// 正文另存"的工具，模型只收到 `"Found 3 tool(s) for 'exa'"` —— 工具名和
     /// schema 全丢，模型只能反复瞎猜工具名。`llm_content` 存在却没人读，
     /// 等于把发现工具的唯一途径堵死了。
@@ -1286,23 +1286,23 @@ pub fn is_safe_query_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
         "Read"
-            | "read_many_files"
-            | "ListDir"
+            | "ReadManyFiles"
+            | "LS"
             | "Glob"
             | "Grep"
             | "CodebaseSearch"
-            | "tool_search"
-            | "gh_pr_comments"
+            | "ToolSearch"
+            | "GhPrComments"
             | "TodoWrite"
-            | "mcp_list_servers"
-            | "mcp_list_tools"
-            | "mcp_search_tools"
-            | "mcp_tool_info"
-            | "mcp_refresh"
-            // `tool_search` 只读 registry，不改任何状态：它存在的意义就是让
+            | "McpListServers"
+            | "McpListTools"
+            | "McpSearchTools"
+            | "McpToolInfo"
+            | "McpRefresh"
+            // `ToolSearch` 只读 registry，不改任何状态：它存在的意义就是让
             // 模型发现工具，每问一次都要人点一次"允许"会让这个工具形同虚设
             // （截图里每一次 tool_search 调用都卡在 "Permission required"）。
-            | "tool_search"
+            | "ToolSearch"
     )
 }
 
@@ -1455,12 +1455,12 @@ mod thinking_effort_tests {
         assert!(matches!(ThinkingEffort::High.next(), ThinkingEffort::Xhigh));
     }
 
-    /// `tool_search` 是只读的发现工具，不该每次调用都弹确认。
+    /// `ToolSearch` 是只读的发现工具，不该每次调用都弹确认。
     ///
     /// 它不在安全查询集里时，策略兜底的 `AskUser` 会让模型每搜一次工具就问
     /// 用户一次；并发搜索时还会堆出多张确认卡。
     #[test]
     fn tool_search_is_a_safe_query_tool() {
-        assert!(crate::types::is_safe_query_tool("tool_search"));
+        assert!(crate::types::is_safe_query_tool("ToolSearch"));
     }
 }

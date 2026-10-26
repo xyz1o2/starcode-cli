@@ -87,7 +87,7 @@ pub const ROUTING_MATRIX: &[RouteSlot] = &[
     RouteSlot {
         id: "edit-many",
         job: "Change several coupled sites in one pass",
-        primary: "multi_edit",
+        primary: "MultiEdit",
         never_via_bash: "`sed`, `awk`",
     },
     RouteSlot {
@@ -99,7 +99,7 @@ pub const ROUTING_MATRIX: &[RouteSlot] = &[
     RouteSlot {
         id: "list-directory",
         job: "List a directory",
-        primary: "ListDir",
+        primary: "LS",
         never_via_bash: "`ls`",
     },
     RouteSlot {
@@ -117,19 +117,19 @@ pub const ROUTING_MATRIX: &[RouteSlot] = &[
     RouteSlot {
         id: "check-compile",
         job: "Check compile / lint errors after an edit",
-        primary: "get_diagnostics",
+        primary: "GetDiagnostics",
         never_via_bash: "—",
     },
     RouteSlot {
         id: "run-tests",
         job: "Run the test suite",
-        primary: "run_tests",
+        primary: "RunTests",
         never_via_bash: "—",
     },
     RouteSlot {
         id: "discover-long-tail",
         job: "Find a long-tail tool you don't already know by name",
-        primary: "tool_search",
+        primary: "ToolSearch",
         never_via_bash: "—",
     },
 ];
@@ -168,9 +168,9 @@ pub fn render_workflow_markdown() -> String {
     let by_name = primary_for("file-name").unwrap_or("Glob");
     let read = primary_for("read-known-file").unwrap_or("Read");
     let edit_one = primary_for("edit-one").unwrap_or("Edit");
-    let edit_many = primary_for("edit-many").unwrap_or("multi_edit");
-    let diag = primary_for("check-compile").unwrap_or("get_diagnostics");
-    let tests = primary_for("run-tests").unwrap_or("run_tests");
+    let edit_many = primary_for("edit-many").unwrap_or("MultiEdit");
+    let diag = primary_for("check-compile").unwrap_or("GetDiagnostics");
+    let tests = primary_for("run-tests").unwrap_or("RunTests");
 
     format!(
         "## Workflow\n\

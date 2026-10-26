@@ -35,7 +35,7 @@ impl ExitPlanModeTool {
 
 impl BaseDeclarativeTool for ExitPlanModeTool {
     fn name(&self) -> &str {
-        "exit_plan_mode"
+        "ExitPlanMode"
     }
 
     fn display_name(&self) -> &str {

@@ -1978,7 +1978,7 @@ pub fn get_mcp_manage_palette_items() -> Vec<PaletteItem> {
             action: PaletteAction::TypeCommand("/mcp add ".to_string()),
         },
         PaletteItem {
-            id: "mcp_refresh".to_string(),
+            id: "McpRefresh".to_string(),
             label: "Refresh Servers".to_string(),
             description: "Reload all MCP connections".to_string(),
             category: Some("MCP".to_string()),

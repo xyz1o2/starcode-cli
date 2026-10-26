@@ -71,7 +71,7 @@ This file provides guidance to StarCode when working with code in this repositor
 
 Current CWD: {cwd}
 
-Please use `read_many_files` to inspect relevant config files first, then `Write` or `Edit` to update `{file}`."#,
+Please use `ReadManyFiles` to inspect relevant config files first, then `Write` or `Edit` to update `{file}`."#,
         file = file_name,
         exists_note = exists_note,
         cwd = cwd.display(),

@@ -129,7 +129,7 @@ impl ToolInvocation for GitInsightInvocation {
 
 impl BaseDeclarativeTool for GitInsightTool {
     fn name(&self) -> &str {
-        "git_insight"
+        "GitInsight"
     }
 
     fn display_name(&self) -> &str {

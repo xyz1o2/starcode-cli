@@ -26,7 +26,7 @@ Use the following thought process for every task:
 ## TOOL USAGE
 - Use `Grep` for initial discovery.
 - Use `Read` to examine implementation details.
-- Use `ListDir` to understand directory structure.
+- Use `LS` to understand directory structure.
 
 ## OUTPUT FORMAT
 When the user asks for analysis, provide:

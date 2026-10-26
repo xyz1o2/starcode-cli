@@ -25,7 +25,9 @@ pub(super) fn register_core_runtime_tools(
 
 fn is_core_tool_enabled(selection_config: &Config, tool_name: &str) -> bool {
     if let Some(core_tools) = selection_config.core_tools() {
-        core_tools.iter().any(|t| t == tool_name)
+        // 折叠大小写比较：注册名是 PascalCase，但用户配置里写 `read` 是常事。
+        // 逐字相等会让整条配置静默失效（所有工具都不注册），比匹配上更糟。
+        core_tools.iter().any(|t| t.eq_ignore_ascii_case(tool_name))
     } else {
         true
     }
@@ -71,7 +73,7 @@ fn register_core_file_tools(
         )));
     }
 
-    if is_core_tool_enabled(selection_config, "read_many_files") {
+    if is_core_tool_enabled(selection_config, "ReadManyFiles") {
         registry.register_tool(Arc::new(ReadManyFilesTool::new(
             registry_config.clone(),
             global_state.clone(),
@@ -86,7 +88,7 @@ fn register_core_file_tools(
         )));
     }
 
-    if is_core_tool_enabled(selection_config, "ListDir") {
+    if is_core_tool_enabled(selection_config, "LS") {
         registry.register_tool(Arc::new(ListDirTool::new()));
     }
 }
@@ -117,21 +119,21 @@ fn register_core_runtime_support_tools(
     use crate::core::tools::exit_plan_mode::ExitPlanModeTool;
     use crate::core::tools::sleep::WaitTool;
 
-    if is_core_tool_enabled(selection_config, "exit_plan_mode") {
+    if is_core_tool_enabled(selection_config, "ExitPlanMode") {
         registry.register_tool(Arc::new(ExitPlanModeTool::new(
             registry_config.clone(),
             message_bus.clone(),
         )));
     }
 
-    if is_core_tool_enabled(selection_config, "ask_user_question") {
+    if is_core_tool_enabled(selection_config, "AskUserQuestion") {
         registry.register_tool(Arc::new(AskUserQuestionTool::new(
             registry_config.clone(),
             message_bus.clone(),
         )));
     }
 
-    if is_core_tool_enabled(selection_config, "wait") {
+    if is_core_tool_enabled(selection_config, "Wait") {
         registry.register_tool(Arc::new(WaitTool::new()));
     }
 }
@@ -149,7 +151,7 @@ fn register_core_navigation_tools(registry: &Arc<ToolRegistry>, selection_config
         registry.register_tool(Arc::new(LspTool::new()));
     }
 
-    if is_core_tool_enabled(selection_config, "next_edit") {
+    if is_core_tool_enabled(selection_config, "NextEdit") {
         registry.register_tool(Arc::new(NextEditTool::new()));
     }
 }

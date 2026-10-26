@@ -96,7 +96,7 @@ pub async fn tools(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult
         lines.push(format!("- {}: {}", group, names.join(", ")));
     }
     lines.push(String::new());
-    lines.push("Use `tool_search` to find tools by capability.".to_string());
+    lines.push("Use `ToolSearch` to find tools by capability.".to_string());
 
     ctx.state
         .chat_history

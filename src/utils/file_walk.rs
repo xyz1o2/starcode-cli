@@ -4,7 +4,7 @@
 //! `walkdir::WalkDir`（完全不认 `.gitignore`）、`glob::glob`（连硬编码
 //! 黑名单都没有）、`fs::read_dir`。同一个仓库里的后果是：`Glob` 能翻出
 //! `target/` 里两千多个文件、`Grep` 翻不出、`@` 选择器 87% 的名额花在
-//! 被 `.gitignore` 忽略的路径上、`ListDir` 又会一头钻进 `target/`。
+//! 被 `.gitignore` 忽略的路径上、`LS` 又会一头钻进 `target/`。
 //!
 //! 这里定一份口径，对齐 Claude Code：
 //!

@@ -5,6 +5,6 @@ description: Read MCP server resource content
 Read specific resource content from MCP server.
 
 **Use for**: reading discovered MCP resources.
-**NOT for**: undiscovered resources (use `mcp_list_resources` first).
+**NOT for**: undiscovered resources (use `McpListResources` first).
 
 **Params**: `server` (required), `uri` (required)

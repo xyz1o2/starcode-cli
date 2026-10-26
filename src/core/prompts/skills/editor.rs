@@ -24,13 +24,13 @@ Every edit must be preceded by understanding. You cannot fix code you haven't re
 4. Plan edit order: definitions first, then call sites.
 
 ### Phase 4 — EDIT (only after phases 1-3 complete)
-1. Use `Edit` for single-file edits, `multi_edit` for coordinated cross-file changes.
+1. Use `Edit` for single-file edits, `MultiEdit` for coordinated cross-file changes.
 2. Each `old_string` must match EXACTLY once. Include enough surrounding context.
 3. NEVER use `// ... rest of code ...` or any placeholder — provide the ACTUAL content.
 4. Preserve existing indentation, spacing, and naming conventions.
 
 ### Phase 5 — VERIFY (must run after all edits)
-1. `get_diagnostics` to check for compilation errors.
+1. `GetDiagnostics` to check for compilation errors.
 2. Visually confirm changed sections.
 3. Run relevant tests if available.
 

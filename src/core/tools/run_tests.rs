@@ -135,7 +135,7 @@ impl ToolInvocation for RunTestsInvocation {
 
 impl BaseDeclarativeTool for RunTestsTool {
     fn name(&self) -> &str {
-        "run_tests"
+        "RunTests"
     }
 
     fn display_name(&self) -> &str {

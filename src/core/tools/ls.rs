@@ -94,7 +94,7 @@ impl ToolInvocation for ListDirToolInvocation {
 
 impl BaseDeclarativeTool for ListDirTool {
     fn name(&self) -> &str {
-        "ListDir"
+        "LS"
     }
 
     fn display_name(&self) -> &str {

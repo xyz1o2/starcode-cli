@@ -56,10 +56,10 @@ impl ProactiveSuggestions {
             {
                 if !tools_used.iter().any(|t| t.contains("test")) {
                     self.suggestions.push(Suggestion {
-                        id: "run_tests".to_string(),
+                        id: "RunTests".to_string(),
                         suggestion_type: SuggestionType::ActionSuggestion,
                         message: "You've made code changes. Consider running tests.".to_string(),
-                        action: Some("run_tests".to_string()),
+                        action: Some("RunTests".to_string()),
                         priority: SuggestionPriority::Medium,
                         timestamp: chrono::Utc::now().timestamp(),
                     });

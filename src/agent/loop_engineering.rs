@@ -125,7 +125,7 @@ impl StructuredError {
 
         match category {
             ErrorCategory::Compilation => {
-                Some("Read the error message carefully. Check syntax, imports, and type annotations. Use `get_diagnostics` to see all issues.".to_string())
+                Some("Read the error message carefully. Check syntax, imports, and type annotations. Use `GetDiagnostics` to see all issues.".to_string())
             }
             ErrorCategory::TestFailure => {
                 Some("Read the test output to understand what failed. Check if your changes broke existing behavior. Run the specific failing test to isolate the issue.".to_string())
@@ -946,7 +946,7 @@ fn suggest_alternative_tool(tool_name: &str) -> Option<String> {
         "Read" => Some("Grep".to_string()),
         "Grep" => Some("Glob".to_string()),
         "CodebaseSearch" => Some("Grep".to_string()),
-        "multi_edit" => Some("Edit".to_string()),
+        "MultiEdit" => Some("Edit".to_string()),
         _ => None,
     }
 }
@@ -975,7 +975,7 @@ fn analyze_tool_error(tool_name: &str, error_msg: &str) -> String {
     match tool_name {
         "Bash" => "Try a simpler command or break into multiple steps".to_string(),
         "Write" => "Ensure directory exists and you have write permissions".to_string(),
-        "Edit" | "multi_edit" => "Verify the exact text to replace exists in the file".to_string(),
+        "Edit" | "MultiEdit" => "Verify the exact text to replace exists in the file".to_string(),
         _ => format!("Try a different approach for '{}'", tool_name),
     }
 }

@@ -135,7 +135,7 @@ impl ToolInvocation for GhPrCommentsInvocation {
 
 impl BaseDeclarativeTool for GhPrCommentsTool {
     fn name(&self) -> &str {
-        "gh_pr_comments"
+        "GhPrComments"
     }
 
     fn display_name(&self) -> &str {

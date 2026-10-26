@@ -220,7 +220,7 @@ impl AutoModeClassifier {
         // 读取类工具直接放行（入口已由 canonical_tool_name 归一到注册名）
         if matches!(
             tool_name,
-            "Read" | "read_many_files" | "Grep" | "Glob" | "ListDir" | "CodebaseSearch"
+            "Read" | "ReadManyFiles" | "Grep" | "Glob" | "LS" | "CodebaseSearch"
         ) {
             return Some(ClassifierResult::allow(
                 "Read-only tool, always safe",

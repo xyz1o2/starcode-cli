@@ -202,7 +202,7 @@ pub(crate) fn render_tool_entry_blocks(
             // 参数摘要为空时真正去掉括号 —— 上面 `full_line` 算了不带括号的形态，
             // 但之前渲染那行永远硬写 "(" ")"，结果出来的是 "Update Todos()"、
             // "ls()"，看上去像工具调用坏掉了。参数为空本身是有效语义：
-            // TodoWrite 只显工具名，ListDir 列当前目录时摘要已回落到 "."。
+            // TodoWrite 只显工具名，LS 列当前目录时摘要已回落到 "."。
             let name_span = Span::styled(
                 tool_name,
                 Style::default()
@@ -429,12 +429,12 @@ fn build_tool_argument_display(
     let mut extra_info: Vec<String> = Vec::new();
 
     let summary = match name {
-        "enter_plan_mode" => {
+        "EnterPlanMode" => {
             let reason = get_str(&["reason"]).unwrap_or_else(|| "No reason provided".to_string());
             extra_info.push(reason);
             "Enter plan mode".to_string()
         }
-        "exit_plan_mode" => {
+        "ExitPlanMode" => {
             let plan = get_str(&["plan"]).unwrap_or_default();
             if !plan.trim().is_empty() {
                 extra_info.push(truncate_chars_with_ellipsis(&plan, lim(200)));
@@ -466,7 +466,7 @@ fn build_tool_argument_display(
             }
             truncate_chars_with_ellipsis(&cmd, lim(180))
         }
-        "Edit" | "smart_edit" => {
+        "Edit" | "SmartEdit" => {
             let path = get_str(&["path", "target_file", "file_path"])
                 .map(|p| shorten(&p))
                 .unwrap_or_else(|| "(no path provided)".to_string());
@@ -531,7 +531,7 @@ fn build_tool_argument_display(
                 format!("{} in {}", pat, shorten(&dir))
             }
         }
-        "ListDir" => get_str(&["directory", "path"])
+        "LS" => get_str(&["directory", "path"])
             .map(|p| shorten(&p))
             .unwrap_or_else(|| ".".to_string()),
         // MCP：`mcp__<server>__<tool>`，参数结构由外部 server 决定，
@@ -786,8 +786,8 @@ fn render_rich_tool_content(
                     )));
                     return lines;
                 }
-                // Glob/ListDir: "Found N files"
-                "Glob" | "ListDir" => {
+                // Glob/LS: "Found N files"
+                "Glob" | "LS" => {
                     let file_count = text.lines().filter(|l| !l.trim().is_empty()).count();
                     lines.push(Line::from(vec![
                         Span::raw("Found "),
@@ -1304,7 +1304,7 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// 回归：ListDir 列的正是当前工作目录时，路径缩短函数返回空串，
+    /// 回归：LS 列的正是当前工作目录时，路径缩短函数返回空串，
     /// 调用行显示成 `ls()` —— 看不出在列哪个目录。现在回落到 "."。
     #[test]
     fn listdir_on_the_cwd_shows_ls_dot_not_empty_parens() {
@@ -1312,7 +1312,7 @@ mod tests {
         state.ui_verbose = false;
         let cwd = crate::core::utils::paths::current_dir_cached();
         let args = serde_json::json!({ "directory": cwd.to_string_lossy() }).to_string();
-        let entry = tool_call_entry("ListDir", &args);
+        let entry = tool_call_entry("LS", &args);
 
         let blocks = render_tool_entry_blocks(&state, &entry, 0, 80, false, false, false);
         assert_eq!(first_line_text(&blocks), "● ls(.)");
@@ -1324,7 +1324,7 @@ mod tests {
         state.ui_verbose = false;
         let dir = crate::core::utils::paths::current_dir_cached().join("src");
         let args = serde_json::json!({ "directory": dir.to_string_lossy() }).to_string();
-        let entry = tool_call_entry("ListDir", &args);
+        let entry = tool_call_entry("LS", &args);
 
         let blocks = render_tool_entry_blocks(&state, &entry, 0, 80, false, false, false);
         assert_eq!(first_line_text(&blocks), "● ls(src)");

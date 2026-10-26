@@ -151,7 +151,7 @@ fn test_tool_description_resolution() {
     assert!(edit_desc.unwrap().contains("Exact string replacement"));
 
     // 新增工具
-    let wait_desc = tool_descriptions::resolve_tool_description("wait");
+    let wait_desc = tool_descriptions::resolve_tool_description("Wait");
     assert!(wait_desc.is_some(), "wait 应有 .md 描述");
 
     // 映射表与注册工具名必须一致：
@@ -174,7 +174,7 @@ fn test_tool_description_resolution() {
     let no_desc: Vec<&str> = registered
         .difference(&mapped)
         .copied()
-        .filter(|name| !name.starts_with("mcp_"))
+        .filter(|name| !name.starts_with("Mcp"))
         .collect();
     assert!(
         no_desc.is_empty(),
@@ -198,7 +198,7 @@ fn test_description_key_matches_active_tools() {
 
 /// 每个映射键都必须对应磁盘上真实存在的 `.md`。
 ///
-/// `Grep`/`Glob`/`ListDir`/`CodebaseSearch`/`ProjectMap` 五个键原来写的是工具
+/// `Grep`/`Glob`/`LS`/`CodebaseSearch`/`ProjectMap` 五个键原来写的是工具
 /// 注册名（`"Grep" => "Grep"`），而文件叫 `tool-description-grep.md` —— 大小写
 /// 不匹配，于是 schema 描述静默回退到 Rust 默认串，正文也进不了 bundle。
 #[test]
@@ -223,7 +223,7 @@ fn search_tool_bodies_reach_the_prompt_bundle() {
     let active = HashSet::from([
         "Grep".to_string(),
         "Glob".to_string(),
-        "ListDir".to_string(),
+        "LS".to_string(),
         "CodebaseSearch".to_string(),
         "ProjectMap".to_string(),
     ]);

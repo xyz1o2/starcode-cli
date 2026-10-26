@@ -377,7 +377,7 @@ impl ToolInvocation for ReadManyToolInvocation {
 
 impl BaseDeclarativeTool for ReadManyFilesTool {
     fn name(&self) -> &str {
-        "read_many_files"
+        "ReadManyFiles"
     }
 
     fn display_name(&self) -> &str {

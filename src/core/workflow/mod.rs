@@ -279,7 +279,7 @@ impl WorkflowManager {
             version: "1.0".to_string(),
             steps: vec![
                 WorkflowStep {
-                    name: "run_tests".to_string(),
+                    name: "RunTests".to_string(),
                     step_type: StepType::Shell,
                     command: Some("cargo test".to_string()),
                     tool: None,

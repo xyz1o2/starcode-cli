@@ -223,7 +223,7 @@ impl ToolExecutor {
         }
 
         if hide_skill {
-            tools.retain(|t| t.function.name != "skill");
+            tools.retain(|t| t.function.name != "Skill");
         }
 
         // MCP management tools are injected here so the agent can always orchestrate MCP safely.
@@ -679,7 +679,7 @@ impl ToolExecutor {
         let original_tool_name = tool_call.function.name.as_str();
         let resolved_tool_name = Self::canonical_tool_name(original_tool_name);
         let name = resolved_tool_name.as_str();
-        if self.config.recursion_depth > 0 && name == "skill" {
+        if self.config.recursion_depth > 0 && name == "Skill" {
             return Self::error_result(
                 "Skill tool is disabled for sub-agents to prevent recursion."
                     .to_string()
@@ -833,7 +833,7 @@ impl ToolExecutor {
                                 // 没有就退回 `output`。
                                 //
                                 // 曾经这里只取 `output`，而 `llm_content` 被整个
-                                // 丢掉 —— `tool_search` 那种"摘要一行、正文另存"的
+                                // 丢掉 —— `ToolSearch` 那种"摘要一行、正文另存"的
                                 // 工具，模型收到的只有 `"Found 3 tool(s) for 'exa'"`，
                                 // 工具名和 schema 全丢，于是只能反复瞎猜名字。
                                 // `shell.rs` 里那段注释（"llm_content 根本没人读"）
@@ -1041,7 +1041,7 @@ impl ToolExecutor {
     /// 缓存命中后补做"读过的文件要登记"这一步。
     ///
     /// 只处理两个"读"类工具，因为只有它们把路径交给模型、也只有它们的登记会被
-    /// `Edit`/`Write`/`multi_edit`/`notebook_edit` 的前置检查消费。登记的是**当前
+    /// `Edit`/`Write`/`MultiEdit`/`NotebookEdit` 的前置检查消费。登记的是**当前
     /// 磁盘内容**，不是缓存里那份：缓存里的内容可能已经过时，而登记过期内容等于
     /// 放行一次基于旧版本的编辑。
     async fn rerecord_read_paths(&self, name: &str, args: &Value) {
@@ -1062,7 +1062,7 @@ impl ToolExecutor {
                         })
                 })
                 .unwrap_or_default(),
-            "notebook_read" => args
+            "NotebookRead" => args
                 .get("file_path")
                 .and_then(Value::as_str)
                 .map(|p| vec![p.to_string()])
@@ -1112,7 +1112,7 @@ impl ToolExecutor {
         let name = canonical_name.as_str();
         if matches!(
             name,
-            "mcp_list_servers" | "mcp_list_tools" | "mcp_tool_info" | "mcp_search_tools"
+            "McpListServers" | "McpListTools" | "McpToolInfo" | "McpSearchTools"
         ) {
             return true;
         }
@@ -1150,7 +1150,7 @@ impl ToolExecutor {
         let args = Self::camel_to_snake_keys(args);
         match canonical_name {
             "Edit" => Self::normalize_replace_args(args),
-            "multi_edit" => Self::normalize_multi_edit_args(args),
+            "MultiEdit" => Self::normalize_multi_edit_args(args),
             "Grep" => Self::normalize_search_args(original_name, args),
             "Read" => Self::normalize_read_file_args(args),
             "Agent" => Self::normalize_agent_args(args),
@@ -1744,7 +1744,7 @@ fn mcp_management_tools() -> [StarTool; 10] {
         StarTool {
             tool_type: "function".to_string(),
             function: crate::types::StarToolFunction {
-                name: "mcp_list_servers".to_string(),
+                name: "McpListServers".to_string(),
                 description: "List MCP servers currently configured".to_string(),
                 parameters: crate::types::StarToolParameters {
                     param_type: "object".to_string(),
@@ -1756,7 +1756,7 @@ fn mcp_management_tools() -> [StarTool; 10] {
         StarTool {
             tool_type: "function".to_string(),
             function: crate::types::StarToolFunction {
-                name: "mcp_list_tools".to_string(),
+                name: "McpListTools".to_string(),
                 description: "List tools for an MCP server (returns mcp__<server>__<tool>)"
                     .to_string(),
                 parameters: crate::types::StarToolParameters {
@@ -1779,7 +1779,7 @@ fn mcp_management_tools() -> [StarTool; 10] {
         StarTool {
             tool_type: "function".to_string(),
             function: crate::types::StarToolFunction {
-                name: "mcp_tool_info".to_string(),
+                name: "McpToolInfo".to_string(),
                 description: "Get schema/description for a tool in an MCP server".to_string(),
                 parameters: crate::types::StarToolParameters {
                     param_type: "object".to_string(),
@@ -1808,7 +1808,7 @@ fn mcp_management_tools() -> [StarTool; 10] {
         StarTool {
             tool_type: "function".to_string(),
             function: crate::types::StarToolFunction {
-                name: "mcp_search_tools".to_string(),
+                name: "McpSearchTools".to_string(),
                 description: "Search MCP tools by keyword across servers".to_string(),
                 parameters: crate::types::StarToolParameters {
                     param_type: "object".to_string(),
@@ -1837,7 +1837,7 @@ fn mcp_management_tools() -> [StarTool; 10] {
         StarTool {
             tool_type: "function".to_string(),
             function: crate::types::StarToolFunction {
-                name: "mcp_restart_server".to_string(),
+                name: "McpRestartServer".to_string(),
                 description: "Restart one MCP server and refresh tools".to_string(),
                 parameters: crate::types::StarToolParameters {
                     param_type: "object".to_string(),
@@ -1859,7 +1859,7 @@ fn mcp_management_tools() -> [StarTool; 10] {
         StarTool {
             tool_type: "function".to_string(),
             function: crate::types::StarToolFunction {
-                name: "mcp_refresh".to_string(),
+                name: "McpRefresh".to_string(),
                 description: "Re-discover MCP servers and refresh tool cache".to_string(),
                 parameters: crate::types::StarToolParameters {
                     param_type: "object".to_string(),
@@ -1871,7 +1871,7 @@ fn mcp_management_tools() -> [StarTool; 10] {
         StarTool {
             tool_type: "function".to_string(),
             function: crate::types::StarToolFunction {
-                name: "mcp_list_resources".to_string(),
+                name: "McpListResources".to_string(),
                 description: "列出 MCP 服务器的资源列表 (List resources for an MCP server)"
                     .to_string(),
                 parameters: crate::types::StarToolParameters {
@@ -1894,7 +1894,7 @@ fn mcp_management_tools() -> [StarTool; 10] {
         StarTool {
             tool_type: "function".to_string(),
             function: crate::types::StarToolFunction {
-                name: "mcp_read_resource".to_string(),
+                name: "McpReadResource".to_string(),
                 description: "读取 MCP 服务器上的资源内容 (Read a resource from an MCP server)"
                     .to_string(),
                 parameters: crate::types::StarToolParameters {
@@ -1924,7 +1924,7 @@ fn mcp_management_tools() -> [StarTool; 10] {
         StarTool {
             tool_type: "function".to_string(),
             function: crate::types::StarToolFunction {
-                name: "mcp_list_prompts".to_string(),
+                name: "McpListPrompts".to_string(),
                 description: "列出 MCP 服务器的提示模板列表 (List prompt templates for an MCP server)"
                     .to_string(),
                 parameters: crate::types::StarToolParameters {
@@ -1947,7 +1947,7 @@ fn mcp_management_tools() -> [StarTool; 10] {
         StarTool {
             tool_type: "function".to_string(),
             function: crate::types::StarToolFunction {
-                name: "mcp_get_prompt".to_string(),
+                name: "McpGetPrompt".to_string(),
                 description:
                     "获取 MCP 服务器的提示模板 (Get a prompt template from an MCP server with optional arguments)"
                         .to_string(),
@@ -1988,16 +1988,16 @@ fn mcp_management_tools() -> [StarTool; 10] {
 fn is_mcp_management_tool(name: &str) -> bool {
     matches!(
         name,
-        "mcp_list_servers"
-            | "mcp_list_tools"
-            | "mcp_tool_info"
-            | "mcp_search_tools"
-            | "mcp_restart_server"
-            | "mcp_refresh"
-            | "mcp_list_resources"
-            | "mcp_read_resource"
-            | "mcp_list_prompts"
-            | "mcp_get_prompt"
+        "McpListServers"
+            | "McpListTools"
+            | "McpToolInfo"
+            | "McpSearchTools"
+            | "McpRestartServer"
+            | "McpRefresh"
+            | "McpListResources"
+            | "McpReadResource"
+            | "McpListPrompts"
+            | "McpGetPrompt"
     )
 }
 
@@ -2037,7 +2037,7 @@ async fn execute_mcp_management_tool(
     };
 
     match name {
-        "mcp_list_servers" => {
+        "McpListServers" => {
             let servers = mcp_manager.list_server_names().await;
             ToolResult {
                 success: true,
@@ -2047,7 +2047,7 @@ async fn execute_mcp_management_tool(
                 llm_content: None,
             }
         }
-        "mcp_list_tools" => {
+        "McpListTools" => {
             let server = match require_str("server") {
                 Ok(v) => v,
                 Err(err) => return err,
@@ -2075,7 +2075,7 @@ async fn execute_mcp_management_tool(
                 },
             }
         }
-        "mcp_tool_info" => {
+        "McpToolInfo" => {
             let server = match require_str("server") {
                 Ok(v) => v,
                 Err(err) => return err,
@@ -2121,7 +2121,7 @@ async fn execute_mcp_management_tool(
                 },
             }
         }
-        "mcp_search_tools" => {
+        "McpSearchTools" => {
             let query = match require_str("query") {
                 Ok(v) => v.to_lowercase(),
                 Err(err) => return err,
@@ -2180,7 +2180,7 @@ async fn execute_mcp_management_tool(
                 llm_content: None,
             }
         }
-        "mcp_restart_server" => {
+        "McpRestartServer" => {
             let server = match require_str("server") {
                 Ok(v) => v,
                 Err(err) => return err,
@@ -2220,7 +2220,7 @@ async fn execute_mcp_management_tool(
                 },
             }
         }
-        "mcp_refresh" => {
+        "McpRefresh" => {
             if let Err(e) = mcp_manager.initialize_mcp_servers().await {
                 return ToolResult {
                     success: false,
@@ -2250,7 +2250,7 @@ async fn execute_mcp_management_tool(
                 llm_content: None,
             }
         }
-        "mcp_list_resources" => {
+        "McpListResources" => {
             let server = match require_str("server") {
                 Ok(v) => v,
                 Err(err) => return err,
@@ -2283,7 +2283,7 @@ async fn execute_mcp_management_tool(
                 },
             }
         }
-        "mcp_read_resource" => {
+        "McpReadResource" => {
             let server = match require_str("server") {
                 Ok(v) => v,
                 Err(err) => return err,
@@ -2316,7 +2316,7 @@ async fn execute_mcp_management_tool(
                 },
             }
         }
-        "mcp_list_prompts" => {
+        "McpListPrompts" => {
             let server = match require_str("server") {
                 Ok(v) => v,
                 Err(err) => return err,
@@ -2356,7 +2356,7 @@ async fn execute_mcp_management_tool(
                 },
             }
         }
-        "mcp_get_prompt" => {
+        "McpGetPrompt" => {
             let server = match require_str("server") {
                 Ok(v) => v,
                 Err(err) => return err,
@@ -2468,7 +2468,7 @@ mod tests {
         out
     }
 
-    /// 一个"摘要一行、正文另存"的工具 —— `tool_search` 就是这个形状。
+    /// 一个"摘要一行、正文另存"的工具 —— `ToolSearch` 就是这个形状。
     struct TwoChannelTool;
 
     impl crate::core::tools::tools::BaseDeclarativeTool for TwoChannelTool {
@@ -2548,7 +2548,7 @@ mod tests {
 
     /// 回归：工具的 `llm_content` 曾经被整个丢掉 —— executor 只取
     /// `return_display`，于是模型收到的是 "Found 1 tool(s)"，工具名和 schema
-    /// 全不在里面。`tool_search` 靠这条通道把发现结果交给模型，通道一断，
+    /// 全不在里面。`ToolSearch` 靠这条通道把发现结果交给模型，通道一断，
     /// 模型就只能反复瞎猜工具名。
     #[tokio::test]
     async fn llm_content_reaches_the_agent_level_result() {

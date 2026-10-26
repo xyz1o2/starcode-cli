@@ -354,15 +354,16 @@ fn usage_for_bucket(verb: &str) -> String {
 }
 
 /// 用户按 Claude Code 的口径打 `bash` / `read`，落盘时统一成注册表里的写法。
+///
+/// 注册名是 PascalCase，但用户手输常常是全小写 —— 折叠大小写后统一归到
+/// 注册名，落盘的规则才匹配得到工具调用。
 fn normalize_tool_name(raw: &str) -> String {
     let raw = raw.trim();
     let canonical = crate::core::tools::constants::canonical_tool_name(raw);
     if canonical != raw {
         return canonical;
     }
-    crate::core::tools::constants::all_builtin_tool_names()
-        .into_iter()
-        .find(|name| name.eq_ignore_ascii_case(raw))
+    crate::core::tools::constants::find_builtin_tool_name(raw)
         .map(|name| name.to_string())
         .unwrap_or_else(|| raw.to_string())
 }

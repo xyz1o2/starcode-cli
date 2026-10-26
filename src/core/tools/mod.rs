@@ -54,6 +54,7 @@ pub mod snip;
 pub mod suggest_pr;
 pub mod task_management;
 pub mod tasks;
+pub mod tool_name_consistency;
 pub mod tool_registry;
 pub mod tool_search;
 pub mod tools;

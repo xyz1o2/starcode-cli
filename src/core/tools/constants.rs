@@ -23,7 +23,7 @@ pub enum ToolName {
     // 搜索/导航
     Grep,
     Glob,
-    ListDir,
+    LS,
     LSP,
     WebSearch,
     WebFetch,
@@ -82,7 +82,7 @@ pub enum ToolName {
     SendMessage,
     Monitor,
     Brief,
-    Workflow,
+    WorkflowTool,
     Memory,
     /// 模型自调自身运行期设置的工具，见 `core::self_tuning`。
     SelfConfig,
@@ -106,91 +106,91 @@ impl ToolName {
         match self {
             // 文件操作
             ToolName::Read => "Read",
-            ToolName::ReadManyFiles => "read_many_files",
+            ToolName::ReadManyFiles => "ReadManyFiles",
             ToolName::Write => "Write",
             ToolName::Edit => "Edit",
-            ToolName::SmartEdit => "smart_edit",
-            ToolName::MultiEdit => "multi_edit",
-            ToolName::NotebookRead => "notebook_read",
-            ToolName::NotebookEdit => "notebook_edit",
+            ToolName::SmartEdit => "SmartEdit",
+            ToolName::MultiEdit => "MultiEdit",
+            ToolName::NotebookRead => "NotebookRead",
+            ToolName::NotebookEdit => "NotebookEdit",
 
             // 搜索/导航
             ToolName::Grep => "Grep",
             ToolName::Glob => "Glob",
-            ToolName::ListDir => "ListDir",
+            ToolName::LS => "LS",
             ToolName::LSP => "LSP",
             ToolName::WebSearch => "WebSearch",
             ToolName::WebFetch => "WebFetch",
 
             // 执行
             ToolName::Bash => "Bash",
-            ToolName::RunTests => "run_tests",
+            ToolName::RunTests => "RunTests",
 
             // 代理/任务
             ToolName::Agent => "Agent",
-            ToolName::Skill => "skill",
+            ToolName::Skill => "Skill",
             ToolName::Todo => "TodoWrite",
 
             // 分析
-            ToolName::GetDiagnostics => "get_diagnostics",
+            ToolName::GetDiagnostics => "GetDiagnostics",
             ToolName::CodebaseSearch => "CodebaseSearch",
             ToolName::ProjectMap => "ProjectMap",
             ToolName::CodeGraph => "CodeGraph",
-            ToolName::NextEdit => "next_edit",
+            ToolName::NextEdit => "NextEdit",
 
             // Git/GitHub
-            ToolName::GitInsight => "git_insight",
-            ToolName::GitRewind => "git_rewind",
-            ToolName::GitCommitAttribution => "git_commit_attribution",
-            ToolName::GitAutofixPr => "git_autofix_pr",
-            ToolName::GitPrSubscribe => "git_pr_subscribe",
-            ToolName::GhPrComments => "gh_pr_comments",
-            ToolName::SuggestPr => "suggest_pr",
+            ToolName::GitInsight => "GitInsight",
+            ToolName::GitRewind => "GitRewind",
+            ToolName::GitCommitAttribution => "GitCommitAttribution",
+            ToolName::GitAutofixPr => "GitAutofixPr",
+            ToolName::GitPrSubscribe => "GitPrSubscribe",
+            ToolName::GhPrComments => "GhPrComments",
+            ToolName::SuggestPr => "SuggestPr",
 
             // 模式切换
-            ToolName::EnterPlanMode => "enter_plan_mode",
-            ToolName::ExitPlanMode => "exit_plan_mode",
-            ToolName::EnterWorktree => "enter_worktree",
-            ToolName::ExitWorktree => "exit_worktree",
+            ToolName::EnterPlanMode => "EnterPlanMode",
+            ToolName::ExitPlanMode => "ExitPlanMode",
+            ToolName::EnterWorktree => "EnterWorktree",
+            ToolName::ExitWorktree => "ExitWorktree",
 
             // 任务管理
-            ToolName::TaskGet => "task_get",
-            ToolName::TaskList => "task_list",
-            ToolName::TaskUpdate => "task_update",
-            ToolName::TaskOutput => "task_output",
+            ToolName::TaskGet => "TaskGet",
+            ToolName::TaskList => "TaskList",
+            ToolName::TaskUpdate => "TaskUpdate",
+            ToolName::TaskOutput => "TaskOutput",
 
             // 调度
-            ToolName::Wait => "wait",
-            ToolName::CronCreate => "cron_create",
-            ToolName::CronList => "cron_list",
-            ToolName::CronDelete => "cron_delete",
-            ToolName::BackgroundTask => "background_task",
-            ToolName::RemoteTrigger => "remote_trigger",
-            ToolName::ScheduleWakeup => "schedule_wakeup",
+            ToolName::Wait => "Wait",
+            ToolName::CronCreate => "CronCreate",
+            ToolName::CronList => "CronList",
+            ToolName::CronDelete => "CronDelete",
+            ToolName::BackgroundTask => "BackgroundTask",
+            ToolName::RemoteTrigger => "RemoteTrigger",
+            ToolName::ScheduleWakeup => "ScheduleWakeup",
 
             // 其他
-            ToolName::AskUserQuestion => "ask_user_question",
-            ToolName::ToolSearch => "tool_search",
-            ToolName::McpAuth => "mcp_auth",
-            ToolName::Snip => "snip",
-            ToolName::SendMessage => "send_message",
-            ToolName::Monitor => "monitor",
-            ToolName::Brief => "brief",
-            ToolName::Workflow => "workflow",
-            ToolName::Memory => "memory",
-            ToolName::SelfConfig => "self_config",
+            ToolName::AskUserQuestion => "AskUserQuestion",
+            ToolName::ToolSearch => "ToolSearch",
+            ToolName::McpAuth => "McpAuth",
+            ToolName::Snip => "Snip",
+            ToolName::SendMessage => "SendMessage",
+            ToolName::Monitor => "Monitor",
+            ToolName::Brief => "Brief",
+            ToolName::WorkflowTool => "WorkflowTool",
+            ToolName::Memory => "Memory",
+            ToolName::SelfConfig => "SelfConfig",
 
             // MCP
-            ToolName::McpListServers => "mcp_list_servers",
-            ToolName::McpListTools => "mcp_list_tools",
-            ToolName::McpToolInfo => "mcp_tool_info",
-            ToolName::McpSearchTools => "mcp_search_tools",
-            ToolName::McpRestartServer => "mcp_restart_server",
-            ToolName::McpRefresh => "mcp_refresh",
-            ToolName::McpListResources => "mcp_list_resources",
-            ToolName::McpReadResource => "mcp_read_resource",
-            ToolName::McpListPrompts => "mcp_list_prompts",
-            ToolName::McpGetPrompt => "mcp_get_prompt",
+            ToolName::McpListServers => "McpListServers",
+            ToolName::McpListTools => "McpListTools",
+            ToolName::McpToolInfo => "McpToolInfo",
+            ToolName::McpSearchTools => "McpSearchTools",
+            ToolName::McpRestartServer => "McpRestartServer",
+            ToolName::McpRefresh => "McpRefresh",
+            ToolName::McpListResources => "McpListResources",
+            ToolName::McpReadResource => "McpReadResource",
+            ToolName::McpListPrompts => "McpListPrompts",
+            ToolName::McpGetPrompt => "McpGetPrompt",
         }
     }
 
@@ -204,71 +204,71 @@ impl ToolName {
         match s {
             // 直接匹配
             "Read" => Some(ToolName::Read),
-            "read_many_files" => Some(ToolName::ReadManyFiles),
+            "ReadManyFiles" => Some(ToolName::ReadManyFiles),
             "Write" => Some(ToolName::Write),
             "Edit" => Some(ToolName::Edit),
-            "smart_edit" => Some(ToolName::SmartEdit),
-            "multi_edit" => Some(ToolName::MultiEdit),
-            "notebook_read" => Some(ToolName::NotebookRead),
-            "notebook_edit" => Some(ToolName::NotebookEdit),
+            "SmartEdit" => Some(ToolName::SmartEdit),
+            "MultiEdit" => Some(ToolName::MultiEdit),
+            "NotebookRead" => Some(ToolName::NotebookRead),
+            "NotebookEdit" => Some(ToolName::NotebookEdit),
             "Grep" => Some(ToolName::Grep),
             "Glob" => Some(ToolName::Glob),
-            "ListDir" => Some(ToolName::ListDir),
+            "LS" => Some(ToolName::LS),
             "LSP" => Some(ToolName::LSP),
             "WebSearch" => Some(ToolName::WebSearch),
             "WebFetch" => Some(ToolName::WebFetch),
             "Bash" => Some(ToolName::Bash),
-            "run_tests" => Some(ToolName::RunTests),
+            "RunTests" => Some(ToolName::RunTests),
             "Agent" => Some(ToolName::Agent),
-            "skill" => Some(ToolName::Skill),
+            "Skill" => Some(ToolName::Skill),
             "TodoWrite" => Some(ToolName::Todo),
-            "get_diagnostics" => Some(ToolName::GetDiagnostics),
+            "GetDiagnostics" => Some(ToolName::GetDiagnostics),
             "CodebaseSearch" => Some(ToolName::CodebaseSearch),
             "ProjectMap" => Some(ToolName::ProjectMap),
             "CodeGraph" => Some(ToolName::CodeGraph),
-            "next_edit" => Some(ToolName::NextEdit),
-            "git_insight" => Some(ToolName::GitInsight),
-            "git_rewind" => Some(ToolName::GitRewind),
-            "git_commit_attribution" => Some(ToolName::GitCommitAttribution),
-            "git_autofix_pr" => Some(ToolName::GitAutofixPr),
-            "git_pr_subscribe" => Some(ToolName::GitPrSubscribe),
-            "gh_pr_comments" => Some(ToolName::GhPrComments),
-            "suggest_pr" => Some(ToolName::SuggestPr),
-            "enter_plan_mode" => Some(ToolName::EnterPlanMode),
-            "exit_plan_mode" => Some(ToolName::ExitPlanMode),
-            "enter_worktree" => Some(ToolName::EnterWorktree),
-            "exit_worktree" => Some(ToolName::ExitWorktree),
-            "task_get" => Some(ToolName::TaskGet),
-            "task_list" => Some(ToolName::TaskList),
-            "task_update" => Some(ToolName::TaskUpdate),
-            "task_output" => Some(ToolName::TaskOutput),
-            "wait" => Some(ToolName::Wait),
-            "cron_create" => Some(ToolName::CronCreate),
-            "cron_list" => Some(ToolName::CronList),
-            "cron_delete" => Some(ToolName::CronDelete),
-            "background_task" => Some(ToolName::BackgroundTask),
-            "remote_trigger" => Some(ToolName::RemoteTrigger),
-            "schedule_wakeup" => Some(ToolName::ScheduleWakeup),
-            "ask_user_question" => Some(ToolName::AskUserQuestion),
-            "tool_search" => Some(ToolName::ToolSearch),
-            "mcp_auth" => Some(ToolName::McpAuth),
-            "snip" => Some(ToolName::Snip),
-            "send_message" => Some(ToolName::SendMessage),
-            "monitor" => Some(ToolName::Monitor),
-            "brief" => Some(ToolName::Brief),
-            "workflow" => Some(ToolName::Workflow),
-            "memory" => Some(ToolName::Memory),
-            "self_config" => Some(ToolName::SelfConfig),
-            "mcp_list_servers" => Some(ToolName::McpListServers),
-            "mcp_list_tools" => Some(ToolName::McpListTools),
-            "mcp_tool_info" => Some(ToolName::McpToolInfo),
-            "mcp_search_tools" => Some(ToolName::McpSearchTools),
-            "mcp_restart_server" => Some(ToolName::McpRestartServer),
-            "mcp_refresh" => Some(ToolName::McpRefresh),
-            "mcp_list_resources" => Some(ToolName::McpListResources),
-            "mcp_read_resource" => Some(ToolName::McpReadResource),
-            "mcp_list_prompts" => Some(ToolName::McpListPrompts),
-            "mcp_get_prompt" => Some(ToolName::McpGetPrompt),
+            "NextEdit" => Some(ToolName::NextEdit),
+            "GitInsight" => Some(ToolName::GitInsight),
+            "GitRewind" => Some(ToolName::GitRewind),
+            "GitCommitAttribution" => Some(ToolName::GitCommitAttribution),
+            "GitAutofixPr" => Some(ToolName::GitAutofixPr),
+            "GitPrSubscribe" => Some(ToolName::GitPrSubscribe),
+            "GhPrComments" => Some(ToolName::GhPrComments),
+            "SuggestPr" => Some(ToolName::SuggestPr),
+            "EnterPlanMode" => Some(ToolName::EnterPlanMode),
+            "ExitPlanMode" => Some(ToolName::ExitPlanMode),
+            "EnterWorktree" => Some(ToolName::EnterWorktree),
+            "ExitWorktree" => Some(ToolName::ExitWorktree),
+            "TaskGet" => Some(ToolName::TaskGet),
+            "TaskList" => Some(ToolName::TaskList),
+            "TaskUpdate" => Some(ToolName::TaskUpdate),
+            "TaskOutput" => Some(ToolName::TaskOutput),
+            "Wait" => Some(ToolName::Wait),
+            "CronCreate" => Some(ToolName::CronCreate),
+            "CronList" => Some(ToolName::CronList),
+            "CronDelete" => Some(ToolName::CronDelete),
+            "BackgroundTask" => Some(ToolName::BackgroundTask),
+            "RemoteTrigger" => Some(ToolName::RemoteTrigger),
+            "ScheduleWakeup" => Some(ToolName::ScheduleWakeup),
+            "AskUserQuestion" => Some(ToolName::AskUserQuestion),
+            "ToolSearch" => Some(ToolName::ToolSearch),
+            "McpAuth" => Some(ToolName::McpAuth),
+            "Snip" => Some(ToolName::Snip),
+            "SendMessage" => Some(ToolName::SendMessage),
+            "Monitor" => Some(ToolName::Monitor),
+            "Brief" => Some(ToolName::Brief),
+            "WorkflowTool" => Some(ToolName::WorkflowTool),
+            "Memory" => Some(ToolName::Memory),
+            "SelfConfig" => Some(ToolName::SelfConfig),
+            "McpListServers" => Some(ToolName::McpListServers),
+            "McpListTools" => Some(ToolName::McpListTools),
+            "McpToolInfo" => Some(ToolName::McpToolInfo),
+            "McpSearchTools" => Some(ToolName::McpSearchTools),
+            "McpRestartServer" => Some(ToolName::McpRestartServer),
+            "McpRefresh" => Some(ToolName::McpRefresh),
+            "McpListResources" => Some(ToolName::McpListResources),
+            "McpReadResource" => Some(ToolName::McpReadResource),
+            "McpListPrompts" => Some(ToolName::McpListPrompts),
+            "McpGetPrompt" => Some(ToolName::McpGetPrompt),
 
             _ => None,
         }
@@ -289,7 +289,7 @@ impl ToolName {
             // 搜索/导航
             ToolName::Grep,
             ToolName::Glob,
-            ToolName::ListDir,
+            ToolName::LS,
             ToolName::LSP,
             ToolName::WebSearch,
             ToolName::WebFetch,
@@ -340,7 +340,7 @@ impl ToolName {
             ToolName::SendMessage,
             ToolName::Monitor,
             ToolName::Brief,
-            ToolName::Workflow,
+            ToolName::WorkflowTool,
             ToolName::Memory,
             ToolName::SelfConfig,
             // MCP
@@ -365,7 +365,7 @@ impl ToolName {
                 | ToolName::ReadManyFiles
                 | ToolName::Grep
                 | ToolName::Glob
-                | ToolName::ListDir
+                | ToolName::LS
                 | ToolName::CodebaseSearch
                 | ToolName::ProjectMap
                 | ToolName::CodeGraph
@@ -431,7 +431,7 @@ impl ToolName {
             // 搜索/导航
             ToolName::Grep
             | ToolName::Glob
-            | ToolName::ListDir
+            | ToolName::LS
             | ToolName::LSP
             | ToolName::CodebaseSearch
             | ToolName::ProjectMap
@@ -489,7 +489,7 @@ impl ToolName {
             | ToolName::McpGetPrompt => "MCP",
             // 其他
             ToolName::AskUserQuestion
-            | ToolName::Workflow
+            | ToolName::WorkflowTool
             | ToolName::Memory
             | ToolName::SelfConfig => "Other",
         }
@@ -501,11 +501,37 @@ pub fn all_builtin_tool_names() -> Vec<&'static str> {
     ToolName::all_builtin().iter().map(|t| t.as_str()).collect()
 }
 
-/// 从字符串获取规范化的工具名称（别名归一到 `ToolName`）
+/// 把工具名折叠成「忽略大小写」的比较键。
+///
+/// 注册名是 PascalCase，模型和用户偶尔会写成 `todowrite` 这种全小写。
+/// 折叠大小写后这些拼法就统一了。
+///
+/// 刻意**不**折叠下划线：`smart_edit` 是改名前的旧注册名，本次改名是硬切换，
+/// 它应该落回「未知工具名」而不是被悄悄纠正 —— 否则用户改了名、
+/// 旧配置却继续生效，排查起来最难。
+fn fold_tool_name(name: &str) -> String {
+    name.to_lowercase()
+}
+
+/// 从字符串获取规范化的工具名称（归一到注册名）。
+///
+/// 只认注册名本身 —— 旧的下划线写法不是别名，而是拼错的注册名，
+/// 折叠匹配会把它纠正回来（见 [`fold_tool_name`]）。
 pub fn canonical_tool_name(name: &str) -> String {
     ToolName::from_str(name)
         .map(|t| t.as_str().to_string())
         .unwrap_or_else(|| name.to_string())
+}
+
+/// 按「忽略大小写」的规则查找注册名。
+///
+/// 供用户手输工具名的场合兜底（`/permissions add`、hook matcher 等）。
+/// 找不到时返回 `None` —— 调用方应保留原样，而不是猜一个。
+pub fn find_builtin_tool_name(name: &str) -> Option<&'static str> {
+    let wanted = fold_tool_name(name);
+    all_builtin_tool_names()
+        .into_iter()
+        .find(|candidate| fold_tool_name(candidate) == wanted)
 }
 
 /// 判断工具名是否属于编辑类工具（只认注册名）
@@ -533,7 +559,7 @@ mod alias_tests {
         assert_eq!(canonical_tool_name("Bash"), "Bash");
         assert_eq!(canonical_tool_name("Agent"), "Agent");
         assert_eq!(canonical_tool_name("CodebaseSearch"), "CodebaseSearch");
-        assert_eq!(canonical_tool_name("smart_edit"), "smart_edit");
+        assert_eq!(canonical_tool_name("SmartEdit"), "SmartEdit");
         assert_eq!(canonical_tool_name("TodoWrite"), "TodoWrite");
     }
 
@@ -557,10 +583,10 @@ mod alias_tests {
     fn edit_tool_detection_covers_all_registered_edit_tools() {
         // 注册名
         assert!(is_edit_tool_name("Edit"));
-        assert!(is_edit_tool_name("smart_edit"));
-        assert!(is_edit_tool_name("multi_edit"));
+        assert!(is_edit_tool_name("SmartEdit"));
+        assert!(is_edit_tool_name("MultiEdit"));
         assert!(is_edit_tool_name("Write"));
-        assert!(is_edit_tool_name("notebook_edit"));
+        assert!(is_edit_tool_name("NotebookEdit"));
         // 非编辑工具
         assert!(!is_edit_tool_name("Read"));
         assert!(!is_edit_tool_name("Grep"));
@@ -573,11 +599,71 @@ mod alias_tests {
         assert!(is_read_only_tool_name("CodebaseSearch"));
         assert!(is_read_only_tool_name("ProjectMap"));
         assert!(is_read_only_tool_name("CodeGraph"));
-        assert!(is_read_only_tool_name("get_diagnostics"));
-        assert!(is_read_only_tool_name("ListDir"));
+        assert!(is_read_only_tool_name("GetDiagnostics"));
+        assert!(is_read_only_tool_name("LS"));
         // 编辑工具不是只读
         assert!(!is_read_only_tool_name("Edit"));
         assert!(!is_read_only_tool_name("Write"));
+    }
+
+    /// 工具名统一用 PascalCase（对标 Claude Code）。
+    ///
+    /// 这条不变量不是为了好看：LLM 靠工具名识别工具，snake_case 与
+    /// PascalCase 混排会让模型在 `multi_edit` / `MultiEdit` 之间摇摆，
+    /// 而错的那个名字在注册表里根本不存在 —— 调用会直接失败。
+    /// `LS` / `LSP` 是例外：缩写本身就是 PascalCase 的写法。
+    #[test]
+    fn every_registered_name_is_pascal_case() {
+        for tool in ToolName::all_builtin() {
+            let name = tool.as_str();
+            assert!(
+                name.chars().next().is_some_and(|c| c.is_ascii_uppercase()),
+                "工具名 {name} 必须以大写字母开头"
+            );
+            assert!(
+                !name.contains('_'),
+                "工具名 {name} 不该含下划线（应写 {name} 的 PascalCase 形式）"
+            );
+        }
+    }
+
+    /// 旧的下划线写法不再是别名 —— 改名是硬切换。
+    ///
+    /// 保留旧名兼容看起来友好，实际更糟：用户改了名而旧配置继续生效，
+    /// 出问题时排查方向完全相反。所以旧名必须原样落回「未知工具名」。
+    #[test]
+    fn legacy_snake_case_names_are_not_aliases() {
+        for legacy in [
+            "smart_edit",
+            "multi_edit",
+            "notebook_read",
+            "read_many_files",
+            "get_diagnostics",
+            "task_get",
+            "tool_search",
+            "ask_user_question",
+            "enter_plan_mode",
+            "mcp_list_servers",
+        ] {
+            assert!(
+                ToolName::from_str(legacy).is_none(),
+                "{legacy} 是改名前的旧名，不该再被认作注册名"
+            );
+        }
+    }
+
+    /// 大小写漂移能被纠正 —— 模型偶尔会写成全小写。
+    #[test]
+    fn lowercase_spellings_resolve_to_the_registered_name() {
+        assert_eq!(find_builtin_tool_name("todowrite"), Some("TodoWrite"));
+        assert_eq!(find_builtin_tool_name("read"), Some("Read"));
+        assert_eq!(find_builtin_tool_name("GREP"), Some("Grep"));
+        assert_eq!(find_builtin_tool_name("multiedit"), Some("MultiEdit"));
+        // 下划线差异不算大小写漂移
+        assert_eq!(find_builtin_tool_name("multi_edit"), None);
+        // 未注册的名字原样落回
+        assert_eq!(find_builtin_tool_name("mcp__github"), None);
+        assert_eq!(find_builtin_tool_name("view_file"), None);
     }
 }
 

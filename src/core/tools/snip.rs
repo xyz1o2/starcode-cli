@@ -371,7 +371,7 @@ impl ToolInvocation for SnipInvocation {
 
 impl BaseDeclarativeTool for SnipTool {
     fn name(&self) -> &str {
-        "snip"
+        "Snip"
     }
 
     fn display_name(&self) -> &str {

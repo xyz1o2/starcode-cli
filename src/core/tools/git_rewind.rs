@@ -156,7 +156,7 @@ impl ToolInvocation for GitRewindInvocation {
 
 impl BaseDeclarativeTool for GitRewindTool {
     fn name(&self) -> &str {
-        "git_rewind"
+        "GitRewind"
     }
 
     fn display_name(&self) -> &str {

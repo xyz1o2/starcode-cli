@@ -14,7 +14,7 @@ pub async fn relay_confirmation_bus_message(
             let args_json = serde_json::to_string(&args_value).unwrap_or_else(|_| "{}".to_string());
 
             // ask_user_question gets its own confirmation type with parsed options
-            let mut confirmation = if req.tool_call.name == "ask_user_question" {
+            let mut confirmation = if req.tool_call.name == "AskUserQuestion" {
                 build_ask_user_question_confirmation(&args_value)
             } else {
                 let synthetic_tool_call = crate::types::StarToolCall {
@@ -172,7 +172,7 @@ fn build_ask_user_question_confirmation(
         .unwrap_or_default();
 
     crate::types::ToolConfirmation {
-        tool_name: "ask_user_question".to_string(),
+        tool_name: "AskUserQuestion".to_string(),
         operation_type: ConfirmationType::AskUserQuestion,
         details: ConfirmationDetails::AskUserQuestion {
             question,

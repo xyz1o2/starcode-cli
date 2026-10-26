@@ -4,7 +4,7 @@ description: Recursive context navigator - explores codebase structure and finds
 when_to_use: When the user needs to understand code context, explore project structure, or find related code
 allowed_tools:
   - Read
-  - read_many_files
+  - ReadManyFiles
   - Grep
   - Glob
   - ProjectMap

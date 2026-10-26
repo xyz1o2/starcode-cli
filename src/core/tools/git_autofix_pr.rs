@@ -176,7 +176,7 @@ impl ToolInvocation for GitAutofixPrInvocation {
 
 impl BaseDeclarativeTool for GitAutofixPrTool {
     fn name(&self) -> &str {
-        "git_autofix_pr"
+        "GitAutofixPr"
     }
 
     fn display_name(&self) -> &str {

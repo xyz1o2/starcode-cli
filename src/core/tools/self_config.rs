@@ -1,4 +1,4 @@
-//! `self_config`：模型调节自身运行期设置的唯一入口。
+//! `SelfConfig`：模型调节自身运行期设置的唯一入口。
 //!
 //! # 为什么需要它
 //!
@@ -281,7 +281,7 @@ impl ToolInvocation for SelfConfigInvocation {
 
 impl BaseDeclarativeTool for SelfConfigTool {
     fn name(&self) -> &str {
-        "self_config"
+        "SelfConfig"
     }
 
     fn display_name(&self) -> &str {

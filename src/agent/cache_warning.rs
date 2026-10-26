@@ -148,7 +148,7 @@ impl ToolParameterLogger {
 
     /// 提取技能名称
     pub fn extract_skill_name(tool_name: &str, input: &Value) -> Option<String> {
-        if tool_name == "skill" || tool_name == "Skill" {
+        if tool_name == "Skill" {
             if let Some(name) = input
                 .get("name")
                 .or(input.get("skill_name"))

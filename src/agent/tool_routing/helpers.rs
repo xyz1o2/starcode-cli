@@ -16,12 +16,12 @@ pub(crate) fn is_read_only_tool_name(name: &str) -> bool {
 
 /// 检查是否是验证工具
 pub(crate) fn is_validation_tool_name(name: &str) -> bool {
-    matches!(name, "get_diagnostics" | "run_tests")
+    matches!(name, "GetDiagnostics" | "RunTests")
 }
 
 /// 检查是否是记忆工具（只认注册名；/remember、/recall 是斜杠命令，不是工具）
 pub(crate) fn is_memory_tool_name(name: &str) -> bool {
-    matches!(name, "memory")
+    matches!(name, "Memory")
 }
 
 /// 获取只读轮次限制
@@ -198,12 +198,12 @@ pub(crate) fn select_tools_for_turn_for_client(
 /// 注意：这里必须使用**真实注册名**（LLM 看到的是 schema 里的注册名）。
 pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     "Read",
-    "read_many_files",
+    "ReadManyFiles",
     "Grep",
     "Glob",
-    "ListDir",
+    "LS",
     "Edit",
-    "multi_edit",
+    "MultiEdit",
     "Write",
     "Bash",
     "CodebaseSearch",
@@ -213,13 +213,13 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     // 任务列表回读：TodoWrite 是只写的——模型写下计划后，若无法读回，
     // 长程任务在压缩或轮次推进后就失去了外部记忆锚点。这里把读回工具
     // 一并纳入核心集，保证模型随时能看到自己列过的待办。
-    "task_list",
-    "task_get",
-    "get_diagnostics",
-    "run_tests",
+    "TaskList",
+    "TaskGet",
+    "GetDiagnostics",
+    "RunTests",
     // Discovery of long-tail tools (git/web/team/cron...) — always visible
     // so the agent can find any tool it doesn't know about by name.
-    "tool_search",
+    "ToolSearch",
 ];
 
 /// 带限制的工具选择
@@ -356,7 +356,7 @@ fn resolved_discovered_tool_quota() -> usize {
 
 /// 解析通用工具短名单限制
 ///
-/// 默认值 = 核心工具数：短名单只常驻核心工具，长尾工具由 `tool_search` 发现后
+/// 默认值 = 核心工具数：短名单只常驻核心工具，长尾工具由 `ToolSearch` 发现后
 /// 经粘滞配额追加。评分填充随之成为空操作，tools 数组不再逐消息漂移，
 /// prompt 缓存前缀保持稳定（见 [`resolved_tool_shortlist_limit`] 的缓存稳定性说明）。
 fn resolved_general_tool_shortlist_limit() -> usize {
@@ -460,7 +460,7 @@ fn score_tool_for_turn(tool: &StarTool, user_input: &str, _current_turn: i32) ->
                 score += 5.0;
             }
         }
-        "Edit" | "multi_edit" => {
+        "Edit" | "MultiEdit" => {
             if input_lower.contains("edit")
                 || input_lower.contains("change")
                 || input_lower.contains("update")
@@ -619,7 +619,7 @@ pub(crate) fn compute_tool_roles(tool: &StarTool) -> ToolRoles {
         is_read: is_read_tool(tool),
         is_search: is_search_tool(tool),
         is_edit: is_edit_tool_name(name),
-        is_execute: name == "Bash" || name == "run_tests",
+        is_execute: name == "Bash" || name == "RunTests",
         is_project_map: is_project_map_tool(tool),
         is_codebase_search: is_codebase_search_tool(tool),
     }
@@ -627,7 +627,7 @@ pub(crate) fn compute_tool_roles(tool: &StarTool) -> ToolRoles {
 
 /// 检查是否是读取工具
 fn is_read_tool(tool: &StarTool) -> bool {
-    matches!(tool.function.name.as_str(), "Read" | "ListDir")
+    matches!(tool.function.name.as_str(), "Read" | "LS")
 }
 
 /// 检查是否是搜索工具

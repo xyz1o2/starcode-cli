@@ -56,7 +56,7 @@ impl ToolInvocation for McpListResourcesInvocation {
             }
 
             let listing = serde_json::json!({
-                "tool": "mcp_list_resources",
+                "tool": "McpListResources",
                 "note": "MCP resource listing is handled by the MCP manager at runtime.",
                 "server": params.server,
                 "status": "delegated_to_mcp_manager"
@@ -78,7 +78,7 @@ impl ToolInvocation for McpListResourcesInvocation {
 
 impl BaseDeclarativeTool for McpListResourcesTool {
     fn name(&self) -> &str {
-        "mcp_list_resources"
+        "McpListResources"
     }
     fn display_name(&self) -> &str {
         "MCP List Resources"
@@ -163,7 +163,7 @@ impl ToolInvocation for McpReadResourceInvocation {
         let params = self.params.clone();
         Box::pin(async move {
             let resource_info = serde_json::json!({
-                "tool": "mcp_read_resource",
+                "tool": "McpReadResource",
                 "server": params.server,
                 "uri": params.uri,
                 "status": "delegated_to_mcp_manager"
@@ -185,7 +185,7 @@ impl ToolInvocation for McpReadResourceInvocation {
 
 impl BaseDeclarativeTool for McpReadResourceTool {
     fn name(&self) -> &str {
-        "mcp_read_resource"
+        "McpReadResource"
     }
     fn display_name(&self) -> &str {
         "MCP Read Resource"

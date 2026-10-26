@@ -188,7 +188,7 @@ impl ToolInvocation for WorkflowInvocation {
 
 impl BaseDeclarativeTool for WorkflowTool {
     fn name(&self) -> &str {
-        "workflow"
+        "WorkflowTool"
     }
 
     fn display_name(&self) -> &str {

@@ -18,7 +18,7 @@ pub fn create_smart_edit_tool_definition() -> StarTool {
     StarTool {
         tool_type: "function".to_string(),
         function: StarToolFunction {
-            name: "smart_edit".to_string(),
+            name: "SmartEdit".to_string(),
 
             // ⭐ AI 友好描述：突出优势，引导使用
             description: concat!(

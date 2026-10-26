@@ -271,7 +271,7 @@ pub(crate) fn build_project_map_tool_call(user_input: &str, turn: i32) -> StarTo
 }
 
 pub(crate) fn build_validation_tool_call(turn: i32) -> StarToolCall {
-    build_tool_call("get_diagnostics", &serde_json::json!({"turn": turn}))
+    build_tool_call("GetDiagnostics", &serde_json::json!({"turn": turn}))
 }
 
 pub(crate) fn build_json_fallback_prompt(
@@ -306,7 +306,7 @@ pub(crate) fn json_fallback_extract_tool_call(response_text: &str) -> Option<Sta
 /// 子代理的 objective 会回退成技能名本身（如把 "navigator" 当成语义查询）。
 fn build_skill_tool_call(skill: &str, user_input: &str, _turn: i32) -> StarToolCall {
     build_tool_call(
-        "skill",
+        "Skill",
         &serde_json::json!({
             "skill": skill,
             "args": {"objective": user_input}
@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn skill_call_carries_question_in_objective() {
         let call = build_navigator_skill_tool_call("where is auth handled", 3);
-        assert_eq!(call.function.name, "skill");
+        assert_eq!(call.function.name, "Skill");
 
         let args: serde_json::Value = serde_json::from_str(&call.function.arguments).unwrap();
         assert_eq!(

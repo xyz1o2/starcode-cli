@@ -22,20 +22,20 @@
 use std::sync::OnceLock;
 
 /// 工具注册名 → `tool-description-*.md` 文件名键 的映射。
-/// 多个工具可共享同一份描述（如 Read/read_many_files → readfile）。
+/// 多个工具可共享同一份描述（如 Read/ReadManyFiles → readfile）。
 fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str, &'static str> {
     static MAP: OnceLock<std::collections::HashMap<&'static str, &'static str>> = OnceLock::new();
     MAP.get_or_init(|| {
         let mut m = std::collections::HashMap::new();
         // 文件操作
         m.insert("Read", "readfile");
-        m.insert("read_many_files", "readfile");
+        m.insert("ReadManyFiles", "readfile");
         m.insert("Edit", "edit");
         m.insert("Write", "write");
-        m.insert("multi_edit", "multiedit");
-        m.insert("smart_edit", "smartedit");
-        m.insert("notebook_edit", "notebookedit");
-        m.insert("next_edit", "nextedit");
+        m.insert("MultiEdit", "multiedit");
+        m.insert("SmartEdit", "smartedit");
+        m.insert("NotebookEdit", "notebookedit");
+        m.insert("NextEdit", "nextedit");
         // 搜索/导航
         // 键必须是**磁盘上的文件名**（`tool-description-<key>.md`），不是工具注册名。
         // 这五个原来写成了 `"Grep" => "Grep"` 这样的注册名，而文件叫
@@ -45,66 +45,66 @@ fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str
         // 传进来的 key 是小写化后的文件名）。
         m.insert("Grep", "grep");
         m.insert("Glob", "glob");
-        m.insert("ListDir", "ls");
+        m.insert("LS", "ls");
         m.insert("CodebaseSearch", "codebase_search");
         m.insert("ProjectMap", "projectmap");
         m.insert("CodeGraph", "code_graph");
-        m.insert("tool_search", "toolsearch");
-        m.insert("get_diagnostics", "getdiagnostics");
+        m.insert("ToolSearch", "toolsearch");
+        m.insert("GetDiagnostics", "getdiagnostics");
         // 执行
         m.insert("Bash", "bash");
-        m.insert("run_tests", "runtests");
-        m.insert("background_task", "backgroundtask");
-        m.insert("monitor", "monitor");
-        m.insert("wait", "wait");
+        m.insert("RunTests", "runtests");
+        m.insert("BackgroundTask", "backgroundtask");
+        m.insert("Monitor", "monitor");
+        m.insert("Wait", "wait");
         // 任务管理
         m.insert("TodoWrite", "managetasks");
-        m.insert("task_get", "taskget");
-        m.insert("task_list", "tasklist");
-        m.insert("task_update", "taskupdate");
-        m.insert("task_output", "taskoutput");
+        m.insert("TaskGet", "taskget");
+        m.insert("TaskList", "tasklist");
+        m.insert("TaskUpdate", "taskupdate");
+        m.insert("TaskOutput", "taskoutput");
         // 代理/技能
         m.insert("Agent", "runagent");
-        m.insert("skill", "skill");
-        m.insert("brief", "brief");
-        m.insert("workflow", "workflow");
+        m.insert("Skill", "skill");
+        m.insert("Brief", "brief");
+        m.insert("WorkflowTool", "workflow");
         // 记忆
-        m.insert("memory", "savememory");
+        m.insert("Memory", "savememory");
         // Git/GitHub
-        m.insert("git_insight", "gitinsight");
-        m.insert("git_rewind", "gitrewind");
-        m.insert("git_commit_attribution", "gitcommitattribution");
-        m.insert("git_autofix_pr", "gitautofixpr");
-        m.insert("git_pr_subscribe", "gitprsubscribe");
-        m.insert("gh_pr_comments", "ghprcomments");
-        m.insert("suggest_pr", "suggestpr");
+        m.insert("GitInsight", "gitinsight");
+        m.insert("GitRewind", "gitrewind");
+        m.insert("GitCommitAttribution", "gitcommitattribution");
+        m.insert("GitAutofixPr", "gitautofixpr");
+        m.insert("GitPrSubscribe", "gitprsubscribe");
+        m.insert("GhPrComments", "ghprcomments");
+        m.insert("SuggestPr", "suggestpr");
         // Web
         m.insert("WebSearch", "websearch");
         m.insert("WebFetch", "webfetch");
         // MCP
-        m.insert("mcp_list_resources", "mcplistresources");
-        m.insert("mcp_read_resource", "mcpreadresource");
-        m.insert("mcp_search_tools", "mcpsearch");
+        m.insert("McpListResources", "mcplistresources");
+        m.insert("McpReadResource", "mcpreadresource");
+        m.insert("McpSearchTools", "mcpsearch");
         // 模式切换
-        m.insert("enter_plan_mode", "enterplanmode");
-        m.insert("exit_plan_mode", "exitplanmode");
-        m.insert("enter_worktree", "enterworktree");
-        m.insert("exit_worktree", "exitworktree");
+        m.insert("EnterPlanMode", "enterplanmode");
+        m.insert("ExitPlanMode", "exitplanmode");
+        m.insert("EnterWorktree", "enterworktree");
+        m.insert("ExitWorktree", "exitworktree");
         // 其他
-        m.insert("ask_user_question", "askuserquestion");
-        m.insert("snip", "snip");
-        m.insert("self_config", "selfconfig");
-        m.insert("send_message", "sendmessage");
-        m.insert("cron_create", "cron");
-        m.insert("cron_list", "cron");
-        m.insert("cron_delete", "cron");
+        m.insert("AskUserQuestion", "askuserquestion");
+        m.insert("Snip", "snip");
+        m.insert("SelfConfig", "selfconfig");
+        m.insert("SendMessage", "sendmessage");
+        m.insert("CronCreate", "cron");
+        m.insert("CronList", "cron");
+        m.insert("CronDelete", "cron");
         // 扩展工具集
-        m.insert("wait", "wait");
+        m.insert("Wait", "wait");
         m.insert("LSP", "lsp");
-        m.insert("mcp_auth", "mcp_auth");
-        m.insert("notebook_read", "notebook_read");
-        m.insert("remote_trigger", "remote_trigger");
-        m.insert("schedule_wakeup", "schedule_wakeup");
+        m.insert("McpAuth", "mcp_auth");
+        m.insert("NotebookRead", "notebook_read");
+        m.insert("RemoteTrigger", "remote_trigger");
+        m.insert("ScheduleWakeup", "schedule_wakeup");
         m
     })
 }
@@ -163,7 +163,7 @@ pub fn resolve_tool_routing(tool_name: &str) -> Option<String> {
 /// 列出**磁盘上**所有声明了 `routing:` 的描述文件：
 /// `[(文件名, 槽 id, 映射到该文件的工具注册名…)]`。
 ///
-/// 一个描述文件可以服务多个工具（如 `readfile` 同时喂 `Read` 和 `read_many_files`），
+/// 一个描述文件可以服务多个工具（如 `readfile` 同时喂 `Read` 和 `ReadManyFiles`），
 /// 所以第三项是列表（已排序——`tool_description_key_map` 是 HashMap，迭代序不稳定）。
 /// 拿不到任何注册名的条目由测试判为孤儿描述。
 pub fn declared_routing_claims() -> Vec<(String, String, Vec<String>)> {
@@ -218,7 +218,7 @@ fn strip_frontmatter(content: &str) -> &str {
 
 /// 加载工具的完整使用说明正文（`tool-description-*.md` 去掉 frontmatter）。
 ///
-/// 供 `tool_search` 的 `select:<name>` 模式动态加载：长尾工具不常驻系统提示词，
+/// 供 `ToolSearch` 的 `select:<name>` 模式动态加载：长尾工具不常驻系统提示词，
 /// 模型发现工具时随结果拿到详细用法 —— 使用说明走 tool result（消息尾部），
 /// 不触碰 prompt 缓存前缀。
 pub fn resolve_tool_body(tool_name: &str) -> Option<String> {
@@ -265,7 +265,7 @@ mod tests {
         let body = resolve_tool_body("Edit").expect("Edit 必须有使用说明");
         assert!(!body.contains("<!--"), "正文不得包含 frontmatter");
         assert!(
-            body.contains("`Write`") && body.contains("`multi_edit`"),
+            body.contains("`Write`") && body.contains("`MultiEdit`"),
             "正文应是工具指引原文，而非空壳"
         );
     }

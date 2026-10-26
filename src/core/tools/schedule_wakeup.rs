@@ -132,7 +132,7 @@ impl ToolInvocation for ScheduleWakeupInvocation {
 
 impl BaseDeclarativeTool for ScheduleWakeupTool {
     fn name(&self) -> &str {
-        "schedule_wakeup"
+        "ScheduleWakeup"
     }
 
     fn display_name(&self) -> &str {

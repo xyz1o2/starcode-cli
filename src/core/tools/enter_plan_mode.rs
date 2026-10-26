@@ -24,7 +24,7 @@ impl EnterPlanModeTool {
 
 impl BaseDeclarativeTool for EnterPlanModeTool {
     fn name(&self) -> &str {
-        "enter_plan_mode"
+        "EnterPlanMode"
     }
 
     fn display_name(&self) -> &str {

@@ -58,7 +58,7 @@ impl ToolUseSummaryGenerator {
                     "Finding files".to_string()
                 }
             }
-            "ListDir" => {
+            "LS" => {
                 if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
                     format!("Listing: {}", path)
                 } else {

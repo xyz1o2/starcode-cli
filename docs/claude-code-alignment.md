@@ -233,6 +233,7 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | PolicyEngine 接线 | `with_project_rules` 是唯一构造点 | ✅ `core/config/runtime_bootstrap.rs:34-49` |
 | headless 拒绝策略 | `non_interactive` 打开，`AskUser` 无人应答时直接拒 | ✅ 同上 |
 | hook 事件名（部分） | `PreToolUse` 等沿用 CC 命名，含 alias 映射 | ✅ `core/hooks/store.rs:32-79`、`agent/hooks.rs:125-174` |
+| 内置工具命名 | PascalCase，无 snake_case、无 `Tool` 后缀（`LS` / `WorkflowTool` 除外）；单一事实源 `ToolName` 枚举 | ✅ `core/tools/constants.rs`、`core/tools/tool_name_consistency.rs` |
 | Headless 入口 | `-p/--prompt` 直出 JSONL 或文本 | ✅ `main.rs:52` |
 
 ### 2.2 语义分歧（已修，记录用）

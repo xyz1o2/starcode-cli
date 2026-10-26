@@ -4,7 +4,7 @@ description: Code analysis expert - analyzes code structure, dependencies, and d
 when_to_use: When the user asks to analyze code, understand architecture, find dependencies, or detect code issues
 allowed_tools:
   - Read
-  - read_many_files
+  - ReadManyFiles
   - Grep
   - Glob
   - CodebaseSearch

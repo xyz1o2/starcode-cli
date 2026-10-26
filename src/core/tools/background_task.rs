@@ -91,7 +91,7 @@ impl ToolInvocation for BackgroundTaskInvocation {
             match crate::core::remote::queue_message(
                 &config.project_root(),
                 message,
-                Some("background_task".to_string()),
+                Some("BackgroundTask".to_string()),
             )
             .await
             {
@@ -160,7 +160,7 @@ fn sanitize_filename(s: &str) -> String {
 
 impl BaseDeclarativeTool for BackgroundTaskTool {
     fn name(&self) -> &str {
-        "background_task"
+        "BackgroundTask"
     }
 
     fn display_name(&self) -> &str {

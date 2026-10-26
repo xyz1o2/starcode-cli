@@ -85,7 +85,7 @@ impl ToolInvocation for WaitInvocation {
 
 impl BaseDeclarativeTool for WaitTool {
     fn name(&self) -> &str {
-        "wait"
+        "Wait"
     }
 
     fn display_name(&self) -> &str {

@@ -93,7 +93,7 @@ fn full_rewrite_guard_message(
 
     Some(format!(
         "Write blocked [full_file_rewrite_blocked]: existing file '{}' would be replaced almost entirely (changed ratio {:.1}%, {} lines). \
-Do not retry `Write` with another full-file body. Read the file again and switch to `Edit`, `smart_edit`, or `multi_edit` with targeted old/new hunks.",
+Do not retry `Write` with another full-file body. Read the file again and switch to `Edit`, `SmartEdit`, or `MultiEdit` with targeted old/new hunks.",
         file_path.display(),
         ratio * 100.0,
         original_lines

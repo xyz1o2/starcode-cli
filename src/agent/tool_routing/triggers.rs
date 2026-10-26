@@ -595,7 +595,7 @@ fn should_trigger_navigator_skill_with_flag(
     auto_enabled
         && !already_attempted
         && codebase_search_attempted
-        && active_tools.contains("skill")
+        && active_tools.contains("Skill")
 }
 
 /// 检查是否应该触发分析器技能
@@ -607,7 +607,7 @@ fn should_trigger_analyzer_skill_with_flag(
     already_attempted: bool,
     auto_enabled: bool,
 ) -> bool {
-    auto_enabled && !already_attempted && project_map_attempted && active_tools.contains("skill")
+    auto_enabled && !already_attempted && project_map_attempted && active_tools.contains("Skill")
 }
 
 /// 检查是否应该触发项目地图
@@ -638,7 +638,7 @@ fn should_trigger_editor_skill_with_flag(
         && !already_attempted
         && codebase_search_attempted
         && navigator_skill_attempted
-        && active_tools.contains("skill")
+        && active_tools.contains("Skill")
 }
 
 /// 检查是否启用第一轮预取
@@ -893,7 +893,7 @@ mod tests {
             false,
             "随便一句",
             "",
-            &tools(&["skill"]),
+            &tools(&["Skill"]),
             true,  // codebase_search_attempted → EditorSkill 的前置满足
             true,  // navigator_skill_attempted → EditorSkill 的前置满足
             false, // analyzer 未尝试

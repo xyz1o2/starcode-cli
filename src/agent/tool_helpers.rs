@@ -34,7 +34,7 @@ pub(crate) fn tool_result_is_usable(result: &ToolResult) -> bool {
 /// - `output` —— 给人看的摘要（UI 把它渲染成折叠结果里的一行）；
 /// - `llm_content` —— 给模型看的完整正文（工具名清单、参数 schema、使用说明）。
 ///
-/// 两者**不同时**只发 `output` 等于把发现结果整个丢掉：`tool_search` 就是
+/// 两者**不同时**只发 `output` 等于把发现结果整个丢掉：`ToolSearch` 就是
 /// 这个形状 —— 它给 UI 的是一句 "Found 3 tool(s) for 'exa'"，给模型的才是
 /// 那三个工具名和 schema。模型拿不到后者就只能反复瞎猜工具名。
 ///
@@ -381,7 +381,7 @@ mod tests {
 
     // ── llm_facing_content ─────────────────────────────────────────────────
 
-    /// 回归：`tool_search` 给 UI 的是一句摘要，给模型的才是工具名和 schema。
+    /// 回归：`ToolSearch` 给 UI 的是一句摘要，给模型的才是工具名和 schema。
     /// 只发 `output` 的话，模型永远看不到搜到了什么。
     #[test]
     fn llm_content_wins_over_the_human_facing_summary() {

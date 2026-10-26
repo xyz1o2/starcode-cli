@@ -6,7 +6,7 @@ routing: create-file
 Writes a file to the local filesystem.
 
 **Use for**: creating new files, complete file rewrites.
-**NOT for**: modifying existing code (use `Edit`/`multi_edit`).
+**NOT for**: modifying existing code (use `Edit`/`MultiEdit`).
 
 **Rules**:
 - This tool will overwrite the existing file if there is one at the provided path.

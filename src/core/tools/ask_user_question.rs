@@ -70,7 +70,7 @@ impl AskUserQuestionTool {
 
 impl BaseDeclarativeTool for AskUserQuestionTool {
     fn name(&self) -> &str {
-        "ask_user_question"
+        "AskUserQuestion"
     }
 
     fn display_name(&self) -> &str {

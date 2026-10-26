@@ -5,7 +5,7 @@ description: Manage remote agent triggers - list, get, create, update, run.
 Manage remote agent scheduled triggers.
 
 **Use for**: scheduling remote agent execution, listing/updating existing triggers.
-**NOT for**: local cron tasks (use `cron_create`).
+**NOT for**: local cron tasks (use `CronCreate`).
 
 **Rules**:
 - List before creating to avoid duplicates

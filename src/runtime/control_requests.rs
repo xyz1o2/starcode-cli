@@ -664,7 +664,7 @@ async fn handle_tool_confirmation_response(
                 .await;
 
             let default_timeout_secs = match tool_call.function.name.as_str() {
-                "smart_edit" | "skill" => 240,
+                "SmartEdit" | "Skill" => 240,
                 "Bash" | "shell" => 120,
                 _ => 180,
             };

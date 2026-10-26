@@ -80,7 +80,7 @@ impl ToolInvocation for NextEditInvocation {
 
 impl BaseDeclarativeTool for NextEditTool {
     fn name(&self) -> &str {
-        "next_edit"
+        "NextEdit"
     }
 
     fn display_name(&self) -> &str {

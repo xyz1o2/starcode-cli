@@ -281,7 +281,7 @@ impl PermissionRuleEngine {
 
     fn extract_path_from_args(&self, tool: &str, args: &serde_json::Value) -> Option<String> {
         match tool {
-            "Edit" | "smart_edit" | "Write" | "Read" | "read_many_files" => args
+            "Edit" | "SmartEdit" | "Write" | "Read" | "ReadManyFiles" => args
                 .get("path")
                 .or_else(|| args.get("file_path"))
                 .or_else(|| args.get("target_file"))

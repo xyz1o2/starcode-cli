@@ -91,7 +91,7 @@ impl ToolInvocation for CronCreateInvocation {
 
 impl BaseDeclarativeTool for CronCreateTool {
     fn name(&self) -> &str {
-        "cron_create"
+        "CronCreate"
     }
 
     fn display_name(&self) -> &str {
@@ -228,7 +228,7 @@ impl ToolInvocation for CronListInvocation {
 
 impl BaseDeclarativeTool for CronListTool {
     fn name(&self) -> &str {
-        "cron_list"
+        "CronList"
     }
 
     fn display_name(&self) -> &str {
@@ -346,7 +346,7 @@ impl ToolInvocation for CronDeleteInvocation {
 
 impl BaseDeclarativeTool for CronDeleteTool {
     fn name(&self) -> &str {
-        "cron_delete"
+        "CronDelete"
     }
 
     fn display_name(&self) -> &str {

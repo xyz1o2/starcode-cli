@@ -36,7 +36,7 @@ async fn read_current_content(path: &std::path::Path) -> String {
 /// 把一次成功读取登记进两份 read state。
 ///
 /// 两份都要写，因为 `Edit`/`Write` 查的是 `read_file_state`（`edit.rs`、
-/// `write_file.rs`），而 `multi_edit`/`notebook_edit` 查的是 `execution_state`。
+/// `write_file.rs`），而 `MultiEdit`/`NotebookEdit` 查的是 `execution_state`。
 ///
 /// `abs_path` 必须由调用方用 [`crate::core::utils::paths::read_state_key`] 算：
 /// 这里只负责写，不负责规范化，否则写入端和查询端的键会分叉，明明读过也报

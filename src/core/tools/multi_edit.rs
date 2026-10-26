@@ -135,8 +135,8 @@ impl ToolInvocation for MultiEditToolInvocation {
                             .collect::<Vec<_>>()
                             .join(", ");
                         let msg = format!(
-                            "Edit blocked [edit_file_not_read]: {count} file(s) must be read before `multi_edit`:\n{list}\n\
-                             REQUIRED NEXT STEP: call {calls} (batch them in one response), then retry `multi_edit`. \
+                            "Edit blocked [edit_file_not_read]: {count} file(s) must be read before `MultiEdit`:\n{list}\n\
+                             REQUIRED NEXT STEP: call {calls} (batch them in one response), then retry `MultiEdit`. \
                              Do NOT retry until ALL listed files have been read.",
                             count = unread.len(),
                             list = file_list,
@@ -277,7 +277,7 @@ impl ToolInvocation for MultiEditToolInvocation {
                         if let Err(e) = crate::utils::checkpoint_manager::track_edit(
                             path,
                             msg_id,
-                            Some("multi_edit"),
+                            Some("MultiEdit"),
                             None, // session_id: per-cwd fallback, matches /undo and /rewind
                         )
                         .await
@@ -404,7 +404,7 @@ impl MultiEditTool {
 
 impl BaseDeclarativeTool for MultiEditTool {
     fn name(&self) -> &str {
-        "multi_edit"
+        "MultiEdit"
     }
 
     fn display_name(&self) -> &str {
@@ -547,7 +547,7 @@ mod tests {
         ///
         /// 这个形状是判别式用例：前面那个 `mark_read` 两张表都写，所以哪怕门查错了
         /// 表也能过 —— 只有走这条路的文件（`Glob` / `Grep` / 批量 `Read` /
-        /// `read_many_files`）才能区分门到底查的是哪张表。
+        /// `ReadManyFiles`）才能区分门到底查的是哪张表。
         async fn mark_browsed(&self, rel: &str) {
             let path = self.dir.path().join(rel);
             let key = crate::core::utils::paths::read_state_key(&path);
@@ -605,7 +605,7 @@ mod tests {
     /// 前置门：**读过的文件放行**。
     ///
     /// 这条在改动前就会挂 —— 门查的是 `execution_state`，而登记只写
-    /// `read_file_state`，所以 `Read` → `multi_edit` 是 100% 误报。
+    /// `read_file_state`，所以 `Read` → `MultiEdit` 是 100% 误报。
     #[tokio::test]
     async fn a_read_file_passes_the_gate() {
         let h = Harness::new("multi-edit-gate-ok").await;
@@ -702,7 +702,7 @@ mod tests {
 
     /// 判别式回归：门必须查 `read_file_state`，不能查 `execution_state`。
     ///
-    /// `Glob` / `Grep` / 批量 `Read` / `read_many_files` **只**写 `read_file_state`；
+    /// `Glob` / `Grep` / 批量 `Read` / `ReadManyFiles` **只**写 `read_file_state`；
     /// 只有单个 `Read` 和 `@` 内联会顺带写 `execution_state`。门查错表的后果是
     /// "Glob 完再 multi_edit" 100% 误报 `[edit_file_not_read]` —— 而这正是
     /// agent 最常见的用法：先搜出文件，再批量改。

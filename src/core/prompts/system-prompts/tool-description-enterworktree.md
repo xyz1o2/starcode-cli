@@ -12,4 +12,4 @@ Create isolated worktree for experimental changes. Main directory unaffected.
 **Rules**:
 - Requires user confirmation
 - Changes don't affect main working directory
-- Use `exit_worktree` to clean up
+- Use `ExitWorktree` to clean up

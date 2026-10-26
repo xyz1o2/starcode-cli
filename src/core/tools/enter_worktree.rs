@@ -22,7 +22,7 @@ impl EnterWorktreeTool {
 
 impl BaseDeclarativeTool for EnterWorktreeTool {
     fn name(&self) -> &str {
-        "enter_worktree"
+        "EnterWorktree"
     }
 
     fn display_name(&self) -> &str {

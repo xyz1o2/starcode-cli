@@ -233,7 +233,7 @@ impl MCPManager {
     ///
     /// 见 `core::mcp::config::load_effective_mcp_config` 的作用域表。只读
     /// `.star/mcp.json` 的话，用户在 Claude Code 里配好的 server 永远进不了
-    /// registry —— `tool_search` 于是搜不到任何 MCP 工具。
+    /// registry —— `ToolSearch` 于是搜不到任何 MCP 工具。
     pub async fn initialize_mcp_servers(&self) -> Result<(), McpError> {
         let cfg = load_effective_mcp_config().await?;
         for (name, s) in cfg.mcp_servers {

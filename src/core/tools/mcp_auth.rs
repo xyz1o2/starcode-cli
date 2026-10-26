@@ -173,7 +173,7 @@ impl ToolInvocation for McpAuthInvocation {
                             msg.push_str(&format!("Scopes: {}\n", s.scopes.join(", ")));
                         }
                         msg.push_str(
-                            "\nPlease visit the auth URL to authorize, then run `mcp_auth` again.",
+                            "\nPlease visit the auth URL to authorize, then run `McpAuth` again.",
                         );
                         (msg, Some("auth_required"), "auth_required")
                     } else {
@@ -189,7 +189,7 @@ impl ToolInvocation for McpAuthInvocation {
                     let msg = format!(
                         "No OAuth state found for MCP server '{}'.\n\
                          The server may not have been connected yet or does not require OAuth.\n\
-                         Use `mcp_list_servers` to check server status.",
+                         Use `McpListServers` to check server status.",
                         server_name
                     );
                     (msg, Some("no_state"), "not_configured")
@@ -218,7 +218,7 @@ impl ToolInvocation for McpAuthInvocation {
 
 impl BaseDeclarativeTool for McpAuthTool {
     fn name(&self) -> &str {
-        "mcp_auth"
+        "McpAuth"
     }
 
     fn display_name(&self) -> &str {

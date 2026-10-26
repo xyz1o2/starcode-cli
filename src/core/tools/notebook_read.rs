@@ -201,9 +201,9 @@ impl ToolInvocation for NotebookReadInvocation {
                 output.push_str("--------------------------------------------------\n");
             }
 
-            // 登记 read state，否则紧随其后的 `notebook_edit` 必然被
+            // 登记 read state，否则紧随其后的 `NotebookEdit` 必然被
             // `[edit_file_not_read]` 拦下 —— 而"先 notebook_read 再 notebook_edit"
-            // 正是 `notebook_edit` 的工具说明要求模型走的路径。
+            // 正是 `NotebookEdit` 的工具说明要求模型走的路径。
             //
             // 登记的是**原始 JSON 文本**而不是上面拼给人看的转储：`Edit`/`Write`
             // 之后会用存下来的 content 和磁盘内容比对来判断文件是否被改过，
@@ -263,7 +263,7 @@ impl NotebookReadTool {
 
 impl BaseDeclarativeTool for NotebookReadTool {
     fn name(&self) -> &str {
-        "notebook_read"
+        "NotebookRead"
     }
 
     fn display_name(&self) -> &str {
@@ -385,9 +385,9 @@ mod tests {
         assert!(out.contains("Format: v4.5"), "nbformat 要报出来：{out}");
     }
 
-    /// 回归：读完之后必须登记 read state，否则紧随其后的 `notebook_edit`
+    /// 回归：读完之后必须登记 read state，否则紧随其后的 `NotebookEdit`
     /// 必然被 `[edit_file_not_read]` 拦下 —— 而"先 notebook_read 再
-    /// notebook_edit"正是 `notebook_edit` 的工具说明要求模型走的路径。
+    /// notebook_edit"正是 `NotebookEdit` 的工具说明要求模型走的路径。
     ///
     /// 修复前 `NotebookReadTool` 压根没有 `GlobalState`，这条路径 100% 走不通。
     #[tokio::test]

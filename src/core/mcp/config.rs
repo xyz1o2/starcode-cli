@@ -4,7 +4,7 @@
 //!
 //! starcode 原来只读 `.star/mcp.json`（项目级）。但绝大多数 MCP server 是
 //! **用户级**的 —— 用户在 Claude Code / Cursor / Codex 里配一次，到哪都能用。
-//! 只读项目级文件的后果是：用户明明配了 `exa`，`tool_search` 却永远搜不到
+//! 只读项目级文件的后果是：用户明明配了 `exa`，`ToolSearch` 却永远搜不到
 //! `mcp__exa__*`，因为这些 server 压根没进 registry。
 //!
 //! 对标 Claude Code 的三档作用域（见 `docs/claude-code-alignment.md` §1.7）：

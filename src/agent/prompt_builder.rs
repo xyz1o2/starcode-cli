@@ -268,7 +268,7 @@ impl PromptBuilder {
     /// - 模板类文件（scope-strategy / complexity-strategies / token-budget-warning /
     ///   conversation-summary / auto-plan-injection / planner-system 等）都在各自的
     ///   渲染点单独加载，原文进 system 纯属噪音；
-    /// - 长尾工具的使用说明由 `tool_search` 的 `select:<name>` 模式动态加载，
+    /// - 长尾工具的使用说明由 `ToolSearch` 的 `select:<name>` 模式动态加载，
     ///   随 tool result 下发（消息尾部），不进缓存前缀 —— 若按短名单 active 过滤，
     ///   每发现一个工具 system 前缀就漂移一次，击穿 prompt 缓存。
     ///

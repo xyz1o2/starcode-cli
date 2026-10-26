@@ -1,4 +1,4 @@
-//! `tool_search`：长尾工具的发现入口。
+//! `ToolSearch`：长尾工具的发现入口。
 //!
 //! 对标 Claude Code 的 `SearchExtraTools`，补齐三处差距：
 //! 1. **分词加权检索**。旧实现拿整条 query 去做子串匹配，"find a tool to create a
@@ -54,7 +54,7 @@ fn discovered_state() -> &'static Mutex<DiscoveredTools> {
     STATE.get_or_init(|| Mutex::new(DiscoveredTools::default()))
 }
 
-/// 记录本次会话中被 `tool_search` 命中的工具名（按发现顺序，重复项提升到最新）。
+/// 记录本次会话中被 `ToolSearch` 命中的工具名（按发现顺序，重复项提升到最新）。
 pub fn record_discovered_tools(names: &[String]) {
     let Ok(mut state) = discovered_state().lock() else {
         return;
@@ -286,6 +286,9 @@ impl ToolSearchTool {
         }
 
         let wanted = name.to_lowercase();
+        // 折叠下划线后的候选：模型可能照着旧的下划线写法来 select。
+        // 只作为兜底，且要求唯一命中 —— 多个候选时仍然列出来让模型选。
+        let wanted_folded = wanted.replace('_', "");
         let candidates: Vec<Hit> = self
             .registry
             .get_all_tool_entries()
@@ -295,6 +298,7 @@ impl ToolSearchTool {
                 tool_name == wanted
                     || tool_name.ends_with(&format!("__{}", wanted))
                     || tool_name.ends_with(&format!("_{}", wanted))
+                    || tool_name.replace('_', "") == wanted_folded
             })
             .map(|(tool_name, description, schema)| Hit {
                 name: tool_name,
@@ -393,7 +397,7 @@ fn render_schema(schema: &serde_json::Value) -> String {
 
 impl BaseDeclarativeTool for ToolSearchTool {
     fn name(&self) -> &str {
-        "tool_search"
+        "ToolSearch"
     }
 
     fn display_name(&self) -> &str {
@@ -711,7 +715,7 @@ mod tests {
         vec![
             entry("git_branch", "Create, rename or delete a git branch."),
             entry(
-                "git_rewind",
+                "GitRewind",
                 "Restore the working tree to an earlier checkpoint.",
             ),
             entry(

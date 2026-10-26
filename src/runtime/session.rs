@@ -1226,8 +1226,8 @@ pub async fn apply_deferred_runtime_actions(
                 // After tool execution, check if mode was changed by on_confirm callback.
                 // The on_confirm callback sets mode via tokio::spawn, so we wait briefly
                 // and then broadcast the current state to UI.
-                if tool_call.function.name == "enter_plan_mode"
-                    || tool_call.function.name == "exit_plan_mode"
+                if tool_call.function.name == "EnterPlanMode"
+                    || tool_call.function.name == "ExitPlanMode"
                 {
                     // Give the async on_confirm callback time to execute
                     // Use multiple yields to ensure the spawned task completes

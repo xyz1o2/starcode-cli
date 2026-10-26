@@ -100,7 +100,7 @@ impl ToolInvocation for BriefInvocation {
 
 impl BaseDeclarativeTool for BriefTool {
     fn name(&self) -> &str {
-        "brief"
+        "Brief"
     }
 
     fn display_name(&self) -> &str {

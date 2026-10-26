@@ -34,7 +34,7 @@ impl SkillPrefetchManager {
 
                     // 基于关键词预测
                     if content_lower.contains("test") || content_lower.contains("run") {
-                        predictions.push("run_tests".to_string());
+                        predictions.push("RunTests".to_string());
                     }
 
                     if content_lower.contains("git") || content_lower.contains("commit") {

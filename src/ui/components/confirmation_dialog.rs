@@ -148,7 +148,7 @@ fn render_edit_diff_preview(diff: &str, wrap_width: usize) -> Vec<Line<'static>>
     lines
 }
 
-/// 生成编辑类工具（`Edit` / `smart_edit`）审批卡里的 diff 预览。
+/// 生成编辑类工具（`Edit` / `SmartEdit`）审批卡里的 diff 预览。
 ///
 /// **不能按行号逐行对比。** 那是位置对齐：插入或删除一行之后，后面所有行
 /// 都会"错位"，于是每一行都被标成先删后加 —— 一张几百行的假 diff，实际
@@ -945,7 +945,7 @@ pub async fn build_confirmation_from_tool_call(
     };
 
     match name {
-        "exit_plan_mode" => {
+        "ExitPlanMode" => {
             let plan = get_str(&["plan"]).unwrap_or_else(|| {
                 i18n::t("ui.confirm.msg.empty_plan", "（空计划）", "(empty plan)")
             });
@@ -955,7 +955,7 @@ pub async fn build_confirmation_from_tool_call(
                 plan
             };
             crate::types::ToolConfirmation {
-                tool_name: "exit_plan_mode".to_string(),
+                tool_name: "ExitPlanMode".to_string(),
                 operation_type: crate::types::ConfirmationType::ShellCommand,
                 details: crate::types::ConfirmationDetails::ShellCommand {
                     command: preview,
@@ -993,7 +993,7 @@ pub async fn build_confirmation_from_tool_call(
                 outcome: None,
             }
         }
-        "smart_edit" => {
+        "SmartEdit" => {
             let path = get_str(&["file_path", "path", "target_file"])
                 .unwrap_or_else(|| "unknown".to_string());
             let old_str =

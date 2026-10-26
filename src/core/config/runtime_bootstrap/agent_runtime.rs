@@ -43,7 +43,7 @@ fn register_agent_editing_tools(
 
     use crate::core::tools::notebook_read::NotebookReadTool;
     // 必须传 global_state：没有它 notebook_read 无从登记 read state，而
-    // notebook_edit 的前置检查会因此永远为真，`notebook_read` → `notebook_edit`
+    // notebook_edit 的前置检查会因此永远为真，`NotebookRead` → `NotebookEdit`
     // 这条被工具说明写死的路径 100% 被 [edit_file_not_read] 拦下。
     tool_registry.register_tool(Arc::new(NotebookReadTool::new(
         config.clone(),
@@ -116,7 +116,7 @@ fn register_agent_execution_tools(
     use crate::core::tools::exit_plan_mode::ExitPlanModeTool;
     // exit_plan_mode 同样由 CoreRuntime 层按门控注册；仅在缺失时兜底补齐，
     // 保证 headless / 精简装配路径下仍能退出 Plan 模式。
-    if tool_registry.get_tool("exit_plan_mode").is_none() {
+    if tool_registry.get_tool("ExitPlanMode").is_none() {
         tool_registry.register_tool(Arc::new(ExitPlanModeTool::new(
             config.clone(),
             message_bus.clone(),
@@ -344,9 +344,9 @@ fn ensure_fallback_core_tools(
     }
 
     // Other important tools
-    if !tool_names.iter().any(|name| name == "read_many_files") {
+    if !tool_names.iter().any(|name| name == "ReadManyFiles") {
         crate::utils::logging::append_debug_log_line(
-            "read_many_files missing, attempting manual registration.",
+            "ReadManyFiles missing, attempting manual registration.",
         );
         use crate::core::tools::read_many::ReadManyFilesTool;
         tool_registry.register_tool(Arc::new(ReadManyFilesTool::new(
@@ -354,7 +354,7 @@ fn ensure_fallback_core_tools(
             global_state.clone(),
         )));
     }
-    if !tool_names.iter().any(|name| name == "ListDir") {
+    if !tool_names.iter().any(|name| name == "LS") {
         crate::utils::logging::append_debug_log_line(
             "ListDir (ListDirTool) missing, attempting manual registration.",
         );

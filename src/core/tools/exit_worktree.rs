@@ -22,7 +22,7 @@ impl ExitWorktreeTool {
 
 impl BaseDeclarativeTool for ExitWorktreeTool {
     fn name(&self) -> &str {
-        "exit_worktree"
+        "ExitWorktree"
     }
 
     fn display_name(&self) -> &str {

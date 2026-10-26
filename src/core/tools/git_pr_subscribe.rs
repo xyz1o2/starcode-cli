@@ -136,7 +136,7 @@ async fn get_pr_state(repo: &str, pr_number: u64) -> String {
 
 impl BaseDeclarativeTool for GitPrSubscribeTool {
     fn name(&self) -> &str {
-        "git_pr_subscribe"
+        "GitPrSubscribe"
     }
 
     fn display_name(&self) -> &str {

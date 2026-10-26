@@ -109,7 +109,7 @@ impl ToolInvocation for GitCommitAttributionInvocation {
 
 impl BaseDeclarativeTool for GitCommitAttributionTool {
     fn name(&self) -> &str {
-        "git_commit_attribution"
+        "GitCommitAttribution"
     }
 
     fn display_name(&self) -> &str {

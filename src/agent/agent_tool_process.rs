@@ -136,12 +136,12 @@ impl Agent {
                 *project_map_attempted = true;
             }
             if tool_calls.iter().any(|tc| {
-                tc.function.name == "skill" && tc.function.arguments.contains("\"navigator\"")
+                tc.function.name == "Skill" && tc.function.arguments.contains("\"navigator\"")
             }) {
                 *navigator_skill_attempted = true;
             }
             if tool_calls.iter().any(|tc| {
-                tc.function.name == "skill"
+                tc.function.name == "Skill"
                     && (tc.function.arguments.contains("\"analyzer\"")
                         || tc.function.arguments.contains("\"task_type\":\"analyze\""))
             }) {
@@ -673,7 +673,7 @@ impl Agent {
         // 模型看到的正文优先用 `llm_content`：那是工具专门写给模型的一份
         // （工具名清单、参数 schema、使用说明），而 `output` 只是给人看的一行
         // 摘要。两者不同时，只发 `output` 等于把发现结果整个丢掉 ——
-        // `tool_search` 就是这样让模型拿到 "Found 3 tool(s)" 却不知道是哪三个。
+        // `ToolSearch` 就是这样让模型拿到 "Found 3 tool(s)" 却不知道是哪三个。
         let tool_msg_content = tool_helpers::llm_facing_content(&result);
         messages.push(StarMessage::tool(
             tool_call.id.clone(),

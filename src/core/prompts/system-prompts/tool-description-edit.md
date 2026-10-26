@@ -6,7 +6,7 @@ routing: edit-one
 Performs exact string replacements in files.
 
 **Use for**: modifying existing code, renaming symbols, fixing bugs.
-**NOT for**: creating new files (use `Write`), bulk rewrites (use `multi_edit`).
+**NOT for**: creating new files (use `Write`), bulk rewrites (use `MultiEdit`).
 
 **Rules**:
 - MUST read file first — edit fails on unread files

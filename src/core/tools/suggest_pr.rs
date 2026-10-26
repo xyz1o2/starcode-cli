@@ -184,7 +184,7 @@ impl ToolInvocation for SuggestPRInvocation {
 
 impl BaseDeclarativeTool for SuggestBackgroundPRTool {
     fn name(&self) -> &str {
-        "suggest_pr"
+        "SuggestPr"
     }
 
     fn display_name(&self) -> &str {

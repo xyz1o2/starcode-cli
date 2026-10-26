@@ -3,7 +3,7 @@ use crate::types::{StarToolCall, ToolResult};
 
 fn validation_failure_summary(tool_name: &str, result: &ToolResult) -> Option<String> {
     let lower = tool_name.to_lowercase();
-    if lower.contains("run_tests") {
+    if lower.contains("runtests") {
         return run_tests_failure_summary(result);
     }
     if lower.contains("diagnostics") {

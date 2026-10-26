@@ -8,7 +8,7 @@
 ///
 /// 使用的工具：
 /// - search (ripgrep)
-/// - Read / read_many_files
+/// - Read / ReadManyFiles
 /// - grep
 use super::{SubAgent, SubTask, SubTaskResult};
 use crate::agent::StarAgent;

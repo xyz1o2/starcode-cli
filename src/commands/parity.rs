@@ -1369,7 +1369,7 @@ pub async fn issue(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRes
 
 /// `/subscribe-pr [<pr> | rm <pr>]` — 订阅 PR 状态跟踪。
 ///
-/// 与 `git_pr_subscribe` 工具共用 `.star/pr_subscriptions/`，纯本地记录，
+/// 与 `GitPrSubscribe` 工具共用 `.star/pr_subscriptions/`，纯本地记录，
 /// 不改动 GitHub 上的通知设置。
 pub async fn subscribe_pr(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     let dir = star_dir()?.join("pr_subscriptions");

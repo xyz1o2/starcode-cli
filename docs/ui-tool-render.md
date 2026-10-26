@@ -93,7 +93,7 @@ Span::raw(")")
 |---|---|---|
 | `view_file` / `Read` | `Read N lines`（N = output 行数） | FileReadTool/UI.tsx text 分支 |
 | `Grep` / `search_file_content` / `grep_search` | `Found N matches`（N = 非空行数；行多为 `path:ln:text`） | SearchResultSummary |
-| `find_by_name` / `list_directory` / `ListDir` | `Found N files`（N = 非空行数） | Glob/文件列表 |
+| `find_by_name` / `list_directory` / `LS` | `Found N files`（N = 非空行数） | Glob/文件列表 |
 | 其他工具 | 维持现 8 行预览逻辑不变 | OutputLine 的 3 行预览精神 |
 
 - 摘要行后追加 dim 提示 ` (Tab to expand)`（对标 `ctrl+o to expand`），仅当有内容可展开。

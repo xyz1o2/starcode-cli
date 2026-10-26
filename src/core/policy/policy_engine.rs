@@ -194,7 +194,7 @@ impl PolicyEngine {
                 // Plan 模式只放只读工具和 exit_plan_mode。重新进入 plan 模式没意义，
                 // 还会把 agent 困在 enter/exit 循环里，准备好了就用 exit_plan_mode。
                 let is_safe = crate::types::is_safe_query_tool(&tool_call.name);
-                let is_exit = tool_call.name == "exit_plan_mode";
+                let is_exit = tool_call.name == "ExitPlanMode";
                 return CheckResult {
                     decision: if is_safe || is_exit {
                         PolicyDecision::Allow
@@ -544,7 +544,7 @@ mod tests {
     #[tokio::test]
     async fn default_mode_allows_read_only_tools_without_asking() {
         let engine = engine_in(ApprovalMode::Default);
-        for tool in ["Read", "Grep", "Glob", "ListDir", "TodoWrite"] {
+        for tool in ["Read", "Grep", "Glob", "LS", "TodoWrite"] {
             let result = engine
                 .check(
                     &call(tool, serde_json::json!({"file_path": "src/main.rs"})),

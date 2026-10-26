@@ -187,7 +187,7 @@ impl ToolInvocation for RemoteTriggerInvocation {
 
 impl BaseDeclarativeTool for RemoteTriggerTool {
     fn name(&self) -> &str {
-        "remote_trigger"
+        "RemoteTrigger"
     }
 
     fn display_name(&self) -> &str {

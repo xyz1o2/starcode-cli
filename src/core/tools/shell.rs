@@ -32,7 +32,7 @@ Usage notes:
    - Capture output is automatic.
 3. Restrictions:
    - AVOID using `find`, `grep`, `Select-String` for searching. Use `Grep` or `Glob`.
-   - AVOID using `cat`, `type`, `gc` (Get-Content) to read files. Use `Read` or `read_many_files`.
+   - AVOID using `cat`, `type`, `gc` (Get-Content) to read files. Use `Read` or `ReadManyFiles`.
    - Maintain current working directory; use absolute paths where possible.
 "#;
 
@@ -46,7 +46,7 @@ Usage notes:
    - Capture output is automatic.
 3. Restrictions:
    - AVOID using `find`, `grep` for searching. Use `Grep` or `Glob`.
-   - AVOID using `cat`, `head`, `tail` to read files. Use `Read` or `read_many_files`.
+   - AVOID using `cat`, `head`, `tail` to read files. Use `Read` or `ReadManyFiles`.
    - Maintain current working directory; use absolute paths where possible.
 "#;
 
@@ -647,7 +647,7 @@ fn check_tool_substitution(
     let cmd_parts: Vec<&str> = command.split_whitespace().collect();
     let cmd_lower = cmd_parts.first()?.to_lowercase();
 
-    if cmd_lower == "Grep" || cmd_lower == "egrep" || cmd_lower == "fgrep" {
+    if cmd_lower == "grep" || cmd_lower == "egrep" || cmd_lower == "fgrep" {
         return Some(crate::core::tools::tools::ToolCallConfirmationDetails {
             confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
             title: "Tool Substitution Suggestion".to_string(),
@@ -676,11 +676,11 @@ fn check_tool_substitution(
         });
     }
 
-    if cmd_lower == "ListDir" && (command.contains("-R") || command.contains("/s")) {
+    if cmd_lower == "ls" && (command.contains("-R") || command.contains("/s")) {
         return Some(crate::core::tools::tools::ToolCallConfirmationDetails {
             confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
             title: "Tool Substitution Suggestion".to_string(),
-            prompt: "Use the 'ListDir' tool for recursive or detailed directory listing. It provides file types and sizes in a parsed format.".to_string(),
+            prompt: "Use the 'LS' tool for recursive or detailed directory listing. It provides file types and sizes in a parsed format.".to_string(),
             on_confirm: std::sync::Arc::new(|_, _feedback| {}),
         });
     }
