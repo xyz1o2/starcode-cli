@@ -264,7 +264,11 @@ fn build_request(
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok());
     let max_tokens = match thinking.max_tokens {
-        Some(need) => Some(env_max_tokens.filter(|configured| *configured > need).unwrap_or(need)),
+        Some(need) => Some(
+            env_max_tokens
+                .filter(|configured| *configured > need)
+                .unwrap_or(need),
+        ),
         None => {
             if matches!(profile.kind, crate::llm::thinking::ProviderKind::Anthropic) {
                 Some(env_max_tokens.unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS))
