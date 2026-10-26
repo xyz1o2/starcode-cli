@@ -13,6 +13,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 /// Cached search engine with validity signal (mtime of index.json).
@@ -59,6 +60,29 @@ pub struct SearchEngineCacheManager {
     engine_cache: RwLock<HashMap<(PathBuf, String), CachedSearchEngine>>,
     /// LRU query result cache, keyed by (canonical_root, query, index_mtime).
     query_cache: RwLock<LruCache<(PathBuf, String, Option<SystemTime>), String>>,
+}
+
+/// 进程级共享的搜索引擎缓存。
+///
+/// 以前 `SearchEngineCacheManager` 在 `ContextEngine::new()` 里创建，
+/// 而 `CodebaseSearchTool` 在 runtime_bootstrap 里**独立**创建自己的一份 ——
+/// 两边不是同一个对象。于是：
+/// - watcher 把建好的索引写进 **它那份** cache
+/// - `CodebaseSearchTool` 去读 **自己那份**（永远是空的）
+///
+/// 结果是 `with_cache` 零调用者、`search_cache` 恒为 `None`，
+/// `resolve_engine` 每次都走「无缓存 → 同步全量构建」——
+/// 每次检索重建 851 个文件、10 MB，实测 11 秒；
+/// 而 serve-stale-while-rebuild、增量索引、`is_engine_ready` 全部形同虚设。
+///
+/// 改成进程级单例后，watcher 与工具指向同一个 manager，
+/// 索引只建一次，两边都能读到。
+static SHARED_SEARCH_CACHE: std::sync::LazyLock<Arc<SearchEngineCacheManager>> =
+    std::sync::LazyLock::new(|| Arc::new(SearchEngineCacheManager::new()));
+
+/// 取进程级共享的搜索引擎缓存。
+pub fn shared_search_cache() -> Arc<SearchEngineCacheManager> {
+    SHARED_SEARCH_CACHE.clone()
 }
 
 impl SearchEngineCacheManager {

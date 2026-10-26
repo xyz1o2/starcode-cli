@@ -20,6 +20,7 @@ pub mod management;
 pub mod precise_retrieval;
 pub mod reflector;
 pub mod reranker;
+pub mod retrieval_baseline;
 pub mod search_cache;
 pub mod search_engine;
 pub mod selection;

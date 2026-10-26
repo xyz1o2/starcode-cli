@@ -188,6 +188,20 @@ Two narrow folding rules exist, and neither accepts the old snake_case spelling:
 
 Implementations are split between `src/core/tools/` (~60 files) and `src/tools/` (bash, search, todo, git_insight, lsp, …). Presence in the tree does not mean a tool is live — see "Not everything is wired up".
 
+### Code retrieval (`CodebaseSearch`)
+
+The context engine lives in `src/core/context/` (~9k lines). `docs/context-search-benchmark.md` is the Augment Code × Windsurf FastContext comparison — read it before changing anything here; it records what each design does and why.
+
+**Retrieval is lexical, not semantic.** `SearchEngine` is a BM25-style inverted index over tree-sitter AST chunks (`chunking.rs` → `tree_sitter_chunker.rs`), with three recall paths fused by RRF (`fusion.rs`): co-occurrence-expanded lexical, exact lexical, and literal ripgrep. There is **no embedding** anywhere in the tree, so cross-language recall (Chinese question → English identifier) does not work — only Chinese→Chinese does, via CJK bigram tokenization.
+
+Three things here were broken and are now guarded by tests:
+
+- **The search cache must be the shared singleton.** `search_cache::shared_search_cache()` is process-wide; the watcher and `CodebaseSearchTool` must point at the *same* instance. They used to be two separate objects (`ContextEngine`'s vs the tool's own `None`), so the watcher built the index in the background and the tool never saw it — every search fell back to a synchronous full rebuild (11.9s). Now: 2.3s for a new query, 3ms for a repeated one.
+- **Stopwords must not enter the index.** Without them `the`/`is`/`in` appear hundreds of times per file and `tf × idf` buries the real matches — the top hit for `permission gate` reported `an, and, docs, in, is, it…` as its matched terms.
+- **CJK needs bigram tokenization.** Chinese has no spaces, so the whole phrase used to become one token: 错误处理 → `["错误处理"]`, and searching 错误 could never reach `handle_error`.
+
+The auto-trigger gate (`should_trigger_codebase_search_with_flag`) deliberately checks only `enabled && !attempted && tool_present`; the *scoring* lives in `score_rank_locate_route`, which decides the query shape. Concept markers ("why", "explain") are a **score penalty, not a veto** — 「为什么 X 这么设计」 is exactly the kind of question that needs a cross-file search. On a cold index the first call returns `Warming` (empty); the agent now waits for the index and re-runs the search itself rather than hoping the model retries.
+
 ### Prompts and tool descriptions are `.md`, not Rust
 
 `src/core/prompts/system-prompts/` holds 85 markdown files embedded at compile time via `rust_embed` (`SystemPrompts`) and overridable at runtime: `STAR_PROMPT_DIR` > `~/.starcode/prompts/` > `./.star/prompts/` > embedded, with mtime-based cache invalidation (`src/core/prompts/loader.rs`). 68 are `tool-description-*.md`; per `tool_descriptions.rs`, the frontmatter `description:` becomes the schema description sent to the LLM while the file body joins the system prompt bundle. **To change what the model is told about a tool, edit the `.md`** — the registry-name → file-key mapping is a hand-maintained `HashMap` in that file.

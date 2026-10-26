@@ -908,6 +908,51 @@ impl Agent {
                         Some(&mut satisfied),
                     )
                     .await;
+
+                // 冷启动补跑：首查拿到的是 Warming（空结果）时，**框架自己**
+                // 等索引就绪后重跑一次。
+                //
+                // 不这么做的后果很具体：自动触发那一次几乎必然空手而归，而
+                // "稍后重跑"要靠模型自觉 —— 模型看到空结果多半就认定
+                // "这个功能不存在"，改用别的工具或者直接猜。整条自动检索
+                // 链路等于白跑一次，还烧掉一个回合。
+                //
+                // 这里等的是 watcher 的就绪信号，不是盲目 sleep：索引建完
+                // `is_engine_ready()` 立刻为真，延迟通常在一秒以内。
+                if !satisfied {
+                    let wait_budget = std::time::Duration::from_millis(
+                        std::env::var("STAR_CODEBASE_SEARCH_WARMUP_WAIT_MS")
+                            .ok()
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(8_000),
+                    );
+                    let ready =
+                        crate::core::tools::codebase_search::wait_for_index_ready(wait_budget)
+                            .await;
+                    crate::utils::logging::append_debug_log_line(&format!(
+                        "[ACE_AUTO] CodebaseSearch cold-start warmup wait ready={ready} waited_ms={} turn={current_turn}",
+                        wait_budget.as_millis()
+                    ));
+                    if ready {
+                        // 重跑要用新的 tool_call id —— 同一个 id 出现两次，
+                        // 消息流里就是两个同 id 的 tool call，很多下游按 id 配对
+                        // （tool_result ↔ tool_call）会认错。
+                        let mut retry_satisfied = false;
+                        let retry_call = build_codebase_search_tool_call(user_input, current_turn);
+                        self.run_auto_trigger_tool(
+                            user_input,
+                            messages,
+                            retry_call,
+                            verification_required,
+                            skip_verification,
+                            loop_state,
+                            Some(&mut retry_satisfied),
+                        )
+                        .await;
+                        satisfied = retry_satisfied;
+                    }
+                }
+
                 *codebase_search_attempted = satisfied;
                 crate::utils::logging::append_debug_log_line(&format!(
                     "[ACE_AUTO] CodebaseSearch auto-run satisfied={satisfied} turn={current_turn}"

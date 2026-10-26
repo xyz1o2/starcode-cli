@@ -35,6 +35,46 @@ mod weights {
 
     // ── Indexing ─────────────────────────────────────────────────────────────
     pub const MIN_TOKEN_LEN: usize = 2;
+
+    /// 英文停用词 —— 不进倒排表。
+    ///
+    /// 以前没有停用词表，于是 `the` `is` `in` `and` `an` `it` 这些词全都
+    /// 进了索引。它们的 IDF 本该很低（几乎每个文件都有），但**数量巨大**：
+    /// 一个 500 行的文件里 `the` 可能出现 200 次，tf 一乘就把分数带跑了。
+    ///
+    /// 实测症状：搜「permission gate」，排第一的结果 `Matched terms` 是
+    /// `an, and, docs, in, is, it, no, permission, rs, star, to, with` ——
+    /// 十二个匹配词里十个是噪声。
+    ///
+    /// 中英文各自的虚词表分开维护：英文停用词不能误伤中文，
+    /// 中文虚词也不能误伤英文标识符。
+    pub const EN_STOPWORDS: &[&str] = &[
+        "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can", "did", "do", "does",
+        "for", "from", "had", "has", "have", "he", "her", "here", "him", "his", "how", "i", "if",
+        "in", "into", "is", "it", "its", "me", "my", "no", "not", "of", "on", "or", "our", "out",
+        "over", "own", "s", "she", "should", "so", "some", "such", "than", "that", "the", "their",
+        "them", "then", "there", "these", "they", "this", "those", "to", "up", "very", "was", "we",
+        "were", "what", "when", "where", "which", "while", "who", "whom", "why", "will", "with",
+        "would", "you", "your", "us", "am", "been", "being", "does", "doing", "done", "each",
+        "few", "more", "most", "other", "same", "shall", "should", "some", "such", "only", "just",
+        "also", "any", "both", "because", "before", "between", "during", "through", "under",
+        "until", "against", "about", "above", "below", "down", "off", "again", "further", "then",
+        "once",
+    ];
+
+    /// 中文虚词 —— 单字与双字的高频功能词。
+    ///
+    /// 与英文停用词分开：中文虚词在代码里几乎不出现（代码标识符是英文），
+    /// 但**中文注释**里满是它们。不滤掉的话，查「在哪里」会把所有含
+    /// 「在」的注释都拉进来。
+    pub const CJK_STOPWORDS: &[&str] = &[
+        "的", "了", "和", "是", "在", "有", "我", "你", "他", "她", "它", "们", "这", "那", "哪",
+        "个", "什", "么", "怎", "么", "样", "吗", "呢", "吧", "啊", "与", "及", "或", "而", "但",
+        "却", "就", "都", "还", "也", "很", "太", "更", "最", "会", "能", "要", "把", "被", "给",
+        "让", "从", "到", "向", "对", "于", "为", "以", "其", "此", "该", "着", "过", "地", "得",
+        "之", "并", "且", "如", "若", "所", "因", "由", "请", "帮", "我", "想", "要", "看", "查",
+        "找", "下", "一下",
+    ];
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +184,19 @@ impl SearchEngine {
     }
 
     /// 该路径是否已在索引中。
+    /// 取某个文件的所有 chunk。
+    ///
+    /// 字面召回通道需要它：ripgrep 命中的是**文件**，而检索结果是**块**。
+    /// 没有这个转换，字面命中但语义没召回的文件就只能带一个空块进结果 ——
+    /// 那等于没有召回。
+    pub fn document_chunks(&self, path: &str) -> Vec<CodeChunk> {
+        self.path_to_doc
+            .get(path)
+            .and_then(|doc_id| self.documents.get(*doc_id))
+            .map(|entry| entry.chunks.clone())
+            .unwrap_or_default()
+    }
+
     pub fn contains_document(&self, path: &str) -> bool {
         self.path_to_doc.contains_key(path)
     }
@@ -634,21 +687,116 @@ impl SearchEngine {
     fn tokenize(&self, text: &str) -> Vec<String> {
         let mut out = HashSet::new();
         for raw in text.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-') {
-            let raw_lower = raw.to_lowercase();
-            Self::push_token(&mut out, &raw_lower);
-
-            for part in raw_lower.split(['_', '-']) {
-                Self::push_token(&mut out, part);
+            // CJK 连续段单独处理：中文没有空格，整段会被切成**一个** token
+            // （「错误处理」→ `["错误处理"]`）。于是查「错误」时，代码里写的是
+            // `handle_error` 就永远命中不了 —— 跨语言召回直接归零。
+            //
+            // 这里用 bigram + 单字切分，不需要词典也不需要外部依赖：
+            // 「错误处理」→ `错误` `误处` `处理` + `错` `误` `处` `理`。
+            // bigram 承载主要的区分度，单字兜住「处」这种单独出现的字。
+            let (cjk_parts, non_cjk) = Self::split_cjk(raw);
+            for part in cjk_parts {
+                Self::push_cjk_tokens(&mut out, &part);
             }
 
-            for part in Self::split_camel_case(raw) {
-                Self::push_token(&mut out, &part);
+            for part in non_cjk {
+                let part_lower = part.to_lowercase();
+                Self::push_token(&mut out, &part_lower);
+
+                for sub in part_lower.split(['_', '-']) {
+                    Self::push_token(&mut out, sub);
+                }
+
+                for sub in Self::split_camel_case(&part) {
+                    Self::push_token(&mut out, &sub);
+                }
             }
         }
+
+        Self::strip_stopwords(&mut out);
 
         let mut tokens: Vec<String> = out.into_iter().collect();
         tokens.sort();
         tokens
+    }
+
+    /// 把一段文本拆成「CJK 连续段」与「非 CJK 段」。
+    ///
+    /// CJK 判定覆盖中日韩表意文字与假名 —— 这些语言都不靠空格分词，
+    /// 拉丁字母与数字则继续走原来的按分隔符 + camelCase 的路径。
+    fn split_cjk(text: &str) -> (Vec<String>, Vec<String>) {
+        let mut cjk = Vec::new();
+        let mut other = Vec::new();
+        let mut current = String::new();
+        // 当前累积段是不是 CJK 段 —— 收尾时要按它决定 push 到哪一边
+        let mut current_is_cjk = false;
+
+        for ch in text.chars() {
+            let is_cjk = Self::is_cjk_char(ch);
+            if is_cjk != current_is_cjk {
+                if !current.is_empty() {
+                    if current_is_cjk {
+                        cjk.push(std::mem::take(&mut current));
+                    } else {
+                        other.push(std::mem::take(&mut current));
+                    }
+                }
+                current_is_cjk = is_cjk;
+            }
+            current.push(ch);
+        }
+        if !current.is_empty() {
+            if current_is_cjk {
+                cjk.push(current);
+            } else {
+                other.push(current);
+            }
+        }
+        (cjk, other)
+    }
+
+    /// 该字符是否属于「需要按字切分」的语言。
+    fn is_cjk_char(ch: char) -> bool {
+        matches!(ch as u32,
+            0x3040..=0x30FF   // 平假名 / 片假名
+            | 0x3400..=0x4DBF // 扩展 A
+            | 0x4E00..=0x9FFF // 基本区
+            | 0xF900..=0xFAFF // 兼容表意文字
+            | 0xAC00..=0xD7AF // 谚文音节
+            | 0x20000..=0x2A6DF // 扩展 B
+        )
+    }
+
+    /// 把一段 CJK 文本切成检索 token。
+    ///
+    /// 同时产出三种形态：
+    /// - **整串**（「错误处理」）—— 原文里就这么写时精确命中
+    /// - **bigram**（「错误」「误处」「处理」）—— 主要的区分度来源
+    /// - **单字**（「错」「误」…）—— 兜住只出现一次的字
+    ///
+    /// 单字让索引膨胀得厉害，所以只有整串本身够长时才额外产出单字。
+    fn push_cjk_tokens(tokens: &mut HashSet<String>, text: &str) {
+        let chars: Vec<char> = text.chars().collect();
+        if chars.is_empty() {
+            return;
+        }
+
+        // 整串
+        tokens.insert(text.to_string());
+
+        // bigram
+        if chars.len() >= 2 {
+            for window in chars.windows(2) {
+                tokens.insert(window.iter().collect());
+            }
+        }
+
+        // 单字（仅长串才补，避免短词的噪声淹没倒排表）
+        if chars.len() >= 3 {
+            for ch in &chars {
+                tokens.insert(ch.to_string());
+            }
+        }
     }
 
     fn push_token(tokens: &mut HashSet<String>, token: &str) {
@@ -656,6 +804,22 @@ impl SearchEngine {
         if token.chars().count() >= weights::MIN_TOKEN_LEN {
             tokens.insert(token.to_string());
         }
+    }
+
+    /// 该 token 是否是停用词（英文虚词 / 中文虚词）。
+    fn is_stopword(token: &str) -> bool {
+        weights::EN_STOPWORDS.contains(&token) || weights::CJK_STOPWORDS.contains(&token)
+    }
+
+    /// 从 token 集合里剔除停用词。
+    ///
+    /// **整集合都是停用词时原样保留** —— 否则查「the」或「是什么」
+    /// 会得到空查询，直接零命中。宁可召回一堆噪声，也好过没有结果。
+    fn strip_stopwords(tokens: &mut HashSet<String>) {
+        if tokens.iter().all(|t| Self::is_stopword(t)) {
+            return;
+        }
+        tokens.retain(|t| !Self::is_stopword(t));
     }
 
     fn split_camel_case(raw: &str) -> Vec<String> {
@@ -765,6 +929,70 @@ mod tests {
             end_line: 1,
             context_header: None,
         }
+    }
+
+    /// CJK 分词：整串 + bigram + 单字。
+    ///
+    /// 中文没有空格，整段被切成**一个** token 是字法检索最大的短板 ——
+    /// 「错误处理」和「错误」互相搜不到。Bigram 是无词典方案里区分度最高的
+    /// 切法：既不引入外部依赖，也不会像单字那样把倒排表撑爆。
+    #[test]
+    fn cjk_text_is_split_into_bigrams_and_singles() {
+        let engine = SearchEngine::new();
+        let tokens = engine.tokenize("错误处理");
+
+        // 整串保留 —— 原文里就这么写时能精确命中
+        assert!(tokens.contains(&"错误处理".to_string()));
+        // bigram —— 主要区分度来源
+        assert!(tokens.contains(&"错误".to_string()));
+        assert!(tokens.contains(&"处理".to_string()));
+        assert!(tokens.contains(&"误处".to_string()));
+        // 单字 —— 兜住只出现一次的字
+        assert!(tokens.contains(&"错".to_string()));
+    }
+
+    /// 两字词不该炸出单字噪声。
+    ///
+    /// 「限流」只出 `限流`：单字 `限`/`流` 在代码里到处都是，放进倒排表
+    /// 只会让所有中文查询都命中一大片无关 chunk。
+    #[test]
+    fn short_cjk_terms_do_not_produce_single_char_noise() {
+        let engine = SearchEngine::new();
+        let tokens = engine.tokenize("限流");
+        assert_eq!(tokens, vec!["限流".to_string()]);
+    }
+
+    /// 英文分词路径不能被 CJK 改动影响。
+    ///
+    /// 这条是回归防线：CJK 支持是加法，不是替换 —— 原来的
+    /// 「按分隔符切 + 拆 snake_case + 拆 camelCase」必须一字不改。
+    #[test]
+    fn ascii_tokenization_is_unchanged() {
+        let engine = SearchEngine::new();
+        let tokens = engine.tokenize("user authentication");
+        assert_eq!(
+            tokens,
+            vec!["authentication".to_string(), "user".to_string()]
+        );
+
+        let snake = engine.tokenize("handle_error");
+        assert!(snake.contains(&"handle".to_string()));
+        assert!(snake.contains(&"error".to_string()));
+        assert!(snake.contains(&"handle_error".to_string()));
+
+        let camel = engine.tokenize("parseConfig");
+        assert!(camel.contains(&"parse".to_string()));
+        assert!(camel.contains(&"config".to_string()));
+    }
+
+    /// 混合文本：中文段与英文段各走各的路径，不互相污染。
+    #[test]
+    fn mixed_script_text_splits_on_script_boundaries() {
+        let engine = SearchEngine::new();
+        let tokens = engine.tokenize("错误 handle_error");
+        assert!(tokens.contains(&"错误".to_string()));
+        assert!(tokens.contains(&"handle".to_string()));
+        assert!(tokens.contains(&"error".to_string()));
     }
 
     fn doc(engine: &mut SearchEngine, path: &str, words: &[&str]) {

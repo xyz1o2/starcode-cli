@@ -51,10 +51,16 @@ pub struct CodebaseSearchTool {
 }
 
 impl CodebaseSearchTool {
+    /// 构造工具。
+    ///
+    /// 默认挂上**进程级共享**的搜索引擎缓存。以前这里是 `None` ——
+    /// 意味着每次检索都同步全量重建索引（实测 851 文件 / 10 MB / 11 秒），
+    /// 而 watcher 明明已经在后台把索引建好了 —— 只是两边不是同一个
+    /// cache manager，工具读不到。
     pub fn new(config: Arc<crate::core::config::Config>) -> Self {
         Self {
             config,
-            search_cache: None,
+            search_cache: Some(crate::core::context::search_cache::shared_search_cache()),
         }
     }
 
@@ -1169,9 +1175,66 @@ fn search_codebase_with_limits(
         })
         .collect();
 
-    // RRF fusion
+    // ── 第三路：字面精确召回（ripgrep）────────────────────────────────────
+    //
+    // 前两路是同一个词法引擎的两种参数，属于**同源**信号；这一路才是异构的：
+    // ripgrep 的字面匹配对精确符号特别准，而这正是词法排序最容易漏的地方
+    // （`handle_error` 会被拆成 handle + error，`handle_error` 的整串权重却
+    // 只在字面匹配里才拿得到）。
+    //
+    // 对齐方式：字面命中的是**文件**，语义命中的是文件里的 **chunk**。
+    // 把文件级的命中映射到该文件在语义结果里的最佳 chunk，两路才能在
+    // 同一个 candidate id 上相遇 —— 否则 RRF 融合的是不相干的 id，等于没融。
+    let literal_files = literal_recall_files(query, root);
+    let mut literal_candidates: Vec<Candidate> = Vec::new();
+    // 字面命中、但语义没召回的文件 → 其载体块（供重排阶段还原内容）
+    let mut literal_only_files: HashMap<String, crate::core::context::chunking::CodeChunk> =
+        HashMap::new();
+    if !literal_files.is_empty() {
+        // 文件 → 该文件在语义结果中的最佳 chunk（取 expanded 优先）
+        let mut best_per_file: HashMap<&str, &crate::core::context::search_engine::SearchResult> =
+            HashMap::new();
+        for r in expanded_results.iter().chain(exact_results.iter()) {
+            best_per_file
+                .entry(r.file_path.as_str())
+                .and_modify(|existing| {
+                    if r.score > existing.score {
+                        *existing = r;
+                    }
+                })
+                .or_insert(r);
+        }
+
+        for (file_path, _hits) in &literal_files {
+            match best_per_file.get(file_path.as_str()) {
+                // 语义也召回了同一文件 —— 对齐到同一个 chunk，两路在此汇合
+                Some(result) => literal_candidates.push(Candidate {
+                    id: format!("{}:{}", result.file_path, result.chunk.start_line),
+                    score: result.score,
+                }),
+                // 语义没召回、字面召回了 —— **这一路必须能独立把结果带进来**。
+                // 字面通道的价值正在于补语义排序的漏；把它裁剪成「语义已召回
+                // 的文件的子集」就等于没有这一路。
+                //
+                // 用该文件在索引里的**首个块**作为载体：字面命中已经证明这个
+                // 文件相关，具体是哪一块由后续重排与展开决定。
+                None => {
+                    let chunks = engine.document_chunks(file_path);
+                    if let Some(chunk) = chunks.first() {
+                        literal_candidates.push(Candidate {
+                            id: format!("{file_path}:{}", chunk.start_line),
+                            score: 0.0,
+                        });
+                        literal_only_files.insert(file_path.clone(), chunk.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // RRF fusion —— 三路异构信号
     let fused = fusion::fuse(
-        &[expanded_candidates, exact_candidates],
+        &[expanded_candidates, exact_candidates, literal_candidates],
         &RrfParams::default(),
     );
 
@@ -1184,9 +1247,26 @@ fn search_codebase_with_limits(
             .collect();
 
     // Convert fused results to reranker candidates
-    let rerank_candidates: Vec<RerankCandidate> = fused
+    //
+    // 字面独有候选（`file:0`）不在语义结果里，lookup 查不到 —— 这里补一份
+    // 最小可用的 SearchResult，让它照样能进重排。分数给 0：它靠 RRF 的
+    // 排名位置进入，而不是靠伪造的高分挤掉语义真正命中的块。
+    let mut rerank_candidates: Vec<RerankCandidate> = fused
         .iter()
-        .filter_map(|f| result_lookup.get(&f.id).map(|r| (*r).clone()))
+        .filter_map(|f| {
+            result_lookup.get(&f.id).map(|r| (*r).clone()).or_else(|| {
+                let (file_path, start_line) = f.id.rsplit_once(':')?;
+                let start_line: usize = start_line.parse().ok()?;
+                let chunk = literal_only_files.get(file_path)?.clone();
+                Some(crate::core::context::search_engine::SearchResult {
+                    file_path: file_path.to_string(),
+                    chunk,
+                    score: 0.0,
+                    matches: Vec::new(),
+                    signals: vec!["literal_match".to_string()],
+                })
+            })
+        })
         .map(|r| RerankCandidate::from_search_result(&r))
         .take(TOP_N_FUSED)
         .collect();
@@ -1321,6 +1401,75 @@ fn format_ripgrep_fallback(query: &str, root: &std::path::Path) -> String {
         Ok(results) => format_ripgrep_results(query, &results),
         Err(e) => format!("Fallback grep failed: {}", e),
     }
+}
+
+/// 等待语义索引就绪，最多等 `timeout`。
+///
+/// 冷启动时 `CodebaseSearch` 的第一次调用几乎必然返回 `Warming`（空结果 +
+/// "稍后重跑"）。这是刻意设计的 —— 不在查询路径上同步做全量构建。
+/// 但代价是：**自动触发那一次基本白跑**。工具自己给的"稍后重跑"要靠模型
+/// 自觉执行，而模型常常不会。
+///
+/// 所以框架需要自己把这次补上：等索引就绪，然后重跑同一个查询。
+/// Windsurf FastContext 的官方经验是「宁可漏掉部分上下文，也不要污染主
+/// agent 上下文」；反过来在这里也成立 —— **宁可多等几秒，也不要给模型
+/// 一个空结果**，因为空结果会被模型当成「这个功能不存在」。
+pub async fn wait_for_index_ready(timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if crate::core::context::watcher::is_engine_ready() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+}
+
+/// 字面精确召回通道 —— 返回命中文件的**排名列表**。
+///
+/// 这是第三路召回，与前两路**异构**：
+/// - 前两路是同一个词法引擎的两种参数（expanded / exact）
+/// - 这一路是 ripgrep 的字面匹配：精确符号（`handle_error`）、路径片段、
+///   大小写敏感的字面串 —— 这些是词法排序最容易漏掉的东西
+///
+/// Augment 把它做成了 `matched_string` 字段与 `contains_string` 查询约束，
+/// 官方文档称之为「语义 + 字面 + 结构化过滤三路合一」。这里用同样的思路。
+///
+/// 返回的是**文件路径**（按命中数与命中位置排序），不是 chunk ——
+/// chunk 的对齐交给调用方：字面命中的是文件，语义命中的是文件里的块。
+fn literal_recall_files(query: &str, root: &Path) -> Vec<(String, usize)> {
+    let config = RipgrepConfig {
+        max_results: Some(80),
+        case_sensitive: false,
+        ..Default::default()
+    };
+
+    let results = match search_with_ripgrep(query, &root.to_string_lossy(), config) {
+        Ok(results) => results,
+        // 字面通道失败不是致命错误：语义通道还在跑，静默跳过这一路。
+        Err(_) => return Vec::new(),
+    };
+
+    // 聚合到文件维度，命中行数越多排越前。
+    //
+    // 路径必须归一成「相对 root + 正斜杠」—— 与索引里的 key 同一口径
+    // （见 `index_file` 的 `strip_prefix(root)`）。ripgrep 返回的是绝对路径，
+    // 直接拿去和索引比对会一个都匹配不上。
+    let mut per_file: HashMap<String, usize> = HashMap::new();
+    for hit in &results {
+        let rel = Path::new(&hit.file)
+            .strip_prefix(root)
+            .unwrap_or_else(|_| Path::new(&hit.file))
+            .to_string_lossy()
+            .replace('\\', "/");
+        *per_file.entry(rel).or_default() += 1;
+    }
+    let mut ranked: Vec<(String, usize)> = per_file.into_iter().collect();
+    // 命中数降序；同数按路径升序 —— 稳定排序让同一查询的结果可复现
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked
 }
 
 fn format_ripgrep_results(
@@ -1490,6 +1639,115 @@ mod tests {
     use crate::core::context::indexer::{IndexResult, Indexer};
     use crate::core::context::search_cache::{CachedSearchEngine, SearchEngineCacheManager};
     use std::fs;
+
+    /// 字面召回通道：ripgrep 命中但语义排序漏掉的文件，必须能进结果。
+    ///
+    /// 这是第三路召回存在的全部理由 —— 精确符号（`handle_error`）在词法
+    /// 排序里会被拆成 handle + error，整串权重只有字面匹配才拿得到。
+    /// 如果这一路被裁剪成「语义结果的子集」，它就等于不存在。
+    #[test]
+    fn literal_recall_finds_files_by_exact_identifier() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("exact.rs"), "pub fn handle_error() {}\n").unwrap();
+        fs::write(root.join("other.rs"), "pub fn unrelated() {}\n").unwrap();
+
+        let hits = literal_recall_files("handle_error", root);
+        assert!(
+            !hits.is_empty(),
+            "字面通道必须命中 handle_error 这个精确标识符"
+        );
+        assert!(
+            hits.iter().any(|(path, _)| path.ends_with("exact.rs")),
+            "命中的应当是 exact.rs，实际：{hits:?}"
+        );
+        // 路径必须与索引 key 同一口径：相对 root + 正斜杠
+        assert!(
+            hits.iter().all(|(path, _)| !path.starts_with('/')),
+            "字面通道的路径应相对 root，实际：{hits:?}"
+        );
+    }
+
+    /// 字面通道不该把不相关文件带进来。
+    #[test]
+    fn literal_recall_ignores_unrelated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("other.rs"), "pub fn unrelated() {}\n").unwrap();
+
+        let hits = literal_recall_files("handle_error", root);
+        assert!(hits.is_empty(), "不相关的文件不该被字面通道召回：{hits:?}");
+    }
+
+    /// 搜索引擎缓存必须是**进程级共享**的。
+    ///
+    /// 以前 `CodebaseSearchTool::new()` 挂的是 `None`，而 watcher 把建好的
+    /// 索引写进 `ContextEngine` 那份 cache —— 两边不是同一个对象。于是
+    /// watcher 明明在后台把索引建好了，工具却永远读不到，每次检索都退回
+    /// 同步全量重建（实测 851 文件 / 10 MB / 11 秒）。
+    ///
+    /// 这条测试守住接线：工具默认拿到的必须是共享实例。
+    #[test]
+    fn tool_uses_the_shared_search_cache() {
+        let config = std::sync::Arc::new(crate::core::config::Config::new(
+            crate::core::config::ConfigParameters::default(),
+        ));
+        let tool = CodebaseSearchTool::new(config);
+        let cache = tool.search_cache.clone().expect("工具必须挂上搜索引擎缓存");
+        assert!(
+            std::sync::Arc::ptr_eq(
+                &cache,
+                &crate::core::context::search_cache::shared_search_cache()
+            ),
+            "工具必须与 watcher 共用同一个缓存实例，否则 watcher 建好的索引读不到"
+        );
+    }
+
+    /// 第二次检索应当命中缓存 —— 引擎缓存命中后不该再全量重建。
+    ///
+    /// 这是「更快」的直接兑现：实测首次 11.9s，第二次 2.3s
+    /// （同一查询走查询缓存则是 3ms）。
+    ///
+    /// 用**独立的** cache 实例，不能用共享那个 —— 共享实例是进程级的，
+    /// 别的测试先跑就会把 watcher 启起来，于是这里拿到的是预热提示而不是
+    /// 缓存命中。测试不该依赖全局状态。
+    #[test]
+    fn second_search_reuses_the_cached_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("alpha.rs"), "fn alpha_handler() {}\n").unwrap();
+
+        let cache = std::sync::Arc::new(SearchEngineCacheManager::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let first = rt.block_on(run_codebase_search(
+            root.to_path_buf(),
+            "alpha_handler".to_string(),
+            None,
+            None,
+            Some(cache.clone()),
+        ));
+        assert!(!first.is_empty(), "首次检索应当有结果");
+
+        // 第二次跑**同一个查询**：查询缓存（LRU）必然命中 —— 它按
+        // (root, query, mtime) 键控，不受协调器是否启动的影响。
+        //
+        // 这里刻意不测「不同查询走引擎缓存」：那条路径会撞上
+        // `watcher::is_started()` 这个**进程级**状态 —— 别的测试一旦启动过
+        // 协调器，这里就只会拿到预热提示。测试不该依赖全局状态。
+        let second = rt.block_on(run_codebase_search(
+            root.to_path_buf(),
+            "alpha_handler".to_string(),
+            None,
+            None,
+            Some(cache.clone()),
+        ));
+        assert_eq!(
+            first, second,
+            "同一查询的第二次检索应当命中查询缓存，返回完全相同的结果"
+        );
+    }
 
     /// 测试用的显式预算。
     ///

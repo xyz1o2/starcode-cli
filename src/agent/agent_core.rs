@@ -211,8 +211,15 @@ impl Agent {
 
             // 后台索引协调器：watcher + 低优先级增量重建（免阻塞，见 watcher.rs）。
             // 注入语义引擎缓存后启动，Edit/Write 的脏标记与文件监听统一由此驱动。
+            // 注入**进程级共享**的缓存：watcher 把建好的索引写进它，
+            // `CodebaseSearchTool` 读的是同一个对象。
+            //
+            // 以前这里注入的是 `self.context_engine.search_cache` —— 而工具在
+            // runtime_bootstrap 里**独立**创建了自己的一份。两边不是同一个
+            // 对象，于是 watcher 建好的索引工具永远读不到，每次检索都退回
+            // 同步全量重建。
             crate::core::context::watcher::set_engine_cache(
-                self.context_engine.search_cache.clone(),
+                crate::core::context::search_cache::shared_search_cache(),
             );
 
             // 装 watcher + 请求首轮重建**必须**离开这条关键路径。

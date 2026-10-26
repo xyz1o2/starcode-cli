@@ -294,6 +294,24 @@ const SWEEP_MARKERS: &[&str] = &[
     "哪些",
     "几个地方",
     "都哪里",
+    // 中文问句的常见形态：「X 是怎么做的」这一类也是跨文件定位 ——
+    // 它问的正是「干这件事的地方在哪」。以前只认「在哪/哪里/哪些」，
+    // 于是「用户鉴权是怎么做的？」拿 0 分，中文提问几乎永远触发不了。
+    "怎么",
+    "如何",
+    "怎么做",
+    "怎么实现",
+    "如何实现",
+    "在哪块",
+    "哪部分",
+    "哪个模块",
+    "哪块",
+    "什么机制",
+    "什么逻辑",
+    "哪一步",
+    "从哪",
+    "由谁",
+    "谁负责",
 ];
 
 /// 「找的是干这件事的地方，而不是某个符号」的功能动词。
@@ -313,6 +331,16 @@ const FUNCTIONAL_VERBS: &[&str] = &[
     "负责",
     "相关",
     "逻辑",
+    // 中文里「问某个东西由什么构成 / 为什么这么设计」的高频说法。
+    // 这些问的同样是「这件事落在哪儿」，所以归到功能动词这一档。
+    "设计",
+    "机制",
+    "原理",
+    "方案",
+    "策略",
+    "流程",
+    "怎么用",
+    "在哪用",
 ];
 
 /// 概念问答：**词法引擎结构上答不了**的形状。
@@ -367,9 +395,13 @@ fn score_rank_locate_route(user_input: &str) -> Option<u32> {
         return None;
     }
     // 纯概念问答 → 词法检索必然零命中，白烧一个回合。
-    if CONCEPTUAL_MARKERS.iter().any(|m| lower.contains(m)) {
-        return None;
-    }
+    //
+    // 但「为什么这么设计」「原理是什么」这类问题恰恰**需要**跨文件搜索：
+    // 要回答设计意图，就得看它牵动的多个文件。以前这里是硬否决，
+    // 于是这类问题永远拿不到检索结果 —— 而它们本来是最该检索的一类。
+    // 现在降为扣分：概念词命中时不直接否决，而是压低分数，让更强的
+    // 扫面信号仍有机会把它拉过阈值。
+    let is_conceptual = CONCEPTUAL_MARKERS.iter().any(|m| lower.contains(m));
 
     let is_question = raw.contains('?') || raw.contains('？');
     let has_sweep = SWEEP_MARKERS.iter().any(|m| norm.contains(m));
@@ -382,14 +414,24 @@ fn score_rank_locate_route(user_input: &str) -> Option<u32> {
     // ── 二、分档 ──
     // 每档给一个远高于阈值的分：`STARCODE_ROUTE_SCORE_MIN` 仍可整体调高/调低，
     // 但档内不会因为某条规则差几分就掉出触发范围。
+    //
+    // 「为什么 X 这么设计」单独一档：中文的疑问词位置太自由，靠标记词很难
+    // 穷举。但它问的确实是「设计决策落在哪几个文件里」——要答它就得看多个
+    // 文件，正是跨文件检索的目标。判据是「疑问 + 功能动词」：
+    // 「为什么限流逻辑这么设计」里有「逻辑」，说明问的是某个功能。
+    let is_why_design = CONCEPTUAL_MARKERS.iter().any(|m| lower.contains(m)) && has_verb;
+
     let mut score: u32 = if has_sweep {
         // 一档：明确的跨文件定位问法。这一个信号就够，不必再叠加别的。
         75
     } else if is_question && has_verb {
         // 二档：问句 + 功能动词（"限流怎么处理？"）——同样是"找干这件事的地方"。
         62
+    } else if is_why_design {
+        // 三档：「为什么 X 这么设计」——概念词 + 功能动词。
+        65
     } else {
-        // 三档：证据不足，不够格。宁可漏一次，也不要在无关提问上白烧一轮检索。
+        // 四档：证据不足，不够格。宁可漏一次，也不要在无关提问上白烧一轮检索。
         return None;
     };
 
@@ -399,6 +441,16 @@ fn score_rank_locate_route(user_input: &str) -> Option<u32> {
     }
     if word_count >= 3 {
         score += 5;
+    }
+
+    // 概念词扣分 —— 保留「有扫面信号仍可触发」的可能，
+    // 只压低纯概念问句（没有扫面信号时本来也进不了档）。
+    //
+    // 扣 15 而不是更多：一档 75 − 15 = 60，恰好压线过阈值 —— 「为什么限流
+    // 要这么设计」这类问题**恰恰最需要**跨文件搜索（要答设计意图就得看
+    // 它牵动的多个文件），不该被概念词一票否决。
+    if is_conceptual && !is_why_design {
+        score = score.saturating_sub(15);
     }
 
     let score = score.min(100);
@@ -462,11 +514,9 @@ fn describe_rank_locate_route(user_input: &str) -> String {
     if has_exact_identifier_shape(user_input) {
         return format!("veto: exact-token shape (Grep/Glob/CodeGraph owns this) => [{lower}]");
     }
-    if let Some(m) = CONCEPTUAL_MARKERS.iter().find(|m| lower.contains(*m)) {
-        return format!(
-            "veto: conceptual QA ({m:?}) — lexical search cannot answer it => [{lower}]"
-        );
-    }
+    // 概念词现在是**扣分**而不是否决，所以不能报成 "veto:" ——
+    // 那会让排障时以为「被判死了」，而实际上它只是被压低了分数。
+    // 只有当它同时缺少别的信号（进不了任何一档）时，才是真的被拒。
 
     let mut why: Vec<String> = Vec::new();
     if let Some(m) = SWEEP_MARKERS.iter().find(|m| norm.contains(**m)) {
@@ -478,6 +528,9 @@ fn describe_rank_locate_route(user_input: &str) -> String {
     }
     if FUNCTIONAL_VERBS.iter().any(|v| norm.contains(*v)) {
         why.push("functional-verb".to_string());
+    }
+    if let Some(m) = CONCEPTUAL_MARKERS.iter().find(|m| lower.contains(*m)) {
+        why.push(format!("conceptual-penalty({m:?})"));
     }
     if why.is_empty() {
         why.push(
@@ -714,6 +767,56 @@ fn read_bool_env_flag(key: &str, default: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// 中文提问必须能触发跨文件定位检索。
+    ///
+    /// 以前中文标记词只认「在哪 / 哪里 / 哪些」，于是「用户鉴权是怎么做的」
+    /// 「如何实现限流」这类最常见的中文问法拿 0 分 —— 中文提问几乎永远
+    /// 触发不了检索。这是「触发不智能」最直接的成因。
+    #[test]
+    fn chinese_questions_trigger_the_locate_route() {
+        let threshold = route_score_threshold();
+        for query in [
+            "用户鉴权是怎么做的？",
+            "错误处理在哪里实现？",
+            "如何实现限流？",
+            "限流逻辑在哪里？",
+            "哪个文件负责重试？",
+            "为什么限流要这么设计？",
+            "重试机制是什么原理？",
+        ] {
+            let score = score_rank_locate_route(query).unwrap_or(0);
+            assert!(
+                score >= threshold,
+                "中文提问 {query:?} 得分 {score} < 阈值 {threshold} —— 中文提问触发不了检索"
+            );
+        }
+    }
+
+    /// 无关提问不该触发 —— 补中文标记词不能变成「什么都触发」。
+    #[test]
+    fn unrelated_questions_still_do_not_trigger() {
+        for query in [
+            "config parsing",
+            "重构这个模块",
+            "帮我看下这个 bug",
+            "what is the architecture?",
+            "把这个文件翻译成英文",
+        ] {
+            assert!(
+                score_rank_locate_route(query).is_none(),
+                "无关提问 {query:?} 不该触发跨文件检索"
+            );
+        }
+    }
+
+    /// 英文路径不能被中文标记词的改动影响。
+    #[test]
+    fn english_questions_keep_their_scores() {
+        assert!(score_rank_locate_route("where is auth handled?").is_some());
+        assert!(score_rank_locate_route("how does the retry mechanism work?").is_some());
+        assert!(score_rank_locate_route("which file handles rate limits?").is_some());
+    }
+
     use super::*;
 
     fn tools(names: &[&str]) -> HashSet<String> {
@@ -853,7 +956,10 @@ mod tests {
     /// 词法检索必然零命中 —— 触发它只是白烧一个回合。
     /// 注意 `token 预算是怎么算的` 带问号也进不来，正因为否决发生在打分之前。
     #[test]
-    fn conceptual_qa_is_vetoed_not_merely_low_scored() {
+    fn conceptual_qa_without_other_signals_still_does_not_trigger() {
+        // 概念词不再是**一票否决** —— 「为什么 X 这么设计」恰恰需要跨文件检索。
+        // 但纯粹的概念问答（没有任何扫面信号、也不带功能动词）仍然不该触发：
+        // 词法引擎结构上答不了它，白烧一轮。
         for q in [
             "why does the watcher use a debounce",
             "explain the tool routing architecture",
@@ -864,11 +970,30 @@ mod tests {
             let detail = describe_rank_locate_route(q);
             assert!(
                 score_rank_locate_route(q).is_none(),
-                "概念问答不该路由到词法引擎：{q:?}  detail={detail}"
+                "纯概念问答不该路由到词法引擎：{q:?}  detail={detail}"
+            );
+            // 必须是**扣分**而非否决 —— 报成 "veto:" 会让排障以为它被一票否决了
+            assert!(
+                !detail.starts_with("veto:"),
+                "概念词是扣分不是否决，detail 不该报 veto：{detail}"
             );
             assert!(
-                detail.starts_with("veto:"),
-                "被拒的 query 必须在 detail 里说明否决理由，否则没法排障：{detail}"
+                detail.contains("conceptual-penalty"),
+                "detail 必须说明这是概念词扣分，否则没法排障：{detail}"
+            );
+        }
+    }
+
+    /// 概念问句一旦带上功能动词，就该走跨文件检索 —— 设计意图往往分散在
+    /// 多个文件里，要答「为什么这么设计」就得把它们都看一遍。
+    #[test]
+    fn conceptual_question_with_functional_verb_does_trigger() {
+        let threshold = route_score_threshold();
+        for q in ["为什么限流逻辑要这么设计？", "重试机制是什么原理？"] {
+            let score = score_rank_locate_route(q).unwrap_or(0);
+            assert!(
+                score >= threshold,
+                "带功能动词的概念问句 {q:?} 得分 {score} < {threshold}"
             );
         }
     }
