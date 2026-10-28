@@ -486,6 +486,10 @@ mod tests {
 
     // ── 输出摘要 ────────────────────────────────────────────────
 
+    /// 造一个带指定退出码的 Output。`ExitStatus::from_raw` 是 Unix 专属 API
+    /// （Windows 上 ExitStatus 只能来自真实子进程，没有公开构造方式），所以这个
+    /// helper 连同依赖它的断言都只在 Unix 上编译。
+    #[cfg(unix)]
     fn output(stdout: &str, stderr: &str, code: i32) -> std::process::Output {
         use std::os::unix::process::ExitStatusExt;
         std::process::Output {
@@ -496,6 +500,9 @@ mod tests {
     }
 
     /// stderr 优先：git 的失败原因只写在 stderr，stdout 里的进度行会误导人。
+    /// 断言依赖 Unix 的 ExitStatus Display（"exit status: N"），Windows 上
+    /// Display 文案不同（"exit code: N"），所以整个测试只在 Unix 上跑。
+    #[cfg(unix)]
     #[test]
     fn summarize_output_prefers_stderr_then_stdout_then_exit_status() {
         assert_eq!(summarize_output(&output("progress", "boom", 1)), "boom");
@@ -539,6 +546,12 @@ Checking patch src/d.rs...
             "Applying: fix\nAlready up to date.\nerror: something else happened",
         );
         assert!(files.is_empty(), "{files:?}");
+    }
+
+    /// 真造一个带退出码的 Output，确认 exit status 本身不被解析成冲突文件。
+    #[cfg(unix)]
+    #[test]
+    fn unrelated_process_output_yields_no_conflicts() {
         assert!(collect_apply_conflict_files(&output("", "", 0)).is_empty());
     }
 
@@ -554,6 +567,10 @@ Checking patch src/d.rs...
         assert_eq!(map_target_for_worktree(".", repo, repo, wt), ".");
     }
 
+    /// 输入是 Unix 风格路径（"/repo"、"/wt"），在 Windows 上 Path 的语义不同
+    /// （`Path::new("/repo")` 解析成"当前驱动器根下"，join 出来的分隔符也不同），
+    /// 所以只在 Unix 上跑。Windows 上的真实路径映射由本地路径规则另行保证。
+    #[cfg(unix)]
     #[test]
     fn relative_targets_are_joined_onto_the_command_directory() {
         assert_eq!(
@@ -568,7 +585,9 @@ Checking patch src/d.rs...
     }
 
     /// 绝对路径落在仓库外时映射成 `.`：worktree 里没有那个文件，
-    /// 编一个越界路径只会让成员在别人的目录上乱跑。
+    /// 编一个越界路径只会让成员在别人的目录上乱跑。同样只在 Unix 上跑：
+    /// 输入 `/repo`、`/wt`、`/etc/passwd` 是 Unix 语义路径。
+    #[cfg(unix)]
     #[test]
     fn absolute_targets_inside_the_repo_are_rebased_onto_the_worktree() {
         assert_eq!(
