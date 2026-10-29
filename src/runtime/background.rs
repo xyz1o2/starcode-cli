@@ -11,8 +11,11 @@ use tokio::sync::mpsc;
 /// - Runs as a tokio task (not a blocking thread)
 /// - Polls every 5 seconds
 /// - Sends git status updates to UI via agent_tx
-/// - Gracefully handles git errors (e.g. not a git repo)
-/// - Uses exponential backoff on repeated failures to avoid log spam
+/// - Failure reasons are carried all the way into the log
+///   (`Status query failed (attempt N): <reason>`)
+/// - Permanently-not-a-repo failures stop the loop entirely (之前以 60s 的
+///   背退节奏永远空问下去，实测 new-api 这种解压目录就是 3 连无原因失败)
+/// - Other git errors back off exponentially to avoid log spam
 pub fn spawn_git_status_loop(agent_tx: mpsc::Sender<AgentRequest>, _initial_cwd: PathBuf) {
     tokio::spawn(async move {
         let mut consecutive_errors = 0u32;
@@ -23,7 +26,7 @@ pub fn spawn_git_status_loop(agent_tx: mpsc::Sender<AgentRequest>, _initial_cwd:
             // without restarting the loop or recreating the UI.
             let cwd = crate::core::utils::paths::current_dir_cached().clone();
             match crate::core::services::git_service::get_git_status(&cwd).await {
-                Some(status) => {
+                Ok(Some(status)) => {
                     consecutive_errors = 0; // Reset on success
                     let mut status_str = status.branch;
                     let mut flags = Vec::new();
@@ -43,12 +46,29 @@ pub fn spawn_git_status_loop(agent_tx: mpsc::Sender<AgentRequest>, _initial_cwd:
                         .send(AgentRequest::UpdateGitStatus(status_str))
                         .await;
                 }
-                None => {
+                // git 成功但输出没有分支头：解析层的「不是工作树」语义。
+                // 这不是错误，重试也拿不到状态 —— 打一条说明后停止轮询。
+                Ok(None) => {
+                    crate::utils::logging::append_debug_log_line(&format!(
+                        "[GIT] {}: 不含分支头的 status 输出，判定非工作树，轮询停止",
+                        cwd.display()
+                    ));
+                    return;
+                }
+                Err(reason) => {
+                    // 永久性的「这里不是仓库」：重试显然没用，直接收工。
+                    if crate::core::services::git_service::is_permanently_not_a_repo(&reason) {
+                        crate::utils::logging::append_debug_log_line(&format!(
+                            "[GIT] {}: {reason} —— 非 git 仓库，状态轮询停止",
+                            cwd.display()
+                        ));
+                        return;
+                    }
                     consecutive_errors += 1;
                     // Log first few errors, then suppress to avoid log spam
                     if consecutive_errors <= 3 {
                         crate::utils::logging::append_debug_log_line(&format!(
-                            "[GIT] Status query failed (attempt {})",
+                            "[GIT] Status query failed (attempt {}): {reason}",
                             consecutive_errors
                         ));
                     }

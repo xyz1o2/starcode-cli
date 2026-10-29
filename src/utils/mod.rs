@@ -5,6 +5,7 @@ pub mod checkpoint_manager;
 pub mod environment_context;
 pub mod file_walk;
 pub mod format_utils;
+pub mod git_self_exclude;
 pub mod invocation;
 pub mod logging;
 pub mod markdown_parser;

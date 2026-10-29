@@ -170,18 +170,27 @@ pub(crate) fn repair_tool_message_sequence(messages: &mut Vec<StarMessage>) {
         if pending_ids.is_empty() {
             return;
         }
+        let missing: Vec<&String> = pending_ids
+            .iter()
+            .filter(|id| !responded.contains(*id))
+            .collect();
+        // 常态（该段全部 tool call 都已有响应）**完全静默**。
+        //
+        // 旧实现每逢分界都打两行：先「检测到 N 个未响应的工具」（N 实际上是
+        // 本段全部 tool call 数，措辞就是错的），再给每个工具打一行
+        // 「✓ 已有响应」。行数随会话历史线性膨胀：实测一个 5.7 分钟、多轮
+        // 工具调用的会话里 100 检测行 + 100 ✓行，占整份日志 37%。
+        // 真正异常（确实有 id 缺响应）时才打点：一行汇总 + 每个缺失 id 一行。
+        if missing.is_empty() {
+            return;
+        }
         crate::utils::logging::append_debug_log_line(&format!(
-            "🔧 [工具序列管理] 检测到 {} 个未响应的工具",
-            pending_ids.len()
+            "🔧 [工具序列管理] 补齐 tool 响应: {}/{} 缺失，注入合成 tool 消息（其余 {} 个已有响应）",
+            missing.len(),
+            pending_ids.len(),
+            pending_ids.len() - missing.len()
         ));
-        for id in pending_ids {
-            if responded.contains(id) {
-                crate::utils::logging::append_debug_log_line(&format!(
-                    "  ✓ 工具 {} 已有响应，继续处理",
-                    id
-                ));
-                continue;
-            }
+        for id in missing {
             crate::utils::logging::append_debug_log_line(&format!(
                 "  ⚠️  Tool {} missing response, adding synthetic tool message",
                 id
@@ -358,6 +367,74 @@ mod tests {
             messages[0].content.as_deref(),
             Some("正常消息"),
             "带内部标记前缀的旧消息应被整条删除"
+        );
+    }
+
+    fn tool_call(id: &str, name: &str) -> crate::types::StarToolCall {
+        crate::types::StarToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    /// 全部 tool call 都已有响应时，序列补齐必须**零改动、零注入** ——
+    /// 日志同理（常态完全静默）。旧版本会在这里打「检测到 N 个未响应的工具」
+    /// + 每个工具一行 ✓，把单会话日志吃掉 37%。
+    #[test]
+    fn repair_tool_sequence_is_silent_passthrough_when_all_responded() {
+        let mut messages = vec![
+            StarMessage::user("先读配置"),
+            StarMessage::assistant_with_tool_calls(vec![
+                tool_call("call_a", "Read"),
+                tool_call("call_b", "Grep"),
+            ]),
+            StarMessage::tool("call_b", "结果 B"),
+            StarMessage::tool("call_a", "结果 A"),
+            StarMessage::assistant("好了"),
+        ];
+
+        repair_tool_message_sequence(&mut messages);
+
+        assert_eq!(messages.len(), 5, "没有任何消息被增删");
+        for msg in &messages {
+            let body = msg.content.as_deref().unwrap_or_default();
+            assert!(
+                !body.contains("Tool call did not return"),
+                "完整响应历史里不得合成占位 tool 消息: {body:?}"
+            );
+        }
+    }
+
+    /// 确实缺响应的 id 才补合成 tool 消息，已有响应的原样保留。
+    #[test]
+    fn repair_tool_sequence_injects_synthetic_only_for_missing() {
+        let mut messages = vec![
+            StarMessage::user("改这行"),
+            StarMessage::assistant_with_tool_calls(vec![
+                tool_call("call_ok", "Read"),
+                tool_call("call_gone", "Edit"),
+            ]),
+            StarMessage::tool("call_ok", "结果"),
+            StarMessage::assistant("下一步"),
+        ];
+
+        repair_tool_message_sequence(&mut messages);
+
+        assert_eq!(messages.len(), 5, "只为缺失的一个 id 注入占位消息");
+        let synthetic = &messages[3];
+        assert_eq!(
+            synthetic.tool_call_id.as_deref(),
+            Some("call_gone"),
+            "占位消息应挂在缺失的 id 上"
+        );
+        let body = synthetic.content.as_deref().unwrap_or_default();
+        assert!(
+            body.contains("Tool call did not return"),
+            "缺失响应应有提示占位文本: {body:?}"
         );
     }
 }

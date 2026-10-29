@@ -131,6 +131,30 @@ fn default_confirmation_details(
     }
 }
 
+/// 敏感文件门闸命中的确认卡片。
+///
+/// 与 policy/default 卡片的区别在失效范围：这是**每次都问**的门（会话/
+/// 持久授权不落库），文案里明说，避免用户以为点一次「总是允许」就永远
+/// 安静了。`hit` 是命中类别（`.env`、`*.pem`、SSH 私钥…）。
+fn sensitive_confirmation_details(
+    tool_name: &str,
+    args: &serde_json::Value,
+    hit: &str,
+) -> crate::core::tools::tools::ToolCallConfirmationDetails {
+    crate::core::tools::tools::ToolCallConfirmationDetails {
+        confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
+        title: format!("Sensitive file access: {}", tool_name),
+        prompt: format!(
+            "`{}` accesses a sensitive file ({}). This check asks every time: \
+             session/persistent approvals do not cover credentials and keys.{}",
+            tool_name,
+            hit,
+            confirmation_summary(args)
+        ),
+        on_confirm: std::sync::Arc::new(|_, _feedback| {}),
+    }
+}
+
 pub struct ToolExecutor {
     tool_registry: Arc<ToolRegistry>,
     config: Arc<Config>,
@@ -457,6 +481,23 @@ impl ToolExecutor {
             }
         }
 
+        // 敏感文件门闸（.env / *.pem / SSH 私钥 / .git-credentials）：即使策略
+        // Allow、即使有会话/持久授权，也必须每次走到用户面前。这里把
+        // `approved` 硬性拉回 false —— 授权读回块和下面的早退路径全部让位。
+        //
+        // 位置放错了会静默失效：这块放在 policy match **之后**是有意的 ——
+        // 放在前面时 `Allow` 分支会无条件把 `approved` 置回 true，门闸等于
+        // 没设。端到端测试
+        // （sensitive_file_asks_every_time_and_blocks_the_session_grant）锁住的
+        // 正是这个顺序。
+        // 口径与匹配规则见 `agent::sensitive_paths` 模块头；
+        // `STAR_SENSITIVE_FILE_ASK=0` 可整体关闭。
+        let sensitive_hit = crate::agent::sensitive_paths::guard_hit(tool_name, args);
+        if sensitive_hit.is_some() {
+            requires_prompt = true;
+            approved = false;
+        }
+
         // 会话/持久授权：用户按下「本会话允许 / 总是允许」时给**这个工具**的授权，
         // 必须读回来。
         //
@@ -465,8 +506,9 @@ impl ToolExecutor {
         // `SessionPermissionManager` 却永远读不回来，用户点完「允许本会话」，下一次
         // 编辑照样弹框。授权必须是**读的**，写了不读等于没写。
         //
-        // 仍然压得住的只有一件事：用户自己写下的 `ask` 规则，语义就是"每次都问我"。
-        if !policy_requires_confirmation {
+        // 仍然压得住的有两件事：用户自己写下的 `ask` 规则（语义就是"每次都问我"），
+        // 以及敏感文件门闸 —— 会话/持久授权不允许把它降级成"问过一次就放行"。
+        if !policy_requires_confirmation && sensitive_hit.is_none() {
             let permission_hit = self.permission_manager.check_allowed_with_identity(
                 tool_name,
                 args,
@@ -511,14 +553,16 @@ impl ToolExecutor {
             // 卡片文案两种要分开：显式 ask 规则才配说 "matches an `ask` rule"，
             // 兜底 default 没有规则可指。
             Ok(None) if requires_prompt && !approved => {
-                card_source = if policy_requires_confirmation {
-                    "ask_rule"
-                } else {
-                    "fallback_default"
-                };
-                if policy_requires_confirmation {
+                // 敏感文件卡片优先于 ask 规则/兜底：它解释的是"你点过的允许
+                // 为什么这次不算数"，语义最特殊，文案最要紧，别被兜底话术盖掉。
+                if let Some(hit) = &sensitive_hit {
+                    card_source = "sensitive_file";
+                    sensitive_confirmation_details(tool_name, args, hit)
+                } else if policy_requires_confirmation {
+                    card_source = "ask_rule";
                     policy_confirmation_details(tool_name, args)
                 } else {
+                    card_source = "fallback_default";
                     default_confirmation_details(tool_name, args)
                 }
             }
@@ -535,8 +579,13 @@ impl ToolExecutor {
         // 说明第二次到底是谁要求弹的。卡片来源（工具自己 / ask 规则 / 兜底）正是
         // 判断依据，缺了它就只能靠猜。
         crate::utils::logging::append_debug_log_line(&format!(
-            "🔔 Asking for approval: {} (source={}, granted={}, policy_ask={}, explicit_rule={})",
-            tool_name, card_source, approved, requires_prompt, policy_requires_confirmation
+            "🔔 Asking for approval: {} (source={}, granted={}, policy_ask={}, explicit_rule={}, sensitive={})",
+            tool_name,
+            card_source,
+            approved,
+            requires_prompt,
+            policy_requires_confirmation,
+            sensitive_hit.is_some()
         ));
 
         // 通知外部 harness「有一个工具在等人批准」—— 它需要 tool_call_id 才能
@@ -625,7 +674,24 @@ impl ToolExecutor {
         }
         on_confirm(outcome.clone(), response.feedback.clone());
 
+        // 敏感文件命中的批准只对「这一次」有效：会话/持久授权不允许被落库，
+        // 否则用户点过一次「总是允许」，下一个碰同一文件的调用就永远安静了。
+        // 注意 on_confirm 已在上面照常调用 —— 这次调用本身是放行的，
+        // 钉住的只是「授权缓存」。
+        let sensitive_gated =
+            crate::agent::sensitive_paths::guard_hit(tool_name, args).is_some();
+
         match outcome {
+            crate::types::ToolConfirmationOutcome::AllowSession
+            | crate::types::ToolConfirmationOutcome::ProceedAlways
+            | crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave
+                if sensitive_gated =>
+            {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "🔐 Permission NOT stored: {} touched a sensitive file — approval is one-shot, it will ask again next time",
+                    tool_name
+                ));
+            }
             crate::types::ToolConfirmationOutcome::AllowSession => {
                 self.permission_manager
                     .allow_tool_session_with_identity(tool_name, permission_identity);
@@ -3125,6 +3191,115 @@ mod tests {
             prompts.load(Ordering::SeqCst),
             1,
             "点了「允许本会话」之后，Edit 不该再弹第二次"
+        );
+    }
+
+    /// 敏感文件门闸的端到端：`Read` 是只读工具、`default` 档自动放行，但
+    /// 碰上 `.env` 必须每次弹卡；答「允许本会话」后——**授权不落库**——
+    /// 下一次读同一个文件照样弹。顺带验证门闸不波及普通文件（最后一读
+    /// 一张卡都不弹）。
+    ///
+    /// 这条是模块内纯函数测试锁不住的回归：纯函数只管「命中没有」，
+    /// 端到端才管得住「授权别把门闸降级」这条真正的红线。
+    #[tokio::test]
+    async fn sensitive_file_asks_every_time_and_blocks_the_session_grant() {
+        use crate::core::config::trusted_folders::TrustedFolders;
+        use crate::core::config::ConfigParameters;
+        use crate::core::state::GlobalState;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        std::fs::create_dir_all(temp.path().join(".star")).expect("seed project .star dir");
+        let mut params = ConfigParameters::default();
+        params.target_dir = temp.path().to_path_buf();
+        params.cwd = temp.path().to_path_buf();
+        params.folder_trust = Some(false);
+        let mut config = Config::new(params);
+        config.trusted_folders_manager = Some(
+            TrustedFolders::new_for_test(temp.path().join("trustedFolders.json"))
+                .expect("创建隔离 trust 配置失败"),
+        );
+        let config = Arc::new(config);
+
+        let env_file = temp.path().join(".env");
+        std::fs::write(&env_file, "API_KEY=seed\n").expect("seed .env file");
+        // 第二次换一个敏感文件：只读工具有 5 分钟结果缓存（命中时短路整个
+        // pass_gate），同名文件第二次读连门都不进 —— 那是缓存语义不是门闸
+        // 失效（内容已在上下文里，不存在「新的一次访问」）。测试里用
+        // `.env.prod` 保证第二次也真真切切地过一遍门。
+        let env_prod = temp.path().join(".env.prod");
+        std::fs::write(&env_prod, "API_KEY=prod\n").expect("seed .env.prod file");
+        let normal = temp.path().join("notes.txt");
+        std::fs::write(&normal, "hello\n").expect("seed notes.txt");
+
+        let bus = Arc::new(MessageBus::new(
+            crate::core::policy::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let registry = Arc::new(ToolRegistry::new(config.clone()));
+        registry.register_tool(Arc::new(
+            crate::core::tools::read_file::ReadFileTool::new(
+                config.clone(),
+                bus.clone(),
+                Arc::new(GlobalState::new()),
+            ),
+        ));
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            registry,
+            Some(bus.clone()),
+            config,
+        );
+
+        let prompts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // 订阅先在调用方线程建好再 spawn —— broadcast 只缓冲订阅之后的消息。
+        let counting = tokio::spawn(count_each_confirmation(bus.clone(), prompts.clone()));
+        let responder = tokio::spawn(respond_to_each_confirmation(
+            bus.clone(),
+            // 连续两次「允许本会话」：正是要被门闸拦下、不许落库的那种
+            vec![
+                crate::types::ToolConfirmationOutcome::AllowSession,
+                crate::types::ToolConfirmationOutcome::AllowSession,
+            ],
+        ));
+
+        let read_call = |id: &str, target: &std::path::Path| StarToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: "Read".to_string(),
+                arguments: serde_json::json!({"file_path": target.to_string_lossy()}).to_string(),
+            },
+        };
+
+        // 第一次读 .env：弹卡
+        let first = executor
+            .execute(&read_call("env-1", &env_file), None, None)
+            .await;
+        assert!(first.success, "第一次读取失败：{:?}", first.error);
+
+        // 第二次读 .env.prod：还必须弹卡 —— 两次 AllowSession 都被门闸拦住
+        let second = executor
+            .execute(&read_call("env-2", &env_prod), None, None)
+            .await;
+        assert!(second.success, "第二次读取失败：{:?}", second.error);
+
+        // 普通文件：不弹卡，只读自动放行
+        let third = executor
+            .execute(&read_call("notes", &normal), None, None)
+            .await;
+        assert!(third.success, "普通文件读取失败：{:?}", third.error);
+
+        tokio::time::timeout(Duration::from_secs(3), settle())
+            .await
+            .expect("排空总线缓冲超时");
+        responder.abort();
+        counting.abort();
+        let asked = prompts.load(Ordering::SeqCst);
+        assert_eq!(
+            asked, 2,
+            "两次 .env 读取必须各弹一次卡，普通文件不许弹（实际 {asked} 次）"
         );
     }
 

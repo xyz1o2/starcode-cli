@@ -34,6 +34,7 @@ mod prompt_builder;
 mod query_loop_types;
 pub mod reflection;
 pub mod router;
+pub(crate) mod sensitive_paths;
 pub mod skills;
 mod stop_hook;
 mod stream_enhanced;

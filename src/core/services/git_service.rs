@@ -36,7 +36,10 @@ fn recent_changes_cache() -> &'static Mutex<HashMap<String, GitCacheEntry>> {
 /// 一次就给全了 —— 分支名就在输出第一行 `## `。
 const GIT_POLL_BUDGET: Duration = Duration::from_secs(10);
 
-/// 跑一条 git 命令，最多给 `budget`。
+/// 跑一条 git 命令，最多给 `budget`。失败时把**原因**带回来 —— 以前 `None`
+/// 把「进程起不来 / git 退出非零 / 超时」三种完全不同的问题混成一种，调用方
+/// 只能打一句 `Status query failed`，排查新-api 这类「目录根本不是仓库」时
+/// 什么线索都拿不到（实测就是连续 3 个无原因失败）。
 ///
 /// **`kill_on_drop(true)` 是这里的关键，不是保险起见。** tokio 的默认值是
 /// `false`：也就是说 `tokio::time::timeout` 超时只是把 future 丢掉，**子进程
@@ -44,21 +47,49 @@ const GIT_POLL_BUDGET: Duration = Duration::from_secs(10);
 /// 超时都留下一个仍在扫整个工作区的 `git status`，而轮询几秒后又启新的。几个
 /// 并存的 `git status` 抢同一块慢 I/O —— 这就是「首次特别慢」不但没修好、还会
 /// 越拖越长、且日志里反复出现 `status --porcelain timed out` 的原因。
-async fn run_git(cwd: &Path, args: &[&str], budget: Duration) -> Option<std::process::Output> {
+async fn run_git(
+    cwd: &Path,
+    args: &[&str],
+    budget: Duration,
+) -> Result<std::process::Output, String> {
     let mut command = tokio::process::Command::new("git");
     command.args(args).current_dir(cwd).kill_on_drop(true);
 
     match tokio::time::timeout(budget, command.output()).await {
-        Ok(Ok(output)) if output.status.success() => Some(output),
-        Ok(Ok(_)) => None,
-        Ok(Err(_)) => None,
+        Ok(Ok(output)) if output.status.success() => Ok(output),
+        Ok(Ok(output)) => {
+            // git 自身退出非零（128 not a git repository 等）：stderr 尾行就是原因。
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail = stderr
+                .trim_end()
+                .lines()
+                .next_back()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            Err(format!(
+                "`git {}` 失败 ({}){}",
+                args.join(" "),
+                output.status.code().unwrap_or(-1),
+                if tail.is_empty() {
+                    String::from("，stderr 为空")
+                } else {
+                    format!(": {tail}")
+                }
+            ))
+        }
+        Ok(Err(err)) => Err(format!("git 进程启动失败: {err}")),
         Err(_) => {
             crate::utils::logging::append_debug_log_line(&format!(
                 "[GIT] `git {}` timed out after {}s",
                 args.join(" "),
                 budget.as_secs()
             ));
-            None
+            Err(format!(
+                "`git {}` 超时（{}s）",
+                args.join(" "),
+                budget.as_secs()
+            ))
         }
     }
 }
@@ -111,14 +142,29 @@ fn parse_status_output(stdout: &str) -> Option<GitStatus> {
     Some(status)
 }
 
-pub async fn get_git_status<P: AsRef<Path>>(cwd: P) -> Option<GitStatus> {
+/// 查询一次 git 状态。
+///
+/// - `Ok(Some)`：正常工作树分支状态；
+/// - `Ok(None)`：git 成功但输出没有 `##` 分支头 —— 解析层认定的「不是工作树」；
+/// - `Err(reason)`：起进程 / git 退出非零 / 超时，原因原文带回，调用方据此
+///   可以打 `Status query failed (attempt N): <reason>`，不再是无解释的三连。
+pub async fn get_git_status<P: AsRef<Path>>(cwd: P) -> Result<Option<GitStatus>, String> {
     let output = run_git(
         cwd.as_ref(),
         &["status", "--porcelain", "--branch"],
         GIT_POLL_BUDGET,
     )
     .await?;
-    parse_status_output(&String::from_utf8_lossy(&output.stdout))
+    Ok(parse_status_output(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// 失败是否**永久性**的「不是 git 仓库」。这类失败重试没有意义
+/// （比如解压出来的 new-api 目录、`cargo new` 的产物目录），轮询应当停掉，
+/// 而不是以每 60s 一次的节奏永远问下去。其余失败（dubious ownership、网络
+/// 盘抖动……）都值得继续退避重试。
+pub fn is_permanently_not_a_repo(reason: &str) -> bool {
+    let r = reason.to_ascii_lowercase();
+    r.contains("not a git repository") || r.contains("not in a git repository")
 }
 
 pub fn get_file_history(path: &Path, n: usize) -> Option<String> {
@@ -459,6 +505,26 @@ mod tests {
         assert!(parse_status_output("").is_none());
         assert!(parse_status_output("fatal: not a git repository\n").is_none());
         assert!(parse_status_output(" M src/main.rs\n").is_none());
+    }
+
+    /// 「不是 git 仓库」必须被识别为**永久失败**（new-api 这类解压目录：
+    /// 重试一万次也是 128），轮询任务据此直接停而不是永远在背后空问。
+    /// 其它失败（dubious ownership、盘抖动）不能误判，依旧按可重试处理。
+    #[test]
+    fn permanent_not_a_repo_classification() {
+        assert!(is_permanently_not_a_repo(
+            "`git status --porcelain --branch` 失败 (128): fatal: not a git repository (or any of the parent directories): .git"
+        ));
+        assert!(is_permanently_not_a_repo(
+            "fatal: not in a git repository"
+        ));
+        assert!(!is_permanently_not_a_repo(
+            "`git status --porcelain --branch` 超时（10s）"
+        ));
+        assert!(!is_permanently_not_a_repo(
+            "fatal: detected dubious ownership in repository at '/repo'"
+        ));
+        assert!(!is_permanently_not_a_repo(""));
     }
 }
 
