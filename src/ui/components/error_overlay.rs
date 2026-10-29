@@ -138,9 +138,7 @@ pub fn render_error_overlay(f: &mut Frame, state: &ErrorOverlayState, area: Rect
     // 分类行：外壳标题之外，第一眼要看到错误"是什么类型"。
     lines.push(Line::from(Span::styled(
         format!(" ⚠ {}", type_label),
-        Style::default()
-            .fg(type_color)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(type_color).add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(""));
 

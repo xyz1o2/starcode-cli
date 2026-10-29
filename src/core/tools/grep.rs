@@ -1,6 +1,8 @@
 use crate::core::confirmation_bus::MessageBus;
 use crate::core::tools::constants::ToolErrorType;
-use crate::core::tools::ripgrep::{search_with_ripgrep, RipgrepConfig};
+use crate::core::tools::ripgrep::{
+    format_grep_hits, search_with_ripgrep, GrepHit, RipgrepConfig, DEFAULT_MAX_RESULTS,
+};
 use crate::core::tools::tools::{
     BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation, ToolResult,
 };
@@ -227,7 +229,8 @@ impl ToolInvocation for GrepToolInvocation {
                     // or better, respect the new flags if we update the schema.
                     // For backward compatibility, let's treat the pattern as regex.
                     include_patterns: params.include.map(|s| vec![s]),
-                    max_results: Some(1000), // Reasonable limit
+                    // 1000 条 × 每行一整行源码，一次调用就能吃掉几万 token。
+                    max_results: Some(DEFAULT_MAX_RESULTS),
                     ..Default::default()
                 };
 
@@ -290,34 +293,15 @@ impl ToolInvocation for GrepToolInvocation {
                     });
                 }
 
-                let match_count = filtered_matches.len();
-                // Group by file for display
-                let mut matches_by_file: std::collections::HashMap<
-                    String,
-                    Vec<&crate::core::tools::tools::SearchResult>,
-                > = std::collections::HashMap::new();
-                for m in &filtered_matches {
-                    matches_by_file.entry(m.file.clone()).or_default().push(m);
-                }
-
-                let mut llm_content = format!(
-                    "Found {} matches for pattern \"{}\":\n---\n",
-                    match_count, params.pattern
-                );
-
-                for (file, file_matches) in matches_by_file {
-                    llm_content.push_str(&format!("File: {}\n", file));
-                    for m in file_matches {
-                        if let Some(text) = &m.text {
-                            llm_content.push_str(&format!(
-                                "L{}: {}\n",
-                                m.line.unwrap_or(0),
-                                text.trim()
-                            ));
-                        }
-                    }
-                    llm_content.push_str("---\n");
-                }
+                let hits: Vec<GrepHit<'_>> = filtered_matches
+                    .iter()
+                    .map(|m| GrepHit {
+                        file: &m.file,
+                        line: m.line,
+                        text: m.text.as_deref(),
+                    })
+                    .collect();
+                let llm_content = format_grep_hits(&hits, &search_dir, &params.pattern);
 
                 Ok(ToolResult {
                     llm_content: Some(llm_content.clone()),

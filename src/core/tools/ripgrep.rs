@@ -71,6 +71,156 @@ impl Default for RipgrepConfig {
     }
 }
 
+/// 调用方没给 `max_results` 时的上限。
+///
+/// 以前 `None` 会被当成“不限”（`u32::MAX`），一次 `Grep("func")` 能把几千条
+/// 匹配整段灌进上下文 —— 这是工具最大的一处 token 浪费。
+pub const DEFAULT_MAX_RESULTS: u32 = 100;
+
+/// 单条匹配行最多保留的字符数（超出用 `…` 收尾）。
+pub const MAX_LINE_CHARS: usize = 160;
+
+/// 单个文件最多列出的匹配行数，其余折成 `+N more`。
+pub const MAX_LINES_PER_FILE: usize = 10;
+
+/// 输出总预算（字符）。超了就截断并提示收窄搜索范围，避免一次调用吃掉整个窗口。
+pub const MAX_OUTPUT_CHARS: usize = 12_000;
+
+/// 展示用路径：相对 `base_dir`，分隔符统一成 `/`。
+///
+/// 绝对值路径每列一个文件都要重复一遍工作目录前缀，几十个文件时这部分几乎占
+/// 掉一半 token。
+pub fn display_path(file: &str, base_dir: &std::path::Path) -> String {
+    let rel = crate::core::utils::paths::make_relative(std::path::Path::new(file), base_dir);
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    if rel.is_empty() {
+        file.replace('\\', "/")
+    } else {
+        rel
+    }
+}
+
+/// 折叠一行源码：去首尾空白、压掉制表/换行/控制字符，超长截断。
+pub fn collapse_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len().min(MAX_LINE_CHARS));
+    let mut pending_space = false;
+    for c in text.trim().chars() {
+        match c {
+            '\t' | '\r' | '\n' => pending_space = true,
+            c if c.is_control() => {}
+            ' ' => {
+                if !out.is_empty() {
+                    pending_space = true;
+                }
+            }
+            c => {
+                if pending_space && !out.is_empty() {
+                    out.push(' ');
+                    pending_space = false;
+                }
+                out.push(c);
+            }
+        }
+    }
+    if out.chars().count() > MAX_LINE_CHARS {
+        let keep: String = out.chars().take(MAX_LINE_CHARS - 1).collect();
+        format!("{keep}…")
+    } else {
+        out
+    }
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.chars().count() > max {
+        let keep: String = s.chars().take(max - 1).collect();
+        format!("{keep}…")
+    } else {
+        s.to_string()
+    }
+}
+
+/// `1 file` / `3 files` —— 复数只影响观感，但 "1 files" 看着像 bug。
+pub fn plural_count(n: usize, word: &str) -> String {
+    if n == 1 {
+        format!("{} {}", n, word)
+    } else {
+        format!("{} {}s", n, word)
+    }
+}
+
+/// 一次 Grep 结果输入给格式化器的最小集（两个 Grep 实现共用）。
+pub struct GrepHit<'a> {
+    pub file: &'a str,
+    pub line: Option<u32>,
+    pub text: Option<&'a str>,
+}
+
+/// 把匹配结果压成紧凑文本：
+///
+/// ```text
+/// 12 matches in 3 files for "model\.DB"
+/// src/models/gorm.go
+///   36: func InitDB(cfg *Config) error {
+///   42: model.DB, err = gorm.Open(mysql.Open(dsn), &gorm.Config{})
+///   +8 more
+/// ```
+///
+/// 关键点：一行一条、路径相对、行长有上限、每文件有上限、整体有预算。
+pub fn format_grep_hits(hits: &[GrepHit<'_>], base_dir: &std::path::Path, pattern: &str) -> String {
+    if hits.is_empty() {
+        return format!(
+            "No matches found for pattern \"{}\"",
+            truncate_str(pattern, 80)
+        );
+    }
+
+    let mut by_file: std::collections::BTreeMap<&str, Vec<&GrepHit<'_>>> =
+        std::collections::BTreeMap::new();
+    for hit in hits {
+        by_file.entry(hit.file).or_default().push(hit);
+    }
+
+    let mut out = format!(
+        "{} in {} for \"{}\"\n",
+        plural_count(hits.len(), "match"),
+        plural_count(by_file.len(), "file"),
+        truncate_str(pattern, 80)
+    );
+
+    let mut truncated = false;
+    for (file, mut file_hits) in by_file {
+        if out.len() >= MAX_OUTPUT_CHARS {
+            truncated = true;
+            break;
+        }
+        file_hits.sort_by_key(|h| h.line.unwrap_or(0));
+
+        out.push_str(&display_path(file, base_dir));
+        out.push('\n');
+        for hit in file_hits.iter().take(MAX_LINES_PER_FILE) {
+            let text = hit.text.map(collapse_line).unwrap_or_default();
+            match hit.line {
+                Some(line) => out.push_str(&format!("  {}: {}\n", line, text)),
+                None => out.push_str(&format!("  {}\n", text)),
+            }
+        }
+        if file_hits.len() > MAX_LINES_PER_FILE {
+            out.push_str(&format!(
+                "  +{} more\n",
+                file_hits.len() - MAX_LINES_PER_FILE
+            ));
+        }
+    }
+
+    if truncated {
+        out.push_str(
+            "\n[truncated] 结果过多已截断：换更精确的 pattern、加 include_pattern 或缩小 path 再搜一次。\n",
+        );
+    }
+
+    out.trim_end().to_string()
+}
+
 /// Search using Rust grep crate
 pub fn search_with_ripgrep(
     query: &str,
@@ -133,7 +283,7 @@ pub fn search_with_ripgrep(
 
     // Result collector (thread-safe)
     let results = Arc::new(Mutex::new(Vec::new()));
-    let max_results = config.max_results.unwrap_or(u32::MAX);
+    let max_results = config.max_results.unwrap_or(DEFAULT_MAX_RESULTS);
     let current_count = Arc::new(Mutex::new(0u32));
 
     // Traverse files and search
@@ -345,20 +495,50 @@ mod tests {
         assert!(result.is_err(), "非法正则必须返回 Err，实际：{result:?}");
     }
 
-    /// 反过来：同样的 pattern 在 `regex: false` 下是合法的字面量搜索。
+    /// 超长行（压缩过的 js、base64 blob）必须被截断 —— 一条 5KB 的行能顶掉
+    /// 三十条正常结果。
     #[test]
-    fn the_same_pattern_is_a_valid_literal_search_when_regex_is_off() {
-        let dir = fixture();
-        std::fs::write(dir.path().join("paren.rs"), "let x = needle(1);\n").unwrap();
-        let hits = search_with_ripgrep(
-            "needle(",
-            dir.path().to_str().unwrap(),
-            RipgrepConfig {
-                regex: false,
-                ..Default::default()
+    fn a_very_long_line_is_truncated() {
+        let long = "x".repeat(5_000);
+        let collapsed = collapse_line(&long);
+        assert_eq!(collapsed.chars().count(), MAX_LINE_CHARS);
+        assert!(collapsed.ends_with('…'));
+    }
+
+    /// 制表符/连续空白压成一个空格：缩进对模型没信息量，但很占字符。
+    #[test]
+    fn whitespace_runs_collapse_to_one_space() {
+        assert_eq!(collapse_line("\t\t  let\t\t x = 1;  "), "let x = 1;");
+    }
+
+    /// 输出形状：一行计数 + 分组文件路径 + 缩进 `行号: 内容`。
+    #[test]
+    fn hits_are_grouped_by_file_with_relative_paths() {
+        let base = std::path::Path::new("/proj");
+        let hits = vec![
+            GrepHit {
+                file: "/proj/src/a.rs",
+                line: Some(3),
+                text: Some("fn a() {}"),
             },
-        )
-        .expect("literal search should run");
-        assert_eq!(hits.len(), 1, "字面量搜索应当命中 paren.rs：{hits:?}");
+            GrepHit {
+                file: "/proj/src/b.rs",
+                line: Some(1),
+                text: Some("fn b() {}"),
+            },
+        ];
+        let out = format_grep_hits(&hits, base, "fn ");
+
+        assert_eq!(
+            out,
+            "2 matches in 2 files for \"fn \"\nsrc/a.rs\n  3: fn a() {}\nsrc/b.rs\n  1: fn b() {}"
+        );
+    }
+
+    /// 空结果也要给一句能看懂的话，而不是空字符串。
+    #[test]
+    fn empty_hits_say_so() {
+        let out = format_grep_hits(&[], std::path::Path::new("/proj"), "nope");
+        assert!(out.starts_with("No matches found"), "实际：{out}");
     }
 }

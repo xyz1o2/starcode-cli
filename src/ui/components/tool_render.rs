@@ -767,17 +767,36 @@ fn render_rich_tool_content(
                     )));
                     return lines;
                 }
-                // Grep: "Found N matches"
+                // Grep: "Found N matches" —— 命中数从输出头部解析。
+                //
+                // 以前这里数的是**非空行数**：一条 "No results found for ..." 正好
+                // 也是 1 行，于是折叠态写 "Found 1 matches"、展开却空空如也；
+                // 新格式（每文件一个路径行 + N 条命中行）同样会被数成"命中行数 +
+                // 文件数 + 1"。
                 "Grep" => {
-                    let match_count = text.lines().filter(|l| !l.trim().is_empty()).count();
-                    lines.push(Line::from(vec![
-                        Span::raw("Found "),
-                        Span::styled(
-                            format!("{}", match_count),
+                    let (count, files) = summarise_grep_output(text);
+                    let mut spans: Vec<Span<'static>> = Vec::new();
+                    if count == 0 {
+                        spans.push(Span::styled(
+                            crate::core::i18n::t("tool.no_matches", "没有匹配", "No matches"),
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(Modifier::DIM),
+                        ));
+                    } else {
+                        spans.push(Span::styled(
+                            format!("{}", count),
                             Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(" matches"),
-                    ]));
+                        ));
+                        spans.push(Span::raw(if count == 1 { " match" } else { " matches" }));
+                        if let Some(files) = files.filter(|f| *f > 0) {
+                            spans.push(Span::raw(format!(
+                                " in {}",
+                                crate::core::tools::ripgrep::plural_count(files, "file")
+                            )));
+                        }
+                    }
+                    lines.push(Line::from(spans));
                     lines.push(Line::from(Span::styled(
                         "  (Tab to expand)",
                         Style::default()
@@ -934,6 +953,59 @@ fn render_rich_tool_content(
     }
 
     lines
+}
+
+/// 从 Grep 输出里读回真实的命中数和命中文件数。
+///
+/// 折叠态摘要以前数的是**输出行数**（`text.lines().filter(non-empty).count()`）：
+/// 一条 "No results found for ..." 也正好是 1 行，于是界面写 "Found 1 matches"、
+/// 展开什么都没有。新格式（`12 matches in 3 files for "..."`、路径行 + 命中行）
+/// 同样会被数成"命中数 + 文件数 + 1"。
+///
+/// 头部格式由 `core::tools::ripgrep::format_grep_hits` 保证稳定：
+/// - `12 matches in 3 files for "..."` / `1 match in 1 file for "..."`
+/// - `3 files with matches:`（files_with_matches）
+/// - `3 files matching by name:`（只有文件名命中）
+/// - `No matches found for "..."` / `No results found ...` / `No files ...`
+fn summarise_grep_output(text: &str) -> (usize, Option<usize>) {
+    let Some(first) = text.lines().find(|l| !l.trim().is_empty()) else {
+        return (0, None);
+    };
+    let first = first.trim();
+
+    if first.starts_with("No matches") || first.starts_with("No results") || first.starts_with("No files")
+    {
+        return (0, Some(0));
+    }
+
+    let words: Vec<&str> = first.split_whitespace().collect();
+    // 旧兜底格式是 "Found 5 matches for pattern ..."，新格式直接以数字开头。
+    let offset = match words.first() {
+        Some(word) if word.eq_ignore_ascii_case("found") => 1,
+        _ => 0,
+    };
+
+    let number = words.get(offset).and_then(|w| w.parse::<usize>().ok());
+    if let (Some(count), Some(kind)) = (number, words.get(offset + 1)) {
+        if kind.starts_with("match") {
+            let files = match (words.get(offset + 2), words.get(offset + 3)) {
+                (Some(&"in"), Some(files)) => files.parse::<usize>().ok(),
+                _ => None,
+            };
+            return (count, files);
+        }
+        if kind.starts_with("file") {
+            return (count, Some(count));
+        }
+    }
+
+    // 头部认不出来就保守估计：减掉头部两行，剩下的非空行都是命中行。
+    let body = text
+        .lines()
+        .skip(2)
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    (body, None)
 }
 
 /// ToolResult 文本渲染的公共函数（折叠态：第一行预览 + 行数；展开态：完整内容）
@@ -1376,5 +1448,52 @@ mod tests {
         let blocks = render_tool_entry_blocks(&state, &entry, 0, 72, false, false, false);
         let flat: Vec<Line> = blocks.iter().flat_map(|b| b.iter()).cloned().collect();
         assert_lines_render!("tool_render_tool_call", 72, 4, &flat);
+    }
+
+    // ── Grep 折叠摘要 ──────────────────────────────────────────────────────
+
+    /// 回归：折叠态写 "Found 1 matches"、展开却是空的。
+    ///
+    /// 摘要以前数的是输出里的非空行数，而 "No results found for ..." 恰好一行。
+    #[test]
+    fn grep_summary_of_an_empty_result_is_zero() {
+        assert_eq!(
+            summarise_grep_output("No results found for \"^type .*Adapter interface\""),
+            (0, Some(0))
+        );
+        assert_eq!(
+            summarise_grep_output("No matches found for pattern \"nope\""),
+            (0, Some(0))
+        );
+    }
+
+    /// 新格式：头部就写着真实命中数和文件数，不要再去数正文行。
+    #[test]
+    fn grep_summary_reads_the_header() {
+        let text = "1 match in 1 file for \"type Adapter interface\"\n\
+                    relay/channel/adapter.go\n\
+                    \x20 12: type Adapter interface {";
+        assert_eq!(summarise_grep_output(text), (1, Some(1)));
+
+        let many = "12 matches in 3 files for \"model\\.DB\"\nsrc/a.go\n  1: model.DB = nil";
+        assert_eq!(summarise_grep_output(many), (12, Some(3)));
+    }
+
+    /// 只回文件名 / 只回计数的模式也要认得。
+    #[test]
+    fn grep_summary_understands_path_only_modes() {
+        assert_eq!(
+            summarise_grep_output("3 files with matches:\nsrc/a.go\nsrc/b.go\nsrc/c.go"),
+            (3, Some(3))
+        );
+        assert_eq!(
+            summarise_grep_output("2 files matching by name:\nsrc/a.go\nsrc/b.go"),
+            (2, Some(2))
+        );
+        // 旧兜底格式
+        assert_eq!(
+            summarise_grep_output("Found 5 matches for pattern \"x\":\n---\nsrc/a.go\nL1: x"),
+            (5, None)
+        );
     }
 }

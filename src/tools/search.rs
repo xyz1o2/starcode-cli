@@ -1,4 +1,7 @@
 use crate::core::state::{GlobalState, ReadFileState};
+use crate::core::tools::ripgrep::{
+    display_path, format_grep_hits, plural_count, GrepHit, DEFAULT_MAX_RESULTS,
+};
 use crate::core::tools::tools::{FileSearchResult, SearchResult, UnifiedSearchResult};
 use crate::core::tools::{
     BaseDeclarativeTool, Kind, ToolCallConfirmationDetails, ToolError, ToolInvocation,
@@ -52,11 +55,17 @@ impl SearchTool {
         include_hidden: Option<bool>,
     ) -> Result<ToolResult, Box<dyn std::error::Error>> {
         let output_mode = output_mode.unwrap_or_else(|| "content".to_string());
+        // 默认只做一件事：`@` 开头明显是在找文件，否则只搜内容。
+        //
+        // 以前默认 `"both"` —— 一次纯内容搜索也会顺带跑一遍文件名搜索，再把最多
+        // 20 行文件路径贴进上下文（"📂 Matched Files" 那一节）。对"这个词在哪
+        // 用过"这类问题，那一节基本没有信息量，纯粹烧 token。要文件名列表就显式
+        // 传 `search_type` 或 `output_mode: "files_with_matches"`。
         let search_type = search_type.unwrap_or_else(|| {
-            if output_mode == "files_with_matches" {
-                "text".to_string()
+            if query.starts_with('@') {
+                "files".to_string()
             } else {
-                "both".to_string()
+                "text".to_string()
             }
         });
         let base_dir = self.resolve_search_base_dir(path.as_deref());
@@ -203,10 +212,10 @@ impl SearchTool {
             });
         }
 
-        let formatted_output = if output_mode == "files_with_matches" {
-            self.format_files_with_matches(&results, query)
-        } else {
-            self.format_unified_results(&results, query, &search_type)
+        let formatted_output = match output_mode.as_str() {
+            "files_with_matches" => self.format_files_with_matches(&results, query),
+            "count" => self.format_counts(&results, query),
+            _ => self.format_unified_results(&results, query, &search_type),
         };
 
         Ok(ToolResult {
@@ -236,7 +245,9 @@ impl SearchTool {
             case_sensitive: case_sensitive.unwrap_or(false),
             whole_word: whole_word.unwrap_or(false),
             regex: regex.unwrap_or(false),
-            max_results,
+            // 必须有上限。以前这里直接传 `None`，而 ripgrep 把 `None` 当
+            // `u32::MAX` —— 一次宽泛的 pattern 就能把上千条匹配灌进上下文。
+            max_results: Some(max_results.unwrap_or(DEFAULT_MAX_RESULTS)),
             file_types: file_types.cloned(),
             exclude_patterns: None,
             include_patterns: include_pattern.map(|p| vec![p.to_string()]),
@@ -349,6 +360,12 @@ impl SearchTool {
         Ok(file_results)
     }
 
+    /// 文本匹配 + 命中的文件名，压成紧凑文本。
+    ///
+    /// 三条硬约束（都是 token 账）：
+    /// 1. 路径相对 cwd，不再每个文件重复一遍绝对路径前缀；
+    /// 2. 一行一条，行内容截断，每文件最多几行，其余折成 `+N more`；
+    /// 3. 整体有字符预算，超了就截断并提示收窄搜索范围。
     fn format_unified_results(
         &self,
         results: &[UnifiedSearchResult],
@@ -359,61 +376,68 @@ impl SearchTool {
             return format!("No results found for \"{}\"", query);
         }
 
-        let mut output = format!("Search results for \"{}\":\n", query);
+        let base_dir = PathBuf::from(crate::core::utils::paths::current_dir_cached().clone());
+        let mut output = String::new();
 
-        let text_results: Vec<&UnifiedSearchResult> =
-            results.iter().filter(|r| r.result_type == "text").collect();
         let file_results: Vec<&UnifiedSearchResult> =
             results.iter().filter(|r| r.result_type == "file").collect();
-
         if !file_results.is_empty() {
-            output.push_str("\n📂 Matched Files:\n");
+            output.push_str(&format!(
+                "{} matching by name:\n",
+                plural_count(file_results.len(), "file")
+            ));
             for result in file_results.iter().take(20) {
-                output.push_str(&format!("- {}\n", result.file));
+                output.push_str(&format!("  {}\n", display_path(&result.file, &base_dir)));
             }
             if file_results.len() > 20 {
-                output.push_str(&format!(
-                    "  ... and {} more files\n",
-                    file_results.len() - 20
-                ));
+                output.push_str(&format!("  +{} more\n", file_results.len() - 20));
             }
         }
 
-        if !text_results.is_empty() {
-            output.push_str("\n📝 Text Matches:\n");
-
-            use std::collections::HashMap;
-            let mut file_matches: HashMap<String, Vec<&UnifiedSearchResult>> = HashMap::new();
-            for result in &text_results {
-                file_matches
-                    .entry(result.file.clone())
-                    .or_default()
-                    .push(result);
-            }
-
-            let mut sorted_files: Vec<String> = file_matches.keys().cloned().collect();
-            sorted_files.sort();
-
-            for file in sorted_files {
-                let matches = &file_matches[&file];
-                output.push_str(&format!("{}\n", file));
-
-                let mut sorted_matches = matches.clone();
-                sorted_matches.sort_by_key(|m| m.line.unwrap_or(0));
-
-                for m in sorted_matches.iter().take(10) {
-                    if let Some(line_num) = m.line {
-                        let content = m.match_content.as_deref().unwrap_or("").trim();
-                        output.push_str(&format!("- {}: {}\n", line_num, content));
-                    }
-                }
-                if matches.len() > 10 {
-                    output.push_str(&format!("  ... +{} more matches\n", matches.len() - 10));
-                }
+        let text_hits: Vec<GrepHit<'_>> = results
+            .iter()
+            .filter(|r| r.result_type == "text")
+            .map(|r| GrepHit {
+                file: &r.file,
+                line: r.line,
+                // 注意：取 `text`（命中行的原文），不是 `match_content`
+                // —— 后者存的是 pattern 本身，取错会让每一行都把正则重复一遍。
+                text: r.text.as_deref(),
+            })
+            .collect();
+        if !text_hits.is_empty() {
+            if !output.is_empty() {
                 output.push('\n');
             }
+            output.push_str(&format_grep_hits(&text_hits, &base_dir, query));
         }
 
+        output.trim_end().to_string()
+    }
+
+    /// 只回"每个文件命中几处"：判断改动面时用，最省的一种输出。
+    fn format_counts(&self, results: &[UnifiedSearchResult], query: &str) -> String {
+        let text_results: Vec<&UnifiedSearchResult> =
+            results.iter().filter(|r| r.result_type == "text").collect();
+        if text_results.is_empty() {
+            return format!("No matches found for \"{}\"", query);
+        }
+
+        let base_dir = PathBuf::from(crate::core::utils::paths::current_dir_cached().clone());
+        let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for r in &text_results {
+            *counts.entry(r.file.as_str()).or_default() += 1;
+        }
+
+        let mut output = format!(
+            "{} in {} for \"{}\"\n",
+            plural_count(text_results.len(), "match"),
+            plural_count(counts.len(), "file"),
+            query
+        );
+        for (file, count) in counts {
+            output.push_str(&format!("{}: {}\n", display_path(file, &base_dir), count));
+        }
         output.trim_end().to_string()
     }
 
@@ -430,9 +454,10 @@ impl SearchTool {
             return format!("No files with matches found for \"{}\"", query);
         }
 
-        let mut output = format!("Files with matches for \"{}\":\n", query);
+        let base_dir = PathBuf::from(crate::core::utils::paths::current_dir_cached().clone());
+        let mut output = format!("{} with matches:\n", plural_count(files.len(), "file"));
         for file in files {
-            output.push_str(&format!("{}\n", file));
+            output.push_str(&format!("{}\n", display_path(&file, &base_dir)));
         }
         output.trim_end().to_string()
     }
@@ -485,6 +510,100 @@ fn calculate_file_score(file_name: &str, file_path: &str, pattern: &str) -> u32 
     1
 }
 
+/// 把匹配结果压成上下文友好文本时的几条硬约束。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::state::GlobalState;
+
+    fn text_hit(file: &str, line: u32, text: &str) -> UnifiedSearchResult {
+        UnifiedSearchResult {
+            result_type: "text".to_string(),
+            file: file.to_string(),
+            line: Some(line),
+            column: None,
+            text: Some(text.to_string()),
+            // ripgrep 把 pattern 本身塞在 `match_content` 里 —— 格式化时必须用
+            // `text`，否则每行都在重复正则。
+            match_content: Some("model\\.DB".to_string()),
+            score: None,
+        }
+    }
+
+    fn tool() -> SearchTool {
+        SearchTool::new(Arc::new(GlobalState::new()))
+    }
+
+    /// 回归：每行显示的是**命中行的原文**，不是 pattern。
+    ///
+    /// 事故实况：`format_unified_results` 取的是 `match_content`，于是
+    /// `Grep("model\.DB|DB\.Where|...")` 的每一行输出都是那个正则本身 —— 5 条
+    /// 结果把同一串 40 字符的 pattern 抄了 5 遍，还一个字都没告诉模型。
+    #[test]
+    fn a_match_line_shows_the_line_not_the_pattern() {
+        let results = vec![text_hit(
+            "src/models/gorm.go",
+            36,
+            "model.DB, err = gorm.Open(dsn)",
+        )];
+        let out = tool().format_unified_results(&results, "model\\.DB", "text");
+
+        assert!(
+            out.contains("model.DB, err = gorm.Open(dsn)"),
+            "实际输出：{out}"
+        );
+        assert!(
+            !out.contains("36: model\\.DB"),
+            "行内容里出现了 pattern 本身，说明又取错了字段：{out}"
+        );
+    }
+
+    /// 路径相对 cwd：绝对路径前缀在每个文件上重复一遍，文件一多就是纯浪费。
+    #[test]
+    fn paths_are_relative_to_the_working_directory() {
+        let cwd = crate::core::utils::paths::current_dir_cached().clone();
+        let abs = cwd.join("src").join("models").join("gorm.go");
+        let results = vec![text_hit(&abs.to_string_lossy(), 36, "model.DB = nil")];
+        let out = tool().format_unified_results(&results, "model\\.DB", "text");
+
+        assert!(
+            out.contains("src/models/gorm.go"),
+            "应当输出相对路径，实际：{out}"
+        );
+        assert!(
+            !out.contains(&cwd.to_string_lossy().to_string()),
+            "实际：{out}"
+        );
+    }
+
+    /// 同文件超过 MAX_LINES_PER_FILE 条时折叠成 `+N more`，而不是全量铺开。
+    #[test]
+    fn a_file_with_many_hits_is_folded() {
+        let results: Vec<_> = (1..=25)
+            .map(|i| text_hit("src/a.rs", i, &format!("let x{i} = 1;")))
+            .collect();
+        let out = tool().format_unified_results(&results, "let x", "text");
+
+        assert!(out.contains("+15 more"), "应当折叠多余命中，实际：{out}");
+        assert!(out.contains("25 matches"), "总数仍要可见，实际：{out}");
+    }
+
+    /// `count` 模式只回"每个文件几处"，给判断改动面用。
+    #[test]
+    fn count_mode_returns_matches_per_file_only() {
+        let results = vec![
+            text_hit("src/a.rs", 1, "let x = 1;"),
+            text_hit("src/a.rs", 2, "let y = 2;"),
+            text_hit("src/b.rs", 9, "let z = 3;"),
+        ];
+        let out = tool().format_counts(&results, "let ");
+
+        assert!(out.contains("3 matches in 2 files"), "实际：{out}");
+        assert!(out.contains("src/a.rs: 2"), "实际：{out}");
+        assert!(!out.contains("let x"), "count 模式不该带行内容：{out}");
+    }
+}
+
 impl BaseDeclarativeTool for SearchTool {
     fn name(&self) -> &str {
         "Grep"
@@ -495,7 +614,11 @@ impl BaseDeclarativeTool for SearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search for files or text content in files"
+        "Search file contents (or file names, when the query starts with '@') with ripgrep. \
+         output_mode: 'content' (default, matching lines), 'files_with_matches' (paths only, cheapest), \
+         'count' (matches per file). Output is bounded: relative paths, at most 100 matches, \
+         at most 10 lines per file, long lines truncated — raise `max_results` or narrow \
+         `path`/`include_pattern` if you need more."
     }
 
     fn kind(&self) -> Kind {
@@ -510,14 +633,14 @@ impl BaseDeclarativeTool for SearchTool {
                 "pattern": { "type": "string", "description": "Alias for query, accepted for grep-compatible calls." },
                 "path": { "type": "string", "description": "Directory to search. Supports relative paths, absolute paths, and Windows drive paths such as G:\\\\project when running under WSL." },
                 "dir_path": { "type": "string", "description": "Alias for path, accepted for compatibility with older grep tools." },
-                "output_mode": { "type": "string", "enum": ["content", "files_with_matches"], "description": "Output mode. 'content' returns matching lines; 'files_with_matches' returns unique file paths only." },
+                "output_mode": { "type": "string", "enum": ["content", "files_with_matches", "count"], "description": "Output mode. 'content' returns matching lines (bounded: max_results matches, 10 per file, long lines truncated); 'files_with_matches' returns unique file paths only; 'count' returns the number of matches per file." },
                 "search_type": { "type": "string", "enum": ["text", "files", "both"], "description": "Type of search: 'text' for content, 'files' for filenames, 'both' for combined" },
                 "include_pattern": { "type": "string", "description": "Glob pattern to include files" },
                 "exclude_pattern": { "type": "string", "description": "Glob pattern to exclude files" },
                 "case_sensitive": { "type": "boolean", "description": "Case sensitive search" },
                 "whole_word": { "type": "boolean", "description": "Match whole words only" },
                 "regex": { "type": "boolean", "description": "Treat query as regex" },
-                "max_results": { "type": "integer", "description": "Maximum number of results" },
+                "max_results": { "type": "integer", "description": "Maximum number of matches to return (default 100). Raise it only when you really need more — every extra match costs context." },
                 "file_types": { "type": "array", "items": { "type": "string" }, "description": "Filter by file types (e.g., ['rs', 'toml'])" },
                 "exclude_files": { "type": "array", "items": { "type": "string" }, "description": "List of files to exclude" },
                 "include_hidden": { "type": "boolean", "description": "Include hidden files" }

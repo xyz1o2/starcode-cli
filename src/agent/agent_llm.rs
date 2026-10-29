@@ -132,6 +132,32 @@ impl Agent {
             estimated_tokens + tool_schema_tokens,
         ));
 
+        // 请求出线指纹：registry 本身按名字索引（重名会互相覆盖），短名单又由
+        // 多个来源拼装（核心集 / 评分 / MCP 配额 / 已发现配额），按理不可能
+        // 发出重名条目；但只要抓包看到某个工具在请求里出现两次，就需要能
+        // 首先排除"本进程真的发重了"这一条 —— 这行就是为那一刻准备的对照。
+        {
+            let mut seen: std::collections::HashSet<&str> =
+                std::collections::HashSet::with_capacity(turn_tool_selection.tools.len());
+            let dedup_names: Vec<&str> = turn_tool_selection
+                .tools
+                .iter()
+                .filter(|t| !seen.insert(t.function.name.as_str()))
+                .map(|t| t.function.name.as_str())
+                .collect();
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[LLM] Turn {} request tools: {} entries, {} unique{}",
+                current_turn,
+                turn_tool_selection.tools.len(),
+                seen.len(),
+                if dedup_names.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — DUPLICATE: {}", dedup_names.join(", "))
+                }
+            ));
+        }
+
         // 预发送 Token 检查
         let context_window = self.context_compressor.context_window() as usize;
         let safety_threshold = (context_window as f64 * 0.80) as usize;
