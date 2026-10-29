@@ -48,6 +48,13 @@ pub struct IndexCoordinator {
     last_rebuild_failed: AtomicBool,
     /// 语义搜索引擎缓存（agent_core lazy_init 时注入）
     engine_cache: Mutex<Option<Arc<crate::core::context::search_cache::SearchEngineCacheManager>>>,
+    /// 0 变更空转重建的抑制计数：每轮空转 +1，每 30s 汇总打一次点并清零。
+    ///
+    /// 只影响日志，不影响任何逻辑 —— 空转本身无害，刷屏有害。
+    /// 实测教训：0 变更重建不抑制时，50 Hz 空转两天写满 2.5 GB 日志。
+    idle_noop_count: AtomicU64,
+    /// 上次空转汇总打点的时刻。
+    last_idle_report: Mutex<Option<Instant>>,
 }
 
 static COORDINATOR: OnceLock<IndexCoordinator> = OnceLock::new();
@@ -65,6 +72,8 @@ fn coordinator() -> &'static IndexCoordinator {
         rebuilding: AtomicBool::new(false),
         last_rebuild_failed: AtomicBool::new(false),
         engine_cache: Mutex::new(None),
+        idle_noop_count: AtomicU64::new(0),
+        last_idle_report: Mutex::new(None),
     })
 }
 
@@ -315,12 +324,19 @@ fn rebuild_worker_loop(
                         }
                         _ => {}
                     }
-                    let mut inner = coord.inner.lock();
+                     let mut inner = coord.inner.lock();
                     for path in event.paths {
                         if let Ok(rel) = path.strip_prefix(&root) {
                             let rel = rel.to_string_lossy().replace('\\', "/");
                             // 索引自身的持久化文件不进脏集合，否则重建→写盘→事件→重建 死循环
-                            if rel.starts_with(".star/") {
+                            //
+                            // 注意 `.star` 目录**本身**也算：Windows 上 notify 会把「watch
+                            // 根目录自己的元数据变更」直接以 watch 根路径上报，rel == ".star"
+                            // 和 rel == "" 都不指向任何文件，放进来只会引发「0 变更重建
+                            // 空转 50 Hz + 刷爆 debug 日志」（实测把 2.5 GB 日志灌满的就是它）。
+                            // `.star` 内部的真实写入反正由 `(size, mtime)` 全量增量兜底，
+                            // 下一轮真实事件自会把变化补进来。
+                            if rel.is_empty() || rel == ".star" || rel.starts_with(".star/") {
                                 continue;
                             }
                             // 事件过滤：没有这一层，跑一次 `cargo build` 会灌进
@@ -365,10 +381,13 @@ fn rebuild_worker_loop(
         };
 
         if has_pending {
-            let snapshot: Vec<String> = {
+            let mut snapshot: Vec<String> = {
                 let mut inner = coord.inner.lock();
                 std::mem::take(&mut inner.dirty).into_iter().collect()
             };
+            // HashSet 迭代序是随机的：日志里 dirty.first() 一会 `Some("")`
+            // 一会 `Some(".star")`，排查时误导。排序一次，日志稳定可读。
+            snapshot.sort();
             run_incremental_rebuild(&root, &snapshot);
         }
     }
@@ -390,16 +409,37 @@ fn run_incremental_rebuild(root: &Path, dirty: &[String]) {
     let indexer = Indexer::new(root);
     let index_result = indexer.index_project();
 
+    // 0 变更 = 本轮没有任何文件内容变化（自指事件残留等），是纯空转：
+    // 日志照打会把 debug 日志刷爆（实测 50 Hz 空转两天写满 2.5 GB）。
+    // 抑制为「每 30s 汇总一次」—— 空转次数和耗时仍然可观测，不再刷屏。
+    let index_noop =
+        matches!(&index_result, Ok(r) if r.new_blobs.is_empty() && r.removed_blobs.is_empty());
+
     match &index_result {
         Ok(result) => {
-            crate::utils::logging::append_debug_log_line(&format!(
-                "[Context] incremental reindex: {} changed, {} removed, {} total ({:?}) in {:?}",
-                result.new_blobs.len(),
-                result.removed_blobs.len(),
-                result.total_files,
-                dirty.first(),
-                started_at.elapsed()
-            ));
+            if index_noop {
+                let count = coord.idle_noop_count.fetch_add(1, Ordering::SeqCst) + 1;
+                let mut last = coord.last_idle_report.lock();
+                if last.as_ref().is_none_or(|t| t.elapsed() >= Duration::from_secs(30)) {
+                    *last = Some(Instant::now());
+                    coord.idle_noop_count.store(0, Ordering::SeqCst);
+                    drop(last);
+                    crate::utils::logging::append_debug_log_line(&format!(
+                        "[Context] incremental reindex: 0 changes (no-op ×{}) — suppressing for 30s (last {:?})",
+                        count,
+                        started_at.elapsed()
+                    ));
+                }
+            } else {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[Context] incremental reindex: {} changed, {} removed, {} total ({:?}) in {:?}",
+                    result.new_blobs.len(),
+                    result.removed_blobs.len(),
+                    result.total_files,
+                    dirty.first(),
+                    started_at.elapsed()
+                ));
+            }
         }
         Err(err) => {
             crate::utils::logging::append_debug_log_line(&format!(
@@ -433,11 +473,24 @@ fn run_incremental_rebuild(root: &Path, dirty: &[String]) {
                                 files,
                             } => format!("full rebuild, {} files", files),
                         };
-                        crate::utils::logging::append_debug_log_line(&format!(
-                            "[Context] semantic engine updated in background: {} in {:?}",
-                            detail,
-                            started_at.elapsed()
-                        ));
+                        // 索引 0 变更 + 补丁 0 ops：纯空转，不复打点（同上面
+                        // reindex 的 30s 汇总口径）—— 这一条本身就是 2.5 GB
+                        // 日志里最大的单一来源（1,159 万行 / 1.1 GB）。
+                        // FullRebuild 和真实补丁照常打点，可观测性不受影响。
+                        let boring = index_noop
+                            && matches!(
+                                &outcome,
+                                crate::core::tools::codebase_search::UpdateOutcome::Patched {
+                                    changed,
+                                } if *changed == 0
+                            );
+                        if !boring {
+                            crate::utils::logging::append_debug_log_line(&format!(
+                                "[Context] semantic engine updated in background: {} in {:?}",
+                                detail,
+                                started_at.elapsed()
+                            ));
+                        }
                         coord.last_rebuild_failed.store(false, Ordering::SeqCst);
                     }
                     Err(err) => {
