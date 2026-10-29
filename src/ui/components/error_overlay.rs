@@ -1,12 +1,17 @@
-/// Error overlay — displays provider errors with retry/cancel/switch options.
+/// Error overlay — provider 错误走**统一弹窗外壳**（`common::modal_shell`，
+/// 与 /mcp /market /plugin 同一套骨架）：几何、清屏、边框、标题、底部按键条
+/// 都归外壳管，这里只产出内容行。之前自己手搓了一份居中矩形 + 徽章标题 +
+/// 内联 `[r] 按钮`，样式和别的弹窗对不上，改一处主题要记两套写法。
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
     Frame,
 };
 
+use super::common::modal_shell::{
+    footer_hints, modal_shell, render_body, row_style, with_footer, ModalSpec,
+};
 use crate::core::i18n;
 use crate::ui::themes::theme::Theme;
 
@@ -108,71 +113,57 @@ fn error_type_label(error_type: &ErrorType) -> (&'static str, Color) {
     }
 }
 
-/// 给 toast / 状态栏用的短标题。浮层不弹的时候，这是用户唯一会立刻看到的一行。
-pub fn error_type_title(error_type: &ErrorType) -> String {
-    error_type_label(error_type).0.to_string()
-}
-
-/// Render the error overlay
+/// 渲染错误浮层 —— 统一外壳 + 标准选项列表。
+///
+/// 三个动作的交互没有变：↑/↓/Enter 走选中项，`r` / `c` / `s` 仍然直开直执行；
+/// 变的只是外观：选项行用和确认卡、MCP 列表一致的 `❯` 高亮列表，
+/// 按键说明收进外壳统一管理的 footer。
 pub fn render_error_overlay(f: &mut Frame, state: &ErrorOverlayState, area: Rect, theme: &Theme) {
-    let width = 60.min(area.width.saturating_sub(4));
-    let height = 14.min(area.height.saturating_sub(4));
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let popup_area = Rect {
-        x,
-        y,
-        width,
-        height,
-    };
-
-    f.render_widget(Clear, popup_area);
-
     let (type_label, type_color) = error_type_label(&state.error_type);
+
+    let inner = modal_shell(
+        f,
+        area,
+        &ModalSpec {
+            title: i18n::t("ui.error.title", "错误", "Error"),
+            accent: type_color,
+            size: Some((ERROR_DIALOG_WIDTH, ERROR_DIALOG_HEIGHT)),
+            ..ModalSpec::default()
+        },
+    );
+    let (body, footer) = with_footer(inner);
 
     let mut lines = Vec::new();
 
-    // Title
-    lines.push(Line::from(vec![Span::styled(
-        format!(" {} ", type_label),
-        Style::default()
-            .fg(Color::White)
-            .bg(type_color)
-            .add_modifier(Modifier::BOLD),
-    )]));
-    lines.push(Line::from(""));
-
-    // Error message (truncated)
-    //
-    // 按 **字符** 而不是字节截断：provider 的错误里混着中文是常事，按字节切会落在
-    // 非 UTF-8 边界上直接 panic，而这个函数正在渲染一个"出错了"的浮层。
-    let max_msg_chars = (width as usize).saturating_sub(4);
-    let msg = if state.error_message.chars().count() > max_msg_chars {
-        let head: String = state
-            .error_message
-            .chars()
-            .take(max_msg_chars.saturating_sub(3))
-            .collect();
-        format!("{}...", head)
-    } else {
-        state.error_message.clone()
-    };
+    // 分类行：外壳标题之外，第一眼要看到错误"是什么类型"。
     lines.push(Line::from(Span::styled(
-        msg,
-        Style::default().fg(theme.foreground),
+        format!(" ⚠ {}", type_label),
+        Style::default()
+            .fg(type_color)
+            .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(""));
 
+    // 错误消息。按**字符**折行（provider 的错误里混中文，按字节切会落在
+    // 非 UTF-8 边界上 panic）——消息全文已经在 chat_history 里，浮层里
+    // 折不完的部分折行计数收尾，不截掉信息。
+    let wrap_width = body.width.saturating_sub(4) as usize;
+    let show = wrap_with_cap(&state.error_message, wrap_width, MESSAGE_MAX_LINES);
+    for text in show {
+        lines.push(Line::from(Span::raw(text)));
+    }
+
     // Retry info
     if state.retry_count > 0 {
+        lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!(" {}/{}", state.retry_count, state.max_retries),
             Style::default().fg(theme.secondary),
         )));
-        lines.push(Line::from(""));
     }
 
-    // Action buttons
+    // Action rows —— 与确认卡同一套 `❯ N. label` 头部；快捷键显示在行首。
+    lines.push(Line::from(""));
     let actions = [
         (
             ErrorAction::Retry,
@@ -190,45 +181,75 @@ pub fn render_error_overlay(f: &mut Frame, state: &ErrorOverlayState, area: Rect
             "s",
         ),
     ];
-
-    let mut action_spans = Vec::new();
-    for (i, (action, label, key)) in actions.iter().enumerate() {
-        if i > 0 {
-            action_spans.push(Span::styled("  ", Style::default()));
-        }
-        let is_selected = state.selected_action == *action;
-        let style = if is_selected {
-            Style::default()
-                .fg(Color::White)
-                .bg(theme.primary)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.secondary)
-        };
-        action_spans.push(Span::styled(format!(" [{}] {} ", key, label), style));
+    for (action, label, key) in actions {
+        let selected = state.selected_action == action;
+        // 统一列表行高亮：与 MCP / market 列表同一种选中样式（黑底青字）。
+        let row = row_style(0, usize::from(selected));
+        let arrow = Span::styled(
+            if selected { " ❯ " } else { "   " },
+            Style::default().fg(theme.primary),
+        );
+        let key_span = Span::styled(format!("{} ", key), row);
+        let text_span = Span::styled(label, row);
+        lines.push(Line::from(vec![arrow, key_span, text_span]));
     }
-    lines.push(Line::from(action_spans));
-    lines.push(Line::from(""));
 
-    // Hint
-    lines.push(Line::from(Span::styled(
-        i18n::t(
-            "ui.error.hint",
-            "↑/↓ 导航 · Enter 确认",
-            "↑/↓ navigate · Enter confirm",
-        ),
-        Style::default().fg(theme.comment),
-    )));
+    render_body(f, body, lines);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(type_color))
-        .title(Span::styled(
-            format!(" {} ", i18n::t("ui.error.title", "错误", "Error")),
-            Style::default().fg(type_color).add_modifier(Modifier::BOLD),
-        ));
+    // 外壳统一的底部按键条；`Esc` 的行为同 `c`（关浮层，不放弃重试机会）。
+    let hints: &[(&str, &str)] = &[
+        ("↑↓", "select"),
+        ("Enter", "confirm"),
+        ("r", "retry"),
+        ("c", "cancel"),
+        ("s", "provider"),
+        ("Esc", "close"),
+    ];
+    render_body(f, footer, vec![footer_hints(hints)]);
+}
 
-    let paragraph = Paragraph::new(lines).block(block);
-    f.render_widget(paragraph, popup_area);
+/// 浮层的固定格子尺寸：错误确认弹窗要小而稳，
+/// 用百分比几何会在宽屏上被拉成横幅。
+const ERROR_DIALOG_WIDTH: u16 = 62;
+const ERROR_DIALOG_HEIGHT: u16 = 13;
+/// 消息超出多少行后收为"还有 N 行"——浮层高度被这两项锁着。
+const MESSAGE_MAX_LINES: usize = 3;
+
+/// 按字符数折行（近似 display width），最多“cap 行正文 + 1 行计数”。
+fn wrap_with_cap(text: &str, width: usize, cap: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out: Vec<String> = Vec::new();
+    for paragraph in text.split('\n') {
+        if paragraph.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        for word in paragraph.split(' ') {
+            let word = if word.chars().count() > width {
+                word.chars().take(width).collect::<String>()
+            } else {
+                word.to_string()
+            };
+            if current.is_empty() {
+                current = word;
+            } else if current.chars().count() + word.chars().count() >= width {
+                out.push(current);
+                current = word;
+            } else {
+                current.push(' ');
+                current.push_str(&word);
+            }
+        }
+        if !current.is_empty() {
+            out.push(current);
+        }
+    }
+
+    if out.len() > cap {
+        let hidden = out.len() - cap;
+        out.truncate(cap);
+        out.push(format!("  … +{} lines (full text in chat)", hidden));
+    }
+    out
 }

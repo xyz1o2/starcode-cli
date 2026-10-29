@@ -19,6 +19,10 @@ pub struct ModalSpec {
     pub percent_y: u16,
     pub title: String,
     pub accent: Color,
+    /// Fixed cell size override. 小对话框（错误浮层这类 60 列左右的确认弹窗）
+    /// 不适合百分比几何：屏一大弹窗就被拉成横幅。给了 size 就按固定格子居中，
+    /// 并 clamp 进 `area`；不给则走 `percent_x/percent_y`。
+    pub size: Option<(u16, u16)>,
 }
 
 impl Default for ModalSpec {
@@ -28,6 +32,7 @@ impl Default for ModalSpec {
             percent_y: 60,
             title: String::new(),
             accent: Color::Cyan,
+            size: None,
         }
     }
 }
@@ -56,7 +61,19 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 /// Draw the modal chrome (clear + rounded border + title) and return the
 /// inner area the caller should render its body into.
 pub fn modal_shell(f: &mut Frame<'_>, area: Rect, spec: &ModalSpec) -> Rect {
-    let area = centered_rect(spec.percent_x, spec.percent_y, area);
+    let area = match spec.size {
+        Some((width, height)) => {
+            let width = width.min(area.width.saturating_sub(2)).max(4);
+            let height = height.min(area.height.saturating_sub(2)).max(3);
+            Rect {
+                x: area.x + area.width.saturating_sub(width) / 2,
+                y: area.y + area.height.saturating_sub(height) / 2,
+                width,
+                height,
+            }
+        }
+        None => centered_rect(spec.percent_x, spec.percent_y, area),
+    };
     let block = Block::default()
         .title(Span::styled(
             format!(" {} ", spec.title),
