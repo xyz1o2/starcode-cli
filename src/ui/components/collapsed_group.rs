@@ -354,12 +354,11 @@ fn build_status_indicators(tool_calls: usize, errors: usize, successes: usize) -
 }
 
 /// 截断字符串
+///
+/// 以前是字节切片 `&s[..n]`，切点落在多字节字符中间直接 panic；现在统一走
+/// 显示宽度口径（`utils::text::truncate_display`）。
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
-    }
+    crate::ui::utils::text::truncate_display(s, max_len)
 }
 
 /// 折叠组的切换逻辑

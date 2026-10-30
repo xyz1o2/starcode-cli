@@ -325,10 +325,5 @@ fn mcp_confirm_lines(name: &str) -> Vec<Line<'static>> {
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let cut: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{}…", cut)
-    }
+    crate::ui::utils::text::truncate_display(s, max)
 }

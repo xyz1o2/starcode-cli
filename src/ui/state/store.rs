@@ -1558,7 +1558,6 @@ impl ChatState {
         }
     }
 
-    /// 获取选中的文本内容（从渲染后的行中提取）
     /// 选区里的纯文本。
     ///
     /// 换算逻辑在 `ui::selection`（与高亮共用一套列宽口径）；这里只负责
@@ -1568,6 +1567,51 @@ impl ChatState {
         crate::ui::selection::selected_text(&range, |entry_idx| {
             crate::ui::selection::entry_rendered_lines(self, entry_idx)
         })
+    }
+
+    /// 某个工具块当前是展开还是折叠。
+    ///
+    /// 折叠状态存的是"与默认值相反的翻转位"（`expanded_tool_call_ids`）：
+    /// ToolCall 默认展开；ToolResult 里只有编辑类工具默认展开。
+    /// 这段判断以前在 `tool_render.rs` 里就地算，现在收在这里，读写两端同一份。
+    pub fn is_tool_expanded(&self, entry: &ChatEntry) -> bool {
+        let Some(tc) = entry.tool_call.as_ref() else {
+            return true;
+        };
+        // 走统一归一，避免别名漏判（对标 constants::is_edit_tool_name）
+        let is_edit_tool =
+            crate::core::tools::constants::is_edit_tool_name(tc.function.name.as_str())
+                || tc.function.name == "TodoWrite";
+
+        let default_expanded = matches!(entry.entry_type, crate::types::ChatEntryType::ToolCall)
+            || (matches!(entry.entry_type, crate::types::ChatEntryType::ToolResult)
+                && is_edit_tool);
+        default_expanded ^ self.expanded_tool_call_ids.contains(&tc.id)
+    }
+
+    /// 折叠 / 展开一个工具块，返回是否真的切换了。
+    ///
+    /// 以前 `mouse.rs`（单击工具头）和 `input.rs`（Tab）各写一遍增删逻辑，
+    /// 而两边的收尾动作不一样：`input.rs` 会 `virtual_list.mark_dirty`，
+    /// `mouse.rs` 不会 —— 靠"缓存里没有这一项"侥幸触发重渲染。
+    /// 现在只此一处，切换后统一失效缓存 + 标脏。
+    pub fn toggle_tool_expansion(&mut self, entry_idx: usize) -> bool {
+        let Some(entry) = self.chat_history.get(entry_idx) else {
+            return false;
+        };
+        let Some(tc) = entry.tool_call.as_ref() else {
+            return false;
+        };
+        let tool_id = tc.id.clone();
+
+        if self.expanded_tool_call_ids.contains(&tool_id) {
+            self.expanded_tool_call_ids.remove(&tool_id);
+        } else {
+            self.expanded_tool_call_ids.insert(tool_id);
+        }
+        self.rendered_cache.remove(&entry_idx);
+        self.virtual_list.mark_dirty(entry_idx);
+        true
     }
 
     pub fn update_item_height(&mut self, index: usize, height: u16) {
@@ -2102,6 +2146,84 @@ mod tests {
         state.text_selection.start_selection(0, 0, 2);
         state.text_selection.update_selection(0, 0, 5);
         assert_eq!(state.get_selected_text().as_deref(), Some("分析"));
+    }
+
+    /// 折叠切换：读写两端必须是同一份逻辑。
+    ///
+    /// 以前 `tool_render.rs`（读）、`mouse.rs`（单击写）、`input.rs`（Tab 写）
+    /// 各写一遍，读的地方算 `default_expanded ^ toggled`，写的地方直接增删
+    /// `expanded_tool_call_ids` —— 收尾动作还不一致（Tab 会标脏 virtual_list，
+    /// 单击不会）。
+    #[test]
+    fn toggling_a_tool_block_is_observed_by_the_render_path() {
+        let mut state = ChatState::new();
+        let tool_call = crate::types::StarToolCall {
+            id: "call-1".to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: "Read".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+        // ToolResult + Read（非编辑类工具）→ 默认折叠
+        state.chat_history.push(ChatEntry::tool_result(
+            "",
+            tool_call,
+            crate::types::ToolResult {
+                success: true,
+                output: Some("ok".to_string()),
+                error: None,
+                data: None,
+                llm_content: None,
+            },
+        ));
+
+        let entry = &state.chat_history[0];
+        assert!(
+            !state.is_tool_expanded(entry),
+            "非编辑类工具的 ToolResult 默认折叠"
+        );
+
+        assert!(state.toggle_tool_expansion(0));
+        assert!(state.is_tool_expanded(&state.chat_history[0]));
+
+        assert!(state.toggle_tool_expansion(0));
+        assert!(!state.is_tool_expanded(&state.chat_history[0]));
+    }
+
+    /// 折叠状态翻转后必须让渲染缓存失效，否则画面上还是旧的展开状态。
+    #[test]
+    fn toggling_invalidates_the_render_cache() {
+        let mut state = ChatState::new();
+        let tool_call = crate::types::StarToolCall {
+            id: "call-2".to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: "Grep".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+        state
+            .chat_history
+            .push(ChatEntry::tool_call("", tool_call));
+        state
+            .rendered_cache
+            .insert(0, (1, vec![ratatui::text::Line::from("x")]));
+
+        assert!(state.toggle_tool_expansion(0));
+        assert!(
+            !state.rendered_cache.contains_key(&0),
+            "切换后渲染缓存必须失效"
+        );
+    }
+
+    /// 没有工具调用的条目不是可折叠对象。
+    #[test]
+    fn an_entry_without_a_tool_call_cannot_be_toggled() {
+        let mut state = ChatState::new();
+        state.chat_history.push(ChatEntry::assistant("hello"));
+        assert!(!state.toggle_tool_expansion(0));
+        assert!(!state.toggle_tool_expansion(99));
     }
 
     #[test]

@@ -132,16 +132,14 @@ fn try_toggle_on_click(state: &mut ChatState, entry_idx: usize, row: usize) -> b
         }
     }
 
-    if let Some(tc) = &entry.tool_call {
-        if row == 0 {
-            if state.expanded_tool_call_ids.contains(&tc.id) {
-                state.expanded_tool_call_ids.remove(&tc.id);
-            } else {
-                state.expanded_tool_call_ids.insert(tc.id.clone());
-            }
-            state.rendered_cache.remove(&entry_idx);
-            return true;
-        }
+    // 工具块：仅点头部行（row 0）切换。
+    //
+    // 切换逻辑收在 `ChatState::toggle_tool_expansion` —— Tab 键走同一条路径，
+    // 两边以前各写一遍增删，收尾动作还不一致（Tab 会标脏 virtual_list，
+    // 单击不会）。
+    let is_tool_header = row == 0 && entry.tool_call.is_some();
+    if is_tool_header {
+        return state.toggle_tool_expansion(entry_idx);
     }
 
     false

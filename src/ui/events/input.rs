@@ -2927,17 +2927,8 @@ pub async fn handle_key_event(
             if !state.is_palette_open() && !state.is_awaiting_confirmation {
                 let focused_idx = find_focused_tool_entry(state);
                 if let Some(idx) = focused_idx {
-                    if let Some(entry) = state.chat_history.get(idx) {
-                        if let Some(tc) = &entry.tool_call {
-                            if state.expanded_tool_call_ids.contains(&tc.id) {
-                                state.expanded_tool_call_ids.remove(&tc.id);
-                            } else {
-                                state.expanded_tool_call_ids.insert(tc.id.clone());
-                            }
-                            state.rendered_cache.remove(&idx);
-                            state.virtual_list.mark_dirty(idx);
-                        }
-                    }
+                    // 与鼠标单击工具头走同一条路径（ChatState::toggle_tool_expansion）。
+                    state.toggle_tool_expansion(idx);
                     // 展开/折叠会改变该块的高度，视口锚点必须跟着重算，
                     // 否则用户展开的是当前屏幕中央那块，看的却是别处的滚动位置。
                     state.auto_follow = false;

@@ -269,12 +269,7 @@ fn simplify_path(path: &str, cwd: &std::path::Path) -> String {
 
 /// Truncate string to max length（按字符数截断，中文安全）
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else {
-        let cut: String = s.chars().take(max_len.saturating_sub(1)).collect();
-        format!("{}…", cut)
-    }
+    crate::ui::utils::text::truncate_display(s, max_len)
 }
 
 fn render_command_hints_overlay(

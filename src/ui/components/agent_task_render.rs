@@ -512,7 +512,7 @@ fn format_tokens(count: u32) -> String {
 /// 模型生成，中文/emoji 一律会把切点落在多字节字符中间，直接 panic 掉整个 TUI。
 /// 现在统一走 CJK 宽度感知的公共实现，顺带修正宽字符的对齐。
 fn truncate_str(s: &str, max_len: usize) -> String {
-    crate::ui::utils::render::truncate_to_display_width(s, max_len)
+    crate::ui::utils::text::truncate_display(s, max_len)
 }
 
 #[cfg(test)]

@@ -118,23 +118,9 @@ pub(crate) fn render_tool_entry_blocks(
     let prefix_width: usize = 5;
     let tool_inner_width = tool_box_width.saturating_sub(prefix_width + 1);
 
-    let expanded = entry
-        .tool_call
-        .as_ref()
-        .map(|tc| {
-            // ToolCall 默认展开
-            // ToolResult: 编辑类工具默认展开，其他工具默认折叠
-            // 走统一归一，避免别名漏判（对标 constants::is_edit_tool_name）
-            let is_edit_tool =
-                crate::core::tools::constants::is_edit_tool_name(tc.function.name.as_str())
-                    || tc.function.name == "TodoWrite";
-
-            let default_expanded = matches!(entry.entry_type, ChatEntryType::ToolCall)
-                || (matches!(entry.entry_type, ChatEntryType::ToolResult) && is_edit_tool);
-            let toggled = state.expanded_tool_call_ids.contains(&tc.id);
-            default_expanded ^ toggled
-        })
-        .unwrap_or(true);
+    // 折叠状态统一由 ChatState 判定（默认展开 + 翻转位），
+    // 与 mouse / Tab 的切换入口是同一份逻辑。
+    let expanded = state.is_tool_expanded(entry);
 
     // ToolCall: 只显示工具名称和参数摘要（单行）
     // ToolResult: 显示结果内容

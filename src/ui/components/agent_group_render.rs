@@ -196,9 +196,14 @@ fn render_agent_progress_lines(
 
     // 描述（灰色括号）
     if let Some(desc) = &stat.description {
+        // 按显示宽度截断：以前是字节切片 `&desc[..n]`，切点落在多字节字符
+        // 中间直接 panic（中文描述必踩），而且 `len()` 是字节数不是列数。
         let max_desc_width = (area_width as usize).saturating_sub(40);
-        let truncated = if desc.len() > max_desc_width {
-            format!(" ({}…)", &desc[..max_desc_width.saturating_sub(1)])
+        let truncated = if crate::ui::utils::render::display_width(desc) > max_desc_width {
+            format!(
+                " ({})",
+                crate::ui::utils::text::truncate_display(desc, max_desc_width)
+            )
         } else {
             format!(" ({})", desc)
         };

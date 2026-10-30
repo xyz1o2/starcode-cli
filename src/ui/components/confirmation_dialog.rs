@@ -883,12 +883,12 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     result
 }
 
+/// 截断到指定显示宽度。
+///
+/// 以前是字节切片 `&s[..n]` —— 切点落在多字节字符中间直接 panic（中文路径、
+/// 中文错误信息都会踩到）。现在统一走显示宽度口径。
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
-    }
+    crate::ui::utils::text::truncate_display(s, max_len)
 }
 
 fn format_display_path(path: &str) -> String {

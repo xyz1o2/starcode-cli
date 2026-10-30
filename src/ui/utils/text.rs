@@ -15,6 +15,21 @@ pub fn is_status_text(s: &str) -> bool {
 // 这里定一份口径：**列宽一律按 `render::char_display_width` 算**，也就是
 // ratatui 分配缓冲区格子的那套规则（见 render::display_width 的注释）。
 
+/// 按**显示宽度**截断，超出部分用 `…` 收尾。
+///
+/// 这是全 UI 唯一该用的截断函数。以前每个组件自己写一份 `truncate_str`，
+/// 至少四种实现：
+/// - 字节切片 `&s[..n]`（`collapsed_group` / `confirmation_dialog`）——
+///   切点落在多字节字符中间直接 panic；
+/// - 按字符数切（三个 modal + `command_suggestions`）——CJK 实际占 2 列，
+///   长度会算少一倍；
+/// - 按显示宽度切（`agent_task_render`）——只有这一种是对的。
+///
+/// 省略号也统一成 `…`（`...` 占 3 列，`…` 占 1 列）。
+pub fn truncate_display(text: &str, max_width: usize) -> String {
+    crate::ui::utils::render::truncate_to_display_width(text, max_width)
+}
+
 /// 一行渲染结果里的纯文本（去掉所有样式）。
 pub fn line_plain_text(line: &ratatui::text::Line<'_>) -> String {
     line.spans
@@ -468,5 +483,39 @@ pub fn find_last_split_point(s: &str, max_chars: usize) -> usize {
         }
     } else {
         last_boundary
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 截断不能切碎宽字符，也不能 panic。
+    ///
+    /// 回归：以前每个组件自己写一份 `truncate_str`，其中两处是**字节切片**
+    /// （`&s[..n]`），切点落在多字节字符中间直接 panic —— 中文描述、中文路径
+    /// 都会踩到。
+    #[test]
+    fn truncate_display_never_splits_a_multibyte_char() {
+        let cjk = "研究 src/hooks 目录下的组件实现";
+        for width in 0..=40 {
+            let out = truncate_display(cjk, width);
+            assert!(cjk.starts_with(out.trim_end_matches('…')), "宽度 {width}：{out}");
+        }
+    }
+
+    /// 截断按**显示列**算，不是字符数：中文一个字占 2 列。
+    #[test]
+    fn truncate_display_counts_display_columns() {
+        // 6 个汉字 = 12 列
+        assert_eq!(crate::ui::utils::render::display_width("中文测试文本"), 12);
+        let out = truncate_display("中文测试文本", 5);
+        assert!(crate::ui::utils::render::display_width(&out) <= 6, "实际：{out}");
+    }
+
+    /// 短文本原样返回，不加省略号。
+    #[test]
+    fn truncate_display_keeps_short_input_intact() {
+        assert_eq!(truncate_display("abc", 10), "abc");
     }
 }
