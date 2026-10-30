@@ -224,11 +224,129 @@ pub fn format_grep_hits(hits: &[GrepHit<'_>], base_dir: &std::path::Path, patter
 
     if truncated {
         out.push_str(
-            "\n[truncated] 结果过多已截断：换更精确的 pattern、加 include_pattern 或缩小 path 再搜一次。\n",
+            "\n[truncated] too many results: narrow the pattern, add an include_pattern, or search a smaller path.\n",
         );
     }
 
     out.trim_end().to_string()
+}
+
+/// 模式编译失败时的**窄修复**：把没有配对的括号按字面量转义。
+///
+/// ## 为什么需要它
+///
+/// 模型经常想搜**字面量**的左括号（Go 的 `func Relay(ctx ...)`），写正则时
+/// 习惯性打成 `\(` —— 但 `\(` 在 JSON 里是**非法转义**，序列化时被丢掉反斜杠，
+/// 于是模型发出的是 `func Relay(c|relay.Relay`：第 12 列的 `(` 没有配对，
+/// 整个正则编译失败，一次搜索颗粒无收。
+///
+/// 修法很窄：**只**把没有配对的 `(` / `)` 转义成字面量，其余原样不动；
+/// 修完还编译不过就照旧报错。返回 `Some(修好的模式)` 当且仅当
+/// "原模式编译不过、且修复后能编译"。
+pub fn try_repair_pattern(pattern: &str) -> Option<String> {
+    // 先确认原模式真的编译不过 —— 合法模式一个字都不动。
+    if RegexMatcherBuilder::new().build(pattern).is_ok() {
+        return None;
+    }
+
+    let repaired = escape_unbalanced_parens(pattern);
+    if repaired == pattern {
+        return None;
+    }
+    if RegexMatcherBuilder::new().build(&repaired).is_err() {
+        return None;
+    }
+    Some(repaired)
+}
+
+/// 把没有配对的 `(` / `)` 转义成字面量。
+///
+/// 已转义的（`\(`）不动；字符类 `[...]` 里的括号不算；被引号包裹的也不算。
+pub fn escape_unbalanced_parens(pattern: &str) -> String {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out = String::with_capacity(pattern.len());
+    let mut in_class = false;
+    let mut stack: Vec<usize> = Vec::new(); // 未配对左括号在 `out` 里的下标
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        let c = chars[i];
+        let escaped = i > 0 && chars[i - 1] == '\\';
+
+        match c {
+            '[' if !escaped => {
+                in_class = true;
+                out.push(c);
+            }
+            ']' if !escaped => {
+                in_class = false;
+                out.push(c);
+            }
+            '(' if !escaped && !in_class => {
+                stack.push(out.len());
+                out.push(c);
+            }
+            ')' if !escaped && !in_class => {
+                match stack.pop() {
+                    Some(_) => out.push(c),
+                    // 多出来的右括号：按字面量处理
+                    None => {
+                        out.push('\\');
+                        out.push(c);
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+        i += 1;
+    }
+
+    // 剩下没配对的左括号：按字面量处理（要在它前面补一个反斜杠）
+    if stack.is_empty() {
+        return out;
+    }
+    let mut result = String::with_capacity(out.len() + stack.len());
+    let mut to_escape = stack
+        .into_iter()
+        .collect::<std::collections::HashSet<usize>>();
+    let mut idx = 0usize;
+    for c in out.chars() {
+        if to_escape.remove(&idx) {
+            result.push('\\');
+        }
+        result.push(c);
+        idx += 1;
+    }
+    result
+}
+
+/// 第一个**没配对**的括号在模式里的列号（0-based）。
+///
+/// 比解析 regex crate 的错误串可靠：错误串里的 `^` 指的是"报错 span"，
+/// 而 crate 为了显示会把模式加上 `(?:` 前缀，列号会偏。
+pub fn first_unbalanced_paren(pattern: &str) -> Option<usize> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut stack: Vec<usize> = Vec::new();
+    let mut in_class = false;
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        let c = chars[i];
+        let escaped = i > 0 && chars[i - 1] == '\\';
+        match c {
+            '[' if !escaped => in_class = true,
+            ']' if !escaped => in_class = false,
+            '(' if !escaped && !in_class => stack.push(i),
+            ')' if !escaped && !in_class => {
+                if stack.pop().is_none() {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    stack.first().copied()
 }
 
 /// Search using Rust grep crate
@@ -550,5 +668,90 @@ mod tests {
     fn empty_hits_say_so() {
         let out = format_grep_hits(&[], std::path::Path::new("/proj"), "nope");
         assert!(out.starts_with("No matches found"), "实际：{out}");
+    }
+
+    // ── 非法正则的窄修复 ────────────────────────────────────────────────────
+
+    /// 模型想搜字面量左括号（Go 的 `func Relay(ctx ...)`），打成 `\(`；
+    /// 但 `\(` 在 JSON 里是非法转义，反斜杠被丢掉，发过来就成了
+    /// `func Relay(c|relay.Relay` —— 第 12 列的 `(` 没配对，正则编译失败。
+    /// 修法：把没配对的括号按字面量转义。
+    #[test]
+    fn an_unclosed_paren_is_repaired_into_a_literal_one() {
+        let broken = r"^func Relay|^func relayText|func RelayTextHelper|func Relay(c|relay.Relay";
+        let repaired = try_repair_pattern(broken).expect("应当能修复");
+        assert_eq!(
+            repaired,
+            r"^func Relay|^func relayText|func RelayTextHelper|func Relay\(c|relay.Relay"
+        );
+        // 修完必须真的能编译
+        assert!(RegexMatcherBuilder::new().build(&repaired).is_ok());
+    }
+
+    /// 合法模式一个字都不动 —— 修复只对**编译不过**的模式生效。
+    #[test]
+    fn a_valid_pattern_is_left_alone() {
+        assert_eq!(try_repair_pattern(r"func Relay\("), None);
+        assert_eq!(try_repair_pattern(r"func Relay\(ctx"), None);
+        assert_eq!(try_repair_pattern("foo|bar"), None);
+    }
+
+    /// 已转义的括号、字符类里的括号都不算"没配对"。
+    #[test]
+    fn escaped_and_class_parens_are_left_alone() {
+        // 已转义 → 不动
+        assert_eq!(escape_unbalanced_parens(r"a\(b"), r"a\(b");
+        // 字符类里的括号是字面量，不参与配对
+        assert_eq!(escape_unbalanced_parens("[()]"), "[()]");
+        // 多出来的右括号按字面量处理
+        assert_eq!(escape_unbalanced_parens("a)b"), r"a\)b");
+    }
+
+    /// 修不好的模式不该被硬改 —— 比如 `a[b` 这种括号方括号不配对的。
+    #[test]
+    fn an_unrepairable_pattern_is_not_touched() {
+        assert_eq!(try_repair_pattern("a[b"), None);
+    }
+
+    /// 错误里要指出的列，用"第一个没配对的括号"算 —— 比解析 regex crate 的错误串可靠。
+    #[test]
+    fn the_unbalanced_paren_position_is_found() {
+        let broken = r"^func Relay|^func relayText|func RelayTextHelper|func Relay(c|relay.Relay";
+        let pos = first_unbalanced_paren(broken).expect("应当找得到没配对的括号");
+        assert_eq!(&broken[pos..pos + 1], "(");
+        // 合法模式没有没配对的括号
+        assert_eq!(first_unbalanced_paren(r"func Relay\(ctx"), None);
+        assert_eq!(first_unbalanced_paren("a(b)c"), None);
+    }
+
+    /// 端到端：用户实际遇到的那条 pattern，修好之后要**真的搜到东西**。
+    ///
+    /// 事故实况：模型想找 Go 的 `func Relay(ctx ...)`，打成 `func Relay\(`；
+    /// `\(` 在 JSON 里是非法转义，反斜杠被丢掉，发过来成了
+    /// `^func Relay|^func relayText|func RelayTextHelper|func Relay(c|relay.Relay`
+    /// —— 第 12 列的 `(` 没配对，正则编译失败，整次搜索颗粒无收。
+    #[test]
+    fn the_repaired_pattern_actually_finds_the_go_function() {
+        let dir = fixture();
+        std::fs::write(
+            dir.path().join("relay.go"),
+            "func Relay(ctx context.Context) error {\n\treturn nil\n}\n",
+        )
+        .unwrap();
+
+        let broken = r"^func Relay|^func relayText|func RelayTextHelper|func Relay(c|relay.Relay";
+        let repaired = try_repair_pattern(broken).expect("应当能修");
+
+        let hits = search_with_ripgrep(
+            &repaired,
+            dir.path().to_str().unwrap(),
+            RipgrepConfig {
+                regex: true,
+                ..Default::default()
+            },
+        )
+        .expect("修好的模式应当能编译并搜到");
+        assert_eq!(hits.len(), 1, "实际：{hits:?}");
+        assert!(hits[0].text.as_deref().unwrap().contains("func Relay(ctx"));
     }
 }

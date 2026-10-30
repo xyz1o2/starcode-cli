@@ -97,6 +97,8 @@ impl SearchTool {
             });
         }
         let mut results = Vec::new();
+        // 模式被"窄修复"过时的说明（见下面的 try_repair_pattern）。
+        let mut pattern_note: Option<String> = None;
         // dotfile 默认可见 —— 对齐 Claude Code。以前只有 `@` 开头的查询才
         // 看得到 `.github/`、`.env.example` 这类真正需要搜的文件。
         let include_hidden_default = true;
@@ -111,13 +113,29 @@ impl SearchTool {
         if search_type == "text" || search_type == "both" {
             let file_types_ref = file_types.as_ref();
             let exclude_files_ref = exclude_files.as_ref();
+
+            // 正则模式下先做一次**窄修复**：模型想搜字面量左括号时打成 `\(`，
+            // 而 `\(` 在 JSON 里是非法转义、反斜杠会被丢掉，发过来就成了
+            // `func Relay(c|relay.Relay` —— 第 12 列的 `(` 没配对，整个正则编译
+            // 失败，一次搜索颗粒无收。修法只动没配对的括号，其余原样。
+            let mut effective_query = query.to_string();
+            if regex.unwrap_or(false) {
+                if let Some(repaired) = crate::core::tools::ripgrep::try_repair_pattern(query) {
+                    pattern_note = Some(format!(
+                        "Unbalanced parenthesis in pattern, escaped as a literal and retried: {}",
+                        repaired
+                    ));
+                    effective_query = repaired;
+                }
+            }
+
             // 错误必须冒出来。以前这里是 `if let Ok(...)` —— 正则编译失败
             // （`RegexMatcherBuilder::build` 对非法 pattern 返回 `Err`）被整个
             // 吞掉，然后落到下面的 `"No results found"`。于是一个写错的正则和
             // "确实没有匹配"在界面上完全一样，模型只会一遍遍换个写法重试。
             let text_results = self
                 .execute_ripgrep(
-                    query,
+                    &effective_query,
                     &base_dir,
                     include_pattern.as_deref(),
                     exclude_pattern.as_deref(),
@@ -134,11 +152,7 @@ impl SearchTool {
             let text_results = match text_results {
                 Ok(results) => results,
                 Err(error) => {
-                    let message = format!(
-                        "Grep could not run pattern \"{}\": {}. Check the pattern's regex syntax, \
-                         or set `regex: false` to search for it literally.",
-                        query, error
-                    );
+                    let message = describe_pattern_error(query, &error.to_string());
                     return Ok(ToolResult {
                         success: false,
                         output: Some(message.clone()),
@@ -203,9 +217,13 @@ impl SearchTool {
         }
 
         if results.is_empty() {
+            let mut output = format!("No results found for \"{}\"", query);
+            if let Some(note) = &pattern_note {
+                output = format!("{}\n{}", note, output);
+            }
             return Ok(ToolResult {
                 success: true,
-                output: Some(format!("No results found for \"{}\"", query)),
+                output: Some(output),
                 error: None,
                 data: None,
                 llm_content: None,
@@ -216,6 +234,10 @@ impl SearchTool {
             "files_with_matches" => self.format_files_with_matches(&results, query),
             "count" => self.format_counts(&results, query),
             _ => self.format_unified_results(&results, query, &search_type),
+        };
+        let formatted_output = match &pattern_note {
+            Some(note) => format!("{}\n{}", note, formatted_output),
+            None => formatted_output,
         };
 
         Ok(ToolResult {
@@ -463,6 +485,35 @@ impl SearchTool {
     }
 }
 
+/// 把正则编译错误说成一句**能照做**的话。
+///
+/// 以前只有一句 "Check the pattern's regex syntax, or set `regex: false`" ——
+/// 模型看到之后多半只是把同一个 pattern 换个写法再发一次。真正有用的信息有两条：
+/// **哪一列**出的问题，以及**大概率是哪种笔误**。
+fn describe_pattern_error(pattern: &str, error: &str) -> String {
+    let mut message = format!("Grep could not run pattern \"{}\": {}", pattern, error);
+
+    // 大概率是"想搜字面量括号但转义丢了"——JSON 里 `\(` 是非法转义。
+    let has_paren = pattern.contains('(') || pattern.contains(')');
+    let has_escaped_paren = pattern.contains("\\(") || pattern.contains("\\)");
+
+    if let Some(pos) = crate::core::tools::ripgrep::first_unbalanced_paren(pattern) {
+        let ch = pattern.chars().nth(pos).unwrap_or('?');
+        message.push_str(&format!("\n  Position: column {} {:?}", pos + 1, ch));
+    }
+
+    if has_paren && !has_escaped_paren {
+        message.push_str(
+            "\n  Hint: the pattern has an unescaped parenthesis. To match a literal one write \
+             `\\(` (in JSON the backslash must be written `\\\\(`), or switch the whole pattern to \
+             a literal search (`regex: false`).",
+        );
+    } else {
+        message.push_str("\n  Fix the regex syntax, or switch to a literal search (`regex: false`).");
+    }
+    message
+}
+
 fn normalize_input_path(raw_path: &str) -> PathBuf {
     crate::core::utils::paths::normalize_cross_platform_path(raw_path)
 }
@@ -629,7 +680,7 @@ impl BaseDeclarativeTool for SearchTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "The search query (text or file pattern). Use either query or pattern." },
+                "query": { "type": "string", "description": "The search query (text or file pattern). Use either query or pattern. Treated as a regular expression; unbalanced parentheses are repaired automatically and searched literally (to search for a string as-is, set regex: false)." },
                 "pattern": { "type": "string", "description": "Alias for query, accepted for grep-compatible calls." },
                 "path": { "type": "string", "description": "Directory to search. Supports relative paths, absolute paths, and Windows drive paths such as G:\\\\project when running under WSL." },
                 "dir_path": { "type": "string", "description": "Alias for path, accepted for compatibility with older grep tools." },

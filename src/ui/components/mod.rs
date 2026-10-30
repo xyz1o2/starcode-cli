@@ -10,7 +10,6 @@ pub mod command_suggestions;
 pub mod common;
 pub mod confirmation_dialog;
 pub mod error_overlay;
-pub mod global_search;
 pub mod help_popup;
 pub mod highlight;
 pub mod input_modal;

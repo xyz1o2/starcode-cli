@@ -1,7 +1,8 @@
 use crate::core::confirmation_bus::MessageBus;
 use crate::core::tools::constants::ToolErrorType;
 use crate::core::tools::ripgrep::{
-    format_grep_hits, search_with_ripgrep, GrepHit, RipgrepConfig, DEFAULT_MAX_RESULTS,
+    format_grep_hits, search_with_ripgrep, try_repair_pattern, GrepHit, RipgrepConfig,
+    DEFAULT_MAX_RESULTS,
 };
 use crate::core::tools::tools::{
     BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation, ToolResult,
@@ -239,8 +240,21 @@ impl ToolInvocation for GrepToolInvocation {
                 let mut final_config = rg_config;
                 final_config.regex = true; // Force regex to match old behavior
 
+                // 窄修复：模型想搜字面量左括号时打成 `\(`，而 `\(` 在 JSON 里是
+                // 非法转义、反斜杠会被丢掉，发过来就成了 `func Relay(c|...` ——
+                // 第 12 列的 `(` 没配对，整个正则编译失败，搜索颗粒无收。
+                let mut pattern_note: Option<String> = None;
+                let mut effective_pattern = params.pattern.clone();
+                if let Some(repaired) = try_repair_pattern(&params.pattern) {
+                    pattern_note = Some(format!(
+                        "Unbalanced parenthesis in pattern, escaped as a literal and retried: {}",
+                        repaired
+                    ));
+                    effective_pattern = repaired;
+                }
+
                 let matches = search_with_ripgrep(
-                    &params.pattern,
+                    &effective_pattern,
                     &search_dir.to_string_lossy(),
                     final_config,
                 )
@@ -280,10 +294,13 @@ impl ToolInvocation for GrepToolInvocation {
                     .collect();
 
                 if filtered_matches.is_empty() {
-                    let message = format!(
+                    let mut message = format!(
                         "No matches found for pattern \"{}\" (after filtering)",
                         params.pattern
                     );
+                    if let Some(note) = &pattern_note {
+                        message = format!("{}\n{}", note, message);
+                    }
                     return Ok(ToolResult {
                         llm_content: Some(message.clone()),
                         return_display: Some(message.clone()),
@@ -301,7 +318,10 @@ impl ToolInvocation for GrepToolInvocation {
                         text: m.text.as_deref(),
                     })
                     .collect();
-                let llm_content = format_grep_hits(&hits, &search_dir, &params.pattern);
+                let mut llm_content = format_grep_hits(&hits, &search_dir, &params.pattern);
+                if let Some(note) = &pattern_note {
+                    llm_content = format!("{}\n{}", note, llm_content);
+                }
 
                 Ok(ToolResult {
                     llm_content: Some(llm_content.clone()),
@@ -354,7 +374,7 @@ impl GrepTool {
         serde_json::json!({
             "properties": {
                 "pattern": {
-                    "description": "The regular expression (regex) pattern to search for within file contents (e.g., 'function\\s+myFunction', 'import\\s+\\{.*\\}\\s+from\\s+.*').",
+                    "description": "The regular expression (regex) pattern to search for within file contents (e.g., 'function\\s+myFunction', 'import\\s+\\{.*\\}\\s+from\\s+.*'). Unbalanced parentheses are repaired automatically and searched literally.",
                     "type": "string"
                 },
                 "dir_path": {

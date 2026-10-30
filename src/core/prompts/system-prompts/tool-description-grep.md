@@ -29,6 +29,7 @@ A powerful search tool built on ripgrep.
   better first pass in exactly that case. The difference is ranking, not correctness: either
   tool will do.
 - Supports full regex syntax (e.g., `log.*Error`, `function\s+\w+`). Patterns match within a single line.
+- Unbalanced parentheses are repaired automatically: they are escaped and retried as literals. This matters because a literal `(` written as `\(` loses its backslash inside JSON. To search for a string exactly, pass `regex: false`.
 - Dotfiles are searched by default (`.github/workflows/`, `.env.example` are reachable); `.git`, `.svn`, `.hg`, `.bzr`, `.jj` and `.sl` are always skipped, as is anything ignored by `.gitignore`, `.starignore`, `.ignore`/`.rgignore` or `~/.star/ignore`.
 - Use `exclude_pattern` to leave out tests or generated code — nothing is filtered out on your behalf.
 - After match at file:line, use `Read(offset=line-10, limit=60)` — don't read whole file
