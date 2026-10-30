@@ -500,7 +500,8 @@ mod tests {
         let cjk = "研究 src/hooks 目录下的组件实现";
         for width in 0..=40 {
             let out = truncate_display(cjk, width);
-            assert!(cjk.starts_with(out.trim_end_matches('…')), "宽度 {width}：{out}");
+            let kept = out.trim_end_matches("...");
+            assert!(cjk.starts_with(kept), "宽度 {width}：{out}");
         }
     }
 
@@ -510,7 +511,10 @@ mod tests {
         // 6 个汉字 = 12 列
         assert_eq!(crate::ui::utils::render::display_width("中文测试文本"), 12);
         let out = truncate_display("中文测试文本", 5);
-        assert!(crate::ui::utils::render::display_width(&out) <= 6, "实际：{out}");
+        assert!(
+            crate::ui::utils::render::display_width(&out) <= 6,
+            "实际：{out}"
+        );
     }
 
     /// 短文本原样返回，不加省略号。

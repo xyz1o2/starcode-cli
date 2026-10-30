@@ -131,40 +131,38 @@ ui/utils/text.rs
 
 ---
 
-## 三、待抽取清单（按风险排序）
+## 三、抽取清单
 
-| # | 项 | 位置 | 问题 | 改法 | 风险 |
-|---|----|------|------|------|------|
-| A | 截断函数 | `utils/text.rs` 之外还有 **7 份** `truncate_str`：`agent_task_render.rs:514`、`collapsed_group.rs:357`、`command_suggestions.rs:271`、`confirmation_dialog.rs:886`、`mcp_modal.rs:327`、`market_modal.rs:119`、`plugin_modal.rs:136` | 4 种实现：`collapsed_group` 与 `confirmation_dialog` 是**字节切片**（`&s[..n]`），多字节边界直接 panic；`command_suggestions` / 三个 modal 按字符数；`agent_task_render` 按显示宽度。省略号还有 `...` 和 `…` 两种 | 全部换成 `utils::text::truncate_display(text, max_width)`（显示宽度 + `…`） | 低 |
-| B | 折叠切换 | `tool_render.rs:121`（读）、`mouse.rs:135`（写）、`input.rs:2929`（写） | 三处各写一遍 `expanded_tool_call_ids` 的增删；`input.rs` 额外做 `virtual_list.mark_dirty` + `auto_follow = false`，`mouse.rs` 没有 —— 两条路径行为不一致 | 收成 `ChatState::toggle_tool_expansion(entry_idx) -> bool`，读写都走它 | 低 |
-| C | 次要文字样式 | 全 UI 60+ 处 `Color::DarkGray + DIM` 与 `theme.subtle` 两套写法并存 | 同一语义两套颜色来源，主题切换时有一半不跟随 | 加 `theme.dim_style()`，逐模块替换 | **中**：会改变视觉基线，要先定基线 |
-| D | 摘要行 | 已做：`push_collapsed_summary` / `push_expand_hint` 收口 7 个工具臂 | `message_render.rs:273` 与 `agent_task_render.rs:88` 写的是 `(ctrl+o to expand)`，与工具块的 `(Tab to expand)` 不是同一个按键 | 保持两套 helper（`push_expand_hint` / `push_expand_hint_ctrl_o`），不强行合并 | 低 |
-| E | 大文件拆分 | `events/input.rs` 236KB、`services/stream.rs` 175KB、`components/palette.rs` 113KB | 改一处要读半份文件 | `palette.rs` 按 `PaletteMode` 切文件最省事；`input.rs` 按"按键 / 命令 / Vim"切 | 中高，需要连续几次独立提交 |
+### 3.1 已完成
 
-### 3.1 A 的具体改法
+| 项 | 位置 | 问题 | 改法 | 状态 |
+|----|------|------|------|------|
+| A | 截断函数 | `utils/text.rs` 之外还有 **7 份** `truncate_str`：`agent_task_render.rs:514`、`collapsed_group.rs:357`、`command_suggestions.rs:271`、`confirmation_dialog.rs:886`、`mcp_modal.rs:327`、`market_modal.rs:119`、`plugin_modal.rs:136` | 4 种实现：`collapsed_group` 与 `confirmation_dialog` 是**字节切片**（`&s[..n]`），多字节边界直接 panic；`command_suggestions` / 三个 modal 按字符数（CJK 实际占 2 列，长度算少一半）；`agent_task_render` 按显示宽度 | ✅ 已统一到 `utils::text::truncate_display` |
+| B | 折叠切换 | `tool_render.rs:121`（读）、`mouse.rs:135`（写）、`input.rs:2929`（写） | 三处各写一遍 `expanded_tool_call_ids` 的增删；`input.rs` 额外做 `virtual_list.mark_dirty` + `auto_follow = false`，`mouse.rs` 没有 —— 两条路径行为不一致 | ✅ 已收成 `ChatState::toggle_tool_expansion` + `is_tool_expanded` |
+| D | 摘要行 | `tool_render.rs` 里 Read / Grep / Glob / LS / CodebaseSearch / ProjectMap / WebFetch 七个臂各写一份折叠摘要 | 四行 `lines.push` + 样式 + 提示文案全重复 | ✅ 已收成 `push_collapsed_summary` + `push_expand_hint` |
+
+**A 的具体改法**：
 
 ```rust
 // src/ui/utils/text.rs
-/// 按**显示宽度**截断，超出部分用 `…` 收尾（不切碎宽字符）。
-pub fn truncate_display(text: &str, max_width: usize) -> String
+/// 按**显示宽度**截断，超出部分用 `...` 收尾（不切碎宽字符）。
+pub fn truncate_display(text: &str, max_width: usize) -> String {
+    crate::ui::utils::render::truncate_to_display_width(text, max_width)
+}
 ```
 
-调用点统一成：
+> 省略号沿用 `render::truncate_to_display_width` 的 `...`（占 3 列），不改成 `…` ——
+> 它是全项目用得最广的实现，`...` 与它的 3 列预算配套。四个原本用 `…` 的组件
+> （`command_suggestions` / 三个 modal）随之从 `…` 变成 `...`。
 
-```rust
-// 以前（collapsed_group.rs / confirmation_dialog.rs，字节切片会 panic）
-if s.len() <= max_len { s.to_string() } else { format!("{}...", &s[..max_len - 3]) }
-
-// 以后
-crate::ui::utils::text::truncate_display(s, max_len)
-```
-
-### 3.2 B 的具体改法
+**B 的具体改法**：
 
 ```rust
 // src/ui/state/store.rs
 impl ChatState {
-    /// 折叠/展开一个工具块。返回是否真的切换了。
+    /// 工具块当前是展开还是折叠（默认展开 + 翻转位）。
+    pub fn is_tool_expanded(&self, entry: &ChatEntry) -> bool
+    /// 折叠 / 展开一个工具块，返回是否真的切换了。
     pub fn toggle_tool_expansion(&mut self, entry_idx: usize) -> bool
 }
 ```
@@ -174,8 +172,16 @@ impl ChatState {
 - `mouse.rs::try_toggle_on_click` → `state.toggle_tool_expansion(entry_idx)`
 - `input.rs`（Tab）→ `state.toggle_tool_expansion(idx)`，随后保留
   `auto_follow = false`（展开会改变高度，视口锚点要重算）
-- `tool_render.rs` 读折叠状态 → `state.is_tool_expanded(entry)`（把
-  `default_expanded ^ toggled` 那段也收进来）
+- `tool_render.rs` 读折叠状态 → `state.is_tool_expanded(entry)`
+
+### 3.2 待办
+
+| # | 项 | 位置 | 问题 | 改法 | 风险 |
+|---|----|------|------|------|------|
+| C | 次要文字样式 | 全 UI 60+ 处 `Color::DarkGray + DIM` 与 `theme.subtle` 两套写法并存 | 同一语义两套颜色来源，主题切换时有一半不跟随 | 加 `theme.dim_style()`，逐模块替换 | **中**：会改变视觉基线，要先定基线 |
+| D' | 展开提示文案 | `message_render.rs:273` 与 `agent_task_render.rs:88` 写的是 `(ctrl+o to expand)`，工具块写的是 `(Tab to expand)` | 不是同一个按键 | 保持两套 helper（`push_expand_hint` / `push_expand_hint_ctrl_o`），不强行合并 | 低 |
+| E | 大文件拆分 | `events/input.rs` 236KB、`services/stream.rs` 175KB、`components/palette.rs` 113KB | 改一处要读半份文件 | `palette.rs` 按 `PaletteMode` 切文件最省事；`input.rs` 按"按键 / 命令 / Vim"切 | 中高，需要连续几次独立提交 |
+| F | 测试隔离 | `services/stream.rs::cache_merge_tests` 两个用例共享状态，第二个单跑也失败 | 与本次改动无关（stash 对比确认），但会污染全量测试的信号 | 给两个用例各自独立的临时目录/配置 | 低 |
 
 ---
 
@@ -187,14 +193,18 @@ impl ChatState {
 | 列宽口径收口 | `src/ui/utils/text.rs` | +84 |
 | 删掉 store 里的重复实现 | `src/ui/state/store.rs` | −186 |
 | 删掉 chat_history 里的重复实现 | `src/ui/components/chat_history.rs` | −181 |
-| 折叠摘要行收口 | `src/ui/components/tool_render.rs` | ±195 |
+| 折叠摘要行收口（A2） | `src/ui/components/tool_render.rs` | ±195 |
 | 两个复制入口合并 | `src/ui/events/mouse.rs` / `src/ui/events/input.rs` | −20 |
+| 截断函数统一（A） | 7 个组件 + `utils/text.rs` | −40 |
+| 折叠切换收口（B） | `state/store.rs` / `mouse.rs` / `input.rs` / `tool_render.rs` | −30 |
 
-新增测试 7 个：
+新增测试 11 个：
 
 - 高亮：选区起点落在 span 开头 / 落在 span 中间
 - 取文本：CJK 可视列切分、跨条目选区
 - 范围解析：字段缺失不 panic、反向拖选
+- 截断：不切碎多字节字符、按显示列算、短文本原样返回
+- 折叠：切换对渲染路径可见、切换让渲染缓存失效、非工具条目不可切换
 
 ---
 

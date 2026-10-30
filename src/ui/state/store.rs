@@ -2177,18 +2177,20 @@ mod tests {
                 llm_content: None,
             },
         ));
+        // `ChatState::new()` 里已经塞了一条欢迎语，占 index 0。
+        let idx = state.chat_history.len() - 1;
 
-        let entry = &state.chat_history[0];
+        let entry = &state.chat_history[idx];
         assert!(
             !state.is_tool_expanded(entry),
             "非编辑类工具的 ToolResult 默认折叠"
         );
 
-        assert!(state.toggle_tool_expansion(0));
-        assert!(state.is_tool_expanded(&state.chat_history[0]));
+        assert!(state.toggle_tool_expansion(idx));
+        assert!(state.is_tool_expanded(&state.chat_history[idx]));
 
-        assert!(state.toggle_tool_expansion(0));
-        assert!(!state.is_tool_expanded(&state.chat_history[0]));
+        assert!(state.toggle_tool_expansion(idx));
+        assert!(!state.is_tool_expanded(&state.chat_history[idx]));
     }
 
     /// 折叠状态翻转后必须让渲染缓存失效，否则画面上还是旧的展开状态。
@@ -2203,16 +2205,15 @@ mod tests {
                 arguments: "{}".to_string(),
             },
         };
-        state
-            .chat_history
-            .push(ChatEntry::tool_call("", tool_call));
+        state.chat_history.push(ChatEntry::tool_call("", tool_call));
+        let idx = state.chat_history.len() - 1;
         state
             .rendered_cache
-            .insert(0, (1, vec![ratatui::text::Line::from("x")]));
+            .insert(idx, (1, vec![ratatui::text::Line::from("x")]));
 
-        assert!(state.toggle_tool_expansion(0));
+        assert!(state.toggle_tool_expansion(idx));
         assert!(
-            !state.rendered_cache.contains_key(&0),
+            !state.rendered_cache.contains_key(&idx),
             "切换后渲染缓存必须失效"
         );
     }
