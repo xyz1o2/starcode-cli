@@ -56,7 +56,7 @@ pub fn render_market_modal(
             ),
             Span::styled(
                 "Enter=confirm  Esc=cancel",
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             ),
         ]));
     }
@@ -101,7 +101,7 @@ fn tabs_line(active: MarketTab) -> Line<'static> {
         } else {
             spans.push(Span::styled(
                 format!("  {}  ", label),
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             ));
         }
     }
@@ -131,7 +131,7 @@ fn entry_rows(
     if state.market_loading {
         lines.push(Line::from(Span::styled(
             "  Loading marketplace…",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
         return lines;
     }
@@ -156,7 +156,7 @@ fn entry_rows(
     if state.market_entries.is_empty() {
         lines.push(Line::from(Span::styled(
             "  (empty)",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
         return lines;
     }
@@ -171,7 +171,7 @@ fn entry_rows(
 
         match enabled_of(&entry.name) {
             Some(true) => spans.push(Span::styled("●", Style::default().fg(Color::Green))),
-            Some(false) => spans.push(Span::styled("○", Style::default().fg(Color::DarkGray))),
+            Some(false) => spans.push(Span::styled("○", crate::ui::themes::theme::muted_style())),
             None => {
                 if installed.contains(&entry.name) {
                     spans.push(Span::styled("✓", Style::default().fg(Color::Green)));
@@ -195,7 +195,7 @@ fn entry_rows(
         ));
         spans.push(Span::styled(
             format!(" v{:<6}", truncate_str(&entry.version, 6)),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ));
         spans.push(Span::styled(
             format!(" {}", truncate_str(&entry.description, 40)),
@@ -210,7 +210,7 @@ fn entry_rows(
 
     lines.push(Line::from(Span::styled(
         format!("  {} items", state.market_entries.len()),
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     )));
     lines
 }
@@ -239,18 +239,27 @@ fn sources_lines(state: &ChatState) -> Vec<Line<'static>> {
     vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Marketplace dir:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "  Marketplace dir:  ",
+                crate::ui::themes::theme::muted_style(),
+            ),
             Span::styled(dir.display().to_string(), Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
-            Span::styled("  Index entries:    ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "  Index entries:    ",
+                crate::ui::themes::theme::muted_style(),
+            ),
             Span::styled(
                 index.entries.len().to_string(),
                 Style::default().fg(Color::White),
             ),
         ]),
         Line::from(vec![
-            Span::styled("  Updated at:       ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "  Updated at:       ",
+                crate::ui::themes::theme::muted_style(),
+            ),
             Span::styled(index.updated_at.clone(), Style::default().fg(Color::White)),
         ]),
         Line::from(""),

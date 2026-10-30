@@ -130,7 +130,10 @@ impl Theme {
             user_message_bg: Color::Rgb(240, 240, 240), // 浅灰色背景
             selection_bg: Color::Rgb(180, 213, 255),    // 浅蓝色选择背景
             inactive: Color::Rgb(102, 102, 102),        // 深灰色
-            subtle: Color::Rgb(175, 175, 175),          // 浅灰色
+            // 浅色主题上 `subtle` 是"次要文字"——175 灰在白底上对比度只有 1.9:1，
+            // 几乎看不见（这是亮色主题一直有的问题：同一份代码里两种颜色来源，
+            // 暗色那边用 `subtle`、这边写死 DarkGray）。压到 130 灰（≈3.6:1）。
+            subtle: Color::Rgb(130, 130, 130),
             suggestion: Color::Rgb(87, 105, 247),       // 中蓝色
 
             // Thinking 相关颜色
@@ -466,7 +469,8 @@ impl Theme {
             user_message_bg: Color::Rgb(238, 232, 213), // 浅灰色背景
             selection_bg: Color::Rgb(180, 213, 255),    // 浅蓝色选择背景
             inactive: Color::Rgb(147, 161, 161),        // Solarized 灰色
-            subtle: Color::Rgb(180, 190, 190),          // 浅灰色
+            // 同 default_light：浅底上的次要文字不能浅到看不见（≈3.9:1）。
+            subtle: Color::Rgb(135, 140, 140),
             suggestion: Color::Rgb(38, 139, 210),       // Solarized 蓝色
 
             // Thinking 相关颜色

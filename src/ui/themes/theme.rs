@@ -1,4 +1,37 @@
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
+
+/// **没有主题上下文时**的次要文字兜底样式。
+///
+/// `src/ui` 里有一批纯工具函数（`utils/render.rs`、`components/common/*`、
+/// `components/highlight/*`、几个 modal）根本不接收 `&Theme`，它们以前直接写
+/// `Style::default().fg(Color::DarkGray)`。这里给它一个名字：**次要文字只有
+/// 这一处定义**，将来要把这些函数也接上主题时，只需要把调用点的
+/// `muted_style()` 换成 `theme.subtle_style()`，颜色本身不用再改。
+pub fn muted_style() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+/// [`muted_style`] 的更弱一档（对应以前的 `DarkGray + DIM`）。
+pub fn muted_dim_style() -> Style {
+    Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::DIM)
+}
+
+impl Theme {
+    /// 次要文字（辅助说明、提示行）：比正文弱一档。
+    ///
+    /// 以前这类文字一半写死 `Color::DarkGray`（不跟随主题）、一半取
+    /// `theme.subtle` —— 同一语义两套颜色来源。统一从这里取色。
+    pub fn subtle_style(&self) -> Style {
+        Style::default().fg(self.subtle)
+    }
+
+    /// 更弱的文字：在 [`Theme::subtle_style`] 基础上再压一档。
+    pub fn dim_style(&self) -> Style {
+        Style::default().fg(self.subtle).add_modifier(Modifier::DIM)
+    }
+}
 
 pub struct Theme {
     pub name: String,

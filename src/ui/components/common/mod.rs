@@ -11,6 +11,22 @@ use ratatui::{
     text::{Line, Span},
 };
 
+/// 折叠态的展开提示行。
+///
+/// **样式**统一在这里，**措辞**由调用方给 —— thinking 块走 i18n，工具块写死。
+///
+/// 两套按键是真实存在的差异，不要合并成同一个字符串：
+/// - 工具块：**Tab**（见 `events/input.rs` 的 `KeyCode::Tab`）
+/// - thinking / 子代理块：**Ctrl+O**
+///
+/// 以前这三处各写一遍 `Line::from(Span::styled(...))`，连缩进和括号都不一致。
+pub fn expand_hint(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        text.to_string(),
+        crate::ui::themes::theme::muted_dim_style(),
+    ))
+}
+
 /// 通用的确认/取消按钮样式
 pub fn render_action_buttons(
     actions: &[(&str, &str)], // (key, label)
@@ -85,8 +101,8 @@ pub fn render_status_icon(status: &str) -> Span<'static> {
         "warning" | "⚠" => Span::styled("⚠", Style::default().fg(Color::Yellow)),
         "info" | "ℹ" => Span::styled("ℹ", Style::default().fg(Color::Blue)),
         "loading" | "●" => Span::styled("●", Style::default().fg(Color::Blue)),
-        "pending" | "○" => Span::styled("○", Style::default().fg(Color::DarkGray)),
-        _ => Span::styled("·", Style::default().fg(Color::DarkGray)),
+        "pending" | "○" => Span::styled("○", crate::ui::themes::theme::muted_style()),
+        _ => Span::styled("·", crate::ui::themes::theme::muted_style()),
     }
 }
 
@@ -141,7 +157,7 @@ pub fn render_timestamp(timestamp: &chrono::DateTime<chrono::Utc>) -> Span<'stat
         format!("{}d ago", duration.num_days())
     };
 
-    Span::styled(time_str, Style::default().fg(Color::DarkGray))
+    Span::styled(time_str, crate::ui::themes::theme::muted_style())
 }
 
 /// 渲染截断文本

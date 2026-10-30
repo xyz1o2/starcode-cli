@@ -106,11 +106,26 @@ pub(crate) fn merge_declared_and_discovered_models(
     provider_id: &str,
     declared: &[String],
 ) {
+    let cached = crate::agent::model_cache::load(provider_id);
+    merge_declared_and_discovered_models_with(state, provider_id, declared, cached);
+}
+
+/// 合并逻辑本体，缓存由调用方给。
+///
+/// 生产路径走 [`merge_declared_and_discovered_models`]（从磁盘缓存读）；测试直接
+/// 传 `load_from_path` 的结果，**不碰 `STAR_MODEL_CACHE_PATH`** —— 那是进程级
+/// 环境变量，并行跑的两个用例会互相覆盖对方的缓存文件（一个用例单跑也失败）。
+fn merge_declared_and_discovered_models_with(
+    state: &mut ChatState,
+    provider_id: &str,
+    declared: &[String],
+    cached: Option<crate::agent::model_cache::CachedModels>,
+) {
     let mut merged: Vec<String> = declared.to_vec();
     let mut seen: std::collections::HashSet<String> = merged.iter().cloned().collect();
 
     // 磁盘缓存里这个 provider 曾经拉到的模型 —— 大多数情况下不用等网络。
-    if let Some(hit) = crate::agent::model_cache::load(provider_id) {
+    if let Some(hit) = cached {
         for model in &hit.models {
             if model.provider == provider_id && seen.insert(model.id.clone()) {
                 merged.push(model.id.clone());
@@ -4423,7 +4438,7 @@ fn extract_last_code_block(content: &str) -> Option<String> {
 
 #[cfg(test)]
 mod cache_merge_tests {
-    use super::merge_declared_and_discovered_models;
+    use super::merge_declared_and_discovered_models_with;
     use crate::ui::state::store::ChatState;
 
     /// 面板列表必须是「声明的候选」与「API 发现的」的**并集**。
@@ -4432,10 +4447,13 @@ mod cache_merge_tests {
     /// 他在表单里写了哪怕一个模型名，之前那段代码就把整个列表**替换**成了声明
     /// 的那几个 —— API 明明还返回了另外十几个模型，面板上却只看得到一个，
     /// 得再点一次刷新才补得回来。
+    ///
+    /// 缓存从临时文件**直接读进函数**，不碰 `STAR_MODEL_CACHE_PATH`：那是进程级
+    /// 环境变量，并行跑的两个用例会互相覆盖对方的缓存文件（单跑第二个也失败）。
     #[test]
     fn the_panel_lists_declared_and_discovered_models_together() {
-        let cache = std::env::temp_dir().join(format!("star-merge-{}.json", std::process::id()));
-        let _ = std::fs::remove_file(&cache);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = dir.path().join("model-cache.json");
         crate::agent::model_cache::save_to_path(
             &cache,
             "e2e",
@@ -4444,10 +4462,15 @@ mod cache_merge_tests {
                 crate::types::ModelInfo::new("discovered-b", "e2e"),
             ],
         );
-        std::env::set_var("STAR_MODEL_CACHE_PATH", &cache);
+        let cached = crate::agent::model_cache::load_from_path(&cache, "e2e");
 
         let mut state = ChatState::new();
-        merge_declared_and_discovered_models(&mut state, "e2e", &["declared".to_string()]);
+        merge_declared_and_discovered_models_with(
+            &mut state,
+            "e2e",
+            &["declared".to_string()],
+            cached,
+        );
 
         assert!(
             state.available_models.contains(&"declared".to_string()),
@@ -4470,25 +4493,22 @@ mod cache_merge_tests {
             Some("declared"),
             "声明的候选必须排在最前"
         );
-
-        std::env::remove_var("STAR_MODEL_CACHE_PATH");
-        let _ = std::fs::remove_file(&cache);
     }
 
     /// 别家 provider 的模型不能混进来 —— 缓存是按 provider 分桶的。
     #[test]
     fn only_this_providers_discovered_models_are_merged_in() {
-        let cache = std::env::temp_dir().join(format!("star-merge2-{}.json", std::process::id()));
-        let _ = std::fs::remove_file(&cache);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = dir.path().join("model-cache.json");
         crate::agent::model_cache::save_to_path(
             &cache,
             "other",
             &[crate::types::ModelInfo::new("someone-elses-model", "other")],
         );
-        std::env::set_var("STAR_MODEL_CACHE_PATH", &cache);
+        let cached = crate::agent::model_cache::load_from_path(&cache, "e2e");
 
         let mut state = ChatState::new();
-        merge_declared_and_discovered_models(&mut state, "e2e", &[]);
+        merge_declared_and_discovered_models_with(&mut state, "e2e", &[], cached);
 
         assert!(
             !state
@@ -4497,8 +4517,5 @@ mod cache_merge_tests {
             "别家 provider 的模型不该进来: {:?}",
             state.available_models
         );
-
-        std::env::remove_var("STAR_MODEL_CACHE_PATH");
-        let _ = std::fs::remove_file(&cache);
     }
 }

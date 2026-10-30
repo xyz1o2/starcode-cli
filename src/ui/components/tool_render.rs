@@ -753,9 +753,7 @@ fn render_rich_tool_content(
                     if count == 0 {
                         lines.push(Line::from(Span::styled(
                             crate::core::i18n::t("tool.no_matches", "没有匹配", "No matches"),
-                            Style::default()
-                                .fg(Color::DarkGray)
-                                .add_modifier(Modifier::DIM),
+                            crate::ui::themes::theme::muted_dim_style(),
                         )));
                         push_expand_hint(&mut lines);
                         return lines;
@@ -797,7 +795,7 @@ fn render_rich_tool_content(
                         let path = path.split(" (Score:").next().unwrap_or(path).trim();
                         lines.push(Line::from(Span::styled(
                             format!("  top: {}", path),
-                            Style::default().fg(Color::DarkGray),
+                            crate::ui::themes::theme::muted_style(),
                         )));
                     }
                     return lines;
@@ -846,7 +844,7 @@ fn render_rich_tool_content(
                     if !preview.is_empty() {
                         lines.push(Line::from(Span::styled(
                             format!("  {}", preview),
-                            Style::default().fg(Color::DarkGray),
+                            crate::ui::themes::theme::muted_style(),
                         )));
                     }
                     return lines;
@@ -864,7 +862,7 @@ fn render_rich_tool_content(
                                     tool_inner_width.saturating_sub(2)
                                 )
                             ),
-                            Style::default().fg(Color::DarkGray),
+                            crate::ui::themes::theme::muted_style(),
                         )));
                         push_expand_hint(&mut lines);
                         return lines;
@@ -977,16 +975,12 @@ fn push_collapsed_summary(
 
 /// 折叠态的「按 Tab 展开」提示 —— 所有工具共用这一份措辞与样式。
 ///
-/// `message_render.rs` 与 `agent_task_render.rs` 里的 thinking / 子代理块用的是
-/// **Ctrl+O**（见 `events/input.rs`），与此处的 Tab 是两套真实按键；文案各自维护，
-/// 这里先不跨模块合并，避免把两个不同按键的语义混进一个 helper。
+/// thinking / 子代理块用的是 **Ctrl+O**（见 `events/input.rs`），与此处的 Tab 是
+/// 两套真实按键；措辞与样式共用 `common::expand_hint`，按键由调用方给。
 fn push_expand_hint(lines: &mut Vec<Line<'static>>) {
-    lines.push(Line::from(Span::styled(
+    lines.push(crate::ui::components::common::expand_hint(
         "  (Tab to expand)",
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::DIM),
-    )));
+    ));
 }
 
 /// ToolResult 文本渲染的公共函数（折叠态：第一行预览 + 行数；展开态：完整内容）
@@ -1003,9 +997,7 @@ fn render_tool_result_text(
     if success && text.trim().is_empty() && !expanded {
         lines.push(Line::from(Span::styled(
             crate::core::i18n::t("tool.done", "Done", "Done"),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
+            crate::ui::themes::theme::muted_dim_style(),
         )));
         return;
     }
@@ -1015,9 +1007,7 @@ fn render_tool_result_text(
     if success && text.contains("Running in the background") && !expanded {
         lines.push(Line::from(Span::styled(
             "Running in the background (↓ to manage)",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
+            crate::ui::themes::theme::muted_dim_style(),
         )));
         return;
     }
@@ -1048,7 +1038,7 @@ fn render_tool_result_text(
             if !preview.is_empty() {
                 lines.push(Line::from(Span::styled(
                     preview,
-                    Style::default().fg(Color::DarkGray),
+                    crate::ui::themes::theme::muted_style(),
                 )));
                 shown += 1;
             }
@@ -1058,9 +1048,7 @@ fn render_tool_result_text(
             let hidden = total.saturating_sub(shown);
             lines.push(Line::from(Span::styled(
                 format!("... +{} lines  (press Tab to expand)", hidden),
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
+                crate::ui::themes::theme::muted_dim_style(),
             )));
         }
         return;

@@ -87,7 +87,7 @@ fn render_group_header(stats: &[AgentStat], area_width: u16) -> Vec<Line<'static
     if all_complete {
         // 全部完成
         if all_async {
-            spans.push(Span::styled("● ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled("● ", crate::ui::themes::theme::muted_style()));
             spans.push(Span::styled(
                 total.to_string(),
                 Style::default()
@@ -96,11 +96,11 @@ fn render_group_header(stats: &[AgentStat], area_width: u16) -> Vec<Line<'static
             ));
             spans.push(Span::styled(
                 " background agents launched ",
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             ));
             spans.push(Span::styled(
                 "(↓ manage)",
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             ));
         } else {
             let icon = if failed > 0 { "⚠" } else { "✓" };
@@ -121,7 +121,7 @@ fn render_group_header(stats: &[AgentStat], area_width: u16) -> Vec<Line<'static
             ));
             spans.push(Span::styled(
                 " agents finished",
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             ));
             if failed > 0 {
                 spans.push(Span::styled(
@@ -139,7 +139,7 @@ fn render_group_header(stats: &[AgentStat], area_width: u16) -> Vec<Line<'static
                 total,
                 if total == 1 { "" } else { "s" }
             ),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ));
     }
 
@@ -154,7 +154,7 @@ fn render_empty_group_header(count: usize) -> Vec<Line<'static>> {
             count,
             if count == 1 { "" } else { "s" }
         ),
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     ))]
 }
 
@@ -178,7 +178,7 @@ fn render_agent_progress_lines(
     // 树形连接符
     line1_spans.push(Span::styled(
         format!("{} ", tree_char),
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     ));
 
     // Agent 类型（粗体，带颜色）
@@ -209,7 +209,7 @@ fn render_agent_progress_lines(
         };
         line1_spans.push(Span::styled(
             truncated,
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ));
     }
 
@@ -218,7 +218,7 @@ fn render_agent_progress_lines(
         if stat.tool_use_count > 0 || stat.tokens.unwrap_or(0) > 0 {
             line1_spans.push(Span::styled(
                 " · ".to_string(),
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             ));
             if stat.tool_use_count > 0 {
                 line1_spans.push(Span::styled(
@@ -231,7 +231,7 @@ fn render_agent_progress_lines(
                             "uses"
                         }
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    crate::ui::themes::theme::muted_style(),
                 ));
             }
             if let Some(tokens) = stat.tokens {
@@ -239,12 +239,12 @@ fn render_agent_progress_lines(
                     if stat.tool_use_count > 0 {
                         line1_spans.push(Span::styled(
                             " · ".to_string(),
-                            Style::default().fg(Color::DarkGray),
+                            crate::ui::themes::theme::muted_style(),
                         ));
                     }
                     line1_spans.push(Span::styled(
                         format_tokens(tokens),
-                        Style::default().fg(Color::DarkGray),
+                        crate::ui::themes::theme::muted_style(),
                     ));
                 }
             }
@@ -258,11 +258,11 @@ fn render_agent_progress_lines(
     let prefix = if is_last { "   " } else { "│  " };
     line2_spans.push(Span::styled(
         prefix.to_string(),
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     ));
     line2_spans.push(Span::styled(
         "⎿  ".to_string(),
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     ));
 
     // 状态文本

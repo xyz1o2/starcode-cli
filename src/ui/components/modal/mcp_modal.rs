@@ -70,7 +70,7 @@ fn mcp_list_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
     if state.mcp_modal_loading {
         lines.push(Line::from(Span::styled(
             "  Loading MCP servers…",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
         return lines;
     }
@@ -89,7 +89,7 @@ fn mcp_list_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
     if state.mcp_modal_servers.is_empty() {
         lines.push(Line::from(Span::styled(
             "  No MCP servers configured.",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -129,7 +129,7 @@ fn mcp_list_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
         spans.push(Span::styled(
             format!(" {}", status_text),
             if row.disabled {
-                Style::default().fg(Color::DarkGray)
+                crate::ui::themes::theme::muted_style()
             } else if row.connected {
                 Style::default().fg(Color::Green)
             } else {
@@ -156,7 +156,7 @@ fn mcp_list_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
             connected,
             enabled
         ),
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     )));
     lines
 }
@@ -194,7 +194,7 @@ fn mcp_menu_lines(state: &ChatState, name: &str) -> Vec<Line<'static>> {
         };
         spans.push(Span::styled(
             st.to_string(),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ));
         lines.push(Line::from(spans));
         lines.push(Line::from(""));
@@ -229,13 +229,13 @@ fn mcp_tools_lines(state: &ChatState, name: &str, body_h: u16) -> Vec<Line<'stat
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled(
         format!("  Server: {}", name),
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     )));
 
     if state.mcp_modal_loading {
         lines.push(Line::from(Span::styled(
             "  Discovering tools…",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
         return lines;
     }
@@ -248,7 +248,7 @@ fn mcp_tools_lines(state: &ChatState, name: &str, body_h: u16) -> Vec<Line<'stat
     if state.mcp_modal_tools.is_empty() {
         lines.push(Line::from(Span::styled(
             "  (no tools)",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
         return lines;
     }
@@ -298,7 +298,7 @@ fn mcp_detail_lines(state: &ChatState, _name: &str, index: usize) -> Vec<Line<'s
     }
     lines.push(Line::from(Span::styled(
         "  Input Schema:",
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     )));
     let schema = serde_json::to_string_pretty(&tool.input_schema).unwrap_or_else(|_| "{}".into());
     for seg in schema.lines() {
@@ -319,7 +319,7 @@ fn mcp_confirm_lines(name: &str) -> Vec<Line<'static>> {
         Line::from(""),
         Line::from(Span::styled(
             "  This cannot be undone (re-add with /mcp add).",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )),
     ]
 }

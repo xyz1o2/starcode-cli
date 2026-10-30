@@ -46,7 +46,7 @@ pub fn render_compression_status(f: &mut Frame, state: &CompressionState, area: 
     let lines = if state.is_compressed {
         vec![
             Line::from(vec![
-                Span::styled("  Compression: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("  Compression: ", crate::ui::themes::theme::muted_style()),
                 Span::styled(
                     "Active",
                     Style::default()
@@ -55,28 +55,28 @@ pub fn render_compression_status(f: &mut Frame, state: &CompressionState, area: 
                 ),
             ]),
             Line::from(vec![
-                Span::styled("  Turn: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("  Turn: ", crate::ui::themes::theme::muted_style()),
                 Span::styled(
                     format!("{}", state.turn_number),
                     Style::default().fg(Color::White),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("  Original: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("  Original: ", crate::ui::themes::theme::muted_style()),
                 Span::styled(
                     format_tokens(state.original_tokens),
                     Style::default().fg(Color::Red),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("  Compressed: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("  Compressed: ", crate::ui::themes::theme::muted_style()),
                 Span::styled(
                     format_tokens(state.compressed_tokens),
                     Style::default().fg(Color::Green),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("  Reduction: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("  Reduction: ", crate::ui::themes::theme::muted_style()),
                 Span::styled(
                     format!("{:.1}%", (1.0 - state.compression_ratio) * 100.0),
                     Style::default().fg(Color::Cyan),
@@ -85,7 +85,7 @@ pub fn render_compression_status(f: &mut Frame, state: &CompressionState, area: 
         ]
     } else {
         vec![Line::from(vec![
-            Span::styled("  Compression: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  Compression: ", crate::ui::themes::theme::muted_style()),
             Span::styled("Not needed", Style::default().fg(Color::Green)),
         ])]
     };
@@ -93,7 +93,7 @@ pub fn render_compression_status(f: &mut Frame, state: &CompressionState, area: 
     let block = Block::default()
         .title(" Context Compression ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(crate::ui::themes::theme::muted_style());
 
     f.render_widget(Paragraph::new(lines).block(block), area);
 }

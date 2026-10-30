@@ -137,9 +137,13 @@ ui/utils/text.rs
 
 | 项 | 位置 | 问题 | 改法 | 状态 |
 |----|------|------|------|------|
-| A | 截断函数 | `utils/text.rs` 之外还有 **7 份** `truncate_str`：`agent_task_render.rs:514`、`collapsed_group.rs:357`、`command_suggestions.rs:271`、`confirmation_dialog.rs:886`、`mcp_modal.rs:327`、`market_modal.rs:119`、`plugin_modal.rs:136` | 4 种实现：`collapsed_group` 与 `confirmation_dialog` 是**字节切片**（`&s[..n]`），多字节边界直接 panic；`command_suggestions` / 三个 modal 按字符数（CJK 实际占 2 列，长度算少一半）；`agent_task_render` 按显示宽度 | ✅ 已统一到 `utils::text::truncate_display` |
-| B | 折叠切换 | `tool_render.rs:121`（读）、`mouse.rs:135`（写）、`input.rs:2929`（写） | 三处各写一遍 `expanded_tool_call_ids` 的增删；`input.rs` 额外做 `virtual_list.mark_dirty` + `auto_follow = false`，`mouse.rs` 没有 —— 两条路径行为不一致 | ✅ 已收成 `ChatState::toggle_tool_expansion` + `is_tool_expanded` |
-| D | 摘要行 | `tool_render.rs` 里 Read / Grep / Glob / LS / CodebaseSearch / ProjectMap / WebFetch 七个臂各写一份折叠摘要 | 四行 `lines.push` + 样式 + 提示文案全重复 | ✅ 已收成 `push_collapsed_summary` + `push_expand_hint` |
+| A | 截断函数 | `utils/text.rs` 之外还有 **7 份** `truncate_str`：`agent_task_render.rs:514`、`collapsed_group.rs:357`、`command_suggestions.rs:271`、`confirmation_dialog.rs:886`、`mcp_modal.rs:327`、`market_modal.rs:119`、`plugin_modal.rs:136` | 4 种实现：`collapsed_group` 与 `confirmation_dialog` 是**字节切片**（`&s[..n]`），多字节边界直接 panic；`command_suggestions` / 三个 modal 按字符数（CJK 实际占 2 列，长度算少一半）；`agent_task_render` 按显示宽度 | ✅ 统一到 `utils::text::truncate_display` |
+| B | 折叠切换 | `tool_render.rs`（读）、`mouse.rs`（写）、`input.rs`（写）三处各写一遍 | `input.rs` 额外做 `virtual_list.mark_dirty` + `auto_follow = false`，`mouse.rs` 没有 —— 两条路径行为不一致 | ✅ `ChatState::toggle_tool_expansion` + `is_tool_expanded` |
+| C | 次要文字样式 | 全 UI 200+ 处裸写 `Style::default().fg(Color::DarkGray)`，一半不跟随主题 | 新增 `theme::muted_style()` / `muted_dim_style()`（无主题上下文时的**唯一定义**）与 `Theme::subtle_style()` / `dim_style()`（有主题时用）；200+ 处改写；亮色预设的 `subtle` 从 175 灰压到 130 灰（白底上 1.9:1 → 3.6:1） | ✅ |
+| D | 展开提示 | 工具块 `(Tab to expand)`、thinking 块 `(ctrl+o 展开思考)`、子代理块 `(ctrl+o to expand)` 三处各写一遍，缩进与括号都不一致 | 样式统一到 `components::common::expand_hint(text)`，**措辞与按键由调用方给**（Tab / Ctrl+O 是两套真实按键，不合并） | ✅ |
+| D' | 折叠摘要行 | Read / Grep / Glob / LS / CodebaseSearch / ProjectMap / WebFetch 七个臂各写一份 | `push_collapsed_summary` + `push_expand_hint` | ✅ |
+| E | 大文件 | `events/input.rs` 5617 行、`components/palette.rs` 2907 行 | `input.rs` → `input/{mod,provider_form,palette_action,ask_user_question,chat_search,bg_agent,tool_approval}.rs`；`palette.rs` → `palette/{mod,items,describe}.rs` | ✅ |
+| F | 测试隔离 | `services/stream.rs::cache_merge_tests` 两个用例抢 `STAR_MODEL_CACHE_PATH`（进程级环境变量），并行时互相覆盖 —— 单跑第二个也失败 | 合并逻辑拆出 `merge_declared_and_discovered_models_with(..., cached)`，测试直接传 `load_from_path` 的结果，**完全不碰环境变量** | ✅ |
 
 **A 的具体改法**：
 
@@ -167,36 +171,70 @@ impl ChatState {
 }
 ```
 
-调用点：
+**C 的两个入口**（刻意分成两个）：
 
-- `mouse.rs::try_toggle_on_click` → `state.toggle_tool_expansion(entry_idx)`
-- `input.rs`（Tab）→ `state.toggle_tool_expansion(idx)`，随后保留
-  `auto_follow = false`（展开会改变高度，视口锚点要重算）
-- `tool_render.rs` 读折叠状态 → `state.is_tool_expanded(entry)`
+```rust
+// 有主题上下文
+theme.subtle_style()   // = fg(theme.subtle)
+theme.dim_style()     // = fg(theme.subtle) + DIM
 
-### 3.2 待办
+// 没有主题上下文（纯工具函数）
+crate::ui::themes::theme::muted_style()      // = fg(Color::DarkGray)
+crate::ui::themes::theme::muted_dim_style()  // = fg(Color::DarkGray) + DIM
+```
 
-| # | 项 | 位置 | 问题 | 改法 | 风险 |
-|---|----|------|------|------|------|
-| C | 次要文字样式 | 全 UI 60+ 处 `Color::DarkGray + DIM` 与 `theme.subtle` 两套写法并存 | 同一语义两套颜色来源，主题切换时有一半不跟随 | 加 `theme.dim_style()`，逐模块替换 | **中**：会改变视觉基线，要先定基线 |
-| D' | 展开提示文案 | `message_render.rs:273` 与 `agent_task_render.rs:88` 写的是 `(ctrl+o to expand)`，工具块写的是 `(Tab to expand)` | 不是同一个按键 | 保持两套 helper（`push_expand_hint` / `push_expand_hint_ctrl_o`），不强行合并 | 低 |
-| E | 大文件拆分 | `events/input.rs` 236KB、`services/stream.rs` 175KB、`components/palette.rs` 113KB | 改一处要读半份文件 | `palette.rs` 按 `PaletteMode` 切文件最省事；`input.rs` 按"按键 / 命令 / Vim"切 | 中高，需要连续几次独立提交 |
-| F | 测试隔离 | `services/stream.rs::cache_merge_tests` 两个用例共享状态，第二个单跑也失败 | 与本次改动无关（stash 对比确认），但会污染全量测试的信号 | 给两个用例各自独立的临时目录/配置 | 低 |
+> 为什么不把 200+ 处全换成 `theme.subtle_style()`？因为其中大部分函数**根本不接收
+> `&Theme`**（`utils/render.rs`、`components/common/*`、`components/highlight/*`、
+> 几个 modal）。为了统一颜色而给几十个纯函数加上主题参数，是比"留一个兜底入口"
+> 大得多的改动。兜底入口保证**次要文字只有一个定义处**，将来要接主题时逐个替换
+> 调用点即可，颜色本身不用再改。
+
+**E 的拆分边界**：
+
+```
+src/ui/events/input/
+  mod.rs               主分发（handle_key_event）+ 全局快捷键 + 粘贴 + Vim 动作
+  provider_form.rs     provider 配置表单（字段切换 / 校验 / 保存 / 回滚）
+  palette_action.rs    命令面板动作执行
+  ask_user_question.rs 问答工具的交互输入
+  chat_search.rs       会话内搜索
+  bg_agent.rs          后台代理选择器 + 各类模态框按键
+  tool_approval.rs     工具调用审批
+
+src/ui/components/palette/
+  mod.rs        调度（按 PaletteMode 挑条目、过滤）+ 渲染
+  items.rs      各类面板的条目构造
+  describe.rs   条目副标题文本
+```
+
+原先对外可见的 `pub(crate)` 函数（`handle_input_modal`、`execute_palette_action` 等）
+在 `input/mod.rs` 里显式重新导出，**调用方的路径不变**。
+
+### 3.2 仍待办
+
+| # | 项 | 位置 | 说明 | 风险 |
+|---|----|------|------|------|
+| G | 把兜底色接上主题 | `muted_style()` 的 ~200 个调用点 | 纯函数没有 `&Theme`，要接上主题得先给它们加参数；属于接口改造，不是重构 | 中高，需要分批做 |
+| H | 剩余大文件 | `services/stream.rs` 175KB、`state/store.rs` 95KB、`components/status_line/mod.rs` 89KB、`app/runtime.rs` 81KB | 这几个的内部边界比 input/palette 更难切（状态与副作用交织），建议等 input/palette 的拆分跑一段时间再动 | 中高 |
+| I | 死代码 | `components/interrupted.rs`、`vim/operators.rs`、`vim/text_objects.rs` | 确认无调用后删除 | 低 |
 
 ---
 
 ## 四、本轮已实施
 
-| 改动 | 文件 | 净变化 |
-|------|------|--------|
+| 改动 | 文件 | 规模 |
+|------|------|------|
 | 新增选区模块 | `src/ui/selection.rs` | +430 |
 | 列宽口径收口 | `src/ui/utils/text.rs` | +84 |
 | 删掉 store 里的重复实现 | `src/ui/state/store.rs` | −186 |
 | 删掉 chat_history 里的重复实现 | `src/ui/components/chat_history.rs` | −181 |
-| 折叠摘要行收口（A2） | `src/ui/components/tool_render.rs` | ±195 |
-| 两个复制入口合并 | `src/ui/events/mouse.rs` / `src/ui/events/input.rs` | −20 |
+| 折叠摘要行 + 展开提示收口 | `src/ui/components/tool_render.rs`、`components/common/mod.rs` | ±210 |
 | 截断函数统一（A） | 7 个组件 + `utils/text.rs` | −40 |
-| 折叠切换收口（B） | `state/store.rs` / `mouse.rs` / `input.rs` / `tool_render.rs` | −30 |
+| 折叠切换收口（B） | `state/store.rs`、`events/mouse.rs`、`events/input/mod.rs`、`components/tool_render.rs` | −30 |
+| 次要文字样式收口（C） | 34 个文件 + `themes/theme.rs`、`themes/presets.rs` | ±230 |
+| `input.rs` 拆分（E） | `events/input/` 7 个文件（5617 行 → 最大 3315 行） | 纯搬移 |
+| `palette.rs` 拆分（E） | `components/palette/` 3 个文件（2907 行 → 最大 1660 行） | 纯搬移 |
+| 测试隔离（F） | `services/stream.rs` | ±49 |
 
 新增测试 11 个：
 
@@ -210,12 +248,19 @@ impl ChatState {
 
 ## 五、验收口径
 
-| 检查 | 命令 |
-|------|------|
-| 编译 | `cargo check`（新增 warning 数为 0） |
-| 格式 | `cargo fmt --check`（改动文件无 diff） |
-| 单测 | `cargo test --lib`（UI 相关全绿；`model_catalog` / `hooks` / `checkpoint_manager` 等模块的既有失败不在本轮范围） |
-| 手工 | 拖选一段中文 → 应整段高亮并复制；Shift+拖选 → 交给终端原生选择 |
+| 检查 | 命令 | 结果 |
+|------|------|------|
+| 编译 | `cargo check` | 新增 warning 0（仓库既有 2 条） |
+| 格式 | `cargo fmt --check` | 改动文件无 diff（仓库既有 diff 在 `agent/`、`core/`、`utils/`） |
+| 单测 | `cargo test --lib` | 1739 passed / 5 failed —— 失败的 5 条在 `model_catalog`、`team_apply`、`hooks`、`checkpoint_manager`，与本次改动无关（stash 对比确认） |
+| UI 单测 | `cargo test --lib -- ui::` | 343 passed / 0 failed |
+| 手工 | 拖选一段中文 → 应整段高亮并复制；Shift+拖选 → 交给终端原生选择；工具块 Tab 折叠 → 与鼠标单击行为一致 |
+
+### 5.1 编辑器/终端的编码提醒
+
+仓库里的 `.rs` 全部是 **UTF-8 无 BOM**。Windows 终端默认按 GBK 显示 UTF-8 字节，
+中文会显示成乱码 —— 那是**显示层问题，不是文件坏了**。终端里 `chcp 65001` 可解决；
+编辑器请确认编码是 UTF-8。
 
 ---
 

@@ -77,7 +77,7 @@ pub fn render_chat_search_bar(f: &mut Frame, state: &ChatState, area: Rect) {
             "  Enter 下一个 · Shift+Enter 上一个 · Esc 关闭",
             "  Enter next · Shift+Enter prev · Esc close",
         ),
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     ));
 
     f.render_widget(Paragraph::new(Line::from(spans)), area);

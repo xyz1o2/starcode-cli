@@ -389,7 +389,7 @@ pub fn render_global_search(f: &mut Frame, state: &GlobalSearchState, area: Rect
     let results_block = Block::default()
         .title(format!(" Results ({}) ", match_label))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(crate::ui::themes::theme::muted_style());
 
     if state.results.is_empty() {
         let empty_msg = if state.is_searching {
@@ -447,7 +447,7 @@ pub fn render_global_search(f: &mut Frame, state: &GlobalSearchState, area: Rect
     let preview = Paragraph::new(preview_lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(crate::ui::themes::theme::muted_style()),
     );
     f.render_widget(preview, areas.preview);
 

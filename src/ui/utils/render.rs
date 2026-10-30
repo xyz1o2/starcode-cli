@@ -768,7 +768,7 @@ pub fn build_tool_body_block(
         if total_lines > 1 {
             result.push(Line::from(vec![Span::styled(
                 format!("... +{} lines", total_lines - 1),
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             )]));
         }
         return result;
@@ -866,7 +866,10 @@ pub fn build_tool_body_block(
 
             // Check for list items
             if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
-                spans.push(Span::styled("  • ", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    "  • ",
+                    crate::ui::themes::theme::muted_style(),
+                ));
                 spans.push(Span::styled(
                     trimmed[2..].to_string(),
                     Style::default().fg(Color::White),
@@ -881,7 +884,7 @@ pub fn build_tool_body_block(
                         format!("\"{}\"", key),
                         Style::default().fg(Color::Blue),
                     ));
-                    spans.push(Span::styled(": ", Style::default().fg(Color::DarkGray)));
+                    spans.push(Span::styled(": ", crate::ui::themes::theme::muted_style()));
                     spans.push(Span::styled(
                         val.to_string(),
                         Style::default().fg(Color::White),
@@ -899,7 +902,7 @@ pub fn build_tool_body_block(
                         key.to_string(),
                         Style::default().fg(Color::Blue),
                     ));
-                    spans.push(Span::styled(": ", Style::default().fg(Color::DarkGray)));
+                    spans.push(Span::styled(": ", crate::ui::themes::theme::muted_style()));
                     spans.push(Span::styled(
                         val.to_string(),
                         Style::default().fg(Color::White),
@@ -912,7 +915,7 @@ pub fn build_tool_body_block(
             else if trimmed == "{" || trimmed == "}" || trimmed == "[" || trimmed == "]" {
                 spans.push(Span::styled(
                     clean_line.to_string(),
-                    Style::default().fg(Color::DarkGray),
+                    crate::ui::themes::theme::muted_style(),
                 ));
             }
             // Check for file paths
@@ -1177,7 +1180,7 @@ pub fn build_diff_block(diff_content: &str, wrap_width: usize) -> Vec<Line<'stat
     if displayable_lines.is_empty() {
         lines.push(Line::from(Span::styled(
             "No changes detected.",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
         return lines;
     }
@@ -1198,7 +1201,7 @@ pub fn build_diff_block(diff_content: &str, wrap_width: usize) -> Vec<Line<'stat
             // hunk 头缩进同样的宽度，视觉上就在同一列。
             let indent = gutter_width + 6;
             lines.push(Line::from(vec![
-                Span::styled(" ".repeat(indent), Style::default().fg(Color::DarkGray)),
+                Span::styled(" ".repeat(indent), crate::ui::themes::theme::muted_style()),
                 Span::styled(
                     truncate_to_display_width(&line.content, wrap_width.saturating_sub(indent)),
                     Style::default().fg(Color::Cyan),
@@ -1221,7 +1224,7 @@ pub fn build_diff_block(diff_content: &str, wrap_width: usize) -> Vec<Line<'stat
                     let sep = "═".repeat(wrap_width.min(100));
                     lines.push(Line::from(Span::styled(
                         sep,
-                        Style::default().fg(Color::DarkGray),
+                        crate::ui::themes::theme::muted_style(),
                     )));
                 }
             }
@@ -1294,7 +1297,7 @@ pub fn build_diff_block(diff_content: &str, wrap_width: usize) -> Vec<Line<'stat
                     .map(|n| format!("{:width$}", n, width = gutter_width))
                     .unwrap_or_else(|| " ".repeat(gutter_width)),
                 " ",
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
                 None,
             ),
             _ => (String::new(), " ", Style::default(), None),
@@ -1304,7 +1307,7 @@ pub fn build_diff_block(diff_content: &str, wrap_width: usize) -> Vec<Line<'stat
         let highlighted_line = highlight_code_line(display_content, language);
 
         let mut spans = Vec::new();
-        let gutter_style = Style::default().fg(Color::DarkGray);
+        let gutter_style = crate::ui::themes::theme::muted_style();
 
         // Line Num
         let num_display = if num_str.is_empty() {
@@ -1335,7 +1338,7 @@ pub fn build_diff_block(diff_content: &str, wrap_width: usize) -> Vec<Line<'stat
         let marker_style = match line.line_type {
             2 => Style::default().fg(Color::Green),
             3 => Style::default().fg(Color::Red),
-            _ => Style::default().fg(Color::DarkGray),
+            _ => crate::ui::themes::theme::muted_style(),
         };
         spans.push(Span::styled(
             format!(" {} ", marker),
@@ -1450,7 +1453,7 @@ pub fn render_diff_stats_summary(stats: &DiffStats) -> Line<'static> {
         ),
         Span::styled(
             format!(" in {} file(s)", stats.files_changed),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ),
     ])
 }
@@ -1494,13 +1497,16 @@ pub fn render_expanded_diff(
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" (Tab to collapse)", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " (Tab to collapse)",
+            crate::ui::themes::theme::muted_style(),
+        ),
     ]));
 
     // 分隔线
     lines.push(Line::from(Span::styled(
         "─".repeat(wrap_width.min(100)),
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     )));
 
     // Diff 内容

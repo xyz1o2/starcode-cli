@@ -91,7 +91,7 @@ pub fn render_theme_picker(f: &mut Frame, themes: &[ThemeInfo], selected: usize,
                 ),
                 Span::styled(
                     format!(" - {}", theme.description),
-                    Style::default().fg(Color::DarkGray),
+                    crate::ui::themes::theme::muted_style(),
                 ),
             ]);
             ListItem::new(line)
@@ -126,7 +126,7 @@ pub fn render_theme_picker(f: &mut Frame, themes: &[ThemeInfo], selected: usize,
             Line::from(vec![
                 Span::styled(
                     format!("  {:<12}", name),
-                    Style::default().fg(Color::DarkGray),
+                    crate::ui::themes::theme::muted_style(),
                 ),
                 Span::styled("████████", Style::default().fg(*color)),
             ])
@@ -138,7 +138,7 @@ pub fn render_theme_picker(f: &mut Frame, themes: &[ThemeInfo], selected: usize,
             .title(format!(" Preview: {} ", theme.name))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(crate::ui::themes::theme::muted_style()),
     );
     f.render_widget(preview, chunks[1]);
 }

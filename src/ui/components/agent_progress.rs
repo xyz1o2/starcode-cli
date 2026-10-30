@@ -82,7 +82,7 @@ pub fn render_agent_progress_line(
     // 树形字符
     spans.push(Span::styled(
         format!("   {} ", tree_char),
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     ));
 
     // Agent类型/名称
@@ -102,7 +102,7 @@ pub fn render_agent_progress_line(
         if let (Some(name), Some(desc)) = (&progress.name, &progress.description) {
             spans.push(Span::styled(
                 format!(": {}", desc),
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             ));
         }
     } else {
@@ -116,7 +116,7 @@ pub fn render_agent_progress_line(
         if let Some(desc) = &progress.description {
             spans.push(Span::styled(
                 format!(" ({})", desc),
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             ));
         }
     }
@@ -141,7 +141,7 @@ pub fn render_agent_progress_line(
     if progress.tool_use_count > 0 {
         spans.push(Span::styled(
             format!(" · {} tools", progress.tool_use_count),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ));
     }
 
@@ -149,7 +149,7 @@ pub fn render_agent_progress_line(
     if let Some(tokens) = progress.tokens {
         spans.push(Span::styled(
             format!(" · {} tokens", format_tokens(tokens)),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ));
     }
 

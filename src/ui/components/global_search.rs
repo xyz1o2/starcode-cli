@@ -159,7 +159,7 @@ fn render_search_input(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
         ]),
         Line::from(Span::styled(
             "Type to search | ↑/↓: Navigate | Enter: Open | Esc: Close",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )),
     ])
     .block(block);
@@ -183,7 +183,7 @@ fn render_results_list(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
                     "Press Esc to close",
                     "Press Esc to close",
                 ),
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             )),
         ])
         .block(block);
@@ -197,7 +197,7 @@ fn render_results_list(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
             .title("Results")
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::DarkGray));
+            .border_style(crate::ui::themes::theme::muted_style());
 
         let message = if state.query.is_empty() {
             "Enter a search query to find files"
@@ -245,7 +245,7 @@ fn render_results_list(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
                 Span::styled(file_path, Style::default().fg(Color::Yellow)),
                 Span::styled(
                     format!(":{} ", result.line_number),
-                    Style::default().fg(Color::DarkGray),
+                    crate::ui::themes::theme::muted_style(),
                 ),
                 Span::styled(content, style),
             ]))
@@ -258,7 +258,7 @@ fn render_results_list(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
                 .title(format!("Results ({})", state.results.len()))
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(crate::ui::themes::theme::muted_style()),
         )
         .highlight_style(
             Style::default()
@@ -305,7 +305,7 @@ fn render_footer(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
             if let Some(before) = &result.context_before {
                 lines.push(Line::from(Span::styled(
                     before.clone(),
-                    Style::default().fg(Color::DarkGray),
+                    crate::ui::themes::theme::muted_style(),
                 )));
             }
 
@@ -319,13 +319,13 @@ fn render_footer(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
             if let Some(after) = &result.context_after {
                 lines.push(Line::from(Span::styled(
                     after.clone(),
-                    Style::default().fg(Color::DarkGray),
+                    crate::ui::themes::theme::muted_style(),
                 )));
             }
         } else {
             lines.push(Line::from(Span::styled(
                 "Press [P] to show preview",
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             )));
         }
     }
@@ -333,13 +333,13 @@ fn render_footer(f: &mut Frame, state: &GlobalSearchState, area: Rect) {
     lines.push(Line::from(Span::raw("")));
     lines.push(Line::from(Span::styled(
         "↑/↓: Navigate | Enter: Open File | P: Toggle Preview | Esc: Close",
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     )));
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(crate::ui::themes::theme::muted_style());
 
     let paragraph = Paragraph::new(lines).block(block);
 

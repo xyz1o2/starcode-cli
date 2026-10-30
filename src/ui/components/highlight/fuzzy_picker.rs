@@ -125,7 +125,7 @@ pub fn render_search_input(f: &mut Frame, area: Rect, title: &str, query: &str, 
     // 对标 CCB SearchBox: 前缀 `⌖` + 内容
     let input_line = if query.is_empty() {
         // placeholder 首字符反色（对标 CCB）
-        let mut spans = vec![Span::styled("⌖ ", Style::default().fg(Color::DarkGray))];
+        let mut spans = vec![Span::styled("⌖ ", crate::ui::themes::theme::muted_style())];
         if !placeholder.is_empty() {
             let chars: Vec<char> = placeholder.chars().collect();
             spans.push(Span::styled(
@@ -135,14 +135,14 @@ pub fn render_search_input(f: &mut Frame, area: Rect, title: &str, query: &str, 
             if chars.len() > 1 {
                 spans.push(Span::styled(
                     chars[1..].iter().collect::<String>(),
-                    Style::default().fg(Color::DarkGray),
+                    crate::ui::themes::theme::muted_style(),
                 ));
             }
         }
         Line::from(spans)
     } else {
         Line::from(vec![
-            Span::styled("⌖ ", Style::default().fg(Color::DarkGray)),
+            Span::styled("⌖ ", crate::ui::themes::theme::muted_style()),
             Span::styled(query.to_string(), Style::default().fg(Color::White)),
         ])
     };
@@ -183,9 +183,9 @@ pub fn scroll_indicator(
     if is_focused {
         Span::styled("▶ ", Style::default().fg(Color::Yellow))
     } else if i == 0 && has_above {
-        Span::styled("↑ ", Style::default().fg(Color::DarkGray))
+        Span::styled("↑ ", crate::ui::themes::theme::muted_style())
     } else if i == visible_count.saturating_sub(1) && has_below {
-        Span::styled("↓ ", Style::default().fg(Color::DarkGray))
+        Span::styled("↓ ", crate::ui::themes::theme::muted_style())
     } else {
         Span::raw("  ")
     }
@@ -206,11 +206,11 @@ pub fn render_byline(f: &mut Frame, area: Rect, hints: &[(&str, &str)]) {
     let mut spans = Vec::new();
     for (i, (key, action)) in hints.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(" · ", crate::ui::themes::theme::muted_style()));
         }
         spans.push(Span::styled(
             key.to_string(),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ));
         // compact 模式下缩短 action 标签
         let action_display = if compact {
@@ -233,7 +233,7 @@ pub fn render_byline(f: &mut Frame, area: Rect, hints: &[(&str, &str)]) {
 pub fn render_empty_state(f: &mut Frame, area: Rect, block: Block<'_>, message: &str) {
     let empty = Paragraph::new(message)
         .block(block)
-        .style(Style::default().fg(Color::DarkGray));
+        .style(crate::ui::themes::theme::muted_style());
     f.render_widget(empty, area);
 }
 

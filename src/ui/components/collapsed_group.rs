@@ -70,9 +70,7 @@ fn render_collapsed_summary(
         // 展开/折叠图标
         Span::styled(
             "▸ ",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
+            crate::ui::themes::theme::muted_style().add_modifier(Modifier::BOLD),
         ),
         // 摘要文本
         Span::styled(summary_text, Style::default().fg(Color::Gray)),
@@ -80,7 +78,7 @@ fn render_collapsed_summary(
         if !status_indicators.is_empty() {
             Span::styled(
                 format!(" {}", status_indicators),
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             )
         } else {
             Span::raw("")
@@ -88,7 +86,7 @@ fn render_collapsed_summary(
         // 条目数量
         Span::styled(
             format!(" ({} items)", entry_count),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ),
     ]);
 
@@ -120,11 +118,9 @@ fn render_expanded_group(
     let title_line = Line::from(vec![
         Span::styled(
             "▾ ",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
+            crate::ui::themes::theme::muted_style().add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Collapse", Style::default().fg(Color::DarkGray)),
+        Span::styled("Collapse", crate::ui::themes::theme::muted_style()),
     ]);
     lines.push(title_line);
 
@@ -146,7 +142,7 @@ fn render_expanded_group(
                     Span::styled("  ", Style::default()),
                     Span::styled(
                         "─".repeat(area_width.saturating_sub(4)),
-                        Style::default().fg(Color::DarkGray),
+                        crate::ui::themes::theme::muted_style(),
                     ),
                 ]));
             }
@@ -191,7 +187,7 @@ fn render_tool_call_sub_entry(
         let args_preview = truncate_str(&tc.function.arguments, width.saturating_sub(4));
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled(args_preview, Style::default().fg(Color::DarkGray)),
+            Span::styled(args_preview, crate::ui::themes::theme::muted_style()),
         ]));
     }
 

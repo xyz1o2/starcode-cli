@@ -98,27 +98,30 @@ pub fn render_export_dialog(f: &mut Frame, state: &ExportState, area: Rect) {
 
     // Format
     let format_line = Line::from(vec![
-        Span::styled("  Format: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("  Format: ", crate::ui::themes::theme::muted_style()),
         Span::styled(
             state.format.name(),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" (Tab to change)", Style::default().fg(Color::DarkGray)),
+        Span::styled(" (Tab to change)", crate::ui::themes::theme::muted_style()),
     ]);
     f.render_widget(Paragraph::new(format_line), chunks[1]);
 
     // Filename
     let filename_line = Line::from(vec![
-        Span::styled("  File: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("  File: ", crate::ui::themes::theme::muted_style()),
         Span::styled(state.filename.clone(), Style::default().fg(Color::Yellow)),
     ]);
     f.render_widget(Paragraph::new(filename_line), chunks[2]);
 
     // Options
     let options_line = Line::from(vec![
-        Span::styled("  Include metadata: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "  Include metadata: ",
+            crate::ui::themes::theme::muted_style(),
+        ),
         Span::styled(
             if state.include_metadata { "Yes" } else { "No" },
             Style::default().fg(if state.include_metadata {
@@ -129,7 +132,7 @@ pub fn render_export_dialog(f: &mut Frame, state: &ExportState, area: Rect) {
         ),
         Span::styled(
             "  Include tool calls: ",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ),
         Span::styled(
             if state.include_tool_calls {
@@ -149,7 +152,7 @@ pub fn render_export_dialog(f: &mut Frame, state: &ExportState, area: Rect) {
     // Help
     let help_line = Line::from(vec![Span::styled(
         "  Enter Export  Esc Cancel  Tab Format  m Metadata  t Tool calls",
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     )]);
     f.render_widget(Paragraph::new(help_line), chunks[4]);
 }

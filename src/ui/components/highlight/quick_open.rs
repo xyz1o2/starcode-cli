@@ -191,7 +191,7 @@ pub fn render_quick_open(f: &mut Frame, state: &QuickOpenState, area: Rect) {
     let files_block = Block::default()
         .title(format!(" Files ({}) ", match_label))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(crate::ui::themes::theme::muted_style());
 
     if state.files.is_empty() {
         let empty_msg = if state.query.is_empty() {
@@ -230,7 +230,7 @@ pub fn render_quick_open(f: &mut Frame, state: &QuickOpenState, area: Rect) {
                     .preview_content
                     .as_deref()
                     .unwrap_or("Press Enter to open"),
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             )),
         ]
     } else {
@@ -239,7 +239,7 @@ pub fn render_quick_open(f: &mut Frame, state: &QuickOpenState, area: Rect) {
     let preview = Paragraph::new(preview_lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(crate::ui::themes::theme::muted_style()),
     );
     f.render_widget(preview, areas.preview);
 

@@ -138,7 +138,7 @@ fn render_centered_list(f: &mut Frame<'_>, area: Rect, title: &str, items: &[Lis
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::DarkGray))
+            .border_style(crate::ui::themes::theme::muted_style())
             .title(format!(" {} ", title))
             .title_style(Style::default().fg(Color::Cyan)),
     );

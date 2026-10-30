@@ -275,7 +275,7 @@ pub(crate) fn render_non_tool_entry_blocks(
                                         "(ctrl+o to expand)",
                                     )
                                 ),
-                                Style::default().fg(theme.subtle),
+                                theme.subtle_style(),
                             ),
                         ];
                         blocks.push(vec![Line::from(header_spans)]);

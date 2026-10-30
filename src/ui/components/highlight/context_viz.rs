@@ -76,7 +76,7 @@ pub fn render_context_visualization(f: &mut Frame, breakdown: &TokenBreakdown, a
         ),
         Span::styled(
             format!(" ({:.1}%)", pct),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ),
     ]);
     f.render_widget(Paragraph::new(title), chunks[0]);
@@ -134,7 +134,7 @@ fn breakdown_line(label: &str, tokens: u32, total: u32, color: Color) -> Line<'s
     Line::from(vec![
         Span::styled(
             format!("  {:<15}", label),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ),
         Span::styled(
             format!("{:>8}", format_tokens(tokens)),
@@ -142,7 +142,7 @@ fn breakdown_line(label: &str, tokens: u32, total: u32, color: Color) -> Line<'s
         ),
         Span::styled(
             format!("  ({:.1}%)", pct),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ),
     ])
 }

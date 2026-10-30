@@ -13,7 +13,7 @@ pub mod git;
 const SEP: &str = " │ ";
 
 fn sep() -> Span<'static> {
-    Span::styled(SEP, Style::default().fg(Color::DarkGray))
+    Span::styled(SEP, crate::ui::themes::theme::muted_style())
 }
 
 /// UI 只用 worker acknowledgement 中的 policy 计算 active context 比例；启动前不能
@@ -705,7 +705,7 @@ fn fit_meta_groups(groups: &[(Color, String)], budget: usize) -> Vec<Span<'stati
 }
 
 fn meta_sep() -> Span<'static> {
-    Span::styled(META_SEP, Style::default().fg(Color::DarkGray))
+    Span::styled(META_SEP, crate::ui::themes::theme::muted_style())
 }
 
 /// 工具名在状态行里的显示上限（字符数）。

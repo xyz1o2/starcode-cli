@@ -1,8 +1,7 @@
 /// 缓存命中率显示组件
-/// 
+///
 /// 对标claude-code-main的CachePill组件
 /// 显示缓存命中率和TTL倒计时
-
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -40,7 +39,7 @@ impl CacheStatsState {
         } else {
             self.misses += 1;
         }
-        
+
         let total = self.hits + self.misses;
         if total > 0 {
             self.last_hit_rate = Some(self.hits as f64 / total as f64 * 100.0);
@@ -84,7 +83,7 @@ fn format_countdown(remaining_secs: u64) -> String {
 }
 
 /// 渲染缓存命中率显示
-/// 
+///
 /// 输出格式: Cache 85% 45:30
 pub fn render_cache_pill(stats: &CacheStatsState) -> Line<'static> {
     let hit_rate_text = match stats.hit_rate_percent() {
@@ -99,25 +98,26 @@ pub fn render_cache_pill(stats: &CacheStatsState) -> Line<'static> {
 
     // 颜色逻辑
     let hit_rate_color = match stats.hit_rate_percent() {
-        Some(rate) if rate >= 50.0 => Color::Rgb(80, 220, 100),  // Green
+        Some(rate) if rate >= 50.0 => Color::Rgb(80, 220, 100), // Green
         Some(_) => Color::DarkGray,
         None => Color::DarkGray,
     };
 
     // 倒计时颜色
-    let elapsed = stats.last_reset_at
+    let elapsed = stats
+        .last_reset_at
         .map(|t| t.elapsed().as_secs())
         .unwrap_or(0);
     let elapsed_min = elapsed as f64 / 60.0;
-    
+
     let timer_color = if elapsed >= 3600 {
-        Color::DarkGray  // Expired
+        Color::DarkGray // Expired
     } else if elapsed_min < 20.0 {
-        Color::Rgb(80, 220, 100)  // Green
+        Color::Rgb(80, 220, 100) // Green
     } else if elapsed_min < 40.0 {
-        Color::Rgb(255, 200, 50)  // Yellow
+        Color::Rgb(255, 200, 50) // Yellow
     } else {
-        Color::Rgb(255, 80, 80)  // Red
+        Color::Rgb(255, 80, 80) // Red
     };
 
     // 闪烁效果（最后5分钟）
@@ -127,15 +127,18 @@ pub fn render_cache_pill(stats: &CacheStatsState) -> Line<'static> {
         let phase = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_millis() / 500) % 2;
+            .as_millis()
+            / 500)
+            % 2;
         phase == 0
     } else {
         true
     };
 
-    let mut spans = vec![
-        Span::styled(" Cache ", Style::default().fg(Color::DarkGray)),
-    ];
+    let mut spans = vec![Span::styled(
+        " Cache ",
+        crate::ui::themes::theme::muted_style(),
+    )];
 
     if flash_visible {
         spans.push(Span::styled(
@@ -155,11 +158,13 @@ pub fn render_cache_pill(stats: &CacheStatsState) -> Line<'static> {
 
 /// 渲染简洁的缓存命中率（用于状态栏）
 pub fn render_cache_pill_compact(stats: &CacheStatsState) -> String {
-    let hit_rate = stats.hit_rate_percent()
+    let hit_rate = stats
+        .hit_rate_percent()
         .map(|r| format!("{:.0}%", r))
         .unwrap_or_else(|| "--%".to_string());
-    
-    let countdown = stats.remaining_ttl_secs()
+
+    let countdown = stats
+        .remaining_ttl_secs()
         .map(|s| format_countdown(s))
         .unwrap_or_else(|| "--:--".to_string());
 

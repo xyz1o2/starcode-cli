@@ -125,7 +125,7 @@ fn render_title(f: &mut Frame, state: &ThemePickerState, area: Rect) {
         ]),
         Line::from(Span::styled(
             "Use ↑/↓ to navigate, Enter to select, Esc to cancel",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )),
     ])
     .block(block);
@@ -167,7 +167,7 @@ fn render_theme_list(f: &mut Frame, state: &ThemePickerState, area: Rect) {
                 ),
                 Span::styled(
                     format!(" ({})", dark_light),
-                    Style::default().fg(Color::DarkGray),
+                    crate::ui::themes::theme::muted_style(),
                 ),
             ]))
         })
@@ -179,7 +179,7 @@ fn render_theme_list(f: &mut Frame, state: &ThemePickerState, area: Rect) {
                 .title("Available Themes")
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(crate::ui::themes::theme::muted_style()),
         )
         .highlight_style(
             Style::default()
@@ -226,13 +226,13 @@ fn render_footer(f: &mut Frame, state: &ThemePickerState, area: Rect) {
     lines.push(Line::from(Span::raw("")));
     lines.push(Line::from(Span::styled(
         "↑/↓: Navigate | Enter: Select | Esc: Cancel",
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     )));
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(crate::ui::themes::theme::muted_style());
 
     let paragraph = Paragraph::new(lines).block(block);
 

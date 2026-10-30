@@ -147,7 +147,7 @@ fn context_window_detail_lines(state: &ChatState) -> Vec<Line<'static>> {
         };
         lines.push(Line::from(Span::styled(
             label,
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
     }
 
@@ -160,7 +160,7 @@ fn context_window_detail_lines(state: &ChatState) -> Vec<Line<'static>> {
         Line::default(),
         Line::from(Span::styled(
             "Enter to change | Esc to close",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )),
     ]);
     lines
@@ -330,7 +330,7 @@ fn build_detail_lines(state: &ChatState, selected: usize) -> Vec<Line<'static>> 
         Line::default(),
         Line::from(Span::styled(
             "Enter to change | Esc to close",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )),
     ]
 }
@@ -364,7 +364,7 @@ pub fn render_status_modal(f: &mut Frame, area: Rect, state: &ChatState) {
         .block(
             Block::default()
                 .borders(Borders::RIGHT)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(crate::ui::themes::theme::muted_style()),
         )
         .highlight_style(Style::default().bg(Color::DarkGray));
 

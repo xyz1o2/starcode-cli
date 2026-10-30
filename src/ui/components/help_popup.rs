@@ -222,7 +222,7 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
                     "按 ? 或 ESC 关闭",
                     "Press ? or ESC to close",
                 ),
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             ),
             Span::raw(")"),
         ]),
@@ -261,7 +261,7 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
                 "工具执行时会显示确认框，用 1/2/3 或方向键选择",
                 "Tool execution may require confirmation: use 1/2/3 or arrows",
             ),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ),
     ]));
 

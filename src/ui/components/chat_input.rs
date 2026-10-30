@@ -127,7 +127,7 @@ pub fn render_input(f: &mut Frame<'_>, state: &ChatState, area: Rect) {
         .title_top(
             Line::from(Span::styled(
                 format!(" {} ", count_label),
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             ))
             .alignment(ratatui::layout::Alignment::Right),
         );
@@ -288,11 +288,14 @@ fn build_folded_lines(state: &ChatState, total_lines: usize) -> Vec<Line<'static
             ),
             Span::styled(
                 " (Alt+P 展开)".to_string(),
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             ),
         ]),
         Line::from(vec![
-            Span::styled("预览: ".to_string(), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "预览: ".to_string(),
+                crate::ui::themes::theme::muted_style(),
+            ),
             Span::raw(preview),
         ]),
     ]

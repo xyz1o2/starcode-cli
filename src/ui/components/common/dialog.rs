@@ -119,7 +119,7 @@ pub fn render_confirmation_dialog(
     content.push(Line::from(""));
     content.push(Line::from(Span::styled(
         "Press number to select, ESC to cancel",
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     )));
 
     let config = DialogConfig {
@@ -165,7 +165,7 @@ pub fn render_input_dialog(
     content.push(Line::from(""));
     content.push(Line::from(Span::styled(
         "Press Enter to confirm, ESC to cancel",
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     )));
 
     let config = DialogConfig {

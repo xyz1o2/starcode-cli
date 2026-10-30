@@ -98,7 +98,7 @@ pub fn render_key_hints(hints: &[(&str, &str)], theme: &Theme) -> Line<'static> 
 pub fn render_help_text(text: &str) -> Line<'static> {
     Line::from(Span::styled(
         text.to_string(),
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     ))
 }
 

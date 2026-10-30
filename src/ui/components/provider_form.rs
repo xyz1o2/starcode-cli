@@ -268,7 +268,7 @@ pub fn render_provider_form(f: &mut Frame, area: Rect, state: &mut ChatState) {
     for (key_part, label_part) in hint_parts {
         hint_spans.push(Span::styled(
             *key_part,
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ));
         hint_spans.push(Span::styled(*label_part, Style::default().fg(Color::Gray)));
     }

@@ -106,7 +106,7 @@ pub fn render_history_search(f: &mut Frame, state: &HistorySearchState, area: Re
         .title(format!(" Results ({}) ", match_label))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(crate::ui::themes::theme::muted_style());
 
     if state.results.is_empty() {
         let empty_msg = if state.query.is_empty() {
@@ -161,7 +161,7 @@ pub fn render_history_search(f: &mut Frame, state: &HistorySearchState, area: Re
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(crate::ui::themes::theme::muted_style()),
     );
     f.render_widget(preview, areas.preview);
 

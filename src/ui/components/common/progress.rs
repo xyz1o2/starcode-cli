@@ -96,7 +96,7 @@ pub fn render_step_progress(current: usize, total: usize, label: &str) -> Line<'
         Span::styled(label.to_string(), Style::default().fg(Color::White)),
         Span::styled(
             format!(" ({}%)", (progress * 100.0).round() as u32),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ),
     ])
 }
@@ -114,7 +114,7 @@ pub fn render_timed_progress_bar(
         bar,
         Span::styled(
             format!(" {}", elapsed_str),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ),
     ])
 }
@@ -153,7 +153,7 @@ pub fn render_circular_progress(
         ),
         Span::styled(
             empty_char.to_string().repeat(empty),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ),
     ]);
 

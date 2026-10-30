@@ -113,7 +113,7 @@ pub fn render_diff_lines(diff_text: &str, filename: &str, width: u16) -> Vec<Lin
                 result.push(Line::from(vec![
                     Span::styled(
                         format!("  {:width$} ", "", width = gutter_width - 2),
-                        Style::default().fg(Color::DarkGray),
+                        crate::ui::themes::theme::muted_style(),
                     ),
                     Span::styled(
                         diff_line.content.clone(),
@@ -132,7 +132,7 @@ pub fn render_diff_lines(diff_text: &str, filename: &str, width: u16) -> Vec<Lin
                 result.push(Line::from(vec![
                     Span::styled(
                         format!("{} │ ", line_num),
-                        Style::default().fg(Color::DarkGray),
+                        crate::ui::themes::theme::muted_style(),
                     ),
                     Span::styled(
                         "+ ",
@@ -155,7 +155,7 @@ pub fn render_diff_lines(diff_text: &str, filename: &str, width: u16) -> Vec<Lin
                 result.push(Line::from(vec![
                     Span::styled(
                         format!("{} │ ", line_num),
-                        Style::default().fg(Color::DarkGray),
+                        crate::ui::themes::theme::muted_style(),
                     ),
                     Span::styled(
                         "- ",
@@ -180,12 +180,12 @@ pub fn render_diff_lines(diff_text: &str, filename: &str, width: u16) -> Vec<Lin
                 result.push(Line::from(vec![
                     Span::styled(
                         format!("{} │ ", old_num),
-                        Style::default().fg(Color::DarkGray),
+                        crate::ui::themes::theme::muted_style(),
                     ),
                     Span::styled("  ", Style::default()),
                     Span::styled(
                         truncate_ansi(&highlighted, content_width),
-                        Style::default().fg(Color::DarkGray),
+                        crate::ui::themes::theme::muted_style(),
                     ),
                 ]));
             }

@@ -84,10 +84,11 @@ pub fn render_agent_task_entry(
 
     // ── 3. 尾部提示 ──
     if !is_transcript && !is_async {
-        blocks.push(vec![Line::from(Span::styled(
+        // 与工具块的展开提示共用 `common::expand_hint`（样式一处，措辞各自给）。
+        // 子代理块用的是 Ctrl+O，与工具块的 Tab 不是同一个按键。
+        blocks.push(vec![crate::ui::components::common::expand_hint(
             "      (ctrl+o to expand)",
-            Style::default().fg(theme.inactive),
-        ))]);
+        )]);
     }
 
     blocks

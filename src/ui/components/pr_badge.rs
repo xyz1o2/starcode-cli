@@ -1,8 +1,7 @@
 /// PR徽章组件
-/// 
+///
 /// 对标claude-code-main的PrBadge组件
 /// 显示PR状态和链接
-
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -46,7 +45,7 @@ fn get_pr_status_color(state: &Option<PrReviewState>) -> Option<Color> {
 }
 
 /// 渲染PR徽章
-/// 
+///
 /// 输出格式：
 /// - PR #123 (approved)
 /// - PR #456 (changes requested)
@@ -55,25 +54,27 @@ fn get_pr_status_color(state: &Option<PrReviewState>) -> Option<Color> {
 pub fn render_pr_badge(pr: &PrInfo) -> Line<'static> {
     let status_color = get_pr_status_color(&pr.review_state);
     let mut spans = Vec::new();
-    
+
     // PR标签
-    spans.push(Span::styled(
-        "PR",
-        Style::default().fg(Color::DarkGray),
-    ));
-    
+    spans.push(Span::styled("PR", crate::ui::themes::theme::muted_style()));
+
     // PR编号
     let number_style = if let Some(color) = status_color {
-        Style::default().fg(color).add_modifier(if pr.bold { Modifier::BOLD } else { Modifier::empty() })
+        Style::default().fg(color).add_modifier(if pr.bold {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        })
     } else {
-        Style::default().fg(Color::DarkGray).add_modifier(if pr.bold { Modifier::BOLD } else { Modifier::empty() })
+        crate::ui::themes::theme::muted_style().add_modifier(if pr.bold {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        })
     };
-    
-    spans.push(Span::styled(
-        format!(" #{}", pr.number),
-        number_style,
-    ));
-    
+
+    spans.push(Span::styled(format!(" #{}", pr.number), number_style));
+
     Line::from(spans)
 }
 
@@ -93,6 +94,6 @@ pub fn render_pr_compact(pr: &PrInfo) -> String {
         Some(state) => format!(" ({})", render_pr_status_label(state)),
         None => String::new(),
     };
-    
+
     format!("PR #{}{}", pr.number, status)
 }

@@ -40,7 +40,7 @@ pub fn render_session_list(f: &mut Frame, sessions: &[SessionEntry], selected: u
                 ),
                 Span::styled(
                     format!(" {} msgs", s.message_count),
-                    Style::default().fg(Color::DarkGray),
+                    crate::ui::themes::theme::muted_style(),
                 ),
             ]);
             ListItem::new(line)
@@ -75,9 +75,9 @@ pub fn render_session_list(f: &mut Frame, sessions: &[SessionEntry], selected: u
             Block::default()
                 .title(" Preview ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(crate::ui::themes::theme::muted_style()),
         )
-        .style(Style::default().fg(Color::DarkGray))
+        .style(crate::ui::themes::theme::muted_style())
         .wrap(ratatui::widgets::Wrap { trim: true });
     f.render_widget(preview, chunks[1]);
 }

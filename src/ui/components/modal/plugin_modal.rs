@@ -70,7 +70,7 @@ pub fn render_plugins_modal(
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(hint, Style::default().fg(Color::DarkGray)),
+            Span::styled(hint, crate::ui::themes::theme::muted_style()),
         ]));
     }
 
@@ -126,7 +126,7 @@ fn tabs_line(active: PluginTab) -> Line<'static> {
         } else {
             spans.push(Span::styled(
                 format!("  {}  ", label),
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             ));
         }
     }
@@ -141,7 +141,7 @@ fn plugin_status_icon(enabled: bool) -> Span<'static> {
     if enabled {
         Span::styled("●", Style::default().fg(Color::Green))
     } else {
-        Span::styled("○", Style::default().fg(Color::DarkGray))
+        Span::styled("○", crate::ui::themes::theme::muted_style())
     }
 }
 
@@ -159,7 +159,7 @@ fn discover_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
     let total = state.plugin_discover.len();
     let indices = state.filtered_discover_indices();
     let search_span = if state.plugin_search.is_empty() {
-        Span::styled("Type to filter…", Style::default().fg(Color::DarkGray))
+        Span::styled("Type to filter…", crate::ui::themes::theme::muted_style())
     } else {
         Span::styled(
             state.plugin_search.clone(),
@@ -174,7 +174,7 @@ fn discover_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
     if !state.plugin_search.is_empty() {
         search_line.push(Span::styled(
             format!("  ({} / {})", indices.len(), total),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ));
     }
     lines.push(Line::from(search_line));
@@ -182,7 +182,7 @@ fn discover_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
     if state.plugin_loading {
         lines.push(Line::from(Span::styled(
             "  Loading…",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
         return lines;
     }
@@ -203,18 +203,18 @@ fn discover_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  No plugins available.",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
         lines.push(Line::from(Span::styled(
             "  Add a marketplace first using the Marketplaces tab.",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
         return lines;
     }
     if indices.is_empty() {
         lines.push(Line::from(Span::styled(
             format!("  No plugins match '{}'.", state.plugin_search.trim()),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
         return lines;
     }
@@ -237,7 +237,7 @@ fn discover_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
     if start > 0 {
         lines.push(Line::from(Span::styled(
             "  ↑ more above",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
     }
     for pos in start..end {
@@ -248,7 +248,7 @@ fn discover_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
         let radio = if state.plugin_selected.contains(&row.plugin.name) {
             Span::styled("◉", Style::default().fg(Color::Cyan))
         } else {
-            Span::styled("○", Style::default().fg(Color::DarkGray))
+            Span::styled("○", crate::ui::themes::theme::muted_style())
         };
         lines.push(Line::from(vec![
             Span::raw(" "),
@@ -278,7 +278,7 @@ fn discover_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
     if end < indices.len() {
         lines.push(Line::from(Span::styled(
             "  ↓ more below",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
     }
     lines
@@ -290,7 +290,7 @@ fn installed_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
     if state.plugin_loading {
         lines.push(Line::from(Span::styled(
             "  Loading…",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
         return lines;
     }
@@ -304,11 +304,11 @@ fn installed_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  No plugins installed.",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
         lines.push(Line::from(Span::styled(
             "  Install from the Discover tab, or /plugin install <source>.",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
         return lines;
     }
@@ -342,7 +342,7 @@ fn installed_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
             ),
             Span::styled(
                 format!(" {}", truncate_str(&p.entry.source, 32)),
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             ),
         ]));
     }
@@ -386,7 +386,7 @@ fn detail_lines(state: &ChatState, _body_h: u16) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         format!("  Source: {}", p.source),
-        Style::default().fg(Color::DarkGray),
+        crate::ui::themes::theme::muted_style(),
     )));
     if !p.homepage.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -397,7 +397,7 @@ fn detail_lines(state: &ChatState, _body_h: u16) -> Vec<Line<'static>> {
     if let Some(r) = p.source_ref.as_deref().filter(|r| !r.trim().is_empty()) {
         lines.push(Line::from(Span::styled(
             format!("  Ref: {}", r),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
     }
 
@@ -415,7 +415,7 @@ fn marketplaces_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
     if state.plugin_loading {
         lines.push(Line::from(Span::styled(
             "  Loading…",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
         return lines;
     }
@@ -435,7 +435,7 @@ fn marketplaces_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
             Span::styled("＋ Add marketplace…".to_string(), style),
             Span::styled(
                 "  (git URL / GitHub owner/repo / local path)",
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             ),
         ]));
     }
@@ -458,7 +458,7 @@ fn marketplaces_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
             Span::styled(format!(" {:<22}", truncate_str(&m.name, 22)), style),
             Span::styled(
                 format!(" {} plugins", count),
-                Style::default().fg(Color::DarkGray),
+                crate::ui::themes::theme::muted_style(),
             ),
             Span::styled(
                 format!("  {}", truncate_str(&m.source, 36)),
@@ -498,7 +498,7 @@ fn errors_lines(state: &ChatState, body_h: u16) -> Vec<Line<'static>> {
     if state.plugin_loading {
         lines.push(Line::from(Span::styled(
             "  Loading…",
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         )));
         return lines;
     }

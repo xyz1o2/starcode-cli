@@ -119,7 +119,10 @@ pub fn footer_hints(hints: &[(&str, &str)]) -> Line<'static> {
     let mut spans: Vec<Span> = vec![Span::raw(" ")];
     for (i, (key, label)) in hints.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled("  ·  ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                "  ·  ",
+                crate::ui::themes::theme::muted_style(),
+            ));
         }
         spans.push(Span::styled(
             key.to_string(),
@@ -129,7 +132,7 @@ pub fn footer_hints(hints: &[(&str, &str)]) -> Line<'static> {
         ));
         spans.push(Span::styled(
             format!(" {}", label),
-            Style::default().fg(Color::DarkGray),
+            crate::ui::themes::theme::muted_style(),
         ));
     }
     Line::from(spans)
@@ -139,7 +142,7 @@ pub fn footer_hints(hints: &[(&str, &str)]) -> Line<'static> {
 /// it also works in colorblind mode).
 pub fn status_spans(connected: bool, disabled: bool) -> Vec<Span<'static>> {
     if disabled {
-        return vec![Span::styled("○", Style::default().fg(Color::DarkGray))];
+        return vec![Span::styled("○", crate::ui::themes::theme::muted_style())];
     }
     if connected {
         return vec![Span::styled("●", Style::default().fg(Color::Green))];
