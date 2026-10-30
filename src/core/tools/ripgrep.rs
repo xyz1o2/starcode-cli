@@ -139,13 +139,18 @@ fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
-/// `1 file` / `3 files` —— 复数只影响观感，但 "1 files" 看着像 bug。
+/// `1 file` / `3 files` / `2 matches` —— 单复数只管观感，但 "2 matchs" 一看就是
+/// 没测过：以 s/ch/sh/x/z 结尾的词加 `es`。
 pub fn plural_count(n: usize, word: &str) -> String {
     if n == 1 {
-        format!("{} {}", n, word)
-    } else {
-        format!("{} {}s", n, word)
+        return format!("{} {}", n, word);
     }
+    let needs_es = word.ends_with('s')
+        || word.ends_with('x')
+        || word.ends_with('z')
+        || word.ends_with("ch")
+        || word.ends_with("sh");
+    format!("{} {}{}", n, word, if needs_es { "es" } else { "s" })
 }
 
 /// 一次 Grep 结果输入给格式化器的最小集（两个 Grep 实现共用）。

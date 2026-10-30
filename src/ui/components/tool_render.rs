@@ -973,7 +973,9 @@ fn summarise_grep_output(text: &str) -> (usize, Option<usize>) {
     };
     let first = first.trim();
 
-    if first.starts_with("No matches") || first.starts_with("No results") || first.starts_with("No files")
+    if first.starts_with("No matches")
+        || first.starts_with("No results")
+        || first.starts_with("No files")
     {
         return (0, Some(0));
     }
