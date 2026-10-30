@@ -1,6 +1,7 @@
 pub mod app;
 pub mod components;
 pub mod events;
+pub mod selection;
 pub mod services;
 pub mod shared;
 pub mod state;

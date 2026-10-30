@@ -287,25 +287,22 @@ pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
                 let _toggled = try_toggle_on_click(state, entry_idx, row);
                 state.text_selection.clear();
             } else if state.text_selection.has_selection() {
-                // 如果有选中文本，自动复制到剪贴板
-                if let Some(selected_text) = state.get_selected_text() {
-                    let copied = crate::ui::utils::clipboard::copy_to_clipboard(&selected_text);
-                    match copied {
-                        Ok(()) => {
-                            // 刻意**不**清选区：保留高亮，用户能看到复制了哪一段，
-                            // 剪贴板被占用时还能按 Ctrl+C 重试。
-                            state.current_status_line = Some("Copied".to_string());
-                        }
-                        Err(e) => {
-                            // 失败要说给用户听，且保留选区好让用户重试（Ctrl+C）。
-                            // 此前这里只写日志文件，界面上毫无反馈。
-                            state.current_status_line =
-                                Some(format!("Copy failed: {e} — press Ctrl+C to retry"));
-                            crate::utils::logging::append_debug_log_line(&format!(
-                                "[COPY] failed: {}",
-                                e
-                            ));
-                        }
+                // 松开即复制：走 `ui::selection::copy_selection`（和 Ctrl+C 同一个
+                // 入口），失败要说给用户听，且**保留选区**好让用户重试（Ctrl+C）。
+                // 此前这里只写日志文件，界面上毫无反馈。
+                match crate::ui::selection::copy_selection(state) {
+                    Ok(()) => {
+                        // 刻意**不**清选区：保留高亮，用户能看到复制了哪一段，
+                        // 剪贴板被占用时还能按 Ctrl+C 重试。
+                        state.current_status_line = Some("Copied".to_string());
+                    }
+                    Err(e) => {
+                        state.current_status_line =
+                            Some(format!("Copy failed: {e} — press Ctrl+C to retry"));
+                        crate::utils::logging::append_debug_log_line(&format!(
+                            "[COPY] failed: {}",
+                            e
+                        ));
                     }
                 }
             }

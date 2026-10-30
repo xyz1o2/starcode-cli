@@ -5,6 +5,90 @@ pub fn is_status_text(s: &str) -> bool {
         .any(|prefix| t.starts_with(prefix))
 }
 
+// ── 选区相关的列宽换算 ────────────────────────────────────────────────────
+//
+// 选区要同时回答两个问题："屏幕上第 N 列是哪个字符"和"这一段字符占几列"。
+// 以前这两个换算分散在三处（state/store.rs、components/chat_history.rs 各写一份），
+// 而且口径不完全一致：有的按字符累加，有的按整个 span 的宽度切。
+// 结果就是中文/框线字符（Ambiguous 宽度）一出现，高亮范围和复制出来的文本就对不上。
+//
+// 这里定一份口径：**列宽一律按 `render::char_display_width` 算**，也就是
+// ratatui 分配缓冲区格子的那套规则（见 render::display_width 的注释）。
+
+/// 一行渲染结果里的纯文本（去掉所有样式）。
+pub fn line_plain_text(line: &ratatui::text::Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+}
+
+/// 把可视列号（鼠标坐标）换算成字符下标。
+///
+/// 可视列 ≠ 字符下标：CJK 汉字、emoji 占 2 列。选区复制必须走这个换算，
+/// 否则中文只会复制到一半。
+pub fn char_index_at_visual_col(text: &str, visual_col: usize) -> usize {
+    let mut width = 0usize;
+    for (i, ch) in text.chars().enumerate() {
+        if width >= visual_col {
+            return i;
+        }
+        width += crate::ui::utils::render::char_display_width(ch);
+    }
+    text.chars().count()
+}
+
+/// 按可视宽度把一行切成三段：前缀 / 选中段 / 后缀。
+///
+/// - `start_width`：前缀占多少**可视列**
+/// - `end_width`：前缀 + 选中段一共占多少可视列
+///
+/// 切点落在宽字符中间时，整个宽字符归到后一段（宁可多给半个字，也不要把
+/// 一个汉字劈成两半 —— 半个汉字进剪贴板是没法用的）。
+pub fn split_by_width(
+    text: &str,
+    start_width: usize,
+    end_width: usize,
+) -> (String, String, String) {
+    let mut prefix = String::new();
+    let mut middle = String::new();
+    let mut suffix = String::new();
+    let mut current_width = 0usize;
+
+    // 起点就在本段开头时**没有前缀**，必须直接进选中段。
+    //
+    // 以前这里一律 `in_prefix = true`，而 `in_middle` 只在前缀分支里被置位 ——
+    // 于是 `start_width == 0` 时 `in_middle` 永远是 false，整段文字都掉进
+    // suffix，选中段恒为空。选区起点落在某个 span 开头时（最常见的情形），
+    // 屏幕上一点高亮都不会出现，拖选看着像"没生效"。
+    let mut in_middle = start_width == 0;
+    let mut in_prefix = !in_middle;
+
+    for ch in text.chars() {
+        let ch_width = crate::ui::utils::render::char_display_width(ch).max(1);
+
+        if in_prefix && current_width < start_width {
+            prefix.push(ch);
+            current_width += ch_width;
+            if current_width >= start_width {
+                in_prefix = false;
+                in_middle = true;
+            }
+        } else if in_middle && current_width < end_width {
+            middle.push(ch);
+            current_width += ch_width;
+            if current_width >= end_width {
+                in_middle = false;
+            }
+        } else {
+            suffix.push(ch);
+            current_width += ch_width;
+        }
+    }
+
+    (prefix, middle, suffix)
+}
+
 pub fn strip_tool_running_prefix(s: &str) -> String {
     let t = s.trim();
     for prefix in crate::core::i18n::running_prefixes() {

@@ -751,23 +751,12 @@ fn render_rich_tool_content(
                 // Read: "Read N lines"
                 "Read" => {
                     let line_count = text.lines().count();
-                    lines.push(Line::from(vec![
-                        Span::raw("Read "),
-                        Span::styled(
-                            format!("{}", line_count),
-                            Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(" lines"),
-                    ]));
-                    lines.push(Line::from(Span::styled(
-                        "  (Tab to expand)",
-                        Style::default()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::DIM),
-                    )));
+                    push_collapsed_summary(
+                        &mut lines, "Read", line_count, "line", None, tool_color,
+                    );
                     return lines;
                 }
-                // Grep: "Found N matches" —— 命中数从输出头部解析。
+                // Grep: 命中数从输出头部解析。
                 //
                 // 以前这里数的是**非空行数**：一条 "No results found for ..." 正好
                 // 也是 1 行，于是折叠态写 "Found 1 matches"、展开却空空如也；
@@ -775,53 +764,31 @@ fn render_rich_tool_content(
                 // 文件数 + 1"。
                 "Grep" => {
                     let (count, files) = summarise_grep_output(text);
-                    let mut spans: Vec<Span<'static>> = Vec::new();
                     if count == 0 {
-                        spans.push(Span::styled(
+                        lines.push(Line::from(Span::styled(
                             crate::core::i18n::t("tool.no_matches", "没有匹配", "No matches"),
                             Style::default()
                                 .fg(Color::DarkGray)
                                 .add_modifier(Modifier::DIM),
-                        ));
-                    } else {
-                        spans.push(Span::styled(
-                            format!("{}", count),
-                            Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
-                        ));
-                        spans.push(Span::raw(if count == 1 { " match" } else { " matches" }));
-                        if let Some(files) = files.filter(|f| *f > 0) {
-                            spans.push(Span::raw(format!(
-                                " in {}",
-                                crate::core::tools::ripgrep::plural_count(files, "file")
-                            )));
-                        }
+                        )));
+                        push_expand_hint(&mut lines);
+                        return lines;
                     }
-                    lines.push(Line::from(spans));
-                    lines.push(Line::from(Span::styled(
-                        "  (Tab to expand)",
-                        Style::default()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::DIM),
-                    )));
+                    let extra = files.filter(|f| *f > 0).map(|f| {
+                        format!(
+                            "in {}",
+                            crate::core::tools::ripgrep::plural_count(f, "file")
+                        )
+                    });
+                    push_collapsed_summary(&mut lines, "", count, "match", extra, tool_color);
                     return lines;
                 }
                 // Glob/LS: "Found N files"
                 "Glob" | "LS" => {
                     let file_count = text.lines().filter(|l| !l.trim().is_empty()).count();
-                    lines.push(Line::from(vec![
-                        Span::raw("Found "),
-                        Span::styled(
-                            format!("{}", file_count),
-                            Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(" files"),
-                    ]));
-                    lines.push(Line::from(Span::styled(
-                        "  (Tab to expand)",
-                        Style::default()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::DIM),
-                    )));
+                    push_collapsed_summary(
+                        &mut lines, "Found", file_count, "file", None, tool_color,
+                    );
                     return lines;
                 }
                 // CodebaseSearch: 折叠态显示命中文件数 + 首个结果。
@@ -830,14 +797,14 @@ fn render_rich_tool_content(
                 "CodebaseSearch" => {
                     // "File: <path>" 行即一个命中
                     let hits = text.lines().filter(|l| l.starts_with("File: ")).count();
-                    lines.push(Line::from(vec![
-                        Span::raw("Codebase search · "),
-                        Span::styled(
-                            format!("{}", hits),
-                            Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(" ranked results"),
-                    ]));
+                    push_collapsed_summary(
+                        &mut lines,
+                        "Codebase search ·",
+                        hits,
+                        "ranked result",
+                        None,
+                        tool_color,
+                    );
                     if let Some(first) = text.lines().find(|l| l.starts_with("File: ")) {
                         let path = first.trim_start_matches("File: ");
                         // 去掉可能的 "(Score: ...)" 后缀
@@ -847,12 +814,6 @@ fn render_rich_tool_content(
                             Style::default().fg(Color::DarkGray),
                         )));
                     }
-                    lines.push(Line::from(Span::styled(
-                        "  (Tab to expand)",
-                        Style::default()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::DIM),
-                    )));
                     return lines;
                 }
                 // ProjectMap: 折叠态显示扫描概要
@@ -862,20 +823,15 @@ fn render_rich_tool_content(
                         .find_map(|l| l.strip_prefix("- scanned_files: "))
                         .and_then(|s| s.split(" (limit").next())
                     {
-                        lines.push(Line::from(vec![
-                            Span::raw("Project map · "),
-                            Span::styled(
-                                scanned.trim().to_string(),
-                                Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw(" files scanned"),
-                        ]));
-                        lines.push(Line::from(Span::styled(
-                            "  (Tab to expand)",
-                            Style::default()
-                                .fg(Color::DarkGray)
-                                .add_modifier(Modifier::DIM),
-                        )));
+                        let scanned = scanned.trim().parse::<usize>().unwrap_or(0);
+                        push_collapsed_summary(
+                            &mut lines,
+                            "Project map ·",
+                            scanned,
+                            "file",
+                            Some("scanned".to_string()),
+                            tool_color,
+                        );
                         return lines;
                     }
                     // 解析失败则走通用预览
@@ -889,29 +845,24 @@ fn render_rich_tool_content(
                         text.trim(),
                         tool_inner_width.saturating_sub(2),
                     );
-                    lines.push(Line::from(vec![
-                        Span::raw(if tc.function.name.contains("Fetch") {
-                            "Fetched "
+                    push_collapsed_summary(
+                        &mut lines,
+                        if tc.function.name.contains("Fetch") {
+                            "Fetched"
                         } else {
-                            "Found "
-                        }),
-                        Span::styled(
-                            format!("{} bytes", bytes),
-                            Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
-                        ),
-                    ]));
+                            "Found"
+                        },
+                        bytes,
+                        "byte",
+                        None,
+                        tool_color,
+                    );
                     if !preview.is_empty() {
                         lines.push(Line::from(Span::styled(
                             format!("  {}", preview),
                             Style::default().fg(Color::DarkGray),
                         )));
                     }
-                    lines.push(Line::from(Span::styled(
-                        "  (Tab to expand)",
-                        Style::default()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::DIM),
-                    )));
                     return lines;
                 }
                 // 子代理：折叠态显示它最终交回了什么，而不是一段 JSON。
@@ -929,12 +880,7 @@ fn render_rich_tool_content(
                             ),
                             Style::default().fg(Color::DarkGray),
                         )));
-                        lines.push(Line::from(Span::styled(
-                            "  (Tab to expand)",
-                            Style::default()
-                                .fg(Color::DarkGray)
-                                .add_modifier(Modifier::DIM),
-                        )));
+                        push_expand_hint(&mut lines);
                         return lines;
                     }
                     // 没有正文时退回通用预览，不返回空块
@@ -1008,6 +954,53 @@ fn summarise_grep_output(text: &str) -> (usize, Option<usize>) {
         .filter(|line| !line.trim().is_empty())
         .count();
     (body, None)
+}
+
+/// 折叠态摘要行的统一构造：`<label> <count> <unit>[ <extra>]` + `(Tab to expand)`。
+///
+/// `render_rich_tool_content` 里 Read / Grep / Glob / LS / CodebaseSearch /
+/// ProjectMap / WebFetch 各写一份同样的三四行 `lines.push(...)`，样式和提示文案
+/// 散落各处；改一处忘七处已经是这个文件最常见的 bug 形态。收在这里后，各工具臂只
+/// 负责算出 (label, count, unit, extra)。
+fn push_collapsed_summary(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    count: usize,
+    unit: &str,
+    extra: Option<String>,
+    color: Color,
+) {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if !label.is_empty() {
+        spans.push(Span::raw(format!("{} ", label)));
+    }
+    spans.push(Span::styled(
+        format!("{}", count),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::raw(format!(
+        " {}",
+        crate::core::tools::ripgrep::plural_word(count, unit)
+    )));
+    if let Some(extra) = extra {
+        spans.push(Span::raw(format!(" {}", extra)));
+    }
+    lines.push(Line::from(spans));
+    push_expand_hint(lines);
+}
+
+/// 折叠态的「按 Tab 展开」提示 —— 所有工具共用这一份措辞与样式。
+///
+/// `message_render.rs` 与 `agent_task_render.rs` 里的 thinking / 子代理块用的是
+/// **Ctrl+O**（见 `events/input.rs`），与此处的 Tab 是两套真实按键；文案各自维护，
+/// 这里先不跨模块合并，避免把两个不同按键的语义混进一个 helper。
+fn push_expand_hint(lines: &mut Vec<Line<'static>>) {
+    lines.push(Line::from(Span::styled(
+        "  (Tab to expand)",
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM),
+    )));
 }
 
 /// ToolResult 文本渲染的公共函数（折叠态：第一行预览 + 行数；展开态：完整内容）

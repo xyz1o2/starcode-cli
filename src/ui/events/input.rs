@@ -2278,13 +2278,10 @@ async fn cycle_thinking_effort(
 /// 返回 None 时会静默继续往下走，用户想复制结果把正在输出的内容 Abort 掉了。
 async fn copy_selection_or_interrupt(state: &mut ChatState, agent_tx: &mpsc::Sender<AgentRequest>) {
     if state.text_selection.has_selection() {
-        // 系统剪贴板优先，失败自动退回 OSC 52（SSH/WSL 下 arboard 写的是远端
+        // 复制走 `ui::selection::copy_selection` —— 和鼠标松开同一个入口，
+        // 系统剪贴板优先、失败自动退回 OSC 52（SSH/WSL 下 arboard 写的是远端
         // 剪贴板，那条环境里能用的正是 OSC 52）。
-        let copied = match state.get_selected_text() {
-            Some(selected_text) => crate::ui::utils::clipboard::copy_to_clipboard(&selected_text),
-            None => Err("选区为空".to_string()),
-        };
-        match copied {
+        match crate::ui::selection::copy_selection(state) {
             Ok(()) => {
                 state.text_selection.clear();
                 state.current_status_line = Some("Copied".to_string());

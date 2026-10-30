@@ -10,6 +10,9 @@ use unicode_width::UnicodeWidthStr;
 use crate::{types::ChatEntryType, ui::state::ChatState};
 
 /// Apply selection highlight to text lines (Optimized)
+///
+/// 换算逻辑搬到 `ui::selection` 了 —— 高亮与复制必须用同一套列宽口径，
+/// 否则屏幕上高亮的范围和复制出来的文本会不一致。
 fn apply_selection_highlight(
     lines: &mut [Line],
     entry_idx: usize,
@@ -20,172 +23,24 @@ fn apply_selection_highlight(
         return;
     }
 
-    // 1. Get Global Selection Bounds
-    let (start_entry, end_entry) = match (
-        state.text_selection.start_entry_idx,
-        state.text_selection.end_entry_idx,
-    ) {
-        (Some(s), Some(e)) => {
-            if s <= e {
-                (s, e)
-            } else {
-                (e, s)
-            }
-        }
-        _ => return,
-    };
-
-    if entry_idx < start_entry || entry_idx > end_entry {
-        return;
-    }
-
-    let Some(((start_row, start_col), (end_row, end_col))) =
-        state.text_selection.get_selection_range()
-    else {
+    let Some(range) = crate::ui::selection::SelectionRange::resolve(&state.text_selection) else {
         return;
     };
 
-    for (i, line) in lines.iter_mut().enumerate() {
-        let row_idx = i + line_offset;
-
-        // 2. Determine Selected Column Range for this specific line
-        let (sel_start_col, sel_end_col) = if entry_idx == start_entry && entry_idx == end_entry {
-            // Single entry selection
-            if row_idx < start_row || row_idx > end_row {
-                continue;
-            }
-            let s = if row_idx == start_row { start_col } else { 0 };
-            let e = if row_idx == end_row {
-                end_col
-            } else {
-                usize::MAX
-            };
-            (s, e)
-        } else if entry_idx == start_entry {
-            // Start entry (multi-entry)
-            if row_idx < start_row {
-                continue;
-            }
-            let s = if row_idx == start_row { start_col } else { 0 };
-            (s, usize::MAX)
-        } else if entry_idx == end_entry {
-            // End entry (multi-entry)
-            if row_idx > end_row {
-                continue;
-            }
-            let e = if row_idx == end_row {
-                end_col
-            } else {
-                usize::MAX
-            };
-            (0, e)
-        } else {
-            // Middle entry
-            (0, usize::MAX)
-        };
-
-        // 3. Rebuild spans only if overlapping
-        let mut new_spans: Vec<Span> = Vec::with_capacity(line.spans.len() * 2);
-        let mut current_col = 0;
-
-        for span in &line.spans {
-            let span_text = span.content.as_ref();
-            // Use Unicode width for column calculation to match terminal display
-            let span_len = span_text.width();
-            let span_end_col = current_col + span_len;
-
-            // Check overlap: [current_col, span_end_col) vs [sel_start_col, sel_end_col]
-            // Note: sel_end_col is INCLUSIVE in is_position_selected logic (<= end_col)
-            // But for range slicing, we need to be careful.
-
-            // If the span is completely outside selection
-            if span_end_col <= sel_start_col || current_col > sel_end_col {
-                new_spans.push(span.clone());
-            } else {
-                // Partial or full overlap
-                // Calculate relative split points using visual width
-                let rel_start = if current_col < sel_start_col {
-                    sel_start_col - current_col
-                } else {
-                    0
-                };
-
-                // sel_end_col is inclusive; compute exclusive end safely to avoid
-                // overflow when sel_end_col == usize::MAX (meaning "end of line").
-                let sel_end_exclusive = sel_end_col.saturating_add(1);
-                let rel_end = if span_end_col > sel_end_exclusive {
-                    sel_end_exclusive.saturating_sub(current_col)
-                } else {
-                    span_len
-                };
-
-                // Split by visual width, not char count
-                let (prefix, selected, suffix) = split_by_width(span_text, rel_start, rel_end);
-
-                // 1. Unselected Prefix
-                if !prefix.is_empty() {
-                    new_spans.push(Span::styled(prefix, span.style));
-                }
-
-                // 2. Selected Middle
-                if !selected.is_empty() {
-                    new_spans.push(Span::styled(
-                        selected,
-                        span.style
-                            .bg(Color::Blue)
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                }
-
-                // 3. Unselected Suffix
-                if !suffix.is_empty() {
-                    new_spans.push(Span::styled(suffix, span.style));
-                }
-            }
-            current_col += span_len;
-        }
-        line.spans = new_spans;
-    }
-}
-
-/// Split text by visual width into (prefix, middle, suffix)
-/// prefix: first `start_width` visual columns
-/// middle: next `end_width - start_width` visual columns
-/// suffix: remaining text
-fn split_by_width(text: &str, start_width: usize, end_width: usize) -> (String, String, String) {
-    let mut prefix = String::new();
-    let mut middle = String::new();
-    let mut suffix = String::new();
-    let mut current_width = 0;
-    let mut in_prefix = true;
-    let mut in_middle = false;
-
-    for ch in text.chars() {
-        // 度量口径必须与 ratatui 的缓冲区一致（见 render::display_width），
-        // 否则选区高亮的起止列会随 Ambiguous 字符逐个右移
-        let ch_width = crate::ui::utils::render::char_display_width(ch).max(1);
-
-        if in_prefix && current_width < start_width {
-            prefix.push(ch);
-            current_width += ch_width;
-            if current_width >= start_width {
-                in_prefix = false;
-                in_middle = true;
-            }
-        } else if in_middle && current_width < end_width {
-            middle.push(ch);
-            current_width += ch_width;
-            if current_width >= end_width {
-                in_middle = false;
-            }
-        } else {
-            suffix.push(ch);
-            current_width += ch_width;
-        }
-    }
-
-    (prefix, middle, suffix)
+    // `lines` 是某个条目自己的渲染行，行号要从该条目内的偏移算起。
+    let shifted = crate::ui::selection::SelectionRange {
+        start: (
+            range.start.0,
+            range.start.1.saturating_sub(line_offset),
+            range.start.2,
+        ),
+        end: (
+            range.end.0,
+            range.end.1.saturating_sub(line_offset),
+            range.end.2,
+        ),
+    };
+    crate::ui::selection::apply_highlight(lines, &shifted, entry_idx);
 }
 
 fn find_scroll_anchor(heights: &[u16], scroll_top: usize) -> Option<(usize, usize)> {

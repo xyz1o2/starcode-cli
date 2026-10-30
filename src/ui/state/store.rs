@@ -313,92 +313,9 @@ impl TextSelection {
         self.start.is_some() && self.end.is_some()
     }
 
-    /// 获取选择范围（确保start <= end）
-    pub fn get_selection_range(&self) -> Option<((usize, usize), (usize, usize))> {
-        if let (Some(start), Some(end)) = (self.start, self.end) {
-            let (start_entry, end_entry) = if self.start_entry_idx <= self.end_entry_idx {
-                (self.start_entry_idx.unwrap(), self.end_entry_idx.unwrap())
-            } else {
-                (self.end_entry_idx.unwrap(), self.start_entry_idx.unwrap())
-            };
-
-            let (start_pos, end_pos) = if start_entry < end_entry {
-                (start, end)
-            } else if start_entry == end_entry {
-                if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
-                    (start, end)
-                } else {
-                    (end, start)
-                }
-            } else {
-                (end, start)
-            };
-
-            Some((start_pos, end_pos))
-        } else {
-            None
-        }
-    }
-
-    /// 检查指定位置是否在选择范围内
-    pub fn is_position_selected(&self, entry_idx: usize, row: usize, col: usize) -> bool {
-        if !self.has_selection() {
-            return false;
-        }
-
-        let Some(((start_row, start_col), (end_row, end_col))) = self.get_selection_range() else {
-            return false;
-        };
-
-        let (start_entry, end_entry) = if self.start_entry_idx <= self.end_entry_idx {
-            (self.start_entry_idx.unwrap(), self.end_entry_idx.unwrap())
-        } else {
-            (self.end_entry_idx.unwrap(), self.start_entry_idx.unwrap())
-        };
-
-        // 检查是否在选择的聊天项范围内
-        if entry_idx < start_entry || entry_idx > end_entry {
-            return false;
-        }
-
-        // 在同一聊天项内检查行列位置
-        if entry_idx == start_entry && entry_idx == end_entry {
-            // 单个聊天项内的选择
-            if row < start_row || row > end_row {
-                return false;
-            }
-            if row == start_row && col < start_col {
-                return false;
-            }
-            if row == end_row && col > end_col {
-                return false;
-            }
-            true
-        } else if entry_idx == start_entry {
-            // 在起始聊天项内
-            row > start_row || (row == start_row && col >= start_col)
-        } else if entry_idx == end_entry {
-            // 在结束聊天项内
-            row < end_row || (row == end_row && col <= end_col)
-        } else {
-            // 在中间聊天项内
-            true
-        }
-    }
-}
-
-/// 把可视列号（鼠标坐标，CJK/宽字符占 2 列）换算成字符下标。
-/// 选区复制必须走这个换算：此前直接把可视列当字符数用，
-/// 中文文本会只复制到一半。
-fn char_index_at_visual_col(text: &str, visual_col: usize) -> usize {
-    let mut width = 0usize;
-    for (i, ch) in text.chars().enumerate() {
-        if width >= visual_col {
-            return i;
-        }
-        width += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-    }
-    text.chars().count()
+    // 起止 → 范围的换算、以及"某点是否在选区内"的判定，都搬到 `ui::selection`
+    // 了（`SelectionRange::resolve` / `SelectionRange::contains`）。以前这两份
+    // 逻辑在 store 与 chat_history 各写一遍，列宽口径还不一致。
 }
 
 /// 后台代理选择器最多列出的行数（不含 main 行）
@@ -1642,96 +1559,15 @@ impl ChatState {
     }
 
     /// 获取选中的文本内容（从渲染后的行中提取）
+    /// 选区里的纯文本。
+    ///
+    /// 换算逻辑在 `ui::selection`（与高亮共用一套列宽口径）；这里只负责
+    /// "这个条目的渲染行从哪来"。
     pub fn get_selected_text(&self) -> Option<String> {
-        if !self.text_selection.has_selection() {
-            return None;
-        }
-
-        let (start_entry, end_entry) = match (
-            self.text_selection.start_entry_idx,
-            self.text_selection.end_entry_idx,
-        ) {
-            (Some(s), Some(e)) => {
-                if s <= e {
-                    (s, e)
-                } else {
-                    (e, s)
-                }
-            }
-            _ => return None,
-        };
-
-        let ((start_row, start_col), (end_row, end_col)) =
-            self.text_selection.get_selection_range()?;
-
-        let mut result = String::new();
-        let mut has_selected_line = false;
-
-        for entry_idx in start_entry..=end_entry {
-            let rendered_lines: Vec<ratatui::text::Line> = match self.rendered_cache.get(&entry_idx)
-            {
-                Some((_, lines)) => lines.clone(),
-                None => {
-                    // 缓存缺失（流式更新刚清掉）时重渲染兜底，否则复制静默失败
-                    if entry_idx >= self.chat_history.len() {
-                        continue;
-                    }
-                    let width = self.last_chat_area.map(|a| a.width).unwrap_or(80);
-                    crate::ui::components::chat_history::render_entry_lines(self, entry_idx, width)
-                }
-            };
-
-            let line_start = if entry_idx == start_entry {
-                start_row
-            } else {
-                0
-            };
-            let line_end = if entry_idx == end_entry {
-                end_row.min(rendered_lines.len().saturating_sub(1))
-            } else {
-                rendered_lines.len().saturating_sub(1)
-            };
-
-            for (i, line) in rendered_lines
-                .iter()
-                .enumerate()
-                .take(line_end + 1)
-                .skip(line_start)
-            {
-                // 将 Line 转换为纯文本
-                let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-
-                // 鼠标锚点是可视列（CJK 占 2 列），切片必须先换算成字符下标，
-                // 否则中文文本只会复制到一半
-                let col_start = if i == start_row && entry_idx == start_entry {
-                    char_index_at_visual_col(&line_text, start_col)
-                } else {
-                    0
-                };
-                // end_col 与高亮的 is_position_selected 语义一致（闭区间，<= end_col），
-                // 换算时 +1 才能包含末字符
-                let col_end = if i == end_row && entry_idx == end_entry {
-                    char_index_at_visual_col(&line_text, end_col.saturating_add(1))
-                } else {
-                    line_text.chars().count()
-                };
-
-                let selected: String = line_text
-                    .chars()
-                    .skip(col_start)
-                    .take(col_end.saturating_sub(col_start))
-                    .collect();
-                if !selected.is_empty() {
-                    if !result.is_empty() {
-                        result.push('\n');
-                    }
-                    result.push_str(&selected);
-                    has_selected_line = true;
-                }
-            }
-        }
-
-        has_selected_line.then_some(result)
+        let range = crate::ui::selection::SelectionRange::resolve(&self.text_selection)?;
+        crate::ui::selection::selected_text(&range, |entry_idx| {
+            crate::ui::selection::entry_rendered_lines(self, entry_idx)
+        })
     }
 
     pub fn update_item_height(&mut self, index: usize, height: u16) {
