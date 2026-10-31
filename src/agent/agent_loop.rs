@@ -501,8 +501,12 @@ impl Agent {
                     ));
                 }
             }
-        } else if should_prefetch_codebase_search(user_input, all_active_tools, history_len) {
-            *codebase_search_attempted = true;
+        } else if should_prefetch_codebase_search(
+            user_input,
+            all_active_tools,
+            history_len,
+            Some(self.config.target_dir().as_path()),
+        ) {
             let codebase_tool_call = build_codebase_search_tool_call(user_input, 0);
 
             crate::utils::logging::append_debug_log_line(
@@ -517,6 +521,16 @@ impl Agent {
                 Ok(()) => {
                     let result = self.execute_single_tool(&codebase_tool_call).await;
                     hooks::run_post_tool_hooks(user_input, &codebase_tool_call, &result).await;
+                    // 闸门**按结果置位**，不按"调用过"置位。
+                    //
+                    // 预取发生在首轮模型请求之前 —— 那时索引几乎必然还在构建，
+                    // 于是工具回的是 Warming（"稍后重跑"）。按"调用过"置位的话，
+                    // 闸门被这一次**什么都没搜到**的调用永久关上，
+                    // 工具自己给的"再试一次"建议被自家 flag 当场否掉。
+                    // 这正是 `tool_helpers::tool_result_is_usable` 存在的原因，
+                    // 也是自动触发路径（`handle_auto_triggers`）已经用上的口径。
+                    *codebase_search_attempted =
+                        crate::agent::tool_helpers::tool_result_is_usable(&result);
                     messages.push(StarMessage::tool(
                         codebase_tool_call.id.clone(),
                         crate::agent::tool_helpers::llm_facing_content(&result),

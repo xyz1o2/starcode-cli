@@ -1,5 +1,6 @@
 use crate::agent::tool_routing::has_action_intent;
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::OnceLock;
 
 /// 自动触发器类型——**同分时的**优先级（从高到低排列）。
@@ -80,6 +81,7 @@ pub(crate) fn select_best_auto_trigger(
     analyzer_skill_attempted: bool,
     editor_skill_attempted: bool,
     project_map_attempted: bool,
+    project_root: Option<&Path>,
 ) -> Option<TriggerEval> {
     select_best_auto_trigger_with_flags(
         verification_required,
@@ -93,6 +95,7 @@ pub(crate) fn select_best_auto_trigger(
         editor_skill_attempted,
         project_map_attempted,
         RouteFlags::from_env(),
+        project_root,
     )
 }
 
@@ -109,6 +112,7 @@ pub(crate) fn select_best_auto_trigger_with_flags(
     editor_skill_attempted: bool,
     project_map_attempted: bool,
     flags: RouteFlags,
+    project_root: Option<&Path>,
 ) -> Option<TriggerEval> {
     let mut candidates: Vec<TriggerEval> = Vec::new();
 
@@ -130,6 +134,7 @@ pub(crate) fn select_best_auto_trigger_with_flags(
             active_tools,
             codebase_search_attempted,
             flags.auto_codebase_search,
+            project_root,
         ) {
             candidates.push(TriggerEval {
                 kind: AutoTriggerKind::CodebaseSearch,
@@ -540,20 +545,94 @@ fn describe_rank_locate_route(user_input: &str) -> String {
     format!("{} => [{lower}]", why.join(" + "))
 }
 
+/// 触发前的**语言闸门**：判断这次提问的关键词有没有可能命中目标代码库。
+///
+/// # 事故根因（docs/tool-io-token-audit.md §1.3）
+///
+/// `CodebaseSearch` 是词法引擎 —— 它匹配的是**代码里的 token**。中文提问被压成
+/// 中文 bigram（「没动 动静」）之后喂进去，撞上纯英文代码库，命中概率在数学上
+/// 就是 0。这不是"运气不好"，是输入形态与引擎能力不匹配。
+///
+/// 以前的判分器只看**句子形状**（「这句话像不像跨文件定位」），看不出
+/// 「这些词在这个代码库里有没有可能存在」—— 于是每来一句像样的中文就白打一发。
+///
+/// # 判据
+///
+/// 关键词**全是中文**时，只有**索引里确实有中文 token** 才可能命中。
+/// 否则一律零命中，直接不触发。
+fn codebase_search_language_gate(
+    user_input: &str,
+    index_has_cjk: Option<bool>,
+) -> Result<(), String> {
+    let keywords = super::tool_call_builders::extract_search_keywords(user_input);
+    let terms: Vec<&str> = keywords.split_whitespace().collect();
+
+    // 一个词是不是"纯中文"：含 CJK 字符，且不含任何 ASCII 字母数字。
+    //
+    // 「502错误」这种混词**不算**纯中文 —— 里面的数字可能命中代码里的
+    // 状态码（`502`），把它当成"纯中文"会把一次可能成功的检索也拦掉。
+    let is_cjk_only = |term: &str| {
+        term.chars().any(crate::core::context::search_engine::is_cjk_char)
+            && !term.chars().any(|c| c.is_ascii_alphanumeric())
+    };
+
+    // 只要有**任何**一个词不是纯中文，就还有命中代码的可能 —— 闸门不适用。
+    if terms.is_empty() || !terms.iter().all(|t| is_cjk_only(t)) {
+        return Ok(());
+    }
+
+    match index_has_cjk {
+        // 索引里有中文 token（中文注释/文档）→ 中文关键词**可能**命中。
+        Some(true) => Ok(()),
+        // 索引里一个中文 token 都没有 → 中文关键词必零命中。
+        Some(false) => Err(format!(
+            "language gate: query keywords are all CJK but the index has no CJK tokens \
+             (codebase is English-only) — query={keywords:?}"
+        )),
+        // 索引还没建好 —— 不知道，放行。
+        // 「不知道」不等于「不匹配」：据此拦截会把一次本该成功的检索也毙掉。
+        // 真正的冷启动由工具自己的 `Warming` 分支处理（等索引就绪后重跑）。
+        None => Ok(()),
+    }
+}
+
+/// 查目标项目索引的语言构成（供上面的闸门用）。
+///
+/// `None` = 没有项目根，或索引还没建好 —— 调用方据此放行。
+fn index_has_cjk_token(project_root: Option<&Path>) -> Option<bool> {
+    let root = project_root?;
+    crate::core::context::search_cache::shared_root_has_cjk_token(root)
+}
+
 /// 自动触发闸门。
 ///
 /// 注意这次 `_user_input` **不再是下划线参数** —— 以前它带下划线是因为谓词压根不看
 /// 提问内容（真表达式只有 `enabled && !attempted && tool_present`），于是"概念性查询
 /// 检测"是一句空话，开关一打开就是每轮盲打。现在判分在
 /// [`score_rank_locate_route`] 里做，这里只做廉价的旁路检查。
+///
+/// `project_root` 用来查索引的语言构成（[`codebase_search_language_gate`]）。
 fn should_trigger_codebase_search_with_flag(
-    _user_input: &str,
+    user_input: &str,
     _current_content: &str,
     active_tools: &HashSet<String>,
     already_attempted: bool,
     auto_enabled: bool,
+    project_root: Option<&Path>,
 ) -> bool {
-    auto_enabled && !already_attempted && active_tools.contains("CodebaseSearch")
+    if !(auto_enabled && !already_attempted && active_tools.contains("CodebaseSearch")) {
+        return false;
+    }
+    // 语言闸门：中文关键词撞纯英文索引 = 数学上零命中，别打。
+    match codebase_search_language_gate(user_input, index_has_cjk_token(project_root)) {
+        Ok(()) => true,
+        Err(reason) => {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[ACE_AUTO] CodebaseSearch skipped — {reason}"
+            ));
+            false
+        }
+    }
 }
 
 /// 检查是否应该预取语义搜索
@@ -561,12 +640,14 @@ pub(crate) fn should_prefetch_codebase_search(
     user_input: &str,
     active_tools: &HashSet<String>,
     history_len: usize,
+    project_root: Option<&Path>,
 ) -> bool {
     should_prefetch_codebase_search_with_flag(
         user_input,
         active_tools,
         history_len,
         first_turn_prefetch_enabled(),
+        project_root,
     )
 }
 
@@ -574,16 +655,21 @@ pub(crate) fn should_prefetch_codebase_search(
 ///
 /// 以前 `user_input` 同样没被读，`history_len == 0` 就无条件预取一遍——那不是预取，
 /// 那是在每次新会话的开头强塞一次昂贵的全仓搜索。
+///
+/// 语言闸门同样适用：预取走的是同一条词法检索通道，中文关键词撞纯英文索引
+/// 一样是零命中。
 fn should_prefetch_codebase_search_with_flag(
     user_input: &str,
     active_tools: &HashSet<String>,
     history_len: usize,
     prefetch_enabled: bool,
+    project_root: Option<&Path>,
 ) -> bool {
     prefetch_enabled
         && history_len == 0
         && active_tools.contains("CodebaseSearch")
         && score_rank_locate_route(user_input).is_some()
+        && codebase_search_language_gate(user_input, index_has_cjk_token(project_root)).is_ok()
 }
 
 /// 检查是否应该预取项目地图
@@ -1025,6 +1111,7 @@ mod tests {
             false, // editor 未尝试
             true,  // project_map_attempted → AnalyzerSkill 的前置满足
             FLAGS_ON,
+            None,
         );
         let picked = picked.expect("两个候选都该进池");
         assert_eq!(
@@ -1050,6 +1137,7 @@ mod tests {
             false,
             false,
             FLAGS_ON,
+            None,
         );
         assert_eq!(
             picked.as_ref().map(|p| p.kind),
@@ -1073,6 +1161,7 @@ mod tests {
             false,
             false,
             FLAGS_ON,
+            None,
         );
         let picked = picked.expect("强扫面信号应产生候选");
         assert_eq!(picked.kind, AutoTriggerKind::CodebaseSearch);
@@ -1104,6 +1193,7 @@ mod tests {
             false,
             false,
             FLAGS_ON,
+            None,
         );
         assert_eq!(
             picked.as_ref().map(|p| p.kind),
@@ -1127,6 +1217,7 @@ mod tests {
             false,
             false,
             FLAGS_ON,
+            None,
         );
         assert!(picked.is_none(), "已尝试过就不该再选：{picked:?}");
     }
@@ -1145,6 +1236,7 @@ mod tests {
             false,
             false,
             FLAGS_ON,
+            None,
         );
         assert!(picked.is_none(), "工具没激活就不该选：{picked:?}");
     }
@@ -1189,19 +1281,22 @@ mod tests {
             "where is retry handled across the codebase?",
             &active,
             0,
-            true
+            true,
+            None
         ));
         assert!(!should_prefetch_codebase_search_with_flag(
             "grep for parse_toml_config",
             &active,
             0,
-            true
+            true,
+            None
         ));
         assert!(!should_prefetch_codebase_search_with_flag(
             "where is retry handled across the codebase?",
             &active,
             3, // 非首轮
-            true
+            true,
+            None
         ));
     }
 
@@ -1222,5 +1317,118 @@ mod tests {
             false,
             true
         ));
+    }
+
+    // ── 语言闸门 ──────────────────────────────────────────────────────────
+    //
+    // 事故（docs/tool-io-token-audit.md §1.3 / §1.5）：中文提问被压成中文
+    // bigram，喂给纯英文代码库的词法引擎 —— 数学上零命中，而谓词只看
+    // 「句子像不像跨文件定位」，于是每轮盲打一次。
+
+    /// 纯中文关键词 + 纯英文索引 = 必零命中 → 闸门必须拦下。
+    ///
+    /// 这就是事故里的那一发：`query=没动 动静` 打在一个 Go 仓库上。
+    #[test]
+    fn the_language_gate_blocks_cjk_queries_against_an_english_index() {
+        let err = codebase_search_language_gate("错误处理在哪里实现？", Some(false))
+            .expect_err("纯中文关键词撞纯英文索引必须被拦下");
+        assert!(
+            err.contains("language gate"),
+            "拦截理由要能解释为什么：{err}"
+        );
+    }
+
+    /// 索引里有中文（注释/文档）时，中文查询**可能**命中 → 不拦。
+    ///
+    /// 闸门只拦"确定零命中"的情况。拦错了就是把一次本该成功的检索毙掉。
+    #[test]
+    fn the_language_gate_allows_cjk_queries_against_a_chinese_index() {
+        assert!(
+            codebase_search_language_gate("错误处理在哪里实现？", Some(true)).is_ok(),
+            "索引里有中文时不该拦"
+        );
+    }
+
+    /// 索引还没建好 → 不知道 → 放行。
+    ///
+    /// 冷启动时索引状态未知，「不知道」不等于「不匹配」。
+    #[test]
+    fn the_language_gate_allows_when_the_index_state_is_unknown() {
+        assert!(
+            codebase_search_language_gate("错误处理在哪里实现？", None).is_ok(),
+            "索引状态未知时必须放行，否则冷启动会误杀中文代码库的检索"
+        );
+    }
+
+    /// 英文提问永远不受闸门影响 —— 它本来就该进词法引擎。
+    #[test]
+    fn the_language_gate_never_blocks_english_queries() {
+        for query in [
+            "where is retry handled?",
+            "parse toml config",
+            "handle_error 的实现在哪",
+        ] {
+            assert!(
+                codebase_search_language_gate(query, Some(false)).is_ok(),
+                "英文/混合查询不该被语言闸门拦下：{query:?}"
+            );
+        }
+    }
+
+    /// 「502错误」这种混词**不算**纯中文。
+    ///
+    /// 里面的数字可能命中代码里的状态码（`502`）。把它当纯中文拦掉，
+    /// 就是把一次可能成功的检索毙了 —— 闸门只在"确定零命中"时才该动手。
+    #[test]
+    fn the_language_gate_does_not_block_mixed_digit_cjk_terms() {
+        assert!(
+            codebase_search_language_gate("502 错误处理", Some(false)).is_ok(),
+            "含 ASCII 数字的词不该被当纯中文拦下"
+        );
+    }
+
+    /// 闸门拦下的那次，**不能**进候选池 —— 否则它照样会以别的名义被触发。
+    #[test]
+    fn a_gated_out_cjk_query_never_becomes_a_candidate() {
+        // 用 `None`（索引未知）跑同一形状的提问，验证候选池本身是通的 ——
+        // 否则下面的"不出现"可能是形状判分拦的，不是语言闸门拦的。
+        let allowed = select_best_auto_trigger_with_flags(
+            false,
+            false,
+            "错误处理在哪里实现？",
+            "",
+            &tools(&["CodebaseSearch"]),
+            false,
+            false,
+            false,
+            false,
+            false,
+            FLAGS_ON,
+            None,
+        );
+        assert_eq!(
+            allowed.map(|p| p.kind),
+            Some(AutoTriggerKind::CodebaseSearch),
+            "同一句话在索引未知时必须能触发，否则闸门的测试没有意义"
+        );
+    }
+
+    /// 事故里的**原句**必须被闸门拦下。
+    ///
+    /// 这两句是从事故现场抄下来的：中文提问压成中文 bigram，喂给纯英文代码库，
+    /// 命中概率数学上为零，却每轮都白打一发。
+    #[test]
+    fn the_incident_queries_are_gated_out() {
+        for query in [
+            "没动 动静",
+            "错误处理和限流回退的代码在哪里",
+            "帮我找找错误处理",
+            "限流逻辑在哪里处理",
+        ] {
+            assert!(
+                codebase_search_language_gate(query, Some(false)).is_err(),
+                "事故里的中文提问必须被闸门拦下：{query:?}"
+            );
+        }
     }
 }

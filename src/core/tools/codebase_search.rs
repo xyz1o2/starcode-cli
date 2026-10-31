@@ -1275,6 +1275,12 @@ fn search_codebase_with_limits(
     let reranker = HeuristicReranker;
     let reranked = reranker.rerank(query, rerank_candidates, TOP_N_FINAL);
 
+    // ── 零结果诊断 ─────────────────────────────────────────────────────────────
+    //
+    // 诊断只依赖**索引**和**查询词**，跟重排结果无关，所以先算好，
+    // 零结果时直接拿来解释，非零结果时不额外开销。
+    let diagnostics = engine.diagnosis_from_terms(&engine.extract_base_terms(query));
+
     // ── Format Output ────────────────────────────────────────────────────────
     let mut output = String::new();
     output.push_str(&format!(
@@ -1310,30 +1316,73 @@ fn search_codebase_with_limits(
         ));
     }
 
+    // ── 空结果诊断 ─────────────────────────────────────────────────────────────
     if reranked.is_empty() {
-        output.push_str("No relevant code found.");
-    } else {
-        for r in &reranked {
-            let c = &r.candidate;
+        output.push_str("No relevant code found.\n");
+        output.push_str("Diagnosis:\n");
+        if diagnostics.query_is_pure_cjk && !diagnostics.index_has_cjk_token {
+            output.push_str(
+                "  - Your query keywords are in Chinese, but this codebase has no Chinese \
+                 (no CJK tokens in the index). Chinese keywords can't match English \
+                 identifiers — that's why there are no hits.\n",
+            );
+            output.push_str(
+                "  - Try again with English domain words (e.g. 'retry backoff', 'parse toml'), \
+                 or use `Grep` if you know the exact string/symbol.\n",
+            );
+        } else if diagnostics.term_coverage < 0.15 {
             output.push_str(&format!(
-                "File: {} (Score: {:.2}, Lines: {}-{})\n",
-                c.file_path, r.final_score, c.start_line, c.end_line
+                "  - None of the query keywords appear in the indexed code at all \
+                 (term coverage: {:.0}%), so there is nothing to rank.\n",
+                diagnostics.term_coverage * 100.0,
             ));
-            if let Some(ctx) = &c.context_header {
-                output.push_str(&format!("Context: {}\n", ctx));
-            }
-            if !c.matched_terms.is_empty() {
-                output.push_str(&format!("Matched terms: {}\n", c.matched_terms.join(", ")));
-            }
-            if !r.boost_signals.is_empty() {
-                output.push_str(&format!("Signals: {}\n", r.boost_signals.join("; ")));
-            }
-            output.push_str("```\n");
-            output.push_str(&c.content);
-            output.push_str("\n```\n\n");
+            output.push_str(
+                "  - The keywords may not be the words the code actually uses. Try `Grep` \
+                 with the exact string/symbol you have in mind.\n",
+            );
+        } else if diagnostics.index_cjk_token_ratio > 0.1 {
+            output.push_str(
+                "  - The index contains Chinese text, but the query terms still don't appear \
+                 in the indexed code chunks (only in comments/docs that weren't chunked).\n",
+            );
+            output.push_str(
+                "  - Use `Grep` if you know the exact string you're looking for.\n",
+            );
+        } else {
+            output.push_str(
+                "  - The query terms exist but didn't co-occur in any indexed code chunk with \
+                 enough score to pass ranking. `Grep` will show every raw match instead.\n",
+            );
         }
-        output.push_str("Suggested next step: read the top 1-3 files above before editing or explaining cross-file behavior.\n");
+        if !diagnostics.query_is_pure_cjk {
+            output.push_str(&format!(
+                "  - Keywords used: {}\n",
+                engine.extract_base_terms(query).join(", ")
+            ));
+        }
+        return Ok(output);
     }
+    // ── 有结果：正常渲染 ────────────────────────────────────────────────────────
+    for r in &reranked {
+        let c = &r.candidate;
+        output.push_str(&format!(
+            "File: {} (Score: {:.2}, Lines: {}-{})\n",
+            c.file_path, r.final_score, c.start_line, c.end_line
+        ));
+        if let Some(ctx) = &c.context_header {
+            output.push_str(&format!("Context: {}\n", ctx));
+        }
+        if !c.matched_terms.is_empty() {
+            output.push_str(&format!("Matched terms: {}\n", c.matched_terms.join(", ")));
+        }
+        if !r.boost_signals.is_empty() {
+            output.push_str(&format!("Signals: {}\n", r.boost_signals.join("; ")));
+        }
+        output.push_str("```\n");
+        output.push_str(&c.content);
+        output.push_str("\n```\n\n");
+    }
+    output.push_str("Suggested next step: read the top 1-3 files above before editing or explaining cross-file behavior.\n");
 
     // ── Store in query cache ─────────────────────────────────────────────────
     // LRU eviction is handled automatically by lru::LruCache.
@@ -1746,6 +1795,103 @@ mod tests {
         assert_eq!(
             first, second,
             "同一查询的第二次检索应当命中查询缓存，返回完全相同的结果"
+        );
+    }
+
+    /// 零结果必须**解释原因**并给出下一步 —— 否则模型只会读成
+    /// 「这个功能不存在」，然后换个说法再问一遍，再问一遍。
+    ///
+    /// 事故原样（docs/tool-io-token-audit.md §1.3）：中文提问打纯英文代码库，
+    /// 工具只回一句 "No relevant code found" —— 信息量等同于"没有这个东西"。
+    #[test]
+    fn a_zero_hit_result_explains_the_language_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // 纯英文代码库。
+        write(root, "alpha.rs", "fn alpha_handler() {}\n");
+
+        // 用 `seed_cache` 预置索引，并直接调 `search_codebase_with_limits`（显式传
+        // `test_limits()`）。
+        //
+        // 两个坑：
+        // 1. 直接跑 `run_codebase_search` 会撞上 `watcher::is_started()` 这个
+        //    **进程级**状态 —— 别的测试一旦启动过协调器，这里就只会拿到 Warming
+        //    提示而不是真实检索结果。测试不该依赖全局状态。
+        // 2. `run_codebase_search` 的 limits 来自进程级环境变量，而
+        //    `seed_cache` 用的是 `test_limits()` —— 两边 cache_key 不同，
+        //    预置的引擎根本命中不了。显式传同一个 limits 才对得上。
+        let cache = seed_cache(root, test_limits());
+        let out = search_codebase_with_limits(root, "错误处理", None, test_limits(), Some(&cache))
+            .expect("search must succeed");
+
+        assert!(
+            out.contains("No relevant code found"),
+            "零结果必须明说没命中：{out}"
+        );
+        assert!(
+            out.contains("Diagnosis"),
+            "零结果必须带诊断段：{out}"
+        );
+        assert!(
+            out.contains("Chinese") && out.contains("English"),
+            "诊断必须点破语言不匹配（中文关键词 vs 英文代码库）：{out}"
+        );
+        assert!(
+            out.contains("Grep"),
+            "诊断必须给出可执行的下一步（换英文词或用 Grep）：{out}"
+        );
+    }
+
+    /// 零结果但索引里**有**中文时，不该误报语言不匹配 —— 那是在骗模型。
+    #[test]
+    fn a_zero_hit_result_does_not_claim_a_language_mismatch_when_the_index_has_chinese() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // 索引里有中文注释，但查询的词不存在于其中。
+        write(root, "alpha.rs", "// 错误处理入口\nfn alpha_handler() {}\n");
+
+        let cache = seed_cache(root, test_limits());
+        let out = search_codebase_with_limits(root, "限流回退", None, test_limits(), Some(&cache))
+            .expect("search must succeed");
+
+        assert!(
+            out.contains("No relevant code found"),
+            "零结果必须明说没命中：{out}"
+        );
+        assert!(
+            !out.contains("this codebase has no Chinese"),
+            "索引里有中文时不能报'这个代码库没有中文'：{out}"
+        );
+    }
+
+    /// 关键词压根不在索引里时，诊断必须说清"覆盖率 0%"并给出下一步。
+    ///
+    /// 这跟语言不匹配是两回事：前者是词选错了，后者是语言不对。
+    /// 混为一谈会让模型换一种错误的方式重试。
+    #[test]
+    fn a_zero_hit_result_reports_term_coverage_when_the_words_do_not_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "alpha.rs", "fn alpha_handler() {}\n");
+
+        let cache = seed_cache(root, test_limits());
+        let out = search_codebase_with_limits(
+            root,
+            "nonexistent_symbol_xyz",
+            None,
+            test_limits(),
+            Some(&cache),
+        )
+        .expect("search must succeed");
+
+        assert!(out.contains("No relevant code found"), "{out}");
+        assert!(
+            out.contains("Diagnosis"),
+            "零结果必须带诊断段：{out}"
+        );
+        assert!(
+            !out.contains("Chinese"),
+            "英文查询不该被报成语言问题：{out}"
         );
     }
 

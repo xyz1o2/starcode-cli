@@ -131,12 +131,33 @@ impl CallGraph {
     // ── Queries ───────────────────────────────────────────────────────────
 
     /// Find symbols whose name contains the given string.
+    /// 按名称匹配符号，**按匹配质量降序**返回。
+    ///
+    /// 排序键（越靠前越好）：精确相等 > 前缀匹配 > 子串匹配；同档内名字短者优先
+    /// （`ApplyParamOverride` 比 `ApplyParamOverrideWithExtraChecks` 更接近查询本身），
+    /// 再按路径稳定排序保证可复现。
+    ///
+    /// 以前这里只 `filter(contains)` 不排序，调用方 `take(5)` 拿到的是符号表插入顺序，
+    /// 而输出文案却写着 "Showing top 5 by name match" —— 模型以为看到的是最相关的 5 个。
     pub fn find_symbols(&self, name_hint: &str) -> Vec<&SymbolDef> {
         let lower = name_hint.to_lowercase();
-        self.symbols
+        let mut matched: Vec<&SymbolDef> = self
+            .symbols
             .iter()
             .filter(|s| !s.name.is_empty() && s.name.to_lowercase().contains(&lower))
-            .collect()
+            .collect();
+        matched.sort_by_key(|s| {
+            let name_lower = s.name.to_lowercase();
+            let rank: u8 = if name_lower == lower {
+                0
+            } else if name_lower.starts_with(&lower) {
+                1
+            } else {
+                2
+            };
+            (rank, s.name.chars().count(), s.file_path.as_str())
+        });
+        matched
     }
 
     /// Get the symbol definition by ID.
@@ -302,6 +323,109 @@ impl SymbolDef {
             end_line: 0,
             signature: String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::context::symbol::SymbolKind;
+
+    fn sym(id: usize, name: &str, file: &str) -> SymbolDef {
+        SymbolDef {
+            id,
+            name: name.to_string(),
+            kind: SymbolKind::Function,
+            file_path: file.to_string(),
+            start_line: id + 1,
+            end_line: id + 1,
+            signature: format!("fn {name}()"),
+        }
+    }
+
+    fn graph_of(symbols: Vec<SymbolDef>) -> CallGraph {
+        CallGraph::build(&[FileSymbols {
+            file_path: "x.rs".to_string(),
+            symbols,
+            edges: Vec::new(),
+        }])
+    }
+
+    /// 事故记录（docs/tool-io-token-audit.md §1.4）：`trace_call_chain` 输出
+    /// "Showing top 5 by name match"，但 `find_symbols` 只 `filter(contains)`
+    /// **不排序** —— 调用方 `take(5)` 拿到的是符号表的插入顺序。
+    ///
+    /// 文案说"最相关的 5 个"，实际给的是"最先被索引的 5 个"。模型据此判断
+    /// "这个函数在项目里有 82 处定义"并去读第一个 —— 而那个可能只是同名 wrapper。
+    #[test]
+    fn find_symbols_ranks_by_name_match_quality() {
+        // 故意按"最不像"到"最像"的顺序插入：插入顺序与匹配质量相反。
+        let graph = graph_of(vec![
+            sym(0, "ApplyParamOverrideWithExtraChecks", "z.rs"),
+            sym(1, "ApplyParamOverrideV2", "y.rs"),
+            sym(2, "ApplyParamOverride", "x.rs"),
+        ]);
+
+        let found = graph.find_symbols("ApplyParamOverride");
+        let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
+
+        assert_eq!(
+            names,
+            vec![
+                // 精确相等排第一
+                "ApplyParamOverride",
+                // 前缀匹配排第二
+                "ApplyParamOverrideV2",
+                // 子串匹配排最后
+                "ApplyParamOverrideWithExtraChecks",
+            ],
+            "精确 > 前缀 > 子串，与插入顺序无关：{names:?}"
+        );
+    }
+
+    /// 同档内名字短者优先 —— `ApplyParamOverrideWithChecks` 比
+    /// `ApplyParamOverrideWithExtraChecks` 更接近查询本身。
+    #[test]
+    fn find_symbols_prefers_shorter_names_within_the_same_rank() {
+        let graph = graph_of(vec![
+            sym(0, "ApplyParamOverrideWithExtraChecks", "z.rs"),
+            sym(1, "ApplyParamOverrideWithChecks", "y.rs"),
+        ]);
+
+        let found = graph.find_symbols("ApplyParamOverride");
+        let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "ApplyParamOverrideWithChecks",
+                "ApplyParamOverrideWithExtraChecks"
+            ],
+            "同档内短名优先：{names:?}"
+        );
+    }
+
+    /// 排序必须是**稳定且可复现**的：同样的图两次查询必须给出同样的顺序，
+    /// 否则模型看到的"top 5"每次都不一样，无法据此做判断。
+    #[test]
+    fn find_symbols_order_is_reproducible() {
+        let graph = graph_of(vec![
+            sym(0, "ApplyParamOverrideHelper", "b.rs"),
+            sym(1, "ApplyParamOverrideHelper", "a.rs"),
+        ]);
+
+        let first: Vec<String> = graph
+            .find_symbols("ApplyParamOverride")
+            .iter()
+            .map(|s| s.file_path.clone())
+            .collect();
+        let second: Vec<String> = graph
+            .find_symbols("ApplyParamOverride")
+            .iter()
+            .map(|s| s.file_path.clone())
+            .collect();
+
+        assert_eq!(first, second, "同分同名必须按路径稳定排序");
+        assert_eq!(first, vec!["a.rs".to_string(), "b.rs".to_string()]);
     }
 }
 

@@ -12,7 +12,7 @@ use lru::LruCache;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -34,6 +34,12 @@ pub struct EngineMeta {
     pub doc_count: usize,
     pub total_bytes: u64,
     pub index_mtime: Option<SystemTime>,
+    /// 索引里是否存在任何 CJK token。
+    ///
+    /// 触发侧的语言闸门要靠它判断"中文关键词有没有可能命中这个代码库"：
+    /// 索引里一个中文 token 都没有时，中文关键词是**数学上**零命中，
+    /// 发过去只会白烧一轮。
+    pub has_cjk_token: bool,
 }
 
 /// `patch_engine` 的结果。
@@ -85,6 +91,17 @@ pub fn shared_search_cache() -> Arc<SearchEngineCacheManager> {
     SHARED_SEARCH_CACHE.clone()
 }
 
+/// 某个项目根下已缓存的引擎里是否存在 CJK token。
+///
+/// 返回 `None` = 该项目还没有缓存好的引擎（冷启动）—— 调用方应据此**放行**：
+/// "不知道"不等于"不匹配"，据此拦截会把一次本该成功的检索也毙掉。
+///
+/// 只看**内容**不看 mtime：语言构成是代码库的属性，不是某个 revision 的属性。
+/// 索引过期时用旧引擎的判断照样成立。
+pub fn shared_root_has_cjk_token(root: &Path) -> Option<bool> {
+    shared_search_cache().root_has_cjk_token(root)
+}
+
 impl SearchEngineCacheManager {
     pub fn new() -> Self {
         Self {
@@ -130,7 +147,29 @@ impl SearchEngineCacheManager {
             doc_count: cached.engine.doc_count(),
             total_bytes: cached.engine.total_bytes(),
             index_mtime: cached.index_mtime,
+            has_cjk_token: cached.engine.has_cjk_token(),
         })
+    }
+
+    /// 某个项目根下已缓存的引擎里是否存在 CJK token。
+    ///
+    /// 返回 `None` = 该项目还没有缓存好的引擎（冷启动）—— 调用方应据此**放行**：
+    /// "不知道"不等于"不匹配"，据此拦截会把一次本该成功的检索也毙掉。
+    ///
+    /// 只看**内容**不看 mtime：语言构成是代码库的属性，不是某个 revision 的属性。
+    /// 索引过期时用旧引擎的判断照样成立。
+    pub fn root_has_cjk_token(&self, root: &Path) -> Option<bool> {
+        let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let cache = self.engine_cache.read();
+        let mut seen = false;
+        let mut has_cjk = false;
+        for ((path, _), cached) in cache.iter() {
+            if *path == canonical {
+                seen = true;
+                has_cjk |= cached.engine.has_cjk_token();
+            }
+        }
+        seen.then_some(has_cjk)
     }
 
     /// 在写锁内对一个已缓存引擎施加增量补丁。
@@ -222,6 +261,81 @@ mod tests {
 
     fn key(name: &str) -> (PathBuf, String) {
         (PathBuf::from(name), "f1b1t1".to_string())
+    }
+
+    /// 触发侧语言闸门的数据源：缓存里有没有中文 token。
+    ///
+    /// 判据错了，两个方向都会出事：
+    /// - 说"有中文"而实际没有 → 闸门放行 → 中文查询继续白打（事故原样）；
+    /// - 说"没有中文"而实际有 → 闸门拦下 → 中文代码库里的中文注释搜不到。
+    #[test]
+    fn root_has_cjk_token_reports_the_index_language() {
+        let cache = SearchEngineCacheManager::new();
+        // 用真实目录：生产路径上缓存的键是 **canonical** 路径，
+        // 查��也是 canonical —— 键与查法不一致就会永远查不到。
+        let dir = std::env::temp_dir().join("starcode_lang_gate_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+
+        // 还没缓存引擎 → 不知道（None），调用方据此放行。
+        assert_eq!(
+            cache.root_has_cjk_token(&dir),
+            None,
+            "没有缓存引擎时必须报 None，不能谎报'没有中文'"
+        );
+
+        // 纯英文索引。
+        cache.put_engine(
+            (canonical.clone(), "f1b1t1".to_string()),
+            CachedSearchEngine {
+                engine: test_engine(&["a.rs"]),
+                index_mtime: Some(SystemTime::now()),
+            },
+        );
+        assert_eq!(
+            cache.root_has_cjk_token(&dir),
+            Some(false),
+            "纯英文索引必须报 false"
+        );
+
+        // 另一个项目根不受影响。
+        assert_eq!(
+            cache.root_has_cjk_token(Path::new("/proj/other")),
+            None,
+            "别的项目根不该命中本项目的引擎"
+        );
+    }
+
+    #[test]
+    fn root_has_cjk_token_detects_chinese_content() {
+        let cache = SearchEngineCacheManager::new();
+        let dir = std::env::temp_dir().join("starcode_lang_gate_cjk_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+
+        let mut engine = SearchEngine::new();
+        engine.add_document(
+            "a.rs".to_string(),
+            vec![CodeChunk {
+                content: "// 错误处理入口".to_string(),
+                start_line: 1,
+                end_line: 1,
+                context_header: None,
+            }],
+        );
+        cache.put_engine(
+            (canonical, "f1b1t1".to_string()),
+            CachedSearchEngine {
+                engine,
+                index_mtime: Some(SystemTime::now()),
+            },
+        );
+
+        assert_eq!(
+            cache.root_has_cjk_token(&dir),
+            Some(true),
+            "含中文注释的索引必须报 true"
+        );
     }
 
     /// 本设计最隐蔽的正确性点：**无操作补丁也必须盖 mtime**。

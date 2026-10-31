@@ -92,6 +92,12 @@ pub struct SearchResult {
 struct DocumentEntry {
     path: String,
     chunks: Vec<CodeChunk>,
+    /// 该文档是否贡献过任何 CJK token。
+    ///
+    /// 单独记在文档上，是为了让 `cjk_doc_count` 能在删除时**精确**递减 ——
+    /// 只留一个全局 sticky 布尔的话，删掉最后一个中文文档后标志仍是 true，
+    /// 而诊断会据此说"这个代码库有中文"，那是在骗模型。
+    has_cjk: bool,
 }
 
 #[derive(Clone)]
@@ -105,6 +111,9 @@ pub struct SearchEngine {
     path_to_doc: HashMap<String, usize>,
     // Document frequencies: word -> count of documents containing it
     doc_freqs: HashMap<String, usize>,
+    // 贡献了 CJK token 的文档数。`has_cjk_token` 由它派生（`> 0`），
+    // 这样删除文档时能精确递减，而不是留一个永不复位的 sticky 布尔。
+    cjk_doc_count: usize,
     // 注意：没有 `total_docs` 字段 —— 它由 `documents.len()` 派生。
     // 维护一个独立计数器在增量删除下极易与实际文档数脱节，而 IDF 依赖它。
 }
@@ -114,6 +123,25 @@ struct QueryProfile {
     base_terms: Vec<String>,
     expanded_terms: Vec<String>,
     phrases: Vec<String>,
+}
+
+/// 该字符是否属于「需要按字切分」的语言（CJK 表意文字 + 日文假名 + 谚文）。
+///
+/// **单一事实源** —— 以前这个判定在 `search_engine.rs` 和
+/// `tool_call_builders.rs` 各写了一份，且两处范围不同：
+/// 索引侧含假名与谚文，关键词侧只有基本汉字区。于是"提取时算中文、
+/// 索引时不算中文"的 token 会凭空消失，而两边谁也说不清。
+///
+/// 现在只有这一个定义，两侧都调它。
+pub fn is_cjk_char(ch: char) -> bool {
+    matches!(ch as u32,
+        0x3040..=0x30FF   // 平假名 / 片假名
+        | 0x3400..=0x4DBF // 扩展 A
+        | 0x4E00..=0x9FFF // 基本区
+        | 0xF900..=0xFAFF // 兼容表意文字
+        | 0xAC00..=0xD7AF // 谚文音节
+        | 0x20000..=0x2A6DF // 扩展 B
+    )
 }
 
 /// Options controlling the search behaviour.
@@ -154,6 +182,23 @@ impl SearchOptions {
     }
 }
 
+/// 一次查询的诊断信息。
+///
+/// 零结果本身不是可执行信息 —— 模型只会把 "No relevant code found" 理解成
+/// "这个功能不存在"。诊断把"为什么没命中"拆成几种可区分的原因，
+/// 每一种都能对应一个明确的下一步动作。
+#[derive(Debug, Clone)]
+pub struct QueryDiagnosis {
+    /// 查询的 base_terms 有多少比例在倒排表里存在（0.0~1.0）。
+    pub term_coverage: f64,
+    /// 索引里是否含有任何 CJK token。
+    pub index_has_cjk_token: bool,
+    /// 索引里 CJK token 占比。
+    pub index_cjk_token_ratio: f64,
+    /// 所有 base_terms 是否都是 CJK 词（不含英文）。
+    pub query_is_pure_cjk: bool,
+}
+
 impl SearchEngine {
     pub fn new() -> Self {
         Self {
@@ -161,6 +206,7 @@ impl SearchEngine {
             documents: Vec::new(),
             path_to_doc: HashMap::new(),
             doc_freqs: HashMap::new(),
+            cjk_doc_count: 0,
         }
     }
 
@@ -172,6 +218,64 @@ impl SearchEngine {
     /// 文档数（别名，供状态展示）。
     pub fn doc_count(&self) -> usize {
         self.documents.len()
+    }
+
+    /// 索引里是否存在任何 CJK token。
+    ///
+    /// 用于零结果分类：如果用户查询是纯 CJK 而 `has_cjk_token == false`，
+    /// 说明索引是纯英文代码库，查询词在数学上不可能命中 —— 这是零结果的一个
+    /// 明确、可解释的原因，也是触发侧需要知道的信息。
+    pub fn has_cjk_token(&self) -> bool {
+        self.cjk_doc_count > 0
+    }
+
+    /// 该查询的 base_terms 有多少比例在索引里实际存在（召回率）。
+    ///
+    /// 0.0 = 每个词都查无此人，1.0 = 所有词都在倒排表里。用于区分
+    /// "查询词有效但恰好没命中" 与 "查询词本身就不在索引里"。
+    pub fn term_coverage(&self, terms: &[String]) -> f64 {
+        if terms.is_empty() {
+            return 0.0;
+        }
+        let covered = terms
+            .iter()
+            .filter(|t| self.index.contains_key(t.as_str()))
+            .count();
+        covered as f64 / terms.len() as f64
+    }
+
+    /// 该索引里 CJK token 占总 token 数的比例（0~1）。
+    ///
+    /// 索引几乎全是英文代码时 <0.05，混有大量中文注释/文档时明显更高。
+    pub fn cjk_token_ratio(&self) -> f64 {
+        let total: usize = self.index.values().map(|v| v.len()).sum();
+        if total == 0 {
+            return 0.0;
+        }
+        let cjk: usize = self
+            .index
+            .iter()
+            .filter(|(t, _)| t.chars().any(|c| Self::is_cjk_char(c)))
+            .map(|(_, v)| v.len())
+            .sum();
+        cjk as f64 / total as f64
+    }
+
+    /// 从一组查询词算诊断信息。
+    pub fn diagnosis_from_terms(&self, terms: &[String]) -> QueryDiagnosis {
+        // "纯 CJK" = 每个词都含 CJK 字符，且不含任何 ASCII 字母。
+        // 只有 ASCII 数字/符号不算英文词，但也不算 CJK 词，所以整体判定
+        // 仍然是"这个词是中文的"。
+        let query_is_pure_cjk = !terms.is_empty()
+            && terms.iter().all(|t| {
+                t.chars().any(|c| Self::is_cjk_char(c)) && !t.chars().any(|c| c.is_ascii_alphabetic())
+            });
+        QueryDiagnosis {
+            term_coverage: self.term_coverage(terms),
+            index_has_cjk_token: self.has_cjk_token(),
+            index_cjk_token_ratio: self.cjk_token_ratio(),
+            query_is_pure_cjk,
+        }
     }
 
     /// 所有已索引文档内容的总字节数（供预算核算与状态展示）。
@@ -249,14 +353,23 @@ impl SearchEngine {
         self.path_to_doc.insert(file_path.clone(), doc_id);
 
         let mut doc_words = HashSet::new();
+        let mut doc_has_cjk = false;
         for (chunk_id, chunk) in chunks.iter().enumerate() {
             for word in self.chunk_words(&file_path, chunk) {
+                // 先判 CJK 再收进 `doc_words`：`insert` 会把 `word` 移走，
+                // 之后再用 `word.chars()` 就是 use-after-move。
+                if word.chars().any(|c| Self::is_cjk_char(c)) {
+                    doc_has_cjk = true;
+                }
                 self.index
                     .entry(word.clone())
                     .or_default()
                     .push((doc_id, chunk_id));
                 doc_words.insert(word);
             }
+        }
+        if doc_has_cjk {
+            self.cjk_doc_count += 1;
         }
         for word in doc_words {
             *self.doc_freqs.entry(word).or_default() += 1;
@@ -265,6 +378,7 @@ impl SearchEngine {
         self.documents.push(DocumentEntry {
             path: file_path,
             chunks,
+            has_cjk: doc_has_cjk,
         });
     }
 
@@ -313,7 +427,11 @@ impl SearchEngine {
 
         // 2. swap-remove：末尾元素填坑，并修正它的 doc_id。
         let last_id = self.documents.len() - 1;
+        let removed_had_cjk = self.documents[removed_id].has_cjk;
         self.documents.swap_remove(removed_id);
+        if removed_had_cjk {
+            self.cjk_doc_count = self.cjk_doc_count.saturating_sub(1);
+        }
         if removed_id != last_id {
             // 被移动的文档现在位于 removed_id，倒排表里的 doc_id 必须跟着改。
             let moved_path = self.documents[removed_id].path.clone();
@@ -469,7 +587,9 @@ impl SearchEngine {
         let mut results: Vec<SearchResult> = scores
             .into_iter()
             .map(|((doc_id, chunk_id), score)| {
-                let DocumentEntry { path, chunks } = &self.documents[doc_id];
+                let DocumentEntry {
+                    path, chunks, ..
+                } = &self.documents[doc_id];
                 let chunk = chunks[chunk_id].clone();
 
                 let mut final_score = score;
@@ -622,6 +742,13 @@ impl SearchEngine {
         }
     }
 
+    /// 只提取 base_terms —— 供诊断使用，不跑扩写。
+    pub fn extract_base_terms(&self, query: &str) -> Vec<String> {
+        self.tokenize(query)
+    }
+
+    /// 一次查询的诊断信息。
+
     /// Expand query terms using **co-occurrence within the actual index**.
     ///
     /// For each base term we look at the top-N chunks that contain it, collect
@@ -757,14 +884,7 @@ impl SearchEngine {
 
     /// 该字符是否属于「需要按字切分」的语言。
     fn is_cjk_char(ch: char) -> bool {
-        matches!(ch as u32,
-            0x3040..=0x30FF   // 平假名 / 片假名
-            | 0x3400..=0x4DBF // 扩展 A
-            | 0x4E00..=0x9FFF // 基本区
-            | 0xF900..=0xFAFF // 兼容表意文字
-            | 0xAC00..=0xD7AF // 谚文音节
-            | 0x20000..=0x2A6DF // 扩展 B
-        )
+        is_cjk_char(ch)
     }
 
     /// 把一段 CJK 文本切成检索 token。
@@ -993,6 +1113,114 @@ mod tests {
         assert!(tokens.contains(&"错误".to_string()));
         assert!(tokens.contains(&"handle".to_string()));
         assert!(tokens.contains(&"error".to_string()));
+    }
+
+    // ── 零结果诊断 ────────────────────────────────────────────────────────
+    //
+    // 事故根因（docs/tool-io-token-audit.md §1.3）：中文提问撞纯英文代码库，
+    // 词法检索必然零命中。以前工具只回一句 "No relevant code found" ——
+    // 模型读到的信息量等同于"这个功能不存在"，于是换个说法再问一遍，
+    // 换个说法再问一遍。诊断要回答的是**为什么没命中**。
+
+    /// 纯英文索引 + 纯中文查询 = 数学上零命中，诊断必须点破这一点。
+    #[test]
+    fn cjk_query_against_an_english_index_is_diagnosed_as_a_language_mismatch() {
+        let mut engine = SearchEngine::new();
+        doc(&mut engine, "a.rs", &["fn handle_error() {}"]);
+
+        let terms = engine.extract_base_terms("错误处理");
+        let diagnosis = engine.diagnosis_from_terms(&terms);
+
+        assert!(
+            diagnosis.query_is_pure_cjk,
+            "纯中文查询必须被认出来：{diagnosis:?}"
+        );
+        assert!(
+            !diagnosis.index_has_cjk_token,
+            "纯英文索引不该有 CJK token：{diagnosis:?}"
+        );
+        assert_eq!(
+            diagnosis.term_coverage, 0.0,
+            "中文词在英文索引里一个都不存在：{diagnosis:?}"
+        );
+    }
+
+    /// 反向：索引里有中文注释时，中文查询**可能**命中，不该被判成语言不匹配。
+    ///
+    /// 这是闸门的另一半 —— 只在"确定不可能命中"时才拦，否则会把一次
+    /// 本该成功的检索也毙掉。
+    #[test]
+    fn a_chinese_index_is_not_diagnosed_as_a_language_mismatch() {
+        let mut engine = SearchEngine::new();
+        doc(&mut engine, "a.rs", &["// 错误处理的入口在这里"]);
+
+        assert!(
+            engine.has_cjk_token(),
+            "索引里有中文注释时必须报告 has_cjk_token"
+        );
+        let terms = engine.extract_base_terms("错误处理");
+        let diagnosis = engine.diagnosis_from_terms(&terms);
+        assert!(
+            diagnosis.index_has_cjk_token,
+            "有中文的索引不该被判成语言不匹配：{diagnosis:?}"
+        );
+    }
+
+    /// 删掉唯一的中文文档后，"这个代码库有中文"必须变成 false。
+    ///
+    /// 以前这是一个 sticky 布尔：设过就永远是真的。于是删掉中文注释之后，
+    /// 诊断仍然说"索引里有中文" —— 那是在骗模型，而且方向恰好相反
+    /// （真实情况是更该提示语言不匹配了）。
+    #[test]
+    fn removing_the_only_chinese_document_clears_the_cjk_flag() {
+        let mut engine = SearchEngine::new();
+        doc(&mut engine, "a.rs", &["// 错误处理"]);
+        assert!(engine.has_cjk_token());
+
+        assert!(engine.remove_document("a.rs"));
+        assert!(
+            !engine.has_cjk_token(),
+            "删掉唯一的中文文档后不该还声称索引里有中文"
+        );
+        engine.verify_invariants().unwrap();
+    }
+
+    /// 英文查询不该被当成纯中文 —— 判据是有没有 ASCII 字母，不是"有没有 CJK"。
+    #[test]
+    fn an_english_query_is_never_pure_cjk() {
+        let mut engine = SearchEngine::new();
+        doc(&mut engine, "a.rs", &["fn handle_error() {}"]);
+
+        for query in ["handle_error", "retry backoff", "错误处理 retry"] {
+            let terms = engine.extract_base_terms(query);
+            let diagnosis = engine.diagnosis_from_terms(&terms);
+            assert!(
+                !diagnosis.query_is_pure_cjk,
+                "含英文的查询 {query:?} 不该被判成纯中文：{diagnosis:?}"
+            );
+        }
+    }
+
+    /// 关键词在索引里存在但没命中时，覆盖率必须如实反映 —— 这是区分
+    /// 「查询词根本不存在」与「查询词存在但排名不够」的唯一依据。
+    #[test]
+    fn term_coverage_reflects_which_query_words_exist() {
+        let mut engine = SearchEngine::new();
+        doc(&mut engine, "a.rs", &["fn handle_error() {}"]);
+
+        let all_present = engine.term_coverage(&["handle".to_string(), "error".to_string()]);
+        assert!(
+            (all_present - 1.0).abs() < f64::EPSILON,
+            "两个词都在索引里，覆盖率必须是 1.0：{all_present}"
+        );
+
+        let half = engine.term_coverage(&["handle".to_string(), "nonexistent".to_string()]);
+        assert!(
+            (half - 0.5).abs() < f64::EPSILON,
+            "只有一个词在索引里，覆盖率必须是 0.5：{half}"
+        );
+
+        assert_eq!(engine.term_coverage(&[]), 0.0, "空词表没有覆盖率可言");
     }
 
     fn doc(engine: &mut SearchEngine, path: &str, words: &[&str]) {

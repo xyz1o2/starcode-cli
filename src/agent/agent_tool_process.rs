@@ -861,6 +861,7 @@ impl Agent {
             *analyzer_skill_attempted,
             *editor_skill_attempted,
             *project_map_attempted,
+            Some(self.config.target_dir().as_path()),
         );
 
         let Some(selected) = best else {
@@ -937,8 +938,13 @@ impl Agent {
                         // 重跑要用新的 tool_call id —— 同一个 id 出现两次，
                         // 消息流里就是两个同 id 的 tool call，很多下游按 id 配对
                         // （tool_result ↔ tool_call）会认错。
+                        //
+                        // 另外带上 `warmup_retry` 标记：补跑与首查的 query/turn
+                        // 完全相同，不标记的话在 UI 上就是"同一个调用出现两次"
+                        // （事故记录 §1.5 的 `turn=1` 双发）。
                         let mut retry_satisfied = false;
-                        let retry_call = build_codebase_search_tool_call(user_input, current_turn);
+                        let retry_call = crate::agent::tool_routing::
+                            build_codebase_search_tool_call_with(user_input, current_turn, true);
                         self.run_auto_trigger_tool(
                             user_input,
                             messages,

@@ -24,11 +24,33 @@ pub(crate) fn build_navigator_skill_tool_call(user_input: &str, turn: i32) -> St
 /// 路径喂给了词法引擎最不适合的输入形态**。
 ///
 /// 现在自动路径和模型手调路径的输入形态一致了：都是关键词。
+///
+/// # `warmup_retry`
+///
+/// 冷启动补跑（首查拿到 Warming、等索引就绪后重跑）会带上这个标记。
+/// 它不改查询内容，只为让**第二次调用在 UI 上可区分**——
+///
+/// 补跑与首查的 `query` 和 `turn` 完全相同，光看参数根本分不出哪个是哪个，
+/// 于是补跑看起来就像"同一个调用出现了两次"（事故记录 §1.5 的
+/// `turn=1` 双发就是它）。标记让排障时一眼看出这是有意补跑。
 pub(crate) fn build_codebase_search_tool_call(user_input: &str, turn: i32) -> StarToolCall {
-    build_tool_call(
-        "CodebaseSearch",
-        &serde_json::json!({"query": extract_search_keywords(user_input), "turn": turn}),
-    )
+    build_codebase_search_tool_call_with(user_input, turn, false)
+}
+
+/// 同 [`build_codebase_search_tool_call`]，但可标记为「冷启动补跑」。
+pub(crate) fn build_codebase_search_tool_call_with(
+    user_input: &str,
+    turn: i32,
+    warmup_retry: bool,
+) -> StarToolCall {
+    let mut args = serde_json::json!({
+        "query": extract_search_keywords(user_input),
+        "turn": turn,
+    });
+    if warmup_retry {
+        args["warmup_retry"] = serde_json::Value::Bool(true);
+    }
+    build_tool_call("CodebaseSearch", &args)
 }
 
 /// 把自然语言提问压成给词法引擎用的关键词串。
@@ -260,7 +282,7 @@ pub(crate) fn extract_search_keywords(query: &str) -> String {
 }
 
 fn is_cjk(c: char) -> bool {
-    matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF)
+    crate::core::context::search_engine::is_cjk_char(c)
 }
 
 pub(crate) fn build_project_map_tool_call(user_input: &str, turn: i32) -> StarToolCall {
@@ -450,5 +472,41 @@ mod tests {
     fn codebase_search_falls_back_to_raw_input_when_nothing_survives() {
         assert_eq!(extract_search_keywords("what is it"), "what is it");
         assert_eq!(extract_search_keywords("????"), "????");
+    }
+
+    /// 冷启动补跑必须与首查**可区分**。
+    ///
+    /// 事故记录（docs/tool-io-token-audit.md §1.5）里 `turn=1` 出现了两次
+    /// 完全相同的调用 —— 根因就是补跑沿用了首查的 query 与 turn。
+    /// 补跑内容必须一致（同一批关键词重跑），但要有标记能认出它是补跑。
+    #[test]
+    fn the_warmup_retry_is_marked() {
+        let first = build_codebase_search_tool_call("where is retry handled", 1);
+        let retry = build_codebase_search_tool_call_with("where is retry handled", 1, true);
+
+        let first_args: serde_json::Value =
+            serde_json::from_str(&first.function.arguments).unwrap();
+        let retry_args: serde_json::Value =
+            serde_json::from_str(&retry.function.arguments).unwrap();
+
+        assert_eq!(
+            first_args.get("query"),
+            retry_args.get("query"),
+            "补跑必须用同一批关键词 —— 它就是首查的重跑"
+        );
+        assert_eq!(first_args.get("turn"), retry_args.get("turn"));
+        assert!(
+            first_args.get("warmup_retry").is_none(),
+            "首查不该带补跑标记"
+        );
+        assert_eq!(
+            retry_args.get("warmup_retry"),
+            Some(&serde_json::Value::Bool(true)),
+            "补跑必须带标记，否则与首查长得一模一样"
+        );
+        assert_ne!(
+            first.id, retry.id,
+            "tool_call id 必须不同 —— 同 id 出现两次会让按 id 配对的下游认错"
+        );
     }
 }

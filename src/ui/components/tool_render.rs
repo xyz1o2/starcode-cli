@@ -520,6 +520,25 @@ fn build_tool_argument_display(
         "LS" => get_str(&["directory", "path"])
             .map(|p| shorten(&p))
             .unwrap_or_else(|| ".".to_string()),
+        // CodebaseSearch: 保留原来的 `query=..., turn=...` 摘要形态
+        // （事故记录里就是 `codebase search(query=停, turn=43)` 这种样子），
+        // 只在冷启动补跑时**追加**一个标记。
+        //
+        // 补跑与首查的 query 和 turn 完全相同 —— 不标出来的话，补跑在 UI 上
+        // 就是"同一个调用出现了两次"（事故记录 §1.5 的 `turn=1` 双发）。
+        "CodebaseSearch" => {
+            let mut parts = Vec::new();
+            if let Some(q) = get_str(&["query"]) {
+                parts.push(format!("query={}", truncate_chars_with_ellipsis(&q, 40)));
+            }
+            if let Some(t) = get_u64(&["turn"]) {
+                parts.push(format!("turn={t}"));
+            }
+            if obj.get("warmup_retry").and_then(|v| v.as_bool()) == Some(true) {
+                parts.push("retry".to_string());
+            }
+            parts.join(", ")
+        }
         // MCP：`mcp__<server>__<tool>`，参数结构由外部 server 决定，
         // 通用倾倒对它是唯一合理的选择，但 server 名值得单独标出来 ——
         // 用户判断"这次调用可不可信"看的就是它。
@@ -1274,6 +1293,44 @@ mod tests {
         assert!(body.contains("src/auth.rs"), "top file missing: {body:?}");
         // 元数据头不应出现在折叠态
         assert!(!body.contains("RRF fusion"), "metadata leaked: {body:?}");
+    }
+
+    /// 冷启动补跑必须与首查**可区分**。
+    ///
+    /// 事故记录（docs/tool-io-token-audit.md §1.5）里 `turn=1` 出现了两次
+    /// 完全相同的调用 —— 根因就是冷启动补跑沿用了首查的 query 与 turn，
+    /// 在 UI 上完全看不出来。不标出来的话它就一直是"重复调用"的观感。
+    #[test]
+    fn codebase_search_marks_the_warmup_retry() {
+        let call = |args: &str| crate::types::StarToolCall {
+            id: "c1".to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: "CodebaseSearch".to_string(),
+                arguments: args.to_string(),
+            },
+        };
+        let render = |args: &str| {
+            let (summary, _) = build_tool_argument_display(&call(args), false);
+            summary
+        };
+
+        let first = render(r#"{"query":"auth flow","turn":1}"#);
+        let retry = render(r#"{"query":"auth flow","turn":1,"warmup_retry":true}"#);
+
+        assert!(
+            !first.contains("retry"),
+            "首查不该被标成补跑：{first:?}"
+        );
+        assert!(
+            retry.contains("retry"),
+            "补跑必须标出来，否则与首查长得一模一样：{retry:?}"
+        );
+        // 摘要形态不能变 —— 事故记录里是 `codebase search(query=…, turn=…)`。
+        assert!(
+            first.contains("query=auth flow") && first.contains("turn=1"),
+            "首查摘要形态变了：{first:?}"
+        );
     }
 
     /// ProjectMap 折叠态应显示扫描文件数，而非原始输出行。
