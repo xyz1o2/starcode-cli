@@ -6,6 +6,7 @@ on:
     branches: [main]
   pull_request:
     branches: [dev-m]
+  workflow_dispatch: {}
   schedule:
     - cron: '0 6 * * 1'  # Weekly Monday 6am UTC
 
