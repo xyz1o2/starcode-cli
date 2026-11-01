@@ -11,7 +11,16 @@
 #   - NCSA/libfuzzer-sys、CDLA/webpki-roots 同理；
 #   - LGPL-2.1-or-later 只出现在 `OR` 表达式里（r-efi: MIT OR Apache-2.0
 #     OR LGPL），OR 分支里有 MIT/Apache 兜底，不必单独放行 LGPL。
-#   - Apache-2.0 WITH LLVM-exception 需要 exception 放行（见下方）。
+#
+# [advisories]：vulnerability 保持默认 deny——这是 cargo-audit/deny 的核心价值。
+# `unmaintained`/`unsound` 在 cargo-deny 0.20 默认是 "all"（连传递依赖的
+# unmaintained 都报 error）。当前有三个传递依赖被标 unmaintained：
+#   bincode(←syntect)、fxhash(←selectors←scraper)、paste(←pulp←exr←image)，
+# 升级路径全在上游手里，不在本仓库控制内。改为 "workspace"：只对**我们直接
+# 选择的**依赖报 unmaintained/unsound，传递依赖不再阻断 job。
+[advisories]
+unmaintained = "workspace"
+unsound = "workspace"
 
 [licenses]
 allow = [
@@ -32,20 +41,8 @@ allow = [
     "Zlib",
 ]
 
-# `WITH` 例外（如 LLVM-exception）不能只靠 allow 放行，必须声明 exception。
-# 否则只有 `Apache-2.0 WITH LLVM-exception` 的依赖会被拒。
-[[licenses.exceptions]]
-allow = ["Apache-2.0 WITH LLVM-exception"]
-
-# [advisories]：vulnerability 默认 deny（好消息：rustls 系漏洞在当前
-# Cargo.lock 里已全部升到 patched 版本）；unmaintained/unsound/yanked
-# 默认 warn，不致 job 失败。Tokio 1.53.2 的 unsound 与 clipboard-win
-# 5.4.1 的 yanked 属于这一级，已在逐步处理。
-[advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-unsound = "warn"
-yanked = "warn"
-notice = "warn"
-
-# [bans]/[sources]：无特别要求，保持默认即可。
+# 若有依赖的许可证**只有** `Apache-2.0 WITH LLVM-exception`（没有 OR 兜底），
+# 需要按 crate 加 exception（此字段必需 crate 名）：
+#   [[licenses.exceptions]]
+#   allow = ["Apache-2.0 WITH LLVM-exception"]
+#   crate = "some-crate"

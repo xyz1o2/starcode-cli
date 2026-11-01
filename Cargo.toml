@@ -2,6 +2,7 @@
 name = "starcode-cli"
 version = "0.3.0"
 edition = "2021"
+license = "MIT"
 default-run = "starcode-cli"
 
 [[bin]]
