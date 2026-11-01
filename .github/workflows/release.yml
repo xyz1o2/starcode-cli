@@ -159,9 +159,12 @@ jobs:
       # taiki-e/install-action@cargo-zigbuild 只下 cargo-zigbuild 本体，不含 zig。
       # 缺 zig 时 cargo zigbuild 立刻报 "Failed to find zig / cannot find binary
       # path"，三个 Linux 交叉 target 全挂。zig 必须单独装一步。
+      # 注意：install-action 的 tool 列表里没有 zig（@zig 是无效 ref，GitHub
+      # 会解析所有 action 引用、连被 if 跳过的步骤也会让 job 整体失败），
+      # 所以这里用专门的 setup-zig action。
       - name: 安装 zig（cargo-zigbuild 的链接器后端）
         if: runner.os == 'Linux' && !matrix.native
-        uses: taiki-e/install-action@zig
+        uses: mlugg/setup-zig@v2
 
       - name: 安装 cargo-zigbuild
         if: runner.os == 'Linux' && !matrix.native
