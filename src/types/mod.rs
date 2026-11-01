@@ -1299,10 +1299,9 @@ pub fn is_safe_query_tool(tool_name: &str) -> bool {
             | "McpSearchTools"
             | "McpToolInfo"
             | "McpRefresh"
-            // `ToolSearch` 只读 registry，不改任何状态：它存在的意义就是让
-            // 模型发现工具，每问一次都要人点一次"允许"会让这个工具形同虚设
-            // （截图里每一次 tool_search 调用都卡在 "Permission required"）。
-            | "ToolSearch"
+            // `GetDiagnostics` 只跑 `cargo check` / `eslint` / `pylint`，纯读不写任何状态，
+            // 只是把编译错误和 lint 警告收集一遍——每调用一次弹一次确认会让这个工具形同虚设。
+            | "GetDiagnostics"
     )
 }
 
@@ -1455,12 +1454,13 @@ mod thinking_effort_tests {
         assert!(matches!(ThinkingEffort::High.next(), ThinkingEffort::Xhigh));
     }
 
-    /// `ToolSearch` 是只读的发现工具，不该每次调用都弹确认。
-    ///
-    /// 它不在安全查询集里时，策略兜底的 `AskUser` 会让模型每搜一次工具就问
-    /// 用户一次；并发搜索时还会堆出多张确认卡。
+    /// `GetDiagnostics` 是只读工具（跑 `cargo check`/`eslint`/`pylint`，不写文件），
+    /// Default 模式不该对它有确认弹窗——它只是把编译错误和 lint 警告收集一遍。
     #[test]
-    fn tool_search_is_a_safe_query_tool() {
-        assert!(crate::types::is_safe_query_tool("ToolSearch"));
+    fn get_diagnostics_is_a_safe_query_tool() {
+        assert!(crate::types::is_safe_query_tool("GetDiagnostics"));
+        assert!(crate::core::tools::constants::is_read_only_tool_name(
+            "GetDiagnostics"
+        ));
     }
 }

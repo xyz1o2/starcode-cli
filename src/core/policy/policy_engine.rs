@@ -561,6 +561,15 @@ mod tests {
                 "模式内置放行不是规则命中，`explicit_rule` 必须为 false，否则「本会话允许」会失效"
             );
         }
+        // GetDiagnostics 同样免确认：它只跑 cargo check/eslint/pylint，不写任何状态
+        for tool in ["GetDiagnostics"] {
+            let result = engine.check(&call(tool, serde_json::json!({})), None).await;
+            assert_eq!(
+                result.decision,
+                PolicyDecision::Allow,
+                "{tool} 是只读诊断工具，default 模式不该弹确认"
+            );
+        }
     }
 
     /// 同一修复在 headless 下的意义：`-p` 遇只读工具必须是放行而不是拒绝。
