@@ -115,11 +115,14 @@ jobs:
             os: ubuntu-latest
             native: false
           # ---- macOS ----
-          # macos-latest 已经是 arm64，所以 x86_64 用 macos-13 原生构建，
-          # 避免交叉编译带来的 SDK/链接问题。
+          # macos-13（Intel runner）排队极久——Intel runner 池持续缩容，
+          # 实测 30+ 分钟仍 queued、runner 都分配不到。x86_64 改在
+          # macos-14（arm64）上交叉编译：Apple clang 跨 -arch 用同一个
+          # macOS SDK，无需额外工具链；产物 Intel Mac 原生可跑，arm64
+          # Mac 也能通过 Rosetta 2 跑。
           - target: x86_64-apple-darwin
-            os: macos-13
-            native: true
+            os: macos-14
+            native: false
           - target: aarch64-apple-darwin
             os: macos-14
             native: true
@@ -176,6 +179,16 @@ jobs:
       - name: 编译 release（Windows 交叉）
         if: runner.os == 'Windows' && !matrix.native
         run: cargo xwin build --release --locked --bin starcode-cli --target ${{ matrix.target }}
+
+      # ---- macOS 交叉：arm64 runner 上编 x86_64 ----
+      # rustc+Apple clang 跨 -arch 编译不需要额外 SDK；只有 C 依赖需要
+      # 显式告诉目标架构：aws-lc-sys 等走 cmake，CMAKE_OSX_ARCHITECTURES
+      # 让它们的 C 代码也编成 x86_64。
+      - name: 编译 release（macOS 交叉）
+        if: runner.os == 'macOS' && !matrix.native
+        env:
+          CMAKE_OSX_ARCHITECTURES: ${{ matrix.target == 'x86_64-apple-darwin' && 'x86_64' || 'arm64' }}
+        run: cargo build --release --locked --bin starcode-cli --target ${{ matrix.target }}
 
       - name: 编译 release（原生）
         if: matrix.native
