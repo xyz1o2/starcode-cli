@@ -104,7 +104,7 @@ fn move_selection_end_to(state: &mut ChatState, col: u16, row: u16) {
 /// 单击（按下到松开未拖动）时的折叠/展开切换，返回是否发生了切换。
 /// 判定规则与旧版「Down 即切换」完全一致：
 /// - thinking 块：展开时点任意行折叠；折叠时点头部或预览行展开
-/// - 工具块：仅点头部行（row 0）切换
+/// - 工具块：点头部行切换
 fn try_toggle_on_click(state: &mut ChatState, entry_idx: usize, row: usize) -> bool {
     let Some(entry) = state.chat_history.get(entry_idx) else {
         return false;
@@ -132,13 +132,39 @@ fn try_toggle_on_click(state: &mut ChatState, entry_idx: usize, row: usize) -> b
         }
     }
 
-    // 工具块：仅点头部行（row 0）切换。
+    // 工具块：点工具名展开/收起；正文展开后点正文里任意一行都收起。
     //
-    // 切换逻辑收在 `ChatState::toggle_tool_expansion` —— Tab 键走同一条路径，
-    // 两边以前各写一遍增删，收尾动作还不一致（Tab 会标脏 virtual_list，
-    // 单击不会）。
-    let is_tool_header = row == 0 && entry.tool_call.is_some();
-    if is_tool_header {
+    // 一个工具块在 `chat_history` 里是**两条** entry：工具头（ToolCall，工具名
+    // 那一行）和工具体（ToolResult，正文）。两条共用同一个 tool_call.id，
+    // 折叠位是同一份 —— 所以从哪一条点都是切同一块。
+    //
+    // 命中规则与 thinking 块一致（见上）：**展开着时点块内任意一行都收起**。
+    // 展开的正文可能有两百行，工具名远在屏幕外 —— 不这样，用户得一路滚回顶部
+    // 才收得起来（这正是本次要修的操作痛点）。
+    //
+    // 折叠着时点正文任意一行（摘要行 / 预览行）都展开；点工具名那一行同样展开。
+    let Some(entry) = state.chat_history.get(entry_idx) else {
+        return false;
+    };
+    if entry.tool_call.is_none() {
+        return false;
+    }
+    // TodoWrite 的正文是任务清单，整份渲染、不看展开位 —— 对它做折叠/展开
+    // 没有意义，点它必须什么都不发生。
+    if !state.tool_block_is_foldable(entry) {
+        return false;
+    }
+    // 工具名那一行的行号：entry 前面可能垫了一行分隔空行（`leading_blank_rows`
+    // 与渲染同源），所以工具名不一定是第 0 行 —— 以前按第 0 行判，命中的是
+    // 那行看不见的空行，于是"点工具名"没反应、"点工具名上面那行空白"才有反应。
+    let first_content_row =
+        crate::ui::components::chat_history::leading_blank_rows(state, entry_idx);
+    let should_toggle = match entry.entry_type {
+        crate::types::ChatEntryType::ToolCall => row == first_content_row,
+        crate::types::ChatEntryType::ToolResult => row >= first_content_row,
+        _ => false,
+    };
+    if should_toggle {
         return state.toggle_tool_expansion(entry_idx);
     }
 
@@ -541,6 +567,275 @@ mod tests {
             state.text_selection.end,
             Some((2, 10)),
             "Moved 越界与 Drag 走同一套钳制"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 工具块的展开 / 收起
+    //
+    // 用户反馈（原文）：「展开工具视图之后要收起它非常难 —— 得一路滚回顶部
+    // 去点那个显示出来的工具名」。这里锁住三条规则：
+    //   1. 点**看得见的工具名**（不是它上面那行空白）能切换
+    //   2. 正文展开着时，点正文里任意一行都能收起（不必滚回顶部）
+    //   3. TodoWrite 的任务清单不可折叠，点它什么也不发生
+    // ══════════════════════════════════════════════════════════════════════
+
+    fn tool_call_entry(id: &str, name: &str) -> crate::types::ChatEntry {
+        crate::types::ChatEntry::tool_call(
+            "",
+            crate::types::StarToolCall {
+                id: id.to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::StarToolCallFunction {
+                    name: name.to_string(),
+                    arguments: r#"{"file_path":"app/main.py"}"#.to_string(),
+                },
+            },
+        )
+    }
+
+    fn tool_result_entry(id: &str, name: &str, output: &str) -> crate::types::ChatEntry {
+        crate::types::ChatEntry::tool_result(
+            "",
+            crate::types::StarToolCall {
+                id: id.to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::StarToolCallFunction {
+                    name: name.to_string(),
+                    arguments: r#"{"file_path":"app/main.py"}"#.to_string(),
+                },
+            },
+            crate::types::ToolResult {
+                success: true,
+                output: Some(output.to_string()),
+                error: None,
+                data: None,
+                llm_content: None,
+            },
+        )
+    }
+
+    /// 一个会话：用户消息 → 助手消息 → 工具头 → 工具体。
+    /// 渲染后工具名那一行在文档里的绝对行号由 `tool_header_row` 给出。
+    fn tool_block_state() -> ChatState {
+        let mut state = ChatState::new();
+        state.chat_history = vec![
+            crate::types::ChatEntry::user("看看文件"),
+            crate::types::ChatEntry::assistant("好"),
+            tool_call_entry("t1", "Read"),
+            tool_result_entry("t1", "Read", "line A\nline B\nline C"),
+        ];
+        state.last_chat_area = Some(Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        });
+        state
+    }
+
+    /// 渲染一遍并把渲染结果写回 state（与真实渲染路径同源）。
+    fn render(state: &mut ChatState) -> Vec<ratatui::text::Line<'static>> {
+        let lines = crate::ui::components::chat_history::render_chat_lines(state, 80);
+        state.total_rendered_lines = lines.len();
+        lines
+    }
+
+    /// 找出含 `needle` 的那一行的绝对行号。
+    fn row_containing(lines: &[ratatui::text::Line<'static>], needle: &str) -> usize {
+        lines
+            .iter()
+            .position(|l| {
+                let t: String = l
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref().to_string())
+                    .collect();
+                t.contains(needle)
+            })
+            .unwrap_or_else(|| panic!("渲染结果里没有 {needle:?} 那一行"))
+    }
+
+    /// 工具名那一行（工具名被渲染成 "view(...)" —— `tool_display_name` 的映射）。
+    fn tool_header_row(state: &mut ChatState) -> usize {
+        let lines = render(state);
+        row_containing(&lines, "view(")
+    }
+
+    fn click_at(state: &mut ChatState, row: u16) {
+        handle_mouse_event(
+            state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 0, row),
+        );
+        handle_mouse_event(
+            state,
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 0, row),
+        );
+    }
+
+    /// 回归：点**看得见的工具名**那一行能展开。
+    ///
+    /// 旧实现判的是「entry 的第 0 行」——工具头 entry 渲染出来是
+    /// `[前导空行] + [工具名行]`，所以第 0 行是那行看不见的空白。
+    /// 于是用户的体验是「点工具名没反应，点工具名上面那行空白才有反应」。
+    #[test]
+    fn clicking_the_visible_tool_name_toggles_the_block() {
+        let mut state = tool_block_state();
+        let header_row = tool_header_row(&mut state);
+
+        assert!(!state.expanded_tool_call_ids.contains("t1"), "初始是折叠态");
+
+        click_at(&mut state, header_row as u16);
+
+        assert!(
+            state.expanded_tool_call_ids.contains("t1"),
+            "点工具名必须能展开（而不是点它上面那行空白）"
+        );
+    }
+
+    /// 回归：工具名上面那行空白**不是**切换目标。
+    ///
+    /// 这行是分隔用的空行，点了它什么也不该发生 —— 否则"点工具名没反应"
+    /// 这个症状会被"点空白有反应"掩盖过去。
+    #[test]
+    fn clicking_the_blank_above_the_tool_name_does_nothing() {
+        let mut state = tool_block_state();
+        let header_row = tool_header_row(&mut state);
+        assert!(header_row > 0, "工具名上面应当有一行分隔空行");
+
+        click_at(&mut state, (header_row - 1) as u16);
+
+        assert!(
+            !state.expanded_tool_call_ids.contains("t1"),
+            "点工具名上面那行空白不得切换"
+        );
+    }
+
+    /// 回归：正文展开着时，点正文里任意一行都能收起。
+    ///
+    /// 这条是用户反馈的核心：展开后的正文可能几十上百行，工具名远在屏幕外，
+    /// 不这样就得一路滚回顶部才收得起来。
+    #[test]
+    fn clicking_inside_an_expanded_body_collapses_it() {
+        let mut state = tool_block_state();
+        let header_row = tool_header_row(&mut state);
+
+        // 先展开（点工具名）
+        click_at(&mut state, header_row as u16);
+        assert!(state.expanded_tool_call_ids.contains("t1"), "先展开");
+
+        // 重新渲染 —— 真实流程里两次点击之间一定有一帧
+        let lines = render(&mut state);
+        let body_row = row_containing(&lines, "line B");
+        assert!(
+            body_row > header_row,
+            "正文行必须在工具名下面（body_row={body_row}, header_row={header_row}）"
+        );
+
+        // 再点正文中间那一行
+        click_at(&mut state, body_row as u16);
+
+        assert!(
+            !state.expanded_tool_call_ids.contains("t1"),
+            "点正文里任意一行必须能收起，不必滚回工具名"
+        );
+    }
+
+    /// 回归：折叠着的正文，点它也能展开。
+    #[test]
+    fn clicking_the_collapsed_summary_expands_it() {
+        let mut state = tool_block_state();
+        let header_row = tool_header_row(&mut state);
+
+        // 工具体紧跟在工具头后面（工具序列不加空行），摘要行就在它下面
+        click_at(&mut state, (header_row + 1) as u16);
+
+        assert!(
+            state.expanded_tool_call_ids.contains("t1"),
+            "点折叠态的摘要行必须能展开"
+        );
+    }
+
+    /// 回归：TodoWrite 的任务清单不可折叠 —— 点它什么也不发生。
+    ///
+    /// 清单整份渲染、不看展开位（对标 CC 的 TaskList），对它做折叠/展开
+    /// 没有意义；真让它翻起来，屏幕上还是同一份清单，纯属骗人。
+    #[test]
+    fn clicking_a_todowrite_block_does_nothing() {
+        let mut state = ChatState::new();
+        state.chat_history = vec![
+            crate::types::ChatEntry::user("列个计划"),
+            tool_call_entry("t2", "TodoWrite"),
+            tool_result_entry("t2", "TodoWrite", "ok"),
+        ];
+        state.last_chat_area = Some(Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        });
+        let lines = render(&mut state);
+        let header_row = row_containing(&lines, "Update Todos");
+
+        click_at(&mut state, header_row as u16);
+        assert!(
+            !state.expanded_tool_call_ids.contains("t2"),
+            "TodoWrite 不得被折叠/展开"
+        );
+
+        click_at(&mut state, (header_row + 1) as u16);
+        assert!(
+            !state.expanded_tool_call_ids.contains("t2"),
+            "TodoWrite 的清单不得被折叠/展开"
+        );
+    }
+
+    /// 回归：收起之后，工具名那一行必须还在视口里。
+    ///
+    /// 收起时正文整段消失，下面的内容会上移；视口若停在原处，
+    /// 用户看到的是一段毫不相干的内容 —— 像是"点了没反应"。
+    #[test]
+    fn collapsing_keeps_the_tool_name_in_view() {
+        // 正文要够长，长到"用户正在正文中间"时工具名已经滚出视口
+        let long_output = (1..=40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = ChatState::new();
+        state.chat_history = vec![
+            crate::types::ChatEntry::user("看看文件"),
+            crate::types::ChatEntry::assistant("好"),
+            tool_call_entry("t1", "Read"),
+            tool_result_entry("t1", "Read", &long_output),
+        ];
+        state.last_chat_area = Some(Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        });
+        state.last_chat_height = 6;
+
+        let header_row = tool_header_row(&mut state);
+        click_at(&mut state, header_row as u16);
+        assert!(state.expanded_tool_call_ids.contains("t1"), "先展开");
+
+        // 重新渲染，再把视口滚到正文中间 —— 此刻工具名已滚出视口
+        let lines = render(&mut state);
+        let body_row = row_containing(&lines, "line 20");
+        state.scroll = body_row - 2;
+        let screen_row = (body_row - state.scroll) as u16;
+
+        // 点正文里那一行 → 收起
+        click_at(&mut state, screen_row);
+        assert!(!state.expanded_tool_call_ids.contains("t1"), "已收起");
+
+        // 收起后工具名必须回到视口里
+        let scroll = state.scroll;
+        let viewport = state.last_chat_height as usize;
+        assert!(
+            header_row >= scroll && header_row < scroll + viewport,
+            "收起后工具名必须仍在视口内（scroll={scroll}, header_row={header_row}）"
         );
     }
 }

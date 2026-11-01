@@ -1468,15 +1468,13 @@ pub async fn handle_key_event(
             }
         }
         KeyCode::Tab => {
-            // Tab: toggle expand/collapse of the nearest tool entry
+            // Tab: toggle expand/collapse of the tool block under the viewport
             if !state.is_palette_open() && !state.is_awaiting_confirmation {
                 let focused_idx = find_focused_tool_entry(state);
                 if let Some(idx) = focused_idx {
-                    // 与鼠标单击工具头走同一条路径（ChatState::toggle_tool_expansion）。
+                    // 与鼠标单击工具头走同一条路径（ChatState::toggle_tool_expansion）：
+                    // 切换、失效缓存、锚定视口都在里面做完了。
                     state.toggle_tool_expansion(idx);
-                    // 展开/折叠会改变该块的高度，视口锚点必须跟着重算，
-                    // 否则用户展开的是当前屏幕中央那块，看的却是别处的滚动位置。
-                    state.auto_follow = false;
                 }
             }
         }
@@ -1849,8 +1847,25 @@ async fn handle_paste(
     Ok(true)
 }
 
-/// Find the nearest ToolCall entry to the current viewport center for keyboard toggle.
-/// Returns the index into chat_history, or None if no ToolCall entry is visible.
+/// 测试用的入口：暴露"视口下那一块工具"的查找结果。
+#[cfg(test)]
+pub(crate) fn find_focused_tool_entry_for_test(state: &ChatState) -> Option<usize> {
+    find_focused_tool_entry(state)
+}
+
+/// Find the tool block under the viewport, for keyboard toggle.
+/// Returns the index of the tool **header** entry, or None if no tool block
+/// is visible in the viewport.
+///
+/// 找的是**整块**（工具头 + 工具体），不是只找工具头那条 entry。
+///
+/// 一个工具块在 `chat_history` 里是两条 entry：工具头（ToolCall，一行工具名）
+/// 和工具体（ToolResult，展开后能有两百行）。只按工具头找的话，视口中心落在
+/// 工具体里时永远匹配不上 —— 而"展开之后正好在正文中间"恰恰是最常见的场景，
+/// 于是 Tab 在那儿按了没反应。
+///
+/// 只认**与视口有重叠**的块：视口里根本没有工具块时，Tab 什么都不做 ——
+/// 去切一个屏幕外的块只会把视口拽到别处。
 fn find_focused_tool_entry(state: &ChatState) -> Option<usize> {
     use crate::types::ChatEntryType;
 
@@ -1867,33 +1882,56 @@ fn find_focused_tool_entry(state: &ChatState) -> Option<usize> {
         state.scroll
     };
     let viewport_center = scroll + viewport_height / 2;
+    let viewport_bottom = scroll + viewport_height;
 
-    // 关键：条目的**屏幕行区间**由 `virtual_list` 记录的真实高度累加得到。
+    // 关键：条目的**屏幕行区间**由上一次渲染记录的真实行高累加得到。
     //
     // 原实现拿 entry 下标跟 `scroll / 2` 比距离 —— entry 下标是序号不是行号，
     // 一个 30 行的工具块和一个 1 行的回复在下标空间里等价，于是 Tab 经常展开
     // 视口里根本看不见的那一块，用户看到的是"什么都没发生"。
+    //
+    // 用 `last_item_heights` 而不是 `virtual_list`：鼠标命中测试
+    // （`map_mouse_to_chat_position`）用的也是它 —— 两条路径必须用同一份
+    // 行高，否则"点到的"和"Tab 切的"会是不同的块。
+    //
+    // 候选是「同一个工具块的头 + 身」：工具体有多高都算进这一块的区间里，
+    // 视口中心落在正文里同样能命中这一块。
     let mut best_idx: Option<usize> = None;
     let mut best_distance: usize = usize::MAX;
     let mut top = 0usize;
     for (idx, entry) in state.chat_history.iter().enumerate() {
-        let height = state.virtual_list.item_height(idx) as usize;
+        let height = state.last_item_heights.get(idx).copied().unwrap_or(0) as usize;
         let bottom = top + height;
-        if entry.entry_type == ChatEntryType::ToolCall && height > 0 {
-            // 条目覆盖视口中心才算是"焦点所在"
-            if viewport_center >= top && viewport_center < bottom {
-                let mid = top + height / 2;
-                let distance = mid.abs_diff(viewport_center);
-                if distance < best_distance {
-                    best_distance = distance;
-                    best_idx = Some(idx);
-                }
+        // 工具体（ToolResult）也是候选：它才是展开后占满屏幕的那一条。
+        // 命中后仍然切**工具头**那条 entry —— 折叠位按 tool_call.id 记，
+        // 两条切的是同一份状态，但切头那条能保证"同一块只切一次"。
+        let is_tool_part = entry.tool_call.is_some()
+            && matches!(
+                entry.entry_type,
+                ChatEntryType::ToolCall | ChatEntryType::ToolResult
+            )
+            && height > 0;
+        // 与视口有重叠才算"视口下的那一块"
+        if is_tool_part && top < viewport_bottom && bottom > scroll {
+            // 中心落在这一块里 → 距离 0（最优）；否则取中心到这一块区间的距离。
+            let distance = if viewport_center >= top && viewport_center < bottom {
+                0
+            } else if viewport_center < top {
+                top - viewport_center
+            } else {
+                viewport_center - bottom + 1
+            };
+            if distance < best_distance {
+                best_distance = distance;
+                best_idx = Some(idx);
             }
         }
         top = bottom;
     }
 
-    best_idx
+    // 命中的可能是工具体那条；统一换成同一块的工具头 —— 折叠位与视口锚定
+    // 都以头为准。
+    best_idx.and_then(|idx| state.tool_header_index(idx).or(Some(idx)))
 }
 
 /// Apply a vim motion to the textarea cursor.
@@ -1952,6 +1990,69 @@ fn apply_vim_motion(state: &mut ChatState, motion: &crate::ui::vim::motions::Mot
 mod tests {
     use super::*;
     use crate::ui::state::store::AgentTaskInfo;
+
+    /// 取消流式输出的宽限期内，用户输入新需求不应被排队。
+    ///
+    /// 问题：Esc 取消后 is_streaming 仍保留 1.5 秒（用于 UI 动画收尾），导致
+    /// enqueue_user_message 的保护拦住下一条输入 → 进入 pending_user_messages
+    /// → 用户按一次 Enter 看起来没反应，要等宽限期过或再按一次才发出去。
+    ///
+    /// 修复：enqueue_user_message 判断「真正在流式中」时排除取消宽限期。
+    #[tokio::test]
+    async fn enter_during_cancel_grace_period_does_not_queue() {
+        let mut state = ChatState::new();
+        let (tx, mut rx) = mpsc::channel(16);
+
+        state.is_streaming = true;
+        state.is_processing = true;
+        state
+            .chat_history
+            .push(crate::types::ChatEntry::user("first"));
+        state
+            .chat_history
+            .push(crate::types::ChatEntry::assistant("").with_streaming(true));
+
+        // 按 Esc 取消
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            state.is_streaming,
+            "宽限期内 is_streaming 仍是 true（用于动画）"
+        );
+        assert_eq!(state.is_processing, false);
+        assert!(state.cancelling_since.is_some());
+        let _ = rx.try_recv(); // 吃掉 Abort 请求
+
+        // 输入新需求 + 回车
+        state.textarea.insert_str("second");
+        sync_input_from_textarea(&mut state);
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // 验证：应该立即发送，不应进排队
+        assert_eq!(
+            state.pending_user_messages.len(),
+            0,
+            "取消宽限期内的输入应立即发送，不应排队"
+        );
+        let sent = rx.try_recv().expect("应该收到 SendMessage 请求");
+        assert!(
+            matches!(sent, AgentRequest::SendMessage { .. }),
+            "应该立即发送，不是排队"
+        );
+    }
 
     /// 对话内搜索：命中行号必须与 `render_chat_lines` 的输出一致。
     ///
@@ -2104,6 +2205,192 @@ mod tests {
             .await
             .unwrap();
         assert!(!state.is_palette_open(), "再按一次 Ctrl+P 应当关闭");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Tab 键：切换视口下的工具块
+    // ══════════════════════════════════════════════════════════════════════
+
+    fn tool_block_state() -> ChatState {
+        let mut state = ChatState::new();
+        let tool_call = crate::types::StarToolCall {
+            id: "t1".to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: "Read".to_string(),
+                arguments: r#"{"file_path":"app/main.py"}"#.to_string(),
+            },
+        };
+        let tool_result = crate::types::ToolResult {
+            success: true,
+            output: Some("line A\nline B\nline C".to_string()),
+            error: None,
+            data: None,
+            llm_content: None,
+        };
+        state.chat_history = vec![
+            crate::types::ChatEntry::user("看看文件"),
+            crate::types::ChatEntry::assistant("好"),
+            crate::types::ChatEntry::tool_call("", tool_call.clone()),
+            crate::types::ChatEntry::tool_result("", tool_call, tool_result),
+        ];
+        state
+    }
+
+    /// 回归：视口落在**工具体内部**时，Tab 也必须命中那一块。
+    ///
+    /// 旧实现只认工具头那条 entry（ToolCall）。展开后的正文能有两百行，
+    /// 视口中心落在正文里是常态 —— 那时 Tab 匹配不上任何东西，
+    /// 用户看到的是"按了没反应"。
+    #[test]
+    fn tab_finds_the_tool_block_when_the_viewport_is_inside_the_body() {
+        let mut state = tool_block_state();
+        let lines = crate::ui::components::chat_history::render_chat_lines(&mut state, 80);
+        state.total_rendered_lines = lines.len();
+        state.last_chat_height = 4;
+
+        // 视口中心落在工具体那条 entry 上（工具头下面那条）
+        let body_entry = 3usize;
+        let body_top: usize = state.last_item_heights[..body_entry]
+            .iter()
+            .map(|h| *h as usize)
+            .sum();
+        state.scroll = body_top;
+        state.auto_follow = false;
+
+        assert_eq!(
+            find_focused_tool_entry_for_test(&state),
+            Some(2),
+            "视口在正文里时，Tab 必须命中这一块的工具头"
+        );
+    }
+
+    /// 回归：Tab 切的是**工具头**那条 entry。
+    ///
+    /// 工具头与工具体共用同一个 `tool_call.id`，折叠位是同一份 ——
+    /// 但视口锚定以头为准，切头那条才能保证"同一块只切一次"。
+    #[test]
+    fn tab_targets_the_tool_header_of_the_block() {
+        let mut state = tool_block_state();
+        let lines = crate::ui::components::chat_history::render_chat_lines(&mut state, 80);
+        state.total_rendered_lines = lines.len();
+        state.last_chat_height = 24;
+        state.auto_follow = false;
+
+        assert_eq!(find_focused_tool_entry_for_test(&state), Some(2));
+    }
+
+    /// 回归：Tab 真的能切换展开/折叠。
+    #[tokio::test]
+    async fn tab_toggles_the_expansion_of_the_block_under_the_viewport() {
+        let mut state = tool_block_state();
+        let lines = crate::ui::components::chat_history::render_chat_lines(&mut state, 80);
+        state.total_rendered_lines = lines.len();
+        state.last_chat_height = 24;
+        state.auto_follow = false;
+        let (tx, _rx) = mpsc::channel(16);
+
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            state.expanded_tool_call_ids.contains("t1"),
+            "Tab 必须能展开视口下的那一块"
+        );
+
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !state.expanded_tool_call_ids.contains("t1"),
+            "再按一次 Tab 必须能收起"
+        );
+    }
+
+    /// 回归：视口里没有工具块时，Tab 什么都不做。
+    ///
+    /// 去切一个屏幕外的块只会把视口拽到别处 —— 比"按了没反应"更糟。
+    #[tokio::test]
+    async fn tab_does_nothing_when_no_tool_block_is_visible() {
+        let mut state = tool_block_state();
+        // 工具块后面再补一条助手消息，让文档末尾不是工具块
+        state
+            .chat_history
+            .push(crate::types::ChatEntry::assistant("好了"));
+        let lines = crate::ui::components::chat_history::render_chat_lines(&mut state, 80);
+        state.total_rendered_lines = lines.len();
+        // 视口只有 2 行，滚到文档最末尾 —— 那里只有助手消息，没有工具块
+        state.last_chat_height = 2;
+        state.scroll = state.total_rendered_lines.saturating_sub(2);
+        state.auto_follow = false;
+        let (tx, _rx) = mpsc::channel(16);
+
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            state.expanded_tool_call_ids.is_empty(),
+            "视口里没有工具块时，Tab 不得去切屏幕外的块"
+        );
+    }
+
+    /// 回归：TodoWrite 的任务清单不可折叠 —— Tab 按它什么也不发生。
+    #[tokio::test]
+    async fn tab_does_nothing_on_a_todowrite_block() {
+        let mut state = ChatState::new();
+        let tool_call = crate::types::StarToolCall {
+            id: "t2".to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: "TodoWrite".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+        let tool_result = crate::types::ToolResult {
+            success: true,
+            output: Some("ok".to_string()),
+            error: None,
+            data: None,
+            llm_content: None,
+        };
+        state.chat_history = vec![
+            crate::types::ChatEntry::user("列个计划"),
+            crate::types::ChatEntry::tool_call("", tool_call.clone()),
+            crate::types::ChatEntry::tool_result("", tool_call, tool_result),
+        ];
+        let lines = crate::ui::components::chat_history::render_chat_lines(&mut state, 80);
+        state.total_rendered_lines = lines.len();
+        state.last_chat_height = 24;
+        state.auto_follow = false;
+        let (tx, _rx) = mpsc::channel(16);
+
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !state.expanded_tool_call_ids.contains("t2"),
+            "TodoWrite 不得被折叠/展开"
+        );
     }
 
     /// 回归：已删除 provider 的残留缓存桶不得劫持模型路由。

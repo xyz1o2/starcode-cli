@@ -1223,8 +1223,15 @@ impl ChatState {
     /// 某个工具块当前是展开还是折叠。
     ///
     /// 折叠状态存的是"与默认值相反的翻转位"（`expanded_tool_call_ids`）：
-    /// ToolCall 默认展开；ToolResult 里只有编辑类工具默认展开。
-    /// 这段判断以前在 `tool_render.rs` 里就地算，现在收在这里，读写两端同一份。
+    /// 非编辑类工具（Read/Grep/…）默认**折叠**，编辑类工具（Edit/Write/…）默认
+    /// **展开**。这段判断以前在 `tool_render.rs` 里就地算，现在收在这里，读写
+    /// 两端同一份。
+    ///
+    /// 问的是**工具正文**的状态，不是某条 entry 的状态：一次工具调用在历史里
+    /// 是两条 entry —— 工具头（ToolCall）和工具体（ToolResult）—— 共享同一个
+    /// `tool_call.id` 和同一个翻转位。以前这里按 entry 类型给不同的默认值，
+    /// 于是同一个工具的头和身会给出**相反**的答案，拿头部问"正文展开着吗"
+    /// 得到的结论是反的。
     pub fn is_tool_expanded(&self, entry: &ChatEntry) -> bool {
         let Some(tc) = entry.tool_call.as_ref() else {
             return true;
@@ -1233,11 +1240,48 @@ impl ChatState {
         let is_edit_tool =
             crate::core::tools::constants::is_edit_tool_name(tc.function.name.as_str())
                 || tc.function.name == "TodoWrite";
+        is_edit_tool ^ self.expanded_tool_call_ids.contains(&tc.id)
+    }
 
-        let default_expanded = matches!(entry.entry_type, crate::types::ChatEntryType::ToolCall)
-            || (matches!(entry.entry_type, crate::types::ChatEntryType::ToolResult)
-                && is_edit_tool);
-        default_expanded ^ self.expanded_tool_call_ids.contains(&tc.id)
+    /// 某个工具块里「工具头」那条 entry 的下标。
+    ///
+    /// 一个工具块在 `chat_history` 里是两条 entry：工具头（ToolCall）和
+    /// 工具体（ToolResult）。收起后要把视口锚回工具头，而工具体可能排在
+    /// 很远的地方（确认卡走的是"追加到末尾"那条分支），所以按 `tool_call.id`
+    /// 找，而不是按相邻下标猜。
+    pub fn tool_header_index(&self, entry_idx: usize) -> Option<usize> {
+        let tc = self.chat_history.get(entry_idx)?.tool_call.as_ref()?;
+        self.chat_history
+            .iter()
+            .enumerate()
+            .find(|(_, e)| {
+                e.entry_type == crate::types::ChatEntryType::ToolCall
+                    && e.tool_call.as_ref().map(|t| t.id == tc.id).unwrap_or(false)
+            })
+            .map(|(i, _)| i)
+    }
+
+    /// 某条 entry 顶行在渲染文档里的绝对行号。
+    fn entry_top_line(&self, entry_idx: usize) -> Option<usize> {
+        let heights = &self.last_item_heights;
+        if entry_idx > heights.len() {
+            return None;
+        }
+        Some(heights[..entry_idx].iter().map(|h| *h as usize).sum())
+    }
+
+    /// 这个工具块是不是"可折叠"的。
+    ///
+    /// TodoWrite 的结果是任务清单（对标 CC 的 TaskList），整份渲染、
+    /// 不看展开位 —— 对它做折叠/展开没有意义，点它必须什么都不发生。
+    ///
+    /// 对**工具头和工具体都生效**：两者共用同一个 `tool_call.id`，
+    /// 折叠位是同一份，只堵住一半的话，另一半照样能把位翻掉。
+    pub fn tool_block_is_foldable(&self, entry: &ChatEntry) -> bool {
+        let Some(tc) = entry.tool_call.as_ref() else {
+            return false;
+        };
+        crate::core::tools::constants::canonical_tool_name(&tc.function.name) != "TodoWrite"
     }
 
     /// 折叠 / 展开一个工具块，返回是否真的切换了。
@@ -1253,16 +1297,79 @@ impl ChatState {
         let Some(tc) = entry.tool_call.as_ref() else {
             return false;
         };
+        // TodoWrite 的清单整份渲染、不看展开位 —— 对它做折叠/展开没有意义。
+        // 规则收在这里，鼠标单击与 Tab 走同一条路径，谁都绕不过去。
+        if !self.tool_block_is_foldable(entry) {
+            return false;
+        }
         let tool_id = tc.id.clone();
 
         if self.expanded_tool_call_ids.contains(&tool_id) {
             self.expanded_tool_call_ids.remove(&tool_id);
         } else {
-            self.expanded_tool_call_ids.insert(tool_id);
+            self.expanded_tool_call_ids.insert(tool_id.clone());
         }
-        self.rendered_cache.remove(&entry_idx);
-        self.virtual_list.mark_dirty(entry_idx);
+        // 工具头（ToolCall）和工具体（ToolResult）是**两条** entry，共用同一个
+        // tool_call.id —— 折叠位是同一份，展开与否由两条一起决定。
+        //
+        // 以前只失效被点的那一条：点工具头时工具体还留着旧渲染缓存，
+        // 展开/折叠看起来"点了没反应"。这里把同一块的全部条目一起失效。
+        for (i, e) in self.chat_history.iter().enumerate() {
+            if e.tool_call
+                .as_ref()
+                .map(|t| t.id == tool_id)
+                .unwrap_or(false)
+            {
+                self.rendered_cache.remove(&i);
+                self.virtual_list.mark_dirty(i);
+            }
+        }
+        self.anchor_viewport_to_tool(entry_idx);
         true
+    }
+
+    /// 把视口锚到这个工具块上。
+    ///
+    /// 收起正文后，正文下面的内容整体上移 —— 视口停在原处会突然落在**无关的
+    /// 内容**上（看着像"点了没反应"）。这里保证工具名那一行始终在眼前：
+    ///
+    /// - 工具名当前可见 → 视口不动（不打断正在读的内容）
+    /// - 工具名已被滚出视口（用户正在正文中间）→ 把工具头拉回视口顶部
+    ///
+    /// 工具头的**绝对行号**不受这次折叠影响（工具体排在工具头后面），
+    /// 所以直接用上一次渲染的行高累加即可。
+    ///
+    /// 只有**真的要把视口挪走**时才停掉跟随底部：视口不动的话，让新消息
+    /// 继续把视口往下带才是用户要的（用户正在流的末尾，点开一个工具看看）。
+    fn anchor_viewport_to_tool(&mut self, entry_idx: usize) {
+        let Some(header_idx) = self.tool_header_index(entry_idx) else {
+            return;
+        };
+        let Some(header_line) = self.entry_top_line(header_idx) else {
+            return;
+        };
+        // 工具名在工具头 entry 里的行号（前面可能垫了一行分隔空行）。
+        let name_row =
+            header_line + crate::ui::components::chat_history::leading_blank_rows(self, header_idx);
+
+        let viewport_height = self.last_chat_height as usize;
+        if viewport_height == 0 {
+            return;
+        }
+        // 用渲染那一帧的实际视口起点（auto_follow 时 scroll 会被重算）。
+        let max_scroll = self.total_rendered_lines.saturating_sub(viewport_height);
+        let effective_scroll = if self.auto_follow || self.scroll > max_scroll {
+            max_scroll
+        } else {
+            self.scroll
+        };
+        let visible = name_row >= effective_scroll
+            && name_row < effective_scroll.saturating_add(viewport_height);
+        if !visible {
+            self.scroll = header_line;
+            // 用户刚把视口挪到这一块上，新消息不该再把视口拽走。
+            self.auto_follow = false;
+        }
     }
 
     pub fn update_item_height(&mut self, index: usize, height: u16) {

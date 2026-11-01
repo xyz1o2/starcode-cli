@@ -413,7 +413,15 @@ pub async fn enqueue_user_message(
     // 仅限纯 UI / 只读查询类命令；会改动会话状态或与 agent 交互的命令仍排队
     let is_safe_command_during_stream = is_streaming_safe_command(user_input.trim());
 
-    if (state.is_processing || state.is_streaming) && !is_safe_command_during_stream {
+    // 「真正在流式中」= is_streaming && 不在取消宽限期内。
+    // 取消宽限期里 is_streaming 仍是 true（用于 UI 动画平滑收尾），但不应拦住用户输入。
+    let actually_streaming = state.is_streaming
+        && state
+            .cancelling_since
+            .map(|t| t.elapsed() > std::time::Duration::from_millis(1500))
+            .unwrap_or(true);
+
+    if (state.is_processing || actually_streaming) && !is_safe_command_during_stream {
         // 需求插进当前这一轮（模型下一次调用就能看到），不用等本轮跑完。
         // 命令类（/ # !）仍排队 —— 它们各有各的处理路径，不是需求。
         if is_plain_requirement(&user_input) {

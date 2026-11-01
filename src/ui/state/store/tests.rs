@@ -417,6 +417,150 @@ fn an_entry_without_a_tool_call_cannot_be_toggled() {
     assert!(!state.toggle_tool_expansion(99));
 }
 
+/// 回归：一个工具块的**头与身必须给出同一个展开状态**。
+///
+/// 工具头（ToolCall）和工具体（ToolResult）是两条 entry，共享同一个
+/// `tool_call.id` 与同一个翻转位。以前这里按 entry 类型给不同的默认值
+/// （工具头默认"展开"、工具体默认"折叠"），于是同一个工具的头与身给出
+/// **相反**的答案 —— 拿头部问"正文展开着吗"得到的结论是反的。
+#[test]
+fn the_header_and_the_body_of_one_block_agree_on_expansion() {
+    let mut state = ChatState::new();
+    let tool_call = crate::types::StarToolCall {
+        id: "call-3".to_string(),
+        call_type: "function".to_string(),
+        function: crate::types::StarToolCallFunction {
+            name: "Read".to_string(),
+            arguments: "{}".to_string(),
+        },
+    };
+    state
+        .chat_history
+        .push(ChatEntry::tool_call("", tool_call.clone()));
+    let header_idx = state.chat_history.len() - 1;
+    state.chat_history.push(ChatEntry::tool_result(
+        "",
+        tool_call,
+        crate::types::ToolResult {
+            success: true,
+            output: Some("ok".to_string()),
+            error: None,
+            data: None,
+            llm_content: None,
+        },
+    ));
+    let body_idx = state.chat_history.len() - 1;
+
+    let header_expanded = state.is_tool_expanded(&state.chat_history[header_idx]);
+    let body_expanded = state.is_tool_expanded(&state.chat_history[body_idx]);
+    assert_eq!(
+        header_expanded, body_expanded,
+        "同一个工具块的头与身必须给出同一个展开状态"
+    );
+
+    // 从**头部**切换后，身也要跟着变
+    assert!(state.toggle_tool_expansion(header_idx));
+    assert!(
+        state.is_tool_expanded(&state.chat_history[body_idx]),
+        "从头切了，正文必须跟着展开"
+    );
+    assert!(state.is_tool_expanded(&state.chat_history[header_idx]));
+
+    // 从**正文**切换后，头也要跟着变
+    assert!(state.toggle_tool_expansion(body_idx));
+    assert!(
+        !state.is_tool_expanded(&state.chat_history[header_idx]),
+        "从身切了，头必须跟着收起"
+    );
+}
+
+/// 回归：切换必须让**同一块的两条 entry** 都失效渲染缓存。
+///
+/// 以前只失效被点的那一条 —— 点工具头时工具体还留着旧渲染缓存，
+/// 展开/折叠看起来"点了没反应"。
+#[test]
+fn toggling_invalidates_both_entries_of_the_block() {
+    let mut state = ChatState::new();
+    let tool_call = crate::types::StarToolCall {
+        id: "call-4".to_string(),
+        call_type: "function".to_string(),
+        function: crate::types::StarToolCallFunction {
+            name: "Read".to_string(),
+            arguments: "{}".to_string(),
+        },
+    };
+    state
+        .chat_history
+        .push(ChatEntry::tool_call("", tool_call.clone()));
+    let header_idx = state.chat_history.len() - 1;
+    state.chat_history.push(ChatEntry::tool_result(
+        "",
+        tool_call,
+        crate::types::ToolResult {
+            success: true,
+            output: Some("ok".to_string()),
+            error: None,
+            data: None,
+            llm_content: None,
+        },
+    ));
+    let body_idx = state.chat_history.len() - 1;
+
+    for idx in [header_idx, body_idx] {
+        state
+            .rendered_cache
+            .insert(idx, (1, vec![ratatui::text::Line::from("x")]));
+    }
+
+    assert!(state.toggle_tool_expansion(header_idx));
+    assert!(
+        !state.rendered_cache.contains_key(&header_idx)
+            && !state.rendered_cache.contains_key(&body_idx),
+        "同一块的两条 entry 都必须失效缓存"
+    );
+}
+
+/// TodoWrite 的任务清单不可折叠。
+#[test]
+fn a_todowrite_block_is_not_foldable() {
+    let mut state = ChatState::new();
+    let tool_call = crate::types::StarToolCall {
+        id: "call-5".to_string(),
+        call_type: "function".to_string(),
+        function: crate::types::StarToolCallFunction {
+            name: "TodoWrite".to_string(),
+            arguments: "{}".to_string(),
+        },
+    };
+    state
+        .chat_history
+        .push(ChatEntry::tool_call("", tool_call.clone()));
+    let header_idx = state.chat_history.len() - 1;
+    state.chat_history.push(ChatEntry::tool_result(
+        "",
+        tool_call,
+        crate::types::ToolResult {
+            success: true,
+            output: Some("ok".to_string()),
+            error: None,
+            data: None,
+            llm_content: None,
+        },
+    ));
+    let body_idx = state.chat_history.len() - 1;
+
+    assert!(
+        !state.tool_block_is_foldable(&state.chat_history[header_idx])
+            && !state.tool_block_is_foldable(&state.chat_history[body_idx]),
+        "TodoWrite 不得可折叠"
+    );
+    assert!(
+        !state.toggle_tool_expansion(header_idx) && !state.toggle_tool_expansion(body_idx),
+        "TodoWrite 不得被切换"
+    );
+    assert!(state.expanded_tool_call_ids.is_empty());
+}
+
 #[test]
 fn discarding_a_runtime_mutation_rebuilds_requested_intent_from_remaining_queue() {
     let mut state = ChatState::new();

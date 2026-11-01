@@ -327,6 +327,47 @@ fn render_teammate_view(state: &ChatState, area_width: u16) -> Option<Vec<Line<'
     Some(lines)
 }
 
+/// 这条 entry 前面要不要垫一行空行（0 或 1）。
+///
+/// 渲染与鼠标命中测试必须用**同一份**判断：工具头渲染出来是
+/// `[前导空行] + [● 工具名(参数)]`，两处各算一次的话，命中测试会跟屏幕上
+/// 的那一行错开 —— 于是「点工具名」打空，点工具名上面那行空白反而有反应。
+///
+/// 规则：除首条外都垫一行，但工具序列（ToolCall/ToolResult/ToolConfirmation）
+/// 之间、以及 Agent 任务条目之间连续排布，不垫。
+pub fn leading_blank_rows(state: &ChatState, entry_idx: usize) -> usize {
+    if entry_idx == 0 {
+        return 0;
+    }
+    let Some(entry) = state.chat_history.get(entry_idx) else {
+        return 0;
+    };
+    let Some(prev) = state.chat_history.get(entry_idx - 1) else {
+        return 0;
+    };
+    // 工具调用序列：ToolCall/ToolResult/ToolConfirmation 之间不加空行
+    let is_tool_sequence = matches!(
+        entry.entry_type,
+        ChatEntryType::ToolCall | ChatEntryType::ToolResult | ChatEntryType::ToolConfirmation
+    ) && matches!(
+        prev.entry_type,
+        ChatEntryType::ToolCall | ChatEntryType::ToolResult | ChatEntryType::ToolConfirmation
+    );
+    // Agent 任务条目之间不加空行
+    let is_agent_sequence = matches!(
+        entry.entry_type,
+        ChatEntryType::AgentTask | ChatEntryType::AgentGroup
+    ) && matches!(
+        prev.entry_type,
+        ChatEntryType::AgentTask | ChatEntryType::AgentGroup
+    );
+    if is_tool_sequence || is_agent_sequence {
+        0
+    } else {
+        1
+    }
+}
+
 /// 渲染单个条目的完整行序列。`pub(crate)`：`store::get_selected_text` 在
 /// rendered_cache 缺失时用它兜底重渲染，否则复制会静默失败。
 pub(crate) fn render_entry_lines(
@@ -413,29 +454,7 @@ pub(crate) fn render_entry_lines(
     //   - ToolCall immediately after ToolCall (multiple tool calls in sequence)
     //   - ToolCall immediately after ToolResult (continuation of tool sequence)
     //   - AgentTask/AgentGroup entries (always flow together)
-    let add_leading_blank = if entry_idx == 0 {
-        false
-    } else {
-        let prev = &state.chat_history[entry_idx - 1];
-        // 工具调用序列：ToolCall/ToolResult/ToolConfirmation 之间不加空行
-        let is_tool_sequence = matches!(
-            entry.entry_type,
-            ChatEntryType::ToolCall | ChatEntryType::ToolResult | ChatEntryType::ToolConfirmation
-        ) && matches!(
-            prev.entry_type,
-            ChatEntryType::ToolCall | ChatEntryType::ToolResult | ChatEntryType::ToolConfirmation
-        );
-        // Agent 任务条目之间不加空行
-        let is_agent_sequence = matches!(
-            entry.entry_type,
-            ChatEntryType::AgentTask | ChatEntryType::AgentGroup
-        ) && matches!(
-            prev.entry_type,
-            ChatEntryType::AgentTask | ChatEntryType::AgentGroup
-        );
-        !is_tool_sequence && !is_agent_sequence
-    };
-    if add_leading_blank {
+    if leading_blank_rows(state, entry_idx) > 0 {
         entry_lines.insert(0, Line::from(""));
     }
 
