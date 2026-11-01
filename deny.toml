@@ -1,0 +1,51 @@
+# cargo-deny 配置（Security workflow 的 `cargo deny check all` 用）。
+#
+# 之前仓库长期没有此文件，cargo-deny 走内置默认配置：默认 `[licenses] allow`
+# 是**空的**，要求每个依赖的许可证都被显式允许，于是所有依赖一律
+# `rejected: license is not explicitly allowed`，Cargo Deny job 永远红灯。
+#
+# 下面的 allow 列表按当前依赖树里**实际出现**的许可证逐条放行：
+#   - 宽松许可（MIT/Apache/ISC/BSD/Zlib/Unicode 等）常规放行；
+#   - MPL-2.0 来自 scraper（网页正文提取）与 dirs/shellexpand，弱 copyleft、
+#     二进制分发时需提供该部分源码，功能上必须保留，先放行；
+#   - NCSA/libfuzzer-sys、CDLA/webpki-roots 同理；
+#   - LGPL-2.1-or-later 只出现在 `OR` 表达式里（r-efi: MIT OR Apache-2.0
+#     OR LGPL），OR 分支里有 MIT/Apache 兜底，不必单独放行 LGPL。
+#   - Apache-2.0 WITH LLVM-exception 需要 exception 放行（见下方）。
+
+[licenses]
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "NCSA",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+# `WITH` 例外（如 LLVM-exception）不能只靠 allow 放行，必须声明 exception。
+# 否则只有 `Apache-2.0 WITH LLVM-exception` 的依赖会被拒。
+[[licenses.exceptions]]
+allow = ["Apache-2.0 WITH LLVM-exception"]
+
+# [advisories]：vulnerability 默认 deny（好消息：rustls 系漏洞在当前
+# Cargo.lock 里已全部升到 patched 版本）；unmaintained/unsound/yanked
+# 默认 warn，不致 job 失败。Tokio 1.53.2 的 unsound 与 clipboard-win
+# 5.4.1 的 yanked 属于这一级，已在逐步处理。
+[advisories]
+vulnerability = "deny"
+unmaintained = "warn"
+unsound = "warn"
+yanked = "warn"
+notice = "warn"
+
+# [bans]/[sources]：无特别要求，保持默认即可。

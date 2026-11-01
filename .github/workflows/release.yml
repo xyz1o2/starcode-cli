@@ -153,6 +153,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends cmake pkg-config build-essential
 
       # ---- Linux 交叉编译：cargo-zigbuild 用 zig cc 统一解决 gnu/musl 交叉链接器 ----
+      # taiki-e/install-action@cargo-zigbuild 只下 cargo-zigbuild 本体，不含 zig。
+      # 缺 zig 时 cargo zigbuild 立刻报 "Failed to find zig / cannot find binary
+      # path"，三个 Linux 交叉 target 全挂。zig 必须单独装一步。
+      - name: 安装 zig（cargo-zigbuild 的链接器后端）
+        if: runner.os == 'Linux' && !matrix.native
+        uses: taiki-e/install-action@zig
+
       - name: 安装 cargo-zigbuild
         if: runner.os == 'Linux' && !matrix.native
         uses: taiki-e/install-action@cargo-zigbuild

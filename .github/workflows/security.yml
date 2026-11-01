@@ -16,6 +16,13 @@ jobs:
   audit:
     name: Cargo Audit
     runs-on: ubuntu-latest
+    # rustsec/audit-check 发现漏洞时会自动建 issue 跟踪（create-issues 默认开）。
+    # 之前 workflow 级只有 contents: read，建 issue 被 GitHub 拒成
+    # "Resource not accessible by integration"，job 因此从 warning 变 error。
+    # 漏洞本身在最新 Cargo.lock 里已修，这里补上建 issue 所需权限。
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
