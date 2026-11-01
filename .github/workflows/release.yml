@@ -93,7 +93,10 @@ jobs:
 
   build:
     name: 打包 ${{ matrix.target }}
-    needs: test
+    # validate 必须列直接依赖：needs 上下文只暴露**直接**依赖的 outputs，
+    # 间接依赖（validate 经 test）的 outputs 取出来是空串，打包出来的
+    # 产物名就会变成 `starcode-cli--<target>`（版本号位空掉）。
+    needs: [test, validate]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
