@@ -21,9 +21,12 @@ jobs:
     # 之前 workflow 级只有 contents: read，建 issue 被 GitHub 拒成
     # "Resource not accessible by integration"，job 因此从 warning 变 error。
     # 漏洞本身在最新 Cargo.lock 里已修，这里补上建 issue 所需权限。
+    # 有 unmaintained warning 时它还会创建 check-run 显示注释，
+    # checks:write 同样必需。
     permissions:
       contents: read
       issues: write
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
