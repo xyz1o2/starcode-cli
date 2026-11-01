@@ -259,10 +259,12 @@ pub(crate) fn render_non_tool_entry_blocks(
                         // 折叠态 + 已完成：这一块唯一的形态 —— 一条记录。
                         // `∴ Thought for 14s  (ctrl+o to expand)`
                         //
-                        // 折叠 + 进行中时这里**什么都不渲染**（整块不出声）。此前的
-                        // `∴ Thinking…` 与输入框上方的 spinner 行说的是同一件事，
-                        // 却用两套权重两种措辞同时占着用户的注意力；而记录本来
-                        // 就不该抢实时状态的活。正文只负责"事后发生了什么"。
+                        // 之前"折叠 + 进行中"时什么都不渲染，理由是避免与输入框上方的
+                        // spinner 行重复。但这导致用户手动收缩进行中的思考块时，
+                        // 整块消失，用户会困惑"我的思考块去哪了"。
+                        //
+                        // 新策略：折叠 + 进行中时显示简短占位符（不带展开提示），
+                        // 折叠 + 已完成时显示完整标题（带展开提示）。
                         let header_spans = vec![
                             Span::styled("∴ ", label_style),
                             Span::styled(header_text.clone(), label_style),
@@ -277,6 +279,14 @@ pub(crate) fn render_non_tool_entry_blocks(
                                 ),
                                 theme.subtle_style(),
                             ),
+                        ];
+                        blocks.push(vec![Line::from(header_spans)]);
+                    } else if is_streaming_now && !cancelling {
+                        // 折叠态 + 进行中：显示简短占位符（不带展开提示）
+                        // 避免用户手动收缩思考块后整块消失
+                        let header_spans = vec![
+                            Span::styled("∴ ", label_style),
+                            Span::styled(header_text, label_style),
                         ];
                         blocks.push(vec![Line::from(header_spans)]);
                     }

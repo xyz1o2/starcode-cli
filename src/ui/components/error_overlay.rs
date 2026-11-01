@@ -101,15 +101,15 @@ pub fn is_retryable(error_type: &ErrorType) -> bool {
     )
 }
 
-fn error_type_label(error_type: &ErrorType) -> (&'static str, Color) {
+fn error_type_label(error_type: &ErrorType, theme: &Theme) -> (&'static str, Color) {
     match error_type {
-        ErrorType::RateLimit => ("Rate Limit", Color::Yellow),
-        ErrorType::AuthError => ("Auth Error", Color::Red),
-        ErrorType::QuotaError => ("Quota / Billing", Color::Red),
-        ErrorType::NetworkError => ("Network Error", Color::Yellow),
-        ErrorType::ProviderError => ("Provider Error", Color::Red),
-        ErrorType::ContextOverflow => ("Context Overflow", Color::Magenta),
-        ErrorType::Unknown => ("Error", Color::Red),
+        ErrorType::RateLimit => ("Rate Limit", theme.warning),
+        ErrorType::AuthError => ("Auth Error", theme.error),
+        ErrorType::QuotaError => ("Quota / Billing", theme.error),
+        ErrorType::NetworkError => ("Network Error", theme.warning),
+        ErrorType::ProviderError => ("Provider Error", theme.error),
+        ErrorType::ContextOverflow => ("Context Overflow", theme.info),
+        ErrorType::Unknown => ("Error", theme.error),
     }
 }
 
@@ -119,7 +119,7 @@ fn error_type_label(error_type: &ErrorType) -> (&'static str, Color) {
 /// 变的只是外观：选项行用和确认卡、MCP 列表一致的 `❯` 高亮列表，
 /// 按键说明收进外壳统一管理的 footer。
 pub fn render_error_overlay(f: &mut Frame, state: &ErrorOverlayState, area: Rect, theme: &Theme) {
-    let (type_label, type_color) = error_type_label(&state.error_type);
+    let (type_label, type_color) = error_type_label(&state.error_type, theme);
 
     let inner = modal_shell(
         f,
@@ -148,7 +148,10 @@ pub fn render_error_overlay(f: &mut Frame, state: &ErrorOverlayState, area: Rect
     let wrap_width = body.width.saturating_sub(4) as usize;
     let show = wrap_with_cap(&state.error_message, wrap_width, MESSAGE_MAX_LINES);
     for text in show {
-        lines.push(Line::from(Span::raw(text)));
+        lines.push(Line::from(Span::styled(
+            text,
+            Style::default().fg(theme.foreground),
+        )));
     }
 
     // Retry info
@@ -181,7 +184,7 @@ pub fn render_error_overlay(f: &mut Frame, state: &ErrorOverlayState, area: Rect
     ];
     for (action, label, key) in actions {
         let selected = state.selected_action == action;
-        // 统一列表行高亮：与 MCP / market 列表同一种选中样式（黑底青字）。
+        // 统一列表行高亮：与 MCP / market 列表同一种选中样式。
         let row = row_style(0, usize::from(selected));
         let arrow = Span::styled(
             if selected { " ❯ " } else { "   " },

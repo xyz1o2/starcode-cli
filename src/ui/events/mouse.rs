@@ -110,14 +110,32 @@ fn try_toggle_on_click(state: &mut ChatState, entry_idx: usize, row: usize) -> b
         return false;
     };
 
+    // Debug: 记录点击信息，帮助诊断"点工具块却展开思考块"的问题
+    crate::utils::logging::append_debug_log_line(&format!(
+        "[TOGGLE_CLICK] entry_idx={} row={} entry_type={:?} has_reasoning={} reasoning_len={} has_tool_call={} tool_name={:?}",
+        entry_idx,
+        row,
+        entry.entry_type,
+        entry.reasoning_content.is_some(),
+        entry.reasoning_content.as_ref().map(|s| s.len()).unwrap_or(0),
+        entry.tool_call.is_some(),
+        entry.tool_call.as_ref().map(|tc| tc.function.name.as_str())
+    ));
+
     if let Some(reasoning) = &entry.reasoning_content {
         if !reasoning.is_empty() {
             let is_expanded = state.expanded_thinking_indices.contains(&entry_idx);
+            // 思考块折叠时只渲染 1 行标题："∴ Thought for 14s  (ctrl+o to expand)"
+            // 点击这一行（row 0）应该展开；展开后点任意行都收起。
+            //
+            // 之前的 `row <= preview_lines` 判断有问题：折叠态的 heading 占 1 行，
+            // preview_lines 却统计的是 reasoning 内容的前 3 行（折叠时根本不渲染），
+            // 导致 row 0 可能大于 preview_lines（reasoning 内容少于 1 行时），
+            // 无法展开。正确的逻辑：折叠时点任意位置（实际只有 row 0）都展开。
             let should_toggle = if is_expanded {
-                true
+                true // 展开时点任意行都收起
             } else {
-                let preview_lines = reasoning.lines().take(3).count();
-                row <= preview_lines
+                true // 折叠时点标题行（唯一可见的那一行）展开
             };
             if should_toggle {
                 if is_expanded {

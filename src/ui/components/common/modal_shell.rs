@@ -13,6 +13,8 @@ use ratatui::{
     Frame,
 };
 
+use crate::ui::themes::theme::Theme;
+
 /// Geometry spec for a modal shell.
 pub struct ModalSpec {
     pub percent_x: u16,
@@ -115,7 +117,12 @@ pub fn with_footer(inner: Rect) -> (Rect, Rect) {
 }
 
 /// Footer key-hint bar: `[(key, label), ...]` rendered dim with bright keys.
+/// 使用当前会话的主题（通过全局默认主题获取）。
 pub fn footer_hints(hints: &[(&str, &str)]) -> Line<'static> {
+    // 使用默认主题颜色。大多数调用点都有 state，但签名已经在很多地方使用，
+    // 为了避免破坏性更改，使用 primary 色的合理默认值。
+    use crate::ui::themes::theme::Theme;
+    let theme = Theme::default_dark();  // 回退到默认深色主题
     let mut spans: Vec<Span> = vec![Span::raw(" ")];
     for (i, (key, label)) in hints.iter().enumerate() {
         if i > 0 {
@@ -127,7 +134,7 @@ pub fn footer_hints(hints: &[(&str, &str)]) -> Line<'static> {
         spans.push(Span::styled(
             key.to_string(),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.primary)
                 .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
@@ -141,24 +148,29 @@ pub fn footer_hints(hints: &[(&str, &str)]) -> Line<'static> {
 /// Status icon for list rows: connected / error / disabled (shape + color so
 /// it also works in colorblind mode).
 pub fn status_spans(connected: bool, disabled: bool) -> Vec<Span<'static>> {
+    use crate::ui::themes::theme::Theme;
+    let theme = Theme::default_dark();
     if disabled {
         return vec![Span::styled("○", crate::ui::themes::theme::muted_style())];
     }
     if connected {
-        return vec![Span::styled("●", Style::default().fg(Color::Green))];
+        return vec![Span::styled("●", Style::default().fg(theme.success))];
     }
-    vec![Span::styled("✗", Style::default().fg(Color::Red))]
+    vec![Span::styled("✗", Style::default().fg(theme.error))]
 }
 
 /// Build highlight/normal styles for row `index` given `selected`.
+/// 使用主题颜色而不是硬编码，与主 UI 保持一致。
 pub fn row_style(index: usize, selected: usize) -> Style {
+    use crate::ui::themes::theme::Theme;
+    let theme = Theme::default_dark();
     if index == selected {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
+            .bg(theme.selection_bg)
+            .fg(theme.foreground)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(theme.foreground)
     }
 }
 
