@@ -105,7 +105,7 @@ fn move_selection_end_to(state: &mut ChatState, col: u16, row: u16) {
 /// 判定规则与旧版「Down 即切换」完全一致：
 /// - thinking 块：展开时点任意行折叠；折叠时点头部或预览行展开
 /// - 工具块：点头部行切换
-fn try_toggle_on_click(state: &mut ChatState, entry_idx: usize, row: usize) -> bool {
+pub(crate) fn try_toggle_on_click(state: &mut ChatState, entry_idx: usize, row: usize) -> bool {
     let Some(entry) = state.chat_history.get(entry_idx) else {
         return false;
     };
@@ -144,6 +144,11 @@ fn try_toggle_on_click(state: &mut ChatState, entry_idx: usize, row: usize) -> b
                     state.expanded_thinking_indices.insert(entry_idx);
                 }
                 state.rendered_cache.remove(&entry_idx);
+                // 折叠/展开是用户明确的布局意图，不是流式内容导致的抖动，
+                // `streaming_height_floor` 的"只增不减"下限从这一帧起作废，
+                // 否则折叠后的 1 行标题会被垫回展开时刻的高度（大片空白行）。
+                // 反抖动保护在下一个 stale 帧按折叠后的新高度重新钉底。
+                state.streaming_height_floor.remove(&entry_idx);
                 return true;
             }
             return false;

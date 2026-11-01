@@ -1049,6 +1049,93 @@ mod steering_tests {
         assert!(code_top < code_bottom, "代码块要完整: {:?}", texts);
     }
 
+    /// 回归：expand 后再 collapse 的 ∴ Thinking 块，文档总高必须缩回折叠态的高度
+    /// —— 用户报的现象是「展开后再折叠，大片空白行缩不上去」。
+    ///
+    /// 状态变化与 `mouse.rs::try_toggle_on_click` 完全同构：切 `expanded_thinking_indices`
+    /// 并移除该条目的 `rendered_cache` 强制跨帧重测。
+    #[test]
+    fn collapsing_an_expanded_thinking_block_shrinks_back_to_the_collapsed_document() {
+        let mut state = ChatState::test_fixture();
+
+        let mut entry = crate::types::ChatEntry::assistant("");
+        entry.reasoning_content =
+            Some("first step of the reasoning\n\nsecond step\nthird line\n".to_string());
+        state.chat_history.push(entry);
+        let idx = state.chat_history.len() - 1;
+
+        let collapsed = crate::ui::components::chat_history::render_chat_lines(&mut state, 80)
+            .len()
+            as u16;
+
+        state.expanded_thinking_indices.insert(idx);
+        state.rendered_cache.remove(&idx);
+        let expanded = crate::ui::components::chat_history::render_chat_lines(&mut state, 80)
+            .len()
+            as u16;
+        assert!(expanded > collapsed, "展开必须变高：{expanded} <= {collapsed}");
+
+        state.expanded_thinking_indices.remove(&idx);
+        state.rendered_cache.remove(&idx);
+        let back = crate::ui::components::chat_history::render_chat_lines(&mut state, 80)
+            .len()
+            as u16;
+        assert_eq!(
+            back, collapsed,
+            "再折叠必须缩回折叠态高度（空白行没缩回去就是这条）"
+        );
+    }
+
+    /// 回归：回合仍在流式时点折叠，`streaming_height_floor` 会把展开时刻的
+    /// 高度钉成下限，折叠后的 1 行标题被补成整屏空白 —— 用户报的
+    /// 「展开后再折叠，大片空白行缩不上去」。
+    #[test]
+    fn collapsing_mid_stream_must_not_be_pinned_by_the_streaming_height_floor() {
+        let mut state = ChatState::test_fixture();
+
+        let mut entry = crate::types::ChatEntry::assistant("");
+        entry.reasoning_content =
+            Some("reasoning alpha\nreasoning beta\nreasoning gamma\n".to_string());
+        state.chat_history.push(entry);
+        state.chat_history.last_mut().unwrap().is_streaming = Some(true);
+        let idx = state.chat_history.len() - 1;
+
+        // 还没交互过时的基线：折叠 + 流式占位共 1-2 行
+        let collapsed = crate::ui::components::chat_history::render_chat_lines(&mut state, 80)
+            .len()
+            as u16;
+
+        // 流式中通过真实点击路径展开（floor 随后会被 stale 帧钉在展开高度）
+        assert!(
+            crate::ui::events::mouse::try_toggle_on_click(&mut state, idx, 0),
+            "点击思考块应展开"
+        );
+        let expanded = crate::ui::components::chat_history::render_chat_lines(&mut state, 80)
+            .len()
+            as u16;
+        assert!(expanded > collapsed, "展开必须变高：{expanded} <= {collapsed}");
+
+        // 流式又长了一段：stale 重测，floor 从此刻起钉在展开高度
+        if let Some(r) = state.chat_history[idx].reasoning_content.as_mut() {
+            r.push_str("reasoning delta grows the block\n");
+        }
+        let _ =
+            crate::ui::components::chat_history::render_chat_lines(&mut state, 80);
+
+        // 流式中再点击折叠 —— floor 必须一并失效，不得用空白行垫回展开高度
+        assert!(
+            crate::ui::events::mouse::try_toggle_on_click(&mut state, idx, 0),
+            "点击思考块应折叠"
+        );
+        let back = crate::ui::components::chat_history::render_chat_lines(&mut state, 80)
+            .len()
+            as u16;
+        assert_eq!(
+            back, collapsed,
+            "流式中的折叠同样要立刻缩回（floor 不许把空白垫进来）"
+        );
+    }
+
     /// 回归：工具调用之后 `stream_targets` 是**悬空**的（指向
     /// `chat_history.len()`，等下一段内容再建一条助手条目）。
     /// 那个窗口里插入需求会越界 panic（index out of bounds）。

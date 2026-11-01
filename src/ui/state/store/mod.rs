@@ -1322,6 +1322,10 @@ impl ChatState {
             {
                 self.rendered_cache.remove(&i);
                 self.virtual_list.mark_dirty(i);
+                // 同 thinking 块：用户折叠是明确的布局意图，流式高度下限
+                // （`streaming_height_floor`）随之作废，不许把折叠后的
+                // 结尾垫回展开时刻的高度。
+                self.streaming_height_floor.remove(&i);
             }
         }
         self.anchor_viewport_to_tool(entry_idx);

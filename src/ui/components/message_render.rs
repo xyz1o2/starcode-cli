@@ -1018,14 +1018,15 @@ mod tests {
         );
     }
 
-    /// 思考完成态的折叠头是 `∴ Thought for 14s  (ctrl+o to expand)`；
-    /// 而**思考进行中，正文整块不出声**。
+    /// 思考折叠头随状态分两种形态（对标手动收缩进行中思考块的场景）：
+    /// - 折叠 + 已完成：`∴ Thought for 14s  (ctrl+o to expand)` —— 带展开提示的完整记录
+    /// - 折叠 + 进行中：`∴ Thinking` —— 短占位符，**不带**展开提示、**不带**假耗时
     ///
-    /// 此前是"流式期 `∴ Thinking…` → 完成期 `∴ Thought for Xs`"两态。这条回归现在
-    /// 守住的是另一半约定：实时状态由输入框上方的 spinner 行独家承担
-    /// （`⠹ Spelunking… (18s · esc to interrupt)`），正文再喊一遍"Thinking…" 就成了
-    /// 同一个"思考中"在屏上说了两遍 —— 而且正文那遍还是 primary + 粗斜体，比状态行
-    /// 响得多，用户第一眼读到的反而不是那行。
+    /// 此前"折叠 + 进行中"什么都不渲染（实时状态让给输入框上方的 spinner 行），
+    /// 但手动收缩进行中的思考块后整块消失，用户会困惑"我的思考块去哪了"。
+    /// 现在流式期渲染一条安静些的占位符：内容仍是 spinner 行的活（占位符不带
+    /// "esc to interrupt" 之类实时语义），但块本身留在屏上，点它还能再展开。
+    /// 这条回归守住：占位符不重复展开提示、不伪造耗时。
     #[test]
     fn thinking_header_is_the_completed_record_only() {
         let mut state = crate::ui::state::ChatState::new();
@@ -1059,22 +1060,31 @@ mod tests {
         assert!(completed.contains("Thought for 14s"), "{:?}", completed);
         assert!(completed.contains("(ctrl+o to expand)"), "{:?}", completed);
 
-        // 流式态：折叠中的思考块不出声 —— 既没有头部，也没有正文。
+        // 流式态：折叠中的思考块留一条简短占位符 —— 不带展开提示、不带假耗时。
         state.chat_history[idx].is_streaming = Some(true);
         state.chat_history[idx].reasoning_finished_elapsed_ms = None;
         let streaming = header_of(&state);
         assert!(
-            streaming.is_empty(),
-            "思考进行中正文不该出声，实际 {:?}",
+            streaming.contains("Thinking"),
+            "流式中折叠态应显示占位符，实际 {:?}",
             streaming
         );
-        assert!(!streaming.contains("Thinking"), "{:?}", streaming);
-        assert!(!streaming.contains("ctrl+o"), "{:?}", streaming);
+        assert!(
+            !streaming.contains("ctrl+o"),
+            "占位符不得重复展开提示，实际 {:?}",
+            streaming
+        );
+        assert!(
+            !streaming.contains("Thought for"),
+            "流式中不得伪造耗时，实际 {:?}",
+            streaming
+        );
 
         let blocks = render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, 70, false);
-        assert!(
-            blocks.is_empty(),
-            "折叠 + 流式时整个思考块都不该渲染，实际 {:?}",
+        assert_eq!(
+            blocks.len(),
+            1,
+            "折叠 + 流式时整个思考块只有占位符一行，实际 {:?}",
             blocks
         );
     }
