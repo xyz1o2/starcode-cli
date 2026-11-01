@@ -81,6 +81,8 @@ starcode-cli
 
 > 注意：直接 `cargo build --release` 只会得到 `starcode-cli` 这个名字，`sc` / `starcode` 别名由安装脚本创建。
 
+> **WSL 提示**：装完 Rust 后新开终端如果提示 `cargo 不在 PATH`，执行 `source ~/.cargo/env`，或把 `$HOME/.cargo/bin` 加进 PATH —— rustup 只会往 rc 文件里写新终端用的 PATH，当前会话需要手动 source。
+
 #### 通过 Cargo 安装
 
 ```bash

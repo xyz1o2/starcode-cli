@@ -81,6 +81,8 @@ starcode-cli
 
 > Note: `cargo build --release` on its own only gives you the `starcode-cli` name — the `sc` / `starcode` aliases are created by the install script.
 
+> **WSL note:** if a brand-new terminal says `cargo 不在 PATH` (cargo not on PATH) right after a Rust install succeeded, run `source ~/.cargo/env` or add `$HOME/.cargo/bin` to PATH — rustup only wires the PATH for future shells via your rc files.
+
 #### Using Cargo
 
 ```bash

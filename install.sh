@@ -63,6 +63,8 @@ preflight() {
     # --- Rust 工具链 -------------------------------------------------------
     if ! have cargo; then
         fatal="${fatal}  [x] cargo 不在 PATH\n"
+        fatal="${fatal}      还没装过 Rust：curl https://sh.rustup.rs -sSf | sh -s -- -y\n"
+        fatal="${fatal}      装过但新终端找不到：source \$HOME/.cargo/env（或把 \$HOME/.cargo/bin 加进 PATH）\n"
     elif [ "$os" = "Linux" ]; then
         # WSL 常见坑：装的是 Windows 版 Rust（x86_64-pc-windows-msvc），在 Linux 下编不动。
         local host; host="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
@@ -107,7 +109,7 @@ preflight() {
         return 0
     fi
     if [ -z "$missing" ]; then
-        echo "      Rust 工具链也需修复：https://rustup.rs"
+        echo "      修复工具链后再重跑 bash install.sh。"
         return 1
     fi
 
