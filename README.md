@@ -27,7 +27,42 @@ A conversational AI coding agent that runs in your terminal — written in 100% 
 
 ### Installation
 
-#### From Source (Recommended)
+#### Pre-built Binaries (Recommended)
+
+**Linux / WSL / macOS**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/xyz1o2/starcode-cli/dev-m/install-binary.sh | sh
+```
+
+**Windows** (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/xyz1o2/starcode-cli/dev-m/install-binary.ps1 | iex
+```
+
+The script detects your platform, downloads the matching archive from the latest release, verifies its SHA-256 checksum against `SHA256SUMS.txt`, and installs `starcode-cli` into `~/.cargo/bin` (Windows: `%USERPROFILE%\.cargo\bin`) with the `sc` / `starcode` aliases next to it.
+
+| Platform          | Archive                                                        |
+| ----------------- | -------------------------------------------------------------- |
+| Linux x86_64      | `x86_64-unknown-linux-gnu`, or `x86_64-unknown-linux-musl` (static — also runs on Alpine) |
+| Linux ARM64       | `aarch64-unknown-linux-gnu`, or `aarch64-unknown-linux-musl` (static) |
+| macOS Intel       | `x86_64-apple-darwin`                                          |
+| macOS Apple Silicon | `aarch64-apple-darwin`                                       |
+| Windows x64       | `x86_64-pc-windows-msvc.zip`                                   |
+| Windows ARM64     | `aarch64-pc-windows-msvc.zip`                                  |
+
+> **WSL:** the script installs into the Linux side — `~/.cargo/bin` lands on the WSL `PATH`, not the Windows one.
+
+If `~/.cargo/bin` is not on your `PATH` yet:
+
+```bash
+echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc   # zsh: ~/.zshrc
+```
+
+To pin a specific version instead of latest, download its archive from the [Releases](https://github.com/xyz1o2/starcode-cli/releases) page, extract it, and put `starcode-cli` (`starcode-cli.exe` on Windows) on your `PATH`.
+
+#### From Source
 
 ```bash
 git clone https://github.com/xyz1o2/starcode-cli.git
@@ -51,23 +86,6 @@ starcode-cli
 ```bash
 cargo install --git https://github.com/xyz1o2/starcode-cli.git starcode-cli
 ```
-
-#### Pre-built Binaries
-
-Download the latest release for your platform from the [Releases](https://github.com/xyz1o2/starcode-cli/releases) page. Each release ships archives for Linux (x64/ARM64, glibc and static musl), macOS (Intel/Apple Silicon), and Windows (x64/ARM64), plus a `SHA256SUMS.txt`.
-
-```bash
-# Linux (x86_64)
-curl -fsSL -O https://github.com/xyz1o2/starcode-cli/releases/latest/download/starcode-cli-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf starcode-cli-x86_64-unknown-linux-gnu.tar.gz
-install -m755 starcode-cli-x86_64-unknown-linux-gnu/starcode-cli ~/.cargo/bin/
-```
-
-On Alpine or any musl-only distro, use the `x86_64-unknown-linux-musl` build instead — it is statically linked and needs no glibc.
-
-On Windows, download the `.zip` and move `starcode-cli.exe` onto your `PATH`.
-
-See [docs/build-release.md](docs/build-release.md) for the full platform matrix and how releases are produced.
 
 ### Quick Start
 
@@ -265,7 +283,8 @@ starcode-cli/
 ├── i18n/               # translations
 ├── .github/workflows/  # ci.yml (check/test/build) + release.yml (tag → 多平台发布)
 ├── docs/build-release.md   # 构建与发布说明
-├── install.sh / .ps1 / .bat
+├── install.sh / .ps1 / .bat                # 从源码构建安装
+├── install-binary.sh / .ps1                # 预编译二进制下载安装（README 推荐入口）
 └── Cargo.toml
 ```
 

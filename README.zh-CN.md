@@ -27,7 +27,42 @@
 
 ### 安装
 
-#### 从源码安装（推荐）
+#### 预编译二进制（推荐）
+
+**Linux / WSL / macOS**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/xyz1o2/starcode-cli/dev-m/install-binary.sh | sh
+```
+
+**Windows**（PowerShell）
+
+```powershell
+irm https://raw.githubusercontent.com/xyz1o2/starcode-cli/dev-m/install-binary.ps1 | iex
+```
+
+脚本会自动识别平台，从最新 Release 下载对应的压缩包，用 `SHA256SUMS.txt` 校验 SHA-256，然后把 `starcode-cli` 装进 `~/.cargo/bin`（Windows: `%USERPROFILE%\.cargo\bin`），并在旁边建好 `sc` / `starcode` 别名。
+
+| 平台 | 压缩包 |
+| ---- | ------ |
+| Linux x86_64 | `x86_64-unknown-linux-gnu`，或 `x86_64-unknown-linux-musl`（静态，Alpine 也能跑） |
+| Linux ARM64 | `aarch64-unknown-linux-gnu`，或 `aarch64-unknown-linux-musl`（静态） |
+| macOS Intel | `x86_64-apple-darwin` |
+| macOS Apple Silicon | `aarch64-apple-darwin` |
+| Windows x64 | `x86_64-pc-windows-msvc.zip` |
+| Windows ARM64 | `aarch64-pc-windows-msvc.zip` |
+
+> **WSL**：脚本装的是 Linux 侧——`~/.cargo/bin` 进的是 WSL 的 `PATH`，不是 Windows 的。
+
+`~/.cargo/bin` 不在 `PATH` 里时：
+
+```bash
+echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc   # zsh: ~/.zshrc
+```
+
+想锁定特定版本而不是最新：去 [Releases](https://github.com/xyz1o2/starcode-cli/releases) 页面下载对应压缩包，解压后把 `starcode-cli`（Windows 为 `starcode-cli.exe`）放到 `PATH` 上即可。
+
+#### 从源码安装
 
 ```bash
 git clone https://github.com/xyz1o2/starcode-cli.git
@@ -51,10 +86,6 @@ starcode-cli
 ```bash
 cargo install --git https://github.com/xyz1o2/starcode-cli.git starcode-cli
 ```
-
-#### 预编译二进制
-
-从 [Releases](https://github.com/xyz1o2/starcode-cli/releases) 页面下载对应平台的版本。
 
 ### 快速开始
 
@@ -232,7 +263,8 @@ starcode-cli/
 │   ├── ui/             # 终端 UI（ratatui）：状态、组件、服务
 │   └── utils/          # 日志、路径、项目上下文、杂项
 ├── i18n/               # 翻译
-├── install.sh / .ps1 / .bat
+├── install.sh / .ps1 / .bat                # 从源码构建安装
+├── install-binary.sh / .ps1                # 预编译二进制下载安装（README 推荐入口）
 └── Cargo.toml
 ```
 
