@@ -155,7 +155,9 @@ pub async fn get_git_status<P: AsRef<Path>>(cwd: P) -> Result<Option<GitStatus>,
         GIT_POLL_BUDGET,
     )
     .await?;
-    Ok(parse_status_output(&String::from_utf8_lossy(&output.stdout)))
+    Ok(parse_status_output(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
 }
 
 /// 失败是否**永久性**的「不是 git 仓库」。这类失败重试没有意义
@@ -515,9 +517,7 @@ mod tests {
         assert!(is_permanently_not_a_repo(
             "`git status --porcelain --branch` 失败 (128): fatal: not a git repository (or any of the parent directories): .git"
         ));
-        assert!(is_permanently_not_a_repo(
-            "fatal: not in a git repository"
-        ));
+        assert!(is_permanently_not_a_repo("fatal: not in a git repository"));
         assert!(!is_permanently_not_a_repo(
             "`git status --porcelain --branch` 超时（10s）"
         ));

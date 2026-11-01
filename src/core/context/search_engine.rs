@@ -268,7 +268,8 @@ impl SearchEngine {
         // 仍然是"这个词是中文的"。
         let query_is_pure_cjk = !terms.is_empty()
             && terms.iter().all(|t| {
-                t.chars().any(|c| Self::is_cjk_char(c)) && !t.chars().any(|c| c.is_ascii_alphabetic())
+                t.chars().any(|c| Self::is_cjk_char(c))
+                    && !t.chars().any(|c| c.is_ascii_alphabetic())
             });
         QueryDiagnosis {
             term_coverage: self.term_coverage(terms),
@@ -587,9 +588,7 @@ impl SearchEngine {
         let mut results: Vec<SearchResult> = scores
             .into_iter()
             .map(|((doc_id, chunk_id), score)| {
-                let DocumentEntry {
-                    path, chunks, ..
-                } = &self.documents[doc_id];
+                let DocumentEntry { path, chunks, .. } = &self.documents[doc_id];
                 let chunk = chunks[chunk_id].clone();
 
                 let mut final_score = score;

@@ -192,8 +192,8 @@ fn cleanup_expired_logs_once() {
     if days == 0 {
         return;
     }
-    let Some(cutoff) = std::time::SystemTime::now()
-        .checked_sub(std::time::Duration::from_secs(days * 24 * 3600))
+    let Some(cutoff) =
+        std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(days * 24 * 3600))
     else {
         return;
     };
@@ -298,14 +298,24 @@ pub fn append_debug_log_line(line: &str) {
     if !is_log_enabled() || should_skip_debug_log_line(line) {
         return;
     }
-    append_log_line(debug_log_path(), &log_writers().debug, line, DEBUG_LOG_MAX_BYTES);
+    append_log_line(
+        debug_log_path(),
+        &log_writers().debug,
+        line,
+        DEBUG_LOG_MAX_BYTES,
+    );
 }
 
 pub fn append_agent_log_line(line: &str) {
     if !is_log_enabled() {
         return;
     }
-    append_log_line(agent_log_path(), &log_writers().agent, line, AGENT_LOG_MAX_BYTES);
+    append_log_line(
+        agent_log_path(),
+        &log_writers().agent,
+        line,
+        AGENT_LOG_MAX_BYTES,
+    );
 }
 
 #[cfg(test)]
@@ -333,9 +343,18 @@ mod tests {
         rotate_chain(&main, 3);
 
         assert!(!main.exists(), "current 应改名为 .1");
-        assert_eq!(std::fs::read_to_string(temp.path().join("t.log.1")).unwrap(), "current");
-        assert_eq!(std::fs::read_to_string(temp.path().join("t.log.2")).unwrap(), "old-1");
-        assert_eq!(std::fs::read_to_string(temp.path().join("t.log.3")).unwrap(), "old-2");
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("t.log.1")).unwrap(),
+            "current"
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("t.log.2")).unwrap(),
+            "old-1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("t.log.3")).unwrap(),
+            "old-2"
+        );
         assert!(
             !temp.path().join("t.log.4").exists(),
             "keep=3 时 .4 不该出现,最老的一份直接丢弃"
@@ -355,7 +374,6 @@ mod tests {
         );
     }
 }
-
 
 // ============ 增强的日志功能 - 任务追踪和调试 ============
 

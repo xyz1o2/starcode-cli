@@ -128,10 +128,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         // 普通 .git 目录
         std::fs::create_dir(temp.path().join(".git")).unwrap();
-        assert_eq!(
-            resolve_git_dir(temp.path()),
-            Some(temp.path().join(".git"))
-        );
+        assert_eq!(resolve_git_dir(temp.path()), Some(temp.path().join(".git")));
         // worktree 形态：.git 是文件，gitdir 是相对主仓库的相对路径
         let linked = temp.path().join("linked");
         std::fs::create_dir_all(&linked).unwrap();

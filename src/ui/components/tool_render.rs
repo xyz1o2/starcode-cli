@@ -1318,10 +1318,7 @@ mod tests {
         let first = render(r#"{"query":"auth flow","turn":1}"#);
         let retry = render(r#"{"query":"auth flow","turn":1,"warmup_retry":true}"#);
 
-        assert!(
-            !first.contains("retry"),
-            "首查不该被标成补跑：{first:?}"
-        );
+        assert!(!first.contains("retry"), "首查不该被标成补跑：{first:?}");
         assert!(
             retry.contains("retry"),
             "补跑必须标出来，否则与首查长得一模一样：{retry:?}"

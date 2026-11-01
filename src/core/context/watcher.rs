@@ -496,8 +496,7 @@ fn rebuild_worker_loop(
             if !idle_backoff.is_zero() {
                 let wait_rec = {
                     let mut inner = coord.inner.lock();
-                    let snapshot_has_sentinel =
-                        inner.dirty.iter().any(|p| p.starts_with('\0'));
+                    let snapshot_has_sentinel = inner.dirty.iter().any(|p| p.starts_with('\0'));
                     let urgent = coord.skip_idle_backoff.swap(false, Ordering::SeqCst)
                         && !snapshot_has_sentinel;
                     if urgent {
@@ -591,7 +590,10 @@ fn run_incremental_rebuild(root: &Path, dirty: &[String], stats: &EventWindowSta
             } else if index_noop {
                 let count = coord.idle_noop_count.fetch_add(1, Ordering::SeqCst) + 1;
                 let mut last = coord.last_idle_report.lock();
-                if last.as_ref().is_none_or(|t| t.elapsed() >= Duration::from_secs(30)) {
+                if last
+                    .as_ref()
+                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(30))
+                {
                     *last = Some(Instant::now());
                     coord.idle_noop_count.store(0, Ordering::SeqCst);
                     drop(last);

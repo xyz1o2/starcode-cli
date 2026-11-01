@@ -1345,9 +1345,7 @@ fn search_codebase_with_limits(
                 "  - The index contains Chinese text, but the query terms still don't appear \
                  in the indexed code chunks (only in comments/docs that weren't chunked).\n",
             );
-            output.push_str(
-                "  - Use `Grep` if you know the exact string you're looking for.\n",
-            );
+            output.push_str("  - Use `Grep` if you know the exact string you're looking for.\n");
         } else {
             output.push_str(
                 "  - The query terms exist but didn't co-occur in any indexed code chunk with \
@@ -1828,10 +1826,7 @@ mod tests {
             out.contains("No relevant code found"),
             "零结果必须明说没命中：{out}"
         );
-        assert!(
-            out.contains("Diagnosis"),
-            "零结果必须带诊断段：{out}"
-        );
+        assert!(out.contains("Diagnosis"), "零结果必须带诊断段：{out}");
         assert!(
             out.contains("Chinese") && out.contains("English"),
             "诊断必须点破语言不匹配（中文关键词 vs 英文代码库）：{out}"
@@ -1885,10 +1880,7 @@ mod tests {
         .expect("search must succeed");
 
         assert!(out.contains("No relevant code found"), "{out}");
-        assert!(
-            out.contains("Diagnosis"),
-            "零结果必须带诊断段：{out}"
-        );
+        assert!(out.contains("Diagnosis"), "零结果必须带诊断段：{out}");
         assert!(
             !out.contains("Chinese"),
             "英文查询不该被报成语言问题：{out}"

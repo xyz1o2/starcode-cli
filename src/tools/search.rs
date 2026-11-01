@@ -509,7 +509,8 @@ fn describe_pattern_error(pattern: &str, error: &str) -> String {
              a literal search (`regex: false`).",
         );
     } else {
-        message.push_str("\n  Fix the regex syntax, or switch to a literal search (`regex: false`).");
+        message
+            .push_str("\n  Fix the regex syntax, or switch to a literal search (`regex: false`).");
     }
     message
 }

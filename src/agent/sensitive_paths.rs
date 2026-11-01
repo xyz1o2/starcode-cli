@@ -259,8 +259,14 @@ mod tests {
 
     #[test]
     fn pem_and_ssh_keys() {
-        assert_eq!(hit("Read", json!({"file_path": "server.pem"})), Some("*.pem"));
-        assert_eq!(hit("Read", json!({"file_path": "server.PEM"})), Some("*.pem"));
+        assert_eq!(
+            hit("Read", json!({"file_path": "server.pem"})),
+            Some("*.pem")
+        );
+        assert_eq!(
+            hit("Read", json!({"file_path": "server.PEM"})),
+            Some("*.pem")
+        );
         assert_eq!(hit("Read", json!({"file_path": "pem"})), None);
         assert_eq!(
             hit("Read", json!({"file_path": "~/.ssh/id_rsa"})),
@@ -283,17 +289,20 @@ mod tests {
             hit("Read", json!({"file_path": "id_ecdsa"})),
             Some(SSH_KEY_KIND)
         );
-        assert_eq!(hit("Read", json!({"file_path": ".git-credentials"})), Some(".git-credentials"));
+        assert_eq!(
+            hit("Read", json!({"file_path": ".git-credentials"})),
+            Some(".git-credentials")
+        );
     }
 
     #[test]
     fn bash_command_scan() {
+        assert_eq!(hit("Bash", json!({"command": "cat .env"})), Some(".env"));
         assert_eq!(
-            hit("Bash", json!({"command": "cat .env"})),
-            Some(".env")
-        );
-        assert_eq!(
-            hit("Bash", json!({"command": "grep -r token /home/u/proj/.env"})),
+            hit(
+                "Bash",
+                json!({"command": "grep -r token /home/u/proj/.env"})
+            ),
             Some(".env")
         );
         assert_eq!(
@@ -306,17 +315,26 @@ mod tests {
             None,
             "字符边界：.environment 不命中"
         );
-        assert_eq!(hit("Bash", json!({"command": "cat x.env y.pem"})), Some("*.pem"));
+        assert_eq!(
+            hit("Bash", json!({"command": "cat x.env y.pem"})),
+            Some("*.pem")
+        );
         assert_eq!(
             hit("Bash", json!({"command": "ssh-keygen -t rsa -f id_rsa"})),
             Some(SSH_KEY_KIND)
         );
         assert_eq!(
-            hit("Bash", json!({"command": "git commit -m 'have a .env day'"})),
+            hit(
+                "Bash",
+                json!({"command": "git commit -m 'have a .env day'"})
+            ),
             None,
             "引号内的句子是一个词（shell argv 语义），basename=day 不命中"
         );
-        assert_eq!(hit("Bash", json!({"command": "echo hello > out.txt"})), None);
+        assert_eq!(
+            hit("Bash", json!({"command": "echo hello > out.txt"})),
+            None
+        );
     }
 
     #[test]

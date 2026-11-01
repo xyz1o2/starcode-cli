@@ -678,8 +678,7 @@ impl ToolExecutor {
         // 否则用户点过一次「总是允许」，下一个碰同一文件的调用就永远安静了。
         // 注意 on_confirm 已在上面照常调用 —— 这次调用本身是放行的，
         // 钉住的只是「授权缓存」。
-        let sensitive_gated =
-            crate::agent::sensitive_paths::guard_hit(tool_name, args).is_some();
+        let sensitive_gated = crate::agent::sensitive_paths::guard_hit(tool_name, args).is_some();
 
         match outcome {
             crate::types::ToolConfirmationOutcome::AllowSession
@@ -3238,13 +3237,11 @@ mod tests {
             false,
         ));
         let registry = Arc::new(ToolRegistry::new(config.clone()));
-        registry.register_tool(Arc::new(
-            crate::core::tools::read_file::ReadFileTool::new(
-                config.clone(),
-                bus.clone(),
-                Arc::new(GlobalState::new()),
-            ),
-        ));
+        registry.register_tool(Arc::new(crate::core::tools::read_file::ReadFileTool::new(
+            config.clone(),
+            bus.clone(),
+            Arc::new(GlobalState::new()),
+        )));
         let executor = ToolExecutor::new(
             StarClient::new("", None, None, None, None),
             registry,

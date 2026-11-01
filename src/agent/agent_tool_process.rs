@@ -943,8 +943,12 @@ impl Agent {
                         // 完全相同，不标记的话在 UI 上就是"同一个调用出现两次"
                         // （事故记录 §1.5 的 `turn=1` 双发）。
                         let mut retry_satisfied = false;
-                        let retry_call = crate::agent::tool_routing::
-                            build_codebase_search_tool_call_with(user_input, current_turn, true);
+                        let retry_call =
+                            crate::agent::tool_routing::build_codebase_search_tool_call_with(
+                                user_input,
+                                current_turn,
+                                true,
+                            );
                         self.run_auto_trigger_tool(
                             user_input,
                             messages,

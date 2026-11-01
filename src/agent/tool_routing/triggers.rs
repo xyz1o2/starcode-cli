@@ -572,7 +572,8 @@ fn codebase_search_language_gate(
     // 「502错误」这种混词**不算**纯中文 —— 里面的数字可能命中代码里的
     // 状态码（`502`），把它当成"纯中文"会把一次可能成功的检索也拦掉。
     let is_cjk_only = |term: &str| {
-        term.chars().any(crate::core::context::search_engine::is_cjk_char)
+        term.chars()
+            .any(crate::core::context::search_engine::is_cjk_char)
             && !term.chars().any(|c| c.is_ascii_alphanumeric())
     };
 
