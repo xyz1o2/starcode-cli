@@ -966,11 +966,65 @@ mod tests {
     /// 那是测试间的竞争，不是被测代码的 bug。串行化这一组用例即可消除它。
     static DIRTY_SET_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
+    /// 捏住 `rebuilding` 旗标的守卫：worker 排空脏集合后见 `rebuilding`
+    /// 已置位，会走 `run_incremental_rebuild` 的「上一轮还在跑」分支把路径
+    /// **原样回队**，既不做真重建也不消费路径。
+    ///
+    /// 没有这个守卫，「打脏后脏集合里仍有路径」就是测试线程和 worker
+    /// 抢锁的竞态：worker 随时可能被 condvar 唤醒，一把
+    /// `mem::take(&mut inner.dirty)` 排空整个集合去重建。1793 个测试并行
+    /// 时 worker 常常赢——本测试因此在 CI Linux 上间歇性挂掉（本地
+    /// Windows 却一直过，纯属调度运气；和 tokio 版本无关，worker 是
+    /// 普通 std 线程）。
+    ///
+    /// 置位前先等 worker 走完手上那轮真重建：否则它结束时执行
+    /// `rebuilding.store(false)`，顺手就把我们的 hold 释放了。
+    struct RebuildingHold(&'static IndexCoordinator);
+
+    impl RebuildingHold {
+        fn acquire(coord: &'static IndexCoordinator) -> Self {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while coord.rebuilding.load(Ordering::SeqCst) {
+                if Instant::now() > deadline {
+                    break; // 兜底超时：best-effort，不再死等
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            coord.rebuilding.store(true, Ordering::SeqCst);
+            RebuildingHold(coord)
+        }
+    }
+
+    impl Drop for RebuildingHold {
+        fn drop(&mut self) {
+            self.0.rebuilding.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// 自旋等待脏集合里出现满足谓词的路径（2s 截止）。在 `RebuildingHold`
+    /// 下 worker 排空后必会原样回队，所以等多轮一定能看到；超时才认输。
+    fn wait_for_dirty<F>(coord: &IndexCoordinator, pred: F) -> bool
+    where
+        F: Fn(&str) -> bool,
+    {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if coord.inner.lock().dirty.iter().any(|p| pred(p)) {
+                return true;
+            }
+            if Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn mark_dirty_starts_coordinator_and_collects_paths() {
         let _guard = DIRTY_SET_TEST_LOCK.lock();
-        let dir = tempfile::tempdir().unwrap();
         let coord = coordinator();
+        let _hold = RebuildingHold::acquire(coord);
+        let dir = tempfile::tempdir().unwrap();
         // 全局协调器可能被并行测试先播种过 root（engine/semantic 查询路径
         // 也会 request_refresh），因此这里不断言 root 归属，只验证：
         // 1) 幂等启动 2) 脏集合收集到标记文件。
@@ -979,11 +1033,15 @@ mod tests {
 
         mark_files_dirty(vec![dir.path().join("a.rs").to_string_lossy().to_string()]);
 
-        let inner = coord.inner.lock();
+        // 路径要么尚未被 worker 排空，要么已被它按回队路径放回——
+        // 两种情况自旋都能看到。没有 RebuildingHold 时这是纯竞态。
+        let found = wait_for_dirty(coord, |p| p.ends_with("a.rs"));
+
         assert!(coord.started.load(Ordering::SeqCst));
         assert!(
-            inner.dirty.iter().any(|p| p.ends_with("a.rs")),
-            "脏集合应包含标记的文件"
+            found,
+            "脏集合应包含标记的文件: {:?}",
+            coord.inner.lock().dirty
         );
     }
 
@@ -1004,18 +1062,31 @@ mod tests {
         // 它的哨兵会落进本用例的断言里 —— 那是测试间竞争，不是被测代码的 bug。
         let _guard = DIRTY_SET_TEST_LOCK.lock();
         let coord = coordinator();
+        // 同一类竞态：worker 可能在本用例断言前把刚回队的路径排空去重建。
+        // 捏住 rebuilding 让它排空后按「上一轮还在跑」原样放回。
+        let _hold = RebuildingHold::acquire(coord);
 
         coord.inner.lock().dirty.clear();
 
         requeue_dirty_paths(&["src/a.rs".to_string(), "src/b.rs".to_string()]);
 
-        let inner = coord.inner.lock();
-        assert!(inner.dirty.contains("src/a.rs"));
-        assert!(inner.dirty.contains("src/b.rs"));
+        let has_a = wait_for_dirty(coord, |p| p == "src/a.rs");
+        let has_b = wait_for_dirty(coord, |p| p == "src/b.rs");
+
         assert!(
-            !inner.dirty.iter().any(|p| p.starts_with('\0')),
+            has_a,
+            "回队必须保留 src/a.rs: {:?}",
+            coord.inner.lock().dirty
+        );
+        assert!(
+            has_b,
+            "回队必须保留 src/b.rs: {:?}",
+            coord.inner.lock().dirty
+        );
+        assert!(
+            !coord.inner.lock().dirty.iter().any(|p| p.starts_with('\0')),
             "回队不得注入哨兵，否则普通编辑会被误升级为全量重建：{:?}",
-            inner.dirty
+            coord.inner.lock().dirty
         );
     }
 
