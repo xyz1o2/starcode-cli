@@ -295,15 +295,24 @@ pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
                     move_selection_end_to(state, m.column, m.row);
                 }
             }
-            // 未拖动 = 单击（起止锚点重合）：执行折叠/展开切换，并清掉单格
-            // 选区高亮。切换会改变条目行数，残留锚点会指向错误的行。
+            // 未拖动 = 单击（起止锚点重合，或偏移不足 2 列）：执行折叠/展开切换，
+            // 并清掉单格选区高亮。
+            //
+            // 「不足 2 列也算单击」修的是另一个问题：鼠标/触摸板按下到松开之间
+            // 有 1 列级抖动是常态，旧判定 `s == e` 只要差 1 列就落进
+            // `has_selection()` 分支 → 松开即复制把 `∴ Thin` 这种几字符的碎片
+            // 塞进剪贴板。用户的意图是单击，不是复制。
             let clicked = match (
                 state.text_selection.start_entry_idx,
                 state.text_selection.end_entry_idx,
                 state.text_selection.start,
                 state.text_selection.end,
             ) {
-                (Some(se), Some(ee), Some(s), Some(e)) if se == ee && s == e => Some((se, s.0)),
+                (Some(se), Some(ee), Some(s), Some(e))
+                    if se == ee && s.0 == e.0 && e.1.abs_diff(s.1) <= 1 =>
+                {
+                    Some((se, s.0))
+                }
                 _ => None,
             };
 
@@ -427,6 +436,68 @@ mod tests {
         assert_eq!(state.text_selection.start_entry_idx, Some(idx));
         assert_eq!(state.text_selection.start, Some((0, 0)));
         assert_eq!(state.text_selection.end, Some((1, 10)));
+    }
+
+    /// 鼠标/触摸板按下到松开之间的 1 列级抖动不得触发「松开即复制」。
+    ///
+    /// 真实事故：用户单击 thinking 折叠头（`∴ Thinking…`），Down 在第 5 列、
+    /// Up 在第 6 列，旧判定 `s == e` 不成立 → 落进 `has_selection()` 分支 →
+    /// `copy_selection` 把 `∴ Thin` 这 6 个字符塞进剪贴板。用户的意图是单击，
+    /// 不是复制。
+    #[test]
+    fn a_one_column_jitter_is_a_click_not_a_copy() {
+        let mut state = setup_state();
+        let idx = state.chat_history.len() - 1;
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 1),
+        );
+        // 松开时向右偏了 1 列——触摸板/鼠标的常规抖动
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 6, 1),
+        );
+
+        assert!(
+            state.expanded_thinking_indices.contains(&idx),
+            "1 列抖动应按单击处理：触发折叠/展开"
+        );
+        assert!(
+            state.text_selection.start.is_none(),
+            "抖动选区必须被清掉，不得残留成可复制选区"
+        );
+    }
+
+    /// 真正的拖选（≥2 列位移）仍然走「松开即复制」，不受抖动阈值影响。
+    #[test]
+    fn a_real_drag_still_selects_for_copy() {
+        let mut state = setup_state();
+        let idx = state.chat_history.len() - 1;
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 1),
+        );
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 8, 1),
+        );
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 8, 1),
+        );
+
+        assert!(
+            state.expanded_thinking_indices.is_empty(),
+            "拖选不得触发折叠/展开"
+        );
+        assert!(
+            state.text_selection.has_selection(),
+            "拖选后必须保留选区供复制"
+        );
+        assert_eq!(state.text_selection.start, Some((0, 0)));
+        assert_eq!(state.text_selection.end, Some((0, 8)));
     }
 
     /// 拖到内容末尾之下（超出总行数）时锚点钳制到最后一行，
