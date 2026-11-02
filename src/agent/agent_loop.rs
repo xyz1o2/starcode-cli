@@ -462,8 +462,9 @@ impl Agent {
         codebase_search_attempted: &mut bool,
     ) {
         use crate::agent::tool_routing::{
-            build_codebase_search_tool_call, build_project_map_tool_call,
-            should_prefetch_codebase_search, should_prefetch_project_map,
+            build_codebase_search_tool_call_for_query, build_project_map_tool_call,
+            extract_search_keywords, rewrite_search_query, should_prefetch_codebase_search,
+            should_prefetch_project_map,
         };
 
         if should_prefetch_project_map(user_input, all_active_tools, history_len) {
@@ -507,7 +508,13 @@ impl Agent {
             history_len,
             Some(self.config.target_dir().as_path()),
         ) {
-            let codebase_tool_call = build_codebase_search_tool_call(user_input, 0);
+            // 中文需求必须先改写成"代码侧"的检索词：词法引擎的索引里全是英文
+            // 标识符，把「然后 后停 停来」原样塞进 query 命中不了任何 token。
+            // 改写失败（超时/模型抽风）就回退规则压缩，绝不拖住首轮。
+            let query = rewrite_search_query(&self.client, user_input)
+                .await
+                .unwrap_or_else(|| extract_search_keywords(user_input));
+            let codebase_tool_call = build_codebase_search_tool_call_for_query(&query, 0, false);
 
             crate::utils::logging::append_debug_log_line(
                 "[ACE_PREFETCH] first-turn conceptual query detected; prefetching codebase_search before the first model call",

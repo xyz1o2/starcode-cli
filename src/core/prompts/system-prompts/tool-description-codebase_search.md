@@ -21,8 +21,11 @@ relevant* regions rather than a flat dump of every match.
 - Caller / callee structure → use `CodeGraph`
 
 **Params**:
-- `query` (required): **keywords**, not a sentence. "retry backoff", "parse config toml". Full
-  natural language questions dilute the ranking — pass the terms the code would actually use.
+- `query` (required): **code-side keywords**, not the user's sentence. The index holds
+  identifiers, paths and English comments — a Chinese or natural-language phrasing matches
+  nothing. Translate the request into the words the code would actually use
+  ("retry backoff", "parse config toml"); if the request is in another language, do that
+  translation yourself before calling.
 - `path`: search root (default: workspace)
 - `budget_profile`: set to `"auto"` for a faster, more conservative scan
 

@@ -146,6 +146,9 @@ fn register_agent_execution_tools(
     tool_registry.register_tool(Arc::new(
         crate::core::tools::code_graph_tool::CodeGraphTool::new(),
     ));
+    tool_registry.register_tool(Arc::new(
+        crate::core::tools::repo_map_tool::RepoMapTool::new(),
+    ));
 
     use crate::core::tools::shell::ShellTool;
     tool_registry.register_tool(Arc::new(ShellTool::new(

@@ -41,6 +41,7 @@ pub mod read_file;
 pub mod read_many;
 pub mod readability_safe;
 pub mod remote_trigger;
+pub mod repo_map_tool;
 pub mod result_budget;
 pub mod ripgrep;
 pub mod rtk;

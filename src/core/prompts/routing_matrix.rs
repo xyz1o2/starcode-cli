@@ -73,6 +73,12 @@ pub const ROUTING_MATRIX: &[RouteSlot] = &[
         never_via_bash: "—",
     },
     RouteSlot {
+        id: "repo-map",
+        job: "Learn the repository's real symbol names before searching for them",
+        primary: "RepoMap",
+        never_via_bash: "—",
+    },
+    RouteSlot {
         id: "project-overview",
         job: "Statistical overview of what this repo contains",
         primary: "ProjectMap",

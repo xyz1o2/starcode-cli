@@ -33,18 +33,18 @@ pub(crate) fn build_navigator_skill_tool_call(user_input: &str, turn: i32) -> St
 /// 补跑与首查的 `query` 和 `turn` 完全相同，光看参数根本分不出哪个是哪个，
 /// 于是补跑看起来就像"同一个调用出现了两次"（事故记录 §1.5 的
 /// `turn=1` 双发就是它）。标记让排障时一眼看出这是有意补跑。
-pub(crate) fn build_codebase_search_tool_call(user_input: &str, turn: i32) -> StarToolCall {
-    build_codebase_search_tool_call_with(user_input, turn, false)
-}
-
-/// 同 [`build_codebase_search_tool_call`]，但可标记为「冷启动补跑」。
-pub(crate) fn build_codebase_search_tool_call_with(
-    user_input: &str,
+/// 用**已经准备好的检索词**构造调用。
+///
+/// 自动触发路径会先用 LLM 把自然语言需求改写成代码侧检索词（中文需求直接塞
+/// 进词法引擎必然零命中）；冷启动补跑必须复用**同一个** query —— 重新改写
+/// 会得到不同的词，补跑与首查就配不上对了。
+pub(crate) fn build_codebase_search_tool_call_for_query(
+    query: &str,
     turn: i32,
     warmup_retry: bool,
 ) -> StarToolCall {
     let mut args = serde_json::json!({
-        "query": extract_search_keywords(user_input),
+        "query": query,
         "turn": turn,
     });
     if warmup_retry {
@@ -404,9 +404,10 @@ mod tests {
 
     #[test]
     fn codebase_search_call_sends_keywords_not_the_raw_question() {
-        let call = build_codebase_search_tool_call(
-            "where is retry and backoff handled in this codebase?",
+        let call = build_codebase_search_tool_call_for_query(
+            &extract_search_keywords("where is retry and backoff handled in this codebase?"),
             2,
+            false,
         );
         let args: serde_json::Value = serde_json::from_str(&call.function.arguments).unwrap();
         let q = args.get("query").and_then(|q| q.as_str()).unwrap();
@@ -481,8 +482,8 @@ mod tests {
     /// 补跑内容必须一致（同一批关键词重跑），但要有标记能认出它是补跑。
     #[test]
     fn the_warmup_retry_is_marked() {
-        let first = build_codebase_search_tool_call("where is retry handled", 1);
-        let retry = build_codebase_search_tool_call_with("where is retry handled", 1, true);
+        let first = build_codebase_search_tool_call_for_query("retry handled", 1, false);
+        let retry = build_codebase_search_tool_call_for_query("retry handled", 1, true);
 
         let first_args: serde_json::Value =
             serde_json::from_str(&first.function.arguments).unwrap();

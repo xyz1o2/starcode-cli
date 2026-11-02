@@ -9,7 +9,7 @@
 // The graph is built on top of the symbol definitions and call edges extracted
 // by `symbol.rs`, resolving call-site names to cross-file symbol definitions.
 
-use super::symbol::{FileSymbols, SymbolDef, SymbolId, SymbolKind};
+use super::symbol::{CallEdge, FileSymbols, SymbolDef, SymbolId, SymbolKind};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -23,6 +23,26 @@ pub struct ResolvedEdge {
     pub callee_name: String,
     pub file_path: String,
     pub line: usize,
+    /// 这条边是怎么解析出来的（消歧依据）。
+    ///
+    /// 以前同名定义**全部**连边，于是 `helper` 这种常见名字会把上百个符号
+    /// 拉成"互相调用"——模型据此判断"这个函数有 82 处定义"，然后去读第一个。
+    pub provenance: EdgeProvenance,
+}
+
+/// 跨文件调用边的消歧依据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeProvenance {
+    /// 名字唯一，无需消歧。
+    Unique,
+    /// 同名多个候选，选了**同一个文件**里的那个（本地调用最常见）。
+    SameFile,
+    /// 同名多个候选，选了**大小写完全一致**的那个（跨文件同名但大小写不同）。
+    ExactCase,
+    /// 同名多个候选且无法消歧 —— 全部连上（宁可多召回，不漏边）。
+    Ambiguous,
+    /// 名字在索引里根本不存在（未解析引用）。
+    Unresolved,
 }
 
 /// The complete call graph for a project.
@@ -71,11 +91,18 @@ impl CallGraph {
     pub fn build(file_symbols: &[FileSymbols]) -> Self {
         let mut symbols = Vec::new();
         let mut name_index: HashMap<String, Vec<SymbolId>> = HashMap::new();
+        // 大小写不敏感的第二张表：调用点写 `parseConfig`、实现叫 `ParseConfig`
+        // 时（JS/TS 常见）也能连上，且消歧时能挑出大小写完全一致的那个。
+        let mut lower_name_index: HashMap<String, Vec<SymbolId>> = HashMap::new();
 
         // Collect all symbols
         for fs in file_symbols {
             for sym in &fs.symbols {
                 name_index.entry(sym.name.clone()).or_default().push(sym.id);
+                lower_name_index
+                    .entry(sym.name.to_lowercase())
+                    .or_default()
+                    .push(sym.id);
                 if sym.id >= symbols.len() {
                     symbols.resize(sym.id + 1, SymbolDef::placeholder());
                 }
@@ -83,29 +110,44 @@ impl CallGraph {
             }
         }
 
-        // Resolve edges: match callee_name → symbol definitions
+        // ── 两遍式解析 ────────────────────────────────────────────────────
+        //
+        // 第一遍：把每个调用点的**名字**收集成候选表；第二遍：统一解析成边。
+        //
+        // 以前是一遍式"按名字连全部候选"，同名定义全都连上：常见名字
+        // （helper / new / run）会把上百个符号拉成互相调用。现在加消歧：
+        // 同名多候选时优先同文件，其次大小写完全一致，实在分不清才全部连上
+        // 并标记为 Ambiguous。
         let mut edges = Vec::new();
         let mut calls_out: HashMap<SymbolId, Vec<SymbolId>> = HashMap::new();
         let mut calls_in: HashMap<SymbolId, Vec<SymbolId>> = HashMap::new();
 
         for fs in file_symbols {
             for edge in &fs.edges {
-                // Find matching symbols by name (cross-file resolution)
-                let matches = name_index.get(&edge.callee_name);
+                // 先按精确名字找；找不到再退化到大小写不敏感（JS/TS 的
+                // `parseConfig` vs `ParseConfig`）。
+                let candidates = name_index
+                    .get(edge.callee_name.as_str())
+                    .filter(|ids| !ids.is_empty())
+                    .or_else(|| lower_name_index.get(&edge.callee_name.to_lowercase()));
+                let Some(candidates) = candidates else {
+                    continue;
+                };
 
-                if let Some(matched_ids) = matches {
-                    for &callee_id in matched_ids {
-                        let resolved = ResolvedEdge {
-                            caller_id: edge.caller_id,
-                            callee_id,
-                            callee_name: edge.callee_name.clone(),
-                            file_path: edge.file_path.clone(),
-                            line: edge.line,
-                        };
-                        calls_out.entry(edge.caller_id).or_default().push(callee_id);
-                        calls_in.entry(callee_id).or_default().push(edge.caller_id);
-                        edges.push(resolved);
-                    }
+                let (chosen, provenance) = disambiguate_callees(candidates, edge, &symbols);
+
+                for &callee_id in &chosen {
+                    let resolved = ResolvedEdge {
+                        caller_id: edge.caller_id,
+                        callee_id,
+                        callee_name: edge.callee_name.clone(),
+                        file_path: edge.file_path.clone(),
+                        line: edge.line,
+                        provenance,
+                    };
+                    calls_out.entry(edge.caller_id).or_default().push(callee_id);
+                    calls_in.entry(callee_id).or_default().push(edge.caller_id);
+                    edges.push(resolved);
                 }
             }
         }
@@ -251,6 +293,21 @@ impl CallGraph {
         self.edges.len()
     }
 
+    /// 已解析的调用边（含消歧依据）—— repo map 与诊断用。
+    pub fn resolved_edges(&self) -> &[ResolvedEdge] {
+        &self.edges
+    }
+
+    /// 全部符号定义（按 id 顺序）—— repo map 用。
+    pub fn symbols(&self) -> &[SymbolDef] {
+        &self.symbols
+    }
+
+    /// 某个符号的直接调用者数量（入度）—— repo map 的重要度信号之一。
+    pub fn caller_count(&self, id: SymbolId) -> usize {
+        self.calls_in.get(&id).map(|ids| ids.len()).unwrap_or(0)
+    }
+
     // ── Traversal helpers ─────────────────────────────────────────────────
 
     fn trace_up(&self, start: SymbolId, max_depth: usize) -> Vec<CallChainLevel> {
@@ -325,10 +382,59 @@ impl CallGraph {
     }
 }
 
-// ── Query scoring ─────────────────────────────────────────────────────────────
+/// 同名候选消歧：返回要连边的符号与依据。
+///
+/// 以前是"同名全部连上"——`helper`/`new`/`run` 这种常见名字会把上百个符号
+/// 拉成互相调用，模型据此判断"这个函数在项目里有 82 处定义"。现在按可信度
+/// 逐级收窄：同文件 → 大小写完全一致 → 实在分不清才全连（宁可多召回，不漏边）。
+fn disambiguate_callees(
+    candidates: &[SymbolId],
+    edge: &CallEdge,
+    symbols: &[SymbolDef],
+) -> (Vec<SymbolId>, EdgeProvenance) {
+    if candidates.len() == 1 {
+        return (candidates.to_vec(), EdgeProvenance::Unique);
+    }
 
+    // 大小写完全一致且**只有一个**：跨文件的大小写差异被精确命中。
+    let exact: Vec<SymbolId> = candidates
+        .iter()
+        .copied()
+        .filter(|id| {
+            symbols
+                .get(*id)
+                .is_some_and(|symbol| symbol.name == edge.callee_name)
+        })
+        .collect();
+    if exact.len() == 1 {
+        return (exact, EdgeProvenance::ExactCase);
+    }
+
+    // 同文件优先：同一模块里的本地调用是最常见的情形。
+    let same_file: Vec<SymbolId> = candidates
+        .iter()
+        .copied()
+        .filter(|id| {
+            symbols
+                .get(*id)
+                .is_some_and(|symbol| symbol.file_path == edge.file_path)
+        })
+        .collect();
+    if !same_file.is_empty() {
+        return (same_file, EdgeProvenance::SameFile);
+    }
+
+    // 到这里仍然分不清：同名、同大小写、都不在调用方文件里 —— 全连并标记
+    // Ambiguous（宁可多召回，不漏边）。
+    (candidates.to_vec(), EdgeProvenance::Ambiguous)
+}
+
+// ── Query scoring ─────────────────────────────────────────────────────────────
 /// 给一个符号按查询打分；`None` 表示不匹配（不会出现在结果里）。
-fn score_symbol(symbol: &SymbolDef, query: &str, query_lower: &str) -> Option<f32> {
+///
+/// 内存检索（`CallGraph::find_symbols`）与库内 FTS5 检索共用这一份评分，
+/// 两条路径给出的排名必须一致。
+pub(crate) fn score_symbol(symbol: &SymbolDef, query: &str, query_lower: &str) -> Option<f32> {
     let name_lower = symbol.name.to_lowercase();
     let query_len = query_lower.chars().count();
     if query_len == 0 {
@@ -659,6 +765,111 @@ mod tests {
         ]);
         let found = graph.find_symbols("compute_hash");
         assert_eq!(found[0].file_path, "src/core/util.rs");
+    }
+
+    /// 造一张多文件图：`(文件, 符号名, [(调用者下标, 被调名)])`。
+    fn graph_with_calls(files: Vec<(&str, Vec<&str>, Vec<(usize, &str)>)>) -> CallGraph {
+        let mut all: Vec<FileSymbols> = Vec::new();
+        let mut next_id = 0usize;
+        for (path, names, calls) in files {
+            let symbols: Vec<SymbolDef> = names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| SymbolDef {
+                    id: next_id + index,
+                    name: (*name).to_string(),
+                    kind: SymbolKind::Function,
+                    file_path: path.to_string(),
+                    start_line: index + 1,
+                    end_line: index + 1,
+                    signature: format!("fn {name}()"),
+                })
+                .collect();
+            let edges = calls
+                .into_iter()
+                .map(|(caller_index, callee)| CallEdge {
+                    caller_id: next_id + caller_index,
+                    callee_name: callee.to_string(),
+                    callee_id: None,
+                    file_path: path.to_string(),
+                    line: 1,
+                })
+                .collect();
+            next_id += names.len();
+            all.push(FileSymbols {
+                file_path: path.to_string(),
+                symbols,
+                edges,
+            });
+        }
+        CallGraph::build(&all)
+    }
+
+    /// 同名定义不该互相连边：以前"同名全连"会让 `helper` 把上百个符号
+    /// 拉成互相调用（模型据此说"这函数有 82 处定义"）。
+    #[test]
+    fn same_file_candidate_wins_when_names_collide() {
+        let graph = graph_with_calls(vec![
+            ("a.rs", vec!["helper", "caller"], vec![(1, "helper")]),
+            ("b.rs", vec!["helper"], vec![]),
+        ]);
+
+        let helpers = graph.find_symbols("helper");
+        let a_helper = helpers
+            .iter()
+            .find(|symbol| symbol.file_path == "a.rs")
+            .expect("a.rs 的 helper");
+        let b_helper = helpers
+            .iter()
+            .find(|symbol| symbol.file_path == "b.rs")
+            .expect("b.rs 的 helper");
+
+        assert_eq!(
+            graph.callers_of(a_helper.id).len(),
+            1,
+            "a.rs 里的 helper 才是被调的那个"
+        );
+        assert!(
+            graph.callers_of(b_helper.id).is_empty(),
+            "b.rs 的同名 helper 不该被连上"
+        );
+    }
+
+    #[test]
+    fn unique_names_resolve_without_ambiguity() {
+        let graph = graph_with_calls(vec![(
+            "a.rs",
+            vec!["caller", "target"],
+            vec![(0, "target")],
+        )]);
+        let edges = graph.resolved_edges();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].provenance, EdgeProvenance::Unique);
+    }
+
+    /// 真的分不清（跨文件同名、同大小写）时全部连上，但不能静默丢边。
+    #[test]
+    fn ambiguous_names_keep_every_candidate() {
+        let graph = graph_with_calls(vec![
+            ("a.rs", vec!["caller"], vec![(0, "shared")]),
+            ("c.rs", vec!["shared"], vec![]),
+            ("d.rs", vec!["shared"], vec![]),
+        ]);
+        let edges = graph.resolved_edges();
+        assert_eq!(edges.len(), 2, "分不清时两个候选都连上");
+        assert!(edges
+            .iter()
+            .all(|edge| edge.provenance == EdgeProvenance::Ambiguous));
+    }
+
+    /// 调用点写 `parseConfig`、实现叫 `ParseConfig`（JS/TS 常见）也要连上。
+    #[test]
+    fn case_insensitive_fallback_resolves_camel_case_mismatches() {
+        let graph = graph_with_calls(vec![
+            ("a.rs", vec!["caller"], vec![(0, "parseConfig")]),
+            ("b.rs", vec!["ParseConfig"], vec![]),
+        ]);
+        assert_eq!(graph.resolved_edges().len(), 1, "大小写不一致也要连上");
     }
 }
 

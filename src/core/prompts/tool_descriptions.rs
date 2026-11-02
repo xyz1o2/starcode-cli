@@ -49,6 +49,7 @@ fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str
         m.insert("CodebaseSearch", "codebase_search");
         m.insert("ProjectMap", "projectmap");
         m.insert("CodeGraph", "code_graph");
+        m.insert("RepoMap", "repomap");
         m.insert("ToolSearch", "toolsearch");
         m.insert("GetDiagnostics", "getdiagnostics");
         // 执行

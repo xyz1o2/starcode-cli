@@ -42,6 +42,8 @@ pub enum ToolName {
     CodebaseSearch,
     ProjectMap,
     CodeGraph,
+    /// 仓库符号地图（按调用图中心性排序的真实标识符清单）。
+    RepoMap,
     NextEdit,
 
     // Git/GitHub
@@ -136,6 +138,7 @@ impl ToolName {
             ToolName::CodebaseSearch => "CodebaseSearch",
             ToolName::ProjectMap => "ProjectMap",
             ToolName::CodeGraph => "CodeGraph",
+            ToolName::RepoMap => "RepoMap",
             ToolName::NextEdit => "NextEdit",
 
             // Git/GitHub
@@ -226,6 +229,7 @@ impl ToolName {
             "CodebaseSearch" => Some(ToolName::CodebaseSearch),
             "ProjectMap" => Some(ToolName::ProjectMap),
             "CodeGraph" => Some(ToolName::CodeGraph),
+            "RepoMap" => Some(ToolName::RepoMap),
             "NextEdit" => Some(ToolName::NextEdit),
             "GitInsight" => Some(ToolName::GitInsight),
             "GitRewind" => Some(ToolName::GitRewind),
@@ -305,6 +309,7 @@ impl ToolName {
             ToolName::CodebaseSearch,
             ToolName::ProjectMap,
             ToolName::CodeGraph,
+            ToolName::RepoMap,
             ToolName::NextEdit,
             // Git/GitHub
             ToolName::GitInsight,
@@ -369,6 +374,7 @@ impl ToolName {
                 | ToolName::CodebaseSearch
                 | ToolName::ProjectMap
                 | ToolName::CodeGraph
+                | ToolName::RepoMap
                 | ToolName::GetDiagnostics
                 | ToolName::LSP
                 | ToolName::WebSearch
@@ -436,6 +442,7 @@ impl ToolName {
             | ToolName::CodebaseSearch
             | ToolName::ProjectMap
             | ToolName::CodeGraph
+            | ToolName::RepoMap
             | ToolName::NextEdit
             | ToolName::ToolSearch
             | ToolName::Snip => "Search",

@@ -10,7 +10,7 @@ use crate::core::tools::tools::{
     BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation, ToolResult as CoreToolResult,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -614,7 +614,7 @@ impl BaseDeclarativeTool for CodebaseSearchTool {
         // （槽 `ranked-cross-file-locate`）。
         // 注意长度受 `compact_tool_definition` 的 160 字符上限约束，
         // `core::prompts::tests::ace_tool_descriptions_fit_compact_limit` 会盯着。
-        "Ranked cross-file search — top relevant regions with match signals, not every raw match. Use when you know roughly the code's words; for exact strings use Grep."
+        "Ranked cross-file search — top relevant regions with match signals, not every raw match. The index is LEXICAL: the query must be code-side terms (identifiers, type names, technical nouns, path fragments) — never the user's sentence verbatim. Use when you know roughly the code's words; for exact strings use Grep."
     }
 
     fn kind(&self) -> Kind {
@@ -1727,7 +1727,50 @@ pub fn explore_symbol(
     limits: ExploreLimits,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let graph = crate::core::context::call_graph_db::get_call_graph(root)?;
-    let symbols = graph.find_symbols(name_hint);
+
+    // 候选 = 内存 contains 匹配 ∪ FTS5 分词匹配。
+    //
+    // 两条路径互补：内存认不出「auth handler」→ `auth_handler`（查询串不连续），
+    // FTS5 认不出拼写误差。并集之后按**同一份**评分排序，两条路径给模型的
+    // 顺序必须一致。
+    let query = name_hint.trim();
+    let query_lower = query.to_lowercase();
+    let mut scored: Vec<(f32, &symbol::SymbolDef)> = Vec::new();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+
+    for candidate in graph.find_symbols(query) {
+        let score = call_graph::score_symbol(candidate, query, &query_lower).unwrap_or(0.0);
+        if seen.insert((candidate.file_path.clone(), candidate.name.clone())) {
+            scored.push((score, candidate));
+        }
+    }
+
+    if let Ok(hits) =
+        crate::core::context::call_graph_db::search_symbols(root, query, limits.max_symbols * 4)
+    {
+        for hit in hits {
+            let Some(candidate) = graph.symbols().iter().find(|candidate| {
+                candidate.file_path == hit.file_path && candidate.name == hit.name
+            }) else {
+                continue;
+            };
+            if seen.insert((candidate.file_path.clone(), candidate.name.clone())) {
+                scored.push((hit.score, candidate));
+            }
+        }
+    }
+
+    scored.sort_by(|(score_a, a), (score_b, b)| {
+        score_b
+            .partial_cmp(score_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.chars().count().cmp(&b.name.chars().count()))
+            .then_with(|| a.file_path.cmp(&b.file_path))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let symbols: Vec<&symbol::SymbolDef> =
+        scored.into_iter().map(|(_, candidate)| candidate).collect();
 
     if symbols.is_empty() {
         return Ok(format!(
@@ -2852,6 +2895,21 @@ mod tests {
         assert!(
             out.contains("CodebaseSearch"),
             "零命中时应给出下一步建议: {out}"
+        );
+    }
+
+    /// FTS5 分词检索补上了内存 contains 的盲区：
+    /// 「auth handler」在内存里匹配不到 `auth_handler`（查询串不连续）。
+    #[test]
+    fn explore_finds_symbols_by_identifier_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/a.rs", "fn auth_handler() {}\n");
+
+        let out = explore_symbol(root, "auth handler", ExploreLimits::default()).unwrap();
+        assert!(
+            out.contains("auth_handler"),
+            "分词检索应命中 auth_handler: {out}"
         );
     }
 }

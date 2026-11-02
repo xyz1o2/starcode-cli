@@ -654,11 +654,13 @@ fn cached_system_prompts_max_chars() -> usize {
         std::env::var("STAR_SYSTEM_PROMPTS_MAX_CHARS")
             .ok()
             .and_then(|v| v.parse().ok())
-            // 必须容得下 CORE_TOOL_NAMES 全部 14 份指南（当前合计约 19.3k 字节）。
+            // 必须容得下 CORE_TOOL_NAMES 全部 18 份指南（当前合计约 24.9k 字符）。
             // 以前默认 15_000 会按文件名序静默截断尾部，把 CodebaseSearch / Write /
             // tool_search 的使用指南整份丢出系统提示词——而 schema 描述又是
             // frontmatter 里的一行短句，模型于是对这几个工具既看不到详情也无人解释。
-            .unwrap_or(24_000)
+            // 24_000 曾刚好装下 17 份（23.9k，余量不到 100 字符）；加入 RepoMap
+            // 指南（+1.0k）后必须同步上调，否则 write.md 会被静默截掉。
+            .unwrap_or(26_000)
     })
 }
 

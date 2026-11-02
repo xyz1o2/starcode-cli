@@ -23,9 +23,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// 版本不匹配时整库丢弃重建（复刻 `Indexer::load_index` 的版本丢弃逻辑）。
 ///
 /// 版本历史：
+/// - 3: 新增 `symbols_fts`（FTS5 符号全文，按标识符分词匹配）
 /// - 1: 初版
 /// - 2: 行号修正为 1-based（旧库的 start_line 全部小 1，必须重建）
-pub const CALLGRAPH_SCHEMA_VERSION: u32 = 2;
+pub const CALLGRAPH_SCHEMA_VERSION: u32 = 3;
 
 /// 每批变更文件的提交粒度：初次全量在大仓上避免数千次 fsync。
 const SYNC_BATCH_FILES: usize = 200;
@@ -346,6 +347,10 @@ fn flush(
                     "DELETE FROM call_edges WHERE file_rel_path = ?1",
                     params![rel],
                 )?;
+                tx.execute(
+                    "DELETE FROM symbols_fts WHERE file_rel_path = ?1",
+                    params![rel],
+                )?;
 
                 for sym in &file_symbols.symbols {
                     tx.execute(
@@ -360,6 +365,19 @@ fn flush(
                             sym.start_line as i64,
                             sym.end_line as i64,
                             sym.signature
+                        ],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO symbols_fts
+                           (file_rel_path, local_idx, name, signature, kind, start_line)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            rel,
+                            sym.id as i64,
+                            sym.name,
+                            sym.signature,
+                            sym.kind.as_str(),
+                            sym.start_line as i64
                         ],
                     )?;
                 }
@@ -388,6 +406,10 @@ fn flush(
                 )?;
             }
             StagedChange::Remove { rel } => {
+                tx.execute(
+                    "DELETE FROM symbols_fts WHERE file_rel_path = ?1",
+                    params![rel],
+                )?;
                 // 子表有 ON DELETE CASCADE（PRAGMA foreign_keys = ON 已开）。
                 tx.execute("DELETE FROM files WHERE rel_path = ?1", params![rel])?;
             }
@@ -530,6 +552,116 @@ pub fn load_graph(root: &Path) -> Result<Option<CallGraph>, Box<dyn Error + Send
     }
 
     Ok(Some(CallGraph::build(&file_symbols)))
+}
+
+// ── FTS5 符号检索 ─────────────────────────────────────────────────────────────
+
+/// FTS5 命中的一条符号。
+#[derive(Debug, Clone)]
+pub struct SymbolHit {
+    pub name: String,
+    pub kind: String,
+    pub file_path: String,
+    pub start_line: usize,
+    pub signature: String,
+    pub score: f32,
+}
+
+/// 用 FTS5 做**分词级**符号检索。
+///
+/// 内存 contains 匹配要求查询串连续出现（"auth handler" 命中不了
+/// `auth_handler`）；FTS5 把标识符按下划线/驼峰拆成 token，于是
+/// "auth handler" 能命中 `auth_handler`、`handle_auth`、`AuthHandler`。
+///
+/// 排名复用内存检索同一份评分（`call_graph::score_symbol`）——两条路径
+/// 给模型的顺序必须一致。
+pub fn search_symbols(
+    root: &Path,
+    hint: &str,
+    limit: usize,
+) -> Result<Vec<SymbolHit>, Box<dyn Error + Send + Sync>> {
+    let db = db_path(root);
+    if !db.exists() {
+        return Ok(Vec::new());
+    }
+    let Some(query) = fts_query(hint) else {
+        return Ok(Vec::new());
+    };
+
+    let conn = Connection::open(&db)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    let mut stmt = conn.prepare(
+        "SELECT file_rel_path, name, kind, start_line, signature FROM symbols_fts
+         WHERE symbols_fts MATCH ?1 ORDER BY rank LIMIT ?2",
+    )?;
+
+    let rows = stmt.query_map(params![query, limit as i64], |row| {
+        Ok(SymbolHit {
+            file_path: row.get(0)?,
+            name: row.get(1)?,
+            kind: row.get(2)?,
+            start_line: row.get::<_, i64>(3)? as usize,
+            signature: row.get(4)?,
+            score: 0.0,
+        })
+    })?;
+
+    let mut hits: Vec<SymbolHit> = Vec::new();
+    for row in rows {
+        hits.push(row?);
+    }
+
+    let query_trimmed = hint.trim();
+    let query_lower = query_trimmed.to_lowercase();
+    for hit in &mut hits {
+        let symbol = SymbolDef {
+            id: 0,
+            name: hit.name.clone(),
+            kind: parse_kind(&hit.kind),
+            file_path: hit.file_path.clone(),
+            start_line: hit.start_line,
+            end_line: hit.start_line,
+            signature: hit.signature.clone(),
+        };
+        hit.score =
+            super::call_graph::score_symbol(&symbol, query_trimmed, &query_lower).unwrap_or(0.0);
+    }
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.file_path.cmp(&b.file_path))
+            .then_with(|| a.start_line.cmp(&b.start_line))
+    });
+    Ok(hits)
+}
+
+/// 把检索词拼成 FTS5 MATCH 表达式：每个 token 前缀匹配，token 之间 AND。
+fn fts_query(hint: &str) -> Option<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    for raw in hint.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        let token = raw.trim_matches('_').to_lowercase();
+        if token.len() < 2 || !token.chars().all(|c| c.is_ascii_alphanumeric()) {
+            continue;
+        }
+        if tokens.iter().any(|existing| existing == &token) {
+            continue;
+        }
+        tokens.push(token);
+        if tokens.len() >= 6 {
+            break;
+        }
+    }
+    if tokens.is_empty() {
+        return None;
+    }
+    Some(
+        tokens
+            .iter()
+            .map(|token| format!("\"{token}\"*"))
+            .collect::<Vec<_>>()
+            .join(" AND "),
+    )
 }
 
 #[derive(Default)]
@@ -690,7 +822,19 @@ fn create_schema(conn: &Connection, root: &str) -> Result<(), Box<dyn Error + Se
            line             INTEGER NOT NULL
          );
          CREATE INDEX IF NOT EXISTS idx_call_edges_lookup
-           ON call_edges(file_rel_path, caller_local_idx);",
+           ON call_edges(file_rel_path, caller_local_idx);
+         -- 符号全文（FTS5）。标识符按下划线/驼峰拆成 token，于是
+         -- 「auth handler」能命中 `auth_handler` —— 内存 contains 匹配做不到
+         -- （它要求查询串连续出现）。
+         CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
+           file_rel_path UNINDEXED,
+           local_idx     UNINDEXED,
+           name,
+           signature,
+           kind          UNINDEXED,
+           start_line    UNINDEXED,
+           tokenize = 'unicode61'
+         );",
     )?;
     write_meta(
         conn,
@@ -1109,6 +1253,40 @@ mod tests {
         );
     }
 
+    /// FTS5 的独有能力：**分词级**匹配。
+    ///
+    /// 内存 contains 要求查询串连续出现，所以「auth handler」命中不了
+    /// `auth_handler`；FTS5 把标识符拆成 token，于是能命中，且与词序无关。
+    #[test]
+    fn fts_matches_identifier_tokens_regardless_of_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/a.rs", "fn auth_handler() {}\n");
+        let root = canonical(root);
+        sync(&root).unwrap();
+
+        let hits = search_symbols(&root, "auth handler", 10).unwrap();
+        assert_eq!(hits.len(), 1, "分词匹配应命中 auth_handler：{hits:?}");
+        assert_eq!(hits[0].name, "auth_handler");
+
+        let reversed = search_symbols(&root, "handler auth", 10).unwrap();
+        assert_eq!(reversed.len(), 1, "词序无关（AND 语义）：{reversed:?}");
+    }
+
+    /// 库里没有的东西不能被 FTS5 凭空造出来。
+    #[test]
+    fn fts_returns_nothing_for_unrelated_terms() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/a.rs", "fn auth_handler() {}\n");
+        let root = canonical(root);
+        sync(&root).unwrap();
+
+        assert!(search_symbols(&root, "zzz_unrelated", 10)
+            .unwrap()
+            .is_empty());
+    }
+
     /// 手动基准（不进 CI）：
     /// `cargo test --release --lib -- core::context::call_graph_db::tests::bench_call_graph_paths --ignored --nocapture`
     #[test]
@@ -1143,6 +1321,26 @@ mod tests {
             "callgraph bench: memory-build={memory_ms}ms cold-sync={first_sync_ms}ms load={load_ms}ms | symbols={} edges={}",
             loaded.len(),
             loaded.edge_count()
+        );
+
+        // 冒烟：真实仓库上跑一次符号地图（v3 库 + FTS5 + PageRank 全链路）。
+        let map = crate::core::context::repo_map::build_repo_map(
+            &root,
+            None,
+            crate::core::context::repo_map::RepoMapLimits {
+                max_entries: 8,
+                ..Default::default()
+            },
+        )
+        .expect("repo map");
+        println!("{map}");
+
+        // 冒烟：FTS5 分词检索（内存 contains 找不到的形态）。
+        let hits = crate::core::context::call_graph_db::search_symbols(&root, "codebase search", 5)
+            .expect("fts");
+        println!(
+            "fts hits for 'codebase search': {:?}",
+            hits.iter().map(|hit| &hit.name).collect::<Vec<_>>()
         );
     }
 }

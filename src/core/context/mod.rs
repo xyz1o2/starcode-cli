@@ -20,6 +20,7 @@ pub mod lens_service;
 pub mod management;
 pub mod precise_retrieval;
 pub mod reflector;
+pub mod repo_map;
 pub mod reranker;
 pub mod retrieval_baseline;
 pub mod search_cache;

@@ -4,6 +4,7 @@ use std::collections::HashSet;
 mod auto_plan;
 mod helpers;
 mod loop_detection;
+mod query_rewrite;
 mod tool_call_builders;
 mod triggers;
 
@@ -16,11 +17,12 @@ pub(crate) use helpers::{
     should_skip_verification, truncate_chars, ToolHints, ToolRoles, CORE_TOOL_NAMES,
 };
 pub(crate) use loop_detection::{detect_tool_loop, resolved_tool_loop_repeat_threshold};
+pub(crate) use query_rewrite::{needs_rewrite, rewrite_search_query};
 pub(crate) use tool_call_builders::{
-    build_analyzer_skill_tool_call, build_codebase_search_tool_call,
-    build_codebase_search_tool_call_with, build_editor_skill_tool_call, build_json_fallback_prompt,
-    build_navigator_skill_tool_call, build_project_map_tool_call, build_validation_tool_call,
-    extract_search_keywords, json_fallback_extract_tool_call,
+    build_analyzer_skill_tool_call, build_codebase_search_tool_call_for_query,
+    build_editor_skill_tool_call, build_json_fallback_prompt, build_navigator_skill_tool_call,
+    build_project_map_tool_call, build_validation_tool_call, extract_search_keywords,
+    json_fallback_extract_tool_call,
 };
 pub(crate) use triggers::{
     dynamic_context_first_turn_enabled, json_fallback_enabled, select_best_auto_trigger,

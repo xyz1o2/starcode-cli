@@ -100,7 +100,8 @@ PRAGMA foreign_keys = ON;    -- 级联删除依赖它，rusqlite 默认关
 ```
 
 版本历史：
-- `CALLGRAPH_SCHEMA_VERSION = 2`：行号修正为 1-based（v1 库的 `start_line` 全部小 1）
+- `CALLGRAPH_SCHEMA_VERSION = 3`：新增 `symbols_fts`（FTS5 符号全文）
+- 2：行号修正为 1-based（v1 库的 `start_line` 全部小 1）
 - 1：初版
 - 语义变化（如 kind 词表调整、加新列影响读结果）一律 bump 版本 → 旧库整文件重建，不做就地迁移（量级不值得）。
 
@@ -234,27 +235,60 @@ kind 反序列化：按 `SymbolKind::as_str()` 词表 match；未知字符串 �
 - 手动基准（不自动化进 CI）：
   `cargo test --release --lib -- core::context::call_graph_db::tests::bench_call_graph_paths --ignored --nocapture`
 
-### 基准（本仓库，release，2026-11-02）
+### 基准（本仓库，release，2026-11-03）
 
 | 路径 | 耗时 | 说明 |
 |---|---|---|
-| 内存全量构建（旧行为） | 2081 ms | walk + tree-sitter 全量 parse + 解析边 |
-| 冷同步（建库） | 2340 ms | 首查代价：全量 parse + 写库（+12%） |
-| 库加载（热查询） | **87 ms** | 全表读取 + `CallGraph::build`，无磁盘解析 |
+| 内存全量构建（旧行为） | 1948 ms | walk + tree-sitter 全量 parse + 解析边 |
+| 冷同步（建库，v3） | 5469 ms | 首查代价：全量 parse + 写库（含 FTS5 索引写入，+3.2s） |
+| 库加载（热查询） | 185 ms | 全表读取 + `CallGraph::build`，无磁盘解析 |
 
-规模：13,934 个符号 / 167,071 条解析边。第二次起的查询约快 **24×**，且与仓库大小解耦——
+规模：14,042 个符号 / 149,518 条解析边。第二次起的查询约快 **10×**，且与仓库大小解耦——
 这是持久化的全部收益来源。
 
-## 12. 后续阶段（本期不做）
+FTS5 的代价写在明处：冷同步从 2.3s 涨到 5.5s（多写一份全文索引），换来的是
+内存 contains 做不到的**分词级**匹配：
 
-1. **FTS5 符号全文**（对标 codegraph `nodes_fts` + 触发器）：`find_symbols` 的 `contains` 内存扫描换 SQL，支持"记不清全名"的场景，配合 `boundedEditDistance` 容错。
+```text
+fts hits for "codebase search":
+  codebase_search · codebase_search_language_gate · codebase_search_limits
+  run_codebase_search · search_codebase
+```
+
+（查询串带空格时，内存 contains 一个都匹配不上。）
+
+## 12. 后续阶段（全部已实现）
+
+1. ~~**FTS5 符号全文**~~ —— **已实现**：`symbols_fts`（FTS5，按标识符分词，`auth handler` → `auth_handler`，与词序无关）+ 与内存检索共用的评分层；explore 的候选 = 内存 contains ∪ FTS5 分词。
 2. ~~**`explore` 复合工具**~~ —— **已实现（升级 `CodeGraph`）**：一次调用返回逐字源码 + 直接 callers/callees + 上下游影响面（`depth`/`max_symbols` 可调）；`trace_call_chain` 保留给 MCP。
 3. ~~**查询评分加分项移植**~~ —— **已实现**：名称匹配分级（精确 > 大小写不敏感精确 > 前缀 > camel/snake 词边界 > 子串）、kind 加权（callable 优先）、路径相关性、测试路径降权、有界编辑距离容错（4–7 字符允许 1 个编辑、≥8 允许 2 个，且首字母必须一致）；同分按名字长度 → 路径 → id 稳定排序。
-4. ~~**watcher dirty 联动**~~ —— **已实现（惰性清 token）**：Edit/Write 与 watcher 真实事件都会让 token 失效，查询时增量同步。若将来要"查询零等待"，可让协调器 rebuild 后主动 `sync`（当前不做，避免没人用 CodeGraph 时白跑）。
-5. **`unresolved_refs` 两遍式候选消歧 + `provenance`**（codegraph 的四类边 + 边溯源）。
-6. **PageRank 式 repo map**（aider 思路，给冷启动的首查提供全局地图）。
+4. ~~**watcher dirty 联动**~~ —— **已实现（惰性清 token）**：worker 消费脏快照时清掉进程内 token，查询时增量同步；只认真实路径，排除 `\0refresh-all` 哨兵（周期性 refiller 会把缓存变成摆设）。
+5. ~~**两遍式引用解析**~~ —— **已实现**：候选按名字收集后统一解析并消歧（同名唯一 → 同文件 → 大小写完全一致 → 全连并标记 `Ambiguous`）；边带 `provenance`，调用图不再把同名定义互相连成一团。
+6. ~~**PageRank repo map**~~ —— **已实现（新工具 `RepoMap`）**：文件级 PageRank × 符号入度 × kind 权重，输出"最重要的真实标识符"清单 —— 它是中文需求落到英文标识符上的那本字典。
 
-## 13. 评审待决问题
+## 13. 关联改动：自然语言 → 代码侧检索词（query 改写）
+
+调用图与搜索都是**词法**引擎：索引里全是英文标识符、路径和英文注释。把中文
+需求（「然后 后停 停来」）整句塞进 `query`，一个 token 都命中不了 —— 工具参数
+是"找代码用的检索词"，不是"复述用户需求"。
+
+对标 Sourcegraph Cody 的 context engine（明确为"长句与外语提问"做 query
+rewriting），本项目在**自动触发路径**上做同一件事的最小版本：
+
+- 判据（`agent/tool_routing/query_rewrite.rs::needs_rewrite`）：输入含 CJK
+  **且**没有代码味 token（`snake_case` / `CamelCase` / 路径 / `::`）。
+- 动作：一次极小的 LLM 调用（8s 超时），把需求映射成 ≤6 个英文标识符/术语；
+  返回值经过停用词过滤（模型爱回散文："Sure! here you go: ..."）与标识符
+  字符校验。
+- 失败即回退原有规则压缩（`extract_search_keywords`），**绝不拖住首轮**。
+- 冷启动补跑必须复用**同一个** query —— 重新改写会得到不同的词，首查与补跑
+  就配不上对了。
+
+配套：工具描述与 `tool-description-codebase_search.md` 明确写明
+`query` 必须是代码侧关键词；新增 `RepoMap` 工具（§12.6）给模型提供"真实标识符
+字典"，让中文需求有词可搜。
+
+## 14. 评审待决问题
 
 1. 初次全量的分批粒度：200 文件/事务是否合适（基准后定）。
 2. `files` 表是否需要 `UNIQUE(root)` 防跨仓库误用之外的什么（现在 root 存 meta 单行）。

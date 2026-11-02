@@ -3,12 +3,11 @@ use crate::agent::agent_loop::TurnResult;
 use crate::agent::loop_engineering::{LoopState, LoopStrategy, StructuredError, ToolCallBudget};
 use crate::agent::nudges;
 use crate::agent::tool_routing::{
-    build_analyzer_skill_tool_call, build_codebase_search_tool_call, build_editor_skill_tool_call,
-    build_json_fallback_prompt, build_navigator_skill_tool_call, build_project_map_tool_call,
-    build_tool_loop_signature, build_validation_tool_call, detect_tool_loop, has_action_intent,
-    is_edit_tool_name, is_read_only_tool_name, is_validation_tool_name,
-    json_fallback_extract_tool_call, resolved_read_only_turn_limit, select_best_auto_trigger,
-    AutoTriggerKind,
+    build_analyzer_skill_tool_call, build_editor_skill_tool_call, build_json_fallback_prompt,
+    build_navigator_skill_tool_call, build_project_map_tool_call, build_tool_loop_signature,
+    build_validation_tool_call, detect_tool_loop, has_action_intent, is_edit_tool_name,
+    is_read_only_tool_name, is_validation_tool_name, json_fallback_extract_tool_call,
+    resolved_read_only_turn_limit, select_best_auto_trigger, AutoTriggerKind,
 };
 use crate::agent::{hooks, reflection, tool_helpers};
 use crate::core::i18n;
@@ -897,7 +896,20 @@ impl Agent {
                 // 以前在这里一刀切置 true，于是工具自己给出的"稍后重跑"建议
                 // 被自家 flag 当场否掉，这一轮再也补不上那次搜索。
                 let mut satisfied = false;
-                let tool_call = build_codebase_search_tool_call(user_input, current_turn);
+                // 中文需求先改写成代码侧检索词（词法引擎吃英文标识符）；补跑
+                // 必须复用同一个 query，否则两次调用搜的不是同一件事。
+                let query =
+                    crate::agent::tool_routing::rewrite_search_query(&self.client, user_input)
+                        .await
+                        .unwrap_or_else(|| {
+                            crate::agent::tool_routing::extract_search_keywords(user_input)
+                        });
+                let tool_call =
+                    crate::agent::tool_routing::build_codebase_search_tool_call_for_query(
+                        &query,
+                        current_turn,
+                        false,
+                    );
                 let result = self
                     .run_auto_trigger_tool(
                         user_input,
@@ -944,8 +956,8 @@ impl Agent {
                         // （事故记录 §1.5 的 `turn=1` 双发）。
                         let mut retry_satisfied = false;
                         let retry_call =
-                            crate::agent::tool_routing::build_codebase_search_tool_call_with(
-                                user_input,
+                            crate::agent::tool_routing::build_codebase_search_tool_call_for_query(
+                                &query,
                                 current_turn,
                                 true,
                             );
