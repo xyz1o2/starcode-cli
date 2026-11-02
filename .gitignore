@@ -17,3 +17,6 @@ logs/
 .agents
 .empryo
 .spec-workflow
+# Generated context indexes (index.json / callgraph.db and WAL sidecars).
+# `.star/settings.json` stays committable; only derived data is ignored.
+.star/context/

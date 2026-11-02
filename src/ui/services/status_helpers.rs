@@ -32,8 +32,7 @@ pub(super) fn truncate_status_detail(detail: &str, max_chars: usize) -> String {
 
 pub(super) fn format_tool_name_for_status(name: &str) -> String {
     match name {
-        "CodebaseSearch" => "codebase search".to_string(),
-        "ProjectMap" => "project map".to_string(),
+        // CodebaseSearch / ProjectMap 保持注册名（理由同 tool_display_name）
         "Write" => "write file".to_string(),
         "Read" => "read file".to_string(),
         "MultiEdit" => "multi edit".to_string(),

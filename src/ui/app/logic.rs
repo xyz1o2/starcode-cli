@@ -1064,22 +1064,22 @@ mod steering_tests {
         state.chat_history.push(entry);
         let idx = state.chat_history.len() - 1;
 
-        let collapsed = crate::ui::components::chat_history::render_chat_lines(&mut state, 80)
-            .len()
-            as u16;
+        let collapsed =
+            crate::ui::components::chat_history::render_chat_lines(&mut state, 80).len() as u16;
 
         state.expanded_thinking_indices.insert(idx);
         state.rendered_cache.remove(&idx);
-        let expanded = crate::ui::components::chat_history::render_chat_lines(&mut state, 80)
-            .len()
-            as u16;
-        assert!(expanded > collapsed, "展开必须变高：{expanded} <= {collapsed}");
+        let expanded =
+            crate::ui::components::chat_history::render_chat_lines(&mut state, 80).len() as u16;
+        assert!(
+            expanded > collapsed,
+            "展开必须变高：{expanded} <= {collapsed}"
+        );
 
         state.expanded_thinking_indices.remove(&idx);
         state.rendered_cache.remove(&idx);
-        let back = crate::ui::components::chat_history::render_chat_lines(&mut state, 80)
-            .len()
-            as u16;
+        let back =
+            crate::ui::components::chat_history::render_chat_lines(&mut state, 80).len() as u16;
         assert_eq!(
             back, collapsed,
             "再折叠必须缩回折叠态高度（空白行没缩回去就是这条）"
@@ -1101,35 +1101,34 @@ mod steering_tests {
         let idx = state.chat_history.len() - 1;
 
         // 还没交互过时的基线：折叠 + 流式占位共 1-2 行
-        let collapsed = crate::ui::components::chat_history::render_chat_lines(&mut state, 80)
-            .len()
-            as u16;
+        let collapsed =
+            crate::ui::components::chat_history::render_chat_lines(&mut state, 80).len() as u16;
 
         // 流式中通过真实点击路径展开（floor 随后会被 stale 帧钉在展开高度）
         assert!(
             crate::ui::events::mouse::try_toggle_on_click(&mut state, idx, 0),
             "点击思考块应展开"
         );
-        let expanded = crate::ui::components::chat_history::render_chat_lines(&mut state, 80)
-            .len()
-            as u16;
-        assert!(expanded > collapsed, "展开必须变高：{expanded} <= {collapsed}");
+        let expanded =
+            crate::ui::components::chat_history::render_chat_lines(&mut state, 80).len() as u16;
+        assert!(
+            expanded > collapsed,
+            "展开必须变高：{expanded} <= {collapsed}"
+        );
 
         // 流式又长了一段：stale 重测，floor 从此刻起钉在展开高度
         if let Some(r) = state.chat_history[idx].reasoning_content.as_mut() {
             r.push_str("reasoning delta grows the block\n");
         }
-        let _ =
-            crate::ui::components::chat_history::render_chat_lines(&mut state, 80);
+        let _ = crate::ui::components::chat_history::render_chat_lines(&mut state, 80);
 
         // 流式中再点击折叠 —— floor 必须一并失效，不得用空白行垫回展开高度
         assert!(
             crate::ui::events::mouse::try_toggle_on_click(&mut state, idx, 0),
             "点击思考块应折叠"
         );
-        let back = crate::ui::components::chat_history::render_chat_lines(&mut state, 80)
-            .len()
-            as u16;
+        let back =
+            crate::ui::components::chat_history::render_chat_lines(&mut state, 80).len() as u16;
         assert_eq!(
             back, collapsed,
             "流式中的折叠同样要立刻缩回（floor 不许把空白垫进来）"

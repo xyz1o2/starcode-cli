@@ -893,7 +893,8 @@ impl SearchEngine {
     /// - **bigram**（「错误」「误处」「处理」）—— 主要的区分度来源
     /// - **单字**（「错」「误」…）—— 兜住只出现一次的字
     ///
-    /// 单字让索引膨胀得厉害，所以只有整串本身够长时才额外产出单字。
+    /// 单字会让倒排表膨胀，但短查询（「不动」）只有单字能兜住；召回优先，
+    /// 精度交给 RRF 融合与重排阶段消化。
     fn push_cjk_tokens(tokens: &mut HashSet<String>, text: &str) {
         let chars: Vec<char> = text.chars().collect();
         if chars.is_empty() {
@@ -911,15 +912,13 @@ impl SearchEngine {
         }
 
         // 单字（兜底召回）
-        // 
+        //
         // 之前只有 len >= 3 时才产出单字，理由是"避免短词噪声淹没倒排表"。
         // 但这导致 2 字查询（「又不」「不动」）只产出整串，命中不了代码里
         // 单独出现的「不」或「动」—— 短查询反而召回更差。
         //
-        // 新策略：**所有** CJK 段都产出单字，但在**查询时**（而非索引时）
-        // 限制单字权重，避免它们主导排序。索引时不限，是为了让所有单字
-        // 都能被召回；查询时降权，是为了让短查询也能找到包含这些字的文档，
-        // 只是排序时优先整串/bigram 匹配。
+        // 现在**所有** CJK 段都产出单字。噪声由融合与重排阶段消化，
+        // 而不是在召回阶段提前丢弃（丢掉就再也找不回来了）。
         for ch in &chars {
             tokens.insert(ch.to_string());
         }
@@ -1077,15 +1076,27 @@ mod tests {
         assert!(tokens.contains(&"错".to_string()));
     }
 
-    /// 两字词不该炸出单字噪声。
+    /// 两字词也要产出单字兜底。
     ///
-    /// 「限流」只出 `限流`：单字 `限`/`流` 在代码里到处都是，放进倒排表
-    /// 只会让所有中文查询都命中一大片无关 chunk。
+    /// 旧策略（len >= 3 才出单字）让「限流」只能整串命中；代码里写成
+    /// 「限」+「流」分散出现时零召回。召回阶段宁可多给候选，排序交给
+    /// RRF 融合与重排。
     #[test]
-    fn short_cjk_terms_do_not_produce_single_char_noise() {
+    fn short_cjk_terms_still_emit_single_char_fallbacks() {
         let engine = SearchEngine::new();
         let tokens = engine.tokenize("限流");
-        assert_eq!(tokens, vec!["限流".to_string()]);
+        assert!(
+            tokens.contains(&"限流".to_string()),
+            "整串必须保留：{tokens:?}"
+        );
+        assert!(
+            tokens.contains(&"限".to_string()),
+            "单字兜底必须保留：{tokens:?}"
+        );
+        assert!(
+            tokens.contains(&"流".to_string()),
+            "单字兜底必须保留：{tokens:?}"
+        );
     }
 
     /// 英文分词路径不能被 CJK 改动影响。

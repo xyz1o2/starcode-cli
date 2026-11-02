@@ -53,16 +53,38 @@ pub struct IndexEntry {
     pub mtime_ms: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+/// 索引格式版本号。分词逻辑、倒排表结构、或任何影响检索结果的改动都应该增加版本号，
+/// 让旧索引失效，触发全量重建。
+///
+/// 版本历史：
+/// - 1: 初始版本
+/// - 2: 中文分词改动 —— 所有 CJK 段产出单字 token（之前只有 len >= 3 才产出）
+const INDEX_FORMAT_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectIndex {
+    /// 索引格式版本号。不匹配当前版本时，整个索引会被丢弃，触发全量重建。
+    #[serde(default)]
+    pub version: u32,
     /// 相对路径 → 索引条目
     #[serde(deserialize_with = "deserialize_blobs_compat")]
     pub blobs: HashMap<String, IndexEntry>,
 }
 
-/// `blobs` 字段的兼容反序列化：新格式 `HashMap<String, IndexEntry>`，
-/// 旧格式（v1）`HashMap<String, String>`。旧条目 size/mtime 记 0，
-/// 下一轮索引会读一次文件做元数据回填。
+impl Default for ProjectIndex {
+    fn default() -> Self {
+        Self {
+            version: INDEX_FORMAT_VERSION,
+            blobs: HashMap::new(),
+        }
+    }
+}
+
+/// `blobs` 字段的兼容反序列化：旧格式（v1）是 `HashMap<String, String>`。
+///
+/// 让它能解析出来，是为了把"版本不匹配"交给 [`Indexer::load_index`] 的
+/// 版本门禁处理（丢弃整库重建），而不是让它表现为 JSON 解析错误 ——
+/// 两者结果相同，但前者能留下明确的版本日志。
 fn deserialize_blobs_compat<'de, D>(
     deserializer: D,
 ) -> Result<HashMap<String, IndexEntry>, D::Error>
@@ -127,7 +149,16 @@ impl Indexer {
         if self.index_file.exists() {
             if let Ok(content) = fs::read_to_string(&self.index_file) {
                 if let Ok(index) = serde_json::from_str::<ProjectIndex>(&content) {
-                    return index;
+                    // 版本号不匹配时，丢弃旧索引，触发全量重建。
+                    // 这确保分词逻辑或倒排表结构改变后，不会沿用格式不兼容的旧索引。
+                    if index.version == INDEX_FORMAT_VERSION {
+                        return index;
+                    }
+                    log::info!(
+                        "Index format version mismatch (found {}, expected {}), triggering full rebuild",
+                        index.version,
+                        INDEX_FORMAT_VERSION
+                    );
                 }
                 // 旧格式（HashMap<String,String>）由自定义 Deserialize 兜底；
                 // 走到这里说明文件本身损坏，回退全量重建。
@@ -426,17 +457,23 @@ mod tests {
         assert_eq!(result.total_files, 0);
     }
 
+    /// v1（无 `version` 字段）在版本门禁处整库丢弃 —— 旧索引的分词语义与
+    /// v2 不兼容，沿用会留下"重建过但依然搜不到"的陈旧数据。
+    /// 下一次 `index_project` 会全量重建。
     #[test]
-    fn legacy_index_format_is_deserialized() {
+    fn legacy_index_format_is_discarded_for_a_full_rebuild() {
         let (dir, indexer) = temp_project();
         let legacy = r#"{"blobs": {"src/a.rs": "deadbeef"}}"#;
         fs::create_dir_all(dir.path().join(".star/context")).unwrap();
         fs::write(dir.path().join(".star/context/index.json"), legacy).unwrap();
 
         let index = indexer.load_index_public_for_test();
-        let entry = index.blobs.get("src/a.rs").expect("legacy entry kept");
-        assert_eq!(entry.hash, "deadbeef");
-        assert_eq!(entry.size, 0, "旧条目无元数据，下一轮会读一次回填");
+        assert!(
+            index.blobs.is_empty(),
+            "旧格式必须整库丢弃，触发全量重建：{:?}",
+            index.blobs
+        );
+        assert_eq!(index.version, INDEX_FORMAT_VERSION);
     }
 
     #[test]

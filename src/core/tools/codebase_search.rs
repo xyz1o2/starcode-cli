@@ -1115,17 +1115,31 @@ fn search_codebase_with_limits(
     let (engine, stats, source) = resolve_engine(root, limits, &update_output, cache)?;
 
     if matches!(source, EngineSource::Warming) {
+        // 索引未就绪 ≠ 只能干等：ripgrep 字面兜底**不依赖索引**，先把能给的给出来。
+        //
+        // 之前的实现在此直接 return "still building / re-run once"——模型重跑时
+        // watcher 若仍未就绪，就还是同一句 Warming；用户实际看到的就是连续
+        // 两轮 turn=13 双发、零产出。字面兜底让冷启动第一轮就有可用结果。
         let mut output = String::new();
         output.push_str(&format!(
             "The cross-file search index for '{}' is still building in the background (first build; typically finishes in seconds).\n",
             root.display()
         ));
-        // 措辞要"再试一次"，而不是"去用 Grep"：上次这里写的是
-        // "No results available ... use `Grep` now"，等于在模型第一次调用这个工具时
-        // 就教它别再用——第一次几乎必然是空的（lazy_init 的后台构建和首轮 LLM 请求并发）。
-        output.push_str(
-            "No hits this turn — this is a cold index, not an empty result. Re-run `CodebaseSearch` with the same keywords once before giving up on it.\n",
-        );
+
+        let literal_text = literal_text_fallback(query, root);
+        match literal_text {
+            Some(fallback) => {
+                output.push_str("Meanwhile, a literal text search found these candidates:\n\n");
+                output.push_str(&fallback);
+            }
+            None => {
+                // 字面也零命中时才让模型重跑。（措辞保留"再试一次"而不是"改用
+                // Grep"——第一次调用时就把模型推走会让这个工具永远不被用。）
+                output.push_str(
+                    "No hits this turn — this is a cold index, not an empty result. Re-run `CodebaseSearch` with the same keywords once before giving up on it.\n",
+                );
+            }
+        }
         return Ok(output);
     }
 
@@ -1474,6 +1488,21 @@ pub async fn wait_for_index_ready(timeout: Duration) -> bool {
     }
 }
 
+/// 字面兜底（Warming 分支专用）：索引未就绪时立即跑一次 ripgrep 全文搜索。
+///
+/// 返回 `Some(格式化结果)` 当且仅当**有命中**；零命中或 ripgrep 失败都返回
+/// `None`（调用方据此决定是给出兜底结果还是让模型重跑）。
+fn literal_text_fallback(query: &str, root: &Path) -> Option<String> {
+    let config = RipgrepConfig {
+        max_results: Some(40),
+        ..Default::default()
+    };
+    match search_with_ripgrep(query, root.to_string_lossy().as_ref(), config) {
+        Ok(results) if !results.is_empty() => Some(format_ripgrep_results(query, &results)),
+        _ => None,
+    }
+}
+
 /// 字面精确召回通道 —— 返回命中文件的**排名列表**。
 ///
 /// 这是第三路召回，与前两路**异构**：
@@ -1587,7 +1616,7 @@ pub fn build_call_graph(
             None => continue,
         };
 
-        let language = language_for_call_graph(ext);
+        let language = symbol::language_for_file(ext);
         if language.is_none() {
             continue;
         }
@@ -1613,22 +1642,6 @@ pub fn build_call_graph(
     Ok(CallGraph::build(&file_symbols))
 }
 
-/// Map file extension to Tree-sitter language for call graph extraction.
-fn language_for_call_graph(ext: &str) -> Option<tree_sitter::Language> {
-    match ext {
-        "rs" => Some(tree_sitter_rust::LANGUAGE.into()),
-        "py" | "pyi" => Some(tree_sitter_python::LANGUAGE.into()),
-        "js" | "jsx" | "mjs" | "cjs" => Some(tree_sitter_javascript::LANGUAGE.into()),
-        "ts" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
-        "tsx" => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
-        "go" => Some(tree_sitter_go::LANGUAGE.into()),
-        "c" | "h" => Some(tree_sitter_c::LANGUAGE.into()),
-        "cpp" | "hpp" | "cc" | "cxx" | "hxx" => Some(tree_sitter_cpp::LANGUAGE.into()),
-        "java" => Some(tree_sitter_java::LANGUAGE.into()),
-        _ => None,
-    }
-}
-
 /// Trace the call chain for a symbol matching `name_hint`.
 ///
 /// Returns a formatted call chain string suitable for the LLM.
@@ -1636,7 +1649,10 @@ pub fn trace_call_chain(
     root: &Path,
     name_hint: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let graph = build_call_graph(root)?;
+    // 优先读 `.star/context/callgraph.db`；需要时增量同步，库不可用才回退
+    // 内存全量构建。查询 API 与输出格式不变 —— 见
+    // docs/callgraph-persistence-design.zh-CN.md。
+    let graph = crate::core::context::call_graph_db::get_call_graph(root)?;
 
     let symbols = graph.find_symbols(name_hint);
     if symbols.is_empty() {

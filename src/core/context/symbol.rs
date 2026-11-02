@@ -111,6 +111,26 @@ const MAX_CALL_NAME_DEPTH: usize = 4;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+/// 按扩展名选择 Tree-sitter 语言。
+///
+/// 调用图的内存构建（`codebase_search::build_call_graph`）与持久化同步
+/// （`call_graph_db::sync`）共用这一处白名单：任何一边单独扩语言，都会让
+/// "内存构建"和"库加载"看到不同的符号集。
+pub fn language_for_file(ext: &str) -> Option<Language> {
+    match ext {
+        "rs" => Some(tree_sitter_rust::LANGUAGE.into()),
+        "py" | "pyi" => Some(tree_sitter_python::LANGUAGE.into()),
+        "js" | "jsx" | "mjs" | "cjs" => Some(tree_sitter_javascript::LANGUAGE.into()),
+        "ts" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        "tsx" => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
+        "go" => Some(tree_sitter_go::LANGUAGE.into()),
+        "c" | "h" => Some(tree_sitter_c::LANGUAGE.into()),
+        "cpp" | "hpp" | "cc" | "cxx" | "hxx" => Some(tree_sitter_cpp::LANGUAGE.into()),
+        "java" => Some(tree_sitter_java::LANGUAGE.into()),
+        _ => None,
+    }
+}
+
 /// Extract all symbol definitions and call edges from source using Tree-sitter.
 ///
 /// Returns `None` if tree-sitter is unavailable for the language or parsing fails.

@@ -520,24 +520,23 @@ fn build_tool_argument_display(
         "LS" => get_str(&["directory", "path"])
             .map(|p| shorten(&p))
             .unwrap_or_else(|| ".".to_string()),
-        // CodebaseSearch: 保留原来的 `query=..., turn=...` 摘要形态
-        // （事故记录里就是 `codebase search(query=停, turn=43)` 这种样子），
-        // 只在冷启动补跑时**追加**一个标记。
+        // CodebaseSearch: 摘要显示搜索词本身，不带键名（对标 Claude Code 的
+        // `Grep(pattern)` 形态：`CodebaseSearch(不动)`）。turn 是内部回合数，
+        // 对用户是噪声，不再显示。
         //
-        // 补跑与首查的 query 和 turn 完全相同 —— 不标出来的话，补跑在 UI 上
-        // 就是"同一个调用出现了两次"（事故记录 §1.5 的 `turn=1` 双发）。
+        // 冷启动补跑与首查的 query 完全相同 —— 不标出来的话，补跑在 UI 上
+        // 就是"同一个调用出现了两次"。补跑在尾部追加 ` · retry` 后缀。
         "CodebaseSearch" => {
-            let mut parts = Vec::new();
-            if let Some(q) = get_str(&["query"]) {
-                parts.push(format!("query={}", truncate_chars_with_ellipsis(&q, 40)));
-            }
-            if let Some(t) = get_u64(&["turn"]) {
-                parts.push(format!("turn={t}"));
-            }
+            let mut summary = get_str(&["query"])
+                .map(|q| truncate_chars_with_ellipsis(&q, 40))
+                .unwrap_or_default();
             if obj.get("warmup_retry").and_then(|v| v.as_bool()) == Some(true) {
-                parts.push("retry".to_string());
+                if !summary.is_empty() {
+                    summary.push_str(" ");
+                }
+                summary.push_str("· retry");
             }
-            parts.join(", ")
+            summary
         }
         // MCP：`mcp__<server>__<tool>`，参数结构由外部 server 决定，
         // 通用倾倒对它是唯一合理的选择，但 server 名值得单独标出来 ——
@@ -802,7 +801,7 @@ fn render_rich_tool_content(
                     let hits = text.lines().filter(|l| l.starts_with("File: ")).count();
                     push_collapsed_summary(
                         &mut lines,
-                        "Codebase search ·",
+                        "CodebaseSearch ·",
                         hits,
                         "ranked result",
                         None,
@@ -1297,9 +1296,15 @@ mod tests {
 
     /// 冷启动补跑必须与首查**可区分**。
     ///
-    /// 事故记录（docs/tool-io-token-audit.md §1.5）里 `turn=1` 出现了两次
-    /// 完全相同的调用 —— 根因就是冷启动补跑沿用了首查的 query 与 turn，
-    /// 在 UI 上完全看不出来。不标出来的话它就一直是"重复调用"的观感。
+    /// 冷启动补跑必须与首查**可区分**。
+    ///
+    /// 事故记录（docs/tool-io-token-audit.md §1.5）里 `turn=1` 双发在 UI 上
+    /// 完全 identical —— 根因是补跑沿用了首查的 query。所以补跑的 `· retry`
+    /// 后缀必须守住。
+    ///
+    /// 摘要形态（对标 Claude Code 的参数直显风格）：
+    /// 首查 `codebase search(auth flow)`，补跑 `codebase search(auth flow · retry)`。
+    /// `turn=` 是内部回合数，只对排障者有意义，已不再显示。
     #[test]
     fn codebase_search_marks_the_warmup_retry() {
         let call = |args: &str| crate::types::StarToolCall {
@@ -1318,15 +1323,15 @@ mod tests {
         let first = render(r#"{"query":"auth flow","turn":1}"#);
         let retry = render(r#"{"query":"auth flow","turn":1,"warmup_retry":true}"#);
 
+        assert_eq!(
+            first, "auth flow",
+            "首查摘要应该只显示搜索词本身：{first:?}"
+        );
+        assert!(!first.contains("turn="), "内部回合数不该显示：{first:?}");
         assert!(!first.contains("retry"), "首查不该被标成补跑：{first:?}");
         assert!(
             retry.contains("retry"),
             "补跑必须标出来，否则与首查长得一模一样：{retry:?}"
-        );
-        // 摘要形态不能变 —— 事故记录里是 `codebase search(query=…, turn=…)`。
-        assert!(
-            first.contains("query=auth flow") && first.contains("turn=1"),
-            "首查摘要形态变了：{first:?}"
         );
     }
 

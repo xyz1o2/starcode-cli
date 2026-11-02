@@ -1,5 +1,6 @@
 pub mod activity_tracker;
 pub mod call_graph;
+pub mod call_graph_db;
 pub mod chunking;
 pub mod curator;
 pub mod discovery;

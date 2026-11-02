@@ -535,6 +535,12 @@ fn rebuild_worker_loop(
                 let mut inner = coord.inner.lock();
                 std::mem::take(&mut inner.dirty).into_iter().collect()
             };
+            // 真实文件变更（排除 `\0refresh-all` 哨兵，它可能来自周期性
+            // refiller）→ 让调用图库的缓存 token 失效。下一次 CodeGraph
+            // 查询会重新 walk + 只重解析变更文件，而不是读编辑前的旧图。
+            if has_real_dirty_paths(&snapshot) {
+                crate::core::context::call_graph_db::invalidate(&root);
+            }
             // HashSet 迭代序是随机的：日志里 dirty.first() 一会 `Some("")`
             // 一会 `Some(".star")`，排查时误导。排序一次，日志稳定可读。
             snapshot.sort();
@@ -549,6 +555,14 @@ fn rebuild_worker_loop(
             stats = EventWindowStats::default();
         }
     }
+}
+
+/// 脏快照里是否包含**真实文件路径**（排除 `\0refresh-all` 哨兵）。
+///
+/// 哨兵可能是周期性 refiller 塞进来的；若也按它清调用图 token，
+/// 每次查询都会重新同步，等于把持久化缓存关掉。
+fn has_real_dirty_paths(snapshot: &[String]) -> bool {
+    snapshot.iter().any(|path| !path.starts_with('\0'))
 }
 
 /// 增量重建：indexer（(size,mtime) 快速跳过）→ 语义引擎增量更新 → 状态翻转。
@@ -1174,5 +1188,17 @@ mod tests {
             coord.skip_idle_backoff.load(Ordering::SeqCst),
             "mark_files_dirty 后应置位插队旗标"
         );
+    }
+
+    /// 只有真实路径才让调用图 token 失效；`\0refresh-all` 哨兵不算 ——
+    /// 否则周期性 refiller 会让每次 CodeGraph 查询都重新同步。
+    #[test]
+    fn sentinel_only_snapshots_do_not_invalidate_the_callgraph() {
+        assert!(!has_real_dirty_paths(&[]));
+        assert!(!has_real_dirty_paths(&["\0refresh-all".to_string()]));
+        assert!(has_real_dirty_paths(&[
+            "\0refresh-all".to_string(),
+            "src/a.rs".to_string()
+        ]));
     }
 }

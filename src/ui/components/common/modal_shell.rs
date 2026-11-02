@@ -122,7 +122,7 @@ pub fn footer_hints(hints: &[(&str, &str)]) -> Line<'static> {
     // 使用默认主题颜色。大多数调用点都有 state，但签名已经在很多地方使用，
     // 为了避免破坏性更改，使用 primary 色的合理默认值。
     use crate::ui::themes::theme::Theme;
-    let theme = Theme::default_dark();  // 回退到默认深色主题
+    let theme = Theme::default_dark(); // 回退到默认深色主题
     let mut spans: Vec<Span> = vec![Span::raw(" ")];
     for (i, (key, label)) in hints.iter().enumerate() {
         if i > 0 {

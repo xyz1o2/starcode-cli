@@ -123,8 +123,9 @@ pub fn tool_display_name(name: &str) -> String {
         "TodoWrite" => "Update Todos".into(),
         "EnterPlanMode" | "ExitPlanMode" => "plan".into(),
         "ask_user" | "user_prompt" => "ask".into(),
-        "CodebaseSearch" => "codebase search".into(),
-        "ProjectMap" => "project map".into(),
+        // CodebaseSearch / ProjectMap 保持 PascalCase 注册名：显示形态必须和
+        // schema、文档、routing matrix 里的叫法一致（用户点名的是
+        // "codebase search" 里的那个空格）。
         _ => name,
     }
 }
@@ -443,13 +444,14 @@ pub fn format_tool_result_with_saved_path(
 mod tests {
     use super::{shorten_path_for_display, tool_display_name};
 
-    /// 回归：CodebaseSearch / ProjectMap 以前落到 `_` 分支，
-    /// 聊天历史里显示原始注册名（与状态栏的 "codebase search" / "project map"
-    /// 和文档里的叫法都不一致）。
+    /// CodebaseSearch / ProjectMap 显示注册名原样 —— 词表式的短动词
+    /// （view / search）和"两个词加空格"的短语（codebase search）读起来
+    /// 像拼写错误，尤其拼在 `name(args)` 形态里时。PascalCase 注册名
+    /// 和工具 schema、文档、dash 面板里的叫法一致。
     #[test]
     fn search_tools_get_friendly_display_names() {
-        assert_eq!(tool_display_name("CodebaseSearch"), "codebase search");
-        assert_eq!(tool_display_name("ProjectMap"), "project map");
+        assert_eq!(tool_display_name("CodebaseSearch"), "CodebaseSearch");
+        assert_eq!(tool_display_name("ProjectMap"), "ProjectMap");
     }
 
     #[test]
