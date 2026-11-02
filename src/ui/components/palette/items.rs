@@ -283,7 +283,7 @@ pub fn get_session_palette_items() -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: i18n::t("palette.back.label", ".. Back", ".. Back"),
+            label: i18n::t("palette.back.label", "← Back", "← 返回"),
             description: i18n::t(
                 "palette.back.desc.main",
                 "Return to main menu",
@@ -372,7 +372,7 @@ pub fn get_system_palette_items() -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: i18n::t("palette.back.label", ".. Back", ".. Back"),
+            label: i18n::t("palette.back.label", "← Back", "← 返回"),
             description: i18n::t(
                 "palette.back.desc.main",
                 "Return to main menu",
@@ -449,7 +449,7 @@ pub fn get_language_palette_items() -> Vec<PaletteItem> {
     let current = i18n::current_language();
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
-        label: i18n::t("palette.back.label", ".. Back", ".. Back"),
+        label: i18n::t("palette.back.label", "← Back", "← 返回"),
         description: i18n::t(
             "palette.back.desc.settings",
             "Return to settings",
@@ -484,7 +484,7 @@ pub fn get_agent_palette_items() -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: i18n::t("palette.back.label", ".. Back", ".. Back"),
+            label: i18n::t("palette.back.label", "← Back", "← 返回"),
             description: i18n::t(
                 "palette.back.desc.main",
                 "Return to main menu",
@@ -534,7 +534,7 @@ pub fn get_memory_palette_items() -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: i18n::t("palette.back.label", ".. Back", ".. Back"),
+            label: i18n::t("palette.back.label", "← Back", "← 返回"),
             description: i18n::t(
                 "palette.back.desc.prev",
                 "Return to previous menu",
@@ -588,7 +588,7 @@ pub fn get_agent_mode_palette_items() -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: i18n::t("palette.back.label", ".. Back", ".. Back"),
+            label: i18n::t("palette.back.label", "← Back", "← 返回"),
             description: i18n::t(
                 "palette.back.desc.prev",
                 "Return to previous menu",
@@ -654,7 +654,7 @@ pub fn get_thinking_effort_palette_items(
 
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
-        label: i18n::t("palette.back.label", ".. Back", ".. Back"),
+        label: i18n::t("palette.back.label", "← Back", "← 返回"),
         description: i18n::t(
             "palette.desc.back.main",
             "Return to previous menu",
@@ -799,7 +799,7 @@ pub fn get_context_window_palette_items(
     let check = |id: &str| if id == current_id { " ●" } else { "" };
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
-        label: i18n::t("palette.back.label", ".. Back", ".. Back"),
+        label: i18n::t("palette.back.label", "← Back", "← 返回"),
         description: i18n::t(
             "palette.desc.back.main",
             "Return to previous menu",
@@ -854,7 +854,7 @@ pub fn get_theme_palette_items(state: &ChatState) -> Vec<PaletteItem> {
 
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
-        label: i18n::t("palette.back.label", ".. Back", ".. Back"),
+        label: i18n::t("palette.back.label", "← Back", "← 返回"),
         description: i18n::t(
             "palette.desc.back.main",
             "Return to previous menu",
@@ -882,9 +882,26 @@ pub fn get_provider_palette_items(
     configured: &[String],
     keyless_providers: &[String],
 ) -> Vec<PaletteItem> {
-    let mut items = vec![PaletteItem {
+    // 刷新模型列表放在**第一项**：它是对这页最有用、也最常被找的动作，不该被
+    // 埋在长列表尾部。`category: None` 让它平铺在分组之外，渲染顺序由
+    // `palette_display_items` 的置顶规则统一保证。
+    let mut items = Vec::new();
+    push_model_refresh_option(&mut items, false, None);
+
+    // 「Add New Provider」紧跟在刷新之后：既是列表顶部的显式入口，也不再被
+    // 归进 "Custom" 分组（那会让它跑到所有内置 provider 后面去）。
+    items.push(PaletteItem {
+        id: "add_provider".to_string(),
+        label: "＋ Add New Provider".to_string(),
+        description: "Create a custom OpenAI/Anthropic compatible endpoint".to_string(),
+        category: None,
+        action: PaletteAction::OpenProviderForm,
+    });
+
+    // 导航项仍然保留，但由 `palette_display_items` 固定排到最后。
+    items.push(PaletteItem {
         id: "back".to_string(),
-        label: i18n::t("palette.back.label", ".. Back", ".. Back"),
+        label: i18n::t("palette.back.label", "← Back", "← 返回"),
         description: i18n::t(
             "palette.desc.back.main",
             "Return to main menu",
@@ -892,7 +909,7 @@ pub fn get_provider_palette_items(
         ),
         category: None,
         action: PaletteAction::Back,
-    }];
+    });
 
     let builtin_ids: std::collections::HashSet<&str> = ALL_PROVIDERS.iter().map(|p| p.id).collect();
 
@@ -902,6 +919,7 @@ pub fn get_provider_palette_items(
     for id in configured
         .iter()
         .filter(|id| !builtin_ids.contains(id.as_str()))
+        .filter(|id| !provider_row_is_hidden(id))
     {
         // 没填密钥的自定义 provider 要**留在列表里并被标出来**，而不是消失。
         //
@@ -933,20 +951,25 @@ pub fn get_provider_palette_items(
     }
 
     // Built-in providers
-    for provider in ALL_PROVIDERS.iter() {
+    for provider in ALL_PROVIDERS
+        .iter()
+        .filter(|provider| !provider_row_is_hidden(provider.id))
+    {
         items.push(build_provider_item_flat(provider, configured));
     }
 
-    // Add new provider entry
-    items.push(PaletteItem {
-        id: "add_provider".to_string(),
-        label: "Add New Provider".to_string(),
-        description: "Create a custom OpenAI/Anthropic compatible endpoint".to_string(),
-        category: Some("Custom".to_string()),
-        action: PaletteAction::OpenProviderForm,
-    });
-
     items
+}
+
+/// 某些内建 provider 只作为**实现细节**存在，不该在 Providers 面板里单独占一行。
+///
+/// `claude-code` 是兼容层从 `~/.claude/settings.json` 合成的：它和 Anthropic
+/// 提供的是同一批 Claude 模型，单独列一行只会在面板里制造两个 "Anthropic"。
+/// 面板里只留 Anthropic；它加载到的模型在模型面板里也归到 Anthropic 分组下
+/// （见 `normalize_model_group`），但选中时仍带着真实的 `claude-code` 归属，
+/// 端点与凭证不会被换掉。
+pub(super) fn provider_row_is_hidden(id: &str) -> bool {
+    id == crate::core::config::providers::CLAUDE_CODE_PROVIDER_ID
 }
 
 pub(super) fn build_provider_item_flat(
@@ -999,7 +1022,7 @@ pub(super) fn get_provider_category_items(
 ) -> Vec<PaletteItem> {
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
-        label: i18n::t("palette.back.label", ".. Back", ".. Back"),
+        label: i18n::t("palette.back.label", "← Back", "← 返回"),
         description: i18n::t(
             "palette.back.desc.providers",
             "Return to providers",
@@ -1009,7 +1032,11 @@ pub(super) fn get_provider_category_items(
         action: PaletteAction::Back,
     }];
 
-    for provider in ALL_PROVIDERS.iter().filter(|p| p.category == category) {
+    for provider in ALL_PROVIDERS
+        .iter()
+        .filter(|p| p.category == category)
+        .filter(|p| !provider_row_is_hidden(p.id))
+    {
         items.push(build_provider_item(provider, category_label, configured));
     }
 
@@ -1021,7 +1048,7 @@ pub fn get_provider_options_items(provider_id: &str, configured: &[String]) -> V
     let metadata = get_provider_by_id(provider_id);
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
-        label: ".. Back".to_string(),
+        label: "← Back".to_string(),
         description: "Return to list".to_string(),
         category: None,
         action: PaletteAction::Back,
@@ -1113,7 +1140,7 @@ pub fn get_provider_delete_items(provider_id: &str) -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: ".. Back".to_string(),
+            label: "← Back".to_string(),
             description: "Keep this provider".to_string(),
             category: None,
             action: PaletteAction::Back,
@@ -1205,6 +1232,7 @@ pub fn get_provider_quick_items(configured: &[String]) -> Vec<PaletteItem> {
         for provider in ALL_PROVIDERS
             .iter()
             .filter(|provider| provider.category == category)
+            .filter(|provider| !provider_row_is_hidden(provider.id))
         {
             items.push(build_provider_item(provider, category_label, configured));
         }
@@ -1255,7 +1283,7 @@ pub(super) fn push_model_refresh_option(
 ///
 /// 这里曾经平铺着四条与"选一个模型"无关的行：
 ///
-/// - `.. Back` —— 与 Esc 完全等价。`PaletteAction::Back` 和 `handle_palette` 的
+/// - `← Back` —— 与 Esc 完全等价。`PaletteAction::Back` 和 `handle_palette` 的
 ///   Esc 分支都是「pop `palette_history`，空了才关面板」，选它没有任何额外能力，
 ///   ���是让用户在模型列表上方先跨过一行才能碰到第一个模型。
 /// - `⌨ Enter model name...` —— 手动输入任意模型 ID 的入口（原
@@ -1298,13 +1326,24 @@ pub fn get_model_palette_items(
             // Infer provider from model name
             infer_provider_from_model(model)
         });
-        provider_models.entry(provider).or_default().push(model);
+        // 兼容层合成的 `claude-code` 与 Anthropic 是同一批 Claude 模型。分组时
+        // 并到 Anthropic 名下，面板里只出现一个 "Anthropic"；选项本身仍然带着
+        // 真实的归属（见下面 `SetModel` 的 `provider_id`），端点/凭证不会被换掉。
+        let group = normalize_model_group(&provider);
+        provider_models.entry(group).or_default().push(model);
     }
+
+    // 合并后同一组里可能出现同 id 的模型（Anthropic 与 Claude Code 都列了
+    // `claude-opus-...`）。同名同组只留一条，避免面板里出现两行一模一样的项。
+    let mut emitted: HashSet<(String, String)> = HashSet::new();
 
     // Add provider-grouped models
     for (provider, provider_model_list) in &provider_models {
         let provider_label = format_provider_name(provider);
         for model in provider_model_list {
+            if !emitted.insert((provider.clone(), (*model).clone())) {
+                continue;
+            }
             let label = if model.as_str() == current {
                 format!("{} (Current)", model)
             } else {
@@ -1380,11 +1419,25 @@ pub(super) fn infer_provider_from_model(model: &str) -> String {
     }
 }
 
+/// 模型面板里用来分组的 provider 名。
+///
+/// `claude-code` 是兼容层从 Claude Code 配置合成的 provider，它和 Anthropic
+/// 提供同一批模型。分组时并到 `anthropic` 下，面板里只留一个 "Anthropic"；
+/// **只影响分组标题**，选中项仍然按原始归属路由。
+pub(super) fn normalize_model_group(provider: &str) -> String {
+    if provider == crate::core::config::providers::CLAUDE_CODE_PROVIDER_ID {
+        "anthropic".to_string()
+    } else {
+        provider.to_string()
+    }
+}
+
 /// Format provider name for display
 pub(super) fn format_provider_name(provider: &str) -> String {
     match provider {
         "openai" => "OpenAI".to_string(),
         "anthropic" => "Anthropic".to_string(),
+        "claude-code" => "Anthropic".to_string(),
         "google" => "Google".to_string(),
         "deepseek" => "DeepSeek".to_string(),
         "alibaba" => "Alibaba (Qwen)".to_string(),
@@ -1433,7 +1486,7 @@ pub fn get_project_palette_items() -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: ".. Back".to_string(),
+            label: "← Back".to_string(),
             description: "Return to main menu".to_string(),
             category: None,
             action: PaletteAction::Back,
@@ -1484,7 +1537,7 @@ pub fn get_integrations_palette_items() -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: ".. Back".to_string(),
+            label: "← Back".to_string(),
             description: "Return to main menu".to_string(),
             category: None,
             action: PaletteAction::Back,
@@ -1524,7 +1577,7 @@ pub fn get_mcp_manage_palette_items() -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: ".. Back".to_string(),
+            label: "← Back".to_string(),
             description: "Return to Integrations".to_string(),
             category: None,
             action: PaletteAction::Back,

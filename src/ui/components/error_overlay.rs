@@ -92,8 +92,9 @@ pub fn classify_error(error: &str) -> ErrorType {
 /// Check if an error type is retryable.
 ///
 /// `ProviderError` 不再算可重试：BadRequest 也落在这一类，重试只会原地
-/// 复现。真正值得自动重试的（网络抖动 / 5xx / 过载）在 agent 侧已经退避
-/// 重试过 3 次了，弹到这里说明那些都没成 —— 由用户决定下一步。
+/// 复现。真正值得自动重试的（网络抖动 / 5xx / 过载 / 限流）在 agent 侧已经
+/// 退避重试过；`handle_error_message` 也不再为这些错误弹浮层，只把错误留在
+/// 聊天记录里，避免打断用户输入。
 pub fn is_retryable(error_type: &ErrorType) -> bool {
     matches!(
         error_type,

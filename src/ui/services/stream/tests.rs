@@ -1918,3 +1918,82 @@ fn removal_keeps_selection_unless_anchor_entry_is_removed() {
         "锚点条目被删时选区必须清除"
     );
 }
+
+/// 网络错误已经由 agent 退避重试过：终态只进聊天记录/状态栏，不弹错误浮层。
+#[tokio::test]
+async fn retried_network_error_does_not_open_the_error_overlay() {
+    let mut state = ChatState::new();
+    let (agent_tx, _agent_rx) = mpsc::channel(1);
+    let message_id = 90;
+
+    handle_stream_update(
+        &mut state,
+        StreamMessage::Start {
+            message_id,
+            kind: StreamStartKind::UserTurn {
+                model: "gpt-4o".to_string(),
+            },
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+    handle_stream_update(
+        &mut state,
+        StreamMessage::Error {
+            message_id,
+            error: "error sending request for url (https://api.example.com/v1)".to_string(),
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !state
+            .modal_stack
+            .contains(&crate::ui::state::modal::Modal::ErrorOverlay),
+        "瞬时网络错误不该打断用户：浮层必须保持关闭"
+    );
+    // 错误仍要可见，并且 Esc 仍能重发上一条。
+    assert!(state
+        .chat_history
+        .last()
+        .is_some_and(|entry| entry.content.contains("Error:")));
+    assert!(state.last_turn_failed);
+}
+
+/// 需要用户改配置的错误仍然弹浮层 —— 它才是浮层存在的理由。
+#[tokio::test]
+async fn auth_error_still_opens_the_error_overlay() {
+    let mut state = ChatState::new();
+    let (agent_tx, _agent_rx) = mpsc::channel(1);
+    let message_id = 91;
+
+    handle_stream_update(
+        &mut state,
+        StreamMessage::Start {
+            message_id,
+            kind: StreamStartKind::UserTurn {
+                model: "gpt-4o".to_string(),
+            },
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+    handle_stream_update(
+        &mut state,
+        StreamMessage::Error {
+            message_id,
+            error: "401 Unauthorized".to_string(),
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+
+    assert!(state
+        .modal_stack
+        .contains(&crate::ui::state::modal::Modal::ErrorOverlay));
+}

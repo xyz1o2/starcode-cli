@@ -119,12 +119,12 @@
   "agent.exploration.limit": "[EXPLORATION_LIMIT]\n{count} consecutive read-only turns (file reads/searches) without any code edits.\nStop exploring and immediately make code changes. Use edit/write_file tools directly, do not read more files.",
   "agent.auto_continue.prompt": "Please provide a final answer based on the tool outputs above, without calling any more tools.",
 
-  "cmd.settings.lang.invalid": "❌ Invalid language. Supported: auto | en | zh-CN",
-  "cmd.settings.lang.set": "✅ UI language set to {lang} (effective: {resolved})",
+  "cmd.settings.lang.invalid": "Invalid language. Supported: auto | en | zh-CN",
+  "cmd.settings.lang.set": "UI language set to {lang} (effective: {resolved})",
   "cmd.settings.lang.current": "Current UI language: {lang} (effective: {resolved})\nUsage: /lang <auto|en|zh-CN>",
-  "cmd.theme.not_implemented": "ℹ️ Theme switching is not implemented yet.",
+  "cmd.theme.not_implemented": "Theme switching is not implemented yet.",
 
-  "palette.back.label": ".. Back",
+  "palette.back.label": "← Back",
   "palette.back.desc.main": "Return to main menu",
   "palette.back.desc.prev": "Return to previous menu",
   "palette.back.desc.settings": "Return to settings",

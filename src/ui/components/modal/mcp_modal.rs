@@ -214,7 +214,7 @@ fn mcp_menu_lines(state: &ChatState, name: &str) -> Vec<Line<'static>> {
         actions.push("Authenticate… (opens browser)".to_string());
     }
     actions.push("Remove server…".to_string());
-    actions.push(".. Back".to_string());
+    actions.push("← Back".to_string());
     for (i, label) in actions.iter().enumerate() {
         let style = row_style(i, state.mcp_modal_menu_index);
         lines.push(Line::from(vec![

@@ -124,7 +124,7 @@
   "cmd.settings.lang.current": "当前界面语言: {lang}（生效: {resolved}）\n用法: /lang <auto|en|zh-CN>",
   "cmd.theme.not_implemented": "ℹ️ 主题切换功能尚未实现。",
 
-  "palette.back.label": ".. 返回",
+  "palette.back.label": "← 返回",
   "palette.back.desc.main": "返回主菜单",
   "palette.back.desc.prev": "返回上级菜单",
   "palette.back.desc.settings": "返回设置",

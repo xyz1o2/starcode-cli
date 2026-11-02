@@ -1687,27 +1687,40 @@ async fn handle_error_message(
     }
 
     let error_type = crate::ui::components::error_overlay::classify_error(&error);
-    // 每一类错误都弹浮层，不只"可重试"的那几类。
+    // 自动重试类错误（网络抖动 / 限流 / 过载 / 5xx）不弹浮层。
     //
-    // 以前 Auth / Quota / Provider 错误只弹一条 3 秒 toast 就消失，于是 401/403
-    // 之后界面上**什么都不剩**：没有浮层的 `r`（唯一能重发的入口），也没有别的
-    // 重试键（`/retry` 不存在，Esc 与重试无关）。而这恰恰是最需要"改完 provider
-    // 再试一次"的错误 —— 浮层上的 `s` 直接开 provider 面板，`r` 直接重发。
-    state.error_overlay_state = crate::ui::components::error_overlay::ErrorOverlayState {
-        error_message: error.clone(),
-        error_type: error_type.clone(),
-        retry_count: 0,
-        max_retries: 10,
-        is_retrying: false,
-        // 不可重试的错误（401/403、余额耗尽）默认高亮"切换提供商"：原地重试
-        // 只会复现同一个错，先把 key / 网关改对才是有用的下一步。
-        selected_action: if crate::ui::components::error_overlay::is_retryable(&error_type) {
-            crate::ui::components::error_overlay::ErrorAction::Retry
-        } else {
-            crate::ui::components::error_overlay::ErrorAction::SwitchProvider
-        },
-    };
-    state.open_error_overlay();
+    // agent 侧已经为它们做过退避重试，这里再弹一个模态只会打断正在输入的下一条
+    // 消息；而且弹窗里唯一有用的动作（重发）在输入框按 Esc 也能做。错误本身照常
+    // 写进聊天记录和状态栏，用户回头能看到。参考 Claude Code：瞬时 API 失败只
+    // 在消息流里提示，不抢焦点。
+    //
+    // 其余错误仍然弹：401/403、余额耗尽、请求非法需要用户去改配置；上下文超限
+    // 需要用户主动 `/compact` —— 它们都是"重发一次解决不了"的错误，值得占一个
+    // 模态。浮层上的 `s` 直接开 provider 面板，`r` 直接重发。
+    let auto_retried = matches!(
+        crate::llm::error_kind::LlmErrorKind::classify(&error),
+        crate::llm::error_kind::LlmErrorKind::Network
+            | crate::llm::error_kind::LlmErrorKind::RateLimit
+            | crate::llm::error_kind::LlmErrorKind::Overloaded
+            | crate::llm::error_kind::LlmErrorKind::ServerError
+    );
+    if !auto_retried {
+        state.error_overlay_state = crate::ui::components::error_overlay::ErrorOverlayState {
+            error_message: error.clone(),
+            error_type: error_type.clone(),
+            retry_count: 0,
+            max_retries: 10,
+            is_retrying: false,
+            // 不可重试的错误（401/403、余额耗尽）默认高亮"切换提供商"：原地重试
+            // 只会复现同一个错，先把 key / 网关改对才是有用的下一步。
+            selected_action: if crate::ui::components::error_overlay::is_retryable(&error_type) {
+                crate::ui::components::error_overlay::ErrorAction::Retry
+            } else {
+                crate::ui::components::error_overlay::ErrorAction::SwitchProvider
+            },
+        };
+        state.open_error_overlay();
+    }
 
     // 状态栏只放一行精简信息：标签 + 下一步提示；原始错误全文另进 chat_history
     // （可换行查看）。按 "Original error:" 显式切开，即便上游把换行吞了，也不会
