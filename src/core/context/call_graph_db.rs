@@ -21,7 +21,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// 库结构版本。schema 或任何影响读结果的语义变化都必须 bump；
 /// 版本不匹配时整库丢弃重建（复刻 `Indexer::load_index` 的版本丢弃逻辑）。
-pub const CALLGRAPH_SCHEMA_VERSION: u32 = 1;
+///
+/// 版本历史：
+/// - 1: 初版
+/// - 2: 行号修正为 1-based（旧库的 start_line 全部小 1，必须重建）
+pub const CALLGRAPH_SCHEMA_VERSION: u32 = 2;
 
 /// 每批变更文件的提交粒度：初次全量在大仓上避免数千次 fsync。
 const SYNC_BATCH_FILES: usize = 200;

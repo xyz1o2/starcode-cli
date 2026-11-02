@@ -1695,6 +1695,191 @@ pub fn trace_call_chain(
     Ok(output)
 }
 
+/// explore 的输出预算。工具层从参数构造，测试直接给值。
+#[derive(Debug, Clone, Copy)]
+pub struct ExploreLimits {
+    /// 最多展开多少个匹配符号。
+    pub max_symbols: usize,
+    /// 调用链深度（上游 + 下游）。
+    pub depth: usize,
+    /// 每个符号最多带多少行源码。
+    pub max_source_lines: usize,
+}
+
+impl Default for ExploreLimits {
+    fn default() -> Self {
+        Self {
+            max_symbols: 3,
+            depth: 2,
+            max_source_lines: 80,
+        }
+    }
+}
+
+/// 复合查询（explore）：命中符号 + **逐字源码** + 直接调用关系 + 影响面，一次返回。
+///
+/// 对标 codegraph 的 `explore`：agent 平时要 `CodeGraph` → `Read` → 再查调用链，
+/// 三次往返；这里合并成一次，源码按符号的行区间精确截取。输出目标"够用且不
+/// 淹没上下文"——源码默认最多 80 行/符号、最多 3 个符号。
+pub fn explore_symbol(
+    root: &Path,
+    name_hint: &str,
+    limits: ExploreLimits,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let graph = crate::core::context::call_graph_db::get_call_graph(root)?;
+    let symbols = graph.find_symbols(name_hint);
+
+    if symbols.is_empty() {
+        return Ok(format!(
+            "No symbols found matching '{name_hint}' in the project call graph ({} total symbols indexed).\n\
+             Try a shorter substring, or run CodebaseSearch first to discover the exact symbol name.",
+            graph.len()
+        ));
+    }
+
+    let max_symbols = limits.max_symbols.max(1);
+    let depth = limits.depth.max(1);
+    let mut output = String::new();
+    output.push_str(&format!(
+        "Explore '{name_hint}' — {} match(es); indexed {} symbols / {} edges\n",
+        symbols.len(),
+        graph.len(),
+        graph.edge_count()
+    ));
+    if symbols.len() > max_symbols {
+        output.push_str(&format!(
+            "Showing the top {max_symbols} by name match; use a more specific hint for the rest.\n"
+        ));
+    }
+    output.push('\n');
+
+    for symbol in symbols.iter().take(max_symbols) {
+        write_symbol_card(
+            &mut output,
+            root,
+            &graph,
+            symbol,
+            limits.max_source_lines,
+            depth,
+        );
+    }
+
+    if symbols.len() > max_symbols {
+        output.push_str(&format!(
+            "… and {} more matching symbols.\n",
+            symbols.len() - max_symbols
+        ));
+    }
+
+    Ok(output)
+}
+
+fn write_symbol_card(
+    output: &mut String,
+    root: &Path,
+    graph: &CallGraph,
+    symbol: &symbol::SymbolDef,
+    max_source_lines: usize,
+    depth: usize,
+) {
+    output.push_str(&format!(
+        "── {} `{}` — {}:{}-{}\n",
+        symbol.kind.as_str(),
+        symbol.name,
+        symbol.file_path,
+        symbol.start_line,
+        symbol.end_line
+    ));
+
+    match source_snippet(root, symbol, max_source_lines) {
+        Some(snippet) => output.push_str(&snippet),
+        None => output.push_str("(source unavailable)\n"),
+    }
+    output.push('\n');
+
+    write_relations(output, "Callers", &graph.callers_of(symbol.id));
+    write_relations(output, "Callees", &graph.callees_of(symbol.id));
+
+    let chain = graph.call_chain(symbol.id, depth);
+    let upstream: usize = chain.callers.iter().map(|level| level.symbols.len()).sum();
+    let downstream: usize = chain.callees.iter().map(|level| level.symbols.len()).sum();
+    let downstream_names: Vec<&str> = chain
+        .callees
+        .iter()
+        .flat_map(|level| level.symbols.iter())
+        .take(6)
+        .map(|symbol| symbol.name.as_str())
+        .collect();
+
+    output.push_str(&format!(
+        "Impact (depth {depth}): {upstream} upstream / {downstream} downstream"
+    ));
+    if !downstream_names.is_empty() {
+        output.push_str(&format!(" — e.g. {}", downstream_names.join(", ")));
+    }
+    output.push_str("\n\n");
+}
+
+fn write_relations(output: &mut String, label: &str, symbols: &[&symbol::SymbolDef]) {
+    const SHOWN: usize = 6;
+
+    if symbols.is_empty() {
+        output.push_str(&format!("{label}: —\n"));
+        return;
+    }
+
+    let shown: Vec<String> = symbols
+        .iter()
+        .take(SHOWN)
+        .map(|symbol| format!("`{}` ({})", symbol.name, symbol.file_path))
+        .collect();
+    output.push_str(&format!(
+        "{label} ({}): {}",
+        symbols.len(),
+        shown.join(", ")
+    ));
+    if symbols.len() > SHOWN {
+        output.push_str(&format!(" … +{}", symbols.len() - SHOWN));
+    }
+    output.push('\n');
+}
+
+/// 按 1-based 行区间截取源码（explore 的"逐字源码"部分）。
+///
+/// 只保留原始行，不重复行号 —— 区间已经在卡片标题里，再标一遍纯占 token。
+fn source_snippet(root: &Path, symbol: &symbol::SymbolDef, max_lines: usize) -> Option<String> {
+    let content = std::fs::read_to_string(root.join(&symbol.file_path)).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+    let start = symbol.start_line.max(1);
+    if start > lines.len() {
+        return None;
+    }
+
+    let cap = max_lines.max(1);
+    let end = symbol
+        .end_line
+        .max(start)
+        .min(lines.len())
+        .min(start + cap - 1);
+
+    let mut snippet = String::from("```\n");
+    for line in &lines[start - 1..end] {
+        snippet.push_str(line);
+        snippet.push('\n');
+    }
+    snippet.push_str("```\n");
+
+    if symbol.end_line > end {
+        snippet.push_str(&format!(
+            "… ({} more lines; Read `{}:{}` for the rest)\n",
+            symbol.end_line - end,
+            symbol.file_path,
+            end + 1
+        ));
+    }
+    Some(snippet)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2595,6 +2780,78 @@ mod tests {
         assert!(
             matches!(src, EngineSource::Fresh),
             "query should be Fresh with a valid token, got {src:?}"
+        );
+    }
+
+    // ── explore（复合查询） ─────────────────────────────────────────────
+
+    /// 一次调用必须带回三样东西：逐字源码、直接调用关系、影响面。
+    /// 少任何一样，agent 就还得再补一次 Read/Grep，复合查询就失去意义。
+    #[test]
+    fn explore_returns_source_and_call_flow_in_one_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "src/a.rs",
+            "fn helper() {}\n\nfn target() {\n    helper();\n}\n",
+        );
+        write(root, "src/b.rs", "fn caller() {\n    target();\n}\n");
+
+        let out = explore_symbol(root, "target", ExploreLimits::default()).unwrap();
+
+        assert!(out.contains("fn target()"), "必须带逐字源码: {out}");
+        assert!(
+            out.contains("Callers (1)") && out.contains("caller"),
+            "必须带直接调用者: {out}"
+        );
+        assert!(
+            out.contains("Callees (1)") && out.contains("helper"),
+            "必须带直接被调者: {out}"
+        );
+        assert!(out.contains("src/b.rs"), "调用者路径必须出现: {out}");
+        assert!(out.contains("Impact (depth 2)"), "必须带影响面: {out}");
+    }
+
+    /// 源码必须按预算截断，并明确告诉 agent 剩余部分从哪里读。
+    /// 不截断会让一个 800 行的函数直接吃掉整个上下文。
+    #[test]
+    fn explore_caps_the_source_snippet() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let body: String = (1..=30).map(|i| format!("    // line {i}\n")).collect();
+        write(root, "src/long.rs", &format!("fn long() {{\n{body}}}\n"));
+
+        let limits = ExploreLimits {
+            max_symbols: 1,
+            depth: 1,
+            max_source_lines: 5,
+        };
+        let out = explore_symbol(root, "long", limits).unwrap();
+
+        assert_eq!(
+            out.matches("// line").count(),
+            4,
+            "只应带 5 行源码（含签名行）: {out}"
+        );
+        assert!(out.contains("more lines"), "截断必须明确告知: {out}");
+        assert!(
+            out.contains("Read `src/long.rs:6`"),
+            "必须指向剩余内容的起始行: {out}"
+        );
+    }
+
+    #[test]
+    fn explore_says_when_nothing_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/a.rs", "fn a() {}\n");
+
+        let out = explore_symbol(root, "no_such_symbol_xyz", ExploreLimits::default()).unwrap();
+        assert!(out.contains("No symbols found"), "{out}");
+        assert!(
+            out.contains("CodebaseSearch"),
+            "零命中时应给出下一步建议: {out}"
         );
     }
 }

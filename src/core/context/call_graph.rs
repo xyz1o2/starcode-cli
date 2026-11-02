@@ -9,7 +9,8 @@
 // The graph is built on top of the symbol definitions and call edges extracted
 // by `symbol.rs`, resolving call-site names to cross-file symbol definitions.
 
-use super::symbol::{FileSymbols, SymbolDef, SymbolId};
+use super::symbol::{FileSymbols, SymbolDef, SymbolId, SymbolKind};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 // ── Graph structures ──────────────────────────────────────────────────────────
@@ -131,33 +132,45 @@ impl CallGraph {
     // ── Queries ───────────────────────────────────────────────────────────
 
     /// Find symbols whose name contains the given string.
-    /// 按名称匹配符号，**按匹配质量降序**返回。
+    /// 按名称匹配**打分排序**返回（对标 codegraph 的查询评分层）。
     ///
-    /// 排序键（越靠前越好）：精确相等 > 前缀匹配 > 子串匹配；同档内名字短者优先
-    /// （`ApplyParamOverride` 比 `ApplyParamOverrideWithExtraChecks` 更接近查询本身），
-    /// 再按路径稳定排序保证可复现。
+    /// 排序信号（从强到弱）：
+    /// 1. **名称匹配形态**：精确（区分大小写）> 精确（忽略大小写）> 前缀 >
+    ///    词边界（camelCase / snake_case / 分隔符后）> 任意子串 > 模糊匹配；
+    /// 2. **kind**：函数/方法 > trait/interface > 类型 —— 调用图查询的主场景；
+    /// 3. **路径相关性**：查询词出现在文件路径里（`search_engine` →
+    ///    `src/core/context/search_engine.rs`）；
+    /// 4. **名字长度**：越短越贴近查询本身；
+    /// 5. **模糊兜底**：查询 ≥4 字符且首字母一致时，允许 1~2 个编辑距离的
+    ///    拼写误差（`handle_eror` → `handle_error`）。
     ///
-    /// 以前这里只 `filter(contains)` 不排序，调用方 `take(5)` 拿到的是符号表插入顺序，
-    /// 而输出文案却写着 "Showing top 5 by name match" —— 模型以为看到的是最相关的 5 个。
+    /// 同分时按名字长度 → 路径 → id 稳定排序，保证两次查询顺序一致。
     pub fn find_symbols(&self, name_hint: &str) -> Vec<&SymbolDef> {
-        let lower = name_hint.to_lowercase();
-        let mut matched: Vec<&SymbolDef> = self
+        let query = name_hint.trim();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let query_lower = query.to_lowercase();
+
+        let mut scored: Vec<(f32, &SymbolDef)> = self
             .symbols
             .iter()
-            .filter(|s| !s.name.is_empty() && s.name.to_lowercase().contains(&lower))
+            .filter(|symbol| !symbol.name.is_empty())
+            .filter_map(|symbol| {
+                score_symbol(symbol, query, &query_lower).map(|score| (score, symbol))
+            })
             .collect();
-        matched.sort_by_key(|s| {
-            let name_lower = s.name.to_lowercase();
-            let rank: u8 = if name_lower == lower {
-                0
-            } else if name_lower.starts_with(&lower) {
-                1
-            } else {
-                2
-            };
-            (rank, s.name.chars().count(), s.file_path.as_str())
+
+        scored.sort_by(|(score_a, a), (score_b, b)| {
+            score_b
+                .partial_cmp(score_a)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.name.chars().count().cmp(&b.name.chars().count()))
+                .then_with(|| a.file_path.cmp(&b.file_path))
+                .then_with(|| a.id.cmp(&b.id))
         });
-        matched
+
+        scored.into_iter().map(|(_, symbol)| symbol).collect()
     }
 
     /// Get the symbol definition by ID.
@@ -312,6 +325,144 @@ impl CallGraph {
     }
 }
 
+// ── Query scoring ─────────────────────────────────────────────────────────────
+
+/// 给一个符号按查询打分；`None` 表示不匹配（不会出现在结果里）。
+fn score_symbol(symbol: &SymbolDef, query: &str, query_lower: &str) -> Option<f32> {
+    let name_lower = symbol.name.to_lowercase();
+    let query_len = query_lower.chars().count();
+    if query_len == 0 {
+        return None;
+    }
+
+    let mut score = if symbol.name == query {
+        100.0
+    } else if name_lower == query_lower {
+        95.0
+    } else if name_lower.starts_with(query_lower) {
+        85.0
+    } else if camel_case_boundary_match(&symbol.name, query_lower)
+        || separator_boundary_match(&name_lower, query_lower)
+    {
+        75.0
+    } else if let Some(pos) = name_lower.find(query_lower) {
+        55.0 - (pos as f32 * 0.5)
+    } else {
+        // 模糊兜底：短查询噪声比收益大，不参与。
+        let max_distance = match query_len {
+            4..=7 => 1,
+            8.. => 2,
+            _ => return None,
+        };
+        if !same_first_char(&name_lower, query_lower) {
+            return None;
+        }
+        if !within_bounded_edit_distance(&name_lower, query_lower, max_distance) {
+            return None;
+        }
+        30.0
+    };
+
+    score += match symbol.kind {
+        SymbolKind::Function | SymbolKind::Method => 6.0,
+        SymbolKind::Trait | SymbolKind::Interface => 3.0,
+        SymbolKind::Struct | SymbolKind::Class | SymbolKind::Enum => 2.0,
+        _ => 0.0,
+    };
+
+    // 路径相关性：查询词出现在文件路径里（`search_engine` → search_engine.rs）。
+    if query_len >= 3 && symbol.file_path.to_lowercase().contains(query_lower) {
+        score += 8.0;
+    }
+    // 测试文件里的同名 helper 轻微降权，别挤掉实现。
+    if is_test_path(&symbol.file_path) {
+        score -= 3.0;
+    }
+
+    // 名字越短越贴近查询本身（同档次级信号）。
+    score -= (symbol.name.chars().count().saturating_sub(query_len)) as f32 * 0.2;
+    Some(score)
+}
+
+/// camelCase 词边界：`search` 命中 `CodebaseSearch` 的 `Search` 段。
+fn camel_case_boundary_match(name: &str, query_lower: &str) -> bool {
+    let mut chars = query_lower.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let mut capitalized = String::with_capacity(query_lower.len());
+    capitalized.extend(first.to_uppercase());
+    capitalized.push_str(chars.as_str());
+    name.contains(&capitalized)
+}
+
+/// snake_case / 分隔符词边界：`engine` 命中 `search_engine` / `search-engine`。
+fn separator_boundary_match(name_lower: &str, query_lower: &str) -> bool {
+    let mut from = 0;
+    while let Some(pos) = name_lower[from..].find(query_lower) {
+        let idx = from + pos;
+        if idx > 0 {
+            let prev = name_lower[..idx].chars().next_back().unwrap_or('\0');
+            if matches!(prev, '_' | '-' | '.' | ':' | '/') {
+                return true;
+            }
+        }
+        from = idx + query_lower.len().max(1);
+        if from >= name_lower.len() {
+            break;
+        }
+    }
+    false
+}
+
+fn same_first_char(a: &str, b: &str) -> bool {
+    a.chars().next() == b.chars().next()
+}
+
+fn is_test_path(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.contains("/tests/")
+        || lower.contains("\\tests\\")
+        || lower.ends_with("_test.rs")
+        || lower.ends_with("_tests.rs")
+        || lower.ends_with("_test.go")
+        || lower.ends_with("_test.py")
+        || lower.ends_with(".test.ts")
+        || lower.ends_with(".test.tsx")
+        || lower.ends_with(".spec.ts")
+        || lower.ends_with(".spec.tsx")
+}
+
+/// 限界编辑距离：只回答"是否 ≤ `max_distance`"，超限立即返回。
+///
+/// 逐字符 DP；`row_min > max_distance` 时提前退出（名字通常比查询长得多，
+/// 提前退出让 1.4 万符号的模糊扫描仍是毫秒级）。
+fn within_bounded_edit_distance(a: &str, b: &str, max_distance: usize) -> bool {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.len().abs_diff(b.len()) > max_distance {
+        return false;
+    }
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        current[0] = i;
+        let mut row_min = current[0];
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            current[j] = (previous[j] + 1)
+                .min(current[j - 1] + 1)
+                .min(previous[j - 1] + cost);
+            row_min = row_min.min(current[j]);
+        }
+        if row_min > max_distance {
+            return false;
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[b.len()] <= max_distance
+}
+
 impl SymbolDef {
     fn placeholder() -> Self {
         Self {
@@ -426,6 +577,88 @@ mod tests {
 
         assert_eq!(first, second, "同分同名必须按路径稳定排序");
         assert_eq!(first, vec!["a.rs".to_string(), "b.rs".to_string()]);
+    }
+
+    fn sym_of_kind(id: usize, name: &str, kind: SymbolKind, file: &str) -> SymbolDef {
+        SymbolDef {
+            id,
+            name: name.to_string(),
+            kind,
+            file_path: file.to_string(),
+            start_line: id + 1,
+            end_line: id + 1,
+            signature: String::new(),
+        }
+    }
+
+    /// 拼错一个字符（长查询）必须还能兜住 —— 这是 boundedEditDistance 的
+    /// 直接收益，记不清完整标识符时尤其常见。
+    #[test]
+    fn find_symbols_tolerates_a_typo_in_long_queries() {
+        let graph = graph_of(vec![sym(0, "handle_error", "x.rs")]);
+        let found = graph.find_symbols("handle_eror");
+        assert_eq!(found.len(), 1, "一个编辑距离内的拼写误差应命中");
+        assert_eq!(found[0].name, "handle_error");
+    }
+
+    /// 短查询不参与模糊匹配：3 个字符的窗口太容易撞上无关符号。
+    #[test]
+    fn find_symbols_does_not_fuzzy_match_tiny_queries() {
+        let graph = graph_of(vec![sym(0, "handler", "x.rs")]);
+        assert!(graph.find_symbols("hnl").is_empty());
+        // 前缀匹配不受影响
+        assert_eq!(graph.find_symbols("hand").len(), 1);
+    }
+
+    /// camelCase / snake_case 的词边界匹配要排在任意子串之前。
+    #[test]
+    fn find_symbols_prefers_word_boundaries_over_plain_substrings() {
+        let graph = graph_of(vec![
+            sym(0, "Research", "r.rs"),
+            sym(1, "CodebaseSearch", "s.rs"),
+        ]);
+        let found = graph.find_symbols("search");
+        assert_eq!(found[0].name, "CodebaseSearch", "camel 词边界应排第一");
+
+        let graph = graph_of(vec![
+            sym(0, "researchagent", "r.rs"),
+            sym(1, "thing_search", "t.rs"),
+        ]);
+        let found = graph.find_symbols("search");
+        assert_eq!(found[0].name, "thing_search", "分隔符词边界应排第一");
+    }
+
+    /// 调用图的主场景是可调用符号：同名时 function/method 排在类型前面。
+    #[test]
+    fn find_symbols_prefers_callables_over_types() {
+        let graph = graph_of(vec![
+            sym_of_kind(0, "Auth", SymbolKind::Struct, "a.rs"),
+            sym_of_kind(1, "Auth", SymbolKind::Function, "z.rs"),
+        ]);
+        let found = graph.find_symbols("Auth");
+        assert_eq!(found[0].kind, SymbolKind::Function);
+    }
+
+    /// 查询词出现在路径里时加权：`search` → `src/core/search_engine.rs`。
+    #[test]
+    fn find_symbols_rewards_path_relevance() {
+        let graph = graph_of(vec![
+            sym(0, "SearchEngine", "src/other/model.rs"),
+            sym(1, "SearchEngine", "src/core/search_engine.rs"),
+        ]);
+        let found = graph.find_symbols("search");
+        assert_eq!(found[0].file_path, "src/core/search_engine.rs");
+    }
+
+    /// 测试文件里的同名 helper 不应挤掉实现。
+    #[test]
+    fn find_symbols_downranks_test_paths() {
+        let graph = graph_of(vec![
+            sym(0, "compute_hash", "src/tests/util.rs"),
+            sym(1, "compute_hash", "src/core/util.rs"),
+        ]);
+        let found = graph.find_symbols("compute_hash");
+        assert_eq!(found[0].file_path, "src/core/util.rs");
     }
 }
 

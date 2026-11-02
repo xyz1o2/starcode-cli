@@ -340,5 +340,46 @@ fn node_text_first_line<'a>(node: &Node<'a>, source: &'a str) -> String {
 
 fn byte_to_line(source: &str, byte_offset: usize) -> usize {
     let prefix = &source[..byte_offset.min(source.len())];
-    prefix.lines().count().max(1)
+    // 不能数 `lines()`：定义从行首开始时 prefix 以 '\n' 结尾，`lines()` 会
+    // 少算一行（旧实现因此让所有 start_line 都小 1，explore 截源码会错位）。
+    prefix.bytes().filter(|byte| *byte == b'\n').count() + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 行号必须是 **1-based**，且 start/end 正好框住定义体。
+    ///
+    /// explore 的源码片段直接按 `start_line..=end_line` 截取；差一行就会
+    /// 把上一行注释或下一行代码带进来。
+    #[test]
+    fn symbol_lines_are_one_based_and_match_the_source() {
+        let source = "// header\n\nfn first() {}\n\nfn second() {\n    first();\n}\n";
+        let language: Language = tree_sitter_rust::LANGUAGE.into();
+        let mut next_id = 0;
+        let file = extract_symbols(source, "a.rs", "rs", &language, &mut next_id).unwrap();
+
+        let first = file
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "first")
+            .expect("first");
+        assert_eq!(
+            (first.start_line, first.end_line),
+            (3, 3),
+            "first 应在第 3 行"
+        );
+
+        let second = file
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "second")
+            .expect("second");
+        assert_eq!(
+            (second.start_line, second.end_line),
+            (5, 7),
+            "second 应在 5..=7 行"
+        );
+    }
 }

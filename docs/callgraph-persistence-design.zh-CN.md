@@ -100,7 +100,8 @@ PRAGMA foreign_keys = ON;    -- 级联删除依赖它，rusqlite 默认关
 ```
 
 版本历史：
-- `CALLGRAPH_SCHEMA_VERSION = 1`（初版）
+- `CALLGRAPH_SCHEMA_VERSION = 2`：行号修正为 1-based（v1 库的 `start_line` 全部小 1）
+- 1：初版
 - 语义变化（如 kind 词表调整、加新列影响读结果）一律 bump 版本 → 旧库整文件重建，不做就地迁移（量级不值得）。
 
 ## 6. 增量同步（sync）
@@ -247,8 +248,8 @@ kind 反序列化：按 `SymbolKind::as_str()` 词表 match；未知字符串 �
 ## 12. 后续阶段（本期不做）
 
 1. **FTS5 符号全文**（对标 codegraph `nodes_fts` + 触发器）：`find_symbols` 的 `contains` 内存扫描换 SQL，支持"记不清全名"的场景，配合 `boundedEditDistance` 容错。
-2. **`explore` 复合工具**：一次调用返回"调用链 + 命中符号源码片段 + 影响面（callees 下一跳）"——对标 codegraph benchmark 数字（官方口径 tools -88% / tokens -62%）的真实来源。
-3. **查询评分加分项移植**：`nameMatchBonus` / `kindBonus` / `scorePathRelevance` / `boundedEditDistance`。
+2. ~~**`explore` 复合工具**~~ —— **已实现（升级 `CodeGraph`）**：一次调用返回逐字源码 + 直接 callers/callees + 上下游影响面（`depth`/`max_symbols` 可调）；`trace_call_chain` 保留给 MCP。
+3. ~~**查询评分加分项移植**~~ —— **已实现**：名称匹配分级（精确 > 大小写不敏感精确 > 前缀 > camel/snake 词边界 > 子串）、kind 加权（callable 优先）、路径相关性、测试路径降权、有界编辑距离容错（4–7 字符允许 1 个编辑、≥8 允许 2 个，且首字母必须一致）；同分按名字长度 → 路径 → id 稳定排序。
 4. ~~**watcher dirty 联动**~~ —— **已实现（惰性清 token）**：Edit/Write 与 watcher 真实事件都会让 token 失效，查询时增量同步。若将来要"查询零等待"，可让协调器 rebuild 后主动 `sync`（当前不做，避免没人用 CodeGraph 时白跑）。
 5. **`unresolved_refs` 两遍式候选消歧 + `provenance`**（codegraph 的四类边 + 边溯源）。
 6. **PageRank 式 repo map**（aider 思路，给冷启动的首查提供全局地图）。

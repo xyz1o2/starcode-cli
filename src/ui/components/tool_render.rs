@@ -538,6 +538,11 @@ fn build_tool_argument_display(
             }
             summary
         }
+        // CodeGraph（explore 形态）仍是"按符号查"：直显符号名，
+        // 不显示 `symbol=` 键名。depth / max_symbols 是内部预算，不占摘要。
+        "CodeGraph" => get_str(&["symbol"])
+            .map(|symbol| truncate_chars_with_ellipsis(&symbol, 40))
+            .unwrap_or_default(),
         // MCP：`mcp__<server>__<tool>`，参数结构由外部 server 决定，
         // 通用倾倒对它是唯一合理的选择，但 server 名值得单独标出来 ——
         // 用户判断"这次调用可不可信"看的就是它。
@@ -1332,6 +1337,30 @@ mod tests {
         assert!(
             retry.contains("retry"),
             "补跑必须标出来，否则与首查长得一模一样：{retry:?}"
+        );
+    }
+
+    /// CodeGraph 摘要直显符号名（`CodeGraph(auth_handler)`），不显示键名；
+    /// depth / max_symbols 是查询预算，不进摘要。
+    #[test]
+    fn code_graph_shows_the_symbol_without_key_names() {
+        let call = |args: &str| crate::types::StarToolCall {
+            id: "c1".to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: "CodeGraph".to_string(),
+                arguments: args.to_string(),
+            },
+        };
+
+        let (summary, extra) =
+            build_tool_argument_display(&call(r#"{"symbol":"auth_handler","depth":3}"#), false);
+
+        assert_eq!(summary, "auth_handler", "摘要应直显符号名：{summary:?}");
+        assert!(!summary.contains("symbol="), "不该显示键名：{summary:?}");
+        assert!(
+            extra.iter().all(|line| !line.contains("depth")),
+            "depth 不该占用摘要：{extra:?}"
         );
     }
 

@@ -1,9 +1,14 @@
-//! CodeGraph 工具：把已有的调用图追踪（`codebase_search::trace_call_chain`）
-//! 提升为一等公民工具——给一个符号名，返回 who-calls / callees / 调用链。
+//! CodeGraph 工具：复合代码调查（explore）。
+//!
+//! 给一个符号名，一次返回：命中符号的**逐字源码** + 直接 callers/callees +
+//! 上下游影响面（深度可调）。对标 codegraph 的 `explore`，把原来
+//! `CodeGraph` → `Read` → 再查调用链的三次往返压成一次。底层仍是
+//! `.star/context/callgraph.db` 的持久化调用图。
 //!
 //! 对标设计文档 L1 结构层：精确结构问题走这里，概念/关键词走 CodebaseSearch，
 //! 精确字符串走 Grep。只读、不改盘。
 
+use crate::core::tools::codebase_search::{explore_symbol, ExploreLimits};
 use crate::core::tools::tools::{
     BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation, ToolResult as CoreToolResult,
 };
@@ -18,6 +23,12 @@ pub struct CodeGraphParams {
     /// 搜索根目录（默认当前目录）。
     #[serde(default)]
     pub path: Option<String>,
+    /// 调用链深度（默认 2，上限 4）。
+    #[serde(default)]
+    pub depth: Option<usize>,
+    /// 最多展开多少个匹配符号（默认 3，上限 5）。
+    #[serde(default)]
+    pub max_symbols: Option<usize>,
 }
 
 pub struct CodeGraphTool;
@@ -40,7 +51,7 @@ pub struct CodeGraphInvocation {
 
 impl ToolInvocation for CodeGraphInvocation {
     fn get_description(&self) -> String {
-        format!("Call graph: {}", self.params.symbol)
+        format!("Explore: {}", self.params.symbol)
     }
 
     fn tool_locations(&self) -> Vec<ToolLocation> {
@@ -60,15 +71,18 @@ impl ToolInvocation for CodeGraphInvocation {
     > {
         let symbol = self.params.symbol.clone();
         let path = self.params.path.clone();
+        let limits = ExploreLimits {
+            max_symbols: self.params.max_symbols.unwrap_or(3).clamp(1, 5),
+            depth: self.params.depth.unwrap_or(2).clamp(1, 4),
+            max_source_lines: ExploreLimits::default().max_source_lines,
+        };
         Box::pin(async move {
             let root = path
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
             // 构图会走全仓解析，放到 blocking 线程，避免卡住 async 执行器。
-            let joined = tokio::task::spawn_blocking(move || {
-                crate::core::tools::codebase_search::trace_call_chain(&root, &symbol)
-            })
-            .await;
+            let joined =
+                tokio::task::spawn_blocking(move || explore_symbol(&root, &symbol, limits)).await;
             let text = match joined {
                 Ok(Ok(s)) => s,
                 Ok(Err(e)) => format!("CodeGraph error: {e}"),
@@ -95,7 +109,7 @@ impl BaseDeclarativeTool for CodeGraphTool {
     }
 
     fn description(&self) -> &str {
-        "Precise call-graph query: given a function/method/type name, returns who-calls, callees, and call chains via tree-sitter + resolved edges. Use for 'what calls X' / 'how does X reach Y' structural questions; for exact strings use Grep, for concepts use CodebaseSearch."
+        "Compound code investigation: given a function/method/type name, returns its verbatim source, direct callers and callees, and the upstream/downstream impact in one call. Use for 'what calls X', 'what does X call', and 'what breaks if I change X' instead of chaining Grep + Read + call-graph queries."
     }
 
     fn kind(&self) -> Kind {
@@ -106,8 +120,10 @@ impl BaseDeclarativeTool for CodeGraphTool {
         json!({
             "type": "object",
             "properties": {
-                "symbol": { "type": "string", "description": "Function/method/type name to trace in the call graph" },
-                "path": { "type": "string", "description": "Root directory to scan (default: current directory)" }
+                "symbol": { "type": "string", "description": "Function/method/type name to explore. Ranked: exact > camel/snake word boundary > prefix > substring > typo tolerance (1-2 edits for queries of 4+ chars)" },
+                "path": { "type": "string", "description": "Root directory to scan (default: current directory)" },
+                "depth": { "type": "integer", "minimum": 1, "maximum": 4, "description": "Call-chain depth for the impact summary (default: 2)" },
+                "max_symbols": { "type": "integer", "minimum": 1, "maximum": 5, "description": "How many matching symbols to expand with source and call flow (default: 3)" }
             },
             "required": ["symbol"]
         })
