@@ -101,7 +101,10 @@ fn register_core_command_tools(
     use crate::tools::SearchTool;
 
     if is_core_tool_enabled(selection_config, "Grep") {
-        registry.register_tool(Arc::new(SearchTool::new(global_state.clone())));
+        registry.register_tool(Arc::new(SearchTool::new_with_base_dir(
+            global_state.clone(),
+            selection_config.target_dir().clone(),
+        )));
     }
 
     // `Bash` 与 `TodoWrite` 在 agent_runtime 注册（需要 LLM client 等重装配）。

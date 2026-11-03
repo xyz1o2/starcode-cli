@@ -22,11 +22,15 @@ pub struct SearchTool {
 
 impl SearchTool {
     pub fn new(global_state: Arc<GlobalState>) -> Self {
+        Self::new_with_base_dir(global_state, std::env::current_dir().unwrap_or_default())
+    }
+
+    /// Runtime construction must pass the configured project root. Falling back to
+    /// `current_dir()` makes `Grep(path=".")` search the process cwd instead of the
+    /// workspace the agent is operating on (especially visible in WSL/IDE launches).
+    pub fn new_with_base_dir(global_state: Arc<GlobalState>, base_dir: PathBuf) -> Self {
         Self {
-            current_directory: std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                .to_string_lossy()
-                .to_string(),
+            current_directory: base_dir.to_string_lossy().to_string(),
             global_state,
         }
     }
@@ -286,6 +290,10 @@ impl SearchTool {
         };
 
         let mut excludes = Vec::new();
+        // Agent runtime state is never source code and can contain prior tool
+        // outputs with the exact words being searched. Keep it out by default;
+        // callers can still opt into a narrower explicit scope when needed.
+        excludes.push(".star/".to_string());
         if let Some(pattern) = exclude_pattern {
             excludes.push(pattern.to_string());
         }
