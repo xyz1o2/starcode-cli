@@ -123,6 +123,18 @@ impl VirtualList {
         self.heights.get(index).map(|i| i.height).unwrap_or(0)
     }
 
+    /// 当前条目之前的累计行数。
+    ///
+    /// 高度变化时，聊天区需要用它判断该条目是否位于视口上方；如果是，
+    /// 就补偿滚动偏移，保持用户眼前的内容不动。
+    pub fn prefix_height(&self, index: usize) -> usize {
+        self.heights
+            .iter()
+            .take(index.min(self.heights.len()))
+            .map(|item| item.height as usize)
+            .sum()
+    }
+
     /// Get total lines across all items.
     pub fn total_lines(&self) -> usize {
         self.total_lines

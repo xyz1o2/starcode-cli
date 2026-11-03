@@ -272,7 +272,19 @@ fn build_document(state: &mut ChatState, area_width: u16) -> Vec<Line<'static>> 
                 state.streaming_height_floor.remove(&idx);
             }
             let h = lines.len().min(u16::MAX as usize) as u16;
+            let old_height = state.virtual_list.get_height(idx);
+            let prefix_height = state.virtual_list.prefix_height(idx);
             state.virtual_list.set_height(idx, h);
+            // 高度变化不能把用户正在看的内容整体推走。auto-follow 时滚动位置
+            // 会在 app/mod.rs 按底部重新计算；只有用户主动往上看时，才补偿
+            // 位于当前视口上方条目的高度差。
+            if !state.auto_follow && prefix_height < state.scroll && old_height != h {
+                if h > old_height {
+                    state.scroll = state.scroll.saturating_add((h - old_height) as usize);
+                } else {
+                    state.scroll = state.scroll.saturating_sub((old_height - h) as usize);
+                }
+            }
             // Ensure last_item_heights has capacity before setting
             while state.last_item_heights.len() <= idx {
                 state.last_item_heights.push(0);
