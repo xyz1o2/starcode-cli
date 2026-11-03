@@ -54,9 +54,18 @@ pub(crate) fn render_non_tool_entry_blocks(
                 let reasoning_display = crate::ui::utils::text::sanitize_for_tui(reasoning);
                 // 过滤掉空的或无意义的 thinking 内容
                 let reasoning_trimmed = reasoning_display.trim();
-                let is_meaningful = !reasoning_trimmed.is_empty()
-                    && reasoning_trimmed != "empty"
-                    && reasoning_trimmed.len() > 5; // 至少 5 个字符才算有意义
+                // 「至少 5 个字符才算有意义」这条阈值会让思考块**半途才冒出来**：
+                // 推理刚开始时正文不足 6 个字符 → 整块不渲染；等流过了阈值 →
+                // 块突然出现。视觉上就是"闪"了一下。
+                //
+                // 现在：有任何非空正文就渲染（只有 "empty" 这种占位串除外）。
+                //
+                // 外加一条**粘住**规则：流式期间块必须一直在。推理刚开始时正文
+                // 还没到（reasoning_content = Some("")），或者流在两段之间短暂
+                // 归零——那两种时刻一旦不渲染，块就会"消失 → 又出现"，正是
+                // 肉眼看到的抖动。
+                let is_meaningful = (!reasoning_trimmed.is_empty() && reasoning_trimmed != "empty")
+                    || is_streaming_now;
 
                 if is_meaningful {
                     // thinking 折叠头（含 `∴ Thought for Xs` 耗时标签）一旦出现就保留
@@ -119,10 +128,24 @@ pub(crate) fn render_non_tool_entry_blocks(
                                 ),
                                 format_thinking_duration(ms),
                             ),
-                            // 历史会话恢复的条目没有冻结耗时，退回普通标签
-                            None => {
-                                crate::core::i18n::t("ui.thinking.label", "Thinking", "Thinking")
-                            }
+                            // 进行中：现在态 + 省略号。
+                            //
+                            // 以前这里是光秃秃的 "Thinking" —— 既不像现在（没有
+                            // 进行中的标记），也不像完成后的记录（没有过去式），
+                            // 读起来含糊。而同一个"思考中"已经由紧贴输入框的
+                            // spinner 行独家承担（`⠹ Spelunking… (18s · esc)`），
+                            // 正文这一行只需要说清"这是进行中的思考"。
+                            None if is_streaming_now => format!(
+                                "{}…",
+                                crate::core::i18n::t(
+                                    "ui.thinking.in_progress",
+                                    "思考中",
+                                    "Thinking"
+                                )
+                            ),
+                            // 历史会话恢复的条目既没有冻结耗时、也不在流式里 ——
+                            // 用过去态，别让它永远停在 "Thinking"。
+                            None => crate::core::i18n::t("ui.thinking.past", "思考过", "Thought"),
                         }
                     };
 
@@ -289,11 +312,30 @@ pub(crate) fn render_non_tool_entry_blocks(
                         ];
                         blocks.push(vec![Line::from(header_spans)]);
                     } else if is_streaming_now && !cancelling {
-                        // 折叠态 + 进行中：显示简短占位符（不带展开提示）
-                        // 避免用户手动收缩思考块后整块消失
+                        // 折叠态 + 进行中：**和完成态用同一套结构**（标记 + 标签 +
+                        // 展开提示），只有文案与配色不同。
+                        //
+                        // 以前进行中是不带提示的短占位符（"∴ Thinking"），完成瞬间
+                        // 才补上 "  (ctrl+o to expand)" —— 行宽从 11 列暴涨到 ~39 列，
+                        // 窄终端里当场折行 → 文档高度 +1 → 视口整体下移一格。
+                        // 用户看到的就是"思考块一结束屏幕就跳一下"（闪屏）。
+                        //
+                        // 结构恒定 → 只有标签文案变化（"Thinking…" → "Thought for
+                        // 14s"，+6 列），绝大多数终端不会因此折行。
                         let header_spans = vec![
                             Span::styled("∴ ", label_style),
                             Span::styled(header_text, label_style),
+                            Span::styled(
+                                format!(
+                                    " {}",
+                                    crate::core::i18n::t(
+                                        "ui.thinking.expand_hint",
+                                        "(ctrl+o 展开思考)",
+                                        "(ctrl+o to expand)",
+                                    )
+                                ),
+                                theme.subtle_style(),
+                            ),
                         ];
                         blocks.push(vec![Line::from(header_spans)]);
                     }
@@ -1067,18 +1109,22 @@ mod tests {
         assert!(completed.contains("Thought for 14s"), "{:?}", completed);
         assert!(completed.contains("(ctrl+o to expand)"), "{:?}", completed);
 
-        // 流式态：折叠中的思考块留一条简短占位符 —— 不带展开提示、不带假耗时。
+        // 流式态：折叠中的思考块 —— 进行态标签 + **同样带展开提示**。
+        //
+        // 标题结构必须恒定：以前进行中是不带提示的短占位符（"∴ Thinking"），
+        // 完成瞬间才补上 "  (ctrl+o to expand)" —— 行宽从 11 列暴涨到 ~39 列，
+        // 窄终端当场折行 → 文档高度 +1 → 视口整体下移（用户看到的"闪屏"）。
         state.chat_history[idx].is_streaming = Some(true);
         state.chat_history[idx].reasoning_finished_elapsed_ms = None;
         let streaming = header_of(&state);
         assert!(
             streaming.contains("Thinking"),
-            "流式中折叠态应显示占位符，实际 {:?}",
+            "流式中折叠态应显示进行态标签，实际 {:?}",
             streaming
         );
         assert!(
-            !streaming.contains("ctrl+o"),
-            "占位符不得重复展开提示，实际 {:?}",
+            streaming.contains("ctrl+o"),
+            "进行中也要带展开提示（标题结构恒定），实际 {:?}",
             streaming
         );
         assert!(
@@ -1124,7 +1170,14 @@ mod tests {
                     .collect::<String>()
             })
             .collect();
-        assert!(header.contains("Thinking"), "{:?}", header);
+        // 恢复的历史条目：既没有冻结耗时、也不在流式里 → 用**过去态**标签。
+        // 写成 "Thinking" 会把一条早已结束的思考说成"正在想"。
+        assert!(header.contains("Thought"), "{:?}", header);
+        assert!(
+            !header.contains("Thinking"),
+            "历史条目是过去的思考，不能写成进行中的 Thinking：{:?}",
+            header
+        );
         assert!(!header.contains("Thought for"), "{:?}", header);
         assert!(header.contains("(ctrl+o to expand)"), "{:?}", header);
     }

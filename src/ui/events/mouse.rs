@@ -123,7 +123,11 @@ pub(crate) fn try_toggle_on_click(state: &mut ChatState, entry_idx: usize, row: 
     ));
 
     if let Some(reasoning) = &entry.reasoning_content {
-        if !reasoning.is_empty() {
+        // 可见性判定必须与渲染一致：有正文，**或**正在流式（此时正文可能还没到，
+        // 但标题行已经在屏幕上）。以前只认"有正文"，于是流式刚开始、正文尚空时
+        // 那行"∴ Thinking…"看得见却点不动 —— 点了没反应，用户只会当成卡住。
+        let block_visible = !reasoning.is_empty() || entry.is_streaming == Some(true);
+        if block_visible {
             let is_expanded = state.expanded_thinking_indices.contains(&entry_idx);
             // 思考块折叠时只渲染 1 行标题："∴ Thought for 14s  (ctrl+o to expand)"
             // 点击这一行（row 0）应该展开；展开后点任意行都收起。
