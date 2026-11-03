@@ -46,7 +46,34 @@ fn last_sync_tokens() -> &'static Mutex<HashMap<PathBuf, Option<SystemTime>>> {
 
 /// 库文件位置：`.star/context/callgraph.db`（与 `index.json` 同目录）。
 pub fn db_path(root: &Path) -> PathBuf {
-    root.join(".star").join("context").join("callgraph.db")
+    project_root(root)
+        .join(".star")
+        .join("context")
+        .join("callgraph.db")
+}
+
+/// 将工具传入的子目录归一到项目仓库根。
+///
+/// CodeGraph/RepoMap 经常从 `repo/agent` 这种子目录发起查询；如果直接把
+/// 参数当 root，就会生成 `repo/agent/.star/context/callgraph.db`，同一个项目
+/// 每个子目录各有一份图。向上找到 `.git` 后统一使用仓库根，和 Storage 的
+/// monorepo 语义保持一致；非 Git 目录则保留传入目录。
+pub(crate) fn project_root(root: &Path) -> PathBuf {
+    let start = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut current = start.clone();
+    loop {
+        let dot_git = current.join(".git");
+        if dot_git.is_dir() || dot_git.is_file() {
+            return current;
+        }
+        let Some(parent) = current.parent() else {
+            return start;
+        };
+        if parent == current {
+            return start;
+        }
+        current = parent.to_path_buf();
+    }
 }
 
 /// 一次同步的可观测结果（日志与测试共用）。
@@ -65,7 +92,7 @@ pub struct SyncReport {
 ///
 /// `trace_call_chain` 用它替换 `build_call_graph` —— 工具 schema 与输出不变。
 pub fn get_call_graph(root: &Path) -> Result<CallGraph, Box<dyn Error + Send + Sync>> {
-    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let canonical = project_root(root);
     let token = index_token(&canonical);
 
     let token_changed = {
@@ -134,12 +161,13 @@ pub fn sync(root: &Path) -> Result<SyncReport, Box<dyn Error + Send + Sync>> {
     let _guard = SYNC_LOCK.lock().expect("callgraph sync lock poisoned");
     let started = Instant::now();
 
-    let db = db_path(root);
+    let root = project_root(root);
+    let db = db_path(&root);
     if let Some(parent) = db.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    let mut report = match sync_once(root, &db) {
+    let mut report = match sync_once(&root, &db) {
         Ok(report) => report,
         // 只有**确认损坏**才隔离重建。另一个进程正在写库时拿到的是
         // SQLITE_BUSY（有 busy_timeout 兜底），那是可重试的争用，不是数据损坏；
@@ -150,7 +178,7 @@ pub fn sync(root: &Path) -> Result<SyncReport, Box<dyn Error + Send + Sync>> {
                 db.display()
             );
             quarantine_db(&db);
-            sync_once(root, &db)?
+            sync_once(&root, &db)?
         }
         Err(err) => return Err(err),
     };
@@ -427,8 +455,9 @@ fn flush(
 /// 库不存在 / 版本不符 → `Ok(None)`；文件损坏 → `Err`。两种都由
 /// [`get_call_graph`] 决定是重建还是内存兜底（设计文档 §8）。
 pub fn load_graph(root: &Path) -> Result<Option<CallGraph>, Box<dyn Error + Send + Sync>> {
-    let root_str = normalized_root(root);
-    let db = db_path(root);
+    let root = project_root(root);
+    let root_str = normalized_root(&root);
+    let db = db_path(&root);
     if !db.exists() {
         return Ok(None);
     }
@@ -1148,6 +1177,23 @@ mod tests {
         assert!(
             load_graph(&root).unwrap().is_some(),
             "空符号文件不能让加载路径返回 None"
+        );
+    }
+
+    #[test]
+    fn nested_tool_path_uses_the_git_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let nested = root.join("agent").join("worker");
+        fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(project_root(&nested), root.canonicalize().unwrap());
+        assert_eq!(
+            db_path(&nested),
+            root.canonicalize()
+                .unwrap()
+                .join(".star/context/callgraph.db")
         );
     }
 

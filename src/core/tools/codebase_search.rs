@@ -1757,7 +1757,11 @@ pub fn explore_symbol(
     name_hint: &str,
     limits: ExploreLimits,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let graph = crate::core::context::call_graph_db::get_call_graph(root)?;
+    // CallGraph 将子目录归一到 Git 根；源码片段也必须使用同一个 root，
+    // 否则 `RepoMap(path=repo/agent)` 得到的 `agent/foo.go` 会被拼成
+    // `repo/agent/agent/foo.go`，表现为图有符号但 source unavailable。
+    let root = crate::core::context::call_graph_db::project_root(root);
+    let graph = crate::core::context::call_graph_db::get_call_graph(&root)?;
 
     // 候选 = 内存 contains 匹配 ∪ FTS5 分词匹配。
     //
@@ -1777,7 +1781,7 @@ pub fn explore_symbol(
     }
 
     if let Ok(hits) =
-        crate::core::context::call_graph_db::search_symbols(root, query, limits.max_symbols * 4)
+        crate::core::context::call_graph_db::search_symbols(&root, query, limits.max_symbols * 4)
     {
         for hit in hits {
             let Some(candidate) = graph.symbols().iter().find(|candidate| {
@@ -1830,7 +1834,7 @@ pub fn explore_symbol(
     for symbol in symbols.iter().take(max_symbols) {
         write_symbol_card(
             &mut output,
-            root,
+            &root,
             &graph,
             symbol,
             limits.max_source_lines,
