@@ -3,11 +3,12 @@ use crate::agent::agent_loop::TurnResult;
 use crate::agent::loop_engineering::{LoopState, LoopStrategy, StructuredError, ToolCallBudget};
 use crate::agent::nudges;
 use crate::agent::tool_routing::{
-    build_analyzer_skill_tool_call, build_editor_skill_tool_call, build_json_fallback_prompt,
-    build_navigator_skill_tool_call, build_project_map_tool_call, build_tool_loop_signature,
-    build_validation_tool_call, detect_tool_loop, has_action_intent, is_edit_tool_name,
-    is_read_only_tool_name, is_validation_tool_name, json_fallback_extract_tool_call,
-    resolved_read_only_turn_limit, select_best_auto_trigger, AutoTriggerKind,
+    build_analyzer_skill_tool_call, build_editor_skill_tool_call, build_explore_tool_call,
+    build_json_fallback_prompt, build_navigator_skill_tool_call, build_project_map_tool_call,
+    build_repo_map_tool_call, build_tool_loop_signature, build_validation_tool_call,
+    detect_tool_loop, has_action_intent, is_edit_tool_name, is_read_only_tool_name,
+    is_validation_tool_name, json_fallback_extract_tool_call, resolved_read_only_turn_limit,
+    select_best_auto_trigger, AutoTriggerKind,
 };
 use crate::agent::{hooks, reflection, tool_helpers};
 use crate::core::i18n;
@@ -890,6 +891,19 @@ impl Agent {
                 )
                 .await
             }
+            AutoTriggerKind::Explore => {
+                let tool_call = build_explore_tool_call(user_input, current_turn);
+                self.run_auto_trigger_tool(
+                    user_input,
+                    messages,
+                    tool_call,
+                    verification_required,
+                    skip_verification,
+                    loop_state,
+                    None,
+                )
+                .await
+            }
             AutoTriggerKind::CodebaseSearch => {
                 // 闸门**不**在这里置位——它在工具真给出可用结果之后才置。
                 // 冷启动首查几乎必然是 Warming（后台建索引与首轮 LLM 请求并发），
@@ -1009,6 +1023,20 @@ impl Agent {
             AutoTriggerKind::ProjectMap => {
                 *project_map_attempted = true;
                 let tool_call = build_project_map_tool_call(user_input, current_turn);
+                self.run_auto_trigger_tool(
+                    user_input,
+                    messages,
+                    tool_call,
+                    verification_required,
+                    skip_verification,
+                    loop_state,
+                    None,
+                )
+                .await
+            }
+            AutoTriggerKind::RepoMap => {
+                *project_map_attempted = true;
+                let tool_call = build_repo_map_tool_call(user_input, current_turn);
                 self.run_auto_trigger_tool(
                     user_input,
                     messages,

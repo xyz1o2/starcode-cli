@@ -292,6 +292,27 @@ pub(crate) fn build_project_map_tool_call(user_input: &str, turn: i32) -> StarTo
     )
 }
 
+pub(crate) fn build_repo_map_tool_call(user_input: &str, turn: i32) -> StarToolCall {
+    let focus = extract_search_keywords(user_input);
+    let args = serde_json::json!({
+        "focus": focus,
+        "max_entries": 60,
+        "turn": turn,
+    });
+    build_tool_call("RepoMap", &args)
+}
+
+pub(crate) fn build_explore_tool_call(user_input: &str, turn: i32) -> StarToolCall {
+    let symbol = extract_search_keywords(user_input);
+    let args = serde_json::json!({
+        "symbol": symbol,
+        "depth": 2,
+        "max_symbols": 3,
+        "turn": turn,
+    });
+    build_tool_call("CodeGraph", &args)
+}
+
 pub(crate) fn build_validation_tool_call(turn: i32) -> StarToolCall {
     build_tool_call("GetDiagnostics", &serde_json::json!({"turn": turn}))
 }

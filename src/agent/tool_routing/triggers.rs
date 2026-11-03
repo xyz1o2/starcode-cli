@@ -29,6 +29,10 @@ pub(crate) enum AutoTriggerKind {
     AnalyzerSkill = 1,
     /// 项目地图（结构概览，信息密度最低）
     ProjectMap = 0,
+    /// 真实符号名地图（中文/自然语言需求的代码词典）。
+    RepoMap = 6,
+    /// 已知符号的源码 + callers/callees + 影响面。
+    Explore = 7,
 }
 
 /// 触发器评估结果。
@@ -145,6 +149,20 @@ pub(crate) fn select_best_auto_trigger_with_flags(
         }
     }
 
+    // 结构调查：已知函数/模块，想看调用链与影响面。这个槽不能依赖模型
+    // 自己先想起 CodeGraph；当用户明确问 callers/impact 时由框架直接投放。
+    if looks_like_structure_question(user_input)
+        && !codebase_search_attempted
+        && active_tools.contains("CodeGraph")
+    {
+        candidates.push(TriggerEval {
+            kind: AutoTriggerKind::Explore,
+            score: 84,
+            reason: "structural_explore_request",
+            detail: "callers_callees_impact_question".to_string(),
+        });
+    }
+
     // JSON回退 — 检测到行动意图但模型没返回工具调用
     if flags.json_fallback && has_action_intent(current_content) {
         candidates.push(TriggerEval {
@@ -173,6 +191,20 @@ pub(crate) fn select_best_auto_trigger_with_flags(
     }
 
     // 项目地图 — 需要项目结构总览
+    if looks_like_overview_question(user_input)
+        && !project_map_attempted
+        && flags.auto_skill_fallbacks
+        && active_tools.contains("RepoMap")
+    {
+        candidates.push(TriggerEval {
+            kind: AutoTriggerKind::RepoMap,
+            score: 78,
+            reason: "repository_vocabulary_needed",
+            detail: "overview_or_onboarding_request_needs_real_symbol_names".to_string(),
+        });
+    }
+
+    // 兼容原有 ProjectMap：统计地图仍然是较轻量的结构概览。
     if should_trigger_project_map_with_flag(
         user_input,
         current_content,
@@ -756,6 +788,27 @@ fn looks_like_overview_question(user_input: &str) -> bool {
     MARKERS.iter().any(|m| lower.contains(m))
 }
 
+fn looks_like_structure_question(user_input: &str) -> bool {
+    let lower = user_input.to_lowercase();
+    [
+        "who calls",
+        "callers",
+        "callees",
+        "impact",
+        "blast radius",
+        "what calls",
+        "调用者",
+        "谁调用",
+        "调用链",
+        "影响面",
+        "影响范围",
+        "怎么走",
+        "会影响什么",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
 /// 检查是否应该触发导航技能
 fn should_trigger_navigator_skill_with_flag(
     _user_input: &str,
@@ -816,7 +869,10 @@ fn should_trigger_editor_skill_with_flag(
 
 /// 检查是否启用第一轮预取
 fn first_turn_prefetch_enabled() -> bool {
-    bool_env_flag("STAR_ENABLE_FIRST_TURN_PREFETCH", false)
+    // 首轮预取现在有内容形状判定（score_rank_locate_route），不是无条件盲搜。
+    // 默认打开才能让“分析项目/哪里实现/怎么处理”这类首句真正拿到上下文；
+    // 需要旧行为时显式设 STAR_ENABLE_FIRST_TURN_PREFETCH=0。
+    bool_env_flag("STAR_ENABLE_FIRST_TURN_PREFETCH", true)
 }
 
 /// 检查是否启用动态上下文第一轮
@@ -837,7 +893,9 @@ fn auto_codebase_search_enabled() -> bool {
 
 /// 检查是否启用自动技能回退
 fn auto_skill_fallbacks_enabled() -> bool {
-    bool_env_flag("STAR_ENABLE_AUTO_SKILL_FALLBACKS", false)
+    // CodebaseSearch/ProjectMap 完成后，结构复杂的任务自动交给 navigator /
+    // analyzer 子 agent。触发器本身有 attempted 与 route 条件，不是全局盲跑。
+    bool_env_flag("STAR_ENABLE_AUTO_SKILL_FALLBACKS", true)
 }
 
 /// 检查是否启用 JSON 回退
