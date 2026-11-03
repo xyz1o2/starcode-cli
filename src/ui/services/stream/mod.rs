@@ -1293,12 +1293,15 @@ pub async fn handle_stream_update(
         StreamMessage::ApprovalModeChanged { mode } => {
             state.approval_mode = mode.clone();
             let mode_name = match mode {
-                crate::types::ApprovalMode::Default => i18n::t("ui.mode.build", "Build", "Build"),
+                crate::types::ApprovalMode::Default => {
+                    i18n::t("ui.mode.default", "Default", "Default")
+                }
                 crate::types::ApprovalMode::AcceptEdits => {
                     i18n::t("ui.mode.accept_edits", "Accept edits", "Accept edits")
                 }
                 crate::types::ApprovalMode::Plan => i18n::t("ui.mode.plan", "Plan", "Plan"),
                 crate::types::ApprovalMode::Yolo => i18n::t("ui.mode.yolo", "YOLO", "YOLO"),
+                crate::types::ApprovalMode::Auto => i18n::t("ui.mode.auto", "Auto", "Auto"),
             };
             // 这里**不再**往 chat_history 推一条 assistant 条目。
             //

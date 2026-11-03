@@ -33,12 +33,14 @@
   "ui.status.running": "Status: ",
   "ui.status.done": "Done: ",
 
-  "ui.mode.build": "Build",
+  "ui.mode.default": "Default",
   "ui.mode.plan": "Plan",
   "ui.mode.yolo": "YOLO",
-  "ui.mode.build.desc": "Build mode: confirm dangerous actions; manage tasks with Ctrl+T or /task",
+  "ui.mode.auto": "Auto",
+  "ui.mode.default.desc": "Default mode: confirm dangerous actions; manage tasks with Ctrl+T or /task",
   "ui.mode.plan.desc": "Plan mode: read-only research; manage plans with /task or Ctrl+T",
   "ui.mode.yolo.desc": "YOLO mode: all actions auto-run (dangerous!)",
+  "ui.mode.auto.desc": "Auto mode: an AI safety classifier reviews each action; safe operations run without confirmation",
 
   "ui.approval.mode_changed.label": "Status: Approval mode changed to: ",
 

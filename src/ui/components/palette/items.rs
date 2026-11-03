@@ -405,8 +405,8 @@ pub fn get_system_palette_items() -> Vec<PaletteItem> {
             ),
             description: i18n::t(
                 "palette.desc.approval_mode",
-                "Switch Auto, Plan or Yolo",
-                "Switch Auto, Plan or Yolo",
+                "Switch Auto, Default, Plan or Yolo",
+                "Switch Auto, Default, Plan or Yolo",
             ),
             category: cat_settings.clone(),
             action: PaletteAction::Navigate(PaletteMode::AgentMode),

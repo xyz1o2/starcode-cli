@@ -564,6 +564,20 @@ fn codebase_search_language_gate(
     user_input: &str,
     index_has_cjk: Option<bool>,
 ) -> Result<(), String> {
+    codebase_search_language_gate_with(user_input, index_has_cjk, true)
+}
+
+/// `allow_rewrite` 区分**两个阶段**：
+///
+/// - 判定阶段（`true`）：中文需求会被改写成英文标识符，所以放行 ——
+///   否则闸门在改写之前就把触发否了，改写白做，中文请求永远拿不到检索结果。
+/// - 有效 query 阶段（`false`）：改写**失败**后 query 仍是中文，这时按老规矩
+///   拦下（索引无中文 token 时零命中，别白烧一个回合）。
+fn codebase_search_language_gate_with(
+    user_input: &str,
+    index_has_cjk: Option<bool>,
+    allow_rewrite: bool,
+) -> Result<(), String> {
     let keywords = super::tool_call_builders::extract_search_keywords(user_input);
     let terms: Vec<&str> = keywords.split_whitespace().collect();
 
@@ -586,15 +600,34 @@ fn codebase_search_language_gate(
         // 索引里有中文 token（中文注释/文档）→ 中文关键词**可能**命中。
         Some(true) => Ok(()),
         // 索引里一个中文 token 都没有 → 中文关键词必零命中。
-        Some(false) => Err(format!(
-            "language gate: query keywords are all CJK but the index has no CJK tokens \
-             (codebase is English-only) — query={keywords:?}"
-        )),
+        //
+        // **例外：改写路径能救**（判定阶段）。自动触发会先把中文需求改写成
+        // 英文标识符（`query_rewrite`），所以这里必须放行 —— 否则闸门在改写
+        // 之前就把触发否了，改写白做，中文请求永远拿不到检索结果。
+        // 改写失败时由调用方拿**有效 query** 再判一次
+        // （`language_gate_allows`），那时才真正拦下。
+        Some(false) => {
+            if allow_rewrite && super::query_rewrite::needs_rewrite(user_input) {
+                return Ok(());
+            }
+            Err(format!(
+                "language gate: query keywords are all CJK but the index has no CJK tokens \
+                 (codebase is English-only) — query={keywords:?}"
+            ))
+        }
         // 索引还没建好 —— 不知道，放行。
         // 「不知道」不等于「不匹配」：据此拦截会把一次本该成功的检索也毙掉。
         // 真正的冷启动由工具自己的 `Warming` 分支处理（等索引就绪后重跑）。
         None => Ok(()),
     }
+}
+
+/// 语言闸门（对**有效 query** 判定）—— 调用方在拿到改写结果后用。
+///
+/// 改写成功 → query 是英文标识符，必然放行；改写失败 → query 还是中文，
+/// 这时闸门按老规矩拦下（索引无中文 token 时零命中，别白烧一个回合）。
+pub(crate) fn language_gate_allows(query: &str, project_root: Option<&Path>) -> bool {
+    codebase_search_language_gate_with(query, index_has_cjk_token(project_root), false).is_ok()
 }
 
 /// 查目标项目索引的语言构成（供上面的闸门用）。
@@ -1326,16 +1359,27 @@ mod tests {
     // bigram，喂给纯英文代码库的词法引擎 —— 数学上零命中，而谓词只看
     // 「句子像不像跨文件定位」，于是每轮盲打一次。
 
-    /// 纯中文关键词 + 纯英文索引 = 必零命中 → 闸门必须拦下。
+    /// 纯中文关键词 + 纯英文索引 = 必零命中 → **有效 query 阶段**必须拦下。
     ///
     /// 这就是事故里的那一发：`query=没动 动静` 打在一个 Go 仓库上。
+    /// （判定阶段放行 —— 中文需求会被改写成英文标识符，见下一条测试。）
     #[test]
     fn the_language_gate_blocks_cjk_queries_against_an_english_index() {
-        let err = codebase_search_language_gate("错误处理在哪里实现？", Some(false))
+        let err = codebase_search_language_gate_with("错误处理在哪里实现？", Some(false), false)
             .expect_err("纯中文关键词撞纯英文索引必须被拦下");
         assert!(
             err.contains("language gate"),
             "拦截理由要能解释为什么：{err}"
+        );
+    }
+
+    /// 判定阶段要**放行**中文需求：自动触发会先把它改写成英文标识符。
+    /// 闸门若在改写之前就否掉触发，改写白做，中文请求永远拿不到检索结果。
+    #[test]
+    fn the_decision_gate_allows_cjk_queries_that_can_be_rewritten() {
+        assert!(
+            codebase_search_language_gate("错误处理在哪里实现？", Some(false)).is_ok(),
+            "可改写的中文需求不该在判定阶段被拦下"
         );
     }
 
@@ -1414,12 +1458,14 @@ mod tests {
         );
     }
 
-    /// 事故里的**原句**必须被闸门拦下。
+    /// 事故里的**原句**现在必须走改写路径，而不是被闸门直接丢掉。
     ///
     /// 这两句是从事故现场抄下来的：中文提问压成中文 bigram，喂给纯英文代码库，
-    /// 命中概率数学上为零，却每轮都白打一发。
+    /// 命中概率数学上为零，却每轮都白打一发。修法不是"干脆不触发"，而是
+    /// **先把需求改写成英文标识符**再搜 —— 所以判定阶段必须放行；
+    /// 而"改写失败、有效 query 仍是中文"时，闸门还得照旧拦下。
     #[test]
-    fn the_incident_queries_are_gated_out() {
+    fn the_incident_queries_go_through_the_rewrite_path() {
         for query in [
             "没动 动静",
             "错误处理和限流回退的代码在哪里",
@@ -1427,8 +1473,16 @@ mod tests {
             "限流逻辑在哪里处理",
         ] {
             assert!(
-                codebase_search_language_gate(query, Some(false)).is_err(),
-                "事故里的中文提问必须被闸门拦下：{query:?}"
+                crate::agent::tool_routing::query_rewrite::needs_rewrite(query),
+                "事故里的中文提问必须能走改写路径：{query:?}"
+            );
+            assert!(
+                codebase_search_language_gate(query, Some(false)).is_ok(),
+                "可改写的中文提问不该在判定阶段被拦下：{query:?}"
+            );
+            assert!(
+                codebase_search_language_gate_with(query, Some(false), false).is_err(),
+                "改写失败后仍用中文打英文索引，必须被拦下：{query:?}"
             );
         }
     }

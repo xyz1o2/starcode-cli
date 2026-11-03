@@ -254,7 +254,15 @@ pub struct ChatState {
     /// Virtual-scrolling list with per-entry dirty tracking (tuie-inspired).
     pub virtual_list: VirtualList,
     pub last_terminal_width: u16,
-    pub last_rendered_stream_key: HashMap<usize, (usize, usize)>,
+    /// 流式条目的“显示指纹”：(reasoning 字符数, content 字符数, 打字机已揭示字符数)。
+    ///
+    /// 第三项是打字机效果的关键：内容不再增长、但还在逐字揭示时，前两项不变 ——
+    /// 少了它，流式条目会在揭示中途判定为“没变”，屏幕停住。
+    pub last_rendered_stream_key: HashMap<usize, (usize, usize, usize)>,
+    /// 整份聊天文档的扁平行缓存，见 `components::chat_history::DocumentCache`。
+    pub document_cache: Option<crate::ui::components::chat_history::DocumentCache>,
+    /// 打字机显示层：只影响“这一刻露出多少字符”，不改 `entry.content`。
+    pub typewriter: crate::ui::state::typewriter::TypewriterState,
     // =========================================
     // ============ Palette State ============
     pub palette_items: Vec<crate::ui::state::palette::PaletteItem>,
@@ -861,6 +869,8 @@ impl ChatState {
             virtual_list: VirtualList::new(),
             last_terminal_width: 0,
             last_rendered_stream_key: HashMap::new(),
+            document_cache: None,
+            typewriter: crate::ui::state::typewriter::TypewriterState::new(),
             modal_stack: Vec::new(),
             mcp_modal_servers: Vec::new(),
             mcp_modal_index: 0,
@@ -1102,6 +1112,8 @@ impl ChatState {
         self.rendered_cache.clear();
         self.last_rendered_stream_key.clear();
         self.streaming_height_floor.clear();
+        self.document_cache = None;
+        self.typewriter.reset();
         self.virtual_list.mark_all_dirty();
     }
 

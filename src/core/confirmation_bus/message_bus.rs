@@ -72,6 +72,31 @@ impl MessageBus {
         policy_engine.set_approval_mode(mode);
     }
 
+    /// 装上 auto 档位的 LLM 分类器。
+    ///
+    /// 必须在 `PolicyEngine` 建好**之后**调用 —— 分类器要读同一份对话上下文
+    /// （`GlobalState`），而共享状态是在总线之后建的。
+    pub async fn set_auto_classifier(
+        &self,
+        classifier: std::sync::Arc<
+            dyn crate::core::auto_mode::service::AutoModeClassifier,
+        >,
+        transcript_provider: Option<std::sync::Arc<dyn Fn() -> String + Send + Sync>>,
+    ) {
+        let mut policy_engine = self.policy_engine.write().await;
+        policy_engine.set_auto_classifier(classifier, transcript_provider);
+    }
+
+    /// auto 分类器统计（诊断用）。
+    pub async fn auto_classifier_stats(
+        &self,
+    ) -> crate::core::auto_mode::service::ClassifierStats {
+        self.policy_engine
+            .read()
+            .await
+            .auto_classifier_stats()
+    }
+
     /// 重新从磁盘装载权限规则。PolicyEngine 只活在这里，UI 改完 settings 必须走这一趟。
     pub async fn reload_permission_rules(&self, cwd: &std::path::Path) -> usize {
         let mut policy_engine = self.policy_engine.write().await;

@@ -43,12 +43,7 @@ pub fn set_approval_mode(
 
     // Update MessageBus policy engine
     let mb = message_bus.clone();
-    let mode_clone = match mode {
-        ApprovalMode::Default => PolicyApprovalMode::Default,
-        ApprovalMode::AcceptEdits => PolicyApprovalMode::AcceptEdits,
-        ApprovalMode::Yolo => PolicyApprovalMode::Yolo,
-        ApprovalMode::Plan => PolicyApprovalMode::Plan,
-    };
+    let mode_clone = mode.clone().into();
     spawn_and_log_panic(async move {
         mb.set_approval_mode(mode_clone).await;
     });
@@ -61,7 +56,8 @@ pub fn toggle_yolo_mode(
 ) -> ApprovalMode {
     let mut m = approval_mode_lock.lock().unwrap_or_else(|e| e.into_inner());
     let new_mode = if *m == ApprovalMode::Yolo {
-        ApprovalMode::Default
+        // 关掉 yolo 后回到 auto —— auto 是新的默认档，比 default 更贴近"能干活"。
+        ApprovalMode::Auto
     } else {
         ApprovalMode::Yolo
     };
@@ -69,12 +65,7 @@ pub fn toggle_yolo_mode(
 
     // Update MessageBus policy engine
     let mb = message_bus.clone();
-    let mode_clone = match new_mode {
-        ApprovalMode::Default => PolicyApprovalMode::Default,
-        ApprovalMode::AcceptEdits => PolicyApprovalMode::AcceptEdits,
-        ApprovalMode::Yolo => PolicyApprovalMode::Yolo,
-        ApprovalMode::Plan => PolicyApprovalMode::Plan,
-    };
+    let mode_clone = new_mode.clone().into();
     spawn_and_log_panic(async move {
         mb.set_approval_mode(mode_clone).await;
     });

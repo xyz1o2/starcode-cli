@@ -232,6 +232,34 @@ pub(crate) fn plan_mode_reminder_if_needed(
     }
 }
 
+/// auto 档位的自主执行提醒。
+///
+/// 返回 `Some` 时由调用方包进当轮 user 消息的 `<system-reminder>` 里
+/// （见 `agent_run` 的 turn_extras 组装），**不**另起 system 消息 ——
+/// 理由与 plan mode 提醒完全一样：system 数组整体是缓存前缀，模式提醒
+/// 每轮都可能变，放进去等于每轮击穿一次前缀。
+///
+/// # 为什么需要这段提醒
+///
+/// auto 档位改变的是**审批**，不是**行为**。模型不知道自己在 auto 档位下，
+/// 就仍会按"每步都可能被打断"的节奏行事：反复停下来解释、频繁提问。
+/// 提醒告诉它"工具调用会被 AI 自动裁决，正常往下做"，它才会真的连续执行。
+///
+/// 措辞与 `core::auto_mode::prompts::build_auto_mode_enter_prompt` 保持一致，
+/// 两处说的是同一件事。
+pub(crate) fn auto_mode_reminder_if_needed(
+    approval_mode: &crate::types::ApprovalMode,
+) -> Option<String> {
+    if matches!(approval_mode, crate::types::ApprovalMode::Auto) {
+        Some(
+            "Auto mode is active. Tool calls are reviewed by an AI safety classifier instead of prompting the user for every action, so routine operations run without interruption. Execute directly and make reasonable assumptions; minimize questions and prefer action over planning. The classifier may still ask the user about genuinely risky operations, and explicit user permission rules always win — the user can correct you at any time."
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 pub(crate) fn trim_context_if_needed(messages: &mut Vec<StarMessage>) -> Option<(String, bool)> {
     // ============ 智能化改进 6: 上下文智能管理 ============
     let enabled = std::env::var("STAR_ENABLE_CONTEXT_MONITOR")
@@ -470,4 +498,50 @@ pub(crate) fn trim_context_if_needed(messages: &mut Vec<StarMessage>) -> Option<
         ),
         true,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// auto 档位必须收到自主执行提醒 —— 否则模型不知道自己能连续跑。
+    #[test]
+    fn auto_mode_gets_the_autonomous_execution_reminder() {
+        let reminder =
+            auto_mode_reminder_if_needed(&crate::types::ApprovalMode::Auto).expect("auto 档位要有提醒");
+        assert!(
+            reminder.contains("Auto mode is active"),
+            "提醒要说清当前是 auto 档位：{reminder}"
+        );
+        assert!(
+            reminder.contains("classifier"),
+            "提醒要说明工具调用由分类器裁决：{reminder}"
+        );
+    }
+
+    /// 其他档位不该收到 auto 提醒 —— 尤其 plan 模式，两者语义相反。
+    #[test]
+    fn other_modes_do_not_get_the_auto_reminder() {
+        for mode in [
+            crate::types::ApprovalMode::Default,
+            crate::types::ApprovalMode::AcceptEdits,
+            crate::types::ApprovalMode::Plan,
+            crate::types::ApprovalMode::Yolo,
+        ] {
+            assert!(
+                auto_mode_reminder_if_needed(&mode).is_none(),
+                "{mode:?} 不该收到 auto 提醒"
+            );
+        }
+    }
+
+    /// plan 模式的只读护栏提醒不能被 auto 提醒挤掉。
+    #[test]
+    fn plan_mode_still_gets_its_own_reminder() {
+        assert!(plan_mode_reminder_if_needed(&crate::types::ApprovalMode::Plan).is_some());
+        assert!(
+            auto_mode_reminder_if_needed(&crate::types::ApprovalMode::Plan).is_none(),
+            "plan 模式不该同时收到 auto 提醒"
+        );
+    }
 }

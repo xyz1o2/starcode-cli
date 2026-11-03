@@ -368,6 +368,15 @@ pub enum AgentRequest {
     /// 重新读取磁盘上的权限规则（`/permissions allow|deny|ask|remove` 改完 settings 之后）。
     /// PolicyEngine 活在 MessageBus 里，UI 侧改不到，只能靠这条消息让运行时自己重载。
     ReloadPermissions,
+    /// 取 auto 档位分类器的统计快照（`/permissions classifier`）。
+    ///
+    /// PolicyEngine 活在 MessageBus 里，UI 侧读不到它的计数器，所以走
+    /// 「请求 — 回传」这条路：命令层发请求，worker 侧读出统计再回给 UI。
+    GetAutoClassifierStats {
+        response: tokio::sync::mpsc::Sender<
+            Result<crate::core::auto_mode::service::ClassifierStats, String>,
+        >,
+    },
     /// 思考力度档位（Alt+T / `/effort` / 命令面板）。UI 侧只改显示，
     /// 真正让它作用到请求上要靠这条消息落到 `llm::thinking`。
     SetThinkingEffort(crate::types::ThinkingEffort),

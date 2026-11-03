@@ -18,6 +18,41 @@ fn sep() -> Span<'static> {
     Span::styled(SEP, crate::ui::themes::theme::muted_style())
 }
 
+/// 审批模式的**状态栏指示段**（对标 Claude Code 的 mode indicator）。
+///
+/// # 为什么提到这里
+///
+/// 此前 `bar.rs` 与 `mod.rs` 各抄了一份**逐字相同**的 match —— 改一个档位
+/// 要改两处，漏一处就出现两种状态栏。这段是唯一真源。
+///
+/// 文案用 `ApprovalMode::label()`，与设置面板、`/permissions` 同一套措辞；
+/// 档位名本身由 `ApprovalMode::as_str()` 提供，不再各写一份。
+pub(crate) fn approval_mode_span(mode: &ApprovalMode, theme: &crate::ui::themes::theme::Theme) -> Span<'static> {
+    let (text, style) = match mode {
+        ApprovalMode::Default => (
+            format!("⏵⏵ {}", mode.as_str()),
+            Style::default().fg(theme.subtle),
+        ),
+        ApprovalMode::AcceptEdits => (
+            format!("⏵⏵ accept-edits"),
+            Style::default().fg(Color::LightGreen),
+        ),
+        ApprovalMode::Plan => (
+            format!("⏸ plan"),
+            Style::default().fg(Color::Rgb(0, 102, 102)),
+        ),
+        ApprovalMode::Yolo => (
+            format!("⏵⏵ yolo"),
+            Style::default().fg(theme.error).add_modifier(Modifier::BOLD),
+        ),
+        ApprovalMode::Auto => (
+            format!("🤖 auto"),
+            Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+        ),
+    };
+    Span::styled(text, style)
+}
+
 /// UI 只用 worker acknowledgement 中的 policy 计算 active context 比例；启动前不能
 /// 根据模型名、模型列表或环境变量猜测一个容量。
 fn confirmed_context_policy(
@@ -1379,34 +1414,7 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
     // ── 6. Approval mode (always visible,对标 Claude Code mode indicator) ────
     {
         spans.push(sep());
-        match state.approval_mode {
-            ApprovalMode::Default => {
-                spans.push(Span::styled(
-                    "⏵⏵ default",
-                    Style::default().fg(theme.subtle),
-                ));
-            }
-            ApprovalMode::AcceptEdits => {
-                spans.push(Span::styled(
-                    "⏵⏵ accept-edits",
-                    Style::default().fg(Color::LightGreen),
-                ));
-            }
-            ApprovalMode::Plan => {
-                spans.push(Span::styled(
-                    "⏸ plan",
-                    Style::default().fg(Color::Rgb(0, 102, 102)),
-                ));
-            }
-            ApprovalMode::Yolo => {
-                spans.push(Span::styled(
-                    "⏵⏵ yolo",
-                    Style::default()
-                        .fg(theme.error)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            }
-        }
+        spans.push(approval_mode_span(&state.approval_mode, theme));
     }
 
     // ── 6b. Thinking effort ──────────────────────────────────────────────────

@@ -4,6 +4,62 @@ use crate::types::StarMessage;
 use futures::Stream;
 use std::pin::Pin;
 
+/// 构造 auto 档位分类器要读的对话摘要。
+///
+/// 只保留 **user 与 assistant 的正文**，跳过 system 提示与 tool 输出：
+/// - system 提示是几万字的固定前缀，对"用户想要什么"没有增量信息，纯烧 token；
+/// - tool 输出是模型的中间产物，可能极长，同样不提供意图信号。
+///
+/// 每条正文截断到 2000 字符（与 `/btw` 的 transcript 压缩口径一致），
+/// 总长封顶 8000 字符 —— 分类器侧还会再截一次，两道闸门都留着。
+fn build_auto_mode_transcript(messages: &[StarMessage], user_input: &str) -> String {
+    const PER_MESSAGE_LIMIT: usize = 2000;
+    const TOTAL_LIMIT: usize = 8000;
+
+    let mut out = String::new();
+    let mut budget = TOTAL_LIMIT;
+
+    for msg in messages {
+        let role = msg.role.as_str();
+        if role != "user" && role != "assistant" {
+            continue;
+        }
+        let Some(content) = msg.content.as_deref() else {
+            continue;
+        };
+        let content = content.trim();
+        if content.is_empty() {
+            continue;
+        }
+
+        let take = content
+            .char_indices()
+            .nth(PER_MESSAGE_LIMIT)
+            .map(|(i, _)| i)
+            .unwrap_or(content.len());
+        let body = if take < content.len() {
+            format!("{}…[truncated]", &content[..take])
+        } else {
+            content.to_string()
+        };
+
+        let line = format!("{}: {}\n", role, body);
+        if line.len() > budget {
+            break;
+        }
+        budget -= line.len();
+        out.push_str(&line);
+    }
+
+    // 兜底：会话消息还没建起来时，至少把当轮用户输入给分类器 ——
+    // "用户要什么"这句话本身就是最关键的意图信号。
+    if out.trim().is_empty() && !user_input.trim().is_empty() {
+        out = format!("user: {}\n", user_input.trim());
+    }
+
+    out
+}
+
 /// 把当轮的用户消息并进对话。
 ///
 /// **紧跟在另一条 user 消息后面时合并成一条。** 运行中插入的需求（steering）
@@ -331,6 +387,13 @@ impl Agent {
             {
                 turn_extras.push(reminder);
             }
+            // auto 档位的自主执行提醒 —— 与 plan mode 提醒同一条通路
+            // （挂当轮 user 消息，不进 system 缓存前缀）。
+            if let Some(reminder) =
+                crate::agent::context::auto_mode_reminder_if_needed(&self.approval_mode)
+            {
+                turn_extras.push(reminder);
+            }
 
             // 当轮上下文跟在用户输入后面（对标 Claude Code 的 <system-reminder> 位置：
             // 用户的话先说完，附加上下文再跟上），这样 system 前缀保持稳定。
@@ -353,6 +416,17 @@ impl Agent {
             }
             // 紧跟在另一条 user 消息后面时合并成一条（见 `push_or_merge_user_message`）。
             push_or_merge_user_message(&mut messages, turn_message);
+
+            // 把本轮上下文写进共享状态，供 auto 档位的 LLM 分类器读取。
+            //
+            // 分类器要判断"这次工具调用是不是用户要的"，就必须看见用户这句话 ——
+            // 同一个 `rm -rf target`，用户明说"清理构建产物"与"你自己看着办"是两件
+            // 完全不同的事。这里写的是**合并后的当轮消息**（含 plan 提醒等附加上下文），
+            // 因为那才是模型真正看到的意图。
+            if let Some(gs) = self.runtime_global_state() {
+                let transcript = build_auto_mode_transcript(&messages, &user_input);
+                gs.set_auto_mode_transcript(Some(transcript)).await;
+            }
 
             // Create the event bridging channel and wire it on the agent.
             // Events are emitted through this channel via emit_event().
@@ -561,6 +635,61 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// transcript 只留 user/assistant 正文 —— system 提示与 tool 输出不进，
+    /// 它们对"用户想要什么"没有增量信息，纯烧 token。
+    #[test]
+    fn the_transcript_keeps_only_user_and_assistant_bodies() {
+        let messages = vec![
+            StarMessage::system("几万字的固定系统提示".to_string()),
+            StarMessage::user("请跑一下测试".to_string()),
+            StarMessage::new(
+                "tool",
+                Some("cargo test 输出".to_string()),
+            ),
+            StarMessage::assistant("测试跑完了".to_string()),
+        ];
+
+        let transcript = build_auto_mode_transcript(&messages, "请跑一下测试");
+
+        assert!(transcript.contains("user: 请跑一下测试"), "{transcript}");
+        assert!(transcript.contains("assistant: 测试跑完了"), "{transcript}");
+        assert!(
+            !transcript.contains("系统提示"),
+            "system 提示不该进 transcript：{transcript}"
+        );
+        assert!(
+            !transcript.contains("cargo test 输出"),
+            "tool 输出不该进 transcript：{transcript}"
+        );
+    }
+
+    /// 空会话时至少把当轮用户输入给分类器 —— "用户要什么"这句话本身就是
+    /// 最关键的意图信号。
+    #[test]
+    fn an_empty_session_falls_back_to_the_turn_input() {
+        let transcript = build_auto_mode_transcript(&[], "删掉 target 目录");
+        assert!(transcript.contains("删掉 target 目录"), "{transcript}");
+    }
+
+    /// 超长正文必须截断 —— 分类器上下文不能无限膨胀。
+    #[test]
+    fn long_messages_are_truncated() {
+        let long = "x".repeat(10_000);
+        let messages = vec![StarMessage::user(long)];
+
+        let transcript = build_auto_mode_transcript(&messages, "ignored");
+
+        assert!(
+            transcript.contains("[truncated]"),
+            "超长正文必须截断：{transcript}"
+        );
+        assert!(
+            transcript.len() < 4000,
+            "截断后的长度应受控，实际 {}",
+            transcript.len()
+        );
+    }
 
     /// 上一条是 user 消息时合并，不留连续两条 user。
     #[test]

@@ -904,6 +904,17 @@ impl Agent {
                         .unwrap_or_else(|| {
                             crate::agent::tool_routing::extract_search_keywords(user_input)
                         });
+                // 闸门兜底：改写失败 → query 还是中文；索引无中文 token 时，
+                // 这一发必然零命中 —— 与其在工具里空转，不如根本不触发。
+                if !crate::agent::tool_routing::language_gate_allows(
+                    &query,
+                    Some(self.config.target_dir().as_path()),
+                ) {
+                    crate::utils::logging::append_debug_log_line(
+                        "[ACE_AUTO] CodebaseSearch skipped — language gate (query is CJK-only, index has no CJK tokens)",
+                    );
+                    return TurnResult::Done;
+                }
                 let tool_call =
                     crate::agent::tool_routing::build_codebase_search_tool_call_for_query(
                         &query,

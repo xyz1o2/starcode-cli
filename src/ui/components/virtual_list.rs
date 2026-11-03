@@ -19,6 +19,12 @@ struct ItemState {
 pub struct VirtualList {
     heights: Vec<ItemState>,
     total_lines: usize,
+    /// 结构代数：任何一次 `dirty` 标记、插入、删除、长度变化都自增。
+    ///
+    /// 渲染层用它判断“这份文档要不要整体重建”。此前没有这个值，`render_chat_lines`
+    /// 只能每帧把整份会话重新拼一遍 —— 长会话里每滚一格都是 O(全部行) 的深拷贝，
+    /// 帧时间抖动起来就是肉眼可见的闪屏。
+    generation: u64,
     /// When true, the view automatically follows new items (scroll to bottom).
     pub auto_follow: bool,
 }
@@ -28,8 +34,14 @@ impl VirtualList {
         Self {
             heights: Vec::new(),
             total_lines: 0,
+            generation: 0,
             auto_follow: true,
         }
+    }
+
+    /// 结构代数（只增不减）。
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn len(&self) -> usize {
@@ -38,14 +50,18 @@ impl VirtualList {
 
     /// Resize to match the given number of items.
     pub fn resize(&mut self, new_len: usize) {
-        self.heights.resize_with(new_len, ItemState::default);
-        self.recalc_total();
+        if new_len != self.heights.len() {
+            self.heights.resize_with(new_len, ItemState::default);
+            self.recalc_total();
+            self.generation = self.generation.wrapping_add(1);
+        }
     }
 
     /// Mark an item as dirty (needs re-render).
     pub fn mark_dirty(&mut self, index: usize) {
         if let Some(item) = self.heights.get_mut(index) {
             item.dirty = true;
+            self.generation = self.generation.wrapping_add(1);
         }
     }
 
@@ -54,6 +70,7 @@ impl VirtualList {
         for item in &mut self.heights {
             item.dirty = true;
         }
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// 在 idx 处插入一个新项（中插条目时使用），后续项顺移；新项标记为 dirty。
@@ -67,6 +84,7 @@ impl VirtualList {
             },
         );
         self.recalc_total();
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// 在 idx 处删除一个条目（中间删除聊天条目时使用），后续项自动前移。
@@ -74,6 +92,7 @@ impl VirtualList {
         if idx < self.heights.len() {
             self.heights.remove(idx);
             self.recalc_total();
+            self.generation = self.generation.wrapping_add(1);
         }
     }
 
@@ -166,6 +185,7 @@ impl VirtualList {
         for item in &mut self.heights {
             item.dirty = true;
         }
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Get item height (alias for get_height).

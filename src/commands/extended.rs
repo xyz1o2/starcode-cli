@@ -441,12 +441,7 @@ pub async fn debug_state(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Com
     lines.push(format!("  Processing: {}", ctx.state.is_processing));
     lines.push(format!("  Streaming: {}", ctx.state.is_streaming));
     lines.push(format!("  Sandbox: {}", ctx.state.sandbox_enabled));
-    let mode = match ctx.state.approval_mode {
-        crate::types::ApprovalMode::Default => "default",
-        crate::types::ApprovalMode::AcceptEdits => "acceptEdits",
-        crate::types::ApprovalMode::Plan => "plan",
-        crate::types::ApprovalMode::Yolo => "yolo",
-    };
+    let mode = ctx.state.approval_mode.as_str();
     lines.push(format!("  Approval mode: {}", mode));
     if let Some(branch) = &ctx.state.git_branch {
         lines.push(format!("  Git branch: {}", branch));

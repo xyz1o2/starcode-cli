@@ -196,7 +196,7 @@ const SETTING_ITEMS: &[SettingItem] = &[
         id: "approval",
         label: "Approval Mode",
         get_value: |s| approval_mode_label(&s.approval_mode).to_string(),
-        description: "Default: confirm dangerous ops\nPlan: require approval for all edits\nYolo: auto-approve everything",
+        description: "Auto: an AI classifier reviews each action\nDefault: confirm dangerous ops\nPlan: require approval for all edits\nYolo: auto-approve everything",
     },
     SettingItem {
         id: "thinking",

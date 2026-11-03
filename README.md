@@ -19,7 +19,7 @@ A conversational AI coding agent that runs in your terminal — written in 100% 
 - **Interactive TUI** — streaming responses, diffs, syntax highlighting, themes, mouse support.
 - **Headless Mode** — drive a prompt from a script and get JSONL or plain text back.
 - **Rich Toolchain** — read/write/edit/notebook tools, shell, ripgrep search, AST-aware codebase search, git insight, sub-agents, todos, cron, worktrees, MCP servers.
-- **Permissions** — read-only tools run without prompts; edits and commands are confirmed interactively (with the diff shown before you approve); `acceptEdits` and `plan` modes trade prompting for automation.
+- **Permissions** — `auto` (the default) runs safe operations without prompts while still asking before dangerous commands and system-path writes; `default`, `acceptEdits`, `plan` and `yolo` give finer control.
 - **Project Context** — instructions are picked up from `STAR.md` / `STARCODE.md` / `CLAUDE.md` / `AGENTS.md` in your project.
 - **Sessions** — save, resume, and manage conversation history.
 - **Internationalization** — English and Chinese UI.
@@ -196,6 +196,7 @@ starcode git status
 #### Permission modes
 
 ```bash
+starcode --permission-mode auto        # default: safe ops run free, dangerous ones still ask
 starcode --permission-mode default     # read-only tools run free; writes and commands ask
 starcode --permission-mode acceptEdits # also run file edits and read-only shell commands
 starcode --permission-mode plan        # read-only; plans before touching anything
@@ -204,7 +205,12 @@ starcode --permission-mode yolo        # bypass all permissions (dangerous!)
 
 `Shift+Tab` cycles the mode in the TUI. `bypassPermissions` is an alias for `yolo`.
 An explicit `deny` rule in `settings.json` beats every mode, including `yolo`; an
-explicit `ask` rule still forces a prompt in `default` and `acceptEdits`.
+explicit `ask` rule still forces a prompt in every mode except `yolo`.
+
+`auto` is the default. It lets read-only tools, edits inside the project, and shell
+commands that match no dangerous pattern run without a prompt, while `sudo`,
+`rm -rf /`, `curl … | bash`, `git push --force` and writes to system paths still
+ask. Untrusted folders fall back to `default`.
 
 #### Slash commands in the TUI
 

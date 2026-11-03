@@ -90,6 +90,10 @@ pub async fn run(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
             let msg = render_deny_log(&ctx.state.permission_rules);
             reply(ctx.state, msg);
         }
+        "classifier" => {
+            let msg = render_classifier_status(ctx.state, ctx.agent_tx).await;
+            reply(ctx.state, msg);
+        }
         "clear-log" => {
             ctx.state.permission_rules.get_deny_log().clear();
             reply(ctx.state, "Deny log cleared.".to_string());
@@ -97,7 +101,7 @@ pub async fn run(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
         other => {
             let Some(mode) = mode_from_verb(other) else {
                 return Err(format!(
-                    "Unknown /permissions argument `{}`.\nRules: allow | ask | deny | remove | list\nModes: default | acceptEdits | plan | yolo | bypassPermissions\nLog: deny-log | clear-log",
+                    "Unknown /permissions argument `{}`.\nRules: allow | ask | deny | remove | list\nModes: auto | default | acceptEdits | plan | yolo | bypassPermissions\nLog: deny-log | clear-log",
                     args[0]
                 ));
             };
@@ -183,6 +187,92 @@ fn render_overview_with(cwd: &Path, mode: &ApprovalMode, merged: SettingsPermiss
         "`Edit(src/**)`, `WebFetch(domain:docs.rs)`, `mcp__github`\n"
     ));
     out
+}
+
+/// auto 档位的分类器状态。
+///
+/// 让用户看得见"AI 到底替我放行了多少次" —— 这是 auto 档位最需要可观测的
+/// 一件事：它在替你做安全判断，那这个判断的统计就该摆在明面上。
+///
+/// 统计住在 PolicyEngine 里，UI 侧拿不到，所以走「请求 — 回传」这条路
+/// （`AgentRequest::GetAutoClassifierStats`）。
+async fn render_classifier_status(
+    state: &mut crate::ui::state::store::ChatState,
+    agent_tx: &tokio::sync::mpsc::Sender<AgentRequest>,
+) -> String {
+    let enabled = crate::core::auto_mode::wiring::classifier_enabled();
+
+    let stats = match request_classifier_stats(agent_tx).await {
+        Ok(stats) => stats,
+        Err(e) => {
+            return format!(
+                "**Auto classifier:** {}\n\nFailed to read classifier statistics: {}",
+                if enabled { "enabled" } else { "disabled" },
+                e
+            );
+        }
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "**Auto classifier:** {}\n",
+        if enabled {
+            "enabled"
+        } else {
+            "disabled (local guardrails only)"
+        }
+    ));
+    out.push_str(&format!(
+        "**Approval mode:** `{}`\n",
+        mode_label(&state.approval_mode)
+    ));
+
+    match Some(stats) {
+        Some(stats) if stats.total_classifications > 0 => {
+            out.push_str(&format!(
+                "\n**Classifications:** {}\n- allowed: {}\n- denied: {}\n- asked the user: {}\n- average latency: {:.0}ms\n",
+                stats.total_classifications,
+                stats.allowed,
+                stats.denied,
+                stats.asked,
+                stats.avg_latency_ms
+            ));
+        }
+        Some(_) => {
+            out.push_str("\nNo classifications yet.\n");
+        }
+        None => {
+            out.push_str("\nClassifier statistics unavailable (no runtime message bus).\n");
+        }
+    }
+
+    out.push_str(concat!(
+        "\nEnv: `STAR_AUTO_MODE_CLASSIFIER=0` disables it, ",
+        "`STAR_AUTO_MODE_CLASSIFIER_MODEL` picks the model, ",
+        "`STAR_AUTO_MODE_CLASSIFIER_TIMEOUT` sets the timeout (seconds).\n"
+    ));
+    out
+}
+
+/// 向运行时索取分类器统计。
+///
+/// 超时兜底：worker 卡住时命令不该把 UI 一起卡住 —— 返回错误信息让用户
+/// 看到"读不到"，而不是无限等待。
+async fn request_classifier_stats(
+    agent_tx: &tokio::sync::mpsc::Sender<AgentRequest>,
+) -> Result<crate::core::auto_mode::service::ClassifierStats, String> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    agent_tx
+        .send(AgentRequest::GetAutoClassifierStats { response: tx })
+        .await
+        .map_err(|e| format!("failed to reach the agent runtime: {}", e))?;
+
+    match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await {
+        Ok(Some(Ok(stats))) => Ok(stats),
+        Ok(Some(Err(e))) => Err(e),
+        Ok(None) => Err("the agent runtime closed the request channel".to_string()),
+        Err(_) => Err("timed out waiting for the agent runtime".to_string()),
+    }
 }
 
 fn render_deny_log(engine: &crate::core::permission_rules::PermissionRuleEngine) -> String {
@@ -377,16 +467,12 @@ fn mode_from_verb(verb: &str) -> Option<ApprovalMode> {
         PolicyMode::AcceptEdits => Some(ApprovalMode::AcceptEdits),
         PolicyMode::Plan => Some(ApprovalMode::Plan),
         PolicyMode::Yolo => Some(ApprovalMode::Yolo),
+        PolicyMode::Auto => Some(ApprovalMode::Auto),
     }
 }
 
 fn mode_label(mode: &ApprovalMode) -> &'static str {
-    match mode {
-        ApprovalMode::Default => "default",
-        ApprovalMode::AcceptEdits => "acceptEdits",
-        ApprovalMode::Plan => "plan",
-        ApprovalMode::Yolo => "yolo",
-    }
+    mode.as_str()
 }
 
 #[cfg(test)]

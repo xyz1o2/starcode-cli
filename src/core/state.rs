@@ -163,6 +163,15 @@ pub struct GlobalState {
     /// `Agent` → 新 `ToolExecutor`，如果管理器跟着 executor 走，用户上一轮点过的
     /// "Allow for session" 到下一轮就没了，于是同一个命令反复弹确认。
     permission_manager: Arc<OnceLock<Arc<SessionPermissionManager>>>,
+    /// auto 档位的 LLM 分类器读到的对话上下文。
+    ///
+    /// 分类器要判断"这次调用是不是用户要的"，就得看见对话。放在共享状态里是
+    /// 因为分类器跑在 `PolicyEngine`（策略层）里，而对话在 `Agent` 里 ——
+    /// 两者之间没有直接引用，这个槽位是唯一的桥。
+    ///
+    /// 每轮开始时由运行时写入最新摘要；分类器每次判定都重新读，所以它看到的
+    /// 永远是当前上下文，而不是某个陈旧快照。
+    auto_mode_transcript: Arc<RwLock<Option<String>>>,
 }
 
 impl GlobalState {
@@ -173,7 +182,27 @@ impl GlobalState {
             execution_state: Arc::new(RwLock::new(ExecutionState::new())),
             current_message_id: Arc::new(RwLock::new(None)),
             permission_manager: Arc::new(OnceLock::new()),
+            auto_mode_transcript: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// 写入 auto 分类器要看的对话上下文。
+    pub async fn set_auto_mode_transcript(&self, transcript: Option<String>) {
+        *self.auto_mode_transcript.write().await = transcript;
+    }
+
+    /// 读出 auto 分类器要看的对话上下文。
+    pub async fn auto_mode_transcript(&self) -> Option<String> {
+        self.auto_mode_transcript.read().await.clone()
+    }
+
+    /// **同步**读出 auto 分类器要看的对话上下文。
+    ///
+    /// 分类器的 transcript provider 是同步闭包（`Fn() -> String`），拿不到
+    /// async 上下文。这里用 `try_read`：拿不到锁就返回 `None` —— 分类器没拿到
+    /// 上下文时会判不准，但那只影响精度，不影响安全（分类器只收紧不放宽）。
+    pub fn try_auto_mode_transcript(&self) -> Option<String> {
+        self.auto_mode_transcript.try_read().ok().and_then(|g| g.clone())
     }
 
     /// 取得运行时共享的会话权限管理器。

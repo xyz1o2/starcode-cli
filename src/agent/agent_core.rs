@@ -265,7 +265,32 @@ impl Agent {
             crate::core::tools::project_map::spawn_project_map_prewarm(cwd);
         }
 
+        crate::utils::logging::append_agent_log_line("[INIT-LAZY] install_auto_classifier...");
+        self.install_auto_classifier().await;
+
         crate::utils::logging::append_agent_log_line("[INIT-LAZY] completed");
+    }
+
+    /// 把 auto 档位的 LLM 分类器装进策略引擎。
+    ///
+    /// 放在 lazy_init 而不是构造期：这里才有 client（分类器要调模型），
+    /// 而且构造期不做 I/O —— 分类器装配要读 provider store。
+    ///
+    /// 装配失败（没 provider / 被环境变量关掉）不影响主流程：auto 档位
+    /// 退回纯本地护栏，仍然工作，只是不再自主判定。
+    async fn install_auto_classifier(&mut self) {
+        let Some(message_bus) = self.runtime_message_bus() else {
+            return;
+        };
+        let Some(global_state) = self.runtime_global_state() else {
+            return;
+        };
+        crate::core::auto_mode::wiring::install_auto_classifier(
+            &self.client,
+            &message_bus,
+            &global_state,
+        )
+        .await;
     }
 
     pub fn set_abort_flag(&mut self, flag: Arc<std::sync::atomic::AtomicBool>) {

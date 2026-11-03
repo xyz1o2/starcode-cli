@@ -1097,6 +1097,83 @@ pub enum ApprovalMode {
     AcceptEdits, // 接受编辑：文件改动与只读命令免确认，其余仍问
     Plan,        // Plan 模式：只读研究/规划，禁止非只读工具
     Yolo,        // YOLO 模式：所有操作自动执行（危险！）
+    Auto,        // auto 模式：AI 分类器驱动，默认档位
+}
+
+impl ApprovalMode {
+    /// 档位的**规范 slug** —— 与 `approval_mode_from_str` 的别名口径互通。
+    ///
+    /// 这是审批档位名��**唯一真源**：设置项、命令行、`/permissions` 的动词、
+    /// 落盘的会话记录都用它。此前每个调用点各写一份 `match`，同一个 `Default`
+    /// 在十处被叫成 "Auto" / "Build" / "default" / "默认" 四种名字 ——
+    /// 加上 `Auto` 档位之后，"Auto" 这个名字同时指两个不同的档位。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::AcceptEdits => "acceptEdits",
+            Self::Plan => "plan",
+            Self::Yolo => "yolo",
+            Self::Auto => "auto",
+        }
+    }
+
+    /// 档位的**显示标签**（面向用户）。
+    ///
+    /// 同样只此一份。此前 `Default` 在状态栏叫 "Auto"、在设置里叫 "Build"、
+    /// 在 `/permissions` 里叫 "default"；现在统一成 `Default` 叫 "default"，
+    /// 真正的 auto 档位叫 "auto"。
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::AcceptEdits => "Accept edits",
+            Self::Plan => "Plan",
+            Self::Yolo => "Yolo",
+            Self::Auto => "Auto",
+        }
+    }
+
+    /// 中文标签（中文界面用）。
+    ///
+    /// 英文档位名保留在括号里 —— 用户在英文文档、命令行 `--permission-mode`
+    /// 里看到的就是那些名字，中文标签不该把它们藏起来。
+    pub fn label_zh(&self) -> &'static str {
+        match self {
+            Self::Default => "默认 (default)",
+            Self::AcceptEdits => "接受编辑 (acceptEdits)",
+            Self::Plan => "Plan (计划模式)",
+            Self::Yolo => "YOLO (全部放行)",
+            Self::Auto => "Auto (自动审批)",
+        }
+    }
+}
+
+/// session 侧的审批档位 → policy 侧的同名档位。
+///
+/// 两个枚举是分开的（session 要给 UI 显示，policy 要给规则引擎），
+/// 转换只在这里做一次 —— 三个兜底构造点各写一遍 `match` 早晚会漂。
+impl From<ApprovalMode> for crate::core::policy::types::ApprovalMode {
+    fn from(mode: ApprovalMode) -> Self {
+        match mode {
+            ApprovalMode::Default => crate::core::policy::types::ApprovalMode::Default,
+            ApprovalMode::AcceptEdits => crate::core::policy::types::ApprovalMode::AcceptEdits,
+            ApprovalMode::Plan => crate::core::policy::types::ApprovalMode::Plan,
+            ApprovalMode::Yolo => crate::core::policy::types::ApprovalMode::Yolo,
+            ApprovalMode::Auto => crate::core::policy::types::ApprovalMode::Auto,
+        }
+    }
+}
+
+/// policy 侧的审批档位 → session 侧的同名档位。
+impl From<crate::core::policy::types::ApprovalMode> for ApprovalMode {
+    fn from(mode: crate::core::policy::types::ApprovalMode) -> Self {
+        match mode {
+            crate::core::policy::types::ApprovalMode::Default => ApprovalMode::Default,
+            crate::core::policy::types::ApprovalMode::AcceptEdits => ApprovalMode::AcceptEdits,
+            crate::core::policy::types::ApprovalMode::Plan => ApprovalMode::Plan,
+            crate::core::policy::types::ApprovalMode::Yolo => ApprovalMode::Yolo,
+            crate::core::policy::types::ApprovalMode::Auto => ApprovalMode::Auto,
+        }
+    }
 }
 
 // ============ UX 改进: ThinkingEffort（思考努力级别）============
@@ -1416,6 +1493,7 @@ impl ModelInfo {
 
 #[cfg(test)]
 mod thinking_effort_tests {
+    use super::ApprovalMode;
     use super::ThinkingEffort;
 
     #[test]
@@ -1462,5 +1540,66 @@ mod thinking_effort_tests {
         assert!(crate::core::tools::constants::is_read_only_tool_name(
             "GetDiagnostics"
         ));
+    }
+
+    /// 审批档位的 slug 必须**唯一** —— 加上 `Auto` 档位之后，
+    /// "auto" 这个名字曾经同时指 `Default`（旧显示名）和新的 auto 档位。
+    ///
+    /// 断言的是"两两不同"，而不是逐个写死期望值：将来再加档位时，
+    /// 忘了给新档位一个 slug，这��测试会立刻指出重复的那个。
+    #[test]
+    fn approval_mode_slugs_are_unique() {
+        let modes = [
+            ApprovalMode::Default,
+            ApprovalMode::AcceptEdits,
+            ApprovalMode::Plan,
+            ApprovalMode::Yolo,
+            ApprovalMode::Auto,
+        ];
+
+        let mut slugs: Vec<&str> = modes.iter().map(|m| m.as_str()).collect();
+        let total = slugs.len();
+        slugs.sort_unstable();
+        slugs.dedup();
+        assert_eq!(slugs.len(), total, "审批档位的 slug 必须互不相同");
+    }
+
+    /// 显示标签同样必须唯一 —— 同一个词不能指两个档位。
+    #[test]
+    fn approval_mode_labels_are_unique() {
+        let modes = [
+            ApprovalMode::Default,
+            ApprovalMode::AcceptEdits,
+            ApprovalMode::Plan,
+            ApprovalMode::Yolo,
+            ApprovalMode::Auto,
+        ];
+
+        let mut labels: Vec<&str> = modes.iter().map(|m| m.label()).collect();
+        let total = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), total, "审批档位的显示标签必须互不相同");
+    }
+
+    /// slug 必须能被 `approval_mode_from_str` 解析回来 —— 那是设置项、
+    /// 命令行与 `/permissions` 共用的别名口径，两边对不上就有一边失效。
+    #[test]
+    fn approval_mode_slugs_round_trip_through_the_alias_parser() {
+        for mode in [
+            ApprovalMode::Default,
+            ApprovalMode::AcceptEdits,
+            ApprovalMode::Plan,
+            ApprovalMode::Yolo,
+            ApprovalMode::Auto,
+        ] {
+            let policy_mode: crate::core::policy::types::ApprovalMode = mode.clone().into();
+            assert_eq!(
+                crate::core::policy::approval_mode_from_str(mode.as_str()),
+                Some(policy_mode),
+                "{} 的 slug 解析不回来",
+                mode.as_str()
+            );
+        }
     }
 }

@@ -514,6 +514,17 @@ impl Agent {
             let query = rewrite_search_query(&self.client, user_input)
                 .await
                 .unwrap_or_else(|| extract_search_keywords(user_input));
+            // 闸门兜底：改写失败 → query 还是中文。索引里没有中文 token 时，
+            // 这一发必然零命中 —— 与其在工具里空转，不如根本不触发。
+            if !crate::agent::tool_routing::language_gate_allows(
+                &query,
+                Some(self.config.target_dir().as_path()),
+            ) {
+                crate::utils::logging::append_debug_log_line(
+                    "[ACE_PREFETCH] CodebaseSearch skipped — language gate (query is CJK-only, index has no CJK tokens)",
+                );
+                return;
+            }
             let codebase_tool_call = build_codebase_search_tool_call_for_query(&query, 0, false);
 
             crate::utils::logging::append_debug_log_line(

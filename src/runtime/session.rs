@@ -326,6 +326,16 @@ pub async fn handle_streaming_request(
             ));
             StreamingRequestOutcome::Continue
         }
+        Some(AgentRequest::GetAutoClassifierStats { response }) => {
+            // 纯读，不推迟：统计住在 PolicyEngine 里（MessageBus 持有），
+            // 流式回合内也能直接读到。
+            let stats = context
+                .message_bus
+                .auto_classifier_stats()
+                .await;
+            let _ = response.send(Ok(stats)).await;
+            StreamingRequestOutcome::Continue
+        }
         Some(AgentRequest::SetThinkingEffort(effort)) => {
             // 本轮跑完再生效。中途打开思考会让接下来的一次请求带上
             // thinking 参数，而历史里已经有不含 thinking block 的

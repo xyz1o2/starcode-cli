@@ -51,7 +51,8 @@ pub(crate) async fn rewrite_search_query(client: &StarClient, user_input: &str) 
         "You translate a developer's request into code-search terms. Reply with ONLY a \
          space-separated list of at most 6 terms that would literally appear in source \
          code: identifiers (snake_case or CamelCase), type names, or technical nouns \
-         in English. No explanation, no punctuation, no quotes.",
+         in English. If you cannot suggest any plausible code term, reply with the single \
+         word NONE. No explanation, no punctuation, no quotes.",
     );
     let user = crate::types::StarMessage::user(format!("Request: {user_input}\n\nTerms:"));
 
@@ -91,10 +92,6 @@ pub(crate) async fn rewrite_search_query(client: &StarClient, user_input: &str) 
     Some(terms.join(" "))
 }
 
-/// 解析模型回传的检索词。
-///
-/// 模型爱加编号、引号、解释文字 —— 这里只留"像标识符"的词：
-/// 含字母、长度 ≥3、只含标识符字符（字母数字 `_ - . : #`）。
 /// 英文虚词 —— 模型偶尔会回散文（"Sure! here you go: ..."）。
 ///
 /// 这些词进了检索词表纯属噪声：它们在任何代码里都高频命中，等于把排序信号
@@ -257,6 +254,37 @@ const EN_PROSE_STOPWORDS: &[&str] = &[
     "via",
 ];
 
+/// "元回答"黑名单 —— 模型有时不是给词，而是**回答"没有"**。
+///
+/// 现场事故：改写调用回了一句 `None`（意思是"我没想到英文标识符"），解析器
+/// 把它当成合法检索词，于是拿 `None` 去搜纯英文代码库，命中一片 `none`。
+/// 这些词一个都不是检索词，必须在解析层拒掉。
+const META_ANSWER_TOKENS: &[&str] = &[
+    "none",
+    "null",
+    "nil",
+    "nothing",
+    "nonefound",
+    "notfound",
+    "no",
+    "n/a",
+    "na",
+    "unknown",
+    "unspecified",
+    "undefined",
+    "empty",
+    "tbd",
+    "todo",
+    "cannot",
+    "unable",
+    "notapplicable",
+];
+
+/// 解析模型回传的检索词。
+///
+/// 模型爱加编号、引号、解释文字 —— 这里只留"像标识符"的词：
+/// 含字母、长度 ≥3、只含标识符字符（字母数字 `_ - . : #`），且不是英文虚词
+/// 或"元回答"。全部被拒 → 返回 `None` → 调用方回退规则压缩。
 pub(crate) fn parse_rewritten_terms(text: &str) -> Option<Vec<String>> {
     let mut terms: Vec<String> = Vec::new();
 
@@ -282,6 +310,9 @@ pub(crate) fn parse_rewritten_terms(text: &str) -> Option<Vec<String>> {
             }
             let lower = token.to_lowercase();
             if EN_PROSE_STOPWORDS.contains(&lower.as_str()) {
+                continue;
+            }
+            if META_ANSWER_TOKENS.contains(&lower.as_str()) {
                 continue;
             }
             if terms
@@ -344,5 +375,21 @@ mod tests {
     fn deduplicates_case_insensitively() {
         let terms = parse_rewritten_terms("Retry retry RETRY").unwrap();
         assert_eq!(terms, vec!["Retry"]);
+    }
+
+    /// 现场事故：模型回了一句 `None`（意思是"没有可用的英文词"），解析器把它
+    /// 当成合法检索词，于是拿 `None` 去搜英文代码库，捞回一片 `none`。
+    #[test]
+    fn meta_answers_are_not_search_terms() {
+        assert!(parse_rewritten_terms("None").is_none());
+        assert!(parse_rewritten_terms("null\nunknown\nnothing").is_none());
+        assert!(parse_rewritten_terms("N/A").is_none());
+    }
+
+    /// 但"元回答"里混着真词时，真词要留下。
+    #[test]
+    fn real_terms_survive_next_to_a_meta_answer() {
+        let terms = parse_rewritten_terms("None\nretry_backoff").unwrap();
+        assert_eq!(terms, vec!["retry_backoff"]);
     }
 }

@@ -237,6 +237,16 @@ pub async fn handle_request(
                 count
             ));
         }
+        AgentRequest::GetAutoClassifierStats { response } => {
+            // PolicyEngine 活在 MessageBus 里，统计只能从那儿取。
+            let stats = agent
+                .policy_auto_classifier_stats()
+                .await
+                .unwrap_or_else(|| {
+                    crate::core::auto_mode::service::ClassifierStats::default()
+                });
+            let _ = response.send(Ok(stats)).await;
+        }
         AgentRequest::SetThinkingEffort(effort) => {
             apply_runtime_settings_and_persist(
                 agent,

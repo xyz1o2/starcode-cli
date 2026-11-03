@@ -807,34 +807,7 @@ pub(super) fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'sta
     // ── 6. Approval mode (always visible,对标 Claude Code mode indicator) ────
     {
         spans.push(sep());
-        match state.approval_mode {
-            ApprovalMode::Default => {
-                spans.push(Span::styled(
-                    "⏵⏵ default",
-                    Style::default().fg(theme.subtle),
-                ));
-            }
-            ApprovalMode::AcceptEdits => {
-                spans.push(Span::styled(
-                    "⏵⏵ accept-edits",
-                    Style::default().fg(Color::LightGreen),
-                ));
-            }
-            ApprovalMode::Plan => {
-                spans.push(Span::styled(
-                    "⏸ plan",
-                    Style::default().fg(Color::Rgb(0, 102, 102)),
-                ));
-            }
-            ApprovalMode::Yolo => {
-                spans.push(Span::styled(
-                    "⏵⏵ yolo",
-                    Style::default()
-                        .fg(theme.error)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            }
-        }
+        spans.push(super::approval_mode_span(&state.approval_mode, theme));
     }
 
     // ── 6b. Thinking effort ──────────────────────────────────────────────────

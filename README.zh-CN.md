@@ -194,12 +194,17 @@ starcode git status
 #### 权限模式
 
 ```bash
-starcode --permission-mode default     # 执行前询问（默认）
+starcode --permission-mode auto        # 默认：安全操作免确认，危险操作仍询问
+starcode --permission-mode default     # 执行前询问
 starcode --permission-mode plan        # 只读，先规划再动手
 starcode --permission-mode yolo        # 跳过所有权限（危险！）
 ```
 
 `acceptEdits` 与 `bypassPermissions` 分别是 `default` 和 `yolo` 的别名。
+
+`auto` 是默认档位：只读工具、项目目录内的读写、以及未命中危险模式的 shell 命令
+免确认执行；`sudo`、`rm -rf /`、`curl … | bash`、`git push --force` 与系统路径写入
+仍会弹确认。不受信任的目录退回 `default`。
 
 #### TUI 内的斜杠命令
 

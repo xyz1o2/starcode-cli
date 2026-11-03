@@ -31,7 +31,7 @@ pub enum TodoStatus {
 }
 
 #[derive(Deserialize, Clone, Debug)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TodoItemInput {
     /// 祈使句："Run tests"
     pub content: String,
@@ -42,27 +42,133 @@ pub struct TodoItemInput {
     pub active_form: String,
 }
 
-#[derive(Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize, Debug, Default)]
 pub struct TodoWriteParams {
     pub todos: Vec<TodoItemInput>,
 }
 
-/// 解析并校验入参。zod 的 `min(1)` 对齐：content / activeForm 都不能是空白串。
+/// 顶层可接受的数组键。`todos` 是规范名；其余是模型常见的别名 ——
+/// 同一个工具换个模型/换个轮次叫法不一致，是常事。
+const TODO_LIST_KEYS: &[&str] = &["todos", "items", "tasks", "task_list", "todo_list"];
+
+/// 解析并校验入参。
+///
+/// # 为什么要"宽容"
+///
+/// 以前这里是**全或无**的严格反序列化（`deny_unknown_fields`）：模型只要形状
+/// 差一点点（整个 `todos` 键没带、把单条待办当成整个对象、顺手带个 `id`），
+/// 整次调用直接失败；而失败信息是 serde 的原文（"missing field `todos`"），
+/// 模型往往照着同一个形状重试 —— 白烧一个回合，现场就是这么来的。
+///
+/// 现在的边界：
+/// - **顶层仍然严格**：出现 `todos` 之外的键（旧的 `operation` envelope 之类）
+///   一律报错 —— 宽容吞掉它会让模型以为更新成功，实际把清单清空了；
+/// - **条目宽容**：多余字段忽略（`id` 之类）、`status` 缺省 `pending`、
+///   `activeForm` 缺省用 `content`；
+/// - **形状别名**：数组键认 `todos`/`items`/`tasks`/…；把**单条**待办当成整个
+///   对象也认（模型理解为"更新一条"）。
 pub(crate) fn parse_todo_write_params(params: &Value) -> Result<TodoWriteParams, String> {
-    let parsed: TodoWriteParams = serde_json::from_value(params.clone())
-        .map_err(|e| format!("invalid TodoWrite parameters: {}", e))?;
-    for item in &parsed.todos {
-        if item.content.trim().is_empty() {
-            return Err("invalid TodoWrite parameters: todo content cannot be empty".to_string());
+    let object = params.as_object().ok_or_else(|| {
+        format!(
+            "invalid TodoWrite parameters: expected an object, got {}",
+            json_type_name(params)
+        )
+    })?;
+
+    let list_key = TODO_LIST_KEYS
+        .iter()
+        .copied()
+        .find(|key| object.contains_key(*key));
+
+    let items: Vec<Value> = match list_key {
+        Some(key) => {
+            // 顶层夹带别的键 → 旧式 envelope，必须拒（见函数注释）。
+            let unknown: Vec<&str> = object
+                .keys()
+                .map(|name| name.as_str())
+                .filter(|name| *name != key)
+                .collect();
+            if !unknown.is_empty() {
+                return Err(format!(
+                    "invalid TodoWrite parameters: unexpected key(s) {unknown:?} next to `{key}`; \
+                     expected {{\"todos\":[{{\"content\":\"...\",\"status\":\"pending|in_progress|completed\",\"activeForm\":\"...\"}}]}}"
+                ));
+            }
+            let value = object.get(key).unwrap_or(&Value::Null);
+            value.as_array().cloned().ok_or_else(|| {
+                format!("invalid TodoWrite parameters: `{key}` must be an array of todo items")
+            })?
         }
-        if item.active_form.trim().is_empty() {
-            return Err(
-                "invalid TodoWrite parameters: todo activeForm cannot be empty".to_string(),
-            );
+        None => {
+            // 没有数组键：可能是"单条待办当成整个对象"。
+            if object.contains_key("content") {
+                vec![params.clone()]
+            } else {
+                return Err(format!(
+                    "invalid TodoWrite parameters: missing field `todos` \
+                     (expected {{\"todos\":[{{\"content\":\"...\",\"status\":\"pending|in_progress|completed\",\"activeForm\":\"...\"}}]}})"
+                ));
+            }
         }
+    };
+
+    let mut todos = Vec::with_capacity(items.len());
+    for raw in &items {
+        todos.push(parse_todo_item(raw)?);
     }
-    Ok(parsed)
+    Ok(TodoWriteParams { todos })
+}
+
+fn parse_todo_item(raw: &Value) -> Result<TodoItemInput, String> {
+    let object = raw.as_object().ok_or_else(|| {
+        "invalid TodoWrite parameters: each todo item must be an object".to_string()
+    })?;
+
+    let content = object
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if content.trim().is_empty() {
+        return Err("invalid TodoWrite parameters: todo content cannot be empty".to_string());
+    }
+
+    let status = match object.get("status") {
+        None | Some(Value::Null) => TodoStatus::Pending,
+        Some(value) => serde_json::from_value::<TodoStatus>(value.clone()).map_err(|err| {
+            format!(
+                "invalid TodoWrite parameters: todo status is invalid ({err}); \
+                 use pending | in_progress | completed"
+            )
+        })?,
+    };
+
+    // `activeForm` 缺省就用 content —— 面板只在 in_progress 时显示它，
+    // 拿 content 顶上不丢信息（严格模式下这里会直接失败）。
+    let active_form = object
+        .get("activeForm")
+        .or_else(|| object.get("active_form"))
+        .and_then(Value::as_str)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(content)
+        .to_string();
+
+    Ok(TodoItemInput {
+        content: content.to_string(),
+        status,
+        active_form,
+    })
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
 }
 
 /// 生成替换后的任务图。全部 completed → 空图（清单完成即清空）。
@@ -337,26 +443,84 @@ mod tests {
         assert_eq!(parsed.todos[0].active_form, "安装 recharts 图表库中");
     }
 
-    /// zod min(1) 对齐：content / activeForm 为空都报错
+    /// 空 content 必须报错；空 `activeForm` 则**回落到 content**（面板只在
+    /// in_progress 时显示它，严格模式下这里会直接失败 —— 白烧一个回合）。
     #[test]
-    fn rejects_empty_content_or_active_form() {
-        for bad in [
-            json!({ "todos": [{ "content": "  ", "status": "pending", "activeForm": "x" }] }),
-            json!({ "todos": [{ "content": "x", "status": "pending", "activeForm": "" }] }),
-        ] {
-            assert!(parse_todo_write_params(&bad).is_err());
+    fn rejects_empty_content_but_falls_back_for_active_form() {
+        let empty_content =
+            json!({ "todos": [{ "content": "  ", "status": "pending", "activeForm": "x" }] });
+        assert!(parse_todo_write_params(&empty_content).is_err());
+
+        let empty_active_form =
+            json!({ "todos": [{ "content": "x", "status": "pending", "activeForm": "" }] });
+        let parsed = parse_todo_write_params(&empty_active_form).unwrap();
+        assert_eq!(
+            parsed.todos[0].active_form, "x",
+            "activeForm 缺省用 content"
+        );
+    }
+
+    /// 顶层仍然严格：旧式 `operation` envelope 必须报错（宽容吞掉它会让模型
+    /// 以为更新成功，实际把清单清空了）。
+    #[test]
+    fn rejects_the_legacy_envelope() {
+        let legacy = json!({ "operation": { "action": "add", "title": "t" }, "todos": [] });
+        let err = parse_todo_write_params(&legacy).expect_err("旧 envelope 必须被拒");
+        assert!(err.contains("operation"), "{err}");
+    }
+
+    /// 现场事故：模型把**单条**待办当成了整个对象（没有 `todos` 键）。
+    /// 这种形状偏差不该让整次调用失败。
+    #[test]
+    fn accepts_a_single_todo_object() {
+        let params = json!({ "content": "Run tests", "status": "in_progress", "activeForm": "Running tests" });
+        let parsed = parse_todo_write_params(&params).unwrap();
+        assert_eq!(parsed.todos.len(), 1);
+        assert_eq!(parsed.todos[0].content, "Run tests");
+        assert_eq!(parsed.todos[0].status, TodoStatus::InProgress);
+    }
+
+    /// 数组键的常见别名（同一个工具，不同模型叫法不一致）。
+    #[test]
+    fn accepts_common_list_aliases() {
+        for key in ["items", "tasks", "task_list", "todo_list"] {
+            let mut map = serde_json::Map::new();
+            map.insert(
+                key.to_string(),
+                json!([{ "content": "Do it", "status": "pending", "activeForm": "Doing it" }]),
+            );
+            let parsed = parse_todo_write_params(&Value::Object(map)).unwrap();
+            assert_eq!(parsed.todos.len(), 1, "别名 `{key}` 应被接受");
         }
     }
 
-    /// strictObject 对齐：未知字段（包括旧 operation 包装）直接报错，而不是被宽容解析
+    /// 条目里的多余字段（`id` 之类）忽略，不让整次调用失败。
     #[test]
-    fn rejects_unknown_fields_and_legacy_envelope() {
-        for bad in [
-            json!({ "operation": { "action": "add", "title": "t" }, "todos": [] }),
-            json!({ "todos": [{ "content": "t", "status": "pending", "activeForm": "t", "id": "1" }] }),
-        ] {
-            assert!(parse_todo_write_params(&bad).is_err());
-        }
+    fn ignores_extra_item_fields() {
+        let params = json!({
+            "todos": [{ "content": "t", "status": "pending", "activeForm": "t", "id": "1" }]
+        });
+        let parsed = parse_todo_write_params(&params).unwrap();
+        assert_eq!(parsed.todos.len(), 1);
+    }
+
+    /// 缺省的 `status` / `activeForm` 用默认值，别把模型打回重试。
+    #[test]
+    fn defaults_missing_status_and_active_form() {
+        let params = json!({ "todos": [{ "content": "Do it" }] });
+        let parsed = parse_todo_write_params(&params).unwrap();
+        assert_eq!(parsed.todos[0].status, TodoStatus::Pending);
+        assert_eq!(parsed.todos[0].active_form, "Do it");
+    }
+
+    /// 报错必须**可执行**：模型看到形状就能一次改对，而不是照着
+    /// serde 原文再错一遍。
+    #[test]
+    fn the_error_message_shows_the_expected_shape() {
+        let err = parse_todo_write_params(&json!({})).expect_err("空对象必须报错");
+        assert!(err.contains("missing field `todos`"), "{err}");
+        assert!(err.contains("\"todos\""), "{err}");
+        assert!(err.contains("activeForm"), "{err}");
     }
 
     /// 状态枚举外的值（旧版的 Blocked 等）报错回给模型

@@ -582,17 +582,18 @@ async fn handle_model_confirmation(
     Ok(())
 }
 
-/// Shift+Tab（`TogglePlanMode`）：Default → AcceptEdits → Plan → Yolo → Default
+/// Shift+Tab（`TogglePlanMode`）：Auto → Default → AcceptEdits → Plan → Yolo → Auto
 /// （对标 app:cycleMode / CC 的 shift+tab）。
 ///
 /// `handle_key_event` 里有一个**排在它前面**的调用点（必须抢在两个行内确认之前），
 /// 注册表分发器里也有一份 —— 两者共用这个函数，避免同一套模式循环写两遍。
 async fn cycle_approval_mode(state: &mut ChatState, agent_tx: &mpsc::Sender<AgentRequest>) {
     state.approval_mode = match state.approval_mode {
+        ApprovalMode::Auto => ApprovalMode::Default,
         ApprovalMode::Default => ApprovalMode::AcceptEdits,
         ApprovalMode::AcceptEdits => ApprovalMode::Plan,
         ApprovalMode::Plan => ApprovalMode::Yolo,
-        ApprovalMode::Yolo => ApprovalMode::Default,
+        ApprovalMode::Yolo => ApprovalMode::Auto,
     };
 
     let _ = agent_tx
@@ -907,7 +908,7 @@ pub async fn handle_key_event(
         return Ok(());
     }
 
-    // Handle Shift+Tab for mode cycle: Default → Plan → Yolo → Default
+    // Handle Shift+Tab for mode cycle: Auto → Default → AcceptEdits → Plan → Yolo → Auto
     // (Shift+Tab is normalized to BackTab by the runtime event loop before reaching here)
     //
     // 位置是刻意的：它是**唯一**排在两个行内确认之前的全局绑定。`/clear` 与大段

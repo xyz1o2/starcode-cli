@@ -25,8 +25,9 @@ pub(crate) use tool_call_builders::{
     json_fallback_extract_tool_call,
 };
 pub(crate) use triggers::{
-    dynamic_context_first_turn_enabled, json_fallback_enabled, select_best_auto_trigger,
-    should_prefetch_codebase_search, should_prefetch_project_map, AutoTriggerKind,
+    dynamic_context_first_turn_enabled, json_fallback_enabled, language_gate_allows,
+    select_best_auto_trigger, should_prefetch_codebase_search, should_prefetch_project_map,
+    AutoTriggerKind,
 };
 
 /// 工具选择结果

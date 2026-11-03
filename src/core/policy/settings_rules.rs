@@ -598,6 +598,9 @@ pub fn approval_mode_from_str(raw: &str) -> Option<ApprovalMode> {
         "acceptedits" => Some(ApprovalMode::AcceptEdits),
         "plan" | "readonly" => Some(ApprovalMode::Plan),
         "yolo" | "bypasspermissions" | "dangerouslyskippermissions" => Some(ApprovalMode::Yolo),
+        "auto" | "autoconfirm" | "auto-approve" | "dontask" | "don'task" => {
+            Some(ApprovalMode::Auto)
+        }
         _ => None,
     }
 }

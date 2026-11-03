@@ -50,6 +50,8 @@ pub enum ApprovalMode {
     Yolo, // Skip permission
     #[serde(rename = "plan")]
     Plan, // Plan mode (read-only)
+    #[serde(rename = "auto")]
+    Auto, // AI classifier driven: allow safe ops without confirmation
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

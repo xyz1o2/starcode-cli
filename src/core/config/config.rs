@@ -233,7 +233,19 @@ impl Config {
             }),
             recursion_depth: params.recursion_depth.unwrap_or(0),
             headless: params.headless.unwrap_or(false),
-            policy_engine_approval_mode: params.approval_mode.unwrap_or(ApprovalMode::Default),
+            // 默认档位是 auto（对标 Claude Code 的 auto 模式）。但 auto 免确认写操作，
+            // 受信任检查约束：不受信任的目录退回 default，否则"文件夹信任"这道闸门
+            // 会被默认档位从后门绕过。
+            policy_engine_approval_mode: {
+                let mode = params.approval_mode.unwrap_or(ApprovalMode::Auto);
+                let folder_trust = params.folder_trust.unwrap_or(false);
+                let trusted = params.trusted_folder.unwrap_or(false);
+                if !folder_trust || trusted {
+                    mode
+                } else {
+                    ApprovalMode::Default
+                }
+            },
             runtime_services: None,
         }
     }
@@ -476,6 +488,7 @@ impl Config {
         &mut self,
         mode: ApprovalMode,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // 不受信任的目录只允许 default —— auto 免确认写操作，yolo 连护栏都没有。
         if !self.is_trusted_folder() && mode != ApprovalMode::Default {
             return Err("Cannot enable privileged approval modes in an untrusted folder.".into());
         }

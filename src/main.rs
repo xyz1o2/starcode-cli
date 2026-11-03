@@ -112,7 +112,7 @@ struct CliArgs {
     #[arg(long = "dangerously-skip-permissions")]
     dangerously_skip_permissions: bool,
 
-    /// Approval mode: default | plan | yolo | acceptEdits | bypassPermissions
+    /// Approval mode: auto | default | plan | yolo | acceptEdits | bypassPermissions
     #[arg(long = "permission-mode", visible_alias = "approval-mode")]
     permission_mode: Option<String>,
 
@@ -652,7 +652,7 @@ fn parse_cli_approval_mode(
     // 别名口径和 `permissions.defaultMode`、`/permissions <mode>` 共用一份。
     crate::core::policy::approval_mode_from_str(input).ok_or_else(|| {
         format!(
-            "invalid --permission-mode `{}` (expected: default|plan|yolo|acceptEdits|bypassPermissions)",
+            "invalid --permission-mode `{}` (expected: default|plan|yolo|acceptEdits|auto)",
             input
         )
     })

@@ -804,6 +804,20 @@ fn render_rich_tool_content(
                 "CodebaseSearch" => {
                     // "File: <path>" 行即一个命中
                     let hits = text.lines().filter(|l| l.starts_with("File: ")).count();
+                    // 索引未就绪时输出是"still building"——渲染成 `0 ranked results`
+                    // 会让人以为是"搜了但没有"，实际是"还没建好"。这两件事必须
+                    // 在界面上就分得开（现场：连续两个 0，看不出哪里不对）。
+                    if text.contains("still building") {
+                        lines.push(Line::from(vec![
+                            Span::raw("CodebaseSearch · ".to_string()),
+                            Span::styled(
+                                "building index".to_string(),
+                                Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
+                        push_expand_hint(&mut lines);
+                        return lines;
+                    }
                     push_collapsed_summary(
                         &mut lines,
                         "CodebaseSearch ·",
@@ -1297,6 +1311,57 @@ mod tests {
         assert!(body.contains("src/auth.rs"), "top file missing: {body:?}");
         // 元数据头不应出现在折叠态
         assert!(!body.contains("RRF fusion"), "metadata leaked: {body:?}");
+    }
+
+    /// 索引未就绪时不能渲染成 `0 ranked results`。
+    ///
+    /// "还在构建"与"搜了但没有"是两件事，界面上必须分得开 —— 现场正是连续
+    /// 两个 0，用户看不出哪里不对（而模型据此判断"索引已建立"，改用了别的
+    /// 工具，把搜索绕开了）。
+    #[test]
+    fn codebase_search_collapsed_says_when_the_index_is_building() {
+        let output = concat!(
+            "The cross-file search index for '/repo' is still building in the background ",
+            "(first build; typically finishes in seconds).\n",
+            "Meanwhile, a literal text search found these candidates:\n\n",
+        );
+        let entry = crate::types::ChatEntry::tool_result(
+            "",
+            crate::types::StarToolCall {
+                id: "c1".to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::StarToolCallFunction {
+                    name: "CodebaseSearch".to_string(),
+                    arguments: r#"{"query":"auth flow"}"#.to_string(),
+                },
+            },
+            crate::types::ToolResult {
+                success: true,
+                output: Some(output.to_string()),
+                error: None,
+                data: None,
+                llm_content: None,
+            },
+        );
+
+        let lines = render_rich_tool_content(
+            &entry,
+            entry.tool_call.as_ref().unwrap(),
+            80,
+            false, // 折叠态
+            false,
+            &theme(),
+        );
+
+        let body: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+            .collect();
+        assert!(body.contains("building index"), "got: {body:?}");
+        assert!(
+            !body.contains("0 ranked results"),
+            "未就绪不能显示成 0 命中：{body:?}"
+        );
     }
 
     /// 冷启动补跑必须与首查**可区分**。

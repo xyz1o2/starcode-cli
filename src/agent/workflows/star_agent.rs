@@ -106,12 +106,7 @@ impl StarAgent {
     }
 
     fn initial_approval_mode(config: &Config) -> ApprovalMode {
-        match config.approval_mode() {
-            crate::core::policy::ApprovalMode::Default => ApprovalMode::Default,
-            crate::core::policy::ApprovalMode::AcceptEdits => ApprovalMode::AcceptEdits,
-            crate::core::policy::ApprovalMode::Plan => ApprovalMode::Plan,
-            crate::core::policy::ApprovalMode::Yolo => ApprovalMode::Yolo,
-        }
+        config.approval_mode().clone().into()
     }
 
     /// 当前生效的审批模式。
@@ -131,12 +126,19 @@ impl StarAgent {
     /// 两个枚举是分开的（session 要给 UI 显示，policy 要给规则引擎），转换只在这里
     /// 做一次，避免三个兜底构造点各写一遍 match。
     pub fn policy_approval_mode(&self) -> crate::core::policy::ApprovalMode {
-        match self.approval_mode() {
-            ApprovalMode::Plan => crate::core::policy::ApprovalMode::Plan,
-            ApprovalMode::Yolo => crate::core::policy::ApprovalMode::Yolo,
-            ApprovalMode::AcceptEdits => crate::core::policy::ApprovalMode::AcceptEdits,
-            ApprovalMode::Default => crate::core::policy::ApprovalMode::Default,
-        }
+        self.approval_mode().into()
+    }
+
+    /// auto 档位分类器的统计快照。
+    ///
+    /// PolicyEngine 活在 MessageBus 里，所以要走它才拿得到计数器。
+    /// 没有总线时返回 `None` —— 调用方据此显示"不可用"，而不是显示全零
+    /// （全零会被误读成"分类了一次都没有"，而真实情况是根本没接线）。
+    pub async fn policy_auto_classifier_stats(
+        &self,
+    ) -> Option<crate::core::auto_mode::service::ClassifierStats> {
+        let bus = self.runtime_message_bus()?;
+        Some(bus.auto_classifier_stats().await)
     }
 
     const MAX_RECURSION_DEPTH: usize = 3;

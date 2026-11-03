@@ -48,6 +48,7 @@ pub fn resolve_border_color(state: &ChatState) -> Color {
         crate::types::ApprovalMode::AcceptEdits => Color::LightGreen,
         crate::types::ApprovalMode::Plan => Color::Cyan,
         crate::types::ApprovalMode::Yolo => Color::Red,
+        crate::types::ApprovalMode::Auto => Color::Green,
     };
     // Send animation: brief cyan flash when message is sent
     if let Some(since) = state.send_animation_since {

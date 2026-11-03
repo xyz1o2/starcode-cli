@@ -49,12 +49,7 @@ pub fn resolve_transcript_path() -> Option<PathBuf> {
 }
 
 fn approval_mode_label(mode: &ApprovalMode) -> &'static str {
-    match mode {
-        ApprovalMode::Default => "default",
-        ApprovalMode::AcceptEdits => "acceptEdits",
-        ApprovalMode::Plan => "plan",
-        ApprovalMode::Yolo => "yolo",
-    }
+    mode.as_str()
 }
 
 fn current_provider_id(state: &ChatState) -> Option<String> {

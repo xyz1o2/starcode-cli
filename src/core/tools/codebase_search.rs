@@ -97,12 +97,18 @@ pub struct CodebaseSearchLimits {
 }
 
 impl CodebaseSearchLimits {
-    /// A compact key for cache lookups, encoding the budget profile.
+    /// 缓存键 —— **只认引擎，不认预算档位**。
+    ///
+    /// 以前 key 里带着 max_files/max_total_bytes/timeout，于是
+    /// `budget_profile="auto"`（f320b4M）会开出一个**watcher 永远不会填的**
+    /// 缓存命名空间：查询永远 cache miss → 永远落到 Warming → 模型看到
+    /// "索引还在构建"就改用 Grep 绕开（现场：连续两次 0 ranked results，
+    /// 而同样的 query 在默认预算下能命中 40 条）。
+    ///
+    /// 引擎内容只由默认预算决定（watcher 用它建），预算档位退化成"输出多少"
+    /// 的旋钮，不该影响缓存身份。
     pub fn cache_key(&self) -> String {
-        format!(
-            "f{}b{}t{}",
-            self.max_files, self.max_total_bytes, self.timeout_ms
-        )
+        "engine".to_string()
     }
 }
 
@@ -1112,7 +1118,26 @@ fn search_codebase_with_limits(
     }
 
     // ── Resolve engine (fresh / stale / warming) ─────────────────────────────
-    let (engine, stats, source) = resolve_engine(root, limits, &update_output, cache)?;
+    //
+    // 引擎一律用**默认预算**取：watcher 建的引擎就是它，缓存身份也按它算
+    // （见 `CodebaseSearchLimits::cache_key`）。预算档位只影响"取多少结果"，
+    // 不影响引擎身份 —— 否则 auto 档会开出一个 watcher 永远不填的命名空间，
+    // 查询永远 Warming。
+    let build_limits = codebase_search_limits();
+    let (engine, stats, source) = resolve_engine(root, build_limits, &update_output, cache)?;
+
+    // auto 档 = 更保守的输出（候选与结果各减半），但**不**另建一份引擎。
+    let conservative = limits.max_files < build_limits.max_files;
+    let candidate_cap = if conservative {
+        TOP_N_CANDIDATE / 2
+    } else {
+        TOP_N_CANDIDATE
+    };
+    let final_cap = if conservative {
+        TOP_N_FINAL / 2
+    } else {
+        TOP_N_FINAL
+    };
 
     if matches!(source, EngineSource::Warming) {
         // 索引未就绪 ≠ 只能干等：ripgrep 字面兜底**不依赖索引**，先把能给的给出来。
@@ -1165,12 +1190,12 @@ fn search_codebase_with_limits(
     // Strategy A: full expansion, no diversity (preserves raw scores for RRF)
     let expanded_results = engine.search_with_options(
         query,
-        TOP_N_CANDIDATE,
+        candidate_cap,
         &SearchOptions::expanded_no_diversity(),
     );
 
     // Strategy B: exact terms only, no diversity
-    let exact_results = engine.search_with_options(query, TOP_N_CANDIDATE, &SearchOptions::exact());
+    let exact_results = engine.search_with_options(query, candidate_cap, &SearchOptions::exact());
 
     // Convert to RRF candidates
     let expanded_candidates: Vec<Candidate> = expanded_results
@@ -1287,7 +1312,7 @@ fn search_codebase_with_limits(
 
     // ── Reranker ──────────────────────────────────────────────────────────────
     let reranker = HeuristicReranker;
-    let reranked = reranker.rerank(query, rerank_candidates, TOP_N_FINAL);
+    let reranked = reranker.rerank(query, rerank_candidates, final_cap);
 
     // ── 零结果诊断 ─────────────────────────────────────────────────────────────
     //
@@ -1326,7 +1351,7 @@ fn search_codebase_with_limits(
     if stats.truncated {
         output.push_str(&format!(
             "Note: search was capped for responsiveness (max_files={}, max_total_bytes={}).\n\n",
-            limits.max_files, limits.max_total_bytes
+            build_limits.max_files, build_limits.max_total_bytes
         ));
     }
 
@@ -1398,8 +1423,14 @@ fn search_codebase_with_limits(
 
     // ── Store in query cache ─────────────────────────────────────────────────
     // LRU eviction is handled automatically by lru::LruCache.
+    //
+    // 但**未就绪**的输出不能进缓存："索引还在构建"不是检索结果。缓存下来会让
+    // 同一条 query 在引擎就绪之后仍然重播那句"还在构建"——用户看到的就是
+    // "连查两次都是同一句"，像坏了。
     if let Some(manager) = cache {
-        manager.put_query(query_cache_key, output.clone());
+        if !matches!(source, EngineSource::Warming) {
+            manager.put_query(query_cache_key, output.clone());
+        }
     }
 
     Ok(output)
@@ -2100,6 +2131,42 @@ mod tests {
         assert!(
             !out.contains("this codebase has no Chinese"),
             "索引里有中文时不能报'这个代码库没有中文'：{out}"
+        );
+    }
+
+    /// 回归现场：`budget_profile="auto"` 的查询永远命中不了 watcher 建的引擎。
+    ///
+    /// 缓存键里带着预算档位时，auto 档（f320b4M）与 watcher 的默认档
+    /// （f1200b12M）是**两个缓存命名空间**，而 watcher 只填后者 —— 于是 auto
+    /// 查询永远 cache miss → 永远 Warming → 模型看到"索引还在构建"就改用
+    /// Grep 绕开（现场：连续两次 0 ranked results，而同样的 query 在默认
+    /// 预算下能命中 40 条）。
+    #[test]
+    fn an_auto_budget_query_still_finds_the_shared_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "alpha.rs", "fn alpha_handler() {}\n");
+
+        // watcher 用默认预算建引擎（= 共享的那一份）
+        let cache = seed_cache(root, test_limits());
+        // 查询用 auto 档预算
+        let auto_limits = CodebaseSearchLimits {
+            max_files: 320,
+            max_file_bytes: 256 * 1024,
+            max_total_bytes: 4 * 1024 * 1024,
+            timeout_ms: 5_000,
+        };
+        let out =
+            search_codebase_with_limits(root, "alpha_handler", None, auto_limits, Some(&cache))
+                .expect("search must succeed");
+
+        assert!(
+            !out.contains("still building"),
+            "auto 档不该再命中 Warming：{out}"
+        );
+        assert!(
+            out.contains("alpha.rs"),
+            "auto 档必须能用上共享引擎的检索结果：{out}"
         );
     }
 
@@ -2824,6 +2891,59 @@ mod tests {
             matches!(src, EngineSource::Fresh),
             "query should be Fresh with a valid token, got {src:?}"
         );
+    }
+
+    /// 手动诊断（不进 CI）：对着**真实仓库**跑一条 query，把引擎返回、
+    /// 分词结果与零命中诊断全打出来。
+    ///
+    /// ```powershell
+    /// $env:STAR_DIAG_ROOT="H:\test\ARTEX"
+    /// $env:STAR_DIAG_QUERY="runWorker assignWork MCP tool call"
+    /// cargo test --release --lib -- diagnose_real_repo --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn diagnose_real_repo() {
+        let root = std::env::var("STAR_DIAG_ROOT")
+            .expect("STAR_DIAG_ROOT must point at the repo to diagnose");
+        let root = std::path::PathBuf::from(root);
+        let query = std::env::var("STAR_DIAG_QUERY")
+            .unwrap_or_else(|_| "runWorker assignWork MCP tool call".to_string());
+
+        let limits = match std::env::var("STAR_DIAG_BUDGET").as_deref() {
+            Ok("auto") => codebase_search_limits_for_profile(Some("auto")),
+            _ => CodebaseSearchLimits {
+                max_files: 1200,
+                max_file_bytes: 512 * 1024,
+                max_total_bytes: 12 * 1024 * 1024,
+                timeout_ms: 12_000,
+            },
+        };
+        let (engine, stats) =
+            build_search_engine_from_fs(&root, limits, &None).expect("engine build should succeed");
+        println!(
+            "indexed_files={} bytes={} truncated={} scanned={}",
+            stats.indexed_files, stats.total_bytes, stats.truncated, stats.scanned_text_files
+        );
+
+        let base = engine.extract_base_terms(&query);
+        println!("base_terms={base:?}");
+        println!("diagnosis={:?}", engine.diagnosis_from_terms(&base));
+
+        let expanded =
+            engine.search_with_options(&query, 40, &SearchOptions::expanded_no_diversity());
+        let exact = engine.search_with_options(&query, 40, &SearchOptions::exact());
+        println!(
+            "expanded_results={} exact_results={}",
+            expanded.len(),
+            exact.len()
+        );
+        for result in expanded.iter().take(5) {
+            println!(
+                "  {}:{} score={:.3} matched={:?}",
+                result.file_path, result.chunk.start_line, result.score, result.matches
+            );
+        }
     }
 
     // ── explore（复合查询） ─────────────────────────────────────────────

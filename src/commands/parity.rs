@@ -112,12 +112,7 @@ fn star_dir() -> Result<PathBuf, String> {
 }
 
 fn approval_label(mode: &crate::types::ApprovalMode) -> &'static str {
-    match mode {
-        crate::types::ApprovalMode::Default => "default",
-        crate::types::ApprovalMode::AcceptEdits => "acceptEdits",
-        crate::types::ApprovalMode::Plan => "plan",
-        crate::types::ApprovalMode::Yolo => "yolo",
-    }
+    mode.as_str()
 }
 
 /// 敏感环境变量只显示是否设置与长度，不回显明文
