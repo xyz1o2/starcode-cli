@@ -76,6 +76,14 @@ impl KeyContext {
         // 模态栈优先。输入框同样是栈上的一个 `Modal::InputModal`，不再是平行的
         // flag —— 曾经两个真相源靠手工同步，异步 ModelsList 一打穿就出现
         // 「面板画得出来、按键却全被隐形输入框吞掉」。
+        // Tool approval outranks a stale/hidden input modal. A permission card can
+        // coexist briefly with an input modal while the async stream settles; if
+        // InputModal wins here, ↑/↓/Enter are routed into the hidden textarea and
+        // the visible permission choices appear frozen until a mouse click changes
+        // focus.
+        if state.is_awaiting_confirmation {
+            return KeyContext::ToolConfirmation;
+        }
         if state.is_input_modal_open() {
             return KeyContext::InputModal;
         }
@@ -92,9 +100,6 @@ impl KeyContext {
             ) => return KeyContext::ReadOnlyDialog,
             Some(_) => return KeyContext::Modal,
             None => {}
-        }
-        if state.is_awaiting_confirmation {
-            return KeyContext::ToolConfirmation;
         }
         // 帮助浮层排在模态之后：draw_ui 里 help 先画、模态后画，模态在上面，
         // 判定必须与绘制顺序一致，否则顶层窗口的按键会落到下一层去。
@@ -211,6 +216,14 @@ mod tests {
         state.open_palette(crate::ui::state::palette::PaletteMode::Main);
         assert!(state.is_input_modal_open());
         assert_eq!(KeyContext::of(&state), KeyContext::InputModal);
+    }
+
+    #[test]
+    fn tool_confirmation_wins_over_a_stale_input_modal() {
+        let mut state = ChatState::new();
+        state.enter_input_modal();
+        state.is_awaiting_confirmation = true;
+        assert_eq!(KeyContext::of(&state), KeyContext::ToolConfirmation);
     }
 
     #[test]

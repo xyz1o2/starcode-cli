@@ -47,6 +47,13 @@ pub async fn handle_modal_key(
         return Ok(false);
     }
 
+    // A visible tool-approval card must receive navigation keys even if an
+    // input modal is still present in the stack from the async transition that
+    // produced the card. Return false here so the main input dispatcher can
+    // route the key through KeyContext::ToolConfirmation.
+    if state.is_awaiting_confirmation {
+        return Ok(false);
+    }
     if state.is_input_modal_open() {
         return crate::ui::events::input::handle_input_modal(state, key, agent_tx).await;
     }
