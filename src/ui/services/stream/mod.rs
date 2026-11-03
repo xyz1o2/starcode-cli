@@ -66,6 +66,16 @@ pub(crate) fn apply_models_to_state(
     models: &[crate::types::ModelInfo],
     cache_age_secs: Option<u64>,
 ) {
+    // 刷新请求可能经过多个 provider，期间会收到空的中间列表。不要把当前
+    // 面板瞬间清空：那会让 Ctrl+P 的内容闪没，再在下一条响应到达时跳回来。
+    // 初次加载时本来就是空列表，仍由 awaiting_models 渲染 Loading。
+    if models.is_empty() && !state.available_models.is_empty() {
+        state.awaiting_models = true;
+        state
+            .awaiting_models_since
+            .get_or_insert_with(std::time::Instant::now);
+        return;
+    }
     state.available_models = models.iter().map(|m| m.id.clone()).collect();
     state.available_models_info = models.to_vec(); // 保存完整的模型信息
     state.set_models_list_age(cache_age_secs);
@@ -1131,6 +1141,8 @@ pub async fn handle_stream_update(
                     &state.model_provider_map,
                     state.models_list_age_secs(),
                 );
+                state.selected_palette_index =
+                    crate::ui::components::palette::model_selection_index(state);
             }
             // Fallback: models arrived, open palette in Model mode for selection
             else if !state.available_models.is_empty() && !user_is_elsewhere {
@@ -1143,7 +1155,8 @@ pub async fn handle_stream_update(
                     &state.model_provider_map,
                     state.models_list_age_secs(),
                 );
-                state.selected_palette_index = 0;
+                state.selected_palette_index =
+                    crate::ui::components::palette::model_selection_index(state);
                 state.palette_filter.clear();
             }
         }

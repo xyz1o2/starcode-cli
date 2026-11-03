@@ -65,6 +65,8 @@ pub(crate) async fn execute_palette_action(
             if !state.is_palette_open() {
                 state.modal_stack.push(crate::ui::state::Modal::Palette);
             }
+            state.selected_palette_index =
+                crate::ui::components::palette::model_selection_index(state);
         }
         PaletteAction::RefreshModels => {
             // 显式刷新：跳过内存/磁盘缓存，扇出到所有已配置 provider。
@@ -81,6 +83,8 @@ pub(crate) async fn execute_palette_action(
                 &crate::ui::state::palette::PaletteMode::Model,
                 state,
             );
+            state.selected_palette_index =
+                crate::ui::components::palette::model_selection_index(state);
             let _ = agent_tx
                 .send(AgentRequest::ListModels { force: true })
                 .await;

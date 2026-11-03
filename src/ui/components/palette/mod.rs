@@ -204,6 +204,28 @@ pub fn palette_display_items(
     ordered
 }
 
+/// 返回模型面板打开时应聚焦的条目：当前模型优先，其次第一个可选项。
+///
+/// 刷新入口是置顶的全局动作，但不应该抢默认焦点；用户打开 Ctrl+P 后通常
+/// 先确认/切换当前模型，而不是立刻重新请求所有 provider。
+pub fn model_selection_index(state: &ChatState) -> usize {
+    let items = palette_display_items(&PaletteMode::Model, state, "");
+    items
+        .iter()
+        .position(|item| {
+            matches!(
+                item.action,
+                PaletteAction::SetModel { ref model, .. } if model == &state.current_model
+            )
+        })
+        .unwrap_or_else(|| {
+            items
+                .iter()
+                .position(|item| !matches!(item.action, PaletteAction::RefreshModels))
+                .unwrap_or(0)
+        })
+}
+
 /// 全局动作在列表里的位置：0/1 置顶，3 置底，2 跟随原有分组。
 ///
 /// 只在模型/Providers 两页置顶刷新项：全局搜索里它只是一个普通结果，抢到

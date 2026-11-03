@@ -110,6 +110,12 @@ pub struct DocumentKey {
     expanded_tool_calls: usize,
     expanded_thinking: usize,
     transcript_mode: bool,
+    pending_confirmation_choice: usize,
+    confirmation_feedback_mode: bool,
+    confirmation_feedback_fingerprint: u64,
+    show_permission_explanation: bool,
+    show_permission_debug: bool,
+    confirmation_outcome_fingerprint: u64,
     theme: String,
     selection: Option<crate::ui::selection::SelectionRange>,
     typewriter: Vec<(usize, usize)>,
@@ -137,6 +143,12 @@ impl DocumentKey {
                     .unwrap_or(0) as u64,
             );
             fingerprint = fnv_mix(fingerprint, u64::from(entry.is_streaming == Some(true)));
+            if let Some(confirmation) = &entry.confirmation {
+                fingerprint = fnv_mix(
+                    fingerprint,
+                    confirmation.outcome.as_deref().map(fnv_text).unwrap_or(0),
+                );
+            }
             if let Some(shown) = state.typewriter.shown(idx) {
                 typewriter.push((idx, shown));
             }
@@ -150,11 +162,29 @@ impl DocumentKey {
             expanded_tool_calls: state.expanded_tool_call_ids.len(),
             expanded_thinking: state.expanded_thinking_indices.len(),
             transcript_mode: state.is_transcript_mode,
+            pending_confirmation_choice: state.pending_confirmation_choice,
+            confirmation_feedback_mode: state.confirmation_feedback_mode,
+            confirmation_feedback_fingerprint: fnv_text(&state.pending_confirmation_feedback),
+            show_permission_explanation: state.show_permission_explanation,
+            show_permission_debug: state.show_permission_debug,
+            confirmation_outcome_fingerprint: state
+                .pending_confirmation_entry_idx
+                .and_then(|idx| state.chat_history.get(idx))
+                .and_then(|entry| entry.confirmation.as_ref())
+                .and_then(|confirmation| confirmation.outcome.as_deref())
+                .map(fnv_text)
+                .unwrap_or(0),
             theme: state.theme_manager.current().name.clone(),
             selection: crate::ui::selection::SelectionRange::resolve(&state.text_selection),
             typewriter,
         }
     }
+}
+
+fn fnv_text(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3)
+    })
 }
 
 /// Render chat entries into lines for the full-page scrollable document.
