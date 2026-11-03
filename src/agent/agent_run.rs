@@ -643,10 +643,7 @@ mod tests {
         let messages = vec![
             StarMessage::system("几万字的固定系统提示".to_string()),
             StarMessage::user("请跑一下测试".to_string()),
-            StarMessage::new(
-                "tool",
-                Some("cargo test 输出".to_string()),
-            ),
+            StarMessage::new("tool", Some("cargo test 输出".to_string())),
             StarMessage::assistant("测试跑完了".to_string()),
         ];
 

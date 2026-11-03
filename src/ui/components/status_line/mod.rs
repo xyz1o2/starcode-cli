@@ -27,7 +27,10 @@ fn sep() -> Span<'static> {
 ///
 /// 文案用 `ApprovalMode::label()`，与设置面板、`/permissions` 同一套措辞；
 /// 档位名本身由 `ApprovalMode::as_str()` 提供，不再各写一份。
-pub(crate) fn approval_mode_span(mode: &ApprovalMode, theme: &crate::ui::themes::theme::Theme) -> Span<'static> {
+pub(crate) fn approval_mode_span(
+    mode: &ApprovalMode,
+    theme: &crate::ui::themes::theme::Theme,
+) -> Span<'static> {
     let (text, style) = match mode {
         ApprovalMode::Default => (
             format!("⏵⏵ {}", mode.as_str()),
@@ -43,11 +46,15 @@ pub(crate) fn approval_mode_span(mode: &ApprovalMode, theme: &crate::ui::themes:
         ),
         ApprovalMode::Yolo => (
             format!("⏵⏵ yolo"),
-            Style::default().fg(theme.error).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
         ),
         ApprovalMode::Auto => (
             format!("🤖 auto"),
-            Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.success)
+                .add_modifier(Modifier::BOLD),
         ),
     };
     Span::styled(text, style)

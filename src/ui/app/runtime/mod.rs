@@ -126,10 +126,54 @@ const PERIODIC_TICK_INTERVAL: Duration = Duration::from_millis(1000);
 fn is_animating(state: &ChatState) -> bool {
     // 处理中：状态栏 spinner + shimmer + 颜色脉动 + thinking 透明度
     state.is_processing
-        // 流式输出中：token 计数脉动、工具调用 ● 闪烁
+        // 流式输出中：token 计数脉动、工具调用 ● 闪烁、打字机揭示
         || state.is_streaming
         // 平滑滚动的惯性尚未停下
         || state.scroll_velocity.abs() > f64::EPSILON
+}
+
+/// 把一帧包进终端的同步输出（DEC private mode 2026）里提交。
+///
+/// # 为什么需要
+///
+/// ratatui 的 `draw` 把这一帧的 diff 写进 stdout，但**一帧在终端上什么时候生效**
+/// 由终端决定。没有同步输出时，终端可以把一次大幅重排（滚动 3 行 → 整屏内容都变）
+/// 拆成多次可见刷新，用户看到的就是"闪一下"。`ESC[?2026h` … `ESC[?2026l` 之间的
+/// 输出会被终端缓存，直到收到结束标记才整体显示 —— 一帧要么全上，要么全没上。
+///
+/// Windows Terminal、iTerm2、kitty、WezTerm、foot 都支持；不支持的终端按私有模式
+/// 的通用规则忽略这两个序列，行为与不加时完全一致。
+///
+/// `STAR_TERM_SYNC=0` 关闭（排障用：怀疑同步输出与某些终端/多路复用器不兼容时）。
+fn draw_frame_atomically(
+    terminal: &mut RatatuiTerminal<CrosstermBackend<std::io::Stdout>>,
+    state: &mut ChatState,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    static SYNC_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let enabled = *SYNC_ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("STAR_TERM_SYNC").as_deref(),
+            Ok("0") | Ok("off") | Ok("false")
+        )
+    });
+
+    if enabled {
+        let mut out = std::io::stdout();
+        out.write_all(b"\x1b[?2026h")?;
+        out.flush()?;
+    }
+
+    let drawn = terminal.draw(|f| super::draw_ui(f, state));
+
+    if enabled {
+        let mut out = std::io::stdout();
+        out.write_all(b"\x1b[?2026l")?;
+        out.flush()?;
+    }
+
+    drawn.map(|_| ())
 }
 
 #[allow(unused_assignments)]
@@ -228,7 +272,7 @@ pub async fn run_ui_loop(
     let ui_cwd = crate::core::utils::paths::current_dir_cached().clone();
 
     // Initial draw
-    terminal.draw(|f| super::draw_ui(f, state))?;
+    draw_frame_atomically(terminal, state)?;
     last_draw = Instant::now();
     needs_redraw = false;
 
@@ -519,6 +563,11 @@ pub async fn run_ui_loop(
             // 动画时钟由事件循环推进，不再由 draw_ui 自增。空闲时停住，
             // 帧内容才会真正稳定下来。
             state.animation_tick = state.animation_tick.wrapping_add(1);
+            // 打字机：按时间推进已经收到的流式文本的“露出进度”。
+            // 按字段拆借，避免整份 `&state` 与 `&mut state.typewriter` 冲突。
+            if state.typewriter.advance(&state.chat_history) {
+                needs_redraw = true;
+            }
             needs_redraw = true;
         }
 
@@ -528,7 +577,7 @@ pub async fn run_ui_loop(
                 terminal.clear()?;
                 state.request_clear_screen = false;
             }
-            terminal.draw(|f| super::draw_ui(f, state))?;
+            draw_frame_atomically(terminal, state)?;
             last_draw = Instant::now();
             needs_redraw = false;
         }

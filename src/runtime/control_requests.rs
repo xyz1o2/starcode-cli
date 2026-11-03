@@ -242,9 +242,7 @@ pub async fn handle_request(
             let stats = agent
                 .policy_auto_classifier_stats()
                 .await
-                .unwrap_or_else(|| {
-                    crate::core::auto_mode::service::ClassifierStats::default()
-                });
+                .unwrap_or_else(|| crate::core::auto_mode::service::ClassifierStats::default());
             let _ = response.send(Ok(stats)).await;
         }
         AgentRequest::SetThinkingEffort(effort) => {

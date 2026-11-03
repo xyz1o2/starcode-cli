@@ -26,7 +26,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::ui::state::ChatState;
+use crate::types::ChatEntry;
 
 /// 默认揭示速率（字符/秒）。约 2 行/秒，肉眼可读又不至于让人等。
 const DEFAULT_CPS: f32 = 90.0;
@@ -36,7 +36,7 @@ const BACKLOG_FAST: usize = 200;
 const BACKLOG_SPRINT: usize = 600;
 
 /// 一条流式消息的显示进度。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TypewriterState {
     /// 开关（`STAR_TYPEWRITER=0` 关闭）。
     pub enabled: bool,
@@ -106,7 +106,7 @@ impl TypewriterState {
     /// 推进一帧。返回 `true` 表示有内容被揭示，调用方需要重绘。
     ///
     /// 只关心**仍在流式**的条目：它们的内容长度是目标，`shown` 是当前进度。
-    pub fn advance(&mut self, state: &ChatState) -> bool {
+    pub fn advance(&mut self, chat_history: &[ChatEntry]) -> bool {
         if !self.enabled {
             return false;
         }
@@ -119,15 +119,15 @@ impl TypewriterState {
         self.last_tick = Some(now);
 
         // 条目集合先收窄：已结束的流把所有进度丢掉，屏幕上直接是全文。
-        let streaming: Vec<(usize, usize)> = state
-            .chat_history
+        let streaming: Vec<(usize, usize)> = chat_history
             .iter()
             .enumerate()
             .filter(|(_, e)| e.is_streaming == Some(true))
             .map(|(idx, e)| (idx, e.content.chars().count()))
             .collect();
 
-        self.shown.retain(|idx, _| streaming.iter().any(|(i, _)| i == idx));
+        self.shown
+            .retain(|idx, _| streaming.iter().any(|(i, _)| i == idx));
 
         if streaming.is_empty() {
             self.credit = 0.0;
@@ -175,6 +175,7 @@ impl Default for TypewriterState {
 mod tests {
     use super::*;
     use crate::types::ChatEntry;
+    use crate::ui::state::ChatState;
 
     fn state_with_streaming(content: &str) -> ChatState {
         let mut state = ChatState::test_fixture();
@@ -189,7 +190,7 @@ mod tests {
         let state = state_with_streaming("hello world, this is a long streamed answer");
         let mut tw = TypewriterState::new();
         tw.cps = 10.0;
-        assert!(tw.advance(&state));
+        assert!(tw.advance(&state.chat_history));
         let idx = state.chat_history.len() - 1;
         let shown = tw.shown(idx).expect("进步应被记录");
         assert!(shown > 0 && shown < state.chat_history[idx].content.chars().count());
@@ -205,9 +206,12 @@ mod tests {
         tw.cps = 3.0;
         // 反复推进，每一步的预览都必须是合法 UTF-8 前缀
         for _ in 0..40 {
-            tw.advance(&state);
+            tw.advance(&state.chat_history);
             let preview = tw.preview(idx, content).into_owned();
-            assert!(content.starts_with(&preview), "预览必须是原文前缀: {preview:?}");
+            assert!(
+                content.starts_with(&preview),
+                "预览必须是原文前缀: {preview:?}"
+            );
         }
     }
 
@@ -216,9 +220,9 @@ mod tests {
         let mut state = state_with_streaming("short");
         let idx = state.chat_history.len() - 1;
         let mut tw = TypewriterState::new();
-        tw.advance(&state);
+        tw.advance(&state.chat_history);
         state.chat_history[idx].is_streaming = Some(false);
-        tw.advance(&state);
+        tw.advance(&state.chat_history);
         assert!(tw.shown(idx).is_none(), "流结束后进度必须丢弃");
         assert_eq!(tw.preview(idx, "short"), Cow::Borrowed("short"));
     }
@@ -228,7 +232,7 @@ mod tests {
         let state = state_with_streaming("abc");
         let mut tw = TypewriterState::new();
         tw.enabled = false;
-        assert!(!tw.advance(&state));
+        assert!(!tw.advance(&state.chat_history));
         assert_eq!(tw.preview(1, "abc"), Cow::Borrowed("abc"));
     }
 
@@ -239,11 +243,11 @@ mod tests {
         let idx = state.chat_history.len() - 1;
         let mut tw = TypewriterState::new();
         tw.cps = 30.0;
-        tw.advance(&state);
+        tw.advance(&state.chat_history);
         let first = tw.shown(idx).unwrap();
         // 900ms 后，积压 4000 字符走 sprint 档位
         tw.last_tick = Some(Instant::now() - std::time::Duration::from_millis(900));
-        tw.advance(&state);
+        tw.advance(&state.chat_history);
         let second = tw.shown(idx).unwrap();
         assert!(
             second - first > 100,

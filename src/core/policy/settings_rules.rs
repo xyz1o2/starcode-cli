@@ -591,16 +591,34 @@ fn push_rules(out: &mut Vec<PermissionRuleSpec>, value: Option<&Value>) {
 }
 
 /// `defaultMode` / `/permissions <mode>` / `--permission-mode` 共用的一套别名口径。
+///
+/// 规范形态由 [`ApprovalMode::as_str`] 定义，这里只额外接受几个常见别名
+/// （`ask` / `bypassPermissions` / `dontAsk` …）。
+///
+/// 之所以要走一遍 `as_str()` 而不是直接 match 字面量：档位增加时，
+/// 规范名与解析口径必须一起变 —— 否则就出现"设置里写 `auto` 但解析不出来"
+/// 这种只在某个用户身上复现的坑。
 pub fn approval_mode_from_str(raw: &str) -> Option<ApprovalMode> {
     let normalized = raw.trim().to_ascii_lowercase().replace(['-', '_'], "");
-    match normalized.as_str() {
-        "default" | "ask" => Some(ApprovalMode::Default),
-        "acceptedits" => Some(ApprovalMode::AcceptEdits),
-        "plan" | "readonly" => Some(ApprovalMode::Plan),
-        "yolo" | "bypasspermissions" | "dangerouslyskippermissions" => Some(ApprovalMode::Yolo),
-        "auto" | "autoconfirm" | "auto-approve" | "dontask" | "don'task" => {
-            Some(ApprovalMode::Auto)
+
+    // 规范名优先（`as_str()` 的直接形态，含 acceptEdits 这种驼峰）。
+    for mode in [
+        ApprovalMode::Default,
+        ApprovalMode::AcceptEdits,
+        ApprovalMode::Plan,
+        ApprovalMode::Yolo,
+        ApprovalMode::Auto,
+    ] {
+        if mode.as_str().to_ascii_lowercase() == normalized {
+            return Some(mode);
         }
+    }
+
+    match normalized.as_str() {
+        "ask" => Some(ApprovalMode::Default),
+        "readonly" => Some(ApprovalMode::Plan),
+        "bypasspermissions" | "dangerouslyskippermissions" => Some(ApprovalMode::Yolo),
+        "autoconfirm" | "autoapprove" | "dontask" => Some(ApprovalMode::Auto),
         _ => None,
     }
 }
@@ -896,6 +914,72 @@ mod tests {
             Some(ApprovalMode::Yolo)
         );
         assert_eq!(approval_mode_from_str("nonsense"), None);
+    }
+
+    /// 每个档位的规范名必须能被解析回来 —— `as_str()` 是真源，
+    /// 解析器必须认它。两个地方各写一份字面量时，加档位就会漏掉一处。
+    #[test]
+    fn every_approval_mode_round_trips_through_its_canonical_name() {
+        for mode in [
+            ApprovalMode::Default,
+            ApprovalMode::AcceptEdits,
+            ApprovalMode::Plan,
+            ApprovalMode::Yolo,
+            ApprovalMode::Auto,
+        ] {
+            assert_eq!(
+                approval_mode_from_str(mode.as_str()),
+                Some(mode.clone()),
+                "{} 解析不回来",
+                mode.as_str()
+            );
+        }
+    }
+
+    /// 规范名必须与 serde 的 `rename` 一致 —— 落盘的 settings 用 serde 的名字，
+    /// 解析器用 `as_str()`，两者对不上就会出现"写进文件读不出来"。
+    #[test]
+    fn the_canonical_name_matches_the_serialized_name() {
+        for mode in [
+            ApprovalMode::Default,
+            ApprovalMode::AcceptEdits,
+            ApprovalMode::Plan,
+            ApprovalMode::Yolo,
+            ApprovalMode::Auto,
+        ] {
+            let serialized = serde_json::to_string(&mode).expect("serialize");
+            assert_eq!(
+                serialized,
+                format!("\"{}\"", mode.as_str()),
+                "{} 的 serde 名字与 as_str 不一致",
+                mode.as_str()
+            );
+        }
+    }
+
+    /// 档位名必须唯一 —— 加上 auto 档位之后，"auto" 一度同时指
+    /// `Default`（旧显示名）与新的 auto 档位。
+    #[test]
+    fn the_approval_mode_names_are_unique() {
+        let modes = [
+            ApprovalMode::Default,
+            ApprovalMode::AcceptEdits,
+            ApprovalMode::Plan,
+            ApprovalMode::Yolo,
+            ApprovalMode::Auto,
+        ];
+
+        let mut names: Vec<&str> = modes.iter().map(|m| m.as_str()).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "审批档位的名字必须互不相同");
+
+        let mut labels: Vec<&str> = modes.iter().map(|m| m.label()).collect();
+        let total = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), total, "审批档位的显示标签必须互不相同");
     }
 
     /// 回归：签入版本库的 `.star/settings.json` 不能把审批模式抬到 yolo。

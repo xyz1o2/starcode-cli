@@ -765,7 +765,7 @@ fn async_agent_launch_remaps_indices_before_follow_up_updates() {
     state.total_rendered_lines = state.virtual_list.total_lines();
     state.rendered_cache.insert(1, (7, Vec::new()));
     state.rendered_cache.insert(3, (13, Vec::new()));
-    state.last_rendered_stream_key.insert(3, (1, 2));
+    state.last_rendered_stream_key.insert(3, (1, 2, 3));
     state.streaming_height_floor.insert(3, 13);
 
     handle_tool_result_message(
@@ -790,7 +790,7 @@ fn async_agent_launch_remaps_indices_before_follow_up_updates() {
     assert_eq!(state.total_rendered_lines, 29);
     assert!(!state.rendered_cache.contains_key(&1));
     assert!(state.rendered_cache.contains_key(&2));
-    assert_eq!(state.last_rendered_stream_key.get(&2), Some(&(1, 2)));
+    assert_eq!(state.last_rendered_stream_key.get(&2), Some(&(1, 2, 3)));
     assert_eq!(state.streaming_height_floor.get(&2), Some(&13));
     assert_eq!(state.active_agent_tasks["worker-1"].entry_idx, 3);
     assert_eq!(state.chat_history[3].entry_type, ChatEntryType::AgentTask);

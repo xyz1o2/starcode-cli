@@ -42,7 +42,14 @@ pub(crate) fn render_non_tool_entry_blocks(
             blocks.push(super::welcome_header::welcome_header_lines(state));
         }
         ChatEntryType::Assistant => {
-            let display_content = crate::ui::utils::text::sanitize_for_tui(&entry.content);
+            // 打字机只截“源文本”，截完再 sanitize：按字符截断必须发生在原文上，
+            // 否则 sanitize 后的字符数偏差会让进度与内容错位。
+            let visible_source = if is_streaming_now && entry_idx != usize::MAX {
+                state.typewriter.preview(entry_idx, &entry.content)
+            } else {
+                std::borrow::Cow::Borrowed(entry.content.as_str())
+            };
+            let display_content = crate::ui::utils::text::sanitize_for_tui(&visible_source);
             if let Some(reasoning) = &entry.reasoning_content {
                 let reasoning_display = crate::ui::utils::text::sanitize_for_tui(reasoning);
                 // 过滤掉空的或无意义的 thinking 内容

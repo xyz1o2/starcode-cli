@@ -75,9 +75,123 @@ fn scroll_top_for_anchor(heights: &[u16], entry_idx: usize, row: usize) -> Optio
     Some(current_y + clamped_row)
 }
 
+/// 整份聊天文档的扁平行缓存。
+///
+/// 聊天区不虚拟化**输出**（每一帧写进 buffer 的只有视口那几十行），但
+/// `render_chat_lines` 的产物是“整份会话的每一行”。此前它每帧都被重新拼一遍：
+/// 长会话里滚动一格 = 对全部条目做一次深拷贝（`Line` 里的 `Span` 是
+/// `Cow<'static, str>`，克隆就是真实分配），帧时间随会话长度线性增长。滚动时
+/// 一帧 100ms+，终端上看到的就是卡顿与闪屏。
+///
+/// 现在这份文档按 [`DocumentKey`] 缓存：只要内容没变（纯滚动、纯选中、空闲重绘），
+/// 直接复用同一份 `Rc<Vec<Line>>`，滚动一帧的成本只剩“写视口那几十行”。
+#[derive(Debug, Clone)]
+pub struct DocumentCache {
+    pub width: u16,
+    pub key: DocumentKey,
+    pub lines: std::rc::Rc<Vec<Line<'static>>>,
+}
+
+/// 判断“这份文档还能不能复用”的指纹。
+///
+/// 覆盖所有会改变渲染结果、但**不一定**经过 `mark_dirty` 的输入：
+/// 条目内容长度、思考内容长度、条目类型、流式标记、展开态、transcript 模式、
+/// 主题、选区、以及打字机已揭示的字符数。结构变更（插入/删除/标脏）由
+/// [`crate::ui::components::virtual_list::VirtualList::generation`] 兜住。
+///
+/// 新增“渲染期读的 state 字段”时，必须同步加到这里 —— 否则会得到一份永远不刷新
+/// 的旧文档（症状：改了状态，屏幕不动）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentKey {
+    width: u16,
+    generation: u64,
+    history_len: usize,
+    content_fingerprint: u64,
+    expanded_tool_calls: usize,
+    expanded_thinking: usize,
+    transcript_mode: bool,
+    theme: String,
+    selection: Option<crate::ui::selection::SelectionRange>,
+    typewriter: Vec<(usize, usize)>,
+}
+
+fn fnv_mix(mut hash: u64, value: u64) -> u64 {
+    hash ^= value;
+    hash = hash.wrapping_mul(0x1000_0000_01b3);
+    hash
+}
+
+impl DocumentKey {
+    fn of(state: &ChatState, width: u16) -> Self {
+        let mut fingerprint: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut typewriter = Vec::new();
+        for (idx, entry) in state.chat_history.iter().enumerate() {
+            fingerprint = fnv_mix(fingerprint, entry.entry_type.clone() as u64);
+            fingerprint = fnv_mix(fingerprint, entry.content.len() as u64);
+            fingerprint = fnv_mix(
+                fingerprint,
+                entry
+                    .reasoning_content
+                    .as_ref()
+                    .map(|r| r.len())
+                    .unwrap_or(0) as u64,
+            );
+            fingerprint = fnv_mix(fingerprint, u64::from(entry.is_streaming == Some(true)));
+            if let Some(shown) = state.typewriter.shown(idx) {
+                typewriter.push((idx, shown));
+            }
+        }
+
+        Self {
+            width,
+            generation: state.virtual_list.generation(),
+            history_len: state.chat_history.len(),
+            content_fingerprint: fingerprint,
+            expanded_tool_calls: state.expanded_tool_call_ids.len(),
+            expanded_thinking: state.expanded_thinking_indices.len(),
+            transcript_mode: state.is_transcript_mode,
+            theme: state.theme_manager.current().name.clone(),
+            selection: crate::ui::selection::SelectionRange::resolve(&state.text_selection),
+            typewriter,
+        }
+    }
+}
+
 /// Render chat entries into lines for the full-page scrollable document.
-/// Returns the rendered lines WITHOUT drawing to the frame.
-pub fn render_chat_lines(state: &mut ChatState, area_width: u16) -> Vec<Line<'static>> {
+///
+/// 返回 `Rc` 而不是 `Vec`：内容没变时调用方拿到的是**同一份**文档（引用计数 +1），
+/// 不会每帧深拷贝整份会话。要读行内容照常 `&lines[..]` / `lines.len()`。
+pub fn render_chat_lines(
+    state: &mut ChatState,
+    area_width: u16,
+) -> std::rc::Rc<Vec<Line<'static>>> {
+    // 后台代理详情视图不缓存：它的行数少，且内容来自 `active_agent_tasks`
+    // （带每秒变化的耗时），放进按 `chat_history` 尺寸分配的缓存里只会互相污染。
+    if state.viewing_agent_task_id.is_some() {
+        return std::rc::Rc::new(build_document(state, area_width));
+    }
+
+    let key = DocumentKey::of(state, area_width);
+    if let Some(cache) = &state.document_cache {
+        if cache.width == area_width && cache.key == key {
+            return cache.lines.clone();
+        }
+    }
+
+    let lines = std::rc::Rc::new(build_document(state, area_width));
+
+    // 重建时已经把最新高度写回 `virtual_list` / `last_item_heights`，
+    // 这里再取一次 key：`build_document` 会调用 `resize`（长度变化才会推进代数）。
+    let key = DocumentKey::of(state, area_width);
+    state.document_cache = Some(DocumentCache {
+        width: area_width,
+        key,
+        lines: lines.clone(),
+    });
+    lines
+}
+
+fn build_document(state: &mut ChatState, area_width: u16) -> Vec<Line<'static>> {
     // 详情视图优先：`viewing_agent_task_id` 有值时整块聊天区换成那个后台代理的输出。
     // 刻意不走 virtual_list / rendered_cache —— 那两者的下标是按 `chat_history` 尺寸分配的，
     // 塞进另一份条目列表会互相污染高度缓存。详情视图行数有限，每帧全量渲染即可。
@@ -125,7 +239,10 @@ pub fn render_chat_lines(state: &mut ChatState, area_width: u16) -> Vec<Line<'st
             .map(|r| r.len())
             .unwrap_or(0);
         let content_len = entry.content.len();
-        let current_key = (reasoning_len, content_len);
+        // 第三项是打字机已揭示的字符数：内容不再增长、但还在逐字铺开时，
+        // 前两项不变，少了它这一帧就会被判成“没变化”，屏幕停在中途。
+        let typewriter_shown = state.typewriter.shown(idx).unwrap_or(0);
+        let current_key = (reasoning_len, content_len, typewriter_shown);
 
         let stale = if is_streaming {
             state.virtual_list.item_height(idx) == 0
@@ -164,6 +281,10 @@ pub fn render_chat_lines(state: &mut ChatState, area_width: u16) -> Vec<Line<'st
             if !is_streaming {
                 state.rendered_cache.insert(idx, (h, lines.clone()));
                 state.last_rendered_stream_key.remove(&idx);
+                // 脏标记必须在这里清掉。此前 `clear_dirty` 全仓零调用：任何被标脏
+                // 过的条目会永久命中 stale 分支，每帧重新解析一次 markdown ——
+                // 滚动时这一条就足以把帧时间拖到两位数毫秒，长会话里表现为卡顿。
+                state.virtual_list.clear_dirty(idx);
                 all_lines.extend(lines);
             } else {
                 state.rendered_cache.remove(&idx);
@@ -174,8 +295,14 @@ pub fn render_chat_lines(state: &mut ChatState, area_width: u16) -> Vec<Line<'st
                 state.rendered_cache.insert(idx, (h, lines));
             }
         } else {
-            // Not stale: use cached (non-streaming) or re-render (streaming)
-            if is_streaming {
+            // Not stale: reuse cached lines for both branches.
+            //
+            // 流式条目此前在这条分支里无条件重渲染（“反正每帧都会变”），但内容
+            // 不再增长、打字机也追平时它其实没变 —— 白白多做一次 markdown 解析。
+            // 缓存里存的就是上一帧的同一批行，直接用。
+            if let Some((_, lines)) = state.rendered_cache.get(&idx) {
+                all_lines.extend(lines.clone());
+            } else if is_streaming {
                 let mut lines = render_entry_lines(state, idx, area_width);
                 // 与 stale 分支相同的高度下限，保证同帧高度一致
                 let floor = state.streaming_height_floor.get(&idx).copied().unwrap_or(0);
@@ -183,8 +310,6 @@ pub fn render_chat_lines(state: &mut ChatState, area_width: u16) -> Vec<Line<'st
                     lines.resize(floor as usize, Line::from(""));
                 }
                 all_lines.extend(lines);
-            } else if let Some((_, lines)) = state.rendered_cache.get(&idx) {
-                all_lines.extend(lines.clone());
             }
         }
     }

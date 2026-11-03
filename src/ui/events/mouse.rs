@@ -732,7 +732,7 @@ mod tests {
     fn render(state: &mut ChatState) -> Vec<ratatui::text::Line<'static>> {
         let lines = crate::ui::components::chat_history::render_chat_lines(state, 80);
         state.total_rendered_lines = lines.len();
-        lines
+        lines.as_ref().clone()
     }
 
     /// 找出含 `needle` 的那一行的绝对行号。

@@ -54,6 +54,54 @@ pub enum ApprovalMode {
     Auto, // AI classifier driven: allow safe ops without confirmation
 }
 
+impl ApprovalMode {
+    /// 档位的**规范 slug** —— 与 serde 的 `rename` 一致，也是
+    /// `approval_mode_from_str` 的目标形态。
+    ///
+    /// 这是档位名��**唯一真源**：settings 的 `defaultMode`、命令行
+    /// `--permission-mode`、`/permissions <mode>` 的动词、落盘的会话记录
+    /// 全用它。此前这些地方各写一份字面量，同一个 `Default` 在十处被叫成
+    /// "Auto" / "Build" / "default" / "默认" 四种名字 —— 加上 `Auto` 档位
+    /// 之后，"auto" 这个词同时指两个不同的档位。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::AcceptEdits => "acceptEdits",
+            Self::Plan => "plan",
+            Self::Yolo => "yolo",
+            Self::Auto => "auto",
+        }
+    }
+
+    /// 档位的**显示标签**（面向用户）。
+    ///
+    /// 同样只此一份：`Default` 叫 "Default"，真正的 auto 档位叫 "Auto" ——
+    /// 两个名字不再撞车。
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::AcceptEdits => "Accept edits",
+            Self::Plan => "Plan",
+            Self::Yolo => "Yolo",
+            Self::Auto => "Auto",
+        }
+    }
+
+    /// 中文标签（中文界面用）。
+    ///
+    /// 英文档位名保留在括号里 —— 用户在英文文档、命令行 `--permission-mode`
+    /// 里看到的就是那些名字，中文标签不该把它们藏起来。
+    pub fn label_zh(&self) -> &'static str {
+        match self {
+            Self::Default => "默认 (default)",
+            Self::AcceptEdits => "接受编辑 (acceptEdits)",
+            Self::Plan => "Plan (计划模式)",
+            Self::Yolo => "YOLO (全部放行)",
+            Self::Auto => "Auto (自动审批)",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllowedPathConfig {
     pub included_args: Option<Vec<String>>,

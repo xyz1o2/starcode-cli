@@ -1103,33 +1103,16 @@ pub enum ApprovalMode {
 impl ApprovalMode {
     /// 档位的**规范 slug** —— 与 `approval_mode_from_str` 的别名口径互通。
     ///
-    /// 这是审批档位名��**唯一真源**：设置项、命令行、`/permissions` 的动词、
-    /// 落盘的会话记录都用它。此前每个调用点各写一份 `match`，同一个 `Default`
-    /// 在十处被叫成 "Auto" / "Build" / "default" / "默认" 四种名字 ——
-    /// 加上 `Auto` 档位之后，"Auto" 这个名字同时指两个不同的档位。
+    /// 真源在 policy 侧（[`crate::core::policy::types::ApprovalMode::as_str`]），
+    /// 那边带 serde、是 settings 里序列化的那个；session 侧只是转一道。
+    /// 两个枚举各写一份字面量时，加档位就会漏掉一处。
     pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::AcceptEdits => "acceptEdits",
-            Self::Plan => "plan",
-            Self::Yolo => "yolo",
-            Self::Auto => "auto",
-        }
+        crate::core::policy::types::ApprovalMode::from(self.clone()).as_str()
     }
 
     /// 档位的**显示标签**（面向用户）。
-    ///
-    /// 同样只此一份。此前 `Default` 在状态栏叫 "Auto"、在设置里叫 "Build"、
-    /// 在 `/permissions` 里叫 "default"；现在统一成 `Default` 叫 "default"，
-    /// 真正的 auto 档位叫 "auto"。
     pub fn label(&self) -> &'static str {
-        match self {
-            Self::Default => "Default",
-            Self::AcceptEdits => "Accept edits",
-            Self::Plan => "Plan",
-            Self::Yolo => "Yolo",
-            Self::Auto => "Auto",
-        }
+        crate::core::policy::types::ApprovalMode::from(self.clone()).label()
     }
 
     /// 中文标签（中文界面用）。
@@ -1137,13 +1120,7 @@ impl ApprovalMode {
     /// 英文档位名保留在括号里 —— 用户在英文文档、命令行 `--permission-mode`
     /// 里看到的就是那些名字，中文标签不该把它们藏起来。
     pub fn label_zh(&self) -> &'static str {
-        match self {
-            Self::Default => "默认 (default)",
-            Self::AcceptEdits => "接受编辑 (acceptEdits)",
-            Self::Plan => "Plan (计划模式)",
-            Self::Yolo => "YOLO (全部放行)",
-            Self::Auto => "Auto (自动审批)",
-        }
+        crate::core::policy::types::ApprovalMode::from(self.clone()).label_zh()
     }
 }
 

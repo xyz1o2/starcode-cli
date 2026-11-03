@@ -128,6 +128,9 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     };
 
     // Empty state placeholder when no chat history
+    //
+    // `render_chat_lines` 返回 `Rc<Vec<Line>>`（内容没变时复用同一份文档），
+    // 所以空状态的分支也要包成 `Rc` —— 两边类型一致才编得过。
     let chat_lines = if total == 0 && !state.is_processing {
         let theme = state.theme_manager.current();
         let model = if state.current_model.is_empty() {
@@ -135,7 +138,7 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
         } else {
             state.current_model.as_str()
         };
-        vec![
+        std::rc::Rc::new(vec![
             ratatui::text::Line::from(""),
             ratatui::text::Line::from(vec![ratatui::text::Span::styled(
                 format!("  ⊙ {}", model),
@@ -149,7 +152,7 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
                 ),
                 ratatui::style::Style::default().fg(theme.secondary),
             )]),
-        ]
+        ])
     } else {
         chat_lines
     };
@@ -161,7 +164,7 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     crate::ui::utils::render::write_lines_to_buffer(
         f.buffer_mut(),
         chat_content_area,
-        &chat_lines,
+        &chat_lines[..],
         scroll,
     );
 
@@ -169,7 +172,7 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     if let Some(row) = state.chat_search.current_match() {
         crate::ui::components::chat_search::highlight_current_match(
             f,
-            &chat_lines,
+            &chat_lines[..],
             chat_content_area,
             scroll,
             row,

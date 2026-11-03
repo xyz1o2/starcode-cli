@@ -42,7 +42,8 @@ pub struct PolicyEngine {
     ///
     /// `None` = 只有本地护栏（0 LLM 开销）。`Some` = 本地护栏判不出来的调用
     /// 交给模型裁决，模型也判不出来就退回弹确认。
-    auto_classifier: Option<std::sync::Arc<dyn crate::core::auto_mode::service::AutoModeClassifier>>,
+    auto_classifier:
+        Option<std::sync::Arc<dyn crate::core::auto_mode::service::AutoModeClassifier>>,
     /// 对话上下文提供者 —— 分类器需要知道"用户到底想要什么"。
     auto_transcript: Option<std::sync::Arc<dyn Fn() -> String + Send + Sync>>,
     /// 分类调用计数（诊断用）。
@@ -84,9 +85,7 @@ impl PolicyEngine {
     pub fn set_auto_classifier(
         &mut self,
         classifier: std::sync::Arc<dyn crate::core::auto_mode::service::AutoModeClassifier>,
-        transcript_provider: Option<
-            std::sync::Arc<dyn Fn() -> String + Send + Sync>,
-        >,
+        transcript_provider: Option<std::sync::Arc<dyn Fn() -> String + Send + Sync>>,
     ) {
         self.auto_classifier = Some(classifier);
         self.auto_transcript = transcript_provider;
@@ -407,14 +406,18 @@ impl PolicyEngine {
                                 self.classify_with_llm(&tool_call.name, &args).await
                             {
                                 match verdict {
-                                    crate::core::auto_mode::service::AutoVerdict::Allow { .. } => {
+                                    crate::core::auto_mode::service::AutoVerdict::Allow {
+                                        ..
+                                    } => {
                                         return CheckResult {
                                             decision: PolicyDecision::Allow,
                                             rule: None,
                                             explicit_rule: false,
                                         };
                                     }
-                                    crate::core::auto_mode::service::AutoVerdict::Deny { reason } => {
+                                    crate::core::auto_mode::service::AutoVerdict::Deny {
+                                        reason,
+                                    } => {
                                         return CheckResult {
                                             decision: PolicyDecision::DenyWithReason(reason),
                                             rule: None,
@@ -1022,7 +1025,10 @@ mod tests {
         for (tool, args) in [
             ("Bash", serde_json::json!({"command": "cargo test --lib"})),
             ("Edit", serde_json::json!({"file_path": "src/main.rs"})),
-            ("WebFetch", serde_json::json!({"url": "https://example.com"})),
+            (
+                "WebFetch",
+                serde_json::json!({"url": "https://example.com"}),
+            ),
         ] {
             assert_eq!(
                 engine.check(&call(tool, args.clone()), None).await.decision,
@@ -1073,7 +1079,10 @@ mod tests {
 
         let decision = engine
             .check(
-                &call("WebFetch", serde_json::json!({"url": "https://evil.example"})),
+                &call(
+                    "WebFetch",
+                    serde_json::json!({"url": "https://evil.example"}),
+                ),
                 None,
             )
             .await

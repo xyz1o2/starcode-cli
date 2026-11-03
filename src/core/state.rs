@@ -202,7 +202,10 @@ impl GlobalState {
     /// async 上下文。这里用 `try_read`：拿不到锁就返回 `None` —— 分类器没拿到
     /// 上下文时会判不准，但那只影响精度，不影响安全（分类器只收紧不放宽）。
     pub fn try_auto_mode_transcript(&self) -> Option<String> {
-        self.auto_mode_transcript.try_read().ok().and_then(|g| g.clone())
+        self.auto_mode_transcript
+            .try_read()
+            .ok()
+            .and_then(|g| g.clone())
     }
 
     /// 取得运行时共享的会话权限管理器。

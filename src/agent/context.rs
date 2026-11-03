@@ -507,8 +507,8 @@ mod tests {
     /// auto 档位必须收到自主执行提醒 —— 否则模型不知道自己能连续跑。
     #[test]
     fn auto_mode_gets_the_autonomous_execution_reminder() {
-        let reminder =
-            auto_mode_reminder_if_needed(&crate::types::ApprovalMode::Auto).expect("auto 档位要有提醒");
+        let reminder = auto_mode_reminder_if_needed(&crate::types::ApprovalMode::Auto)
+            .expect("auto 档位要有提醒");
         assert!(
             reminder.contains("Auto mode is active"),
             "提醒要说清当前是 auto 档位：{reminder}"

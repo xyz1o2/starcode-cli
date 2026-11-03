@@ -87,7 +87,11 @@ pub struct ClassificationRequest {
 }
 
 impl ClassificationRequest {
-    pub fn new(tool_name: impl Into<String>, tool_params: Value, transcript: impl Into<String>) -> Self {
+    pub fn new(
+        tool_name: impl Into<String>,
+        tool_params: Value,
+        transcript: impl Into<String>,
+    ) -> Self {
         Self {
             tool_name: tool_name.into(),
             tool_params,
@@ -269,12 +273,7 @@ impl AutoModeClassifier for LlmAutoModeClassifier {
             Ok::<String, Box<dyn std::error::Error + Send + Sync>>(content)
         };
 
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(self.timeout_secs),
-            call,
-        )
-        .await
-        {
+        match tokio::time::timeout(std::time::Duration::from_secs(self.timeout_secs), call).await {
             Ok(Ok(content)) => {
                 if content.trim().is_empty() {
                     // 空响应 = 没得到裁决 = 问人。
@@ -305,10 +304,7 @@ impl AutoModeClassifier for LlmAutoModeClassifier {
                     self.timeout_secs, request.tool_name
                 ));
                 AutoVerdict::Ask {
-                    reason: format!(
-                        "AI classifier timed out after {}s",
-                        self.timeout_secs
-                    ),
+                    reason: format!("AI classifier timed out after {}s", self.timeout_secs),
                 }
             }
         }
@@ -355,7 +351,11 @@ impl std::fmt::Debug for CircuitBreakingClassifier {
 }
 
 impl CircuitBreakingClassifier {
-    pub fn new(inner: Arc<dyn AutoModeClassifier>, failure_threshold: u32, cooldown_secs: u64) -> Self {
+    pub fn new(
+        inner: Arc<dyn AutoModeClassifier>,
+        failure_threshold: u32,
+        cooldown_secs: u64,
+    ) -> Self {
         Self {
             inner,
             failure_threshold: failure_threshold.max(1),
@@ -509,10 +509,7 @@ impl ClassifierCounter {
     }
 
     pub fn snapshot(&self) -> ClassifierStats {
-        self.stats
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.stats.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
@@ -687,10 +684,7 @@ mod tests {
         for _ in 0..3 {
             breaker.classify(&request()).await;
         }
-        assert!(
-            breaker.is_available(),
-            "模型正常说'不确定'不该触发熔断"
-        );
+        assert!(breaker.is_available(), "模型正常说'不确定'不该触发熔断");
     }
 
     /// 一次成功就清零连续失败计数。
@@ -714,10 +708,7 @@ mod tests {
 
         breaker.classify(&request()).await;
         breaker.classify(&request()).await;
-        assert!(
-            breaker.is_available(),
-            "中间的成功应当清零失败计数"
-        );
+        assert!(breaker.is_available(), "中间的成功应当清零失败计数");
     }
 
     /// mock 分类器用完就退化成问人 —— 模拟"分类器没话说"。

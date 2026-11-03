@@ -78,9 +78,7 @@ impl MessageBus {
     /// （`GlobalState`），而共享状态是在总线之后建的。
     pub async fn set_auto_classifier(
         &self,
-        classifier: std::sync::Arc<
-            dyn crate::core::auto_mode::service::AutoModeClassifier,
-        >,
+        classifier: std::sync::Arc<dyn crate::core::auto_mode::service::AutoModeClassifier>,
         transcript_provider: Option<std::sync::Arc<dyn Fn() -> String + Send + Sync>>,
     ) {
         let mut policy_engine = self.policy_engine.write().await;
@@ -88,13 +86,8 @@ impl MessageBus {
     }
 
     /// auto 分类器统计（诊断用）。
-    pub async fn auto_classifier_stats(
-        &self,
-    ) -> crate::core::auto_mode::service::ClassifierStats {
-        self.policy_engine
-            .read()
-            .await
-            .auto_classifier_stats()
+    pub async fn auto_classifier_stats(&self) -> crate::core::auto_mode::service::ClassifierStats {
+        self.policy_engine.read().await.auto_classifier_stats()
     }
 
     /// 重新从磁盘装载权限规则。PolicyEngine 只活在这里，UI 改完 settings 必须走这一趟。

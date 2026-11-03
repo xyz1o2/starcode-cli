@@ -178,6 +178,9 @@ pub(crate) fn finalize_entry_streaming(state: &mut ChatState, idx: usize) {
     }
     state.rendered_cache.remove(&idx);
     state.virtual_list.mark_dirty(idx);
+    // 流结束了，打字机必须立刻交还全文：剩下的字符已经全部收到，
+    // 继续逐字揭示只会让"已完成"的消息在屏幕上还缺一截。
+    state.typewriter.flush(idx);
 }
 
 /// 从仍在执行的工具中选出最后启动的一项，保持状态行的显示标签与 ID 生命周期同步。

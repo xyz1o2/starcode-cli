@@ -103,7 +103,11 @@ pub async fn install_auto_classifier(
         crate::core::auto_mode::service::CircuitBreakingClassifier::params_from_env();
     let classifier: Arc<dyn AutoModeClassifier> = Arc::new(
         crate::core::auto_mode::service::CircuitBreakingClassifier::new(
-            Arc::new(LlmAutoModeClassifier::new(client.clone(), model.clone(), timeout_secs)),
+            Arc::new(LlmAutoModeClassifier::new(
+                client.clone(),
+                model.clone(),
+                timeout_secs,
+            )),
             breaker_threshold,
             breaker_cooldown,
         ),
