@@ -482,9 +482,19 @@ fn interrupt_hint_requires_a_wide_active_request() {
 fn elapsed_counter_tracks_the_turn_while_processing() {
     let mut state = ChatState::new();
     // 会话已经开了很久，但这一回合刚开始。
-    state.session_started_at = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+    //
+    // 回拨的量不能超过系统单调时钟的起点 —— Windows 上 `Instant` 减 duration
+    // 会直接 panic（"overflow when subtracting duration from instant"），
+    // 而 `Instant::now()` 距开机只有几十秒。所以这里用"开机以来的时长"当
+    // 会话年龄：足够老（与 7 秒的回合形成对比），又不会溢出。
+    //
+    // 机器刚开机时这个减法依然可能溢出，所以退回到"不早于起点"。
+    let uptime = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(3600))
+        .unwrap_or(std::time::Instant::now());
+    state.session_started_at = uptime;
     state.processing_started_at =
-        Some(std::time::Instant::now() - std::time::Duration::from_secs(7));
+        std::time::Instant::now().checked_sub(std::time::Duration::from_secs(7));
 
     assert_eq!(turn_elapsed_secs(&state), None, "空闲时没有回合计时");
 

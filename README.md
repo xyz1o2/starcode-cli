@@ -207,10 +207,24 @@ starcode --permission-mode yolo        # bypass all permissions (dangerous!)
 An explicit `deny` rule in `settings.json` beats every mode, including `yolo`; an
 explicit `ask` rule still forces a prompt in every mode except `yolo`.
 
-`auto` is the default. It lets read-only tools, edits inside the project, and shell
-commands that match no dangerous pattern run without a prompt, while `sudo`,
-`rm -rf /`, `curl … | bash`, `git push --force` and writes to system paths still
-ask. Untrusted folders fall back to `default`.
+`auto` is the default. Read-only tools run without a prompt; anything the local
+guardrails cannot judge goes to an **AI safety classifier** that decides
+allow / deny / ask, with the conversation as context. `sudo`, `rm -rf /`,
+`curl … | bash`, `git push --force` and writes to system paths are blocked
+locally and never reach the model. If the classifier is unavailable, unsure, or
+the model contradicts itself, the action falls back to asking you. Untrusted
+folders fall back to `default`.
+
+| Env | Effect |
+|---|---|
+| `STAR_AUTO_MODE_CLASSIFIER=0` | Disable the classifier; keep local guardrails only |
+| `STAR_AUTO_MODE_CLASSIFIER_MODEL` | Model to classify with (default: the configured `small_fast_model`) |
+| `STAR_AUTO_MODE_CLASSIFIER_TIMEOUT` | Per-call timeout in seconds (default: 10) |
+| `STAR_AUTO_MODE_CLASSIFIER_BREAKER_THRESHOLD` | Consecutive failures before the circuit breaker opens (default: 3) |
+| `STAR_AUTO_MODE_CLASSIFIER_BREAKER_COOLDOWN` | Breaker cooldown in seconds (default: 60) |
+
+`/permissions classifier` shows how many calls were allowed, denied, or escalated
+to you.
 
 #### Slash commands in the TUI
 

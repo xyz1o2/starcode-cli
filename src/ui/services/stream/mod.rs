@@ -1692,41 +1692,19 @@ async fn handle_error_message(
         }
     }
 
-    let error_type = crate::ui::components::error_overlay::classify_error(&error);
-    // 自动重试类错误（网络抖动 / 限流 / 过载 / 5xx）不弹浮层。
+    // 模型调用失败**不弹模态**。
     //
-    // agent 侧已经为它们做过退避重试，这里再弹一个模态只会打断正在输入的下一条
-    // 消息；而且弹窗里唯一有用的动作（重发）在输入框按 Esc 也能做。错误本身照常
-    // 写进聊天记录和状态栏，用户回头能看到。参考 Claude Code：瞬时 API 失败只
-    // 在消息流里提示，不抢焦点。
+    // 错误信息已经完整落在两个地方：
+    // - 聊天记录里的一条 Error 条目（原始错误全文，可展开）
+    // - 状态栏的一行精简提示（"Error: <摘要>" + 下一步该做什么）
     //
-    // 其余错误仍然弹：401/403、余额耗尽、请求非法需要用户去改配置；上下文超限
-    // 需要用户主动 `/compact` —— 它们都是"重发一次解决不了"的错误，值得占一个
-    // 模态。浮层上的 `s` 直接开 provider 面板，`r` 直接重发。
-    let auto_retried = matches!(
-        crate::llm::error_kind::LlmErrorKind::classify(&error),
-        crate::llm::error_kind::LlmErrorKind::Network
-            | crate::llm::error_kind::LlmErrorKind::RateLimit
-            | crate::llm::error_kind::LlmErrorKind::Overloaded
-            | crate::llm::error_kind::LlmErrorKind::ServerError
-    );
-    if !auto_retried {
-        state.error_overlay_state = crate::ui::components::error_overlay::ErrorOverlayState {
-            error_message: error.clone(),
-            error_type: error_type.clone(),
-            retry_count: 0,
-            max_retries: 10,
-            is_retrying: false,
-            // 不可重试的错误（401/403、余额耗尽）默认高亮"切换提供商"：原地重试
-            // 只会复现同一个错，先把 key / 网关改对才是有用的下一步。
-            selected_action: if crate::ui::components::error_overlay::is_retryable(&error_type) {
-                crate::ui::components::error_overlay::ErrorAction::Retry
-            } else {
-                crate::ui::components::error_overlay::ErrorAction::SwitchProvider
-            },
-        };
-        state.open_error_overlay();
-    }
+    // 用户要做的动作也都不需要模态来承载：
+    // - 重发 → 在输入框按 Esc（`last_turn_failed` 置位后一直有效）
+    // - 换 provider → Ctrl+P → Providers
+    //
+    // 弹窗唯一多出来的东西是"抢焦点"：它打断正在输入的下一条消息，而错误
+    // 本身并没有因为多了个模态而更容易被看到。参考 Claude Code：API 失败
+    // 只在消息流里提示。
 
     // 状态栏只放一行精简信息：标签 + 下一步提示；原始错误全文另进 chat_history
     // （可换行查看）。按 "Original error:" 显式切开，即便上游把换行吞了，也不会

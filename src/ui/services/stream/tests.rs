@@ -1919,81 +1919,71 @@ fn removal_keeps_selection_unless_anchor_entry_is_removed() {
     );
 }
 
-/// 网络错误已经由 agent 退避重试过：终态只进聊天记录/状态栏，不弹错误浮层。
+/// 模型调用失败**不弹模态** —— 无论错误种类。
+///
+/// 错误信息已经落在两个地方：聊天记录里的一条 Error 条目（原始错误全文）
+/// 与状态栏的一行精简提示。用户要的动作也不需要模态承载：
+/// 重发 → 输入框按 Esc；换 provider → Ctrl+P → Providers。
+///
+/// 浮层唯一多出来的东西是"抢焦点"：它打断正在输入的下一条消息，
+/// 而错误并没有因为多了个模态而更容易被看到。
+///
+/// 这条测试同时锁住两件事：**不弹模态**，且**错误不丢**。
 #[tokio::test]
-async fn retried_network_error_does_not_open_the_error_overlay() {
-    let mut state = ChatState::new();
-    let (agent_tx, _agent_rx) = mpsc::channel(1);
-    let message_id = 90;
+async fn a_model_failure_never_opens_a_modal_but_stays_visible() {
+    for (message_id, error) in [
+        (
+            90,
+            "error sending request for url (https://api.example.com/v1)",
+        ),
+        (91, "401 Unauthorized"),
+        (
+            92,
+            "The model call failed.\n\nOriginal error: Provider error: rig deepseek stream",
+        ),
+    ] {
+        let mut state = ChatState::new();
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
 
-    handle_stream_update(
-        &mut state,
-        StreamMessage::Start {
-            message_id,
-            kind: StreamStartKind::UserTurn {
-                model: "gpt-4o".to_string(),
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Start {
+                message_id,
+                kind: StreamStartKind::UserTurn {
+                    model: "gpt-4o".to_string(),
+                },
             },
-        },
-        &agent_tx,
-    )
-    .await
-    .unwrap();
-    handle_stream_update(
-        &mut state,
-        StreamMessage::Error {
-            message_id,
-            error: "error sending request for url (https://api.example.com/v1)".to_string(),
-        },
-        &agent_tx,
-    )
-    .await
-    .unwrap();
-
-    assert!(
-        !state
-            .modal_stack
-            .contains(&crate::ui::state::modal::Modal::ErrorOverlay),
-        "瞬时网络错误不该打断用户：浮层必须保持关闭"
-    );
-    // 错误仍要可见，并且 Esc 仍能重发上一条。
-    assert!(state
-        .chat_history
-        .last()
-        .is_some_and(|entry| entry.content.contains("Error:")));
-    assert!(state.last_turn_failed);
-}
-
-/// 需要用户改配置的错误仍然弹浮层 —— 它才是浮层存在的理由。
-#[tokio::test]
-async fn auth_error_still_opens_the_error_overlay() {
-    let mut state = ChatState::new();
-    let (agent_tx, _agent_rx) = mpsc::channel(1);
-    let message_id = 91;
-
-    handle_stream_update(
-        &mut state,
-        StreamMessage::Start {
-            message_id,
-            kind: StreamStartKind::UserTurn {
-                model: "gpt-4o".to_string(),
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Error {
+                message_id,
+                error: error.to_string(),
             },
-        },
-        &agent_tx,
-    )
-    .await
-    .unwrap();
-    handle_stream_update(
-        &mut state,
-        StreamMessage::Error {
-            message_id,
-            error: "401 Unauthorized".to_string(),
-        },
-        &agent_tx,
-    )
-    .await
-    .unwrap();
+            &agent_tx,
+        )
+        .await
+        .unwrap();
 
-    assert!(state
-        .modal_stack
-        .contains(&crate::ui::state::modal::Modal::ErrorOverlay));
+        assert!(
+            state.modal_stack.is_empty(),
+            "模型失败不该弹模态（error={error:?}），实际栈：{:?}",
+            state.modal_stack
+        );
+        // 错误仍要可见，并且 Esc 仍能重发上一条。
+        assert!(
+            state
+                .chat_history
+                .last()
+                .is_some_and(|entry| entry.content.contains("Error:")),
+            "错误必须留在聊天记录里（error={error:?}）"
+        );
+        assert!(
+            state.last_turn_failed,
+            "Esc 重发的判据必须置位（error={error:?}）"
+        );
+    }
 }

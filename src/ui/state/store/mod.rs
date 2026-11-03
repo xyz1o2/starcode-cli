@@ -446,7 +446,6 @@ pub struct ChatState {
     pub compression_state: crate::ui::components::highlight::compression::CompressionState,
     // ============ New Feature States ============
     pub context_breakdown: crate::ui::components::highlight::context_viz::TokenBreakdown,
-    pub error_overlay_state: crate::ui::components::error_overlay::ErrorOverlayState,
     pub log_selector_state: crate::ui::components::log_selector::LogSelectorState,
     pub diff_preview_scroll: usize,
     pub pending_model_confirmation: bool,
@@ -970,7 +969,6 @@ impl ChatState {
             // ============ New Feature States ============
             context_breakdown:
                 crate::ui::components::highlight::context_viz::TokenBreakdown::default(),
-            error_overlay_state: crate::ui::components::error_overlay::ErrorOverlayState::default(),
             log_selector_state: crate::ui::components::log_selector::LogSelectorState::default(),
             diff_preview_scroll: 0,
             pending_model_confirmation: false,

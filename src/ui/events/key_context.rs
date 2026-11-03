@@ -7,7 +7,7 @@
 //! ```text
 //! handle_modal_key → Shift+Tab → /clear 确认 → 粘贴确认 → Ctrl+P → …
 //!   → handle_overlay_input → bg-agent 选择器 → vim → handle_input_modal
-//!   → keymap → handle_paste → 模型确认 → LogSelector → ErrorOverlay → 主 match
+//!   → keymap → handle_paste → 模型确认 → LogSelector → 主 match
 //! ```
 //!
 //! 「现在是什么模式」这个判断被**重复推导**了十几次，且各层清单互不一致：
@@ -54,7 +54,7 @@ pub enum KeyContext {
     Help,
     /// 主题选择器（Enter 应用 / Esc 回滚）
     ThemePicker,
-    /// 只读展示型对话框（Settings 状态、LogSelector、ErrorOverlay …）
+    /// 只读展示型对话框（Settings 状态、LogSelector …）
     ReadOnlyDialog,
     /// 后台代理选择器：↑/↓/Enter/Esc
     BgAgentSelector,
@@ -88,8 +88,7 @@ impl KeyContext {
                 | Modal::CompressionStatus
                 | Modal::ContextViz
                 | Modal::StatusModal
-                | Modal::LogSelector
-                | Modal::ErrorOverlay,
+                | Modal::LogSelector,
             ) => return KeyContext::ReadOnlyDialog,
             Some(_) => return KeyContext::Modal,
             None => {}

@@ -8,21 +8,34 @@
 //!
 //! # 接线状态（2026-11-03 更新）
 //!
-//! 本模块分两层，**当前只接了下面那层**：
+//! 两层都接上了：
 //!
 //! - ✅ **本地护栏层**：`dangerous_patterns::is_dangerous_pattern` / `is_system_path`
-//!   已被 `core::policy::PolicyEngine` 的 `ApprovalMode::Auto` 档位消费
-//!   （`mode_auto_allows`）。auto 是当前的**默认档位**，0 LLM 开销：
-//!   只读工具 + 项目目录内读写 + 未命中危险模式的 bash 命令免确认；
-//!   `sudo` / `rm -rf /` / `curl|bash` / `git push --force` 与系统路径写入照常弹确认。
+//!   被 `core::policy::PolicyEngine` 的 `ApprovalMode::Auto` 档位消费
+//!   （`mode_auto_verdict`）。危险命令模式与系统路径写入在这里**直接拒**，
+//!   不进分类器 —— 模型没有机会放行 `rm -rf /`。
 //!
-//! - ❌ **LLM 分类层**：`AutoModeManager` / `AutoModeClassifier` 仍然**无实例化**
-//!   —— 唯一的构造点在 `auto_mode/mod.rs` 自己的 impl 块里。接线它需要一个
-//!   **独立的模型调用通道**（在权限判定里再调一次 LLM），成本和风险都不小，
-//!   是一个独立工作项。
+//! - ✅ **LLM 分类层**：[`service::AutoModeClassifier`] 是权限判定链路上的
+//!   分类器 trait；[`service::LlmAutoModeClassifier`] 是走
+//!   `llm::client::StarClient` 的真模型实现（复用 provider 解析与鉴权）；
+//!   [`wiring::install_auto_classifier`] 在 `Agent::lazy_init` 把它装进
+//!   策略引擎，对话上下文经 `core::state::GlobalState` 的
+//!   `auto_mode_transcript` 槽位传给分类器。
 //!
-//! 也就是说：auto 档位目前**不**做 LLM 语义分类，只做确定性本地规则。
-//! LLM 分类接上后，auto 会从"本地护栏"升级成"AI 分类器 + 本地护栏"。
+//! # 失败方向
+//!
+//! 分类器是**收紧**权限的闸门，不是放宽的闸门：模型不可用、超时、响应
+//! 无法解析、模型自相矛盾 —— 一律退回"问人"，绝不静默放行。
+//! [`service::CircuitBreakingClassifier`] 让 provider 挂掉时不会每次调用都
+//! 白等一次超时。
+//!
+//! # 还没接的
+//!
+//! - [`classifier::AutoModeClassifier`]（旧的直连实现）自己用 `reqwest` 打
+//!   `/chat/completions`，模型与密钥全部从环境变量读，与 provider 解析脱节。
+//!   它现在只作为历史参考与本地规则来源保留，运行时走的是 `service.rs`。
+//! - [`AutoModeManager`] / [`AutoModeState`] 里的危险权限剥离与恢复
+//!   （`strip_dangerous_rules` / `restore_dangerous_rules`）仍未接线。
 pub mod classifier;
 pub mod dangerous_patterns;
 pub mod prompts;
@@ -32,6 +45,9 @@ pub mod wiring;
 pub use classifier::{AutoModeClassifier, ClassifierDecision, ClassifierResult, ClassifierStage};
 pub use dangerous_patterns::{
     is_dangerous_pattern, DANGEROUS_BASH_PATTERNS, DANGEROUS_PERMISSION_PATTERNS,
+};
+pub use service::{
+    AutoModeClassifier as Classifier, AutoVerdict, ClassificationRequest, LlmAutoModeClassifier,
 };
 
 use serde::{Deserialize, Serialize};

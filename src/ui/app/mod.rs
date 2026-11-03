@@ -480,15 +480,6 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
                     f.area(),
                 )
             }
-            Modal::ErrorOverlay => {
-                let theme = state.theme_manager.current();
-                crate::ui::components::error_overlay::render_error_overlay(
-                    f,
-                    &state.error_overlay_state,
-                    f.area(),
-                    theme,
-                );
-            }
             Modal::LogSelector => {
                 let theme = state.theme_manager.current();
                 crate::ui::components::log_selector::render_log_selector(

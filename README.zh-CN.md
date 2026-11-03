@@ -202,9 +202,21 @@ starcode --permission-mode yolo        # 跳过所有权限（危险！）
 
 `acceptEdits` 与 `bypassPermissions` 分别是 `default` 和 `yolo` 的别名。
 
-`auto` 是默认档位：只读工具、项目目录内的读写、以及未命中危险模式的 shell 命令
-免确认执行；`sudo`、`rm -rf /`、`curl … | bash`、`git push --force` 与系统路径写入
-仍会弹确认。不受信任的目录退回 `default`。
+`auto` 是默认档位：只读工具免确认；本地护栏判不了的调用交给 **AI 安全分类器**
+裁决（结合对话上下文判断这次操作是不是用户要的）。`sudo`、`rm -rf /`、
+`curl … | bash`、`git push --force` 与系统路径写入由本地规则直接拦下，根本不会
+送到模型。分类器不可用、判不准、或模型自相矛盾时，一律退回弹确认。
+不受信任的目录退回 `default`。
+
+| 环境变量 | 作用 |
+|---|---|
+| `STAR_AUTO_MODE_CLASSIFIER=0` | 关掉分类器，只留本地护栏 |
+| `STAR_AUTO_MODE_CLASSIFIER_MODEL` | 分类用的模型（默认取已配置的 `small_fast_model`） |
+| `STAR_AUTO_MODE_CLASSIFIER_TIMEOUT` | 单次分类超时（秒，默认 10） |
+| `STAR_AUTO_MODE_CLASSIFIER_BREAKER_THRESHOLD` | 连续失败多少次后熔断（默认 3） |
+| `STAR_AUTO_MODE_CLASSIFIER_BREAKER_COOLDOWN` | 熔断冷却时间（秒，默认 60） |
+
+`/permissions classifier` 可以看到放行 / 拒绝 / 升级给用户的次数统计。
 
 #### TUI 内的斜杠命令
 

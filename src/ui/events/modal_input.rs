@@ -86,9 +86,6 @@ pub async fn handle_modal_key(
         Modal::LogSelector => {
             crate::ui::events::input::handle_log_selector_key(state, key, agent_tx).await
         }
-        Modal::ErrorOverlay => {
-            crate::ui::events::input::handle_error_overlay_key(state, key, agent_tx).await
-        }
         // 已在上面提前返回（输入框未必在栈顶）。
         Modal::InputModal => Ok(false),
     }
@@ -1254,7 +1251,6 @@ mod tests {
             Modal::ContextViz,
             Modal::StatusModal,
             Modal::LogSelector,
-            Modal::ErrorOverlay,
             Modal::GlobalSearch,
             Modal::QuickOpen,
             Modal::HistorySearch,

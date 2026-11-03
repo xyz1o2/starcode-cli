@@ -49,7 +49,6 @@ pub enum Modal {
     /// 上下文可视化
     ContextViz,
     /// 错误覆盖层
-    ErrorOverlay,
     /// 日志选择器
     LogSelector,
     /// 通用输入对话框（API Key、重命名等）
@@ -492,12 +491,6 @@ impl ChatState {
     pub fn open_context_viz(&mut self) {
         self.close_all_modals();
         self.modal_stack.push(Modal::ContextViz);
-    }
-
-    /// 错误覆盖层
-    pub fn open_error_overlay(&mut self) {
-        self.close_all_modals();
-        self.modal_stack.push(Modal::ErrorOverlay);
     }
 
     /// 日志选择器

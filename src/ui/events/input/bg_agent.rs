@@ -179,56 +179,6 @@ pub(crate) async fn retry_last_user_message(
     Ok(true)
 }
 
-/// 错误覆盖层：Enter 执行选中项、r 重试上一条、s 换 provider、c/Esc 关闭、↑↓ 切换选项。
-pub(crate) async fn handle_error_overlay_key(
-    state: &mut ChatState,
-    key: KeyEvent,
-    agent_tx: &mpsc::Sender<AgentRequest>,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    // Enter 执行当前高亮的选项。之前界面画着 "Enter 确认" 却没有 Enter 分支，
-    // `_ => {}` + `Ok(true)` 把按键吞掉 —— 高亮的那一项按下去什么都不会发生。
-    if key.code == KeyCode::Enter {
-        match state.error_overlay_state.selected_action {
-            crate::ui::components::error_overlay::ErrorAction::Retry => {
-                state.pop_modal();
-                retry_last_user_message(state, agent_tx).await?;
-            }
-            crate::ui::components::error_overlay::ErrorAction::SwitchProvider => {
-                state.pop_modal();
-                state.open_palette(PaletteMode::Provider);
-            }
-            crate::ui::components::error_overlay::ErrorAction::Cancel => {
-                state.pop_modal();
-            }
-        }
-        return Ok(true);
-    }
-    match key.code {
-        KeyCode::Char('r') | KeyCode::Char('R') => {
-            state.pop_modal();
-            retry_last_user_message(state, agent_tx).await?;
-        }
-        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
-            state.pop_modal();
-            // 关掉浮层不等于放弃这次重试机会：Esc 之后在输入框按 Esc 仍然能重发。
-            // 只有用户发了新消息或跑完一轮，这个标志才会被清掉。
-        }
-        KeyCode::Char('s') | KeyCode::Char('S') => {
-            // Switch provider
-            state.pop_modal();
-            state.open_palette(PaletteMode::Provider);
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            state.error_overlay_state.select_prev();
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            state.error_overlay_state.select_next();
-        }
-        _ => {}
-    }
-    Ok(true)
-}
-
 /// 主题选择器：↑↓ 导航（实时预览）、Enter 应用、Esc 取消。
 ///
 /// 从 `handle_overlay_input` 抽出来的独立处理器：模态的按键处理应当住在

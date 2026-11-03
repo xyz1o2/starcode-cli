@@ -27,8 +27,8 @@ use tool_approval::*;
 // 下列函数以前就在 input 模块上可见（pub(crate)），搬进子模块后在这里
 // 重新导出，调用方的路径不用改。
 pub(crate) use bg_agent::{
-    handle_error_overlay_key, handle_log_selector_key, handle_status_modal_key,
-    handle_theme_picker_key, retry_last_user_message,
+    handle_log_selector_key, handle_status_modal_key, handle_theme_picker_key,
+    retry_last_user_message,
 };
 pub(crate) use palette_action::execute_palette_action;
 pub(crate) use tool_approval::{handle_input_modal, handle_task_panel_key};
@@ -1199,7 +1199,7 @@ pub async fn handle_key_event(
     }
 
     // 模态栈上的窗口一律由 `modal_input::handle_modal_key` 分发（LogSelector、
-    // ErrorOverlay、StatusModal、ThemePicker、InputModal 都在那张表里），
+    // StatusModal、ThemePicker、InputModal 都在那张表里），
     // 非模态的上下文也已在上文的查表分发里处理完。这里只剩主输入区。
 
     match key.code {
