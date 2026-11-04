@@ -130,6 +130,9 @@ fn is_animating(state: &ChatState) -> bool {
         || state.is_streaming
         // 平滑滚动的惯性尚未停下
         || state.scroll_velocity.abs() > f64::EPSILON
+        // 打字机还有没铺完的正文（流结束后的"落针"阶段）。
+        // 不算进来的话，收尾那一下没人推进 —— 剩下的字永远差一截。
+        || state.typewriter.has_pending_reveal(&state.chat_history)
 }
 
 /// 把一帧包进终端的同步输出（DEC private mode 2026）里提交。

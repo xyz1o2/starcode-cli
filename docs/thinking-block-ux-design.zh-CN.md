@@ -282,15 +282,212 @@ there_is_no_second_handwritten_tool_name_list                       passed
 两条都实测过能抓到问题：临时把 `"web_fetch"` 加回 match arm，守卫立刻报出
 文件与行号。
 
-## 12. 验证
+---
+
+# 附二：工具显示名（方案 C）
+
+## 12. 问题
+
+`tool_display_name` 把注册名映射成聊天区的短标签。四个问题：
+
+1. **丢信息** —— `Edit` / `SmartEdit` / `MultiEdit` 全显示成 `edit`，
+   用户看不出这次改的是整文件替换、智能定位还是批量多处。
+2. **显示的名字在项目里不存在** —— `view` / `bash` / `search` 在 schema、
+   文档、**权限规则**里都没有；用户想加规则要写 `Read(...)`。
+3. **两套表互相不一致** —— 聊天行 `view`，状态行 `read file`；两张表都要手工维护。
+4. **`complete_task` 是明确残留** —— commit `f50c171` 的提交信息写着
+   *"no legacy-name compatibility: every "Todo"/"complete_task" match arm
+   (registry alias table, tool routing shortlist, catalog, stream reload,
+   **formatters, renderer**) now matches only "TodoWrite""*，
+   但这条 arm 在 formatter 里活了下来。
+   `find_by_name` 同类 —— 全仓从未有过对应的工具实现。
+
+## 13. 最终决定：方案 C
+
+保留 Claude Code 风格的短标签观感，但修掉上面两个实质问题：
+
+| 项 | 处理 |
+|---|---|
+| `Edit` / `SmartEdit` / `MultiEdit` | 拆开：`edit` / `smart edit` / `multi edit` |
+| `complete_task` | 删掉（项目早已硬切到 `TodoWrite`） |
+| `find_by_name` | 删掉（全仓从未有过工具实现） |
+| 其余（`view` / `bash` / `search` / `glob` / `write` / `plan` / `Update Todos`） | 保持现状 |
+| 状态行 `format_tool_name_for_status` | 补上 `SmartEdit → "smart edit"`、`Edit → "edit file"`，与聊天行对齐 |
+
+同时给 `tool_display_name` 补了文档，把"两条规矩"写明：
+
+1. **不合并语义不同的工具**；
+2. **不写已废弃的旧名**。
+
+## 14. 验证
 
 ```text
 cargo fmt --all -- --check                        通过
 git diff --check                                  通过
 cargo check --workspace --all-targets --locked 通过
-constants::alias_tests 9 passed
+ui::utils::format 8 passed（含 4 个新增）
 tool_name_consistency 8 passed
-全量 lib 1868 passed / 37 failed / 3 ignored
+全量 lib 1871 passed / 37 failed / 3 ignored
+集成测试（含 UI 快照）全通过
+```
+
+37 个失败与改动前完全一致（Windows 用户 profile 隔离问题），无新增失败。
+
+---
+
+# 附三：TUI 闪屏（附三：速率受控揭示）
+
+## 15. 现象
+
+> tui 上的输出老是一块一块输出的，看着一闪一闪的。��以像调音软件音量那样，
+> 快慢显示，人看起来会更舒服 —— 不管 LLM 流返回的快慢，也不应该闪屏。
+
+参照物是 Claude Code v2.1.308 的界面（见 `.image/2026-11/`）：整段正文**一次
+性铺开**，不做逐字动画；进度只由 spinner 行表达
+（`✶ Wandering… (46s · ↓ 217 tokens)`）。
+
+## 16. 根因：三个问题叠加
+
+### ① 打字机进度没跟着索引位移（头号成因）
+
+工具结果插到 `chat_history` 中间时（每次工具调用都插，`handle_tool_result_message`
+走 `chat_history.insert(insert_pos, entry)`），后面那条正在流式的消息索引 +1。
+
+而打字机进度 `TypewriterState::shown` 是**按条目索引**存的，`index_shift.rs` 只
+位移了 `rendered_cache` / `last_rendered_stream_key` / `streaming_height_floor`，
+**漏了打字机**。
+
+于是 `preview()` 查不到这条的进度 → 走 `Cow::Borrowed(content)` 分支 →
+**返回全文** → 整段话一帧蹦出来。
+
+这就是"一块一块"的直接来源：每次工具调用后闪一次。
+
+### ② 帧间隔无上限
+
+```rust
+let dt = self.last_tick.map(|t| now.duration_since(t).as_secs_f32()).unwrap_or(0.0);
+```
+
+`advance()` 只在动画帧里跑（`is_animating`）。思考阶段没有流式输出 → 打字机不推进
+→ `last_tick` 停在几秒前。流式一开始，第一个 `dt` 是好几秒：
+
+```text
+credit += 90 cps × 6 (sprint 档) × 5 s = 2700 字符
+```
+
+→ 一帧揭示 2700 字。
+
+### ③ 收尾时直接丢弃进度
+
+`finalize_entry_streaming` 原本调 `typewriter.flush(idx)` —— 流一结束就把剩余文字
+整块弹出来，屏幕上最后一段是"啪"一下出现的。
+
+## 17. 修复：音量表模型
+
+参照 VU 表指针：**位置平滑逼近目标，速度有上限，到点自然停**。
+
+| 约束 | 实现 |
+|---|---|
+| 帧间隔有上限 | `MAX_FRAME_DT = 100ms` —— 停了很久也只多揭示 100ms 的量 |
+| 单帧步长有上限 | `MAX_CHARS_PER_FRAME = 48` —— 任何一帧的视觉增量都有界 |
+| 进度跟着索引位移 | `shift_indices_after_insert` / `shift_indices_after_removal` |
+| 收尾不丢弃进度 | 流结束后进入"落针"阶段，按同样速率铺完才丢 |
+| 落针阶段也要有动画帧 | `is_animating` 纳入 `typewriter.has_pending_reveal()` |
+| 预览按进度截（不限流式中） | `message_render` 里去掉 `is_streaming_now` 条件 |
+
+### 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `src/ui/state/typewriter.rs` | 帧间隔/步长上限、落针阶段、索引位移方法、`has_pending_reveal` |
+| `src/ui/services/stream/index_shift.rs` | 插入/删除时同步位移打字机进度 |
+| `src/ui/services/stream/mod.rs` | 收尾不再 `flush` |
+| `src/ui/components/message_render.rs` | 预览按进度截（不限流式中） |
+| `src/ui/app/runtime/mod.rs` | `is_animating` 纳入打字机积压 |
+
+### 回归测试
+
+```text
+a_long_gap_does_not_release_a_big_block_at_once              passed
+the_tail_settles_instead_of_popping_in                       passed
+a_settled_entry_returns_the_full_text                       passed
+the_progress_follows_the_entry_index_when_a_tool_result_is_inserted  passed
+large_backlog_is_caught_up_faster                            passed
+preview_returns_full_text_after_stream_ends                  passed
+```
+
+---
+
+# 附四：Bash 权限（对齐 Claude Code）
+
+## 18. 现状差距
+
+Claude Code v2.1.308 的规则（官方文档）：
+
+> Claude Code recognizes a built-in set of Bash commands as read-only and
+> runs them **without a permission prompt in every mode**.
+
+StarCode 的差距：
+
+| | Claude Code | StarCode（改前） |
+|---|---|---|
+| 只读命令集 | 所有模式都免确认 | **只挂在 `acceptEdits` 模式** |
+| `git` 只读子命令 | 认（`status`/`log`/`diff`…） | 不认（整个 `git` 都不放行） |
+| auto 模式的兜底 | 分类器**只拦不放**，不回退问人 | 分类器不确定 → **问人** |
+
+## 19. 已改
+
+### ① 只读命令集在所有模式生效
+
+`default` 档位现在也放行只读命令 —— 用户抱怨的"bash 每次都要权限同意"就来自这里。
+
+三条硬性拒绝条件原样保留（重定向 `>`/`<`、命令替换 `` ` ``/`$(`、分隔段逐个判定），
+少放行的代价只是多一次确认，不会凭空多出风险面。
+
+### ② 补上只读 `git` 子命令
+
+`git` 整条放行不行 —— 它下面既有 `status` 也有 `push`/`reset --hard`/`clean -fd`。
+新增白名单：
+
+```text
+status  log  diff  show  blame  describe  shortlog  ls-files
+rev-parse  cat-file  grep  watchchanged  annotate
+```
+
+`commit` / `push` / `reset` / `clean` / `checkout` / `merge` / `rebase` / `stash`
+/ `tag` / `branch` 一律不放行（`git branch -d` 会删分支）。
+
+### ③ auto 模式的兜底语义（未改，列出供决策）
+
+Claude Code 的 auto 模式里，分类器**只做"放行/拦截"，不回退问人** —— 判不出来就
+拦截，模型自己换写法。StarCode 现在是"分类器判不出来 → 问人"。
+
+这一条**没改**：改成"拦截"会让分类器故障时整轮任务直接卡死（provider 挂了 →
+所有工具调用被拒 → 任务无法推进），比多问一次人更糟。
+
+改动清单：
+
+| 文件 | 改动 |
+|---|---|
+| `src/types/mod.rs` | `is_readonly_fs_command` 文档更新；新增 `is_readonly_git_command` 与只读 git 子命令白名单 |
+| `src/core/policy/policy_engine.rs` | `default` 档位接入只读命令集 |
+
+### 回归测试
+
+```text
+default_mode_allows_readonly_commands    passed
+default_mode_still_asks_for_mutating_commands  passed
+accept_edits_allows_edits_and_readonly_commands_only  passed
+policy_engine 全部 19 passed
+```
+
+## 20. 验证
+
+```text
+cargo fmt --all -- --check                        通过
+git diff --check                                  通过
+cargo check --workspace --all-targets --locked 通过
+全量 lib 1877 passed / 37 failed / 3 ignored
 ```
 
 37 个失败与改动前完全一致（Windows 用户 profile 隔离问题），无新增失败。

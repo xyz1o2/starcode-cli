@@ -1377,10 +1377,15 @@ pub fn is_file_edit_tool(tool_name: &str) -> bool {
     crate::core::tools::constants::is_edit_tool_name(tool_name)
 }
 
-/// `acceptEdits` 模式下免确认的**只读** shell 命令。
+/// 只读 shell 命令 —— **所有审批模式**下都免确认。
 ///
-/// 刻意比 CC 的 "common filesystem commands" 保守：只放行纯读命令，少放行的代价
-/// 只是多一次确认，不会凭空多出一个风险面。
+/// 对标 Claude Code 的 "read-only commands"：*Claude Code recognizes a built-in
+/// set of Bash commands as read-only and runs them without a permission prompt
+/// in **every mode***。
+///
+/// 之前这条只挂在 `acceptEdits` 模式上，于是 `default` 模式里连 `ls` / `cat` /
+/// `git status` 都要弹确认 —— 用户每轮都被问"就看一下目录也要批？"，正是
+/// Claude Code 新版本把 auto 模式设为默认后大家抱怨的点。
 ///
 /// 三条硬性拒绝条件，因为它们都能把"只读"变成写入：
 /// - 重定向 `>` / `<`：能改文件
@@ -1422,8 +1427,53 @@ pub fn is_readonly_fs_command(tool_name: &str, args: &serde_json::Value) -> bool
                 .next()
                 .unwrap_or(program)
                 .trim_end_matches(".exe");
-            READONLY_FS_COMMANDS.contains(&program)
+            if READONLY_FS_COMMANDS.contains(&program) {
+                return true;
+            }
+            // `git` 单独放行不行 —— 它下面既有 `status` 也有 `push`/`reset --hard`。
+            is_readonly_git_command(segment)
         })
+}
+
+/// `git` 的**只读**子命令。
+///
+/// `git status` / `git log` / `git diff` 是纯读；`git push` / `git reset --hard`
+/// / `git clean -fd` 会写、会删 —— 所以 `git` 不能整条放行，只能按子命令挑。
+///
+/// 只放行"看"的子命令：`commit`/`push`/`reset`/`clean`/`checkout`/`merge`/
+/// `rebase`/`stash`/`tag`/`branch` 一律不放行（`git branch -d` 会删分支）。
+const READONLY_GIT_SUBCOMMANDS: &[&str] = &[
+    "status",
+    "log",
+    "diff",
+    "show",
+    "blame",
+    "describe",
+    "shortlog",
+    "ls-files",
+    "rev-parse",
+    "cat-file",
+    "grep",
+    "whatchanged",
+    "annotate",
+];
+
+/// `git` 命令是否只读（只放行上面的子命令白名单）。
+fn is_readonly_git_command(segment: &str) -> bool {
+    let mut words = segment.split_whitespace();
+    let program = words.next().unwrap_or_default();
+    let program = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .trim_end_matches(".exe");
+    if program != "git" {
+        return false;
+    }
+    match words.next() {
+        Some(sub) => READONLY_GIT_SUBCOMMANDS.contains(&sub),
+        None => false,
+    }
 }
 
 /// Model information with provider details

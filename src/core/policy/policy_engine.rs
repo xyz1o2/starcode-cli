@@ -237,9 +237,21 @@ impl PolicyEngine {
         use crate::core::auto_mode::service::AutoVerdict;
         match self.approval_mode {
             ApprovalMode::Default => {
-                if crate::types::is_safe_query_tool(tool_name) {
+                // 默认档位也放行只读命令 —— 对标 Claude Code：
+                // *"Claude Code recognizes a built-in set of Bash commands as
+                // read-only and runs them without a permission prompt in every
+                // mode"*。
+                //
+                // 之前这条只挂在 `acceptEdits` 上，于是 default 档里连 `ls` /
+                // `cat` / `git status` 都要弹确认 —— 用户抱怨的"bash 每次都要
+                // 权限同意"就是这么来的。少放行的代价只是多一次确认，
+                // 多放行的风险由那三条硬性拒绝条件（重定向 / 命令替换 /
+                // 分隔段）兜住。
+                if crate::types::is_safe_query_tool(tool_name)
+                    || crate::types::is_readonly_fs_command(tool_name, args)
+                {
                     AutoVerdict::Allow {
-                        reason: "default mode: read-only tool".to_string(),
+                        reason: "default mode: read-only operation".to_string(),
                     }
                 } else {
                     AutoVerdict::Undecided
@@ -932,6 +944,59 @@ mod tests {
                     .decision,
                 PolicyDecision::Allow,
                 "{args} 绝不能被 acceptEdits 静默放行"
+            );
+        }
+    }
+
+    /// `default` 档位也放行只读命令 —— 对标 Claude Code：
+    /// *"runs them without a permission prompt in every mode"*。
+    ///
+    /// 之前只读命令只挂在 `acceptEdits` 上，于是默认档里连 `ls` / `cat` /
+    /// `git status` 都要弹确认 —— 用户抱怨的"bash 每次都要权限同意"就是这么来的。
+    #[tokio::test]
+    async fn default_mode_allows_readonly_commands() {
+        let engine = engine_in(ApprovalMode::Default);
+
+        for args in [
+            serde_json::json!({"command": "ls -la src"}),
+            serde_json::json!({"command": "cat README.md"}),
+            serde_json::json!({"command": "grep -rn TODO src | head -20"}),
+            serde_json::json!({"command": "git status"}),
+            serde_json::json!({"command": "git log --oneline -10"}),
+            serde_json::json!({"command": "pwd && ls"}),
+        ] {
+            assert_eq!(
+                engine
+                    .check(&call("Bash", args.clone()), None)
+                    .await
+                    .decision,
+                PolicyDecision::Allow,
+                "{args} 在 default 下不该弹确认"
+            );
+        }
+    }
+
+    /// 只读放行**不覆盖会写/会删的命令**。
+    #[tokio::test]
+    async fn default_mode_still_asks_for_mutating_commands() {
+        let engine = engine_in(ApprovalMode::Default);
+
+        for args in [
+            serde_json::json!({"command": "git push"}),
+            serde_json::json!({"command": "git reset --hard"}),
+            serde_json::json!({"command": "git clean -fd"}),
+            serde_json::json!({"command": "rm -rf target"}),
+            serde_json::json!({"command": "ls && rm -rf target"}),
+            serde_json::json!({"command": "cat a.txt > b.txt"}),
+            serde_json::json!({"command": "git commit -m 'x'"}),
+        ] {
+            assert_ne!(
+                engine
+                    .check(&call("Bash", args.clone()), None)
+                    .await
+                    .decision,
+                PolicyDecision::Allow,
+                "{args} 绝不能被 default 档静默放行"
             );
         }
     }

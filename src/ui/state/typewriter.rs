@@ -14,13 +14,27 @@
 //!
 //! 按**字符**推进，不按字节 —— CJK、emoji 不会被切在 UTF-8 中间。每帧的推进量
 //! 由经过时间 × 速率算出，并带一个分数余量（`credit`），所以 30fps 下也是平滑的，
-//! 不会因为取整变成“一帧一个字”。
+//! 不会因为取整变成"一帧一个字"。
 //!
-//! 流式输出本身可能比打字机快得多。积压（backlog）越大，揭示速率越高，超过阈值
-//! 直接按倍数追赶 —— 打字机永远只是“把已经收到的内容铺开”，它不是限速器，不能
-//! 让模型已经在下一段了屏幕上还卡在上上段。
+//! # 三条不许"块状输出"的约束
 //!
-//! 条目不再流式时（`is_streaming != Some(true)`）立刻丢弃对应进度，渲染回到全文。
+//! 这个模块存在的唯一理由就是**别让正文一块一块地蹦出来**。三个地方都能让
+//! 它蹦，加了三条约束把它们都按住：
+//!
+//! 1. **帧间隔有上限**（[`MAX_FRAME_DT`]）。`last_tick` 记的是**上一次推进**的时刻，
+//!    而推进只在动画帧里发生 —— 思考阶段（没有流式输出）不推进，`last_tick`
+//!    就停在几秒前。流式一开始，第一个 `dt` 是好几秒，`credit` 一次性攒够几千
+//!    字符 → 整段话一帧全出来。削顶之后，"停了很久"也只多揭示 100ms 的量。
+//! 2. **单帧步长有上限**（[`MAX_CHARS_PER_FRAME`]）。积压大 + 追赶倍率 6 时，
+//!    `cps × factor × dt` 仍能算出很大的值。这个上限保证**任何一帧**的视觉增量
+//!    都是有界的。
+//! 3. **收尾不丢弃进度**。流结束时不 `flush`，而是让打字机继续把剩下的字
+//!    "落针"（settle）完 —— 落针过程同样受上面两条约束。
+//!
+//! 另外还有一条容易漏的：**条目索引会位移**。工具结果插到 `chat_history`
+//! 中间时，后面那条正在流式的消息索引 +1；打字机进度按索引存，不跟着移的话
+//! `preview()` 查不到 → 返回全文 → 又是一帧蹦出一大段。见
+//! [`TypewriterState::shift_indices_after_insert`]。
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -34,6 +48,17 @@ const DEFAULT_CPS: f32 = 90.0;
 const BACKLOG_FAST: usize = 200;
 /// 积压超过这个字符数全速追赶。
 const BACKLOG_SPRINT: usize = 600;
+
+/// 单帧最多揭示"这么多时间"的内容。
+///
+/// 帧间隔再大也不能一次蹦出一大段 —— 这是"块状输出"的头号成因。
+/// 上限 100ms ≈ 6 帧 @30fps：正常帧间隔都远小于它，只有"停了很久"才被削顶。
+const MAX_FRAME_DT: f32 = 0.1;
+
+/// 单帧最多揭示的字符数（积压追赶时的硬上限）。
+///
+/// 保证**任何一帧**的视觉增量都是有界的 —— 也就是"不闪屏"。
+const MAX_CHARS_PER_FRAME: usize = 48;
 
 /// 一条流式消息的显示进度。
 #[derive(Debug)]
@@ -91,9 +116,42 @@ impl TypewriterState {
         }
     }
 
-    /// 丢弃一个条目的进度：它的下一帧按全文渲染。
-    pub fn flush(&mut self, idx: usize) {
-        self.shown.remove(&idx);
+    /// 在 `pos` 处插入条目后，把进度索引整体后移。
+    ///
+    /// 工具结果插在工具调用后面（`handle_tool_result_message` 走的就是这条路），
+    /// 后面那条正在流式的消息索引 +1。进度不跟着移的话，`preview()` 查不到这条
+    /// 的进度 → **返回全文** → 整段话一帧蹦出来 —— 就是"块状输出"。
+    pub fn shift_indices_after_insert(&mut self, pos: usize) {
+        self.shown = self
+            .shown
+            .iter()
+            .map(|(idx, shown)| (if *idx >= pos { idx + 1 } else { *idx }, *shown))
+            .collect();
+    }
+
+    /// 移除 `pos` 处的条目后，把进度索引整体前移。
+    pub fn shift_indices_after_removal(&mut self, pos: usize) {
+        self.shown = self
+            .shown
+            .drain()
+            .filter_map(|(idx, shown)| match idx.cmp(&pos) {
+                std::cmp::Ordering::Less => Some((idx, shown)),
+                std::cmp::Ordering::Equal => None,
+                std::cmp::Ordering::Greater => Some((idx - 1, shown)),
+            })
+            .collect();
+    }
+
+    /// 还有没有"没铺完"的正文。
+    ///
+    /// 有的话事件循环就得继续跑动画帧 —— 否则收尾阶段的"落针"没人推进，
+    /// 屏幕上会永远少一截。
+    pub fn has_pending_reveal(&self, chat_history: &[ChatEntry]) -> bool {
+        self.shown.iter().any(|(idx, shown)| {
+            chat_history
+                .get(*idx)
+                .is_some_and(|entry| *shown < entry.content.chars().count())
+        })
     }
 
     /// 清空所有进度（`/clear`、会话切换、重置渲染缓存时调用）。
@@ -105,37 +163,54 @@ impl TypewriterState {
 
     /// 推进一帧。返回 `true` 表示有内容被揭示，调用方需要重绘。
     ///
-    /// 只关心**仍在流式**的条目：它们的内容长度是目标，`shown` 是当前进度。
+    /// 推进两类条目：
+    /// 1. **还在流式的** —— 目标是它的全文长度；
+    /// 2. **已经结束、但还没铺完的** —— 让它"落针"。
+    ///    流结束时不再直接丢弃进度（那会让剩下的字整块弹出），
+    ///    而是继续按同样的速率铺完，铺完才丢掉进度记录。
     pub fn advance(&mut self, chat_history: &[ChatEntry]) -> bool {
         if !self.enabled {
             return false;
         }
 
         let now = Instant::now();
+        // 帧间隔削顶：停了很久之后第一次推进，也只多揭示 100ms 的量。
         let dt = self
             .last_tick
             .map(|t| now.duration_since(t).as_secs_f32())
-            .unwrap_or(0.0);
+            .unwrap_or(0.0)
+            .min(MAX_FRAME_DT);
         self.last_tick = Some(now);
 
-        // 条目集合先收窄：已结束的流把所有进度丢掉，屏幕上直接是全文。
-        let streaming: Vec<(usize, usize)> = chat_history
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.is_streaming == Some(true))
-            .map(|(idx, e)| (idx, e.content.chars().count()))
-            .collect();
+        // 目标集合：还在流式的 + 已经结束但还没铺完的。
+        let mut targets: Vec<(usize, usize)> = Vec::new();
+        for (idx, entry) in chat_history.iter().enumerate() {
+            let total = entry.content.chars().count();
+            if entry.is_streaming == Some(true) {
+                targets.push((idx, total));
+            } else if let Some(&shown) = self.shown.get(&idx) {
+                if shown < total {
+                    targets.push((idx, total));
+                }
+            }
+        }
 
+        // 已经铺完、且不再流式的条目：进度可以丢掉（预览本来就是全文）。
         self.shown
-            .retain(|idx, _| streaming.iter().any(|(i, _)| i == idx));
+            .retain(|idx, shown| match chat_history.get(*idx) {
+                Some(entry) => {
+                    entry.is_streaming == Some(true) || *shown < entry.content.chars().count()
+                }
+                None => false,
+            });
 
-        if streaming.is_empty() {
+        if targets.is_empty() {
             self.credit = 0.0;
             return false;
         }
 
         let mut progressed = false;
-        for (idx, total) in streaming {
+        for (idx, total) in targets {
             let shown = self.shown.entry(idx).or_insert(0);
             if *shown >= total {
                 continue;
@@ -149,15 +224,15 @@ impl TypewriterState {
                 1.0
             };
 
-            // 每帧至少推进 1 个字符：dt 为 0（同一毫秒内的连续 tick）时不能原地不动。
             self.credit += self.cps * factor * dt;
-            let step = self.credit.floor().max(1.0) as usize;
-            self.credit -= (step.max(1) - 1) as f32;
+            // 单帧步长有上限：任何一帧的视觉增量都是有界的。
+            let step = (self.credit.floor() as usize).clamp(1, MAX_CHARS_PER_FRAME);
+            self.credit = (self.credit - step as f32).max(0.0);
             *shown = (*shown + step).min(total);
             progressed = true;
         }
 
-        // 有进度才保留余量，避免空闲帧不断累积成一次“瞬移”。
+        // 有进度才保留余量，避免空闲帧不断累积成一次"瞬移"。
         if !progressed {
             self.credit = 0.0;
         }
@@ -215,6 +290,10 @@ mod tests {
         }
     }
 
+    /// 回归：流结束后**不**立刻丢弃进度 —— 剩下的字要按速率"落针"。
+    ///
+    /// 以前流一结束就 `flush`，剩余文字整块弹出（屏幕上最后一段"啪"一下出现）。
+    /// 现在进度保留，继续按同样的速率铺完；铺完之后预览自然回到全文。
     #[test]
     fn preview_returns_full_text_after_stream_ends() {
         let mut state = state_with_streaming("short");
@@ -222,9 +301,49 @@ mod tests {
         let mut tw = TypewriterState::new();
         tw.advance(&state.chat_history);
         state.chat_history[idx].is_streaming = Some(false);
+
+        // 落针阶段：预览仍是前缀，不是全文。
         tw.advance(&state.chat_history);
-        assert!(tw.shown(idx).is_none(), "流结束后进度必须丢弃");
-        assert_eq!(tw.preview(idx, "short"), Cow::Borrowed("short"));
+        let preview = tw.preview(idx, "short").into_owned();
+        assert!(
+            "short".starts_with(&preview),
+            "落针阶段预览必须是前缀：{preview:?}"
+        );
+
+        // 铺完之后回到全文。
+        let mut tw2 = TypewriterState::new();
+        tw2.cps = 1000.0;
+        for _ in 0..5 {
+            tw2.advance(&state.chat_history);
+        }
+        assert_eq!(
+            tw2.preview(idx, "short"),
+            Cow::Borrowed(&"short".to_string())
+        );
+    }
+
+    /// 大积压要加速追赶，但**单帧步长有上限**。
+    ///
+    /// 上限是"不闪屏"的硬保证：任何一帧的视觉增量都是有界的。
+    #[test]
+    fn large_backlog_is_caught_up_faster() {
+        let long = "x".repeat(4000);
+        let state = state_with_streaming(&long);
+        let idx = state.chat_history.len() - 1;
+        let mut tw = TypewriterState::new();
+        tw.cps = 30.0;
+        tw.advance(&state.chat_history);
+        let first = tw.shown(idx).unwrap();
+        // 一个正常帧（30fps ≈ 33ms）
+        tw.last_tick = Some(Instant::now() - std::time::Duration::from_millis(33));
+        tw.advance(&state.chat_history);
+        let second = tw.shown(idx).unwrap();
+        let advanced = second - first;
+        assert!(advanced > 1, "大积压必须加速追赶，实际只推进了 {advanced}");
+        assert!(
+            advanced <= MAX_CHARS_PER_FRAME,
+            "单帧步长必须有上限（否则又是一次'一块一块'）：{advanced}"
+        );
     }
 
     #[test]
@@ -236,23 +355,159 @@ mod tests {
         assert_eq!(tw.preview(1, "abc"), Cow::Borrowed("abc"));
     }
 
+    /// 大积压要加速追赶，但**单帧步长有上限**。
+    /// 回归：帧间隔再大，单帧也不能蹦出一大段。
+    ///
+    /// 打字机只在动画帧里推进，`last_tick` 记的是**上一次推进**的时刻。
+    /// 思考阶段（没有流式输出）不推进 → `last_tick` 停在几秒前 →
+    /// 流式一开始第一个 `dt` 是好几秒 → 整段话一帧全出来。
     #[test]
-    fn large_backlog_is_caught_up_faster() {
+    fn a_long_gap_does_not_release_a_big_block_at_once() {
         let long = "x".repeat(4000);
         let state = state_with_streaming(&long);
         let idx = state.chat_history.len() - 1;
         let mut tw = TypewriterState::new();
-        tw.cps = 30.0;
+        tw.cps = 90.0;
+        // 模拟"停了很久才收到第一块内容"：`last_tick` 是 10 秒前。
+        tw.last_tick = Some(Instant::now() - std::time::Duration::from_secs(10));
         tw.advance(&state.chat_history);
-        let first = tw.shown(idx).unwrap();
-        // 900ms 后，积压 4000 字符走 sprint 档位
-        tw.last_tick = Some(Instant::now() - std::time::Duration::from_millis(900));
-        tw.advance(&state.chat_history);
-        let second = tw.shown(idx).unwrap();
+        let shown = tw.shown(idx).expect("应有进度");
         assert!(
-            second - first > 100,
-            "大积压必须加速追赶，实际只推进了 {}",
-            second - first
+            shown <= MAX_CHARS_PER_FRAME,
+            "单帧揭示 {shown} 个字符，超出上限 {MAX_CHARS_PER_FRAME} —— 这就是'一块一块'"
+        );
+    }
+
+    /// 回归：收尾时不该把剩下的字整块弹出来。
+    ///
+    /// 流结束 → 进度进入"落针"阶段，按同样的速率铺完；铺完之前预览仍是前缀。
+    #[test]
+    fn the_tail_settles_instead_of_popping_in() {
+        let content = "y".repeat(500);
+        let mut state = state_with_streaming(&content);
+        let idx = state.chat_history.len() - 1;
+        let mut tw = TypewriterState::new();
+        tw.cps = 90.0;
+        tw.advance(&state.chat_history);
+        let before = tw.shown(idx).unwrap();
+
+        // 流结束（不再 streaming），但进度还在。
+        state.chat_history[idx].is_streaming = Some(false);
+        tw.advance(&state.chat_history);
+        let after = tw.shown(idx).expect("落针阶段应保留进度");
+        assert!(after > before, "落针阶段应继续推进：{before} -> {after}");
+        assert!(after < 500, "不能一次全铺完：{after}");
+        let preview = tw.preview(idx, &content).into_owned();
+        assert_eq!(
+            preview.chars().count(),
+            after,
+            "预览长度应等于进度（否则尾部会整块跳出）"
+        );
+    }
+
+    /// 回归：进度落完后自动回到全文（不能永远截着一截）。
+    #[test]
+    fn a_settled_entry_returns_the_full_text() {
+        let content = "z".repeat(30);
+        let mut state = state_with_streaming(&content);
+        let idx = state.chat_history.len() - 1;
+        let mut tw = TypewriterState::new();
+        tw.cps = 1000.0;
+        state.chat_history[idx].is_streaming = Some(false);
+        for _ in 0..10 {
+            tw.advance(&state.chat_history);
+        }
+        assert_eq!(tw.preview(idx, &content), Cow::Borrowed(&content));
+    }
+
+    /// 端到端：模拟"流式回答 + 中间插入工具结果"，记录每帧揭示的字符数。
+    ///
+    /// 帧间增量有界 = 不闪屏。旧实现里，工具结果插入后进度索引没跟着位移，
+    /// 下一帧直接返回全文 —— 这一帧的增量就是整段的长度。
+    #[test]
+    fn reveal_steps_stay_bounded_across_a_tool_call() {
+        let mut state = ChatState::test_fixture();
+        state.chat_history.clear();
+
+        // 索引 0：工具调用；索引 1：正在流式的助手消息
+        // （真实布局就是这样：工具结果插在工具调用后面，流式消息因此往后挪）
+        state.chat_history.push(ChatEntry::tool_call(
+            "call-1",
+            crate::types::StarToolCall {
+                id: "call-1".to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::StarToolCallFunction {
+                    name: "Read".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            },
+        ));
+        state.chat_history.push(
+            ChatEntry::assistant("第一段回答，解释这个项目怎么组织的。".to_string())
+                .with_streaming(true),
+        );
+
+        let mut tw = TypewriterState::new();
+        tw.cps = 90.0;
+
+        let mut steps: Vec<usize> = Vec::new();
+        let mut last_shown = 0usize;
+
+        // 阶段 1：流式内容一点点到达（每帧 33ms ≈ 30fps）
+        for _ in 0..12 {
+            state.chat_history[1]
+                .content
+                .push_str("又来了一些内容，继续写。");
+            tw.last_tick = Some(Instant::now() - std::time::Duration::from_millis(33));
+            tw.advance(&state.chat_history);
+            let shown = tw.shown(1).unwrap_or(0);
+            steps.push(shown.saturating_sub(last_shown));
+            last_shown = shown;
+        }
+
+        // 阶段 2：工具结果插到索引 1 → 流式消息索引变成 2
+        state.chat_history.insert(
+            1,
+            ChatEntry::tool_result(
+                "out",
+                crate::types::StarToolCall {
+                    id: "call-1".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::types::StarToolCallFunction {
+                        name: "Read".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                },
+                crate::types::ToolResult {
+                    success: true,
+                    output: Some("out".to_string()),
+                    error: None,
+                    data: None,
+                    llm_content: None,
+                },
+            ),
+        );
+        tw.shift_indices_after_insert(1);
+
+        // 阶段 3：继续流式（索引已变成 2）
+        for _ in 0..12 {
+            state.chat_history[2].content.push_str("工具之后的正文。");
+            tw.last_tick = Some(Instant::now() - std::time::Duration::from_millis(33));
+            tw.advance(&state.chat_history);
+            let shown = tw.shown(2).unwrap_or(0);
+            steps.push(shown.saturating_sub(last_shown));
+            last_shown = shown;
+        }
+
+        let max_step = steps.iter().copied().max().unwrap_or(0);
+        println!("每帧揭示字符数: {steps:?}");
+        assert!(
+            max_step <= MAX_CHARS_PER_FRAME,
+            "单帧最多揭示 {MAX_CHARS_PER_FRAME} 字，实际 {max_step} —— 这就是'一块一块'"
+        );
+        assert!(
+            last_shown > 0,
+            "插入工具结果后进度必须还在（否则整段会一帧蹦出）"
         );
     }
 }

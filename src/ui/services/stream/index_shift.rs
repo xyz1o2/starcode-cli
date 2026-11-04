@@ -26,6 +26,12 @@ pub(super) fn shift_index_caches_after_insert(state: &mut ChatState, pos: usize)
         state.last_item_heights.push(0);
     }
 
+    // 打字机进度按条目索引存 —— 必须跟着位移。
+    //
+    // 工具结果插在工具调用后面时，后面那条正在流式的消息索引 +1；进度不跟着移，
+    // `preview()` 就查不到它的进度 → 返回全文 → 整段话一帧蹦出来（"块状输出"）。
+    state.typewriter.shift_indices_after_insert(pos);
+
     // rendered_cache: HashMap<usize, (u16, Vec<Line>)>
     let remixed: std::collections::HashMap<usize, _> = state
         .rendered_cache
@@ -161,6 +167,9 @@ pub(super) fn remove_chat_entry_and_shift_indices(state: &mut ChatState, pos: us
             std::cmp::Ordering::Greater => Some((idx - 1, due)),
         };
     }
+
+    // 打字机进度同样按索引存 —— 跟着位移，否则进度会落到隔壁条目上。
+    state.typewriter.shift_indices_after_removal(pos);
 
     if pos < state.last_item_heights.len() {
         state.last_item_heights.remove(pos);

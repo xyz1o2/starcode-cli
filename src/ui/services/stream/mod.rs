@@ -208,9 +208,13 @@ pub(crate) fn finalize_entry_streaming(state: &mut ChatState, idx: usize) {
     }
     state.rendered_cache.remove(&idx);
     state.virtual_list.mark_dirty(idx);
-    // 流结束了，打字机必须立刻交还全文：剩下的字符已经全部收到，
-    // 继续逐字揭示只会让"已完成"的消息在屏幕上还缺一截。
-    state.typewriter.flush(idx);
+    // 注意：**不**丢弃打字机进度。
+    //
+    // 以前这里 `typewriter.flush(idx)` —— 流一结束就把剩余文字整块弹出来，
+    // 屏幕上最后一段是"啪"一下出现的。正确做法是让打字机继续按同样的速率把
+    // 剩下的字"落针"完（见 `TypewriterState::advance` 的 settle 分支），
+    // 铺满之后进度自然被丢掉，预览回到全文。
+    //
     // 思考结束 → 延迟收起成一行收据（用户手动干预过的块不动）。
     if had_reasoning {
         state.schedule_thinking_collapse(idx);
