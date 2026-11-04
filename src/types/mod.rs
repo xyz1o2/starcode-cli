@@ -128,6 +128,14 @@ pub struct ChatEntry {
     /// on completed thinking blocks while new blocks are still streaming.
     #[serde(skip)]
     pub reasoning_finished_elapsed_ms: Option<u128>,
+    /// 思考块**开始**的时刻，用于流式期间的实时计时（"Thinking 5s…"）。
+    ///
+    /// 为什么不能用 `reasoning_finished_elapsed_ms`：那是结束时刻冻结的值，
+    /// 流式期间它还是 `None`，于是进行中的思考块没有耗时可显示。而回合级的
+    /// `state.thinking_started_at` 也不够用 —— 一轮里可能有多个思考块
+    /// （工具调用前后各一个），它们各自的开始时刻不同。
+    #[serde(skip)]
+    pub reasoning_started_at: Option<std::time::Instant>,
     // Transient welcome header — never persisted to session files
     #[serde(skip)]
     pub is_welcome: bool,
@@ -220,6 +228,7 @@ impl ChatEntry {
             confirmation: None,
             reasoning_content: None,
             reasoning_finished_elapsed_ms: None,
+            reasoning_started_at: None,
             is_welcome: false,
             // 新增字段
             collapsed_entries: None,
@@ -1335,10 +1344,14 @@ pub enum ToolConfirmationOutcome {
 
 /// 只读"查询类"工具：命中后可免确认直接执行（对标 Claude Code 的只读工具集）。
 ///
-/// 只认注册名 —— 调用方在进入策略引擎前已由 `canonical_tool_name` 归一。
+/// 名字先归一到**注册名**再比对 —— 策略引擎拿到的是模型原样发出的名字
+/// （`read` / `bash` 这类全小写写法都出现过），不归一的话只读工具会因为
+/// 大小写不同而被当成"要确认的工具"。
+///
+/// 只认注册名 —— 旧的下划线写法不是别名，是拼错的名字。
 pub fn is_safe_query_tool(tool_name: &str) -> bool {
     matches!(
-        tool_name,
+        crate::core::tools::constants::resolve_registered_tool_name(tool_name),
         "Read"
             | "ReadManyFiles"
             | "LS"

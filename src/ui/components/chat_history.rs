@@ -109,6 +109,12 @@ pub struct DocumentKey {
     content_fingerprint: u64,
     expanded_tool_calls: usize,
     expanded_thinking: usize,
+    /// 思考块的手动展开覆盖（index → 展开与否）。
+    ///
+    /// 必须进 key：自动展开/收起的判定不只看 `expanded_thinking_indices`，
+    /// 还看这张表（手动意图压过自动化）。表变了而 key 没变 → 屏幕不刷新，
+    /// 症状是"点了没反应"。
+    thinking_manual_override: Vec<(usize, bool)>,
     transcript_mode: bool,
     pending_confirmation_choice: usize,
     confirmation_feedback_mode: bool,
@@ -161,6 +167,16 @@ impl DocumentKey {
             content_fingerprint: fingerprint,
             expanded_tool_calls: state.expanded_tool_call_ids.len(),
             expanded_thinking: state.expanded_thinking_indices.len(),
+            thinking_manual_override: {
+                let mut overrides: Vec<(usize, bool)> = state
+                    .thinking_manual_override
+                    .iter()
+                    .map(|(idx, expanded)| (*idx, *expanded))
+                    .collect();
+                // HashMap 迭代顺序不定 → 排序后再进 key，否则同一状态会算出不同的 key。
+                overrides.sort_unstable();
+                overrides
+            },
             transcript_mode: state.is_transcript_mode,
             pending_confirmation_choice: state.pending_confirmation_choice,
             confirmation_feedback_mode: state.confirmation_feedback_mode,

@@ -13,8 +13,8 @@ impl ToolUseSummaryGenerator {
         output: Option<&str>,
     ) -> Option<String> {
         // 入口归一：内部只匹配注册名，别名由 constants 统一处理
-        let tool_name = crate::core::tools::constants::canonical_tool_name(tool_name);
-        let summary = match tool_name.as_str() {
+        let tool_name = crate::core::tools::constants::resolve_registered_tool_name(tool_name);
+        let summary = match tool_name {
             "Bash" => {
                 if let Some(command) = input.get("command").and_then(|v| v.as_str()) {
                     let short_cmd = crate::utils::string_utils::truncate_with_ellipsis(command, 50);
@@ -115,8 +115,8 @@ impl ToolContentEventRecorder {
         let mut attributes = HashMap::new();
 
         // 入口归一：内部只匹配注册名
-        let tool_name = crate::core::tools::constants::canonical_tool_name(tool_name);
-        match tool_name.as_str() {
+        let tool_name = crate::core::tools::constants::resolve_registered_tool_name(tool_name);
+        match tool_name {
             "Read" => {
                 if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
                     attributes.insert("file_path".to_string(), path.to_string());
@@ -532,7 +532,7 @@ impl ToolExecutionEnhancer {
 
         // 5. 提取Git commit ID（如果是git commit）
         let mut git_commit_id = None;
-        if tool_name == "Bash" {
+        if crate::core::tools::constants::resolve_registered_tool_name(tool_name) == "Bash" {
             if let Some(command) = input.get("command").and_then(|v| v.as_str()) {
                 if command.contains("git commit") {
                     if let Some(output_str) = output.get("output").and_then(|v| v.as_str()) {

@@ -217,7 +217,10 @@ impl AutoModeClassifier {
 
     /// 本地规则快速检查（零 LLM 开销）
     fn local_rule_check(&self, tool_name: &str, tool_params: &Value) -> Option<ClassifierResult> {
-        // 读取类工具直接放行（入口已由 canonical_tool_name 归一到注册名）
+        // 工具名先归一到注册名：模型偶尔写成全小写（`read` / `bash`），
+        // 归一之后下面的 arm 只写注册名。
+        let tool_name = crate::core::tools::constants::resolve_registered_tool_name(tool_name);
+        // 读取类工具直接放行
         if matches!(
             tool_name,
             "Read" | "ReadManyFiles" | "Grep" | "Glob" | "LS" | "CodebaseSearch"

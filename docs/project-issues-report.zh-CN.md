@@ -93,6 +93,49 @@
 
 已改为兼容单条 todo 对象、`items/tasks/task_list/todo_list` 别名、缺省 status/activeForm 和条目级额外字段；顶层旧式 `operation` envelope 仍拒绝，错误信息带可复制 JSON 形状。
 
+### P1：工具折叠摘要与展开正文取自不同字段，计数互相矛盾
+
+**表现**：`glob(dir_path=..., pattern=**/*.svg)` 折叠态写 `Found 1 file`，点开却是"没找到"；`LS` 折叠态的文件数把表头和分割线也算进去了。
+
+**原因**：折叠摘要走 `tr.output` 的**非空行计数**，而这个数字和工具的真实结果量没关系：
+
+- `Glob` 空结果时 UI 侧 output 是单行 `"No files found"` → 被数成 1 个文件；
+- `Glob` 有命中时 UI 侧 output 是分组树（`"1 files\n  a.svg"`）→ 2 行 → 被数成 2 个文件；
+- `LS` 的 output 是表格（表头 + 分割线 + 条目 + `Total: N items`）→ 行数远多于条目数。
+
+这与之前修掉的 `Grep`（`"No results found"` 被写成 `Found 1 matches`）是同一类缺陷：摘要不看工具自己写的权威数字，只去数正文行。
+
+**已修复**：
+
+- `Glob` 折叠摘要改用 `tool_result.data` 里的真实文件列表计数（`data` 就是 `found_file_paths`），无 `data` 时退回解析输出头部的 `{count} files` / `Found N file(s)`；
+- `Glob` 空结果显示 `No files`，不再显示 `Found 1 file`；
+- `LS` 折叠摘要读末行 `Total: N items`，空目录显示 `Empty`，解析不出总数时退回通用预览而不编造数字；
+- 新增 `count_glob_paths_in_output` / `parse_ls_total_items` / `is_empty_directory_notice` 三个解析函数。
+
+**验证**：`src/core/tools/glob.rs` 新增真实工具集成测试（命中时 `data` 必须是路径数组；空结果时 output 必须是 `No files found` 且 `data` 为 `None`），`src/ui/components/tool_render.rs` 新增 5 个渲染回归测试。
+
+### P1：内部路由收据泄漏到用户可见输出
+
+**表现**：助手消息里出现 `[ROUTE] referee | workflow=project-analysis | stages=... | primary=...`，把工具轨迹和最终回答割裂开。
+
+**原因**：模型的上层提示要求每次回复输出路由收据，模型把它当普通正文返回；项目侧没有任何提示词要求输出它，也没有拦截它。源码检索确认 `src/core/prompts/**` 与 `src/**` 中都不存在该模板。
+
+**已修复**：在 `src/core/prompts/system-prompts/system-prompt-core-identity.md` 的 COMMUNICATION RULES 里明确禁止输出内部路由字段。
+
+**边界**：这是提示词层约束，不是硬过滤。若上层提示词再次要求输出该格式，仍会复现；彻底方案是把路由收据移出模型的可见输出通道（例如只写入 debug 日志）。
+
+### P1：空 reasoning 也创建 ChatEntry，产生空的 `Thought` 块
+
+**表现**：工具调用前后各出现一次 `∴ Thought (ctrl+o to expand)`，但展开后没有内容。
+
+**原因**：`StreamMessage::ReasoningDelta` / `Thinking` 的处理分支先创建 `ChatEntry::assistant("").with_reasoning("")` 再追加正文；provider 发空 delta（心跳/过渡标记）时，就会留下一个 `reasoning_content = Some("")` 的条目。渲染层又用"有 reasoning_content **或**正在 streaming"作为显示条件，于是空块被画出来。
+
+**已修复**：
+
+- 空 reasoning delta 直接丢弃，不创建条目；
+- 渲染层只在 reasoning 正文非空时渲染 `Thought`；
+- 冻结耗时也改为要求正文非空，避免空块显示假耗时。
+
 ## 3. 配置与默认值问题
 
 当前 Thinking、Context Window、Language、Approval Mode 的默认值总体合理，但 `Auto` 的来源不透明。设置菜单建议显示：

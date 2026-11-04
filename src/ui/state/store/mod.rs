@@ -38,6 +38,22 @@ pub struct ChatState {
     pub chat_scrollbar_state: ScrollbarState,
     pub expanded_tool_call_ids: HashSet<String>,
     pub expanded_thinking_indices: HashSet<usize>,
+    /// 用户对思考块展开状态的**手动干预**记录。
+    ///
+    /// 三态而不是布尔：
+    /// - `None`：用户没管过 → 跟随自动行为（流式中自动展开、结束后自动收起）；
+    /// - `Some(true)`：用户手动展开过 → 永远保持展开，自动化不许把它收起；
+    /// - `Some(false)`：用户手动收起过 → 永远保持收起，自动化不许把它撑开。
+    ///
+    /// 业界一致做法（Claude Code / Cursor / CopilotKit / Neon UI）：手动意图
+    /// 永远压过自动化。只用一个 `HashSet` 记"展开了哪些"是做不到这件事的 ——
+    /// 自动化展开后无法区分"用户要的"和"自动撑开的"，下一轮就会把它收掉。
+    pub thinking_manual_override: HashMap<usize, bool>,
+    /// 思考块流式结束的时刻，用于延迟自动收起。
+    ///
+    /// 结束时**立刻**收起会让用户看不到推理的最后一段（模型往往在最后几句
+    /// 才写出结论）；延迟约 800ms 让这一眼落地，再收成一行收据。
+    pub thinking_collapse_at: Option<(usize, std::time::Instant)>,
     pub complete_task_message_ids: HashSet<u64>,
     pub auto_continued_message_ids: HashSet<u64>,
     pub pending_user_messages: VecDeque<String>,
@@ -746,6 +762,8 @@ impl ChatState {
             chat_scrollbar_state: ScrollbarState::default(),
             expanded_tool_call_ids: HashSet::new(),
             expanded_thinking_indices: HashSet::new(),
+            thinking_manual_override: HashMap::new(),
+            thinking_collapse_at: None,
             complete_task_message_ids: HashSet::new(),
             auto_continued_message_ids: HashSet::new(),
             pending_user_messages: VecDeque::new(),
@@ -1153,6 +1171,110 @@ impl ChatState {
         }
     }
 
+    /// 思考块是否展开 —— **唯一的判定入口**。
+    ///
+    /// 优先级（从高到低）：
+    /// 1. transcript 模式：整轮原始输出摊开，所有思考块都展开；
+    /// 2. 用户手动干预过：用户说什么就是什么，自动化不许改；
+    /// 3. 流式进行中：自动展开，让用户实时看到推理正文；
+    /// 4. 其余：收起成一行收据。
+    ///
+    /// 以前"是否展开"散在渲染层里就地算（`is_transcript_mode ||
+    /// expanded_thinking_indices.contains(&idx)`），自动行为无处安放 ——
+    /// 这就是"只能看到它在思考"的原因：折叠是唯一的常态，推理正文永远藏着。
+    pub fn is_thinking_expanded(&self, entry_idx: usize, is_streaming: bool) -> bool {
+        if self.is_transcript_mode {
+            return true;
+        }
+        if let Some(&manual) = self.thinking_manual_override.get(&entry_idx) {
+            return manual;
+        }
+        if is_streaming {
+            return true;
+        }
+        self.expanded_thinking_indices.contains(&entry_idx)
+    }
+
+    /// 用户手动切换某个思考块的展开状态。
+    ///
+    /// 记录进 `thinking_manual_override` 后，自动行为对这个块永久失效：
+    /// 用户展开过就一直展开，收起过就一直收起 —— 除非整轮 transcript 模式
+    /// 把它强制摊开（那是"看全部原始输出"，语义上高于单块偏好）。
+    pub fn toggle_thinking_expansion(&mut self, entry_idx: usize) -> bool {
+        // 当前状态必须问**同一个**判定入口，且带上这个条目自己的流式状态：
+        // 流式期自动展开的块，手工"收起"才算数；把 is_streaming 写死成 false
+        // 会把自动展开误判成"折叠"，于是一次点击反而把块撑开 —— 用户的直觉
+        // （点一下收起来）被反转。
+        let is_streaming = self
+            .chat_history
+            .get(entry_idx)
+            .map(|entry| entry.is_streaming == Some(true))
+            .unwrap_or(false);
+        let currently_expanded = self.is_thinking_expanded(entry_idx, is_streaming);
+        if currently_expanded {
+            self.expanded_thinking_indices.remove(&entry_idx);
+            self.thinking_manual_override.insert(entry_idx, false);
+        } else {
+            self.expanded_thinking_indices.insert(entry_idx);
+            self.thinking_manual_override.insert(entry_idx, true);
+        }
+        // 手动干预后，自动收起的定时器对它失去意义。
+        if self
+            .thinking_collapse_at
+            .is_some_and(|(idx, _)| idx == entry_idx)
+        {
+            self.thinking_collapse_at = None;
+        }
+        self.clear_cache();
+        currently_expanded
+    }
+
+    /// 流式开始：思考块自动展开。
+    ///
+    /// 实时看到推理正文，是"知道模型在想什么"和"只知道模型在想"的分界。
+    /// 用户手动收起过的块保持收起 —— 否则用户刚按下去就被撑开，等于没有这个开关。
+    pub fn auto_expand_thinking(&mut self, entry_idx: usize) {
+        if self.thinking_manual_override.contains_key(&entry_idx) {
+            return;
+        }
+        self.expanded_thinking_indices.insert(entry_idx);
+        self.clear_cache();
+    }
+
+    /// 标记某个思考块"流式已结束"，等延迟到了再自动收起。
+    ///
+    /// 延迟是为了让用户看清推理的最后一段 —— 很多模型是在最后几句才写出
+    /// 结论，立刻收起会把结论藏掉。
+    pub fn schedule_thinking_collapse(&mut self, entry_idx: usize) {
+        if self.thinking_manual_override.contains_key(&entry_idx) {
+            return;
+        }
+        self.thinking_collapse_at = Some((entry_idx, Instant::now()));
+    }
+
+    /// 每帧调用：延迟到期就收起对应的思考块。
+    ///
+    /// 返回是否真的收起了一块（收起是可见的布局变化，调用方要重绘）。
+    pub fn tick_thinking_collapse(&mut self) -> bool {
+        let Some((idx, due)) = self.thinking_collapse_at else {
+            return false;
+        };
+        if Instant::now() < due + THINKING_AUTO_COLLAPSE_DELAY {
+            return false;
+        }
+        self.thinking_collapse_at = None;
+        if self.thinking_manual_override.contains_key(&idx) {
+            // 用户手动干预过：不收，但这次自动收起就此结束。
+            return false;
+        }
+        let was_expanded = self.expanded_thinking_indices.remove(&idx);
+        if was_expanded {
+            self.clear_cache();
+            return true;
+        }
+        false
+    }
+
     /// 切换 transcript（verbose 输出）模式，返回切换后的状态。
     ///
     /// 对标 Claude Code 的 `app:toggleTranscript`：transcript 视图是「把这一轮的全部原始
@@ -1171,7 +1293,11 @@ impl ChatState {
                 }
             }
         } else {
-            self.expanded_thinking_indices.clear();
+            // 关掉 transcript 时不能把"用户手动展开的块"一起收掉 ——
+            // transcript 是"看全部原始输出"，关掉它不等于取消用户对某一块的
+            // 展开偏好。手动覆盖过的块保留原状。
+            self.expanded_thinking_indices
+                .retain(|idx| self.thinking_manual_override.get(idx) == Some(&true));
         }
         self.clear_cache();
         self.is_transcript_mode
@@ -1249,7 +1375,8 @@ impl ChatState {
         // 走统一归一，避免别名漏判（对标 constants::is_edit_tool_name）
         let is_edit_tool =
             crate::core::tools::constants::is_edit_tool_name(tc.function.name.as_str())
-                || tc.function.name == "TodoWrite";
+                || crate::core::tools::constants::resolve_registered_tool_name(&tc.function.name)
+                    == "TodoWrite";
         is_edit_tool ^ self.expanded_tool_call_ids.contains(&tc.id)
     }
 
@@ -1291,7 +1418,8 @@ impl ChatState {
         let Some(tc) = entry.tool_call.as_ref() else {
             return false;
         };
-        crate::core::tools::constants::canonical_tool_name(&tc.function.name) != "TodoWrite"
+        crate::core::tools::constants::resolve_registered_tool_name(&tc.function.name)
+            != "TodoWrite"
     }
 
     /// 折叠 / 展开一个工具块，返回是否真的切换了。

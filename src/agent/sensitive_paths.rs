@@ -205,6 +205,7 @@ pub fn guard_hit(tool_name: &str, args: &serde_json::Value) -> Option<&'static s
     if !enabled() || args.is_null() {
         return None;
     }
+    let tool_name = crate::core::tools::constants::resolve_registered_tool_name(tool_name);
     if tool_name == "Bash" || tool_name == "RunTests" {
         if let Some(command) = args.get("command").and_then(|v| v.as_str()) {
             return command_hit(command);

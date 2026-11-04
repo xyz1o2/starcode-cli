@@ -146,7 +146,7 @@ impl StreamingToolExecutor {
 
     /// 检查是否是Bash工具（只认注册名；入口已由 canonical_tool_name 归一）
     fn is_bash_tool(tool_name: &str) -> bool {
-        tool_name == "Bash"
+        crate::core::tools::constants::resolve_registered_tool_name(tool_name) == "Bash"
     }
 
     /// 获取取消原因

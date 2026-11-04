@@ -60,12 +60,9 @@ pub(crate) fn render_non_tool_entry_blocks(
                 //
                 // 现在：有任何非空正文就渲染（只有 "empty" 这种占位串除外）。
                 //
-                // 外加一条**粘住**规则：流式期间块必须一直在。推理刚开始时正文
-                // 还没到（reasoning_content = Some("")），或者流在两段之间短暂
-                // 归零——那两种时刻一旦不渲染，块就会"消失 → 又出现"，正是
-                // 肉眼看到的抖动。
-                let is_meaningful = (!reasoning_trimmed.is_empty() && reasoning_trimmed != "empty")
-                    || is_streaming_now;
+                // 只有实际收到正文才渲染 thinking；空的 provider 占位不会生成
+                // 一个用户可见的 Thought 标题。
+                let is_meaningful = !reasoning_trimmed.is_empty() && reasoning_trimmed != "empty";
 
                 if is_meaningful {
                     // thinking 折叠头（含 `∴ Thought for Xs` 耗时标签）一旦出现就保留
@@ -77,8 +74,7 @@ pub(crate) fn render_non_tool_entry_blocks(
                     // 在哪。窗口移除后统一为"始终可见"。
                     //
                     // 折叠态只占一行；想看正文用 Ctrl+O / Tab 切展开模式。
-                    let is_expanded = state.is_transcript_mode
-                        || state.expanded_thinking_indices.contains(&entry_idx);
+                    let is_expanded = state.is_thinking_expanded(entry_idx, is_streaming_now);
 
                     // 间距规则（对标 Claude Code：只有"块的顶部 margin"一个所有者）：
                     // thinking 块前不另加空行 — entry 级 leading blank 已提供分隔，
@@ -99,15 +95,15 @@ pub(crate) fn render_non_tool_entry_blocks(
                         Style::default().fg(theme.inactive)
                     };
 
-                    // 头部随状态变化。这里只剩两种形态：
-                    // 已完成   → `∴ Thought for 14s`（折叠态补展开提示）
-                    // 取消中   → `∴ Canceling…`（展开态用）
+                    // 头部随状态变化。三种形态：
+                    // 进行中   → `∴ Thinking 5s…`（计时器实时走动）
+                    // 已完成   → `∴ Thought for 14s`
+                    // 取消中   → `∴ Canceling…`
                     //
-                    // "思考中 → `∴ Thinking…`" 这一支已被删掉：实时状态由紧贴输入框的
-                    // spinner 行独家承担（`⠹ Spelunking… (18s · esc to interrupt)`），
-                    // 而这一行此前是 primary + 粗斜体、比状态行响得多。同一个"思考中"
-                    // 在屏上说了两遍、两套权重、两种措辞，而用户只需要一个"现在"。
-                    // 正文该留下的，是思考**结束后**的记录。
+                    // 进行中为什么也带耗时：只写"Thinking…"的话，用户看不出模型
+                    // 是在推进还是卡住了 —— 一行实时走动的时间（"Thinking 12s…"）
+                    // 才能区分"想得久"和"卡住了"。业界一致做法（Cursor /
+                    // Backstage 的 `"Thinking ${elapsedSeconds}s…"`）。
                     let header_text = if cancelling {
                         format!(
                             "{}…",
@@ -128,21 +124,27 @@ pub(crate) fn render_non_tool_entry_blocks(
                                 ),
                                 format_thinking_duration(ms),
                             ),
-                            // 进行中：现在态 + 省略号。
+                            // 进行中：现在态 + 实时耗时。
                             //
-                            // 以前这里是光秃秃的 "Thinking" —— 既不像现在（没有
-                            // 进行中的标记），也不像完成后的记录（没有过去式），
-                            // 读起来含糊。而同一个"思考中"已经由紧贴输入框的
-                            // spinner 行独家承担（`⠹ Spelunking… (18s · esc)`），
-                            // 正文这一行只需要说清"这是进行中的思考"。
-                            None if is_streaming_now => format!(
-                                "{}…",
-                                crate::core::i18n::t(
+                            // 耗时基准是**这个块自己的**开始时刻
+                            // （`reasoning_started_at`），不是回合起点 ——
+                            // 一轮里有多个思考块时，用回合起点会让每个块都显示
+                            // 同一个"从回合开始算"的时间。
+                            None if is_streaming_now => {
+                                let label = crate::core::i18n::t(
                                     "ui.thinking.in_progress",
                                     "思考中",
-                                    "Thinking"
-                                )
-                            ),
+                                    "Thinking",
+                                );
+                                match entry.reasoning_started_at {
+                                    Some(started) => format!(
+                                        "{} {}…",
+                                        label,
+                                        format_thinking_duration(started.elapsed().as_millis())
+                                    ),
+                                    None => format!("{label}…"),
+                                }
+                            }
                             // 历史会话恢复的条目既没有冻结耗时、也不在流式里 ——
                             // 用过去态，别让它永远停在 "Thinking"。
                             None => crate::core::i18n::t("ui.thinking.past", "思考过", "Thought"),
@@ -1109,22 +1111,19 @@ mod tests {
         assert!(completed.contains("Thought for 14s"), "{:?}", completed);
         assert!(completed.contains("(ctrl+o to expand)"), "{:?}", completed);
 
-        // 流式态：折叠中的思考块 —— 进行态标签 + **同样带展开提示**。
+        // 流式态：**自动展开**，正文直接可见。
         //
-        // 标题结构必须恒定：以前进行中是不带提示的短占位符（"∴ Thinking"），
-        // 完成瞬间才补上 "  (ctrl+o to expand)" —— 行宽从 11 列暴涨到 ~39 列，
-        // 窄终端当场折行 → 文档高度 +1 → 视口整体下移（用户看到的"闪屏"）。
+        // 旧契约是"流式期永远折叠、只留一行占位"，于是用户只能看到
+        // "模型在想"，看不到"模型在想什么"。现在流式期间自动展开：
+        // 标题带实时耗时，正文逐字流出。
         state.chat_history[idx].is_streaming = Some(true);
         state.chat_history[idx].reasoning_finished_elapsed_ms = None;
+        state.chat_history[idx].reasoning_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
         let streaming = header_of(&state);
         assert!(
             streaming.contains("Thinking"),
-            "流式中折叠态应显示进行态标签，实际 {:?}",
-            streaming
-        );
-        assert!(
-            streaming.contains("ctrl+o"),
-            "进行中也要带展开提示（标题结构恒定），实际 {:?}",
+            "流式中应显示进行态标签，实际 {:?}",
             streaming
         );
         assert!(
@@ -1132,16 +1131,110 @@ mod tests {
             "流式中不得伪造耗时，实际 {:?}",
             streaming
         );
+        // 进行中的标题带实时耗时（"Thinking 5s…"），这是"在推进 vs 卡住了"的
+        // 唯一可辨信号。
+        assert!(
+            streaming.contains("5s"),
+            "流式中应显示实时耗时，实际 {:?}",
+            streaming
+        );
 
+        // 流式期自动展开 → 正文可见，块不止一行。
         let blocks = render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, 70, false);
-        assert_eq!(
-            blocks.len(),
-            1,
-            "折叠 + 流式时整个思考块只有占位符一行，实际 {:?}",
-            blocks
+        let body: String = blocks
+            .iter()
+            .flat_map(|b| b.iter())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            body.contains("first step"),
+            "流式期自动展开，推理正文必须可见，实际 {:?}",
+            body
         );
     }
 
+    /// 视觉核对：把 thinking 块的三种状态真渲染出来看一眼。
+    ///
+    /// 断言只能证明"某段文字在不在"，证明不了**排版**对不对 ——
+    /// 而这次改动的全部价值都在排版上（正文是否可见、标签是否像话）。
+    /// 跑 `cargo test --lib thinking_states_look_right -- --nocapture` 看输出。
+    #[test]
+    fn thinking_states_look_right() {
+        fn render(state: &crate::ui::state::ChatState, idx: usize) -> String {
+            let blocks =
+                render_non_tool_entry_blocks(state, &state.chat_history[idx], idx, 76, false);
+            blocks
+                .iter()
+                .flat_map(|b| b.iter())
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        let mut state = crate::ui::state::ChatState::new();
+        state.chat_history.clear();
+
+        // 状态 1：流式中（自动展开 + 实时耗时）
+        let mut streaming = crate::types::ChatEntry::assistant("这是最终回答。");
+        streaming.reasoning_content = Some("先看看项目结构。\n\n再确认工具调用。".to_string());
+        streaming.is_streaming = Some(true);
+        streaming.reasoning_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(7));
+        state.chat_history.push(streaming);
+        let streaming_idx = state.chat_history.len() - 1;
+
+        // 状态 2：已完成 + 自动收起
+        let mut done = crate::types::ChatEntry::assistant("已经想完了。");
+        done.reasoning_content = Some("推理正文在这里。".to_string());
+        done.reasoning_finished_elapsed_ms = Some(14_000);
+        state.chat_history.push(done);
+        let done_idx = state.chat_history.len() - 1;
+
+        // 状态 3：历史恢复（无耗时基准）
+        let mut restored = crate::types::ChatEntry::assistant("恢复的历史。");
+        restored.reasoning_content = Some("旧会话里的推理。".to_string());
+        state.chat_history.push(restored);
+        let restored_idx = state.chat_history.len() - 1;
+
+        // 每一态都在**当场**取渲染结果 —— 末尾统一拼的话，状态 1 会显示成
+        // 手动收起之后的样子（同一个字符串取两次），看不出差别。
+        let s1 = render(&state, streaming_idx);
+        let s2 = render(&state, done_idx);
+        let s3 = render(&state, restored_idx);
+
+        // 状态 4：用户手动收起后（流式中也不被撑开）
+        state.toggle_thinking_expansion(streaming_idx);
+        let s4 = render(&state, streaming_idx);
+
+        // 状态 5：完成态手动展开（想重看推理）
+        state.toggle_thinking_expansion(done_idx);
+        let s5 = render(&state, done_idx);
+
+        println!("\n════ 状态 1：流式中（自动展开）════\n{s1}");
+        println!("\n════ 状态 2：已完成（自动收起成一行收据）════\n{s2}");
+        println!("\n════ 状态 3：历史恢复（无耗时基准）════\n{s3}");
+        println!("\n════ 状态 4：用户手动收起后（流式中）════\n{s4}");
+        println!("\n════ 状态 5：完成态手动展开 ════\n{s5}");
+
+        // 控制台对多字节字符的处理不可靠 —— 落盘一份 UTF-8 原文便于肉眼核对。
+        let dump = format!(
+            "状态 1：流式中（自动展开）\n{s1}\n\n状态 2：已完成（自动收起成一行收据）\n{s2}\n\n状态 3：历史恢复（无耗时基准）\n{s3}\n\n状态 4：用户手动收起后（流式中）\n{s4}\n\n状态 5：完成态手动展开\n{s5}\n",
+        );
+        let _ = std::fs::write(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/thinking_states.txt"),
+            dump,
+        );
+    }
     /// 恢复的历史思考块（serde skip → finished_at/elapsed 均为 None）：
     /// 必须保持折叠可见、头部是普通 "Thinking"，绝不能被冻结成
     /// "Thought for 1s"（finalize 无时钟基准时的旧 bug）。

@@ -570,6 +570,15 @@ pub async fn run_ui_loop(
             }
             needs_redraw = true;
         }
+        // 思考块的延迟自动收起。
+        //
+        // 挂在**动画**分支外面而不是 `animating` 里面：收起有 800ms 延迟，
+        // 等待期间可能已经没有动画在跑（模型已经输出完正文），那时
+        // `is_animating` 为 false，这一帧不会推进。但收起是用户可见的
+        // 布局变化，必须重绘 —— 所以在这里单独 tick 并置位 `needs_redraw`。
+        if state.tick_thinking_collapse() {
+            needs_redraw = true;
+        }
 
         if needs_redraw {
             // Ctrl+L clear screen request

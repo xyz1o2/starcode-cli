@@ -109,9 +109,10 @@ fn extract_value_from_kv_like(raw: &str, key: &str) -> Option<String> {
 }
 
 pub fn tool_display_name(name: &str) -> String {
-    // 入口归一：内部只匹配注册名，别名由 constants 统一处理
-    let name = crate::core::tools::constants::canonical_tool_name(name);
-    match name.as_str() {
+    // 解析到注册名：大小写漂移（模型偶尔写成 `todowrite`）在入口一次性纠正，
+    // 下面的 arm 只写注册名（PascalCase），不写小写变体。
+    let name = crate::core::tools::constants::resolve_registered_tool_name(name);
+    match name {
         "Read" => "view".into(),
         "Bash" => "bash".into(),
         "LS" => "ls".into(),
@@ -119,21 +120,21 @@ pub fn tool_display_name(name: &str) -> String {
         "Glob" => "glob".into(),
         "Edit" | "SmartEdit" | "MultiEdit" => "edit".into(),
         "Write" => "write".into(),
+        // `complete_task` 不是内置注册名（内置的是 `TaskUpdate` 等），
+        // 它是外部插件提供的工具名 —— 按原样匹配。
         "complete_task" => "done".into(),
         "TodoWrite" => "Update Todos".into(),
         "EnterPlanMode" | "ExitPlanMode" => "plan".into(),
-        "ask_user" | "user_prompt" => "ask".into(),
         // CodebaseSearch / ProjectMap 保持 PascalCase 注册名：显示形态必须和
         // schema、文档、routing matrix 里的叫法一致（用户点名的是
         // "codebase search" 里的那个空格）。
-        _ => name,
+        _ => name.to_string(),
     }
 }
 
 fn tool_call_brief(tc: &StarToolCall) -> String {
-    // 入口归一：内部只匹配注册名，别名由 constants 统一处理
-    let canonical = crate::core::tools::constants::canonical_tool_name(&tc.function.name);
-    let name = canonical.as_str();
+    // 解析到注册名：大小写漂移在入口一次性纠正，下面的 arm 只写注册名。
+    let name = crate::core::tools::constants::resolve_registered_tool_name(&tc.function.name);
     let raw_args = tc.function.arguments.as_str();
 
     // Key fix: if args look like XML/DSML format (contain DSML tags), return brief tool name

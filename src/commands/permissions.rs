@@ -448,14 +448,7 @@ fn usage_for_bucket(verb: &str) -> String {
 /// 注册名是 PascalCase，但用户手输常常是全小写 —— 折叠大小写后统一归到
 /// 注册名，落盘的规则才匹配得到工具调用。
 fn normalize_tool_name(raw: &str) -> String {
-    let raw = raw.trim();
-    let canonical = crate::core::tools::constants::canonical_tool_name(raw);
-    if canonical != raw {
-        return canonical;
-    }
-    crate::core::tools::constants::find_builtin_tool_name(raw)
-        .map(|name| name.to_string())
-        .unwrap_or_else(|| raw.to_string())
+    crate::core::tools::constants::resolve_registered_tool_name(raw.trim()).to_string()
 }
 
 /// 模式别名复用 `settings_rules` 那一份（和 `defaultMode`、`--permission-mode` 同源），

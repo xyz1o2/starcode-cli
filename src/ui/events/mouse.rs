@@ -128,7 +128,12 @@ pub(crate) fn try_toggle_on_click(state: &mut ChatState, entry_idx: usize, row: 
         // 那行"∴ Thinking…"看得见却点不动 —— 点了没反应，用户只会当成卡住。
         let block_visible = !reasoning.is_empty() || entry.is_streaming == Some(true);
         if block_visible {
-            let is_expanded = state.expanded_thinking_indices.contains(&entry_idx);
+            // 展开状态问的是**同一个**判定入口（`is_thinking_expanded`）：
+            // 流式期间块是自动展开的，单看 `expanded_thinking_indices` 会
+            // 得出"折叠"的结论，于是点一下反而变成"展开"（其实早就展开着），
+            // 用户的直觉（点一下收起来）被反转。
+            let is_expanded =
+                state.is_thinking_expanded(entry_idx, entry.is_streaming == Some(true));
             // 思考块折叠时只渲染 1 行标题："∴ Thought for 14s  (ctrl+o to expand)"
             // 点击这一行（row 0）应该展开；展开后点任意行都收起。
             //
@@ -142,11 +147,9 @@ pub(crate) fn try_toggle_on_click(state: &mut ChatState, entry_idx: usize, row: 
                 true // 折叠时点标题行（唯一可见的那一行）展开
             };
             if should_toggle {
-                if is_expanded {
-                    state.expanded_thinking_indices.remove(&entry_idx);
-                } else {
-                    state.expanded_thinking_indices.insert(entry_idx);
-                }
+                // 走统一入口：它会记录"用户手动干预"，此后自动展开/收起
+                // 对这个块永久失效（手动意图压过自动化）。
+                state.toggle_thinking_expansion(entry_idx);
                 state.rendered_cache.remove(&entry_idx);
                 // 折叠/展开是用户明确的布局意图，不是流式内容导致的抖动，
                 // `streaming_height_floor` 的"只增不减"下限从这一帧起作废，

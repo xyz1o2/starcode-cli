@@ -367,9 +367,13 @@ fn build_tool_argument_display(
     tc: &crate::types::StarToolCall,
     verbose: bool,
 ) -> (String, Vec<String>) {
-    // 入口归一：内部只匹配注册名，别名由 constants 统一处理
-    let canonical_name = crate::core::tools::constants::canonical_tool_name(&tc.function.name);
-    let name = canonical_name.as_str();
+    // 解析到注册名：大小写漂移在入口一次性纠正，下面的 arm 只写注册名。
+    //
+    // 以前这里是 `"WebFetch" | "web_fetch"` 这样一串别名。内置工具名早已
+    // 硬切成 PascalCase（`core/tools/constants.rs` 的 `ToolName` 枚举），
+    // 那串 snake_case 别名既不是注册名（`canonical_tool_name` 原样返回），
+    // 也过不了执行器的 `get_tool()` —— 是改名时漏掉的残留。
+    let name = crate::core::tools::constants::resolve_registered_tool_name(&tc.function.name);
     // verbose 模式不截断、不缩短路径（对标 Claude Code verbose 显示）
     let lim = |n: usize| if verbose { usize::MAX } else { n };
     let shorten = |p: &str| {
@@ -414,7 +418,7 @@ fn build_tool_argument_display(
     // extra_info: 展开时显示的额外信息（summary 中未包含的）
     let mut extra_info: Vec<String> = Vec::new();
 
-    let summary = match name {
+    let mut summary = match name {
         "EnterPlanMode" => {
             let reason = get_str(&["reason"]).unwrap_or_else(|| "No reason provided".to_string());
             extra_info.push(reason);
@@ -478,26 +482,13 @@ fn build_tool_argument_display(
             }
             String::new()
         }
-        "Agent" | "agent" | "Task" => {
+        "Agent" => {
             // 对标 CC：子代理调用行只显示 description，不倾倒 prompt 全文
             let desc = get_str(&["description"]).unwrap_or_default();
             if let Some(kind) = get_str(&["subagent_type", "agent_type"]) {
                 extra_info.push(format!("type: {}", kind));
             }
             desc
-        }
-        // 网络类：URL / query 是这行唯一有决策价值的信息，
-        // 落进 summarize_object_inline 会得到 `{"url": "…", "prompt": "…"}` 这种倾倒。
-        "WebFetch" | "web_fetch" => {
-            let url = get_str(&["url"]).unwrap_or_default();
-            if let Some(p) = get_str(&["prompt"]) {
-                extra_info.push(truncate_chars_with_ellipsis(&p, lim(160)));
-            }
-            shorten(&url)
-        }
-        "WebSearch" | "web_search" => {
-            let q = get_str(&["query", "q"]).unwrap_or_default();
-            truncate_chars_with_ellipsis(&q, lim(180))
         }
         "complete_task" => {
             let first = get_str(&["result"])
@@ -557,6 +548,25 @@ fn build_tool_argument_display(
         }
         _ => summarize_object_inline(obj),
     };
+
+    // 网络类：URL / query 是这行唯一有决策价值的信息，
+    // 落进 summarize_object_inline 会得到 `{"url": "…", "prompt": "…"}` 这种倾倒。
+    //
+    // 匹配注册名（大小写漂移已在入口归一）。
+    match name {
+        "WebFetch" => {
+            let url = get_str(&["url"]).unwrap_or_default();
+            if let Some(p) = get_str(&["prompt"]) {
+                extra_info.push(truncate_chars_with_ellipsis(&p, lim(160)));
+            }
+            summary = shorten(&url);
+        }
+        "WebSearch" => {
+            let q = get_str(&["query", "q"]).unwrap_or_default();
+            summary = truncate_chars_with_ellipsis(&q, lim(180));
+        }
+        _ => {}
+    }
 
     (summary, extra_info)
 }
@@ -635,9 +645,11 @@ fn render_rich_tool_content(
     _prev_is_confirmation: bool,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    // 入口归一：内部只匹配注册名，别名由 constants 统一处理
-    let canonical_name = crate::core::tools::constants::canonical_tool_name(&tc.function.name);
-    let name = canonical_name.as_str();
+    // 解析到注册名：大小写漂移在入口一次性纠正，下面的 arm 只写注册名。
+    //
+    // UI 拿到的是模型原样发出的 tool_call（`agent_tool_process::emit_tool_started`），
+    // 模型偶尔写成 `webfetch`/`WEBFETCH` —— 解析后仍是注册名 `WebFetch`。
+    let name = crate::core::tools::constants::resolve_registered_tool_name(&tc.function.name);
 
     // ===== TodoWrite：结果块直接渲染 todos 清单（对标 Claude Code TaskListV2） =====
     if name == "TodoWrite" {
@@ -756,7 +768,26 @@ fn render_rich_tool_content(
 
         // ===== 查看类工具：折叠态只显示摘要行 =====
         if !expanded && !text.trim().is_empty() && tr.success {
-            match tc.function.name.as_str() {
+            // 匹配**折叠名**（全小写），不用原始名、也不列别名。
+            //
+            // 以前这里写的是 `tc.function.name.as_str()`，于是每个分支都得
+            // 额外列一遍小写/下划线别名（`"WebFetch" | "web_fetch" | …`）。
+            // 但那些别名是**死代码**：`canonical_tool_name` 只认注册名
+            // （`ToolName::from_str` 精确匹配），`web_fetch` 不在注册名里，
+            // 归一后原样不变；而执行器早就用注册名去 `get_tool()` 解析，
+            // 别名根本走不到工具实现，UI 里更不会出现。
+            //
+            // 实测（canonical_tool_name 的行为）：
+            //   "web_fetch" → "web_fetch"（不变，非注册名）
+            //   "WebFetch"  → "WebFetch"（注册名，原样）
+            //
+            // 所以别名分支既不会命中，又让每个读者以为"这些写法都支持"。
+            //
+            // 真正要防的是**大小写漂移**：UI 拿到的是模型原样发出的
+            // tool_call（见 `agent_tool_process::emit_tool_started`），模型写成
+            // `webfetch`/`WEBFETCH` 时 UI 就该照样认出来 —— 入口已把它解析回
+            // 注册名，这里的 arm 只写注册名。
+            match name {
                 // Read: "Read N lines"
                 "Read" => {
                     let line_count = text.lines().count();
@@ -791,12 +822,54 @@ fn render_rich_tool_content(
                     return lines;
                 }
                 // Glob/LS: "Found N files"
-                "Glob" | "LS" => {
-                    let file_count = text.lines().filter(|l| !l.trim().is_empty()).count();
+                //
+                // 计数必须来自**权威来源**，不能数输出行数：
+                // - Glob 的 `data` 字段就是 `found_file_paths`（真实文件列表）；
+                //   `output` 是给模型看的正文（"Found N file(s) matching ..."），
+                //   空结果时是单行 "No files found matching ..." ——
+                //   按行数数会得出"1 个文件"，展开却是"没找到"，自相矛盾。
+                // - LS 的 `output` 是表格，末行写着 "Total: N items"；
+                //   按行数数会把表头、分割线一起算进去。
+                "Glob" => {
+                    let file_count = tr
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.as_array())
+                        .map(|paths| paths.len())
+                        .unwrap_or_else(|| count_glob_paths_in_output(text));
+                    if file_count == 0 {
+                        lines.push(Line::from(Span::styled(
+                            crate::core::i18n::t("tool.no_files", "没有文件", "No files"),
+                            crate::ui::themes::theme::muted_dim_style(),
+                        )));
+                        push_expand_hint(&mut lines);
+                        return lines;
+                    }
                     push_collapsed_summary(
                         &mut lines, "Found", file_count, "file", None, tool_color,
                     );
                     return lines;
+                }
+                "LS" => {
+                    match parse_ls_total_items(text) {
+                        Some(count) => {
+                            push_collapsed_summary(
+                                &mut lines, "Listed", count, "item", None, tool_color,
+                            );
+                            return lines;
+                        }
+                        // 空目录：输出是一行 "Directory '...' is empty"。
+                        None if is_empty_directory_notice(text) => {
+                            lines.push(Line::from(Span::styled(
+                                crate::core::i18n::t("tool.empty_dir", "空目录", "Empty"),
+                                crate::ui::themes::theme::muted_dim_style(),
+                            )));
+                            push_expand_hint(&mut lines);
+                            return lines;
+                        }
+                        // 表格没解析出总数：退回通用预览，不编造数字。
+                        None => {}
+                    }
                 }
                 // CodebaseSearch: 折叠态显示命中文件数 + 首个结果。
                 // 输出头部是索引元数据（query/root/统计），直接预览前 8 行
@@ -860,7 +933,7 @@ fn render_rich_tool_content(
                 // WebFetch/WebSearch：折叠态给"抓了多少内容"而不是倾倒全文。
                 // 折叠态还看不出抓到了什么，是这两类工具此前最大的问题 ——
                 // 调用行是 URL/查询，结果块却是通用 JSON 倾倒。
-                "WebFetch" | "web_fetch" | "WebSearch" | "web_search" => {
+                "WebFetch" | "WebSearch" => {
                     let bytes = text.len();
                     let preview = crate::ui::utils::render::truncate_to_display_width(
                         text.trim(),
@@ -868,7 +941,7 @@ fn render_rich_tool_content(
                     );
                     push_collapsed_summary(
                         &mut lines,
-                        if tc.function.name.contains("Fetch") {
+                        if name == "WebFetch" {
                             "Fetched"
                         } else {
                             "Found"
@@ -888,7 +961,7 @@ fn render_rich_tool_content(
                 }
                 // 子代理：折叠态显示它最终交回了什么，而不是一段 JSON。
                 // 子代理的工作全在这个结果里，不给摘要用户就只能全程等它跑完。
-                "Agent" | "agent" | "Task" => {
+                "Agent" => {
                     let body = text.trim();
                     if !body.is_empty() {
                         lines.push(Line::from(Span::styled(
@@ -920,6 +993,72 @@ fn render_rich_tool_content(
     }
 
     lines
+}
+
+/// 从 Glob 的输出里数出文件路径条数。
+///
+/// 权威来源是 `data` 里的 `found_file_paths`；这个函数只在 `data` 缺失
+/// （例如旧会话恢复）时兜底，从输出头部读工具自己写的数字：
+/// - UI 展示格式（`return_display`）首行是 "{count} files"；
+/// - 给模型的正文（`output`）首行是 "Found {count} file(s) matching ..."。
+///
+/// 空结果输出 "No files found ..." 必须算 0，而不是 1。
+fn count_glob_paths_in_output(text: &str) -> usize {
+    let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let first = first.trim();
+    if first.starts_with("No files found") || first.starts_with("No results") {
+        return 0;
+    }
+    // "{count} files" —— UI 展示格式。
+    if let Some(count) = leading_count_before(first, "file") {
+        return count;
+    }
+    // "Found {count} file(s) matching ..." —— 给模型的正文。
+    let mut words = first.split_whitespace();
+    if words
+        .next()
+        .is_some_and(|w| w.eq_ignore_ascii_case("found"))
+    {
+        if let Some(count) = words.next().and_then(|w| w.parse::<usize>().ok()) {
+            return count;
+        }
+    }
+    // 头部认不出来：只数路径行（不含空行和说明行），不做更激进的猜测。
+    text.lines()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .count()
+}
+
+/// 读 "{count} file(s)" 里的 count。
+fn leading_count_before(text: &str, unit: &str) -> Option<usize> {
+    let mut words = text.split_whitespace();
+    let count = words.next()?.parse::<usize>().ok()?;
+    let rest = words.next()?;
+    if rest.starts_with(unit) {
+        return Some(count);
+    }
+    None
+}
+
+/// 从 LS 的表格输出里读出条目总数（末行 "Total: N items"）。
+fn parse_ls_total_items(text: &str) -> Option<usize> {
+    text.lines().find_map(|line| {
+        let line = line.trim();
+        let rest = line.strip_prefix("Total: ")?;
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            return None;
+        }
+        digits.parse::<usize>().ok()
+    })
+}
+
+/// LS 的"空目录"提示行。
+fn is_empty_directory_notice(text: &str) -> bool {
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .any(|l| l.contains("is empty"))
 }
 
 /// 从 Grep 输出里读回真实的命中数和命中文件数。
@@ -1617,5 +1756,143 @@ mod tests {
             summarise_grep_output("Found 5 matches for pattern \"x\":\n---\nsrc/a.go\nL1: x"),
             (5, None)
         );
+    }
+
+    // ── Glob / LS 折叠摘要 ─────────────────────────────────────────────────
+
+    fn tool_result_entry(
+        name: &str,
+        output: &str,
+        data: Option<serde_json::Value>,
+    ) -> crate::types::ChatEntry {
+        crate::types::ChatEntry::tool_result(
+            "",
+            crate::types::StarToolCall {
+                id: "c3".to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::StarToolCallFunction {
+                    name: name.to_string(),
+                    arguments: "{}".to_string(),
+                },
+            },
+            crate::types::ToolResult {
+                success: true,
+                output: Some(output.to_string()),
+                error: None,
+                data,
+                llm_content: None,
+            },
+        )
+    }
+
+    /// 回归：Glob 折叠态写 "Found 1 file"，展开却是 "没找到"。
+    ///
+    /// 摘要以前数的是输出里的非空行数，而空结果的输出恰好一行
+    /// （"No files found matching ..."），于是凭空多出一个文件。
+    /// 权威来源是 `data` 里的文件路径列表。
+    #[test]
+    fn glob_summary_of_an_empty_result_is_not_one_file() {
+        let entry = tool_result_entry(
+            "Glob",
+            "No files found matching pattern \"**/*.svg\" within /tmp/test_svg",
+            Some(serde_json::json!([])),
+        );
+
+        let lines = render_rich_tool_content(
+            &entry,
+            entry.tool_call.as_ref().unwrap(),
+            80,
+            false,
+            false,
+            &theme(),
+        );
+
+        let body: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+            .collect();
+        assert!(
+            !body.contains("Found 1 file"),
+            "空结果不能算 1 个文件：{body:?}"
+        );
+        assert!(body.contains("No files"), "应显示没有文件：{body:?}");
+    }
+
+    /// Glob 有命中时，摘要数字必须等于真实文件数（`data` 里的路径条数）。
+    ///
+    /// 运行时 UI 的 output 是分组树（"1 files\n  a.svg"），按行数数会得出 2。
+    #[test]
+    fn glob_summary_counts_the_data_file_list() {
+        let entry = tool_result_entry(
+            "Glob",
+            "1 files\n  a.svg",
+            Some(serde_json::json!(["/tmp/a.svg"])),
+        );
+
+        let lines = render_rich_tool_content(
+            &entry,
+            entry.tool_call.as_ref().unwrap(),
+            80,
+            false,
+            false,
+            &theme(),
+        );
+
+        let body: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+            .collect();
+        assert!(body.contains("Found 1 file"), "got: {body:?}");
+        assert!(
+            !body.contains("Found 2 files"),
+            "不能按输出行数计数：{body:?}"
+        );
+    }
+
+    /// `data` 缺失时（旧会话恢复）退回到头部解析，空结果仍然不能算 1。
+    #[test]
+    fn glob_summary_falls_back_to_the_output_header() {
+        assert_eq!(count_glob_paths_in_output("No files found"), 0);
+        assert_eq!(
+            count_glob_paths_in_output("No files found matching pattern \"**/*.svg\" within /tmp"),
+            0
+        );
+        // UI 展示格式：首行就是工具自己写的 "{count} files"。
+        assert_eq!(
+            count_glob_paths_in_output("3 files\n  a.svg\n  b.svg\n  c.svg"),
+            3
+        );
+        // 给模型的正文格式。
+        assert_eq!(
+            count_glob_paths_in_output("Found 2 file(s) matching \"**/*.svg\":\n/a.svg\n/b.svg"),
+            2
+        );
+    }
+
+    /// LS 的摘要读末行 "Total: N items"，不能把表头和分割线算成条目。
+    #[test]
+    fn ls_summary_reads_the_total_items_line() {
+        let output = "📁 Directory Listing: /tmp\n\
+                      --------------------------------------------------\n\
+                      Type  | Size       | Modified            | Name\n\
+                     ------+------------+---------------------+------\n\
+                      📄 | 12         | 2026-01-01 00:00:00  | a.txt\n\
+                      📂 | -          | 2026-01-01 00:00:00  | sub\n\
+                      --------------------------------------------------\n\
+                      Total: 2 items";
+        assert_eq!(parse_ls_total_items(output), Some(2));
+        assert!(!is_empty_directory_notice(output));
+    }
+
+    /// LS 空目录不能显示成 "Listed 1 item"。
+    #[test]
+    fn ls_summary_of_an_empty_directory_is_empty() {
+        assert_eq!(
+            parse_ls_total_items("📁 Directory '/tmp/empty' is empty (or all files filtered out)"),
+            None
+        );
+        assert!(is_empty_directory_notice(
+            "📁 Directory '/tmp/empty' is empty (or all files filtered out)"
+        ));
     }
 }

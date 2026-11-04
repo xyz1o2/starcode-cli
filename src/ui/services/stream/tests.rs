@@ -859,6 +859,107 @@ async fn reasoning_delta_refreshes_stream_liveness() {
 }
 
 #[tokio::test]
+async fn empty_reasoning_delta_does_not_create_thought_entry() {
+    let mut state = ChatState::new();
+    let (agent_tx, _agent_rx) = mpsc::channel(1);
+    let message_id = 8;
+    state.stream_targets.insert(message_id, 0);
+    let history_len = state.chat_history.len();
+
+    handle_stream_update(
+        &mut state,
+        StreamMessage::ReasoningDelta {
+            message_id,
+            content: "   ".to_string(),
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(state.chat_history.len(), history_len);
+    assert!(state.thinking_started_at.is_none());
+}
+
+/// 端到端：推理正文流进来 → 思考块**自动展开**（用户实时看到推理）。
+///
+/// 这是"只知道模型在想"和"知道模型在想什么"的分界。旧实现永远折叠，
+/// 推理正文只在用户手动点开后才可见 —— 而多数人根本不知道可以点。
+#[tokio::test]
+async fn streaming_reasoning_auto_expands_the_thinking_block() {
+    let mut state = ChatState::new();
+    let (agent_tx, _agent_rx) = mpsc::channel(1);
+    let message_id = 21;
+    state.stream_targets.insert(message_id, 0);
+
+    handle_stream_update(
+        &mut state,
+        StreamMessage::ReasoningDelta {
+            message_id,
+            content: "first reasoning step".to_string(),
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+
+    let idx = state.chat_history.len() - 1;
+    assert!(
+        state.is_thinking_expanded(idx, true),
+        "推理正文流进来时，思考块必须自动展开"
+    );
+    assert!(
+        state.chat_history[idx].reasoning_started_at.is_some(),
+        "必须记录计时起点，否则进行中的块显示不出耗时"
+    );
+}
+
+/// 端到端：思考结束 → 排定延迟收起 → 到期后收成一行收据。
+#[tokio::test]
+async fn a_finished_thinking_block_is_scheduled_to_collapse() {
+    let mut state = ChatState::new();
+    let (agent_tx, _agent_rx) = mpsc::channel(1);
+    let message_id = 22;
+    state.stream_targets.insert(message_id, 0);
+
+    handle_stream_update(
+        &mut state,
+        StreamMessage::ReasoningDelta {
+            message_id,
+            content: "reasoning".to_string(),
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+
+    let idx = state.chat_history.len() - 1;
+    crate::ui::services::stream::finalize_entry_streaming(&mut state, idx);
+
+    assert!(
+        state.thinking_collapse_at.is_some(),
+        "思考结束必须排定自动收起"
+    );
+    assert!(
+        state.chat_history[idx]
+            .reasoning_finished_elapsed_ms
+            .is_some(),
+        "思考结束必须冻结耗时（否则标签停在进行态）"
+    );
+
+    // 延迟到期 → 收起。
+    state
+        .thinking_collapse_at
+        .as_mut()
+        .map(|(_, due)| *due -= std::time::Duration::from_secs(5));
+    assert!(state.tick_thinking_collapse());
+    assert!(
+        !state.is_thinking_expanded(idx, false),
+        "到期后必须收成一行收据"
+    );
+}
+
+#[tokio::test]
 async fn active_tool_output_and_results_preserve_parallel_lifecycle() {
     let mut state = ChatState::new();
     let (agent_tx, _agent_rx) = mpsc::channel(1);

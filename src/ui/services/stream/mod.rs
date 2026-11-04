@@ -175,22 +175,46 @@ fn merge_declared_and_discovered_models_with(
 /// 结束 entry 的 streaming 状态，并冻结 thinking 计时器。
 /// 统一处理所有 is_streaming = false 的场景，避免遗漏 reasoning_finished_elapsed_ms。
 pub(crate) fn finalize_entry_streaming(state: &mut ChatState, idx: usize) {
+    let mut had_reasoning = false;
     if let Some(entry) = state.chat_history.get_mut(idx) {
         entry.is_streaming = Some(false);
         // 冻结 thinking 计时器：只对有 reasoning 且未冻结的 entry 设置。
-        // 必须有真实请求（processing_started_at）才冻结——恢复的会话等场景
-        // 没有时钟基准，冻结成 0 会把每块都显示成 "Thought for 1s"。
-        if let Some(started) = state.processing_started_at {
-            if entry.reasoning_content.is_some() && entry.reasoning_finished_elapsed_ms.is_none() {
-                entry.reasoning_finished_elapsed_ms = Some(started.elapsed().as_millis());
+        //
+        // 计时基准优先用**这个思考块自己的**开始时刻（`reasoning_started_at`）：
+        // 回合级的 `processing_started_at` 算的是整轮耗时，一轮里有两个思考块
+        // （工具调用前后各一个）时，第二个块会显示出"从回合开始算"的时长 ——
+        // 比实际思考时间大得多，而且两个块的耗时一模一样。
+        //
+        // 恢复的会话等场景没有时钟基准，冻结成 0 会把每块都显示成
+        // "Thought for 1s"，所以只有真有基准时才冻结。
+        let has_reasoning = entry
+            .reasoning_content
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty());
+        if has_reasoning && entry.reasoning_finished_elapsed_ms.is_none() {
+            let elapsed = entry
+                .reasoning_started_at
+                .map(|started| started.elapsed().as_millis())
+                .or_else(|| {
+                    state
+                        .processing_started_at
+                        .map(|started| started.elapsed().as_millis())
+                });
+            if let Some(elapsed) = elapsed {
+                entry.reasoning_finished_elapsed_ms = Some(elapsed);
             }
         }
+        had_reasoning = has_reasoning;
     }
     state.rendered_cache.remove(&idx);
     state.virtual_list.mark_dirty(idx);
     // 流结束了，打字机必须立刻交还全文：剩下的字符已经全部收到，
     // 继续逐字揭示只会让"已完成"的消息在屏幕上还缺一截。
     state.typewriter.flush(idx);
+    // 思考结束 → 延迟收起成一行收据（用户手动干预过的块不动）。
+    if had_reasoning {
+        state.schedule_thinking_collapse(idx);
+    }
 }
 
 /// 从仍在执行的工具中选出最后启动的一项，保持状态行的显示标签与 ID 生命周期同步。
@@ -595,6 +619,12 @@ pub async fn handle_stream_update(
             content,
         } => {
             let content = sanitize_for_tui(&content);
+            // Providers may emit an empty reasoning delta as a heartbeat or
+            // transition marker. It is not a visible thought and must not
+            // create an empty Assistant entry that later renders as `Thought`.
+            if content.trim().is_empty() {
+                return Ok(());
+            }
             state.last_token_time = Some(std::time::Instant::now());
             if let Some(&idx0) = state.stream_targets.get(&message_id) {
                 let mut idx = idx0;
@@ -628,9 +658,15 @@ pub async fn handle_stream_update(
                     if let Some(rc) = &mut entry.reasoning_content {
                         rc.push_str(&content);
                     }
+                    // 计时起点：第一次收到这个思考块的正文。
+                    if entry.reasoning_started_at.is_none() {
+                        entry.reasoning_started_at = Some(std::time::Instant::now());
+                    }
                     state.rendered_cache.remove(&idx);
                     state.virtual_list.mark_dirty(idx);
                 }
+                // 自动展开：流式期间让用户实时看到推理正文。
+                state.auto_expand_thinking(idx);
             }
         }
         StreamMessage::Thinking {
@@ -638,6 +674,9 @@ pub async fn handle_stream_update(
             content,
         } => {
             let content = sanitize_for_tui(&content);
+            if content.trim().is_empty() {
+                return Ok(());
+            }
             state.last_token_time = Some(std::time::Instant::now());
             if state.thinking_started_at.is_none() {
                 state.thinking_started_at = Some(std::time::Instant::now());
@@ -683,9 +722,15 @@ pub async fn handle_stream_update(
                     if let Some(rc) = &mut entry.reasoning_content {
                         rc.push_str(&content);
                     }
+                    // 计时起点：第一次收到这个思考块的正文。
+                    if entry.reasoning_started_at.is_none() {
+                        entry.reasoning_started_at = Some(std::time::Instant::now());
+                    }
                     state.rendered_cache.remove(&idx);
                     state.virtual_list.mark_dirty(idx);
                 }
+                // 自动展开：流式期间让用户实时看到推理正文。
+                state.auto_expand_thinking(idx);
             }
         }
         StreamMessage::AssistantNote {
@@ -879,7 +924,11 @@ pub async fn handle_stream_update(
             }
             // 1. End the current Assistant message's streaming state
             let had_thinking = if let Some(entry) = state.chat_history.get(assistant_idx) {
-                entry.entry_type == ChatEntryType::Assistant && entry.reasoning_content.is_some()
+                entry.entry_type == ChatEntryType::Assistant
+                    && entry
+                        .reasoning_content
+                        .as_deref()
+                        .is_some_and(|text| !text.trim().is_empty())
             } else {
                 false
             };

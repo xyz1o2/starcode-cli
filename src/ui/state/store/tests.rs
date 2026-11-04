@@ -202,6 +202,140 @@ fn toggle_transcript_mode_drives_thinking_expansion() {
     assert!(state.expanded_thinking_indices.is_empty());
 }
 
+/// 思考块在流式期间**自动展开** —— 用户要能实时看到推理正文，
+/// 而不是只看到一个"模型在想"。
+#[test]
+fn a_streaming_thinking_block_is_expanded_by_default() {
+    let mut state = ChatState::new();
+    state.chat_history.clear();
+    let mut entry = ChatEntry::assistant("");
+    entry.reasoning_content = Some("thinking...".to_string());
+    entry.is_streaming = Some(true);
+    state.chat_history.push(entry);
+
+    assert!(
+        state.is_thinking_expanded(0, true),
+        "流式中的思考块必须自动展开"
+    );
+}
+
+/// 流式结束后自动收起成一行收据。
+#[test]
+fn a_finished_thinking_block_collapses_back() {
+    let mut state = ChatState::new();
+    state.chat_history.clear();
+    let mut entry = ChatEntry::assistant("");
+    entry.reasoning_content = Some("thinking...".to_string());
+    state.chat_history.push(entry);
+
+    assert!(
+        !state.is_thinking_expanded(0, false),
+        "已结束的思考块默认收起"
+    );
+}
+
+/// 手动干预压过自动化：用户收起过的块，流式期间不许被撑开。
+///
+/// 这是"手动意图永远压过自动化"的硬约束 —— 否则用户刚按下去，
+/// 下一个 delta 就把它弹开，等于这个开关不存在。
+#[test]
+fn a_manual_collapse_survives_the_next_streaming_delta() {
+    let mut state = ChatState::new();
+    state.chat_history.clear();
+    let mut entry = ChatEntry::assistant("");
+    entry.reasoning_content = Some("thinking...".to_string());
+    entry.is_streaming = Some(true);
+    state.chat_history.push(entry);
+
+    // 流式中点一下 = 收起。
+    assert!(state.toggle_thinking_expansion(0));
+    assert!(
+        !state.is_thinking_expanded(0, true),
+        "手动收起后，即使还在流式也不能自动撑开"
+    );
+
+    // 下一个 delta 触发自动展开 —— 但手动覆盖必须挡住它。
+    state.auto_expand_thinking(0);
+    assert!(
+        !state.is_thinking_expanded(0, true),
+        "自动展开不能压过用户的手动收起"
+    );
+}
+
+/// 手动展开同样压过自动化：流式结束后的自动收起不能把它收掉。
+#[test]
+fn a_manual_expand_survives_the_auto_collapse() {
+    let mut state = ChatState::new();
+    state.chat_history.clear();
+    let mut entry = ChatEntry::assistant("");
+    entry.reasoning_content = Some("thinking...".to_string());
+    state.chat_history.push(entry);
+
+    // 手动展开（此时不在流式中，折叠态 → 展开态）。
+    assert!(!state.toggle_thinking_expansion(0));
+    assert!(state.is_thinking_expanded(0, false));
+
+    // 流式结束 → 排定自动收起 → 到期后不能收。
+    state.schedule_thinking_collapse(0);
+    state
+        .thinking_collapse_at
+        .as_mut()
+        .map(|(_, due)| *due -= std::time::Duration::from_secs(5));
+    state.tick_thinking_collapse();
+
+    assert!(
+        state.is_thinking_expanded(0, false),
+        "手动展开的块不许被自动收起"
+    );
+}
+
+/// 自动收起有延迟：用户能看见推理的最后一段（结论常常在最后几句）。
+#[test]
+fn the_auto_collapse_waits_before_folding() {
+    let mut state = ChatState::new();
+    state.chat_history.clear();
+    let mut entry = ChatEntry::assistant("");
+    entry.reasoning_content = Some("thinking...".to_string());
+    state.chat_history.push(entry);
+
+    state.auto_expand_thinking(0);
+    state.schedule_thinking_collapse(0);
+
+    // 延迟未到：仍然展开。
+    state.tick_thinking_collapse();
+    assert!(state.is_thinking_expanded(0, false), "延迟未到不能收起");
+
+    // 把到期时间往前拨 → 收起。
+    state
+        .thinking_collapse_at
+        .as_mut()
+        .map(|(_, due)| *due -= std::time::Duration::from_secs(5));
+    assert!(state.tick_thinking_collapse(), "到期后应真的收起一块");
+    assert!(!state.is_thinking_expanded(0, false));
+}
+
+/// transcript 模式是"看全部原始输出"，优先级高于单块偏好：
+/// 关掉 transcript 时不能把用户手动展开的块一起收掉。
+#[test]
+fn turning_off_transcript_keeps_manually_expanded_blocks() {
+    let mut state = ChatState::new();
+    state.chat_history.clear();
+    let mut entry = ChatEntry::assistant("");
+    entry.reasoning_content = Some("thought".to_string());
+    state.chat_history.push(entry);
+
+    // 用户手动展开这一块。
+    assert!(!state.toggle_thinking_expansion(0));
+
+    assert!(state.toggle_transcript_mode());
+    assert!(!state.toggle_transcript_mode());
+
+    assert!(
+        state.is_thinking_expanded(0, false),
+        "关掉 transcript 不等于取消用户对单块的展开偏好"
+    );
+}
+
 /// 造一个后台代理任务：`started_at` 用「now - offset_ms」拉开先后顺序
 fn bg_task(id: &str, is_async: bool, offset_ms: u64) -> AgentTaskInfo {
     AgentTaskInfo {

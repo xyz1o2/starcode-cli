@@ -125,8 +125,13 @@ impl PermissionRuleSpec {
     }
 }
 
+/// 工具名归一：大小写漂移在**这里**抹平，规则与调用用同一个口径。
+///
+/// 用 `resolve_registered_tool_name`（忽略大小写、返回注册名），而不是
+/// `canonical_tool_name`（只认精确注册名）—— 后者对 `bash` 这类全小写写法
+/// 原样返回，"大小写漂移在这里抹平"就成了空话。
 fn canonical(tool: &str) -> String {
-    crate::core::tools::constants::canonical_tool_name(tool)
+    crate::core::tools::constants::resolve_registered_tool_name(tool).to_string()
 }
 
 /// 工具族：用户按 Claude Code 的口径写 `Read` / `Edit`，得覆盖 StarCode 里做同一件事的

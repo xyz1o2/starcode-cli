@@ -623,7 +623,10 @@ pub(crate) fn compute_tool_roles(tool: &StarTool) -> ToolRoles {
         is_read: is_read_tool(tool),
         is_search: is_search_tool(tool),
         is_edit: is_edit_tool_name(name),
-        is_execute: name == "Bash" || name == "RunTests",
+        is_execute: matches!(
+            crate::core::tools::constants::resolve_registered_tool_name(name),
+            "Bash" | "RunTests"
+        ),
         is_project_map: is_project_map_tool(tool),
         is_codebase_search: is_codebase_search_tool(tool),
     }
@@ -631,25 +634,29 @@ pub(crate) fn compute_tool_roles(tool: &StarTool) -> ToolRoles {
 
 /// 检查是否是读取工具
 fn is_read_tool(tool: &StarTool) -> bool {
-    matches!(tool.function.name.as_str(), "Read" | "LS")
+    matches!(
+        crate::core::tools::constants::resolve_registered_tool_name(&tool.function.name),
+        "Read" | "LS"
+    )
 }
 
 /// 检查是否是搜索工具
 fn is_search_tool(tool: &StarTool) -> bool {
     matches!(
-        tool.function.name.as_str(),
+        crate::core::tools::constants::resolve_registered_tool_name(&tool.function.name),
         "Grep" | "Glob" | "CodebaseSearch"
     )
 }
 
 /// 检查是否是项目地图工具
 fn is_project_map_tool(tool: &StarTool) -> bool {
-    tool.function.name == "ProjectMap"
+    crate::core::tools::constants::resolve_registered_tool_name(&tool.function.name) == "ProjectMap"
 }
 
 /// 检查是否是语义搜索工具
 fn is_codebase_search_tool(tool: &StarTool) -> bool {
-    tool.function.name == "CodebaseSearch"
+    crate::core::tools::constants::resolve_registered_tool_name(&tool.function.name)
+        == "CodebaseSearch"
 }
 
 /// 检查是否匹配模式

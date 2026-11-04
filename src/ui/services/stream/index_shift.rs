@@ -71,6 +71,21 @@ pub(super) fn shift_index_caches_after_insert(state: &mut ChatState, pos: usize)
             queued.entry_idx += 1;
         }
     }
+
+    // 思考块的索引表也要跟着位移（与删除路径同构，方向相反）。
+    state.expanded_thinking_indices = state
+        .expanded_thinking_indices
+        .iter()
+        .map(|idx| if *idx >= pos { idx + 1 } else { *idx })
+        .collect();
+    state.thinking_manual_override = state
+        .thinking_manual_override
+        .iter()
+        .map(|(idx, expanded)| (if *idx >= pos { idx + 1 } else { *idx }, *expanded))
+        .collect();
+    if let Some((idx, due)) = state.thinking_collapse_at {
+        state.thinking_collapse_at = Some((if idx >= pos { idx + 1 } else { idx }, due));
+    }
 }
 
 pub(super) fn shift_indexed_cache_after_removal<T>(
@@ -124,6 +139,28 @@ pub(super) fn remove_chat_entry_and_shift_indices(state: &mut ChatState, pos: us
             std::cmp::Ordering::Greater => Some(idx - 1),
         })
         .collect();
+
+    // 手动展开覆盖同样按索引存：被删条目那条直接丢弃，后面的索引 −1。
+    // 不跟着位移的话，用户对第 N 块的展开偏好会落到第 N−1 块身上 ——
+    // 症状是"点开一块，另一块莫名其妙也开了"。
+    state.thinking_manual_override = state
+        .thinking_manual_override
+        .drain()
+        .filter_map(|(idx, expanded)| match idx.cmp(&pos) {
+            std::cmp::Ordering::Less => Some((idx, expanded)),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some((idx - 1, expanded)),
+        })
+        .collect();
+
+    // 待收起的思考块索引同理。
+    if let Some((idx, due)) = state.thinking_collapse_at {
+        state.thinking_collapse_at = match idx.cmp(&pos) {
+            std::cmp::Ordering::Less => Some((idx, due)),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some((idx - 1, due)),
+        };
+    }
 
     if pos < state.last_item_heights.len() {
         state.last_item_heights.remove(pos);

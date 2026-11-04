@@ -318,6 +318,13 @@ impl TextSelection {
 /// 后台代理选择器最多列出的行数（不含 main 行）
 pub const MAX_BG_AGENT_ROWS: usize = 8;
 
+/// 思考块流式结束后，延迟多久自动收起成一行收据。
+///
+/// 业界取值在 0.8s 上下（Backstage 的 `AUTO_COLLAPSE_DELAY_MS`）。
+/// 延迟的意义：很多模型是在推理的**最后几句**才写出结论，立刻收起会把
+/// 结论藏进"展开才看得见"里 —— 用户正好没看见最关键的那句。
+pub const THINKING_AUTO_COLLAPSE_DELAY: std::time::Duration = std::time::Duration::from_millis(800);
+
 /// Agent 任务追踪信息
 #[derive(Debug, Clone)]
 pub struct AgentTaskInfo {

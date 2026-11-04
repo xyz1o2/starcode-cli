@@ -322,10 +322,7 @@ fn ensure_fallback_core_tools(
             global_state.clone(),
         )));
     }
-    if !tool_names
-        .iter()
-        .any(|name| name == "Edit" || name == "edit")
-    {
+    if !tool_names.iter().any(|name| name == "Edit") {
         crate::utils::logging::append_debug_log_line(
             "Edit/edit missing, attempting manual registration.",
         );

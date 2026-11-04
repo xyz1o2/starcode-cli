@@ -915,8 +915,7 @@ pub async fn build_confirmation_from_tool_call(
     tc: &crate::types::StarToolCall,
 ) -> crate::types::ToolConfirmation {
     // 入口归一：内部只匹配注册名，别名由 constants 统一处理
-    let canonical_name = crate::core::tools::constants::canonical_tool_name(&tc.function.name);
-    let name = canonical_name.as_str();
+    let name = crate::core::tools::constants::resolve_registered_tool_name(&tc.function.name);
     let args_value: serde_json::Value =
         serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::Value::Null);
     let get_str = |keys: &[&str]| -> Option<String> {

@@ -126,22 +126,28 @@ impl Agent {
         // Check if we have tool calls to execute
         if !tool_calls.is_empty() {
             // Track which tools were attempted
-            if tool_calls
-                .iter()
-                .any(|tc| tc.function.name == "CodebaseSearch")
-            {
+            if tool_calls.iter().any(|tc| {
+                crate::core::tools::constants::resolve_registered_tool_name(&tc.function.name)
+                    == "CodebaseSearch"
+            }) {
                 *codebase_search_attempted = true;
             }
-            if tool_calls.iter().any(|tc| tc.function.name == "ProjectMap") {
+            if tool_calls.iter().any(|tc| {
+                crate::core::tools::constants::resolve_registered_tool_name(&tc.function.name)
+                    == "ProjectMap"
+            }) {
                 *project_map_attempted = true;
             }
             if tool_calls.iter().any(|tc| {
-                tc.function.name == "Skill" && tc.function.arguments.contains("\"navigator\"")
+                crate::core::tools::constants::resolve_registered_tool_name(&tc.function.name)
+                    == "Skill"
+                    && tc.function.arguments.contains("\"navigator\"")
             }) {
                 *navigator_skill_attempted = true;
             }
             if tool_calls.iter().any(|tc| {
-                tc.function.name == "Skill"
+                crate::core::tools::constants::resolve_registered_tool_name(&tc.function.name)
+                    == "Skill"
                     && (tc.function.arguments.contains("\"analyzer\"")
                         || tc.function.arguments.contains("\"task_type\":\"analyze\""))
             }) {
@@ -411,7 +417,9 @@ impl Agent {
                 Ok(()) => {
                     // StarLens：首个 Grep 前轻推一次"先回想系统认知"（默认关，不拦截 grep）。
                     if !lens_grep_nudged
-                        && tool_call.function.name == "Grep"
+                        && crate::core::tools::constants::resolve_registered_tool_name(
+                            &tool_call.function.name,
+                        ) == "Grep"
                         && crate::core::context::lens_service::is_enabled()
                     {
                         messages.push(StarMessage::system(
@@ -1267,8 +1275,8 @@ fn tool_execution_segments(tool_calls: &[StarToolCall]) -> Vec<ToolExecutionSegm
 /// 的命令，而不是只打断 LLM 流。
 fn is_barrier_tool(name: &str) -> bool {
     matches!(
-        name.to_lowercase().as_str(),
-        "codebasesearch" | "projectmap" | "bash" | "websearch"
+        crate::core::tools::constants::resolve_registered_tool_name(name),
+        "CodebaseSearch" | "ProjectMap" | "Bash" | "WebSearch"
     )
 }
 

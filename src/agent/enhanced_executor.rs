@@ -294,7 +294,7 @@ pub struct SimulatedSedEditStripper;
 impl SimulatedSedEditStripper {
     /// 剥离_simulatedSedEdit字段
     pub fn strip(tool_name: &str, input: &mut Value) -> bool {
-        if tool_name != "Bash" {
+        if crate::core::tools::constants::resolve_registered_tool_name(tool_name) != "Bash" {
             return false;
         }
 
@@ -397,8 +397,7 @@ impl ToolAttributeExtractor {
         let mut attributes = HashMap::new();
 
         // 入口归一：内部只匹配注册名
-        let tool_name = crate::core::tools::constants::canonical_tool_name(tool_name);
-        let tool_name = tool_name.as_str();
+        let tool_name = crate::core::tools::constants::resolve_registered_tool_name(tool_name);
 
         if let Some(obj) = input.as_object() {
             match tool_name {
@@ -769,7 +768,7 @@ impl EnhancedToolExecutor {
         self.span_manager.start_span(tool_name, attributes);
 
         // 4. 检查Bash分类器
-        if tool_name == "Bash" {
+        if crate::core::tools::constants::resolve_registered_tool_name(tool_name) == "Bash" {
             if let Some(command) = cleaned_input.get("command").and_then(|v| v.as_str()) {
                 self.bash_classifier
                     .start_speculative_check(command, "default");

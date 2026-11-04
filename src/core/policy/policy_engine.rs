@@ -361,7 +361,9 @@ impl PolicyEngine {
                 // Plan 模式只放只读工具和 exit_plan_mode。重新进入 plan 模式没意义，
                 // 还会把 agent 困在 enter/exit 循环里，准备好了就用 exit_plan_mode。
                 let is_safe = crate::types::is_safe_query_tool(&tool_call.name);
-                let is_exit = tool_call.name == "ExitPlanMode";
+                let is_exit =
+                    crate::core::tools::constants::resolve_registered_tool_name(&tool_call.name)
+                        == "ExitPlanMode";
                 return CheckResult {
                     decision: if is_safe || is_exit {
                         PolicyDecision::Allow

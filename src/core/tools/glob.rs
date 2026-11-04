@@ -540,3 +540,91 @@ fn format_glob_display(base_dir: &Path, paths: &[String], count: usize) -> Strin
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::tools::tools::ToolInvocation;
+
+    async fn test_config(dir: &Path) -> Arc<crate::core::config::Config> {
+        let mut parameters = crate::core::config::ConfigParameters::default();
+        parameters.model = "test-model".to_string();
+        parameters.core_tools = Some(Vec::new());
+        parameters.mcp_enabled = Some(false);
+        parameters.enable_agents = Some(false);
+        // Glob 的搜索根是 `target_dir`，不是 `cwd`。
+        parameters.target_dir = dir.to_path_buf();
+        let mut config = crate::core::config::Config::new(parameters);
+        config.cwd = dir.to_path_buf();
+        config
+            .initialize()
+            .await
+            .expect("test config must initialize");
+        Arc::new(config)
+    }
+
+    async fn run_glob(dir: &Path, pattern: &str) -> ToolResult {
+        let config = test_config(dir).await;
+        let invocation = GlobToolInvocation::new(
+            config,
+            GlobToolParams {
+                pattern: pattern.to_string(),
+                dir_path: None,
+                case_sensitive: None,
+                respect_git_ignore: None,
+                respect_star_ignore: None,
+            },
+            Arc::new(GlobalState::new()),
+        );
+        invocation.execute(None, None).await.expect("glob runs")
+    }
+
+    /// 命中时：`data` 必须是**真实文件列表**，UI 的折叠摘要靠它计数。
+    ///
+    /// 以前 UI 数的是 `output` 的非空行数，于是"找到 1 个文件"会被写成
+    /// "Found 2 files"（正文有头部 + 路径两行），展开却只有 1 个路径。
+    #[tokio::test]
+    async fn a_hit_carries_the_real_file_list_in_data() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.svg"), "<svg/>").expect("write svg");
+        std::fs::write(dir.path().join("b.svg"), "<svg/>").expect("write svg");
+        std::fs::write(dir.path().join("note.txt"), "x").expect("write txt");
+
+        let result = run_glob(dir.path(), "*.svg").await;
+
+        assert!(result.error.is_none(), "glob should succeed");
+        let paths = result
+            .data
+            .as_ref()
+            .and_then(|data| data.as_array())
+            .expect("data must be the found file list");
+        assert_eq!(paths.len(), 2, "only the two svg files match");
+        for path in paths {
+            assert!(path.as_str().unwrap_or_default().ends_with(".svg"));
+        }
+    }
+
+    /// 空结果：`output` 是一行 "No files found matching ..."。
+    ///
+    /// 这行曾经被 UI 当成"1 个文件"，于是折叠态写 "Found 1 file"、
+    /// 展开却是"没找到"，显示和输出记录对不上。
+    #[tokio::test]
+    async fn an_empty_result_says_no_files_and_lists_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("note.txt"), "x").expect("write txt");
+
+        let result = run_glob(dir.path(), "*.svg").await;
+
+        assert!(result.error.is_none(), "an empty match is not an error");
+        assert!(
+            result.output.starts_with("No files found"),
+            "expected an explicit no-files message, got: {:?}",
+            result.output
+        );
+        assert!(
+            result.data.is_none(),
+            "no match means no file list, got: {:?}",
+            result.data
+        );
+    }
+}

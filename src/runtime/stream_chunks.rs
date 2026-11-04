@@ -95,7 +95,10 @@ pub async fn handle_stream_chunk(
         }
         StreamingChunkType::ToolResult => {
             if let (Some(tool_call), Some(tool_result)) = (chunk.tool_call, chunk.tool_result) {
-                if tool_call.function.name == "TodoWrite" {
+                if crate::core::tools::constants::resolve_registered_tool_name(
+                    &tool_call.function.name,
+                ) == "TodoWrite"
+                {
                     let _ = tx.send(StreamMessage::ReloadTasks).await;
                 }
                 let _ = tx

@@ -520,10 +520,16 @@ fn fold_tool_name(name: &str) -> String {
     name.to_lowercase()
 }
 
-/// 从字符串获取规范化的工具名称（归一到注册名）。
+/// 把工具名归一到**注册名**（只认精确注册名）。
 ///
-/// 只认注册名本身 —— 旧的下划线写法不是别名，而是拼错的注册名，
-/// 折叠匹配会把它纠正回来（见 [`fold_tool_name`]）。
+/// 精确匹配，找不到就原样返回。这个"原样返回"是刻意的：
+/// 执行器要用它区分"模型拼错了名字"（→ 报 `Unknown tool`）和
+/// "真的叫这个名字的插件/MCP 工具"（→ 照常执行）。
+///
+/// 所以它**不做大小写折叠** —— `read` 不是 `Read` 的别名，是拼错的写法。
+/// 需要"认出同一个工具"的场合（渲染、分类、只读工具判定）用
+/// [`resolve_registered_tool_name`]；需要"按用户输入找注册名"的场合
+/// （`/permissions add`、hook matcher）用 [`find_builtin_tool_name`]。
 pub fn canonical_tool_name(name: &str) -> String {
     ToolName::from_str(name)
         .map(|t| t.as_str().to_string())
@@ -539,6 +545,28 @@ pub fn find_builtin_tool_name(name: &str) -> Option<&'static str> {
     all_builtin_tool_names()
         .into_iter()
         .find(|candidate| fold_tool_name(candidate) == wanted)
+}
+
+/// 把工具名解析成**注册名**（忽略大小写），找不到就原样返回。
+///
+/// 这是渲染层该用的入口：模型偶尔把注册名写成全小写（`todowrite`）或
+/// 换个大小写（`WEBFETCH`），渲染层要照旧认出同一个工具。
+///
+/// 与 [`canonical_tool_name`] 的区别：
+/// - `canonical_tool_name` 只认精确注册名，找不到就原样返回（执行器用 ——
+///   它必须能区分"拼错的名字"和"真的叫这个的插件工具"）；
+/// - 这个**大小写不敏感**，专门给"只管认出来就行"的场合（UI 渲染），
+///   返回值一定是注册名，调用方可以放心地按注册名写 match arm。
+///
+/// 用法：
+/// ```ignore
+/// match resolve_registered_tool_name(&tc.function.name) {
+///     "TodoWrite" => { /* … */ }
+///     _ => { /* … */ }
+/// }
+/// ```
+pub fn resolve_registered_tool_name(name: &str) -> &str {
+    find_builtin_tool_name(name).unwrap_or(name)
 }
 
 /// 判断工具名是否属于编辑类工具（只认注册名）
@@ -671,6 +699,58 @@ mod alias_tests {
         // 未注册的名字原样落回
         assert_eq!(find_builtin_tool_name("mcp__github"), None);
         assert_eq!(find_builtin_tool_name("view_file"), None);
+    }
+
+    /// 渲染层的入口：大小写漂移解析回**注册名**，未注册的名字原样返回。
+    ///
+    /// 这条是 UI 敢用 PascalCase 写 match arm 的前提 ——
+    /// arm 只写注册名，模型写成 `todowrite` 也能命中。
+    #[test]
+    fn resolve_registered_tool_name_returns_the_registered_name() {
+        // 大小写漂移 → 注册名
+        assert_eq!(find_builtin_tool_name("TODOWRITE"), Some("TodoWrite"));
+        assert_eq!(find_builtin_tool_name("todowrite"), Some("TodoWrite"));
+        assert_eq!(resolve_registered_tool_name("todowrite"), "TodoWrite");
+        assert_eq!(resolve_registered_tool_name("TodoWrite"), "TodoWrite");
+        assert_eq!(resolve_registered_tool_name("TODOWRITE"), "TodoWrite");
+        assert_eq!(resolve_registered_tool_name("webfetch"), "WebFetch");
+        assert_eq!(resolve_registered_tool_name("GREP"), "Grep");
+        // 注册名原样返回
+        assert_eq!(resolve_registered_tool_name("Read"), "Read");
+        // 未注册的名字原样返回（插件工具名、MCP 工具名）
+        assert_eq!(
+            resolve_registered_tool_name("complete_task"),
+            "complete_task"
+        );
+        assert_eq!(
+            resolve_registered_tool_name("mcp__github__issue"),
+            "mcp__github__issue"
+        );
+        // 旧的 snake_case 别名**不**被当成注册名 —— 它不是别名，是拼错的名字。
+        assert_eq!(resolve_registered_tool_name("web_fetch"), "web_fetch");
+    }
+
+    /// 三个归一函数的分工是**明确**的，不能互相顶替。
+    ///
+    /// - `canonical_tool_name`：精确注册名，未知原样返回（执行器用 ——
+    ///   要区分"拼错了"和"插件真叫这个"）；
+    /// - `find_builtin_tool_name`：忽略大小写地**查找**注册名，找不到给 None；
+    /// - `resolve_registered_tool_name`：忽略大小写地**解析**成注册名，
+    ///   找不到原样返回（渲染层用 —— arm 只写注册名）。
+    #[test]
+    fn the_three_normalizers_have_distinct_contracts() {
+        // 精确：大小写不同就不是注册名，原样返回
+        assert_eq!(canonical_tool_name("Read"), "Read");
+        assert_eq!(canonical_tool_name("read"), "read");
+        assert_eq!(canonical_tool_name("web_fetch"), "web_fetch");
+
+        // 查找：大小写不同也找得到注册名
+        assert_eq!(find_builtin_tool_name("read"), Some("Read"));
+        assert_eq!(find_builtin_tool_name("web_fetch"), None);
+
+        // 解析：大小写不同 → 注册名；不是注册名 → 原样
+        assert_eq!(resolve_registered_tool_name("read"), "Read");
+        assert_eq!(resolve_registered_tool_name("web_fetch"), "web_fetch");
     }
 }
 

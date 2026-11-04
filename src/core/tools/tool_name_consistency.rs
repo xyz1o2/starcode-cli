@@ -22,6 +22,15 @@ const NAMES_ELSEWHERE: &[&str] = &[
     "GetDiagnostics", // tools/diagnostics.rs：ToolName::GetDiagnostics.as_str()
 ];
 
+/// UI 里出现、但**语义不是工具名**的字面量。
+///
+/// 扫 match arm 时会撞上这些：它们的 arm 标签长得像工具名别名（带下划线），
+/// 但实际是任务状态之类的枚举值。不归"工具名一致"这条守管。
+const NON_TOOL_NAME_LITERALS: &[&str] = &[
+    "in_progress", // TodoWrite 的 status 值
+    "completed",   // TodoWrite 的 status 值
+];
+
 /// 提取源码里 `fn name(&self) -> &str` 后面紧跟的字符串字面量。
 ///
 /// 只认「函数签名 + 空行 + 立即返回字面量」这一种形态 —— 这是本仓库里
@@ -61,6 +70,113 @@ fn collect_all_declared_names() -> Vec<(String, String)> {
     out
 }
 
+/// 扫描 UI 层里"按工具名匹配"的字符串字面量。
+///
+/// 返回的是**全部** arm 字面量（合法的也返回），规则由调用方判定 ——
+/// 这样"扫到了东西"这件事本身才能被验证（扫不到 = 扫描坏了 = 空转）。
+///
+/// 为什么单独扫：`fn name()` 扫描只看工具实现，**看不到 UI 的 match arm** ——
+/// 而 UI 里残留的旧别名（`"WebFetch" | "web_fetch"`）就是这么活下来的：
+/// 改名时改了实现、忘了改渲染分支，那个分支从此命中不了，死得无声无息。
+///
+/// 扫的文件：`src/ui/components`、`src/ui/utils` 下文件名含 tool 或等于 format 的。
+/// 工具名的 match arm 就住在这几个文件里；扫全 UI 会撞上 badge 之类的无关 arm。
+fn collect_ui_tool_name_literals() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for dir in ["src/ui/components", "src/ui/utils"] {
+        collect_ui_names_from_dir(std::path::Path::new(dir), &mut out);
+    }
+    out
+}
+
+/// 判定一个字面量是不是合法的"工具名写法"。
+///
+/// 合法当且仅当它是
+/// - 注册名本身（`WebFetch` / `TodoWrite`），或
+/// - 白名单里的外部工具名（插件提供的 `complete_task` 等），或
+/// - 非工具名的同形字面量（TodoWrite 的 status 值 `in_progress`）。
+///
+/// **注册名一律 PascalCase**（项目约定，见 `tool_name_consistency` 的既有断言
+/// "工具名不该带下划线"）。大小写漂移由入口的
+/// [`crate::core::tools::constants::resolve_registered_tool_name`] 一次性纠正，
+/// arm 里不需要（也不应该）写小写变体。
+///
+/// 旧别名（`web_fetch`）不满足任何一条：它既不是注册名，也不是外部工具名 ——
+/// 正好被这条守抓住。
+fn is_legal_tool_name_literal(literal: &str) -> bool {
+    // 非内置工具名（插件 / MCP 提供）—— 合法但不在注册名枚举里。
+    const EXTERNAL_TOOL_NAMES: &[&str] = &[
+        "complete_task", // 插件工具
+        "find_by_name",  // 插件工具
+    ];
+
+    if EXTERNAL_TOOL_NAMES.contains(&literal) || NON_TOOL_NAME_LITERALS.contains(&literal) {
+        return true;
+    }
+    ToolName::from_str(literal).is_some()
+}
+
+fn collect_ui_names_from_dir(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_ui_names_from_dir(&path, out);
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        // 只在"工具渲染"文件里扫：文件名含 tool 或等于 format。
+        // 工具名的 match arm 就住在这几个文件里；扫全 UI 会撞上 badge 之类的无关 arm。
+        let file_stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if !(file_stem.contains("tool") || file_stem == "format") {
+            continue;
+        }
+        for (lineno, line) in source.lines().enumerate() {
+            // 只看 match arm 的标签位置。一行里可能有多个字面量
+            // （`"WebFetch" | "web_search" => {`），**每一个**都要看 ——
+            // 只看第一个会漏掉 arm 里的后续别名。
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with('"') {
+                continue;
+            }
+            let mut rest = trimmed;
+            let mut literals: Vec<String> = Vec::new();
+            loop {
+                let Some(after_quote) = rest.strip_prefix('"') else {
+                    break;
+                };
+                let Some(end) = after_quote.find('"') else {
+                    break;
+                };
+                literals.push(after_quote[..end].to_string());
+                rest = after_quote[end + 1..].trim_start();
+                if let Some(tail) = rest.strip_prefix('|') {
+                    rest = tail.trim_start();
+                    continue;
+                }
+                break;
+            }
+            // 必须是 arm 标签：所有字面量之后跟 `=>`。
+            if literals.is_empty() || !rest.starts_with("=>") {
+                continue;
+            }
+            for literal in literals {
+                out.push((literal, format!("{}:{}", path.display(), lineno + 1)));
+            }
+        }
+    }
+}
+
 fn collect_from_dir(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -81,6 +197,123 @@ fn collect_from_dir(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
             out.push((name, path.display().to_string()));
         }
     }
+}
+
+/// 注册名 → 它改名之前的 snake_case 写法。
+///
+/// `WebFetch` → `web_fetch`，`TodoWrite` → `todo_write`，`ReadManyFiles` →
+/// `read_many_files`。这些是**历史拼法**，不是别名 —— `canonical_tool_name`
+/// 对它们原样返回，执行器也就 `get_tool()` 不到。
+fn legacy_snake_case_spelling(registered: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in registered.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// 扫描整个 `src/`，找"旧 snake_case 拼法被当成工具名用"的地方。
+///
+/// 匹配范围：字符串字面量出现在行首（match arm 标签 / 常量定义）。
+///
+/// 跳过测试区域：`mod tests` 里的断言**故意**提到旧拼法（证明它不是别名），
+/// 那不是"当成工具名用"。
+fn collect_legacy_alias_usages() -> Vec<(String, String)> {
+    let legacy: Vec<(String, String)> = ToolName::all_builtin()
+        .iter()
+        .map(|t| t.as_str())
+        .map(|name| (legacy_snake_case_spelling(name), name.to_string()))
+        .filter(|(snake, _)| snake.contains('_'))
+        .collect();
+
+    let mut out = Vec::new();
+    for dir in ["src"] {
+        collect_legacy_from_dir(std::path::Path::new(dir), &legacy, &mut out);
+    }
+    out
+}
+
+fn collect_legacy_from_dir(
+    dir: &std::path::Path,
+    legacy: &[(String, String)],
+    out: &mut Vec<(String, String)>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_legacy_from_dir(&path, legacy, out);
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for (lineno, line) in non_test_lines(&source) {
+            let trimmed = line.trim_start();
+            // 只看行首的字面量（match arm 标签 / 常量定义）。
+            let Some(rest) = trimmed.strip_prefix('"') else {
+                continue;
+            };
+            let Some(end) = rest.find('"') else {
+                continue;
+            };
+            let literal = &rest[..end];
+            if let Some((_, registered)) = legacy.iter().find(|(snake, _)| snake == literal) {
+                out.push((
+                    literal.to_string(),
+                    format!("{}:{} (注册名 {registered})", path.display(), lineno + 1),
+                ));
+            }
+        }
+    }
+}
+
+/// 去掉测试专用区域里的行，返回 `(行号, 行内容)`。
+///
+/// 判据：`mod <名字>` 后面带 `test`（`mod tests`、`mod alias_tests`）的模块
+/// 整块跳过 —— 那里的字符串字面量是**断言内容**，不是"当成工具名用"。
+/// 跟踪花括号深度找模块的结束位置。
+fn non_test_lines(source: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut depth: i32 = 0;
+    let mut test_module_end_depth: Option<i32> = None;
+    for (idx, line) in source.lines().enumerate() {
+        if let Some(end_depth) = test_module_end_depth {
+            if depth < end_depth {
+                test_module_end_depth = None;
+            } else {
+                depth += line.matches('{').count() as i32;
+                depth -= line.matches('}').count() as i32;
+                continue;
+            }
+        }
+        let trimmed = line.trim_start();
+        // `mod tests {` / `mod alias_tests {`
+        let is_test_module =
+            trimmed.starts_with("mod ") && trimmed.contains("test") && trimmed.ends_with('{');
+        if is_test_module {
+            test_module_end_depth = Some(depth);
+            depth += line.matches('{').count() as i32;
+            depth -= line.matches('}').count() as i32;
+            continue;
+        }
+        out.push((idx + 1, line));
+        depth += line.matches('{').count() as i32;
+        depth -= line.matches('}').count() as i32;
+    }
+    out
 }
 
 #[test]
@@ -125,6 +358,103 @@ fn the_special_names_elsewhere_are_still_registered() {
     for name in NAMES_ELSEWHERE {
         assert!(ToolName::from_str(name).is_some(), "{name} 应当仍是注册名");
     }
+}
+
+/// 全仓不该再把旧 snake_case 拼法当成工具名用。
+///
+/// 注册名是 PascalCase（`WebFetch`），旧拼法 `web_fetch` **不是别名**：
+/// `canonical_tool_name` 对它原样返回，执行器也就 `get_tool()` 不到它。
+/// 留着只会让人以为"这些写法都支持"，而实际是命中不了的死分支。
+///
+/// 这条守的是"改名时漏改匹配点"：实现改了、匹配点没改 → 分支从此命中不了，
+/// 界面表现是折叠摘要悄悄退化成通用预览，不报任何错。
+#[test]
+fn no_legacy_snake_case_tool_name_is_used_anywhere() {
+    let usages = collect_legacy_alias_usages();
+    assert!(
+        usages.is_empty(),
+        "这些地方还在用旧 snake_case 工具名写法（命中不了的死分支）：\n  {}",
+        usages
+            .iter()
+            .map(|(name, path)| format!("{name} ({path})"))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}
+
+/// 工具名只有一个真相源：`ToolName` 枚举。
+///
+/// 以前还有一个 `src/constants/tools.rs`，里面是一份手抄的工具名清单 ——
+/// 零用户、而且抄错了（`TOOL_LS = "ListDir"`，而注册名早就改成 `LS`）。
+/// 两份清单并存时，改名只改一份，另一份就静默过期。
+#[test]
+fn there_is_no_second_handwritten_tool_name_list() {
+    let stale = std::path::Path::new("src/constants/tools.rs");
+    assert!(
+        !stale.exists(),
+        "src/constants/tools.rs 是手抄的工具名清单（零用户、值还是错的）—— \
+         工具名只有一个真相源：core::tools::constants::ToolName"
+    );
+}
+///
+/// 这条守的是"改名时漏改渲染分支"：工具实现从 `web_fetch` 改成 `WebFetch` 之后，
+/// UI 里 `"WebFetch" | "web_fetch"` 的后半个就成了死分支 —— 命中不了，也不报错，
+/// 折叠摘要悄悄退化成通用预览。`fn name()` 扫描看不到 match arm，
+/// 所以这条单独扫 UI 目录。
+#[test]
+fn ui_tool_name_match_arms_use_registered_names() {
+    let literals = collect_ui_tool_name_literals();
+    assert!(
+        !literals.is_empty(),
+        "没扫到任何 UI 工具名字面量 —— 扫描逻辑本身坏了，测试会变成空转"
+    );
+
+    let unknown: Vec<String> = literals
+        .iter()
+        .filter(|(name, _)| !is_legal_tool_name_literal(name))
+        .map(|(name, path)| format!("{name} ({path})"))
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "UI 里这些工具名不是注册名 —— 多半是改名时漏掉的旧别名：\n  {}",
+        unknown.join("\n  ")
+    );
+}
+
+/// UI 层不该再出现 snake_case 的内置工具别名。
+///
+/// 注册名是 PascalCase（`WebFetch`），snake_case 写法（`web_fetch`）不是别名，
+/// 而是拼错的注册名 —— `canonical_tool_name` 对它原样返回，执行器也就找不到
+/// 工具。这类分支只能是死代码。
+#[test]
+fn ui_tool_name_match_arms_have_no_snake_case_builtin_aliases() {
+    let literals = collect_ui_tool_name_literals();
+    assert!(
+        !literals.is_empty(),
+        "没扫到任何 UI 工具名字面量 —— 扫描逻辑本身坏了，测试会变成空转"
+    );
+    // 只查**内置工具**的旧别名：插件工具名（`complete_task`）与任务状态值
+    // （`in_progress`）本来就带下划线，它们不是内置工具别名。
+    let legacy: Vec<String> = literals
+        .iter()
+        .filter(|(name, _)| name.contains('_'))
+        .filter(|(name, _)| !is_external_or_non_tool_name(name))
+        .map(|(name, path)| format!("{name} ({path})"))
+        .collect();
+    assert!(
+        legacy.is_empty(),
+        "UI 里不该有带下划线的内置工具别名：\n  {}",
+        legacy.join("\n  ")
+    );
+}
+
+/// 是不是"外部工具名 / 非工具名"（插件提供的名字、任务状态值）。
+fn is_external_or_non_tool_name(literal: &str) -> bool {
+    const EXTERNAL_TOOL_NAMES: &[&str] = &[
+        "complete_task", // 插件工具
+        "find_by_name",  // 插件工具
+    ];
+    EXTERNAL_TOOL_NAMES.contains(&literal) || NON_TOOL_NAME_LITERALS.contains(&literal)
 }
 
 #[cfg(test)]

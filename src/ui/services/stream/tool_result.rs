@@ -25,7 +25,9 @@ pub(super) fn handle_tool_result_message(
             }
         }
     }
-    if matches!(tool_call.function.name.as_str(), "TodoWrite") {
+    if crate::core::tools::constants::resolve_registered_tool_name(&tool_call.function.name)
+        == "TodoWrite"
+    {
         state.task_panel.reload();
         state.task_panel.mark_modified();
         if !state.task_panel.is_visible && !state.task_panel.manually_hidden {
@@ -56,9 +58,11 @@ pub(super) fn handle_tool_result_message(
     // 当 Agent 工具以 background=true 执行时，ToolResult.data 包含
     // { status: "async_launched", agent_id: "..." }
     // 此时创建 AgentTask 条目而非普通 ToolResult
-    if (tool_call.function.name == "Agent" || tool_call.function.name == "agent")
-        && tool_result.success
-    {
+    //
+    // 折叠匹配：模型偶尔把注册名写成 `agent`。执行器那边已按注册名解析
+    // （`canonical_tool_name` + `get_tool`），所以这里比的是**折叠名** ——
+    // 一次 `eq_ignore_ascii_case` 就够，不必为每种大小写写一个分支。
+    if tool_call.function.name.eq_ignore_ascii_case("Agent") && tool_result.success {
         if let Some(data) = &tool_result.data {
             if let Some(status_str) = data.get("status").and_then(|v| v.as_str()) {
                 if status_str == "async_launched" || status_str == "fork_launched" {

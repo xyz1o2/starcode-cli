@@ -2,7 +2,8 @@ use crate::agent::tool_routing::{is_memory_tool_name, truncate_chars};
 use crate::types::{StarToolCall, ToolResult};
 
 fn validation_failure_summary(tool_name: &str, result: &ToolResult) -> Option<String> {
-    let lower = tool_name.to_lowercase();
+    let lower =
+        crate::core::tools::constants::resolve_registered_tool_name(tool_name).to_lowercase();
     if lower.contains("runtests") {
         return run_tests_failure_summary(result);
     }

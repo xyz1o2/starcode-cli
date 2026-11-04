@@ -79,7 +79,7 @@ impl StructuredError {
             ErrorCategory::NotFound
         } else if error_lower.contains("timeout") || error_lower.contains("timed out") {
             ErrorCategory::Timeout
-        } else if tool_name == "Bash" {
+        } else if crate::core::tools::constants::resolve_registered_tool_name(tool_name) == "Bash" {
             ErrorCategory::Runtime
         } else {
             ErrorCategory::ToolExecution
@@ -939,8 +939,8 @@ fn extract_tool_name(signature: &str) -> String {
 /// 建议替代工具
 fn suggest_alternative_tool(tool_name: &str) -> Option<String> {
     // 入口归一：内部只匹配注册名
-    let tool_name = crate::core::tools::constants::canonical_tool_name(tool_name);
-    match tool_name.as_str() {
+    let tool_name = crate::core::tools::constants::resolve_registered_tool_name(tool_name);
+    match tool_name {
         "Bash" => Some("Grep".to_string()),
         "Write" => Some("Edit".to_string()),
         "Read" => Some("Grep".to_string()),

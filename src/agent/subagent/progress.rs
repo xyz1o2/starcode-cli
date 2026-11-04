@@ -183,7 +183,7 @@ pub fn user_facing_tool_name(tool_name: &str) -> String {
             return format!("{}:{}", server, tool);
         }
     }
-    crate::core::tools::constants::canonical_tool_name(tool_name)
+    crate::core::tools::constants::resolve_registered_tool_name(tool_name).to_string()
 }
 
 /// 从工具参数里提取一行摘要（对标 `tool.getToolUseSummary()`）

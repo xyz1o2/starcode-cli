@@ -1089,6 +1089,9 @@ mod steering_tests {
     /// 回归：回合仍在流式时点折叠，`streaming_height_floor` 会把展开时刻的
     /// 高度钉成下限，折叠后的 1 行标题被补成整屏空白 —— 用户报的
     /// 「展开后再折叠，大片空白行缩不上去」。
+    ///
+    /// 注意起点变了：流式中的思考块**自动展开**（用户能实时看到推理），
+    /// 所以第一次点击是"收起"，不是"展开"。
     #[test]
     fn collapsing_mid_stream_must_not_be_pinned_by_the_streaming_height_floor() {
         let mut state = ChatState::test_fixture();
@@ -1100,20 +1103,21 @@ mod steering_tests {
         state.chat_history.last_mut().unwrap().is_streaming = Some(true);
         let idx = state.chat_history.len() - 1;
 
-        // 还没交互过时的基线：折叠 + 流式占位共 1-2 行
-        let collapsed =
-            crate::ui::components::chat_history::render_chat_lines(&mut state, 80).len() as u16;
-
-        // 流式中通过真实点击路径展开（floor 随后会被 stale 帧钉在展开高度）
-        assert!(
-            crate::ui::events::mouse::try_toggle_on_click(&mut state, idx, 0),
-            "点击思考块应展开"
-        );
+        // 流式期自动展开 → 基线就是展开态的高度。
         let expanded =
             crate::ui::components::chat_history::render_chat_lines(&mut state, 80).len() as u16;
+
+        // 用户手动收起（走真实点击路径）。floor 随后会被 stale 帧钉在展开高度，
+        // 所以这一步是在验证"收起后不被空白行垫回去"。
         assert!(
-            expanded > collapsed,
-            "展开必须变高：{expanded} <= {collapsed}"
+            crate::ui::events::mouse::try_toggle_on_click(&mut state, idx, 0),
+            "点击思考块应收起"
+        );
+        let collapsed =
+            crate::ui::components::chat_history::render_chat_lines(&mut state, 80).len() as u16;
+        assert!(
+            collapsed < expanded,
+            "收起必须变矮：{collapsed} >= {expanded}"
         );
 
         // 流式又长了一段：stale 重测，floor 从此刻起钉在展开高度
@@ -1122,16 +1126,12 @@ mod steering_tests {
         }
         let _ = crate::ui::components::chat_history::render_chat_lines(&mut state, 80);
 
-        // 流式中再点击折叠 —— floor 必须一并失效，不得用空白行垫回展开高度
-        assert!(
-            crate::ui::events::mouse::try_toggle_on_click(&mut state, idx, 0),
-            "点击思考块应折叠"
-        );
-        let back =
+        // 手动偏好压过自动化：流式仍在继续，但用户收起过的块**不许被撑开**。
+        let after_growth =
             crate::ui::components::chat_history::render_chat_lines(&mut state, 80).len() as u16;
-        assert_eq!(
-            back, collapsed,
-            "流式中的折叠同样要立刻缩回（floor 不许把空白垫进来）"
+        assert!(
+            after_growth <= collapsed,
+            "用户手动收起后，自动化不许再撑开它：{after_growth} > {collapsed}"
         );
     }
 
