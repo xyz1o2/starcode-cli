@@ -108,9 +108,24 @@ fn extract_value_from_kv_like(raw: &str, key: &str) -> Option<String> {
     None
 }
 
+/// 工具在聊天区显示的短标签。
+///
+/// 只做一件事：把注册名换成界面上的短名。分两类：
+///
+/// - **内置工具**（注册名，`ToolName` 枚举）—— 对标 Claude Code 的观感：
+///   `Read → view`、`Grep → search`、`Glob → glob`、`Bash → bash`。
+///   这些短名只用于显示，schema、权限规则、hook matcher 里的名字仍是注册名。
+/// - **注册名之外的名字**（插件工具、MCP 工具）—— 原样显示。
+///
+/// 两条规矩：
+/// 1. **不合并语义不同的工具**。`Edit` / `SmartEdit` / `MultiEdit` 三个编辑工具
+///    必须能区分 —— 都显示成 `edit` 的话，用户看不出这次改的是哪一种。
+/// 2. **不写已废弃的旧名**。`complete_task` 是 TodoWrite 之前的旧工具名，
+///    项目早已硬切到 `TodoWrite`（见 commit `f50c171` 的"no legacy-name
+///    compatibility"），留着只会让人以为这个工具还在。
+///
+/// 大小写漂移（模型写 `todowrite`）在入口归一，下面的 arm 只写注册名。
 pub fn tool_display_name(name: &str) -> String {
-    // 解析到注册名：大小写漂移（模型偶尔写成 `todowrite`）在入口一次性纠正，
-    // 下面的 arm 只写注册名（PascalCase），不写小写变体。
     let name = crate::core::tools::constants::resolve_registered_tool_name(name);
     match name {
         "Read" => "view".into(),
@@ -118,11 +133,12 @@ pub fn tool_display_name(name: &str) -> String {
         "LS" => "ls".into(),
         "Grep" => "search".into(),
         "Glob" => "glob".into(),
-        "Edit" | "SmartEdit" | "MultiEdit" => "edit".into(),
+        // 编辑家族逐个区分：这三个都是"改文件"，但改法不同（整文件替换 /
+        // 智能定位 / 批量多处），界面上必须看得出是哪一种。
+        "Edit" => "edit".into(),
+        "SmartEdit" => "smart edit".into(),
+        "MultiEdit" => "multi edit".into(),
         "Write" => "write".into(),
-        // `complete_task` 不是内置注册名（内置的是 `TaskUpdate` 等），
-        // 它是外部插件提供的工具名 —— 按原样匹配。
-        "complete_task" => "done".into(),
         "TodoWrite" => "Update Todos".into(),
         "EnterPlanMode" | "ExitPlanMode" => "plan".into(),
         // CodebaseSearch / ProjectMap 保持 PascalCase 注册名：显示形态必须和
@@ -268,15 +284,6 @@ fn tool_call_brief(tc: &StarToolCall) -> String {
                 let first = plan.lines().next().unwrap_or("").trim();
                 if !first.is_empty() {
                     return truncate_text(first, 220);
-                }
-            }
-            return "".to_string();
-        }
-        "complete_task" => {
-            if let Some(result) = get_str("result") {
-                let first_line = result.lines().next().unwrap_or("").trim();
-                if !first_line.is_empty() {
-                    return truncate_text(first_line, 200);
                 }
             }
             return "".to_string();
@@ -458,6 +465,31 @@ mod tests {
     #[test]
     fn unknown_tools_fall_back_to_raw_name() {
         assert_eq!(tool_display_name("SomeFutureTool"), "SomeFutureTool");
+    }
+
+    /// 三个编辑工具必须显示得出来 —— 都显示成 `edit` 的话，
+    /// 用户看不出这次改的是整文件替换、智能定位还是批量多处。
+    #[test]
+    fn the_edit_family_stays_distinguishable() {
+        assert_eq!(tool_display_name("Edit"), "edit");
+        assert_eq!(tool_display_name("SmartEdit"), "smart edit");
+        assert_eq!(tool_display_name("MultiEdit"), "multi edit");
+    }
+
+    /// 大小写漂移要归到同一个标签 —— 模型写 `todowrite` 也不能换个显示。
+    #[test]
+    fn case_drift_maps_to_the_same_label() {
+        assert_eq!(tool_display_name("todowrite"), "Update Todos");
+        assert_eq!(tool_display_name("multiedit"), "multi edit");
+        assert_eq!(tool_display_name("WEBFETCH"), "WebFetch");
+    }
+
+    /// 已废弃的旧工具名不该再被特殊显示 —— 项目早已硬切到 `TodoWrite`
+    /// （见 commit `f50c171` 的 "no legacy-name compatibility"）。
+    #[test]
+    fn the_retired_complete_task_name_is_not_special_cased() {
+        // 原样显示，不映射成 "done" —— 这个工具名已经不存在了。
+        assert_eq!(tool_display_name("complete_task"), "complete_task");
     }
 
     /// 回归：LS 列的正是当前工作目录时，`strip_prefix` 给出空相对路径，

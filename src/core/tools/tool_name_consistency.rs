@@ -93,7 +93,6 @@ fn collect_ui_tool_name_literals() -> Vec<(String, String)> {
 ///
 /// 合法当且仅当它是
 /// - 注册名本身（`WebFetch` / `TodoWrite`），或
-/// - 白名单里的外部工具名（插件提供的 `complete_task` 等），或
 /// - 非工具名的同形字面量（TodoWrite 的 status 值 `in_progress`）。
 ///
 /// **注册名一律 PascalCase**（项目约定，见 `tool_name_consistency` 的既有断言
@@ -101,19 +100,11 @@ fn collect_ui_tool_name_literals() -> Vec<(String, String)> {
 /// [`crate::core::tools::constants::resolve_registered_tool_name`] 一次性纠正，
 /// arm 里不需要（也不应该）写小写变体。
 ///
-/// 旧别名（`web_fetch`）不满足任何一条：它既不是注册名，也不是外部工具名 ——
-/// 正好被这条守抓住。
+/// 插件工具名与 MCP 工具名（`complete_task`、`mcp__server__tool`）不在注册名
+/// 枚举里，但**也不该**出现在按工具名匹配的 arm 上 —— 它们没有固定形态，
+/// 按名字猜参数只会误判。要展示它们就原样显示（`_ => name`）。
 fn is_legal_tool_name_literal(literal: &str) -> bool {
-    // 非内置工具名（插件 / MCP 提供）—— 合法但不在注册名枚举里。
-    const EXTERNAL_TOOL_NAMES: &[&str] = &[
-        "complete_task", // 插件工具
-        "find_by_name",  // 插件工具
-    ];
-
-    if EXTERNAL_TOOL_NAMES.contains(&literal) || NON_TOOL_NAME_LITERALS.contains(&literal) {
-        return true;
-    }
-    ToolName::from_str(literal).is_some()
+    NON_TOOL_NAME_LITERALS.contains(&literal) || ToolName::from_str(literal).is_some()
 }
 
 fn collect_ui_names_from_dir(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
@@ -433,12 +424,12 @@ fn ui_tool_name_match_arms_have_no_snake_case_builtin_aliases() {
         !literals.is_empty(),
         "没扫到任何 UI 工具名字面量 —— 扫描逻辑本身坏了，测试会变成空转"
     );
-    // 只查**内置工具**的旧别名：插件工具名（`complete_task`）与任务状态值
-    // （`in_progress`）本来就带下划线，它们不是内置工具别名。
+    // 只查**内置工具**的旧别名：任务状态值（`in_progress`）带下划线，
+    // 但它不是工具名。
     let legacy: Vec<String> = literals
         .iter()
         .filter(|(name, _)| name.contains('_'))
-        .filter(|(name, _)| !is_external_or_non_tool_name(name))
+        .filter(|(name, _)| !NON_TOOL_NAME_LITERALS.contains(&name.as_str()))
         .map(|(name, path)| format!("{name} ({path})"))
         .collect();
     assert!(
@@ -446,15 +437,6 @@ fn ui_tool_name_match_arms_have_no_snake_case_builtin_aliases() {
         "UI 里不该有带下划线的内置工具别名：\n  {}",
         legacy.join("\n  ")
     );
-}
-
-/// 是不是"外部工具名 / 非工具名"（插件提供的名字、任务状态值）。
-fn is_external_or_non_tool_name(literal: &str) -> bool {
-    const EXTERNAL_TOOL_NAMES: &[&str] = &[
-        "complete_task", // 插件工具
-        "find_by_name",  // 插件工具
-    ];
-    EXTERNAL_TOOL_NAMES.contains(&literal) || NON_TOOL_NAME_LITERALS.contains(&literal)
 }
 
 #[cfg(test)]

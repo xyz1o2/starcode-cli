@@ -35,6 +35,8 @@ pub(super) fn format_tool_name_for_status(name: &str) -> String {
         // CodebaseSearch / ProjectMap 保持注册名（理由同 tool_display_name）
         "Write" => "write file".to_string(),
         "Read" => "read file".to_string(),
+        "Edit" => "edit file".to_string(),
+        "SmartEdit" => "smart edit".to_string(),
         "MultiEdit" => "multi edit".to_string(),
         "EnterPlanMode" => "enter plan mode".to_string(),
         "ExitPlanMode" => "exit plan mode".to_string(),

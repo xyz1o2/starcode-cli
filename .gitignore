@@ -21,3 +21,4 @@ logs/
 # `.star/settings.json` stays committable; only derived data is ignored.
 .star/context/
 .code/
+.image/

@@ -490,24 +490,6 @@ fn build_tool_argument_display(
             }
             desc
         }
-        "complete_task" => {
-            let first = get_str(&["result"])
-                .unwrap_or_default()
-                .lines()
-                .next()
-                .unwrap_or("")
-                .to_string();
-            truncate_chars_with_ellipsis(&first, lim(140))
-        }
-        "find_by_name" => {
-            let pat = get_str(&["Pattern"]).unwrap_or_default();
-            let dir = get_str(&["SearchDirectory"]).unwrap_or_default();
-            if dir.is_empty() {
-                pat
-            } else {
-                format!("{} in {}", pat, shorten(&dir))
-            }
-        }
         "LS" => get_str(&["directory", "path"])
             .map(|p| shorten(&p))
             .unwrap_or_else(|| ".".to_string()),
