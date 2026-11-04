@@ -102,6 +102,26 @@ pub fn shared_root_has_cjk_token(root: &Path) -> Option<bool> {
     shared_search_cache().root_has_cjk_token(root)
 }
 
+/// 某个项目根下，这组检索词在索引里的**覆盖率**（0.0 = 一个都没出现过）。
+///
+/// 用途：自动触发的语言闸门。它此前只问"索引里有没有**任何**中文 token" ——
+/// 项目里有一两处中文注释就放行，于是中文 query 照发，必然零命中。
+/// 覆盖率问的是**这组词本身**在不在倒排表里，是能命中的必要条件。
+///
+/// 返回 `None` = 该项目还没有缓存好的引擎（冷启动）—— 调用方据此放行：
+/// "不知道"不等于"不匹配"。
+pub fn shared_root_term_coverage(root: &Path, terms: &[String]) -> Option<f64> {
+    shared_search_cache().root_term_coverage(root, terms)
+}
+
+/// 某个项目根下最常见的标识符（词表锚点，给查询改写用）。
+///
+/// 返回 `None` = 该项目还没有缓存好的引擎（冷启动）—— 此时改写提示里
+/// 没有词表锚点，退回"纯猜"，但仍能工作（只是命中率低）。
+pub fn shared_root_identifier_vocabulary(root: &Path, limit: usize) -> Option<Vec<String>> {
+    shared_search_cache().root_identifier_vocabulary(root, limit)
+}
+
 impl SearchEngineCacheManager {
     pub fn new() -> Self {
         Self {
@@ -170,6 +190,51 @@ impl SearchEngineCacheManager {
             }
         }
         seen.then_some(has_cjk)
+    }
+
+    /// 某组检索词在这个项目根的索引里的覆盖率（0.0~1.0）。
+    ///
+    /// 与 [`Self::root_has_cjk_token`] 同样的"冷启动返回 `None`"约定：
+    /// 没有引擎就不知道覆盖率，此时不该据此拦下检索。
+    pub fn root_term_coverage(&self, root: &Path, terms: &[String]) -> Option<f64> {
+        let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let cache = self.engine_cache.read();
+        let mut coverage: Option<f64> = None;
+        for ((path, _), cached) in cache.iter() {
+            if *path == canonical {
+                // 只看内容不看 mtime：词在不在索引里是代码库的属性。
+                let current = cached.engine.term_coverage(terms);
+                coverage = Some(coverage.map_or(current, |prev| prev.max(current)));
+            }
+        }
+        coverage
+    }
+
+    /// 这个项目根的标识符词表（给查询改写当锚点）。
+    ///
+    /// 与覆盖率同样的"冷启动返回 `None`"约定。
+    pub fn root_identifier_vocabulary(&self, root: &Path, limit: usize) -> Option<Vec<String>> {
+        let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let cache = self.engine_cache.read();
+        let mut vocabulary: Option<Vec<String>> = None;
+        for ((path, _), cached) in cache.iter() {
+            if *path == canonical {
+                let current = cached.engine.identifier_vocabulary(limit);
+                vocabulary = Some(match vocabulary {
+                    Some(mut prev) => {
+                        for token in current {
+                            if !prev.contains(&token) {
+                                prev.push(token);
+                            }
+                        }
+                        prev.truncate(limit);
+                        prev
+                    }
+                    None => current,
+                });
+            }
+        }
+        vocabulary
     }
 
     /// 在写锁内对一个已缓存引擎施加增量补丁。

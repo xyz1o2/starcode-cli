@@ -158,6 +158,28 @@ fn sensitive_confirmation_details(
 pub struct ToolExecutor {
     tool_registry: Arc<ToolRegistry>,
     config: Arc<Config>,
+    /// LLM 客户端 —— 给检索类工具做**查询归一**用。
+    ///
+    /// 为什么需要它：`CodebaseSearch` 是**词法**引擎，索引里全是英文标识符。
+    /// 调用方（模型或自动触发）传进来的中文需求（"缺点"）一个 token 都命中不了。
+    /// 以前改写只在**自动触发**那条路径上做（`agent_tool_process.rs`），
+    /// 模型自己发起的调用完全绕过它 —— 于是界面上出现
+    /// `CodebaseSearch(缺点)` 这种必然零命中的调用。
+    ///
+    /// 归一放在**工具入口**（`normalize_tool_args`）而不是调用方，才是对的：
+    /// 对标 Augment Code 的 `codebase-retrieval`（参数是自然语言
+    /// `information_request`，翻译由检索器内部做）与 Windsurf FastContext
+    /// （`query` 就是自然语言描述，由后端模型自己决定搜什么）。
+    client: StarClient,
+    /// 查询归一结果缓存（`原 query` → `代码侧检索词`）。
+    ///
+    /// 为什么需要：冷启动补跑会用**同一个** query 再搜一次（不然两次搜的
+    /// 不是同一件事）。归一如果每次都重新问模型，两次可能得到不同的词，
+    /// 补跑就白跑了。缓存让同一个 query 在同一轮里只翻译一次。
+    ///
+    /// 生命周期跟着 executor 走 —— `Agent::run_stream` 每条用户消息重建
+    /// executor，跨轮不复用（不同轮的上下文可能给出更好的译法）。
+    query_rewrite_cache: RwLock<std::collections::HashMap<String, String>>,
     message_bus: Option<Arc<MessageBus>>,
     cached_tool_definitions: RwLock<Option<(u64, Vec<StarTool>)>>,
     permission_manager: Arc<SessionPermissionManager>,
@@ -170,7 +192,7 @@ impl ToolExecutor {
     const MAX_CACHE_ENTRIES: usize = 200;
 
     pub fn new(
-        _client: StarClient,
+        client: StarClient,
         tool_registry: Arc<ToolRegistry>,
         message_bus: Option<Arc<MessageBus>>,
         config: Arc<Config>,
@@ -184,11 +206,13 @@ impl ToolExecutor {
         };
 
         Self {
+            client,
             tool_registry,
             config,
             message_bus,
             cached_tool_definitions: RwLock::new(None),
             permission_manager,
+            query_rewrite_cache: RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -766,7 +790,9 @@ impl ToolExecutor {
         // 且必须是合法 JSON；剥不动的原样下发，交给各工具的严格解析报错
         // （`tasks.rs` 的 strictObject 约定保持不变）。
         args = Self::unwrap_stringified_args(args);
-        let args = Self::normalize_tool_args(original_tool_name, name, args);
+        let args = self
+            .normalize_tool_args(original_tool_name, name, args)
+            .await;
 
         // Check for cancellation before starting
         if let Some(ref token) = abort_signal {
@@ -1207,20 +1233,89 @@ impl ToolExecutor {
         }
     }
 
-    fn normalize_tool_args(original_name: &str, canonical_name: &str, args: Value) -> Value {
+    /// 归一化工具入参。
+    ///
+    /// 除了修字段名/字段类型，还要给**检索类工具**做查询归一 ——
+    /// `CodebaseSearch` 是词法引擎，喂中文必然零命中。翻译在**这里**做，
+    /// 模型直接调用和自动触发走的是同一条路（对标 Augment 的
+    /// `codebase-retrieval`：参数是自然语言，翻译是检索器内部的活）。
+    async fn normalize_tool_args(
+        &self,
+        original_name: &str,
+        canonical_name: &str,
+        args: Value,
+    ) -> Value {
         // 先对所有工具做通用修复：
         // 1. 把字符串数字转为真正的数字
         // 2. 把 camelCase 参数名转为 snake_case
         let args = Self::fix_string_numbers(args);
         let args = Self::camel_to_snake_keys(args);
-        match canonical_name {
+        let args = match canonical_name {
             "Edit" => Self::normalize_replace_args(args),
             "MultiEdit" => Self::normalize_multi_edit_args(args),
             "Grep" => Self::normalize_search_args(original_name, args),
             "Read" => Self::normalize_read_file_args(args),
             "Agent" => Self::normalize_agent_args(args),
             _ => args,
+        };
+        match canonical_name {
+            "CodebaseSearch" => self.normalize_codebase_search_query(args).await,
+            _ => args,
         }
+    }
+
+    /// 把 `CodebaseSearch` 的 `query` 从"人话"归一成"代码侧检索词"。
+    ///
+    /// 现场事故：界面出现 `CodebaseSearch(缺点)`，索引是英文的，这一发必然零命中，
+    /// 而工具还会回一句"索引还在建"—— 模型据此认定"这个功能不存在"，改用别的
+    /// 工具或者直接猜。
+    ///
+    /// 规则（对标 Augment Code `codebase-retrieval` / Windsurf FastContext）：
+    /// - **调用方可以传自然语言**，翻译是检索器的内部责任；
+    /// - 已经是代码侧词（英文标识符）时**原样放行**，不额外花一次 LLM 调用；
+    /// - 翻译失败时退回规则压缩（`extract_search_keywords`），再不行就是原词 ——
+    ///   但那会零命中，所以由语言闸门兜住（见 `language_gate_allows`）。
+    async fn normalize_codebase_search_query(&self, args: Value) -> Value {
+        let Some(query) = args.get("query").and_then(|v| v.as_str()) else {
+            return args;
+        };
+        let query = query.trim().to_string();
+        if query.is_empty() {
+            return args;
+        }
+        // 已经是代码侧的词（有标识符特征）→ 不动，也不占缓存。
+        if !crate::agent::tool_routing::needs_rewrite(&query) {
+            return args;
+        }
+        // 同一轮里同一个 query 只翻译一次（补跑要搜同一件事）。
+        let cached = self
+            .query_rewrite_cache
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(&query).cloned());
+        let rewritten = match cached {
+            Some(terms) => terms,
+            None => {
+                // 带**词表锚点**：把这个项目真实存在的标识符摆进提示词，
+                // 模型就能挑仓库真有的词，而不是凭空译一个索引里没有的词。
+                let terms = crate::agent::tool_routing::rewrite_search_query_in(
+                    &self.client,
+                    &query,
+                    Some(self.config.target_dir().as_path()),
+                )
+                .await
+                .unwrap_or_else(|| crate::agent::tool_routing::extract_search_keywords(&query));
+                if let Ok(mut cache) = self.query_rewrite_cache.write() {
+                    cache.insert(query.clone(), terms.clone());
+                }
+                terms
+            }
+        };
+        let mut args = args;
+        if let Some(obj) = args.as_object_mut() {
+            obj.insert("query".to_string(), serde_json::Value::String(rewritten));
+        }
+        args
     }
 
     /// 递归遍历 JSON args，把 camelCase 的 key 转为 snake_case
@@ -2653,6 +2748,85 @@ mod tests {
             result.llm_content.as_deref(),
             Some("the full body the model needs"),
             "llm_content 必须在 executor 里被保留下来"
+        );
+    }
+
+    /// 回归：`CodebaseSearch` 的中文 query 必须在**工具入口**被归一。
+    ///
+    /// 现场事故：界面出现 `CodebaseSearch(缺点)` —— 词法索引里全是英文标识符，
+    /// 这一发必然零命中，而工具还回一句"索引还在建"，模型据此认定"这功能不存在"。
+    ///
+    /// 以前改写只在**自动触发**那条路径上做（`agent_tool_process.rs`），
+    /// 模型自己发起的调用完全绕过它 —— 于是"谁来调用谁负责翻译"这个错配
+    /// 变成了"谁都能跳过翻译"。
+    ///
+    /// 对标 Augment Code 的 `codebase-retrieval`（参数是自然语言
+    /// `information_request`，翻译由检索器内部做）与 Windsurf FastContext
+    /// （`query` 是自然语言描述，由后端模型决定搜什么）：**翻译是检索器的
+    /// 内部责任，不是调用方的义务**。
+    #[tokio::test]
+    async fn a_chinese_codebase_search_query_is_normalized_at_the_tool_entry() {
+        use crate::core::config::ConfigParameters;
+
+        let temp = tempfile::tempdir().expect("create temporary directory");
+        let mut params = ConfigParameters::default();
+        params.target_dir = temp.path().to_path_buf();
+        params.cwd = temp.path().to_path_buf();
+        let config = Arc::new(Config::new(params));
+
+        let registry = Arc::new(ToolRegistry::new(config.clone()));
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            registry,
+            None,
+            config,
+        );
+
+        let args = serde_json::json!({"query": "这个项目的缺点在哪", "path": "."});
+        let normalized = executor
+            .normalize_tool_args("CodebaseSearch", "CodebaseSearch", args)
+            .await;
+        let query = normalized
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+
+        // 没有 LLM 可用时退回规则压缩 —— 至少不能是**原样的中文整句**。
+        // 规则压缩会把 CJK 段切成 bigram，至少是可检索的形态。
+        assert_ne!(
+            query, "这个项目的缺点在哪",
+            "中文 query 必须被归一，不能原样进词法引擎"
+        );
+        assert!(!query.is_empty(), "归一后不能是空 query");
+    }
+
+    /// 已经是代码侧的词时**原样放行** —— 不额外花一次 LLM 调用，也不改变语义。
+    #[tokio::test]
+    async fn a_code_side_query_is_passed_through_untouched() {
+        use crate::core::config::ConfigParameters;
+
+        let temp = tempfile::tempdir().expect("create temporary directory");
+        let mut params = ConfigParameters::default();
+        params.target_dir = temp.path().to_path_buf();
+        params.cwd = temp.path().to_path_buf();
+        let config = Arc::new(Config::new(params));
+
+        let registry = Arc::new(ToolRegistry::new(config.clone()));
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            registry,
+            None,
+            config,
+        );
+
+        let args = serde_json::json!({"query": "retry_backoff handler", "path": "."});
+        let normalized = executor
+            .normalize_tool_args("CodebaseSearch", "CodebaseSearch", args)
+            .await;
+        assert_eq!(
+            normalized.get("query").and_then(|v| v.as_str()),
+            Some("retry_backoff handler"),
+            "代码侧的 query 不该被改动"
         );
     }
 

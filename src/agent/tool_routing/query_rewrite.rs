@@ -18,6 +18,15 @@ const REWRITE_TIMEOUT: Duration = Duration::from_secs(8);
 /// 改写结果最多保留几个检索词。
 const MAX_TERMS: usize = 6;
 
+/// 提示词里最多带多少个**词表锚点**（仓库真实标识符）。
+///
+/// 锚点把"凭空猜"变成"挑现成的"：中文需求译出来的词必须**真的在索引里**
+/// 才可能命中。把这个仓库自己的命名摆给模型，它就能选 `known_issues`，
+/// 而不是猜一个这仓库根本没有的 `weakness`。
+///
+/// 对标 Windsurf FastContext 的 lexical anchoring（把本地词表注入检索提示）。
+const MAX_ANCHORS: usize = 60;
+
 /// 需求里已经出现"代码味"的词时不必改写 —— 模型自己知道该搜什么。
 fn has_code_like_token(input: &str) -> bool {
     input.split_whitespace().any(|raw| {
@@ -41,8 +50,81 @@ pub(crate) fn needs_rewrite(user_input: &str) -> bool {
     has_cjk && !has_code_like_token(user_input)
 }
 
+/// 自动触发 CodebaseSearch 时的检索词构造。
+///
+/// 三种情况：
+/// - **需求已经是代码侧的词**（英文 / 含标识符特征）→ 规则压缩，直接可用。
+///   注意 `rewrite_search_query` 在这种情况下返回 `None`（"不需要改写"），
+///   和"改写失败"的 `None` **不是一回事** —— 早期把两者混为一谈，
+///   结果所有英文请求的自动触发都被跳过了。
+/// - **需求是中文** → 必须改写成英文标识符；改写成功用改写结果。
+/// - **中文且改写失败** → 返回 `None`（这一发不发）。
+///   回退的 bigram 是中文词，索引里没有 → 必然零命中，还把模型带进
+///   "再搜一遍同样的词"的死循环（现场：ARTEX，
+///   `[ACE_REWRITE] query rewrite timed out after 8000ms` 之后发出
+///   `CodebaseSearch(缺点)`，连着两次零命中）。
+///
+/// 少一次检索好过给模型一个必然为空的答案 —— 空结果会被它当成
+/// 「这个功能不存在」。
+pub(crate) async fn build_auto_search_query(
+    client: &StarClient,
+    user_input: &str,
+) -> Option<String> {
+    build_auto_search_query_in(client, user_input, None).await
+}
+
+/// 带项目根的版本（能带上词表锚点）。
+pub(crate) async fn build_auto_search_query_in(
+    client: &StarClient,
+    user_input: &str,
+    project_root: Option<&std::path::Path>,
+) -> Option<String> {
+    if !needs_rewrite(user_input) {
+        // 已经是代码侧的词：规则压缩即可，不需要（也不该）花一次 LLM 调用。
+        return Some(super::tool_call_builders::extract_search_keywords(
+            user_input,
+        ));
+    }
+    match rewrite_search_query_in(client, user_input, project_root).await {
+        Some(terms) => Some(terms),
+        None => {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[ACE_AUTO] query rewrite unavailable for a CJK request — skipping \
+                 (fallback bigrams would be zero-hit): {user_input:?}"
+            ));
+            None
+        }
+    }
+}
+
+/// 取这个项目的**词表锚点**（真实标识符），给改写提示用。
+///
+/// 没有索引（冷启动）时返回空 vec —— 提示词照发，只是没有锚点。
+fn anchors_for(project_root: Option<&std::path::Path>) -> Vec<String> {
+    let Some(root) = project_root else {
+        return Vec::new();
+    };
+    crate::core::context::search_cache::shared_root_identifier_vocabulary(root, MAX_ANCHORS)
+        .unwrap_or_default()
+}
+
 /// 把需求改写成检索词；返回 `None` 表示"没改成"（调用方回退规则压缩）。
 pub(crate) async fn rewrite_search_query(client: &StarClient, user_input: &str) -> Option<String> {
+    rewrite_search_query_in(client, user_input, None).await
+}
+
+/// 带**词表锚点**的改写：把目标项目真实存在的标识符摆进提示词。
+///
+/// 没有锚点时，模型只能凭空译（"缺点" → `limitation`/`drawback`/`weakness`），
+/// 而仓库实际用的可能��� `gap`/`known_issues`/`todo` —— 译出来的词索引里
+/// 根本没有，命中率为零。有锚点时模型是在**挑**，不是在猜。
+///
+/// 对标 Windsurf FastContext 的 lexical anchoring。
+pub(crate) async fn rewrite_search_query_in(
+    client: &StarClient,
+    user_input: &str,
+    project_root: Option<&std::path::Path>,
+) -> Option<String> {
     if !needs_rewrite(user_input) {
         return None;
     }
@@ -51,10 +133,21 @@ pub(crate) async fn rewrite_search_query(client: &StarClient, user_input: &str) 
         "You translate a developer's request into code-search terms. Reply with ONLY a \
          space-separated list of at most 6 terms that would literally appear in source \
          code: identifiers (snake_case or CamelCase), type names, or technical nouns \
-         in English. If you cannot suggest any plausible code term, reply with the single \
-         word NONE. No explanation, no punctuation, no quotes.",
+         in English. If a list of repository identifiers is given, prefer terms from it \
+         — those are the words this codebase actually uses. If you cannot suggest any \
+         plausible code term, reply with the single word NONE. No explanation, no \
+         punctuation, no quotes.",
     );
-    let user = crate::types::StarMessage::user(format!("Request: {user_input}\n\nTerms:"));
+
+    let anchors = anchors_for(project_root);
+    let user = if anchors.is_empty() {
+        crate::types::StarMessage::user(format!("Request: {user_input}\n\nTerms:"))
+    } else {
+        crate::types::StarMessage::user(format!(
+            "Request: {user_input}\n\nRepository identifiers (prefer these when they fit):\n{}\n\nTerms:",
+            anchors.join(", ")
+        ))
+    };
 
     let outcome = tokio::time::timeout(
         REWRITE_TIMEOUT,
@@ -350,6 +443,48 @@ mod tests {
         assert!(!needs_rewrite("where is retry handled"));
         assert!(!needs_rewrite("run_codebase_search 怎么改"));
         assert!(!needs_rewrite("看看 CodebaseSearch 的实现"));
+    }
+
+    /// 词表锚点从索引来 —— 冷启动时索引还没建好，锚点为空。
+    #[test]
+    fn the_anchor_list_is_empty_without_an_index() {
+        let dir = tempfile::tempdir().expect("tmp");
+        assert!(
+            super::anchors_for(Some(dir.path())).is_empty(),
+            "没有索引时不该编造词表"
+        );
+        assert!(
+            super::anchors_for(None).is_empty(),
+            "没有项目根时不该编造词表"
+        );
+    }
+
+    /// 回归：**英文请求必须照常触发** CodebaseSearch。
+    ///
+    /// `rewrite_search_query` 对"不需要改写"的请求返回 `None`，而"改写失败"
+    /// 也返回 `None` —— 两者不是一回事。早期把两者混为一谈，结果所有英文
+    /// 请求的自动触发都被跳过了（英文是主要使用场景，等于把功能改没了）。
+    #[tokio::test]
+    async fn an_english_request_still_produces_a_query() {
+        let client = crate::llm::client::StarClient::new("", None, None, None, None);
+        let query = build_auto_search_query(&client, "where is retry handled")
+            .await
+            .expect("英文请求必须能构造出 query");
+        assert!(
+            query.contains("retry"),
+            "英文请求的检索词应保留关键词，实际 {query:?}"
+        );
+    }
+
+    /// 中文请求 + 改写不可用（没有可用的 provider）→ **不发**这一发。
+    #[tokio::test]
+    async fn a_cjk_request_without_a_rewrite_is_skipped() {
+        let client = crate::llm::client::StarClient::new("", None, None, None, None);
+        let query = build_auto_search_query(&client, "这个项目的缺点在哪").await;
+        assert!(
+            query.is_none(),
+            "改写不可用时不该发这一发（回退 bigram 必然零命中），实际 {query:?}"
+        );
     }
 
     #[test]

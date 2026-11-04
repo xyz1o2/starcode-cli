@@ -719,6 +719,16 @@ fn run_incremental_rebuild(root: &Path, dirty: &[String], stats: &EventWindowSta
     // 文件，只推进新的一部分；直到某一轮不再截断，引擎才拿完整数据。
     if truncated {
         coord.inner.lock().dirty.insert("\0refresh-all".to_string());
+        // 续扫**必须插队**。
+        //
+        // 它不是空转：上一轮真的推进了一部分索引（预算耗尽前读进去的那些文件
+        // 已经落盘），只是没读完。不插队的话，续扫要排在空转退避后面 —— 那个
+        // 退避是指数增长的（5s→10s→…→2min），于是"首次构建"在会话内根本
+        // 走不完：查询侧一次又一次看到 Warming，模型一次次重试，最后放弃。
+        //
+        // 截断本身说明还有大量文件没读 —— 那就是"确实有事要做"，与
+        // "这轮什么都没变"（空转）性质完全不同。
+        coord.skip_idle_backoff.store(true, Ordering::SeqCst);
     }
 
     coord.generation.fetch_add(1, Ordering::SeqCst);
@@ -800,6 +810,23 @@ pub fn is_started() -> bool {
 /// 语义引擎是否就绪（供查询路径决定是否提示 warming）。
 pub fn is_engine_ready() -> bool {
     coordinator().ready.load(Ordering::SeqCst)
+}
+
+/// 协调器**实际在重建哪个 root**。
+///
+/// 查询路径必须拿它和查询 root 比对 —— 协调器是进程级单例，它只重建**第一次**
+/// 交给它的那棵树。对另一个 root 的查询走 Warming 路径 = 永远等不到引擎：
+/// 后台根本不会给那个 root 建索引（现场：把查询缩到子目录后，连着几次都是
+/// "still building"，而全仓查询同样等不到，因为两边其实都不是托管 root）。
+///
+/// 返回 `None` = 协调器没启动，或还没定下 root。
+pub fn rebuild_root() -> Option<std::path::PathBuf> {
+    coordinator()
+        .inner
+        .lock()
+        .project_root
+        .as_ref()
+        .map(|root| root.canonicalize().unwrap_or_else(|_| root.clone()))
 }
 
 /// 是否有后台重建正在进行。

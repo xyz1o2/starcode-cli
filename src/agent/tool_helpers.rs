@@ -20,10 +20,21 @@ pub(crate) fn tool_result_is_usable(result: &ToolResult) -> bool {
         return false;
     }
     // 索引还在预热：内容是解释性文字而非检索结果。
+    //
+    // 标记必须跟着工具的实际文案走 —— 少了任何一个，"预热空结果"就会被当成
+    // 真结果，闸门当场关上，工具自己给的"稍后重跑"被自家 flag 否掉。
+    //
+    // 大小写必须对得上：工具的文案是 `"No hits — ..."`（大写 N），
+    // 而旧文案是 `"No hits this turn ..."`（也是大写 N）。写成小写的
+    // `"no hits —"` 匹配不到任何东西 —— 那是个**永远不会命中**的标记，
+    // 等于没加。
+    //
+    // 旧的 `"no hits this turn"` 保留：兼容仍在跑的旧构建产物。
     const COLD_MARKERS: &[&str] = &[
         "is still building",
         "is building in the background",
-        "no hits this turn",
+        "No hits this turn",
+        "No hits —",
     ];
     !COLD_MARKERS.iter().any(|m| text.contains(m))
 }
@@ -435,6 +446,56 @@ mod tests {
         assert!(
             !tool_result_is_usable(&warming),
             "预热空结果不能让闸门关闭，否则那次重跑永远补不上"
+        );
+    }
+
+    /// **标记必须与工具的实际文案逐字对得上。**
+    ///
+    /// 事故原样：文案是 `"No hits — ..."`（大写 N），而标记写成了小写的
+    /// `"no hits —"` —— `contains` 大小写敏感，那个标记**永远匹配不到**，
+    /// 等于没加。于是新的"重跑无用"文案被当成了真结果，闸门当场关上。
+    ///
+    /// 这条测试直接用工具的**真实文案**（两版：新版 + 旧版），
+    /// 任何一边漂移都会红。
+    #[test]
+    fn the_cold_markers_match_the_tools_actual_wording() {
+        // 新版文案（工具当前输出的原文）。
+        let current = result(
+            true,
+            "The cross-file search index for '/repo' is still building in the background \
+             (first build; typically finishes in seconds).\n\n\
+             No hits — the index for this root is not ready, so this is not an empty result.\n\
+             \n\
+             Do NOT re-run `CodebaseSearch` for this root: the first build is still in \
+             progress, so every retry returns this same message.",
+        );
+        assert!(
+            !tool_result_is_usable(&current),
+            "新版预热文案必须被判为不可用（否则闸门关闭，重跑永远补不上）"
+        );
+
+        // 旧版文案（仍在跑的旧构建产物）。
+        let legacy = result(
+            true,
+            "The cross-file search index for '/repo' is still building in the background \
+             (first build; typically finishes in seconds).\nNo hits this turn — this is a cold \
+             index, not an empty result.",
+        );
+        assert!(
+            !tool_result_is_usable(&legacy),
+            "旧版预热文案必须被判为不可用"
+        );
+
+        // 中文 query 的那版文案。
+        let cjk = result(
+            true,
+            "The cross-file search index for '/repo' is still building in the background \
+             (first build; typically finishes in seconds).\nNo hits — and the query itself is \
+             in Chinese, while the index holds English identifiers.",
+        );
+        assert!(
+            !tool_result_is_usable(&cjk),
+            "中文 query 的预热文案必须被判为不可用"
         );
     }
 

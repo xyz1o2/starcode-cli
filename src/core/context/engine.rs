@@ -73,6 +73,30 @@ pub struct ContextEngine {
     project_context_cache: Arc<RwLock<HashMap<PathBuf, ProjectContextCacheEntry>>>,
     project_context_cache_secs: u64,
     /// 语义搜索缓存管理器 (parking_lot RwLock, 不中毒; LRU淘汰)
+    ///
+    /// **必须是进程级共享的那个单例**，不能是独立实例。
+    ///
+    /// 以前这里是 `Arc::new(SearchEngineCacheManager::new())` —— 于是进程里
+    /// 存在**两个**语义缓存：
+    /// - watcher（`watcher::set_engine_cache`）写进 `shared_search_cache()`
+    /// - 工具（`agent_core::lazy_init` 的 `with_cache(context_engine.search_cache)`）
+    ///   读的是 ContextEngine 自己那份
+    ///
+    /// 而 `lazy_init` 那句 `register_tool` 会**覆盖**掉 `runtime_bootstrap`
+    /// 里已经挂好共享缓存的工具，于是最终生效的是"读 B 桶"的那份。
+    /// 后果：watcher 在后台把索引建好了（ARTEX 实测 639 文件 / 4.3s，
+    /// 日志 `semantic engine updated in background: full rebuild`），
+    /// 工具却永远读不到 —— 查询侧每次都判定"引擎不存在"，于是回一句
+    /// "still building"，模型照着提示重试，一次又一次。
+    ///
+    /// 现场事故：ARTEX 上连续 11 次 CodebaseSearch 全部返回同一句
+    /// "still building"，35.2k tokens / 1m48s，最后给用户写了一份
+    /// "索引构建疑似卡住"的错误结论；而同一时刻 watcher 日志明明白白写着
+    /// 引擎已经建好。
+    ///
+    /// 现在 ContextEngine 直接持有共享单例：任何拿到
+    /// `context_engine.search_cache` 的调用方拿到的都是同一个对象，
+    /// "watcher 写的"和"工具读的"不可能分家。
     pub search_cache: Arc<SearchEngineCacheManager>,
 }
 
@@ -100,7 +124,9 @@ impl ContextEngine {
             cache_refresh_secs,
             project_context_cache: Arc::new(RwLock::new(HashMap::new())),
             project_context_cache_secs,
-            search_cache: Arc::new(SearchEngineCacheManager::new()),
+            // 进程级共享单例 —— 见 `search_cache` 字段的文档：这里曾经是
+            // 一个独立的 `Arc::new(...)`，于是 watcher 写一份、工具读另一份。
+            search_cache: super::search_cache::shared_search_cache(),
         }
     }
 

@@ -17,7 +17,10 @@ pub(crate) use helpers::{
     should_skip_verification, truncate_chars, ToolHints, ToolRoles, CORE_TOOL_NAMES,
 };
 pub(crate) use loop_detection::{detect_tool_loop, resolved_tool_loop_repeat_threshold};
-pub(crate) use query_rewrite::{needs_rewrite, rewrite_search_query};
+pub(crate) use query_rewrite::{
+    build_auto_search_query, build_auto_search_query_in, needs_rewrite, rewrite_search_query,
+    rewrite_search_query_in,
+};
 pub(crate) use tool_call_builders::{
     build_analyzer_skill_tool_call, build_codebase_search_tool_call_for_query,
     build_editor_skill_tool_call, build_explore_tool_call, build_json_fallback_prompt,

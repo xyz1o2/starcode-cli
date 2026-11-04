@@ -918,22 +918,34 @@ impl Agent {
                 // 以前在这里一刀切置 true，于是工具自己给出的"稍后重跑"建议
                 // 被自家 flag 当场否掉，这一轮再也补不上那次搜索。
                 let mut satisfied = false;
-                // 中文需求先改写成代码侧检索词（词法引擎吃英文标识符）；补跑
-                // 必须复用同一个 query，否则两次调用搜的不是同一件事。
-                let query =
-                    crate::agent::tool_routing::rewrite_search_query(&self.client, user_input)
-                        .await
-                        .unwrap_or_else(|| {
-                            crate::agent::tool_routing::extract_search_keywords(user_input)
-                        });
-                // 闸门兜底：改写失败 → query 还是中文；索引无中文 token 时，
-                // 这一发必然零命中 —— 与其在工具里空转，不如根本不触发。
+                // 检索词构造：英文/代码侧需求走规则压缩；中文需求必须改写成
+                // 英文标识符，改写失败就**不发**这一发（回退 bigram 是中文词，
+                // 索引里没有 → 必然零命中，还会把模型带进"再搜一遍同样的词"
+                // 的死循环 —— 现场：ARTEX，`[ACE_REWRITE] query rewrite timed
+                // out after 8000ms` 之后发出 `CodebaseSearch(缺点)`，连着两次
+                // 零命中）。
+                //
+                // 少一次检索好过给模型一个必然为空的答案 —— 空结果会被它当成
+                // 「这个功能不存在」。
+                let Some(query) = crate::agent::tool_routing::build_auto_search_query_in(
+                    &self.client,
+                    user_input,
+                    Some(self.config.target_dir().as_path()),
+                )
+                .await
+                else {
+                    crate::utils::logging::append_debug_log_line(
+                        "[ACE_AUTO] CodebaseSearch skipped — no usable query (CJK request whose rewrite failed)",
+                    );
+                    return TurnResult::Done;
+                };
+                // 闸门兜底：query 仍是中文且索引里查无此词 → 零命中，别触发。
                 if !crate::agent::tool_routing::language_gate_allows(
                     &query,
                     Some(self.config.target_dir().as_path()),
                 ) {
                     crate::utils::logging::append_debug_log_line(
-                        "[ACE_AUTO] CodebaseSearch skipped — language gate (query is CJK-only, index has no CJK tokens)",
+                        "[ACE_AUTO] CodebaseSearch skipped — language gate (query terms are not in the index)",
                     );
                     return TurnResult::Done;
                 }
@@ -972,9 +984,11 @@ impl Agent {
                             .and_then(|v| v.trim().parse().ok())
                             .unwrap_or(8_000),
                     );
-                    let ready =
-                        crate::core::tools::codebase_search::wait_for_index_ready(wait_budget)
-                            .await;
+                    let ready = crate::core::tools::codebase_search::wait_for_index_ready(
+                        self.config.target_dir().as_path(),
+                        wait_budget,
+                    )
+                    .await;
                     crate::utils::logging::append_debug_log_line(&format!(
                         "[ACE_AUTO] CodebaseSearch cold-start warmup wait ready={ready} waited_ms={} turn={current_turn}",
                         wait_budget.as_millis()

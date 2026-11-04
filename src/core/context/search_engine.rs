@@ -261,6 +261,40 @@ impl SearchEngine {
         cjk as f64 / total as f64
     }
 
+    /// 索引里最常见的**标识符**（按文档数排序）。
+    ///
+    /// 用途：给查询改写当"词表锚点"（lexical anchoring）。中文需求要翻成
+    /// 英文标识符，光靠模型猜会猜偏 —— "缺点" 可能被译成
+    /// `limitation`/`drawback`/`weakness`，而这个仓库实际用的是
+    /// `gap`/`known_issues`/`todo`。把仓库自己的词摆进提示词，模型就能
+    /// **挑仓库真有的词**，而不是凭空造词。
+    ///
+    /// 对标 Windsurf FastContext 的做法：*Lexical Anchoring — extract exact
+    /// candidate filenames, path tokens, and literal terms from the local repo*，
+    /// 然后 *pass local chunks, anchors, and the hotspot map to [the model]*。
+    ///
+    /// 只收"长得像标识符"的词（含 `_` 或含大写字母）；纯英文单词（注释里
+    /// 的 the/handle/error）不算 —— 那是词，不是这个仓库的**命名**。
+    pub fn identifier_vocabulary(&self, limit: usize) -> Vec<String> {
+        let mut candidates: Vec<(String, usize)> = self
+            .index
+            .keys()
+            .filter(|token| {
+                token.chars().count() >= 4
+                    && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && (token.contains('_') || token.chars().any(|c| c.is_ascii_uppercase()))
+            })
+            .map(|token| {
+                let df = self.doc_freqs.get(token).copied().unwrap_or(1);
+                (token.clone(), df)
+            })
+            .collect();
+        // 文档数多的词更可能是这个仓库的"主干命名"；同频按字典序，保证稳定。
+        candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        candidates.truncate(limit);
+        candidates.into_iter().map(|(token, _)| token).collect()
+    }
+
     /// 从一组查询词算诊断信息。
     pub fn diagnosis_from_terms(&self, terms: &[String]) -> QueryDiagnosis {
         // "纯 CJK" = 每个词都含 CJK 字符，且不含任何 ASCII 字母。

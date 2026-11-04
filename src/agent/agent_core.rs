@@ -253,6 +253,21 @@ impl Agent {
                 self.context_engine.prewarm_index_cache();
             }
 
+            // 工具必须与 watcher 读**同一个**缓存对象。
+            //
+            // 这里的 `with_cache(...)` 是会**覆盖** `runtime_bootstrap` 里那个
+            // 工具的（`register_tool` 按名字覆盖），所以它传的缓存必须是
+            // 共享单例 —— 否则等于用"读另一份缓存"的工具把那个好工具顶掉。
+            //
+            // 事故原样：这里曾经传 `self.context_engine.search_cache`，
+            // 而 ContextEngine 当时持有的是一份**独立**实例，于是
+            // watcher 写进共享单例、工具读独立实例 —— 索引明明建好了
+            // （ARTEX 日志：`semantic engine updated in background: full
+            // rebuild, 639 files in 4.34s`），查询却一直回 "still building"，
+            // 模型连着 11 次重试后给用户写了"索引构建卡住"的错误结论。
+            //
+            // 现在 `context_engine.search_cache` 本身就是共享单例，
+            // 两边不可能分家。
             if let Some(tool_registry) = self.runtime_tool_registry() {
                 let cached_tool =
                     crate::core::tools::codebase_search::CodebaseSearchTool::with_cache(

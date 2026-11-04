@@ -487,7 +487,270 @@ policy_engine 全部 19 passed
 cargo fmt --all -- --check                        通过
 git diff --check                                  通过
 cargo check --workspace --all-targets --locked 通过
-全量 lib 1877 passed / 37 failed / 3 ignored
+全量 lib 1881 passed / 37 failed / 3 ignored
 ```
 
 37 个失败与改动前完全一致（Windows 用户 profile 隔离问题），无新增失败。
+
+---
+
+# 附五：CodebaseSearch 的「找词不对」
+
+## 21. 现象
+
+```text
+● CodebaseSearch(缺点)
+  ⎿  The cross-file search index for '/mnt/h/test/ARTEX' is still building in the background
+     (first build; typically finishes in seconds).
+     No hits this turn — this is a cold index, not an empty result. Re-run `CodebaseSearch`
+     with the same keywords once before giving up on it.
+● CodebaseSearch(缺点 · retry)
+  ⎿  CodebaseSearch · building index
+```
+
+两个问题：query 是中文词（必然零命中），而且工具让模型"用同样的词再搜一遍" → 死循环。
+
+## 22. 地面真相（ARTEX 调试日志）
+
+```text
+[15:44:56] [ACE_AUTO] selected trigger CodebaseSearch (score=75, reason=ranked_cross_file_locate_shape)
+[15:45:04] [ACE_REWRITE] query rewrite timed out after 8000ms
+[15:45:05] [ACE_AUTO] CodebaseSearch cold-start warmup wait ready=true waited_ms=8000
+[15:45:07] [ACE_AUTO] CodebaseSearch auto-run satisfied=false
+```
+
+三个缺陷叠加：
+
+| # | 缺陷 | 机制 |
+|---|---|---|
+| **A** | 改写超时 → 回退 bigram → 中文 query 照发 | `rewrite_search_query` 8 秒超时 → `extract_search_keywords` 把中文切成 bigram（"缺点" → "缺点"） |
+| **B** | 语言闸门过宽 | 判据是"索引里有没有**任何**中文 token"。ARTEX 有中文注释 → `has_cjk=true` → 放行，但"缺点"根本不在索引里 |
+| **C** | 等就绪与工具判就绪不同源 | 等的是**进程级** `watcher::is_engine_ready()`；工具查的是**按 root + cache key** 且 mtime 对得上的引擎。`ready=true` 之后补跑仍报 "still building" |
+
+## 23. 调研：参考实现怎么传参
+
+| 工具 | 参数 | 检索方式 |
+|---|---|---|
+| Augment `grep-search` | `query`="Text or regex to search for" + `paths`/`include_globs`/`exclude_globs`/`max_results` | **词法**，调用方给代码文本 |
+| Augment `codebase-retrieval` | `information_request`="A natural-language description…" | **语义**，独立引擎 |
+| Windsurf FastContext | `query`=自然语言 + `project_root`/`exclude_paths`/`tree_depth` | 自然语言 → 后端模型决定搜什么 |
+| Controller `codebase-search` | `query`="Natural language search query…" + `path` | 语义 |
+
+关键结论：**这两个参考实现都不把自然语言喂给词法引擎**。Augment 干脆分成两个工具：词法的那个要"代码文本"，语义的那个才收自然语言。Windsurf 的自然语言进的是**后端模型**，不是倒排表。
+
+而 StarCode 的 `CodebaseSearch` 是**词法**引擎（项目既定路线：不引入 embedding）。所以：
+
+> ★ 入参契约必须保持"代码侧检索词"。让词法工具接受自然语言是**契约撒谎** ——
+> 翻译是猜的，会超时（本例 8 秒），猜错了照样零命中。
+
+所以我**撤回了**"入参接受自然语言"的改动：schema 与工具描述恢复成"code-side keywords"，并继续要求模型自己给出代码词汇。
+
+## 24. 真正的修法
+
+### ① 闸门改用**覆盖率**而不是"有没有中文 token"
+
+判据从"索引里有没有中文 token"（过宽）换成"**这组词本身在不在索引里**"：
+
+```rust
+// src/agent/tool_routing/triggers.rs
+if let Some(coverage) = term_coverage {
+    if coverage <= 0.0 {
+        return Err("language gate: query keywords are not in the index at all ...");
+    }
+}
+```
+
+覆盖率来自引擎已有的 `term_coverage()`（倒排表命中率），新增 `shared_root_term_coverage` 从缓存取。
+
+**真实 ARTEX 验证**：
+
+```text
+ARTEX 索引: files=639
+ARTEX: has_cjk=Some(true)  coverage("缺点")=Some(0.0)
+闸门对 "缺点": allows=false
+```
+
+旧逻辑：`has_cjk=true` → 放行 → 发一次必然零命中的检索。
+新逻辑：覆盖率 0 → 拦下。
+
+### ② 改写失败就不发这一发
+
+自动触发路径原来"改写失败 → 回退 bigram → 照发"。现在改成**改写失败就不触发**：
+
+```rust
+let rewritten = rewrite_search_query(&self.client, user_input).await;
+let query = match rewritten {
+    Some(terms) => terms,
+    None => { /* 记日志，跳过触发 */ return TurnResult::Done; }
+};
+```
+
+少一次检索好过给模型一个必然为空的答案 —— 空结果会被它当成「这个功能不存在」。
+
+### ③ 等就绪与工具判就绪同源
+
+`wait_for_index_ready` 改成按 root 查缓存（和 `resolve_engine` 完全相同的判据），不再等进程级标志：
+
+```rust
+pub fn root_engine_ready(root: &Path) -> bool { /* 缓存命中 + mtime 对得上 */ }
+```
+
+现场日志 `ready=true waited_ms=8000` 却仍 "still building" 的矛盾因此消失。
+
+### ④ 工具零命中时区分"换个词"与"再搜一遍"
+
+`is_cjk_only_query` 让冷启动路径（Warming）与 ripgrep 兜底路径都给出可执行的下一步：
+
+```text
+No hits — and the query itself is in Chinese, while the index holds English identifiers,
+paths and English comments. Retrying the same Chinese words cannot match: pass code-side
+terms instead ...
+```
+
+（原来的"重跑同样的词"对中文 query 是**有害建议**。）
+
+### ⑤ 兜底：模型自己调时也不漏
+
+`ToolExecutor` 保留 LLM client，在**工具入口**（`normalize_tool_args`）给 `CodebaseSearch` 的 query 做一次归一，模型绕过自动触发直接调也走同一条路。同轮内同一个 query 只翻译一次（缓存），保证补跑搜的是同一件事。
+
+注意：这是**兜底**，不是契约 —— 工具描述仍然要求模型给代码侧词汇。
+
+## 25. 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `src/core/context/search_cache.rs` | 新增 `shared_root_term_coverage` / `root_term_coverage` |
+| `src/agent/tool_routing/triggers.rs` | 闸门加覆盖率判据；新增 `codebase_search_language_gate_detail` |
+| `src/agent/agent_tool_process.rs` | 改写失败即跳过触发；等待按 root |
+| `src/core/tools/codebase_search.rs` | `wait_for_index_ready(root, …)` / `root_engine_ready` / `seed_shared_engine`；`is_cjk_only_query` 零命中诊断 |
+| `src/agent/tool_executor.rs` | 保留 client；工具入口归一 CodebaseSearch query |
+
+## 26. 回归测试
+
+```text
+the_language_gate_blocks_cjk_terms_that_are_not_in_the_index   passed
+the_language_gate_allows_cjk_terms_that_are_in_the_index       passed
+a_chinese_codebase_search_query_is_normalized_at_the_tool_entry passed
+a_code_side_query_is_passed_through_untouched                 passed
+codebase_search 41 passed
+```
+
+## 27. 仍然存在的边界
+
+1. **翻译是猜的**。即使改写成功，"缺点" → `limitation / drawback / weakness` 也可能和仓库里的实际用词（`gap` / `known_issues` / `TODO`）不重合。这是词法引擎 + 不引入 embedding 的必然结果 —— 真要解决需要语义索引（Windsurf 的 Semble / Augment 的 Context Engine）。
+2. **改写要 8 秒**且会超时。修法是**跳过**而不是硬扛。
+3. **缺范围参数**。Augment `grep-search` 有 `paths`/`include_globs`/`exclude_globs`，Windsurf 有 `exclude_paths`；StarCode 只有 `path`。大仓库里"缩小范围"是最有效的提速手段，这条值得补。
+
+---
+
+# 附六：把「猜」变成「挑」（词表锚点）
+
+## 28. 上一版留下的问题
+
+附五修好了「不该发的检索」与「死循环」，但**翻译本身还是猜的**：
+
+> "缺点" → `limitation` / `drawback` / `weakness`
+
+这三个词很可能**一个都不在 ARTEX 的索引里** —— 于是改写"成功"了，检索照样零命中。
+
+## 29. 参考实现怎么解决
+
+Windsurf FastContext 的检索不是"给一句自然语言 → 搜"这么简单，它的管线是：
+
+```text
+1. Local Semantic Prefetch      → 预取本地候选 chunk
+2. Lexical Anchoring            → 从本地仓库抽出"确切的候选文件名、路径 token、字面词"
+3. Hotspot Repo Mapping         → BM25F 给目录打分，构造聚焦的子树
+4. Remote Verification          → 把本地 chunk、anchors、hotspot map 一起交给后端模型
+```
+
+关键在第 2 步和第 4 步：**把仓库自己的词表摆进检索提示**，让模型在**这个仓库的命名里挑**，而不是凭空造词。
+
+## 30. 实现
+
+### 引擎侧：取词表
+
+`SearchEngine::identifier_vocabulary(limit)` —— 从倒排表里挑出"长得像标识符"的词（含 `_` 或含大写字母），按文档数排序：
+
+```rust
+token.chars().count() >= 4
+    && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    && (token.contains('_') || token.chars().any(|c| c.is_ascii_uppercase()))
+```
+
+纯英文单词（注释里的 the/handle/error）不算 —— 那是词，不是这个仓库的**命名**。
+
+缓存侧：`shared_root_identifier_vocabulary(root, limit)`。
+
+### 改写侧：把词表摆进提示
+
+```rust
+"Request: {user_input}
+
+Repository identifiers (prefer these when they fit):
+task_id, created_at, finding_id, report_finding, last_error, ...
+
+Terms:"
+```
+
+system prompt 同步改口："If a list of repository identifiers is given, prefer terms from it — those are the words this codebase actually uses."
+
+### 真实 ARTEX 验证
+
+```text
+ARTEX 索引: files=639
+锚点=60
+样例: task_id, created_at, root_domain, exploration_id, finding_id, tool_use,
+      asset_ids, conversation_id, output_tokens, input_tokens, last_error,
+      llm_profile_id, report_finding, cache_read_tokens, agent_key, ...
+```
+
+模型译"缺点"时能看到 `finding_id` / `report_finding` / `last_error` —— 而不是编一个 `weakness`。
+
+### 修一个我自己引入的回归
+
+附五里把 `rewrite_search_query` 的 `None` 当成"改写失败"，于是**所有英文请求的自动触发都被跳过了** —— 英文是主要使用场景，等于把功能改没了。
+
+根因：`rewrite_search_query` 对"不需要改写"也返回 `None`（`needs_rewrite == false` 时提前 return None），与"改写失败"的 `None` **不是一回事**。
+
+修法：抽 `build_auto_search_query_in`，先判 `needs_rewrite`：
+
+```rust
+if !needs_rewrite(user_input) {
+    return Some(extract_search_keywords(user_input));   // 英文/代码侧 → 规则压缩
+}
+match rewrite_search_query_in(client, user_input, project_root).await {
+    Some(terms) => Some(terms),
+    None => None,   // 中文 + 改写失败 → 不发
+}
+```
+
+回归测试 `an_english_request_still_produces_a_query` 钉住这条。
+
+## 31. 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `src/core/context/search_engine.rs` | 新增 `identifier_vocabulary` |
+| `src/core/context/search_cache.rs` | 新增 `shared_root_identifier_vocabulary` / `root_identifier_vocabulary` |
+| `src/agent/tool_routing/query_rewrite.rs` | `rewrite_search_query_in`（带锚点）、`build_auto_search_query_in`、锚点词表 |
+| `src/agent/agent_tool_process.rs` | 自动触发改用带锚点的构造 |
+| `src/agent/tool_executor.rs` | 工具入口兜底也带锚点 |
+
+## 32. 验证
+
+```text
+cargo fmt --all -- --check                        通过
+git diff --check                                  通过
+cargo check --workspace --all-targets --locked 通过
+query_rewrite 11 passed（含英文请求回归测试）
+全量 lib 1884 passed / 37 failed / 3 ignored
+```
+
+37 个失败与改动前完全一致（Windows 用户 profile 隔离问题），无新增失败。
+
+## 33. 剩下的边界
+
+1. **锚点只覆盖高频标识符**。仓库里低频但精准的专有词可能不在前 60 个里 —— 模型仍可能译偏。
+2. **词表来自倒排表**（分词后的 token），不是符号表。理论上可以用 CallGraph 的符号表更准，但那是另一条链路。
+3. **缺范围参数**（`paths`/`include_globs`/`exclude_globs`）—— 仍然值得补。

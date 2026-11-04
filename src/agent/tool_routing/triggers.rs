@@ -610,6 +610,20 @@ fn codebase_search_language_gate_with(
     index_has_cjk: Option<bool>,
     allow_rewrite: bool,
 ) -> Result<(), String> {
+    codebase_search_language_gate_detail(user_input, index_has_cjk, allow_rewrite, None).map(|_| ())
+}
+
+/// 语言闸门的详细版：除了"过/不过"，还给出**为什么**。
+///
+/// `term_coverage` 是这组检索词在索引里的覆盖率（0.0 = 一个都没出现过）。
+/// 它把闸门从"索引里有没有**任何**中文 token"（过宽）换成
+/// "**这组词本身**在不在索引里"（能命中的必要条件）。
+fn codebase_search_language_gate_detail(
+    user_input: &str,
+    index_has_cjk: Option<bool>,
+    allow_rewrite: bool,
+    term_coverage: Option<f64>,
+) -> Result<String, String> {
     let keywords = super::tool_call_builders::extract_search_keywords(user_input);
     let terms: Vec<&str> = keywords.split_whitespace().collect();
 
@@ -625,12 +639,29 @@ fn codebase_search_language_gate_with(
 
     // 只要有**任何**一个词不是纯中文，就还有命中代码的可能 —— 闸门不适用。
     if terms.is_empty() || !terms.iter().all(|t| is_cjk_only(t)) {
-        return Ok(());
+        return Ok(format!("query has non-CJK terms: {keywords:?}"));
+    }
+
+    // 覆盖率已知 → 用它判：这组词在索引里一个都没有，必然零命中。
+    //
+    // 这是"索引里有中文 token"判不出来的那个 case：项目里有一两处中文注释
+    // （→ `index_has_cjk == true`），但这组具体词不在索引里（→ 覆盖率 0）。
+    // 现场事故：ARTEX 的索引里有中文注释，闸门放行，`CodebaseSearch(缺点)`
+    // 照发 —— 一发必然零命中，还把模型带进"再搜一遍同样的词"的死循环。
+    if let Some(coverage) = term_coverage {
+        if coverage <= 0.0 {
+            return Err(format!(
+                "language gate: query keywords are not in the index at all \
+                 (term coverage: {coverage:.0}%) — query={keywords:?}"
+            ));
+        }
     }
 
     match index_has_cjk {
         // 索引里有中文 token（中文注释/文档）→ 中文关键词**可能**命中。
-        Some(true) => Ok(()),
+        Some(true) => Ok(format!(
+            "index has CJK tokens; query may match Chinese comments: {keywords:?}"
+        )),
         // 索引里一个中文 token 都没有 → 中文关键词必零命中。
         //
         // **例外：改写路径能救**（判定阶段）。自动触发会先把中文需求改写成
@@ -640,7 +671,7 @@ fn codebase_search_language_gate_with(
         // （`language_gate_allows`），那时才真正拦下。
         Some(false) => {
             if allow_rewrite && super::query_rewrite::needs_rewrite(user_input) {
-                return Ok(());
+                return Ok(format!("rewrite may rescue this query: {keywords:?}"));
             }
             Err(format!(
                 "language gate: query keywords are all CJK but the index has no CJK tokens \
@@ -650,16 +681,27 @@ fn codebase_search_language_gate_with(
         // 索引还没建好 —— 不知道，放行。
         // 「不知道」不等于「不匹配」：据此拦截会把一次本该成功的检索也毙掉。
         // 真正的冷启动由工具自己的 `Warming` 分支处理（等索引就绪后重跑）。
-        None => Ok(()),
+        None => Ok(format!(
+            "index not built yet; cannot judge coverage: {keywords:?}"
+        )),
     }
 }
 
 /// 语言闸门（对**有效 query** 判定）—— 调用方在拿到改写结果后用。
 ///
 /// 改写成功 → query 是英文标识符，必然放行；改写失败 → query 还是中文，
-/// 这时闸门按老规矩拦下（索引无中文 token 时零命中，别白烧一个回合）。
+/// 这时闸门按覆盖率拦下（这组词一个都不在索引里 → 零命中，别白烧一个回合）。
+///
+/// 覆盖率判定取代了"索引里有没有中文 token"：项目里有一两处中文注释就能让
+/// 旧判据放行，于是中文 query 照发、必然零命中（现场：`CodebaseSearch(缺点)`）。
 pub(crate) fn language_gate_allows(query: &str, project_root: Option<&Path>) -> bool {
-    codebase_search_language_gate_with(query, index_has_cjk_token(project_root), false).is_ok()
+    codebase_search_language_gate_detail(
+        query,
+        index_has_cjk_token(project_root),
+        false,
+        index_term_coverage(query, project_root),
+    )
+    .is_ok()
 }
 
 /// 查目标项目索引的语言构成（供上面的闸门用）。
@@ -668,6 +710,16 @@ pub(crate) fn language_gate_allows(query: &str, project_root: Option<&Path>) -> 
 fn index_has_cjk_token(project_root: Option<&Path>) -> Option<bool> {
     let root = project_root?;
     crate::core::context::search_cache::shared_root_has_cjk_token(root)
+}
+
+/// 这组检索词在索引里的覆盖率（`None` = 索引还没建好，不知道）。
+fn index_term_coverage(query: &str, project_root: Option<&Path>) -> Option<f64> {
+    let root = project_root?;
+    let terms: Vec<String> = query.split_whitespace().map(|t| t.to_string()).collect();
+    if terms.is_empty() {
+        return None;
+    }
+    crate::core::context::search_cache::shared_root_term_coverage(root, &terms)
 }
 
 /// 自动触发闸门。
@@ -1487,6 +1539,36 @@ mod tests {
         assert!(
             codebase_search_language_gate("502 错误处理", Some(false)).is_ok(),
             "含 ASCII 数字的词不该被当纯中文拦下"
+        );
+    }
+
+    /// 回归：索引里有中文 token，但**这组词不在索引里** → 必须拦下。
+    ///
+    /// 现场事故（ARTEX）：项目里有中文注释（→ `index_has_cjk == true`），
+    /// 闸门据此放行，于是发出 `CodebaseSearch(缺点)` —— 这组词根本不在索引里，
+    /// 必然零命中；工具又回一句"再搜一遍同样的词"，模型照做 → 两次零命中。
+    ///
+    /// 覆盖率才是"能命中"的必要条件：0 = 这组词一个都没出现过。
+    #[test]
+    fn the_language_gate_blocks_cjk_terms_that_are_not_in_the_index() {
+        let err = codebase_search_language_gate_detail(
+            "缺点",
+            Some(true), // 索引里有中文 token
+            false,
+            Some(0.0), // 但这组词的覆盖率是 0
+        );
+        assert!(
+            err.is_err(),
+            "索引里有中文 token 不等于这组词能命中 —— 覆盖率 0 必须拦下"
+        );
+    }
+
+    /// 覆盖率已知且 > 0 → 放行（这组词确实在索引里）。
+    #[test]
+    fn the_language_gate_allows_cjk_terms_that_are_in_the_index() {
+        assert!(
+            codebase_search_language_gate_detail("缺点", Some(true), false, Some(0.5)).is_ok(),
+            "词在索引里就该放行"
         );
     }
 

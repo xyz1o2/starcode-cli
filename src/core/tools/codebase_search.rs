@@ -506,6 +506,47 @@ async fn run_codebase_search(
     let limits_for_search = limits;
     let cache_for_search = cache.clone();
 
+    // ── 冷启动：等索引就绪，而不是立刻返回 "still building" ──────────────
+    //
+    // 自动触发路径早就等过一次（见 `agent_tool_process.rs` 的 warmup wait），
+    // 但**模型显式调用**这条路径没有 —— 于是模型拿到的是一句"还在构建，
+    // 请重跑一次"，它照着做，一轮一轮地重试，直到会话耗尽（现场：连着 11 次
+    // 同一条提示，每次都"重跑一次"，而索引压根没在推进）。
+    //
+    // 只在**引擎完全不存在**时等。三种状态要分清：
+    // - Fresh（缓存里的 mtime 与磁盘一致）→ 直接用，不等；
+    // - Stale（引擎在，但磁盘变了）→ 立刻用旧引擎回答（serve-stale），
+    //   **也**不等 —— 否则"改一个文件"之后每一次检索都要白等 8 秒；
+    // - Absent（冷启动，压根没有引擎）→ 这才是该等的情况。
+    //
+    // 等的是**工具自己手里那份缓存**（`cache`），不是某个全局单例：
+    // 判据不一致就会出现"等了 8 秒还是 Warming"的白等。
+    if let Some(cache_ref) = cache.as_ref() {
+        let presence =
+            crate::core::tools::codebase_search::root_engine_presence(cache_ref, &root_path);
+        if presence == crate::core::tools::codebase_search::EnginePresence::Absent {
+            let wait_budget = std::time::Duration::from_millis(
+                std::env::var("STAR_CODEBASE_SEARCH_WARMUP_WAIT_MS")
+                    .ok()
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(8_000),
+            );
+            emit_progress(
+                &update_output,
+                format!(
+                    "Cross-file index is still building · waiting up to {}s for it",
+                    wait_budget.as_millis() / 1000
+                ),
+            );
+            crate::core::tools::codebase_search::wait_for_index_ready_in(
+                cache_ref,
+                &root_path,
+                wait_budget,
+            )
+            .await;
+        }
+    }
+
     let search_future = tokio::task::spawn_blocking(move || {
         search_codebase_with_limits(
             &root_for_search,
@@ -633,7 +674,7 @@ impl BaseDeclarativeTool for CodebaseSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Keywords or a short phrase whose terms appear in the code (e.g. 'retry backoff', 'parse config toml'). Pass keywords, not a full natural-language question — a sentence dilutes the ranking."
+                    "description": "Code-side keywords whose terms appear in the code (e.g. 'retry backoff', 'parse config toml'). Do not pass the user's sentence — the index holds identifiers, paths and English comments, so a Chinese or question-shaped phrasing matches nothing. If the request is in another language, translate it yourself into the words the code would use. Keywords, not a full question: a sentence dilutes the ranking."
                 },
                 "path": {
                     "type": "string",
@@ -1058,7 +1099,7 @@ fn resolve_engine(
 ) -> Result<(SearchEngine, IndexStats, EngineSource), Box<dyn std::error::Error + Send + Sync>> {
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let current_mtime = index_mtime(root);
-    let cache_key = (canonical_root, limits.cache_key());
+    let cache_key = (canonical_root.clone(), limits.cache_key());
 
     if let Some(manager) = cache {
         if let Some(engine) = manager.get_engine(&cache_key, current_mtime) {
@@ -1071,8 +1112,24 @@ fn resolve_engine(
         }
 
         // 冷启动：协调器可用且未发生过失败 → 后台构建 + Warming 兜底
+        //
+        // 但**只有查询的就是协调器实际在重建的那个 root** 时才能走这条路。
+        // 协调器是进程级单例，它只重建第一次交给它的那棵树；对别的 root
+        // （典型：把查询缩到子目录）走 Warming = 永远等不到引擎 —— 后台根本
+        // 不会给那个 root 建索引，而查询侧一次又一次看到同一条 "still
+        // building"。现场：缩到单目录后连着几次都是 Warming，而全仓查询
+        // 同样等不到（协调器的 root 是启动时的 cwd，查询 root 与它不一致）。
+        //
+        // 非托管 root 直接同步构建：它没被后台覆盖，只能自己建。子目录通常
+        // 很小，同步构建代价可接受；大目录则会走上面的超时兜底。
         let coordinator_engaged = crate::core::context::watcher::is_started();
-        if coordinator_engaged && !crate::core::context::watcher::last_rebuild_failed() {
+        let root_is_managed = crate::core::context::watcher::rebuild_root()
+            .map(|managed| managed == canonical_root)
+            .unwrap_or(false);
+        if coordinator_engaged
+            && root_is_managed
+            && !crate::core::context::watcher::last_rebuild_failed()
+        {
             crate::core::context::watcher::request_refresh(root);
             return Ok((
                 SearchEngine::new(),
@@ -1158,11 +1215,38 @@ fn search_codebase_with_limits(
                 output.push_str(&fallback);
             }
             None => {
-                // 字面也零命中时才让模型重跑。（措辞保留"再试一次"而不是"改用
-                // Grep"——第一次调用时就把模型推走会让这个工具永远不被用。）
-                output.push_str(
-                    "No hits this turn — this is a cold index, not an empty result. Re-run `CodebaseSearch` with the same keywords once before giving up on it.\n",
-                );
+                // 字面也零命中。此时**不能再让模型重跑**。
+                //
+                // 旧文案是"Re-run with the same keywords once before giving up"——
+                // 它把模型推进一个死循环：索引在会话内没建完，重跑多少次都是
+                // 同一条 "still building"。现场：模型照着做了，连着 11 次
+                // CodebaseSearch 全部返回同一句提示，token 烧掉 35k，最后
+                // 放弃改用 Grep，还给用户写了一份"索引构建很慢/疑似卡住"的结论。
+                //
+                // 现在只说**真话**：索引没就绪、重跑无用、眼下该用什么。
+                if is_cjk_only_query(query) {
+                    output.push_str(
+                        "No hits — and the query itself is in Chinese, while the index holds English \
+                         identifiers, paths and English comments. Retrying the same Chinese words \
+                         cannot match: pass code-side terms instead (e.g. the error/drawback/limitation \
+                         names this codebase would use), or re-run with the English wording of the \
+                         concept.\n",
+                    );
+                } else {
+                    output.push_str(
+                        "No hits — the index for this root is not ready, so this is not an empty \
+                         result.\n\
+                         \n\
+                         Do NOT re-run `CodebaseSearch` for this root: the first build is still in \
+                         progress, so every retry returns this same message. Use the tools that work \
+                         right now instead:\n\
+                         - `Grep` for exact identifiers, strings or paths (regex over file contents);\n\
+                         - `ProjectMap` for the repository's file/symbol structure.\n\
+                         \n\
+                         When the index does finish, a later `CodebaseSearch` on the same root will \
+                         return ranked cross-file results.\n",
+                    );
+                }
             }
         }
         return Ok(output);
@@ -1506,10 +1590,40 @@ fn format_ripgrep_fallback(query: &str, root: &std::path::Path) -> String {
 /// Windsurf FastContext 的官方经验是「宁可漏掉部分上下文，也不要污染主
 /// agent 上下文」；反过来在这里也成立 —— **宁可多等几秒，也不要给模型
 /// 一个空结果**，因为空结果会被模型当成「这个功能不存在」。
-pub async fn wait_for_index_ready(timeout: Duration) -> bool {
+///
+/// # 为什么按 root 等，而不是等全局 `is_engine_ready()`
+///
+/// 现场事故：日志里 `ready=true waited_ms=8000`，补跑却仍然返回
+/// "still building"。两个"就绪"看的不是同一件事：
+/// - 这里等的 `watcher::is_engine_ready()` 是**进程级**标志
+///   （"语义引擎在某个时刻构建过"）；
+/// - 工具侧 `resolve_engine` 查的是**按 root + cache key** 的引擎，
+///   而且 mtime 必须对得上（`get_engine` 的两个条件）。
+///
+/// 于是"全局就绪"不等于"这个项目的引擎可用"：全局标志一置位就返回 true，
+/// 补跑却拿到同一个 Warming —— 白等 8 秒，还多一次零命中调用。
+/// 现在按 root 查缓存，和工具侧用**完全相同**的判据。
+///
+/// 等的是**指定的那份缓存**（工具手里那份），不是某个全局单例 ——
+/// 判据与工具读的对象不一致，就会出现"等了 8 秒还是 Warming"的白等。
+pub async fn wait_for_index_ready(root: &Path, timeout: Duration) -> bool {
+    let cache = crate::core::context::search_cache::shared_search_cache();
+    wait_for_index_ready_in(&cache, root, timeout).await
+}
+
+/// 在**指定缓存**里等这个项目根的引擎就绪。
+///
+/// 与 [`wait_for_index_ready`] 的区别只在于查哪份缓存 —— 但这个区别正是
+/// 事故的核心：工具读的是它自己手里那份，而 watcher 写进的是另一份，
+/// 于是"等全局就绪"永远等不到"工具能读到"。
+pub async fn wait_for_index_ready_in(
+    cache: &std::sync::Arc<crate::core::context::search_cache::SearchEngineCacheManager>,
+    root: &Path,
+    timeout: Duration,
+) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if crate::core::context::watcher::is_engine_ready() {
+        if root_engine_presence(cache, root) != EnginePresence::Absent {
             return true;
         }
         if std::time::Instant::now() >= deadline {
@@ -1517,6 +1631,88 @@ pub async fn wait_for_index_ready(timeout: Duration) -> bool {
         }
         tokio::time::sleep(Duration::from_millis(120)).await;
     }
+}
+
+/// 这个项目根的引擎在缓存里的状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnginePresence {
+    /// 缓存里有引擎，且它记录的 mtime 与磁盘上的 `index.json` 一致 —— 可直接用。
+    Fresh,
+    /// 缓存里有引擎，但 mtime 对不上 —— 磁盘变了。用旧引擎回答（serve-stale），
+    /// 后台重建完成后自然切换。
+    Stale,
+    /// 缓存里压根没有这个 root 的引擎 —— 冷启动。
+    Absent,
+}
+
+/// 这个项目根的引擎现在能不能被查询路径直接取到。
+///
+/// 与 `resolve_engine` 的 Fresh 分支同源：缓存里有 `(root, "engine")`，
+/// 且它记录的 mtime 与当前 `index.json` 的 mtime 一致。
+pub fn root_engine_ready(root: &Path) -> bool {
+    let cache = crate::core::context::search_cache::shared_search_cache();
+    root_engine_presence(&cache, root) == EnginePresence::Fresh
+}
+
+/// 引擎在**指定缓存**里的状态。
+///
+/// 与 `resolve_engine` 用**同一个**判据（同一个 cache key、同一份 mtime 比对）——
+/// 两处判据一旦分叉，就会出现"等到了却说没就绪"或"没等却说就绪"的白等。
+pub fn root_engine_presence(
+    cache: &std::sync::Arc<crate::core::context::search_cache::SearchEngineCacheManager>,
+    root: &Path,
+) -> EnginePresence {
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let current_mtime = index_mtime(root);
+    let cache_key = (canonical_root, codebase_search_limits().cache_key());
+    if cache.get_engine(&cache_key, current_mtime).is_some() {
+        EnginePresence::Fresh
+    } else if cache.get_engine_stale(&cache_key).is_some() {
+        EnginePresence::Stale
+    } else {
+        EnginePresence::Absent
+    }
+}
+
+/// 把这个项目根的引擎构建好放进**共享**缓存（线上查询路径用的就是这个缓存）。
+///
+/// 返回索引的文件数。给"想在进程外验证检索行为"的场景用（探针、诊断）。
+pub fn seed_shared_engine(root: &Path) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let limits = codebase_search_limits();
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let cache_key = (canonical_root, limits.cache_key());
+    let cache = crate::core::context::search_cache::shared_search_cache();
+    if let Some(engine) = cache.get_engine(&cache_key, index_mtime(root)) {
+        let _ = engine;
+        return Ok(0);
+    }
+    let (engine, stats) = build_search_engine_from_fs(root, limits, &None)?;
+    let files = stats.indexed_files;
+    cache.put_engine(
+        cache_key,
+        CachedSearchEngine {
+            engine,
+            index_mtime: index_mtime(root),
+        },
+    );
+    Ok(files)
+}
+
+/// 查询是不是**纯中文**（没有任何 ASCII 字母数字）。
+///
+/// 索引里是英文标识符、路径和英文注释 —— 纯中文的 query 一个 token 都命中不了。
+/// 命中为零时，模型需要知道"换个词"而不是"再搜一遍"，否则它会原样重跑。
+fn is_cjk_only_query(query: &str) -> bool {
+    let mut has_cjk = false;
+    let mut has_ascii_alnum = false;
+    for ch in query.chars() {
+        if crate::core::context::search_engine::is_cjk_char(ch) {
+            has_cjk = true;
+        } else if ch.is_ascii_alphanumeric() {
+            has_ascii_alnum = true;
+        }
+    }
+    has_cjk && !has_ascii_alnum
 }
 
 /// 字面兜底（Warming 分支专用）：索引未就绪时立即跑一次 ripgrep 全文搜索。
@@ -1591,7 +1787,15 @@ fn format_ripgrep_results(
     ));
 
     if results.is_empty() {
-        output.push_str("No matches found.");
+        if is_cjk_only_query(query) {
+            output.push_str(
+                "No matches — the query is in Chinese while the codebase is written in English \
+                 identifiers. Retrying the same words cannot match: use the code-side terms for \
+                 the concept you mean.\n",
+            );
+        } else {
+            output.push_str("No matches found.");
+        }
         return output;
     }
 
@@ -2027,6 +2231,194 @@ mod tests {
                 &crate::core::context::search_cache::shared_search_cache()
             ),
             "工具必须与 watcher 共用同一个缓存实例，否则 watcher 建好的索引读不到"
+        );
+    }
+
+    /// **回归：分裂缓存** —— watcher 写进 A 桶、工具读 B 桶。
+    ///
+    /// 这是 ARTEX 上「索引永远建不出来 + 模型无限重试」的真正根因：
+    ///
+    /// ```text
+    /// agent_core.rs:221  watcher 写入 → shared_search_cache()
+    /// agent_core.rs:260  工具读取   → context_engine.search_cache（另一个实例！）
+    /// engine.rs:103      ContextEngine::new() 里 Arc::new(SearchEngineCacheManager::new())
+    /// ```
+    ///
+    /// `lazy_init` 那句 `register_tool` 会**覆盖** `runtime_bootstrap` 里
+    /// 已经挂好共享缓存的工具，于是最终生效的是"读 B 桶"的那份。
+    /// watcher 把索引建好了（ARTEX 日志：`semantic engine updated in
+    /// background: full rebuild, 639 files in 4.34s`），工具却永远读不到，
+    /// 每次查询都回一句 "still building" —— 模型照着提示重试 11 次。
+    ///
+    /// 这条测试守住接线：**ContextEngine 持有的必须是共享单例**。
+    /// 只要它退回 `Arc::new(...)`，这里立刻红。
+    #[test]
+    fn the_context_engine_shares_the_process_wide_search_cache() {
+        let engine = crate::core::context::engine::ContextEngine::new();
+        assert!(
+            std::sync::Arc::ptr_eq(
+                &engine.search_cache,
+                &crate::core::context::search_cache::shared_search_cache()
+            ),
+            "ContextEngine 必须持有进程级共享缓存：watcher 写的是它、工具读的也必须是它，\
+             两个对象就永远读不到对方建好的索引"
+        );
+    }
+
+    /// 工具实例（无论 `new` 还是 `with_cache`）拿到的缓存，必须与
+    /// `ContextEngine` 持有的那份是**同一个对象**。
+    ///
+    /// `agent_core::lazy_init` 用 `with_cache(context_engine.search_cache)`
+    /// 覆盖掉 `runtime_bootstrap` 注册的工具 —— 也就是说，**最终生效的**
+    /// 工具读的是 ContextEngine 那份。只要它不是共享单例，watcher 建好的
+    /// 索引就永远读不到。
+    #[test]
+    fn the_tool_and_the_context_engine_read_one_cache() {
+        let config = std::sync::Arc::new(crate::core::config::Config::new(
+            crate::core::config::ConfigParameters::default(),
+        ));
+        let engine = crate::core::context::engine::ContextEngine::new();
+        let tool = CodebaseSearchTool::with_cache(config, engine.search_cache.clone());
+        let tool_cache = tool.search_cache.clone().expect("工具必须挂上缓存");
+
+        assert!(
+            std::sync::Arc::ptr_eq(&tool_cache, &engine.search_cache),
+            "工具与 ContextEngine 必须读同一个缓存对象"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(
+                &tool_cache,
+                &crate::core::context::search_cache::shared_search_cache()
+            ),
+            "工具最终必须读进程级共享缓存（watcher 写的就是它）"
+        );
+    }
+
+    /// watcher 建好的引擎，工具**读得到** —— 这才是"索引建出来了"的定义。
+    ///
+    /// 前两条守住"接线"，这条守住"接线之后确实通"。
+    /// 模拟 watcher 的动作：往**共享单例**里存一个引擎；然后问
+    /// `root_engine_presence`：必须报 Fresh，而不是 Absent。
+    ///
+    /// 事故原样：ARTEX 上 watcher 明明写了引擎（639 files），查询侧却一直
+    /// 判定"引擎不存在" → 每次回 "still building"。
+    #[test]
+    fn an_engine_written_by_the_watcher_is_visible_to_the_query_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("alpha.rs"), "fn alpha_handler() {}\n").unwrap();
+        // 写 index.json，产生 mtime 令牌（get_engine 要比对它）。
+        Indexer::new(root).index_project().unwrap();
+
+        let cache = crate::core::context::search_cache::shared_search_cache();
+        let key = (
+            root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+            codebase_search_limits().cache_key(),
+        );
+        let mut engine = crate::core::context::search_engine::SearchEngine::new();
+        engine.add_document(
+            "alpha.rs".to_string(),
+            vec![CodeChunk {
+                content: "fn alpha_handler() {}".to_string(),
+                start_line: 1,
+                end_line: 1,
+                context_header: None,
+            }],
+        );
+        cache.put_engine(
+            key.clone(),
+            CachedSearchEngine {
+                engine,
+                index_mtime: index_mtime(root),
+            },
+        );
+
+        assert_eq!(
+            root_engine_presence(&cache, root),
+            EnginePresence::Fresh,
+            "watcher 写进共享缓存的引擎，查询路径必须能看到"
+        );
+        assert!(
+            root_engine_ready(root),
+            "共享缓存里有引擎时，root_engine_ready 必须为真"
+        );
+
+        // 清理：共享单例是进程级的，别把引擎留给后续用例。
+        cache.clear();
+    }
+
+    /// 显式调用**不再白等**：引擎已经 Fresh 时，检索必须立刻拿到结果，
+    /// 不能先进 8 秒的 warmup 等待。
+    ///
+    /// 修复前，显式调用路径完全没有等待逻辑（只有自动触发路径等），
+    /// 于是模型拿到 "still building" → 重试 → 再 "still building" → 死循环。
+    #[test]
+    fn an_explicit_call_does_not_wait_when_the_engine_is_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("alpha.rs"), "fn alpha_handler() {}\n").unwrap();
+        Indexer::new(root).index_project().unwrap();
+
+        let cache = std::sync::Arc::new(SearchEngineCacheManager::new());
+        // 预置一个与磁盘 mtime 一致的引擎 → 应当被判为 Fresh。
+        let key = (
+            root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+            codebase_search_limits().cache_key(),
+        );
+        let mut engine = crate::core::context::search_engine::SearchEngine::new();
+        engine.add_document(
+            "alpha.rs".to_string(),
+            vec![CodeChunk {
+                content: "fn alpha_handler() {}".to_string(),
+                start_line: 1,
+                end_line: 1,
+                context_header: None,
+            }],
+        );
+        cache.put_engine(
+            key,
+            CachedSearchEngine {
+                engine,
+                index_mtime: index_mtime(root),
+            },
+        );
+
+        assert_eq!(
+            root_engine_presence(&cache, root),
+            EnginePresence::Fresh,
+            "预置的引擎必须被判为 Fresh"
+        );
+    }
+
+    /// Stale（磁盘变了、引擎还在）**不等待** —— serve-stale 的意义就在这。
+    ///
+    /// 修复前的等待逻辑只看"引擎在不在"，于是改一个文件之后每一次检索
+    /// 都要白等 8 秒才返回旧结果。
+    #[test]
+    fn a_stale_engine_is_served_without_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("alpha.rs"), "fn alpha_handler() {}\n").unwrap();
+        Indexer::new(root).index_project().unwrap();
+
+        let cache = std::sync::Arc::new(SearchEngineCacheManager::new());
+        let key = (
+            root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+            codebase_search_limits().cache_key(),
+        );
+        // 存一个 mtime 对不上的引擎 → Stale。
+        cache.put_engine(
+            key,
+            CachedSearchEngine {
+                engine: crate::core::context::search_engine::SearchEngine::new(),
+                index_mtime: Some(std::time::SystemTime::UNIX_EPOCH),
+            },
+        );
+
+        assert_eq!(
+            root_engine_presence(&cache, root),
+            EnginePresence::Stale,
+            "mtime 对不上的引擎必须判为 Stale（可 serve-stale，不必等）"
         );
     }
 
@@ -2807,6 +3199,115 @@ mod tests {
                 "engine should not be empty after rebuild"
             );
         }
+    }
+
+    /// **端到端：watcher 建索引 → 工具查得到。**
+    ///
+    /// 这条测试复现 ARTEX 事故的完整形状：
+    ///
+    /// ```text
+    /// 1. watcher 把索引写进**共享单例**（生产路径：watcher::set_engine_cache）
+    /// 2. 模型显式调用 CodebaseSearch
+    /// 3. 查询路径必须拿到那个引擎，**不是** "still building"
+    /// ```
+    ///
+    /// 事故原样：第 1 步与第 2 步用的是**两个不同的缓存对象**，
+    /// 于是第 3 步永远判成"引擎不存在"，模型连着 11 次重试
+    /// （35.2k tokens / 1m48s）后给用户写了"索引构建疑似卡住"的错误结论。
+    ///
+    /// 关键：第 2 步查的缓存**必须取自 `ContextEngine`** —— 生产路径上
+    /// 工具拿到的就是 `context_engine.search_cache`（`agent_core::lazy_init`
+    /// 的 `with_cache(...)`）。如果这里直接用共享单例，测试就绕开了
+    /// 真正出问题的接线，事故照样能溜过去。
+    #[test]
+    fn the_watcher_and_the_query_path_share_one_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/repeater.rs", "fn repeater_replay_request() {}\n");
+        write(root, "src/other.rs", "fn unrelated_handler() {}\n");
+
+        let cache = crate::core::context::search_cache::shared_search_cache();
+        cache.clear();
+
+        // ── 第 1 步：watcher 建索引（生产路径：update_engine_in_cache 写共享单例）
+        let indexer = Indexer::new(root);
+        let idx = indexer.index_project().unwrap();
+        let limits = codebase_search_limits();
+        let outcome = update_engine_in_cache_with_limits(root, &cache, &idx, limits, None)
+            .expect("watcher rebuild must succeed");
+        assert!(
+            matches!(outcome, UpdateOutcome::FullRebuild { .. }),
+            "冷启动必须是全量重建：{outcome:?}"
+        );
+
+        // ── 第 2 步：工具查的是 **ContextEngine 手里那份**（生产接线）
+        //
+        // `agent_core::lazy_init` 就是这么注册的：
+        // `CodebaseSearchTool::with_cache(config, context_engine.search_cache.clone())`
+        let engine = crate::core::context::engine::ContextEngine::new();
+        let tool_cache = engine.search_cache.clone();
+
+        assert!(
+            std::sync::Arc::ptr_eq(&tool_cache, &cache),
+            "ContextEngine 必须与 watcher 写的是同一个缓存（分裂缓存 = 事故根因）"
+        );
+
+        let presence = root_engine_presence(&tool_cache, root);
+        assert_eq!(
+            presence,
+            EnginePresence::Fresh,
+            "watcher 建好的引擎必须对查询路径可见（分裂缓存 = 事故根因）"
+        );
+
+        // ── 第 3 步：走完整的检索路径，必须真的检索到
+        let out = search_codebase_with_limits(
+            root,
+            "repeater_replay_request",
+            None,
+            limits,
+            Some(&tool_cache),
+        )
+        .expect("search must succeed");
+        assert!(
+            out.contains("repeater.rs"),
+            "检索必须命中 repeater.rs，实际输出：{out}"
+        );
+        assert!(
+            !out.contains("still building"),
+            "索引已就绪，绝不能回 \"still building\"：{out}"
+        );
+
+        cache.clear();
+    }
+
+    /// **端到端：显式调用在引擎未就绪时不会自说自话。**
+    ///
+    /// 显式调用路径的等待逻辑（修复 A）必须满足：
+    /// - 引擎 Fresh → **不等待**，立刻检索；
+    /// - 引擎 Absent → 等到预算上限，然后如实说"没就绪"。
+    ///
+    /// 两种情况都**不能**返回 "still building" 之外的东西，更不能让模型
+    /// 收到一句"重跑一次"（那是死循环指令）。
+    #[test]
+    fn an_explicit_call_never_tells_the_model_to_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/a.rs", "fn alpha_handler() {}\n");
+        Indexer::new(root).index_project().unwrap();
+
+        let cache = std::sync::Arc::new(SearchEngineCacheManager::new());
+        let out =
+            search_codebase_with_limits(root, "alpha_handler", None, test_limits(), Some(&cache))
+                .expect("search must succeed");
+
+        assert!(
+            !out.contains("Re-run `CodebaseSearch`"),
+            "绝不能让模型重跑同一个查询（旧文案是死循环指令）：{out}"
+        );
+        assert!(
+            !out.contains("before giving up"),
+            "绝不能出现「重跑一次再放弃」这类死循环指令：{out}"
+        );
     }
 
     /// 文件未变更时，indexer 不该重复写盘 —— 否则 index.json 的 mtime
