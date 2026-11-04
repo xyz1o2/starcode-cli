@@ -3398,6 +3398,93 @@ mod tests {
         );
     }
 
+    /// **ARTEX 生产路径端到端探针**（手动，不进 CI）。
+    ///
+    /// `diagnose_real_repo` 只验"引擎能不能建出来、能不能命中"；这一条验的是
+    /// **接线** —— 事故那一步恰恰不是"引擎建不出来"，而是"引擎建好了、
+    /// 工具读不到"。所以必须走生产路径的三段：
+    ///
+    /// ```text
+    /// 1. watcher 把索引写进**共享单例**
+    /// 2. 工具从 **ContextEngine** 手里那份读（不是共享单例直连）
+    /// 3. 查询必须命中，且不能出现 "still building"
+    /// ```
+    ///
+    /// 第 2 步必须取自 `ContextEngine` —— 直接用共享单例会绕开真正出问题的
+    /// 那段接线，事故照样能溜过去。
+    ///
+    /// ```bash
+    /// STAR_DIAG_ROOT=/mnt/h/test/ARTEX \
+    /// STAR_DIAG_QUERY="repeater replay request send draft parse HTTP" \
+    /// cargo test --release --lib -- artix_e2e_probe --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn artix_e2e_probe() {
+        let root = std::env::var("STAR_DIAG_ROOT")
+            .map(std::path::PathBuf::from)
+            .expect("STAR_DIAG_ROOT must point at the repo");
+        let query = std::env::var("STAR_DIAG_QUERY")
+            .unwrap_or_else(|_| "repeater replay request send draft parse HTTP".to_string());
+
+        let cache = crate::core::context::search_cache::shared_search_cache();
+        cache.clear();
+
+        // ── 第 1 步：watcher 建索引（生产路径：update_engine_in_cache → 共享单例）
+        let idx = Indexer::new(&root).index_project().expect("index");
+        println!(
+            "[1] index_project: total_files={} new_blobs={} removed={} truncated={}",
+            idx.total_files,
+            idx.new_blobs.len(),
+            idx.removed_blobs.len(),
+            idx.truncated
+        );
+        let limits = codebase_search_limits();
+        let outcome = update_engine_in_cache_with_limits(&root, &cache, &idx, limits, None)
+            .expect("watcher rebuild");
+        println!("[1] watcher rebuild outcome: {outcome:?}");
+
+        // ── 第 2 步：工具读的是 ContextEngine 那份
+        let engine = crate::core::context::engine::ContextEngine::new();
+        let tool_cache = engine.search_cache.clone();
+        println!(
+            "[2] same object as shared cache? {}",
+            std::sync::Arc::ptr_eq(&tool_cache, &cache)
+        );
+        let presence = root_engine_presence(&tool_cache, &root);
+        println!("[2] engine presence (tool's view): {presence:?}");
+
+        // ── 第 3 步：走完整检索路径
+        let out = search_codebase_with_limits(&root, &query, None, limits, Some(&tool_cache))
+            .expect("search");
+        println!(
+            "[3] contains 'still building'? {} | contains 'No hits'? {}",
+            out.contains("still building"),
+            out.contains("No hits")
+        );
+        for line in out.lines().take(8) {
+            println!("      {line}");
+        }
+
+        // 断言：这一步失败 = 事故复现
+        assert_eq!(
+            presence,
+            EnginePresence::Fresh,
+            "工具必须能看到 watcher 建好的引擎（分裂缓存 = 事故根因）"
+        );
+        assert!(
+            !out.contains("still building"),
+            "绝不能回 \"still building\"：\n{out}"
+        );
+        assert!(
+            !out.contains("No hits"),
+            "事故当时的查询必须命中，不能零命中：\n{out}"
+        );
+
+        cache.clear();
+        println!("[OK] ARTEX 生产路径端到端通过");
+    }
+
     /// 手动诊断（不进 CI）：对着**真实仓库**跑一条 query，把引擎返回、
     /// 分词结果与零命中诊断全打出来。
     ///
