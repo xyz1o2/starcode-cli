@@ -1116,9 +1116,9 @@ impl StarAgent {
             return;
         }
         match manager.initialize_plugin_mcp_servers(servers).await {
-            Ok(()) => crate::utils::logging::append_debug_log_line(
-                "[MCP] plugin MCP servers registered",
-            ),
+            Ok(()) => {
+                crate::utils::logging::append_debug_log_line("[MCP] plugin MCP servers registered")
+            }
             Err(error) => crate::utils::logging::append_debug_log_line(&format!(
                 "[MCP] failed to register plugin MCP servers: {error}"
             )),

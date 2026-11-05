@@ -430,7 +430,7 @@ impl Agent {
                 Ok(tools) => {
                     for tool in tools {
                         let registered_name =
-                            format!("mcp__{}__{}", server_name, tool.name.as_str());
+                            crate::core::mcp::mcp_tool_name(&server_name, tool.name.as_str());
                         tool_registry.register_tool(Arc::new(
                             crate::tools::mcp_tool::McpToolWrapper::new(
                                 mcp_manager.clone(),

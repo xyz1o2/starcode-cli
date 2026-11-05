@@ -1009,6 +1009,24 @@ pub async fn handle_key_event(
             }
             return Ok(());
         }
+        // 帮助浮层：ESC 关闭它（弹窗上明写着「Press ? or ESC to close」）。
+        //
+        // 之前它和下面那批「吃掉所有键」的上下文混在一起，于是 ESC 在这里
+        // 就被吞掉了 —— 用户按 ESC 没反应，弹窗关不掉。
+        //
+        // 它必须**先于**下面那批处理：主 ESC 处理器在更下面（`KeyCode::Esc`
+        // 那一支），而这里 return 掉了，键根本走不到那儿。
+        //
+        // F1 / ? 也关（与打开时对称）。
+        KeyContext::Help => {
+            match key.code {
+                KeyCode::Esc => state.show_help = false,
+                KeyCode::F(1) => state.show_help = false,
+                KeyCode::Char('?') => state.show_help = false,
+                _ => {}
+            }
+            return Ok(());
+        }
         // 这些上下文已经在阶梯更早处被独占处理（它们吃掉所有键），走到这里
         // 说明处理完了但键没被消费 —— 直接结束，别漏进主输入框。
         KeyContext::InlineConfirm
@@ -1016,8 +1034,7 @@ pub async fn handle_key_event(
         | KeyContext::Modal
         | KeyContext::ThemePicker
         | KeyContext::ReadOnlyDialog
-        | KeyContext::Palette
-        | KeyContext::Help => return Ok(()),
+        | KeyContext::Palette => return Ok(()),
         KeyContext::Vim | KeyContext::TextInput => {}
     }
 
@@ -1991,6 +2008,62 @@ fn apply_vim_motion(state: &mut ChatState, motion: &crate::ui::vim::motions::Mot
 mod tests {
     use super::*;
     use crate::ui::state::store::AgentTaskInfo;
+
+    /// **帮助浮层必须能被 ESC 关掉。**
+    ///
+    /// 弹窗上明写着「Press ? or ESC to close」，但 ESC 按了没反应。
+    ///
+    /// 原因：`KeyContext::Help` 和其它「独占上下文」一起
+    /// `return Ok(())` —— 所有键都被吞掉，包括 ESC。而真正关 help 的
+    /// ESC 处理在**更下面**（主 `KeyCode::Esc` 那一支），键根本走不到。
+    ///
+    /// 修法：`KeyContext::Help` 单独处理 ESC / F1 / `?`，先于那批
+    /// 「吃掉所有键」的上下文。
+    #[tokio::test]
+    async fn esc_closes_the_help_overlay() {
+        let mut state = ChatState::new();
+        let (tx, _rx) = mpsc::channel(16);
+
+        state.show_help = true;
+        assert_eq!(
+            crate::ui::events::key_context::KeyContext::of(&state),
+            crate::ui::events::key_context::KeyContext::Help,
+            "help 打开时上下文必须是 Help"
+        );
+
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !state.show_help,
+            "ESC 必须关掉帮助浮层（弹窗上写着「Press ? or ESC to close」）"
+        );
+    }
+
+    /// F1 与 `?` 也关（与打开时对称）。
+    #[tokio::test]
+    async fn f1_closes_the_help_overlay() {
+        let mut state = ChatState::new();
+        let (tx, _rx) = mpsc::channel(16);
+
+        state.show_help = true;
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(!state.show_help, "F1 必须关掉帮助浮层");
+    }
 
     /// 取消流式输出的宽限期内，用户输入新需求不应被排队。
     ///

@@ -2300,7 +2300,7 @@ async fn execute_mcp_management_tool(
                 Ok(tools) => {
                     let names: Vec<String> = tools
                         .iter()
-                        .map(|t| format!("mcp__{}__{}", server, t.name))
+                        .map(|t| crate::core::mcp::mcp_tool_name(&server, &t.name))
                         .collect();
                     ToolResult {
                         success: true,
@@ -2395,7 +2395,7 @@ async fn execute_mcp_management_tool(
                                     "server": server,
                                     "tool": tool.name,
                                     "description": tool.description,
-                                    "fullName": format!("mcp__{}__{}", server, tool.name),
+                                    "fullName": crate::core::mcp::mcp_tool_name(&server, &tool.name),
                                 }));
                             }
                         }
@@ -2437,7 +2437,7 @@ async fn execute_mcp_management_tool(
                         .unwrap_or_default();
                     let names: Vec<String> = tools
                         .iter()
-                        .map(|t| format!("mcp__{}__{}", server, t.name))
+                        .map(|t| crate::core::mcp::mcp_tool_name(&server, &t.name))
                         .collect();
                     let payload = serde_json::json!({
                         "server": server,
@@ -2648,8 +2648,11 @@ async fn execute_mcp_dynamic_tool(
 ) -> ToolResult {
     let suffix = name.strip_prefix("mcp__").unwrap_or(name);
     let mut parts = suffix.splitn(2, "__");
-    let server = parts.next().unwrap_or("").trim();
+    let raw_server = parts.next().unwrap_or("").trim();
     let tool = parts.next().unwrap_or("").trim();
+    // 拼名时冒号被换成了下划线（function name 不允许冒号），这里换回来 ——
+    // 否则插件 server 拆出来的名字与 manager 里注册的对不上。
+    let server = crate::core::mcp::server_name_from_tool_name(raw_server);
 
     if server.is_empty() || tool.is_empty() {
         return ToolResult {
@@ -2678,7 +2681,7 @@ async fn execute_mcp_dynamic_tool(
         args.clone()
     };
 
-    match mcp_manager.call_tool(server, tool, arg_payload).await {
+    match mcp_manager.call_tool(&server, tool, arg_payload).await {
         Ok(value) => ToolResult {
             success: true,
             output: Some(
