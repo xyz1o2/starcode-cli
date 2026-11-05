@@ -386,10 +386,64 @@ impl SkillLoader {
             result = result.replace(&placeholder, value);
         }
 
+        // Replace bare `$name` (CC 的具名参数写法：`arguments: [issue]` → `$issue`)。
+        //
+        // 只替换**声明过的**参数名 —— 否则会顺手把正文里的 shell 变量
+        // （`$PATH`、`$HOME`）和 CC 自己的 `$ARGUMENTS` 也换掉。
+        //
+        // 边界：参数名必须是**完整**的标识符（后面不能再跟字母/数字/下划线），
+        // 否则 `$issue_id` 会被 `$issue` 截胡。
+        for (name, value) in named_args {
+            let mut replaced = String::with_capacity(result.len());
+            let mut rest = result.as_str();
+            while let Some(start) = rest.find('$') {
+                replaced.push_str(&rest[..start]);
+                let after = &rest[start + 1..];
+                let name_len = name.len();
+                if after.len() >= name_len && after[..name_len] == *name {
+                    // 后面不能紧跟标识符字符 —— `$issue_id` 不该被 `$issue` 命中。
+                    let next = after[name_len..].chars().next();
+                    let is_word_char = next
+                        .map(|c| c.is_ascii_alphanumeric() || c == '_')
+                        .unwrap_or(false);
+                    if !is_word_char {
+                        replaced.push_str(value);
+                        rest = &after[name_len..];
+                        continue;
+                    }
+                }
+                // 不是本参数：原样输出 `$`，继续往后找。
+                replaced.push('$');
+                rest = after;
+            }
+            replaced.push_str(rest);
+            result = replaced;
+        }
+
         // Replace $1, $2, ... (positional args, 1-indexed)
+        //
+        // 同样要避开 `$10` 被 `$1` 截胡：`$1` 后面紧跟数字时不替换。
         for (i, arg) in positional_args.iter().enumerate() {
             let placeholder = format!("${}", i + 1);
-            result = result.replace(&placeholder, arg);
+            let mut replaced = String::with_capacity(result.len());
+            let mut rest = result.as_str();
+            while let Some(start) = rest.find('$') {
+                replaced.push_str(&rest[..start]);
+                let after = &rest[start + 1..];
+                if after.starts_with(&placeholder[1..]) {
+                    let next = after[placeholder.len() - 1..].chars().next();
+                    let is_digit = next.map(|c| c.is_ascii_digit()).unwrap_or(false);
+                    if !is_digit {
+                        replaced.push_str(arg);
+                        rest = &after[placeholder.len() - 1..];
+                        continue;
+                    }
+                }
+                replaced.push('$');
+                rest = after;
+            }
+            replaced.push_str(rest);
+            result = replaced;
         }
 
         result
@@ -438,13 +492,10 @@ impl SkillLoader {
             // shell 关掉：`!cmd` 不执行，原样留着（模型能看到那是什么命令）。
             skill.body.clone()
         } else {
-            execute_shell_in_prompt_with(
-                &skill.body,
-                skill.metadata.shell.as_deref(),
-            )
+            execute_shell_in_prompt_with(&skill.body, skill.metadata.shell.as_deref())
         };
 
-        substitute_skill_arguments(&body, &skill.metadata.arguments)
+        body
     }
 
     /// 按 frontmatter 的 `arguments` 声明做参数替换。
@@ -452,16 +503,33 @@ impl SkillLoader {
     /// CC 的约定：`arguments: [issue, branch]` 时 `$issue` 是第 1 个位置参数、
     /// `$branch` 是第 2 个；`$ARGUMENTS` 是全部参数的原始串。
     /// 位置参数从 skill 工具的 `args` 里按顺序取。
+    ///
+    /// 声明了参数但调用方没给值 → 占位符**原样留着**（比替换成空串好：
+    /// 模型看得见「这里缺一个参数」，而不是拿到一段缺了信息的指令）。
     pub fn substitute_skill_arguments(
         body: &str,
         declarations: &[SkillArgument],
+        positional: &[String],
     ) -> String {
         if declarations.is_empty() {
             return body.to_string();
         }
-        // 声明了具名参数但没给值 → 占位符原样留着（比替换成空串好：
-        // 模型看得见「这里缺一个参数」）。
-        body.to_string()
+
+        let mut named: HashMap<String, String> = HashMap::new();
+        for (idx, decl) in declarations.iter().enumerate() {
+            if let Some(value) = positional.get(idx) {
+                named.insert(decl.name.clone(), value.clone());
+            }
+        }
+
+        let mut result = Self::substitute_parameters(body, positional, &named);
+
+        // `$ARGUMENTS` = 全部位置参数的原始串（CC 的约定）。
+        if result.contains("$ARGUMENTS") {
+            result = result.replace("$ARGUMENTS", &positional.join(" "));
+        }
+
+        result
     }
 }
 
@@ -474,11 +542,7 @@ fn execute_single_shell(cmd: &str) -> String {
 /// `powershell: true` 时走 `powershell -Command`（Windows）；
 /// 否则走 `sh -c`。
 fn execute_single_shell_with(cmd: &str, powershell: bool) -> String {
-    let mut command = std::process::Command::new(if powershell {
-        "powershell"
-    } else {
-        "sh"
-    });
+    let mut command = std::process::Command::new(if powershell { "powershell" } else { "sh" });
     if powershell {
         command.arg("-Command");
     } else {
@@ -810,6 +874,79 @@ mod tests {
         assert_eq!(meta.model.as_deref(), Some("gpt-4o"));
         assert_eq!(meta.agent.as_deref(), Some("Explore"));
         assert_eq!(meta.shell.as_deref(), Some("powershell"));
+    }
+
+    /// 参数替换：`$name` / `$1` / `$ARGUMENTS`。
+    #[test]
+    fn arguments_are_substituted_by_position() {
+        let declarations = vec![
+            SkillArgument {
+                name: "issue".to_string(),
+                description: String::new(),
+                required: true,
+                default: None,
+            },
+            SkillArgument {
+                name: "branch".to_string(),
+                description: String::new(),
+                required: true,
+                default: None,
+            },
+        ];
+
+        let body = "fix $issue on $branch ($1 / $2) all=[$ARGUMENTS]";
+        let out = SkillLoader::substitute_skill_arguments(
+            body,
+            &declarations,
+            &["42".to_string(), "main".to_string()],
+        );
+        assert!(out.contains("fix 42 on main"), "{out}");
+        assert!(out.contains("(42 / main)"), "{out}");
+        assert!(out.contains("all=[42 main]"), "{out}");
+    }
+
+    /// 声明了参数但没给值 → 占位符原样留着。
+    ///
+    /// 替换成空串会让模型拿到一段缺了信息的指令还以为参数就是空的；
+    /// 留着 `$issue` 它就知道缺了一个。
+    #[test]
+    fn a_missing_argument_leaves_the_placeholder() {
+        let declarations = vec![SkillArgument {
+            name: "issue".to_string(),
+            description: String::new(),
+            required: true,
+            default: None,
+        }];
+        let out = SkillLoader::substitute_skill_arguments("fix $issue now", &declarations, &[]);
+        assert!(out.contains("$issue"), "缺参数时占位符必须留着：{out}");
+    }
+
+    /// 没有 `arguments` 声明 → 正文原样（不做任何替换）。
+    #[test]
+    fn no_declarations_means_no_substitution() {
+        let out = SkillLoader::substitute_skill_arguments("keep $1 as is", &[], &["x".to_string()]);
+        assert_eq!(out, "keep $1 as is");
+    }
+
+    /// `shell: 0` → `!cmd` 块**不执行**，原样留在正文里。
+    #[test]
+    fn shell_zero_disables_command_execution() {
+        let content = "---\nname: s\nshell: 0\n---\n\nbefore !(echo hi) after\n";
+        let (meta, body) = SkillLoader::parse_frontmatter(content);
+        let skill = SkillDefinition {
+            name: "s".to_string(),
+            description: String::new(),
+            location: "/tmp/s".to_string(),
+            body,
+            disabled: false,
+            version: None,
+            metadata: meta,
+        };
+        let rendered = SkillLoader::render_skill_prompt(&skill);
+        assert!(
+            rendered.contains("!(echo hi)"),
+            "shell: 0 时命令不该被执行（原文要留着）：{rendered}"
+        );
     }
 
     /// `---` 必须是文件第一行 —— 否则整份文件当正文（CC 的明确要求）。

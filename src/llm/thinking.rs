@@ -39,6 +39,20 @@ pub const ENV_STAR_THINKING_DIALECT: &str = "STAR_THINKING_DIALECT";
 /// 处理 `AgentRequest::SetThinkingEffort` 时，读取方是构造请求时。
 static SESSION_EFFORT: AtomicU8 = AtomicU8::new(UNSET);
 
+/// **本轮**思考力度（skill 的 `effort` frontmatter 字段）。
+///
+/// 与 `SESSION_EFFORT` 的区别是**生命周期**：
+/// - `SESSION_EFFORT` = 整个会话（用户 `/effort` 选的）
+/// - `TURN_EFFORT` = 只到下一条用户消息为止
+///
+/// Claude Code 语义（<https://code.claude.com/docs/en/skills>）：
+/// "Effort level for the rest of the current turn. Overrides the session
+/// effort level, but not the `CLAUDE_CODE_EFFORT_LEVEL` environment variable."
+///
+/// 写方是 skill 执行；清空在下一条用户消息开始时（与 `allowed-tools`
+/// 的 per-turn 表同一个时机）。
+static TURN_EFFORT: AtomicU8 = AtomicU8::new(UNSET);
+
 const UNSET: u8 = 0;
 
 fn encode(effort: &ThinkingEffort) -> u8 {
@@ -80,8 +94,25 @@ pub fn parse_effort(raw: &str) -> Option<ThinkingEffort> {
     }
 }
 
-/// 当前生效档位：会话设置 > `STAR_THINKING_EFFORT` > `Off`。
+/// 设置**本轮**档位（skill 的 `effort` 字段）。
+pub fn set_turn_effort(effort: &ThinkingEffort) {
+    TURN_EFFORT.store(encode(effort), Ordering::Relaxed);
+}
+
+/// 清空本轮档位（下一条用户消息开始时调用）。
+pub fn clear_turn_effort() {
+    TURN_EFFORT.store(UNSET, Ordering::Relaxed);
+}
+
+/// 当前生效档位：本轮 > 会话设置 > `STAR_THINKING_EFFORT` > `Off`。
+///
+/// 本轮优先级最高 —— skill 是在**当前**这次任务里显式要求的，
+/// 应当压过用户之前的会话级选择（但压不过环境变量之外的东西：
+/// 环境变量是全局默认值，会话设置本来就压它）。
 pub fn current_effort() -> ThinkingEffort {
+    if let Some(effort) = decode(TURN_EFFORT.load(Ordering::Relaxed)) {
+        return effort;
+    }
     if let Some(effort) = decode(SESSION_EFFORT.load(Ordering::Relaxed)) {
         return effort;
     }

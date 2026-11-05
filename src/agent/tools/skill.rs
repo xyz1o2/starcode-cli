@@ -409,8 +409,10 @@ impl ToolInvocation for SkillInvocation {
                     // 将其内容作为上下文注入返回
                     // 沙箱隔离：明确标记来源和边界
                     // 执行内联 shell 命令 (!(...) 语法)
-                    let rendered_body =
-                        crate::agent::skills::loader::SkillLoader::render_skill_prompt(&skill);
+                    //
+                    // 参数替换：frontmatter 的 `arguments` 声明按位置取
+                    // `args` 里的值（`$name` / `$1` / `$ARGUMENTS`）。
+                    let rendered_body = render_skill_with_args(&skill, &args);
                     let output = format!(
                         "✅ External Skill Loaded Successfully\n\n<skill_sandbox name=\"{}\" source=\"{}\">\n{}\n</skill_sandbox>\n\n⚠️ This skill is running in a restricted context. Please follow the instructions above.",
                         skill.name, skill.location, rendered_body
@@ -774,6 +776,20 @@ async fn apply_skill_runtime_effects(
         }
     }
 
+    // ── effort ───────────────────────────────────────────────────
+    //
+    // 本轮档位（skill 显式要求）压过会话档位，但只到下一条用户消息。
+    if let Some(raw) = meta.effort.as_deref() {
+        if let Some(effort) = crate::types::ThinkingEffort::parse_skill_effort(raw) {
+            crate::llm::thinking::set_turn_effort(&effort);
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[Skill] `{}` set this turn's effort to `{}`",
+                skill.name,
+                effort.as_str()
+            ));
+        }
+    }
+
     // ── model ────────────────────────────────────────────────────
     if let Some(model) = meta.model.as_deref() {
         let trimmed = model.trim();
@@ -906,5 +922,253 @@ fn normalize_subagent_type_slug(name: &str) -> String {
         "edit" | "editor" => "editor".to_string(),
         "code_reviewer" | "reviewer" | "review" => "code_reviewer".to_string(),
         _ => lowered,
+    }
+}
+
+/// 渲染 skill 正文：执行 `!cmd` 块 + 按 frontmatter 声明替换参数。
+///
+/// 位置参数从工具调用的 `args` 里取 —— CC 的约定是 `arguments` 声明的顺序
+/// 对应位置参数的顺序（`arguments: [issue, branch]` → 第 1 个值给 `$issue`）。
+///
+/// `args` 的形状有两种：
+/// - 字符串 → 整个当作 `$ARGUMENTS`（单参数 skill 的常见写法）
+/// - 数组 → 按顺序映射到声明的参数名
+fn render_skill_with_args(
+    skill: &crate::agent::skills::loader::SkillDefinition,
+    args: &serde_json::Value,
+) -> String {
+    let positional = positional_args_from(args);
+    let body = crate::agent::skills::loader::SkillLoader::render_skill_prompt(skill);
+    crate::agent::skills::loader::SkillLoader::substitute_skill_arguments(
+        &body,
+        &skill.metadata.arguments,
+        &positional,
+    )
+}
+
+/// 从工具调用的 `args` 里取出位置参数（字符串数组）。
+fn positional_args_from(args: &serde_json::Value) -> Vec<String> {
+    match args {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .collect(),
+        serde_json::Value::String(s) if !s.trim().is_empty() => vec![s.clone()],
+        _ => Vec::new(),
+    }
+}
+
+/// frontmatter 语义的端到端测试。
+///
+/// 这组测试走**生产接线**（真实的 `PolicyEngine` + `MessageBus`），
+/// 验证的不是「解析出来了」而是「**真的生效了**」。
+#[cfg(test)]
+mod frontmatter_effects {
+    use super::*;
+    use crate::core::confirmation_bus::MessageBus;
+    use crate::core::policy::{PolicyDecision, PolicyEngine};
+
+    fn bus() -> std::sync::Arc<MessageBus> {
+        std::sync::Arc::new(MessageBus::new(
+            PolicyEngine::new(Default::default()),
+            false,
+        ))
+    }
+
+    fn call(name: &str) -> crate::core::policy::FunctionCall {
+        crate::core::policy::FunctionCall {
+            name: name.to_string(),
+            args: Some(serde_json::json!({})),
+        }
+    }
+
+    /// `allowed-tools` → 该工具本轮免确认。
+    ///
+    /// 走真实的 `MessageBus` → `PolicyEngine::check` 路径 ——
+    /// 不是直接调 `apply_turn_tool_policy`（那会绕开接线）。
+    #[tokio::test]
+    async fn allowed_tools_take_effect_through_the_message_bus() {
+        let bus = bus();
+        bus.apply_turn_tool_policy(&["Bash".to_string()], &[])
+            .await;
+
+        let decision = bus.check_tool_policy(&call("Bash"), None).await.decision;
+        assert_eq!(
+            decision,
+            PolicyDecision::Allow,
+            "skill 的 allowed-tools 应当真的让 Bash 免确认"
+        );
+
+        // 不在名单里的照常要确认。
+        let decision = bus.check_tool_policy(&call("Write"), None).await.decision;
+        assert_eq!(
+            decision,
+            PolicyDecision::AskUser,
+            "不在名单里的工具必须照常弹确认"
+        );
+    }
+
+    /// 下一条用户消息 → 授权清空（生产路径上由 `agent_run` 调用）。
+    #[tokio::test]
+    async fn the_grant_is_cleared_for_the_next_user_message() {
+        let bus = bus();
+        bus.apply_turn_tool_policy(&["Bash".to_string()], &[])
+            .await;
+        assert_eq!(
+            bus.check_tool_policy(&call("Bash"), None).await.decision,
+            PolicyDecision::Allow
+        );
+
+        bus.clear_turn_tool_policy().await;
+
+        assert_eq!(
+            bus.check_tool_policy(&call("Bash"), None).await.decision,
+            PolicyDecision::AskUser,
+            "下一条用户消息后授权必须失效"
+        );
+    }
+
+    /// `disallowed-tools` → 本轮禁用，且压过「本会话总是允许」。
+    #[tokio::test]
+    async fn disallowed_tools_take_effect_through_the_message_bus() {
+        let bus = bus();
+        bus.apply_turn_tool_policy(&[], &["AskUserQuestion".to_string()])
+            .await;
+
+        let decision = bus
+            .check_tool_policy(&call("AskUserQuestion"), None)
+            .await
+            .decision;
+        assert!(
+            matches!(decision, PolicyDecision::DenyWithReason(_)),
+            "disallowed-tools 里的工具本轮必须被拒，实际 {decision:?}"
+        );
+    }
+
+    /// `disable-model-invocation` 的 skill 不进模型的可用清单。
+    ///
+    /// 这是「模型看不到它，也就不会想去调它」的那一层。
+    #[test]
+    fn a_gated_skill_is_not_offered_to_the_model() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let skills_dir = dir.path().join(".star").join("skills");
+
+        std::fs::create_dir_all(skills_dir.join("open_skill")).expect("mkdir");
+        std::fs::write(
+            skills_dir.join("open_skill").join("SKILL.md"),
+            "---\nname: open_skill\ndescription: d\n---\n\nbody\n",
+        )
+        .expect("write");
+
+        std::fs::create_dir_all(skills_dir.join("gated")).expect("mkdir");
+        std::fs::write(
+            skills_dir.join("gated").join("SKILL.md"),
+            "---\nname: gated\ndescription: d\ndisable-model-invocation: true\n---\n\nbody\n",
+        )
+        .expect("write");
+
+        let listed = list_model_callable_skills(dir.path());
+        let names: Vec<&str> = listed.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"open_skill"),
+            "普通 skill 必须在清单里：{names:?}"
+        );
+        assert!(
+            !names.contains(&"gated"),
+            "disable-model-invocation 的 skill 不该出现在模型清单里：{names:?}"
+        );
+    }
+
+    /// `model: inherit` → 不换模型（CC 的约定）。
+    #[tokio::test]
+    async fn model_inherit_does_not_switch() {
+        let cell = crate::agent::model_switch::new_cell();
+        let skill = crate::agent::skills::loader::SkillDefinition {
+            name: "s".to_string(),
+            description: String::new(),
+            location: "/tmp/s".to_string(),
+            body: "body".to_string(),
+            disabled: false,
+            version: None,
+            metadata: {
+                let mut meta = crate::agent::skills::loader::SkillMetadata::default();
+                meta.model = Some("inherit".to_string());
+                meta
+            },
+        };
+
+        apply_skill_runtime_effects(&skill, None, Some(&cell)).await;
+
+        assert!(
+            crate::agent::model_switch::take(&cell).await.is_none(),
+            "`inherit` 不该发布模型切换"
+        );
+    }
+
+    /// `model: gpt-4o` → 发布一次模型切换（本轮剩余部分生效）。
+    #[tokio::test]
+    async fn a_model_field_publishes_a_switch() {
+        let cell = crate::agent::model_switch::new_cell();
+        let skill = crate::agent::skills::loader::SkillDefinition {
+            name: "s".to_string(),
+            description: String::new(),
+            location: "/tmp/s".to_string(),
+            body: "body".to_string(),
+            disabled: false,
+            version: None,
+            metadata: {
+                let mut meta = crate::agent::skills::loader::SkillMetadata::default();
+                meta.model = Some("gpt-4o".to_string());
+                meta
+            },
+        };
+
+        apply_skill_runtime_effects(&skill, None, Some(&cell)).await;
+
+        let pending = crate::agent::model_switch::take(&cell).await;
+        assert!(
+            pending.is_some(),
+            "`model` 字段必须发布一次模型切换"
+        );
+        assert_eq!(pending.expect("pending").model, "gpt-4o");
+    }
+
+    /// `effort` → 本轮档位（压过会话档位），下一条消息后清空。
+    #[tokio::test]
+    async fn an_effort_field_sets_the_turn_effort() {
+        crate::llm::thinking::set_session_effort(&crate::types::ThinkingEffort::Low);
+        crate::llm::thinking::clear_turn_effort();
+
+        let skill = crate::agent::skills::loader::SkillDefinition {
+            name: "s".to_string(),
+            description: String::new(),
+            location: "/tmp/s".to_string(),
+            body: "body".to_string(),
+            disabled: false,
+            version: None,
+            metadata: {
+                let mut meta = crate::agent::skills::loader::SkillMetadata::default();
+                meta.effort = Some("high".to_string());
+                meta
+            },
+        };
+
+        apply_skill_runtime_effects(&skill, None, None).await;
+        assert_eq!(
+            crate::llm::thinking::current_effort(),
+            crate::types::ThinkingEffort::High,
+            "本轮档位必须压过会话档位"
+        );
+
+        // 下一条用户消息 → 回到会话档位。
+        crate::llm::thinking::clear_turn_effort();
+        assert_eq!(
+            crate::lll::thinking::current_effort(),
+            crate::types::ThinkingEffort::Low,
+            "下一条用户消息后必须回到会话档位"
+        );
     }
 }

@@ -121,6 +121,9 @@ impl Agent {
             if let Some(bus) = self.runtime_message_bus() {
                 bus.clear_turn_tool_policy().await;
             }
+            // 本轮思考力度同样只到下一条用户消息为止
+            // （skill 的 `effort` frontmatter 字段）。
+            crate::llm::thinking::clear_turn_effort();
 
             // 换一个干净的中断 token：CancellationToken 一旦 cancel 就不可撤销，
             // 上一回合的 ESC 不能把本回合的流和工具一起废掉。
