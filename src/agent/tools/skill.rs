@@ -1080,6 +1080,28 @@ mod frontmatter_effects {
         );
     }
 
+    /// `agent:` 字段 → 子代理类型。
+    ///
+    /// CC 那边写的是展示名（`Explore` / `Plan` / `general-purpose`），
+    /// 这里要归一成 `SubagentType` 的 serde slug。
+    #[test]
+    fn the_agent_field_maps_to_a_subagent_type() {
+        assert_eq!(normalize_subagent_type_slug("Explore"), "explorer");
+        assert_eq!(
+            normalize_subagent_type_slug("general-purpose"),
+            "general_purpose"
+        );
+        assert_eq!(
+            normalize_subagent_type_slug("Code Reviewer"),
+            "code_reviewer"
+        );
+        // 归一后的 slug 必须能被 serde 认出来。
+        let parsed: Result<crate::core::agents::SubagentType, _> = serde_json::from_value(
+            serde_json::Value::String(normalize_subagent_type_slug("Explore")),
+        );
+        assert!(parsed.is_ok(), "归一后的 slug 必须是合法变体");
+    }
+
     /// `model: inherit` → 不换模型（CC 的约定）。
     #[tokio::test]
     async fn model_inherit_does_not_switch() {
