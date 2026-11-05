@@ -3060,14 +3060,20 @@ pub async fn vault(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRes
 // 技能：搜索 / 学习 / 市场
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// 载入项目 + 用户目录下的所有 SKILL.md
+/// 载入**所有来源**的 SKILL.md（项目 / 全局 / 扩展安装）。
+///
+/// 三个根目录由 `Storage::skill_roots()` 统一给出 —— 与 agent 侧、
+/// `/skills list`、`/reload-skills` 用的是同一套，不会出现「某处看得见
+/// 某处看不见」。
 async fn load_all_skills() -> Vec<crate::agent::skills::loader::SkillDefinition> {
     use crate::agent::skills::loader::SkillLoader;
     use crate::core::config::storage::Storage;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let storage = Storage::new(cwd);
-    let mut all = SkillLoader::load_skills_from_dir(&storage.project_skills_dir()).await;
-    all.extend(SkillLoader::load_skills_from_dir(&Storage::user_skills_dir()).await);
+    let mut all = Vec::new();
+    for dir in storage.skill_roots() {
+        all.extend(SkillLoader::load_skills_from_dir(&dir).await);
+    }
     all
 }
 

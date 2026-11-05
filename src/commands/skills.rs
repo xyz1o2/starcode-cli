@@ -61,10 +61,18 @@ pub async fn reload(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandR
     let storage = crate::core::config::storage::Storage::new(cwd);
     let project_dir = storage.project_skills_dir();
     let user_dir = crate::core::config::storage::Storage::user_skills_dir();
+    // 扩展安装的 skill 也参与重扫 —— 与 agent 侧同一套根目录。
+    let extension_dir = storage.extensions_skills_dir();
 
     let project_skills = skill_names_in_dir(&project_dir).await;
     let user_skills = skill_names_in_dir(&user_dir).await;
-    let current: BTreeSet<String> = project_skills.union(&user_skills).cloned().collect();
+    let extension_skills = skill_names_in_dir(&extension_dir).await;
+    let project_count = project_skills.len();
+    let user_count = user_skills.len();
+    let extension_count = extension_skills.len();
+    let mut current: BTreeSet<String> = project_skills;
+    current.extend(user_skills);
+    current.extend(extension_skills);
 
     let snapshot_path = reload_snapshot_path(&storage.star_dir());
     let previous = read_reload_snapshot(&snapshot_path).await;
@@ -92,10 +100,11 @@ pub async fn reload(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandR
         ));
     }
     out.push_str(&format!(
-        "- Available: {} (project {}, user {})\n",
+        "- Available: {} (project {}, user {}, extension {})\n",
         current.len(),
-        project_skills.len(),
-        user_skills.len()
+        project_count,
+        user_count,
+        extension_count
     ));
 
     if !added.is_empty() {
@@ -181,6 +190,8 @@ pub async fn execute_skills_command(ctx: CommandContext<'_>, cmd: SkillsCommand)
     let storage = crate::core::config::storage::Storage::new(cwd.clone());
     let project_skills_dir = storage.project_skills_dir();
     let user_skills_dir = crate::core::config::storage::Storage::user_skills_dir();
+    // 扩展安装的 skill（marketplace）—— 与 agent 侧用同一套根目录。
+    let extension_skills_dir = storage.extensions_skills_dir();
 
     match cmd {
         SkillsCommand::List => {
@@ -192,12 +203,24 @@ pub async fn execute_skills_command(ctx: CommandContext<'_>, cmd: SkillsCommand)
             let user_skills =
                 crate::agent::skills::loader::SkillLoader::load_skills_from_dir(&user_skills_dir)
                     .await;
+            // 扩展装的 skill（`/extension` marketplace 装的）也在清单里 ——
+            // 它们落在 `.star/extensions/skills/`，以前这个目录没人扫，
+            // 于是「装完的 skill 在 `/skills list` 里看不见、模型也调不着」。
+            let extension_skills = crate::agent::skills::loader::SkillLoader::load_skills_from_dir(
+                &extension_skills_dir,
+            )
+            .await;
 
             project_skills.sort_by(|a, b| a.name.cmp(&b.name));
             let mut user_skills_sorted = user_skills;
             user_skills_sorted.sort_by(|a, b| a.name.cmp(&b.name));
+            let mut extension_skills_sorted = extension_skills;
+            extension_skills_sorted.sort_by(|a, b| a.name.cmp(&b.name));
 
-            if project_skills.is_empty() && user_skills_sorted.is_empty() {
+            if project_skills.is_empty()
+                && user_skills_sorted.is_empty()
+                && extension_skills_sorted.is_empty()
+            {
                 ctx.state.chat_history.push(
                     crate::types::ChatEntry::assistant(
                         "No custom skills found.\n\nCreate one with `/skills new <name>` or place a `SKILL.md` under `.star/skills/<name>/`.".to_string()
@@ -247,6 +270,27 @@ pub async fn execute_skills_command(ctx: CommandContext<'_>, cmd: SkillsCommand)
                 }
             }
 
+            if !extension_skills_sorted.is_empty() {
+                if !project_skills.is_empty() || !user_skills_sorted.is_empty() {
+                    lines.push(String::new());
+                }
+                lines.push("## Extension Skills\n".to_string());
+                for s in &extension_skills_sorted {
+                    let desc = if s.description.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {}", s.description)
+                    };
+                    let ver = s
+                        .version
+                        .as_deref()
+                        .map(|v| format!(" `v{}`", v))
+                        .unwrap_or_default();
+                    lines.push(format!("- **{}**{}{}", s.name, ver, desc));
+                    lines.push(format!("  - location: `{}`", s.location));
+                }
+            }
+
             ctx.state
                 .chat_history
                 .push(crate::types::ChatEntry::assistant(lines.join("\n")).with_streaming(false));
@@ -262,6 +306,13 @@ pub async fn execute_skills_command(ctx: CommandContext<'_>, cmd: SkillsCommand)
                 v.extend(
                     crate::agent::skills::loader::SkillLoader::load_skills_from_dir(
                         &user_skills_dir,
+                    )
+                    .await,
+                );
+                // 扩展装的 skill 也能 `/skills show` 出来。
+                v.extend(
+                    crate::agent::skills::loader::SkillLoader::load_skills_from_dir(
+                        &extension_skills_dir,
                     )
                     .await,
                 );

@@ -182,6 +182,38 @@ impl Storage {
         self.star_dir().join("extensions")
     }
 
+    /// **所有** skill 根目录（按查找优先级排列）。
+    ///
+    /// # 为什么是三个来源
+    ///
+    /// | 来源 | 位置 | 谁放进去 |
+    /// |---|---|---|
+    /// | 项目 | `.star/skills/` | 用户手写、`/import` 导入 |
+    /// | 全局 | `~/.starcode/skills/` | 用户手写、`/import --user` 导入 |
+    /// | 扩展 | `.star/extensions/skills/` | `/extension` marketplace 安装 |
+    ///
+    /// 扩展这一层以前**没人扫** —— marketplace 装好的 skill 落在
+    /// `.star/extensions/skills/<name>/SKILL.md`，而 agent 只看
+    /// `.star/skills/` 与 `~/.starcode/skills/`，于是「装完的 skill 永远
+    /// 不会被模型调用」。
+    ///
+    /// 这与 Claude Code 的分层一致（<https://code.claude.com/docs/en/skills>）：
+    /// 用户 skill（`~/.claude/skills/`）、项目 skill（`.claude/skills/`）、
+    /// 插件 skill（`<plugin>/skills/`）是**三处独立的扫描源**，插件 skill
+    /// 不会被塞进用户目录。
+    pub fn skill_roots(&self) -> Vec<PathBuf> {
+        vec![
+            self.project_skills_dir(),
+            Self::user_skills_dir(),
+            self.extensions_skills_dir(),
+        ]
+    }
+
+    /// marketplace 安装的 skill 根（`<project>/.star/extensions/skills/`）。
+    pub fn extensions_skills_dir(&self) -> PathBuf {
+        self.extensions_dir().join("skills")
+    }
+
     pub fn extensions_config_path(&self) -> PathBuf {
         self.extensions_dir().join("star-extension.json")
     }

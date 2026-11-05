@@ -468,6 +468,7 @@ impl ToolInvocation for SkillInvocation {
 /// 2. `<project>/.star/skills/<name>.skill.md`
 /// 3. `~/.starcode/skills/<name>/SKILL.md`
 /// 4. `~/.starcode/skills/<name>.skill.md`
+/// 5. `<project>/.star/extensions/skills/<name>/SKILL.md`（`/extension` 装的）
 ///
 /// 目录布局与 Claude Code 一致（`<skill-dir>/SKILL.md`），另接受
 /// `<name>.skill.md` 这种单文件写法 —— `SkillLoader::load_skills_from_dir`
@@ -483,7 +484,12 @@ async fn load_user_skill_from_dirs(
     use crate::core::config::storage::Storage;
 
     let storage = Storage::new(project_root.to_path_buf());
-    let dirs = [storage.project_skills_dir(), Storage::user_skills_dir()];
+    // 三个来源：项目 / 全局 / 扩展安装（见 `Storage::skill_roots`）。
+    //
+    // 扩展这一层以前没人扫 —— marketplace 装好的 skill 落在
+    // `.star/extensions/skills/<name>/SKILL.md`，agent 看不到，于是
+    // 「装完的 skill 永远不被调用」。
+    let dirs = storage.skill_roots();
 
     // 名字的等价变体：原名 + 分隔符互换。
     let mut candidates: Vec<String> = vec![name.to_string()];
@@ -634,6 +640,56 @@ name: review\ndescription: d\n---\n\nbody\n",
         }
     }
 
+    /// **扩展安装的 skill 必须能被找到**（断链回归）。
+    ///
+    /// `/extension` marketplace 装好的 skill 落在
+    /// `.star/extensions/skills/<name>/SKILL.md`，而 agent 侧以前只看
+    /// `.star/skills/` 与 `~/.starcode/skills/` —— 于是「装完的 skill 永远
+    /// 不会被模型调用」，`/skills list` 里也看不见。
+    ///
+    /// 三个来源现在由 `Storage::skill_roots()` 统一给出
+    /// （与 Claude Code 的 user / project / plugin 三层扫描一致）。
+    #[tokio::test]
+    async fn an_extension_installed_skill_is_found() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let ext_skills = dir.path().join(".star").join("extensions").join("skills");
+        std::fs::create_dir_all(ext_skills.join("review")).expect("mkdir");
+        std::fs::write(
+            ext_skills.join("review").join("SKILL.md"),
+            "---\nname: review\ndescription: d\n---\n\nbody\n",
+        )
+        .expect("write");
+
+        let found = load_user_skill_from_dirs("review", dir.path()).await;
+        assert!(
+            found.is_some(),
+            "扩展安装的 skill 必须能被找到（marketplace 装完就该能用）"
+        );
+        assert_eq!(found.expect("found").name, "review");
+    }
+
+    /// 扩展来源也要出现在**清单**里 —— 否则模型看不到它的存在。
+    #[test]
+    fn an_extension_installed_skill_is_listed() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let ext_skills = dir.path().join(".star").join("extensions").join("skills");
+        std::fs::create_dir_all(ext_skills.join("review")).expect("mkdir");
+        std::fs::write(
+            ext_skills.join("review").join("SKILL.md"),
+            "---\nname: review\ndescription: d\n---\n\nbody\n",
+        )
+        .expect("write");
+
+        let listed: Vec<String> = list_model_callable_skills(dir.path())
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(
+            listed.contains(&"review".to_string()),
+            "扩展装的 skill 必须出现在清单里：{listed:?}"
+        );
+    }
+
     /// 没有这个 skill 时返回 None（不 panic、不误报）。
     #[tokio::test]
     async fn a_missing_skill_resolves_to_none() {
@@ -664,7 +720,8 @@ fn list_model_callable_skills(
     use crate::core::config::storage::Storage;
 
     let storage = Storage::new(project_root.to_path_buf());
-    let dirs = [storage.project_skills_dir(), Storage::user_skills_dir()];
+    // 三个来源（项目 / 全局 / 扩展安装）—— 见 `Storage::skill_roots`。
+    let dirs = storage.skill_roots();
 
     let mut skills: Vec<crate::agent::skills::loader::SkillDefinition> = Vec::new();
     for dir in dirs {
