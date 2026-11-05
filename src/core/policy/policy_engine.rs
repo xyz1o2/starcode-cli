@@ -510,31 +510,57 @@ impl PolicyEngine {
                         crate::core::auto_mode::service::AutoVerdict::Undecided => {
                             // 只有 auto 档位才有分类器可问；default/acceptEdits 落到下面
                             // 的规则与兜底逻辑，和改动前完全一致。
-                            if let Some(verdict) =
-                                self.classify_with_llm(&tool_call.name, &args).await
-                            {
-                                match verdict {
-                                    crate::core::auto_mode::service::AutoVerdict::Allow {
-                                        ..
-                                    } => {
+                            match self.classify_with_llm(&tool_call.name, &args).await {
+                                Some(
+                                    crate::core::auto_mode::service::AutoVerdict::Allow { .. },
+                                ) => {
+                                    return CheckResult {
+                                        decision: PolicyDecision::Allow,
+                                        rule: None,
+                                        explicit_rule: false,
+                                    };
+                                }
+                                Some(crate::core::auto_mode::service::AutoVerdict::Deny {
+                                    reason,
+                                }) => {
+                                    return CheckResult {
+                                        decision: PolicyDecision::DenyWithReason(reason),
+                                        rule: None,
+                                        explicit_rule: false,
+                                    };
+                                }
+                                // 分类器**不可用**（没装 / 熔断 / provider 挂了）。
+                                //
+                                // 这一支原来直接落到兜底 `AskUser` —— 于是分类器一挂，
+                                // 每次编辑、每次写文件都要问人。现场：ARTEX 的日志里
+                                // 每次会话都有
+                                // `[AutoMode] classifier circuit breaker tripped`
+                                // （12 次），熔断之后 `Edit` 就一路弹到底。
+                                //
+                                // 现在退化成 `acceptEdits` 的口径：**文件改动类
+                                // 工具照常放行**（写文件是 agent 的本职工作，用户
+                                // 开着 auto 档位就是在说「别烦我」），其余仍走兜底
+                                // 问人。
+                                //
+                                // **只对 auto 档位生效** —— default 档位的语义是
+                                // 「每次都问」，不能因为分类器没装就放宽（那会让
+                                // default 变成 acceptEdits，用户毫不知情）。
+                                //
+                                // 放行的范围只到「改项目里的文件」——
+                                // `is_file_edit_tool` 认的是 Edit/Write/MultiEdit
+                                // 这类，路径级的护栏（系统目录、敏感文件）在
+                                // 本地护栏那一层已经先判过了，这里不重复也不放宽。
+                                None => {
+                                    if crate::types::is_file_edit_tool(&tool_call.name) {
                                         return CheckResult {
                                             decision: PolicyDecision::Allow,
                                             rule: None,
                                             explicit_rule: false,
                                         };
                                     }
-                                    crate::core::auto_mode::service::AutoVerdict::Deny {
-                                        reason,
-                                    } => {
-                                        return CheckResult {
-                                            decision: PolicyDecision::DenyWithReason(reason),
-                                            rule: None,
-                                            explicit_rule: false,
-                                        };
-                                    }
-                                    // Ask / Undecided → 继续往下走，最终落到弹确认。
-                                    _ => {}
                                 }
+                                // Ask / Undecided → 继续往下走，最终落到弹确认。
+                                Some(_) => {}
                             }
                         }
                         crate::core::auto_mode::service::AutoVerdict::Ask { .. } => {}
@@ -1470,6 +1496,77 @@ mod turn_grant_tests {
             decision,
             PolicyDecision::AskUser,
             "清空后必须回到正常的审批流程"
+        );
+    }
+
+    /// **auto 档位下分类器不可用时，文件编辑不再每次问人。**
+    ///
+    /// 现场事故：ARTEX 的日志里每次会话都有
+    /// `[AutoMode] classifier circuit breaker tripped after 2 consecutive failures`，
+    /// 熔断之后 `Edit` 一路弹到底（每次编辑一张卡）。
+    ///
+    /// 根因：分类器不可用时直接落到兜底 `AskUser` —— 而 auto 档位的语义
+    /// 本来就是「别烦我，agent 自己判断」。分类器挂了不代表用户改主意了。
+    ///
+    /// 修法：退化成 `acceptEdits` 的口径 —— 文件改动类工具照常放行，
+    /// 其余仍走兜底问人。
+    #[tokio::test]
+    async fn auto_mode_allows_file_edits_when_the_classifier_is_unavailable() {
+        let mut engine = PolicyEngine::new(PolicyEngineConfig {
+            approval_mode: Some(ApprovalMode::Auto),
+            ..Default::default()
+        });
+        // 不装分类器 → `classify_with_llm` 返回 None（= 不可用）。
+
+        let decision = engine
+            .check(&call("Edit"), None)
+            .await
+            .decision;
+        assert_eq!(
+            decision,
+            PolicyDecision::Allow,
+            "分类器不可用时，auto 档位不该每次编辑都问人"
+        );
+    }
+
+    /// 但**非文件改动**的工具仍然要问 —— 分类器挂了不代表放行一切。
+    #[tokio::test]
+    async fn auto_mode_still_asks_for_other_tools_when_the_classifier_is_unavailable() {
+        let mut engine = PolicyEngine::new(PolicyEngineConfig {
+            approval_mode: Some(ApprovalMode::Auto),
+            ..Default::default()
+        });
+
+        let decision = engine
+            .check(
+                &FunctionCall {
+                    name: "WebFetch".to_string(),
+                    args: Some(serde_json::json!({"url": "https://example.com"})),
+                },
+                None,
+            )
+            .await
+            .decision;
+        assert_eq!(
+            decision,
+            PolicyDecision::AskUser,
+            "分类器不可用时，非编辑类工具仍要问人"
+        );
+    }
+
+    /// default 档位**不受影响** —— 分类器的事只关 auto 档的事。
+    #[tokio::test]
+    async fn default_mode_still_asks_for_file_edits() {
+        let engine = PolicyEngine::new(PolicyEngineConfig {
+            approval_mode: Some(ApprovalMode::Default),
+            ..Default::default()
+        });
+
+        let decision = engine.check(&call("Edit"), None).await.decision;
+        assert_eq!(
+            decision,
+            PolicyDecision::AskUser,
+            "default 档位下编辑仍要问人（auto 的宽松不扩散到 default）"
         );
     }
 

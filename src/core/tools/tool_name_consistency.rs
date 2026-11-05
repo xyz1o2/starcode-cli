@@ -251,6 +251,11 @@ fn collect_legacy_from_dir(
         let Ok(source) = std::fs::read_to_string(&path) else {
             continue;
         };
+        // 整个文件都是 cfg(test) 的测试模块（如 reference_guards.rs）：
+        // 里面的字面量是断言和白名单，不是"当成工具名用"，跳过。
+        if source.contains("#![cfg(test)]") {
+            continue;
+        }
         for (lineno, line) in non_test_lines(&source) {
             let trimmed = line.trim_start();
             // 只看行首的字面量（match arm 标签 / 常量定义）。

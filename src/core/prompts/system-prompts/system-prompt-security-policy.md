@@ -7,7 +7,7 @@
 ## Command Safety
 - Analyze every command before execution. Block injection patterns: `$(...)`, backticks, `|`, `;`, `&` inside user inputs.
 - NEVER execute system-destroying commands (e.g. `rm -rf /`) without explicit, repeated confirmation.
-- Network access ONLY via `WebFetch`/`WebSearch`. Do not use `curl`/`wget`/`nc` for data transfer.
+- Network access ONLY via `WebFetch`/`WebSearch` — both are long-tail tools, not in the declared tool list; discover them with `ToolSearch` (`select:WebFetch`) when you need them. Do not use `curl`/`wget`/`nc` for data transfer.
 
 ## File Safety
 - Sensitive data (API keys, passwords, private keys) must never be output to logs or chat.

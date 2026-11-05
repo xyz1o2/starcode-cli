@@ -5,7 +5,7 @@ description: Get GitHub PR review comments
 Fetch PR review comments and discussions.
 
 **Use for**: reviewing PR feedback, understanding review context.
-**NOT for**: creating PRs (use `SuggestPr`), managing issues (use `github_issue`).
+**NOT for**: creating PRs (use `SuggestPr`), managing issues (use `gh issue` via `Bash`).
 
 **Rules**:
 - Requires `gh` CLI

@@ -267,12 +267,17 @@ pub fn build_confirmation_card_block(
                 header, question, ..
             } => header.clone().unwrap_or_else(|| truncate_str(question, 40)),
         };
+        // 已裁决的卡片：**只显示图标 + 内容摘要**，不显示 "Allowed (once)" 这类
+        // 裁决文字。
+        //
+        // 图标已经表达了裁决结果（✓ 放行 / ✗ 拒绝 / … 排队），文字是冗余的 ——
+        // 而且它把整行拉长，让「已批准」和「已拒绝」在扫视时都变成一串要看清的
+        // 英文。用户在意的只是「这步过没过」，那一眼看图标就够。
         return vec![Line::from(vec![
             Span::styled(
                 format!("{} ", icon),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(outcome.clone(), Style::default().fg(color)),
             Span::styled(format!("  {}", detail), Style::default().fg(INACTIVE_COLOR)),
         ])];
     }
@@ -652,17 +657,17 @@ pub fn build_ask_user_question_card(
 ) -> Vec<Line<'static>> {
     use crate::types::ConfirmationDetails;
 
-    // Already resolved — show outcome
+    // Already resolved — show outcome.
+    //
+    // 与上面那条一样：**只显示图标**，不显示 "Allowed (once)" 这类裁决文字。
+    // 这个渲染器没有内容摘要可配，所以整行就只剩一个图标 —— 那正好，
+    // 它本来就是「一行摘要」的形状。
     if let Some(outcome) = &confirmation.outcome {
         let (color, icon) = outcome_style(outcome);
-        let outcome_text = outcome.clone();
-        return vec![Line::from(vec![
-            Span::styled(
-                format!("{} ", icon),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(outcome_text, Style::default().fg(color)),
-        ])];
+        return vec![Line::from(vec![Span::styled(
+            format!("{} ", icon),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )])];
     }
 
     let mut lines: Vec<Line<'static>> = Vec::new();

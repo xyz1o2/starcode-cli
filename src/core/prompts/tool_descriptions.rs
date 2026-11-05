@@ -206,7 +206,11 @@ pub fn resolve_tool_description(tool_name: &str) -> Option<String> {
 }
 
 /// 去掉 frontmatter 注释块的正文。
-fn strip_frontmatter(content: &str) -> &str {
+///
+/// `pub(crate)`：`prompt_builder` 组装 Core Tool Usage Guides bundle 时也要剥掉
+/// frontmatter（它是给注册表读的元数据，进模型上下文纯属浪费），两处必须同一份
+/// 实现——两份实现曾导致测试按剥后计长、生产按原文计长，静默截断被测试掩掉。
+pub(crate) fn strip_frontmatter(content: &str) -> &str {
     if content.trim_start().starts_with("<!--") {
         content
             .split_once("-->")

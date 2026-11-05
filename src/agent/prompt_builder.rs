@@ -226,35 +226,18 @@ impl PromptBuilder {
             return cached;
         }
 
-        let mut out = String::new();
-        out.push_str("\n\n# Core Tool Usage Guides\n");
-
-        let selected_filenames = Self::core_tool_description_filenames();
-
-        for filename in selected_filenames {
-            if out.len() >= max_chars {
-                break;
-            }
-
-            if let Some(file_content) = crate::core::prompts::loader::try_load_prompt(&filename) {
-                let content = if file_content.len() > max_file_chars {
-                    let safe_end = file_content
-                        .char_indices()
-                        .nth(max_file_chars)
-                        .map(|(i, _)| i)
-                        .unwrap_or(file_content.len());
-                    &file_content[..safe_end]
-                } else {
-                    file_content.as_str()
-                };
-
-                out.push_str(&format!("\n--- START OF {} ---\n", filename));
-                out.push_str(content.trim());
-                out.push_str(&format!("\n--- END OF {} ---", filename));
-            }
+        let (bundle, dropped) = assemble_core_bundle(
+            &Self::core_tool_description_filenames(),
+            max_chars,
+            max_file_chars,
+        );
+        if !dropped.is_empty() {
+            // 静默截断曾把 toolsearch / write 指南整份丢出系统提示词，
+            // 而模型对此毫无线索。cap 太紧时至少留下可诊断的痕迹。
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[Prompt] Core tool guides dropped by char cap ({max_chars}): {dropped:?}"
+            ));
         }
-
-        let bundle = if out.len() > 100 { Some(out) } else { None };
 
         system_prompt_bundle_cache()
             .lock()
@@ -273,7 +256,10 @@ impl PromptBuilder {
     ///   每发现一个工具 system 前缀就漂移一次，击穿 prompt 缓存。
     ///
     /// 纯函数：只依赖内嵌文件清单与核心工具常量，会话内恒定 → 缓存前缀稳定。
-    fn core_tool_description_filenames() -> Vec<String> {
+    ///
+    /// `pub(crate)`：`prompts::reference_guards` 的测试要复刻它来核验 bundle
+    /// 的引用闭包，不复制实现。
+    pub(crate) fn core_tool_description_filenames() -> Vec<String> {
         let core_tools: HashSet<String> = crate::agent::tool_routing::CORE_TOOL_NAMES
             .iter()
             .map(|s| s.to_string())
@@ -344,25 +330,22 @@ impl PromptBuilder {
 
     /// Build system messages with prompt cache optimization.
     ///
-    /// # 缓存前缀必须逐字节稳定
+    /// # 缓存边界：静态块 + 准静态块
     ///
-    /// Anthropic 的 prompt cache 是**前缀**缓存，而 rig 只在 system 数组的最后一块上
-    /// 打断点（`apply_system_cache_control` → `system.last_mut()`），所以**整个 system
-    /// 数组都属于被缓存的前缀**：其中任何一个字节变了，这一整段（本项目约 4 万字符）
-    /// 就要按原价重算。
+    /// Anthropic 的 prompt cache 是**前缀**缓存，rig 只在 system 数组最后一块上
+    /// 打断点（`apply_system_cache_control` → `system.last_mut()`），但**保留**
+    /// 既有块上已有的标记。这里于是拆成两条：
     ///
-    /// 因此这里只往 system 里放"一个缓存窗口内不会变"的东西：
+    /// - **静态块**（带 cache_control）：身份 / 模式提示 / 安全策略 / reminders /
+    ///   平台信息 / 工具目录 / Core Tool Usage Guides bundle——一个缓存窗口内逐字节恒定；
+    /// - **准静态块**：项目指令（STAR.md）/ StarLens / 输出风格 / scope 策略 /
+    ///   final override rules——可变，但有自己的缓存断点；变了只失效这一块，
+    ///   静态前缀继续命中。
     ///
-    /// - 静态段：身份 / 模式提示 / 安全策略 / reminders / 平台信息 / 工具目录 /
-    ///   扩展提示包 / final override rules；
-    /// - 准静态段：项目指令（STAR.md，改了会变但不会每轮变）+ git 快照
-    ///   （TTL 300s ≈ 缓存存活时间，见 [`cached_git_snapshot`]）。
-    ///
-    /// 真正每轮都变的东西（`complexity_hint`、检索出来的动态上下文）不再进 system，
-    /// 由调用方挂到当轮 user 消息上 —— 见 [`PromptBuilder::build_turn_context`]。
+    /// 对标 Claude Code 的 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` 分界。
     ///
     /// `.star/SYSTEM.md` 可以整体替换这里生成的内容，`.star/APPEND_SYSTEM.md` 可以在
-    /// 后面追加 —— 见 [`read_prompt_override`]。
+    /// 准静态块后面追加 —— 见 [`read_prompt_override`]。
     ///
     /// If `STAR_PROMPT_CACHE_ENABLED=0`, the messages are plain system messages
     /// without cache_control.
@@ -383,14 +366,16 @@ impl PromptBuilder {
         if let Some(replacement) =
             read_prompt_override(cwd_path, "STAR_SYSTEM_PROMPT_FILE", "SYSTEM.md")
         {
-            return vec![Self::finish_system_message(cwd_path, replacement)];
+            let msg = Self::finish_dynamic_message(cwd_path, replacement)
+                .expect("SYSTEM.md override 已在 read_prompt_override 校验非空");
+            return vec![msg];
         }
 
         let flags = PromptFlags::from_env();
 
-        // ── 准静态段（跟着静态段一起进缓存前缀）──
-        // 这些内容会变，但不是每轮都变；跟静态段放在同一条 system 消息里，
-        // 变的时候重建一次缓存即可，比每轮都变要划算得多。
+        // ── 准静态段：进第二条 system 消息（自带缓存断点，不污染静态前缀）──
+        // 这些内容会变，但不是每轮都变；放在准静态块里，变的时候只重建这一块的
+        // 缓存条目，静态前缀不受影响。
         let mut semi_static_parts: Vec<String> = Vec::new();
 
         if let Some(ctx) = project_context_override {
@@ -527,31 +512,57 @@ impl PromptBuilder {
         // （见 [`PromptBuilder::build_turn_context`]）。system prompt 因此
         // **逐字节恒定**，整个会话共用一个缓存前缀。
 
-        // ── Assemble messages ──
-        // 静态 + 准静态合成**一条** system 消息：rig 只会在 system 数组最后一块上打
-        // 缓存断点，拆成两条并不会让前面那条单独进缓存，反而白白多一条消息。
-        // final override rules 压在最后，保持"最后读到"的位置优势。
-        let mut parts = static_parts;
-        parts.append(&mut semi_static_parts);
-        parts.push(final_override_rules());
+        // ── Assemble messages：缓存边界（对标 Claude Code 的 __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__）──
+        //
+        // Anthropic 按 breakpoint 做前缀缓存。rig 只会在 system 数组**最后一块**上
+        // 打断点，且不会动既有块上已有的标记（`apply_system_cache_control` 只补缺）。
+        // 因此：静态段（身份/模式指引/安全策略/reminders/环境信息/工具目录/核心工具指南）
+        // 单独成块并打 cache_control，准静态段（STAR.md/输出风格/LENS/scope 等）放第二条。
+        // 准静态块里改一个字节，只失效准静态块自己的缓存条目，整个静态前缀继续命中；
+        // rig 仍会在末尾补一个断点给准静态块。
+        //
+        // 旧行为是两段拼成**一条**：rig 的断点落在整体末尾，准静态改动 ==
+        // 整个静态前缀（连带 tools 断点）一起失效。
+        //
+        // final override rules 压在准静态块最后，保持"最后读到"的位置优势。
+        let static_content = static_parts.join("\n\n");
+        let mut dynamic_parts = semi_static_parts;
+        dynamic_parts.push(final_override_rules());
+        let dynamic_content = dynamic_parts.join("\n\n");
 
-        vec![Self::finish_system_message(cwd_path, parts.join("\n\n"))]
+        let mut msgs = vec![Self::cached_static_message(static_content)];
+        if let Some(dynamic_msg) = Self::finish_dynamic_message(cwd_path, dynamic_content) {
+            msgs.push(dynamic_msg);
+        }
+        msgs
     }
 
-    /// 收尾：追加 `APPEND_SYSTEM.md`，再按开关决定是否打缓存标记
-    fn finish_system_message(cwd: &Path, mut content: String) -> crate::types::StarMessage {
+    /// 静态块：打 cache_control（缓存按钮），不追加用户覆盖。
+    fn cached_static_message(content: String) -> crate::types::StarMessage {
+        if prompt_cache_enabled() {
+            crate::types::StarMessage::cached_system(content)
+        } else {
+            crate::types::StarMessage::system(content)
+        }
+    }
+
+    /// 准静态块：追加 `APPEND_SYSTEM.md`（用户追加覆盖跟动态内容走，一动只失效
+    /// 这一块）；为空（无项目指令、无 git 快照、无 output style…）则不发第二条。
+    fn finish_dynamic_message(cwd: &Path, mut content: String) -> Option<crate::types::StarMessage> {
         if let Some(appended) =
             read_prompt_override(cwd, "STAR_APPEND_SYSTEM_PROMPT_FILE", "APPEND_SYSTEM.md")
         {
             content.push_str("\n\n");
             content.push_str(&appended);
         }
-
-        if prompt_cache_enabled() {
+        if content.trim().is_empty() {
+            return None;
+        }
+        Some(if prompt_cache_enabled() {
             crate::types::StarMessage::cached_system(content)
         } else {
             crate::types::StarMessage::system(content)
-        }
+        })
     }
 
     /// 构造"当轮上下文"—— 每条用户消息都会变、因此**不能**进 system prompt 的那部分
@@ -626,6 +637,69 @@ impl PromptBuilder {
     }
 }
 
+/// 进缓存 system message 的静态段文件（interactive 用 system-prompt.md，
+/// Agent/Plan 用 system-prompt-agent-mode.md，两者都要算进引用守卫的输入）。
+/// 与各 `render` 函数的加载点一一对应——新增静态段时必须同步更新这里。
+/// `reference_guards` 的引用守卫以此为输入。
+pub(crate) const BUNDLE_STATIC_FILE_NAMES: &[&str] = &[
+    "system-prompt.md",
+    "system-prompt-agent-mode.md",
+    "system-prompt-core-identity.md",
+    "system-prompt-key-scenarios.md",
+    "system-prompt-reminders.md",
+    "system-prompt-security-policy.md",
+    "system-prompt-tool-guidance.md",
+    "system-prompt-task-agent-usage.md",
+    "final-override-rules.md",
+];
+
+/// 纯函数：按 cap 装填 Core Tool Usage Guides bundle。
+///
+/// **生产与测试共用同一段装填逻辑**——两份算法曾导致"测试剥掉 frontmatter 后算账、
+/// 生产按原文计长"，于是 cap 先撞在生产侧，而 `default_max_chars_covers_all_core_guides`
+/// 照常绿灯，`toolsearch` / `write` 两份指南被静默截掉。
+///
+/// frontmatter（给注册表读的元数据）进模型上下文纯属浪费，这里一律剥掉。
+/// 返回 `(bundle, 因 cap 被丢弃的文件)`。
+fn assemble_core_bundle(
+    files: &[String],
+    max_chars: usize,
+    max_file_chars: usize,
+) -> (Option<String>, Vec<String>) {
+    let mut out = String::new();
+    out.push_str("\n\n# Core Tool Usage Guides\n");
+    let mut dropped: Vec<String> = Vec::new();
+
+    for filename in files {
+        if out.len() >= max_chars {
+            dropped.push(filename.clone());
+            continue;
+        }
+
+        let Some(file_content) = crate::core::prompts::loader::try_load_prompt(filename) else {
+            continue;
+        };
+        let body = crate::core::prompts::tool_descriptions::strip_frontmatter(&file_content);
+        let content = if body.len() > max_file_chars {
+            let safe_end = body
+                .char_indices()
+                .nth(max_file_chars)
+                .map(|(i, _)| i)
+                .unwrap_or(body.len());
+            &body[..safe_end]
+        } else {
+            body
+        };
+
+        out.push_str(&format!("\n--- START OF {} ---\n", filename));
+        out.push_str(content.trim());
+        out.push_str(&format!("\n--- END OF {} ---", filename));
+    }
+
+    let bundle = if out.len() > 100 { Some(out) } else { None };
+    (bundle, dropped)
+}
+
 fn system_prompt_bundle_cache() -> &'static Mutex<HashMap<String, Option<String>>> {
     static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -654,13 +728,13 @@ fn cached_system_prompts_max_chars() -> usize {
         std::env::var("STAR_SYSTEM_PROMPTS_MAX_CHARS")
             .ok()
             .and_then(|v| v.parse().ok())
-            // 必须容得下 CORE_TOOL_NAMES 全部 18 份指南（当前合计约 24.9k 字符）。
-            // 以前默认 15_000 会按文件名序静默截断尾部，把 CodebaseSearch / Write /
-            // tool_search 的使用指南整份丢出系统提示词——而 schema 描述又是
-            // frontmatter 里的一行短句，模型于是对这几个工具既看不到详情也无人解释。
-            // 24_000 曾刚好装下 17 份（23.9k，余量不到 100 字符）；加入 RepoMap
-            // 指南（+1.0k）后必须同步上调，否则 write.md 会被静默截掉。
-            .unwrap_or(26_000)
+            // bundle 只计入剥掉 frontmatter 后的正文（见 assemble_core_bundle），
+            // 当前全部核心指南合计约 26.3k 字符（write.md 加完正好超出 26k——
+            // 装填是"先判满再装"，末位文件允许越线）。默认提到 28k：
+            // 至少 1.7k 余量，新加一个核心工具的指南也不至于静默挤掉尾部
+            // 文件；小上下文模型可用 STAR_SYSTEM_PROMPTS_MAX_CHARS 调回。
+            // toolsearch / write 指南曾因旧的 26k cap 被静默截掉，本次一并修复。
+            .unwrap_or(28_000)
     })
 }
 
@@ -828,11 +902,77 @@ mod tests {
             true,
             None,
         );
-        let content = msgs[0].content.as_deref().unwrap_or_default();
-        assert!(
-            !content.contains("# Git Status"),
-            "git 快照必须留在 user 侧；它进 system 会击穿整个缓存前缀"
+        for msg in &msgs {
+            assert!(
+                !msg.content.as_deref().unwrap_or_default().contains("# Git Status"),
+                "git 快照必须留在 user 侧；它进 system 会击穿整个缓存前缀"
+            );
+        }
+    }
+
+    /// 缓存边界拆成两条：静态前缀与准静态后缀分块，静态块打 cache_control。
+    /// 准静态块内容变了（STAR.md/输出风格），静态前缀的缓存条目不该失效。
+    #[test]
+    fn system_message_is_split_into_static_and_dynamic_at_the_cache_boundary() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let cwd_str = cwd.to_string_lossy().to_string();
+        let msgs = PromptBuilder::build_cached_system_messages(
+            PromptMode::Agent,
+            "2026-10-24",
+            "linux",
+            &cwd_str,
+            None,
+            Some("SENTINEL_DYNAMIC_MARKER_42".to_string()),
+            true,
+            true,
+            None,
         );
+
+        assert_eq!(msgs.len(), 2, "应拆成 [静态块, 准静态块]");
+        let static_block = msgs[0].content.as_deref().unwrap_or_default();
+        let dynamic_block = msgs[1].content.as_deref().unwrap_or_default();
+
+        assert!(
+            !static_block.contains("SENTINEL_DYNAMIC_MARKER_42"),
+            "准静态内容（项目指令）漏进了静态前缀"
+        );
+        assert!(
+            dynamic_block.contains("SENTINEL_DYNAMIC_MARKER_42"),
+            "准静态块没有带上项目指令"
+        );
+        assert!(
+            static_block.contains("STAR CLI") || static_block.contains("SYSTEM PROMPT"),
+            "静态块应包含核心身份段"
+        );
+    }
+
+    /// 末位准静态块允许为空（无项目指令/无 git/无 output style…）——
+    /// 此时不应发送第二条 system 消息。
+    #[test]
+    fn empty_dynamic_block_is_omitted() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let cwd_str = cwd.to_string_lossy().to_string();
+        let msgs = PromptBuilder::build_cached_system_messages(
+            PromptMode::Agent,
+            "2026-10-24",
+            "linux",
+            &cwd_str,
+            None,
+            None,
+            true,
+            true,
+            None,
+        );
+        assert!(
+            msgs.len() >= 1,
+            "至少要有静态块"
+        );
+        for msg in &msgs {
+            assert!(
+                !msg.content.as_deref().unwrap_or_default().trim().is_empty(),
+                "不该出现空的 system 消息"
+            );
+        }
     }
 
     #[test]
@@ -883,32 +1023,37 @@ mod tests {
     /// 回归 F1：bundle 的 15k 字符上限曾按文件名序静默截断尾部，
     /// 把 CodebaseSearch / Write 等核心工具的使用指南整份丢掉，
     /// 而它们给模型的 schema 描述只有 frontmatter 里一行短句。
-    /// 这里断言默认 cap 容得下全部核心指南，避免 cap 再次悄悄变窄。
+    /// 这里断言：用**生产同一段装填逻辑**装默认 cap，一份都不许掉。
     #[test]
     fn default_max_chars_covers_all_core_guides() {
         let files = PromptBuilder::core_tool_description_filenames();
         let cap = cached_system_prompts_max_chars();
+        let file_cap = cached_system_prompts_max_file_chars();
 
-        let mut total = "\n\n# Core Tool Usage Guides\n".len();
-        let mut dropped = Vec::new();
-        for f in &files {
-            if total >= cap {
-                dropped.push(f.clone());
-                continue;
-            }
-            let body = crate::core::prompts::loader::try_load_prompt(f).unwrap_or_default();
-            let body = if body.trim_start().starts_with("<!--") {
-                body.split_once("-->").map(|(_, r)| r).unwrap_or(&body)
-            } else {
-                &body
-            };
-            total += body.len().min(cached_system_prompts_max_file_chars());
-        }
+        let (bundle, dropped) = assemble_core_bundle(&files, cap, file_cap);
+        let bundle = bundle.expect("bundle should assemble from core guides");
 
         assert!(
             dropped.is_empty(),
-            "默认 cap {cap} 装不下全部 {} 份核心指南，末尾被丢弃：{dropped:?}",
+            "默认 cap {cap} 装不下全部 {} 份核心指南，被丢弃：{dropped:?}",
             files.len()
+        );
+        // 2026-11 回归点：装填逻辑曾按含 frontmatter 的原文计长，
+        // `tool-description-toolsearch.md` 和 `tool-description-write.md` 被静默截掉。
+        for must in [
+            "tool-description-toolsearch.md",
+            "tool-description-write.md",
+            "tool-description-bash.md",
+        ] {
+            assert!(
+                bundle.contains(&format!("--- START OF {must} ---")),
+                "bundle 里没有 {must}\n{bundle}"
+            );
+        }
+        // frontmatter（注册表元数据）不该进模型上下文。
+        assert!(
+            !bundle.contains("<!--"),
+            "bundle 里不该出现 frontmatter 注释块"
         );
     }
 }

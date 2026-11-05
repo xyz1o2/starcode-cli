@@ -1,6 +1,22 @@
 use crate::types::StarMessage;
 use std::collections::HashSet;
 
+/// 前导 system 消息的数量。
+///
+/// system 前缀可能不止一条：静态块（带 cache_control）+ 准静态块，见
+/// `PromptBuilder::build_cached_system_messages`。压缩/裁剪逻辑必须**整段**
+/// 保留——只认 `messages[0]` 会把准静态块（项目指令 / final rules）压进摘要
+/// 或直接丢掉。
+pub(crate) fn leading_system_count(messages: &[StarMessage]) -> usize {
+    messages.iter().take_while(|m| m.role == "system").count()
+}
+
+/// 把前导 system 消息**整段**追加进 `out`。
+pub(crate) fn push_leading_system_messages(out: &mut Vec<StarMessage>, messages: &[StarMessage]) {
+    let n = leading_system_count(messages);
+    out.extend_from_slice(&messages[..n]);
+}
+
 /// Estimate total character count of all messages.
 pub(crate) fn estimate_messages_chars(messages: &[StarMessage]) -> usize {
     let mut total = 0;

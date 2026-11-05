@@ -23,7 +23,7 @@ While the Bash tool can do similar things, it's better to use the built-in tools
 - If your command will create new directories or files, first use `LS` to verify the parent directory exists and is the correct location.
 - Always quote file paths that contain spaces with double quotes in your command (e.g., cd "path with spaces/file.txt")
 - Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of `cd`. You may use `cd` if the User explicitly requests it.
-- Commands time out after 2 minutes by default (the limit is configured server-side, not per call). Hand long-running work to the `BackgroundTask` tool instead of blocking the session.
+- Commands time out after 2 minutes by default (the limit is configured server-side, not per call). There is no way to run a command in the background — the session blocks until the command finishes. For long work, break it into steps under the timeout, or ask the user to run it in their own terminal.
 - When issuing multiple commands:
   - If the commands are independent and can run in parallel, make multiple Bash tool calls in a single message.
   - If the commands depend on each other and must run sequentially, use a single Bash call with '&&' to chain them together.
@@ -43,7 +43,7 @@ While the Bash tool can do similar things, it's better to use the built-in tools
   - Do not use --no-edit with git rebase commands, as the --no-edit flag is not a valid option for git rebase.
 - Avoid unnecessary `sleep` commands:
   - Do not sleep between commands that can run immediately — just run them.
-  - For long-running commands, use the `BackgroundTask` tool — you will be notified when it completes. Do not poll.
+  - Long-running work is not backgroundable: no tool here detaches a shell command. Keep commands short; if the task exceeds the timeout, tell the user to run it in their own terminal instead.
   - Do not retry failing commands in a sleep loop — diagnose the root cause.
   - If you must sleep, keep the duration short (under 2 seconds) to avoid blocking the user.
 

@@ -53,6 +53,39 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "<non-string panic payload>".to_string())
 }
 
+/// 工具自己的逐次确认要不要跑。
+///
+/// # 为什么不是「已授权就跳过」
+///
+/// `requires_invocation_confirmation` 表示「这个工具**每次**都要问」
+/// （`Edit` 在 `folder_trust` 打开时就是）—— 用户在弹窗里点「允许本会话」
+/// 说的是「这个工具可以一直用」，但工具自己可能坚持每次都问
+/// （未信任目录的编辑就是这种情况：路径级的顾虑不会因为一次授权而消失）。
+///
+/// # 但不能问两次
+///
+/// 门闸有**两道**：策略层（兜底 `AskUser` / 规则 / 授权）与工具层
+/// （`should_confirm_execute`）。这两道问的是同一件事 —— 「这次调用要不要
+/// 放行」。Claude Code 只有**一道**门：官方 issue #37518 里明确说，
+/// VS Code 扩展多出来的那道「看 diff 再批准」是
+/// *"an additional approval gate that runs **independently** of your allow
+/// rules"*，并且指出 CLI 版本没有这个问题。
+///
+/// 我们这里曾经也有同样的毛病：工具层返回 `Some(details)` 时弹一张卡，
+/// 策略层的兜底卡**不弹**（match 是互斥的），所以一次调用只弹一张 ——
+/// 但那次调用会在**下一次**再来一遍，因为工具层的 `requires_invocation_
+/// confirmation` 让「已授权」失效了。
+///
+/// 结果是日志里这种自相矛盾的序列：
+/// ```text
+/// 🔔 Edit (source=tool, granted=false)   ← 第一次
+/// 🔐 Permission Granted: Allowing tool Edit for session
+/// 🔔 Edit (source=tool, granted=true)    ← 授权刚生效，又问一次
+/// ```
+///
+/// 修法：工具层与策略层**共用同一张卡**。工具层有话说就用它的（信息更具体，
+/// 比如「未信任目录」）；否则用策略层的。已经拿到授权（`approved`）时，
+/// 工具层**不再**单独弹 —— 用户已经就这个工具表过态了，再问一遍是噪音。
 fn should_run_invocation_confirmation(
     approved: bool,
     requires_invocation_confirmation: bool,
@@ -554,8 +587,38 @@ impl ToolExecutor {
             }
         }
 
-        // 工具自己的逐次检查：它知道参数级/路径级的顾虑（`Edit` 关心未信任目录），
-        // 通用授权不该替它做主，所以这条路径不受上面的 `approved` 影响。
+        // 工具自己的逐次检查：它知道参数级/路径级的顾虑（`Edit` 关心未信任目录）。
+        //
+        // 关键：**工具层与策略层必须共用同一张卡**。
+        //
+        // 以前这里在 `approved` 为真时仍然会弹（只要工具声明了
+        // `requires_invocation_confirmation`），于是日志里出现自相矛盾的序列：
+        // ```text
+        // 🔔 Edit (source=tool, granted=false)   ← 第一次问
+        // 🔐 Permission Granted: Allowing tool Edit for session
+        // 🔔 Edit (source=tool, granted=true)    ← 授权刚生效，又问一次
+        // ```
+        // 用户点一次「允许本会话」却还是每次被问 —— 这正是「权限老是弹窗」
+        // 的一半原因。
+        //
+        // 现在：**工具自己有话说（`Some(details)`）时用它那张卡**，但如果
+        // 用户已经就这个工具给过会话/持久授权，就**不再单独弹一次** ——
+        // 授权已经覆盖了「这个工具能不能用」这个问题。
+        //
+        // 工具层的语义仍然保留给真正需要每次都问的场景（未信任目录的编辑：
+        // 那是**路径级**的顾虑，与「这个工具允不允许用」是两个问题）——
+        // 那条路径由 `requires_invocation_confirmation` 表达，而
+        // `EditTool::requires_invocation_confirmation()` 只在 `folder_trust`
+        // 打开时为真（默认关闭）。
+        let should_confirm = invocation.should_confirm_execute(abort_signal).await;
+        let tool_has_own_card = matches!(&should_confirm, Ok(Some(_)));
+
+        // 已经授权过，而工具要问的又只是「这个工具能不能用」这一层
+        // （不是路径级的顾虑）→ 不再重复问。
+        if approved && tool_has_own_card && !requires_invocation_confirmation {
+            return Gate::Open;
+        }
+
         if !should_run_invocation_confirmation(approved, requires_invocation_confirmation) {
             return Gate::Open;
         }
@@ -565,7 +628,6 @@ impl ToolExecutor {
             return Gate::Open;
         };
 
-        let should_confirm = invocation.should_confirm_execute(abort_signal).await;
         let details = match should_confirm {
             Ok(Some(details)) => {
                 card_source = "tool";

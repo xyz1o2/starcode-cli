@@ -31,6 +31,8 @@ pub(crate) mod nudges;
 mod planner;
 pub(crate) mod policies;
 mod prompt_builder;
+#[cfg(test)]
+mod reference_guards;
 mod query_loop_types;
 pub mod reflection;
 pub mod router;

@@ -110,9 +110,11 @@ fn apply_cache_breakpoints(body: &mut serde_json::Value) {
     }
 
     // ── 断点 2：system prompt ──
-    // 每条请求只有一条 system 消息（`prompt_builder.rs:536` 返回 `vec![单条]`），
-    // 但压缩可能在数组中部插入 system 摘要（`message_pipeline.rs:404-434`）——那些在
-    // 缓存前缀之外，标记第一条即可，不要试图全标。
+    // 提示词拆成 [静态块, 准静态块] 两条（见 prompt_builder::build_cached_system_messages）。
+    // 断点标记**第一条** system 消息的最后一块（静态块）：项目指令（STAR.md）等
+    // 准静态内容变了，只失效准静态块，静态前缀继续命中。压缩可能在数组中部插入
+    // system 摘要（`message_pipeline.rs:404-434`）——那些在缓存前缀之外，
+    // 标记第一条即可，不要试图全标。
     if let Some(messages) = body.get_mut("messages").and_then(|v| v.as_array_mut()) {
         if let Some(system) = messages
             .iter_mut()

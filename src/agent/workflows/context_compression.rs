@@ -287,29 +287,26 @@ impl ContextCompressor {
             });
         }
 
-        // Apply Level 2 directly for force compress
-        // We assume index 0 is system prompt
-        let _system_msg = if !messages.is_empty() && messages[0].role == "system" {
-            messages[0].clone()
-        } else {
-            StarMessage::system("".to_string())
-        };
+        // Apply Level 2 directly for force compress.
+        // system 前缀整段保留（静态块 + 准静态块，见 message_processing::leading_system_count），
+        // 不假设只有 index 0。
+        let prefix_n = crate::agent::message_processing::leading_system_count(&messages);
 
         let keep_count = LEVEL1_KEEP_RECENT;
         let split_idx = messages.len().saturating_sub(keep_count);
 
-        // Ensure split_idx respects system prompt (don't split before index 1)
-        let split_idx = if split_idx < 1 { 1 } else { split_idx };
+        // 不从 system 前缀中间切开
+        let split_idx = if split_idx < prefix_n { prefix_n } else { split_idx };
 
         let recent_messages = messages[split_idx..].to_vec();
 
         let mut summary_text = format!(
             "(User Manual Compression: Omitted {} to {} messages. Summary: User interacted multiple times, tools executed. Recent context preserved.)",
-            1, split_idx
+            prefix_n, split_idx
         );
 
         if let Some(client) = client {
-            let messages_to_summarize = &messages[0..split_idx];
+            let messages_to_summarize = &messages[prefix_n..split_idx];
             if let Ok(generated_summary) = self
                 .generate_au2_summary(messages_to_summarize, client, instructions)
                 .await
@@ -327,10 +324,8 @@ impl ContextCompressor {
         ));
 
         let mut new_messages = Vec::new();
-        // If we have a system prompt, keep it at index 0
-        if !messages.is_empty() && messages[0].role == "system" {
-            new_messages.push(messages[0].clone());
-        }
+        // Keep the whole leading system prefix (static block + dynamic block)
+        crate::agent::message_processing::push_leading_system_messages(&mut new_messages, &messages);
         new_messages.push(summary_msg);
         new_messages.extend(recent_messages);
 
@@ -437,9 +432,11 @@ impl ContextCompressor {
         // --- Level 2 (Summarization - AU2 8-Section Strategy) ---
         // Use messages_l1 as base (already truncated, might help summarizer too)
         let keep_count = LEVEL2_KEEP_RECENT;
+        // system 前缀整段保留（静态块 + 准静态块），不假设只有 index 0
+        let prefix_n = crate::agent::message_processing::leading_system_count(&messages_l1);
         let split_idx = messages_l1.len().saturating_sub(keep_count);
-        // Ensure we don't cut off system prompt if it exists at index 0
-        let mut split_idx = if split_idx < 1 { 1 } else { split_idx };
+        // 不从 system 前缀中间切开
+        let mut split_idx = if split_idx < prefix_n { prefix_n } else { split_idx };
 
         // Adjust split point to avoid keeping orphaned tool messages whose
         // corresponding assistant tool_calls are in the summarized portion.
@@ -453,11 +450,11 @@ impl ContextCompressor {
 
         let mut summary_text = format!(
             "(Auto Compression Level 2: Omitted {} to {} messages.)",
-            1, split_idx
+            prefix_n, split_idx
         );
 
         if let Some(client) = client {
-            let messages_to_summarize = &messages_l1[0..split_idx];
+            let messages_to_summarize = &messages_l1[prefix_n..split_idx];
             if let Ok(generated_summary) = self
                 .generate_au2_summary(messages_to_summarize, client, None)
                 .await
@@ -479,9 +476,8 @@ impl ContextCompressor {
         ));
 
         let mut new_messages = Vec::new();
-        if !messages_l1.is_empty() && messages_l1[0].role == "system" {
-            new_messages.push(messages_l1[0].clone());
-        }
+        // Keep the whole leading system prefix (static block + dynamic block)
+        crate::agent::message_processing::push_leading_system_messages(&mut new_messages, &messages_l1);
         new_messages.push(summary_msg);
         new_messages.extend(recent_messages);
 

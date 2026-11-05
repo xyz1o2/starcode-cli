@@ -159,6 +159,32 @@ fn apply_tool_registry_layer(
     }
 }
 
+/// 仅供测试：完整两层装配（CoreRuntime + AgentRuntime），Agent 层用空 StarClient。
+///
+/// 生产路径分两次走（`build_core_tool_registry` → `build_agent_runtime_artifacts`），
+/// 中间隔着 RuntimeServices 的接线；测试只关心最终 registry 的完整视图。
+#[cfg(test)]
+pub(crate) async fn build_two_layer_registry_for_tests() -> Arc<ToolRegistry> {
+    use crate::core::config::ConfigParameters;
+
+    let bus = Arc::new(MessageBus::new(PolicyEngine::new(PolicyEngineConfig::default()), false));
+    let gs = Arc::new(GlobalState::new());
+    let model_switch_cell = crate::agent::model_switch::new_cell();
+
+    let mut config = Config::new(ConfigParameters::default());
+    config.install_runtime_services(
+        RuntimeServices::new(None, bus.clone(), None, gs.clone()).with_model_switch_cell(model_switch_cell),
+    );
+    let config = Arc::new(config);
+
+    let registry = build_core_tool_registry(&config, config.clone(), bus.clone(), gs.clone())
+        .await
+        .expect("core tool registry should build in tests");
+    let client = StarClient::new("", None, None, None, None);
+    agent_runtime::register_agent_runtime_tools(&registry, &config, &bus, &gs, &client);
+    registry
+}
+
 pub fn build_agent_runtime_artifacts(
     client: &StarClient,
     config: &Arc<Config>,

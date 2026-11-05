@@ -14,4 +14,5 @@
 - When delegating, provide a clear, specific goal to the sub-agent.
 - Expect a summary of findings, not code edits.
 - Use parallel delegation: if multiple independent explorations are needed, launch multiple sub-agents in one response.
+- Sub-agents are launched with the `Agent` tool — a long-tail tool, not in the declared tool list. If you do not have it yet, discover it with `ToolSearch` (`select:Agent`), then call it by name.
 - After receiving sub-agent results, act on them directly — don't re-explore what was already found.

@@ -259,17 +259,12 @@ impl CompactStrategy for AutoCompactStrategy {
         // CompactManager::compact() 会先剥离连续的 system 前缀再调用本策略，
         // 此时 index 0 不再是 system prompt，而是第一条 user 消息（用户的原始
         // 任务）。写死 1.. 会把原始任务整体丢弃，且它既不在保留的 user 消息里、
-        // 也不在最近窗口里。这里与 snip_compact 保持一致的动态起点。
-        let start_idx = if !messages.is_empty() && messages[0].role == "system" {
-            1
-        } else {
-            0
-        };
+        // 也不在最近窗口里。这里用动态起点：system 前缀整段跳过
+        // （未剥离时静态块 + 准静态块都保留，见 message_processing::leading_system_count）。
+        let start_idx = crate::agent::message_processing::leading_system_count(messages);
 
-        // 保留系统消息
-        if start_idx == 1 {
-            result.push(messages[0].clone());
-        }
+        // 保留 system 前缀整段（剥离后为 0 条，push 不变，行为不变）
+        crate::agent::message_processing::push_leading_system_messages(&mut result, messages);
 
         // 添加压缩提示（含关键信息提取摘要，避免压缩后丢失项目分析/文件路径/决策）
         let omitted_msgs = &messages[start_idx..split_idx];
@@ -360,12 +355,8 @@ impl AutoCompactManager {
 
         let split_idx = messages.len() - keep_recent;
 
-        // 确定要压缩的消息（排除系统消息）
-        let start_idx = if !messages.is_empty() && messages[0].role == "system" {
-            1
-        } else {
-            0
-        };
+        // 确定要压缩的消息（排除 system 前缀的整段——静态块 + 准静态块都不能动）
+        let start_idx = crate::agent::message_processing::leading_system_count(messages);
 
         let messages_to_summarize = &messages[start_idx..split_idx];
 
@@ -382,10 +373,8 @@ impl AutoCompactManager {
         // 构建新消息列表
         let mut result = Vec::with_capacity(messages.len());
 
-        // 保留系统消息
-        if !messages.is_empty() && messages[0].role == "system" {
-            result.push(messages[0].clone());
-        }
+        // 保留 system 前缀整段（静态块 + 准静态块都不能动）
+        crate::agent::message_processing::push_leading_system_messages(&mut result, messages);
 
         // 添加摘要消息
         result.push(StarMessage::system(format!(
@@ -486,6 +475,35 @@ mod tests {
             .find(|m| m.role == "user")
             .and_then(|m| m.content.as_deref());
         assert_eq!(last_user, Some("turn 9"));
+    }
+
+    /// 回归：system 前缀可能不止一条（静态块 + 准静态块，见
+    /// PromptBuilder::build_cached_system_messages）。裁剪不得只保留 index 0，
+    /// 准静态块（项目指令 / final rules）必须原样留在前缀里。
+    #[test]
+    fn apply_preserves_the_whole_system_prefix() {
+        let strategy = strategy();
+        let keep = strategy.get_keep_recent_count();
+
+        let mut messages = vec![
+            StarMessage::system("static block A"),
+            StarMessage::system("dynamic block B"),
+        ];
+        for i in 0..(keep + 4) {
+            messages.push(StarMessage::user(format!("turn {}", i)));
+        }
+
+        let result = strategy.apply(&messages);
+        assert_eq!(
+            result.first().and_then(|m| m.content.as_deref()),
+            Some("static block A"),
+            "静态块丢失"
+        );
+        assert_eq!(
+            result.get(1).and_then(|m| m.content.as_deref()),
+            Some("dynamic block B"),
+            "准静态块丢失"
+        );
     }
 
     /// 被省略的消息条数要按实际起点算，不是写死的 split_idx - 1。

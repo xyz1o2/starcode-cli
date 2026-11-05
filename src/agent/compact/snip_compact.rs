@@ -153,12 +153,8 @@ impl CompactStrategy for SnipCompactStrategy {
 
         let split_idx = messages.len() - self.keep_recent;
 
-        // 确定要压缩的消息（排除系统消息）
-        let start_idx = if !messages.is_empty() && messages[0].role == "system" {
-            1
-        } else {
-            0
-        };
+        // 确定要压缩的消息（排除 system 前缀的整段——静态块 + 准静态块都不能动）
+        let start_idx = crate::agent::message_processing::leading_system_count(messages);
 
         let messages_to_summarize = &messages[start_idx..split_idx];
 
@@ -172,10 +168,8 @@ impl CompactStrategy for SnipCompactStrategy {
         // 构建新消息列表
         let mut result = Vec::with_capacity(messages.len());
 
-        // 保留系统消息
-        if !messages.is_empty() && messages[0].role == "system" {
-            result.push(messages[0].clone());
-        }
+        // 保留 system 前缀整段（静态块 + 准静态块都不能动）
+        crate::agent::message_processing::push_leading_system_messages(&mut result, messages);
 
         // 添加摘要消息
         result.push(StarMessage::system(format!(
@@ -234,3 +228,36 @@ impl CompactStrategy for SnipCompactStrategy {
         400 // 最低优先级，作为最后手段
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归：system 前缀可能不止一条（静态块 + 准静态块，见
+    /// PromptBuilder::build_cached_system_messages）。snip 只认 index 0
+    /// 会丢掉准静态块（项目指令 / final rules）。
+    #[test]
+    fn apply_preserves_the_whole_system_prefix() {
+        let strategy = SnipCompactStrategy::new().with_keep_recent(5);
+        let mut messages = vec![
+            StarMessage::system("static block A"),
+            StarMessage::system("dynamic block B"),
+        ];
+        for i in 0..9 {
+            messages.push(StarMessage::user(format!("turn {}", i)));
+        }
+
+        let result = strategy.apply(&messages);
+        assert_eq!(
+            result.first().and_then(|m| m.content.as_deref()),
+            Some("static block A"),
+            "静态块丢失"
+        );
+        assert_eq!(
+            result.get(1).and_then(|m| m.content.as_deref()),
+            Some("dynamic block B"),
+            "准静态块丢失"
+        );
+    }
+}
+
