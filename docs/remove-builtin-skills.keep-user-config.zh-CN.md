@@ -139,7 +139,29 @@ src/core/tools/mcp_auth.rs, mcp_resources.rs, src/tools/mcp_tool.rs
 
 ---
 
-## 7. 遗留与建议
+## 7. 后续：skill 来源统一（2026-11-05 补）
+
+发现并修掉一条**断链**：marketplace 装好的 skill 落在
+`.star/extensions/skills/<name>/SKILL.md`，而 agent 侧只扫 `.star/skills/`
+与 `~/.starcode/skills/` —— **装完的 skill 永远不会被模型调用**，
+`/skills list` 里也看不见。
+
+现在三个来源由 `Storage::skill_roots()` 统一给出（agent 侧、`/skills list`、
+`/skills show`、`/reload-skills`、`/context` 全用同一套）：
+
+| 来源 | 位置 |
+|---|---|
+| 项目 | `.star/skills/` |
+| 全局 | `~/.starcode/skills/` |
+| 扩展安装 | `.star/extensions/skills/` |
+
+这与 Claude Code 的分层一致（<https://code.claude.com/docs/en/skills>）：
+用户 skill、项目 skill、插件 skill 是**三处独立的扫描源**，插件 skill
+不会被塞进用户目录。
+
+---
+
+## 8. 遗留与建议
 
 **根因 C（索引截断时引擎不落地）仍未解决** —— 与本次无关，详见 `docs/codebase-search-index-incident.zh-CN.md` §5.1。
 
