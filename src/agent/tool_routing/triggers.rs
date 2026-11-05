@@ -130,6 +130,7 @@ pub(crate) fn select_best_auto_trigger(
     editor_skill_attempted: bool,
     project_map_attempted: bool,
     project_root: Option<&Path>,
+    available_skills: &SkillAvailability,
 ) -> Option<TriggerEval> {
     select_best_auto_trigger_with_flags(
         verification_required,
@@ -144,6 +145,7 @@ pub(crate) fn select_best_auto_trigger(
         project_map_attempted,
         RouteFlags::from_env(),
         project_root,
+        available_skills,
     )
 }
 
@@ -226,6 +228,7 @@ pub(crate) fn select_best_auto_trigger_with_flags(
         codebase_search_attempted,
         navigator_skill_attempted,
         flags.auto_skill_fallbacks,
+        available_skills,
     ) {
         candidates.push(TriggerEval {
             kind: AutoTriggerKind::NavigatorSkill,
@@ -1059,6 +1062,15 @@ fn read_bool_env_flag(key: &str, default: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// 测试里「所有内置 skill 都还在」的可用名单。
+    ///
+    /// 内置 skill 已经在运行时下线了，但**路由排序**的测试关心的是
+    /// 「分数 vs kind」的比较，不是「skill 存不存在」——
+    /// 所以这里给一份满名单，让 skill 类候选能进池。
+    fn skills_all() -> SkillAvailability {
+        SkillAvailability::from_names(["analyzer", "editor", "navigator"])
+    }
+
     /// 中文提问必须能触发跨文件定位检索。
     ///
     /// 以前中文标记词只认「在哪 / 哪里 / 哪些」，于是「用户鉴权是怎么做的」
@@ -1296,6 +1308,74 @@ mod tests {
         assert!(score_rank_locate_route("   ").is_none());
     }
 
+    /// **回归：内置 skill 下线后，自动触发器不能再去调它们。**
+    ///
+    /// 现场（用户截图）：分析项目时，模型跑完 `ProjectMap`，框架立刻触发
+    /// `Skill(skill="analyzer")` —— 而内置 analyzer 已随 2026-11-05 的下线
+    /// 一起删掉了，于是回一句
+    /// `No suitable agent or external skill found for: analyzer`，
+    /// 白跑一轮，还把模型带偏（它接着说「没有可用的分析 skill」）。
+    ///
+    /// 触发条件原来只检查 `active_tools.contains("Skill")` —— 「Skill 工具
+    /// 在不在」，不是「analyzer 在不在」。用户自定义 skill 也要用这个工具，
+    /// 所以那个条件永远成立。
+    ///
+    /// 现在触发器先看**这个 skill 到底存不存在**。
+    #[test]
+    fn a_builtin_skill_trigger_does_not_fire_when_the_skill_is_gone() {
+        // 一个 skill 都没有（内置下线后的默认状态）。
+        let none = SkillAvailability::empty();
+
+        let picked = select_best_auto_trigger_with_flags(
+            false,
+            false,
+            "分析一下这个项目",
+            "",
+            &tools(&["Skill", "ProjectMap"]),
+            true,  // codebase_search_attempted
+            true,  // navigator_skill_attempted
+            false, // analyzer 未尝试
+            false, // editor 未尝试
+            true,  // project_map_attempted → AnalyzerSkill 的前置满足
+            FLAGS_ON,
+            None,
+            &none,
+        );
+
+        assert!(
+            picked.as_ref().map(|p| p.kind) != Some(AutoTriggerKind::AnalyzerSkill),
+            "analyzer 不存在时不该触发 AnalyzerSkill，实际 {:?}",
+            picked.map(|p| p.kind)
+        );
+    }
+
+    /// 反向保证：用户**自己**定义了 analyzer 时，触发照常发生。
+    #[test]
+    fn a_user_defined_skill_still_gets_triggered() {
+        let available = SkillAvailability::from_names(["analyzer"]);
+
+        let picked = select_best_auto_trigger_with_flags(
+            false,
+            false,
+            "分析一下这个项目",
+            "",
+            &tools(&["Skill", "ProjectMap"]),
+            true,
+            true,
+            false,
+            false,
+            true, // project_map_attempted
+            FLAGS_ON,
+            None,
+            &available,
+        );
+
+        assert_eq!(
+            picked.expect("用户定义的 analyzer 该被触发").kind,
+            AutoTriggerKind::AnalyzerSkill
+        );
+    }
+
     /// 回归：分数必须真的影响选择。
     ///
     /// 以前 `sort_by(|a,b| b.kind.cmp(&a.kind).then(b.score.cmp(&a.score)))` 里 kind 是
@@ -1318,6 +1398,7 @@ mod tests {
             true,  // project_map_attempted → AnalyzerSkill 的前置满足
             FLAGS_ON,
             None,
+            &skills_all(),
         );
         let picked = picked.expect("两个候选都该进池");
         assert_eq!(
@@ -1344,6 +1425,7 @@ mod tests {
             false,
             FLAGS_ON,
             None,
+            &skills_all(),
         );
         assert_eq!(
             picked.as_ref().map(|p| p.kind),
@@ -1368,6 +1450,7 @@ mod tests {
             false,
             FLAGS_ON,
             None,
+            &skills_all(),
         );
         let picked = picked.expect("强扫面信号应产生候选");
         assert_eq!(picked.kind, AutoTriggerKind::CodebaseSearch);
@@ -1400,6 +1483,7 @@ mod tests {
             false,
             FLAGS_ON,
             None,
+            &skills_all(),
         );
         assert_eq!(
             picked.as_ref().map(|p| p.kind),
@@ -1424,6 +1508,7 @@ mod tests {
             false,
             FLAGS_ON,
             None,
+            &skills_all(),
         );
         assert!(picked.is_none(), "已尝试过就不该再选：{picked:?}");
     }
@@ -1443,6 +1528,7 @@ mod tests {
             false,
             FLAGS_ON,
             None,
+            &skills_all(),
         );
         assert!(picked.is_none(), "工具没激活就不该选：{picked:?}");
     }
@@ -1652,6 +1738,7 @@ mod tests {
             false,
             FLAGS_ON,
             None,
+            &skills_all(),
         );
         assert_eq!(
             allowed.map(|p| p.kind),

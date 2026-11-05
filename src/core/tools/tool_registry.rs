@@ -110,6 +110,25 @@ impl ToolRegistry {
         })
     }
 
+    /// 当前可用的 **skill 名字**（`Skill` 工具管着的那批）。
+    ///
+    /// 自动触发器要用它判断「这个 skill 存不存在」—— 内置 skill 下线后，
+    /// 无条件调 `Skill(skill="analyzer")` 只会白跑一轮再报
+    /// 「No suitable agent」（现场：ARTEX 的会话里每次分析都触发一次
+    /// analyzer skill，然后失败）。
+    ///
+    /// 拿不到 `Skill` 工具（没注册 / 被禁用）时返回空列表 —— 调用方据此
+    /// 判定「一个 skill 都没有」，于是所有 skill 类触发器都不触发。
+    pub fn available_skill_names(&self) -> Vec<String> {
+        let Some(tool) = self.get_tool("Skill") else {
+            return Vec::new();
+        };
+        match tool.extras() {
+            Some(crate::core::tools::tools::ToolExtras::SkillNames(names)) => names,
+            None => Vec::new(),
+        }
+    }
+
     pub fn sort_tools(&self) {
         // 目前不做排序；必要时可在 get_function_declarations 中排序
     }

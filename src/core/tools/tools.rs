@@ -17,6 +17,15 @@ pub enum LocationType {
     Execute,
 }
 
+/// 工具额外暴露的可查询信息。
+///
+/// 见 [`BaseDeclarativeTool::extras`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolExtras {
+    /// `Skill` 工具管着的 skill 名字（用户自定义 agent + 用户 SKILL.md）。
+    SkillNames(Vec<String>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
     Read,
@@ -143,6 +152,18 @@ pub trait BaseDeclarativeTool: Send + Sync {
 
     fn is_read_only(&self) -> bool {
         false
+    }
+
+    /// 这个工具**额外提供**的可查询信息（默认没有）。
+    ///
+    /// 注册表里存的是 `Arc<dyn BaseDeclarativeTool>`，有些查询需要工具
+    /// **自己**才知道的信息 —— 比如「`Skill` 工具管着哪些 skill 名」。
+    /// 不给 `as_any`（那要 80 多个实现都改）也不靠 `name()` 猜（那拿不到
+    /// 列表），于是用这个可选钩子：只有需要暴露额外信息的工具才实现它。
+    ///
+    /// 当前唯一的使用者：`Skill` 工具 → `SkillExtras::SkillNames`。
+    fn extras(&self) -> Option<ToolExtras> {
+        None
     }
 
     fn permission_cache_identity(&self) -> Option<String> {

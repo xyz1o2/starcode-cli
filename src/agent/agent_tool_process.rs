@@ -857,6 +857,21 @@ impl Agent {
         verification_required: &mut bool,
         loop_state: &mut LoopState,
     ) -> TurnResult {
+        // 当前可用的 skill 名单 ——
+        //
+        // 内置 skill（analyzer / editor / navigator）已于 2026-11-05 下线，
+        // 但自动触发器还在无条件调它们。于是每次分析任务都会：
+        //   ProjectMap → 触发 AnalyzerSkill → Skill(skill="analyzer")
+        //              → 「No suitable agent or external skill found」
+        // 白跑一轮，还把模型带偏（截图里的现象）。
+        //
+        // 触发器必须先知道「这个 skill 到底存不存在」。
+        let available_skills = crate::agent::tool_routing::SkillAvailability::from_names(
+            self.runtime_tool_registry()
+                .map(|reg| reg.available_skill_names())
+                .unwrap_or_default(),
+        );
+
         // 使用优先级驱动选择替代原串行链
         let best = select_best_auto_trigger(
             *verification_required,
@@ -870,6 +885,7 @@ impl Agent {
             *editor_skill_attempted,
             *project_map_attempted,
             Some(self.config.target_dir().as_path()),
+            &available_skills,
         );
 
         let Some(selected) = best else {

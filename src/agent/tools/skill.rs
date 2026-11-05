@@ -78,6 +78,21 @@ impl SkillTool {
         }
     }
 
+    fn extras(&self) -> Option<crate::core::tools::tools::ToolExtras> {
+        Some(crate::core::tools::tools::ToolExtras::SkillNames(
+            self.available_skill_names.clone(),
+        ))
+    }
+
+    /// 当前可用的 skill 名字（用户自定义 agent + 用户 SKILL.md）。
+    ///
+    /// 自动触发器要用它判断「这个 skill 到底存不存在」——
+    /// 内置 skill 下线后，无条件调 `Skill(skill="analyzer")` 只会白跑一轮
+    /// 再报「No suitable agent」。
+    pub fn available_skill_names(&self) -> Vec<String> {
+        self.available_skill_names.clone()
+    }
+
     /// 注入消息总线（`allowed-tools` 生效所必需）。
     pub fn with_message_bus(
         mut self,
