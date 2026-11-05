@@ -12,26 +12,28 @@
 /// 1. 复杂任务分解：将"重构模块"分解为"分析+编辑+测试"
 /// 2. 并行执行：多个子任务同时执行，提升效率
 /// 3. 专业化：每个 SubAgent 专注于自己擅长的领域
-pub mod analyzer;
-pub mod auto_fix;
+///
+/// # 内置子代理已下线（2026-11-05）
+///
+/// 原来这里有 6 个**内置**子代理（analyzer / auto_fix / editor / explore /
+/// navigator / verify），它们是写死在二进制里的固定角色。现在只剩**框架**
+/// （`SubAgent` trait / `SubAgentManager`）与**用户自定义** agent 的加载
+/// （`custom` / `loader`）—— 用户在 `.star/agents/` 或 `~/.starcode/agents/`
+/// 里写的 agent 定义照常可用。
+///
+/// 这与 Claude Code 的分层一致（参考副本
+/// `study_or_copy_projects/claude-code-main/src/skills/`）：bundled skills
+/// （内置，随二进制发布）与 directory-loaded skills（用户目录）本来就是两条
+/// 独立的路径，删掉前者不影响后者。
 pub mod custom;
-pub mod editor;
-pub mod explore;
 pub mod loader;
-pub mod navigator;
-pub mod verify;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub use analyzer::AnalyzerAgent;
-pub use auto_fix::AutoFixAgent;
 pub use custom::register_custom_subagents;
-pub use editor::EditorAgent;
-pub use explore::ExploreAgent;
-pub use navigator::NavigatorAgent;
 
 /// 子任务定义
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -40,8 +40,7 @@ use crate::agent::skills::custom::{
     render_custom_subagent_markdown,
 };
 use crate::agent::skills::{
-    register_custom_subagents, AnalyzerAgent, AutoFixAgent, EditorAgent, ExploreAgent,
-    NavigatorAgent, SubAgentManager, SubTask, SubTaskResult,
+    register_custom_subagents, SubAgentManager, SubTask, SubTaskResult,
 };
 
 #[derive(Subcommand)]

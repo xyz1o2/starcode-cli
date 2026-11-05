@@ -1,6 +1,5 @@
 use crate::agent::skills::{
-    register_custom_subagents, AnalyzerAgent, AutoFixAgent, EditorAgent, NavigatorAgent,
-    SubAgentManager, SubTask,
+    register_custom_subagents, SubAgentManager, SubTask,
 };
 use crate::core::tools::{
     BaseDeclarativeTool, Kind, ToolCallConfirmationDetails, ToolError, ToolInvocation,
@@ -26,26 +25,12 @@ impl SkillTool {
         let mut sub_config = (*config).clone();
         sub_config.recursion_depth = sub_config.recursion_depth.saturating_add(1);
         let sub_config = Arc::new(sub_config);
-        manager.register(Box::new(AnalyzerAgent::new(
-            client.clone(),
-            sub_config.clone(),
-        )));
-        manager.register(Box::new(EditorAgent::new(
-            client.clone(),
-            sub_config.clone(),
-        )));
-        // ExploreAgent 不在这里注册：它走 AgentTool 的 `subagent_type: explorer`
-        // 单轨（runner.rs 的 `run_explore` 派发），那条路径才有 UI 进度回流。
-        manager.register(Box::new(NavigatorAgent::new(
-            client.clone(),
-            sub_config.clone(),
-        )));
 
-        // AutoFixAgent needs client and config to spawn sub-agents
-        manager.register(Box::new(AutoFixAgent::new(
-            client.clone(),
-            sub_config.clone(),
-        )));
+        // 只注册**用户自定义** agent。
+        //
+        // 内置子代理（analyzer / editor / navigator / auto_fix）已于 2026-11-05
+        // 下线 —— 它们的 Rust 实现已从 `src/agent/skills/` 删除。
+        // 用户在 `.star/agents/` / `~/.starcode/agents/` 写的定义不受影响。
         let custom_defs = register_custom_subagents(&mut manager, client, sub_config.clone());
         let mut available_skill_names = manager.agent_ids();
         available_skill_names.sort();

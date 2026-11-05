@@ -207,19 +207,26 @@ impl StarAgentRunner {
         })
     }
 
-    /// Explorer 派发：跑 `ExploreAgent` 的确定性检索（ACE 广搜 + 可选 deep
-    /// filter），把结果包成 `SubAgentResult`。检索本身不产生工具调用/ token
-    /// 统计，这里按 0 上报；开始时推一条进度，让 UI 行不只是"Initializing"。
+    /// Explorer 派发：**已下线**（2026-11-05）。
+    ///
+    /// `ExploreAgent` 是写死在二进制里的**内置**检索专家，它的 Rust 实现
+    /// 已随其余内置子代理（analyzer / auto_fix / editor / navigator /
+    /// verify）一起从 `src/agent/skills/` 删除。
+    ///
+    /// 现在 `explorer` 请求落到通用 LLM 循环：模型自己决定用哪些工具检索。
+    /// 这条路径本来就能工作（`analyzer` / `editor` / `code_reviewer` 一直都
+    /// 是这么跑的），只是少了"确定性广搜 + deep filter"这套固定编排。
+    ///
+    /// 用户的**自定义** agent（在 `.star/agents/` 定义）不受影响 ——
+    /// 它们走 `SubAgentManager`，与这里无关。
+    ///
+    /// 保留这个函数（而不是直接删掉调用点）是为了让"explorer 已无专用实现"
+    /// 这件事在代码里留有明确痕迹，而不是变成一条悄悄改了行为的路径。
     async fn run_explore(
         &self,
         request: SubAgentRequest,
         sink: Option<SubAgentProgressSink>,
     ) -> Result<SubAgentResult, SubAgentError> {
-        use crate::agent::skills::{ExploreAgent, SubAgent, SubTask};
-
-        let mut sub_config = (*self.config).clone();
-        sub_config.recursion_depth = sub_config.recursion_depth.saturating_add(1);
-
         if let Some(sink) = sink.as_ref() {
             sink(SubAgentProgress {
                 last_tool_info: Some("Searching codebase…".to_string()),
@@ -227,26 +234,42 @@ impl StarAgentRunner {
             });
         }
 
-        let agent = ExploreAgent::new(self.client.clone(), Arc::new(sub_config));
-        let task = SubTask::new(
-            uuid::Uuid::new_v4().to_string(),
-            request.prompt,
-            "search".to_string(),
-            // target 留空 → ExploreAgent 回落到工作区根
-            String::new(),
-        );
+        // 内置检索专家已下线：改用通用 LLM 循环跑这个子代理。
+        //
+        // 这里刻意**不**走 `SubAgent::execute` —— 那是给 `SubAgentManager`
+        // 里注册的 agent 用的接口（用户自定义 agent 走那条），而通用循环在
+        // 上面的 `run_with_progress` 里已经跑完了，重复调用会跑两遍。
+        let mut agent = crate::agent::StarAgent::new_with_provider(
+            &self.client.api_key,
+            Some(self.client.model.clone()),
+            Some(self.client.base_url.clone()),
+            request.max_rounds,
+            Some(self.client.is_openai_compatible),
+            Some(Arc::new(self.child_config())),
+            // 继承父 client 的 provider id（见上方通用路径的同一处理）。
+            self.client.provider_id.clone(),
+        )
+        .await
+        .map_err(|e| {
+            SubAgentError::new(
+                SubAgentErrorKind::InitializationFailed,
+                format!("Failed to create SubAgent: {}", e),
+            )
+        })?;
 
-        let result = agent
-            .execute(task)
+        let entries = agent
+            .process_user_message(&request.prompt)
             .await
             .map_err(|e| SubAgentError::new(SubAgentErrorKind::ExecutionFailed, e.to_string()))?;
 
-        let output = if result.success {
-            // details 里是检索结果正文；summary 只是 "Search Complete" 之类
-            result.details.unwrap_or(result.summary)
-        } else {
-            result.error.unwrap_or(result.summary)
-        };
+        // `process_user_message` 返回 `Vec<ChatEntry>`（一条 assistant 条目）。
+        // 子代理结果的 output 是纯文本，所以取那条条目的正文。
+        let output = entries
+            .iter()
+            .map(|entry| entry.content.as_str())
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
 
         Ok(SubAgentResult {
             output,
@@ -255,6 +278,13 @@ impl StarAgentRunner {
             total_tokens: 0,
             last_tool_info: Some("Search complete".to_string()),
         })
+    }
+
+    /// 子代理的递归深度配置（父配置 +1 层）。
+    fn child_config(&self) -> crate::core::config::Config {
+        let mut sub_config = (*self.config).clone();
+        sub_config.recursion_depth = sub_config.recursion_depth.saturating_add(1);
+        sub_config
     }
 }
 

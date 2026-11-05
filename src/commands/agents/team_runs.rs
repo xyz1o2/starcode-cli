@@ -1,7 +1,8 @@
 use super::team_definitions::{
-    find_team_agent, normalize_agent_name, resolve_team_agents, team_run_mode_label,
+    find_team_agent, normalize_agent_name, resolve_team_agents, team_agent_catalog,
+    team_run_mode_label,
 };
-use super::team_definitions::{validate_team_run_id, TEAM_AGENT_CATALOG};
+use super::team_definitions::validate_team_run_id;
 use super::*;
 
 pub(super) async fn list_agent_team_catalog(ctx: CommandContext<'_>) -> CommandResult {
@@ -21,10 +22,12 @@ pub(super) async fn list_agent_team_catalog_in(
     let mut lines = vec![
         "# Agent Teams".to_string(),
         "".to_string(),
-        "Built-in Team Members:".to_string(),
+        "Team Members (from your custom agents):".to_string(),
     ];
 
-    for def in TEAM_AGENT_CATALOG {
+    // 成员来自用户自定义 agent（内置子代理已于 2026-11-05 下线）。
+    let catalog = team_agent_catalog(cwd);
+    for def in &catalog {
         let aliases = if def.aliases.is_empty() {
             "-".to_string()
         } else {
@@ -34,6 +37,9 @@ pub(super) async fn list_agent_team_catalog_in(
             "- `{}` (task_type: `{}`): {} | aliases: {}",
             def.cli_name, def.task_type, def.description, aliases
         ));
+    }
+    if catalog.is_empty() {
+        lines.push("- (none — define agents in .star/agents/ to add team members)".to_string());
     }
 
     lines.push("".to_string());
@@ -383,6 +389,15 @@ mod tests {
     #[tokio::test]
     async fn the_catalog_lists_every_member_and_the_examples() {
         let dir = tempfile::tempdir().unwrap();
+        // 放一个用户自定义 agent —— 团队成员现在来自用户定义，不是内置清单。
+        let agents_dir = dir.path().join(".star").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("reviewer.md"),
+            "---\nid: reviewer\nname: reviewer\ndescription: 代码审查\n---\n\n审查。\n",
+        )
+        .unwrap();
+
         let (mut state, tx) = ctx_parts();
         list_agent_team_catalog_in(
             CommandContext {
@@ -396,16 +411,40 @@ mod tests {
 
         let out = last(&state);
         assert!(out.starts_with("# Agent Teams"), "{out}");
-        for def in TEAM_AGENT_CATALOG {
-            assert!(out.contains(&format!("`{}`", def.cli_name)), "{out}");
-        }
+        // 用户 agent 必须出现在清单里。
+        assert!(out.contains("`reviewer`"), "{out}");
+        assert!(out.contains("代码审查"), "{out}");
         assert!(out.contains("Preset Teams:"), "{out}");
         assert!(out.contains("- (empty)"), "{out}");
-        assert!(
-            out.contains("/agents team run --agents search,analyzer"),
-            "{out}"
-        );
         assert!(out.contains("/agents team show-run <run-id>"), "{out}");
+    }
+
+    /// 没有用户自定义 agent 时，清单如实显示"没有成员" ——
+    /// 不能列出一堆点不动的内置成员（内置子代理已于 2026-11-05 下线）。
+    #[tokio::test]
+    async fn the_catalog_is_empty_without_user_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, tx) = ctx_parts();
+        list_agent_team_catalog_in(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            dir.path(),
+        )
+        .await
+        .unwrap();
+
+        let out = last(&state);
+        assert!(out.contains("Team Members"), "{out}");
+        assert!(
+            out.contains("(none"),
+            "没有用户 agent 时必须如实说没有成员：{out}"
+        );
+        assert!(
+            !out.contains("`analyzer`") && !out.contains("`navigator`"),
+            "已下线的内置成员不该出现在清单里：{out}"
+        );
     }
 
     #[tokio::test]

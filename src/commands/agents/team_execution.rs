@@ -1,4 +1,6 @@
-use super::team_definitions::{generate_team_run_id, resolve_team_agents, team_run_mode_label};
+use super::team_definitions::{
+    generate_team_run_id, resolve_team_agents, team_agent_catalog, team_run_mode_label,
+};
 use super::team_definitions::{
     normalize_agent_name, parse_team_run_mode, TeamAgentDef, TeamMemberWorkspace,
 };
@@ -79,17 +81,20 @@ async fn resolve_team_runtime(
     ))
 }
 
+/// 组建团队用的 `SubAgentManager`。
+///
+/// ── 2026-11-05：内置子代理已下线 ──────────────────────────────────────
+///
+/// 原来这里注册 5 个**内置** agent（analyzer / editor / explore /
+/// navigator / auto_fix），它们的 Rust 实现已从 `src/agent/skills/` 删除。
+///
+/// 现在只注册**用户自定义** agent（`.star/agents/` 或 `~/.starcode/agents/`
+/// 里的定义）。`TEAM_AGENT_CATALOG` 里那些内置条目也随之移除 —— 留着的
+/// 话 `/agents team list` 会列出一堆实际不可用的成员，而真正能跑的是
+/// 用户自己的 agent。
 fn build_team_manager(client: StarClient, config: Arc<Config>) -> SubAgentManager {
     let mut manager = SubAgentManager::new();
-    manager.register(Box::new(AnalyzerAgent::new(client.clone(), config.clone())));
-    manager.register(Box::new(EditorAgent::new(client.clone(), config.clone())));
-    manager.register(Box::new(ExploreAgent::new(client.clone(), config.clone())));
-    manager.register(Box::new(NavigatorAgent::new(
-        client.clone(),
-        config.clone(),
-    )));
-    let _ = register_custom_subagents(&mut manager, client.clone(), config.clone());
-    manager.register(Box::new(AutoFixAgent::new(client, config)));
+    let _ = register_custom_subagents(&mut manager, client, config);
     manager
 }
 
@@ -366,12 +371,12 @@ pub(super) fn append_shared_memory(
 
 pub(super) fn sort_outcomes_by_member_order(
     outcomes: &mut Vec<TeamTaskOutcome>,
-    selected: &[&TeamAgentDef],
+    selected: &[TeamAgentDef],
 ) {
     let order_map: HashMap<&str, usize> = selected
         .iter()
         .enumerate()
-        .map(|(i, def)| (def.cli_name, i))
+        .map(|(i, def)| (def.cli_name.as_str(), i))
         .collect();
     outcomes.sort_by_key(|item| {
         order_map
@@ -662,7 +667,7 @@ async fn execute_round_pipeline(
 #[derive(Debug)]
 pub(super) struct TeamRunPlan {
     pub(super) objective: String,
-    pub(super) selected: Vec<&'static TeamAgentDef>,
+    pub(super) selected: Vec<TeamAgentDef>,
     pub(super) max_steps: usize,
     pub(super) run_mode: TeamRunMode,
     pub(super) rounds: usize,
@@ -673,9 +678,13 @@ pub(super) struct TeamRunPlan {
 }
 
 /// 命令行参数优先，其次预设，最后是内联默认值。
+///
+/// `catalog` 是当前可用的团队成员（来自用户自定义 agent）。内置子代理已
+/// 于 2026-11-05 下线，成员不再由静态常量提供。
 pub(super) fn plan_team_run(
     args: &AgentTeamRunArgs,
     preset: &TeamPreset,
+    catalog: &[TeamAgentDef],
 ) -> Result<TeamRunPlan, String> {
     let objective = {
         let inline = args.objective.join(" ").trim().to_string();
@@ -689,7 +698,7 @@ pub(super) fn plan_team_run(
     };
 
     let agents_input = args.agents.clone().unwrap_or_else(|| preset.agents.clone());
-    let selected = resolve_team_agents(agents_input)?;
+    let selected = resolve_team_agents(agents_input, catalog)?;
 
     let max_steps = args.max_steps.or(preset.max_steps).unwrap_or(5);
     if max_steps == 0 || max_steps > 30 {
@@ -729,7 +738,9 @@ pub(super) fn plan_team_run(
 
     Ok(TeamRunPlan {
         objective,
-        selected,
+        // `resolve_team_agents` 返回借用；这里转成拥有值，好让 `TeamRunPlan`
+        // 不再依赖 catalog 的生命周期。
+        selected: selected.into_iter().cloned().collect(),
         max_steps,
         run_mode,
         rounds,
@@ -781,6 +792,9 @@ pub(super) async fn run_agent_team(
 
     let preset = resolve_team_run_preset(&storage, args.team.as_deref()).await?;
 
+    // 团队成员来自用户自定义 agent（内置子代理已于 2026-11-05 下线）。
+    let catalog = team_agent_catalog(&command_cwd);
+
     let TeamRunPlan {
         objective,
         selected,
@@ -791,7 +805,7 @@ pub(super) async fn run_agent_team(
         timeout_secs,
         target,
         dry_run,
-    } = plan_team_run(&args, &preset)?;
+    } = plan_team_run(&args, &preset, &catalog)?;
 
     let timeout = timeout_secs.map(Duration::from_secs);
 
@@ -828,7 +842,7 @@ pub(super) async fn run_agent_team(
                 .project_temp_dir()
                 .join("agent-teams")
                 .join(&run_id)
-                .join(def.cli_name);
+                .join(&def.cli_name);
             git_service::worktree_remove_force(repo_root, &work_dir).await;
             if work_dir.exists() {
                 if work_dir.is_dir() {
@@ -994,7 +1008,7 @@ pub(super) async fn run_agent_team(
             "- agents: {}",
             selected
                 .iter()
-                .map(|d| d.cli_name)
+                .map(|d| d.cli_name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -1126,7 +1140,21 @@ pub(super) async fn run_agent_team(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::agents::team_definitions::TEAM_AGENT_CATALOG;
+
+    /// 造一份团队成员清单（内置子代理已于 2026-11-05 下线，成员来自用户
+    /// 自定义 agent —— 单测里直接构造 `TeamAgentDef` 最直接）。
+    fn test_catalog(names: &[&str]) -> Vec<TeamAgentDef> {
+        names
+            .iter()
+            .map(|name| TeamAgentDef {
+                cli_name: (*name).to_string(),
+                internal_id: (*name).to_string(),
+                task_type: "t".to_string(),
+                aliases: Vec::new(),
+                description: format!("{name} agent"),
+            })
+            .collect()
+    }
 
     fn outcome(member: &str, success: bool, summary: &str) -> TeamTaskOutcome {
         let result = if success {
@@ -1329,19 +1357,24 @@ mod tests {
     /// 输出顺序必须跟用户选的成员顺序一致；并行执行完的顺序是随机的。
     #[test]
     fn outcomes_are_reordered_to_match_the_requested_members() {
-        let selected = resolve_team_agents(vec![
-            "search".to_string(),
-            "analyzer".to_string(),
-            "editor".to_string(),
-        ])
+        let catalog = test_catalog(&["explore", "analyzer", "editor"]);
+        let selected = resolve_team_agents(
+            vec![
+                "explore".to_string(),
+                "analyzer".to_string(),
+                "editor".to_string(),
+            ],
+            &catalog,
+        )
         .unwrap();
+        let owned: Vec<TeamAgentDef> = selected.into_iter().cloned().collect();
         let mut outcomes = vec![
             outcome("editor", true, "e"),
             outcome("unknown", true, "u"),
             outcome("explore", true, "s"),
             outcome("analyzer", true, "a"),
         ];
-        sort_outcomes_by_member_order(&mut outcomes, &selected);
+        sort_outcomes_by_member_order(&mut outcomes, &owned);
         let names: Vec<&str> = outcomes.iter().map(|o| o.member_name.as_str()).collect();
         assert_eq!(names, vec!["explore", "analyzer", "editor", "unknown"]);
     }
@@ -1423,7 +1456,7 @@ mod tests {
     fn plan_falls_back_to_the_inline_defaults() {
         let mut args = run_args();
         args.objective = vec!["fix".to_string(), "the".to_string(), "build".to_string()];
-        let plan = plan_team_run(&args, &inline_preset()).unwrap();
+        let plan = plan_team_run(&args, &inline_preset(), &test_catalog(&["explore", "editor"])).unwrap();
 
         assert_eq!(plan.objective, "fix the build");
         assert_eq!(plan.max_steps, 5);
@@ -1435,7 +1468,7 @@ mod tests {
         assert!(!plan.dry_run);
         assert_eq!(plan.timeout_secs, None);
         assert_eq!(
-            plan.selected.iter().map(|d| d.cli_name).collect::<Vec<_>>(),
+            plan.selected.iter().map(|d| d.cli_name.as_str()).collect::<Vec<_>>(),
             vec!["explore", "editor"]
         );
     }
@@ -1444,7 +1477,7 @@ mod tests {
     fn the_preset_objective_is_used_when_the_command_line_has_none() {
         let mut preset = inline_preset();
         preset.objective = Some("sweep the TODOs".to_string());
-        let plan = plan_team_run(&run_args(), &preset).unwrap();
+        let plan = plan_team_run(&run_args(), &preset, &test_catalog(&["explore", "editor"])).unwrap();
         assert_eq!(plan.objective, "sweep the TODOs");
     }
 
@@ -1456,7 +1489,7 @@ mod tests {
         let mut args = run_args();
         args.objective = vec!["inline".to_string(), "text".to_string()];
         assert_eq!(
-            plan_team_run(&args, &preset).unwrap().objective,
+            plan_team_run(&args, &preset, &test_catalog(&["explore", "editor"])).unwrap().objective,
             "inline text"
         );
     }
@@ -1466,7 +1499,7 @@ mod tests {
     fn a_blank_preset_objective_counts_as_missing() {
         let mut preset = inline_preset();
         preset.objective = Some("   ".to_string());
-        let err = plan_team_run(&run_args(), &preset).unwrap_err();
+        let err = plan_team_run(&run_args(), &preset, &test_catalog(&["explore", "editor"])).unwrap_err();
         assert!(err.starts_with("objective is required"), "{err}");
     }
 
@@ -1489,7 +1522,7 @@ mod tests {
         args.timeout_secs = Some(90);
         args.target = Some("tests".to_string());
 
-        let plan = plan_team_run(&args, &preset).unwrap();
+        let plan = plan_team_run(&args, &preset, &test_catalog(&["explore", "editor"])).unwrap();
         assert_eq!(plan.max_steps, 9);
         assert_eq!(plan.effective_parallelism, 2);
         assert!(matches!(plan.run_mode, TeamRunMode::Parallel));
@@ -1507,7 +1540,7 @@ mod tests {
         let mut args = run_args();
         args.objective = vec!["go".to_string()];
         assert!(matches!(
-            plan_team_run(&args, &preset).unwrap().run_mode,
+            plan_team_run(&args, &preset, &test_catalog(&["explore", "editor"])).unwrap().run_mode,
             TeamRunMode::Parallel
         ));
     }
@@ -1520,7 +1553,7 @@ mod tests {
         preset.parallelism = Some(4);
         let mut args = run_args();
         args.objective = vec!["go".to_string()];
-        let plan = plan_team_run(&args, &preset).unwrap();
+        let plan = plan_team_run(&args, &preset, &test_catalog(&["explore", "editor"])).unwrap();
         assert!(matches!(plan.run_mode, TeamRunMode::Pipeline));
         assert_eq!(plan.effective_parallelism, 1);
     }
@@ -1532,7 +1565,7 @@ mod tests {
         preset.dry_run = Some(true);
         let mut args = run_args();
         args.objective = vec!["go".to_string()];
-        assert!(plan_team_run(&args, &preset).unwrap().dry_run);
+        assert!(plan_team_run(&args, &preset, &test_catalog(&["explore", "editor"])).unwrap().dry_run);
     }
 
     #[test]
@@ -1551,7 +1584,7 @@ mod tests {
             args.objective = vec!["go".to_string()];
             mutate(&mut args);
             assert_eq!(
-                plan_team_run(&args, &inline_preset()).unwrap_err(),
+                plan_team_run(&args, &inline_preset(), &test_catalog(&["explore", "editor"])).unwrap_err(),
                 expected
             );
         }
@@ -1562,7 +1595,7 @@ mod tests {
         let mut args = run_args();
         args.objective = vec!["go".to_string()];
         args.agents = Some(vec!["ghost".to_string()]);
-        let err = plan_team_run(&args, &inline_preset()).unwrap_err();
+        let err = plan_team_run(&args, &inline_preset(), &test_catalog(&["explore", "editor"])).unwrap_err();
         assert!(err.contains("unknown team agents: ghost"), "{err}");
     }
 
@@ -1573,9 +1606,10 @@ mod tests {
         args.objective = vec!["go".to_string()];
         args.agents = Some(vec!["all".to_string()]);
         args.parallelism = Some(16);
-        let plan = plan_team_run(&args, &inline_preset()).unwrap();
-        assert_eq!(plan.selected.len(), TEAM_AGENT_CATALOG.len());
-        assert_eq!(plan.effective_parallelism, TEAM_AGENT_CATALOG.len());
+        let catalog = test_catalog(&["explore", "editor", "analyzer"]);
+        let plan = plan_team_run(&args, &inline_preset(), &catalog).unwrap();
+        assert_eq!(plan.selected.len(), catalog.len());
+        assert_eq!(plan.effective_parallelism, catalog.len());
     }
 
     // ── resolve_team_run_preset ─────────────────────────────────

@@ -1,6 +1,6 @@
 use super::team_definitions::{
     find_team_agent, normalize_agent_name, parse_team_run_mode, resolve_team_agents,
-    team_run_mode_label,
+    team_agent_catalog, team_run_mode_label,
 };
 use super::*;
 
@@ -24,7 +24,9 @@ pub(super) async fn save_team_preset_in(
         return Err("invalid preset name".to_string());
     }
 
-    let resolved_agents = resolve_team_agents(args.agents.clone())?;
+    // 团队成员来自用户自定义 agent（内置子代理已于 2026-11-05 下线）。
+    let catalog = team_agent_catalog(cwd);
+    let resolved_agents = resolve_team_agents(args.agents.clone(), &catalog)?;
     let agents: Vec<String> = resolved_agents
         .iter()
         .map(|a| a.cli_name.to_string())
@@ -287,6 +289,23 @@ mod tests {
         }
     }
 
+    /// 在项目里写两个用户自定义 agent（`search` / `editor`）。
+    ///
+    /// 团队成员现在来自用户 agent（内置子代理已于 2026-11-05 下线），
+    /// 所以保存预设的测试必须先在磁盘上造出这两个 agent，否则
+    /// `resolve_team_agents` 会把它们判成"未知成员"。
+    fn seed_user_agents(dir: &Path) {
+        let agents_dir = dir.join(".star").join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("mkdir");
+        for (id, desc) in [("search", "代码检索"), ("editor", "代码编辑")] {
+            std::fs::write(
+                agents_dir.join(format!("{id}.md")),
+                format!("---\nid: {id}\nname: {id}\ndescription: {desc}\n---\n\n{desc}。\n"),
+            )
+            .expect("write");
+        }
+    }
+
     fn preset_path(dir: &Path) -> PathBuf {
         let storage = crate::core::config::storage::Storage::new(dir.to_path_buf());
         team_preset_file_path(TeamPresetScope::Project, &storage)
@@ -305,6 +324,7 @@ mod tests {
     async fn save_writes_the_preset_to_the_project_store() {
         let dir = tempfile::tempdir().unwrap();
         let (mut state, tx) = ctx_parts();
+        seed_user_agents(dir.path());
         let mut args = save_args("rust-refactor");
         args.description = Some("  refactor helpers  ".to_string());
         args.target = Some("src".to_string());
@@ -342,11 +362,14 @@ mod tests {
         assert_eq!(saved.timeout_secs, Some(120));
         assert_eq!(saved.dry_run, Some(true));
         assert_eq!(saved.objective.as_deref(), Some("split the module"));
-        // `--agents search,editor` 存的是规范化后的 cli_name —— `search` 是
-        // `explore` 的别名，落盘时写回规范名。
+        // `--agents search,editor` 存的是解析出来的 cli_name。
+        //
+        // 内置子代理下线后，`search` 不再是 `explore` 的别名（内置成员已经
+        // 没有了），它是用户在 `.star/agents/` 里定义的那个 agent 的名字 ——
+        // 所以这里原样落盘。
         assert_eq!(
             saved.agents,
-            vec!["explore".to_string(), "editor".to_string()]
+            vec!["search".to_string(), "editor".to_string()]
         );
 
         let out = last(&state);
@@ -358,6 +381,7 @@ mod tests {
     #[tokio::test]
     async fn saving_the_same_name_overwrites_instead_of_duplicating() {
         let dir = tempfile::tempdir().unwrap();
+        seed_user_agents(dir.path());
         let (mut state, tx) = ctx_parts();
         let mut first = save_args("review");
         first.description = Some("first".to_string());
@@ -395,6 +419,7 @@ mod tests {
     #[tokio::test]
     async fn the_store_stays_sorted_by_name() {
         let dir = tempfile::tempdir().unwrap();
+        seed_user_agents(dir.path());
         let (mut state, tx) = ctx_parts();
         for name in ["zeta", "alpha", "mike"] {
             save_team_preset_in(
@@ -419,6 +444,7 @@ mod tests {
     #[tokio::test]
     async fn blank_optional_text_is_stored_as_none() {
         let dir = tempfile::tempdir().unwrap();
+        seed_user_agents(dir.path());
         let (mut state, tx) = ctx_parts();
         let mut args = save_args("blank");
         args.description = Some("   ".to_string());
@@ -448,6 +474,7 @@ mod tests {
     #[tokio::test]
     async fn an_unsanitizable_preset_name_is_rejected_before_any_write() {
         let dir = tempfile::tempdir().unwrap();
+        seed_user_agents(dir.path());
         let (mut state, tx) = ctx_parts();
         let err = save_team_preset_in(
             CommandContext {
@@ -467,6 +494,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_agents_are_rejected_before_any_write() {
         let dir = tempfile::tempdir().unwrap();
+        seed_user_agents(dir.path());
         let (mut state, tx) = ctx_parts();
         let mut args = save_args("broken");
         args.agents = vec!["search".to_string(), "nonexistent".to_string()];
@@ -489,6 +517,7 @@ mod tests {
     #[tokio::test]
     async fn numeric_bounds_are_enforced() {
         let dir = tempfile::tempdir().unwrap();
+        seed_user_agents(dir.path());
         let (mut state, tx) = ctx_parts();
 
         type Mutation = fn(&mut AgentTeamSaveArgs);
@@ -536,6 +565,7 @@ mod tests {
     #[tokio::test]
     async fn show_renders_every_field_and_the_follow_up_command() {
         let dir = tempfile::tempdir().unwrap();
+        seed_user_agents(dir.path());
         let (mut state, tx) = ctx_parts();
         let mut args = save_args("rust-refactor");
         args.description = Some("refactor helpers".to_string());
@@ -569,7 +599,7 @@ mod tests {
         assert!(out.starts_with("# Team Preset"), "{out}");
         assert!(out.contains("- name: `rust-refactor`"), "{out}");
         assert!(out.contains("- scope: `project`"), "{out}");
-        assert!(out.contains("- agents: explore,editor"), "{out}");
+        assert!(out.contains("- agents: search,editor"), "{out}");
         assert!(out.contains("- target: src"), "{out}");
         assert!(out.contains("- max_steps: 5"), "{out}");
         // 未设置的字段渲染占位符而不是空串
@@ -588,6 +618,7 @@ mod tests {
     #[tokio::test]
     async fn show_falls_back_to_the_runtime_defaults() {
         let dir = tempfile::tempdir().unwrap();
+        seed_user_agents(dir.path());
         let (mut state, tx) = ctx_parts();
         save_team_preset_in(
             CommandContext {
@@ -621,6 +652,7 @@ mod tests {
     #[tokio::test]
     async fn show_matches_the_name_case_insensitively() {
         let dir = tempfile::tempdir().unwrap();
+        seed_user_agents(dir.path());
         let (mut state, tx) = ctx_parts();
         save_team_preset_in(
             CommandContext {
@@ -673,6 +705,7 @@ mod tests {
     #[tokio::test]
     async fn remove_deletes_only_the_named_preset() {
         let dir = tempfile::tempdir().unwrap();
+        seed_user_agents(dir.path());
         let (mut state, tx) = ctx_parts();
         for name in ["keep", "drop"] {
             save_team_preset_in(
@@ -746,6 +779,7 @@ mod tests {
     #[tokio::test]
     async fn preset_names_are_sanitized_on_the_way_in() {
         let dir = tempfile::tempdir().unwrap();
+        seed_user_agents(dir.path());
         let (mut state, tx) = ctx_parts();
         save_team_preset_in(
             CommandContext {
