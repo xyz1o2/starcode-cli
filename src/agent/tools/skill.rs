@@ -54,11 +54,16 @@ impl SkillTool {
         //
         // 内置 skill 下线后，这是**唯一**的 prompt 型 skill 来源 ——
         // 不告诉模型有哪些，模型根本不会想到去调它们。
-        let user_skill_names = list_user_skill_names(&config.target_dir().clone());
-        if !user_skill_names.is_empty() {
+        //
+        // 只列**模型可调用**的：`disable-model-invocation: true` 的 skill
+        // 不该出现在模型的可用清单里（Claude Code 语义：它的 description
+        // 也不进上下文）。
+        let user_skills = list_model_callable_skills(&config.target_dir().clone());
+        if !user_skills.is_empty() {
+            let names: Vec<String> = user_skills.iter().map(|s| s.name.clone()).collect();
             description.push_str(&format!(
                 " Prompt-based skills available: {}.",
-                user_skill_names.join(", ")
+                names.join(", ")
             ));
         }
 
@@ -621,45 +626,109 @@ name: review\ndescription: d\n---\n\nbody\n",
     }
 }
 
-/// 列出用户目录里的 prompt 型 skill 名字（供工具描述用）。
+/// 列出用户目录里的 prompt 型 skill（供工具描述用）。
 ///
 /// 与 [`load_user_skill_from_dirs`] 用同一套目录与命名规则 —— 两个函数
 /// 必须一致，否则会出现「描述里说有这个名字，调用时却找不到」。
-fn list_user_skill_names(project_root: &std::path::Path) -> Vec<String> {
+///
+/// **只返回模型可调用的**：`disable-model-invocation: true` 的 skill
+/// 不进模型的可用清单（Claude Code 语义：它的 description 也不进上下文，
+/// 模型看不到它，也就不会想去调它）。
+///
+/// 这里用**同步**的文件读取（不是 `load_skills_from_dir`）：工具描述在
+/// 构造期就要定下来，而 `BaseDeclarativeTool::description(&self) -> &str`
+/// 是同步的。skill 文件很小（几 KB 的 markdown），同步读没有代价；
+/// 换成 async 就得在同步上下文里造 runtime，徒增复杂度。
+fn list_model_callable_skills(
+    project_root: &std::path::Path,
+) -> Vec<crate::agent::skills::loader::SkillDefinition> {
+    use crate::agent::skills::loader::SkillLoader;
     use crate::core::config::storage::Storage;
 
     let storage = Storage::new(project_root.to_path_buf());
     let dirs = [storage.project_skills_dir(), Storage::user_skills_dir()];
 
-    let mut names: Vec<String> = Vec::new();
+    let mut skills: Vec<crate::agent::skills::loader::SkillDefinition> = Vec::new();
     for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            // 形态一：<dir>/<name>/SKILL.md
-            if path.is_dir() && path.join("SKILL.md").exists() {
-                if !names.iter().any(|n| n == stem) {
-                    names.push(stem.to_string());
-                }
+        for skill in load_skills_in_dir_sync(&dir) {
+            // 项目目录优先：同名时用户目录的版本不重复列。
+            if skills.iter().any(|s| s.name == skill.name) {
                 continue;
             }
-            // 形态二：<dir>/<name>.skill.md
-            if path.is_file() && stem.ends_with(".skill") {
-                let name = stem.trim_end_matches(".skill").to_string();
-                if !names.iter().any(|n| *n == name) {
-                    names.push(name);
-                }
-            }
+            skills.push(skill);
         }
     }
-    names.sort();
-    names.dedup();
-    names
+    skills.retain(|s| s.metadata.model_may_invoke());
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills
+}
+
+/// 同步读一个目录下的所有 skill（`<name>/SKILL.md` 与 `<name>.skill.md`）。
+fn load_skills_in_dir_sync(
+    dir: &std::path::Path,
+) -> Vec<crate::agent::skills::loader::SkillDefinition> {
+    use crate::agent::skills::loader::SkillLoader;
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut skills = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file = if path.is_dir() {
+            let candidate = path.join("SKILL.md");
+            if candidate.exists() {
+                Some(candidate)
+            } else {
+                None
+            }
+        } else {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .map(|name| name.ends_with(".skill.md"))
+                .unwrap_or(false)
+                .then(|| path.clone())
+        };
+        let Some(file) = file else { continue };
+        let Ok(content) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let (metadata, body) = SkillLoader::parse_frontmatter(&content);
+        let name = if metadata.name.is_empty() {
+            path.file_stem()
+                .map(|s| s.to_string_lossy().trim_end_matches(".skill").to_string())
+                .unwrap_or_default()
+        } else {
+            metadata.name.clone()
+        };
+        if name.is_empty() {
+            continue;
+        }
+        skills.push(crate::agent::skills::loader::SkillDefinition {
+            name,
+            description: metadata.description.clone(),
+            location: file.display().to_string(),
+            body,
+            disabled: metadata.disabled,
+            version: metadata.version.clone(),
+            metadata,
+        });
+    }
+    skills
+}
+
+/// 同步加载一个目录下的所有 skill。
+///
+/// `SkillLoader::load_skills_from_dir` 是 async 的，而工具描述的构造
+/// 是同步的（`BaseDeclarativeTool::description(&self) -> &str`）。
+///
+/// 这里用一条独立的 runtime 跑 —— 目录扫描是纯文件 IO，不碰 tokio 的
+/// 调度器，不会与当前线程的 runtime 死锁（`block_on` 只在**没有**正在
+/// 运行的 runtime 时才安全，见 [`crate::utils::async_block_on`]）。
+async fn block_on_load_skills(
+    dir: &std::path::Path,
+) -> Vec<crate::agent::skills::loader::SkillDefinition> {
+    crate::agent::skills::loader::SkillLoader::load_skills_from_dir(dir).await
 }
 
 /// 把 skill frontmatter 的**运行时**效果落到系统里。
