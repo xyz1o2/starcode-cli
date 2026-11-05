@@ -1199,6 +1199,22 @@ impl ThinkingEffort {
         }
     }
 
+    /// 从字符串解析档位（skill frontmatter 的 `effort` 字段用）。
+    ///
+    /// CC 的取值：`low` / `medium` / `high` / `xhigh` / `max`。
+    /// `max` 映射到 `Xhigh` —— StarCode 没有 `max` 档（`Xhigh` 已是最高）。
+    /// 认 `inherit`（保持当前）—— 返回 `None`。
+    pub fn parse_skill_effort(raw: &str) -> Option<Self> {
+        match raw.trim().to_lowercase().as_str() {
+            "off" | "none" => Some(Self::Off),
+            "low" => Some(Self::Low),
+            "medium" | "default" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" | "max" => Some(Self::Xhigh),
+            _ => None,
+        }
+    }
+
     pub fn next(&self) -> Self {
         match self {
             Self::Off => Self::Low,

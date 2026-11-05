@@ -1332,3 +1332,156 @@ mod tests {
         );
     }
 }
+
+/// skill 的 `allowed-tools` / `disallowed-tools` 在策略引擎里的行为。
+///
+/// 这组测试锁的是「skill 授权与用户配置的权限规则如何相处」——
+/// 顺序错了就会出现「skill 说能用，用户说 deny，结果照样用了」。
+#[cfg(test)]
+mod turn_grant_tests {
+    use super::*;
+    use crate::core::policy::settings_rules::{PermissionRuleSpec, SettingsPermissions};
+
+    fn call(name: &str) -> FunctionCall {
+        FunctionCall {
+            name: name.to_string(),
+            args: Some(serde_json::json!({})),
+        }
+    }
+
+    /// 造一份只含权限规则的 settings（走真实的 JSON 解析路径）。
+    fn settings_from(rules: &[(&str, &str)]) -> SettingsPermissions {
+        let dir = tempfile::tempdir().expect("tmp");
+        let settings_path = dir.path().join("settings.json");
+        let permissions: serde_json::Value = serde_json::json!({
+            "permissions": {
+                "allow": rules.iter().filter(|(k, _)| *k == "allow").map(|(_, v)| *v).collect::<Vec<_>>(),
+                "ask": rules.iter().filter(|(k, _)| *k == "ask").map(|(_, v)| *v).collect::<Vec<_>>(),
+                "deny": rules.iter().filter(|(k, _)| *k == "deny").map(|(_, v)| *v).collect::<Vec<_>>(),
+            }
+        });
+        std::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&permissions).expect("json"),
+        )
+        .expect("write");
+        SettingsPermissions::from_paths(&[settings_path])
+    }
+
+    fn engine_with(settings: SettingsPermissions) -> PolicyEngine {
+        let mut engine = PolicyEngine::new(PolicyEngineConfig::default());
+        engine.set_settings_permissions(settings);
+        engine
+    }
+
+    /// `allowed-tools` 让那个工具本轮免确认。
+    #[tokio::test]
+    async fn allowed_tools_skip_the_confirmation() {
+        let mut engine = engine_with(SettingsPermissions::default());
+        engine.apply_turn_tool_policy(&["Bash".to_string()], &[]);
+
+        let decision = engine.check(&call("Bash"), None).await.decision;
+        assert_eq!(
+            decision,
+            PolicyDecision::Allow,
+            "allowed-tools 里的工具本轮不该弹确认"
+        );
+    }
+
+    /// 不在 `allowed-tools` 里的工具**照常**走审批。
+    ///
+    /// `allowed-tools` 是「免确认」，不是「限制可用工具集」（CC 语义）。
+    #[tokio::test]
+    async fn tools_outside_the_grant_still_ask() {
+        let mut engine = engine_with(SettingsPermissions::default());
+        engine.apply_turn_tool_policy(&["Bash".to_string()], &[]);
+
+        let decision = engine.check(&call("Write"), None).await.decision;
+        assert_eq!(
+            decision,
+            PolicyDecision::AskUser,
+            "不在 allowed-tools 里的工具必须照常弹确认"
+        );
+    }
+
+    /// `disallowed-tools` 本轮禁用那个工具 —— 且压过「本会话总是允许」。
+    ///
+    /// 顺序很重要：skill 说「这轮别用 AskUserQuestion」，而上一轮用户点过
+    /// 「总是允许」—— 后者更笼统，前者更当下。
+    #[tokio::test]
+    async fn disallowed_tools_beat_the_session_allowance() {
+        let mut engine = engine_with(SettingsPermissions::default());
+        engine.allow_tool_for_session("AskUserQuestion".to_string());
+        engine.apply_turn_tool_policy(&[], &["AskUserQuestion".to_string()]);
+
+        let decision = engine.check(&call("AskUserQuestion"), None).await.decision;
+        assert!(
+            matches!(decision, PolicyDecision::DenyWithReason(_)),
+            "本轮禁用的工具必须被拒（即便上一轮点过总是允许），实际 {decision:?}"
+        );
+    }
+
+    /// 显式 `ask` 规则**压过** skill 的免确认。
+    ///
+    /// 用户在 `settings.json` 里写 `ask: ["Bash"]` 的语义是"每次都问我"——
+    /// 那比 skill 自己的免确认强。
+    #[tokio::test]
+    async fn an_explicit_ask_rule_beats_the_skill_grant() {
+        let mut engine = engine_with(settings_from(&[("ask", "Bash")]));
+        engine.apply_turn_tool_policy(&["Bash".to_string()], &[]);
+
+        let decision = engine.check(&call("Bash"), None).await.decision;
+        assert_eq!(
+            decision,
+            PolicyDecision::AskUser,
+            "显式 ask 规则必须压过 skill 的 allowed-tools"
+        );
+    }
+
+    /// 显式 `deny` 规则压过 skill 的免确认（deny 压一切）。
+    #[tokio::test]
+    async fn an_explicit_deny_rule_beats_the_skill_grant() {
+        let mut engine = engine_with(settings_from(&[("deny", "Bash")]));
+        engine.apply_turn_tool_policy(&["Bash".to_string()], &[]);
+
+        let decision = engine.check(&call("Bash"), None).await.decision;
+        assert!(
+            matches!(decision, PolicyDecision::DenyWithReason(_)),
+            "deny 规则必须压过 skill 的 allowed-tools，实际 {decision:?}"
+        );
+    }
+
+    /// 下一条用户消息 → 本轮授权清空。
+    ///
+    /// CC 语义："The grant clears when you send your next message."
+    /// 不清的话，上一条消息的 skill 授权会漏到下一条。
+    #[tokio::test]
+    async fn the_grant_clears_with_the_next_user_message() {
+        let mut engine = engine_with(SettingsPermissions::default());
+        engine.apply_turn_tool_policy(&["Bash".to_string()], &[]);
+        assert!(engine.is_turn_granted("Bash"));
+        assert!(engine.is_turn_denied("Write") == false);
+
+        engine.clear_turn_grants();
+
+        assert!(!engine.is_turn_granted("Bash"), "本轮授权必须被清空");
+        let decision = engine.check(&call("Bash"), None).await.decision;
+        assert_eq!(
+            decision,
+            PolicyDecision::AskUser,
+            "清空后必须回到正常的审批流程"
+        );
+    }
+
+    /// 工具名大小写/别名要归一 —— `allowed-tools: bash` 与注册名 `Bash` 是同一个。
+    #[tokio::test]
+    async fn granted_tool_names_are_canonicalized() {
+        let mut engine = engine_with(SettingsPermissions::default());
+        engine.apply_turn_tool_policy(&["bash".to_string()], &[]);
+
+        assert!(
+            engine.is_turn_granted("Bash"),
+            "工具名应当归一到注册名再比对"
+        );
+    }
+}

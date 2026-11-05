@@ -74,8 +74,13 @@ pub async fn build_runtime_services(
 
     let mut registry_config = config.clone();
     registry_config.install_runtime_services(
-        RuntimeServices::new(None, message_bus.clone(), mcp_manager.clone(), global_state.clone())
-            .with_model_switch_cell(model_switch_cell.clone()),
+        RuntimeServices::new(
+            None,
+            message_bus.clone(),
+            mcp_manager.clone(),
+            global_state.clone(),
+        )
+        .with_model_switch_cell(model_switch_cell.clone()),
     );
     let registry_config = Arc::new(registry_config);
 

@@ -274,8 +274,8 @@ fn register_skill_tool(
     if config.recursion_depth == 0 && enable_skill_tool {
         // 消息总线：skill 的 `allowed-tools` / `disallowed-tools` 要写进
         // 策略引擎的 per-turn 表，走的是总线背后的 PolicyEngine。
-        let mut skill_tool = SkillTool::new(client.clone(), config.clone())
-            .with_message_bus(message_bus.clone());
+        let mut skill_tool =
+            SkillTool::new(client.clone(), config.clone()).with_message_bus(message_bus.clone());
 
         // 模型切换槽：skill 的 `model` frontmatter 走它。
         if let Some(cell) = config.runtime_model_switch_cell() {
@@ -289,10 +289,7 @@ fn register_skill_tool(
         let subagent_runner = crate::agent::StarAgentRunner::shared(client.clone(), config.clone());
         if let Some(queue) = config.runtime_notification_queue() {
             skill_tool = skill_tool.with_async_runner(Arc::new(
-                crate::agent::subagent::runner::AsyncSubagentRunner::new(
-                    subagent_runner,
-                    queue,
-                ),
+                crate::agent::subagent::runner::AsyncSubagentRunner::new(subagent_runner, queue),
             ));
         }
 

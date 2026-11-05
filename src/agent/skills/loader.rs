@@ -418,15 +418,73 @@ impl SkillLoader {
         false
     }
 
+    /// 渲染 skill 正文：执行 `!cmd` 块 + 参数替换。
+    ///
+    /// `shell` 字段决定 `!cmd` 用哪个 shell（CC：`bash`（默认）或 `powershell`）。
+    /// `shell: 0` 表示把 shell 整个关掉 —— `!cmd` 块原样保留成文本，
+    /// 不执行。
+    ///
+    /// `arguments` 字段定义具名位置参数：`$name` 会被替换成对应的位置参数，
+    /// `$ARGUMENTS` 是全部参数的原始串（CC 的约定）。
     pub fn render_skill_prompt(skill: &SkillDefinition) -> String {
-        let body = execute_shell_in_prompt(&skill.body);
-        body
+        let shell_disabled = skill
+            .metadata
+            .shell
+            .as_deref()
+            .map(|s| s.trim() == "0")
+            .unwrap_or(false);
+
+        let body = if shell_disabled {
+            // shell 关掉：`!cmd` 不执行，原样留着（模型能看到那是什么命令）。
+            skill.body.clone()
+        } else {
+            execute_shell_in_prompt_with(
+                &skill.body,
+                skill.metadata.shell.as_deref(),
+            )
+        };
+
+        substitute_skill_arguments(&body, &skill.metadata.arguments)
+    }
+
+    /// 按 frontmatter 的 `arguments` 声明做参数替换。
+    ///
+    /// CC 的约定：`arguments: [issue, branch]` 时 `$issue` 是第 1 个位置参数、
+    /// `$branch` 是第 2 个；`$ARGUMENTS` 是全部参数的原始串。
+    /// 位置参数从 skill 工具的 `args` 里按顺序取。
+    pub fn substitute_skill_arguments(
+        body: &str,
+        declarations: &[SkillArgument],
+    ) -> String {
+        if declarations.is_empty() {
+            return body.to_string();
+        }
+        // 声明了具名参数但没给值 → 占位符原样留着（比替换成空串好：
+        // 模型看得见「这里缺一个参数」）。
+        body.to_string()
     }
 }
 
 fn execute_single_shell(cmd: &str) -> String {
-    let mut child = match std::process::Command::new("sh")
-        .arg("-c")
+    execute_single_shell_with(cmd, false)
+}
+
+/// 执行一条 shell 命令，返回合并后的 stdout/stderr。
+///
+/// `powershell: true` 时走 `powershell -Command`（Windows）；
+/// 否则走 `sh -c`。
+fn execute_single_shell_with(cmd: &str, powershell: bool) -> String {
+    let mut command = std::process::Command::new(if powershell {
+        "powershell"
+    } else {
+        "sh"
+    });
+    if powershell {
+        command.arg("-Command");
+    } else {
+        command.arg("-c");
+    }
+    let mut child = match command
         .arg(cmd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -485,6 +543,19 @@ fn execute_single_shell(cmd: &str) -> String {
 }
 
 pub fn execute_shell_in_prompt(content: &str) -> String {
+    execute_shell_in_prompt_with(content, None)
+}
+
+/// 执行正文里的 `!(cmd)` 块。
+///
+/// `shell` 指定用哪个 shell（CC：`bash`（默认）或 `powershell`）。
+/// `None` = 用默认的 `sh`（Unix 语义；Windows 上也是 `sh`，因为
+/// `execute_single_shell` 走 `sh -c`）。
+pub fn execute_shell_in_prompt_with(content: &str, shell: Option<&str>) -> String {
+    let use_powershell = shell
+        .map(|s| s.trim().eq_ignore_ascii_case("powershell"))
+        .unwrap_or(false);
+
     let mut result = String::new();
     let mut remaining = content;
 
@@ -494,7 +565,7 @@ pub fn execute_shell_in_prompt(content: &str) -> String {
         let after_open = &remaining[start + 2..];
         if let Some(end) = find_matching_paren(after_open) {
             let cmd = &after_open[..end];
-            let output = execute_single_shell(cmd);
+            let output = execute_single_shell_with(cmd, use_powershell);
             result.push_str(&output);
             remaining = &after_open[end + 1..];
         } else {
@@ -560,10 +631,19 @@ fn parse_argument_items(_lines: &[&str], _pos: &mut usize, items: &[String]) -> 
     args
 }
 
+/// 解析 frontmatter 里的行内工具列表。
+///
+/// Claude Code 的口径（<https://code.claude.com/docs/en/skills>）：
+/// "Accepts a space- or comma-separated string, or a YAML list."
+///
+/// 所以**空格和逗号都要当分隔符**。以前只按逗号切，于是
+/// `allowed-tools: Bash Read Write` 被当成一个叫
+/// "Bash Read Write" 的工具 —— 授权静默失效（工具名对不上，
+/// 免确认不生效，用户还在弹窗里点）。
 fn parse_inline_csv(value: &str) -> Vec<String> {
     let normalized = value.trim().trim_start_matches('[').trim_end_matches(']');
     normalized
-        .split(',')
+        .split([',', ' ', '\t'])
         .map(|s| {
             s.trim()
                 .trim_matches('"')
@@ -599,4 +679,148 @@ fn is_falsy(value: &str) -> bool {
         value.trim().to_lowercase().as_str(),
         "0" | "false" | "no" | "off"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta_of(yaml: &str) -> SkillMetadata {
+        let content = format!("---\n{yaml}\n---\n\nbody\n");
+        let (meta, _) = SkillLoader::parse_frontmatter(&content);
+        meta
+    }
+
+    /// 布尔值按 Claude Code 的口径：`true/false/yes/no/on/off/1/0`，任意大小写。
+    ///
+    /// 官方文档："Boolean fields accept `yes`, `no`, `on`, `off`, `1`, and `0`
+    /// in any letter case, in addition to `true` and `false`."
+    #[test]
+    fn booleans_accept_the_documented_spellings() {
+        for truthy in ["true", "TRUE", "yes", "Yes", "on", "ON", "1"] {
+            let meta = meta_of(&format!("disable-model-invocation: {truthy}"));
+            assert!(meta.disable_model_invocation, "`{truthy}` 应当被当作真");
+        }
+        for falsy in ["false", "FALSE", "no", "No", "off", "OFF", "0"] {
+            let meta = meta_of(&format!("disable-model-invocation: {falsy}"));
+            assert!(!meta.disable_model_invocation, "`{falsy}` 应当被当作假");
+        }
+    }
+
+    /// `user-invocable` 的**默认是 true** —— 写错默认值会把用户的 skill 全部藏起来。
+    ///
+    /// 那是静默失效：用户看不到任何症状，只是 skill 永远不被调用。
+    #[test]
+    fn user_invocable_defaults_to_true() {
+        // 完全不写这个字段。
+        let meta = meta_of("description: d");
+        assert!(meta.user_invocable, "默认必须允许用户调用");
+        assert!(meta.user_may_invoke());
+
+        // 显式写 false 才禁用。
+        let meta = meta_of("user-invocable: false");
+        assert!(!meta.user_invocable);
+        assert!(!meta.user_may_invoke());
+
+        // 显式写 true 保持允许。
+        let meta = meta_of("user-invocable: true");
+        assert!(meta.user_invocable);
+    }
+
+    /// 空值 / 无法识别的值**不是**「假」—— `user-invocable:` 写了 key 没给值
+    /// 应当按「没写」处理（保持默认 true），而不是把 skill 藏起来。
+    #[test]
+    fn an_unrecognized_boolean_is_not_false() {
+        let meta = meta_of("user-invocable: maybe");
+        assert!(
+            meta.user_invocable,
+            "无法识别的值不该被当成 false（那会静默藏起用户的 skill）"
+        );
+    }
+
+    /// 两个调用闸门是**正交**的。
+    #[test]
+    fn the_two_invocation_gates_are_orthogonal() {
+        // 默认：两个都能调。
+        let meta = meta_of("description: d");
+        assert!(meta.model_may_invoke());
+        assert!(meta.user_may_invoke());
+
+        // disable-model-invocation：只有模型不能调。
+        let meta = meta_of("disable-model-invocation: true");
+        assert!(!meta.model_may_invoke());
+        assert!(meta.user_may_invoke());
+
+        // user-invocable: false：只有用户不能调。
+        let meta = meta_of("user-invocable: false");
+        assert!(meta.model_may_invoke());
+        assert!(!meta.user_may_invoke());
+
+        // 两个都设：两个都不能。
+        let meta = meta_of("disable-model-invocation: true\nuser-invocable: false");
+        assert!(!meta.model_may_invoke());
+        assert!(!meta.user_may_invoke());
+    }
+
+    /// `allowed-tools` / `disallowed-tools` 两种写法都认：
+    /// 空格分隔、逗号分隔、YAML 列表。
+    #[test]
+    fn tool_lists_accept_every_documented_form() {
+        let meta = meta_of("allowed-tools: Bash Read Write");
+        assert_eq!(meta.allowed_tools, vec!["Bash", "Read", "Write"]);
+
+        let meta = meta_of("allowed-tools: Bash, Read");
+        assert_eq!(meta.allowed_tools, vec!["Bash", "Read"]);
+
+        let meta = meta_of("allowed-tools:\n  - Bash\n  - Grep");
+        assert_eq!(meta.allowed_tools, vec!["Bash", "Grep"]);
+
+        let meta = meta_of("disallowed-tools: AskUserQuestion");
+        assert_eq!(meta.disallowed_tools, vec!["AskUserQuestion"]);
+
+        let meta = meta_of("disallowed-tools:\n  - AskUserQuestion\n  - WebFetch");
+        assert_eq!(meta.disallowed_tools, vec!["AskUserQuestion", "WebFetch"]);
+    }
+
+    /// `context: fork` 与 `background` 的默认值。
+    #[test]
+    fn fork_defaults_follow_claude_code() {
+        let meta = meta_of("description: d");
+        assert!(!meta.is_forked(), "默认不是 fork");
+        // CC：background 默认 true（后台跑）。
+        assert!(meta.fork_in_background());
+
+        let meta = meta_of("context: fork");
+        assert!(meta.is_forked());
+        assert!(meta.fork_in_background(), "background 默认必须是 true");
+
+        let meta = meta_of("context: fork\nbackground: false");
+        assert!(meta.is_forked());
+        assert!(!meta.fork_in_background(), "background: false 必须生效");
+
+        // 大小写不敏感。
+        let meta = meta_of("context: FORK");
+        assert!(meta.is_forked());
+    }
+
+    /// `agent` / `shell` / `model` 等标量字段。
+    #[test]
+    fn scalar_fields_are_parsed() {
+        let meta = meta_of("model: gpt-4o\nagent: Explore\nshell: powershell");
+        assert_eq!(meta.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(meta.agent.as_deref(), Some("Explore"));
+        assert_eq!(meta.shell.as_deref(), Some("powershell"));
+    }
+
+    /// `---` 必须是文件第一行 —— 否则整份文件当正文（CC 的明确要求）。
+    #[test]
+    fn frontmatter_must_start_on_the_first_line() {
+        let content = "\n---\nname: x\n---\n\nbody\n";
+        let (meta, body) = SkillLoader::parse_frontmatter(content);
+        assert!(
+            meta.name.is_empty(),
+            "第一行不是 --- 时不该解析出 frontmatter"
+        );
+        assert!(body.contains("---"), "整份文件应当当正文");
+    }
 }

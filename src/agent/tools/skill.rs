@@ -88,7 +88,10 @@ impl SkillTool {
     }
 
     /// 注入模型切换槽（`model` 字段生效所必需）。
-    pub fn with_model_switch_cell(mut self, cell: crate::agent::model_switch::ModelSwitchCell) -> Self {
+    pub fn with_model_switch_cell(
+        mut self,
+        cell: crate::agent::model_switch::ModelSwitchCell,
+    ) -> Self {
         self.model_switch_cell = Some(cell);
         self
     }
@@ -387,12 +390,7 @@ impl ToolInvocation for SkillInvocation {
                     // 子代理**看不到**当前对话历史 —— 所以 skill 正文必须
                     // 自成一体。默认后台运行（`background: false` 则本轮等结果）。
                     if skill.metadata.is_forked() {
-                        return run_skill_forked(
-                            &skill,
-                            async_runner.as_ref(),
-                            &skill_name,
-                        )
-                        .await;
+                        return run_skill_forked(&skill, async_runner.as_ref(), &skill_name).await;
                     }
 
                     // ── 应用 frontmatter 的运行时效果 ─────────────────────────
@@ -844,8 +842,8 @@ async fn run_skill_forked(
     // 子代理的 prompt = skill 正文（`!cmd` 块先执行）。
     let prompt = crate::agent::skills::loader::SkillLoader::render_skill_prompt(skill);
 
-    let request = crate::core::agents::SubAgentRequest::new(prompt)
-        .with_subagent_type(subagent_type.clone());
+    let request =
+        crate::core::agents::SubAgentRequest::new(prompt).with_subagent_type(subagent_type.clone());
 
     let type_label = subagent_type.user_facing_name().to_string();
     let description = format!("skill `{}`", skill.name);
@@ -857,8 +855,7 @@ async fn run_skill_forked(
         let output = format!(
             "Skill `{}` is running in a forked subagent ({}). Its result will arrive \
              in this conversation when it finishes.",
-            skill.name,
-            launched.agent_id
+            skill.name, launched.agent_id
         );
         Ok(CoreToolResult {
             llm_content: Some(output.clone()),
