@@ -296,7 +296,11 @@ impl ContextCompressor {
         let split_idx = messages.len().saturating_sub(keep_count);
 
         // 不从 system 前缀中间切开
-        let split_idx = if split_idx < prefix_n { prefix_n } else { split_idx };
+        let split_idx = if split_idx < prefix_n {
+            prefix_n
+        } else {
+            split_idx
+        };
 
         let recent_messages = messages[split_idx..].to_vec();
 
@@ -325,7 +329,10 @@ impl ContextCompressor {
 
         let mut new_messages = Vec::new();
         // Keep the whole leading system prefix (static block + dynamic block)
-        crate::agent::message_processing::push_leading_system_messages(&mut new_messages, &messages);
+        crate::agent::message_processing::push_leading_system_messages(
+            &mut new_messages,
+            &messages,
+        );
         new_messages.push(summary_msg);
         new_messages.extend(recent_messages);
 
@@ -436,7 +443,11 @@ impl ContextCompressor {
         let prefix_n = crate::agent::message_processing::leading_system_count(&messages_l1);
         let split_idx = messages_l1.len().saturating_sub(keep_count);
         // 不从 system 前缀中间切开
-        let mut split_idx = if split_idx < prefix_n { prefix_n } else { split_idx };
+        let mut split_idx = if split_idx < prefix_n {
+            prefix_n
+        } else {
+            split_idx
+        };
 
         // Adjust split point to avoid keeping orphaned tool messages whose
         // corresponding assistant tool_calls are in the summarized portion.
@@ -477,7 +488,10 @@ impl ContextCompressor {
 
         let mut new_messages = Vec::new();
         // Keep the whole leading system prefix (static block + dynamic block)
-        crate::agent::message_processing::push_leading_system_messages(&mut new_messages, &messages_l1);
+        crate::agent::message_processing::push_leading_system_messages(
+            &mut new_messages,
+            &messages_l1,
+        );
         new_messages.push(summary_msg);
         new_messages.extend(recent_messages);
 

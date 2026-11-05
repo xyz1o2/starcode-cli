@@ -27,10 +27,10 @@
 
 #![cfg(test)]
 
-use crate::core::prompts::routing_matrix;
-use crate::core::tools::constants::ToolName;
-use crate::core::prompts::SystemPrompts;
 use crate::agent::tool_routing::CORE_TOOL_NAMES;
+use crate::core::prompts::routing_matrix;
+use crate::core::prompts::SystemPrompts;
+use crate::core::tools::constants::ToolName;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
@@ -237,9 +237,7 @@ fn bundle_input_files() -> Vec<String> {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    files.extend(
-        crate::agent::prompt_builder::PromptBuilder::core_tool_description_filenames(),
-    );
+    files.extend(crate::agent::prompt_builder::PromptBuilder::core_tool_description_filenames());
     files.sort();
     files.dedup();
     files
@@ -314,11 +312,16 @@ fn core_bundle_only_mentions_declared_tools() {
             if core.contains(token.as_str()) || has_discovery {
                 continue;
             }
-            violations.push(format!("{name}:{line}: `{token}`（不在核心集，且未写发现通道）"));
+            violations.push(format!(
+                "{name}:{line}: `{token}`（不在核心集，且未写发现通道）"
+            ));
         }
     }
 
-    assert!(checked >= 10, "bundle 输入文件数量异常（{checked}），选择逻辑坏了");
+    assert!(
+        checked >= 10,
+        "bundle 输入文件数量异常（{checked}），选择逻辑坏了"
+    );
     assert!(
         violations.is_empty(),
         "cached system message 里出现了核心集中不到、又没写发现通道的工具——\n\
@@ -345,7 +348,8 @@ fn routing_matrix_primaries_are_declared_core_tools() {
 
 #[tokio::test]
 async fn every_core_tool_is_registered_at_runtime() {
-    let registry = crate::core::config::runtime_bootstrap::build_two_layer_registry_for_tests().await;
+    let registry =
+        crate::core::config::runtime_bootstrap::build_two_layer_registry_for_tests().await;
     let missing: Vec<&str> = CORE_TOOL_NAMES
         .iter()
         .copied()

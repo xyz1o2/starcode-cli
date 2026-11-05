@@ -548,7 +548,10 @@ impl PromptBuilder {
 
     /// 准静态块：追加 `APPEND_SYSTEM.md`（用户追加覆盖跟动态内容走，一动只失效
     /// 这一块）；为空（无项目指令、无 git 快照、无 output style…）则不发第二条。
-    fn finish_dynamic_message(cwd: &Path, mut content: String) -> Option<crate::types::StarMessage> {
+    fn finish_dynamic_message(
+        cwd: &Path,
+        mut content: String,
+    ) -> Option<crate::types::StarMessage> {
         if let Some(appended) =
             read_prompt_override(cwd, "STAR_APPEND_SYSTEM_PROMPT_FILE", "APPEND_SYSTEM.md")
         {
@@ -904,7 +907,10 @@ mod tests {
         );
         for msg in &msgs {
             assert!(
-                !msg.content.as_deref().unwrap_or_default().contains("# Git Status"),
+                !msg.content
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("# Git Status"),
                 "git 快照必须留在 user 侧；它进 system 会击穿整个缓存前缀"
             );
         }
@@ -963,10 +969,7 @@ mod tests {
             true,
             None,
         );
-        assert!(
-            msgs.len() >= 1,
-            "至少要有静态块"
-        );
+        assert!(msgs.len() >= 1, "至少要有静态块");
         for msg in &msgs {
             assert!(
                 !msg.content.as_deref().unwrap_or_default().trim().is_empty(),

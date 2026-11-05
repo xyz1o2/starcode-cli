@@ -47,3 +47,20 @@ Observed ledger:
 - 用户 .star/skills/ 目录扫描从未接线（既有缺陷）
 Next action: 清理 prompts/skills 死资源 + 确认 marketplace 模板去留，然后接线用户 SKILL.md 目录加载
 Continuation cues: 继续 / 接着做 / 照做
+
+---
+
+[COMPACTION-RECOVERY] 2026-11-05 · prompt/tool 闭环 + 缓存边界（本次会话）
+Route: ct-attack-defense | Active target: src/agent/{prompt_builder,reference_guards}, src/core/prompts, src/agent/compact | Goal: BackgroundTask 漂移修复 + 提示词/工具一致性闭环 + system 消息缓存边界拆分
+
+Exact identifiers/evidence:
+- 已随 43bf157 提交（另一会话合并提交，含确认框重构）
+- 根因: bash.md 两处 `BackgroundTask` 指引 + 未声明工具 + bundle 静默截断（cap 26k 撞线）
+- 修复: md×6 + reference_guards.rs(4 守卫测试) + assemble_core_bundle 单实现 + strip_frontmatter pub(crate) + BUNDLE_STATIC_FILE_NAMES + build_two_layer_registry_for_tests
+- 缓存: system 拆 [静态块(cache_control) + 准静态块]；rig apply_system_cache_control 保留既有标记只补最后一块（已读源码验证）
+- 压缩: snip/auto_compact + context_compression 只保 messages[0] → 改为整段前缀（leading_system_count/push_leading_system_messages in message_processing.rs）+ 回归测试
+- bundle: frontmatter 剥离(~3k chars) + cap 26000→28000 + dropped 日志
+- 本机预存环境失败 29→37（另一会话 tool_executor/policy_engine 确认框重构所致，与本工作无关，已用基线对照验证）
+- 我的范围测试: 107 passed / 0 failed（prompt_builder/reference_guards/compact prefix/context_compression/prompt_cache_ext/prompts/tool_search/tool_name_consistency）
+
+Next action: 若继续，仅两件事待办: (1) 等 policy/tool-executor 重构收敛后全量 cargo test 复核; (2) CLAUDE.md 可补 3 行缓存边界说明（未做，避免与另一会话冲突）

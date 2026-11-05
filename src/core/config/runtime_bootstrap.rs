@@ -167,13 +167,17 @@ fn apply_tool_registry_layer(
 pub(crate) async fn build_two_layer_registry_for_tests() -> Arc<ToolRegistry> {
     use crate::core::config::ConfigParameters;
 
-    let bus = Arc::new(MessageBus::new(PolicyEngine::new(PolicyEngineConfig::default()), false));
+    let bus = Arc::new(MessageBus::new(
+        PolicyEngine::new(PolicyEngineConfig::default()),
+        false,
+    ));
     let gs = Arc::new(GlobalState::new());
     let model_switch_cell = crate::agent::model_switch::new_cell();
 
     let mut config = Config::new(ConfigParameters::default());
     config.install_runtime_services(
-        RuntimeServices::new(None, bus.clone(), None, gs.clone()).with_model_switch_cell(model_switch_cell),
+        RuntimeServices::new(None, bus.clone(), None, gs.clone())
+            .with_model_switch_cell(model_switch_cell),
     );
     let config = Arc::new(config);
 
