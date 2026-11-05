@@ -598,7 +598,10 @@ name: review\ndescription: d\n---\n\nbody\n",
         )
         .expect("write");
 
-        let listed = list_user_skill_names(dir.path());
+        let listed: Vec<String> = list_model_callable_skills(dir.path())
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
         assert!(
             listed.contains(&"review".to_string()),
             "review 必须出现在清单里：{listed:?}"

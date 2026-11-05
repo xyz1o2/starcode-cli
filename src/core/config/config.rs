@@ -617,6 +617,14 @@ impl Config {
             .as_ref()
             .map(|services| services.global_state())
     }
+    /// 运行中切模型的共享槽（Agent 与 SkillTool 共用）。
+    pub(crate) fn runtime_model_switch_cell(
+        &self,
+    ) -> Option<crate::agent::model_switch::ModelSwitchCell> {
+        self.runtime_services
+            .as_ref()
+            .and_then(|services| services.model_switch_cell())
+    }
     pub(crate) fn runtime_notification_queue(
         &self,
     ) -> Option<Arc<tokio::sync::Mutex<crate::agent::subagent::notification::NotificationQueue>>>

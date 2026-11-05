@@ -13,6 +13,15 @@ pub struct RuntimeServices {
     global_state: Arc<GlobalState>,
     /// 后台 SubAgent 完成通知队列（全局共享，供 AgentTool 写入、主 Agent 每轮消费）
     notification_queue: Option<Arc<Mutex<NotificationQueue>>>,
+    /// 运行中切模型的共享槽。
+    ///
+    /// 放在这里（而不是 `Agent::new` 里新建）是因为**两个消费者**：
+    /// - `Agent`：每轮 drain，把用户 `/model` 的选择换上去
+    /// - `SkillTool`：skill 的 `model` frontmatter 字段也要换模型
+    ///
+    /// 两边必须是**同一个槽** —— 否则 skill 的模型切换会被用户的 `/model`
+    /// 覆盖，或者反过来。
+    model_switch_cell: Option<crate::agent::model_switch::ModelSwitchCell>,
 }
 
 impl RuntimeServices {
@@ -28,6 +37,7 @@ impl RuntimeServices {
             mcp_manager,
             global_state,
             notification_queue: None,
+            model_switch_cell: None,
         }
     }
 
@@ -55,6 +65,19 @@ impl RuntimeServices {
 
     pub(crate) fn notification_queue(&self) -> Option<Arc<Mutex<NotificationQueue>>> {
         self.notification_queue.clone()
+    }
+
+    /// 设置模型切换槽（`Agent::new` 与 `SkillTool` 共用同一个）。
+    pub fn with_model_switch_cell(
+        mut self,
+        cell: crate::agent::model_switch::ModelSwitchCell,
+    ) -> Self {
+        self.model_switch_cell = Some(cell);
+        self
+    }
+
+    pub(crate) fn model_switch_cell(&self) -> Option<crate::agent::model_switch::ModelSwitchCell> {
+        self.model_switch_cell.clone()
     }
 }
 

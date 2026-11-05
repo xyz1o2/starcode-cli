@@ -12,7 +12,7 @@ pub(super) fn register_agent_runtime_tools(
     global_state: &Arc<GlobalState>,
     client: &StarClient,
 ) {
-    register_skill_tool(client, config, tool_registry);
+    register_skill_tool(client, config, tool_registry, message_bus);
     register_agent_editing_tools(tool_registry, config, message_bus, global_state, client);
     register_agent_observability_tools(tool_registry, client);
     register_agent_execution_tools(tool_registry, config, message_bus, client);
@@ -251,6 +251,7 @@ fn register_skill_tool(
     client: &StarClient,
     config: &Arc<Config>,
     tool_registry: &Arc<ToolRegistry>,
+    message_bus: &Arc<MessageBus>,
 ) {
     use crate::agent::tools::SkillTool;
 
@@ -271,7 +272,31 @@ fn register_skill_tool(
     let enable_skill_tool = (config.skills_support() || env_enable_skill) && !env_disable_skill;
 
     if config.recursion_depth == 0 && enable_skill_tool {
-        tool_registry.register_tool(Arc::new(SkillTool::new(client.clone(), config.clone())));
+        // 消息总线：skill 的 `allowed-tools` / `disallowed-tools` 要写进
+        // 策略引擎的 per-turn 表，走的是总线背后的 PolicyEngine。
+        let mut skill_tool = SkillTool::new(client.clone(), config.clone())
+            .with_message_bus(message_bus.clone());
+
+        // 模型切换槽：skill 的 `model` frontmatter 走它。
+        if let Some(cell) = config.runtime_model_switch_cell() {
+            skill_tool = skill_tool.with_model_switch_cell(cell);
+        }
+
+        // 后台子代理执行器：skill 的 `context: fork` 要起隔离子代理。
+        //
+        // 与 `AgentTool` 用同一个 runner（`StarAgentRunner::shared`）——
+        // 两处各建一个会让子代理的注册表分家，`SendMessage` 就找不到人了。
+        let subagent_runner = crate::agent::StarAgentRunner::shared(client.clone(), config.clone());
+        if let Some(queue) = config.runtime_notification_queue() {
+            skill_tool = skill_tool.with_async_runner(Arc::new(
+                crate::agent::subagent::runner::AsyncSubagentRunner::new(
+                    subagent_runner,
+                    queue,
+                ),
+            ));
+        }
+
+        tool_registry.register_tool(Arc::new(skill_tool));
     } else if config.recursion_depth > 0 {
         crate::utils::logging::append_debug_log_line(
             "[SkillTool] Skipped registration for sub-agent to prevent recursion.",

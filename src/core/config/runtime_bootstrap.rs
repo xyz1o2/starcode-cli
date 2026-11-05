@@ -66,13 +66,17 @@ pub async fn build_runtime_services(
             }
         });
 
+    // 模型切换槽：Agent 与 SkillTool 共用同一个。
+    //
+    // 用户 `/model` 与 skill 的 `model` frontmatter 都要换模型 ——
+    // 必须是同一个槽，否则两边互相覆盖。
+    let model_switch_cell = crate::agent::model_switch::new_cell();
+
     let mut registry_config = config.clone();
-    registry_config.install_runtime_services(RuntimeServices::new(
-        None,
-        message_bus.clone(),
-        mcp_manager.clone(),
-        global_state.clone(),
-    ));
+    registry_config.install_runtime_services(
+        RuntimeServices::new(None, message_bus.clone(), mcp_manager.clone(), global_state.clone())
+            .with_model_switch_cell(model_switch_cell.clone()),
+    );
     let registry_config = Arc::new(registry_config);
 
     let tool_registry = build_core_tool_registry(
@@ -95,7 +99,9 @@ pub async fn build_runtime_services(
         mcp_manager,
         global_state,
     );
-    services = services.with_notification_queue(notification_queue);
+    services = services
+        .with_notification_queue(notification_queue)
+        .with_model_switch_cell(model_switch_cell);
 
     Ok(RuntimeBootstrapArtifacts { services })
 }

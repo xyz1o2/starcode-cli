@@ -121,6 +121,14 @@ impl Agent {
         );
         crate::utils::logging::append_agent_log_line("[INIT] ToolExecutor::new completed");
 
+        // 模型切换槽：与 SkillTool 共用同一个 —— 用户的 `/model` 与 skill 的
+        // `model` frontmatter 都要走它，两边分家会互相覆盖。
+        //
+        // 在结构体字面量之前取出来：`config` 会被 move 进 `Agent`。
+        let model_switch_cell = config
+            .runtime_model_switch_cell()
+            .unwrap_or_else(crate::agent::model_switch::new_cell);
+
         // ContextEngine: 延迟初始化，不在构造函数中做任何 I/O
         let context_engine = crate::core::context::engine::ContextEngine::new();
 
@@ -161,7 +169,7 @@ impl Agent {
             denial_tracker: crate::core::permission_rules::deny_log::DenialTracker::new(),
             async_notification_queue: None,
             steering_queue: None,
-            model_switch_cell: crate::agent::model_switch::new_cell(),
+            model_switch_cell,
             task_complexity: crate::core::routing::RequestComplexity::Medium,
             memory_manager: crate::core::memory::MemoryManager::new(
                 &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
