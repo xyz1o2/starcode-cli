@@ -982,6 +982,7 @@ mod frontmatter_effects {
         crate::core::policy::FunctionCall {
             name: name.to_string(),
             args: Some(serde_json::json!({})),
+            read_only: None,
         }
     }
 

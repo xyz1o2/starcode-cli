@@ -170,6 +170,9 @@ impl MessageBus {
                 let tool_call = crate::core::policy::FunctionCall {
                     name: req.tool_call.name.clone(),
                     args: req.tool_call.args.clone(),
+                    // 外部 harness 来的请求：拿不到工具注册表，
+                    // 所以没有工具自己的只读声明。
+                    read_only: None,
                 };
                 let check_result = policy_engine
                     .check(&tool_call, req.server_name.as_deref())

@@ -8,6 +8,22 @@ use serde::{Deserialize, Serialize};
 pub struct FunctionCall {
     pub name: String,
     pub args: Option<serde_json::Value>,
+    /// 工具自己声明的「只读」性质。
+    ///
+    /// 策略引擎看不到工具注册表（它在 `MessageBus` 后面），所以「这个工具
+    /// 读不读东西」只能由调用方告知。调用方（`ToolExecutor`）拿得到
+    /// `tool.is_read_only()`。
+    ///
+    /// 为什么需要它：`is_safe_query_tool` 是一份**硬编码名单**，新加的只读
+    /// 工具如果忘了加进去，就会每次调用都弹权限确认。
+    /// 现场：`RepoMap` / `CodeGraph` / `ProjectMap` 都实现了
+    /// `is_read_only() == true`，但都不在名单里 —— 于是
+    /// 「读一下项目符号图」这种纯读操作也要用户点确认
+    /// （截图里的 `✓ Permission required: RepoMap`）。
+    ///
+    /// 工具自己声明是**更权威**的来源（写工具的人最清楚它读不读），
+    /// 所以优先用它；名单只作为拿不到声明时的兜底。
+    pub read_only: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -274,7 +290,7 @@ impl PolicyEngine {
     /// ask 由 `check` 在调用本方法前查过），本方法只回答"模式承诺放行吗"。
     fn mode_auto_allows(&self, tool_name: &str, args: &serde_json::Value) -> bool {
         matches!(
-            self.mode_auto_verdict(tool_name, args),
+            self.mode_auto_verdict(tool_name, args, None),
             crate::core::auto_mode::service::AutoVerdict::Allow { .. }
         )
     }
@@ -289,8 +305,20 @@ impl PolicyEngine {
         &self,
         tool_name: &str,
         args: &serde_json::Value,
+        tool_declared_read_only: Option<bool>,
     ) -> crate::core::auto_mode::service::AutoVerdict {
         use crate::core::auto_mode::service::AutoVerdict;
+        // 工具自己声明「只读」→ 放行。
+        //
+        // 工具的实现者最清楚它读不读（`RepoMap` / `CodeGraph` / `ProjectMap`
+        // 都实现了 `is_read_only() == true`）。硬编码名单 `is_safe_query_tool`
+        // 是兜底 —— 新加只读工具时忘了加进名单，那份纯读操作就会每次都弹
+        // 权限确认（现场：`✓ Permission required: RepoMap`）。
+        if tool_declared_read_only == Some(true) {
+            return AutoVerdict::Allow {
+                reason: "tool declares itself read-only".to_string(),
+            };
+        }
         match self.approval_mode {
             ApprovalMode::Default => {
                 // 默认档位也放行只读命令 —— 对标 Claude Code：
@@ -491,7 +519,7 @@ impl PolicyEngine {
                     .any(|(verdict, _)| *verdict == RuleVerdict::Ask);
 
                 if !asked_by_rule {
-                    match self.mode_auto_verdict(&tool_call.name, &args) {
+                    match self.mode_auto_verdict(&tool_call.name, &args, tool_call.read_only) {
                         crate::core::auto_mode::service::AutoVerdict::Allow { .. } => {
                             return CheckResult {
                                 decision: PolicyDecision::Allow,
@@ -771,6 +799,7 @@ mod tests {
         FunctionCall {
             name: name.to_string(),
             args: Some(args),
+            read_only: None,
         }
     }
 
@@ -1353,6 +1382,7 @@ mod turn_grant_tests {
         FunctionCall {
             name: name.to_string(),
             args: Some(serde_json::json!({})),
+            read_only: None,
         }
     }
 

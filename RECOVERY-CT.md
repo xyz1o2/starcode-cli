@@ -1,66 +1,58 @@
 [COMPACTION-RECOVERY]
 Route: ct-attack-defense (engineering executor)
 Active target: /mnt/h/test/starcode (branch dev-m)
-Goal: 去掉「源码级内置」的 skills，保留用户配置的 skills 与 MCP
+Goal: 本轮已完成 —— 用户 SKILL.md frontmatter 语义 + 权限弹窗收敛
 
 Exact identifiers/evidence:
-- 根因修复已提交: f0210bc（分裂缓存）+ b8a80d9（修正版文档）
-- 内置 skills 删除已提交: b8fa838 + 6ecbffd
-- exa MCP 已恢复可用（此前长时间 fetch failed）
-- Claude Code 官方文档核实结论:
-  * MCP = 用户配置（.mcp.json / ~/.claude.json，local/project/user 三 scope）
-    仅极少数 built-in（computer-use，默认关闭）
-  * bundled skills = prompt-based markdown（/doctor /code-review /batch /debug），
-    可用 disableBundledSkills 关闭
-  * → 用户意图：删源码级内置，保留用户配置能力
+- 根因修复（分裂缓存）：f0210bc + 文档 b8a80d9
+- 内置 skill 删除：b8fa838 / 6ecbffd；用户 SKILL.md 接线：7c9eb08
+- frontmatter 语义实现：9dfb8cb → 3e624d3 → 6bcf8bf → f4470fa → 08ce855 → 9a25e2d
+- 文档：0a88265（frontmatter 实现说明）、5bc77a0（内置删除说明）
+- 权限弹窗收敛：d3d4ab2（分类器熔断 + 判词解析 + 双门闸）
+- 门禁基线: 1977 passed / 0 failed / 4 ignored
+
+本轮用户的两条要求（都已完成）:
+1. 「✓ Allowed 这种不需要显示」
+   → confirmation_dialog.rs 两处渲染器去掉裁决文字，只留图标（+ 内容摘要）
+2. 「现在的权限老是弹窗」
+   → 三个独立缺陷，都用 ARTEX 日志实证：
+   a) chat() 忽略 model 参数 → 分类器永远用主模型 → 主模型回散文 →
+      判词 unrecognized → 熔断 → 每次工具调用都问人（日志 12 次熔断）
+      修：chat() 尊重 model 覆盖，client_for_model() 造临时 client
+   b) 判词解析只认裸首词 → `**ALLOW**` / `Verdict: ALLOW` / 围栏 全算 unrecognized
+      修：extract_verdict_word() 剥 markdown 装饰 + 跳标签词（前 4 词内找）
+      否定与矛盾护栏不变（认不出 = 问人，绝不放行）
+   c) 工具层与策略层是两道独立的门，问同一件事 → 已授权还再问
+      修：工具层在已有会话/持久授权时不再单独弹；
+      但 requires_invocation_confirmation 为真时不跳（那是路径级顾虑）
+
+刻意**没有**做的事:
+- 没有放宽 PolicyEngine 的「分类器不可用 = 问人」默认 —— 那是安全属性，
+  既有测试 auto_mode_asks_when_no_classifier_is_installed 锁着。
+  （我一度改松了它，导致该测试失败，已回退。）
+
+用户决策记录:
+- 「完全删除源码」的内置 skills，但「只去掉内置，保留用户自定义」
+- MCP 一度被误删 6477 行，已完整回滚（剩余 diff 中 MCP 改动 = 0 行）
 
 Technical scope:
-- 用户明确纠正过一次：「内置 skills 没必要，但用户配置 skills 和 mcp 要能用」
-- MCP 一度被误删 6477 行，已完整回滚（剩余 diff 中 MCP 改动 = 0 行）
-- 全量测试: 1935 passed / 0 failed / 4 ignored
-
-Key structural findings:
-1. 内置 Rust 子代理 6 个已删: analyzer/auto_fix/editor/explore/navigator/verify
-   保留框架: src/agent/skills/mod.rs (SubAgent trait/SubAgentManager) + custom.rs + loader.rs
-2. 用户自定义 agent（.star/agents/*.md）→ load_custom_subagent_definitions ✅ 通路完好
-3. 用户自定义 SKILL.md（.star/skills/）→ load_skills_from_dir **零调用者**（既有死代码，非本次引入）
-   SkillTool 只支持 GitHub/本地路径显式加载，不扫目录
-4. MCP 全套完好: src/core/mcp/ (10 文件) + /mcp 命令 + 弹窗 + 11 个 Mcp* 工具 + 插件 mcpServers
-5. 团队成员清单已从静态常量改为动态（team_agent_catalog(project_root)）
+- exa MCP 恢复了（此前长时间 fetch failed）；Claude Code 官方文档核实过
+  skills/MCP 分层、frontmatter 参考、权限判定顺序（deny→ask→allow）
+- 本地参考副本 .study/study_or_copy_projects/claude-code-main
 
 Deliverable checkpoints:
-- [x] 分裂缓存根因修复（f0210bc）
-- [x] 修正版根因文档（b8a80d9）
-- [x] 内置 skills 源码删除（b8fa838 + 6ecbffd）
-- [x] MCP 误删回滚（工作区，剩余 diff 无 MCP 改动）
-- [x] 全量测试 1935 passed
-- [ ] 用户 SKILL.md 目录加载接通（既有死代码，是否做待定）
-- [ ] 清理 src/core/prompts/skills/（内置 skill 的 prompt 资源，已无引用者）
-- [ ] marketplace 的 6 个内置 skill .md 模板（安装源，用户装后成为自定义 skill）
-- [ ] 最终文档与提交
+- [x] 分裂缓存根因修复
+- [x] 内置 skill 源码删除 + 用户 skill 目录接通
+- [x] SKILL.md frontmatter 全字段语义
+- [x] ✓ Allowed 文案移除
+- [x] 权限弹窗三处收敛
 
-Current stage & primary technique: 收尾阶段 — 确认剩余「内置」残留物的处理方式
+Current stage & primary technique: 收尾 —— 文档与最终复核
 Observed ledger:
-- src/core/prompts/skills/{analyzer,editor,explore,navigator}.rs 现已无引用（内置 agent 删了）
-- src/agent/skills/resources/*.md (6 个) 仍被 src/core/extensions/marketplace.rs include_str! 引用
-  → 它们是 /extension marketplace 的安装模板，装到 .star/skills/ 后成为用户自定义 skill
-- 用户 .star/skills/ 目录扫描从未接线（既有缺陷）
-Next action: 清理 prompts/skills 死资源 + 确认 marketplace 模板去留，然后接线用户 SKILL.md 目录加载
+- 根因 C（索引截断时引擎不落地）仍未解决，见
+  docs/codebase-search-index-incident.zh-CN.md §5.1（ARTEX 未触发截断，无样本）
+- 权限方面还有一个未动的点：敏感文件（.env）每次都问是有意设计
+  （sensitive_paths 模块头明确写了「会话授权不能降级它」），
+  用户若嫌吵可加 STAR_SENSITIVE_FILE_ASK=0
+Next action: 写 docs/permission-prompt-reduction.zh-CN.md 记录三个缺陷与修法
 Continuation cues: 继续 / 接着做 / 照做
-
----
-
-[COMPACTION-RECOVERY] 2026-11-05 · prompt/tool 闭环 + 缓存边界（本次会话）
-Route: ct-attack-defense | Active target: src/agent/{prompt_builder,reference_guards}, src/core/prompts, src/agent/compact | Goal: BackgroundTask 漂移修复 + 提示词/工具一致性闭环 + system 消息缓存边界拆分
-
-Exact identifiers/evidence:
-- 已随 43bf157 提交（另一会话合并提交，含确认框重构）
-- 根因: bash.md 两处 `BackgroundTask` 指引 + 未声明工具 + bundle 静默截断（cap 26k 撞线）
-- 修复: md×6 + reference_guards.rs(4 守卫测试) + assemble_core_bundle 单实现 + strip_frontmatter pub(crate) + BUNDLE_STATIC_FILE_NAMES + build_two_layer_registry_for_tests
-- 缓存: system 拆 [静态块(cache_control) + 准静态块]；rig apply_system_cache_control 保留既有标记只补最后一块（已读源码验证）
-- 压缩: snip/auto_compact + context_compression 只保 messages[0] → 改为整段前缀（leading_system_count/push_leading_system_messages in message_processing.rs）+ 回归测试
-- bundle: frontmatter 剥离(~3k chars) + cap 26000→28000 + dropped 日志
-- 本机预存环境失败 29→37（另一会话 tool_executor/policy_engine 确认框重构所致，与本工作无关，已用基线对照验证）
-- 我的范围测试: 107 passed / 0 failed（prompt_builder/reference_guards/compact prefix/context_compression/prompt_cache_ext/prompts/tool_search/tool_name_consistency）
-
-Next action: 若继续，仅两件事待办: (1) 等 policy/tool-executor 重构收敛后全量 cargo test 复核; (2) CLAUDE.md 可补 3 行缓存边界说明（未做，避免与另一会话冲突）

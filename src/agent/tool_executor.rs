@@ -488,6 +488,10 @@ impl ToolExecutor {
                     &FunctionCall {
                         name: tool_name.to_string(),
                         args: Some(args.clone()),
+                        // 工具自己声明的只读性质 —— 策略引擎看不到工具注册表，
+                        // 只能由这里告知（`RepoMap` / `CodeGraph` 这类纯读工具
+                        // 靠它免确认，不必进硬编码名单）。
+                        read_only: Some(tool.is_read_only()),
                     },
                     None,
                 )
@@ -710,6 +714,7 @@ impl ToolExecutor {
             tool_call: FunctionCall {
                 name: tool_name.to_string(),
                 args: Some(args.clone()),
+                read_only: None,
             },
             // correlation_id 由 bus 在发出去之前填。
             correlation_id: String::new(),
@@ -832,6 +837,7 @@ impl ToolExecutor {
                 tool_call: FunctionCall {
                     name: tool_name.to_string(),
                     args: Some(args.clone()),
+                    read_only: None,
                 },
             }))
             .await;

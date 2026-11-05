@@ -36,6 +36,7 @@ async fn fast_path_write(
     let call = FunctionCall {
         name: "Write".to_string(),
         args: Some(args.clone()),
+        read_only: None,
     };
     match bus.check_tool_policy(&call, None).await.decision {
         PolicyDecision::Deny => return Err("denied".to_string()),

@@ -48,6 +48,50 @@ pub(crate) struct TriggerEval {
     pub detail: String,
 }
 
+/// **当前可用的 skill 名单**。
+///
+/// 内置 skill（analyzer / editor / navigator）已于 2026-11-05 下线，但
+/// 自动触发器还在无条件地调它们 —— 于是每次都调一个不存在的 skill，
+/// 白跑一轮再报「No suitable agent」。
+///
+/// 触发器必须知道**这个 skill 到底存不存在**，才决定要不要触发。
+/// 名单来自 `SkillTool`（用户自定义 agent + 用户 SKILL.md）。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SkillAvailability {
+    names: std::collections::HashSet<String>,
+}
+
+impl SkillAvailability {
+    /// 空名单（= 没有任何 skill 可用）。
+    pub(crate) fn empty() -> Self {
+        Self::default()
+    }
+
+    /// 从名字列表构造。
+    pub(crate) fn from_names<I, S>(names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            names: names.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// 这个 skill 存在吗？
+    ///
+    /// 大小写不敏感 —— 用户写 `Analyzer` 与 `analyzer` 是同一个。
+    pub(crate) fn has(&self, name: &str) -> bool {
+        let needle = name.trim().to_lowercase();
+        self.names.iter().any(|n| n.to_lowercase() == needle)
+    }
+
+    /// 名单里有没有任何东西（一个都没有 → skill 类触发器全都不该触发）。
+    pub(crate) fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+}
+
 /// 三个自动触发开关的取值。
 ///
 /// 把它们从 [`select_best_auto_trigger`] 的参数里抽出来，是为了能在测试里直接指定
@@ -117,6 +161,7 @@ pub(crate) fn select_best_auto_trigger_with_flags(
     project_map_attempted: bool,
     flags: RouteFlags,
     project_root: Option<&Path>,
+    available_skills: &SkillAvailability,
 ) -> Option<TriggerEval> {
     let mut candidates: Vec<TriggerEval> = Vec::new();
 
@@ -228,6 +273,7 @@ pub(crate) fn select_best_auto_trigger_with_flags(
         project_map_attempted,
         analyzer_skill_attempted,
         flags.auto_skill_fallbacks,
+        available_skills,
     ) {
         candidates.push(TriggerEval {
             kind: AutoTriggerKind::AnalyzerSkill,
@@ -246,6 +292,7 @@ pub(crate) fn select_best_auto_trigger_with_flags(
         navigator_skill_attempted,
         editor_skill_attempted,
         flags.auto_skill_fallbacks,
+        available_skills,
     ) {
         candidates.push(TriggerEval {
             kind: AutoTriggerKind::EditorSkill,
@@ -869,11 +916,17 @@ fn should_trigger_navigator_skill_with_flag(
     codebase_search_attempted: bool,
     already_attempted: bool,
     auto_enabled: bool,
+    available_skills: &SkillAvailability,
 ) -> bool {
     auto_enabled
         && !already_attempted
         && codebase_search_attempted
         && active_tools.contains("Skill")
+        // 内置 skill 已于 2026-11-05 下线。只有用户自己定义的 agent 才存在 ——
+        // 没有它就别触发，否则每次都调一个不存在的 skill，白跑一轮
+        // （现场：`Skill(skill=analyzer)` → `No suitable agent or external
+        // skill found for: analyzer`）。
+        && available_skills.has("navigator")
 }
 
 /// 检查是否应该触发分析器技能
@@ -884,8 +937,14 @@ fn should_trigger_analyzer_skill_with_flag(
     project_map_attempted: bool,
     already_attempted: bool,
     auto_enabled: bool,
+    available_skills: &SkillAvailability,
 ) -> bool {
-    auto_enabled && !already_attempted && project_map_attempted && active_tools.contains("Skill")
+    auto_enabled
+        && !already_attempted
+        && project_map_attempted
+        && active_tools.contains("Skill")
+        // 内置 analyzer 已下线 —— 没有用户定义的同名 agent 就不触发。
+        && available_skills.has("analyzer")
 }
 
 /// 检查是否应该触发项目地图
@@ -911,12 +970,15 @@ fn should_trigger_editor_skill_with_flag(
     navigator_skill_attempted: bool,
     already_attempted: bool,
     auto_enabled: bool,
+    available_skills: &SkillAvailability,
 ) -> bool {
     auto_enabled
         && !already_attempted
         && codebase_search_attempted
         && navigator_skill_attempted
         && active_tools.contains("Skill")
+        // 内置 editor 已下线 —— 没有用户定义的同名 agent 就不触发。
+        && available_skills.has("editor")
 }
 
 /// 检查是否启用第一轮预取
