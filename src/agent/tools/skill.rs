@@ -992,8 +992,7 @@ mod frontmatter_effects {
     #[tokio::test]
     async fn allowed_tools_take_effect_through_the_message_bus() {
         let bus = bus();
-        bus.apply_turn_tool_policy(&["Bash".to_string()], &[])
-            .await;
+        bus.apply_turn_tool_policy(&["Bash".to_string()], &[]).await;
 
         let decision = bus.check_tool_policy(&call("Bash"), None).await.decision;
         assert_eq!(
@@ -1015,8 +1014,7 @@ mod frontmatter_effects {
     #[tokio::test]
     async fn the_grant_is_cleared_for_the_next_user_message() {
         let bus = bus();
-        bus.apply_turn_tool_policy(&["Bash".to_string()], &[])
-            .await;
+        bus.apply_turn_tool_policy(&["Bash".to_string()], &[]).await;
         assert_eq!(
             bus.check_tool_policy(&call("Bash"), None).await.decision,
             PolicyDecision::Allow
@@ -1129,10 +1127,7 @@ mod frontmatter_effects {
         apply_skill_runtime_effects(&skill, None, Some(&cell)).await;
 
         let pending = crate::agent::model_switch::take(&cell).await;
-        assert!(
-            pending.is_some(),
-            "`model` 字段必须发布一次模型切换"
-        );
+        assert!(pending.is_some(), "`model` 字段必须发布一次模型切换");
         assert_eq!(pending.expect("pending").model, "gpt-4o");
     }
 
@@ -1166,7 +1161,7 @@ mod frontmatter_effects {
         // 下一条用户消息 → 回到会话档位。
         crate::llm::thinking::clear_turn_effort();
         assert_eq!(
-            crate::lll::thinking::current_effort(),
+            crate::llm::thinking::current_effort(),
             crate::types::ThinkingEffort::Low,
             "下一条用户消息后必须回到会话档位"
         );
