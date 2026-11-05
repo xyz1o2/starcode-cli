@@ -623,6 +623,35 @@ impl StarClient {
         self.inner = Arc::new(client);
     }
 
+    /// 造一个**用别的模型**的 client（不改动 self）。
+    ///
+    /// 给「这次调用换个模型」的场合用 —— 目前只有 auto 档位的 LLM 分类器：
+    /// 它该跑在 `small_fast_model`（"小而快"的副模型）上，而不是主模型。
+    ///
+    /// 以前分类器没有这条通路（`chat` 的 `model` 参数被忽略），于是它一直用
+    /// 主模型。主模型被要求「只回一个词」时常常回一段解释 →
+    /// 判词解析失败 → 熔断 → 之后每次工具调用都退化成「问人」。
+    ///
+    /// 复制的是**除模型以外**的全部配置（provider / base_url / key）。
+    fn client_for_model(&self, model: &str) -> Box<dyn LlmClient> {
+        let provider = infer_provider(
+            model,
+            &self.base_url,
+            self.is_openai_compatible,
+            self.provider_id.as_deref(),
+        );
+        let provider_env_id =
+            provider_env_id(&provider, &self.base_url, self.provider_id.as_deref());
+        let config = LlmConfig {
+            provider,
+            api_key: self.api_key.clone(),
+            base_url: Some(self.base_url.clone()),
+            model: model.to_string(),
+        };
+        let _ = provider_env_id;
+        create_client(config)
+    }
+
     pub fn get_current_model(&self) -> &str {
         &self.model
     }
@@ -695,9 +724,32 @@ impl StarClient {
         &self,
         mut messages: Vec<StarMessage>,
         tools: Option<Vec<StarTool>>,
-        _model: Option<String>,
+        model: Option<String>,
         _search_options: Option<()>,
     ) -> Result<StarResponse, Box<dyn std::error::Error + Send + Sync>> {
+        // `model` 覆盖：**这次调用用别的模型**。
+        //
+        // 以前这个参数被写成 `_model` 直接忽略，于是每次调用都走 `self.model`。
+        // 那个「忽略」本身没问题（绝大多数调用方就是想用当前模型），但它让
+        // **auto 档位的 LLM 分类器**失去了唯一能换模型的手段 ——
+        // `small_fast_model`（"小而快"的副模型）解析出来却从不生效，
+        // 分类器一直用主模型跑。
+        //
+        // 后果很具体：主模型被要求「只回一个词 ALLOW/BLOCK/ASK」时，
+        // 常常回一段解释（thinking 模型尤其如此）→ 解析器认不出首词 →
+        // `unrecognized` → 熔断 → 之后每次工具调用都退化成「问人」。
+        // 现场：ARTEX 的日志里每次会话都有
+        // `[AutoMode] classifier circuit breaker tripped`（12 次）。
+        //
+        // 现在 `model` 真的会生效：临时重建一个用该模型的 client。
+        let override_client;
+        let inner: &Box<dyn LlmClient> = match model.as_deref() {
+            Some(requested) if !requested.trim().is_empty() && requested != self.model => {
+                override_client = self.client_for_model(requested);
+                &override_client
+            }
+            _ => &self.inner,
+        };
         let pipeline = super::message_pipeline::pipeline_for(
             self.provider_env_id,
             &self.model,
@@ -731,7 +783,7 @@ impl StarClient {
             return Err(missing_api_key_error(self.provider_env_id).into());
         }
 
-        match self.inner.chat_completion(messages, tools).await {
+        match inner.chat_completion(messages, tools).await {
             Ok(resp) => {
                 // Runtime detection: check if response contains reasoning_content
                 let has_reasoning = resp

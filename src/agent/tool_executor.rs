@@ -613,8 +613,24 @@ impl ToolExecutor {
         let should_confirm = invocation.should_confirm_execute(abort_signal).await;
         let tool_has_own_card = matches!(&should_confirm, Ok(Some(_)));
 
-        // 已经授权过，而工具要问的又只是「这个工具能不能用」这一层
-        // （不是路径级的顾虑）→ 不再重复问。
+        // 已经授权过（会话/持久），而工具要问的又只是「这个工具能不能用」
+        // 这一层 → 不再重复问。
+        //
+        // `requires_invocation_confirmation` 为真时**不**跳过：那条标志说的是
+        // 「工具每次都要确认一次」，而它存在的原因是**路径级**的顾虑
+        // （`Edit` 改未信任目录）—— 那不是「这个工具允不允许用」，
+        // 用户的一次通用授权覆盖不了它。既有测试
+        // `a_per_invocation_check_still_outranks_a_session_grant` 锁的就是
+        // 这个语义。
+        //
+        // 但 `requires_invocation_confirmation` 为假时，工具自己那张卡说的
+        // 就是「这个工具能不能用」—— 用户已经就这个工具给过会话授权，
+        // 再问一遍是纯粹的噪音。现场（ARTEX 日志）：
+        // ```text
+        // 🔔 Edit (source=tool, granted=false)   ← 第一次
+        // 🔐 Permission Granted: Allowing tool Edit for session
+        // 🔔 Edit (source=tool, granted=true)    ← 授权刚生效，又问一次
+        // ```
         if approved && tool_has_own_card && !requires_invocation_confirmation {
             return Gate::Open;
         }

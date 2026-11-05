@@ -193,14 +193,25 @@ impl LlmAutoModeClassifier {
     ///    放行：矛盾信号意味着我们没真正读懂模型的判断。
     /// 3. `contains("allow")` 绝不用于判定 —— "not allowed" 会被判成放行，
     ///    那是权限旁路。
+    ///
+    /// # 首词之外还认什么
+    ///
+    /// 只认首词不够 —— 现实里的模型经常这么回：
+    /// - `**ALLOW**`（markdown 加粗）
+    /// - `ALLOW`（带代码块围栏）
+    /// - `Verdict: ALLOW` / `Decision: ALLOW`（带前缀标签）
+    /// - `ALLOW\nThis is a read-only operation`（首词 + 换行 + 理由）
+    ///
+    /// 这些都不是「模型不听话」，而是**格式噪声**。把它们一律判成
+    /// `unrecognized` 会让熔断器跳闸，之后每次工具调用都退化成「问人」——
+    /// 现场：ARTEX 的日志里每次会话都有
+    /// `[AutoMode] classifier circuit breaker tripped`（12 次）。
+    ///
+    /// 所以：**剥掉 markdown 装饰后，在前几个词里找裁决词**。
+    /// 找不到才算 unrecognized（保守方向不变 —— 认不出就问人，绝不放行）。
     pub fn parse_verdict(response: &str) -> AutoVerdict {
         let text = response.trim();
-        let first = text
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .trim_matches(|c: char| !c.is_ascii_alphabetic())
-            .to_ascii_lowercase();
+        let first = Self::extract_verdict_word(text);
 
         let reason = text.lines().next().unwrap_or(text).trim().to_string();
 
@@ -250,6 +261,54 @@ impl LlmAutoModeClassifier {
                 reason: format!("AI classifier response unrecognized: {}", text),
             },
         }
+    }
+
+    /// 从模型回复里**取出**裁决词。
+    ///
+    /// 处理现实里常见的格式噪声：
+    /// - markdown 装饰：`**ALLOW**`、`_BLOCK_`、`` `ASK` ``
+    /// - 代码块围栏：` ```ALLOW ``` `
+    /// - 标签前缀：`Verdict: ALLOW`、`Decision - BLOCK`
+    /// - 列表项：`- ALLOW`
+    ///
+    /// 找不到就返回空串（调用方判成 unrecognized → 问人，保守方向不变）。
+    ///
+    /// **只看前几个词**：裁决词后面跟着理由（"ALLOW — 这是只读操作"），
+    /// 理由里可能也出现 allow/block，所以只在前面找。
+    fn extract_verdict_word(text: &str) -> String {
+        /// 裁决词前面允许出现的标签（最多 3 个词）。
+        const LABELS: [&str; 6] = [
+            "verdict", "decision", "answer", "result", "judgment", "choice",
+        ];
+
+        let mut cleaned = text.trim();
+        // 剥掉代码块围栏。
+        cleaned = cleaned.trim_start_matches('`').trim_end_matches('`');
+        cleaned = cleaned.trim();
+
+        let mut words: Vec<String> = cleaned
+            .split_whitespace()
+            .take(4)
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_ascii_alphanumeric())
+                    .to_ascii_lowercase()
+            })
+            .filter(|w| !w.is_empty())
+            .collect();
+
+        // 跳过标签词：`Verdict: ALLOW` → 跳过 `verdict` 找 `allow`。
+        while words
+            .first()
+            .map(|w| LABELS.contains(&w.as_str()))
+            .unwrap_or(false)
+        {
+            words.remove(0);
+        }
+
+        words
+            .into_iter()
+            .find(|w| matches!(w.as_str(), "allow" | "block" | "deny" | "ask"))
+            .unwrap_or_default()
     }
 }
 
@@ -605,6 +664,54 @@ mod tests {
             "this is not allowed to run",
             "ALLOW is not appropriate here, BLOCK",
             "I would BLOCK this",
+        ] {
+            let verdict = LlmAutoModeClassifier::parse_verdict(text);
+            assert!(
+                !matches!(verdict, AutoVerdict::Allow { .. }),
+                "{text:?} 被判成了放行"
+            );
+        }
+    }
+
+    /// **格式噪声不能当成「模型不听话」。**
+    ///
+    /// 现场事故：ARTEX 的日志里每次会话都有
+    /// `[AutoMode] classifier circuit breaker tripped`（12 次）——
+    /// 分类器被熔断之后，auto 档位每次工具调用都退化成「问人」，
+    /// 用户抱怨「权限老是弹窗」。
+    ///
+    /// 根因之一是判词解析太严：模型回 `**ALLOW**`、`Verdict: ALLOW`、
+    /// `\`\`ALLOW\`\`` 这类格式时，首词不是裁决词 → `unrecognized` →
+    /// 熔断。这些是**格式**问题，不是判断问题。
+    #[test]
+    fn markdown_and_label_noise_still_parses() {
+        for text in [
+            "**ALLOW** — read-only operation",
+            "_BLOCK_ — this deletes files",
+            "`ASK` — needs user intent",
+            "Verdict: ALLOW",
+            "Decision: BLOCK",
+            "```ALLOW```",
+            "- ALLOW",
+            "Result: ASK",
+        ] {
+            let verdict = LlmAutoModeClassifier::parse_verdict(text);
+            let ok = match text.to_ascii_lowercase().as_str() {
+                t if t.contains("allow") => matches!(verdict, AutoVerdict::Allow { .. }),
+                t if t.contains("block") => matches!(verdict, AutoVerdict::Deny { .. }),
+                _ => matches!(verdict, AutoVerdict::Ask { .. }),
+            };
+            assert!(ok, "{text:?} 解析成了 {verdict:?}");
+        }
+    }
+
+    /// 但**否定**与**矛盾**仍然要挡住 —— 格式宽松不能变成语义宽松。
+    #[test]
+    fn the_noise_tolerance_does_not_weaken_the_negation_guard() {
+        for text in [
+            "not allowed",
+            "Verdict: not allowed",
+            "ALLOW is not appropriate here, BLOCK",
         ] {
             let verdict = LlmAutoModeClassifier::parse_verdict(text);
             assert!(
