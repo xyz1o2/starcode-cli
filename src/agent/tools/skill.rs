@@ -1,6 +1,4 @@
-use crate::agent::skills::{
-    register_custom_subagents, SubAgentManager, SubTask,
-};
+use crate::agent::skills::{register_custom_subagents, SubAgentManager, SubTask};
 use crate::core::tools::{
     BaseDeclarativeTool, Kind, ToolCallConfirmationDetails, ToolError, ToolInvocation,
     ToolLocation, ToolResult as CoreToolResult,

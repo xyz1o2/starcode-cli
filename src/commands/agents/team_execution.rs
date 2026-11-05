@@ -1456,7 +1456,12 @@ mod tests {
     fn plan_falls_back_to_the_inline_defaults() {
         let mut args = run_args();
         args.objective = vec!["fix".to_string(), "the".to_string(), "build".to_string()];
-        let plan = plan_team_run(&args, &inline_preset(), &test_catalog(&["explore", "editor"])).unwrap();
+        let plan = plan_team_run(
+            &args,
+            &inline_preset(),
+            &test_catalog(&["explore", "editor"]),
+        )
+        .unwrap();
 
         assert_eq!(plan.objective, "fix the build");
         assert_eq!(plan.max_steps, 5);
@@ -1468,7 +1473,10 @@ mod tests {
         assert!(!plan.dry_run);
         assert_eq!(plan.timeout_secs, None);
         assert_eq!(
-            plan.selected.iter().map(|d| d.cli_name.as_str()).collect::<Vec<_>>(),
+            plan.selected
+                .iter()
+                .map(|d| d.cli_name.as_str())
+                .collect::<Vec<_>>(),
             vec!["explore", "editor"]
         );
     }
@@ -1477,7 +1485,8 @@ mod tests {
     fn the_preset_objective_is_used_when_the_command_line_has_none() {
         let mut preset = inline_preset();
         preset.objective = Some("sweep the TODOs".to_string());
-        let plan = plan_team_run(&run_args(), &preset, &test_catalog(&["explore", "editor"])).unwrap();
+        let plan =
+            plan_team_run(&run_args(), &preset, &test_catalog(&["explore", "editor"])).unwrap();
         assert_eq!(plan.objective, "sweep the TODOs");
     }
 
@@ -1489,7 +1498,9 @@ mod tests {
         let mut args = run_args();
         args.objective = vec!["inline".to_string(), "text".to_string()];
         assert_eq!(
-            plan_team_run(&args, &preset, &test_catalog(&["explore", "editor"])).unwrap().objective,
+            plan_team_run(&args, &preset, &test_catalog(&["explore", "editor"]))
+                .unwrap()
+                .objective,
             "inline text"
         );
     }
@@ -1499,7 +1510,8 @@ mod tests {
     fn a_blank_preset_objective_counts_as_missing() {
         let mut preset = inline_preset();
         preset.objective = Some("   ".to_string());
-        let err = plan_team_run(&run_args(), &preset, &test_catalog(&["explore", "editor"])).unwrap_err();
+        let err =
+            plan_team_run(&run_args(), &preset, &test_catalog(&["explore", "editor"])).unwrap_err();
         assert!(err.starts_with("objective is required"), "{err}");
     }
 
@@ -1540,7 +1552,9 @@ mod tests {
         let mut args = run_args();
         args.objective = vec!["go".to_string()];
         assert!(matches!(
-            plan_team_run(&args, &preset, &test_catalog(&["explore", "editor"])).unwrap().run_mode,
+            plan_team_run(&args, &preset, &test_catalog(&["explore", "editor"]))
+                .unwrap()
+                .run_mode,
             TeamRunMode::Parallel
         ));
     }
@@ -1565,7 +1579,11 @@ mod tests {
         preset.dry_run = Some(true);
         let mut args = run_args();
         args.objective = vec!["go".to_string()];
-        assert!(plan_team_run(&args, &preset, &test_catalog(&["explore", "editor"])).unwrap().dry_run);
+        assert!(
+            plan_team_run(&args, &preset, &test_catalog(&["explore", "editor"]))
+                .unwrap()
+                .dry_run
+        );
     }
 
     #[test]
@@ -1584,7 +1602,12 @@ mod tests {
             args.objective = vec!["go".to_string()];
             mutate(&mut args);
             assert_eq!(
-                plan_team_run(&args, &inline_preset(), &test_catalog(&["explore", "editor"])).unwrap_err(),
+                plan_team_run(
+                    &args,
+                    &inline_preset(),
+                    &test_catalog(&["explore", "editor"])
+                )
+                .unwrap_err(),
                 expected
             );
         }
@@ -1595,7 +1618,12 @@ mod tests {
         let mut args = run_args();
         args.objective = vec!["go".to_string()];
         args.agents = Some(vec!["ghost".to_string()]);
-        let err = plan_team_run(&args, &inline_preset(), &test_catalog(&["explore", "editor"])).unwrap_err();
+        let err = plan_team_run(
+            &args,
+            &inline_preset(),
+            &test_catalog(&["explore", "editor"]),
+        )
+        .unwrap_err();
         assert!(err.contains("unknown team agents: ghost"), "{err}");
     }
 

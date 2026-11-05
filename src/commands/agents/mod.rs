@@ -39,9 +39,7 @@ use crate::agent::skills::custom::{
     load_custom_subagent_definitions, load_custom_subagent_from_file, normalize_custom_agent_id,
     render_custom_subagent_markdown,
 };
-use crate::agent::skills::{
-    register_custom_subagents, SubAgentManager, SubTask, SubTaskResult,
-};
+use crate::agent::skills::{register_custom_subagents, SubAgentManager, SubTask, SubTaskResult};
 
 #[derive(Subcommand)]
 pub(crate) enum AgentsCommand {

@@ -168,7 +168,8 @@ pub(super) fn resolve_team_agents<'a>(
 
     if selected.is_empty() {
         return Err(
-            "no valid team agents selected. use --agents <name> (see `/agents team list`)".to_string(),
+            "no valid team agents selected. use --agents <name> (see `/agents team list`)"
+                .to_string(),
         );
     }
 
@@ -415,11 +416,8 @@ mod tests {
             aliases: vec![],
             description: "d".to_string(),
         }];
-        let err = resolve_team_agents(
-            vec!["analyzer".to_string(), "gpt5".to_string()],
-            &catalog,
-        )
-        .unwrap_err();
+        let err = resolve_team_agents(vec!["analyzer".to_string(), "gpt5".to_string()], &catalog)
+            .unwrap_err();
         assert!(err.contains("unknown team agents: gpt5"), "{err}");
         assert!(err.contains("/agents team list"), "{err}");
     }

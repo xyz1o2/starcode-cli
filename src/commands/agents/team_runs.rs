@@ -1,8 +1,8 @@
+use super::team_definitions::validate_team_run_id;
 use super::team_definitions::{
     find_team_agent, normalize_agent_name, resolve_team_agents, team_agent_catalog,
     team_run_mode_label,
 };
-use super::team_definitions::validate_team_run_id;
 use super::*;
 
 pub(super) async fn list_agent_team_catalog(ctx: CommandContext<'_>) -> CommandResult {
