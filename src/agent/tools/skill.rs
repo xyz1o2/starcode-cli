@@ -17,6 +17,13 @@ pub struct SkillTool {
     available_skill_names: Vec<String>,
     /// 项目根 —— 用户自定义 SKILL.md（`.star/skills/`）的查找位置。
     project_root: std::path::PathBuf,
+    /// 消息总线 —— skill 的 `allowed-tools` / `disallowed-tools` 要写进
+    /// 策略引擎（per-turn）。
+    message_bus: Option<std::sync::Arc<crate::core::confirmation_bus::MessageBus>>,
+    /// 运行中切模型的交接槽 —— skill 的 `model` 字段走它。
+    model_switch_cell: Option<crate::agent::model_switch::ModelSwitchCell>,
+    /// 后台子代理执行器 —— skill 的 `context: fork` 走它。
+    async_runner: Option<std::sync::Arc<crate::agent::subagent::runner::AsyncSubagentRunner>>,
 }
 
 impl SkillTool {
@@ -60,7 +67,34 @@ impl SkillTool {
             description,
             available_skill_names,
             project_root: config.target_dir().clone(),
+            message_bus: config.runtime_message_bus(),
+            model_switch_cell: None,
+            async_runner: None,
         }
+    }
+
+    /// 注入消息总线（`allowed-tools` 生效所必需）。
+    pub fn with_message_bus(
+        mut self,
+        bus: std::sync::Arc<crate::core::confirmation_bus::MessageBus>,
+    ) -> Self {
+        self.message_bus = Some(bus);
+        self
+    }
+
+    /// 注入模型切换槽（`model` 字段生效所必需）。
+    pub fn with_model_switch_cell(mut self, cell: crate::agent::model_switch::ModelSwitchCell) -> Self {
+        self.model_switch_cell = Some(cell);
+        self
+    }
+
+    /// 注入后台子代理执行器（`context: fork` 生效所必需）。
+    pub fn with_async_runner(
+        mut self,
+        runner: std::sync::Arc<crate::agent::subagent::runner::AsyncSubagentRunner>,
+    ) -> Self {
+        self.async_runner = Some(runner);
+        self
     }
 }
 
@@ -124,6 +158,9 @@ impl BaseDeclarativeTool for SkillTool {
             skill_name,
             args,
             project_root: self.project_root.clone(),
+            message_bus: self.message_bus.clone(),
+            model_switch_cell: self.model_switch_cell.clone(),
+            async_runner: self.async_runner.clone(),
         }))
     }
 }
@@ -134,6 +171,12 @@ pub struct SkillInvocation {
     args: Value,
     /// 项目根 —— 用户自定义 SKILL.md 的查找位置。
     project_root: std::path::PathBuf,
+    /// 消息总线（per-turn 工具策略）。
+    message_bus: Option<std::sync::Arc<crate::core::confirmation_bus::MessageBus>>,
+    /// 模型切换槽。
+    model_switch_cell: Option<crate::agent::model_switch::ModelSwitchCell>,
+    /// 后台子代理执行器（`context: fork`）。
+    async_runner: Option<std::sync::Arc<crate::agent::subagent::runner::AsyncSubagentRunner>>,
 }
 
 #[async_trait]
@@ -162,10 +205,13 @@ impl ToolInvocation for SkillInvocation {
         let args = self.args.clone();
         let update_output = update_output.clone();
         let project_root = self.project_root.clone();
+        let message_bus = self.message_bus.clone();
+        let model_switch_cell = self.model_switch_cell.clone();
+        let async_runner = self.async_runner.clone();
 
         Box::pin(async move {
             if let Some(cb) = update_output.as_ref() {
-                cb(format!("Running skill `{}`\n", skill_name));
+                cb(format!("Running skill `{skill_name}`\n"));
             }
 
             // Construct SubTask
@@ -271,9 +317,6 @@ impl ToolInvocation for SkillInvocation {
                 // 查找顺序（先命中先用）：
                 // 1. 项目 `.star/skills/<name>/SKILL.md` 或 `<name>.skill.md`
                 // 2. 用户 `~/.starcode/skills/<name>/SKILL.md`（全局）
-                //
-                // 这一段之前是**死代码**：`SkillLoader::load_skills_from_dir`
-                // 从来没有调用者，用户目录里的 SKILL.md 写了也不会被加载。
                 let skill_def = load_user_skill_from_dirs(&skill_name, &project_root).await;
 
                 // ============ 外部 Skill 加载 (GitHub / Local) ============
@@ -302,6 +345,63 @@ impl ToolInvocation for SkillInvocation {
                 };
 
                 if let Some(skill) = skill_def {
+                    // ── 调用闸门：`disable-model-invocation` ──────────────────
+                    //
+                    // Claude Code 语义：模型不得自动调用这个 skill，用户仍可
+                    // 显式调用（`/name`）。
+                    //
+                    // StarCode 没有 `/name` 入口（用户 skill 不在 `/` 菜单里），
+                    // 而 `SkillTool` 的调用**全部**来自模型 —— 所以对这个工具
+                    // 而言，"模型不许自动调" 就等于"不许调"。用户想用就走
+                    // `/skills show` 看内容。
+                    if !skill.metadata.model_may_invoke() {
+                        let output = format!(
+                            "Skill `{}` is not available for model invocation \
+                             (its frontmatter sets `disable-model-invocation: true`). \
+                             Use `/skills show {}` to read it.",
+                            skill.name, skill.name
+                        );
+                        return Ok(CoreToolResult {
+                            llm_content: Some(output.clone()),
+                            return_display: Some(output.clone()),
+                            output,
+                            error: Some(ToolError {
+                                error_type: "SkillNotInvocable".to_string(),
+                                message: format!(
+                                    "skill `{}` sets disable-model-invocation: true",
+                                    skill.name
+                                ),
+                            }),
+                            data: None,
+                        });
+                    }
+
+                    // ── `context: fork`：在隔离子代理里跑 ─────────────────────
+                    //
+                    // Claude Code 语义：skill 正文成为子代理的 prompt，
+                    // 子代理**看不到**当前对话历史 —— 所以 skill 正文必须
+                    // 自成一体。默认后台运行（`background: false` 则本轮等结果）。
+                    if skill.metadata.is_forked() {
+                        return run_skill_forked(
+                            &skill,
+                            async_runner.as_ref(),
+                            &skill_name,
+                        )
+                        .await;
+                    }
+
+                    // ── 应用 frontmatter 的运行时效果 ─────────────────────────
+                    //
+                    // `allowed-tools` / `disallowed-tools` 写进策略引擎的
+                    // per-turn 表（下一条用户消息即清）；`model` 发布一次
+                    // 模型切换（`execute_turn` 在下次 provider 请求前 drain）。
+                    apply_skill_runtime_effects(
+                        &skill,
+                        message_bus.as_ref(),
+                        model_switch_cell.as_ref(),
+                    )
+                    .await;
+
                     // 成功加载外部 Skill
                     // 将其内容作为上下文注入返回
                     // 沙箱隔离：明确标记来源和边界
@@ -560,4 +660,182 @@ fn list_user_skill_names(project_root: &std::path::Path) -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+/// 把 skill frontmatter 的**运行时**效果落到系统里。
+///
+/// 三个字段有运行时含义（其余字段要么是纯展示，要么本次不实现）：
+///
+/// - `allowed-tools` / `disallowed-tools` → 策略引擎的 per-turn 表。
+///   **只到下一条用户消息为止**（Claude Code 语义：grant clears when you
+///   send your next message）。写入的是 `PolicyEngine`，判定走
+///   `PolicyEngine::check` —— 与用户写在 `settings.json` 里的 `allow` 规则
+///   同一个入口，不会绕过 deny 规则。
+///
+/// - `model` → 发布一次模型切换。`execute_turn` 在每次 provider 请求前
+///   drain 这个槽，所以效果是「本轮剩余部分用新模型」。
+///   `inherit` 表示保持当前模型（Claude Code 的约定）。
+///
+/// `effort` 没有实现：StarCode 的 effort 只有 `self_tuning` 那条「模型自己
+/// 调」的通路，没有 per-turn override 的落点，硬塞会与那套语义混淆。
+/// `context: fork` 由调用方单独处理（要起子代理，不只是改状态）。
+async fn apply_skill_runtime_effects(
+    skill: &crate::agent::skills::loader::SkillDefinition,
+    message_bus: Option<&std::sync::Arc<crate::core::confirmation_bus::MessageBus>>,
+    model_switch_cell: Option<&crate::agent::model_switch::ModelSwitchCell>,
+) {
+    let meta = &skill.metadata;
+
+    // ── allowed-tools / disallowed-tools ──────────────────────────
+    if !meta.allowed_tools.is_empty() || !meta.disallowed_tools.is_empty() {
+        if let Some(bus) = message_bus {
+            bus.apply_turn_tool_policy(&meta.allowed_tools, &meta.disallowed_tools)
+                .await;
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[Skill] `{}` applied turn tool policy: allowed={:?} disallowed={:?}",
+                skill.name, meta.allowed_tools, meta.disallowed_tools
+            ));
+        } else {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[Skill] `{}` declares allowed-tools but no message bus is wired — \
+                 the grant is not applied",
+                skill.name
+            ));
+        }
+    }
+
+    // ── model ────────────────────────────────────────────────────
+    if let Some(model) = meta.model.as_deref() {
+        let trimmed = model.trim();
+        // `inherit` = 保持当前模型（Claude Code 的约定）。
+        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("inherit") {
+            if let Some(cell) = model_switch_cell {
+                crate::agent::model_switch::publish(
+                    cell,
+                    crate::agent::model_switch::PendingModelSwitch {
+                        model: trimmed.to_string(),
+                        provider_id: None,
+                    },
+                )
+                .await;
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[Skill] `{}` switched the rest of this turn to model `{trimmed}`",
+                    skill.name
+                ));
+            }
+        }
+    }
+}
+
+/// 在隔离子代理里跑一个 skill（`context: fork`）。
+///
+/// Claude Code 语义：
+/// - skill 正文成为子代理的 prompt；子代理**看不到**当前对话历史，
+///   所以 skill 必须自成一体。
+/// - `agent` 指定子代理类型（默认 general-purpose）。
+/// - `background` 指定是否后台运行（默认 true = 后台）。
+///
+/// 返回给模型的是「子代理跑完了」这件事，不是 skill 正文 —— 正文已经被
+/// 子代理吃掉了，再塞回主上下文就是重复。
+async fn run_skill_forked(
+    skill: &crate::agent::skills::loader::SkillDefinition,
+    async_runner: Option<&std::sync::Arc<crate::agent::subagent::runner::AsyncSubagentRunner>>,
+    skill_name: &str,
+) -> Result<CoreToolResult, Box<dyn std::error::Error>> {
+    let Some(runner) = async_runner else {
+        let output = format!(
+            "Skill `{}` requests `context: fork`, but no subagent runner is available \
+             in this session. Run it without `context: fork`.",
+            skill.name
+        );
+        return Ok(CoreToolResult {
+            llm_content: Some(output.clone()),
+            return_display: Some(output.clone()),
+            output,
+            error: Some(ToolError {
+                error_type: "ForkUnavailable".to_string(),
+                message: "no subagent runner available for context: fork".to_string(),
+            }),
+            data: None,
+        });
+    };
+
+    // 子代理类型：`agent` 字段，缺省 general-purpose。
+    let subagent_type = match skill.metadata.agent.as_deref() {
+        Some(name) => serde_json::from_value::<crate::core::agents::SubagentType>(
+            serde_json::Value::String(normalize_subagent_type_slug(name)),
+        )
+        .unwrap_or(crate::core::agents::SubagentType::GeneralPurpose),
+        None => crate::core::agents::SubagentType::GeneralPurpose,
+    };
+
+    // 子代理的 prompt = skill 正文（`!cmd` 块先执行）。
+    let prompt = crate::agent::skills::loader::SkillLoader::render_skill_prompt(skill);
+
+    let request = crate::core::agents::SubAgentRequest::new(prompt)
+        .with_subagent_type(subagent_type.clone());
+
+    let type_label = subagent_type.user_facing_name().to_string();
+    let description = format!("skill `{}`", skill.name);
+    let agent_name = Some(skill_name.to_string());
+
+    if skill.metadata.fork_in_background() {
+        // 后台：立刻返回，结果随通知回流主会话。
+        let launched = runner.spawn_background(request, agent_name, description, type_label);
+        let output = format!(
+            "Skill `{}` is running in a forked subagent ({}). Its result will arrive \
+             in this conversation when it finishes.",
+            skill.name,
+            launched.agent_id
+        );
+        Ok(CoreToolResult {
+            llm_content: Some(output.clone()),
+            return_display: Some(output.clone()),
+            output,
+            error: None,
+            data: Some(serde_json::json!({
+                "status": "fork_launched",
+                "agent_id": launched.agent_id,
+                "skill": skill.name,
+            })),
+        })
+    } else {
+        // 前台：本轮等结果。
+        let result = runner
+            .run_foreground(request, agent_name, description, type_label)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+        let output = if result.output.trim().is_empty() {
+            format!("Skill `{}` finished with no output.", skill.name)
+        } else {
+            result.output.clone()
+        };
+        Ok(CoreToolResult {
+            llm_content: Some(output.clone()),
+            return_display: Some(output.clone()),
+            output,
+            error: None,
+            data: Some(serde_json::json!({
+                "status": "fork_completed",
+                "skill": skill.name,
+                "tool_use_count": result.tool_use_count,
+                "total_tokens": result.total_tokens,
+            })),
+        })
+    }
+}
+
+/// 把 frontmatter 里的 agent 名归一成 `SubagentType` 的 snake_case slug。
+///
+/// Claude Code 那边写的是 `Explore` / `Plan` / `general-purpose` 这种
+/// 展示名，这里要转成 serde 能认的 slug（`explorer` / `general_purpose`）。
+fn normalize_subagent_type_slug(name: &str) -> String {
+    let lowered = name.trim().to_lowercase().replace(['-', ' '], "_");
+    match lowered.as_str() {
+        "explore" | "explorer" => "explorer".to_string(),
+        "analyze" | "analyzer" => "analyzer".to_string(),
+        "edit" | "editor" => "editor".to_string(),
+        "code_reviewer" | "reviewer" | "review" => "code_reviewer".to_string(),
+        _ => lowered,
+    }
 }

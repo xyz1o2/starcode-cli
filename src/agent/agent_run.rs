@@ -112,6 +112,16 @@ impl Agent {
             // 中途新发现的工具要到下一条消息才进入 tools 数组，避免击穿 prompt 缓存前缀。
             crate::core::tools::tool_search::begin_message_epoch();
 
+            // 清空上一条消息留下的**本轮**工具策略。
+            //
+            // skill 的 `allowed-tools` / `disallowed-tools` 只到下一条用户消息为止
+            // （Claude Code 语义：grant clears when you send your next message）。
+            // 不清的话，上一条消息的 skill 授权会漏到下一条 —— 那条消息
+            // 可能压根没调用过任何 skill。
+            if let Some(bus) = self.runtime_message_bus() {
+                bus.clear_turn_tool_policy().await;
+            }
+
             // 换一个干净的中断 token：CancellationToken 一旦 cancel 就不可撤销，
             // 上一回合的 ESC 不能把本回合的流和工具一起废掉。
             self.arm_abort_token();

@@ -404,6 +404,33 @@ impl AsyncSubagentRunner {
         }
     }
 
+    /// **前台**运行 SubAgent —— 调用方等结果。
+    ///
+    /// 与 [`Self::spawn_background`] 的区别只是「等不等」：
+    /// - `spawn_background` 立刻返回，结果随通知回流（`background: true`）
+    /// - 本方法等到跑完，把结果直接交给调用方（`background: false`）
+    ///
+    /// skill 的 `context: fork` + `background: false` 走这条：Claude Code 的
+    /// 语义是「本轮等 fork 的结果，而不是让它在后台跑」。
+    pub async fn run_foreground(
+        &self,
+        request: SubAgentRequest,
+        name: Option<String>,
+        description: String,
+        agent_type_label: String,
+    ) -> Result<SubAgentResult, SubAgentError> {
+        if let Some(ref agent_name) = name {
+            let aid = format!("agent-fork-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+            self.name_registry
+                .lock()
+                .await
+                .insert(agent_name.clone(), aid);
+        }
+        let _ = description;
+        let _ = agent_type_label;
+        self.sync_runner.run(request).await
+    }
+
     /// 后台启动 SubAgent，立即返回 AsyncLaunchResult
     ///
     /// `agent_type_label` 是用户可见的类型标签（对标 `userFacingName`），

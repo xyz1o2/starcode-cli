@@ -35,6 +35,22 @@ pub struct PolicyEngine {
     allow_hooks: bool,
     approval_mode: ApprovalMode,
     session_allowances: std::collections::HashSet<String>, // tool_name
+    /// **本轮**免确认放行的工具（skill 的 `allowed-tools`）。
+    ///
+    /// 与 `session_allowances` 的区别是**生命周期**：
+    /// - `session_allowances` = 整个会话（「总是允许」）
+    /// - `turn_grants` = 只到下一条用户消息为止
+    ///
+    /// Claude Code 的语义（<https://code.claude.com/docs/en/skills>）：
+    /// "The grant clears when you send your next message, even though the skill
+    /// content stays in context; invoking the skill again re-applies it for that turn."
+    ///
+    /// 落点在 `agent_loop` 的每轮开始 —— 用户新消息进来就清空。
+    turn_grants: std::collections::HashSet<String>,
+    /// **本轮**从可用池移除的工具（skill 的 `disallowed-tools`）。
+    ///
+    /// 与 `turn_grants` 相反：这个是"本轮不许用"。清空时机相同。
+    turn_denials: std::collections::HashSet<String>,
     permission_rule_engine: PermissionRuleEngine,
     /// settings.json `permissions` 段里的 allow/ask/deny 规则
     settings_permissions: SettingsPermissions,
@@ -69,6 +85,8 @@ impl PolicyEngine {
             allow_hooks: config.allow_hooks.unwrap_or(true),
             approval_mode: config.approval_mode.unwrap_or(ApprovalMode::Default),
             session_allowances: std::collections::HashSet::new(),
+            turn_grants: std::collections::HashSet::new(),
+            turn_denials: std::collections::HashSet::new(),
             permission_rule_engine: PermissionRuleEngine::new(),
             settings_permissions: SettingsPermissions::default(),
             auto_classifier: None,
@@ -197,6 +215,44 @@ impl PolicyEngine {
 
     pub fn allow_tool_for_session(&mut self, tool_name: String) {
         self.session_allowances.insert(tool_name);
+    }
+
+    /// 应用一个 skill 的本轮工具策略（`allowed-tools` / `disallowed-tools`）。
+    ///
+    /// 只影响**本轮** —— 下一条用户消息进来时由 [`Self::clear_turn_grants`] 清掉。
+    ///
+    /// `allowed-tools` 是**免确认放行**，不是"限制可用工具集"（Claude Code
+    /// 语义）：不在名单里的工具仍然可用，只是照常走审批。
+    /// `disallowed-tools` 才是真的从可用池里移除。
+    pub fn apply_turn_tool_policy(&mut self, allowed: &[String], disallowed: &[String]) {
+        for tool in allowed {
+            let canonical =
+                crate::core::tools::constants::resolve_registered_tool_name(tool).to_string();
+            self.turn_grants.insert(canonical);
+        }
+        for tool in disallowed {
+            let canonical =
+                crate::core::tools::constants::resolve_registered_tool_name(tool).to_string();
+            self.turn_denials.insert(canonical);
+        }
+    }
+
+    /// 清空本轮的工具策略（下一条用户消息开始时调用）。
+    pub fn clear_turn_grants(&mut self) {
+        self.turn_grants.clear();
+        self.turn_denials.clear();
+    }
+
+    /// 本轮是否放行这个工具（skill 的 `allowed-tools`）。
+    pub fn is_turn_granted(&self, tool_name: &str) -> bool {
+        let canonical = crate::core::tools::constants::resolve_registered_tool_name(tool_name);
+        self.turn_grants.contains(canonical)
+    }
+
+    /// 本轮是否禁用这个工具（skill 的 `disallowed-tools`）。
+    pub fn is_turn_denied(&self, tool_name: &str) -> bool {
+        let canonical = crate::core::tools::constants::resolve_registered_tool_name(tool_name);
+        self.turn_denials.contains(canonical)
     }
 
     pub fn set_approval_mode(&mut self, mode: ApprovalMode) {
@@ -330,11 +386,14 @@ impl PolicyEngine {
     /// 判定顺序（对标 Claude Code）：
     ///
     /// 1. `deny` 规则 —— 连 yolo 和"本会话总是允许"都压不住，用户写 deny 就是要绝对拦住；
-    /// 2. 会话内的"总是允许"；
-    /// 3. 审批模式（yolo 全放 / plan 只放只读 / default 与 acceptEdits 放各自的只读集合）；
-    /// 4. `allow` 规则 —— 命中即免确认，这是 allow 存在的唯一意义；
-    /// 5. `ask` 规则 —— 命中则强制弹确认，哪怕默认是放行；
-    /// 6. 旧的 `PolicyRule` 列表，最后落到 `default_decision`。
+    /// 2. skill 的 `disallowed-tools`（本轮禁用）—— 用户显式禁的，比任何放行都强；
+    /// 3. 会话内的"总是允许"；
+    /// 4. skill 的 `allowed-tools`（本轮免确认）—— 比审批模式**弱**：
+    ///    它只免确认，不能覆盖用户写的 `ask` 规则（见 §5）；
+    /// 5. 审批模式（yolo 全放 / plan 只放只读 / default 与 acceptEdits 放各自的只读集合）；
+    /// 6. `allow` 规则 —— 命中即免确认，这是 allow 存在的唯一意义；
+    /// 7. `ask` 规则 —— 命中则强制弹确认，哪怕默认是放行；
+    /// 8. 旧的 `PolicyRule` 列表，最后落到 `default_decision`。
     pub async fn check(&self, tool_call: &FunctionCall, server_name: Option<&str>) -> CheckResult {
         let args = tool_call.args.clone().unwrap_or(serde_json::Value::Null);
         let settings_verdict = self.settings_permissions.evaluate(&tool_call.name, &args);
@@ -351,13 +410,48 @@ impl PolicyEngine {
             }
         }
 
-        // 2. 会话内已经点过"总是允许"
+        // 2. skill 的 `disallowed-tools`：本轮从可用池移除。
+        //
+        // 放在 session_allowances 之前 —— 「本轮不许用」比「本会话总是允许」
+        // 更具体、更当下。skill 说别用 AskUserQuestion，就不该因为上一轮
+        // 点过「总是允许」而继续弹。
+        if self.is_turn_denied(&tool_call.name) {
+            return CheckResult {
+                decision: PolicyDecision::DenyWithReason(format!(
+                    "tool `{}` is disabled for this turn by the active skill's disallowed-tools",
+                    tool_call.name
+                )),
+                rule: None,
+                explicit_rule: false,
+            };
+        }
+
+        // 3. 会话内已经点过"总是允许"
         if self.session_allowances.contains(&tool_call.name) {
             return CheckResult {
                 decision: PolicyDecision::Allow,
                 rule: None,
                 explicit_rule: false,
             };
+        }
+
+        // 4. skill 的 `allowed-tools`：本轮免确认。
+        //
+        // **放在审批模式之前，但不放���显式 `ask` 规则之前** —— 显式 `ask`
+        // 规则的语义是"每次都问我"，那比 skill 的免确认强（skill 是用户自己
+        // 写的，但它不能推翻用户在 settings.json 里写的 `ask`）。
+        if self.is_turn_granted(&tool_call.name) {
+            let asked_by_rule = [&settings_verdict, &legacy_verdict]
+                .into_iter()
+                .flatten()
+                .any(|(verdict, _)| *verdict == RuleVerdict::Ask);
+            if !asked_by_rule {
+                return CheckResult {
+                    decision: PolicyDecision::Allow,
+                    rule: None,
+                    explicit_rule: false,
+                };
+            }
         }
 
         // 3. 审批模式

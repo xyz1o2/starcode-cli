@@ -21,20 +21,102 @@ pub struct SkillArgument {
 }
 
 /// Full metadata parsed from SKILL.md frontmatter
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+///
+/// 字段语义对齐 Claude Code（<https://code.claude.com/docs/en/skills>），
+/// 尤其是两个正交的调用开关：
+///
+/// | frontmatter | 用户可调 | 模型可自动调 |
+/// |---|---|---|
+/// | （默认） | ✓ | ✓ |
+/// | `disable-model-invocation: true` | ✓ | ✗ |
+/// | `user-invocable: false` | ✗ | ✓ |
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillMetadata {
     pub name: String,
     pub description: String,
     pub when_to_use: Option<String>,
+    /// 本轮免确认放行的工具（调用 skill 的那一轮有效，下条消息即清）。
     pub allowed_tools: Vec<String>,
+    /// 本轮从可用池移除的工具。
+    pub disallowed_tools: Vec<String>,
     pub argument_hint: Option<String>,
     pub arguments: Vec<SkillArgument>,
     pub model: Option<String>,
     pub context: Option<String>,
     pub effort: Option<String>,
+    /// `context: fork` 时的子代理类型（默认 general-purpose）。
+    pub agent: Option<String>,
+    /// `context: fork` 时是否后台运行（默认 true）。
+    pub background: Option<bool>,
+    /// `!cmd` 块用的 shell（bash / powershell）。
+    pub shell: Option<String>,
     pub paths: Vec<String>,
     pub disabled: bool,
+    /// 模型不得自动调用这个 skill（用户仍可显式调用）。
+    pub disable_model_invocation: bool,
+    /// 用户不可显式调用（仅模型可用）。
+    pub user_invocable: bool,
     pub version: Option<String>,
+}
+
+impl SkillMetadata {
+    /// 这个 skill 是否允许模型自动调用。
+    ///
+    /// `disable-model-invocation: true` → 不得自动调用。
+    pub fn model_may_invoke(&self) -> bool {
+        !self.disable_model_invocation
+    }
+
+    /// 这个 skill 是否允许用户显式调用。
+    ///
+    /// `user-invocable: false` → 不可显式调用。默认 true。
+    pub fn user_may_invoke(&self) -> bool {
+        self.user_invocable
+    }
+
+    /// 是否跑在隔离子代理里（`context: fork`）。
+    pub fn is_forked(&self) -> bool {
+        self.context
+            .as_deref()
+            .map(|c| c.trim().eq_ignore_ascii_case("fork"))
+            .unwrap_or(false)
+    }
+
+    /// fork 是否后台运行（默认 true —— 与 Claude Code 一致）。
+    pub fn fork_in_background(&self) -> bool {
+        self.background.unwrap_or(true)
+    }
+}
+
+/// `SkillMetadata` 的默认值。
+///
+/// **手写而不是 derive** —— `user_invocable` 的默认必须是 `true`
+/// （Claude Code 语义：默认用户可调），而 `bool` 的 derive 默认是 `false`。
+/// 用 derive 的话，「没写 `user-invocable`」会被当成「用户不可调」，
+/// 把用户的 skill 全部藏起来 —— 那是**静默失效**，最难查。
+impl Default for SkillMetadata {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            when_to_use: None,
+            allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
+            argument_hint: None,
+            arguments: Vec::new(),
+            model: None,
+            context: None,
+            effort: None,
+            agent: None,
+            background: None,
+            shell: None,
+            paths: Vec::new(),
+            disabled: false,
+            disable_model_invocation: false,
+            user_invocable: true,
+            version: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,6 +309,7 @@ impl SkillLoader {
 
                     match key.as_str() {
                         "allowed-tools" | "allowed_tools" => meta.allowed_tools = items,
+                        "disallowed-tools" | "disallowed_tools" => meta.disallowed_tools = items,
                         "paths" => meta.paths = items,
                         "arguments" => {
                             // Parse structured arguments from collected items
@@ -255,11 +338,25 @@ impl SkillLoader {
                     "model" => meta.model = Some(cleaned),
                     "context" => meta.context = Some(cleaned),
                     "effort" => meta.effort = Some(cleaned),
+                    "agent" => meta.agent = Some(cleaned),
+                    "shell" => meta.shell = Some(cleaned),
+                    "background" => meta.background = Some(is_truthy(&cleaned)),
                     "disabled" => meta.disabled = is_truthy(&cleaned),
+                    // 调用闸门（Claude Code 语义）：默认两个都允许。
+                    "disable-model-invocation" | "disable_model_invocation" => {
+                        meta.disable_model_invocation = is_truthy(&cleaned)
+                    }
+                    "user-invocable" | "user_invocable" => {
+                        // 默认 true —— 只有显式写成假值才禁用。
+                        meta.user_invocable = !is_falsy(&cleaned);
+                    }
                     "version" => meta.version = Some(cleaned),
                     "allowed-tools" | "allowed_tools" => {
                         // Inline array like: allowed-tools: Bash, Read, Write
                         meta.allowed_tools = parse_inline_csv(&cleaned);
+                    }
+                    "disallowed-tools" | "disallowed_tools" => {
+                        meta.disallowed_tools = parse_inline_csv(&cleaned);
                     }
                     "paths" => {
                         meta.paths = parse_inline_csv(&cleaned);
@@ -478,6 +575,28 @@ fn parse_inline_csv(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// frontmatter 布尔值的真值判定。
+///
+/// Claude Code 的口径（<https://code.claude.com/docs/en/skills>）：
+/// "Boolean fields accept `yes`, `no`, `on`, `off`, `1`, and `0` in any letter
+/// case, in addition to `true` and `false`."
+///
+/// 所以真值 = `true` / `yes` / `on` / `1`（任意大小写）。
 fn is_truthy(value: &str) -> bool {
-    matches!(value.to_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    matches!(
+        value.trim().to_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// frontmatter 布尔值的假值判定（`is_truthy` 的反面）。
+///
+/// 单独一个函数而不是 `!is_truthy(...)`：**空值与无法识别的值不是"假"**。
+/// `user-invocable: `（写了 key 但没给值）应当按"没写"处理 —— 也就是
+/// 保持默认的 true，而不是当成 false 把用户的 skill 藏起来。
+fn is_falsy(value: &str) -> bool {
+    matches!(
+        value.trim().to_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
 }

@@ -115,6 +115,20 @@ impl MessageBus {
         policy_engine.check(tool_call, server_name).await
     }
 
+    /// 应用 skill 的本轮工具策略（`allowed-tools` / `disallowed-tools`）。
+    ///
+    /// 只到下一条用户消息为止 —— 由 [`Self::clear_turn_tool_policy`] 清掉。
+    pub async fn apply_turn_tool_policy(&self, allowed: &[String], disallowed: &[String]) {
+        let mut policy_engine = self.policy_engine.write().await;
+        policy_engine.apply_turn_tool_policy(allowed, disallowed);
+    }
+
+    /// 清空本轮的工具策略（下一条用户消息开始时调用）。
+    pub async fn clear_turn_tool_policy(&self) {
+        let mut policy_engine = self.policy_engine.write().await;
+        policy_engine.clear_turn_grants();
+    }
+
     /// 现在有没有人能够回答确认卡片。
     ///
     /// `-p` headless 没有 UI 订阅总线，策略层已经把 `AskUser` 翻成了 `Deny`；
