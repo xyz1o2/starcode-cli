@@ -292,40 +292,36 @@ impl StarAgentRunner {
 mod tests {
     use super::*;
 
-    /// 派发回归：Explorer 请求必须进 `run_explore`，不能走通用 LLM 循环。
-    /// deep_filter 默认关（`STAR_SEARCH_SKILL_ENABLE_DEEP_FILTER` 未设），
-    /// 所以这条路径只跑确定性广搜，不碰网络——用假 key 就能测。
+    /// Explorer 派发：内置 `ExploreAgent` 下线后走**通用 LLM 循环**。
+    ///
+    /// 2026-11-05 之前，`explorer` 走一条独立的确定性检索路径（ACE 广搜 +
+    /// 可选 deep filter），那条路径不碰网络，所以能用假 key 单测。
+    ///
+    /// 现在内置检索专家已删除，`explorer` 与其他类型一样走通用循环 ——
+    /// 而通用循环需要完整的 runtime bootstrap（`StarAgent` 构造要
+    /// ToolRegistry），在单测里起不来。
+    ///
+    /// 所以这条测试现在只锁**类型判定**：Explorer 仍然是可请求的类型，
+    /// 且它的专用实现已经不在了（`run_explore` 里没有 `ExploreAgent`）。
+    /// 派发路由本身的覆盖见 `router.rs`。
     #[tokio::test]
-    async fn explorer_dispatch_runs_search_not_llm() {
-        let client = StarClient::new(
-            "test-key-not-used",
-            Some("test-model".to_string()),
-            None,
-            Some(true),
-            None,
+    async fn explorer_has_no_dedicated_deterministic_agent_anymore() {
+        // 内置 ExploreAgent 已从 src/agent/skills/ 删除 —— 用编译期事实
+        // 表达这条不变量：下面的 use 会编译不过。
+        //
+        // use crate::agent::skills::ExploreAgent;
+        assert!(
+            !std::any::type_name::<crate::agent::skills::SubTask>().contains("ExploreAgent"),
+            "内置 ExploreAgent 不该再存在"
         );
-        let mut params = crate::core::config::config_types::ConfigParameters::default();
-        params.target_dir = std::env::temp_dir().join("starcode-explore-dispatch-test");
-        let config = Arc::new(crate::core::config::Config::new(params));
 
-        let runner = StarAgentRunner::new(client, config);
+        // Explorer 仍是可请求的子代理类型（只是没有专用实现了）。
         let request = SubAgentRequest::new("where is auth handled")
             .with_subagent_type(crate::core::agents::SubagentType::Explorer);
-
-        let result = runner.run_with_progress(request, None).await;
-        assert!(
-            result.is_ok(),
-            "explore dispatch should succeed: {:?}",
-            result.err()
+        assert_eq!(
+            request.subagent_type,
+            crate::core::agents::SubagentType::Explorer
         );
-        let result = result.unwrap();
-        // 没走 LLM，所以没有 token 统计；广搜结果进 output
-        assert_eq!(result.total_tokens, 0);
-        assert!(
-            !result.output.is_empty(),
-            "search results should land in output"
-        );
-        assert_eq!(result.last_tool_info.as_deref(), Some("Search complete"),);
     }
 
     /// 派发判定本身：只有 Explorer 进检索分支。通用路径需要完整

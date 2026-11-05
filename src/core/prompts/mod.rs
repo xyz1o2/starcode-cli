@@ -8,7 +8,6 @@ pub mod prompt_cache;
 pub mod reminders;
 pub mod routing_matrix;
 pub mod security_policy;
-pub mod skills;
 pub mod summary;
 pub mod system_prompt_type;
 pub mod task_agent_usage;
