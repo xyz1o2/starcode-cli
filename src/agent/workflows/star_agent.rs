@@ -1038,6 +1038,23 @@ impl StarAgent {
     pub async fn initialize_mcp(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if let Some(manager) = self.inner.runtime_mcp_manager() {
             manager.initialize_mcp_servers().await?;
+            // 插件带来的 MCP server —— 必须在 `discover_all()` **之前**注册，
+            // 否则它们的工具不会进 registry，`ToolSearch` 搜不到。
+            //
+            // 现场（用户报告）：`/plugin` 装了 exa，`ToolSearch` 也搜到了
+            // 「exa web search」，但真正调用时模型挑的是别的 MCP server
+            // （`mcp__chrome-devtools__navigate_page`）—— exa 的工具
+            // 压根没进 registry。
+            //
+            // 根因：`discover_plugin_mcp_servers()`（读插件 manifest 的
+            // `mcpServers`）与 `initialize_plugin_mcp_servers()`（把解析结果
+            // 注册进 manager）**各自都写好了，但都没有调用者**。插件的
+            // MCP server 从来没接进运行时。
+            //
+            // 这与 Claude Code 的同类缺陷一致（issue #86154：
+            // "claude mcp list reports Connected, but ToolSearch finds no
+            // mcp__* tools"）。
+            self.load_plugin_mcp_servers(manager.as_ref()).await;
             let errs = manager.discover_all().await;
             self.inner.refresh_mcp_tools().await;
             self.is_mcp_initialized.store(true, Ordering::SeqCst);
@@ -1074,6 +1091,37 @@ impl StarAgent {
             }
         } else {
             Err("MCP initialization failed".into())
+        }
+    }
+
+    /// 把**插件**声明的 MCP server 注册进 manager。
+    ///
+    /// 插件的 MCP 配置来自插件自己的 manifest（`.star-plugin/plugin.json`
+    /// 等）的 `mcpServers` 字段 —— 与 `.mcp.json` / `.star/mcp.json` 是
+    /// **不同的来源**，运行时以前只读后者，所以插件的 server 永远进不来。
+    ///
+    /// 失败不中断整个初始化：插件的 MCP 配错了不该让其它 server 也起不来。
+    async fn load_plugin_mcp_servers(&self, manager: &crate::core::mcp::MCPManager) {
+        let project_root = self.inner.config.target_dir().clone();
+        let servers = match crate::core::plugins::discover_plugin_mcp_servers(&project_root).await {
+            Ok(servers) => servers,
+            Err(error) => {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[MCP] plugin MCP discovery failed: {error}"
+                ));
+                return;
+            }
+        };
+        if servers.is_empty() {
+            return;
+        }
+        match manager.initialize_plugin_mcp_servers(servers).await {
+            Ok(()) => crate::utils::logging::append_debug_log_line(
+                "[MCP] plugin MCP servers registered",
+            ),
+            Err(error) => crate::utils::logging::append_debug_log_line(&format!(
+                "[MCP] failed to register plugin MCP servers: {error}"
+            )),
         }
     }
 
