@@ -4,6 +4,7 @@
 pub mod agent_tool;
 pub mod ask_user_question;
 pub mod background_task;
+pub mod bash_tasks;
 pub mod brief;
 pub mod code_graph_tool;
 pub mod codebase_search;

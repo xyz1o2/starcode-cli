@@ -160,6 +160,11 @@ fn register_agent_execution_tools(
     use crate::core::tools::background_task::BackgroundTaskTool;
     tool_registry.register_tool(Arc::new(BackgroundTaskTool::new(config.clone())));
 
+    // ── Bash background-task governance（对标 CC 的 TaskOutput / KillShell）──
+    use crate::core::tools::bash_tasks::{BashTaskOutputTool, KillShellTool};
+    tool_registry.register_tool(Arc::new(BashTaskOutputTool::new()));
+    tool_registry.register_tool(Arc::new(KillShellTool::new()));
+
     use crate::core::tools::cron::{CronCreateTool, CronDeleteTool, CronListTool};
     tool_registry.register_tool(Arc::new(CronCreateTool::new(config.clone())));
     tool_registry.register_tool(Arc::new(CronListTool::new(config.clone())));

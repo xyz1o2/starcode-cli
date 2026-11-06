@@ -221,6 +221,12 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     "TaskGet",
     "GetDiagnostics",
     "RunTests",
+    // Background bash governance: the shortlist must contain the pair that
+    // takes care of tasks moved to the background (CC keeps TaskOutput/KillShell
+    // always visible, otherwise the model has no entry point to poll/stop them).
+    // 本仓库的 `TaskOutput` 名字已被 task_management 占用，取 BashTaskOutput。
+    "BashTaskOutput",
+    "KillShell",
     // Discovery of long-tail tools (git/web/team/cron...) — always visible
     // so the agent can find any tool it doesn't know about by name.
     "ToolSearch",

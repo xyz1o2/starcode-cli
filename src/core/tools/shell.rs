@@ -59,6 +59,10 @@ pub struct ShellToolParams {
     /// Disable sandbox for this command execution (auto-set when retrying after sandbox restriction)
     #[serde(default)]
     pub dangerously_disable_sandbox: bool,
+    /// Run the command in the background: return a task id immediately
+    /// (对标 Claude Code Bash 的 run_in_background).
+    #[serde(default)]
+    pub run_in_background: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -530,6 +534,10 @@ impl BaseDeclarativeTool for ShellTool {
                 "dir_path": {
                     "type": "string",
                     "description": "Optional directory to run the command in."
+                },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "Set to true to run this command in the background. The tool result returns a task id (bash-xxxxxxxx); poll progress with TaskOutput and stop it with KillShell."
                 }
             },
             "required": ["command"]
@@ -992,6 +1000,10 @@ impl ToolInvocation for ShellToolInvocation {
 
             cmd.current_dir(&cwd);
             cmd.kill_on_drop(true);
+            // Unix 下让每条命令独立成组：超时转后台 / KillShell 时可以整组发信
+            // 号（pgid == child pid），命令自己起的子进程一起收掉。
+            #[cfg(unix)]
+            cmd.process_group(0);
             Self::apply_non_interactive_env(&mut cmd);
             cmd.stdin(Stdio::null());
             cmd.stdout(Stdio::piped());
@@ -1015,6 +1027,11 @@ impl ToolInvocation for ShellToolInvocation {
 
             let stdout = child.stdout.take().expect("Failed to open stdout");
             let stderr = child.stderr.take().expect("Failed to open stderr");
+
+            // child 从一开始就住进共享槽：前台循环与超时后的后台治理
+            // （bash_tasks watcher）共用同一个 `Option<Child>`。
+            let child_slot: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>> =
+                Arc::new(tokio::sync::Mutex::new(Some(child)));
 
             let mut stdout_output = String::new();
             let mut stderr_output = String::new();
@@ -1051,6 +1068,43 @@ impl ToolInvocation for ShellToolInvocation {
 
             drop(tx);
 
+            // 接收端包上共享锁：run_in_background / 超时转后台时把同一接收端
+            // 移交给 bash_tasks watcher，主循环在那之前与它竞争读取。
+            let rx: crate::core::tools::bash_tasks::SharedRx =
+                Arc::new(tokio::sync::Mutex::new(rx));
+
+            // 对标 CC 的 run_in_background：立即返回任务 id，进程继续跑。
+            if params.run_in_background.unwrap_or(false) {
+                let child = child_slot
+                    .lock()
+                    .await
+                    .take()
+                    .expect("foreground owns child in slot");
+                let handle = crate::core::tools::bash_tasks::attach_new(
+                    &config,
+                    original_command.clone(),
+                    params.description.clone(),
+                    cwd.clone(),
+                    child,
+                    rx.clone(),
+                    String::new(),
+                    String::new(),
+                );
+                let msg = format!(
+                    "Command running in background (task id: {}). Full output will be written to {}. Poll progress with TaskOutput (task_id: '{}') and stop it with KillShell.",
+                    handle.id,
+                    handle.output_path.display(),
+                    handle.id
+                );
+                return Ok(ToolResult {
+                    llm_content: Some(msg.clone()),
+                    return_display: Some(format!("Background task {}", handle.id)),
+                    output: msg,
+                    error: None,
+                    data: Some(serde_json::json!({ "task_id": handle.id })),
+                });
+            }
+
             let shell_timeout_secs = std::env::var("STAR_SHELL_TIMEOUT")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
@@ -1069,7 +1123,7 @@ impl ToolInvocation for ShellToolInvocation {
 
             loop {
                 tokio::select! {
-                    chunk = rx.recv(), if !output_channel_closed => {
+                    chunk = async { rx.lock().await.recv().await }, if !output_channel_closed => {
                         match chunk {
                             Some((is_stdout, s)) => {
                                 last_output_at = Instant::now();
@@ -1091,8 +1145,10 @@ impl ToolInvocation for ShellToolInvocation {
                     _ = poll.tick() => {
                         if let Some(signal) = &signal {
                             if signal.is_cancelled() {
-                                let _ = child.kill().await;
-                                let _ = child.wait().await;
+                                if let Some(c) = child_slot.lock().await.as_mut() {
+                                    let _ = c.kill().await;
+                                    let _ = c.wait().await;
+                                }
                                 return Ok(ToolResult {
                                     llm_content: Some("Command was cancelled by user.".to_string()),
                                     return_display: Some("Command cancelled by user.".to_string()),
@@ -1104,29 +1160,46 @@ impl ToolInvocation for ShellToolInvocation {
                         }
 
                         if status.is_none() {
-                            status = child.try_wait()?;
+                            status = child_slot
+                                .lock()
+                                .await
+                                .as_mut()
+                                .expect("foreground owns child in slot")
+                                .try_wait()?;
                         }
 
                         if shell_timeout_secs > 0
                             && started_at.elapsed() >= Duration::from_secs(shell_timeout_secs)
                             && status.is_none()
                         {
-                            let _ = child.kill().await;
-                            let _ = child.wait().await;
+                            // 对标 CC：总时长超时不杀进程，转后台让出主线程，
+                            // 由 bash_tasks watcher 继续治理并回报完成通知。
+                            let handle = crate::core::tools::bash_tasks::attach_running(
+                                &config,
+                                original_command.clone(),
+                                params.description.clone(),
+                                cwd.clone(),
+                                child_slot.clone(),
+                                rx.clone(),
+                                stdout_output.clone(),
+                                stderr_output.clone(),
+                            );
+                            let msg = format!(
+                                "Command timed out after {}s and was moved to the background instead of being killed.\nTask id: {}\nFull output file: {}\nIt keeps running and will report back when done; poll with TaskOutput (task_id: '{}'), stop it with KillShell.",
+                                shell_timeout_secs,
+                                handle.id,
+                                handle.output_path.display(),
+                                handle.id
+                            );
                             return Ok(ToolResult {
-                                llm_content: Some(format!(
-                                    "Command timed out after {}s: {}\nPartial stdout: {}\nPartial stderr: {}",
-                                    shell_timeout_secs, original_command,
-                                    if stdout_output.is_empty() { "(empty)" } else { &stdout_output },
-                                    if stderr_output.is_empty() { "(none)" } else { &stderr_output },
+                                llm_content: Some(msg.clone()),
+                                return_display: Some(format!(
+                                    "Moved to background after {}s timeout",
+                                    shell_timeout_secs
                                 )),
-                                return_display: Some(format!("Command timed out after {}s", shell_timeout_secs)),
-                                output: format!("Command timed out after {}s.\nPartial output: {}", shell_timeout_secs, stdout_output),
-                                error: Some(crate::core::tools::ToolError {
-                                    error_type: "timeout".to_string(),
-                                    message: format!("Command timed out after {}s", shell_timeout_secs),
-                                }),
-                                data: None,
+                                output: msg,
+                                error: None,
+                                data: Some(serde_json::json!({ "task_id": handle.id })),
                             });
                         }
 
@@ -1134,8 +1207,10 @@ impl ToolInvocation for ShellToolInvocation {
                             && last_output_at.elapsed() >= Duration::from_millis(inactivity_timeout_ms)
                             && status.is_none()
                         {
-                            let _ = child.kill().await;
-                            let _ = child.wait().await;
+                            if let Some(c) = child_slot.lock().await.as_mut() {
+                                let _ = c.kill().await;
+                                let _ = c.wait().await;
+                            }
                             return Ok(ToolResult {
                                 llm_content: Some(format!(
                                     "Command inactive for {}ms and was terminated: {}\nPartial stdout: {}\nPartial stderr: {}",
@@ -1163,7 +1238,23 @@ impl ToolInvocation for ShellToolInvocation {
             let status = if let Some(status) = status {
                 status
             } else {
-                child.wait().await?
+                let mut slot_guard = child_slot.lock().await;
+                let Some(c) = slot_guard.as_mut() else {
+                    return Ok(ToolResult {
+                        llm_content: Some(
+                            "Command state lost (already moved or stopped).".to_string(),
+                        ),
+                        return_display: None,
+                        output: String::new(),
+                        error: Some(crate::core::tools::tools::ToolError {
+                            error_type: "internal".to_string(),
+                            message: "shell child is no longer owned by the foreground loop"
+                                .to_string(),
+                        }),
+                        data: None,
+                    });
+                };
+                c.wait().await?
             };
 
             Ok(Self::format_command_result(

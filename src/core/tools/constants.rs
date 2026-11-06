@@ -66,6 +66,11 @@ pub enum ToolName {
     TaskList,
     TaskUpdate,
     TaskOutput,
+    /// 后台 bash 治理（对标 CC 的 TaskOutput；本仓库 TaskOutput 已被任务
+    /// 系统占用，改名避开）。配套 `KillShell`。
+    BashTaskOutput,
+    /// 停掉一个后台 bash 任务（对标 CC 的 TaskStop/KillShell）。
+    KillShell,
 
     // 调度
     Wait,
@@ -161,6 +166,8 @@ impl ToolName {
             ToolName::TaskList => "TaskList",
             ToolName::TaskUpdate => "TaskUpdate",
             ToolName::TaskOutput => "TaskOutput",
+            ToolName::BashTaskOutput => "BashTaskOutput",
+            ToolName::KillShell => "KillShell",
 
             // 调度
             ToolName::Wait => "Wait",
@@ -246,6 +253,8 @@ impl ToolName {
             "TaskList" => Some(ToolName::TaskList),
             "TaskUpdate" => Some(ToolName::TaskUpdate),
             "TaskOutput" => Some(ToolName::TaskOutput),
+            "BashTaskOutput" => Some(ToolName::BashTaskOutput),
+            "KillShell" => Some(ToolName::KillShell),
             "Wait" => Some(ToolName::Wait),
             "CronCreate" => Some(ToolName::CronCreate),
             "CronList" => Some(ToolName::CronList),
@@ -329,6 +338,8 @@ impl ToolName {
             ToolName::TaskList,
             ToolName::TaskUpdate,
             ToolName::TaskOutput,
+            ToolName::BashTaskOutput,
+            ToolName::KillShell,
             // 调度
             ToolName::Wait,
             ToolName::CronCreate,
@@ -382,6 +393,7 @@ impl ToolName {
                 | ToolName::ToolSearch
                 | ToolName::TaskGet
                 | ToolName::TaskList
+                | ToolName::BashTaskOutput
                 | ToolName::Monitor
                 | ToolName::Brief
                 | ToolName::Memory
@@ -456,6 +468,8 @@ impl ToolName {
             | ToolName::TaskList
             | ToolName::TaskUpdate
             | ToolName::TaskOutput
+            | ToolName::BashTaskOutput
+            | ToolName::KillShell
             | ToolName::SendMessage
             | ToolName::Brief => "Agents & tasks",
             // 模式切换
