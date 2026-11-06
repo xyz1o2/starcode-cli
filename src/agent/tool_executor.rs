@@ -859,13 +859,53 @@ impl ToolExecutor {
                     .into(),
             );
         }
-        let mut args: Value =
-            serde_json::from_str(&tool_call.function.arguments).unwrap_or(Value::Null);
-        // LLM may send null or empty arguments; convert to empty object so
-        // deserialization into tool params structs doesn't fail.
-        if args.is_null() {
-            args = Value::Object(serde_json::Map::new());
-        }
+        // 参数必须先通过 JSON 合法性这道门，**不允许**静默兜底。
+        //
+        // 之前是 `unwrap_or(Null)` → 兜成 `{}` → 照样执行。流断断续续时
+        // （idle timeout / 网络断 / provider 半途断流），tool arguments 常常是
+        // 非空的半截 JSON —— 它能走进来，然后在参数反序列化处报一条
+        // "missing field file_path"，模型看不出真正原因是"流中断、参数被截"，
+        // 于是对着一个不存在的语义问题乱猜、重试同一个调用。
+        //
+        // 现在的语义：
+        // - 空串/空白 → `{}`（无参工具的合法形态，各家 provider 都这么发）
+        // - `null` / 字面量 `"null"` → `{}`（LLM 偶发）
+        // - 非空但解析失败 / 解出来不是对象 → 直接报错，指明"参数不完整且
+        //   未执行"，这和流式执行器 `streaming_executor::is_call_complete`
+        //   对残缺调用的判定（不进执行队列）是同一个闸门的两面。
+        let raw_args = tool_call.function.arguments.trim();
+        let mut args: Value = if raw_args.is_empty() {
+            Value::Object(serde_json::Map::new())
+        } else {
+            match serde_json::from_str::<Value>(raw_args) {
+                Ok(value @ Value::Object(_)) => value,
+                Ok(Value::Null) => Value::Object(serde_json::Map::new()),
+                Ok(_) | Err(_) => {
+                    let preview: String = raw_args.chars().take(120).collect();
+                    crate::utils::logging::append_debug_log_line(&format!(
+                        "[TOOL_ARGS] refusing to execute `{}`: arguments are not valid JSON \
+                         ({} bytes) — likely a truncated/interrupted stream. preview: {}",
+                        tool_call.function.name,
+                        raw_args.len(),
+                        preview
+                    ));
+                    return ToolResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!(
+                            "Tool `{}` was not executed: its arguments could not be parsed as \
+                             JSON ({} bytes). The tool call was most likely truncated by an \
+                             interrupted stream. Do not retry the same call — re-emit the full \
+                             tool call with complete arguments.",
+                            tool_call.function.name,
+                            raw_args.len()
+                        )),
+                        data: None,
+                        llm_content: None,
+                    };
+                }
+            }
+        };
         // 部分 OpenAI-compatible 提供方把整段 arguments 再套一层 JSON 字符串
         // （`"arguments": "{\"todos\": […]}"`）。第一层 from_str 会把它解成
         // `Value::String`，原样下发的话每个工具都收到一个字符串，报

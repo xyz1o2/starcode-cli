@@ -25,9 +25,14 @@ pub(super) fn handle_tool_result_message(
             }
         }
     }
-    if crate::core::tools::constants::resolve_registered_tool_name(&tool_call.function.name)
-        == "TodoWrite"
-    {
+    // 任务面板即时刷新：覆盖任务文件的**全部写者**。此前只有 TodoWrite 命中，
+    // 模型改用 TaskUpdate 逐项推进状态时（长清单的常见路线），面板要等事件循环
+    // 1Hz 节拍的 mtime 自愈才追上磁盘 —— 用户看到的就是「todo 经常更新不及时」。
+    // 只列写者（TodoWrite/TaskUpdate）；TaskList/TaskGet 是只读，不影响面板数据。
+    if matches!(
+        crate::core::tools::constants::resolve_registered_tool_name(&tool_call.function.name),
+        "TodoWrite" | "TaskUpdate"
+    ) {
         state.task_panel.reload();
         state.task_panel.mark_modified();
         if !state.task_panel.is_visible && !state.task_panel.manually_hidden {
