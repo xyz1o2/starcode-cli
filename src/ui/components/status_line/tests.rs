@@ -209,7 +209,6 @@ fn cache_telemetry_shows_raw_counts_and_a_cross_provider_hit_rate() {
 
 /// OpenAI 语义：`prompt_tokens` 已含缓存命中，命中率就是 cached / prompt。
 #[test]
-#[test]
 fn cache_hit_rate_uses_input_side_denominator_for_openai_semantics() {
     let usage = crate::types::StarUsage {
         prompt_tokens: 10_000,
@@ -230,7 +229,6 @@ fn cache_hit_rate_uses_input_side_denominator_for_openai_semantics() {
 /// Anthropic 语义：`input_tokens` 不含缓存读，输入侧总量是
 /// `total - completion`，绝不能拿 `prompt_tokens` 当分母（会算出 >100%）。
 #[test]
-#[test]
 fn cache_hit_rate_does_not_exceed_100_for_anthropic_semantics() {
     let usage = crate::types::StarUsage {
         prompt_tokens: 1_000,
@@ -249,7 +247,6 @@ fn cache_hit_rate_does_not_exceed_100_for_anthropic_semantics() {
 }
 
 /// provider 没上报缓存遥测时不该编一个命中率出来。
-#[test]
 #[test]
 fn cache_hit_rate_is_none_without_reported_telemetry() {
     let usage = crate::types::StarUsage {

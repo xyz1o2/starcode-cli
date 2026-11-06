@@ -72,7 +72,7 @@ pub struct SettingsChangeEvent {
 /// 设置缓存
 ///
 /// 对标claude-code-main的settingsCache.ts
-pub struct SettingsCache {
+pub(crate) struct SettingsCache {
     /// 缓存的设置
     cache: HashMap<String, CachedSettings>,
     /// 缓存TTL（秒）
@@ -81,7 +81,7 @@ pub struct SettingsCache {
 
 /// 缓存的设置
 #[derive(Debug, Clone)]
-struct CachedSettings {
+pub(crate) struct CachedSettings {
     /// 设置数据
     data: serde_json::Value,
     /// 缓存时间
@@ -92,7 +92,7 @@ struct CachedSettings {
 
 impl SettingsCache {
     /// 创建新的设置缓存
-    pub fn new(ttl_secs: u64) -> Self {
+    pub(crate) fn new(ttl_secs: u64) -> Self {
         Self {
             cache: HashMap::new(),
             ttl_secs,
@@ -100,7 +100,7 @@ impl SettingsCache {
     }
 
     /// 获取缓存的设置
-    pub fn get(&self, key: &str) -> Option<&CachedSettings> {
+    pub(crate) fn get(&self, key: &str) -> Option<&CachedSettings> {
         self.cache.get(key).and_then(|cached| {
             let now = chrono::Utc::now().timestamp();
             if now - cached.cached_at < self.ttl_secs as i64 {
@@ -112,7 +112,7 @@ impl SettingsCache {
     }
 
     /// 设置缓存
-    pub fn set(&mut self, key: String, data: serde_json::Value, source: SettingSource) {
+    pub(crate) fn set(&mut self, key: String, data: serde_json::Value, source: SettingSource) {
         let cached = CachedSettings {
             data,
             cached_at: chrono::Utc::now().timestamp(),
@@ -122,12 +122,12 @@ impl SettingsCache {
     }
 
     /// 清除缓存
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.cache.clear();
     }
 
     /// 清除过期缓存
-    pub fn clear_expired(&mut self) {
+    pub(crate) fn clear_expired(&mut self) {
         let now = chrono::Utc::now().timestamp();
         self.cache
             .retain(|_, cached| now - cached.cached_at < self.ttl_secs as i64);
