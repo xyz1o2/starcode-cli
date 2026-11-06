@@ -723,4 +723,54 @@ mod tests {
         assert_eq!(a.status, GraphTaskStatus::InProgress);
         assert!(a.completed_at.is_none(), "重开的项目必须清掉完成时间戳");
     }
+
+    /// 真实落盘回环：参数 → 图 → save_to_file → load_from_file → 面板可见状态。
+    ///
+    /// 此前的测试全部在内存里进行，save/load 之间隔着 `repair_task_graph` 与
+    /// JSON 序列化 —— 磁盘格式一旦和内存形状漂移（字段改名、枚举序列化方式
+    /// 变化），只有真实用户重新打开会话时才会撞上。这条测试把全流程走一遍：
+    /// 三种状态、顺序、active_form 都必须毫发无损地过一遍磁盘。
+    #[test]
+    fn todo_write_survives_a_real_disk_round_trip() {
+        let params = parse_todo_write_params(&json!({
+            "todos": [
+                { "content": "写入", "status": "completed", "activeForm": "写入中" },
+                { "content": "校验", "status": "in_progress", "activeForm": "校验中" },
+                { "content": "收尾", "status": "pending", "activeForm": "收尾中" },
+            ]
+        }))
+        .unwrap();
+        let mut manager = TaskManager::new();
+        manager.graph = next_todo_graph(&params.todos, &TaskGraph::new());
+
+        let path = std::env::temp_dir().join(format!(
+            "star_todo_roundtrip_{}_{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("时钟正常")
+                .as_nanos()
+        ));
+        manager.save_to_file(&path).expect("落盘成功");
+        let reloaded = TaskManager::load_from_file(&path).expect("重载成功");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(reloaded.graph.root_ids.len(), 3, "三条都应保留");
+        assert_eq!(reloaded.graph.root_ids.len(), reloaded.graph.nodes.len());
+        let by_title = |t: &str| {
+            reloaded
+                .graph
+                .nodes
+                .values()
+                .find(|n| n.title == t)
+                .unwrap_or_else(|| panic!("重载后应存在节点 {t}"))
+        };
+        let done = by_title("写入");
+        assert_eq!(done.status, GraphTaskStatus::Completed);
+        assert!(done.completed_at.is_some(), "完成时间戳应随磁盘保留");
+        assert_eq!(done.active_form.as_deref(), Some("写入中"));
+        assert_eq!(by_title("校验").status, GraphTaskStatus::InProgress);
+        assert_eq!(by_title("校验").active_form.as_deref(), Some("校验中"));
+        assert_eq!(by_title("收尾").status, GraphTaskStatus::Pending);
+    }
 }
