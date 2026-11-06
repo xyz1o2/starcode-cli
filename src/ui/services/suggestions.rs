@@ -328,12 +328,10 @@ fn accept_mention_hint(state: &mut ChatState) {
             state.show_mention_hints = false;
             state.mention_hints.clear();
         }
-    } else {
-        // 裸路径补全（无 @ 前缀）
-        let trimmed = display.trim_end_matches('/').to_string();
-        state.input = trimmed;
-        state.input.push(' ');
-        update_textarea_from_input(state);
+    }
+    // 没有 @ token 时提示不可能打开（refresh_mention_hints 只认 @ token），
+    // 到这里就是外部直接改了状态，稳妥收场即可。
+    else {
         state.show_mention_hints = false;
         state.mention_hints.clear();
     }
@@ -357,36 +355,75 @@ fn refresh_mention_hints(state: &mut ChatState) {
         return;
     }
 
-    let token_start = state
-        .input
-        .rfind(char::is_whitespace)
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let token = state.input.get(token_start..).unwrap_or("");
-    let t = token.trim();
-
-    // 修复：避免将以 / 开头的命令（位于输入开头）误判为文件路径
-    // 如果 token 位于开头且以 / 起始，优先视为命令
-    let is_command_candidate = token_start == 0 && t.starts_with('/');
-
-    // 优化：仅在明确可能是文件路径时触发（包含路径分隔符或以.开头）
-    if !t.is_empty()
-        && !is_command_candidate
-        && (t.contains('/') || t.contains('\\') || t.starts_with('.'))
-    {
-        let hints = crate::ui::services::file_search::search_files(t);
-        if hints.is_empty() {
-            state.show_mention_hints = false;
-            state.mention_hints.clear();
-        } else {
-            state.show_mention_hints = true;
-            state.mention_hints = hints;
-            state.selected_mention_hint = 0;
-            state.show_command_hints = false;
-        }
-        return;
-    }
-
+    // 走到这里说明没有活跃的 @ token：不再让「末尾 token 恰好含 / 或以 . 开头」
+    // 触发目录弹窗 —— 之前裸 token 回退会在任意段落的词中间敲一个 `/`（甚至就是
+    // 裸 `/`）时把当前词当路径去 search_files，裸 `/` 更是列出文件系统根目录的
+    // 子项，表现为「打到一半突然吐出一个目录列表」。Claude Code 也只有 @ 触发。
     state.show_mention_hints = false;
     state.mention_hints.clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::state::ChatState;
+
+    /// 回归：任意段落中的裸 `/` 不得再弹出目录列表。
+    ///
+    /// 之前 `refresh_mention_hints` 的裸 token 回退会把末尾含 `/` 的词送进
+    /// `search_files`，裸 `/` 经 `search_children` 列出的是文件系统根目录。
+    #[test]
+    fn mid_text_slash_does_not_open_mention_hints() {
+        let mut state = ChatState::new();
+        for input in ["用 /mode 切换模式", "mkdir dir/sub /", "路径 a /", "/"] {
+            state.input = input.to_string();
+            on_input_changed(&mut state);
+            assert!(
+                !state.show_mention_hints,
+                "输入 {input:?} 不该弹目录提示，实际弹出了 {:?}",
+                state.mention_hints
+            );
+        }
+    }
+
+    /// `@` 仍然在任意段落可用。
+    #[test]
+    fn at_token_mid_paragraph_still_opens() {
+        let mut state = ChatState::new();
+        state.input = "看看 @Cargo".to_string();
+        on_input_changed(&mut state);
+        assert!(state.show_mention_hints, "段落中的 @ 要能打开提示");
+        assert!(
+            state.mention_hints.iter().any(|h| h.contains("Cargo.toml")),
+            "应命中 Cargo.toml，实际 {:?}",
+            state.mention_hints
+        );
+    }
+
+    /// 目录下钻：`@dir/` 列出该目录的直接子项。
+    #[test]
+    fn at_dir_drills_into_children() {
+        let mut state = ChatState::new();
+        state.input = "见 @src/".to_string();
+        on_input_changed(&mut state);
+        assert!(
+            state.show_mention_hints && !state.mention_hints.is_empty(),
+            "@src/ 应列出子项"
+        );
+        assert!(
+            state.mention_hints.iter().all(|h| h.starts_with("src/")),
+            "子项都应带 src/ 前缀，实际 {:?}",
+            state.mention_hints
+        );
+    }
+
+    /// 输入开头的 `/` 命令提示不受影响。
+    #[test]
+    fn leading_slash_still_shows_command_hints() {
+        let mut state = ChatState::new();
+        state.input = "/he".to_string();
+        on_input_changed(&mut state);
+        assert!(state.show_command_hints, "开头的 / 要出命令提示");
+        assert!(!state.show_mention_hints);
+    }
 }
