@@ -1076,6 +1076,10 @@ impl StarAgent {
         }
 
         if let Some(manager) = &self.fallback_mcp_manager {
+            // 插件 MCP server 同样必须在 `discover_all()` 之前注册。
+            // 以前只有上面的 runtime manager 分支做了这一步，走 fallback 的
+            // 会话里插件的工具不存在 —— 与 `ecf28da` 修掉的主路径故障同型。
+            self.load_plugin_mcp_servers(manager.as_ref()).await;
             let errs = manager.discover_all().await;
             self.is_mcp_initialized.store(true, Ordering::SeqCst);
             self.inner.refresh_mcp_tools().await;
@@ -1119,9 +1123,14 @@ impl StarAgent {
             Ok(()) => {
                 crate::utils::logging::append_debug_log_line("[MCP] plugin MCP servers registered")
             }
-            Err(error) => crate::utils::logging::append_debug_log_line(&format!(
-                "[MCP] failed to register plugin MCP servers: {error}"
-            )),
+            // 除 debug 日志外升级为 warn：这是一条用户可感知的功能缺口
+            // （"/plugin 显示已装但调不着"），只留在 debug 日志里排障成本太高。
+            Err(error) => {
+                log::warn!("failed to register plugin MCP servers: {error}");
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[MCP] failed to register plugin MCP servers: {error}"
+                ));
+            }
         }
     }
 

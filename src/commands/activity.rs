@@ -65,7 +65,7 @@ impl ActivityScan {
         let mut counts = BTreeMap::new();
         for call in &self.tool_calls {
             if let Some((server, _tool)) = split_mcp_tool(&call.tool) {
-                *counts.entry(server.to_string()).or_insert(0) += 1;
+                *counts.entry(server).or_insert(0) += 1;
             }
         }
         counts
@@ -141,14 +141,10 @@ fn normalize_skill_name(raw: &str) -> String {
     trimmed.to_string()
 }
 
-pub fn split_mcp_tool(name: &str) -> Option<(&str, &str)> {
-    let rest = name.strip_prefix("mcp__")?;
-    let (server, tool) = rest.split_once("__")?;
-    if server.is_empty() || tool.is_empty() {
-        None
-    } else {
-        Some((server, tool))
-    }
+pub fn split_mcp_tool(name: &str) -> Option<(String, String)> {
+    // 委托给 `core::mcp` 的唯一拆名入口：带插件 server 的冒号还原，
+    // 以前这里各自手写 split，拆出的 `plugin_exa_exa` 与注册键对不上。
+    crate::core::mcp::split_mcp_tool_name(name)
 }
 
 pub fn leading_slash_command(content: &str) -> Option<String> {
@@ -610,7 +606,7 @@ mod tests {
         assert_eq!(scan.tool_calls.len(), 1);
         assert_eq!(
             split_mcp_tool(&scan.tool_calls[0].tool),
-            Some(("exa", "search"))
+            Some(("exa".to_string(), "search".to_string()))
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -620,7 +616,7 @@ mod tests {
     fn mcp_and_skill_helpers_ignore_incomplete_names() {
         assert_eq!(
             split_mcp_tool("mcp__github__list_issues"),
-            Some(("github", "list_issues"))
+            Some(("github".to_string(), "list_issues".to_string()))
         );
         assert_eq!(split_mcp_tool("mcp__github"), None);
         assert_eq!(split_mcp_tool("Bash"), None);

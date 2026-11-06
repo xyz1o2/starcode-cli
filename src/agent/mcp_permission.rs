@@ -85,21 +85,28 @@ impl McpServerManager {
         self.connections.insert(connection.name.clone(), connection);
     }
 
+    /// 按注册表（connections）消歧查找服务器连接。
+    ///
+    /// 见 `core::mcp::split_mcp_tool_name_disambiguated` 的前缀碰撞说明：
+    /// 普通 server 真叫 `plugin_x_y` 时不能被猜成 `plugin:x:y`，谁在册
+    /// （connections 里注册键）用谁。
+    fn resolve_connection(&self, tool_name: &str) -> Option<&McpServerConnection> {
+        let (server_name, _tool) =
+            crate::core::mcp::split_mcp_tool_name_disambiguated(tool_name, &|n| {
+                self.connections.contains_key(n)
+            })?;
+        self.connections.get(&server_name)
+    }
+
     /// 获取服务器类型
     pub fn get_server_type(&self, tool_name: &str) -> Option<McpServerType> {
         if !tool_name.starts_with("mcp__") {
             return None;
         }
 
-        // 从工具名称中提取服务器名称
-        let parts: Vec<&str> = tool_name.splitn(3, "__").collect();
-        if parts.len() < 2 {
-            return None;
-        }
-
-        let server_name = parts[1];
-        self.connections
-            .get(server_name)
+        // 拆名走 `core::mcp` 唯一入口：需要冒号还原，否则插件 server
+        // 拆出 `plugin_x_x`，对不上 connections 里注册的 `plugin:x:x`。
+        self.resolve_connection(tool_name)
             .map(|c| c.server_type.clone())
     }
 
@@ -109,15 +116,8 @@ impl McpServerManager {
             return None;
         }
 
-        // 从工具名称中提取服务器名称
-        let parts: Vec<&str> = tool_name.splitn(3, "__").collect();
-        if parts.len() < 2 {
-            return None;
-        }
-
-        let server_name = parts[1];
-        self.connections
-            .get(server_name)
+        // 同上：冒号还原后才能命中 connections 的注册键。
+        self.resolve_connection(tool_name)
             .and_then(|c| c.base_url.clone())
     }
 
@@ -128,19 +128,13 @@ impl McpServerManager {
 
     /// 从工具名称中提取MCP信息
     pub fn extract_mcp_info(tool_name: &str) -> Option<McpToolInfo> {
-        if !tool_name.starts_with("mcp__") {
-            return None;
-        }
-
-        let parts: Vec<&str> = tool_name.splitn(3, "__").collect();
-        if parts.len() >= 3 {
-            Some(McpToolInfo {
-                server_name: parts[1].to_string(),
-                tool_name: parts[2].to_string(),
-            })
-        } else {
-            None
-        }
+        // 拆名走 `core::mcp` 唯一入口：server_name 是**还原冒号后**的名字，
+        // 与 manager 注册键一致；顺带把残缺名（`mcp__exa`）判成 None。
+        let (server_name, tool_name) = crate::core::mcp::split_mcp_tool_name(tool_name)?;
+        Some(McpToolInfo {
+            server_name,
+            tool_name,
+        })
     }
 }
 
@@ -407,6 +401,28 @@ mod tests {
         assert_eq!(
             ToolErrorClassifier::classify_error("Command timed out"),
             "TimeoutError"
+        );
+    }
+
+    /// 前缀碰撞：普通 server 真叫 `plugin_x_y` 时按 connections 消歧回
+    /// 原始段，不能被猜成 `plugin:x:y` 后查不到。
+    #[test]
+    fn test_plugin_prefix_collision_resolved_by_connections() {
+        let mut manager = McpServerManager::new();
+        manager.add_connection(McpServerConnection {
+            name: "plugin_x_y".to_string(),
+            server_type: McpServerType::Http,
+            base_url: Some("http://x".to_string()),
+            is_connected: true,
+        });
+
+        assert_eq!(
+            manager.get_server_type("mcp__plugin_x_y__tool"),
+            Some(McpServerType::Http)
+        );
+        assert_eq!(
+            manager.get_server_base_url("mcp__plugin_x_y__tool"),
+            Some("http://x".to_string())
         );
     }
 

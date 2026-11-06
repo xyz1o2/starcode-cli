@@ -8,8 +8,8 @@ pub use lifecycle::{
     PluginLifecycleStage, PluginRuntimeLifecycle,
 };
 pub use mcp::{
-    is_valid_plugin_mcp_server_name, qualify_plugin_mcp_server_name, PluginMcpServerConfig,
-    ResolvedPluginMcpServer,
+    is_valid_plugin_mcp_server_name, is_valid_plugin_name, qualify_plugin_mcp_server_name,
+    PluginMcpServerConfig, ResolvedPluginMcpServer,
 };
 pub use tool::build_plugin_declarative_tools;
 
@@ -34,6 +34,21 @@ pub fn scope_target_dir(project_root: &Path, scope: &str) -> PathBuf {
     } else {
         project_root.to_path_buf()
     }
+}
+
+/// 安装入口的插件名闸门：名字必须是 `[a-zA-Z0-9-]`。
+///
+/// 与发现端（`discover_plugin_*` 的 `is_valid_plugin_name` 跳过）同一条规则，
+/// 但在**装的时候**就拒绝，而不是装完静默不加载 —— 否则用户面对
+/// 「/plugin 显示已装、什么都调不着」，排查全靠翻 debug 日志。原因见
+/// `mcp::is_valid_plugin_name`：插件名带 `_` 时工具名往返必然拆错。
+fn validate_new_plugin_name(plugin_name: &str) -> Result<(), String> {
+    if is_valid_plugin_name(plugin_name) {
+        return Ok(());
+    }
+    Err(format!(
+        "invalid plugin name `{plugin_name}`: only [a-zA-Z0-9-] is allowed (underscores in a plugin name break the tool-name round-trip, so the plugin would be installed but never load)"
+    ))
 }
 
 fn scope_storage(project_root: &Path, scope: &str) -> crate::core::config::storage::Storage {
@@ -190,6 +205,17 @@ pub async fn discover_plugin_hooks(
             continue;
         }
 
+        // 插件名字符校验：含 `_`（或其它非 `[a-zA-Z0-9-]`）的插件名会让
+        // 工具名拆回时必然算不出注册键（见 `mcp::server_name_from_tool_name`）。
+        // 跳过而不是带病注册 —— 否则装了一个不可调用的 server 却看不出来为什么。
+        if !is_valid_plugin_name(&plugin.entry.name) {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[MCP] plugin {:?} skipped: name must be [a-zA-Z0-9-] (underscores break tool-name round-trip)",
+                plugin.entry.name
+            ));
+            continue;
+        }
+
         let Some(runtime_manifest) = plugin.runtime_manifest.as_ref() else {
             continue;
         };
@@ -235,6 +261,17 @@ pub async fn discover_plugin_commands(
             continue;
         }
 
+        // 插件名字符校验：含 `_`（或其它非 `[a-zA-Z0-9-]`）的插件名会让
+        // 工具名拆回时必然算不出注册键（见 `mcp::server_name_from_tool_name`）。
+        // 跳过而不是带病注册 —— 否则装了一个不可调用的 server 却看不出来为什么。
+        if !is_valid_plugin_name(&plugin.entry.name) {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[MCP] plugin {:?} skipped: name must be [a-zA-Z0-9-] (underscores break tool-name round-trip)",
+                plugin.entry.name
+            ));
+            continue;
+        }
+
         let Some(runtime_manifest) = plugin.runtime_manifest.as_ref() else {
             continue;
         };
@@ -270,6 +307,17 @@ pub async fn discover_plugin_tools(project_root: &Path) -> Result<Vec<ResolvedPl
 
     for plugin in plugins {
         if !plugin.entry.enabled {
+            continue;
+        }
+
+        // 插件名字符校验：含 `_`（或其它非 `[a-zA-Z0-9-]`）的插件名会让
+        // 工具名拆回时必然算不出注册键（见 `mcp::server_name_from_tool_name`）。
+        // 跳过而不是带病注册 —— 否则装了一个不可调用的 server 却看不出来为什么。
+        if !is_valid_plugin_name(&plugin.entry.name) {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[MCP] plugin {:?} skipped: name must be [a-zA-Z0-9-] (underscores break tool-name round-trip)",
+                plugin.entry.name
+            ));
             continue;
         }
 
@@ -313,6 +361,17 @@ pub async fn discover_plugin_mcp_servers(
 
     for plugin in plugins {
         if !plugin.entry.enabled {
+            continue;
+        }
+
+        // 插件名字符校验：含 `_`（或其它非 `[a-zA-Z0-9-]`）的插件名会让
+        // 工具名拆回时必然算不出注册键（见 `mcp::server_name_from_tool_name`）。
+        // 跳过而不是带病注册 —— 否则装了一个不可调用的 server 却看不出来为什么。
+        if !is_valid_plugin_name(&plugin.entry.name) {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "[MCP] plugin {:?} skipped: name must be [a-zA-Z0-9-] (underscores break tool-name round-trip)",
+                plugin.entry.name
+            ));
             continue;
         }
 
@@ -524,6 +583,7 @@ pub async fn install_plugin_local(
     if !source.exists() {
         return Err(format!("source path does not exist: {}", source.display()));
     }
+    validate_new_plugin_name(plugin_name)?;
 
     let dst = prepare_install_destination(project_root, plugin_name, scope).await?;
 
@@ -552,6 +612,10 @@ pub async fn install_plugin_git(
     git_ref: Option<&str>,
     scope: &str,
 ) -> Result<PluginEntry, String> {
+    // 漏斗闸门：所有安装路径（local / git / marketplace）分别在装之前拒绝
+    // 非法插件名，而不是装完靠发现端静默跳过。
+    validate_new_plugin_name(plugin_name)?;
+
     let dst = prepare_install_destination(project_root, plugin_name, scope).await?;
 
     let clone = tokio::process::Command::new("git")
@@ -653,14 +717,16 @@ pub async fn update_plugin(
                 .map_err(|e| format!("failed to run `git pull`: {}", e))?;
 
             if pull.status.success() {
-                let mut manifest = load_manifest(project_root).await?;
+                // scope 感知：插件的 entry 记在哪份 manifest 就更新哪份 ——
+                // user scope 装的插件以前被写进 project manifest，循环空转。
+                let mut manifest = load_manifest_scoped(project_root, &plugin.entry.scope).await?;
                 for entry in manifest.plugins.iter_mut() {
                     if entry.name == plugin_name {
                         entry.installed_at = Utc::now().timestamp();
                         break;
                     }
                 }
-                save_manifest(project_root, &manifest).await?;
+                save_manifest_scoped(project_root, &plugin.entry.scope, &manifest).await?;
             }
 
             let out = summarize_process_output(&pull);
@@ -823,7 +889,13 @@ pub fn normalize_plugin_name(input: &str) -> String {
     let mut out = String::new();
     for c in input.chars() {
         if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-            out.push(c);
+            // `_` 会破坏工具名往返（P0-2），归一成 `-`：git 仓库名
+            // `my_plugin` 推断出的名字装上后必须能被发现，而不是静默不加载。
+            if c == '_' {
+                out.push('-');
+            } else {
+                out.push(c);
+            }
         }
     }
     out
@@ -1159,4 +1231,57 @@ fn looks_like_github_shorthand(input: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
     };
     valid_part(owner) && valid_part(repo)
+}
+
+#[cfg(test)]
+mod install_gate_tests {
+    use super::*;
+
+    /// 安装入口必须拒绝带 `_` 的插件名 —— 否则装出「已装但永不加载」的插件，
+    /// 用户只能事后翻 debug 日志才知道为什么。
+    #[test]
+    fn install_rejects_names_that_break_the_tool_name_round_trip() {
+        let source = tempfile::tempdir().expect("tmp src");
+        let project = tempfile::tempdir().expect("tmp project");
+        std::fs::write(source.path().join("marker.txt"), "x").expect("write");
+
+        let err = tokio::runtime::Runtime::new()
+            .expect("rt")
+            .block_on(install_plugin_local(
+                project.path(),
+                source.path(),
+                "my_plugin",
+                SCOPE_PROJECT,
+            ))
+            .expect_err("underscores must be rejected at install time");
+        assert!(
+            err.contains("my_plugin"),
+            "错误信息里要带上被拒的名字：{err}"
+        );
+
+        // manifest 里也不能留下 entry。
+        let manifest = tokio::runtime::Runtime::new()
+            .expect("rt")
+            .block_on(load_manifest(project.path()))
+            .expect("manifest");
+        assert!(
+            manifest.plugins.is_empty(),
+            "被拒的安装不能留下 manifest entry：{:?}",
+            manifest.plugins
+        );
+    }
+
+    /// 名字归一：`_` 进不来（会破坏拆名），但也不能把用户输入拍死 ——
+    /// git 仓库名 `my_plugin` 归一成 `my-plugin` 后必须能装能被发现。
+    #[test]
+    fn normalize_turns_underscores_into_hyphens() {
+        assert_eq!(normalize_plugin_name("my_plugin"), "my-plugin");
+        assert_eq!(normalize_plugin_name("my-plugin"), "my-plugin");
+        assert_eq!(normalize_plugin_name("My Plugin!"), "MyPlugin");
+        // 归一后的名字必须通过安装闸门 —— 这是这两条规则互锁的本意。
+        for name in ["my_plugin", "my-plugin", "exa"] {
+            validate_new_plugin_name(&normalize_plugin_name(name))
+                .expect("归一后的名字必须能过安装闸门");
+        }
+    }
 }

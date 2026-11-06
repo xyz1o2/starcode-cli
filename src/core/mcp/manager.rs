@@ -40,6 +40,18 @@ impl MCPManager {
         servers.get(server_name).cloned()
     }
 
+    /// 拆 `mcp__<server>__<tool>` 工具名，**按注册表消歧**。
+    ///
+    /// 见 `core::mcp::split_mcp_tool_name_disambiguated`：普通 server 恰好
+    /// 长成插件前缀形（真叫 `plugin_x_y`）时，前缀猜出的 `plugin:x:y` 不在
+    /// 注册表，此时退回原始段。要拿"与注册键一致的 server 名"，执行路径
+    /// 统统走这里，不要对 `core::mcp::split_mcp_tool_name` 的结果直接
+    /// `call_tool`。
+    pub async fn split_mcp_tool_name(&self, name: &str) -> Option<(String, String)> {
+        let servers = self.servers.read().await;
+        crate::core::mcp::split_mcp_tool_name_disambiguated(name, &|n| servers.contains_key(n))
+    }
+
     pub async fn get_cached_tools(&self, server_name: &str) -> Option<Vec<MCPTool>> {
         let servers = self.servers.read().await;
         servers.get(server_name).map(|s| s.tools.clone())
@@ -222,11 +234,24 @@ impl MCPManager {
         &self,
         servers: Vec<crate::core::plugins::ResolvedPluginMcpServer>,
     ) -> Result<(), McpError> {
+        // 逐 server 容错：以前一个 `register_plugin_server` 失败就 `?` 短路，
+        // 一个坏 manifest 连累**所有**后续插件server 不注册（现场看不到任何
+        // server，只知道"failed"）。现在失败的名字收集进错误信息，其余照常注册。
+        let mut failures: Vec<String> = Vec::new();
         for server in servers {
-            let config = server.to_mcp_server_config();
-            self.register_plugin_server(config).await?;
+            let name = server.qualified_name.clone();
+            if let Err(error) = self
+                .register_plugin_server(server.to_mcp_server_config())
+                .await
+            {
+                failures.push(format!("{name}: {error}"));
+            }
         }
-        Ok(())
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; ").into())
+        }
     }
 
     /// 装载**所有**作用域的 MCP server（user + project），后者覆盖前者。
@@ -327,5 +352,54 @@ impl Clone for MCPManager {
 impl Default for MCPManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod split_disambiguation_tests {
+    use super::*;
+    use crate::core::mcp::types::TransportConfig;
+
+    fn stdio_config(name: &str) -> MCPServerConfig {
+        MCPServerConfig {
+            name: name.to_string(),
+            transport: TransportConfig {
+                transport_type: "stdio".to_string(),
+                command: Some("true".to_string()),
+                args: None,
+                env: None,
+                url: None,
+                headers: None,
+            },
+            command: None,
+            args: None,
+            env: None,
+            disabled: None,
+        }
+    }
+
+    /// 普通 server 恰好叫 `plugin_x_y`：注册表在册的名字必须赢过前缀猜名；
+    /// 真插件 server 的还原不受影响。
+    #[tokio::test]
+    async fn registry_lookup_beats_plugin_prefix_guess() {
+        let manager = MCPManager::new();
+        manager
+            .add_server(stdio_config("plugin_x_y"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            manager.split_mcp_tool_name("mcp__plugin_x_y__do").await,
+            Some(("plugin_x_y".to_string(), "do".to_string()))
+        );
+
+        manager
+            .register_plugin_server(stdio_config("plugin:exa:exa"))
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.split_mcp_tool_name("mcp__plugin_exa_exa__do").await,
+            Some(("plugin:exa:exa".to_string(), "do".to_string()))
+        );
     }
 }

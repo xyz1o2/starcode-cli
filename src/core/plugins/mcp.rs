@@ -64,6 +64,21 @@ pub fn is_valid_plugin_mcp_server_name(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
 }
 
+/// 插件名（marketplace `name` 字段）必须 `[a-zA-Z0-9-]` —— **不含下划线**。
+///
+/// 原因在 `core::mcp::server_name_from_tool_name`：工具名拼出来是
+/// `mcp__plugin_<plugin>_<server>__<tool>`，拆名时按**从左第一段下划线**切
+/// 插件名 / server 名。插件名若含 `_`，往返必然拆错
+/// （`plugin:my_plugin:search` → 拆回 `plugin:my:plugin_search`），
+/// 调用直接「server not found」。所以校验规则比 server 名严一格：
+/// server 名允许 `_`（左切后它原样保留），插件名不行。
+pub fn is_valid_plugin_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+}
+
 pub fn qualify_plugin_mcp_server_name(plugin_name: &str, server_name: &str) -> String {
     format!("plugin:{}:{}", plugin_name, server_name)
 }

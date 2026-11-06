@@ -176,12 +176,10 @@ pub fn search_read_summary_text(
 /// `canonical_tool_name`；这里只额外处理 MCP 工具的
 /// `mcp__server__tool → server:tool` 展示转换。
 pub fn user_facing_tool_name(tool_name: &str) -> String {
-    // MCP 工具 mcp__server__tool → server:tool
-    if let Some(rest) = tool_name.strip_prefix("mcp__") {
-        let mut it = rest.splitn(2, "__");
-        if let (Some(server), Some(tool)) = (it.next(), it.next()) {
-            return format!("{}:{}", server, tool);
-        }
+    // MCP 工具 mcp__server__tool → server:tool（冒号已还原，插件 server
+    // 展示成 `plugin:exa:exa:tool` 而不是乱码前缀）。
+    if let Some((server, tool)) = crate::core::mcp::split_mcp_tool_name(tool_name) {
+        return format!("{}:{}", server, tool);
     }
     crate::core::tools::constants::resolve_registered_tool_name(tool_name).to_string()
 }

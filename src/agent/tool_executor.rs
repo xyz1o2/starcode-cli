@@ -2646,24 +2646,6 @@ async fn execute_mcp_dynamic_tool(
     name: &str,
     args: &Value,
 ) -> ToolResult {
-    let suffix = name.strip_prefix("mcp__").unwrap_or(name);
-    let mut parts = suffix.splitn(2, "__");
-    let raw_server = parts.next().unwrap_or("").trim();
-    let tool = parts.next().unwrap_or("").trim();
-    // 拼名时冒号被换成了下划线（function name 不允许冒号），这里换回来 ——
-    // 否则插件 server 拆出来的名字与 manager 里注册的对不上。
-    let server = crate::core::mcp::server_name_from_tool_name(raw_server);
-
-    if server.is_empty() || tool.is_empty() {
-        return ToolResult {
-            success: false,
-            output: None,
-            error: Some(format!("Invalid MCP tool name: {}", name)),
-            data: None,
-            llm_content: None,
-        };
-    }
-
     let config = tool_registry.get_config();
     let Some(mcp_manager) = config.runtime_mcp_manager() else {
         return ToolResult {
@@ -2675,13 +2657,27 @@ async fn execute_mcp_dynamic_tool(
         };
     };
 
+    // 拆名必须走 `core::mcp` 的唯一入口，并且在**有注册表的地方**按注册表
+    // 消歧：普通 server 真叫 `plugin_x_y` 时，前缀猜名会错还原成
+    // `plugin:x:y`（见 docs/mcp-plugin-skill-line-issues.zh-CN.md §2 P0-1
+    // / P0-2）—— manager 的 `split_mcp_tool_name` 谁在册用谁。
+    let Some((server, tool)) = mcp_manager.split_mcp_tool_name(name).await else {
+        return ToolResult {
+            success: false,
+            output: None,
+            error: Some(format!("Invalid MCP tool name: {}", name)),
+            data: None,
+            llm_content: None,
+        };
+    };
+
     let arg_payload = if args.is_null() {
         serde_json::json!({})
     } else {
         args.clone()
     };
 
-    match mcp_manager.call_tool(&server, tool, arg_payload).await {
+    match mcp_manager.call_tool(&server, &tool, arg_payload).await {
         Ok(value) => ToolResult {
             success: true,
             output: Some(

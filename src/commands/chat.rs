@@ -379,10 +379,12 @@ mod tests {
         state.is_processing = true;
 
         let (tx, mut rx) = mpsc::channel(8);
-        // 模拟 worker：接下 RestoreSession 并回一个 Ok
+        // 模拟 worker：接下 RestoreSession 并回一个 Ok。
+        // send 是 async，必须 .await——否则 Future 被 let _ 丢弃，回执从未发出，
+        // restore 侧会拿到 "Agent worker closed ..." 而在这里必然失败。
         let worker = tokio::spawn(async move {
             if let Some(AgentRequest::RestoreSession { response, .. }) = rx.recv().await {
-                let _ = response.send(Ok(()));
+                let _ = response.send(Ok(())).await;
             }
         });
 
