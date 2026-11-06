@@ -369,7 +369,18 @@ pub(crate) fn render_non_tool_entry_blocks(
                 // 仍然不走去 markdown 排版：状态行里常有 `*`、`_`、反引号和 URL，
                 // 当正文解析会把它们吃成斜体/代码/链接。但折行必须和正文同一套，
                 // 否则窄窗口下同一条消息里的两种文本宽度上限还不一样。
-                let status_style = Style::default().fg(theme.secondary);
+                //
+                // 错误类状态行（`Error: ` / `异常：` 前缀）用 `theme.error`：
+                // 失败必须和普通状态一眼可分 —— 服务器原始反馈全文（含
+                // `Original error:` 一段）就在这条里。
+                let is_error_status = crate::core::i18n::error_status_prefixes()
+                    .iter()
+                    .any(|prefix| display_content.trim().starts_with(prefix));
+                let status_style = if is_error_status {
+                    Style::default().fg(theme.error)
+                } else {
+                    Style::default().fg(theme.secondary)
+                };
                 let status_text = display_content.trim();
                 // 续行比首行多缩进 2 列：折行后看不出哪里是断点，错误全文读起来
                 // 会像一长条没有换行的面条（与 thinking 展开态同一个理由）。

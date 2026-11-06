@@ -1499,6 +1499,11 @@ pub async fn handle_stream_update(
             status,
         } => {
             state.current_status_line = Some(status);
+            // 状态更新即 worker 存活信号：流式退避重试等待最长可达数十秒，
+            // 只有这一行状态在动（agent_status 走的是 Trace 路径已经喂过
+            // 看门狗；StatusUpdate 此前没有）。不刷新的话 STALL 看门狗会在
+            // 30s 处把重试等待误判成无响应并提前收场。
+            state.last_token_time = Some(std::time::Instant::now());
         }
         StreamMessage::AgentTaskUpdate {
             message_id: _,

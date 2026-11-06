@@ -5,6 +5,7 @@ mod mock;
 mod openai_compatible;
 pub mod prompt_cache_ext;
 pub mod providers;
+pub mod retry;
 pub mod rig_adapter;
 pub mod thinking;
 

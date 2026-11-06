@@ -110,7 +110,14 @@ pub fn status_prefixes() -> &'static [&'static str] {
 }
 
 pub fn running_prefixes() -> &'static [&'static str] {
-    &["⏳ 执行中：", "⏳ Running: ", "[RUN] ", "RUN "]
+    &["执行中：", "Running: ", "[RUN] ", "RUN "]
+}
+
+/// 错误类状态前缀 —— `status_prefixes` 的红色子集。错误条目在聊天区
+/// 以 `theme.error` 渲染，服务器原始反馈靠 `error_kind::diagnose` 保证
+/// 完整落在正文里（`Original error:` 一段）。
+pub fn error_status_prefixes() -> &'static [&'static str] {
+    &["异常：", "Error: "]
 }
 
 pub fn normalize_language_setting(input: &str) -> Option<&'static str> {

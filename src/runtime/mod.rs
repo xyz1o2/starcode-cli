@@ -7,4 +7,5 @@ pub mod hooks;
 pub mod messages;
 pub mod session;
 pub mod stream_chunks;
+pub mod stream_retry;
 pub mod streaming_session;

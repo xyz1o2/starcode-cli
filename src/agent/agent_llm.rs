@@ -5,6 +5,7 @@ use crate::agent::loop_engineering::{
 use crate::agent::messaging::AgentEvent;
 use crate::agent::tool_routing::ToolSelection;
 use crate::agent::{hooks, tool_helpers};
+use crate::llm::retry;
 use crate::types::{StarMessage, StarToolCall, StarUsage};
 use std::time::Instant;
 
@@ -1166,10 +1167,6 @@ impl Agent {
     ///
     /// 返回 `Some(LlmResult::Retry)` 表示已等待完毕、让外层重跑这一轮；
     /// 返回 `None` 表示次数用尽，交回 `RecoveryManager` 走切 provider 那条路。
-    ///
-    /// 退避是 `base * 2^attempt` 加最多 ±25% 抖动（多实例同时撞上同一个 5xx 时
-    /// 不要一起在同一秒重试），上限 `STAR_RETRY_MAX_DELAY_MS`。等待期间每秒发一次
-    /// Trace：这类失败以前是全静默的，用户只看到界面停住。
     async fn backoff_retry(
         &mut self,
         err_str: &str,
@@ -1177,22 +1174,12 @@ impl Agent {
         recovery_manager: &mut RecoveryManager,
         current_turn: i32,
     ) -> Option<LlmResult> {
-        let max_attempts: u32 = std::env::var("STAR_MAX_RETRIES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(3);
+        // 参数、退避公式与状态文案全部来自 `llm::retry` 内核（唯一口径，
+        // 流式会话的重试用同一份；见该模块头注释）。
+        let max_attempts = retry::max_attempts();
         if max_attempts == 0 {
             return None;
         }
-        let base_delay_ms: u64 = std::env::var("STAR_RETRY_BASE_DELAY_MS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1000);
-        let max_delay_ms: u64 = std::env::var("STAR_RETRY_MAX_DELAY_MS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(32_000);
-
         // 计数按类别分桶：一次网络抖动不该消耗 5xx 的重试预算。
         let key = format!("llm_backoff:{:?}", kind);
         let attempt = recovery_manager
@@ -1202,35 +1189,14 @@ impl Agent {
             .unwrap_or(0);
         if attempt >= max_attempts {
             crate::utils::logging::append_debug_log_line(&format!(
-                "[LLM_RETRY] {} exhausted after {} attempt(s) — handing off to recovery manager",
-                kind.label(),
-                attempt,
+                "[LLM_RETRY] {}",
+                retry::exhausted_log(kind, max_attempts),
             ));
             return None;
         }
         recovery_manager.retry_counts.insert(key, attempt + 1);
 
-        // 服务端建议优先；否则指数退避 + 抖动。
-        let delay_ms = match crate::llm::error_kind::retry_after_secs(err_str) {
-            Some(secs) => secs * 1000,
-            None => {
-                let raw = base_delay_ms.saturating_mul(1u64 << attempt.min(16));
-                let capped = raw.min(max_delay_ms);
-                // 抖动不引入 rand 依赖：用当前纳秒当熵源，够散了。
-                let entropy = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.subsec_nanos() as u64)
-                    .unwrap_or(0);
-                let jitter_span = capped / 4;
-                let jitter = if jitter_span == 0 {
-                    0
-                } else {
-                    entropy % (jitter_span * 2 + 1)
-                };
-                capped.saturating_add(jitter).saturating_sub(jitter_span)
-            }
-        };
-
+        let delay_ms = retry::delay_ms(err_str, attempt);
         crate::utils::logging::append_debug_log_line(&format!(
             "[LLM_RETRY] turn={} {} attempt {}/{} — waiting {}ms",
             current_turn,
@@ -1240,35 +1206,22 @@ impl Agent {
             delay_ms,
         ));
 
-        let mut remaining = std::time::Duration::from_millis(delay_ms);
-        let tick = std::time::Duration::from_secs(1);
-        loop {
-            if self.is_aborted() {
-                return Some(LlmResult::Error(AgentEvent::Error(
-                    "Cancelled while waiting to retry.".to_string(),
-                )));
-            }
-            self.emit_retry_status(&format!(
-                "{} — retry {}/{} in {:.0}s",
-                kind.label(),
-                attempt + 1,
-                max_attempts,
-                remaining.as_secs_f64().ceil(),
-            ));
-            if remaining <= tick {
-                tokio::time::sleep(remaining).await;
-                break;
-            }
-            tokio::time::sleep(tick).await;
-            remaining = remaining.saturating_sub(tick);
+        let abort_flag = self.abort_flag.clone();
+        let completed = retry::wait_interruptible(
+            std::time::Duration::from_millis(delay_ms),
+            abort_flag.as_deref(),
+            |remaining| {
+                self.emit_retry_status(&retry::waiting_status(kind, attempt, remaining));
+            },
+        )
+        .await;
+        if !completed {
+            return Some(LlmResult::Error(AgentEvent::Error(
+                "Cancelled while waiting to retry.".to_string(),
+            )));
         }
 
-        self.emit_retry_status(&format!(
-            "{} — retrying now ({}/{})",
-            kind.label(),
-            attempt + 1,
-            max_attempts,
-        ));
+        self.emit_retry_status(&retry::retrying_status(kind, attempt));
         Some(LlmResult::Retry)
     }
 }

@@ -72,132 +72,222 @@ pub async fn run_streaming_session(
 
     let mut shutdown_requested = false;
     let mut abort_requested = false;
-    match agent
-        .process_user_message_stream(context.user_message)
-        .await
-    {
-        Ok(mut stream) => {
-            let mut chunk_count: u64 = 0;
-            'streaming: loop {
-                tokio::select! {
-                    Ok(msg) = async {
-                        if shutdown_requested {
-                            std::future::pending().await
-                        } else if let Some(rx) = &mut *context.bus_rx {
-                            rx.recv().await
-                        } else {
-                            std::future::pending().await
+    // 流式失败的重试预算：init 失败与首 chunk 断流共用同一份
+    // `StreamRetryPolicy`（参数、退避、文案全部来自 `llm::retry` 内核）。
+    let mut retry_policy = crate::runtime::stream_retry::StreamRetryPolicy::default();
+    'attempt: loop {
+        match agent
+            .process_user_message_stream(context.user_message)
+            .await
+        {
+            Ok(mut stream) => {
+                let mut chunk_count: u64 = 0;
+                'streaming: loop {
+                    tokio::select! {
+                        Ok(msg) = async {
+                            if shutdown_requested {
+                                std::future::pending().await
+                            } else if let Some(rx) = &mut *context.bus_rx {
+                                rx.recv().await
+                            } else {
+                                std::future::pending().await
+                            }
+                        } => {
+                            crate::runtime::confirmation_bridge::relay_confirmation_bus_message(
+                                context.tx,
+                                context.message_id,
+                                msg,
+                            )
+                            .await;
                         }
-                    } => {
-                        crate::runtime::confirmation_bridge::relay_confirmation_bus_message(
-                            context.tx,
-                            context.message_id,
-                            msg,
-                        )
-                        .await;
-                    }
-                    maybe_req = context.rx.recv(), if !shutdown_requested && !abort_requested => {
-                        match crate::runtime::session::handle_streaming_request(
-                            deferred,
-                            maybe_req,
-                            StreamingRequestContext {
-                                tx: context.tx,
-                                message_id: context.message_id,
-                                user_message: context.user_message,
-                                current_model_snapshot: context.current_model_snapshot,
-                                project_root: context.project_root,
-                                abort_flag: context.abort_flag,
-                                steering_queue: context.steering_queue,
-                                steering_signal: context.steering_signal,
-                                message_bus: context.message_bus,
-                                model_switch_cell: context.model_switch_cell,
-                            },
-                        ).await {
-                            StreamingRequestOutcome::Continue => {}
-                            StreamingRequestOutcome::Break => {
-                                break 'streaming;
-                            }
-                            StreamingRequestOutcome::Abort => {
-                                abort_requested = true;
-                                append_debug_log_line(
-                                    "[Worker] Abort requested; draining cancelled agent stream",
-                                );
-                            }
-                            StreamingRequestOutcome::Return => {
-                                return StreamingSessionResult::WorkerClosed;
-                            }
-                            StreamingRequestOutcome::Shutdown => {
-                                shutdown_requested = true;
-                                append_debug_log_line(
-                                    "[Worker] Shutdown requested; draining cancelled agent stream",
-                                );
-                            }
-                        }
-                    }
-                    chunk = stream.next() => {
-                        match chunk {
-                            Some(Ok(c)) => {
-                                chunk_count += 1;
-                                let is_tool = matches!(c.chunk_type,
-                                    crate::types::StreamingChunkType::ToolCalls |
-                                    crate::types::StreamingChunkType::ToolResult
-                                );
-                                let done = crate::runtime::stream_chunks::handle_stream_chunk(
-                                    context.tx,
-                                    context.message_id,
-                                    c,
-                                ).await;
-                                if done {
-                                    append_debug_log_line(&format!(
-                                        "[Worker] Stream done after {} chunks",
-                                        chunk_count
-                                    ));
+                        maybe_req = context.rx.recv(), if !shutdown_requested && !abort_requested => {
+                            match crate::runtime::session::handle_streaming_request(
+                                deferred,
+                                maybe_req,
+                                StreamingRequestContext {
+                                    tx: context.tx,
+                                    message_id: context.message_id,
+                                    user_message: context.user_message,
+                                    current_model_snapshot: context.current_model_snapshot,
+                                    project_root: context.project_root,
+                                    abort_flag: context.abort_flag,
+                                    steering_queue: context.steering_queue,
+                                    steering_signal: context.steering_signal,
+                                    message_bus: context.message_bus,
+                                    model_switch_cell: context.model_switch_cell,
+                                },
+                            ).await {
+                                StreamingRequestOutcome::Continue => {}
+                                StreamingRequestOutcome::Break => {
                                     break 'streaming;
                                 }
-                                // After tool events, yield the async task so the UI
-                                // has a frame to render each tool call/result separately,
-                                // preventing them from appearing all at once.
-                                if is_tool {
-                                    tokio::task::yield_now().await;
+                                StreamingRequestOutcome::Abort => {
+                                    abort_requested = true;
+                                    append_debug_log_line(
+                                        "[Worker] Abort requested; draining cancelled agent stream",
+                                    );
+                                }
+                                StreamingRequestOutcome::Return => {
+                                    return StreamingSessionResult::WorkerClosed;
+                                }
+                                StreamingRequestOutcome::Shutdown => {
+                                    shutdown_requested = true;
+                                    append_debug_log_line(
+                                        "[Worker] Shutdown requested; draining cancelled agent stream",
+                                    );
                                 }
                             }
-                            Some(Err(e)) => {
-                                let error_msg = e.to_string();
-                                append_debug_log_line(&format!(
-                                    "[Worker] Stream error after {} chunks: {}",
-                                    chunk_count, error_msg
-                                ));
-                                let _ = context.tx.send(StreamMessage::Error {
-                                    message_id: context.message_id,
-                                    error: error_msg,
-                                }).await;
-                                break 'streaming;
-                            }
-                            None => {
-                                append_debug_log_line(&format!(
-                                    "[Worker] Stream ended after {} chunks",
-                                    chunk_count
-                                ));
-                                let _ = context.tx.send(StreamMessage::Done {
-                                    message_id: context.message_id,
-                                }).await;
-                                break 'streaming;
+                        }
+                        chunk = stream.next() => {
+                            match chunk {
+                                Some(Ok(c)) => {
+                                    chunk_count += 1;
+                                    let is_tool = matches!(c.chunk_type,
+                                        crate::types::StreamingChunkType::ToolCalls |
+                                        crate::types::StreamingChunkType::ToolResult
+                                    );
+                                    let done = crate::runtime::stream_chunks::handle_stream_chunk(
+                                        context.tx,
+                                        context.message_id,
+                                        c,
+                                    ).await;
+                                    if done {
+                                        append_debug_log_line(&format!(
+                                            "[Worker] Stream done after {} chunks",
+                                            chunk_count
+                                        ));
+                                        break 'streaming;
+                                    }
+                                    // After tool events, yield the async task so the UI
+                                    // has a frame to render each tool call/result separately,
+                                    // preventing them from appearing all at once.
+                                    if is_tool {
+                                        tokio::task::yield_now().await;
+                                    }
+                                }
+                                Some(Err(e)) => {
+                                    let error_msg = e.to_string();
+                                    append_debug_log_line(&format!(
+                                        "[Worker] Stream error after {} chunks: {}",
+                                        chunk_count, error_msg
+                                    ));
+                                    // 直接把未分类的原文抛给 UI 收场是旧缺陷：网络抖动
+                                    // 本可以退避重来。交给 `StreamRetryPolicy` 决策 ——
+                                    // 只有零 chunk（内容未落地）且可重试类别才重建流。
+                                    match retry_policy.decide(&error_msg, chunk_count) {
+                                        crate::runtime::stream_retry::StreamFailureDecision::Retry {
+                                            delay_ms,
+                                            waiting_status,
+                                            retrying_status,
+                                        } => {
+                                            let _ = context.tx.send(StreamMessage::StatusUpdate {
+                                                message_id: context.message_id,
+                                                status: waiting_status,
+                                            }).await;
+                                            let interrupted = !crate::llm::retry::wait_interruptible(
+                                                std::time::Duration::from_millis(delay_ms),
+                                                Some(context.abort_flag.as_ref()),
+                                                |_| {},
+                                            ).await;
+                                            if interrupted {
+                                                let _ = context.tx.send(StreamMessage::Error {
+                                                    message_id: context.message_id,
+                                                    error: "Cancelled while waiting to retry.".to_string(),
+                                                }).await;
+                                                break 'attempt;
+                                            }
+                                            append_debug_log_line(&format!(
+                                                "[Worker] Stream retry: {}",
+                                                retrying_status
+                                            ));
+                                            let _ = context.tx.send(StreamMessage::StatusUpdate {
+                                                message_id: context.message_id,
+                                                status: retrying_status,
+                                            }).await;
+                                            continue 'attempt;
+                                        }
+                                        crate::runtime::stream_retry::StreamFailureDecision::GiveUp(diagnosis) => {
+                                            let _ = context.tx.send(StreamMessage::Error {
+                                                message_id: context.message_id,
+                                                error: diagnosis,
+                                            }).await;
+                                            break 'attempt;
+                                        }
+                                    }
+                                }
+                                None => {
+                                    append_debug_log_line(&format!(
+                                        "[Worker] Stream ended after {} chunks",
+                                        chunk_count
+                                    ));
+                                    let _ = context.tx.send(StreamMessage::Done {
+                                        message_id: context.message_id,
+                                    }).await;
+                                    break 'streaming;
+                                }
                             }
                         }
                     }
                 }
+                break 'attempt;
             }
-        }
-        Err(e) => {
-            let error_msg = e.to_string();
-            append_debug_log_line(&format!("[Worker] Agent stream init failed: {}", error_msg));
-            let _ = context
-                .tx
-                .send(StreamMessage::Error {
-                    message_id: context.message_id,
-                    error: error_msg,
-                })
-                .await;
+            Err(e) => {
+                let error_msg = e.to_string();
+                append_debug_log_line(&format!("[Worker] Agent stream init failed: {}", error_msg));
+                match retry_policy.decide(&error_msg, 0) {
+                    crate::runtime::stream_retry::StreamFailureDecision::Retry {
+                        delay_ms,
+                        waiting_status,
+                        retrying_status,
+                    } => {
+                        let _ = context
+                            .tx
+                            .send(StreamMessage::StatusUpdate {
+                                message_id: context.message_id,
+                                status: waiting_status,
+                            })
+                            .await;
+                        let interrupted = !crate::llm::retry::wait_interruptible(
+                            std::time::Duration::from_millis(delay_ms),
+                            Some(context.abort_flag.as_ref()),
+                            |_| {},
+                        )
+                        .await;
+                        if interrupted {
+                            let _ = context
+                                .tx
+                                .send(StreamMessage::Error {
+                                    message_id: context.message_id,
+                                    error: "Cancelled while waiting to retry.".to_string(),
+                                })
+                                .await;
+                            break 'attempt;
+                        }
+                        append_debug_log_line(&format!(
+                            "[Worker] Stream retry: {}",
+                            retrying_status
+                        ));
+                        let _ = context
+                            .tx
+                            .send(StreamMessage::StatusUpdate {
+                                message_id: context.message_id,
+                                status: retrying_status,
+                            })
+                            .await;
+                        continue 'attempt;
+                    }
+                    crate::runtime::stream_retry::StreamFailureDecision::GiveUp(diagnosis) => {
+                        let _ = context
+                            .tx
+                            .send(StreamMessage::Error {
+                                message_id: context.message_id,
+                                error: diagnosis,
+                            })
+                            .await;
+                        break 'attempt;
+                    }
+                }
+            }
         }
     }
 
