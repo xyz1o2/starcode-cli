@@ -478,6 +478,8 @@ pub async fn handle_stream_update(
                 // 「~估算 ↔ 真实」的格式与数值横跳。基线在下次 TokenCount 整体替换。
                 // token_count 是流内增量计数，语义不跨回合，仍归零。
                 state.token_count = 0;
+                // 回合累计口径跟着回合计时一起归零：↓ 计数只统计本回合。
+                state.turn_tokens = 0;
             }
             state
                 .stream_targets
@@ -1089,6 +1091,10 @@ pub async fn handle_stream_update(
 
             state.token_count = tokens;
             if let Some(ref u) = usage {
+                // 回合累计（对标 CC `↓ Xk tokens`）：一条 StatsUpdate 就是一次真实
+                // provider 响应，逐响应累加；不能拿 token_usage 整体替换盖过来——
+                // 那个只是最近一次响应的上下文口径。
+                state.turn_tokens = state.turn_tokens.saturating_add(u.total_tokens as u32);
                 // 每个 TokenCount 带的是一次具体 provider 响应，必须整体替换。
                 // 不能将工具循环中不同模型调用的 prompt/completion/cache 字段拼成一条。
                 state.token_usage = Some(u.clone());

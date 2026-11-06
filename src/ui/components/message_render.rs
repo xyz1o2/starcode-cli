@@ -108,6 +108,18 @@ pub(crate) fn render_non_tool_entry_blocks(
                     // 是在推进还是卡住了 —— 一行实时走动的时间（"Thinking 12s…"）
                     // 才能区分"想得久"和"卡住了"。业界一致做法（Cursor /
                     // Backstage 的 `"Thinking ${elapsedSeconds}s…"`）。
+                    // token 后缀（两种状态都显示）：正文为空时占位串
+                    // 估不出 1 个 token，就不挂后缀。
+                    //
+                    // 带 `~` 前缀：Claude Code 头部没有 token 数，它的真实计数
+                    // 走 spinner 行（`↓ 8.7k tokens`）且依赖 provider 在思考期
+                    // 回传增量 usage —— 2.1.178 起 thinking 阶段已经拿不到。
+                    // 我们这里是字符数估算，不是 provider 计数，必须标出来；
+                    // 与状态栏 fallback 的 `~Xk` 同一视觉语言。
+                    let token_suffix = match estimate_reasoning_tokens(reasoning_trimmed) {
+                        0 => String::new(),
+                        n => format!(" · ~{} tokens", n),
+                    };
                     let header_text = if cancelling {
                         format!(
                             "{}…",
@@ -120,13 +132,14 @@ pub(crate) fn render_non_tool_entry_blocks(
                     } else {
                         match entry.reasoning_finished_elapsed_ms {
                             Some(ms) => format!(
-                                "{} {}",
+                                "{} {}{}",
                                 crate::core::i18n::t(
                                     "ui.thinking.thought_for",
                                     "思考了",
                                     "Thought for"
                                 ),
                                 format_thinking_duration(ms),
+                                token_suffix,
                             ),
                             // 进行中：现在态 + 实时耗时。
                             //
@@ -142,16 +155,21 @@ pub(crate) fn render_non_tool_entry_blocks(
                                 );
                                 match entry.reasoning_started_at {
                                     Some(started) => format!(
-                                        "{} {}…",
+                                        "{} {}{}…",
                                         label,
-                                        format_thinking_duration(started.elapsed().as_millis())
+                                        format_thinking_duration(started.elapsed().as_millis()),
+                                        token_suffix,
                                     ),
-                                    None => format!("{label}…"),
+                                    None => format!("{label}{}…", token_suffix),
                                 }
                             }
                             // 历史会话恢复的条目既没有冻结耗时、也不在流式里 ——
                             // 用过去态，别让它永远停在 "Thinking"。
-                            None => crate::core::i18n::t("ui.thinking.past", "思考过", "Thought"),
+                            None => format!(
+                                "{}{}",
+                                crate::core::i18n::t("ui.thinking.past", "思考过", "Thought"),
+                                token_suffix,
+                            ),
                         }
                     };
 
@@ -659,6 +677,21 @@ fn format_thinking_duration(ms: u128) -> String {
     } else {
         format!("{}m {}s", secs / 60, secs % 60)
     }
+}
+
+/// thinking 头部的 token 计数（对标 Claude Code `Thought for 14s · 843 tokens`）。
+///
+/// provider 的 usage 不带 reasoning 细分（StarUsage 只有总 completion），
+/// `ChatEntry` 也没有逐块的 token 值，只能按字符数近似：ASCII 约 4 字符
+/// 1 token，CJK 约 1 字符 1 token —— 与 `agent_llm.rs` 流内截断用的
+/// `len()/4` 同一思路，但按文种加权，中文估得更准。
+/// 流式过程中数字随正文增长，结束后随 reasoning 冻结稳定下来。
+fn estimate_reasoning_tokens(text: &str) -> u32 {
+    let mut weight: u64 = 0;
+    for ch in text.chars() {
+        weight += if ch.is_ascii() { 1 } else { 4 };
+    }
+    (weight / 4) as u32
 }
 
 #[cfg(test)]
@@ -1297,6 +1330,66 @@ mod tests {
         assert_eq!(format_thinking_duration(500), "1s");
         assert_eq!(format_thinking_duration(14_000), "14s");
         assert_eq!(format_thinking_duration(65_000), "1m 5s");
+    }
+
+    /// token 估算：ASCII 4 字符 1 token；非 ASCII（CJK）约 1 字符 1 token。
+    #[test]
+    fn reasoning_token_estimate_mixes_scripts() {
+        assert_eq!(estimate_reasoning_tokens(""), 0);
+        // 8 个 ASCII 字符 → 2 tokens
+        assert_eq!(estimate_reasoning_tokens("12345678"), 2);
+        // 4 个 CJK 字符 → 每个 weight 4 → 16/4 = 4 tokens
+        assert_eq!(estimate_reasoning_tokens("中文推理"), 4);
+        // 混合："分析 " → 2 CJK(8) + " " (1) = 9/4 = 2
+        assert_eq!(estimate_reasoning_tokens("分析 "), 2);
+    }
+
+    /// 对标 Claude Code `Thought for 14s · 843 tokens`：token 计数在
+    /// **进行中**（Thinking …）和**已完成**（Thought for …）两种状态下都要显示。
+    #[test]
+    fn thinking_header_shows_token_count_in_both_states() {
+        let mut state = crate::ui::state::ChatState::new();
+        state.chat_history.clear();
+        // 19 个 ASCII 字符 → 4 tokens
+        let mut entry = crate::types::ChatEntry::assistant("");
+        entry.reasoning_content = Some("a step of reasoning".to_string());
+        entry.reasoning_finished_elapsed_ms = Some(14_000);
+        entry.is_streaming = Some(false);
+        state.chat_history.push(entry);
+        let idx = 0;
+
+        let header_of = |state: &crate::ui::state::ChatState| {
+            let blocks =
+                render_non_tool_entry_blocks(state, &state.chat_history[idx], idx, 70, false);
+            blocks
+                .first()
+                .map(|block| {
+                    block
+                        .iter()
+                        .map(|line| {
+                            line.spans
+                                .iter()
+                                .map(|s| s.content.as_ref())
+                                .collect::<String>()
+                        })
+                        .collect::<String>()
+                })
+                .unwrap_or_default()
+        };
+
+        // 已完成态：耗时 + token 计数并存。
+        let finished = header_of(&state);
+        assert!(finished.contains("Thought for 14s"), "{:?}", finished);
+        assert!(finished.contains("· ~4 tokens"), "{:?}", finished);
+
+        // 进行中态：实时耗时 + 当前 token 计数并存。
+        state.chat_history[idx].reasoning_finished_elapsed_ms = None;
+        state.chat_history[idx].is_streaming = Some(true);
+        state.chat_history[idx].reasoning_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+        let streaming = header_of(&state);
+        assert!(streaming.contains("Thinking"), "{:?}", streaming);
+        assert!(streaming.contains("· ~4 tokens"), "{:?}", streaming);
     }
 
     /// 完成的 thinking 折叠头必须始终可见，`∴ Thought for Xs` 不得因为

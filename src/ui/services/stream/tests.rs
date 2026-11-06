@@ -1663,6 +1663,94 @@ async fn new_request_keeps_usage_as_baseline_while_compression_stats_preserve_it
 }
 
 #[tokio::test]
+async fn token_count_accumulates_turn_totals_per_provider_response() {
+    let mut state = ChatState::new();
+    let (agent_tx, _agent_rx) = mpsc::channel(1);
+    let message_id = 47;
+    let first = crate::types::StarUsage {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        total_tokens: 120,
+        ..Default::default()
+    };
+    let second = crate::types::StarUsage {
+        prompt_tokens: 200,
+        completion_tokens: 30,
+        total_tokens: 230,
+        ..Default::default()
+    };
+
+    handle_stream_update(
+        &mut state,
+        StreamMessage::Start {
+            message_id,
+            kind: StreamStartKind::UserTurn {
+                model: "gpt-4o".to_string(),
+            },
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+    for usage in [&first, &second] {
+        handle_stream_update(
+            &mut state,
+            StreamMessage::TokenCount {
+                message_id,
+                tokens: usage.total_tokens,
+                usage: Some((*usage).clone()),
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+    }
+
+    // 回合累计口径：逐响应 total_tokens 求和，工具循环每完成一轮涨一格。
+    assert_eq!(state.turn_tokens, first.total_tokens + second.total_tokens);
+    // token_usage 保持「最近一次响应」的上下文口径，不能被累加污染。
+    assert_eq!(
+        state.token_usage.as_ref().map(|u| u.total_tokens),
+        Some(second.total_tokens)
+    );
+}
+
+#[tokio::test]
+async fn user_turn_start_resets_turn_cumulative_tokens_but_operation_start_does_not() {
+    let mut state = ChatState::new();
+    let (agent_tx, _agent_rx) = mpsc::channel(1);
+    state.turn_tokens = 350;
+
+    // 子操作的 Start（hook / 注入请求）不属于新回合，累计不得清零。
+    handle_stream_update(
+        &mut state,
+        StreamMessage::Start {
+            message_id: 48,
+            kind: StreamStartKind::Operation,
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.turn_tokens, 350);
+
+    // 新用户回合开始：↓ 计数只统计本回合，归零等第一条 provider 响应回来。
+    handle_stream_update(
+        &mut state,
+        StreamMessage::Start {
+            message_id: 49,
+            kind: StreamStartKind::UserTurn {
+                model: "gpt-4o".to_string(),
+            },
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.turn_tokens, 0);
+}
+
+#[tokio::test]
 async fn terminal_messages_settle_accumulated_cost_once_and_ignore_late_usage() {
     let mut state = ChatState::new();
     let (agent_tx, _agent_rx) = mpsc::channel(1);

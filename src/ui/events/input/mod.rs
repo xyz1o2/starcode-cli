@@ -485,6 +485,7 @@ async fn handle_inline_confirm(
                 // 与空历史矛盾的旧基线，直到下一次 provider usage 到来。
                 state.token_usage = None;
                 state.token_count = 0;
+                state.turn_tokens = 0;
                 state.cache_read_tokens = 0;
                 state.cache_creation_tokens = 0;
                 let _ = agent_tx

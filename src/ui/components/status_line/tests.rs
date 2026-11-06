@@ -729,3 +729,31 @@ fn verb_table_matches_the_real_claude_code_list() {
 
     assert_eq!(SPINNER_VERBS.len(), 187, "应与 Claude Code 真实表等长");
 }
+
+/// 回归：spinner 行 token 用量走**回合累计**口径，对标 CC `↓ 8.7k tokens`。
+///
+/// 旧实现显示最近一次响应的 prompt_tokens（上下文占用），且要等满 30 秒才出
+/// —— 工具循环里用户看不到任何数字在动。现在逐响应 total_tokens 求和，
+/// 一到就显示且随每轮工具调用上涨；`token_usage` 仍是上下文口径，互不污染。
+#[test]
+fn spinner_token_group_shows_turn_cumulative_down_tokens_immediately() {
+    let mut state = ChatState::new();
+    state.is_processing = true;
+    state.turn_tokens = 8_700;
+
+    let text: String = processing_spinner_line(&state, 120)[1]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(text.contains("↓ 8.7k tokens"), "{text:?}");
+
+    // 无可用累计（回合还没出第一条 provider 响应，或新回合刚归零）时不显示。
+    state.turn_tokens = 0;
+    let text: String = processing_spinner_line(&state, 120)[1]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(!text.contains("tokens"), "{text:?}");
+}

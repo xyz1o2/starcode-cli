@@ -58,6 +58,10 @@ fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str
         m.insert("BackgroundTask", "backgroundtask");
         m.insert("Monitor", "monitor");
         m.insert("Wait", "wait");
+        // 后台 bash 任务治理（对标 CC 的 TaskOutput / KillShell；
+        // TaskOutput 名字已被任务管理系统占用，取 BashTaskOutput 避开）
+        m.insert("BashTaskOutput", "bashtaskoutput");
+        m.insert("KillShell", "killshell");
         // 任务管理
         m.insert("TodoWrite", "managetasks");
         m.insert("TaskGet", "taskget");

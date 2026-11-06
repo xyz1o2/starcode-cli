@@ -258,6 +258,10 @@ pub struct ChatState {
     // ============ Stats =================
     pub au2_compressed: bool,
     pub token_usage: Option<crate::types::StarUsage>,
+    /// 回合累计 token（对标 CC `↓ Xk tokens`）：本回合逐次 provider 响应的
+    /// total_tokens 求和。`token_usage` 是最近一次响应的上下文口径，这个是
+    /// 回合口径，两者不混。新回合（UserTurn Start）归零。
+    pub turn_tokens: u32,
     // ============ Cache Stats ============
     /// Latest provider-reported cache read tokens (not a session total).
     pub cache_read_tokens: u64,
@@ -802,6 +806,7 @@ impl ChatState {
             cancelling_since: None,
             processing_time_secs: 0,
             token_count: 0,
+            turn_tokens: 0,
             total_cost: 0.0,
             response_costs: HashMap::new(),
             response_models: HashMap::new(),

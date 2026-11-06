@@ -141,11 +141,6 @@ pub(super) fn meta_sep() -> Span<'static> {
 /// 工具名在状态行里的显示上限（字符数）。
 pub(super) const TOOL_NAME_MAX_CHARS: usize = 30;
 
-/// 回合进行多久之后才开始报 token 用量（秒）。
-///
-/// 对标 Claude Code：30 秒之前用户还不关心上下文，数字反而挤掉动词。
-pub(super) const TOKEN_DISPLAY_AFTER_SECS: u64 = 30;
-
 /// Render a spinner line above the input area.
 ///
 /// 这是回合期间**唯一**的实时面。同一件事此前在正文里还有一份 live 折叠头
@@ -272,25 +267,20 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
         }
     }
 
-    // 5) token 用量（紧凑模式）。prompt_tokens 优先，provider 只报 total_tokens
-    //    时退回它——两者与 token_count 同源，不搞第二套 `↓` 格式。
-    //    对标 Claude Code：30 秒之前用户还不关心上下文，数字反而挤掉动词。
-    if state.token_count > 0 && elapsed >= TOKEN_DISPLAY_AFTER_SECS {
-        if let Some(usage) = state.token_usage.as_ref() {
-            let tokens = if usage.prompt_tokens > 0 {
-                usage.prompt_tokens
-            } else {
-                usage.total_tokens
-            };
-            if tokens > 0 {
-                let color = if stall > 0.5 {
-                    lerp_color(theme.secondary, theme.error, stall * 0.3)
-                } else {
-                    theme.secondary
-                };
-                groups.push((color, format!("{} tokens", format_token_count(tokens))));
-            }
-        }
+    // 5) token 用量（对标 Claude Code `↓ 8.7k tokens`）：回合累计口径 ——
+    //    逐响应 total_tokens 求和（prompt+completion+cache），工具循环里每完成一
+    //    轮就涨一格，随回合实时变化。`token_usage` 是最近一次响应的上下文口径，
+    //    由 token_warning_line 负责，两套数字不混用。
+    if state.turn_tokens > 0 {
+        let color = if stall > 0.5 {
+            lerp_color(theme.secondary, theme.error, stall * 0.3)
+        } else {
+            theme.secondary
+        };
+        groups.push((
+            color,
+            format!("↓ {} tokens", format_token_count(state.turn_tokens)),
+        ));
     }
 
     // 预算：行首缩进 1 + 字形 1 + 空格 1 + 动词 + "…" 1 + 空格 1 + "(" 1 + ")" 1
