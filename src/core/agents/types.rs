@@ -263,6 +263,47 @@ impl SubagentType {
     pub fn is_custom(&self) -> bool {
         !matches!(self, Self::GeneralPurpose)
     }
+
+    /// 把模型 / skill frontmatter 给的任意写法解析成子代理类型。
+    ///
+    /// 全仓库唯一的别名归一入口：agent 参数归一（tool_executor）和 skill
+    /// frontmatter `agent:` 字段（skill.rs）都走这里，各自不再维护别名表。
+    /// 归一规则不枚举别名：小写并丢弃 `_`/`-`/空格后，与每个变体自身的 slug
+    /// 和展示名比对 —— 精确相等或前缀命中（前缀至少 4 个字符，避免 "ana"
+    /// 这类截断猜错方向）。
+    /// 未识别返回 None：自定义 agent 的名字由调用方原样透传。
+    pub fn from_name(raw: &str) -> Option<Self> {
+        let canon = |s: &str| -> String {
+            s.chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .map(|c| c.to_ascii_lowercase())
+                .collect()
+        };
+        let target = canon(raw);
+        if target.len() < 4 {
+            return None;
+        }
+        for variant in [
+            Self::GeneralPurpose,
+            Self::Explorer,
+            Self::Analyzer,
+            Self::Editor,
+            Self::CodeReviewer,
+        ] {
+            let slug = canon(variant.as_str());
+            let display = canon(variant.user_facing_name());
+            if slug == target
+                || display == target
+                || slug.starts_with(&target)
+                || display.starts_with(&target)
+                || target.starts_with(&slug)
+                || target.starts_with(&display)
+            {
+                return Some(variant);
+            }
+        }
+        None
+    }
 }
 
 /// `Option<SubagentType>` 的用户可见标签：`None` 代表 fork（继承父上下文）
@@ -307,6 +348,51 @@ pub struct AgentToolFullInput {
     pub background: Option<bool>,
     /// 最大轮次数
     pub max_rounds: Option<u32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 全部别名写法必须落到与旧硬编码表相同的变体 —— 两个调用方
+    /// （tool_executor / skill.rs）删表前靠这套用例圈行为。
+    #[test]
+    fn from_name_covers_every_previous_alias_arm() {
+        use SubagentType::*;
+        for (raw, expected) in [
+            ("general_purpose", GeneralPurpose),
+            ("generalpurpose", GeneralPurpose),
+            ("general", GeneralPurpose),
+            ("general-purpose", GeneralPurpose),
+            ("GeneralPurpose", GeneralPurpose),
+            ("explorer", Explorer),
+            ("explore", Explorer),
+            ("Explore", Explorer),
+            ("analyzer", Analyzer),
+            ("analyze", Analyzer),
+            ("editor", Editor),
+            ("edit", Editor),
+            ("code_reviewer", CodeReviewer),
+            ("codereviewer", CodeReviewer),
+            ("reviewer", CodeReviewer),
+            ("review", CodeReviewer),
+            ("Code Reviewer", CodeReviewer),
+        ] {
+            assert_eq!(
+                SubagentType::from_name(raw),
+                Some(expected.clone()),
+                "{raw:?} 必须归一到 {expected:?}"
+            );
+        }
+    }
+
+    /// 未识别（自定义 agent）或过短截断必须返回 None，调用方才能透传。
+    #[test]
+    fn from_name_rejects_custom_names_and_short_prefixes() {
+        assert_eq!(SubagentType::from_name("my_custom_agent"), None);
+        assert_eq!(SubagentType::from_name("ana"), None);
+        assert_eq!(SubagentType::from_name(""), None);
+    }
 }
 
 /// SubAgent 权限模式（对标 CCB permissionMode）

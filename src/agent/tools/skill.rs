@@ -986,15 +986,12 @@ async fn run_skill_forked(
 ///
 /// Claude Code 那边写的是 `Explore` / `Plan` / `general-purpose` 这种
 /// 展示名，这里要转成 serde 能认的 slug（`explorer` / `general_purpose`）。
+/// 归一本身收敛在 `SubagentType::from_name`（枚举自己是身份的唯一事实来源）；
+/// 这里只保留"未识别时透传原名"的兜底，自定义 agent 靠它往下走。
 fn normalize_subagent_type_slug(name: &str) -> String {
-    let lowered = name.trim().to_lowercase().replace(['-', ' '], "_");
-    match lowered.as_str() {
-        "explore" | "explorer" => "explorer".to_string(),
-        "analyze" | "analyzer" => "analyzer".to_string(),
-        "edit" | "editor" => "editor".to_string(),
-        "code_reviewer" | "reviewer" | "review" => "code_reviewer".to_string(),
-        _ => lowered,
-    }
+    crate::core::agents::SubagentType::from_name(name)
+        .map(|t| t.as_str().to_string())
+        .unwrap_or_else(|| name.trim().to_owned())
 }
 
 /// 渲染 skill 正文：执行 `!cmd` 块 + 按 frontmatter 声明替换参数。

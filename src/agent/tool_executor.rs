@@ -1329,11 +1329,15 @@ impl ToolExecutor {
         canonical_name: &str,
         args: Value,
     ) -> Value {
-        // 先对所有工具做通用修复：
-        // 1. 把字符串数字转为真正的数字
-        // 2. 把 camelCase 参数名转为 snake_case
-        let args = Self::fix_string_numbers(args);
+        // 先把 camelCase 参数名转为 snake_case：后面两步（schema 保护集、
+        // 字符串→数字）都以 canonical 键名为准，顺序不能倒。
         let args = Self::camel_to_snake_keys(args);
+        // 字符串→数字转换不再手维护名单：豁免集来自**工具自己声明的
+        // parameter_schema** —— 所有 `"type": "string"` 的参数（含嵌套在
+        // `items` 里的，如 MultiEdit 的 `edits[].old_string`）一律豁免。
+        // 新增字符串参数时不需要同步改这里，schema 是唯一事实来源。
+        let string_keys = self.declared_string_keys(original_name, canonical_name);
+        let args = Self::fix_string_numbers(args, &string_keys);
         let args = match canonical_name {
             "Edit" => Self::normalize_replace_args(args),
             "MultiEdit" => Self::normalize_multi_edit_args(args),
@@ -1455,50 +1459,97 @@ impl ToolExecutor {
         args
     }
 
-    /// 归一化 Agent 参数，处理 subagent_type 大小写问题
+    /// 归一化 Agent 参数。
+    ///
+    /// `subagent_type` 的大小写/连字符别名全部交给 `SubagentType::from_name`
+    /// —— 枚举自己是身份的唯一事实来源，这里不再维护别名表；未识别的值
+    /// 原样放行（自定义 agent 名交给下游注册表解析）。
     fn normalize_agent_args(mut args: Value) -> Value {
         let Some(obj) = args.as_object_mut() else {
             return args;
         };
-        // subagent_type: 兼容 camelCase 和 PascalCase
-        if let Some(val) = obj
+        let provided = obj
             .get("subagent_type")
             .or(obj.get("subagentType"))
-            .cloned()
-        {
-            if let Some(s) = val.as_str() {
-                let lower = s.to_lowercase();
-                let normalized = match lower.as_str() {
-                    "general_purpose" | "generalpurpose" | "general" => "general_purpose",
-                    "explorer" | "explore" => "explorer",
-                    "analyzer" | "analyze" => "analyzer",
-                    "editor" | "edit" => "editor",
-                    "code_reviewer" | "codereviewer" | "reviewer" => "code_reviewer",
-                    other => other,
-                };
-                obj.insert(
-                    "subagent_type".to_string(),
-                    Value::String(normalized.to_string()),
-                );
-                obj.remove("subagentType");
-            }
+            .cloned();
+        if let Some(s) = provided.as_ref().and_then(|v| v.as_str()) {
+            let normalized = crate::core::agents::SubagentType::from_name(s)
+                .map(|t| t.as_str().to_string())
+                .unwrap_or_else(|| s.to_string());
+            obj.insert("subagent_type".to_string(), Value::String(normalized));
+            obj.remove("subagentType");
         }
         args
     }
 
-    /// 递归遍历 JSON args，把字符串数字转为真正的数字类型
-    fn fix_string_numbers(value: Value) -> Value {
+    /// 收集某工具在 schema 里声明为字符串型的参数名。
+    ///
+    /// schema 是参数类型的唯一事实来源（与 `SubagentType::from_name` 同一
+    /// 架构原则），这里只做推导，不维护名单。数组参数经 `items` 下探
+    /// （MultiEdit 的 `edits` 就是这种形状）。
+    fn declared_string_keys(
+        &self,
+        original_name: &str,
+        canonical_name: &str,
+    ) -> std::collections::HashSet<String> {
+        let mut keys = std::collections::HashSet::new();
+        if let Some(tool) = self
+            .tool_registry
+            .get_tool(canonical_name)
+            .or_else(|| self.tool_registry.get_tool(original_name))
+        {
+            Self::collect_string_typed_keys(&tool.parameter_schema(), &mut keys);
+        }
+        keys
+    }
+
+    /// 递归收集 schema 里声明为 `"type": "string"` 的参数名。
+    ///
+    /// anyOf/oneOf 不展开 —— 有组合类型的参数本来就不该被数字化改写，
+    /// 拿不准时保持字符串是安全方向。
+    fn collect_string_typed_keys(schema: &Value, out: &mut std::collections::HashSet<String>) {
+        let Some(obj) = schema.as_object() else {
+            return;
+        };
+        if let Some(Value::Object(props)) = obj.get("properties") {
+            for (key, sub) in props {
+                if sub.get("type").and_then(Value::as_str) == Some("string") {
+                    out.insert(key.clone());
+                } else {
+                    Self::collect_string_typed_keys(sub, out);
+                }
+            }
+        }
+        if let Some(items) = obj.get("items") {
+            Self::collect_string_typed_keys(items, out);
+        }
+    }
+
+    /// 递归遍历 JSON args，把字符串数字转为真正的数字类型。
+    ///
+    /// `protected` 里的键保持原样：这些键在 schema 里声明为字符串
+    /// （`declared_string_keys`），数字样的值也是文本 —— 例如把 old_string
+    /// "42" 换成 "47" 的编辑。转换曾把它们改写成 JSON 数字，随后 serde
+    /// 反序列化直接失败，Edit / MultiEdit / SmartEdit 100% 报错。
+    /// 没有可用 schema 时集合为空，退化为全量转换（与旧行为一致）。
+    fn fix_string_numbers(value: Value, protected: &std::collections::HashSet<String>) -> Value {
         match value {
             Value::Object(map) => {
                 let mut new_map = serde_json::Map::new();
                 for (k, v) in map {
-                    new_map.insert(k, Self::fix_string_numbers(v));
+                    if protected.contains(&k) {
+                        new_map.insert(k, v);
+                    } else {
+                        new_map.insert(k, Self::fix_string_numbers(v, protected));
+                    }
                 }
                 Value::Object(new_map)
             }
-            Value::Array(arr) => {
-                Value::Array(arr.into_iter().map(Self::fix_string_numbers).collect())
-            }
+            Value::Array(arr) => Value::Array(
+                arr.into_iter()
+                    .map(|v| Self::fix_string_numbers(v, protected))
+                    .collect(),
+            ),
             Value::String(s) => {
                 // 尝试解析为 u64/i64/f64，成功后返回数字类型
                 if let Ok(n) = s.parse::<i64>() {
@@ -2701,6 +2752,32 @@ async fn execute_mcp_dynamic_tool(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// `subagent_type` 的 camelCase 与别名写法统一归一到 slug；
+    /// 未识别的自定义名原样透传（架构上归一收敛在 SubagentType::from_name）。
+    #[test]
+    fn subagent_type_aliases_normalize_to_slugs() {
+        let out = ToolExecutor::normalize_agent_args(json!({
+            "subagentType": "GeneralPurpose",
+            "prompt": "p"
+        }));
+        assert_eq!(
+            out["subagent_type"],
+            json!("general_purpose"),
+            "camelCase 键与变体写法必须归一到 slug"
+        );
+        assert!(out.get("subagentType").is_none(), "旧键必须被清掉");
+
+        let out = ToolExecutor::normalize_agent_args(json!({ "subagent_type": "reviewer" }));
+        assert_eq!(out["subagent_type"], json!("code_reviewer"));
+
+        let out = ToolExecutor::normalize_agent_args(json!({ "subagent_type": "my_team_agent" }));
+        assert_eq!(
+            out["subagent_type"],
+            json!("my_team_agent"),
+            "自定义 agent 名必须原样放行"
+        );
+    }
 
     /// 静音 panic hook 跑一段代码：被捕获的 panic 不该往测试输出里打噪音。
     fn without_panic_output<T>(f: impl FnOnce() -> T) -> T {
@@ -4727,5 +4804,55 @@ mod tests {
             error.contains("interrupted"),
             "报错要如实说是被中断，别让模型以为换个写法就能过：{error}"
         );
+    }
+
+    /// 字符串保护集必须从 schema 推导，包含嵌套在 `items` 里的子字段
+    /// （MultiEdit 的 `edits[].old_string` 形状）；数字型字段保持可转换。
+    #[test]
+    fn collected_string_keys_come_from_the_tool_schema() {
+        let mut out = std::collections::HashSet::new();
+        ToolExecutor::collect_string_typed_keys(
+            &json!({
+                "type": "object",
+                "properties": {
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_string": { "type": "string" },
+                                "count": { "type": "integer" }
+                            }
+                        }
+                    },
+                    "note": { "type": "string" }
+                }
+            }),
+            &mut out,
+        );
+        assert!(
+            out.contains("old_string"),
+            "嵌套在 items 里的字符串字段必须豁免"
+        );
+        assert!(out.contains("note"));
+        assert!(!out.contains("count"), "数字型字段必须保持可转换");
+    }
+
+    /// 受保护键的数字样字符串不得被数字化；未保护键保持旧行为（转换）。
+    #[test]
+    fn fix_string_numbers_respects_protected_keys() {
+        let protected: std::collections::HashSet<String> =
+            ["old_string".to_string()].into_iter().collect();
+        let out = ToolExecutor::fix_string_numbers(
+            json!({ "old_string": "42", "count": "7", "list": ["5", "x"] }),
+            &protected,
+        );
+        assert_eq!(
+            out["old_string"],
+            json!("42"),
+            "数字样的替换文本必须保持字符串"
+        );
+        assert_eq!(out["count"], json!(7));
+        assert_eq!(out["list"], json!([5, "x"]));
     }
 }
