@@ -1433,11 +1433,15 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
                             )
                             .await
                         {
+                            // 基线必须归一换行再入库：stale 比对时一边是归一的
+                            // LF，一边如果存 CRLF 原文，CRLF 文件永远判 "变了"，
+                            // 逃生口对 CRLF 文件全废。Read 侧登记走的是
+                            // `read_current_content`（归一），这里必须同一约定。
                             let mut state = global_state.read_file_state.write().await;
                             state.insert(
                                 abs_path.clone(),
                                 ReadFileState {
-                                    content,
+                                    content: normalize_line_endings(&content),
                                     timestamp,
                                     file_system_timestamp,
                                 },

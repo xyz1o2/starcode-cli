@@ -101,9 +101,9 @@ pub(crate) async fn execute_loop_command_in(
                 .map_err(|e| format!("Failed to remove loop task: {}", e))?;
 
             let msg = if removed {
-                format!("✅ 已删除 /loop 任务 `{}`", name)
+                format!("已删除 /loop 任务 `{}`", name)
             } else {
-                format!("⚠️ 未找到 /loop 任务 `{}`", name)
+                format!("未找到 /loop 任务 `{}`", name)
             };
 
             ctx.state
@@ -114,7 +114,7 @@ pub(crate) async fn execute_loop_command_in(
     }
 }
 
-fn format_ts(ts: i64) -> String {
+pub(crate) fn format_ts(ts: i64) -> String {
     match Local.timestamp_opt(ts, 0).single() {
         Some(dt) => dt.format("%Y-%m-%d %H:%M:%S %Z").to_string(),
         None => ts.to_string(),

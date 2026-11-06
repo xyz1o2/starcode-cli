@@ -2106,7 +2106,7 @@ pub async fn desktop(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Command
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// 项目级 goal 存储（`.star/goals.json`），比默认的 `~/.starcode/goals.json` 更贴合仓库
-fn goal_manager() -> Result<crate::core::goal_tracking::GoalManager, String> {
+pub(crate) fn goal_manager() -> Result<crate::core::goal_tracking::GoalManager, String> {
     let path = star_dir()?.join("goals.json");
     let mut mgr =
         crate::core::goal_tracking::GoalManager::new(Some(path.to_string_lossy().as_ref()));
@@ -2114,12 +2114,12 @@ fn goal_manager() -> Result<crate::core::goal_tracking::GoalManager, String> {
     Ok(mgr)
 }
 
-fn short_id(id: &str) -> String {
+pub(crate) fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
 /// 按 id 前缀解析目标；返回完整 id
-fn resolve_goal_id(
+pub(crate) fn resolve_goal_id(
     mgr: &crate::core::goal_tracking::GoalManager,
     prefix: &str,
 ) -> Result<String, String> {
@@ -2139,7 +2139,7 @@ fn resolve_goal_id(
     }
 }
 
-fn goal_status_icon(status: &crate::core::goal_tracking::GoalStatus) -> &'static str {
+pub(crate) fn goal_status_icon(status: &crate::core::goal_tracking::GoalStatus) -> &'static str {
     use crate::core::goal_tracking::GoalStatus as S;
     match status {
         S::InProgress => "▶",

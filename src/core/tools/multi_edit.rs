@@ -1,7 +1,8 @@
 use crate::core::state::GlobalState;
 use crate::core::tools::constants::ToolErrorType;
 use crate::core::tools::edit::{
-    apply_replacement, calculate_replacement, diagnose_replace_failure,
+    apply_replacement, calculate_replacement, detect_line_ending, diagnose_replace_failure,
+    LineEnding,
 };
 use crate::core::tools::tools::{
     BaseDeclarativeTool, Kind, ToolError, ToolInvocation, ToolLocation, ToolResult,
@@ -85,6 +86,10 @@ impl ToolInvocation for MultiEditToolInvocation {
 
         Box::pin(async move {
             let mut file_contents = HashMap::new();
+            // 原始行尾必须在替换前记下来：calculate_replacement 内部会把内容
+            // 归一成 LF，写回时必须还原，否则 MultiEdit 会把 CRLF 文件静默
+            // 转成 LF —— Edit 工具是保留行尾的，两个工具不能行为分叉。
+            let mut line_endings: HashMap<PathBuf, LineEnding> = HashMap::new();
             let final_contents;
 
             // ============ P1.2 改进：前置验证 - 检查所有编辑文件是否已被读取 ============
@@ -169,6 +174,7 @@ impl ToolInvocation for MultiEditToolInvocation {
                                 .map_err(|e| {
                                     format!("Failed to read file {}: {}", edit.file_path, e)
                                 })?;
+                        line_endings.insert(path.clone(), detect_line_ending(&content));
                         file_contents.insert(path.clone(), content);
                     } else {
                         // For new files, content is empty
@@ -337,6 +343,12 @@ impl ToolInvocation for MultiEditToolInvocation {
                             break;
                         }
                     }
+                    // 还原原始行尾：内容经 calculate_replacement 已被归一为
+                    // LF，CRLF 文件必须先转回去再落盘（新文件不在表里，按 LF）。
+                    let content = match line_endings.get(&path) {
+                        Some(LineEnding::CRLF) => content.replace('\n', "\r\n"),
+                        _ => content,
+                    };
                     if let Err(e) = tokio::fs::write(&path, content).await {
                         write_error =
                             Some(format!("Failed to write file {}: {}", path.display(), e));
@@ -364,6 +376,45 @@ impl ToolInvocation for MultiEditToolInvocation {
                     }),
                     data: None,
                 });
+            }
+
+            // ── 写后重登记 read 基线 ──
+            // 不变量："谁在工具控制下改了文件，谁就负责重登记基线"。`Edit`
+            // 成功后会刷新 `read_file_state`，`NotebookEdit` 会走
+            // `record_file_read`，唯独 MultiEdit 此前写完就撒手 —— 基线还停在
+            // Read 时刻的旧内容、mtime 也是旧的。下一次 `Edit` 同个文件时
+            // mtime 检查必中（时间戳旧了），内容比对也必中（基线是改前原文），
+            // 于是 "MultiEdit → Edit 同一文件" 是 100% 的 [EditFileModified] 误报。
+            // `record_file_read` 会同时刷新 `read_file_state` 和
+            // `execution_state` 两张表，与 `Edit` 成功后的语义对齐。失败只告警：
+            // 基线刷新是辅助性质，不能因为它回滚一次已经落盘的批量编辑。
+            for path in &modified_files {
+                let content =
+                    match crate::core::utils::file_utils::read_file_with_encoding_async(path).await
+                    {
+                        Ok(content) => content,
+                        Err(e) => {
+                            log::warn!("MultiEdit: 写后重登记基线失败 {}: {}", path.display(), e);
+                            continue;
+                        }
+                    };
+                // 存档前归一换行，和 `Read` 侧登记（`read_file.rs` 的
+                // `read_current_content`）用同一个约定 —— Edit 的 stale 比对
+                // 两边都按归一后的 LF 比，基线必须用同一把尺子。
+                let normalized = crate::core::tools::edit::normalize_line_endings(&content);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                let abs_path = crate::core::utils::paths::read_state_key(path);
+                crate::core::tools::read_file::record_file_read(
+                    &global_state,
+                    &abs_path,
+                    normalized,
+                    now,
+                    now,
+                )
+                .await;
             }
 
             let file_names: Vec<String> = modified_files
@@ -804,5 +855,87 @@ mod tests {
 
         assert!(result.error.is_some(), "匹配不上必须报错");
         assert_eq!(h.read("a.rs"), "alpha\n", "失败时磁盘必须原封不动");
+    }
+
+    /// 成功落盘后必须把 read 基线重登记为**改后的新内容**。
+    ///
+    /// 回归：MultiEdit 写完文件后如果不动 `read_file_state`，基线停在 Read
+    /// 时刻的旧内容、mtime 也是旧的，下一次 `Edit` 同个文件是 100% 的
+    /// [EditFileModified] 误报（mtime 检查必中，内容比对也必中 —— 基线是改前
+    /// 原文）。`Edit` 成功后自己会刷新基线、`NotebookEdit` 走
+    /// `record_file_read`，MultiEdit 必须同样遵守
+    /// "谁在工具控制下改了文件，谁就重登记基线" 的不变量。修复前这条必挂。
+    #[tokio::test]
+    async fn a_successful_edit_refreshes_the_read_baseline() {
+        let h = Harness::new("multi-edit-baseline-refresh").await;
+        h.write("a.rs", "alpha\n");
+        h.mark_read("a.rs").await;
+
+        let result = h
+            .run(json!({
+                "edits": [{ "file_path": "a.rs", "old_string": "alpha", "new_string": "beta" }]
+            }))
+            .await;
+        assert!(result.error.is_none(), "不该报错：{:?}", result.error);
+
+        let key = crate::core::utils::paths::read_state_key(&h.dir.path().join("a.rs"));
+        let baseline = h
+            .global_state
+            .read_file_state
+            .read()
+            .await
+            .get(&key)
+            .cloned()
+            .expect("成功编辑后基线必须还在表里");
+        assert_eq!(
+            baseline.content,
+            crate::core::tools::edit::normalize_line_endings("beta\n"),
+            "基线必须是改后的内容（按登记约定归一换行），而不是 Read 时刻的旧文"
+        );
+        // 时间戳必须往后走，否则 mtime 检查还会拿旧值去比。
+        let marked_at = {
+            // mark_read 用的就是写入当下；编辑发生在其后，基线时间戳不应早于它。
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        };
+        assert!(
+            baseline.file_system_timestamp <= marked_at,
+            "基线时间戳不能超前于当下"
+        );
+    }
+
+    /// CRLF 文件同样要刷新基线，且存进去的必须是归一（LF）后的内容。
+    ///
+    /// stale 比对时两边都按归一的 LF 比；如果 MultiEdit 把 CRLF 原文塞进基线，
+    /// 下一次 Edit 在 CRLF 文件上还是会误报 "modified since you last read"。
+    #[tokio::test]
+    async fn a_crlf_file_gets_a_normalized_baseline_after_edit() {
+        let h = Harness::new("multi-edit-baseline-crlf").await;
+        h.write("win.rs", "alpha\r\nbeta\r\n");
+        h.mark_read("win.rs").await;
+
+        let result = h
+            .run(json!({
+                "edits": [{ "file_path": "win.rs", "old_string": "alpha", "new_string": "A" }]
+            }))
+            .await;
+        assert!(result.error.is_none(), "不该报错：{:?}", result.error);
+        assert_eq!(h.read("win.rs"), "A\r\nbeta\r\n", "CRLF 行尾必须原样保留");
+
+        let key = crate::core::utils::paths::read_state_key(&h.dir.path().join("win.rs"));
+        let baseline = h
+            .global_state
+            .read_file_state
+            .read()
+            .await
+            .get(&key)
+            .cloned()
+            .expect("成功编辑后基线必须还在表里");
+        assert_eq!(
+            baseline.content, "A\nbeta\n",
+            "基线必须是归一（LF）后的改后内容，否则 CRLF 文件的 stale 比对必误报"
+        );
     }
 }

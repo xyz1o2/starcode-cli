@@ -20,6 +20,7 @@ pub mod hooks;
 pub mod import;
 pub mod init;
 
+pub mod goal_loop;
 pub mod loop_cmd;
 pub mod mcp;
 pub mod memory;
@@ -197,6 +198,7 @@ pub async fn handle_command(
         "init" => init::run(ctx, args).await,
         "plan" => plan::run(ctx, args).await,
         "loop" => loop_wrapper(ctx, args).await,
+        "goal-loop" => goal_loop_wrapper(ctx, args).await,
         "agents" => {
             let args = system::default_subcommand_args("agents", args);
             agents_wrapper(ctx, args).await
@@ -529,6 +531,13 @@ simple_command_wrapper!(
     "loop",
     crate::commands::loop_cmd::LoopCommand,
     crate::commands::loop_cmd::execute_loop_command
+);
+
+simple_command_wrapper!(
+    goal_loop_wrapper,
+    "goal-loop",
+    crate::commands::goal_loop::GoalLoopCommand,
+    crate::commands::goal_loop::execute_goal_loop_command
 );
 
 simple_command_wrapper!(

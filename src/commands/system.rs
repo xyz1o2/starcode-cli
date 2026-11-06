@@ -228,6 +228,35 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         ],
     },
     SlashCommand {
+        name: "goal-loop",
+        alt_names: &[],
+        description: "Loop the agent on a goal until it is done",
+        category: "Automation",
+        sub_commands: &[
+            SlashCommand {
+                name: "start",
+                alt_names: &[],
+                description: "Start looping on a goal (id prefix or new title)",
+                category: "Automation",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "list",
+                alt_names: &[],
+                description: "List goal loops",
+                category: "Automation",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "stop",
+                alt_names: &[],
+                description: "Remove a goal loop by name",
+                category: "Automation",
+                sub_commands: &[],
+            },
+        ],
+    },
+    SlashCommand {
         name: "agents",
         alt_names: &[],
         description: "Subagent definition management",

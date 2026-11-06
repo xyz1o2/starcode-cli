@@ -95,6 +95,9 @@ pub fn spawn_git_status_loop(agent_tx: mpsc::Sender<AgentRequest>, _initial_cwd:
 pub enum BackgroundEvent {
     /// `/loop`：本轮到期、且不在「最近刚跑完」窗口内的任务。
     LoopTasksDue(Vec<crate::core::loops::LoopTask>),
+    /// `/goal-loop`：本轮到期、需要推进一轮的目标循环任务。带轮询时的 cwd ——
+    /// 目标上下文（`.star/goals.json`）要用同一个目录读。
+    GoalLoopTasksDue(Vec<crate::core::loops::GoalLoopTask>, PathBuf),
     /// `/loop`：轮询本身失败（磁盘/网络）。
     LoopFailed(String),
     /// `/remote`：远程控制 inbox 里这一轮取到的请求。
@@ -142,6 +145,28 @@ pub fn spawn_schedule_pollers(
                 // UI 循环没了（退出中），跟着收工。
                 break;
             }
+
+            // `/goal-loop` 与 `/loop` 同一个节拍器：每 tick 单独取一次到期任务。
+            // 收口（goal 完成 / 迭代用尽）已在 tick 内落盘，这里只发待触发的。
+            let goal_event = match crate::core::loops::tick_and_collect_due_goal_loops(
+                &loop_cwd, now_ts,
+            )
+            .await
+            {
+                Ok(due) => BackgroundEvent::GoalLoopTasksDue(due, loop_cwd.clone()),
+                Err(err) => {
+                    crate::utils::logging::append_debug_log_line(&format!(
+                        "[GOAL-LOOP] poll failed: {}",
+                        err
+                    ));
+                    // 复用 None 语义的错误事件没有单独类型；记日志即可，
+                    // 下一 tick 自然重试。
+                    continue;
+                }
+            };
+            if loop_events.send(goal_event).await.is_err() {
+                break;
+            }
         }
     });
 
@@ -179,6 +204,9 @@ pub async fn apply_background_event(
 ) -> bool {
     match event {
         BackgroundEvent::LoopTasksDue(tasks) => apply_loop_tasks(state, agent_tx, tasks).await,
+        BackgroundEvent::GoalLoopTasksDue(tasks, cwd) => {
+            apply_goal_loop_tasks(state, agent_tx, tasks, &cwd).await
+        }
         BackgroundEvent::LoopFailed(err) => {
             state.current_status_line = Some(format!("/loop 调度失败: {}", err));
             false
@@ -232,6 +260,64 @@ async fn apply_loop_tasks(
             .await;
 
         state.current_status_line = Some(format!("已触发 /loop 任务: {}", task.name));
+        needs_redraw = true;
+    }
+    needs_redraw
+}
+
+/// 触发到期的 `/goal-loop` 任务：把目标上下文包成一轮轮次的提示词交给 agent。
+async fn apply_goal_loop_tasks(
+    state: &mut ChatState,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+    due_tasks: Vec<crate::core::loops::GoalLoopTask>,
+    cwd: &Path,
+) -> bool {
+    let mut needs_redraw = false;
+
+    for task in due_tasks {
+        let message_id = state.next_message_id;
+        state.next_message_id += 1;
+
+        // 目标上下文用 tick 时的快照：goal 标题/进度可能在上轮之后被改过。
+        let mut message = format!(
+            "[Goal Loop: {} | iteration {}/{} | every {} minutes]\n",
+            task.name, task.iterations_run, task.max_iterations, task.interval_minutes
+        );
+        match crate::core::loops::goal_prompt_for(cwd, &task.goal_id).await {
+            Ok(Some(prompt)) => message.push_str(&prompt),
+            Ok(None) => {
+                message.push_str(&format!("## Current Goal: {}\n", task.goal_title));
+            }
+            Err(_) => {
+                message.push_str(&format!("## Current Goal: {}\n", task.goal_title));
+            }
+        }
+        message.push_str(
+            "\nAdvance this goal one round: make the next concrete step, verify it, then \
+             stop cleanly. Do not start unrelated work.\n",
+        );
+        message.push_str(&format!(
+            "Once the goal is fully achieved and verified, tell the user to run \
+             `/goal done {}` — the loop stops on its own next tick.",
+            crate::commands::parity::short_id(&task.goal_id)
+        ));
+
+        state.chat_history.push(ChatEntry::user(format!(
+            "[goal-loop:{}] (iteration {}/{}) {}",
+            task.name, task.iterations_run, task.max_iterations, task.goal_title
+        )));
+
+        let _ = agent_tx
+            .send(AgentRequest::SendMessage {
+                message_id,
+                message,
+            })
+            .await;
+
+        state.current_status_line = Some(format!(
+            "已触发 goal-loop: {} (第 {}/{} 轮)",
+            task.name, task.iterations_run, task.max_iterations
+        ));
         needs_redraw = true;
     }
     needs_redraw
