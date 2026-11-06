@@ -520,13 +520,12 @@ fn build_tool_argument_display(
         // 通用倾倒对它是唯一合理的选择，但 server 名值得单独标出来 ——
         // 用户判断"这次调用可不可信"看的就是它。
         _ if name.starts_with("mcp__") => {
-            let parts: Vec<&str> = name.splitn(3, "__").collect();
-            if parts.len() == 3 {
-                extra_info.push(format!("server: {}", parts[1]));
-                summarize_object_inline(obj)
-            } else {
-                summarize_object_inline(obj)
+            // 拆名走统一入口：插件 server 要显示冒号还原后的注册键
+            // （`plugin:exa:exa`），显示原始段会与管理器里的名字对不上。
+            if let Some((server, _)) = crate::core::mcp::split_mcp_tool_name(name) {
+                extra_info.push(format!("server: {server}"));
             }
+            summarize_object_inline(obj)
         }
         _ => summarize_object_inline(obj),
     };

@@ -130,20 +130,15 @@ pub struct ToolParameterLogger;
 
 impl ToolParameterLogger {
     /// 提取MCP工具详情
+    ///
+    /// 拆名走 [`crate::core::mcp::split_mcp_tool_name`] 唯一入口（带插件
+    /// server 冒号还原），不要手写 `splitn(3, "__")` —— 那会把
+    /// `plugin_exa_exa` 这样拼出来的 server 名当真名用。
     pub fn extract_mcp_tool_details(tool_name: &str) -> Option<McpToolDetails> {
-        if !tool_name.starts_with("mcp__") {
-            return None;
-        }
-
-        let parts: Vec<&str> = tool_name.splitn(3, "__").collect();
-        if parts.len() >= 3 {
-            Some(McpToolDetails {
-                server_name: parts[1].to_string(),
-                tool_name: parts[2].to_string(),
-            })
-        } else {
-            None
-        }
+        crate::core::mcp::split_mcp_tool_name(tool_name).map(|(server, tool)| McpToolDetails {
+            server_name: server,
+            tool_name: tool,
+        })
     }
 
     /// 提取技能名称
@@ -464,5 +459,17 @@ mod tests {
         let details = details.unwrap();
         assert_eq!(details.server_name, "server");
         assert_eq!(details.tool_name, "tool");
+    }
+
+    /// 插件 server 的拼名（冒号已换成下划线）拆回来必须是冒号还原后的
+    /// 名字，否则提取出的 server 名和管理器注册键对不上。
+    #[test]
+    fn test_mcp_tool_details_restores_plugin_server_name() {
+        let details =
+            ToolParameterLogger::extract_mcp_tool_details("mcp__plugin_exa_exa__web_search_exa");
+        assert!(details.is_some());
+        let details = details.unwrap();
+        assert_eq!(details.server_name, "plugin:exa:exa");
+        assert_eq!(details.tool_name, "web_search_exa");
     }
 }

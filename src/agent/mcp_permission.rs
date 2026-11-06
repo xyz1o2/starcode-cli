@@ -321,12 +321,9 @@ pub struct MessageSanitizer;
 impl MessageSanitizer {
     /// 清理工具名称用于分析
     pub fn sanitize_tool_name_for_analytics(tool_name: &str) -> String {
-        // 移除MCP前缀
-        if tool_name.starts_with("mcp__") {
-            let parts: Vec<&str> = tool_name.splitn(3, "__").collect();
-            if parts.len() >= 3 {
-                return parts[2].to_string();
-            }
+        // 拆名走统一入口（带插件 server 冒号还原），与全库约定一致。
+        if let Some((_, tool)) = crate::core::mcp::split_mcp_tool_name(tool_name) {
+            return tool;
         }
         tool_name.to_string()
     }
