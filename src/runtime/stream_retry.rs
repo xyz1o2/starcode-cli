@@ -46,12 +46,15 @@ impl StreamRetryPolicy {
             return StreamFailureDecision::GiveUp(diagnose(err_str));
         }
 
+        // Unknown 与 agent 循环同口径：认不出的错误可退避重试（对标
+        // Claude Code `shouldRetry` 的粗判），不做上下文压缩。
         let retry_eligible = matches!(
             kind,
             LlmErrorKind::Network
                 | LlmErrorKind::ServerError
                 | LlmErrorKind::Overloaded
                 | LlmErrorKind::RateLimit
+                | LlmErrorKind::Unknown
         );
         let max_attempts = retry::max_attempts();
         if !retry_eligible || max_attempts == 0 {

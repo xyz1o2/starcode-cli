@@ -841,9 +841,17 @@ impl Agent {
         // ── 2. 可重试类：真正的退避重试，退避期间有可见反馈 ──
         // 只覆盖"等一会儿就能好"的错误。限流交给下面的 RecoveryManager ——
         // 它还会顺手切 provider，比单纯等待强。
+        // Unknown 一并进退避（对标 Claude Code `shouldRetry`：能连上、有
+        // 结构化响应体的错误按 `status >= 500` 粗判可重试；认不出 ≠ 终止）。
+        // 反例记录：曾把反代 554 空回复按 Unknown 裸放进恢复了阶梯 —— 零
+        // 间隔打完重试预算，直接 "Recovery gave up"。退避间隔才是网关恢复
+        // 的正确节奏。
         if matches!(
             kind,
-            LlmErrorKind::Network | LlmErrorKind::ServerError | LlmErrorKind::Overloaded
+            LlmErrorKind::Network
+                | LlmErrorKind::ServerError
+                | LlmErrorKind::Overloaded
+                | LlmErrorKind::Unknown
         ) {
             // `None` 表示次数用尽：不返回，落到下面的 RecoveryManager，
             // 让它决定切 provider 还是收尾。

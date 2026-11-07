@@ -32,7 +32,10 @@ pub enum LlmErrorKind {
     ContextWindow,
     /// 400 / 422 —— 请求本身非法（工具 schema、参数越界等）。重试无意义。
     BadRequest,
-    /// 认不出来。当作可重试（一次），但不做上下文压缩。
+    /// 认不出来 —— 反代/网关的非标准状态码与文案都在此类（早期版本曾以此
+    /// 为据给每个站点补关键词，后废弃：认不出的错误没有枚举完备性，比对标
+    /// 的 `shouldRetry` 的 `status >= 500` 粗判差一个量级）。处理与 Network
+    /// 同通道：进退避重试，不做上下文压缩。
     Unknown,
 }
 
@@ -440,5 +443,19 @@ mod tests {
         let out = diagnose("HTTP 402 Insufficient Balance");
         assert!(out.starts_with("Quota / Billing:"));
         assert!(out.contains("Original error: HTTP 402 Insufficient Balance"));
+    }
+
+    #[test]
+    fn gateway_empty_reply_is_retryable_not_terminal() {
+        // 真实回归：反代/网关在 API 前面直接断连，返回非标准状态码（实测
+        // glowp 发 554），文案明说 "you can retry your request"。统一口径下
+        // 不为任何站点枚举状态码 —— 而是 Unknown 走与 Network 同一条退避
+        // 通道（见 backoff_retry），认不出的错误也以退避间隔重试而不是
+        // 零间隔打完重试预算。
+        let err = r#"Provider error: rig openai stream error: ProviderResponseError: {"error":{"message":"glowp: 554 : refused with no details (an empty reply, often from a firewall or proxy in front of the API rather than the API itself) (554: you can retry your request)","type":"api_error"}}"#;
+        let kind = LlmErrorKind::classify(err);
+        assert_eq!(kind, LlmErrorKind::Unknown);
+        assert!(kind.is_retryable(), "554 empty reply must stay retryable");
+        assert!(!kind.is_terminal());
     }
 }
