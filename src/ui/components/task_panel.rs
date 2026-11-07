@@ -47,6 +47,10 @@ pub struct TaskPanel {
     pub tasks_modified_since_load: bool,          // Track if tasks were modified since startup
     /// 上次装载数据时文件的 mtime。渲染每帧比对一次，发现文件更新就自动 reload。
     pub last_loaded_mtime: Option<std::time::SystemTime>,
+    /// 项目级 active 目标（`.star/goals.json`）。面板首段显示 goal 进度条，
+    /// `/goal progress` 落盘后由 1Hz tick 的 mtime 自愈刷新。
+    pub active_goals: Vec<crate::core::goal_tracking::Goal>,
+    pub last_goals_mtime: Option<std::time::SystemTime>,
 }
 
 use std::path::PathBuf;
@@ -62,6 +66,9 @@ impl TaskPanel {
         let task_manager =
             TaskManager::load_from_file(&path).unwrap_or_else(|_| TaskManager::new());
 
+        let (active_goals, last_goals_mtime) =
+            Self::load_active_goals_from(&Self::goals_file_for_workspace(&workspace));
+
         Self {
             is_visible: false,
             manually_hidden: false,
@@ -74,7 +81,38 @@ impl TaskPanel {
             auto_hide_at: None,
             tasks_modified_since_load: false,
             last_loaded_mtime: mtime,
+            active_goals,
+            last_goals_mtime,
         }
+    }
+
+    /// 项目级 goal 文件。与 `commands::parity::goal_manager` 的存储同源
+    /// （`.star/goals.json`，`Vec<Goal>`）——命令写一笔，面板读一份。
+    pub fn goals_file_for_workspace(workspace: &std::path::Path) -> PathBuf {
+        workspace.join(".star").join("goals.json")
+    }
+
+    /// 只留 InProgress 的目标：`/goal done` 或 progress≥100 之后 goal 自动从
+    /// 面板退场。新建的排前面（与 `/goal list` 一致），文件不存在或解析失败
+    /// 返回空列表。
+    fn load_active_goals_from(
+        path: &std::path::Path,
+    ) -> (
+        Vec<crate::core::goal_tracking::Goal>,
+        Option<std::time::SystemTime>,
+    ) {
+        use crate::core::goal_tracking::GoalStatus;
+        let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+        let goals: Vec<crate::core::goal_tracking::Goal> = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let mut goals: Vec<_> = goals
+            .into_iter()
+            .filter(|g| g.status == GoalStatus::InProgress)
+            .collect();
+        goals.sort_by_key(|g| -g.created_at);
+        (goals, mtime)
     }
 
     fn save(&mut self) {
@@ -107,6 +145,8 @@ impl TaskPanel {
     /// 面板没人通知，就会一直显示旧清单（"更新不及时"）。这里按 mtime 自愈，
     /// 一次 `stat` 的开销可以忽略。编辑中不 reload，否则正在改的行会被冲掉。
     pub fn reload_if_stale(&mut self) {
+        // goal 段与任务编辑互不相干，编辑锁只挡任务清单，goal 进度照常刷新
+        self.reload_goals();
         if self.editing_task_id.is_some() {
             return;
         }
@@ -121,6 +161,30 @@ impl TaskPanel {
         };
         if self.last_loaded_mtime != Some(mtime) {
             self.reload();
+        }
+    }
+
+    /// goals.json 的 mtime 自愈：`/goal progress` 直接落盘、不经过任何 UI
+    /// 通知路径，靠 1Hz tick 走这里拿到最新进度（与任务清单同一套机制）。
+    fn reload_goals(&mut self) {
+        let path = Self::goals_file_for_workspace(
+            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        );
+        let Some(mtime) = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+        else {
+            // 文件被删掉了：清空面板段落，别让旧进度挂着
+            if self.last_goals_mtime.is_some() || !self.active_goals.is_empty() {
+                self.active_goals.clear();
+                self.last_goals_mtime = None;
+            }
+            return;
+        };
+        if self.last_goals_mtime != Some(mtime) {
+            let (goals, goal_mtime) = Self::load_active_goals_from(&path);
+            self.active_goals = goals;
+            self.last_goals_mtime = goal_mtime;
         }
     }
 
@@ -342,16 +406,19 @@ impl TaskPanel {
     /// `agent_active`），两处都由 turn 生命周期驱动而不是数据状态驱动
     /// （对标 CCB issue #58297 的 v2.1.141 修复）。
     pub fn check_auto_hide(&mut self, agent_active: bool) {
-        let has_active = self
-            .task_manager
-            .graph
-            .nodes
-            .values()
-            .any(|n| match n.status {
-                TaskStatus::Pending | TaskStatus::Blocked => true,
-                TaskStatus::InProgress => agent_active,
-                TaskStatus::Completed | TaskStatus::Skipped => false,
-            });
+        // active goal 常驻面板：目标循环一跑几小时是常态，5 秒收起计时
+        // 不该把 goal 进度条一起收走。手动隐藏不受影响（is_visible=false）。
+        let has_active = !self.active_goals.is_empty()
+            || self
+                .task_manager
+                .graph
+                .nodes
+                .values()
+                .any(|n| match n.status {
+                    TaskStatus::Pending | TaskStatus::Blocked => true,
+                    TaskStatus::InProgress => agent_active,
+                    TaskStatus::Completed | TaskStatus::Skipped => false,
+                });
 
         if has_active {
             self.auto_hide_at = None;
@@ -430,48 +497,55 @@ impl TaskPanel {
     }
 
     pub fn next(&mut self) {
-        // Flatten logic needed to navigate tree
+        // Flatten logic needed to navigate tree。高亮索引在 goal 行上多转一圈：
+        // 可选区间是 [goal 行, goal 行 + flat.len())，前面的偏移属于 goal 段。
         let flat = self.flatten_tasks();
-        if flat.is_empty() {
+        let offset = self.active_goals.len();
+        let selectable = offset + flat.len();
+        if selectable == 0 {
             return;
         }
 
         let i = match self.list_state.selected() {
             Some(i) => {
-                if i >= flat.len() - 1 {
-                    0
+                if i >= selectable - 1 {
+                    offset
                 } else {
                     i + 1
                 }
             }
-            None => 0,
+            None => offset,
         };
         self.list_state.select(Some(i));
     }
 
     pub fn previous(&mut self) {
         let flat = self.flatten_tasks();
-        if flat.is_empty() {
+        let offset = self.active_goals.len();
+        let selectable = offset + flat.len();
+        if selectable == 0 {
             return;
         }
 
         let i = match self.list_state.selected() {
             Some(i) => {
-                if i == 0 {
-                    flat.len() - 1
+                if i <= offset {
+                    selectable - 1
                 } else {
                     i - 1
                 }
             }
-            None => 0,
+            None => selectable - 1,
         };
         self.list_state.select(Some(i));
     }
 
     pub fn get_selected_task_id(&self) -> Option<String> {
         let flat = self.flatten_tasks();
+        let offset = self.active_goals.len();
         self.list_state
             .selected()
+            .and_then(|i| (i >= offset).then(|| i - offset))
             .and_then(|i| flat.get(i).map(|(node, _)| node.id.clone()))
     }
 
@@ -879,7 +953,27 @@ pub fn render_task_panel_mut(
         }
     }
 
-    let items: Vec<ListItem> = if flat_tasks.is_empty() {
+    // 首段：active goal 的进度条。`/goal progress` 落盘 → 1Hz tick mtime reload
+    // → 下一帧条子跟着动；完成后（100% 或 /goal done）自动退场。
+    let mut items: Vec<ListItem> = Vec::new();
+    for goal in &panel.active_goals {
+        let short_goal_id: String = goal.id.chars().take(8).collect();
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled("🎯 ", Style::default().fg(theme.primary)),
+            Span::styled(goal.title.clone(), Style::default().fg(theme.primary)),
+            Span::styled(
+                format!(
+                    "  [{}] {}% · {}",
+                    progress_bar(goal.progress, 10),
+                    goal.progress,
+                    short_goal_id
+                ),
+                Style::default().fg(theme.subtle),
+            ),
+        ])));
+    }
+
+    let task_items: Vec<ListItem> = if flat_tasks.is_empty() && panel.active_goals.is_empty() {
         let label = if panel.view_mode == TaskViewMode::Active {
             "No active tasks. Use Ctrl+N to add or /task add."
         } else {
@@ -980,6 +1074,7 @@ pub fn render_task_panel_mut(
             })
             .collect()
     };
+    items.extend(task_items);
 
     // 对标 CCB TaskListV2 standalone 头：` 5 tasks (2 done, 1 in progress, 2 open) `。
     // 计数描述状态分布，agent 在跑时再跟上当前进行中项的 activeForm
@@ -1074,6 +1169,12 @@ pub fn render_task_panel_mut(
     }
 }
 
+/// 10 格进度条：`███░░░░░░░`。自由函数便于单测 0/50/100/越界的形态。
+fn progress_bar(pct: u8, width: usize) -> String {
+    let filled = (pct.min(100) as usize) * width / 100;
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+}
+
 /// 取当前进行中任务的展示文案（activeForm 优先，回退 title），按 `ordered_ids()`
 /// 的清单顺序取第一个进行中项——和清单里看到的顺序一致。无进行中项返回 None。
 ///
@@ -1155,6 +1256,33 @@ mod tests {
             auto_hide_at: None,
             tasks_modified_since_load: false,
             last_loaded_mtime: None,
+            active_goals: Vec::new(),
+            last_goals_mtime: None,
+        }
+    }
+
+    fn goal(
+        id: &str,
+        title: &str,
+        status: crate::core::goal_tracking::GoalStatus,
+        progress: u8,
+    ) -> crate::core::goal_tracking::Goal {
+        use crate::core::goal_tracking::{Goal, GoalPriority};
+        Goal {
+            id: id.to_string(),
+            title: title.to_string(),
+            description: None,
+            status,
+            priority: GoalPriority::Medium,
+            created_at: 0,
+            updated_at: 0,
+            completed_at: None,
+            sub_goals: Vec::new(),
+            tags: Vec::new(),
+            progress,
+            parent_id: None,
+            deadline: None,
+            milestones: Vec::new(),
         }
     }
 
@@ -1406,5 +1534,135 @@ mod tests {
             Some(std::time::UNIX_EPOCH),
             "编辑中不能 reload"
         );
+    }
+
+    // ── D. goal 进度段 ─────────────────────────────────────────────
+
+    #[test]
+    fn load_active_goals_keeps_inprogress_only_newest_first() {
+        use crate::core::goal_tracking::GoalStatus;
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().join(".star");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("goals.json"),
+            serde_json::to_string(&[
+                goal("11111111-0000", "新的 50%", GoalStatus::InProgress, 50),
+                goal("22222222-0000", "完成的不显示", GoalStatus::Completed, 100),
+                goal("33333333-0000", "更早的", GoalStatus::InProgress, 10),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (goals, mtime) = TaskPanel::load_active_goals_from(&d.join("goals.json"));
+        assert!(mtime.is_some(), "要拿到 mtime 才能做自愈比对");
+        assert_eq!(goals.len(), 2, "完成/取消的 goal 不进面板");
+        assert_eq!(
+            goals[0].title, "新的 50%",
+            "新的排前面（与 /goal list 一致）"
+        );
+        assert_eq!(goals[0].progress, 50);
+    }
+
+    #[test]
+    fn load_active_goals_survives_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (goals, mtime) =
+            TaskPanel::load_active_goals_from(&dir.path().join(".star").join("goals.json"));
+        assert!(goals.is_empty());
+        assert!(mtime.is_none());
+    }
+
+    #[test]
+    fn active_goal_holds_the_panel_open() {
+        use crate::core::goal_tracking::GoalStatus;
+        let mut panel = empty_panel();
+        panel.active_goals.push(goal(
+            "11111111-0000",
+            "测试 goal",
+            GoalStatus::InProgress,
+            50,
+        ));
+        panel.is_visible = true;
+
+        panel.check_auto_hide(false);
+        assert!(
+            panel.auto_hide_at.is_none(),
+            "active goal 不该启动收起计时（不然 5 秒后进度条被收走）"
+        );
+        assert!(panel.is_visible);
+    }
+
+    #[test]
+    fn selection_offsets_skip_goal_rows() {
+        use crate::core::goal_tracking::GoalStatus;
+        let mut panel = empty_panel();
+        panel.active_goals.push(goal(
+            "11111111-0000",
+            "测试 goal",
+            GoalStatus::InProgress,
+            50,
+        ));
+        // 两个任务：偏移 1 之后才是任务行（TaskNode 的 id 是 UUID，先接住）
+        let t1 = TaskNode::new("task one".into());
+        let t1_id = t1.id.clone();
+        panel.task_manager.graph.root_ids.push(t1_id.clone());
+        panel.task_manager.graph.nodes.insert(t1_id.clone(), t1);
+        let t2 = TaskNode::new("task two".into());
+        let t2_id = t2.id.clone();
+        panel.task_manager.graph.root_ids.push(t2_id.clone());
+        panel.task_manager.graph.nodes.insert(t2_id.clone(), t2);
+
+        // 索引 0 是 goal 行：不属于任务，返回 None
+        panel.list_state.select(Some(0));
+        assert_eq!(panel.get_selected_task_id(), None);
+
+        panel.list_state.select(Some(1));
+        assert_eq!(
+            panel.get_selected_task_id(),
+            Some(t1_id.clone()),
+            "跳过 goal 偏移索到第一个任务"
+        );
+        panel.list_state.select(Some(2));
+        assert_eq!(
+            panel.get_selected_task_id(),
+            Some(t2_id),
+            "索引 2 → 第二个任务"
+        );
+
+        // next 从 None 出发落在第一个任务（跳过 goal 偏移），末尾之后回绕
+        panel.list_state.select(None);
+        panel.next();
+        assert_eq!(panel.list_state.selected(), Some(1), "next → 第一个任务");
+        panel.next();
+        assert_eq!(panel.list_state.selected(), Some(2));
+        panel.next();
+        assert_eq!(
+            panel.list_state.selected(),
+            Some(1),
+            "末尾之后回到第一个任务"
+        );
+
+        // previous 从 None 出发落在最后一个任务，再往前回到第一个任务
+        panel.list_state.select(None);
+        panel.previous();
+        assert_eq!(
+            panel.list_state.selected(),
+            Some(2),
+            "previous → 最后一个任务"
+        );
+        panel.previous();
+        assert_eq!(panel.list_state.selected(), Some(1), "往前回到第一个任务");
+        panel.previous();
+        assert_eq!(panel.list_state.selected(), Some(2), "不会越过 goal 行越界");
+    }
+
+    #[test]
+    fn progress_bar_boundaries() {
+        assert_eq!(progress_bar(0, 10), "░░░░░░░░░░");
+        assert_eq!(progress_bar(50, 10), "█████░░░░░");
+        assert_eq!(progress_bar(100, 10), "██████████");
+        assert_eq!(progress_bar(150, 10), "██████████");
     }
 }

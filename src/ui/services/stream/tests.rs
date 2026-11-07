@@ -881,12 +881,12 @@ async fn empty_reasoning_delta_does_not_create_thought_entry() {
     assert!(state.thinking_started_at.is_none());
 }
 
-/// 端到端：推理正文流进来 → 思考块**自动展开**（用户实时看到推理）。
+/// 端到端：推理正文流进来 → 思考块**保持收起**（默认不展开）。
 ///
-/// 这是"只知道模型在想"和"知道模型在想什么"的分界。旧实现永远折叠，
-/// 推理正文只在用户手动点开后才可见 —— 而多数人根本不知道可以点。
+/// 推理正文一展开就把整屏铺满、回答被顶出视口，多数用户要的是"知道它在想"
+/// 这一行收据。想看正文用点击展开或 Ctrl+O transcript。
 #[tokio::test]
-async fn streaming_reasoning_auto_expands_the_thinking_block() {
+async fn streaming_reasoning_keeps_the_thinking_block_collapsed() {
     let mut state = ChatState::new();
     let (agent_tx, _agent_rx) = mpsc::channel(1);
     let message_id = 21;
@@ -905,8 +905,8 @@ async fn streaming_reasoning_auto_expands_the_thinking_block() {
 
     let idx = state.chat_history.len() - 1;
     assert!(
-        state.is_thinking_expanded(idx, true),
-        "推理正文流进来时，思考块必须自动展开"
+        !state.is_thinking_expanded(idx, true),
+        "推理正文流进来时思考块默认收起"
     );
     assert!(
         state.chat_history[idx].reasoning_started_at.is_some(),
@@ -937,25 +937,15 @@ async fn a_finished_thinking_block_is_scheduled_to_collapse() {
     crate::ui::services::stream::finalize_entry_streaming(&mut state, idx);
 
     assert!(
-        state.thinking_collapse_at.is_some(),
-        "思考结束必须排定自动收起"
-    );
-    assert!(
         state.chat_history[idx]
             .reasoning_finished_elapsed_ms
             .is_some(),
         "思考结束必须冻结耗时（否则标签停在进行态）"
     );
-
-    // 延迟到期 → 收起。
-    state
-        .thinking_collapse_at
-        .as_mut()
-        .map(|(_, due)| *due -= std::time::Duration::from_secs(5));
-    assert!(state.tick_thinking_collapse());
+    // 默认收起：收据本来就是收起态，不需要（也不应）发生布局变化。
     assert!(
         !state.is_thinking_expanded(idx, false),
-        "到期后必须收成一行收据"
+        "思考结束后默认收成一行收据"
     );
 }
 

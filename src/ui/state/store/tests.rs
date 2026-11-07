@@ -202,10 +202,10 @@ fn toggle_transcript_mode_drives_thinking_expansion() {
     assert!(state.expanded_thinking_indices.is_empty());
 }
 
-/// 思考块在流式期间**自动展开** —— 用户要能实时看到推理正文，
-/// 而不是只看到一个"模型在想"。
+/// 思考块默认收起 —— 即使还在流式。推理正文铺满整屏会把回答顶出视口，
+/// 用户想看正文再手动展开（点击／回车／Ctrl+O transcript）。
 #[test]
-fn a_streaming_thinking_block_is_expanded_by_default() {
+fn a_thinking_block_stays_collapsed_by_default_even_while_streaming() {
     let mut state = ChatState::new();
     state.chat_history.clear();
     let mut entry = ChatEntry::assistant("");
@@ -214,8 +214,8 @@ fn a_streaming_thinking_block_is_expanded_by_default() {
     state.chat_history.push(entry);
 
     assert!(
-        state.is_thinking_expanded(0, true),
-        "流式中的思考块必须自动展开"
+        !state.is_thinking_expanded(0, true),
+        "流式中的思考块默认也是收起的"
     );
 }
 
@@ -234,12 +234,15 @@ fn a_finished_thinking_block_collapses_back() {
     );
 }
 
-/// 手动干预压过自动化：用户收起过的块，流式期间不许被撑开。
+/// 手动干预压过自动化：用户收起过的块，后续不许被撑开。
 ///
 /// 这是"手动意图永远压过自动化"的硬约束 —— 否则用户刚按下去，
 /// 下一个 delta 就把它弹开，等于这个开关不存在。
+///
+/// 默认收起后，流式中的点按不再是"收起"而是"展开"：锁两个方向 ——
+/// 手动展开后 receiver 端的自动行为不能反悔，手动收起后也不能被弹开。
 #[test]
-fn a_manual_collapse_survives_the_next_streaming_delta() {
+fn a_manual_thinking_state_survives_later_automation() {
     let mut state = ChatState::new();
     state.chat_history.clear();
     let mut entry = ChatEntry::assistant("");
@@ -247,14 +250,17 @@ fn a_manual_collapse_survives_the_next_streaming_delta() {
     entry.is_streaming = Some(true);
     state.chat_history.push(entry);
 
-    // 流式中点一下 = 收起。
-    assert!(state.toggle_thinking_expansion(0));
-    assert!(
-        !state.is_thinking_expanded(0, true),
-        "手动收起后，即使还在流式也不能自动撑开"
-    );
+    // 默认收起 → 流式中点一下 = 展开。
+    assert!(!state.toggle_thinking_expansion(0));
+    assert!(state.is_thinking_expanded(0, true), "手动展开要立即生效");
 
-    // 下一个 delta 触发自动展开 —— 但手动覆盖必须挡住它。
+    // 即使流式结束后的自动收起也不能把手动展开收掉。
+    state.schedule_thinking_collapse(0);
+    assert!(state.is_thinking_expanded(0, false), "手动展开压过自动收起");
+
+    // 再点一下 = 手动收起，自动行为同样不能再撑开它。
+    assert!(state.toggle_thinking_expansion(0));
+    assert!(!state.is_thinking_expanded(0, true));
     state.auto_expand_thinking(0);
     assert!(
         !state.is_thinking_expanded(0, true),

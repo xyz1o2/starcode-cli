@@ -671,8 +671,8 @@ pub async fn handle_stream_update(
                     state.rendered_cache.remove(&idx);
                     state.virtual_list.mark_dirty(idx);
                 }
-                // 自动展开：流式期间让用户实时看到推理正文。
-                state.auto_expand_thinking(idx);
+                // 思考块默认保持收起（见 `is_thinking_expanded`）：正文一
+                // 展开就把回答顶出视口。用户想看用点击展开或 Ctrl+O。
             }
         }
         StreamMessage::Thinking {
@@ -735,8 +735,6 @@ pub async fn handle_stream_update(
                     state.rendered_cache.remove(&idx);
                     state.virtual_list.mark_dirty(idx);
                 }
-                // 自动展开：流式期间让用户实时看到推理正文。
-                state.auto_expand_thinking(idx);
             }
         }
         StreamMessage::AssistantNote {

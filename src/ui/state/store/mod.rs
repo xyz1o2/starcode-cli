@@ -1181,21 +1181,21 @@ impl ChatState {
     /// 优先级（从高到低）：
     /// 1. transcript 模式：整轮原始输出摊开，所有思考块都展开；
     /// 2. 用户手动干预过：用户说什么就是什么，自动化不许改；
-    /// 3. 流式进行中：自动展开，让用户实时看到推理正文；
-    /// 4. 其余：收起成一行收据。
+    /// 3. 其余：默认收起成一行收据。
+    ///
+    /// 默认不再随流式自动展开：推理正文一展开就把整屏铺满，回答反而被顶
+    /// 出视口，用户要的是"知道它在想"而不是每轮都读完整推理。想看正文用
+    /// 点击／回车展开，或 Ctrl+O 进 transcript 模式一次看全部。
     ///
     /// 以前"是否展开"散在渲染层里就地算（`is_transcript_mode ||
     /// expanded_thinking_indices.contains(&idx)`），自动行为无处安放 ——
     /// 这就是"只能看到它在思考"的原因：折叠是唯一的常态，推理正文永远藏着。
-    pub fn is_thinking_expanded(&self, entry_idx: usize, is_streaming: bool) -> bool {
+    pub fn is_thinking_expanded(&self, entry_idx: usize, _is_streaming: bool) -> bool {
         if self.is_transcript_mode {
             return true;
         }
         if let Some(&manual) = self.thinking_manual_override.get(&entry_idx) {
             return manual;
-        }
-        if is_streaming {
-            return true;
         }
         self.expanded_thinking_indices.contains(&entry_idx)
     }
@@ -1236,8 +1236,9 @@ impl ChatState {
 
     /// 流式开始：思考块自动展开。
     ///
-    /// 实时看到推理正文，是"知道模型在想什么"和"只知道模型在想"的分界。
-    /// 用户手动收起过的块保持收起 —— 否则用户刚按下去就被撑开，等于没有这个开关。
+    /// 默认已停用（UI 不再调用）：推理正文铺满整屏会把回答顶出视口。
+    /// 保留方法与手动覆盖判定 —— 未来若加"默认展开"的配置位，自动展开与
+    /// 手动意图压过自动的规则仍从这里走。
     pub fn auto_expand_thinking(&mut self, entry_idx: usize) {
         if self.thinking_manual_override.contains_key(&entry_idx) {
             return;

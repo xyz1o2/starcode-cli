@@ -65,8 +65,12 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     let task_panel_visible = state.task_panel.is_visible;
     let task_panel_h = if task_panel_visible {
         let task_count = state.task_panel.flatten_tasks().len();
-        // Compact: title + tasks + borders, capped at 8 rows
-        (task_count as u16 + 3).min(8).max(3)
+        // goal 进度条也在面板里：高度把 goal 段一起数进去，cap 随 goal 行数上浮
+        // ——否则任务多时 8 行 cap 先到，goal 段会被挤出可视面积。
+        let goal_count = state.task_panel.active_goals.len();
+        (task_count as u16 + goal_count as u16 + 3)
+            .min(8 + goal_count as u16)
+            .max(3)
     } else {
         0u16
     };
