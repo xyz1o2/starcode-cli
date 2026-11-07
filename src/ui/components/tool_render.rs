@@ -20,6 +20,8 @@ pub fn get_tool_status_icon(
     match &entry.status {
         Some(EntryStatus::Success) => ("✓", theme.tool_success),
         Some(EntryStatus::Error) => ("✗", theme.tool_error),
+        // 软失败：回合里非终结的工具报错 —— 灰化 ✗，不抢视觉焦点
+        Some(EntryStatus::SoftError) => ("✗", theme.subtle),
         Some(EntryStatus::Warning) => ("⚠", theme.warning),
         Some(EntryStatus::Cancelled) => ("⊘", theme.inactive),
         Some(EntryStatus::InProgress) => ("●", theme.primary),
@@ -55,6 +57,8 @@ pub fn get_tool_name_color(entry: &crate::types::ChatEntry, theme: &Theme) -> Co
         if let Some(tr) = &entry.tool_result {
             if tr.success {
                 theme.tool_success
+            } else if entry.status == Some(EntryStatus::SoftError) {
+                theme.subtle
             } else {
                 theme.tool_error
             }
@@ -645,7 +649,10 @@ fn render_rich_tool_content(
 
     // 此函数只处理 ToolResult
     let tool_color = if let Some(tr) = &entry.tool_result {
-        if tr.success {
+        if entry.status == Some(EntryStatus::SoftError) {
+            // 软失败：灰化，工具失败不代表回合失败
+            theme.subtle
+        } else if tr.success {
             theme.tool_success
         } else {
             theme.tool_error
@@ -965,11 +972,26 @@ fn render_rich_tool_content(
             }
         }
 
-        render_tool_result_text(&mut lines, text, tr.success, tool_inner_width, expanded);
+        let soft = entry.status == Some(EntryStatus::SoftError);
+        render_tool_result_text(
+            &mut lines,
+            text,
+            tr.success,
+            soft,
+            tool_inner_width,
+            expanded,
+        );
     } else {
         // 回退：tool_result 字段缺失时（如会话恢复），使用 entry.content 渲染
         if !entry.content.trim().is_empty() {
-            render_tool_result_text(&mut lines, &entry.content, true, tool_inner_width, expanded);
+            render_tool_result_text(
+                &mut lines,
+                &entry.content,
+                true,
+                false,
+                tool_inner_width,
+                expanded,
+            );
         }
     }
 
@@ -1141,10 +1163,12 @@ fn push_expand_hint(lines: &mut Vec<Line<'static>>) {
 }
 
 /// ToolResult 文本渲染的公共函数（折叠态：第一行预览 + 行数；展开态：完整内容）
+/// `soft` = 软失败（回合未因它终结）：错误正文不刷红，灰化呈现
 fn render_tool_result_text(
     lines: &mut Vec<Line<'static>>,
     text: &str,
     success: bool,
+    soft: bool,
     width: usize,
     expanded: bool,
 ) {
@@ -1218,6 +1242,12 @@ fn render_tool_result_text(
     }
 
     if !success {
+        // 软失败灰化（不会终结回合的工具报错），硬失败保持红色
+        let error_style = if soft {
+            crate::ui::themes::theme::muted_style()
+        } else {
+            Style::default().fg(Color::Red)
+        };
         for line in result_text.lines() {
             // 错误输出同样保留 ANSI 颜色，无色部分补红色（对标 OutputLine isError）
             if line.contains('\x1b') {
@@ -1231,17 +1261,14 @@ fn render_tool_result_text(
                     for span in row.iter_mut() {
                         if span.style == Style::default() {
                             let content = span.content.clone();
-                            *span = Span::styled(content, Style::default().fg(Color::Red));
+                            *span = Span::styled(content, error_style);
                         }
                     }
                     lines.push(Line::from(row));
                 }
             } else {
                 let stripped = crate::ui::utils::render::strip_ansi_codes(line);
-                lines.push(Line::from(vec![Span::styled(
-                    stripped,
-                    Style::default().fg(Color::Red),
-                )]));
+                lines.push(Line::from(vec![Span::styled(stripped, error_style)]));
             }
         }
     } else {

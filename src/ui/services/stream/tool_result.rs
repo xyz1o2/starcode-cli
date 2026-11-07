@@ -219,7 +219,8 @@ pub(super) fn handle_tool_result_message(
             if !should_suppress_redundant_result_after_confirmation(&tool_call, &tool_result) {
                 let mut entry =
                     ChatEntry::tool_result(content, tool_call.clone(), tool_result.clone())
-                        .with_streaming(false);
+                        .with_streaming(false)
+                        .with_soft_error_on_failure(&tool_result);
                 entry.tool_elapsed_ms = elapsed_ms;
                 state.chat_history.push(entry);
             }
@@ -229,7 +230,8 @@ pub(super) fn handle_tool_result_message(
             state.rendered_cache.remove(&i);
             state.virtual_list.mark_dirty(i);
             let mut entry = ChatEntry::tool_result(content, tool_call.clone(), tool_result.clone())
-                .with_streaming(false);
+                .with_streaming(false)
+                .with_soft_error_on_failure(&tool_result);
             entry.tool_elapsed_ms = elapsed_ms;
             // 插入到对应 ToolCall 之后（而非追加到末尾）：
             // 并行工具调用时结果按完成顺序到达，若一律 push 到末尾，
@@ -240,7 +242,8 @@ pub(super) fn handle_tool_result_message(
         }
     } else {
         let mut entry = ChatEntry::tool_result(content, tool_call.clone(), tool_result.clone())
-            .with_streaming(false);
+            .with_streaming(false)
+            .with_soft_error_on_failure(&tool_result);
         entry.tool_elapsed_ms = elapsed_ms;
         state.chat_history.push(entry);
     }

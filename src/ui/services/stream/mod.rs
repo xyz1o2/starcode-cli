@@ -42,7 +42,7 @@ use crate::core::i18n;
 use crate::runtime::messages::{
     AgentRequest, RuntimeSettingsAcknowledgement, StreamMessage, StreamStartKind,
 };
-use crate::types::{ChatEntry, ChatEntryType, StarToolCall, ToolResult};
+use crate::types::{ChatEntry, ChatEntryType, EntryStatus, StarToolCall, ToolResult};
 use crate::ui::app::logic::{
     emit_status_text, enqueue_user_message, recover_missing_tool_results, save_tool_output,
 };
@@ -1754,6 +1754,30 @@ async fn handle_error_message(
 
     recover_missing_tool_results(state, message_id, &error);
     let assistant_idx = state.stream_targets.get(&message_id).copied();
+    // 回合终结性门控的红 ✗ 提级：回合走到 Error，说明这一轮没有产出正常回复，
+    // 本回合的软失败（SoftError）很可能就是原因 —— 全部提级回红，让用户一眼
+    // 看到是哪些工具坏了。正常 Done 收尾则保持软失败灰化不动。
+    let turn_start_idx = state
+        .message_start_indices
+        .get(&message_id)
+        .copied()
+        .unwrap_or(0);
+    for idx in turn_start_idx..state.chat_history.len() {
+        let is_failed_result = {
+            let e = &state.chat_history[idx];
+            e.entry_type == ChatEntryType::ToolResult
+                && e.tool_result
+                    .as_ref()
+                    .map(|tr| !tr.success)
+                    .unwrap_or(false)
+                && e.status != Some(EntryStatus::Error)
+        };
+        if is_failed_result {
+            state.chat_history[idx].status = Some(EntryStatus::Error);
+            state.rendered_cache.remove(&idx);
+            state.virtual_list.mark_dirty(idx);
+        }
+    }
     let cancelling_graceful = state
         .cancelling_since
         .map(|t| t.elapsed() < std::time::Duration::from_millis(1500))

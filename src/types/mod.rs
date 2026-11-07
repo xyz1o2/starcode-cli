@@ -61,6 +61,11 @@ pub enum EntryStatus {
     Cancelled,  // 已取消
     InProgress, // 进行中
     Pending,    // 等待中
+    /// 软失败：工具执行报错但回合仍在继续，红 ✗ 提级按「回合终结性」门控 ——
+    /// 正常收尾保持灰化折叠显示，回合出错（Error）时提级回红（见
+    /// `stream::handle_error_message`）。对标 Claude Code：工具失败不阻断回合时
+    /// 只折叠呈现，不抢视觉焦点。
+    SoftError,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,6 +295,15 @@ impl ChatEntry {
         entry
     }
 
+    /// 失败的工具结果在到达时就置为软失败，避免回合中途闪一帧红 ✗ 又在
+    /// Done 后变暗 —— 提级只发生在回合走到 Error（`handle_error_message`）时。
+    pub fn with_soft_error_on_failure(mut self, tool_result: &ToolResult) -> Self {
+        if !tool_result.success {
+            self.status = Some(EntryStatus::SoftError);
+        }
+        self
+    }
+
     pub fn with_streaming(mut self, is_streaming: bool) -> Self {
         self.is_streaming = Some(is_streaming);
         self
@@ -441,6 +455,7 @@ impl ChatEntry {
         match &self.status {
             Some(EntryStatus::Success) => "✓",
             Some(EntryStatus::Error) => "✗",
+            Some(EntryStatus::SoftError) => "✗",
             Some(EntryStatus::Warning) => "⚠",
             Some(EntryStatus::Cancelled) => "⊘",
             Some(EntryStatus::InProgress) => "●",
@@ -453,6 +468,7 @@ impl ChatEntry {
         match &self.status {
             Some(EntryStatus::Success) => ratatui::style::Color::Green,
             Some(EntryStatus::Error) => ratatui::style::Color::Red,
+            Some(EntryStatus::SoftError) => ratatui::style::Color::DarkGray,
             Some(EntryStatus::Warning) => ratatui::style::Color::Yellow,
             Some(EntryStatus::Cancelled) => ratatui::style::Color::DarkGray,
             Some(EntryStatus::InProgress) => ratatui::style::Color::Blue,

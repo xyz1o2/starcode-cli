@@ -1,6 +1,6 @@
 use crate::core::i18n;
 use crate::runtime::messages::AgentRequest;
-use crate::types::{ChatEntry, ChatEntryType, ToolResult};
+use crate::types::{ChatEntry, ChatEntryType, EntryStatus, ToolResult};
 use crate::ui::services::at_processor;
 use crate::ui::state::ChatState;
 use crate::ui::utils::text::{is_status_text, sanitize_filename, strip_tool_running_prefix};
@@ -130,6 +130,9 @@ pub fn recover_missing_tool_results(state: &mut ChatState, message_id: u64, reas
             llm_content: None,
         });
         state.chat_history[i].is_streaming = Some(false);
+        // 中断的工具结果同样是软失败：回合还在收尾，不提级红 ✗
+        // （回合走到 Error 时由 handle_error_message 统一提级）。
+        state.chat_history[i].status = Some(EntryStatus::SoftError);
 
         append_transcript_event(
             state,

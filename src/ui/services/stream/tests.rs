@@ -2176,3 +2176,138 @@ async fn a_model_failure_never_opens_a_modal_but_stays_visible() {
         );
     }
 }
+
+// ── 软失败 / 回合终结性门控：工具失败不终结回合时只灰化，回合 Error 才提级红 ──
+
+/// 失败的工具结果到达时应置为 SoftError，正常 Done 收尾后保持软失败。
+///
+///之前失败结果一律红 ✗：模型自己重试就能修好的工具报错（比如一次 Grep 空手而归、
+/// Bash 退出码非零）会在流水里挂满红灯，视觉上和"回合失败了"分不开。
+#[tokio::test]
+async fn failed_tool_results_arrive_soft_and_stay_soft_on_normal_done() {
+    let mut state = ChatState::new();
+    let (agent_tx, _agent_rx) = mpsc::channel(1);
+    let message_id = 71;
+
+    handle_stream_update(
+        &mut state,
+        StreamMessage::Start {
+            message_id,
+            kind: StreamStartKind::UserTurn {
+                model: "gpt-4o".to_string(),
+            },
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+
+    handle_tool_result_message(
+        &mut state,
+        message_id,
+        StarToolCall {
+            id: "call-1".to_string(),
+            ..agent_tool_call()
+        },
+        ToolResult {
+            success: false,
+            output: None,
+            error: Some("bash exited with code 1".to_string()),
+            data: None,
+            llm_content: None,
+        },
+    );
+
+    let entry = state
+        .chat_history
+        .iter()
+        .find(|e| e.entry_type == ChatEntryType::ToolResult)
+        .expect("failed result must create a ToolResult entry");
+    assert_eq!(
+        entry.status,
+        Some(EntryStatus::SoftError),
+        "失败结果到达时应为软失败，而不是红 ✗"
+    );
+
+    // 回合正常收尾：软失败保持灰化，不提级。
+    handle_stream_update(&mut state, StreamMessage::Done { message_id }, &agent_tx)
+        .await
+        .unwrap();
+    let entry = state
+        .chat_history
+        .iter()
+        .find(|e| e.entry_type == ChatEntryType::ToolResult)
+        .unwrap();
+    assert_eq!(
+        entry.status,
+        Some(EntryStatus::SoftError),
+        "正常 Done 不该把软失败提级成红 ✗"
+    );
+}
+
+/// 回合走到 Error（终结性失败）时，本回合的软失败全部提级回红 ✗ ——
+/// 用户需要一眼看到是哪些工具坏了。
+#[tokio::test]
+async fn turn_error_promotes_soft_tool_failures_back_to_red() {
+    let mut state = ChatState::new();
+    let (agent_tx, _agent_rx) = mpsc::channel(1);
+    let message_id = 72;
+
+    handle_stream_update(
+        &mut state,
+        StreamMessage::Start {
+            message_id,
+            kind: StreamStartKind::UserTurn {
+                model: "gpt-4o".to_string(),
+            },
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+
+    handle_tool_result_message(
+        &mut state,
+        message_id,
+        StarToolCall {
+            id: "call-1".to_string(),
+            ..agent_tool_call()
+        },
+        ToolResult {
+            success: false,
+            output: None,
+            error: Some("connection reset".to_string()),
+            data: None,
+            llm_content: None,
+        },
+    );
+    assert!(
+        state
+            .chat_history
+            .iter()
+            .any(|e| e.status == Some(EntryStatus::SoftError)),
+        "前置条件：失败结果先以软失败落库"
+    );
+
+    handle_stream_update(
+        &mut state,
+        StreamMessage::Error {
+            message_id,
+            error: "stream failed".to_string(),
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+
+    let entry = state
+        .chat_history
+        .iter()
+        .find(|e| e.entry_type == ChatEntryType::ToolResult)
+        .unwrap();
+    assert_eq!(
+        entry.status,
+        Some(EntryStatus::Error),
+        "回合终结性失败必须把本回合的软失败提级回红 ✗"
+    );
+}
