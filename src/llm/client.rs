@@ -51,6 +51,53 @@ fn parse_model_context_window(model: &serde_json::Value) -> Option<u32> {
         })
 }
 
+/// 单次响应的最大输出 token 数。字段名两套大小写并存
+/// （`max_output_tokens` / `maxOutputTokens`），同样只认真值。
+fn parse_model_max_output_tokens(model: &serde_json::Value) -> Option<u32> {
+    ["max_output_tokens", "maxOutputTokens"]
+        .into_iter()
+        .find_map(|field| {
+            model
+                .get(field)
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|tokens| u32::try_from(tokens).ok())
+                .filter(|tokens| *tokens > 0)
+        })
+}
+
+/// provider 是否显式声明 reasoning 能力。`reasoning: true`（OpenRouter /
+/// 网关系）与 `supportsReasoning: true` 都算；显式 `false` 也收下 ——
+/// 声明值优先于模型名启发式。
+fn parse_model_supports_reasoning(model: &serde_json::Value) -> Option<bool> {
+    ["reasoning", "supportsReasoning", "supports_reasoning"]
+        .into_iter()
+        .find_map(|field| model.get(field).and_then(serde_json::Value::as_bool))
+}
+
+/// provider 声明支持的 reasoning 档位列表。
+/// `supported_reasoning_levels` 有两种形状：字符串数组
+/// `["low","high","max"]`，或对象数组 `[{"effort":"low"},…]`；两者都收。
+fn parse_model_supported_efforts(model: &serde_json::Value) -> Vec<String> {
+    let levels = ["supported_reasoning_levels", "reasoning_levels"]
+        .into_iter()
+        .find_map(|field| model.get(field).and_then(serde_json::Value::as_array));
+    let Some(levels) = levels else {
+        return Vec::new();
+    };
+    levels
+        .iter()
+        .filter_map(|entry| {
+            if let Some(word) = entry.as_str() {
+                return Some(word.to_string());
+            }
+            entry
+                .get("effort")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 #[derive(Debug, Zeroize, ZeroizeOnDrop)]
 pub struct StarClient {
     pub api_key: String,
@@ -423,6 +470,7 @@ impl StarClient {
             api_key: resolved_api_key.value.clone(),
             base_url: Some(url_str.clone()),
             model: model_name.clone(),
+            provider_id: provider_id.clone(),
         };
 
         let client = create_client(config);
@@ -449,13 +497,24 @@ impl StarClient {
     }
 
     /// Check if the model supports thinking/reasoning.
-    /// Returns runtime detection result if available, otherwise falls back to model name detection.
+    ///
+    /// 优先级：运行时探测 > `/models` 声明 > 模型名启发式。声明值来自
+    /// `reasoning` / `supportsReasoning` 字段（`list_models` 解析入库），
+    /// 比按名字猜可靠得多 —— 网关聚合的模型名五花八门，启发式只是一道
+    /// 缺省防线，不是权威。
     pub fn supports_thinking(&self) -> bool {
         // First check runtime detection
         if let Ok(detected) = self.detected_thinking_support.read() {
             if let Some(supports) = *detected {
                 return supports;
             }
+        }
+        // `/models` 声明值（预热发生在模型切换 / 面板打开时）
+        if let Some(capability) = crate::agent::model_catalog::get_cached_reasoning_capability(
+            self.provider_id.as_deref(),
+            &self.model,
+        ) {
+            return capability.supported;
         }
         // Fallback to model name detection
         crate::core::config::models::is_thinking_model(&self.model)
@@ -617,6 +676,7 @@ impl StarClient {
             api_key: resolved_api_key.value,
             base_url: Some(self.base_url.clone()),
             model: self.model.clone(),
+            provider_id: self.provider_id.clone(),
         };
 
         let client = create_client(config);
@@ -647,6 +707,7 @@ impl StarClient {
             api_key: self.api_key.clone(),
             base_url: Some(self.base_url.clone()),
             model: model.to_string(),
+            provider_id: self.provider_id.clone(),
         };
         let _ = provider_env_id;
         create_client(config)
@@ -1216,8 +1277,11 @@ impl StarClient {
                 // OpenAI-compatible 有 context_window 的提供商
                 let context_window = parse_model_context_window(m);
 
-                // 自动判断模型是否支持 thinking/reasoning
-                let supports_thinking = crate::core::config::models::is_thinking_model(id);
+                // provider 显式声明的能力优先，启发式只兜缺省
+                let supports_reasoning = parse_model_supports_reasoning(m);
+                let supported_efforts = parse_model_supported_efforts(m);
+                let supports_thinking = supports_reasoning
+                    .unwrap_or_else(|| crate::core::config::models::is_thinking_model(id));
 
                 let mut model_info = crate::types::ModelInfo::new(id, &provider);
                 if let Some(name) = display_name {
@@ -1225,6 +1289,15 @@ impl StarClient {
                 }
                 if let Some(ctx) = context_window {
                     model_info = model_info.with_context_window(ctx);
+                }
+                if let Some(out) = parse_model_max_output_tokens(m) {
+                    model_info = model_info.with_max_output_tokens(out);
+                }
+                if let Some(reasoning) = supports_reasoning {
+                    model_info = model_info.with_supports_reasoning(reasoning);
+                }
+                if !supported_efforts.is_empty() {
+                    model_info = model_info.with_supported_efforts(supported_efforts);
                 }
                 model_info = model_info.with_supports_thinking(supports_thinking);
                 Some(model_info)
@@ -1296,6 +1369,86 @@ mod tests {
         assert_eq!(
             parse_model_context_window(&json!({ "contextWindow": u64::from(u32::MAX) + 1 })),
             None
+        );
+    }
+
+    // ── /models 能力字段的解析：两套大小写并存，声明值优先 ──
+
+    #[test]
+    fn parses_max_output_tokens_from_both_capitalizations() {
+        use super::parse_model_max_output_tokens;
+        assert_eq!(
+            parse_model_max_output_tokens(&json!({ "max_output_tokens": 131_072 })),
+            Some(131_072)
+        );
+        assert_eq!(
+            parse_model_max_output_tokens(&json!({ "maxOutputTokens": 65_536 })),
+            Some(65_536)
+        );
+        assert_eq!(parse_model_max_output_tokens(&json!({})), None);
+        assert_eq!(
+            parse_model_max_output_tokens(&json!({ "max_output_tokens": 0 })),
+            None
+        );
+    }
+
+    #[test]
+    fn parses_declared_reasoning_capaibility() {
+        use super::{parse_model_supported_efforts, parse_model_supports_reasoning};
+        // OpenRouter / 网关系：reasoning 是裸 bool
+        assert_eq!(
+            parse_model_supports_reasoning(&json!({ "reasoning": true })),
+            Some(true)
+        );
+        // camelCase 变体
+        assert_eq!(
+            parse_model_supports_reasoning(&json!({ "supportsReasoning": true })),
+            Some(true)
+        );
+        // 显式 false 也要收 —— 声明优先于启发式
+        assert_eq!(
+            parse_model_supports_reasoning(&json!({ "reasoning": false })),
+            Some(false)
+        );
+        assert_eq!(parse_model_supports_reasoning(&json!({})), None);
+
+        // 档位：字符串数组与对象数组两种形状
+        assert_eq!(
+            parse_model_supported_efforts(&json!({
+                "supported_reasoning_levels": ["low", "high", "max"]
+            })),
+            vec!["low", "high", "max"]
+        );
+        assert_eq!(
+            parse_model_supported_efforts(&json!({
+                "reasoning_levels": [{ "effort": "low" }, { "effort": "max" }]
+            })),
+            vec!["low", "max"]
+        );
+        assert!(parse_model_supported_efforts(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn real_gateway_models_payload_yields_declared_capabilities() {
+        // 实测网关返回的真实形状（shape 而非任何特定站点）：
+        // `reasoning` 裸 bool + `supported_reasoning_levels` 对象数组 + snake_case token 字段。
+        let model = json!({
+            "id": "some/aggregated-model",
+            "max_input_tokens": 1048576,
+            "max_output_tokens": 131072,
+            "reasoning": true,
+            "supported_reasoning_levels": [{"effort":"low"},{"effort":"high"},{"effort":"max"}]
+        });
+        use super::{
+            parse_model_context_window, parse_model_max_output_tokens,
+            parse_model_supported_efforts, parse_model_supports_reasoning,
+        };
+        assert_eq!(parse_model_context_window(&model), Some(1_048_576));
+        assert_eq!(parse_model_max_output_tokens(&model), Some(131_072));
+        assert_eq!(parse_model_supports_reasoning(&model), Some(true));
+        assert_eq!(
+            parse_model_supported_efforts(&model),
+            vec!["low", "high", "max"]
         );
     }
 

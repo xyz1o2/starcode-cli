@@ -141,6 +141,10 @@ pub struct ProviderProfile<'a> {
     pub model: &'a str,
     pub base_url: Option<&'a str>,
     pub provider_name: Option<&'a str>,
+    /// provider store 里的 id（`local` / `opencode`…）。能力缓存
+    /// （`/models` 声明的 max_output_tokens、reasoning 档位）按
+    /// provider + model 查询，缺这个键就查不到声明值。
+    pub provider_id: Option<&'a str>,
 }
 
 /// 各家开思考的字段长得完全不一样，只能挑一种发。
@@ -459,6 +463,7 @@ mod tests {
             model,
             base_url: if host.is_empty() { None } else { Some(host) },
             provider_name: None,
+            provider_id: None,
         }
     }
 

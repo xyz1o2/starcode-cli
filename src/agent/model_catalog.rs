@@ -56,9 +56,23 @@ impl ModelCapabilityKey {
 /// 由 `/models` 返回的名义容量，按 provider + model 保存。
 static MODEL_CONTEXT_WINDOW_CACHE: RwLock<Option<HashMap<ModelCapabilityKey, u32>>> =
     RwLock::new(None);
+/// 由 `/models` 返回的单次响应最大输出 token，按 provider + model 保存。
+static MODEL_MAX_OUTPUT_TOKENS_CACHE: RwLock<Option<HashMap<ModelCapabilityKey, u32>>> =
+    RwLock::new(None);
+/// 由 `/models` 返回的 reasoning 能力与档位白名单，按 provider + model 保存。
+static MODEL_REASONING_CACHE: RwLock<Option<HashMap<ModelCapabilityKey, ReasoningCapability>>> =
+    RwLock::new(None);
 /// provider 明确返回上下文溢出后记录的会话安全上限，不能覆盖用户的 Fixed 选择。
 static PROVIDER_SAFE_CONTEXT_CAP_CACHE: RwLock<Option<HashMap<ModelCapabilityKey, u32>>> =
     RwLock::new(None);
+
+/// provider 显式声明的 reasoning 能力。`efforts` 为空表示"支持思考但没给
+/// 档位白名单"—— 档位判定回落启发式，不能当成"全档位都合法"。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReasoningCapability {
+    pub supported: bool,
+    pub efforts: Vec<String>,
+}
 
 /// 从 provider + model 作用域的缓存中查询模型上下文窗口。
 pub fn get_cached_context_window(provider_id: Option<&str>, model_name: &str) -> Option<u32> {
@@ -67,6 +81,23 @@ pub fn get_cached_context_window(provider_id: Option<&str>, model_name: &str) ->
         .read()
         .ok()
         .and_then(|guard| guard.as_ref()?.get(&key).copied())
+}
+
+/// 查询 `/models` 声明的单次响应最大输出 token。`None` = provider 未声明。
+pub fn get_cached_max_output_tokens(provider_id: Option<&str>, model_name: &str) -> Option<u32> {
+    let key = ModelCapabilityKey::new(provider_id, model_name);
+    let guard = MODEL_MAX_OUTPUT_TOKENS_CACHE.read().ok()?;
+    guard.as_ref()?.get(&key).copied()
+}
+
+/// 查询 `/models` 声明的 reasoning 能力。`None` = provider 未声明。
+pub fn get_cached_reasoning_capability(
+    provider_id: Option<&str>,
+    model_name: &str,
+) -> Option<ReasoningCapability> {
+    let key = ModelCapabilityKey::new(provider_id, model_name);
+    let guard = MODEL_REASONING_CACHE.read().ok()?;
+    guard.as_ref()?.get(&key).cloned()
 }
 
 /// 查询 provider 明确报告的会话安全容量上限。
@@ -95,8 +126,11 @@ pub fn get_provider_safe_context_cap(provider_id: Option<&str>, model_name: &str
 /// 下次调用会再写一遍，而状态栏、压缩逻辑这些读者拿不到就退回到别的来源。
 /// 宁可少预热一次，也不能为了预热把用户界面挂住。
 pub fn update_context_window_cache(provider_id: Option<&str>, models: &[ModelInfo]) {
-    // 没有任何模型带 context_window 时不必去抢那把锁。
-    if !models.iter().any(|m| m.context_window.is_some()) {
+    // 没有任何模型带 capability 时不必去抢那把锁。
+    if !models
+        .iter()
+        .any(|m| m.context_window.is_some() || m.max_output_tokens > 0)
+    {
         return;
     }
     let Ok(mut guard) = MODEL_CONTEXT_WINDOW_CACHE.try_write() else {
@@ -105,16 +139,32 @@ pub fn update_context_window_cache(provider_id: Option<&str>, models: &[ModelInf
     };
     let cache = guard.get_or_insert_with(HashMap::new);
     for model in models {
+        let resolved_provider = if model.provider.is_empty() {
+            provider_id
+        } else {
+            Some(model.provider.as_str())
+        };
+        let key = ModelCapabilityKey::new(resolved_provider, &model.id);
         if let Some(context_window) = model.context_window {
-            let resolved_provider = if model.provider.is_empty() {
-                provider_id
-            } else {
-                Some(model.provider.as_str())
-            };
-            cache.insert(
-                ModelCapabilityKey::new(resolved_provider, &model.id),
-                context_window,
-            );
+            cache.insert(key.clone(), context_window);
+        }
+        if model.max_output_tokens > 0 {
+            if let Ok(mut out_guard) = MODEL_MAX_OUTPUT_TOKENS_CACHE.try_write() {
+                out_guard
+                    .get_or_insert_with(HashMap::new)
+                    .insert(key.clone(), model.max_output_tokens);
+            }
+        }
+        if model.supports_reasoning.is_some() || !model.supported_efforts.is_empty() {
+            if let Ok(mut r_guard) = MODEL_REASONING_CACHE.try_write() {
+                r_guard.get_or_insert_with(HashMap::new).insert(
+                    key.clone(),
+                    ReasoningCapability {
+                        supported: model.supports_reasoning.unwrap_or(false),
+                        efforts: model.supported_efforts.clone(),
+                    },
+                );
+            }
         }
     }
 }
@@ -435,5 +485,31 @@ mod non_blocking_tests {
         // 正常路径不能坏：能拿锁时照写不误。
         update_context_window_cache(Some("p"), &models);
         assert_eq!(get_cached_context_window(Some("p"), "no-window"), None);
+    }
+
+    #[test]
+    fn declared_output_and_reasoning_capabilities_land_in_their_own_caches() {
+        let provider = "model-catalog-test-capability-provider";
+        let model = "model-catalog-test-capability-model";
+
+        let mut info = ModelInfo::new(model.to_string(), provider.to_string());
+        info.max_output_tokens = 131_072;
+        info.supports_reasoning = Some(true);
+        info.supported_efforts = vec!["low".into(), "high".into(), "max".into()];
+        update_context_window_cache(Some(provider), &[info]);
+
+        assert_eq!(
+            get_cached_max_output_tokens(Some(provider), model),
+            Some(131_072)
+        );
+        let cap = get_cached_reasoning_capability(Some(provider), model).expect("declared");
+        assert!(cap.supported);
+        assert_eq!(cap.efforts, vec!["low", "high", "max"]);
+        // 未声明的模型不返回任何值 —— 缺省必须走 env/硬编码兜底，不许猜。
+        assert_eq!(get_cached_max_output_tokens(Some(provider), "other"), None);
+        assert_eq!(
+            get_cached_reasoning_capability(Some(provider), "other"),
+            None
+        );
     }
 }

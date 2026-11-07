@@ -30,31 +30,41 @@ const FINISH_TOOL_CALLS: &str = "tool_calls";
 const EMPTY_JSON: &str = "{}";
 
 /// Anthropic 协议要求显式 `max_tokens`，rig 不代填时的兜底值。
+/// 只在 `/models` 与 `STAR_MAX_TOKENS` 都没给值时才用到。
 const DEFAULT_ANTHROPIC_MAX_TOKENS: u64 = 8192;
 
 /// A unified LLM client wrapping rig-core for native providers.
+///
+/// `capability_provider_id` 是 provider store 里的 id（`local` /
+/// `opencode`…）。`/models` 声明的能力（max_output_tokens、reasoning
+/// 档位）按 provider + model 入库，请求构造时凭这个键查回声明值；缺省
+/// None 时落回 env / 硬编码兜底。
 #[derive(Debug, Clone)]
 pub enum RigAdapter {
     OpenAI {
         api_key: String,
         model: String,
         base_url: Option<String>,
+        capability_provider_id: Option<String>,
     },
     Anthropic {
         api_key: String,
         model: String,
         base_url: Option<String>,
+        capability_provider_id: Option<String>,
     },
     DeepSeek {
         api_key: String,
         model: String,
         base_url: Option<String>,
+        capability_provider_id: Option<String>,
     },
     OpenAiCompatible {
         api_key: String,
         model: String,
         base_url: String,
         provider_name: String,
+        capability_provider_id: Option<String>,
     },
 }
 
@@ -64,6 +74,7 @@ impl RigAdapter {
             api_key,
             model,
             base_url: None,
+            capability_provider_id: None,
         }
     }
     pub fn openai_with_base_url(api_key: String, model: String, base_url: String) -> Self {
@@ -71,6 +82,7 @@ impl RigAdapter {
             api_key,
             model,
             base_url: Some(base_url),
+            capability_provider_id: None,
         }
     }
     pub fn anthropic(api_key: String, model: String) -> Self {
@@ -78,6 +90,7 @@ impl RigAdapter {
             api_key,
             model,
             base_url: None,
+            capability_provider_id: None,
         }
     }
     pub fn anthropic_with_base_url(api_key: String, model: String, base_url: String) -> Self {
@@ -85,6 +98,7 @@ impl RigAdapter {
             api_key,
             model,
             base_url: Some(base_url),
+            capability_provider_id: None,
         }
     }
     pub fn deepseek(api_key: String, model: String) -> Self {
@@ -92,6 +106,7 @@ impl RigAdapter {
             api_key,
             model,
             base_url: None,
+            capability_provider_id: None,
         }
     }
     pub fn deepseek_with_base_url(api_key: String, model: String, base_url: String) -> Self {
@@ -99,6 +114,7 @@ impl RigAdapter {
             api_key,
             model,
             base_url: Some(base_url),
+            capability_provider_id: None,
         }
     }
     pub fn openai_compatible(
@@ -112,7 +128,33 @@ impl RigAdapter {
             model,
             base_url,
             provider_name,
+            capability_provider_id: None,
         }
+    }
+    /// 装上能力缓存的 provider 键。所有变体共用，便于 `create_client`
+    /// 在提供 `config.provider_id` 时统一补挂。
+    pub fn with_provider_id(mut self, provider_id: Option<String>) -> Self {
+        match &mut self {
+            Self::OpenAI {
+                capability_provider_id,
+                ..
+            }
+            | Self::Anthropic {
+                capability_provider_id,
+                ..
+            }
+            | Self::DeepSeek {
+                capability_provider_id,
+                ..
+            }
+            | Self::OpenAiCompatible {
+                capability_provider_id,
+                ..
+            } => {
+                *capability_provider_id = provider_id;
+            }
+        }
+        self
     }
 }
 
@@ -260,20 +302,36 @@ fn build_request(
     // budget 方言下也要显式给出。budget 方言要求 `max_tokens > budget_tokens`，
     // 而 rig 只在请求没给 `max_tokens` 时才填自己的默认值（老模型上是 2048，
     // 比 budget 还小），所以同样必须显式给出；用户自己配了更大的值就听用户的。
+    //
+    // 兜底阶梯：`/models` 声明的模型输出上限 > `STAR_MAX_TOKENS` > 硬编码兜底。
+    // 曾经只有硬编码 8192：`/models` 明明报了 max_output_tokens（实测 glowp
+    // 网关 131072），请求却按 8192 发 —— 长回答被无声截断，模型永远到不了
+    // "finish_reason=length" 的自然边界。
     let env_max_tokens = std::env::var(crate::llm::ENV_STAR_MAX_TOKENS)
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok());
+    let declared_max_tokens = crate::agent::model_catalog::get_cached_max_output_tokens(
+        profile.provider_id,
+        profile.model,
+    )
+    .map(|tokens| tokens as u64);
     let max_tokens = match thinking.max_tokens {
-        Some(need) => Some(
-            env_max_tokens
+        Some(need) => {
+            // budget 方言：必须 > budget_tokens，用户配置和声明值里挑能用的。
+            let raise = env_max_tokens
                 .filter(|configured| *configured > need)
-                .unwrap_or(need),
-        ),
+                .or(declared_max_tokens.filter(|declared| *declared > need));
+            Some(raise.unwrap_or(need))
+        }
         None => {
             if matches!(profile.kind, crate::llm::thinking::ProviderKind::Anthropic) {
-                Some(env_max_tokens.unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS))
+                Some(
+                    env_max_tokens
+                        .or(declared_max_tokens)
+                        .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS),
+                )
             } else {
-                None
+                declared_max_tokens.map(Some).unwrap_or(None)
             }
         }
     };
@@ -890,39 +948,53 @@ impl RigAdapter {
         use crate::llm::thinking::{ProviderKind, ProviderProfile};
         match self {
             Self::OpenAI {
-                model, base_url, ..
+                model,
+                base_url,
+                capability_provider_id,
+                ..
             } => ProviderProfile {
                 kind: ProviderKind::OpenAi,
                 model,
                 base_url: base_url.as_deref(),
                 provider_name: None,
+                provider_id: capability_provider_id.as_deref(),
             },
             Self::Anthropic {
-                model, base_url, ..
+                model,
+                base_url,
+                capability_provider_id,
+                ..
             } => ProviderProfile {
                 kind: ProviderKind::Anthropic,
                 model,
                 base_url: base_url.as_deref(),
                 provider_name: None,
+                provider_id: capability_provider_id.as_deref(),
             },
             Self::DeepSeek {
-                model, base_url, ..
+                model,
+                base_url,
+                capability_provider_id,
+                ..
             } => ProviderProfile {
                 kind: ProviderKind::DeepSeek,
                 model,
                 base_url: base_url.as_deref(),
                 provider_name: None,
+                provider_id: capability_provider_id.as_deref(),
             },
             Self::OpenAiCompatible {
                 model,
                 base_url,
                 provider_name,
+                capability_provider_id,
                 ..
             } => ProviderProfile {
                 kind: ProviderKind::Compatible,
                 model,
                 base_url: Some(base_url),
                 provider_name: Some(provider_name),
+                provider_id: capability_provider_id.as_deref(),
             },
         }
     }
@@ -941,6 +1013,7 @@ impl RigAdapter {
                 api_key,
                 model,
                 base_url,
+                ..
             } => {
                 // 官方 OpenAI 严格校验 content part，`cache_control` 是规范外字段，
                 // 这里恒定关掉——它只在明确支持的聚合网关上打开。
@@ -950,11 +1023,13 @@ impl RigAdapter {
                 api_key,
                 model,
                 base_url,
+                ..
             } => rig_anthropic_complete(api_key, model, base_url.as_deref(), request).await,
             Self::DeepSeek {
                 api_key,
                 model,
                 base_url,
+                ..
             } => {
                 let r =
                     rig_complete_with_url!(deepseek, api_key, model, base_url.as_deref(), request)?;
@@ -969,7 +1044,7 @@ impl RigAdapter {
                 api_key,
                 model,
                 base_url,
-                provider_name: _,
+                ..
             } => {
                 rig_openai_complete(
                     api_key,
@@ -996,6 +1071,7 @@ impl RigAdapter {
                 api_key,
                 model,
                 base_url,
+                ..
             } => rig_openai_stream(api_key, model, base_url.as_deref(), request, false).await,
             Self::OpenAiCompatible {
                 api_key,
@@ -1016,11 +1092,13 @@ impl RigAdapter {
                 api_key,
                 model,
                 base_url,
+                ..
             } => rig_anthropic_stream(api_key, model, base_url.as_deref(), request).await,
             Self::DeepSeek {
                 api_key,
                 model,
                 base_url,
+                ..
             } => {
                 rig_stream_with_url!(deepseek, api_key, model, base_url.as_deref(), request)
             }

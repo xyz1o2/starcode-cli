@@ -531,7 +531,36 @@ impl StarAgent {
                 model
             ));
         }
+        self.warm_model_capabilities().await;
         Ok(())
+    }
+
+    /// 模型切换生效后预热能力缓存。
+    ///
+    /// `/models` 声明的上下文窗口与 max_output_tokens 是状态栏、压缩策略和
+    /// 请求构造（Anthropic 显式 max_tokens）的输入，而这些消费方读的是
+    /// `model_catalog` 的缓存键 —— 不预热的话，切换后的第一轮请求全部按
+    /// 兜底值发，直到用户恰好打开过模型面板才被填上。预热失败只降级：
+    /// 拉不到列表就返回，缺声明值走 env / 硬编码兜底，不许把切换本身判失败。
+    async fn warm_model_capabilities(&self) {
+        match crate::agent::model_list::list_models_with_mode(&self.client, false).await {
+            Ok(result) => {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[SetModel] capability cache warmed: {} models (age {:?})",
+                    result.models.len(),
+                    result
+                        .cache_age_secs
+                        .map(std::time::Duration::from_secs)
+                        .map(|d| format!("{d:?}"))
+                        .unwrap_or_else(|| "fresh".to_string()),
+                ));
+            }
+            Err(e) => {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[SetModel] capability cache warm skipped: {e}"
+                ));
+            }
+        }
     }
 
     /// 为兼容旧调用点立即应用模型选择；新的 UI 路径应使用

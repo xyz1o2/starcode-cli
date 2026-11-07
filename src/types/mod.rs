@@ -1518,9 +1518,26 @@ pub struct ModelInfo {
     /// 模型的上下文窗口大小（tokens），从 API /models 端点提取（如果提供商返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
-    /// 模型是否支持 thinking/reasoning 功能
+    /// 模型单次响应的最大输出 token 数（`max_output_tokens` / `maxOutputTokens`）。
+    /// 0 表示 provider 未声明 —— 不许猜。
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub max_output_tokens: u32,
+    /// 模型是否支持 reasoning（provider 显式声明，来自 `reasoning` /
+    /// `supportsReasoning` 字段）。缺省时由模型名启发式兜底，声明值优先。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_reasoning: Option<bool>,
+    /// provider 声明支持的 reasoning 档位（`supported_reasoning_levels` /
+    /// `reasoning.supportedEfforts`）。空 = provider 没说，档位判定回落启发式。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_efforts: Vec<String>,
+    /// 模型是否支持 thinking/reasoning —— UI 展示用，声明值派生
+    /// （`supports_reasoning`），缺省走模型名启发式。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_thinking: Option<bool>,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 impl ModelInfo {
@@ -1530,6 +1547,9 @@ impl ModelInfo {
             provider: provider.into(),
             display_name: None,
             context_window: None,
+            max_output_tokens: 0,
+            supports_reasoning: None,
+            supported_efforts: Vec::new(),
             supports_thinking: None,
         }
     }
@@ -1544,8 +1564,23 @@ impl ModelInfo {
         self
     }
 
+    pub fn with_max_output_tokens(mut self, tokens: u32) -> Self {
+        self.max_output_tokens = tokens;
+        self
+    }
+
     pub fn with_supports_thinking(mut self, supports: bool) -> Self {
         self.supports_thinking = Some(supports);
+        self
+    }
+
+    pub fn with_supports_reasoning(mut self, supports: bool) -> Self {
+        self.supports_reasoning = Some(supports);
+        self
+    }
+
+    pub fn with_supported_efforts(mut self, efforts: Vec<String>) -> Self {
+        self.supported_efforts = efforts;
         self
     }
 

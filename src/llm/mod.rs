@@ -267,6 +267,10 @@ pub struct LlmConfig {
     pub base_url: Option<String>,
     #[zeroize(skip)]
     pub model: String,
+    /// provider store 里的 id（`local` / `opencode`…），能力缓存键用它。
+    /// 缺省 None：查不到声明值，落回 env / 硬编码兜底。
+    #[zeroize(skip)]
+    pub provider_id: Option<String>,
 }
 
 /// 用户显式配置了可用的 base_url 时，请求必须发往那里。
@@ -315,6 +319,7 @@ pub fn create_client(config: LlmConfig) -> Box<dyn LlmClient> {
         config.api_key.clone()
     };
 
+    let provider_id = config.provider_id.clone();
     match &config.provider {
         LlmProvider::OpenAi => match explicit_url {
             Some(u) => Box::new(rig_adapter::RigAdapter::openai_with_base_url(
@@ -354,21 +359,27 @@ pub fn create_client(config: LlmConfig) -> Box<dyn LlmClient> {
                 config.model.clone(),
             )),
         },
-        LlmProvider::MiniMax => Box::new(rig_adapter::RigAdapter::openai_compatible(
-            api_key.clone(),
-            config.model.clone(),
-            explicit_url
-                .clone()
-                .unwrap_or_else(|| MINIMAX_DEFAULT_BASE_URL.to_string()),
-            "minimax".to_string(),
+        LlmProvider::MiniMax => Box::new(rig_adapter::RigAdapter::with_provider_id(
+            rig_adapter::RigAdapter::openai_compatible(
+                api_key.clone(),
+                config.model.clone(),
+                explicit_url
+                    .clone()
+                    .unwrap_or_else(|| MINIMAX_DEFAULT_BASE_URL.to_string()),
+                "minimax".to_string(),
+            ),
+            provider_id,
         )),
-        LlmProvider::Xiaomi => Box::new(rig_adapter::RigAdapter::openai_compatible(
-            api_key.clone(),
-            config.model.clone(),
-            explicit_url
-                .clone()
-                .unwrap_or_else(|| XIAOMI_DEFAULT_BASE_URL.to_string()),
-            "xiaomi".to_string(),
+        LlmProvider::Xiaomi => Box::new(rig_adapter::RigAdapter::with_provider_id(
+            rig_adapter::RigAdapter::openai_compatible(
+                api_key.clone(),
+                config.model.clone(),
+                explicit_url
+                    .clone()
+                    .unwrap_or_else(|| XIAOMI_DEFAULT_BASE_URL.to_string()),
+                "xiaomi".to_string(),
+            ),
+            provider_id,
         )),
         LlmProvider::Mock => Box::new(MockClient::new(None)),
         LlmProvider::Custom(name) => {
@@ -385,15 +396,18 @@ pub fn create_client(config: LlmConfig) -> Box<dyn LlmClient> {
                     )),
                 }
             } else {
-                Box::new(rig_adapter::RigAdapter::openai_compatible(
-                    api_key.clone(),
-                    config.model.clone(),
-                    // 注意这里**不能**换成 explicit_url：OpenAiCompatible 的
-                    // base_url 是 String 而非 Option，没有地址时 rig 会拿到空串，
-                    // 构建出一个指向 "" 的客户端。保持原有行为，缺失地址由
-                    // client.rs 的 PLACEHOLDER 告警负责报出来。
-                    base_url.unwrap_or_default(),
-                    name.clone(),
+                Box::new(rig_adapter::RigAdapter::with_provider_id(
+                    rig_adapter::RigAdapter::openai_compatible(
+                        api_key.clone(),
+                        config.model.clone(),
+                        // 注意这里**不能**换成 explicit_url：OpenAiCompatible 的
+                        // base_url 是 String 而非 Option，没有地址时 rig 会拿到空串，
+                        // 构建出一个指向 "" 的客户端。保持原有行为，缺失地址由
+                        // client.rs 的 PLACEHOLDER 告警负责报出来。
+                        base_url.unwrap_or_default(),
+                        name.clone(),
+                    ),
+                    provider_id,
                 ))
             }
         }
@@ -430,6 +444,7 @@ mod create_client_tests {
             api_key: "test-key".to_string(),
             base_url: base_url.map(str::to_string),
             model: "deepseek-v4.1-flash:free".to_string(),
+            provider_id: None,
         }
     }
 

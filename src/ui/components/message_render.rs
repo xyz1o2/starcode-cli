@@ -1159,11 +1159,10 @@ mod tests {
         assert!(completed.contains("Thought for 14s"), "{:?}", completed);
         assert!(completed.contains("(ctrl+o to expand)"), "{:?}", completed);
 
-        // 流式态：**自动展开**，正文直接可见。
+        // 流式态：**默认仍收起**，折叠头是进行态占位符。
         //
-        // 旧契约是"流式期永远折叠、只留一行占位"，于是用户只能看到
-        // "模型在想"，看不到"模型在想什么"。现在流式期间自动展开：
-        // 标题带实时耗时，正文逐字流出。
+        // 默认自动展开已移除：正文一展开就把回答顶出视口。流式中的块
+        // 渲染"Thinking 5s…"进行态占位，正文要用户手动展开才可见。
         state.chat_history[idx].is_streaming = Some(true);
         state.chat_history[idx].reasoning_finished_elapsed_ms = None;
         state.chat_history[idx].reasoning_started_at =
@@ -1187,7 +1186,7 @@ mod tests {
             streaming
         );
 
-        // 流式期自动展开 → 正文可见，块不止一行。
+        // 默认收起 → 正文不可见；块只有折叠头一行。
         let blocks = render_non_tool_entry_blocks(&state, &state.chat_history[idx], idx, 70, false);
         let body: String = blocks
             .iter()
@@ -1200,8 +1199,8 @@ mod tests {
             })
             .collect();
         assert!(
-            body.contains("first step"),
-            "流式期自动展开，推理正文必须可见，实际 {:?}",
+            !body.contains("first step"),
+            "思考块默认收起，正文不是流式自动可见，实际 {:?}",
             body
         );
     }
