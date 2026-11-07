@@ -1,6 +1,7 @@
 use crate::core::state::{GlobalState, ReadFileState};
 use crate::core::tools::ripgrep::{
-    display_path, format_grep_hits, plural_count, GrepHit, DEFAULT_MAX_RESULTS,
+    display_path, empty_result_tail, format_grep_hits, plural_count, GrepHit, ScanStats,
+    DEFAULT_MAX_RESULTS,
 };
 use crate::core::tools::tools::{FileSearchResult, SearchResult, UnifiedSearchResult};
 use crate::core::tools::{
@@ -101,7 +102,10 @@ impl SearchTool {
             });
         }
         let mut results = Vec::new();
-        // 模式被"窄修复"过时的说明（见下面的 try_repair_pattern）。
+        // 文本通道的扫描统计 —— 空结果时诊断“为什么空”用。纯文件名搜索
+        // （`@query`）不走 ripgrep，就没有这套统计。
+        let mut text_scan_stats: Option<ScanStats> = None;
+        // 模式被“窄修复”过时的说明（见下面的 try_repair_pattern）。
         let mut pattern_note: Option<String> = None;
         // dotfile 默认可见 —— 对齐 Claude Code。以前只有 `@` 开头的查询才
         // 看得到 `.github/`、`.env.example` 这类真正需要搜的文件。
@@ -154,7 +158,10 @@ impl SearchTool {
                 .await;
 
             let text_results = match text_results {
-                Ok(results) => results,
+                Ok((hits, scan_stats)) => {
+                    text_scan_stats = Some(scan_stats);
+                    hits
+                }
                 Err(error) => {
                     let message = describe_pattern_error(query, &error.to_string());
                     return Ok(ToolResult {
@@ -222,6 +229,18 @@ impl SearchTool {
 
         if results.is_empty() {
             let mut output = format!("No results found for \"{}\"", query);
+            // 文本通道真跑过才接统计口径尾串 —— 纯文件名搜索没有这套统计。
+            if let Some(stats) = &text_scan_stats {
+                output.push_str("\n\n");
+                output.push_str(&empty_result_tail(
+                    stats,
+                    query,
+                    Path::new(&base_dir),
+                    include_pattern.as_deref(),
+                    file_types.as_deref(),
+                    case_sensitive.unwrap_or(false),
+                ));
+            }
             if let Some(note) = &pattern_note {
                 output = format!("{}\n{}", note, output);
             }
@@ -266,7 +285,7 @@ impl SearchTool {
         file_types: Option<&Vec<String>>,
         exclude_files: Option<&Vec<String>>,
         include_hidden: bool,
-    ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
+    ) -> Result<(Vec<SearchResult>, ScanStats), Box<dyn std::error::Error>> {
         let mut config = crate::core::tools::ripgrep::RipgrepConfig {
             case_sensitive: case_sensitive.unwrap_or(false),
             whole_word: whole_word.unwrap_or(false),
@@ -304,7 +323,8 @@ impl SearchTool {
             config.exclude_patterns = Some(excludes);
         }
 
-        let results = crate::core::tools::ripgrep::search_with_ripgrep(query, &base_dir, config)?;
+        let results =
+            crate::core::tools::ripgrep::search_with_ripgrep_stats(query, &base_dir, config)?;
 
         Ok(results)
     }
@@ -661,6 +681,37 @@ mod tests {
         assert!(out.contains("3 matches in 2 files"), "实际：{out}");
         assert!(out.contains("src/a.rs: 2"), "实际：{out}");
         assert!(!out.contains("let x"), "count 模式不该带行内容：{out}");
+    }
+
+    /// 空结果必须接上 `[scope]`/`[hints]` 诊断尾串 —— 文本通道真跑过才有。
+    #[test]
+    fn an_empty_text_search_appends_the_scan_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let result = rt.block_on(tool().search(
+            "totally_absent_token",
+            Some("text".to_string()),
+            Some(dir.path().to_string_lossy().to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
+
+        let output = result.unwrap().output.unwrap();
+        assert!(
+            output.starts_with("No results found for \"totally_absent_token\""),
+            "实际：{output}"
+        );
+        assert!(output.contains("[scope]"), "实际：{output}");
+        assert!(output.contains("[hints]"), "实际：{output}");
     }
 }
 

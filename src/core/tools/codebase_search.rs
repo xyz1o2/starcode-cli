@@ -1573,8 +1573,12 @@ fn format_ripgrep_fallback(query: &str, root: &std::path::Path) -> String {
         ..Default::default()
     };
 
-    match search_with_ripgrep(query, root.to_string_lossy().as_ref(), config) {
-        Ok(results) => format_ripgrep_results(query, &results),
+    match crate::core::tools::ripgrep::search_with_ripgrep_stats(
+        query,
+        root.to_string_lossy().as_ref(),
+        config,
+    ) {
+        Ok((results, stats)) => format_ripgrep_results(query, &results, &stats, root),
         Err(e) => format!("Fallback grep failed: {}", e),
     }
 }
@@ -1724,8 +1728,14 @@ fn literal_text_fallback(query: &str, root: &Path) -> Option<String> {
         max_results: Some(40),
         ..Default::default()
     };
-    match search_with_ripgrep(query, root.to_string_lossy().as_ref(), config) {
-        Ok(results) if !results.is_empty() => Some(format_ripgrep_results(query, &results)),
+    match crate::core::tools::ripgrep::search_with_ripgrep_stats(
+        query,
+        root.to_string_lossy().as_ref(),
+        config,
+    ) {
+        Ok((results, stats)) if !results.is_empty() => {
+            Some(format_ripgrep_results(query, &results, &stats, root))
+        }
         _ => None,
     }
 }
@@ -1778,6 +1788,8 @@ fn literal_recall_files(query: &str, root: &Path) -> Vec<(String, usize)> {
 fn format_ripgrep_results(
     query: &str,
     results: &[crate::core::tools::tools::SearchResult],
+    scan_stats: &crate::core::tools::ripgrep::ScanStats,
+    root: &Path,
 ) -> String {
     let mut output = String::new();
     output.push_str(&format!(
@@ -1796,6 +1808,12 @@ fn format_ripgrep_results(
         } else {
             output.push_str("No matches found.");
         }
+        // 空结果附上扫描范围：兜底到底搜了几个文件 —— 不然模型会把"兜底零命中"
+        // 和"这个概念不存在"混成一句。
+        output.push('\n');
+        output.push_str(&crate::core::tools::ripgrep::empty_result_tail(
+            scan_stats, query, root, None, None, false,
+        ));
         return output;
     }
 
@@ -2263,6 +2281,30 @@ mod tests {
             "ContextEngine 必须持有进程级共享缓存：watcher 写的是它、工具读的也必须是它，\
              两个对象就永远读不到对方建好的索引"
         );
+    }
+
+    /// 兜底 grep 的空结果必须附上扫描范围（[scope]/[hints]）—— 纯说
+    /// "No matches found." 会让模型把"兜底零命中"当成"这个概念不存在"。
+    #[test]
+    fn an_empty_fallback_result_lists_the_scan_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn unrelated() {}\n").unwrap();
+
+        let stats = crate::core::tools::ripgrep::ScanStats {
+            files_enumerated: 1,
+            files_searched: 1,
+            matches: 0,
+            ..Default::default()
+        };
+        let out = format_ripgrep_results("absent_token", &[], &stats, dir.path());
+
+        assert!(out.contains("No matches found."), "实际：{out}");
+        assert!(out.contains("[scope]"), "实际：{out}");
+        assert!(
+            out.contains("1 files in scope, 1 searched, 0 matches"),
+            "实际：{out}"
+        );
+        assert!(out.contains("[hints]"), "实际：{out}");
     }
 
     /// 工具实例（无论 `new` 还是 `with_cache`）拿到的缓存，必须与

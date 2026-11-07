@@ -1,8 +1,8 @@
 use crate::core::confirmation_bus::MessageBus;
 use crate::core::tools::constants::ToolErrorType;
 use crate::core::tools::ripgrep::{
-    format_grep_hits, search_with_ripgrep, try_repair_pattern, GrepHit, RipgrepConfig,
-    DEFAULT_MAX_RESULTS,
+    empty_result_tail, format_grep_hits, search_with_ripgrep_stats, try_repair_pattern, GrepHit,
+    RipgrepConfig, ScanStats, DEFAULT_MAX_RESULTS,
 };
 use crate::core::tools::tools::{
     BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation, ToolResult,
@@ -229,7 +229,7 @@ impl ToolInvocation for GrepToolInvocation {
                     // Let's force regex = true if we want to match old behavior,
                     // or better, respect the new flags if we update the schema.
                     // For backward compatibility, let's treat the pattern as regex.
-                    include_patterns: params.include.map(|s| vec![s]),
+                    include_patterns: params.include.clone().map(|s| vec![s]),
                     // 1000 条 × 每行一整行源码，一次调用就能吃掉几万 token。
                     max_results: Some(DEFAULT_MAX_RESULTS),
                     ..Default::default()
@@ -253,7 +253,7 @@ impl ToolInvocation for GrepToolInvocation {
                     effective_pattern = repaired;
                 }
 
-                let matches = search_with_ripgrep(
+                let (matches, scan_stats) = search_with_ripgrep_stats(
                     &effective_pattern,
                     &search_dir.to_string_lossy(),
                     final_config,
@@ -294,9 +294,12 @@ impl ToolInvocation for GrepToolInvocation {
                     .collect();
 
                 if filtered_matches.is_empty() {
-                    let mut message = format!(
-                        "No matches found for pattern \"{}\" (after filtering)",
-                        params.pattern
+                    let mut message = empty_matches_message(
+                        &params.pattern,
+                        &scan_stats,
+                        &search_dir,
+                        params.include.as_deref(),
+                        params.case_sensitive,
                     );
                     if let Some(note) = &pattern_note {
                         message = format!("{}\n{}", note, message);
@@ -462,6 +465,43 @@ impl BaseDeclarativeTool for GrepTool {
     }
 }
 
+/// 空结果消息：区分"根本没搜到"和"搜到了但被后置过滤器剥光"，
+/// 并在末尾接上 `[scope]`/`[hints]` 诊断尾串（格式定义在 `ripgrep.rs`）。
+///
+/// 以前这两种情况写同一句 "No matches found (after filtering)"：模型分不清
+/// 是作用域选错了还是过滤器太凶，只能换个写法盲目重试。
+fn empty_matches_message(
+    pattern: &str,
+    scan_stats: &ScanStats,
+    search_dir: &std::path::Path,
+    include: Option<&str>,
+    case_sensitive: bool,
+) -> String {
+    let mut message = format!("No matches found for pattern \"{}\"", pattern);
+    if scan_stats.matches == 0 {
+        // 作用域/作用域之内确实没命中 —— 让统计口径说话。
+        message.push_str("\n\n");
+        message.push_str(&empty_result_tail(
+            scan_stats,
+            pattern,
+            search_dir,
+            include,
+            None,
+            case_sensitive,
+        ));
+    } else {
+        // ripgrep 搜到了 N 行，但全被 exclude_comments / exclude_patterns 剥掉 ——
+        // 这不是作用域问题，点名过滤器。
+        message.push_str(&format!(
+            "\n\n[hints]\n  - the pattern matched {} lines before post-filtering; all were \
+             removed by exclude_comments / exclude_patterns. Recheck those flags if this \
+             looks wrong.",
+            scan_stats.matches
+        ));
+    }
+    message
+}
+
 /// Check if a line is a comment based on common comment patterns
 fn is_comment_line(line: &str) -> bool {
     let trimmed = line.trim();
@@ -507,4 +547,64 @@ fn matches_glob_pattern(file_path: &str, pattern: &str) -> bool {
     }
     // Exact match
     file_path == pattern
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一次"确实搜过但没中"的扫描统计（2 文件、0 命中）。
+    fn searched_empty_stats() -> ScanStats {
+        ScanStats {
+            files_enumerated: 2,
+            files_searched: 2,
+            matches: 0,
+            ..Default::default()
+        }
+    }
+
+    /// 空结果消息要接上 [scope]/[hints]，让模型知道扫了多少文件、下一步该怎么办。
+    #[test]
+    fn an_empty_scan_gets_the_scope_and_hints_tail() {
+        let dir = std::path::Path::new("/proj");
+        let message = empty_matches_message("needle", &searched_empty_stats(), dir, None, false);
+
+        assert!(
+            message.starts_with("No matches found for pattern \"needle\""),
+            "实际：{message}"
+        );
+        assert!(message.contains("[scope]"), "实际：{message}");
+        assert!(message.contains("[hints]"), "实际：{message}");
+        assert!(
+            message.contains("matched nothing"),
+            "搜过但没中要给 pattern 层面的建议：{message}"
+        );
+    }
+
+    /// 以前两种"空"混成一句 "No matches found (after filtering)"；现在搜到过、
+    /// 又被后置过滤器剥光的情形必须单独点名过滤器。
+    #[test]
+    fn post_filter_depletion_points_at_the_filters() {
+        let dir = std::path::Path::new("/proj");
+        let stats = ScanStats {
+            files_enumerated: 2,
+            files_searched: 2,
+            matches: 7,
+            ..Default::default()
+        };
+        let message = empty_matches_message("fn ", &stats, dir, None, false);
+
+        assert!(
+            message.contains("matched 7 lines before post-filtering"),
+            "要点出搜索阶段命中过：{message}"
+        );
+        assert!(
+            message.contains("exclude_comments / exclude_patterns"),
+            "要点名过滤器：{message}"
+        );
+        assert!(
+            !message.contains("[scope]"),
+            "过滤器问题没有作用域诊断：{message}"
+        );
+    }
 }

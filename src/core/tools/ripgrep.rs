@@ -158,6 +158,150 @@ pub fn plural_count(n: usize, word: &str) -> String {
     format!("{} {}", n, plural_word(n, word))
 }
 
+/// 一次 Grep 的扫描统计 —— 空结果时判断"*为什么*空"的依据。
+///
+/// 模型收到 "No matches found" 时最常犯的错是换个写法原样重试。真正有用的
+/// 信息是：**到底搜了多少文件**。0 个文件、include 把文件全滤掉、还是搜了
+/// 200 个文件但一条没中 —— 这三种"空"的下一步动作完全不同。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ScanStats {
+    /// walker 交上来的文件数（在 include / file_types / 大小过滤**之前**）。
+    pub files_enumerated: usize,
+    /// 真正跑过搜索的文件。
+    pub files_searched: usize,
+    /// include glob 滤掉的文件数。
+    pub skipped_by_include: usize,
+    /// file_types 滤掉的文件数（无扩展名的文件也算在这里）。
+    pub skipped_by_type: usize,
+    /// 超过大小上限滤掉的文件数。
+    pub skipped_by_size: usize,
+    /// 命中的匹配行数。
+    pub matches: usize,
+    /// 到达 `max_results` 提前停止 —— 结果被截断过，不是天然的"全部"。
+    pub hit_limit: bool,
+}
+
+impl ScanStats {
+    /// `[scope]` 一行：这次搜索实际扫了什么。
+    ///
+    /// 空结果诊断的第一句话 —— 之后所有判断都建立在这行事实之上。
+    pub fn scope_line(&self, base_dir: &std::path::Path) -> String {
+        let mut line = format!(
+            "[scope] under \"{}\": {} files in scope, {} searched, {} matches",
+            base_dir.display(),
+            self.files_enumerated,
+            self.files_searched,
+            self.matches
+        );
+
+        let mut skipped: Vec<String> = Vec::new();
+        if self.skipped_by_include > 0 {
+            skipped.push(format!("include {}", self.skipped_by_include));
+        }
+        if self.skipped_by_type > 0 {
+            skipped.push(format!("file_types {}", self.skipped_by_type));
+        }
+        if self.skipped_by_size > 0 {
+            skipped.push(format!("size {}", self.skipped_by_size));
+        }
+        if !skipped.is_empty() {
+            line.push_str(&format!(" (skipped: {})", skipped.join(", ")));
+        }
+        if self.hit_limit {
+            line.push_str(" [stopped at max_results]");
+        }
+        line
+    }
+}
+
+/// 空结果的 `[hints]` 行：按统计口径给出**能照做**的下一步，而不是"再试一次"。
+///
+/// 只在真的扫过文件、且一条没中时才给泛泛的 pattern 建议 —— 扫到 0 个文件
+/// 时问题在作用域，不在写法。
+pub fn empty_scan_hints(
+    stats: &ScanStats,
+    pattern: &str,
+    include_pattern: Option<&str>,
+    file_types: Option<&[String]>,
+    case_sensitive: bool,
+) -> Vec<String> {
+    let mut hints = Vec::new();
+
+    if stats.files_enumerated == 0 {
+        hints.push(
+            "nothing was walked under this root — the path may not exist, be empty, or be \
+             fully ignored by .gitignore/.starignore."
+                .to_string(),
+        );
+        return hints;
+    }
+
+    if stats.files_searched == 0 {
+        if stats.skipped_by_include >= stats.files_enumerated {
+            let pat = include_pattern.unwrap_or("<include>");
+            hints.push(format!(
+                "the include glob \"{}\" excluded every walked file. Globs match paths relative \
+                 to the search base (usually cwd): \"src/**\" matches nothing when the walk root \
+                 is already <cwd>/src — an entry there has the relative path \"lib.rs\". Drop the \
+                 directory prefix or pass the walk root itself as path.",
+                pat
+            ));
+        } else if stats.skipped_by_type >= stats.files_enumerated {
+            hints.push(format!(
+                "file_types [{}] excluded every walked file — files without an extension are \
+                 also dropped whenever a type filter is set. Check the extension list.",
+                file_types
+                    .map(|t| t.join(", "))
+                    .unwrap_or_else(|| "?".to_string())
+            ));
+        } else if stats.skipped_by_size >= stats.files_enumerated {
+            hints.push(
+                "every walked file exceeded the size cap (2 MB by default) — the matches may \
+                 live in files this search never opened."
+                    .to_string(),
+            );
+        }
+        return hints;
+    }
+
+    // 真的搜过文件但一条没中 —— 这时才轮到"写法"层面的建议。
+    if case_sensitive && pattern_has_uppercase(pattern) {
+        hints.push("case_sensitive is on; most identifiers appear in different casing — try case_sensitive: false.".to_string());
+    }
+    hints.push(
+        "the pattern compiled and ran, but matched nothing in the searched files. Try: broaden \
+         the path/include scope; reword to the identifiers the code actually uses (`retry_backoff`, \
+         not the user's sentence); or if you meant a literal string, re-run with regex: false."
+            .to_string(),
+    );
+    hints
+}
+
+/// 判断搜索 pattern 里有没有大写字母（给 case_sensitive 提示用）。
+fn pattern_has_uppercase(s: &str) -> bool {
+    s.chars().any(|c| c.is_ascii_uppercase())
+}
+
+/// 空结果诊断尾串：`[scope]` 一行 + 若干 `[hints]`。
+///
+/// 调用方（Grep / Search / CodebaseSearch 兜底）在返回"没搜到"时把这个串
+/// 追加到末尾 —— 模型下一步该干什么，直接写在里头。
+pub fn empty_result_tail(
+    stats: &ScanStats,
+    pattern: &str,
+    base_dir: &std::path::Path,
+    include_pattern: Option<&str>,
+    file_types: Option<&[String]>,
+    case_sensitive: bool,
+) -> String {
+    let mut tail = stats.scope_line(base_dir);
+    tail.push_str("\n[hints]");
+    for hint in empty_scan_hints(stats, pattern, include_pattern, file_types, case_sensitive) {
+        tail.push_str(&format!("\n  - {}", hint));
+    }
+    tail
+}
+
 /// 一次 Grep 结果输入给格式化器的最小集（两个 Grep 实现共用）。
 pub struct GrepHit<'a> {
     pub file: &'a str,
@@ -355,6 +499,18 @@ pub fn search_with_ripgrep(
     base_dir: &str,
     config: RipgrepConfig,
 ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
+    search_with_ripgrep_stats(query, base_dir, config).map(|(results, _stats)| results)
+}
+
+/// 同 [`search_with_ripgrep`]，但把扫描统计也带出来 —— 有统计的调用方
+/// （两个 Grep 工具、CodebaseSearch 兜底）才能在空结果时说得清"为什么空"。
+pub fn search_with_ripgrep_stats(
+    query: &str,
+    base_dir: &str,
+    config: RipgrepConfig,
+) -> Result<(Vec<SearchResult>, ScanStats), Box<dyn std::error::Error>> {
+    let mut stats = ScanStats::default();
+
     // Build Matcher
     let mut matcher_builder = RegexMatcherBuilder::new();
 
@@ -425,6 +581,7 @@ pub fn search_with_ripgrep(
         {
             let count = current_count.lock().unwrap_or_else(|e| e.into_inner());
             if *count >= max_results {
+                stats.hit_limit = true;
                 break;
             }
         }
@@ -433,11 +590,13 @@ pub fn search_with_ripgrep(
         if !entry.path().is_file() {
             continue;
         }
+        stats.files_enumerated += 1;
 
         // Check file size (manual max_filesize implementation)
         if let Some(max_size) = max_file_size {
             if let Ok(metadata) = entry.path().metadata() {
                 if metadata.len() > max_size {
+                    stats.skipped_by_size += 1;
                     continue; // Skip files that are too large
                 }
             }
@@ -448,10 +607,12 @@ pub fn search_with_ripgrep(
             if let Some(ext) = entry.path().extension() {
                 let ext_str = ext.to_string_lossy().to_lowercase();
                 if !types.iter().any(|t| t.to_lowercase() == ext_str) {
+                    stats.skipped_by_type += 1;
                     continue;
                 }
             } else {
                 // Files without extension, skip if type filter exists
+                stats.skipped_by_type += 1;
                 continue;
             }
         }
@@ -464,6 +625,7 @@ pub fn search_with_ripgrep(
         // 不上 —— 见 `include_base` 的文档注释。
         if let Some(ref matcher) = include_matcher {
             if !crate::utils::file_walk::glob_matches(matcher, &include_root, entry.path()) {
+                stats.skipped_by_include += 1;
                 continue;
             }
         }
@@ -471,6 +633,7 @@ pub fn search_with_ripgrep(
         // Execute search
         let path = entry.path();
         let path_str = path.to_string_lossy().to_string();
+        stats.files_searched += 1;
 
         let results_clone = Arc::clone(&results);
         let current_count_clone = Arc::clone(&current_count);
@@ -484,6 +647,7 @@ pub fn search_with_ripgrep(
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 if *count >= max_results {
+                    stats.hit_limit = true;
                     return Ok(false); // Stop search
                 }
 
@@ -496,8 +660,12 @@ pub fn search_with_ripgrep(
                     text: Some(line_content.trim().to_string()),
                     match_content: Some(query.to_string()),
                 });
+                drop(results_guard);
 
                 *count += 1;
+                drop(count);
+
+                stats.matches += 1;
 
                 Ok(true) // Continue search
             }),
@@ -520,7 +688,7 @@ pub fn search_with_ripgrep(
         Err(arc) => arc.lock().unwrap_or_else(|e| e.into_inner()).clone(),
     };
 
-    Ok(results)
+    Ok((results, stats))
 }
 
 #[cfg(test)]
@@ -668,6 +836,124 @@ mod tests {
     fn empty_hits_say_so() {
         let out = format_grep_hits(&[], std::path::Path::new("/proj"), "nope");
         assert!(out.starts_with("No matches found"), "实际：{out}");
+    }
+
+    // ── ScanStats + 空结果诊断 ──────────────────────────────────────────────
+
+    /// 统计口径：walker 看到的文件数、真正搜过的文件数、命中数各归各位。
+    #[test]
+    fn scan_stats_count_files_and_matches() {
+        let dir = fixture();
+        let (results, stats) = search_with_ripgrep_stats(
+            "needle",
+            dir.path().to_str().unwrap(),
+            RipgrepConfig::default(),
+        )
+        .expect("search should run");
+
+        assert_eq!(stats.files_enumerated, 2, "实际：{stats:?}");
+        assert_eq!(stats.files_searched, 2, "实际：{stats:?}");
+        assert_eq!(stats.matches, results.len());
+        assert_eq!(stats.matches, 2);
+        assert!(!stats.hit_limit);
+        assert_eq!(stats.skipped_by_include, 0);
+    }
+
+    /// include 把所有文件滤掉的"空"与"搜了但没中"的"空"必须区分开：前者要指出
+    /// 是 glob 的锅（glob 基和 walker 根不一致是历史事故的根因）。
+    #[test]
+    fn an_include_that_excludes_everything_explains_itself() {
+        let dir = fixture();
+        let (_, stats) = search_with_ripgrep_stats(
+            "needle",
+            dir.path().to_str().unwrap(),
+            RipgrepConfig {
+                include_patterns: Some(vec!["*.zzz".to_string()]),
+                ..Default::default()
+            },
+        )
+        .expect("search should run");
+
+        assert_eq!(stats.files_enumerated, 2);
+        assert_eq!(stats.files_searched, 0, "实际：{stats:?}");
+        assert_eq!(stats.skipped_by_include, 2);
+        assert_eq!(stats.matches, 0);
+
+        let tail = empty_result_tail(&stats, "needle", dir.path(), Some("*.zzz"), None, false);
+        assert!(tail.contains("[scope]"), "实际：{tail}");
+        assert!(
+            tail.contains("excluded every walked file"),
+            "include 全滤掉的空结果要点名 glob：{tail}"
+        );
+        assert!(
+            tail.contains("relative to the search base"),
+            "要解释 glob 基口径：{tail}"
+        );
+    }
+
+    /// 根目录下啥都没有时的"空"是作用域问题，不该给 pattern 层面的建议。
+    #[test]
+    fn an_empty_root_is_reported_as_a_scope_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, stats) = search_with_ripgrep_stats(
+            "needle",
+            dir.path().to_str().unwrap(),
+            RipgrepConfig::default(),
+        )
+        .expect("search should run");
+
+        assert_eq!(stats.files_enumerated, 0);
+        let tail = empty_result_tail(&stats, "needle", dir.path(), None, None, false);
+        assert!(tail.contains("nothing was walked"), "实际：{tail}");
+        assert!(
+            !tail.contains("regex: false"),
+            "作用域问题不给写法建议：{tail}"
+        );
+    }
+
+    /// 真的搜过文件但一条没中 —— 这时才给写法层面的建议。
+    #[test]
+    fn a_searched_but_empty_hit_gets_wording_advice() {
+        let dir = fixture();
+        let (_, stats) = search_with_ripgrep_stats(
+            "totally_absent_token",
+            dir.path().to_str().unwrap(),
+            RipgrepConfig::default(),
+        )
+        .expect("search should run");
+
+        assert_eq!(stats.files_searched, 2);
+        assert_eq!(stats.matches, 0);
+        let tail = empty_result_tail(
+            &stats,
+            "totally_absent_token",
+            dir.path(),
+            None,
+            None,
+            false,
+        );
+        assert!(tail.contains("matched nothing"), "实际：{tail}");
+    }
+
+    /// `[scope]` 行要把 skip 计数列清楚，被滤掉的文件多少要可见。
+    #[test]
+    fn the_scope_line_lists_what_was_skipped() {
+        let mut stats = ScanStats {
+            files_enumerated: 10,
+            files_searched: 6,
+            skipped_by_include: 3,
+            skipped_by_size: 1,
+            ..Default::default()
+        };
+        let line = stats.scope_line(std::path::Path::new("/w"));
+        assert!(line.contains("10 files in scope"), "实际：{line}");
+        assert!(line.contains("6 searched"), "实际：{line}");
+        assert!(line.contains("skipped: include 3, size 1"), "实际：{line}");
+        assert!(!line.contains("[stopped at"), "没撞上限不提上限：{line}");
+
+        stats.hit_limit = true;
+        let line = stats.scope_line(std::path::Path::new("/w"));
+        assert!(line.contains("[stopped at max_results]"), "实际：{line}");
     }
 
     // ── 非法正则的窄修复 ────────────────────────────────────────────────────
