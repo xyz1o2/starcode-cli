@@ -1089,12 +1089,13 @@ mod steering_tests {
         );
     }
 
-    /// 回归：回合仍在流式时点折叠，`streaming_height_floor` 会把展开时刻的
-    /// 高度钉成下限，折叠后的 1 行标题被补成整屏空白 —— 用户报的
+    /// 回归：`streaming_height_floor` 在流式期间"只增不减"，若用户手动收起后
+    /// 它仍生效，会把折叠后的 1 行标题钉在展开时刻的高度 —— 用户报的
     /// 「展开后再折叠，大片空白行缩不上去」。
     ///
-    /// 注意起点变了：流式中的思考块**自动展开**（用户能实时看到推理），
-    /// 所以第一次点击是"收起"，不是"展开"。
+    /// 当前默认：流式中的思考块**收起**（自动展开已停用，见
+    /// `is_thinking_expanded`），floor 只在手动展开期间被钉到展开高度 ——
+    /// 所以路径是：手动展开 → 内容增长钉底 → 收起 → 验证不被 floor 垫回。
     #[test]
     fn collapsing_mid_stream_must_not_be_pinned_by_the_streaming_height_floor() {
         let mut state = ChatState::test_fixture();
@@ -1106,15 +1107,31 @@ mod steering_tests {
         state.chat_history.last_mut().unwrap().is_streaming = Some(true);
         let idx = state.chat_history.len() - 1;
 
-        // 流式期自动展开 → 基线就是展开态的高度。
-        let expanded =
+        // 流式默认收起 → 基线是折叠态（1 行标题）的高度。
+        let base =
             crate::ui::components::chat_history::render_chat_lines(&mut state, 80).len() as u16;
 
-        // 用户手动收起（走真实点击路径）。floor 随后会被 stale 帧钉在展开高度，
-        // 所以这一步是在验证"收起后不被空白行垫回去"。
+        // 用户手动展开（走真实点击路径）：流式重测把 floor 钉在展开高度，
+        // 这正是下面收起时要对抗的下限。
         assert!(
             crate::ui::events::mouse::try_toggle_on_click(&mut state, idx, 0),
-            "点击思考块应收起"
+            "点击思考块应展开"
+        );
+        let expanded =
+            crate::ui::components::chat_history::render_chat_lines(&mut state, 80).len() as u16;
+        assert!(expanded > base, "手动展开必须变高：{expanded} <= {base}");
+
+        // 流式又长了一段：stale 重测，floor 从此刻起钉在展开高度
+        if let Some(r) = state.chat_history[idx].reasoning_content.as_mut() {
+            r.push_str("reasoning delta grows the block\n");
+        }
+        let _ = crate::ui::components::chat_history::render_chat_lines(&mut state, 80);
+
+        // 用户手动收起：floor 从点击帧起作废，折叠后的 1 行标题不许被
+        // 钉回展开时刻的高度（大片空白行就是这条）。
+        assert!(
+            crate::ui::events::mouse::try_toggle_on_click(&mut state, idx, 0),
+            "再点击应收起"
         );
         let collapsed =
             crate::ui::components::chat_history::render_chat_lines(&mut state, 80).len() as u16;
@@ -1123,13 +1140,11 @@ mod steering_tests {
             "收起必须变矮：{collapsed} >= {expanded}"
         );
 
-        // 流式又长了一段：stale 重测，floor 从此刻起钉在展开高度
+        // 流式仍在继续：手动收起过的块**不许被自动化撑开**。
         if let Some(r) = state.chat_history[idx].reasoning_content.as_mut() {
-            r.push_str("reasoning delta grows the block\n");
+            r.push_str("more content after manual collapse\n");
         }
         let _ = crate::ui::components::chat_history::render_chat_lines(&mut state, 80);
-
-        // 手动偏好压过自动化：流式仍在继续，但用户收起过的块**不许被撑开**。
         let after_growth =
             crate::ui::components::chat_history::render_chat_lines(&mut state, 80).len() as u16;
         assert!(

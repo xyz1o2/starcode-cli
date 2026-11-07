@@ -1,7 +1,9 @@
 pub mod clipboard;
 pub mod cost;
 pub mod format;
+pub mod heatmap;
 pub mod render;
+pub mod stats;
 pub mod status;
 pub mod term_recovery;
 pub mod text;
