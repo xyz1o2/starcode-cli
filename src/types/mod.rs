@@ -1186,6 +1186,7 @@ pub enum ThinkingEffort {
     Medium, // 中等努力：平衡思考
     High,   // 高努力：深度思考
     Xhigh,  // 超高努力：旗舰模型扩展档（对标 OpenAI/Anthropic 的 xhigh）
+    Max,    // 最大努力：provider 声明支持才发原词，否则 clamp 降档
 }
 
 impl Default for ThinkingEffort {
@@ -1202,6 +1203,7 @@ impl ThinkingEffort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
@@ -1212,13 +1214,13 @@ impl ThinkingEffort {
             Self::Medium => "Medium",
             Self::High => "High",
             Self::Xhigh => "Xhigh",
+            Self::Max => "Max",
         }
     }
 
     /// 从字符串解析档位（skill frontmatter 的 `effort` 字段用）。
     ///
     /// CC 的取值：`low` / `medium` / `high` / `xhigh` / `max`。
-    /// `max` 映射到 `Xhigh` —— StarCode 没有 `max` 档（`Xhigh` 已是最高）。
     /// 认 `inherit`（保持当前）—— 返回 `None`。
     pub fn parse_skill_effort(raw: &str) -> Option<Self> {
         match raw.trim().to_lowercase().as_str() {
@@ -1226,7 +1228,8 @@ impl ThinkingEffort {
             "low" => Some(Self::Low),
             "medium" | "default" => Some(Self::Medium),
             "high" => Some(Self::High),
-            "xhigh" | "max" => Some(Self::Xhigh),
+            "xhigh" => Some(Self::Xhigh),
+            "max" => Some(Self::Max),
             _ => None,
         }
     }
@@ -1237,7 +1240,8 @@ impl ThinkingEffort {
             Self::Low => Self::Medium,
             Self::Medium => Self::High,
             Self::High => Self::Xhigh,
-            Self::Xhigh => Self::Off,
+            Self::Xhigh => Self::Max,
+            Self::Max => Self::Off,
         }
     }
 
@@ -1246,7 +1250,8 @@ impl ThinkingEffort {
     ///
     /// Claude Code 没有 Off 这一档，所以空心圈在那边是 low；这里 Off 用虚线圈
     /// `◌`，把"关掉"和"低"区分开。Xhigh 是本市面通用刻度之上的旗舰扩展档，
-    /// 用实心菱形 `◆` 表示比 `●` 更进一步。
+    /// 用实心菱形 `◆` 表示比 `●` 更进一步；Max 是 provider 白名单档（标环
+    /// `◇` —— 比 `◆` 更"空"一点，提示它通常会被 clamp 降档）。
     pub fn symbol(&self) -> &'static str {
         match self {
             Self::Off => "◌",
@@ -1254,6 +1259,7 @@ impl ThinkingEffort {
             Self::Medium => "◐",
             Self::High => "●",
             Self::Xhigh => "◆",
+            Self::Max => "◇",
         }
     }
 
@@ -1631,12 +1637,13 @@ mod thinking_effort_tests {
     #[test]
     fn cycling_all_gears_returns_to_the_start() {
         let mut gear = ThinkingEffort::Off;
-        for _ in 0..5 {
+        for _ in 0..6 {
             gear = gear.next();
         }
         assert!(matches!(gear, ThinkingEffort::Off));
-        // High 的下一档必须是新增的 Xhigh，不能跳回 Off
+        // 刻度不跳档：High → Xhigh → Max 逐级上升，Max 之后才回到 Off
         assert!(matches!(ThinkingEffort::High.next(), ThinkingEffort::Xhigh));
+        assert!(matches!(ThinkingEffort::Xhigh.next(), ThinkingEffort::Max));
     }
 
     /// `GetDiagnostics` 是只读工具（跑 `cargo check`/`eslint`/`pylint`，不写文件），

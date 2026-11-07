@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/version-0.3.0-blue" alt="version">
   <img src="https://img.shields.io/badge/rust-2021-orange" alt="rust edition">
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
+  <img src="https://img.shields.io/badge/license-PolyForm--Noncommercial--1.0.0-blue" alt="license">
   <img src="https://img.shields.io/badge/platform-cross--platform-lightgrey" alt="platform">
 </p>
 

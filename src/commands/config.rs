@@ -154,7 +154,8 @@ pub(crate) fn apply_config_value(
         }
         "thinking" => {
             let normalized = normalize_thinking(value).ok_or_else(|| {
-                "Invalid thinking effort. Supported: off, low, medium, high, xhigh.".to_string()
+                "Invalid thinking effort. Supported: off, low, medium, high, xhigh, max."
+                    .to_string()
             })?;
             settings.thinking_effort = Some(normalized.to_string());
             Ok((canonical, normalized.to_string()))
@@ -923,7 +924,8 @@ mod tests {
         ];
         assert_eq!(
             runtime_thinking_from_applied(&applied),
-            Some(crate::types::ThinkingEffort::Xhigh)
+            Some(crate::types::ThinkingEffort::Max),
+            "the last applied thinking value wins verbatim (clamping happens at request time)"
         );
         assert_eq!(
             runtime_context_from_applied(&applied),
@@ -985,8 +987,8 @@ mod tests {
         assert_eq!(settings.thinking_effort.as_deref(), Some("high"));
         assert_eq!(
             apply_config_value(&mut settings, "thinking", "max").unwrap(),
-            ("thinking", "xhigh".to_string()),
-            "config must accept the same top effort spelling as /effort"
+            ("thinking", "max".to_string()),
+            "max is its own gear now — stored as declared, clamped only at request time"
         );
         assert_eq!(
             apply_config_value(&mut settings, "thinking", "false").unwrap(),

@@ -62,6 +62,7 @@ fn encode(effort: &ThinkingEffort) -> u8 {
         ThinkingEffort::Medium => 3,
         ThinkingEffort::High => 4,
         ThinkingEffort::Xhigh => 5,
+        ThinkingEffort::Max => 6,
     }
 }
 
@@ -88,8 +89,10 @@ pub fn parse_effort(raw: &str) -> Option<ThinkingEffort> {
         "low" | "minimal" | "think" => Some(ThinkingEffort::Low),
         "medium" | "mid" | "auto" | "on" | "true" => Some(ThinkingEffort::Medium),
         "high" => Some(ThinkingEffort::High),
-        // xhigh / max / ultrathink 都归到最高扩展档（对标各家旗舰档位词表）
-        "xhigh" | "max" | "ultra" | "ultrathink" => Some(ThinkingEffort::Xhigh),
+        // xhigh / ultrathink 归扩展档；max 是独立档（对标 CC 的 `max`），
+        // 仅在 provider 声明白名单里原词下发，否则 clamp 降档。
+        "xhigh" | "ultra" | "ultrathink" => Some(ThinkingEffort::Xhigh),
+        "max" => Some(ThinkingEffort::Max),
         _ => None,
     }
 }
@@ -305,13 +308,14 @@ pub fn resolve_dialect(profile: &ProviderProfile<'_>) -> ThinkingDialect {
 
 // ── 档位 → 参数 ───────────────────────────────────────────────────
 
-/// `low` / `medium` / `high` / `xhigh` 四个词。`Off` 不会走到这里（调用点已判空）。
+/// 五档词表。`Off` 不会走到这里（调用点已判空）。
 fn effort_word(effort: &ThinkingEffort) -> &'static str {
     match effort {
         ThinkingEffort::Off | ThinkingEffort::Low => "low",
         ThinkingEffort::Medium => "medium",
         ThinkingEffort::High => "high",
         ThinkingEffort::Xhigh => "xhigh",
+        ThinkingEffort::Max => "max",
     }
 }
 
@@ -342,12 +346,48 @@ fn supports_xhigh(kind: ProviderKind, model: &str) -> bool {
     }
 }
 
-/// 发到请求体里的最终档位词：`Xhigh` 在不支持的模型上自动降为 `high`。
-fn effective_word(kind: ProviderKind, model: &str, effort: &ThinkingEffort) -> &'static str {
+/// 发到请求体里的最终档位词。
+///
+/// 扩展档（`xhigh` / `max`）在 provider 不认时逐级 clamp —— 宁可降档也不要
+/// 整轮 400。判定顺序是声明优先：`/models` 给出过 `supported_reasoning_levels`
+/// 白名单就照它判（`ProviderProfile.provider_id` 是入库键），没给过才落到
+/// 模型名启发式。clamp 阶梯：max → xhigh → high。
+fn effective_word(profile: &ProviderProfile<'_>, effort: &ThinkingEffort) -> &'static str {
     match effort {
-        ThinkingEffort::Xhigh if !supports_xhigh(kind, model) => "high",
+        ThinkingEffort::Max if !supports_effort_for(profile, effort) => "xhigh",
+        ThinkingEffort::Xhigh if !supports_effort_for(profile, effort) => "high",
         other => effort_word(other),
     }
+}
+
+/// 该档位对当前 provider + model 是否合法。
+///
+/// 声明列表优先：provider 在 `/models` 里报过档位白名单时，白名单就是答案
+/// —— 声明里没有的就是不认，不再按模型名猜。白名单缺席才走启发式
+/// （`supports_xhigh`）。
+fn supports_effort_for(profile: &ProviderProfile<'_>, effort: &ThinkingEffort) -> bool {
+    let capability = profile.provider_id.and_then(|pid| {
+        crate::agent::model_catalog::get_cached_reasoning_capability(Some(pid), profile.model)
+    });
+    if let Some(capability) = capability {
+        if !capability.efforts.is_empty() {
+            // 白名单里存的是 provider 的原词，比对大小写不敏感。
+            let word = effort_word(effort);
+            return capability
+                .efforts
+                .iter()
+                .any(|declared| declared.eq_ignore_ascii_case(word));
+        }
+        // 声明了能力但没给档位表：二进制场景（只说"支持思考"），
+        // low/medium/high 一律认，扩展档仍走启发式。
+        return match effort {
+            ThinkingEffort::Max | ThinkingEffort::Xhigh => {
+                supports_xhigh(profile.kind, profile.model)
+            }
+            _ => true,
+        };
+    }
+    supports_xhigh(profile.kind, profile.model)
 }
 
 /// `(budget_tokens, max_tokens)`。`budget_tokens` 必须小于 `max_tokens`，
@@ -359,6 +399,10 @@ fn budget_ladder(effort: &ThinkingEffort) -> (u64, u64) {
         ThinkingEffort::Medium => (10_000, 24_576),
         ThinkingEffort::High => (24_576, 32_000),
         ThinkingEffort::Xhigh => (30_720, 32_000),
+        // Max 档：预算顶格。这里的 (budget, max_tokens) 只在 AnthropicBudget
+        // 方言消费 —— 32000 上限是老一代模型的握手线；声明 max_output_tokens
+        // 更大的模型由 request 构造层（declared > budget 的 raise 分支）放大。
+        ThinkingEffort::Max => (30_720, 32_000),
     }
 }
 
@@ -398,7 +442,7 @@ pub fn thinking_params(profile: &ProviderProfile<'_>, effort: &ThinkingEffort) -
                     .insert("thinking".to_string(), json!({ "type": "adaptive" }));
                 params.extra.insert(
                     "output_config".to_string(),
-                    json!({ "effort": effective_word(profile.kind, profile.model, effort) }),
+                    json!({ "effort": effective_word(profile, effort) }),
                 );
             }
         }
@@ -416,7 +460,7 @@ pub fn thinking_params(profile: &ProviderProfile<'_>, effort: &ThinkingEffort) -
             if on {
                 params.extra.insert(
                     "reasoning_effort".to_string(),
-                    json!(effective_word(profile.kind, profile.model, effort)),
+                    json!(effective_word(profile, effort)),
                 );
             }
         }
@@ -424,7 +468,7 @@ pub fn thinking_params(profile: &ProviderProfile<'_>, effort: &ThinkingEffort) -
             if on {
                 params.extra.insert(
                     "reasoning".to_string(),
-                    json!({ "effort": effective_word(profile.kind, profile.model, effort) }),
+                    json!({ "effort": effective_word(profile, effort) }),
                 );
             }
         }
@@ -470,6 +514,70 @@ mod tests {
     fn params(kind: ProviderKind, model: &str, host: &str, effort: ThinkingEffort) -> Value {
         let p = profile(kind, model, host);
         Value::Object(thinking_params(&p, &effort).extra)
+    }
+
+    /// 带 provider_id 的画像：声明白名单按 provider + model 入库，
+    /// 测试要能命中缓存键。名字带前缀避免撞上其它测试的入库条目。
+    fn seed_declared(model: &str, efforts: &[&str]) -> String {
+        let provider_id = format!("thinking-test-{model}");
+        crate::agent::model_catalog::for_testing_seed_reasoning_capability(
+            Some(&provider_id),
+            model,
+            true,
+            efforts.iter().map(|e| e.to_string()).collect(),
+        );
+        provider_id
+    }
+
+    fn declared_profile<'a>(kind: ProviderKind, model: &'a str) -> ProviderProfile<'a> {
+        ProviderProfile {
+            kind,
+            model,
+            base_url: None,
+            provider_name: None,
+            // 测试里 provider_id 与 model 一一对应（seed_declared 命名规则）
+            provider_id: Some(Box::leak(format!("thinking-test-{model}").into_boxed_str())),
+        }
+    }
+
+    #[test]
+    fn max_is_sent_verbatim_only_when_the_provider_declares_it() {
+        let _guard = SERIAL.lock().unwrap();
+        let _pid = seed_declared("decl-max-model", &["low", "high", "max"]);
+        let p = declared_profile(ProviderKind::Compatible, "decl-max-model");
+        // 声明了 max：原词下发
+        assert_eq!(
+            effective_word(&p, &ThinkingEffort::Max),
+            "max",
+            "declared max must be sent verbatim"
+        );
+        // 同一 provider 声明细表里没有 xhigh：clamp 到 high
+        assert_eq!(
+            effective_word(&p, &ThinkingEffort::Xhigh),
+            "high",
+            "undeclared xhigh must clamp per the ladder"
+        );
+        assert_eq!(effective_word(&p, &ThinkingEffort::Medium), "medium");
+    }
+
+    #[test]
+    fn an_undeclared_max_clamps_to_xhigh_then_high() {
+        let _guard = SERIAL.lock().unwrap();
+        // 无声明列表（启发式）：非旗舰模型两个扩展档都 clamp
+        let p = profile(ProviderKind::Compatible, "some-普通的-model", "");
+        assert_eq!(effective_word(&p, &ThinkingEffort::Max), "xhigh");
+        assert_eq!(effective_word(&p, &ThinkingEffort::Xhigh), "high");
+    }
+
+    #[test]
+    fn declared_bool_without_levels_treats_low_medium_high_as_legal() {
+        let _guard = SERIAL.lock().unwrap();
+        let _pid = seed_declared("decl-bool-model", &[]);
+        let p = declared_profile(ProviderKind::Compatible, "decl-bool-model");
+        // 声明了 reasoning 但没给档位表：低档全认，扩展档走启发式
+        assert_eq!(effective_word(&p, &ThinkingEffort::Low), "low");
+        assert_eq!(effective_word(&p, &ThinkingEffort::High), "high");
+        assert_eq!(effective_word(&p, &ThinkingEffort::Max), "xhigh");
     }
 
     #[test]

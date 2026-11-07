@@ -646,6 +646,7 @@ pub fn get_thinking_effort_palette_items(
         crate::types::ThinkingEffort::Medium => "thinking_medium",
         crate::types::ThinkingEffort::High => "thinking_high",
         crate::types::ThinkingEffort::Xhigh => "thinking_xhigh",
+        crate::types::ThinkingEffort::Max => "thinking_max",
     };
     // 选中标记不能再用 "●" —— 那正是 High 档的符号，`High ●` 读起来像两个东西。
     // 档位前缀直接用状态栏那套符号，用户在面板里选一次就认得状态栏上那一格了。
@@ -711,7 +712,13 @@ pub fn get_thinking_effort_palette_items(
                 "thinking_xhigh",
                 crate::types::ThinkingEffort::Xhigh,
                 "palette.desc.thinking_xhigh",
-                "Maximum thinking (falls back to High on models without xhigh support)",
+                "Extended thinking (falls back to High on models without xhigh support)",
+            ),
+            (
+                "thinking_max",
+                crate::types::ThinkingEffort::Max,
+                "palette.desc.thinking_max",
+                "Max thinking (sent verbatim only when the provider declares it; clamps otherwise)",
             ),
         ];
         for (id, effort, key, fallback) in levels {

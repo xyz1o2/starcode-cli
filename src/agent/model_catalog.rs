@@ -109,6 +109,26 @@ pub fn get_provider_safe_context_cap(provider_id: Option<&str>, model_name: &str
         .and_then(|guard| guard.as_ref()?.get(&key).copied())
 }
 
+/// 直接抹进 reasoning 缓存的一条声明值 —— 只给测试用。
+///
+/// 正常入库只发生在 `update_context_window_cache`（预热/面板路径），
+/// 那里要抢锁还有防死锁语义；测试只需要"给这个键摆一份声明白名单"，
+/// 直写最简单，也不用造一份假的 `ModelInfo` 列表。
+#[cfg(test)]
+pub fn for_testing_seed_reasoning_capability(
+    provider_id: Option<&str>,
+    model_name: &str,
+    supported: bool,
+    efforts: Vec<String>,
+) {
+    let key = ModelCapabilityKey::new(provider_id, model_name);
+    if let Ok(mut guard) = MODEL_REASONING_CACHE.write() {
+        guard
+            .get_or_insert_with(HashMap::new)
+            .insert(key, ReasoningCapability { supported, efforts });
+    }
+}
+
 /// 更新指定 provider 的模型上下文窗口缓存。
 ///
 /// # 为什么用 `try_write` 而不是 `write`

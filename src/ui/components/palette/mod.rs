@@ -1120,10 +1120,17 @@ mod tests {
 
         // 两个能力等级的面板完全一致
         assert_eq!(binary_labels, granular_labels);
-        // 刻度固定为 Off → Low → Medium → High → Xhigh，没有 “On”
+        // 刻度固定为 Off → Low → Medium → High → Xhigh → Max，没有 “On”
         assert_eq!(
             binary_labels,
-            vec!["◌ Off  (current)", "○ Low", "◐ Medium", "● High", "◆ Xhigh"]
+            vec![
+                "◌ Off  (current)",
+                "○ Low",
+                "◐ Medium",
+                "● High",
+                "◆ Xhigh",
+                "◇ Max"
+            ]
         );
     }
 
