@@ -189,6 +189,7 @@ tmux·iTerm2 pane）、idle notification 携带结题正文、stuck teammate 被
 | 消息早达（running agent 的 fg command 转 background） | 未做（量在 ToolExecutor，后置） |
 | 死后 mailbox 持久化（跨重启 resume 寻址） | 未做（进程内 mailbox，重启即无——CC 靠 `~/.claude/teammates/` 文件） |
 | 权限/model 继承 | 大半既有（sub_config clone 带 allowed_tools/policy mode）；缺 org 策略家族降级（非互通缺口） |
+| **Explore 显示/行为对标**（2.0.17 引入 → 2.1.196 后台默认 → 2.1.198 继承模型） | ✅ 本次补齐：路由默认后台（`explorer_defaults_to_background_but_respects_explicit_sync`，CC 2.1.196 语义「检索类一次性可并行，阻塞无收益」+ 显式 background=false 保留同步）；只读工具白名单（`EXPLORER_READONLY_TOOLS` 灌 sub_config.core_tools，注册层 `is_core_tool_enabled` 消费，对标 docs 的 Read/Grep/Glob/只读 Bash）；显示层原本就已对标（`search_read_summary_text` / `render_done_line` / `@name` 优先 / ctrl+o 展开） |
 
 ## 9. 明确不做
 

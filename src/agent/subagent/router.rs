@@ -119,6 +119,20 @@ pub fn route_agent_call(
         };
     }
 
+    // 规则 2.5：Explore 默认后台（对标 CC 2.1.196「Subagents now run in the
+    // background by default … and is notified when they finish」—— 检索类
+    // 子代理一次性、可并行、结果自足，阻塞主线程没有收益；前台等待只在
+    // 调用方显式 `background=false` 时保留）。
+    if matches!(input.subagent_type.as_ref(), Some(SubagentType::Explorer))
+        && input.background.unwrap_or(true)
+    {
+        return AgentRoute::AsyncAgent {
+            agent_id: generate_agent_id(),
+            request: build_request(input),
+            name: input.name.clone(),
+        };
+    }
+
     // 规则 3：显式 background 参数 或 agent 定义 background → 异步
     if input.background.unwrap_or(false) || agent_def_background {
         return AgentRoute::AsyncAgent {
@@ -278,5 +292,40 @@ mod tests {
             }
             other => panic!("expected AsyncAgent, got {:?}", other),
         }
+    }
+
+    /// 对标 CC 2.1.196「Subagents now run in the background by default」里
+    /// 检索类子代理的那一半：Explorer **默认后台**（规则 2.5），显式
+    /// `background=false` 才回落同步；非 Explorer 类型同步默认不变。
+    #[test]
+    fn explorer_defaults_to_background_but_respects_explicit_sync() {
+        // Explorer 无 background 参数 → 后台
+        let mut input = default_input();
+        input.subagent_type = Some(SubagentType::Explorer);
+        assert!(matches!(
+            route_agent_call(&input, false, false),
+            AgentRoute::AsyncAgent { .. }
+        ));
+
+        // 显式 background=false → 保留同步等待
+        input.background = Some(false);
+        assert!(matches!(
+            route_agent_call(&input, false, false),
+            AgentRoute::SyncNamedAgent { .. }
+        ));
+
+        // 显式 background=true → 后台（与规则 3 一致）
+        input.background = Some(true);
+        assert!(matches!(
+            route_agent_call(&input, false, false),
+            AgentRoute::AsyncAgent { .. }
+        ));
+
+        // 非 Explorer 默认不动：general-purpose 无 background 还是同步
+        let default = default_input();
+        assert!(matches!(
+            route_agent_call(&default, false, false),
+            AgentRoute::SyncNamedAgent { .. }
+        ));
     }
 }

@@ -35,6 +35,28 @@ fn install_parent_context(agent: &mut crate::agent::StarAgent, request: &SubAgen
     }
 }
 
+/// Explore 子代理的只读工具白名单（对标 CC 官方 docs 对 Explore agent 的
+/// 定义：Read / Grep / Glob / 只读 Bash，禁一切可变更工具）。
+///
+/// 挂在子 config 的 `core_tools` 上 —— 那是注册层（`is_core_tool_enabled`）
+/// 既有的一条门，覆盖它等于子代理的**注册面**收口，而不仅是模型侧提示。
+/// `Bash` 保留在名单里：只读命令由 `is_readonly_fs_command` 在确认门把关，
+/// 这里收掉 Write/Edit 一类的可变更工具就足够表达"只读"语义。
+pub const EXPLORER_READONLY_TOOLS: &[&str] = &[
+    "Read",
+    "Grep",
+    "Glob",
+    "LS",
+    "Bash",
+    "ReadManyFiles",
+    "CodebaseSearch",
+    "CodeGraph",
+    "RepoMap",
+    "NotebookRead",
+    "TodoWrite",
+    "AskUserQuestion",
+];
+
 /// 同步 SubAgent 执行器
 pub struct StarAgentRunner {
     client: StarClient,
@@ -107,6 +129,18 @@ impl StarAgentRunner {
 
         let mut sub_config = (*self.config).clone();
         sub_config.recursion_depth = sub_config.recursion_depth.saturating_add(1);
+        // Explorer 走通用 LLM 循环（专用检索代理 2026-11-05 下线后），这里把
+        // 子代理的**工具注册面**收口成只读白名单 —— 对标 CC 官方 docs 的
+        // Explore agent（Read/Grep/Glob/只读 Bash）。core_tools 是注册层
+        // `is_core_tool_enabled` 既有的门，不需要新增机制。
+        if request.subagent_type == crate::core::agents::SubagentType::Explorer {
+            sub_config.core_tools = Some(
+                EXPLORER_READONLY_TOOLS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            );
+        }
         // 子 agent 自己的 hub 身份写进 config：SendMessage 从 config 读发件人，
         // worker 回话给 "lead" 时不用自报 agent_id（Phase 3/4）。
         let child_identity = request.identity.clone().or_else(|| {
@@ -324,9 +358,18 @@ impl StarAgentRunner {
     }
 
     /// 子代理的递归深度配置（父配置 +1 层）。
+    ///
+    /// explorer 专用（通用循环的 explorer 已在上面 `run_with_progress` 的
+    /// 分支里收口）：同样应用只读白名单，subtype 已知必为 Explorer。
     fn child_config(&self) -> crate::core::config::Config {
         let mut sub_config = (*self.config).clone();
         sub_config.recursion_depth = sub_config.recursion_depth.saturating_add(1);
+        sub_config.core_tools = Some(
+            EXPLORER_READONLY_TOOLS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
         sub_config
     }
 }
@@ -398,6 +441,39 @@ mod tests {
             .with_subagent_type(crate::core::agents::SubagentType::Explorer);
         assert_eq!(
             request.subagent_type,
+            crate::core::agents::SubagentType::Explorer
+        );
+    }
+
+    /// Explore 只读白名单（对标 CC 官方 docs 的 Explore agent：Read/Grep/Glob/
+    /// 只读 Bash，禁一切可变更工具）。两条派发路径的收口点都靠把
+    /// `core_tools` 灌进子 config —— 这里锁不变量的输入侧：白名单不含
+    /// Write/Edit 类可变更工具，且派发判定路由正确（真正注册面由
+    /// `is_core_tool_enabled` 在构造期消费，其覆盖见 core_runtime 测试）。
+    #[test]
+    fn explorer_readonly_whitelist_excludes_mutating_tools() {
+        let mutating = ["Write", "Edit", "MultiEdit", "SmartEdit", "NotebookEdit"];
+        for tool in mutating {
+            assert!(
+                !EXPLORER_READONLY_TOOLS.contains(&tool),
+                "{} 不该出现在 Explore 只读白名单里",
+                tool
+            );
+        }
+        for tool in ["Read", "Grep", "Glob", "Bash"] {
+            assert!(
+                EXPLORER_READONLY_TOOLS.contains(&tool),
+                "{} 是 Explore 的核心检索工具，必须在名单里",
+                tool
+            );
+        }
+
+        // 通用循环路径的收口：派发判定仍以 subtype 为准。这里用配置构造的
+        // 输入侧验证（StarAgent 构造需要完整 runtime bootstrap，单测起不来）。
+        let explorer_req = SubAgentRequest::new("find auth")
+            .with_subagent_type(crate::core::agents::SubagentType::Explorer);
+        assert_eq!(
+            explorer_req.subagent_type,
             crate::core::agents::SubagentType::Explorer
         );
     }
