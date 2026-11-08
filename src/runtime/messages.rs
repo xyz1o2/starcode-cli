@@ -47,6 +47,18 @@ pub struct InitAgentMailResult {
     pub peers: Vec<String>,
 }
 
+/// 隐式 team 的一个成员快照（对标 CC：`ListAgents` 列 live teammates）。
+/// `identity` 即 hub 的 mailbox 键 —— SendMessage 的 target_agent 照抄它。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTeamMember {
+    pub identity: String,
+    /// `agent_id`（`agent-xxxx` 形态的稳定 ID）。
+    pub agent_id: String,
+    /// running / completed —— register/unregister 的写照。
+    pub status: String,
+    pub mailbox_pending: usize,
+}
+
 /// UI 发给 worker 的原子运行时设置变更。`ui_revision` 由 UI 单调递增，
 /// worker 据此保留流式期间的 FIFO 顺序并让 UI 丢弃过时确认。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,6 +255,9 @@ pub enum StreamMessage {
         mode: crate::types::ApprovalMode,
     },
     ConfiguredProviders(Vec<String>),
+    /// 隐式 team 成员快照（spawn / 终态 / 收递消息后由 runtime 推一条全量）。
+    /// `None` = hub 缺席（清空本地快照）；`Some(vec)` = 当前全部成员。
+    AgentTeamUpdate(Option<Vec<AgentTeamMember>>),
     CurrentModelChanged {
         model: String,
         provider_id: Option<String>,

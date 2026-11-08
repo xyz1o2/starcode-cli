@@ -210,6 +210,14 @@ pub async fn handle_stream_chunk(
                     .await;
             }
         }
+        StreamingChunkType::AgentTeamSnapshot => {
+            // content 携带 AgentTeamMember 的 JSON 数组；解析失败按 hub 缺席
+            // 处理（清空快照），而不是静默显示上一帧的陈局成员。
+            let members = chunk.content.as_deref().and_then(|c| {
+                serde_json::from_str::<Vec<crate::runtime::messages::AgentTeamMember>>(c).ok()
+            });
+            let _ = tx.send(StreamMessage::AgentTeamUpdate(members)).await;
+        }
     }
     false
 }

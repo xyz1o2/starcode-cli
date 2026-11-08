@@ -96,7 +96,7 @@
 | 5 | 局域网互通（RemoteBridge：进程内 hub → HTTP 出站/入站、well-known 发现、peer 列表、共享密钥） | 见 §7 | ✅ |
 | 6 | 孤儿 `MessageRouter` 删除（`messaging/router.rs` 零调用点，hub 是唯一实现，`MessageType` 导出同步移除）；IdleNotification 唤醒：`MailWakeupSignal`（tokio Notify）+ `AgentMailbox.deliver` 投给 lead/广播时 notify + 入站 listener 携带唤醒 + UI 空闲等待醒来注入消费提示（同 `apply_loop_tasks` 路径） | `messaging/hub.rs` / `remote.rs` / `ui/app/runtime/mod.rs` | ✅ |
 
-## 7. 局域网互通（Phase 5 · 设计，未实现）
+## 7. 局域网互通（Phase 5 · 已实现，剩 peer 自动发现同 §7.3 标注）
 
 跨进程/跨机消息原先列在「明确不做」，现在单独立项：本仓库第④层已有
 `inbox.jsonl`（外部 harness → 本进程），但**本机多个 StarCode 进程之间**、
@@ -171,7 +171,26 @@ E2E（`two_process_cross_forward_lands_in_peer_mailbox`）：两个 hub + 两个
 模拟两个 StarCode 进程，本地未命中 → HTTP 转发 → 对端 mailbox 落箱 → drain 消费，
 全程真 HTTP 往返，测试内验证。
 
-## 8. 明确不做
+## 8. 对标 CC agent teams 的差距账（2026-11-08 调研 changelog 2.1.32→2.1.319）
+
+CC 的 agent teams 本体（同机）机制：隐式 team（2.1.178 起 `Agent(name=…)` 即注册，
+TeamCreate/Delete 已删）、`name@team` 双字段寻址、teammate 双形态（in-process /
+tmux·iTerm2 pane）、idle notification 携带结题正文、stuck teammate 被 SendMessage
+即唤醒重试、resume 后按 name 找回（compaction 前的要 agent id）、权限/模型全链继承。
+**CC 没有 LAN 互通**（跨机靠 cloud sessions）—— 本仓库 §7 的 well-known + HTTP
+是对 A2A 的自研方向，不是 CC 的对标面。
+
+| CC 语义 | 本仓库状态 |
+|---|---|
+| 隐式 team：`Agent(name=…)` 即可寻址 | ✅ 命名后台 spawn `with_identity(name)`（`agent_tool.rs` AsyncAgent / CoordinatorWorker / ForkAgent 全路径），SendMessage name 寻址、worker 发件人、hub 注册键三者同源 |
+| stuck teammate 被 SendMessage 即唤醒重试 | ✅ `agent_loop::hub_has_pending_mail`：turn 收尾邮箱有未读 → 不收工，续跑消费（测试 `wakeup_retry_gates_on_identity_and_pending_mail`） |
+| ListAgents 列 live teammates | ✅ `/agent-mail agents`：spawn/终态各推 `AgentTeamSnapshot` chunk（progress::emit_to_ui），UI 存 `agent_team_snapshot` |
+| idle notification 带结题正文 | 部分：`<task-notification>` 带 summary/result（原有），「回话给 lead」的语义走 SendMessage 提示 |
+| 消息早达（running agent 的 fg command 转 background） | 未做（量在 ToolExecutor，后置） |
+| 死后 mailbox 持久化（跨重启 resume 寻址） | 未做（进程内 mailbox，重启即无——CC 靠 `~/.claude/teammates/` 文件） |
+| 权限/model 继承 | 大半既有（sub_config clone 带 allowed_tools/policy mode）；缺 org 策略家族降级（非互通缺口） |
+
+## 9. 明确不做
 
 - 跨机消息不做 A2A 全家桶（Agent Card 签名链 / OAuth2 / webhook push）——
   局域网可信场景用共享密钥 + 回环默认绑定就够；标准演进到需要时再接；

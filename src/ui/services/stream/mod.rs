@@ -1338,6 +1338,11 @@ pub async fn handle_stream_update(
                 Err(_) => Vec::new(),
             };
         }
+        StreamMessage::AgentTeamUpdate(members) => {
+            // 隐式 team 快照（对标 CC 的 /list-agents 列 live teammates）。
+            // None = hub 缺席 → 清空快照；Some = 全量刷新。
+            state.agent_team_snapshot = members;
+        }
         StreamMessage::CurrentModelChanged { model, provider_id } => {
             // Legacy startup/provider-listing notifications cannot overwrite a newer
             // revisioned UI request or the worker-confirmed runtime snapshot.

@@ -254,4 +254,29 @@ mod tests {
             }
         ));
     }
+
+    /// 对标 CC 2.1.178「隐式 team」：Agent 的 `name` 参数即注册进隐式 team 的
+    /// 可寻址名。路由侧的保证是：**带 background 的调用把 name 原样带出**，
+    /// `AgentTool` 据此 `with_identity(name)` → `config.agent_identity`，因此
+    /// SendMessage 的 name 寻址、worker 内部回话用的发件人、hub 注册键三者同源。
+    /// 没有 name 的后台 spawn 继续匿名（identity None，回落 agent_id）。
+    #[test]
+    fn named_background_spawn_carries_name_for_hub_addressing() {
+        let mut input = default_input();
+        input.background = Some(true);
+        input.name = Some("researcher".to_string());
+
+        match route_agent_call(&input, false, false) {
+            AgentRoute::AsyncAgent { request, name, .. } => {
+                assert_eq!(name.as_deref(), Some("researcher"));
+                // request.identity 由 AgentTool 设置（见 agent_tool.rs AsyncAgent 分支）；
+                // 这里锁定路由只对 background 生效、name 不被路由层吞掉。
+                assert!(
+                    request.identity.is_none(),
+                    "路由层不注入 identity（由 AgentTool 决定）"
+                );
+            }
+            other => panic!("expected AsyncAgent, got {:?}", other),
+        }
+    }
 }

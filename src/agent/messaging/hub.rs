@@ -212,6 +212,14 @@ impl AgentRouter {
             .collect()
     }
 
+    /// 全部注册项的 (身份键, AgentEntry) 列表（team 快照用）。
+    pub fn registered_entries(&self) -> Vec<(String, AgentEntry)> {
+        self.entries
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
     /// 投递一条消息。`from_identity` 用于广播时排除发送者自己。
     pub fn deliver(
         &mut self,

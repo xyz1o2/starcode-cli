@@ -331,6 +331,41 @@ impl StarAgentRunner {
     }
 }
 
+/// 把 hub 的注册表拍成一份成员快照推给 UI（对标 CC 的 ListAgents 列 live
+/// teammates）。register / unregister 之后各推一次，`/agent-mail agents`
+/// 读到的就是当前真相而不是 spawn 时的旧帧。
+///
+/// 走 `progress::emit_to_ui`（cross-turn 兜底 sink 也在），后台 tokio 任务
+/// 里同样可达；chunk 的 `content` 字段带成员 JSON 数组，运行时侧在
+/// `stream_chunks.rs` 解成 `StreamMessage::AgentTeamUpdate`。
+async fn emit_team_snapshot(hub: &crate::agent::messaging::SharedAgentRouter) {
+    use crate::agent::messaging::{AgentRouter, LEAD_IDENTITY};
+    let router: tokio::sync::MutexGuard<'_, AgentRouter> = hub.lock().await;
+    let members: Vec<crate::runtime::messages::AgentTeamMember> = router
+        .registered_entries()
+        .into_iter()
+        .map(
+            |(identity, entry)| crate::runtime::messages::AgentTeamMember {
+                mailbox_pending: router.pending_count(&identity),
+                identity,
+                agent_id: entry.agent_id,
+                status: match entry.status {
+                    crate::agent::messaging::AgentStatus::Running => "running".to_string(),
+                    crate::agent::messaging::AgentStatus::Completed => "completed".to_string(),
+                },
+            },
+        )
+        .collect();
+    // lead 常驻第一行（SendMessage target_agent="lead" 是回话路径）。
+    let snapshot_json = serde_json::to_string(&members).unwrap_or_else(|_| "[]".to_string());
+    crate::agent::subagent::progress::emit_to_ui(crate::types::StreamingChunk {
+        chunk_type: crate::types::StreamingChunkType::AgentTeamSnapshot,
+        content: Some(snapshot_json),
+        ..crate::types::StreamingChunk::new(crate::types::StreamingChunkType::AgentTeamSnapshot)
+    });
+    let _ = LEAD_IDENTITY;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,6 +577,8 @@ impl AsyncSubagentRunner {
                     "[AgentHub] registered worker '{}' ({})",
                     identity, aid
                 ));
+                drop(router);
+                emit_team_snapshot(hub).await;
             }
 
             let start = std::time::Instant::now();
@@ -663,6 +700,7 @@ impl AsyncSubagentRunner {
                     agent_name.as_deref().unwrap_or(&aid),
                     aid
                 ));
+                emit_team_snapshot(hub).await;
             }
         });
 

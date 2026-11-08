@@ -1111,7 +1111,10 @@ pub enum StreamingChunkType {
     // ============================================
     // ============ Agent 任务 UI ============
     AgentTaskUpdate, // Agent 任务生命周期更新
-                     // ============================================
+    /// 隐式 team 成员快照（对标 CC 的 ListAgents 列 live teammates）。
+    /// `content` 字段携带 `AgentTeamMember` JSON 数组；None 组合仍是合法载荷。
+    AgentTeamSnapshot,
+    // ============================================
 }
 
 // ============ UX 改进: ApprovalMode（审批模式）============

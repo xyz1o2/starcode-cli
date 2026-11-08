@@ -440,6 +440,16 @@ impl Agent {
                     continue;
                 }
                 TurnResult::Done => {
+                    // 唤醒重试（对标 CC agent teams：「messaging a stuck teammate
+                    // wakes it to retry immediately」）。带 hub 身份的 agent 在
+                    // turn 收尾时若邮箱里躺着未消费的消息，绝不能就此收工 ——
+                    // 把下一条消息当新 turn 的输入继续跑，而不是把收掉 turn 的
+                    // 结果带进下一个进程事件。
+                    if hub_has_pending_mail(self.agent_hub.as_ref(), self.hub_identity.as_deref())
+                        .await
+                    {
+                        continue;
+                    }
                     crate::utils::logging::append_debug_log_line(&format!(
                         "[AGENT] Loop exited: {} (turn={})",
                         StopReason::Completed,
@@ -1117,6 +1127,31 @@ pub(crate) enum TurnResult {
     Error(AgentEvent),
 }
 
+/// 唤醒重试的判定（对标 CC agent teams：「messaging a stuck teammate wakes it
+/// to retry immediately」）—— turn 收尾时邮箱里是否躺着未消费的消息。
+///
+/// 独立成函数是为了可测：hub / identity 两个 Option 组合出四种罢工姿势，
+/// 只有「两个都有 && pending > 0」才应续跑；lead（投递方主动 notify 的那个）
+/// 与命名 worker（被投递的那个）走的是同一条判定。
+pub(crate) async fn hub_has_pending_mail(
+    hub: Option<&crate::agent::messaging::SharedAgentRouter>,
+    identity: Option<&str>,
+) -> bool {
+    let (Some(hub), Some(identity)) = (hub, identity) else {
+        return false;
+    };
+    let pending = hub.lock().await.pending_count(identity);
+    if pending > 0 {
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[AGENT] turn done but mailbox has {} pending message(s) for '{}'; continuing to consume",
+            pending, identity,
+        ));
+        true
+    } else {
+        false
+    }
+}
+
 /// Agent 停止原因 — 对齐 Claude Code 的 11 种终止条件
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StopReason {
@@ -1160,6 +1195,28 @@ impl std::fmt::Display for StopReason {
 mod tests {
     use super::*;
     use crate::types::{StarToolCall, StarToolCallFunction};
+
+    /// 唤醒重试四象限（cab 对标 CC：stuck teammate 被 SendMessage 即唤醒重试）。
+    #[tokio::test]
+    async fn wakeup_retry_gates_on_identity_and_pending_mail() {
+        // 无 hub / 无身份 → 不续跑
+        assert!(!hub_has_pending_mail(None, None).await);
+        // hub + 身份 + 空箱 → 不续跑
+        let hub = crate::agent::messaging::new_shared_router();
+        hub.lock()
+            .await
+            .register_entry("w1", "agent-111", Some("w1".into()));
+        assert!(!hub_has_pending_mail(Some(&hub), Some("w1")).await);
+        // hub + 身份 + 有信 → 续跑，且 drain 后不再续
+        hub.lock().await.deliver(
+            crate::agent::messaging::AgentMessage::new("lead", "收到没", "追赶"),
+            "w1",
+            "lead",
+        );
+        assert!(hub_has_pending_mail(Some(&hub), Some("w1")).await);
+        hub.lock().await.drain("w1");
+        assert!(!hub_has_pending_mail(Some(&hub), Some("w1")).await);
+    }
 
     fn assistant_call(id: &str, tool_name: &str) -> StarMessage {
         StarMessage::assistant_with_tool_calls(vec![StarToolCall {

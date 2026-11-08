@@ -287,9 +287,14 @@ impl ToolInvocation for AgentToolInvocation {
 
                     let type_label = agent_type_label(input.subagent_type.as_ref()).to_string();
 
-                    // 命名后台 agent 拿 name 作 mailbox 身份 —— SendMessage 可按
-                    // name 寻址它（设计文档 §4 寻址语义第一条）。匿名后台 agent
-                    // 的 identity 留空，spawn 时回落 agent_id。
+                    // 命名后台 agent 拿 name 作 mailbox 身份（对标 CC：Agent 的
+                    // `name` 参数即注册进隐式 team 的可寻址名，`name@team` 里的
+                    // name 部分）。匿名后台 agent 不带 identity，spawn 时回落
+                    // agent_id —— SendMessage 仍可按 agent_id 单播它。
+                    let request = match name.as_ref() {
+                        Some(n) => request.with_identity(n.clone()),
+                        None => request,
+                    };
                     let launch = async_runner.spawn_background(
                         request,
                         name.clone(),
@@ -299,8 +304,10 @@ impl ToolInvocation for AgentToolInvocation {
 
                     Ok(ToolResult {
                         llm_content: Some(format!(
-                            "Agent launched in background.\nagent_id: {}\nOutput file: {}\nWait for <task-notification> for results.",
+                            "Agent launched in background.\nagent_id: {}\n{}\nOutput file: {}\nWait for <task-notification> for results.",
                             launch.agent_id,
+                            name.as_ref().map(|n| format!("Addressable as '{}' via SendMessage (it can reply with SendMessage target_agent='lead').", n))
+                                .unwrap_or_default(),
                             launch.output_file.display(),
                         )),
                         return_display: Some(format!("Agent {} started", launch.agent_id)),
@@ -379,24 +386,28 @@ impl ToolInvocation for AgentToolInvocation {
                     }
                     enriched_prompt.push_str(&request.base.prompt);
 
+                    let fork_name = format!("fork-{}", agent_id);
+                    // fork 也进隐式 team：以 fork 名寻址（对齐 CC 的 fork 可回话语义）。
+                    let request_with_id = SubAgentRequest {
+                        prompt: enriched_prompt,
+                        max_rounds: request.base.max_rounds,
+                        subagent_type: request.base.subagent_type,
+                        parent_messages: request.base.parent_messages,
+                        parent_pending_context: request.base.parent_pending_context,
+                        identity: Some(fork_name.clone()),
+                    };
                     let launch = async_runner.spawn_background(
-                        SubAgentRequest {
-                            prompt: enriched_prompt,
-                            max_rounds: request.base.max_rounds,
-                            subagent_type: request.base.subagent_type,
-                            parent_messages: request.base.parent_messages,
-                            parent_pending_context: request.base.parent_pending_context,
-                            identity: request.base.identity,
-                        },
-                        Some(format!("fork-{}", agent_id)),
+                        request_with_id,
+                        Some(fork_name.clone()),
                         request.description.clone(),
                         "Fork".to_string(),
                     );
 
                     Ok(ToolResult {
                         llm_content: Some(format!(
-                            "Fork agent launched.\nagent_id: {}\nInherited {} parent messages.\nResults will arrive via <task-notification>.",
+                            "Fork agent launched.\nagent_id: {}\nAddressable as '{}' via SendMessage.\nInherited {} parent messages.\nResults will arrive via <task-notification>.",
                             launch.agent_id,
+                            fork_name,
                             request.parent_messages.len(),
                         )),
                         return_display: Some(format!("Fork {} started", agent_id)),
@@ -406,6 +417,7 @@ impl ToolInvocation for AgentToolInvocation {
                             "status": "fork_launched",
                             "agent_id": launch.agent_id,
                             "agent_type": "Fork",
+                            "name": fork_name,
                             "description": request.description,
                             "inherited_messages": request.parent_messages.len(),
                             "output_file": launch.output_file.to_string_lossy(),

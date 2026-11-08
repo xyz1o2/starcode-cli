@@ -2066,6 +2066,42 @@ pub async fn agent_mail(mut ctx: CommandContext<'_>, args: Vec<String>) -> Comma
 
     let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
 
+    // `/agent-mail agents` — 列出隐式 team 的 live 成员（对标 CC 的
+    // `ListAgents`/`/list-agents` 列 live teammates）。读的是会话 worker 已
+    // 注册的 hub —— UI 层没有 hub 引用，走运行时快照放在 ChatState 的
+    // AgentMail 快照（由 stream.rs 维护）不可用时的 env 兜底说明。
+    if sub == "agents" {
+        let mut out = String::from("## Agent team members\n\n");
+        match ctx.state.agent_team_snapshot.as_ref() {
+            Some(snapshot) if !snapshot.is_empty() => {
+                out.push_str(&format!(
+                    "{:<22} {:<12} {}\n",
+                    "IDENTITY", "STATUS", "MAILBOX PENDING"
+                ));
+                for m in snapshot.iter() {
+                    out.push_str(&format!(
+                        "{:<22} {:<12} {}\n",
+                        m.identity, m.status, m.mailbox_pending
+                    ));
+                }
+                out.push_str(
+                    "\nSendMessage target_agent=<identity> to message one; \
+                     `lead` is the main session's mailbox.\n",
+                );
+            }
+            _ => {
+                out.push_str(
+                    "No hub snapshot available in this session (headless mode or the runtime \
+                     has not registered any agents yet). Named background agents register on \
+                     spawn: run the `Agent` tool with `background: true` and a `name`, then \
+                     check again.\n",
+                );
+            }
+        }
+        push_msg(&mut ctx, out);
+        return Ok(());
+    }
+
     if sub == "probe" {
         // 探测模式：逐对端拉 well-known 卡片（3s 超时/对端）。
         let client = PeerMailClient::from_env();

@@ -62,11 +62,12 @@ pub async fn agent_worker(
         let fwd_tx = tx.clone();
         tokio::spawn(async move {
             while let Some(chunk) = bg_rx.recv().await {
-                // 只转发 Agent 任务更新：其余类型都属于某个具体 turn 的流，
-                // 用一个假的 message_id 混进 UI 只会错位。
+                // 只转发 Agent 任务更新与 team 快照：其余类型都属于某个具体
+                // turn 的流，用一个假的 message_id 混进 UI 只会错位。
                 if !matches!(
                     chunk.chunk_type,
                     crate::types::StreamingChunkType::AgentTaskUpdate
+                        | crate::types::StreamingChunkType::AgentTeamSnapshot
                 ) {
                     continue;
                 }

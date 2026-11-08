@@ -370,6 +370,12 @@ pub struct ChatState {
     /// 配好了）是两回事：留空密钥的 provider 依然列出，只是被标出来。见
     /// `providers::provider_has_usable_credentials`。
     pub keyless_providers: Vec<String>,
+    /// Agent team 成员的最近快照（对标 CC 的 `/list-agents` 列 live teammates）。
+    ///
+    /// 由 `StreamMessage::AgentTeamUpdate` 维护：runtime 在 spawn / 终态 / 收递
+    /// 消息后推送。`/agent-mail agents` 读它；快照为空（headless / 还没 spawn
+    /// 过命名 agent）时命令给出可操作的指引而不是假装有队伍。
+    pub agent_team_snapshot: Option<Vec<crate::runtime::messages::AgentTeamMember>>,
     /// "新增 provider" 单面板表单的编辑状态。`input_context` 是
     /// `ProviderForm` 时它才有效。
     pub provider_form: crate::ui::state::palette::ProviderFormState,
@@ -943,6 +949,7 @@ impl ChatState {
             input_context: None,
             configured_providers: Vec::new(),
             keyless_providers: Vec::new(),
+            agent_team_snapshot: None,
             provider_form: crate::ui::state::palette::ProviderFormState::new(),
             task_panel: crate::ui::components::task_panel::TaskPanel::new(),
             paste_in_progress: false,

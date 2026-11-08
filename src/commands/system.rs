@@ -476,6 +476,13 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
                 category: "Automation",
                 sub_commands: &[],
             },
+            SlashCommand {
+                name: "agents",
+                alt_names: &[],
+                description: "List implicit-team members and unread mail",
+                category: "Automation",
+                sub_commands: &[],
+            },
         ],
     },
     SlashCommand {
@@ -3227,6 +3234,6 @@ mod tests {
             cmd.category
         );
         let sub_names: Vec<&str> = cmd.sub_commands.iter().map(|s| s.name).collect();
-        assert_eq!(sub_names, vec!["status", "probe"]);
+        assert_eq!(sub_names, vec!["status", "probe", "agents"]);
     }
 }
