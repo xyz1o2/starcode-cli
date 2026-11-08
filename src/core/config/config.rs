@@ -98,6 +98,13 @@ pub struct Config {
     pub(crate) experimental_jit_context: bool,
     pub(crate) file_filtering: FileFiltering,
     pub recursion_depth: usize,
+    /// 本 agent 在消息 hub 里的身份（mailbox 键）。
+    ///
+    /// `None` = lead（主 agent，hub 侧固定身份 `"lead"`）。runner 派生
+    /// 子 agent 时在这里填子 agent 的身份（`agent-xxxx` / name），
+    /// `SendMessage` 工具据此确认发件人，worker 才不用老老实实自报家门。
+    /// 设计文档：`docs/agent-messaging-design.zh-CN.md` §4/§6 Phase 3/4。
+    pub agent_identity: Option<String>,
     /// `-p` 单次执行（headless）：没有 UI 订阅确认总线。
     pub headless: bool,
     pub policy_engine_approval_mode: ApprovalMode,
@@ -232,6 +239,7 @@ impl Config {
                 disable_fuzzy_search: Some(false),
             }),
             recursion_depth: params.recursion_depth.unwrap_or(0),
+            agent_identity: None,
             headless: params.headless.unwrap_or(false),
             // 默认档位是 auto（对标 Claude Code 的 auto 模式）。但 auto 免确认写操作，
             // 受信任检查约束：不受信任的目录退回 default，否则"文件夹信任"这道闸门
@@ -632,6 +640,12 @@ impl Config {
         self.runtime_services
             .as_ref()
             .and_then(|services| services.notification_queue())
+    }
+    /// Agent 间消息路由 hub（进程级单例，lead 与 worker 共享）。
+    pub(crate) fn runtime_agent_hub(&self) -> Option<crate::agent::messaging::SharedAgentRouter> {
+        self.runtime_services
+            .as_ref()
+            .and_then(|services| services.agent_hub())
     }
     pub fn install_runtime_services(&mut self, runtime_services: RuntimeServices) {
         self.runtime_services = Some(Arc::new(runtime_services));

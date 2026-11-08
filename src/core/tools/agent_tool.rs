@@ -287,6 +287,9 @@ impl ToolInvocation for AgentToolInvocation {
 
                     let type_label = agent_type_label(input.subagent_type.as_ref()).to_string();
 
+                    // 命名后台 agent 拿 name 作 mailbox 身份 —— SendMessage 可按
+                    // name 寻址它（设计文档 §4 寻址语义第一条）。匿名后台 agent
+                    // 的 identity 留空，spawn 时回落 agent_id。
                     let launch = async_runner.spawn_background(
                         request,
                         name.clone(),
@@ -315,15 +318,16 @@ impl ToolInvocation for AgentToolInvocation {
                 }
 
                 // Coordinator Worker 路径
-                AgentRoute::CoordinatorWorker {
-                    agent_id: _,
-                    request,
-                } => {
+                AgentRoute::CoordinatorWorker { agent_id, request } => {
                     let async_runner = async_runner.ok_or_else(|| {
                         "AsyncSubagentRunner not configured for coordinator".to_string()
                     })?;
 
                     let type_label = "Worker".to_string();
+                    // Coordinator worker 以 agent_id 为 mailbox 身份注册进 hub：
+                    // SendMessage 可按 agent_id 单播，worker 可回话给 "lead"。
+                    // （lead → worker 的任务指派正文已在 prompt 里，无需再发。）
+                    let request = request.with_identity(agent_id.clone());
                     let launch = async_runner.spawn_background(
                         request,
                         None,
@@ -382,6 +386,7 @@ impl ToolInvocation for AgentToolInvocation {
                             subagent_type: request.base.subagent_type,
                             parent_messages: request.base.parent_messages,
                             parent_pending_context: request.base.parent_pending_context,
+                            identity: request.base.identity,
                         },
                         Some(format!("fork-{}", agent_id)),
                         request.description.clone(),

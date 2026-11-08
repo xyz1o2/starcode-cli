@@ -348,6 +348,31 @@ impl Agent {
                 }
             }
 
+            // 消费 Agent 间消息（hub mailbox → user-role XML 注入）。
+            //
+            // lead 与 worker 跑的是同一份 agent_loop，所以这段写一次两个身份
+            // 同时受益：worker 在自己的每个 turn 开头消费发给它的消息，
+            // lead 同理。见 docs/agent-messaging-design.zh-CN.md §4/§5。
+            if let (Some(hub), Some(identity)) = (self.agent_hub.clone(), self.hub_identity.clone())
+            {
+                let drained = {
+                    let mut router = hub.lock().await;
+                    router.drain(&identity)
+                };
+                for msg in drained {
+                    // UI 侧短注（不进对话正文，只让用户知道有 agent 来信）
+                    self.emit_direct_chunk(crate::types::StreamingChunk::assistant_note(format!(
+                        "[message from {}] {}",
+                        msg.from, msg.summary
+                    )));
+                    messages.push(crate::types::StarMessage::new("user", Some(msg.to_xml())));
+                    crate::utils::logging::append_debug_log_line(&format!(
+                        "[AgentHub] injected message {} from {} into turn {}",
+                        msg.id, msg.from, current_turn
+                    ));
+                }
+            }
+
             // Inject loop state context if there have been failures
             if loop_state.consecutive_failures > 0 {
                 let context_summary = loop_state.generate_context_summary();

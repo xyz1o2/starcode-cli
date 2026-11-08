@@ -76,6 +76,11 @@ impl StarAgent {
         self.client.clone()
     }
 
+    /// 运行时服务里的 Agent 间消息 hub 句柄（AgentMail listener 装配用）。
+    pub fn agent_hub(&self) -> Option<crate::agent::messaging::SharedAgentRouter> {
+        self.inner.config.runtime_agent_hub()
+    }
+
     /// `/subtask`：fork 当前会话并放到后台执行。
     ///
     /// 与普通 AgentTool 后台任务的区别是父会话的 `StarMessage` 会被完整

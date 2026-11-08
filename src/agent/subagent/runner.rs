@@ -39,11 +39,19 @@ fn install_parent_context(agent: &mut crate::agent::StarAgent, request: &SubAgen
 pub struct StarAgentRunner {
     client: StarClient,
     config: Arc<Config>,
+    /// Agent 间消息 hub：派生带 identity 的子 agent 时把 hub 接进去。
+    /// `None` = 从 config 的 RuntimeServices 读（bootstrap 创建的同一单例）。
+    agent_hub: Option<crate::agent::messaging::SharedAgentRouter>,
 }
 
 impl StarAgentRunner {
     pub fn new(client: StarClient, config: Arc<Config>) -> Self {
-        Self { client, config }
+        let agent_hub = config.runtime_agent_hub();
+        Self {
+            client,
+            config,
+            agent_hub,
+        }
     }
 
     /// 创建共享引用（供 AgentTool 使用）
@@ -99,6 +107,13 @@ impl StarAgentRunner {
 
         let mut sub_config = (*self.config).clone();
         sub_config.recursion_depth = sub_config.recursion_depth.saturating_add(1);
+        // 子 agent 自己的 hub 身份写进 config：SendMessage 从 config 读发件人，
+        // worker 回话给 "lead" 时不用自报 agent_id（Phase 3/4）。
+        let child_identity = request.identity.clone().or_else(|| {
+            let id = uuid::Uuid::new_v4().to_string();
+            Some(format!("agent-{}", &id[..8]))
+        });
+        sub_config.agent_identity = child_identity.clone();
 
         let mut agent = crate::agent::StarAgent::new_with_provider(
             &self.client.api_key,
@@ -118,6 +133,23 @@ impl StarAgentRunner {
                 format!("Failed to create SubAgent: {}", e),
             )
         })?;
+
+        // Hub 身份接线（Phase 3）：子 agent 在 hub 里注册成自己的身份，
+        // SendMessage 按 name / agent_id 单播它，它自己每个 turn 开头 drain。
+        // hub 优先取 runner 上挂的；runner 未挂（装配缺省）时从 config 读
+        // RuntimeServices 里的同一个单例。身份与 sub_config.agent_identity
+        // 同源（上面已填），保证 SendMessage 的发件人与 mailbox 键一致。
+        if let Some(hub) = self
+            .agent_hub
+            .clone()
+            .or_else(|| self.config.runtime_agent_hub())
+        {
+            let identity = child_identity.unwrap_or_else(|| {
+                let id = uuid::Uuid::new_v4().to_string();
+                format!("agent-{}", &id[..8])
+            });
+            agent.set_agent_hub(hub, identity);
+        }
 
         // `/subtask` forks the current conversation rather than starting from a
         // blank child. Install the parent's native provider context before the
@@ -257,6 +289,17 @@ impl StarAgentRunner {
             )
         })?;
 
+        // explorer 路径同样接 hub（前端进度模式无 mailbox 消费者，给一次性
+        // 身份 —— 只是不让它回落成 "lead" 抢主 agent 的邮箱）。
+        if let Some(hub) = self
+            .agent_hub
+            .clone()
+            .or_else(|| self.config.runtime_agent_hub())
+        {
+            let id = uuid::Uuid::new_v4().to_string();
+            agent.set_agent_hub(hub, format!("agent-{}", &id[..8]));
+        }
+
         let entries = agent
             .process_user_message(&request.prompt)
             .await
@@ -389,6 +432,9 @@ pub struct AsyncSubagentRunner {
     notification_queue: Arc<Mutex<NotificationQueue>>,
     /// agent_name → agent_id 注册表，供 SendMessage 按 name 寻址
     name_registry: Arc<Mutex<HashMap<String, String>>>,
+    /// Agent 间消息路由 hub（进程级单例）。`None` = 装配方没接 hub，
+    /// `deliver_message` 退回写文件死信（旧行为），注册/注销跳过。
+    agent_hub: Option<crate::agent::messaging::SharedAgentRouter>,
 }
 
 impl AsyncSubagentRunner {
@@ -401,7 +447,14 @@ impl AsyncSubagentRunner {
             sync_runner,
             notification_queue,
             name_registry: Arc::new(Mutex::new(HashMap::new())),
+            agent_hub: None,
         }
+    }
+
+    /// 注入消息路由 hub（启用进程内互通：注册 / 投递 / 注销全走它）。
+    pub fn with_agent_hub(mut self, hub: crate::agent::messaging::SharedAgentRouter) -> Self {
+        self.agent_hub = Some(hub);
+        self
     }
 
     /// **前台**运行 SubAgent —— 调用方等结果。
@@ -424,11 +477,16 @@ impl AsyncSubagentRunner {
             self.name_registry
                 .lock()
                 .await
-                .insert(agent_name.clone(), aid);
+                .insert(agent_name.clone(), aid.clone());
+            self.register_in_hub(&aid, Some(agent_name));
         }
         let _ = description;
         let _ = agent_type_label;
-        self.sync_runner.run(request).await
+        let result = self.sync_runner.run(request).await;
+        if let Some(ref agent_name) = name {
+            self.unregister_from_hub(agent_name);
+        }
+        result
     }
 
     /// 后台启动 SubAgent，立即返回 AsyncLaunchResult
@@ -456,12 +514,34 @@ impl AsyncSubagentRunner {
         let aid = agent_id.clone();
         let agent_name = name.clone();
         let type_label = agent_type_label.clone();
+        let spawn_hub = self.agent_hub.clone();
+        // 调用方显式指派的 mailbox 身份（`SubAgentRequest::with_identity`）；
+        // 未指派时回落 name / agent_id（见下方注册处）。
+        let hub_identity = request.identity.clone();
 
         tokio::spawn(async move {
             // 注册 name → agent_id 映射。放进 spawn 内用 async lock，
             // 避免在 async 上下文里调用 blocking_lock 触发 panic。
             if let Some(ref n) = agent_name {
                 registry.lock().await.insert(n.clone(), aid.clone());
+            }
+
+            // 消息 hub 注册：此后 SendMessage 可按 name / agent_id 投递到本
+            // worker；worker 自己每轮 turn 开头从 mailbox drain（Phase 3）。
+            // 身份键与 worker 内部构造时用的 sub_config.agent_identity 同源
+            // （request.identity → name → agent_id），保证 SendMessage 发件人
+            // 与 mailbox 键一致。
+            if let Some(ref hub) = spawn_hub {
+                let identity = hub_identity
+                    .clone()
+                    .or_else(|| agent_name.clone())
+                    .unwrap_or_else(|| aid.clone());
+                let mut router = hub.lock().await;
+                router.register_entry(&identity, &aid, agent_name.clone());
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[AgentHub] registered worker '{}' ({})",
+                    identity, aid
+                ));
             }
 
             let start = std::time::Instant::now();
@@ -559,7 +639,7 @@ impl AsyncSubagentRunner {
 
             let mut q = queue.lock().await;
             q.enqueue(TaskNotification {
-                task_id: aid,
+                task_id: aid.clone(),
                 tool_use_id: None,
                 status,
                 summary: desc,
@@ -571,8 +651,19 @@ impl AsyncSubagentRunner {
                 },
                 entries,
                 agent_type: Some(type_label),
-                name: agent_name,
+                name: agent_name.clone(),
             });
+
+            // 终态注销：旧 agent_id 不再解析（对迟到的消息显式 UnknownTarget），
+            // mailbox 保留 —— 迟到消息落进可见的空箱而不是复活一个幽灵。
+            if let Some(ref hub) = spawn_hub {
+                hub.lock().await.unregister(&aid);
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[AgentHub] unregistered worker '{}' ({})",
+                    agent_name.as_deref().unwrap_or(&aid),
+                    aid
+                ));
+            }
         });
 
         AsyncLaunchResult {
@@ -587,53 +678,158 @@ impl AsyncSubagentRunner {
         self.name_registry.lock().await.get(name).cloned()
     }
 
+    fn register_in_hub(&self, agent_id: &str, name: Option<&String>) {
+        let Some(ref hub) = self.agent_hub else {
+            return;
+        };
+        let hub = hub.clone();
+        let identity = name
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| agent_id.to_string());
+        let aid = agent_id.to_string();
+        let n = name.cloned();
+        tokio::spawn(async move {
+            hub.lock().await.register_entry(identity, aid, n);
+        });
+    }
+
+    fn unregister_from_hub(&self, name: &str) {
+        let Some(ref hub) = self.agent_hub else {
+            return;
+        };
+        let hub = hub.clone();
+        let n = name.to_string();
+        tokio::spawn(async move {
+            hub.lock().await.unregister(&n);
+        });
+    }
+
     /// 列出所有已注册 agent name（供 broadcast 使用）
     pub async fn list_agent_names(&self) -> Vec<String> {
         self.name_registry.lock().await.keys().cloned().collect()
     }
 
-    /// 投递消息到目标 agent（供 SendMessage 委托）
+    /// 投递消息到目标 agent（供 SendMessage 委托）。
     ///
-    /// - running → 写入文件 inbox（排队到 agent 下一轮处理）
-    /// - stopped → 尝试从 sidechain 恢复后台运行
+    /// 接了 hub（Phase 2 半接线后此处为唯一路径）：走 `AgentRouter::deliver`
+    /// —— name / agent_id / `"lead"` 单播，`"*"` 广播，目标未注册时显式
+    /// `UnknownTarget`（无死信，设计文档 §3 第三条约束）。
+    /// hub 未接线时退回旧的文件 inbox —— 调用方无人消费，等于死信，仅作
+    /// 兜底使签名不炸，装配层应总是接 hub。
     pub async fn deliver_message(
         &self,
-        _target_name: &str,
-        _message: &str,
-        _summary: &str,
-        _is_protocol: bool,
+        from_identity: &str,
+        target_name: &str,
+        message: &str,
+        summary: &str,
+        message_type: crate::agent::messaging::HubMessageType,
     ) -> Result<ToolResult, Box<dyn std::error::Error>> {
-        // 基础实现：写文件 inbox
-        let inbox_dir = std::env::current_dir()
-            .unwrap_or_default()
-            .join(".star")
-            .join("messages");
+        let Some(ref hub) = self.agent_hub else {
+            return Err("AgentHub not configured; cannot deliver message".into());
+        };
 
-        if !inbox_dir.exists() {
-            tokio::fs::create_dir_all(&inbox_dir).await?;
+        let mut msg = crate::agent::messaging::AgentMessage::new(
+            from_identity.to_string(),
+            message.to_string(),
+            summary.to_string(),
+        );
+        msg.message_type = message_type;
+
+        let mut router = hub.lock().await;
+        match router.deliver(msg.clone(), target_name, from_identity) {
+            crate::agent::messaging::Delivery::Delivered { mailbox_key, .. } => Ok(ToolResult {
+                llm_content: Some(format!(
+                    "Message delivered to '{}' (mailbox: {}). It will be consumed at the start of that agent's next turn.",
+                    target_name, mailbox_key
+                )),
+                return_display: Some(format!("Delivered to {}", target_name)),
+                output: format!("Message delivered to '{}'", target_name),
+                error: None,
+                data: Some(serde_json::json!({
+                    "status": "delivered",
+                    "target": target_name,
+                    "mailbox": mailbox_key,
+                })),
+            }),
+            crate::agent::messaging::Delivery::Broadcast { delivered_to } => {
+                Ok(ToolResult {
+                    llm_content: Some(format!(
+                        "Broadcast delivered to {} registered agents: {}.",
+                        delivered_to.len(),
+                        delivered_to.join(", ")
+                    )),
+                    return_display: Some(format!("Broadcast to {} agents", delivered_to.len())),
+                    output: format!("Broadcast to {} agents", delivered_to.len()),
+                    error: None,
+                    data: Some(serde_json::json!({
+                        "status": "broadcast_delivered",
+                        "delivered_to": delivered_to,
+                    })),
+                })
+            }
+            crate::agent::messaging::Delivery::UnknownTarget { to } => {
+                let known = router.registered_names();
+                drop(router);
+
+                // 本地未命中 → 出站转发给 peers（Phase 5.1）。跨机广播用
+                // "*all"（设计 §7.2 第 3 条）；普通单播转发原 to，由对端
+                // 自行解析 identity。全部对端失败 → 显式 UnknownTarget。
+                if let Some(report) = self.forward_to_peers(&msg, &to).await {
+                    if report.accepted.is_empty() {
+                        return Err(format!(
+                            "UnknownTarget: no registered agent or lead matches '{}' locally, \
+                             and all {} peer(s) failed: {}. Registered agents: {}.",
+                            to,
+                            report.failed.len(),
+                            report
+                                .failed
+                                .iter()
+                                .map(|(p, e)| format!("{} ({})", p, e))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            if known.is_empty() { "(none)".to_string() } else { known.join(", ") }
+                        )
+                        .into());
+                    }
+                    return Ok(ToolResult {
+                        llm_content: Some(format!(
+                            "Message forwarded to peer(s): {}. Local registry has no match for '{}'.",
+                            report.accepted.join(", "),
+                            to
+                        )),
+                        return_display: Some(format!("Forwarded to {}", report.accepted.join(", "))),
+                        output: format!("Forwarded to peer(s): {}", report.accepted.join(", ")),
+                        error: None,
+                        data: Some(serde_json::json!({
+                            "status": "forwarded_to_peers",
+                            "accepted": report.accepted,
+                            "failed": report.failed,
+                        })),
+                    });
+                }
+
+                Err(format!(
+                    "UnknownTarget: no registered agent or lead matches '{}'. Registered agents: {}. Use 'lead' to message the main agent, or 'target_agent=\"*\"' to broadcast.",
+                    to,
+                    if known.is_empty() { "(none)".to_string() } else { known.join(", ") }
+                ).into())
+            }
         }
+    }
 
-        let timestamp = chrono::Utc::now().timestamp_millis();
-        let filename = format!("{}_{}.json", _target_name, timestamp);
-        let msg_path = inbox_dir.join(&filename);
-
-        let msg = serde_json::json!({
-            "from": "agent",
-            "to": _target_name,
-            "message": _message,
-            "summary": _summary,
-            "is_protocol": _is_protocol,
-            "timestamp": timestamp,
-        });
-
-        tokio::fs::write(&msg_path, serde_json::to_string_pretty(&msg)?).await?;
-
-        Ok(ToolResult {
-            llm_content: Some(format!("Message delivered to {}", _target_name)),
-            return_display: None,
-            output: String::new(),
-            error: None,
-            data: None,
-        })
+    /// 本地 UnknownTarget 时的出站转发（Phase 5.1）。
+    ///
+    /// 未配置 peers（`STAR_AGENT_PEERS`）时返回 `None`——保持单机语义；
+    /// 配置了才构造 `PeerMailClient` 转发，并对账逐对端结果。
+    async fn forward_to_peers(
+        &self,
+        msg: &crate::agent::messaging::AgentMessage,
+        to: &str,
+    ) -> Option<crate::agent::messaging::remote::PeerForwardReport> {
+        let client = crate::agent::messaging::remote::PeerMailClient::from_env();
+        if !client.has_peers() {
+            return None;
+        }
+        Some(client.forward(msg.clone(), to).await)
     }
 }

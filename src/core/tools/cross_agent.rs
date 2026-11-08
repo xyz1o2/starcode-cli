@@ -108,29 +108,46 @@ impl ToolInvocation for SendMessageInvocation {
                 return Err("SendMessage requires a non-empty 'summary' field".into());
             }
 
-            // Broadcast 路径：写所有已注册 agent
-            if params.target_agent == "*" || params.message_type == MessageType::Broadcast {
-                if let Some(ref reg) = registry {
-                    let names = reg.list_agent_names().await;
-                    let count = names.len();
-                    for name in &names {
-                        let _ = reg
-                            .deliver_message(name, &params.message, &params.summary, false)
-                            .await;
+            // hub 路径（Phase 4）：deliver 全走 AgentRouter —— 单播 /
+            // 广播 / UnknownTarget 显式报错，绝不写死信文件。
+            // 发件人身份：lead 的 config.agent_identity 是 None，固定 "lead"；
+            // 子 agent 由 runner 写入自己的身份。
+            if let Some(ref reg) = registry {
+                let from_identity = config
+                    .agent_identity
+                    .clone()
+                    .unwrap_or_else(|| crate::agent::messaging::LEAD_IDENTITY.to_string());
+
+                let hub_type = match params.message_type {
+                    MessageType::Broadcast => crate::agent::messaging::HubMessageType::PlainText,
+                    MessageType::PlainText => crate::agent::messaging::HubMessageType::PlainText,
+                    MessageType::ShutdownRequest => {
+                        crate::agent::messaging::HubMessageType::TaskAssignment // 关停请求在 hub 侧暂归 plain_text 处理
                     }
-                    return Ok(ToolResult {
-                        llm_content: Some(format!("Broadcast sent to {} agents", count)),
-                        return_display: Some(format!("Broadcast to {} agents", count)),
-                        output: format!("Broadcast to {} agents", count),
-                        error: None,
-                        data: Some(serde_json::json!({
-                            "status": "broadcast_sent", "targets": names,
-                        })),
-                    });
-                }
+                    MessageType::PlanApprovalRequest => {
+                        crate::agent::messaging::HubMessageType::PlanApprovalRequest
+                    }
+                    MessageType::PermissionRequest => {
+                        crate::agent::messaging::HubMessageType::PermissionRequest
+                    }
+                };
+                let to = if params.message_type == MessageType::Broadcast {
+                    "*".to_string()
+                } else {
+                    params.target_agent.clone()
+                };
+
+                return reg
+                    .deliver_message(
+                        &from_identity,
+                        &to,
+                        &params.message,
+                        &params.summary,
+                        hub_type,
+                    )
+                    .await;
             }
 
-            // 协议消息：通过 AsyncSubagentRunner 投递
             let is_protocol = matches!(
                 params.message_type,
                 MessageType::ShutdownRequest
@@ -138,62 +155,16 @@ impl ToolInvocation for SendMessageInvocation {
                     | MessageType::PermissionRequest
             );
 
-            if let Some(ref reg) = registry {
-                return reg
-                    .deliver_message(
-                        &params.target_agent,
-                        &params.message,
-                        &params.summary,
-                        is_protocol,
-                    )
-                    .await;
-            }
-
-            // 兜底：原有文件 inbox 方式
-            let root = config.project_root();
-            let inbox_dir = root.join(".star").join("messages");
-            if !inbox_dir.exists() {
-                tokio::fs::create_dir_all(&inbox_dir)
-                    .await
-                    .map_err(|e| format!("Failed to create messages dir: {}", e))?;
-            }
-
-            let timestamp = chrono::Utc::now().timestamp_millis();
-            let filename = format!("{}_{}.json", params.target_agent, timestamp);
-            let msg_path = inbox_dir.join(&filename);
-
-            let msg = serde_json::json!({
-                "from": "agent",
-                "to": params.target_agent,
-                "message": params.message,
-                "summary": params.summary,
-                "message_type": params.message_type,
-                "is_protocol": is_protocol,
-                "priority": params.priority,
-                "timestamp": timestamp,
-            });
-
-            let content = serde_json::to_string_pretty(&msg)
-                .map_err(|e| format!("Failed to serialize message: {}", e))?;
-            tokio::fs::write(&msg_path, content)
-                .await
-                .map_err(|e| format!("Failed to write message: {}", e))?;
-
-            Ok(ToolResult {
-                llm_content: Some(format!(
-                    "Message '{}' sent to agent '{}'.",
-                    params.summary, params.target_agent
-                )),
-                return_display: Some(format!("Message sent to {}", params.target_agent)),
-                output: format!("Message queued for agent '{}'", params.target_agent),
-                error: None,
-                data: Some(serde_json::json!({
-                    "status": "sent",
-                    "target": params.target_agent,
-                    "summary": params.summary,
-                    "is_protocol": is_protocol,
-                })),
-            })
+            // hub 未接线（registry None）：显式失败。旧兜底曾把消息写进
+            // `.star/messages/` 文件然后报告成功 —— 全仓库没有消费者，消息
+            // 发出去即消失（设计文档 §2 断点 1 的死信反模式）。宁可让模型
+            // 看到 "not configured"，也不给它一个假成功。
+            let _ = is_protocol;
+            Err(
+                "Messaging hub is not configured in this runtime (SendMessage registry missing). \
+                 This session cannot deliver agent-to-agent messages."
+                    .into(),
+            )
         })
     }
 }

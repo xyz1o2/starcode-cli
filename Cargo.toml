@@ -48,6 +48,14 @@ pulldown-cmark = "0.13"
 tokio-util = "0.7"
 walkdir = "2.5"
 
+# AgentMail 局域网互通（agent/messaging/remote.rs）：hyper 1.x 服务器 + body 工具
+# + TokioIo 适配（hyper-util 把 tokio TcpStream 适配给 hyper 1.x 的 rt trait）。
+# 均已在依赖树里（reqwest 传递依赖），声明直接版本以稳定 BUILD。
+hyper = { version = "1.12", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+
 # Environment variables
 dotenvy = "0.15"
 

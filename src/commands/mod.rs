@@ -421,6 +421,7 @@ pub async fn handle_command(
         "cron" => parity::schedule(ctx, args).await,
         "rc" => parity::remote_control(ctx, args).await,
         "rcs" => parity::remote_control(ctx, args).await,
+        "agent-mail" => parity::agent_mail(ctx, args).await,
         "color" => config::theme(ctx, args).await,
         "detach" => parity::detach(ctx, args).await,
         "schedule" => parity::schedule(ctx, args).await,

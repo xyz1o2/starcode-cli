@@ -18,6 +18,13 @@ pub struct SubAgentRequest {
     pub parent_messages: Vec<crate::types::StarMessage>,
     /// 父会话里尚未随下一条用户消息发出的本地命令输出。
     pub parent_pending_context: Vec<String>,
+    /// 本子代理在消息 hub 里的身份（mailbox 键）。
+    ///
+    /// `Some(name)` = 命名 worker（`SendMessage` 可按 name 寻址）；
+    /// `Some("agent-{id}")` = 匿名后台 worker，按 agent_id 寻址；
+    /// `None` = 前台一次性任务，不注册、收不到消息。
+    /// 设计文档：`docs/agent-messaging-design.zh-CN.md` §6 Phase 3。
+    pub identity: Option<String>,
 }
 
 impl SubAgentRequest {
@@ -28,6 +35,7 @@ impl SubAgentRequest {
             subagent_type: SubagentType::GeneralPurpose,
             parent_messages: Vec::new(),
             parent_pending_context: Vec::new(),
+            identity: None,
         }
     }
 
@@ -38,6 +46,12 @@ impl SubAgentRequest {
 
     pub fn with_subagent_type(mut self, subagent_type: SubagentType) -> Self {
         self.subagent_type = subagent_type;
+        self
+    }
+
+    /// 设置本子代理在消息 hub 里的身份（有 identity 才能收 SendMessage）。
+    pub fn with_identity(mut self, identity: impl Into<String>) -> Self {
+        self.identity = Some(identity.into());
         self
     }
 

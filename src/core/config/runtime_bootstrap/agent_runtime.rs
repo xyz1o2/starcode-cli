@@ -82,13 +82,21 @@ fn register_agent_execution_tools(
     message_bus: &Arc<MessageBus>,
     client: &StarClient,
 ) {
-    // 后台 SubAgent 异步执行器 + 全局通知队列
+    // 后台 SubAgent 异步执行器 + 全局通知队列 + Agent 间消息 hub。
+    //
+    // hub 从 RuntimeServices 取（bootstrap 里创建的进程级单例）：装配时挂上，
+    // `Agent::new` 与 skill fork 出的子 agent 构造时也从 config 读到同一个
+    // hub，lead / worker / fork 的注册表与邮箱就永远是一份。
     let subagent_runner = crate::agent::StarAgentRunner::shared(client.clone(), config.clone());
     let async_runner = config.runtime_notification_queue().map(|queue| {
-        Arc::new(crate::agent::subagent::runner::AsyncSubagentRunner::new(
+        let mut runner = crate::agent::subagent::runner::AsyncSubagentRunner::new(
             subagent_runner.clone(),
             queue,
-        ))
+        );
+        if let Some(hub) = config.runtime_agent_hub() {
+            runner = runner.with_agent_hub(hub);
+        }
+        Arc::new(runner)
     });
 
     use crate::core::tools::agent_tool::AgentTool;
@@ -291,11 +299,16 @@ fn register_skill_tool(
         //
         // 与 `AgentTool` 用同一个 runner（`StarAgentRunner::shared`）——
         // 两处各建一个会让子代理的注册表分家，`SendMessage` 就找不到人了。
+        // hub 同理从 config（RuntimeServices）取：fork 的 agent 也注册进
+        // 同一个 hub，所以 lead 能 SendMessage 到 fork（设计文档 §2 断点 4）。
         let subagent_runner = crate::agent::StarAgentRunner::shared(client.clone(), config.clone());
         if let Some(queue) = config.runtime_notification_queue() {
-            skill_tool = skill_tool.with_async_runner(Arc::new(
-                crate::agent::subagent::runner::AsyncSubagentRunner::new(subagent_runner, queue),
-            ));
+            let mut fork_runner =
+                crate::agent::subagent::runner::AsyncSubagentRunner::new(subagent_runner, queue);
+            if let Some(hub) = config.runtime_agent_hub() {
+                fork_runner = fork_runner.with_agent_hub(hub);
+            }
+            skill_tool = skill_tool.with_async_runner(Arc::new(fork_runner));
         }
 
         tool_registry.register_tool(Arc::new(skill_tool));

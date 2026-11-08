@@ -60,6 +60,15 @@ pub struct Agent {
     /// 队列；这里在每轮 turn 开始时消费，把它们作为 user 消息插进对话。
     pub(crate) steering_queue:
         Option<Arc<crate::agent::messaging::AsyncMessageQueue<(u64, String)>>>,
+    /// Agent 间消息 hub：`SendMessage` 投递进来的邮箱。
+    ///
+    /// lead 与 worker 跑的是同一份 `agent_loop.rs`，所以 drain 注入写一次两个
+    /// 身份同时受益 —— 子 agent 自己每个 turn 开头也会消费发给它的消息。
+    /// 设计文档：`docs/agent-messaging-design.zh-CN.md` §4/§6 Phase 3。
+    pub(crate) agent_hub: Option<crate::agent::messaging::SharedAgentRouter>,
+    /// 本 agent 在 [`Self::agent_hub`] 里的身份（mailbox 键）。
+    /// `None` = not addressable（无 hub / 尚未委派身份），drain 跳过。
+    pub(crate) hub_identity: Option<String>,
     /// 运行中切模型的交接槽（见 `agent::model_switch`）。
     ///
     /// 用户在 agent 还在跑的时候切模型：改动落在**下一次请求**上（Claude Code
@@ -169,6 +178,8 @@ impl Agent {
             denial_tracker: crate::core::permission_rules::deny_log::DenialTracker::new(),
             async_notification_queue: None,
             steering_queue: None,
+            agent_hub: None,
+            hub_identity: None,
             model_switch_cell,
             task_complexity: crate::core::routing::RequestComplexity::Medium,
             memory_manager: crate::core::memory::MemoryManager::new(
@@ -194,6 +205,13 @@ impl Agent {
         // 连接后台 SubAgent 通知队列（若 runtime 已初始化）
         if let Some(queue) = agent.config.runtime_notification_queue() {
             agent.set_notification_queue(queue);
+        }
+
+        // 连接 Agent 间消息 hub：默认身份是 lead（主 agent 的固定可寻址名，
+        // worker 回话的默认收件人）。子 agent 由 runner 调 `set_agent_hub`
+        // 覆盖成自己的身份。
+        if let Some(hub) = agent.config.runtime_agent_hub() {
+            agent.set_agent_hub(hub, crate::agent::messaging::LEAD_IDENTITY);
         }
 
         agent
@@ -402,6 +420,19 @@ impl Agent {
         queue: Arc<crate::agent::messaging::AsyncMessageQueue<(u64, String)>>,
     ) {
         self.steering_queue = Some(queue);
+    }
+
+    /// 注入 Agent 间消息 hub，并登记本 agent 的身份（mailbox 键）。
+    ///
+    /// lead 用 [`LEAD_IDENTITY`]（`"lead"`），命名 worker 用它的 name，
+    /// 匿名后台 worker 用 agent_id。见 `docs/agent-messaging-design.zh-CN.md` §4。
+    pub fn set_agent_hub(
+        &mut self,
+        hub: crate::agent::messaging::SharedAgentRouter,
+        identity: impl Into<String>,
+    ) {
+        self.agent_hub = Some(hub);
+        self.hub_identity = Some(identity.into());
     }
 
     pub fn set_approval_mode(&mut self, mode: crate::types::ApprovalMode) {

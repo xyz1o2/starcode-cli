@@ -269,6 +269,17 @@ pub async fn run_ui_loop(
 
     // Initial load of configured providers and current model (non-blocking)
     let _ = agent_tx.try_send(AgentRequest::LoadConfiguredProviders);
+    // AgentMail 入站 listener（默认关，`STAR_AGENT_MAIL_ENABLED=1` 才起）。
+    // request-response: worker 起好 listener 回传绑定地址 + 到信唤醒信号
+    // （Phase 6 IdleNotification 联动用）；peers 留给 /agent-mail 命令查询。
+    let (mail_result_tx, mut mail_result_rx) = tokio::sync::mpsc::channel::<
+        Result<crate::runtime::messages::InitAgentMailResult, String>,
+    >(4);
+    let _ = agent_tx.try_send(AgentRequest::InitAgentMail {
+        response: mail_result_tx.clone(),
+    });
+    let mut agent_mail_wakeup: Option<crate::agent::messaging::MailWakeupSignal> = None;
+    let mut agent_mail_peers: Vec<String> = Vec::new();
     // Trigger async MCP server initialization — loads .star/mcp.json,
     // connects to servers, and registers tools in the background.
     let _ = agent_tx.try_send(AgentRequest::McpRefresh);
@@ -669,6 +680,55 @@ pub async fn run_ui_loop(
                     }
                     Err(_) => {} // 超时，正常到期
                 }
+            }
+        }
+
+        // ── AgentMail 到信唤醒（Phase 6 IdleNotification 联动）──
+        //
+        // 收到 worker 回传的 wakeup 信号后，空闲期间被到信唤醒时给 agent
+        // 注入一条消费提示（与 apply_loop_tasks 的注入路径同构）：下一轮
+        // turn 开头的 hub drain 会把 mailbox 内容真正推进对话。没有信
+        // （Notify 竞态丢失）也不投 —— next turn 会自然 drain。
+        if agent_mail_wakeup.is_none() {
+            if let Ok(Ok(result)) = mail_result_rx.try_recv() {
+                match result.bound {
+                    Some(bound) => {
+                        crate::utils::logging::append_debug_log_line(&format!(
+                            "[AgentMail] UI armed wakeup (listener on {})",
+                            bound
+                        ));
+                    }
+                    None => {
+                        crate::utils::logging::append_debug_log_line(
+                            "[AgentMail] listener not started (disabled or unsafe config)",
+                        );
+                    }
+                }
+                agent_mail_wakeup = Some(result.wakeup);
+                agent_mail_peers = result.peers;
+            }
+        }
+        if let Some(ref signal) = agent_mail_wakeup {
+            let woke =
+                tokio::time::timeout(std::time::Duration::from_millis(0), signal.wait_mail())
+                    .await
+                    .is_ok();
+            if woke && !state.is_processing && state.pending_user_messages.is_empty() {
+                // 让 agent 知道有 agent 来信可消费（主动唤醒 / 空闲注入）。
+                let message = concat!(
+                    "[AgentMail] 有一条 agent 间消息已进入本会话的 mailbox，",
+                    "请处理它或查看摘要。"
+                )
+                .to_string();
+                let message_id = state.next_message_id;
+                state.next_message_id += 1;
+                let _ = agent_tx
+                    .send(AgentRequest::SendMessage {
+                        message_id,
+                        message,
+                    })
+                    .await;
+                needs_redraw = true;
             }
         }
     }

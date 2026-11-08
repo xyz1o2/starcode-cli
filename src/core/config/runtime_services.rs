@@ -22,6 +22,12 @@ pub struct RuntimeServices {
     /// 两边必须是**同一个槽** —— 否则 skill 的模型切换会被用户的 `/model`
     /// 覆盖，或者反过来。
     model_switch_cell: Option<crate::agent::model_switch::ModelSwitchCell>,
+    /// Agent 间消息路由 hub（进程级单例，见 `agent::messaging::hub`）。
+    ///
+    /// 设计文档：`docs/agent-messaging-design.zh-CN.md` §4。放在这里的原因与
+    /// notification_queue 相同：子 config 经 `Arc` clone 自动继承，lead 与
+    /// worker 共享同一个注册表和邮箱分家就永远不存在。
+    agent_hub: Option<crate::agent::messaging::SharedAgentRouter>,
 }
 
 impl RuntimeServices {
@@ -38,6 +44,7 @@ impl RuntimeServices {
             global_state,
             notification_queue: None,
             model_switch_cell: None,
+            agent_hub: None,
         }
     }
 
@@ -78,6 +85,16 @@ impl RuntimeServices {
 
     pub(crate) fn model_switch_cell(&self) -> Option<crate::agent::model_switch::ModelSwitchCell> {
         self.model_switch_cell.clone()
+    }
+
+    /// 设置或读取 Agent 间消息路由 hub（进程级单例）。
+    pub fn with_agent_hub(mut self, hub: crate::agent::messaging::SharedAgentRouter) -> Self {
+        self.agent_hub = Some(hub);
+        self
+    }
+
+    pub(crate) fn agent_hub(&self) -> Option<crate::agent::messaging::SharedAgentRouter> {
+        self.agent_hub.clone()
     }
 }
 

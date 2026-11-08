@@ -72,6 +72,14 @@ pub async fn build_runtime_services(
     // 必须是同一个槽，否则两边互相覆盖。
     let model_switch_cell = crate::agent::model_switch::new_cell();
 
+    // Agent 间消息路由 hub（进程级单例）：与 notification_queue 同样的共享
+    // 方式 —— 挂上 RuntimeServices 后经 config 的 Arc clone 流向所有子代理。
+    // 见 docs/agent-messaging-design.zh-CN.md §4/§6 Phase 2。
+    let agent_hub = existing_runtime
+        .and_then(|runtime| runtime.agent_hub())
+        .unwrap_or_else(crate::agent::messaging::new_shared_router);
+    let agent_hub_for_registry = agent_hub.clone();
+
     let mut registry_config = config.clone();
     registry_config.install_runtime_services(
         RuntimeServices::new(
@@ -80,7 +88,8 @@ pub async fn build_runtime_services(
             mcp_manager.clone(),
             global_state.clone(),
         )
-        .with_model_switch_cell(model_switch_cell.clone()),
+        .with_model_switch_cell(model_switch_cell.clone())
+        .with_agent_hub(agent_hub_for_registry),
     );
     let registry_config = Arc::new(registry_config);
 
@@ -106,7 +115,8 @@ pub async fn build_runtime_services(
     );
     services = services
         .with_notification_queue(notification_queue)
-        .with_model_switch_cell(model_switch_cell);
+        .with_model_switch_cell(model_switch_cell)
+        .with_agent_hub(agent_hub);
 
     Ok(RuntimeBootstrapArtifacts { services })
 }
@@ -177,7 +187,8 @@ pub(crate) async fn build_two_layer_registry_for_tests() -> Arc<ToolRegistry> {
     let mut config = Config::new(ConfigParameters::default());
     config.install_runtime_services(
         RuntimeServices::new(None, bus.clone(), None, gs.clone())
-            .with_model_switch_cell(model_switch_cell),
+            .with_model_switch_cell(model_switch_cell)
+            .with_agent_hub(crate::agent::messaging::new_shared_router()),
     );
     let config = Arc::new(config);
 

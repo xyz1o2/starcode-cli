@@ -162,6 +162,7 @@ fn build_request(input: &AgentToolFullInput) -> SubAgentRequest {
             .unwrap_or(SubagentType::GeneralPurpose),
         parent_messages: Vec::new(),
         parent_pending_context: Vec::new(),
+        identity: None,
     }
 }
 

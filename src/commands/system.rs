@@ -457,6 +457,28 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         sub_commands: &[],
     },
     SlashCommand {
+        name: "agent-mail",
+        alt_names: &[],
+        description: "Agent-to-agent mail status and peer probe",
+        category: "Automation",
+        sub_commands: &[
+            SlashCommand {
+                name: "status",
+                alt_names: &[],
+                description: "Show listener / peers configuration",
+                category: "Automation",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "probe",
+                alt_names: &[],
+                description: "Probe each peer's well-known agent-mail card",
+                category: "Automation",
+                sub_commands: &[],
+            },
+        ],
+    },
+    SlashCommand {
         name: "remote",
         alt_names: &[],
         description: "Remote control protocol and inbox",
@@ -3186,5 +3208,25 @@ mod tests {
             !ALL_COMMANDS.iter().any(|c| c.name == "eval"),
             "`/eval` 仍被声明但没有 handler，/help 与补全会把它列出来",
         );
+    }
+
+    /// `/agent-mail`（Phase 5.4b）：声明必须指向真实 handler —— `commands/mod.rs`
+    /// 的 match 里有 `"agent-mail" => parity::agent_mail` 分支，且它的子命令
+    /// `status` / `probe` 能被 handler 消化。防 /eval 式悬空回归。
+    #[test]
+    fn agent_mail_is_declared_and_dispatched() {
+        let cmd = ALL_COMMANDS
+            .iter()
+            .find(|c| c.name == "agent-mail")
+            .expect("`/agent-mail` should be declared in ALL_COMMANDS (Phase 5.4b)");
+        assert_eq!(cmd.category, "Automation");
+        // format_help 只打印 HELP_CATEGORIES 里的分类（§ 模块顶注释：承重白名单）。
+        assert!(
+            HELP_CATEGORIES.contains(&cmd.category),
+            "category '{}' is not in HELP_CATEGORIES — the command would be invisible in /help",
+            cmd.category
+        );
+        let sub_names: Vec<&str> = cmd.sub_commands.iter().map(|s| s.name).collect();
+        assert_eq!(sub_names, vec!["status", "probe"]);
     }
 }

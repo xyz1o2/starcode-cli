@@ -460,6 +460,18 @@ pub async fn handle_streaming_request(
             );
             StreamingRequestOutcome::Continue
         }
+        Some(AgentRequest::InitAgentMail { response }) => {
+            // 本请求只在启动时由 UI 发一次（turn 开始前），正常走 worker 的
+            // control_requests 分支。这里兜「回合进行中又收到」的边缘：StarAgent
+            // 此刻被独占借出拿不到 config，listener 拉不起来；给 UI 回显式失败
+            // 说明而不是让它干等。
+            let _ = response
+                .send(Err(
+                    "InitAgentMail arrived mid-turn; retry when the turn ends.".to_string(),
+                ))
+                .await;
+            StreamingRequestOutcome::Continue
+        }
     }
 }
 

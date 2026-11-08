@@ -35,6 +35,18 @@ pub enum RuntimeSettingsPersistencePolicy {
     SessionOnly,
 }
 
+/// `AgentRequest::InitAgentMail` 的结果回传（UI 事件循环保存唤醒信号，
+/// 空闲时 `wait_mail` 醒来注入消费提示）。
+#[derive(Clone)]
+pub struct InitAgentMailResult {
+    /// listener 已绑定的地址；disabled / 失败时为 None。
+    pub bound: Option<std::net::SocketAddr>,
+    /// 到信唤醒信号（lead / 广播收到信时 notify）。
+    pub wakeup: crate::agent::messaging::MailWakeupSignal,
+    /// 本进程配置的出站 peers（`/agent-mail` 状态展示用）。
+    pub peers: Vec<String>,
+}
+
 /// UI 发给 worker 的原子运行时设置变更。`ui_revision` 由 UI 单调递增，
 /// worker 据此保留流式期间的 FIFO 顺序并让 UI 丢弃过时确认。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -381,6 +393,14 @@ pub enum AgentRequest {
     /// 真正让它作用到请求上要靠这条消息落到 `llm::thinking`。
     SetThinkingEffort(crate::types::ThinkingEffort),
     LoadConfiguredProviders,
+    /// AgentMail：按 env 配置拉起入站邮箱 listener（`STAR_AGENT_MAIL_*`）。
+    ///
+    /// 由 UI 事件循环启动时发一次。worker 侧拿 hub +读 env，listener 生命
+    /// 周期挂在进程 —— 结果经 `[AgentMail]` 日志可见。成功时把 listener 绑
+    /// 定地址与到信唤醒信号回传 UI（Phase 6 IdleNotification 联动用）。
+    InitAgentMail {
+        response: tokio::sync::mpsc::Sender<Result<InitAgentMailResult, String>>,
+    },
     Compress {
         message_id: u64,
         /// Optional `/compact <instructions>` focus text. `None` keeps the

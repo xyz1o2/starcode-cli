@@ -2056,6 +2056,95 @@ async fn remote_surface(client: &str) -> String {
     out
 }
 
+/// `/agent-mail` — Agent 间邮件互通状态（Phase 5.4b）。
+///
+/// 展示三条真实信息：入站 listener 配置（env 读数的真相，不是猜测）、
+/// 出站 peers 列表、以及可选的对端探测（`/agent-mail probe` 逐对端拉
+/// well-known 卡片核实对端确实是 agent-mail 服务）。
+pub async fn agent_mail(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    use crate::agent::messaging::remote::{MailServerConfig, PeerMailClient};
+
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
+
+    if sub == "probe" {
+        // 探测模式：逐对端拉 well-known 卡片（3s 超时/对端）。
+        let client = PeerMailClient::from_env();
+        if !client.has_peers() {
+            push_msg(
+                &mut ctx,
+                "## AgentMail probe\n\nNo peers configured. Set `STAR_AGENT_PEERS` \
+                 (comma-separated base URLs) and restart the session.",
+            );
+            return Ok(());
+        }
+        let peers = client.peer_base_urls();
+        let cards = crate::agent::messaging::remote::discover_peers(&peers).await;
+        let mut out = String::from("## AgentMail peers\n\n");
+        for card in cards {
+            match card.status {
+                Ok(()) => out.push_str(&format!(
+                    "- ✅ `{}` — agent-mail v{}, inbox `{}`, auth `{}`\n",
+                    card.base_url,
+                    card.version.unwrap_or(0),
+                    card.inbox_path.as_deref().unwrap_or("?"),
+                    card.auth.as_deref().unwrap_or("?"),
+                )),
+                Err(reason) => out.push_str(&format!("- ❌ `{}` — {}\n", card.base_url, reason)),
+            }
+        }
+        push_msg(&mut ctx, out);
+        return Ok(());
+    }
+
+    // status（默认）
+    let cfg = MailServerConfig::from_env();
+    let client = PeerMailClient::from_env();
+    let mut out = String::from("## AgentMail（agent 间消息互通）\n\n");
+    out.push_str(&format!(
+        "- inbound listener: **{}** (`{}:{}`, key **{}**)\n",
+        if cfg.enabled { "enabled" } else { "disabled" },
+        cfg.host,
+        cfg.port,
+        if cfg.shared_key.is_some() {
+            "set"
+        } else {
+            "unset"
+        },
+    ));
+    if !cfg.enabled {
+        out.push_str(
+            "  - enable with `STAR_AGENT_MAIL_ENABLED=1`; it binds loopback only unless \
+             `STAR_AGENT_MAIL_HOST` is set (non-loopback binding requires a key)\n",
+        );
+    }
+    let peers = client.peer_base_urls();
+    if peers.is_empty() {
+        out.push_str(
+            "- outbound peers: none (`STAR_AGENT_PEERS` unset) — single-process semantics\n",
+        );
+    } else {
+        out.push_str(&format!(
+            "- outbound peers ({}): {} — run `/agent-mail probe` to verify each\n",
+            peers.len(),
+            peers
+                .iter()
+                .map(|p| format!("`{}`", p))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+    }
+    out.push_str(
+        "\n### Semantics\n\n\
+         - in-process agents (lead / workers / forks) exchange messages through the \
+           internal hub; `SendMessage target_agent=\"lead\"` is the reply path\n\
+         - unknown targets error explicitly (no dead-letter files)\n\
+         - remote messages land in the local mailbox and are consumed at the start \
+           of the agent's next turn; an idle lead is woken by the mail signal\n",
+    );
+    push_msg(&mut ctx, out);
+    Ok(())
+}
+
 /// `/remote-control` — 展示本会话可被远程驱动的两条真实通路
 pub async fn remote_control(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
     let mut out = String::from("## Remote control\n\n");

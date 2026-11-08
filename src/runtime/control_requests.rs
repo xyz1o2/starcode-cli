@@ -1,6 +1,8 @@
+use crate::agent::messaging::MailWakeupSignal;
 use crate::agent::StarAgent;
 use crate::runtime::messages::{
-    AgentRequest, PendingCheckpointAction, RuntimeSettingsMutation, StreamMessage, StreamStartKind,
+    AgentRequest, InitAgentMailResult, PendingCheckpointAction, RuntimeSettingsMutation,
+    StreamMessage, StreamStartKind,
 };
 use crate::utils::logging::append_debug_log_line;
 use futures::FutureExt;
@@ -342,6 +344,43 @@ pub async fn handle_request(
             let store = crate::core::config::provider_store::ProviderStore::new();
             let ids = store.configured_provider_ids().await.unwrap_or_default();
             let _ = tx.send(StreamMessage::ConfiguredProviders(ids)).await;
+        }
+        AgentRequest::InitAgentMail { response } => {
+            // AgentMail 入站 listener（Phase 5.2）。默认关闭；开了也只是回环
+            // 绑定 —— 安全闸门在 MailServerConfig::is_safe_to_start 里，
+            // 非回环无密钥直接拒绝启动。失败不致命：单机互通是增量能力，
+            // 折日志说明原因即可。成功时一并回传 [AgentMail] 绑定地址、
+            // 到信唤醒信号与 peers 列表（Phase 6 / 5.4b）。
+            let result = match agent.agent_hub() {
+                None => Err("hub missing".to_string()),
+                Some(hub) => {
+                    let cfg = crate::agent::messaging::remote::MailServerConfig::from_env();
+                    match crate::agent::messaging::remote::spawn_inbound_listener(hub, cfg).await {
+                        Ok((bound, _handle)) => {
+                            append_debug_log_line(&format!(
+                                "[AgentMail] inbound listener ready on {}",
+                                bound
+                            ));
+                            Ok(bound)
+                        }
+                        Err(reason) => {
+                            append_debug_log_line(&format!(
+                                "[AgentMail] listener not started: {}",
+                                reason
+                            ));
+                            Err(reason)
+                        }
+                    }
+                }
+            };
+            let peers =
+                crate::agent::messaging::remote::PeerMailClient::from_env().peer_base_urls();
+            let result = InitAgentMailResult {
+                bound: result.ok(),
+                wakeup: MailWakeupSignal::new(),
+                peers,
+            };
+            let _ = response.send(Ok(result)).await;
         }
         AgentRequest::ToolConfirmationResponse {
             tool_calls,
