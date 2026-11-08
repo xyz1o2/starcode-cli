@@ -25,8 +25,8 @@ type Err = Box<dyn std::error::Error>;
 ///
 /// **这张表必须穷尽 [`Modal`] 的全部变体。** 此前这里是 `match top { … _ => Ok(false) }`：
 /// 新加一个变体编译得过、弹窗也画得出来，按键却会静默漏到主输入框 —— 在只读弹窗
-/// 上按 Enter 会直接把消息发出去，正是 [`parity-ui-framework.md`] 记过的那类 bug。
-/// 现在漏写就是编译错误。
+/// 上按 Enter 会直接把消息发出去（当年记在 `parity-ui-framework.md` 里，那份
+/// parity 文档体系现已下线，教训仍成立）。现在漏写就是编译错误。
 pub async fn handle_modal_key(
     state: &mut ChatState,
     key: crossterm::event::KeyEvent,

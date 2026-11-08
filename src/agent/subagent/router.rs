@@ -211,16 +211,32 @@ mod tests {
 
     /// 回归：`subagent_type` 必须一路透到 `SubAgentRequest`，runner 靠它
     /// 派发 explorer 到 `run_explore`。丢在路由上 explorer 就退回通用 agent。
+    ///
+    /// 规则 2.5（CC 2.1.196）之后 explorer 默认后台 —— 要走同步分支得显式
+    /// `background=false`，这里两个分支都锁： subtype 透传不因路由切换丢
+    /// （后台分支的请求同样带 Explorer）。
     #[test]
     fn request_carries_subagent_type_through_route() {
         let mut input = default_input();
         input.subagent_type = Some(SubagentType::Explorer);
-        let route = route_agent_call(&input, false, false);
-        match route {
+
+        // 默认（后台）分支：AsyncAgent 的 request 同样透传 subtype
+        let async_route = route_agent_call(&input, false, false);
+        match async_route {
+            AgentRoute::AsyncAgent { request, .. } => {
+                assert_eq!(request.subagent_type, SubagentType::Explorer);
+            }
+            _ => panic!("explorer default must route to AsyncAgent"),
+        }
+
+        // 显式同步分支
+        input.background = Some(false);
+        let sync_route = route_agent_call(&input, false, false);
+        match sync_route {
             AgentRoute::SyncNamedAgent { request, .. } => {
                 assert_eq!(request.subagent_type, SubagentType::Explorer);
             }
-            _ => panic!("explorer input must route to SyncNamedAgent"),
+            _ => panic!("explorer with background=false must route to SyncNamedAgent"),
         }
     }
 

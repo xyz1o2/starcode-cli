@@ -53,6 +53,7 @@ pub mod session_persistence;
 pub mod settings_sync;
 pub mod skill_learning;
 pub mod skill_search;
+pub mod star_env_registry;
 pub mod state;
 pub mod swarm;
 pub mod tasks;
