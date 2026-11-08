@@ -161,6 +161,8 @@ Two invariants the steering path depends on: the injected message carries its ow
 
 **The assistant's output gets cut in half at the steering point, and the cut has to land on a markdown boundary.** The user's message goes between the two halves, so a cut in the middle of a fenced code block leaves the first half with an unclosed ` ``` ` — the renderer then treats everything after it, *including the user's own message*, as code. `markdown_parser::split_markdown_at_safe_boundary` picks the cut: at the last paragraph boundary outside any fence, or — when the text is inside a fence — before that fence's opening line, so the code block stays whole in the second half. Lists and tables are never cut either.
 
+> `src/commands/parity.rs` 2026-11-09 分拆为 parity/ 目录：`core / git_github / team_mail / remote / goal_job / memory / skills / ultra / web / diag / trigger` 十一个子模块（主文件只剩 mod 声明 + pub use 转发 + tests）。跨子模块引用走 `crate::commands::parity::core::{push_msg, ask_agent, run, …}`；`commands/mod.rs` 的 match 臂 `parity::lens` 等指向 `/agents`/`/help` 等用户面名称——由于 `pub use *` 转发，这些引用在拆分后无需改动。adding a command 仍按下方四触点走。
+
 ### Slash commands — four touch points
 
 Adding or changing a command means editing all of these:
