@@ -918,6 +918,58 @@ fn render_rich_tool_content(
                     }
                     // 解析失败则走通用预览
                 }
+                // RepoMap: 折叠态显示符号概要。表头行是权威计数来源
+                // （"Repo map — N of M symbols, ranked by call-graph centrality"），
+                // 数正文行会把 "── file" 分组行一起算进去。
+                "RepoMap" => {
+                    if let Some((shown, total)) = text.lines().find_map(|l| {
+                        let rest = l.strip_prefix("Repo map — ")?;
+                        let counts =
+                            rest.strip_suffix(" symbols, ranked by call-graph centrality")?;
+                        let mut parts = counts.split(" of ");
+                        let shown = parts.next()?.trim().parse::<usize>().ok()?;
+                        let total = parts.next()?.trim().parse::<usize>().ok()?;
+                        Some((shown, total))
+                    }) {
+                        push_collapsed_summary(
+                            &mut lines,
+                            "Repo map ·",
+                            shown,
+                            "symbol",
+                            Some(format!("of {} indexed", total)),
+                            tool_color,
+                        );
+                        return lines;
+                    }
+                    // 解析失败则走通用预览
+                }
+                // Bash：折叠态显示首行输出预览 + 总行数。
+                // 此前 Bash 无专属摘要，走通用预览一次铺 8 行命令输出 ——
+                // 输出越长的命令越占满默认视图。失败态不走这里（guard 里
+                // 已限 success），错误正文仍由通用路径刷红。
+                "Bash" => {
+                    // 后台任务提示行有专属渲染（Done/Running in background），
+                    // 交给通用路径单独处理。
+                    if text.contains("Running in the background") {
+                        // fall through
+                    } else {
+                        if let Some(first) = text.lines().find(|l| !l.trim().is_empty()) {
+                            let preview = crate::ui::utils::render::truncate_to_display_width(
+                                first.trim(),
+                                tool_inner_width.saturating_sub(2),
+                            );
+                            if !preview.is_empty() {
+                                lines.push(Line::from(Span::styled(
+                                    format!("  {}", preview),
+                                    crate::ui::themes::theme::muted_style(),
+                                )));
+                            }
+                        }
+                        let total = text.lines().count();
+                        push_collapsed_summary(&mut lines, "", total, "line", None, tool_color);
+                        return lines;
+                    }
+                }
                 // WebFetch/WebSearch：折叠态给"抓了多少内容"而不是倾倒全文。
                 // 折叠态还看不出抓到了什么，是这两类工具此前最大的问题 ——
                 // 调用行是 URL/查询，结果块却是通用 JSON 倾倒。
@@ -1615,6 +1667,105 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
             .collect();
         assert!(body.contains("88 files scanned"), "got: {body:?}");
+    }
+
+    /// RepoMap 折叠态应显示符号概要（排名数 / 索引总数），计数来自表头行
+    /// 而非正文行数 —— 正文里的 "── file" 分组行不能算进去。
+    #[test]
+    fn repo_map_collapsed_shows_symbol_summary() {
+        let entry = crate::types::ChatEntry::tool_result(
+            "",
+            crate::types::StarToolCall {
+                id: "c3".to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::StarToolCallFunction {
+                    name: "RepoMap".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            },
+            crate::types::ToolResult {
+                success: true,
+                output: Some(
+                    "Repo map — 60 of 312 symbols, ranked by call-graph centrality\nFocus: license\n\n── src/a.rs\n   fn tool_render  (line 11)\n"
+                        .to_string(),
+                ),
+                error: None,
+                data: None,
+                llm_content: None,
+            },
+        );
+
+        let lines = render_rich_tool_content(
+            &entry,
+            entry.tool_call.as_ref().unwrap(),
+            80,
+            false,
+            false,
+            &theme(),
+        );
+
+        let body: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+            .collect();
+        assert!(
+            body.contains("Repo map · 60 symbols of 312 indexed"),
+            "got: {body:?}"
+        );
+        assert!(
+            !body.contains("── src/a.rs"),
+            "折叠态不该铺符号表：{body:?}"
+        );
+    }
+
+    /// Bash 折叠态只显示首行输出预览 + 总行数，不再一次铺 8 行命令输出；
+    /// 后台任务提示行有专属渲染，不被摘要臂截胡。
+    #[test]
+    fn bash_collapsed_shows_first_line_preview_and_count() {
+        let entry = crate::types::ChatEntry::tool_result(
+            "",
+            crate::types::StarToolCall {
+                id: "c4".to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::StarToolCallFunction {
+                    name: "Bash".to_string(),
+                    arguments: r#"{"command":"cargo build"}"#.to_string(),
+                },
+            },
+            crate::types::ToolResult {
+                success: true,
+                output: Some(
+                    "\n  Compiling starcode-cli v0.3.0\nwarning: unused variable\nanother output line\n"
+                        .to_string(),
+                ),
+                error: None,
+                data: None,
+                llm_content: None,
+            },
+        );
+
+        let lines = render_rich_tool_content(
+            &entry,
+            entry.tool_call.as_ref().unwrap(),
+            80,
+            false,
+            false,
+            &theme(),
+        );
+
+        let body: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+            .collect();
+        assert!(
+            body.contains("Compiling starcode-cli"),
+            "应显示首行输出预览：{body:?}"
+        );
+        assert!(
+            !body.contains("unused variable"),
+            "折叠态不该铺出后续输出行：{body:?}"
+        );
+        assert!(body.contains("4 lines"), "应显示输出总行数：{body:?}");
     }
 
     fn tool_call_entry(name: &str, arguments: &str) -> crate::types::ChatEntry {
