@@ -368,6 +368,7 @@ impl ProviderStore {
                 output_style: None,
                 context_window: None,
                 file_filtering: None,
+                env: None,
             })
         } else {
             // Default if not exists
@@ -387,6 +388,7 @@ impl ProviderStore {
                 output_style: None,
                 context_window: None,
                 file_filtering: None,
+                env: None,
             }
         };
 

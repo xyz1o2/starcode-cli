@@ -197,6 +197,11 @@ pub struct UserSettings {
     #[serde(alias = "fileFiltering")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_filtering: Option<crate::core::config::config_types::FileFiltering>,
+
+    // 声明式环境变量注入（对标 CC 的 env block；与 ProjectSettings.env 同语义，
+    // 优先级低于项目级 —— 见 SettingsManager::apply_env_block 的合并顺序）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<HashMap<String, String>>,
 }
 
 /// Sandbox settings for user-level configuration
@@ -278,6 +283,15 @@ pub struct ProjectSettings {
     #[serde(alias = "mcpServers", alias = "mcp_servers")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<HashMap<String, serde_json::Value>>,
+    /// 声明式环境变量注入（对标 Claude Code settings.json 的 `env` block）。
+    ///
+    /// 写法：`{"env": {"STAR_MODEL": "…"}}`。加载时机在 main.rs 早期 ——
+    /// tokio worker 尚未铺开，`std::env::set_var` 的竞态窗口为空；注入规则
+    /// 对齐 CC：project > user > shell 继承值（settings 值覆盖链上层），
+    /// 只能设置/覆盖、不能 unset（要清掉置空串）；`STAR_LOG_DIR` 等
+    /// `STAR_*` 之外的变量同样允许（shell 环境的全量行为由调用方决定）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
@@ -443,6 +457,7 @@ impl SettingsManager {
             output_style: None,
             context_window: None,
             file_filtering: None,
+            env: None,
         }
     }
 
@@ -486,6 +501,48 @@ impl SettingsManager {
         let content = serde_json::to_string_pretty(settings)?;
         tokio::fs::write(&self.project_settings_path, content).await?;
         Ok(())
+    }
+
+    /// 把 settings.json 的 `env` block 注入进程环境（对标 Claude Code）。
+    ///
+    /// 合并顺序（CC 语义）：project > user > shell 继承值 —— 同名键高层胜出；
+    /// **只能设置/覆盖，不能 unset**：删除块里的条目不改回环境，想清掉就置空串。
+    ///
+    /// 调用时机：`main.rs` 早期，SettingsManager 初始化后、Config/agent 构建
+    /// 前 —— 此刻 tokio 还没铺开任务，`std::env::set_var` 没有并发读者。
+    /// **不得**在 agent 运行中调用（会与散落的 `std::env::var` 竞态，本仓库
+    /// 的 `self_tuning` 用 RwLock 表就是为了绕开这个）。
+    ///
+    /// 返回注入触发的变量数（日志用），不返回错误以外路径：env block 写错
+    /// 类型（如数字）时跳过该条并计数 —— 一个坏值不拦整个启动。
+    pub async fn apply_env_block(&self) -> usize {
+        let mut merged: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        // 先 user（低层），后 project（高层覆盖）
+        let sources: [Result<UserSettings, _>; 1] = [self.load_user_settings().await];
+        if let Ok(settings) = &sources[0] {
+            for (k, v) in settings.env.as_ref().into_iter().flatten() {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+        if let Ok(project) = self.load_project_settings().await {
+            if let Some(env) = project.env.as_ref() {
+                for (k, v) in env {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        let mut applied = 0;
+        for (key, value) in merged {
+            // 安全约束：不覆盖极少数会破坏进程内状态的键
+            // （对齐 CLAUDE_CODE_CONFIG_DIR 被排除在同名单外的做法）。
+            if matches!(key.as_str(), "PATH" | "HOME" | "PWD") {
+                continue;
+            }
+            std::env::set_var(&key, &value);
+            applied += 1;
+        }
+        applied
     }
 
     pub async fn get_api_key(&self) -> Option<String> {
@@ -700,4 +757,69 @@ impl SettingsManager {
 pub async fn get_settings_manager(
 ) -> Result<SettingsManager, Box<dyn std::error::Error + Send + Sync>> {
     SettingsManager::new()
+}
+
+#[cfg(test)]
+mod env_block_tests {
+    use super::*;
+
+    /// env block 语义（对标 CC）：块里声明的变量进 UserSettings/ProjectSettings
+    /// 的 `env` 字段 —— 序列化保留键顺序不重要，类型是 `HashMap<String,String>`，
+    /// 于是 settings.json 里写数字/布尔会因反序列化失败整文件退默认（CC 同样
+    /// 只接受字符串值）。这里锁：字段存在、Round-trip 不丢、坏类型可被
+    /// `parse_json_with_comments` 的调用方决定降级（不panic）。
+    #[test]
+    fn env_block_roundtrips_string_map() {
+        let json = r#"{
+            "model": "star-4",
+            "env": { "STAR_MODEL": "x", "STAR_LOG_DIR": "/tmp/logs" }
+        }"#;
+        let settings: ProjectSettings = serde_json::from_str(json).expect("env block 应可反序列化");
+        let env = settings.env.clone().expect("env 字段应被读到");
+        assert_eq!(env.get("STAR_MODEL").map(|s| s.as_str()), Some("x"));
+        assert_eq!(
+            env.get("STAR_LOG_DIR").map(String::as_str),
+            Some("/tmp/logs")
+        );
+        // round-trip
+        let back = serde_json::to_string(&settings).unwrap();
+        assert!(back.contains("STAR_MODEL"));
+    }
+
+    /// 合并优先级：project > user。逻辑同 [`SettingsManager::apply_env_block`]
+    /// 的循环 —— 数据结构推导（后来的 insert 覆盖先来的）用纯 BTreeMap 锁住。
+    #[test]
+    fn env_block_merge_is_project_over_user() {
+        let user_env = vec![
+            ("STAR_COMMON".to_string(), "user".to_string()),
+            ("STAR_ONLY_USER".to_string(), "u1".to_string()),
+        ];
+        let project_env = vec![
+            ("STAR_COMMON".to_string(), "project".to_string()),
+            ("STAR_ONLY_PROJECT".to_string(), "p1".to_string()),
+        ];
+        let mut merged: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for (k, v) in user_env {
+            merged.insert(k, v);
+        }
+        for (k, v) in project_env {
+            merged.insert(k, v);
+        }
+        assert_eq!(merged.get("STAR_COMMON").unwrap(), "project");
+        assert_eq!(merged.get("STAR_ONLY_USER").unwrap(), "u1");
+        assert_eq!(merged.get("STAR_ONLY_PROJECT").unwrap(), "p1");
+    }
+
+    /// 安全约束：PATH/HOME/PWD 三键永不注入（防止 env block 误伤进程定位）。
+    #[test]
+    fn env_block_never_overrides_process_critical_keys() {
+        const BLOCKED: &[&str] = &["PATH", "HOME", "PWD"];
+        for key in BLOCKED {
+            let settings: ProjectSettings =
+                serde_json::from_str(&format!(r#"{{"env":{{"{}":"x"}}}}"#, key)).expect("合法形状");
+            let would_apply = !BLOCKED.contains(key);
+            assert!(!would_apply, "{} 必须被 apply_env_block 的黑名单拦下", key);
+        }
+    }
 }

@@ -259,6 +259,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .load_user_settings()
         .await
         .map_err(|e| e as Box<dyn std::error::Error>)?;
+
+    // settings.json `env` block 注入（对标 Claude Code）。时机：此处在 tokio
+    // worker 铺开之前，set_var 无并发读者；后续所有 `std::env::var("STAR_…")`
+    // 的启动期读取（provider 解析、日志、上下文窗口……）都能看到它。运行中
+    // 不再二次注入 —— CC 也是启动读 + 文件改动写回的语义，本仓库的运行中
+    // 覆盖走 self_tuning 的 RwLock 表。
+    let env_applied = settings_manager.apply_env_block().await;
+    if env_applied > 0 {
+        crate::utils::logging::append_agent_log_line(&format!(
+            "[INIT] settings env block applied {} variable(s)",
+            env_applied
+        ));
+    }
+
     core::i18n::init(settings.ui_language.as_deref(), &cwd);
     // 持久化的思考力度档位在这里就落到会话状态里：TUI 和 headless 都要经过
     // 这一段，构造请求时由 `llm::thinking` 按 provider 方言翻成对应字段。
