@@ -141,6 +141,7 @@ pub(crate) fn render_tool_entry_blocks(
                     state.pending_confirmation_choice,
                     &state.pending_question_selections,
                     &state.pending_other_input,
+                    theme,
                 )
             } else {
                 crate::ui::components::confirmation_dialog::build_confirmation_card_block(
@@ -151,6 +152,7 @@ pub(crate) fn render_tool_entry_blocks(
                     state.show_permission_debug,
                     state.confirmation_feedback_mode,
                     &state.pending_confirmation_feedback,
+                    theme,
                 )
             }
         } else {

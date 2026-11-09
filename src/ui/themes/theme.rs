@@ -33,6 +33,7 @@ impl Theme {
     }
 }
 
+#[derive(Clone)]
 pub struct Theme {
     pub name: String,
     pub background: Color,

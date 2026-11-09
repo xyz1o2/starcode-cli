@@ -319,6 +319,25 @@ impl PolicyEngine {
                 reason: "tool declares itself read-only".to_string(),
             };
         }
+        // Auto 档的本地白名单**先于** LLM 分类器判定 —— 白名单命中就不再问模型。
+        //
+        // 之前 Auto 分支只有「Bash 查危险模式」一条本地规则，`git status` /
+        // `ls` / `TodoWrite` 这类字面就能确定无害的调用也丢给分类器：等 10 秒
+        // 超时（日志现场：108 次 `classifier timed out`），熔断一跳闸还改成弹框
+        // —— 同一条命令「时而静默放行、时而弹框」，用户看到的就是权限混乱。
+        // Default / AcceptEdits 两档一直在用下面的白名单，Auto 档没有理由更严。
+        //
+        // 白名单口径与 Default 完全一致（`is_safe_query_tool` +
+        // `is_readonly_fs_command`），不含文件编辑 —— 那是 acceptEdits 的增量，
+        // auto 档里写操作仍要过分类器。
+        if self.approval_mode == ApprovalMode::Auto
+            && (crate::types::is_safe_query_tool(tool_name)
+                || crate::types::is_readonly_fs_command(tool_name, args))
+        {
+            return AutoVerdict::Allow {
+                reason: "auto mode: read-only allowlist (no classifier needed)".to_string(),
+            };
+        }
         match self.approval_mode {
             ApprovalMode::Default => {
                 // 默认档位也放行只读命令 —— 对标 Claude Code：
@@ -356,13 +375,9 @@ impl PolicyEngine {
             ApprovalMode::Yolo | ApprovalMode::Plan => AutoVerdict::Undecided,
             ApprovalMode::Auto => {
                 // auto 模式 = 本地护栏 + LLM 分类器（对标 Claude Code yoloClassifier）：
-                // 字面能判的直接判，判不了的问模型，模型也判不出来就问人。
+                // 字面能判的已经在上面的白名单里判掉了（只读工具 / 只读命令），
+                // 这里只处理「字面能判出**危险**」的硬拦截，其余交给模型。
                 match tool_name {
-                    // 只读工具直接放行（0 LLM 开销）
-                    "Read" | "ReadManyFiles" | "Grep" | "Glob" | "LS" | "CodebaseSearch"
-                    | "ToolSearch" | "GetDiagnostics" => AutoVerdict::Allow {
-                        reason: "auto mode: read-only tool".to_string(),
-                    },
                     // Bash 命令：命中危险模式一律拦截（curl|bash / sudo / rm -rf / 等），
                     // 其余交给分类器 —— 「这条命令用户到底要不要」只有模型能判。
                     "Bash" => {

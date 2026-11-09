@@ -158,11 +158,17 @@ impl LlmAutoModeClassifier {
     }
 
     /// 从环境变量读超时：`STAR_AUTO_MODE_CLASSIFIER_TIMEOUT`（秒）。
+    ///
+    /// 默认 2 秒而不是原来的 10 秒 —— 分类是"这条调用危不危险"的粗判，
+    /// 不是完整推理：一次正常的裁决模型 1 秒内就该回话。10 秒意味着 provider
+    /// 慢的时候每次工具调用都白等 10 秒才弹框（现场日志：108 次
+    /// `classifier timed out`，同一条命令因此「时而放行、时而弹框」）。
+    /// 超时竖直收紧后，失灵路径退化成弹框的代价从 10s 降到 2s。
     pub fn timeout_from_env() -> u64 {
         std::env::var("STAR_AUTO_MODE_CLASSIFIER_TIMEOUT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(10)
+            .unwrap_or(2)
     }
 
     /// 构造分类提示词。

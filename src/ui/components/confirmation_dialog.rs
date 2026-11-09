@@ -4,14 +4,47 @@ use ratatui::{
 };
 
 use crate::core::i18n;
+use crate::ui::themes::Theme;
 
-/// Permission dialog colors (matching Claude Code dark theme)
-const PERMISSION_COLOR: Color = Color::Rgb(177, 185, 249); // Light blue-purple
-const SUGGESTION_COLOR: Color = Color::Rgb(177, 185, 249); // Same as permission
-const SUCCESS_COLOR: Color = Color::Rgb(78, 186, 101); // Bright green
-const ERROR_COLOR: Color = Color::Rgb(255, 107, 128); // Bright red
-const INACTIVE_COLOR: Color = Color::Rgb(153, 153, 153); // Light gray
-const SUBTLE_COLOR: Color = Color::Rgb(80, 80, 80); // Dark gray
+/// 确认卡的调色板 —— **从当前主题取色**，不再写死一套 RGB。
+///
+/// 以前这里是一组 Claude Code 暗色主题的硬编码 RGB（紫蓝/亮绿/亮红…），
+/// 用户切到 monokai 等别的主题时，确认卡是屏幕上唯一不换装的组件。
+/// 现在每个 render 函数从 `ChatState.theme_manager` 拿 `Theme`，把六个语义
+/// 槽位（强调 / 成功 / 错误 / 次要 / 弱化 / 更弱）映射到主题字段：
+/// `accent -> primary`、`success -> success`、`error -> error`、
+/// `inactive -> secondary`、`subtle -> inactive`、`dim -> subtle`。
+///
+/// 结构体传参而不是散传六个 `Color`：render 调用处一处 `Palette::of(&theme)`
+/// 即可，将来加槽位不用改所有调用点。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ConfirmPalette {
+    /// 标题、选中项指示 —— 主题强调色。
+    pub accent: Color,
+    /// 放行图标、`$` 提示。
+    pub success: Color,
+    /// 拒绝图标、高风险。
+    pub error: Color,
+    /// 路径、正文 —— 比正文弱一档。
+    pub secondary: Color,
+    /// 风险标签、弱提示。
+    pub dim: Color,
+    /// 分隔线、按键提示 —— 最弱的一档。
+    pub faint: Color,
+}
+
+impl ConfirmPalette {
+    pub(crate) fn of(theme: &Theme) -> Self {
+        Self {
+            accent: theme.primary,
+            success: theme.success,
+            error: theme.error,
+            secondary: theme.secondary,
+            dim: theme.inactive,
+            faint: theme.subtle,
+        }
+    }
+}
 
 fn risk_label(risk: &crate::types::RiskLevel) -> String {
     let shape = match risk {
@@ -33,13 +66,13 @@ fn risk_label(risk: &crate::types::RiskLevel) -> String {
     format!("{} {}", shape, text)
 }
 
-fn risk_color(risk: &crate::types::RiskLevel) -> Color {
+fn risk_color(risk: &crate::types::RiskLevel, palette: &ConfirmPalette) -> Color {
     match risk {
-        crate::types::RiskLevel::Safe => Color::Green,
-        crate::types::RiskLevel::Low => Color::Cyan,
-        crate::types::RiskLevel::Medium => Color::Yellow,
-        crate::types::RiskLevel::High => Color::LightRed,
-        crate::types::RiskLevel::Critical => Color::Red,
+        crate::types::RiskLevel::Safe => palette.success,
+        crate::types::RiskLevel::Low => palette.secondary,
+        crate::types::RiskLevel::Medium => palette.accent,
+        crate::types::RiskLevel::High => palette.error,
+        crate::types::RiskLevel::Critical => palette.error,
     }
 }
 
@@ -108,7 +141,7 @@ fn diff_line_counts(diff: &str, old_lines: usize, new_lines: usize) -> (usize, u
 }
 
 /// 编辑类确认卡的 diff 预览（`+` 绿 / `-` 红 / `@@` 亮），超出上限折叠成一行计数。
-fn render_edit_diff_preview(diff: &str, wrap_width: usize) -> Vec<Line<'static>> {
+fn render_edit_diff_preview(diff: &str, wrap_width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let diff = diff.trim();
     if diff.is_empty() {
         return Vec::new();
@@ -119,20 +152,20 @@ fn render_edit_diff_preview(diff: &str, wrap_width: usize) -> Vec<Line<'static>>
             "  {}",
             i18n::t("ui.confirm.label.diff", "变更预览:", "Diff preview:")
         ),
-        Style::default().fg(INACTIVE_COLOR),
+        Style::default().fg(theme.inactive),
     ))];
 
     let all: Vec<&str> = diff.lines().collect();
     let shown = all.len().min(EDIT_DIFF_PREVIEW_LINES);
     for raw in &all[..shown] {
         let color = if raw.starts_with('+') && !raw.starts_with("+++") {
-            Color::Green
+            theme.diff_added
         } else if raw.starts_with('-') && !raw.starts_with("---") {
-            Color::Red
+            theme.diff_removed
         } else if raw.starts_with("@@") || raw.starts_with("diff --git") {
-            Color::Cyan
+            theme.info
         } else {
-            Color::Gray
+            theme.inactive
         };
         lines.push(Line::from(Span::styled(
             format!("  {}", truncate_str(raw, wrap_width.saturating_sub(4))),
@@ -142,7 +175,7 @@ fn render_edit_diff_preview(diff: &str, wrap_width: usize) -> Vec<Line<'static>>
     if all.len() > shown {
         lines.push(Line::from(Span::styled(
             format!("  … +{} more diff lines", all.len() - shown),
-            Style::default().fg(SUBTLE_COLOR),
+            Style::default().fg(theme.subtle),
         )));
     }
     lines
@@ -207,11 +240,11 @@ async fn build_edit_preview_diff(path: &str, old_str: &str, new_str: &str) -> St
 /// 默认是绿色 ✓（= 放行）。**任何没走到"用户同意"这一步的结局都不能穿绿勾** ——
 /// 审批卡上的 ✓ 只有"已批准"一个读法，被顶掉（superseded）、超时这类"根本没问到"
 /// 的状态如果也画成 ✓，用户回头扫一眼历史就会以为那条命令已经获批了。
-fn outcome_style(outcome: &str) -> (Color, &'static str) {
+fn outcome_style(outcome: &str, palette: &ConfirmPalette) -> (Color, &'static str) {
     let lowered = outcome.to_lowercase();
     // 排队中的请求既不是批准也不是拒绝；用灰色省略号，避免和"已放行"的绿勾混淆。
     if lowered.contains("queued") || outcome.contains("排队") {
-        return (INACTIVE_COLOR, "…");
+        return (palette.secondary, "…");
     }
     let refused = lowered.eq_ignore_ascii_case("cancelled")
         || lowered.contains("cancel")
@@ -221,9 +254,9 @@ fn outcome_style(outcome: &str) -> (Color, &'static str) {
         || outcome.contains("作废")
         || outcome.contains("取代");
     if refused {
-        (ERROR_COLOR, "✗")
+        (palette.error, "✗")
     } else {
-        (SUCCESS_COLOR, "✓")
+        (palette.success, "✓")
     }
 }
 
@@ -235,12 +268,14 @@ pub fn build_confirmation_card_block(
     show_debug: bool,
     feedback_mode: bool,
     feedback: &str,
+    theme: &Theme,
 ) -> Vec<Line<'static>> {
     use crate::types::{ConfirmationDetails, ConfirmationType};
+    let palette = ConfirmPalette::of(theme);
 
     // If already resolved, show outcome (Claude Code style: compact single line)
     if let Some(outcome) = &confirmation.outcome {
-        let (color, icon) = outcome_style(outcome);
+        let (color, icon) = outcome_style(outcome, &palette);
         let detail = match &confirmation.details {
             ConfirmationDetails::EditFile { file_path, .. } => format_display_path(file_path),
             ConfirmationDetails::CreateFile { file_path, .. } => format_display_path(file_path),
@@ -278,7 +313,10 @@ pub fn build_confirmation_card_block(
                 format!("{} ", icon),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("  {}", detail), Style::default().fg(INACTIVE_COLOR)),
+            Span::styled(
+                format!("  {}", detail),
+                Style::default().fg(palette.secondary),
+            ),
         ])];
     }
 
@@ -301,7 +339,7 @@ pub fn build_confirmation_card_block(
     lines.push(Line::from(Span::styled(
         title,
         Style::default()
-            .fg(PERMISSION_COLOR)
+            .fg(palette.accent)
             .add_modifier(Modifier::BOLD),
     )));
 
@@ -309,8 +347,22 @@ pub fn build_confirmation_card_block(
     let sep = "─".repeat(wrap_width.saturating_sub(2));
     lines.push(Line::from(Span::styled(
         sep,
-        Style::default().fg(SUBTLE_COLOR),
+        Style::default().fg(palette.faint),
     )));
+
+    // ── Why asked (reason) ──
+    //
+    // 「这次为什么要问」的一行说明：ask 规则 / 敏感文件 / 兜底保守询问 三种
+    // 弹框在这里分得开 —— 用户头一次能看出这次拦截来自哪一层，而不是把所有
+    // 弹框混成一个「时而问时而不问」的谜。放 `risk` 行之前，先读原因再读风险。
+    if let Some(reason) = &confirmation.reason {
+        if !reason.trim().is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("  ⚡ {}", reason.trim()),
+                Style::default().fg(palette.accent),
+            )));
+        }
+    }
 
     // ── Content (command/file with description) ──
     match &confirmation.operation_type {
@@ -326,15 +378,15 @@ pub fn build_confirmation_card_block(
                 let (added, removed) = diff_line_counts(diff, *old_lines, *new_lines);
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(file_path.clone(), Style::default().fg(Color::Yellow)),
+                    Span::styled(file_path.clone(), Style::default().fg(theme.warning)),
                     Span::styled(
                         format!(" (+{} -{})", added, removed),
-                        Style::default().fg(INACTIVE_COLOR),
+                        Style::default().fg(palette.secondary),
                     ),
                 ]));
                 // 审批前必须看得到将写入什么 —— CC 在这里给完整 diff。
                 // 只给 `path (+N -M)` 的话，用户只能盲批，"要不要看"这个问题就没了。
-                lines.extend(render_edit_diff_preview(diff, wrap_width));
+                lines.extend(render_edit_diff_preview(diff, wrap_width, theme));
             }
         }
         ConfirmationType::ShellCommand => {
@@ -347,8 +399,8 @@ pub fn build_confirmation_card_block(
             {
                 let preview = truncate_str(command, wrap_width.saturating_sub(6) as usize);
                 lines.push(Line::from(vec![
-                    Span::styled("  $ ", Style::default().fg(SUCCESS_COLOR)),
-                    Span::styled(preview, Style::default().fg(Color::White)),
+                    Span::styled("  $ ", Style::default().fg(palette.success)),
+                    Span::styled(preview, Style::default().fg(theme.foreground)),
                 ]));
                 lines.push(Line::from(vec![Span::styled(
                     format!(
@@ -356,7 +408,7 @@ pub fn build_confirmation_card_block(
                         i18n::t("ui.confirm.label.risk", "  风险: ", "  Risk: "),
                         risk_label(estimated_risk)
                     ),
-                    Style::default().fg(risk_color(estimated_risk)),
+                    Style::default().fg(risk_color(estimated_risk, &palette)),
                 )]));
                 // Render diff preview if available
                 if let Some(diff) = diff_preview {
@@ -366,7 +418,7 @@ pub fn build_confirmation_card_block(
                                 "  {}",
                                 i18n::t("ui.confirm.label.diff", "变更预览:", "Diff preview:")
                             ),
-                            Style::default().fg(INACTIVE_COLOR),
+                            Style::default().fg(palette.secondary),
                         )));
                         for diff_line in diff.lines().take(20) {
                             let color = if diff_line.starts_with('+') {
@@ -394,7 +446,7 @@ pub fn build_confirmation_card_block(
             if let ConfirmationDetails::CreateFile { file_path, .. } = &confirmation.details {
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(file_path.clone(), Style::default().fg(Color::Yellow)),
+                    Span::styled(file_path.clone(), Style::default().fg(theme.warning)),
                 ]));
             }
         }
@@ -406,14 +458,17 @@ pub fn build_confirmation_card_block(
             if let ConfirmationDetails::Generic { title, prompt } = &confirmation.details {
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(truncate_str(title, 40), Style::default().fg(Color::White)),
+                    Span::styled(
+                        truncate_str(title, 40),
+                        Style::default().fg(theme.foreground),
+                    ),
                 ]));
                 if !prompt.is_empty() {
                     lines.push(Line::from(vec![
                         Span::styled("  ", Style::default()),
                         Span::styled(
                             truncate_str(prompt, 60),
-                            Style::default().fg(INACTIVE_COLOR),
+                            Style::default().fg(palette.secondary),
                         ),
                     ]));
                 }
@@ -436,31 +491,32 @@ pub fn build_confirmation_card_block(
                     i18n::t("ui.confirm.label.risk", "  风险: ", "  Risk: "),
                     risk_label(&risk)
                 ),
-                Style::default().fg(risk_color(&risk)).add_modifier(
-                    if matches!(
-                        risk,
-                        crate::types::RiskLevel::High | crate::types::RiskLevel::Critical
-                    ) {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    },
-                ),
+                Style::default()
+                    .fg(risk_color(&risk, &palette))
+                    .add_modifier(
+                        if matches!(
+                            risk,
+                            crate::types::RiskLevel::High | crate::types::RiskLevel::Critical
+                        ) {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        },
+                    ),
             )));
         }
     }
 
-    // ── Blank line ──
-    lines.push(Line::from(""));
-
     // ── Question ──
+    //
+    // 不再前置空行；问题行与选项紧挨着标题块，卡片高度省 1-2 行。
     lines.push(Line::from(Span::styled(
         i18n::t(
             "ui.confirm.question.proceed",
             "  是否继续？",
             "  Do you want to proceed?",
         ),
-        Style::default().fg(Color::White),
+        Style::default().fg(theme.foreground),
     )));
 
     // ── Options (Claude Code style) ──
@@ -470,7 +526,7 @@ pub fn build_confirmation_card_block(
             Span::styled(
                 "❯ ",
                 Style::default()
-                    .fg(SUGGESTION_COLOR)
+                    .fg(palette.accent)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
@@ -479,15 +535,19 @@ pub fn build_confirmation_card_block(
         let num = Span::styled(
             format!("{}. ", choice),
             Style::default().fg(if selected {
-                SUGGESTION_COLOR
+                palette.accent
             } else {
-                INACTIVE_COLOR
+                palette.secondary
             }),
         );
         let text = Span::styled(
             label.to_string(),
             Style::default()
-                .fg(if selected { Color::White } else { Color::Gray })
+                .fg(if selected {
+                    theme.foreground
+                } else {
+                    palette.dim
+                })
                 .add_modifier(if selected {
                     Modifier::BOLD
                 } else {
@@ -521,35 +581,41 @@ pub fn build_confirmation_card_block(
     ));
 
     // ── Feedback input (Tab) ──
-    let feedback_prompt = if feedback_mode {
-        "  Feedback (Tab to return): "
-    } else {
-        "  Feedback (Tab to add): "
-    };
-    let feedback_display = if feedback.is_empty() && feedback_mode {
-        "Type feedback…"
-    } else {
-        feedback
-    };
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(
-            feedback_prompt,
-            Style::default().fg(if feedback_mode {
-                SUGGESTION_COLOR
-            } else {
-                INACTIVE_COLOR
-            }),
-        ),
-        Span::styled(
-            feedback_display.to_string(),
-            Style::default().fg(if feedback.is_empty() {
-                INACTIVE_COLOR
-            } else {
-                Color::White
-            }),
-        ),
-    ]));
+    //
+    // 不再常驻：只有进入反馈模式（Tab）或已经打了草稿才渲染这一行。
+    // 一个几乎没人用的输入位在每张确认卡上白占两行，是卡片「重」的一部分；
+    // 需要反馈的用户本来就知道按 Tab（底部提示写明了）。
+    if feedback_mode || !feedback.is_empty() {
+        let feedback_prompt = if feedback_mode {
+            "  Feedback (Tab to return): "
+        } else {
+            "  Feedback (Tab to add): "
+        };
+        let feedback_display = if feedback.is_empty() && feedback_mode {
+            "Type feedback…"
+        } else {
+            feedback
+        };
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                feedback_prompt,
+                Style::default().fg(if feedback_mode {
+                    palette.accent
+                } else {
+                    palette.secondary
+                }),
+            ),
+            Span::styled(
+                feedback_display.to_string(),
+                Style::default().fg(if feedback.is_empty() {
+                    palette.secondary
+                } else {
+                    theme.foreground
+                }),
+            ),
+        ]));
+    }
 
     // ── Explanation section (Ctrl+E) ──
     if show_explanation {
@@ -561,7 +627,7 @@ pub fn build_confirmation_card_block(
                 "  Why is this permission needed?",
             ),
             Style::default()
-                .fg(PERMISSION_COLOR)
+                .fg(palette.accent)
                 .add_modifier(Modifier::BOLD),
         )));
         let explanation = match &confirmation.details {
@@ -603,7 +669,7 @@ pub fn build_confirmation_card_block(
         };
         lines.push(Line::from(Span::styled(
             explanation.to_string(),
-            Style::default().fg(INACTIVE_COLOR),
+            Style::default().fg(palette.secondary),
         )));
     }
 
@@ -613,7 +679,7 @@ pub fn build_confirmation_card_block(
         lines.push(Line::from(Span::styled(
             "  Debug (tool input)",
             Style::default()
-                .fg(PERMISSION_COLOR)
+                .fg(palette.accent)
                 .add_modifier(Modifier::BOLD),
         )));
         let debug_json = match &confirmation.details {
@@ -628,20 +694,23 @@ pub fn build_confirmation_card_block(
         for l in wrap_text(&debug_json, wrap_width.saturating_sub(4)) {
             lines.push(Line::from(Span::styled(
                 format!("  {}", l),
-                Style::default().fg(SUBTLE_COLOR),
+                Style::default().fg(palette.faint),
             )));
         }
     }
 
     // ── Bottom hint ──
+    // 说明行（prompt_reason）与按键提示合并成一段，省一个空行。
+    // 反馈默认隐藏后，按键提示也裁掉 Feedback —— Tab 仍然可用，
+    // 但一行提示里排五个动作已经超出扫视体验，低频动作交给 Ctrl+E 解释。
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         i18n::t(
             "ui.confirm.hint.key_guide",
-            "  Esc 拒绝 · 1-4 选择 · Enter 确认 · Tab 反馈 · Ctrl+E 解释 / Ctrl+D 调试",
-            "  Esc to reject · 1-4 to select · Enter to confirm · Tab feedback · Ctrl+E explain · Ctrl+D debug",
+            "  Esc 拒绝 · 1-4 选择 · Enter 确认 · Ctrl+E/Ctrl+Shift+D 解释/调试",
+            "  Esc to reject · 1-4 to select · Enter to confirm · Ctrl+E/Ctrl+Shift+D explain/debug",
         ),
-        Style::default().fg(SUBTLE_COLOR),
+        Style::default().fg(palette.faint),
     )));
 
     lines
@@ -654,8 +723,10 @@ pub fn build_ask_user_question_card(
     selected_choice: usize,     // 1-based focused option index
     selected_options: &[usize], // selected indices for multi-select
     other_input: &str,          // "Other" text input value
+    theme: &Theme,
 ) -> Vec<Line<'static>> {
     use crate::types::ConfirmationDetails;
+    let palette = ConfirmPalette::of(theme);
 
     // Already resolved — show outcome.
     //
@@ -663,7 +734,7 @@ pub fn build_ask_user_question_card(
     // 这个渲染器没有内容摘要可配，所以整行就只剩一个图标 —— 那正好，
     // 它本来就是「一行摘要」的形状。
     if let Some(outcome) = &confirmation.outcome {
-        let (color, icon) = outcome_style(outcome);
+        let (color, icon) = outcome_style(outcome, &palette);
         return vec![Line::from(vec![Span::styled(
             format!("{} ", icon),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -701,13 +772,13 @@ pub fn build_ask_user_question_card(
         Span::styled(
             "? ",
             Style::default()
-                .fg(SUGGESTION_COLOR)
+                .fg(palette.accent)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("{}{}", header_text, mode_label),
             Style::default()
-                .fg(PERMISSION_COLOR)
+                .fg(palette.accent)
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
@@ -716,7 +787,7 @@ pub fn build_ask_user_question_card(
     let sep = "─".repeat(wrap_width.saturating_sub(2));
     lines.push(Line::from(Span::styled(
         sep,
-        Style::default().fg(SUBTLE_COLOR),
+        Style::default().fg(palette.faint),
     )));
 
     // ── Question text (wrapped) ──
@@ -729,7 +800,7 @@ pub fn build_ask_user_question_card(
         for chunk in wrap_text(line_text, max_line) {
             lines.push(Line::from(vec![
                 Span::styled("  ", Style::default()),
-                Span::styled(chunk, Style::default().fg(Color::White)),
+                Span::styled(chunk, Style::default().fg(theme.foreground)),
             ]));
         }
     }
@@ -749,7 +820,7 @@ pub fn build_ask_user_question_card(
             Span::styled(
                 "❯ ",
                 Style::default()
-                    .fg(SUGGESTION_COLOR)
+                    .fg(palette.accent)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
@@ -758,10 +829,10 @@ pub fn build_ask_user_question_card(
 
         let focus_style = if is_focused {
             Style::default()
-                .fg(Color::White)
+                .fg(theme.foreground)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(palette.dim)
         };
 
         let label_str = label.clone();
@@ -782,9 +853,9 @@ pub fn build_ask_user_question_card(
 
         if !desc.is_empty() {
             let desc_style = if is_focused {
-                Style::default().fg(INACTIVE_COLOR)
+                Style::default().fg(palette.secondary)
             } else {
-                Style::default().fg(SUBTLE_COLOR)
+                Style::default().fg(palette.faint)
             };
             let desc_str = desc.clone();
             for chunk in wrap_text(&desc_str, max_desc_width) {
@@ -802,7 +873,7 @@ pub fn build_ask_user_question_card(
         Span::styled(
             "❯ ",
             Style::default()
-                .fg(SUGGESTION_COLOR)
+                .fg(palette.accent)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
@@ -810,10 +881,10 @@ pub fn build_ask_user_question_card(
     };
     let other_style = if is_other_focused {
         Style::default()
-            .fg(Color::White)
+            .fg(theme.foreground)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(palette.dim)
     };
 
     lines.push(Line::from(""));
@@ -828,9 +899,9 @@ pub fn build_ask_user_question_card(
         Span::styled(
             other_display,
             if other_input_owned.is_empty() {
-                Style::default().fg(SUBTLE_COLOR)
+                Style::default().fg(palette.faint)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme.foreground)
             },
         ),
     ]));
@@ -852,7 +923,7 @@ pub fn build_ask_user_question_card(
     };
     lines.push(Line::from(Span::styled(
         format!("  {}", help),
-        Style::default().fg(SUBTLE_COLOR),
+        Style::default().fg(palette.faint),
     )));
 
     lines
@@ -972,6 +1043,7 @@ pub async fn build_confirmation_from_tool_call(
                 },
                 is_dangerous: false,
                 outcome: None,
+                reason: None,
             }
         }
         "Edit" => {
@@ -995,6 +1067,7 @@ pub async fn build_confirmation_from_tool_call(
                 },
                 is_dangerous: false,
                 outcome: None,
+                reason: None,
             }
         }
         "SmartEdit" => {
@@ -1018,6 +1091,7 @@ pub async fn build_confirmation_from_tool_call(
                 },
                 is_dangerous: false,
                 outcome: None,
+                reason: None,
             }
         }
         "save_memory" => {
@@ -1081,6 +1155,7 @@ pub async fn build_confirmation_from_tool_call(
                 },
                 is_dangerous: false,
                 outcome: None,
+                reason: None,
             }
         }
         "Bash" | "shell" => {
@@ -1139,6 +1214,7 @@ pub async fn build_confirmation_from_tool_call(
                 },
                 is_dangerous,
                 outcome: None,
+                reason: None,
             }
         }
         "Write" => {
@@ -1168,6 +1244,7 @@ pub async fn build_confirmation_from_tool_call(
                 },
                 is_dangerous: false,
                 outcome: None,
+                reason: None,
             }
         }
         "Read" => {
@@ -1209,6 +1286,7 @@ pub async fn build_confirmation_from_tool_call(
                 },
                 is_dangerous: false,
                 outcome: None,
+                reason: None,
             }
         }
         _ => crate::types::ToolConfirmation {
@@ -1233,6 +1311,7 @@ pub async fn build_confirmation_from_tool_call(
             },
             is_dangerous: false,
             outcome: None,
+            reason: None,
         },
     }
 }
@@ -1249,6 +1328,7 @@ mod tests {
             details,
             is_dangerous: false,
             outcome: None,
+            reason: None,
         }
     }
 
@@ -1318,7 +1398,7 @@ mod tests {
     #[test]
     fn card_renders_exactly_one_risk_line() {
         let count_risk = |c: &ToolConfirmation| {
-            build_confirmation_card_block(c, 60, 0, false, false, false, "")
+            build_confirmation_card_block(c, 60, 0, false, false, false, "", &test_theme())
                 .iter()
                 .filter(|l| {
                     let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -1367,6 +1447,7 @@ mod tests {
             false,
             true,
             "Use the safe path",
+            &test_theme(),
         );
         let rendered: String = lines
             .iter()
@@ -1375,6 +1456,97 @@ mod tests {
             .collect();
 
         assert!(rendered.contains("Feedback (Tab to return): Use the safe path"));
-        assert!(rendered.contains("Tab feedback"));
+        assert!(rendered.contains("Ctrl+E"));
+    }
+
+    /// 反馈行不再常驻：没进反馈模式、也没有草稿时不渲染。
+    #[test]
+    fn feedback_row_is_hidden_until_needed() {
+        let confirmation = conf(
+            ConfirmationType::ShellCommand,
+            ConfirmationDetails::ShellCommand {
+                command: "ls".to_string(),
+                working_dir: ".".to_string(),
+                estimated_risk: RiskLevel::Low,
+                diff_preview: None,
+            },
+        );
+        let rendered: String = build_confirmation_card_block(
+            &confirmation,
+            80,
+            1,
+            false,
+            false,
+            false,
+            "",
+            &test_theme(),
+        )
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect();
+
+        assert!(
+            !rendered.contains("Feedback"),
+            "空闲态不该出现 Feedback 行：{rendered}"
+        );
+    }
+
+    /// 「这次为什么要问」要上卡 —— ask 规则 / 兜底询问的区分靠它。
+    #[test]
+    fn reason_line_renders_when_present() {
+        let mut confirmation = conf(
+            ConfirmationType::ShellCommand,
+            ConfirmationDetails::ShellCommand {
+                command: "cargo publish".to_string(),
+                working_dir: ".".to_string(),
+                estimated_risk: RiskLevel::Medium,
+                diff_preview: None,
+            },
+        );
+        let without = build_confirmation_card_block(
+            &confirmation,
+            80,
+            1,
+            false,
+            false,
+            false,
+            "",
+            &test_theme(),
+        )
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+        assert!(
+            !without.contains("ask rule"),
+            "reason 为 None 时不得出现原因行：{without}"
+        );
+
+        confirmation.reason =
+            Some("Your permission settings say `ask` for this tool — asked every time".to_string());
+        let with = build_confirmation_card_block(
+            &confirmation,
+            80,
+            1,
+            false,
+            false,
+            false,
+            "",
+            &test_theme(),
+        )
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+        assert!(
+            with.contains("ask` for this tool") || with.contains("ask\" for this tool"),
+            "reason 出现时必须渲染出原文：{with}"
+        );
+    }
+
+    /// 测试用主题 —— `ThemeManager::new()` 是纯构造（13 套硬编码预设），无需固定。
+    fn test_theme() -> crate::ui::themes::Theme {
+        crate::ui::themes::ThemeManager::new().current().clone()
     }
 }

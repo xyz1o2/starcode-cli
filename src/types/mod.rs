@@ -1291,6 +1291,13 @@ pub struct ToolConfirmation {
     pub is_dangerous: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// **为什么这次被问** —— 卡片上的一行说明，回应「有时候要同意有时候不用」
+    /// 的困惑：用户看得出这次拦截来自哪一层，才不会把几种弹框混成一个谜。
+    ///
+    /// 由 `pass_gate` 按 `card_source` 填人话，`confirmation_bridge` 透传；
+    /// `None` = 工具自带确认卡（它自己的 prompt 已经解释过了）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1385,6 +1392,11 @@ pub enum ToolConfirmationOutcome {
 
 /// 只读"查询类"工具：命中后可免确认直接执行（对标 Claude Code 的只读工具集）。
 ///
+/// 名单里也收 **会话内状态管理** 工具（`TodoWrite` / `TaskUpdate` 这族）：
+/// 它们改的是进程内任务清单，不碰文件系统、不走网络 —— 每次都被弹确认
+/// 会让「记个待办」这种最小操作也要用户点头（日志现场：TodoWrite/TaskUpdate
+/// 合计被问了近 20 次，一半还是分类器超时后才问出来的）。
+///
 /// 名字先归一到**注册名**再比对 —— 策略引擎拿到的是模型原样发出的名字
 /// （`read` / `bash` 这类全小写写法都出现过），不归一的话只读工具会因为
 /// 大小写不同而被当成"要确认的工具"。
@@ -1402,6 +1414,10 @@ pub fn is_safe_query_tool(tool_name: &str) -> bool {
             | "ToolSearch"
             | "GhPrComments"
             | "TodoWrite"
+            | "TaskGet"
+            | "TaskList"
+            | "TaskUpdate"
+            | "TaskOutput"
             | "McpListServers"
             | "McpListTools"
             | "McpSearchTools"

@@ -69,6 +69,9 @@ pub async fn relay_confirmation_bus_message(
             }
 
             confirmation.tool_name = req.tool_call.name.clone();
+            // 「这次为什么要问」的一行说明 —— 由 pass_gate 按卡片来源填，
+            // 只透传不加工。工具自带的卡为 None（它自己的 prompt 已解释）。
+            confirmation.reason = req.reason.clone();
             let _ = tx
                 .send(StreamMessage::ToolConfirmationRequest {
                     message_id,
@@ -182,5 +185,6 @@ fn build_ask_user_question_confirmation(
         },
         is_dangerous: false,
         outcome: None,
+        reason: None,
     }
 }

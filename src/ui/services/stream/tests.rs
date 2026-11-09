@@ -1095,6 +1095,7 @@ async fn confirmation_feedback_draft_resets_for_new_request_and_matching_result(
         },
         is_dangerous: false,
         outcome: None,
+        reason: None,
     };
 
     handle_stream_update(
@@ -1419,6 +1420,7 @@ fn shell_confirmation(command: &str) -> crate::types::ToolConfirmation {
         },
         is_dangerous: true,
         outcome: None,
+        reason: None,
     }
 }
 

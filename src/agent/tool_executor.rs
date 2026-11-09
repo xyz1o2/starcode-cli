@@ -114,6 +114,33 @@ struct GateInput<'a> {
     abort_signal: Option<&'a tokio_util::sync::CancellationToken>,
 }
 
+/// 「这次为什么要问」的一行人话 —— 从 `pass_gate` 的卡片来源翻译成用户视角。
+///
+/// 在确认卡上渲染出来。没有它，`ask` 规则命中、敏感文件门闸、兜底保守询问
+/// 三种弹框长得一样；「有时候要同意有时候不用」的困惑一半来自这里 —— 用户
+/// 分不清这次拦截来自哪一层。工具自带的卡（`tool`）已有自己的解释，返回
+/// `None` 不重复。
+fn build_prompt_reason(
+    card_source: &str,
+    policy_ask: bool,
+    sensitive_hit: Option<&str>,
+) -> Option<String> {
+    if let Some(hit) = sensitive_hit {
+        return Some(format!(
+            "Sensitive file ({hit}) — this check asks every time, even after an approval"
+        ));
+    }
+    match card_source {
+        "ask_rule" => {
+            Some("Your permission settings say `ask` for this tool — asked every time".to_string())
+        }
+        "fallback_default" if policy_ask => Some(
+            "No allow rule covers this tool — asking per the conservative fallback".to_string(),
+        ),
+        _ => None,
+    }
+}
+
 /// `ask` 规则命中、但工具自身没有确认要求时补出来的确认卡片。
 ///
 /// 用户在 settings.json 里写 `ask` 就是想要一次"我看看再决定"的机会，
@@ -721,6 +748,9 @@ impl ToolExecutor {
             server_name: None,
             title: Some(details.title),
             prompt: Some(details.prompt),
+            // 「这次为什么要问」——来源在下面填。工具自带的卡（source=tool）
+            // 自己的 prompt 已经解释过了，不再重复一行。
+            reason: build_prompt_reason(card_source, requires_prompt, sensitive_hit),
             // UI 手上只有模型侧的 tool_call.id，靠它把"这张卡"和稍后到达的
             // ToolResult 对上；不上的话卡片收不到自己那次调用的结局。
             originating_tool_call_id: Some(originating_tool_call_id.to_string()),

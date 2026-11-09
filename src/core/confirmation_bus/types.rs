@@ -65,6 +65,14 @@ pub struct ToolConfirmationRequest {
     pub server_name: Option<String>,
     pub title: Option<String>,
     pub prompt: Option<String>,
+    /// **这次为什么要问**（人话一行），由 `pass_gate` 按 `card_source` 填。
+    ///
+    /// 三种来源的文案不同：`ask_rule`（用户写下的 ask 规则）、
+    /// `sensitive_file`（敏感文件每次必问）、`fallback_default`（没有规则
+    /// 命中，保守起见）。UI 在确认卡上把这一行渲染出来 —— 用户看得出这次
+    /// 拦截来自哪一层，「有时候要同意有时候不用」的困惑才有着落。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// 发起这次确认的**模型侧** tool_call id。
     ///
     /// `correlation_id` 是 bus 生成的 UUID，只有等答复的那一方认它；UI 拿到
