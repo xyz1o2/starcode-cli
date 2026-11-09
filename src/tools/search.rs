@@ -777,6 +777,11 @@ impl BaseDeclarativeTool for SearchTool {
             global_state: self.global_state.clone(),
         }))
     }
+
+    // ripgrep 检索，纯读。
+    fn is_read_only(&self) -> bool {
+        true
+    }
 }
 
 struct SearchToolInvocation {

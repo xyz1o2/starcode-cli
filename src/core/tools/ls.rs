@@ -152,6 +152,10 @@ impl BaseDeclarativeTool for ListDirTool {
             params,
         }))
     }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
 }
 
 impl ListDirTool {

@@ -480,6 +480,12 @@ impl BaseDeclarativeTool for ProjectMapTool {
         let params: ProjectMapParams = serde_json::from_value(params)?;
         Ok(Box::new(ProjectMapInvocation { params }))
     }
+
+    // 只读，但会写 `.star/context/project_map_cache.json` 磁盘缓存 ——
+    // 那是实现对自身性能的内部簿记，不是对用户项目的改动（RepoMap 同判）。
+    fn is_read_only(&self) -> bool {
+        true
+    }
 }
 
 fn generate_project_map(

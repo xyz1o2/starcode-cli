@@ -306,6 +306,10 @@ impl BaseDeclarativeTool for NotebookReadTool {
             self.global_state.clone(),
         )))
     }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

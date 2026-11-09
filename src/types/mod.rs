@@ -1458,6 +1458,13 @@ pub fn is_safe_query_tool(tool_name: &str) -> bool {
             | "McpSearchTools"
             | "McpToolInfo"
             | "McpRefresh"
+            // 资源与提示词四件：列/读远端服务器暴露的静态内容，纯读
+            // （McpListResources / McpReadResource 的实现层已是 `is_read_only
+            // == true`，这里同步口径，让 Plan 档与 Auto 本地白名单同样认得）。
+            | "McpListResources"
+            | "McpReadResource"
+            | "McpListPrompts"
+            | "McpGetPrompt"
             // `GetDiagnostics` 只跑 `cargo check` / `eslint` / `pylint`，纯读不写任何状态，
             // 只是把编译错误和 lint 警告收集一遍——每调用一次弹一次确认会让这个工具形同虚设。
             | "GetDiagnostics"

@@ -481,6 +481,196 @@ impl ToolExecutor {
     /// 只有两种结局，**没有第三种**。尤其没有"等太久了就当拒绝"：等待时长由
     /// 用户决定，不由计时器决定（真正的等待在 [`MessageBus::await_tool_decision`]，
     /// 它没有超时）。
+    ///
+    /// registry 之外的工具（MCP 管理工具 / `mcp__<server>__<tool>` 动态工具）
+    /// 的门禁 —— 与 [`Self::pass_gate`] 平级，但走的是轻量路径：没有工具实体
+    /// （`should_confirm_execute` / `permission_cache_identity` 都拿不到），
+    /// 只做「策略 verdict + 用户确认」两步。
+    ///
+    /// 之前这两个分支完全不设门 —— `McpRestartServer`（重开 server 连接）和
+    /// 任意远端 `mcp__` 工具都是一声不吭直接执行的。管理工具里多数是
+    /// 只读（列表/读资源），靠 `is_tool_read_only` 的硬编码名单放行；剩下的
+    /// （Restart / 动态工具）每次都问。会话授权（「本会话允许」）对动态工具
+    /// 按签名记录 —— 用户对同一个 server+tool 点过「总是允许」后就不再重复问。
+    async fn pass_gate_registryless(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        originating_tool_call_id: &str,
+        abort_signal: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Gate {
+        // 只读硬编码名单命中 → 策略免问。`read_only: Some(true/false)` 告知
+        // 策略引擎这个工具的性质（`is_tool_read_only` 对不认识的名字兜底 false。
+        let read_only = Self::is_tool_read_only_static(tool_name);
+
+        let Some(bus) = self.message_bus.clone() else {
+            // 没有总线（legacy/test 模式）：没人能问，也没人能拒。
+            return Gate::Open;
+        };
+
+        let mut requires_prompt = false;
+        let mut approved = false;
+
+        let check = bus
+            .check_tool_policy(
+                &FunctionCall {
+                    name: tool_name.to_string(),
+                    args: Some(args.clone()),
+                    read_only: Some(read_only),
+                },
+                None,
+            )
+            .await;
+
+        match check.decision {
+            PolicyDecision::Deny | PolicyDecision::DenyWithReason(_) => {
+                let reason = match check.decision {
+                    PolicyDecision::DenyWithReason(r) => r,
+                    _ => "denied by policy".to_string(),
+                };
+                Self::publish_policy_rejection(&bus, tool_name, args).await;
+                crate::agent::hooks::run_permission_denied_hook(
+                    &crate::types::StarToolCall {
+                        id: originating_tool_call_id.to_string(),
+                        call_type: "function".to_string(),
+                        function: crate::types::StarToolCallFunction {
+                            name: tool_name.to_string(),
+                            arguments: args.to_string(),
+                        },
+                    },
+                    &reason,
+                )
+                .await;
+                return Gate::Closed(format!("Tool execution denied: {}", reason));
+            }
+            PolicyDecision::Allow => approved = true,
+            PolicyDecision::AskUser => requires_prompt = true,
+        }
+
+        // 敏感文件门闸对 MCP 工具不适用（args 里没有本地路径），跳过。
+        //
+        // 会话/持久授权读回：registryless 工具没有 identity，按工具名记。
+        if !requires_prompt {
+            let permission_hit = self
+                .permission_manager
+                .check_allowed_with_identity(tool_name, args, None);
+            if permission_hit != PermissionHit::None {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "✅ Permission: Allowing {} without prompt (registryless gate)",
+                    tool_name
+                ));
+                approved = true;
+            }
+        }
+
+        if approved {
+            return Gate::Open;
+        }
+
+        if !requires_prompt {
+            return Gate::Open;
+        }
+
+        // 用户确认卡片：默认兜底文案（没有规则可指）。
+        let details = default_confirmation_details(tool_name, args);
+        crate::utils::logging::append_debug_log_line(&format!(
+            "🔔 Asking for approval: {} (source=fallback_default, registryless)",
+            tool_name
+        ));
+
+        crate::agent::hooks::run_permission_request_hook(
+            &crate::types::StarToolCall {
+                id: originating_tool_call_id.to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::StarToolCallFunction {
+                    name: tool_name.to_string(),
+                    arguments: args.to_string(),
+                },
+            },
+            "fallback_default",
+        )
+        .await;
+
+        let request = ToolConfirmationRequest {
+            message_type: MessageBusType::ToolConfirmationRequest,
+            tool_call: FunctionCall {
+                name: tool_name.to_string(),
+                args: Some(args.clone()),
+                read_only: Some(read_only),
+            },
+            correlation_id: String::new(),
+            server_name: None,
+            title: Some(details.title),
+            prompt: Some(details.prompt),
+            reason: Some(
+                "No allow rule covers this tool — asking per the conservative fallback".to_string(),
+            ),
+            originating_tool_call_id: Some(originating_tool_call_id.to_string()),
+        };
+
+        let on_confirm = details.on_confirm.clone();
+        let response = match bus.await_tool_decision(request, abort_signal).await {
+            Ok(response) => response,
+            Err(e) => return Gate::Closed(e.to_string()),
+        };
+
+        if !response.confirmed {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "🚫 Approval declined for {} (registryless gate)",
+                tool_name
+            ));
+            return Gate::Closed(format!(
+                "The user declined to run `{}`. Do not retry the same call — say what you wanted \
+                 to do, or ask the user how to proceed.",
+                tool_name
+            ));
+        }
+
+        // 授权落库：没有工具实体，`normalize_confirmation_outcome` 没东西可归一，
+        // outcome 原样生效。敏感文件门闸不存在，`sensitive_gated` 恒 false。
+        let requested_outcome = response
+            .outcome
+            .clone()
+            .unwrap_or(crate::types::ToolConfirmationOutcome::ProceedOnce);
+        on_confirm(requested_outcome.clone(), response.feedback.clone());
+        match requested_outcome {
+            crate::types::ToolConfirmationOutcome::AllowSession => {
+                self.permission_manager
+                    .allow_tool_session_with_identity(tool_name, None);
+            }
+            crate::types::ToolConfirmationOutcome::ProceedAlways => {
+                self.permission_manager
+                    .allow_action_with_identity(tool_name, args, None);
+            }
+            crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave => {
+                self.permission_manager
+                    .allow_tool_persisted_with_identity(tool_name, None);
+            }
+            _ => {}
+        }
+        Gate::Open
+    }
+
+    /// registry 之外的只读判定（不持有 ToolExecutor 引用的静态版本）。
+    fn is_tool_read_only_static(name: &str) -> bool {
+        let canonical = Self::canonical_tool_name(name);
+        let name = canonical.as_str();
+        matches!(
+            name,
+            "McpListServers"
+                | "McpListTools"
+                | "McpToolInfo"
+                | "McpSearchTools"
+                | "McpListResources"
+                | "McpReadResource"
+                | "McpListPrompts"
+                | "McpGetPrompt"
+                | "McpRefresh"
+        )
+    }
+
+    /// 门禁原路径：registry 里的工具走这里（有工具实体可问
+    /// `should_confirm_execute` / 能落 permissions identity）。
     async fn pass_gate(&self, input: GateInput<'_>) -> Gate {
         let GateInput {
             tool_name,
@@ -1202,10 +1392,23 @@ impl ToolExecutor {
                 }
                 Err(e) => Self::error_result(e),
             }
-        } else if is_mcp_management_tool(name) {
-            execute_mcp_management_tool(&self.tool_registry, name, &args).await
-        } else if name.starts_with("mcp__") {
-            execute_mcp_dynamic_tool(&self.tool_registry, name, &args).await
+        } else if is_mcp_management_tool(name) || name.starts_with("mcp__") {
+            // registry 之外的工具没有工具实体，但门禁不能缺位：
+            // McpRestartServer（重开连接）与任意远端 mcp__ 工此前一声不吭
+            // 直跑。只读管理工具（is_tool_read_only 名单）照常放行，其余
+            // 走与 pass_gate 同一套「策略 verdict + 用户确认」。
+            match self
+                .pass_gate_registryless(name, &args, &tool_call.id, abort_signal.as_ref())
+                .await
+            {
+                Gate::Open => {}
+                Gate::Closed(reason) => return Self::error_result(reason.into()),
+            }
+            if is_mcp_management_tool(name) {
+                execute_mcp_management_tool(&self.tool_registry, name, &args).await
+            } else {
+                execute_mcp_dynamic_tool(&self.tool_registry, name, &args).await
+            }
         } else {
             Self::error_result(format!("Unknown tool: {}", name).into())
         };
@@ -1355,9 +1558,22 @@ impl ToolExecutor {
     pub fn is_tool_read_only(&self, name: &str) -> bool {
         let canonical_name = Self::canonical_tool_name(name);
         let name = canonical_name.as_str();
+        // MCP 管理工具不在 registry（`execute_mcp_management_tool` 直跑），
+        // registry 查不到，名单就是它们唯一的只读声明。写家当的
+        // `McpRestartServer` 故意不在名单里：重开一个 server 连接不是只读。
+        // `McpRefresh` 会重建内部工具缓存（`is_safe_query_tool` 已放行，
+        // 两处口径保持一致），但不重开单个 server —— 那是 Restart 的领地。
         if matches!(
             name,
-            "McpListServers" | "McpListTools" | "McpToolInfo" | "McpSearchTools"
+            "McpListServers"
+                | "McpListTools"
+                | "McpToolInfo"
+                | "McpSearchTools"
+                | "McpListResources"
+                | "McpReadResource"
+                | "McpListPrompts"
+                | "McpGetPrompt"
+                | "McpRefresh"
         ) {
             return true;
         }

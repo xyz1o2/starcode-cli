@@ -463,9 +463,12 @@ pub fn find_nearest_existing_star_dir(start: &Path) -> Option<PathBuf> {
 ///
 /// 授权的爆炸半径必须是当前项目，所以这里把全局目录排除掉：找不到项目自己的
 /// `.star` 就用 `start` 本身，让项目在自己的目录下建一个。
+///
+/// 全局目录的口径**只有一份**：`Storage::global_star_dir()` —— 它同时处理
+/// `STAR_CONFIG_DIR` 重定向，这里不要自己再拼 `~/.star`。
 pub fn find_nearest_project_star_dir(start: &Path) -> Option<PathBuf> {
-    let global = dirs::home_dir().map(|home| home.join(STAR_DIR));
-    find_nearest_existing_star_dir(start).filter(|found| Some(found) != global.as_ref())
+    let global = crate::core::config::storage::Storage::global_star_dir();
+    find_nearest_existing_star_dir(start).filter(|found| Some(found) != Some(&global))
 }
 
 pub fn current_project_star_dir() -> PathBuf {

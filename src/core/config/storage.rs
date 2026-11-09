@@ -26,7 +26,30 @@ impl Storage {
         Self { target_dir }
     }
 
+    /// 全局配置目录。
+    ///
+    /// 设了 `STAR_CONFIG_DIR` 环境变量时整体搬迁到这里（对标 Claude Code 的
+    /// `CLAUDE_CONFIG_DIR`：settings、model cache、OAuth、commands/skills 等
+    /// 所有全局层文件一起走），为空或未设置时回落 `~/.star`。
+    ///
+    /// 只影响全局层：项目自己的 `.star` 由 `find_nearest_project_star_dir`
+    /// 从工作目录上溯发现，与该变量无关。它排除全局目录的判断也调用本函数，
+    /// 所以重定向后「项目状态不认领全局目录」的语义仍然成立。
     pub fn global_star_dir() -> PathBuf {
+        // 非空且非纯空白才算数：`STAR_CONFIG_DIR=""` 视为未设置。
+        if let Some(dir) = env::var_os("STAR_CONFIG_DIR")
+            .filter(|value| !value.is_empty() && !value.to_string_lossy().trim().is_empty())
+        {
+            let configured = PathBuf::from(&dir);
+            if configured.is_absolute() {
+                return configured;
+            }
+            // 相对路径按当前工作目录解析后固定成绝对路径，避免后续
+            // `~/.starcode` 之类基于它的派生路径随 CWD 漂移。
+            return env::current_dir()
+                .map(|cwd| cwd.join(&configured))
+                .unwrap_or(configured);
+        }
         if let Some(home) = home_dir() {
             home.join(STAR_DIR)
         } else {

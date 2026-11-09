@@ -171,6 +171,11 @@ impl BaseDeclarativeTool for LspTool {
             tool: self.clone_box(),
         }))
     }
+
+    // 全部动作都是查询（diagnostics/definition/references/hover/…），无写入。
+    fn is_read_only(&self) -> bool {
+        true
+    }
 }
 
 impl LspTool {

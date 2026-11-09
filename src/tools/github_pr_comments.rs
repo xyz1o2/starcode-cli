@@ -176,6 +176,11 @@ impl BaseDeclarativeTool for GhPrCommentsTool {
             params,
         }))
     }
+
+    // 只跑 `gh pr view` 拉评论，纯读。
+    fn is_read_only(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

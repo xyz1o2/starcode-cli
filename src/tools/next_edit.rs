@@ -124,6 +124,11 @@ impl BaseDeclarativeTool for NextEditTool {
         let params: NextEditParams = serde_json::from_value(params)?;
         Ok(Box::new(NextEditInvocation { params }))
     }
+
+    // 纯分析：rg 找引用 + 读文件，不改任何磁盘状态。
+    fn is_read_only(&self) -> bool {
+        true
+    }
 }
 
 async fn analyze_impact(

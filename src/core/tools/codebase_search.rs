@@ -1405,38 +1405,42 @@ fn search_codebase_with_limits(
     let diagnostics = engine.diagnosis_from_terms(&engine.extract_base_terms(query));
 
     // ── Format Output ────────────────────────────────────────────────────────
+    //
+    // 头部只保留**有信息量的行**：命中数与异常态（索引过期/被截断）。RRF 参数、
+    // 索引统计这类恒定元数据每查都一样（现场：`Search: RRF fusion (K=60) ·
+    // expanded + exact · reranked (5)` 十次查询九次一字不差），喂给模型纯属
+    // 重复 token —— 正常路径一行头部 + 结果正文就够了。
     let mut output = String::new();
     output.push_str(&format!(
-        "Semantic Search Results for '{}' (Top {})\nRoot: {}\n",
+        "Ranked results for '{}' — {} file(s):\n",
         query,
         reranked.len(),
-        root.display(),
     ));
     if matches!(source, EngineSource::Stale) {
         output.push_str(
             "Index: serving previous revision — files changed since; rebuild running in background (results may be slightly stale)\n",
         );
     }
-    if was_cached {
-        output.push_str("Index: cached (no files changed)\n");
-    } else if !matches!(source, EngineSource::Stale) {
-        output.push_str(&format!(
-            "Indexed files: {} / scanned text files: {} / skipped large files: {} / bytes: {}\n",
-            stats.indexed_files,
-            stats.scanned_text_files,
-            stats.skipped_large_files,
-            stats.total_bytes
-        ));
-    }
-    output.push_str(&format!(
-        "Search: RRF fusion (K=60) · expanded + exact · reranked ({})\n\n",
-        reranked.len()
-    ));
     if stats.truncated {
         output.push_str(&format!(
-            "Note: search was capped for responsiveness (max_files={}, max_total_bytes={}).\n\n",
+            "Note: search was capped for responsiveness (max_files={}, max_total_bytes={}).\n",
             build_limits.max_files, build_limits.max_total_bytes
         ));
+    }
+    if reranked.is_empty() {
+        // 缓存状态诊断只在「没搜到」时才有价值——有结果时用户不关心索引新鲜度。
+        if was_cached {
+            output.push_str("Index: cached (no files changed)\n");
+        } else if !matches!(source, EngineSource::Stale) {
+            output.push_str(&format!(
+                "Indexed files: {} / scanned text files: {} / skipped large files: {} / bytes: {}\n",
+                stats.indexed_files,
+                stats.scanned_text_files,
+                stats.skipped_large_files,
+                stats.total_bytes
+            ));
+        }
+        output.push('\n');
     }
 
     // ── 空结果诊断 ─────────────────────────────────────────────────────────────
@@ -1486,6 +1490,8 @@ fn search_codebase_with_limits(
     // ── 有结果：正常渲染 ────────────────────────────────────────────────────────
     for r in &reranked {
         let c = &r.candidate;
+        // 元数据行按有无内容输出：Matched terms / Signals 空的时候不再各占
+        // 一行 "Matched terms: " 空壳（把非空的 and/in 这类词显示出来更吵）。
         output.push_str(&format!(
             "File: {} (Score: {:.2}, Lines: {}-{})\n",
             c.file_path, r.final_score, c.start_line, c.end_line

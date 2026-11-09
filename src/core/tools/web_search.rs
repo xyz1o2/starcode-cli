@@ -791,6 +791,11 @@ impl BaseDeclarativeTool for WebSearchTool {
         Kind::Search
     }
 
+    // 网络只读：搜索不改本地任何状态（与 WebFetch 同判）。
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn create_invocation(
         &self,
         params: serde_json::Value,

@@ -370,6 +370,69 @@ fn summarize_object_inline(obj: &serde_json::Map<String, serde_json::Value>) -> 
     parts.join(", ")
 }
 
+/// MCP 动态工具调用行的参数摘要（对标 CC 的 MCP 工具展示：只亮出"调什么"）。
+///
+/// 外部 server 的参数名没有规范，但常见的"主谓键"就那几个：query / url /
+/// path / tool_name / prompt / id / uri / repo / pr。命中其一 → 调用行直显
+/// 值；字符串值偏长（正文类参数）截断进 extra_info。一个都不命中 → 参数
+/// 压成 `{N fields}`，完整内容留给结果块和展开态 —— 键值倾倒一行铺满屏
+/// 在这里只制造噪音。
+fn summarize_mcp_args(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    extra_info: &mut Vec<String>,
+    detail_lim: usize,
+) -> String {
+    // 值得直接上调用行的键，按常见度排序。
+    const PRIMARY_KEYS: &[&str] = &[
+        "query",
+        "q",
+        "url",
+        "uri",
+        "path",
+        "file_path",
+        "tool",
+        "tool_name",
+        "name",
+        "repo",
+        "pr",
+        "pr_number",
+        "id",
+        "symbol",
+        "sql",
+        "command",
+    ];
+    for key in PRIMARY_KEYS {
+        if let Some(v) = obj.get(*key) {
+            match v {
+                serde_json::Value::String(s) => {
+                    let s = s.trim();
+                    // 正文类长参数：调用行放前视短摘要，全文进 extra_info。
+                    if s.chars().count() > 80 {
+                        if let Some(rest) = obj
+                            .iter()
+                            .find(|(k, _)| *k != *key)
+                            .and_then(|(_, v)| v.as_str())
+                        {
+                            extra_info.push(truncate_chars_with_ellipsis(rest, detail_lim));
+                        }
+                        return truncate_chars_with_ellipsis(s, 60);
+                    }
+                    return s.to_string();
+                }
+                serde_json::Value::Number(n) => return n.to_string(),
+                _ => {}
+            }
+        }
+    }
+    // 没有可直显的键：参数量少时退回通用倾倒（两三个键还是可读的），
+    // 多了就只要张数。
+    if obj.len() <= 3 {
+        summarize_object_inline(obj)
+    } else {
+        format!("{{{} fields}}", obj.len())
+    }
+}
+
 fn build_tool_argument_display(
     tc: &crate::types::StarToolCall,
     verbose: bool,
@@ -548,16 +611,18 @@ fn build_tool_argument_display(
         "CodeGraph" => get_str(&["symbol"])
             .map(|symbol| truncate_chars_with_ellipsis(&symbol, 40))
             .unwrap_or_default(),
-        // MCP：`mcp__<server>__<tool>`，参数结构由外部 server 决定，
-        // 通用倾倒对它是唯一合理的选择，但 server 名值得单独标出来 ——
-        // 用户判断"这次调用可不可信"看的就是它。
+        // MCP：`mcp__<server>__<tool>`，参数结构由外部 server 决定。
+        // 参数的风格千奇百怪，但"这行在调什么"的答案几乎总是同一类键
+        // （query/url/path/tool_name），识别得出来就直显值 + 内容摘要进
+        // extra_info；识别不出来再退回通用倾倒 —— 全部键值铺一行，
+        // 大 payload 的调用行会占满屏。
         _ if name.starts_with("mcp__") => {
             // 拆名走统一入口：插件 server 要显示冒号还原后的注册键
             // （`plugin:exa:exa`），显示原始段会与管理器里的名字对不上。
             if let Some((server, _)) = crate::core::mcp::split_mcp_tool_name(name) {
                 extra_info.push(format!("server: {server}"));
             }
-            summarize_object_inline(obj)
+            summarize_mcp_args(obj, &mut extra_info, lim(160))
         }
         _ => summarize_object_inline(obj),
     };
@@ -1052,6 +1117,58 @@ fn render_rich_tool_content(
             }
         }
 
+        // MCP 动态工具（mcp__<server>__<tool>）：折叠态给"返回了什么"的
+        // 一行摘要，而不是 JSON pretty dump 的前 8 行 —— 远端返回常见 hundreds
+        // 行的嵌套 JSON，通用预览就是满屏括号。识别 JSON 时给字节量 + 首个
+        // 字符串值预览；不是 JSON（纯文本返回）则维持通用预览。
+        if !expanded && tr.success && name.starts_with("mcp__") && !text.trim().is_empty() {
+            let parsed: Option<serde_json::Value> =
+                serde_json::from_str::<serde_json::Value>(text.trim()).ok();
+            if let Some(json) = parsed {
+                let bytes = text.len();
+                push_collapsed_summary(&mut lines, "Got", bytes, "byte", None, tool_color);
+                let preview_value: Option<String> = if let Some(arr) = json.as_array() {
+                    arr.iter()
+                        .find_map(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| Some(format!("{} items", arr.len())))
+                } else if let Some(o) = json.as_object() {
+                    // 对象结构：首个字符串值，或字段数 —— 优先给人能读懂的正文
+                    o.iter()
+                        .find_map(|(_, v)| v.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            o.values()
+                                .find_map(|v| {
+                                    if v.is_object() || v.is_array() {
+                                        Some(())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .map(|_| format!("{} fields", o.len()))
+                        })
+                } else {
+                    json.as_str().map(|s| s.to_string())
+                };
+                if let Some(pv) = preview_value {
+                    let preview = crate::ui::utils::render::truncate_to_display_width(
+                        pv.trim(),
+                        tool_inner_width.saturating_sub(2),
+                    );
+                    if !preview.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {}", preview),
+                            crate::ui::themes::theme::muted_style(),
+                        )));
+                    }
+                }
+                push_expand_hint(&mut lines);
+                return lines;
+            }
+            // 非 JSON 返回 → fall through 通用预览
+        }
+
         let soft = entry.status == Some(EntryStatus::SoftError);
         render_tool_result_text(
             &mut lines,
@@ -1538,10 +1655,7 @@ mod tests {
     #[test]
     fn codebase_search_collapsed_shows_hit_count_and_top_file() {
         let output = concat!(
-            "Semantic Search Results for 'auth flow' (Top 3)\n",
-            "Root: /repo\n",
-            "Indexed files: 100 / scanned text files: 120\n",
-            "Search: RRF fusion (K=60)\n\n",
+            "Ranked results for 'auth flow' — 3 file(s):\n\n",
             "File: src/auth.rs (Score: 0.92, Lines: 10-40)\n",
             "```\ncode here\n```\n\n",
             "File: src/session.rs (Score: 0.71, Lines: 5-9)\n\n",
@@ -1581,7 +1695,7 @@ mod tests {
             .collect();
         assert!(body.contains("3 ranked results"), "got: {body:?}");
         assert!(body.contains("src/auth.rs"), "top file missing: {body:?}");
-        // 元数据头不应出现在折叠态
+        // 元数据头不应出现在折叠态（新格式已不再生成，老会话里的旧缓存行也要挡住）
         assert!(!body.contains("RRF fusion"), "metadata leaked: {body:?}");
     }
 

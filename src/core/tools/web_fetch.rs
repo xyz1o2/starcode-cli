@@ -210,6 +210,11 @@ impl BaseDeclarativeTool for WebFetchTool {
         Kind::Read
     }
 
+    // 网络只读：抓 URL 不改本地任何状态（对标 CC 把 WebFetch 归入 read 级）。
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn create_invocation(
         &self,
         params: serde_json::Value,
