@@ -540,7 +540,8 @@ pub fn build_assistant_body_block(
 }
 
 /// Word-aware text wrapping — wraps at whitespace boundaries, hard-breaks long words.
-/// Safe for CJK via UnicodeWidthChar. Truncates > 5000 chars to avoid OOM.
+/// Safe for CJK via UnicodeWidthChar. 截断也必须**有提示**：静默截尾会让用户
+/// 以为内容丢了/程序错了，所以超限行在尾部显式标注省略量。
 ///
 /// 保留原文空白：行首缩进（代码块）与词间连续空格都不会被折叠，
 /// 只有折行断点处的空格被丢弃（与终端/浏览器的折行行为一致）。
@@ -548,15 +549,26 @@ pub fn wrap_text_to_width(text: &str, wrap_width: usize) -> Vec<String> {
     if wrap_width <= 2 {
         return text.lines().map(|l| l.to_string()).collect();
     }
-    let chars: Vec<char> = text.chars().take(5000).collect();
+    let chars: Vec<char> = text.chars().take(MAX_WRAP_SOURCE_CHARS).collect();
     if chars.is_empty() {
         return vec![String::new()];
     }
-    wrap_char_ranges(&chars, wrap_width, wrap_width)
+    let mut out: Vec<String> = wrap_char_ranges(&chars, wrap_width, wrap_width)
         .into_iter()
         .map(|(s, e)| chars[s..e].iter().collect())
-        .collect()
+        .collect();
+    // 超限走显式提示，不许静默丢字：用户看到"截断了 N 字符"才知道去哪里找全文
+    let dropped = text.chars().count().saturating_sub(chars.len());
+    if dropped > 0 {
+        out.push(format!("… [本行过长，省略了后面 {dropped} 字符]",));
+    }
+    out
 }
+
+/// 单行折行前允许保留的最大源字符数（防 OOM）。此前是 5000 且**静默**截尾 ——
+/// 正文渲染路径（markdown 段落、代码块）都从这里过，正常回答里贴一段长 JSON /
+/// 长 URL 就会在 5000 字符处无声少一截。上限放宽到 20 万，超限必须有可见提示。
+const MAX_WRAP_SOURCE_CHARS: usize = 200_000;
 
 /// 折行核心：按显示宽度对字符流做贪心断行，返回每行在 `chars` 中的区间 `[start, end)`。
 ///
@@ -1826,5 +1838,34 @@ mod tests {
             .map(|(s, e)| chars[s..e].iter().collect())
             .collect();
         assert_eq!(rows, vec!["aaa bbb", "ccc", "ddd"]);
+    }
+
+    /// 回归：超上限单行不能静默截尾 —— 必须带显式省略提示。
+    /// 旧实现 `take(5000)` 后无声丢字，正文里贴一段长 JSON 就少一截。
+    #[test]
+    fn wrap_overlimit_line_shows_truncation_marker() {
+        let long = "x".repeat(MAX_WRAP_SOURCE_CHARS + 123);
+        let out = wrap_text_to_width(&long, 80);
+        assert!(
+            out.concat().contains("省略了后面 123 字符"),
+            "缺少截断提示: {:?}",
+            out.last()
+        );
+        // 提示行之前的正文不丢字（除被截掉的 123 个）
+        let kept_x = out
+            .iter()
+            .take(out.len() - 1)
+            .map(|l| l.chars().filter(|c| *c == 'x').count())
+            .sum::<usize>();
+        assert_eq!(kept_x, MAX_WRAP_SOURCE_CHARS, "保留的正文应精确等于上限");
+    }
+
+    /// 回归：低于上限的行行为不变（不出现提示行）。
+    #[test]
+    fn wrap_within_limit_has_no_marker() {
+        let src = "a".repeat(6000); // 远超旧 5000 上限，但在新上限内
+        let out = wrap_text_to_width(&src, 80);
+        assert!(out.iter().all(|l| !l.contains("省略")));
+        assert_eq!(out.concat(), src);
     }
 }
