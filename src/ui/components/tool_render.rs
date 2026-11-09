@@ -452,6 +452,31 @@ fn build_tool_argument_display(
             };
             format!("{}{}", path, range)
         }
+        "Write" | "NotebookEdit" => {
+            // 调用行只显示目标路径 —— `content=` 倾倒的是整个文件正文，
+            // 把真正有决策价值的 path 挤到截断省略号之后
+            // （现场：`Write(content=# 零依赖单进程 Node 服务…, file_path=…Docker…)`）。
+            // 文件写了多少行由结果块的 "Wrote N lines to path" 摘要说。
+            get_str(&["path", "file_path", "target_file", "notebook_path"])
+                .map(|p| shorten(&p))
+                .unwrap_or_else(|| "(no path provided)".to_string())
+        }
+        "MultiEdit" => {
+            // 与 Write 同款问题：edits 数组会被倾倒成 "[N items]"，路径反而看不见。
+            // collapsed 说明交给结果块的 "Added N lines, removed M lines"。
+            let path = get_str(&["path", "file_path", "target_file"])
+                .map(|p| shorten(&p))
+                .unwrap_or_else(|| "(no path provided)".to_string());
+            if let Some(n) = obj
+                .get("edits")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .filter(|n| *n > 0)
+            {
+                extra_info.push(format!("{} edits", n));
+            }
+            path
+        }
         "Bash" => {
             let cmd = get_str(&["command", "CommandLine"]).unwrap_or_default();
             let dir = get_str(&["dir_path", "working_dir"])
@@ -1460,6 +1485,51 @@ mod tests {
             "MCP 调用行应标出 server 名，实际 {extra:?}"
         );
         assert!(!summary.is_empty());
+    }
+
+    /// 回归：Write 调用行此前落进通用 JSON 倾倒，得到
+    /// `Write(content=# 零依赖单进程 Node 服务…, file_path=…Docker…)` ——
+    /// 整个文件正文被截进参数位，真正有决策价值的 path 反而被挤到
+    /// 截断省略号后面。调用行必须只显示目标路径。
+    #[test]
+    fn write_call_line_shows_path_not_content_dump() {
+        // 用 json! 构造：content 里的真实换行才是现场形态（模型把多行文件
+        // 正文整个塞进 content），手写转义在这里既费劲又容易写错语义
+        let args = serde_json::json!({
+            "content": "# 零依赖单进程 Node 服务：不需要 npm install，也没有 package.json\n这是一段很长的文件正文，会把调用行撑爆",
+            "file_path": "/mnt/d/ai-workspace/workbuddy_ext/Dockerfile"
+        })
+        .to_string();
+        let (summary, _) = build_tool_argument_display(&call_for("Write", &args), false);
+
+        assert!(
+            summary.contains("Dockerfile"),
+            "调用行摘要必须包含路径，实际 {summary:?}"
+        );
+        assert!(
+            !summary.contains("content="),
+            "调用行不得倾倒 content=（正文归属结果块的 Wrote N lines）：{summary:?}"
+        );
+        assert!(
+            !summary.contains('{'),
+            "Write 调用行不该形如 JSON 倾倒：{summary:?}"
+        );
+    }
+
+    /// MultiEdit 同款回归：edits 数组不该占掉调用行，路径 + 编辑数分开交代。
+    #[test]
+    fn multi_edit_call_line_shows_path_and_edit_count() {
+        let args =
+            r#"{"edits":[{"old":"a","new":"b"},{"old":"c","new":"d"}],"file_path":"src/main.rs"}"#;
+        let (summary, extra) = build_tool_argument_display(&call_for("MultiEdit", args), false);
+        assert!(
+            summary.contains("main.rs"),
+            "调用行摘要必须包含路径，实际 {summary:?}"
+        );
+        assert!(
+            extra.iter().any(|e| e.contains("2 edits")),
+            "edits 数量进 extra_info，实际 {extra:?}"
+        );
     }
 
     /// 回归：CodebaseSearch 折叠态以前预览输出头部，那是索引元数据
