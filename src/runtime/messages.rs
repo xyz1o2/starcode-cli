@@ -390,7 +390,6 @@ pub enum AgentRequest {
     AppendContext {
         content: String,
     },
-    ToggleYoloMode,
     SetApprovalMode(crate::types::ApprovalMode),
     /// 重新读取磁盘上的权限规则（`/permissions allow|deny|ask|remove` 改完 settings 之后）。
     /// PolicyEngine 活在 MessageBus 里，UI 侧改不到，只能靠这条消息让运行时自己重载。

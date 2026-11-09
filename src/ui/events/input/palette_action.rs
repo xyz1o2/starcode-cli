@@ -153,11 +153,12 @@ pub(crate) async fn execute_palette_action(
         }
         PaletteAction::SetAgentMode(mode) => {
             state.close_palette();
-            let approval_mode = match mode.as_str() {
-                "yolo" => crate::types::ApprovalMode::Yolo,
-                "plan" => crate::types::ApprovalMode::Plan,
-                _ => crate::types::ApprovalMode::Default,
-            };
+            // 走统一的别名口径（settings `defaultMode` 同源）；面板里既可能发
+            // 官方名（`bypassPermissions`）也可能发旧名（`yolo`）的字符串。
+            // 认不出的字符串回落到 Default，与旧行为一致。
+            let approval_mode = crate::core::policy::approval_mode_from_str(mode.trim())
+                .map(crate::types::ApprovalMode::from)
+                .unwrap_or(crate::types::ApprovalMode::Default);
             state.approval_mode = approval_mode.clone();
             let _ = agent_tx
                 .send(AgentRequest::SetApprovalMode(approval_mode))

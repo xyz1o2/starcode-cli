@@ -149,7 +149,10 @@ arboard = "3.6"
 zeroize = { version = "1.9", features = ["derive"] }
 rust-embed = "8.13"
 lsp-types = "0.97"
-image = "0.25"
+# 只用 PNG/JPEG（剪贴板截图保存）。default-features 会拽进 AVIF 编码器
+# （ravif → rav1e → av-scenechange），其 build script 在 seccomp 沙箱里跑不了
+# —— blaze 装载 workspace 就死在这。关掉用不到的格式。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 html2text = "0.17"
 readability-rust = "0.1.0"
 scraper = "0.27"

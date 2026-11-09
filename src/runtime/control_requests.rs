@@ -268,12 +268,6 @@ pub async fn handle_request(
         AgentRequest::SendMessage { .. } => {
             // Handled in worker main loop
         }
-        AgentRequest::ToggleYoloMode => {
-            let new_mode = agent.toggle_yolo_mode();
-            let _ = tx
-                .send(StreamMessage::ApprovalModeChanged { mode: new_mode })
-                .await;
-        }
         AgentRequest::SetApprovalMode(mode) => {
             agent.set_approval_mode(mode.clone());
             let _ = tx.send(StreamMessage::ApprovalModeChanged { mode }).await;

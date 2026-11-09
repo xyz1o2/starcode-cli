@@ -496,7 +496,7 @@ impl Config {
         &mut self,
         mode: ApprovalMode,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // 不受信任的目录只允许 default —— auto 免确认写操作，yolo 连护栏都没有。
+        // 不受信任的目录只允许 default —— auto 免确认写操作，bypassPermissions 连护栏都没有。
         if !self.is_trusted_folder() && mode != ApprovalMode::Default {
             return Err("Cannot enable privileged approval modes in an untrusted folder.".into());
         }

@@ -405,8 +405,8 @@ pub fn get_system_palette_items() -> Vec<PaletteItem> {
             ),
             description: i18n::t(
                 "palette.desc.approval_mode",
-                "Switch Auto, Default, Plan or Yolo",
-                "Switch Auto, Default, Plan or Yolo",
+                "Switch Auto, Default, Plan or Bypass permissions",
+                "Switch Auto, Default, Plan or Bypass permissions",
             ),
             category: cat_settings.clone(),
             action: PaletteAction::Navigate(PaletteMode::AgentMode),
@@ -498,8 +498,8 @@ pub fn get_agent_palette_items() -> Vec<PaletteItem> {
             label: i18n::t("palette.label.agent_mode", "Agent Mode", "Agent Mode"),
             description: i18n::t(
                 "palette.desc.agent_mode",
-                "Switch agent mode (Plan/Auto/Yolo)",
-                "Switch agent mode (Plan/Auto/Yolo)",
+                "Switch agent mode (Plan/Auto/Bypass)",
+                "Switch agent mode (Plan/Auto/Bypass)",
             ),
             category: cat.clone(),
             action: PaletteAction::Navigate(PaletteMode::AgentMode),
@@ -620,15 +620,15 @@ pub fn get_agent_mode_palette_items() -> Vec<PaletteItem> {
             action: PaletteAction::SetAgentMode("plan".to_string()),
         },
         PaletteItem {
-            id: "mode_yolo".to_string(),
-            label: i18n::t("palette.label.mode_yolo", "YOLO Mode", "YOLO Mode"),
+            id: "mode_bypass".to_string(),
+            label: i18n::t("palette.label.mode_bypass", "Bypass mode", "Bypass mode"),
             description: i18n::t(
-                "palette.desc.mode_yolo",
+                "palette.desc.mode_bypass",
                 "Auto-approve all actions (dangerous)",
                 "Auto-approve all actions (dangerous)",
             ),
             category: cat,
-            action: PaletteAction::SetAgentMode("yolo".to_string()),
+            action: PaletteAction::SetAgentMode("bypassPermissions".to_string()),
         },
     ]
 }

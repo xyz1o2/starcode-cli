@@ -19,7 +19,7 @@ A conversational AI coding agent that runs in your terminal — written in 100% 
 - **Interactive TUI** — streaming responses, diffs, syntax highlighting, themes, mouse support.
 - **Headless Mode** — drive a prompt from a script and get JSONL or plain text back.
 - **Rich Toolchain** — read/write/edit/notebook tools, shell, ripgrep search, AST-aware codebase search, git insight, sub-agents, todos, cron, worktrees, MCP servers.
-- **Permissions** — `auto` (the default) runs safe operations without prompts while still asking before dangerous commands and system-path writes; `default`, `acceptEdits`, `plan` and `yolo` give finer control.
+- **Permissions** — `auto` (the default) runs safe operations without prompts while still asking before dangerous commands and system-path writes; `default`, `acceptEdits`, `plan` and `bypassPermissions` give finer control.
 - **Project Context** — instructions are picked up from `STAR.md` / `STARCODE.md` / `CLAUDE.md` / `AGENTS.md` in your project.
 - **Sessions** — save, resume, and manage conversation history.
 - **Internationalization** — English and Chinese UI.
@@ -200,12 +200,13 @@ starcode --permission-mode auto        # default: safe ops run free, dangerous o
 starcode --permission-mode default     # read-only tools run free; writes and commands ask
 starcode --permission-mode acceptEdits # also run file edits and read-only shell commands
 starcode --permission-mode plan        # read-only; plans before touching anything
-starcode --permission-mode yolo        # bypass all permissions (dangerous!)
+starcode --permission-mode bypassPermissions  # run everything without asking (dangerous!)
 ```
 
-`Shift+Tab` cycles the mode in the TUI. `bypassPermissions` is an alias for `yolo`.
-An explicit `deny` rule in `settings.json` beats every mode, including `yolo`; an
-explicit `ask` rule still forces a prompt in every mode except `yolo`.
+`Shift+Tab` cycles the mode in the TUI. `yolo` is an accepted alias for
+`bypassPermissions`. An explicit `deny` rule in `settings.json` beats every mode,
+including `bypassPermissions`; an explicit `ask` rule still forces a prompt in
+every mode except `bypassPermissions`.
 
 `auto` is the default. Read-only tools run without a prompt; anything the local
 guardrails cannot judge goes to an **AI safety classifier** that decides

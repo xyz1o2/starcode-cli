@@ -43,7 +43,7 @@ pub(super) fn status_overview_description(state: Option<&ChatState>) -> String {
 pub(super) fn approval_mode_description(state: Option<&ChatState>) -> String {
     state
         .map(|state| format!("Current: {}", approval_mode_label(&state.approval_mode)))
-        .unwrap_or_else(|| "Switch Auto, Default, Plan or Yolo".to_string())
+        .unwrap_or_else(|| "Switch Auto, Default, Plan or Bypass permissions".to_string())
 }
 
 pub(super) fn thinking_effort_description(state: Option<&ChatState>) -> String {

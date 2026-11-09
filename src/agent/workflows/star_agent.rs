@@ -1289,52 +1289,13 @@ impl StarAgent {
         }
     }
 
-    pub fn toggle_yolo_mode(&mut self) -> crate::types::ApprovalMode {
-        if self.inner.is_yolo_mode_disabled() {
-            {
-                let mut mode = self
-                    .approval_mode_lock
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                *mode = ApprovalMode::Default;
-            }
-            self.inner.set_approval_mode(ApprovalMode::Default);
-            if let Some(bus) = self.inner.runtime_message_bus() {
-                crate::agent::approval::set_approval_mode(
-                    ApprovalMode::Default,
-                    &self.approval_mode_lock,
-                    &bus,
-                );
-            }
-            return ApprovalMode::Default;
-        }
-
-        if let Some(bus) = self.inner.runtime_message_bus() {
-            let mode = crate::agent::approval::toggle_yolo_mode(&self.approval_mode_lock, &bus);
-            self.inner.set_approval_mode(mode.clone());
-            return mode;
-        }
-
-        let mut mode = self
-            .approval_mode_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let new_mode = if *mode == ApprovalMode::Yolo {
-            ApprovalMode::Default
-        } else {
-            ApprovalMode::Yolo
-        };
-        *mode = new_mode.clone();
-        self.inner.set_approval_mode(new_mode.clone());
-        new_mode
-    }
-
     pub fn set_approval_mode(&mut self, mode: crate::types::ApprovalMode) {
-        let safe_mode = if self.inner.is_yolo_mode_disabled() && mode == ApprovalMode::Yolo {
-            ApprovalMode::Default
-        } else {
-            mode
-        };
+        let safe_mode =
+            if self.inner.is_yolo_mode_disabled() && mode == ApprovalMode::BypassPermissions {
+                ApprovalMode::Default
+            } else {
+                mode
+            };
 
         // Sync mode to inner agent for plan mode reminder injection
         self.inner.set_approval_mode(safe_mode.clone());

@@ -101,7 +101,7 @@ pub async fn run(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
         other => {
             let Some(mode) = mode_from_verb(other) else {
                 return Err(format!(
-                    "Unknown /permissions argument `{}`.\nRules: allow | ask | deny | remove | list\nModes: auto | default | acceptEdits | plan | yolo | bypassPermissions\nLog: deny-log | clear-log",
+                    "Unknown /permissions argument `{}`.\nRules: allow | ask | deny | remove | list\nModes: auto | default | acceptEdits | plan | bypassPermissions\nLog: deny-log | clear-log",
                     args[0]
                 ));
             };
@@ -155,7 +155,9 @@ fn render_overview_with(cwd: &Path, mode: &ApprovalMode, merged: SettingsPermiss
             }
             out.push('\n');
         }
-        out.push_str("Precedence: deny > ask > allow. Deny also overrides yolo mode.\n");
+        out.push_str(
+            "Precedence: deny > ask > allow. Deny also overrides bypassPermissions mode.\n",
+        );
     }
 
     if !merged.additional_directories.is_empty() {
@@ -459,7 +461,7 @@ fn mode_from_verb(verb: &str) -> Option<ApprovalMode> {
         PolicyMode::Default => Some(ApprovalMode::Default),
         PolicyMode::AcceptEdits => Some(ApprovalMode::AcceptEdits),
         PolicyMode::Plan => Some(ApprovalMode::Plan),
-        PolicyMode::Yolo => Some(ApprovalMode::Yolo),
+        PolicyMode::BypassPermissions => Some(ApprovalMode::BypassPermissions),
         PolicyMode::Auto => Some(ApprovalMode::Auto),
     }
 }
@@ -678,7 +680,7 @@ mod tests {
         assert_eq!(mode_from_verb("readonly"), Some(ApprovalMode::Plan));
         assert_eq!(
             mode_from_verb("bypassPermissions"),
-            Some(ApprovalMode::Yolo)
+            Some(ApprovalMode::BypassPermissions)
         );
         assert_eq!(mode_from_verb("nonsense"), None);
     }
@@ -689,7 +691,7 @@ mod tests {
             ApprovalMode::Default,
             ApprovalMode::AcceptEdits,
             ApprovalMode::Plan,
-            ApprovalMode::Yolo,
+            ApprovalMode::BypassPermissions,
         ] {
             let label = mode_label(&mode);
             assert_eq!(

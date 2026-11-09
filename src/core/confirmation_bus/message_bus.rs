@@ -184,7 +184,7 @@ impl MessageBus {
                     // 能走到 publish 的请求，调用方（ToolExecutor）已经判过"要问用户"
                     // 才把它发出来的；在 publish 里再判一次并且**只允许它抬高**判定，
                     // 等于开了一条"没有任何人点过同意就执行"的旁路：两次判定之间只要
-                    // 状态动过（`/permissions` 重载规则、审批模式被切到 yolo、
+                    // 状态动过（`/permissions` 重载规则、审批模式被切到 bypassPermissions、
                     // 子代理并发），命令就会在 UI 一张卡都没画的情况下跑掉。
                     //
                     // publish 这一层的职责是**收紧**（deny 仍然生效），不是放宽。

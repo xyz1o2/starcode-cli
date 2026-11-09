@@ -526,7 +526,7 @@ mod tests {
             crate::types::ApprovalMode::Default,
             crate::types::ApprovalMode::AcceptEdits,
             crate::types::ApprovalMode::Plan,
-            crate::types::ApprovalMode::Yolo,
+            crate::types::ApprovalMode::BypassPermissions,
         ] {
             assert!(
                 auto_mode_reminder_if_needed(&mode).is_none(),

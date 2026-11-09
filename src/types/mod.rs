@@ -1122,10 +1122,10 @@ pub enum StreamingChunkType {
 pub enum ApprovalMode {
     #[default]
     Default, // 默认模式：写操作与命令需要确认，只读工具免确认 (Build)
-    AcceptEdits, // 接受编辑：文件改动与只读命令免确认，其余仍问
-    Plan,        // Plan 模式：只读研究/规划，禁止非只读工具
-    Yolo,        // YOLO 模式：所有操作自动执行（危险！）
-    Auto,        // auto 模式：AI 分类器驱动，默认档位
+    AcceptEdits,       // 接受编辑：文件改动与只读命令免确认，其余仍问
+    Plan,              // Plan 模式：只读研究/规划，禁止非只读工具
+    BypassPermissions, // 全放行（对标 Claude Code bypassPermissions，旧名 YOLO）
+    Auto,              // auto 模式：AI 分类器驱动，默认档位
 }
 
 impl ApprovalMode {
@@ -1162,7 +1162,9 @@ impl From<ApprovalMode> for crate::core::policy::types::ApprovalMode {
             ApprovalMode::Default => crate::core::policy::types::ApprovalMode::Default,
             ApprovalMode::AcceptEdits => crate::core::policy::types::ApprovalMode::AcceptEdits,
             ApprovalMode::Plan => crate::core::policy::types::ApprovalMode::Plan,
-            ApprovalMode::Yolo => crate::core::policy::types::ApprovalMode::Yolo,
+            ApprovalMode::BypassPermissions => {
+                crate::core::policy::types::ApprovalMode::BypassPermissions
+            }
             ApprovalMode::Auto => crate::core::policy::types::ApprovalMode::Auto,
         }
     }
@@ -1175,7 +1177,9 @@ impl From<crate::core::policy::types::ApprovalMode> for ApprovalMode {
             crate::core::policy::types::ApprovalMode::Default => ApprovalMode::Default,
             crate::core::policy::types::ApprovalMode::AcceptEdits => ApprovalMode::AcceptEdits,
             crate::core::policy::types::ApprovalMode::Plan => ApprovalMode::Plan,
-            crate::core::policy::types::ApprovalMode::Yolo => ApprovalMode::Yolo,
+            crate::core::policy::types::ApprovalMode::BypassPermissions => {
+                ApprovalMode::BypassPermissions
+            }
             crate::core::policy::types::ApprovalMode::Auto => ApprovalMode::Auto,
         }
     }
@@ -1728,7 +1732,7 @@ mod thinking_effort_tests {
             ApprovalMode::Default,
             ApprovalMode::AcceptEdits,
             ApprovalMode::Plan,
-            ApprovalMode::Yolo,
+            ApprovalMode::BypassPermissions,
             ApprovalMode::Auto,
         ];
 
@@ -1746,7 +1750,7 @@ mod thinking_effort_tests {
             ApprovalMode::Default,
             ApprovalMode::AcceptEdits,
             ApprovalMode::Plan,
-            ApprovalMode::Yolo,
+            ApprovalMode::BypassPermissions,
             ApprovalMode::Auto,
         ];
 
@@ -1765,7 +1769,7 @@ mod thinking_effort_tests {
             ApprovalMode::Default,
             ApprovalMode::AcceptEdits,
             ApprovalMode::Plan,
-            ApprovalMode::Yolo,
+            ApprovalMode::BypassPermissions,
             ApprovalMode::Auto,
         ] {
             let policy_mode: crate::core::policy::types::ApprovalMode = mode.clone().into();

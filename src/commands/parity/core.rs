@@ -441,15 +441,21 @@ pub async fn history(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandR
 
 /// `/mode` — 切换权限/审批模式（对标 Claude Code /mode）。
 /// 无参数展示当前模式与可选项；带参数复用 `/permissions` 的切换实现。
+///
+/// 别名不再在这里私养一份：全部走 `approval_mode_from_str` 这份统一口径
+/// （settings `defaultMode`、`--permission-mode`、`/permissions` 同源）。
+/// 此前这份本地表把 `"auto" => "yolo"`，在 `Auto` 独立成档之后就把
+/// `/mode auto` 错切成了全放行。
 pub async fn mode(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     if args.is_empty() {
         let current = approval_label(&ctx.state.approval_mode);
         let out = format!(
             "# Permission mode\n\nCurrent: **{}**\n\n\
+             - `/mode auto` — LLM classifier reviews each action instead of you\n\
              - `/mode default` — ask before risky writes/commands; read-only tools run free\n\
-             - `/mode accept-edits` — also apply file edits and read-only shell commands without asking\n\
+             - `/mode acceptEdits` — also apply file edits and read-only shell commands without asking\n\
              - `/mode plan` — read-only research & planning, no mutating tools\n\
-             - `/mode bypass` — run everything without asking (Claude Code: bypassPermissions)\n\n\
+             - `/mode bypassPermissions` — run everything without asking (alias: yolo)\n\n\
              _Rules and the deny log live under `/permissions`._",
             current
         );
@@ -457,24 +463,26 @@ pub async fn mode(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
         return Ok(());
     }
 
-    let arg = args[0].to_lowercase();
-    let mapped = match arg.as_str() {
-        "default" | "build" => "default",
-        "acceptedits" | "accept-edits" => "acceptEdits",
-        "plan" | "readonly" | "read-only" => "plan",
-        "bypass" | "yolo" | "auto" | "bypasspermissions" | "bypass-permissions" => "yolo",
-        other => {
+    let arg = args[0].trim();
+    let mut normalized = arg.to_lowercase().replace(['-', '_'], "");
+    if normalized == "yolo" {
+        // 旧官名（本项目的 YOLO 时代）仍要能认出来。
+        normalized = "bypasspermissions".to_string();
+    }
+    let mapped = match crate::core::policy::approval_mode_from_str(&normalized) {
+        Some(m) => m.as_str().to_string(),
+        None => {
             push_msg(
                 &mut ctx,
                 format!(
-                    "❌ Unknown mode: `{}`. Usage: /mode [default|accept-edits|plan|bypass]",
-                    other
+                    "❌ Unknown mode: `{}`. Usage: /mode [auto|default|acceptEdits|plan|bypassPermissions]",
+                    arg
                 ),
             );
             return Ok(());
         }
     };
-    crate::commands::permissions::run(ctx, vec![mapped.to_string()]).await
+    crate::commands::permissions::run(ctx, vec![mapped]).await
 }
 
 /// `/output-style` — 设置输出风格（对标 Claude Code /output-style）。

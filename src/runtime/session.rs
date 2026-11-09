@@ -57,7 +57,6 @@ pub struct DeferredRuntimeActions {
     pub pending_mcp_refresh: bool,
     pub pending_mcp_list_servers: bool,
     pub pending_mcp_list_tools: Option<String>,
-    pub pending_toggle_yolo: bool,
     pub pending_set_approval_mode: Option<crate::types::ApprovalMode>,
     pub pending_tool_confirmation: Option<(Vec<crate::types::StarToolCall>, u64, bool, bool)>,
     pub pending_checkpoint_action: Option<PendingCheckpointAction>,
@@ -254,10 +253,6 @@ pub async fn handle_streaming_request(
             deferred
                 .pending_context_actions
                 .push_back(DeferredContextAction::Append { content });
-            StreamingRequestOutcome::Continue
-        }
-        Some(AgentRequest::ToggleYoloMode) => {
-            deferred.pending_toggle_yolo = true;
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::Compress {
@@ -1177,14 +1172,6 @@ pub async fn apply_deferred_runtime_actions(
                 kind,
                 content,
             })
-            .await;
-    }
-
-    if deferred.pending_toggle_yolo {
-        deferred.pending_toggle_yolo = false;
-        let new_mode = agent.toggle_yolo_mode();
-        let _ = tx
-            .send(StreamMessage::ApprovalModeChanged { mode: new_mode })
             .await;
     }
 

@@ -112,7 +112,7 @@ struct CliArgs {
     #[arg(long = "dangerously-skip-permissions")]
     dangerously_skip_permissions: bool,
 
-    /// Approval mode: auto | default | plan | yolo | acceptEdits | bypassPermissions
+    /// Approval mode: auto | default | acceptEdits | plan | bypassPermissions (alias: yolo)
     #[arg(long = "permission-mode", visible_alias = "approval-mode")]
     permission_mode: Option<String>,
 
@@ -333,7 +333,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let cli_approval_mode = if args.dangerously_skip_permissions {
-        Some(crate::core::policy::types::ApprovalMode::Yolo)
+        Some(crate::core::policy::types::ApprovalMode::BypassPermissions)
     } else if let Some(mode) = args.permission_mode.as_deref() {
         Some(parse_cli_approval_mode(mode).map_err(|e| {
             let err: Box<dyn std::error::Error> = e.into();
@@ -666,7 +666,7 @@ fn parse_cli_approval_mode(
     // 别名口径和 `permissions.defaultMode`、`/permissions <mode>` 共用一份。
     crate::core::policy::approval_mode_from_str(input).ok_or_else(|| {
         format!(
-            "invalid --permission-mode `{}` (expected: default|plan|yolo|acceptEdits|auto)",
+            "invalid --permission-mode `{}` (expected: auto|default|acceptEdits|plan|bypassPermissions)",
             input
         )
     })

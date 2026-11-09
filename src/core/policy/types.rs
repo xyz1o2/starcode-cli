@@ -46,8 +46,11 @@ pub enum ApprovalMode {
     Default, // Ask for permission
     #[serde(rename = "acceptEdits")]
     AcceptEdits, // Accept file edits automatically
-    #[serde(rename = "yolo")]
-    Yolo, // Skip permission
+    // 对标 Claude Code：官方模式名是 `bypassPermissions`，serde rename 就是它。
+    // `alias = "yolo"` 兼容本项目早期落盘的会话记录 / settings —— 读得到旧值，
+    // 写出去的永远是官方名。
+    #[serde(rename = "bypassPermissions", alias = "yolo")]
+    BypassPermissions, // Skip permission
     #[serde(rename = "plan")]
     Plan, // Plan mode (read-only)
     #[serde(rename = "auto")]
@@ -68,7 +71,7 @@ impl ApprovalMode {
             Self::Default => "default",
             Self::AcceptEdits => "acceptEdits",
             Self::Plan => "plan",
-            Self::Yolo => "yolo",
+            Self::BypassPermissions => "bypassPermissions",
             Self::Auto => "auto",
         }
     }
@@ -82,7 +85,7 @@ impl ApprovalMode {
             Self::Default => "Default",
             Self::AcceptEdits => "Accept edits",
             Self::Plan => "Plan",
-            Self::Yolo => "Yolo",
+            Self::BypassPermissions => "Bypass permissions",
             Self::Auto => "Auto",
         }
     }
@@ -96,7 +99,7 @@ impl ApprovalMode {
             Self::Default => "默认 (default)",
             Self::AcceptEdits => "接受编辑 (acceptEdits)",
             Self::Plan => "Plan (计划模式)",
-            Self::Yolo => "YOLO (全部放行)",
+            Self::BypassPermissions => "Bypass (全部放行)",
             Self::Auto => "Auto (自动审批)",
         }
     }

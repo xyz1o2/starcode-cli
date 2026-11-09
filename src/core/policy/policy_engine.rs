@@ -285,7 +285,7 @@ impl PolicyEngine {
     /// - `default` = Manual —— 只读工具免确认，写与命令才问
     /// - `acceptEdits` —— 再加上文件改动工具与只读 shell 命令
     ///
-    /// `Yolo` / `Plan` 在 `check` 里各自 return，不走这里。
+    /// `BypassPermissions` / `Plan` 在 `check` 里各自 return，不走这里。
     /// deny 与显式 `ask` 的优先级由 `check` 的调用顺序保证（deny 第 1 步、
     /// ask 由 `check` 在调用本方法前查过），本方法只回答"模式承诺放行吗"。
     fn mode_auto_allows(&self, tool_name: &str, args: &serde_json::Value) -> bool {
@@ -372,7 +372,7 @@ impl PolicyEngine {
                     AutoVerdict::Undecided
                 }
             }
-            ApprovalMode::Yolo | ApprovalMode::Plan => AutoVerdict::Undecided,
+            ApprovalMode::BypassPermissions | ApprovalMode::Plan => AutoVerdict::Undecided,
             ApprovalMode::Auto => {
                 // auto 模式 = 本地护栏 + LLM 分类器（对标 Claude Code yoloClassifier）：
                 // 字面能判的已经在上面的白名单里判掉了（只读工具 / 只读命令），
@@ -428,12 +428,12 @@ impl PolicyEngine {
 
     /// 判定顺序（对标 Claude Code）：
     ///
-    /// 1. `deny` 规则 —— 连 yolo 和"本会话总是允许"都压不住，用户写 deny 就是要绝对拦住；
+    /// 1. `deny` 规则 —— 连 bypassPermissions 和"本会话总是允许"都压不住，用户写 deny 就是要绝对拦住；
     /// 2. skill 的 `disallowed-tools`（本轮禁用）—— 用户显式禁的，比任何放行都强；
     /// 3. 会话内的"总是允许"；
     /// 4. skill 的 `allowed-tools`（本轮免确认）—— 比审批模式**弱**：
     ///    它只免确认，不能覆盖用户写的 `ask` 规则（见 §5）；
-    /// 5. 审批模式（yolo 全放 / plan 只放只读 / default 与 acceptEdits 放各自的只读集合）；
+    /// 5. 审批模式（bypassPermissions 全放 / plan 只放只读 / default 与 acceptEdits 放各自的只读集合）；
     /// 6. `allow` 规则 —— 命中即免确认，这是 allow 存在的唯一意义；
     /// 7. `ask` 规则 —— 命中则强制弹确认，哪怕默认是放行；
     /// 8. 旧的 `PolicyRule` 列表，最后落到 `default_decision`。
@@ -499,7 +499,7 @@ impl PolicyEngine {
 
         // 3. 审批模式
         match self.approval_mode {
-            ApprovalMode::Yolo => {
+            ApprovalMode::BypassPermissions => {
                 return CheckResult {
                     decision: PolicyDecision::Allow,
                     rule: None,
@@ -885,7 +885,7 @@ mod tests {
     async fn yolo_still_allows_in_non_interactive_mode() {
         let engine = PolicyEngine::new(PolicyEngineConfig {
             non_interactive: Some(true),
-            approval_mode: Some(ApprovalMode::Yolo),
+            approval_mode: Some(ApprovalMode::BypassPermissions),
             ..Default::default()
         });
         assert_eq!(

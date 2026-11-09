@@ -47,7 +47,7 @@ pub fn resolve_border_color(state: &ChatState) -> Color {
         crate::types::ApprovalMode::Default => theme.input_border,
         crate::types::ApprovalMode::AcceptEdits => Color::LightGreen,
         crate::types::ApprovalMode::Plan => Color::Cyan,
-        crate::types::ApprovalMode::Yolo => Color::Red,
+        crate::types::ApprovalMode::BypassPermissions => Color::Red,
         crate::types::ApprovalMode::Auto => Color::Green,
     };
     // Send animation: brief cyan flash when message is sent
@@ -367,8 +367,8 @@ mod tests {
     }
 
     #[test]
-    fn test_border_color_yolo() {
-        let state = make_state(ApprovalMode::Yolo, "");
+    fn test_border_color_bypass_permissions() {
+        let state = make_state(ApprovalMode::BypassPermissions, "");
         assert_eq!(resolve_border_color(&state), Color::Red);
     }
 
@@ -436,11 +436,14 @@ mod tests {
         });
     }
 
-    /// 多行输入 —— 框高随行数增长（`calc_input_height`），Yolo 模式边框为 red。
+    /// 多行输入 —— 框高随行数增长（`calc_input_height`），bypassPermissions 模式边框为 red。
     #[test]
-    fn snapshot_yolo_multiline() {
-        let state = make_state(ApprovalMode::Yolo, "first line\nsecond line\nthird");
-        assert_render!("chat_input_yolo_multiline", 44, 9, |f| {
+    fn snapshot_bypass_multiline() {
+        let state = make_state(
+            ApprovalMode::BypassPermissions,
+            "first line\nsecond line\nthird",
+        );
+        assert_render!("chat_input_bypass_multiline", 44, 9, |f| {
             render_input(f, &state, f.area())
         });
     }

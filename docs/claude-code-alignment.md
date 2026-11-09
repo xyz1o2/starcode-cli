@@ -228,7 +228,7 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | Anthropic 协议 | `anthropic-version: 2023-06-01`、thinking budget/effort、prompt caching | ✅ `llm/mod.rs:69`、`llm/thinking.rs` |
 | provider 环境变量 | `ANTHROPIC_API_KEY` / `BASE_URL` / `MODEL` 是解析的一层，带 `SourceRef` | ✅ `core/config/provider_resolution.rs:13-18` |
 | 权限规则**语法** | `Tool(specifier)` + `allow`/`ask`/`deny`/`defaultMode` 与 CC 同构 | ✅ `core/policy/settings_rules.rs:1-23` |
-| 权限三级判定 | deny > ask > allow，deny 连 yolo 都挡得住 | ✅ 同上 |
+| 权限三级判定 | deny > ask > allow，deny 连 bypassPermissions 都挡得住 | ✅ 同上 |
 | 规则合并 + trust 分级 | 可提交的 `settings.json` 只能加规则、不能抬升审批模式 | ✅ `settings_rules.rs:468-489` |
 | PolicyEngine 接线 | `with_project_rules` 是唯一构造点 | ✅ `core/config/runtime_bootstrap.rs:34-49` |
 | headless 拒绝策略 | `non_interactive` 打开，`AskUser` 无人应答时直接拒 | ✅ 同上 |
@@ -331,7 +331,7 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | 项 | 落点 | 结果 |
 |---|---|---|
 | `default` 档把只读工具也弹确认 | `core/policy/policy_engine.rs`（新增 `mode_auto_allows`）、`types/mod.rs` | 5 个新测试锁住语义；连带修好 headless `-p` 下"每个工具都被拒" |
-| `acceptEdits` 被折叠成 `default` | `policy/types.rs`、`types/mod.rs`（两处枚举）、`settings_rules.rs`、`parity.rs` 的 `/mode` | Shift+Tab 循环扩为四档；显式 `ask` 规则仍压得住模式内置放行 |
+| `acceptEdits` 被折叠成 `default` | `policy/types.rs`、`types/mod.rs`（两处枚举）、`settings_rules.rs`、`parity.rs` 的 `/mode` | Shift+Tab 循环扩为四档（2026-11-10 起五档）；显式 `ask` 规则仍压得住模式内置放行 |
 | 确认等待不响应 abort（600s 静默） | `confirmation_bus/message_bus.rs`（新增 `request_cancellable`）、`agent/tool_executor.rs` | 3 个新测试；放弃等待时补发取消应答，把 UI 上的确认卡一并收掉 |
 | 确认等待 600s 后自己超时，把「没回答」写成「被拒绝」 | `confirmation_bus/message_bus.rs`（`await_tool_decision`，去掉 `request_cancellable`/`request`）、`agent/tool_executor.rs`（新增 `pass_gate`/`Gate`，删掉 `STAR_CONFIRM_TIMEOUT`）、`agent/tool_helpers.rs`（删掉按确认超时推导的兜底） | 等待只剩三种结局：用户拍板、用户中断、总线关闭；工具兜底时限改挂在 `invocation.execute()` 上，不再把用户思考的时间算进工具预算 |
 | 「允许本会话 / 总是允许」写了却不生效，下次照样弹 | `agent/tool_executor.rs::pass_gate`（删掉 `!requires_invocation_confirmation` 对授权读取的否决）、`core/tools/tools.rs`（该标志的含义改为"必须被咨询"） | 授权一定读得到；工具自己的逐次检查仍然有话语权，3 个新测试分别锁住"本会话不再弹"、"总是允许不再弹"、"工具自己的确认不被吞掉" |
@@ -357,7 +357,7 @@ lib 套件 914 全绿，`cargo fmt --check` 绿，本次改动范围内 clippy �
 | **P1** | `@import` 展开 | `utils/project_context.rs` | M |
 | **P1** | `.mcp.json` 作为回落 | `core/utils/paths.rs:337` | S |
 | **P1** | `STAR_CONFIG_DIR` 环境变量，对应 `CLAUDE_CONFIG_DIR` | `core/config/storage.rs:8` | S |
-| **P1** | `ApprovalMode` 补 `dontAsk`（headless/CI 用）。`acceptEdits` 已于 2026-10-13 独立成档，剩下三档（`auto`/`dontAsk`/`bypassPermissions` 中的 `auto` 与 `dontAsk`）仍缺 | `core/policy/types.rs`、`main.rs` | M |
+| **P1** | `ApprovalMode` 补 `dontAsk`（headless/CI 用）。`acceptEdits` 已于 2026-10-13 独立成档，`auto` 于 2026-11-10 独立成档（`core/auto_mode/` 分类器），`bypassPermissions` 同日落位（旧名 `yolo` 降为输入别名）；还剩 `dontAsk` 一档 | `core/policy/types.rs`、`main.rs` | S |
 | **P1** | MCP tool search，schema 延迟加载 | `core/tools/tool_registry.rs` | L |
 | **P2** | `.claude/rules/` + `paths:` frontmatter 条件加载 | 新模块 | M |
 | **P2** | 补 hook 事件 `PermissionRequest` / `PostToolBatch` / `ConfigChange` / `InstructionsLoaded` | `core/hooks/store.rs` | M |
@@ -414,7 +414,7 @@ P2 的 workflows 价值最高（把子 agent 并行从消耗主 context 变成�
 
 ### 查完后新发现的两个问题
 
-**A. 兜底路径丢审批模式 —— 已修（2026-10-13）。** `PolicyEngine::with_project_rules` 原先有 4 个构造点，只有主路径 `runtime_bootstrap.rs:40` 传了 `approval_mode`，另外 3 处 `unwrap_or_else` 兜底用 `PolicyEngineConfig::default()`：用户选 yolo/plan，runtime 一缺席确认判断就悄悄退回逐次询问。现已全部带上真实模式（新增 `StarAgent::approval_mode()` / `policy_approval_mode()` 做两个 `ApprovalMode` 枚举之间的转换）。
+**A. 兜底路径丢审批模式 —— 已修（2026-10-13）。** `PolicyEngine::with_project_rules` 原先有 4 个构造点，只有主路径 `runtime_bootstrap.rs:40` 传了 `approval_mode`，另外 3 处 `unwrap_or_else` 兜底用 `PolicyEngineConfig::default()`：用户选 bypassPermissions/plan，runtime 一缺席确认判断就悄悄退回逐次询问。现已全部带上真实模式（新增 `StarAgent::approval_mode()` / `policy_approval_mode()` 做两个 `ApprovalMode` 枚举之间的转换）。
 
 **B. `permissions.json` 与 `settings.json` 双格式并存。** `policy_engine.rs:66` 注释写明「装载 `.star/permissions.json`（旧格式）+ settings.json 的 `permissions` 段（新格式）」，对应 `storage.rs:167`。迁移到 `.claude/settings.json` 时要保住旧格式读取，否则老用户配置静默失效。
 

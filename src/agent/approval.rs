@@ -2,7 +2,6 @@
 //!
 //! Responsibilities:
 //! - Set approval mode
-//! - Toggle yolo mode
 
 use std::sync::{Arc, Mutex};
 
@@ -47,28 +46,4 @@ pub fn set_approval_mode(
     spawn_and_log_panic(async move {
         mb.set_approval_mode(mode_clone).await;
     });
-}
-
-/// Toggle yolo mode
-pub fn toggle_yolo_mode(
-    approval_mode_lock: &Arc<Mutex<ApprovalMode>>,
-    message_bus: &Arc<MessageBus>,
-) -> ApprovalMode {
-    let mut m = approval_mode_lock.lock().unwrap_or_else(|e| e.into_inner());
-    let new_mode = if *m == ApprovalMode::Yolo {
-        // 关掉 yolo 后回到 auto —— auto 是新的默认档，比 default 更贴近"能干活"。
-        ApprovalMode::Auto
-    } else {
-        ApprovalMode::Yolo
-    };
-    *m = new_mode.clone();
-
-    // Update MessageBus policy engine
-    let mb = message_bus.clone();
-    let mode_clone = new_mode.clone().into();
-    spawn_and_log_panic(async move {
-        mb.set_approval_mode(mode_clone).await;
-    });
-
-    new_mode
 }

@@ -14,7 +14,7 @@
 //! }
 //! ```
 //!
-//! 判定优先级 deny > ask > allow：deny 连 yolo 模式都挡得住，这是有意的 ——
+//! 判定优先级 deny > ask > allow：deny 连 bypassPermissions 都挡得住，这是有意的 ——
 //! 用户写下 deny 是为了兜住"任何情况下都别碰"，而不是给一个能被模式覆盖的建议。
 //!
 //! 与 Claude Code 的一处**故意偏差**：allow 规则匹配 shell 命令时，`&&`/`||`/`;`/
@@ -611,7 +611,7 @@ pub fn approval_mode_from_str(raw: &str) -> Option<ApprovalMode> {
         ApprovalMode::Default,
         ApprovalMode::AcceptEdits,
         ApprovalMode::Plan,
-        ApprovalMode::Yolo,
+        ApprovalMode::BypassPermissions,
         ApprovalMode::Auto,
     ] {
         if mode.as_str().to_ascii_lowercase() == normalized {
@@ -622,7 +622,11 @@ pub fn approval_mode_from_str(raw: &str) -> Option<ApprovalMode> {
     match normalized.as_str() {
         "ask" => Some(ApprovalMode::Default),
         "readonly" => Some(ApprovalMode::Plan),
-        "bypasspermissions" | "dangerouslyskippermissions" => Some(ApprovalMode::Yolo),
+        // 对标 Claude Code：官方名 `bypassPermissions`；`yolo` 是本项目早期
+        // 用的旧名、`--dangerously-skip-permissions` 是 CC 的 flag —— 都作别名。
+        "bypasspermissions" | "dangerouslyskippermissions" | "yolo" | "bypass" => {
+            Some(ApprovalMode::BypassPermissions)
+        }
         "autoconfirm" | "autoapprove" | "dontask" => Some(ApprovalMode::Auto),
         _ => None,
     }
@@ -916,7 +920,7 @@ mod tests {
         );
         assert_eq!(
             approval_mode_from_str("bypassPermissions"),
-            Some(ApprovalMode::Yolo)
+            Some(ApprovalMode::BypassPermissions)
         );
         assert_eq!(approval_mode_from_str("nonsense"), None);
     }
@@ -929,7 +933,7 @@ mod tests {
             ApprovalMode::Default,
             ApprovalMode::AcceptEdits,
             ApprovalMode::Plan,
-            ApprovalMode::Yolo,
+            ApprovalMode::BypassPermissions,
             ApprovalMode::Auto,
         ] {
             assert_eq!(
@@ -949,7 +953,7 @@ mod tests {
             ApprovalMode::Default,
             ApprovalMode::AcceptEdits,
             ApprovalMode::Plan,
-            ApprovalMode::Yolo,
+            ApprovalMode::BypassPermissions,
             ApprovalMode::Auto,
         ] {
             let serialized = serde_json::to_string(&mode).expect("serialize");
@@ -970,7 +974,7 @@ mod tests {
             ApprovalMode::Default,
             ApprovalMode::AcceptEdits,
             ApprovalMode::Plan,
-            ApprovalMode::Yolo,
+            ApprovalMode::BypassPermissions,
             ApprovalMode::Auto,
         ];
 

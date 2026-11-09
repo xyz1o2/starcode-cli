@@ -44,8 +44,9 @@ pub(crate) fn approval_mode_span(
             format!("⏸ plan"),
             Style::default().fg(Color::Rgb(0, 102, 102)),
         ),
-        ApprovalMode::Yolo => (
-            format!("⏵⏵ yolo"),
+        ApprovalMode::BypassPermissions => (
+            // 对标 Claude Code 的状态栏文案。
+            format!("⏵⏵ bypass permissions on"),
             Style::default()
                 .fg(theme.error)
                 .add_modifier(Modifier::BOLD),
