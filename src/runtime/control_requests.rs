@@ -57,7 +57,7 @@ pub async fn handle_request(
             // 控制请求都会被积压在 channel 里，导致“切换模型卡住”。因此把列表拉取
             // 放到后台任务，主循环立即继续处理后续请求。
             let client = agent.client.clone();
-            let tx = tx.clone();
+            let tx_in_task = tx.clone();
             // 这个 spawn 的结果**必须**回到 UI —— `awaiting_models` 只在收到
             // `ModelsList` / `ModelsError` 时清掉。所以下面必须保证任何退出路径
             // 都发得出消息：panic 被 catch 住并补一条 `ModelsError`。
@@ -66,6 +66,10 @@ pub async fn handle_request(
             // await，**一条日志、一条消息都没有**，UI 那边 `awaiting_models` 就永远
             // 停在 true，模型面板的转圈停不下来。真实事故：日志里出现
             // `[ListModels] Client state: …` 却再也没有后续，而进程本身活得很好。
+            //
+            // spawn 结束时把「列表非空」带回外层：外层据此重算上下文策略
+            // （agent 不允许跨 spawn 持有 &mut 引用，见下方 refresh_targets 处注释）。
+            let (fetch_tx, mut fetch_rx) = tokio::sync::oneshot::channel::<bool>();
             tokio::spawn(async move {
                 // 整条链路的**硬上限**。
                 //
@@ -119,31 +123,73 @@ pub async fn handle_request(
                         // 就切不过去"的来源。
                         let store = crate::core::config::provider_store::ProviderStore::new();
                         let ids = store.configured_provider_ids().await.unwrap_or_default();
-                        let _ = tx.send(StreamMessage::ConfiguredProviders(ids)).await;
-                        let _ = tx
+                        let _ = tx_in_task
+                            .send(StreamMessage::ConfiguredProviders(ids))
+                            .await;
+                        // 模型能力的目录缓存（context_window / safe cap）在
+                        // `list_models_with_mode` 内已经更新。外层（spawn 之外）
+                        // 会在拿到非空列表时重算上下文策略。缓存命中路径
+                        // （`cache_age_secs` 有值）同样算"有结果"。
+                        let has_models =
+                            !result.models.is_empty() || result.cache_age_secs.is_some();
+                        let _ = tx_in_task
                             .send(StreamMessage::ModelsList {
                                 models: result.models,
                                 cache_age_secs: result.cache_age_secs,
                             })
                             .await;
+                        let _ = fetch_tx.send(has_models);
                     }
                     Ok(Err(e)) => {
                         append_debug_log_line(&format!("[DEBUG] Worker: ListModels failed: {}", e));
-                        let _ = tx.send(StreamMessage::ModelsError(e)).await;
+                        let _ = tx_in_task.send(StreamMessage::ModelsError(e)).await;
                     }
                     Err(_) => {
                         append_debug_log_line(
                             "[DEBUG] Worker: ListModels panicked; replying with ModelsError so \
                              the UI stops waiting",
                         );
-                        let _ = tx
+                        let _ = tx_in_task
                             .send(StreamMessage::ModelsError(
                                 "Model list request failed unexpectedly.".to_string(),
                             ))
                             .await;
+                        let _ = fetch_tx.send(false);
                     }
                 }
             });
+
+            // 模型能力的目录缓存（context_window / safe cap）已由
+            // `list_models_with_mode` 灌进内存。若会话的上下文策略还停在
+            // built-in fallback（缓存冷时 `StarAgent::new` 算不出真实窗口），
+            // 现在重算一次，让压缩阈值对齐模型的真实上下文 —— 不然 1M 模型
+            // 会按 200K 的默认窗口收窄压缩预算，真正需要的压缩反而迟来。
+            //
+            // 发全 None 的 mutation 即可：`apply_runtime_settings` 对
+            // `context_window: None` 保留 requested 选择、按新 evidence 重算
+            // policy，并把 ack 发回 UI。revision 是 legacy 0（不占 UI 的单调
+            // 序列）、persistence 会话限定（不覆写用户的设置文件）。
+            //
+            // 拉取在后台跑，外层不阻塞地探一次结果：没回来就跳过 —— 拉到之后
+            // 用户随便发一条消息，后续 ListModels（面板/其他路径）还会再走到这。
+            // 典型时序下本地缓存几乎立即命中，几乎每次都能赶上。
+            if let Ok(has_models) = fetch_rx.try_recv() {
+                if has_models {
+                    apply_runtime_settings_and_persist(
+                        agent,
+                        &tx,
+                        RuntimeSettingsMutation {
+                            ui_revision: RuntimeSettingsMutation::LEGACY_UI_REVISION,
+                            persistence:
+                                crate::runtime::messages::RuntimeSettingsPersistencePolicy::SessionOnly,
+                            model: None,
+                            context_window: None,
+                            thinking_effort: None,
+                        },
+                    )
+                    .await;
+                }
+            }
         }
         AgentRequest::PluginToolsRefresh => {
             agent.refresh_plugin_tools().await;

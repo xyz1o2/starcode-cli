@@ -584,6 +584,7 @@ impl PromptBuilder {
         dynamic_context: Option<&str>,
         complexity_hint: Option<&str>,
         git_snapshot: Option<&str>,
+        goals_context: Option<&str>,
     ) -> Option<String> {
         let mut blocks: Vec<String> = Vec::new();
 
@@ -592,6 +593,9 @@ impl PromptBuilder {
                 "### Task Complexity & Planning Strategy\n\n{}",
                 hint
             ));
+        }
+        if let Some(goals) = goals_context.map(str::trim).filter(|s| !s.is_empty()) {
+            blocks.push(goals.to_string());
         }
         if let Some(ctx) = dynamic_context.map(str::trim).filter(|s| !s.is_empty()) {
             blocks.push(format!("### Retrieved Project Context\n\n{}", ctx));
@@ -858,16 +862,20 @@ mod tests {
 
     #[test]
     fn turn_context_is_none_when_nothing_to_say() {
-        assert!(PromptBuilder::build_turn_context(None, None, None).is_none());
-        assert!(PromptBuilder::build_turn_context(Some("  "), Some("\n"), None).is_none());
-        assert!(PromptBuilder::build_turn_context(None, None, Some("  ")).is_none());
+        assert!(PromptBuilder::build_turn_context(None, None, None, None).is_none());
+        assert!(PromptBuilder::build_turn_context(Some("  "), Some("\n"), None, None).is_none());
+        assert!(PromptBuilder::build_turn_context(None, None, Some("  "), None).is_none());
     }
 
     #[test]
     fn turn_context_wraps_blocks_in_system_reminder() {
-        let out =
-            PromptBuilder::build_turn_context(Some("retrieved doc"), Some("plan first"), None)
-                .expect("both blocks present");
+        let out = PromptBuilder::build_turn_context(
+            Some("retrieved doc"),
+            Some("plan first"),
+            None,
+            None,
+        )
+        .expect("both blocks present");
         assert!(out.starts_with("<system-reminder>"));
         assert!(out.ends_with("</system-reminder>"));
         // 复杂度提示排在检索上下文之前
@@ -883,6 +891,7 @@ mod tests {
             None,
             None,
             Some("# Git Status\n  Current branch: dev-m"),
+            None,
         )
         .expect("git snapshot present");
         assert!(out.starts_with("<system-reminder>"));
@@ -969,7 +978,7 @@ mod tests {
             true,
             None,
         );
-        assert!(msgs.len() >= 1, "至少要有静态块");
+        assert!(!msgs.is_empty(), "至少要有静态块");
         for msg in &msgs {
             assert!(
                 !msg.content.as_deref().unwrap_or_default().trim().is_empty(),
@@ -983,9 +992,34 @@ mod tests {
         // 不动环境变量：默认上限 4000，直接喂一段更长的进去。
         // （单测并行跑，set_var 会漏给同文件里的其它测试。）
         let long = "x".repeat(9000);
-        let out = PromptBuilder::build_turn_context(Some(&long), None, None).unwrap();
+        let out = PromptBuilder::build_turn_context(Some(&long), None, None, None).unwrap();
         assert!(out.contains("turn context truncated"));
         assert!(out.chars().count() < 5000);
+    }
+
+    /// 活跃目标块（`/goal`）排在检索上下文之前：模型应先知道"往哪去"，再看
+    /// "现在有什么材料"。这个顺序约束对应 agent_run.rs::render_active_goals
+    /// 的注入位次。
+    #[test]
+    fn turn_context_carries_goals_before_retrieved_context() {
+        let out = PromptBuilder::build_turn_context(
+            Some("retrieved doc"),
+            None,
+            None,
+            Some("## Active Goals (set via /goal)\n\n- **ship it** — 40%"),
+        )
+        .expect("goals block present");
+        assert!(out.contains("Active Goals"));
+        assert!(out.contains("ship it"));
+        let goals_at = out.find("Active Goals").unwrap();
+        let ctx_at = out.find("retrieved doc").unwrap();
+        assert!(goals_at < ctx_at, "目标块必须在检索上下文之前");
+    }
+
+    /// 空白目标块视同无目标：不被当成有效 block 触发 <system-reminder>。
+    #[test]
+    fn turn_context_ignores_blank_goals() {
+        assert!(PromptBuilder::build_turn_context(None, None, None, Some("  ")).is_none());
     }
 
     /// Bundle 只收核心工具的使用说明正文：会话内恒定 → 缓存前缀稳定。
@@ -1060,3 +1094,4 @@ mod tests {
         );
     }
 }
+// (appended below the existing tests module via edit)

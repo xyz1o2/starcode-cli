@@ -1104,6 +1104,26 @@ pub async fn run_app(
         agent_worker(agent, agent_rx, ui_tx).await;
     });
 
+    // 启动即预热模型能力目录（对标「模型长上下文长度需要自动设置」）：
+    //
+    // `1.05M` 这类真实上下文窗口来自 provider `/models` 的声明，而此前只有用户
+    // **打开过模型面板**才会入库（`AgentRequest::ListModels` 路径）。不点面板的话，
+    // worker 的上下文策略停在 built-in fallback（200K），压缩阈值整体收窄 ——
+    // 一个 1M 窗口的模型会在六分之五的寿命里按 200K 谈压缩。
+    //
+    // 这里在 worker 起来后立即发一次非强制的 ListModels：磁盘缓存命中几乎零成本；
+    // 结果到达后 control_requests 里会顺带按目录重算上下文策略并把 ack 发回 UI
+    // （见 ListModels 分支的 oneshot 段注释）。
+    if (agent_tx
+        .send(AgentRequest::ListModels { force: false })
+        .await)
+        .is_err()
+    {
+        crate::utils::logging::append_debug_log_line(
+            "[Worker] Startup ListModels prefetch dropped: worker closed",
+        );
+    }
+
     // Run UI loop
     let res = run_ui_loop(&mut terminal, &mut state, agent_tx, ui_rx).await;
 

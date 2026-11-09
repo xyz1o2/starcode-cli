@@ -190,7 +190,9 @@ fn build_ask_user_question_confirmation(
 /// 1. 正常的对象数组；
 /// 2. JSON 字符串（部分 LLM 会把数组序列化成字符串再塞回来）；
 /// 3. 逗号分隔的 label 串（如 `"Yes, No"`）——每个 label 生成一个选项。
-fn parse_options_value(raw: &serde_json::Value) -> Vec<crate::types::AskUserQuestionOption> {
+pub(crate) fn parse_options_value(
+    raw: &serde_json::Value,
+) -> Vec<crate::types::AskUserQuestionOption> {
     use crate::types::AskUserQuestionOption;
 
     match raw {

@@ -897,9 +897,50 @@ pub async fn handle_stream_update(
                     // 对标 Claude Code「auto-compact on/off」闪现：compact 发生时
                     // 给用户一个实时提示。payload 由 agent_loop.rs 的
                     // run_compression_check 发出。
+                    //
+                    // Toast 一闪而过容易错过（expire_toasts 会收掉），而"上下文被
+                    // 压缩过"恰恰是用户应该知道的事：帮助式输出从此（准）建立在
+                    // 摘要之上。所以除 toast 外，往对话区插一条独立的系统提示行
+                    // —— 格式 `✓ Context compacted: N → M tokens (strategy)`，与
+                    // CC 的 compact 提示行同形。
                     if let Some(on) = payload.get("on").and_then(|value| value.as_bool()) {
                         if on {
                             state.push_toast("Auto-compact on", ToastKind::Success);
+                            let tokens_before = payload
+                                .get("tokens_before")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let tokens_after = payload
+                                .get("tokens_after")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let strategy = payload
+                                .get("strategy")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("compact");
+                            let line = if tokens_before > 0 {
+                                format!(
+                                    "✓ Context compacted: {} → {} tokens ({})",
+                                    tokens_before, tokens_after, strategy
+                                )
+                            } else {
+                                format!("✓ Context compacted ({})", strategy)
+                            };
+                            // 同一行不重复插：Trace 可能对 predictive 与常规压缩
+                            // 各发一次，相邻两条一样的提示行只是噪声
+                            let dupe = state
+                                .chat_history
+                                .last()
+                                .map(|e| {
+                                    e.entry_type == ChatEntryType::Assistant && e.content == line
+                                })
+                                .unwrap_or(false);
+                            if !dupe {
+                                state
+                                    .chat_history
+                                    .push(ChatEntry::assistant(&line).with_streaming(false));
+                                state.virtual_list.mark_all_dirty();
+                            }
                         } else {
                             state.push_toast("Auto-compact off", ToastKind::Info);
                         }

@@ -334,10 +334,16 @@ impl Agent {
             let git_snapshot = crate::agent::prompt_builder::PromptBuilder::render_git_snapshot(
                 &cwd,
             );
+            // 活跃目标（`/goal` 持久化的）注入当轮上下文：模型不知道目标存在的话，
+            // `/goal` 就只是一条本地笔记 —— 设定了目标 agent 也照做自己的。
+            // 每轮重读 goals.json（本地小文件 IO），用户刚改的 progress 下一轮
+            // 就能被看到，不值得上缓存。
+            let goal_context = Self::render_active_goals(&cwd);
             let turn_context = crate::agent::prompt_builder::PromptBuilder::build_turn_context(
                 dynamic_ctx.as_deref(),
                 complexity_hint.as_deref(),
                 git_snapshot.as_deref(),
+                goal_context.as_deref(),
             );
             // 日期在会话第一条用户消息时固定一次，之后整场会话复用。
             // 每轮重取 `Local::now()` 会让跨零点的会话白白重建一次整个缓存前缀
@@ -461,7 +467,7 @@ impl Agent {
             agent_for_loop.session_messages = self.session_messages.clone();
             agent_for_loop.abort_flag = self.abort_flag.clone();
             agent_for_loop.abort_token = self.abort_token.clone();
-            agent_for_loop.task_complexity = self.task_complexity.clone();
+            agent_for_loop.task_complexity = self.task_complexity;
             // steering 队列要一路传到这个 fresh Agent —— 运行中插入的需求
             // 是在这里被消费、插进对话的。
             agent_for_loop.steering_queue = self.steering_queue.clone();
@@ -642,6 +648,43 @@ impl Agent {
         }
 
         Ok((final_response, latest_usage))
+    }
+
+    /// 活跃目标（`/goal` 设定的）当轮上下文块。无活跃目标返回 None。
+    ///
+    /// 之所以在 agent 侧重读文件而不是跟着命令走：`/goal` 写进的只是
+    /// `.star/goals.json`，模型对它毫无感知 —— 这就是「goal 指令没实现好」
+    /// 的根子：设了目标，agent 照样不知道要往哪个方向推进。
+    fn render_active_goals(cwd: &std::path::Path) -> Option<String> {
+        let path = cwd.join(".star").join("goals.json");
+        if !path.exists() {
+            return None;
+        }
+        let content = std::fs::read_to_string(&path).ok()?;
+        let goals: Vec<crate::core::goal_tracking::Goal> = serde_json::from_str(&content).ok()?;
+        let active: Vec<_> = goals
+            .iter()
+            .filter(|g| {
+                !matches!(
+                    g.status,
+                    crate::core::goal_tracking::GoalStatus::Completed
+                        | crate::core::goal_tracking::GoalStatus::Cancelled
+                )
+            })
+            .collect();
+        if active.is_empty() {
+            return None;
+        }
+        let mut body = String::from("## Active Goals (set via /goal)\n\n");
+        for g in active {
+            body.push_str(&format!("- **{}** — {}%\n", g.title, g.progress));
+        }
+        body.push_str(
+            "\nThese are goals the user is tracking for this project. Work towards them when \
+             relevant to the current request; report progress updates back so the user can \
+             run `/goal progress`.\n",
+        );
+        Some(body)
     }
 }
 

@@ -2303,3 +2303,61 @@ async fn turn_error_promotes_soft_tool_failures_back_to_red() {
         "回合终结性失败必须把本回合的软失败提级回红 ✗"
     );
 }
+
+/// auto_compact Trace 除 toast 外，必须往对话区插一条 `✓ Context compacted: …`
+/// 的可见提示行 —— toast 一闪而过，而"上下文被压缩过"是用户必须知道的事。
+#[tokio::test]
+async fn auto_compact_trace_inserts_a_visible_chat_line() {
+    let mut state = ChatState::new();
+    let (agent_tx, _agent_rx) = mpsc::channel(1);
+    let before = state.chat_history.len();
+
+    handle_stream_update(
+        &mut state,
+        StreamMessage::Trace {
+            message_id: 1,
+            event: "auto_compact".to_string(),
+            payload: serde_json::json!({
+                "on": true,
+                "tokens_before": 120000u64,
+                "tokens_after": 50000u64,
+                "strategy": "auto_compact",
+            }),
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+
+    assert!(state.chat_history.len() > before, "必须插入一条可见条目");
+    let line = &state.chat_history[state.chat_history.len() - 1];
+    assert!(
+        line.content
+            .contains("Context compacted: 120000 → 50000 tokens (auto_compact)"),
+        "提示行必须带压缩前后 token 数与策略：{:?}",
+        line.content
+    );
+
+    // 相邻重复的 Trace 不再插第二条
+    handle_stream_update(
+        &mut state,
+        StreamMessage::Trace {
+            message_id: 1,
+            event: "auto_compact".to_string(),
+            payload: serde_json::json!({
+                "on": true,
+                "tokens_before": 120000u64,
+                "tokens_after": 50000u64,
+                "strategy": "auto_compact",
+            }),
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state.chat_history.len(),
+        before + 1,
+        "相邻重复提示只保留一条"
+    );
+}
