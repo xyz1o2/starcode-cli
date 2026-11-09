@@ -154,10 +154,20 @@ impl ThemeManager {
     pub fn set_theme(&mut self, name: &str) -> bool {
         if let Some(index) = self.themes.iter().position(|t| t.name == name) {
             self.current_index = index;
+            publish_current_theme(&self.themes[self.current_index]);
             true
         } else {
             false
         }
+    }
+
+    /// 主题名 → 颜色的直接查询（不需要 ThemeManager 实例）。
+    ///
+    /// 深层渲染工具函数（如 `build_user_body_block`）拿不到 `ChatState`，
+    /// 从这里取当前主题的字段。进程里真正的 `ThemeManager` 在 `ChatState`
+    /// 上，`set_theme` 时会把当前主题同步发布到这里。
+    pub fn current_theme() -> std::sync::Arc<Theme> {
+        shared_current_theme()
     }
 
     pub fn list_themes(&self) -> Vec<&str> {
@@ -166,5 +176,32 @@ impl ThemeManager {
 
     pub fn next_theme(&mut self) {
         self.current_index = (self.current_index + 1) % self.themes.len();
+        publish_current_theme(&self.themes[self.current_index]);
+    }
+}
+
+/// 当前主题的进程级快照 —— `set_theme` / `next_theme` 时发布。
+///
+/// 背景：主题此前只活在 `ChatState.theme_manager` 里，而一些**深层渲染工具
+/// 函数**（`build_user_body_block` 等）不在组件调用链上、拿不到 `state`。
+/// 每当 `ThemeManager` 切换主题就覆盖这把锁，工具函数读最近一帧的主题。
+/// 测试专用构造（`new_for_test` 一类）不经过 `set_theme` 时读起来是
+/// `default_dark`，与首套预设一致。
+static CURRENT_THEME: std::sync::OnceLock<std::sync::RwLock<std::sync::Arc<Theme>>> =
+    std::sync::OnceLock::new();
+
+fn shared_current_theme() -> std::sync::Arc<Theme> {
+    let lock = CURRENT_THEME
+        .get_or_init(|| std::sync::RwLock::new(std::sync::Arc::new(Theme::default_dark())));
+    lock.read()
+        .map(|t| t.clone())
+        .unwrap_or_else(|_| std::sync::Arc::new(Theme::default_dark()))
+}
+
+fn publish_current_theme(theme: &Theme) {
+    let lock = CURRENT_THEME
+        .get_or_init(|| std::sync::RwLock::new(std::sync::Arc::new(Theme::default_dark())));
+    if let Ok(mut slot) = lock.write() {
+        *slot = std::sync::Arc::new(theme.clone());
     }
 }

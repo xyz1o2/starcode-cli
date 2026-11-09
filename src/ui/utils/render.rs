@@ -961,24 +961,44 @@ pub fn build_user_body_block(content: &str, wrap_width: usize) -> Vec<Line<'stat
     if wrap_width == 0 {
         return vec![];
     }
+    // 底色板走当前主题的 `user_message_bg`：13 套主题都定义了这个字段、
+    // 却一直没有渲染引用 —— 用户消息「> 」与 assistant 正文毫无视觉区分。
+    // 深色主题配深灰底、浅色主题配浅灰底，与 `Theme::user_fg` 同一套来源。
+    let bg = crate::ui::themes::ThemeManager::current_theme().user_message_bg;
+    let user_style = Style::default().fg(Color::White).bg(bg);
     let mut lines: Vec<Line<'static>> = Vec::new();
     for line in content.lines() {
         let clean = strip_ansi_codes(line);
         if line_spans_display_width(&[Span::raw(&clean)]) <= wrap_width {
-            lines.push(Line::from(Span::styled(
-                clean,
-                Style::default().fg(Color::White),
-            )));
+            lines.push(pad_line_to_width(
+                Span::styled(clean, user_style),
+                wrap_width,
+            ));
         } else {
             for wrapped in wrap_text_to_width(&clean, wrap_width) {
-                lines.push(Line::from(Span::styled(
-                    wrapped,
-                    Style::default().fg(Color::White),
-                )));
+                lines.push(pad_line_to_width(
+                    Span::styled(wrapped, user_style),
+                    wrap_width,
+                ));
             }
         }
     }
     lines
+}
+
+/// 给一条 span 打底色并补空格填充到指定显示宽度。
+///
+/// 底色板要"整行铺满"才好看：只给文字部分在不补格的情况下，同一消息里长行短行
+/// 的底色块参差不齐。补的空格继承同一个样式，`write_lines_to_buffer` 会把
+/// `bg` 写进那些格子。
+fn pad_line_to_width(content_span: Span<'static>, target_width: usize) -> Line<'static> {
+    let span_style = content_span.style;
+    let current = line_spans_display_width(std::slice::from_ref(&content_span));
+    if current >= target_width {
+        return Line::from(content_span);
+    }
+    let pad = " ".repeat(target_width - current);
+    Line::from(vec![content_span, Span::styled(pad, span_style)])
 }
 
 pub fn build_diff_block(diff_content: &str, wrap_width: usize) -> Vec<Line<'static>> {
@@ -1571,6 +1591,37 @@ pub fn apply_alignment(lines: &mut Vec<Line<'static>>, align: Alignment) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 用户消息必须带主题底色板，且铺满整行 —— 只给文字部分上底色时，
+    /// 长行短行的色块参差不齐，"底色板"就名不副实。
+    #[test]
+    fn user_body_lines_carry_message_bg_filled_to_full_width() {
+        let bg = crate::ui::themes::ThemeManager::current_theme().user_message_bg;
+        let lines = build_user_body_block("短行\n多长一些的一行内容", 40);
+        assert_eq!(lines.len(), 2);
+        for l in lines {
+            assert_eq!(
+                l.spans
+                    .iter()
+                    .find(|s| !s.content.trim().is_empty())
+                    .map(|s| s.style.bg),
+                Some(Some(bg)),
+                "每行可见文字必须带 user_message_bg 底色"
+            );
+            // 行宽铺满：末尾的填充格继承同一 bg
+            let width = line_spans_display_width(&l.spans);
+            assert_eq!(width, 40, "底色板必须铺满折行宽度");
+            // 所有 span 都带 bg（含尾部空白填充）
+            for s in &l.spans {
+                assert_eq!(
+                    s.style.bg,
+                    Some(bg),
+                    "填充格也必须染上底色：{:?}",
+                    s.content
+                );
+            }
+        }
+    }
 
     /// 度量口径守卫：`display_width` 必须与 ratatui 自己算出的宽度逐字符一致。
     ///

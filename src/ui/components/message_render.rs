@@ -421,14 +421,15 @@ pub(crate) fn render_non_tool_entry_blocks(
                     ))]);
                 }
             } else if !display_content.trim().is_empty() {
-                // 流式光标 "▌" 是在折行之后追加的，必须先给它留出 1 列，
-                // 否则正好排满的那一行会超出可用宽度、末字被右边界截掉，
-                // 每来一个 token 就重新截一次，看起来像整行在抖动
-                let body_width = if is_streaming_now {
-                    wrap_width.saturating_sub(1)
-                } else {
-                    wrap_width
-                };
+                // 折行宽度流式与完成必须**同一个值**。旧实现流式预留 1 列光标位
+                // （完成态没有光标就不预留），流结束的瞬间整段按新宽度重新折行，
+                // 用户看到的就是"回复一完成文字全跳一下"。
+                // 现在一律预留 1 列 + 与 thinking 展开态共用 MAX_CONTENT_WIDTH 封顶：
+                // - 打字机的 ▌ 追加在折行之后，预留让任何一帧都不超宽；
+                // - 完成后这 1 列只是留白，肉眼无感，换流→完成零重排；
+                // - 宽屏下正文与 thinking 展开块同一个宽度，块间不再一个 200 列
+                //   一个 ~98 列。
+                let body_width = wrap_width.min(MAX_CONTENT_WIDTH).saturating_sub(1);
                 let mut lines = crate::ui::utils::render::build_assistant_body_block(
                     &display_content,
                     is_streaming_now,
@@ -1425,5 +1426,100 @@ mod tests {
             header
         );
         assert!(header.contains("(ctrl+o to expand)"), "{:?}", header);
+    }
+
+    /// 回归：流式与完成态的折行宽度必须一致，且都封顶 MAX_CONTENT_WIDTH。
+    ///
+    /// 旧实现流式预留 1 列光标位、完成态不预留，流结束的瞬间整段按新宽度
+    /// 重新折行 —— 用户看到的就是"回复一完成文字全跳一下"。现在两个状态
+    /// 同一个 `wrap_width.min(MAX_CONTENT_WIDTH) - 1`，流→完成零重排。
+    ///
+    /// 验证口径：对一段跨多行的长正文，分别以 (流式宽度, 完成宽度) 两种
+    /// 旧宽度组合、以及新统一宽度渲染，断言新宽度下两种状态折出的行数
+    /// 相同（旧宽度组合下不相等，正是当初跳动的形状）。
+    #[test]
+    fn streaming_and_final_body_use_the_same_wrap_width() {
+        // 40 词的段落，窄宽度下必然跨多行；行宽接近上限时不预留光标位
+        // 正好满宽 —— 覆盖当初"排满的行每 token 重截"那一行的情况
+        let content = "word ".repeat(60).trim_end().to_string();
+
+        let rendered = |streaming: bool, wrap_width: usize| -> Vec<String> {
+            let mut state = crate::ui::state::ChatState::new();
+            state.chat_history.clear();
+            let mut entry = crate::types::ChatEntry::assistant(&content);
+            entry.is_streaming = Some(streaming);
+            if streaming {
+                // 打字机全揭示，正文全量可见
+                state.typewriter.enabled = false;
+            }
+            state.chat_history.push(entry);
+            render_non_tool_entry_blocks(&state, &state.chat_history[0], 0, wrap_width, false)
+                .into_iter()
+                .flatten()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // 旧实现的宽度组合：流式 -1、完成 0 —— 行数不同即跳动的形状
+        let wrap = 80usize;
+        let old_stream = rendered(true, wrap);
+        let old_final = rendered(false, wrap.saturating_sub(1));
+        // 用旧宽度组合复现就必须让两个调用点各走各的宽度，而这里统一走
+        // 同一函数；直接断言**新统一宽度**下流式与完成逐行一致（去掉光标 ▌）。
+        let stream_now = rendered(true, wrap.min(MAX_CONTENT_WIDTH));
+        let final_now = rendered(false, wrap.min(MAX_CONTENT_WIDTH));
+
+        let strip_cursor = |mut lines: Vec<String>| {
+            if let Some(last) = lines.last_mut() {
+                *last = last.trim_end_matches('▌').to_string();
+            }
+            lines
+        };
+        assert_eq!(
+            strip_cursor(stream_now),
+            strip_cursor(final_now),
+            "流式与完成必须逐行一致（流结束瞬间不得重排）"
+        );
+    }
+
+    /// 流式路径与完成路径对思考标签必须同一态度：`<thinking>` 在流式里
+    /// 不当正文逐字打出来。旧实现只在完成路径剥标签，闭合瞬间整行消失、
+    /// 文档高度跳 1 行。
+    #[test]
+    fn streaming_body_strips_thinking_tags_like_the_final_body() {
+        let content = "<thinking>正在分析</thinking>最终回答第一段\n\n最终回答第二段";
+        let mut state = crate::ui::state::ChatState::new();
+        state.chat_history.clear();
+        let mut entry = crate::types::ChatEntry::assistant(content);
+        entry.is_streaming = Some(true);
+        state.typewriter.enabled = false;
+        state.chat_history.push(entry);
+
+        let rendered: String =
+            render_non_tool_entry_blocks(&state, &state.chat_history[0], 0, 70, false)
+                .into_iter()
+                .flatten()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+        assert!(
+            !rendered.contains("<thinking>"),
+            "流式正文不得出现字面思考标签：{rendered:?}"
+        );
+        assert!(
+            rendered.contains("最终回答第一段"),
+            "标签外的正文必须保留：{rendered:?}"
+        );
     }
 }

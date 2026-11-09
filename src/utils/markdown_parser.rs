@@ -77,28 +77,9 @@ pub fn parse_markdown_content_ext(content: &str, extract_thinking: bool) -> Vec<
             blocks.push(ContentBlock::Text(rest.to_string()));
         }
     } else {
-        // Strip all thinking tags
-        let mut remaining = content.to_string();
-        for (open, close) in THINKING_TAGS {
-            remaining = remaining.replace(open, "").replace(close, "");
-        }
-
-        // If stripping thinking tags left nothing, extract content from inside the tags
-        // This handles models that wrap entire response in thinking tags
-        if remaining.trim().is_empty() && !content.trim().is_empty() {
-            for (open, close) in THINKING_TAGS {
-                if let Some(start) = content.find(open) {
-                    let content_start = start + open.len();
-                    if let Some(end) = content[content_start..].find(close) {
-                        let inner = &content[content_start..content_start + end];
-                        if !inner.trim().is_empty() {
-                            remaining = inner.to_string();
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        // Strip all thinking tags (语义与流式路径共用 strip_thinking_tags_inline，
+        // 保证完成态与流式态对标签的处理一字不差)
+        let remaining = strip_thinking_tags_inline(content);
 
         if !remaining.trim().is_empty() {
             blocks.push(ContentBlock::Text(remaining));
@@ -115,6 +96,37 @@ pub fn parse_markdown_content_ext(content: &str, extract_thinking: bool) -> Vec<
 /// Backward-compatible wrapper: always extracts `<thinking>` blocks.
 pub fn parse_markdown_content(content: &str) -> Vec<ContentBlock> {
     parse_markdown_content_ext(content, true)
+}
+
+/// 把内容里的 `<thinking>` / `༿` 标签剥成纯正文。
+///
+/// 流式与完成两条渲染路径必须对思考标签同一态度：旧实现只在完成路径剥标签，
+/// 流式把 `<thinking>` 当正文逐字打出来，闭合瞬间整行消失、文档高度跳 1 行。
+///
+/// 这是 `parse_markdown_content_ext` 的 `extract_thinking = false` 路径的抽取，
+/// 语义与其逐字一致：剥掉所有成对标签；如果剥完什么都不剩而原文非空
+/// （模型把整个回复包在 `༿` 里），从标签内部提取正文。
+pub(crate) fn strip_thinking_tags_inline(content: &str) -> String {
+    let mut remaining = content.to_string();
+    for (open, close) in THINKING_TAGS {
+        remaining = remaining.replace(open, "").replace(close, "");
+    }
+
+    if remaining.trim().is_empty() && !content.trim().is_empty() {
+        for (open, close) in THINKING_TAGS {
+            if let Some(start) = content.find(open) {
+                let content_start = start + open.len();
+                if let Some(end) = content[content_start..].find(close) {
+                    let inner = &content[content_start..content_start + end];
+                    if !inner.trim().is_empty() {
+                        remaining = inner.to_string();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    remaining
 }
 
 /// Render a single thinking block with dimmed styling and vertical bar prefix.
@@ -1218,7 +1230,16 @@ pub fn render_markdown_incremental(
     content: &str,
     wrap_width: Option<usize>,
 ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
-    // 防御：边界必须落在内容范围内且是 UTF-8 字符边界，否则整体视为 unstable
+    // 与完成态一致地剥掉思考标签：流式不再把 `<thinking>` 当正文逐字打出来，
+    // 闭合瞬间也不会整行消失（旧实现 completion 路径剥、流式路径不剥 → 跳行）。
+    // 无标签时零拷贝走原引用，避免流式每个 token 都做一次全量字符串分配。
+    let stripped;
+    let content: &str = if content.contains("<thinking>") {
+        stripped = strip_thinking_tags_inline(content);
+        &stripped
+    } else {
+        content
+    };
     let boundary = {
         let b = last_paragraph_boundary(content);
         if b == 0 || b > content.len() || !content.is_char_boundary(b) {
