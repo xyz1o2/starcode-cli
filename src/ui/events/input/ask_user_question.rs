@@ -1,6 +1,37 @@
 //! AskUserQuestion 工具的交互输入（选项选择 + 自由文本回答）。
 //!
+//! 一次调用可以携带多个问题（对标 Claude Code 的 `questions` 数组），UI 逐题
+//! 引导：每回答完一题把 `AskUserAnswer` 存进 `pending_question_answers` 并推进
+//! `pending_question_index`，全部答完才发一次 `UserAnswers` —— 模型不会中途
+//! 看到半套答案，用户也可以在任意一题按 Esc 整体放弃。
+
 use super::*;
+
+/// 把当前确认卡的当前问题提取成 owned 数据，避免与后续的状态变更借用冲突。
+fn current_question_data(state: &ChatState) -> Option<(String, Vec<String>, bool)> {
+    let entry = state
+        .pending_confirmation_entry_idx
+        .and_then(|idx| state.chat_history.get(idx))?;
+    let conf = entry.confirmation.as_ref()?;
+    match &conf.details {
+        crate::types::ConfirmationDetails::AskUserQuestion { questions } => {
+            let item = questions.get(state.pending_question_index)?;
+            Some((
+                item.question.clone(),
+                item.options.iter().map(|o| o.label.clone()).collect(),
+                item.multi_select,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// 更新确认卡的渲染结果缓存。
+fn invalidate_cache(state: &mut ChatState) {
+    if let Some(idx) = state.pending_confirmation_entry_idx {
+        state.rendered_cache.remove(&idx);
+    }
+}
 
 /// Handle keyboard input for the AskUserQuestion confirmation dialog.
 /// Supports option navigation (Up/Down/j/k), direct selection (1-9),
@@ -12,26 +43,11 @@ pub(super) async fn handle_ask_user_question_input(
     agent_tx: &mpsc::Sender<AgentRequest>,
     tool_call_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Extract option info from the confirmation entry
-    let (option_count, multi_select) = state
-        .pending_confirmation_entry_idx
-        .and_then(|idx| state.chat_history.get(idx))
-        .and_then(|entry| entry.confirmation.as_ref())
-        .map(|conf| match &conf.details {
-            crate::types::ConfirmationDetails::AskUserQuestion {
-                options,
-                multi_select,
-                ..
-            } => (options.len(), *multi_select),
-            _ => (0, false),
-        })
-        .unwrap_or((0, false));
-
-    let invalidate_cache = |state: &mut ChatState| {
-        if let Some(idx) = state.pending_confirmation_entry_idx {
-            state.rendered_cache.remove(&idx);
-        }
+    let Some((question_text, option_labels, multi_select)) = current_question_data(state) else {
+        return Ok(());
     };
+    let option_count = option_labels.len();
+    let other_idx = option_count;
 
     if state.pending_question_other_focused {
         // "Other" text input mode
@@ -61,11 +77,12 @@ pub(super) async fn handle_ask_user_question_input(
             }
             KeyCode::Enter => {
                 // Confirm with other input included
-                submit_ask_user_question_answer(
+                submit_current_question(
                     state,
                     agent_tx,
                     tool_call_id,
-                    option_count,
+                    &question_text,
+                    &option_labels,
                     multi_select,
                 )
                 .await?;
@@ -82,8 +99,6 @@ pub(super) async fn handle_ask_user_question_input(
         }
     } else {
         // Option navigation mode
-        // "Other" is at index option_count (after all regular options)
-        let other_idx = option_count;
         let total_items = option_count + 1; // options + Other
 
         match key.code {
@@ -129,11 +144,12 @@ pub(super) async fn handle_ask_user_question_input(
                     } else {
                         // Single-select: select and confirm immediately
                         state.pending_confirmation_choice = opt_idx;
-                        submit_ask_user_question_answer(
+                        submit_current_question(
                             state,
                             agent_tx,
                             tool_call_id,
-                            option_count,
+                            &question_text,
+                            &option_labels,
                             multi_select,
                         )
                         .await?;
@@ -162,26 +178,30 @@ pub(super) async fn handle_ask_user_question_input(
                     // "Other" is focused — switch to text input mode instead of submitting
                     state.pending_question_other_focused = true;
                     invalidate_cache(state);
-                } else if multi_select && !state.pending_question_selections.is_empty() {
-                    submit_ask_user_question_answer(
+                } else if multi_select {
+                    if !state.pending_question_selections.is_empty() {
+                        submit_current_question(
+                            state,
+                            agent_tx,
+                            tool_call_id,
+                            &question_text,
+                            &option_labels,
+                            multi_select,
+                        )
+                        .await?;
+                    }
+                    // 多选没勾任何项：Enter 忽略，避免交上去一个空答案
+                } else if state.pending_confirmation_choice < option_count {
+                    submit_current_question(
                         state,
                         agent_tx,
                         tool_call_id,
-                        option_count,
-                        multi_select,
-                    )
-                    .await?;
-                } else if !multi_select && option_count > 0 {
-                    submit_ask_user_question_answer(
-                        state,
-                        agent_tx,
-                        tool_call_id,
-                        option_count,
+                        &question_text,
+                        &option_labels,
                         multi_select,
                     )
                     .await?;
                 }
-                // If multi_select but nothing selected, ignore Enter
             }
             _ => {}
         }
@@ -190,96 +210,115 @@ pub(super) async fn handle_ask_user_question_input(
     Ok(())
 }
 
-/// Collect the user's answer from the AskUserQuestion UI state and submit it.
-pub(super) async fn submit_ask_user_question_answer(
+/// 收集当前题的答案并存起来；这一题是最后一题时打包发 `UserAnswers`。
+async fn submit_current_question(
     state: &mut ChatState,
     agent_tx: &mpsc::Sender<AgentRequest>,
     tool_call_id: &str,
-    option_count: usize,
+    question_text: &str,
+    option_labels: &[String],
     multi_select: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Collect answer labels from the confirmation entry options
-    let answers: Vec<String> = if multi_select {
+    let selected: Vec<String> = if multi_select {
         let mut indices = state.pending_question_selections.clone();
         indices.sort();
         indices
-            .iter()
-            .filter_map(|&idx| {
-                state
-                    .pending_confirmation_entry_idx
-                    .and_then(|entry_idx| state.chat_history.get(entry_idx))
-                    .and_then(|entry| entry.confirmation.as_ref())
-                    .and_then(|conf| match &conf.details {
-                        crate::types::ConfirmationDetails::AskUserQuestion { options, .. } => {
-                            options.get(idx).map(|o| o.label.clone())
-                        }
-                        _ => None,
-                    })
-            })
+            .into_iter()
+            .filter_map(|idx| option_labels.get(idx).cloned())
             .collect()
-    } else if option_count > 0 {
+    } else {
         let focused = state.pending_confirmation_choice;
-        state
-            .pending_confirmation_entry_idx
-            .and_then(|entry_idx| state.chat_history.get(entry_idx))
-            .and_then(|entry| entry.confirmation.as_ref())
-            .and_then(|conf| match &conf.details {
-                crate::types::ConfirmationDetails::AskUserQuestion { options, .. } => {
-                    options.get(focused).map(|o| o.label.clone())
-                }
-                _ => None,
-            })
+        option_labels
+            .get(focused)
+            .filter(|_| focused < option_labels.len())
+            .cloned()
             .into_iter()
             .collect()
-    } else {
-        Vec::new()
     };
 
-    let text_input = if state.pending_other_input.is_empty() {
+    let text_input = if state.pending_other_input.trim().is_empty() {
         None
     } else {
-        Some(state.pending_other_input.clone())
+        Some(state.pending_other_input.trim().to_string())
     };
 
-    // Update ChatEntry outcome text
-    if let Some(idx) = state.pending_confirmation_entry_idx {
-        if let Some(entry) = state.chat_history.get_mut(idx) {
-            if let Some(conf) = entry.confirmation.as_mut() {
-                let outcome_str = if answers.is_empty() && text_input.is_some() {
-                    format!("User input: {}", text_input.as_ref().unwrap())
-                } else if answers.is_empty() {
-                    "No selection".to_string()
-                } else if answers.len() == 1 {
-                    if let Some(ref ti) = text_input {
-                        format!("User selected: {} (with input: {})", answers[0], ti)
-                    } else {
-                        format!("User selected: {}", answers[0])
-                    }
-                } else {
-                    format!(
-                        "User selected {} options: {}",
-                        answers.len(),
-                        answers.join(", ")
-                    )
-                };
-                conf.outcome = Some(outcome_str);
-            }
-        }
-        state.rendered_cache.remove(&idx);
+    // 单选没选任何项且没有自由文本：交不上一份空答案。
+    // （UI 入口保证了这条，这里只是防御。）
+    if selected.is_empty() && text_input.is_none() {
+        invalidate_cache(state);
+        return Ok(());
     }
 
-    let _ = agent_tx
-        .send(AgentRequest::ConfirmTool {
-            tool_call_id: tool_call_id.to_string(),
-            outcome: crate::types::ToolConfirmationOutcome::UserAnswer {
-                answers,
-                text_input,
-            },
-            feedback: None,
-        })
-        .await;
+    let answer = crate::types::AskUserAnswer {
+        question: question_text.to_string(),
+        selected,
+        text_input,
+    };
+    state.pending_question_answers.push(answer);
 
-    state.clear_pending_confirmation();
+    // 推进到下一题或结束整个提问。
+    let total_questions = state
+        .pending_confirmation_entry_idx
+        .and_then(|idx| state.chat_history.get(idx))
+        .and_then(|entry| entry.confirmation.as_ref())
+        .and_then(|conf| match &conf.details {
+            crate::types::ConfirmationDetails::AskUserQuestion { questions } => {
+                Some(questions.len())
+            }
+            _ => None,
+        })
+        .unwrap_or(0);
+
+    state.pending_question_index += 1;
+    if state.pending_question_index >= total_questions {
+        let answers = state.pending_question_answers.clone();
+        // 卡片上的结局摘要：每题一行 "question → 答案"。
+        if let Some(idx) = state.pending_confirmation_entry_idx {
+            if let Some(entry) = state.chat_history.get_mut(idx) {
+                if let Some(conf) = entry.confirmation.as_mut() {
+                    let summary = answers
+                        .iter()
+                        .map(|a| {
+                            let chosen = if a.selected.is_empty() {
+                                a.text_input
+                                    .clone()
+                                    .unwrap_or_else(|| "(empty)".to_string())
+                            } else {
+                                let mut v = a.selected.join(", ");
+                                if let Some(ti) = &a.text_input {
+                                    v.push_str(&format!(" (+ input: {})", ti));
+                                }
+                                v
+                            };
+                            format!("{} → {}", a.question, chosen)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    conf.outcome = Some(if answers.len() == 1 {
+                        summary
+                    } else {
+                        format!("Answered {} questions: {}", answers.len(), summary)
+                    });
+                }
+            }
+            state.rendered_cache.remove(&idx);
+        }
+        let _ = agent_tx
+            .send(AgentRequest::ConfirmTool {
+                tool_call_id: tool_call_id.to_string(),
+                outcome: crate::types::ToolConfirmationOutcome::UserAnswers { answers },
+                feedback: None,
+            })
+            .await;
+        state.clear_pending_confirmation();
+    } else {
+        // 还有下一题：重置本题的交互状态，光标回到第一个选项。
+        state.pending_question_selections.clear();
+        state.pending_other_input.clear();
+        state.pending_question_other_focused = false;
+        state.pending_confirmation_choice = 0;
+        invalidate_cache(state);
+    }
 
     Ok(())
 }

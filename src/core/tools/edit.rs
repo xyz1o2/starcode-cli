@@ -988,7 +988,8 @@ impl crate::core::tools::tools::ToolInvocation for EditToolInvocation {
                                         confirmed_untrusted_edit.store(true, Ordering::Release);
                                     }
                                     ToolConfirmationOutcome::Cancel
-                                    | ToolConfirmationOutcome::UserAnswer { .. } => return,
+                                    | ToolConfirmationOutcome::UserAnswer { .. }
+                                    | ToolConfirmationOutcome::UserAnswers { .. } => return,
                                 }
 
                                 if matches!(outcome, ToolConfirmationOutcome::ProceedAlwaysAndSave) {

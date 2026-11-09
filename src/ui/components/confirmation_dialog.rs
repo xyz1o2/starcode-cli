@@ -298,9 +298,13 @@ pub fn build_confirmation_card_block(
                     title.clone()
                 }
             }
-            ConfirmationDetails::AskUserQuestion {
-                header, question, ..
-            } => header.clone().unwrap_or_else(|| truncate_str(question, 40)),
+            ConfirmationDetails::AskUserQuestion { questions, .. } => {
+                let first = questions.first();
+                let header = first.and_then(|q| q.header.clone());
+                header.clone().unwrap_or_else(|| {
+                    truncate_str(first.map(|q| q.question.as_str()).unwrap_or(""), 40)
+                })
+            }
         };
         // 已裁决的卡片：**只显示图标 + 内容摘要**，不显示 "Allowed (once)" 这类
         // 裁决文字。
@@ -723,6 +727,7 @@ pub fn build_ask_user_question_card(
     selected_choice: usize,     // 1-based focused option index
     selected_options: &[usize], // selected indices for multi-select
     other_input: &str,          // "Other" text input value
+    question_index: usize,      // 当前正在回答第几个问题（0-based）
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     use crate::types::ConfirmationDetails;
@@ -744,28 +749,32 @@ pub fn build_ask_user_question_card(
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Extract owned data to satisfy 'static lifetime
-    let (question_text, header_text, mode_label, options_data, multi_select_flag) =
-        if let ConfirmationDetails::AskUserQuestion {
-            question,
-            header,
-            options,
-            multi_select,
-        } = &confirmation.details
-        {
-            let h = header.clone().unwrap_or_else(|| "Question".to_string());
-            let m = if *multi_select {
-                " (多选)".to_string()
-            } else {
-                " (单选)".to_string()
-            };
-            let opts: Vec<(String, String)> = options
-                .iter()
-                .map(|o| (o.label.clone(), o.description.clone()))
-                .collect();
-            (question.clone(), h, m, opts, *multi_select)
+    // 一次调用可带多个问题，但一次只展示一个（对标 Claude Code：逐问引导）。
+    let (item, questions_len) =
+        if let ConfirmationDetails::AskUserQuestion { questions } = &confirmation.details {
+            (questions.get(question_index), questions.len())
         } else {
-            return lines;
+            (None, 0)
         };
+    let Some(item) = item else {
+        return lines;
+    };
+    let question_text = item.question.clone();
+    let multi_select_flag = item.multi_select;
+    let mode_label = if item.multi_select {
+        " (多选)"
+    } else {
+        " (单选)"
+    };
+    let header_text = item
+        .header
+        .clone()
+        .unwrap_or_else(|| "Question".to_string());
+    let options_data: Vec<(String, String)> = item
+        .options
+        .iter()
+        .map(|o| (o.label.clone(), o.description.clone()))
+        .collect();
 
     // ── Header ──
     lines.push(Line::from(vec![
@@ -776,7 +785,12 @@ pub fn build_ask_user_question_card(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{}{}", header_text, mode_label),
+            format!(
+                "{}{}{}",
+                header_text,
+                mode_label,
+                progress_suffix(questions_len, question_index)
+            ),
             Style::default()
                 .fg(palette.accent)
                 .add_modifier(Modifier::BOLD),
@@ -930,6 +944,15 @@ pub fn build_ask_user_question_card(
 }
 
 /// Wrap text to a max character width, breaking at word boundaries when possible.
+/// 多问题调用的进度后缀：只有一个问题时省略，多个时显示当前进度（` · 2/4`）。
+fn progress_suffix(total: usize, index: usize) -> String {
+    if total <= 1 {
+        String::new()
+    } else {
+        format!(" · {}/{}", index + 1, total)
+    }
+}
+
 fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 {
         return vec![text.to_string()];

@@ -112,6 +112,7 @@ impl ToolConfirmationResponse {
                 | ToolConfirmationOutcome::ProceedAlwaysAndSave
                 | ToolConfirmationOutcome::AllowSession
                 | ToolConfirmationOutcome::UserAnswer { .. }
+                | ToolConfirmationOutcome::UserAnswers { .. }
         );
 
         Self {

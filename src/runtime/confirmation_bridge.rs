@@ -130,61 +130,111 @@ pub async fn relay_confirmation_bus_message(
 
 /// Build a ToolConfirmation for the ask_user_question tool directly from
 /// its parsed JSON arguments, bypassing the generic tool-call dialog builder.
+///
+/// 支持两种入参形态（对标 Claude Code）：
+/// - `questions` 数组：每项含 `question` / `header` / `options` / `multiSelect`；
+/// - 旧形态：顶层单个 `question` + `options` + `multiSelect`，包成单问题数组。
+///
+/// 两种形态里 `options` 都可能被 LLM 写成 JSON 字符串或逗号分隔的
+/// label 串，走 [`parse_options_value`] 统一容错。
 fn build_ask_user_question_confirmation(
     args: &serde_json::Value,
 ) -> crate::types::ToolConfirmation {
-    use crate::types::{AskUserQuestionOption, ConfirmationDetails, ConfirmationType};
+    use crate::types::{AskUserQuestionItem, ConfirmationDetails, ConfirmationType};
 
-    let question = args
-        .get("question")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let header = args
-        .get("header")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let multi_select = args
-        .get("multiSelect")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    // 单个原始问题 JSON → 规范化的 AskUserQuestionItem。
+    let to_item = |raw: &serde_json::Value| {
+        let question = raw
+            .get("question")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let header = raw
+            .get("header")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let multi_select = raw
+            .get("multiSelect")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        AskUserQuestionItem {
+            question,
+            header,
+            options: raw
+                .get("options")
+                .map(parse_options_value)
+                .unwrap_or_default(),
+            multi_select,
+        }
+    };
 
-    let options: Vec<AskUserQuestionOption> = args
-        .get("options")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .map(|opt| AskUserQuestionOption {
-                    label: opt
-                        .get("label")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    description: opt
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    preview: opt
-                        .get("preview")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let questions: Vec<AskUserQuestionItem> = match args.get("questions") {
+        // questions 数组形态——每个元素独立解析。
+        Some(serde_json::Value::Array(arr)) => arr.iter().map(to_item).collect(),
+        // 单问题形态（兼容旧调用，也是绝大多数调用的现实路径）。
+        _ => vec![to_item(args)],
+    };
 
     crate::types::ToolConfirmation {
         tool_name: "AskUserQuestion".to_string(),
         operation_type: ConfirmationType::AskUserQuestion,
-        details: ConfirmationDetails::AskUserQuestion {
-            question,
-            header,
-            options,
-            multi_select,
-        },
+        details: ConfirmationDetails::AskUserQuestion { questions },
         is_dangerous: false,
         outcome: None,
         reason: None,
+    }
+}
+
+/// 解析 AskUserQuestion 的 `options` 字段值，容忍三种写法：
+/// 1. 正常的对象数组；
+/// 2. JSON 字符串（部分 LLM 会把数组序列化成字符串再塞回来）；
+/// 3. 逗号分隔的 label 串（如 `"Yes, No"`）——每个 label 生成一个选项。
+fn parse_options_value(raw: &serde_json::Value) -> Vec<crate::types::AskUserQuestionOption> {
+    use crate::types::AskUserQuestionOption;
+
+    match raw {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|opt| AskUserQuestionOption {
+                label: opt
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                description: opt
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                preview: opt
+                    .get("preview")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
+            })
+            .collect(),
+        serde_json::Value::String(s) => {
+            let s = s.trim();
+            if (s.starts_with('[') && s.ends_with(']')) || (s.starts_with('{') && s.ends_with('}'))
+            {
+                serde_json::from_str::<serde_json::Value>(s)
+                    .ok()
+                    .map(|parsed| parse_options_value(&parsed))
+                    .unwrap_or_default()
+            } else {
+                s.split(',')
+                    .map(|label| {
+                        let label = label.trim().trim_matches('"').trim();
+                        AskUserQuestionOption {
+                            label: label.to_string(),
+                            description: label.to_string(),
+                            preview: None,
+                        }
+                    })
+                    .collect()
+            }
+        }
+        _ => Vec::new(),
     }
 }

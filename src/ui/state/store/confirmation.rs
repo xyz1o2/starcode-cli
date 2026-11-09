@@ -35,6 +35,8 @@ impl ChatState {
         self.pending_question_selections.clear();
         self.pending_other_input.clear();
         self.pending_question_other_focused = false;
+        self.pending_question_index = 0;
+        self.pending_question_answers.clear();
         self.chat_list_state.select(Some(queued.entry_idx));
         true
     }
@@ -97,6 +99,8 @@ impl ChatState {
         self.pending_question_other_focused = false;
         self.pending_other_input.clear();
         self.pending_question_selections.clear();
+        self.pending_question_index = 0;
+        self.pending_question_answers.clear();
         self.activate_next_queued_confirmation();
     }
 }

@@ -238,6 +238,11 @@ pub struct ChatState {
     pub pending_question_selections: Vec<usize>, // 多选问题的已选选项索引
     pub pending_other_input: String,             // "Other" 文本输入值
     pub pending_question_other_focused: bool,    // "Other" 输入框是否聚焦
+    /// 当前正在回答第几个问题（0-based）。一次 AskUserQuestion 调用可以带
+    /// 多个问题，UI 一次只展示一个，答完一题自动推进（对标 Claude Code）。
+    pub pending_question_index: usize,
+    /// 已经回答过的各题答案，全部答完时整包提交为 `UserAnswers`。
+    pub pending_question_answers: Vec<crate::types::AskUserAnswer>,
     pub last_confirmation_message_id: Option<u64>,
     /// 对标 Claude Code: Tab 切换到反馈输入模式
     pub confirmation_feedback_mode: bool,
@@ -879,6 +884,8 @@ impl ChatState {
             pending_question_selections: Vec::new(),
             pending_other_input: String::new(),
             pending_question_other_focused: false,
+            pending_question_index: 0,
+            pending_question_answers: Vec::new(),
             confirmation_feedback_mode: false,
             pending_confirmation_feedback: String::new(),
             pending_confirmation_queue: VecDeque::new(),

@@ -141,6 +141,7 @@ pub(crate) fn render_tool_entry_blocks(
                     state.pending_confirmation_choice,
                     &state.pending_question_selections,
                     &state.pending_other_input,
+                    state.pending_question_index,
                     theme,
                 )
             } else {

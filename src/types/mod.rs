@@ -1342,17 +1342,34 @@ pub enum ConfirmationDetails {
         prompt: String,
     },
     AskUserQuestion {
-        question: String,
-        header: Option<String>,
-        options: Vec<AskUserQuestionOption>,
-        multi_select: bool,
+        /// 一次调用携带的多个问题（对标 Claude Code 的 `questions` 数组，一次至多 4 个）。
+        /// 旧的单问调用在构造时包成单元素数组。
+        questions: Vec<AskUserQuestionItem>,
     },
 }
 
-/// 向用户提问的选项
+/// 向用户提问选项里的一次调用中的一个疑问项。
+///
+/// 对标 Claude Code：一次 AskUserQuestion 调用可以带多个问题，逐个引导用户
+/// 回答；每个问题可以有自己的多选/单选语义和选项集。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskUserQuestionItem {
+    pub question: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    pub options: Vec<AskUserQuestionOption>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multi_select: bool,
+}
+
+/// 向用户提问的选项
+///
+/// `description` 容错默认空串：一些 LLM 只给 label 不给描述，反序列化直接失败
+/// 会让整个问题丢掉，比少一段描述更糟。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AskUserQuestionOption {
     pub label: String,
+    #[serde(default)]
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
@@ -1375,6 +1392,18 @@ pub enum UserChoice {
     Cancel,      // 取消
 }
 
+/// 多问题回答载荷里单个问题的答案。
+///
+/// 对标 Claude Code 的 `answers` 记录（问题文本 → 选项 label，
+/// 多选用逗号拼接），这里保留数组形式以保留多选语义。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AskUserAnswer {
+    pub question: String,
+    pub selected: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_input: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ToolConfirmationOutcome {
     ProceedOnce,
@@ -1386,6 +1415,12 @@ pub enum ToolConfirmationOutcome {
     UserAnswer {
         answers: Vec<String>,
         text_input: Option<String>,
+    },
+    /// User answered a multi-question AskUserQuestion call —
+    /// one entry per question, carrying each question's own selections.
+    /// 对标 Claude Code 的结构化 answers（问题 → 答案）。
+    UserAnswers {
+        answers: Vec<AskUserAnswer>,
     },
 }
 // ============ 确认类型定义完成 ============
