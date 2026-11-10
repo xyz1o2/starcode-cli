@@ -738,6 +738,16 @@ impl Agent {
         messages: &mut Vec<StarMessage>,
         current_turn: i32,
     ) -> Result<(), String> {
+        // 对齐 Claude Code：`autoCompactEnabled`（/autocompact off）关掉的是
+        // **整个**自动压缩——预测性、常规、后备全部跳过，只留手动 /compact 和
+        // prompt-too-long 的 reactive 恢复。此前这个开关只管 legacy 摘要路径，
+        // 用户关了自动压缩上下文照样被压，属于行为正确性 bug。
+        // 工具结果预算与过期释放是内存管理而非上下文压缩，仍然照跑。
+        if !crate::agent::context::auto_compact_enabled() {
+            self.apply_tool_result_budget(messages);
+            return Ok(());
+        }
+
         if let Err(reason) = hooks::run_stage_hooks(
             user_input,
             crate::core::hooks::store::ManagedHookEvent::PreCompact,
@@ -763,13 +773,15 @@ impl Agent {
         if let Some(predictive_result) = self.compact_manager.predictive_compact(messages) {
             if predictive_result.was_compacted {
                 *messages = predictive_result.messages;
+                // 对齐 Claude Code 的压缩延续消息：告诉模型会话因上下文耗尽而
+                // 被接续，直接从摘要之后继续，不要复述摘要。
                 messages.push(StarMessage::system(format!(
                     "Context was preemptively compressed using '{}' based on predicted growth. \
-                     Original: {} tokens → Now: {} tokens. \
-                     Continue the task based on the summarized context above.",
+                     Original: {} tokens → Now: {} tokens. {}",
                     predictive_result.strategy_name,
                     predictive_result.original_token_count,
                     predictive_result.new_token_count,
+                    crate::agent::workflows::context_compression::compact_continuation_message_suffix(),
                 )));
 
                 crate::utils::logging::append_debug_log_line(&format!(
@@ -798,14 +810,23 @@ impl Agent {
         let compact_result = self.compact_manager.compact(messages);
 
         // 如果 CompactManager 没有执行压缩，使用原有的 ContextCompressor 作为后备
+        // decision 需要 'static 生命周期：静态策略名直接借用，动态策略名用
+        // `Box::leak` 兜底会泄漏。策略名集合是封闭的小集合，逐个映射零成本。
         let compression_result = if compact_result.was_compacted {
+            let decision: &'static str = match compact_result.strategy_name.as_str() {
+                "tool_output_compact" => "tool_output_compact",
+                "micro_compact" => "micro_compact",
+                "auto_compact" => "auto_compact",
+                "snip_compact" => "snip_compact",
+                _ => Box::leak(compact_result.strategy_name.clone().into_boxed_str()),
+            };
             crate::agent::workflows::context_compression::CompressionResult {
                 messages: compact_result.messages,
                 was_compacted: true,
                 original_token_count: compact_result.original_token_count,
                 new_token_count: compact_result.new_token_count,
                 threshold_tokens: self.compact_manager.config().max_tokens,
-                decision: Box::leak(compact_result.strategy_name.into_boxed_str()),
+                decision,
             }
         } else {
             tokio::time::timeout(
@@ -836,14 +857,14 @@ impl Agent {
             *messages = compression_result.messages;
 
             // Insert a natural language message about compression (no system marker prefix)
+            // 对齐 Claude Code 的压缩延续消息。
             messages.push(StarMessage::system(format!(
                 "Context was compressed using '{}' to fit within the token budget. \
-                 Previous messages were summarized. \
-                 Original: {} tokens → Now: {} tokens. \
-                 Continue the task based on the summarized context above.",
+                 Original: {} tokens → Now: {} tokens. {}",
                 compression_result.decision,
                 compression_result.original_token_count,
                 compression_result.new_token_count,
+                crate::agent::workflows::context_compression::compact_continuation_message_suffix(),
             )));
 
             crate::utils::logging::append_debug_log_line(&format!(

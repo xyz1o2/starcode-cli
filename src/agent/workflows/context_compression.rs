@@ -19,6 +19,90 @@ const LEVEL1_KEEP_RECENT: usize = 8;
 /// Level 2 压缩保留的最近消息数
 const LEVEL2_KEEP_RECENT: usize = 6;
 
+/// 对齐 Claude Code 的 `formatCompactSummary`：剥掉 `<analysis>` 草稿块
+/// （它只用于提升摘要质量，写完后没有信息价值），把 `<summary>` 块替换为
+/// 可读的 `Summary:` 标题，并清理多余空行。
+pub(crate) fn format_compact_summary(summary: &str) -> String {
+    let mut formatted = strip_tag_block(summary, "analysis");
+
+    if let Some(content) = extract_tag_block(&formatted, "summary") {
+        formatted = formatted.replace(
+            &format!("<summary>{}</summary>", content),
+            &format!("Summary:\n{}", content.trim()),
+        );
+    }
+
+    // 清理段落之间的多余空行
+    while formatted.contains("\n\n\n") {
+        formatted = formatted.replace("\n\n\n", "\n\n");
+    }
+
+    formatted.trim().to_string()
+}
+
+/// 删除成对 tag 包裹的整块内容（含 tag 本身）。没有闭合 tag 时不动原文。
+fn strip_tag_block(text: &str, tag: &str) -> String {
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    match (text.find(&open), text.find(&close)) {
+        (Some(start), Some(close_pos)) => {
+            let end = close_pos + close.len();
+            let mut out = String::with_capacity(text.len());
+            out.push_str(&text[..start]);
+            out.push_str(&text[end..]);
+            out
+        }
+        _ => text.to_string(),
+    }
+}
+
+/// 提取成对 tag 内的内容。没有成对 tag 时返回 `None`。
+fn extract_tag_block(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    Some(text[start..end].to_string())
+}
+
+/// 对齐 Claude Code 的 `getCompactUserSummaryMessage`：压缩后的延续消息。
+///
+/// `recent_messages_preserved` 对应 CC 的同名参数——保留了最近消息时告诉模型
+/// "Recent messages are preserved verbatim"，让它知道细节在后面而不是全在摘要里。
+pub(crate) fn compact_continuation_message(
+    summary: &str,
+    recent_messages_preserved: bool,
+) -> String {
+    let formatted = format_compact_summary(summary);
+    let mut message = format!(
+        "This session is being continued from a previous conversation that ran out of context. \
+         The summary below covers the earlier portion of the conversation.\n\n{}",
+        formatted
+    );
+
+    if recent_messages_preserved {
+        message.push_str("\n\nRecent messages are preserved verbatim.");
+    }
+
+    message.push_str(
+        "\nContinue the conversation from where it left off without asking the user any further \
+         questions. Resume directly — do not acknowledge the summary, do not recap what was \
+         happening, do not preface with \"I'll continue\" or similar. Pick up the last task as \
+         if the break never happened.",
+    );
+
+    message
+}
+
+/// 压缩注入消息的**直接续跑指令**部分，供已有 "Context was compressed…" 格式
+/// 的注入点复用（那些消息自带压缩元信息，只需要补上 CC 的续跑指令）。
+pub(crate) fn compact_continuation_message_suffix() -> &'static str {
+    "Continue the conversation from where it left off without asking the user any further \
+     questions. Resume directly — do not acknowledge the summary, do not recap what was \
+     happening, do not preface with \"I'll continue\" or similar. Pick up the last task as \
+     if the break never happened."
+}
+
 /// 根据上下文窗口大小动态计算压缩参数
 fn dynamic_compression_params(context_window: usize) -> (usize, usize, u64) {
     // 返回 (min_tokens, buffer_tokens, cooldown_secs)
@@ -322,9 +406,9 @@ impl ContextCompressor {
             }
         }
 
-        let summary_msg = StarMessage::system(format!(
-            "Conversation Summary (AU2 Compressed):\n{}",
-            summary_text
+        let summary_msg = StarMessage::system(compact_continuation_message(
+            &summary_text,
+            !recent_messages.is_empty(),
         ));
 
         let mut new_messages = Vec::new();
@@ -383,10 +467,16 @@ impl ContextCompressor {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(self.min_tokens);
 
+        // 对齐 Claude Code：threshold = window − autocompact buffer（CC 是固定的
+        // 13_000）。这里 buffer 按窗口大小分档（10K–50K），同时保留比例下限作为
+        // 大窗口时的保守地板。buffer 可用 STAR_COMPRESSION_BUFFER_TOKENS 覆盖。
+        let buffer_tokens = std::env::var("STAR_COMPRESSION_BUFFER_TOKENS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(self.buffer_tokens);
         let ratio_threshold = (self.context_window as f64 * ratio) as usize;
-        // 对齐 Claude Code：threshold = window - buffer（约 95-98%）
         let ratio_threshold =
-            ratio_threshold.max(self.context_window.saturating_sub(self.buffer_tokens));
+            ratio_threshold.max(self.context_window.saturating_sub(buffer_tokens));
         let threshold = ratio_threshold.max(min_tokens);
 
         if total_tokens < threshold {
@@ -481,9 +571,9 @@ impl ContextCompressor {
             }
         }
 
-        let summary_msg = StarMessage::system(format!(
-            "Conversation Summary (AU2 Compressed):\n{}",
-            summary_text
+        let summary_msg = StarMessage::system(compact_continuation_message(
+            &summary_text,
+            !recent_messages.is_empty(),
         ));
 
         let mut new_messages = Vec::new();
@@ -563,5 +653,51 @@ mod tests {
     fn whitespace_only_instructions_do_not_add_an_empty_section() {
         let prompt = build_summary_prompt(SUMMARY_PROMPT, HISTORY, Some("   \n\t"));
         assert_eq!(prompt, build_summary_prompt(SUMMARY_PROMPT, HISTORY, None));
+    }
+
+    // ---- 对齐 Claude Code：formatCompactSummary / 延续消息 ----
+
+    #[test]
+    fn format_compact_summary_strips_analysis_and_promotes_summary_tag() {
+        let raw = "<analysis>\nstep 1, step 2\n</analysis>\n<summary>\n1. Primary Request: fix the bug\n</summary>\ntrailing";
+        let formatted = format_compact_summary(raw);
+        assert!(!formatted.contains("analysis"), "{formatted}");
+        assert!(!formatted.contains("step 1"), "{formatted}");
+        assert!(
+            formatted.contains("Summary:\n1. Primary Request: fix the bug"),
+            "{formatted}"
+        );
+    }
+
+    #[test]
+    fn format_compact_summary_passes_through_untagged_text() {
+        assert_eq!(format_compact_summary("plain summary"), "plain summary");
+    }
+
+    #[test]
+    fn continuation_message_matches_claude_code_shape() {
+        let message = compact_continuation_message("1. Primary Request: x", false);
+        assert!(message.starts_with(
+            "This session is being continued from a previous conversation that ran out of context."
+        ));
+        assert!(message.contains("1. Primary Request: x"));
+        assert!(message.contains("Resume directly"));
+        assert!(!message.contains("Recent messages are preserved"));
+    }
+
+    #[test]
+    fn continuation_message_reports_preserved_recent_messages() {
+        let message = compact_continuation_message("s", true);
+        assert!(message.contains("Recent messages are preserved verbatim."));
+        // 保留提示在摘要之后、续跑指令之前
+        let preserved = message.find("Recent messages are preserved").unwrap();
+        let resume = message.find("Resume directly").unwrap();
+        assert!(preserved < resume);
+    }
+
+    #[test]
+    fn continuation_suffix_is_the_resume_instruction() {
+        assert!(compact_continuation_message_suffix().starts_with("Continue the conversation"));
+        assert!(compact_continuation_message_suffix().contains("Resume directly"));
     }
 }

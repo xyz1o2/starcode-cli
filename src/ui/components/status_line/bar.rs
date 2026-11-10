@@ -324,9 +324,8 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
 /// Render a token usage warning line above the input area.
 /// 仅在 worker 已确认真实 capacity 后显示上下文占用提醒。
 pub fn token_warning_line(state: &ChatState) -> Vec<ratatui::text::Line<'static>> {
-    let auto_compact_enabled = std::env::var("STAR_ENABLE_AUTO_COMPACT")
-        .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "off"))
-        .unwrap_or(true);
+    // 与压缩主路径同源：self_tuning overlay（/autocompact 写入）> env > 默认开。
+    let auto_compact_enabled = crate::agent::context::auto_compact_enabled();
     let theme = state.theme_manager.current();
 
     let tokens = match &state.token_usage {
@@ -382,12 +381,9 @@ pub fn token_warning_line(state: &ChatState) -> Vec<ratatui::text::Line<'static>
             )
         }
     } else if auto_compact_enabled {
+        // 对齐 Claude Code 的 "Autocompact will trigger soon" 提示措辞。
         (
-            format!(
-                "Context {:.0}% used · compact begins near {}",
-                pct_used,
-                crate::core::context_policy::format_context_window(policy.compact_max_tokens)
-            ),
+            "Autocompact will trigger soon · discards older messages · /compact to control what gets kept".to_string(),
             theme.warning,
         )
     } else {

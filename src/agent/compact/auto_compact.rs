@@ -376,13 +376,17 @@ impl AutoCompactManager {
         // 保留 system 前缀整段（静态块 + 准静态块都不能动）
         crate::agent::message_processing::push_leading_system_messages(&mut result, messages);
 
-        // 添加摘要消息
-        result.push(StarMessage::system(format!(
-            "## Context Compressed (Auto)\n\n{}\n\n---\n\
-             **IMPORTANT**: The user's original messages have been summarized above. \
-             Continue executing the task based on this summary.",
-            summary
-        )));
+        // 添加摘要消息。摘要后的 user 消息原文会被保留在后面，所以
+        // recent_messages_preserved = true（对齐 CC：细节在后面而不是全在摘要里）。
+        let recent_preserved = messages[split_idx..]
+            .iter()
+            .any(|m| m.role == "user" || m.role == "assistant");
+        result.push(StarMessage::system(
+            crate::agent::workflows::context_compression::compact_continuation_message(
+                &summary,
+                recent_preserved,
+            ),
+        ));
 
         // Preserve ALL user messages from the summarized portion
         for msg in &messages[start_idx..split_idx] {

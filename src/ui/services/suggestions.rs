@@ -19,17 +19,22 @@ fn extract_mention_path(hint: &str) -> &str {
 /// 定位输入末尾正在输入的 @ token。
 /// 返回 Some((start, quoted))：start 是 '@' 的字节位置，quoted 表示 @" 引号形式。
 /// 引号形式允许 token 内含空格；普通形式以空白结尾即失效。
+///
+/// 触发规则：输入里的**每一个** `@` 都算（取最后一个）。发送侧
+/// `at_processor::find_next_unescaped_at` 就是不管前缀直接解析所有 `@` 的，
+/// UI 若还要求「@ 前面必须是空白」，`看看@src` 这类紧贴文字的引用就会
+/// 发送时被解析、输入时却弹不出提示 —— 两侧必须同一条规则。
 fn last_at_token_start(input: &str) -> Option<(usize, bool)> {
+    let at = input.rfind('@')?;
     let bytes = input.as_bytes();
-    let mut at = None;
-    for i in 0..bytes.len() {
-        if bytes[i] == b'@' && (i == 0 || (bytes[i - 1] as char).is_whitespace()) {
-            at = Some(i);
-        }
-    }
-    let at = at?;
     let quoted = bytes.get(at + 1) == Some(&b'"');
-    if !quoted && input[at + 1..].contains(char::is_whitespace) {
+    if quoted {
+        // 引号形式：闭合引号出现即 token 已终结，不再激活 —— 否则引用完
+        // 一个带空格的文件继续打字，弹窗会每敲一个字重新冒出来。
+        if input[at + 2..].contains('"') {
+            return None;
+        }
+    } else if input[at + 1..].contains(char::is_whitespace) {
         return None; // 普通 token 已被空白终结，不再激活
     }
     Some((at, quoted))
@@ -55,7 +60,7 @@ fn at_token_frag(input: &str, at: usize, quoted: bool) -> &str {
 }
 
 /// 把 @ token 替换为指定路径。路径含空格时使用 @"..." 引号形式（对标 Claude Code）。
-/// is_dir 为真时以 `/` 结尾且不关闭提示（继续下钻），否则补空格。
+/// is_dir 为真时以 `/` 结尾（继续敲 `/` 前的定稿形态），不补空格；文件补空格。
 fn replace_at_token_with_path(input: &mut String, path: &str, is_dir: bool) {
     let Some((at, _quoted)) = last_at_token_start(input) else {
         return;
@@ -307,7 +312,10 @@ pub fn handle_tab(state: &mut ChatState) -> bool {
 }
 
 /// 接受当前选中的 @ 文件提示。
-/// 目录：替换为 `dir/` 并立即刷新提示（下钻）；文件：替换 + 空格并关闭提示。
+/// 目录和文件一视同仁：替换为路径并关闭提示。目录不补空格也不下钻 ——
+/// 「选文件夹」就该只选中文件夹本身；要下钻继续敲 `/`（`@src/` 会重新
+/// 列出子项）。之前 Enter 选目录会自动展开子项，用户想引用整个目录却
+/// 被迫在弹窗里继续选，感觉是「选文件夹会连带」。
 fn accept_mention_hint(state: &mut ChatState) {
     let selected = state.mention_hints[state.selected_mention_hint].clone();
     let display = extract_mention_path(&selected).to_string();
@@ -320,21 +328,11 @@ fn accept_mention_hint(state: &mut ChatState) {
     if at_input {
         replace_at_token_with_path(&mut state.input, &display, is_dir);
         update_textarea_from_input(state);
-        if is_dir {
-            // 下钻：保持提示打开并刷新子项列表
-            state.selected_mention_hint = 0;
-            refresh_mention_hints(state);
-        } else {
-            state.show_mention_hints = false;
-            state.mention_hints.clear();
-        }
     }
     // 没有 @ token 时提示不可能打开（refresh_mention_hints 只认 @ token），
     // 到这里就是外部直接改了状态，稳妥收场即可。
-    else {
-        state.show_mention_hints = false;
-        state.mention_hints.clear();
-    }
+    state.show_mention_hints = false;
+    state.mention_hints.clear();
 }
 
 fn refresh_mention_hints(state: &mut ChatState) {
@@ -400,7 +398,7 @@ mod tests {
         );
     }
 
-    /// 目录下钻：`@dir/` 列出该目录的直接子项。
+    /// 目录下钻：`@src/` 列出该目录的直接子项。
     #[test]
     fn at_dir_drills_into_children() {
         let mut state = ChatState::new();
@@ -415,6 +413,65 @@ mod tests {
             "子项都应带 src/ 前缀，实际 {:?}",
             state.mention_hints
         );
+    }
+
+    /// 紧贴文字的 `@`（前面没有空白）也要能触发 —— 发送侧
+    /// `at_processor` 解析所有 `@`，UI 触发规则必须一致。
+    #[test]
+    fn at_attached_to_word_still_opens() {
+        let mut state = ChatState::new();
+        state.input = "看看@Cargo".to_string();
+        on_input_changed(&mut state);
+        assert!(state.show_mention_hints, "紧贴文字的 @ 要能打开提示");
+        assert!(
+            state.mention_hints.iter().any(|h| h.contains("Cargo.toml")),
+            "应命中 Cargo.toml，实际 {:?}",
+            state.mention_hints
+        );
+    }
+
+    /// 选中目录 = 只选中目录本身：Enter 后提示关闭、token 定稿为 `@dir/`，
+    /// 不自动展开子项（要下钻继续敲 `/`）。
+    #[test]
+    fn accepting_a_dir_selects_the_dir_only() {
+        let mut state = ChatState::new();
+        state.input = "见 @src".to_string();
+        on_input_changed(&mut state);
+        assert!(state.show_mention_hints, "@src 应列出候选");
+        let dir_idx = state
+            .mention_hints
+            .iter()
+            .position(|h| h.ends_with('/') && h.starts_with("src"))
+            .unwrap_or_else(|| panic!("候选里应有 src/ 目录，实际 {:?}", state.mention_hints));
+        state.selected_mention_hint = dir_idx;
+        assert!(handle_enter(&mut state), "Enter 应被采纳");
+        assert!(!state.show_mention_hints, "选中目录后提示应关闭");
+        assert!(
+            state.input.contains("@src/"),
+            "输入应定稿为 @src/，实际 {:?}",
+            state.input
+        );
+        // 定稿后继续敲 `/` 前的形态不会再弹提示（token 已被后续输入终结的
+        // 场景由 last_at_token_start 的空白规则处理；`@src/` 尾斜杠触发下钻）。
+        on_input_changed(&mut state);
+        assert!(state.show_mention_hints, "@src/ 尾斜杠形态应保持下钻能力");
+    }
+
+    /// 引号形式闭合后 token 终结：继续打字不得再弹提示（乱弹回归）。
+    #[test]
+    fn closed_quoted_token_does_not_reopen_hints() {
+        let mut state = ChatState::new();
+        state.input = "读 @\"my file.txt\" 然后总结".to_string();
+        on_input_changed(&mut state);
+        assert!(
+            !state.show_mention_hints,
+            "闭合的 @\"...\" 不该再激活提示，实际 {:?}",
+            state.mention_hints
+        );
+        // 未闭合的引号形式仍激活（用真实存在的路径，否则是「无匹配关闭」而非「token 终结」）
+        state.input = "读 @\"src".to_string();
+        on_input_changed(&mut state);
+        assert!(state.show_mention_hints, "未闭合的 @\" 仍应激活提示");
     }
 
     /// 输入开头的 `/` 命令提示不受影响。

@@ -504,6 +504,33 @@ pub(crate) fn trim_context_if_needed(messages: &mut Vec<StarMessage>) -> Option<
 mod tests {
     use super::*;
 
+    /// `/autocompact off`（写 self_tuning overlay）必须能关掉 `auto_compact_enabled`
+    /// —— 这是压缩主路径的开关源，对齐 Claude Code 的 `autoCompactEnabled: false`。
+    #[test]
+    fn self_tuning_overlay_controls_the_auto_compact_gate() {
+        let _serial = crate::core::self_tuning::overrides::snapshot();
+
+        // 默认开
+        crate::core::self_tuning::overrides::reset(None).expect("clean overlay");
+        std::env::remove_var("STAR_ENABLE_AUTO_COMPACT");
+        assert!(auto_compact_enabled());
+
+        // overlay 关 → 关（/autocompact off 的效果）
+        crate::core::self_tuning::overrides::set_user("compact.auto_enabled", "false", false)
+            .expect("set overlay");
+        assert!(!auto_compact_enabled());
+
+        // overlay 清除 → 恢复
+        crate::core::self_tuning::overrides::reset(Some("compact.auto_enabled"))
+            .expect("clear overlay");
+        assert!(auto_compact_enabled());
+
+        // env fallback 仍然有效（overlay 未设置时）
+        std::env::set_var("STAR_ENABLE_AUTO_COMPACT", "off");
+        assert!(!auto_compact_enabled());
+        std::env::remove_var("STAR_ENABLE_AUTO_COMPACT");
+    }
+
     /// auto 档位必须收到自主执行提醒 —— 否则模型不知道自己能连续跑。
     #[test]
     fn auto_mode_gets_the_autonomous_execution_reminder() {

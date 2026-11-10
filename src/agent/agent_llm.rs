@@ -887,6 +887,19 @@ impl Agent {
                         crate::agent::compact::token_counter::count_tokens(messages),
                     )
                     .await;
+                    // 对齐 Claude Code：任何压缩（包括 prompt-too-long 的 reactive
+                    // 恢复）都要让用户看见。此前这条路径只在日志里留痕，UI 上
+                    // 上下文悄悄从 90 万掉到 20 万，用户毫无感知。
+                    self.emit_event(crate::agent::messaging::AgentEvent::Trace {
+                        event: "auto_compact".to_string(),
+                        payload: serde_json::json!({
+                            "on": true,
+                            "trigger": "reactive",
+                            "tokens_before": before_tokens,
+                            "tokens_after": compact_result.new_token_count,
+                            "strategy": compact_result.strategy_name,
+                        }),
+                    });
                 }
                 LlmResult::Retry
             }
