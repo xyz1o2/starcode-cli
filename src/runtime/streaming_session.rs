@@ -182,12 +182,42 @@ pub async fn run_streaming_session(
                                         } => {
                                             let _ = context.tx.send(StreamMessage::StatusUpdate {
                                                 message_id: context.message_id,
-                                                status: waiting_status,
+                                                status: waiting_status.clone(),
                                             }).await;
+                                            let kind_label = waiting_status
+                                                .split(" — ")
+                                                .next()
+                                                .unwrap_or("Error")
+                                                .to_string();
+                                            let attempt_line = waiting_status
+                                                .rsplit('(')
+                                                .next()
+                                                .map(|s| s.trim_end_matches(')').to_string())
+                                                .unwrap_or_default();
                                             let interrupted = !crate::llm::retry::wait_interruptible(
                                                 std::time::Duration::from_millis(delay_ms),
                                                 Some(context.abort_flag.as_ref()),
-                                                |_| {},
+                                                |remaining| {
+                                                    // 每秒刷新倒计时（on_tick 回调）：
+                                                    // 等待最长可达 32s，静止的文案会让
+                                                    // 用户以为卡死了。
+                                                    let text = format!(
+                                                        "{} — retry {} in {:.0}s ({})",
+                                                        kind_label,
+                                                        attempt_line
+                                                            .split('/')
+                                                            .next()
+                                                            .unwrap_or("1"),
+                                                        remaining.as_secs_f64().ceil(),
+                                                        attempt_line,
+                                                    );
+                                                    let _ = context
+                                                        .tx
+                                                        .try_send(StreamMessage::StatusUpdate {
+                                                            message_id: context.message_id,
+                                                            status: text,
+                                                        });
+                                                },
                                             ).await;
                                             if interrupted {
                                                 let _ = context.tx.send(StreamMessage::Error {
@@ -244,13 +274,37 @@ pub async fn run_streaming_session(
                             .tx
                             .send(StreamMessage::StatusUpdate {
                                 message_id: context.message_id,
-                                status: waiting_status,
+                                status: waiting_status.clone(),
                             })
                             .await;
+                        let kind_label = waiting_status
+                            .split(" — ")
+                            .next()
+                            .unwrap_or("Error")
+                            .to_string();
+                        let attempt_line = waiting_status
+                            .rsplit('(')
+                            .next()
+                            .map(|s| s.trim_end_matches(')').to_string())
+                            .unwrap_or_default();
                         let interrupted = !crate::llm::retry::wait_interruptible(
                             std::time::Duration::from_millis(delay_ms),
                             Some(context.abort_flag.as_ref()),
-                            |_| {},
+                            |remaining| {
+                                // 每秒刷新倒计时（on_tick 回调）：等待最长可达 32s，
+                                // 静止的文案会让用户以为卡死了。
+                                let text = format!(
+                                    "{} — retry {} in {:.0}s ({})",
+                                    kind_label,
+                                    attempt_line.split('/').next().unwrap_or("1"),
+                                    remaining.as_secs_f64().ceil(),
+                                    attempt_line,
+                                );
+                                let _ = context.tx.try_send(StreamMessage::StatusUpdate {
+                                    message_id: context.message_id,
+                                    status: text,
+                                });
+                            },
                         )
                         .await;
                         if interrupted {

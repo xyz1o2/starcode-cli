@@ -90,6 +90,71 @@ fn seeding_never_overwrites_an_existing_list() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// 配置就绪的会话收到启动预取的模型列表，不能自动弹模型选择面板。
+///
+/// 回归点：启动时 runtime 会对 worker 发一次非强制的 ListModels 预取（把
+/// 真实上下文窗口喂给压缩策略），结果一到就命中 ModelsList 分支的
+/// fallback —— 此前它不看 `current_model` 是否已有值，无条件 `open_palette`
+/// —— 表现为「一启动就弹设置弹窗」，配置明明是好的。
+#[tokio::test]
+async fn startup_prefetch_does_not_open_the_model_palette_when_model_is_set() {
+    let mut state = ChatState::new();
+    state.current_model = "glowp/glm-5.3-flash".to_string();
+    let (agent_tx, _agent_rx) = mpsc::channel(1);
+
+    handle_stream_update(
+        &mut state,
+        StreamMessage::ModelsList {
+            models: vec![crate::types::ModelInfo::new("glowp/glm-5.3-flash", "glowp")],
+            cache_age_secs: Some(3600),
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !state.is_palette_open(),
+        "configured session must not get a model palette popped up on startup"
+    );
+    assert_eq!(
+        state.current_model, "glowp/glm-5.3-flash",
+        "prefetch must not clear the configured model"
+    );
+}
+
+/// fallback 仍要服务它的本职场景：provider 切换后模型待选（current_model 为
+/// 空），列表一到就该把 Model 面板摆到用户面前。
+#[tokio::test]
+async fn provider_switch_awaiting_model_still_opens_the_palette() {
+    let mut state = ChatState::new();
+    state.current_model = String::new();
+    let (agent_tx, _agent_rx) = mpsc::channel(1);
+
+    handle_stream_update(
+        &mut state,
+        StreamMessage::ModelsList {
+            models: vec![crate::types::ModelInfo::new("new-model", "other-provider")],
+            cache_age_secs: None,
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        state.is_palette_open(),
+        "empty current_model means the user is mid provider switch; palette must open"
+    );
+    assert!(
+        matches!(
+            state.palette_mode,
+            crate::ui::state::palette::PaletteMode::Model
+        ),
+        "the auto-opened palette must be in Model mode"
+    );
+}
+
 fn agent_tool_call() -> StarToolCall {
     StarToolCall {
         id: "agent-call".to_string(),

@@ -886,16 +886,21 @@ impl Agent {
                 )).await;
             }
 
-            // 通知 UI：auto-compact 发生（对标 Claude Code 的实时提示）
-            self.emit_event(crate::agent::messaging::AgentEvent::Trace {
-                event: "auto_compact".to_string(),
-                payload: serde_json::json!({
-                    "on": true,
-                    "tokens_before": compression_result.original_token_count,
-                    "tokens_after": compression_result.new_token_count,
-                    "strategy": compression_result.decision,
-                }),
-            });
+            // 通知 UI：auto-compact 发生（对标 Claude Code 的实时提示）。
+            // 只有真正的上下文摘要压缩才打扰用户 —— tool_output_compact /
+            // micro_compact / snip_compact 是每轮可能跑的例行裁剪，每轮弹一条
+            // 「✓ Context compacted」是噪声（Claude Code 对微压缩也不出提示）。
+            if compression_result.decision == "auto_compact" {
+                self.emit_event(crate::agent::messaging::AgentEvent::Trace {
+                    event: "auto_compact".to_string(),
+                    payload: serde_json::json!({
+                        "on": true,
+                        "tokens_before": compression_result.original_token_count,
+                        "tokens_after": compression_result.new_token_count,
+                        "strategy": compression_result.decision,
+                    }),
+                });
+            }
         }
 
         Ok(())

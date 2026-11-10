@@ -2417,14 +2417,37 @@ pub fn parse_command(input: &str) -> Option<ParsedCommand> {
         }
     }
 
-    found_command.map(|_cmd| {
-        // Keep the *original* remainder instead of re-joining split words.
-        // Re-joining collapsed runs of spaces and kept quotes attached, so
-        // `/memory add "fact  with  spaces"` could never reach the command
-        // intact even though Claude Code treats the trailing text as arguments.
-        let args = remainder_after_words(without_slash, consumed_parts).to_string();
-        ParsedCommand { path, args }
-    })
+    found_command
+        .map(|_cmd| {
+            // Keep the *original* remainder instead of re-joining split words.
+            // Re-joining collapsed runs of spaces and kept quotes attached, so
+            // `/memory add "fact  with  spaces"` could never reach the command
+            // intact even though Claude Code treats the trailing text as arguments.
+            let args = remainder_after_words(without_slash, consumed_parts).to_string();
+            ParsedCommand { path, args }
+        })
+        .or_else(|| resolve_unique_prefix(&parts, consumed_parts))
+}
+
+/// 前缀唯一化兜底（对标 Claude Code：部分命令名也能解析）。
+///
+/// 精确匹配失败时（用户敲 `/mem` 就回车），在**顶层**命令表里找名字以该
+/// 片段为前缀的命令：唯一命中直接解析成它，多个命中保持 None（提交路径
+/// 会给出 "did you mean" 提示，浮层照常列出候选）。只处理第一个片段 ——
+/// 子命令层级的前缀歧义交给浮层选择，不在这里猜。
+fn resolve_unique_prefix(parts: &[&str], _consumed: usize) -> Option<ParsedCommand> {
+    let first = parts.first()?;
+    let matches: Vec<&SlashCommand> = ALL_COMMANDS
+        .iter()
+        .filter(|cmd| cmd.name.starts_with(first))
+        .collect();
+    match matches.as_slice() {
+        [cmd] => Some(ParsedCommand {
+            path: vec![cmd.name.to_string()],
+            args: remainder_after_words(&parts.join(" "), 1).to_string(),
+        }),
+        _ => None,
+    }
 }
 
 /// Return the substring after the first `words` whitespace-delimited words,
@@ -3061,6 +3084,33 @@ mod tests {
                 "`{input}` must dispatch as `/{canonical}`"
             );
         }
+    }
+
+    /// 部分命令名的前缀唯一化（对标 Claude Code：`/comp` + Enter 应解析成
+    /// `/compress`，而不是报 Unknown command）。
+    #[test]
+    fn partial_command_names_resolve_by_unique_prefix() {
+        // /comp 在顶层命令里是唯一前缀（compress）
+        let parsed = parse_command("/comp focus on API").expect("unique prefix must resolve");
+        assert_eq!(parsed.path, vec!["compress".to_string()]);
+        assert_eq!(parsed.args, "focus on API");
+
+        // 无参形态
+        let parsed = parse_command("/comp").expect("unique prefix must resolve");
+        assert_eq!(parsed.path, vec!["compress".to_string()]);
+        assert_eq!(parsed.args, "");
+
+        // /mem 是已声明的独立命令（alias of /memory），精确匹配优先于前缀
+        let parsed = parse_command("/mem").expect("exact match must win");
+        assert_eq!(parsed.path, vec!["mem".to_string()]);
+
+        // 多个命中（前缀歧义）：不猜，交给浮层选择 / "did you mean" 提示
+        assert!(
+            parse_command("/re").is_none(),
+            "ambiguous prefix must not guess"
+        );
+        // 完全不匹配：同样 None
+        assert!(parse_command("/zzz").is_none());
     }
 
     /// `/branch` is now a top-level conversation command, while `/git branch`

@@ -579,6 +579,7 @@ pub async fn handle_stream_update(
             message_id,
             content,
         } => {
+            clear_stale_retry_status(state);
             handle_content_message(state, message_id, &content);
         }
         StreamMessage::TextDelta {
@@ -587,6 +588,7 @@ pub async fn handle_stream_update(
         } => {
             let content = sanitize_for_tui(&content);
             state.last_token_time = Some(std::time::Instant::now());
+            clear_stale_retry_status(state);
             if let Some(&idx0) = state.stream_targets.get(&message_id) {
                 let mut idx = idx0;
                 if idx < state.chat_history.len() {
@@ -684,6 +686,7 @@ pub async fn handle_stream_update(
                 return Ok(());
             }
             state.last_token_time = Some(std::time::Instant::now());
+            clear_stale_retry_status(state);
             if state.thinking_started_at.is_none() {
                 state.thinking_started_at = Some(std::time::Instant::now());
             }
@@ -1242,8 +1245,15 @@ pub async fn handle_stream_update(
                 state.selected_palette_index =
                     crate::ui::components::palette::model_selection_index(state);
             }
-            // Fallback: models arrived, open palette in Model mode for selection
-            else if !state.available_models.is_empty() && !user_is_elsewhere {
+            // Fallback: models arrived, open palette in Model mode for selection.
+            // 只在确实没有可用模型时才代开 —— 启动时的 ListModels 预取
+            //（runtime/mod.rs 起始段）也会让模型列表到达，配置好的会话不能因此
+            // 每次启动都弹模型选择面板；provider 切换路径（上方）会把
+            // current_model 清空等用户选型，那才是这个 fallback 该服务的场景。
+            else if !state.available_models.is_empty()
+                && state.current_model.is_empty()
+                && !user_is_elsewhere
+            {
                 state.palette_history.clear();
                 state.open_palette(crate::ui::state::palette::PaletteMode::Model);
                 state.palette_items = crate::ui::components::palette::get_model_palette_items(
@@ -1789,6 +1799,26 @@ async fn dequeue_pending_user_input(
         }
     }
     Ok(())
+}
+
+/// 流恢复输出时清掉挂着的重试文案。
+///
+/// 重试状态的写入点（`agent_status` Trace 与 `StatusUpdate`）只负责"重试期间"
+/// 的展示；重试成功、模型重新开始输出后，没有人清 `current_status_line` ——
+/// 旧的 "Provider Error — retrying now (1/3)" 会一直挂在 spinner 行上，直到
+/// 回合结束被 "✓ Done" 覆盖。实测出现过正文已经流了 5 分钟、括号里还是 1/3
+/// 的情况。TextDelta / Content / Thinking 三个"模型确实在说话"的信号到达时
+/// 调用这里：状态行若还匹配重试文案形状，就清掉（别的状态，如 preflight /
+/// checkpoint，不属于本函数的管辖）。
+fn clear_stale_retry_status(state: &mut ChatState) {
+    const RETRY_MARKERS: [&str; 2] = ["— retrying now", "— retry"];
+    let Some(status) = state.current_status_line.as_deref() else {
+        return;
+    };
+    let lowered = status.to_lowercase();
+    if RETRY_MARKERS.iter().any(|m| lowered.contains(m)) {
+        state.current_status_line = None;
+    }
 }
 
 async fn handle_error_message(
