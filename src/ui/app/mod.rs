@@ -198,11 +198,15 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
             width: 1,
             height: chat_area.height,
         };
-        f.render_stateful_widget(
-            ratatui::widgets::Scrollbar::new(ratatui::widgets::ScrollbarOrientation::VerticalRight),
-            scrollbar_area,
-            &mut state.chat_scrollbar_state,
-        );
+        // 只画 thumb，不画轨道和箭头 —— 默认样式（↑│││…│↓）会把整列填满，
+        // 深色主题下看起来是一根贯穿全屏的细线，比没有还吵。CC 的滑块也是
+        // 只有 thumb：位置即信息，轨道是噪音。
+        let scrollbar =
+            ratatui::widgets::Scrollbar::new(ratatui::widgets::ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(None);
+        f.render_stateful_widget(scrollbar, scrollbar_area, &mut state.chat_scrollbar_state);
     }
 
     // Render token warning (context window usage)

@@ -15,6 +15,17 @@ const IMAGE_MAX_HEIGHT: u32 = 2000;
 const IMAGE_MAX_SIZE_BYTES: u64 = 5 * 1024 * 1024;
 
 pub(crate) fn save_clipboard_image() -> Option<(String, u32, u32)> {
+    // WSL 优先走 Windows 剪贴板桥：arboard 在 WSL 里连的是 X11/Wayland 的
+    // 剪贴板，而 Windows 侧复制的图片进不了那个世界 —— 用户复制截图后
+    // Ctrl+V 永远拿到的是空。powershell.exe 的 `Get-Clipboard -Format Image`
+    // 读的是 Windows 自己的剪贴板，才是对的源。失败再回落 arboard。
+    #[cfg(target_os = "linux")]
+    if crate::core::prompts::env_info::is_wsl() {
+        if let Some(result) = save_clipboard_image_wsl() {
+            return Some(result);
+        }
+    }
+
     let mut clipboard = Clipboard::new().ok()?;
     let image_data = clipboard.get_image().ok()?;
     let current_dir = std::env::current_dir().ok()?;
@@ -73,6 +84,96 @@ pub(crate) fn save_clipboard_image() -> Option<(String, u32, u32)> {
     } else {
         Some((
             format!(".star/images/{}", filename),
+            final_width,
+            final_height,
+        ))
+    }
+}
+
+/// WSL 下的 Windows 剪贴板桥：`powershell.exe Get-Clipboard -Format Image`
+/// 把 Windows 侧的截图存成 PNG，再从 `/mnt/c/...` 拷回项目里。
+///
+/// 返回 None 表示 Windows 侧没有图片（或桥失败）——调用方回落 arboard。
+/// 剪贴板里是文本时 PowerShell 输出 "no image"，同样走回落。
+#[cfg(target_os = "linux")]
+fn save_clipboard_image_wsl() -> Option<(String, u32, u32)> {
+    use std::process::Command;
+
+    let win_temp = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "$img = Get-Clipboard -Format Image; \
+             if ($img) { \
+               $p = Join-Path $env:TEMP 'starcode_clip.png'; \
+               $img.Save($p, [System.Drawing.Imaging.ImageFormat]::Png); \
+               Write-Output $p \
+             } else { Write-Output 'no image' }",
+        ])
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&win_temp.stdout).trim().to_string();
+    if !stdout.ends_with(".png") {
+        return None;
+    }
+
+    // `C:\Users\...\starcode_clip.png` → `/mnt/c/Users/.../starcode_clip.png`
+    let wsl_path = stdout.replace('\\', "/");
+    let wsl_path = wsl_path
+        .strip_prefix("C:/")
+        .map(|rest| format!("/mnt/c/{}", rest))?;
+    let bytes = fs::read(&wsl_path).ok()?;
+
+    let current_dir = std::env::current_dir().ok()?;
+    let images_dir = current_dir.join(".star").join("images");
+    fs::create_dir_all(&images_dir).ok()?;
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S");
+    let file_path = images_dir.join(format!("image_{}.png", timestamp));
+    fs::write(&file_path, &bytes).ok()?;
+
+    // 尺寸从 PNG 头解（IHDR 在固定偏移：8 字节签名 + 4 长度 + 4 类型 + 宽高各 4）
+    let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+
+    // 复用 arboard 路径的尺寸限制与 JPEG 降档逻辑：只在本函数内做超限压缩
+    let img = image::open(&file_path).ok()?;
+    let (final_width, final_height, final_img) =
+        if width > IMAGE_MAX_WIDTH || height > IMAGE_MAX_HEIGHT {
+            let ratio_w = IMAGE_MAX_WIDTH as f64 / width as f64;
+            let ratio_h = IMAGE_MAX_HEIGHT as f64 / height as f64;
+            let ratio = ratio_w.min(ratio_h);
+            let new_width = (width as f64 * ratio).round() as u32;
+            let new_height = (height as f64 * ratio).round() as u32;
+            let resized = image::imageops::resize(
+                &img,
+                new_width,
+                new_height,
+                image::imageops::FilterType::Lanczos3,
+            );
+            (new_width, new_height, resized)
+        } else {
+            (width, height, img.to_rgba8())
+        };
+    final_img
+        .save_with_format(&file_path, ImageFormat::Png)
+        .ok()?;
+
+    let file_size = fs::metadata(&file_path).ok()?.len();
+    if file_size > IMAGE_MAX_SIZE_BYTES {
+        let jpg_path = images_dir.join(format!("image_{}.jpg", timestamp));
+        final_img
+            .save_with_format(&jpg_path, ImageFormat::Jpeg)
+            .ok()?;
+        let _ = fs::remove_file(&file_path);
+        Some((
+            format!(".star/images/image_{}.jpg", timestamp),
+            final_width,
+            final_height,
+        ))
+    } else {
+        Some((
+            format!(".star/images/image_{}.png", timestamp),
             final_width,
             final_height,
         ))

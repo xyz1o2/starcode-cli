@@ -183,10 +183,15 @@ impl CommandClassifier {
         // - 磁盘操作
         // - Fork bomb
         // - 管道注入
+        //
+        // 注意 `"rm -f /"` 不能进这张表：`contains()` 是子串匹配，
+        // `rm -f /mnt/d/.../points.sqlite`（删项目里的一个文件）也会命中，
+        // 于是任何绝对路径的 `rm -f` 都被当成删根。删根的各形态已被
+        // `"rm -rf /"` / `"rm -fr /"` / `"rm -rf /*"` 覆盖；`rm -f`（不带
+        // -r）本来就删不掉目录，没有「删根」能力，交给 Moderate 确认流程。
         let critical_patterns = [
             "rm -rf /",
             "rm -fr /",
-            "rm -f /",
             "rm -rf /*",
             "mkfs",
             "fdisk",
@@ -326,5 +331,45 @@ impl CommandClassifier {
         } else {
             SafetyLevel::Safe
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `rm -f /mnt/.../points.sqlite`（删项目里的一个文件）不能被当成删根。
+    /// 曾因 critical_patterns 里的 `"rm -f /"` 子串匹配被硬拦截，
+    /// auto 模式下连确认弹窗都没有（deny 优先于一切，分类器接不到手）。
+    #[test]
+    fn rm_f_with_absolute_path_is_not_root_deletion() {
+        let cmd = "pkill -9 node; sleep 1; rm -f /mnt/d/ai-workspace/workbuddy_ext/data/points.sqlite; echo cleaned";
+        assert_ne!(
+            CommandClassifier::classify(cmd).level,
+            SafetyLevel::Dangerous,
+            "`rm -f <绝对路径>` 是普通删文件，走 Moderate 确认，不该命中删根模式"
+        );
+        // 单条 `rm -f <绝对路径>` 同理
+        assert_ne!(
+            CommandClassifier::classify("rm -f \"/mnt/d/ai-workspace/x/data/points.sqlite\"").level,
+            SafetyLevel::Dangerous
+        );
+    }
+
+    /// 删根的各形态仍然要硬拦 —— 这是 `"rm -f /"` 当初想拦的东西。
+    #[test]
+    fn root_deletion_forms_stay_dangerous() {
+        assert_eq!(
+            CommandClassifier::classify("rm -rf /").level,
+            SafetyLevel::Dangerous
+        );
+        assert_eq!(
+            CommandClassifier::classify("rm -rf /*").level,
+            SafetyLevel::Dangerous
+        );
+        assert_eq!(
+            CommandClassifier::classify("rm -fr /").level,
+            SafetyLevel::Dangerous
+        );
     }
 }
