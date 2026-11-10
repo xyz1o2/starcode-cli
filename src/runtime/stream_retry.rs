@@ -120,7 +120,7 @@ mod tests {
         );
         assert!(matches!(
             policy.decide("connection refused", 0),
-            StreamFailureDecision::GiveUp(text) if text.contains("Original error:")
+            StreamFailureDecision::GiveUp(text) if text.contains("connection refused")
         ));
     }
 

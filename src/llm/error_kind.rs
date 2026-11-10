@@ -253,7 +253,102 @@ impl LlmErrorKind {
     }
 }
 
+/// 从多层包装的错误里剥出服务器返回的 message（对标 Claude Code 的
+/// `API Error: <服务器消息>`）。
+///
+/// 错误到达用户面前时已经穿了两层本地壳：rig 的
+/// `rig openai stream error: ProviderResponseError: {json}` 和适配层的
+/// `Provider error: {…}`。这两层是工具链的错，不是服务器的错 —— 用户要看的是
+/// JSON 里 `error.message` 那一句。剥壳顺序：先找服务器 JSON 的 `error.message`
+/// / `message`，剥不出再退回剥本地壳前缀，都失败就原样返回。
+///
+/// 只读不诊断：分类仍走 `classify`（它要的是全文，状态码可能在壳里）。
+pub fn server_message(error: &str) -> String {
+    let mut current = error.trim();
+
+    // ① 服务器 JSON：{"error":{"message":"…"}} 或 {"message":"…"}。
+    //    从每个 `{` 起做括号配对（跳过字符串字面量），截出完整 JSON 再解析，
+    //    第一个解析成功的胜出 —— 壳前缀里不会有 `{`，通常第一个就命中。
+    for (start, ch) in current.char_indices() {
+        if ch != '{' {
+            continue;
+        }
+        let Some(end) = matching_brace(current, start) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&current[start..=end]) else {
+            continue;
+        };
+        let msg = v
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .or_else(|| v.get("message").and_then(|m| m.as_str()));
+        if let Some(msg) = msg {
+            if !msg.trim().is_empty() {
+                return msg.trim().to_string();
+            }
+        }
+    }
+
+    // ② 剥本地壳前缀（适配层 / rig 层），剩下的就是 rig 透传的原文
+    const SHELL_PREFIXES: [&str; 3] = [
+        "Provider error: ",
+        "rig openai stream error: ",
+        "ProviderResponseError: ",
+    ];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for prefix in SHELL_PREFIXES {
+            if let Some(rest) = current.strip_prefix(prefix) {
+                current = rest.trim_start();
+                changed = true;
+            }
+        }
+    }
+    current.to_string()
+}
+
+/// 从 `start`（必须指向 `{`）做括号配对，返回配对 `}` 的字节下标。
+/// 字符串字面量内的括号与转义引号不计入。
+fn matching_brace(s: &str, start: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    debug_assert_eq!(bytes[start], b'{');
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// 把原始错误包成"标签 + 下一步 + 原文"。用户看到的就是这一段。
+///
+/// 展示口径对标 Claude Code 的 `API Error: <服务器消息>`：正文只放服务器
+/// 返回的 message（`server_message` 剥掉工具壳），完整原文留给 debug 日志，
+/// 不再怼在用户脸上。
 pub fn diagnose(error: &str) -> String {
     let kind = LlmErrorKind::classify(error);
     let mut out = format!("{}: ", kind.label());
@@ -261,8 +356,11 @@ pub fn diagnose(error: &str) -> String {
         Some(hint) => out.push_str(hint),
         None => out.push_str("The model call failed."),
     }
-    out.push_str("\n\nOriginal error: ");
-    out.push_str(error);
+    let server = server_message(error);
+    if !server.is_empty() && !out.contains(&server) {
+        out.push_str("\n\n");
+        out.push_str(&server);
+    }
     out
 }
 
@@ -442,7 +540,52 @@ mod tests {
     fn diagnose_keeps_the_original_text() {
         let out = diagnose("HTTP 402 Insufficient Balance");
         assert!(out.starts_with("Quota / Billing:"));
-        assert!(out.contains("Original error: HTTP 402 Insufficient Balance"));
+        // 无壳可剥：原文就是服务器 message，直接出现在正文里
+        assert!(out.contains("Insufficient Balance"));
+    }
+
+    /// 真实回归（glowp 554）：正文只放服务器 message，本地工具壳
+    /// （Provider error / rig openai stream error / ProviderResponseError）
+    /// 不得出现在用户面前 —— 完整原文进 debug 日志即可。
+    #[test]
+    fn diagnose_strips_tool_shows_server_message() {
+        let err = r#"Provider error: rig openai stream error: ProviderResponseError: {"error":{"message":"glowp: 554 : refused with no details (an empty reply, often from a firewall or proxy in front of the API rather than the API itself) (554: you can retry your request)","type":"api_error"}}"#;
+        let out = diagnose(err);
+        assert!(out.starts_with("Error: "));
+        assert!(
+            out.contains("glowp: 554 : refused with no details"),
+            "应显示服务器 message，实际：{out}"
+        );
+        assert!(!out.contains("rig openai stream error"), "工具壳不外露");
+        assert!(!out.contains("ProviderResponseError"), "工具壳不外露");
+        assert!(!out.contains("Original error:"), "原文不再怼给用户");
+    }
+
+    /// 剥壳函数：JSON message / 裸前缀 / 无壳三种形态。
+    #[test]
+    fn server_message_extracts_from_wrapped_forms() {
+        // 标准形态：{"error":{"message":…}}
+        assert_eq!(
+            server_message(
+                r#"Provider error: rig openai stream error: ProviderResponseError: {"error":{"message":"boom happened","type":"api_error"}}"#
+            ),
+            "boom happened"
+        );
+        // 顶层 message 形态（部分网关这么发）
+        assert_eq!(
+            server_message(r#"{"message":"upstream timeout"}"#),
+            "upstream timeout"
+        );
+        // 无 JSON：只剥本地壳前缀
+        assert_eq!(
+            server_message("Provider error: rig openai stream error: status 502 Bad Gateway"),
+            "status 502 Bad Gateway"
+        );
+        // 完全无壳：原样返回
+        assert_eq!(
+            server_message("HTTP 402 Insufficient Balance"),
+            "HTTP 402 Insufficient Balance"
+        );
     }
 
     #[test]
