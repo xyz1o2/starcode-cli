@@ -12,7 +12,7 @@
 //!
 //! # 外部 harness 现在该用什么
 //!
-//! 文件协议（`core/remote`）—— 见 `docs/harness-integration.md`：
+//! 文件协议（`core/remote`）—— 见 docs/harness-integration.md（已删除，git 历史可取回）：
 //!
 //! - `.star/remote/inbox.jsonl` → `outbox.jsonl`，`send_message` /
 //!   `approve_tool` / `cancel` / `ping`，带 `request_id` 配对。

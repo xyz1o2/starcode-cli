@@ -2518,7 +2518,7 @@ mod tests {
     /// 零结果必须**解释原因**并给出下一步 —— 否则模型只会读成
     /// 「这个功能不存在」，然后换个说法再问一遍，再问一遍。
     ///
-    /// 事故原样（docs/tool-io-token-audit.md §1.3）：中文提问打纯英文代码库，
+    /// 事故原样（旧 tool-io-token-audit §1.3）：中文提问打纯英文代码库，
     /// 工具只回一句 "No relevant code found" —— 信息量等同于"没有这个东西"。
     #[test]
     fn a_zero_hit_result_explains_the_language_mismatch() {

@@ -53,6 +53,11 @@ pub enum ApprovalMode {
     BypassPermissions, // Skip permission
     #[serde(rename = "plan")]
     Plan, // Plan mode (read-only)
+    // 对标 Claude Code：`dontAsk` —— 不弹任何确认，会弹的一律直接拒。
+    // 给 CI / headless 用：比 bypassPermissions 收得紧（不是全放行，
+    // 是「没人回答得了我，就别问」），allow 规则与只读操作仍然可用。
+    #[serde(rename = "dontAsk")]
+    DontAsk, // Auto-deny anything that would prompt
     #[serde(rename = "auto")]
     Auto, // AI classifier driven: allow safe ops without confirmation
 }
@@ -72,6 +77,7 @@ impl ApprovalMode {
             Self::AcceptEdits => "acceptEdits",
             Self::Plan => "plan",
             Self::BypassPermissions => "bypassPermissions",
+            Self::DontAsk => "dontAsk",
             Self::Auto => "auto",
         }
     }
@@ -86,6 +92,7 @@ impl ApprovalMode {
             Self::AcceptEdits => "Accept edits",
             Self::Plan => "Plan",
             Self::BypassPermissions => "Bypass permissions",
+            Self::DontAsk => "Don't ask",
             Self::Auto => "Auto",
         }
     }
@@ -100,6 +107,7 @@ impl ApprovalMode {
             Self::AcceptEdits => "接受编辑 (acceptEdits)",
             Self::Plan => "Plan (计划模式)",
             Self::BypassPermissions => "Bypass (全部放行)",
+            Self::DontAsk => "Don't ask (不问直接拒)",
             Self::Auto => "Auto (自动审批)",
         }
     }

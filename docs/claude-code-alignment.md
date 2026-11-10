@@ -276,7 +276,7 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | 全局层无 `.claude/` 回落 | 指令层已支持 `~/.claude/CLAUDE.md`；但 skills/agents/commands/等仍只读 `~/.star/*` | ❌ 部分 |
 | 无 `CLAUDE.local.md` | **已修** | ✅ `utils/project_context.rs` |
 | 无 `.claude/CLAUDE.md` | **已修**（`agent/system_prompt_merge.rs` 的旧实现无调用者，未基于它扩展） | ✅ 同上 |
-| 无 `@import` 展开 | 未实现。CC 里 `@path` 会展开进 context，这里仍按字面量 | ❌ |
+| 无 `@import` 展开 | **已修（2026-11-10）**：`expand_imports`（`utils/project_context.rs`）—— 相对路径相对所在文件解析、`~/` 到 home、围栏内不展开、深度上限 5、环检测、目标缺失保留原行；合并路径（`load_merged_project_context`）已接线 | ✅ `utils/project_context.rs` |
 | 无 `.claude/rules/` | 无 `paths:` 条件加载 | ❌ |
 | 无 `claudeMdExcludes` | — | ❌ |
 | hooks 存在独立文件 | **已修**：`.star/hooks.json`（StarCode 自有，写入路径不变）与 settings.json 的 `hooks` 段（CC 风格，只读）**同时读取**，在 `list_hooks` 合并 | ✅ `core/hooks/settings_hooks.rs` |
@@ -285,7 +285,7 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | hook 事件自造名 | `BeforeAgent` / `AfterAgent` / `BeforeToolSelection` / `BeforeModel` / `AfterModel` 在 CC 中无对应 | ❌ `commands/hooks.rs:13,34` |
 | 权限模式 | **已修（2026-10-13）**：`acceptEdits` 曾被折叠成 `Default`（CLI 与文档都写这个模式，实际给的是"写操作照样弹框"）。现在是独立一档：只读工具 + 文件编辑 + 只读 shell 命令免确认 | ✅ `core/policy/types.rs`、`policy_engine.rs::mode_auto_allows` |
 | `default` 档只读也弹框 | **已修**：`default_decision = AskUser` 曾把 `Read`/`Grep`/`Glob` 也弹框；headless 下 `non_interactive` 再把它翻成 Deny，于是 `-p` 模式**每个工具都被拒**。现在按 CC 语义表放行只读工具 | ✅ `policy_engine.rs::check` 第 3 步 |
-| 无 `dontAsk` 模式 | CI / headless 场景缺一个「其余直接拒」的档位 | ❌ |
+| 无 `dontAsk` 模式 | **已修（2026-11-10）**：`ApprovalMode::DontAsk` 独立成档 —— 只读照常放行，其余直接拒（不是 AskUser）；显式 `allow` 规则仍能放行。顺带修掉 `approval_mode_from_str` 把 `dontask` 误当 auto 别名的问题 | ✅ `core/policy/types.rs`、`policy_engine.rs` |
 | 无 auto 模式分类器 | — | ❌ |
 | 无 sandbox | — | ❌ |
 | 无 managed 层 | 只有 `STAR_PERMISSIONS_FILE` 一个显式入口 | ❌ |
@@ -354,10 +354,10 @@ lib 套件 914 全绿，`cargo fmt --check` 绿，本次改动范围内 clippy �
 
 | P | 项 | 落点 | 预估 |
 |---|---|---|---|
-| **P1** | `@import` 展开 | `utils/project_context.rs` | M |
+| **P1** | ~~`@import` 展开~~ **已完成（2026-11-10）**：`expand_imports`，围栏/深度/环三个边界都有测试 | ✅ |—|
 | **P1** | `.mcp.json` 作为回落 | `core/utils/paths.rs:337` | S |
 | **P1** | `STAR_CONFIG_DIR` 环境变量，对应 `CLAUDE_CONFIG_DIR` | `core/config/storage.rs:8` | S |
-| **P1** | `ApprovalMode` 补 `dontAsk`（headless/CI 用）。`acceptEdits` 已于 2026-10-13 独立成档，`auto` 于 2026-11-10 独立成档（`core/auto_mode/` 分类器），`bypassPermissions` 同日落位（旧名 `yolo` 降为输入别名）；还剩 `dontAsk` 一档 | `core/policy/types.rs`、`main.rs` | S |
+| **P1** | ~~`ApprovalMode` 补 `dontAsk`（headless/CI 用）~~ **已完成（2026-11-10）**：`acceptEdits` / `auto` / `bypassPermissions` / `dontAsk` 四档全部独立成档，CC 的五种审批模式对齐完毕 |—| ✅ |
 | **P1** | MCP tool search，schema 延迟加载 | `core/tools/tool_registry.rs` | L |
 | **P2** | `.claude/rules/` + `paths:` frontmatter 条件加载 | 新模块 | M |
 | **P2** | 补 hook 事件 `PermissionRequest` / `PostToolBatch` / `ConfigChange` / `InstructionsLoaded` | `core/hooks/store.rs` | M |
@@ -428,11 +428,11 @@ P2 的 workflows 价值最高（把子 agent 并行从消耗主 context 变成�
 2. **对着上一代架构**。泄漏源码是 v2.1.88（2026-03），官方文档已到 v2.1.2xx，中间 dynamic workflows、auto mode 默认化、tool search 默认开启、35+ hook 事件、`.claude/rules/` 条件加载等全是新的。
 3. **完成度自评不可信**。标着 ✅ 100% 的项（如 Explore UI、Tool 渲染）是 UI 渲染格式，与 harness 架构对标是两件事。
 
-**仍可参考**：`docs/ui-tool-render.md`（终端渲染对比）、`docs/ui-benchmark-ccb.md`（UI 视觉基准）。这两份是 UI 层观察，不受配置架构变化影响。
+**仍可参考**：曾保留过 `ui-tool-render.md`（终端渲染对比）与 `ui-benchmark-ccb.md`（UI 视觉基准），均已随文档清理被删除（commit `18c5f0c`，git 历史可取回）；UI 层观察不再有活文档。
 
 **已执行的处置（2026-10-13）**：
 
 - **已删除 5 份整体作废的**：`parity-overview.md`、`parity-agent.md`、`parity-commands.md`、`parity-orphaned.md`、`parity-edge-cases.md`。删除前逐条写明作废原因，其中 `parity-orphaned.md` 列出了被证伪的三项（PolicyEngine、ModelFallbackManager、Workflow）。git 历史中仍可取回。
-- **保留 5 份 UI 层的**：`parity-task.md`、`parity-progress.md`、`parity-permission.md`、`parity-tool-render-gaps.md`、`parity-ui-framework.md`。它们只覆盖终端渲染与 UI 框架结构，不受配置架构变化影响。`parity-permission.md` 中「需要先接线 `PolicyEngine`」的错误说法已就地改正为指向本文。
+- **保留过的 5 份 UI 层的**（`parity-task.md`、`parity-progress.md`、`parity-permission.md`、`parity-tool-render-gaps.md`、`parity-ui-framework.md`）不久后随 `.docs/` 目录一起被清理（commit `18c5f0c`），现在**全部不存在**；本文是唯一有哪些对齐结论仍有效的地方。
 - **`CLAUDE.md`** 的 Project 段落加了对标文档指针；「Not everything is wired up」一节订正了两条错误判断（`PolicyEngine::load_permission_rules` 实为活路径；`WebBrowserTool` 已从树中移除），并补记了 `core/langfuse/client.rs:315` 这条此前漏列的 stub。
 - `README.md` 未引用 `parity-*.md`，无需改动。

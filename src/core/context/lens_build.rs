@@ -1,7 +1,7 @@
 //! StarLens 全仓组装：遍历受管范围，产出结构-only 的 `WholeIndex` 与漂移基线。
 //!
 //! 本层只做确定性工作——walk + scope 评估 + tree-sitter 结构抽取 + 落盘；
-//! 语义半扇 F/R/S 由后续 cheap model 管线增强（见 docs/starlens-design.md P1）。
+//! 语义半扇 F/R/S 由后续 cheap model 管线增强（见已删除的 docs/starlens-design.md P1）。
 
 use super::lens::{ScopeRole, WholeIndex};
 use super::lens_extract::extract_structural;

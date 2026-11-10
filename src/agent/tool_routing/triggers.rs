@@ -43,7 +43,7 @@ pub(crate) struct TriggerEval {
     pub score: u32,
     pub reason: &'static str,
     /// 人类可读的判分依据，写进 debug log——这是唯一能回答"它到底为什么触发/
-    /// 为什么没触发"的地方。eval 基座已删（见 docs/starlens-design.md §12 末），
+    /// 为什么没触发"的地方。eval 基座已删（见已删除的 docs/starlens-design.md §12 末），
     /// 所以这行日志是当下唯一的可观测面，别省。
     pub detail: String,
 }
@@ -587,7 +587,7 @@ fn names_another_tool(lower: &str) -> bool {
 /// 把判分依据写成人能读的一句话，进 debug log。
 ///
 /// 这是当下唯一能回答"它为什么触发 / 为什么没触发"的出口——eval 基座已随
-/// eval 体系删除（见 docs/starlens-design.md §12 末），所以每条判定都必须可被人复核。
+/// eval 体系删除（见已删除的 docs/starlens-design.md §12 末），所以每条判定都必须可被人复核。
 /// **被否决的输入要报出否决理由**，否则排障时只看到 "no strong signal"，
 /// 分不清是词表没覆盖还是被硬否决拒了。
 fn describe_rank_locate_route(user_input: &str) -> String {
@@ -629,7 +629,7 @@ fn describe_rank_locate_route(user_input: &str) -> String {
 
 /// 触发前的**语言闸门**：判断这次提问的关键词有没有可能命中目标代码库。
 ///
-/// # 事故根因（docs/tool-io-token-audit.md §1.3）
+/// # 事故根因（旧 tool-io-token-audit §1.3）
 ///
 /// `CodebaseSearch` 是词法引擎 —— 它匹配的是**代码里的 token**。中文提问被压成
 /// 中文 bigram（「没动 动静」）之后喂进去，撞上纯英文代码库，命中概率在数学上
@@ -1145,7 +1145,7 @@ mod tests {
     ///
     /// 这批样本就是"判定集"里 codebase_search 的那一类。它锁的是**路由契约**
     /// （这类问题归 CodebaseSearch），不测量真实模型行为——eval 基座已删，
-    /// 真正的行为度量得先重建评测基座，见 docs/starlens-design.md §12 末。
+    /// 真正的行为度量得先重建评测基座，见已删除的 docs/starlens-design.md §12 末。
     #[test]
     fn cross_file_locate_questions_score_above_threshold() {
         for q in [
@@ -1613,7 +1613,7 @@ mod tests {
 
     // ── 语言闸门 ──────────────────────────────────────────────────────────
     //
-    // 事故（docs/tool-io-token-audit.md §1.3 / §1.5）：中文提问被压成中文
+    // 事故（旧 tool-io-token-audit §1.3 / §1.5）：中文提问被压成中文
     // bigram，喂给纯英文代码库的词法引擎 —— 数学上零命中，而谓词只看
     // 「句子像不像跨文件定位」，于是每轮盲打一次。
 

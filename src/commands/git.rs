@@ -245,7 +245,7 @@ async fn handle_commit_and_push(
         shell_tool_inactivity_timeout: None,
         fake_responses: None,
         record_responses: None,
-        disable_yolo_mode: None,
+        disable_bypass_mode: None,
         mcp_enabled: None,
         enable_hooks: None,
         hooks: None,

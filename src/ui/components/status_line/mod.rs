@@ -51,6 +51,12 @@ pub(crate) fn approval_mode_span(
                 .fg(theme.error)
                 .add_modifier(Modifier::BOLD),
         ),
+        ApprovalMode::DontAsk => (
+            // dontAsk 档：不适用 CC 的状态栏 emoji（那是交互档位的），用 ✋ 强调
+            // 「会拦」。颜色与 bypass 同为警示红但不加粗。
+            "✋ dont-ask".to_string(),
+            Style::default().fg(theme.error),
+        ),
         ApprovalMode::Auto => (
             format!("🤖 auto"),
             Style::default()

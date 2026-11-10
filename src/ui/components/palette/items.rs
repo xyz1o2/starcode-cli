@@ -627,8 +627,23 @@ pub fn get_agent_mode_palette_items() -> Vec<PaletteItem> {
                 "Auto-approve all actions (dangerous)",
                 "Auto-approve all actions (dangerous)",
             ),
-            category: cat,
+            category: cat.clone(),
             action: PaletteAction::SetAgentMode("bypassPermissions".to_string()),
+        },
+        PaletteItem {
+            id: "mode_dont_ask".to_string(),
+            label: i18n::t(
+                "palette.label.mode_dont_ask",
+                "Don't ask mode",
+                "Don't ask 模式",
+            ),
+            description: i18n::t(
+                "palette.desc.mode_dont_ask",
+                "Never prompt; denied instead (CI/headless)",
+                "永不弹确认，会弹的直接拒（CI/headless）",
+            ),
+            category: cat,
+            action: PaletteAction::SetAgentMode("dontAsk".to_string()),
         },
     ]
 }

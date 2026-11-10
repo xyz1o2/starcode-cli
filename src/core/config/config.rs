@@ -85,7 +85,7 @@ pub struct Config {
     pub(crate) shell_tool_inactivity_timeout: u64,
     pub(crate) fake_responses: Option<String>,
     pub(crate) record_responses: Option<String>,
-    pub(crate) disable_yolo_mode: bool,
+    pub(crate) disable_bypass_mode: bool,
     pub(crate) pending_include_directories: Vec<String>,
     pub(crate) enable_hooks: bool,
     pub(crate) hooks: Option<HashMap<String, Vec<HookDefinition>>>,
@@ -221,7 +221,7 @@ impl Config {
                 * 1000,
             fake_responses: params.fake_responses,
             record_responses: params.record_responses,
-            disable_yolo_mode: params.disable_yolo_mode.unwrap_or(false),
+            disable_bypass_mode: params.disable_bypass_mode.unwrap_or(false),
             pending_include_directories: vec![],
             enable_hooks: params.enable_hooks.unwrap_or(false),
             hooks: params.hooks,
@@ -445,9 +445,6 @@ impl Config {
     pub fn record_responses(&self) -> Option<&String> {
         self.record_responses.as_ref()
     }
-    pub fn disable_yolo_mode(&self) -> bool {
-        self.disable_yolo_mode
-    }
     pub fn enable_hooks(&self) -> bool {
         self.enable_hooks
     }
@@ -510,8 +507,8 @@ impl Config {
             true
         }
     }
-    pub fn is_yolo_mode_disabled(&self) -> bool {
-        self.disable_yolo_mode || !self.is_trusted_folder()
+    pub fn is_bypass_mode_disabled(&self) -> bool {
+        self.disable_bypass_mode || !self.is_trusted_folder()
     }
 
     /// headless（`-p`）下没有 UI 订阅消息总线：需要确认的工具没人应答。

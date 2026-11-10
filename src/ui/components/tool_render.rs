@@ -1754,7 +1754,7 @@ mod tests {
     ///
     /// 冷启动补跑必须与首查**可区分**。
     ///
-    /// 事故记录（docs/tool-io-token-audit.md §1.5）里 `turn=1` 双发在 UI 上
+    /// 事故记录（旧 tool-io-token-audit §1.5）里 `turn=1` 双发在 UI 上
     /// 完全 identical —— 根因是补跑沿用了首查的 query。所以补跑的 `· retry`
     /// 后缀必须守住。
     ///

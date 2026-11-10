@@ -1125,6 +1125,7 @@ pub enum ApprovalMode {
     AcceptEdits,       // 接受编辑：文件改动与只读命令免确认，其余仍问
     Plan,              // Plan 模式：只读研究/规划，禁止非只读工具
     BypassPermissions, // 全放行（对标 Claude Code bypassPermissions，旧名 YOLO）
+    DontAsk,           // 不问直接拒（对标 Claude Code dontAsk，CI/headless 用）
     Auto,              // auto 模式：AI 分类器驱动，默认档位
 }
 
@@ -1165,6 +1166,7 @@ impl From<ApprovalMode> for crate::core::policy::types::ApprovalMode {
             ApprovalMode::BypassPermissions => {
                 crate::core::policy::types::ApprovalMode::BypassPermissions
             }
+            ApprovalMode::DontAsk => crate::core::policy::types::ApprovalMode::DontAsk,
             ApprovalMode::Auto => crate::core::policy::types::ApprovalMode::Auto,
         }
     }
@@ -1180,6 +1182,7 @@ impl From<crate::core::policy::types::ApprovalMode> for ApprovalMode {
             crate::core::policy::types::ApprovalMode::BypassPermissions => {
                 ApprovalMode::BypassPermissions
             }
+            crate::core::policy::types::ApprovalMode::DontAsk => ApprovalMode::DontAsk,
             crate::core::policy::types::ApprovalMode::Auto => ApprovalMode::Auto,
         }
     }
@@ -1733,6 +1736,7 @@ mod thinking_effort_tests {
             ApprovalMode::AcceptEdits,
             ApprovalMode::Plan,
             ApprovalMode::BypassPermissions,
+            ApprovalMode::DontAsk,
             ApprovalMode::Auto,
         ];
 
@@ -1751,6 +1755,7 @@ mod thinking_effort_tests {
             ApprovalMode::AcceptEdits,
             ApprovalMode::Plan,
             ApprovalMode::BypassPermissions,
+            ApprovalMode::DontAsk,
             ApprovalMode::Auto,
         ];
 
@@ -1770,6 +1775,7 @@ mod thinking_effort_tests {
             ApprovalMode::AcceptEdits,
             ApprovalMode::Plan,
             ApprovalMode::BypassPermissions,
+            ApprovalMode::DontAsk,
             ApprovalMode::Auto,
         ] {
             let policy_mode: crate::core::policy::types::ApprovalMode = mode.clone().into();

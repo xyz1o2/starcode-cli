@@ -445,7 +445,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         shell_tool_inactivity_timeout: None,
         fake_responses: None,
         record_responses: None,
-        disable_yolo_mode: None,
+        disable_bypass_mode: None,
         mcp_enabled: None,
         enable_hooks: None,
         hooks: None,
@@ -666,7 +666,7 @@ fn parse_cli_approval_mode(
     // 别名口径和 `permissions.defaultMode`、`/permissions <mode>` 共用一份。
     crate::core::policy::approval_mode_from_str(input).ok_or_else(|| {
         format!(
-            "invalid --permission-mode `{}` (expected: auto|default|acceptEdits|plan|bypassPermissions)",
+            "invalid --permission-mode `{}` (expected: auto|default|acceptEdits|plan|bypassPermissions|dontAsk)",
             input
         )
     })

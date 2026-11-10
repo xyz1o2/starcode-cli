@@ -594,7 +594,10 @@ async fn cycle_approval_mode(state: &mut ChatState, agent_tx: &mpsc::Sender<Agen
         ApprovalMode::Default => ApprovalMode::AcceptEdits,
         ApprovalMode::AcceptEdits => ApprovalMode::Plan,
         ApprovalMode::Plan => ApprovalMode::BypassPermissions,
-        ApprovalMode::BypassPermissions => ApprovalMode::Auto,
+        ApprovalMode::BypassPermissions => ApprovalMode::DontAsk,
+        // dontAsk 不进 Shift+Tab 循环 —— 它是 CI/headless 的档位；交互终端里
+        // 「不问直接拒」只会让人以为程序卡死了。再次 Shift+Tab 回到 Default。
+        ApprovalMode::DontAsk => ApprovalMode::Default,
     };
 
     let _ = agent_tx

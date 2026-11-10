@@ -419,7 +419,7 @@ pub struct SettingsPermissions {
     pub deny: Vec<PermissionRuleSpec>,
     pub ask: Vec<PermissionRuleSpec>,
     pub allow: Vec<PermissionRuleSpec>,
-    /// `defaultMode`：default | acceptEdits | plan | bypassPermissions
+    /// `defaultMode`：default | acceptEdits | plan | bypassPermissions | dontAsk | auto
     pub default_mode: Option<String>,
     /// `additionalDirectories`：允许越出 cwd 访问的目录
     pub additional_directories: Vec<String>,
@@ -463,7 +463,7 @@ impl SettingsPermissions {
     /// 规则（allow/ask/deny）取并集，各层都安全 —— 项目里写 deny 只会更安全。
     /// 但 `defaultMode` 是覆盖语义：签入版本库的 `.star/settings.json`
     /// 一旦写了 `bypassPermissions`，任何人 clone 下来就自动获得免确认权限，
-    /// 而 `is_yolo_mode_disabled()` 在这条启动路径上根本没被调用。
+    /// 而 `is_bypass_mode_disabled()` 在这条启动路径上根本没被调用。
     /// 因此把可提交的 `settings.json` 标为不可信，只允许个人层
     /// （`settings.local.json`、全局 `~/.star/`、`STAR_PERMISSIONS_FILE`）
     /// 决定审批模式。
@@ -612,6 +612,7 @@ pub fn approval_mode_from_str(raw: &str) -> Option<ApprovalMode> {
         ApprovalMode::AcceptEdits,
         ApprovalMode::Plan,
         ApprovalMode::BypassPermissions,
+        ApprovalMode::DontAsk,
         ApprovalMode::Auto,
     ] {
         if mode.as_str().to_ascii_lowercase() == normalized {
@@ -627,7 +628,7 @@ pub fn approval_mode_from_str(raw: &str) -> Option<ApprovalMode> {
         "bypasspermissions" | "dangerouslyskippermissions" | "yolo" | "bypass" => {
             Some(ApprovalMode::BypassPermissions)
         }
-        "autoconfirm" | "autoapprove" | "dontask" => Some(ApprovalMode::Auto),
+        "autoconfirm" | "autoapprove" => Some(ApprovalMode::Auto),
         _ => None,
     }
 }
@@ -991,11 +992,11 @@ mod tests {
         assert_eq!(labels.len(), total, "审批档位的显示标签必须互不相同");
     }
 
-    /// 回归：签入版本库的 `.star/settings.json` 不能把审批模式抬到 yolo。
+    /// 回归：签入版本库的 `.star/settings.json` 不能把审批模式抬到 bypassPermissions。
     ///
     /// `defaultMode` 是覆盖语义，而项目层文件会随仓库分发 ——
     /// 一个 `bypassPermissions` 就让每个 clone 下来的人自动免确认，
-    /// 且这条启动路径上 `is_yolo_mode_disabled()` 根本没被调用。
+    /// 且这条启动路径上 `is_bypass_mode_disabled()` 根本没被调用。
     /// 可提交层只允许加规则（deny 只会更安全），不允许放宽审批。
     #[test]
     fn untrusted_project_layer_cannot_escalate_the_approval_mode() {

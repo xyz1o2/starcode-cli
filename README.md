@@ -285,7 +285,7 @@ sudo apt-get install -y cmake pkg-config build-essential
 ```
 
 Releases are tag-driven — bump `version` in `Cargo.toml`, then `git tag v0.4.0 && git push origin main --tags`.
-Full details in [docs/build-release.md](docs/build-release.md).
+(详情见 release.yml 工作流与 `cargo build --release`；旧版 `docs/build-release.md` 已删除。)
 
 #### Project structure
 
@@ -305,7 +305,7 @@ starcode-cli/
 │   └── utils/          # logging, paths, project context, misc
 ├── i18n/               # translations
 ├── .github/workflows/  # ci.yml (check/test/build) + release.yml (tag → 多平台发布)
-├── docs/build-release.md   # 构建与发布说明
+├── docs/               # 对齐基线与设计文档（claude-code-alignment.md 等）
 ├── install.sh / .ps1 / .bat                # 从源码构建安装
 ├── install-binary.sh / .ps1                # 预编译二进制下载安装（README 推荐入口）
 └── Cargo.toml

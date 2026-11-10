@@ -472,6 +472,19 @@ mod tests {
         }
     }
 
+    /// 测试专用 client：**禁用系统代理**。
+    ///
+    /// 这些测试打的是本机回环 listener。用户壳里常设 `http_proxy`
+    /// 且 `no_proxy` 用 `127.*` 这类 reqwest 不识别的通配写法 —— 请求会
+    /// 被偶发送进代理，回 502，把断言 401/404/202 的测试变成 flake
+    /// （现场：全量跑挂、单跑过）。回环流量没有理由走代理。
+    fn loopback_http() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build no-proxy client")
+    }
+
     #[test]
     fn mail_server_config_defaults_and_safety_gate() {
         // 默认回环无密钥 → 可以启动（回环免配置语义）
@@ -503,7 +516,7 @@ mod tests {
             .expect("listener should start on loopback");
         let url = format!("http://{}/agent-mail/inbox", bound);
 
-        let http = reqwest::Client::new();
+        let http = loopback_http();
 
         // 未知目标 → 404 unknown_target（无死信语义）
         let mut ghost = AgentMessage::new("lead", "谁来收？", "投递");
@@ -547,7 +560,7 @@ mod tests {
                 .await
                 .unwrap();
         let url = format!("http://{}/agent-mail/inbox", bound);
-        let http = reqwest::Client::new();
+        let http = loopback_http();
 
         let mut msg = AgentMessage::new("lead", "x", "s");
         msg.to = "someone".into();

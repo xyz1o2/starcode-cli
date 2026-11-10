@@ -48,6 +48,9 @@ pub fn resolve_border_color(state: &ChatState) -> Color {
         crate::types::ApprovalMode::AcceptEdits => Color::LightGreen,
         crate::types::ApprovalMode::Plan => Color::Cyan,
         crate::types::ApprovalMode::BypassPermissions => Color::Red,
+        // 与 bypass 同属「注意：会被拒」的警示色，但深一档 —— 不是"全部放行"
+        // 而是"其余一律拒"。
+        crate::types::ApprovalMode::DontAsk => Color::LightRed,
         crate::types::ApprovalMode::Auto => Color::Green,
     };
     // Send animation: brief cyan flash when message is sent

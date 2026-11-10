@@ -608,7 +608,7 @@ mod tests {
         }])
     }
 
-    /// 事故记录（docs/tool-io-token-audit.md §1.4）：`trace_call_chain` 输出
+    /// 事故记录（旧 tool-io-token-audit §1.4）：`trace_call_chain` 输出
     /// "Showing top 5 by name match"，但 `find_symbols` 只 `filter(contains)`
     /// **不排序** —— 调用方 `take(5)` 拿到的是符号表的插入顺序。
     ///

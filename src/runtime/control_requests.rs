@@ -873,7 +873,7 @@ async fn handle_confirm_tool(
     let message_bus = agent.runtime_message_bus().unwrap_or_else(|| {
         use crate::core::policy::{PolicyEngine, PolicyEngineConfig};
         // 同 worker.rs 的兜底：规则和审批模式都要带上，否则 runtime 缺席时
-        // 用户选的 yolo/plan 会退化成逐次询问。
+        // 用户选的 bypassPermissions/plan 会退化成逐次询问。
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let approval_mode = agent.policy_approval_mode();
         std::sync::Arc::new(crate::core::confirmation_bus::MessageBus::new(

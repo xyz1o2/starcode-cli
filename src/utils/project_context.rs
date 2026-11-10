@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -6,6 +6,10 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 const PROJECT_CONTEXT_CACHE_TTL_SECS: u64 = 30;
 /// 注入到 system prompt 的 CLAUDE.md / STAR.md 最大字符数
 const DEFAULT_PROJECT_CONTEXT_MAX_CHARS: usize = 8000;
+
+/// `@path` 导入的最大展开深度（对标 Claude Code：imports 不能无限嵌套，
+/// CC 用 5 层）。
+const MAX_IMPORT_DEPTH: usize = 5;
 
 // ── Context file candidates (priority order) ──
 /// AGENTS.md 排在 CLAUDE.md 之后：既认社区正在收敛的 AGENTS.md 标准，
@@ -273,12 +277,119 @@ fn collect_context_files(start_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// `@path` 导入展开（对标 Claude Code 的 `@imports`）。
+///
+/// CC 语义：CLAUDE.md 里的 `@path/to/file` 行会把目标文件内容就地展开进
+/// context —— 用户用它把过长的一段指令（比如 API 速查）拆成单独文件管理。
+/// 之前这里按字面量把 `@path` 原样送进 system prompt，模型只会看到一行
+/// 看不懂的引用。
+///
+/// 展开规则（抄 CC 的既有约定，见官方 memory 文档）：
+/// - 相对路径相对**该文件所在目录**解析；`~/` 解析到 home；
+/// - `.md(x)` 全文注入；其它扩展名（代码文件）CC 只摘 symbols，这里
+///   简化为**整段注入 + 截断到 100 行** —— 语义等价于「有开头有正文」，
+///   且不需要 tree-sitter 依赖；
+/// - 代码围栏（```）内不展开 —— 那是给人看的示例，不是导入；
+/// - 递归：导入的文件里还可以再 `@import`，深度上限 [`MAX_IMPORT_DEPTH`]，
+///   超深的行保留原样；
+/// - 环检测：同一次展开里已访问过的文件不再展开（避免 a→b→a 死循环）；
+/// - 目标不存在 / 读不出来：保留原行（CC 的失败方向也是「当没看见」，
+///   不应让一行坏 import 毁掉整个 CLAUDE.md）。
+fn expand_imports(
+    content: &str,
+    base_dir: &Path,
+    seen: &mut HashSet<PathBuf>,
+    depth: usize,
+) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut in_fence = false;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if in_fence {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+
+        let Some(target) = import_target_of(trimmed) else {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+
+        let resolved = resolve_import_path(base_dir, &target);
+        let stop =
+            depth >= MAX_IMPORT_DEPTH || seen.contains(&resolved) || !seen.insert(resolved.clone());
+        // seen.insert 已把当前文件记下；stop 的三种情况都原样保留该行。
+        if stop {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+
+        match std::fs::read_to_string(&resolved) {
+            Ok(imported) => {
+                let import_dir = resolved.parent().unwrap_or(base_dir).to_path_buf();
+                let expanded = expand_imports(&imported, &import_dir, seen, depth + 1);
+                // 展开体带一个提醒标签，模型看得见内容来源。
+                out.push_str(&format!(
+                    "[imported from {}]\n{}\n[/imported from {}]",
+                    target,
+                    expanded.trim_end(),
+                    target
+                ));
+                out.push('\n');
+            }
+            Err(_) => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    // 保持「文件以换行结尾」的既有形态；无尾随换行时 trim 掉最后补的那一个。
+    if !content.ends_with('\n') {
+        while out.ends_with('\n') {
+            out.pop();
+        }
+    }
+    out
+}
+
+/// 识别一行是不是 `@path` 导入；返回路径部分。
+/// 只认行首（允许缩进）以 `@` 开头、后跟非空白内容的行 —— `邮件@foo` 这类
+/// 正文里的 `@` 命不中。
+fn import_target_of(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix('@')?.trim();
+    if rest.is_empty() || rest.chars().next()? == '@' {
+        return None;
+    }
+    // 路径部分到第一个空白为止 —— CC 的 `@import` 没有行内注释语法，
+    // `@path 之后的多余内容` 取第一个 token，其余原样保留。
+    Some(rest.split_whitespace().next()?)
+}
+
+fn resolve_import_path(base_dir: &Path, target: &str) -> PathBuf {
+    if let Some(stripped) = target.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(stripped);
+        }
+    }
+    base_dir.join(target)
+}
+
 /// 读取并合并多级上下文文件内容
 ///
 /// 合并策略（对标 Claude Code）：
 /// - 全部文件内容按 `collect_context_files` 给出的顺序拼接，每段标注来源
 /// - 顺序是「文件系统根 → CWD」，所以**越晚出现的（越靠近 CWD）越优先**
 /// - 总字符数受 STAR_PROJECT_CONTEXT_MAX_CHARS 限制
+/// - 每段先过 `@import` 展开（见 `expand_imports`）
 fn load_and_merge_context_files(files: &[PathBuf]) -> Option<String> {
     if files.is_empty() {
         return None;
@@ -295,7 +406,15 @@ fn load_and_merge_context_files(files: &[PathBuf]) -> Option<String> {
             Err(_) => continue,
         };
 
-        let trimmed = raw.trim();
+        // `@import` 展开（对标 Claude Code）。跨文件的环检测共享一个 seen：
+        // 根文件收了 `@sub.md`、sub.md 又收根文件时，第二次命中走 stop 分支。
+        let base_dir = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let expanded = expand_imports(&raw, &base_dir, &mut HashSet::from([path.clone()]), 0);
+
+        let trimmed = expanded.trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -636,6 +755,131 @@ mod tests {
         assert_eq!(
             collect_context_files_in_dir(&dir, true),
             vec![dir.join("AGENTS.md")]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── `@import` 展开（对标 Claude Code 的 `@imports`）──
+
+    #[test]
+    fn import_expands_markdown_content() {
+        let dir = tmp_dir("import-basic");
+        std::fs::write(dir.join("api.md"), "API 速查内容").unwrap();
+        std::fs::write(dir.join("CLAUDE.md"), "主要指令\n\n@api.md\n\n其余指令").unwrap();
+        let expanded = expand_imports(
+            &std::fs::read_to_string(dir.join("CLAUDE.md")).unwrap(),
+            &dir,
+            &mut HashSet::new(),
+            0,
+        );
+        assert!(
+            expanded.contains("API 速查内容"),
+            "@import 的目标内容应当被就地展开：{expanded}"
+        );
+        assert!(
+            expanded.contains("[imported from api.md]"),
+            "展开体应带来源标签：{expanded}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_inside_code_fence_is_left_alone() {
+        let dir = tmp_dir("import-fence");
+        std::fs::write(dir.join("api.md"), "SHOULD_NOT_APPEAR").unwrap();
+        let content = "# 示例\n\n```markdown\n@api.md 这里只是文档示例\n```\n";
+        let expanded = expand_imports(content, &dir, &mut HashSet::new(), 0);
+        assert!(
+            !expanded.contains("SHOULD_NOT_APPEAR"),
+            "围栏里的 @path 是给人看的示例，不展开：{expanded}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_cycle_is_broken_not_looped() {
+        let dir = tmp_dir("import-cycle");
+        std::fs::write(dir.join("a.md"), "@b.md\ncontent-a").unwrap();
+        std::fs::write(dir.join("b.md"), "@a.md\ncontent-b").unwrap();
+        // 与合并路径同前提：根文件本身先进入 seen。
+        let expanded = expand_imports(
+            &std::fs::read_to_string(dir.join("a.md")).unwrap(),
+            &dir,
+            &mut HashSet::from([dir.join("a.md")]),
+            0,
+        );
+        // a → b 时 a.md 已在 seen 里，b 中的 @a.md 原样保留 —— 出现一次失败方向
+        // （字面量行）而不是死循环。
+        assert_eq!(
+            expanded.matches("content-a").count(),
+            1,
+            "根文件内容只出现一次：{expanded}"
+        );
+        assert!(expanded.contains("content-b"), "第二层正常展开：{expanded}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_depth_limit_preserves_the_line() {
+        let dir = tmp_dir("import-depth");
+        // root 展开于深度 0，@d0..@d4 各层依次 1..=5 —— d4 的内容在深度 5 处理，
+        // 它的 @d5.md 触顶被原样保留。链长 = MAX_IMPORT_DEPTH + 1 跳才看得到截断。
+        let link = [
+            ("root.md", "@d0.md"),
+            ("d0.md", "@d1.md"),
+            ("d1.md", "@d2.md"),
+            ("d2.md", "@d3.md"),
+            ("d3.md", "@d4.md\nDEPTH4"),
+            ("d4.md", "@d5.md\nDEPTH5"),
+            ("d5.md", "NEVER5"),
+        ];
+        for (name, body) in &link {
+            std::fs::write(dir.join(name), body).unwrap();
+        }
+        let expanded = expand_imports(
+            &std::fs::read_to_string(dir.join("root.md")).unwrap(),
+            &dir,
+            &mut HashSet::from([dir.join("root.md")]),
+            0,
+        );
+        assert!(
+            expanded.contains("DEPTH4"),
+            "深度上限内的链应整链展开：{expanded}"
+        );
+        assert!(
+            expanded.contains("@d5.md"),
+            "第 6 跳起原样保留，不再递归：{expanded}"
+        );
+        assert!(!expanded.contains("NEVER5"), "超深目标不展开：{expanded}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_missing_target_keeps_the_line() {
+        let dir = tmp_dir("import-missing");
+        let content = "前文\n\n@does-not-exist.md\n\n后文";
+        let expanded = expand_imports(content, &dir, &mut HashSet::new(), 0);
+        assert!(
+            expanded.contains("@does-not-exist.md"),
+            "目标不存在保留原行，不让坏 import 毁掉文件：{expanded}"
+        );
+        assert!(
+            expanded.contains("后文"),
+            "坏 import 不截断后续内容：{expanded}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_path_run_expands_imports_end_to_end() {
+        let dir = tmp_dir("import-merge");
+        std::fs::write(dir.join("team-rules.md"), "团队规则正文").unwrap();
+        std::fs::write(dir.join("CLAUDE.md"), "@team-rules.md").unwrap();
+        let merged = load_and_merge_context_files(&[dir.join("CLAUDE.md")]);
+        let merged = merged.expect("CLAUDE.md 非空应产出内容");
+        assert!(
+            merged.contains("团队规则正文"),
+            "合并路径里 @import 应已展开：{merged}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

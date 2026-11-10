@@ -101,7 +101,7 @@ pub async fn run(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
         other => {
             let Some(mode) = mode_from_verb(other) else {
                 return Err(format!(
-                    "Unknown /permissions argument `{}`.\nRules: allow | ask | deny | remove | list\nModes: auto | default | acceptEdits | plan | bypassPermissions\nLog: deny-log | clear-log",
+                    "Unknown /permissions argument `{}`.\nRules: allow | ask | deny | remove | list\nModes: auto | default | acceptEdits | plan | bypassPermissions | dontAsk\nLog: deny-log | clear-log",
                     args[0]
                 ));
             };
@@ -462,6 +462,7 @@ fn mode_from_verb(verb: &str) -> Option<ApprovalMode> {
         PolicyMode::AcceptEdits => Some(ApprovalMode::AcceptEdits),
         PolicyMode::Plan => Some(ApprovalMode::Plan),
         PolicyMode::BypassPermissions => Some(ApprovalMode::BypassPermissions),
+        PolicyMode::DontAsk => Some(ApprovalMode::DontAsk),
         PolicyMode::Auto => Some(ApprovalMode::Auto),
     }
 }

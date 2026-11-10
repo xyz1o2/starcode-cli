@@ -9,7 +9,7 @@
 //!
 //! 留着它是个陷阱：审查时看到 `HookEventType` 里列了 22 个 Claude Code 事件，
 //! 很容易得出"事件覆盖了 22 个"的结论 —— 而实际生效的只有
-//! `store::ManagedHookEvent` 里的那些（见 `docs/harness-integration.md`）。
+//! `store::ManagedHookEvent` 里的那些（见 docs/harness-integration.md，已删除，git 历史可取回）。
 //!
 //! 要么接线它，要么删掉它。接线是一个独立的工作项。
 

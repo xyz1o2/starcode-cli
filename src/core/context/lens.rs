@@ -1,7 +1,7 @@
 //! StarLens 代码认知层：数据模型与紧凑文本格式。
 //!
 //! 本模块只定义"一条认知 entry 长什么样"以及它与磁盘上 `.star/lens/lens.txt`
-//! 之间的序列化/反序列化，不涉及生成管线、注入或漂移检测（见 docs/starlens-design.md）。
+//! 之间的序列化/反序列化，不涉及生成管线、注入或漂移检测（见已删除的 docs/starlens-design.md）。
 //!
 //! 设计要点：
 //! - 符号标签（object/lang/role/sha）与 `symbols`/`imports` 来自解析器，永远正确；

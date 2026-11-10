@@ -1422,6 +1422,9 @@ pub async fn handle_stream_update(
                 crate::types::ApprovalMode::BypassPermissions => {
                     i18n::t("ui.mode.bypass", "Bypass", "Bypass")
                 }
+                crate::types::ApprovalMode::DontAsk => {
+                    i18n::t("ui.mode.dont_ask", "Don't ask", "Don't ask")
+                }
                 crate::types::ApprovalMode::Auto => i18n::t("ui.mode.auto", "Auto", "Auto"),
             };
             // 这里**不再**往 chat_history 推一条 assistant 条目。

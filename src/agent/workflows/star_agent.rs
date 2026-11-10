@@ -118,7 +118,7 @@ impl StarAgent {
     ///
     /// 存在的理由：`runtime_message_bus()` 返回 None 时的兜底构造要重新建一个
     /// `PolicyEngine`，而 `PolicyEngineConfig::default()` 只会给出 `Default` ——
-    /// 用户选了 yolo/plan，runtime 一缺席确认判断就悄悄退回逐次询问。
+    /// 用户选了 bypassPermissions/plan，runtime 一缺席确认判断就悄悄退回逐次询问。
     pub fn approval_mode(&self) -> ApprovalMode {
         self.approval_mode_lock
             .lock()
@@ -1291,7 +1291,7 @@ impl StarAgent {
 
     pub fn set_approval_mode(&mut self, mode: crate::types::ApprovalMode) {
         let safe_mode =
-            if self.inner.is_yolo_mode_disabled() && mode == ApprovalMode::BypassPermissions {
+            if self.inner.is_bypass_mode_disabled() && mode == ApprovalMode::BypassPermissions {
                 ApprovalMode::Default
             } else {
                 mode

@@ -1,6 +1,6 @@
 //! StarLens 漂移检测：对比 baseline + 现有 entry 集合与磁盘现状。
 //!
-//! 纯函数式分类（对标 docs/starlens-design.md §6）：
+//! 纯函数式分类（对标已删除的 docs/starlens-design.md §6）：
 //! - `Stale`：对象在 baseline、磁盘也在，但 sha 变了 → entry 过期待重算；
 //! - `Missing`：baseline 有、磁盘已无；
 //! - `Orphan`：有语义 entry，但现在已不是 Index 角色（文件没了或降级）→ 待清理；

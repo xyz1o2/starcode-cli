@@ -11,7 +11,7 @@
 //!
 //! **所以：看到本文件里的 `HookEvent` 枚举，不要以为那 15 个事件已经生效。**
 //! 生效的事件列表看 `store.rs` 的 `ManagedHookEvent`，以及
-//! `docs/harness-integration.md`。
+//! docs/harness-integration.md（已删除，git 历史可取回）。
 //!
 //! 本模块保留是因为它的类型定义还有参考价值（CC 事件名的权威清单），
 //! 接线它属于独立的一步工作。

@@ -455,7 +455,8 @@ pub async fn mode(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
              - `/mode default` — ask before risky writes/commands; read-only tools run free\n\
              - `/mode acceptEdits` — also apply file edits and read-only shell commands without asking\n\
              - `/mode plan` — read-only research & planning, no mutating tools\n\
-             - `/mode bypassPermissions` — run everything without asking (alias: yolo)\n\n\
+             - `/mode bypassPermissions` — run everything without asking (alias: yolo)\n\
+             - `/mode dontAsk` — never prompt; anything that would ask is denied (CI/headless)\n\n\
              _Rules and the deny log live under `/permissions`._",
             current
         );
@@ -464,18 +465,15 @@ pub async fn mode(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
     }
 
     let arg = args[0].trim();
-    let mut normalized = arg.to_lowercase().replace(['-', '_'], "");
-    if normalized == "yolo" {
-        // 旧官名（本项目的 YOLO 时代）仍要能认出来。
-        normalized = "bypasspermissions".to_string();
-    }
-    let mapped = match crate::core::policy::approval_mode_from_str(&normalized) {
+    // 旧名（`yolo` / `bypass` / `dangerously-skip-permissions` …）由统一口径
+    // `approval_mode_from_str` 认领，这里不再私养映射。
+    let mapped = match crate::core::policy::approval_mode_from_str(arg) {
         Some(m) => m.as_str().to_string(),
         None => {
             push_msg(
                 &mut ctx,
                 format!(
-                    "❌ Unknown mode: `{}`. Usage: /mode [auto|default|acceptEdits|plan|bypassPermissions]",
+                    "❌ Unknown mode: `{}`. Usage: /mode [auto|default|acceptEdits|plan|bypassPermissions|dontAsk]",
                     arg
                 ),
             );

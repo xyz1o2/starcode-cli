@@ -279,22 +279,6 @@ impl PolicyEngine {
         self.approval_mode.clone()
     }
 
-    /// 审批模式**自带**的免确认集合（对标 Claude Code 的模式语义表）。
-    ///
-    /// 这是模式语义的一部分，不是用户写下的规则，所以不进 `settings_permissions`：
-    /// - `default` = Manual —— 只读工具免确认，写与命令才问
-    /// - `acceptEdits` —— 再加上文件改动工具与只读 shell 命令
-    ///
-    /// `BypassPermissions` / `Plan` 在 `check` 里各自 return，不走这里。
-    /// deny 与显式 `ask` 的优先级由 `check` 的调用顺序保证（deny 第 1 步、
-    /// ask 由 `check` 在调用本方法前查过），本方法只回答"模式承诺放行吗"。
-    fn mode_auto_allows(&self, tool_name: &str, args: &serde_json::Value) -> bool {
-        matches!(
-            self.mode_auto_verdict(tool_name, args, None),
-            crate::core::auto_mode::service::AutoVerdict::Allow { .. }
-        )
-    }
-
     /// auto 档位的三态判定：**放行 / 拦截 / 交给 LLM 分类器**。
     ///
     /// 本地护栏只处理"字面就能看出来"的情况（只读工具、系统路径、危险命令
@@ -372,7 +356,12 @@ impl PolicyEngine {
                     AutoVerdict::Undecided
                 }
             }
-            ApprovalMode::BypassPermissions | ApprovalMode::Plan => AutoVerdict::Undecided,
+            // BypassPermissions / Plan / DontAsk 不在这里展开：
+            // BypassPermissions 与 Plan 在 `check` 里各自 return；DontAsk 的
+            // 只读放行也在 `check` 里 return 了（见 DontAsk 分支）。
+            ApprovalMode::BypassPermissions | ApprovalMode::Plan | ApprovalMode::DontAsk => {
+                AutoVerdict::Undecided
+            }
             ApprovalMode::Auto => {
                 // auto 模式 = 本地护栏 + LLM 分类器（对标 Claude Code yoloClassifier）：
                 // 字面能判的已经在上面的白名单里判掉了（只读工具 / 只读命令），
@@ -519,6 +508,36 @@ impl PolicyEngine {
                     } else {
                         PolicyDecision::Deny
                     },
+                    rule: None,
+                    explicit_rule: false,
+                };
+            }
+            ApprovalMode::DontAsk => {
+                // 对标 Claude Code 的 `dontAsk`：不弹任何确认，会弹的一律直接拒。
+                // 只读操作照常放行（模式语义与 default 的只读集合一致），
+                // 其余落到下面的规则层 —— 显式 `allow` 规则仍能放行，
+                // 显式 `ask` 规则在这里被翻成 Deny（没有人能回答它）。
+                let asked_by_rule = [&settings_verdict, &legacy_verdict]
+                    .into_iter()
+                    .flatten()
+                    .any(|(verdict, _)| *verdict == RuleVerdict::Ask);
+                if !asked_by_rule
+                    && (crate::types::is_safe_query_tool(&tool_call.name)
+                        || crate::types::is_readonly_fs_command(&tool_call.name, &args))
+                {
+                    return CheckResult {
+                        decision: PolicyDecision::Allow,
+                        rule: None,
+                        explicit_rule: false,
+                    };
+                }
+                // 会弹确认的（以及显式 ask 命中的）→ 直接拒。
+                return CheckResult {
+                    decision: PolicyDecision::DenyWithReason(format!(
+                        "dontAsk mode: `{}` requires confirmation and no one can answer; \
+                         grant it explicitly in permissions.allow if needed",
+                        tool_call.name
+                    )),
                     rule: None,
                     explicit_rule: false,
                 };
@@ -880,9 +899,10 @@ mod tests {
         ));
     }
 
-    /// yolo 在 headless 下仍然放行 —— 用户显式要求免确认时不该被 non_interactive 推翻。
+    /// bypassPermissions 在 headless 下仍然放行 —— 用户显式要求免确认时不该被
+    /// non_interactive 推翻。
     #[tokio::test]
-    async fn yolo_still_allows_in_non_interactive_mode() {
+    async fn bypass_permissions_still_allows_in_non_interactive_mode() {
         let engine = PolicyEngine::new(PolicyEngineConfig {
             non_interactive: Some(true),
             approval_mode: Some(ApprovalMode::BypassPermissions),
@@ -990,6 +1010,87 @@ mod tests {
                 "{tool} 必须在 default 模式下弹确认"
             );
         }
+    }
+
+    /// `dontAsk` 档（对标 Claude Code）：只读照常放行，会弹确认的一律直接拒。
+    #[tokio::test]
+    async fn dont_ask_mode_allows_read_only_and_denies_the_rest() {
+        let engine = engine_in(ApprovalMode::DontAsk);
+        // 只读工具免确认 —— dontAsk 的只读集合与 default 一致。
+        for tool in ["Read", "Grep", "Glob", "LS", "TodoWrite"] {
+            assert_eq!(
+                engine
+                    .check(
+                        &call(tool, serde_json::json!({"file_path": "src/main.rs"})),
+                        None
+                    )
+                    .await
+                    .decision,
+                PolicyDecision::Allow,
+                "{tool} 是只读工具，dontAsk 模式不该拒"
+            );
+        }
+        // 只读 shell 命令与 default 档同集合：`ls` 放行，写命令才拒。
+        assert_eq!(
+            engine
+                .check(&call("Bash", serde_json::json!({"command": "ls"})), None)
+                .await
+                .decision,
+            PolicyDecision::Allow
+        );
+        // 其余一律直接拒（不是 AskUser —— 这就是 dontAsk 的全部意义）。
+        for (tool, args) in [
+            ("Write", serde_json::json!({"path": "a.txt"})),
+            ("Edit", serde_json::json!({"file_path": "a.txt"})),
+            ("Bash", serde_json::json!({"command": "git push"})),
+            (
+                "WebFetch",
+                serde_json::json!({"url": "https://example.com"}),
+            ),
+        ] {
+            let decision = engine.check(&call(tool, args), None).await.decision;
+            assert!(
+                matches!(
+                    decision,
+                    PolicyDecision::Deny | PolicyDecision::DenyWithReason(_)
+                ),
+                "{tool} 在 dontAsk 模式必须直接拒，实际 {:?}",
+                decision
+            );
+        }
+    }
+
+    /// `dontAsk` 只压「会弹确认」的东西：显式 `allow` 规则仍能放行。
+    /// 这是它与 deny 语义的分界 —— 规则（用户写的）永远比模式（缺省）具体。
+    #[tokio::test]
+    async fn dont_ask_mode_still_honors_explicit_allow_rules() {
+        let mut engine = engine_in(ApprovalMode::DontAsk);
+        let mut perms = SettingsPermissions::default();
+        perms
+            .allow
+            .push(PermissionRuleSpec::parse("Bash(git status:*)").expect("parse"));
+        engine.set_settings_permissions(perms);
+        assert_eq!(
+            engine
+                .check(
+                    &call("Bash", serde_json::json!({"command": "git status"})),
+                    None
+                )
+                .await
+                .decision,
+            PolicyDecision::Allow
+        );
+        // 没有 allow 规则兜着的同类命令仍然拒。
+        assert!(matches!(
+            engine
+                .check(
+                    &call("Bash", serde_json::json!({"command": "git push --force"})),
+                    None
+                )
+                .await
+                .decision,
+            PolicyDecision::Deny | PolicyDecision::DenyWithReason(_)
+        ));
     }
 
     /// 显式 `ask` 规则压得住模式内置放行 —— 用户写 `ask: ["Read"]` 就是"每次都问我"。
@@ -1187,7 +1288,7 @@ mod tests {
         }
     }
 
-    /// auto 模式的护栏必须真的拦得住 —— 这是它比 yolo 强的地方。
+    /// auto 模式的护栏必须真的拦得住 —— 这是它比 bypassPermissions 强的地方。
     ///
     /// 危险命令与系统路径写入由**本地规则**直接拒（不经过分类器），
     /// 所以没有分类器时也一样拦得住。

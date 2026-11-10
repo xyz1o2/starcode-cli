@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 StarCode CLI (`starcode-cli`) — a Rust terminal-UI coding agent (ratatui 0.30 + crossterm + tokio) that talks to OpenAI-compatible and Anthropic-style providers. One crate: lib (`src/lib.rs`) plus one bin (`src/main.rs`), ~188k lines across 696 files in `src/`.
 
-The codebase is deliberately modeled on Claude Code — comments say "对标 Claude Code" throughout. Read-only reference copies live in `study_or_copy_projects/` (gitignored): `claude-code-main`, `claude-code-rust`, `claude-code-system-prompts-main`, `tuie-main`. Consult them when matching behavior or terminal rendering; `docs/ui-tool-render.md` is a worked example of that comparison.
+The codebase is deliberately modeled on Claude Code — comments say "对标 Claude Code" throughout. Read-only reference copies live in `study_or_copy_projects/` (gitignored): `claude-code-main`, `claude-code-rust`, `claude-code-system-prompts-main`, `tuie-main`. Consult them when matching behavior or terminal rendering.
 
 **docs/ 归档规则（2026-11-09 起）：** `docs/` 只放**活文档**（对齐基线、设计内文、当前系统的说明）；结案报告 / 事故记录 / 已实施完的一次性计划移 `docs/archive/`（git mv 保历史）。指向 src 内注释的 `parity-*.md` 一类老引用已随体系下线，见过的那处断链（`modal_input.rs`）已改为文字表述。
 
@@ -60,8 +60,10 @@ Subcommands bypass both paths: `mcp`, `git`, `init`.
 
 ### External harness integration
 
-`docs/harness-integration.md` is the reference for driving StarCode from an external
-process (CI script, orchestrator, IDE plugin). Three surfaces:
+The harness docs (`docs/harness-integration.md`, `docs/harness-testing.md`) were
+deleted (commit `18c5f0c`; git history still has them). The surfaces themselves
+are live code. Driving StarCode from an external process (CI script,
+orchestrator, IDE plugin) has three surfaces:
 
 - **`--output-format stream-json`** — a line-per-event stream of the whole agent
   process (tool calls, text deltas, token usage, errors) ending in a `result` line
@@ -77,14 +79,13 @@ process (CI script, orchestrator, IDE plugin). Three surfaces:
   `search_code` / `trace_call_chain`, not the agent tool set.
 
 Two things that look available and are not: `src/core/bridge/` (WebSocket control
-plane, 1447 lines, **no call sites**) and `src/sdk/` (not declared in any `mod`,
-so it never compiles). See `docs/harness-integration.md` §8.
+plane, 1447 lines, **no call sites**) and `src/sdk/` (since deleted from the tree
+along with `src/constants/`).
 
-`docs/harness-testing.md` is the hands-on manual: how to exercise every one of
-those surfaces from the TUI input box (`/remote protocol` / `/remote status` /
-`remote send`) and from a second terminal writing `.star/remote/inbox.jsonl`,
-plus the `PermissionRequest` → `approve_tool` round trip that lets an external
-script answer a tool confirmation.
+Exercise those surfaces from the TUI input box (`/remote protocol` /
+`/remote status` / `remote send`) or from a second terminal writing
+`.star/remote/inbox.jsonl`; the `PermissionRequest` → `approve_tool` round trip
+lets an external script answer a tool confirmation.
 
 ### UI ↔ Agent: two channels, one worker
 
@@ -194,7 +195,7 @@ Implementations are split between `src/core/tools/` (~60 files) and `src/tools/`
 
 ### Code retrieval (`CodebaseSearch`)
 
-The context engine lives in `src/core/context/` (~9k lines). `docs/context-search-benchmark.md` is the Augment Code × Windsurf FastContext comparison — read it before changing anything here; it records what each design does and why.
+The context engine lives in `src/core/context/` (~9k lines). The Augment Code × Windsurf FastContext comparison (`docs/context-search-benchmark.md`) was deleted (commit `18c5f0c`; git history still has it) — read it there before changing anything in this area.
 
 **Retrieval is lexical, not semantic.** `SearchEngine` is a BM25-style inverted index over tree-sitter AST chunks (`chunking.rs` → `tree_sitter_chunker.rs`), with three recall paths fused by RRF (`fusion.rs`): co-occurrence-expanded lexical, exact lexical, and literal ripgrep. There is **no embedding** anywhere in the tree, so cross-language recall (Chinese question → English identifier) does not work — only Chinese→Chinese does, via CJK bigram tokenization.
 

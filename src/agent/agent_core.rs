@@ -616,7 +616,7 @@ impl Agent {
         }
     }
 
-    pub fn is_yolo_mode_disabled(&self) -> bool {
-        self.config.is_yolo_mode_disabled()
+    pub fn is_bypass_mode_disabled(&self) -> bool {
+        self.config.is_bypass_mode_disabled()
     }
 }
