@@ -1468,6 +1468,7 @@ mod tests {
             ask: vec![PermissionRuleSpec::parse("Read").unwrap()],
             deny: Vec::new(),
             default_mode: None,
+            disable_bypass_permissions_mode: false,
             additional_directories: Vec::new(),
         });
 

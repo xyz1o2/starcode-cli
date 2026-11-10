@@ -421,6 +421,10 @@ pub struct SettingsPermissions {
     pub allow: Vec<PermissionRuleSpec>,
     /// `defaultMode`：default | acceptEdits | plan | bypassPermissions | dontAsk | auto
     pub default_mode: Option<String>,
+    /// `disableBypassPermissionsMode`（对标 Claude Code 同名设置）：任何层只要
+    /// 写了 `"disable"`，`bypassPermissions` 档位在本项目就整体失效 —— CLI flag
+    /// 和 `defaultMode` 都压不住。托管/团队锁场景用。
+    pub disable_bypass_permissions_mode: bool,
     /// `additionalDirectories`：允许越出 cwd 访问的目录
     pub additional_directories: Vec<String>,
 }
@@ -533,6 +537,20 @@ impl SettingsPermissions {
                     "[Policy] Ignoring `defaultMode: {}` from an untrusted settings layer",
                     mode.trim()
                 ));
+            }
+        }
+        // 对标 Claude Code 的 `permissions.disableBypassPermissionsMode`。
+        // 任何层（含可提交的项目层）都能设 —— 它只会**收紧**权限，与 allow/deny
+        // 规则同属"加规则只会更安全"的那一类，所以不做 trust 分级。
+        if let Some(v) = pick(
+            perms,
+            &[
+                "disableBypassPermissionsMode",
+                "disable_bypass_permissions_mode",
+            ],
+        ) {
+            if v.as_str() == Some("disable") {
+                self.disable_bypass_permissions_mode = true;
             }
         }
         if let Some(dirs) = pick(perms, &["additionalDirectories", "additional_directories"])
@@ -1012,6 +1030,35 @@ mod tests {
         let mut trusted = SettingsPermissions::default();
         trusted.merge_json_with_trust(&settings, true);
         assert_eq!(trusted.default_mode.as_deref(), Some("bypassPermissions"));
+    }
+
+    /// 对标 Claude Code 的 `permissions.disableBypassPermissionsMode`：
+    /// 任何层写 `"disable"` 都把开关置位 —— 包括可提交的项目层。
+    /// 它只会收紧权限（跟 deny 规则同类），所以不做 trust 分级；
+    /// 取值不是 `"disable"` 时不开（保留 CC 只认这一个值的口径）。
+    #[test]
+    fn disable_bypass_permissions_mode_is_read_from_any_layer() {
+        let mut trusted = SettingsPermissions::default();
+        trusted.merge_json(&json!({
+            "permissions": {"disableBypassPermissionsMode": "disable"}
+        }));
+        assert!(trusted.disable_bypass_permissions_mode);
+
+        let mut untrusted = SettingsPermissions::default();
+        untrusted.merge_json_with_trust(
+            &json!({"permissions": {"disableBypassPermissionsMode": "disable"}}),
+            false,
+        );
+        assert!(
+            untrusted.disable_bypass_permissions_mode,
+            "托管锁是收紧项，不可信层也要生效"
+        );
+
+        let mut other_value = SettingsPermissions::default();
+        other_value.merge_json(&json!({
+            "permissions": {"disableBypassPermissionsMode": "allow"}
+        }));
+        assert!(!other_value.disable_bypass_permissions_mode);
     }
 
     /// 反向保证：不可信层写 deny 规则仍然生效 —— 那是让它更安全，不是放宽。

@@ -116,6 +116,11 @@ impl Config {
     pub fn new(params: ConfigParameters) -> Self {
         let storage = Storage::new(params.target_dir.clone());
         let trusted_folders_manager = TrustedFolders::new().ok();
+        // `permissions` 段的托管开关（`disableBypassPermissionsMode`）。
+        // 这里只取这一个布尔 —— defaultMode 的解析在 main.rs 的启动路径，
+        // 两处各读各的，合流点在下面的 `policy_engine_approval_mode`。
+        let settings_permissions =
+            crate::core::policy::SettingsPermissions::from_project(&params.target_dir);
 
         Self {
             trusted_folders_manager,
@@ -245,14 +250,23 @@ impl Config {
             // 受信任检查约束：不受信任的目录退回 default，否则"文件夹信任"这道闸门
             // 会被默认档位从后门绕过。
             policy_engine_approval_mode: {
-                let mode = params.approval_mode.unwrap_or(ApprovalMode::Auto);
+                let mut mode = params.approval_mode.unwrap_or(ApprovalMode::Auto);
                 let folder_trust = params.folder_trust.unwrap_or(false);
                 let trusted = params.trusted_folder.unwrap_or(false);
-                if !folder_trust || trusted {
-                    mode
-                } else {
-                    ApprovalMode::Default
+                if folder_trust && !trusted {
+                    mode = ApprovalMode::Default;
                 }
+                // `permissions.disableBypassPermissionsMode: "disable"`（对标 Claude Code）：
+                // 设置写了就压过 CLI flag 和 `defaultMode` —— 这是托管的硬锁，
+                // 能被启动 flag 绕过的话就等于没锁。
+                if params.disable_bypass_mode.unwrap_or(false)
+                    || settings_permissions.disable_bypass_permissions_mode
+                {
+                    if mode == ApprovalMode::BypassPermissions {
+                        mode = ApprovalMode::Default;
+                    }
+                }
+                mode
             },
             runtime_services: None,
         }

@@ -229,6 +229,7 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | provider 环境变量 | `ANTHROPIC_API_KEY` / `BASE_URL` / `MODEL` 是解析的一层，带 `SourceRef` | ✅ `core/config/provider_resolution.rs:13-18` |
 | 权限规则**语法** | `Tool(specifier)` + `allow`/`ask`/`deny`/`defaultMode` 与 CC 同构 | ✅ `core/policy/settings_rules.rs:1-23` |
 | 权限三级判定 | deny > ask > allow，deny 连 bypassPermissions 都挡得住 | ✅ 同上 |
+| `permissions.disableBypassPermissionsMode: "disable"` | 任何层可设；压过 CLI flag 与 `defaultMode`，`bypassPermissions` 退回 `default` | ✅ `settings_rules.rs`（解析）+ `config.rs`（启动合流）；2026-11-10 落地 |
 | 规则合并 + trust 分级 | 可提交的 `settings.json` 只能加规则、不能抬升审批模式 | ✅ `settings_rules.rs:468-489` |
 | PolicyEngine 接线 | `with_project_rules` 是唯一构造点 | ✅ `core/config/runtime_bootstrap.rs:34-49` |
 | headless 拒绝策略 | `non_interactive` 打开，`AskUser` 无人应答时直接拒 | ✅ 同上 |
