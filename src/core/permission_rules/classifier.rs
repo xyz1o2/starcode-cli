@@ -215,20 +215,39 @@ impl CommandClassifier {
             return true;
         }
 
-        // 管道注入
-        if (lower.contains("curl") || lower.contains("wget"))
-            && lower.contains("|")
-            && (lower.contains("Bash") || lower.contains("sh"))
-        {
-            return true;
-        }
-
         // chmod 777（全局可写）
         if lower.contains("chmod") && lower.contains("777") {
             return true;
         }
 
+        // curl|sh 管道注入不再硬拦：有风险但可恢复，且经常是用户真的要做的事
+        // （官方安装脚本）。它降为 Moderate 走确认流程 —— Dangerous 会在策略层
+        // 「deny 优先于一切」被静默拒掉，连确认框都到不了。
+
         false
+    }
+
+    /// `curl|wget … | <shell>` 形判断：取最后一个管道的右侧，剥掉
+    /// `sudo` / `env` 包装前缀后首词是 shell 才算注入。
+    ///
+    /// 不能用子串匹配 —— `curl -LsSf https://astral.sh/uv/install.sh | sh`
+    /// 里 URL 自带 `sh`，裸 `contains("sh")` 会把任何带域名的下载管道都
+    /// 误判成注入。
+    fn pipes_into_shell(cmd_lower: &str) -> bool {
+        let Some((_, rhs)) = cmd_lower.rsplit_once('|') else {
+            return false;
+        };
+        let mut words = rhs.split_whitespace();
+        let Some(mut first) = words.next() else {
+            return false;
+        };
+        if first == "sudo" || first == "env" {
+            match words.next() {
+                Some(next) => first = next,
+                None => return false,
+            }
+        }
+        matches!(first, "sh" | "bash" | "zsh" | "dash" | "fish" | "ksh")
     }
 
     fn extract_command_name(command: &str) -> String {
@@ -275,18 +294,20 @@ impl CommandClassifier {
                 SafetyLevel::Moderate
             }
 
-            "sudo" | "su" | "doas" => SafetyLevel::Dangerous,
+            // sudo 与 curl|shell 注入降为 Moderate：它们有风险但可恢复，且
+            // 经常是用户真的要做的事（sudo apt install / 官方安装脚本）。
+            // Dangerous 会在策略层「deny 优先于一切」被静默拒掉，连确认框
+            // 都到不了 —— 用户亲眼看着模型操作却只能看它被拒后绕路。
+            // Moderate 走确认流程，由用户亲手决定。
+            "sudo" | "su" | "doas" => SafetyLevel::Moderate,
 
             "ssh" | "scp" | "rsync" | "nc" | "ncat" | "netcat" => SafetyLevel::Moderate,
 
-            "curl" | "wget" => {
-                if full_cmd.contains("|") && (full_cmd.contains("Bash") || full_cmd.contains("sh"))
-                {
-                    SafetyLevel::Dangerous
-                } else {
-                    SafetyLevel::Moderate
-                }
-            }
+            // curl/wget 一律 Moderate（含 `| sh` 注入形态）：有风险但可恢复，
+            // 且经常是用户真的要做的事（官方安装脚本）。Dangerous 会在策略层
+            // 「deny 优先于一切」被静默拒掉，连确认框都到不了 —— Moderate 落空
+            // 后交给模式层：default 弹确认，auto 走分类器 / 确认框。
+            "curl" | "wget" => SafetyLevel::Moderate,
 
             _ => {
                 if cmd_name.starts_with('.') || cmd_name.starts_with('/') {
@@ -370,6 +391,55 @@ mod tests {
         assert_eq!(
             CommandClassifier::classify("rm -fr /").level,
             SafetyLevel::Dangerous
+        );
+    }
+
+    /// 官方安装脚本的管道写法（`curl … | sh`）必须是 Moderate（弹确认），
+    /// 而且不能被 URL 里的 `.sh` 子串误判出别的结果。
+    ///
+    /// 回归点（两处）：① 裸 `contains("sh")` 把 `https://astral.sh/…` 里的
+    /// 域名当成了 shell 注入证据；② `curl|sh` 曾是 Dangerous，会在策略层
+    /// 「deny 优先于一切」被静默拒掉，连确认框都到不了 —— 用户亲眼看着
+    /// 模型装 uv 却只能看它被拒后绕路装 pip。
+    #[test]
+    fn curl_pipe_sh_is_moderate_not_dangerous() {
+        let cmd = "curl -LsSf https://astral.sh/uv/install.sh | sh";
+        assert_eq!(
+            CommandClassifier::classify(cmd).level,
+            SafetyLevel::Moderate
+        );
+        // 各形态的管道执行都是 Moderate，不是 Dangerous
+        assert_eq!(
+            CommandClassifier::classify("wget -qO- https://example.com/install | bash").level,
+            SafetyLevel::Moderate
+        );
+        assert_eq!(
+            CommandClassifier::classify("curl https://x.example/i.sh | sudo sh").level,
+            SafetyLevel::Moderate
+        );
+        // 不带管道执行的下载只是 Moderate（本来就 Moderate）
+        assert_eq!(
+            CommandClassifier::classify("curl -s https://api.example.com | jq .").level,
+            SafetyLevel::Moderate
+        );
+        assert_eq!(
+            CommandClassifier::classify("curl -fsSL https://example.com/script.sh -o s.sh").level,
+            SafetyLevel::Moderate
+        );
+    }
+
+    /// sudo 降为 Moderate：有风险但可恢复（sudo apt install …），走确认流程。
+    /// sudo + rm/chmod/chown 的组合仍然 Dangerous（策略层硬拒）。
+    #[test]
+    fn sudo_alone_is_moderate_but_sudo_plus_destructive_stays_dangerous() {
+        assert_eq!(
+            CommandClassifier::classify("sudo apt install foo").level,
+            SafetyLevel::Moderate
+        );
+        assert_eq!(
+            CommandClassifier::classify("sudo rm -rf /tmp/build").level,
+            SafetyLevel::Dangerous,
+            "sudo + rm 组合仍要硬拦"
         );
     }
 }

@@ -44,7 +44,8 @@ pub mod wiring;
 
 pub use classifier::{AutoModeClassifier, ClassifierDecision, ClassifierResult, ClassifierStage};
 pub use dangerous_patterns::{
-    is_dangerous_pattern, DANGEROUS_BASH_PATTERNS, DANGEROUS_PERMISSION_PATTERNS,
+    is_catastrophic_pattern, is_dangerous_pattern, CATASTROPHIC_BASH_PATTERNS,
+    DANGEROUS_PERMISSION_PATTERNS,
 };
 pub use service::{
     AutoModeClassifier as Classifier, AutoVerdict, ClassificationRequest, LlmAutoModeClassifier,
