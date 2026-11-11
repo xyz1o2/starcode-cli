@@ -1,5 +1,37 @@
 //! rig-core adapter — replaces hand-rolled LLM provider code.
-//! Uses rig-core's CompletionRequest API for proper message/tool support.
+//! Uses rig-core 0.46's wire architecture (`Model<Wire, Transport>`)
+//! for proper message/tool support across OpenAI-compatible, Anthropic
+//! and DeepSeek endpoints.
+//!
+//! # rig 0.46 迁移说明（2026-11）
+//!
+//! 0.42 的 `CompletionsClient` / `CompletionClient::completion_model` /
+//! `StreamedAssistantContent` 在 0.46 里全部消失，换成 wire 架构：
+//!
+//! - **wire**（`Chat` / `Messages`）：纯数据端点，`encode` 请求、`decoder`
+//!   解回复。`OpenAIConfig::chat(model)` / `AnthropicConfig::completion(model)`
+//!   构造。
+//! - **client**（`openai::OpenAI` / `anthropic::Anthropic`）：配置 + transport，
+//!   `.chat(...)` / `.completion(...)` 产出 `Model<Wire>`。
+//! - **transport**：`HttpClientExt` 的任意实现经 `Model::new(wire, transport)`
+//!   装上。项目自己的 `build_rig_http_client()`（统一超时/代理）包装成
+//!   `rig_reqwest::ReqwestClient` 后注入，因此 0.42 时代的自定义 HTTP client
+//!   配置**完整保留**。
+//! - **流式**：`Model::stream` 返回 `Streamed<Completion>`，事件驱动
+//!   （`Item<StreamEvent>`：`Start` / `Text` / `Reasoning` / `Arguments` /
+//!   `End`），流末尾 `finish()` 折叠成 `CompletionResponse`（usage 在里面）。
+//! - **usage 解码**：0.42 的强类型 `Usage`（缺 `prompt_tokens` 字段即整帧
+//!   `Corrupt` → `JsonError` 杀整条流）在 0.46 全部改成
+//!   `Option<u64>` + `#[serde(default)]`，OpenAI 线格式走 lenient
+//!   `normalized_usage`（"so no usage shape fails a reply"）。这条迁移
+//!   正是本次升级的直接动机。
+//!
+//! # Anthropic prompt cache
+//!
+//! 0.42 的 `CompletionModel::with_prompt_caching()/.with_automatic_caching()`
+//! 变成 wire 上的字段开关：`Messages::with_prompt_caching()`（0.46 把
+//! automatic caching 并进了同一个开关 + 请求的 `GenerationOptions::cache`）。
+//! `Model.wire` 是 pub 字段，构建后直接改写。
 
 use crate::llm::{LlmClient, LlmError, LlmEvent, ModelInfo};
 use crate::types::{StarChoice, StarMessage, StarResponse, StarTool, StarUsage};
@@ -9,15 +41,16 @@ use futures::Stream;
 use serde_json::Value;
 use std::error::Error;
 use std::pin::Pin;
+use std::sync::Arc;
 
-use rig_core::{
-    completion::message::{
-        AssistantContent, Message, ReasoningContent, Text, ToolCall, ToolCallId, ToolFunction,
-        ToolResult, ToolResultContent, UserContent,
-    },
-    completion::{self, CompletionModel, CompletionRequest},
-    providers::{anthropic, deepseek, openai},
+use rig_core::completion::request::{CompletionRequest, ToolDefinition};
+use rig_core::message::{
+    AssistantContent, CallId, Message, Reasoning, Text, ToolCall, ToolFunction, ToolName,
+    ToolResult, ToolResultContent, UserContent,
 };
+use rig_core::providers::anthropic;
+use rig_core::providers::openai;
+use rig_core::streaming::{Item, StreamEvent};
 
 // ── Constants ──────────────────────────────────────────────────────
 const ROLE_SYSTEM: &str = "system";
@@ -156,6 +189,14 @@ impl RigAdapter {
         }
         self
     }
+
+    /// 项目的 HTTP 客户端（超时/代理统一配置）包成 rig 0.46 的
+    /// `DynHttpClient` transport。所有 provider 共用这一份。
+    fn transport() -> rig_core::http_client::DynHttpClient {
+        rig_core::http_client::DynHttpClient::new(rig_reqwest::ReqwestClient::from(
+            crate::llm::build_rig_http_client(),
+        ))
+    }
 }
 
 // ── Message / Tool conversion ────────────────────────────────────
@@ -164,76 +205,82 @@ fn convert_messages(msgs: &[StarMessage]) -> Vec<Message> {
 }
 
 fn convert_one_message(msg: &StarMessage) -> Message {
-    let text = |s: &str| Text {
-        text: s.to_string(),
-        additional_params: None,
-    };
     match msg.role.as_str() {
         ROLE_SYSTEM => Message::System {
             content: msg.content.clone().unwrap_or_default(),
         },
         ROLE_USER => Message::User {
-            content: vec![UserContent::Text(text(
-                &msg.content.clone().unwrap_or_default(),
+            content: vec![UserContent::Text(Text::new(
+                msg.content.clone().unwrap_or_default(),
             ))],
         },
         ROLE_ASSISTANT => {
             let mut parts: Vec<AssistantContent> = Vec::new();
-            // Add reasoning if present. DeepSeek thinking mode requires the
-            // `reasoning_content` field to be present (even empty) on every
-            // assistant message that carries tool_calls. Dropping empty
-            // reasoning causes "The reasoning_content in the thinking mode
-            // must be passed back to the API" (400).
+            // DeepSeek thinking mode requires the `reasoning_content` field to
+            // be present (even empty) on every assistant message that carries
+            // tool_calls. Dropping empty reasoning causes "The
+            // reasoning_content in the thinking mode must be passed back to
+            // the API" (400).
             if msg.reasoning_content.is_some() {
                 let text = msg.reasoning_content.as_deref().unwrap_or("");
-                parts.push(AssistantContent::Reasoning(
-                    rig_core::completion::message::Reasoning::new(text),
-                ));
+                parts.push(AssistantContent::Reasoning(Reasoning::new(text)));
             }
             if let Some(tool_calls) = &msg.tool_calls {
                 for tc in tool_calls {
-                    let args = serde_json::from_str(&tc.function.arguments)
-                        .unwrap_or(Value::String(tc.function.arguments.clone()));
-                    // rig 0.42：ToolCallId 非空保证，空 id 走 mint。
-                    let call_id = ToolCallId::new_or_mint(tc.id.clone());
-                    parts.push(AssistantContent::ToolCall(ToolCall::new(
-                        call_id,
-                        ToolFunction::new(tc.function.name.clone(), args),
-                    )));
+                    // 0.46 的 ToolFunction.arguments 是 serde_json::Map：
+                    // 非对象参数（历史遗留的裸字符串）放进 invalid_arguments
+                    // 保留原文。
+                    let arguments = serde_json::from_str::<serde_json::Map<String, Value>>(
+                        &tc.function.arguments,
+                    )
+                    .unwrap_or_default();
+                    let call_id = CallId::from_wire(tc.id.clone());
+                    let function = ToolFunction {
+                        name: ToolName::new(tc.function.name.clone())
+                            .unwrap_or_else(|_| ToolName::new("unknown_tool").expect("non-empty")),
+                        arguments,
+                        invalid_arguments: None,
+                    };
+                    parts.push(AssistantContent::ToolCall(ToolCall::new(call_id, function)));
                 }
             }
             if let Some(ref content) = msg.content {
                 if !content.is_empty() {
-                    parts.push(AssistantContent::Text(text(content)));
+                    parts.push(AssistantContent::Text(Text::new(content)));
                 }
             }
             if parts.is_empty() {
-                parts.push(AssistantContent::Text(text("")));
+                parts.push(AssistantContent::Text(Text::new("")));
             }
-            Message::Assistant {
-                id: None,
-                content: parts,
+            Message::Assistant(rig_core::message::AssistantMessage::new(parts))
+        }
+        ROLE_TOOL => {
+            // 0.46 的 ToolResult 要求工具名（provider replay 需要独立于 call
+            // id）。历史消息里只有 tool_call_id，工具名不存在 —— 但 OpenAI
+            // 线格式只发 `tool_call_id` + `content`（chat.rs 的
+            // `tool_message` 不发 name），所以空名只影响Anthropic replay。
+            // 用占位名过类型检查，不影响 OpenAI 路径。
+            let tool_name = ToolName::new("tool").expect("non-empty");
+            Message::User {
+                content: vec![UserContent::ToolResult(ToolResult {
+                    call: CallId::from_wire(msg.tool_call_id.clone().unwrap_or_default()),
+                    name: tool_name,
+                    content: vec![ToolResultContent::Text(Text::new(
+                        msg.content.clone().unwrap_or_default(),
+                    ))],
+                    is_error: false,
+                })],
             }
         }
-        ROLE_TOOL => Message::User {
-            content: vec![UserContent::ToolResult(ToolResult {
-                call: ToolCallId::new_or_mint(msg.tool_call_id.clone().unwrap_or_default()),
-                provider: None,
-                name: String::new(),
-                content: vec![ToolResultContent::Text(text(
-                    &msg.content.clone().unwrap_or_default(),
-                ))],
-            })],
-        },
         _ => Message::User {
-            content: vec![UserContent::Text(text(
-                &msg.content.clone().unwrap_or_default(),
+            content: vec![UserContent::Text(Text::new(
+                msg.content.clone().unwrap_or_default(),
             ))],
         },
     }
 }
 
-fn convert_tools(tools: &Option<Vec<StarTool>>) -> Vec<completion::request::ToolDefinition> {
+fn convert_tools(tools: &Option<Vec<StarTool>>) -> Vec<Arc<ToolDefinition>> {
     let list = match tools {
         Some(v) => v.clone(),
         None => return vec![],
@@ -242,10 +289,13 @@ fn convert_tools(tools: &Option<Vec<StarTool>>) -> Vec<completion::request::Tool
         return vec![];
     }
     list.iter()
-        .map(|t| completion::request::ToolDefinition {
-            name: t.function.name.clone(),
-            description: t.function.description.clone(),
-            parameters: serde_json::to_value(&t.function.parameters).unwrap_or_default(),
+        .filter_map(|t| {
+            Some(Arc::new(ToolDefinition {
+                name: ToolName::new(t.function.name.clone()).ok()?,
+                description: t.function.description.clone(),
+                parameters: serde_json::to_value(&t.function.parameters).unwrap_or_default(),
+                annotations: Default::default(),
+            }))
         })
         .collect()
 }
@@ -259,22 +309,17 @@ fn build_request(
 
     // 这里**故意不再**塞 `cache_control`。
     //
-    // 原来的代码把所有带 `cache_control` 的 system 消息收集成一个数组塞进
-    // `additional_params["cache_control"]`。rig 的 Anthropic provider 会把这个键
-    // 取出来做 `serde_json::from_value::<CacheControl>()` —— 而 `CacheControl` 是
-    // `#[serde(tag = "type")]` 的内部标签枚举，只认对象 `{"type":"ephemeral"}`，
-    // 数组直接反序列化失败，于是**每一次 Anthropic 请求都在发出之前就报
-    // `Invalid Anthropic additional_params.cache_control payload`**。
+    // 断点由两条路径各自负责，都不经过这里：
     //
-    // 断点改由两条路径各自负责，都不经过这里：
-    //
-    // - **Anthropic**：rig 自己打（`anthropic_caching_model` 里的
-    //   `with_prompt_caching().with_automatic_caching()`），system 与 tools 各占一个
-    //   显式断点，会话历史的移动断点由 Anthropic 服务端自己往后推。
-    // - **OpenAI 兼容**：`prompt_cache_ext::PromptCacheExt` 在
-    //   `finalize_request_body` 里对已序列化的 body 打点（tools 末项 + system 末块）。
-    //   之所以不能走 `additional_params`：那个字段带 `#[serde(flatten)]` 展平到**顶层**，
-    //   往里塞 `messages` 会整体覆盖整个消息数组。
+    // - **Anthropic**：rig 自己打（`Messages::with_prompt_caching()`，0.46 把
+    //   automatic caching 并进了这个开关 + `GenerationOptions::cache`），
+    //   system 与 tools 各占一个显式断点，会话历史的移动断点由
+    //   Anthropic 服务端自己往后推。
+    // - **OpenAI 兼容**：`prompt_cache_ext::PatchTransport` 在 transport 层对
+    //   已编码的 body 打点（tools 末项 + system 末块）。之所以不能走
+    //   `additional_params`：0.46 的 raw_layer 把它 `deep_merge` 到顶层，
+    //   往里塞 `messages` 会整体覆盖整个消息数组。`cache_points` 字段
+    //   Chat wire 也不消费（只有 Anthropic Messages 和 OpenAI Responses 实现了）。
     //
     // `StarMessage::cache_control` 保留下来只用于 prompt builder 侧区分静态/动态
     // 段落；它由上面的两条路径各自消费，不参与请求构造。
@@ -282,7 +327,7 @@ fn build_request(
     // 思考力度 —— 档位由 UI 侧（Alt+T / `/effort` / 命令面板）经
     // `AgentRequest::SetThinkingEffort` 存进 `llm::thinking` 的会话状态，
     // 这里按 provider 方言翻成它认识的那**一个**字段：`additional_params`
-    // 是 `#[serde(flatten)]`，几种字段一起发会让严格的服务端 400。
+    // 是 deep-merge 到顶层的，几种字段一起发会让严格的服务端 400。
     let effort = crate::llm::thinking::current_effort();
     let thinking = crate::llm::thinking::thinking_params(&profile, &effort);
     if !thinking.is_empty() {
@@ -297,11 +342,10 @@ fn build_request(
         extra_params.insert(key, value);
     }
 
-    // Anthropic 协议要求请求必须带 `max_tokens`（rig 不会代填默认值，
-    // 缺了会报 "max_tokens must be set for Anthropic"），所以即使不在
-    // budget 方言下也要显式给出。budget 方言要求 `max_tokens > budget_tokens`，
-    // 而 rig 只在请求没给 `max_tokens` 时才填自己的默认值（老模型上是 2048，
-    // 比 budget 还小），所以同样必须显式给出；用户自己配了更大的值就听用户的。
+    // Anthropic 协议要求请求必须带 `max_tokens`，所以即使不在 budget 方言下也要
+    // 显式给出。budget 方言要求 `max_tokens > budget_tokens`，而 rig 只在请求没给
+    // `max_tokens` 时才按模型档案填默认值，所以同样必须显式给出；用户自己配了更大
+    // 的值就听用户的。
     //
     // 兜底阶梯：`/models` 声明的模型输出上限 > `STAR_MAX_TOKENS` > 硬编码兜底。
     // 曾经只有硬编码 8192：`/models` 明明报了 max_output_tokens（实测 glowp
@@ -342,31 +386,24 @@ fn build_request(
         Some(serde_json::Value::Object(extra_params))
     };
 
-    CompletionRequest {
-        model: None,
-        preamble: None,
-        chat_history: {
-            let history = convert_messages(messages);
-            if history.is_empty() {
-                vec![Message::User {
-                    content: vec![UserContent::Text(Text {
-                        text: String::new(),
-                        additional_params: None,
-                    })],
-                }]
-            } else {
-                history
-            }
-        },
-        documents: vec![],
-        tools: convert_tools(tools),
-        temperature: None,
-        max_tokens,
-        tool_choice: None,
-        additional_params,
-        output_schema: None,
-        record_telemetry_content: true,
+    let mut history = convert_messages(messages);
+    let mut request = CompletionRequest::new(if history.is_empty() {
+        Message::User {
+            content: vec![UserContent::Text(Text::new(String::new()))],
+        }
+    } else {
+        // `new` 把 prompt 放最后一条；这里整个历史就是 prompt，
+        // 之后用 `messages` 语义不对 —— 直接填 chat_history 字段。
+        history.remove(0)
+    });
+    for message in history {
+        request.chat_history.push(Arc::new(message));
     }
+    request.tools = convert_tools(tools);
+    request.max_tokens = max_tokens;
+    request.additional_params = additional_params;
+    request.record_telemetry_content = true;
+    request
 }
 
 /// Full parsed completion result with text, tool calls, reasoning, and usage.
@@ -389,30 +426,22 @@ fn extract_response(contents: &[AssistantContent]) -> CompletionResult {
                 text.push_str(&t.text);
             }
             AssistantContent::Reasoning(r) => {
-                for rc in &r.content {
-                    match rc {
-                        ReasoningContent::Text { text: t, .. } => reasoning.push_str(t),
-                        ReasoningContent::Summary(t) => reasoning.push_str(t),
-                        _ => {}
-                    }
-                }
+                reasoning.push_str(&r.text);
             }
             AssistantContent::ToolCall(tc) => {
-                let args_str = match &tc.function.arguments {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
+                // 0.46：arguments 是 serde_json::Map（已解析），裸字符串留在
+                // invalid_arguments。序列化成 JSON 字符串交给上层（工具执行器
+                // 仍按 JSON 字符串解析）。
+                let args_str = if let Some(raw) = &tc.function.invalid_arguments {
+                    raw.clone()
+                } else {
+                    Value::Object(tc.function.arguments.clone()).to_string()
                 };
                 tool_calls.push(crate::types::StarToolCall {
-                    // rig 0.42：ToolCallId 只能通过 as_str() 取值。
-                    id: tc
-                        .id
-                        .as_str()
-                        .strip_prefix("call_function_")
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| tc.id.as_str().to_string()),
+                    id: tc.id.wire().to_string(),
                     call_type: CALL_TYPE_FUNCTION.to_string(),
                     function: crate::types::StarToolCallFunction {
-                        name: tc.function.name.clone(),
+                        name: tc.function.name.to_string(),
                         arguments: if args_str.is_empty() {
                             EMPTY_JSON.to_string()
                         } else {
@@ -469,41 +498,158 @@ fn build_star_response(result: CompletionResult) -> StarResponse {
 
 /// Convert rig Usage to StarUsage.
 ///
-/// Rig normalizes absent cache accounting to zero. It cannot distinguish that from an
-/// explicitly reported zero, so mark provenance only when it exposes a nonzero cache value.
-fn convert_usage(usage: &rig_core::completion::Usage) -> StarUsage {
+/// 0.46 的 Usage 全是 `Option<u64>`：缺字段就是 None，与显式 0 无法区分。
+/// 缓存遥测只在服务端真的报了非零值时标记 provenance。
+fn convert_usage(usage: &rig_core::completion::request::Usage) -> StarUsage {
+    let u64_or_0 = |v: Option<u64>| v.unwrap_or(0);
+    let cached = u64_or_0(usage.cached_input_tokens);
+    let cache_creation = u64_or_0(usage.cache_creation_input_tokens);
     StarUsage {
-        prompt_tokens: usage.input_tokens as u32,
-        completion_tokens: usage.output_tokens as u32,
-        total_tokens: usage.total_tokens as u32,
-        cache_read_tokens: usage.cached_input_tokens as u32,
-        cache_creation_tokens: usage.cache_creation_input_tokens as u32,
-        cache_telemetry_reported: usage.cached_input_tokens > 0
-            || usage.cache_creation_input_tokens > 0,
+        prompt_tokens: u64_or_0(usage.input_tokens) as u32,
+        completion_tokens: u64_or_0(usage.output_tokens) as u32,
+        total_tokens: u64_or_0(usage.total_tokens) as u32,
+        cache_read_tokens: cached as u32,
+        cache_creation_tokens: cache_creation as u32,
+        cache_telemetry_reported: cached > 0 || cache_creation > 0,
     }
 }
 
-// ── Macro: completion call with optional base_url support
-macro_rules! rig_complete_with_url {
-    ($mod:ident, $api_key:expr, $model:expr, $base_url:expr, $request:expr) => {{
-        use rig_core::client::CompletionClient;
-        let mut builder = $mod::Client::builder()
-            .api_key($api_key)
-            .http_client(crate::llm::build_rig_http_client());
-        if let Some(url) = $base_url {
-            builder = builder.base_url(url);
-        }
-        let client = builder.build().map_err(|e| {
-            LlmError::ProviderError(format!("rig {} client: {e}", stringify!($mod)))
-        })?;
-        let model = client.completion_model($model.clone());
-        model.completion($request).await.map_err(|e| {
-            LlmError::ProviderError(format!("rig {} completion: {e}", stringify!($mod)))
-        })
-    }};
+/// 缓存命中时 `input_tokens` 会很小（大头记在 cached_input_tokens 上），所以
+/// 判「服务端没报 usage」必须把缓存计数也算进来，否则高命中率的那一轮会被
+/// 当成"没有 usage"而丢掉。
+fn usage_reported(usage: &rig_core::completion::request::Usage) -> bool {
+    usage.is_reported()
 }
 
-/// OpenAI completion using Completions API (not Responses API).
+/// 驱动一条 rig 0.46 流并转成我们的 LlmEvent 流。
+///
+/// 0.46 的流是事件驱动的：`Start` 开 part，`Text` / `Reasoning` /
+/// `Arguments` 增量，`End` 带定稿内容（完整 ToolCall 在这里出来）。
+/// usage 不再是流内事件 —— `Streamed::finish()` 折叠出的
+/// `CompletionResponse` 携带它，所以在流耗尽后发送 `UsageUpdate`。
+async fn drive_stream(
+    label: &'static str,
+    mut streamed: rig_core::streaming::Streamed<rig_core::operation::Completion>,
+    tx: tokio::sync::mpsc::Sender<Result<LlmEvent, LlmError>>,
+) {
+    use futures::StreamExt;
+
+    let mut has_tool_calls = false;
+    let mut saw_usage_carrier = false;
+    let mut last_usage: Option<rig_core::completion::request::Usage> = None;
+
+    while let Some(item) = streamed.next().await {
+        match item {
+            // Start 开 part、Arguments 是 tool call 的参数增量：都由
+            // rig 内部聚合，End 事件才携带定稿内容，这里无事可做。
+            Ok(Item::Event(StreamEvent::Start { .. }))
+            | Ok(Item::Event(StreamEvent::Arguments { .. })) => {}
+            Ok(Item::Event(StreamEvent::Text { text, .. })) => {
+                if tx.send(Ok(LlmEvent::TextChunk(text))).await.is_err() {
+                    return;
+                }
+            }
+            Ok(Item::Event(StreamEvent::Reasoning { text, .. })) => {
+                if tx.send(Ok(LlmEvent::ReasoningChunk(text))).await.is_err() {
+                    return;
+                }
+            }
+            Ok(Item::Event(StreamEvent::End { content, .. })) => {
+                match content {
+                    AssistantContent::ToolCall(tc) => {
+                        has_tool_calls = true;
+                        // 0.46：arguments 是 Map（增量 JSON 已由 rig 聚合），
+                        // 裸字符串（非对象）留在 invalid_arguments。
+                        let args = tc
+                            .function
+                            .invalid_arguments
+                            .clone()
+                            .unwrap_or_else(|| {
+                                Value::Object(tc.function.arguments.clone()).to_string()
+                            });
+                        if tx
+                            .send(Ok(LlmEvent::ToolCall(crate::types::StarToolCall {
+                                id: tc.id.wire().to_string(),
+                                call_type: CALL_TYPE_FUNCTION.to_string(),
+                                function: crate::types::StarToolCallFunction {
+                                    name: tc.function.name.to_string(),
+                                    arguments: if args.is_empty() {
+                                        EMPTY_JSON.to_string()
+                                    } else {
+                                        args
+                                    },
+                                },
+                            })))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    AssistantContent::Reasoning(r) if !r.text.is_empty() => {
+                        // 完整 reasoning 块已作为增量流出过；只对没发过增量的
+                        // 场景补发，避免重复。
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Item::Unknown(_)) => {}
+            Err(e) => {
+                let _ = tx
+                    .send(Err(LlmError::ProviderError(format!(
+                        "rig {label} stream error: {e}"
+                    ))))
+                    .await;
+                return;
+            }
+        }
+    }
+
+    // 流结束：折叠出 usage。0.46 的 usage 在 CompletionResponse 里，
+    // 中途出错时 finish() 也返回 Err —— 那条错误已经在上面以流内 Err 形式
+    // 发过了，这里不再重复。
+    if let Ok(response) = streamed.finish().await {
+        saw_usage_carrier = usage_reported(&response.usage);
+        if saw_usage_carrier {
+            last_usage = Some(response.usage.clone());
+        }
+    }
+    if let Some(usage) = last_usage {
+        if tx.send(Ok(LlmEvent::UsageUpdate(convert_usage(&usage))))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    let finish = if has_tool_calls {
+        FINISH_TOOL_CALLS
+    } else {
+        FINISH_STOP
+    };
+    let _ = tx.send(Ok(LlmEvent::Finish(finish.to_string()))).await;
+}
+
+/// 起一条流：`Model::stream` 拿到 `Streamed`，丢进 spawned task 驱动，
+/// 返回 `ReceiverStream`（保持 Send + Sync 契约，与 0.42 相同）。
+async fn start_stream<T>(
+    label: &'static str,
+    model: rig_core::Model<rig_core::providers::openai::wire::Chat, T>,
+    request: CompletionRequest,
+) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError>
+where
+    T: rig_core::driver::Transport<rig_core::providers::openai::wire::Chat>,
+{
+    let streamed = model
+        .stream(request)
+        .map_err(|e| LlmError::ProviderError(format!("rig {label} stream: {e}")))?;
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<LlmEvent, LlmError>>(64);
+    tokio::spawn(drive_stream(label, streamed, tx));
+    Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+}
+
+/// OpenAI Chat Completions 线格式（不是 Responses API）。
+///
 /// The Responses API requires an OpenAI-generated ID for reasoning items,
 /// which we don't have for historical messages with reasoning_content.
 /// The Completions API silently skips reasoning content, avoiding the error.
@@ -519,185 +665,53 @@ async fn rig_openai_complete(
     request: CompletionRequest,
     prompt_cache: bool,
 ) -> Result<CompletionResult, LlmError> {
-    use rig_core::client::CompletionClient;
-    let mut builder = openai::CompletionsClient::builder()
-        .api_key(api_key)
-        .http_client(crate::llm::build_rig_http_client());
+    let mut config = openai_config(api_key);
     if let Some(url) = base_url {
-        builder = builder.base_url(url);
+        config.base_url = url.to_string();
     }
-    let client = builder
-        .build()
-        .map_err(|e| LlmError::ProviderError(format!("rig openai client: {e}")))?;
-    let r = if prompt_cache {
-        // `with_ext` 保留 base_url / headers / HTTP backend，只换掉 provider 扩展，
-        // 于是 rig 的传输、流式、遥测逻辑全部照常复用。
-        let cached = client.with_ext(crate::llm::prompt_cache_ext::PromptCacheExt::new(true));
-        cached.completion_model(model).completion(request).await
+    let chat = openai::wire::Chat::new(config, model);
+    let response = if prompt_cache {
+        // 断点注入 transport：在 rig 编码之后、发送之前给 body 打点。
+        let transport = crate::llm::prompt_cache_ext::patched_transport(
+            crate::llm::build_rig_http_client(),
+            true,
+        );
+        let client = rig_core::Model::new(chat, transport);
+        client
+            .call(request)
+            .await
+            .map_err(|e| LlmError::ProviderError(format!("rig openai completion: {e}")))?
     } else {
-        client.completion_model(model).completion(request).await
-    }
-    .map_err(|e| LlmError::ProviderError(format!("rig openai completion: {e}")))?;
-    let mut result = extract_response(&r.choice);
-    result.usage = Some(convert_usage(&r.usage));
+        let client = rig_core::Model::new(chat, RigAdapter::transport());
+        client
+            .call(request)
+            .await
+            .map_err(|e| LlmError::ProviderError(format!("rig openai completion: {e}")))?
+    };
+    let mut result = extract_response(&response.choice);
+    result.usage = Some(convert_usage(&response.usage));
     Ok(result)
 }
 
-// ── Macro: true streaming with optional base_url support ────────────
-// Uses rig-core's `CompletionModel::stream` so reasoning/text deltas are
-// forwarded incrementally to the agent layer. The rig stream is consumed on
-// a spawned task and forwarded via a channel, which keeps the returned
-// stream Send + Sync.
-//
-// 拆成两层：`rig_stream_with_url!` 负责按 provider 模块建 client + model，
-// `rig_stream_from_model!` 负责驱动流。Anthropic 需要在 model 上额外挂
-// `with_prompt_caching()` / `with_automatic_caching()`（这两个方法只有 Anthropic
-// 的 `CompletionModel` 有），所以它自己建 model 再走下层宏。
-macro_rules! rig_stream_with_url {
-    ($mod:ident, $api_key:expr, $model:expr, $base_url:expr, $request:expr) => {{
-        use rig_core::client::CompletionClient;
-
-        let mut builder = $mod::Client::builder()
-            .api_key($api_key)
-            .http_client(crate::llm::build_rig_http_client());
-        if let Some(url) = $base_url {
-            builder = builder.base_url(url);
-        }
-        let client = builder.build().map_err(|e| {
-            LlmError::ProviderError(format!("rig {} client: {e}", stringify!($mod)))
-        })?;
-        let model = client.completion_model($model.clone());
-        rig_stream_from_model!(stringify!($mod), model, $request)
-    }};
+/// OpenAI 配置：官方 dialect（已注册，可序列化），base_url 覆盖走运行时字段。
+///
+/// `OpenAIConfig::new` 是官方 `OPENAI` 方言 + Bearer 认证 —— 与 0.42
+/// `CompletionsClient` 的行为等价；`from_env` 会读 `OPENAI_API_KEY` /
+/// `OPENAI_BASE_URL`，这里显式传 key 不走 env，避免与 `STAR_*` 语义混淆。
+fn openai_config(api_key: &str) -> openai::wire::OpenAIConfig {
+    openai::wire::OpenAIConfig::new(api_key)
 }
 
-macro_rules! rig_stream_from_model {
-    ($label:expr, $model:expr, $request:expr) => {{
-        use futures::StreamExt;
-        use rig_core::streaming::StreamedAssistantContent;
-
-        let label: &str = $label;
-        let stream = $model
-            .stream($request)
-            .await
-            .map_err(|e| LlmError::ProviderError(format!("rig {label} stream: {e}")))?;
-
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<LlmEvent, LlmError>>(64);
-        tokio::spawn(async move {
-            let mut stream = stream;
-            let mut last_usage: Option<crate::types::StarUsage> = None;
-            let mut has_tool_calls = false;
-
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(StreamedAssistantContent::Text(t)) => {
-                        if tx.send(Ok(LlmEvent::TextChunk(t.text))).await.is_err() {
-                            return;
-                        }
-                    }
-                    // rig 0.42：Reasoning 变成 struct variant，正文在 .reasoning 里。
-                    Ok(StreamedAssistantContent::Reasoning { reasoning, .. }) => {
-                        for rc in reasoning.content {
-                            match rc {
-                                ReasoningContent::Text { text, .. } => {
-                                    if tx.send(Ok(LlmEvent::ReasoningChunk(text))).await.is_err() {
-                                        return;
-                                    }
-                                }
-                                ReasoningContent::Summary(s) => {
-                                    if tx.send(Ok(LlmEvent::ReasoningChunk(s))).await.is_err() {
-                                        return;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    Ok(StreamedAssistantContent::ReasoningDelta { reasoning, .. }) => {
-                        if tx
-                            .send(Ok(LlmEvent::ReasoningChunk(reasoning)))
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Ok(StreamedAssistantContent::ToolCall { tool_call, .. }) => {
-                        has_tool_calls = true;
-                        let args = match tool_call.function.arguments {
-                            Value::String(s) => s,
-                            other => other.to_string(),
-                        };
-                        if tx
-                            .send(Ok(LlmEvent::ToolCall(crate::types::StarToolCall {
-                                // rig 0.42：ToolCallId 需要显式转成字符串。
-                                    id: tool_call.id.as_str().to_string(),
-                                call_type: CALL_TYPE_FUNCTION.to_string(),
-                                function: crate::types::StarToolCallFunction {
-                                    name: tool_call.function.name,
-                                    arguments: if args.is_empty() {
-                                        EMPTY_JSON.to_string()
-                                    } else {
-                                        args
-                                    },
-                                },
-                            })))
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    // rig-core aggregates tool call deltas internally and emits
-                    // the complete ToolCall above; nothing to do here.
-                    Ok(StreamedAssistantContent::ToolCallDelta { .. }) => {}
-                    Ok(StreamedAssistantContent::Final(res)) => {
-                        // rig 0.42：token_usage() 变成 StreamFinal 上的 pub usage 字段。
-                    let usage = &res.usage;
-                        // 缓存命中时 `input_tokens` 会很小（大头记在 cached_input_tokens
-                        // 上），所以判空必须把缓存计数也算进来，否则高命中率的那一轮
-                        // 会被当成"没有 usage"而丢掉。
-                        if usage.input_tokens > 0
-                            || usage.output_tokens > 0
-                            || usage.cached_input_tokens > 0
-                            || usage.cache_creation_input_tokens > 0
-                        {
-                            last_usage = Some(convert_usage(&usage));
-                        }
-                    }
-                    Ok(StreamedAssistantContent::Unknown(_)) => {}
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(LlmError::ProviderError(format!(
-                                "rig {label} stream error: {e}"
-                            ))))
-                            .await;
-                        return;
-                    }
-                }
-            }
-            if let Some(usage) = last_usage {
-                if tx.send(Ok(LlmEvent::UsageUpdate(usage))).await.is_err() {
-                    return;
-                }
-            }
-            let finish = if has_tool_calls {
-                FINISH_TOOL_CALLS
-            } else {
-                FINISH_STOP
-            };
-            let _ = tx.send(Ok(LlmEvent::Finish(finish.to_string()))).await;
-        });
-
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
-    }};
+/// DeepSeek 配置：DEEPSEEK 方言（`reasoning_field: "reasoning_content"` 已内置，
+/// 0.42 时代我们手工回填 reasoning_content 的兼容行为由 rig 接管）。
+fn deepseek_config(api_key: &str) -> openai::wire::OpenAIConfig {
+    openai::wire::OpenAIConfig::with_key(&openai::wire::DEEPSEEK, api_key)
 }
 
-/// True streaming for OpenAI / OpenAI-compatible providers via
-/// rig-core's OpenAI CompletionsClient.
+/// 通用 OpenAI 兼容客户端（流式）。
 ///
 /// `prompt_cache` 的语义与 [`rig_openai_complete`] 相同：官方 OpenAI 恒为 `false`，
-/// 断点只对明确支持的聚合网关打开。两条路径共用 `finalize_request_body` 钩子，
+/// 断点只对明确支持的聚合网关打开。transport 注入点对两条路径一致，
 /// 所以流式与非流式打出的断点完全一致。
 async fn rig_openai_stream(
     api_key: &str,
@@ -706,162 +720,96 @@ async fn rig_openai_stream(
     request: CompletionRequest,
     prompt_cache: bool,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError> {
-    use futures::StreamExt;
-    use rig_core::client::CompletionClient;
-    use rig_core::streaming::StreamedAssistantContent;
-
-    let mut builder = openai::CompletionsClient::builder()
-        .api_key(api_key)
-        .http_client(crate::llm::build_rig_http_client());
+    let mut config = openai_config(api_key);
     if let Some(url) = base_url {
-        builder = builder.base_url(url);
+        config.base_url = url.to_string();
     }
-    let client = builder
-        .build()
-        .map_err(|e| LlmError::ProviderError(format!("rig openai client: {e}")))?;
-    let stream = if prompt_cache {
-        client
-            .with_ext(crate::llm::prompt_cache_ext::PromptCacheExt::new(true))
-            .completion_model(model)
-            .stream(request)
-            .await
+    let chat = openai::wire::Chat::new(config, model);
+    if prompt_cache {
+        let transport = crate::llm::prompt_cache_ext::patched_transport(
+            crate::llm::build_rig_http_client(),
+            true,
+        );
+        let client = rig_core::Model::new(chat, transport);
+        start_stream("openai", client, request).await
     } else {
-        client.completion_model(model).stream(request).await
+        let client = rig_core::Model::new(chat, RigAdapter::transport());
+        start_stream("openai", client, request).await
     }
-    .map_err(|e| LlmError::ProviderError(format!("rig openai stream: {e}")))?;
-
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<LlmEvent, LlmError>>(64);
-    tokio::spawn(async move {
-        let mut stream = stream;
-        let mut last_usage: Option<crate::types::StarUsage> = None;
-        let mut has_tool_calls = false;
-        let mut saved_finish_reason = FINISH_STOP.to_string();
-
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(StreamedAssistantContent::Text(t)) => {
-                    if tx.send(Ok(LlmEvent::TextChunk(t.text))).await.is_err() {
-                        return;
-                    }
-                }
-                // rig 0.42：Reasoning 变成 struct variant。
-                Ok(StreamedAssistantContent::Reasoning { reasoning, .. }) => {
-                    for rc in reasoning.content {
-                        match rc {
-                            ReasoningContent::Text { text, .. } => {
-                                if tx.send(Ok(LlmEvent::ReasoningChunk(text))).await.is_err() {
-                                    return;
-                                }
-                            }
-                            ReasoningContent::Summary(s) => {
-                                if tx.send(Ok(LlmEvent::ReasoningChunk(s))).await.is_err() {
-                                    return;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                Ok(StreamedAssistantContent::ReasoningDelta { reasoning, .. }) => {
-                    if tx
-                        .send(Ok(LlmEvent::ReasoningChunk(reasoning)))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-                Ok(StreamedAssistantContent::ToolCall { tool_call, .. }) => {
-                    has_tool_calls = true;
-                    let args = match tool_call.function.arguments {
-                        Value::String(s) => s,
-                        other => other.to_string(),
-                    };
-                    if tx
-                        .send(Ok(LlmEvent::ToolCall(crate::types::StarToolCall {
-                            // rig 0.42：ToolCallId 需要显式转成字符串。
-                            id: tool_call.id.as_str().to_string(),
-                            call_type: CALL_TYPE_FUNCTION.to_string(),
-                            function: crate::types::StarToolCallFunction {
-                                name: tool_call.function.name,
-                                arguments: if args.is_empty() {
-                                    EMPTY_JSON.to_string()
-                                } else {
-                                    args
-                                },
-                            },
-                        })))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-                Ok(StreamedAssistantContent::ToolCallDelta { .. }) => {}
-                Ok(StreamedAssistantContent::Final(res)) => {
-                    // rig 0.42：token_usage() 变成 StreamFinal 上的 pub usage 字段。
-                    let usage = &res.usage;
-                    // 见 `rig_stream_with_url!` 里的同一段注释：缓存命中的那一轮
-                    // `input_tokens` 很小，判空要连缓存计数一起看。
-                    if usage.input_tokens > 0
-                        || usage.output_tokens > 0
-                        || usage.cached_input_tokens > 0
-                        || usage.cache_creation_input_tokens > 0
-                    {
-                        last_usage = Some(convert_usage(&usage));
-                    }
-                }
-                Ok(StreamedAssistantContent::Unknown(_)) => {}
-                Err(e) => {
-                    let _ = tx
-                        .send(Err(LlmError::ProviderError(format!(
-                            "rig openai stream error: {e}"
-                        ))))
-                        .await;
-                    return;
-                }
-            }
-        }
-        if let Some(usage) = last_usage {
-            if tx.send(Ok(LlmEvent::UsageUpdate(usage))).await.is_err() {
-                return;
-            }
-        }
-        let finish = if has_tool_calls {
-            FINISH_TOOL_CALLS
-        } else {
-            FINISH_STOP
-        };
-        let _ = tx.send(Ok(LlmEvent::Finish(finish.to_string()))).await;
-    });
-
-    Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
 }
 
-/// 建一个开好 prompt cache 的 Anthropic model
+/// DeepSeek 非流式补全（复用 OpenAI Chat wire + DEEPSEEK 方言）。
+async fn rig_deepseek_complete(
+    api_key: &str,
+    model: &str,
+    base_url: Option<&str>,
+    request: CompletionRequest,
+) -> Result<CompletionResult, LlmError> {
+    let mut config = deepseek_config(api_key);
+    if let Some(url) = base_url {
+        config.base_url = url.to_string();
+    }
+    let chat = openai::wire::Chat::new(config, model);
+    let client = rig_core::Model::new(chat, rig_core::http_client::DynHttpClient::new(rig_reqwest::ReqwestClient::from(crate::llm::build_rig_http_client())));
+    let response = client
+        .call(request)
+        .await
+        .map_err(|e| LlmError::ProviderError(format!("rig deepseek completion: {e}")))?;
+    let mut result = extract_response(&response.choice);
+    result.usage = Some(convert_usage(&response.usage));
+    Ok(result)
+}
+
+/// DeepSeek 流式补全。
+async fn rig_deepseek_stream(
+    api_key: &str,
+    model: &str,
+    base_url: Option<&str>,
+    request: CompletionRequest,
+) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError> {
+    let mut config = deepseek_config(api_key);
+    if let Some(url) = base_url {
+        config.base_url = url.to_string();
+    }
+    let chat = openai::wire::Chat::new(config, model);
+    let client = rig_core::Model::new(chat, rig_core::http_client::DynHttpClient::new(rig_reqwest::ReqwestClient::from(crate::llm::build_rig_http_client())));
+    start_stream("deepseek", client, request).await
+}
+
+/// 建一个开好 prompt cache 的 Anthropic Messages wire
 ///
-/// # 为什么要单独一份而不走通用宏
+/// # 为什么要单独一份而不走通用路径
 ///
-/// `with_prompt_caching()` / `with_automatic_caching()` 只长在 Anthropic 的
-/// `CompletionModel` 上，泛型宏（`$mod::Client`）拿不到。
+/// `with_prompt_caching()` 只长在 Anthropic 的 `Messages` wire 上。
 ///
-/// # 两个开关是叠加的，不是二选一
+/// # 缓存形状
 ///
-/// rig 的文档写得很清楚：两个一起开时，**顶层自动断点负责会话历史那个会往后移动
-/// 的缓存点，rig 仍然在预算允许时给 tools 和 system 各打一个显式断点**。
-/// Anthropic 一次请求最多 4 个断点，这里用掉 3 个（顶层 1 + tools 1 + system 1），
-/// 正好是 agent 循环想要的形状：
+/// 0.46 把 0.42 的 `with_prompt_caching()` + `with_automatic_caching()` 合并：
+/// `Messages::with_prompt_caching()` 开启 system / tools / 最后一条消息的显式
+/// 断点，配合请求的 `GenerationOptions::cache`（顶层 marker，服务端把移动断点
+/// 往后推）。Anthropic 一次请求最多 4 个断点，这里用掉 3 个
+/// （顶层 1 + tools 1 + system 1），正好是 agent 循环想要的形状：
 ///
 /// - system prompt（本项目约 4 万字符）只在首轮付全价；
 /// - tool schema（几十个工具的 JSON）同样只付一次；
 /// - 会话历史随着轮次增长，断点由服务端自己往后推，每轮只为**增量**付全价。
 ///
-/// 只开 `automatic_caching` 也能省，但 system 和 tools 会跟历史挤在同一个移动断点
-/// 之前，命中率会差一截。
-fn anthropic_caching_model(
-    model: anthropic::completion::CompletionModel,
-) -> anthropic::completion::CompletionModel {
-    model.with_prompt_caching().with_automatic_caching()
+/// 顶层 marker 由 `options.cache = Some(CacheRetention::Short)` 携带（5 分钟
+/// TTL，Anthropic 默认）。
+fn anthropic_caching_wire(mut wire: anthropic::wire::Messages) -> anthropic::wire::Messages {
+    wire.prompt_caching = true;
+    wire
+}
+
+/// Anthropic 配置（ANTHROPIC 方言）。`AnthropicConfig.base_url` 是 API root
+/// **不带** `/v1`；调用方给的 URL 若带 `/v1` 尾缀需剥掉（0.42 时代 rig 的
+/// anthropic client 同样这样约定，行为不变）。
+fn anthropic_config(api_key: &str, base_url: Option<&str>) -> anthropic::AnthropicConfig {
+    let mut config = anthropic::AnthropicConfig::new(api_key);
+    if let Some(url) = base_url {
+        config.base_url = url.trim_end_matches('/').trim_end_matches("/v1").to_string();
+    }
+    config
 }
 
 /// Anthropic 非流式补全（带 prompt cache）
@@ -871,24 +819,14 @@ async fn rig_anthropic_complete(
     base_url: Option<&str>,
     request: CompletionRequest,
 ) -> Result<CompletionResult, LlmError> {
-    use rig_core::client::CompletionClient;
-
-    let mut builder = anthropic::Client::builder()
-        .api_key(api_key)
-        .http_client(crate::llm::build_rig_http_client());
-    if let Some(url) = base_url {
-        builder = builder.base_url(url);
-    }
-    let client = builder
-        .build()
-        .map_err(|e| LlmError::ProviderError(format!("rig anthropic client: {e}")))?;
-    let model_client = anthropic_caching_model(client.completion_model(model));
-    let r = model_client
-        .completion(request)
+    let wire = anthropic_caching_wire(anthropic_config(api_key, base_url).completion(model));
+    let client = rig_core::Model::new(wire, rig_core::http_client::DynHttpClient::new(rig_reqwest::ReqwestClient::from(crate::llm::build_rig_http_client())));
+    let response = client
+        .call(request)
         .await
         .map_err(|e| LlmError::ProviderError(format!("rig anthropic completion: {e}")))?;
-    let mut result = extract_response(&r.choice);
-    result.usage = Some(convert_usage(&r.usage));
+    let mut result = extract_response(&response.choice);
+    result.usage = Some(convert_usage(&response.usage));
     Ok(result)
 }
 
@@ -899,19 +837,15 @@ async fn rig_anthropic_stream(
     base_url: Option<&str>,
     request: CompletionRequest,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError> {
-    use rig_core::client::CompletionClient;
-
-    let mut builder = anthropic::Client::builder()
-        .api_key(api_key)
-        .http_client(crate::llm::build_rig_http_client());
-    if let Some(url) = base_url {
-        builder = builder.base_url(url);
-    }
-    let client = builder
-        .build()
-        .map_err(|e| LlmError::ProviderError(format!("rig anthropic client: {e}")))?;
-    let model_client = anthropic_caching_model(client.completion_model(model));
-    rig_stream_from_model!("anthropic", model_client, request)
+    let wire = anthropic_caching_wire(anthropic_config(api_key, base_url).completion(model));
+    let client = rig_core::Model::new(wire, rig_core::http_client::DynHttpClient::new(rig_reqwest::ReqwestClient::from(crate::llm::build_rig_http_client())));
+    // Anthropic 的流式 wire 类型不同，单独起流（复用同一个驱动循环）。
+    let streamed = client
+        .stream(request)
+        .map_err(|e| LlmError::ProviderError(format!("rig anthropic stream: {e}")))?;
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<LlmEvent, LlmError>>(64);
+    tokio::spawn(drive_stream("anthropic", streamed, tx));
+    Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
 }
 
 #[async_trait]
@@ -1004,11 +938,10 @@ impl RigAdapter {
         request: CompletionRequest,
     ) -> Result<CompletionResult, LlmError> {
         match self {
-            // OpenAI: use CompletionsClient (Chat Completions API) instead of
-            // the default Client (Responses API). The Responses API requires an
-            // OpenAI-generated ID for reasoning items on historical assistant
-            // messages, which we don't have. The Chat Completions API silently
-            // skips reasoning content, avoiding the error.
+            // OpenAI: use Chat Completions wire (not Responses API). The
+            // Responses API requires an OpenAI-generated ID for reasoning
+            // items on historical assistant messages, which we don't have.
+            // The Chat Completions API silently skips reasoning content.
             Self::OpenAI {
                 api_key,
                 model,
@@ -1030,15 +963,9 @@ impl RigAdapter {
                 model,
                 base_url,
                 ..
-            } => {
-                let r =
-                    rig_complete_with_url!(deepseek, api_key, model, base_url.as_deref(), request)?;
-                let mut result = extract_response(&r.choice);
-                result.usage = Some(convert_usage(&r.usage));
-                Ok(result)
-            }
-            // Generic OpenAI Compatible: use rig-core's OpenAI CompletionsClient
-            // with custom base_url. This leverages rig-core's proper reasoning
+            } => rig_deepseek_complete(api_key, model, base_url.as_deref(), request).await,
+            // Generic OpenAI Compatible: rig-core's OpenAI Chat wire with
+            // custom base_url. This leverages rig-core's proper reasoning
             // content handling (PR #1999, #2112).
             Self::OpenAiCompatible {
                 api_key,
@@ -1058,7 +985,7 @@ impl RigAdapter {
         }
     }
 
-    /// True streaming via rig-core's `CompletionModel::stream`. Reasoning and
+    /// True streaming via rig-core's `Model::stream`. Reasoning and
     /// text deltas are forwarded incrementally so the agent layer sees
     /// thinking content arrive in real time (no fake streaming).
     async fn do_stream(
@@ -1099,9 +1026,7 @@ impl RigAdapter {
                 model,
                 base_url,
                 ..
-            } => {
-                rig_stream_with_url!(deepseek, api_key, model, base_url.as_deref(), request)
-            }
+            } => rig_deepseek_stream(api_key, model, base_url.as_deref(), request).await,
         }
     }
 }

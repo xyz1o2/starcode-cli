@@ -186,7 +186,8 @@ thread-priority = "3.1"
 # Multi-provider LLM support (unified provider abstraction)
 # rig-core provides core provider abstractions without heavy companion dependencies
 # Disable default features to reduce dependencies (no epub, pdf, rayon, websocket, etc.)
-rig-core = { version = "0.42", default-features = false, features = ["derive", "reqwest", "rustls"] }
+rig-core = { version = "0.46", default-features = false, features = ["derive", "reqwest", "rustls"] }
+rig-reqwest = { version = "0.46", default-features = false, features = ["rustls"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_SystemServices"] }
