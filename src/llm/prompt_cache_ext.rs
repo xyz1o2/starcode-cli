@@ -256,9 +256,7 @@ pub fn patched_transport(
     client: reqwest::Client,
     enabled: bool,
 ) -> PatchTransport<rig_core::http_client::DynHttpClient> {
-    let http = rig_core::http_client::DynHttpClient::new(rig_reqwest::ReqwestClient::from(
-        client,
-    ));
+    let http = rig_core::http_client::DynHttpClient::new(rig_reqwest::ReqwestClient::from(client));
     PatchTransport::new(http, enabled)
 }
 
@@ -434,25 +432,14 @@ mod tests {
     /// 与 rig 实际生成的形状脱节。
     #[test]
     fn breakpoints_land_in_the_real_openai_wire_format() {
-        use std::sync::Arc;
+        use rig_core::message::Message;
 
-        let core = rig_core::completion::CompletionRequest {
-            model: None,
-            chat_history: vec![
-                Arc::new(rig_core::message::Message::System {
-                    content: "You are a coding agent.".to_string(),
-                }),
-                Arc::new(rig_core::message::Message::User {
-                    content: vec![rig_core::message::UserContent::Text(
-                        rig_core::message::Text {
-                            text: "hello".to_string(),
-                            ..Default::default()
-                        },
-                    )],
-                }),
-            ],
-            ..rig_core::completion::CompletionRequest::default()
-        };
+        // CompletionRequest 是 #[non_exhaustive]，只能走构造器 + 字段改写。
+        let mut core = rig_core::completion::CompletionRequest::new(Message::user("hello"));
+        core.chat_history.insert(
+            0,
+            std::sync::Arc::new(Message::system("You are a coding agent.")),
+        );
 
         let config = rig_core::providers::openai::wire::OpenAIConfig::new("test-key");
         let chat = rig_core::providers::openai::wire::Chat::new(config, "some-model");

@@ -227,20 +227,14 @@ fn convert_one_message(msg: &StarMessage) -> Message {
             }
             if let Some(tool_calls) = &msg.tool_calls {
                 for tc in tool_calls {
-                    // 0.46 的 ToolFunction.arguments 是 serde_json::Map：
-                    // 非对象参数（历史遗留的裸字符串）放进 invalid_arguments
-                    // 保留原文。
-                    let arguments = serde_json::from_str::<serde_json::Map<String, Value>>(
-                        &tc.function.arguments,
-                    )
-                    .unwrap_or_default();
+                    // 0.46 的 ToolFunction::parse 是官方入口：对象原样保留，
+                    // 字符串形式的对象再解一层，截断/非对象参数存进
+                    // invalid_arguments 保留原文。手搓 from_str::<Map> 会丢掉
+                    // 截断对象里已经写出的字段。
+                    let name = ToolName::new(tc.function.name.clone())
+                        .unwrap_or_else(|_| ToolName::new("unknown_tool").expect("non-empty"));
+                    let function = ToolFunction::parse(name, &tc.function.arguments);
                     let call_id = CallId::from_wire(tc.id.clone());
-                    let function = ToolFunction {
-                        name: ToolName::new(tc.function.name.clone())
-                            .unwrap_or_else(|_| ToolName::new("unknown_tool").expect("non-empty")),
-                        arguments,
-                        invalid_arguments: None,
-                    };
                     parts.push(AssistantContent::ToolCall(ToolCall::new(call_id, function)));
                 }
             }
@@ -560,13 +554,9 @@ async fn drive_stream(
                         has_tool_calls = true;
                         // 0.46：arguments 是 Map（增量 JSON 已由 rig 聚合），
                         // 裸字符串（非对象）留在 invalid_arguments。
-                        let args = tc
-                            .function
-                            .invalid_arguments
-                            .clone()
-                            .unwrap_or_else(|| {
-                                Value::Object(tc.function.arguments.clone()).to_string()
-                            });
+                        let args = tc.function.invalid_arguments.clone().unwrap_or_else(|| {
+                            Value::Object(tc.function.arguments.clone()).to_string()
+                        });
                         if tx
                             .send(Ok(LlmEvent::ToolCall(crate::types::StarToolCall {
                                 id: tc.id.wire().to_string(),
@@ -615,7 +605,8 @@ async fn drive_stream(
         }
     }
     if let Some(usage) = last_usage {
-        if tx.send(Ok(LlmEvent::UsageUpdate(convert_usage(&usage))))
+        if tx
+            .send(Ok(LlmEvent::UsageUpdate(convert_usage(&usage))))
             .await
             .is_err()
         {
@@ -750,7 +741,12 @@ async fn rig_deepseek_complete(
         config.base_url = url.to_string();
     }
     let chat = openai::wire::Chat::new(config, model);
-    let client = rig_core::Model::new(chat, rig_core::http_client::DynHttpClient::new(rig_reqwest::ReqwestClient::from(crate::llm::build_rig_http_client())));
+    let client = rig_core::Model::new(
+        chat,
+        rig_core::http_client::DynHttpClient::new(rig_reqwest::ReqwestClient::from(
+            crate::llm::build_rig_http_client(),
+        )),
+    );
     let response = client
         .call(request)
         .await
@@ -772,7 +768,12 @@ async fn rig_deepseek_stream(
         config.base_url = url.to_string();
     }
     let chat = openai::wire::Chat::new(config, model);
-    let client = rig_core::Model::new(chat, rig_core::http_client::DynHttpClient::new(rig_reqwest::ReqwestClient::from(crate::llm::build_rig_http_client())));
+    let client = rig_core::Model::new(
+        chat,
+        rig_core::http_client::DynHttpClient::new(rig_reqwest::ReqwestClient::from(
+            crate::llm::build_rig_http_client(),
+        )),
+    );
     start_stream("deepseek", client, request).await
 }
 
@@ -807,7 +808,10 @@ fn anthropic_caching_wire(mut wire: anthropic::wire::Messages) -> anthropic::wir
 fn anthropic_config(api_key: &str, base_url: Option<&str>) -> anthropic::AnthropicConfig {
     let mut config = anthropic::AnthropicConfig::new(api_key);
     if let Some(url) = base_url {
-        config.base_url = url.trim_end_matches('/').trim_end_matches("/v1").to_string();
+        config.base_url = url
+            .trim_end_matches('/')
+            .trim_end_matches("/v1")
+            .to_string();
     }
     config
 }
@@ -820,7 +824,12 @@ async fn rig_anthropic_complete(
     request: CompletionRequest,
 ) -> Result<CompletionResult, LlmError> {
     let wire = anthropic_caching_wire(anthropic_config(api_key, base_url).completion(model));
-    let client = rig_core::Model::new(wire, rig_core::http_client::DynHttpClient::new(rig_reqwest::ReqwestClient::from(crate::llm::build_rig_http_client())));
+    let client = rig_core::Model::new(
+        wire,
+        rig_core::http_client::DynHttpClient::new(rig_reqwest::ReqwestClient::from(
+            crate::llm::build_rig_http_client(),
+        )),
+    );
     let response = client
         .call(request)
         .await
@@ -838,7 +847,12 @@ async fn rig_anthropic_stream(
     request: CompletionRequest,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError> {
     let wire = anthropic_caching_wire(anthropic_config(api_key, base_url).completion(model));
-    let client = rig_core::Model::new(wire, rig_core::http_client::DynHttpClient::new(rig_reqwest::ReqwestClient::from(crate::llm::build_rig_http_client())));
+    let client = rig_core::Model::new(
+        wire,
+        rig_core::http_client::DynHttpClient::new(rig_reqwest::ReqwestClient::from(
+            crate::llm::build_rig_http_client(),
+        )),
+    );
     // Anthropic 的流式 wire 类型不同，单独起流（复用同一个驱动循环）。
     let streamed = client
         .stream(request)
