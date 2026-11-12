@@ -290,11 +290,33 @@ pub struct ChatState {
     pub typewriter: crate::ui::state::typewriter::TypewriterState,
     // =========================================
     // ============ Palette State ============
-    pub palette_items: Vec<crate::ui::state::palette::PaletteItem>,
+    /// 面板里选中的条目下标 —— 解释成**渲染序**（见
+    /// `palette::palette_display_items`，那是渲染与 Enter 共用的唯一定义）。
+    ///
+    /// 曾经还有一个 `palette_items` 字段存着条目快照，但它只写不读：真正的条目
+    /// 每次都现算（`palette_display_items` 现算 + 过滤），快照与它常年不一致，
+    /// 读它的代码一旦被加回来就会读到过期数据。这个字段已删。
     pub selected_palette_index: usize,
     pub palette_mode: crate::ui::state::palette::PaletteMode,
     pub palette_history: Vec<crate::ui::state::palette::PaletteMode>,
     pub palette_filter: String,
+    /// 面板列表的可视行数（不含搜索框与分组标题行）。
+    ///
+    /// PageUp/PageDown 按它翻页 —— 此前固定跳 10 行，在 34 行终端上会跳过头，
+    /// 在 60 行终端上跳不满，两种都不对。渲染每帧写回（布局记忆，见
+    /// `render_palette`），按键处理只读。
+    pub palette_visible_rows: usize,
+    /// 面板**列表区**在屏幕上的矩形（不含搜索行与边框）。
+    ///
+    /// 鼠标命中测试要用它：面板开着时滚轮应当滚列表、点击应当选中条目，
+    /// 而不是穿过去滚聊天区、拖选聊天文字。
+    pub palette_area: Option<Rect>,
+    /// 列表**行号 → 条目下标**的映射。
+    ///
+    /// 列表里混着分组标题行（不可选），所以「第 3 行」不等于「第 3 个条目」。
+    /// 渲染时建好这张表，鼠标点选直接查它 —— 免得命中逻辑再实现一遍
+    /// 「标题行不占位」这条规则，两边迟早漂。
+    pub palette_row_to_item: Vec<usize>,
     // ============ Unified Modal Stack ============
     /// 单一模态栈：替代散落的 show_* bool。栈顶接收按键与渲染。
     pub modal_stack: Vec<crate::ui::state::modal::Modal>,
@@ -939,11 +961,13 @@ impl ChatState {
             plugin_op_pending: false,
             plugin_message: None,
             plugin_confirm: None,
-            palette_items: Vec::new(),
             selected_palette_index: 0,
             palette_mode: crate::ui::state::palette::PaletteMode::Main,
             palette_history: Vec::new(),
             palette_filter: String::new(),
+            palette_visible_rows: 0,
+            palette_area: None,
+            palette_row_to_item: Vec::new(),
             show_provider_menu: false,
             selected_provider_index: 0,
             show_session_menu: false,

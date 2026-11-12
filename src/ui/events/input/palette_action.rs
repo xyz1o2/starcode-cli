@@ -31,9 +31,7 @@ pub(crate) async fn execute_palette_action(
             // Entering from the settings modal (ShowStatus closes the palette)
             // must reopen the palette, otherwise navigation appears to do nothing.
             state.pop_modal();
-            let items = crate::ui::components::palette::get_items(&mode, state);
             state.palette_mode = mode;
-            state.palette_items = items;
             state.selected_palette_index = 0;
             state.palette_filter.clear();
             if !state.is_palette_open() {
@@ -79,10 +77,6 @@ pub(crate) async fn execute_palette_action(
             } else {
                 state.palette_mode = crate::ui::state::palette::PaletteMode::Model;
             }
-            state.palette_items = crate::ui::components::palette::get_items(
-                &crate::ui::state::palette::PaletteMode::Model,
-                state,
-            );
             state.selected_palette_index =
                 crate::ui::components::palette::model_selection_index(state);
             let _ = agent_tx
@@ -214,7 +208,6 @@ pub(crate) async fn execute_palette_action(
         PaletteAction::Back => {
             if let Some(prev_mode) = state.palette_history.pop() {
                 state.palette_mode = prev_mode.clone();
-                state.palette_items = crate::ui::components::palette::get_items(&prev_mode, state);
                 state.selected_palette_index = 0;
                 state.palette_filter.clear();
             } else {

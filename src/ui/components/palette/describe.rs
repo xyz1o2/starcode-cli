@@ -12,7 +12,7 @@ use crate::ui::utils::status::{
 pub(super) fn model_summary_description(state: Option<&ChatState>) -> String {
     state
         .and_then(current_model_id)
-        .map(|model| format!("Current: {}", model))
+        .map(|model| format!("Current · {}", model))
         .unwrap_or_else(|| "Switch the current model".to_string())
 }
 
@@ -23,12 +23,12 @@ pub(super) fn provider_summary_description(state: Option<&ChatState>) -> String 
     if let Some(state) = state {
         if current_provider_id(state).is_some() {
             let provider = current_provider_display(state);
-            return format!("Current: {} · {} configured", provider, configured.max(1));
+            return format!("Current · {} · {} configured", provider, configured.max(1));
         }
     }
 
     if configured > 0 {
-        format!("{} configured provider(s)", configured)
+        format!("{} configured", configured)
     } else {
         "Connect or switch provider".to_string()
     }
@@ -42,18 +42,18 @@ pub(super) fn status_overview_description(state: Option<&ChatState>) -> String {
 
 pub(super) fn approval_mode_description(state: Option<&ChatState>) -> String {
     state
-        .map(|state| format!("Current: {}", approval_mode_label(&state.approval_mode)))
+        .map(|state| format!("Current · {}", approval_mode_label(&state.approval_mode)))
         .unwrap_or_else(|| "Switch Auto, Default, Plan or Bypass permissions".to_string())
 }
 
 pub(super) fn thinking_effort_description(state: Option<&ChatState>) -> String {
     state
-        .map(|state| format!("Current: {}", state.thinking_effort.label()))
+        .map(|state| format!("Current · {}", state.thinking_effort.label()))
         .unwrap_or_else(|| "Set thinking/reasoning effort level".to_string())
 }
 
 pub(super) fn theme_description(state: Option<&ChatState>) -> String {
     state
-        .map(|state| format!("Current: {}", state.theme_manager.current().name))
+        .map(|state| format!("Current · {}", state.theme_manager.current().name))
         .unwrap_or_else(|| "Switch color theme".to_string())
 }

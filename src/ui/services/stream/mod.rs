@@ -1235,13 +1235,6 @@ pub async fn handle_stream_update(
                     crate::ui::state::palette::PaletteMode::Model
                 )
             {
-                state.palette_items = crate::ui::components::palette::get_model_palette_items(
-                    &state.available_models,
-                    &state.current_model,
-                    state.awaiting_models,
-                    &state.model_provider_map,
-                    state.models_list_age_secs(),
-                );
                 state.selected_palette_index =
                     crate::ui::components::palette::model_selection_index(state);
             }
@@ -1256,13 +1249,6 @@ pub async fn handle_stream_update(
             {
                 state.palette_history.clear();
                 state.open_palette(crate::ui::state::palette::PaletteMode::Model);
-                state.palette_items = crate::ui::components::palette::get_model_palette_items(
-                    &state.available_models,
-                    &state.current_model,
-                    state.awaiting_models,
-                    &state.model_provider_map,
-                    state.models_list_age_secs(),
-                );
                 state.selected_palette_index =
                     crate::ui::components::palette::model_selection_index(state);
                 state.palette_filter.clear();

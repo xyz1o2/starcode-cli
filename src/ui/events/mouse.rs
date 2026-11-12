@@ -7,6 +7,64 @@ pub fn scroll_chat_by_lines(state: &mut ChatState, delta_lines: i32) {
     crate::ui::state::scroll_chat(state, delta_lines);
 }
 
+/// 鼠标位置落在**面板列表区**内时，返回那块矩形。
+///
+/// 面板开着时鼠标事件一律先问这一句：命中就归面板处理，不命中才落回聊天区。
+/// 此前完全没有这一层，于是滚轮和点击都穿过了浮在最上层的面板。
+fn palette_area_at(state: &ChatState, col: u16, row: u16) -> Option<ratatui::layout::Rect> {
+    if !state.is_palette_open() {
+        return None;
+    }
+    let area = state.palette_area?;
+    if col < area.x
+        || col >= area.x.saturating_add(area.width)
+        || row < area.y
+        || row >= area.y.saturating_add(area.height)
+    {
+        return None;
+    }
+    Some(area)
+}
+
+/// 面板列表的滚轮：把选中项按可见行数翻。
+///
+/// 滚轮一格翻一屏（`palette_visible_rows`），而不是一行 —— 面板一次能看到
+/// 十几行，一格一行的话要滚十几下才走完一遍列表。
+fn palette_scroll(state: &mut ChatState, area: ratatui::layout::Rect, direction: i32) {
+    let page = state.palette_visible_rows.max(1);
+    let total = state.palette_row_to_item.len();
+    if total == 0 {
+        return;
+    }
+    let last = total - 1;
+    state.selected_palette_index = if direction < 0 {
+        state.selected_palette_index.saturating_sub(page)
+    } else {
+        (state.selected_palette_index + page).min(last)
+    };
+    let _ = area;
+}
+
+/// 面板列表的点击：把选中项移到被点的那一行。
+///
+/// 列表里混着分组标题行（不可选），所以「第几行」要经 `palette_row_to_item`
+/// 换算成「第几个条目」—— 那张表由渲染时建好，和高亮用的是同一套行号。
+fn palette_select_at(state: &mut ChatState, col: u16, row: u16) {
+    let Some(area) = state.palette_area else {
+        return;
+    };
+    if row < area.y || row >= area.y.saturating_add(area.height) {
+        return;
+    }
+    let line = (row - area.y) as usize;
+    let Some(&item_index) = state.palette_row_to_item.get(line) else {
+        // 点在分组标题行上：不可选，不动选中项。
+        return;
+    };
+    let _ = col;
+    state.selected_palette_index = item_index;
+}
+
 fn map_mouse_to_chat_position(
     state: &ChatState,
     mouse_col: u16,
@@ -213,6 +271,12 @@ pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
     }
     match m.kind {
         MouseEventKind::ScrollUp => {
+            // 面板开着时，滚轮属于**面板列表** —— 长列表（几十个模型）此前
+            // 只能靠键盘翻，滚轮穿过去滚的是背后的聊天区。
+            if let Some(area) = palette_area_at(state, m.column, m.row) {
+                palette_scroll(state, area, -1);
+                return;
+            }
             // 检查鼠标是否在 input 区域
             if let Some(input_area) = state.last_input_area {
                 if m.column >= input_area.x
@@ -237,6 +301,10 @@ pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
             scroll_chat_by_lines(state, -3 * speed_multiplier);
         }
         MouseEventKind::ScrollDown => {
+            if let Some(area) = palette_area_at(state, m.column, m.row) {
+                palette_scroll(state, area, 1);
+                return;
+            }
             // 检查鼠标是否在 input 区域
             if let Some(input_area) = state.last_input_area {
                 if m.column >= input_area.x
@@ -263,6 +331,12 @@ pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
         MouseEventKind::Down(MouseButton::Left) => {
             // Shift+Click bypasses TUI mouse capture to allow native terminal text selection
             if m.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                return;
+            }
+            // 面板开着时，左键落在面板里就是**选条目**，不是拖选聊天文字。
+            // 此前点击直接落到聊天区：面板看着浮在最上层，鼠标却穿过去。
+            if palette_area_at(state, m.column, m.row).is_some() {
+                palette_select_at(state, m.column, m.row);
                 return;
             }
             if let Some((entry_idx, row, col)) = map_mouse_to_chat_position(state, m.column, m.row)

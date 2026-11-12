@@ -121,10 +121,10 @@
   "agent.exploration.limit": "[EXPLORATION_LIMIT]\n已连续进行 {count} 轮只读操作（读文件/搜索）却未修改任何代码。\n停止继续探索，立即根据已有信息执行代码修改。直接使用 edit/write_file 工具写出改动，不要再读更多文件。",
   "agent.auto_continue.prompt": "请基于上面的工具输出给出最终回答，不要再调用工具。",
 
-  "cmd.settings.lang.invalid": "❌ 语言无效。支持: auto | en | zh-CN",
-  "cmd.settings.lang.set": "✅ 界面语言已设置为 {lang}（生效: {resolved}）",
+  "cmd.settings.lang.invalid": "语言无效。支持: auto | en | zh-CN",
+  "cmd.settings.lang.set": "界面语言已设置为 {lang}（生效: {resolved}）",
   "cmd.settings.lang.current": "当前界面语言: {lang}（生效: {resolved}）\n用法: /lang <auto|en|zh-CN>",
-  "cmd.theme.not_implemented": "ℹ️ 主题切换功能尚未实现。",
+  "cmd.theme.not_implemented": "主题切换功能尚未实现。",
 
   "palette.back.label": "← 返回",
   "palette.back.desc.main": "返回主菜单",

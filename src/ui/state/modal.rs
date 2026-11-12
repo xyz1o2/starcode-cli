@@ -319,12 +319,15 @@ impl ChatState {
         self.modal_stack.retain(|m| !matches!(m, Modal::Palette));
     }
 
-    /// (Re)open the palette at `mode`: resets items/filter/selection.
+    /// (Re)open the palette at `mode`: resets filter/selection.
+    ///
+    /// 条目**不在这里缓存** —— 真正的来源是每次现算的
+    /// `palette::palette_display_items`（它要随过滤词、provider 列表、模型列表
+    /// 变化而变）。曾经这里存一份 `palette_items` 快照，但那份快照只写不读，
+    /// 与现算的结果常年不一致。
     pub fn open_palette(&mut self, mode: PaletteMode) {
         self.close_palette();
-        let items = crate::ui::components::palette::get_items(&mode, self);
         self.palette_mode = mode;
-        self.palette_items = items;
         self.selected_palette_index = 0;
         self.palette_filter.clear();
         self.input_modal_value.clear();
@@ -334,9 +337,7 @@ impl ChatState {
     /// Navigate within the open palette: push current mode onto history.
     pub fn push_palette_mode(&mut self, mode: PaletteMode) {
         self.palette_history.push(self.palette_mode.clone());
-        let items = crate::ui::components::palette::get_items(&mode, self);
         self.palette_mode = mode;
-        self.palette_items = items;
         self.selected_palette_index = 0;
         self.palette_filter.clear();
     }

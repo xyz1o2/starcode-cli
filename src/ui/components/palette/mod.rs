@@ -2,6 +2,24 @@
 //!
 //! 本文件只管**调度与渲染**：按 PaletteMode 挑条目、过滤、画框。
 //! 条目本身在 [items]，条目描述在 [describe]。
+//!
+//! # 视觉方向：它是一个终端输入区，不是一个网页弹窗
+//!
+//! 面板此前照着"模态弹窗"的样式做：圆角双层边框、emoji 图标、四种角色各配
+//! 一种颜色、每一行都加粗。五个角色五种颜色意味着**没有重点**；双层边框让
+//! 搜索框和外框看起来像两个控件叠在一起；等粗的每一行则让层级消失。
+//!
+//! 现在按**终端自己的语法**重做：
+//!
+//! - **层级用缩进**表达，不��颜色。分组标题顶格，分组内的条目缩进 2 列 ——
+//!   终端里没有别的东西用缩进表达层级，这一处独占它（见 `INDENT_GROUPED`）。
+//! - **只有一处有颜色**：当前选中行（主题的 `selection_bg`）。其余全是同一支
+//!   灰阶，靠字重和颜色深浅分层。
+//! - **一个边框**。外框即是搜索框的边框，不再套第二层。
+//! - **字重只在一处用**：选中项（`BOLD`）。普通项不加粗 —— 12 行全粗等于
+//!   12 行都没粗。
+//! - **没有 emoji**。`⟳` `＋` `⏳` `●` 这些符号被去掉：其中 `⏳` 是宽字符
+//!   （占两列），`＋` `●` `←` 是歧义宽度，在不同终端里对齐各不相同。
 
 pub mod describe;
 pub mod items;
@@ -28,6 +46,18 @@ pub use items::*;
 /// 命令面板（Ctrl+P）占屏比例。宽度刻意压得比常见弹窗窄。
 const PALETTE_WIDTH_PERCENT: u16 = 58;
 const PALETTE_HEIGHT_PERCENT: u16 = 60;
+
+/// 分组内条目的缩进列数。
+///
+/// 缩进是这个面板唯一的层级手段：分组标题顶格，它下面的条目缩进两列。
+/// 散项（刷新、加 provider、返回）不缩进 —— 它们不属于任何分组。
+const INDENT_GROUPED: usize = 2;
+
+/// 描述与标题之间的间隔列数。
+///
+/// 两列：一个空格会让描述看起来像标题的一部分（"Status Not set"），四列以上
+/// 在 58% 宽的面板里会把描述挤到换行。
+const DESCRIPTION_GAP: usize = 2;
 
 pub fn palette_item_matches_query(item: &PaletteItem, query_lower: &str) -> bool {
     if query_lower.is_empty() {
@@ -239,9 +269,14 @@ fn palette_pin_rank(item: &PaletteItem, mode: &PaletteMode) -> u8 {
     }
 }
 
+/// 面板标题。
+///
+/// 标题只说**这是哪一页**，不重复"按 Ctrl+P 打开"—— 面板已经开着了，
+/// 把入口键写进标题既占地方，又承诺了一个不总成立的按键（Esc 只在有
+/// 历史时才回退，无历史时是关闭面板）。
 pub fn palette_title(mode: &PaletteMode, query: &str) -> String {
     let scope = if !query.trim().is_empty() && matches!(mode, PaletteMode::Main) {
-        "Search All"
+        "Search all"
     } else {
         match mode {
             PaletteMode::Main => "Actions",
@@ -258,34 +293,45 @@ pub fn palette_title(mode: &PaletteMode, query: &str) -> String {
             PaletteMode::McpManage => "MCP",
             PaletteMode::Help => "Help",
             PaletteMode::Model => "Models",
-            PaletteMode::AgentMode => "Agent Mode",
+            PaletteMode::AgentMode => "Approval mode",
             PaletteMode::ThinkingEffort => "Thinking",
-            PaletteMode::ContextWindow => "Context Window",
+            PaletteMode::ContextWindow => "Context window",
             PaletteMode::Theme => "Theme",
-            PaletteMode::ProviderPopular => "Popular Providers",
-            PaletteMode::ProviderOther => "Regional Providers",
-            PaletteMode::ProviderLocal => "Local Providers",
-            PaletteMode::ProviderOptions(_) => "Provider Setup",
-            PaletteMode::ProviderDelete(_) => "Remove Provider",
+            PaletteMode::ProviderPopular => "Popular providers",
+            PaletteMode::ProviderOther => "Regional providers",
+            PaletteMode::ProviderLocal => "Local providers",
+            PaletteMode::ProviderOptions(_) => "Provider setup",
+            PaletteMode::ProviderDelete(_) => "Remove provider",
             PaletteMode::Language => "Language",
-            PaletteMode::OutputStyle => "Output Style",
+            PaletteMode::OutputStyle => "Output style",
         }
     };
 
-    format!(" {} (Ctrl+P) ", scope)
+    format!(" {} ", scope)
 }
 
+/// 搜索框的占位符 —— 说的是**这一页能搜什么**，不是"搜索"两个字。
+///
+/// 此前 Main 页写的是 "Search actions, models, providers"，但 Main 页空输入时
+/// 显示的是全部动作（不是搜索结果），标题写着 "Actions"、占位符写着 "Search…"，
+/// 两句话描述的是两种不同状态，读者得先猜面板现在是哪种。
 pub fn palette_placeholder(mode: &PaletteMode) -> &'static str {
     match mode {
-        PaletteMode::Main => "Search actions, models, providers",
-        PaletteMode::Command => "Search commands",
-        PaletteMode::Provider => "Search providers by name or endpoint type",
-        PaletteMode::Model => "Search models",
-        PaletteMode::Language => "Select UI language",
-        PaletteMode::System => "Search settings, language, diagnostics",
-        PaletteMode::Memory => "Search memory actions",
-        PaletteMode::Session => "Search session actions",
-        _ => "Search commands",
+        PaletteMode::Main => "Filter actions",
+        PaletteMode::Command => "Filter commands",
+        PaletteMode::Provider => "Filter providers",
+        PaletteMode::Model => "Filter models",
+        PaletteMode::Language => "Filter languages",
+        PaletteMode::System => "Filter settings",
+        PaletteMode::Memory => "Filter memory actions",
+        PaletteMode::Session => "Filter session actions",
+        PaletteMode::Theme => "Filter themes",
+        PaletteMode::AgentMode => "Filter modes",
+        PaletteMode::ThinkingEffort => "Filter levels",
+        PaletteMode::ContextWindow => "Filter sizes",
+        PaletteMode::OutputStyle => "Filter styles",
+        PaletteMode::Help => "Filter commands",
+        _ => "Filter",
     }
 }
 
@@ -349,7 +395,7 @@ fn get_all_provider_search_items(configured: &[String]) -> Vec<PaletteItem> {
     {
         provider_items.push(PaletteItem {
             id: format!("provider_{}", id),
-            label: format!("{} ✓", id),
+            label: id.clone(),
             description: "Custom provider".to_string(),
             category: Some("Custom".to_string()),
             action: PaletteAction::Navigate(PaletteMode::ProviderOptions(id.clone())),
@@ -475,59 +521,60 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
     let primary_color = theme.primary;
     let inactive_color = theme.inactive;
     let foreground_color = theme.foreground;
-    let info_color = theme.info;
-    let success_color = theme.success;
+    let subtle_color = theme.subtle;
     let selection_bg = theme.selection_bg;
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_color))
-        .title(palette_title(&state.palette_mode, &state.palette_filter))
-        .title_style(Style::default().fg(primary_color));
 
     // 70% 太宽：行内 label + description 拉得过开，视觉上压住整个会话区。
     // 收到 58% 后两侧留白足够，最长的描述行（删除 provider 的那句）在 120 列
     // 终端上正好放得下。
     let area = centered_rect(PALETTE_WIDTH_PERCENT, PALETTE_HEIGHT_PERCENT, area);
     f.render_widget(Clear, area);
+
+    // **一个边框**。此前外框套着内框（内框是"Search"），两条同色 hairline 相距
+    // 一列，看起来像两个控件叠在一起 —— 而实际只有一个输入框。
+    // 现在外框同时承担两件事：它的上边框就是搜索行的位置。
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
+        .title(palette_title(&state.palette_mode, &state.palette_filter))
+        .title_style(Style::default().fg(inactive_color));
     f.render_widget(block, area);
 
+    // 外框之内：标题行（搜索）1 行 + 列表。列表至少留 1 行。
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
-        .constraints([Constraint::Length(3), Constraint::Min(1)].as_ref())
+        .constraints([Constraint::Length(1), Constraint::Min(1)].as_ref())
         .split(area);
 
     let query = state.palette_filter.trim();
-    let query_lower = query.to_lowercase();
     let is_empty = query.is_empty();
 
-    let placeholder = palette_placeholder(&state.palette_mode);
+    // 搜索行：空输入时显示这一页能搜什么，有输入时显示输入本身。
+    // 末尾画一个**真实的光标**（反显块）—— 此前搜索框是一个纯 `Paragraph`，
+    // 输完字看不见插入点在哪，得靠数字符猜。
     let input_text = if is_empty {
-        placeholder
+        palette_placeholder(&state.palette_mode).to_string()
     } else {
-        state.palette_filter.as_str()
+        state.palette_filter.clone()
     };
     let input_style = if is_empty {
-        Style::default().fg(inactive_color)
+        Style::default().fg(subtle_color)
     } else {
         Style::default().fg(foreground_color)
     };
 
-    let input = Paragraph::new(Line::from(vec![
-        Span::raw(" "),
-        Span::styled(input_text.to_string(), input_style),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(border_color))
-            .title(" Search ")
-            .title_style(Style::default().fg(primary_color)),
-    );
-    f.render_widget(input, chunks[0]);
+    let mut input_spans = vec![Span::styled(input_text, input_style)];
+    // 光标画在文字末尾。空输入时光标落在占位符之后（占位符是提示，不是内容，
+    // 但光标得有地方待着，否则这一行看起来不像能输入）。
+    input_spans.push(Span::styled(
+        " ",
+        Style::default()
+            .fg(foreground_color)
+            .add_modifier(Modifier::REVERSED),
+    ));
+    f.render_widget(Paragraph::new(Line::from(input_spans)), chunks[0]);
 
     // 顺序只在 `palette_display_items` 里定义一次（见它的文档注释）。这里和
     // `handle_palette` 用的是同一个 vec，所以高亮画在第 `selected_palette_index`
@@ -537,6 +584,9 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
     let mut list_items: Vec<ListItem> = Vec::new();
     // `display_items[i]` 对应 `list_items` 里的哪一行（标题行不占位）。
     let mut row_of_item: Vec<usize> = Vec::with_capacity(display_items.len());
+    // 反向映射：列表第几行对应第几个条目。鼠标点选用 —— 分组标题行不占位，
+    // 所以「第 3 行」不等于「第 3 个条目」。
+    let mut item_of_row: Vec<usize> = Vec::with_capacity(display_items.len());
     // 已经发过标题的分组名。置顶/置底的散项可能夹在分组之间，所以不能再用
     // "见过散项就再也不画标题"的老逻辑 —— 只按分类是否变化来决定。
     let mut last_header: Option<String> = None;
@@ -545,71 +595,61 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
         // 空列表只出一条**不可选**的提示。模型面板加载中时说明原因，而不是
         // 摆一条 action=Back 的"加载中"菜单项让人去选。
         let hint = if matches!(state.palette_mode, PaletteMode::Model) && state.awaiting_models {
-            "⏳ Loading models… (Esc to close)"
+            "Loading models..."
         } else {
-            "No results"
+            "No matches"
         };
         list_items.push(ListItem::new(Line::from(Span::styled(
             hint,
-            Style::default().fg(inactive_color),
+            Style::default().fg(subtle_color),
         ))));
     } else {
-        for item in &display_items {
+        for (item_index, item) in display_items.iter().enumerate() {
             let indented = item.category.is_some();
             if let Some(category) = &item.category {
                 if last_header.as_deref() != Some(category.as_str()) {
+                    // 分组标题：顶格、弱色、不加粗。它是**标签**，不是内容 ——
+                    // 颜色在这里承担的是"分组边界"，而不是"这是个好东西"。
                     list_items.push(ListItem::new(Line::from(Span::styled(
                         category.clone(),
-                        Style::default()
-                            .fg(primary_color)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(primary_color),
                     ))));
                     last_header = Some(category.clone());
                 }
             }
 
-            // 三类全局动作各给一个颜色，不再和普通条目糊成一片：
-            // 刷新（第一项）用主色，Add New Provider 用成功色，返回用信息色。
-            let is_back = matches!(item.action, PaletteAction::Back);
-            let is_add_provider = matches!(item.action, PaletteAction::OpenProviderForm);
-            let is_refresh = matches!(item.action, PaletteAction::RefreshModels);
-            let label_style = if is_back {
-                Style::default().fg(info_color).add_modifier(Modifier::BOLD)
-            } else if is_add_provider {
-                Style::default()
-                    .fg(success_color)
-                    .add_modifier(Modifier::BOLD)
-            } else if is_refresh {
-                Style::default()
-                    .fg(primary_color)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().add_modifier(Modifier::BOLD)
-            };
+            // 标签不加粗：层级靠缩进和颜色，不靠字重。此前每一行都是 BOLD，
+            // 12 行全粗等于 12 行都没粗，反而没有重点。
+            let label_style = Style::default().fg(foreground_color);
 
             let mut spans = Vec::new();
             if indented {
-                spans.push(Span::raw("  "));
+                spans.push(Span::raw(" ".repeat(INDENT_GROUPED)));
             }
             spans.push(Span::styled(item.label.clone(), label_style));
             if !item.description.is_empty() {
-                spans.push(Span::raw("  "));
+                spans.push(Span::raw(" ".repeat(DESCRIPTION_GAP)));
                 spans.push(Span::styled(
                     item.description.clone(),
                     Style::default().fg(inactive_color),
                 ));
             }
             // 返回项的按键提示：Esc 与选中它完全等价，写出来才"功能性"。
-            if is_back {
-                spans.push(Span::raw("  "));
+            // 画成一枚 keycap（反显的小块）而不是普通文字 —— 它是键，不是标签。
+            if matches!(item.action, PaletteAction::Back) {
+                spans.push(Span::raw(" ".repeat(DESCRIPTION_GAP)));
                 spans.push(Span::styled(
-                    "Esc",
-                    Style::default().fg(info_color).add_modifier(Modifier::BOLD),
+                    " Esc ",
+                    Style::default()
+                        .fg(foreground_color)
+                        .bg(subtle_color)
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
 
             list_items.push(ListItem::new(Line::from(spans)));
             row_of_item.push(list_items.len() - 1);
+            item_of_row.push(item_index);
         }
     }
 
@@ -621,15 +661,22 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
         list_state.select(Some(row_of_item[state.selected_palette_index]));
     }
 
+    // 面板里**唯一**有底色的一处：当前选中行。其余全是同一支灰阶。
     let list = List::new(list_items)
-        .highlight_style(
-            Style::default()
-                .bg(selection_bg)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
+        .highlight_style(Style::default().bg(selection_bg).add_modifier(Modifier::BOLD))
+        // 高亮符号缩进两列，与分组内的条目对齐 —— 缩进是这个面板的层级语言，
+        // 选中标记也得说同一种。
+        .highlight_symbol("  ");
 
     f.render_stateful_widget(list, chunks[1], &mut list_state);
+
+    // 列表可视行数写回状态，供 PageUp/PageDown 按**实际行数**翻页。
+    // 此前固定跳 10 行：34 行终端上跳过头，60 行终端上跳不满。
+    state.palette_visible_rows = chunks[1].height as usize;
+    // 命中测试用的几何与行号映射。鼠标滚轮与点选靠它们落在面板而不是
+    // 穿过去落到聊天区（见 `events::mouse`）。
+    state.palette_area = Some(chunks[1]);
+    state.palette_row_to_item = item_of_row;
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -867,7 +914,7 @@ mod tests {
 
     /// 模型面板不该凭空造出 "Other" / "Manual" 之类的分组层级。
     ///
-    /// 回归点：`← Back`、`Enter model name...`、`Fetch model list from API`
+    /// 回归点：`Back`、`Enter model name...`、`Fetch model list from API`
     /// 三项原本要么被兜底进 "Other" 组、要么被塞进 "Manual" 组，于是用户找一个
     /// 模型时得先穿过两个与模型无关的分组标题。现在只剩刷新入口且它 `category: None`，
     /// 渲染时平铺、不带标题，模型分组直接顶上来。
@@ -1121,10 +1168,11 @@ mod tests {
         // 两个能力等级的面板完全一致
         assert_eq!(binary_labels, granular_labels);
         // 刻度固定为 Off → Low → Medium → High → Xhigh → Max，没有 “On”
+        // label 是「符号 + 档位名」；"当前"不在 label 里（写进描述）。
         assert_eq!(
             binary_labels,
             vec![
-                "◌ Off  (current)",
+                "◌ Off",
                 "○ Low",
                 "◐ Medium",
                 "● High",
@@ -1176,7 +1224,7 @@ mod tests {
         );
 
         // 空闲时保留刷新入口，且它不参与 provider 分组（分组标题只服务于模型本身）
-        assert_eq!(labels[0], "⟳ Fetch model list from API", "{labels:?}");
+        assert_eq!(labels[0], "Fetch model list from API", "{labels:?}");
         assert!(
             items[0].category.is_none(),
             "刷新入口不应被提升成一级分组标题"

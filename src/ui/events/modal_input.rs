@@ -117,9 +117,7 @@ async fn handle_palette(
     match key.code {
         Esc => {
             if let Some(prev_mode) = state.palette_history.pop() {
-                let items = crate::ui::components::palette::get_items(&prev_mode, state);
                 state.palette_mode = prev_mode;
-                state.palette_items = items;
                 state.selected_palette_index = 0;
                 state.palette_filter.clear();
             } else {
@@ -136,12 +134,6 @@ async fn handle_palette(
             }
         }
         Down => {
-            if state.is_awaiting_confirmation {
-                if state.pending_confirmation_choice < 4 {
-                    state.pending_confirmation_choice += 1;
-                }
-                return Ok(true);
-            }
             if items_len > 0 {
                 if state.selected_palette_index < items_len - 1 {
                     state.selected_palette_index += 1;
@@ -152,13 +144,18 @@ async fn handle_palette(
         }
         PageUp => {
             if items_len > 0 {
-                state.selected_palette_index = state.selected_palette_index.saturating_sub(10);
+                // 按**实际可视行数**翻页。此前写死 10 行：34 行终端上跳过头
+                // （一次跳过三分之一列表），60 行终端上跳不满（翻半屏还剩一半）。
+                // `palette_visible_rows` 由渲染每帧写回（布局记忆）。
+                let page = state.palette_visible_rows.max(1);
+                state.selected_palette_index = state.selected_palette_index.saturating_sub(page);
             }
         }
         PageDown => {
             if items_len > 0 {
+                let page = state.palette_visible_rows.max(1);
                 state.selected_palette_index =
-                    (state.selected_palette_index + 10).min(items_len - 1);
+                    (state.selected_palette_index + page).min(items_len - 1);
             }
         }
         Enter => {
@@ -190,24 +187,14 @@ async fn handle_palette(
             }
         }
         Char(c) => {
-            if state.palette_mode == crate::ui::state::PaletteMode::Provider && c == 'e' {
-                if let Some(selected_item) = display_items.get(state.selected_palette_index) {
-                    let provider_id = match &selected_item.action {
-                        crate::ui::state::PaletteAction::SelectProvider(pid) => Some(pid.clone()),
-                        crate::ui::state::PaletteAction::EditProvider(pid) => Some(pid.clone()),
-                        crate::ui::state::PaletteAction::Navigate(
-                            crate::ui::state::PaletteMode::ProviderOptions(pid),
-                        ) => Some(pid.clone()),
-                        _ => None,
-                    };
-
-                    if let Some(pid) = provider_id {
-                        super::input::open_provider_form(state, Some(pid)).await;
-                        return Ok(true);
-                    }
-                }
-            }
-
+            // 搜索框里**每一个**字符都必须能打进去。
+            //
+            // 此前 Providers 页把裸 `e` 劫持成"打开编辑表单"：用户在搜索框里
+            // 想打 "openai-compatible" 之类的词，第一个 e 就把表单弹开了 ——
+            // 搜索框里唯一不能输入的字母，正好是 provider 名里最常见的那个。
+            //
+            // 编辑的入口不该藏在搜索框里：面板里本来就有独立的 "Edit Provider"
+            // 行（`ProviderOptions` 页），编辑从那里进。搜索框只做搜索。
             state.palette_filter.push(c);
             state.selected_palette_index = 0;
         }

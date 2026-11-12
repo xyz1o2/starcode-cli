@@ -89,19 +89,15 @@ pub(super) fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec
         PaletteItem {
             id: "vim_mode".to_string(),
             label: i18n::t("palette.label.vim_mode", "Vim Mode", "Vim Mode"),
+            // 开关类条目只说**当前是什么状态**。此前写 "Enabled — toggle off"
+            // / "Disabled — toggle on"：破折号从句是模板，而且"回车会翻转它"
+            // 本来就是这类条目的定义，说出来是废话。
             description: if state.map_or(false, |s| s.vim_enabled) {
-                i18n::t(
-                    "palette.desc.vim_on",
-                    "Enabled — toggle off",
-                    "Enabled — toggle off",
-                )
+                i18n::t("palette.desc.vim_on", "On", "开")
             } else {
-                i18n::t(
-                    "palette.desc.vim_off",
-                    "Disabled — toggle on",
-                    "Disabled — toggle on",
-                )
-            },
+                i18n::t("palette.desc.vim_off", "Off", "关")
+            }
+            .to_string(),
             category: Some(i18n::t("palette.cat.settings", "Settings", "Settings")),
             action: PaletteAction::ToggleVimMode,
         },
@@ -112,17 +108,20 @@ pub(super) fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec
                 "Mouse Capture",
                 "Mouse Capture",
             ),
+            // 这一条必须说清**代价**（捕获开着就没法用终端原生选区），
+            // 但要在 58% 宽的面板里放得下 —— 此前的两句话在 120 列终端上
+            // 从中间被截断，读起来像 bug。
             description: match state.map(|s| s.mouse_capture_enabled) {
                 Some(true) => i18n::t(
                     "palette.desc.mouse_on",
-                    "On — wheel scrolls directly; terminal text selection is off",
-                    "On — wheel scrolls directly; terminal text selection is off",
+                    "On · no terminal text selection",
+                    "开 · 终端无法原生选区",
                 )
                 .to_string(),
                 Some(false) => i18n::t(
                     "palette.desc.mouse_off",
-                    "Off — terminal selection works; wheel arrives as arrow keys",
-                    "Off — terminal selection works; wheel arrives as arrow keys",
+                    "Off · terminal selection works",
+                    "关 · 终端原生选区可用",
                 )
                 .to_string(),
                 None => String::new(),
@@ -134,9 +133,9 @@ pub(super) fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec
             id: "ui_verbose".to_string(),
             label: "Verbose UI".to_string(),
             description: if state.map_or(false, |s| s.ui_verbose) {
-                "Enabled — full paths, untruncated commands".to_string()
+                "On · full paths".to_string()
             } else {
-                "Disabled — toggle to show full details".to_string()
+                "Off".to_string()
             },
             category: Some(i18n::t("palette.cat.settings", "Settings", "Settings")),
             action: PaletteAction::ToggleUiVerbose,
@@ -149,18 +148,11 @@ pub(super) fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec
                 "Colorblind Mode",
             ),
             description: if state.map_or(false, |s| s.colorblind_mode) {
-                i18n::t(
-                    "palette.desc.colorblind_on",
-                    "Enabled — toggle off",
-                    "Enabled — toggle off",
-                )
+                i18n::t("palette.desc.colorblind_on", "On", "开")
             } else {
-                i18n::t(
-                    "palette.desc.colorblind_off",
-                    "Disabled — add shape indicators",
-                    "Disabled — add shape indicators",
-                )
-            },
+                i18n::t("palette.desc.colorblind_off", "Off", "关")
+            }
+            .to_string(),
             category: Some(i18n::t("palette.cat.settings", "Settings", "Settings")),
             action: PaletteAction::ToggleColorblindMode,
         },
@@ -283,7 +275,7 @@ pub fn get_session_palette_items() -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: i18n::t("palette.back.label", "← Back", "← 返回"),
+            label: i18n::t("palette.back.label", "Back", "返回"),
             description: i18n::t(
                 "palette.back.desc.main",
                 "Return to main menu",
@@ -372,7 +364,7 @@ pub fn get_system_palette_items() -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: i18n::t("palette.back.label", "← Back", "← 返回"),
+            label: i18n::t("palette.back.label", "Back", "返回"),
             description: i18n::t(
                 "palette.back.desc.main",
                 "Return to main menu",
@@ -449,7 +441,7 @@ pub fn get_language_palette_items() -> Vec<PaletteItem> {
     let current = i18n::current_language();
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
-        label: i18n::t("palette.back.label", "← Back", "← 返回"),
+        label: i18n::t("palette.back.label", "Back", "返回"),
         description: i18n::t(
             "palette.back.desc.settings",
             "Return to settings",
@@ -464,13 +456,12 @@ pub fn get_language_palette_items() -> Vec<PaletteItem> {
         let active = resolved == current;
         items.push(PaletteItem {
             id: format!("lang_{}", code),
-            label: format!("{}{}", if active { "✓ " } else { "  " }, label),
-            description: format!(
-                "{} {} ({})",
-                i18n::t("palette.desc.lang_to", "Switch to", "Switch to"),
-                label,
-                code
-            ),
+            label: label.to_string(),
+            description: if active {
+                format!("Current · {}", code)
+            } else {
+                format!("Switch to {}", code)
+            },
             category: Some(i18n::t("palette.cat.language", "Language", "Language")),
             action: PaletteAction::ExecuteCommand(format!("/lang {}", code)),
         });
@@ -484,7 +475,7 @@ pub fn get_agent_palette_items() -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: i18n::t("palette.back.label", "← Back", "← 返回"),
+            label: i18n::t("palette.back.label", "Back", "返回"),
             description: i18n::t(
                 "palette.back.desc.main",
                 "Return to main menu",
@@ -534,7 +525,7 @@ pub fn get_memory_palette_items() -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: i18n::t("palette.back.label", "← Back", "← 返回"),
+            label: i18n::t("palette.back.label", "Back", "返回"),
             description: i18n::t(
                 "palette.back.desc.prev",
                 "Return to previous menu",
@@ -588,7 +579,7 @@ pub fn get_agent_mode_palette_items() -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: i18n::t("palette.back.label", "← Back", "← 返回"),
+            label: i18n::t("palette.back.label", "Back", "返回"),
             description: i18n::t(
                 "palette.back.desc.prev",
                 "Return to previous menu",
@@ -663,14 +654,14 @@ pub fn get_thinking_effort_palette_items(
         crate::types::ThinkingEffort::Xhigh => "thinking_xhigh",
         crate::types::ThinkingEffort::Max => "thinking_max",
     };
-    // 选中标记不能再用 "●" —— 那正是 High 档的符号，`High ●` 读起来像两个东西。
     // 档位前缀直接用状态栏那套符号，用户在面板里选一次就认得状态栏上那一格了。
-    let check = |id: &str| if id == current_id { "  (current)" } else { "" };
+    // 不用 "●" 当选中标记 —— 那正是 High 档的符号，`High ●` 读起来像两个东西；
+    // "当前"写在描述里。
     let sym = |e: &crate::types::ThinkingEffort| e.symbol();
 
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
-        label: i18n::t("palette.back.label", "← Back", "← 返回"),
+        label: i18n::t("palette.back.label", "Back", "返回"),
         description: i18n::t(
             "palette.desc.back.main",
             "Return to previous menu",
@@ -683,16 +674,17 @@ pub fn get_thinking_effort_palette_items(
     // Always show Off
     items.push(PaletteItem {
         id: "thinking_off".to_string(),
-        label: format!(
-            "{} Off{}",
-            sym(&crate::types::ThinkingEffort::Off),
-            check("thinking_off")
-        ),
-        description: i18n::t(
-            "palette.desc.thinking_off",
-            "Disable thinking/reasoning",
-            "Disable thinking/reasoning",
-        ),
+        label: format!("{} Off", sym(&crate::types::ThinkingEffort::Off)),
+        description: if current_id == "thinking_off" {
+            "Current level".to_string()
+        } else {
+            i18n::t(
+                "palette.desc.thinking_off",
+                "Disable thinking/reasoning",
+                "Disable thinking/reasoning",
+            )
+            .to_string()
+        },
         category: cat.clone(),
         action: PaletteAction::SetThinkingEffort(crate::types::ThinkingEffort::Off),
     });
@@ -740,8 +732,12 @@ pub fn get_thinking_effort_palette_items(
             let name = effort.display_name();
             items.push(PaletteItem {
                 id: id.to_string(),
-                label: format!("{} {}{}", sym(&effort), name, check(id)),
-                description: i18n::t(key, fallback, fallback),
+                label: format!("{} {}", sym(&effort), name),
+                description: if id == current_id {
+                    "Current level".to_string()
+                } else {
+                    i18n::t(key, fallback, fallback).to_string()
+                },
                 category: cat.clone(),
                 action: PaletteAction::SetThinkingEffort(effort),
             });
@@ -818,10 +814,9 @@ pub fn get_context_window_palette_items(
         .find(|(_, selection, _)| *selection == current)
         .map(|(id, _, _)| *id)
         .unwrap_or("ctx_custom");
-    let check = |id: &str| if id == current_id { " ●" } else { "" };
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
-        label: i18n::t("palette.back.label", "← Back", "← 返回"),
+        label: i18n::t("palette.back.label", "Back", "返回"),
         description: i18n::t(
             "palette.desc.back.main",
             "Return to previous menu",
@@ -831,17 +826,20 @@ pub fn get_context_window_palette_items(
         action: PaletteAction::Back,
     }];
     for (id, selection, label) in presets {
+        let is_current = id == current_id;
         items.push(PaletteItem {
             id: id.to_string(),
-            label: format!("{}{}", label, check(id)),
-            description: if matches!(
+            label: label.to_string(),
+            description: if is_current {
+                "Current setting".to_string()
+            } else if matches!(
                 selection,
                 crate::core::context_policy::ContextWindowSelection::Auto
             ) {
                 i18n::t(
                     "palette.desc.ctx_auto",
-                    "Use model's default context window",
-                    "Use model's default context window",
+                    "Detect from the model",
+                    "Detect from the model",
                 )
             } else {
                 format!("Set context window to {}", label)
@@ -851,9 +849,9 @@ pub fn get_context_window_palette_items(
         });
     }
     let custom_label = if current_id == "ctx_custom" {
-        format!("Custom: {} ●", current.display())
+        format!("Custom: {}", current.display())
     } else {
-        "Custom...".to_string()
+        "Custom".to_string()
     };
     items.push(PaletteItem {
         id: "ctx_custom".to_string(),
@@ -872,11 +870,10 @@ pub fn get_context_window_palette_items(
 pub fn get_theme_palette_items(state: &ChatState) -> Vec<PaletteItem> {
     let cat = Some(i18n::t("palette.cat.theme", "Theme", "Theme"));
     let current_name = &state.theme_manager.current().name;
-    let check = |name: &str| if name == current_name { " ●" } else { "" };
 
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
-        label: i18n::t("palette.back.label", "← Back", "← 返回"),
+        label: i18n::t("palette.back.label", "Back", "返回"),
         description: i18n::t(
             "palette.desc.back.main",
             "Return to previous menu",
@@ -888,10 +885,16 @@ pub fn get_theme_palette_items(state: &ChatState) -> Vec<PaletteItem> {
 
     for theme_name in state.theme_manager.list_themes() {
         let display_name = theme_name.to_string();
+        let is_current = theme_name == current_name;
         items.push(PaletteItem {
             id: format!("theme_{}", theme_name),
-            label: format!("{}{}", display_name, check(theme_name)),
-            description: format!("Switch to {} theme", display_name),
+            label: display_name.clone(),
+            // "当前用的是哪个"是**状态**，写在描述里；label 保持是纯名字。
+            description: if is_current {
+                "Current theme".to_string()
+            } else {
+                format!("Switch to {}", display_name)
+            },
             category: cat.clone(),
             action: PaletteAction::SetTheme(theme_name.to_string()),
         });
@@ -914,8 +917,8 @@ pub fn get_provider_palette_items(
     // 归进 "Custom" 分组（那会让它跑到所有内置 provider 后面去）。
     items.push(PaletteItem {
         id: "add_provider".to_string(),
-        label: "＋ Add New Provider".to_string(),
-        description: "Create a custom OpenAI/Anthropic compatible endpoint".to_string(),
+        label: "Add New Provider".to_string(),
+        description: "Custom OpenAI or Anthropic endpoint".to_string(),
         category: None,
         action: PaletteAction::OpenProviderForm,
     });
@@ -923,7 +926,7 @@ pub fn get_provider_palette_items(
     // 导航项仍然保留，但由 `palette_display_items` 固定排到最后。
     items.push(PaletteItem {
         id: "back".to_string(),
-        label: i18n::t("palette.back.label", "← Back", "← 返回"),
+        label: i18n::t("palette.back.label", "Back", "返回"),
         description: i18n::t(
             "palette.desc.back.main",
             "Return to main menu",
@@ -956,28 +959,39 @@ pub fn get_provider_palette_items(
         let has_key = !keyless_providers.contains(id);
         items.push(PaletteItem {
             id: format!("provider_{}", id),
-            label: if has_key {
-                format!("{} ✓", id)
-            } else {
-                format!("{} ✓ ⚠ no API key", id)
-            },
+            // 状态写在描述里，不写进 label：label 是名字（`✓` 混在名字里，
+            // 用户没法直接拿它去 grep 配置），描述才是状态该待的地方。
+            label: id.clone(),
             description: if has_key {
-                "Custom provider — configure or remove".to_string()
+                "Custom provider".to_string()
             } else {
-                "Custom provider — no API key set, requests will fail until one is added"
-                    .to_string()
+                "Custom provider · no API key".to_string()
             },
             category: Some("Custom".to_string()),
             action: PaletteAction::Navigate(PaletteMode::ProviderOptions(id.clone())),
         });
     }
 
-    // Built-in providers
-    for provider in ALL_PROVIDERS
-        .iter()
-        .filter(|provider| !provider_row_is_hidden(provider.id))
-    {
-        items.push(build_provider_item_flat(provider, configured));
+    // 内建 provider 按**类别**分组，而不是 14 行平铺。
+    //
+    // 平铺时用户要在 "Alibaba (DashScope / Qwen)" "ByteDance (Ark / Doubao)"
+    // "SiliconFlow" "Together AI" 之间横向扫，而真正常用的两三家埋在中间。
+    // 分组之后，缩进 + 组名就是层级：扫一眼组名就知道哪几行是同一类。
+    //
+    // 组名用 `build_provider_item` 里那套（Popular / Regional / Local）——
+    // 同一份措辞，命令浮层（`get_provider_quick_items`）也用它。
+    for (category, category_label) in [
+        (ProviderCategory::Popular, "Popular"),
+        (ProviderCategory::Chinese, "Regional"),
+        (ProviderCategory::Local, "Local"),
+    ] {
+        for provider in ALL_PROVIDERS
+            .iter()
+            .filter(|p| p.category == category)
+            .filter(|p| !provider_row_is_hidden(p.id))
+        {
+            items.push(build_provider_item(provider, category_label, configured));
+        }
     }
 
     items
@@ -1001,11 +1015,7 @@ pub(super) fn build_provider_item_flat(
     let is_configured = configured.iter().any(|id| id == provider.id);
     let uses_manual_base_url = provider_requires_manual_base_url(provider.id);
 
-    let label = if is_configured {
-        format!("{} ✓", provider.name)
-    } else {
-        provider.name.to_string()
-    };
+    let label = provider.name.to_string();
 
     let action = if is_configured || uses_manual_base_url {
         // 已配置的走选项页（Use / Edit / 删除都在那）；需要先填 URL 的本地端点
@@ -1044,7 +1054,7 @@ pub(super) fn get_provider_category_items(
 ) -> Vec<PaletteItem> {
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
-        label: i18n::t("palette.back.label", "← Back", "← 返回"),
+        label: i18n::t("palette.back.label", "Back", "返回"),
         description: i18n::t(
             "palette.back.desc.providers",
             "Return to providers",
@@ -1070,7 +1080,7 @@ pub fn get_provider_options_items(provider_id: &str, configured: &[String]) -> V
     let metadata = get_provider_by_id(provider_id);
     let mut items = vec![PaletteItem {
         id: "back".to_string(),
-        label: "← Back".to_string(),
+        label: "Back".to_string(),
         description: "Return to list".to_string(),
         category: None,
         action: PaletteAction::Back,
@@ -1162,7 +1172,7 @@ pub fn get_provider_delete_items(provider_id: &str) -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: "← Back".to_string(),
+            label: "Back".to_string(),
             description: "Keep this provider".to_string(),
             category: None,
             action: PaletteAction::Back,
@@ -1185,11 +1195,7 @@ pub(super) fn build_provider_item(
 ) -> PaletteItem {
     let is_configured = configured.iter().any(|id| id == provider.id);
     let uses_manual_base_url = provider_requires_manual_base_url(provider.id);
-    let label = if is_configured {
-        format!("{} ✓", provider.name)
-    } else {
-        provider.name.to_string()
-    };
+    let label = provider.name.to_string();
 
     let description = if uses_manual_base_url {
         if is_configured {
@@ -1289,12 +1295,12 @@ pub(super) fn push_model_refresh_option(
         return;
     }
     let hint = match format_cache_age(cache_age_secs) {
-        Some(age) => format!("List cached {} · queries every configured provider", age),
-        None => "Queries every configured provider (can take a few seconds)".to_string(),
+        Some(age) => format!("Cached {} · queries every provider", age),
+        None => "Queries every provider".to_string(),
     };
     items.push(PaletteItem {
         id: "refresh_models".to_string(),
-        label: "⟳ Fetch model list from API".to_string(),
+        label: "Fetch model list from API".to_string(),
         description: hint,
         category: None,
         action: PaletteAction::RefreshModels,
@@ -1323,12 +1329,12 @@ pub fn get_model_palette_items(
     push_model_refresh_option(&mut items, is_loading, cache_age_secs);
 
     if models.is_empty() {
-        // 加载中：返回空列表，由 `render_palette` 画一条不可选的 "Loading models…"。
+        // 加载中：返回空列表，由 `render_palette` 画一条不可选的 "Loading models..."。
         if !is_loading && !current.is_empty() {
             items.push(PaletteItem {
                 id: format!("model_{}", current),
-                label: format!("{} (current)", current),
-                description: "Using configured model".to_string(),
+                label: current.to_string(),
+                description: "Current model".to_string(),
                 category: Some("Models".to_string()),
                 action: PaletteAction::SetModel {
                     model: current.to_string(),
@@ -1366,11 +1372,7 @@ pub fn get_model_palette_items(
             if !emitted.insert((provider.clone(), (*model).clone())) {
                 continue;
             }
-            let label = if model.as_str() == current {
-                format!("{} (Current)", model)
-            } else {
-                model.to_string()
-            };
+            let is_current = model.as_str() == current;
 
             items.push(PaletteItem {
                 // 身份是 (provider, model) 这一对，不是光模型名 —— 两个 provider
@@ -1380,8 +1382,13 @@ pub fn get_model_palette_items(
                     Some(owner) => format!("model_{}@{}", model, owner),
                     None => format!("model_{}", model),
                 },
-                label,
-                description: format!("Provider: {}", provider_label),
+                // label 是纯模型名；"当前在用"写在描述里。
+                label: model.to_string(),
+                description: if is_current {
+                    format!("Current · {}", provider_label)
+                } else {
+                    format!("Provider: {}", provider_label)
+                },
                 category: Some(provider_label.clone()),
                 action: PaletteAction::SetModel {
                     model: model.to_string(),
@@ -1508,7 +1515,7 @@ pub fn get_project_palette_items() -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: "← Back".to_string(),
+            label: "Back".to_string(),
             description: "Return to main menu".to_string(),
             category: None,
             action: PaletteAction::Back,
@@ -1559,7 +1566,7 @@ pub fn get_integrations_palette_items() -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: "← Back".to_string(),
+            label: "Back".to_string(),
             description: "Return to main menu".to_string(),
             category: None,
             action: PaletteAction::Back,
@@ -1599,7 +1606,7 @@ pub fn get_mcp_manage_palette_items() -> Vec<PaletteItem> {
     vec![
         PaletteItem {
             id: "back".to_string(),
-            label: "← Back".to_string(),
+            label: "Back".to_string(),
             description: "Return to Integrations".to_string(),
             category: None,
             action: PaletteAction::Back,
