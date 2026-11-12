@@ -315,8 +315,17 @@ impl ChatState {
     }
 
     /// Close any open palette instance.
+    ///
+    /// **同时清空导航历史。** 历史记的是"面板从哪一页走进来的"，面板一关，
+    /// 那个"来处"就不存在了 —— 留着它，下次打开面板时按 Esc 会跳回上一次
+    /// 停留的子页（模型页、provider 选项页……），而不是关闭面板。
+    ///
+    /// 真实症状：用户从 Providers 进去看模型，然后 Esc 关掉面板（历史里
+    /// 残留着 Main → Providers → Model），再按 Ctrl+P 打开 Main 页，敲一个
+    /// Esc —— 面板没关，反而跳进了模型页。
     pub fn close_palette(&mut self) {
         self.modal_stack.retain(|m| !matches!(m, Modal::Palette));
+        self.palette_history.clear();
     }
 
     /// (Re)open the palette at `mode`: resets filter/selection.
@@ -1064,5 +1073,48 @@ mod tests {
 
         state.pop_modal();
         assert!(state.modal_stack.is_empty());
+    }
+
+    /// 关掉面板必须**清掉导航历史**。
+    ///
+    /// 回归点：历史记的是"从哪一页走进来的"，面板一关那个来处就没了。留着它，
+    /// 下次打开面板按 Esc 会跳回上一次停留的子页，而不是关闭面板 ——
+    /// 用户看到的是「按 Esc 面板没关，反而进了模型页」。
+    #[test]
+    fn closing_the_palette_forgets_where_it_came_from() {
+        let mut state = ChatState::new();
+        state.open_palette(PaletteMode::Main);
+        state.push_palette_mode(PaletteMode::Provider);
+        state.push_palette_mode(PaletteMode::ProviderOptions("openai".to_string()));
+        assert_eq!(state.palette_history.len(), 2);
+
+        state.close_palette();
+
+        assert!(
+            state.palette_history.is_empty(),
+            "面板关掉后不该还留着来路：{:?}",
+            state.palette_history
+        );
+    }
+
+    /// 面板内**回退一层**不该清掉整条历史。
+    ///
+    /// Back / Esc 在有历史时是"退回上一页"，历史还要留着让用户能再退回来。
+    /// 只有真正关闭面板（历史空了）才清。
+    #[test]
+    fn going_back_one_page_keeps_the_rest_of_the_history() {
+        let mut state = ChatState::new();
+        state.open_palette(PaletteMode::Main);
+        state.push_palette_mode(PaletteMode::Provider);
+        state.push_palette_mode(PaletteMode::Model);
+        assert_eq!(state.palette_history.len(), 2);
+
+        state.palette_history.pop();
+
+        assert_eq!(
+            state.palette_history.len(),
+            1,
+            "退一层只弹掉一层，剩下那层还得留着"
+        );
     }
 }

@@ -50,8 +50,8 @@ pub(super) fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec
             id: "settings_overview".to_string(),
             label: i18n::t(
                 "palette.label.settings_overview",
-                "Settings Overview",
-                "Settings Overview",
+                "Settings overview",
+                "Settings overview",
             ),
             description: i18n::t(
                 "palette.desc.settings_overview",
@@ -65,8 +65,8 @@ pub(super) fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec
             id: "approval_mode".to_string(),
             label: i18n::t(
                 "palette.label.approval_mode",
-                "Approval Mode",
-                "Approval Mode",
+                "Approval mode",
+                "Approval mode",
             ),
             description: approval_mode_description(state),
             category: Some(i18n::t("palette.cat.settings", "Settings", "Settings")),
@@ -88,7 +88,7 @@ pub(super) fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec
         },
         PaletteItem {
             id: "vim_mode".to_string(),
-            label: i18n::t("palette.label.vim_mode", "Vim Mode", "Vim Mode"),
+            label: i18n::t("palette.label.vim_mode", "Vim mode", "Vim mode"),
             // 开关类条目只说**当前是什么状态**。此前写 "Enabled — toggle off"
             // / "Disabled — toggle on"：破折号从句是模板，而且"回车会翻转它"
             // 本来就是这类条目的定义，说出来是废话。
@@ -105,8 +105,8 @@ pub(super) fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec
             id: "mouse_capture".to_string(),
             label: i18n::t(
                 "palette.label.mouse_capture",
-                "Mouse Capture",
-                "Mouse Capture",
+                "Mouse capture",
+                "Mouse capture",
             ),
             // 这一条必须说清**代价**（捕获开着就没法用终端原生选区），
             // 但要在 58% 宽的面板里放得下 —— 此前的两句话在 120 列终端上
@@ -144,8 +144,8 @@ pub(super) fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec
             id: "colorblind_mode".to_string(),
             label: i18n::t(
                 "palette.label.colorblind",
-                "Colorblind Mode",
-                "Colorblind Mode",
+                "Colorblind mode",
+                "Colorblind mode",
             ),
             description: if state.map_or(false, |s| s.colorblind_mode) {
                 i18n::t("palette.desc.colorblind_on", "On", "开")
@@ -160,8 +160,8 @@ pub(super) fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec
             id: "system_doctor".to_string(),
             label: i18n::t(
                 "palette.label.system_doctor",
-                "System Doctor",
-                "System Doctor",
+                "System doctor",
+                "System doctor",
             ),
             description: i18n::t(
                 "palette.desc.system_doctor",
@@ -228,7 +228,7 @@ pub(super) fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec
         },
         PaletteItem {
             id: "context_viz".to_string(),
-            label: i18n::t("palette.label.context", "Context Window", "Context Window"),
+            label: i18n::t("palette.label.context", "Context window", "Context window"),
             description: i18n::t(
                 "palette.desc.context",
                 "View token usage breakdown",
@@ -243,7 +243,7 @@ pub(super) fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec
         },
         PaletteItem {
             id: "output_style".to_string(),
-            label: i18n::t("palette.label.output_style", "Output Style", "Output Style"),
+            label: i18n::t("palette.label.output_style", "Output style", "Output style"),
             description: i18n::t(
                 "palette.desc.output_style",
                 "Change response formatting style",
@@ -256,8 +256,8 @@ pub(super) fn get_main_palette_items_for_state(state: Option<&ChatState>) -> Vec
             id: "log_selector".to_string(),
             label: i18n::t(
                 "palette.label.log_selector",
-                "Session Browser",
-                "Session Browser",
+                "Session browser",
+                "Session browser",
             ),
             description: i18n::t(
                 "palette.desc.log_selector",
@@ -407,8 +407,8 @@ pub fn get_system_palette_items() -> Vec<PaletteItem> {
             id: "system_doctor".to_string(),
             label: i18n::t(
                 "palette.label.system_doctor",
-                "System Doctor",
-                "System Doctor",
+                "System doctor",
+                "System doctor",
             ),
             description: i18n::t(
                 "palette.desc.system_doctor_run",
@@ -420,7 +420,7 @@ pub fn get_system_palette_items() -> Vec<PaletteItem> {
         },
         PaletteItem {
             id: "language_settings".to_string(),
-            label: i18n::t("palette.label.ui_language", "UI Language", "UI Language"),
+            label: i18n::t("palette.label.ui_language", "UI language", "UI language"),
             description: format!(
                 "{}: {} — {}",
                 i18n::t("palette.desc.lang_current", "Current", "Current"),
@@ -486,7 +486,7 @@ pub fn get_agent_palette_items() -> Vec<PaletteItem> {
         },
         PaletteItem {
             id: "agent_mode".to_string(),
-            label: i18n::t("palette.label.agent_mode", "Agent Mode", "Agent Mode"),
+            label: i18n::t("palette.label.agent_mode", "Agent mode", "Agent mode"),
             description: i18n::t(
                 "palette.desc.agent_mode",
                 "Switch agent mode (Plan/Auto/Bypass)",
@@ -497,7 +497,7 @@ pub fn get_agent_palette_items() -> Vec<PaletteItem> {
         },
         PaletteItem {
             id: "list_tools".to_string(),
-            label: i18n::t("palette.label.list_tools", "List Tools", "List Tools"),
+            label: i18n::t("palette.label.list_tools", "List tools", "List tools"),
             description: i18n::t(
                 "palette.desc.list_tools",
                 "Show available tools",
@@ -508,7 +508,7 @@ pub fn get_agent_palette_items() -> Vec<PaletteItem> {
         },
         PaletteItem {
             id: "mcp_status".to_string(),
-            label: i18n::t("palette.label.mcp_status", "MCP Status", "MCP Status"),
+            label: i18n::t("palette.label.mcp_status", "MCP status", "MCP status"),
             description: i18n::t(
                 "palette.desc.mcp_status",
                 "Check MCP server status",
@@ -965,7 +965,7 @@ pub fn get_provider_palette_items(
             description: if has_key {
                 "Custom provider".to_string()
             } else {
-                "Custom provider · no API key".to_string()
+                "Custom provider · no API key, requests will fail".to_string()
             },
             category: Some("Custom".to_string()),
             action: PaletteAction::Navigate(PaletteMode::ProviderOptions(id.clone())),
@@ -1026,10 +1026,28 @@ pub(super) fn build_provider_item_flat(
         PaletteAction::EditProvider(provider.id.to_string())
     };
 
+    // 这条路径只被全局搜索用（`get_all_provider_search_items`）。搜索结果一行
+    // 只有名字的话，用户分不清"这个 provider 干什么的"和"配好了没"——
+    // 描述里给一句话的定位。
+    //
+    // 措辞与 `build_provider_item`（Providers 页）保持一致：同一件事在两处
+    // 说得不一样，用户会以为是两回事。
+    let description = if is_configured {
+        if provider.requires_api_key {
+            format!("{} · ready, review or replace the key", provider.description)
+        } else {
+            format!("{} · ready, review or choose a model", provider.description)
+        }
+    } else if uses_manual_base_url {
+        format!("{} · custom endpoint, URL first then key", provider.description)
+    } else {
+        format!("{} · paste the API key", provider.description)
+    };
+
     PaletteItem {
         id: format!("provider_{}", provider.id),
         label,
-        description: String::new(),
+        description,
         category: None,
         action,
     }
@@ -1197,41 +1215,34 @@ pub(super) fn build_provider_item(
     let uses_manual_base_url = provider_requires_manual_base_url(provider.id);
     let label = provider.name.to_string();
 
+    // 描述只说**状态**与**下一步**，不写成破折号从句。
+    //
+    // 此前这里是 `"<描述> - ready, review settings or replace API key"` 这样的
+    // 一长串：前半句是 provider 自己的介绍，后半句是半句祈使句，两头都不完整，
+    // 在 58% 宽的面板里还容易被截断成半句话。
+    //
+    // 现在拆开：`provider.description`（它自己的话）留在前面，后面只跟一个
+    // 逗号分隔的状态短语 —— 读起来是两个完整的信息，不是半句话。
     let description = if uses_manual_base_url {
         if is_configured {
             if provider.requires_api_key {
-                format!(
-                    "{} - ready, endpoint and API key configurable",
-                    provider.description
-                )
+                format!("{} · ready, endpoint and key configurable", provider.description)
             } else {
-                format!("{} - ready, endpoint configurable", provider.description)
+                format!("{} · ready, endpoint configurable", provider.description)
             }
         } else if provider.requires_api_key {
-            format!(
-                "{} - custom endpoint, URL first then API key",
-                provider.description
-            )
+            format!("{} · custom endpoint, URL first then key", provider.description)
         } else {
-            format!(
-                "{} - local endpoint, set URL then choose model",
-                provider.description
-            )
+            format!("{} · local endpoint, set URL then model", provider.description)
         }
     } else if is_configured {
         if provider.requires_api_key {
-            format!(
-                "{} - ready, review settings or replace API key",
-                provider.description
-            )
+            format!("{} · ready, review or replace the key", provider.description)
         } else {
-            format!(
-                "{} - ready, review settings or choose model",
-                provider.description
-            )
+            format!("{} · ready, review or choose a model", provider.description)
         }
     } else {
-        format!("{} - paste API key only", provider.description)
+        format!("{} · paste the API key", provider.description)
     };
 
     let action = if uses_manual_base_url || is_configured {
@@ -1674,11 +1685,13 @@ pub fn get_help_palette_items() -> Vec<PaletteItem> {
         } else {
             format!(" (alias: {})", cmd.alt_names.join(", "))
         };
+        // 子命令单独一段。此前拼进描述里的是 `" — subcommands: a, b"` —— 破折号
+        // 从句，读起来像半句话，而且在窄面板里第一个子命令名就被截断了。
         let subs = if cmd.sub_commands.is_empty() {
             String::new()
         } else {
             format!(
-                " — subcommands: {}",
+                " · subcommands: {}",
                 cmd.sub_commands
                     .iter()
                     .map(|s| s.name)

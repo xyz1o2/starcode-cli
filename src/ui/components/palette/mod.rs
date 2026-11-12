@@ -1163,15 +1163,22 @@ mod tests {
             .iter()
             .find(|i| i.label.starts_with("no-key"))
             .expect("no-key 应在列表中");
+        // 标记写在**描述**里，不在 label 里：label 是名字，混进状态符号
+        // （`✓` / `⚠`）之后就没法直接拿它去 grep 配置了。
         assert!(
-            flagged.label.contains("no API key"),
+            flagged.description.contains("no API key"),
             "必须被标出缺密钥：{}",
-            flagged.label
+            flagged.description
         );
         assert!(
             flagged.description.contains("requests will fail"),
             "说明行要说清后果：{}",
             flagged.description
+        );
+        assert!(
+            !flagged.label.contains("no API key"),
+            "label 只放名字，不放状态：{}",
+            flagged.label
         );
 
         let ok = items
@@ -1179,9 +1186,9 @@ mod tests {
             .find(|i| i.label.starts_with("has-key"))
             .expect("has-key 应在列表中");
         assert!(
-            !ok.label.contains("no API key"),
+            !ok.description.contains("no API key"),
             "有密钥的 provider 不该被误标：{}",
-            ok.label
+            ok.description
         );
     }
 
@@ -1191,7 +1198,7 @@ mod tests {
         let configured = vec!["a".to_string(), "b".to_string()];
         let items = get_provider_palette_items(&configured, &[]);
         assert!(
-            items.iter().all(|i| !i.label.contains("no API key")),
+            items.iter().all(|i| !i.description.contains("no API key")),
             "凭证状态未知时不能瞎标"
         );
     }
