@@ -1044,23 +1044,27 @@ pub(crate) fn format_cache_age(age_secs: Option<u64>) -> Option<String> {
     })
 }
 
-/// 显式刷新（不在加载中时才作为可选项出现）。
+/// 显式刷新（面板第一行的全局动作）。
 ///
-/// **加载中不产生任何行**：此前这一行会把 label 换成 "⟳ Fetching model list..."、
-/// 另有一条 action 为 `Back` 的 "⏳ Loading models..." 占位 —— 两条状态伪装成菜单项，
-/// 用户能选中一个"正在加载"的条目，回车却只是后退。状态不该占用选择位，见
-/// `render_palette` 里那条不可选的提示行。
+/// **加载中该行仍在**，只是描述换成状态文案。曾经加载中整行消失 —— 列表
+/// 瞬间上移一格、响应到达后再跳回来，第一项在眼前闪一下；非空列表时
+/// `render_palette` 又只给空列表画 "Loading models..." 提示，这个状态变化
+/// 完全无处安放，唯一可见的效果就是那一下闪动。
+///
+/// 它仍然是一个真实可选项：加载中选中它等于再发一次刷新请求（幂等），不是
+/// 伪装成菜单项的状态 —— 那种「回车只是后退」的死条目才是该禁止的。
 pub(super) fn push_model_refresh_option(
     items: &mut Vec<PaletteItem>,
     is_loading: bool,
     cache_age_secs: Option<u64>,
 ) {
-    if is_loading {
-        return;
-    }
-    let hint = match format_cache_age(cache_age_secs) {
-        Some(age) => format!("Cached {} · queries every provider", age),
-        None => "Queries every provider".to_string(),
+    let hint = if is_loading {
+        "Fetching…".to_string()
+    } else {
+        match format_cache_age(cache_age_secs) {
+            Some(age) => format!("Cached {} · queries every provider", age),
+            None => "Queries every provider".to_string(),
+        }
     };
     items.push(PaletteItem {
         id: "refresh_models".to_string(),

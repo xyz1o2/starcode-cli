@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-StarCode CLI (`starcode-cli`) — a Rust terminal-UI coding agent (ratatui 0.30 + crossterm + tokio) that talks to OpenAI-compatible and Anthropic-style providers. One crate: lib (`src/lib.rs`) plus one bin (`src/main.rs`), ~188k lines across 696 files in `src/`.
+StarCode CLI (`starcode-cli`) — a Rust terminal-UI coding agent (ratatui 0.30 + crossterm + tokio) that talks to OpenAI-compatible and Anthropic-style providers. One crate: lib (`src/lib.rs`) plus one bin (`src/main.rs`), ~280k lines across 731 Rust files in `src/` (measured 2026-11-13; this number drifts fast, recount before quoting it).
 
 The codebase is deliberately modeled on Claude Code — comments say "对标 Claude Code" throughout. Read-only reference copies live in `study_or_copy_projects/` (gitignored): `claude-code-main`, `claude-code-rust`, `claude-code-system-prompts-main`, `tuie-main`. Consult them when matching behavior or terminal rendering.
 
@@ -20,7 +20,8 @@ cargo build --release           # → target/release/starcode-cli
 cargo run                       # start the TUI
 
 # tests
-cargo test --lib                            # the real suite: ~850 unit tests inside src/
+cargo test --lib                            # the real suite: 2149 unit tests inside src/
+                                            #   (2026-11-13: 2145 passed / 4 ignored / 0 failed)
 cargo test --lib commands::parity           # one module
 cargo test --lib detects_cargo_verifiers    # one test by name
 cargo test --lib -- --nocapture             # see println! from tests
@@ -35,11 +36,14 @@ cargo test --workspace --doc
 
 ### Gate state — verify, don't assume
 
-- `cargo fmt --check`: **green as of 2026-10-13** (re-verified after the core-workflow pass).
+- `cargo fmt --check`: **green as of 2026-11-13** (re-verified).
   Run it before claiming green anyway; earlier notes here were wrong twice.
-- `cargo clippy --workspace --all-targets`: ~470 warnings, 0 errors. Not gated: CI runs it
+- `cargo check --workspace --all-targets --locked`: **green as of 2026-11-13**.
+- `cargo clippy --workspace --all-targets`: 591 warnings on the lib target (436 on the
+  bin target), 0 errors — measured 2026-11-13, most are duplicates. Not gated: CI runs it
   without `-D warnings`. Scope to your work: `cargo clippy --lib 2>&1 | rg <your_file>`.
-- `cargo test --workspace --lib -- --test-threads=1`: green as of 2026-10-13, 914 tests.
+- `cargo test --workspace --lib -- --test-threads=1`: 2145 passed / 4 ignored (2149 total),
+  0 failed, green as of 2026-11-13.
 
 `--test-threads=1` is mandatory for the lib tests: `utils::checkpoint_manager` mutates the
 process-global `STAR_FILE_HISTORY_DIR_OVERRIDE`, so parallel tests delete each other's
@@ -54,9 +58,10 @@ step in `ci.yml`.
 ### Two entry paths (`src/main.rs`)
 
 - **Headless** (`-p/--prompt`): builds `Config` + `StarAgent` synchronously, calls `StarAgent::process_user_message`, prints JSONL or text. No UI.
-- **Interactive**: enters the TUI *immediately* with a loading screen while `Config::initialize()` + `StarAgent::new()` run in a spawned task under a 30s timeout, arriving over a `oneshot` channel (`main.rs:548-629`). Startup failures therefore look like a stuck loading screen, not a crash — the `[INIT]` breadcrumbs in `.star/logs/agent.log` are how you diagnose them.
+- **Interactive**: enters the TUI *immediately* with a loading screen while `Config::initialize()` + `StarAgent::new()` run in a spawned task under a 30s timeout, arriving over a `oneshot` channel (the startup
+task in `src/main.rs`; line numbers drift, grep `[INIT]`). Startup failures therefore look like a stuck loading screen, not a crash — the `[INIT]` breadcrumbs in `.star/logs/agent.log` are how you diagnose them.
 
-Subcommands bypass both paths: `mcp`, `git`, `init`.
+Subcommands bypass both paths: `mcp`, `git`, `init`, `doctor`.
 
 ### External harness integration
 
@@ -79,8 +84,8 @@ orchestrator, IDE plugin) has three surfaces:
   `search_code` / `trace_call_chain`, not the agent tool set.
 
 Two things that look available and are not: `src/core/bridge/` (WebSocket control
-plane, 1447 lines, **no call sites**) and `src/sdk/` (since deleted from the tree
-along with `src/constants/`).
+plane; only its config surface is read for `/remote status`, no listener is ever started)
+and `src/sdk/` (since deleted from the tree along with `src/constants/`).
 
 Exercise those surfaces from the TUI input box (`/remote protocol` /
 `/remote status` / `remote send`) or from a second terminal writing
@@ -96,7 +101,9 @@ UI  --AgentRequest-->  agent_worker  --StreamMessage-->  UI
 ```
 
 - `src/runtime/messages.rs` — the protocol, and the first file to read. `AgentRequest` (UI→Agent: `SendMessage`, `Abort`, `SetModel`, `GenerateNote`, `PluginOp`, …) and `StreamMessage` (Agent→UI: `TextDelta`, `ToolCalls`, `ToolResult`, `AgentTaskUpdate`, `Done`, …) define every legal interaction between the two halves.
-- `src/ui/services/worker.rs` — `agent_worker` drains `steering_queue` before `rx` so interrupts beat queued input. `SendMessage` goes to `runtime::agent_runtime::process_message`; everything else to `runtime::control_requests::handle_request`.
+- `src/ui/services/worker.rs` — `agent_worker` drains `steering_queue` before `rx` so interrupts beat queued input. `SendMessage` goes to `runtime::agent_runtime::process_message`; other control
+requests go to `runtime::agent_runtime::process_control_request` (which fans out through
+`runtime::control_requests`).
 - `src/runtime/` — the seam: `agent_runtime` (per message: preflight hooks → streaming session → after-agent hooks → deferred actions), `streaming_session`, `control_requests`, `confirmation_bridge`, `hooks`, `checkpoints`.
 - `src/ui/services/stream.rs` — `handle_stream_update`, the single `match` translating every `StreamMessage` into `ChatState` mutations, processed by the UI loop in 8ms batches.
 

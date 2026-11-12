@@ -2,6 +2,7 @@
 
 - 日期：2026-11-04
 - 范围：`∴ Thinking… / ∴ Thought for Xs` 思考块的标签、展开策略、全流程状态流转
+- 数据口径：文中「全量 lib 测试 NNN passed / 37 failed」是 2026-11-04 当次验证记录，不代表当前状态；当前门禁以 `CLAUDE.md` 的 Gate state 为准（2026-11-13：2145 passed / 4 ignored，0 failed）。
 
 ## 1. 问题
 

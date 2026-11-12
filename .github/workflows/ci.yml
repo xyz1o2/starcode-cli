@@ -20,8 +20,9 @@ env:
 
 jobs:
   # fmt 是硬门禁（债务已清零）。
-  # clippy 只作建议：仓库还有 ~470 条存量警告（lib target 471 条，0 error），
-  # 用 `-D warnings` 门禁会让 CI 长期红灯。警告照常打在日志里。
+  # clippy 只作建议：仓库还有存量警告（2026-11-13 实测 lib target 591 条、
+  # bin target 436 条，0 error，多数是重复项），用 `-D warnings` 门禁会让 CI
+  # 长期红灯。警告照常打在日志里。
   # 清完之后把 `-- -D warnings` 加回 clippy 那一步即可恢复成硬门禁。
   lint:
     name: Lint & Format

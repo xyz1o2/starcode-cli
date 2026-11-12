@@ -422,7 +422,9 @@ fn get_global_search_palette_items(state: &ChatState) -> Vec<PaletteItem> {
             get_model_palette_items(
                 &state.available_models,
                 &state.current_model,
-                state.awaiting_models,
+                // 与 Model 页同口径：走带 15s 死线的 `models_loading()`，
+                // 裸标志在 worker 回复丢失时会永远停在 true。
+                state.models_loading(),
                 &state.model_provider_map,
                 state.models_list_age_secs(),
             ),
@@ -1416,9 +1418,13 @@ mod tests {
         );
     }
 
-    /// 加载中：既不产出刷新项、也不产出占位项，返回空列表让渲染层画不可选提示。
+    /// 加载中、空列表：刷新行仍在（描述显示加载状态），没有其它占位项。
+    ///
+    /// 回归点：此前加载中连刷新行都撤掉，渲染层只在**空列表**时画一条
+    /// "Loading models..." 提示 —— 非空列表刷新时刷新行消失、列表上移一格、
+    /// 响应到达后跳回来，第一项闪一下。
     #[test]
-    fn loading_yields_no_items_at_all() {
+    fn loading_keeps_the_refresh_row_and_yields_nothing_else() {
         let items = get_model_palette_items(
             &[],
             "claude-opus-5",
@@ -1426,10 +1432,12 @@ mod tests {
             &std::collections::HashMap::new(),
             None,
         );
+        assert_eq!(items.len(), 1, "加载中只留刷新行：{:?}", ids(&items));
+        assert_eq!(items[0].id, "refresh_models");
         assert!(
-            items.is_empty(),
-            "加载中不该有任何可选项（此前是「正在加载」的菜单项）：{:?}",
-            ids(&items)
+            items[0].description.contains("Fetching"),
+            "加载状态写在描述里：{}",
+            items[0].description
         );
     }
 
@@ -1456,28 +1464,42 @@ mod tests {
         );
     }
 
-    /// 加载中不再有刷新项 —— 状态不该伪装成可点的东西。
+    /// 加载中列表不跳：刷新行留在原位，只换描述 —— 列表形状不变，就不会闪。
     ///
-    /// 回归点：此前这条会把刷新项的 label 换成 "⟳ Fetching model list..."，用户
-    /// 能选中一条"正在拉取"的菜单项，回车只是再触发一次请求。
+    /// 回归点：此前加载中把刷新行整行撤掉（也曾经把 label 换成
+    /// "⟳ Fetching model list..."），行数/行序一变，整个列表在眼前跳动。
     #[test]
-    fn loading_removes_the_refresh_item_instead_of_relabelling_it() {
-        let items = get_model_palette_items(
+    fn loading_does_not_remove_or_relabel_the_refresh_row() {
+        let idle = get_model_palette_items(
+            &["a".to_string()],
+            "a",
+            false,
+            &std::collections::HashMap::new(),
+            None,
+        );
+        let loading = get_model_palette_items(
             &["a".to_string()],
             "a",
             true,
             &std::collections::HashMap::new(),
             None,
         );
-        assert!(
-            !items.iter().any(|i| i.id == "refresh_models"),
-            "加载中不该有可选的刷新项：{:?}",
-            ids(&items)
+        assert_eq!(
+            idle.len(),
+            loading.len(),
+            "加载前后行数必须一致，否则列表跳动：{:?} vs {:?}",
+            ids(&idle),
+            ids(&loading)
         );
+        let refresh = loading
+            .iter()
+            .find(|i| i.id == "refresh_models")
+            .expect("刷新行必须始终存在");
+        assert_eq!(refresh.label, "Fetch model list from API", "label 不变");
         assert!(
-            items.iter().all(|i| !i.label.contains("Fetching")),
-            "没有任何条目该显示加载文案：{:?}",
-            ids(&items)
+            refresh.description.contains("Fetching"),
+            "加载状态只写在描述里：{}",
+            refresh.description
         );
     }
 

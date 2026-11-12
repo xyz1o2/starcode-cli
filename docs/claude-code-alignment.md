@@ -3,6 +3,7 @@
 > 快照日期：2026-10-13
 > Source of truth：Claude Code 官方文档（`code.claude.com/docs`），版本线 v2.1.2xx
 > 适用范围：本文是**架构对标的唯一依据**，取代 2026-10-13 删除的 `docs/parity-*.md` 架构系列
+> 数据口径：文内「lib 套件 NNN 全绿」一类数字都是快照当时的验证记录，不是当前值；当前门禁状态以 `CLAUDE.md` 的 Gate state 为准（2026-11-13：2145 passed / 4 ignored，0 failed）。
 
 ---
 

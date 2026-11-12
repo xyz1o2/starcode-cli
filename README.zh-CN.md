@@ -260,9 +260,9 @@ starcode mcp remove filesystem
 ```bash
 cargo check --all-targets      # 最快的正确性检查，迭代时用这个
 cargo build --release          # → target/release/starcode-cli
-cargo test --lib -- --test-threads=1   # 单元测试都在 src/ 内
+cargo test --lib -- --test-threads=1   # 2149 个单元测试都在 src/ 内（2026-11-13）
 cargo fmt --all -- --check     # CI 硬门禁，当前是绿的
-cargo clippy --workspace --all-targets   # 存量 ~470 条警告，CI 里不带 -D warnings
+cargo clippy --workspace --all-targets   # 存量 591 条警告（lib target，0 error），CI 不带 -D warnings
 ```
 
 #### 项目结构

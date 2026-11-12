@@ -200,6 +200,55 @@ pub(crate) fn synthesize_current_model_entry(
     ))
 }
 
+/// 把**一个** provider 声明的候选模型并入列表（纯本地读，零网络）。
+///
+/// 声明集（`candidate_models()`）是本地配置的一部分，不是「API 拉回来的东西」
+/// —— 所以这条合并在**每一条返回路径**上都要做，包括缓存命中。此前只有真实
+/// 拉取路径做它，缓存命中的两条路径直接返回快照：用户新声明的模型（编辑
+/// provider 表单、手改配置文件）被旧快照挡在面板外，直到强制刷新或缓存过期。
+/// 用户报告的「新加的模型在 /model 面板里不更新」就是这条缝。
+fn merge_declared_models_of(
+    pid: &str,
+    provider: &crate::core::config::models::ProviderSettings,
+    models: &mut Vec<ModelInfo>,
+) {
+    let configured_models = provider.candidate_models();
+    if configured_models.is_empty() {
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[ListModels] Provider '{}' has no models configured.",
+            pid
+        ));
+        return;
+    }
+    crate::utils::logging::append_debug_log_line(&format!(
+        "[ListModels] Provider '{}' has {} configured models (default '{}').",
+        pid,
+        configured_models.len(),
+        configured_models[0]
+    ));
+    for model_id in &configured_models {
+        if !models
+            .iter()
+            .any(|m| m.id == *model_id && m.provider == pid)
+        {
+            models.push(ModelInfo::new(model_id.clone(), pid.to_string()));
+        }
+    }
+}
+
+/// 对配置里**所有** provider 合并声明候选集。缓存命中路径用 —— 那两条路径
+/// 返回的快照本来就跨 provider（扇出结果随全量列表一起落盘），声明集也按
+/// 全量合并，两边口径一致。
+fn merge_all_declared_models(
+    config: Option<&crate::core::config::models::ProviderConfig>,
+    models: &mut Vec<ModelInfo>,
+) {
+    let Some(config) = config else { return };
+    for (pid, provider) in &config.providers {
+        merge_declared_models_of(pid, provider, models);
+    }
+}
+
 pub async fn list_models_with_mode(
     star_client: &crate::llm::client::StarClient,
     force: bool,
@@ -305,12 +354,16 @@ pub async fn list_models_with_mode(
         }
 
         if provider_still_exists {
-            if let Some((cached_models, age)) = get_cached_models(&current_provider_id) {
+            if let Some((mut cached_models, age)) = get_cached_models(&current_provider_id) {
                 crate::utils::logging::append_debug_log_line(&format!(
                     "[ListModels] Using in-memory cache for provider '{}', count={}",
                     current_provider_id,
                     cached_models.len()
                 ));
+                // 缓存命中也要合并声明候选集：声明集是本地配置，不是 API 的产物，
+                // 新声明/新删除的模型必须立刻反映，不能等缓存过期（内存 60s、
+                // 磁盘永不过期）。不合并的话，新加的模型被旧快照挡在面板外。
+                merge_all_declared_models(config.as_ref(), &mut cached_models);
                 return Ok(ModelListResult {
                     models: cached_models,
                     cache_age_secs: Some(age),
@@ -348,8 +401,12 @@ pub async fn list_models_with_mode(
                     &hit.models,
                 );
                 set_cached_models(current_provider_id.clone(), hit.models.clone());
+                // 同内存缓存路径：磁盘缓存永不过期，声明候选集必须在这里合并，
+                // 否则新声明的模型要等到下一次真实拉取才可见。
+                let mut models = hit.models;
+                merge_all_declared_models(config.as_ref(), &mut models);
                 return Ok(ModelListResult {
-                    models: hit.models,
+                    models,
                     cache_age_secs: Some(hit.age_secs),
                 });
             }
@@ -447,28 +504,7 @@ pub async fn list_models_with_mode(
             // HashMap，键序随机，而这份列表会直接进模型面板 —— 每次刷新换一次
             // 排列，用户会以为程序在乱跳。`candidate_models()` 还把
             // `selected_model` 放在首位，那才是用户钦定的默认项。
-            let configured_models = provider.candidate_models();
-            if configured_models.is_empty() {
-                crate::utils::logging::append_debug_log_line(&format!(
-                    "[ListModels] Provider '{}' has no models configured.",
-                    pid
-                ));
-            } else {
-                crate::utils::logging::append_debug_log_line(&format!(
-                    "[ListModels] Provider '{}' has {} configured models (default '{}').",
-                    pid,
-                    configured_models.len(),
-                    configured_models[0]
-                ));
-                for model_id in &configured_models {
-                    if !models
-                        .iter()
-                        .any(|m| m.id == *model_id && m.provider == *pid)
-                    {
-                        models.push(ModelInfo::new(model_id.clone(), pid.clone()));
-                    }
-                }
-            }
+            merge_declared_models_of(pid, provider, &mut models);
 
             // B. Dynamic Parallel Fetching —— 只在显式刷新时扇出，这是原来最慢的一步
             if !force {
@@ -747,6 +783,7 @@ pub fn clear_model_cache() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::config::models::{ModelConfig, ProviderConfig, ProviderSettings};
 
     fn info(id: &str, provider: &str) -> ModelInfo {
         ModelInfo::new(id.to_string(), provider.to_string())
@@ -854,5 +891,126 @@ mod tests {
         // 补条逻辑会重新按当次的 provider 判断，不会固化一条假归属。
         let from_cache = cached;
         assert!(from_cache.is_empty());
+    }
+
+    // ---- 缓存命中路径的声明候选集合并 ----
+
+    fn settings(default: Option<&str>, models: &[&str]) -> ProviderSettings {
+        ProviderSettings {
+            selected_model: default.map(str::to_string),
+            default_model: default.map(str::to_string),
+            models: (!models.is_empty()).then(|| {
+                models
+                    .iter()
+                    .map(|m| (m.to_string(), ModelConfig::default()))
+                    .collect()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn config_with(providers: &[(&str, ProviderSettings)]) -> ProviderConfig {
+        ProviderConfig {
+            providers: providers
+                .iter()
+                .map(|(pid, s)| (pid.to_string(), s.clone()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// 回归：缓存命中时也要合并声明候选集。
+    ///
+    /// 用户报告的「新加的模型在 /model 面板里不更新」：内存缓存（60s）和磁盘
+    /// 缓存（永不过期）命中时直接返回快照，声明集合只在真实拉取路径做 ——
+    /// 编辑 provider 表单新声明的模型被旧快照挡在面板外，直到强制刷新。
+    /// 声明集是本地配置，必须每条返回路径都合并。
+    #[test]
+    fn a_cache_hit_still_carries_newly_declared_models() {
+        let mut cached = vec![info("old-model", "opencode")];
+        let config = config_with(&[("opencode", settings(Some("new-model"), &[]))]);
+
+        merge_all_declared_models(Some(&config), &mut cached);
+
+        let ids: Vec<&str> = cached.iter().map(|m| m.id.as_str()).collect();
+        assert!(
+            ids.contains(&"new-model"),
+            "新声明的模型必须出现在缓存命中路径的返回里：{ids:?}"
+        );
+        assert!(
+            ids.contains(&"old-model"),
+            "API 发现的模型不能被声明合并挤掉：{ids:?}"
+        );
+        // 声明的默认项进列表后，归属必须是这个 provider
+        assert!(
+            cached
+                .iter()
+                .all(|m| m.provider == "opencode" || m.id == "old-model"),
+            "新合并条目必须带 provider 归属"
+        );
+    }
+
+    /// 合并是**并集**语义：声明集只往快照上**加**，不从快照里删。
+    ///
+    /// 与 UI 侧 `merge_declared_and_discovered_models` 同一口径 —— 声明是"用户
+    /// 钦定要用这些"，快照是"这家实际提供这些"。从声明里删掉一个模型**不**
+    /// 表示"屏蔽它"：它若是 API 真提供的，仍该留在面板上。声明的删除要等
+    /// 下一次真实拉取自然收敛（快照按当时声明落盘，之后落盘的快照就不含它）。
+    #[test]
+    fn merging_is_union_not_subtraction() {
+        let mut cached = vec![
+            info("declared-once", "opencode"),
+            info("api-model", "opencode"),
+        ];
+        let config = config_with(&[("opencode", settings(None, &[]))]);
+
+        merge_all_declared_models(Some(&config), &mut cached);
+
+        let ids: Vec<&str> = cached.iter().map(|m| m.id.as_str()).collect();
+        assert!(
+            ids.contains(&"declared-once"),
+            "并集语义：快照里的条目不因声明删除而消失（它可能是 API 真提供的）：{ids:?}"
+        );
+        assert!(
+            ids.contains(&"api-model"),
+            "API 发现的模型不受声明影响：{ids:?}"
+        );
+    }
+
+    /// 合并必须幂等：同一份声明合并两次不产生重复条目。
+    #[test]
+    fn merging_declarations_is_idempotent() {
+        let mut cached = vec![info("m1", "opencode")];
+        let config = config_with(&[("opencode", settings(Some("m1"), &["m2"]))]);
+
+        merge_all_declared_models(Some(&config), &mut cached);
+        let once: Vec<(String, String)> = cached
+            .iter()
+            .map(|m| (m.id.clone(), m.provider.clone()))
+            .collect();
+        merge_all_declared_models(Some(&config), &mut cached);
+        let twice: Vec<(String, String)> = cached
+            .iter()
+            .map(|m| (m.id.clone(), m.provider.clone()))
+            .collect();
+
+        assert_eq!(once, twice, "重复合并不该产生重复条目");
+        assert_eq!(twice.len(), 2, "{twice:?}");
+    }
+
+    /// config 为 None（store 读取失败）时合并是空操作，不能 panic。
+    #[test]
+    fn merging_with_no_config_is_a_noop() {
+        let mut cached = vec![info("m1", "opencode")];
+        let before: Vec<(String, String)> = cached
+            .iter()
+            .map(|m| (m.id.clone(), m.provider.clone()))
+            .collect();
+        merge_all_declared_models(None, &mut cached);
+        let after: Vec<(String, String)> = cached
+            .iter()
+            .map(|m| (m.id.clone(), m.provider.clone()))
+            .collect();
+        assert_eq!(before, after);
     }
 }
