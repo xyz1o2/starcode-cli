@@ -786,17 +786,25 @@ async fn rig_deepseek_stream(
 /// # 缓存形状
 ///
 /// 0.46 把 0.42 的 `with_prompt_caching()` + `with_automatic_caching()` 合并：
-/// `Messages::with_prompt_caching()` 开启 system / tools / 最后一条消息的显式
-/// 断点，配合请求的 `GenerationOptions::cache`（顶层 marker，服务端把移动断点
-/// 往后推）。Anthropic 一次请求最多 4 个断点，这里用掉 3 个
-/// （顶层 1 + tools 1 + system 1），正好是 agent 循环想要的形状：
+/// `Messages::with_prompt_caching()` 开启 system / tools / 最后一条消息的
+/// 显式断点。Anthropic 一次请求最多 4 个断点，这里用掉 3 个
+/// （tools 1 + system 1 + 会话末尾移动断点 1），正好是 agent 循环想要的形状：
 ///
 /// - system prompt（本项目约 4 万字符）只在首轮付全价；
 /// - tool schema（几十个工具的 JSON）同样只付一次；
 /// - 会话历史随着轮次增长，断点由服务端自己往后推，每轮只为**增量**付全价。
 ///
-/// 顶层 marker 由 `options.cache = Some(CacheRetention::Short)` 携带（5 分钟
-/// TTL，Anthropic 默认）。
+/// 会话末尾的移动断点由 rig 的 manual 模式补打（`completion.rs` 里
+/// `manual && top.is_none()` 分支），不需要请求方设置任何字段。
+///
+/// # 已知现状（2026-11-12 两轮探针实测）
+///
+/// magpie 网关（`anthropic-compatible` 类型）**不支持** `cache_control`：
+/// 标记被原样接受但 `cache_creation_input_tokens` 恒为 0，实测命中
+/// （`cache_read_input_tokens`）来自网关/上游的隐式前缀匹配，与本开关无关。
+/// 断点代码本身正确（见
+/// `tests::anthropic_caching_wire_marks_breakpoints_in_the_real_request`），
+/// 对官方 Anthropic API 或支持标记的网关仍然有效，故保留。
 fn anthropic_caching_wire(mut wire: anthropic::wire::Messages) -> anthropic::wire::Messages {
     wire.prompt_caching = true;
     wire
@@ -1042,5 +1050,75 @@ impl RigAdapter {
                 ..
             } => rig_deepseek_stream(api_key, model, base_url.as_deref(), request).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rig_core::providers::anthropic;
+    use rig_core::wire::Wire as _;
+
+    /// 端到端锁死 Anthropic 缓存断点：`anthropic_caching_wire` 开关 + rig 的
+    /// 标记逻辑，必须把 `cache_control` 真落进**发上线的请求体**里——
+    /// system 末块、tools 末项、最后一条 user 消息各一个。2026-11-12 排查
+    /// magpie 冒烟 `cache_creation=0` 时补上：wire 开关是通的，缺的是
+    /// 请求里的验证。
+    #[test]
+    fn anthropic_caching_wire_marks_breakpoints_in_the_real_request() {
+        let mut request = CompletionRequest::new(Message::user("hello"));
+        request
+            .chat_history
+            .insert(0, Arc::new(Message::system("You are a coding agent.")));
+        request.tools = vec![Arc::new(ToolDefinition {
+            name: ToolName::new("Read").expect("non-empty"),
+            description: "read a file".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            annotations: Default::default(),
+        })];
+        request.max_tokens = Some(64);
+
+        let config = anthropic::AnthropicConfig::new("test-key");
+        let wire = anthropic_caching_wire(config.completion("some-model"));
+        let encoded = wire
+            .encode(request, rig_core::wire::Mode::Unary)
+            .expect("anthropic wire request should build");
+
+        let bytes = match encoded.request.body() {
+            rig_core::wire::Body::Bytes(bytes) => bytes.to_vec(),
+            other => panic!("anthropic body should be bytes, got {other:?}"),
+        };
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("anthropic request should serialize");
+
+        // system 末块有断点。
+        let system = body
+            .get("system")
+            .and_then(|v| v.as_array())
+            .expect("system should be an array of blocks");
+        let system_marked = system.last().and_then(|b| b.get("cache_control")).is_some();
+        assert!(system_marked, "system 末块必须带 cache_control: {body}");
+
+        // tools 末项有断点。
+        let tools_marked = body["tools"]
+            .as_array()
+            .and_then(|t| t.last())
+            .and_then(|t| t.get("cache_control"))
+            .is_some();
+        assert!(tools_marked, "tools 末项必须带 cache_control");
+
+        // 最后一条消息的块有断点（会话历史的移动断点）。
+        let last_message_marked = body["messages"]
+            .as_array()
+            .and_then(|m| m.last())
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array().or_else(|| None))
+            .and_then(|blocks| blocks.last())
+            .and_then(|b| b.get("cache_control"))
+            .is_some();
+        assert!(
+            last_message_marked,
+            "最后一条消息必须带移动断点（0.46 的 manual 模式补打）"
+        );
     }
 }
