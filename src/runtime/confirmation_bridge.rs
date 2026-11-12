@@ -100,11 +100,7 @@ pub async fn relay_confirmation_bus_message(
                 )
                 .await;
             confirmation.tool_name = rej.tool_call.name.clone();
-            confirmation.outcome = Some(i18n::t(
-                "ui.tool.policy_rejected",
-                "Denied (policy)",
-                "Denied (policy)",
-            ));
+            confirmation.outcome = Some(i18n::t1("ui.tool.policy_rejected"));
 
             let _ = tx
                 .send(StreamMessage::ToolConfirmationRequest {

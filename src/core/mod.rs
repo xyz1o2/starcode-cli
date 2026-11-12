@@ -25,6 +25,7 @@ pub mod feature_flags;
 pub mod goal_tracking;
 pub mod hooks;
 pub mod i18n;
+pub mod i18n_dict;
 pub mod lan_pipes;
 pub mod langfuse;
 pub mod loops;

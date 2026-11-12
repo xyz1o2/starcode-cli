@@ -96,11 +96,8 @@ impl Agent {
                     .unwrap_or(5)
                     .clamp(2, 20);
                 if *tool_loop_interventions >= max_interventions {
-                    let msg = i18n::t(
-                        "agent.tool_loop.guard.limit",
-                        &format!("工具重复调用已被连续拦截 {} 次。请立即基于已有结果完成任务，不要再调用相同工具。直接用 Edit/Write 写出改动，或用 summary 总结已完成的工作。", max_interventions),
-                        &format!("Tool loop guard triggered {} times. You MUST complete the task now based on existing results. Do NOT call the same tool again. Use edit/Write to make changes, or provide a summary of completed work.", max_interventions),
-                    );
+                    let msg = i18n::t1("agent.tool_loop.guard.limit")
+                        .replace("{0}", &max_interventions.to_string());
                     messages.push(StarMessage::system(msg));
                     // Reset counter so next intervention cycle starts fresh
                     *tool_loop_interventions = 0;
@@ -593,11 +590,7 @@ impl Agent {
                     *consecutive_read_only_turns = 0;
                     // Send a natural language instruction instead of a system marker
                     messages.push(StarMessage::system(
-                        i18n::t(
-                            "agent.exploration.limit",
-                            "你已经连续进行了 {count} 轮只读操作（读文件/搜索）却未修改任何代码。请立即根据已有信息执行代码修改。直接使用 Edit/Write 工具写出改动，不要再读更多文件。",
-                            "You have performed {count} consecutive read-only operations (file reads/searches) without any code edits. Stop exploring and immediately make code changes based on the information you already have. Use Edit/Write tools directly, do not read more files.",
-                        ).replace("{count}", &count.to_string())
+                        i18n::t1("agent.exploration.limit").replace("{count}", &count.to_string()),
                     ));
                 }
             }

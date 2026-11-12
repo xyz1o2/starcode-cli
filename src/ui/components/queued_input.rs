@@ -102,11 +102,7 @@ fn build_lines(state: &ChatState, width: u16) -> Vec<Line<'static>> {
     }
 
     // 页脚给的是队列真实条数，所以正文被截断也不会误导。
-    let footer = i18n::t(
-        "ui.queued.footer",
-        &format!("{} 条排队中 · ↑ 取回编辑", total),
-        &format!("{} queued · ↑ to edit", total),
-    );
+    let footer = i18n::t1("ui.queued.footer").replace("{0}", &total.to_string());
     lines.push(Line::from(vec![
         Span::raw(LEFT_PAD),
         Span::styled(

@@ -779,11 +779,7 @@ impl ChatState {
         // 界面上并不显示；其余消费者一律按 is_welcome 跳过它。
         let welcome_entry = ChatEntry {
             entry_type: crate::types::ChatEntryType::Assistant,
-            content: crate::core::i18n::t(
-                "ui.welcome.message",
-                "欢迎使用 StarCode CLI! 输入你的问题，或使用 /help 查看命令。",
-                "Welcome to StarCode CLI! Type your question or use /help for commands.",
-            ),
+            content: crate::core::i18n::t1("ui.welcome.message"),
             is_welcome: true,
             ..ChatEntry::new(crate::types::ChatEntryType::Assistant, String::new())
         };

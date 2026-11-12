@@ -307,11 +307,7 @@ fn restore_session_history(
     state.pending_message_id = None;
     state.pending_confirmation = None;
     state.pending_confirmation_choice = 0;
-    state.discard_pending_confirmation_queue(&crate::core::i18n::t(
-        "ui.confirm.cancelled_clear",
-        "已取消 · 对话已清空",
-        "Cancelled — the conversation was cleared",
-    ));
+    state.discard_pending_confirmation_queue(&crate::core::i18n::t1("ui.confirm.cancelled_clear"));
     state.clear_pending_confirmation();
     state.current_tool_name = None;
     state.tool_started_at.clear();

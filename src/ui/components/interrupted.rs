@@ -11,11 +11,7 @@ use crate::types::ChatEntry;
 
 /// 中断提示文案。中文/英文按当前界面语言走 i18n。
 pub fn interrupted_notice_text() -> String {
-    crate::core::i18n::t(
-        "ui.interrupted.notice",
-        "已中断 · 已输出的内容保留。想换方向直接说。",
-        "Interrupted · What should I do instead?",
-    )
+    crate::core::i18n::t1("ui.interrupted.notice")
 }
 
 /// 往聊天区推一条中断提示。

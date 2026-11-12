@@ -480,20 +480,7 @@ pub(super) async fn clear_provider_key(
     crate::ui::app::logic::emit_status_text(
         state,
         0,
-        &format!(
-            "{}",
-            crate::core::i18n::t(
-                "provider.key_cleared",
-                &format!(
-                    "已清空 '{}' 保存的 API Key（环境变量仍可能生效）",
-                    provider_id
-                ),
-                &format!(
-                    "Cleared the stored API key for '{}' (environment variables still apply)",
-                    provider_id
-                ),
-            )
-        ),
+        &crate::core::i18n::t1("provider.key_cleared").replace("{0}", provider_id),
     );
 }
 

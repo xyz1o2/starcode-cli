@@ -302,14 +302,8 @@ pub async fn clear(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult 
     } else {
         ctx.state.pending_clear_name = None;
         // Nothing to clear
-        ctx.state.current_status_line = Some(
-            crate::core::i18n::t(
-                "ui.status.nothing_to_clear",
-                "没有可清除的内容",
-                "Nothing to clear",
-            )
-            .to_string(),
-        );
+        ctx.state.current_status_line =
+            Some(crate::core::i18n::t1("ui.status.nothing_to_clear").to_string());
     }
     Ok(())
 }

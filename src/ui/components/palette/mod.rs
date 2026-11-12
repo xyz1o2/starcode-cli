@@ -29,7 +29,6 @@ use crate::core::i18n;
 use crate::ui::state::{ChatState, PaletteAction, PaletteItem, PaletteMode};
 use crate::ui::utils::status::{
     approval_mode_label, current_model_id, current_provider_display, current_provider_id,
-    status_summary,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -39,13 +38,19 @@ use ratatui::{
     Frame,
 };
 use std::collections::HashSet;
+use unicode_width::UnicodeWidthStr;
 
 use describe::*;
 pub use items::*;
 
 /// 命令面板（Ctrl+P）占屏比例。宽度刻意压得比常见弹窗窄。
 const PALETTE_WIDTH_PERCENT: u16 = 58;
-const PALETTE_HEIGHT_PERCENT: u16 = 60;
+/// 高度比例。
+///
+/// 60% 在 34 行终端上只留 11 行可用，Main 页的 21 个条目加 5 个分组标题要
+/// 26 行 —— 一半多在屏幕外。收到 72% 后同样终端有 19 行可用，滚动一圈就能
+/// 看完，比"打开面板先滚半屏"好。
+const PALETTE_HEIGHT_PERCENT: u16 = 72;
 
 /// 分组内条目的缩进列数。
 ///
@@ -58,6 +63,13 @@ const INDENT_GROUPED: usize = 2;
 /// 两列：一个空格会让描述看起来像标题的一部分（"Status Not set"），四列以上
 /// 在 58% 宽的面板里会把描述挤到换行。
 const DESCRIPTION_GAP: usize = 2;
+
+/// 选中标记占的列数。
+///
+/// `List::highlight_symbol` 的宽度会从每一行的可用宽度里扣掉 —— 所以算
+/// "这一行还剩几列" 时必须把它算进去，否则会以为放得下、实际被右边界切掉
+/// 最后一个词（"Config paths, languag"）。
+const HIGHLIGHT_SYMBOL_WIDTH: usize = 2;
 
 pub fn palette_item_matches_query(item: &PaletteItem, query_lower: &str) -> bool {
     if query_lower.is_empty() {
@@ -624,6 +636,9 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
     let display_items = palette_display_items(&state.palette_mode, state, query);
 
     let mut list_items: Vec<ListItem> = Vec::new();
+    // 列表区的可用列数 —— 决定一行里还塞不塞得下描述。
+    // 选中标记（`highlight_symbol`）占掉的开头几列也要扣掉。
+    let list_width = (chunks[1].width as usize).saturating_sub(HIGHLIGHT_SYMBOL_WIDTH);
     // `display_items[i]` 对应 `list_items` 里的哪一行（标题行不占位）。
     let mut row_of_item: Vec<usize> = Vec::with_capacity(display_items.len());
     // 反向映射：列表第几行对应第几个条目。鼠标点选用 —— 分组标题行不占位，
@@ -693,7 +708,22 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
                 spans.push(Span::raw(" ".repeat(INDENT_GROUPED)));
             }
             spans.push(Span::styled(item.label.clone(), label_style));
-            if !item.description.is_empty() {
+
+            // 描述要么**完整**显示，要么**整条不显示** —— 不能显示一半。
+            //
+            // 80 列终端上，面板内部只有 44 列可用；标签 + 缩进 + 间隔占掉
+            // 二十几列，剩下的放不下 "On · no terminal text selection" 这种
+            // 描述。此前是让 ratatui 去切，结果是 "Config paths, languag" ——
+            // 半个单词悬在那儿，读起来像 bug 而不是像省略。
+            //
+            // 放不下就不显示描述：标签本身已经能认出这是什么，次要信息在窄屏
+            // 上让位给标签。宽终端上（120 列以上）描述照常全显示。
+            let used = INDENT_GROUPED * usize::from(indented)
+                + display_width(item.label.as_str())
+                + DESCRIPTION_GAP;
+            let description_fits = !item.description.is_empty()
+                && used + display_width(item.description.as_str()) <= list_width;
+            if description_fits {
                 spans.push(Span::raw(" ".repeat(DESCRIPTION_GAP)));
                 spans.push(Span::styled(
                     item.description.clone(),
@@ -721,15 +751,26 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
 
     let mut list_state = ListState::default();
     if !row_of_item.is_empty() {
-        if state.selected_palette_index >= row_of_item.len() {
-            state.selected_palette_index = row_of_item.len() - 1;
-        }
-        list_state.select(Some(row_of_item[state.selected_palette_index]));
+        // 越界时**就地钳一下**，但不写回状态。
+        //
+        // 渲染路径只许写两类状态：布局记忆与记忆化。选中下标是**业务状态** ——
+        // 它由按键处理维护。渲染时改它，等于让"画什么"反过来决定"现在选中了
+        // 什么"：过滤词一变，条目数一少，渲染就把下标改小，用户再按 Enter
+        // 触发的是另一个条目。
+        //
+        // 钳位本身是必要的（否则 `row_of_item[...]` 会 panic），但它只影响这一帧
+        // 画哪一个高亮 —— 下一次按键会把状态带回合法范围。
+        let selected = state.selected_palette_index.min(row_of_item.len() - 1);
+        list_state.select(Some(row_of_item[selected]));
     }
 
     // 面板里**唯一**有底色的一处：当前选中行。其余全是同一支灰阶。
     let list = List::new(list_items)
-        .highlight_style(Style::default().bg(selection_bg).add_modifier(Modifier::BOLD))
+        .highlight_style(
+            Style::default()
+                .bg(selection_bg)
+                .add_modifier(Modifier::BOLD),
+        )
         // 高亮符号缩进两列，与分组内的条目对齐 —— 缩进是这个面板的层级语言，
         // 选中标记也得说同一种。
         .highlight_symbol("  ");
@@ -743,6 +784,14 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
     // 穿过去落到聊天区（见 `events::mouse`）。
     state.palette_area = Some(chunks[1]);
     state.palette_row_to_item = item_of_row;
+}
+
+/// 一段文本在终端里占几列。
+///
+/// 用显示宽度而不是字节数或字符数：中文是双宽字符，按字符数算会以为
+/// "终端无法原生选区" 占 8 列，实际占 16 列 —— 判断"放不放得下"就判错了。
+fn display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -944,7 +993,7 @@ mod tests {
             "别的分类照常画标题"
         );
         assert!(
-            !palette_category_has_header(&PaletteMode::Model, "", "Anthropic"),
+            palette_category_has_header(&PaletteMode::Model, "", "Anthropic"),
             "模型页的 Anthropic 是有信息量的，必须画"
         );
     }
@@ -1306,14 +1355,7 @@ mod tests {
         // label 是「符号 + 档位名」；"当前"不在 label 里（写进描述）。
         assert_eq!(
             binary_labels,
-            vec![
-                "◌ Off",
-                "○ Low",
-                "◐ Medium",
-                "● High",
-                "◆ Xhigh",
-                "◇ Max"
-            ]
+            vec!["◌ Off", "○ Low", "◐ Medium", "● High", "◆ Xhigh", "◇ Max"]
         );
     }
 
@@ -1545,13 +1587,16 @@ mod tests {
     /// （ratatui#1402），一次"把分组标题改成青色"的重构会静默通过。
     /// 本仓库的基线把每个 cell 的 fg/bg/modifier 都编码进去（见
     /// `ui::test_support::snapshot`），所以改颜色即改基线。
+    ///
+    /// 终端尺寸取 80x24 —— 最小、最常见的那一档。窄终端上描述被截断、
+    /// 列表要滚动，那正是最该被盯住的场景。
     #[test]
     fn palette_main_page_appearance() {
         let mut state = crate::ui::state::ChatState::test_fixture();
         state.palette_mode = PaletteMode::Main;
         state.modal_stack.push(crate::ui::state::Modal::Palette);
 
-        crate::ui::test_support::assert_render!("palette_main", 100, 28, |f| {
+        crate::ui::test_support::assert_render!("palette_main", 80, 24, |f| {
             // 区域先取出来：`f` 已经是可变借用，再调 `f.area()` 会撞上借用检查。
             let area = f.area();
             render_palette(f, area, &mut state);

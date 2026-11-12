@@ -117,12 +117,7 @@ async fn import_windsurf_config(
         project_cfg.mcp_servers.insert(name, s);
     }
     crate::core::mcp::save_project_mcp_config(&project_cfg).await?;
-    Ok(i18n::t(
-        "cmd.mcp.import.success",
-        "Imported MCP servers from: {path}",
-        "Imported MCP servers from: {path}",
-    )
-    .replace("{path}", path))
+    Ok(i18n::t1("cmd.mcp.import.success").replace("{path}", path))
 }
 
 async fn export_windsurf_config(
@@ -137,12 +132,7 @@ async fn export_windsurf_config(
     }
     let s = serde_json::to_string_pretty(&project_cfg)?;
     tokio::fs::write(path, s).await?;
-    Ok(i18n::t(
-        "cmd.mcp.export.success",
-        "Exported MCP servers to: {path}",
-        "Exported MCP servers to: {path}",
-    )
-    .replace("{path}", path))
+    Ok(i18n::t1("cmd.mcp.export.success").replace("{path}", path))
 }
 
 pub async fn add_mcp_server(
@@ -160,12 +150,7 @@ pub async fn add_mcp_server(
     };
     project_cfg.mcp_servers.insert(name.clone(), s);
     crate::core::mcp::save_project_mcp_config(&project_cfg).await?;
-    Ok(i18n::t(
-        "cmd.mcp.add.success",
-        "Added MCP server: {name}",
-        "Added MCP server: {name}",
-    )
-    .replace("{name}", &name))
+    Ok(i18n::t1("cmd.mcp.add.success").replace("{name}", &name))
 }
 
 pub async fn remove_mcp_server(name: &str) -> Result<String, crate::core::mcp::McpError> {
@@ -181,12 +166,7 @@ pub async fn remove_mcp_server(name: &str) -> Result<String, crate::core::mcp::M
         .into());
     }
     crate::core::mcp::save_project_mcp_config(&project_cfg).await?;
-    Ok(i18n::t(
-        "cmd.mcp.remove.success",
-        "Removed MCP server: {name}",
-        "Removed MCP server: {name}",
-    )
-    .replace("{name}", name))
+    Ok(i18n::t1("cmd.mcp.remove.success").replace("{name}", name))
 }
 
 /// `--env KEY=VALUE` 的解析。`add` 和 `install` 曾经各抄一份，于是
@@ -201,21 +181,11 @@ fn parse_env_pairs(
             continue;
         }
         let Some((k, v)) = s.split_once('=') else {
-            return Err(i18n::t(
-                "cmd.mcp.error.invalid_env",
-                "invalid --env value: {value}",
-                "invalid --env value: {value}",
-            )
-            .replace("{value}", s));
+            return Err(i18n::t1("cmd.mcp.error.invalid_env").replace("{value}", s));
         };
         let k = k.trim();
         if k.is_empty() {
-            return Err(i18n::t(
-                "cmd.mcp.error.invalid_env_key",
-                "invalid --env key: {value}",
-                "invalid --env key: {value}",
-            )
-            .replace("{value}", s));
+            return Err(i18n::t1("cmd.mcp.error.invalid_env_key").replace("{value}", s));
         }
         env_map.insert(k.to_string(), v.to_string());
     }
@@ -241,16 +211,12 @@ fn validate_transport(
     url: Option<&str>,
 ) -> Result<(), String> {
     match transport {
-        "stdio" if command.unwrap_or("").trim().is_empty() => Err(i18n::t(
-            "cmd.mcp.error.stdio_requires_command",
-            "stdio transport requires --command",
-            "stdio transport requires --command",
-        )),
-        "http" | "streamable_http" | "sse" if url.unwrap_or("").trim().is_empty() => Err(i18n::t(
-            "cmd.mcp.error.http_requires_url",
-            "http/sse/streamable_http transport requires --url",
-            "http/sse/streamable_http transport requires --url",
-        )),
+        "stdio" if command.unwrap_or("").trim().is_empty() => {
+            Err(i18n::t1("cmd.mcp.error.stdio_requires_command"))
+        }
+        "http" | "streamable_http" | "sse" if url.unwrap_or("").trim().is_empty() => {
+            Err(i18n::t1("cmd.mcp.error.http_requires_url"))
+        }
         _ => Ok(()),
     }
 }
@@ -271,11 +237,7 @@ async fn render_tools_snapshot(
     let discover_errors = manager.discover_all().await;
     let servers = manager.list_server_names().await;
     if servers.is_empty() {
-        return Ok(i18n::t(
-            "cmd.mcp.list.empty",
-            "No MCP servers configured.",
-            "No MCP servers configured.",
-        ));
+        return Ok(i18n::t1("cmd.mcp.list.empty"));
     }
 
     let mut out = String::new();
@@ -291,11 +253,7 @@ async fn render_tools_snapshot(
         match manager.list_tools(&server).await {
             Ok(tools) => {
                 if tools.is_empty() {
-                    out.push_str(&i18n::t(
-                        "cmd.mcp.tools.no_tools",
-                        "  (no tools)\n",
-                        "  (no tools)\n",
-                    ));
+                    out.push_str(&i18n::t1("cmd.mcp.tools.no_tools"));
                 } else {
                     for tool in tools {
                         if include_desc {
@@ -312,44 +270,21 @@ async fn render_tools_snapshot(
                 }
             }
             Err(e) => {
-                out.push_str(
-                    &i18n::t(
-                        "cmd.mcp.tools.error",
-                        "  Error: {error}\n",
-                        "  error: {error}\n",
-                    )
-                    .replace("{error}", &e.to_string()),
-                );
+                out.push_str(&i18n::t1("cmd.mcp.tools.error").replace("{error}", &e.to_string()));
             }
         }
 
         if let Some(err) = discover_errors.get(&server) {
-            out.push_str(
-                &i18n::t(
-                    "cmd.mcp.tools.discover_error",
-                    "  Found error: {error}\n",
-                    "  discover_error: {error}\n",
-                )
-                .replace("{error}", err),
-            );
+            out.push_str(&i18n::t1("cmd.mcp.tools.discover_error").replace("{error}", err));
         }
         out.push('\n');
     }
 
     if out.trim().is_empty() {
         if let Some(filter) = server_filter {
-            return Ok(i18n::t(
-                "cmd.mcp.tools.server_not_found",
-                "Server not found: {name}",
-                "Server not found: {name}",
-            )
-            .replace("{name}", filter));
+            return Ok(i18n::t1("cmd.mcp.tools.server_not_found").replace("{name}", filter));
         }
-        return Ok(i18n::t(
-            "cmd.mcp.list.empty",
-            "No MCP servers configured.",
-            "No MCP servers configured.",
-        ));
+        return Ok(i18n::t1("cmd.mcp.list.empty"));
     }
     Ok(out.trim_end().to_string())
 }
@@ -370,56 +305,29 @@ async fn render_status_snapshot() -> Result<String, crate::core::mcp::McpError> 
     let servers = manager.list_server_names().await;
 
     if servers.is_empty() {
-        return Ok(i18n::t(
-            "cmd.mcp.status.empty",
-            "MCP Status\n- configured: {total} (enabled: {enabled}, disabled: {disabled})\n- active: 0",
-            "MCP Status\n- configured: {total} (enabled: {enabled}, disabled: {disabled})\n- active: 0",
-        )
-        .replace("{total}", &configured_total.to_string())
-        .replace("{enabled}", &configured_enabled.to_string())
-        .replace("{disabled}", &configured_disabled.to_string()));
+        return Ok(i18n::t1("cmd.mcp.status.empty")
+            .replace("{total}", &configured_total.to_string())
+            .replace("{enabled}", &configured_enabled.to_string())
+            .replace("{disabled}", &configured_disabled.to_string()));
     }
 
     let mut out = String::new();
-    out.push_str(&i18n::t(
-        "cmd.mcp.status.header",
-        "MCP Status\n",
-        "MCP Status\n",
-    ));
+    out.push_str(&i18n::t1("cmd.mcp.status.header"));
     out.push_str(
-        &i18n::t(
-            "cmd.mcp.status.configured",
-            "- configured: {total} (enabled: {enabled}, disabled: {disabled})\n",
-            "- configured: {total} (enabled: {enabled}, disabled: {disabled})\n",
-        )
-        .replace("{total}", &configured_total.to_string())
-        .replace("{enabled}", &configured_enabled.to_string())
-        .replace("{disabled}", &configured_disabled.to_string()),
+        &i18n::t1("cmd.mcp.status.configured")
+            .replace("{total}", &configured_total.to_string())
+            .replace("{enabled}", &configured_enabled.to_string())
+            .replace("{disabled}", &configured_disabled.to_string()),
     );
-    out.push_str(
-        &i18n::t(
-            "cmd.mcp.status.active",
-            "- active: {count}\n",
-            "- active: {count}\n",
-        )
-        .replace("{count}", &servers.len().to_string()),
-    );
-    out.push_str(&i18n::t(
-        "cmd.mcp.status.servers_header",
-        "Servers:\n",
-        "Servers:\n",
-    ));
+    out.push_str(&i18n::t1("cmd.mcp.status.active").replace("{count}", &servers.len().to_string()));
+    out.push_str(&i18n::t1("cmd.mcp.status.servers_header"));
 
     for server in servers {
         if let Some(err) = discover_errors.get(&server) {
             out.push_str(
-                &i18n::t(
-                    "cmd.mcp.status.server_error",
-                    "  - {name}: error ({error})\n",
-                    "  - {name}: error ({error})\n",
-                )
-                .replace("{name}", &server)
-                .replace("{error}", err),
+                &i18n::t1("cmd.mcp.status.server_error")
+                    .replace("{name}", &server)
+                    .replace("{error}", err),
             );
             continue;
         }
@@ -427,24 +335,16 @@ async fn render_status_snapshot() -> Result<String, crate::core::mcp::McpError> 
         match manager.list_tools(&server).await {
             Ok(tools) => {
                 out.push_str(
-                    &i18n::t(
-                        "cmd.mcp.status.server_connected",
-                        "  - {name}: connected ({count} tools)\n",
-                        "  - {name}: connected ({count} tools)\n",
-                    )
-                    .replace("{name}", &server)
-                    .replace("{count}", &tools.len().to_string()),
+                    &i18n::t1("cmd.mcp.status.server_connected")
+                        .replace("{name}", &server)
+                        .replace("{count}", &tools.len().to_string()),
                 );
             }
             Err(e) => {
                 out.push_str(
-                    &i18n::t(
-                        "cmd.mcp.status.server_error",
-                        "  - {name}: error ({error})\n",
-                        "  - {name}: error ({error})\n",
-                    )
-                    .replace("{name}", &server)
-                    .replace("{error}", &e.to_string()),
+                    &i18n::t1("cmd.mcp.status.server_error")
+                        .replace("{name}", &server)
+                        .replace("{error}", &e.to_string()),
                 );
             }
         }
@@ -462,47 +362,30 @@ pub async fn execute_mcp_command(
             // agent 实际连的就是这份，只显示项目级会让用户以为 server 没配。
             let servers = crate::core::mcp::load_effective_mcp_servers().await?;
             if servers.is_empty() {
-                return Ok(i18n::t(
-                    "cmd.mcp.list.empty",
-                    "No MCP servers configured.",
-                    "No MCP servers configured.",
-                ));
+                return Ok(i18n::t1("cmd.mcp.list.empty"));
             }
             let mut out = String::new();
-            out.push_str(&i18n::t(
-                "cmd.mcp.list.header",
-                "Configured MCP Servers:\n",
-                "Configured MCP Servers:\n",
-            ));
+            out.push_str(&i18n::t1("cmd.mcp.list.header"));
             for entry in servers {
                 let server = entry.server;
                 out.push_str(
-                    &i18n::t(
-                        "cmd.mcp.list.item",
-                        "- {name}: {command} ({transport})\n",
-                        "- {name}: {command} ({transport})\n",
-                    )
-                    .replace("{name}", &entry.name)
-                    .replace("{command}", server.command.as_deref().unwrap_or("-"))
-                    .replace(
-                        "{transport}",
-                        server.transport_type.as_deref().unwrap_or("-"),
-                    ),
+                    &i18n::t1("cmd.mcp.list.item")
+                        .replace("{name}", &entry.name)
+                        .replace("{command}", server.command.as_deref().unwrap_or("-"))
+                        .replace(
+                            "{transport}",
+                            server.transport_type.as_deref().unwrap_or("-"),
+                        ),
                 );
                 // 标出来源：同名 server 可能同时存在于多个作用域。
                 out.push_str(&format!("  (from {})\n", entry.scope.label()));
                 if let Some(args) = &server.args {
                     out.push_str(
-                        &i18n::t("cmd.mcp.list.args", "  Args: {args}\n", "  Args: {args}\n")
-                            .replace("{args}", &format!("{:?}", args)),
+                        &i18n::t1("cmd.mcp.list.args").replace("{args}", &format!("{:?}", args)),
                     );
                 }
                 if server.disabled.unwrap_or(false) {
-                    out.push_str(&i18n::t(
-                        "cmd.mcp.list.disabled",
-                        "  (Disabled)\n",
-                        "  (Disabled)\n",
-                    ));
+                    out.push_str(&i18n::t1("cmd.mcp.list.disabled"));
                 }
             }
             Ok(out)
@@ -513,25 +396,17 @@ pub async fn execute_mcp_command(
             let errors = manager.discover_all().await;
             let server_count = manager.list_server_names().await.len();
             if errors.is_empty() {
-                Ok(i18n::t(
-                    "cmd.mcp.refresh.success",
-                    "Refreshed MCP servers successfully ({count} servers).",
-                    "Refreshed MCP servers successfully ({count} servers).",
-                )
-                .replace("{count}", &server_count.to_string()))
+                Ok(i18n::t1("cmd.mcp.refresh.success")
+                    .replace("{count}", &server_count.to_string()))
             } else {
                 let details = errors
                     .into_iter()
                     .map(|(name, err)| format!("{}: {}", name, err))
                     .collect::<Vec<_>>()
                     .join("; ");
-                Ok(i18n::t(
-                    "cmd.mcp.refresh.partial",
-                    "Refreshed MCP with partial failures ({count} servers): {details}",
-                    "Refreshed MCP with partial failures ({count} servers): {details}",
-                )
-                .replace("{count}", &server_count.to_string())
-                .replace("{details}", &details))
+                Ok(i18n::t1("cmd.mcp.refresh.partial")
+                    .replace("{count}", &server_count.to_string())
+                    .replace("{details}", &details))
             }
         }
         McpCommand::Tools { server } => {

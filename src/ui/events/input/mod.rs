@@ -493,12 +493,7 @@ async fn handle_inline_confirm(
                     .await;
                 state.current_status_line = Some(match saved {
                     Some(id) => format!("Conversation cleared. Previous saved as `{}`.", id),
-                    None => crate::core::i18n::t(
-                        "ui.status.cleared",
-                        "对话已清除",
-                        "Conversation cleared",
-                    )
-                    .to_string(),
+                    None => crate::core::i18n::t1("ui.status.cleared").to_string(),
                 });
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -1049,11 +1044,7 @@ pub async fn handle_key_event(
                 // Copy to clipboard（含 OSC 52 兜底）
                 match crate::ui::utils::clipboard::copy_to_clipboard(code) {
                     Ok(()) => state.push_toast(
-                        &crate::core::i18n::t(
-                            "ui.status.copied_code_block",
-                            "已复制代码块到剪贴板",
-                            "Code block copied to clipboard",
-                        ),
+                        &crate::core::i18n::t1("ui.status.copied_code_block"),
                         crate::ui::state::store::ToastKind::Success,
                     ),
                     Err(e) => {
@@ -1307,14 +1298,7 @@ pub async fn handle_key_event(
                         let note = if known {
                             String::new()
                         } else {
-                            format!(
-                                " {}",
-                                crate::core::i18n::t(
-                                    "ui.model.not_in_list",
-                                    "(不在已获取的模型列表中，仍按自定义名称使用)",
-                                    "(not in fetched model list; using as custom name)",
-                                )
-                            )
+                            format!(" {}", crate::core::i18n::t1("ui.model.not_in_list"))
                         };
                         if request_runtime_model_change(
                             state,

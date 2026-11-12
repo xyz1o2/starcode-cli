@@ -75,11 +75,8 @@ impl ChatState {
             if let Some(entry) = self.chat_history.get_mut(idx) {
                 if let Some(confirmation) = entry.confirmation.as_mut() {
                     if confirmation.outcome.is_none() {
-                        confirmation.outcome = Some(crate::core::i18n::t(
-                            "ui.confirm.cancelled_turn",
-                            "已取消 · 对应工具已有结果",
-                            "Cancelled — the tool already finished",
-                        ));
+                        confirmation.outcome =
+                            Some(crate::core::i18n::t1("ui.confirm.cancelled_tool_done"));
                     }
                 }
             }

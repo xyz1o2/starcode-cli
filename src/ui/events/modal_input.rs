@@ -159,7 +159,18 @@ async fn handle_palette(
             }
         }
         Enter => {
-            if let Some(selected_item) = display_items.get(state.selected_palette_index) {
+            // 下标要钳进范围再取。
+            //
+            // 列表可以在**不重置选中项**的情况下变短：模型列表刷新后条目少了、
+            // provider 被删了、过滤词变了（`palette_filter` 改动时下标会归零，
+            // 但异步到达的 `ModelsList` 不会）。此时 `get(越界下标)` 返回 None，
+            // 按 Enter 就**什么都不发生** —— 用户看到的是"这个模型怎么都切不上去"。
+            //
+            // 钳到最后一项：用户至少能选中一个，而不是敲键无反应。
+            let index = state
+                .selected_palette_index
+                .min(display_items.len().saturating_sub(1));
+            if let Some(selected_item) = display_items.get(index) {
                 let action = selected_item.action.clone();
                 super::input::execute_palette_action(state, action, agent_tx).await?;
             }

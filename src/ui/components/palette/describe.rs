@@ -6,7 +6,6 @@
 use crate::ui::state::ChatState;
 use crate::ui::utils::status::{
     approval_mode_label, current_model_id, current_provider_display, current_provider_id,
-    status_summary,
 };
 
 pub(super) fn model_summary_description(state: Option<&ChatState>) -> String {
@@ -34,10 +33,19 @@ pub(super) fn provider_summary_description(state: Option<&ChatState>) -> String 
     }
 }
 
+/// 「Status」条目的副标题。
+///
+/// 只说**当前模型** —— 不复述状态栏那四段摘要（模型 · provider · 审批模式 ·
+/// 语言）。那四段是给状态栏那条整行用的；塞进面板的一行里，四十列宽的地方
+/// 放不下，末尾会被切掉半个词（"Not set · Not set · Default · en"）。
+///
+/// 状态栏本来就在屏幕下方常驻着，用户要看完整状态随时能看；面板这一行要
+/// 回答的只是"现在在用什么模型"，其余的点了 Status 就有。
 pub(super) fn status_overview_description(state: Option<&ChatState>) -> String {
     state
-        .map(status_summary)
-        .unwrap_or_else(|| "Review model, provider and runtime status".to_string())
+        .and_then(current_model_id)
+        .map(|model| format!("Current · {}", model))
+        .unwrap_or_else(|| "No model set".to_string())
 }
 
 pub(super) fn approval_mode_description(state: Option<&ChatState>) -> String {

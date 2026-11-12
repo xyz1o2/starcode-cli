@@ -57,10 +57,7 @@ pub fn render_chat_search_bar(f: &mut Frame, state: &ChatState, area: Rect) {
 
     if !search.query.is_empty() {
         let (label, color) = if search.matches.is_empty() {
-            (
-                i18n::t("ui.search.no_match", "无匹配", "no matches"),
-                Color::Red,
-            )
+            (i18n::t1("ui.search.no_match"), Color::Red)
         } else {
             (
                 format!("{}/{}", search.selected + 1, search.matches.len()),
@@ -72,11 +69,7 @@ pub fn render_chat_search_bar(f: &mut Frame, state: &ChatState, area: Rect) {
     }
 
     spans.push(Span::styled(
-        i18n::t(
-            "ui.search.hints",
-            "  Enter 下一个 · Shift+Enter 上一个 · Esc 关闭",
-            "  Enter next · Shift+Enter prev · Esc close",
-        ),
+        i18n::t1("ui.search.hints"),
         crate::ui::themes::theme::muted_style(),
     ));
 

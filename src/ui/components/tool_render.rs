@@ -887,7 +887,7 @@ fn render_rich_tool_content(
                     let (count, files) = summarise_grep_output(text);
                     if count == 0 {
                         lines.push(Line::from(Span::styled(
-                            crate::core::i18n::t("tool.no_matches", "没有匹配", "No matches"),
+                            crate::core::i18n::t1("tool.no_matches"),
                             crate::ui::themes::theme::muted_dim_style(),
                         )));
                         push_expand_hint(&mut lines);
@@ -920,7 +920,7 @@ fn render_rich_tool_content(
                         .unwrap_or_else(|| count_glob_paths_in_output(text));
                     if file_count == 0 {
                         lines.push(Line::from(Span::styled(
-                            crate::core::i18n::t("tool.no_files", "没有文件", "No files"),
+                            crate::core::i18n::t1("tool.no_files"),
                             crate::ui::themes::theme::muted_dim_style(),
                         )));
                         push_expand_hint(&mut lines);
@@ -942,7 +942,7 @@ fn render_rich_tool_content(
                         // 空目录：输出是一行 "Directory '...' is empty"。
                         None if is_empty_directory_notice(text) => {
                             lines.push(Line::from(Span::styled(
-                                crate::core::i18n::t("tool.empty_dir", "空目录", "Empty"),
+                                crate::core::i18n::t1("tool.empty_dir"),
                                 crate::ui::themes::theme::muted_dim_style(),
                             )));
                             push_expand_hint(&mut lines);
@@ -1374,7 +1374,7 @@ fn render_tool_result_text(
     // ===== Bash 无输出时显示 Done =====
     if success && text.trim().is_empty() && !expanded {
         lines.push(Line::from(Span::styled(
-            crate::core::i18n::t("tool.done", "Done", "Done"),
+            crate::core::i18n::t1("tool.done"),
             crate::ui::themes::theme::muted_dim_style(),
         )));
         return;

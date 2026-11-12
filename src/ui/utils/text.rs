@@ -115,7 +115,7 @@ pub fn strip_tool_running_prefix(s: &str) -> String {
 }
 
 pub fn input_placeholder_text() -> String {
-    crate::core::i18n::t("ui.input.placeholder", "询问 Star…", "Ask Star…")
+    crate::core::i18n::t1("ui.input.placeholder")
 }
 
 pub fn strip_system_reminder_blocks_inplace(s: &mut String) {

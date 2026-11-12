@@ -482,19 +482,11 @@ fn collect_input_lines(
     }
 
     lines.push(secret_input_line(
-        &i18n::t(
-            "cmd.provider.doctor.input.provider_key",
-            "Provider config key",
-            "Provider config key",
-        ),
+        &i18n::t1("cmd.provider.doctor.input.provider_key"),
         stored_settings.and_then(|settings| settings.api_key.clone()),
     ));
     lines.push(secret_input_line(
-        &i18n::t(
-            "cmd.provider.doctor.input.legacy_key",
-            "Legacy `user-settings.apiKey`",
-            "Legacy `user-settings.apiKey`",
-        ),
+        &i18n::t1("cmd.provider.doctor.input.legacy_key"),
         settings.api_key.clone(),
     ));
 
@@ -503,19 +495,11 @@ fn collect_input_lines(
         std::env::var("STAR_BASE_URL").ok(),
     ));
     lines.push(value_input_line(
-        &i18n::t(
-            "cmd.provider.doctor.input.provider_base_url",
-            "Provider config base URL",
-            "Provider config base URL",
-        ),
+        &i18n::t1("cmd.provider.doctor.input.provider_base_url"),
         stored_settings.and_then(|settings| settings.base_url.clone()),
     ));
     lines.push(value_input_line(
-        &i18n::t(
-            "cmd.provider.doctor.input.legacy_base_url",
-            "Legacy `user-settings.baseUrl`",
-            "Legacy `user-settings.baseUrl`",
-        ),
+        &i18n::t1("cmd.provider.doctor.input.legacy_base_url"),
         settings.base_url.clone(),
     ));
 
@@ -532,11 +516,7 @@ fn build_provider_doctor_notes(diagnosis: &ProviderDoctorDiagnosis) -> Vec<Strin
     let provider_id = diagnosis.provider_id.as_deref();
 
     if provider_id.is_none() {
-        notes.push(i18n::t(
-            "cmd.provider.doctor.note.no_provider",
-            "No effective provider is selected. Use Ctrl+P -> Providers or `/provider select <provider>` first.",
-            "No effective provider is selected. Use Ctrl+P -> Providers or `/provider select <provider>` first.",
-        ));
+        notes.push(i18n::t1("cmd.provider.doctor.note.no_provider"));
         return notes;
     }
 
@@ -546,13 +526,9 @@ fn build_provider_doctor_notes(diagnosis: &ProviderDoctorDiagnosis) -> Vec<Strin
     ) {
         if session_provider != stored_provider {
             notes.push(
-                i18n::t(
-                    "cmd.provider.doctor.note.provider_mismatch",
-                    "Current session provider differs from saved `activeProviderId`. Re-select provider before testing.",
-                    "Current session provider differs from saved `activeProviderId`. Re-select provider before testing.",
-                )
-                .replace("{session}", session_provider)
-                .replace("{stored}", stored_provider),
+                i18n::t1("cmd.provider.doctor.note.provider_mismatch")
+                    .replace("{session}", session_provider)
+                    .replace("{stored}", stored_provider),
             );
         }
     }
@@ -567,34 +543,20 @@ fn build_provider_doctor_notes(diagnosis: &ProviderDoctorDiagnosis) -> Vec<Strin
                 .api_key_env_hint
                 .as_deref()
                 .unwrap_or("provider-specific env");
-            notes.push(
-                i18n::t(
-                    "cmd.provider.doctor.note.missing_key",
-                    "This provider requires an API key, but no effective key found. Check saved key, `STAR_API_KEY`, or `{hint}`.",
-                    "This provider requires an API key, but no effective key found. Check saved key, `STAR_API_KEY`, or `{hint}`.",
-                )
-                .replace("{hint}", env_hint),
-            );
+            notes
+                .push(i18n::t1("cmd.provider.doctor.note.missing_key").replace("{hint}", env_hint));
         }
 
         if providers::provider_requires_manual_base_url(provider_id)
             && diagnosis.base_url.value.is_none()
         {
-            notes.push(i18n::t(
-                "cmd.provider.doctor.note.missing_base_url",
-                "This provider requires a manual base URL, but no effective value was found.",
-                "This provider requires a manual base URL, but no effective value was found.",
-            ));
+            notes.push(i18n::t1("cmd.provider.doctor.note.missing_base_url"));
         }
     }
 
     if provider_id == Some("kimi-code") {
         if diagnosis.openai_compatible {
-            notes.push(i18n::t(
-                "cmd.provider.doctor.note.kimi_openai_compatible",
-                "`Kimi For Coding` should not run in OpenAI compatible mode; state looks wrong.",
-                "`Kimi For Coding` should not run in OpenAI compatible mode; state looks wrong.",
-            ));
+            notes.push(i18n::t1("cmd.provider.doctor.note.kimi_openai_compatible"));
         }
 
         if let Some(base_url) = diagnosis.base_url.value.as_deref() {
@@ -602,22 +564,14 @@ fn build_provider_doctor_notes(diagnosis: &ProviderDoctorDiagnosis) -> Vec<Strin
                 .to_ascii_lowercase()
                 .contains("api.kimi.com/coding")
             {
-                notes.push(i18n::t(
-                    "cmd.provider.doctor.note.kimi_base_url",
-                    "`Kimi For Coding` should use `https://api.kimi.com/coding/v1` as its base URL.",
-                    "`Kimi For Coding` should use `https://api.kimi.com/coding/v1` as its base URL.",
-                ));
+                notes.push(i18n::t1("cmd.provider.doctor.note.kimi_base_url"));
             }
         }
 
         if diagnosis.api_key.source.kind == SRC_PROVIDER_ENV_API_KEY
             && diagnosis.api_key.source.detail.as_deref() == Some("MOONSHOT_API_KEY")
         {
-            notes.push(i18n::t(
-                "cmd.provider.doctor.note.kimi_moonshot_env",
-                "`Kimi For Coding` is currently using `MOONSHOT_API_KEY`. Prefer a dedicated `KIMI_API_KEY` to avoid mixing it with a regular Moonshot key.",
-                "`Kimi For Coding` is currently using `MOONSHOT_API_KEY`. Prefer a dedicated `KIMI_API_KEY` to avoid mixing it with a regular Moonshot key.",
-            ));
+            notes.push(i18n::t1("cmd.provider.doctor.note.kimi_moonshot_env"));
         }
     }
 
@@ -629,30 +583,18 @@ fn build_provider_doctor_notes(diagnosis: &ProviderDoctorDiagnosis) -> Vec<Strin
             .map(|value| value.to_ascii_lowercase().contains("api.kimi.com/coding"))
             .unwrap_or(false)
         {
-            notes.push(i18n::t(
-                "cmd.provider.doctor.note.moonshot_kimi_base_url",
-                "`Moonshot AI` is currently pointing at the `Kimi For Coding` endpoint. This usually means provider and base URL are mixed up.",
-                "`Moonshot AI` is currently pointing at the `Kimi For Coding` endpoint. This usually means provider and base URL are mixed up.",
-            ));
+            notes.push(i18n::t1("cmd.provider.doctor.note.moonshot_kimi_base_url"));
         }
     }
 
     if provider_id == Some("anthropic") {
         if diagnosis.base_url.value.as_deref() == Some("https://api.anthropic.com") {
-            notes.push(i18n::t(
-                "cmd.provider.doctor.note.anthropic_base_url_v1",
-                "Anthropic base URL is missing `/v1`. Change it to `https://api.anthropic.com/v1` or requests may hit wrong endpoint and return 403 or `Request not allowed`.",
-                "Anthropic base URL is missing `/v1`. Change it to `https://api.anthropic.com/v1` or requests may hit wrong endpoint and return 403 or `Request not allowed`.",
-            ));
+            notes.push(i18n::t1("cmd.provider.doctor.note.anthropic_base_url_v1"));
         }
     }
 
     if notes.is_empty() {
-        notes.push(i18n::t(
-            "cmd.provider.doctor.note.ok",
-            "No obvious local configuration conflict was found. If 401 persists, the provider is most likely rejecting the current key.",
-            "No obvious local configuration conflict was found. If 401 persists, the provider is most likely rejecting the current key.",
-        ));
+        notes.push(i18n::t1("cmd.provider.doctor.note.ok"));
     }
 
     notes
@@ -660,107 +602,63 @@ fn build_provider_doctor_notes(diagnosis: &ProviderDoctorDiagnosis) -> Vec<Strin
 
 fn render_provider_doctor_report(diagnosis: &ProviderDoctorDiagnosis) -> String {
     let mut report = String::new();
-    report.push_str(&i18n::t(
-        "cmd.provider.doctor.title",
-        "# Provider Doctor\n\n",
-        "# Provider Doctor\n\n",
-    ));
+    report.push_str(&i18n::t1("cmd.provider.doctor.title"));
 
     report.push_str(&format!(
         "- {}: {}\n",
-        i18n::t(
-            "cmd.provider.doctor.provider",
-            "Effective provider",
-            "Effective provider",
-        ),
+        i18n::t1("cmd.provider.doctor.provider"),
         format_provider_label(diagnosis.provider_id.as_deref(), &diagnosis.provider_name),
     ));
     report.push_str(&format!(
         "- {}: {}\n",
-        i18n::t(
-            "cmd.provider.doctor.provider_source",
-            "Provider source",
-            "Provider source",
-        ),
+        i18n::t1("cmd.provider.doctor.provider_source"),
         describe_source(&diagnosis.provider_source),
     ));
     report.push_str(&format!(
         "- {}: {}\n",
-        i18n::t(
-            "cmd.provider.doctor.model",
-            "Current model",
-            "Current model"
-        ),
+        i18n::t1("cmd.provider.doctor.model"),
         format_optional_code(diagnosis.model.value.as_deref()),
     ));
     report.push_str(&format!(
         "- {}: {}\n",
-        i18n::t(
-            "cmd.provider.doctor.model_source",
-            "Model source",
-            "Model source"
-        ),
+        i18n::t1("cmd.provider.doctor.model_source"),
         describe_source(&diagnosis.model.source),
     ));
     report.push_str(&format!(
         "- {}: {}\n",
-        i18n::t("cmd.provider.doctor.base_url", "Base URL", "Base URL"),
+        i18n::t1("cmd.provider.doctor.base_url"),
         format_optional_code(diagnosis.base_url.value.as_deref()),
     ));
     report.push_str(&format!(
         "- {}: {}\n",
-        i18n::t(
-            "cmd.provider.doctor.base_url_source",
-            "Base URL source",
-            "Base URL source",
-        ),
+        i18n::t1("cmd.provider.doctor.base_url_source"),
         describe_source(&diagnosis.base_url.source),
     ));
     // `/fast` 为什么切/没切模型，答案在这两行：副模型没配成 `missing`
     // 就说明它只能按名字猜，而不是有人指定过。
     report.push_str(&format!(
         "- {}: {}\n",
-        i18n::t(
-            "cmd.provider.doctor.fast_model",
-            "Fast model (used by `/fast`)",
-            "Fast model (used by `/fast`)",
-        ),
+        i18n::t1("cmd.provider.doctor.fast_model"),
         format_optional_code(diagnosis.small_fast_model.value.as_deref()),
     ));
     report.push_str(&format!(
         "- {}: {}\n",
-        i18n::t(
-            "cmd.provider.doctor.fast_model_source",
-            "Fast model source",
-            "Fast model source",
-        ),
+        i18n::t1("cmd.provider.doctor.fast_model_source"),
         describe_source(&diagnosis.small_fast_model.source),
     ));
     report.push_str(&format!(
         "- {}: `{}`\n",
-        i18n::t(
-            "cmd.provider.doctor.openai_compatible",
-            "OpenAI Compatible",
-            "OpenAI compatible",
-        ),
+        i18n::t1("cmd.provider.doctor.openai_compatible"),
         diagnosis.openai_compatible,
     ));
     report.push_str(&format!(
         "- {}: {}\n",
-        i18n::t(
-            "cmd.provider.doctor.openai_compatible_source",
-            "Compatibility source",
-            "Compatibility source",
-        ),
+        i18n::t1("cmd.provider.doctor.openai_compatible_source"),
         describe_source(&diagnosis.openai_compatible_source),
     ));
     report.push_str(&format!(
         "- {}: {}\n",
-        i18n::t(
-            "cmd.provider.doctor.api_key",
-            "Effective API key",
-            "Effective API key",
-        ),
+        i18n::t1("cmd.provider.doctor.api_key"),
         diagnosis
             .api_key
             .value
@@ -771,40 +669,24 @@ fn render_provider_doctor_report(diagnosis: &ProviderDoctorDiagnosis) -> String 
     ));
     report.push_str(&format!(
         "- {}: {}\n",
-        i18n::t(
-            "cmd.provider.doctor.api_key_source",
-            "API key source",
-            "API key source",
-        ),
+        i18n::t1("cmd.provider.doctor.api_key_source"),
         describe_source(&diagnosis.api_key.source),
     ));
     report.push_str(&format!(
         "- {}: {}\n",
-        i18n::t(
-            "cmd.provider.doctor.api_key_hint",
-            "Provider env hint",
-            "Provider env hint",
-        ),
+        i18n::t1("cmd.provider.doctor.api_key_hint"),
         format_optional_code(diagnosis.api_key_env_hint.as_deref()),
     ));
 
     report.push('\n');
-    report.push_str(&i18n::t(
-        "cmd.provider.doctor.inputs",
-        "## Inputs\n",
-        "## Inputs\n",
-    ));
+    report.push_str(&i18n::t1("cmd.provider.doctor.inputs"));
     for line in &diagnosis.input_lines {
         report.push_str(line);
         report.push('\n');
     }
 
     report.push('\n');
-    report.push_str(&i18n::t(
-        "cmd.provider.doctor.checks",
-        "## Checks\n",
-        "## Checks\n",
-    ));
+    report.push_str(&i18n::t1("cmd.provider.doctor.checks"));
     for note in build_provider_doctor_notes(diagnosis) {
         report.push_str("- ");
         report.push_str(&note);
@@ -831,7 +713,7 @@ fn provider_display_name(
         return provider_id.to_string();
     }
 
-    i18n::t("cmd.provider.doctor.provider_missing", "Not set", "Not set")
+    i18n::t1("cmd.provider.doctor.provider_missing")
 }
 
 fn trimmed_non_empty(value: Option<String>) -> Option<String> {
@@ -902,13 +784,9 @@ fn value_input_line(label: &str, raw_value: Option<String>) -> String {
 
 fn status_label(kind: &str) -> String {
     match kind {
-        "set" => i18n::t("cmd.provider.doctor.status.set", "set", "set"),
-        "placeholder" => i18n::t(
-            "cmd.provider.doctor.status.placeholder",
-            "placeholder/empty",
-            "placeholder/empty",
-        ),
-        _ => i18n::t("cmd.provider.doctor.status.missing", "missing", "missing"),
+        "set" => i18n::t1("cmd.provider.doctor.status.set"),
+        "placeholder" => i18n::t1("cmd.provider.doctor.status.placeholder"),
+        _ => i18n::t1("cmd.provider.doctor.status.missing"),
     }
 }
 
@@ -920,124 +798,64 @@ fn status_label(kind: &str) -> String {
 fn external_config_source(field: &str) -> String {
     format!(
         "{} `{}`",
-        i18n::t(
-            "cmd.provider.doctor.source.external_config",
-            "external CLI config",
-            "external CLI config",
-        ),
+        i18n::t1("cmd.provider.doctor.source.external_config"),
         field
     )
 }
 
 fn describe_source(source: &SourceRef) -> String {
     match source.kind {
-        SRC_SESSION_PROVIDER => i18n::t(
-            "cmd.provider.doctor.source.session_provider",
-            "current session provider",
-            "current session provider",
-        ),
-        SRC_PROVIDER_STORE_ACTIVE_PROVIDER => i18n::t(
-            "cmd.provider.doctor.source.active_provider",
-            "saved `activeProviderId`",
-            "saved `activeProviderId`",
-        ),
-        SRC_SESSION_MODEL => i18n::t(
-            "cmd.provider.doctor.source.session_model",
-            "current session model",
-            "current session model",
-        ),
-        SRC_CLI_MODEL => i18n::t(
-            "cmd.provider.doctor.source.cli_model",
-            "CLI `--model`",
-            "CLI `--model`",
-        ),
+        SRC_SESSION_PROVIDER => i18n::t1("cmd.provider.doctor.source.session_provider"),
+        SRC_PROVIDER_STORE_ACTIVE_PROVIDER => {
+            i18n::t1("cmd.provider.doctor.source.active_provider")
+        }
+        SRC_SESSION_MODEL => i18n::t1("cmd.provider.doctor.source.session_model"),
+        SRC_CLI_MODEL => i18n::t1("cmd.provider.doctor.source.cli_model"),
         SRC_ENV_STAR_MODEL => "`STAR_MODEL`".to_string(),
         SRC_ENV_ANTHROPIC_MODEL => "`ANTHROPIC_MODEL`".to_string(),
         SRC_CLAUDE_CODE_MODEL | SRC_CODEX_MODEL => external_config_source("model"),
         SRC_CLAUDE_CODE_PROVIDER => match source.detail.as_deref() {
             Some(detail) => external_config_source(detail),
-            None => i18n::t(
-                "cmd.provider.doctor.source.claude_code_provider",
-                "Claude Code configuration",
-                "Claude Code configuration",
-            ),
+            None => i18n::t1("cmd.provider.doctor.source.claude_code_provider"),
         },
-        SRC_PROVIDER_STORE_ACTIVE_MODEL => i18n::t(
-            "cmd.provider.doctor.source.active_model",
-            "saved `activeModel`",
-            "saved `activeModel`",
-        ),
+        SRC_PROVIDER_STORE_ACTIVE_MODEL => i18n::t1("cmd.provider.doctor.source.active_model"),
         SRC_ENV_STAR_SMALL_FAST_MODEL => "`STAR_SMALL_FAST_MODEL`".to_string(),
         SRC_ENV_ANTHROPIC_SMALL_FAST_MODEL => "`ANTHROPIC_SMALL_FAST_MODEL`".to_string(),
         SRC_CLAUDE_CODE_SMALL_FAST_MODEL => {
             external_config_source("env.ANTHROPIC_SMALL_FAST_MODEL")
         }
-        SRC_USER_SETTINGS_DEFAULT_MODEL => i18n::t(
-            "cmd.provider.doctor.source.default_model",
-            "`user-settings.defaultModel`",
-            "`user-settings.defaultModel`",
-        ),
+        SRC_USER_SETTINGS_DEFAULT_MODEL => i18n::t1("cmd.provider.doctor.source.default_model"),
         SRC_ENV_STAR_BASE_URL => "`STAR_BASE_URL`".to_string(),
         SRC_ENV_ANTHROPIC_BASE_URL => "`ANTHROPIC_BASE_URL`".to_string(),
         SRC_CLAUDE_CODE_BASE_URL | SRC_CODEX_BASE_URL => external_config_source("base_url"),
-        SRC_PROVIDER_STORE_BASE_URL => i18n::t(
-            "cmd.provider.doctor.source.provider_base_url",
-            "provider config base URL",
-            "provider config base URL",
-        ),
-        SRC_PROVIDER_DEFAULT_BASE_URL => i18n::t(
-            "cmd.provider.doctor.source.provider_default_base_url",
-            "provider default base URL",
-            "provider default base URL",
-        ),
-        SRC_USER_SETTINGS_BASE_URL => i18n::t(
-            "cmd.provider.doctor.source.user_base_url",
-            "`user-settings.baseUrl`",
-            "`user-settings.baseUrl`",
-        ),
+        SRC_PROVIDER_STORE_BASE_URL => i18n::t1("cmd.provider.doctor.source.provider_base_url"),
+        SRC_PROVIDER_DEFAULT_BASE_URL => {
+            i18n::t1("cmd.provider.doctor.source.provider_default_base_url")
+        }
+        SRC_USER_SETTINGS_BASE_URL => i18n::t1("cmd.provider.doctor.source.user_base_url"),
         SRC_ENV_STAR_API_KEY => "`STAR_API_KEY`".to_string(),
         SRC_ENV_ANTHROPIC_API_KEY => "`ANTHROPIC_API_KEY`".to_string(),
         SRC_ENV_ANTHROPIC_AUTH_TOKEN => "`ANTHROPIC_AUTH_TOKEN`".to_string(),
         SRC_CLAUDE_CODE_API_KEY | SRC_CODEX_API_KEY => external_config_source("api_key"),
-        SRC_PROVIDER_STORE_API_KEY => i18n::t(
-            "cmd.provider.doctor.source.provider_key",
-            "provider config key",
-            "provider config key",
-        ),
+        SRC_PROVIDER_STORE_API_KEY => i18n::t1("cmd.provider.doctor.source.provider_key"),
         SRC_PROVIDER_ENV_API_KEY => {
             let env_var = source.detail.as_deref().unwrap_or("provider env");
             format!(
                 "{} `{}`",
-                i18n::t(
-                    "cmd.provider.doctor.source.provider_env_key",
-                    "provider-specific env",
-                    "provider-specific env",
-                ),
+                i18n::t1("cmd.provider.doctor.source.provider_env_key"),
                 env_var
             )
         }
-        SRC_USER_SETTINGS_API_KEY => i18n::t(
-            "cmd.provider.doctor.source.user_key",
-            "`user-settings.apiKey`",
-            "`user-settings.apiKey`",
-        ),
-        SRC_PROVIDER_RULE_OPENAI_COMPATIBLE => i18n::t(
-            "cmd.provider.doctor.source.provider_rule",
-            "provider rule",
-            "provider rule",
-        ),
+        SRC_USER_SETTINGS_API_KEY => i18n::t1("cmd.provider.doctor.source.user_key"),
+        SRC_PROVIDER_RULE_OPENAI_COMPATIBLE => i18n::t1("cmd.provider.doctor.source.provider_rule"),
         SRC_ENV_STAR_OPENAI_COMPATIBLE => "`STAR_OPENAI_COMPATIBLE`".to_string(),
-        SRC_USER_SETTINGS_OPENAI_COMPATIBLE => i18n::t(
-            "cmd.provider.doctor.source.user_openai_compatible",
-            "`user-settings.isOpenAICompatible`",
-            "`user-settings.isOpenAICompatible`",
-        ),
-        SRC_RUNTIME_DEFAULT_OPENAI_COMPATIBLE => i18n::t(
-            "cmd.provider.doctor.source.runtime_default",
-            "runtime default",
-            "runtime default",
-        ),
-        _ => i18n::t("cmd.provider.doctor.source.missing", "missing", "missing"),
+        SRC_USER_SETTINGS_OPENAI_COMPATIBLE => {
+            i18n::t1("cmd.provider.doctor.source.user_openai_compatible")
+        }
+        SRC_RUNTIME_DEFAULT_OPENAI_COMPATIBLE => {
+            i18n::t1("cmd.provider.doctor.source.runtime_default")
+        }
+        _ => i18n::t1("cmd.provider.doctor.source.missing"),
     }
 }
 

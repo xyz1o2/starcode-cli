@@ -355,11 +355,7 @@ async fn steer_user_message(
         })
         .await;
 
-    state.current_status_line = Some(crate::core::i18n::t(
-        "ui.status.steered",
-        "已插入当前回合",
-        "Added to the running turn",
-    ));
+    state.current_status_line = Some(crate::core::i18n::t1("ui.status.steered"));
 
     Ok(())
 }
@@ -637,20 +633,10 @@ pub async fn enqueue_user_message(
         if !was_already_open {
             state.chat_history.push(ChatEntry {
                 is_streaming: Some(false),
-                ..ChatEntry::assistant(
-                    &i18n::t(
-                        "ui.provider.no_model_selected",
-                        "当前 Provider 尚未选择模型。请先选择该 Provider 的模型后再发送消息。",
-                        "No model selected for the current provider. Please select a model before sending a message.",
-                    ),
-                )
+                ..ChatEntry::assistant(&i18n::t1("ui.provider.no_model_selected"))
             });
         }
-        state.current_status_line = Some(i18n::t(
-            "ui.provider.no_model_selected.status",
-            "请先选择当前 Provider 的模型",
-            "Please select a model for the current provider",
-        ));
+        state.current_status_line = Some(i18n::t1("ui.provider.no_model_selected.status"));
         // 清掉失败标志：这条消息不可能成功，`last_turn_failed` 再留着只会让 Esc
         // 继续无意义地重发（每次都撞回这里）。
         state.last_turn_failed = false;
@@ -737,16 +723,16 @@ pub async fn enqueue_user_message(
         let content = if items.len() == 1 {
             format!(
                 "{} 1 {}: {}",
-                crate::core::i18n::t("status.read_files", "状态：已读取", "Read"),
-                crate::core::i18n::t("status.file", "个文件", "file"),
+                crate::core::i18n::t1("status.read_files"),
+                crate::core::i18n::t1("status.file"),
                 items[0]
             )
         } else {
             let mut s = format!(
                 "{} {} {}:",
-                crate::core::i18n::t("status.read_files", "状态：已读取", "Read"),
+                crate::core::i18n::t1("status.read_files"),
                 items.len(),
-                crate::core::i18n::t("status.files", "个文件", "files")
+                crate::core::i18n::t1("status.files")
             );
             for it in &items {
                 s.push_str("\n  ");

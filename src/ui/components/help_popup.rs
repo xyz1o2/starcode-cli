@@ -11,198 +11,76 @@ use crate::core::i18n;
 pub fn render_help_popup(f: &mut Frame, area: Rect) {
     let sections: Vec<(String, Vec<(String, String)>)> = vec![
         (
-            i18n::t("ui.help.section.nav", "导航", "Navigation"),
+            i18n::t1("ui.help.section.nav"),
             vec![
-                (
-                    "PgUp/PgDn".to_string(),
-                    i18n::t("ui.help.nav.page", "翻页", "Page up/down"),
-                ),
-                (
-                    "Home/End".to_string(),
-                    i18n::t("ui.help.nav.home_end", "跳到开头/结尾", "Jump to start/end"),
-                ),
-                (
-                    "↑/↓".to_string(),
-                    i18n::t("ui.help.nav.arrows", "在提示中导航", "Navigate suggestions"),
-                ),
+                ("PgUp/PgDn".to_string(), i18n::t1("ui.help.nav.page")),
+                ("Home/End".to_string(), i18n::t1("ui.help.nav.home_end")),
+                ("↑/↓".to_string(), i18n::t1("ui.help.nav.arrows")),
             ],
         ),
         (
-            i18n::t("ui.help.section.input", "输入", "Input"),
+            i18n::t1("ui.help.section.input"),
             vec![
                 (
                     "Tab".to_string(),
                     // 这里此前写的是「补全/接受建议」，实际主输入区的 Tab 是折叠/展开
                     // 当前视口中心的工具输出块（`input.rs` 的 `KeyCode::Tab` 分支）。
                     // 补全走的是提示浮层的 ↑/↓ + Enter，写错等于教用户按一个不存在的键。
-                    i18n::t(
-                        "ui.help.input.tab",
-                        "折叠/展开工具输出",
-                        "Expand/collapse tool output",
-                    ),
+                    i18n::t1("ui.help.input.tab"),
                 ),
-                (
-                    "Enter".to_string(),
-                    i18n::t("ui.help.input.enter", "发送/确认", "Send/confirm"),
-                ),
-                (
-                    "Alt+P".to_string(),
-                    i18n::t(
-                        "ui.help.input.fold",
-                        "折叠/展开多行粘贴",
-                        "Fold/unfold pasted text",
-                    ),
-                ),
-                (
-                    "Backspace".to_string(),
-                    i18n::t("ui.help.input.backspace", "删除字符", "Delete character"),
-                ),
+                ("Enter".to_string(), i18n::t1("ui.help.input.enter")),
+                ("Alt+P".to_string(), i18n::t1("ui.help.input.fold")),
+                ("Backspace".to_string(), i18n::t1("ui.help.input.backspace")),
             ],
         ),
         (
-            i18n::t("ui.help.section.control", "控制", "Control"),
+            i18n::t1("ui.help.section.control"),
             // 由按键注册表生成，不要在这里手抄 —— 此前两份清单已经漂移出
             // 「有键没文档」和「文档写了键却没有」的多处不一致。
             // 新增全局绑定只需改 `events/keymap.rs` 的 GLOBAL_BINDINGS。
             crate::ui::events::keymap::GLOBAL_BINDINGS
                 .iter()
-                .map(|d| {
-                    (
-                        d.binding.label().to_string(),
-                        i18n::t("ui.help.control", d.zh, d.en),
-                    )
-                })
+                .map(|d| (d.binding.label().to_string(), i18n::t1(d.key)))
                 .collect(),
         ),
         (
-            i18n::t("ui.help.section.confirm", "审批时", "While approving"),
+            i18n::t1("ui.help.section.confirm"),
             vec![
-                (
-                    "1/2/3/4".to_string(),
-                    i18n::t("ui.help.approve.choose", "选择处理方式", "Choose an action"),
-                ),
+                ("1/2/3/4".to_string(), i18n::t1("ui.help.approve.choose")),
                 (
                     "Ctrl+Shift+D".to_string(),
-                    i18n::t(
-                        "ui.help.control.perm_debug",
-                        "切换权限调试面板",
-                        "Toggle permission debug panel",
-                    ),
+                    i18n::t1("ui.help.control.perm_debug"),
                 ),
             ],
         ),
         (
-            i18n::t("ui.help.section.command", "命令", "Commands"),
+            i18n::t1("ui.help.section.command"),
             vec![
-                (
-                    "/help".to_string(),
-                    i18n::t("ui.help.cmd.help", "显示帮助", "Show help"),
-                ),
-                (
-                    "/clear".to_string(),
-                    i18n::t("ui.help.cmd.clear", "清除对话", "Clear chat"),
-                ),
-                (
-                    "/model".to_string(),
-                    i18n::t("ui.help.cmd.model", "选择模型", "Select model"),
-                ),
-                (
-                    "/effort".to_string(),
-                    i18n::t(
-                        "ui.help.cmd.effort",
-                        "设置思考深度（off/low/medium/high）",
-                        "Set thinking depth (off/low/medium/high)",
-                    ),
-                ),
-                (
-                    "/settings".to_string(),
-                    i18n::t(
-                        "ui.help.cmd.settings",
-                        "查看当前设置概览",
-                        "Show current settings overview",
-                    ),
-                ),
+                ("/help".to_string(), i18n::t1("ui.help.cmd.help")),
+                ("/clear".to_string(), i18n::t1("ui.help.cmd.clear")),
+                ("/model".to_string(), i18n::t1("ui.help.cmd.model")),
+                ("/effort".to_string(), i18n::t1("ui.help.cmd.effort")),
+                ("/settings".to_string(), i18n::t1("ui.help.cmd.settings")),
                 (
                     "/permissions".to_string(),
-                    i18n::t(
-                        "ui.help.cmd.permissions",
-                        "权限规则与审批模式",
-                        "Permission rules and approval mode",
-                    ),
+                    i18n::t1("ui.help.cmd.permissions"),
                 ),
-                (
-                    "/loop".to_string(),
-                    i18n::t("ui.help.cmd.loop", "管理定时任务", "Manage loops"),
-                ),
-                (
-                    "/agents".to_string(),
-                    i18n::t(
-                        "ui.help.cmd.agents",
-                        "管理 agent 与 teams（含 run/apply/runs/show-run/clean）",
-                        "Manage agents and teams (run/apply/runs/show-run/clean)",
-                    ),
-                ),
-                (
-                    "/plugin".to_string(),
-                    i18n::t("ui.help.cmd.plugin", "管理插件", "Manage plugins"),
-                ),
-                (
-                    "/remote".to_string(),
-                    i18n::t("ui.help.cmd.remote", "远程控制收件箱", "Remote inbox"),
-                ),
-                (
-                    "/hooks".to_string(),
-                    i18n::t("ui.help.cmd.hooks", "管理 hooks", "Manage hooks"),
-                ),
-                (
-                    "/mcp".to_string(),
-                    i18n::t("ui.help.cmd.mcp", "MCP 管理命令", "MCP commands"),
-                ),
-                (
-                    "/restore".to_string(),
-                    i18n::t(
-                        "ui.help.cmd.restore",
-                        "恢复 checkpoint",
-                        "Restore checkpoint",
-                    ),
-                ),
+                ("/loop".to_string(), i18n::t1("ui.help.cmd.loop")),
+                ("/agents".to_string(), i18n::t1("ui.help.cmd.agents")),
+                ("/plugin".to_string(), i18n::t1("ui.help.cmd.plugin")),
+                ("/remote".to_string(), i18n::t1("ui.help.cmd.remote")),
+                ("/hooks".to_string(), i18n::t1("ui.help.cmd.hooks")),
+                ("/mcp".to_string(), i18n::t1("ui.help.cmd.mcp")),
+                ("/restore".to_string(), i18n::t1("ui.help.cmd.restore")),
             ],
         ),
         (
-            i18n::t("ui.help.section.other", "其他", "Other"),
+            i18n::t1("ui.help.section.other"),
             vec![
-                (
-                    "?".to_string(),
-                    i18n::t(
-                        "ui.help.other.toggle",
-                        "显示/关闭此帮助",
-                        "Toggle this help",
-                    ),
-                ),
-                (
-                    "@filename".to_string(),
-                    i18n::t(
-                        "ui.help.other.at",
-                        "自动读取文件内容",
-                        "Auto-read file content",
-                    ),
-                ),
-                (
-                    "!cmd".to_string(),
-                    i18n::t(
-                        "ui.help.other.bang",
-                        "本地跑命令，输出进上下文",
-                        "Run locally, output goes to the model",
-                    ),
-                ),
-                (
-                    "!!cmd".to_string(),
-                    i18n::t(
-                        "ui.help.other.bangbang",
-                        "本地跑命令，输出只给你看",
-                        "Run locally, output stays out of context",
-                    ),
-                ),
+                ("?".to_string(), i18n::t1("ui.help.other.toggle")),
+                ("@filename".to_string(), i18n::t1("ui.help.other.at")),
+                ("!cmd".to_string(), i18n::t1("ui.help.other.bang")),
+                ("!!cmd".to_string(), i18n::t1("ui.help.other.bangbang")),
             ],
         ),
     ];
@@ -210,18 +88,14 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
-                i18n::t("ui.help.title", "快捷键帮助", "Keyboard Shortcuts"),
+                i18n::t1("ui.help.title"),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" ("),
             Span::styled(
-                i18n::t(
-                    "ui.help.close",
-                    "按 ? 或 ESC 关闭",
-                    "Press ? or ESC to close",
-                ),
+                i18n::t1("ui.help.close"),
                 crate::ui::themes::theme::muted_style(),
             ),
             Span::raw(")"),
@@ -251,16 +125,9 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
     }
 
     lines.push(Line::from(vec![
+        Span::styled(i18n::t1("ui.help.tip"), Style::default().fg(Color::Cyan)),
         Span::styled(
-            i18n::t("ui.help.tip", "提示: ", "Tip: "),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::styled(
-            i18n::t(
-                "ui.help.tip.confirm",
-                "工具执行时会显示确认框，用 1/2/3 或方向键选择",
-                "Tool execution may require confirmation: use 1/2/3 or arrows",
-            ),
+            i18n::t1("ui.help.tip.confirm"),
             crate::ui::themes::theme::muted_style(),
         ),
     ]));
@@ -282,7 +149,7 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .title(i18n::t("ui.help.block", "帮助", "Help")),
+            .title(i18n::t1("ui.help.block")),
     );
 
     f.render_widget(Clear, popup_area);

@@ -184,36 +184,18 @@ fn render_done_line(state: &ChatState, entry: &ChatEntry) -> Vec<Line<'static>> 
 
     let (icon, color, label) = match status {
         // 用户拒绝授权（对标 renderToolUseRejectedMessage）
-        AgentTaskStatus::Rejected => (
-            "✗",
-            theme.error,
-            crate::core::i18n::t("agent.rejected", "Rejected", "Rejected"),
-        ),
-        AgentTaskStatus::Failed => (
-            "✗",
-            theme.error,
-            crate::core::i18n::t("agent.failed", "Failed", "Failed"),
-        ),
+        AgentTaskStatus::Rejected => ("✗", theme.error, crate::core::i18n::t1("agent.rejected")),
+        AgentTaskStatus::Failed => ("✗", theme.error, crate::core::i18n::t1("agent.failed")),
         // 后台 agent 已交回控制权，不算"完成"
         AgentTaskStatus::Background => (
             "●",
             theme.inactive,
-            crate::core::i18n::t(
-                "agent.background",
-                "Running in the background",
-                "Running in the background",
-            ),
+            crate::core::i18n::t1("agent.background"),
         ),
-        _ if entry.agent_is_error.unwrap_or(false) => (
-            "✗",
-            theme.error,
-            crate::core::i18n::t("agent.failed", "Failed", "Failed"),
-        ),
-        _ => (
-            "✓",
-            theme.success,
-            crate::core::i18n::t("agent.done", "Done", "Done"),
-        ),
+        _ if entry.agent_is_error.unwrap_or(false) => {
+            ("✗", theme.error, crate::core::i18n::t1("agent.failed"))
+        }
+        _ => ("✓", theme.success, crate::core::i18n::t1("agent.done")),
     };
 
     let mut spans = vec![

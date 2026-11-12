@@ -87,9 +87,8 @@ impl GlobalBinding {
 /// 带帮助文案的注册表条目。
 pub struct BindingDoc {
     pub binding: GlobalBinding,
-    /// 帮助文案的中英文键，由 `i18n::t` 在渲染时填充。
-    pub zh: &'static str,
-    pub en: &'static str,
+    /// 帮助文案在 i18n 词典里的 key，由 `i18n::t1` 在渲染时填充。
+    pub key: &'static str,
 }
 
 /// 帮助弹窗「控制」一节的内容，**由注册表生成**。
@@ -98,83 +97,67 @@ pub struct BindingDoc {
 pub const GLOBAL_BINDINGS: &[BindingDoc] = &[
     BindingDoc {
         binding: GlobalBinding::TogglePalette,
-        zh: "打开命令面板",
-        en: "Open command palette",
+        key: "ui.help.key.toggle_palette",
     },
     BindingDoc {
         binding: GlobalBinding::ToggleTasks,
-        zh: "切换任务面板",
-        en: "Toggle tasks",
+        key: "ui.help.key.toggle_tasks",
     },
     BindingDoc {
         binding: GlobalBinding::ToggleTranscript,
-        zh: "切换详细输出（transcript）",
-        en: "Verbose output (transcript)",
+        key: "ui.help.key.toggle_transcript",
     },
     BindingDoc {
         binding: GlobalBinding::GlobalSearch,
-        zh: "全局搜索代码",
-        en: "Search across files",
+        key: "ui.help.key.global_search",
     },
     BindingDoc {
         binding: GlobalBinding::SearchChat,
-        zh: "在本对话中搜索",
-        en: "Search this conversation",
+        key: "ui.help.key.search_chat",
     },
     BindingDoc {
         binding: GlobalBinding::QuickOpen,
-        zh: "快速打开文件",
-        en: "Quick open file",
+        key: "ui.help.key.quick_open",
     },
     BindingDoc {
         binding: GlobalBinding::HistorySearch,
-        zh: "搜索历史输入",
-        en: "Search input history",
+        key: "ui.help.key.history_search",
     },
     BindingDoc {
         binding: GlobalBinding::CopyOrInterrupt,
-        zh: "复制选区 / 中断生成 / 清空输入（连按两次退出）",
-        en: "Copy selection / interrupt / clear input (press twice to exit)",
+        key: "ui.help.key.copy_or_interrupt",
     },
     BindingDoc {
         binding: GlobalBinding::ClearScreen,
-        zh: "清屏",
-        en: "Clear screen",
+        key: "ui.help.key.clear_screen",
     },
     BindingDoc {
         binding: GlobalBinding::Paste,
-        zh: "粘贴剪贴板内容",
-        en: "Paste from clipboard",
+        key: "ui.help.key.paste",
     },
     BindingDoc {
         binding: GlobalBinding::ToggleHelp,
-        zh: "显示/隐藏本帮助",
-        en: "Toggle this help",
+        key: "ui.help.key.toggle_help",
     },
     BindingDoc {
         binding: GlobalBinding::Exit,
-        zh: "退出程序",
-        en: "Exit",
+        key: "ui.help.key.exit",
     },
     BindingDoc {
         binding: GlobalBinding::TogglePlanMode,
-        zh: "切换 Plan/Build",
-        en: "Toggle Plan/Build",
+        key: "ui.help.key.toggle_plan_mode",
     },
     BindingDoc {
         binding: GlobalBinding::FoldInput,
-        zh: "折叠/展开长输入",
-        en: "Fold/unfold long input",
+        key: "ui.help.key.fold_input",
     },
     BindingDoc {
         binding: GlobalBinding::CycleThinking,
-        zh: "切换思考深度（◌/○/◐/●）",
-        en: "Cycle thinking depth (◌/○/◐/●)",
+        key: "ui.help.key.cycle_thinking",
     },
     BindingDoc {
         binding: GlobalBinding::CycleTheme,
-        zh: "切换主题",
-        en: "Cycle theme",
+        key: "ui.help.key.cycle_theme",
     },
 ];
 

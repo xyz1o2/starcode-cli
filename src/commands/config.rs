@@ -659,11 +659,7 @@ pub async fn settings(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
         ) {
             if let Some(raw_lang) = args.get(1) {
                 let Some(normalized) = i18n::normalize_language_setting(raw_lang) else {
-                    let msg = i18n::t(
-                        "cmd.settings.lang.invalid",
-                        "❌ 语言无效。支持: auto | en | zh-CN",
-                        "❌ Invalid language. Supported: auto | en | zh-CN",
-                    );
+                    let msg = i18n::t1("cmd.settings.lang.invalid");
                     ctx.state
                         .chat_history
                         .push(ChatEntry::assistant(msg).with_streaming(false));
@@ -682,11 +678,7 @@ pub async fn settings(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
                     .textarea
                     .set_placeholder_text(crate::ui::utils::text::input_placeholder_text());
 
-                let template = i18n::t(
-                    "cmd.settings.lang.set",
-                    "✅ 界面语言已设置为 {lang}（生效: {resolved}）",
-                    "✅ UI language set to {lang} (effective: {resolved})",
-                );
+                let template = i18n::t1("cmd.settings.lang.set");
                 let content = template
                     .replace("{lang}", normalized)
                     .replace("{resolved}", resolved.as_code());
@@ -741,11 +733,7 @@ async fn show_settings_help(
     ]);
     let active_provider = describe_active_provider(&provider_config);
 
-    let template = i18n::t(
-        "cmd.settings.help",
-        "设置概览：\n- 当前模型: {model}\n- 当前 Provider: {provider}\n- 审批模式: {approval}\n- 已配置 Provider 数: {configured}\n- 界面语言: {current}\n- 生效语言: {resolved}\n\n配置文件：\n- 用户: {user_path}\n- 项目: {project_path}\n- 系统: {system_path}\n\n常用入口：\n- Ctrl+P: 打开命令面板\n- Providers: Ctrl+P -> Providers\n- Model: Ctrl+P -> Model\n- 语言: /settings lang <auto|en|zh-CN>\n- 诊断: /doctor",
-        "Settings Overview:\n- Current model: {model}\n- Active provider: {provider}\n- Approval mode: {approval}\n- Configured providers: {configured}\n- UI language: {current}\n- Effective language: {resolved}\n\nConfig files:\n- User: {user_path}\n- Project: {project_path}\n- System: {system_path}\n\nQuick actions:\n- Ctrl+P: open command palette\n- Providers: Ctrl+P -> Providers\n- Model: Ctrl+P -> Model\n- Language: /settings lang <auto|en|zh-CN>\n- Diagnostics: /doctor",
-    );
+    let template = i18n::t1("cmd.settings.help");
     let content = template
         .replace("{model}", current_model)
         .replace("{provider}", &active_provider)
@@ -829,13 +817,9 @@ pub async fn lang(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
             .map_err(|e| e.to_string())?;
         let current = settings.ui_language.as_deref().unwrap_or("auto");
         let resolved = i18n::resolve_ui_language(settings.ui_language.as_deref());
-        let msg = i18n::t(
-            "cmd.settings.lang.current",
-            "当前界面语言: {lang}（生效: {resolved}）\n用法: /lang <auto|en|zh-CN>",
-            "Current UI language: {lang} (effective: {resolved})\nUsage: /lang <auto|en|zh-CN>",
-        )
-        .replace("{lang}", current)
-        .replace("{resolved}", resolved.as_code());
+        let msg = i18n::t1("cmd.settings.lang.current")
+            .replace("{lang}", current)
+            .replace("{resolved}", resolved.as_code());
         ctx.state
             .chat_history
             .push(ChatEntry::assistant(msg).with_streaming(false));

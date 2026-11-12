@@ -127,16 +127,12 @@ pub async fn handle_stream_chunk(
                 } else {
                     let prefix = match progress.status {
                         crate::types::ToolProgressStatus::Starting => {
-                            i18n::t("ui.status.starting", "状态：", "Status: ")
+                            i18n::t1("ui.status.starting")
                         }
-                        crate::types::ToolProgressStatus::Running => {
-                            i18n::t("ui.status.running", "状态：", "Status: ")
-                        }
-                        crate::types::ToolProgressStatus::Completed => {
-                            i18n::t("ui.status.done", "完成：", "Done: ")
-                        }
+                        crate::types::ToolProgressStatus::Running => i18n::t1("ui.status.running"),
+                        crate::types::ToolProgressStatus::Completed => i18n::t1("ui.status.done"),
                         crate::types::ToolProgressStatus::Failed => {
-                            i18n::t("ui.status.error", "异常：", "Error: ")
+                            i18n::t1("ui.status.error_prefix")
                         }
                     };
 

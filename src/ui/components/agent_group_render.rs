@@ -279,14 +279,11 @@ fn render_agent_progress_lines(
                 (text.to_string(), Color::Yellow)
             }
             AgentTaskStatus::Completed => (
-                with_elapsed(&crate::core::i18n::t("agent.done", "Done", "Done"), stat),
+                with_elapsed(&crate::core::i18n::t1("agent.done"), stat),
                 Color::Green,
             ),
             AgentTaskStatus::Failed => (
-                with_elapsed(
-                    &crate::core::i18n::t("agent.failed", "Failed", "Failed"),
-                    stat,
-                ),
+                with_elapsed(&crate::core::i18n::t1("agent.failed"), stat),
                 Color::Red,
             ),
             // 用户拒绝授权（对标 renderToolUseRejectedMessage）

@@ -15,7 +15,7 @@ const FOLDED_PREVIEW_MAX_CHARS: usize = 72;
 
 fn truncate_for_preview(value: &str, max_chars: usize) -> String {
     if value.is_empty() {
-        return i18n::t("ui.input.empty", "(空内容)", "(empty)");
+        return i18n::t1("ui.input.empty");
     }
     let mut out = String::new();
     let mut count = 0usize;
@@ -28,7 +28,7 @@ fn truncate_for_preview(value: &str, max_chars: usize) -> String {
         count += 1;
     }
     if out.is_empty() {
-        i18n::t("ui.input.empty", "(空内容)", "(empty)")
+        i18n::t1("ui.input.empty")
     } else {
         out
     }
@@ -282,12 +282,8 @@ fn build_folded_lines(state: &ChatState, total_lines: usize) -> Vec<Line<'static
     vec![
         Line::from(vec![
             Span::styled(
-                i18n::t(
-                    "ui.input.paste_folded",
-                    "[已粘贴 +{lines} 行]",
-                    "[Pasted +{lines} lines]",
-                )
-                .replace("{lines}", &total_lines.saturating_sub(1).to_string()),
+                i18n::t1("ui.input.paste_folded")
+                    .replace("{lines}", &total_lines.saturating_sub(1).to_string()),
                 Style::default().fg(Color::Yellow),
             ),
             Span::styled(

@@ -268,6 +268,29 @@ Four constraints, all deliberate:
 
 Model and context window are still **not** self-tunable: `agent_run.rs` freezes them into the per-message fresh `Agent` at turn start, so they apply to the next user message via the existing `RuntimeSettingsMutation` path. `inspect` lists them as read-only and points at `/model` and `/context`. Persisted overrides land in `~/.star/self-tuning.json` (`Storage::self_tuning_path`), deliberately **not** `settings.json` — a within-session adjustment should not become the user's permanent configuration.
 
+### i18n：词典是唯一真相源
+
+调用点只有一种形式：**`i18n::t1("some.key")`** —— 单参。文案住在 `i18n/en-US.json` 和 `i18n/zh-CN.json`，改文案只改词典。
+
+**为什么不是 `i18n::t(key, zh, en)`。** 那个三参形式曾经存在，2026-11-12 下线。两个理由：两份字面量常常一模一样（读代码的人得逐字比对），以及更糟的 —— **它们根本不生效**。取文案是词典优先（`dict.get(key)` 命中直接返回），词典既然内嵌进二进制，调用点写的就是死代码。写两遍的代价是「改了个寂寞」：以为改了，其实改的是一行没人读的字面量。
+
+**词典已经编译进二进制。** `src/core/i18n_dict.rs` 用 `rust_embed` 内嵌 `i18n/`（和系统提示词同一个模式）。这一步不是可选的：release 产物只打包二进制 + LICENSE + README，`i18n/` 目录不在包里 —— 不内嵌的话用户机器上永远读不到词典，文案只能靠调用点字面量撑着，那正是三参形式的历史包袱。
+
+加载顺序（后者覆盖前者）：内嵌词典 → `cwd/i18n/` → `~/.starcode/i18n/` → `.star/i18n/`。外部词典让用户能覆盖翻译。
+
+**词典缺 key 时 `t1` 返回 key 本身**，不是空字符串。空串在界面上是「这一行什么都没写」，很难联想到漏了词典；返回 key 一眼看出是哪个 key 没进。
+
+四个门在 `src/core/i18n.rs` 的 `mod tests` 里，缺一个就红：
+
+- `every_key_used_in_the_source_tree_exists_in_the_dictionary` —— **窄集**判据：`T1Scanner` 单遍词法扫描 `src/` 全部 `.rs`，配平 `t1(...)` 实参括号，实参里的字面量（含三元分支）必须在两份词典里都在。实参是变量的调用点（`t1(d.key)`）必须登记进 `DYNAMIC_KEY_SOURCES`（`keymap.rs`、`palette/items.rs`、`help_popup.rs`、`palette_action.rs`），未登记直接红
+- `the_dictionary_has_no_unreferenced_entries` —— **宽集**判据：源码里出现 `"<key>"` 字面量即算引用。两个门用不同集合是刻意的：宽集把 `user.name`、`t.log.4`、`api.anthropic.com` 都当 key（缺失门误报一片），但宽集漏判孤儿的方向是安全的；缺失门必须从严
+- `the_two_dictionaries_cover_the_same_keys` —— 两份词典的 key 集合必须相同（差一个 = 那种语言下界面显示 key 本身）
+- `dictionary_values_use_real_newlines_not_escaped_sequences` —— 词典值里的换行必须是**真换行**，不能是字面量 `\n` 两字符
+
+最后一条踩过：灌词典时用 `json.dumps` 会把真换行编码成 `\n`，解析出来还是两字符，屏幕上就显示成 `# Provider Doctor\n\n`。同时注意 `t1` 的 key 不在词典时**显示 key 本身**这个兜底，恰恰是第一个门要拦的东西。扫描器本身也踩过一课：`t1(` 是 3 个字符，括号在 `idx+2`——手算偏移配平括号的那一版让**每个**调用点都解析失败，所以现在用单遍词法扫描器（`T1Scanner`），注释/字符串/字符字面量与调用点识别在同一个循环里，索引天然一致。
+
+**动态文案走模板 + 占位符。** 需要插值时，词典里存 `{0}` / `{1}` 或 `{count}` 这类占位符，调用点 `.replace("{0}", &value)`。命名占位符（`{name}`、`{count}`）优先 —— 多个插值时 `{0}` 读起来是「第几个」。
+
 ### Debugging a TUI
 
 You cannot print — ratatui owns the terminal. File logging is **on by default** and writes to `.star/logs/starcode_debug.log` and `.star/logs/agent.log` via `utils::logging::{append_debug_log_line, append_agent_log_line}`; `STAR_LOG_DIR` relocates it and `STAR_LOG_ENABLED=0` disables it. Existing call sites tag lines `[Worker]`, `[AgentRuntime]`, `[INIT]`, `[UI]` — follow that.
@@ -275,7 +298,7 @@ You cannot print — ratatui owns the terminal. File logging is **on by default*
 ## Conventions
 
 - **Comments and doc comments in Chinese; user-visible strings in English.** `src/commands/` follows this strictly. Older code (e.g. `src/ui/app/logic.rs`) still has Chinese in user-facing strings.
-- Localized strings go through `i18n::t(key, zh, en)` (`src/core/i18n.rs`): dictionary hit first, else the language-appropriate literal.
+- Localized strings go through `i18n::t1(key)` (`src/core/i18n.rs`) — **单参**。文案由词典拥有，调用点只留 key。详见下方「i18n：词典是唯一真相源」。
 - Large modules open with a `///` header block covering architecture, threading, and error handling (`ui/app/runtime.rs`, `runtime/messages.rs`, `ui/services/worker.rs`). Match that when adding a module of comparable weight.
 - `src/lib.rs` and `src/main.rs` both open with a blanket `#![allow(dead_code, unused_imports, unused_variables, unused_mut, unused_assignments)]`. The compiler will not tell you something is unused — decide by grepping for call sites.
 - rustfmt `max_width = 100`; clippy.toml sets `too-many-lines-threshold = 100`, `too-many-arguments-threshold = 10`.

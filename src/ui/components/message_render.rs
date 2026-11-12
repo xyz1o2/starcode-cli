@@ -121,23 +121,12 @@ pub(crate) fn render_non_tool_entry_blocks(
                         n => format!(" · ~{} tokens", n),
                     };
                     let header_text = if cancelling {
-                        format!(
-                            "{}…",
-                            crate::core::i18n::t(
-                                "ui.thinking.cancelling",
-                                "Canceling",
-                                "Canceling"
-                            )
-                        )
+                        format!("{}…", crate::core::i18n::t1("ui.thinking.cancelling"))
                     } else {
                         match entry.reasoning_finished_elapsed_ms {
                             Some(ms) => format!(
                                 "{} {}{}",
-                                crate::core::i18n::t(
-                                    "ui.thinking.thought_for",
-                                    "思考了",
-                                    "Thought for"
-                                ),
+                                crate::core::i18n::t1("ui.thinking.thought_for"),
                                 format_thinking_duration(ms),
                                 token_suffix,
                             ),
@@ -148,11 +137,7 @@ pub(crate) fn render_non_tool_entry_blocks(
                             // 一轮里有多个思考块时，用回合起点会让每个块都显示
                             // 同一个"从回合开始算"的时间。
                             None if is_streaming_now => {
-                                let label = crate::core::i18n::t(
-                                    "ui.thinking.in_progress",
-                                    "思考中",
-                                    "Thinking",
-                                );
+                                let label = crate::core::i18n::t1("ui.thinking.in_progress");
                                 match entry.reasoning_started_at {
                                     Some(started) => format!(
                                         "{} {}{}…",
@@ -167,7 +152,7 @@ pub(crate) fn render_non_tool_entry_blocks(
                             // 用过去态，别让它永远停在 "Thinking"。
                             None => format!(
                                 "{}{}",
-                                crate::core::i18n::t("ui.thinking.past", "思考过", "Thought"),
+                                crate::core::i18n::t1("ui.thinking.past"),
                                 token_suffix,
                             ),
                         }
@@ -323,14 +308,7 @@ pub(crate) fn render_non_tool_entry_blocks(
                             Span::styled("∴ ", label_style),
                             Span::styled(header_text.clone(), label_style),
                             Span::styled(
-                                format!(
-                                    " {}",
-                                    crate::core::i18n::t(
-                                        "ui.thinking.expand_hint",
-                                        "(ctrl+o 展开思考)",
-                                        "(ctrl+o to expand)",
-                                    )
-                                ),
+                                format!(" {}", crate::core::i18n::t1("ui.thinking.expand_hint")),
                                 theme.subtle_style(),
                             ),
                         ];
@@ -350,14 +328,7 @@ pub(crate) fn render_non_tool_entry_blocks(
                             Span::styled("∴ ", label_style),
                             Span::styled(header_text, label_style),
                             Span::styled(
-                                format!(
-                                    " {}",
-                                    crate::core::i18n::t(
-                                        "ui.thinking.expand_hint",
-                                        "(ctrl+o 展开思考)",
-                                        "(ctrl+o to expand)",
-                                    )
-                                ),
+                                format!(" {}", crate::core::i18n::t1("ui.thinking.expand_hint")),
                                 theme.subtle_style(),
                             ),
                         ];

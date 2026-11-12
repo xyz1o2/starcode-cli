@@ -1141,11 +1141,7 @@ pub fn build_status_lines(state: &ChatState, width: u16) -> Vec<Line<'static>> {
         lines.push(Line::from(vec![
             Span::styled(" ⚠ ", Style::default().fg(theme.warning)),
             Span::styled(
-                crate::core::i18n::t(
-                    "ui.model.confirm_switch",
-                    &format!("切换模型到 {}? (y/n)", model),
-                    &format!("Switch model to {}? (y/n)", model),
-                ),
+                crate::core::i18n::t1("ui.model.confirm_switch").replace("{0}", &model),
                 Style::default().fg(theme.warning),
             ),
         ]));

@@ -486,10 +486,8 @@ pub async fn run_ui_loop(
             crate::ui::components::interrupted::push_interrupted_notice(state, partial_kept);
             // 中断后排队中的确认请求也失效了，必须先清队列再清当前卡，
             // 否则 clear 会把一张没人在等的卡重新激活。
-            state.discard_pending_confirmation_queue(&crate::core::i18n::t(
+            state.discard_pending_confirmation_queue(&crate::core::i18n::t1(
                 "ui.confirm.cancelled_interrupt",
-                "已取消 · 回合被中断",
-                "Cancelled — the turn was interrupted",
             ));
             // Clear confirmation state to unblock queued messages
             state.clear_pending_confirmation();
@@ -521,11 +519,9 @@ pub async fn run_ui_loop(
             state.end_thinking();
             // 不能写 "✓ Done"：走到这里只说明 UI 没等到信号，agent 是否还在跑
             // 并不知道。谎报完成正是"界面上什么都不剩"的最后一环。
-            let zh = format!("⚠ 已静默 {stall_secs}s，回合可能卡住（Esc 可中断）");
-            let en = format!(
-                "⚠ No stream activity for {stall_secs}s — the turn may be stuck (Esc to interrupt)"
+            state.current_status_line = Some(
+                crate::core::i18n::t1("ui.status.stalled").replace("{0}", &stall_secs.to_string()),
             );
-            state.current_status_line = Some(crate::core::i18n::t("ui.status.stalled", &zh, &en));
         }
 
         // 后台轮询结果：`/loop` 与 `/remote` 的 I/O 跑在独立任务里（见
@@ -996,14 +992,7 @@ pub async fn run_app(
     let mut state = ChatState::new();
     state.auto_follow = true;
     state.virtual_list.mark_all_dirty();
-    state.current_status_line = Some(
-        crate::core::i18n::t(
-            "ui.init.loading",
-            "正在加载配置和工具…",
-            "Loading configuration and tools…",
-        )
-        .to_string(),
-    );
+    state.current_status_line = Some(crate::core::i18n::t1("ui.init.loading").to_string());
     terminal.draw(|f| super::draw_ui(f, &mut state))?;
 
     // ── 启动早期输入捕获 ──

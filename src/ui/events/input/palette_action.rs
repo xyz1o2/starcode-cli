@@ -127,11 +127,8 @@ pub(crate) async fn execute_palette_action(
                 state.pending_model_confirmation = true;
                 // 提示本体由状态栏那一行常驻渲染（见 status_line::build_status_lines）——
                 // 只写进 `current_status_line` 的话，空闲状态下它根本不显示。
-                state.current_status_line = Some(crate::core::i18n::t(
-                    "ui.model.confirm_switch",
-                    &format!("切换模型到 {}? (y/n)", model),
-                    &format!("Switch model to {}? (y/n)", model),
-                ));
+                state.current_status_line =
+                    Some(crate::core::i18n::t1("ui.model.confirm_switch").replace("{0}", &model));
                 return Ok(());
             }
 
@@ -301,13 +298,9 @@ pub(crate) async fn execute_palette_action(
                 0,
                 &format!(
                     "{} {}，{}",
-                    crate::core::i18n::t("provider.selected", "已选择", "Selected"),
+                    crate::core::i18n::t1("provider.selected"),
                     provider_id,
-                    crate::core::i18n::t(
-                        "provider.next_select_model",
-                        "接下来选择模型",
-                        "now select a model"
-                    )
+                    crate::core::i18n::t1("provider.next_select_model")
                 ),
             );
             // 先用磁盘缓存把面板填上：这个 provider 以前拉过的话，一按就是完整列表，
@@ -444,11 +437,7 @@ pub(crate) async fn execute_palette_action(
         PaletteAction::CreatePr => {
             state.close_palette();
             // Send a message to the agent to create a PR
-            let msg = crate::core::i18n::t(
-                "ui.pr.create_request",
-                "请帮我创建一个 Pull Request。使用 `gh pr create` 命令，自动填充标题和描述。",
-                "Please help me create a Pull Request. Use `gh pr create` command with auto-filled title and description.",
-            ).to_string();
+            let msg = crate::core::i18n::t1("ui.pr.create_request").to_string();
             let message_id = state.next_message_id;
             state.next_message_id += 1;
             state.chat_history.push(crate::types::ChatEntry::new(
@@ -468,20 +457,14 @@ pub(crate) async fn execute_palette_action(
             crate::ui::app::logic::emit_status_text(
                 state,
                 0,
-                &crate::core::i18n::t(
-                    "ui.status.colorblind",
-                    &format!(
-                        "色盲模式: {}",
-                        if state.colorblind_mode {
-                            "开启"
-                        } else {
-                            "关闭"
-                        }
-                    ),
-                    &format!(
-                        "Colorblind mode: {}",
-                        if state.colorblind_mode { "ON" } else { "OFF" }
-                    ),
+                &format!(
+                    "{}: {}",
+                    crate::core::i18n::t1("ui.status.colorblind"),
+                    crate::core::i18n::t1(if state.colorblind_mode {
+                        "ui.status.colorblind.on"
+                    } else {
+                        "ui.status.colorblind.off"
+                    })
                 ),
             );
         }

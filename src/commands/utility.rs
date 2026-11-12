@@ -33,11 +33,7 @@ pub async fn undo(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult 
             )
         };
 
-        let template = i18n::t(
-            "cmd.undo.success",
-            "✅ 已成功撤销到快照: {id}\n\n{summary}",
-            "✅ Reverted to snapshot: {id}\n\n{summary}",
-        );
+        let template = i18n::t1("cmd.undo.success");
         let content = template
             .replace("{id}", &snapshot_id)
             .replace("{summary}", &summary);
@@ -48,14 +44,9 @@ pub async fn undo(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult 
     }
 
     // No file-history snapshots — show the "none found" message.
-    ctx.state.chat_history.push(
-        ChatEntry::assistant(i18n::t(
-            "cmd.undo.none",
-            "⚠️ 没有找到可撤销的快照。",
-            "⚠️ No undo snapshots found.",
-        ))
-        .with_streaming(false),
-    );
+    ctx.state
+        .chat_history
+        .push(ChatEntry::assistant(i18n::t1("cmd.undo.none")).with_streaming(false));
 
     Ok(())
 }
@@ -107,11 +98,7 @@ pub async fn copy(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
         let content_to_copy = msg.content.clone();
         match crate::ui::utils::clipboard::copy_to_clipboard(&content_to_copy) {
             Ok(()) => {
-                let template = i18n::t(
-                    "cmd.copy.success_nth",
-                    "✅ 已复制第 {index} 条助手回复（共 {total} 条）到剪贴板。",
-                    "✅ Copied assistant reply #{index} of {total} to clipboard.",
-                );
+                let template = i18n::t1("cmd.copy.success_nth");
                 ctx.state.chat_history.push(
                     ChatEntry::assistant(
                         template
@@ -122,29 +109,16 @@ pub async fn copy(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
                 );
             }
             Err(e) => {
-                let prefix = i18n::t(
-                    "cmd.copy.error",
-                    "无法访问剪贴板: ",
-                    "Unable to access clipboard: ",
-                );
+                let prefix = i18n::t1("cmd.copy.error");
                 return Err(format!("{}{}", prefix, e));
             }
         }
     } else if available == 0 {
-        ctx.state.chat_history.push(
-            ChatEntry::assistant(i18n::t(
-                "cmd.copy.none",
-                "⚠️ 未找到可复制的助手回复。",
-                "⚠️ No assistant reply available to copy.",
-            ))
-            .with_streaming(false),
-        );
+        ctx.state
+            .chat_history
+            .push(ChatEntry::assistant(i18n::t1("cmd.copy.none")).with_streaming(false));
     } else {
-        let template = i18n::t(
-            "cmd.copy.unavailable",
-            "⚠️ 没有第 {index} 条助手回复（共 {total} 条）。",
-            "⚠️ No assistant reply #{index} (only {total} available).",
-        );
+        let template = i18n::t1("cmd.copy.unavailable");
         ctx.state.chat_history.push(
             ChatEntry::assistant(
                 template

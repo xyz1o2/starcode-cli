@@ -138,10 +138,7 @@ pub fn render_log_selector(f: &mut Frame, state: &LogSelectorState, area: Rect, 
     // Title + search
     let title_line = Line::from(vec![
         Span::styled(
-            format!(
-                " {} ",
-                i18n::t("ui.log_selector.title", "会话浏览器", "Session Browser")
-            ),
+            format!(" {} ", i18n::t1("ui.log_selector.title")),
             Style::default()
                 .fg(theme.primary)
                 .add_modifier(Modifier::BOLD),
@@ -185,10 +182,7 @@ pub fn render_log_selector(f: &mut Frame, state: &LogSelectorState, area: Rect, 
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.border))
                 .title(Span::styled(
-                    format!(
-                        " {} ",
-                        i18n::t("ui.log_selector.sessions", "会话", "Sessions")
-                    ),
+                    format!(" {} ", i18n::t1("ui.log_selector.sessions")),
                     Style::default().fg(theme.secondary),
                 )),
         )
@@ -201,33 +195,17 @@ pub fn render_log_selector(f: &mut Frame, state: &LogSelectorState, area: Rect, 
 
     // Preview
     let preview_text = if state.is_loading {
-        i18n::t(
-            "ui.log_selector.loading",
-            "正在加载保存的会话…",
-            "Loading saved sessions...",
-        )
+        i18n::t1("ui.log_selector.loading")
     } else if let Some(error) = state.load_error.as_deref() {
-        format!(
-            "{}: {}",
-            i18n::t(
-                "ui.log_selector.load_failed",
-                "无法加载会话",
-                "Could not load sessions"
-            ),
-            error
-        )
+        format!("{}: {}", i18n::t1("ui.log_selector.load_failed"), error)
     } else if let Some(session) = state.get_selected_session() {
         if session.preview.is_empty() {
-            i18n::t("ui.log_selector.no_preview", "无预览", "No preview")
+            i18n::t1("ui.log_selector.no_preview")
         } else {
             session.preview.clone()
         }
     } else {
-        i18n::t(
-            "ui.log_selector.no_sessions",
-            "无保存的会话",
-            "No saved sessions",
-        )
+        i18n::t1("ui.log_selector.no_sessions")
     };
 
     let preview = Paragraph::new(preview_text)
@@ -238,10 +216,7 @@ pub fn render_log_selector(f: &mut Frame, state: &LogSelectorState, area: Rect, 
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.border))
                 .title(Span::styled(
-                    format!(
-                        " {} ",
-                        i18n::t("ui.log_selector.preview", "预览", "Preview")
-                    ),
+                    format!(" {} ", i18n::t1("ui.log_selector.preview")),
                     Style::default().fg(theme.secondary),
                 )),
         );
@@ -251,9 +226,9 @@ pub fn render_log_selector(f: &mut Frame, state: &LogSelectorState, area: Rect, 
     let hints = Line::from(vec![Span::styled(
         format!(
             " Enter={} Esc={} /={}",
-            i18n::t("ui.log_selector.resume", "恢复", "Resume"),
-            i18n::t("ui.log_selector.close", "关闭", "Close"),
-            i18n::t("ui.log_selector.filter", "筛选", "Filter"),
+            i18n::t1("ui.log_selector.resume"),
+            i18n::t1("ui.log_selector.close"),
+            i18n::t1("ui.log_selector.filter"),
         ),
         Style::default().fg(theme.comment),
     )]);

@@ -22,3 +22,5 @@ logs/
 .star/context/
 .code/
 .image/
+.claude/
+*.snap

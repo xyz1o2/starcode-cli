@@ -149,11 +149,7 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
                 ratatui::style::Style::default().fg(theme.success),
             )]),
             ratatui::text::Line::from(vec![ratatui::text::Span::styled(
-                crate::core::i18n::t(
-                    "ui.empty.hint",
-                    "  输入问题开始对话，或 Ctrl+P 打开命令面板",
-                    "  Type a question to start, or Ctrl+P for commands",
-                ),
+                crate::core::i18n::t1("ui.empty.hint"),
                 ratatui::style::Style::default().fg(theme.secondary),
             )]),
         ])
@@ -307,11 +303,7 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
                 ratatui::style::Style::default().fg(ratatui::style::Color::Yellow),
             ),
             ratatui::text::Span::styled(
-                crate::core::i18n::t(
-                    "ui.clear.confirm",
-                    "确认清除所有对话? (y/n)",
-                    "Clear all conversation? (y/n)",
-                ),
+                crate::core::i18n::t1("ui.clear.confirm"),
                 ratatui::style::Style::default().fg(ratatui::style::Color::White),
             ),
         ]);
@@ -339,11 +331,7 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
                 ratatui::style::Style::default().fg(ratatui::style::Color::Yellow),
             ),
             ratatui::text::Span::styled(
-                crate::core::i18n::t(
-                    "ui.paste.confirm",
-                    &format!("粘贴 {} 行文本？(y/n)", line_count),
-                    &format!("Paste {} lines? (y/n)", line_count),
-                ),
+                crate::core::i18n::t1("ui.paste.confirm").replace("{0}", &line_count.to_string()),
                 ratatui::style::Style::default().fg(ratatui::style::Color::White),
             ),
         ]);

@@ -55,13 +55,11 @@ fn risk_label(risk: &crate::types::RiskLevel) -> String {
         crate::types::RiskLevel::Critical => "⚠",
     };
     let text = match risk {
-        crate::types::RiskLevel::Safe => i18n::t("ui.confirm.risk.safe", "安全", "Safe"),
-        crate::types::RiskLevel::Low => i18n::t("ui.confirm.risk.low", "低风险", "Low"),
-        crate::types::RiskLevel::Medium => i18n::t("ui.confirm.risk.medium", "中风险", "Medium"),
-        crate::types::RiskLevel::High => i18n::t("ui.confirm.risk.high", "高风险", "High"),
-        crate::types::RiskLevel::Critical => {
-            i18n::t("ui.confirm.risk.critical", "严重风险", "Critical")
-        }
+        crate::types::RiskLevel::Safe => i18n::t1("ui.confirm.risk.safe"),
+        crate::types::RiskLevel::Low => i18n::t1("ui.confirm.risk.low"),
+        crate::types::RiskLevel::Medium => i18n::t1("ui.confirm.risk.medium"),
+        crate::types::RiskLevel::High => i18n::t1("ui.confirm.risk.high"),
+        crate::types::RiskLevel::Critical => i18n::t1("ui.confirm.risk.critical"),
     };
     format!("{} {}", shape, text)
 }
@@ -148,10 +146,7 @@ fn render_edit_diff_preview(diff: &str, wrap_width: usize, theme: &Theme) -> Vec
     }
 
     let mut lines = vec![Line::from(Span::styled(
-        format!(
-            "  {}",
-            i18n::t("ui.confirm.label.diff", "变更预览:", "Diff preview:")
-        ),
+        format!("  {}", i18n::t1("ui.confirm.label.diff")),
         Style::default().fg(theme.inactive),
     ))];
 
@@ -195,11 +190,7 @@ async fn build_edit_preview_diff(path: &str, old_str: &str, new_str: &str) -> St
     if path == "unknown" || old_str.is_empty() {
         let raw_preview = old_str.lines().take(6).collect::<Vec<_>>().join("\n");
         let new_preview = new_str.lines().take(6).collect::<Vec<_>>().join("\n");
-        let tpl = i18n::t(
-            "ui.confirm.msg.preview_mode",
-            "（预览模式: 参数不完整）\n- {0}\n+ {1}",
-            "(preview mode: incomplete parameters)\n- {0}\n+ {1}",
-        );
+        let tpl = i18n::t1("ui.confirm.msg.preview_mode");
         return tpl
             .replace("{0}", &raw_preview)
             .replace("{1}", &new_preview);
@@ -208,11 +199,7 @@ async fn build_edit_preview_diff(path: &str, old_str: &str, new_str: &str) -> St
     let content = match tokio::fs::read_to_string(path).await {
         Ok(content) => content,
         Err(e) => {
-            let tpl = i18n::t(
-                "ui.confirm.msg.failed_read",
-                "（无法读取文件，无法生成差异: {0}）\n- {1}\n+ {2}",
-                "(failed to read file, cannot generate diff: {0})\n- {1}\n+ {2}",
-            );
+            let tpl = i18n::t1("ui.confirm.msg.failed_read");
             return tpl
                 .replace("{0}", &e.to_string())
                 .replace("{1}", old_str)
@@ -225,11 +212,7 @@ async fn build_edit_preview_diff(path: &str, old_str: &str, new_str: &str) -> St
         crate::core::tools::edit::calculate_replacement(&normalized, old_str, new_str);
 
     if replacement.occurrences == 0 {
-        return i18n::t(
-            "ui.confirm.msg.no_diff",
-            "（无差异或替换未匹配）\n",
-            "(no differences or replacement not matched)\n",
-        );
+        return i18n::t1("ui.confirm.msg.no_diff");
     }
 
     crate::core::tools::edit::build_edit_diff(path, &normalized, &replacement.new_content)
@@ -328,17 +311,11 @@ pub fn build_confirmation_card_block(
 
     // ── Title (bold, permission color) ──
     let title = match &confirmation.operation_type {
-        ConfirmationType::EditFile => {
-            i18n::t("ui.confirm.title.edit_file", "编辑文件", "Edit file")
-        }
-        ConfirmationType::ShellCommand => {
-            i18n::t("ui.confirm.title.bash", "Bash 命令", "Bash command")
-        }
-        ConfirmationType::CreateFile => {
-            i18n::t("ui.confirm.title.create_file", "新建文件", "Create file")
-        }
+        ConfirmationType::EditFile => i18n::t1("ui.confirm.title.edit_file"),
+        ConfirmationType::ShellCommand => i18n::t1("ui.confirm.title.bash"),
+        ConfirmationType::CreateFile => i18n::t1("ui.confirm.title.create_file"),
         ConfirmationType::AskUserQuestion => "Question".to_string(), // rendered by build_ask_user_question_card
-        _ => i18n::t("ui.confirm.title.tool_use", "工具调用", "Tool use"),
+        _ => i18n::t1("ui.confirm.title.tool_use"),
     };
     lines.push(Line::from(Span::styled(
         title,
@@ -409,7 +386,7 @@ pub fn build_confirmation_card_block(
                 lines.push(Line::from(vec![Span::styled(
                     format!(
                         "{}{}",
-                        i18n::t("ui.confirm.label.risk", "  风险: ", "  Risk: "),
+                        i18n::t1("ui.confirm.label.risk"),
                         risk_label(estimated_risk)
                     ),
                     Style::default().fg(risk_color(estimated_risk, &palette)),
@@ -418,10 +395,7 @@ pub fn build_confirmation_card_block(
                 if let Some(diff) = diff_preview {
                     if !diff.is_empty() {
                         lines.push(Line::from(Span::styled(
-                            format!(
-                                "  {}",
-                                i18n::t("ui.confirm.label.diff", "变更预览:", "Diff preview:")
-                            ),
+                            format!("  {}", i18n::t1("ui.confirm.label.diff")),
                             Style::default().fg(palette.secondary),
                         )));
                         for diff_line in diff.lines().take(20) {
@@ -490,11 +464,7 @@ pub fn build_confirmation_card_block(
         let risk = estimate_details_risk(confirmation);
         if confirmation.is_dangerous || !matches!(risk, crate::types::RiskLevel::Safe) {
             lines.push(Line::from(Span::styled(
-                format!(
-                    "{}{}",
-                    i18n::t("ui.confirm.label.risk", "  风险: ", "  Risk: "),
-                    risk_label(&risk)
-                ),
+                format!("{}{}", i18n::t1("ui.confirm.label.risk"), risk_label(&risk)),
                 Style::default()
                     .fg(risk_color(&risk, &palette))
                     .add_modifier(
@@ -515,11 +485,7 @@ pub fn build_confirmation_card_block(
     //
     // 不再前置空行；问题行与选项紧挨着标题块，卡片高度省 1-2 行。
     lines.push(Line::from(Span::styled(
-        i18n::t(
-            "ui.confirm.question.proceed",
-            "  是否继续？",
-            "  Do you want to proceed?",
-        ),
+        i18n::t1("ui.confirm.question.proceed"),
         Style::default().fg(theme.foreground),
     )));
 
@@ -563,26 +529,10 @@ pub fn build_confirmation_card_block(
 
     // 文案里不要再写 "1. " —— option() 自己会加序号和当前项的 `>` 标记，
     // 写了就渲染成 "1. 1. Allow once"（见 confirmation_dialog 的历史截图）。
-    lines.push(option(
-        1,
-        &i18n::t("ui.confirm.option.once", "允许一次", "Allow once"),
-    ));
-    lines.push(option(
-        2,
-        &i18n::t(
-            "ui.confirm.option.session",
-            "本会话允许",
-            "Allow for session",
-        ),
-    ));
-    lines.push(option(
-        3,
-        &i18n::t("ui.confirm.option.always", "永久允许", "Always allow"),
-    ));
-    lines.push(option(
-        4,
-        &i18n::t("ui.confirm.option.deny", "拒绝", "Deny"),
-    ));
+    lines.push(option(1, &i18n::t1("ui.confirm.option.once")));
+    lines.push(option(2, &i18n::t1("ui.confirm.option.session")));
+    lines.push(option(3, &i18n::t1("ui.confirm.option.always")));
+    lines.push(option(4, &i18n::t1("ui.confirm.option.deny")));
 
     // ── Feedback input (Tab) ──
     //
@@ -625,51 +575,19 @@ pub fn build_confirmation_card_block(
     if show_explanation {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            i18n::t(
-                "ui.confirm.explain.title",
-                "  为什么询问此权限？",
-                "  Why is this permission needed?",
-            ),
+            i18n::t1("ui.confirm.explain.title"),
             Style::default()
                 .fg(palette.accent)
                 .add_modifier(Modifier::BOLD),
         )));
         let explanation = match &confirmation.details {
             ConfirmationDetails::EditFile { .. } | ConfirmationDetails::CreateFile { .. } => {
-                i18n::t(
-                    "ui.confirm.explain.edit",
-                    "  该工具将修改你的文件系统。请检查上面的路径与变更是否符合预期。",
-                    "  This tool will modify files on disk. Review the path and changes above.",
-                )
+                i18n::t1("ui.confirm.explain.edit")
             }
-            ConfirmationDetails::DeleteFile { .. } => {
-                i18n::t(
-                    "ui.confirm.explain.delete",
-                    "  该工具将删除文件，此操作不可恢复。",
-                    "  This tool will delete a file, which cannot be undone.",
-                )
-            }
-            ConfirmationDetails::ShellCommand { .. } => {
-                i18n::t(
-                    "ui.confirm.explain.bash",
-                    "  该命令将在你的机器上执行，可能产生副作用。风险等级见上方标注。",
-                    "  This command will run on your machine and may have side effects. See risk level above.",
-                )
-            }
-            ConfirmationDetails::NetworkRequest { .. } => {
-                i18n::t(
-                    "ui.confirm.explain.network",
-                    "  该工具将向外部服务发起网络请求。",
-                    "  This tool will make a network request to an external service.",
-                )
-            }
-            _ => {
-                i18n::t(
-                    "ui.confirm.explain.generic",
-                    "  出于安全考虑，该操作需要你确认后才能执行。",
-                    "  For safety, this action requires your approval before it runs.",
-                )
-            }
+            ConfirmationDetails::DeleteFile { .. } => i18n::t1("ui.confirm.explain.delete"),
+            ConfirmationDetails::ShellCommand { .. } => i18n::t1("ui.confirm.explain.bash"),
+            ConfirmationDetails::NetworkRequest { .. } => i18n::t1("ui.confirm.explain.network"),
+            _ => i18n::t1("ui.confirm.explain.generic"),
         };
         lines.push(Line::from(Span::styled(
             explanation.to_string(),
@@ -709,11 +627,7 @@ pub fn build_confirmation_card_block(
     // 但一行提示里排五个动作已经超出扫视体验，低频动作交给 Ctrl+E 解释。
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        i18n::t(
-            "ui.confirm.hint.key_guide",
-            "  Esc 拒绝 · 1-4 选择 · Enter 确认 · Ctrl+E/Ctrl+Shift+D 解释/调试",
-            "  Esc to reject · 1-4 to select · Enter to confirm · Ctrl+E/Ctrl+Shift+D explain/debug",
-        ),
+        i18n::t1("ui.confirm.hint.key_guide"),
         Style::default().fg(palette.faint),
     )));
 
@@ -923,17 +837,9 @@ pub fn build_ask_user_question_card(
     // ── Help ──
     lines.push(Line::from(""));
     let help = if multi_select_flag {
-        crate::core::i18n::t(
-            "ui.confirm.help_multiselect",
-            "Enter=确认  Esc=取消  1-9=切换  Space=多选切换  Tab=其他输入",
-            "Enter=Confirm  Esc=Cancel  1-9=Toggle  Space=Multi-select  Tab=Other input",
-        )
+        crate::core::i18n::t1("ui.confirm.help_multiselect")
     } else {
-        crate::core::i18n::t(
-            "ui.confirm.help_single",
-            "Enter=确认  Esc=取消  1-9=选择  ↑↓=导航  Tab/选Other后Enter=输入自定义",
-            "Enter=Confirm  Esc=Cancel  1-9=Select  ↑↓=Navigate  Tab/Other+Enter=Custom input",
-        )
+        crate::core::i18n::t1("ui.confirm.help_single")
     };
     lines.push(Line::from(Span::styled(
         format!("  {}", help),
@@ -1044,9 +950,7 @@ pub async fn build_confirmation_from_tool_call(
 
     match name {
         "ExitPlanMode" => {
-            let plan = get_str(&["plan"]).unwrap_or_else(|| {
-                i18n::t("ui.confirm.msg.empty_plan", "（空计划）", "(empty plan)")
-            });
+            let plan = get_str(&["plan"]).unwrap_or_else(|| i18n::t1("ui.confirm.msg.empty_plan"));
             let preview = if plan.chars().count() > 800 {
                 format!("{}...", plan.chars().take(800).collect::<String>())
             } else {
@@ -1212,11 +1116,7 @@ pub async fn build_confirmation_from_tool_call(
                         let stat_text = String::from_utf8_lossy(&stat.stdout).to_string();
                         let diff_text = String::from_utf8_lossy(&diff.stdout).to_string();
                         if stat_text.is_empty() && diff_text.is_empty() {
-                            Some(i18n::t(
-                                "ui.confirm.git_diff.no_changes",
-                                "（无暂存变更）",
-                                "(No staged changes)",
-                            ))
+                            Some(i18n::t1("ui.confirm.git_diff.no_changes"))
                         } else {
                             Some(format!("{}\n{}", stat_text.trim(), diff_text.trim()))
                         }
@@ -1247,11 +1147,7 @@ pub async fn build_confirmation_from_tool_call(
             let preview_lines: Vec<&str> = content.lines().take(20).collect();
             let preview = if content.lines().count() > 20 {
                 {
-                    let tpl = i18n::t(
-                        "ui.confirm.msg.remaining_omitted",
-                        "{0}\n...（其余 {1} 行已省略）",
-                        "{0}\n... (remaining {1} lines omitted)",
-                    );
+                    let tpl = i18n::t1("ui.confirm.msg.remaining_omitted");
                     tpl.replace("{0}", &preview_lines.join("\n"))
                         .replace("{1}", &(content.lines().count() - 20).to_string())
                 }
@@ -1319,11 +1215,7 @@ pub async fn build_confirmation_from_tool_call(
                 command: {
                     let args_preview = tc.function.arguments.chars().take(240).collect::<String>();
                     {
-                        let tpl = i18n::t(
-                            "ui.confirm.msg.unknown_tool",
-                            "未知工具: {0} {1}",
-                            "unknown tool: {0} {1}",
-                        );
+                        let tpl = i18n::t1("ui.confirm.msg.unknown_tool");
                         tpl.replace("{0}", &tc.function.name)
                             .replace("{1}", &args_preview)
                     }

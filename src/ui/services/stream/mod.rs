@@ -378,11 +378,7 @@ fn apply_runtime_settings_acknowledgement(
             match failed_model {
                 Some(model) => format!(
                     "{} · {}",
-                    crate::core::i18n::t(
-                        "ui.model.switch_failed",
-                        &format!("切换模型到 {} 失败", model),
-                        &format!("Switch to model {} failed", model),
-                    ),
+                    crate::core::i18n::t1("ui.model.switch_failed").replace("{0}", model),
                     detail.unwrap_or("unknown reason"),
                 ),
                 None => format!(
@@ -500,15 +496,7 @@ pub async fn handle_stream_update(
             state.current_tool_name = None;
             state.auto_follow = true; // Lock to bottom when streaming starts
             state.show_scroll_to_bottom = false;
-            emit_status_text(
-                state,
-                message_id,
-                &i18n::t(
-                    "ui.status.start",
-                    "Status: processing",
-                    "Status: processing",
-                ),
-            );
+            emit_status_text(state, message_id, &i18n::t1("ui.status.start"));
             append_transcript_event(
                 state,
                 "start",
@@ -545,22 +533,13 @@ pub async fn handle_stream_update(
             emit_status_text(
                 state,
                 message_id,
-                &i18n::t(
-                    "ui.status.restore",
-                    "Status: restored checkpoint {id}",
-                    "Status: restored checkpoint {id}",
-                )
-                .replace("{id}", &checkpoint_id),
+                &i18n::t1("ui.status.restore").replace("{id}", &checkpoint_id),
             );
             state.chat_history.push(
                 ChatEntry::assistant(
-                    i18n::t(
-                        "ui.status.restore.summary",
-                        "Status: restored checkpoint {id}{summary}",
-                        "Status: restored checkpoint {id}{summary}",
-                    )
-                    .replace("{id}", &checkpoint_id)
-                    .replace("{summary}", &summary),
+                    i18n::t1("ui.status.restore.summary")
+                        .replace("{id}", &checkpoint_id)
+                        .replace("{summary}", &summary),
                 )
                 .with_streaming(false),
             );
@@ -770,15 +749,7 @@ pub async fn handle_stream_update(
         } => {
             match event.as_str() {
                 "model_request_preparing" => {
-                    emit_status_text(
-                        state,
-                        message_id,
-                        &i18n::t(
-                            "ui.status.model_prepare",
-                            "Status: preparing model request",
-                            "Status: preparing model request",
-                        ),
-                    );
+                    emit_status_text(state, message_id, &i18n::t1("ui.status.model_prepare"));
                 }
                 "model_request_started" => {
                     state.model_wait_started_at = Some(Instant::now());
@@ -787,32 +758,16 @@ pub async fn handle_stream_update(
                         .and_then(|value| value.as_u64())
                         .unwrap_or(0);
                     let status = if prepare_elapsed_ms > 0 {
-                        i18n::t(
-                            "ui.status.model_wait",
-                            "Status: local request prep finished ({ms}ms), connecting to provider",
-                            "Status: local request prep finished ({ms}ms), connecting to provider",
-                        )
-                        .replace("{ms}", &prepare_elapsed_ms.to_string())
+                        i18n::t1("ui.status.model_wait")
+                            .replace("{ms}", &prepare_elapsed_ms.to_string())
                     } else {
-                        i18n::t(
-                            "ui.status.model_wait_no_ms",
-                            "Status: local request prep finished, connecting to provider",
-                            "Status: local request prep finished, connecting to provider",
-                        )
+                        i18n::t1("ui.status.model_wait_no_ms")
                     };
                     emit_status_text(state, message_id, &status);
                 }
                 "provider_request_started" => {
                     state.model_wait_started_at = Some(Instant::now());
-                    emit_status_text(
-                        state,
-                        message_id,
-                        &i18n::t(
-                            "ui.status.provider_send",
-                            "Status: sending request to provider",
-                            "Status: sending request to provider",
-                        ),
-                    );
+                    emit_status_text(state, message_id, &i18n::t1("ui.status.provider_send"));
                 }
                 "provider_response_headers" => {
                     let elapsed_ms = payload
@@ -821,18 +776,10 @@ pub async fn handle_stream_update(
                         .unwrap_or(0);
                     state.model_wait_started_at = Some(Instant::now());
                     let status = if elapsed_ms > 0 {
-                        i18n::t(
-                            "ui.status.provider_headers",
-                            "Status: provider responded ({ms}ms), waiting for first token",
-                            "Status: provider responded ({ms}ms), waiting for first token",
-                        )
-                        .replace("{ms}", &elapsed_ms.to_string())
+                        i18n::t1("ui.status.provider_headers")
+                            .replace("{ms}", &elapsed_ms.to_string())
                     } else {
-                        i18n::t(
-                            "ui.status.provider_headers_no_ms",
-                            "Status: provider responded, waiting for first token",
-                            "Status: provider responded, waiting for first token",
-                        )
+                        i18n::t1("ui.status.provider_headers_no_ms")
                     };
                     emit_status_text(state, message_id, &status);
                 }
@@ -843,18 +790,10 @@ pub async fn handle_stream_update(
                         .unwrap_or(0);
                     state.model_wait_started_at = Some(Instant::now());
                     let status = if elapsed_ms > 0 {
-                        i18n::t(
-                            "ui.status.provider_first_byte",
-                            "Status: first response bytes received ({ms}ms), waiting for first token",
-                            "Status: first response bytes received ({ms}ms), waiting for first token",
-                        )
-                        .replace("{ms}", &elapsed_ms.to_string())
+                        i18n::t1("ui.status.provider_first_byte")
+                            .replace("{ms}", &elapsed_ms.to_string())
                     } else {
-                        i18n::t(
-                            "ui.status.provider_first_byte_no_ms",
-                            "Status: first response bytes received, waiting for first token",
-                            "Status: first response bytes received, waiting for first token",
-                        )
+                        i18n::t1("ui.status.provider_first_byte_no_ms")
                     };
                     emit_status_text(state, message_id, &status);
                 }
@@ -865,18 +804,9 @@ pub async fn handle_stream_update(
                         .and_then(|value| value.as_u64())
                         .unwrap_or(0);
                     let status = if elapsed_ms > 0 {
-                        i18n::t(
-                            "ui.status.model_ready",
-                            "Status: model started responding ({ms}ms)",
-                            "Status: model started responding ({ms}ms)",
-                        )
-                        .replace("{ms}", &elapsed_ms.to_string())
+                        i18n::t1("ui.status.model_ready").replace("{ms}", &elapsed_ms.to_string())
                     } else {
-                        i18n::t(
-                            "ui.status.model_ready_no_ms",
-                            "Status: model started responding",
-                            "Status: model started responding",
-                        )
+                        i18n::t1("ui.status.model_ready_no_ms")
                     };
                     emit_status_text(state, message_id, &status);
                 }
@@ -891,8 +821,7 @@ pub async fn handle_stream_update(
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     if !msg.is_empty() {
-                        let status = i18n::t("ui.status.agent", "Status: {msg}", "Status: {msg}")
-                            .replace("{msg}", msg);
+                        let status = i18n::t1("ui.status.agent").replace("{msg}", msg);
                         emit_status_text(state, message_id, &status);
                     }
                 }
@@ -1204,12 +1133,7 @@ pub async fn handle_stream_update(
                     emit_status_text(
                         state,
                         0,
-                        &i18n::t(
-                            "ui.status.provider.awaiting_model",
-                            "Status: switched to {provider}; choose a model for this provider",
-                            "Status: switched to {provider}; choose a model for this provider",
-                        )
-                        .replace("{provider}", &pid),
+                        &i18n::t1("ui.status.provider.awaiting_model").replace("{provider}", &pid),
                     );
                 }
             }
@@ -1258,17 +1182,13 @@ pub async fn handle_stream_update(
             state.awaiting_models = false;
             state.awaiting_models_since = None;
             state.chat_history.push(
-                ChatEntry::assistant(
-                    i18n::t("ui.status.error", "Error: {error}", "Error: {error}")
-                        .replace("{error}", &err),
-                )
-                .with_streaming(false),
+                ChatEntry::assistant(i18n::t1("ui.status.error").replace("{error}", &err))
+                    .with_streaming(false),
             );
             emit_status_text(
                 state,
                 0,
-                &i18n::t("ui.status.error", "Error: {error}", "Error: {error}")
-                    .replace("{error}", &err),
+                &i18n::t1("ui.status.error").replace("{error}", &err),
             );
         }
         StreamMessage::McpStatus { ready, error } => {
@@ -1277,8 +1197,7 @@ pub async fn handle_stream_update(
                 emit_status_text(
                     state,
                     0,
-                    &i18n::t("ui.status.error", "Error: {error}", "Error: {error}")
-                        .replace("{error}", &e),
+                    &i18n::t1("ui.status.error").replace("{error}", &e),
                 );
             }
         }
@@ -1408,20 +1327,12 @@ pub async fn handle_stream_update(
         StreamMessage::ApprovalModeChanged { mode } => {
             state.approval_mode = mode.clone();
             let mode_name = match mode {
-                crate::types::ApprovalMode::Default => {
-                    i18n::t("ui.mode.default", "Default", "Default")
-                }
-                crate::types::ApprovalMode::AcceptEdits => {
-                    i18n::t("ui.mode.accept_edits", "Accept edits", "Accept edits")
-                }
-                crate::types::ApprovalMode::Plan => i18n::t("ui.mode.plan", "Plan", "Plan"),
-                crate::types::ApprovalMode::BypassPermissions => {
-                    i18n::t("ui.mode.bypass", "Bypass", "Bypass")
-                }
-                crate::types::ApprovalMode::DontAsk => {
-                    i18n::t("ui.mode.dont_ask", "Don't ask", "Don't ask")
-                }
-                crate::types::ApprovalMode::Auto => i18n::t("ui.mode.auto", "Auto", "Auto"),
+                crate::types::ApprovalMode::Default => i18n::t1("ui.mode.default"),
+                crate::types::ApprovalMode::AcceptEdits => i18n::t1("ui.mode.accept_edits"),
+                crate::types::ApprovalMode::Plan => i18n::t1("ui.mode.plan"),
+                crate::types::ApprovalMode::BypassPermissions => i18n::t1("ui.mode.bypass"),
+                crate::types::ApprovalMode::DontAsk => i18n::t1("ui.mode.dont_ask"),
+                crate::types::ApprovalMode::Auto => i18n::t1("ui.mode.auto"),
             };
             // 这里**不再**往 chat_history 推一条 assistant 条目。
             //
@@ -1435,12 +1346,7 @@ pub async fn handle_stream_update(
             emit_status_text(
                 state,
                 0,
-                &i18n::t(
-                    "ui.status.approval.current",
-                    "Status: approval mode {name}",
-                    "Status: approval mode {name}",
-                )
-                .replace("{name}", &mode_name),
+                &i18n::t1("ui.status.approval.current").replace("{name}", &mode_name),
             );
         }
         StreamMessage::UpdateGitStatus(status) => {
@@ -1485,11 +1391,7 @@ pub async fn handle_stream_update(
                             .unwrap_or(false);
                         if let Some(entry) = state.chat_history[idx].confirmation.as_mut() {
                             if entry.outcome.is_none() {
-                                entry.outcome = Some(i18n::t(
-                                    "ui.confirm.queued",
-                                    "排队中 · 回答完当前请求后继续",
-                                    "Queued — will ask after the current decision",
-                                ));
+                                entry.outcome = Some(i18n::t1("ui.confirm.queued"));
                             }
                         }
                         state.chat_history[idx].is_streaming = Some(false);
@@ -1687,11 +1589,7 @@ async fn handle_done_message(
         state.is_streaming = true;
         state.active_message_id = Some(message_id);
 
-        let continue_msg = i18n::t(
-            "ui.status.continue",
-            "Status: continuing final response",
-            "Status: continuing final response",
-        );
+        let continue_msg = i18n::t1("ui.status.continue");
         state
             .chat_history
             .push(ChatEntry::assistant(format!("⟳ {}", continue_msg)).with_streaming(false));
@@ -1709,11 +1607,7 @@ async fn handle_done_message(
         let _ = agent_tx
             .send(AgentRequest::SendMessage {
                 message_id,
-                message: i18n::t(
-                    "agent.auto_continue.prompt",
-                    "Continue working. If the task is complete, provide a concise summary. If not, use the available tools to continue making progress.",
-                    "Continue working. If the task is complete, provide a concise summary. If not, use the available tools to continue making progress.",
-                ),
+                message: i18n::t1("agent.auto_continue.prompt"),
             })
             .await;
         return Ok(());
@@ -1755,11 +1649,7 @@ async fn handle_done_message(
 fn finish_terminal_stream(state: &mut ChatState, message_id: u64, cancelling_graceful: bool) {
     // 回合结束（正常 Done 或错误）后，排队中的确认请求不可能再被回答；
     // 留着它们只会让下一轮收到新请求时把它们当成有效队列项。
-    state.discard_pending_confirmation_queue(&i18n::t(
-        "ui.confirm.cancelled_turn",
-        "已取消 · 回合已结束",
-        "Cancelled — the turn ended",
-    ));
+    state.discard_pending_confirmation_queue(&i18n::t1("ui.confirm.cancelled_turn"));
     state.is_processing = false;
     state.current_tool_name = None;
     state.end_thinking();
@@ -1880,15 +1770,11 @@ async fn handle_error_message(
     emit_status_text(
         state,
         message_id,
-        &i18n::t("ui.status.error", "Error: {error}", "Error: {error}")
-            .replace("{error}", &first_line),
+        &i18n::t1("ui.status.error").replace("{error}", &first_line),
     );
     state.chat_history.push(
-        ChatEntry::assistant(
-            i18n::t("ui.status.error", "Error: {error}", "Error: {error}")
-                .replace("{error}", error.trim()),
-        )
-        .with_streaming(false),
+        ChatEntry::assistant(i18n::t1("ui.status.error").replace("{error}", error.trim()))
+            .with_streaming(false),
     );
     let error_idx = state.chat_history.len() - 1;
     settle_response_cost(state, message_id, Some(error_idx));

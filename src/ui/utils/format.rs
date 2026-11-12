@@ -49,16 +49,12 @@ fn summarize_json_value(v: &serde_json::Value, max: usize) -> String {
             if arr.is_empty() {
                 "[]".to_string()
             } else {
-                i18n::t("ui.format.items", "[{count} items]", "[{count} items]")
-                    .replace("{count}", &arr.len().to_string())
+                i18n::t1("ui.format.items").replace("{count}", &arr.len().to_string())
             }
         }
-        serde_json::Value::Object(obj) => i18n::t(
-            "ui.format.fields",
-            "{{{count} fields}}",
-            "{{{count} fields}}",
-        )
-        .replace("{count}", &obj.len().to_string()),
+        serde_json::Value::Object(obj) => {
+            i18n::t1("ui.format.fields").replace("{count}", &obj.len().to_string())
+        }
     }
 }
 
@@ -406,41 +402,25 @@ pub fn format_tool_result_with_saved_path(
     let viewer = if cfg!(unix) { "less" } else { "type" };
 
     let first_with_path = if rest.trim().is_empty() {
-        let template = i18n::t(
-            "ui.tool.output.saved.short",
-            "{first}\n\n[FILE] Output saved to: {file}\n   Tip: view with external editor ({viewer} / .star/tool_outputs/)",
-            "{first}\n\n[FILE] Output saved to: {file}\n   Tip: view with external editor ({viewer} / .star/tool_outputs/)",
-        );
+        let template = i18n::t1("ui.tool.output.saved.short");
         template
             .replace("{first}", first)
             .replace("{file}", filename)
             .replace("{viewer}", viewer)
     } else {
-        let template = i18n::t(
-            "ui.tool.output.saved.tag",
-            "{first} [saved: {file}]",
-            "{first} [saved: {file}]",
-        );
+        let template = i18n::t1("ui.tool.output.saved.tag");
         template
             .replace("{first}", first)
             .replace("{file}", filename)
     };
 
     if rest.trim().is_empty() {
-        let template = i18n::t(
-            "ui.tool.output.saved.full",
-            "{first}\n\n[FILE] Full output saved: {path}",
-            "{first}\n\n[FILE] Full output saved: {path}",
-        );
+        let template = i18n::t1("ui.tool.output.saved.full");
         template
             .replace("{first}", &first_with_path)
             .replace("{path}", &path_display)
     } else {
-        let template = i18n::t(
-            "ui.tool.output.saved.full_with_body",
-            "{first}\n{rest}\n\n[FILE] Full output saved: {path}",
-            "{first}\n{rest}\n\n[FILE] Full output saved: {path}",
-        );
+        let template = i18n::t1("ui.tool.output.saved.full_with_body");
         template
             .replace("{first}", &first_with_path)
             .replace("{rest}", &rest)

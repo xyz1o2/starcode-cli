@@ -233,7 +233,7 @@ pub(crate) fn insert_image_paste_block(
     state.textarea.insert_newline();
     state.current_status_line = Some(format!(
         "{}（{}×{} px → {}）",
-        crate::core::i18n::t("paste.image", "已粘贴图片", "Pasted image"),
+        crate::core::i18n::t1("paste.image"),
         width,
         height,
         path
@@ -270,9 +270,9 @@ pub(crate) fn insert_file_paste_block(state: &mut ChatState, paths: Vec<String>)
     state.textarea.insert_newline();
     state.current_status_line = Some(format!(
         "{} {} {}",
-        crate::core::i18n::t("paste.files", "已粘贴", "Pasted"),
+        crate::core::i18n::t1("paste.files"),
         count,
-        crate::core::i18n::t("paste.file_paths", "个文件路径", "file paths")
+        crate::core::i18n::t1("paste.file_paths")
     ));
     let _ = names;
 }
@@ -385,14 +385,10 @@ pub(crate) fn insert_paste_block(state: &mut ChatState, text: String) {
         state.textarea.insert_newline();
         state.current_status_line = Some(format!(
             "{} #{}: {} {}",
-            crate::core::i18n::t("paste.block", "已粘贴块", "Pasted block"),
+            crate::core::i18n::t1("paste.block"),
             id + 1,
             line_count,
-            crate::core::i18n::t(
-                "paste.lines_with_hint",
-                "行（继续输入或再次粘贴）",
-                "lines (continue typing or paste again)"
-            )
+            crate::core::i18n::t1("paste.lines_with_hint")
         ));
     } else {
         state.textarea.insert_str(&normalized);
@@ -426,14 +422,10 @@ pub(crate) fn insert_paste_block_confirmed(state: &mut ChatState, text: String) 
         state.textarea.insert_newline();
         state.current_status_line = Some(format!(
             "{} #{}: {} {}",
-            crate::core::i18n::t("paste.block", "已粘贴块", "Pasted block"),
+            crate::core::i18n::t1("paste.block"),
             id + 1,
             line_count,
-            crate::core::i18n::t(
-                "paste.lines_with_hint",
-                "行（继续输入或再次粘贴）",
-                "lines (continue typing or paste again)"
-            )
+            crate::core::i18n::t1("paste.lines_with_hint")
         ));
     } else {
         state.textarea.insert_str(&normalized);
