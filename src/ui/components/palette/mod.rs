@@ -151,9 +151,38 @@ pub fn get_search_items(mode: &PaletteMode, state: &ChatState, query: &str) -> V
     }
 }
 
-/// 面板是否按分类分组渲染（标题只服务于带 `category` 的条目；置顶/置底项平铺）。
+/// 面板这一页是否按分类分组渲染。
+///
+/// # 搜索时一律平铺
+///
+/// 全局搜索的结果来自十几个来源（模型、provider、命令、会话……），按来源分组
+/// 会把一份**排名列表**切成一堆碎片 —— 搜索要的是排序，不是归类。所以只要
+/// 过滤词非空，这一页就平铺：没有分组标题，也没有缩进。
 pub fn palette_is_grouped(mode: &PaletteMode, query: &str) -> bool {
-    !query.trim().is_empty() || matches!(mode, PaletteMode::Model)
+    let _ = mode;
+    query.trim().is_empty()
+}
+
+/// 一个分类标题是不是**在重复页面标题**。
+///
+/// 主题页的分类叫 "Theme"、页面标题也是 "Theme"；语言页、上下文页同理。
+/// 同一个词在一屏里出现两次，用户得读两遍才知道它不是两件事。
+///
+/// 大小写不敏感 —— 分类名是 i18n 的结果，页面标题是硬编码的英文，
+/// "Context Window" 与 "Context window" 指的是同一件事。
+fn palette_category_repeats_title(mode: &PaletteMode, category: &str) -> bool {
+    category.eq_ignore_ascii_case(palette_scope(mode, ""))
+}
+
+/// 这个分类要不要画标题（以及要不要给它的条目缩进）。
+///
+/// 缩进的意义是"这一行属于上面那个组"。没有标题就没有组，也就没有缩进 ——
+/// 两件事必须一起决定，否则会出现"缩进了却找不到组标题"的悬空缩进。
+///
+/// 唯一的例外是"分类名与页面标题相同"：页面标题已经在说"这是主题页"，
+/// 再画一个 "Theme" 标题只是把同一个词念两遍。
+pub fn palette_category_has_header(mode: &PaletteMode, query: &str, category: &str) -> bool {
+    palette_is_grouped(mode, query) && !palette_category_repeats_title(mode, category)
 }
 
 /// 面板里**真正画出来的顺序**，也是 `selected_palette_index` 唯一该解释的顺序。
@@ -207,6 +236,14 @@ pub fn palette_display_items(
     pinned_top.sort_by_key(|item| palette_pin_rank(item, mode));
 
     let mut ordered = pinned_top;
+    // 分不分组：**只有**渲染器也会画标题时才重排。
+    //
+    // 两边各算一套就是当初那个 bug 的温床 —— 渲染按 A 排序、Enter 按 B 解释
+    // 同一个下标。这里用的 `palette_is_grouped` 与渲染器共用。
+    //
+    // 注意"某个分类的标题被抑制"（分类名与页面标题相同）不影响**重排**：
+    // 重排只是让同分类的条目挨在一起，标题画不画是渲染时逐个分类决定的。
+    // 于是主题页虽然不画 "Theme" 标题，条目仍然是连着的一整块。
     if palette_is_grouped(mode, query) {
         let mut groups: Vec<(String, Vec<PaletteItem>)> = Vec::new();
         let mut loose: Vec<PaletteItem> = Vec::new();
@@ -275,39 +312,45 @@ fn palette_pin_rank(item: &PaletteItem, mode: &PaletteMode) -> u8 {
 /// 把入口键写进标题既占地方，又承诺了一个不总成立的按键（Esc 只在有
 /// 历史时才回退，无历史时是关闭面板）。
 pub fn palette_title(mode: &PaletteMode, query: &str) -> String {
-    let scope = if !query.trim().is_empty() && matches!(mode, PaletteMode::Main) {
-        "Search all"
-    } else {
-        match mode {
-            PaletteMode::Main => "Actions",
-            PaletteMode::Command => "Commands",
-            PaletteMode::Provider => "Providers",
-            PaletteMode::Session => "Session",
-            PaletteMode::System => "Settings",
-            PaletteMode::Agent => "Agent",
-            PaletteMode::Memory => "Memory",
-            PaletteMode::Git => "Git",
-            PaletteMode::Mcp => "MCP",
-            PaletteMode::Project => "Project",
-            PaletteMode::Integrations => "Integrations",
-            PaletteMode::McpManage => "MCP",
-            PaletteMode::Help => "Help",
-            PaletteMode::Model => "Models",
-            PaletteMode::AgentMode => "Approval mode",
-            PaletteMode::ThinkingEffort => "Thinking",
-            PaletteMode::ContextWindow => "Context window",
-            PaletteMode::Theme => "Theme",
-            PaletteMode::ProviderPopular => "Popular providers",
-            PaletteMode::ProviderOther => "Regional providers",
-            PaletteMode::ProviderLocal => "Local providers",
-            PaletteMode::ProviderOptions(_) => "Provider setup",
-            PaletteMode::ProviderDelete(_) => "Remove provider",
-            PaletteMode::Language => "Language",
-            PaletteMode::OutputStyle => "Output style",
-        }
-    };
+    format!(" {} ", palette_scope(mode, query))
+}
 
-    format!(" {} ", scope)
+/// 这一页的**名字**（标题栏里那一行）。
+///
+/// 单独抽出来，是因为"某个分类标题是不是在重复页面标题"这条判断需要它 ——
+/// 主题页的分类叫 "Theme"、页面标题也叫 "Theme"，同一个词在一屏里出现两次
+/// 就是噪音。
+fn palette_scope(mode: &PaletteMode, query: &str) -> &'static str {
+    if !query.trim().is_empty() && matches!(mode, PaletteMode::Main) {
+        return "Search all";
+    }
+    match mode {
+        PaletteMode::Main => "Actions",
+        PaletteMode::Command => "Commands",
+        PaletteMode::Provider => "Providers",
+        PaletteMode::Session => "Session",
+        PaletteMode::System => "Settings",
+        PaletteMode::Agent => "Agent",
+        PaletteMode::Memory => "Memory",
+        PaletteMode::Git => "Git",
+        PaletteMode::Mcp => "MCP",
+        PaletteMode::Project => "Project",
+        PaletteMode::Integrations => "Integrations",
+        PaletteMode::McpManage => "MCP",
+        PaletteMode::Help => "Help",
+        PaletteMode::Model => "Models",
+        PaletteMode::AgentMode => "Approval mode",
+        PaletteMode::ThinkingEffort => "Thinking",
+        PaletteMode::ContextWindow => "Context window",
+        PaletteMode::Theme => "Theme",
+        PaletteMode::ProviderPopular => "Popular providers",
+        PaletteMode::ProviderOther => "Regional providers",
+        PaletteMode::ProviderLocal => "Local providers",
+        PaletteMode::ProviderOptions(_) => "Provider setup",
+        PaletteMode::ProviderDelete(_) => "Remove provider",
+        PaletteMode::Language => "Language",
+        PaletteMode::OutputStyle => "Output style",
+    }
 }
 
 /// 搜索框的占位符 —— 说的是**这一页能搜什么**，不是"搜索"两个字。
@@ -518,7 +561,6 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
     // 所以颜色在这里逐个拷出来（`Color` 是 Copy），别把借用带过可变访问。
     let theme = state.theme_manager.current();
     let border_color = theme.border;
-    let primary_color = theme.primary;
     let inactive_color = theme.inactive;
     let foreground_color = theme.foreground;
     let subtle_color = theme.subtle;
@@ -605,18 +647,42 @@ pub fn render_palette(f: &mut Frame, area: Rect, state: &mut ChatState) {
         ))));
     } else {
         for (item_index, item) in display_items.iter().enumerate() {
-            let indented = item.category.is_some();
+            // 每个分类**各自**判定要不要画标题。整页一个开关是不行的：主题页
+            // 的分类叫 "Theme"、页面标题也叫 "Theme"，同一个词画两遍就是噪音；
+            // 而模型页的 "Anthropic" 是有信息量的，必须画。
+            //
+            // 缩进跟着**分类**走，不是跟着"这次是不是首次出现"走。
+            //
+            // 这两者必须分开：同一个分类里的第二条（比如 "AI" 组下的 Model 和
+            // Providers）不会再画一次标题，但**必须**和第一条一样缩进 ——
+            // 否则分组里的第一行缩进、后面几行顶格，读起来像是它们不属于
+            // 那个组。
+            let mut indented = false;
             if let Some(category) = &item.category {
+                // 这个分类**要不要**标题，是分类的属性，与"是不是第一条"无关。
+                let wants_header =
+                    palette_category_has_header(&state.palette_mode, query, category.as_str());
+                indented = wants_header;
                 if last_header.as_deref() != Some(category.as_str()) {
-                    // 分组标题：顶格、弱色、不加粗。它是**标签**，不是内容 ——
-                    // 颜色在这里承担的是"分组边界"，而不是"这是个好东西"。
-                    list_items.push(ListItem::new(Line::from(Span::styled(
-                        category.clone(),
-                        Style::default().fg(primary_color),
-                    ))));
+                    if wants_header {
+                        // 分组标题：顶格、灰、不加粗。
+                        //
+                        // 此前这里用的是主题的 `primary`（青色）——那让面板上出现了
+                        // **两种**强调色：青色标题 + 底色高亮。两个都亮 = 都不亮，
+                        // 选中行反而被青色标题压过去。
+                        //
+                        // 现在标题与描述同属一支灰，标题靠**顶格**和条目靠**缩进**
+                        // 区分：颜色只标"次要信息"，唯一的强调色留给选中行。
+                        list_items.push(ListItem::new(Line::from(Span::styled(
+                            category.clone(),
+                            Style::default().fg(inactive_color),
+                        ))));
+                    }
                     last_header = Some(category.clone());
                 }
             }
+            // 散项（刷新模型列表、Add New Provider、返回）：顶格 —— 它们不属于
+            // 任何分组。
 
             // 标签不加粗：层级靠缩进和颜色，不靠字重。此前每一行都是 BOLD，
             // 12 行全粗等于 12 行都没粗，反而没有重点。
@@ -829,6 +895,68 @@ mod tests {
             display[1..].iter().all(|i| i.category.is_some()),
             "只有刷新入口可以没有分组，其余都该在某个 provider 分组下"
         );
+    }
+
+    /// Main 页的分类标题不得在同一屏里出现两次。
+    ///
+    /// 回归点：Main 页的条目是**按声明顺序**排的，不是按分类聚拢的 ——
+    /// `output_style`（Settings）排在列表末尾，`log_selector`（Workspace）也
+    /// 排在后面。于是渲染器若"分类变了就画一次标题"，同屏就会出现第二个
+    /// "Settings" 和第二个 "Workspace"。用户会以为面板里有两组同名设置。
+    ///
+    /// 现在 Main 页的条目先按分类聚拢（`palette_display_items` 重排），每个
+    /// 分类只画一次标题。
+    #[test]
+    fn main_page_never_repeats_a_category_header() {
+        let state = crate::ui::state::ChatState::test_fixture();
+        let display = palette_display_items(&PaletteMode::Main, &state, "");
+
+        // 每个分类的条目在列表里必须是**连续**的一段 —— 不连续就意味着渲染时
+        // 会出现第二个同名标题。
+        let mut seen: Vec<&str> = Vec::new();
+        for item in &display {
+            let Some(category) = item.category.as_deref() else {
+                continue;
+            };
+            if seen.last() != Some(&category) {
+                assert!(
+                    !seen.contains(&category),
+                    "分类 {:?} 在列表里断成了两段 —— 渲染时会出现两个同名标题",
+                    category
+                );
+                seen.push(category);
+            }
+        }
+    }
+
+    /// 分类名与页面标题相同时，那个标题不画。
+    ///
+    /// 主题页的分类叫 "Theme"、页面标题也叫 "Theme"。同一个词在一屏里出现
+    /// 两次，用户得读两遍才知道它不是两件事。
+    #[test]
+    fn a_category_that_repeats_the_page_title_gets_no_header() {
+        assert!(
+            !palette_category_has_header(&PaletteMode::Theme, "", "Theme"),
+            "主题页不该再画一个 Theme 标题"
+        );
+        assert!(
+            palette_category_has_header(&PaletteMode::Theme, "", "Dark"),
+            "别的分类照常画标题"
+        );
+        assert!(
+            !palette_category_has_header(&PaletteMode::Model, "", "Anthropic"),
+            "模型页的 Anthropic 是有信息量的，必须画"
+        );
+    }
+
+    /// 搜索时一律平铺：不分组、不缩进。
+    ///
+    /// 全局搜索的结果来自十几个来源，按来源分组会把一份排名列表切成碎片 ——
+    /// 搜索要的是排序，不是归类。
+    #[test]
+    fn a_filtered_palette_is_flat() {
+        assert!(!palette_is_grouped(&PaletteMode::Main, "claude"));
+        assert!(palette_is_grouped(&PaletteMode::Main, ""));
     }
 
     /// Providers 页的顺序：刷新第一、Add New Provider 第二、返回压底。
@@ -1400,5 +1528,26 @@ mod tests {
             &[],
         );
         assert!(matches!(item.action, PaletteAction::EditProvider(_)));
+    }
+
+    /// 面板的**样子**基线。
+    ///
+    /// 逻辑断言管不了"长什么样"：层级靠缩进、颜色只有一处强调、字重只用在
+    /// 选中行 —— 这些都是渲染出来才看得见的。而官方的
+    /// `assert_snapshot!(terminal.backend())` 只序列化字符，颜色不进基线
+    /// （ratatui#1402），一次"把分组标题改成青色"的重构会静默通过。
+    /// 本仓库的基线把每个 cell 的 fg/bg/modifier 都编码进去（见
+    /// `ui::test_support::snapshot`），所以改颜色即改基线。
+    #[test]
+    fn palette_main_page_appearance() {
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        state.palette_mode = PaletteMode::Main;
+        state.modal_stack.push(crate::ui::state::Modal::Palette);
+
+        crate::ui::test_support::assert_render!("palette_main", 100, 28, |f| {
+            // 区域先取出来：`f` 已经是可变借用，再调 `f.area()` 会撞上借用检查。
+            let area = f.area();
+            render_palette(f, area, &mut state);
+        });
     }
 }
