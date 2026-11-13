@@ -304,19 +304,23 @@ fn render_command_hints_overlay(
     }
 
     // 动态命令列宽（对标 Claude Code：可见项最长命令 + 2，设上下限），
-    // 替代原固定 18 padding——短命令描述贴近、长命令不粘连
+    // 替代原固定 18 padding——短命令描述贴近、长命令不粘连。
+    // 宽度按**显示宽度**算（CJK / emoji 占 2 列）：下文补齐也是
+    // `" ".repeat(name_w - display_width(cmd))`，两边同一口径才不会把描述顶出边框。
+    // 只统计当前可见的那几项，被滚出视野的长命令不该撑宽整列。
     let name_w = {
         let max_cmd = state
             .command_hints
             .iter()
+            .skip(start)
+            .take(visible)
             .map(|h| {
-                h.split_once(" - ")
-                    .map(|(c, _)| c.chars().count())
-                    .unwrap_or(h.chars().count())
+                let cmd = h.split_once(" - ").map(|(c, _)| c).unwrap_or(h);
+                crate::ui::utils::render::display_width(cmd)
             })
             .max()
             .unwrap_or(10);
-        (max_cmd + 2).clamp(10, 24) as usize
+        (max_cmd + 2).clamp(10, 24)
     };
     // 描述可用宽度：弹窗宽 - 图标(3) - 命令列 - 边框(2) - 余量(2)
     let desc_w = popup_width.saturating_sub(name_w as u16 + 7).max(10) as usize;
@@ -355,7 +359,14 @@ fn render_command_hints_overlay(
                         .bg(bg),
                 ),
                 Span::styled(
-                    format!("{:<width$}", cmd_part, width = name_w),
+                    format!(
+                        "{}{}",
+                        cmd_part,
+                        " ".repeat(
+                            name_w
+                                .saturating_sub(crate::ui::utils::render::display_width(cmd_part))
+                        )
+                    ),
                     Style::default()
                         .fg(label_fg)
                         .bg(bg)
@@ -369,7 +380,10 @@ fn render_command_hints_overlay(
 
             if !desc_part.is_empty() {
                 spans.push(Span::styled(
-                    truncate_str(desc_part.replace("  ", " ").trim(), desc_w),
+                    crate::ui::utils::text::truncate_display(
+                        desc_part.replace("  ", " ").trim(),
+                        desc_w,
+                    ),
                     Style::default().fg(desc_fg).bg(bg),
                 ));
             }

@@ -949,7 +949,10 @@ pub fn render_task_panel_mut(
             TaskStatus::Pending => pending += 1,
             TaskStatus::InProgress => in_progress += 1,
             TaskStatus::Completed => completed += 1,
-            TaskStatus::Blocked | TaskStatus::Skipped => {}
+            // Blocked/Skipped 既未完成也非进行中，清单里也用 pending 的 ▫ 图标，
+            // 必须计入 open。否则头部 N > done + in_progress + open，数字对不上
+            // （3 项 1 阻塞时显示 "3 tasks (0 done, 0 in progress, 2 open)"）。
+            TaskStatus::Blocked | TaskStatus::Skipped => pending += 1,
         }
     }
 
@@ -958,18 +961,26 @@ pub fn render_task_panel_mut(
     let mut items: Vec<ListItem> = Vec::new();
     for goal in &panel.active_goals {
         let short_goal_id: String = goal.id.chars().take(8).collect();
+        // 右半段（进度条 + 百分比 + id）是 goal 段唯一的信息载体，必须先占位：
+        // 以前标题不限宽，窄终端下标题把整行吃满，被裁掉的恰好是进度条，
+        // goal 行看起来就只剩一段文字。按显示宽度（CJK 占 2 列）截标题。
+        let suffix = format!(
+            "  [{}] {}% · {}",
+            progress_bar(goal.progress, 10),
+            goal.progress,
+            short_goal_id
+        );
+        // 边框 2 列 + "🎯 " 3 列 + 选中行高亮符 "> " 2 列
+        const FIXED_WIDTH: usize = 2 + 3 + 2;
+        let suffix_width = crate::ui::utils::render::display_width(&suffix);
+        let title = crate::ui::utils::text::truncate_display(
+            &goal.title,
+            (area.width as usize).saturating_sub(FIXED_WIDTH + suffix_width),
+        );
         items.push(ListItem::new(Line::from(vec![
             Span::styled("🎯 ", Style::default().fg(theme.primary)),
-            Span::styled(goal.title.clone(), Style::default().fg(theme.primary)),
-            Span::styled(
-                format!(
-                    "  [{}] {}% · {}",
-                    progress_bar(goal.progress, 10),
-                    goal.progress,
-                    short_goal_id
-                ),
-                Style::default().fg(theme.subtle),
-            ),
+            Span::styled(title, Style::default().fg(theme.primary)),
+            Span::styled(suffix, Style::default().fg(theme.subtle)),
         ])));
     }
 
@@ -1080,7 +1091,18 @@ pub fn render_task_panel_mut(
     // 计数描述状态分布，agent 在跑时再跟上当前进行中项的 activeForm
     // （` · Running tests `）描述动作——两者互补，和状态行的 spinner 动词不重复。
     let mut title = if total == 0 {
-        " Tasks ".to_string()
+        // 只有 goal、没有任务时标题仍写 "Tasks"，整个面板看起来像空的 ——
+        // 这一屏到底在显示什么就没人知道了。换成 goal 计数。
+        let goal_count = panel.active_goals.len();
+        if goal_count > 0 {
+            format!(
+                " {} goal{} ",
+                goal_count,
+                if goal_count == 1 { "" } else { "s" }
+            )
+        } else {
+            " Tasks ".to_string()
+        }
     } else {
         let mut parts = vec![format!("{} done", completed)];
         if in_progress > 0 {
@@ -1096,7 +1118,9 @@ pub fn render_task_panel_mut(
     };
     if agent_active {
         if let Some(activity) = current_activity(panel) {
-            title = format!("{}· {} ", title.trim_end(), activity);
+            // trim_end 去掉了标题末尾的空格，分隔符前要自己补一个，
+            // 否则渲染成 `... 2 open)· Running tests`。
+            title = format!("{} · {} ", title.trim_end(), activity);
         }
     }
 
@@ -1110,6 +1134,15 @@ pub fn render_task_panel_mut(
     // Find next task hint (对标 Claude Code "Next task" 提示)
     let next_task_hint = find_next_task_hint(panel);
 
+    // 提示画在最后一行内边距上，只在那一行确实空着时才画。
+    // 清单撑满面板时（任务数超过 8 行 cap 最常见）它会跟列表最后一行抢位置，
+    // 把一条任务盖掉——用户看到的是「任务少了一条」。宁可这次不提示。
+    // 注意不能靠收窄列表高度来让行：那样列表的下边框会上移一行，
+    // 提示反而画到下边框上（`╰→ Next: ...────╯`）。
+    let inner_rows = area.height.saturating_sub(2) as usize;
+    let items_len = items.len();
+    let hint = next_task_hint.filter(|_| area.height > 3 && items_len < inner_rows);
+
     let list = List::new(items)
         .block(block)
         .highlight_style(
@@ -1122,7 +1155,7 @@ pub fn render_task_panel_mut(
     f.render_stateful_widget(list, area, &mut panel.list_state);
 
     // Render next task hint at the bottom if available
-    if let Some(hint) = next_task_hint {
+    if let Some(hint) = hint {
         if area.height > 3 {
             let hint_area = Rect {
                 x: area.x + 1,
@@ -1205,20 +1238,24 @@ fn current_activity(panel: &TaskPanel) -> Option<String> {
 fn find_next_task_hint(panel: &TaskPanel) -> Option<String> {
     let graph = &panel.task_manager.graph;
 
-    // 找最近完成的任务（有 completed_at 的最新一个）
+    // 找最近完成的任务（有 completed_at 的最新一个）。
+    // 这里不能用 `?` 提前返回：没有已完成项时下面的「第一个 pending」回退
+    // 就永远走不到，提示会在纯 pending 清单上直接消失。
     let recently_completed = graph
         .nodes
         .values()
         .filter(|n| n.status == TaskStatus::Completed)
-        .max_by_key(|n| n.completed_at)?;
+        .max_by_key(|n| n.completed_at);
 
     // 找被这个任务阻塞的 pending 任务
-    for id in graph.ordered_ids() {
-        if let Some(node) = graph.nodes.get(&id) {
-            if node.status == TaskStatus::Pending
-                && node.dependencies.contains(&recently_completed.id)
-            {
-                return Some(format!("Next: {}", node.title));
+    if let Some(recently_completed) = recently_completed {
+        for id in graph.ordered_ids() {
+            if let Some(node) = graph.nodes.get(&id) {
+                if node.status == TaskStatus::Pending
+                    && node.dependencies.contains(&recently_completed.id)
+                {
+                    return Some(format!("Next: {}", node.title));
+                }
             }
         }
     }
@@ -1656,6 +1693,157 @@ mod tests {
         assert_eq!(panel.list_state.selected(), Some(1), "往前回到第一个任务");
         panel.previous();
         assert_eq!(panel.list_state.selected(), Some(2), "不会越过 goal 行越界");
+    }
+
+    // ── E. 实际渲染 ────────────────────────────────────────────────
+
+    /// 布局侧（`ui::app::render_page`）给面板分配的高度，公式照抄。
+    fn layout_height(panel: &TaskPanel) -> u16 {
+        let task_count = panel.flatten_tasks().len() as u16;
+        let goal_count = panel.active_goals.len() as u16;
+        (task_count + goal_count + 3).min(8 + goal_count).max(3)
+    }
+
+    /// 按布局高度把面板画进 TestBackend，返回逐行纯文本。
+    fn render_rows(panel: &mut TaskPanel, width: u16, agent_active: bool) -> Vec<String> {
+        use ratatui::{backend::TestBackend, Terminal};
+        let height = layout_height(panel);
+        let theme = Theme::default_dark();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| {
+                render_task_panel_mut(
+                    f,
+                    Rect::new(0, 0, width, height),
+                    panel,
+                    &theme,
+                    0,
+                    agent_active,
+                )
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn with_status(title: &str, status: TaskStatus) -> TaskNode {
+        let mut node = TaskNode::new(title.into());
+        if status == TaskStatus::Completed {
+            node.completed_at = Some(Utc::now());
+        }
+        node.status = status;
+        node
+    }
+
+    #[test]
+    fn render_probe_prints_typical_scenarios() {
+        use crate::core::goal_tracking::GoalStatus;
+
+        // 场景 1：3 项混合状态，agent 在跑
+        let mut panel = empty_panel();
+        add_root(
+            &mut panel,
+            with_status("Read config", TaskStatus::Completed),
+        );
+        let mut running = with_status("Run tests", TaskStatus::InProgress);
+        running.active_form = Some("Running tests".into());
+        add_root(&mut panel, running);
+        add_root(&mut panel, with_status("Write report", TaskStatus::Pending));
+        println!("--- scenario 1: mixed, agent active ---");
+        for row in render_rows(&mut panel, 60, true) {
+            println!("{row}");
+        }
+
+        // 场景 2：1 完成 + 7 pending，超过 8 行 cap
+        let mut panel = empty_panel();
+        add_root(
+            &mut panel,
+            with_status("step 0 done", TaskStatus::Completed),
+        );
+        for i in 1..=7 {
+            add_root(
+                &mut panel,
+                with_status(&format!("step {i}"), TaskStatus::Pending),
+            );
+        }
+        println!("--- scenario 2: over the 8-row cap ---");
+        for row in render_rows(&mut panel, 60, false) {
+            println!("{row}");
+        }
+
+        // 场景 3：goal + 任务
+        let mut panel = empty_panel();
+        panel.active_goals.push(goal(
+            "11111111-0000",
+            "测试下 task面板的显示",
+            GoalStatus::InProgress,
+            40,
+        ));
+        add_root(&mut panel, with_status("step a", TaskStatus::Completed));
+        add_root(&mut panel, with_status("step b", TaskStatus::Pending));
+        println!("--- scenario 3: goal + tasks ---");
+        for row in render_rows(&mut panel, 60, false) {
+            println!("{row}");
+        }
+
+        // 场景 4：只有 goal，没有任务
+        let mut panel = empty_panel();
+        panel.active_goals.push(goal(
+            "11111111-0000",
+            "only a goal",
+            GoalStatus::InProgress,
+            0,
+        ));
+        println!("--- scenario 4: goal only ---");
+        for row in render_rows(&mut panel, 60, false) {
+            println!("{row}");
+        }
+
+        // 场景 5：空清单
+        let mut panel = empty_panel();
+        println!("--- scenario 5: empty ---");
+        for row in render_rows(&mut panel, 60, false) {
+            println!("{row}");
+        }
+
+        // 场景 6：窄终端 + 长标题 goal
+        let mut panel = empty_panel();
+        panel.active_goals.push(goal(
+            "11111111-0000",
+            "a fairly long goal title that will not fit in a narrow terminal",
+            GoalStatus::InProgress,
+            40,
+        ));
+        add_root(&mut panel, with_status("step a", TaskStatus::Pending));
+        println!("--- scenario 6: narrow, long goal title ---");
+        for row in render_rows(&mut panel, 40, false) {
+            println!("{row}");
+        }
+    }
+
+    /// 头部计数必须自洽：`N` 等于 done + in_progress + open。
+    /// Blocked/Skipped 既不完成也不进行中，归入 open——它们和 pending 一样
+    /// 用 ▫ 图标，不计入会让头部数字与实际行数对不上。
+    #[test]
+    fn header_counts_blocked_and_skipped_as_open() {
+        let mut panel = empty_panel();
+        add_root(&mut panel, with_status("blocked one", TaskStatus::Blocked));
+        add_root(&mut panel, with_status("skipped one", TaskStatus::Skipped));
+        add_root(&mut panel, with_status("pending one", TaskStatus::Pending));
+
+        let rows = render_rows(&mut panel, 80, false);
+        let header = &rows[0];
+        // in_progress 为 0 时整段省略（对标实现同样如此）
+        assert!(
+            header.contains("3 tasks (0 done, 3 open)"),
+            "头部应把 blocked/skipped 计入 open，实际 {header:?}"
+        );
     }
 
     #[test]
