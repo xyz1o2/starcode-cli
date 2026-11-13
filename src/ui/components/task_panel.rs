@@ -961,13 +961,22 @@ pub fn render_task_panel_mut(
     let mut items: Vec<ListItem> = Vec::new();
     for goal in &panel.active_goals {
         let short_goal_id: String = goal.id.chars().take(8).collect();
+        // 年龄徽标：一个 0% 的 goal 挂了三周看不出是死是活 —— 「多久没动」
+        // 是判断该收尾还是该清理的第一线索。updated_at 距今 ≥1 天才显示。
+        let age_days = (chrono::Utc::now().timestamp() - goal.updated_at) / 86_400;
+        let age_badge = if age_days >= 1 {
+            format!(" · {}d", age_days)
+        } else {
+            String::new()
+        };
         // 右半段（进度条 + 百分比 + id）是 goal 段唯一的信息载体，必须先占位：
         // 以前标题不限宽，窄终端下标题把整行吃满，被裁掉的恰好是进度条，
         // goal 行看起来就只剩一段文字。按显示宽度（CJK 占 2 列）截标题。
         let suffix = format!(
-            "  [{}] {}% · {}",
+            "  [{}] {}%{} · {}",
             progress_bar(goal.progress, 10),
             goal.progress,
+            age_badge,
             short_goal_id
         );
         // 边框 2 列 + "🎯 " 3 列 + 选中行高亮符 "> " 2 列
@@ -977,9 +986,13 @@ pub fn render_task_panel_mut(
             &goal.title,
             (area.width as usize).saturating_sub(FIXED_WIDTH + suffix_width),
         );
+        // 挂了很多天还 0% 的 goal 用暗色：它更像待清理的遗留而不是进行中的工作，
+        // 视觉上和活跃 goal 区分开（活跃 = primary，陈旧 = inactive）。
+        let stale = age_days >= 7 && goal.progress == 0;
+        let title_color = if stale { theme.inactive } else { theme.primary };
         items.push(ListItem::new(Line::from(vec![
-            Span::styled("🎯 ", Style::default().fg(theme.primary)),
-            Span::styled(title, Style::default().fg(theme.primary)),
+            Span::styled("🎯 ", Style::default().fg(title_color)),
+            Span::styled(title, Style::default().fg(title_color)),
             Span::styled(suffix, Style::default().fg(theme.subtle)),
         ])));
     }
@@ -1852,5 +1865,36 @@ mod tests {
         assert_eq!(progress_bar(50, 10), "█████░░░░░");
         assert_eq!(progress_bar(100, 10), "██████████");
         assert_eq!(progress_bar(150, 10), "██████████");
+    }
+
+    /// goal 行的年龄徽标：≥1 天显示 `· Nd`，当天新建不显示。
+    /// 「一个 0% 的 goal 挂了三周看不出是死是活」——年龄是判断清理还是推进
+    /// 的第一线索（2026-11-13 用户反馈 goal 行一直残留看不出状态）。
+    #[test]
+    fn goal_rows_carry_an_age_badge_and_stale_styling() {
+        use crate::core::goal_tracking::GoalStatus;
+        let mut panel = empty_panel();
+        // 陈旧 goal：updated_at 在 10 天前
+        let mut stale = goal("aaaaaaaa-stale", "stale goal", GoalStatus::InProgress, 0);
+        stale.updated_at = Utc::now().timestamp() - 10 * 86_400;
+        // 新鲜 goal：今天刚更新
+        let mut fresh = goal("bbbbbbbb-fresh", "fresh goal", GoalStatus::InProgress, 50);
+        fresh.updated_at = Utc::now().timestamp();
+
+        panel.active_goals.push(stale);
+        panel.active_goals.push(fresh);
+
+        let rows = render_rows(&mut panel, 80, false);
+        let stale_row = rows.iter().find(|r| r.contains("stale goal")).unwrap();
+        let fresh_row = rows.iter().find(|r| r.contains("fresh goal")).unwrap();
+
+        assert!(
+            stale_row.contains("0% · 10d ·"),
+            "陈旧 goal 行应带年龄徽标，实际 {stale_row:?}"
+        );
+        assert!(
+            !fresh_row.contains("d · "),
+            "当天更新的 goal 行不该有年龄徽标，实际 {fresh_row:?}"
+        );
     }
 }

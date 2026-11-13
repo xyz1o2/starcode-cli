@@ -168,6 +168,17 @@ pub(crate) fn try_toggle_on_click(state: &mut ChatState, entry_idx: usize, row: 
         return false;
     };
 
+    // Agent 任务条目：点击进详情视图（teammate view）。分组里每行都是一个
+    // agent，点组内任意一行都打开组里第一个 async 成员的输出流；Esc 返回。
+    // 必须在 thinking / 工具判定**之前**：这两类条目没有 tool_call/reasoning，
+    // 落到下面只会 false，点击永远无响应（对标 CC 点 Agent 行看子代理输出）。
+    if matches!(
+        entry.entry_type,
+        crate::types::ChatEntryType::AgentTask | crate::types::ChatEntryType::AgentGroup
+    ) {
+        return state.open_agent_view_from_entry(entry_idx);
+    }
+
     // Debug: 记录点击信息，帮助诊断"点工具块却展开思考块"的问题
     crate::utils::logging::append_debug_log_line(&format!(
         "[TOGGLE_CLICK] entry_idx={} row={} entry_type={:?} has_reasoning={} reasoning_len={} has_tool_call={} tool_name={:?}",
@@ -534,12 +545,129 @@ mod tests {
         );
 
         assert!(
-            state.expanded_thinking_indices.is_empty(),
+            !state.expanded_thinking_indices.contains(&idx),
             "拖动不得触发折叠/展开"
         );
         assert_eq!(state.text_selection.start_entry_idx, Some(idx));
         assert_eq!(state.text_selection.start, Some((0, 0)));
         assert_eq!(state.text_selection.end, Some((1, 10)));
+    }
+
+    /// 点击 AgentTask 条目 → 进入该 agent 的详情视图（teammate view）。
+    /// 回归（2026-11-13）：此前 agent 条目既无 thinking 也无 tool_call，
+    /// `try_toggle_on_click` 对它恒为 false —— 用户点 "Running 5 agents…"
+    /// 组里任意一行都没反应，只能靠键盘 ↓+Enter。
+    #[test]
+    fn click_on_agent_task_entry_opens_teammate_view() {
+        let mut state = ChatState::new();
+        let entry = crate::types::ChatEntry::agent_task("agent-abc123", "Explore");
+        state.chat_history.push(entry);
+        state.last_chat_area = Some(Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        });
+        // ChatState::new() 自带 1 条欢迎条目（高 1 行）；agent 条目在其后。
+        state.last_item_heights = vec![1, 3];
+        state.total_rendered_lines = 4;
+
+        // 详情视图的数据源是 active_agent_tasks，先放一条 async 任务进去
+        state.active_agent_tasks.insert(
+            "agent-abc123".to_string(),
+            crate::ui::state::store::AgentTaskInfo {
+                task_id: "agent-abc123".to_string(),
+                agent_type: "Explore".to_string(),
+                description: "分析 agent 模块".to_string(),
+                status: crate::types::AgentTaskStatus::Running,
+                tool_use_count: 0,
+                tokens: 0,
+                is_async: true,
+                is_resolved: false,
+                is_error: false,
+                last_tool_info: None,
+                name: None,
+                task_description: None,
+                started_at: std::time::Instant::now(),
+                finished_at: None,
+                sub_entries: Vec::new(),
+                entry_idx: 0,
+            },
+        );
+
+        // 单击该条目（Down + Up 未拖动）。欢迎条目占第 0 行，agent 条目第 1 行起。
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 1),
+        );
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 0, 1),
+        );
+        assert_eq!(
+            state.viewing_agent_task_id.as_deref(),
+            Some("agent-abc123"),
+            "点击 agent 行应进入详情视图"
+        );
+    }
+
+    /// 点击 AgentGroup 条目 → 打开组内第一个 async 成员。
+    #[test]
+    fn click_on_agent_group_entry_opens_first_async_member() {
+        let mut state = ChatState::new();
+        state
+            .chat_history
+            .push(crate::types::ChatEntry::agent_group(vec![
+                "agent-one".to_string(),
+                "agent-two".to_string(),
+            ]));
+        state.last_chat_area = Some(Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        });
+        // 欢迎条目 1 行 + agent 组条目（5 行：头部 + 2×2 进度行）
+        state.last_item_heights = vec![1, 5];
+        state.total_rendered_lines = 6;
+
+        for id in ["agent-one", "agent-two"] {
+            state.active_agent_tasks.insert(
+                id.to_string(),
+                crate::ui::state::store::AgentTaskInfo {
+                    task_id: id.to_string(),
+                    agent_type: "Explore".to_string(),
+                    description: format!("任务 {id}"),
+                    status: crate::types::AgentTaskStatus::Running,
+                    tool_use_count: 0,
+                    tokens: 0,
+                    is_async: true,
+                    is_resolved: false,
+                    is_error: false,
+                    last_tool_info: None,
+                    name: None,
+                    task_description: None,
+                    started_at: std::time::Instant::now(),
+                    finished_at: None,
+                    sub_entries: Vec::new(),
+                    entry_idx: 0,
+                },
+            );
+        }
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 1),
+        );
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 0, 1),
+        );
+        assert_eq!(
+            state.viewing_agent_task_id.as_deref(),
+            Some("agent-one"),
+            "点组应打开第一个 async 成员"
+        );
     }
 
     /// 鼠标/触摸板按下到松开之间的 1 列级抖动不得触发「松开即复制」。

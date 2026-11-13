@@ -16,7 +16,7 @@ mod tests;
 
 use crate::core::feature_flags::FeatureFlags;
 use crate::core::sandbox::SandboxManager;
-use crate::types::ChatEntry;
+use crate::types::{ChatEntry, ChatEntryType};
 use crate::ui::components::virtual_list::VirtualList;
 use ratatui::{
     layout::Rect,
@@ -1382,6 +1382,40 @@ impl ChatState {
     pub fn exit_teammate_view(&mut self) {
         if self.viewing_agent_task_id.take().is_some() {
             self.clear_cache();
+        }
+    }
+
+    /// 点击 AgentTask / AgentGroup 条目时打开对应后台代理的详情视图。
+    ///
+    /// 分组条目（AgentGroup）取组内**第一个** async 成员：组的每一行都是一个
+    /// 独立 agent，但点击落点只有一个 entry_idx，选中"组里第一个能看的"是
+    /// 最不意外的默认。全部成员都不是 async（纯同步组）时返回 false ——
+    /// 同步子代理的输出已经在聊天流里，没有详情视图可进（与
+    /// `background_agent_rows` 只收 async 同一口径）。
+    /// 返回 true 表示视图已切换（调用方据此清掉单格选区）。
+    pub fn open_agent_view_from_entry(&mut self, entry_idx: usize) -> bool {
+        let Some(entry) = self.chat_history.get(entry_idx) else {
+            return false;
+        };
+        let ids: Vec<String> = match (&entry.entry_type, entry.agent_task_ids.as_ref()) {
+            (ChatEntryType::AgentGroup, Some(ids)) => ids.clone(),
+            (ChatEntryType::AgentTask, _) => entry.agent_task_id.clone().into_iter().collect(),
+            _ => return false,
+        };
+        // 组内第一个 async 成员；AgentTask 的 task_id 一定在 active_agent_tasks
+        // 里（handle_agent_task_update 每条更新都 insert），直接试。
+        let target = ids.into_iter().find(|id| {
+            self.active_agent_tasks
+                .get(id)
+                .map(|t| t.is_async)
+                .unwrap_or(false)
+        });
+        match target {
+            Some(task_id) => {
+                self.enter_teammate_view(&task_id);
+                true
+            }
+            None => false,
         }
     }
 

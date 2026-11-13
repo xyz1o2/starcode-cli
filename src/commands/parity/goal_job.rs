@@ -128,7 +128,9 @@ pub(crate) fn render_goals(
             }
         ));
     }
-    out.push_str("\n`/goal done <id>` · `/goal progress <id> <pct>` · `/goal all`\n");
+    out.push_str(
+        "\n`/goal done <id>` · `/goal rm <id>` · `/goal progress <id> <pct>` · `/goal all`\n",
+    );
     out
 }
 

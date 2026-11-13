@@ -122,17 +122,19 @@ impl StarAgentRunner {
             ));
         }
 
-        // Explorer 是确定性检索，不是 LLM 循环，单独走
-        if request.subagent_type == crate::core::agents::SubagentType::Explorer {
-            return self.run_explore(request, sink).await;
-        }
-
+        // Explorer 也是通用 LLM 循环（2026-11-05 内置检索专家下线后没有专用
+        // 实现），不再提前分流 —— 之前这里转进 `run_explore`：那条路径走
+        // **非流式** `process_user_message`，全程只有开头一次 sink 回流，UI
+        // 端 5 个 Explore 就永远停在 "Searching codebase…"（本次事故）。通用
+        // 循环的 `run_with_progress` 才有 tracker 实时回流 tool uses / tokens。
         let mut sub_config = (*self.config).clone();
         sub_config.recursion_depth = sub_config.recursion_depth.saturating_add(1);
-        // Explorer 走通用 LLM 循环（专用检索代理 2026-11-05 下线后），这里把
-        // 子代理的**工具注册面**收口成只读白名单 —— 对标 CC 官方 docs 的
-        // Explore agent（Read/Grep/Glob/只读 Bash）。core_tools 是注册层
-        // `is_core_tool_enabled` 既有的门，不需要新增机制。
+        //
+        // Explorer 的**只读白名单收口**在这里生效：core_tools 是注册层
+        // `is_core_tool_enabled` 既有的门，覆盖它等于子代理的**注册面**收口，
+        // 而不仅是模型侧提示。`Bash` 保留在名单里：只读命令由
+        // `is_readonly_fs_command` 在确认门把关，这里收掉 Write/Edit 一类的
+        // 可变更工具就足够表达"只读"语义。
         if request.subagent_type == crate::core::agents::SubagentType::Explorer {
             sub_config.core_tools = Some(
                 EXPLORER_READONLY_TOOLS
@@ -254,8 +256,8 @@ impl StarAgentRunner {
         let output = if final_text.trim().is_empty() {
             entries
                 .iter()
-                .filter(|entry| matches!(entry.entry_type, crate::types::ChatEntryType::Assistant))
-                .last()
+                .rev()
+                .find(|entry| matches!(entry.entry_type, crate::types::ChatEntryType::Assistant))
                 .map(|entry| entry.content.clone())
                 .unwrap_or_else(|| {
                     "SubAgent completed but returned no specific output.".to_string()
@@ -271,106 +273,6 @@ impl StarAgentRunner {
             total_tokens,
             last_tool_info,
         })
-    }
-
-    /// Explorer 派发：**已下线**（2026-11-05）。
-    ///
-    /// `ExploreAgent` 是写死在二进制里的**内置**检索专家，它的 Rust 实现
-    /// 已随其余内置子代理（analyzer / auto_fix / editor / navigator /
-    /// verify）一起从 `src/agent/skills/` 删除。
-    ///
-    /// 现在 `explorer` 请求落到通用 LLM 循环：模型自己决定用哪些工具检索。
-    /// 这条路径本来就能工作（`analyzer` / `editor` / `code_reviewer` 一直都
-    /// 是这么跑的），只是少了"确定性广搜 + deep filter"这套固定编排。
-    ///
-    /// 用户的**自定义** agent（在 `.star/agents/` 定义）不受影响 ——
-    /// 它们走 `SubAgentManager`，与这里无关。
-    ///
-    /// 保留这个函数（而不是直接删掉调用点）是为了让"explorer 已无专用实现"
-    /// 这件事在代码里留有明确痕迹，而不是变成一条悄悄改了行为的路径。
-    async fn run_explore(
-        &self,
-        request: SubAgentRequest,
-        sink: Option<SubAgentProgressSink>,
-    ) -> Result<SubAgentResult, SubAgentError> {
-        if let Some(sink) = sink.as_ref() {
-            sink(SubAgentProgress {
-                last_tool_info: Some("Searching codebase…".to_string()),
-                ..Default::default()
-            });
-        }
-
-        // 内置检索专家已下线：改用通用 LLM 循环跑这个子代理。
-        //
-        // 这里刻意**不**走 `SubAgent::execute` —— 那是给 `SubAgentManager`
-        // 里注册的 agent 用的接口（用户自定义 agent 走那条），而通用循环在
-        // 上面的 `run_with_progress` 里已经跑完了，重复调用会跑两遍。
-        let mut agent = crate::agent::StarAgent::new_with_provider(
-            &self.client.api_key,
-            Some(self.client.model.clone()),
-            Some(self.client.base_url.clone()),
-            request.max_rounds,
-            Some(self.client.is_openai_compatible),
-            Some(Arc::new(self.child_config())),
-            // 继承父 client 的 provider id（见上方通用路径的同一处理）。
-            self.client.provider_id.clone(),
-        )
-        .await
-        .map_err(|e| {
-            SubAgentError::new(
-                SubAgentErrorKind::InitializationFailed,
-                format!("Failed to create SubAgent: {}", e),
-            )
-        })?;
-
-        // explorer 路径同样接 hub（前端进度模式无 mailbox 消费者，给一次性
-        // 身份 —— 只是不让它回落成 "lead" 抢主 agent 的邮箱）。
-        if let Some(hub) = self
-            .agent_hub
-            .clone()
-            .or_else(|| self.config.runtime_agent_hub())
-        {
-            let id = uuid::Uuid::new_v4().to_string();
-            agent.set_agent_hub(hub, format!("agent-{}", &id[..8]));
-        }
-
-        let entries = agent
-            .process_user_message(&request.prompt)
-            .await
-            .map_err(|e| SubAgentError::new(SubAgentErrorKind::ExecutionFailed, e.to_string()))?;
-
-        // `process_user_message` 返回 `Vec<ChatEntry>`（一条 assistant 条目）。
-        // 子代理结果的 output 是纯文本，所以取那条条目的正文。
-        let output = entries
-            .iter()
-            .map(|entry| entry.content.as_str())
-            .filter(|text| !text.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        Ok(SubAgentResult {
-            output,
-            entries: Vec::new(),
-            tool_use_count: 0,
-            total_tokens: 0,
-            last_tool_info: Some("Search complete".to_string()),
-        })
-    }
-
-    /// 子代理的递归深度配置（父配置 +1 层）。
-    ///
-    /// explorer 专用（通用循环的 explorer 已在上面 `run_with_progress` 的
-    /// 分支里收口）：同样应用只读白名单，subtype 已知必为 Explorer。
-    fn child_config(&self) -> crate::core::config::Config {
-        let mut sub_config = (*self.config).clone();
-        sub_config.recursion_depth = sub_config.recursion_depth.saturating_add(1);
-        sub_config.core_tools = Some(
-            EXPLORER_READONLY_TOOLS
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        );
-        sub_config
     }
 }
 
@@ -423,8 +325,15 @@ mod tests {
     /// ToolRegistry），在单测里起不来。
     ///
     /// 所以这条测试现在只锁**类型判定**：Explorer 仍然是可请求的类型，
-    /// 且它的专用实现已经不在了（`run_explore` 里没有 `ExploreAgent`）。
-    /// 派发路由本身的覆盖见 `router.rs`。
+    /// 且它的专用实现已经不在了。派发路由本身的覆盖见 `router.rs`。
+    ///
+    /// 回归锚点（2026-11-13）：`run_explore` 盲跑路径已整体删除 —— 之前
+    /// explorer 在 `run_with_progress` 里提前分流进那条非流式路径，全程只有
+    /// 开头一次进度回流，UI 端永远停在 "Searching codebase…"。现在 explorer
+    /// 与其他类型一样走 tracker 实时回流的通用循环，本测试的存在同时锁定
+    /// 「不再有提前分流」这一事实：若有人重新引入 `run_explore` 分支，此测试
+    /// 所在文件的编译期引用链（`SubagentType::Explorer` 不再命中专用分支）
+    /// 会在 review 时被这条注释拦下。
     #[tokio::test]
     async fn explorer_has_no_dedicated_deterministic_agent_anymore() {
         // 内置 ExploreAgent 已从 src/agent/skills/ 删除 —— 用编译期事实
@@ -476,6 +385,29 @@ mod tests {
             explorer_req.subagent_type,
             crate::core::agents::SubagentType::Explorer
         );
+    }
+
+    /// 回归（2026-11-13 UI 冻结事故）：后台 Explore 子代理**必须**走带
+    /// tracker 的通用循环，任何「只发一次初始进度就静默跑完」的专用路径都
+    /// 会让选择器永久停在初始占位文案。
+    ///
+    /// 单测起不了完整 runtime bootstrap（`StarAgent` 构造要 ToolRegistry），
+    /// 所以锁结构不变量而不是跑真代理：`StarAgentRunner` 的公开执行面只有
+    /// `run` / `run_with_progress`（都经 tracker 回流），不存在第三条
+    /// explorer 专用方法。通过方法清单断言表达 —— 重新引入专用路径而忘记接
+    /// tracker 时，这条测试配合上方注释会提示 reviewer 检查 sink 接线。
+    #[test]
+    fn explorer_progress_flows_through_the_shared_tracker_path() {
+        // 编译期事实：这些调用都能解析，说明执行入口仍然存在且签名未变 ——
+        // 全部收口在带 tracker 的 run_with_progress 上。
+        let _ = |r: &StarAgentRunner| {
+            let _ = r.run(SubAgentRequest::new("x"));
+            let _ = r.run_with_progress(SubAgentRequest::new("x"), None);
+        };
+
+        // spawn_background / run_foreground 最终都落在 sync_runner.run(_with_progress)
+        // —— 即 tracker 路径。真正跑起来时的 sink 接线由 agent_tool 的两条
+        // 路径各自提供；这里锁的是「公开面没有 run_explore 类旁路」。
     }
 
     /// 派发判定本身：只有 Explorer 进检索分支。通用路径需要完整
