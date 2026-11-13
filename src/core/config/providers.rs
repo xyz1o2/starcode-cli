@@ -779,6 +779,55 @@ pub fn api_key_env_hint(provider_id: &str) -> Option<String> {
     }
 }
 
+/// RAII：在测试期间移除一组 provider 的 key 环境变量，drop 时原样恢复。
+///
+/// 这组判据会读 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `CLAUDE_API_KEY` 等
+/// （这是产品功能：用户 export 一个变量就能用）。而「没 key 就该被拦」类测试
+/// 与「列表只含自定义 provider」类测试的前提是"这台机器没配过 key" —— 开发机
+/// 上这些变量经常真的设着，断言必然失败。测试只能自己造这个前提。
+///
+/// 只动测试进程自己的环境（`std::env::remove_var`），不影响系统。恢复用
+/// `set_var` —— 这些变量只被**持 guard 的测试**读，恢复发生在该测试结束时，
+/// 并行互扰由 guard 的生命周期界定。provider_store 的排序测试同样复用它
+/// （`configured_provider_ids_from` 会把"内建且已配置"的 provider 附加进列表）。
+#[cfg(test)]
+pub(crate) struct ScopedApiKeyEnvRemoval {
+    saved: Vec<(String, String)>,
+}
+
+#[cfg(test)]
+impl ScopedApiKeyEnvRemoval {
+    pub(crate) fn new(provider_ids: &[String]) -> Self {
+        let mut saved = Vec::new();
+        for pid in provider_ids {
+            for var in api_key_env_candidates(pid) {
+                if let Ok(value) = std::env::var(var) {
+                    saved.push((var.to_string(), value));
+                    std::env::remove_var(var);
+                }
+            }
+        }
+        // 这两个是全局兜底路径（resolve_runtime_api_key_with_source 的最后一跳、
+        // CC 网关令牌），一并摘掉。
+        for var in ["STAR_API_KEY", "ANTHROPIC_AUTH_TOKEN"] {
+            if let Ok(value) = std::env::var(var) {
+                saved.push((var.to_string(), value));
+                std::env::remove_var(var);
+            }
+        }
+        Self { saved }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedApiKeyEnvRemoval {
+    fn drop(&mut self) {
+        for (var, value) in &self.saved {
+            std::env::set_var(var, value);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// 空密钥的自定义 provider 不能发请求 —— 这正是它之前**不该**出现在模型扇出里
@@ -859,15 +908,25 @@ mod tests {
     /// 完全没配置的 provider 自然也没有凭证。
     #[test]
     fn an_unconfigured_provider_has_no_usable_credentials() {
+        let _env = ScopedApiKeyEnvRemoval::new(&["never-configured".to_string()]);
         assert!(!provider_has_usable_credentials("never-configured", None));
     }
 
     /// 要认证的内建 provider 在没 key 时同样不能发请求。
+    ///
+    /// 前提靠 [`ScopedApiKeyEnvRemoval`] 造：开发机上 `ANTHROPIC_API_KEY` 等
+    /// 真实环境变量经常设着，不摘掉的话「没 key 就该被拦」必然失败。
     #[test]
     fn a_keyless_builtin_that_requires_a_key_is_blocked() {
+        let _env = ScopedApiKeyEnvRemoval::new(&[
+            "anthropic".to_string(),
+            "claude-code".to_string(),
+            "openai".to_string(),
+        ]);
         assert!(!provider_has_usable_credentials("openai", None));
         assert!(!provider_has_usable_credentials("anthropic", None));
     }
+
     use super::*;
 
     /// 回归：自定义 provider 的协议类型不能因为"查不到内建元数据"就丢掉。

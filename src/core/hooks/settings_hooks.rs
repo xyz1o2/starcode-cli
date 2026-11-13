@@ -164,6 +164,18 @@ fn convert_handler(
         .map(|t| t as u64)
         .unwrap_or(DEFAULT_COMMAND_HOOK_TIMEOUT_SECS);
 
+    // CC 的 `once`：只在本会话第一次命中时执行（runner.rs 负责记状态）。
+    let once = handler
+        .get("once")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    // CC 的 `statusMessage`：执行时展示给用户的一行说明；空白串视为没配。
+    let status_message = handler
+        .get("statusMessage")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     let matcher_label = matcher.as_deref().unwrap_or("*");
     Ok(Some(ManagedHook {
         name: format!("settings:{}:{}", event.as_str(), matcher_label),
@@ -179,6 +191,8 @@ fn convert_handler(
         source: Some(path.display().to_string()),
         working_dir: None,
         matcher: matcher.clone(),
+        once,
+        status_message,
     }))
 }
 

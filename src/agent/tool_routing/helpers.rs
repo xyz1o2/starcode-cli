@@ -48,6 +48,7 @@ pub(crate) fn truncate_chars(input: &str, max_chars: usize) -> String {
 
 /// 检查是否有操作意图
 pub(crate) fn has_action_intent(text: &str) -> bool {
+    // 英文小写词用 `contains` 匹配（能吃到 "fixing"/"edited" 等变形）。
     let action_keywords = [
         "create",
         "write",
@@ -67,10 +68,61 @@ pub(crate) fn has_action_intent(text: &str) -> bool {
         "improve",
     ];
 
+    // 中文动词不做词形变化，用包含匹配。此前只有英文关键词 —— 中文输入
+    // 「修复这个 bug」「加个测试」一个词都匹配不上，行动 nudge（模型答了
+    // 纯文本、没调工具时把它推回工具调用）从不触发，模型答完解释就停 ——
+    // 用户报告的「对话老是会停下来」的主因之一。中文分词没有空格边界，
+    // 整句 contains 是唯一可行的轻量判法。
+    let cjk_action_keywords = [
+        "修复",
+        "修",
+        "改",
+        "删",
+        "移除",
+        "去掉",
+        "更新",
+        "升级",
+        "创建",
+        "新建",
+        "加",
+        "添加",
+        "写",
+        "实现",
+        "重构",
+        "优化",
+        "补",
+        "接入",
+        "替换",
+        "调整",
+        "清理",
+        "完善",
+        "排查",
+        "处理",
+        "跑",
+        "运行",
+        "部署",
+        "生成",
+        "对齐",
+        "对标",
+        "支持",
+        "迁移",
+        "恢复",
+        "扩展",
+        "改进",
+        "复现",
+        "翻译",
+        "格式化",
+        "改名",
+        "重命名",
+    ];
+
     let text_lower = text.to_lowercase();
     action_keywords
         .iter()
         .any(|keyword| text_lower.contains(keyword))
+        || cjk_action_keywords
+            .iter()
+            .any(|keyword| text.contains(keyword))
 }
 
 /// 获取请求复杂度标签
@@ -676,6 +728,37 @@ fn tool_matches_patterns(tool: &StarTool, patterns: &[&str]) -> bool {
 mod tests {
     use super::*;
     use crate::types::{StarTool, StarToolFunction, StarToolParameters};
+
+    /// 行动意图判定必须覆盖中文动词。
+    ///
+    /// 回归：此前只有英文关键词，中文输入（「修复这个 bug」「加个测试」）
+    /// 一个词都匹配不上 —— 行动 nudge（模型答了纯文本、没调工具时把它推回
+    /// 工具调用）对中文输入从不触发，模型答完解释就停。用户报告的
+    /// 「对话老是会停下来」主因之一。
+    #[test]
+    fn action_intent_covers_cjk_verbs() {
+        // 中文任务动词必须命中
+        for text in [
+            "修复登录 bug",
+            "修一下这个",
+            "加个测试",
+            "删掉这段死代码",
+            "重构 model_switch",
+            "把这个对标 cc 的实现补上",
+            "排查为什么对话会停",
+            "跑一下测试",
+            "改掉这个闪烁问题",
+        ] {
+            assert!(has_action_intent(text), "中文任务动词必须命中：{text}");
+        }
+        // 英文照常
+        assert!(has_action_intent("fix the login bug"));
+        assert!(has_action_intent("please refactor this module"));
+        // 纯疑问（无行动词）不命中 —— nudge 不该把它推回工具
+        for text in ["什么是所有权", "why is rust memory safe", "你好"] {
+            assert!(!has_action_intent(text), "纯疑问不该命中：{text}");
+        }
+    }
 
     fn tool(name: &str, description: &str) -> StarTool {
         StarTool {

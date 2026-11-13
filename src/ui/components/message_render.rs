@@ -5,13 +5,6 @@ use crate::types::ChatEntryType;
 use crate::ui::state::ChatState;
 use crate::ui::themes::theme::Theme;
 
-/// thinking 展开态正文的最大折行宽度（显示列）。
-///
-/// 此前正文按 `终端宽 - 2` 折行，宽屏下一行能拉到 200+ 列：眼睛从行首扫到行尾
-/// 的距离超出单行可读范围，读一段话要来回横跳，整块读不下去。封顶后宽屏上正文
-/// 稳定在 ~100 列，右侧留白；终端本身比它窄时仍按终端宽折行，窄窗口行为不变。
-const MAX_CONTENT_WIDTH: usize = 100;
-
 /// 渲染非工具条目（assistant / user）的文本块。
 ///
 /// `is_sub_transcript`：agent 组展开视图里的子转录条目。thinking 折叠头一旦
@@ -167,11 +160,9 @@ pub(crate) fn render_non_tool_entry_blocks(
 
                         // 内容：dim 色 + 缩进 2 列，逐行渲染不走 markdown 段落排版。
                         //
-                        // 宽度上限：正文折行宽度此前直接吃满终端宽（`wrap_width` =
-                        // 终端宽 - 2），宽屏下一行能拉到 200+ 列，眼睛扫不到行尾，
-                        // 整块读不下去。这里封顶 `MAX_CONTENT_WIDTH`：终端比它窄时
-                        // 仍按终端宽折行，所以窄窗口行为不变，只是宽屏不再无限拉长。
-                        let content_width = wrap_width.min(MAX_CONTENT_WIDTH).saturating_sub(2);
+                        // 宽度：按终端宽折行（对标 CC，2026-11-13 取消 100 列封顶
+                        // —— 封顶让宽屏上内容钉死在左边、右侧大片留白）。
+                        let content_width = wrap_width.saturating_sub(2);
 
                         // 折行续行比首行多缩进 `HANGING_INDENT` 列：续行此前与源新行
                         // 前缀完全相同（都是 2 空格），长行折行后看不出哪里是断点，
@@ -374,7 +365,7 @@ pub(crate) fn render_non_tool_entry_blocks(
                 // 续行比首行多缩进 2 列：折行后看不出哪里是断点，错误全文读起来
                 // 会像一长条没有换行的面条（与 thinking 展开态同一个理由）。
                 const STATUS_HANGING_INDENT: &str = "  ";
-                let first_width = wrap_width.min(MAX_CONTENT_WIDTH);
+                let first_width = wrap_width;
                 // 续行要多让出缩进的宽度，否则加上缩进后会超出 `first_width`
                 let rest_width = first_width
                     .saturating_sub(STATUS_HANGING_INDENT.len())
@@ -395,12 +386,10 @@ pub(crate) fn render_non_tool_entry_blocks(
                 // 折行宽度流式与完成必须**同一个值**。旧实现流式预留 1 列光标位
                 // （完成态没有光标就不预留），流结束的瞬间整段按新宽度重新折行，
                 // 用户看到的就是"回复一完成文字全跳一下"。
-                // 现在一律预留 1 列 + 与 thinking 展开态共用 MAX_CONTENT_WIDTH 封顶：
+                // 现在一律预留 1 列：
                 // - 打字机的 ▌ 追加在折行之后，预留让任何一帧都不超宽；
-                // - 完成后这 1 列只是留白，肉眼无感，换流→完成零重排；
-                // - 宽屏下正文与 thinking 展开块同一个宽度，块间不再一个 200 列
-                //   一个 ~98 列。
-                let body_width = wrap_width.min(MAX_CONTENT_WIDTH).saturating_sub(1);
+                // - 完成后这 1 列只是留白，肉眼无感，换流→完成零重排。
+                let body_width = wrap_width.saturating_sub(1);
                 let mut lines = crate::ui::utils::render::build_assistant_body_block(
                     &display_content,
                     is_streaming_now,
@@ -750,7 +739,7 @@ mod tests {
             rendered.len() > 1,
             "这么长的错误只渲染成一行，说明根本没折行：{rendered:?}"
         );
-        let cap = wrap_width.min(MAX_CONTENT_WIDTH);
+        let cap = wrap_width;
         for line in &rendered {
             let width = crate::ui::utils::render::display_width(line);
             assert!(
@@ -943,11 +932,13 @@ mod tests {
         );
     }
 
-    /// 宽终端上正文不得无限拉长：此前折行宽度直接吃满 `终端宽 - 2`，200 列宽屏
-    /// 里一行能拉到 200+，眼睛扫不到行尾。折行宽度必须封顶 `MAX_CONTENT_WIDTH`，
-    /// 且任何一行的显示宽度都不许超出该上限（含围栏边框）。
+    /// 宽终端上正文**用满给定宽度**（对标 CC，2026-11-13 取消 100 列封顶）。
+    ///
+    /// 回归：此前折行宽度封顶 `MAX_CONTENT_WIDTH`（100 列），宽屏上内容钉死在
+    /// 左边 ~100 列、右侧大片留白 —— 用户报告的「显示总在左边」就是它。现在
+    /// 任何一行都不许超过**传入的** wrap_width（含围栏边框），即按终端宽折行。
     #[test]
-    fn thinking_body_width_is_capped_on_wide_terminals() {
+    fn thinking_body_fills_the_given_width_on_wide_terminals() {
         let long = "word ".repeat(80);
         let render_at = |w: usize| -> Vec<(String, usize)> {
             let mut state = crate::ui::state::ChatState::new();
@@ -967,17 +958,27 @@ mod tests {
                 .collect()
         };
 
-        let cap = MAX_CONTENT_WIDTH;
-        for w in [cap + 40, cap * 3] {
-            for (text, width) in render_at(w) {
+        // 宽终端：行宽可以逼近传入宽度，且绝不超出（超出=被右边界截断）
+        for w in [140usize, 200] {
+            let rendered = render_at(w);
+            assert!(
+                rendered.iter().any(|(_, width)| *width > 100),
+                "wrap_width={w}: 宽屏正文必须真的用到 >100 列（这正是本次修复要恢复的）: {:?}",
+                rendered
+                    .iter()
+                    .map(|(t, _)| t.as_str())
+                    .take(4)
+                    .collect::<Vec<_>>()
+            );
+            for (text, width) in rendered {
                 assert!(
-                    width <= cap,
-                    "wrap_width={w}: line exceeds cap ({width} > {cap}): {text:?}"
+                    width <= w,
+                    "wrap_width={w}: line exceeds width ({width} > {w}): {text:?}"
                 );
             }
         }
 
-        // 窄终端行为不变：仍按终端宽折行，不因为封顶而提前换行
+        // 窄终端行为不变：仍按终端宽折行
         let narrow = render_at(40);
         assert!(
             narrow.iter().any(|(_, width)| *width > 20),
@@ -1399,11 +1400,11 @@ mod tests {
         assert!(header.contains("(ctrl+o to expand)"), "{:?}", header);
     }
 
-    /// 回归：流式与完成态的折行宽度必须一致，且都封顶 MAX_CONTENT_WIDTH。
+    /// 回归：流式与完成态的折行宽度必须一致（同一宽度，流→完成零重排）。
     ///
     /// 旧实现流式预留 1 列光标位、完成态不预留，流结束的瞬间整段按新宽度
     /// 重新折行 —— 用户看到的就是"回复一完成文字全跳一下"。现在两个状态
-    /// 同一个 `wrap_width.min(MAX_CONTENT_WIDTH) - 1`，流→完成零重排。
+    /// 同一个 `wrap_width - 1`。
     ///
     /// 验证口径：对一段跨多行的长正文，分别以 (流式宽度, 完成宽度) 两种
     /// 旧宽度组合、以及新统一宽度渲染，断言新宽度下两种状态折出的行数
@@ -1442,8 +1443,8 @@ mod tests {
         let old_final = rendered(false, wrap.saturating_sub(1));
         // 用旧宽度组合复现就必须让两个调用点各走各的宽度，而这里统一走
         // 同一函数；直接断言**新统一宽度**下流式与完成逐行一致（去掉光标 ▌）。
-        let stream_now = rendered(true, wrap.min(MAX_CONTENT_WIDTH));
-        let final_now = rendered(false, wrap.min(MAX_CONTENT_WIDTH));
+        let stream_now = rendered(true, wrap);
+        let final_now = rendered(false, wrap);
 
         let strip_cursor = |mut lines: Vec<String>| {
             if let Some(last) = lines.last_mut() {

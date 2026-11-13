@@ -784,6 +784,14 @@ mod tests {
     use super::*;
     use crate::core::config::models::ProviderConfig;
 
+    /// RAII guard 复用 providers.rs 的 [`crate::core::config::providers::
+    /// ScopedApiKeyEnvRemoval`]：`configured_provider_ids_from` 会把「内建**且
+    /// 已配置**」的 provider 附加到列表尾部，而"已配置"可以由
+    /// `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` 等真实环境变量成立（产品功能）。
+    /// 开发机上这些变量经常设着 —— 断言列表内容必然失败（left 里多出
+    /// anthropic/openai）。测试要"这台机器没配过内建 provider"的前提，只能造。
+    use crate::core::config::providers::ScopedApiKeyEnvRemoval;
+
     /// 回归：`configured_provider_ids` 必须在多次调用之间给出**完全相同**的顺序。
     ///
     /// `config.providers` 是 HashMap，同 `order` 的那批 provider 的迭代顺序随机；
@@ -792,6 +800,13 @@ mod tests {
     /// 配置），顺序一抖，面板上的 provider 就会自己跳位。
     #[test]
     fn configured_provider_ids_are_stable_across_repeated_reads() {
+        // 摘掉真实的 key 环境变量：否则内建的 anthropic/openai 会因 env 凭证
+        // 被判"已配置"、附加进列表尾部，断言必然失败（见 guard 注释）。
+        let _env = ScopedApiKeyEnvRemoval::new(&[
+            "anthropic".to_string(),
+            "claude-code".to_string(),
+            "openai".to_string(),
+        ]);
         // 三个 provider 同一个 order —— 正好落在"必须靠 id 兜底"的那一档。
         let mut providers = std::collections::HashMap::new();
         for id in ["zeta", "alpha", "mid"] {
@@ -828,6 +843,12 @@ mod tests {
     /// 回归：刚加的 provider 必须排在最前（`order` 更大），不能被 id 兜底打乱。
     #[test]
     fn a_newer_provider_still_outranks_the_older_ones() {
+        // 同上：摘掉内建 provider 的 env 凭证，避免它们被附加进列表尾部。
+        let _env = ScopedApiKeyEnvRemoval::new(&[
+            "anthropic".to_string(),
+            "claude-code".to_string(),
+            "openai".to_string(),
+        ]);
         let mut providers = std::collections::HashMap::new();
         for (id, order) in [("alpha", 1), ("zeta", 2), ("mid", 1)] {
             providers.insert(

@@ -274,7 +274,7 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 
 | 项 | 现状 | 位置 |
 |---|---|---|
-| 配置根写死 | `const STAR_DIR: &str = ".star"`，**无环境变量可覆盖** | ❌ `core/config/storage.rs:8` |
+| 配置根写死 | **已修**：`global_star_dir()` 认 `STAR_CONFIG_DIR`（对标 `CLAUDE_CONFIG_DIR`；绝对/相对均可，空白视为未设，只影响全局层，项目 `.star` 仍由上溯发现） | ✅ `core/config/storage.rs:31` |
 | 全局层无 `.claude/` 回落 | 指令层已支持 `~/.claude/CLAUDE.md`；但 skills/agents/commands/等仍只读 `~/.star/*` | ❌ 部分 |
 | 无 `CLAUDE.local.md` | **已修** | ✅ `utils/project_context.rs` |
 | 无 `.claude/CLAUDE.md` | **已修**（`agent/system_prompt_merge.rs` 的旧实现无调用者，未基于它扩展） | ✅ 同上 |
@@ -358,7 +358,7 @@ lib 套件 914 全绿，`cargo fmt --check` 绿，本次改动范围内 clippy �
 |---|---|---|---|
 | **P1** | ~~`@import` 展开~~ **已完成（2026-11-10）**：`expand_imports`，围栏/深度/环三个边界都有测试 | ✅ |—|
 | **P1** | `.mcp.json` 作为回落 | `core/utils/paths.rs:337` | S |
-| **P1** | `STAR_CONFIG_DIR` 环境变量，对应 `CLAUDE_CONFIG_DIR` | `core/config/storage.rs:8` | S |
+| **P1** | ~~`STAR_CONFIG_DIR` 环境变量，对应 `CLAUDE_CONFIG_DIR`~~ **已完成**：`global_star_dir()` 已认该变量（2026-11-13 复查时发现基线过期） | ✅ |—|
 | **P1** | ~~`ApprovalMode` 补 `dontAsk`（headless/CI 用）~~ **已完成（2026-11-10）**：`acceptEdits` / `auto` / `bypassPermissions` / `dontAsk` 四档全部独立成档，CC 的五种审批模式对齐完毕 |—| ✅ |
 | **P1** | MCP tool search，schema 延迟加载 | `core/tools/tool_registry.rs` | L |
 | **P2** | `.claude/rules/` + `paths:` frontmatter 条件加载 | 新模块 | M |
@@ -367,6 +367,14 @@ lib 套件 914 全绿，`cargo fmt --check` 绿，本次改动范围内 clippy �
 | **P2** | subagent frontmatter 补 `omitClaudeMd` / `maxTurns` / `permissionMode` / description token 预算 | `commands/agents/` | M |
 | **P2** | Dynamic workflows（JS runtime + `agent`/`pipeline`/`parallel`） | 重做 `core/workflow/` | XL |
 | **P3** | auto mode 分类器 / sandbox | 需第二个模型调用通道 | XL |
+| **P2** | hook handler 字段 `if` / `once` / `statusMessage` / exec-form `args`（见 §7.2） | `core/hooks/settings_hooks.rs`、`runner.rs` | M |
+| **P2** | idle compaction：闲置 ~54min 自动压缩（2.1.299，见 §7.1） | `agent/compact/`（可挂 time_based_config） | M |
+| **P2** | keybindings.json 上下文感知重绑定（v2.1.205+，见 §7.2） | `ui/events/keymap.rs` 新增读取层 | M |
+| **P3** | statusline 自定义脚本（`statusLine: command`，stdin 收 JSON） | 新模块 | M |
+| **P3** | 自定义 output style 文件（`.claude/output-styles/*.md`） | `parity/core.rs:488` + `prompt_builder.rs` | M |
+| **P3** | `cleanupPeriodDays` transcript 保留期清理 | transcripts 目录清扫 | M |
+| **P3** | plugin.json `engines["claude-code"]` 版本门控（2.1.323） | 插件装载校验 | S |
+| **XL** | Code Mode：JS 调工具（2.1.323，实验性） | — | XL |
 
 自造事件名的别名映射（`BeforeAgent`→`UserPromptSubmit` 等）已从列表移除：CC 的事件名本来就能被 `ManagedHookEvent::parse()` 识别（两边共享同一套 `#[serde(rename)]`），导入路径不需要映射表。真正缺的是 CC 独有的那 12 个事件，见 P2。
 
@@ -438,3 +446,42 @@ P2 的 workflows 价值最高（把子 agent 并行从消耗主 context 变成�
 - **保留过的 5 份 UI 层的**（`parity-task.md`、`parity-progress.md`、`parity-permission.md`、`parity-tool-render-gaps.md`、`parity-ui-framework.md`）不久后随 `.docs/` 目录一起被清理（commit `18c5f0c`），现在**全部不存在**；本文是唯一有哪些对齐结论仍有效的地方。
 - **`CLAUDE.md`** 的 Project 段落加了对标文档指针；「Not everything is wired up」一节订正了两条错误判断（`PolicyEngine::load_permission_rules` 实为活路径；`WebBrowserTool` 已从树中移除），并补记了 `core/langfuse/client.rs:315` 这条此前漏列的 stub。
 - `README.md` 未引用 `parity-*.md`，无需改动。
+
+---
+
+## 7. 对标复查（2026-11-13，官方 v2.1.296–323）
+
+快照（2026-10-13）一个月后按官方 changelog + 各功能域文档复查一遍，找出 §2.3 没列的缺口。验证口径同 §0：构造点/读取点 grep 过才算数。复查方式说明：本轮原计划派多个子 agent 分头查，但本会话内 Agent 子 agent 工具实际不可调用，改为主线程并行检索完成。
+
+### 7.1 快照后官方新增、StarCode 无对应物
+
+| 官方功能（版本） | StarCode 现状 | 证据 |
+|---|---|---|
+| Code Mode：实验性 opt-in，Claude 写 JS 调用工具（2.1.323） | ❌ 无对应物 | 全仓无 code-mode 概念 |
+| idle compaction：>200K token 且闲置 ~54 分钟自动压缩；`idleCompaction` 设置 + `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`（2.1.299） | ❌ compact/ 14 个文件无 idle 概念（grep 0 命中）；已有 time-based（工作时段）变体可借力 | `agent/compact/` |
+| fork subagents 在 `-p`/SDK/桌面默认开启，`CLAUDE_CODE_FORK_SUBAGENT` 可关（2.1.302） | ❌ 有 `/fork` 命令，无 fork-subagent 机制 | `commands/mod.rs` fork 分支 |
+| plugin.json `engines["claude-code"]` 版本门控：范围外不安装/不更新/不加载（2.1.323） | ❌ 插件体系不认识 engines 字段 | 全仓 `"engines"` 0 命中 |
+| hooks 长跑每 30s 心跳，防宿主把 `-p`/SDK 会话判成 hung（2.1.323） | ❌ | |
+| subagent frontmatter `autoCompactWindow`（2.1.296）、`CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL`（2.1.296） | ❌ 并入 §3 P2 的 subagent 字段缺口 | |
+| Read 工具 `allow_large`（2.1.296） | ❌ | |
+| `CLAUDE_CODE_AUTO_MODE_MODEL`（2.1.302/323）、`/auto-mode-setup`（2.1.304） | ❌ 并入 §3 P3 auto mode 分类器缺口 | |
+| `CLAUDE_CODE_DISABLE_FILE_MENTIONS`、`--shutdown-drain-sec`、`claude plugin eval --disallow-tools`（2.1.299）、`CLAUDE_CODE_DISABLE_AGENT_PROGRESS_SUMMARIES`（2.1.318/323）、`CLAUDE_CODE_RESUME_HINT_COMMAND`（2.1.323） | ❌ | |
+| MCP：allow 规则匹配收紧（2.1.299）、tool description 上限 2048→4096（2.1.296）、调用 >2 分钟自动转后台（`CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`） | ⚠️ 自动后台化未见对应；匹配语义未复查 | MCP 相关文件无截断/后台化逻辑 |
+
+### 7.2 快照前就有、但 §2.3 缺失表漏列的
+
+| 项 | 官方形态 | StarCode 现状 | 证据 |
+|---|---|---|---|
+| keybindings.json 上下文感知重绑定（v2.1.205+；contexts：Doctor/Scroll/Agents/Pane/AbovePromptInput…） | settings 层文件，按键位上下文重绑 | `/keybindings` 只打印静态速查表；全仓无 keybindings.json 读取 | ❌ `commands/parity/core.rs:624` |
+| statusline 自定义脚本（settings 键 `statusLine: {type:"command"}`，stdin 收 JSON，输出替换状态栏） | 用户脚本自定义状态栏 | `/statusline` 只展示状态 + verbose/vim 开关，无脚本机制 | ❌ `commands/parity/core.rs:674` |
+| 自定义 output style 文件（`.claude/output-styles/*.md`，整段替换系统提示对应节） | markdown 文件即风格 | 只有 default/concise/verbose 三档枚举 | ❌ `commands/parity/core.rs:488`、`commands/config.rs:109` |
+| hook handler 字段 `if` / `once` / `statusMessage` / exec-form `args` | §1.2 列明的官方设计（§4 也列为"可抄"） | settings_hooks 只解析 `timeout` | ❌ `core/hooks/settings_hooks.rs:161` |
+| settings 键 `cleanupPeriodDays`（transcript 保留期清理）、`includeCoAuthoredBy`（commit 署名开关）、`spinnerTipsEnabled` | 各自独立小功能 | 全无（grep 0 命中） | ❌ |
+| 模型门控四键的 settings 侧形态：`modelPicker` / `availableModels` / `modelSettings` / `fallbackModel` | §1.1 的合并例外 | settings 层无这些键；fallback **功能**本身有（`STAR_FALLBACK_MODEL`/`STAR_FALLBACK_BASE_URL`） | ❌/✅ `agent/agent_llm.rs:941` |
+| SKILL.md frontmatter `license` | 官方字段（复制官方 skill 时随文件进来） | `SkillMetadata` 无此字段；serde 默认忽略未知字段，不致解析失败，补字段是为捕获元数据 | ❌ `agent/skills/loader.rs:34` |
+
+### 7.3 本轮排除的假缺口
+
+- **模型 fallback**：有。`STAR_FALLBACK_MODEL`/`STAR_FALLBACK_BASE_URL`（`agent/agent_llm.rs:941`、`agent_loop.rs:223`）+ ModelFallbackManager（`agent/agent_core.rs`）。
+- **环境变量体系**：~60 个 `STAR_*` 可调项已在，缺的只是 §7.1 所列具体功能键。
+- **`STAR_CONFIG_DIR`**：已实现（§2.3 该行已订正）——复查时发现基线过期。

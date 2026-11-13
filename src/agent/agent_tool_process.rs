@@ -326,20 +326,24 @@ impl Agent {
             // Action nudge guard: if the model returned text but no tool calls
             // and the user's request looks like a real coding task, inject a nudge.
             // Heuristics:
-            // - Long input (>50 chars) with action intent → likely a task
-            // - Short input (<30 chars) → likely a question, don't nudge
-            // - Medium input with action keywords → likely a task
+            // - Any input with action intent (EN or CJK keywords) → likely a task
+            // - Short input without action keywords → likely a question, don't nudge
+            //
+            // 短输入豁免（<30 字符不 nudge）曾按**长度**一刀切，但中文任务往往
+            // 就五六个字（"修复登录 bug"）—— `has_action_intent` 补上中文动词后
+            // 判据改成"有没有行动词"，长度只决定**没有**行动词时的兜底。
             if matches!(trigger_result, TurnResult::Done) && user_input.chars().count() > 5 {
                 let input_len = user_input.chars().count();
                 let looks_like_task = if input_len > 50 {
                     // Long input: nudge if it has any action intent
                     has_action_intent(user_input)
-                } else if input_len > 30 {
-                    // Medium input: nudge only if strong action keywords present
-                    has_action_intent(user_input)
+                } else if has_action_intent(user_input) {
+                    // Short/medium input with action keywords: still a task.
+                    // （中文任务短，长度不能当"是提问"的证据。）
+                    true
                 } else {
-                    // Short input: likely a question, don't nudge
-                    false
+                    // Short input without any action keyword: likely a question.
+                    input_len > 30 && has_action_intent(user_input)
                 };
 
                 if looks_like_task {

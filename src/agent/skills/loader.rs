@@ -57,6 +57,9 @@ pub struct SkillMetadata {
     /// 用户不可显式调用（仅模型可用）。
     pub user_invocable: bool,
     pub version: Option<String>,
+    /// SPDX 许可表达式或许可证名（官方 SKILL.md frontmatter `license`）。
+    /// 纯元数据，不参与行为；serde 默认忽略未知字段，所以旧缓存/旧文件不受影响。
+    pub license: Option<String>,
 }
 
 impl SkillMetadata {
@@ -115,6 +118,7 @@ impl Default for SkillMetadata {
             disable_model_invocation: false,
             user_invocable: true,
             version: None,
+            license: None,
         }
     }
 }
@@ -351,6 +355,7 @@ impl SkillLoader {
                         meta.user_invocable = !is_falsy(&cleaned);
                     }
                     "version" => meta.version = Some(cleaned),
+                    "license" => meta.license = Some(cleaned),
                     "allowed-tools" | "allowed_tools" => {
                         // Inline array like: allowed-tools: Bash, Read, Write
                         meta.allowed_tools = parse_inline_csv(&cleaned);
@@ -874,6 +879,16 @@ mod tests {
         assert_eq!(meta.model.as_deref(), Some("gpt-4o"));
         assert_eq!(meta.agent.as_deref(), Some("Explore"));
         assert_eq!(meta.shell.as_deref(), Some("powershell"));
+    }
+
+    /// 官方 SKILL.md frontmatter 的 `license` 字段（纯元数据）。
+    #[test]
+    fn license_frontmatter_is_captured() {
+        let meta = meta_of("name: s\nlicense: MIT\n");
+        assert_eq!(meta.license.as_deref(), Some("MIT"));
+        // 没写时不报错，回落 None（serde 对 Option 字段缺省即 None）。
+        let meta = meta_of("name: s\n");
+        assert_eq!(meta.license, None);
     }
 
     /// 参数替换：`$name` / `$1` / `$ARGUMENTS`。

@@ -199,6 +199,8 @@ mod tests {
             source: None,
             working_dir: None,
             matcher: None,
+            once: false,
+            status_message: None,
         };
 
         let store = crate::core::hooks::store::HookStore { hooks: vec![hook] };

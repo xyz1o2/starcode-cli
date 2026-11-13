@@ -141,6 +141,15 @@ pub struct ManagedHook {
     /// 从 settings.json 导入时带上；`/hooks add` 建的一律 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matcher: Option<String>,
+    /// Claude Code 的 `once`：本会话里只在第一次命中时执行，之后整段会话
+    /// 跳过（无论成功失败，CC 语义是 "deactivating it after its first
+    /// execution"）。settings.json 导入时带上；`/hooks add` 建的一律 false。
+    #[serde(default)]
+    pub once: bool,
+    /// Claude Code 的 `statusMessage`：hook 执行时展示给用户的一行说明。
+    /// 展示面（阻塞消息、`/hooks run` 输出）优先用它替代 hook 名。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_message: Option<String>,
 }
 
 /// 按 Claude Code 的 matcher 语义判断某条工具事件是否命中。
@@ -379,6 +388,8 @@ pub async fn list_hooks(project_root: &Path) -> Result<Vec<ManagedHook>, String>
             source: Some(plugin_hook.source),
             working_dir: Some(plugin_hook.working_dir),
             matcher: None,
+            once: false,
+            status_message: None,
         });
     }
 
@@ -428,6 +439,8 @@ pub async fn add_hook(
         source: None,
         working_dir: None,
         matcher: None,
+        once: false,
+        status_message: None,
     };
 
     store.hooks.push(hook.clone());
