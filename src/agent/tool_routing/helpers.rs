@@ -282,6 +282,14 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     // Discovery of long-tail tools (git/web/team/cron...) — always visible
     // so the agent can find any tool it doesn't know about by name.
     "ToolSearch",
+    // 子代理派发：CC 的 CORE_TOOLS 白名单明确包含 AGENT_TOOL_NAME（见
+    // study_or_copy_projects/claude-code-main src/constants/tools.ts「Agent &
+    // interaction」段）。不常驻的后果是真实的：模型从 ToolSearch 的**描述**
+    // 得知 Agent 存在并宣布"派出 4 个子智能体"，但 schema 不在当轮 tools
+    // 数组里 —— 它反复 ToolSearch(select:Agent) 拿到的仍只是描述，最后用
+    // bash(true) 空转占位等 Agent 出现，直到空响应被用户打断。描述能进
+    // 上下文而 schema 进不了 tools 数组，就是"想调而调不出"的死锁形状。
+    "Agent",
 ];
 
 /// 带限制的工具选择
@@ -821,6 +829,42 @@ mod tests {
                 a, b,
                 "tools 数组在第 {turn} 轮发生变化，会击穿 prompt 缓存前缀"
             );
+        }
+    }
+
+    /// Agent 工具必须常驻短名单 —— 对标 CC 的 CORE_TOOLS 白名单（含
+    /// AGENT_TOOL_NAME）。
+    ///
+    /// 回归（真实事故 2026-11-13）：用户要求「开多智能体分析」，模型从
+    /// ToolSearch 的**描述**得知 Agent 存在并宣布"派出 4 个子智能体"，但
+    /// Agent 不在核心白名单、评分也没把它选进 29 个的 shortlist —— 模型
+    /// 拿不到 schema，反复 ToolSearch(select:Agent) 三次，再用 bash(true)
+    /// 空转占位五轮，最后空响应被用户 Esc。"描述能进上下文而 schema 进不了
+    /// tools 数组"就是这种死锁的形状。Agent 是编排入口，必须永远可见。
+    #[test]
+    fn the_agent_tool_is_always_in_the_shortlist() {
+        let _guard = isolated_sticky_state();
+        // 79 个工具（远超 k=29），Agent 藏在其中 —— 评分对 "多智能体" 之外
+        // 的任何输入都不该左右它的入选。
+        let mut tools = wide_tool_set();
+        tools.push(tool(
+            "Agent",
+            "Launch a new agent to perform a complex task",
+        ));
+
+        for input in ["开多智能体分析一下", "refactor the parser", "你好"] {
+            for turn in [1, 5] {
+                let selection = select_tools_for_turn_with_limit(&tools, input, turn, None);
+                let names: Vec<&str> = selection
+                    .tools
+                    .iter()
+                    .map(|t| t.function.name.as_str())
+                    .collect();
+                assert!(
+                    names.contains(&"Agent"),
+                    "input={input:?} turn={turn}: Agent 必须常驻短名单（对齐 CC CORE_TOOLS），实际: {names:?}"
+                );
+            }
         }
     }
 

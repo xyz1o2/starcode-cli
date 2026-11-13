@@ -735,13 +735,14 @@ fn cached_system_prompts_max_chars() -> usize {
         std::env::var("STAR_SYSTEM_PROMPTS_MAX_CHARS")
             .ok()
             .and_then(|v| v.parse().ok())
-            // bundle 只计入剥掉 frontmatter 后的正文（见 assemble_core_bundle），
-            // 当前全部核心指南合计约 26.3k 字符（write.md 加完正好超出 26k——
-            // 装填是"先判满再装"，末位文件允许越线）。默认提到 28k：
-            // 至少 1.7k 余量，新加一个核心工具的指南也不至于静默挤掉尾部
-            // 文件；小上下文模型可用 STAR_SYSTEM_PROMPTS_MAX_CHARS 调回。
-            // toolsearch / write 指南曾因旧的 26k cap 被静默截掉，本次一并修复。
-            .unwrap_or(28_000)
+            // bundle 只计入剥掉 frontmatter 后的正文（见 assemble_core_bundle）。
+            // 当前全部核心指南合计约 27.8k 字符（Agent 的 runagent.md 加入后——
+            // 2026-11-13 Agent 进 CORE_TOOL_NAMES 对齐 CC，见 tool_routing/helpers.rs）。
+            // 默认提到 32k：留 4k 余量，新加一个核心工具的指南也不至于静默挤掉
+            // 尾部文件；小上下文模型可用 STAR_SYSTEM_PROMPTS_MAX_CHARS 调回。
+            // toolsearch / write 指南曾因旧的 26k cap 被静默截掉；runagent 加入后
+            // 28k 又挤掉 5 份尾部指南，本次一并修复。
+            .unwrap_or(32_000)
     })
 }
 
