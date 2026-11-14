@@ -939,7 +939,9 @@ async fn run_skill_forked(
 
     if skill.metadata.fork_in_background() {
         // 后台：立刻返回，结果随通知回流主会话。
-        let launched = runner.spawn_background(request, agent_name, description, type_label);
+        let launched = runner
+            .spawn_background(request, agent_name, description, type_label)
+            .await;
         let output = format!(
             "Skill `{}` is running in a forked subagent ({}). Its result will arrive \
              in this conversation when it finishes.",

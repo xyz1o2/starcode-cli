@@ -102,26 +102,31 @@ pub(super) fn handle_tool_result_message(
                         })
                         .unwrap_or_else(|| "Agent task".to_string());
 
-                    handle_agent_task_update(
-                        state,
-                        AgentTaskUpdateArgs {
-                            task_id: agent_id.to_string(),
-                            agent_type: agent_type.to_string(),
-                            description: description.clone(),
-                            // 工具已交回控制权 → backgrounded（is_async +
-                            // is_resolved），状态行显示任务描述而非工具进度
-                            status: crate::types::AgentTaskStatus::Background,
-                            tool_use_count: 0,
-                            tokens: 0,
-                            is_async: true,
-                            is_resolved: true,
-                            is_error: false,
-                            last_tool_info: None,
-                            name,
-                            task_description: Some(description),
-                            new_sub_entries: Vec::new(),
-                        },
-                    );
+                    // 启动快照已经由 runner 发出；这里的 ToolResult 只负责
+                    // 回填缺失记录。不能把已有 Running（或终态）覆盖成
+                    // Background，并把真实工具次数/token 重置为 0。
+                    if !state.active_agent_tasks.contains_key(agent_id) {
+                        handle_agent_task_update(
+                            state,
+                            AgentTaskUpdateArgs {
+                                task_id: agent_id.to_string(),
+                                agent_type: agent_type.to_string(),
+                                description: description.clone(),
+                                // 工具已交回控制权 → backgrounded（is_async +
+                                // is_resolved），状态行显示任务描述而非工具进度
+                                status: crate::types::AgentTaskStatus::Background,
+                                tool_use_count: 0,
+                                tokens: 0,
+                                is_async: true,
+                                is_resolved: true,
+                                is_error: false,
+                                last_tool_info: None,
+                                name,
+                                task_description: Some(description),
+                                new_sub_entries: Vec::new(),
+                            },
+                        );
+                    }
 
                     // 不再创建重复的 ToolCall 条目 — AgentTask 条目已包含完整信息
                     // 移除已有的 ToolCall streaming 条目

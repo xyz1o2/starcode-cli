@@ -262,7 +262,9 @@ pub async fn handle_request(
             description,
             response,
         } => {
-            let result = agent.spawn_forked_background_subtask(task, description);
+            let result = agent
+                .spawn_forked_background_subtask(task, description)
+                .await;
             let _ = response.send(result).await;
         }
         AgentRequest::SendMessage { .. } => {

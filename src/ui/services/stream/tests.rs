@@ -803,6 +803,52 @@ fn stale_acknowledgement_cannot_commit_a_fast_transition() {
 }
 
 #[test]
+fn async_launch_result_does_not_reset_progress_or_resurrect_finished_agent() {
+    for status in [
+        crate::types::AgentTaskStatus::Running,
+        crate::types::AgentTaskStatus::Completed,
+    ] {
+        let mut state = ChatState::test_fixture();
+        state.chat_history.clear();
+        state
+            .chat_history
+            .push(ChatEntry::tool_call("Agent", agent_tool_call()));
+        handle_agent_task_update(
+            &mut state,
+            AgentTaskUpdateArgs {
+                task_id: "worker-1".to_string(),
+                agent_type: "Explore".to_string(),
+                description: "scan".to_string(),
+                status: status.clone(),
+                tool_use_count: 3,
+                tokens: 400,
+                is_async: true,
+                is_resolved: false,
+                is_error: false,
+                last_tool_info: None,
+                name: None,
+                task_description: None,
+                new_sub_entries: Vec::new(),
+            },
+        );
+        handle_tool_result_message(
+            &mut state,
+            1,
+            agent_tool_call(),
+            async_agent_launch_result(),
+        );
+        let info = &state.active_agent_tasks["worker-1"];
+        assert_eq!(info.status, status);
+        assert_eq!(info.tool_use_count, 3);
+        assert_eq!(info.tokens, 400);
+        assert_eq!(
+            state.background_agent_rows().is_empty(),
+            status == crate::types::AgentTaskStatus::Completed,
+        );
+    }
+}
+
+#[test]
 fn async_agent_launch_remaps_indices_before_follow_up_updates() {
     let mut state = ChatState::new();
     state.chat_history.clear();
@@ -889,6 +935,137 @@ fn async_agent_launch_remaps_indices_before_follow_up_updates() {
         state.chat_history[3].agent_last_tool_info.as_deref(),
         Some("Reading config")
     );
+}
+
+#[test]
+fn completed_background_agent_returns_to_main_and_keeps_history() {
+    let mut state = ChatState::test_fixture();
+    let task_id = "explorer-1";
+    let update = |status, new_sub_entries| AgentTaskUpdateArgs {
+        task_id: task_id.to_string(),
+        agent_type: "Explore".to_string(),
+        description: "Inspect UI".to_string(),
+        status,
+        tool_use_count: 2,
+        tokens: 42,
+        is_async: true,
+        is_resolved: true,
+        is_error: false,
+        last_tool_info: None,
+        name: None,
+        task_description: None,
+        new_sub_entries,
+    };
+    handle_agent_task_update(
+        &mut state,
+        update(crate::types::AgentTaskStatus::Running, Vec::new()),
+    );
+    let entry_idx = state.active_agent_tasks[task_id].entry_idx;
+    assert_eq!(state.background_agent_rows().len(), 1);
+    assert_eq!(
+        crate::ui::components::bg_agent_selector::selector_height(&state),
+        2,
+    );
+
+    state.enter_teammate_view(task_id);
+    state.bg_agent_selection = Some(1);
+    state.auto_follow = false;
+    let report = crate::types::ChatEntry::assistant("UI findings");
+    handle_agent_task_update(
+        &mut state,
+        update(crate::types::AgentTaskStatus::Completed, vec![report]),
+    );
+
+    assert!(state.viewing_agent_task_id.is_none());
+    assert!(state.bg_agent_selection.is_none());
+    assert!(state.auto_follow);
+    assert!(state.background_agent_rows().is_empty());
+    assert_eq!(
+        crate::ui::components::bg_agent_selector::selector_height(&state),
+        0,
+    );
+    let info = &state.active_agent_tasks[task_id];
+    assert_eq!(info.entry_idx, entry_idx);
+    assert_eq!(info.sub_entries[0].content, "UI findings");
+    assert_eq!(
+        state.chat_history[entry_idx].agent_status,
+        Some(crate::types::AgentTaskStatus::Completed)
+    );
+}
+
+#[test]
+fn terminal_agent_does_not_hide_other_running_agents() {
+    let mut state = ChatState::test_fixture();
+    let update = |task_id: &str, status| AgentTaskUpdateArgs {
+        task_id: task_id.to_string(),
+        agent_type: "Explore".to_string(),
+        description: task_id.to_string(),
+        status,
+        tool_use_count: 0,
+        tokens: 0,
+        is_async: true,
+        is_resolved: false,
+        is_error: false,
+        last_tool_info: None,
+        name: None,
+        task_description: None,
+        new_sub_entries: Vec::new(),
+    };
+    handle_agent_task_update(
+        &mut state,
+        update("first", crate::types::AgentTaskStatus::Running),
+    );
+    handle_agent_task_update(
+        &mut state,
+        update("second", crate::types::AgentTaskStatus::Running),
+    );
+    state.enter_teammate_view("second");
+    state.bg_agent_selection = Some(2);
+    handle_agent_task_update(
+        &mut state,
+        update("first", crate::types::AgentTaskStatus::Failed),
+    );
+
+    assert_eq!(state.viewing_agent_task_id.as_deref(), Some("second"));
+    assert!(state.bg_agent_selection.is_none());
+    let rows = state.background_agent_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].task_id, "second");
+    assert_eq!(
+        crate::ui::components::bg_agent_selector::selector_height(&state),
+        2
+    );
+}
+
+#[test]
+fn late_background_launch_result_cannot_resurrect_completed_agent() {
+    let mut state = ChatState::test_fixture();
+    let update = |status| AgentTaskUpdateArgs {
+        task_id: "fast-agent".to_string(),
+        agent_type: "Explore".to_string(),
+        description: "Quick scan".to_string(),
+        status,
+        tool_use_count: 0,
+        tokens: 0,
+        is_async: true,
+        is_resolved: true,
+        is_error: false,
+        last_tool_info: None,
+        name: None,
+        task_description: None,
+        new_sub_entries: Vec::new(),
+    };
+    handle_agent_task_update(&mut state, update(crate::types::AgentTaskStatus::Running));
+    handle_agent_task_update(&mut state, update(crate::types::AgentTaskStatus::Completed));
+    handle_agent_task_update(
+        &mut state,
+        update(crate::types::AgentTaskStatus::Background),
+    );
+    assert_eq!(
+        state.active_agent_tasks["fast-agent"].status,
+        crate::types::AgentTaskStatus::Completed,
+    );
+    assert!(state.background_agent_rows().is_empty());
 }
 
 #[tokio::test]

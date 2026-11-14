@@ -409,6 +409,34 @@ fn background_agent_rows_filters_sorts_and_caps() {
     );
 }
 
+/// 已结束的任务从 selector 收起后，聊天历史不能再次打开其详情；
+/// 同一组仍有运行中成员时，点击组应进入那个成员。
+#[test]
+fn completed_agent_history_does_not_reopen_finished_view() {
+    let mut state = ChatState::test_fixture();
+    state.chat_history.push(ChatEntry::agent_group(vec![
+        "done".to_string(),
+        "running".to_string(),
+    ]));
+    let idx = state.chat_history.len() - 1;
+    let mut done = bg_task("done", true, 20);
+    done.status = crate::types::AgentTaskStatus::Completed;
+    let running = bg_task("running", true, 10);
+    state.active_agent_tasks.insert("done".to_string(), done);
+    state
+        .active_agent_tasks
+        .insert("running".to_string(), running);
+
+    assert!(state.open_agent_view_from_entry(idx));
+    assert_eq!(state.viewing_agent_task_id.as_deref(), Some("running"));
+    state.exit_teammate_view();
+    state.active_agent_tasks.get_mut("running").unwrap().status =
+        crate::types::AgentTaskStatus::Completed;
+    assert!(!state.open_agent_view_from_entry(idx));
+    assert!(state.viewing_agent_task_id.is_none());
+    assert!(state.background_agent_rows().is_empty());
+}
+
 /// 进入/退出详情视图只动 `viewing_agent_task_id`，不碰选择器焦点。
 #[test]
 fn teammate_view_toggles_without_moving_selection() {

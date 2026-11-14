@@ -11,6 +11,18 @@ pub(super) fn handle_agent_task_update(state: &mut ChatState, args: AgentTaskUpd
     use crate::types::ChatEntryType;
 
     let prior = state.active_agent_tasks.get(&args.task_id);
+    // 工具的 async_launched 结果可能晚于子代理终态到达 UI。终态是单向的：
+    // 迟到的 Background / Running 快照不能把已经完成的任务重新挂回选择器。
+    let incoming_terminal = matches!(
+        args.status,
+        crate::types::AgentTaskStatus::Completed
+            | crate::types::AgentTaskStatus::Failed
+            | crate::types::AgentTaskStatus::Rejected
+    );
+    let first_terminal = incoming_terminal && prior.is_none_or(|info| info.finished_at.is_none());
+    if prior.is_some_and(|info| info.finished_at.is_some()) && !incoming_terminal {
+        return;
+    }
     let started_at = prior
         .map(|i| i.started_at)
         .unwrap_or_else(std::time::Instant::now);
@@ -18,15 +30,9 @@ pub(super) fn handle_agent_task_update(state: &mut ChatState, args: AgentTaskUpd
     // `Background` 不算终态 —— 它只表示 Agent 工具交回了控制权，任务还在后台跑；
     // 早先按 `is_resolved` 判断会在启动那一刻就把 finished_at 钉住，
     // 于是后台代理的耗时永远显示 0s。
-    let is_terminal = matches!(
-        args.status,
-        crate::types::AgentTaskStatus::Completed
-            | crate::types::AgentTaskStatus::Failed
-            | crate::types::AgentTaskStatus::Rejected
-    );
     let finished_at = prior
         .and_then(|i| i.finished_at)
-        .or_else(|| is_terminal.then(std::time::Instant::now));
+        .or_else(|| incoming_terminal.then(std::time::Instant::now));
     let mut sub_entries = prior.map(|i| i.sub_entries.clone()).unwrap_or_default();
     sub_entries.extend(args.new_sub_entries.iter().cloned());
     // 进度 chunk 未携带这些字段时沿用旧值，避免状态行闪回 "Initializing…"
@@ -74,6 +80,18 @@ pub(super) fn handle_agent_task_update(state: &mut ChatState, args: AgentTaskUpd
     }
     state.rendered_cache.remove(&entry_idx);
     state.virtual_list.mark_dirty(entry_idx);
+
+    // 已在查看的代理结束时自动回主会话；终态记录留在聊天历史中，
+    // 不让已结束的详情继续占着整个聊天区。
+    if first_terminal && args.is_async {
+        if state.viewing_agent_task_id.as_deref() == Some(args.task_id.as_str()) {
+            state.exit_teammate_view();
+            state.auto_follow = true;
+        }
+        // 行列表缩短后旧索引可能指向另一个正在运行的代理；焦点回到输入框，
+        // 避免下一次 Enter 打开错误的任务。
+        state.bg_agent_selection = None;
+    }
 
     state.active_agent_tasks.insert(
         args.task_id.clone(),

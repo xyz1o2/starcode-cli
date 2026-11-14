@@ -295,12 +295,14 @@ impl ToolInvocation for AgentToolInvocation {
                         Some(n) => request.with_identity(n.clone()),
                         None => request,
                     };
-                    let launch = async_runner.spawn_background(
-                        request,
-                        name.clone(),
-                        input.description.clone(),
-                        type_label.clone(),
-                    );
+                    let launch = async_runner
+                        .spawn_background(
+                            request,
+                            name.clone(),
+                            input.description.clone(),
+                            type_label.clone(),
+                        )
+                        .await;
 
                     Ok(ToolResult {
                         llm_content: Some(format!(
@@ -335,12 +337,14 @@ impl ToolInvocation for AgentToolInvocation {
                     // SendMessage 可按 agent_id 单播，worker 可回话给 "lead"。
                     // （lead → worker 的任务指派正文已在 prompt 里，无需再发。）
                     let request = request.with_identity(agent_id.clone());
-                    let launch = async_runner.spawn_background(
-                        request,
-                        None,
-                        input.description.clone(),
-                        type_label.clone(),
-                    );
+                    let launch = async_runner
+                        .spawn_background(
+                            request,
+                            None,
+                            input.description.clone(),
+                            type_label.clone(),
+                        )
+                        .await;
 
                     Ok(ToolResult {
                         llm_content: Some(format!(
@@ -396,12 +400,14 @@ impl ToolInvocation for AgentToolInvocation {
                         parent_pending_context: request.base.parent_pending_context,
                         identity: Some(fork_name.clone()),
                     };
-                    let launch = async_runner.spawn_background(
-                        request_with_id,
-                        Some(fork_name.clone()),
-                        request.description.clone(),
-                        "Fork".to_string(),
-                    );
+                    let launch = async_runner
+                        .spawn_background(
+                            request_with_id,
+                            Some(fork_name.clone()),
+                            request.description.clone(),
+                            "Fork".to_string(),
+                        )
+                        .await;
 
                     Ok(ToolResult {
                         llm_content: Some(format!(

@@ -511,7 +511,9 @@ pub async fn apply_deferred_context_actions(
                 description,
                 response,
             } => {
-                let result = agent.spawn_forked_background_subtask(task, description);
+                let result = agent
+                    .spawn_forked_background_subtask(task, description)
+                    .await;
                 let _ = response.send(result).await;
             }
             DeferredContextAction::Shutdown { response } => return Some(response),

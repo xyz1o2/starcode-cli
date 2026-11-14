@@ -87,7 +87,7 @@ impl StarAgent {
     /// 安装到子代理，而不是把历史截断成一段 prompt。子代理使用同一份
     /// client/provider 与运行时通知队列，因此结果会通过现有的
     /// `<task-notification>` 通道回到下一轮对话，UI 也能收到 AgentTaskUpdate。
-    pub fn spawn_forked_background_subtask(
+    pub async fn spawn_forked_background_subtask(
         &self,
         task: String,
         description: String,
@@ -107,7 +107,9 @@ impl StarAgent {
         let async_runner =
             crate::agent::subagent::runner::AsyncSubagentRunner::new(runner, notification_queue);
 
-        Ok(async_runner.spawn_background(request, None, description, "Fork".to_string()))
+        Ok(async_runner
+            .spawn_background(request, None, description, "Fork".to_string())
+            .await)
     }
 
     fn initial_approval_mode(config: &Config) -> ApprovalMode {

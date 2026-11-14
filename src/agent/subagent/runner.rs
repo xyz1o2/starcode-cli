@@ -577,7 +577,7 @@ impl AsyncSubagentRunner {
     ///
     /// `agent_type_label` 是用户可见的类型标签（对标 `userFacingName`），
     /// 会随通知回到 UI，避免 UI 侧再硬编码 "general-purpose"。
-    pub fn spawn_background(
+    pub async fn spawn_background(
         &self,
         request: SubAgentRequest,
         name: Option<String>,
@@ -603,18 +603,27 @@ impl AsyncSubagentRunner {
         // 未指派时回落 name / agent_id（见下方注册处）。
         let hub_identity = request.identity.clone();
 
-        // 登记 in-flight：主 agent 的循环退出判定（agent_loop.rs 的 Done 分支）
-        // 读这个集合 —— 模型说 Done 但后台还有人没回来时不收工，等通知。
-        // enqueue 时自动移除，所以这里先行登记不会泄漏。
-        //
-        // 登记放在**干活的那个 spawn 的第一行**，不能另起一个 spawn：两个
-        // spawn 之间没有顺序保证，终态 enqueue 可能先于登记发生，那样
-        // in-flight 就永久泄漏（主 agent 只能等 STAR_BG_WAIT_TIMEOUT_SECS
-        // 超时才收工）。
-        tokio::spawn(async move {
-            // 登记 in-flight（必须先于任何可能失败的步骤）。
-            queue.lock().await.mark_spawned(&aid);
+        // 先发启动快照，再 spawn 真正的后台任务。不能等子 Agent 的第一条
+        // progress callback：初始化、首个 provider 请求或等待确认都可能没有
+        // 回调；也不能把快照放到 spawn 之后，否则极快完成的任务可能先发终态，
+        // 再被迟到的 Running 覆盖成“假运行中”。
+        crate::agent::subagent::progress::emit_to_ui(
+            crate::types::StreamingChunk::agent_task_update(
+                crate::types::AgentTaskUpdatePayload::new(&agent_id, &type_label)
+                    .with_description(desc.clone())
+                    .with_status(crate::types::AgentTaskStatus::Running)
+                    .with_async(true)
+                    .with_name(agent_name.clone())
+                    .with_task_description(Some(desc.clone())),
+            ),
+        );
 
+        // 在返回给主 Agent 前完成登记；不能留到 spawn 的第一行，因为
+        // spawn 尚未被调度时主 Agent 可能已经检查 in-flight 并退出，
+        // 导致终态通知无人汇总。先登记再 spawn 也保证极快完成时 enqueue
+        // 不会早于登记发生。
+        queue.lock().await.mark_spawned(&agent_id);
+        tokio::spawn(async move {
             // 注册 name → agent_id 映射。放进 spawn 内用 async lock，
             // 避免在 async 上下文里调用 blocking_lock 触发 panic。
             if let Some(ref n) = agent_name {

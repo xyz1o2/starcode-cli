@@ -1348,19 +1348,23 @@ impl ChatState {
 
     // ── 后台代理选择器（对标 background agent selector）──────────────────
 
-    /// 选择器可列出的后台代理，单一数据源。
+    /// 选择器只列仍在运行的后台代理；终态保留在聊天历史中供回看。
     ///
-    /// 只收 `is_async` 的任务：同步子代理是当前 turn 的一部分，已经在聊天流里逐行展示，
-    /// 再进选择器只会重复。按 `started_at` 升序，保证行序稳定（`active_agent_tasks` 是
-    /// `HashMap`，直接遍历的顺序每帧都可能变）。
-    ///
-    /// 参照实现用 `evictAfter` 做过期驱逐；这里 `active_agent_tasks` 只插不删，所以靠
-    /// [`MAX_BG_AGENT_ROWS`] 上限收敛 —— 长会话里只保留最近启动的若干个。
+    /// 同步子代理已在聊天流中展示，不重复列出。终态从选择器收起，但任务记录
+    /// 仍留在 `active_agent_tasks`，AgentTask / AgentGroup 可以继续展示结果。
+    /// 按启动时间排序以避免 HashMap 的迭代顺序导致选中行跳动。
     pub fn background_agent_rows(&self) -> Vec<&AgentTaskInfo> {
         let mut rows: Vec<&AgentTaskInfo> = self
             .active_agent_tasks
             .values()
-            .filter(|t| t.is_async)
+            .filter(|t| {
+                t.is_async
+                    && matches!(
+                        t.status,
+                        crate::types::AgentTaskStatus::Running
+                            | crate::types::AgentTaskStatus::Background
+                    )
+            })
             .collect();
         rows.sort_by_key(|t| t.started_at);
         if rows.len() > MAX_BG_AGENT_ROWS {
@@ -1388,14 +1392,10 @@ impl ChatState {
         }
     }
 
-    /// 点击 AgentTask / AgentGroup 条目时打开对应后台代理的详情视图。
+    /// 点击 AgentTask / AgentGroup 条目时打开仍在运行的后台代理详情。
     ///
-    /// 分组条目（AgentGroup）取组内**第一个** async 成员：组的每一行都是一个
-    /// 独立 agent，但点击落点只有一个 entry_idx，选中"组里第一个能看的"是
-    /// 最不意外的默认。全部成员都不是 async（纯同步组）时返回 false ——
-    /// 同步子代理的输出已经在聊天流里，没有详情视图可进（与
-    /// `background_agent_rows` 只收 async 同一口径）。
-    /// 返回 true 表示视图已切换（调用方据此清掉单格选区）。
+    /// 分组条目取第一个仍在运行的 async 成员；终态记录留在聊天历史中，
+    /// 但不重新打开已经收起的详情视图。返回 true 表示视图已切换。
     pub fn open_agent_view_from_entry(&mut self, entry_idx: usize) -> bool {
         let Some(entry) = self.chat_history.get(entry_idx) else {
             return false;
@@ -1405,13 +1405,16 @@ impl ChatState {
             (ChatEntryType::AgentTask, _) => entry.agent_task_id.clone().into_iter().collect(),
             _ => return false,
         };
-        // 组内第一个 async 成员；AgentTask 的 task_id 一定在 active_agent_tasks
-        // 里（handle_agent_task_update 每条更新都 insert），直接试。
+        // 与选择器使用同一口径：完成后不能点历史记录重新进入已收起的详情。
         let target = ids.into_iter().find(|id| {
-            self.active_agent_tasks
-                .get(id)
-                .map(|t| t.is_async)
-                .unwrap_or(false)
+            self.active_agent_tasks.get(id).is_some_and(|t| {
+                t.is_async
+                    && matches!(
+                        t.status,
+                        crate::types::AgentTaskStatus::Running
+                            | crate::types::AgentTaskStatus::Background
+                    )
+            })
         });
         match target {
             Some(task_id) => {
