@@ -13,5 +13,5 @@ Git undo: undo commit, hard reset, stash, pop.
 
 **Actions**:
 - `undo_last_commit`: soft reset, keeps changes staged
-- `reset_to`: HARD reset to `target` — **discards all changes**, only with explicit user approval
+- `reset_to`: HARD reset to the target — **discards all changes**. Inspect the target and obtain explicit user authorization first. This tool does not itself guarantee a separate confirmation dialog.
 - `stash` / `pop`: temporary work storage

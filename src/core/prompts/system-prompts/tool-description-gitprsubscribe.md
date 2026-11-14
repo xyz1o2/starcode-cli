@@ -1,15 +1,15 @@
 <!--
 name: 'Tool Description: GitPRSubscribe'
-description: Subscribe to PR change notifications
+description: Save a PR subscription record and inspect current state
 -->
-Subscribe to PR updates: CI status, reviews, comments.
+Save a local PR subscription record and query the PR's current state and check count.
 
-**Use for**: tracking important PRs, monitoring CI pipelines.
-**NOT for**: one-time PR check (use `gh` via bash), PR creation.
+**Use for**: recording a PR to track later.
+**NOT for**: claiming that reviews, comments, or CI are being monitored continuously; this call only inspects the current snapshot. For a one-time check, use `gh` via Bash.
 
-**Params**: `repo` (owner/repo), `pr_number`
+**Params**: repo (owner/repo), PR number.
 
 **Rules**:
-- Requires `gh` CLI authenticated
-- Saves subscription to `.star/pr_subscriptions/`
-- Use for ongoing PR monitoring
+- Requires an authenticated `gh` CLI.
+- Writes a record under `.star/pr_subscriptions/`; do not treat it as read-only.
+- Confirm that some monitor is running before promising future notifications.

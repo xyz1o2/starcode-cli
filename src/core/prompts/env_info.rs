@@ -92,14 +92,13 @@ pub fn is_ci() -> bool {
 
 /// Render static environment info (does NOT change between turns).
 /// This part is cached with cache_control for prompt caching.
-pub fn render_static_env_info(today: &str, platform: &str, cwd: &str, shell: &str) -> String {
+pub fn render_static_env_info(platform: &str, cwd: &str, shell: &str) -> String {
     let mut parts = vec![
         "# Environment".to_string(),
         "You have been invoked in the following environment:".to_string(),
         format!("  Working directory: {}", cwd),
         format!("  Platform: {}", platform),
         format!("  Shell: {}", shell),
-        format!("  Date: {}", today),
     ];
 
     parts.join("\n")

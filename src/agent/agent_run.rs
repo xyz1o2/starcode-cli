@@ -354,13 +354,9 @@ impl Agent {
                 git_snapshot.as_deref(),
                 goal_context.as_deref(),
             );
-            // 日期在会话第一条用户消息时固定一次，之后整场会话复用。
-            // 每轮重取 `Local::now()` 会让跨零点的会话白白重建一次整个缓存前缀
-            // —— 为了 system prompt 里的一行日期赔上约 4 万字符的缓存。
-            if self.session_today.is_empty() {
-                self.session_today = chrono::Local::now().format("%Y-%m-%d").to_string();
-            }
-            let today = self.session_today.clone();
+            // 日期只落在静态断点之后的准静态 system 块，跨日更新不会
+            // 击穿工具定义和静态 system 的缓存前缀。
+            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
             let output_style_clone = output_style.clone();
             let cached_system_msgs = tokio::task::spawn_blocking(move || {
                 crate::agent::prompt_builder::PromptBuilder::build_cached_system_messages(

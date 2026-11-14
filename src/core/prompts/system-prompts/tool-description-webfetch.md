@@ -11,6 +11,5 @@ Fetch a URL, convert it to markdown, and either return the page or answer a ques
 
 **Rules**:
 - Pass `prompt` by default: the page is read for you and only the answer comes back. Omitting it drops the whole page into context, which costs a great deal more and stays there for the rest of the session.
-- One fetch per URL. There is no cache — fetching the same URL again re-downloads it and returns the same content, so re-fetching after a truncated or unhelpful result gains nothing. Move on or try a different source.
-- Large pages are truncated; the truncation marker says how much was dropped. That prefix is all that is available.
-- If a fetch fails (HTTP error, offline mode), it will keep failing. Use another source or continue without it.
+- Avoid redundant fetches of the same URL. For large pages, use the available offset/range mechanism if the tool exposes one; otherwise try a more specific source.
+- Offline mode remains unavailable until the user disables it. A transient network error, rate limit, or server error may recover; retry only when appropriate rather than claiming all failures are permanent.

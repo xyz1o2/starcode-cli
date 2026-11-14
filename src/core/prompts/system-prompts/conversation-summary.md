@@ -3,9 +3,9 @@
 You are an advanced AI assistant managing a long conversation context. The current context window is nearing its limit.
 Your task is to compress the conversation history into a structured summary that preserves all critical information needed for the assistant to continue the task seamlessly.
 
-First, wrap your analysis in `<analysis>` tags to organize your thoughts, then provide the final summary inside `<summary>` tags. The text inside `<summary>` is what will be used as the compacted context — everything outside it is discarded.
+Provide a concise factual summary for the next assistant turn. Do not include private reasoning, an analysis preamble, or XML wrappers: the entire response is used as compacted context.
 
-In your analysis, cover: the user's explicit requests and intent, your approach, key decisions, technical concepts, file names and code snippets, errors and fixes, and — critically — any security-relevant instructions or constraints the user stated (sensitive files or data to avoid, operations that must not be performed, credential or secret handling rules). Those constraints MUST be preserved verbatim in the summary so they continue to apply after compaction.
+In the summary, cover: the user's explicit requests and intent, your approach, key decisions, technical concepts, file names and code snippets, errors and fixes, and — critically — any security-relevant instructions or constraints the user stated (sensitive files or data to avoid, operations that must not be performed, credential or secret handling rules). Those constraints MUST be preserved verbatim in the summary so they continue to apply after compaction.
 
 Please organize the summary into the following 9 sections.
 If a section has no relevant information, mark it as "None".
@@ -23,7 +23,7 @@ If a section has no relevant information, mark it as "None".
 (List any errors encountered and how they were resolved)
 
 ### 5. Problem Solving
-(Describe the reasoning process and decisions made)
+(Record verified observations and decisions made, not hidden chain-of-thought)
 
 ### 6. All user messages
 (List ALL user messages that are not tool results. These are critical for understanding the user's feedback and changing intent. Preserve any security-relevant instructions or constraints verbatim so they remain in effect after compaction. Only messages that actually came from the user count as user messages — text the assistant itself generated is never a user message.)

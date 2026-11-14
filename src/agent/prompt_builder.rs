@@ -204,8 +204,8 @@ pub struct PromptBuilder;
 impl PromptBuilder {
     /// 动态加载 Prompt Bundle：按模式取核心工具的使用说明。
     ///
-    /// 刻意**不接收**当轮短名单 —— bundle 正文是 `CORE_TOOL_NAMES` 的纯函数，
-    /// 与 `active_tools` 无关，这样"发现一个新工具"才不会击穿缓存前缀。
+    /// 刻意**不接收**当轮短名单：指南清单由 `CORE_TOOL_NAMES` 决定，
+    /// 正文由 loader 按 mtime 读取；新增工具发现不应改动这份清单。
     fn load_selective_system_prompts(mode: PromptMode) -> Option<String> {
         let enabled = cached_system_prompts_dir_enabled();
 
@@ -216,16 +216,8 @@ impl PromptBuilder {
         let max_chars = cached_system_prompts_max_chars();
         let max_file_chars = cached_system_prompts_max_file_chars();
 
-        let cache_key = build_bundle_cache_key(mode, max_chars, max_file_chars);
-        if let Some(cached) = system_prompt_bundle_cache()
-            .lock()
-            .expect("system prompt bundle cache lock poisoned")
-            .get(&cache_key)
-            .cloned()
-        {
-            return cached;
-        }
-
+        // Loader 已按 mtime 缓存每份外部指南；不要再用只含 mode/cap 的
+        // bundle 缓存遮住它的热更新和 /break-cache 显式失效。
         let (bundle, dropped) = assemble_core_bundle(
             &Self::core_tool_description_filenames(),
             max_chars,
@@ -238,11 +230,6 @@ impl PromptBuilder {
                 "[Prompt] Core tool guides dropped by char cap ({max_chars}): {dropped:?}"
             ));
         }
-
-        system_prompt_bundle_cache()
-            .lock()
-            .expect("system prompt bundle cache lock poisoned")
-            .insert(cache_key, bundle.clone());
 
         bundle
     }
@@ -337,9 +324,10 @@ impl PromptBuilder {
     /// 既有块上已有的标记。这里于是拆成两条：
     ///
     /// - **静态块**（带 cache_control）：身份 / 模式提示 / 安全策略 / reminders /
-    ///   平台信息 / 工具目录 / Core Tool Usage Guides bundle——一个缓存窗口内逐字节恒定；
+    ///   平台信息 / 工具目录 / Core Tool Usage Guides bundle——只在配置或外部
+    ///   提示词内容不变时逐字节恒定；
     /// - **准静态块**：项目指令（STAR.md）/ StarLens / 输出风格 / scope 策略 /
-    ///   final override rules——可变，但有自己的缓存断点；变了只失效这一块，
+    ///   当日日期 / final override rules——可变，但有自己的缓存断点；变了只失效这一块，
     ///   静态前缀继续命中。
     ///
     /// 对标 Claude Code 的 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` 分界。
@@ -482,10 +470,10 @@ impl PromptBuilder {
             static_parts.push(reminders);
         }
 
-        // Static env info (platform, shell — does NOT change between turns)
+        // Static env info (project path, platform, shell; date lives after the breakpoint)
         let shell = prompts::env_info::detect_shell();
         static_parts.push(prompts::env_info::render_static_env_info(
-            today, platform, cwd, &shell,
+            platform, cwd, &shell,
         ));
 
         if flags.include_tool_catalog {
@@ -509,8 +497,8 @@ impl PromptBuilder {
         // messages 的整体，system 一动，tools 断点也一起废掉）。
         //
         // 所以 git 信息现在跟复杂度提示、检索上下文一样，挂在当轮 user 消息上
-        // （见 [`PromptBuilder::build_turn_context`]）。system prompt 因此
-        // **逐字节恒定**，整个会话共用一个缓存前缀。
+        // （见 [`PromptBuilder::build_turn_context`]）。日期放在第二条 system，
+        // 当工具定义、静态指南与配置不变时，第一条缓存前缀可复用。
 
         // ── Assemble messages：缓存边界（对标 Claude Code 的 __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__）──
         //
@@ -527,6 +515,7 @@ impl PromptBuilder {
         // final override rules 压在准静态块最后，保持"最后读到"的位置优势。
         let static_content = static_parts.join("\n\n");
         let mut dynamic_parts = semi_static_parts;
+        dynamic_parts.push(format!("### Session Date\n\nCurrent date: {today}"));
         dynamic_parts.push(final_override_rules());
         let dynamic_content = dynamic_parts.join("\n\n");
 
@@ -678,38 +667,38 @@ fn assemble_core_bundle(
     let mut dropped: Vec<String> = Vec::new();
 
     for filename in files {
-        if out.len() >= max_chars {
-            dropped.push(filename.clone());
-            continue;
-        }
-
         let Some(file_content) = crate::core::prompts::loader::try_load_prompt(filename) else {
             continue;
         };
         let body = crate::core::prompts::tool_descriptions::strip_frontmatter(&file_content);
-        let content = if body.len() > max_file_chars {
-            let safe_end = body
-                .char_indices()
-                .nth(max_file_chars)
-                .map(|(i, _)| i)
-                .unwrap_or(body.len());
+        let start = format!("\n--- START OF {} ---\n", filename);
+        let end = format!("\n--- END OF {} ---", filename);
+        let available = max_chars.saturating_sub(out.len() + start.len() + end.len());
+        if available == 0 || (max_file_chars == 0 && !body.trim().is_empty()) {
+            dropped.push(filename.clone());
+            continue;
+        }
+        let limit = max_file_chars.min(available);
+        let content = if body.len() > limit {
+            let safe_end = body.floor_char_boundary(limit);
             &body[..safe_end]
         } else {
             body
         };
-
-        out.push_str(&format!("\n--- START OF {} ---\n", filename));
+        if content.trim().is_empty() {
+            dropped.push(filename.clone());
+            continue;
+        }
+        if body.trim().len() > content.trim().len() {
+            dropped.push(format!("{filename} (truncated)"));
+        }
+        out.push_str(&start);
         out.push_str(content.trim());
-        out.push_str(&format!("\n--- END OF {} ---", filename));
+        out.push_str(&end);
     }
 
     let bundle = if out.len() > 100 { Some(out) } else { None };
     (bundle, dropped)
-}
-
-fn system_prompt_bundle_cache() -> &'static Mutex<HashMap<String, Option<String>>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn system_prompts_dir_enabled_from_env(raw: Option<String>) -> bool {
@@ -754,17 +743,6 @@ fn cached_system_prompts_max_file_chars() -> usize {
             .and_then(|v| v.parse().ok())
             .unwrap_or(6_000)
     })
-}
-
-/// Bundle 缓存 key。
-///
-/// **刻意不含 `active_tools`**：bundle 的正文由 [`PromptBuilder::core_tool_description_filenames`]
-/// 决定，而那份清单是纯函数——只看 `CORE_TOOL_NAMES`，与当轮短名单无关
-/// （见 `core_tool_description_filenames` 的注释：按短名单过滤会让"发现一个新工具"
-/// 击穿一次缓存前缀）。既然正文不随短名单变，把短名单拼进 key 就只是让每次工具
-/// 路由结果变动都白白重建一份约 2.5 万字符的字符串。
-fn build_bundle_cache_key(mode: PromptMode, max_chars: usize, max_file_chars: usize) -> String {
-    format!("mode={mode:?};max_chars={max_chars};max_file_chars={max_file_chars}")
 }
 
 fn should_skip_embedded_prompt_file(filename: &str) -> bool {
@@ -960,6 +938,11 @@ mod tests {
             static_block.contains("STAR CLI") || static_block.contains("SYSTEM PROMPT"),
             "静态块应包含核心身份段"
         );
+        assert!(
+            !static_block.contains("2026-10-24"),
+            "日期不能进静态缓存前缀"
+        );
+        assert!(dynamic_block.contains("Current date: 2026-10-24"));
     }
 
     /// 末位准静态块允许为空（无项目指令/无 git/无 output style…）——
@@ -1058,6 +1041,17 @@ mod tests {
         assert_eq!(files, PromptBuilder::core_tool_description_filenames());
     }
 
+    #[test]
+    fn limited_bundle_never_exceeds_cap_or_splits_utf8() {
+        let files = vec!["tool-description-runagent.md".to_string()];
+        let cap = 180;
+        let (bundle, dropped) = assemble_core_bundle(&files, cap, cap);
+        let bundle = bundle.expect("small bundle should include truncated guide");
+        assert!(bundle.len() <= cap, "{} > {cap}", bundle.len());
+        assert!(bundle.contains("--- END OF tool-description-runagent.md ---"));
+        assert!(dropped.iter().any(|item| item.contains("truncated")));
+    }
+
     /// 回归 F1：bundle 的 15k 字符上限曾按文件名序静默截断尾部，
     /// 把 CodebaseSearch / Write 等核心工具的使用指南整份丢掉，
     /// 而它们给模型的 schema 描述只有 frontmatter 里一行短句。
@@ -1070,6 +1064,11 @@ mod tests {
 
         let (bundle, dropped) = assemble_core_bundle(&files, cap, file_cap);
         let bundle = bundle.expect("bundle should assemble from core guides");
+        assert!(
+            bundle.len() <= cap,
+            "bundle 超出配置上限：{} > {cap}",
+            bundle.len()
+        );
 
         assert!(
             dropped.is_empty(),

@@ -110,7 +110,7 @@ impl BaseDeclarativeTool for AgentTool {
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Run in background. Results arrive via <task-notification>. Default: false."
+                    "description": "Run in background; completion arrives via <task-notification>. Explorer defaults to true, other agent types to false. Set false to wait for an Explorer result."
                 },
                 "max_rounds": {
                     "type": "integer",

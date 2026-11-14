@@ -1,42 +1,24 @@
 <!--
 name: 'Tool Description: RunAgent'
-description: Launch autonomous SubAgent
+description: Delegate multi-step work to a specialized agent; background results arrive via task notifications
 -->
-Launch a new agent to handle complex, multi-step tasks autonomously.
+Launch a specialized agent for a distinct, multi-step task. Each agent type has its own capabilities and available tools.
 
-The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
-
-**Use for**: broad searches, complex refactors, multi-file operations, research tasks.
-**NOT for**: simple single-step tasks, precise sequential control needed, reading specific files (use Read), searching for specific classes/functions (use Grep/Glob).
+**Use for**: broad cross-file exploration or independent work you can run concurrently.
+**NOT for**: reading a known file, a single symbol lookup, or duplicating work you are already doing.
 
 **Available agent types** (`subagent_type`):
-- `general_purpose` (default): researching complex questions, searching code, and executing multi-step tasks
-- `explorer`: fast codebase exploration — finding files by pattern, searching code for keywords
-- `analyzer`: focused analysis of one question or component
+- `general_purpose` (default): research and multi-step tasks
+- `explorer`: codebase exploration; defaults to background execution
+- `analyzer`: focused analysis
 - `editor`: targeted code edits
-- `code_reviewer`: reviewing changes for correctness and quality
+- `code_reviewer`: reviewing code changes
 
-**Usage notes**:
-- Always include a short description (3-5 words) summarizing what the agent will do
-- When the agent is done, it will return a single message back to you. The result returned by the agent is NOT visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
-- You can optionally run agents in the background using `background: true`. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.
-- **Foreground vs background**: Use foreground (default) when you need the agent's results before you can proceed. Use background when you have genuinely independent work to do in parallel.
-- To continue a previously spawned agent, use SendMessage with the agent's ID or name as the `to` field. The agent resumes with its full context preserved. Each Agent invocation starts fresh — provide a complete task description.
-- Set `name` to give the agent a stable handle so `send_message` can target it later.
-- The agent's outputs should generally be trusted
-- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
-- If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks.
-
-**Writing the prompt**:
-Brief the agent like a smart colleague who just walked into the room — it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters.
-- Explain what you're trying to accomplish and why, what you've already learned or ruled out, and enough context for the agent to make judgment calls.
-- If you need a short response, say so ("report in under 200 words").
-- Lookups: hand over the exact command. Investigations: hand over the question — prescribed steps become dead weight when the premise is wrong.
-- Terse command-style prompts produce shallow, generic work.
-- **Never delegate understanding.** Don't write "based on your findings, fix the bug." Write prompts that prove you understood: include file paths, line numbers, what specifically to change.
-
-**When NOT to use**:
-- If you want to read a specific file path, use the Read tool instead
-- If you are searching for a specific class definition like "class Foo", use Grep instead
-- If you are searching for code within a specific file or set of 2-3 files, use Read instead
-- Other tasks that are not related to the agent descriptions above
+**Launch and completion**:
+- Provide a short description (3–5 words) and a detailed prompt. Specify the goal, what you already know, expected output, and whether edits are allowed. A fresh agent does not inherit this conversation.
+- `explorer` runs in the background unless you explicitly set `background: false`. Other agent types run in the foreground unless you set `background: true`. Use background for independent work; use foreground if you need the result before continuing.
+- A background launch returns an agent ID and output-file path. This only means the task started. Its progress may appear in the UI; neither progress nor the launch result is a finding.
+- On completion or failure, a `<task-notification>` is injected into a subsequent turn. Read its `<status>` and `<result>` before reporting findings; relay the actual outcome to the user. Do not sleep, poll, or repeatedly read the output file while waiting. If the result is required for the user's answer, do not finish before it arrives.
+- Results are not shown to the user as your answer. Integrate the agent's findings into your response, and verify claims that matter to the decision. If it fails or does not report back, state what is unverified.
+- `name` makes a running agent addressable through SendMessage. Do not treat a completed agent as still running. Each new Agent call starts a fresh task.
+- If multiple independent agents are genuinely useful, launch them in one response; avoid spawning redundant agents or re-running their investigations yourself.

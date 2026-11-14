@@ -537,7 +537,7 @@ impl BaseDeclarativeTool for ShellTool {
                 },
                 "run_in_background": {
                     "type": "boolean",
-                    "description": "Set to true to run this command in the background. The tool result returns a task id (bash-xxxxxxxx); poll progress with TaskOutput and stop it with KillShell."
+                    "description": "Set to true to run this command in the background. The tool result returns a task id (bash-xxxxxxxx); poll progress with BashTaskOutput and stop it with KillShell."
                 }
             },
             "required": ["command"]
@@ -1091,7 +1091,7 @@ impl ToolInvocation for ShellToolInvocation {
                     String::new(),
                 );
                 let msg = format!(
-                    "Command running in background (task id: {}). Full output will be written to {}. Poll progress with TaskOutput (task_id: '{}') and stop it with KillShell.",
+                    "Command running in background (task id: {}). Full output will be written to {}. Poll progress with BashTaskOutput (task_id: '{}') and stop it with KillShell.",
                     handle.id,
                     handle.output_path.display(),
                     handle.id
@@ -1185,7 +1185,7 @@ impl ToolInvocation for ShellToolInvocation {
                                 stderr_output.clone(),
                             );
                             let msg = format!(
-                                "Command timed out after {}s and was moved to the background instead of being killed.\nTask id: {}\nFull output file: {}\nIt keeps running and will report back when done; poll with TaskOutput (task_id: '{}'), stop it with KillShell.",
+                                "Command timed out after {}s and was moved to the background instead of being killed.\nTask id: {}\nFull output file: {}\nIt keeps running and will report back when done; poll with BashTaskOutput (task_id: '{}'), stop it with KillShell.",
                                 shell_timeout_secs,
                                 handle.id,
                                 handle.output_path.display(),

@@ -1,11 +1,11 @@
 <!--
 name: 'Tool Description: Remote Trigger'
-description: Manage remote agent triggers - list, get, create, update, run.
+description: Preview remote trigger requests; no remote scheduling or execution is performed.
 -->
-Manage remote agent scheduled triggers.
+This tool currently returns local placeholder responses. It does not create, update, list, or run real remote triggers.
 
-**Use for**: scheduling remote agent execution, listing/updating existing triggers.
-**NOT for**: local cron tasks (use `CronCreate`).
+**Use for**: previewing the request/response shape during development.
+**NOT for**: scheduling or checking real remote execution. Use `CronCreate` for supported local cron tasks.
 
 **Rules**:
-- List before creating to avoid duplicates
+- Do not report a trigger as created or executed based on this tool's placeholder output.

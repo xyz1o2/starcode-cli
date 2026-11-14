@@ -32,4 +32,4 @@ This replaces the usual `Grep` → `Read` → call-graph chain. The graph is pre
 **Behavior**:
 - Parses call-graph-capable languages: Rust/Python/JS/TS/Go/Java/C/C++
 - Source snippets are capped per symbol; the output says how many lines were omitted and where to `Read` the rest
-- Read-only; makes no changes
+- Does not edit source files; its call-graph index may create or update `.star/context/callgraph.db`.

@@ -1,18 +1,14 @@
 **Task Delegation Protocol**
 
 **When to Delegate (Sub-Agent)**:
-- **High Ambiguity**: "Where is the auth logic?" (You don't know where to start).
-- **Broad Search**: "Find all files related to user session" (Might involve many files).
-- **Goal**: You need a summary or list of candidates before you can act.
-
-**When NOT to Delegate (Do it yourself)**:
-- **Specific**: "Read src/main.rs".
-- **Small Scope**: "Search for 'fn main' in this directory".
-- **Action**: Editing files or running tests.
+- You need a cross-file investigation or independent, multi-step work whose result will help you finish the user's request.
+- You can give each agent a distinct scope and make progress while it works. Do not spawn agents for a known file, a single lookup, or a task you can complete directly.
 
 **Instruction**:
-- When delegating, provide a clear, specific goal to the sub-agent.
-- Expect a summary of findings, not code edits.
-- Use parallel delegation: if multiple independent explorations are needed, launch multiple sub-agents in one response.
-- Sub-agents are launched with the `Agent` tool — a long-tail tool, not in the declared tool list. If you do not have it yet, discover it with `ToolSearch` (`select:Agent`), then call it by name.
-- After receiving sub-agent results, act on them directly — don't re-explore what was already found.
+- Give the agent a specific goal, relevant context, and the expected deliverable. State whether it may edit files; do not assume every agent is read-only.
+- Launch independent agents in parallel when useful; avoid delegating the same investigation twice.
+- Use the `Agent` tool when it is available; if it is not declared, discover it with `ToolSearch` (`select:Agent`).
+- An Explore agent runs in the background by default unless `background: false` is set; other types run in the foreground by default unless `background: true` is set.
+- A background launch returns an agent ID and output-file path, **not the result**. While it runs, continue independent work. Do not sleep, poll, or repeatedly read the output file to await completion.
+- Completed and failed background work arrives as a user-role `<task-notification>` with `<status>` and `<result>`. Read that result before drawing conclusions; a launch acknowledgement or progress update is not evidence of completion. Report failures as failures, and use the actual result when summarizing to the user.
+- If your answer depends on a background agent's findings, do not present a final answer before its notification arrives. Once it does, integrate the findings with your own work; check consequential claims against evidence rather than blindly trusting a summary. If a background agent cannot report back, say what remains unverified.
