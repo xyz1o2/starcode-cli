@@ -603,10 +603,11 @@ impl AsyncSubagentRunner {
         // 未指派时回落 name / agent_id（见下方注册处）。
         let hub_identity = request.identity.clone();
 
-        // 先发启动快照，再 spawn 真正的后台任务。不能等子 Agent 的第一条
-        // progress callback：初始化、首个 provider 请求或等待确认都可能没有
-        // 回调；也不能把快照放到 spawn 之后，否则极快完成的任务可能先发终态，
-        // 再被迟到的 Running 覆盖成“假运行中”。
+        // 启动前先登记 in-flight：主 Agent 收尾时要看到它，且终态 enqueue
+        // 不能早于登记。随后发启动快照，再 spawn 后台任务；不能等第一次
+        // progress callback（初始化和模型请求可能长期无回调），也不能在 spawn
+        // 后才发 Running（极快完成时会把终态覆盖成假运行中）。
+        queue.lock().await.mark_spawned(&agent_id);
         crate::agent::subagent::progress::emit_to_ui(
             crate::types::StreamingChunk::agent_task_update(
                 crate::types::AgentTaskUpdatePayload::new(&agent_id, &type_label)
@@ -618,11 +619,6 @@ impl AsyncSubagentRunner {
             ),
         );
 
-        // 在返回给主 Agent 前完成登记；不能留到 spawn 的第一行，因为
-        // spawn 尚未被调度时主 Agent 可能已经检查 in-flight 并退出，
-        // 导致终态通知无人汇总。先登记再 spawn 也保证极快完成时 enqueue
-        // 不会早于登记发生。
-        queue.lock().await.mark_spawned(&agent_id);
         tokio::spawn(async move {
             // 注册 name → agent_id 映射。放进 spawn 内用 async lock，
             // 避免在 async 上下文里调用 blocking_lock 触发 panic。
