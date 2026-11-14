@@ -60,16 +60,19 @@ pub fn render_agent_group(
 /// 渲染组头部汇总行
 ///
 /// 格式取决于 Agent 状态：
-/// - 全部完成: `✓ 3 agents finished`
-/// - 全部异步: `● 3 background agents launched (↓ manage)`
-/// - 部分运行: `● Running 3 agents…`
-fn render_group_header(stats: &[AgentStat], area_width: u16) -> Vec<Line<'static>> {
+/// - 有后台/前台任务未结束：`● Running 2 of 3 agents…`
+/// - 全部进入终态：`✓ 3 agents finished` / `⚠ 3 agents finished (1 failed)`
+fn render_group_header(stats: &[AgentStat], _area_width: u16) -> Vec<Line<'static>> {
     let total = stats.len();
     let running = stats
         .iter()
-        .filter(|s| s.status == AgentTaskStatus::Running)
+        .filter(|s| {
+            matches!(
+                s.status,
+                AgentTaskStatus::Running | AgentTaskStatus::Background
+            )
+        })
         .count();
-    // Rejected 与 Failed 同归"未成功"，头部统一计入 failed 计数
     let failed = stats
         .iter()
         .filter(|s| {
@@ -79,68 +82,35 @@ fn render_group_header(stats: &[AgentStat], area_width: u16) -> Vec<Line<'static
             )
         })
         .count();
-    let all_async = stats.iter().all(|s| s.is_async && s.is_resolved);
-    let all_complete = running == 0;
 
     let mut spans = Vec::new();
-
-    if all_complete {
-        // 全部完成
-        if all_async {
-            spans.push(Span::styled("● ", crate::ui::themes::theme::muted_style()));
-            spans.push(Span::styled(
-                total.to_string(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::styled(
-                " background agents launched ",
-                crate::ui::themes::theme::muted_style(),
-            ));
-            spans.push(Span::styled(
-                "(↓ manage)",
-                crate::ui::themes::theme::muted_style(),
-            ));
-        } else {
-            let icon = if failed > 0 { "⚠" } else { "✓" };
-            let color = if failed > 0 {
-                Color::Yellow
-            } else {
-                Color::Green
-            };
-            spans.push(Span::styled(
-                format!("{} ", icon),
-                Style::default().fg(color),
-            ));
-            spans.push(Span::styled(
-                total.to_string(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::styled(
-                " agents finished",
-                crate::ui::themes::theme::muted_style(),
-            ));
-            if failed > 0 {
-                spans.push(Span::styled(
-                    format!(" ({} failed)", failed),
-                    Style::default().fg(Color::Red),
-                ));
-            }
-        }
-    } else {
-        // 有正在运行的
+    if running > 0 {
         spans.push(Span::styled("● ", Style::default().fg(Color::Yellow)));
         spans.push(Span::styled(
-            format!(
-                "Running {} agent{}…",
-                total,
-                if total == 1 { "" } else { "s" }
-            ),
+            format!("Running {} of {} agents…", running, total),
             crate::ui::themes::theme::muted_style(),
         ));
+    } else {
+        let icon = if failed > 0 { "⚠" } else { "✓" };
+        let color = if failed > 0 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+        spans.push(Span::styled(
+            format!("{} ", icon),
+            Style::default().fg(color),
+        ));
+        spans.push(Span::styled(
+            format!("{} agents finished", total),
+            crate::ui::themes::theme::muted_style(),
+        ));
+        if failed > 0 {
+            spans.push(Span::styled(
+                format!(" ({} failed)", failed),
+                Style::default().fg(Color::Red),
+            ));
+        }
     }
 
     vec![Line::from(spans)]
@@ -170,8 +140,6 @@ fn render_agent_progress_lines(
     area_width: u16,
 ) -> Vec<Vec<Line<'static>>> {
     let tree_char = if is_last { "└─" } else { "├─" };
-    let is_backgrounded = stat.is_async && stat.is_resolved;
-
     // ── 第一行：Agent 类型 + 描述 + 统计 ──
     let mut line1_spans = Vec::new();
 
@@ -213,40 +181,38 @@ fn render_agent_progress_lines(
         ));
     }
 
-    // 统计信息（非 backgrounded 时显示）
-    if !is_backgrounded {
-        if stat.tool_use_count > 0 || stat.tokens.unwrap_or(0) > 0 {
+    // 后台运行期间也显示已经产生的工具次数和 token。
+    if stat.tool_use_count > 0 || stat.tokens.unwrap_or(0) > 0 {
+        line1_spans.push(Span::styled(
+            " · ".to_string(),
+            crate::ui::themes::theme::muted_style(),
+        ));
+        if stat.tool_use_count > 0 {
             line1_spans.push(Span::styled(
-                " · ".to_string(),
+                format!(
+                    "{} tool {}",
+                    stat.tool_use_count,
+                    if stat.tool_use_count == 1 {
+                        "use"
+                    } else {
+                        "uses"
+                    }
+                ),
                 crate::ui::themes::theme::muted_style(),
             ));
-            if stat.tool_use_count > 0 {
-                line1_spans.push(Span::styled(
-                    format!(
-                        "{} tool {}",
-                        stat.tool_use_count,
-                        if stat.tool_use_count == 1 {
-                            "use"
-                        } else {
-                            "uses"
-                        }
-                    ),
-                    crate::ui::themes::theme::muted_style(),
-                ));
-            }
-            if let Some(tokens) = stat.tokens {
-                if tokens > 0 {
-                    if stat.tool_use_count > 0 {
-                        line1_spans.push(Span::styled(
-                            " · ".to_string(),
-                            crate::ui::themes::theme::muted_style(),
-                        ));
-                    }
+        }
+        if let Some(tokens) = stat.tokens {
+            if tokens > 0 {
+                if stat.tool_use_count > 0 {
                     line1_spans.push(Span::styled(
-                        format_tokens(tokens),
+                        " · ".to_string(),
                         crate::ui::themes::theme::muted_style(),
                     ));
                 }
+                line1_spans.push(Span::styled(
+                    format_tokens(tokens),
+                    crate::ui::themes::theme::muted_style(),
+                ));
             }
         }
     }
@@ -266,43 +232,35 @@ fn render_agent_progress_lines(
     ));
 
     // 状态文本
-    let (status_text, status_color) = if is_backgrounded {
-        let text = stat
-            .task_description
-            .as_deref()
-            .unwrap_or("Running in the background");
-        (text.to_string(), Color::DarkGray)
-    } else {
-        match stat.status {
-            AgentTaskStatus::Running => {
-                let text = stat.last_tool_info.as_deref().unwrap_or("Initializing…");
-                (text.to_string(), Color::Yellow)
-            }
-            AgentTaskStatus::Completed => (
-                with_elapsed(&crate::core::i18n::t1("agent.done"), stat),
-                Color::Green,
-            ),
-            AgentTaskStatus::Failed => (
-                with_elapsed(&crate::core::i18n::t1("agent.failed"), stat),
-                Color::Red,
-            ),
-            // 用户拒绝授权（对标 renderToolUseRejectedMessage）
-            AgentTaskStatus::Rejected => {
-                let reason = stat.last_tool_info.as_deref().unwrap_or("");
-                let text = if reason.is_empty() {
-                    "Rejected".to_string()
-                } else {
-                    format!("Rejected — {}", reason)
-                };
-                (text, Color::Red)
-            }
-            AgentTaskStatus::Background => {
-                let text = stat
-                    .task_description
-                    .as_deref()
-                    .unwrap_or("Running in the background");
-                (text.to_string(), Color::DarkGray)
-            }
+    let (status_text, status_color) = match stat.status {
+        AgentTaskStatus::Running => {
+            let text = stat.last_tool_info.as_deref().unwrap_or("Initializing…");
+            (text.to_string(), Color::Yellow)
+        }
+        AgentTaskStatus::Completed => (
+            with_elapsed(&crate::core::i18n::t1("agent.done"), stat),
+            Color::Green,
+        ),
+        AgentTaskStatus::Failed => (
+            with_elapsed(&crate::core::i18n::t1("agent.failed"), stat),
+            Color::Red,
+        ),
+        // 用户拒绝授权（对标 renderToolUseRejectedMessage）
+        AgentTaskStatus::Rejected => {
+            let reason = stat.last_tool_info.as_deref().unwrap_or("");
+            let text = if reason.is_empty() {
+                "Rejected".to_string()
+            } else {
+                format!("Rejected — {}", reason)
+            };
+            (text, Color::Red)
+        }
+        AgentTaskStatus::Background => {
+            let text = stat
+                .task_description
+                .as_deref()
+                .unwrap_or("Running in the background");
+            (text.to_string(), Color::DarkGray)
         }
     };
     line2_spans.push(Span::styled(status_text, Style::default().fg(status_color)));
@@ -319,9 +277,6 @@ struct AgentStat {
     status: AgentTaskStatus,
     tool_use_count: u32,
     tokens: Option<u32>,
-    is_resolved: bool,
-    is_error: bool,
-    is_async: bool,
     last_tool_info: Option<String>,
     elapsed: std::time::Duration,
 }
@@ -336,9 +291,6 @@ impl AgentStat {
             status: info.status.clone(),
             tool_use_count: info.tool_use_count,
             tokens: Some(info.tokens),
-            is_resolved: info.is_resolved,
-            is_error: info.is_error,
-            is_async: info.is_async,
             last_tool_info: info.last_tool_info.clone(),
             elapsed: info.elapsed(),
         }
@@ -388,4 +340,96 @@ fn format_tokens(count: u32) -> String {
         count.to_string()
     };
     format!("{} tokens", scaled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::state::AgentTaskInfo;
+    use std::time::Instant;
+
+    fn task(id: &str, status: AgentTaskStatus) -> AgentTaskInfo {
+        AgentTaskInfo {
+            task_id: id.to_string(),
+            agent_type: "Explore".to_string(),
+            description: format!("Research {id}"),
+            status,
+            tool_use_count: 2,
+            tokens: 1200,
+            is_async: true,
+            is_resolved: true,
+            is_error: false,
+            last_tool_info: Some("Read: source.rs".to_string()),
+            name: None,
+            task_description: Some("Exploring sources".to_string()),
+            started_at: Instant::now(),
+            finished_at: None,
+            sub_entries: Vec::new(),
+            entry_idx: 0,
+        }
+    }
+
+    fn text(blocks: Vec<Vec<Line<'static>>>) -> String {
+        blocks
+            .iter()
+            .flat_map(|block| block.iter())
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn background_counts_as_running_and_keeps_usage_visible() {
+        let background = AgentStat::from_info(&task("a", AgentTaskStatus::Background), 80);
+        let finished = AgentStat::from_info(&task("b", AgentTaskStatus::Completed), 80);
+        let header = text(vec![render_group_header(&[background], 80)]);
+        assert!(header.contains("Running 1 of 1 agents"), "{header}");
+
+        let state = ChatState::test_fixture();
+        let lines = text(render_agent_progress_lines(&state, &finished, true, 80));
+        assert!(lines.contains("Done"), "{lines}");
+        assert!(!lines.contains("Exploring sources"), "{lines}");
+        let background = AgentStat::from_info(&task("a", AgentTaskStatus::Background), 80);
+        let lines = text(render_agent_progress_lines(&state, &background, true, 80));
+        assert!(lines.contains("Exploring sources"), "{lines}");
+        assert!(lines.contains("2 tool uses"), "{lines}");
+        assert!(lines.contains("1.2k tokens"), "{lines}");
+    }
+
+    #[test]
+    fn mixed_and_terminal_groups_report_correct_status() {
+        let statuses = [
+            AgentTaskStatus::Background,
+            AgentTaskStatus::Completed,
+            AgentTaskStatus::Failed,
+        ];
+        let stats: Vec<_> = statuses
+            .iter()
+            .enumerate()
+            .map(|(i, status)| AgentStat::from_info(&task(&i.to_string(), status.clone()), 80))
+            .collect();
+        let running = text(vec![render_group_header(&stats, 80)]);
+        assert!(running.contains("Running 1 of 3 agents"), "{running}");
+
+        let statuses = [
+            AgentTaskStatus::Completed,
+            AgentTaskStatus::Failed,
+            AgentTaskStatus::Rejected,
+        ];
+        let stats: Vec<_> = statuses
+            .iter()
+            .enumerate()
+            .map(|(i, status)| AgentStat::from_info(&task(&i.to_string(), status.clone()), 80))
+            .collect();
+        let finished = text(vec![render_group_header(&stats, 80)]);
+        assert!(
+            finished.contains("3 agents finished (2 failed)"),
+            "{finished}"
+        );
+    }
 }

@@ -22,6 +22,16 @@ use tokio::sync::Mutex;
 
 // ── StarAgentRunner（迁入，逻辑不变）──────────────────────────────────────
 
+/// 从子代理本轮生成的会话中读取最终助手正文（排除继承的父会话）。
+fn subagent_final_text(messages: &[crate::types::StarMessage]) -> Option<String> {
+    messages.last().and_then(|message| {
+        (message.role == "assistant" && message.tool_calls.as_ref().is_none_or(Vec::is_empty))
+            .then(|| message.content.as_deref().unwrap_or("").trim())
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    })
+}
+
 /// 把 `/subtask` 的父会话装进刚创建的子代理。
 ///
 /// 单独抽出来是为了让“结构化上下文 + pending 本地输出”这条 fork 语义
@@ -208,8 +218,10 @@ impl StarAgentRunner {
         // new task prompt is appended, so tool calls/results survive intact.
         install_parent_context(&mut agent, &request);
 
+        let parent_message_count = agent.session_context_snapshot().0.len();
         let mut tracker = AgentProgressTracker::new(sink);
         let mut final_text = String::new();
+        let mut stream_error = None;
 
         {
             use crate::types::StreamingChunkType;
@@ -257,6 +269,10 @@ impl StarAgentRunner {
                             }
                         }
                     }
+                    StreamingChunkType::Error => {
+                        stream_error =
+                            Some(chunk.content.unwrap_or_else(|| "Unknown error".to_string()));
+                    }
                     // TextDelta / ReasoningDelta 是增量文本，子 Agent 的中间思考
                     // 不回流父级 UI（对标参考实现只回流 progress messages）
                     _ => {}
@@ -264,23 +280,33 @@ impl StarAgentRunner {
             }
         }
 
+        if let Some(error) = stream_error {
+            return Err(SubAgentError::new(
+                SubAgentErrorKind::ExecutionFailed,
+                format!("SubAgent execution error: {error}"),
+            ));
+        }
+
+        // 流式模型的正文通常只走 direct TextDelta；Branch A 的 Message
+        // 会因为已流式输出而跳过，因此 tracker 不一定收到 Content。
+        // 结果以代理最终会话里的 assistant 正文为准，不从中间增量猜结论。
+        let (session_messages, _) = agent.session_context_snapshot();
+        let answer = subagent_final_text(
+            &session_messages[parent_message_count.min(session_messages.len())..],
+        )
+        .or_else(|| (!final_text.trim().is_empty()).then_some(final_text));
+        if let Some(ref text) = answer {
+            // 增量流本身不记助手条目；收尾时补上最终结论供详情与通知展示。
+            if tracker.last_assistant_text() != Some(text.as_str()) {
+                tracker.on_assistant_text(text.clone());
+            }
+        }
+        let output = answer
+            .unwrap_or_else(|| "SubAgent completed but returned no specific output.".to_string());
         let tool_use_count = tracker.tool_use_count();
         let total_tokens = tracker.tokens();
         let last_tool_info = tracker.last_tool_info();
         let entries = tracker.into_entries();
-
-        let output = if final_text.trim().is_empty() {
-            entries
-                .iter()
-                .rev()
-                .find(|entry| matches!(entry.entry_type, crate::types::ChatEntryType::Assistant))
-                .map(|entry| entry.content.clone())
-                .unwrap_or_else(|| {
-                    "SubAgent completed but returned no specific output.".to_string()
-                })
-        } else {
-            final_text
-        };
 
         Ok(SubAgentResult {
             output,
@@ -330,6 +356,35 @@ async fn emit_team_snapshot(hub: &crate::agent::messaging::SharedAgentRouter) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_answer_comes_from_session_even_when_stream_only_emits_deltas() {
+        let history = vec![
+            crate::types::StarMessage::user("Find the handler".to_string()),
+            crate::types::StarMessage::assistant("Searching…".to_string()),
+            crate::types::StarMessage::assistant_with_tool_calls(vec![
+                crate::types::StarToolCall {
+                    id: "call-1".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::types::StarToolCallFunction {
+                        name: "Grep".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                },
+            ]),
+            crate::types::StarMessage::assistant("The handler is in auth.rs".to_string()),
+        ];
+        assert_eq!(
+            subagent_final_text(&history).as_deref(),
+            Some("The handler is in auth.rs")
+        );
+        assert_eq!(subagent_final_text(&history[..3]), None);
+        assert_eq!(
+            subagent_final_text(&history[..2]).as_deref(),
+            Some("Searching…")
+        );
+        assert_eq!(subagent_final_text(&history[..1]), None);
+    }
 
     /// Explorer 派发：内置 `ExploreAgent` 下线后走**通用 LLM 循环**。
     ///
@@ -718,20 +773,26 @@ impl AsyncSubagentRunner {
             // 终态直接推给 UI。原先终态只在下一个 turn 排空通知队列时才到 UI
             // （agent_loop.rs 的 drain_for_next_turn），用户空闲时后台代理跑完了，
             // 选择器还一直显示 Running —— 等于对着用户撒谎。
+            let final_tools = tool_uses.max(u64::from(
+                seen_tools.load(std::sync::atomic::Ordering::Relaxed),
+            ));
+            let final_tokens = tokens.max(u64::from(
+                seen_tokens.load(std::sync::atomic::Ordering::Relaxed),
+            ));
             {
-                use std::sync::atomic::Ordering;
                 let final_status = match &status {
                     NotificationStatus::Completed => crate::types::AgentTaskStatus::Completed,
                     _ => crate::types::AgentTaskStatus::Failed,
                 };
-                let final_tools = (tool_uses as u32).max(seen_tools.load(Ordering::Relaxed));
-                let final_tokens = (tokens as u32).max(seen_tokens.load(Ordering::Relaxed));
                 crate::agent::subagent::progress::emit_to_ui(
                     crate::types::StreamingChunk::agent_task_update(
                         crate::types::AgentTaskUpdatePayload::new(aid.clone(), type_label.clone())
                             .with_description(desc.clone())
                             .with_status(final_status)
-                            .with_stats(final_tools, final_tokens)
+                            .with_stats(
+                                final_tools.min(u64::from(u32::MAX)) as u32,
+                                final_tokens.min(u64::from(u32::MAX)) as u32,
+                            )
                             .with_async(true)
                             .with_name(agent_name.clone())
                             .with_task_description(Some(desc.clone())),
@@ -747,8 +808,8 @@ impl AsyncSubagentRunner {
                 summary: desc,
                 result: output,
                 usage: NotificationUsage {
-                    total_tokens: tokens,
-                    tool_uses,
+                    total_tokens: final_tokens,
+                    tool_uses: final_tools,
                     duration_ms: start.elapsed().as_millis() as u64,
                 },
                 entries,

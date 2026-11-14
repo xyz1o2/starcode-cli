@@ -4,6 +4,15 @@ use crate::types::StarMessage;
 use futures::Stream;
 use std::pin::Pin;
 
+/// 关闭本轮 direct-chunk 发送端；全局 UI sink 仅在仍指向它时才注销。
+fn close_turn_stream(
+    tx: &mut Option<tokio::sync::mpsc::UnboundedSender<crate::types::StreamingChunk>>,
+) {
+    if let Some(sender) = tx.take() {
+        crate::agent::subagent::progress::clear_ui_sink(&sender);
+    }
+}
+
 /// 构造 auto 档位分类器要读的对话摘要。
 ///
 /// 只保留 **user 与 assistant 的正文**，跳过 system 提示与 tool 输出：
@@ -551,8 +560,10 @@ impl Agent {
                 }
             }
 
-            // Close the sender
+            // 先释放本轮 direct-chunk 发送端，再结束事件流。合并流的接收端
+            // 只有所有发送端都释放后才会关闭；子 Agent 正是等它关闭才写终态通知。
             self.event_tx = None;
+            close_turn_stream(&mut self.stream_tx);
 
             // 通知 UI 处理完成
             yield AgentEvent::Done;
@@ -691,6 +702,27 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn completed_turn_closes_direct_stream_after_last_sender() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut turn_sender = Some(sender.clone());
+        crate::agent::subagent::progress::set_ui_sink(sender);
+
+        // 活跃工具循环在回合结束前也可能持有一个发送端克隆。
+        let tool_sender = turn_sender.as_ref().unwrap().clone();
+        close_turn_stream(&mut turn_sender);
+        drop(tool_sender);
+
+        let mut stream = tokio_stream::wrappers::UnboundedReceiverStream::new(receiver);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+                .await
+                .expect("回合收尾后 direct stream 应关闭")
+                .is_none()
+        );
+    }
 
     /// transcript 只留 user/assistant 正文 —— system 提示与 tool 输出不进，
     /// 它们对"用户想要什么"没有增量信息，纯烧 token。

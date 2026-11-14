@@ -661,13 +661,11 @@ impl StarAgent {
     ///
     /// 那个把 Branch A（`AgentEvent`）和 Branch B（`StreamingChunk` 直接流）
     /// 用 `select()` 合并。`select()` 要等**两个分支都结束**才返回，而
-    /// Branch B 的接收端只有在所有 sender 被 drop 时才结束 —— sender 存在
-    /// `Agent::stream_tx` 里，而 agent 一直活着，于是**流永不结束**。
+    /// Branch B 的接收端只有在所有 sender 被 drop 时才结束。`run_stream` 现在
+    /// 会在回合结束时释放 sender；headless 不需要 UI 的 direct channel，
+    /// 因此直接走 Branch A 更简单，也不会与 UI sink 争用。
     ///
-    /// UI 侧没这个问题：它由外部的退出条件（用户 Ctrl+C / 事件循环退出）
-    /// 收尾。headless 没有那层。
-    ///
-    /// 所以这里走 Branch A 单流。缺的那部分（实时文本 / 思考增量）由
+    /// 缺的那部分（实时文本 / 思考增量）由
     /// `agent_llm.rs` 在**没有 UI 通道时**补发 `AgentEvent::TextDelta` /
     /// `ReasoningDelta` 补上 —— 事件流因此是完整的。
     pub fn process_user_message_streaming<'a>(
@@ -1035,8 +1033,10 @@ impl StarAgent {
                         Some(StreamingChunk::error(err))
                     }
                     AgentEvent::TurnFinished | AgentEvent::Done => {
+                        // Done 要等 direct channel 中已排队的后台任务终态/文本
+                        // 全部送出后才发；否则 UI 收到 Done 就停读，尾部进度丢失。
                         streamed_text_buf.clear();
-                        Some(StreamingChunk::done())
+                        None
                     }
                     AgentEvent::StatsUpdate { token_usage } => {
                         let tokens = token_usage.as_ref().map(|u: &StarUsage| u.total_tokens as u32).unwrap_or(0);
@@ -1063,11 +1063,12 @@ impl StarAgent {
             |c: StreamingChunk| -> Result<StreamingChunk, Box<dyn std::error::Error + Send + Sync>> { Ok(c) },
         );
 
-        // Merge: whichever branch produces first gets yielded next.
-        // Both are Pin<Box<...>> (Unpin) so select() is happy.
-        Ok(Box::pin(futures::stream::select(
-            event_chunks,
-            Box::pin(direct_stream),
+        // 两路全部结束后才发 Done：确保 direct channel 中排队的终态更新
+        // 不会因 UI 提前停止读流而丢失。
+        let merged = futures::stream::select(event_chunks, Box::pin(direct_stream));
+        Ok(Box::pin(futures::StreamExt::chain(
+            merged,
+            futures::stream::once(async { Ok(StreamingChunk::done()) }),
         )))
     }
 
@@ -1386,6 +1387,39 @@ impl StarAgent {
 mod tests {
     use super::*;
     use crate::runtime::messages::RuntimeSettingsPersistencePolicy;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn merged_stream_drains_direct_updates_before_done() {
+        let event_chunks =
+            futures::stream::iter(vec![Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
+                StreamingChunk::content("answer"),
+            )]);
+        let direct_chunks =
+            futures::stream::iter(vec![Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
+                StreamingChunk::agent_task_update(
+                    crate::types::AgentTaskUpdatePayload::new("child", "Explore")
+                        .with_status(crate::types::AgentTaskStatus::Completed),
+                ),
+            )]);
+        let stream = futures::stream::select(event_chunks, direct_chunks)
+            .chain(futures::stream::once(async { Ok(StreamingChunk::done()) }));
+        futures::pin_mut!(stream);
+        let mut types = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            types.push(chunk.unwrap().chunk_type);
+        }
+        assert_eq!(types.len(), 3);
+        assert!(matches!(
+            types[0],
+            StreamingChunkType::Content | StreamingChunkType::AgentTaskUpdate
+        ));
+        assert!(matches!(
+            types[1],
+            StreamingChunkType::Content | StreamingChunkType::AgentTaskUpdate
+        ));
+        assert!(matches!(types[2], StreamingChunkType::Done));
+    }
 
     /// 回归：启动时 client 必须带着 provider id。
     ///

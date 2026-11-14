@@ -34,6 +34,18 @@ pub fn set_ui_sink(tx: UnboundedSender<StreamingChunk>) {
     }
 }
 
+/// 只注销本轮注册的发送端；较新的回合可能已经替换了全局槽位。
+pub fn clear_ui_sink(tx: &UnboundedSender<StreamingChunk>) {
+    if let Ok(mut slot) = ui_sink().write() {
+        if slot
+            .as_ref()
+            .is_some_and(|current| current.same_channel(tx))
+        {
+            *slot = None;
+        }
+    }
+}
+
 /// 跨 turn 常驻的兜底 sink（后台代理专用）。
 ///
 /// [`UI_SINK`] 里那个发送端属于**当前 turn** 的流：turn 一结束，接收端就随流被丢弃，
@@ -294,6 +306,14 @@ impl AgentProgressTracker {
 
     pub fn into_entries(self) -> Vec<ChatEntry> {
         self.entries
+    }
+
+    /// 最近一次已回流的助手正文，用于避免终态结论重复入列。
+    pub fn last_assistant_text(&self) -> Option<&str> {
+        self.entries.iter().rev().find_map(|entry| {
+            matches!(entry.entry_type, crate::types::ChatEntryType::Assistant)
+                .then_some(entry.content.as_str())
+        })
     }
 
     /// 最近状态文案：尾部连续 search/read 达到 2 次以上时折叠为聚合文案
