@@ -20,11 +20,12 @@ use crate::types::AgentTaskStatus;
 use crate::ui::state::ChatState;
 use crate::ui::utils::render::truncate_to_display_width;
 
-/// main 行 + 每个后台代理各一行；`bg_agent_selection` 为 `None`（焦点在输入框）时不显示。
+/// 有后台代理时常驻显示 main 行 + 每个代理一行。
+///
+/// `bg_agent_selection` 只表示键盘焦点，不决定是否渲染：焦点在输入框时
+/// 仍然必须让用户看见 Explore 的实时状态；否则选择器高度为 0，整个窗口
+/// 会被布局直接裁掉，用户只能在底部任务计数里看到一个模糊的 "tasks"。
 pub fn selector_height(state: &ChatState) -> u16 {
-    if state.bg_agent_selection.is_none() {
-        return 0;
-    }
     let rows = state.background_agent_rows().len();
     if rows == 0 {
         return 0;
@@ -107,31 +108,37 @@ pub fn render_selector(state: &ChatState, area_width: u16) -> Vec<Line<'static>>
         let desc_width = (area_width as usize).saturating_sub(fixed);
         let desc_shown = truncate_to_display_width(desc, desc_width);
 
-        let dot_color = match info.status {
-            AgentTaskStatus::Running => theme.warning,
-            AgentTaskStatus::Completed => theme.success,
-            AgentTaskStatus::Failed | AgentTaskStatus::Rejected => theme.error,
-            AgentTaskStatus::Background => theme.info,
+        // 状态标记必须反映任务状态，而不是当前查看对象：之前用
+        // `viewing_agent_task_id` 决定 ●/○，导致所有未打开详情的运行中
+        // Explore 都显示成空心圆，看起来像没启动。查看状态改用行高亮表达。
+        let (status_mark, status_color) = match info.status {
+            AgentTaskStatus::Running => ("●", theme.success),
+            AgentTaskStatus::Completed => ("✓", theme.success),
+            AgentTaskStatus::Failed | AgentTaskStatus::Rejected => ("×", theme.error),
+            AgentTaskStatus::Background => ("·", theme.info),
         };
 
-        let row_fg = if focused {
+        let row_fg = if focused || viewing {
             theme.foreground
         } else {
             theme.subtle
         };
-        let row_mod = if focused {
+        let mut row_mod = if focused || viewing {
             Modifier::BOLD
         } else {
             Modifier::empty()
         };
+        if viewing && !focused {
+            row_mod |= Modifier::UNDERLINED;
+        }
         let mut spans = vec![
             Span::styled(
                 if focused { "❯ " } else { "  " },
                 Style::default().fg(theme.suggestion),
             ),
             Span::styled(
-                if viewing { "● " } else { "○ " },
-                Style::default().fg(dot_color),
+                format!("{} ", status_mark),
+                Style::default().fg(status_color),
             ),
             Span::styled(
                 label.to_string(),
@@ -206,14 +213,18 @@ mod tests {
         state
     }
 
-    /// 焦点不在选择器上、或者没有后台代理时高度必须是 0（面板整块隐藏）
+    /// 有后台代理时即使焦点在输入框也必须显示；没有代理才隐藏。
     #[test]
-    fn height_is_zero_unless_focused_with_rows() {
+    fn selector_stays_visible_while_input_has_focus() {
         let mut state = state_with(2, "research");
-        assert_eq!(selector_height(&state), 0, "focus in input → hidden");
+        assert_eq!(selector_height(&state), 3, "main 行 + 2 个代理");
 
         state.bg_agent_selection = Some(0);
-        assert_eq!(selector_height(&state), 3, "main 行 + 2 个代理");
+        assert_eq!(
+            selector_height(&state),
+            3,
+            "focus only changes highlighting"
+        );
 
         state.active_agent_tasks.clear();
         assert_eq!(selector_height(&state), 0, "no rows → hidden");
@@ -243,5 +254,25 @@ mod tests {
             let lines = render_selector(&state, width);
             assert_eq!(lines.len(), 3, "width = {width}");
         }
+    }
+
+    #[test]
+    fn running_state_mark_is_visible_without_opening_agent() {
+        let state = state_with(1, "research");
+        let lines = render_selector(&state, 80);
+        let rendered: String = lines[1]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            rendered.contains("●"),
+            "running agents must look active: {rendered}"
+        );
+        assert!(
+            !rendered.contains("○"),
+            "viewing must not control running marker"
+        );
     }
 }

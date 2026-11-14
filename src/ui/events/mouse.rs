@@ -26,6 +26,38 @@ fn palette_area_at(state: &ChatState, col: u16, row: u16) -> Option<ratatui::lay
     Some(area)
 }
 
+/// 返回鼠标命中的后台 Agent selector 行。
+///
+/// selector 是布局中的独立区域，必须在聊天区命中之前处理；否则点击底部
+/// 的 Explore 会穿透到上一层 chat area，看起来就是“列表能看但点不动”。
+fn bg_selector_row_at(state: &ChatState, col: u16, row: u16) -> Option<usize> {
+    let area = state.last_bg_selector_area?;
+    if col < area.x
+        || col >= area.x.saturating_add(area.width)
+        || row < area.y
+        || row >= area.y.saturating_add(area.height)
+    {
+        return None;
+    }
+    Some(row.saturating_sub(area.y) as usize)
+}
+
+fn activate_bg_selector_row(state: &mut ChatState, row: usize) {
+    let task_ids: Vec<String> = state
+        .background_agent_rows()
+        .iter()
+        .map(|info| info.task_id.clone())
+        .collect();
+    let max_row = task_ids.len();
+    let row = row.min(max_row);
+    state.bg_agent_selection = Some(row);
+    if row == 0 {
+        state.exit_teammate_view();
+    } else if let Some(task_id) = task_ids.get(row - 1) {
+        state.enter_teammate_view(task_id);
+    }
+}
+
 /// 面板列表的滚轮：把选中项按可见行数翻。
 ///
 /// 滚轮一格翻一屏（`palette_visible_rows`），而不是一行 —— 面板一次能看到
@@ -350,6 +382,11 @@ pub fn handle_mouse_event(state: &mut ChatState, m: MouseEvent) {
                 palette_select_at(state, m.column, m.row);
                 return;
             }
+            if let Some(row) = bg_selector_row_at(state, m.column, m.row) {
+                activate_bg_selector_row(state, row);
+                state.text_selection.clear();
+                return;
+            }
             if let Some((entry_idx, row, col)) = map_mouse_to_chat_position(state, m.column, m.row)
             {
                 // 一律先起选区。thinking / 工具头部的折叠切换延迟到松开且未拖动时
@@ -476,6 +513,76 @@ mod tests {
             row,
             modifiers: crossterm::event::KeyModifiers::empty(),
         }
+    }
+
+    fn background_task(id: &str) -> crate::ui::state::AgentTaskInfo {
+        crate::ui::state::AgentTaskInfo {
+            task_id: id.to_string(),
+            agent_type: "Explore".to_string(),
+            description: format!("research {id}"),
+            status: crate::types::AgentTaskStatus::Running,
+            tool_use_count: 1,
+            tokens: 100,
+            is_async: true,
+            is_resolved: true,
+            is_error: false,
+            last_tool_info: None,
+            name: None,
+            task_description: None,
+            started_at: std::time::Instant::now(),
+            finished_at: None,
+            sub_entries: Vec::new(),
+            entry_idx: 0,
+        }
+    }
+
+    #[test]
+    fn clicking_a_bottom_explore_row_opens_its_detail_view() {
+        let mut state = ChatState::new();
+        state
+            .active_agent_tasks
+            .insert("agent-a".to_string(), background_task("agent-a"));
+        state
+            .active_agent_tasks
+            .insert("agent-b".to_string(), background_task("agent-b"));
+        state.last_bg_selector_area = Some(Rect {
+            x: 0,
+            y: 20,
+            width: 80,
+            height: 3,
+        });
+
+        // row 0 = main，row 1 = agent-a，row 2 = agent-b。
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 22),
+        );
+
+        assert_eq!(state.bg_agent_selection, Some(2));
+        assert_eq!(state.viewing_agent_task_id.as_deref(), Some("agent-b"));
+    }
+
+    #[test]
+    fn clicking_bottom_main_row_returns_to_main_view() {
+        let mut state = ChatState::new();
+        state
+            .active_agent_tasks
+            .insert("agent-a".to_string(), background_task("agent-a"));
+        state.viewing_agent_task_id = Some("agent-a".to_string());
+        state.last_bg_selector_area = Some(Rect {
+            x: 0,
+            y: 20,
+            width: 80,
+            height: 2,
+        });
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 20),
+        );
+
+        assert_eq!(state.bg_agent_selection, Some(0));
+        assert!(state.viewing_agent_task_id.is_none());
     }
 
     /// ChatState::new() 自带欢迎条目（高 1 行），思考条目在其后（3 行）。

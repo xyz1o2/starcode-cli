@@ -450,6 +450,62 @@ impl Agent {
                     {
                         continue;
                     }
+                    // 后台 SubAgent 还在跑时不能收工（对标 CC 2.1.196：派出的
+                    // 后台任务完成时会通知，主循环必须活着等通知）。模型说 Done
+                    // 只代表它此刻没别的事可做 —— `<task-notification>` 只在
+                    // run_agentic_loop 每轮 turn 开头注入（drain_for_next_turn），
+                    // 循环退出后队列里的终态通知永久无人消费，用户就永远等不到
+                    // 汇总（本次事故：主 agent turn 2 即退出，3 个后台 Explore
+                    // 的结果烂在队列里）。
+                    //
+                    // 两个动作：
+                    // 1. 有就绪通知 → continue 直接进入下一轮注入；
+                    // 2. 都还在跑 → 等待第一个终态（abort / 全部返回 / 超时兜底
+                    //    醒来），醒来后也 continue —— 终态已在队列里，下一轮
+                    //    开头的 drain 会注入并让模型汇总。
+                    if self.has_ready_subagent_notifications().await {
+                        crate::utils::logging::append_debug_log_line(&format!(
+                            "[AGENT] turn done but {} background subagent notification(s) pending; continuing to consume (turn={})",
+                            self.pending_subagent_notification_count().await,
+                            current_turn,
+                        ));
+                        continue;
+                    }
+                    if self.has_inflight_subagents().await {
+                        crate::utils::logging::append_debug_log_line(&format!(
+                            "[AGENT] turn done but background subagent(s) still running; waiting for completion (turn={})",
+                            current_turn,
+                        ));
+                        // 明确告诉用户在等什么 —— 否则这段等待在界面上就是
+                        // 「卡壳」：spinner 在转但没有任何新输出（本次事故的
+                        // 用户观感）。
+                        self.emit_direct_chunk(crate::types::StreamingChunk::assistant_note(
+                            "Waiting for background subagent(s) to finish…".to_string(),
+                        ));
+                        match self.wait_for_background_subagents().await {
+                            crate::agent::agent_core::BackgroundWaitOutcome::GotNotifications => {
+                                // 下一轮 turn 开头 drain 会把结果注入，让模型汇总。
+                                continue;
+                            }
+                            crate::agent::agent_core::BackgroundWaitOutcome::Aborted => {
+                                return Err((messages.clone(), AgentEvent::Done));
+                            }
+                            crate::agent::agent_core::BackgroundWaitOutcome::TimedOut => {
+                                // 等不到就没有可汇总的东西 —— 收工。
+                                //
+                                // **必须在这里收工**：继续下一轮的话，模型看到
+                                // 没变化的对话又会 Done，in-flight 条目还在，
+                                // 于是又等、又超时、又 continue —— 死循环。
+                                crate::utils::logging::append_agent_log_line(&format!(
+                                    "[AGENT] background subagent wait gave up; finishing without their results (turn={})",
+                                    current_turn,
+                                ));
+                                self.emit_direct_chunk(crate::types::StreamingChunk::assistant_note(
+                                    "Background subagent(s) did not report back in time; finishing without their results.".to_string(),
+                                ));
+                            }
+                        }
+                    }
                     crate::utils::logging::append_debug_log_line(&format!(
                         "[AGENT] Loop exited: {} (turn={})",
                         StopReason::Completed,

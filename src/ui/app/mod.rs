@@ -37,6 +37,8 @@ pub struct RenderOutput {
     pub chat_area: Rect,
     /// 输入框矩形：点击聚焦输入框靠它。
     pub input_area: Rect,
+    /// 后台 Agent selector 矩形：鼠标点击行切换详情。
+    pub bg_selector_area: Option<Rect>,
 }
 
 fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect) -> RenderOutput {
@@ -354,6 +356,7 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
         total_rendered_lines: total,
         chat_area,
         input_area,
+        bg_selector_area: (bg_panel_h > 0).then_some(bg_panel_area),
     }
 }
 
@@ -373,6 +376,7 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
     state.last_chat_area = Some(out.chat_area);
     state.last_chat_height = out.chat_area.height;
     state.last_input_area = Some(out.input_area);
+    state.last_bg_selector_area = out.bg_selector_area;
 
     let input_area = out.input_area;
     if state.show_command_hints

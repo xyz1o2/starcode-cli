@@ -71,6 +71,8 @@ pub struct ChatState {
     pub transcript_seq: u64,
     pub last_chat_area: Option<Rect>,
     pub last_input_area: Option<Rect>,
+    /// 最后一帧后台 Agent selector 的命中区域，供鼠标点击行切换详情。
+    pub last_bg_selector_area: Option<Rect>,
     pub last_item_heights: Vec<u16>,
     pub show_command_hints: bool,
     pub command_hints: Vec<String>,
@@ -818,6 +820,7 @@ impl ChatState {
             transcript_seq: 0,
             last_chat_area: None,
             last_input_area: None,
+            last_bg_selector_area: None,
             last_item_heights: Vec::new(),
             show_command_hints: false,
             command_hints: Vec::new(),

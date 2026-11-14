@@ -15,6 +15,27 @@ use crate::core::i18n;
 use crate::types::{StarMessage, StarToolCall, ToolResult};
 use std::collections::{HashSet, VecDeque};
 
+/// 这一轮的纯文本回应是不是**紧跟在工具结果之后**。
+///
+/// 判据：**最后一条 assistant 消息的前一条是不是 tool**。
+///
+/// `process_llm_response` 在检查本轮响应之前，已经把本轮的 assistant 消息
+/// （纯文本、无 tool_calls）压进 `messages`，所以「最后一条 assistant」就是
+/// 本轮这条；它前面若是 tool，说明工具结果刚回来、模型正在回应它 ——
+/// 那是合法收尾，不是「拒绝行动」。
+///
+/// 早先的写法是从后往前 find「role 是 tool/user/system **或**带 tool_calls
+/// 的消息」，再判断命中的是不是 tool —— 那会先撞上上一轮带 tool_calls 的
+/// assistant 消息并判成 false，判据几乎恒假，修复等于没生效。
+fn follows_tool_results(messages: &[StarMessage]) -> bool {
+    messages
+        .iter()
+        .rposition(|m| m.role == "assistant")
+        .and_then(|idx| idx.checked_sub(1))
+        .map(|idx| messages[idx].role == "tool")
+        .unwrap_or(false)
+}
+
 impl Agent {
     // 处理 LLM 响应（包括工具执行）
     pub(crate) async fn process_llm_response(
@@ -317,9 +338,16 @@ impl Agent {
                     ));
                     return TurnResult::Continue;
                 } else {
-                    // Conclusion guard passed (content is long enough, first turn,
-                    // or nudge limit reached) — reset nudge counter before Done.
-                    *nudge_interventions = 0;
+                    // Conclusion guard 放行（内容够长 / 首轮 / 已到上限）。
+                    //
+                    // 这里**不**重置 nudge 计数器：计数器的语义是「连续多少轮
+                    // 没产出工具调用」（见 line 174 的唯一归零点）。模型给了一
+                    // 段长文本不代表它干了活 —— 「几个工具调用 → 一段长文本」
+                    // 的交替模式正是空转的形态，文本轮归零会让 nudge 上限对
+                    // 那种空转永久失效（本次事故：子代理被拖到 turn 54+，
+                    // token 烧到 84k+）。
+                    //
+                    // 真正的归零点只有一个：本轮产生了工具调用。
                 }
             }
 
@@ -358,6 +386,21 @@ impl Agent {
                                     .starts_with("You responded with a text explanation")
                         })
                         .unwrap_or(false);
+                    // 刚做完一轮工具调用就来 text-only → 这是**收尾报告**，不是
+                    // 拒绝行动。nudge 它只会逼出「好的，我继续……」式的空转循环
+                    // （本次事故：子代理在 turn 30-54 间被 action nudge 反复拖着
+                    // 跑，token 烧到 84k+）。
+                    let after_tool_results = follows_tool_results(messages);
+                    if after_tool_results {
+                        crate::utils::logging::append_debug_log_line(&format!(
+                            "[AGENT] turn {} text-only response follows tool results — treating as final report, not nudging",
+                            current_turn,
+                        ));
+                        // 不重置计数器：工具调用那轮（line 174）已经归零过，
+                        // 这里再归零等于让「工具 → 文本」交替模式永远撞不到
+                        // nudge 上限。
+                        return TurnResult::Done;
+                    }
                     if already_nudged || *nudge_interventions >= max_nudge_interventions {
                         crate::utils::logging::append_debug_log_line(&format!(
                             "[AGENT] turn {} text-only nudge already present or limit reached — Done",
@@ -377,9 +420,15 @@ impl Agent {
                 }
             }
 
-            // Model produced useful content without needing a nudge —
-            // reset the consecutive-empty-response counter.
-            *nudge_interventions = 0;
+            // 走到这里说明模型这一轮只给了文字、没有工具调用。
+            //
+            // **不重置 nudge 计数器。** 计数器的语义是「连续多少轮没产出
+            // 工具调用」，唯一的归零点是本函数 line 174（本轮有工具调用）。
+            // 早先这里无条件归零，让「几个工具调用 → 一段长文本」的交替模式
+            // 每轮把计数器清零，nudge 上限对那种空转永久失效（本次事故：
+            // 一个子代理被 action nudge 拖到 turn 50+，token 烧到 84k+）。
+            //
+            // 连续空转会累积到上限（默认 3）并停下来 —— 那正是上限存在的意义。
 
             trigger_result
         }
@@ -1394,6 +1443,63 @@ mod tests {
                 arguments: "{}".to_string(),
             },
         }
+    }
+
+    #[test]
+    fn text_only_reply_right_after_tool_results_is_a_final_report() {
+        // 工具刚跑完 → 模型给了纯文本回应。这是收尾报告，不该被 nudge。
+        let messages = vec![
+            StarMessage::new("user", Some("修一下登录 bug".to_string())),
+            StarMessage::assistant_with_tool_calls(vec![tool_call(0, "Read")]),
+            StarMessage::tool("call_0", "file contents"),
+            StarMessage::assistant("已修复登录校验。".to_string()),
+        ];
+        assert!(follows_tool_results(&messages));
+    }
+
+    #[test]
+    fn text_only_reply_without_a_preceding_tool_is_not_a_final_report() {
+        // 用户问完，模型直接给纯文本（前面没有工具结果）→ 该 nudge。
+        let messages = vec![
+            StarMessage::new("user", Some("修一下登录 bug".to_string())),
+            StarMessage::assistant("我需要先看看代码。".to_string()),
+        ];
+        assert!(!follows_tool_results(&messages));
+    }
+
+    #[test]
+    fn an_older_tool_call_does_not_count_as_following_tool_results() {
+        // 关键回归：上一轮用过工具，但**本轮**的文本回应前面是 user 消息
+        // —— 那不是收尾报告。早先的判据会撞上带 tool_calls 的 assistant
+        // 消息而恒假；现在必须正确地区分「本轮」和「更早」。
+        let messages = vec![
+            StarMessage::new("user", Some("修一下登录 bug".to_string())),
+            StarMessage::assistant_with_tool_calls(vec![tool_call(0, "Read")]),
+            StarMessage::tool("call_0", "file contents"),
+            StarMessage::assistant("继续看看。".to_string()),
+            StarMessage::new(
+                "user",
+                Some("<task-notification>done</task-notification>".to_string()),
+            ),
+            StarMessage::assistant("好的，我继续处理。".to_string()),
+        ];
+        assert!(
+            !follows_tool_results(&messages),
+            "the tool result is not adjacent to the latest assistant message"
+        );
+    }
+
+    #[test]
+    fn a_system_nudge_between_tool_and_text_breaks_the_adjacency() {
+        // 中间插了 system 消息（nudge / 通知）→ 文本回应不是紧跟工具结果。
+        let messages = vec![
+            StarMessage::new("user", Some("修一下登录 bug".to_string())),
+            StarMessage::assistant_with_tool_calls(vec![tool_call(0, "Read")]),
+            StarMessage::tool("call_0", "file contents"),
+            StarMessage::system("[CONCLUSION_REQUEST] please summarize"),
+            StarMessage::assistant("好的，我继续处理。".to_string()),
+        ];
+        assert!(!follows_tool_results(&messages));
     }
 
     #[test]

@@ -42,6 +42,14 @@ fn install_parent_context(agent: &mut crate::agent::StarAgent, request: &SubAgen
 /// 既有的一条门，覆盖它等于子代理的**注册面**收口，而不仅是模型侧提示。
 /// `Bash` 保留在名单里：只读命令由 `is_readonly_fs_command` 在确认门把关，
 /// 这里收掉 Write/Edit 一类的可变更工具就足够表达"只读"语义。
+/// 子代理未显式指定 max_rounds 时的默认轮次上限。
+///
+/// 与 agent_tool.rs 的 `DEFAULT_SYNC_MAX_ROUNDS` 同值：那处只护同步路径，
+/// 这里是 runner 层的总收口（后台 / fork / skill / coordinator 全过这里）。
+/// 不设兜底的话子代理继承主会话的 max_session_turns（默认 200），空转的
+/// 子代理能把一个简单检索烧成几十万 token。
+const DEFAULT_SUBAGENT_MAX_ROUNDS: u32 = 50;
+
 pub const EXPLORER_READONLY_TOOLS: &[&str] = &[
     "Read",
     "Grep",
@@ -129,6 +137,14 @@ impl StarAgentRunner {
         // 循环的 `run_with_progress` 才有 tracker 实时回流 tool uses / tokens。
         let mut sub_config = (*self.config).clone();
         sub_config.recursion_depth = sub_config.recursion_depth.saturating_add(1);
+        //
+        // 轮次上限兜底：调用方（AgentTool 的 max_rounds 参数）给了就用，没给
+        // 回落 50 —— 不兜底的话子代理继承主会话的 max_session_turns（默认
+        // 200），一个空转的 Explore 能烧几十万 token（本次事故：子代理跑到
+        // turn 54+）。同步路径在 agent_tool.rs 有同样的回落，这里收口在
+        // runner 层，spawn_background / run_foreground / skill fork 全覆盖。
+        let rounds = request.max_rounds.unwrap_or(DEFAULT_SUBAGENT_MAX_ROUNDS);
+        sub_config.set_max_session_turns(rounds as i32);
         //
         // Explorer 的**只读白名单收口**在这里生效：core_tools 是注册层
         // `is_core_tool_enabled` 既有的门，覆盖它等于子代理的**注册面**收口，
@@ -455,6 +471,31 @@ mod tests {
             crate::core::agents::SubagentType::Explorer
         );
     }
+
+    /// 子代理的轮次上限兜底：没显式给 max_rounds 时回落到 50。
+    ///
+    /// 不兜底的话子代理继承主会话的 `max_session_turns`（默认 200），
+    /// 一个空转的 Explore 能烧几十万 token（本次事故：子代理跑到 turn 54+，
+    /// token 烧到 84k+ 还没停）。
+    #[test]
+    fn subagent_turn_budget_falls_back_to_a_bounded_default() {
+        assert_eq!(DEFAULT_SUBAGENT_MAX_ROUNDS, 50);
+
+        // 显式指定的轮次优先于兜底值。
+        let explicit = SubAgentRequest::new("x").with_max_rounds(7);
+        assert_eq!(explicit.max_rounds, Some(7));
+
+        // 没指定时由 runner 层兜底 —— 这里锁「兜底发生在 runner 层」
+        // （覆盖 spawn_background / run_foreground / skill fork 三条路径）。
+        let unspecified = SubAgentRequest::new("x");
+        assert_eq!(unspecified.max_rounds, None);
+        assert_eq!(
+            unspecified
+                .max_rounds
+                .unwrap_or(DEFAULT_SUBAGENT_MAX_ROUNDS),
+            DEFAULT_SUBAGENT_MAX_ROUNDS
+        );
+    }
 }
 
 // ── AsyncSubagentRunner ──────────────────────────────────────────────────
@@ -562,7 +603,18 @@ impl AsyncSubagentRunner {
         // 未指派时回落 name / agent_id（见下方注册处）。
         let hub_identity = request.identity.clone();
 
+        // 登记 in-flight：主 agent 的循环退出判定（agent_loop.rs 的 Done 分支）
+        // 读这个集合 —— 模型说 Done 但后台还有人没回来时不收工，等通知。
+        // enqueue 时自动移除，所以这里先行登记不会泄漏。
+        //
+        // 登记放在**干活的那个 spawn 的第一行**，不能另起一个 spawn：两个
+        // spawn 之间没有顺序保证，终态 enqueue 可能先于登记发生，那样
+        // in-flight 就永久泄漏（主 agent 只能等 STAR_BG_WAIT_TIMEOUT_SECS
+        // 超时才收工）。
         tokio::spawn(async move {
+            // 登记 in-flight（必须先于任何可能失败的步骤）。
+            queue.lock().await.mark_spawned(&aid);
+
             // 注册 name → agent_id 映射。放进 spawn 内用 async lock，
             // 避免在 async 上下文里调用 blocking_lock 触发 panic。
             if let Some(ref n) = agent_name {

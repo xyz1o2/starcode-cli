@@ -108,6 +108,54 @@ pub struct Agent {
     pub(crate) session_today: String,
 }
 
+/// 这一层 agent 是否消费后台 SubAgent 的完成通知。
+///
+/// 只有 **lead**（`recursion_depth == 0`）消费。
+///
+/// 通知队列是进程级单例，lead 与所有子代理共享同一个实例。若子代理也
+/// drain，主 agent 的 `<task-notification>` 会被子代理偷进自己的上下文 ——
+/// lead 在下一轮 turn 开头 drain 时队列已经空了，汇总永远不发生。
+///
+/// （本次事故：主 agent turn 2 即退出，3 个后台 Explore 的结果既没回到
+/// 主对话，也没留在队列里 —— 通知被并发跑的子代理 drain 掉了。）
+///
+/// 子代理派出的**再下一层**后台代理结果仍会正常回到队列，只是由 lead
+/// 取走 —— 队列是共享的，消费权是单一的。
+fn consumes_subagent_notifications(recursion_depth: usize) -> bool {
+    recursion_depth == 0
+}
+
+/// 等待后台子代理的结果。
+///
+/// 调用方必须按这个区分下一步：**只有 `GotNotifications` 才继续下一轮**
+/// 让模型汇总；`TimedOut` 必须收工 —— 否则会死循环（超时后继续，模型又
+/// Done，in-flight 还在，又等、又超时……）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackgroundWaitOutcome {
+    /// 终态通知已入队，下一轮 turn 开头会被 drain 注入。
+    GotNotifications,
+    /// 等待超时，或在等的过程中队列被别的消费者取空了 —— 没有可汇总的。
+    TimedOut,
+    /// 用户中断了。
+    Aborted,
+}
+
+/// 队列状态 → 等待是否该结束。`None` = 还得继续等。
+///
+/// 独立成函数是为了可测：等待的三种结局（有通知 / 没得等了 / 超时）
+/// 各有一条判据，不必真的等 600 秒才能验证。
+fn background_wait_signal(queue: &mut NotificationQueue) -> Option<BackgroundWaitOutcome> {
+    if queue.pending_count() > 0 {
+        return Some(BackgroundWaitOutcome::GotNotifications);
+    }
+    if !queue.has_inflight() {
+        // 没有在跑的了但也没有通知 —— 队列被别的消费者拿走了，
+        // 没有可汇总的东西，收工。
+        return Some(BackgroundWaitOutcome::TimedOut);
+    }
+    None
+}
+
 impl Agent {
     pub fn new(client: StarClient, config: Arc<Config>) -> Self {
         crate::utils::logging::append_agent_log_line("[INIT] Agent::new starting...");
@@ -203,8 +251,22 @@ impl Agent {
         crate::utils::logging::append_agent_log_line("[INIT] Agent::new completed");
 
         // 连接后台 SubAgent 通知队列（若 runtime 已初始化）
-        if let Some(queue) = agent.config.runtime_notification_queue() {
-            agent.set_notification_queue(queue);
+        //
+        // **只有 lead（recursion_depth == 0）接队列。** 队列是进程级单例，
+        // 子代理共享同一个实例；若子代理也 drain，主 agent 的
+        // `<task-notification>` 会被子代理偷进自己的上下文 —— 主 agent
+        // 的 turn 开头 drain 时队列已空，汇总永远不发生（本次事故：
+        // 3 个后台 Explore 的结果既没回到主对话，也没留在队列里）。
+        //
+        // 子代理自己的后台子代理结果仍会正常回到队列，只是由 lead 取走。
+        if consumes_subagent_notifications(agent.config.recursion_depth) {
+            if let Some(queue) = agent.config.runtime_notification_queue() {
+                agent.set_notification_queue(queue);
+            }
+        } else {
+            crate::utils::logging::append_agent_log_line(
+                "[INIT] Sub-agent skips notification queue (lead-only consumer)",
+            );
         }
 
         // 连接 Agent 间消息 hub：默认身份是 lead（主 agent 的固定可寻址名，
@@ -414,6 +476,95 @@ impl Agent {
         self.async_notification_queue = Some(queue);
     }
 
+    /// 通知队列里是否已有就绪未注入的终态通知。
+    ///
+    /// Done 分支（agent_loop.rs）用它在收工前把队列里的结果捞进对话。
+    pub(crate) async fn has_ready_subagent_notifications(&self) -> bool {
+        match &self.async_notification_queue {
+            Some(q) => q.lock().await.pending_count() > 0,
+            None => false,
+        }
+    }
+
+    pub(crate) async fn pending_subagent_notification_count(&self) -> usize {
+        match &self.async_notification_queue {
+            Some(q) => q.lock().await.pending_count(),
+            None => 0,
+        }
+    }
+
+    /// 是否还有已 spawn 未终态的后台子代理。
+    pub(crate) async fn has_inflight_subagents(&self) -> bool {
+        match &self.async_notification_queue {
+            Some(q) => q.lock().await.has_inflight(),
+            None => false,
+        }
+    }
+
+    /// 等到至少一个后台子代理终态入队（或超时 / abort 兜底醒来）。
+    ///
+    /// 不在这里消费通知 —— 醒来后由 Done 分支 `continue` 进下一轮 turn 开头
+    /// 的 drain 统一注入，保持「通知只在 turn 边界进对话」的既有不变量。
+    ///
+    /// 超时兜底（默认 600s，`STAR_BG_WAIT_TIMEOUT_SECS` 可调）：子代理卡死
+    /// 或通知丢失时不能把主循环永久挂住 —— 等待只是收尾的延迟，不是死锁。
+    /// abort 标志置位时立即返回，让外层的 abort 检查正常退出。
+    ///
+    /// **返回值是必需的**：调用方必须区分「等到了结果，继续下一轮让模型
+    /// 汇总」与「超时了，收工别再等」。不区分就会死循环 —— 超时后
+    /// `continue` 进下一轮，模型看到没变化的对话又 Done，in-flight 还在，
+    /// 于是又等、又超时、又 continue……
+    pub(crate) async fn wait_for_background_subagents(&self) -> BackgroundWaitOutcome {
+        const DEFAULT_BG_WAIT_TIMEOUT_SECS: u64 = 600;
+        let timeout_secs = std::env::var("STAR_BG_WAIT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_BG_WAIT_TIMEOUT_SECS);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
+        // 500ms 轮询：实现简单且足够快（终态本就以秒计）。子代理跑完的信号
+        // 是队列终态入队（in-flight 移除），这里只等状态翻转，不碰队列内容。
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = tokio::time::sleep_until(deadline) => {
+                    crate::utils::logging::append_agent_log_line(&format!(
+                        "[AGENT] background subagent wait timed out after {}s; proceeding without their results",
+                        timeout_secs,
+                    ));
+                    // 放弃这些 in-flight 条目：等待超时后若它们还活着，下一轮
+                    // 又会认为「还有人在跑」→ 又等 → 又超时 → 死循环。
+                    // 等待超时阈值与 in-flight 过期阈值是**两个独立的数**
+                    // （STAR_BG_WAIT_TIMEOUT_SECS vs 固定 600s），谁小谁先到，
+                    // 所以这里必须显式放弃，不能指望过期清理兜底。
+                    if let Some(ref q) = self.async_notification_queue {
+                        q.lock().await.abandon_inflight();
+                    }
+                    return BackgroundWaitOutcome::TimedOut;
+                }
+            }
+            if self
+                .abort_flag
+                .as_ref()
+                .map(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+                .unwrap_or(false)
+            {
+                return BackgroundWaitOutcome::Aborted;
+            }
+            let Some(ref q) = self.async_notification_queue else {
+                return BackgroundWaitOutcome::TimedOut;
+            };
+            let signal = {
+                let mut guard = q.lock().await;
+                background_wait_signal(&mut guard)
+            };
+            if let Some(outcome) = signal {
+                return outcome;
+            }
+        }
+    }
+
     /// 注入 steering 队列：运行中插入的需求从这里进对话。
     pub fn set_steering_queue(
         &mut self,
@@ -618,5 +769,86 @@ impl Agent {
 
     pub fn is_bypass_mode_disabled(&self) -> bool {
         self.config.is_bypass_mode_disabled()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_lead_consumes_background_subagent_notifications() {
+        // lead 消费 —— 主 agent 必须能拿到 `<task-notification>`。
+        assert!(consumes_subagent_notifications(0));
+
+        // 子代理不消费。通知队列是进程级单例，子代理 drain 一次，主 agent
+        // 的通知就没了（本次事故的根因）。
+        assert!(!consumes_subagent_notifications(1));
+        assert!(!consumes_subagent_notifications(2));
+        assert!(!consumes_subagent_notifications(3));
+    }
+
+    fn completed(task_id: &str) -> crate::agent::subagent::notification::TaskNotification {
+        crate::agent::subagent::notification::TaskNotification {
+            task_id: task_id.to_string(),
+            tool_use_id: None,
+            status: crate::agent::subagent::notification::NotificationStatus::Completed,
+            summary: "done".to_string(),
+            result: "result".to_string(),
+            usage: crate::agent::subagent::notification::NotificationUsage {
+                total_tokens: 1,
+                tool_uses: 1,
+                duration_ms: 1,
+            },
+            entries: Vec::new(),
+            agent_type: None,
+            name: None,
+        }
+    }
+
+    #[test]
+    fn the_lead_keeps_waiting_while_a_subagent_is_still_running() {
+        // 子代理还在跑 → 还得等（返回 None = 继续等）。
+        let mut q = NotificationQueue::new();
+        q.mark_spawned("agent-live");
+        assert_eq!(background_wait_signal(&mut q), None);
+    }
+
+    #[test]
+    fn the_wait_ends_when_a_notification_arrives() {
+        // 终态入队 → 等待结束，下一轮 drain 会注入，模型可以汇总。
+        let mut q = NotificationQueue::new();
+        q.mark_spawned("agent-live");
+        q.enqueue(completed("agent-live"));
+        assert_eq!(
+            background_wait_signal(&mut q),
+            Some(BackgroundWaitOutcome::GotNotifications)
+        );
+    }
+
+    #[test]
+    fn the_wait_gives_up_when_nothing_is_running_and_nothing_is_pending() {
+        // 没有在跑的、也没有通知可取 → 没有可汇总的东西，收工。
+        //
+        // 这一条是**死循环的闸门**：若这里返回 None（继续等），调用方会
+        // `continue` 进下一轮，模型又 Done → 又等 → 又超时 → 无限循环。
+        let mut q = NotificationQueue::new();
+        assert_eq!(
+            background_wait_signal(&mut q),
+            Some(BackgroundWaitOutcome::TimedOut)
+        );
+    }
+
+    #[test]
+    fn a_drained_queue_ends_the_wait_instead_of_looping_forever() {
+        // 通知被别的消费者取走了 → 队列空、也没有在跑的 → 收工。
+        let mut q = NotificationQueue::new();
+        q.mark_spawned("agent-live");
+        q.enqueue(completed("agent-live"));
+        let _drained = q.drain_for_next_turn();
+        assert_eq!(
+            background_wait_signal(&mut q),
+            Some(BackgroundWaitOutcome::TimedOut)
+        );
     }
 }
