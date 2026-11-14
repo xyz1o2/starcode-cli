@@ -2,12 +2,12 @@
 name: 'Tool Description: ExitPlanMode'
 description: Exit planning mode after plan approval
 -->
-Exit plan mode after approval and seed tasks from the plan. The tool itself does not run the steps.
+Present the finished plan for user approval. If approved, exit Plan Mode and seed tasks from the plan; the tool itself does not execute the steps.
 
-**Use for**: transitioning from planning to execution after the plan is approved.
-**NOT for**: when no plan exists or the plan was rejected.
+**Use for**: requesting approval to transition from planning to execution.
+**NOT for**: when no plan exists, or retrying a plan the user declined.
 
 **Rules**:
-- Call only after entering plan mode and receiving approval.
+- Call while Plan Mode is active. The tool requests approval; do not claim approval before the user responds.
 - Treat task creation as preparation, not proof that any plan step was executed.
-- Continue the approved work through the normal tool flow when the runtime permits it; report only verified progress.
+- After approval, continue the plan through normal tool calls and report only verified progress. If declined, stop rather than retrying the same request.

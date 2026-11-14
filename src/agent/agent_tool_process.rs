@@ -553,6 +553,25 @@ impl Agent {
                         let tool_call = &runnable_tool_calls[index];
                         self.emit_tool_starts(std::slice::from_ref(tool_call));
                         let result = self.execute_single_tool(tool_call).await;
+                        if result.success
+                            && matches!(
+                                crate::core::tools::constants::resolve_registered_tool_name(
+                                    &tool_call.function.name
+                                ),
+                                "EnterPlanMode" | "ExitPlanMode"
+                            )
+                        {
+                            let mode =
+                                if crate::core::tools::constants::resolve_registered_tool_name(
+                                    &tool_call.function.name,
+                                ) == "ExitPlanMode"
+                                {
+                                    crate::types::ApprovalMode::Default
+                                } else {
+                                    crate::types::ApprovalMode::Plan
+                                };
+                            self.set_approval_mode(mode);
+                        }
                         self.consume_tool_result(
                             user_input,
                             messages,
@@ -1352,7 +1371,7 @@ fn tool_execution_segments(tool_calls: &[StarToolCall]) -> Vec<ToolExecutionSegm
 fn is_barrier_tool(name: &str) -> bool {
     matches!(
         crate::core::tools::constants::resolve_registered_tool_name(name),
-        "CodebaseSearch" | "ProjectMap" | "Bash" | "WebSearch"
+        "CodebaseSearch" | "ProjectMap" | "Bash" | "WebSearch" | "EnterPlanMode" | "ExitPlanMode"
     )
 }
 
@@ -1606,5 +1625,23 @@ mod tests {
         assert!(is_barrier_tool("bash"));
         assert!(is_barrier_tool("BASH"));
         assert!(!is_barrier_tool("Read"));
+    }
+
+    #[test]
+    fn plan_mode_transitions_do_not_race_with_adjacent_tool_calls() {
+        let calls = [
+            tool_call(0, "Read"),
+            tool_call(1, "ExitPlanMode"),
+            tool_call(2, "Write"),
+        ];
+        assert_eq!(
+            tool_execution_segments(&calls),
+            vec![
+                ToolExecutionSegment::Batch(vec![0]),
+                ToolExecutionSegment::Barrier(1),
+                ToolExecutionSegment::Batch(vec![2]),
+            ]
+        );
+        assert!(is_barrier_tool("EnterPlanMode"));
     }
 }

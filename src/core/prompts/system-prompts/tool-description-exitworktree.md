@@ -2,13 +2,13 @@
 name: 'Tool Description: ExitWorktree'
 description: Remove isolated Git worktree
 -->
-Remove an isolated Git worktree. This operation may discard uncommitted changes.
+Remove a registered secondary Git worktree only if it is clean and its HEAD is contained in the main worktree's HEAD. The tool does not merge commits or discard local files.
 
-**Use for**: cleaning up a worktree only after verifying its changes are safely saved elsewhere.
-**NOT for**: preserving uncommitted work; the current keep-changes option does not reliably carry uncommitted changes to the parent branch.
+**Use for**: cleaning up a worktree after its changes have been integrated into the main worktree.
+**NOT for**: preserving or merging uncommitted work; save or integrate changes explicitly before removal.
 
-**Params**: path (required), keep_changes (default: false).
+**Params**: path (required), keep_changes (optional compatibility flag; neither value permits discarding changes).
 
 **Rules**:
-- Inspect the worktree before removal and obtain the user's confirmation for any data loss. A keep-changes request is not proof that files will survive removal.
-- If preservation or merge fails, leave the worktree intact and report the failure; do not claim changes were kept.
+- Inspect the worktree first. Uncommitted, untracked or ignored files and unintegrated commits cause removal to fail without deletion.
+- Do not claim the tool merged changes or silently retry with a force removal.

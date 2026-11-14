@@ -72,6 +72,10 @@ impl MessageBus {
         policy_engine.set_approval_mode(mode);
     }
 
+    pub async fn approval_mode(&self) -> crate::core::policy::types::ApprovalMode {
+        self.policy_engine.read().await.get_approval_mode()
+    }
+
     /// 装上 auto 档位的 LLM 分类器。
     ///
     /// 必须在 `PolicyEngine` 建好**之后**调用 —— 分类器要读同一份对话上下文

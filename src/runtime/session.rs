@@ -1231,26 +1231,21 @@ pub async fn apply_deferred_runtime_actions(
                     }
                 }
 
-                // After tool execution, check if mode was changed by on_confirm callback.
-                // The on_confirm callback sets mode via tokio::spawn, so we wait briefly
-                // and then broadcast the current state to UI.
+                // 计划工具只在实际执行成功后切换策略；读取总线中的已提交状态，
+                // 再同步到长寿命 agent 与 UI，不能用预先缓存的模式伪造成功。
                 if matches!(
                     crate::core::tools::constants::resolve_registered_tool_name(
                         &tool_call.function.name
                     ),
                     "EnterPlanMode" | "ExitPlanMode"
                 ) {
-                    // Give the async on_confirm callback time to execute
-                    // Use multiple yields to ensure the spawned task completes
-                    for _ in 0..10 {
-                        tokio::task::yield_now().await;
+                    if let Some(bus) = agent.runtime_message_bus() {
+                        let mode: crate::types::ApprovalMode = bus.approval_mode().await.into();
+                        if mode != agent.get_approval_mode() {
+                            agent.set_approval_mode(mode.clone());
+                            let _ = tx.send(StreamMessage::ApprovalModeChanged { mode }).await;
+                        }
                     }
-                    // Small delay to ensure spawned task completes
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    let current_mode = agent.get_approval_mode();
-                    let _ = tx
-                        .send(StreamMessage::ApprovalModeChanged { mode: current_mode })
-                        .await;
                 }
             }
 

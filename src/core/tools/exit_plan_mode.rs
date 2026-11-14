@@ -38,6 +38,10 @@ impl BaseDeclarativeTool for ExitPlanModeTool {
         "ExitPlanMode"
     }
 
+    fn requires_invocation_confirmation(&self) -> bool {
+        true
+    }
+
     fn display_name(&self) -> &str {
         "Exit Plan Mode"
     }
@@ -105,7 +109,6 @@ impl ToolInvocation for ExitPlanModeInvocation {
         >,
     > {
         let plan = self.params.plan.clone();
-        let message_bus = self.message_bus.clone();
         Box::pin(async move {
             Ok(Some(ToolCallConfirmationDetails {
                 confirmation_type: crate::core::tools::tools::ConfirmationType::Ask,
@@ -114,25 +117,7 @@ impl ToolInvocation for ExitPlanModeInvocation {
                     "The agent wants to exit Plan Mode and execute the following plan:\n\n{}",
                     plan
                 ),
-                on_confirm: std::sync::Arc::new(move |outcome, _feedback| {
-                    let confirmed = matches!(
-                        outcome,
-                        crate::types::ToolConfirmationOutcome::ProceedOnce
-                            | crate::types::ToolConfirmationOutcome::ProceedAlways
-                            | crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave
-                            | crate::types::ToolConfirmationOutcome::AllowSession
-                    );
-
-                    if confirmed {
-                        let bus = message_bus.clone();
-                        tokio::spawn(async move {
-                            bus.set_approval_mode(
-                                crate::core::policy::types::ApprovalMode::Default,
-                            )
-                            .await;
-                        });
-                    }
-                }),
+                on_confirm: std::sync::Arc::new(|_outcome, _feedback| {}),
             }))
         })
     }
@@ -150,7 +135,23 @@ impl ToolInvocation for ExitPlanModeInvocation {
     > {
         let plan = self.params.plan.clone();
         let config = self.config.clone();
+        let message_bus = self.message_bus.clone();
         Box::pin(async move {
+            if message_bus.approval_mode().await != crate::core::policy::types::ApprovalMode::Plan {
+                return Ok(ToolResult {
+                    llm_content: Some("Plan was not in Plan Mode; no tasks were seeded. Enter Plan Mode and request approval before executing a plan.".to_string()),
+                    return_display: Some("Plan mode required".to_string()),
+                    output: String::new(),
+                    error: Some(crate::core::tools::tools::ToolError {
+                        error_type: "plan_mode_required".to_string(),
+                        message: "ExitPlanMode requires active Plan Mode".to_string(),
+                    }),
+                    data: None,
+                });
+            }
+            message_bus
+                .set_approval_mode(crate::core::policy::types::ApprovalMode::Default)
+                .await;
             let seeded = seed_tasks_from_plan(&plan, &config).await?;
             let mut output = format!("Plan approved:\n{}", plan);
             match seeded {
@@ -175,13 +176,58 @@ impl ToolInvocation for ExitPlanModeInvocation {
                 }
             }
             Ok(ToolResult {
-                llm_content: Some("User has approved the plan. There is nothing else needed from you now. Please respond with \"ok\"".to_string()),
+                llm_content: Some(format!(
+                    "The user approved the plan. Plan text:\n{plan}\n\nContinue implementing the approved plan now. Task-list seeding is only tracking, not execution; report actual progress and results. If execution cannot continue, explain the blocker instead of claiming completion."
+                )),
                 return_display: Some("Plan approved. Exiting Plan Mode.".to_string()),
                 output,
                 error: None,
                 data: None,
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod exit_plan_tests {
+    use super::*;
+    use crate::core::config::ConfigParameters;
+    use crate::core::policy::policy_engine::PolicyEngine;
+    use crate::core::policy::types::{ApprovalMode, PolicyEngineConfig};
+
+    #[tokio::test]
+    async fn exit_requires_plan_mode_and_restores_default_after_approval() {
+        let config = Arc::new(Config::new(ConfigParameters::default()));
+        let bus = Arc::new(MessageBus::new(
+            PolicyEngine::new(PolicyEngineConfig {
+                rules: None,
+                checkers: None,
+                hook_checkers: None,
+                default_decision: None,
+                non_interactive: None,
+                allow_hooks: None,
+                approval_mode: Some(ApprovalMode::Default),
+            }),
+            false,
+        ));
+        let invocation = ExitPlanModeInvocation {
+            params: ExitPlanModeParams {
+                plan: "".to_string(),
+            },
+            config,
+            message_bus: bus.clone(),
+        };
+        let denied = invocation.execute(None, None).await.unwrap();
+        assert!(denied.error.is_some());
+        assert_eq!(bus.approval_mode().await, ApprovalMode::Default);
+        bus.set_approval_mode(ApprovalMode::Plan).await;
+        let approved = invocation.execute(None, None).await.unwrap();
+        assert!(approved.error.is_none());
+        assert!(approved
+            .llm_content
+            .unwrap()
+            .contains("Continue implementing"));
+        assert_eq!(bus.approval_mode().await, ApprovalMode::Default);
     }
 }
 

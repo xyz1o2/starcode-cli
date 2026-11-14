@@ -92,7 +92,6 @@ impl ToolInvocation for EnterPlanModeInvocation {
         >,
     > {
         let reason = self.params.reason.clone();
-        let message_bus = self.message_bus.clone();
         Box::pin(async move {
             Ok(Some(ToolCallConfirmationDetails {
                 confirmation_type: crate::core::tools::tools::ConfirmationType::Ask,
@@ -101,23 +100,7 @@ impl ToolInvocation for EnterPlanModeInvocation {
                     "The agent wants to enter Plan Mode for the following reason:\n\n{}",
                     reason
                 ),
-                on_confirm: std::sync::Arc::new(move |outcome, _feedback| {
-                    let confirmed = matches!(
-                        outcome,
-                        crate::types::ToolConfirmationOutcome::ProceedOnce
-                            | crate::types::ToolConfirmationOutcome::ProceedAlways
-                            | crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave
-                            | crate::types::ToolConfirmationOutcome::AllowSession
-                    );
-
-                    if confirmed {
-                        let bus = message_bus.clone();
-                        tokio::spawn(async move {
-                            bus.set_approval_mode(crate::core::policy::types::ApprovalMode::Plan)
-                                .await;
-                        });
-                    }
-                }),
+                on_confirm: std::sync::Arc::new(|_outcome, _feedback| {}),
             }))
         })
     }
@@ -133,7 +116,11 @@ impl ToolInvocation for EnterPlanModeInvocation {
                 + '_,
         >,
     > {
+        let message_bus = self.message_bus.clone();
         Box::pin(async move {
+            message_bus
+                .set_approval_mode(crate::core::policy::types::ApprovalMode::Plan)
+                .await;
             Ok(ToolResult {
                 llm_content: Some("Entered Plan Mode. You are now in a restricted mode where write operations are disabled. Use 'exit_plan_mode' when you are ready to implement.".to_string()),
                 return_display: Some("Entered Plan Mode.".to_string()),

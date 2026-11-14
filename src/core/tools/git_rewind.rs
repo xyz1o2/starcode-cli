@@ -81,35 +81,16 @@ impl ToolInvocation for GitRewindInvocation {
                         data: None,
                     })
                 }
-                "reset_to" => {
-                    let target = match params.target.as_ref() {
-                        Some(t) => t,
-                        None => {
-                            return Ok(ToolResult {
-                                llm_content: None,
-                                return_display: None,
-                                output: String::new(),
-                                error: Some(ToolError {
-                                    error_type: "invalid_params".to_string(),
-                                    message: "target ref is required for reset_to".to_string(),
-                                }),
-                                data: None,
-                            });
-                        }
-                    };
-
-                    run_git(root, &["reset", "--hard", target])
-                        .await
-                        .map_err(|e| format!("Failed to reset to {}: {}", target, e))?;
-
-                    Ok(ToolResult {
-                        llm_content: Some(format!("Reset to {}", target)),
-                        return_display: Some(format!("Reset to {}", target)),
-                        output: format!("Hard reset to {}", target),
-                        error: None,
-                        data: None,
-                    })
-                }
+                "reset_to" => Ok(ToolResult {
+                    llm_content: Some("GitRewind reset_to is disabled: a general tool grant, including bypass permissions, cannot authorize discarding working-tree changes for a specific target. No Git command was run. Ask the user to perform a separately reviewed recovery operation if needed.".to_string()),
+                    return_display: Some("Hard reset disabled".to_string()),
+                    output: String::new(),
+                    error: Some(ToolError {
+                        error_type: "unsafe_reset_disabled".to_string(),
+                        message: "GitRewind reset_to is disabled; working-tree changes were not discarded".to_string(),
+                    }),
+                    data: None,
+                }),
                 "stash" => {
                     let output = run_git(root, &["stash", "push", "-m", "starcode-rewind"])
                         .await
@@ -164,7 +145,7 @@ impl BaseDeclarativeTool for GitRewindTool {
     }
 
     fn description(&self) -> &str {
-        "Git 撤销/回退操作：撤销上次提交、重置到指定引用、管理暂存区。(Git undo/rewind: undo last commit, reset to ref, or manage stash.)"
+        "Git undo operations: soft-reset the last commit or manage stashes. Destructive reset_to is disabled and never runs git reset --hard."
     }
 
     fn kind(&self) -> Kind {
@@ -177,12 +158,8 @@ impl BaseDeclarativeTool for GitRewindTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["undo_last_commit", "reset_to", "stash", "pop"],
-                    "description": "操作类型 (Action type)"
-                },
-                "target": {
-                    "type": "string",
-                    "description": "目标引用，reset_to 时必需 (Target ref, required for reset_to)"
+                    "enum": ["undo_last_commit", "stash", "pop"],
+                    "description": "Git undo action. Destructive reset_to is disabled."
                 }
             },
             "required": ["action"]
@@ -198,5 +175,55 @@ impl BaseDeclarativeTool for GitRewindTool {
             config: self.config.clone(),
             params,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::ConfigParameters;
+    use std::process::Command;
+
+    #[tokio::test]
+    async fn reset_to_never_discards_files_even_when_invocation_is_executed_directly() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(root.join("tracked"), "original").unwrap();
+        git(&["add", "tracked"]);
+        git(&["commit", "-qm", "initial"]);
+        std::fs::write(root.join("tracked"), "important uncommitted work").unwrap();
+        let config = Arc::new(crate::core::config::Config::new(ConfigParameters {
+            target_dir: root.clone(),
+            ..ConfigParameters::default()
+        }));
+        let invocation = GitRewindInvocation {
+            config,
+            params: GitRewindParams {
+                action: "reset_to".to_string(),
+                target: Some("HEAD".to_string()),
+            },
+        };
+        let result = invocation.execute(None, None).await.unwrap();
+        assert_eq!(result.error.unwrap().error_type, "unsafe_reset_disabled");
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked")).unwrap(),
+            "important uncommitted work"
+        );
     }
 }

@@ -181,6 +181,20 @@ pub async fn process_message(
     }
     append_debug_log_line("[AgentRuntime] Streaming session completed");
 
+    // 计划工具在回合中更改总线策略；同步到长寿命 agent 和 UI，避免下一条消息
+    // 仍用旧模式、状态栏也未随之更新。用户在回合中提交的模式切换稍后再应用。
+    if let Some(bus) = agent.runtime_message_bus() {
+        let policy_mode = bus.approval_mode().await;
+        let mode: crate::types::ApprovalMode = policy_mode.into();
+        if mode != agent.get_approval_mode() {
+            agent.set_approval_mode(mode.clone());
+            let _ = context
+                .tx
+                .send(StreamMessage::ApprovalModeChanged { mode })
+                .await;
+        }
+    }
+
     agent.reset_abort();
 
     for note in crate::runtime::hooks::run_after_agent_hooks(context.project_root, message).await {
