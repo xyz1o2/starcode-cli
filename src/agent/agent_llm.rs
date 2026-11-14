@@ -351,6 +351,13 @@ impl Agent {
         let mut last_event_at = Instant::now();
         let mut stall_count = 0u32;
         let mut total_stall_ms = 0u64;
+        // 这些标记不能只靠循环结束后的缓冲区推断：idle timeout、正常 EOF
+        // 和用户中断最后都会走到同一个收尾区，但它们的语义完全不同。
+        // 尤其是 timeout，绝不能落成 Success(0 tool_calls)，否则 agent loop
+        // 会把上游已经断掉的请求当成模型正常完成。
+        let mut stream_idle_timed_out = false;
+        let mut thinking_grace_expired = false;
+        let mut user_aborted = false;
 
         // Get abort token for user-initiated cancellation (Ctrl+C)
         let abort_token = self.abort_token.clone();
@@ -371,6 +378,7 @@ impl Agent {
                         stall_count,
                         total_stall_ms,
                     ));
+                    stream_idle_timed_out = true;
                     break;
                 }
                 // Thinking timeout: independent of event stream
@@ -413,6 +421,7 @@ impl Agent {
                         "[THINKING] abort grace timer fired — forcing stream break (no content/tool_calls after {:.1}s)",
                         thinking_limit_reached_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0),
                     ));
+                    thinking_grace_expired = true;
                     break;
                 }
                 _ = async {
@@ -425,6 +434,7 @@ impl Agent {
                     crate::utils::logging::append_debug_log_line(
                         "[ABORT] User abort signal received during streaming — breaking stream",
                     );
+                    user_aborted = true;
                     break;
                 }
             };
@@ -709,6 +719,50 @@ impl Agent {
                 }
                 current_reasoning.push_str(&tail);
             }
+        }
+
+        // 流被 idle timeout 或 thinking grace 强制打断时，不能继续走下面的
+        // Success 收尾。否则空缓冲会被 process_llm_response 当成正常文本完成，
+        // 主循环随即输出 "Task completed"，而实际上请求已经断了。
+        // 这条路径沿用 provider 流错误的恢复阶梯：保留已经收到的文本，
+        // 让 RecoveryManager 决定重试 / 切 provider / 向用户报错。
+        if stream_idle_timed_out || thinking_grace_expired {
+            if !current_content.is_empty() {
+                let content = std::mem::take(&mut current_content);
+                let reasoning = std::mem::take(&mut current_reasoning);
+                let mut partial = StarMessage::assistant(content);
+                if !reasoning.is_empty() {
+                    partial.reasoning_content = Some(reasoning);
+                }
+                messages.push(partial);
+            }
+            let reason = if stream_idle_timed_out {
+                format!(
+                    "Stream idle timeout after {:.1}s without a provider event",
+                    idle_timeout.as_secs_f64()
+                )
+            } else {
+                format!(
+                    "Thinking timeout after {:.1}s without usable content",
+                    thinking_abort_grace.as_secs_f64()
+                )
+            };
+            return self
+                .handle_llm_error(
+                    reason,
+                    messages,
+                    recovery_manager,
+                    loop_state,
+                    current_turn,
+                    estimated_tokens,
+                    context_window,
+                )
+                .await;
+        }
+
+        // 用户中断是正常的取消，不应进入错误恢复，也不应被记成一次成功完成。
+        if user_aborted {
+            return LlmResult::Error(AgentEvent::Done);
         }
 
         // Detect thinking-loop: model exhausted its thinking budget without
