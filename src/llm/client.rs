@@ -797,8 +797,18 @@ impl StarClient {
         let Ok(config) = std::env::var("STAR_VISION_BRIDGE") else {
             return Ok(());
         };
+        self.prepare_image_messages_with_config(messages, model, &config)
+            .await
+    }
+
+    async fn prepare_image_messages_with_config(
+        &self,
+        messages: &mut [StarMessage],
+        model: &str,
+        config: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let Some(vision_model) =
-            super::vision_bridge::model_for(&config, self.provider_id.as_deref(), model)?
+            super::vision_bridge::model_for(config, self.provider_id.as_deref(), model)?
         else {
             return Ok(());
         };
@@ -812,7 +822,11 @@ impl StarClient {
             digest.update(vision_model.as_bytes());
             digest.update(self.base_url.as_bytes());
             digest.update(serde_json::to_vec(&message)?);
-            let key: String = digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+            let key: String = digest
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
             let cached = self
                 .vision_observations
                 .read()
@@ -1572,6 +1586,89 @@ mod tests {
                 "model {m} must use the Anthropic protocol"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn image_attachment_vision_bridge_sends_bytes_and_caches_observations() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let body = loop {
+                let mut chunk = [0; 4096];
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        break serde_json::from_slice::<serde_json::Value>(
+                            &request[end + 4..end + 4 + length],
+                        )
+                        .unwrap();
+                    }
+                }
+            };
+            let response = r#"{"id":"1","object":"chat.completion","created":1,"model":"vision-model","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"The screenshot contains a red error label."}}]}"#;
+            socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", response.len(), response).as_bytes()).await.unwrap();
+            body
+        });
+        let client = StarClient::new(
+            "local-test-key",
+            Some("text-model".into()),
+            Some(format!("http://{address}/v1")),
+            Some(true),
+            Some("local".into()),
+        );
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let image = crate::types::ImageAttachment::from_bytes(png.get_ref()).unwrap();
+        let mut message = StarMessage::user("What does the red label say?");
+        message.images.push(image.clone());
+        let original = vec![message];
+        let mut prepared = original.clone();
+        let config = r#"{"local/text-model":"vision-model"}"#;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.prepare_image_messages_with_config(&mut prepared, "text-model", config),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let request = server.await.unwrap();
+        assert_eq!(request["model"], "vision-model");
+        let parts = request["messages"][0]["content"].as_array().unwrap();
+        assert!(parts.iter().any(|part| part["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("What does the red label say?"))));
+        assert!(parts.iter().any(
+            |part| part["image_url"]["url"] == format!("data:image/png;base64,{}", image.data)
+        ));
+        assert!(prepared[0].images.is_empty());
+        assert!(prepared[0]
+            .content
+            .as_ref()
+            .unwrap()
+            .contains("red error label"));
+        assert_eq!(original[0].images, vec![image]);
+        let mut again = original;
+        client
+            .prepare_image_messages_with_config(&mut again, "text-model", config)
+            .await
+            .unwrap();
+        assert_eq!(again[0].content, prepared[0].content);
     }
 
     #[tokio::test]

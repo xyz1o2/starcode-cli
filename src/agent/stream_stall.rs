@@ -196,6 +196,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_idle_limit_allows_thinking_but_remains_bounded() {
+        let now = Instant::now();
+        let mut detector = StreamStallDetector {
+            config: StreamStallConfig::default(),
+            last_event_at: now - Duration::from_secs(31),
+            stall_count: 0,
+            total_stall_ms: 0,
+            stream_start_at: now - Duration::from_secs(31),
+        };
+        assert!(!matches!(
+            detector.should_abort(),
+            StallDecision::Abort { .. }
+        ));
+        detector.last_event_at = now - Duration::from_secs(121);
+        assert!(matches!(
+            detector.should_abort(),
+            StallDecision::Abort { .. }
+        ));
+        detector.record_event();
+        assert!(!matches!(
+            detector.should_abort(),
+            StallDecision::Abort { .. }
+        ));
+    }
+
+    #[test]
     fn test_stall_detection() {
         let config = StreamStallConfig {
             enabled: true,

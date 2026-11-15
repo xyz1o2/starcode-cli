@@ -1283,6 +1283,20 @@ pub async fn handle_key_event(
                     crate::ui::state::expand_paste_segments(&raw_input, &state.paste_segments);
 
                 let trimmed_raw = raw_input.trim();
+                let has_images = state.paste_segments.iter().any(|segment| {
+                    matches!(
+                        segment.kind,
+                        crate::ui::state::PasteKind::Image { .. }
+                            | crate::ui::state::PasteKind::AttachedImage(_)
+                    ) && raw_input.contains(&crate::ui::state::format_image_paste_ref(segment.id))
+                });
+                if has_images && trimmed_raw.starts_with(['/', '#', '!']) {
+                    state.push_toast(
+                        &crate::core::i18n::t1("ui.image.send_unavailable"),
+                        crate::ui::state::ToastKind::Warning,
+                    );
+                    return Ok(());
+                }
                 if trimmed_raw == "/model" || trimmed_raw == "/models" {
                     reset_main_textarea(state);
 

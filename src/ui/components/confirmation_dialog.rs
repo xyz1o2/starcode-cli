@@ -1439,7 +1439,12 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("To: worker-1"), "{rendered}");
         assert!(rendered.contains("Summary: Hand off"), "{rendered}");
-        assert!(rendered.contains("报告结果"), "{rendered}");
+        let without_layout_spacing: String =
+            rendered.chars().filter(|ch| !ch.is_whitespace()).collect();
+        assert!(
+            without_layout_spacing.contains("请检查这个很长的用户界面文字并报告结果"),
+            "{rendered}"
+        );
         for choice in ["1. ", "2. ", "3. ", "4. "] {
             assert!(rendered.contains(choice), "{choice} missing: {rendered}");
         }

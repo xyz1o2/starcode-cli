@@ -436,3 +436,47 @@ impl AgentTaskInfo {
 
 /// 模型列表"还在拉"的最长时间。见 [`ChatState::models_loading`]。
 pub const MODELS_LOADING_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+
+    #[test]
+    fn image_attachment_only_reads_explicit_live_references() {
+        let segment = PasteSegment {
+            id: 0,
+            content: "![Image](/missing.png)".into(),
+            line_count: 1,
+            kind: PasteKind::Image {
+                path: "/missing.png".into(),
+                width: 1,
+                height: 1,
+            },
+        };
+        let plain = prepare_user_input("![Image](/missing.png)", &[segment.clone()]).unwrap();
+        assert!(plain.images.is_empty());
+        assert!(prepare_user_input("deleted attachment", &[segment.clone()])
+            .unwrap()
+            .images
+            .is_empty());
+        assert!(prepare_user_input("[Image #0]", &[segment]).is_err());
+    }
+
+    #[test]
+    fn image_attachment_can_be_submitted_without_text_or_source_file() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let image = crate::types::ImageAttachment::from_bytes(png.get_ref()).unwrap();
+        let segment = PasteSegment {
+            id: 0,
+            content: "[Image]".into(),
+            line_count: 1,
+            kind: PasteKind::AttachedImage(image.clone()),
+        };
+        let input = prepare_user_input("[Image #0]", &[segment]).unwrap();
+        assert_eq!(input.images, vec![image]);
+        assert_eq!(input.text, "[Image]");
+    }
+}

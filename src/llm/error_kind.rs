@@ -411,6 +411,19 @@ pub fn retry_after_secs(error: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stream_timeout_is_not_a_connection_failure() {
+        let error = "Stream idle timeout after 30.0s without a provider event";
+        assert_eq!(
+            super::LlmErrorKind::classify(error),
+            super::LlmErrorKind::StreamTimeout
+        );
+        assert!(super::LlmErrorKind::classify(error).is_retryable());
+        let message = super::diagnose(error);
+        assert!(!message.contains("Could not reach"));
+        assert!(message.contains("STAR_STREAM_IDLE_SECS"));
+    }
+
     use super::*;
 
     #[test]

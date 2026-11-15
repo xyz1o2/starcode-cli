@@ -51,6 +51,7 @@ impl StreamRetryPolicy {
         let retry_eligible = matches!(
             kind,
             LlmErrorKind::Network
+                | LlmErrorKind::StreamTimeout
                 | LlmErrorKind::ServerError
                 | LlmErrorKind::Overloaded
                 | LlmErrorKind::RateLimit
@@ -104,6 +105,23 @@ mod tests {
                 StreamFailureDecision::GiveUp(_) => return n,
             }
         }
+    }
+
+    #[test]
+    fn stream_timeout_has_bounded_retries_and_keeps_its_cause() {
+        let error = "Stream idle timeout after 30.0s without a provider event";
+        let mut policy = StreamRetryPolicy::default();
+        assert_eq!(
+            retries_until_give_up(&mut policy, error),
+            retry::max_attempts() as usize
+        );
+        assert!(
+            matches!(policy.decide(error, 0), StreamFailureDecision::GiveUp(text) if text.contains("Stream Timeout") && !text.contains("could not be classified"))
+        );
+        assert!(matches!(
+            StreamRetryPolicy::default().decide(error, 1),
+            StreamFailureDecision::GiveUp(_)
+        ));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 #[tokio::test]
 async fn withdrawal_waits_for_runtime_and_preserves_draft_and_history() {
     let mut state = ChatState::test_fixture();
+    state.chat_history.clear();
     let mut entry = ChatEntry::user("pending requirement");
     entry.group_id = Some("user-message:42".into());
     state.chat_history.push(entry);
@@ -46,6 +47,57 @@ async fn withdrawal_waits_for_runtime_and_preserves_draft_and_history() {
     assert_eq!(state.chat_history[0].content, "still working");
     assert_eq!(state.input, "pending requirement\ndraft");
     assert!(state.steered_user_messages.is_empty());
+}
+
+#[tokio::test]
+async fn image_attachment_survives_steering_withdrawal_and_resubmission() {
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(2, 3)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let image = crate::types::ImageAttachment::from_bytes(png.get_ref()).unwrap();
+    let mut state = ChatState::test_fixture();
+    state.is_processing = true;
+    state.current_model = "vision-test".into();
+    let (tx, mut rx) = mpsc::channel(8);
+    crate::ui::app::logic::enqueue_user_input(
+        &mut state,
+        crate::types::UserInput {
+            text: "look at this".into(),
+            images: vec![image.clone()],
+        },
+        &tx,
+    )
+    .await
+    .unwrap();
+    let AgentRequest::SendUserInput { message_id, input } = rx.recv().await.unwrap() else {
+        panic!("expected attachment request")
+    };
+    assert_eq!(input.images, vec![image.clone()]);
+    assert_eq!(
+        state.chat_history.last().unwrap().images,
+        vec![image.clone()]
+    );
+    state.textarea.insert_str("existing draft");
+    handle_stream_update(
+        &mut state,
+        StreamMessage::MessageWithdrawal {
+            message_id,
+            withdrawn: true,
+        },
+        &tx,
+    )
+    .await
+    .unwrap();
+    let restored =
+        crate::ui::state::prepare_user_input(&state.input, &state.paste_segments).unwrap();
+    assert_eq!(restored.images, vec![image]);
+    assert!(restored.text.contains("look at this"));
+    assert!(restored.text.contains("existing draft"));
+    assert!(!state
+        .chat_history
+        .iter()
+        .any(|entry| entry.entry_type == ChatEntryType::User));
 }
 
 use super::*;

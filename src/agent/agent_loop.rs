@@ -1426,6 +1426,29 @@ mod tests {
     /// 运行中插入的需求必须进对话 —— 这是「会话运行中我输入需求，它不追加进去」
     /// 的正解：它不是排到本轮结束才发，而是下一轮就出现在请求里。
     #[test]
+    fn image_attachment_steering_keeps_image_only_messages() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let image = crate::types::ImageAttachment::from_bytes(png.get_ref()).unwrap();
+        let queue = Arc::new(crate::agent::messaging::AsyncMessageQueue::new());
+        queue
+            .enqueue((
+                1,
+                crate::types::UserInput {
+                    text: String::new(),
+                    images: vec![image.clone()],
+                },
+            ))
+            .unwrap();
+        let mut messages = Vec::new();
+        assert_eq!(drain_steering_messages(Some(&queue), &mut messages), 1);
+        assert_eq!(messages[0].images, vec![image]);
+        assert_eq!(drain_steering_messages(Some(&queue), &mut messages), 0);
+    }
+
+    #[test]
     fn steering_messages_are_injected_into_the_conversation() {
         let queue = Arc::new(crate::agent::messaging::AsyncMessageQueue::new());
         queue

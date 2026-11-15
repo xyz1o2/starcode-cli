@@ -47,6 +47,13 @@ pub fn count_message_tokens(msg: &StarMessage) -> usize {
         tokens += estimate_text_tokens(content);
     }
 
+    // 图像预算按像素保守估算；不能把 Base64 当文本计数，也不能把图片当零成本。
+    // 实际计费随模型变化，最终用 provider 的 usage 校正。
+    for image in &msg.images {
+        let pixels = u64::from(image.width) * u64::from(image.height);
+        tokens += ((pixels + 749) / 750).max(85) as usize;
+    }
+
     // 推理内容 token
     if let Some(reasoning) = &msg.reasoning_content {
         tokens += estimate_text_tokens(reasoning);

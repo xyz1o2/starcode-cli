@@ -409,6 +409,21 @@ pub async fn enqueue_user_input(
         text: user_input,
         images,
     } = input;
+    // 附件消息不可走命令分流或在离线时进入 steering；重试入口同样需要保护。
+    if !images.is_empty()
+        && (state.network_offline
+            || crate::core::offline::is_offline()
+            || state.current_model.trim().is_empty()
+            || user_input.trim_start().starts_with(['/', '#', '!']))
+    {
+        state.textarea.insert_str(&user_input);
+        crate::ui::events::clipboard_paste::restore_image_attachments(state, images);
+        state.push_toast(
+            &i18n::t1("ui.image.send_unavailable"),
+            crate::ui::state::ToastKind::Warning,
+        );
+        return Ok(());
+    }
     // Ensure we jump back to latest messages when user submits input.
     state.auto_follow = true;
 

@@ -1239,7 +1239,7 @@ impl Agent {
     /// 网络 / 5xx / 过载错误的退避重试。
     ///
     /// 返回 `Some(LlmResult::Retry)` 表示已等待完毕、让外层重跑这一轮；
-    /// 返回 `None` 表示次数用尽，交回 `RecoveryManager` 走切 provider 那条路。
+    /// 返回 `None` 表示次数用尽，由调用方保留原始分类并结束重试。
     async fn backoff_retry(
         &mut self,
         err_str: &str,

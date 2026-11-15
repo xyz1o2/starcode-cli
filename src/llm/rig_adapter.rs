@@ -1080,20 +1080,27 @@ mod tests {
     fn image_attachment_reaches_anthropic_and_openai_wire() {
         use base64::Engine;
         let mut bytes = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::new_rgb8(2, 3).write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        image::DynamicImage::new_rgb8(2, 3)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
         let attachment = crate::types::ImageAttachment::from_bytes(bytes.get_ref()).unwrap();
         let mut message = StarMessage::user("Describe this screenshot");
         message.images.push(attachment.clone());
-        let restored: StarMessage = serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
+        let restored: StarMessage =
+            serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
         let request = || {
             let mut request = CompletionRequest::new(convert_one_message(&restored));
             request.max_tokens = Some(64);
             request
         };
-        let anthropic = anthropic::AnthropicConfig::new("test-key").completion("vision-model")
-            .encode(request(), rig_core::wire::Mode::Unary).unwrap();
-        let openai = openai::OpenAIConfig::new("test-key").chat("vision-model")
-            .encode(request(), rig_core::wire::Mode::Unary).unwrap();
+        let anthropic = anthropic::AnthropicConfig::new("test-key")
+            .completion("vision-model")
+            .encode(request(), rig_core::wire::Mode::Unary)
+            .unwrap();
+        let openai = openai::OpenAIConfig::new("test-key")
+            .chat("vision-model")
+            .encode(request(), rig_core::wire::Mode::Unary)
+            .unwrap();
         let json_body = |body: &rig_core::wire::Body| -> serde_json::Value {
             match body {
                 rig_core::wire::Body::Bytes(bytes) => serde_json::from_slice(bytes).unwrap(),
@@ -1102,11 +1109,29 @@ mod tests {
         };
         let a = json_body(anthropic.request.body());
         let o = json_body(openai.request.body());
-        let a_image = a["messages"][0]["content"].as_array().unwrap().iter().find(|part| part["type"] == "image").unwrap();
+        let a_image = a["messages"][0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|part| part["type"] == "image")
+            .unwrap();
         assert_eq!(a_image["source"]["media_type"], "image/png");
-        assert_eq!(base64::engine::general_purpose::STANDARD.decode(a_image["source"]["data"].as_str().unwrap()).unwrap(), bytes.into_inner());
-        let o_image = o["messages"][0]["content"].as_array().unwrap().iter().find(|part| part["type"] == "image_url").unwrap();
-        assert_eq!(o_image["image_url"]["url"], format!("data:image/png;base64,{}", attachment.data));
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(a_image["source"]["data"].as_str().unwrap())
+                .unwrap(),
+            bytes.into_inner()
+        );
+        let o_image = o["messages"][0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|part| part["type"] == "image_url")
+            .unwrap();
+        assert_eq!(
+            o_image["image_url"]["url"],
+            format!("data:image/png;base64,{}", attachment.data)
+        );
     }
 
     /// 端到端锁死 Anthropic 缓存断点：`anthropic_caching_wire` 开关 + rig 的
