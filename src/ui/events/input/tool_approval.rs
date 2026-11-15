@@ -101,7 +101,11 @@ pub(super) async fn handle_tool_approval(
                         state.show_permission_debug = false;
                         state.clear_pending_confirmation();
                     }
-                    KeyCode::Char(ch) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                    KeyCode::Char(ch)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
                         state.pending_confirmation_feedback.push(ch);
                         if let Some(idx) = state.pending_confirmation_entry_idx {
                             state.rendered_cache.remove(&idx);

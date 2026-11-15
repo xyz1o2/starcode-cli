@@ -182,10 +182,18 @@ fn message_confirmation_details(
     let target = if args.get("message_type").and_then(|v| v.as_str()) == Some("broadcast") {
         "*"
     } else {
-        args.get("target_agent").and_then(|v| v.as_str()).unwrap_or("<missing>")
+        args.get("target_agent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<missing>")
     };
-    let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("<missing>");
-    let message = args.get("message").and_then(|v| v.as_str()).unwrap_or("<missing>");
+    let summary = args
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<missing>");
+    let message = args
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<missing>");
     details.prompt = format!(
         "{}\nTo: {}\nSummary: {}\nMessage:\n{}",
         details.prompt, target, summary, message

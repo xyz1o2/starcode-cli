@@ -28,6 +28,8 @@ pub enum LlmErrorKind {
     ServerError,
     /// 连接失败 / 超时 / DNS / 连接被重置 —— 本地或链路问题。重试有效。
     Network,
+    /// 已发起流请求，但在等待窗口内没有收到 provider 事件。
+    StreamTimeout,
     /// 上下文超限 —— 靠压缩而不是重试解决。
     ContextWindow,
     /// 400 / 422 —— 请求本身非法（工具 schema、参数越界等）。重试无意义。
@@ -156,6 +158,10 @@ impl LlmErrorKind {
             return Self::ServerError;
         }
 
+        if lower.contains("stream idle timeout") {
+            return Self::StreamTimeout;
+        }
+
         // ── 网络层：放在状态码之后，避免吞掉带 "timeout" 字样的 504 ──
         if lower.contains("timed out")
             || lower.contains("timeout")
@@ -190,7 +196,12 @@ impl LlmErrorKind {
     pub fn is_retryable(self) -> bool {
         matches!(
             self,
-            Self::RateLimit | Self::Overloaded | Self::ServerError | Self::Network | Self::Unknown
+            Self::RateLimit
+                | Self::Overloaded
+                | Self::ServerError
+                | Self::Network
+                | Self::StreamTimeout
+                | Self::Unknown
         )
     }
 
@@ -208,6 +219,7 @@ impl LlmErrorKind {
             Self::Overloaded => "Provider Overloaded",
             Self::ServerError => "Provider Error",
             Self::Network => "Network Error",
+            Self::StreamTimeout => "Stream Timeout",
             Self::ContextWindow => "Context Overflow",
             Self::BadRequest => "Bad Request",
             Self::Unknown => "Error",
@@ -236,6 +248,9 @@ impl LlmErrorKind {
             Self::ServerError => {
                 Some("The provider returned a server error. The agent retries with backoff.")
             }
+            Self::StreamTimeout => Some(
+                "No provider event arrived within the stream idle limit. The provider may be thinking or the gateway may be buffering. Adjust STAR_STREAM_IDLE_SECS or retry with another model.",
+            ),
             Self::Network => Some(
                 "Could not reach the provider. Check connectivity/proxy \
                  (HTTPS_PROXY) and STAR_BASE_URL.",

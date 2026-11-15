@@ -439,19 +439,17 @@ pub fn build_confirmation_card_block(
         }
         _ => {
             if let ConfirmationDetails::Generic { title, prompt } = &confirmation.details {
-                for wrapped in crate::ui::utils::text::wrap_detail(
-                    title,
-                    wrap_width.saturating_sub(2).max(1),
-                ) {
+                for wrapped in
+                    crate::ui::utils::text::wrap_detail(title, wrap_width.saturating_sub(2).max(1))
+                {
                     lines.push(Line::from(Span::styled(
                         format!("  {}", wrapped),
                         Style::default().fg(theme.foreground),
                     )));
                 }
-                for wrapped in crate::ui::utils::text::wrap_detail(
-                    prompt,
-                    wrap_width.saturating_sub(2).max(1),
-                ) {
+                for wrapped in
+                    crate::ui::utils::text::wrap_detail(prompt, wrap_width.saturating_sub(2).max(1))
+                {
                     lines.push(Line::from(Span::styled(
                         format!("  {}", wrapped),
                         Style::default().fg(palette.secondary),
@@ -1425,10 +1423,20 @@ mod tests {
             },
         );
         let lines = build_confirmation_card_block(
-            &confirmation, 20, 1, false, false, false, "", &test_theme(),
+            &confirmation,
+            20,
+            1,
+            false,
+            false,
+            false,
+            "",
+            &test_theme(),
         );
-        let rendered = lines.iter().flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref()).collect::<String>();
+        let rendered = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
         assert!(rendered.contains("To: worker-1"), "{rendered}");
         assert!(rendered.contains("Summary: Hand off"), "{rendered}");
         assert!(rendered.contains("报告结果"), "{rendered}");
@@ -1438,7 +1446,9 @@ mod tests {
         for line in lines.iter().filter(|line| {
             line.spans.iter().any(|span| {
                 let text = span.content.as_ref();
-                text.contains("To:") || text.contains("Summary:") || text.contains("Message:")
+                text.contains("To:")
+                    || text.contains("Summary:")
+                    || text.contains("Message:")
                     || text.contains("报告结果")
             })
         }) {

@@ -328,6 +328,7 @@ Summary:"#,
             tool_calls: message.tool_calls.clone(),
             reasoning_content: message.reasoning_content.clone(),
             cache_control: message.cache_control.clone(),
+            images: message.images.clone(),
         }
     }
 

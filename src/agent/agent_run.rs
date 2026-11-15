@@ -106,9 +106,22 @@ pub struct RunOutcome {
 }
 
 impl Agent {
-    pub fn run_stream<'a>(
-        &'a mut self,
+    pub fn run_stream(
+        &mut self,
         user_input: String,
+    ) -> Pin<
+        Box<
+            dyn Stream<Item = Result<AgentEvent, Box<dyn std::error::Error + Send + Sync>>>
+                + Send
+                + '_,
+        >,
+    > {
+        self.run_input_stream(user_input.into())
+    }
+
+    pub fn run_input_stream<'a>(
+        &'a mut self,
+        input: crate::types::UserInput,
     ) -> Pin<
         Box<
             dyn Stream<Item = Result<AgentEvent, Box<dyn std::error::Error + Send + Sync>>>
@@ -116,6 +129,8 @@ impl Agent {
                 + 'a,
         >,
     > {
+        let user_input = input.text;
+        let images = input.images;
         Box::pin(async_stream::try_stream! {
             // 冻结 tool_search 粘滞集合：本条用户消息的所有轮次共享同一份快照，
             // 中途新发现的工具要到下一条消息才进入 tools 数组，避免击穿 prompt 缓存前缀。
@@ -440,6 +455,9 @@ impl Agent {
             }
             // 紧跟在另一条 user 消息后面时合并成一条（见 `push_or_merge_user_message`）。
             push_or_merge_user_message(&mut messages, turn_message);
+            if let Some(message) = messages.last_mut() {
+                message.images.extend(images);
+            }
 
             // 把本轮上下文写进共享状态，供 auto 档位的 LLM 分类器读取。
             //

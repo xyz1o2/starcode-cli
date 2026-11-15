@@ -183,8 +183,10 @@ fn reconstruct_legacy_agent_messages(history: &[ChatEntry]) -> Vec<StarMessage> 
         }
 
         match entry.entry_type {
-            ChatEntryType::User if !entry.content.trim().is_empty() => {
-                messages.push(StarMessage::user(entry.content.clone()));
+            ChatEntryType::User if !entry.content.trim().is_empty() || !entry.images.is_empty() => {
+                let mut message = StarMessage::user(entry.content.clone());
+                message.images = entry.images.clone();
+                messages.push(message);
             }
             ChatEntryType::User => {}
             ChatEntryType::Assistant => {

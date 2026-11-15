@@ -348,6 +348,10 @@ pub enum AgentRequest {
         message_id: u64,
         message: String,
     },
+    SendUserInput {
+        message_id: u64,
+        input: crate::types::UserInput,
+    },
     /// 撤回尚在 steering 队列里的消息；已进入模型请求的消息不可撤回。
     WithdrawMessage {
         message_id: u64,

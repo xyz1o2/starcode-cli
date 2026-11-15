@@ -367,16 +367,25 @@ mod tests {
             );
         }
         assert_eq!(
-            binding_for(&key(KeyCode::Char('x'), KeyModifiers::CONTROL | KeyModifiers::ALT)),
+            binding_for(&key(
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
             None
         );
     }
 
     #[test]
     fn withdrawal_does_not_override_alt_backspace_word_deletion() {
-        assert_eq!(binding_for(&key(KeyCode::Backspace, KeyModifiers::ALT)), None);
         assert_eq!(
-            binding_for(&key(KeyCode::Backspace, KeyModifiers::ALT | KeyModifiers::SHIFT)),
+            binding_for(&key(KeyCode::Backspace, KeyModifiers::ALT)),
+            None
+        );
+        assert_eq!(
+            binding_for(&key(
+                KeyCode::Backspace,
+                KeyModifiers::ALT | KeyModifiers::SHIFT
+            )),
             Some(GlobalBinding::WithdrawMessage)
         );
     }

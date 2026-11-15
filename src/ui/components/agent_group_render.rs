@@ -250,7 +250,7 @@ fn render_agent_progress_lines(
                 format!("{} — {}", status, reason)
             };
             (text, Color::Red)
-        },
+        }
         // 用户拒绝授权（对标 renderToolUseRejectedMessage）
         AgentTaskStatus::Rejected => {
             let reason = stat.last_tool_info.as_deref().unwrap_or("");

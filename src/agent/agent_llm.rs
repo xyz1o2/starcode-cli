@@ -335,7 +335,7 @@ impl Agent {
         );
         // 流式停滞检测（类似 Claude Code 的 stall detection）：
         // - stall_threshold: 10s 无事件视为一次 stall
-        // - idle_timeout: 30s 完全无响应则终止流
+        // - idle_timeout: 120s 无事件则终止；保留环境变量覆盖，容纳推理模型首字等待
         let stall_threshold = std::time::Duration::from_secs(
             std::env::var("STAR_STREAM_STALL_SECS")
                 .ok()
@@ -343,10 +343,7 @@ impl Agent {
                 .unwrap_or(10),
         );
         let idle_timeout = std::time::Duration::from_secs(
-            std::env::var("STAR_STREAM_IDLE_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(30),
+            crate::agent::stream_stall::StreamStallConfig::from_env().idle_timeout_secs,
         );
         let mut last_event_at = Instant::now();
         let mut stall_count = 0u32;
@@ -903,18 +900,19 @@ impl Agent {
         if matches!(
             kind,
             LlmErrorKind::Network
+                | LlmErrorKind::StreamTimeout
                 | LlmErrorKind::ServerError
                 | LlmErrorKind::Overloaded
                 | LlmErrorKind::Unknown
         ) {
-            // `None` 表示次数用尽：不返回，落到下面的 RecoveryManager，
-            // 让它决定切 provider 还是收尾。
+            // 退避预算用尽后保留已知错误原因，不再落入未知断流的第二套重试。
             if let Some(result) = self
                 .backoff_retry(&err_str, kind, recovery_manager, current_turn)
                 .await
             {
                 return result;
             }
+            return LlmResult::Error(AgentEvent::Error(diagnose(&err_str)));
         }
 
         let agent_error = match kind {

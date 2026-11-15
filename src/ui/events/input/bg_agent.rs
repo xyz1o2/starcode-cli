@@ -174,8 +174,11 @@ pub(crate) async fn retry_last_user_message(
         state.last_turn_failed = false;
         return Ok(false);
     };
-    let msg = last_user.content.clone();
-    crate::ui::app::logic::enqueue_user_message(state, msg, agent_tx).await?;
+    let input = crate::types::UserInput {
+        text: last_user.content.clone(),
+        images: last_user.images.clone(),
+    };
+    crate::ui::app::logic::enqueue_user_input(state, input, agent_tx).await?;
     Ok(true)
 }
 

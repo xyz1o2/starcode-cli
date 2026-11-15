@@ -56,14 +56,19 @@ pub(super) fn handle_agent_task_update(state: &mut ChatState, args: AgentTaskUpd
 
     let entry_idx = match prior.map(|i| i.entry_idx) {
         Some(idx)
-            if state.chat_history.get(idx).is_some_and(|entry| match entry.entry_type {
-                ChatEntryType::AgentTask => entry.agent_task_id.as_deref() == Some(args.task_id.as_str()),
-                ChatEntryType::AgentGroup => entry
-                    .agent_task_ids
-                    .as_ref()
-                    .is_some_and(|ids| ids.contains(&args.task_id)),
-                _ => false,
-            }) =>
+            if state
+                .chat_history
+                .get(idx)
+                .is_some_and(|entry| match entry.entry_type {
+                    ChatEntryType::AgentTask => {
+                        entry.agent_task_id.as_deref() == Some(args.task_id.as_str())
+                    }
+                    ChatEntryType::AgentGroup => entry
+                        .agent_task_ids
+                        .as_ref()
+                        .is_some_and(|ids| ids.contains(&args.task_id)),
+                    _ => false,
+                }) =>
         {
             idx
         }
@@ -71,7 +76,9 @@ pub(super) fn handle_agent_task_update(state: &mut ChatState, args: AgentTaskUpd
             .chat_history
             .iter()
             .position(|entry| match entry.entry_type {
-                ChatEntryType::AgentTask => entry.agent_task_id.as_deref() == Some(args.task_id.as_str()),
+                ChatEntryType::AgentTask => {
+                    entry.agent_task_id.as_deref() == Some(args.task_id.as_str())
+                }
                 ChatEntryType::AgentGroup => entry
                     .agent_task_ids
                     .as_ref()

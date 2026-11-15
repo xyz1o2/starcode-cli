@@ -128,6 +128,8 @@ pub struct StarClient {
     #[zeroize(skip)]
     /// Runtime detection of reasoning support: None = not detected yet, Some(true/false) = detected
     detected_thinking_support: Arc<RwLock<Option<bool>>>,
+    #[zeroize(skip)]
+    vision_observations: Arc<RwLock<std::collections::HashMap<String, String>>>,
 }
 
 fn infer_provider(
@@ -417,6 +419,7 @@ impl Clone for StarClient {
             api_key_source: self.api_key_source.clone(),
             api_key_preview: self.api_key_preview.clone(),
             detected_thinking_support: self.detected_thinking_support.clone(),
+            vision_observations: self.vision_observations.clone(),
             provider_id: self.provider_id.clone(),
         }
     }
@@ -493,6 +496,7 @@ impl StarClient {
             api_key_source: resolved_api_key.source,
             api_key_preview: resolved_api_key.preview,
             detected_thinking_support: Arc::new(RwLock::new(None)),
+            vision_observations: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -781,6 +785,72 @@ impl StarClient {
         ))
     }
 
+    /// 仅处理显式映射的纯文本模型；缓存仅存本 client 的观察文字，不保存图片日志。
+    async fn prepare_image_messages(
+        &self,
+        messages: &mut [StarMessage],
+        model: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if !messages.iter().any(|message| !message.images.is_empty()) {
+            return Ok(());
+        }
+        let Ok(config) = std::env::var("STAR_VISION_BRIDGE") else {
+            return Ok(());
+        };
+        let Some(vision_model) =
+            super::vision_bridge::model_for(&config, self.provider_id.as_deref(), model)?
+        else {
+            return Ok(());
+        };
+        let vision = self.client_for_model(&vision_model);
+        for message in messages
+            .iter_mut()
+            .filter(|message| !message.images.is_empty())
+        {
+            use sha2::{Digest, Sha256};
+            let mut digest = Sha256::new();
+            digest.update(vision_model.as_bytes());
+            digest.update(self.base_url.as_bytes());
+            digest.update(serde_json::to_vec(&message)?);
+            let key: String = digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+            let cached = self
+                .vision_observations
+                .read()
+                .ok()
+                .and_then(|cache| cache.get(&key).cloned());
+            let observation = if let Some(cached) = cached {
+                cached
+            } else {
+                let response = tokio::time::timeout(
+                    std::time::Duration::from_secs(120),
+                    vision.chat_completion(
+                        vec![super::vision_bridge::observation_request(message)],
+                        None,
+                    ),
+                )
+                .await
+                .map_err(|_| {
+                    "Vision helper timed out after 120 seconds; image attachments remain in history"
+                })??;
+                let text = response.choices.first().and_then(|choice| choice.message.content.as_ref())
+                    .filter(|text| !text.trim().is_empty())
+                    .ok_or("Vision helper returned no description; image attachments remain in history")?.clone();
+                if let Ok(mut cache) = self.vision_observations.write() {
+                    if cache.len() >= 32 {
+                        cache.clear();
+                    }
+                    cache.insert(key, text.clone());
+                }
+                text
+            };
+            let content = message.content.get_or_insert_with(String::new);
+            content.push_str("\n\n[Image observations from the configured vision model; these are a description, not direct image access]\n");
+            content.push_str(&observation);
+            message.images.clear();
+        }
+        Ok(())
+    }
+
     pub async fn chat(
         &self,
         mut messages: Vec<StarMessage>,
@@ -788,6 +858,8 @@ impl StarClient {
         model: Option<String>,
         _search_options: Option<()>,
     ) -> Result<StarResponse, Box<dyn std::error::Error + Send + Sync>> {
+        self.prepare_image_messages(&mut messages, model.as_deref().unwrap_or(&self.model))
+            .await?;
         // `model` 覆盖：**这次调用用别的模型**。
         //
         // 以前这个参数被写成 `_model` 直接忽略，于是每次调用都走 `self.model`。
@@ -894,6 +966,8 @@ impl StarClient {
         >,
         Box<dyn std::error::Error + Send + Sync>,
     > {
+        self.prepare_image_messages(&mut messages, &self.model)
+            .await?;
         let pipeline = super::message_pipeline::pipeline_for(
             self.provider_env_id,
             &self.model,

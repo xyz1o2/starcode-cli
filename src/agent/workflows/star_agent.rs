@@ -58,7 +58,7 @@ pub struct StarAgent {
     approval_mode_lock: Arc<Mutex<ApprovalMode>>,
     fallback_mcp_manager: Option<Arc<crate::core::mcp::MCPManager>>,
     is_mcp_initialized: Arc<AtomicBool>,
-    steering_queue: Option<Arc<AsyncMessageQueue<(u64, String)>>>,
+    steering_queue: Option<Arc<AsyncMessageQueue<(u64, crate::types::UserInput)>>>,
     steering_signal: Option<Arc<Notify>>,
     /// 最近一次被用户请求的值；即使 provider 将实际容量降级，也不能改写它。
     requested_runtime_settings: RequestedRuntimeSettings,
@@ -949,6 +949,23 @@ impl StarAgent {
         >,
         Box<dyn std::error::Error + Send + Sync>,
     > {
+        self.process_user_input_stream(prompt.to_string().into())
+            .await
+    }
+
+    pub async fn process_user_input_stream(
+        &mut self,
+        input: crate::types::UserInput,
+    ) -> Result<
+        Pin<
+            Box<
+                dyn Stream<Item = Result<StreamingChunk, Box<dyn std::error::Error + Send + Sync>>>
+                    + Send
+                    + '_,
+            >,
+        >,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Create a direct-to-UI channel so that thinking / text deltas
         // emitted during the LLM stream reach the UI in real-time, without
         // waiting for the agent loop to finish.
@@ -962,7 +979,7 @@ impl StarAgent {
             crate::agent::subagent::progress::set_ui_sink(stream_tx);
         }
 
-        let event_stream = self.inner.run_stream(prompt.to_string());
+        let event_stream = self.inner.run_input_stream(input);
 
         // Branch A: AgentEvent → StreamingChunk (tool calls, final messages, etc.)
         // Branch B is always active (we just set stream_tx above), so skip
@@ -1329,7 +1346,10 @@ impl StarAgent {
         mode
     }
 
-    pub fn set_steering_queue(&mut self, queue: Arc<AsyncMessageQueue<(u64, String)>>) {
+    pub fn set_steering_queue(
+        &mut self,
+        queue: Arc<AsyncMessageQueue<(u64, crate::types::UserInput)>>,
+    ) {
         self.steering_queue = Some(queue.clone());
         // 真正跑工具循环的是 `inner`（每条用户消息再派生一个 fresh Agent），
         // 队列必须一路传下去，否则运行中插入的需求没人消费。

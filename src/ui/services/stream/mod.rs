@@ -454,22 +454,39 @@ pub async fn handle_stream_update(
                 }),
             );
         }
-        StreamMessage::MessageWithdrawal { message_id, withdrawn } => {
-            if let Some(pos) = state.steered_user_messages.iter().position(|(id, _)| *id == message_id) {
+        StreamMessage::MessageWithdrawal {
+            message_id,
+            withdrawn,
+        } => {
+            if let Some(pos) = state
+                .steered_user_messages
+                .iter()
+                .position(|(id, _)| *id == message_id)
+            {
                 let (_, raw) = state.steered_user_messages.remove(pos);
                 if withdrawn {
                     let tag = format!("user-message:{message_id}");
                     if let Some(idx) = state.chat_history.iter().position(|entry| {
-                        entry.entry_type == ChatEntryType::User && entry.group_id.as_deref() == Some(tag.as_str())
+                        entry.entry_type == ChatEntryType::User
+                            && entry.group_id.as_deref() == Some(tag.as_str())
                     }) {
+                        let images = state.chat_history[idx].images.clone();
                         remove_chat_entry_and_shift_indices(state, idx);
+                        crate::ui::events::clipboard_paste::restore_image_attachments(
+                            state, images,
+                        );
                     }
                     state.textarea.move_cursor(tui_textarea::CursorMove::Top);
                     state.textarea.move_cursor(tui_textarea::CursorMove::Head);
                     state.textarea.insert_str(&format!("{raw}\n"));
                     crate::ui::events::clipboard_paste::sync_input_from_textarea(state);
                     crate::ui::services::suggestions::on_input_changed(state);
-                    append_transcript_event(state, "user_withdrawn", Some(message_id), serde_json::json!({}));
+                    append_transcript_event(
+                        state,
+                        "user_withdrawn",
+                        Some(message_id),
+                        serde_json::json!({}),
+                    );
                 }
             }
             let message = if withdrawn {
@@ -483,7 +500,9 @@ pub async fn handle_stream_update(
             let is_fresh_user_turn = matches!(&kind, StreamStartKind::UserTurn { .. })
                 && !state.response_models.contains_key(&message_id);
             if let StreamStartKind::UserTurn { model } = &kind {
-                state.steered_user_messages.retain(|(id, _)| *id != message_id);
+                state
+                    .steered_user_messages
+                    .retain(|(id, _)| *id != message_id);
                 state
                     .response_models
                     .entry(message_id)

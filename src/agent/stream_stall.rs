@@ -18,7 +18,7 @@ impl Default for StreamStallConfig {
         Self {
             enabled: true,
             stall_threshold_secs: 10,
-            idle_timeout_secs: 30,
+            idle_timeout_secs: 120,
             max_stall_count: 3,
         }
     }
@@ -39,7 +39,8 @@ impl StreamStallConfig {
         let idle_timeout_secs = std::env::var("STAR_STREAM_IDLE_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(30);
+            .filter(|seconds| *seconds > 0)
+            .unwrap_or(120);
 
         let max_stall_count = std::env::var("STAR_STREAM_MAX_STALLS")
             .ok()

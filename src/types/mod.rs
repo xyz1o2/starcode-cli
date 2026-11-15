@@ -2,7 +2,9 @@
 ///
 /// 对标claude-code-main的src/types/
 pub mod command;
+pub mod image_attachment;
 pub mod message;
+pub use image_attachment::{ImageAttachment, UserInput};
 pub mod permissions;
 pub mod tools;
 
@@ -115,6 +117,8 @@ pub struct ChatEntry {
     #[serde(rename = "type")]
     pub entry_type: ChatEntryType,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
     pub timestamp: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<StarToolCall>>,
@@ -225,6 +229,7 @@ impl ChatEntry {
         Self {
             entry_type,
             content,
+            images: Vec::new(),
             timestamp: Utc::now(),
             tool_calls: None,
             tool_call: None,
@@ -480,6 +485,8 @@ impl ChatEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StarMessage {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
     pub role: String,
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -512,6 +519,7 @@ impl StarMessage {
             tool_calls: None,
             tool_call_id: None,
             cache_control: None,
+            images: Vec::new(),
         }
     }
 
@@ -566,6 +574,7 @@ impl StarMessage {
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             cache_control: None,
+            images: Vec::new(),
         }
     }
 }

@@ -223,6 +223,16 @@ fn build_paste_lines(state: &ChatState) -> Vec<Line<'static>> {
                             Span::styled("]".to_string(), Style::default().fg(Color::Magenta)),
                         ])
                     }
+                    PasteKind::AttachedImage(image) => Line::from(vec![
+                        prefix,
+                        Span::styled(
+                            format!(
+                                "[Image {}×{} · {}]",
+                                image.width, image.height, image.media_type
+                            ),
+                            Style::default().fg(Color::Magenta),
+                        ),
+                    ]),
                     PasteKind::Files(paths) => {
                         let names: Vec<String> = paths
                             .iter()

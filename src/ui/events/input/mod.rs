@@ -633,13 +633,14 @@ pub async fn dispatch_global_binding(
                 })
             });
             if let Some((message_id, _)) = state.steered_user_messages.last() {
-                agent_tx.send(AgentRequest::WithdrawMessage { message_id: *message_id }).await?;
+                agent_tx
+                    .send(AgentRequest::WithdrawMessage {
+                        message_id: *message_id,
+                    })
+                    .await?;
             } else {
                 let message = crate::core::i18n::t1("ui.withdraw.unavailable");
-                state.push_toast(
-                    &message,
-                    crate::ui::state::store::ToastKind::Info,
-                );
+                state.push_toast(&message, crate::ui::state::store::ToastKind::Info);
             }
             Ok(true)
         }
@@ -1346,12 +1347,34 @@ pub async fn handle_key_event(
                 }
 
                 if !input.trim().is_empty() {
+                    let prepared = match crate::ui::state::prepare_user_input(
+                        &raw_input,
+                        &state.paste_segments,
+                    ) {
+                        Ok(input) => input,
+                        Err(error) => {
+                            state.push_toast(&error, crate::ui::state::store::ToastKind::Error);
+                            return Ok(());
+                        }
+                    };
+                    if !prepared.images.is_empty()
+                        && (state.network_offline
+                            || crate::core::offline::is_offline()
+                            || state.current_model.trim().is_empty()
+                            || prepared.text.trim_start().starts_with(['/', '#', '!']))
+                    {
+                        state.push_toast(
+                            &crate::core::i18n::t1("ui.image.send_unavailable"),
+                            crate::ui::state::store::ToastKind::Warning,
+                        );
+                        return Ok(());
+                    }
                     // Important: Clear textarea BEFORE enqueueing message to prevent UI glitch
                     // where Enter keeps triggering and input remains.
                     reset_main_textarea(state);
                     crate::ui::services::suggestions::on_input_changed(state);
 
-                    crate::ui::app::logic::enqueue_user_message(state, input, agent_tx).await?;
+                    crate::ui::app::logic::enqueue_user_input(state, prepared, agent_tx).await?;
                 } else {
                     // Clear empty input if any (e.g. just newlines)
                     reset_main_textarea(state);
@@ -1845,8 +1868,10 @@ async fn handle_paste(
             if let Some((path, width, height)) = save_clipboard_image() {
                 return Ok(ClipboardPayload::Image(path, width, height));
             }
-            Clipboard::new().and_then(|mut clipboard| clipboard.get_text())
-                .map(ClipboardPayload::Text).map_err(|error| error.to_string())
+            Clipboard::new()
+                .and_then(|mut clipboard| clipboard.get_text())
+                .map(ClipboardPayload::Text)
+                .map_err(|error| error.to_string())
         });
         let value = match timeout(Duration::from_secs(15), read).await {
             Ok(Ok(value)) => value,
@@ -2022,7 +2047,9 @@ mod tests {
         let mut state = ChatState::test_fixture();
         insert_image_paste_block(&mut state, "/tmp/draft-image.png".into(), 10, 10);
         sync_input_from_textarea(&mut state);
-        state.pending_user_messages.push_back("queued requirement".into());
+        state
+            .pending_user_messages
+            .push_back("queued requirement".into());
 
         assert!(restore_queued_messages_to_input(&mut state));
         assert!(state.input.starts_with("queued requirement\n"));

@@ -122,16 +122,16 @@ fn release_stale_tool_results_in(messages: &mut Vec<StarMessage>) -> (usize, usi
 /// 队列里的每条消息只会被取走一次（`try_next`），所以同一条不会既被当前这轮
 /// 消费、又被下一轮重复消费。
 fn drain_steering_messages(
-    queue: Option<&Arc<crate::agent::messaging::AsyncMessageQueue<(u64, String)>>>,
+    queue: Option<&Arc<crate::agent::messaging::AsyncMessageQueue<(u64, crate::types::UserInput)>>>,
     messages: &mut Vec<StarMessage>,
 ) -> usize {
     let Some(queue) = queue else {
         return 0;
     };
     let mut injected = 0usize;
-    while let Some((steer_id, steer_text)) = queue.try_next() {
-        let steer_text = steer_text.trim();
-        if steer_text.is_empty() {
+    while let Some((steer_id, input)) = queue.try_next() {
+        let steer_text = input.text.trim();
+        if steer_text.is_empty() && input.images.is_empty() {
             continue;
         }
         crate::utils::logging::append_debug_log_line(&format!(
@@ -139,7 +139,9 @@ fn drain_steering_messages(
             steer_id,
             steer_text.chars().take(120).collect::<String>()
         ));
-        messages.push(StarMessage::user(steer_text.to_string()));
+        let mut message = StarMessage::user(steer_text.to_string());
+        message.images = input.images;
+        messages.push(message);
         injected += 1;
     }
     injected
@@ -1426,9 +1428,13 @@ mod tests {
     #[test]
     fn steering_messages_are_injected_into_the_conversation() {
         let queue = Arc::new(crate::agent::messaging::AsyncMessageQueue::new());
-        queue.enqueue((1, "顺便把测试也改了".to_string())).unwrap();
-        queue.enqueue((2, "   ".to_string())).unwrap();
-        queue.enqueue((3, "还有 README".to_string())).unwrap();
+        queue
+            .enqueue((1, "顺便把测试也改了".to_string().into()))
+            .unwrap();
+        queue.enqueue((2, "   ".to_string().into())).unwrap();
+        queue
+            .enqueue((3, "还有 README".to_string().into()))
+            .unwrap();
 
         let mut messages = vec![StarMessage::user("最初的需求".to_string())];
         let injected = drain_steering_messages(Some(&queue), &mut messages);
@@ -1444,7 +1450,7 @@ mod tests {
     #[test]
     fn steering_messages_are_consumed_only_once() {
         let queue = Arc::new(crate::agent::messaging::AsyncMessageQueue::new());
-        queue.enqueue((1, "只应插一次".to_string())).unwrap();
+        queue.enqueue((1, "只应插一次".to_string().into())).unwrap();
 
         let mut first = Vec::new();
         assert_eq!(drain_steering_messages(Some(&queue), &mut first), 1);

@@ -264,6 +264,7 @@ fn is_plain_requirement(input: &str) -> bool {
 async fn steer_user_message(
     state: &mut ChatState,
     user_input: String,
+    images: Vec<crate::types::ImageAttachment>,
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // `@file` 引用与普通发送走同一套处理：插进对话的必须是展开后的正文。
@@ -302,7 +303,9 @@ async fn steer_user_message(
     }
 
     // 用户输入照常显示在聊天区。
-    state.chat_history.push(ChatEntry::user(user_input.clone()));
+    let mut entry = ChatEntry::user(user_input.clone());
+    entry.images = images.clone();
+    state.chat_history.push(entry);
 
     // 助手那条要么被切走（后半另起一条继续流），要么本来就不存在/是悬空的 ——
     // 两种情况都得把流的落点挪到用户消息**之后**，否则下一段助手内容会被追加
@@ -333,12 +336,17 @@ async fn steer_user_message(
     let message_id = state.next_message_id;
     state.next_message_id += 1;
 
-    if let Some(entry) = state.chat_history.iter_mut().rev().find(|entry| {
-        entry.entry_type == ChatEntryType::User && entry.content == user_input
-    }) {
+    if let Some(entry) = state
+        .chat_history
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.entry_type == ChatEntryType::User && entry.content == user_input)
+    {
         entry.group_id = Some(format!("user-message:{message_id}"));
     }
-    state.steered_user_messages.push((message_id, user_input.clone()));
+    state
+        .steered_user_messages
+        .push((message_id, user_input.clone()));
 
     append_transcript_event(
         state,
@@ -355,12 +363,29 @@ async fn steer_user_message(
     ));
 
     // 发出：runtime 在回合进行中会把它收进 steering 队列，agent 在下一轮开始时消费。
-    let _ = agent_tx
-        .send(AgentRequest::SendMessage {
+    let request = if images.is_empty() {
+        AgentRequest::SendMessage {
             message_id,
             message: final_message,
-        })
-        .await;
+        }
+    } else {
+        AgentRequest::SendUserInput {
+            message_id,
+            input: crate::types::UserInput {
+                text: final_message,
+                images,
+            },
+        }
+    };
+    if let Err(error) = agent_tx.send(request).await {
+        if let AgentRequest::SendUserInput { input, .. } = error.0 {
+            state.textarea.insert_str(&user_input);
+            crate::ui::events::clipboard_paste::restore_image_attachments(state, input.images);
+        }
+        state.is_processing = false;
+        state.is_streaming = false;
+        return Err("Agent worker channel closed".into());
+    }
 
     state.current_status_line = Some(crate::core::i18n::t1("ui.status.steered"));
 
@@ -372,6 +397,18 @@ pub async fn enqueue_user_message(
     user_input: String,
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    enqueue_user_input(state, crate::types::UserInput::from(user_input), agent_tx).await
+}
+
+pub async fn enqueue_user_input(
+    state: &mut ChatState,
+    input: crate::types::UserInput,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let crate::types::UserInput {
+        text: user_input,
+        images,
+    } = input;
     // Ensure we jump back to latest messages when user submits input.
     state.auto_follow = true;
 
@@ -409,7 +446,7 @@ pub async fn enqueue_user_message(
     // 跑完 —— 工具在等审批时用户补充的说明，正是要赶在下一轮之前送达的。
     if state.pending_confirmation_entry_idx.is_some() {
         if is_plain_requirement(&user_input) {
-            return steer_user_message(state, user_input, agent_tx).await;
+            return steer_user_message(state, user_input, images, agent_tx).await;
         }
         state.pending_user_messages.push_back(user_input);
         return Ok(());
@@ -431,7 +468,7 @@ pub async fn enqueue_user_message(
         // 需求插进当前这一轮（模型下一次调用就能看到），不用等本轮跑完。
         // 命令类（/ # !）仍排队 —— 它们各有各的处理路径，不是需求。
         if is_plain_requirement(&user_input) {
-            return steer_user_message(state, user_input, agent_tx).await;
+            return steer_user_message(state, user_input, images, agent_tx).await;
         }
         state.pending_user_messages.push_back(user_input);
         return Ok(());
@@ -689,8 +726,10 @@ pub async fn enqueue_user_message(
 
     let user_entry_idx = state.chat_history.len();
 
-    // 显示用户原始输入
-    state.chat_history.push(ChatEntry::user(user_input.clone()));
+    // 显示用户原始输入，并随历史保存附件。
+    let mut entry = ChatEntry::user(user_input.clone());
+    entry.images = images.clone();
+    state.chat_history.push(entry);
 
     // 如果有文件内容，显示已读取的文件
     if !processed.file_contents.is_empty() {
@@ -811,12 +850,29 @@ pub async fn enqueue_user_message(
     ));
 
     // 发送处理后的消息（包含文件内容）给 Agent
-    let _ = agent_tx
-        .send(AgentRequest::SendMessage {
+    let request = if images.is_empty() {
+        AgentRequest::SendMessage {
             message_id,
             message: final_message,
-        })
-        .await;
+        }
+    } else {
+        AgentRequest::SendUserInput {
+            message_id,
+            input: crate::types::UserInput {
+                text: final_message,
+                images,
+            },
+        }
+    };
+    if let Err(error) = agent_tx.send(request).await {
+        if let AgentRequest::SendUserInput { input, .. } = error.0 {
+            state.textarea.insert_str(&user_input);
+            crate::ui::events::clipboard_paste::restore_image_attachments(state, input.images);
+        }
+        state.is_processing = false;
+        state.is_streaming = false;
+        return Err("Agent worker channel closed".into());
+    }
     Ok(())
 }
 
@@ -916,7 +972,7 @@ mod steering_tests {
         state.stream_targets.insert(7, assistant_idx);
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        super::steer_user_message(&mut state, "顺便补个测试".to_string(), &tx)
+        super::steer_user_message(&mut state, "顺便补个测试".to_string(), Vec::new(), &tx)
             .await
             .expect("steering should succeed");
 
@@ -981,7 +1037,7 @@ mod steering_tests {
         state.stream_targets.insert(3, assistant_idx);
 
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        super::steer_user_message(&mut state, "补充".to_string(), &tx)
+        super::steer_user_message(&mut state, "补充".to_string(), Vec::new(), &tx)
             .await
             .expect("steering should succeed");
 
@@ -1013,7 +1069,7 @@ mod steering_tests {
         state.rendered_cache.clear();
 
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        super::steer_user_message(&mut state, "顺便补个测试".to_string(), &tx)
+        super::steer_user_message(&mut state, "顺便补个测试".to_string(), Vec::new(), &tx)
             .await
             .expect("steering should succeed");
         state.rendered_cache.clear();
@@ -1180,7 +1236,7 @@ mod steering_tests {
         );
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        super::steer_user_message(&mut state, "顺便补个测试".to_string(), &tx)
+        super::steer_user_message(&mut state, "顺便补个测试".to_string(), Vec::new(), &tx)
             .await
             .expect("steering should not panic");
 

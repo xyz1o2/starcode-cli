@@ -91,7 +91,11 @@ pub(super) async fn handle_ask_user_question_input(
                 state.pending_other_input.pop();
                 invalidate_cache(state);
             }
-            KeyCode::Char(ch) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            KeyCode::Char(ch)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
                 state.pending_other_input.push(ch);
                 invalidate_cache(state);
             }

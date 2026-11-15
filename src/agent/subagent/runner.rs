@@ -795,7 +795,8 @@ impl AsyncSubagentRunner {
                             )
                             .with_async(true)
                             .with_last_tool_info(
-                                matches!(status, NotificationStatus::Failed).then(|| output.clone()),
+                                matches!(status, NotificationStatus::Failed)
+                                    .then(|| output.clone()),
                             )
                             .with_name(agent_name.clone())
                             .with_task_description(Some(desc.clone())),

@@ -11,7 +11,7 @@ use std::fs;
 const IMAGE_MAX_WIDTH: u32 = 2000;
 const IMAGE_MAX_HEIGHT: u32 = 2000;
 /// Maximum file size in bytes (5MB, matching Claude Code's API limit)
-const IMAGE_MAX_SIZE_BYTES: u64 = 5 * 1024 * 1024;
+const IMAGE_MAX_SIZE_BYTES: u64 = 5 * 1024 * 1024 / 4 * 3;
 
 pub(crate) fn save_clipboard_image() -> Option<(String, u32, u32)> {
     // WSL 优先走 Windows 剪贴板桥：arboard 在 WSL 里连的是 X11/Wayland 的
@@ -54,7 +54,11 @@ fn save_pasted_image_in(
         return None;
     }
     let img = if img.width() > IMAGE_MAX_WIDTH || img.height() > IMAGE_MAX_HEIGHT {
-        img.resize(IMAGE_MAX_WIDTH, IMAGE_MAX_HEIGHT, image::imageops::FilterType::Lanczos3)
+        img.resize(
+            IMAGE_MAX_WIDTH,
+            IMAGE_MAX_HEIGHT,
+            image::imageops::FilterType::Lanczos3,
+        )
     } else {
         img
     };
@@ -75,13 +79,21 @@ fn save_pasted_image_in(
     }
     fs::create_dir_all(images_dir).ok()?;
     let path = images_dir.join(format!("image_{}.{}", uuid::Uuid::new_v4(), extension));
-    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&path).ok()?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .ok()?;
     if file.write_all(encoded.get_ref()).is_err() {
         drop(file);
         let _ = fs::remove_file(&path);
         return None;
     }
-    Some((path.to_string_lossy().into_owned(), img.width(), img.height()))
+    Some((
+        path.to_string_lossy().into_owned(),
+        img.width(),
+        img.height(),
+    ))
 }
 
 /// WSL 下通过 STA PowerShell 读取 Windows 图片，解码后保存到项目状态目录。
@@ -131,7 +143,9 @@ fn windows_clipboard_path(path: &str) -> Option<std::path::PathBuf> {
         return None;
     }
     Some(std::path::PathBuf::from(format!(
-        "/mnt/{}/{}", (bytes[0] as char).to_ascii_lowercase(), &normalized[3..]
+        "/mnt/{}/{}",
+        (bytes[0] as char).to_ascii_lowercase(),
+        &normalized[3..]
     )))
 }
 
@@ -139,24 +153,32 @@ pub(crate) fn clipboard_target(state: &ChatState) -> Option<crate::ui::state::Cl
     use crate::ui::state::ClipboardTarget;
     if state.is_awaiting_confirmation {
         let tool_call_id = state.pending_tool_call_id.clone()?;
-        let is_question = state.pending_confirmation_entry_idx
+        let is_question = state
+            .pending_confirmation_entry_idx
             .and_then(|idx| state.chat_history.get(idx))
             .and_then(|entry| entry.confirmation.as_ref())
-            .is_some_and(|confirmation| matches!(
-                confirmation.details, crate::types::ConfirmationDetails::AskUserQuestion { .. }
-            ));
+            .is_some_and(|confirmation| {
+                matches!(
+                    confirmation.details,
+                    crate::types::ConfirmationDetails::AskUserQuestion { .. }
+                )
+            });
         return Some(if is_question {
-            ClipboardTarget::Question { tool_call_id, question_index: state.pending_question_index }
+            ClipboardTarget::Question {
+                tool_call_id,
+                question_index: state.pending_question_index,
+            }
         } else {
             ClipboardTarget::Feedback { tool_call_id }
         });
     }
-    if !matches!(crate::ui::events::key_context::KeyContext::of(state),
+    if !matches!(
+        crate::ui::events::key_context::KeyContext::of(state),
         crate::ui::events::key_context::KeyContext::TextInput
-        | crate::ui::events::key_context::KeyContext::Vim
-        | crate::ui::events::key_context::KeyContext::TaskPanel
-        | crate::ui::events::key_context::KeyContext::SuggestionOverlay
-        | crate::ui::events::key_context::KeyContext::BgAgentSelector
+            | crate::ui::events::key_context::KeyContext::Vim
+            | crate::ui::events::key_context::KeyContext::TaskPanel
+            | crate::ui::events::key_context::KeyContext::SuggestionOverlay
+            | crate::ui::events::key_context::KeyContext::BgAgentSelector
     ) {
         return None;
     }
@@ -173,16 +195,19 @@ pub(crate) fn paste_confirmation_text(state: &mut ChatState, text: &str) -> bool
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     match clipboard_target(state) {
         Some(ClipboardTarget::Question { question_index, .. }) => {
-            let other_idx = state.pending_confirmation_entry_idx
+            let other_idx = state
+                .pending_confirmation_entry_idx
                 .and_then(|idx| state.chat_history.get(idx))
                 .and_then(|entry| entry.confirmation.as_ref())
                 .and_then(|confirmation| match &confirmation.details {
-                    crate::types::ConfirmationDetails::AskUserQuestion { questions } => {
-                        questions.get(question_index).map(|question| question.options.len())
-                    }
+                    crate::types::ConfirmationDetails::AskUserQuestion { questions } => questions
+                        .get(question_index)
+                        .map(|question| question.options.len()),
                     _ => None,
                 });
-            let Some(other_idx) = other_idx else { return false; };
+            let Some(other_idx) = other_idx else {
+                return false;
+            };
             state.pending_confirmation_choice = other_idx;
             state.pending_question_other_focused = true;
             state.pending_other_input.push_str(&normalized);
@@ -204,7 +229,9 @@ pub(crate) fn paste_confirmation_text(state: &mut ChatState, text: &str) -> bool
 pub(crate) fn poll_clipboard_read(state: &mut ChatState) -> bool {
     use crate::ui::state::{ClipboardPayload, ClipboardTarget};
     use tokio::sync::oneshot::error::TryRecvError;
-    let Some(pending) = state.pending_clipboard_read.as_mut() else { return false; };
+    let Some(pending) = state.pending_clipboard_read.as_mut() else {
+        return false;
+    };
     let result = match pending.result.try_recv() {
         Ok(result) => result,
         Err(TryRecvError::Empty) => return false,
@@ -214,7 +241,10 @@ pub(crate) fn poll_clipboard_read(state: &mut ChatState) -> bool {
     state.paste_in_progress = false;
     state.paste_end_time = Some(Instant::now());
     if clipboard_target(state).as_ref() != Some(&target) {
-        state.push_toast(&crate::core::i18n::t1("ui.paste.target_changed"), crate::ui::state::ToastKind::Info);
+        state.push_toast(
+            &crate::core::i18n::t1("ui.paste.target_changed"),
+            crate::ui::state::ToastKind::Info,
+        );
         return true;
     }
     match result {
@@ -224,7 +254,12 @@ pub(crate) fn poll_clipboard_read(state: &mut ChatState) -> bool {
                 sync_input_from_textarea(state);
                 crate::ui::services::suggestions::on_input_changed(state);
             } else {
-                paste_confirmation_text(state, &format!("\n![Image]({path})\n"));
+                insert_image_paste_block(state, path, width, height);
+                sync_input_from_textarea(state);
+                state.push_toast(
+                    &crate::core::i18n::t1("ui.image.saved_to_prompt"),
+                    crate::ui::state::ToastKind::Info,
+                );
             }
         }
         Ok(ClipboardPayload::Text(text)) => {
@@ -241,7 +276,10 @@ pub(crate) fn poll_clipboard_read(state: &mut ChatState) -> bool {
         }
         Err(error) => {
             crate::utils::logging::append_debug_log_line(&format!("[PASTE] {error}"));
-            state.push_toast(&crate::core::i18n::t1("ui.paste.failed"), crate::ui::state::ToastKind::Error);
+            state.push_toast(
+                &crate::core::i18n::t1("ui.paste.failed"),
+                crate::ui::state::ToastKind::Error,
+            );
         }
     }
     true
@@ -342,7 +380,9 @@ mod tests {
     fn windows_clipboard_path_uses_actual_drive() {
         assert_eq!(
             windows_clipboard_path(r"D:\Temp\starcode_clip_example.png"),
-            Some(std::path::PathBuf::from("/mnt/d/Temp/starcode_clip_example.png"))
+            Some(std::path::PathBuf::from(
+                "/mnt/d/Temp/starcode_clip_example.png"
+            ))
         );
         assert!(windows_clipboard_path(r"D:\Temp\other.png").is_none());
         assert!(windows_clipboard_path("/tmp/starcode_clip_example.png").is_none());
@@ -372,6 +412,25 @@ pub(crate) fn detect_file_paths(text: &str) -> Option<Vec<String>> {
     } else {
         None
     }
+}
+
+/// 撤回或重试时直接恢复已保存的图片内容，不依赖原临时文件。
+pub(crate) fn restore_image_attachments(
+    state: &mut ChatState,
+    images: Vec<crate::types::ImageAttachment>,
+) {
+    for image in images {
+        let id = state.paste_segments.len();
+        let reference = crate::ui::state::format_image_paste_ref(id);
+        state.paste_segments.push(crate::ui::state::PasteSegment {
+            id,
+            content: "[Image]".to_string(),
+            line_count: 1,
+            kind: crate::ui::state::PasteKind::AttachedImage(image),
+        });
+        state.textarea.insert_str(&format!("\n{reference}\n"));
+    }
+    sync_input_from_textarea(state);
 }
 
 /// 创建图片粘贴块（始终创建，无行数限制）
@@ -475,9 +534,16 @@ pub(crate) const PASTE_CHAR_THRESHOLD: usize = 1000;
 
 pub(super) fn reset_main_textarea(state: &mut ChatState) {
     // 清空或提交草稿后，旧剪贴板结果不能重新填回输入框。
-    if state.pending_clipboard_read.as_ref().is_some_and(|pending| {
-        matches!(&pending.target, crate::ui::state::ClipboardTarget::Prompt { .. })
-    }) {
+    if state
+        .pending_clipboard_read
+        .as_ref()
+        .is_some_and(|pending| {
+            matches!(
+                &pending.target,
+                crate::ui::state::ClipboardTarget::Prompt { .. }
+            )
+        })
+    {
         state.pending_clipboard_read = None;
         state.paste_in_progress = false;
         state.paste_end_time = None;

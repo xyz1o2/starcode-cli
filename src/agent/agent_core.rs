@@ -59,7 +59,7 @@ pub struct Agent {
     /// runtime 侧（`runtime/session.rs`）把回合期间收到的 `SendMessage` 收进这个
     /// 队列；这里在每轮 turn 开始时消费，把它们作为 user 消息插进对话。
     pub(crate) steering_queue:
-        Option<Arc<crate::agent::messaging::AsyncMessageQueue<(u64, String)>>>,
+        Option<Arc<crate::agent::messaging::AsyncMessageQueue<(u64, crate::types::UserInput)>>>,
     /// Agent 间消息 hub：`SendMessage` 投递进来的邮箱。
     ///
     /// lead 与 worker 跑的是同一份 `agent_loop.rs`，所以 drain 注入写一次两个
@@ -561,7 +561,7 @@ impl Agent {
     /// 注入 steering 队列：运行中插入的需求从这里进对话。
     pub fn set_steering_queue(
         &mut self,
-        queue: Arc<crate::agent::messaging::AsyncMessageQueue<(u64, String)>>,
+        queue: Arc<crate::agent::messaging::AsyncMessageQueue<(u64, crate::types::UserInput)>>,
     ) {
         self.steering_queue = Some(queue);
     }

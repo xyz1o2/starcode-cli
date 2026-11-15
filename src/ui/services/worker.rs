@@ -118,7 +118,10 @@ pub async fn agent_worker(
                         message_id,
                         message.len()
                     ));
-                    Some((message_id, message))
+                    Some((message_id, message.into()))
+                }
+                Some(AgentRequest::SendUserInput { message_id, input }) => {
+                    Some((message_id, input))
                 }
                 Some(AgentRequest::Shutdown { response }) => {
                     append_debug_log_line("[Worker] Received Shutdown while idle");
@@ -140,9 +143,10 @@ pub async fn agent_worker(
             }
         };
 
-        let Some((message_id, message)) = next_message else {
+        let Some((message_id, input)) = next_message else {
             continue;
         };
+        let message = input;
 
         append_debug_log_line(&format!("[Worker] Processing message id={}", message_id));
 

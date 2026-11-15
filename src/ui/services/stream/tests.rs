@@ -6,22 +6,42 @@ async fn withdrawal_waits_for_runtime_and_preserves_draft_and_history() {
     let mut entry = ChatEntry::user("pending requirement");
     entry.group_id = Some("user-message:42".into());
     state.chat_history.push(entry);
-    state.chat_history.push(ChatEntry::assistant("still working"));
-    state.steered_user_messages.push((42, "pending requirement".into()));
+    state
+        .chat_history
+        .push(ChatEntry::assistant("still working"));
+    state
+        .steered_user_messages
+        .push((42, "pending requirement".into()));
     state.textarea.insert_str("draft");
     crate::ui::events::clipboard_paste::sync_input_from_textarea(&mut state);
     let (tx, _rx) = mpsc::channel(4);
 
-    handle_stream_update(&mut state, StreamMessage::MessageWithdrawal {
-        message_id: 42, withdrawn: false,
-    }, &tx).await.unwrap();
+    handle_stream_update(
+        &mut state,
+        StreamMessage::MessageWithdrawal {
+            message_id: 42,
+            withdrawn: false,
+        },
+        &tx,
+    )
+    .await
+    .unwrap();
     assert_eq!(state.chat_history[0].content, "pending requirement");
     assert_eq!(state.input, "draft");
 
-    state.steered_user_messages.push((42, "pending requirement".into()));
-    handle_stream_update(&mut state, StreamMessage::MessageWithdrawal {
-        message_id: 42, withdrawn: true,
-    }, &tx).await.unwrap();
+    state
+        .steered_user_messages
+        .push((42, "pending requirement".into()));
+    handle_stream_update(
+        &mut state,
+        StreamMessage::MessageWithdrawal {
+            message_id: 42,
+            withdrawn: true,
+        },
+        &tx,
+    )
+    .await
+    .unwrap();
     assert_eq!(state.chat_history.len(), 1);
     assert_eq!(state.chat_history[0].content, "still working");
     assert_eq!(state.input, "pending requirement\ndraft");
@@ -989,13 +1009,18 @@ fn tool_result_insert_before_agent_keeps_progress_on_its_own_card() {
         },
     );
     assert_eq!(state.active_agent_tasks["worker-1"].entry_idx, 1);
-    handle_tool_result_message(&mut state, 42, call, ToolResult {
-        success: true,
-        output: Some("read ok".into()),
-        error: None,
-        data: None,
-        llm_content: None,
-    });
+    handle_tool_result_message(
+        &mut state,
+        42,
+        call,
+        ToolResult {
+            success: true,
+            output: Some("read ok".into()),
+            error: None,
+            data: None,
+            llm_content: None,
+        },
+    );
     assert_eq!(state.chat_history[1].entry_type, ChatEntryType::ToolResult);
     assert_eq!(state.active_agent_tasks["worker-1"].entry_idx, 2);
     handle_agent_task_update(
@@ -1017,7 +1042,10 @@ fn tool_result_insert_before_agent_keeps_progress_on_its_own_card() {
         },
     );
     assert_eq!(state.chat_history[2].agent_tool_use_count, Some(1));
-    assert_eq!(state.chat_history[2].agent_task_id.as_deref(), Some("worker-1"));
+    assert_eq!(
+        state.chat_history[2].agent_task_id.as_deref(),
+        Some("worker-1")
+    );
     assert_eq!(state.chat_history[1].entry_type, ChatEntryType::ToolResult);
 }
 
@@ -1103,17 +1131,33 @@ fn failed_background_agent_shows_reason_after_detail_is_closed() {
     state.enter_teammate_view(task_id);
     handle_agent_task_update(
         &mut state,
-        update(crate::types::AgentTaskStatus::Failed, Some("SubAgent failed: unavailable")),
+        update(
+            crate::types::AgentTaskStatus::Failed,
+            Some("SubAgent failed: unavailable"),
+        ),
     );
     assert!(state.viewing_agent_task_id.is_none());
     let entry = &state.chat_history[state.active_agent_tasks[task_id].entry_idx];
-    assert_eq!(entry.agent_status, Some(crate::types::AgentTaskStatus::Failed));
-    assert_eq!(entry.agent_last_tool_info.as_deref(), Some("SubAgent failed: unavailable"));
-    let blocks = crate::ui::components::agent_task_render::render_agent_task_entry(
-        &state, entry, 64, state.active_agent_tasks[task_id].entry_idx,
+    assert_eq!(
+        entry.agent_status,
+        Some(crate::types::AgentTaskStatus::Failed)
     );
-    let text = blocks.iter().flat_map(|block| block.iter()).flat_map(|line| line.spans.iter())
-        .map(|span| span.content.as_ref()).collect::<String>();
+    assert_eq!(
+        entry.agent_last_tool_info.as_deref(),
+        Some("SubAgent failed: unavailable")
+    );
+    let blocks = crate::ui::components::agent_task_render::render_agent_task_entry(
+        &state,
+        entry,
+        64,
+        state.active_agent_tasks[task_id].entry_idx,
+    );
+    let text = blocks
+        .iter()
+        .flat_map(|block| block.iter())
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
     assert!(text.contains("SubAgent failed: unavailable"), "{text}");
     assert!(!text.contains("Waiting for the first tool call"), "{text}");
 }

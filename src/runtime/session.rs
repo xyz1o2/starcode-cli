@@ -93,7 +93,7 @@ pub struct StreamingRequestContext<'a> {
     pub current_model_snapshot: &'a str,
     pub project_root: Option<&'a Path>,
     pub abort_flag: &'a std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pub steering_queue: &'a Arc<AsyncMessageQueue<(u64, String)>>,
+    pub steering_queue: &'a Arc<AsyncMessageQueue<(u64, crate::types::UserInput)>>,
     pub steering_signal: &'a Arc<Notify>,
     pub message_bus: &'a Arc<crate::core::confirmation_bus::MessageBus>,
     /// 运行中切模型的交接槽。回合跑起来之后 `StarAgent` 是被独占借出的，
@@ -238,20 +238,29 @@ pub async fn handle_streaming_request(
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::WithdrawMessage { message_id }) => {
-            let withdrawn = context.steering_queue
+            let withdrawn = context
+                .steering_queue
                 .remove_first(|(id, _)| *id == message_id)
                 .is_some();
-            let _ = context.tx.send(StreamMessage::MessageWithdrawal {
-                message_id,
-                withdrawn,
-            }).await;
+            let _ = context
+                .tx
+                .send(StreamMessage::MessageWithdrawal {
+                    message_id,
+                    withdrawn,
+                })
+                .await;
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::SendMessage {
             message_id,
             message,
         }) => {
-            let _ = context.steering_queue.enqueue((message_id, message));
+            let _ = context.steering_queue.enqueue((message_id, message.into()));
+            context.steering_signal.notify_one();
+            StreamingRequestOutcome::Continue
+        }
+        Some(AgentRequest::SendUserInput { message_id, input }) => {
+            let _ = context.steering_queue.enqueue((message_id, input));
             context.steering_signal.notify_one();
             StreamingRequestOutcome::Continue
         }

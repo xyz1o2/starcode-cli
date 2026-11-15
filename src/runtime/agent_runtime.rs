@@ -20,7 +20,7 @@ pub struct AgentRuntimeContext<'a> {
     pub rx: &'a mut mpsc::Receiver<AgentRequest>,
     pub bus_rx: &'a mut Option<broadcast::Receiver<Message>>,
     pub project_root: Option<&'a Path>,
-    pub steering_queue: &'a Arc<AsyncMessageQueue<(u64, String)>>,
+    pub steering_queue: &'a Arc<AsyncMessageQueue<(u64, crate::types::UserInput)>>,
     pub steering_signal: &'a Arc<Notify>,
     pub message_bus: &'a Arc<crate::core::confirmation_bus::MessageBus>,
 }
@@ -55,8 +55,9 @@ pub async fn process_message(
     agent: &mut StarAgent,
     context: AgentRuntimeContext<'_>,
     message_id: u64,
-    message: &str,
+    input: &crate::types::UserInput,
 ) -> AgentRuntimeOutcome {
+    let message = input.text.as_str();
     append_debug_log_line(&format!(
         "[AgentRuntime] Processing message id={}, len={}",
         message_id,
@@ -144,6 +145,7 @@ pub async fn process_message(
             bus_rx: context.bus_rx,
             message_id,
             user_message: message,
+            images: &input.images,
             current_model_snapshot: &current_model_snapshot,
             project_root: context.project_root,
             abort_flag: &abort_flag,

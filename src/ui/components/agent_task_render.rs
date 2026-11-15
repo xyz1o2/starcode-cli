@@ -238,7 +238,11 @@ fn render_done_line(state: &ChatState, entry: &ChatEntry, area_width: u16) -> Ve
 
     let mut lines = vec![Line::from(spans)];
     if matches!(status, AgentTaskStatus::Failed | AgentTaskStatus::Rejected) {
-        if let Some(reason) = entry.agent_last_tool_info.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(reason) = entry
+            .agent_last_tool_info
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
             let width = area_width.saturating_sub(6).max(1) as usize;
             for line in crate::ui::utils::text::wrap_detail(reason, width) {
                 lines.push(Line::from(Span::styled(

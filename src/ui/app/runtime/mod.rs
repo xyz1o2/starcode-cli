@@ -369,7 +369,10 @@ pub async fn run_ui_loop(
                         state.paste_end_time = Some(Instant::now());
 
                         // 与按键路由一致：当前确认卡优先于背后的输入模态。
-                        if crate::ui::events::clipboard_paste::paste_confirmation_text(state, &pasted_text) {
+                        if crate::ui::events::clipboard_paste::paste_confirmation_text(
+                            state,
+                            &pasted_text,
+                        ) {
                             // 当前确认卡已接收正文。
                         } else if state.is_awaiting_confirmation {
                             // 确认卡状态尚未就绪时不能把内容写到背后的输入框。

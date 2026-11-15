@@ -25,10 +25,11 @@ pub struct StreamingSessionContext<'a> {
     pub bus_rx: &'a mut Option<broadcast::Receiver<Message>>,
     pub message_id: u64,
     pub user_message: &'a str,
+    pub images: &'a [crate::types::ImageAttachment],
     pub current_model_snapshot: &'a str,
     pub project_root: Option<&'a Path>,
     pub abort_flag: &'a Arc<std::sync::atomic::AtomicBool>,
-    pub steering_queue: &'a Arc<AsyncMessageQueue<(u64, String)>>,
+    pub steering_queue: &'a Arc<AsyncMessageQueue<(u64, crate::types::UserInput)>>,
     pub steering_signal: &'a Arc<Notify>,
     pub message_bus: &'a Arc<crate::core::confirmation_bus::MessageBus>,
     /// 运行中切模型的交接槽（见 `agent::model_switch`）。
@@ -77,7 +78,10 @@ pub async fn run_streaming_session(
     let mut retry_policy = crate::runtime::stream_retry::StreamRetryPolicy::default();
     'attempt: loop {
         match agent
-            .process_user_message_stream(context.user_message)
+            .process_user_input_stream(crate::types::UserInput {
+                text: context.user_message.to_string(),
+                images: context.images.to_vec(),
+            })
             .await
         {
             Ok(mut stream) => {

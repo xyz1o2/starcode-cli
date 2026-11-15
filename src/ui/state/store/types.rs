@@ -118,6 +118,7 @@ pub enum PasteKind {
         width: u32,
         height: u32,
     },
+    AttachedImage(crate::types::ImageAttachment),
     Files(Vec<String>),
 }
 
@@ -178,12 +179,41 @@ pub fn expand_paste_segments(text: &str, segments: &[PasteSegment]) -> String {
     for seg in segments {
         let placeholder = match seg.kind {
             PasteKind::Text => format_text_paste_ref(seg.id, seg.line_count),
-            PasteKind::Image { .. } => format_image_paste_ref(seg.id),
+            PasteKind::Image { .. } | PasteKind::AttachedImage(_) => format_image_paste_ref(seg.id),
             PasteKind::Files(_) => format_files_paste_ref(seg.id),
         };
         result = result.replace(&placeholder, &seg.content);
     }
     result
+}
+
+/// 提交前读取仍被引用的附件；删除占位符即取消附加，不解析 Markdown 路径。
+pub fn prepare_user_input(
+    text: &str,
+    segments: &[PasteSegment],
+) -> Result<crate::types::UserInput, String> {
+    let mut input = crate::types::UserInput::default();
+    let mut expanded = text.to_string();
+    for segment in segments {
+        let reference = format_image_paste_ref(segment.id);
+        if !text.contains(&reference) {
+            continue;
+        }
+        let image = match &segment.kind {
+            PasteKind::Image { path, .. } => {
+                crate::types::ImageAttachment::from_path(std::path::Path::new(path))?
+            }
+            PasteKind::AttachedImage(image) => image.clone(),
+            _ => continue,
+        };
+        if input.images.len() >= 8 {
+            return Err("A message can contain at most 8 images".into());
+        }
+        input.images.push(image);
+        expanded = expanded.replace(&reference, "[Image]");
+    }
+    input.text = expand_paste_segments(&expanded, segments);
+    Ok(input)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

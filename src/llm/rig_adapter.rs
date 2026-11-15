@@ -209,11 +209,27 @@ fn convert_one_message(msg: &StarMessage) -> Message {
         ROLE_SYSTEM => Message::System {
             content: msg.content.clone().unwrap_or_default(),
         },
-        ROLE_USER => Message::User {
-            content: vec![UserContent::Text(Text::new(
-                msg.content.clone().unwrap_or_default(),
-            ))],
-        },
+        ROLE_USER => {
+            let mut content = Vec::new();
+            if let Some(text) = msg.content.as_ref().filter(|text| !text.is_empty()) {
+                content.push(UserContent::Text(Text::new(text.clone())));
+            }
+            for image in &msg.images {
+                let media_type = match image.media_type.as_str() {
+                    "image/jpeg" => rig_core::message::ImageMediaType::JPEG,
+                    _ => rig_core::message::ImageMediaType::PNG,
+                };
+                content.push(UserContent::image_base64(
+                    image.data.clone(),
+                    Some(media_type),
+                    None,
+                ));
+            }
+            if content.is_empty() {
+                content.push(UserContent::Text(Text::new(String::new())));
+            }
+            Message::User { content }
+        }
         ROLE_ASSISTANT => {
             let mut parts: Vec<AssistantContent> = Vec::new();
             // DeepSeek thinking mode requires the `reasoning_content` field to
@@ -483,6 +499,7 @@ fn build_star_response(result: CompletionResult) -> StarResponse {
                 reasoning_content: result.reasoning,
                 tool_call_id: None,
                 cache_control: None,
+                images: Vec::new(),
             },
             finish_reason: finish_reason.to_string(),
         }],
@@ -1058,6 +1075,39 @@ mod tests {
     use super::*;
     use rig_core::providers::anthropic;
     use rig_core::wire::Wire as _;
+
+    #[test]
+    fn image_attachment_reaches_anthropic_and_openai_wire() {
+        use base64::Engine;
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 3).write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        let attachment = crate::types::ImageAttachment::from_bytes(bytes.get_ref()).unwrap();
+        let mut message = StarMessage::user("Describe this screenshot");
+        message.images.push(attachment.clone());
+        let restored: StarMessage = serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
+        let request = || {
+            let mut request = CompletionRequest::new(convert_one_message(&restored));
+            request.max_tokens = Some(64);
+            request
+        };
+        let anthropic = anthropic::AnthropicConfig::new("test-key").completion("vision-model")
+            .encode(request(), rig_core::wire::Mode::Unary).unwrap();
+        let openai = openai::OpenAIConfig::new("test-key").chat("vision-model")
+            .encode(request(), rig_core::wire::Mode::Unary).unwrap();
+        let json_body = |body: &rig_core::wire::Body| -> serde_json::Value {
+            match body {
+                rig_core::wire::Body::Bytes(bytes) => serde_json::from_slice(bytes).unwrap(),
+                other => panic!("expected JSON bytes, got {other:?}"),
+            }
+        };
+        let a = json_body(anthropic.request.body());
+        let o = json_body(openai.request.body());
+        let a_image = a["messages"][0]["content"].as_array().unwrap().iter().find(|part| part["type"] == "image").unwrap();
+        assert_eq!(a_image["source"]["media_type"], "image/png");
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(a_image["source"]["data"].as_str().unwrap()).unwrap(), bytes.into_inner());
+        let o_image = o["messages"][0]["content"].as_array().unwrap().iter().find(|part| part["type"] == "image_url").unwrap();
+        assert_eq!(o_image["image_url"]["url"], format!("data:image/png;base64,{}", attachment.data));
+    }
 
     /// 端到端锁死 Anthropic 缓存断点：`anthropic_caching_wire` 开关 + rig 的
     /// 标记逻辑，必须把 `cache_control` 真落进**发上线的请求体**里——

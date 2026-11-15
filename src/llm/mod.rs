@@ -8,6 +8,7 @@ pub mod providers;
 pub mod retry;
 pub mod rig_adapter;
 pub mod thinking;
+mod vision_bridge;
 
 pub use crate::core::config::models::ModelInfo;
 pub use error_kind::{diagnose, mentions_status_code, retry_after_secs, LlmErrorKind};
