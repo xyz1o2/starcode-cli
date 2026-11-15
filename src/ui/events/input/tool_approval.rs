@@ -298,7 +298,7 @@ pub(crate) fn handle_task_panel_key(state: &mut ChatState, key: KeyEvent) -> boo
         return true;
     }
 
-    if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('v') {
+    if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('v') {
         state.task_panel.cycle_view_mode();
         crate::ui::app::logic::emit_status_text(
             state,

@@ -368,19 +368,18 @@ pub async fn run_ui_loop(
                         state.paste_in_progress = true;
                         state.paste_end_time = Some(Instant::now());
 
-                        // Route paste to the correct target:
-                        // 1. Input modal (provider key/base URL) → modal_textarea
-                        // 2. Palette filter → palette_filter
-                        // 3. Main input → main textarea
-                        if state.is_input_modal_open() {
+                        // 与按键路由一致：当前确认卡优先于背后的输入模态。
+                        if crate::ui::events::clipboard_paste::paste_confirmation_text(state, &pasted_text) {
+                            // 当前确认卡已接收正文。
+                        } else if state.is_awaiting_confirmation {
+                            // 确认卡状态尚未就绪时不能把内容写到背后的输入框。
+                        } else if state.is_input_modal_open() {
                             let normalized = pasted_text.replace("\r\n", "\n").replace('\r', "\n");
                             state.modal_textarea.insert_str(&normalized);
                             state.input_modal_value =
                                 crate::ui::events::clipboard_paste::collect_modal_input(
                                     &state.modal_textarea,
                                 );
-                        } else if crate::ui::events::clipboard_paste::paste_confirmation_text(state, &pasted_text) {
-                            // 当前确认卡已接收正文。
                         } else if state.is_palette_open() {
                             for c in pasted_text.chars() {
                                 if !c.is_control() {
@@ -388,7 +387,10 @@ pub async fn run_ui_loop(
                                 }
                             }
                             state.selected_palette_index = 0;
-                        } else {
+                        } else if matches!(
+                            crate::ui::events::clipboard_paste::clipboard_target(state),
+                            Some(crate::ui::state::ClipboardTarget::Prompt { .. })
+                        ) {
                             // Bracketed paste already carries the text content —
                             // skip image clipboard check (which can hang on WSL2/SSH).
                             // Image paste is handled by the Ctrl+V path instead.

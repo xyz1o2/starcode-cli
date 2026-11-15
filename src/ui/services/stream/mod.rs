@@ -472,10 +472,12 @@ pub async fn handle_stream_update(
                     append_transcript_event(state, "user_withdrawn", Some(message_id), serde_json::json!({}));
                 }
             }
-            state.push_toast(
-                if withdrawn { i18n::t1("ui.withdraw.success") } else { i18n::t1("ui.withdraw.unavailable") },
-                ToastKind::Info,
-            );
+            let message = if withdrawn {
+                i18n::t1("ui.withdraw.success")
+            } else {
+                i18n::t1("ui.withdraw.unavailable")
+            };
+            state.push_toast(&message, ToastKind::Info);
         }
         StreamMessage::Start { message_id, kind } => {
             let is_fresh_user_turn = matches!(&kind, StreamStartKind::UserTurn { .. })

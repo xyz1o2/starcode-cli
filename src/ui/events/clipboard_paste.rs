@@ -76,7 +76,11 @@ fn save_pasted_image_in(
     fs::create_dir_all(images_dir).ok()?;
     let path = images_dir.join(format!("image_{}.{}", uuid::Uuid::new_v4(), extension));
     let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&path).ok()?;
-    file.write_all(encoded.get_ref()).ok()?;
+    if file.write_all(encoded.get_ref()).is_err() {
+        drop(file);
+        let _ = fs::remove_file(&path);
+        return None;
+    }
     Some((path.to_string_lossy().into_owned(), img.width(), img.height()))
 }
 
@@ -93,7 +97,8 @@ fn save_clipboard_image_wsl() -> Option<(String, u32, u32)> {
             "-NoProfile",
             "-STA",
             "-Command",
-            "Add-Type -AssemblyName System.Windows.Forms; \
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
+             Add-Type -AssemblyName System.Windows.Forms; \
              $img = [System.Windows.Forms.Clipboard]::GetImage(); \
              if ($img) { \
                $p = Join-Path $env:TEMP ('starcode_clip_' + [guid]::NewGuid().ToString() + '.png'); \
@@ -155,7 +160,11 @@ pub(crate) fn clipboard_target(state: &ChatState) -> Option<crate::ui::state::Cl
     ) {
         return None;
     }
-    Some(ClipboardTarget::Prompt)
+    Some(ClipboardTarget::Prompt {
+        session_id: state.active_session_id.clone(),
+        session_started_at: state.session_started_at,
+        next_message_id: state.next_message_id,
+    })
 }
 
 /// 确认卡的文本粘贴与 Ctrl+V 共用目标；不把内容漏进背后的主输入框。
@@ -163,7 +172,18 @@ pub(crate) fn paste_confirmation_text(state: &mut ChatState, text: &str) -> bool
     use crate::ui::state::ClipboardTarget;
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     match clipboard_target(state) {
-        Some(ClipboardTarget::Question { .. }) => {
+        Some(ClipboardTarget::Question { question_index, .. }) => {
+            let other_idx = state.pending_confirmation_entry_idx
+                .and_then(|idx| state.chat_history.get(idx))
+                .and_then(|entry| entry.confirmation.as_ref())
+                .and_then(|confirmation| match &confirmation.details {
+                    crate::types::ConfirmationDetails::AskUserQuestion { questions } => {
+                        questions.get(question_index).map(|question| question.options.len())
+                    }
+                    _ => None,
+                });
+            let Some(other_idx) = other_idx else { return false; };
+            state.pending_confirmation_choice = other_idx;
             state.pending_question_other_focused = true;
             state.pending_other_input.push_str(&normalized);
         }
@@ -175,6 +195,7 @@ pub(crate) fn paste_confirmation_text(state: &mut ChatState, text: &str) -> bool
     }
     if let Some(idx) = state.pending_confirmation_entry_idx {
         state.rendered_cache.remove(&idx);
+        state.virtual_list.mark_dirty(idx);
     }
     true
 }
@@ -198,7 +219,7 @@ pub(crate) fn poll_clipboard_read(state: &mut ChatState) -> bool {
     }
     match result {
         Ok(ClipboardPayload::Image(path, width, height)) => {
-            if target == ClipboardTarget::Prompt {
+            if matches!(target, ClipboardTarget::Prompt { .. }) {
                 insert_image_paste_block(state, path, width, height);
                 sync_input_from_textarea(state);
                 crate::ui::services::suggestions::on_input_changed(state);
@@ -224,6 +245,108 @@ pub(crate) fn poll_clipboard_read(state: &mut ChatState) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::state::{ClipboardPayload, PendingClipboardRead};
+
+    fn ready_clipboard(state: &mut ChatState, payload: ClipboardPayload) {
+        let target = clipboard_target(state).expect("input target");
+        let (tx, result) = tokio::sync::oneshot::channel();
+        assert!(tx.send(Ok(payload)).is_ok());
+        state.pending_clipboard_read = Some(PendingClipboardRead { target, result });
+        state.paste_in_progress = true;
+    }
+
+    #[test]
+    fn clipboard_result_does_not_cross_sessions_or_submissions() {
+        let mut state = ChatState::test_fixture();
+        ready_clipboard(&mut state, ClipboardPayload::Text("old clipboard".into()));
+        state.active_session_id = Some("another-session".into());
+        assert!(poll_clipboard_read(&mut state));
+        assert!(state.input.is_empty());
+        assert!(state.pending_clipboard_read.is_none());
+
+        ready_clipboard(&mut state, ClipboardPayload::Text("old draft".into()));
+        state.next_message_id += 1;
+        assert!(poll_clipboard_read(&mut state));
+        assert!(state.input.is_empty());
+    }
+
+    #[test]
+    fn resetting_prompt_discards_pending_clipboard() {
+        let mut state = ChatState::test_fixture();
+        ready_clipboard(&mut state, ClipboardPayload::Text("old draft".into()));
+        reset_main_textarea(&mut state);
+        assert!(!poll_clipboard_read(&mut state));
+        assert!(!state.paste_in_progress);
+        assert!(state.input.is_empty());
+    }
+
+    #[test]
+    fn pasted_question_text_selects_other_without_touching_prompt() {
+        let mut state = ChatState::test_fixture();
+        let mut entry = crate::types::ChatEntry::new(
+            crate::types::ChatEntryType::ToolConfirmation,
+            String::new(),
+        );
+        entry.confirmation = Some(crate::types::ToolConfirmation {
+            tool_name: "AskUserQuestion".into(),
+            operation_type: crate::types::ConfirmationType::AskUserQuestion,
+            details: crate::types::ConfirmationDetails::AskUserQuestion {
+                questions: vec![crate::types::AskUserQuestionItem {
+                    question: "Choose".into(),
+                    header: None,
+                    options: vec![crate::types::AskUserQuestionOption {
+                        label: "Default".into(),
+                        description: String::new(),
+                        preview: None,
+                    }],
+                    multi_select: false,
+                }],
+            },
+            is_dangerous: false,
+            outcome: None,
+            reason: None,
+        });
+        let idx = state.chat_history.len();
+        state.chat_history.push(entry);
+        state.is_awaiting_confirmation = true;
+        state.pending_tool_call_id = Some("question-1".into());
+        state.pending_confirmation_entry_idx = Some(idx);
+        state.pending_confirmation_choice = 0;
+
+        assert!(paste_confirmation_text(&mut state, "custom\r\nanswer"));
+        assert_eq!(state.pending_confirmation_choice, 1);
+        assert!(state.pending_question_other_focused);
+        assert_eq!(state.pending_other_input, "custom\nanswer");
+        assert!(state.input.is_empty());
+    }
+
+    #[test]
+    fn clipboard_image_files_are_unique_and_resized() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = image::DynamicImage::new_rgba8(2400, 1200);
+        let (first, width, height) = save_pasted_image_in(image.clone(), dir.path()).unwrap();
+        let (second, _, _) = save_pasted_image_in(image, dir.path()).unwrap();
+        assert_ne!(first, second);
+        assert_eq!((width, height), (2000, 1000));
+        let decoded = image::open(first).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (width, height));
+        assert!(fs::metadata(second).unwrap().len() <= IMAGE_MAX_SIZE_BYTES);
+    }
+
+    #[test]
+    fn windows_clipboard_path_uses_actual_drive() {
+        assert_eq!(
+            windows_clipboard_path(r"D:\Temp\starcode_clip_example.png"),
+            Some(std::path::PathBuf::from("/mnt/d/Temp/starcode_clip_example.png"))
+        );
+        assert!(windows_clipboard_path(r"D:\Temp\other.png").is_none());
+        assert!(windows_clipboard_path("/tmp/starcode_clip_example.png").is_none());
+    }
 }
 
 /// 检测文本是否全部为已存在的绝对路径，是则返回路径列表
@@ -351,6 +474,14 @@ pub(super) const RAPID_PASTE_KEY_INTERVAL_MS: u64 = 60;
 pub(crate) const PASTE_CHAR_THRESHOLD: usize = 1000;
 
 pub(super) fn reset_main_textarea(state: &mut ChatState) {
+    // 清空或提交草稿后，旧剪贴板结果不能重新填回输入框。
+    if state.pending_clipboard_read.as_ref().is_some_and(|pending| {
+        matches!(&pending.target, crate::ui::state::ClipboardTarget::Prompt { .. })
+    }) {
+        state.pending_clipboard_read = None;
+        state.paste_in_progress = false;
+        state.paste_end_time = None;
+    }
     state.textarea = TextArea::default();
     state.textarea.set_placeholder_text("Type a message...");
     state

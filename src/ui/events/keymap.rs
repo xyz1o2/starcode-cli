@@ -76,7 +76,7 @@ impl GlobalBinding {
             Self::CopyOrInterrupt => "Ctrl+C",
             Self::Exit => "Ctrl+D",
             Self::ClearScreen => "Ctrl+L",
-            Self::Paste => "Ctrl+V",
+            Self::Paste => "Ctrl+V / Ctrl+Alt+V",
             Self::WithdrawMessage => "Alt+Shift+Backspace",
             Self::ToggleHelp => "F1",
             Self::TogglePlanMode => "Shift+Tab",
@@ -177,7 +177,11 @@ pub fn binding_for(key: &KeyEvent) -> Option<GlobalBinding> {
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
     if ctrl && alt {
-        return None;
+        // 部分终端截获 Ctrl+V；备用组合键仍走同一粘贴处理路径。
+        return match key.code {
+            KeyCode::Char('v') | KeyCode::Char('V') => Some(GlobalBinding::Paste),
+            _ => None,
+        };
     }
 
     if ctrl {
@@ -352,6 +356,20 @@ mod tests {
                 "{code:?} 不该是全局键"
             );
         }
+    }
+
+    #[test]
+    fn clipboard_paste_has_a_terminal_fallback_binding() {
+        for code in [KeyCode::Char('v'), KeyCode::Char('V')] {
+            assert_eq!(
+                binding_for(&key(code, KeyModifiers::CONTROL | KeyModifiers::ALT)),
+                Some(GlobalBinding::Paste)
+            );
+        }
+        assert_eq!(
+            binding_for(&key(KeyCode::Char('x'), KeyModifiers::CONTROL | KeyModifiers::ALT)),
+            None
+        );
     }
 
     #[test]

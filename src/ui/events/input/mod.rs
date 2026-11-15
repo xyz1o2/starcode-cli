@@ -110,13 +110,17 @@ pub(crate) fn restore_queued_messages_to_input(state: &mut ChatState) -> bool {
     if state.pending_user_messages.is_empty() {
         return false;
     }
-    let mut parts: Vec<String> = state.pending_user_messages.drain(..).collect();
-    if !state.input.trim().is_empty() {
-        parts.push(state.input.clone());
+    let parts: Vec<String> = state.pending_user_messages.drain(..).collect();
+    let mut text = parts.join("\n");
+    if !state.input.is_empty() {
+        text.push('\n');
     }
-    let text = parts.join("\n");
-    reset_main_textarea(state);
+    // 保留草稿里的图片/文本占位符及其 paste_segments 映射。
+    state.textarea.move_cursor(tui_textarea::CursorMove::Top);
+    state.textarea.move_cursor(tui_textarea::CursorMove::Head);
     state.textarea.insert_str(&text);
+    state.textarea.move_cursor(tui_textarea::CursorMove::Bottom);
+    state.textarea.move_cursor(tui_textarea::CursorMove::End);
     sync_input_from_textarea(state);
     crate::ui::services::suggestions::on_input_changed(state);
     true
@@ -631,8 +635,9 @@ pub async fn dispatch_global_binding(
             if let Some((message_id, _)) = state.steered_user_messages.last() {
                 agent_tx.send(AgentRequest::WithdrawMessage { message_id: *message_id }).await?;
             } else {
+                let message = crate::core::i18n::t1("ui.withdraw.unavailable");
                 state.push_toast(
-                    crate::core::i18n::t1("ui.withdraw.unavailable"),
+                    &message,
                     crate::ui::state::store::ToastKind::Info,
                 );
             }
@@ -1820,7 +1825,7 @@ async fn handle_paste(
     state: &mut ChatState,
     key: KeyEvent,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    if !key.modifiers.contains(KeyModifiers::CONTROL) || key.code != KeyCode::Char('v') {
+    if crate::ui::events::keymap::binding_for(&key) != Some(GlobalBinding::Paste) {
         return Ok(false);
     }
 
@@ -1996,6 +2001,36 @@ fn apply_vim_motion(state: &mut ChatState, motion: &crate::ui::vim::motions::Mot
 mod tests {
     use super::*;
     use crate::ui::state::store::AgentTaskInfo;
+
+    #[test]
+    fn task_panel_does_not_consume_clipboard_fallback_key() {
+        let mut state = ChatState::test_fixture();
+        state.task_panel.is_visible = true;
+        let key = KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        assert!(!handle_task_panel_key(&mut state, key));
+        assert_eq!(
+            crate::ui::events::keymap::binding_for(&key),
+            Some(GlobalBinding::Paste)
+        );
+    }
+
+    #[test]
+    fn restoring_queued_messages_preserves_image_draft() {
+        let mut state = ChatState::test_fixture();
+        insert_image_paste_block(&mut state, "/tmp/draft-image.png".into(), 10, 10);
+        sync_input_from_textarea(&mut state);
+        state.pending_user_messages.push_back("queued requirement".into());
+
+        assert!(restore_queued_messages_to_input(&mut state));
+        assert!(state.input.starts_with("queued requirement\n"));
+        assert_eq!(state.paste_segments.len(), 1);
+        let expanded = crate::ui::state::expand_paste_segments(&state.input, &state.paste_segments);
+        assert!(expanded.contains("![Image](/tmp/draft-image.png)"));
+        assert!(state.pending_user_messages.is_empty());
+    }
 
     /// **帮助浮层必须能被 ESC 关掉。**
     ///
