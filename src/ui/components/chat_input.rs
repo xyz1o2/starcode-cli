@@ -162,6 +162,7 @@ pub fn render_input(f: &mut Frame<'_>, state: &ChatState, area: Rect) {
 }
 
 fn build_paste_lines(state: &ChatState) -> Vec<Line<'static>> {
+    let theme = state.theme_manager.current();
     let lines = state.textarea.lines();
     let mut rendered: Vec<Line> = Vec::new();
     for line in lines.iter().take(MAX_RENDER_LINES) {
@@ -198,37 +199,28 @@ fn build_paste_lines(state: &ChatState) -> Vec<Line<'static>> {
                             Span::styled("]".to_string(), Style::default().fg(Color::Cyan)),
                         ])
                     }
-                    PasteKind::Image {
-                        path,
-                        width,
-                        height,
-                    } => {
-                        let fname = std::path::Path::new(path)
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or(path.as_str())
-                            .to_string();
-                        Line::from(vec![
-                            prefix,
-                            Span::styled(
-                                format!("[📷 {}×{} ", width, height),
-                                Style::default().fg(Color::Magenta),
+                    PasteKind::Image { width, height, .. } => Line::from(vec![
+                        prefix,
+                        Span::styled(
+                            format!(
+                                "[{} #{} · {}×{}]",
+                                crate::core::i18n::t1("ui.image.label"),
+                                id + 1,
+                                width,
+                                height
                             ),
-                            Span::styled(
-                                fname,
-                                Style::default()
-                                    .fg(Color::White)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled("]".to_string(), Style::default().fg(Color::Magenta)),
-                        ])
-                    }
+                            Style::default().fg(theme.primary),
+                        ),
+                    ]),
                     PasteKind::AttachedImage(image) => Line::from(vec![
                         prefix,
                         Span::styled(
                             format!(
-                                "[Image {}×{} · {}]",
-                                image.width, image.height, image.media_type
+                                "[{} #{} · {}×{}]",
+                                crate::core::i18n::t1("ui.image.label"),
+                                id + 1,
+                                image.width,
+                                image.height
                             ),
                             Style::default().fg(Color::Magenta),
                         ),

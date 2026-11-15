@@ -284,10 +284,15 @@ fn render_command_hints_overlay(
 
     let max_items: usize = 8;
     let total = state.command_hints.len();
-    let visible = total.min(max_items);
-    let hints_height = (visible as u16) + 2;
-    // 与 "@" 文件弹窗统一宽度
-    let popup_width = input_area.width.min(80);
+    let visible = total
+        .min(max_items)
+        .min(input_area.y.saturating_sub(f.area().y) as usize);
+    if visible == 0 || input_area.width < 4 {
+        return;
+    }
+    let hints_height = visible as u16;
+    // 补全属于输入区，占满可用宽度，避免右侧露出聊天文字。
+    let popup_width = input_area.width;
     let popup_area = Rect {
         x: input_area.x,
         y: input_area.y.saturating_sub(hints_height),
@@ -320,10 +325,12 @@ fn render_command_hints_overlay(
             })
             .max()
             .unwrap_or(10);
-        (max_cmd + 2).clamp(10, 24)
+        (max_cmd + 2)
+            .clamp(10, 24)
+            .min(popup_width.saturating_sub(3) as usize)
     };
-    // 描述可用宽度：弹窗宽 - 图标(3) - 命令列 - 边框(2) - 余量(2)
-    let desc_w = popup_width.saturating_sub(name_w as u16 + 7).max(10) as usize;
+    // 描述使用图标和命令列之外的剩余宽度，窄窗口允许为零。
+    let desc_w = popup_width.saturating_sub(name_w as u16 + 3) as usize;
 
     let hint_items: Vec<ListItem> = state
         .command_hints
@@ -344,7 +351,7 @@ fn render_command_hints_overlay(
             let (bg, label_fg, desc_fg, icon) = if is_selected {
                 (theme.selection_bg, theme.foreground, theme.secondary, "▶")
             } else {
-                (Color::Reset, theme.primary, theme.inactive, " ")
+                (theme.background, theme.primary, theme.inactive, " ")
             };
 
             let mut spans = vec![
@@ -361,7 +368,7 @@ fn render_command_hints_overlay(
                 Span::styled(
                     format!(
                         "{}{}",
-                        cmd_part,
+                        crate::ui::utils::text::truncate_display(cmd_part, name_w),
                         " ".repeat(
                             name_w
                                 .saturating_sub(crate::ui::utils::render::display_width(cmd_part))
@@ -392,14 +399,48 @@ fn render_command_hints_overlay(
         })
         .collect();
 
-    let hints_list = List::new(hint_items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(theme.border))
-            .title(" Commands ")
-            .title_style(Style::default().fg(theme.primary)),
-    );
+    let hints_list = List::new(hint_items).style(Style::default().bg(theme.background));
     f.render_widget(Clear, popup_area);
     f.render_widget(hints_list, popup_area);
+}
+
+#[cfg(test)]
+mod screenshot_regressions {
+    use super::*;
+    #[test]
+    fn command_completion_covers_full_input_width() {
+        let mut state = ChatState::test_fixture();
+        state.show_command_hints = true;
+        state.command_hints = vec![
+            "/chat save - Save current session".into(),
+            "/chat resume - Restore saved session".into(),
+        ];
+        crate::ui::test_support::assert_render!("command_completion_full_width", 96, 6, |f| {
+            f.render_widget(
+                ratatui::widgets::Paragraph::new("behind chat\nbehind chat\nbehind chat"),
+                f.area(),
+            );
+            render_command_hints_overlay(
+                f,
+                &state,
+                Rect::new(0, 3, 96, 3),
+                state.theme_manager.current(),
+            );
+        });
+    }
+    #[test]
+    fn command_completion_fits_short_narrow_terminal() {
+        let mut state = ChatState::test_fixture();
+        state.show_command_hints = true;
+        state.command_hints = vec!["/very-long-command - description".into(); 12];
+        state.selected_hint = 11;
+        crate::ui::test_support::assert_render!("command_completion_narrow", 16, 4, |f| {
+            render_command_hints_overlay(
+                f,
+                &state,
+                Rect::new(0, 2, 16, 2),
+                state.theme_manager.current(),
+            );
+        });
+    }
 }

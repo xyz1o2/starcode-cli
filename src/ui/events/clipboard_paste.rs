@@ -299,6 +299,18 @@ mod tests {
     }
 
     #[test]
+    fn image_paste_preserves_running_status() {
+        let mut state = ChatState::test_fixture();
+        state.current_status_line = Some("Waiting for provider".into());
+        insert_image_paste_block(&mut state, "/tmp/image.png".into(), 686, 411);
+        assert_eq!(
+            state.current_status_line.as_deref(),
+            Some("Waiting for provider")
+        );
+        assert_eq!(state.paste_segments.len(), 1);
+    }
+
+    #[test]
     fn clipboard_result_does_not_cross_sessions_or_submissions() {
         let mut state = ChatState::test_fixture();
         ready_clipboard(&mut state, ClipboardPayload::Text("old clipboard".into()));
@@ -459,13 +471,15 @@ pub(crate) fn insert_image_paste_block(
     }
     state.textarea.insert_str(&placeholder);
     state.textarea.insert_newline();
-    state.current_status_line = Some(format!(
-        "{}（{}×{} px → {}）",
-        crate::core::i18n::t1("paste.image"),
-        width,
-        height,
-        path
-    ));
+    state.push_toast(
+        &format!(
+            "{} · {}×{}",
+            crate::core::i18n::t1("paste.image"),
+            width,
+            height
+        ),
+        crate::ui::state::ToastKind::Info,
+    );
 }
 
 /// 创建文件路径粘贴块

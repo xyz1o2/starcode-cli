@@ -428,7 +428,29 @@ pub(crate) fn render_non_tool_entry_blocks(
         ChatEntryType::User => {
             const USER_PREFIX: &str = "> ";
             let user_prefix = Span::styled(USER_PREFIX, Style::default().fg(theme.user_fg));
-            let display_content = crate::ui::utils::text::sanitize_for_tui(&entry.content);
+            let mut display_content = crate::ui::utils::text::sanitize_for_tui(&entry.content);
+            for (index, image) in entry.images.iter().enumerate() {
+                let label = format!(
+                    "[{} #{} · {} · {}×{}]",
+                    crate::core::i18n::t1("ui.image.label"),
+                    index + 1,
+                    image
+                        .media_type
+                        .strip_prefix("image/")
+                        .unwrap_or(&image.media_type)
+                        .to_uppercase(),
+                    image.width,
+                    image.height
+                );
+                if display_content.contains("[Image]") {
+                    display_content = display_content.replacen("[Image]", &label, 1);
+                } else {
+                    if !display_content.is_empty() {
+                        display_content.push('\n');
+                    }
+                    display_content.push_str(&label);
+                }
+            }
             // "> " 是折行之后才加到首行上的，所以正文必须按 wrap_width - 2 折行，
             // 否则首行固定超出 2 列被右边界截掉；续行同样缩进 2 列，
             // 多行输入才会整块对齐在提示符右侧
@@ -659,6 +681,23 @@ fn estimate_reasoning_tokens(text: &str) -> u32 {
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn sent_image_metadata_is_visible() {
+        let state = ChatState::test_fixture();
+        let mut entry = crate::types::ChatEntry::user("[Image]\n看看这是什么");
+        entry.images.push(crate::types::ImageAttachment {
+            media_type: "image/png".into(),
+            data: "hidden-base64".into(),
+            width: 686,
+            height: 411,
+        });
+        let lines: Vec<_> = render_non_tool_entry_blocks(&state, &entry, usize::MAX, 44, false)
+            .into_iter()
+            .flatten()
+            .collect();
+        crate::ui::test_support::assert_lines_render!("sent_image_metadata", 44, 4, &lines);
+    }
 
     #[test]
     fn thinking_label_has_no_black_bg() {
