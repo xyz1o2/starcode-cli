@@ -379,6 +379,8 @@ pub async fn run_ui_loop(
                                 crate::ui::events::clipboard_paste::collect_modal_input(
                                     &state.modal_textarea,
                                 );
+                        } else if crate::ui::events::clipboard_paste::paste_confirmation_text(state, &pasted_text) {
+                            // 当前确认卡已接收正文。
                         } else if state.is_palette_open() {
                             for c in pasted_text.chars() {
                                 if !c.is_control() {
@@ -443,8 +445,12 @@ pub async fn run_ui_loop(
             // The ctrl_c handler in the select below will catch it.
         }
 
-        // Check and clear paste flag (delay a short time to ensure terminal has processed all characters and trailing enter)
-        if state.paste_in_progress {
+        if crate::ui::events::clipboard_paste::poll_clipboard_read(state) {
+            needs_redraw = true;
+        }
+
+        // 终端文本粘贴的保护窗口与后台读取分别维护。
+        if state.paste_in_progress && state.pending_clipboard_read.is_none() {
             if let Some(end_time) = state.paste_end_time {
                 if end_time.elapsed() > Duration::from_millis(350) {
                     state.paste_in_progress = false;

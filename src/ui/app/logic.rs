@@ -333,6 +333,13 @@ async fn steer_user_message(
     let message_id = state.next_message_id;
     state.next_message_id += 1;
 
+    if let Some(entry) = state.chat_history.iter_mut().rev().find(|entry| {
+        entry.entry_type == ChatEntryType::User && entry.content == user_input
+    }) {
+        entry.group_id = Some(format!("user-message:{message_id}"));
+    }
+    state.steered_user_messages.push((message_id, user_input.clone()));
+
     append_transcript_event(
         state,
         "user",

@@ -1,6 +1,11 @@
 {
   "ui.input.placeholder": "询问 Star（Shift+Enter 换行，Ctrl+P 打开命令面板，Ctrl+T 打开任务面板，Tab 自动补全）",
   "ui.input.empty": "(空内容)",
+  "ui.help.key.withdraw_message": "撤回最近尚未处理的消息",
+  "ui.withdraw.success": "消息已撤回并放回输入框",
+  "ui.withdraw.unavailable": "消息已被处理或发送，无法撤回",
+  "ui.paste.failed": "无法读取剪贴板内容",
+  "ui.paste.target_changed": "当前输入目标已改变，已丢弃剪贴板结果",
   "ui.input.paste_folded": "[已粘贴内容 +{lines} 行]",
 
   "ui.status.start": "状态：开始处理",

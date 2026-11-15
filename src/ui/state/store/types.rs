@@ -82,6 +82,33 @@ pub struct PendingModelChange {
     pub provider_id: Option<String>,
 }
 
+/// 剪贴板读取启动时固定目标，防止慢读取把内容插进另一张确认卡。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardTarget {
+    Prompt {
+        session_id: Option<String>,
+        session_started_at: Instant,
+        next_message_id: u64,
+    },
+    Question {
+        tool_call_id: String,
+        question_index: usize,
+    },
+    Feedback {
+        tool_call_id: String,
+    },
+}
+
+pub enum ClipboardPayload {
+    Image(String, u32, u32),
+    Text(String),
+}
+
+pub struct PendingClipboardRead {
+    pub target: ClipboardTarget,
+    pub result: tokio::sync::oneshot::Receiver<Result<ClipboardPayload, String>>,
+}
+
 /// 粘贴块类型
 #[derive(Debug, Clone)]
 pub enum PasteKind {

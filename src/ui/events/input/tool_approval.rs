@@ -15,6 +15,12 @@ pub(super) async fn handle_tool_approval(
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     if state.is_awaiting_confirmation {
+        if super::handle_paste(state, key).await? {
+            return Ok(true);
+        }
+        if key.code == KeyCode::Enter && state.pending_clipboard_read.is_some() {
+            return Ok(true);
+        }
         if let Some(id) = state.pending_tool_call_id.clone() {
             let is_ask = state
                 .pending_confirmation_entry_idx
@@ -95,7 +101,7 @@ pub(super) async fn handle_tool_approval(
                         state.show_permission_debug = false;
                         state.clear_pending_confirmation();
                     }
-                    KeyCode::Char(ch) => {
+                    KeyCode::Char(ch) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
                         state.pending_confirmation_feedback.push(ch);
                         if let Some(idx) = state.pending_confirmation_entry_idx {
                             state.rendered_cache.remove(&idx);

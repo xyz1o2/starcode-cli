@@ -48,6 +48,8 @@ pub enum GlobalBinding {
     ClearScreen,
     /// Ctrl+V — 粘贴
     Paste,
+    /// Alt+Shift+Backspace — 撤回最近尚未消费的补充消息
+    WithdrawMessage,
     /// F1 — 帮助
     ToggleHelp,
     /// Shift+Tab — 切换 Plan/Build
@@ -75,6 +77,7 @@ impl GlobalBinding {
             Self::Exit => "Ctrl+D",
             Self::ClearScreen => "Ctrl+L",
             Self::Paste => "Ctrl+V",
+            Self::WithdrawMessage => "Alt+Shift+Backspace",
             Self::ToggleHelp => "F1",
             Self::TogglePlanMode => "Shift+Tab",
             Self::FoldInput => "Alt+P",
@@ -136,6 +139,10 @@ pub const GLOBAL_BINDINGS: &[BindingDoc] = &[
         key: "ui.help.key.paste",
     },
     BindingDoc {
+        binding: GlobalBinding::WithdrawMessage,
+        key: "ui.help.key.withdraw_message",
+    },
+    BindingDoc {
         binding: GlobalBinding::ToggleHelp,
         key: "ui.help.key.toggle_help",
     },
@@ -193,6 +200,7 @@ pub fn binding_for(key: &KeyEvent) -> Option<GlobalBinding> {
 
     if alt {
         return match key.code {
+            KeyCode::Backspace if shift => Some(GlobalBinding::WithdrawMessage),
             KeyCode::Char('p') | KeyCode::Char('P') => Some(GlobalBinding::FoldInput),
             // Alt+T 循环思考深度；Alt+Shift+T 切主题。两者共用 Alt+T 前缀，
             // 用 shift 位区分（此前是靠 `ch.is_uppercase()` 判断字符大小写，
@@ -347,6 +355,15 @@ mod tests {
     }
 
     #[test]
+    fn withdrawal_does_not_override_alt_backspace_word_deletion() {
+        assert_eq!(binding_for(&key(KeyCode::Backspace, KeyModifiers::ALT)), None);
+        assert_eq!(
+            binding_for(&key(KeyCode::Backspace, KeyModifiers::ALT | KeyModifiers::SHIFT)),
+            Some(GlobalBinding::WithdrawMessage)
+        );
+    }
+
+    #[test]
     fn registry_labels_are_unique() {
         let mut labels: Vec<&str> = GLOBAL_BINDINGS.iter().map(|b| b.binding.label()).collect();
         labels.sort_unstable();
@@ -373,6 +390,7 @@ mod tests {
             GlobalBinding::Exit,
             GlobalBinding::ClearScreen,
             GlobalBinding::Paste,
+            GlobalBinding::WithdrawMessage,
             GlobalBinding::ToggleHelp,
             GlobalBinding::TogglePlanMode,
             GlobalBinding::FoldInput,

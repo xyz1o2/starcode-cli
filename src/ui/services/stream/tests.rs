@@ -1,8 +1,32 @@
 //! handle_stream_update 的测试。
-//!
-//! 单独成文件：这个模块两千多行，比被测代码本身还大。
-//!
-use super::*;
+
+#[tokio::test]
+async fn withdrawal_waits_for_runtime_and_preserves_draft_and_history() {
+    let mut state = ChatState::test_fixture();
+    let mut entry = ChatEntry::user("pending requirement");
+    entry.group_id = Some("user-message:42".into());
+    state.chat_history.push(entry);
+    state.chat_history.push(ChatEntry::assistant("still working"));
+    state.steered_user_messages.push((42, "pending requirement".into()));
+    state.textarea.insert_str("draft");
+    crate::ui::events::clipboard_paste::sync_input_from_textarea(&mut state);
+    let (tx, _rx) = mpsc::channel(4);
+
+    handle_stream_update(&mut state, StreamMessage::MessageWithdrawal {
+        message_id: 42, withdrawn: false,
+    }, &tx).await.unwrap();
+    assert_eq!(state.chat_history[0].content, "pending requirement");
+    assert_eq!(state.input, "draft");
+
+    state.steered_user_messages.push((42, "pending requirement".into()));
+    handle_stream_update(&mut state, StreamMessage::MessageWithdrawal {
+        message_id: 42, withdrawn: true,
+    }, &tx).await.unwrap();
+    assert_eq!(state.chat_history.len(), 1);
+    assert_eq!(state.chat_history[0].content, "still working");
+    assert_eq!(state.input, "pending requirement\ndraft");
+    assert!(state.steered_user_messages.is_empty());
+}
 
 use super::*;
 use crate::types::StarToolCallFunction;
@@ -938,6 +962,66 @@ fn async_agent_launch_remaps_indices_before_follow_up_updates() {
 }
 
 #[test]
+fn tool_result_insert_before_agent_keeps_progress_on_its_own_card() {
+    let mut state = ChatState::test_fixture();
+    state.chat_history.clear();
+    let mut call = agent_tool_call();
+    call.function.name = "Read".into();
+    state
+        .chat_history
+        .push(ChatEntry::tool_call("Read", call.clone()).with_streaming(true));
+    handle_agent_task_update(
+        &mut state,
+        AgentTaskUpdateArgs {
+            task_id: "worker-1".into(),
+            agent_type: "Explore".into(),
+            description: "scan".into(),
+            status: crate::types::AgentTaskStatus::Running,
+            tool_use_count: 0,
+            tokens: 0,
+            is_async: true,
+            is_resolved: false,
+            is_error: false,
+            last_tool_info: None,
+            name: None,
+            task_description: None,
+            new_sub_entries: Vec::new(),
+        },
+    );
+    assert_eq!(state.active_agent_tasks["worker-1"].entry_idx, 1);
+    handle_tool_result_message(&mut state, 42, call, ToolResult {
+        success: true,
+        output: Some("read ok".into()),
+        error: None,
+        data: None,
+        llm_content: None,
+    });
+    assert_eq!(state.chat_history[1].entry_type, ChatEntryType::ToolResult);
+    assert_eq!(state.active_agent_tasks["worker-1"].entry_idx, 2);
+    handle_agent_task_update(
+        &mut state,
+        AgentTaskUpdateArgs {
+            task_id: "worker-1".into(),
+            agent_type: "Explore".into(),
+            description: "scan".into(),
+            status: crate::types::AgentTaskStatus::Running,
+            tool_use_count: 1,
+            tokens: 12,
+            is_async: true,
+            is_resolved: false,
+            is_error: false,
+            last_tool_info: Some("Reading config".into()),
+            name: None,
+            task_description: None,
+            new_sub_entries: Vec::new(),
+        },
+    );
+    assert_eq!(state.chat_history[2].agent_tool_use_count, Some(1));
+    assert_eq!(state.chat_history[2].agent_task_id.as_deref(), Some("worker-1"));
+    assert_eq!(state.chat_history[1].entry_type, ChatEntryType::ToolResult);
+}
+
+#[test]
 fn completed_background_agent_returns_to_main_and_keeps_history() {
     let mut state = ChatState::test_fixture();
     let task_id = "explorer-1";
@@ -991,6 +1075,47 @@ fn completed_background_agent_returns_to_main_and_keeps_history() {
         state.chat_history[entry_idx].agent_status,
         Some(crate::types::AgentTaskStatus::Completed)
     );
+}
+
+#[test]
+fn failed_background_agent_shows_reason_after_detail_is_closed() {
+    let mut state = ChatState::test_fixture();
+    let task_id = "failed-explorer";
+    let update = |status, reason: Option<&str>| AgentTaskUpdateArgs {
+        task_id: task_id.to_string(),
+        agent_type: "Explore".to_string(),
+        description: "Inspect UI".to_string(),
+        status,
+        tool_use_count: 0,
+        tokens: 0,
+        is_async: true,
+        is_resolved: true,
+        is_error: reason.is_some(),
+        last_tool_info: reason.map(str::to_string),
+        name: None,
+        task_description: None,
+        new_sub_entries: Vec::new(),
+    };
+    handle_agent_task_update(
+        &mut state,
+        update(crate::types::AgentTaskStatus::Running, None),
+    );
+    state.enter_teammate_view(task_id);
+    handle_agent_task_update(
+        &mut state,
+        update(crate::types::AgentTaskStatus::Failed, Some("SubAgent failed: unavailable")),
+    );
+    assert!(state.viewing_agent_task_id.is_none());
+    let entry = &state.chat_history[state.active_agent_tasks[task_id].entry_idx];
+    assert_eq!(entry.agent_status, Some(crate::types::AgentTaskStatus::Failed));
+    assert_eq!(entry.agent_last_tool_info.as_deref(), Some("SubAgent failed: unavailable"));
+    let blocks = crate::ui::components::agent_task_render::render_agent_task_entry(
+        &state, entry, 64, state.active_agent_tasks[task_id].entry_idx,
+    );
+    let text = blocks.iter().flat_map(|block| block.iter()).flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref()).collect::<String>();
+    assert!(text.contains("SubAgent failed: unavailable"), "{text}");
+    assert!(!text.contains("Waiting for the first tool call"), "{text}");
 }
 
 #[test]

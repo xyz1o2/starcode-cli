@@ -472,10 +472,26 @@ fn render_teammate_view(state: &ChatState, area_width: u16) -> Option<Vec<Line<'
     let mut lines = vec![Line::from(header), Line::from("")];
 
     if info.sub_entries.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  Waiting for the first tool call…",
-            Style::default().fg(theme.inactive),
-        )));
+        let detail = match info.status {
+            crate::types::AgentTaskStatus::Failed | crate::types::AgentTaskStatus::Rejected => {
+                info.last_tool_info.as_deref().unwrap_or("Task failed")
+            }
+            crate::types::AgentTaskStatus::Completed => "Task completed without tool calls",
+            crate::types::AgentTaskStatus::Running | crate::types::AgentTaskStatus::Background => {
+                info.last_tool_info
+                    .as_deref()
+                    .unwrap_or("Waiting for the first tool call…")
+            }
+        };
+        for wrapped in crate::ui::utils::text::wrap_detail(
+            detail,
+            area_width.saturating_sub(2).max(1) as usize,
+        ) {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", wrapped),
+                Style::default().fg(status_color),
+            )));
+        }
         return Some(lines);
     }
 

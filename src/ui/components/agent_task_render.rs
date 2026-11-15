@@ -47,7 +47,7 @@ pub fn render_agent_task_entry(
         }
     } else if is_resolved {
         // 已完成：精简一行 "Done"（含耗时）
-        blocks.push(render_done_line(state, entry));
+        blocks.push(render_done_line(state, entry, area_width));
     } else if sub_entries.is_empty() {
         // 初始化中
         blocks.push(vec![Line::from(Span::styled(
@@ -173,7 +173,7 @@ fn render_agent_header(entry: &ChatEntry, area_width: u16, theme: &Theme) -> Vec
 ///
 /// 对标 Claude Code 的 Done 格式:
 /// `│  ⎿  Done (N tool uses · Nk tokens · Xs)`
-fn render_done_line(state: &ChatState, entry: &ChatEntry) -> Vec<Line<'static>> {
+fn render_done_line(state: &ChatState, entry: &ChatEntry, area_width: u16) -> Vec<Line<'static>> {
     let theme = state.theme_manager.current();
     let tool_count = entry.agent_tool_use_count.unwrap_or(0);
     let tokens = entry.agent_tokens.unwrap_or(0);
@@ -236,7 +236,19 @@ fn render_done_line(state: &ChatState, entry: &ChatEntry) -> Vec<Line<'static>> 
         spans.push(Span::styled(")", Style::default().fg(theme.inactive)));
     }
 
-    vec![Line::from(spans)]
+    let mut lines = vec![Line::from(spans)];
+    if matches!(status, AgentTaskStatus::Failed | AgentTaskStatus::Rejected) {
+        if let Some(reason) = entry.agent_last_tool_info.as_deref().filter(|s| !s.is_empty()) {
+            let width = area_width.saturating_sub(6).max(1) as usize;
+            for line in crate::ui::utils::text::wrap_detail(reason, width) {
+                lines.push(Line::from(Span::styled(
+                    format!("      {}", line),
+                    Style::default().fg(color),
+                )));
+            }
+        }
+    }
+    lines
 }
 
 /// 折叠后的工具活动行（分组进度条目）

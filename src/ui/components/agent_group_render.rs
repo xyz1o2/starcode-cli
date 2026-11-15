@@ -241,10 +241,16 @@ fn render_agent_progress_lines(
             with_elapsed(&crate::core::i18n::t1("agent.done"), stat),
             Color::Green,
         ),
-        AgentTaskStatus::Failed => (
-            with_elapsed(&crate::core::i18n::t1("agent.failed"), stat),
-            Color::Red,
-        ),
+        AgentTaskStatus::Failed => {
+            let status = with_elapsed(&crate::core::i18n::t1("agent.failed"), stat);
+            let reason = stat.last_tool_info.as_deref().unwrap_or("");
+            let text = if reason.is_empty() {
+                status
+            } else {
+                format!("{} — {}", status, reason)
+            };
+            (text, Color::Red)
+        },
         // 用户拒绝授权（对标 renderToolUseRejectedMessage）
         AgentTaskStatus::Rejected => {
             let reason = stat.last_tool_info.as_deref().unwrap_or("");
@@ -263,9 +269,20 @@ fn render_agent_progress_lines(
             (text.to_string(), Color::DarkGray)
         }
     };
-    line2_spans.push(Span::styled(status_text, Style::default().fg(status_color)));
-
-    vec![vec![Line::from(line1_spans)], vec![Line::from(line2_spans)]]
+    let indent_width = 6;
+    let available = (area_width as usize).saturating_sub(indent_width).max(1);
+    let mut status_lines = crate::ui::utils::text::wrap_detail(&status_text, available)
+        .into_iter()
+        .map(|line| {
+            let mut spans = line2_spans.clone();
+            spans.push(Span::styled(line, Style::default().fg(status_color)));
+            Line::from(spans)
+        })
+        .collect::<Vec<_>>();
+    if status_lines.is_empty() {
+        status_lines.push(Line::from(line2_spans));
+    }
+    vec![vec![Line::from(line1_spans)], status_lines]
 }
 
 /// Agent 统计信息（从 AgentTaskInfo 提取）

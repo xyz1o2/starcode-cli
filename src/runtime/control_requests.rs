@@ -21,6 +21,12 @@ pub async fn handle_request(
         AgentRequest::Abort => {
             agent.abort();
         }
+        AgentRequest::WithdrawMessage { message_id } => {
+            let _ = tx.send(StreamMessage::MessageWithdrawal {
+                message_id,
+                withdrawn: false,
+            }).await;
+        }
         AgentRequest::Shutdown { response } => {
             // worker 在空闲状态截获此请求，经过唯一的 SessionEnd epilogue 后才确认。
             let _ = response

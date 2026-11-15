@@ -4,7 +4,6 @@ use tui_textarea::TextArea;
 
 use crate::ui::state::ChatState;
 use arboard::Clipboard;
-use chrono::Local;
 use image::ImageFormat;
 use std::fs;
 
@@ -28,73 +27,63 @@ pub(crate) fn save_clipboard_image() -> Option<(String, u32, u32)> {
 
     let mut clipboard = Clipboard::new().ok()?;
     let image_data = clipboard.get_image().ok()?;
-    let current_dir = std::env::current_dir().ok()?;
-    let images_dir = current_dir.join(".star").join("images");
-    fs::create_dir_all(&images_dir).ok()?;
-    let timestamp = Local::now().format("%Y%m%d_%H%M%S");
-    let filename = format!("image_{}.png", timestamp);
-    let file_path = images_dir.join(&filename);
-    let width = image_data.width as u32;
-    let height = image_data.height as u32;
+    let width = u32::try_from(image_data.width).ok()?;
+    let height = u32::try_from(image_data.height).ok()?;
     let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
         width,
         height,
         image_data.bytes.into_owned(),
     )?;
 
-    // Resize if dimensions exceed limits
-    let (final_width, final_height, final_img) =
-        if width > IMAGE_MAX_WIDTH || height > IMAGE_MAX_HEIGHT {
-            let ratio_w = IMAGE_MAX_WIDTH as f64 / width as f64;
-            let ratio_h = IMAGE_MAX_HEIGHT as f64 / height as f64;
-            let ratio = ratio_w.min(ratio_h);
-            let new_width = (width as f64 * ratio).round() as u32;
-            let new_height = (height as f64 * ratio).round() as u32;
-            let resized = image::imageops::resize(
-                &img,
-                new_width,
-                new_height,
-                image::imageops::FilterType::Lanczos3,
-            );
-            (new_width, new_height, resized)
-        } else {
-            (width, height, img)
-        };
-
-    // Save as PNG first
-    final_img
-        .save_with_format(&file_path, ImageFormat::Png)
-        .ok()?;
-
-    // Check file size and compress to JPEG if too large
-    let file_size = fs::metadata(&file_path).ok()?.len();
-    if file_size > IMAGE_MAX_SIZE_BYTES {
-        let jpg_path = images_dir.join(format!("image_{}.jpg", timestamp));
-        let dynamic_img = image::DynamicImage::ImageRgba8(final_img);
-        dynamic_img
-            .save_with_format(&jpg_path, ImageFormat::Jpeg)
-            .ok()?;
-        // Remove the PNG file and use JPEG instead
-        let _ = fs::remove_file(&file_path);
-        Some((
-            format!(".star/images/image_{}.jpg", timestamp),
-            final_width,
-            final_height,
-        ))
-    } else {
-        Some((
-            format!(".star/images/{}", filename),
-            final_width,
-            final_height,
-        ))
-    }
+    save_pasted_image(image::DynamicImage::ImageRgba8(img))
 }
 
-/// WSL 下的 Windows 剪贴板桥：`powershell.exe Get-Clipboard -Format Image`
-/// 把 Windows 侧的截图存成 PNG，再从 `/mnt/c/...` 拷回项目里。
+/// 两条剪贴板来源共用解码后的图片处理，保存前验证尺寸和编码体积。
+fn save_pasted_image(img: image::DynamicImage) -> Option<(String, u32, u32)> {
+    let storage = crate::core::config::storage::Storage::new(std::env::current_dir().ok()?);
+    save_pasted_image_in(img, &storage.star_dir().join("images"))
+}
+
+fn save_pasted_image_in(
+    img: image::DynamicImage,
+    images_dir: &std::path::Path,
+) -> Option<(String, u32, u32)> {
+    use std::io::{Cursor, Write};
+
+    if img.width() == 0 || img.height() == 0 {
+        return None;
+    }
+    let img = if img.width() > IMAGE_MAX_WIDTH || img.height() > IMAGE_MAX_HEIGHT {
+        img.resize(IMAGE_MAX_WIDTH, IMAGE_MAX_HEIGHT, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let mut encoded = Cursor::new(Vec::new());
+    img.write_to(&mut encoded, ImageFormat::Png).ok()?;
+    let extension = if encoded.get_ref().len() as u64 > IMAGE_MAX_SIZE_BYTES {
+        encoded = Cursor::new(Vec::new());
+        // JPEG 编码器不接受 RGBA；显式转 RGB 后再检查体积。
+        image::DynamicImage::ImageRgb8(img.to_rgb8())
+            .write_to(&mut encoded, ImageFormat::Jpeg)
+            .ok()?;
+        "jpg"
+    } else {
+        "png"
+    };
+    if encoded.get_ref().len() as u64 > IMAGE_MAX_SIZE_BYTES {
+        return None;
+    }
+    fs::create_dir_all(images_dir).ok()?;
+    let path = images_dir.join(format!("image_{}.{}", uuid::Uuid::new_v4(), extension));
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&path).ok()?;
+    file.write_all(encoded.get_ref()).ok()?;
+    Some((path.to_string_lossy().into_owned(), img.width(), img.height()))
+}
+
+/// WSL 下通过 STA PowerShell 读取 Windows 图片，解码后保存到项目状态目录。
 ///
 /// 返回 None 表示 Windows 侧没有图片（或桥失败）——调用方回落 arboard。
-/// 剪贴板里是文本时 PowerShell 输出 "no image"，同样走回落。
+/// 剪贴板里是文本时不输出图片路径，同样走回落。
 #[cfg(target_os = "linux")]
 fn save_clipboard_image_wsl() -> Option<(String, u32, u32)> {
     use std::process::Command;
@@ -102,82 +91,139 @@ fn save_clipboard_image_wsl() -> Option<(String, u32, u32)> {
     let win_temp = Command::new("powershell.exe")
         .args([
             "-NoProfile",
+            "-STA",
             "-Command",
-            "$img = Get-Clipboard -Format Image; \
+            "Add-Type -AssemblyName System.Windows.Forms; \
+             $img = [System.Windows.Forms.Clipboard]::GetImage(); \
              if ($img) { \
-               $p = Join-Path $env:TEMP 'starcode_clip.png'; \
-               $img.Save($p, [System.Drawing.Imaging.ImageFormat]::Png); \
-               Write-Output $p \
-             } else { Write-Output 'no image' }",
+               $p = Join-Path $env:TEMP ('starcode_clip_' + [guid]::NewGuid().ToString() + '.png'); \
+               try { $img.Save($p, [System.Drawing.Imaging.ImageFormat]::Png); Write-Output $p } \
+               finally { $img.Dispose() } \
+             }",
         ])
         .output()
         .ok()?;
-
-    let stdout = String::from_utf8_lossy(&win_temp.stdout).trim().to_string();
-    if !stdout.ends_with(".png") {
+    if !win_temp.status.success() {
         return None;
     }
+    let stdout = String::from_utf8_lossy(&win_temp.stdout);
+    let path = windows_clipboard_path(stdout.trim())?;
+    let decoded = image::open(&path);
+    // 只清理本次桥创建的唯一临时文件。
+    let _ = fs::remove_file(&path);
+    save_pasted_image(decoded.ok()?)
+}
 
-    // `C:\Users\...\starcode_clip.png` → `/mnt/c/Users/.../starcode_clip.png`
-    let wsl_path = stdout.replace('\\', "/");
-    let wsl_path = wsl_path
-        .strip_prefix("C:/")
-        .map(|rest| format!("/mnt/c/{}", rest))?;
-    let bytes = fs::read(&wsl_path).ok()?;
-
-    let current_dir = std::env::current_dir().ok()?;
-    let images_dir = current_dir.join(".star").join("images");
-    fs::create_dir_all(&images_dir).ok()?;
-    let timestamp = Local::now().format("%Y%m%d_%H%M%S");
-    let file_path = images_dir.join(format!("image_{}.png", timestamp));
-    fs::write(&file_path, &bytes).ok()?;
-
-    // 尺寸从 PNG 头解（IHDR 在固定偏移：8 字节签名 + 4 长度 + 4 类型 + 宽高各 4）
-    let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
-    let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
-
-    // 复用 arboard 路径的尺寸限制与 JPEG 降档逻辑：只在本函数内做超限压缩
-    let img = image::open(&file_path).ok()?;
-    let (final_width, final_height, final_img) =
-        if width > IMAGE_MAX_WIDTH || height > IMAGE_MAX_HEIGHT {
-            let ratio_w = IMAGE_MAX_WIDTH as f64 / width as f64;
-            let ratio_h = IMAGE_MAX_HEIGHT as f64 / height as f64;
-            let ratio = ratio_w.min(ratio_h);
-            let new_width = (width as f64 * ratio).round() as u32;
-            let new_height = (height as f64 * ratio).round() as u32;
-            let resized = image::imageops::resize(
-                &img,
-                new_width,
-                new_height,
-                image::imageops::FilterType::Lanczos3,
-            );
-            (new_width, new_height, resized)
-        } else {
-            (width, height, img.to_rgba8())
-        };
-    final_img
-        .save_with_format(&file_path, ImageFormat::Png)
-        .ok()?;
-
-    let file_size = fs::metadata(&file_path).ok()?.len();
-    if file_size > IMAGE_MAX_SIZE_BYTES {
-        let jpg_path = images_dir.join(format!("image_{}.jpg", timestamp));
-        final_img
-            .save_with_format(&jpg_path, ImageFormat::Jpeg)
-            .ok()?;
-        let _ = fs::remove_file(&file_path);
-        Some((
-            format!(".star/images/image_{}.jpg", timestamp),
-            final_width,
-            final_height,
-        ))
-    } else {
-        Some((
-            format!(".star/images/image_{}.png", timestamp),
-            final_width,
-            final_height,
-        ))
+/// Windows 临时路径按实际盘符映射到 WSL 挂载点。
+fn windows_clipboard_path(path: &str) -> Option<std::path::PathBuf> {
+    let normalized = path.replace('\\', "/");
+    let bytes = normalized.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || &bytes[1..3] != b":/" {
+        return None;
     }
+    let name = normalized.rsplit('/').next()?;
+    if !name.starts_with("starcode_clip_") || !name.ends_with(".png") {
+        return None;
+    }
+    Some(std::path::PathBuf::from(format!(
+        "/mnt/{}/{}", (bytes[0] as char).to_ascii_lowercase(), &normalized[3..]
+    )))
+}
+
+pub(crate) fn clipboard_target(state: &ChatState) -> Option<crate::ui::state::ClipboardTarget> {
+    use crate::ui::state::ClipboardTarget;
+    if state.is_awaiting_confirmation {
+        let tool_call_id = state.pending_tool_call_id.clone()?;
+        let is_question = state.pending_confirmation_entry_idx
+            .and_then(|idx| state.chat_history.get(idx))
+            .and_then(|entry| entry.confirmation.as_ref())
+            .is_some_and(|confirmation| matches!(
+                confirmation.details, crate::types::ConfirmationDetails::AskUserQuestion { .. }
+            ));
+        return Some(if is_question {
+            ClipboardTarget::Question { tool_call_id, question_index: state.pending_question_index }
+        } else {
+            ClipboardTarget::Feedback { tool_call_id }
+        });
+    }
+    if !matches!(crate::ui::events::key_context::KeyContext::of(state),
+        crate::ui::events::key_context::KeyContext::TextInput
+        | crate::ui::events::key_context::KeyContext::Vim
+        | crate::ui::events::key_context::KeyContext::TaskPanel
+        | crate::ui::events::key_context::KeyContext::SuggestionOverlay
+        | crate::ui::events::key_context::KeyContext::BgAgentSelector
+    ) {
+        return None;
+    }
+    Some(ClipboardTarget::Prompt)
+}
+
+/// 确认卡的文本粘贴与 Ctrl+V 共用目标；不把内容漏进背后的主输入框。
+pub(crate) fn paste_confirmation_text(state: &mut ChatState, text: &str) -> bool {
+    use crate::ui::state::ClipboardTarget;
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    match clipboard_target(state) {
+        Some(ClipboardTarget::Question { .. }) => {
+            state.pending_question_other_focused = true;
+            state.pending_other_input.push_str(&normalized);
+        }
+        Some(ClipboardTarget::Feedback { .. }) => {
+            state.confirmation_feedback_mode = true;
+            state.pending_confirmation_feedback.push_str(&normalized);
+        }
+        _ => return false,
+    }
+    if let Some(idx) = state.pending_confirmation_entry_idx {
+        state.rendered_cache.remove(&idx);
+    }
+    true
+}
+
+/// 事件循环取回后台剪贴板结果；读取期间继续处理键盘和模型消息。
+pub(crate) fn poll_clipboard_read(state: &mut ChatState) -> bool {
+    use crate::ui::state::{ClipboardPayload, ClipboardTarget};
+    use tokio::sync::oneshot::error::TryRecvError;
+    let Some(pending) = state.pending_clipboard_read.as_mut() else { return false; };
+    let result = match pending.result.try_recv() {
+        Ok(result) => result,
+        Err(TryRecvError::Empty) => return false,
+        Err(TryRecvError::Closed) => Err("Clipboard reader stopped".to_string()),
+    };
+    let target = state.pending_clipboard_read.take().unwrap().target;
+    state.paste_in_progress = false;
+    state.paste_end_time = Some(Instant::now());
+    if clipboard_target(state).as_ref() != Some(&target) {
+        state.push_toast(&crate::core::i18n::t1("ui.paste.target_changed"), crate::ui::state::ToastKind::Info);
+        return true;
+    }
+    match result {
+        Ok(ClipboardPayload::Image(path, width, height)) => {
+            if target == ClipboardTarget::Prompt {
+                insert_image_paste_block(state, path, width, height);
+                sync_input_from_textarea(state);
+                crate::ui::services::suggestions::on_input_changed(state);
+            } else {
+                paste_confirmation_text(state, &format!("\n![Image]({path})\n"));
+            }
+        }
+        Ok(ClipboardPayload::Text(text)) => {
+            if !paste_confirmation_text(state, &text) {
+                if let Some(paths) = detect_file_paths(&text) {
+                    insert_file_paste_block(state, paths);
+                } else {
+                    insert_paste_block(state, text);
+                    maybe_auto_fold_input(state);
+                }
+                sync_input_from_textarea(state);
+                crate::ui::services::suggestions::on_input_changed(state);
+            }
+        }
+        Err(error) => {
+            crate::utils::logging::append_debug_log_line(&format!("[PASTE] {error}"));
+            state.push_toast(&crate::core::i18n::t1("ui.paste.failed"), crate::ui::state::ToastKind::Error);
+        }
+    }
+    true
 }
 
 /// 检测文本是否全部为已存在的绝对路径，是则返回路径列表

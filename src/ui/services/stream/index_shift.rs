@@ -77,6 +77,11 @@ pub(super) fn shift_index_caches_after_insert(state: &mut ChatState, pos: usize)
             queued.entry_idx += 1;
         }
     }
+    for info in state.active_agent_tasks.values_mut() {
+        if info.entry_idx >= pos {
+            info.entry_idx += 1;
+        }
+    }
 
     // 思考块的索引表也要跟着位移（与删除路径同构，方向相反）。
     state.expanded_thinking_indices = state

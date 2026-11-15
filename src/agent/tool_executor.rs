@@ -170,6 +170,29 @@ fn confirmation_summary(args: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
+/// 消息授权需要完整收件人和正文；不能只给一张泛用的工具名卡片。
+fn message_confirmation_details(
+    tool_name: &str,
+    args: &serde_json::Value,
+    mut details: crate::core::tools::tools::ToolCallConfirmationDetails,
+) -> crate::core::tools::tools::ToolCallConfirmationDetails {
+    if !tool_name.eq_ignore_ascii_case("SendMessage") {
+        return details;
+    }
+    let target = if args.get("message_type").and_then(|v| v.as_str()) == Some("broadcast") {
+        "*"
+    } else {
+        args.get("target_agent").and_then(|v| v.as_str()).unwrap_or("<missing>")
+    };
+    let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("<missing>");
+    let message = args.get("message").and_then(|v| v.as_str()).unwrap_or("<missing>");
+    details.prompt = format!(
+        "{}\nTo: {}\nSummary: {}\nMessage:\n{}",
+        details.prompt, target, summary, message
+    );
+    details
+}
+
 /// 没有命中任何规则、只是兜底 `AskUser` 时的确认卡片。
 ///
 /// 与 `policy_confirmation_details` 的区别只在文案：这里**没有** ask 规则命中，
@@ -572,7 +595,11 @@ impl ToolExecutor {
         }
 
         // 用户确认卡片：默认兜底文案（没有规则可指）。
-        let details = default_confirmation_details(tool_name, args);
+        let details = message_confirmation_details(
+            tool_name,
+            args,
+            default_confirmation_details(tool_name, args),
+        );
         crate::utils::logging::append_debug_log_line(&format!(
             "🔔 Asking for approval: {} (source=fallback_default, registryless)",
             tool_name
@@ -892,6 +919,7 @@ impl ToolExecutor {
             Ok(None) => return Gate::Open,
             Err(e) => return Gate::Closed(e.to_string()),
         };
+        let details = message_confirmation_details(tool_name, args, details);
         let on_confirm = details.on_confirm.clone();
 
         // 每次弹框都留一条面包屑。

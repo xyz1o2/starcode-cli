@@ -1,6 +1,11 @@
 {
   "ui.input.placeholder": "Ask Star (Shift+Enter for newline, Ctrl+P for commands, Ctrl+T for tasks, Tab for auto-completion)",
   "ui.input.empty": "(empty)",
+  "ui.help.key.withdraw_message": "Withdraw the latest pending message",
+  "ui.withdraw.success": "Message withdrawn and returned to the prompt",
+  "ui.withdraw.unavailable": "Message already processed or sent; it cannot be withdrawn",
+  "ui.paste.failed": "Could not read the clipboard",
+  "ui.paste.target_changed": "Clipboard result discarded because the active input changed",
   "ui.input.paste_folded": "[Pasted +{lines} lines]",
 
   "ui.status.start": "Status: processing",

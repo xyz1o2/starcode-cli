@@ -338,10 +338,15 @@ pub fn build_confirmation_card_block(
     // 弹框混成一个「时而问时而不问」的谜。放 `risk` 行之前，先读原因再读风险。
     if let Some(reason) = &confirmation.reason {
         if !reason.trim().is_empty() {
-            lines.push(Line::from(Span::styled(
-                format!("  ⚡ {}", reason.trim()),
-                Style::default().fg(palette.accent),
-            )));
+            for wrapped in crate::ui::utils::text::wrap_detail(
+                &format!("⚡ {}", reason.trim()),
+                wrap_width.saturating_sub(2).max(1),
+            ) {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", wrapped),
+                    Style::default().fg(palette.accent),
+                )));
+            }
         }
     }
 
@@ -434,21 +439,23 @@ pub fn build_confirmation_card_block(
         }
         _ => {
             if let ConfirmationDetails::Generic { title, prompt } = &confirmation.details {
-                lines.push(Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(
-                        truncate_str(title, 40),
+                for wrapped in crate::ui::utils::text::wrap_detail(
+                    title,
+                    wrap_width.saturating_sub(2).max(1),
+                ) {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", wrapped),
                         Style::default().fg(theme.foreground),
-                    ),
-                ]));
-                if !prompt.is_empty() {
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", Style::default()),
-                        Span::styled(
-                            truncate_str(prompt, 60),
-                            Style::default().fg(palette.secondary),
-                        ),
-                    ]));
+                    )));
+                }
+                for wrapped in crate::ui::utils::text::wrap_detail(
+                    prompt,
+                    wrap_width.saturating_sub(2).max(1),
+                ) {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", wrapped),
+                        Style::default().fg(palette.secondary),
+                    )));
                 }
             }
         }
@@ -1405,6 +1412,38 @@ mod tests {
             !rendered.contains("Feedback"),
             "空闲态不该出现 Feedback 行：{rendered}"
         );
+    }
+
+    /// 多行授权正文必须在审批前完整可见，窄终端仍有四个可选动作。
+    #[test]
+    fn generic_card_wraps_full_message_and_keeps_choices() {
+        let confirmation = conf(
+            ConfirmationType::Generic,
+            ConfirmationDetails::Generic {
+                title: "Permission required: SendMessage".to_string(),
+                prompt: "To: worker-1\nSummary: Hand off audit\nMessage:\n请检查这个很长的用户界面文字并报告结果".to_string(),
+            },
+        );
+        let lines = build_confirmation_card_block(
+            &confirmation, 20, 1, false, false, false, "", &test_theme(),
+        );
+        let rendered = lines.iter().flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref()).collect::<String>();
+        assert!(rendered.contains("To: worker-1"), "{rendered}");
+        assert!(rendered.contains("Summary: Hand off"), "{rendered}");
+        assert!(rendered.contains("报告结果"), "{rendered}");
+        for choice in ["1. ", "2. ", "3. ", "4. "] {
+            assert!(rendered.contains(choice), "{choice} missing: {rendered}");
+        }
+        for line in lines.iter().filter(|line| {
+            line.spans.iter().any(|span| {
+                let text = span.content.as_ref();
+                text.contains("To:") || text.contains("Summary:") || text.contains("Message:")
+                    || text.contains("报告结果")
+            })
+        }) {
+            assert!(line.width() <= 20, "overlong detail line: {line:?}");
+        }
     }
 
     /// 「这次为什么要问」要上卡 —— ask 规则 / 兜底询问的区分靠它。

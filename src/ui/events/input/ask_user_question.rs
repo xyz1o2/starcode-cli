@@ -67,11 +67,11 @@ pub(super) async fn handle_ask_user_question_input(
                 state.pending_question_other_focused = false;
                 invalidate_cache(state);
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 state.pending_question_other_focused = false;
                 invalidate_cache(state);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 state.pending_question_other_focused = false;
                 invalidate_cache(state);
             }
@@ -91,7 +91,7 @@ pub(super) async fn handle_ask_user_question_input(
                 state.pending_other_input.pop();
                 invalidate_cache(state);
             }
-            KeyCode::Char(ch) => {
+            KeyCode::Char(ch) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
                 state.pending_other_input.push(ch);
                 invalidate_cache(state);
             }

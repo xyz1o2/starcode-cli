@@ -36,10 +36,15 @@ pub(super) fn handle_agent_task_update(state: &mut ChatState, args: AgentTaskUpd
     let mut sub_entries = prior.map(|i| i.sub_entries.clone()).unwrap_or_default();
     sub_entries.extend(args.new_sub_entries.iter().cloned());
     // 进度 chunk 未携带这些字段时沿用旧值，避免状态行闪回 "Initializing…"
-    let last_tool_info = args
-        .last_tool_info
-        .clone()
-        .or_else(|| prior.and_then(|i| i.last_tool_info.clone()));
+    // 失败终态缺正文时只保留之前的失败原因，不能把成功的工具活动当作错误。
+    let last_tool_info = args.last_tool_info.clone().or_else(|| {
+        prior
+            .filter(|info| {
+                !matches!(args.status, crate::types::AgentTaskStatus::Failed)
+                    || matches!(info.status, crate::types::AgentTaskStatus::Failed)
+            })
+            .and_then(|info| info.last_tool_info.clone())
+    });
     let name = args
         .name
         .clone()
@@ -50,8 +55,30 @@ pub(super) fn handle_agent_task_update(state: &mut ChatState, args: AgentTaskUpd
         .or_else(|| prior.and_then(|i| i.task_description.clone()));
 
     let entry_idx = match prior.map(|i| i.entry_idx) {
-        Some(idx) if idx < state.chat_history.len() => idx,
-        _ => attach_agent_task_entry(state, &args),
+        Some(idx)
+            if state.chat_history.get(idx).is_some_and(|entry| match entry.entry_type {
+                ChatEntryType::AgentTask => entry.agent_task_id.as_deref() == Some(args.task_id.as_str()),
+                ChatEntryType::AgentGroup => entry
+                    .agent_task_ids
+                    .as_ref()
+                    .is_some_and(|ids| ids.contains(&args.task_id)),
+                _ => false,
+            }) =>
+        {
+            idx
+        }
+        _ => state
+            .chat_history
+            .iter()
+            .position(|entry| match entry.entry_type {
+                ChatEntryType::AgentTask => entry.agent_task_id.as_deref() == Some(args.task_id.as_str()),
+                ChatEntryType::AgentGroup => entry
+                    .agent_task_ids
+                    .as_ref()
+                    .is_some_and(|ids| ids.contains(&args.task_id)),
+                _ => false,
+            })
+            .unwrap_or_else(|| attach_agent_task_entry(state, &args)),
     };
 
     // 独立 AgentTask 条目从 entry 自身取数渲染；AgentGroup 从

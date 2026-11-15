@@ -237,6 +237,16 @@ pub async fn handle_streaming_request(
                 .await;
             StreamingRequestOutcome::Continue
         }
+        Some(AgentRequest::WithdrawMessage { message_id }) => {
+            let withdrawn = context.steering_queue
+                .remove_first(|(id, _)| *id == message_id)
+                .is_some();
+            let _ = context.tx.send(StreamMessage::MessageWithdrawal {
+                message_id,
+                withdrawn,
+            }).await;
+            StreamingRequestOutcome::Continue
+        }
         Some(AgentRequest::SendMessage {
             message_id,
             message,

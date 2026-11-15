@@ -216,6 +216,11 @@ pub enum StreamMessage {
     Done {
         message_id: u64,
     },
+    /// 只有运行时确实从待消费队列移除后，UI 才能声称撤回成功。
+    MessageWithdrawal {
+        message_id: u64,
+        withdrawn: bool,
+    },
     Error {
         message_id: u64,
         error: String,
@@ -342,6 +347,10 @@ pub enum AgentRequest {
     SendMessage {
         message_id: u64,
         message: String,
+    },
+    /// 撤回尚在 steering 队列里的消息；已进入模型请求的消息不可撤回。
+    WithdrawMessage {
+        message_id: u64,
     },
     /// 请求模型列表。`force = false`（打开面板等隐式触发）走缓存优先的便宜路径；
     /// `force = true`（面板里的 `⟳`）跳过缓存并扇出到所有已配置 provider。

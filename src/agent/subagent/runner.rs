@@ -794,6 +794,9 @@ impl AsyncSubagentRunner {
                                 final_tokens.min(u64::from(u32::MAX)) as u32,
                             )
                             .with_async(true)
+                            .with_last_tool_info(
+                                matches!(status, NotificationStatus::Failed).then(|| output.clone()),
+                            )
                             .with_name(agent_name.clone())
                             .with_task_description(Some(desc.clone())),
                     ),

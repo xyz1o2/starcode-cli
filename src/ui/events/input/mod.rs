@@ -54,12 +54,6 @@ use crate::ui::events::keymap::GlobalBinding;
 use crate::ui::state::palette::{PaletteAction, PaletteMode};
 use crate::ui::state::ChatState;
 
-/// Result from clipboard operations (to avoid blocking async runtime)
-enum ClipboardResult {
-    Image(String, u32, u32),
-    Text(String),
-}
-
 /// 尝试从剪贴板读取图片并保存到 .star/images/，返回 (相对路径, 宽, 高)
 
 fn clear_suggestion_overlays(state: &mut ChatState) {
@@ -620,6 +614,30 @@ pub async fn dispatch_global_binding(
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     match binding {
+        GlobalBinding::WithdrawMessage => {
+            if KeyContext::of(state).is_exclusive() {
+                return Ok(false);
+            }
+            if restore_queued_messages_to_input(state) {
+                return Ok(true);
+            }
+            state.steered_user_messages.retain(|(id, _)| {
+                let tag = format!("user-message:{id}");
+                state.chat_history.iter().any(|entry| {
+                    entry.entry_type == ChatEntryType::User
+                        && entry.group_id.as_deref() == Some(tag.as_str())
+                })
+            });
+            if let Some((message_id, _)) = state.steered_user_messages.last() {
+                agent_tx.send(AgentRequest::WithdrawMessage { message_id: *message_id }).await?;
+            } else {
+                state.push_toast(
+                    crate::core::i18n::t1("ui.withdraw.unavailable"),
+                    crate::ui::state::store::ToastKind::Info,
+                );
+            }
+            Ok(true)
+        }
         // 已经在 `handle_key_event` 开头处理过（要抢在行内确认之前），这里只是
         // 保证注册表里每个绑定都有唯一实现。
         GlobalBinding::TogglePlanMode => {
@@ -889,6 +907,10 @@ pub async fn handle_key_event(
     agent_tx: &mpsc::Sender<AgentRequest>,
     last_key_time: Option<Instant>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // 确认卡的粘贴先于旧模态处理，避免隐藏的输入模态截走图片。
+    if KeyContext::of(state) == KeyContext::ToolConfirmation && handle_paste(state, key).await? {
+        return Ok(());
+    }
     // ── Unified modal stack takes priority over everything else ──
     // Palette / MCP / Market modals consume keys first; Esc pops one level.
     if super::modal_input::handle_modal_key(state, key, agent_tx).await? {
@@ -1802,54 +1824,32 @@ async fn handle_paste(
         return Ok(false);
     }
 
-    state.paste_in_progress = true;
-    state.paste_end_time = Some(Instant::now());
-
-    // Timeout prevents hangs on WSL2/SSH where clipboard access may block indefinitely
-    const CLIPBOARD_TIMEOUT_MS: u64 = 500;
-    let clipboard_result = timeout(
-        Duration::from_millis(CLIPBOARD_TIMEOUT_MS),
-        tokio::task::spawn_blocking(|| {
-            if let Some((path, w, h)) = save_clipboard_image() {
-                return Ok(ClipboardResult::Image(path, w, h));
-            }
-            if let Ok(mut clipboard) = Clipboard::new() {
-                if let Ok(text) = clipboard.get_text() {
-                    return Ok(ClipboardResult::Text(text));
-                }
-            }
-            Err("Clipboard empty".to_string())
-        }),
-    )
-    .await;
-
-    match clipboard_result {
-        Ok(Ok(Ok(ClipboardResult::Image(path, w, h)))) => {
-            insert_image_paste_block(state, path, w, h);
-            sync_input_from_textarea(state);
-            crate::ui::services::suggestions::on_input_changed(state);
-        }
-        Ok(Ok(Ok(ClipboardResult::Text(text)))) => {
-            if let Some(file_paths) = detect_file_paths(&text) {
-                insert_file_paste_block(state, file_paths);
-            } else {
-                insert_paste_block(state, text);
-                if state.paste_segments.is_empty() {
-                    maybe_auto_fold_input(state);
-                }
-            }
-            sync_input_from_textarea(state);
-            crate::ui::services::suggestions::on_input_changed(state);
-        }
-        Err(_) => {
-            // Timeout — clipboard access hung (common on WSL2/SSH)
-            crate::utils::logging::append_debug_log_line(
-                "[PASTE] Clipboard read timed out, ignoring Ctrl+V",
-            );
-            return Ok(false);
-        }
-        _ => return Ok(false),
+    let Some(target) = super::clipboard_paste::clipboard_target(state) else {
+        return Ok(false);
+    };
+    if state.pending_clipboard_read.is_some() {
+        return Ok(true);
     }
+    let (tx, result) = tokio::sync::oneshot::channel();
+    state.pending_clipboard_read = Some(crate::ui::state::PendingClipboardRead { target, result });
+    state.paste_in_progress = true;
+    state.paste_end_time = None;
+    tokio::spawn(async move {
+        use crate::ui::state::ClipboardPayload;
+        let read = tokio::task::spawn_blocking(|| {
+            if let Some((path, width, height)) = save_clipboard_image() {
+                return Ok(ClipboardPayload::Image(path, width, height));
+            }
+            Clipboard::new().and_then(|mut clipboard| clipboard.get_text())
+                .map(ClipboardPayload::Text).map_err(|error| error.to_string())
+        });
+        let value = match timeout(Duration::from_secs(15), read).await {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => Err(error.to_string()),
+            Err(_) => Err("Clipboard read timed out".to_string()),
+        };
+        let _ = tx.send(value);
+    });
     Ok(true)
 }
 

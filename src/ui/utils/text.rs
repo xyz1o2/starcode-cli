@@ -30,6 +30,27 @@ pub fn truncate_display(text: &str, max_width: usize) -> String {
     crate::ui::utils::render::truncate_to_display_width(text, max_width)
 }
 
+/// 按终端列宽折行，保留段落和空行；超窄视口仍保留完整宽字符。
+pub fn wrap_detail(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut current = String::new();
+        let mut used = 0;
+        for ch in paragraph.chars() {
+            let ch_width = crate::ui::utils::render::char_display_width(ch);
+            if !current.is_empty() && used + ch_width > width {
+                lines.push(std::mem::take(&mut current));
+                used = 0;
+            }
+            current.push(ch);
+            used += ch_width;
+        }
+        lines.push(current);
+    }
+    lines
+}
+
 /// 一行渲染结果里的纯文本（去掉所有样式）。
 pub fn line_plain_text(line: &ratatui::text::Line<'_>) -> String {
     line.spans
@@ -489,6 +510,13 @@ pub fn find_last_split_point(s: &str, max_chars: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detail_wrap_preserves_cjk_and_blank_lines() {
+        let lines = wrap_detail("错误原因\n\ntail", 4);
+        assert_eq!(lines, vec!["错误", "原因", "", "tail"]);
+        assert_eq!(wrap_detail("中", 0), vec!["中"]);
+    }
 
     /// 截断不能切碎宽字符，也不能 panic。
     ///

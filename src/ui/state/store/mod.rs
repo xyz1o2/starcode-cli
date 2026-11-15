@@ -57,6 +57,8 @@ pub struct ChatState {
     pub complete_task_message_ids: HashSet<u64>,
     pub auto_continued_message_ids: HashSet<u64>,
     pub pending_user_messages: VecDeque<String>,
+    /// 已送入运行时的补充消息，以独立 message_id 区分，撤回以回执为准。
+    pub steered_user_messages: Vec<(u64, String)>,
     // ============ Command History ============
     pub command_history: VecDeque<String>,
     pub history_index: Option<usize>,
@@ -416,6 +418,7 @@ pub struct ChatState {
     pub input_folded: bool,
     /// 内嵌粘贴块列表（每块以占位符 [Pasted text #N +M lines] 或 [Image #N] 存于 textarea）
     pub paste_segments: Vec<PasteSegment>,
+    pub pending_clipboard_read: Option<PendingClipboardRead>,
     // ============ App Control ============
     pub should_exit: bool,
     /// 上次按 Ctrl+C 的时间，用于双击退出检测
@@ -802,6 +805,7 @@ impl ChatState {
             complete_task_message_ids: HashSet::new(),
             auto_continued_message_ids: HashSet::new(),
             pending_user_messages: VecDeque::new(),
+            steered_user_messages: Vec::new(),
             // ============ Command History ============
             command_history: crate::core::config::history_store::load_history(),
             history_index: None,
@@ -986,6 +990,7 @@ impl ChatState {
             paste_end_time: None,
             input_folded: false,
             paste_segments: Vec::new(),
+            pending_clipboard_read: None,
             should_exit: false,
             last_ctrl_c: None,
             last_esc_at: None,
