@@ -132,6 +132,21 @@ pub fn on_input_changed(state: &mut ChatState) {
     }
 }
 
+/// 粘贴保护到期本身也是状态变化，必须恢复当时被隐藏的候选并触发重绘。
+pub(crate) fn expire_paste_guard(state: &mut ChatState) -> bool {
+    if state.pending_clipboard_read.is_some()
+        || !state
+            .paste_end_time
+            .is_some_and(|ended| ended.elapsed() >= Duration::from_millis(PASTE_HINT_GUARD_MS))
+    {
+        return false;
+    }
+    state.paste_in_progress = false;
+    state.paste_end_time = None;
+    on_input_changed(state);
+    true
+}
+
 fn should_suppress_hints(state: &ChatState) -> bool {
     if state.paste_in_progress {
         return true;
@@ -218,6 +233,7 @@ fn update_textarea_from_input(state: &mut ChatState) {
     textarea.set_placeholder_text("Type a message...");
     textarea.set_cursor_line_style(ratatui::style::Style::default());
     textarea.set_cursor_render_mode(tui_textarea::CursorRenderMode::Hidden);
+    textarea.set_wrap_mode(tui_textarea::WrapMode::WordOrGlyph);
 
     // Move cursor to end
     textarea.move_cursor(tui_textarea::CursorMove::Bottom);
@@ -498,6 +514,30 @@ mod tests {
                 "next Enter must reach command dispatch"
             );
         }
+    }
+
+    /// 已取回的剪贴板结果同样受短保护；仍在读取时不能提前解锁。
+    #[test]
+    fn paste_guard_waits_for_reader_and_refreshes_completed_paste() {
+        let mut state = ChatState::test_fixture();
+        state.set_input_text("/");
+        state.paste_end_time = Some(std::time::Instant::now() - Duration::from_secs(1));
+        let (_tx, result) = tokio::sync::oneshot::channel();
+        state.pending_clipboard_read = Some(crate::ui::state::PendingClipboardRead {
+            target: crate::ui::state::ClipboardTarget::Prompt {
+                session_id: state.active_session_id.clone(),
+                session_started_at: state.session_started_at,
+                next_message_id: state.next_message_id,
+            },
+            result,
+        });
+        assert!(!expire_paste_guard(&mut state));
+        state.pending_clipboard_read = None;
+        assert!(!state.paste_in_progress);
+        assert!(expire_paste_guard(&mut state));
+        assert!(state.show_command_hints);
+        assert!(!state.command_hints.is_empty());
+        assert!(!expire_paste_guard(&mut state));
     }
 
     /// 输入开头的 `/` 命令提示不受影响。

@@ -2039,6 +2039,177 @@ mod tests {
     use super::*;
     use crate::ui::state::store::AgentTaskInfo;
 
+    /// 用真实按键覆盖清空后的同步和命令补全，不直接给 input 赋期望值。
+    #[tokio::test]
+    async fn slash_completion_recovers_after_deleting_long_input() {
+        for (after_paste, panel_visible, use_tab) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, true, true),
+        ] {
+            let mut state = ChatState::test_fixture();
+            state.task_panel.is_visible = panel_visible;
+            let (tx, _rx) = mpsc::channel(16);
+            if after_paste {
+                state.paste_in_progress = true;
+                state.paste_end_time = Some(Instant::now());
+            }
+            let text = "长文本🙂abcdefghijklmnopqrstuvwx".repeat(3);
+            for ch in text.chars() {
+                handle_key_event(
+                    &mut state,
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                    &tx,
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+            for _ in text.chars() {
+                handle_key_event(
+                    &mut state,
+                    KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                    &tx,
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+            assert!(state.input.is_empty());
+            assert_eq!(state.textarea.lines(), [""]);
+            assert_eq!(
+                crate::ui::components::chat_input::calc_input_height(&mut state, 20),
+                3
+            );
+            if after_paste {
+                state.paste_end_time = Some(Instant::now());
+            }
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .unwrap();
+            if after_paste {
+                assert!(!state.show_command_hints);
+                assert!(!crate::ui::services::suggestions::expire_paste_guard(
+                    &mut state
+                ));
+                state.paste_end_time = Some(Instant::now() - Duration::from_secs(1));
+                assert!(crate::ui::services::suggestions::expire_paste_guard(
+                    &mut state
+                ));
+                assert!(!state.paste_in_progress);
+            }
+            assert_eq!(state.input, "/");
+            assert!(state.show_command_hints);
+            assert!(!state.command_hints.is_empty());
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(state.selected_hint, 1);
+            let chosen = state.command_hints[1]
+                .split(" - ")
+                .next()
+                .unwrap()
+                .to_owned();
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(
+                    if use_tab {
+                        KeyCode::Tab
+                    } else {
+                        KeyCode::Enter
+                    },
+                    KeyModifiers::NONE,
+                ),
+                &tx,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(state.input.trim(), chosen);
+            assert_eq!(state.input, state.textarea.lines().join("\n"));
+            assert_eq!(
+                state.textarea.wrap_mode(),
+                tui_textarea::WrapMode::WordOrGlyph
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn task_editing_keeps_keys_when_prompt_suggestions_exist() {
+        let mut state = ChatState::test_fixture();
+        state.task_panel.is_visible = true;
+        state.task_panel.editing_task_id = Some("task-test".into());
+        state.task_panel.edit_input.insert_str("task");
+        state.set_input_text("/");
+        crate::ui::services::suggestions::on_input_changed(&mut state);
+        let (tx, _rx) = mpsc::channel(16);
+        for code in [KeyCode::Char('x'), KeyCode::Left, KeyCode::Char('y')] {
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(code, KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(state.task_panel.edit_input.lines(), ["taskyx"]);
+        assert_eq!(state.input, "/");
+        assert_eq!(state.selected_hint, 0);
+    }
+
+    /// 删除引用不能让已失效的粘贴记录继续隐藏编辑器和原生光标。
+    #[tokio::test]
+    async fn deleting_paste_reference_restores_wrapped_editor() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut state = ChatState::test_fixture();
+        let (tx, _rx) = mpsc::channel(16);
+        insert_paste_block(&mut state, "pasted text ".repeat(300));
+        sync_input_from_textarea(&mut state);
+        assert_eq!(state.paste_segments.len(), 1);
+        while !state.input.is_empty() {
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(state.paste_segments.len(), 1);
+        for ch in "abcdefghijklmnopqrstuvwx".chars() {
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let height = crate::ui::components::chat_input::calc_input_height(&mut state, 12);
+        assert!(height > 3);
+        let mut terminal = Terminal::new(TestBackend::new(12, height)).unwrap();
+        terminal
+            .draw(|f| crate::ui::components::chat_input::render_input(f, &state, f.area()))
+            .unwrap();
+        assert!(terminal.backend().cursor_visible());
+        assert!(state.textarea.rendered_cursor_position().unwrap().y > 1);
+    }
+
     #[test]
     fn task_panel_does_not_consume_clipboard_fallback_key() {
         let mut state = ChatState::test_fixture();

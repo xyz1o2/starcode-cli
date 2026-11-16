@@ -570,6 +570,9 @@ pub(super) fn reset_main_textarea(state: &mut ChatState) {
     state
         .textarea
         .set_cursor_render_mode(tui_textarea::CursorRenderMode::Hidden);
+    state
+        .textarea
+        .set_wrap_mode(tui_textarea::WrapMode::WordOrGlyph);
     state.input.clear();
     state.input_line_count = 0;
     state.input_folded = false;

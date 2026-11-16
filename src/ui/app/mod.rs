@@ -44,7 +44,8 @@ pub struct RenderOutput {
 fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect) -> RenderOutput {
     use ratatui::layout::{Constraint, Direction, Layout};
 
-    let input_height = crate::ui::components::chat_input::calc_input_height(state);
+    let input_height = crate::ui::components::chat_input::calc_input_height(state, viewport.width)
+        .min(viewport.height.saturating_sub(4).max(3));
     let status_lines =
         crate::ui::components::status_line::build_status_lines(state, viewport.width);
     let footer_h = input_height + status_lines.len() as u16;

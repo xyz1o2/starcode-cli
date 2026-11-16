@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::core::i18n;
+use crate::ui::events::key_context::KeyContext;
 use crate::ui::state::{ChatState, PasteKind};
 use crate::ui::themes::theme::Theme;
 
@@ -78,10 +79,18 @@ pub fn resolve_border_color(state: &ChatState) -> Color {
     }
 }
 
-/// Calculate the required height for the input area
-pub fn calc_input_height(state: &ChatState) -> u16 {
+/// 粘贴记录保留供撤销恢复；只有正文里仍存在的引用才接管输入绘制。
+fn has_active_paste_blocks(state: &ChatState) -> bool {
+    state.textarea.lines().iter().any(|line| {
+        crate::ui::state::parse_paste_reference(line)
+            .is_some_and(|id| state.paste_segments.get(id).is_some())
+    })
+}
+
+/// 按当前宽度测量视觉行，软换行不修改实际提交的正文。
+pub fn calc_input_height(state: &mut ChatState, width: u16) -> u16 {
     let total_lines = state.input_line_count;
-    let has_paste_blocks = !state.paste_segments.is_empty();
+    let has_paste_blocks = has_active_paste_blocks(state);
     let can_fold = total_lines >= crate::ui::state::INPUT_FOLD_MIN_LINES;
     let is_folded = can_fold && state.input_folded && !has_paste_blocks;
 
@@ -89,8 +98,10 @@ pub fn calc_input_height(state: &ChatState) -> u16 {
         total_lines.min(MAX_RENDER_LINES)
     } else if is_folded {
         2
+    } else if total_lines > MAX_RENDER_LINES {
+        MAX_RENDER_LINES
     } else {
-        total_lines.min(MAX_RENDER_LINES).max(1)
+        usize::from(state.textarea.measure(width).content_rows).clamp(1, MAX_RENDER_LINES)
     };
 
     // Block with TOP + BOTTOM borders adds 2 lines
@@ -113,7 +124,7 @@ pub fn render_input(f: &mut Frame<'_>, state: &ChatState, area: Rect) {
     let all_lines = state.textarea.lines();
     let total_lines = state.input_line_count;
     let is_truncated = total_lines > MAX_RENDER_LINES;
-    let has_paste_blocks = !state.paste_segments.is_empty();
+    let has_paste_blocks = has_active_paste_blocks(state);
     let can_fold = total_lines >= crate::ui::state::INPUT_FOLD_MIN_LINES;
     let is_folded = can_fold && state.input_folded && !has_paste_blocks;
 
@@ -139,6 +150,10 @@ pub fn render_input(f: &mut Frame<'_>, state: &ChatState, area: Rect) {
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
+    // 补全和常驻任务面板仍接收正文输入，其余独占上下文不显示主输入光标。
+    let context = KeyContext::of(state);
+    let show_cursor = !context.is_exclusive() || context == KeyContext::SuggestionOverlay;
+
     // Render content based on state
     if has_paste_blocks {
         let lines = build_paste_lines(state);
@@ -148,7 +163,7 @@ pub fn render_input(f: &mut Frame<'_>, state: &ChatState, area: Rect) {
         let lines = build_folded_lines(state, total_lines);
         let para = Paragraph::new(lines).wrap(Wrap { trim: false });
         f.render_widget(para, inner_area);
-        if inner_area.width > 0 && inner_area.height > 0 {
+        if show_cursor && inner_area.width > 0 && inner_area.height > 0 {
             f.set_cursor_position((inner_area.x, inner_area.y));
         }
     } else if is_truncated {
@@ -160,10 +175,8 @@ pub fn render_input(f: &mut Frame<'_>, state: &ChatState, area: Rect) {
         // 输入库已算好含宽字符和滚动的屏幕坐标，交给终端绘制原生光标。
         // 不向差分缓冲写反色光标块，避免快速删除时在部分终端留下色块。
         if let Some(position) = state.textarea.rendered_cursor_position() {
-            if inner_area.contains(position) {
-                if state.modal_stack.is_empty() && !state.show_help {
-                    f.set_cursor_position(position);
-                }
+            if show_cursor && inner_area.contains(position) {
+                f.set_cursor_position(position);
             }
         }
     }
@@ -342,20 +355,55 @@ mod tests {
 
     #[test]
     fn test_height_empty() {
-        let state = make_state(ApprovalMode::Default, "");
-        assert_eq!(calc_input_height(&state), 3);
+        let mut state = make_state(ApprovalMode::Default, "");
+        assert_eq!(calc_input_height(&mut state, 60), 3);
     }
 
     #[test]
     fn test_height_single() {
-        let state = make_state(ApprovalMode::Default, "hello");
-        assert_eq!(calc_input_height(&state), 3);
+        let mut state = make_state(ApprovalMode::Default, "hello");
+        assert_eq!(calc_input_height(&mut state, 60), 3);
     }
 
     #[test]
     fn test_height_multi() {
-        let state = make_state(ApprovalMode::Default, "a\nb\nc");
-        assert_eq!(calc_input_height(&state), 5);
+        let mut state = make_state(ApprovalMode::Default, "a\nb\nc");
+        assert_eq!(calc_input_height(&mut state, 60), 5);
+    }
+
+    /// 测量、绘制和光标共用输入库的软换行布局；缩放不能往正文插入换行。
+    #[test]
+    fn long_input_wraps_and_resizes_without_changing_text() {
+        use ratatui::backend::Backend;
+
+        for text in [
+            "abcdefghijklmnopqrstuvwx",
+            "中文输入中文输入中文输入",
+            "🙂Ａ🙂Ａ🙂Ａ🙂Ａ🙂Ａ",
+        ] {
+            let mut state = make_state(ApprovalMode::Default, text);
+            let narrow_height = calc_input_height(&mut state, 12);
+            assert!(narrow_height > 3);
+            let mut terminal = Terminal::new(TestBackend::new(12, narrow_height)).unwrap();
+            terminal
+                .draw(|f| render_input(f, &state, f.area()))
+                .unwrap();
+            let cursor = terminal.backend_mut().get_cursor_position().unwrap();
+            assert!(cursor.y > 1 && cursor.y < narrow_height - 1);
+            assert!(terminal.backend().cursor_visible());
+            let drawn: String = (1..narrow_height - 1)
+                .flat_map(|y| (0..12).map(move |x| (x, y)))
+                .filter_map(|pos| terminal.backend().buffer().cell(pos))
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .replace(' ', "");
+            assert_eq!(drawn, text);
+            assert_eq!(state.textarea.lines(), [text]);
+            assert_eq!(calc_input_height(&mut state, 100), 3);
+            assert_eq!(calc_input_height(&mut state, 12), narrow_height);
+            state.set_input_text("");
+            assert_eq!(calc_input_height(&mut state, 12), 3);
+        }
     }
 
     #[test]
@@ -441,6 +489,7 @@ mod tests {
                 .content
                 .iter()
                 .all(|cell| { !cell.modifier.contains(Modifier::REVERSED) }));
+            assert!(terminal.backend().cursor_visible());
             use ratatui::backend::Backend;
             assert_eq!(
                 terminal.backend_mut().get_cursor_position().unwrap(),
@@ -462,6 +511,50 @@ mod tests {
             terminal.backend().buffer(),
             clean_terminal.backend().buffer()
         );
+    }
+
+    /// 独占确认或弹窗接管键盘时，普通与折叠输入都必须交还原生光标。
+    #[test]
+    fn native_cursor_follows_input_focus() {
+        use crate::ui::state::modal::Modal;
+
+        let cases: &[(fn(&mut ChatState), bool)] = &[
+            (|_| {}, true),
+            (|s| s.show_command_hints = true, true),
+            (|s| s.task_panel.is_visible = true, true),
+            (|s| s.vim_enabled = true, true),
+            (|s| s.is_awaiting_confirmation = true, false),
+            (|s| s.show_clear_confirmation = true, false),
+            (|s| s.pending_model_confirmation = true, false),
+            (|s| s.bg_agent_selection = Some(0), false),
+            (|s| s.show_help = true, false),
+            (|s| s.push_modal(Modal::Palette), false),
+            (|s| s.push_modal(Modal::InputModal), false),
+        ];
+        for folded in [false, true] {
+            let mut terminal = Terminal::new(TestBackend::new(60, 5)).unwrap();
+            for (configure, visible) in cases {
+                let mut focused_state = make_state(
+                    ApprovalMode::Default,
+                    if folded {
+                        "a\nb\nc\nd\ne\nf\ng\nh"
+                    } else {
+                        "中文🙂"
+                    },
+                );
+                focused_state.input_folded = folded;
+                configure(&mut focused_state);
+                terminal
+                    .draw(|f| render_input(f, &focused_state, f.area()))
+                    .unwrap();
+                assert_eq!(
+                    terminal.backend().cursor_visible(),
+                    *visible,
+                    "context={:?}, folded={folded}",
+                    KeyContext::of(&focused_state),
+                );
+            }
+        }
     }
 
     // ── 渲染快照 ────────────────────────────────────────────────────────────

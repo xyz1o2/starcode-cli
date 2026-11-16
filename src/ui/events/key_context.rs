@@ -115,7 +115,8 @@ impl KeyContext {
         if state.bg_agent_selection.is_some() {
             return KeyContext::BgAgentSelector;
         }
-        if state.task_panel.is_visible {
+        // 编辑任务时键盘归面板；常驻展示时让位给输入框上方的补全列表。
+        if state.task_panel.is_visible && state.task_panel.is_editing() {
             return KeyContext::TaskPanel;
         }
         if state.show_provider_menu
@@ -124,6 +125,9 @@ impl KeyContext {
             || state.show_command_hints
         {
             return KeyContext::SuggestionOverlay;
+        }
+        if state.task_panel.is_visible {
+            return KeyContext::TaskPanel;
         }
         if state.vim_enabled {
             return KeyContext::Vim;
@@ -195,6 +199,16 @@ mod tests {
         assert_eq!(ctx, KeyContext::TaskPanel);
         assert!(!ctx.is_exclusive(), "任务面板不应完全独占键盘");
         assert!(ctx.vim_enabled(), "开着任务面板时 vim 仍应可用");
+    }
+
+    #[test]
+    fn suggestions_outrank_visible_panel_but_not_task_editing() {
+        let mut state = ChatState::test_fixture();
+        state.task_panel.is_visible = true;
+        state.show_command_hints = true;
+        assert_eq!(KeyContext::of(&state), KeyContext::SuggestionOverlay);
+        state.task_panel.editing_task_id = Some("task-test".into());
+        assert_eq!(KeyContext::of(&state), KeyContext::TaskPanel);
     }
 
     #[test]

@@ -5,6 +5,35 @@ use super::*;
 use super::*;
 use crate::types::ChatEntry;
 
+/// 真实页面压缩输入区高度后，软换行光标仍须落在边框内。
+#[test]
+fn wrapped_prompt_keeps_cursor_visible_in_short_viewports() {
+    use ratatui::{
+        backend::{Backend, TestBackend},
+        Terminal,
+    };
+
+    let text = "中文🙂 long-input ".repeat(40);
+    for (width, height) in [(20, 12), (40, 18), (80, 24)] {
+        let mut state = ChatState::test_fixture();
+        state.set_input_text(&text);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| crate::ui::app::draw_ui(f, &mut state))
+            .unwrap();
+        let area = state.last_input_area.unwrap();
+        let cursor = terminal.backend_mut().get_cursor_position().unwrap();
+        assert!(terminal.backend().cursor_visible());
+        assert!(
+            area.contains(cursor),
+            "{width}x{height}: {area:?}, {cursor:?}"
+        );
+        assert!(cursor.y > area.y && cursor.y < area.bottom() - 1);
+        assert_eq!(state.input, text);
+        assert_eq!(state.textarea.lines(), [text.as_str()]);
+    }
+}
+
 #[test]
 fn processing_watchdog_waits_for_recorded_tools() {
     let mut state = ChatState::new();

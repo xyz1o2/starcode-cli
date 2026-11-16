@@ -454,13 +454,8 @@ pub async fn run_ui_loop(
             needs_redraw = true;
         }
 
-        // 终端文本粘贴的保护窗口与后台读取分别维护。
-        if state.paste_in_progress && state.pending_clipboard_read.is_none() {
-            if let Some(end_time) = state.paste_end_time {
-                if end_time.elapsed() > Duration::from_millis(350) {
-                    state.paste_in_progress = false;
-                }
-            }
+        if crate::ui::services::suggestions::expire_paste_guard(state) {
+            needs_redraw = true;
         }
 
         // 取消宽限期到期后的收尾（1.5s）。**这是业务状态机，不在渲染里做** ——

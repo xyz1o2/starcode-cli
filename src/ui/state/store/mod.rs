@@ -732,14 +732,15 @@ impl ChatState {
 
     /// 把输入框整体重设为 `text`（重建 textarea，同步 `input` 与行数计数器）。
     ///
-    /// 语义是「设」而不是「追加」：`calc_input_height` 只看 `input_line_count`，
-    /// 只动 textarea 的话多行内容会被压进一行高的输入框，`state.input` 也仍是旧值。
+    /// 语义是「设」而不是「追加」：逻辑行数、编辑内容与提交正文必须同步，
+    /// 布局再按当前宽度测量软换行后的高度。只动 textarea 会让 `state.input` 留着旧值。
     /// 所有需要整体重设输入框的地方都走这里，免得 textarea 和 `state.input` 走岔。
     pub fn set_input_text(&mut self, text: &str) {
         let mut textarea = TextArea::default();
         textarea.set_placeholder_text(crate::ui::utils::text::input_placeholder_text());
         textarea.set_cursor_line_style(ratatui::style::Style::default());
         textarea.set_cursor_render_mode(tui_textarea::CursorRenderMode::Hidden);
+        textarea.set_wrap_mode(tui_textarea::WrapMode::WordOrGlyph);
         if !text.is_empty() {
             textarea.insert_str(text);
         }
@@ -774,6 +775,7 @@ impl ChatState {
         textarea.set_cursor_line_style(ratatui::style::Style::default());
         // 光标由 render_input 交给终端绘制，不在文本缓冲中反色。
         textarea.set_cursor_render_mode(tui_textarea::CursorRenderMode::Hidden);
+        textarea.set_wrap_mode(tui_textarea::WrapMode::WordOrGlyph);
 
         // 抬头占位条目：渲染走 ui::components::welcome_header（从 state 现算，
         // 见 message_render 里的 `is_welcome` 分支），所以 content 只是兜底文案，
