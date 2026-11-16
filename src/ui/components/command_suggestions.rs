@@ -287,9 +287,11 @@ fn render_command_hints_overlay(
                 let area = Rect::new(input_area.x, input_area.y - 1, input_area.width, 1);
                 f.render_widget(Clear, area);
                 f.render_widget(
-                    ratatui::widgets::Paragraph::new(
-                        crate::ui::utils::text::truncate_display(&hint, area.width as usize)
-                    ).style(Style::default().fg(theme.secondary).bg(theme.background)),
+                    ratatui::widgets::Paragraph::new(crate::ui::utils::text::truncate_display(
+                        &hint,
+                        area.width as usize,
+                    ))
+                    .style(Style::default().fg(theme.secondary).bg(theme.background)),
                     area,
                 );
             }
@@ -433,7 +435,12 @@ mod screenshot_regressions {
         assert!(!crate::ui::services::suggestions::handle_enter(&mut state));
         assert_eq!(state.input, "/resume ");
         crate::ui::test_support::assert_render!("resume_argument_help", 100, 4, |f| {
-            render_command_hints_overlay(f, &state, Rect::new(0, 1, 100, 3), state.theme_manager.current());
+            render_command_hints_overlay(
+                f,
+                &state,
+                Rect::new(0, 1, 100, 3),
+                state.theme_manager.current(),
+            );
         });
     }
 

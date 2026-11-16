@@ -645,8 +645,8 @@ fn explicit_phase_replaces_random_verb_and_normalizes_ellipsis() {
     let mut state = ChatState::test_fixture();
     state.is_processing = true;
     state.current_status_line = Some("Analyzing task complexity...".into());
-    state.processing_started_at = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(3));
+    state.processing_started_at =
+        std::time::Instant::now().checked_sub(std::time::Duration::from_secs(3));
     let lines = processing_spinner_line(&state, 100);
     let text = crate::ui::utils::text::line_plain_text(&lines[1]);
     assert!(text.contains("Analyzing task complexity… (3s"), "{text}");
@@ -655,9 +655,7 @@ fn explicit_phase_replaces_random_verb_and_normalizes_ellipsis() {
     assert!(!text.contains("..."));
     assert!(!text.contains(turn_spinner_verb(&state)));
     assert!(text.contains("esc to interrupt"));
-    crate::ui::test_support::assert_lines_render!(
-        "spinner_explicit_phase", 100, 2, &lines
-    );
+    crate::ui::test_support::assert_lines_render!("spinner_explicit_phase", 100, 2, &lines);
 }
 
 #[test]

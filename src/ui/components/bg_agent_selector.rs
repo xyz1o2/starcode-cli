@@ -48,10 +48,14 @@ pub(crate) fn selector_window_start(state: &ChatState, max_height: u16) -> usize
     let rows = state.background_agent_rows();
     let anchor = state.bg_agent_selection.or_else(|| {
         state.viewing_agent_task_id.as_ref().and_then(|id| {
-            rows.iter().position(|info| &info.task_id == id).map(|index| index + 1)
+            rows.iter()
+                .position(|info| &info.task_id == id)
+                .map(|index| index + 1)
         })
     });
-    anchor.unwrap_or(0).saturating_sub(max_height.saturating_sub(1) as usize)
+    anchor
+        .unwrap_or(0)
+        .saturating_sub(max_height.saturating_sub(1) as usize)
 }
 
 /// 渲染受高度限制的选择器，固定 main 行并跟随当前焦点。
@@ -351,7 +355,10 @@ mod tests {
         let label = crate::core::i18n::t1("ui.agent.viewing");
         assert!(!main.contains(&label));
         assert!(agent.contains(&label), "{agent}");
-        assert!(agent.contains("●"), "running status remains independent: {agent}");
+        assert!(
+            agent.contains("●"),
+            "running status remains independent: {agent}"
+        );
         let info = state.active_agent_tasks.get_mut("t2").unwrap();
         info.finished_at = Some(info.started_at + std::time::Duration::from_secs(3));
         let lines = render_selector_with_limit(&state, 100, 2);

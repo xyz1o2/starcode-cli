@@ -788,9 +788,8 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
     // 区别只在于 todo 文案要先过一遍英文/长度筛（见 in_progress_todo_verb），
     // 筛不过就用本轮固定的随机动词。
     let todo_verb = in_progress_todo_verb(state);
-    let live_status = status_suffix(state).map(|text| {
-        text.trim_end_matches(['.', '…', ' ']).to_string()
-    });
+    let live_status =
+        status_suffix(state).map(|text| text.trim_end_matches(['.', '…', ' ']).to_string());
     let hint_width = if width >= INTERRUPT_HINT_MIN_WIDTH {
         META_SEP.width() + INTERRUPT_HINT.width()
     } else {

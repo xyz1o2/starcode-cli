@@ -478,14 +478,24 @@ mod tests {
             let mut state = ChatState::test_fixture();
             state.input = "/resum".into();
             on_input_changed(&mut state);
-            state.selected_hint = state.command_hints.iter()
-                .position(|hint| hint.starts_with("/resume - ")).unwrap();
-            assert!(if use_tab { handle_tab(&mut state) } else { handle_enter(&mut state) });
+            state.selected_hint = state
+                .command_hints
+                .iter()
+                .position(|hint| hint.starts_with("/resume - "))
+                .unwrap();
+            assert!(if use_tab {
+                handle_tab(&mut state)
+            } else {
+                handle_enter(&mut state)
+            });
             assert_eq!(state.input.trim(), "/resume");
             assert!(state.show_command_hints);
             assert!(state.command_hints.is_empty());
             assert!(crate::commands::system::command_argument_hint(&state.input).is_some());
-            assert!(!handle_enter(&mut state), "next Enter must reach command dispatch");
+            assert!(
+                !handle_enter(&mut state),
+                "next Enter must reach command dispatch"
+            );
         }
     }
 
