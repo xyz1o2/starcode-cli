@@ -7,6 +7,8 @@ pub use types::*;
 pub struct SubAgentRequest {
     pub prompt: String,
     pub max_rounds: Option<u32>,
+    /// 单次调用的模型覆盖；None 或 inherit 继承父级模型及 provider。
+    pub model: Option<String>,
     /// 子代理类型：共享流式循环，Explorer 选择专用搜索提示与工具白名单。
     pub subagent_type: SubagentType,
     /// fork 与 `/subtask` 子代理在开始前继承的父会话消息。
@@ -19,9 +21,8 @@ pub struct SubAgentRequest {
     pub parent_pending_context: Vec<String>,
     /// 本子代理在消息 hub 里的身份（mailbox 键）。
     ///
-    /// `Some(name)` = 命名 worker（`SendMessage` 可按 name 寻址）；
-    /// `Some("agent-{id}")` = 匿名后台 worker，按 agent_id 寻址；
-    /// `None` = 前台一次性任务，不注册、收不到消息。
+    /// 异步 runner 在启动前统一写入任务 ID；可读名称仅作为路由别名。
+    /// 直接同步调用可显式提供身份；未提供时 runner 生成临时身份。
     /// 设计文档：`docs/agent-messaging-design.zh-CN.md` §6 Phase 3。
     pub identity: Option<String>,
     /// **发起方**的递归深度 —— 本子代理将落在 `depth + 1`。
@@ -44,12 +45,18 @@ impl SubAgentRequest {
         Self {
             prompt: prompt.into(),
             max_rounds: None,
+            model: None,
             subagent_type: SubagentType::GeneralPurpose,
             parent_messages: Vec::new(),
             parent_pending_context: Vec::new(),
             identity: None,
             parent_depth: 0,
         }
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
     }
 
     pub fn with_max_rounds(mut self, max_rounds: u32) -> Self {

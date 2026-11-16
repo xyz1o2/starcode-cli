@@ -282,6 +282,7 @@ pub struct ToolExecutor {
     cached_tool_definitions: RwLock<Option<(u64, Vec<StarTool>)>>,
     permission_manager: Arc<SessionPermissionManager>,
     agent_parent_context: RwLock<Arc<Vec<crate::types::StarMessage>>>,
+    agent_parent_client: RwLock<StarClient>,
 }
 
 impl ToolExecutor {
@@ -305,6 +306,7 @@ impl ToolExecutor {
         };
 
         Self {
+            agent_parent_client: RwLock::new(client.clone()),
             client,
             tool_registry,
             config,
@@ -329,12 +331,21 @@ impl ToolExecutor {
         }
     }
 
+    pub(crate) fn set_agent_parent_client(&self, client: &StarClient) {
+        if let Ok(mut snapshot) = self.agent_parent_client.write() {
+            *snapshot = client.clone();
+        }
+    }
+
     fn attach_agent_parent_context(
         &self,
         invocation: &mut dyn crate::core::tools::tools::ToolInvocation,
     ) {
         if let Ok(context) = self.agent_parent_context.read() {
             invocation.set_agent_parent_context(context.clone());
+        }
+        if let Ok(client) = self.agent_parent_client.read() {
+            invocation.set_agent_parent_client(&client);
         }
     }
 
@@ -1315,6 +1326,7 @@ impl ToolExecutor {
             let requires_invocation_confirmation = tool.requires_invocation_confirmation();
             match tool.create_invocation(args.clone()) {
                 Ok(mut invocation) => {
+                    invocation.set_agent_parent_identity(self.config.agent_identity.clone());
                     if name == "Agent" {
                         self.attach_agent_parent_context(invocation.as_mut());
                     }

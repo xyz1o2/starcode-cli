@@ -26,6 +26,8 @@ pub struct AgentToolParams {
     pub background: Option<bool>,
     #[serde(default)]
     pub max_rounds: Option<u32>,
+    #[serde(default)]
+    pub model: Option<String>,
     /// **调用方**所处的递归深度 —— 本子代理落在 `depth + 1`。
     ///
     /// 由执行器（`ToolExecutor::normalize_agent_args`）覆盖写入，不在参数
@@ -44,7 +46,7 @@ impl From<AgentToolParams> for AgentToolFullInput {
             subagent_type: p.subagent_type,
             name: p.name,
             isolation: None,
-            model: None,
+            model: p.model,
             background: p.background,
             max_rounds: p.max_rounds,
             parent_depth: p.parent_depth,
@@ -121,6 +123,10 @@ impl BaseDeclarativeTool for AgentTool {
                     "type": "boolean",
                     "description": "Run in background; completion arrives via <task-notification>. Explorer defaults to true, other agent types to false. Set false to wait for an Explorer result."
                 },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model ID on the current provider. Omit or use inherit to keep the parent model; this does not switch providers."
+                },
                 "max_rounds": {
                     "type": "integer",
                     "description": "Maximum conversation turns for this agent. Default: 50."
@@ -160,6 +166,14 @@ impl AgentToolInvocation {
 }
 
 impl ToolInvocation for AgentToolInvocation {
+    fn set_agent_parent_client(&mut self, client: &crate::llm::client::StarClient) {
+        self.runner = Arc::new(self.runner.with_parent_client(client));
+        self.async_runner = self
+            .async_runner
+            .as_ref()
+            .map(|runner| Arc::new(runner.with_parent_client(client)));
+    }
+
     fn set_agent_parent_context(&mut self, messages: Arc<Vec<crate::types::StarMessage>>) {
         self.parent_context = messages;
     }
@@ -438,6 +452,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn invocation_model_reaches_every_request_route() {
+        let params: AgentToolParams = serde_json::from_value(json!({
+            "description": "inspect code", "prompt": "find caller", "model": "child-model"
+        }))
+        .unwrap();
+        let mut input: AgentToolFullInput = params.into();
+        for background in [false, true] {
+            input.background = Some(background);
+            let request = match route_agent_call(&input, false, false) {
+                AgentRoute::SyncNamedAgent { request, .. }
+                | AgentRoute::AsyncAgent { request, .. } => request,
+                other => panic!("unexpected route: {other:?}"),
+            };
+            assert_eq!(request.model.as_deref(), Some("child-model"));
+        }
+    }
+
+    #[test]
     fn fork_invocation_preserves_structured_history_without_truncation() {
         let config = Arc::new(crate::core::config::Config::new(
             crate::core::config::ConfigParameters::default(),
@@ -471,7 +503,11 @@ mod tests {
             crate::types::StarMessage::tool("read-auth", "auth source"),
         ];
         invocation.set_agent_parent_context(Arc::new(history.clone()));
-        let request = invocation.fork_request(SubAgentRequest::new("check callers"), "fork-auth");
+        let request = invocation.fork_request(
+            SubAgentRequest::new("check callers").with_model("fork-model"),
+            "fork-auth",
+        );
+        assert_eq!(request.model.as_deref(), Some("fork-model"));
         assert_eq!(request.prompt, "check callers");
         assert_eq!(request.identity.as_deref(), Some("fork-auth"));
         assert_eq!(

@@ -755,6 +755,7 @@ impl Agent {
         }) {
             self.tool_executor
                 .set_agent_parent_context(&self.session_messages);
+            self.tool_executor.set_agent_parent_client(&self.client);
         }
         if tool_calls.len() > 1 {
             self.streaming_executor

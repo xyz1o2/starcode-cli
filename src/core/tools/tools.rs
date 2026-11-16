@@ -103,6 +103,12 @@ pub trait ToolInvocation: Send + Sync {
     /// 不从模型参数反序列化，避免伪造父会话或污染共享工具注册表。
     fn set_agent_parent_context(&mut self, _messages: Arc<Vec<crate::types::StarMessage>>) {}
 
+    /// 从真实调用方继承当前客户端；共享注册表中的启动快照可能已经过时。
+    fn set_agent_parent_client(&mut self, _client: &crate::llm::client::StarClient) {}
+
+    /// 从真实调用方继承消息 hub 中的发件身份。
+    fn set_agent_parent_identity(&mut self, _identity: Option<String>) {}
+
     fn get_description(&self) -> String;
     fn tool_locations(&self) -> Vec<ToolLocation>;
     fn should_confirm_execute(

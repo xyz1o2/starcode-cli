@@ -168,6 +168,7 @@ fn build_request(input: &AgentToolFullInput) -> SubAgentRequest {
     SubAgentRequest {
         prompt: input.prompt.clone(),
         max_rounds: input.max_rounds,
+        model: input.model.clone(),
         subagent_type: input
             .subagent_type
             .clone()

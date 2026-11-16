@@ -160,6 +160,8 @@ impl AgentRouter {
     ) {
         let identity = identity.into();
         let agent_id = agent_id.into();
+        // 同名新任务接管身份时移除旧 ID，避免旧任务收尾注销新任务。
+        self.aliases.retain(|_, target| target != &identity);
         self.aliases.insert(agent_id.clone(), identity.clone());
         if let Some(n) = name
             .as_ref()
@@ -167,11 +169,8 @@ impl AgentRouter {
         {
             self.aliases.insert(n.clone(), identity.clone());
         }
-        let status = self
-            .entries
-            .get(&identity)
-            .map(|e| e.status.clone())
-            .unwrap_or(AgentStatus::Running);
+        // 同名任务重新注册是新的运行生命周期，不能继承旧任务的终态。
+        let status = AgentStatus::Running;
         self.entries.insert(
             identity.clone(),
             AgentEntry {
@@ -200,13 +199,18 @@ impl AgentRouter {
 
     /// 已注册身份键列表（broadcast 用）。
     pub fn registered_identities(&self) -> Vec<String> {
-        self.entries.keys().cloned().collect()
+        self.entries
+            .iter()
+            .filter(|(_, entry)| entry.status == AgentStatus::Running)
+            .map(|(identity, _)| identity.clone())
+            .collect()
     }
 
     /// 列出所有已注册的可读名（供 SendMessage 构建错误提示 / UI 展示）。
     pub fn registered_names(&self) -> Vec<String> {
         self.entries
             .values()
+            .filter(|entry| entry.status == AgentStatus::Running)
             .filter_map(|e| e.name.clone())
             .filter(|n| !n.is_empty())
             .collect()
@@ -230,7 +234,7 @@ impl AgentRouter {
         // 广播
         if to == "*" {
             let mut delivered_to = Vec::new();
-            let identities: Vec<String> = self.entries.keys().cloned().collect();
+            let identities = self.registered_identities();
             for identity in &identities {
                 if identity == from_identity {
                     continue;
@@ -450,6 +454,52 @@ mod tests {
         );
         // 已投递的消息仍在箱内，drain 不丢
         assert_eq!(router.pending_count("w1"), 1);
+    }
+
+    #[test]
+    fn completed_agents_do_not_receive_broadcasts_and_reused_names_start_running() {
+        let mut router = AgentRouter::new();
+        router.register_entry("worker", "old-id", Some("worker".into()));
+        router.unregister("old-id");
+        assert!(router.registered_names().is_empty());
+        assert_eq!(
+            router.deliver(
+                AgentMessage::new("lead", "update", "broadcast"),
+                "*",
+                "lead",
+            ),
+            Delivery::Broadcast {
+                delivered_to: vec![]
+            }
+        );
+        assert_eq!(router.pending_count("worker"), 0);
+        router.register_entry("worker", "new-id", Some("worker".into()));
+        // 旧任务迟到的终态不能注销重用同名的新任务。
+        router.unregister("old-id");
+        assert_eq!(router.resolve("new-id").as_deref(), Some("worker"));
+        assert!(router.registered_identities().contains(&"worker".into()));
+        assert_eq!(
+            router.registered_entries()[0].1.status,
+            AgentStatus::Running
+        );
+    }
+
+    #[test]
+    fn overlapping_names_keep_task_mailboxes_and_cleanup_independent() {
+        let mut router = AgentRouter::new();
+        router.register_entry("id-1", "id-1", Some("worker".into()));
+        router.register_entry("id-2", "id-2", Some("worker".into()));
+        router.deliver(AgentMessage::new("lead", "first", "update"), "id-1", "lead");
+        router.deliver(
+            AgentMessage::new("lead", "latest", "update"),
+            "worker",
+            "lead",
+        );
+        assert_eq!(router.drain("id-1")[0].content, "first");
+        assert_eq!(router.drain("id-2")[0].content, "latest");
+        router.unregister("id-1");
+        assert_eq!(router.resolve("worker").as_deref(), Some("id-2"));
+        assert_eq!(router.resolve("id-2").as_deref(), Some("id-2"));
     }
 
     #[test]

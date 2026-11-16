@@ -77,6 +77,12 @@ pub struct SendMessageInvocation {
 }
 
 impl ToolInvocation for SendMessageInvocation {
+    fn set_agent_parent_identity(&mut self, identity: Option<String>) {
+        let mut config = (*self.config).clone();
+        config.agent_identity = identity;
+        self.config = Arc::new(config);
+    }
+
     fn get_description(&self) -> String {
         format!(
             "Send [{}] to agent '{}' (priority: {})",
@@ -229,5 +235,45 @@ impl BaseDeclarativeTool for SendMessageTool {
             params,
             agent_registry: self.agent_registry.clone(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shared_message_tool_uses_the_executing_workers_identity() {
+        let config = Arc::new(crate::core::config::Config::new(Default::default()));
+        let hub = crate::agent::messaging::new_shared_router();
+        hub.lock().await.register_entry("lead", "lead", None);
+        hub.lock()
+            .await
+            .register_entry("worker-id", "worker-id", Some("worker".into()));
+        let runner = crate::agent::subagent::runner::StarAgentRunner::shared(
+            crate::llm::client::StarClient::new("", None, None, None, None),
+            config.clone(),
+        );
+        let registry = Arc::new(
+            AsyncSubagentRunner::new(
+                runner,
+                Arc::new(tokio::sync::Mutex::new(
+                    crate::agent::subagent::notification::NotificationQueue::new(),
+                )),
+            )
+            .with_agent_hub(hub.clone()),
+        );
+        let tool = SendMessageTool::new(config.clone()).with_agent_registry(registry);
+        let mut invocation = tool
+            .create_invocation(serde_json::json!({
+                "target_agent": "lead", "message": "found the caller", "summary": "caller found"
+            }))
+            .unwrap();
+        invocation.set_agent_parent_identity(Some("worker-id".into()));
+        invocation.execute(None, None).await.unwrap();
+        let messages = hub.lock().await.drain("lead");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, "worker-id");
+        assert!(config.agent_identity.is_none());
     }
 }

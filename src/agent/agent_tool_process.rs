@@ -452,6 +452,7 @@ impl Agent {
                 == "Agent"
         }) {
             self.tool_executor.set_agent_parent_context(messages);
+            self.tool_executor.set_agent_parent_client(&self.client);
         }
         // ── Budget enforcement ──
         // 在 hook 前接受整个模型批次，避免部分执行导致协议消息不完整。

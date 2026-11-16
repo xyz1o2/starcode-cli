@@ -107,6 +107,45 @@ impl StarAgentRunner {
         }
     }
 
+    /// 调用级模型只影响新子代理，provider 和 endpoint 保持父级选择。
+    async fn create_child_agent(
+        &self,
+        request: &SubAgentRequest,
+        config: Config,
+    ) -> Result<crate::agent::StarAgent, SubAgentError> {
+        let model = request
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("inherit"))
+            .unwrap_or(&self.client.model);
+        crate::agent::StarAgent::new_with_provider(
+            &self.client.api_key,
+            Some(model.to_owned()),
+            Some(self.client.base_url.clone()),
+            request.max_rounds,
+            Some(self.client.is_openai_compatible),
+            Some(Arc::new(config)),
+            self.client.provider_id.clone(),
+        )
+        .await
+        .map_err(|error| {
+            SubAgentError::new(
+                SubAgentErrorKind::InitializationFailed,
+                format!("Failed to create SubAgent: {error}"),
+            )
+        })
+    }
+
+    /// 替换本次派生所继承的客户端，保留配置和消息 hub。
+    pub(crate) fn with_parent_client(&self, client: &StarClient) -> Self {
+        Self {
+            client: client.clone(),
+            config: self.config.clone(),
+            agent_hub: self.agent_hub.clone(),
+        }
+    }
+
     /// 创建共享引用（供 AgentTool 使用）
     pub fn shared(client: StarClient, config: Arc<Config>) -> SharedSubAgentRunner {
         Arc::new(Self::new(client, config))
@@ -181,24 +220,7 @@ impl StarAgentRunner {
         });
         sub_config.agent_identity = child_identity.clone();
 
-        let mut agent = crate::agent::StarAgent::new_with_provider(
-            &self.client.api_key,
-            Some(self.client.model.clone()),
-            Some(self.client.base_url.clone()),
-            request.max_rounds,
-            Some(self.client.is_openai_compatible),
-            Some(Arc::new(sub_config)),
-            // 继承父 client 的 provider id：否则子 agent 的协议推断和 key 环境变量
-            // 解析都会退回按模型名猜，聚合网关上的模型会被发去厂商官方端点。
-            self.client.provider_id.clone(),
-        )
-        .await
-        .map_err(|e| {
-            SubAgentError::new(
-                SubAgentErrorKind::InitializationFailed,
-                format!("Failed to create SubAgent: {}", e),
-            )
-        })?;
+        let mut agent = self.create_child_agent(&request, sub_config).await?;
 
         // Hub 身份接线（Phase 3）：子 agent 在 hub 里注册成自己的身份，
         // SendMessage 按 name / agent_id 单播它，它自己每个 turn 开头 drain。
@@ -359,6 +381,141 @@ async fn emit_team_snapshot(hub: &crate::agent::messaging::SharedAgentRouter) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn child_model_override_keeps_parent_provider_endpoint_and_model() {
+        let parent = crate::agent::StarAgent::new_for_runtime_settings_test_with_provider(Some(
+            "openrouter".into(),
+        ))
+        .await;
+        let mut parameters = crate::core::config::ConfigParameters::default();
+        parameters.core_tools = Some(Vec::new());
+        parameters.mcp_enabled = Some(false);
+        parameters.enable_agents = Some(false);
+        let mut config = Config::new(parameters);
+        config.initialize().await.unwrap();
+        let config = Arc::new(config);
+        let original = StarAgentRunner::shared(parent.client.clone(), config.clone());
+        let current = StarClient::new(
+            "current-test-key",
+            Some("current-model".into()),
+            Some("http://127.0.0.1:9/v1".into()),
+            Some(true),
+            Some("current-provider".into()),
+        );
+        let async_original = AsyncSubagentRunner::new(
+            original.clone(),
+            Arc::new(Mutex::new(NotificationQueue::new())),
+        );
+        let rebound = async_original.with_parent_client(&current);
+        assert!(Arc::ptr_eq(
+            &rebound.notification_queue,
+            &async_original.notification_queue
+        ));
+        assert!(Arc::ptr_eq(
+            &rebound.name_registry,
+            &async_original.name_registry
+        ));
+        for runner in [
+            original.with_parent_client(&current),
+            rebound.sync_runner.with_parent_client(&current),
+        ] {
+            for (requested, expected) in [
+                (None, "current-model"),
+                (Some("inherit"), "current-model"),
+                (Some(" INHERIT "), "current-model"),
+                (Some(" child-model "), "child-model"),
+            ] {
+                let mut request = SubAgentRequest::new("inspect");
+                request.model = requested.map(str::to_owned);
+                let child = runner
+                    .create_child_agent(&request, (*config).clone())
+                    .await
+                    .unwrap();
+                assert_eq!(child.client.model, expected);
+                assert_eq!(child.client.base_url, current.base_url);
+                assert_eq!(child.client.provider_id, current.provider_id);
+            }
+        }
+        assert_eq!(parent.client.model, "test-model");
+        assert_eq!(original.client.model, "test-model");
+        assert_eq!(async_original.sync_runner.client.model, "test-model");
+        assert_eq!(current.model, "current-model");
+    }
+
+    #[tokio::test]
+    async fn background_launch_registers_before_return_and_cleans_up_after_failure() {
+        let config = Arc::new(Config::new(Default::default()));
+        let sync = StarAgentRunner::shared(StarClient::new("", None, None, None, None), config);
+        let queue = Arc::new(Mutex::new(NotificationQueue::new()));
+        let hub = crate::agent::messaging::new_shared_router();
+        let output_directory = tempfile::tempdir().unwrap();
+        let mut runner = AsyncSubagentRunner::new(sync, queue.clone()).with_agent_hub(hub.clone());
+        runner.output_directory = Some(output_directory.path().to_owned());
+        assert!(Arc::ptr_eq(
+            runner.sync_runner.agent_hub.as_ref().unwrap(),
+            &hub
+        ));
+        for name in [None, Some("named-worker".to_string())] {
+            // 在构造/请求模型之前触发确定性的深度错误，无真实 API 调用。
+            let request = SubAgentRequest::new("inspect").with_parent_depth(usize::MAX);
+            let launch = runner
+                .spawn_background(request, name.clone(), "inspect".into(), "Agent".into())
+                .await;
+            let identity = launch.agent_id.as_str();
+            assert_eq!(
+                hub.lock().await.resolve(&launch.agent_id).as_deref(),
+                Some(identity)
+            );
+            let mut notifications = Vec::new();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    notifications.extend(queue.lock().await.drain_for_next_turn());
+                    if !notifications.is_empty() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(hub.lock().await.resolve(&launch.agent_id).is_none());
+            assert_eq!(notifications.len(), 1);
+            assert!(matches!(
+                notifications[0].status,
+                NotificationStatus::Failed
+            ));
+            assert!(!queue.lock().await.has_inflight());
+            if let Some(name) = name {
+                assert!(runner.resolve_name(&name).await.is_none());
+            }
+            // 测试只清理由本次启动返回的临时输出文件。
+            let _ = tokio::fs::remove_file(launch.output_file).await;
+        }
+    }
+
+    #[test]
+    fn spawned_identity_is_the_same_as_the_consumers_mailbox() {
+        for (explicit, name, expected) in [
+            (None, None, "agent-id"),
+            (None, Some("skill-worker"), "agent-id"),
+            (Some("explicit"), Some("alias"), "agent-id"),
+        ] {
+            let mut request = SubAgentRequest::new("inspect");
+            request.identity = explicit.map(str::to_owned);
+            let identity = AsyncSubagentRunner::bind_identity(&mut request, name, "agent-id");
+            assert_eq!(identity, expected);
+            assert_eq!(request.identity.as_deref(), Some(expected));
+            let mut hub = crate::agent::messaging::AgentRouter::new();
+            hub.register_entry(identity, "agent-id", name.map(str::to_owned));
+            hub.deliver(
+                crate::agent::messaging::AgentMessage::new("lead", "steer", "update"),
+                "agent-id",
+                "lead",
+            );
+            assert_eq!(hub.drain(request.identity.as_deref().unwrap()).len(), 1);
+        }
+    }
 
     #[test]
     fn nested_depth_uses_the_caller_and_rejects_before_construction() {
@@ -590,6 +747,8 @@ pub struct AsyncSubagentRunner {
     /// Agent 间消息路由 hub（进程级单例）。`None` = 装配方没接 hub，
     /// `deliver_message` 退回写文件死信（旧行为），注册/注销跳过。
     agent_hub: Option<crate::agent::messaging::SharedAgentRouter>,
+    #[cfg(test)]
+    output_directory: Option<PathBuf>,
 }
 
 impl AsyncSubagentRunner {
@@ -598,18 +757,56 @@ impl AsyncSubagentRunner {
         sync_runner: Arc<StarAgentRunner>,
         notification_queue: Arc<Mutex<NotificationQueue>>,
     ) -> Self {
+        let agent_hub = sync_runner
+            .agent_hub
+            .clone()
+            .or_else(|| sync_runner.config.runtime_agent_hub());
         Self {
             sync_runner,
             notification_queue,
             name_registry: Arc::new(Mutex::new(HashMap::new())),
-            agent_hub: None,
+            agent_hub,
+            #[cfg(test)]
+            output_directory: None,
         }
     }
 
     /// 注入消息路由 hub（启用进程内互通：注册 / 投递 / 注销全走它）。
     pub fn with_agent_hub(mut self, hub: crate::agent::messaging::SharedAgentRouter) -> Self {
+        // 同步执行侧与异步注册侧必须持有同一个 hub，不能只替换外层。
+        self.sync_runner = Arc::new(StarAgentRunner {
+            client: self.sync_runner.client.clone(),
+            config: self.sync_runner.config.clone(),
+            agent_hub: Some(hub.clone()),
+        });
         self.agent_hub = Some(hub);
         self
+    }
+
+    /// 每次调用继承当前客户端，通知队列和名称注册表仍与原 runner 共享。
+    pub(crate) fn with_parent_client(&self, client: &StarClient) -> Self {
+        Self {
+            sync_runner: Arc::new(self.sync_runner.with_parent_client(client)),
+            notification_queue: self.notification_queue.clone(),
+            name_registry: self.name_registry.clone(),
+            agent_hub: self.agent_hub.clone(),
+            #[cfg(test)]
+            output_directory: self.output_directory.clone(),
+        }
+    }
+
+    fn output_file(&self, agent_id: &str) -> PathBuf {
+        #[cfg(test)]
+        if let Some(ref directory) = self.output_directory {
+            return directory.join(format!("{agent_id}.txt"));
+        }
+        PathBuf::from(format!(".star/subagent_outputs/{agent_id}.txt"))
+    }
+
+    /// 邮箱以任务 ID 隔离；可读名仅作别名，重名任务不能消费彼此的消息。
+    fn bind_identity(request: &mut SubAgentRequest, _name: Option<&str>, agent_id: &str) -> String {
+        request.identity = Some(agent_id.to_owned());
+        agent_id.to_owned()
     }
 
     /// **前台**运行 SubAgent —— 调用方等结果。
@@ -622,24 +819,37 @@ impl AsyncSubagentRunner {
     /// 语义是「本轮等 fork 的结果，而不是让它在后台跑」。
     pub async fn run_foreground(
         &self,
-        request: SubAgentRequest,
+        mut request: SubAgentRequest,
         name: Option<String>,
         description: String,
         agent_type_label: String,
     ) -> Result<SubAgentResult, SubAgentError> {
+        let aid = format!("agent-fork-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let identity = Self::bind_identity(&mut request, name.as_deref(), &aid);
         if let Some(ref agent_name) = name {
-            let aid = format!("agent-fork-{}", &uuid::Uuid::new_v4().to_string()[..8]);
             self.name_registry
                 .lock()
                 .await
                 .insert(agent_name.clone(), aid.clone());
-            self.register_in_hub(&aid, Some(agent_name));
+        }
+        if let Some(ref hub) = self.agent_hub {
+            hub.lock()
+                .await
+                .register_entry(identity, &aid, name.clone());
+            emit_team_snapshot(hub).await;
         }
         let _ = description;
         let _ = agent_type_label;
         let result = self.sync_runner.run(request).await;
         if let Some(ref agent_name) = name {
-            self.unregister_from_hub(agent_name);
+            let mut registry = self.name_registry.lock().await;
+            if registry.get(agent_name) == Some(&aid) {
+                registry.remove(agent_name);
+            }
+        }
+        if let Some(ref hub) = self.agent_hub {
+            hub.lock().await.unregister(&aid);
+            emit_team_snapshot(hub).await;
         }
         result
     }
@@ -650,7 +860,7 @@ impl AsyncSubagentRunner {
     /// 会随通知回到 UI，避免 UI 侧再硬编码 "general-purpose"。
     pub async fn spawn_background(
         &self,
-        request: SubAgentRequest,
+        mut request: SubAgentRequest,
         name: Option<String>,
         description: String,
         agent_type_label: String,
@@ -660,7 +870,7 @@ impl AsyncSubagentRunner {
             format!("agent-{}", &id[..8])
         };
 
-        let output_file = PathBuf::from(format!(".star/subagent_outputs/{}.txt", agent_id));
+        let output_file = self.output_file(&agent_id);
         let out_path = output_file.clone();
         let runner = self.sync_runner.clone();
         let queue = self.notification_queue.clone();
@@ -670,9 +880,18 @@ impl AsyncSubagentRunner {
         let agent_name = name.clone();
         let type_label = agent_type_label.clone();
         let spawn_hub = self.agent_hub.clone();
-        // 调用方显式指派的 mailbox 身份（`SubAgentRequest::with_identity`）；
-        // 未指派时回落 name / agent_id（见下方注册处）。
-        let hub_identity = request.identity.clone();
+        // 实际邮箱用任务 ID，调用者提供的名称只作为路由别名。
+        let hub_identity = Self::bind_identity(&mut request, name.as_deref(), &agent_id);
+        // 返回启动结果前完成注册，调用方紧接着发送消息也能命中同一邮箱。
+        if let Some(ref n) = name {
+            registry.lock().await.insert(n.clone(), agent_id.clone());
+        }
+        if let Some(ref hub) = spawn_hub {
+            hub.lock()
+                .await
+                .register_entry(&hub_identity, &agent_id, name.clone());
+            emit_team_snapshot(hub).await;
+        }
 
         // 启动前先登记 in-flight：主 Agent 收尾时要看到它，且终态 enqueue
         // 不能早于登记。随后发启动快照，再 spawn 后台任务；不能等第一次
@@ -691,32 +910,6 @@ impl AsyncSubagentRunner {
         );
 
         tokio::spawn(async move {
-            // 注册 name → agent_id 映射。放进 spawn 内用 async lock，
-            // 避免在 async 上下文里调用 blocking_lock 触发 panic。
-            if let Some(ref n) = agent_name {
-                registry.lock().await.insert(n.clone(), aid.clone());
-            }
-
-            // 消息 hub 注册：此后 SendMessage 可按 name / agent_id 投递到本
-            // worker；worker 自己每轮 turn 开头从 mailbox drain（Phase 3）。
-            // 身份键与 worker 内部构造时用的 sub_config.agent_identity 同源
-            // （request.identity → name → agent_id），保证 SendMessage 发件人
-            // 与 mailbox 键一致。
-            if let Some(ref hub) = spawn_hub {
-                let identity = hub_identity
-                    .clone()
-                    .or_else(|| agent_name.clone())
-                    .unwrap_or_else(|| aid.clone());
-                let mut router = hub.lock().await;
-                router.register_entry(&identity, &aid, agent_name.clone());
-                crate::utils::logging::append_debug_log_line(&format!(
-                    "[AgentHub] registered worker '{}' ({})",
-                    identity, aid
-                ));
-                drop(router);
-                emit_team_snapshot(hub).await;
-            }
-
             let start = std::time::Instant::now();
 
             // 进度统计的最后一次快照。终态更新时，失败分支拿不到 SubAgentResult，
@@ -786,6 +979,18 @@ impl AsyncSubagentRunner {
                 ));
             }
 
+            // 先停止寻址，再发布终态，避免调用方收到完成通知后仍能投递到旧任务。
+            if let Some(ref name) = agent_name {
+                let mut names = registry.lock().await;
+                if names.get(name) == Some(&aid) {
+                    names.remove(name);
+                }
+            }
+            if let Some(ref hub) = spawn_hub {
+                hub.lock().await.unregister(&aid);
+                emit_team_snapshot(hub).await;
+            }
+
             // 终态直接推给 UI。原先终态只在下一个 turn 排空通知队列时才到 UI
             // （agent_loop.rs 的 drain_for_next_turn），用户空闲时后台代理跑完了，
             // 选择器还一直显示 Running —— 等于对着用户撒谎。
@@ -836,18 +1041,6 @@ impl AsyncSubagentRunner {
                 agent_type: Some(type_label),
                 name: agent_name.clone(),
             });
-
-            // 终态注销：旧 agent_id 不再解析（对迟到的消息显式 UnknownTarget），
-            // mailbox 保留 —— 迟到消息落进可见的空箱而不是复活一个幽灵。
-            if let Some(ref hub) = spawn_hub {
-                hub.lock().await.unregister(&aid);
-                crate::utils::logging::append_debug_log_line(&format!(
-                    "[AgentHub] unregistered worker '{}' ({})",
-                    agent_name.as_deref().unwrap_or(&aid),
-                    aid
-                ));
-                emit_team_snapshot(hub).await;
-            }
         });
 
         AsyncLaunchResult {
@@ -860,32 +1053,6 @@ impl AsyncSubagentRunner {
     /// 按 name 查找 agent_id
     pub async fn resolve_name(&self, name: &str) -> Option<String> {
         self.name_registry.lock().await.get(name).cloned()
-    }
-
-    fn register_in_hub(&self, agent_id: &str, name: Option<&String>) {
-        let Some(ref hub) = self.agent_hub else {
-            return;
-        };
-        let hub = hub.clone();
-        let identity = name
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| agent_id.to_string());
-        let aid = agent_id.to_string();
-        let n = name.cloned();
-        tokio::spawn(async move {
-            hub.lock().await.register_entry(identity, aid, n);
-        });
-    }
-
-    fn unregister_from_hub(&self, name: &str) {
-        let Some(ref hub) = self.agent_hub else {
-            return;
-        };
-        let hub = hub.clone();
-        let n = name.to_string();
-        tokio::spawn(async move {
-            hub.lock().await.unregister(&n);
-        });
     }
 
     /// 列出所有已注册 agent name（供 broadcast 使用）
