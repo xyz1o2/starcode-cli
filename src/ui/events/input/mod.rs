@@ -1582,32 +1582,7 @@ pub async fn handle_key_event(
             let cursor_row = state.textarea.cursor().0;
             let input_is_empty = state.input.trim().is_empty();
 
-            // 鼠标滚轮检测：连续 Up/Down 事件间隔 < 50ms 视为滚轮
-            let now = Instant::now();
-            let is_mouse_scroll = if let Some(pending_time) = state.pending_scroll_time {
-                let elapsed = now.duration_since(pending_time).as_millis();
-                if elapsed < 50 {
-                    // 第二个事件快速到达，确认是鼠标滚轮
-                    state.pending_scroll_direction = None;
-                    state.pending_scroll_time = None;
-                    true
-                } else {
-                    // 超时，第一个事件是键盘按键，执行历史导航
-                    state.pending_scroll_direction = None;
-                    state.pending_scroll_time = None;
-                    false
-                }
-            } else {
-                // 第一个事件，缓存为 pending
-                state.pending_scroll_direction = Some(-1); // -1 = Up
-                state.pending_scroll_time = Some(now);
-                false
-            };
-
-            if is_mouse_scroll {
-                // 鼠标滚轮：滚动聊天而非导航历史
-                crate::ui::state::scroll_chat(state, -3);
-            } else if cursor_row == 0 && !state.pending_user_messages.is_empty() {
+            if cursor_row == 0 && !state.pending_user_messages.is_empty() {
                 // 队列优先于命令历史（对标 PromptInput 的 handleHistoryUp）：
                 // 光标在首行时 ↑ 先把排队的输入取回来改，而不是翻历史
                 let n = state.pending_user_messages.len();
@@ -1647,32 +1622,7 @@ pub async fn handle_key_event(
             let cursor_row = state.textarea.cursor().0;
             let line_count = state.input_line_count;
 
-            // 鼠标滚轮检测：连续 Up/Down 事件间隔 < 50ms 视为滚轮
-            let now = Instant::now();
-            let is_mouse_scroll = if let Some(pending_time) = state.pending_scroll_time {
-                let elapsed = now.duration_since(pending_time).as_millis();
-                if elapsed < 50 {
-                    // 第二个事件快速到达，确认是鼠标滚轮
-                    state.pending_scroll_direction = None;
-                    state.pending_scroll_time = None;
-                    true
-                } else {
-                    // 超时，第一个事件是键盘按键，执行历史导航
-                    state.pending_scroll_direction = None;
-                    state.pending_scroll_time = None;
-                    false
-                }
-            } else {
-                // 第一个事件，缓存为 pending
-                state.pending_scroll_direction = Some(1); // 1 = Down
-                state.pending_scroll_time = Some(now);
-                false
-            };
-
-            if is_mouse_scroll {
-                // 鼠标滚轮：滚动聊天而非导航历史
-                crate::ui::state::scroll_chat(state, 3);
-            } else if cursor_row + 1 >= line_count && state.history_index.is_some() {
+            if cursor_row + 1 >= line_count && state.history_index.is_some() {
                 // Command history navigation: Down when cursor is on last line and in history mode
                 let idx = state.history_index.unwrap();
                 if idx == 0 {
@@ -2208,6 +2158,78 @@ mod tests {
             .unwrap();
         assert!(terminal.backend().cursor_visible());
         assert!(state.textarea.rendered_cursor_position().unwrap().y > 1);
+    }
+
+    #[tokio::test]
+    async fn shift_tab_does_not_approve_a_pending_tool() {
+        let mut state = ChatState::test_fixture();
+        state.is_awaiting_confirmation = true;
+        state.pending_tool_call_id = Some("approval-regression".into());
+        state.pending_confirmation_choice = 1;
+        let mode = state.approval_mode.clone();
+        let (tx, mut rx) = mpsc::channel(16);
+
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(rx.try_recv().is_err());
+        assert!(state.is_awaiting_confirmation);
+        assert_eq!(
+            state.pending_tool_call_id.as_deref(),
+            Some("approval-regression")
+        );
+        assert_eq!(state.approval_mode, mode);
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentRequest::ConfirmTool {
+                outcome: crate::types::ToolConfirmationOutcome::ProceedOnce,
+                ..
+            }
+        ));
+        assert!(!state.is_awaiting_confirmation);
+    }
+
+    #[tokio::test]
+    async fn rapid_arrow_keys_navigate_history_without_scrolling_chat() {
+        let mut state = ChatState::test_fixture();
+        state.set_input_text("");
+        state.command_history = ["newest".into(), "older".into(), "oldest".into()].into();
+        state.history_index = None;
+        let scroll_before = (state.scroll, state.scroll_velocity);
+        let (tx, _rx) = mpsc::channel(16);
+        for (key, expected) in [
+            (KeyCode::Up, "newest"),
+            (KeyCode::Up, "older"),
+            (KeyCode::Up, "oldest"),
+            (KeyCode::Down, "older"),
+            (KeyCode::Down, "newest"),
+            (KeyCode::Down, ""),
+        ] {
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(key, KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(state.input, expected);
+            assert_eq!((state.scroll, state.scroll_velocity), scroll_before);
+        }
     }
 
     #[test]

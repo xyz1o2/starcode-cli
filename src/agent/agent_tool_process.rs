@@ -539,7 +539,10 @@ impl Agent {
                             .map(|&index| runnable_tool_calls[index].clone())
                             .collect::<Vec<_>>();
                         self.emit_tool_starts(&calls);
-                        let results = self.tool_executor.execute_batch(calls, None, None).await;
+                        let results = self
+                            .tool_executor
+                            .execute_batch(calls, None, self.abort_token.clone())
+                            .await;
                         for (index, result) in indices.into_iter().zip(results) {
                             self.consume_tool_result(
                                 user_input,

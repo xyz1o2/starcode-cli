@@ -260,6 +260,7 @@ pub async fn run_ui_loop(
     // 键盘通道一旦关闭，`recv()` 会立刻返回 None —— 必须置位改走定时轮询，
     // 否则循环变成满载自旋。见循环末尾的等待逻辑。
     let mut key_channel_closed = false;
+    let mut stream_channel_closed = false;
 
     // `/loop` 与 `/remote` 的轮询通道。I/O 在独立任务里做（见
     // `runtime::background::spawn_schedule_pollers`），事件循环只在收到结果时回写
@@ -596,17 +597,6 @@ pub async fn run_ui_loop(
             needs_redraw = true;
         }
 
-        if needs_redraw {
-            // Ctrl+L clear screen request
-            if state.request_clear_screen {
-                terminal.clear()?;
-                state.request_clear_screen = false;
-            }
-            draw_frame_atomically(terminal, state)?;
-            last_draw = Instant::now();
-            needs_redraw = false;
-        }
-
         // ── Non-blocking stream message processing ──
         // Process stream messages in batches with a time budget to prevent
         // blocking keyboard input. Each batch has a max duration of 8ms.
@@ -627,6 +617,7 @@ pub async fn run_ui_loop(
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    stream_channel_closed = true;
                     crate::utils::logging::append_debug_log_line("[STREAM] channel disconnected");
                     // Show error to user when worker disconnects unexpectedly
                     if state.is_streaming || state.is_processing {
@@ -652,35 +643,57 @@ pub async fn run_ui_loop(
             }
         }
 
+        // 先处理流消息再绘制，避免已收到的正文多等一轮。
+        if needs_redraw {
+            if state.request_clear_screen {
+                terminal.clear()?;
+                state.request_clear_screen = false;
+            }
+            draw_frame_atomically(terminal, state)?;
+            last_draw = Instant::now();
+            needs_redraw = false;
+        }
+
         // ── 等待下一次输入 / 下一帧 ──
         //
         // 空闲且无动画时改为**阻塞等输入事件**，而不是睡一个帧预算再空转一轮 ——
         // 后者配合「恒为真的重绘门」等于 30Hz 满载轮询。
         // 有动画时仍按帧预算节流，让 spinner 保持目标帧率。
-        let wait = if animating {
+        let wait = if is_animating(state) {
             framerate.saturating_sub(last_draw.elapsed())
         } else {
             PERIODIC_TICK_INTERVAL.saturating_sub(last_periodic_tick.elapsed())
         };
         if !wait.is_zero() {
-            if key_channel_closed {
-                // 键盘线程已死：recv() 会立刻返回 None，不睡就是满载自旋。
-                // 这里继续轮询，好让上面的 key_thread_alive 检查把
-                // 「Input thread crashed」提示显示出来，让用户自己决定何时退出。
-                tokio::time::sleep(wait).await;
-            } else {
-                match tokio::time::timeout(wait, key_rx.recv()).await {
-                    // 期间有输入：存下来，下一轮开头处理。
-                    Ok(Some(ev)) => pending_key_events.push_back(ev),
-                    // 通道关闭（键盘线程死了）：不退出，退回定时轮询，
-                    // 否则下面每轮 recv() 立刻返回 None 会变成满载自旋。
-                    Ok(None) => {
-                        crate::utils::logging::append_debug_log_line(
-                            "[KEY_RX] channel closed, falling back to timed polling",
-                        );
-                        key_channel_closed = true;
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                event = key_rx.recv(), if !key_channel_closed => {
+                    match event {
+                        Some(event) => pending_key_events.push_back(event),
+                        None => key_channel_closed = true,
                     }
-                    Err(_) => {} // 超时，正常到期
+                }
+                message = rx.recv(), if !stream_channel_closed => {
+                    match message {
+                        Some(message) => {
+                            crate::ui::services::stream::handle_stream_update(
+                                state, message, &agent_tx,
+                            ).await?;
+                            stream_msg_count += 1;
+                            needs_redraw = true;
+                        }
+                        None => {
+                            stream_channel_closed = true;
+                            if state.is_streaming || state.is_processing {
+                                state.current_status_line =
+                                    Some("Worker disconnected — press Enter to retry".to_string());
+                                state.is_streaming = false;
+                                state.is_processing = false;
+                                state.end_thinking();
+                                needs_redraw = true;
+                            }
+                        }
+                    }
                 }
             }
         }

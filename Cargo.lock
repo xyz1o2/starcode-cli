@@ -4213,6 +4213,7 @@ dependencies = [
  "ignore",
  "image",
  "jsonschema",
+ "libc",
  "log",
  "lru",
  "lsp-types",

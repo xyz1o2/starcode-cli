@@ -1,4 +1,10 @@
 {
+  "workflow.list.title": "Shell 工作流",
+  "workflow.list.empty": "（没有可执行的工作流文件）",
+  "workflow.list.error": "读取工作流失败：{error}",
+  "workflow.list.missing": "项目中没有 .star/workflows 目录。",
+  "workflow.list.hint": "\n使用 /workflow run <name> 或 WorkflowTool 运行 JSON 或 Shell 工作流。",
+  "workflow.run.usage": "用法：/workflow run <name>",
   "ui.input.placeholder": "询问 Star（Shift+Enter 换行，Ctrl+P 打开命令面板，Ctrl+T 打开任务面板，Tab 自动补全）",
   "ui.image.label": "图片",
   "ui.command.argument_hint": "{usage}  {detail}  （/help {command}）",

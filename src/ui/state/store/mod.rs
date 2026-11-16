@@ -463,10 +463,6 @@ pub struct ChatState {
     pub sandbox_available: std::cell::OnceCell<bool>,
     /// 动画帧计数器 — 每帧 +1，用于旋转指示器和闪烁效果
     pub animation_tick: u64,
-    /// 鼠标滚轮检测：待处理的箭头键事件
-    /// 当收到 Up/Down 时，先缓存方向，等待下一个事件判断是否为滚轮
-    pub pending_scroll_direction: Option<i32>, // -1=Up, 1=Down
-    pub pending_scroll_time: Option<Instant>,
     // ============ Smooth Scrolling ============
     /// Scroll velocity for momentum-based scrolling (lines per tick)
     pub scroll_velocity: f64,
@@ -1090,8 +1086,6 @@ impl ChatState {
             bg_agent_selection: None,
             is_transcript_mode: false,
             // ========================================
-            pending_scroll_direction: None,
-            pending_scroll_time: None,
         }
     }
 

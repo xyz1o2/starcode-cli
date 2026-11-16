@@ -123,7 +123,6 @@ pub fn render_input(f: &mut Frame<'_>, state: &ChatState, area: Rect) {
 
     let all_lines = state.textarea.lines();
     let total_lines = state.input_line_count;
-    let is_truncated = total_lines > MAX_RENDER_LINES;
     let has_paste_blocks = has_active_paste_blocks(state);
     let can_fold = total_lines >= crate::ui::state::INPUT_FOLD_MIN_LINES;
     let is_folded = can_fold && state.input_folded && !has_paste_blocks;
@@ -166,10 +165,6 @@ pub fn render_input(f: &mut Frame<'_>, state: &ChatState, area: Rect) {
         if show_cursor && inner_area.width > 0 && inner_area.height > 0 {
             f.set_cursor_position((inner_area.x, inner_area.y));
         }
-    } else if is_truncated {
-        let lines = build_truncated_lines(state);
-        let para = Paragraph::new(lines).wrap(Wrap { trim: false });
-        f.render_widget(para, inner_area);
     } else {
         f.render_widget(&state.textarea, inner_area);
         // 输入库已算好含宽字符和滚动的屏幕坐标，交给终端绘制原生光标。
@@ -324,16 +319,6 @@ fn build_folded_lines(state: &ChatState, total_lines: usize) -> Vec<Line<'static
     ]
 }
 
-fn build_truncated_lines(state: &ChatState) -> Vec<Line<'static>> {
-    state
-        .textarea
-        .lines()
-        .iter()
-        .take(MAX_RENDER_LINES)
-        .map(|line| Line::raw(line.to_string()))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,6 +389,36 @@ mod tests {
             state.set_input_text("");
             assert_eq!(calc_input_height(&mut state, 12), 3);
         }
+    }
+
+    #[test]
+    fn expanded_input_over_one_hundred_lines_keeps_the_cursor_visible() {
+        use ratatui::backend::Backend;
+
+        let text = (0..120)
+            .map(|i| format!("line-{i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = make_state(ApprovalMode::Default, &text);
+        state.input_folded = false;
+        assert_eq!(calc_input_height(&mut state, 40), 102);
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal
+            .draw(|f| render_input(f, &state, f.area()))
+            .unwrap();
+        let drawn = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(drawn.contains("line-119"));
+        assert!(!drawn.contains("line-000"));
+        let cursor = terminal.backend_mut().get_cursor_position().unwrap();
+        assert!(cursor.y >= 1 && cursor.y < 7);
+        assert!(terminal.backend().cursor_visible());
+        assert_eq!(state.textarea.lines().join("\n"), text);
     }
 
     #[test]

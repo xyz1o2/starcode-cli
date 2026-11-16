@@ -1,4 +1,10 @@
 {
+  "workflow.list.title": "Shell workflows",
+  "workflow.list.empty": "(no executable workflow files found)",
+  "workflow.list.error": "Error reading workflows: {error}",
+  "workflow.list.missing": "No .star/workflows directory found in project.",
+  "workflow.list.hint": "\nRun a JSON or shell workflow with /workflow run <name> or WorkflowTool.",
+  "workflow.run.usage": "Usage: /workflow run <name>",
   "ui.input.placeholder": "Ask Star (Shift+Enter for newline, Ctrl+P for commands, Ctrl+T for tasks, Tab for auto-completion)",
   "ui.image.label": "Image",
   "ui.command.argument_hint": "{usage}  {detail}  (/help {command})",

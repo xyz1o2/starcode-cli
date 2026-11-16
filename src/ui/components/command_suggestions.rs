@@ -148,15 +148,17 @@ fn render_centered_list(f: &mut Frame<'_>, area: Rect, title: &str, items: &[Lis
 }
 
 fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
-    let popup_height = height.min(area.height.saturating_sub(2)).max(3);
-    let vertical_margin = area.height.saturating_sub(popup_height) / 2;
-    let popup_width = area.width * percent_x / 100;
-    let horizontal_margin = area.width.saturating_sub(popup_width) / 2;
-
+    let popup_height = height
+        .min(area.height.saturating_sub(2))
+        .max(3)
+        .min(area.height);
+    let popup_width = ((u32::from(area.width) * u32::from(percent_x.min(100)) / 100) as u16)
+        .max(20)
+        .min(area.width);
     Rect {
-        x: area.x + horizontal_margin,
-        y: area.y + vertical_margin,
-        width: popup_width.max(20),
+        x: area.x + area.width.saturating_sub(popup_width) / 2,
+        y: area.y + area.height.saturating_sub(popup_height) / 2,
+        width: popup_width,
         height: popup_height,
     }
 }

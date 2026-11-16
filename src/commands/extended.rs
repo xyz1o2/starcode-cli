@@ -518,21 +518,24 @@ pub async fn agent_delete(mut ctx: CommandContext<'_>, args: Vec<String>) -> Com
 
 // ── Workflow Commands ─────────────────────────────────────────────
 
-pub async fn workflow_list(mut ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
-    push_msg(
-        &mut ctx,
-        "Workflow definitions:\nUse /workflows to list project workflow files.",
-    );
-    Ok(())
+pub async fn workflow_list(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    crate::commands::compat::workflows(ctx, args).await
 }
 
 pub async fn workflow_run(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     let name = args.first().cloned().unwrap_or_default();
     if name.is_empty() {
-        push_msg(&mut ctx, "Usage: /workflow run <name>");
+        push_msg(&mut ctx, crate::core::i18n::t1("workflow.run.usage"));
         return Ok(());
     }
-    push_msg(&mut ctx, format!("Run workflow: {}", name));
+    crate::core::tools::workflow::validate_workflow_name(&name)?;
+    let message_id = ctx.state.next_message_id;
+    ctx.state.next_message_id += 1;
+    let input = serde_json::json!({"workflow": name});
+    ctx.agent_tx.send(AgentRequest::SendMessage {
+        message_id,
+        message: format!("Execute the named project shell workflow through WorkflowTool using these JSON arguments: {input}. Report the actual tool result; do not claim success before execution."),
+    }).await.map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -2164,6 +2167,45 @@ pub async fn fast(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
 mod runtime_settings_tests {
     use super::*;
     use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn workflow_run_dispatches_a_request_and_rejects_directory_names() {
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
+        let expected_id = state.next_message_id;
+        workflow_run(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx,
+            },
+            vec!["build-check".into()],
+        )
+        .await
+        .unwrap();
+        let AgentRequest::SendMessage {
+            message_id,
+            message,
+        } = agent_rx.try_recv().unwrap()
+        else {
+            panic!("expected workflow execution request");
+        };
+        assert_eq!(message_id, expected_id);
+        assert!(
+            message.contains("WorkflowTool") && message.contains(r#"{"workflow":"build-check"}"#)
+        );
+        let next_id = state.next_message_id;
+        assert!(workflow_run(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &agent_tx
+            },
+            vec!["../outside".into()]
+        )
+        .await
+        .is_err());
+        assert_eq!(state.next_message_id, next_id);
+        assert!(agent_rx.try_recv().is_err());
+    }
 
     #[tokio::test]
     async fn effort_queues_a_persistent_request_without_changing_active_state() {

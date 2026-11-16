@@ -667,15 +667,24 @@ pub async fn workflows(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Comma
 
 /// `cwd` 走参数：单测要能对着临时目录验证"有/没有 workflow 文件"两种输出。
 fn workflows_in(ctx: &mut CommandContext<'_>, cwd: &std::path::Path) {
-    let workflows_dir = cwd.join(".claude").join("workflows");
-    let mut lines = vec!["Workflows".to_string()];
+    let workflows_dir =
+        crate::core::config::storage::Storage::new(cwd.to_path_buf()).project_workflows_dir();
+    let mut lines = vec![crate::core::i18n::t1("workflow.list.title")];
     if workflows_dir.exists() {
         match std::fs::read_dir(&workflows_dir) {
             Ok(entries) => {
                 let mut found = false;
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.extension().is_some_and(|e| e == "md" || e == "js") {
+                    if path.is_file()
+                        && path.extension().is_some_and(|e| e == "json" || e == "sh")
+                        && path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .is_some_and(|name| {
+                                crate::core::tools::workflow::validate_workflow_name(name).is_ok()
+                            })
+                    {
                         lines.push(format!(
                             "- {} ({})",
                             path.file_stem()
@@ -687,15 +696,17 @@ fn workflows_in(ctx: &mut CommandContext<'_>, cwd: &std::path::Path) {
                     }
                 }
                 if !found {
-                    lines.push("(no workflow files found)".to_string());
+                    lines.push(crate::core::i18n::t1("workflow.list.empty"));
                 }
             }
-            Err(e) => lines.push(format!("Error reading workflows: {}", e)),
+            Err(e) => lines.push(
+                crate::core::i18n::t1("workflow.list.error").replace("{error}", &e.to_string()),
+            ),
         }
     } else {
-        lines.push("No .claude/workflows directory found in project.".to_string());
+        lines.push(crate::core::i18n::t1("workflow.list.missing"));
     }
-    lines.push("\nAgent workflows are also available via the Workflow tool.".to_string());
+    lines.push(crate::core::i18n::t1("workflow.list.hint"));
     push_assistant(ctx, lines.join("\n"));
 }
 
@@ -1316,36 +1327,44 @@ mod tests {
         workflows_in(&mut ctx, dir.path());
         let out = last(&state);
         assert!(
-            out.contains("No .claude/workflows directory found"),
+            out.contains(&crate::core::i18n::t1("workflow.list.missing")),
             "{out}"
         );
     }
 
     #[test]
-    fn workflows_lists_markdown_and_js_files_only() {
+    fn workflows_lists_executable_files_from_the_inherited_project() {
         let dir = tempfile::tempdir().unwrap();
-        let wf = dir.path().join(".claude").join("workflows");
+        let wf = crate::core::config::storage::Storage::new(dir.path().to_path_buf())
+            .project_workflows_dir();
         std::fs::create_dir_all(&wf).unwrap();
-        std::fs::write(wf.join("deploy.md"), "steps").unwrap();
-        std::fs::write(wf.join("build.js"), "steps").unwrap();
-        std::fs::write(wf.join("notes.txt"), "ignored").unwrap();
+        std::fs::write(wf.join("deploy.json"), "steps").unwrap();
+        std::fs::write(wf.join("build.sh"), "steps").unwrap();
+        std::fs::write(wf.join("notes.md"), "ignored").unwrap();
+        std::fs::write(wf.join("dynamic.js"), "ignored").unwrap();
+        let nested = dir.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
 
         let (mut state, tx, _rx) = ctx_parts();
         let mut ctx = CommandContext {
             state: &mut state,
             agent_tx: &tx,
         };
-        workflows_in(&mut ctx, dir.path());
+        workflows_in(&mut ctx, &nested);
         let out = last(&state);
         assert!(out.contains("- deploy ("), "{out}");
         assert!(out.contains("- build ("), "{out}");
-        assert!(!out.contains("notes"), "{out}");
+        assert!(!out.contains("notes") && !out.contains("dynamic"), "{out}");
     }
 
     #[test]
     fn an_empty_workflows_directory_says_so() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".claude").join("workflows")).unwrap();
+        std::fs::create_dir_all(
+            crate::core::config::storage::Storage::new(dir.path().to_path_buf())
+                .project_workflows_dir(),
+        )
+        .unwrap();
 
         let (mut state, tx, _rx) = ctx_parts();
         let mut ctx = CommandContext {
@@ -1353,7 +1372,7 @@ mod tests {
             agent_tx: &tx,
         };
         workflows_in(&mut ctx, dir.path());
-        assert!(last(&state).contains("(no workflow files found)"));
+        assert!(last(&state).contains(&crate::core::i18n::t1("workflow.list.empty")));
     }
 
     // ── /pr_comments 参数解析 ───────────────────────────────────

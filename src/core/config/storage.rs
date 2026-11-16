@@ -193,6 +193,10 @@ impl Storage {
         self.star_dir().join("agents")
     }
 
+    pub fn project_workflows_dir(&self) -> PathBuf {
+        self.star_dir().join("workflows")
+    }
+
     pub fn project_i18n_dir(&self) -> PathBuf {
         self.star_dir().join("i18n")
     }

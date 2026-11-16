@@ -122,27 +122,8 @@ pub(super) async fn handle_tool_approval(
                             state.rendered_cache.remove(&idx);
                         }
                     }
-                    // Shift+Tab: 快速批准（对标 Claude Code quick approve）
-                    KeyCode::BackTab => {
-                        if let Some(idx) = state.pending_confirmation_entry_idx {
-                            if let Some(entry) = state.chat_history.get_mut(idx) {
-                                if let Some(conf) = entry.confirmation.as_mut() {
-                                    conf.outcome = Some("Quick approved (Shift+Tab)".to_string());
-                                }
-                            }
-                            state.rendered_cache.remove(&idx);
-                        }
-                        let _ = agent_tx
-                            .send(AgentRequest::ConfirmTool {
-                                tool_call_id: id,
-                                outcome: crate::types::ToolConfirmationOutcome::ProceedOnce,
-                                feedback: None,
-                            })
-                            .await;
-                        state.show_permission_explanation = false;
-                        state.show_permission_debug = false;
-                        state.clear_pending_confirmation();
-                    }
+                    // 输入区的模式切换键不能批准当前请求；批准统一由 Enter 提交。
+                    KeyCode::BackTab => {}
                     // Ctrl+E: 切换权限解释区 / Ctrl+D: 切换 debug 详情（Claude Code 风格）
                     KeyCode::Char('e') | KeyCode::Char('E')
                         if key.modifiers.contains(KeyModifiers::CONTROL) =>

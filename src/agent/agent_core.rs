@@ -759,11 +759,11 @@ impl Agent {
         }
         if tool_calls.len() > 1 {
             self.streaming_executor
-                .execute_partitioned(tool_calls, None)
+                .execute_partitioned(tool_calls, self.abort_token.clone())
                 .await
         } else {
             self.tool_executor
-                .execute_batch(tool_calls, None, None)
+                .execute_batch(tool_calls, None, self.abort_token.clone())
                 .await
         }
     }
