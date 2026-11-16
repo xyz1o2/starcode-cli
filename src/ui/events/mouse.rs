@@ -39,7 +39,17 @@ fn bg_selector_row_at(state: &ChatState, col: u16, row: u16) -> Option<usize> {
     {
         return None;
     }
-    Some(row.saturating_sub(area.y) as usize)
+    let visible_row = row.saturating_sub(area.y) as usize;
+    if visible_row == 0 {
+        return Some(0);
+    }
+    let visible_agents = area.height.saturating_sub(1) as usize;
+    let start = state
+        .bg_agent_selection
+        .filter(|index| *index > visible_agents)
+        .map(|index| index - visible_agents)
+        .unwrap_or(0);
+    Some(start + visible_row)
 }
 
 fn activate_bg_selector_row(state: &mut ChatState, row: usize) {
@@ -560,6 +570,32 @@ mod tests {
 
         assert_eq!(state.bg_agent_selection, Some(2));
         assert_eq!(state.viewing_agent_task_id.as_deref(), Some("agent-b"));
+    }
+
+    #[test]
+    fn clicking_scrolled_selector_row_uses_full_agent_index() {
+        let mut state = ChatState::new();
+        for id in ["agent-a", "agent-b", "agent-c", "agent-d"] {
+            state
+                .active_agent_tasks
+                .insert(id.to_string(), background_task(id));
+        }
+        state.bg_agent_selection = Some(4);
+        state.last_bg_selector_area = Some(Rect {
+            x: 0,
+            y: 20,
+            width: 80,
+            height: 2,
+        });
+
+        // 焦点在 agent-d 时仅显示 main + agent-d；点击第二行仍映射到完整索引 4。
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 21),
+        );
+
+        assert_eq!(state.bg_agent_selection, Some(4));
+        assert_eq!(state.viewing_agent_task_id.as_deref(), Some("agent-d"));
     }
 
     #[test]

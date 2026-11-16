@@ -33,11 +33,39 @@ pub fn selector_height(state: &ChatState) -> u16 {
     (rows + 1) as u16
 }
 
+/// Todo 面板优先占位；终端高度不足时压缩后台代理选择器，不挤掉输入区。
+pub fn selector_height_with_limit(state: &ChatState, max_height: u16) -> u16 {
+    selector_height(state).min(max_height)
+}
+
 /// 渲染选择器的全部行。调用方保证高度与 [`selector_height`] 一致。
 pub fn render_selector(state: &ChatState, area_width: u16) -> Vec<Line<'static>> {
+    render_selector_with_limit(state, area_width, u16::MAX)
+}
+
+/// 渲染受高度限制的选择器；保留 main 行，代理行按当前顺序截断。
+pub fn render_selector_with_limit(
+    state: &ChatState,
+    area_width: u16,
+    max_height: u16,
+) -> Vec<Line<'static>> {
     let theme = state.theme_manager.current();
     let selected = state.bg_agent_selection;
-    let rows = state.background_agent_rows();
+    let all_rows = state.background_agent_rows();
+    if max_height == 0 {
+        return Vec::new();
+    }
+    let visible_count = max_height.saturating_sub(1) as usize;
+    let start = selected
+        .filter(|index| *index > visible_count)
+        .map(|index| index - visible_count)
+        .unwrap_or(0);
+    let rows = all_rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible_count)
+        .collect::<Vec<_>>();
 
     let mut lines = Vec::with_capacity(rows.len() + 1);
 
@@ -76,17 +104,20 @@ pub fn render_selector(state: &ChatState, area_width: u16) -> Vec<Line<'static>>
     ];
     // 操作提示只挂在 main 行右侧，避免每行都重复一遍（文案对齐参考实现文档）
     let hint = "↑/↓ to select · Enter to view";
-    let used = 4 + 4 + "main".len();
-    if (area_width as usize) > used + hint.len() + 2 {
-        let pad = area_width as usize - used - hint.len() - 1;
+    let used = crate::ui::utils::render::display_width("❯ ")
+        + crate::ui::utils::render::display_width(if main_active { "● " } else { "○ " })
+        + crate::ui::utils::render::display_width("main");
+    let hint_width = crate::ui::utils::render::display_width(hint);
+    if (area_width as usize) > used + hint_width + 2 {
+        let pad = area_width as usize - used - hint_width - 1;
         main_spans.push(Span::styled(" ".repeat(pad), Style::default()));
         main_spans.push(Span::styled(hint, Style::default().fg(theme.inactive)));
     }
     lines.push(Line::from(main_spans));
 
     // ── 各后台代理行 ──
-    for (i, info) in rows.iter().enumerate() {
-        let idx = i + 1;
+    for (row_index, info) in rows {
+        let idx = row_index + 1;
         let focused = selected == Some(idx);
         let viewing = state.viewing_agent_task_id.as_deref() == Some(info.task_id.as_str());
 
@@ -103,11 +134,6 @@ pub fn render_selector(state: &ChatState, area_width: u16) -> Vec<Line<'static>>
             .filter(|s| !s.is_empty())
             .unwrap_or(info.description.as_str());
 
-        // 2(❯) + 2(●) + label + 2 空格 + desc + 空隙 + stats
-        let fixed = 4 + label.chars().count() + 2 + stats.chars().count() + 2;
-        let desc_width = (area_width as usize).saturating_sub(fixed);
-        let desc_shown = truncate_to_display_width(desc, desc_width);
-
         // 状态标记必须反映任务状态，而不是当前查看对象：之前用
         // `viewing_agent_task_id` 决定 ●/○，导致所有未打开详情的运行中
         // Explore 都显示成空心圆，看起来像没启动。查看状态改用行高亮表达。
@@ -117,6 +143,17 @@ pub fn render_selector(state: &ChatState, area_width: u16) -> Vec<Line<'static>>
             AgentTaskStatus::Failed | AgentTaskStatus::Rejected => ("×", theme.error),
             AgentTaskStatus::Background => ("·", theme.info),
         };
+
+        // 2(❯) + 2(●) + label + 2 空格 + desc + 空隙 + stats。
+        // 所有宽度都按终端列数计算，不能用 chars().count() 处理中文/emoji。
+        let fixed = crate::ui::utils::render::display_width("❯ ")
+            + crate::ui::utils::render::display_width(&format!("{} ", status_mark))
+            + crate::ui::utils::render::display_width(label)
+            + crate::ui::utils::render::display_width("  ")
+            + crate::ui::utils::render::display_width(&stats)
+            + 2;
+        let desc_width = (area_width as usize).saturating_sub(fixed);
+        let desc_shown = truncate_to_display_width(desc, desc_width);
 
         let row_fg = if focused || viewing {
             theme.foreground
@@ -148,10 +185,16 @@ pub fn render_selector(state: &ChatState, area_width: u16) -> Vec<Line<'static>>
             Span::styled(desc_shown.clone(), Style::default().fg(theme.inactive)),
         ];
 
-        // 右对齐统计
-        let left_width = 4 + label.chars().count() + 2 + desc_shown.chars().count();
-        if (area_width as usize) > left_width + stats.chars().count() + 1 {
-            let pad = area_width as usize - left_width - stats.chars().count() - 1;
+        // 右对齐统计。状态图标的宽度按实际字符计算，不能假定所有图标都相同。
+        let status_prefix = format!("{} ", status_mark);
+        let left_width = crate::ui::utils::render::display_width("❯ ")
+            + crate::ui::utils::render::display_width(&status_prefix)
+            + crate::ui::utils::render::display_width(label)
+            + crate::ui::utils::render::display_width("  ")
+            + crate::ui::utils::render::display_width(&desc_shown);
+        let stats_width = crate::ui::utils::render::display_width(&stats);
+        if (area_width as usize) > left_width + stats_width + 1 {
+            let pad = area_width as usize - left_width - stats_width - 1;
             spans.push(Span::styled(" ".repeat(pad), Style::default()));
         } else {
             spans.push(Span::styled(" ", Style::default()));
@@ -242,6 +285,27 @@ mod tests {
                 "n = {n}"
             );
         }
+    }
+
+    /// 短终端同时存在 Todo 和代理任务时，代理列表收缩但 main 行保留。
+    #[test]
+    fn selector_respects_available_height() {
+        let mut state = state_with(3, "研究任务");
+        assert_eq!(selector_height_with_limit(&state, 2), 2);
+        assert_eq!(render_selector_with_limit(&state, 80, 2).len(), 2);
+        state.bg_agent_selection = Some(3);
+        let lines = render_selector_with_limit(&state, 80, 2);
+        let rendered: String = lines[1]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(
+            rendered.starts_with("❯ "),
+            "selected row must remain visible: {rendered}"
+        );
+        assert_eq!(selector_height_with_limit(&state, 0), 0);
+        assert!(render_selector_with_limit(&state, 80, 0).is_empty());
     }
 
     /// 回归：中文描述 + 任意窄宽度都不能 panic（字节切片实现在这里必崩）

@@ -127,13 +127,37 @@ fn render_agent_header(entry: &ChatEntry, area_width: u16, theme: &Theme) -> Vec
         Style::default().fg(type_color).add_modifier(Modifier::BOLD),
     ));
 
-    // 描述（灰色括号）
+    let stats = if tool_count > 0 || tokens > 0 {
+        let mut parts = Vec::new();
+        if tool_count > 0 {
+            parts.push(format!(
+                "{} tool {}",
+                tool_count,
+                if tool_count == 1 { "use" } else { "uses" }
+            ));
+        }
+        if tokens > 0 {
+            parts.push(format_tokens(tokens));
+        }
+        format!(" · {}", parts.join(" · "))
+    } else {
+        String::new()
+    };
+    let fixed_width = crate::ui::utils::render::display_width("├─ ")
+        + crate::ui::utils::render::display_width(display_name)
+        + crate::ui::utils::render::display_width(&stats);
+
+    // 描述（灰色括号）：按剩余终端列数截断，不使用固定字符预算。
     if !description.is_empty() {
-        let max_desc_width = (area_width as usize).saturating_sub(40);
-        spans.push(Span::styled(
-            format!(" ({})", truncate_str(description, max_desc_width)),
-            Style::default().fg(theme.inactive),
-        ));
+        let description_width = (area_width as usize)
+            .saturating_sub(fixed_width)
+            .saturating_sub(2);
+        if description_width >= 3 {
+            spans.push(Span::styled(
+                format!(" ({})", truncate_str(description, description_width)),
+                Style::default().fg(theme.inactive),
+            ));
+        }
     }
 
     // 统计信息：工具使用次数 + Token 使用量
@@ -324,17 +348,36 @@ fn render_activity_line(
     area_width: u16,
 ) -> Vec<Line<'static>> {
     let theme = state.theme_manager.current();
-    let inner_width = (area_width as usize).saturating_sub(8); // 缩进 + 树形符
+    let prefix = "│  ⎿  ";
+    let mut prefix_width = 0usize;
+    let mut visible_prefix = String::new();
+    for ch in prefix.chars() {
+        let char_width = crate::ui::utils::render::char_display_width(ch);
+        if prefix_width + char_width > area_width as usize {
+            break;
+        }
+        visible_prefix.push(ch);
+        prefix_width += char_width;
+    }
 
     let suffix = if item.repeats > 1 {
         format!(" ×{}", item.repeats)
     } else {
         String::new()
     };
-    let budget = inner_width
-        .saturating_sub(2)
-        .saturating_sub(suffix.chars().count());
-    let text = format!("{}{}", truncate_str(&item.text, budget), suffix);
+    let remaining = (area_width as usize).saturating_sub(prefix_width);
+    let suffix_width = crate::ui::utils::render::display_width(&suffix);
+    let suffix = if suffix_width <= remaining {
+        suffix
+    } else {
+        String::new()
+    };
+    let text_budget = remaining.saturating_sub(crate::ui::utils::render::display_width(&suffix));
+    let text = if text_budget < 3 {
+        String::new()
+    } else {
+        truncate_str(&item.text, text_budget)
+    };
 
     let color = if item.is_assistant {
         theme.foreground
@@ -345,9 +388,8 @@ fn render_activity_line(
     };
 
     vec![Line::from(vec![
-        Span::styled("│  ", Style::default().fg(theme.inactive)),
-        Span::styled("⎿  ", Style::default().fg(theme.inactive)),
-        Span::styled(text, Style::default().fg(color)),
+        Span::styled(visible_prefix, Style::default().fg(theme.inactive)),
+        Span::styled(format!("{}{}", text, suffix), Style::default().fg(color)),
     ])]
 }
 
@@ -537,6 +579,39 @@ mod tests {
     fn truncate_str_keeps_short_input_intact() {
         assert_eq!(truncate_str("abc", 10), "abc");
         assert_eq!(truncate_str("中文", 10), "中文");
+    }
+
+    #[test]
+    fn activity_line_respects_terminal_column_width_with_cjk() {
+        let state = ChatState::test_fixture();
+        let item = SubActivity {
+            text: "读取中文配置文件并验证输出".to_string(),
+            success: true,
+            is_assistant: false,
+            repeats: 3,
+        };
+        for width in 1..=24 {
+            let lines = render_activity_line(&state, &item, width);
+            assert_eq!(lines.len(), 1);
+            let actual = crate::ui::utils::render::line_spans_display_width(&lines[0].spans);
+            assert!(actual <= width as usize, "width={width}, actual={actual}");
+        }
+
+        let normal = render_activity_line(&state, &item, 80);
+        let normal_text: String = normal[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(normal_text.contains("⎿"), "prefix missing: {normal_text}");
+        assert!(
+            normal_text.contains("读取中文配置文件"),
+            "text missing: {normal_text}"
+        );
+        assert!(
+            normal_text.contains("×3"),
+            "repeat count missing: {normal_text}"
+        );
     }
 
     fn progress_tool_call(name: &str, args: &str) -> crate::types::StarToolCall {

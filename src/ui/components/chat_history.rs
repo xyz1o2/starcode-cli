@@ -437,7 +437,13 @@ fn render_teammate_view(state: &ChatState, area_width: u16) -> Option<Vec<Line<'
         tool_uses,
         plural,
     );
-    let fixed = 2 + label.chars().count() + 3 + stats.chars().count() + hint.chars().count() + 4;
+    let display_width = crate::ui::utils::render::display_width;
+    let fixed = display_width("⏵ ")
+        + display_width(label)
+        + display_width(" — ")
+        + display_width(&stats)
+        + display_width(hint)
+        + 4;
     let desc_width = (area_width as usize).saturating_sub(fixed);
     let desc_shown = crate::ui::utils::render::truncate_to_display_width(desc, desc_width);
 
@@ -460,9 +466,13 @@ fn render_teammate_view(state: &ChatState, area_width: u16) -> Option<Vec<Line<'
         format!(" · {}", stats),
         Style::default().fg(theme.inactive),
     ));
-    let used: usize = header.iter().map(|s| s.content.chars().count()).sum();
-    if (area_width as usize) > used + hint.chars().count() + 2 {
-        let pad = area_width as usize - used - hint.chars().count() - 1;
+    let used: usize = header
+        .iter()
+        .map(|s| display_width(s.content.as_ref()))
+        .sum();
+    let hint_width = display_width(hint);
+    if (area_width as usize) > used + hint_width + 2 {
+        let pad = area_width as usize - used - hint_width - 1;
         header.push(Span::styled(" ".repeat(pad), Style::default()));
     } else {
         header.push(Span::styled("  ", Style::default()));

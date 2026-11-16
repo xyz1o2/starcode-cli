@@ -77,10 +77,6 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
         0u16
     };
 
-    // 后台代理选择器（对标 background agent selector）：仅在 ↓ 进入选择器后占位，
-    // 与 task_panel 同一套「按需撑开一段高度」的模式
-    let bg_panel_h = crate::ui::components::bg_agent_selector::selector_height(state);
-
     // 排队中的用户输入（对标 PromptInputQueuedCommands）：紧贴输入框上方，
     // 同样按需撑开
     let queued_panel_h =
@@ -88,6 +84,17 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
 
     // 对话内搜索横条（Ctrl+F）：贴在聊天区正上方，恒 1 行。
     let search_bar_h = crate::ui::components::chat_search::search_bar_height(state);
+
+    // Todo 面板与后台代理选择器并存时，Todo 优先；短终端先裁代理行，避免挤掉输入区。
+    let fixed_h = search_bar_h
+        .saturating_add(token_warning_h)
+        .saturating_add(spinner_h)
+        .saturating_add(task_panel_h)
+        .saturating_add(queued_panel_h)
+        .saturating_add(footer_h);
+    let bg_panel_limit = viewport.height.saturating_sub(fixed_h.saturating_add(1));
+    let bg_panel_h =
+        crate::ui::components::bg_agent_selector::selector_height_with_limit(state, bg_panel_limit);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -239,8 +246,11 @@ fn render_page(f: &mut ratatui::Frame<'_>, state: &mut ChatState, viewport: Rect
     }
 
     if bg_panel_h > 0 {
-        let selector_lines =
-            crate::ui::components::bg_agent_selector::render_selector(state, bg_panel_area.width);
+        let selector_lines = crate::ui::components::bg_agent_selector::render_selector_with_limit(
+            state,
+            bg_panel_area.width,
+            bg_panel_area.height,
+        );
         f.render_widget(
             ratatui::widgets::Paragraph::new(selector_lines),
             bg_panel_area,
