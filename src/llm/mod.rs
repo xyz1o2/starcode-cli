@@ -1,3 +1,4 @@
+mod chat_stream_compat;
 pub mod client;
 pub mod error_kind;
 pub mod message_pipeline;

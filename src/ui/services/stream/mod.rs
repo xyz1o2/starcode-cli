@@ -1818,15 +1818,19 @@ async fn handle_error_message(
     // 让状态栏拖出一长串 "…then retry.Original error: …"。
     let concise = error.split("Original error:").next().unwrap_or(&error);
     let first_line = concise.lines().next().unwrap_or(concise).trim().to_string();
-    emit_status_text(
-        state,
-        message_id,
-        &i18n::t1("ui.status.error").replace("{error}", &first_line),
-    );
-    state.chat_history.push(
-        ChatEntry::assistant(i18n::t1("ui.status.error").replace("{error}", error.trim()))
-            .with_streaming(false),
-    );
+    let error_label = i18n::t1("ui.status.error");
+    let format_error = |text: &str| {
+        let prefix = error_label.split("{error}").next().unwrap_or("");
+        if !prefix.is_empty() && text.starts_with(prefix) {
+            text.to_string()
+        } else {
+            error_label.replace("{error}", text)
+        }
+    };
+    emit_status_text(state, message_id, &format_error(&first_line));
+    state
+        .chat_history
+        .push(ChatEntry::assistant(format_error(error.trim())).with_streaming(false));
     let error_idx = state.chat_history.len() - 1;
     settle_response_cost(state, message_id, Some(error_idx));
     finish_terminal_stream(state, message_id, cancelling_graceful);

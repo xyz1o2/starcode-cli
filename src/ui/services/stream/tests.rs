@@ -2621,18 +2621,27 @@ fn removal_keeps_selection_unless_anchor_entry_is_removed() {
 /// 这条测试同时锁住两件事：**不弹模态**，且**错误不丢**。
 #[tokio::test]
 async fn a_model_failure_never_opens_a_modal_but_stays_visible() {
+    let localized_error = i18n::t1("ui.status.error").replace(
+        "{error}",
+        "The model call failed.\n\nResponseError: Response contained no choices",
+    );
     for (message_id, error) in [
         (
             90,
             "error sending request for url (https://api.example.com/v1)",
         ),
         (91, "401 Unauthorized"),
+        (94, localized_error.as_str()),
+        (
+            93,
+            "Error: The model call failed.\n\nResponseError: Response contained no choices",
+        ),
         (
             92,
             "The model call failed.\n\nOriginal error: Provider error: rig deepseek stream",
         ),
     ] {
-        let mut state = ChatState::new();
+        let mut state = ChatState::test_fixture();
         let (agent_tx, _agent_rx) = mpsc::channel(1);
 
         handle_stream_update(
@@ -2663,12 +2672,16 @@ async fn a_model_failure_never_opens_a_modal_but_stays_visible() {
             "模型失败不该弹模态（error={error:?}），实际栈：{:?}",
             state.modal_stack
         );
-        // 错误仍要可见，并且 Esc 仍能重发上一条。
+        let label = i18n::t1("ui.status.error");
+        let prefix = label.split("{error}").next().unwrap_or("");
+        let content = &state.chat_history.last().unwrap().content;
         assert!(
-            state
-                .chat_history
-                .last()
-                .is_some_and(|entry| entry.content.contains("Error:")),
+            !content.starts_with(&format!("{prefix}{prefix}")),
+            "错误前缀只能添加一次"
+        );
+        // 错误仍要完整可见，并且 Esc 仍能重发上一条。
+        assert!(
+            content.starts_with(prefix) && content.contains(error),
             "错误必须留在聊天记录里（error={error:?}）"
         );
         assert!(

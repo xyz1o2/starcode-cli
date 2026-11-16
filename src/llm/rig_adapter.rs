@@ -648,6 +648,10 @@ async fn start_stream<T>(
 where
     T: rig_core::driver::Transport<rig_core::providers::openai::wire::Chat>,
 {
+    let model = rig_core::Model::new(
+        model.wire,
+        crate::llm::chat_stream_compat::ChatStreamTransport(model.transport),
+    );
     let streamed = model
         .stream(request)
         .map_err(|e| LlmError::ProviderError(format!("rig {label} stream: {e}")))?;
