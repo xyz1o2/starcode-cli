@@ -276,8 +276,7 @@ pub fn handle_enter(state: &mut ChatState) -> bool {
         }
 
         update_textarea_from_input(state);
-        state.show_command_hints = false;
-        state.command_hints.clear();
+        on_input_changed(state);
         return true;
     }
 
@@ -303,8 +302,7 @@ pub fn handle_tab(state: &mut ChatState) -> bool {
         }
 
         update_textarea_from_input(state);
-        state.show_command_hints = false;
-        state.command_hints.clear();
+        on_input_changed(state);
         return true;
     }
 
@@ -472,6 +470,23 @@ mod tests {
         state.input = "读 @\"src".to_string();
         on_input_changed(&mut state);
         assert!(state.show_mention_hints, "未闭合的 @\" 仍应激活提示");
+    }
+
+    #[test]
+    fn accepting_command_completion_keeps_usage_without_consuming_submit() {
+        for use_tab in [false, true] {
+            let mut state = ChatState::test_fixture();
+            state.input = "/resum".into();
+            on_input_changed(&mut state);
+            state.selected_hint = state.command_hints.iter()
+                .position(|hint| hint.starts_with("/resume - ")).unwrap();
+            assert!(if use_tab { handle_tab(&mut state) } else { handle_enter(&mut state) });
+            assert_eq!(state.input.trim(), "/resume");
+            assert!(state.show_command_hints);
+            assert!(state.command_hints.is_empty());
+            assert!(crate::commands::system::command_argument_hint(&state.input).is_some());
+            assert!(!handle_enter(&mut state), "next Enter must reach command dispatch");
+        }
     }
 
     /// 输入开头的 `/` 命令提示不受影响。

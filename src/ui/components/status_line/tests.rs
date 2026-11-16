@@ -411,13 +411,14 @@ fn narrow_terminals_drop_whole_meta_groups_never_half_a_word() {
             "{width} 列下渲染了 {} 列，会溢出：{text:?}",
             text.width()
         );
-        // 出现即整段：` · ` 分隔符 + 完整文案。绝不会是半截。
+        // 阶段位于主标题，出现时必须完整，且不在元数据里重复。
         let present = text.contains(status);
-        assert_eq!(
-            present,
-            text.contains(&format!(" · {status}")),
-            "{width} 列下实时状态只该整段在或整段不在：{text:?}"
-        );
+        if present {
+            assert!(text.starts_with(&format!(" ⠋ {status}…")), "{text:?}");
+            assert_eq!(text.matches(status).count(), 1, "{text:?}");
+        } else {
+            assert!(!text.contains("preflight"), "{text:?}");
+        }
         assert!(
             !text.contains("..."),
             "{width} 列下不该出现旧的逐段截断标记：{text:?}"
@@ -639,6 +640,26 @@ fn a_tool_that_never_finishes_still_turns_red() {
 /// 它是这一行天然的位置——用户盯着的就是这里。现在带信息量的状态（preflight、
 /// checkpoint、取消、卡住）会显示出来，而与动词重复的 `Status: processing`
 /// 一类直接吞掉，否则这行会变成两层废话。
+#[test]
+fn explicit_phase_replaces_random_verb_and_normalizes_ellipsis() {
+    let mut state = ChatState::test_fixture();
+    state.is_processing = true;
+    state.current_status_line = Some("Analyzing task complexity...".into());
+    state.processing_started_at = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(3));
+    let lines = processing_spinner_line(&state, 100);
+    let text = crate::ui::utils::text::line_plain_text(&lines[1]);
+    assert!(text.contains("Analyzing task complexity… (3s"), "{text}");
+    assert_eq!(text.matches("Analyzing task complexity").count(), 1);
+    assert_eq!(text.matches('…').count(), 1);
+    assert!(!text.contains("..."));
+    assert!(!text.contains(turn_spinner_verb(&state)));
+    assert!(text.contains("esc to interrupt"));
+    crate::ui::test_support::assert_lines_render!(
+        "spinner_explicit_phase", 100, 2, &lines
+    );
+}
+
 #[test]
 fn current_status_line_reaches_the_spinner_row() {
     let mut state = ChatState::new();

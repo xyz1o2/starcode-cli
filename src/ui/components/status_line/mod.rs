@@ -788,10 +788,24 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
     // 区别只在于 todo 文案要先过一遍英文/长度筛（见 in_progress_todo_verb），
     // 筛不过就用本轮固定的随机动词。
     let todo_verb = in_progress_todo_verb(state);
-    let verb: &str = match todo_verb {
-        Some(ref v) => v,
-        None => turn_spinner_verb(state),
+    let live_status = status_suffix(state).map(|text| {
+        text.trim_end_matches(['.', '…', ' ']).to_string()
+    });
+    let hint_width = if width >= INTERRUPT_HINT_MIN_WIDTH {
+        META_SEP.width() + INTERRUPT_HINT.width()
+    } else {
+        0
     };
+    // 明确的阶段替代随机动词；放不下完整阶段和时钟时，退回短动词。
+    let verb: &str = live_status
+        .as_deref()
+        .filter(|text| !text.is_empty())
+        .filter(|text| {
+            text.width() + 8 + format_elapsed(elapsed).width() + META_SEP.width() + hint_width
+                <= width as usize
+        })
+        .or(todo_verb.as_deref())
+        .unwrap_or_else(|| turn_spinner_verb(state));
 
     // 两个信号各司其职：`warmup` 是"还在算"，`stall` 是"工具可能卡住"。
     // 工具 ID 而不是显示标签才是权威来源——并行工具完成时不能把兄弟项藏掉。
@@ -860,16 +874,6 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
                 short
             },
         ));
-    }
-
-    // 3) 实时状态。`current_status_line` 上约有 40 处写入，其中混着两类东西：
-    //    "现在成立"的状态（preflight / checkpoint / 卡住）和"刚刚发生过的通知"
-    //    （Copied / Theme: X / Verbose output: ON）。两者都往这一行里塞，
-    //    于是 Ctrl+O 的提示会和回合计时并排显示成 `18s · Verbose output: OFF`
-    //    —— 一条过期通知占据了实时状态的位置。通知侧已迁到 `push_toast`，
-    //    这里只留真正描述"现在"的那部分。
-    if let Some(status) = status_suffix(state) {
-        groups.push((meta_color, status));
     }
 
     // 4) 思考结束后的回顾标签（对标 Claude Code `thought for Xs`），驻留 2 秒

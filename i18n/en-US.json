@@ -1,6 +1,9 @@
 {
   "ui.input.placeholder": "Ask Star (Shift+Enter for newline, Ctrl+P for commands, Ctrl+T for tasks, Tab for auto-completion)",
   "ui.image.label": "Image",
+  "ui.command.argument_hint": "{usage}  {detail}  (/help {command})",
+  "ui.command.resume_hint": "Enter to choose a session, or supply its name or ID",
+  "ui.agent.viewing": "viewing",
   "ui.image.saved_to_prompt": "Image added to the message draft. Submit it as a message after answering this prompt.",
   "ui.image.send_unavailable": "Images require an online session, a selected model, and a normal message. Your draft has been kept.",
   "ui.input.empty": "(empty)",

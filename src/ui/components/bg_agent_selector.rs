@@ -43,7 +43,18 @@ pub fn render_selector(state: &ChatState, area_width: u16) -> Vec<Line<'static>>
     render_selector_with_limit(state, area_width, u16::MAX)
 }
 
-/// 渲染受高度限制的选择器；保留 main 行，代理行按当前顺序截断。
+/// 绘制和鼠标命中共用窗口起点，焦点离开后仍保持正在查看的代理可见。
+pub(crate) fn selector_window_start(state: &ChatState, max_height: u16) -> usize {
+    let rows = state.background_agent_rows();
+    let anchor = state.bg_agent_selection.or_else(|| {
+        state.viewing_agent_task_id.as_ref().and_then(|id| {
+            rows.iter().position(|info| &info.task_id == id).map(|index| index + 1)
+        })
+    });
+    anchor.unwrap_or(0).saturating_sub(max_height.saturating_sub(1) as usize)
+}
+
+/// 渲染受高度限制的选择器，固定 main 行并跟随当前焦点。
 pub fn render_selector_with_limit(
     state: &ChatState,
     area_width: u16,
@@ -56,10 +67,7 @@ pub fn render_selector_with_limit(
         return Vec::new();
     }
     let visible_count = max_height.saturating_sub(1) as usize;
-    let start = selected
-        .filter(|index| *index > visible_count)
-        .map(|index| index - visible_count)
-        .unwrap_or(0);
+    let start = selector_window_start(state, max_height);
     let rows = all_rows
         .iter()
         .enumerate()
@@ -78,15 +86,21 @@ pub fn render_selector_with_limit(
     } else {
         theme.inactive
     };
-    let main_fg = if main_focused {
+    let main_fg = if main_focused || main_active {
         theme.foreground
     } else {
         theme.subtle
     };
-    let main_mod = if main_focused {
+    let main_mod = if main_focused || main_active {
         Modifier::BOLD
     } else {
         Modifier::empty()
+    };
+    let viewing_label = crate::core::i18n::t1("ui.agent.viewing");
+    let main_label = if main_active {
+        format!("main [{viewing_label}]")
+    } else {
+        "main".to_string()
     };
     let mut main_spans = vec![
         Span::styled(
@@ -98,7 +112,7 @@ pub fn render_selector_with_limit(
             Style::default().fg(main_dot),
         ),
         Span::styled(
-            "main".to_string(),
+            main_label.clone(),
             Style::default().fg(main_fg).add_modifier(main_mod),
         ),
     ];
@@ -106,7 +120,7 @@ pub fn render_selector_with_limit(
     let hint = "↑/↓ to select · Enter to view";
     let used = crate::ui::utils::render::display_width("❯ ")
         + crate::ui::utils::render::display_width(if main_active { "● " } else { "○ " })
-        + crate::ui::utils::render::display_width("main");
+        + crate::ui::utils::render::display_width(&main_label);
     let hint_width = crate::ui::utils::render::display_width(hint);
     if (area_width as usize) > used + hint_width + 2 {
         let pad = area_width as usize - used - hint_width - 1;
@@ -127,7 +141,12 @@ pub fn render_selector_with_limit(
             super::agent_group_render::format_duration(info.elapsed()),
             format_tokens(info.tokens),
         );
-        let label = info.name.as_deref().unwrap_or(info.agent_type.as_str());
+        let name = info.name.as_deref().unwrap_or(info.agent_type.as_str());
+        let label = if viewing {
+            format!("{name} [{viewing_label}]")
+        } else {
+            name.to_string()
+        };
         let desc = info
             .task_description
             .as_deref()
@@ -148,7 +167,7 @@ pub fn render_selector_with_limit(
         // 所有宽度都按终端列数计算，不能用 chars().count() 处理中文/emoji。
         let fixed = crate::ui::utils::render::display_width("❯ ")
             + crate::ui::utils::render::display_width(&format!("{} ", status_mark))
-            + crate::ui::utils::render::display_width(label)
+            + crate::ui::utils::render::display_width(&label)
             + crate::ui::utils::render::display_width("  ")
             + crate::ui::utils::render::display_width(&stats)
             + 2;
@@ -189,7 +208,7 @@ pub fn render_selector_with_limit(
         let status_prefix = format!("{} ", status_mark);
         let left_width = crate::ui::utils::render::display_width("❯ ")
             + crate::ui::utils::render::display_width(&status_prefix)
-            + crate::ui::utils::render::display_width(label)
+            + crate::ui::utils::render::display_width(&label)
             + crate::ui::utils::render::display_width("  ")
             + crate::ui::utils::render::display_width(&desc_shown);
         let stats_width = crate::ui::utils::render::display_width(&stats);
@@ -246,7 +265,7 @@ mod tests {
     }
 
     fn state_with(n: usize, desc: &str) -> ChatState {
-        let mut state = ChatState::new();
+        let mut state = ChatState::test_fixture();
         for i in 0..n {
             let id = format!("t{i}");
             state
@@ -318,6 +337,25 @@ mod tests {
             let lines = render_selector(&state, width);
             assert_eq!(lines.len(), 3, "width = {width}");
         }
+    }
+
+    #[test]
+    fn viewed_agent_is_labeled_after_keyboard_focus_returns_to_input() {
+        let mut state = state_with(3, "检查组件");
+        state.viewing_agent_task_id = Some("t2".into());
+        state.bg_agent_selection = None;
+        assert_eq!(selector_window_start(&state, 2), 2);
+        let lines = render_selector_with_limit(&state, 100, 2);
+        let main = crate::ui::utils::text::line_plain_text(&lines[0]);
+        let agent = crate::ui::utils::text::line_plain_text(&lines[1]);
+        let label = crate::core::i18n::t1("ui.agent.viewing");
+        assert!(!main.contains(&label));
+        assert!(agent.contains(&label), "{agent}");
+        assert!(agent.contains("●"), "running status remains independent: {agent}");
+        let info = state.active_agent_tasks.get_mut("t2").unwrap();
+        info.finished_at = Some(info.started_at + std::time::Duration::from_secs(3));
+        let lines = render_selector_with_limit(&state, 100, 2);
+        crate::ui::test_support::assert_lines_render!("agent_selector_viewing", 100, 2, &lines);
     }
 
     #[test]

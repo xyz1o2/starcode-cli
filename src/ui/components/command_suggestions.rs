@@ -278,7 +278,22 @@ fn render_command_hints_overlay(
     input_area: Rect,
     theme: &Theme,
 ) {
-    if !state.show_command_hints || state.command_hints.is_empty() {
+    if !state.show_command_hints {
+        return;
+    }
+    if state.command_hints.is_empty() {
+        if input_area.y > f.area().y && input_area.width > 0 {
+            if let Some(hint) = crate::commands::system::command_argument_hint(&state.input) {
+                let area = Rect::new(input_area.x, input_area.y - 1, input_area.width, 1);
+                f.render_widget(Clear, area);
+                f.render_widget(
+                    ratatui::widgets::Paragraph::new(
+                        crate::ui::utils::text::truncate_display(&hint, area.width as usize)
+                    ).style(Style::default().fg(theme.secondary).bg(theme.background)),
+                    area,
+                );
+            }
+        }
         return;
     }
 
@@ -407,6 +422,32 @@ fn render_command_hints_overlay(
 #[cfg(test)]
 mod screenshot_regressions {
     use super::*;
+
+    #[test]
+    fn complete_resume_command_keeps_argument_help_visible() {
+        let mut state = ChatState::test_fixture();
+        state.input = "/resume ".into();
+        crate::ui::services::suggestions::on_input_changed(&mut state);
+        assert!(state.command_hints.is_empty());
+        assert!(state.show_command_hints);
+        assert!(!crate::ui::services::suggestions::handle_enter(&mut state));
+        assert_eq!(state.input, "/resume ");
+        crate::ui::test_support::assert_render!("resume_argument_help", 100, 4, |f| {
+            render_command_hints_overlay(f, &state, Rect::new(0, 1, 100, 3), state.theme_manager.current());
+        });
+    }
+
+    #[test]
+    fn argument_help_accepts_aliases_and_keeps_subcommand_completion() {
+        let _state = ChatState::test_fixture();
+        for input in ["/resume", "/resume saved-session", "/chat load "] {
+            let hint = crate::commands::system::command_argument_hint(input).unwrap();
+            assert!(hint.contains("[session]"), "{hint}");
+        }
+        assert!(crate::commands::system::command_argument_hint("/resum").is_none());
+        assert!(crate::commands::system::command_argument_hint("/chat ").is_none());
+        assert!(!crate::commands::system::get_command_hints("/chat ").is_empty());
+    }
     #[test]
     fn command_completion_covers_full_input_width() {
         let mut state = ChatState::test_fixture();

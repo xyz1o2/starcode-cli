@@ -43,12 +43,7 @@ fn bg_selector_row_at(state: &ChatState, col: u16, row: u16) -> Option<usize> {
     if visible_row == 0 {
         return Some(0);
     }
-    let visible_agents = area.height.saturating_sub(1) as usize;
-    let start = state
-        .bg_agent_selection
-        .filter(|index| *index > visible_agents)
-        .map(|index| index - visible_agents)
-        .unwrap_or(0);
+    let start = crate::ui::components::bg_agent_selector::selector_window_start(state, area.height);
     Some(start + visible_row)
 }
 
@@ -596,6 +591,9 @@ mod tests {
 
         assert_eq!(state.bg_agent_selection, Some(4));
         assert_eq!(state.viewing_agent_task_id.as_deref(), Some("agent-d"));
+        state.bg_agent_selection = None;
+        assert_eq!(bg_selector_row_at(&state, 10, 21), Some(4));
+        assert_eq!(bg_selector_row_at(&state, 10, 20), Some(0));
     }
 
     #[test]

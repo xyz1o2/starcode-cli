@@ -1,0 +1,7 @@
+─── 100x2 ───
+  0│  ○ main                                                              ↑/↓ to select · Enter to view │
+  1│  ● Explore [viewing]  检查组件                                               3.0s · ↓ 10.9k tokens │
+
+─── styles ───
+  0│0-1 fg:rgb(177,185,249) · 2-3 fg:rgb(153,153,153) · 4-7 fg:rgb(80,80,80) · 8-69 plain · 70-98 fg:rgb(153,153,153) · 99 plain│
+  1│0-1 fg:rgb(177,185,249) · 2-3 fg:green · 4-20 bold,underline,fg:white · 21-22 plain · 23-30 fg:rgb(153,153,153) · 31-77 plain · 78-98 fg:rgb(153,153,153) · 99 plain│

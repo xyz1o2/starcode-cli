@@ -47,7 +47,7 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
             },
             SlashCommand {
                 name: "resume",
-                alt_names: &[],
+                alt_names: &["load"],
                 description: "Restore saved session",
                 category: "Session",
                 sub_commands: &[],
@@ -2717,6 +2717,46 @@ pub fn command_palette_items(input: &str) -> Vec<crate::ui::state::PaletteItem> 
             }
         })
         .collect()
+}
+
+/// 已到叶子命令时显示用法，不把参数占位符加入可接受的补全项。
+pub fn command_argument_hint(input: &str) -> Option<String> {
+    let parts: Vec<String> = input.strip_prefix('/')?
+        .split_whitespace().map(str::to_string).collect();
+    let mut current = ALL_COMMANDS;
+    let mut path = Vec::new();
+    for part in parts {
+        let cmd = current.iter().find(|cmd| {
+            cmd.name.eq_ignore_ascii_case(&part)
+                || cmd.alt_names.iter().any(|alias| alias.eq_ignore_ascii_case(&part))
+        })?;
+        path.push(cmd.name);
+        if cmd.sub_commands.is_empty() {
+            let path = path.join(" ");
+            let arguments = match path.as_str() {
+                "resume" | "chat resume" => Some("[session]"),
+                "chat save" => Some("[name]"),
+                "chat delete" => Some("<session>"),
+                "chat share" => Some("[name]"),
+                _ => None,
+            };
+            let detail = if path == "resume" || path == "chat resume" {
+                crate::core::i18n::t1("ui.command.resume_hint")
+            } else {
+                cmd.description.to_string()
+            };
+            let usage = match arguments {
+                Some(arguments) => format!("/{path} {arguments}"),
+                None => format!("/{path}"),
+            };
+            return Some(crate::core::i18n::t1("ui.command.argument_hint")
+                .replace("{usage}", &usage)
+                .replace("{detail}", &detail)
+                .replace("{command}", &path));
+        }
+        current = cmd.sub_commands;
+    }
+    None
 }
 
 /// 获取命令补全提示
