@@ -70,13 +70,39 @@ pub async fn resolve_classifier_model() -> Option<String> {
         .await
         .unwrap_or_default();
 
-    crate::core::config::provider_resolution::resolve_effective_provider_settings(
+    let resolved = crate::core::config::provider_resolution::resolve_effective_provider_settings(
         crate::core::config::provider_resolution::ProviderResolutionInputs::default(),
         &provider_config,
         &settings,
-    )
-    .small_fast_model
-    .value
+    );
+
+    let selected = select_classifier_model(
+        resolved.small_fast_model.value.as_deref(),
+        resolved.small_fast_model.source.kind,
+    );
+    if selected.is_none() {
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[AutoMode] small_fast_model from {} is not usable as the classifier model — \
+             falling back to the client's own model",
+            resolved.small_fast_model.source.kind
+        ));
+    }
+    selected
+}
+
+/// 外部工具的副模型未绑定当前 client 的端点和凭据，保守回退到 client 自身模型。
+/// 显式分类器模型在调用前已处理，不受此过滤影响。
+fn select_classifier_model(candidate: Option<&str>, source_kind: &str) -> Option<String> {
+    let candidate = candidate.map(str::trim).filter(|c| !c.is_empty())?;
+    if is_external_model_source(source_kind) {
+        return None;
+    }
+    Some(candidate.to_string())
+}
+
+/// 这个来源是不是「外部工具配置采纳来的」。
+fn is_external_model_source(source_kind: &str) -> bool {
+    source_kind == crate::core::config::provider_resolution::SRC_CLAUDE_CODE_SMALL_FAST_MODEL
 }
 
 /// 构造分类器并装进策略引擎。
@@ -136,4 +162,68 @@ pub async fn install_auto_classifier(
         model, timeout_secs
     ));
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::provider_resolution as pr;
+
+    /// 本项目自己 provider 配置给出的副模型 —— 直接采用。
+    #[test]
+    fn project_owned_small_fast_model_is_used() {
+        let picked = select_classifier_model(
+            Some("small-fast-model"),
+            pr::SRC_PROVIDER_STORE_ACTIVE_MODEL,
+        );
+        assert_eq!(picked.as_deref(), Some("small-fast-model"));
+    }
+
+    /// 环境变量给出的副模型（`STAR_SMALL_FAST_MODEL`）也是自己这一侧的。
+    #[test]
+    fn env_owned_small_fast_model_is_used() {
+        let picked =
+            select_classifier_model(Some("small-fast-model"), pr::SRC_ENV_STAR_SMALL_FAST_MODEL);
+        assert_eq!(picked.as_deref(), Some("small-fast-model"));
+    }
+
+    /// 外部工具配置采纳来的副模型：**无法确认**与当前 provider 匹配 →
+    /// 放弃，退回 client 自己的模型（`None`），而不是拿它去撞网关。
+    #[test]
+    fn externally_adopted_small_fast_model_is_not_adopted() {
+        let picked = select_classifier_model(
+            Some("some-other-provider/model"),
+            pr::SRC_CLAUDE_CODE_SMALL_FAST_MODEL,
+        );
+        assert_eq!(
+            picked, None,
+            "外部来源的副模型与当前 provider 是否匹配无法确认，不该采用"
+        );
+    }
+
+    /// 没有候选（provider 没配副模型）→ `None` = 用 client 自己的模型。
+    ///
+    /// 这是**正常**路径，不是「没有分类器」：分类器照样装上，只是模型名
+    /// 留空，由 client 用当前模型跑分类。
+    #[test]
+    fn no_candidate_means_use_the_client_model() {
+        assert_eq!(select_classifier_model(None, pr::SRC_MISSING), None);
+    }
+
+    /// 空串 / 纯空白不算候选。
+    #[test]
+    fn blank_candidates_are_ignored() {
+        assert_eq!(select_classifier_model(Some("   "), pr::SRC_MISSING), None);
+        assert_eq!(select_classifier_model(Some(""), pr::SRC_MISSING), None);
+    }
+
+    /// 候选值两端的空白要被裁掉再采用。
+    #[test]
+    fn candidates_are_trimmed() {
+        let picked = select_classifier_model(
+            Some("  small-fast-model  "),
+            pr::SRC_PROVIDER_STORE_ACTIVE_MODEL,
+        );
+        assert_eq!(picked.as_deref(), Some("small-fast-model"));
+    }
 }

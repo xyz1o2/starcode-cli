@@ -1,6 +1,38 @@
 //! handle_stream_update 的测试。
 
 #[tokio::test]
+async fn text_deltas_clear_completed_analysis_and_preserve_repeated_text() {
+    let mut state = ChatState::test_fixture();
+    state.chat_history.clear();
+    state
+        .chat_history
+        .push(ChatEntry::assistant("").with_streaming(true));
+    state.stream_targets.insert(42, 0);
+    state.current_status_line = Some("Status: Analyzing task complexity...".into());
+    let (tx, _rx) = mpsc::channel(4);
+    for content in ["正文段落。", "正文段落。"] {
+        handle_stream_update(
+            &mut state,
+            StreamMessage::TextDelta {
+                message_id: 42,
+                content: content.into(),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+    }
+    assert!(state.current_status_line.is_none());
+    assert_eq!(state.chat_history[0].content, "正文段落。正文段落。");
+    state.current_status_line = Some("Waiting for approval".into());
+    clear_stale_retry_status(&mut state);
+    assert_eq!(
+        state.current_status_line.as_deref(),
+        Some("Waiting for approval")
+    );
+}
+
+#[tokio::test]
 async fn withdrawal_waits_for_runtime_and_preserves_draft_and_history() {
     let mut state = ChatState::test_fixture();
     state.chat_history.clear();
@@ -1545,8 +1577,12 @@ async fn global_search_results_apply_only_to_open_current_request() {
 
 #[tokio::test]
 async fn confirmation_feedback_draft_resets_for_new_request_and_matching_result() {
-    let mut state = ChatState::new();
+    let mut state = ChatState::test_fixture();
     let (agent_tx, _agent_rx) = mpsc::channel(1);
+    state.viewing_agent_task_id = Some("explore-active".into());
+    state.bg_agent_selection = Some(1);
+    state.auto_follow = false;
+    state.show_scroll_to_bottom = true;
     state.confirmation_feedback_mode = true;
     state.pending_confirmation_feedback = "stale draft".to_string();
     let confirmation = crate::types::ToolConfirmation {
@@ -1575,6 +1611,16 @@ async fn confirmation_feedback_draft_resets_for_new_request_and_matching_result(
     .unwrap();
     assert!(!state.confirmation_feedback_mode);
     assert!(state.pending_confirmation_feedback.is_empty());
+    assert!(state.viewing_agent_task_id.is_none());
+    assert!(state.bg_agent_selection.is_none());
+    assert!(state.auto_follow);
+    assert!(!state.show_scroll_to_bottom);
+    assert!(state.is_awaiting_confirmation);
+    assert_eq!(state.pending_tool_call_id.as_deref(), Some("corr-1"));
+    assert_eq!(
+        state.pending_confirmation_originating_id.as_deref(),
+        Some("call-1")
+    );
 
     state.confirmation_feedback_mode = true;
     state.pending_confirmation_feedback = "result draft".to_string();

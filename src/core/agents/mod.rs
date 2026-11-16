@@ -25,6 +25,19 @@ pub struct SubAgentRequest {
     /// `None` = 前台一次性任务，不注册、收不到消息。
     /// 设计文档：`docs/agent-messaging-design.zh-CN.md` §6 Phase 3。
     pub identity: Option<String>,
+    /// **发起方**的递归深度 —— 本子代理将落在 `depth + 1`。
+    ///
+    /// # 为什么必须由调用方显式带上
+    ///
+    /// 子代理的深度不能靠"数自己被创建了几层"推导出来：创建子代理的
+    /// `AgentTool` 装在**共享的** `ToolRegistry` 里（见
+    /// `core/config/runtime_bootstrap/agent_runtime.rs`），它持有的是**父级**
+    /// `Arc<Config>`。子代理再调 `Agent` 时，从注册表拿到的仍是那个父级
+    /// runner —— 于是深度永远停在父级那一层，链式派生收不住。
+    ///
+    /// 显式带上 `depth` 后，每一级都从**真实的调用链**上数，派生关系与
+    /// 深度不再依赖注册表里恰好装着谁的 runner。
+    pub parent_depth: usize,
 }
 
 impl SubAgentRequest {
@@ -36,6 +49,7 @@ impl SubAgentRequest {
             parent_messages: Vec::new(),
             parent_pending_context: Vec::new(),
             identity: None,
+            parent_depth: 0,
         }
     }
 
@@ -63,6 +77,12 @@ impl SubAgentRequest {
     ) -> Self {
         self.parent_messages = messages;
         self.parent_pending_context = pending_context;
+        self
+    }
+
+    /// 记录**发起方**所处的递归深度（本子代理落在 `depth + 1`）。
+    pub fn with_parent_depth(mut self, depth: usize) -> Self {
+        self.parent_depth = depth;
         self
     }
 }

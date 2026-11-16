@@ -1399,20 +1399,18 @@ pub async fn handle_key_event(
             }
         }
         KeyCode::Esc => {
+            // 详情页的 Esc 先返回主会话，不能被运行中的取消分支抢走。
+            if state.viewing_agent_task_id.is_some() {
+                state.exit_teammate_view();
+                return Ok(());
+            }
+
             // Handle Streaming Cancellation
             if state.is_streaming || state.is_processing {
                 let _ = agent_tx.send(AgentRequest::Abort).await;
                 state.current_status_line = Some("Cancelling...".to_string());
                 state.is_processing = false;
                 state.cancelling_since = Some(Instant::now());
-                return Ok(());
-            }
-
-            // 正在看某个后台代理的详情 → Esc 先回主会话（对标详情视图顶部那句
-            // "Esc to return"）。选择器自己的 Esc 在 handle_bg_agent_selector_key 里
-            // 已经被消费掉，走不到这儿。
-            if state.viewing_agent_task_id.is_some() {
-                state.exit_teammate_view();
                 return Ok(());
             }
 
@@ -3257,6 +3255,28 @@ mod tests {
         assert!(press(&mut state, KeyCode::Esc));
         assert!(state.bg_agent_selection.is_none());
         assert_eq!(state.viewing_agent_task_id.as_deref(), Some("a"));
+    }
+
+    #[tokio::test]
+    async fn escape_from_running_agent_detail_returns_without_aborting() {
+        let mut state = ChatState::test_fixture();
+        state.active_agent_tasks.insert("a".into(), bg_task("a"));
+        state.viewing_agent_task_id = Some("a".into());
+        state.is_processing = true;
+        state.is_streaming = true;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(state.viewing_agent_task_id.is_none());
+        assert!(state.is_processing);
+        assert!(state.is_streaming);
+        assert!(rx.try_recv().is_err(), "returning must not send Abort");
     }
 
     /// 没有后台代理时选择器不该抢键，并顺手把残留焦点清掉。

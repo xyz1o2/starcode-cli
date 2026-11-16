@@ -26,6 +26,14 @@ pub struct AgentToolParams {
     pub background: Option<bool>,
     #[serde(default)]
     pub max_rounds: Option<u32>,
+    /// **调用方**所处的递归深度 —— 本子代理落在 `depth + 1`。
+    ///
+    /// 由执行器（`ToolExecutor::normalize_agent_args`）覆盖写入，不在参数
+    /// schema 里，模型看不到也伪造不了。它必须由**真正发起这次调用的
+    /// 那个 agent** 提供：`AgentTool` 装在共享的 `ToolRegistry` 里，它自己
+    /// 持有的 runner 是父级的，拿它算深度会永远停在父级那一层。
+    #[serde(default, rename = "_parent_depth")]
+    pub parent_depth: usize,
 }
 
 impl From<AgentToolParams> for AgentToolFullInput {
@@ -39,6 +47,7 @@ impl From<AgentToolParams> for AgentToolFullInput {
             model: None,
             background: p.background,
             max_rounds: p.max_rounds,
+            parent_depth: p.parent_depth,
         }
     }
 }
@@ -399,6 +408,7 @@ impl ToolInvocation for AgentToolInvocation {
                         parent_messages: request.base.parent_messages,
                         parent_pending_context: request.base.parent_pending_context,
                         identity: Some(fork_name.clone()),
+                        parent_depth: request.base.parent_depth,
                     };
                     let launch = async_runner
                         .spawn_background(

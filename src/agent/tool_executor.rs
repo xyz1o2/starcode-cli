@@ -32,6 +32,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// `STAR_SHELL_TIMEOUT` 和不活动超时），这里只接"内置工具集体失联"这种情况。
 const DEFAULT_TOOL_WATCHDOG_SECS: u64 = 1800;
 
+/// `Agent` 工具参数里携带「调用方深度」的键名。
+///
+/// 由执行器（`ToolExecutor::normalize_agent_args`）**覆盖写入** —— 模型
+/// 自带的同名键一律无效。键名带下划线前缀表示它是内部字段，不在
+/// `AgentTool` 的参数 schema 里。
+pub(crate) const AGENT_PARENT_DEPTH_KEY: &str = "_parent_depth";
+
 fn tool_watchdog() -> std::time::Duration {
     let secs = std::env::var("STAR_TOOL_WATCHDOG_SECS")
         .ok()
@@ -1665,7 +1672,7 @@ impl ToolExecutor {
             "MultiEdit" => Self::normalize_multi_edit_args(args),
             "Grep" => Self::normalize_search_args(original_name, args),
             "Read" => Self::normalize_read_file_args(args),
-            "Agent" => Self::normalize_agent_args(args),
+            "Agent" => Self::normalize_agent_args(args, self.config.recursion_depth),
             _ => args,
         };
         match canonical_name {
@@ -1786,7 +1793,24 @@ impl ToolExecutor {
     /// `subagent_type` 的大小写/连字符别名全部交给 `SubagentType::from_name`
     /// —— 枚举自己是身份的唯一事实来源，这里不再维护别名表；未识别的值
     /// 原样放行（自定义 agent 名交给下游注册表解析）。
-    fn normalize_agent_args(mut args: Value) -> Value {
+    ///
+    /// 同时**注入调用方的递归深度**（`_parent_depth`）。
+    ///
+    /// # 为什么深度要由执行器注入
+    ///
+    /// `AgentTool` 装在**共享的** `ToolRegistry` 里，它持有的 runner 与
+    /// config 是**父级**的 —— 子代理再调 `Agent` 时，从注册表拿到的仍是
+    /// 父级那份。于是「子代理里再派生一层」算出来的深度与真实调用链
+    /// 对不上，链式派生收不住。
+    ///
+    /// 真正知道「我是第几层」的是**执行这次调用的那个 agent** ——
+    /// 也就是持有本 `ToolExecutor` 的那个，它的 `config.recursion_depth`
+    /// 就是它自己的深度。所以在参数归一这一层把深度带下去，
+    /// 每一级都从真实调用链数。
+    ///
+    /// 键名带下划线前缀：模型**看不到**它（不在 schema 里），也不会自己
+    /// 伪造 —— 值每次都由执行器覆盖写入。
+    fn normalize_agent_args(mut args: Value, parent_depth: usize) -> Value {
         let Some(obj) = args.as_object_mut() else {
             return args;
         };
@@ -1801,6 +1825,11 @@ impl ToolExecutor {
             obj.insert("subagent_type".to_string(), Value::String(normalized));
             obj.remove("subagentType");
         }
+        // 总是覆盖：模型可能自己带了一个 `_parent_depth` 进来，那不能算数。
+        obj.insert(
+            AGENT_PARENT_DEPTH_KEY.to_string(),
+            Value::from(parent_depth),
+        );
         args
     }
 
@@ -3079,10 +3108,13 @@ mod tests {
     /// 未识别的自定义名原样透传（架构上归一收敛在 SubagentType::from_name）。
     #[test]
     fn subagent_type_aliases_normalize_to_slugs() {
-        let out = ToolExecutor::normalize_agent_args(json!({
-            "subagentType": "GeneralPurpose",
-            "prompt": "p"
-        }));
+        let out = ToolExecutor::normalize_agent_args(
+            json!({
+                "subagentType": "GeneralPurpose",
+                "prompt": "p"
+            }),
+            0,
+        );
         assert_eq!(
             out["subagent_type"],
             json!("general_purpose"),
@@ -3090,15 +3122,40 @@ mod tests {
         );
         assert!(out.get("subagentType").is_none(), "旧键必须被清掉");
 
-        let out = ToolExecutor::normalize_agent_args(json!({ "subagent_type": "reviewer" }));
+        let out = ToolExecutor::normalize_agent_args(json!({ "subagent_type": "reviewer" }), 0);
         assert_eq!(out["subagent_type"], json!("code_reviewer"));
 
-        let out = ToolExecutor::normalize_agent_args(json!({ "subagent_type": "my_team_agent" }));
+        let out =
+            ToolExecutor::normalize_agent_args(json!({ "subagent_type": "my_team_agent" }), 0);
         assert_eq!(
             out["subagent_type"],
             json!("my_team_agent"),
             "自定义 agent 名必须原样放行"
         );
+    }
+
+    #[test]
+    fn agent_depth_is_overwritten_and_survives_request_routing() {
+        let normalized = ToolExecutor::normalize_agent_args(
+            json!({
+                "description": "inspect handlers",
+                "prompt": "Inspect handlers",
+                "subagent_type": "explorer",
+                "_parent_depth": 0,
+                "parent_depth": 0
+            }),
+            2,
+        );
+        let params: crate::core::tools::agent_tool::AgentToolParams =
+            serde_json::from_value(normalized).unwrap();
+        let input: crate::core::agents::AgentToolFullInput = params.into();
+        let route = crate::agent::subagent::router::route_agent_call(&input, false, false);
+        match route {
+            crate::agent::subagent::router::AgentRoute::AsyncAgent { request, .. } => {
+                assert_eq!(request.parent_depth, 2);
+            }
+            other => panic!("expected async explorer, got {other:?}"),
+        }
     }
 
     /// 静音 panic hook 跑一段代码：被捕获的 panic 不该往测试输出里打噪音。

@@ -1466,6 +1466,11 @@ pub async fn handle_stream_update(
             );
             // New status update
             if awaiting {
+                // 确认卡在主历史中，先退出代理详情，避免不可见的卡片接收确认键。
+                state.exit_teammate_view();
+                state.bg_agent_selection = None;
+                state.auto_follow = true;
+                state.show_scroll_to_bottom = false;
                 state.pending_confirmation_entry_idx = Some(idx);
                 state.pending_message_id = Some(message_id);
                 state.is_awaiting_confirmation = true;
@@ -1722,22 +1727,23 @@ async fn dequeue_pending_user_input(
     Ok(())
 }
 
-/// 流恢复输出时清掉挂着的重试文案。
+/// 模型开始输出时清掉已完成的分析阶段和挂着的重试文案。
 ///
 /// 重试状态的写入点（`agent_status` Trace 与 `StatusUpdate`）只负责"重试期间"
 /// 的展示；重试成功、模型重新开始输出后，没有人清 `current_status_line` ——
 /// 旧的 "Provider Error — retrying now (1/3)" 会一直挂在 spinner 行上，直到
 /// 回合结束被 "✓ Done" 覆盖。实测出现过正文已经流了 5 分钟、括号里还是 1/3
 /// 的情况。TextDelta / Content / Thinking 三个"模型确实在说话"的信号到达时
-/// 调用这里：状态行若还匹配重试文案形状，就清掉（别的状态，如 preflight /
-/// checkpoint，不属于本函数的管辖）。
+/// 调用这里：只清已结束的复杂度分析和重试文案，保留确认、错误等其他状态。
 fn clear_stale_retry_status(state: &mut ChatState) {
     const RETRY_MARKERS: [&str; 2] = ["— retrying now", "— retry"];
     let Some(status) = state.current_status_line.as_deref() else {
         return;
     };
     let lowered = status.to_lowercase();
-    if RETRY_MARKERS.iter().any(|m| lowered.contains(m)) {
+    if RETRY_MARKERS.iter().any(|m| lowered.contains(m))
+        || lowered.contains("analyzing task complexity")
+    {
         state.current_status_line = None;
     }
 }

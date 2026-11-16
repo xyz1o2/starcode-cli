@@ -148,7 +148,12 @@ impl StarAgent {
         Some(bus.auto_classifier_stats().await)
     }
 
-    const MAX_RECURSION_DEPTH: usize = 3;
+    /// 子代理能到达的最大深度。
+    ///
+    /// 与 `agent::subagent::runner::MAX_SUBAGENT_DEPTH` 同值 —— 派生处
+    /// （runner）与构造处（这里）必须同一条线，否则超限会被包装成
+    /// `InitializationFailed` 而不是 `RecursionLimitExceeded`。
+    const MAX_RECURSION_DEPTH: usize = crate::agent::subagent::runner::MAX_SUBAGENT_DEPTH;
 
     pub async fn new(
         api_key: &str,

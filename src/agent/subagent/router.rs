@@ -177,6 +177,7 @@ fn build_request(input: &AgentToolFullInput) -> SubAgentRequest {
         parent_messages: Vec::new(),
         parent_pending_context: Vec::new(),
         identity: None,
+        parent_depth: input.parent_depth,
     }
 }
 
@@ -194,6 +195,7 @@ mod tests {
             model: None,
             background: None,
             max_rounds: None,
+            parent_depth: 0,
         }
     }
 

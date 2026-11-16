@@ -363,6 +363,11 @@ mod tests {
         info.finished_at = Some(info.started_at + std::time::Duration::from_secs(3));
         let lines = render_selector_with_limit(&state, 100, 2);
         crate::ui::test_support::assert_lines_render!("agent_selector_viewing", 100, 2, &lines);
+        state.viewing_agent_task_id = None;
+        let lines = render_selector_with_limit(&state, 100, 2);
+        assert_eq!(selector_window_start(&state, 2), 0);
+        assert!(crate::ui::utils::text::line_plain_text(&lines[0]).contains(&label));
+        assert!(!crate::ui::utils::text::line_plain_text(&lines[1]).contains(&label));
     }
 
     #[test]

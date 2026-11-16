@@ -60,6 +60,24 @@ fn install_parent_context(agent: &mut crate::agent::StarAgent, request: &SubAgen
 /// 子代理能把一个简单检索烧成几十万 token。
 const DEFAULT_SUBAGENT_MAX_ROUNDS: u32 = 50;
 
+/// 深度到达此值即拒绝创建；lead 为 0，允许的子代理深度为 1、2。
+/// runner 和构造器共用边界，让超限在派生前返回明确的递归错误。
+pub const MAX_SUBAGENT_DEPTH: usize = 3;
+
+fn child_depth(parent_depth: usize, runner_depth: usize) -> Result<usize, SubAgentError> {
+    let depth = parent_depth.max(runner_depth).saturating_add(1);
+    if depth >= MAX_SUBAGENT_DEPTH {
+        return Err(SubAgentError::new(
+            SubAgentErrorKind::RecursionLimitExceeded,
+            format!(
+                "Maximum SubAgent recursion depth reached ({}). Cannot start another SubAgent.",
+                MAX_SUBAGENT_DEPTH
+            ),
+        ));
+    }
+    Ok(depth)
+}
+
 pub const EXPLORER_READONLY_TOOLS: &[&str] = &[
     "Read",
     "Grep",
@@ -133,12 +151,8 @@ impl StarAgentRunner {
         )
         .await;
 
-        if self.config.recursion_depth >= 3 {
-            return Err(SubAgentError::new(
-                SubAgentErrorKind::RecursionLimitExceeded,
-                "Maximum SubAgent recursion depth reached (3). Cannot start another SubAgent.",
-            ));
-        }
+        // 共享注册表的 runner 可能属于父级，以执行器传来的真实调用深度为下界。
+        let child_depth = child_depth(request.parent_depth, self.config.recursion_depth)?;
 
         // Explorer 也是通用 LLM 循环（2026-11-05 内置检索专家下线后没有专用
         // 实现），不再提前分流 —— 之前这里转进 `run_explore`：那条路径走
@@ -146,7 +160,7 @@ impl StarAgentRunner {
         // 端 5 个 Explore 就永远停在 "Searching codebase…"（本次事故）。通用
         // 循环的 `run_with_progress` 才有 tracker 实时回流 tool uses / tokens。
         let mut sub_config = (*self.config).clone();
-        sub_config.recursion_depth = sub_config.recursion_depth.saturating_add(1);
+        sub_config.recursion_depth = child_depth;
         //
         // 轮次上限兜底：调用方（AgentTool 的 max_rounds 参数）给了就用，没给
         // 回落 50 —— 不兜底的话子代理继承主会话的 max_session_turns（默认
@@ -356,6 +370,19 @@ async fn emit_team_snapshot(hub: &crate::agent::messaging::SharedAgentRouter) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_depth_uses_the_caller_and_rejects_before_construction() {
+        assert_eq!(child_depth(0, 0).unwrap(), 1);
+        assert_eq!(child_depth(1, 0).unwrap(), 2);
+        assert_eq!(child_depth(0, 1).unwrap(), 2);
+        for (caller, runner) in [(2, 0), (0, 2), (usize::MAX, 0)] {
+            assert!(matches!(
+                child_depth(caller, runner).unwrap_err().kind,
+                SubAgentErrorKind::RecursionLimitExceeded
+            ));
+        }
+    }
 
     #[test]
     fn final_answer_comes_from_session_even_when_stream_only_emits_deltas() {

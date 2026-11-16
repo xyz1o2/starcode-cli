@@ -348,6 +348,9 @@ pub struct AgentToolFullInput {
     pub background: Option<bool>,
     /// 最大轮次数
     pub max_rounds: Option<u32>,
+    /// 执行器注入的调用方深度，不属于模型参数。
+    #[serde(default, rename = "_parent_depth")]
+    pub parent_depth: usize,
 }
 
 #[cfg(test)]
