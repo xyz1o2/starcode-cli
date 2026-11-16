@@ -156,8 +156,16 @@ pub fn render_input(f: &mut Frame<'_>, state: &ChatState, area: Rect) {
         let para = Paragraph::new(lines).wrap(Wrap { trim: false });
         f.render_widget(para, inner_area);
     } else {
-        // Render textarea widget directly — it handles cursor internally
         f.render_widget(&state.textarea, inner_area);
+        // 输入库已算好含宽字符和滚动的屏幕坐标，交给终端绘制原生光标。
+        // 不向差分缓冲写反色光标块，避免快速删除时在部分终端留下色块。
+        if let Some(position) = state.textarea.rendered_cursor_position() {
+            if inner_area.contains(position) {
+                if state.modal_stack.is_empty() && !state.show_help {
+                    f.set_cursor_position(position);
+                }
+            }
+        }
     }
 }
 
@@ -410,6 +418,50 @@ mod tests {
             }
         }
         assert!(found_hello, "Text 'hello' should appear in rendered output");
+    }
+
+    /// 连续删除必须清掉旧字符与光标样式，不能只验证一张空输入快照。
+    #[test]
+    fn deleting_wide_input_clears_previous_frames() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut state = make_state(
+            ApprovalMode::Default,
+            "中文删除🙂 abc 全角ＡＢＣ ".repeat(12).as_str(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(180, 5)).unwrap();
+        loop {
+            state.input_line_count = state.textarea.lines().len();
+            terminal
+                .draw(|f| render_input(f, &state, f.area()))
+                .unwrap();
+            assert!(terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .all(|cell| { !cell.modifier.contains(Modifier::REVERSED) }));
+            use ratatui::backend::Backend;
+            assert_eq!(
+                terminal.backend_mut().get_cursor_position().unwrap(),
+                state.textarea.rendered_cursor_position().unwrap(),
+            );
+            if state.textarea.lines() == [""] {
+                break;
+            }
+            assert!(state
+                .textarea
+                .input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
+        }
+        let expected = make_state(ApprovalMode::Default, "");
+        let mut clean_terminal = Terminal::new(TestBackend::new(180, 5)).unwrap();
+        clean_terminal
+            .draw(|f| render_input(f, &expected, f.area()))
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer(),
+            clean_terminal.backend().buffer()
+        );
     }
 
     // ── 渲染快照 ────────────────────────────────────────────────────────────

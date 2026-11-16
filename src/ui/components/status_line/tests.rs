@@ -48,6 +48,27 @@ fn the_model_switch_confirmation_is_always_visible() {
     );
 }
 
+/// 历史压缩事件不应在后续回合或恢复会话后留下常驻工作标记。
+#[test]
+fn historical_compaction_does_not_change_the_footer() {
+    let mut state = crate::ui::state::ChatState::test_fixture();
+    state.current_model = "test-model".into();
+    for width in [44, 100, 180] {
+        state.au2_compressed = false;
+        let before = build_status_lines(&state, width);
+        state.au2_compressed = true;
+        let after = build_status_lines(&state, width);
+        assert_eq!(before, after);
+        let text: String = after
+            .iter()
+            .flat_map(|line| &line.spans)
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("test-model"));
+        assert!(!text.contains("[COMPACTED]"));
+    }
+}
+
 /// 没有待确认的切换时，状态栏就是原来那一行。
 #[test]
 fn no_confirmation_adds_no_extra_line() {

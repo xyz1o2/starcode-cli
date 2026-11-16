@@ -739,9 +739,7 @@ impl ChatState {
         let mut textarea = TextArea::default();
         textarea.set_placeholder_text(crate::ui::utils::text::input_placeholder_text());
         textarea.set_cursor_line_style(ratatui::style::Style::default());
-        textarea.set_cursor_style(
-            ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
-        );
+        textarea.set_cursor_render_mode(tui_textarea::CursorRenderMode::Hidden);
         if !text.is_empty() {
             textarea.insert_str(text);
         }
@@ -774,10 +772,8 @@ impl ChatState {
         textarea.set_placeholder_text(&crate::ui::utils::text::input_placeholder_text());
         // Remove underline from cursor line
         textarea.set_cursor_line_style(ratatui::style::Style::default());
-        // 确保光标样式可见，使用反转颜色
-        textarea.set_cursor_style(
-            ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
-        );
+        // 光标由 render_input 交给终端绘制，不在文本缓冲中反色。
+        textarea.set_cursor_render_mode(tui_textarea::CursorRenderMode::Hidden);
 
         // 抬头占位条目：渲染走 ui::components::welcome_header（从 state 现算，
         // 见 message_render 里的 `is_welcome` 分支），所以 content 只是兜底文案，

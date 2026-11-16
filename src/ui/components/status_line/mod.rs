@@ -1472,17 +1472,6 @@ fn build_status_spans(state: &ChatState, width: u16) -> Vec<Span<'static>> {
         ));
     }
 
-    // ── 6c. Compact summary indicator ────────────────────────────────────────
-    if !compact && state.au2_compressed {
-        spans.push(sep());
-        spans.push(Span::styled(
-            "[COMPACTED]",
-            Style::default()
-                .fg(theme.info)
-                .add_modifier(Modifier::ITALIC),
-        ));
-    }
-
     // ── 7. Sandbox indicator (only when unavailable — warning state) ──────────
     if state.sandbox_enabled {
         // 探测结果缓存：Windows 上首次探测要 spawn `wsl` 子进程（300ms~2s），

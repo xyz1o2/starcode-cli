@@ -567,9 +567,9 @@ pub(super) fn reset_main_textarea(state: &mut ChatState) {
     state
         .textarea
         .set_cursor_line_style(ratatui::style::Style::default());
-    state.textarea.set_cursor_style(
-        ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
-    );
+    state
+        .textarea
+        .set_cursor_render_mode(tui_textarea::CursorRenderMode::Hidden);
     state.input.clear();
     state.input_line_count = 0;
     state.input_folded = false;

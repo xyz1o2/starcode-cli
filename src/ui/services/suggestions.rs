@@ -217,6 +217,7 @@ fn update_textarea_from_input(state: &mut ChatState) {
     };
     textarea.set_placeholder_text("Type a message...");
     textarea.set_cursor_line_style(ratatui::style::Style::default());
+    textarea.set_cursor_render_mode(tui_textarea::CursorRenderMode::Hidden);
 
     // Move cursor to end
     textarea.move_cursor(tui_textarea::CursorMove::Bottom);

@@ -314,6 +314,15 @@ impl ToolExecutor {
         }
     }
 
+    /// 子代理的显式工具集合必须在 schema 与执行入口使用相同判据。
+    fn subagent_tool_allowed(&self, name: &str) -> bool {
+        self.config.recursion_depth == 0
+            || self
+                .config
+                .core_tools()
+                .is_none_or(|tools| tools.iter().any(|tool| tool.eq_ignore_ascii_case(name)))
+    }
+
     pub fn get_tool_definitions(&self) -> Vec<StarTool> {
         let generation = self.tool_registry.generation();
         if let Ok(cache) = self.cached_tool_definitions.read() {
@@ -374,6 +383,8 @@ impl ToolExecutor {
 
         // MCP management tools are injected here so the agent can always orchestrate MCP safely.
         tools.extend(mcp_management_tools());
+        // 子代理共享注册表；注册时的白名单不足以隔离父级已注册的工具。
+        tools.retain(|tool| self.subagent_tool_allowed(&tool.function.name));
 
         let compacted = tools
             .into_iter()
@@ -1115,6 +1126,15 @@ impl ToolExecutor {
         let original_tool_name = tool_call.function.name.as_str();
         let resolved_tool_name = Self::canonical_tool_name(original_tool_name);
         let name = resolved_tool_name.as_str();
+        if !self.subagent_tool_allowed(name) {
+            return Self::error_result(
+                format!(
+                    "Tool `{name}` is unavailable for this sub-agent. Complete the assigned task \
+                     directly using its allowed tools; do not delegate or retry this tool."
+                )
+                .into(),
+            );
+        }
         if self.config.recursion_depth > 0 && name == "Skill" {
             return Self::error_result(
                 "Skill tool is disabled for sub-agents to prevent recursion."
@@ -3243,6 +3263,61 @@ mod tests {
                 })
             })
         }
+    }
+
+    /// 子代理复用父注册表时，白名单外工具既不能被发现，也不能绕过 schema 执行。
+    #[tokio::test]
+    async fn explorer_allowlist_filters_shared_registry_and_execution() {
+        use crate::core::config::ConfigParameters;
+        use crate::types::StarToolCallFunction;
+
+        let registry =
+            crate::core::config::runtime_bootstrap::build_two_layer_registry_for_tests().await;
+        assert!(registry.get_tool("Agent").is_some());
+        assert!(registry.get_tool("Write").is_some());
+        registry.register_tool(Arc::new(TwoChannelTool));
+        let mut child = Config::new(ConfigParameters::default());
+        child.recursion_depth = 1;
+        child.core_tools = Some(
+            crate::agent::subagent::runner::EXPLORER_READONLY_TOOLS
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
+        );
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            registry.clone(),
+            None,
+            Arc::new(child),
+        );
+        assert!(executor.subagent_tool_allowed("read"));
+        for name in ["Agent", "WorkflowTool", "Skill", "Write", "two_channel"] {
+            assert!(!executor.subagent_tool_allowed(name));
+            let result = executor
+                .execute(
+                    &StarToolCall {
+                        id: format!("blocked-{name}"),
+                        call_type: "function".into(),
+                        function: StarToolCallFunction {
+                            name: name.into(),
+                            arguments: "{}".into(),
+                        },
+                    },
+                    None,
+                    None,
+                )
+                .await;
+            assert!(!result.success);
+            assert!(result
+                .error
+                .unwrap()
+                .contains("unavailable for this sub-agent"));
+        }
+        assert!(executor
+            .get_tool_definitions()
+            .iter()
+            .all(|tool| { executor.subagent_tool_allowed(&tool.function.name) }));
+        assert!(registry.get_tool("two_channel").is_some());
     }
 
     /// 回归：工具的 `llm_content` 曾经被整个丢掉 —— executor 只取

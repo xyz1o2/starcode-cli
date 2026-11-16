@@ -2830,7 +2830,7 @@ async fn turn_error_promotes_soft_tool_failures_back_to_red() {
 /// 的可见提示行 —— toast 一闪而过，而"上下文被压缩过"是用户必须知道的事。
 #[tokio::test]
 async fn auto_compact_trace_inserts_a_visible_chat_line() {
-    let mut state = ChatState::new();
+    let mut state = ChatState::test_fixture();
     let (agent_tx, _agent_rx) = mpsc::channel(1);
     let before = state.chat_history.len();
 
@@ -2882,4 +2882,86 @@ async fn auto_compact_trace_inserts_a_visible_chat_line() {
         before + 1,
         "相邻重复提示只保留一条"
     );
+    assert_eq!(
+        state.toast_queue.back().unwrap().message,
+        "Context compacted"
+    );
+
+    // 不等待真实时钟：完成提示到期，聊天中的结果仍保留。
+    for toast in &mut state.toast_queue {
+        toast.created_at = std::time::Instant::now() - std::time::Duration::from_secs(4);
+    }
+    state.expire_toasts();
+    assert!(state.toast_queue.is_empty());
+    assert_eq!(state.chat_history.len(), before + 1);
+}
+
+/// 中文完成提示覆盖无计数和后续压缩事件，原有用量不被覆盖。
+#[tokio::test]
+async fn auto_compact_feedback_is_localized_and_keeps_usage() {
+    struct ResetLanguage;
+    impl Drop for ResetLanguage {
+        fn drop(&mut self) {
+            i18n::reset_for_tests();
+        }
+    }
+    let _reset_language = ResetLanguage;
+    let mut state = ChatState::test_fixture();
+    let root = tempfile::tempdir().unwrap();
+    i18n::reload_for_language(i18n::UiLanguage::ZhCN, root.path()).unwrap();
+    let (agent_tx, _agent_rx) = mpsc::channel(1);
+    state.token_usage = Some(crate::types::StarUsage {
+        prompt_tokens: 100,
+        total_tokens: 110,
+        cache_read_tokens: 40,
+        ..Default::default()
+    });
+    state.cache_read_tokens = 40;
+    for (payload, expected) in [
+        (
+            serde_json::json!({"on": true, "strategy": "predictive"}),
+            "✓ 上下文已压缩（predictive）",
+        ),
+        (
+            serde_json::json!({"on": true, "tokens_before": 120000, "tokens_after": 50000, "strategy": "auto_compact"}),
+            "✓ 上下文已压缩：120000 → 50000 tokens（auto_compact）",
+        ),
+    ] {
+        let before = state.chat_history.len();
+        for _ in 0..2 {
+            handle_stream_update(
+                &mut state,
+                StreamMessage::Trace {
+                    message_id: 1,
+                    event: "auto_compact".into(),
+                    payload: payload.clone(),
+                },
+                &agent_tx,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(state.chat_history.len(), before + 1);
+        assert_eq!(state.chat_history.last().unwrap().content, expected);
+        assert_eq!(state.toast_queue.back().unwrap().message, "上下文已压缩");
+        assert_eq!(state.token_usage.as_ref().unwrap().total_tokens, 110);
+        assert_eq!(state.cache_read_tokens, 40);
+    }
+    handle_stream_update(
+        &mut state,
+        StreamMessage::StatsUpdate {
+            au2_compressed: true,
+            token_usage: None,
+        },
+        &agent_tx,
+    )
+    .await
+    .unwrap();
+    let footer: String = crate::ui::components::status_line::build_status_lines(&state, 180)
+        .iter()
+        .flat_map(|line| &line.spans)
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(!footer.contains("[COMPACTED]"));
+    assert_eq!(state.token_usage.as_ref().unwrap().total_tokens, 110);
 }
