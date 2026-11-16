@@ -400,7 +400,8 @@ pub fn draw_ui(f: &mut ratatui::Frame<'_>, state: &mut ChatState) {
 
     // Draw help popup if needed
     if state.show_help {
-        crate::ui::components::help_popup::render_help_popup(f, f.area());
+        state.last_help_terminal_height = f.area().height;
+        crate::ui::components::help_popup::render_help_popup(f, f.area(), state.help_scroll);
     }
 
     // Palette 是唯一可以在「不在栈顶」时也要画的弹窗：输入框会叠在它上面

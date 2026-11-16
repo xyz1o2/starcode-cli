@@ -2,13 +2,18 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
 
 use crate::core::i18n;
 
-pub fn render_help_popup(f: &mut Frame, area: Rect) {
+pub fn max_help_scroll(terminal_height: u16) -> u16 {
+    let viewport = terminal_height.saturating_sub(6);
+    (help_lines().len() as u16).saturating_sub(viewport)
+}
+
+fn help_lines() -> Vec<Line<'static>> {
     let sections: Vec<(String, Vec<(String, String)>)> = vec![
         (
             i18n::t1("ui.help.section.nav"),
@@ -132,9 +137,13 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
         ),
     ]));
 
-    // 弹窗按内容定高，不再写死 28 行。写死的高度早就装不下了（光命令区就十几条），
-    // Paragraph 又没有滚动，超出的部分是静默切掉的 —— 排在后半截的条目等于没写。
-    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
+    lines
+}
+
+pub fn render_help_popup(f: &mut Frame, area: Rect, scroll: u16) {
+    let lines = help_lines();
+    let content_height = lines.len();
+    let height = (content_height as u16 + 2).min(area.height.saturating_sub(4));
     let width = 80.min(area.width.saturating_sub(8));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
@@ -145,13 +154,27 @@ pub fn render_help_popup(f: &mut Frame, area: Rect) {
         height,
     };
 
-    let paragraph = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .title(i18n::t1("ui.help.block")),
-    );
+    let viewport_height = height.saturating_sub(2) as usize;
+    let scroll = usize::from(scroll).min(content_height.saturating_sub(viewport_height));
+    let paragraph = Paragraph::new(lines)
+        .scroll((scroll as u16, 0))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(i18n::t1("ui.help.block")),
+        );
 
     f.render_widget(Clear, popup_area);
     f.render_widget(paragraph, popup_area);
+    if content_height > viewport_height && popup_area.width > 0 && popup_area.height > 2 {
+        let mut scrollbar = ScrollbarState::new(content_height)
+            .viewport_content_length(viewport_height)
+            .position(scroll);
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight),
+            popup_area,
+            &mut scrollbar,
+        );
+    }
 }

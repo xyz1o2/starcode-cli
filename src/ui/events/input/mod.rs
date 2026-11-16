@@ -1050,6 +1050,18 @@ pub async fn handle_key_event(
                 KeyCode::Esc => state.show_help = false,
                 KeyCode::F(1) => state.show_help = false,
                 KeyCode::Char('?') => state.show_help = false,
+                KeyCode::Up => state.help_scroll = state.help_scroll.saturating_sub(1),
+                KeyCode::Down | KeyCode::PageDown | KeyCode::End => {
+                    let height = state.last_help_terminal_height;
+                    let max = crate::ui::components::help_popup::max_help_scroll(height);
+                    state.help_scroll = match key.code {
+                        KeyCode::End => max,
+                        KeyCode::PageDown => state.help_scroll.saturating_add(10).min(max),
+                        _ => state.help_scroll.saturating_add(1).min(max),
+                    };
+                }
+                KeyCode::PageUp => state.help_scroll = state.help_scroll.saturating_sub(10),
+                KeyCode::Home => state.help_scroll = 0,
                 _ => {}
             }
             return Ok(());

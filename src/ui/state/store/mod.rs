@@ -144,6 +144,9 @@ pub struct ChatState {
     pub quick_menu_origin_palette: bool,
     pub quick_menu_back: Option<QuickMenuKind>,
     pub show_help: bool, // 快捷键帮助界面
+    pub help_scroll: u16,
+    /// 上一帧帮助弹窗所在终端的高度，供按键处理计算滚动边界。
+    pub last_help_terminal_height: u16,
     pub auto_follow: bool,
     pub last_chat_height: u16,
     pub last_max_scroll: u16,
@@ -892,6 +895,8 @@ impl ChatState {
             quick_menu_origin_palette: false,
             quick_menu_back: None,
             show_help: false,
+            help_scroll: 0,
+            last_help_terminal_height: 0,
             auto_follow: true,
             last_chat_height: 0,
             last_max_scroll: 0,

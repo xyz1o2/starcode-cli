@@ -168,7 +168,13 @@ fn draw_frame_atomically(
         out.flush()?;
     }
 
-    let drawn = terminal.draw(|f| super::draw_ui(f, state));
+    let drawn = (|| {
+        if state.request_clear_screen {
+            clear_without_cursor_query(terminal)?;
+            state.request_clear_screen = false;
+        }
+        terminal.draw(|f| super::draw_ui(f, state)).map(|_| ())
+    })();
 
     if enabled {
         let mut out = std::io::stdout();
@@ -176,7 +182,17 @@ fn draw_frame_atomically(
         out.flush()?;
     }
 
-    drawn.map(|_| ())
+    drawn
+}
+
+/// 清屏后把差分基线切换为空屏，不读取会与键盘线程竞争的终端光标回复。
+fn clear_without_cursor_query<B: ratatui::backend::Backend>(
+    terminal: &mut RatatuiTerminal<B>,
+) -> Result<(), B::Error> {
+    terminal.backend_mut().clear()?;
+    terminal.get_frame().buffer_mut().reset();
+    terminal.swap_buffers();
+    Ok(())
 }
 
 #[allow(unused_assignments)]
@@ -645,10 +661,6 @@ pub async fn run_ui_loop(
 
         // 先处理流消息再绘制，避免已收到的正文多等一轮。
         if needs_redraw {
-            if state.request_clear_screen {
-                terminal.clear()?;
-                state.request_clear_screen = false;
-            }
             draw_frame_atomically(terminal, state)?;
             last_draw = Instant::now();
             needs_redraw = false;
