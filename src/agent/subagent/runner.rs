@@ -32,7 +32,7 @@ fn subagent_final_text(messages: &[crate::types::StarMessage]) -> Option<String>
     })
 }
 
-/// 把 `/subtask` 的父会话装进刚创建的子代理。
+/// 把 fork 或 `/subtask` 的父会话装进刚创建的子代理。
 ///
 /// 单独抽出来是为了让“结构化上下文 + pending 本地输出”这条 fork 语义
 /// 能在不调用真实 LLM 的情况下被单测钉住。
@@ -45,13 +45,6 @@ fn install_parent_context(agent: &mut crate::agent::StarAgent, request: &SubAgen
     }
 }
 
-/// Explore 子代理的只读工具白名单（对标 CC 官方 docs 对 Explore agent 的
-/// 定义：Read / Grep / Glob / 只读 Bash，禁一切可变更工具）。
-///
-/// 挂在子 config 的 `core_tools` 上 —— 那是注册层（`is_core_tool_enabled`）
-/// 既有的一条门，覆盖它等于子代理的**注册面**收口，而不仅是模型侧提示。
-/// `Bash` 保留在名单里：只读命令由 `is_readonly_fs_command` 在确认门把关，
-/// 这里收掉 Write/Edit 一类的可变更工具就足够表达"只读"语义。
 /// 子代理未显式指定 max_rounds 时的默认轮次上限。
 ///
 /// 与 agent_tool.rs 的 `DEFAULT_SYNC_MAX_ROUNDS` 同值：那处只护同步路径，
@@ -78,6 +71,8 @@ fn child_depth(parent_depth: usize, runner_depth: usize) -> Result<usize, SubAge
     Ok(depth)
 }
 
+/// Explorer 的工具集合；执行器同时限制 schema 和执行入口。
+/// Bash 仍经过通用权限门，工具白名单本身不是命令参数级只读沙箱。
 pub const EXPLORER_READONLY_TOOLS: &[&str] = &[
     "Read",
     "Grep",
@@ -131,11 +126,8 @@ impl StarAgentRunner {
     /// 之所以走 stream 而不是 `process_user_message`：后者只返回一条
     /// assistant 文本，工具调用与 token 用量全部丢失。
     ///
-    /// 按 `request.subagent_type` 派发：`Explorer` 走确定性检索
-    /// （`ExploreAgent` 的 ACE 广搜 + 可选 deep filter），其余走下面的通用
-    /// LLM 循环。之前 `subagent_type` 只当 UI 标签用，`explorer` 实际跑的是
-    /// 通用 agent，真正检索专家要靠 `skill` 工具才能触发，而且那条路径不上
-    /// UI——现在两条路并成一条，AgentTool 的进度回流对 explorer 同样生效。
+    /// 所有类型共用流式 LLM 循环与进度 tracker；Explorer 通过子配置选择
+    /// 搜索专用提示与工具白名单，不另起绕过进度回流的执行路径。
     pub async fn run_with_progress(
         &self,
         request: SubAgentRequest,
@@ -161,6 +153,7 @@ impl StarAgentRunner {
         // 循环的 `run_with_progress` 才有 tracker 实时回流 tool uses / tokens。
         let mut sub_config = (*self.config).clone();
         sub_config.recursion_depth = child_depth;
+        sub_config.subagent_type = Some(request.subagent_type.clone());
         //
         // 轮次上限兜底：调用方（AgentTool 的 max_rounds 参数）给了就用，没给
         // 回落 50 —— 不兜底的话子代理继承主会话的 max_session_turns（默认
@@ -170,11 +163,8 @@ impl StarAgentRunner {
         let rounds = request.max_rounds.unwrap_or(DEFAULT_SUBAGENT_MAX_ROUNDS);
         sub_config.set_max_session_turns(rounds as i32);
         //
-        // Explorer 的**只读白名单收口**在这里生效：core_tools 是注册层
-        // `is_core_tool_enabled` 既有的门，覆盖它等于子代理的**注册面**收口，
-        // 而不仅是模型侧提示。`Bash` 保留在名单里：只读命令由
-        // `is_readonly_fs_command` 在确认门把关，这里收掉 Write/Edit 一类的
-        // 可变更工具就足够表达"只读"语义。
+        // Explorer 只暴露搜索工具；Bash 继续走权限门，不能把工具名当成
+        // 参数级只读保证。专用提示说明职责边界，执行器负责工具集合约束。
         if request.subagent_type == crate::core::agents::SubagentType::Explorer {
             sub_config.core_tools = Some(
                 EXPLORER_READONLY_TOOLS
@@ -227,9 +217,8 @@ impl StarAgentRunner {
             agent.set_agent_hub(hub, identity);
         }
 
-        // `/subtask` forks the current conversation rather than starting from a
-        // blank child. Install the parent's native provider context before the
-        // new task prompt is appended, so tool calls/results survive intact.
+        // fork 与 /subtask 都先安装结构化父上下文，再追加本次任务，
+        // 保留已有工具调用和结果的配对。普通子代理的父上下文为空。
         install_parent_context(&mut agent, &request);
 
         let parent_message_count = agent.session_context_snapshot().0.len();

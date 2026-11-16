@@ -93,6 +93,25 @@
   "cmd.settings.lang.set": "✅ UI language set to {lang} (effective: {resolved})",
   "cmd.settings.lang.current": "Current UI language: {lang} (effective: {resolved})\nUsage: /lang <auto|en|zh-CN>",
 
+  "cmd.state.on": "on",
+  "cmd.state.off": "off",
+
+  "cmd.poor.description": "Toggle poor mode (turns off proactive suggestions)",
+  "cmd.proactive.description": "Toggle proactive suggestions",
+
+  "cmd.poor.unknown_action": "❌ Unknown action `{action}`. Usage: /poor [on|off]",
+  "cmd.poor.save_failed": "❌ Could not save the setting: {error}",
+  "cmd.poor.on": "🪫 Poor mode **on** — proactive suggestions are turned off. Your own `/proactive` choice is kept and comes back when you turn poor mode off.",
+  "cmd.poor.off": "🔋 Poor mode **off** — proactive suggestions are back on.",
+  "cmd.poor.off_keeping_suggestions_off": "🔋 Poor mode **off** — proactive suggestions stay off, because you had turned them off yourself.",
+  "cmd.poor.project_override": "Note: the project settings (`{key}` in .star/settings.json) override this, so the next start may use the project value instead.",
+
+  "cmd.proactive.unknown_action": "❌ Unknown action `{action}`. Usage: /proactive [on|off]",
+  "cmd.proactive.save_failed": "❌ Could not save the setting: {error}",
+  "cmd.proactive.status": "Proactive suggestions: **{state}**",
+  "cmd.proactive.status_with_pending": "Proactive suggestions: **{state}** · {pending} pending",
+  "cmd.proactive.blocked_by_poor": "Poor mode is on, so suggestions stay off for now. Your choice is saved and takes effect when you turn poor mode off.",
+
   "cmd.provider.doctor.model": "Current model",
   "cmd.provider.doctor.model_source": "Model source",
   "cmd.provider.doctor.base_url": "Base URL",

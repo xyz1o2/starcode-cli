@@ -7,10 +7,9 @@ pub use types::*;
 pub struct SubAgentRequest {
     pub prompt: String,
     pub max_rounds: Option<u32>,
-    /// 命名子代理类型。runner 按它派发：`Explorer` 走确定性检索
-    /// （`ExploreAgent`），其余走通用 LLM 循环。
+    /// 子代理类型：共享流式循环，Explorer 选择专用搜索提示与工具白名单。
     pub subagent_type: SubagentType,
-    /// `/subtask` 的 forked subagent 在开始前继承的父会话消息。
+    /// fork 与 `/subtask` 子代理在开始前继承的父会话消息。
     ///
     /// 普通 AgentTool 调用为空；只有明确要求复制当前对话的路径才填充。
     /// 这里保留原始 `StarMessage` 而不是拼成文本，子代理才能继续看到

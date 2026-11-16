@@ -373,9 +373,14 @@ impl Agent {
             // 击穿工具定义和静态 system 的缓存前缀。
             let today = chrono::Local::now().format("%Y-%m-%d").to_string();
             let output_style_clone = output_style.clone();
+            let prompt_mode = if self.config.subagent_type == Some(crate::core::agents::SubagentType::Explorer) {
+                crate::agent::prompt_builder::PromptMode::Explorer
+            } else {
+                crate::agent::prompt_builder::PromptMode::Agent
+            };
             let cached_system_msgs = tokio::task::spawn_blocking(move || {
                 crate::agent::prompt_builder::PromptBuilder::build_cached_system_messages(
-                    crate::agent::prompt_builder::PromptMode::Agent,
+                    prompt_mode,
                     &today,
                     std::env::consts::OS,
                     &cwd_str,

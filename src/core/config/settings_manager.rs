@@ -202,6 +202,28 @@ pub struct UserSettings {
     // 优先级低于项目级 —— 见 SettingsManager::apply_env_block 的合并顺序）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
+
+    /// `/poor` 省电模式开关（对标 Claude Code poor mode）。
+    ///
+    /// **它只管一件事**：把本地的主动建议（`proactive_suggestions`）关掉。
+    /// 它**不**控制记忆抽取，也不减少任何后台模型调用 —— 本仓库里根本
+    /// 没有自动记忆提取任务（`MemoryExtractor` / `BudgetModeManager` 都没有
+    /// 生产消费者），写「跳过记忆提取」是文案在撒谎。
+    ///
+    /// 语义与 Claude Code 对齐：poor 打开时主动建议**暂时**关闭，用户自己
+    /// 在 `/proactive` 里做的选择在 poor 关闭后要**恢复** —— 所以这里存的是
+    /// 用户的**偏好**，而不是 poor 派生出来的有效值。
+    #[serde(alias = "poorMode")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poor_mode: Option<bool>,
+
+    /// 主动建议的用户偏好（`/proactive` 的开关）。
+    ///
+    /// 与 [`Self::poor_mode`] 分开存：poor 是「临时覆盖」，这个是「用户本来
+    /// 想要的」。两者合成出有效值，具体见 `core::poor`。
+    #[serde(alias = "proactiveSuggestions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proactive_suggestions: Option<bool>,
 }
 
 /// Sandbox settings for user-level configuration
@@ -292,6 +314,20 @@ pub struct ProjectSettings {
     /// `STAR_*` 之外的变量同样允许（shell 环境的全量行为由调用方决定）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
+
+    /// 项目级的 `/poor` 开关（见 `UserSettings::poor_mode`）。
+    ///
+    /// 项目层**覆盖**用户层 —— 这是本仓库既有的优先级约定（`env` block
+    /// 同理，见 `SettingsManager::apply_env_block` 的合并顺序）。共享的
+    /// 项目配置可以把「这个仓库一律别弹主动建议」定成一条。
+    #[serde(alias = "poorMode")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poor_mode: Option<bool>,
+
+    /// 项目级的主动建议偏好（见 `UserSettings::proactive_suggestions`）。
+    #[serde(alias = "proactiveSuggestions")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proactive_suggestions: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
@@ -320,10 +356,55 @@ pub struct SettingsManager {
     change_listeners: Vec<Box<dyn Fn(&SettingsChangeEvent) + Send + Sync>>,
 }
 
+/// **测试专用**：把用户设置文件重定向到别的路径。
+///
+/// 命令要写设置（`/poor`、`/proactive` 都写用户层），而测试不能碰用户
+/// 真实的 `~/.star/user-settings.json` —— 也不能靠改 `HOME` 来隔离：
+/// `set_var` 在多线程测试里会漏给同进程里的其它用例。
+///
+/// 与 `ProviderStore::with_paths` 同一思路：给一条**显式**的路径注入口子。
+/// 这里用进程级 `OnceLock` 而不是 `thread_local`：命令的 async 任务会在
+/// tokio 的工作线程上跑，线程局部变量在那边取不到。
+#[cfg(test)]
+static TEST_USER_SETTINGS_PATH: std::sync::OnceLock<std::sync::Mutex<Option<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn test_settings_slot() -> &'static std::sync::Mutex<Option<PathBuf>> {
+    TEST_USER_SETTINGS_PATH.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 测试专用：指定用户设置文件路径（`None` = 恢复默认）。
+///
+/// 只在 `#[cfg(test)]` 下编译 —— 生产构建里这条分支根本不存在。
+#[cfg(test)]
+pub(crate) fn set_test_user_settings_path(path: Option<PathBuf>) {
+    *test_settings_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = path;
+}
+
+fn test_user_settings_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        return test_settings_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
 impl SettingsManager {
     pub fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let home_dir = dirs::home_dir().ok_or("Could not find home directory")?;
-        let user_settings_path = home_dir.join(".star").join("user-settings.json");
+        let user_settings_path = match test_user_settings_path() {
+            Some(path) => path,
+            None => home_dir.join(".star").join("user-settings.json"),
+        };
         let cwd = std::env::current_dir()?;
         let project_settings_path =
             find_project_file_upwards(&cwd, &[".star/settings.json", ".star/settings.jsonc"])
@@ -458,6 +539,8 @@ impl SettingsManager {
             context_window: None,
             file_filtering: None,
             env: None,
+            poor_mode: None,
+            proactive_suggestions: None,
         }
     }
 

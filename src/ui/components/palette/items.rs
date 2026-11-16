@@ -1455,7 +1455,12 @@ pub fn get_help_palette_items() -> Vec<PaletteItem> {
         items.push(PaletteItem {
             id: format!("cmd_{}", cmd.name),
             label: format!("/{}", cmd.name),
-            description: format!("{}{}{}", cmd.description, aliases, subs),
+            description: format!(
+                "{}{}{}",
+                crate::commands::system::command_description(cmd),
+                aliases,
+                subs
+            ),
             category: Some(cmd.category.to_string()),
             action: PaletteAction::TypeCommand(format!("/{} ", cmd.name)),
         });

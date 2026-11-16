@@ -481,6 +481,10 @@ pub(crate) fn reset_preferences_in_place(settings: &mut UserSettings) {
     settings.output_style = None;
     settings.context_window = None;
     settings.sandbox = None;
+    // `/poor` 与主动建议也是偏好：reset 之后回到默认（poor 关、建议开）。
+    // 留着它们的话，"reset preferences" 复位了一半 —— 下次启动仍然 poor。
+    settings.poor_mode = None;
+    settings.proactive_suggestions = None;
 }
 
 /// Serialize settings with every credential-looking field replaced. `/config
@@ -636,6 +640,14 @@ pub(crate) fn merge_preferences(
     if source.sandbox.is_some() {
         destination.sandbox = source.sandbox.clone();
         changed.push("sandbox");
+    }
+    if source.poor_mode.is_some() {
+        destination.poor_mode = source.poor_mode;
+        changed.push("poor_mode");
+    }
+    if source.proactive_suggestions.is_some() {
+        destination.proactive_suggestions = source.proactive_suggestions;
+        changed.push("proactive_suggestions");
     }
     changed
 }
@@ -1102,6 +1114,8 @@ mod tests {
         };
         settings.default_model = Some("model".to_string());
         settings.ui_language = Some("zh-CN".to_string());
+        settings.poor_mode = Some(true);
+        settings.proactive_suggestions = Some(false);
 
         reset_preferences_in_place(&mut settings);
 
@@ -1110,6 +1124,8 @@ mod tests {
         assert!(settings.providers.is_some());
         assert!(settings.default_model.is_none());
         assert!(settings.ui_language.is_none());
+        assert!(settings.poor_mode.is_none());
+        assert!(settings.proactive_suggestions.is_none());
     }
 
     #[test]
@@ -1125,6 +1141,8 @@ mod tests {
             default_model: Some("imported-model".to_string()),
             ui_language: Some("en".to_string()),
             output_style: Some("concise".to_string()),
+            poor_mode: Some(false),
+            proactive_suggestions: Some(false),
             ..UserSettings::default()
         };
 
@@ -1132,12 +1150,20 @@ mod tests {
 
         assert_eq!(
             changed,
-            vec!["model", "lang", "output-style"],
+            vec![
+                "model",
+                "lang",
+                "output-style",
+                "poor_mode",
+                "proactive_suggestions"
+            ],
             "only present preference fields are reported"
         );
         assert_eq!(destination.default_model.as_deref(), Some("imported-model"));
         assert_eq!(destination.ui_language.as_deref(), Some("en"));
         assert_eq!(destination.output_style.as_deref(), Some("concise"));
+        assert_eq!(destination.poor_mode, Some(false));
+        assert_eq!(destination.proactive_suggestions, Some(false));
         assert_eq!(
             destination.api_key.as_deref(),
             Some("local-key"),

@@ -749,6 +749,13 @@ impl Agent {
         &mut self,
         tool_calls: Vec<crate::types::StarToolCall>,
     ) -> Vec<crate::types::ToolResult> {
+        if tool_calls.iter().any(|call| {
+            crate::core::tools::constants::resolve_registered_tool_name(&call.function.name)
+                == "Agent"
+        }) {
+            self.tool_executor
+                .set_agent_parent_context(&self.session_messages);
+        }
         if tool_calls.len() > 1 {
             self.streaming_executor
                 .execute_partitioned(tool_calls, None)

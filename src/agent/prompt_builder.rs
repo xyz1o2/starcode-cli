@@ -172,6 +172,7 @@ pub enum PromptMode {
     Interactive,
     Agent,
     Plan,
+    Explorer,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -443,7 +444,7 @@ impl PromptBuilder {
         // These parts MUST NOT change between turns to maximize cache hits.
         let mut static_parts: Vec<String> = Vec::new();
 
-        if flags.include_core_identity {
+        if flags.include_core_identity && mode != PromptMode::Explorer {
             static_parts.push(prompts::core_identity::render(is_thinking_model));
         }
 
@@ -456,6 +457,11 @@ impl PromptBuilder {
                 static_parts.push(prompts::agent_mode::render(is_thinking_model));
                 maybe_push_key_scenarios(&mut static_parts, is_thinking_model);
             }
+            PromptMode::Explorer => {
+                static_parts.push(crate::core::prompts::loader::load_prompt(
+                    "system-prompt-explorer.md",
+                ));
+            }
         }
 
         if flags.include_security_policy {
@@ -465,9 +471,11 @@ impl PromptBuilder {
             }
         }
 
-        let reminders = prompts::reminders::render(is_thinking_model);
-        if !reminders.trim().is_empty() {
-            static_parts.push(reminders);
+        if mode != PromptMode::Explorer {
+            let reminders = prompts::reminders::render(is_thinking_model);
+            if !reminders.trim().is_empty() {
+                static_parts.push(reminders);
+            }
         }
 
         // Static env info (project path, platform, shell; date lives after the breakpoint)
@@ -476,11 +484,11 @@ impl PromptBuilder {
             platform, cwd, &shell,
         ));
 
-        if flags.include_tool_catalog {
+        if flags.include_tool_catalog && mode != PromptMode::Explorer {
             static_parts.push(prompts::tool_catalog::render(is_thinking_model));
         }
 
-        if include_extended_bundle {
+        if include_extended_bundle && mode != PromptMode::Explorer {
             if let Some(bundle) = Self::load_selective_system_prompts(mode) {
                 if !bundle.trim().is_empty() {
                     static_parts.push(bundle);
@@ -640,6 +648,7 @@ impl PromptBuilder {
 pub(crate) const BUNDLE_STATIC_FILE_NAMES: &[&str] = &[
     "system-prompt.md",
     "system-prompt-agent-mode.md",
+    "system-prompt-explorer.md",
     "system-prompt-core-identity.md",
     "system-prompt-key-scenarios.md",
     "system-prompt-reminders.md",
@@ -875,6 +884,34 @@ mod tests {
         .expect("git snapshot present");
         assert!(out.starts_with("<system-reminder>"));
         assert!(out.contains("Current branch: dev-m"));
+    }
+
+    #[test]
+    fn explorer_prompt_replaces_editing_and_delegation_guidance() {
+        let cwd = tempfile::tempdir().unwrap();
+        let msgs = PromptBuilder::build_cached_system_messages(
+            PromptMode::Explorer,
+            "2026-11-16",
+            "linux",
+            &cwd.path().to_string_lossy(),
+            None,
+            Some("project instructions".into()),
+            true,
+            true,
+            None,
+        );
+        let prompt = msgs
+            .iter()
+            .filter_map(|m| m.content.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(prompt.contains("# Explore existing code"));
+        assert!(prompt.contains("very thorough"));
+        assert!(prompt.contains("file_path:line_number"));
+        assert!(prompt.contains("project instructions"));
+        assert!(!prompt.contains("## Editing"));
+        assert!(!prompt.contains("# Core Tool Usage Guides"));
+        assert!(!prompt.contains("STAR CLI - AGENT MODE"));
     }
 
     /// system prompt 里不能再出现 git 段落 —— 它是每 300s 变一次的那一段。

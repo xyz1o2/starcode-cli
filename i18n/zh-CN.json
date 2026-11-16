@@ -93,6 +93,25 @@
   "cmd.settings.lang.set": "✅ 界面语言已设置为 {lang}（生效: {resolved}）",
   "cmd.settings.lang.current": "当前界面语言: {lang}（生效: {resolved}）\n用法: /lang <auto|en|zh-CN>",
 
+  "cmd.state.on": "开",
+  "cmd.state.off": "关",
+
+  "cmd.poor.description": "切换省电模式（关闭主动建议）",
+  "cmd.proactive.description": "切换主动建议",
+
+  "cmd.poor.unknown_action": "❌ 未知操作 `{action}`。用法: /poor [on|off]",
+  "cmd.poor.save_failed": "❌ 设置保存失败: {error}",
+  "cmd.poor.on": "🪫 省电模式**已开启** —— 主动建议已关闭。你在 `/proactive` 里的选择被保留，关闭省电模式后恢复。",
+  "cmd.poor.off": "🔋 省电模式**已关闭** —— 主动建议已恢复。",
+  "cmd.poor.off_keeping_suggestions_off": "🔋 省电模式**已关闭** —— 主动建议仍为关闭状态，因为此前是你自己关掉的。",
+  "cmd.poor.project_override": "注意：项目设置（`.star/settings.json` 里的 `{key}`）优先级更高，下次启动可能仍以项目配置为准。",
+
+  "cmd.proactive.unknown_action": "❌ 未知操作 `{action}`。用法: /proactive [on|off]",
+  "cmd.proactive.save_failed": "❌ 设置保存失败: {error}",
+  "cmd.proactive.status": "主动建议：**{state}**",
+  "cmd.proactive.status_with_pending": "主动建议：**{state}** · {pending} 条待处理",
+  "cmd.proactive.blocked_by_poor": "省电模式当前开启，建议暂时保持关闭。你的选择已保存，关闭省电模式后生效。",
+
   "cmd.provider.doctor.model": "当前模型",
   "cmd.provider.doctor.model_source": "模型来源",
   "cmd.provider.doctor.base_url": "Base URL",

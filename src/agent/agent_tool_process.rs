@@ -447,6 +447,12 @@ impl Agent {
         file_read_tracker: &mut std::collections::HashMap<String, usize>,
         loop_state: &mut LoopState,
     ) {
+        if tool_calls.iter().any(|call| {
+            crate::core::tools::constants::resolve_registered_tool_name(&call.function.name)
+                == "Agent"
+        }) {
+            self.tool_executor.set_agent_parent_context(messages);
+        }
         // ── Budget enforcement ──
         // 在 hook 前接受整个模型批次，避免部分执行导致协议消息不完整。
         if let Err(exhausted) = accept_tool_calls(&mut loop_state.budget, tool_calls) {

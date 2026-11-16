@@ -274,6 +274,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     core::i18n::init(settings.ui_language.as_deref(), &cwd);
+
+    // `/poor` 与主动建议的启动状态：项目层覆盖用户层（与 env block 同序）。
+    // 这里读一次就够 —— 命令改的是**用户层**，运行中不再重读磁盘。
+    let project_settings = settings_manager
+        .load_project_settings()
+        .await
+        .unwrap_or_default();
+    let poor_startup = core::poor::resolve(&settings, &project_settings);
+
     // 持久化的思考力度档位在这里就落到会话状态里：TUI 和 headless 都要经过
     // 这一段，构造请求时由 `llm::thinking` 按 provider 方言翻成对应字段。
     if let Some(effort) = settings
@@ -630,6 +639,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             initial_history,
             initial_usage,
             initial_session_id,
+            poor_startup,
         )
         .await
         .map_err(|e| e as Box<dyn std::error::Error>)?;

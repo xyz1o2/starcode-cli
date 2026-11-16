@@ -98,6 +98,8 @@ pub struct Config {
     pub(crate) experimental_jit_context: bool,
     pub(crate) file_filtering: FileFiltering,
     pub recursion_depth: usize,
+    /// 子代理运行类型；用于选择专用提示，不随共享注册表串到其他代理。
+    pub(crate) subagent_type: Option<crate::core::agents::SubagentType>,
     /// 本 agent 在消息 hub 里的身份（mailbox 键）。
     ///
     /// `None` = lead（主 agent，hub 侧固定身份 `"lead"`）。runner 派生
@@ -244,6 +246,7 @@ impl Config {
                 disable_fuzzy_search: Some(false),
             }),
             recursion_depth: params.recursion_depth.unwrap_or(0),
+            subagent_type: None,
             agent_identity: None,
             headless: params.headless.unwrap_or(false),
             // 默认档位是 auto（对标 Claude Code 的 auto 模式）。但 auto 免确认写操作，

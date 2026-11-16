@@ -281,6 +281,7 @@ pub struct ToolExecutor {
     message_bus: Option<Arc<MessageBus>>,
     cached_tool_definitions: RwLock<Option<(u64, Vec<StarTool>)>>,
     permission_manager: Arc<SessionPermissionManager>,
+    agent_parent_context: RwLock<Arc<Vec<crate::types::StarMessage>>>,
 }
 
 impl ToolExecutor {
@@ -311,6 +312,29 @@ impl ToolExecutor {
             cached_tool_definitions: RwLock::new(None),
             permission_manager,
             query_rewrite_cache: RwLock::new(std::collections::HashMap::new()),
+            agent_parent_context: RwLock::new(Arc::new(Vec::new())),
+        }
+    }
+
+    /// 每个执行器只存自己的历史快照；当前仍未完成的工具批次不进入 fork。
+    pub(crate) fn set_agent_parent_context(&self, messages: &[crate::types::StarMessage]) {
+        let end = messages
+            .last()
+            .filter(|m| {
+                m.role == "assistant" && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
+            })
+            .map_or(messages.len(), |_| messages.len().saturating_sub(1));
+        if let Ok(mut context) = self.agent_parent_context.write() {
+            *context = Arc::new(messages[..end].to_vec());
+        }
+    }
+
+    fn attach_agent_parent_context(
+        &self,
+        invocation: &mut dyn crate::core::tools::tools::ToolInvocation,
+    ) {
+        if let Ok(context) = self.agent_parent_context.read() {
+            invocation.set_agent_parent_context(context.clone());
         }
     }
 
@@ -1290,7 +1314,10 @@ impl ToolExecutor {
             let permission_identity = tool.permission_cache_identity();
             let requires_invocation_confirmation = tool.requires_invocation_confirmation();
             match tool.create_invocation(args.clone()) {
-                Ok(invocation) => {
+                Ok(mut invocation) => {
+                    if name == "Agent" {
+                        self.attach_agent_parent_context(invocation.as_mut());
+                    }
                     // 门禁先行：没批准就一步都不许往下走。
                     match self
                         .pass_gate(GateInput {
@@ -3263,6 +3290,49 @@ mod tests {
                 })
             })
         }
+    }
+
+    #[test]
+    fn fork_context_excludes_unfinished_batch_and_keeps_completed_tool_messages() {
+        let config = Arc::new(Config::new(crate::core::config::ConfigParameters::default()));
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            Arc::new(ToolRegistry::new(config.clone())),
+            None,
+            config,
+        );
+        let mut completed = crate::types::StarMessage::assistant("read auth");
+        completed.tool_calls = Some(vec![crate::types::StarToolCall {
+            id: "read-1".into(),
+            call_type: "function".into(),
+            function: crate::types::StarToolCallFunction {
+                name: "Read".into(),
+                arguments: "{}".into(),
+            },
+        }]);
+        let mut current = crate::types::StarMessage::assistant("launch branches");
+        current.tool_calls = Some(vec![crate::types::StarToolCall {
+            id: "agent-1".into(),
+            call_type: "function".into(),
+            function: crate::types::StarToolCallFunction {
+                name: "Agent".into(),
+                arguments: "{}".into(),
+            },
+        }]);
+        let mut history = vec![
+            crate::types::StarMessage::user("inspect auth"),
+            completed,
+            crate::types::StarMessage::tool("read-1", "x".repeat(1200)),
+        ];
+        let expected = serde_json::to_value(&history).unwrap();
+        history.push(current);
+        executor.set_agent_parent_context(&history);
+        assert_eq!(
+            serde_json::to_value(executor.agent_parent_context.read().unwrap().as_ref()).unwrap(),
+            expected
+        );
+        executor.set_agent_parent_context(&[]);
+        assert!(executor.agent_parent_context.read().unwrap().is_empty());
     }
 
     /// 子代理复用父注册表时，白名单外工具既不能被发现，也不能绕过 schema 执行。

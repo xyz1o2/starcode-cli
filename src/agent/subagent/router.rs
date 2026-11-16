@@ -31,7 +31,7 @@ pub enum AgentRoute {
         agent_id: String,
         request: SubAgentRequest,
     },
-    /// Fork Agent — 继承父上下文 + exact tools，并行探索分支
+    /// Fork Agent — 继承父会话消息的后台分支
     ForkAgent {
         agent_id: String,
         request: ForkRequest,
@@ -43,10 +43,6 @@ pub enum AgentRoute {
 pub struct ForkRequest {
     /// 基础请求
     pub base: SubAgentRequest,
-    /// 父 Agent 的对话历史（用于继承上下文）
-    pub parent_messages: Vec<crate::types::StarMessage>,
-    /// 父 Agent 的活跃工具名称列表
-    pub parent_tool_names: Vec<String>,
     /// Fork 描述（用于 UI 显示）
     pub description: String,
 }
@@ -85,6 +81,10 @@ fn should_fork(input: &AgentToolFullInput) -> bool {
     false
 }
 
+fn fork_requested(input: &AgentToolFullInput, enabled: bool) -> bool {
+    enabled && input.subagent_type.is_none() && should_fork(input)
+}
+
 // ── 核心分流函数 ─────────────────────────────────────────────────────────
 
 /// 根据输入参数和上下文决定执行路径
@@ -106,14 +106,12 @@ pub fn route_agent_call(
         };
     }
 
-    // 规则 2：Fork Agent — 省略 subagent_type + fork gate 启用时走此路径
-    if is_fork_agent_enabled() && should_fork(input) {
+    // 只有未指定专用类型的调用才可 fork，避免把 Explorer 等类型悄悄改成分支。
+    if fork_requested(input, is_fork_agent_enabled()) {
         return AgentRoute::ForkAgent {
             agent_id: generate_agent_id(),
             request: ForkRequest {
                 base: build_request(input),
-                parent_messages: Vec::new(),   // 由调用方填充
-                parent_tool_names: Vec::new(), // 由调用方填充
                 description: input.description.clone(),
             },
         };
@@ -196,6 +194,22 @@ mod tests {
             background: None,
             max_rounds: None,
             parent_depth: 0,
+        }
+    }
+
+    #[test]
+    fn fork_gate_never_overrides_an_explicit_agent_type() {
+        let mut input = default_input();
+        input.description = "fork investigation".into();
+        assert!(!fork_requested(&input, false));
+        assert!(fork_requested(&input, true));
+        for kind in [
+            SubagentType::Explorer,
+            SubagentType::GeneralPurpose,
+            SubagentType::Editor,
+        ] {
+            input.subagent_type = Some(kind);
+            assert!(!fork_requested(&input, true));
         }
     }
 

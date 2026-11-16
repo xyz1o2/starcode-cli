@@ -220,8 +220,21 @@ pub struct ChatState {
     pub fast_mode_prev_model: Option<crate::runtime::messages::RuntimeModelSelection>,
     /// 正在等待 runtime acknowledgement 的 /fast 转换。它不能乐观改变 fast mode。
     pub pending_fast_mode_transition: Option<PendingFastModeTransition>,
-    /// /poor 省电模式（对标 Claude Code poor mode：跳过记忆抽取与提示建议）
+    /// /poor 省电模式（对标 Claude Code poor mode）。
+    ///
+    /// 它只关掉**本地的主动建议**（`proactive_suggestions.enabled`）——
+    /// 本仓库没有自动记忆提取任务，也不存在被 poor 门控的后台模型调用，
+    /// 所以它不承诺"更省 token"。语义见 `core::poor`。
     pub poor_mode: bool,
+    /// 用户对主动建议的**偏好**（`/proactive` 的开关）。
+    ///
+    /// 与 [`Self::poor_mode`] 分开存：poor 是临时覆盖，这个是「用户本来
+    /// 想要的」。poor 关闭时按它恢复 —— 用户先前用 `/proactive off` 关掉的
+    /// 主动建议，不会因为一次 `/poor on` + `/poor off` 就被悄悄打开。
+    ///
+    /// [`Self::proactive_suggestions`] 里的 `enabled` 才是**有效**值，
+    /// 由两者合成：`effective = !poor_mode && proactive_preference`。
+    pub proactive_preference: bool,
     /// /advisor 顾问模式（每轮结束后附带简短建议）
     pub advisor_mode: bool,
     pub context_window_override: Option<u32>,
@@ -676,6 +689,24 @@ impl ChatState {
         self.models_list_age_at_set = age_secs.unwrap_or(0);
     }
 
+    /// 应用启动时从设置解析出的 poor / 主动建议状态。
+    ///
+    /// 按启动配置合成有效值：`enabled = !poor && 偏好`。
+    /// poor 打开时建议列表必须清空 —— 用户看到的界面要立刻与开关一致，
+    /// 不能留着已经"关掉了"的建议卡片。
+    ///
+    /// `ChatState::new()` 刻意**不**读设置文件：那会让快照测试基线依赖
+    /// 运行机器上的真实配置。设置由启动路径（`main.rs` → `run_app`）读好后
+    /// 显式调进来。
+    pub fn apply_poor_startup(&mut self, startup: crate::core::poor::PoorStartup) {
+        self.poor_mode = startup.poor_mode;
+        self.proactive_preference = startup.proactive_preference;
+        self.proactive_suggestions.enabled = startup.proactive_effective();
+        if !self.proactive_suggestions.enabled {
+            self.proactive_suggestions.suggestions.clear();
+        }
+    }
+
     /// Push a toast notification (auto-dismisses after duration)
     pub fn push_toast(&mut self, message: &str, kind: ToastKind) {
         self.toast_queue.push_back(Toast {
@@ -895,6 +926,7 @@ impl ChatState {
             fast_mode_prev_model: None,
             pending_fast_mode_transition: None,
             poor_mode: false,
+            proactive_preference: true,
             advisor_mode: false,
             context_window_override: None,
             pending_tool_calls: None,

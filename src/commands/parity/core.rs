@@ -747,61 +747,155 @@ pub(crate) fn parse_toggle(args: &[String], current: bool) -> Result<bool, Strin
     }
 }
 
-/// `/poor` — 省电模式：关闭记忆抽取与提示建议（对标 Claude Code poor mode）。
+/// `/poor` — 省电模式（对标 Claude Code poor mode）。
+///
+/// **它到底做了什么**：关掉本地的主动建议。
+///
+/// 它**没有**做的事 —— 所以文案也不许说：跳过记忆提取、减少后台模型调用。
+/// 本仓库没有自动记忆提取的生产消费者（`core::memory::extract::MemoryExtractor`
+/// 与 `core::budget_mode::BudgetModeManager` 都没有构造点），也没有被 poor
+/// 门控的后台模型任务；主动建议本身是**本地**规则，不发模型请求。
+///
+/// poor 是**临时**覆盖：用户先前用 `/proactive off` 关掉的主动建议，
+/// `/poor off` 之后要**恢复成关着**，不能被悄悄打开。
 pub async fn poor(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     let enable = match parse_toggle(&args, ctx.state.poor_mode) {
         Ok(v) => v,
         Err(other) => {
-            push_msg(
-                &mut ctx,
-                format!("❌ Unknown action `{}`. Usage: /poor [on|off]", other),
-            );
+            let msg = crate::core::i18n::t1("cmd.poor.unknown_action").replace("{action}", &other);
+            push_msg(&mut ctx, msg);
             return Ok(());
         }
     };
-    ctx.state.poor_mode = enable;
-    // 省电模式下顺带关掉主动建议（这是最费额外调用的一项）
-    ctx.state.proactive_suggestions.enabled = !enable;
-    let out = if enable {
-        "🪫 Poor mode **on** — memory extraction and prompt suggestions are skipped. \
-         Fewer background model calls, lower cost."
-            .to_string()
-    } else {
-        "🔋 Poor mode **off** — memory extraction and prompt suggestions re-enabled.".to_string()
+
+    // 先落盘再改内存：设置写失败时内存与磁盘不会分叉（内存还是旧值，
+    // 下次启动读到的也是旧值）。
+    let manager = match crate::core::config::settings_manager::SettingsManager::new() {
+        Ok(mgr) => mgr,
+        Err(e) => {
+            let msg =
+                crate::core::i18n::t1("cmd.poor.save_failed").replace("{error}", &e.to_string());
+            push_msg(&mut ctx, msg);
+            return Ok(());
+        }
     };
+    let preference = ctx.state.proactive_preference;
+    if let Err(e) = crate::core::poor::save_preferences(&manager, Some(enable), None).await {
+        let msg = crate::core::i18n::t1("cmd.poor.save_failed").replace("{error}", &e);
+        push_msg(&mut ctx, msg);
+        return Ok(());
+    }
+
+    ctx.state.poor_mode = enable;
+    // 有效值 = !poor && 用户偏好。poor 关闭时按偏好恢复 —— 这正是
+    // 「不要无条件重启原已禁用的建议」那条要求。
+    ctx.state.proactive_suggestions.enabled = !enable && preference;
+    if !ctx.state.proactive_suggestions.enabled {
+        ctx.state.proactive_suggestions.suggestions.clear();
+    }
+
+    let out = if enable {
+        crate::core::i18n::t1("cmd.poor.on")
+    } else if preference {
+        crate::core::i18n::t1("cmd.poor.off")
+    } else {
+        crate::core::i18n::t1("cmd.poor.off_keeping_suggestions_off")
+    };
+    let mut out = out;
+    // 项目层优先级更高：用户刚写的偏好可能根本轮不到生效。得说清楚，
+    // 否则「已关闭」重启后又变回来，看起来像命令坏了。
+    if let Some(key) = project_override_key(&manager, enable, preference).await {
+        out.push('\n');
+        out.push_str(&crate::core::i18n::t1("cmd.poor.project_override").replace("{key}", &key));
+    }
     push_msg(&mut ctx, out);
     Ok(())
 }
 
+/// 项目层是否压住了用户刚做的选择（`None` = 没有压住）。
+///
+/// 项目设置读不到就当没有 —— 那台机器上没有项目层文件。
+async fn project_override_key(
+    manager: &crate::core::config::settings_manager::SettingsManager,
+    poor_mode: bool,
+    preference: bool,
+) -> Option<String> {
+    let project = manager.load_project_settings().await.ok()?;
+    crate::core::poor::project_override(&project, poor_mode, preference).map(str::to_string)
+}
+
 /// `/proactive` — 主动建议开关。
+///
+/// 与 `/poor` 互斥：poor 打开时**有效值恒为关**，但用户在这里做的选择
+/// 仍然**记进偏好** —— poor 关闭后按偏好恢复。
 pub async fn proactive(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
-    let current = ctx.state.proactive_suggestions.enabled;
+    let current = ctx.state.proactive_preference;
     let enable = match parse_toggle(&args, current) {
         Ok(v) => v,
         Err(other) => {
-            push_msg(
-                &mut ctx,
-                format!("❌ Unknown action `{}`. Usage: /proactive [on|off]", other),
-            );
+            let msg =
+                crate::core::i18n::t1("cmd.proactive.unknown_action").replace("{action}", &other);
+            push_msg(&mut ctx, msg);
             return Ok(());
         }
     };
-    ctx.state.proactive_suggestions.enabled = enable;
-    if !enable {
+
+    let manager = match crate::core::config::settings_manager::SettingsManager::new() {
+        Ok(mgr) => mgr,
+        Err(e) => {
+            let msg = crate::core::i18n::t1("cmd.proactive.save_failed")
+                .replace("{error}", &e.to_string());
+            push_msg(&mut ctx, msg);
+            return Ok(());
+        }
+    };
+    let poor_mode = ctx.state.poor_mode;
+    if let Err(e) = crate::core::poor::save_preferences(&manager, None, Some(enable)).await {
+        let msg = crate::core::i18n::t1("cmd.proactive.save_failed").replace("{error}", &e);
+        push_msg(&mut ctx, msg);
+        return Ok(());
+    }
+
+    ctx.state.proactive_preference = enable;
+    // 有效值：poor 压住一切。
+    ctx.state.proactive_suggestions.enabled = !poor_mode && enable;
+    if !ctx.state.proactive_suggestions.enabled {
         ctx.state.proactive_suggestions.suggestions.clear();
     }
+
     let pending = ctx.state.proactive_suggestions.suggestions.len();
-    let out = format!(
-        "Proactive suggestions: **{}**{}",
-        on_off(enable),
-        if enable && pending > 0 {
-            format!(" · {} pending", pending)
-        } else {
-            String::new()
-        }
-    );
+    let state = state_label(ctx.state.proactive_suggestions.enabled);
+    let mut out = if pending > 0 {
+        crate::core::i18n::t1("cmd.proactive.status_with_pending")
+            .replace("{state}", &state)
+            .replace("{pending}", &pending.to_string())
+    } else {
+        crate::core::i18n::t1("cmd.proactive.status").replace("{state}", &state)
+    };
+    if poor_mode && enable {
+        // poor 期间用户把偏好打开：说清楚「记住了，但 poor 期间不生效」。
+        out.push('\n');
+        out.push_str(&crate::core::i18n::t1("cmd.proactive.blocked_by_poor"));
+    }
+    // 项目层优先级更高：用户刚写的偏好可能根本轮不到生效。
+    if let Some(key) = project_override_key(&manager, poor_mode, enable).await {
+        out.push('\n');
+        out.push_str(&crate::core::i18n::t1("cmd.poor.project_override").replace("{key}", &key));
+    }
     push_msg(&mut ctx, out);
     Ok(())
+}
+
+/// 开关状态的本地化标签。
+///
+/// [`on_off`] 是老helper，返回硬编码的英文 `"on"` / `"off"` —— 那些调用点
+/// 都在纯英文的状态行里。这里需要跟着界面语言走，所以单开一个。
+fn state_label(enabled: bool) -> String {
+    if enabled {
+        crate::core::i18n::t1("cmd.state.on")
+    } else {
+        crate::core::i18n::t1("cmd.state.off")
+    }
 }
 
 /// `/advisor` — 顾问模式开关：开启后在提示里要求模型附带下一步建议。
@@ -1048,3 +1142,344 @@ pub async fn attach(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandRe
 // ═══════════════════════════════════════════════════════════════════════════
 // Insights / diagnostics
 // ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+// /poor 与 /proactive 的互斥与恢复语义
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod poor_tests {
+    use super::*;
+    use crate::ui::state::ChatState;
+
+    /// 命令要写用户设置 —— 测试必须落在临时目录里，不能碰用户真实的
+    /// `~/.star/user-settings.json`。`set_test_user_settings_path` 是进程级
+    /// 的一次性重定向，所以这些用例**不能并行跑**：每个用例自己申请一个
+    /// 临时目录，并在结束时还原成 `None`。
+    ///
+    /// 串行化靠一把进程级互斥锁（`TEST_LOCK`）—— 本模块的用例全都
+    /// `lock()` 一次，谁先跑完谁先放行，避免两个用例同时改那条路径。
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 申请一个临时设置目录，并把用户设置路径指过去。
+    ///
+    /// 返回的 guard 在 drop 时把路径恢复成 `None`。
+    struct SettingsGuard {
+        _dir: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn with_temp_settings() -> SettingsGuard {
+        let lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("user-settings.json");
+        crate::core::config::settings_manager::set_test_user_settings_path(Some(path));
+        SettingsGuard {
+            _dir: dir,
+            _lock: lock,
+        }
+    }
+
+    impl Drop for SettingsGuard {
+        fn drop(&mut self) {
+            crate::core::config::settings_manager::set_test_user_settings_path(None);
+        }
+    }
+
+    async fn run_poor(state: &mut ChatState, args: &[&str]) -> String {
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+        let args = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        poor(
+            CommandContext {
+                state,
+                agent_tx: &agent_tx,
+            },
+            args,
+        )
+        .await
+        .expect("poor command");
+        state.chat_history.last().expect("a reply").content.clone()
+    }
+
+    async fn run_proactive(state: &mut ChatState, args: &[&str]) -> String {
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+        let args = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        proactive(
+            CommandContext {
+                state,
+                agent_tx: &agent_tx,
+            },
+            args,
+        )
+        .await
+        .expect("proactive command");
+        state.chat_history.last().expect("a reply").content.clone()
+    }
+
+    /// `/poor on` 真的把主动建议**关掉**，并把已有的建议清空。
+    #[tokio::test]
+    async fn poor_on_turns_suggestions_off_and_clears_them() {
+        let _guard = with_temp_settings();
+        let mut state = ChatState::test_fixture();
+        state.proactive_suggestions.enabled = true;
+        state.proactive_suggestions.suggestions.push(
+            crate::core::proactive::suggestions::Suggestion {
+                id: "stale".to_string(),
+                suggestion_type:
+                    crate::core::proactive::suggestions::SuggestionType::ActionSuggestion,
+                message: "Consider running tests.".to_string(),
+                action: Some("RunTests".to_string()),
+                priority: crate::core::proactive::suggestions::SuggestionPriority::Medium,
+                timestamp: 0,
+            },
+        );
+
+        run_poor(&mut state, &["on"]).await;
+
+        assert!(state.poor_mode);
+        assert!(
+            !state.proactive_suggestions.enabled,
+            "poor 打开时主动建议必须真的关掉"
+        );
+        assert!(
+            state.proactive_suggestions.suggestions.is_empty(),
+            "poor 打开时已有的建议必须清空，不能留着已关掉功能的卡片"
+        );
+    }
+
+    /// `/poor off` 恢复的是**用户原先的选择**，不是无条件打开。
+    ///
+    /// 用户先前用 `/proactive off` 关掉的建议，不能被一次 poor 往返悄悄打开。
+    #[tokio::test]
+    async fn poor_off_restores_the_users_own_choice_instead_of_forcing_it_on() {
+        let _guard = with_temp_settings();
+        let mut state = ChatState::test_fixture();
+
+        // 用户自己先关掉主动建议。
+        run_proactive(&mut state, &["off"]).await;
+        assert!(!state.proactive_preference);
+        assert!(!state.proactive_suggestions.enabled);
+
+        // poor 往返一圈。
+        run_poor(&mut state, &["on"]).await;
+        assert!(state.poor_mode);
+        run_poor(&mut state, &["off"]).await;
+
+        assert!(!state.poor_mode);
+        assert!(!state.proactive_preference, "poor 的往返不该改掉用户的偏好");
+        assert!(
+            !state.proactive_suggestions.enabled,
+            "poor 关闭后必须恢复成用户原先的「关」，不能无条件打开"
+        );
+    }
+
+    /// poor 期间用户把偏好打开：偏好被记住，但**有效值**仍是关。
+    #[tokio::test]
+    async fn proactive_on_during_poor_is_remembered_but_stays_ineffective() {
+        let _guard = with_temp_settings();
+        let mut state = ChatState::test_fixture();
+
+        run_poor(&mut state, &["on"]).await;
+        assert!(state.poor_mode);
+
+        let reply = run_proactive(&mut state, &["on"]).await;
+        assert!(state.proactive_preference, "poor 期间用户的选择要记进偏好");
+        assert!(
+            !state.proactive_suggestions.enabled,
+            "poor 期间有效值必须是关 —— /proactive 不能绕过 poor"
+        );
+        assert!(
+            reply.contains(&crate::core::i18n::t1("cmd.proactive.blocked_by_poor")),
+            "回显要说清楚「记住了但当前不生效」: {reply}"
+        );
+
+        // poor 关闭后按偏好恢复。
+        run_poor(&mut state, &["off"]).await;
+        assert!(
+            state.proactive_suggestions.enabled,
+            "poor 关闭后应按用户偏好恢复为开"
+        );
+    }
+
+    /// poor 关闭后恢复成用户自己关掉的状态 —— 回显也不能说成"已恢复"。
+    #[tokio::test]
+    async fn poor_off_says_suggestions_stay_off_when_the_user_had_disabled_them() {
+        let _guard = with_temp_settings();
+        let mut state = ChatState::test_fixture();
+
+        run_proactive(&mut state, &["off"]).await;
+        run_poor(&mut state, &["on"]).await;
+        let reply = run_poor(&mut state, &["off"]).await;
+
+        assert!(
+            reply.contains(&crate::core::i18n::t1(
+                "cmd.poor.off_keeping_suggestions_off"
+            )),
+            "回显要说清楚仍为关闭: {reply}"
+        );
+    }
+
+    /// 回显不得声称「跳过记忆提取」或「减少后台模型调用」——
+    /// 本仓库既没有自动记忆提取的生产消费者，也没有被 poor 门控的
+    /// 后台模型任务。那两句是兑现不了的承诺。
+    #[tokio::test]
+    async fn the_poor_reply_makes_no_claims_it_cannot_keep() {
+        let _guard = with_temp_settings();
+        let mut state = ChatState::test_fixture();
+
+        let on = run_poor(&mut state, &["on"]).await.to_lowercase();
+        let off = run_poor(&mut state, &["off"]).await.to_lowercase();
+
+        for (label, text) in [("on", &on), ("off", &off)] {
+            assert!(
+                !text.contains("memory extraction"),
+                "{label} 回显不许声称跳过记忆抽取: {text}"
+            );
+            assert!(
+                !text.contains("background model"),
+                "{label} 回显不许声称减少后台模型调用: {text}"
+            );
+            assert!(
+                !text.contains("lower cost"),
+                "{label} 回显不许声称降低费用: {text}"
+            );
+        }
+    }
+
+    /// `/poor` 的开关要落盘 —— 否则下次启动读不到。
+    #[tokio::test]
+    async fn poor_is_persisted_so_the_next_startup_reads_it_back() {
+        let _guard = with_temp_settings();
+        let mut state = ChatState::test_fixture();
+
+        run_poor(&mut state, &["on"]).await;
+
+        let manager = crate::core::config::settings_manager::SettingsManager::new()
+            .expect("settings manager");
+        let settings = manager.load_user_settings().await.expect("user settings");
+        assert_eq!(settings.poor_mode, Some(true));
+        assert_eq!(settings.proactive_suggestions, None);
+    }
+
+    /// 修改建议偏好时，项目层合并出的 poor 值不能写回用户层。
+    #[tokio::test]
+    async fn proactive_does_not_persist_the_projects_poor_override() {
+        let _guard = with_temp_settings();
+        let project = crate::core::config::settings_manager::ProjectSettings {
+            poor_mode: Some(true),
+            ..Default::default()
+        };
+        let mut state = ChatState::test_fixture();
+        state.apply_poor_startup(crate::core::poor::resolve(&Default::default(), &project));
+        run_proactive(&mut state, &["off"]).await;
+
+        let manager = crate::core::config::settings_manager::SettingsManager::new().unwrap();
+        let user = manager.load_user_settings().await.unwrap();
+        assert_eq!(user.poor_mode, None);
+        assert_eq!(user.proactive_suggestions, Some(false));
+        assert!(state.poor_mode);
+        assert!(!state.proactive_suggestions.enabled);
+        // 移除项目覆盖后，其他项目仍用用户层的默认 poor 状态。
+        assert!(!crate::core::poor::resolve(&user, &Default::default()).poor_mode);
+    }
+
+    /// poor 命令同样不能把项目层建议偏好固化到用户层。
+    #[tokio::test]
+    async fn poor_does_not_persist_the_projects_suggestion_override() {
+        let _guard = with_temp_settings();
+        let manager = crate::core::config::settings_manager::SettingsManager::new().unwrap();
+        let mut user = manager.load_user_settings().await.unwrap();
+        user.proactive_suggestions = Some(true);
+        manager.save_user_settings(&user).await.unwrap();
+        let project = crate::core::config::settings_manager::ProjectSettings {
+            proactive_suggestions: Some(false),
+            ..Default::default()
+        };
+        let mut state = ChatState::test_fixture();
+        state.apply_poor_startup(crate::core::poor::resolve(&user, &project));
+        run_poor(&mut state, &["on"]).await;
+        let saved = manager.load_user_settings().await.unwrap();
+        assert_eq!(saved.poor_mode, Some(true));
+        assert_eq!(saved.proactive_suggestions, Some(true));
+    }
+
+    /// 保存失败不得让内存进入未落盘的状态。
+    #[tokio::test]
+    async fn failed_save_keeps_the_previous_session_state() {
+        let guard = with_temp_settings();
+        crate::core::config::settings_manager::set_test_user_settings_path(Some(
+            guard._dir.path().to_path_buf(),
+        ));
+        let mut state = ChatState::test_fixture();
+        let reply = run_poor(&mut state, &["on"]).await;
+        assert!(!state.poor_mode);
+        assert!(state.proactive_preference);
+        assert!(state.proactive_suggestions.enabled);
+        assert!(reply.starts_with("❌"));
+        let reply = run_proactive(&mut state, &["off"]).await;
+        assert!(!state.poor_mode);
+        assert!(state.proactive_preference);
+        assert!(state.proactive_suggestions.enabled);
+        assert!(reply.starts_with("❌"));
+    }
+
+    /// 启动加载：项目层覆盖用户层 —— 与 `env` block 同序。
+    #[tokio::test]
+    async fn the_startup_state_lets_the_project_layer_win() {
+        let user = crate::core::config::settings_manager::UserSettings {
+            poor_mode: Some(false),
+            proactive_suggestions: Some(true),
+            ..Default::default()
+        };
+        let project = crate::core::config::settings_manager::ProjectSettings {
+            poor_mode: Some(true),
+            proactive_suggestions: Some(false),
+            ..Default::default()
+        };
+
+        let startup = crate::core::poor::resolve(&user, &project);
+        let mut state = ChatState::test_fixture();
+        state.apply_poor_startup(startup);
+
+        assert!(state.poor_mode);
+        assert!(!state.proactive_preference);
+        assert!(
+            !state.proactive_suggestions.enabled,
+            "启动时 poor 打开就该是关的"
+        );
+    }
+
+    /// 启动加载：用户层说 poor 关、主动建议关 —— 启动后就是关的，
+    /// 不是默认的「开」。
+    #[tokio::test]
+    async fn the_startup_state_keeps_a_disabled_suggestion_disabled() {
+        let user = crate::core::config::settings_manager::UserSettings {
+            poor_mode: Some(false),
+            proactive_suggestions: Some(false),
+            ..Default::default()
+        };
+
+        let startup = crate::core::poor::resolve(
+            &user,
+            &crate::core::config::settings_manager::ProjectSettings::default(),
+        );
+        let mut state = ChatState::test_fixture();
+        state.apply_poor_startup(startup);
+
+        assert!(!state.poor_mode);
+        assert!(!state.proactive_preference);
+        assert!(
+            !state.proactive_suggestions.enabled,
+            "用户显式关掉的建议不该在启动时被打开"
+        );
+    }
+
+    /// `ChatState::test_fixture()` 不读真实设置 —— 基线必须与机器无关。
+    #[test]
+    fn the_test_fixture_does_not_pick_up_a_persisted_poor_state() {
+        let state = ChatState::test_fixture();
+        assert!(!state.poor_mode);
+        assert!(state.proactive_preference);
+        assert!(state.proactive_suggestions.enabled);
+    }
+}

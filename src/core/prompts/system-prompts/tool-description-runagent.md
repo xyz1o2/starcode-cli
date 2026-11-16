@@ -9,13 +9,14 @@ Launch a specialized agent for a distinct, multi-step task. Each agent type has 
 
 **Available agent types** (`subagent_type`):
 - `general_purpose` (default): research and multi-step tasks
-- `explorer`: codebase exploration; defaults to background execution
+- `explorer`: read-only code search and explanation; defaults to background execution. Specify search breadth ("quick", "medium", or "very thorough") and the paths or relationships to investigate.
 - `analyzer`: focused analysis
 - `editor`: targeted code edits
 - `code_reviewer`: reviewing code changes
 
 **Launch and completion**:
-- Provide a short description (3–5 words) and a detailed prompt. Specify the goal, what you already know, expected output, and whether edits are allowed. A fresh agent does not inherit this conversation.
+- Provide a short description (3–5 words) and a detailed prompt. Specify the goal, what you already know, paths already ruled out, expected output, and whether edits are allowed. Ordinary agents start without this conversation; provide the background needed to do the work.
+- Fork is opt-in: when STAR_FORK_AGENT_ENABLED is enabled, omit `subagent_type` and include "fork" in the description to start a background branch with the caller's completed conversation history. The current unfinished tool batch is excluded. Fork does not promise an identical system prompt or tool pool. `/subtask` is the explicit command for branching the current session.
 - `explorer` runs in the background unless you explicitly set `background: false`. Other agent types run in the foreground unless you set `background: true`. Use background for independent work; use foreground if you need the result before continuing.
 - A background launch returns an agent ID and output-file path. This only means the task started. Its progress may appear in the UI; neither progress nor the launch result is a finding.
 - On completion or failure, a `<task-notification>` is injected into a subsequent turn. Read its `<status>` and `<result>` before reporting findings; relay the actual outcome to the user. Do not sleep, poll, or repeatedly read the output file while waiting. If the result is required for the user's answer, do not finish before it arrives.

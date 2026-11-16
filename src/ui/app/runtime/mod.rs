@@ -960,6 +960,7 @@ pub async fn run_app(
     initial_history: Vec<crate::types::ChatEntry>,
     initial_usage: Option<crate::types::StarUsage>,
     initial_session_id: Option<String>,
+    poor_startup: crate::core::poor::PoorStartup,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::ui::services::worker::agent_worker;
     use crossterm::execute;
@@ -997,6 +998,9 @@ pub async fn run_app(
     // 初始化进度改为走状态行，而不是另起一个页面。
     let mut state = ChatState::new();
     state.auto_follow = true;
+    // `/poor` 与主动建议的持久化状态在**这里**落地，而不是 `ChatState::new()`
+    // 里读磁盘：new() 读真实配置会让快照基线依赖运行机器。
+    state.apply_poor_startup(poor_startup);
     state.virtual_list.mark_all_dirty();
     state.current_status_line = Some(crate::core::i18n::t1("ui.init.loading").to_string());
     terminal.draw(|f| super::draw_ui(f, &mut state))?;

@@ -1978,7 +1978,11 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "poor",
         alt_names: &[],
-        description: "Toggle poor mode (skip memory extraction and prompt suggestions)",
+        // 只有这一句是真的：poor 关掉的是**本地的主动建议**。
+        // 旧的描述写着 "skip memory extraction and prompt suggestions" ——
+        // 记忆抽取在本仓库根本没有生产消费者，而 prompt suggestions 是本地
+        // 规则（不发模型请求），所以那句话承诺了两件兑现不了的事。
+        description: "Toggle poor mode (turns off proactive suggestions)",
         category: "Config",
         sub_commands: &[],
     },
@@ -2883,6 +2887,23 @@ pub fn get_categorized_commands() -> HashMap<&'static str, Vec<&'static SlashCom
     categorized
 }
 
+/// 命令的**本地化**描述。
+///
+/// `SlashCommand::description` 是 `&'static str`，没法直接放 `i18n::t1(...)`
+/// 的结果（词典在运行时才装载）。把整张表改成 `String` 改动太大 ——
+/// 所以只给需要本地化的命令开一个例外，其余命令照旧用静态串。
+///
+/// 目前只有 `/poor` 与 `/proactive` 走这条路：它们的描述曾经**承诺了兑现
+/// 不了的事**（"skip memory extraction"），文案得跟着行为一起改，而改了
+/// 就该跟着界面语言一起变。
+pub fn command_description(cmd: &SlashCommand) -> String {
+    match cmd.name {
+        "poor" => crate::core::i18n::t1("cmd.poor.description"),
+        "proactive" => crate::core::i18n::t1("cmd.proactive.description"),
+        _ => cmd.description.to_string(),
+    }
+}
+
 /// 格式化帮助信息
 pub fn format_help() -> String {
     let mut help_text = " Starcode CLI - 可用命令\n\n".to_string();
@@ -2899,7 +2920,9 @@ pub fn format_help() -> String {
                 };
                 help_text.push_str(&format!(
                     "  /{}{} - {}\n",
-                    cmd.name, aliases, cmd.description
+                    cmd.name,
+                    aliases,
+                    command_description(cmd)
                 ));
 
                 // 显示子命令

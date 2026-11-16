@@ -369,6 +369,8 @@ impl ProviderStore {
                 context_window: None,
                 file_filtering: None,
                 env: None,
+                poor_mode: None,
+                proactive_suggestions: None,
             })
         } else {
             // Default if not exists
@@ -389,6 +391,8 @@ impl ProviderStore {
                 context_window: None,
                 file_filtering: None,
                 env: None,
+                poor_mode: None,
+                proactive_suggestions: None,
             }
         };
 

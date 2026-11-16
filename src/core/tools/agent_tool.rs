@@ -139,6 +139,7 @@ impl BaseDeclarativeTool for AgentTool {
             full_input: params.into(),
             runner: self.runner.clone(),
             async_runner: self.async_runner.clone(),
+            parent_context: Arc::new(Vec::new()),
         }))
     }
 }
@@ -147,9 +148,22 @@ pub struct AgentToolInvocation {
     full_input: AgentToolFullInput,
     runner: SharedSubAgentRunner,
     async_runner: Option<Arc<AsyncSubagentRunner>>,
+    parent_context: Arc<Vec<crate::types::StarMessage>>,
+}
+
+impl AgentToolInvocation {
+    fn fork_request(&self, request: SubAgentRequest, name: &str) -> SubAgentRequest {
+        request
+            .with_parent_context(self.parent_context.as_ref().clone(), Vec::new())
+            .with_identity(name)
+    }
 }
 
 impl ToolInvocation for AgentToolInvocation {
+    fn set_agent_parent_context(&mut self, messages: Arc<Vec<crate::types::StarMessage>>) {
+        self.parent_context = messages;
+    }
+
     fn get_description(&self) -> String {
         format!(
             "Agent [{}]: {}",
@@ -377,39 +391,13 @@ impl ToolInvocation for AgentToolInvocation {
                     let async_runner = async_runner
                         .ok_or_else(|| "AsyncSubagentRunner not configured for fork".to_string())?;
 
-                    // Fork Agent 继承父上下文：将父消息历史注入到 prompt 前面
-                    let mut enriched_prompt = String::new();
-                    if !request.parent_messages.is_empty() {
-                        enriched_prompt.push_str("## Inherited Context from Parent Agent\n\n");
-                        enriched_prompt.push_str("The following conversation history was inherited from the parent agent. ");
-                        enriched_prompt
-                            .push_str("Use this context to understand the ongoing work:\n\n");
-                        for msg in &request.parent_messages {
-                            let role = if msg.role == "user" {
-                                "User"
-                            } else {
-                                "Assistant"
-                            };
-                            let content = msg.content.as_deref().unwrap_or("(empty)");
-                            let content_preview: String = content.chars().take(500).collect();
-                            enriched_prompt
-                                .push_str(&format!("**{}**: {}\n\n", role, content_preview));
-                        }
-                        enriched_prompt.push_str("---\n\n## Fork Task\n\n");
-                    }
-                    enriched_prompt.push_str(&request.base.prompt);
-
-                    let fork_name = format!("fork-{}", agent_id);
-                    // fork 也进隐式 team：以 fork 名寻址（对齐 CC 的 fork 可回话语义）。
-                    let request_with_id = SubAgentRequest {
-                        prompt: enriched_prompt,
-                        max_rounds: request.base.max_rounds,
-                        subagent_type: request.base.subagent_type,
-                        parent_messages: request.base.parent_messages,
-                        parent_pending_context: request.base.parent_pending_context,
-                        identity: Some(fork_name.clone()),
-                        parent_depth: request.base.parent_depth,
-                    };
+                    let inherited_messages = self.parent_context.len();
+                    let fork_name = input
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("fork-{}", agent_id));
+                    // 与 /subtask 共用安装路径，保留消息角色、工具结果和完整文本。
+                    let request_with_id = self.fork_request(request.base, &fork_name);
                     let launch = async_runner
                         .spawn_background(
                             request_with_id,
@@ -424,7 +412,7 @@ impl ToolInvocation for AgentToolInvocation {
                             "Fork agent launched.\nagent_id: {}\nAddressable as '{}' via SendMessage.\nInherited {} parent messages.\nResults will arrive via <task-notification>.",
                             launch.agent_id,
                             fork_name,
-                            request.parent_messages.len(),
+                            inherited_messages,
                         )),
                         return_display: Some(format!("Fork {} started", agent_id)),
                         output: String::new(),
@@ -435,12 +423,60 @@ impl ToolInvocation for AgentToolInvocation {
                             "agent_type": "Fork",
                             "name": fork_name,
                             "description": request.description,
-                            "inherited_messages": request.parent_messages.len(),
+                            "inherited_messages": inherited_messages,
                             "output_file": launch.output_file.to_string_lossy(),
                         })),
                     })
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fork_invocation_preserves_structured_history_without_truncation() {
+        let config = Arc::new(crate::core::config::Config::new(
+            crate::core::config::ConfigParameters::default(),
+        ));
+        let runner = crate::agent::subagent::runner::StarAgentRunner::shared(
+            crate::llm::client::StarClient::new("", None, None, None, None),
+            config,
+        );
+        let params: AgentToolParams = serde_json::from_value(json!({
+            "description": "fork auth investigation", "prompt": "check callers"
+        }))
+        .unwrap();
+        let mut invocation = AgentToolInvocation {
+            full_input: params.into(),
+            runner,
+            async_runner: None,
+            parent_context: Arc::new(Vec::new()),
+        };
+        let mut assistant = crate::types::StarMessage::assistant("x".repeat(1200));
+        assistant.tool_calls = Some(vec![crate::types::StarToolCall {
+            id: "read-auth".into(),
+            call_type: "function".into(),
+            function: crate::types::StarToolCallFunction {
+                name: "Read".into(),
+                arguments: r#"{"file_path":"auth.rs"}"#.into(),
+            },
+        }]);
+        let history = vec![
+            crate::types::StarMessage::user("investigate auth"),
+            assistant,
+            crate::types::StarMessage::tool("read-auth", "auth source"),
+        ];
+        invocation.set_agent_parent_context(Arc::new(history.clone()));
+        let request = invocation.fork_request(SubAgentRequest::new("check callers"), "fork-auth");
+        assert_eq!(request.prompt, "check callers");
+        assert_eq!(request.identity.as_deref(), Some("fork-auth"));
+        assert_eq!(
+            serde_json::to_value(&request.parent_messages).unwrap(),
+            serde_json::to_value(&history).unwrap()
+        );
     }
 }

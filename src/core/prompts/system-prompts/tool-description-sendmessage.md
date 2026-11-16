@@ -4,7 +4,8 @@ description: Send message to another agent
 -->
 Send a message to another agent.
 
-**Use for**: continuing a previously spawned agent, multi-agent coordination, inter-agent communication.
+**Use for**: steering a running agent, multi-agent coordination, inter-agent communication.
+A completed or stopped local agent is no longer addressable. SendMessage does not resume its transcript; launch a new Agent with the relevant context when follow-up work is needed.
 **NOT for**: single-agent environments, regular user-facing replies (use normal text output).
 
 **Key usage**:

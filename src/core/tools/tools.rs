@@ -99,6 +99,10 @@ pub enum ConfirmationType {
 }
 
 pub trait ToolInvocation: Send + Sync {
+    /// 执行器提供真实调用方的结构化历史，只有 Agent 的 fork 路径消费。
+    /// 不从模型参数反序列化，避免伪造父会话或污染共享工具注册表。
+    fn set_agent_parent_context(&mut self, _messages: Arc<Vec<crate::types::StarMessage>>) {}
+
     fn get_description(&self) -> String;
     fn tool_locations(&self) -> Vec<ToolLocation>;
     fn should_confirm_execute(

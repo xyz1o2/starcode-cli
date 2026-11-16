@@ -860,13 +860,12 @@ pub async fn suggestions_cmd(mut ctx: CommandContext<'_>, args: Vec<String>) -> 
             ctx.state.proactive_suggestions.clear_all();
             push_msg(&mut ctx, "All suggestions cleared.".to_string());
         }
-        "on" => {
-            ctx.state.proactive_suggestions.enabled = true;
-            push_msg(&mut ctx, "Proactive suggestions enabled.".to_string());
-        }
-        "off" => {
-            ctx.state.proactive_suggestions.enabled = false;
-            push_msg(&mut ctx, "Proactive suggestions disabled.".to_string());
+        "on" | "off" => {
+            // 走 `/proactive` 的同一条路径：只改 `enabled` 会让**用户偏好**
+            // 与有效值分叉 —— 用户用 `/suggestions off` 关掉的建议，会被
+            // 一次 `/poor on` + `/poor off` 悄悄打开。偏好与有效值必须
+            // 在同一个地方合成。
+            return crate::commands::parity::proactive(ctx, args).await;
         }
         _ => {
             push_msg(

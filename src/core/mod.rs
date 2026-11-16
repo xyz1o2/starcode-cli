@@ -41,6 +41,7 @@ pub mod permissions;
 pub mod plan;
 pub mod plugins;
 pub mod policy;
+pub mod poor;
 pub mod proactive;
 pub mod prompt_suggestion;
 pub mod remote;
