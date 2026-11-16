@@ -524,7 +524,7 @@ pub async fn workflow_list(ctx: CommandContext<'_>, args: Vec<String>) -> Comman
 
 pub async fn workflow_run(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
     let name = args.first().cloned().unwrap_or_default();
-    if name.is_empty() {
+    if name.is_empty() || args.len() != 1 {
         push_msg(&mut ctx, crate::core::i18n::t1("workflow.run.usage"));
         return Ok(());
     }
@@ -545,13 +545,14 @@ pub async fn workflow_create(mut ctx: CommandContext<'_>, args: Vec<String>) -> 
         push_msg(&mut ctx, "Usage: /workflow create <name>");
         return Ok(());
     }
-    push_msg(
-        &mut ctx,
-        format!(
-            "Create workflow: {}\nCreate a .star/workflows/{}.md file.",
-            name, name
-        ),
-    );
+    crate::core::tools::workflow::validate_workflow_name(&name)?;
+    let request = serde_json::json!({"workflow": name, "requirements": args[1..].join(" ")});
+    let message_id = ctx.state.next_message_id;
+    ctx.state.next_message_id += 1;
+    ctx.agent_tx.send(AgentRequest::SendMessage {
+        message_id,
+        message: format!("Create a project shell workflow for this request: {request}. Resolve the workflows directory using the nearest project .star directory, as WorkflowTool does. Inspect existing files first, preserve existing work, and create a valid <name>.json with non-empty steps containing command strings, or <name>.sh. Use normal file tools and their approval flow. Do not execute the workflow unless requested. Report actual changes."),
+    }).await.map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -561,7 +562,14 @@ pub async fn workflow_edit(mut ctx: CommandContext<'_>, args: Vec<String>) -> Co
         push_msg(&mut ctx, "Usage: /workflow edit <name>");
         return Ok(());
     }
-    push_msg(&mut ctx, format!("Edit workflow: {}", name));
+    crate::core::tools::workflow::validate_workflow_name(&name)?;
+    let request = serde_json::json!({"workflow": name, "requirements": args[1..].join(" ")});
+    let message_id = ctx.state.next_message_id;
+    ctx.state.next_message_id += 1;
+    ctx.agent_tx.send(AgentRequest::SendMessage {
+        message_id,
+        message: format!("Inspect and edit the existing project shell workflow for this request: {request}. Resolve the nearest project .star/workflows directory as WorkflowTool does, checking <name>.json before <name>.sh. Read before editing and preserve unrelated changes. If requirements are absent, inspect the definition and ask what should change before writing. Use normal file tools and their approval flow. Do not execute it unless requested. Report actual changes."),
+    }).await.map_err(|error| error.to_string())?;
     Ok(())
 }
 

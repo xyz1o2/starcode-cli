@@ -647,6 +647,9 @@ pub async fn dispatch_global_binding(
         // 已经在 `handle_key_event` 开头处理过（要抢在行内确认之前），这里只是
         // 保证注册表里每个绑定都有唯一实现。
         GlobalBinding::TogglePlanMode => {
+            if state.is_awaiting_confirmation || state.is_input_modal_open() {
+                return Ok(false);
+            }
             cycle_approval_mode(state, agent_tx).await;
             Ok(true)
         }
@@ -2170,6 +2173,30 @@ mod tests {
             .unwrap();
         assert!(terminal.backend().cursor_visible());
         assert!(state.textarea.rendered_cursor_position().unwrap().y > 1);
+    }
+
+    #[tokio::test]
+    async fn help_navigation_reaches_the_end_without_editing_input() {
+        let mut state = ChatState::test_fixture();
+        state.set_input_text("draft");
+        state.show_help = true;
+        state.last_help_terminal_height = 24;
+        let (tx, _rx) = mpsc::channel(16);
+        let max = crate::ui::components::help_popup::max_help_scroll(24);
+        assert!(max > 0);
+        for (key, expected) in [(KeyCode::End, max), (KeyCode::Home, 0)] {
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(key, KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(state.help_scroll, expected);
+            assert!(state.show_help);
+            assert_eq!(state.input, "draft");
+        }
     }
 
     #[tokio::test]

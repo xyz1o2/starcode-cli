@@ -38,10 +38,14 @@ fn wrapped_prompt_keeps_cursor_visible_in_short_viewports() {
 fn clear_without_query_repaints_identical_content() {
     use ratatui::{backend::TestBackend, widgets::Paragraph, Terminal};
     let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
-    terminal.draw(|f| f.render_widget(Paragraph::new("same content"), f.area())).unwrap();
+    terminal
+        .draw(|f| f.render_widget(Paragraph::new("same content"), f.area()))
+        .unwrap();
     let expected = terminal.backend().buffer().clone();
     clear_without_cursor_query(&mut terminal).unwrap();
-    terminal.draw(|f| f.render_widget(Paragraph::new("same content"), f.area())).unwrap();
+    terminal
+        .draw(|f| f.render_widget(Paragraph::new("same content"), f.area()))
+        .unwrap();
     assert_eq!(terminal.backend().buffer(), &expected);
 }
 

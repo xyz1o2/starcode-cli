@@ -424,6 +424,24 @@ fn render_command_hints_overlay(
 }
 
 #[cfg(test)]
+mod geometry_tests {
+    use super::*;
+
+    #[test]
+    fn centered_popup_stays_inside_even_tiny_areas() {
+        for width in 0..=80 {
+            for height in 0..=24 {
+                let area = Rect::new(3, 5, width, height);
+                let popup = centered_rect(68, 14, area);
+                assert!(popup.x >= area.x && popup.y >= area.y);
+                assert!(popup.right() <= area.right());
+                assert!(popup.bottom() <= area.bottom());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod screenshot_regressions {
     use super::*;
 

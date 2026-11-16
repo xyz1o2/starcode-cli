@@ -2,7 +2,10 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{
+        Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState,
+    },
     Frame,
 };
 
@@ -51,7 +54,10 @@ fn help_lines() -> Vec<Line<'static>> {
         (
             i18n::t1("ui.help.section.confirm"),
             vec![
-                ("1/2/3/4".to_string(), i18n::t1("ui.help.approve.choose")),
+                (
+                    "1–4 / y/s/a/d/n".to_string(),
+                    i18n::t1("ui.help.approve.choose"),
+                ),
                 (
                     "Ctrl+Shift+D".to_string(),
                     i18n::t1("ui.help.control.perm_debug"),
@@ -156,14 +162,12 @@ pub fn render_help_popup(f: &mut Frame, area: Rect, scroll: u16) {
 
     let viewport_height = height.saturating_sub(2) as usize;
     let scroll = usize::from(scroll).min(content_height.saturating_sub(viewport_height));
-    let paragraph = Paragraph::new(lines)
-        .scroll((scroll as u16, 0))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .title(i18n::t1("ui.help.block")),
-        );
+    let paragraph = Paragraph::new(lines).scroll((scroll as u16, 0)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(i18n::t1("ui.help.block")),
+    );
 
     f.render_widget(Clear, popup_area);
     f.render_widget(paragraph, popup_area);
