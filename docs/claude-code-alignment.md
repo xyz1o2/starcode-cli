@@ -382,6 +382,77 @@ P2 的 workflows 价值最高（把子 agent 并行从消耗主 context 变成�
 
 ---
 
+## 3.1 架构评估（2026-11-17）
+
+本节是基于当前源码、调用图和本轮门禁的工程判断，不把未接线的类型或历史文档声明当作已实现能力。
+
+### 关键调用链
+
+主会话：
+
+```text
+run_app
+  -> agent_worker
+  -> process_message / process_control_request
+  -> StarAgent::process_user_input_stream
+  -> Agent::run_input_stream
+  -> fresh Agent::run_agentic_loop
+  -> oneshot 交回 session_messages（成功后才置 turn_context_handed_back）
+```
+
+后台/子 Agent：
+
+```text
+AgentTool / 后台任务
+  -> StarAgentRunner::run_with_control
+  -> 子 StarAgent 执行
+  -> turn_context_handed_back() 检查
+  -> 通过后才构造并保存 AgentSession 快照
+```
+
+这两条链解释了当前设计的核心取舍：执行对象与会话对象分离，但“是否允许提交本轮结果”仍由外层通过标记判断。标记只能保证不发布过期快照，不能让已经丢失的 panic 前上下文恢复。
+
+### 本轮验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo check --all-targets` | 通过，dev profile 2m04s |
+| `cargo fmt --all -- --check` | 通过 |
+| `cargo test --lib -- --test-threads=1` | 2345 passed / 5 ignored，exit 0，146.92s |
+| `git diff --check` | 通过 |
+
+测试必须串行运行，原因是 `utils::checkpoint_manager` 等进程级状态会被并行测试互相覆盖；这不是测试命令的偏好，而是当前状态模型的约束。
+
+### 优势
+
+1. **运行时边界清楚。** `src/ui/services/worker.rs::agent_worker` 是 UI 与 Agent 的单一协调点；`AgentRequest` / `StreamMessage` 形成显式协议，UI 不直接管理模型、工具和会话。`src/ui/app/runtime/mod.rs::run_ui_loop` 在 8ms 预算内批量处理流消息，交互循环和 Agent 执行相互隔离。
+2. **单轮执行有隔离意识。** `src/agent/agent_run.rs::run_input_stream` 为实际循环创建 fresh `Agent`，只把必要的运行时快照、会话消息、取消标志和消息队列传入；循环结束后再通过 oneshot 交回会话上下文，降低临时状态污染外层会话的风险。
+3. **异常交接的语义正在收紧。** `turn_context_handed_back` 在每轮开始时清零，只有内部循环结果成功交回后才置为 true；`src/agent/subagent/runner.rs::run_with_control` 在未交接时返回明确错误且不保存新快照。因此，内部任务 panic 或 oneshot 提前关闭时，系统会失败并保留旧快照，而不是把旧上下文伪装成本轮结果。该修复不承诺恢复 panic 发生前尚未交回的上下文。
+4. **外部集成面完整。** 交互 TUI、headless、`stream-json`、remote inbox/outbox、后台任务、MCP 和子 Agent 共用核心运行时，便于接入 CI、IDE 或编排器；MCP server 当前明确只暴露 `search_code` 与 `trace_call_chain`，边界是可验证的。
+5. **性能和成本意识较强。** prompt cache 前缀保护、工具首轮 shortlist、消息 epoch、后台索引、Tree-sitter 分块和 8ms 流预算，说明系统在处理真实长会话，而不只是完成单次模型请求。
+6. **回归体系较扎实。** 本轮实际验证：`cargo check --all-targets` 通过，`cargo fmt --all -- --check` 通过，串行库测试 2345 通过、5 忽略。测试覆盖取消、后台任务、会话恢复、工具权限、消息协议和 UI 边界。
+
+### 主要风险
+
+1. **复杂度已成为首要约束。** `src/` 有 737 个 Rust 文件、约 15,000 个符号；`run_with_control` 的上下游影响面很大，任何生命周期或权限改动都可能跨 runner、Agent、UI、通知和存储。继续增加功能前，应优先收敛状态模型和公共入口。
+2. **状态所有权仍然分散。** `StarAgent` 外层会话、fresh `Agent` 本轮状态、`RuntimeServices` 共享服务、消息 hub、steering queue、取消标志和会话存储共同参与一轮执行。当前 handover marker 解决的是“能否发布快照”，不是所有权本身；取消、panic、任务丢弃和进程退出仍需逐条定义谁负责收尾。
+3. **全局状态降低并发可测试性。** 环境变量、进程级设置、checkpoint 目录覆盖、审批和 thinking 状态等共享状态，使库测试必须串行运行，也限制了多个不同配置的子 Agent 真正并行。后续调用级参数应优先通过显式上下文传递，而不是继续增加全局 setter。
+4. **存在能力漂移和死代码风险。** 对齐文档已确认 `core/workflow/WorkflowManager`、旧的 `SystemPromptMerger` 等没有生产构造点；bridge 只有配置表面而没有实际 listener；部分 `.claude/` 兼容能力仍未实现。新增功能必须先验证构造点、真实消费者和生命周期，避免“声明存在但运行时不走”。
+5. **可观测性仍依赖日志和人工排查。** 交互模式先显示 TUI，再后台初始化 Config/Agent；初始化失败的根因主要在 `[INIT]` 日志。对用户而言，加载卡住、任务等待、任务取消、快照保存失败需要更统一的状态事件和错误分类，不能只依赖日志路径。
+6. **外部协议维护成本高。** `AgentEvent` 使用手工序列化来保持 `stream-json` 的稳定事件名，这是合理但脆弱的外部契约；任何字段、终态或错误语义变化都需要兼容性测试。真实模型、计费、跨进程 harness 和终端差异仍未在本轮验证。
+
+### 优先级建议
+
+- **P0：** 把 Agent turn 生命周期收敛为显式状态机，至少区分 `Running`、`HandingBack`、`SnapshotSaved`、`Cancelled`、`Failed` 和 `Panicked`，并让 UI、通知、邮箱注销和快照保存共享同一终态。
+- **P1：** 将 effort、approval、cwd、取消令牌、上下文策略等从进程级状态逐步迁移到 `TurnContext` / `SubAgentContext`；保留全局状态只作为启动默认值。
+- **P1：** 为 `stream-json`、remote inbox/outbox、MCP 和会话快照建立版本化契约测试，并补充断线、重复消息、进程重启和真实外部 harness 场景。
+- **P2：** 清理无构造点的旧实现，统一 workflow、消息 hub 和配置路径，减少“多个实现只有一个接线”的维护陷阱。
+- **P2：** 将初始化、取消、快照和后台任务状态全部映射为可见 UI/CLI 事件，降低对 `.star/logs/agent.log` 的依赖。
+
+### 本节边界
+
+本轮未运行真实外部模型请求、计费测试、真实终端兼容性测试或跨进程生产 harness；因此不据此宣称网络断开、费用统计和跨终端表现已经完全可靠。
+
 ## 4. 几个可以直接抄的具体设计
 
 不改架构也能抄的细节：

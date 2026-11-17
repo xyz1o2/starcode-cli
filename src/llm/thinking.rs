@@ -73,6 +73,7 @@ fn decode(raw: u8) -> Option<ThinkingEffort> {
         3 => Some(ThinkingEffort::Medium),
         4 => Some(ThinkingEffort::High),
         5 => Some(ThinkingEffort::Xhigh),
+        6 => Some(ThinkingEffort::Max),
         _ => None,
     }
 }
@@ -587,6 +588,22 @@ mod tests {
         assert_eq!(current_effort(), ThinkingEffort::High);
         set_session_effort(&ThinkingEffort::Off);
         assert_eq!(current_effort(), ThinkingEffort::Off);
+    }
+
+    #[test]
+    fn every_effort_survives_encoding_including_max() {
+        for effort in [
+            ThinkingEffort::Off,
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::Xhigh,
+            ThinkingEffort::Max,
+        ] {
+            assert_eq!(decode(encode(&effort)), Some(effort));
+        }
+        assert_eq!(decode(UNSET), None);
+        assert_eq!(decode(u8::MAX), None);
     }
 
     #[test]
