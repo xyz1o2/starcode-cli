@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span};
 
 use crate::types::{AgentTaskStatus, ChatEntry, ChatEntryType};
 use crate::ui::state::ChatState;
+use crate::ui::themes::theme::Theme;
 
 /// 渲染多个 Agent 并发任务组
 ///
@@ -44,7 +45,7 @@ pub fn render_agent_group(
     }
 
     // ── 1. 头部汇总行 ──
-    let header = render_group_header(&agent_stats, area_width);
+    let header = render_group_header(&agent_stats, state.theme_manager.current(), area_width);
     blocks.push(header);
 
     // ── 2. 每个 Agent 两行进度 ──
@@ -61,8 +62,8 @@ pub fn render_agent_group(
 ///
 /// 格式取决于 Agent 状态：
 /// - 有后台/前台任务未结束：`● Running 2 of 3 agents…`
-/// - 全部进入终态：`✓ 3 agents finished` / `⚠ 3 agents finished (1 failed)`
-fn render_group_header(stats: &[AgentStat], _area_width: u16) -> Vec<Line<'static>> {
+/// - 全部进入终态：成功用完成标记，失败与停止分别汇总，停止不计作成功。
+fn render_group_header(stats: &[AgentStat], theme: &Theme, area_width: u16) -> Vec<Line<'static>> {
     let total = stats.len();
     let running = stats
         .iter()
@@ -83,37 +84,72 @@ fn render_group_header(stats: &[AgentStat], _area_width: u16) -> Vec<Line<'stati
         })
         .count();
 
-    let mut spans = Vec::new();
-    if running > 0 {
-        spans.push(Span::styled("● ", Style::default().fg(Color::Yellow)));
-        spans.push(Span::styled(
-            format!("Running {} of {} agents…", running, total),
-            crate::ui::themes::theme::muted_style(),
-        ));
+    let stopped = stats
+        .iter()
+        .filter(|s| matches!(s.status, AgentTaskStatus::Killed))
+        .count();
+    let (icon, color, label) = if running > 0 {
+        (
+            "●",
+            theme.warning,
+            crate::core::i18n::t1("agent.group.running")
+                .replace("{running}", &running.to_string())
+                .replace("{total}", &total.to_string()),
+        )
+    } else if failed > 0 {
+        (
+            "⚠",
+            theme.error,
+            crate::core::i18n::t1("agent.group.finished").replace("{total}", &total.to_string()),
+        )
+    } else if stopped == total {
+        (
+            "⊘",
+            theme.inactive,
+            crate::core::i18n::t1("agent.group.stopped_all").replace("{total}", &total.to_string()),
+        )
+    } else if stopped > 0 {
+        (
+            "⊘",
+            theme.inactive,
+            crate::core::i18n::t1("agent.group.finished").replace("{total}", &total.to_string()),
+        )
     } else {
-        let icon = if failed > 0 { "⚠" } else { "✓" };
-        let color = if failed > 0 {
-            Color::Yellow
-        } else {
-            Color::Green
-        };
-        spans.push(Span::styled(
-            format!("{} ", icon),
-            Style::default().fg(color),
-        ));
-        spans.push(Span::styled(
-            format!("{} agents finished", total),
-            crate::ui::themes::theme::muted_style(),
-        ));
+        (
+            "✓",
+            theme.success,
+            crate::core::i18n::t1("agent.group.completed").replace("{total}", &total.to_string()),
+        )
+    };
+    let mut spans = vec![
+        Span::styled(format!("{icon} "), Style::default().fg(color)),
+        Span::styled(label, Style::default().fg(theme.foreground)),
+    ];
+    if failed > 0 || (stopped > 0 && stopped < total) {
+        spans.push(Span::styled(" (", theme.subtle_style()));
         if failed > 0 {
             spans.push(Span::styled(
-                format!(" ({} failed)", failed),
-                Style::default().fg(Color::Red),
+                crate::core::i18n::t1("agent.group.failed").replace("{count}", &failed.to_string()),
+                Style::default().fg(theme.error),
             ));
         }
+        if stopped > 0 {
+            if failed > 0 {
+                spans.push(Span::styled(", ", theme.subtle_style()));
+            }
+            spans.push(Span::styled(
+                crate::core::i18n::t1("agent.group.stopped")
+                    .replace("{count}", &stopped.to_string()),
+                Style::default().fg(theme.inactive),
+            ));
+        }
+        spans.push(Span::styled(")", theme.subtle_style()));
     }
 
-    vec![Line::from(spans)]
+    crate::ui::utils::render::wrap_spans_to_width(spans, usize::from(area_width).max(1))
+        .into_iter()
+        .map(Line::from)
+        .collect()
 }
 
 /// 渲染空组头部（找不到 Agent 信息时）
@@ -406,9 +442,14 @@ mod tests {
 
     #[test]
     fn background_counts_as_running_and_keeps_usage_visible() {
+        crate::core::i18n::reset_for_tests();
         let background = AgentStat::from_info(&task("a", AgentTaskStatus::Background), 80);
         let finished = AgentStat::from_info(&task("b", AgentTaskStatus::Completed), 80);
-        let header = text(vec![render_group_header(&[background], 80)]);
+        let header = text(vec![render_group_header(
+            &[background],
+            &Theme::default_dark(),
+            80,
+        )]);
         assert!(header.contains("Running 1 of 1 agents"), "{header}");
 
         let state = ChatState::test_fixture();
@@ -424,33 +465,80 @@ mod tests {
 
     #[test]
     fn mixed_and_terminal_groups_report_correct_status() {
-        let statuses = [
-            AgentTaskStatus::Background,
-            AgentTaskStatus::Completed,
-            AgentTaskStatus::Failed,
-        ];
-        let stats: Vec<_> = statuses
-            .iter()
-            .enumerate()
-            .map(|(i, status)| AgentStat::from_info(&task(&i.to_string(), status.clone()), 80))
-            .collect();
-        let running = text(vec![render_group_header(&stats, 80)]);
-        assert!(running.contains("Running 1 of 3 agents"), "{running}");
+        use AgentTaskStatus::*;
+        crate::core::i18n::reset_for_tests();
+        for theme in [Theme::default_dark(), Theme::default_light()] {
+            let cases = [
+                (
+                    vec![Completed, Completed],
+                    "✓ 2 agents completed",
+                    theme.success,
+                ),
+                (vec![Killed, Killed], "⊘ 2 agents stopped", theme.inactive),
+                (
+                    vec![Killed, Completed],
+                    "⊘ 2 agents finished (1 stopped)",
+                    theme.inactive,
+                ),
+                (
+                    vec![Completed, Failed, Rejected],
+                    "⚠ 3 agents finished (2 failed)",
+                    theme.error,
+                ),
+                (
+                    vec![Failed, Killed, Completed],
+                    "⚠ 3 agents finished (1 failed, 1 stopped)",
+                    theme.error,
+                ),
+                (
+                    vec![Background, Failed, Killed],
+                    "● Running 1 of 3 agents… (1 failed, 1 stopped)",
+                    theme.warning,
+                ),
+            ];
+            for (statuses, expected, icon_color) in cases {
+                let stats: Vec<_> = statuses
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, status)| AgentStat::from_info(&task(&i.to_string(), status), 80))
+                    .collect();
+                let lines = render_group_header(&stats, &theme, 80);
+                assert_eq!(text(vec![lines.clone()]), expected);
+                assert_eq!(lines[0].spans[0].style.fg, Some(icon_color));
+                let wrapped = render_group_header(&stats, &theme, 1);
+                assert!(wrapped.iter().all(|line| line.width() <= 1));
+                let wrapped = render_group_header(&stats, &theme, 2);
+                assert!(wrapped.len() > 1);
+                assert!(wrapped.iter().all(|line| line.width() <= 2));
+                assert!(wrapped
+                    .iter()
+                    .flat_map(|line| &line.spans)
+                    .all(|span| { span.style.fg.is_some() }));
+            }
+        }
+    }
 
-        let statuses = [
-            AgentTaskStatus::Completed,
+    #[test]
+    fn mixed_group_header_wraps_with_status_colors() {
+        let state = ChatState::test_fixture();
+        let ids = ["running", "failed", "stopped"];
+        let mut state = state;
+        for (id, status) in ids.iter().zip([
+            AgentTaskStatus::Background,
             AgentTaskStatus::Failed,
-            AgentTaskStatus::Rejected,
-        ];
-        let stats: Vec<_> = statuses
-            .iter()
-            .enumerate()
-            .map(|(i, status)| AgentStat::from_info(&task(&i.to_string(), status.clone()), 80))
-            .collect();
-        let finished = text(vec![render_group_header(&stats, 80)]);
-        assert!(
-            finished.contains("3 agents finished (2 failed)"),
-            "{finished}"
+            AgentTaskStatus::Killed,
+        ]) {
+            state
+                .active_agent_tasks
+                .insert((*id).to_string(), task(id, status));
+        }
+        let entry = ChatEntry::agent_group(ids.into_iter().map(str::to_string).collect());
+        let blocks = render_agent_group(&state, &entry, 24);
+        crate::ui::test_support::assert_lines_render!(
+            "agent_group_mixed_header",
+            24,
+            3,
+            &blocks[0]
         );
     }
 }

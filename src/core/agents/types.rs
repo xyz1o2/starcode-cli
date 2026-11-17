@@ -347,6 +347,9 @@ pub struct AgentToolFullInput {
     /// 已结束子代理的上下文来源 ID。
     #[serde(default)]
     pub resume: Option<String>,
+    /// 子代理本次调用的思考力度；None 表示由调用方补全继承档位。
+    #[serde(default)]
+    pub effort: Option<crate::types::ThinkingEffort>,
     /// 显式请求后台异步执行
     pub background: Option<bool>,
     /// 最大轮次数

@@ -306,7 +306,7 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 
 **死代码确认**：`agent/system_prompt_merge.rs:120-166` 的 `load_claudemd_files` 会读 `.claude/CLAUDE.md`、`.claude/commands/*.md`、`~/.claude/CLAUDE.md`，但 `SystemPromptMerger` 全仓只有 `agent/mod.rs:46` 的 mod 声明，无任何构造或调用点。**看着能用，实际不走。** 修 `.claude/` 记忆兼容时不要基于它扩展，直接在 `project_context.rs` 上改。
 
-**workflows 确认**：`WorkflowManager`（`core/workflow/mod.rs:113`）除自身定义外无引用；`WorkflowTool` 在 `runtime_bootstrap/agent_runtime.rs:205` 注册，是活的。已删除的 `parity-orphaned.md` 曾把 Workflow 整体列为桩实现，**结论过宽**。
+**workflows 确认**：`WorkflowManager`（`core/workflow/mod.rs:113`）除自身定义外无引用；`WorkflowTool` 在 `core/config/runtime_bootstrap/agent_runtime.rs:236` 注册，是活的。已删除的 `parity-orphaned.md` 曾把 Workflow 整体列为桩实现，**结论过宽**。
 
 ---
 
@@ -333,7 +333,7 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | 项 | 落点 | 结果 |
 |---|---|---|
 | `default` 档把只读工具也弹确认 | `core/policy/policy_engine.rs`（新增 `mode_auto_allows`）、`types/mod.rs` | 5 个新测试锁住语义；连带修好 headless `-p` 下"每个工具都被拒" |
-| `acceptEdits` 被折叠成 `default` | `policy/types.rs`、`types/mod.rs`（两处枚举）、`settings_rules.rs`、`parity.rs` 的 `/mode` | Shift+Tab 循环扩为四档（2026-11-10 起五档）；显式 `ask` 规则仍压得住模式内置放行 |
+| `acceptEdits` 被折叠成 `default` | `core/policy/types.rs`、`types/mod.rs`（两处枚举）、`core/policy/settings_rules.rs`、`commands/parity.rs` 的 `/mode` | Shift+Tab 循环扩为四档（2026-11-10 起五档）；显式 `ask` 规则仍压得住模式内置放行 |
 | 确认等待不响应 abort（600s 静默） | `confirmation_bus/message_bus.rs`（新增 `request_cancellable`）、`agent/tool_executor.rs` | 3 个新测试；放弃等待时补发取消应答，把 UI 上的确认卡一并收掉 |
 | 确认等待 600s 后自己超时，把「没回答」写成「被拒绝」 | `confirmation_bus/message_bus.rs`（`await_tool_decision`，去掉 `request_cancellable`/`request`）、`agent/tool_executor.rs`（新增 `pass_gate`/`Gate`，删掉 `STAR_CONFIRM_TIMEOUT`）、`agent/tool_helpers.rs`（删掉按确认超时推导的兜底） | 等待只剩三种结局：用户拍板、用户中断、总线关闭；工具兜底时限改挂在 `invocation.execute()` 上，不再把用户思考的时间算进工具预算 |
 | 「允许本会话 / 总是允许」写了却不生效，下次照样弹 | `agent/tool_executor.rs::pass_gate`（删掉 `!requires_invocation_confirmation` 对授权读取的否决）、`core/tools/tools.rs`（该标志的含义改为"必须被咨询"） | 授权一定读得到；工具自己的逐次检查仍然有话语权，3 个新测试分别锁住"本会话不再弹"、"总是允许不再弹"、"工具自己的确认不被吞掉" |
@@ -505,7 +505,7 @@ AgentTool / 后台任务
 
 `docs/parity-*.md` 系列（生成于 2026-09-06，基于 HEAD `80c5eb3` + 泄漏源码）**不再作为对标依据**，原因：
 
-1. **结论已错**。已删除的 `parity-orphaned.md` 把 `PolicyEngine` 和 `ModelFallbackManager` 列为「从未构造」，但 `runtime_bootstrap.rs:40` 是 PolicyEngine 的唯一构造点，且经 `with_project_rules`（`policy_engine.rs:60`）→ `load_project_permissions` → `load_permission_rules`（`policy_engine.rs:91`）真实装载了磁盘规则。仓库 `CLAUDE.md` 当时也写着「`load_permission_rules` 零调用者」，同样已修正。
+1. **结论已错**。已删除的 `parity-orphaned.md` 把 `PolicyEngine` 和 `ModelFallbackManager` 列为「从未构造」，但 `core/config/runtime_bootstrap.rs:45` 是 PolicyEngine 的唯一构造点，且经 `with_project_rules`（`core/policy/policy_engine.rs:184`）→ `load_project_permissions` → `load_permission_rules`（`core/policy/policy_engine.rs:215`）真实装载了磁盘规则。仓库 `CLAUDE.md` 当时也写着「`load_permission_rules` 零调用者」，同样已修正。
 2. **对着上一代架构**。泄漏源码是 v2.1.88（2026-03），官方文档已到 v2.1.2xx，中间 dynamic workflows、auto mode 默认化、tool search 默认开启、35+ hook 事件、`.claude/rules/` 条件加载等全是新的。
 3. **完成度自评不可信**。标着 ✅ 100% 的项（如 Explore UI、Tool 渲染）是 UI 渲染格式，与 harness 架构对标是两件事。
 

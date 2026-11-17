@@ -1,4 +1,4 @@
-use crate::llm::{LlmClient, LlmError, LlmEvent, ModelInfo};
+use crate::llm::{LlmClient, LlmError, LlmEvent, LlmRequestOptions, ModelInfo};
 use crate::types::{StarMessage, StarResponse, StarTool};
 use async_trait::async_trait;
 use futures::Stream;
@@ -65,6 +65,32 @@ impl LlmClient for OpenAiCompatibleClient {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError>
     {
         self.inner.chat_stream_events(messages, tools).await
+    }
+
+    /// 调用级思考档位的非流式补全 —— 转发给内层 `RigAdapter`，
+    /// 档位（含显式 `Off`）原样带过去。
+    async fn chat_completion_with_options(
+        &self,
+        messages: Vec<StarMessage>,
+        tools: Option<Vec<StarTool>>,
+        options: &LlmRequestOptions,
+    ) -> Result<StarResponse, Box<dyn Error + Send + Sync>> {
+        self.inner
+            .chat_completion_with_options(messages, tools, options)
+            .await
+    }
+
+    /// 调用级思考档位的流式补全 —— 转发给内层 `RigAdapter`。
+    async fn chat_stream_events_with_options(
+        &self,
+        messages: Vec<StarMessage>,
+        tools: Option<Vec<StarTool>>,
+        options: &LlmRequestOptions,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError>
+    {
+        self.inner
+            .chat_stream_events_with_options(messages, tools, options)
+            .await
     }
 
     fn get_model_info(&self) -> Option<ModelInfo> {

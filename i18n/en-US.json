@@ -229,6 +229,12 @@
   "agent.failed": "Failed",
   "agent.rejected": "Rejected",
   "agent.killed": "Stopped",
+  "agent.group.running": "Running {running} of {total} agents…",
+  "agent.group.finished": "{total} agents finished",
+  "agent.group.completed": "{total} agents completed",
+  "agent.group.stopped_all": "{total} agents stopped",
+  "agent.group.failed": "{count} failed",
+  "agent.group.stopped": "{count} stopped",
   "tool.done": "Done",
 
   "cmd.mcp.list.empty": "No MCP servers configured.",

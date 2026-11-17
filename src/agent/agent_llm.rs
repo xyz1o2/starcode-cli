@@ -246,13 +246,22 @@ impl Agent {
 
         // 请求头尚未返回时同样响应取消，不能只在取得流后才监听中断。
         let request_abort = self.abort_token.clone();
+        let request_options = crate::llm::LlmRequestOptions {
+            thinking_effort: Some(self.thinking_effort.clone()),
+        };
         let stream_result = tokio::select! {
             biased;
             _ = async {
                 if let Some(token) = &request_abort { token.cancelled().await; }
                 else { std::future::pending::<()>().await; }
             } => return LlmResult::Error(AgentEvent::Done),
-            result = self.client.chat_stream(msgs, Some(turn_tool_selection.tools.clone()), None, None) => result,
+            result = self.client.chat_stream_with_options(
+                msgs,
+                Some(turn_tool_selection.tools.clone()),
+                None,
+                None,
+                &request_options,
+            ) => result,
         };
         let mut stream = match stream_result {
             Ok(stream) => stream,

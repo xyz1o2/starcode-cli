@@ -98,7 +98,7 @@ pub struct Agent {
         crate::agent::compact::reactive_compact::ReactiveCompactManager,
     /// 当前逻辑回合冻结的上下文策略。由顶层 `StarAgent` 在开始用户回合前安装。
     pub(crate) context_policy: crate::core::context_policy::ResolvedContextPolicy,
-    /// 当前逻辑回合冻结的思考力度。后续 LLM request-options 迁移会消费它。
+    /// 当前逻辑回合冻结的思考力度，并随每次 provider request 显式传递。
     pub(crate) thinking_effort: crate::types::ThinkingEffort,
     /// 模型回退管理器：跨 turn 存活，处理 STAR_FALLBACK_MODELS / STAR_FALLBACK_BASE_URLS
     /// 等列表式回退配置（单值 STAR_FALLBACK_MODEL / STAR_FALLBACK_BASE_URL 仍由
@@ -740,7 +740,9 @@ impl Agent {
         self.reactive_compact_manager =
             crate::agent::compact::reactive_compact::ReactiveCompactManager::new(compact_config);
         self.context_policy = context_policy;
-        self.thinking_effort = thinking_effort;
+        self.thinking_effort = thinking_effort.clone();
+        self.tool_executor
+            .set_agent_parent_thinking_effort(thinking_effort);
     }
 
     pub fn context_policy(&self) -> &crate::core::context_policy::ResolvedContextPolicy {

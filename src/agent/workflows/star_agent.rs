@@ -99,7 +99,8 @@ impl StarAgent {
 
         let (messages, pending_context) = self.session_context_snapshot();
         let request = crate::core::agents::SubAgentRequest::new(task)
-            .with_parent_context(messages, pending_context);
+            .with_parent_context(messages, pending_context)
+            .with_effort(self.turn_runtime_snapshot.thinking_effort.clone());
         let runner = Arc::new(crate::agent::subagent::runner::StarAgentRunner::new(
             self.client.clone(),
             config,
@@ -465,6 +466,13 @@ impl StarAgent {
 
     pub fn turn_runtime_snapshot(&self) -> TurnRuntimeSnapshot {
         self.turn_runtime_snapshot.clone()
+    }
+
+    pub(crate) fn set_turn_thinking_effort(&mut self, effort: crate::types::ThinkingEffort) {
+        self.inner.thinking_effort = effort.clone();
+        self.requested_runtime_settings.thinking_effort = effort.clone();
+        self.active_runtime_settings.thinking_effort = effort.clone();
+        self.turn_runtime_snapshot.thinking_effort = effort;
     }
 
     /// 解析并验证一个模型/provider 选择，然后同步长期 Agent 与外层 client。

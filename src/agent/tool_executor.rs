@@ -283,6 +283,7 @@ pub struct ToolExecutor {
     permission_manager: Arc<SessionPermissionManager>,
     agent_parent_context: RwLock<Arc<Vec<crate::types::StarMessage>>>,
     agent_parent_client: RwLock<StarClient>,
+    agent_parent_thinking_effort: RwLock<crate::types::ThinkingEffort>,
 }
 
 impl ToolExecutor {
@@ -315,6 +316,7 @@ impl ToolExecutor {
             permission_manager,
             query_rewrite_cache: RwLock::new(std::collections::HashMap::new()),
             agent_parent_context: RwLock::new(Arc::new(Vec::new())),
+            agent_parent_thinking_effort: RwLock::new(crate::types::ThinkingEffort::default()),
         }
     }
 
@@ -337,6 +339,12 @@ impl ToolExecutor {
         }
     }
 
+    pub(crate) fn set_agent_parent_thinking_effort(&self, effort: crate::types::ThinkingEffort) {
+        if let Ok(mut snapshot) = self.agent_parent_thinking_effort.write() {
+            *snapshot = effort;
+        }
+    }
+
     fn attach_agent_parent_context(
         &self,
         invocation: &mut dyn crate::core::tools::tools::ToolInvocation,
@@ -346,6 +354,9 @@ impl ToolExecutor {
         }
         if let Ok(client) = self.agent_parent_client.read() {
             invocation.set_agent_parent_client(&client);
+        }
+        if let Ok(effort) = self.agent_parent_thinking_effort.read() {
+            invocation.set_agent_parent_thinking_effort(effort.clone());
         }
     }
 

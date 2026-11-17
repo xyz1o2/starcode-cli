@@ -9,6 +9,7 @@
 pub mod agent;
 pub mod commands;
 pub mod core;
+pub mod entry;
 pub mod llm;
 pub mod runtime;
 pub mod tools;

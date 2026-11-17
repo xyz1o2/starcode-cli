@@ -14,6 +14,20 @@ use std::sync::Arc;
 /// 同步 Agent 未显式指定 max_rounds 时的默认轮次上限
 const DEFAULT_SYNC_MAX_ROUNDS: u32 = 50;
 
+fn deserialize_effort<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::types::ThinkingEffort>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<String>::deserialize(deserializer)? {
+        Some(value) => crate::types::ThinkingEffort::parse_skill_effort(&value)
+            .map(Some)
+            .ok_or_else(|| serde::de::Error::custom("invalid thinking effort")),
+        None => Ok(None),
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AgentToolParams {
     pub description: String,
@@ -30,6 +44,9 @@ pub struct AgentToolParams {
     pub model: Option<String>,
     #[serde(default)]
     pub resume: Option<String>,
+    /// 子代理本次调用的思考力度；省略时继承调用 Agent 的冻结档位。
+    #[serde(default, deserialize_with = "deserialize_effort")]
+    pub effort: Option<crate::types::ThinkingEffort>,
     /// **调用方**所处的递归深度 —— 本子代理落在 `depth + 1`。
     ///
     /// 由执行器（`ToolExecutor::normalize_agent_args`）覆盖写入，不在参数
@@ -50,6 +67,7 @@ impl From<AgentToolParams> for AgentToolFullInput {
             isolation: None,
             model: p.model,
             resume: p.resume,
+            effort: p.effort,
             background: p.background,
             max_rounds: p.max_rounds,
             parent_depth: p.parent_depth,
@@ -134,6 +152,11 @@ impl BaseDeclarativeTool for AgentTool {
                     "type": "string",
                     "description": "Continue from an ended agent ID in this project using its last saved native context. A new task ID is created; current permissions, provider and working directory apply. Missing snapshots are errors. Cannot combine with a different subagent type or fork."
                 },
+                "effort": {
+                    "type": "string",
+                    "enum": ["off", "low", "medium", "high", "xhigh", "max"],
+                    "description": "Thinking effort for this agent call. Omit to inherit the caller's current turn setting."
+                },
                 "max_rounds": {
                     "type": "integer",
                     "description": "Maximum conversation turns for this agent. Default: 50."
@@ -160,6 +183,7 @@ impl BaseDeclarativeTool for AgentTool {
             runner: self.runner.clone(),
             async_runner: self.async_runner.clone(),
             parent_context: Arc::new(Vec::new()),
+            parent_thinking_effort: None,
         }))
     }
 }
@@ -169,9 +193,16 @@ pub struct AgentToolInvocation {
     runner: SharedSubAgentRunner,
     async_runner: Option<Arc<AsyncSubagentRunner>>,
     parent_context: Arc<Vec<crate::types::StarMessage>>,
+    parent_thinking_effort: Option<crate::types::ThinkingEffort>,
 }
 
 impl AgentToolInvocation {
+    fn inherit_parent_effort(&self, input: &mut AgentToolFullInput) {
+        if input.effort.is_none() {
+            input.effort = self.parent_thinking_effort.clone();
+        }
+    }
+
     fn fork_request(&self, request: SubAgentRequest, name: &str) -> SubAgentRequest {
         request
             .with_parent_context(self.parent_context.as_ref().clone(), Vec::new())
@@ -190,6 +221,12 @@ impl ToolInvocation for AgentToolInvocation {
 
     fn set_agent_parent_context(&mut self, messages: Arc<Vec<crate::types::StarMessage>>) {
         self.parent_context = messages;
+    }
+
+    fn set_agent_parent_thinking_effort(&mut self, effort: crate::types::ThinkingEffort) {
+        if self.full_input.effort.is_none() {
+            self.parent_thinking_effort = Some(effort);
+        }
     }
 
     fn get_description(&self) -> String {
@@ -215,6 +252,7 @@ impl ToolInvocation for AgentToolInvocation {
         >,
     > {
         let mut input = self.full_input.clone();
+        self.inherit_parent_effort(&mut input);
         let runner = self.runner.clone();
         let async_runner = self.async_runner.clone();
 
@@ -479,6 +517,21 @@ mod tests {
         }))
         .unwrap();
         let mut input: AgentToolFullInput = params.into();
+        let mut invocation = AgentToolInvocation {
+            full_input: input.clone(),
+            runner: crate::agent::subagent::runner::StarAgentRunner::shared(
+                crate::llm::client::StarClient::new("", None, None, None, None),
+                Arc::new(crate::core::config::Config::new(
+                    crate::core::config::ConfigParameters::default(),
+                )),
+            ),
+            async_runner: None,
+            parent_context: Arc::new(Vec::new()),
+            parent_thinking_effort: None,
+        };
+        invocation.set_agent_parent_thinking_effort(crate::types::ThinkingEffort::High);
+        invocation.inherit_parent_effort(&mut input);
+        assert_eq!(input.effort, Some(crate::types::ThinkingEffort::High));
         for background in [false, true] {
             input.background = Some(background);
             let request = match route_agent_call(&input, false, false) {
@@ -487,8 +540,19 @@ mod tests {
                 other => panic!("unexpected route: {other:?}"),
             };
             assert_eq!(request.model.as_deref(), Some("child-model"));
+            assert_eq!(request.effort, Some(crate::types::ThinkingEffort::High));
             assert_eq!(request.resume.as_deref(), Some("agent-old"));
         }
+        let explicit = AgentToolFullInput {
+            effort: Some(crate::types::ThinkingEffort::Off),
+            background: Some(false),
+            ..input
+        };
+        let request = match route_agent_call(&explicit, false, false) {
+            AgentRoute::SyncNamedAgent { request, .. } => request,
+            other => panic!("expected synchronous route, got {other:?}"),
+        };
+        assert_eq!(request.effort, Some(crate::types::ThinkingEffort::Off));
     }
 
     #[test]
@@ -509,6 +573,7 @@ mod tests {
             runner,
             async_runner: None,
             parent_context: Arc::new(Vec::new()),
+            parent_thinking_effort: None,
         };
         let mut assistant = crate::types::StarMessage::assistant("x".repeat(1200));
         assistant.tool_calls = Some(vec![crate::types::StarToolCall {
@@ -525,12 +590,33 @@ mod tests {
             crate::types::StarMessage::tool("read-auth", "auth source"),
         ];
         invocation.set_agent_parent_context(Arc::new(history.clone()));
+        invocation.set_agent_parent_thinking_effort(crate::types::ThinkingEffort::High);
+        let mut inherited = invocation.full_input.clone();
+        invocation.inherit_parent_effort(&mut inherited);
+        assert_eq!(inherited.effort, Some(crate::types::ThinkingEffort::High));
+        let inherited_request = match route_agent_call(&inherited, false, false) {
+            AgentRoute::SyncNamedAgent { request, .. } => request,
+            other => panic!("expected synchronous route, got {other:?}"),
+        };
+        assert_eq!(
+            inherited_request.effort,
+            Some(crate::types::ThinkingEffort::High)
+        );
+
+        let mut explicit_off = invocation.full_input.clone();
+        explicit_off.effort = Some(crate::types::ThinkingEffort::Off);
+        invocation.inherit_parent_effort(&mut explicit_off);
+        assert_eq!(explicit_off.effort, Some(crate::types::ThinkingEffort::Off));
+
         let request = invocation.fork_request(
-            SubAgentRequest::new("check callers").with_model("fork-model"),
+            SubAgentRequest::new("check callers")
+                .with_model("fork-model")
+                .with_effort(crate::types::ThinkingEffort::High),
             "fork-auth",
         );
         assert_eq!(request.model.as_deref(), Some("fork-model"));
         assert_eq!(request.prompt, "check callers");
+        assert_eq!(request.effort, Some(crate::types::ThinkingEffort::High));
         assert_eq!(request.identity.as_deref(), Some("fork-auth"));
         assert_eq!(
             serde_json::to_value(&request.parent_messages).unwrap(),

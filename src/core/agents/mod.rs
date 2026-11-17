@@ -9,6 +9,8 @@ pub struct SubAgentRequest {
     pub max_rounds: Option<u32>,
     /// 单次调用的模型覆盖；None 或 inherit 继承父级模型及 provider。
     pub model: Option<String>,
+    /// 本次子代理调用使用的思考力度，按逻辑回合冻结。
+    pub effort: Option<crate::types::ThinkingEffort>,
     /// 恢复当前项目中已结束子代理的有效原生上下文；本次执行使用新任务身份。
     pub resume: Option<String>,
     /// 子代理类型：共享流式循环，Explorer 选择专用搜索提示与工具白名单。
@@ -48,6 +50,7 @@ impl SubAgentRequest {
             prompt: prompt.into(),
             max_rounds: None,
             model: None,
+            effort: None,
             resume: None,
             subagent_type: SubagentType::GeneralPurpose,
             parent_messages: Vec::new(),
@@ -59,6 +62,11 @@ impl SubAgentRequest {
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
+        self
+    }
+
+    pub fn with_effort(mut self, effort: crate::types::ThinkingEffort) -> Self {
+        self.effort = Some(effort);
         self
     }
 

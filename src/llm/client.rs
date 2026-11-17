@@ -1,4 +1,4 @@
-use crate::llm::{create_client, LlmClient, LlmConfig, LlmEvent, LlmProvider};
+use crate::llm::{create_client, LlmClient, LlmConfig, LlmEvent, LlmProvider, LlmRequestOptions};
 use crate::llm::{
     ANTHROPIC_API_URL_PATTERN, ANTHROPIC_API_VERSION, API_KEY_NOT_SET, API_KEY_SOURCE_CONFIGURED,
     API_KEY_SOURCE_ENV_STAR, API_KEY_SOURCE_PROVIDER_ENV_PREFIX, API_KEY_SOURCE_UNKNOWN,
@@ -500,6 +500,19 @@ impl StarClient {
         }
     }
 
+    /// 只在测试里用：换掉内层 LLM 客户端。
+    ///
+    /// 存在的理由：流式与非流式 fallback 的一致性必须在**受控**的替身上
+    /// 验证 —— 真实 provider 的 `chat_stream_events` 只在建立流失败时才
+    /// 报错，而 rig 的流式路径只要连上就返回 Ok，于是"fallback 被触发"
+    /// 这件事在真实链路上根本不可复现。替身让我们能精确地让流式失败、
+    /// 非流式成功，并记录两次各自收到的 options。
+    #[cfg(test)]
+    pub(crate) fn with_inner_for_test(mut self, inner: Box<dyn crate::llm::LlmClient>) -> Self {
+        self.inner = Arc::new(inner);
+        self
+    }
+
     /// Check if the model supports thinking/reasoning.
     ///
     /// 优先级：运行时探测 > `/models` 声明 > 模型名启发式。声明值来自
@@ -865,13 +878,41 @@ impl StarClient {
         Ok(())
     }
 
+    /// 旧入口：开始时把思考档位解析一次并冻结，整条链用同一份。
+    ///
+    /// 解析只发生在这里一次 —— 下游（provider 请求构造）拿到的是冻结后的
+    /// 值，不会因为中途有人改了 `/effort` 而与这次回答实际发出的档位不一致。
     pub async fn chat(
+        &self,
+        messages: Vec<StarMessage>,
+        tools: Option<Vec<StarTool>>,
+        model: Option<String>,
+        _search_options: Option<()>,
+    ) -> Result<StarResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let options = LlmRequestOptions {
+            thinking_effort: Some(crate::llm::thinking::current_effort()),
+        };
+        self.chat_with_options(messages, tools, model, _search_options, &options)
+            .await
+    }
+
+    /// 带调用级思考档位的非流式补全。
+    ///
+    /// `options.thinking_effort` 为 `Some` 时原样使用（含显式 `Off`）；
+    /// 为 `None` 时在**方法开头**解析一次全局档位并冻结。冻结后的档位一路
+    /// 传到 provider 请求构造层，中途不会再读全局状态。
+    pub async fn chat_with_options(
         &self,
         mut messages: Vec<StarMessage>,
         tools: Option<Vec<StarTool>>,
         model: Option<String>,
         _search_options: Option<()>,
+        options: &LlmRequestOptions,
     ) -> Result<StarResponse, Box<dyn std::error::Error + Send + Sync>> {
+        // 冻结：这一次回答只有一个档位。
+        let frozen = LlmRequestOptions {
+            thinking_effort: Some(options.resolve_thinking_effort()),
+        };
         self.prepare_image_messages(&mut messages, model.as_deref().unwrap_or(&self.model))
             .await?;
         // `model` 覆盖：**这次调用用别的模型**。
@@ -930,7 +971,10 @@ impl StarClient {
             return Err(missing_api_key_error(self.provider_env_id).into());
         }
 
-        match inner.chat_completion(messages, tools).await {
+        match inner
+            .chat_completion_with_options(messages, tools, &frozen)
+            .await
+        {
             Ok(resp) => {
                 // Runtime detection: check if response contains reasoning_content
                 let has_reasoning = resp
@@ -963,9 +1007,11 @@ impl StarClient {
         }
     }
 
+    /// 旧入口：开始时把思考档位解析一次并冻结，流式请求与它的非流式
+    /// fallback 共用这一份。
     pub async fn chat_stream(
         &self,
-        mut messages: Vec<StarMessage>,
+        messages: Vec<StarMessage>,
         tools: Option<Vec<StarTool>>,
         _model: Option<String>,
         _search_options: Option<()>,
@@ -980,6 +1026,40 @@ impl StarClient {
         >,
         Box<dyn std::error::Error + Send + Sync>,
     > {
+        let options = LlmRequestOptions {
+            thinking_effort: Some(crate::llm::thinking::current_effort()),
+        };
+        self.chat_stream_with_options(messages, tools, _model, _search_options, &options)
+            .await
+    }
+
+    /// 带调用级思考档位的流式补全。
+    ///
+    /// 档位在方法开头冻结一次，**流式请求与它的非流式 fallback 用同一份**
+    /// —— 否则一次回答会发出两个不同档位的请求（用户中途改了 `/effort`
+    /// 时甚至会变成"降级那次思考更深"）。
+    pub async fn chat_stream_with_options(
+        &self,
+        mut messages: Vec<StarMessage>,
+        tools: Option<Vec<StarTool>>,
+        _model: Option<String>,
+        _search_options: Option<()>,
+        options: &LlmRequestOptions,
+    ) -> Result<
+        Pin<
+            Box<
+                dyn Stream<
+                        Item = Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>>,
+                    > + Send
+                    + Sync,
+            >,
+        >,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        // 冻结：这一次回答只有一个档位，流式与 fallback 共用。
+        let frozen = LlmRequestOptions {
+            thinking_effort: Some(options.resolve_thinking_effort()),
+        };
         self.prepare_image_messages(&mut messages, &self.model)
             .await?;
         let pipeline = super::message_pipeline::pipeline_for(
@@ -1028,7 +1108,10 @@ impl StarClient {
         let fallback_messages = messages.clone();
         let fallback_tools = tools.clone();
 
-        let event_stream = match inner_client.chat_stream_events(messages, tools).await {
+        let event_stream = match inner_client
+            .chat_stream_events_with_options(messages, tools, &frozen)
+            .await
+        {
             Ok(s) => {
                 if verbose_debug_logging {
                     crate::utils::logging::append_debug_log_line(
@@ -1083,7 +1166,7 @@ impl StarClient {
                         &err_str.chars().take(200).collect::<String>(),
                     ));
                     match inner_client
-                        .chat_completion(fallback_messages, fallback_tools)
+                        .chat_completion_with_options(fallback_messages, fallback_tools, &frozen)
                         .await
                     {
                         Ok(response) => {
@@ -1425,8 +1508,274 @@ mod tests {
     use super::{infer_provider, parse_model_context_window, provider_env_id, StarClient};
     use crate::core::config::providers::api_key_env_candidates;
     use crate::core::config::providers::OPENCODE_ZEN_BASE_URL as ZEN_BASE_URL;
-    use crate::types::{StarChoice, StarMessage, StarResponse, StarUsage};
+    use crate::llm::{LlmClient, LlmError, LlmEvent, LlmRequestOptions};
+    use crate::types::{
+        StarChoice, StarMessage, StarResponse, StarTool, StarUsage, ThinkingEffort,
+    };
+    use futures::Stream;
     use serde_json::json;
+    use std::pin::Pin;
+
+    // ── 受控替身：记录流式与非流式各自收到的 options ──────────────
+
+    /// 记录每次调用收到的 `LlmRequestOptions` 的替身。
+    ///
+    /// 流式**故意失败**（非终止类错误），非流式**故意成功** —— 这样
+    /// `StarClient::chat_stream` 的非流式 fallback 分支一定会被走到，
+    /// 我们就能断言两次调用拿到的是**同一份** options。
+    ///
+    /// 为什么不用真实 provider：`RigAdapter::chat_stream_events` 只要把流
+    /// 建起来就返回 Ok，fallback 分支在真实链路上几乎不可复现。所以这条
+    /// 测试**不声称**"真实 provider 的 SSE 错误会触发入口 fallback"，
+    /// 它证明的是入口的 fallback 路径**传递**同一份 options。
+    #[derive(Debug)]
+    struct RecordingClient {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<Option<ThinkingEffort>>>>,
+        /// 流式调用发生时顺手改掉全局会话档位 —— 模拟"用户在这两次请求
+        /// 之间按了 `/effort`"。用来证明入口冻结的是**这一次回答**的档位，
+        /// 而不是每次请求各读一次全局。
+        flip_global_effort_on_stream: bool,
+    }
+
+    impl RecordingClient {
+        fn new() -> (
+            Self,
+            std::sync::Arc<std::sync::Mutex<Vec<Option<ThinkingEffort>>>>,
+        ) {
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    seen: seen.clone(),
+                    flip_global_effort_on_stream: false,
+                },
+                seen,
+            )
+        }
+
+        fn flipping_global_effort_on_stream(
+            self,
+        ) -> (
+            Self,
+            std::sync::Arc<std::sync::Mutex<Vec<Option<ThinkingEffort>>>>,
+        ) {
+            let seen = self.seen.clone();
+            (
+                Self {
+                    flip_global_effort_on_stream: true,
+                    ..self
+                },
+                seen,
+            )
+        }
+
+        fn record(&self, options: &LlmRequestOptions) {
+            self.seen
+                .lock()
+                .expect("记录锁")
+                .push(options.thinking_effort.clone());
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for RecordingClient {
+        async fn chat_completion(
+            &self,
+            _messages: Vec<StarMessage>,
+            _tools: Option<Vec<StarTool>>,
+        ) -> Result<StarResponse, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(StarResponse {
+                choices: vec![StarChoice {
+                    message: StarMessage::assistant("fallback answer"),
+                    finish_reason: "stop".to_string(),
+                }],
+                usage: None,
+            })
+        }
+
+        async fn chat_completion_with_options(
+            &self,
+            messages: Vec<StarMessage>,
+            tools: Option<Vec<StarTool>>,
+            options: &LlmRequestOptions,
+        ) -> Result<StarResponse, Box<dyn std::error::Error + Send + Sync>> {
+            self.record(options);
+            self.chat_completion(messages, tools).await
+        }
+
+        async fn chat_stream_events(
+            &self,
+            _messages: Vec<StarMessage>,
+            _tools: Option<Vec<StarTool>>,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError>
+        {
+            Err(LlmError::ProviderError(
+                "connection reset by peer".to_string(),
+            ))
+        }
+
+        async fn chat_stream_events_with_options(
+            &self,
+            _messages: Vec<StarMessage>,
+            _tools: Option<Vec<StarTool>>,
+            options: &LlmRequestOptions,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError>
+        {
+            self.record(options);
+            if self.flip_global_effort_on_stream {
+                // 模拟"用户在流式请求与 fallback 之间改了 /effort"。
+                crate::llm::thinking::set_session_effort(&ThinkingEffort::Low);
+            }
+            // 网络类错误（非终止类）→ 入口会走非流式 fallback。
+            Err(LlmError::NetworkError(
+                "connection reset by peer".to_string(),
+            ))
+        }
+
+        fn get_model_info(&self) -> Option<crate::llm::ModelInfo> {
+            None
+        }
+    }
+
+    /// fallback 的非流式请求必须拿到与流式请求**同一份** options。
+    ///
+    /// 回归的形状：入口曾在流式失败后用"重新解析的全局档位"发非流式
+    /// fallback，于是同一次回答的两个请求带不同档位 —— 用户看到的思考
+    /// 深度与实际请求不一致。
+    #[tokio::test]
+    async fn stream_and_its_non_streaming_fallback_share_the_same_options() {
+        use futures::StreamExt;
+
+        let (recorder, seen) = RecordingClient::new();
+        let client = StarClient::new(
+            "test-key",
+            Some("gpt-4o".to_string()),
+            Some("https://example.invalid/v1".to_string()),
+            Some(true),
+            None,
+        )
+        .with_inner_for_test(Box::new(recorder));
+
+        let options = LlmRequestOptions {
+            thinking_effort: Some(ThinkingEffort::High),
+        };
+        let mut stream = client
+            .chat_stream_with_options(vec![StarMessage::user("hi")], None, None, None, &options)
+            .await
+            .expect("流式入口应返回降级流而不是错误");
+
+        // 把降级流读完，确保 fallback 分支真的跑完了。
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.expect("降级流不应有错误事件"));
+        }
+        assert!(
+            !events.is_empty(),
+            "降级流应至少产出一条事件（fallback 生效）"
+        );
+
+        let recorded = seen.lock().expect("记录锁").clone();
+        assert_eq!(
+            recorded.len(),
+            2,
+            "应当恰好记录两次调用（流式 + 非流式 fallback）: {recorded:?}"
+        );
+        assert_eq!(
+            recorded[0], recorded[1],
+            "流式与 fallback 必须带同一份 options: {recorded:?}"
+        );
+        assert_eq!(
+            recorded[0],
+            Some(ThinkingEffort::High),
+            "options 必须原样传到 provider 层: {recorded:?}"
+        );
+    }
+
+    /// 显式 `Off` 不能被"没指定"吃掉：入口冻结后必须是 `Some(Off)`，
+    /// 且流式与 fallback 都是它。
+    #[tokio::test]
+    async fn explicit_off_survives_to_the_provider_layer() {
+        use futures::StreamExt;
+
+        let (recorder, seen) = RecordingClient::new();
+        let client = StarClient::new(
+            "test-key",
+            Some("gpt-4o".to_string()),
+            Some("https://example.invalid/v1".to_string()),
+            Some(true),
+            None,
+        )
+        .with_inner_for_test(Box::new(recorder));
+
+        let options = LlmRequestOptions {
+            thinking_effort: Some(ThinkingEffort::Off),
+        };
+        let mut stream = client
+            .chat_stream_with_options(vec![StarMessage::user("hi")], None, None, None, &options)
+            .await
+            .expect("流式入口应返回降级流");
+        while let Some(event) = stream.next().await {
+            let _ = event;
+        }
+
+        let recorded = seen.lock().expect("记录锁").clone();
+        assert_eq!(recorded.len(), 2, "应当记录两次调用: {recorded:?}");
+        for effort in &recorded {
+            assert_eq!(
+                *effort,
+                Some(ThinkingEffort::Off),
+                "显式 Off 必须原样传到 provider 层，不能退化成缺省: {recorded:?}"
+            );
+        }
+    }
+
+    /// 没指定档位时，入口冻结一次并让两次调用共用它。
+    ///
+    /// 替身在**流式调用时**把全局会话档位从 High 改成 Low —— 如果 fallback
+    /// 那一侧是"重新读全局"而不是"复用入口冻结的那份"，它就会拿到 Low，
+    /// 断言即失败。这正是本次要防的回归形状。
+    #[tokio::test]
+    async fn unspecified_effort_is_frozen_once_for_the_whole_turn() {
+        use futures::StreamExt;
+
+        let (recorder, seen) = RecordingClient::new();
+        let (recorder, seen) = recorder.flipping_global_effort_on_stream();
+        let client = StarClient::new(
+            "test-key",
+            Some("gpt-4o".to_string()),
+            Some("https://example.invalid/v1".to_string()),
+            Some(true),
+            None,
+        )
+        .with_inner_for_test(Box::new(recorder));
+
+        // 全局档位：High。
+        crate::llm::thinking::set_session_effort(&ThinkingEffort::High);
+
+        let mut stream = client
+            .chat_stream_with_options(
+                vec![StarMessage::user("hi")],
+                None,
+                None,
+                None,
+                &LlmRequestOptions::default(),
+            )
+            .await
+            .expect("流式入口应返回降级流");
+        while let Some(event) = stream.next().await {
+            let _ = event;
+        }
+        crate::llm::thinking::set_session_effort(&ThinkingEffort::Off);
+
+        let recorded = seen.lock().expect("记录锁").clone();
+        assert_eq!(recorded.len(), 2, "应当记录两次调用: {recorded:?}");
+        for effort in &recorded {
+            assert_eq!(
+                *effort,
+                Some(ThinkingEffort::High),
+                "本次回答的档位应在开始时冻结（中途改全局不能影响它）: {recorded:?}"
+            );
+        }
+    }
 
     #[test]
     fn parses_supported_model_context_window_fields() {

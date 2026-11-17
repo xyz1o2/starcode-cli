@@ -106,6 +106,9 @@ pub trait ToolInvocation: Send + Sync {
     /// 从真实调用方继承当前客户端；共享注册表中的启动快照可能已经过时。
     fn set_agent_parent_client(&mut self, _client: &crate::llm::client::StarClient) {}
 
+    /// 从真实调用方继承当前逻辑回合冻结的思考力度。
+    fn set_agent_parent_thinking_effort(&mut self, _effort: crate::types::ThinkingEffort) {}
+
     /// 从真实调用方继承消息 hub 中的发件身份。
     fn set_agent_parent_identity(&mut self, _identity: Option<String>) {}
 

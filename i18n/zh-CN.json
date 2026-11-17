@@ -229,6 +229,12 @@
   "agent.failed": "失败",
   "agent.rejected": "已拒绝",
   "agent.killed": "已停止",
+  "agent.group.running": "{total} 个 agent 中有 {running} 个正在运行…",
+  "agent.group.finished": "{total} 个 agent 已结束",
+  "agent.group.completed": "{total} 个 agent 已完成",
+  "agent.group.stopped_all": "{total} 个 agent 均已停止",
+  "agent.group.failed": "{count} 个失败",
+  "agent.group.stopped": "{count} 个已停止",
   "tool.done": "完成",
 
   "cmd.mcp.list.empty": "未配置 MCP 服务器。",

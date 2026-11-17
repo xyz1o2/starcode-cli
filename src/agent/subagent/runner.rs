@@ -123,7 +123,7 @@ impl StarAgentRunner {
             .map(str::trim)
             .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("inherit"))
             .unwrap_or(&self.client.model);
-        crate::agent::StarAgent::new_with_provider(
+        let mut child = crate::agent::StarAgent::new_with_provider(
             &self.client.api_key,
             Some(model.to_owned()),
             Some(self.client.base_url.clone()),
@@ -138,7 +138,13 @@ impl StarAgentRunner {
                 SubAgentErrorKind::InitializationFailed,
                 format!("Failed to create SubAgent: {error}"),
             )
-        })
+        })?;
+        let effort = request
+            .effort
+            .clone()
+            .unwrap_or_else(|| child.turn_runtime_snapshot().thinking_effort);
+        child.set_turn_thinking_effort(effort);
+        Ok(child)
     }
 
     /// 替换本次派生所继承的客户端，保留配置和消息 hub。

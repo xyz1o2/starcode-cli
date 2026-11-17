@@ -314,6 +314,7 @@ fn build_request(
     messages: &[StarMessage],
     tools: &Option<Vec<StarTool>>,
     profile: crate::llm::thinking::ProviderProfile<'_>,
+    effort: &crate::types::ThinkingEffort,
 ) -> CompletionRequest {
     let mut extra_params = serde_json::Map::new();
 
@@ -338,8 +339,11 @@ fn build_request(
     // `AgentRequest::SetThinkingEffort` 存进 `llm::thinking` 的会话状态，
     // 这里按 provider 方言翻成它认识的那**一个**字段：`additional_params`
     // 是 deep-merge 到顶层的，几种字段一起发会让严格的服务端 400。
-    let effort = crate::llm::thinking::current_effort();
-    let thinking = crate::llm::thinking::thinking_params(&profile, &effort);
+    //
+    // 档位由**调用方**传进来（调用级冻结），本函数不再读全局状态：
+    // 全局读法在同一次回答里可能给出两个不同的档位（流式请求与非流式
+    // fallback 之间用户改了 `/effort`），用户看到的思考深度就和实际请求不一致了。
+    let thinking = crate::llm::thinking::thinking_params(&profile, effort);
     if !thinking.is_empty() {
         crate::utils::logging::append_debug_log_line(&format!(
             "[LLM] thinking effort={} dialect={:?} params={}",
@@ -912,7 +916,27 @@ impl LlmClient for RigAdapter {
         messages: Vec<StarMessage>,
         tools: Option<Vec<StarTool>>,
     ) -> Result<StarResponse, Box<dyn Error + Send + Sync>> {
-        let request = build_request(&messages, &tools, self.thinking_profile());
+        let request = build_request(
+            &messages,
+            &tools,
+            self.thinking_profile(),
+            &crate::llm::thinking::current_effort(),
+        );
+        let result = self.do_completion(request).await?;
+        Ok(build_star_response(result))
+    }
+
+    /// 调用级思考档位的非流式补全。
+    ///
+    /// 档位来自 `options`（显式指定优先），没指定才在**此刻**解析一次全局档位。
+    async fn chat_completion_with_options(
+        &self,
+        messages: Vec<StarMessage>,
+        tools: Option<Vec<StarTool>>,
+        options: &crate::llm::LlmRequestOptions,
+    ) -> Result<StarResponse, Box<dyn Error + Send + Sync>> {
+        let effort = options.resolve_thinking_effort();
+        let request = build_request(&messages, &tools, self.thinking_profile(), &effort);
         let result = self.do_completion(request).await?;
         Ok(build_star_response(result))
     }
@@ -923,7 +947,26 @@ impl LlmClient for RigAdapter {
         tools: Option<Vec<StarTool>>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError>
     {
-        let request = build_request(&messages, &tools, self.thinking_profile());
+        let request = build_request(
+            &messages,
+            &tools,
+            self.thinking_profile(),
+            &crate::llm::thinking::current_effort(),
+        );
+        self.do_stream(request).await
+    }
+
+    /// 调用级思考档位的流式补全。与 [`Self::chat_completion_with_options`]
+    /// 用同一套解析规则，保证同一次回答的流式与非流式两条路带同一个档位。
+    async fn chat_stream_events_with_options(
+        &self,
+        messages: Vec<StarMessage>,
+        tools: Option<Vec<StarTool>>,
+        options: &crate::llm::LlmRequestOptions,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError>
+    {
+        let effort = options.resolve_thinking_effort();
+        let request = build_request(&messages, &tools, self.thinking_profile(), &effort);
         self.do_stream(request).await
     }
 
@@ -1213,5 +1256,285 @@ mod tests {
             last_message_marked,
             "最后一条消息必须带移动断点（0.46 的 manual 模式补打）"
         );
+    }
+
+    // ── 调用级 effort：请求体真的带上了吗 ──────────────────────────
+
+    /// 一个 OpenAI 兼容端点的画像。方言由模型名决定
+    /// （`gpt-5` 系 → `reasoning_effort`），不需要真的连服务器。
+    fn compatible_profile<'a>(model: &'a str) -> crate::llm::thinking::ProviderProfile<'a> {
+        crate::llm::thinking::ProviderProfile {
+            kind: crate::llm::thinking::ProviderKind::Compatible,
+            model,
+            base_url: Some("http://127.0.0.1:1/v1"),
+            provider_name: Some("local-test"),
+            provider_id: None,
+        }
+    }
+
+    /// 把 `build_request` 的结果编成 rig 的请求体 JSON。
+    fn encoded_body(
+        messages: &[StarMessage],
+        effort: &crate::types::ThinkingEffort,
+    ) -> serde_json::Value {
+        let profile = compatible_profile("gpt-5-test");
+        let request = build_request(messages, &None, profile, effort);
+        let chat = openai::OpenAIConfig::new("test-key").chat("gpt-5-test");
+        let encoded = chat
+            .encode(request, rig_core::wire::Mode::Unary)
+            .expect("openai chat wire should encode");
+        match encoded.request.body() {
+            rig_core::wire::Body::Bytes(bytes) => serde_json::from_slice(bytes).unwrap(),
+            other => panic!("expected JSON bytes, got {other:?}"),
+        }
+    }
+
+    /// 显式档位必须真的落到请求体顶层（`additional_params` 是 raw 层，
+    /// deep_merge 到顶层）。
+    #[test]
+    fn explicit_effort_reaches_the_encoded_request_body() {
+        let messages = vec![StarMessage::user("hi")];
+        let high = encoded_body(&messages, &crate::types::ThinkingEffort::High);
+        assert_eq!(
+            high["reasoning_effort"], "high",
+            "显式 high 必须落在请求体顶层: {high}"
+        );
+
+        let low = encoded_body(&messages, &crate::types::ThinkingEffort::Low);
+        assert_eq!(
+            low["reasoning_effort"], "low",
+            "显式 low 必须落在请求体顶层: {low}"
+        );
+    }
+
+    /// 显式 `Off` 与"没指定"必须区分开。
+    ///
+    /// `Off` 在 OpenAI 方言下不发字段（= 用服务端默认，见 `thinking.rs` 的
+    /// 「`Off` 的语义」），所以它与"没指定"的差别体现在**解析**上，
+    /// 不是请求体上：`Off` 绝不能被当成"未指定"再回落到全局档位。
+    #[test]
+    fn explicit_off_is_not_the_same_as_unspecified() {
+        use crate::llm::LlmRequestOptions;
+        use crate::types::ThinkingEffort;
+
+        let explicit = LlmRequestOptions {
+            thinking_effort: Some(ThinkingEffort::Off),
+        };
+        assert_eq!(explicit.resolve_thinking_effort(), ThinkingEffort::Off);
+
+        // 全局档位是 High 时，"没指定"解析成 High，显式 Off 仍是 Off。
+        crate::llm::thinking::set_session_effort(&ThinkingEffort::High);
+        let unspecified = LlmRequestOptions::default();
+        assert_eq!(unspecified.resolve_thinking_effort(), ThinkingEffort::High);
+        assert_eq!(explicit.resolve_thinking_effort(), ThinkingEffort::Off);
+        crate::llm::thinking::set_session_effort(&ThinkingEffort::Off);
+    }
+
+    /// 不同档位编出的请求体互不相同 —— 这条钉住"档位真的进了 body"，
+    /// 而不只是进了某个不参与序列化的中间结构。
+    #[test]
+    fn different_efforts_produce_different_request_bodies() {
+        let messages = vec![StarMessage::user("hi")];
+        let low = encoded_body(&messages, &crate::types::ThinkingEffort::Low);
+        let high = encoded_body(&messages, &crate::types::ThinkingEffort::High);
+        assert_ne!(
+            low["reasoning_effort"], high["reasoning_effort"],
+            "不同档位必须编出不同的请求体"
+        );
+    }
+
+    // ── 本机 HTTP：并发两个不同档位，看真实请求体 ──────────────────
+
+    /// 本机 HTTP 模拟服务：收下请求体，回一个最小可解码的 chat 响应。
+    ///
+    /// 只监听 127.0.0.1，不带任何凭据、不连真实模型。
+    async fn spawn_body_recorder() -> (String, tokio::sync::mpsc::Receiver<serde_json::Value>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let body = loop {
+                        let mut chunk = [0; 4096];
+                        let count = match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        request.extend_from_slice(&chunk[..count]);
+                        if let Some(end) = request.windows(4).position(|b| b == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&request[..end]).to_string();
+                            let length: usize = headers
+                                .lines()
+                                .find_map(|line| {
+                                    let (key, value) = line.split_once(':')?;
+                                    key.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse().unwrap_or(0))
+                                })
+                                .unwrap_or(0);
+                            if request.len() >= end + 4 + length {
+                                break serde_json::from_slice::<serde_json::Value>(
+                                    &request[end + 4..end + 4 + length],
+                                )
+                                .unwrap_or(serde_json::Value::Null);
+                            }
+                        }
+                    };
+                    let _ = tx.send(body).await;
+                    let response = r#"{"id":"1","object":"chat.completion","created":1,"model":"gpt-5-test","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}"#;
+                    let _ = socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                                response.len(),
+                                response
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                });
+            }
+        });
+        (format!("http://{addr}/v1"), rx)
+    }
+
+    /// 并发两个不同档位的请求，断言**真实发出去的两个请求体**里
+    /// `reasoning_effort` 确实不同。
+    ///
+    /// 这条是调用级 effort 的端到端证据：不是"某个函数返回了不同的
+    /// 结构"，而是两次真正的 HTTP 请求带着不同的档位。
+    #[tokio::test]
+    async fn concurrent_requests_carry_their_own_effort() {
+        use crate::llm::{LlmClient as _, LlmRequestOptions};
+        use crate::types::ThinkingEffort;
+
+        let (base_url, mut bodies) = spawn_body_recorder().await;
+        let adapter = crate::llm::rig_adapter::RigAdapter::openai_compatible(
+            "test-key".to_string(),
+            "gpt-5-test".to_string(),
+            base_url,
+            "local-test".to_string(),
+        );
+
+        let low = adapter
+            .chat_completion_with_options(
+                vec![StarMessage::user("hi")],
+                None,
+                &LlmRequestOptions {
+                    thinking_effort: Some(ThinkingEffort::Low),
+                },
+            )
+            .await;
+        assert!(low.is_ok(), "low 请求应成功: {low:?}");
+
+        let high = adapter
+            .chat_completion_with_options(
+                vec![StarMessage::user("hi")],
+                None,
+                &LlmRequestOptions {
+                    thinking_effort: Some(ThinkingEffort::High),
+                },
+            )
+            .await;
+        assert!(high.is_ok(), "high 请求应成功: {high:?}");
+
+        let mut seen: Vec<serde_json::Value> = Vec::new();
+        for _ in 0..2 {
+            seen.push(
+                tokio::time::timeout(std::time::Duration::from_secs(10), bodies.recv())
+                    .await
+                    .expect("请求体应在超时前到达")
+                    .expect("模拟服务应收到两个请求体"),
+            );
+        }
+        let efforts: Vec<serde_json::Value> = seen
+            .iter()
+            .map(|body| body["reasoning_effort"].clone())
+            .collect();
+        assert!(
+            efforts.contains(&serde_json::json!("low")),
+            "其中一个请求体必须带 low: {seen:?}"
+        );
+        assert!(
+            efforts.contains(&serde_json::json!("high")),
+            "其中一个请求体必须带 high: {seen:?}"
+        );
+    }
+
+    /// 并发（真正同时发出）两个不同档位：档位不能互相串味。
+    ///
+    /// 上面的用例是顺序的；这条把两次请求同时发出去，证明"每次调用各自
+    /// 解析自己的档位"，没有共享状态把两次调用搅在一起。
+    #[tokio::test]
+    async fn concurrent_calls_do_not_cross_contaminate_effort() {
+        use crate::llm::{LlmClient as _, LlmRequestOptions};
+        use crate::types::ThinkingEffort;
+
+        let (base_url, mut bodies) = spawn_body_recorder().await;
+        let adapter = std::sync::Arc::new(crate::llm::rig_adapter::RigAdapter::openai_compatible(
+            "test-key".to_string(),
+            "gpt-5-test".to_string(),
+            base_url,
+            "local-test".to_string(),
+        ));
+
+        let (low_adapter, high_adapter) = (adapter.clone(), adapter.clone());
+        let (low, high) = tokio::join!(
+            async move {
+                low_adapter
+                    .chat_completion_with_options(
+                        vec![StarMessage::user("hi")],
+                        None,
+                        &LlmRequestOptions {
+                            thinking_effort: Some(ThinkingEffort::Low),
+                        },
+                    )
+                    .await
+            },
+            async move {
+                high_adapter
+                    .chat_completion_with_options(
+                        vec![StarMessage::user("hi")],
+                        None,
+                        &LlmRequestOptions {
+                            thinking_effort: Some(ThinkingEffort::High),
+                        },
+                    )
+                    .await
+            }
+        );
+        assert!(low.is_ok(), "low 请求应成功: {low:?}");
+        assert!(high.is_ok(), "high 请求应成功: {high:?}");
+
+        let mut seen: Vec<serde_json::Value> = Vec::new();
+        for _ in 0..2 {
+            seen.push(
+                tokio::time::timeout(std::time::Duration::from_secs(10), bodies.recv())
+                    .await
+                    .expect("请求体应在超时前到达")
+                    .expect("模拟服务应收到两个请求体"),
+            );
+        }
+        for body in &seen {
+            let effort = body["reasoning_effort"].as_str().unwrap_or("");
+            assert!(
+                effort == "low" || effort == "high",
+                "每个请求体必须带自己那档 effort: {body}"
+            );
+        }
+        let has_low = seen
+            .iter()
+            .any(|body| body["reasoning_effort"] == serde_json::json!("low"));
+        let has_high = seen
+            .iter()
+            .any(|body| body["reasoning_effort"] == serde_json::json!("high"));
+        assert!(has_low && has_high, "两次并发必须各带各的档位: {seen:?}");
     }
 }

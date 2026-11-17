@@ -17,7 +17,7 @@ pub use mock::MockClient;
 pub use openai_compatible::OpenAiCompatibleClient;
 pub use providers::{BedrockProvider, GeminiProvider, GrokProvider, VertexProvider};
 
-use crate::types::{StarMessage, StarResponse, StarTool, StarToolCall, StarUsage};
+use crate::types::{StarMessage, StarResponse, StarTool, StarToolCall, StarUsage, ThinkingEffort};
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -420,6 +420,32 @@ pub fn create_client(config: LlmConfig) -> Box<dyn LlmClient> {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LlmRequestOptions {
+    /// 本次 provider 请求使用的冻结思考力度。
+    pub thinking_effort: Option<ThinkingEffort>,
+}
+
+impl LlmRequestOptions {
+    /// 这次请求真正使用的思考力度。
+    ///
+    /// - `Some(effort)`：调用方**显式**指定（含 `Off`），原样使用。
+    ///   显式关闭不能退化成"没指定" —— 退化了服务端就会按自己的默认档位思考，
+    ///   用户明明选了关闭却拿到思考内容。
+    /// - `None`：调用方没指定 → 在**此刻**解析一次全局档位
+    ///   （本轮 > 会话 > `STAR_THINKING_EFFORT` > `Off`）。
+    ///
+    /// 调用方应当**只解析一次**并把结果带过整条链（流式请求 + 它的非流式
+    /// fallback）。否则中途改了会话档位，同一次回答的两次请求会带不同的档位，
+    /// 用户看到的思考深度与实际请求不一致。
+    pub fn resolve_thinking_effort(&self) -> ThinkingEffort {
+        match self.thinking_effort.as_ref() {
+            Some(effort) => effort.clone(),
+            None => thinking::current_effort(),
+        }
+    }
+}
+
 #[async_trait]
 pub trait LlmClient: Send + Sync + std::fmt::Debug {
     async fn chat_completion(
@@ -428,6 +454,15 @@ pub trait LlmClient: Send + Sync + std::fmt::Debug {
         tools: Option<Vec<StarTool>>,
     ) -> Result<StarResponse, Box<dyn Error + Send + Sync>>;
 
+    async fn chat_completion_with_options(
+        &self,
+        messages: Vec<StarMessage>,
+        tools: Option<Vec<StarTool>>,
+        _options: &LlmRequestOptions,
+    ) -> Result<StarResponse, Box<dyn Error + Send + Sync>> {
+        self.chat_completion(messages, tools).await
+    }
+
     async fn chat_stream_events(
         &self,
         _messages: Vec<StarMessage>,
@@ -435,6 +470,16 @@ pub trait LlmClient: Send + Sync + std::fmt::Debug {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError>
     {
         Err(LlmError::NotImplemented("chat_stream_events".to_string()))
+    }
+
+    async fn chat_stream_events_with_options(
+        &self,
+        messages: Vec<StarMessage>,
+        tools: Option<Vec<StarTool>>,
+        _options: &LlmRequestOptions,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + Sync>>, LlmError>
+    {
+        self.chat_stream_events(messages, tools).await
     }
 
     fn get_model_info(&self) -> Option<ModelInfo>;
