@@ -470,6 +470,9 @@ impl StarAgent {
 
     pub(crate) fn set_turn_thinking_effort(&mut self, effort: crate::types::ThinkingEffort) {
         self.inner.thinking_effort = effort.clone();
+        self.inner
+            .tool_executor
+            .set_agent_parent_thinking_effort(effort.clone());
         self.requested_runtime_settings.thinking_effort = effort.clone();
         self.active_runtime_settings.thinking_effort = effort.clone();
         self.turn_runtime_snapshot.thinking_effort = effort;

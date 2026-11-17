@@ -21,7 +21,8 @@
 | 子代理消息发件人 | 完整门禁通过 | 执行器向每个 invocation 注入当前 identity；实际投递及 lead mailbox 消费回归覆盖 |
 | 自定义 tools/disallowedTools | 缺口，编辑受审批阻挡 | custom.rs 未把声明集合写入子配置，应与父限制求交并复用执行器门。此前可写代理委派被自动审批以“只读代理拒绝后转交属于权限绕过”拒绝，未换路径执行 |
 | 自定义类型与 background | 缺口 | 定义在 Skill 路径注册，AgentTool 固定内置类型，route 的 definition-background 固定 false；需统一定义解析 |
-| effort / worktree | 缺口 | AgentToolParams / FullInput / SubAgentRequest无调用级effort；StarAgent构造从current_effort取初值，rig_adapter::build_request仍读进程级TURN/SESSION状态，不能用全局setter实现并发子代理覆盖。agent_run已把冻结thinking_effort传给fresh Agent，但agent_llm::chat_stream未带请求级设置，client的非流式fallback复用inner_client也需保留同一值；thinking::encode(Max)=6而decode原缺6分支，现已补齐并新增全部档位纯编码往返回归；验证命令因审批服务不可用未执行，不标已验收。下一步贯穿显式请求参数并覆盖流式及非流式回退，用并发不同effort的本机HTTP验证互不污染；worktree必须约束真实cwd和Git路径。最终完整门禁因审批服务不可用尚未启动，先冻结实现 |
+| 调用级 effort | 实现接通，分层回归通过；最终门禁进行中 | AgentToolParams → FullInput → SubAgentRequest → child 回合快照；执行器注入实际调用方的冻结值，显式 Off 优先。agent_llm 显式传 LlmRequestOptions，StarClient 冻结一次并供入口流式失败后的非流式 fallback 共用，RigAdapter 请求构造不再读全局。LLM 94 项通过，含 wire JSON、并发本机 HTTP low/high 与受控 fallback；这些并发 HTTP 直接调用适配器，尚非父执行器启动两个完整子代理的全链证明。Off 仍沿用 provider 方言，OpenAI 方言省略字段，不承诺服务端关闭推理。Skill 本轮 effort 改为经成功工具结果交回当前 Agent，不写进程全局值；真实加载 Skill 后的本地消费隔离回归 1 项和 frontmatter 8 项通过。Skill context: fork 的元数据继承仍需单独核验 |
+| worktree | 缺口 | 尚未约束真实 cwd 和 Git 路径，不以 schema 声明作为实现证据 |
 | 后台停止、输出查询、恢复 | 停止、历史输出查询与有效原生上下文恢复完整门禁通过；交接边界静态核查完成 | RuntimeServices 共享任务记录，runner 登记启动及最终输出，TaskOutput 查询同一实例并兼容旧 JSON 输出；路径经 Storage 解析，task_id 拒绝路径分隔符。新增版本化终态元数据，正文写入后用同目录临时文件和rename发布；当前进程记录优先，未命中从项目磁盘查询，元数据不携带输出路径，损坏、版本不支持、ID不匹配与读取错误明确报错。仅持久化终态，不把旧进程任务显示为仍在运行。跨全新运行时和独立进程查询均通过，完整门禁通过。新任务ID使用完整UUID，兼容既有短ID查询。新增 TaskStop 通过共享标志取消实际 agent 循环，保持外层消费到退出后收尾；初始化前、请求头等待与 SSE 期间停止回归通过；连接释放与审批取消边界进入完整库补验。新增Agent的resume参数引用项目内原生快照；本次创建新任务ID/邮箱/取消控制，使用当前客户端、权限模式和cwd，不覆盖来源快照。同步任务ID与快照ID已统一，runner在普通失败及协作取消后抓取有效上下文，快照错误显式返回。恢复不承诺压缩前完整历史或崩溃当下状态，SendMessage仍不恢复终态任务。首轮编译因Storage导入路径错误失败、已修；随后HTTP断言失败于无工具请求下rig将历史调用转为文本，已拆分为原生快照保留ID/配对与HTTP保留历史内容两类断言，HTTP定向通过。省略恢复类型在路由前继承，显式冲突拒绝；快照发布不覆盖既有来源。存储失败夹具曾被Storage向上解析影响，已改独立项目；bpinc51n9恢复过滤6项、原生快照过滤2项通过（均含仓库中既有同名匹配测试）。随后 b59rntctw 真实工具调用触及轮次上限后恢复1项通过；btpmchgl7 请求头前取消后恢复1项通过，旧停止标志保留，新执行使用独立控制。b7j99ddhq 当前权限拒绝回归通过：来源结束后实时总线切Plan，恢复的模型Write调用被实际执行器拒绝，目标文件不存在，失败结果含新任务ID。后台停止保留执行/快照保存错误原因。btem6a1i2 完整门禁通过：全目标locked编译、串行库2340通过/5忽略、文档0通过/3忽略、fmt/diff通过。其后仅调整快照发布后临时文件清理失败的处理，避免完整文件已发布却报保存失败，bb7ti05vu 原生快照过滤2项及fmt/diff补验通过。快照可见表示执行循环已交接，不承诺跨进程完成通知/邮箱注销的原子性 |
 | hooks 与 memory | 缺口 | 需 identity 隔离、真实生命周期收尾和上下文注入 |
 | Explore Bash 强只读 | 未完成 | 保留通用权限门；程序名分类不等于参数沙箱 |
@@ -31,6 +32,7 @@
 
 | 项目 | 已落地行为 | 验证与限制 |
 |---|---|---|
+| AgentGroup 汇总状态 | 后台计作运行，失败/拒绝与停止分别计数，纯停止和部分停止不显示成功勾；头部按当前主题取色并折行 | 3 项组件回归通过，含深浅主题、混合终态、1/2 列宽度上限及 24 列带颜色 snapshot；未做跨终端实测 |
 | shell Workflow 路径与失败 | 列表/执行统一 Storage::project_workflows_dir，只列 JSON/sh；继承项目根 cwd；预校验完整 JSON，首个非零退出立即停止，保留步骤名/退出码/stderr；拒绝目录名称 | 前轮 23 项 workflow、4 项 i18n 及全目标编译通过 |
 | Workflow 命令入口 | run 拒绝多余参数；create/edit 实际发送创建/编辑请求，格式说明改为 JSON/sh | 请求分发不等于文件已创建或脚本已执行；正常工具权限门仍生效 |
 | Workflow 取消与时限 | 普通批处理/公开工具执行传入本回合 token；整工作流默认 300s、最大 1800s，审批等待不计入；Unix 独立进程组在取消/超时/future 丢弃时终止 | 先并行排空输出再回收组长，避免正常收尸后按旧 PID 发信号。Windows 仅保证直接子进程；主动脱离组的进程不在保证内。已补取消、实际后代停止和多步共享截止时间回归 |

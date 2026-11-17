@@ -511,6 +511,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn effort_parameters_accept_all_levels_and_reject_invalid_values() {
+        for level in ["off", "low", "medium", "high", "xhigh", "max"] {
+            for spelling in [level.to_string(), level.to_uppercase()] {
+                let params: AgentToolParams = serde_json::from_value(json!({
+                    "description": "inspect", "prompt": "inspect", "effort": spelling
+                }))
+                .expect("supported effort");
+                assert_eq!(params.effort.expect("explicit effort").as_str(), level);
+            }
+        }
+        let omitted: AgentToolParams = serde_json::from_value(json!({
+            "description": "inspect", "prompt": "inspect"
+        }))
+        .expect("omitted effort inherits");
+        assert!(omitted.effort.is_none());
+        for invalid in [json!("bogus"), json!(42), json!(true)] {
+            assert!(serde_json::from_value::<AgentToolParams>(json!({
+                "description": "inspect", "prompt": "inspect", "effort": invalid
+            }))
+            .is_err());
+        }
+    }
+
+    #[test]
     fn invocation_model_reaches_every_request_route() {
         let params: AgentToolParams = serde_json::from_value(json!({
             "description": "inspect code", "prompt": "find caller", "model": "child-model", "resume": "agent-old"

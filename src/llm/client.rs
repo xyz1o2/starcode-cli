@@ -1748,8 +1748,7 @@ mod tests {
         )
         .with_inner_for_test(Box::new(recorder));
 
-        // 全局档位：High。
-        crate::llm::thinking::set_session_effort(&ThinkingEffort::High);
+        let _effort_guard = crate::llm::thinking::TestEffortGuard::new(&ThinkingEffort::High);
 
         let mut stream = client
             .chat_stream_with_options(
@@ -1764,8 +1763,6 @@ mod tests {
         while let Some(event) = stream.next().await {
             let _ = event;
         }
-        crate::llm::thinking::set_session_effort(&ThinkingEffort::Off);
-
         let recorded = seen.lock().expect("记录锁").clone();
         assert_eq!(recorded.len(), 2, "应当记录两次调用: {recorded:?}");
         for effort in &recorded {

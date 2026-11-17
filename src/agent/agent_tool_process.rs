@@ -689,6 +689,24 @@ impl Agent {
         }
     }
 
+    /// 只消费成功 Skill 的内部元数据，保持子代理与父会话的档位相互独立。
+    fn adopt_skill_effort(&mut self, tool_call: &StarToolCall, result: &ToolResult) {
+        if !result.success || tool_call.function.name != "Skill" {
+            return;
+        }
+        let Some(effort) = result
+            .data
+            .as_ref()
+            .and_then(|data| data.get("turn_thinking_effort"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(crate::types::ThinkingEffort::parse_skill_effort)
+        else {
+            return;
+        };
+        self.thinking_effort = effort.clone();
+        self.tool_executor.set_agent_parent_thinking_effort(effort);
+    }
+
     /// 消费一次工具执行结果，保证串行 barrier 与批处理的后处理完全一致。
     #[allow(clippy::too_many_arguments)]
     async fn consume_tool_result(
@@ -704,6 +722,7 @@ impl Agent {
         successful_edit_tools: &mut Vec<String>,
         validation_tool_happened: &mut bool,
     ) {
+        self.adopt_skill_effort(tool_call, &result);
         self.emit_tool_finished(tool_call, &result);
         self.emit_event(crate::agent::messaging::AgentEvent::ToolFinished {
             tool_call: tool_call.clone(),
@@ -1472,6 +1491,69 @@ mod tests {
                 arguments: "{}".to_string(),
             },
         }
+    }
+
+    #[tokio::test]
+    async fn loaded_skill_effort_updates_only_the_calling_agent() {
+        use crate::core::tools::tools::BaseDeclarativeTool;
+        use crate::types::ThinkingEffort;
+
+        let directory = tempfile::tempdir().expect("temporary project");
+        let skill_dir = directory.path().join(".star/skills/local-effort");
+        std::fs::create_dir_all(&skill_dir).expect("skill directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: local-effort\ndescription: test\neffort: high\n---\nRead the source.\n",
+        )
+        .expect("skill fixture");
+        let mut config = crate::core::config::Config::new(crate::core::config::ConfigParameters {
+            target_dir: directory.path().to_path_buf(),
+            core_tools: Some(Vec::new()),
+            mcp_enabled: Some(false),
+            enable_agents: Some(false),
+            ..Default::default()
+        });
+        config.initialize().await.expect("local test runtime");
+        let config = std::sync::Arc::new(config);
+        let client = crate::llm::client::StarClient::new(
+            "test-key",
+            Some("test-model".into()),
+            Some("http://127.0.0.1:1/v1".into()),
+            Some(true),
+            None,
+        );
+        let tool = crate::agent::tools::skill::SkillTool::new(client.clone(), config.clone());
+        let invocation = tool
+            .create_invocation(serde_json::json!({"skill": "local-effort"}))
+            .expect("skill invocation");
+        let global_before = crate::llm::thinking::current_effort();
+        let core_result = invocation.execute(None, None).await.expect("skill loads");
+        assert!(core_result.error.is_none(), "{:?}", core_result.error);
+        let mut result = ToolResult {
+            success: true,
+            output: Some(core_result.output),
+            error: None,
+            data: core_result.data,
+            llm_content: core_result.llm_content,
+        };
+        let mut caller = Agent::new(client.clone(), config.clone());
+        let sibling = Agent::new(client, config);
+        let policy = caller.context_policy.clone();
+        caller.apply_runtime_snapshot(policy.clone(), ThinkingEffort::Low);
+        let sibling_before = sibling.thinking_effort.clone();
+        let call = tool_call(0, "Skill");
+        result.success = false;
+        caller.adopt_skill_effort(&call, &result);
+        assert_eq!(caller.thinking_effort, ThinkingEffort::Low);
+        result.success = true;
+        caller.adopt_skill_effort(&tool_call(1, "Read"), &result);
+        assert_eq!(caller.thinking_effort, ThinkingEffort::Low);
+        caller.adopt_skill_effort(&call, &result);
+        assert_eq!(caller.thinking_effort, ThinkingEffort::High);
+        assert_eq!(sibling.thinking_effort, sibling_before);
+        assert_eq!(crate::llm::thinking::current_effort(), global_before);
+        caller.apply_runtime_snapshot(policy, ThinkingEffort::Low);
+        assert_eq!(caller.thinking_effort, ThinkingEffort::Low);
     }
 
     #[test]

@@ -126,6 +126,33 @@ pub fn current_effort() -> ThinkingEffort {
         .unwrap_or_default()
 }
 
+/// 测试临时覆盖全局档位，退出作用域（含 panic）时还原原始未设置状态。
+/// 库测试仍需串行运行，避免其他读者观察到临时值。
+#[cfg(test)]
+pub(crate) struct TestEffortGuard {
+    session: u8,
+    turn: u8,
+}
+
+#[cfg(test)]
+impl TestEffortGuard {
+    pub(crate) fn new(effort: &ThinkingEffort) -> Self {
+        let guard = Self {
+            session: SESSION_EFFORT.swap(encode(effort), Ordering::Relaxed),
+            turn: TURN_EFFORT.swap(UNSET, Ordering::Relaxed),
+        };
+        guard
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestEffortGuard {
+    fn drop(&mut self) {
+        SESSION_EFFORT.store(self.session, Ordering::Relaxed);
+        TURN_EFFORT.store(self.turn, Ordering::Relaxed);
+    }
+}
+
 // ── provider 画像与方言 ────────────────────────────────────────────
 
 /// `RigAdapter` 的四种取向，决定思考参数往哪种方言翻。

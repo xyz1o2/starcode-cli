@@ -413,7 +413,7 @@ impl ToolInvocation for SkillInvocation {
                     // `allowed-tools` / `disallowed-tools` 写进策略引擎的
                     // per-turn 表（下一条用户消息即清）；`model` 发布一次
                     // 模型切换（`execute_turn` 在下次 provider 请求前 drain）。
-                    apply_skill_runtime_effects(
+                    let effort = apply_skill_runtime_effects(
                         &skill,
                         message_bus.as_ref(),
                         model_switch_cell.as_ref(),
@@ -438,7 +438,11 @@ impl ToolInvocation for SkillInvocation {
                         return_display: Some(output.clone()),
                         output,
                         error: None,
-                        data: None,
+                        data: effort.map(|effort| {
+                            serde_json::json!({
+                                "turn_thinking_effort": effort,
+                            })
+                        }),
                     })
                 } else {
                     let output = format!(
@@ -820,14 +824,14 @@ async fn block_on_load_skills(
 ///   drain 这个槽，所以效果是「本轮剩余部分用新模型」。
 ///   `inherit` 表示保持当前模型（Claude Code 的约定）。
 ///
-/// `effort` 没有实现：StarCode 的 effort 只有 `self_tuning` 那条「模型自己
-/// 调」的通路，没有 per-turn override 的落点，硬塞会与那套语义混淆。
+/// - `effort` → 随工具结果交回当前 Agent，只覆盖当前逻辑回合；不写进程全局值。
+///
 /// `context: fork` 由调用方单独处理（要起子代理，不只是改状态）。
 async fn apply_skill_runtime_effects(
     skill: &crate::agent::skills::loader::SkillDefinition,
     message_bus: Option<&std::sync::Arc<crate::core::confirmation_bus::MessageBus>>,
     model_switch_cell: Option<&crate::agent::model_switch::ModelSwitchCell>,
-) {
+) -> Option<crate::types::ThinkingEffort> {
     let meta = &skill.metadata;
 
     // ── allowed-tools / disallowed-tools ──────────────────────────
@@ -844,20 +848,6 @@ async fn apply_skill_runtime_effects(
                 "[Skill] `{}` declares allowed-tools but no message bus is wired — \
                  the grant is not applied",
                 skill.name
-            ));
-        }
-    }
-
-    // ── effort ───────────────────────────────────────────────────
-    //
-    // 本轮档位（skill 显式要求）压过会话档位，但只到下一条用户消息。
-    if let Some(raw) = meta.effort.as_deref() {
-        if let Some(effort) = crate::types::ThinkingEffort::parse_skill_effort(raw) {
-            crate::llm::thinking::set_turn_effort(&effort);
-            crate::utils::logging::append_debug_log_line(&format!(
-                "[Skill] `{}` set this turn's effort to `{}`",
-                skill.name,
-                effort.as_str()
             ));
         }
     }
@@ -883,6 +873,9 @@ async fn apply_skill_runtime_effects(
             }
         }
     }
+    meta.effort
+        .as_deref()
+        .and_then(crate::types::ThinkingEffort::parse_skill_effort)
 }
 
 /// 在隔离子代理里跑一个 skill（`context: fork`）。
@@ -1225,12 +1218,10 @@ mod frontmatter_effects {
         assert_eq!(pending.expect("pending").model, "gpt-4o");
     }
 
-    /// `effort` → 本轮档位（压过会话档位），下一条消息后清空。
+    /// effort 由调用方接收，解析不修改其他 Agent 所见的全局档位。
     #[tokio::test]
-    async fn an_effort_field_sets_the_turn_effort() {
-        crate::llm::thinking::set_session_effort(&crate::types::ThinkingEffort::Low);
-        crate::llm::thinking::clear_turn_effort();
-
+    async fn an_effort_field_returns_a_local_override() {
+        let before = crate::llm::thinking::current_effort();
         let skill = crate::agent::skills::loader::SkillDefinition {
             name: "s".to_string(),
             description: String::new(),
@@ -1245,19 +1236,8 @@ mod frontmatter_effects {
             },
         };
 
-        apply_skill_runtime_effects(&skill, None, None).await;
-        assert_eq!(
-            crate::llm::thinking::current_effort(),
-            crate::types::ThinkingEffort::High,
-            "本轮档位必须压过会话档位"
-        );
-
-        // 下一条用户消息 → 回到会话档位。
-        crate::llm::thinking::clear_turn_effort();
-        assert_eq!(
-            crate::llm::thinking::current_effort(),
-            crate::types::ThinkingEffort::Low,
-            "下一条用户消息后必须回到会话档位"
-        );
+        let effort = apply_skill_runtime_effects(&skill, None, None).await;
+        assert_eq!(effort, Some(crate::types::ThinkingEffort::High));
+        assert_eq!(crate::llm::thinking::current_effort(), before);
     }
 }

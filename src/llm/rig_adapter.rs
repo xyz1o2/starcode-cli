@@ -1323,11 +1323,10 @@ mod tests {
         assert_eq!(explicit.resolve_thinking_effort(), ThinkingEffort::Off);
 
         // 全局档位是 High 时，"没指定"解析成 High，显式 Off 仍是 Off。
-        crate::llm::thinking::set_session_effort(&ThinkingEffort::High);
+        let _effort_guard = crate::llm::thinking::TestEffortGuard::new(&ThinkingEffort::High);
         let unspecified = LlmRequestOptions::default();
         assert_eq!(unspecified.resolve_thinking_effort(), ThinkingEffort::High);
         assert_eq!(explicit.resolve_thinking_effort(), ThinkingEffort::Off);
-        crate::llm::thinking::set_session_effort(&ThinkingEffort::Off);
     }
 
     /// 不同档位编出的请求体互不相同 —— 这条钉住"档位真的进了 body"，
