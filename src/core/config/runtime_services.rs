@@ -15,7 +15,6 @@ pub struct RuntimeServices {
     notification_queue: Option<Arc<Mutex<NotificationQueue>>>,
     /// lead 的 Agent 与 SkillTool 共用；子代理使用独立模型切换槽。
     model_switch_cell: Option<crate::agent::model_switch::ModelSwitchCell>,
-    child_model_switch_cell: Option<crate::agent::model_switch::ModelSwitchCell>,
     /// Agent 间消息路由 hub（进程级单例，见 `agent::messaging::hub`）。
     agent_hub: Option<crate::agent::messaging::SharedAgentRouter>,
     subagent_tasks: crate::agent::subagent::tasks::SharedSubagentTasks,
@@ -35,7 +34,6 @@ impl RuntimeServices {
             global_state,
             notification_queue: None,
             model_switch_cell: None,
-            child_model_switch_cell: None,
             agent_hub: None,
             subagent_tasks: Arc::new(Mutex::new(Default::default())),
         }
@@ -79,40 +77,17 @@ impl RuntimeServices {
         self.notification_queue.clone()
     }
 
-    /// 设置 lead 的模型切换槽；同时创建独立的子代理槽。
+    /// 设置 lead 的模型切换槽；子代理在 Agent 构造时各自建槽。
     pub fn with_model_switch_cell(
         mut self,
         cell: crate::agent::model_switch::ModelSwitchCell,
     ) -> Self {
         self.model_switch_cell = Some(cell);
-        self.child_model_switch_cell = Some(crate::agent::model_switch::new_cell());
         self
     }
 
     pub(crate) fn model_switch_cell(&self) -> Option<crate::agent::model_switch::ModelSwitchCell> {
         self.model_switch_cell.clone()
-    }
-
-    pub(crate) fn child_model_switch_cell(
-        &self,
-    ) -> Option<crate::agent::model_switch::ModelSwitchCell> {
-        self.child_model_switch_cell.clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn shares_child_model_switch_cell(&self, other: &Self) -> bool {
-        self.child_model_switch_cell
-            .as_ref()
-            .zip(other.child_model_switch_cell.as_ref())
-            .is_some_and(|(left, right)| Arc::ptr_eq(left, right))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn shares_lead_model_switch_cell(&self, other: &Self) -> bool {
-        self.model_switch_cell
-            .as_ref()
-            .zip(other.model_switch_cell.as_ref())
-            .is_some_and(|(left, right)| Arc::ptr_eq(left, right))
     }
 
     /// 设置或读取 Agent 间消息路由 hub（进程级单例）。
@@ -127,29 +102,3 @@ impl RuntimeServices {
 }
 
 pub type RuntimeHandles = RuntimeServices;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn child_configs_share_child_switches_but_not_the_lead_switch() {
-        let bus = Arc::new(MessageBus::new(
-            crate::core::policy::PolicyEngine::new(
-                crate::core::policy::PolicyEngineConfig::default(),
-            ),
-            false,
-        ));
-        let services = RuntimeServices::new(None, bus, None, Arc::new(GlobalState::new()))
-            .with_model_switch_cell(crate::agent::model_switch::new_cell());
-        let left_child = services.clone();
-        let right_child = services.clone();
-        assert!(services.shares_lead_model_switch_cell(&left_child));
-        assert!(!Arc::ptr_eq(
-            services.model_switch_cell().as_ref().unwrap(),
-            services.child_model_switch_cell().as_ref().unwrap(),
-        ));
-        assert!(services.shares_child_model_switch_cell(&left_child));
-        assert!(left_child.shares_child_model_switch_cell(&right_child));
-    }
-}

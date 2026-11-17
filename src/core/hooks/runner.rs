@@ -39,7 +39,16 @@ pub async fn run_hooks(
         .filter(|h| h.enabled && h.event == event)
         // matcher 是 Claude Code 配置带来的过滤条件。`/hooks add` 建的 hook
         // matcher 为 None，即不过滤 —— 保持既有行为不变。
-        .filter(|h| matcher_matches(h.matcher.as_deref(), context.tool_name.as_deref()))
+        .filter(|h| {
+            if matches!(
+                &event,
+                ManagedHookEvent::SubagentStart | ManagedHookEvent::SubagentStop
+            ) {
+                subagent_matcher_matches(h.matcher.as_deref(), context.tool_name.as_deref())
+            } else {
+                matcher_matches(h.matcher.as_deref(), context.tool_name.as_deref())
+            }
+        })
         .collect();
 
     let mut out = Vec::new();
@@ -59,6 +68,80 @@ pub async fn run_hooks(
     }
 
     Ok(out)
+}
+
+/// 类型别名只在生命周期事件中归一；正则仍只匹配原始名称。
+fn subagent_matcher_matches(matcher: Option<&str>, name: Option<&str>) -> bool {
+    if matcher_matches(matcher, name) {
+        return true;
+    }
+    let (Some(pattern), Some(name)) = (matcher, name) else {
+        return false;
+    };
+    if !pattern
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "_- ,|".contains(c))
+    {
+        return false;
+    }
+    let normalize = |value: &str| {
+        value
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect::<String>()
+    };
+    let Some(kind) = [
+        crate::core::agents::SubagentType::GeneralPurpose,
+        crate::core::agents::SubagentType::Explorer,
+        crate::core::agents::SubagentType::Analyzer,
+        crate::core::agents::SubagentType::Editor,
+        crate::core::agents::SubagentType::CodeReviewer,
+    ]
+    .into_iter()
+    .find(|kind| {
+        [kind.as_str(), kind.user_facing_name()]
+            .iter()
+            .any(|alias| normalize(alias) == normalize(name))
+    }) else {
+        return false;
+    };
+    pattern.split(['|', ',']).any(|part| {
+        let part = normalize(part);
+        !part.is_empty()
+            && [kind.as_str(), kind.user_facing_name()]
+                .iter()
+                .any(|alias| normalize(alias) == part)
+    })
+}
+
+#[cfg(test)]
+mod matcher_tests {
+    use super::*;
+
+    #[test]
+    fn subagent_matchers_accept_display_and_slug_aliases_only_for_lifecycle() {
+        assert!(subagent_matcher_matches(
+            Some("general-purpose"),
+            Some("general_purpose")
+        ));
+        assert!(subagent_matcher_matches(
+            Some("Explore|Analyze"),
+            Some("explorer")
+        ));
+        assert!(!matcher_matches(
+            Some("general-purpose"),
+            Some("general_purpose")
+        ));
+        assert!(subagent_matcher_matches(
+            Some("custom-agent"),
+            Some("custom-agent")
+        ));
+        assert!(!subagent_matcher_matches(
+            Some("custom-agent"),
+            Some("other-agent")
+        ));
+    }
 }
 
 async fn run_one_hook(

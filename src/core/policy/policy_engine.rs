@@ -259,16 +259,24 @@ impl PolicyEngine {
         allowed: &[String],
         disallowed: &[String],
     ) {
-        let policy = identity.map(|value| self.scoped_turn_policies.entry(value.to_owned()).or_default());
+        let policy = identity.map(|value| {
+            self.scoped_turn_policies
+                .entry(value.to_owned())
+                .or_default()
+        });
         let (grants, denials) = match policy {
             Some(policy) => (&mut policy.grants, &mut policy.denials),
             None => (&mut self.turn_grants, &mut self.turn_denials),
         };
         for tool in allowed {
-            grants.insert(crate::core::tools::constants::resolve_registered_tool_name(tool).to_string());
+            grants.insert(
+                crate::core::tools::constants::resolve_registered_tool_name(tool).to_string(),
+            );
         }
         for tool in disallowed {
-            denials.insert(crate::core::tools::constants::resolve_registered_tool_name(tool).to_string());
+            denials.insert(
+                crate::core::tools::constants::resolve_registered_tool_name(tool).to_string(),
+            );
         }
     }
 
@@ -1708,6 +1716,47 @@ mod turn_grant_tests {
         assert!(
             engine.is_turn_granted("Bash"),
             "工具名应当归一到注册名再比对"
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_skill_policies_are_isolated_between_lead_and_subagents() {
+        let mut engine = engine_with(SettingsPermissions::default());
+        engine.apply_turn_tool_policy_for(Some("child-a"), &["Bash".into()], &["Write".into()]);
+        engine.apply_turn_tool_policy(&["Read".into()], &[]);
+        assert_eq!(
+            engine.check_for(&call("Bash"), None, None).await.decision,
+            PolicyDecision::AskUser
+        );
+        assert_eq!(
+            engine
+                .check_for(&call("Read"), None, Some("child-a"))
+                .await
+                .decision,
+            PolicyDecision::AskUser
+        );
+        assert_eq!(
+            engine
+                .check_for(&call("Bash"), None, Some("child-a"))
+                .await
+                .decision,
+            PolicyDecision::Allow
+        );
+        assert!(matches!(
+            engine
+                .check_for(&call("Write"), None, Some("child-a"))
+                .await
+                .decision,
+            PolicyDecision::DenyWithReason(_)
+        ));
+        engine.clear_turn_grants_for(Some("child-a"));
+        assert!(engine.is_turn_granted("Read"));
+        assert_eq!(
+            engine
+                .check_for(&call("Bash"), None, Some("child-a"))
+                .await
+                .decision,
+            PolicyDecision::AskUser
         );
     }
 }

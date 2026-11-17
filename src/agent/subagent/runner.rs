@@ -223,8 +223,10 @@ impl StarAgentRunner {
             .clone();
         let prompt = request.prompt.clone();
         let kind = request.subagent_type.as_str();
-        let project_root = crate::agent::hooks::cached_project_root()
-            .unwrap_or_else(|| self.config.target_dir().to_path_buf());
+        let project_root = self
+            .config
+            .session_hook_root()
+            .unwrap_or_else(|_| self.config.target_dir().to_path_buf());
         crate::agent::hooks::run_subagent_lifecycle_hook(
             &project_root,
             ManagedHookEvent::SubagentStart,

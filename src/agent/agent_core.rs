@@ -181,9 +181,7 @@ impl Agent {
         // 在结构体字面量之前取出来：`config` 会被 move 进 `Agent`。
         let model_switch_cell = if config.recursion_depth > 0 {
             // 子代理不能竞争消费 lead 的 /model 请求，只继承创建时解析出的客户端。
-            config
-                .runtime_child_model_switch_cell()
-                .unwrap_or_else(crate::agent::model_switch::new_cell)
+            crate::agent::model_switch::new_cell()
         } else {
             config
                 .runtime_model_switch_cell()
@@ -668,6 +666,7 @@ impl Agent {
     /// agent-scoped state in one place.
     pub async fn change_working_directory(&mut self, path: &std::path::Path) -> Result<(), String> {
         let actual = crate::core::utils::paths::set_current_dir(path)?;
+        self.config.set_session_hook_root(actual.clone())?;
         crate::agent::hooks::clear_project_root_override();
 
         // Memory and project context are resolved per project. Reset the

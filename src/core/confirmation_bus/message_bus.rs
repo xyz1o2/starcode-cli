@@ -115,7 +115,8 @@ impl MessageBus {
         tool_call: &crate::core::policy::FunctionCall,
         server_name: Option<&str>,
     ) -> crate::core::policy::CheckResult {
-        self.check_tool_policy_for(tool_call, server_name, None).await
+        self.check_tool_policy_for(tool_call, server_name, None)
+            .await
     }
 
     pub async fn check_tool_policy_for(
@@ -134,7 +135,8 @@ impl MessageBus {
     ///
     /// 只到下一条用户消息为止 —— 由 [`Self::clear_turn_tool_policy`] 清掉。
     pub async fn apply_turn_tool_policy(&self, allowed: &[String], disallowed: &[String]) {
-        self.apply_turn_tool_policy_for(None, allowed, disallowed).await;
+        self.apply_turn_tool_policy_for(None, allowed, disallowed)
+            .await;
     }
 
     pub async fn apply_turn_tool_policy_for(

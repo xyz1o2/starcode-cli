@@ -501,7 +501,8 @@ impl Agent {
             // steering 队列要一路传到这个 fresh Agent —— 运行中插入的需求
             // 是在这里被消费、插进对话的。
             agent_for_loop.steering_queue = self.steering_queue.clone();
-            // 父回合的模型切换槽仅由 lead 消费，子代理不共享此槽。
+            // 同一个代理的外层与内部循环共享槽；不同子代理在构造时各自建槽。
+            agent_for_loop.model_switch_cell = self.model_switch_cell.clone();
             #[cfg(test)]
             { agent_for_loop.panic_loop_before_handoff = self.panic_loop_before_handoff; }
 

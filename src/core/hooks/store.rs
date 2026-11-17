@@ -179,14 +179,8 @@ pub fn matcher_matches(matcher: Option<&str>, tool_name: Option<&str>) -> bool {
         pattern
             .split(['|', ','])
             .map(|s| s.trim())
-            // 接受生命周期 hook 内部 slug 与用户可见名称，避免配置格式差异静默漏触发。
-            .any(|exact| {
-                !exact.is_empty()
-                    && (exact.eq_ignore_ascii_case(tool_name)
-                        || crate::core::agents::SubagentType::from_name(exact)
-                            .zip(crate::core::agents::SubagentType::from_name(tool_name))
-                            .is_some_and(|(expected, actual)| expected == actual))
-            })
+            // 普通工具事件维持精确名称匹配；子代理别名由生命周期事件单独处理。
+            .any(|exact| !exact.is_empty() && exact.eq_ignore_ascii_case(tool_name))
     } else {
         match regex::Regex::new(pattern) {
             Ok(re) => re.is_match(tool_name),

@@ -16,6 +16,8 @@ pub struct Config {
     pub(crate) resume_session: bool,
     pub(crate) sandbox: Option<SandboxConfig>,
     pub(crate) target_dir: PathBuf,
+    /// 会话切目录后的 hook 根；共享 runner 读取同一值，每次任务启动时冻结。
+    session_hook_root: Arc<std::sync::RwLock<PathBuf>>,
     pub(crate) debug_mode: bool,
     pub(crate) question: Option<String>,
     pub(crate) core_tools: Option<Vec<String>>,
@@ -129,6 +131,7 @@ impl Config {
             session_id: params.session_id,
             resume_session: params.resume_session,
             sandbox: params.sandbox,
+            session_hook_root: Arc::new(std::sync::RwLock::new(params.target_dir.clone())),
             target_dir: params.target_dir,
             debug_mode: params.debug_mode,
             question: params.question,
@@ -286,6 +289,22 @@ impl Config {
     pub fn sandbox(&self) -> Option<&SandboxConfig> {
         self.sandbox.as_ref()
     }
+    pub(crate) fn session_hook_root(&self) -> Result<PathBuf, String> {
+        self.session_hook_root
+            .read()
+            .map(|root| root.clone())
+            .map_err(|_| "Session hook directory lock poisoned".to_owned())
+    }
+
+    pub(crate) fn set_session_hook_root(&self, root: PathBuf) -> Result<(), String> {
+        let mut current = self
+            .session_hook_root
+            .write()
+            .map_err(|_| "Session hook directory lock poisoned".to_owned())?;
+        *current = root;
+        Ok(())
+    }
+
     pub fn target_dir(&self) -> &PathBuf {
         &self.target_dir
     }
@@ -646,13 +665,6 @@ impl Config {
         self.runtime_services
             .as_ref()
             .and_then(|services| services.model_switch_cell())
-    }
-    pub(crate) fn runtime_child_model_switch_cell(
-        &self,
-    ) -> Option<crate::agent::model_switch::ModelSwitchCell> {
-        self.runtime_services
-            .as_ref()
-            .and_then(|services| services.child_model_switch_cell())
     }
     pub(crate) fn runtime_notification_queue(
         &self,

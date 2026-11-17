@@ -185,6 +185,7 @@ impl BaseDeclarativeTool for SkillTool {
             model_switch_cell: self.model_switch_cell.clone(),
             async_runner: self.async_runner.clone(),
             parent_thinking_effort: None,
+            policy_identity: None,
         }))
     }
 }
@@ -203,10 +204,16 @@ pub struct SkillInvocation {
     async_runner: Option<std::sync::Arc<crate::agent::subagent::runner::AsyncSubagentRunner>>,
     /// 调用方当前回合的冻结档位，只供 fork 继承。
     parent_thinking_effort: Option<crate::types::ThinkingEffort>,
+    /// 执行器注入的调用方身份；不从共享注册工具的旧配置推导。
+    policy_identity: Option<String>,
 }
 
 #[async_trait]
 impl ToolInvocation for SkillInvocation {
+    fn set_agent_parent_identity(&mut self, identity: Option<String>) {
+        self.policy_identity = identity;
+    }
+
     fn set_agent_parent_client(&mut self, client: &StarClient) {
         self.async_runner = self
             .async_runner
@@ -246,6 +253,7 @@ impl ToolInvocation for SkillInvocation {
         let model_switch_cell = self.model_switch_cell.clone();
         let async_runner = self.async_runner.clone();
         let parent_thinking_effort = self.parent_thinking_effort.clone();
+        let policy_identity = self.policy_identity.clone();
 
         Box::pin(async move {
             if let Some(cb) = update_output.as_ref() {
@@ -439,6 +447,7 @@ impl ToolInvocation for SkillInvocation {
                         &skill,
                         message_bus.as_ref(),
                         model_switch_cell.as_ref(),
+                        policy_identity.as_deref(),
                     )
                     .await;
 
@@ -853,6 +862,7 @@ async fn apply_skill_runtime_effects(
     skill: &crate::agent::skills::loader::SkillDefinition,
     message_bus: Option<&std::sync::Arc<crate::core::confirmation_bus::MessageBus>>,
     model_switch_cell: Option<&crate::agent::model_switch::ModelSwitchCell>,
+    policy_identity: Option<&str>,
 ) -> Option<crate::types::ThinkingEffort> {
     let meta = &skill.metadata;
 
@@ -860,7 +870,7 @@ async fn apply_skill_runtime_effects(
     if !meta.allowed_tools.is_empty() || !meta.disallowed_tools.is_empty() {
         if let Some(bus) = message_bus {
             bus.apply_turn_tool_policy_for(
-                self.config.agent_identity.as_deref(),
+                policy_identity,
                 &meta.allowed_tools,
                 &meta.disallowed_tools,
             )
@@ -1219,7 +1229,7 @@ mod frontmatter_effects {
             },
         };
 
-        apply_skill_runtime_effects(&skill, None, Some(&cell)).await;
+        apply_skill_runtime_effects(&skill, None, Some(&cell), None).await;
 
         assert!(
             crate::agent::model_switch::take(&cell).await.is_none(),
@@ -1245,7 +1255,7 @@ mod frontmatter_effects {
             },
         };
 
-        apply_skill_runtime_effects(&skill, None, Some(&cell)).await;
+        apply_skill_runtime_effects(&skill, None, Some(&cell), None).await;
 
         let pending = crate::agent::model_switch::take(&cell).await;
         assert!(pending.is_some(), "`model` 字段必须发布一次模型切换");
@@ -1270,7 +1280,7 @@ mod frontmatter_effects {
             },
         };
 
-        let effort = apply_skill_runtime_effects(&skill, None, None).await;
+        let effort = apply_skill_runtime_effects(&skill, None, None, None).await;
         assert_eq!(effort, Some(crate::types::ThinkingEffort::High));
         assert_eq!(crate::llm::thinking::current_effort(), before);
     }
