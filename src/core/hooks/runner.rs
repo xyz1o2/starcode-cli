@@ -49,7 +49,7 @@ pub async fn run_hooks(
             &hook.command,
             hook.timeout_secs,
             hook.blocking,
-            hook.working_dir.as_deref(),
+            hook.working_dir.as_deref().or(Some(project_root)),
             hook.source.as_deref(),
             &event,
             context,

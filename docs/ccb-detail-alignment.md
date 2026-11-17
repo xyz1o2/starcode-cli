@@ -21,10 +21,11 @@
 | 子代理消息发件人 | 完整门禁通过 | 执行器向每个 invocation 注入当前 identity；实际投递及 lead mailbox 消费回归覆盖 |
 | 自定义 tools/disallowedTools | 缺口，编辑受审批阻挡 | custom.rs 未把声明集合写入子配置，应与父限制求交并复用执行器门。此前可写代理委派被自动审批以“只读代理拒绝后转交属于权限绕过”拒绝，未换路径执行 |
 | 自定义类型与 background | 缺口 | 定义在 Skill 路径注册，AgentTool 固定内置类型，route 的 definition-background 固定 false；需统一定义解析 |
-| 调用级 effort | 实现接通，分层回归通过；最终门禁进行中 | AgentToolParams → FullInput → SubAgentRequest → child 回合快照；执行器注入实际调用方的冻结值，显式 Off 优先。agent_llm 显式传 LlmRequestOptions，StarClient 冻结一次并供入口流式失败后的非流式 fallback 共用，RigAdapter 请求构造不再读全局。LLM 94 项通过，含 wire JSON、并发本机 HTTP low/high 与受控 fallback；这些并发 HTTP 直接调用适配器，尚非父执行器启动两个完整子代理的全链证明。Off 仍沿用 provider 方言，OpenAI 方言省略字段，不承诺服务端关闭推理。Skill 本轮 effort 改为经成功工具结果交回当前 Agent，不写进程全局值；真实加载 Skill 后的本地消费隔离回归 1 项和 frontmatter 8 项通过。Skill context: fork 的元数据继承仍需单独核验 |
-| worktree | 缺口 | 尚未约束真实 cwd 和 Git 路径，不以 schema 声明作为实现证据 |
+| 调用级 effort | 实现接通，分层回归及完整门禁通过 | AgentToolParams → FullInput → SubAgentRequest → child 回合快照；执行器注入实际调用方的冻结值，显式 Off 优先。agent_llm 显式传 LlmRequestOptions，StarClient 冻结一次并供入口流式失败后的非流式 fallback 共用，RigAdapter 请求构造不再读全局。LLM 94 项通过，含 wire JSON、并发本机 HTTP low/high 与受控 fallback；这些并发 HTTP 直接调用适配器，尚非父执行器启动两个完整子代理的全链证明。Off 仍沿用 provider 方言，OpenAI 方言省略字段，不承诺服务端关闭推理。Skill 本轮 effort 改为经成功工具结果交回当前 Agent，不写进程全局值；真实加载 Skill 后的本地消费隔离回归 1 项和 frontmatter 8 项通过。Skill context: fork 的 effort/model 和参数展开已接通，执行器每次刷新真实父客户端及冻结 effort；真实文件 → 执行器 → 子代理循环 → 本机 HTTP 回归通过，含前后台继承、显式覆盖、Off、并发 high/low、父设置不变及不继承父历史。工具限制、自定义 agent 解析等元数据仍未验收 |
+| worktree | 子代理隔离仍缺口；创建工具语义修正通过 | Agent 调用尚未约束真实 cwd 和 Git 路径，不以 schema 声明作为实现证据。EnterWorktree 改用配置项目根创建 detached HEAD，相对路径从项目根解析，返回明确说明会话目录未切换，要求后续工具显式使用返回路径；不再误报已经进入隔离环境。buo8j1cuq 真实临时 Git 仓库回归 2 项及 locked 编译通过；其中工具引用门过滤名未匹配测试（0 项），不能算该门验证 |
 | 后台停止、输出查询、恢复 | 停止、历史输出查询与有效原生上下文恢复完整门禁通过；交接边界静态核查完成 | RuntimeServices 共享任务记录，runner 登记启动及最终输出，TaskOutput 查询同一实例并兼容旧 JSON 输出；路径经 Storage 解析，task_id 拒绝路径分隔符。新增版本化终态元数据，正文写入后用同目录临时文件和rename发布；当前进程记录优先，未命中从项目磁盘查询，元数据不携带输出路径，损坏、版本不支持、ID不匹配与读取错误明确报错。仅持久化终态，不把旧进程任务显示为仍在运行。跨全新运行时和独立进程查询均通过，完整门禁通过。新任务ID使用完整UUID，兼容既有短ID查询。新增 TaskStop 通过共享标志取消实际 agent 循环，保持外层消费到退出后收尾；初始化前、请求头等待与 SSE 期间停止回归通过；连接释放与审批取消边界进入完整库补验。新增Agent的resume参数引用项目内原生快照；本次创建新任务ID/邮箱/取消控制，使用当前客户端、权限模式和cwd，不覆盖来源快照。同步任务ID与快照ID已统一，runner在普通失败及协作取消后抓取有效上下文，快照错误显式返回。恢复不承诺压缩前完整历史或崩溃当下状态，SendMessage仍不恢复终态任务。首轮编译因Storage导入路径错误失败、已修；随后HTTP断言失败于无工具请求下rig将历史调用转为文本，已拆分为原生快照保留ID/配对与HTTP保留历史内容两类断言，HTTP定向通过。省略恢复类型在路由前继承，显式冲突拒绝；快照发布不覆盖既有来源。存储失败夹具曾被Storage向上解析影响，已改独立项目；bpinc51n9恢复过滤6项、原生快照过滤2项通过（均含仓库中既有同名匹配测试）。随后 b59rntctw 真实工具调用触及轮次上限后恢复1项通过；btpmchgl7 请求头前取消后恢复1项通过，旧停止标志保留，新执行使用独立控制。b7j99ddhq 当前权限拒绝回归通过：来源结束后实时总线切Plan，恢复的模型Write调用被实际执行器拒绝，目标文件不存在，失败结果含新任务ID。后台停止保留执行/快照保存错误原因。btem6a1i2 完整门禁通过：全目标locked编译、串行库2340通过/5忽略、文档0通过/3忽略、fmt/diff通过。其后仅调整快照发布后临时文件清理失败的处理，避免完整文件已发布却报保存失败，bb7ti05vu 原生快照过滤2项及fmt/diff补验通过。快照可见表示执行循环已交接，不承诺跨进程完成通知/邮箱注销的原子性 |
-| hooks 与 memory | 缺口 | 需 identity 隔离、真实生命周期收尾和上下文注入 |
+| hooks 生命周期 | 通用 runner 接通，定向回归通过 | 每次执行尝试生成/保留独立任务 ID，开始与结束使用同一 ID；成功、初始化校验失败、执行失败、协作取消统一收尾。按调用方项目加载配置，matcher 使用子代理类型；未配置 working_dir 时在项目目录执行。两项目并发隔离、fork 前后台成功及恢复前失败/取消回归通过；不保证进程退出或外层任务强制 abort。自定义定义内 hooks 尚未接通 |
+| memory | 缺口 | 自定义子代理 memory 声明、作用域存储和上下文注入仍需实现 |
 | Explore Bash 强只读 | 未完成 | 保留通用权限门；程序名分类不等于参数沙箱 |
 | Dynamic Workflow | 独立大项，未实现 | 当前 shell WorkflowTool 不是 JS agent/pipeline/parallel 编排，不具备 journal/replay、恢复；不扩充无生产构造的旧 WorkflowManager |
 
@@ -42,12 +43,16 @@
 | Ctrl+L | 在同步输出范围内清后端并更新差分空屏基线，不查询光标 DSR | 已补连续清屏、相同内容、中文/emoji/空白/样式重绘回归；未做终端闪屏实测 |
 | 帮助与窄终端 | 帮助软换行、滚动条、方向/PgUp/PgDn/Home/End；提示退出条件、撤销/重做与审批字母别名；选择浮层尺寸先限制再居中 | 已补帮助末行可达、按键不改草稿、极窄/矮区域边界回归。EscapeGuard 修正文档以匹配20/100ms，不无依据放宽窗口 |
 | MCP 调用错误保真 | refresh_tools 失败直接返回原错；manager 与 server 内层重连失败均保留首次调用和重连原因，共用错误合并函数 | MCP 16 项回归通过，包含 server 真实调用边界：模拟工具传输失败后重连配置错误/重试耗尽，最终错误同时保留两段原因 |
-| Keychain 查询/删除 | 仅明确 item-not-found 状态返回 None/NotFound；其他退出/信号保留原因 | 11项全平台纯解析回归；macOS 实机未验证，store argv 暴露尚未修复 |
+| Keychain 写入/查询/删除 | 写入改用 security-framework 的系统 API，保留 service/account 与新增或更新语义，秘密不再进入子进程 argv；查询/删除仅明确 item-not-found 状态返回 None/NotFound，其他退出/信号保留原因 | 已核验锁定 3.7.0 库的真实源码；新增非 macOS 源码门防止写入退回子进程。Linux 编译与原解析回归通过；本机没有 macOS target/运行环境，尚未验证 macOS 编译、系统授权弹窗及旧条目的访问控制兼容性 |
 | 模型列表加载错误 | 传播 ProviderStore::load 的 Err，进入现有 ModelsError 提示 | ProviderStore 全局/项目/旧版坏JSON改为返回路径错误，不输出原始配置内容；启动入口移除unwrap_or_default；save拒绝覆盖坏配置；旧版迁移在保存成功后才归档。测试legacy路径也隔离到临时项目。by7j2lda9全目标编译和ProviderStore18项通过；其停止保存失败回归因夹具缺父目录失败，已修。bde8l83g3完整门禁通过：全目标locked编译、ProviderStore18项、后台停止3项、串行库2343通过/5忽略、文档0通过/3忽略、fmt/diff通过。随后移除会吞掉字段类型错误的二次解析（旧版字段已为统一设置子集），去重ID及编辑表单保留key的读取错误向上传播，新增类型错误与旧版别名兼容回归；bfzvj4g0k定向补验通过：全目标locked编译、ProviderStore19项、provider_form7项、fmt/diff通过 |
 
-完整问题核查见 [2026-11-17 核查报告](archive/2026-11-17-ccb-issue-verification.md)。A1 参数注入、A3 同步技能 shell 阻塞、自定义工具限制涉及此前受拒绝的 custom.rs 编辑，当前未换路径执行；A2 Keychain store argv、B1 锁恢复等仍有未完成项。B3 shell 竞态未证实，不凭 expect 直接改成已修复。
+完整问题核查见 [2026-11-17 核查报告](archive/2026-11-17-ccb-issue-verification.md)。A1 参数注入、A3 同步技能 shell 阻塞、自定义工具限制涉及此前受拒绝的 custom.rs 编辑，当前未换路径执行；A2 Keychain store argv 已改为系统 API，macOS 平台验收尚缺；B1 索引锁污染已改为明确错误及调用图内存降级，不强行恢复受损状态；bniezsi42 的 indexer 13 项及 call_graph_db 18 项通过，真实进程级 token/sync/index-IO 锁在专用子进程污染后重复查询/调用验证通过，未覆盖 watcher 线程自身 panic 的自动重启。B3 shell 竞态未证实，不凭 expect 直接改成已修复。
 
 ## 验证记录
+
+- 2026-11-17 fork Skill / 通用子代理 hooks / Keychain 阶段门禁 bha6fvbye：全目标 locked 编译通过；串行库 2361 通过 / 5 忽略；文档 0 通过 / 3 忽略；fmt/diff 通过。bksd4icb7 定向覆盖 fork 执行器到 HTTP 1 项、生命周期跨项目隔离 1 项、失败/取消后恢复 2 项及 core hooks 16 项。首次 fork HTTP 断言因夹具模型名未命中推理能力判断而失败，改用 gpt-5 测试模型后保留请求字段断言通过。Keychain 12 项含禁止 store 子进程的源码门；没有 macOS target 或实机，系统互通回归已提供为 macOS 显式忽略测试，未执行。Clippy --lib --locked 成功，变更文件所见警告为原有 unwrap_or 和 Default 建议，未宣称警告清零。fork 的此项测试从执行器进入真实子代理循环，不覆盖父模型自行生成 Skill 调用；普通内联 Skill 的后续 provider 请求仍缺全链覆盖。
+
+- 2026-11-17 调用级 effort / AgentGroup 汇总最终门禁 basi8jmfo：全目标 locked 编译通过；串行库 2358 通过 / 5 忽略；文档 0 通过 / 3 忽略；fmt/diff 通过。先前完整库曾因提示词中反引号 effort 被工具名引用门拦下，改为普通引号后 4 项引用检查通过。Skill 本轮 effort 不再写全局变量，成功结果在普通及自动触发路径交回当前 Agent，Skill 作为执行 barrier 保证后续同批 Agent 启动前消费设置；测试覆盖真实 Skill 加载后的局部消费与分段顺序，未将其称为完整模型循环到 HTTP 的端到端证明。Clippy advisory 成功完成，历史警告未清零。
 
 - 多 Agent 前轮完整门禁：全目标 locked 编译通过；串行库 2287通过/4忽略；文档0通过/3忽略；fmt/diff通过。
 - 本轮阶段结果：全目标编译通过；审批/方向键各1项、输入组件18项、workflow27项、输入路由64项通过。后续新增回归需以最终门禁为准。

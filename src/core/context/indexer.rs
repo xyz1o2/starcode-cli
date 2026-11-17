@@ -29,6 +29,15 @@ const INDEX_BINARY_PROBE_BYTES: usize = 8 * 1024;
 /// 跨进程不保证：同一仓库同时跑两个 StarCode 不是目标场景。
 static INDEX_IO_LOCK: Mutex<()> = Mutex::new(());
 
+/// 拒绝复用被 panic 中断的临界区；调用方收到错误而非反复触发 panic。
+fn index_lock<'a, T>(
+    lock: &'a Mutex<T>,
+    name: &str,
+) -> Result<std::sync::MutexGuard<'a, T>, std::io::Error> {
+    lock.lock()
+        .map_err(|_| std::io::Error::other(format!("{name} lock poisoned")))
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Blob {
     pub hash: String,
@@ -201,7 +210,7 @@ impl Indexer {
     /// - 元数据变了才 read + SHA256；
     /// - 二次索引成本 ≈ 一次目录遍历 + 变更文件的读取。
     pub fn index_project(&self) -> Result<IndexResult, Box<dyn std::error::Error + Send + Sync>> {
-        let _io_guard = INDEX_IO_LOCK.lock().expect("index io lock poisoned");
+        let _io_guard = index_lock(&INDEX_IO_LOCK, "index io")?;
 
         if !self.project_root.exists() {
             return Ok(IndexResult {
@@ -239,10 +248,10 @@ impl Indexer {
                 match result {
                     Ok(entry) => {
                         if entry.file_type().is_some_and(|t| t.is_file()) {
-                            files
-                                .lock()
-                                .expect("index walk collector poisoned")
-                                .push(entry.into_path());
+                            match index_lock(&files, "index walk collector") {
+                                Ok(mut files) => files.push(entry.into_path()),
+                                Err(_) => return ignore::WalkState::Quit,
+                            }
                         }
                     }
                     Err(err) => crate::utils::logging::append_debug_log_line(&format!(
@@ -255,7 +264,7 @@ impl Indexer {
             })
         });
 
-        let collected = files.lock().expect("index walk collector poisoned").clone();
+        let collected = index_lock(&files, "index walk collector")?.clone();
         for path in collected {
             let rel_path = match path.strip_prefix(&self.project_root) {
                 Ok(p) => p.to_string_lossy().replace("\\", "/"),
@@ -392,6 +401,61 @@ fn is_probably_binary(content: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn poisoned_index_lock_is_an_error_on_every_attempt() {
+        let lock = std::sync::Arc::new(std::sync::Mutex::new(()));
+        let held = lock.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = held.lock().unwrap();
+            panic!("controlled index lock poisoning");
+        })
+        .join()
+        .is_err());
+        for _ in 0..2 {
+            let error = super::index_lock(&lock, "index test").unwrap_err();
+            assert!(error.to_string().contains("index test lock poisoned"));
+        }
+    }
+
+    #[test]
+    fn poisoned_shared_index_lock_returns_errors_without_overwriting_the_index() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "core::context::indexer::tests::poisoned_index_process_probe",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "dedicated subprocess entry for irreversible global lock poisoning"]
+    fn poisoned_index_process_probe() {
+        let (dir, indexer) = temp_project();
+        write(&dir, "src/main.rs", "fn initial_symbol() {}\n");
+        indexer.index_project().unwrap();
+        let before = fs::read(&indexer.index_file).unwrap();
+        assert!(std::thread::spawn(|| {
+            let _guard = INDEX_IO_LOCK.lock().unwrap();
+            panic!("controlled global index lock poisoning");
+        })
+        .join()
+        .is_err());
+        for _ in 0..2 {
+            let error = indexer.index_project().unwrap_err();
+            assert!(error.to_string().contains("index io lock poisoned"));
+            assert_eq!(fs::read(&indexer.index_file).unwrap(), before);
+        }
+    }
+
     use super::*;
 
     fn temp_project() -> (tempfile::TempDir, Indexer) {

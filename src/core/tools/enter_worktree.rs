@@ -12,11 +12,15 @@ pub struct EnterWorktreeParams {
     pub path: Option<String>,
 }
 
-pub struct EnterWorktreeTool;
+pub struct EnterWorktreeTool {
+    project_root: std::path::PathBuf,
+}
 
 impl EnterWorktreeTool {
-    pub fn new(_config: Arc<Config>, _message_bus: Arc<MessageBus>) -> Self {
-        Self
+    pub fn new(config: Arc<Config>, _message_bus: Arc<MessageBus>) -> Self {
+        Self {
+            project_root: config.target_dir().to_owned(),
+        }
     }
 }
 
@@ -33,7 +37,8 @@ impl BaseDeclarativeTool for EnterWorktreeTool {
         "Creates an isolated git worktree for experimental or risky changes. \
          Use this before making large-scale refactors, trying experimental approaches, \
          or working on changes that may need to be discarded. \
-         The original working directory is preserved. Use 'exit_worktree' to clean up."
+         Creates the worktree without changing this session's working directory. \
+         Pass the returned path explicitly to later tools. Use ExitWorktree to clean up."
     }
 
     fn kind(&self) -> Kind {
@@ -58,12 +63,93 @@ impl BaseDeclarativeTool for EnterWorktreeTool {
         params: serde_json::Value,
     ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
         let params: EnterWorktreeParams = serde_json::from_value(params)?;
-        Ok(Box::new(EnterWorktreeInvocation { params }))
+        Ok(Box::new(EnterWorktreeInvocation {
+            params,
+            project_root: self.project_root.clone(),
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(root: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    #[tokio::test]
+    async fn creation_uses_the_configured_project_without_claiming_a_cwd_switch() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q"]);
+        git(
+            &root,
+            &[
+                "-c",
+                "user.name=Local Test",
+                "-c",
+                "user.email=local@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "fixture",
+            ],
+        );
+        let head = git(&root, &["rev-parse", "HEAD"]);
+        let cwd = std::env::current_dir().unwrap();
+        let invocation = EnterWorktreeInvocation {
+            params: EnterWorktreeParams {
+                path: Some("relative-worktree".into()),
+            },
+            project_root: root.clone(),
+        };
+        let result = invocation.execute(None, None).await.unwrap();
+        let path = root.join("relative-worktree");
+        assert!(path.join(".git").is_file());
+        assert_eq!(git(&path, &["rev-parse", "HEAD"]), head);
+        let data = result.data.unwrap();
+        assert_eq!(data["worktree_path"], path.to_string_lossy().as_ref());
+        assert_eq!(data["session_cwd_changed"], false);
+        assert_eq!(data["worktree_active"], false);
+        assert!(result
+            .llm_content
+            .unwrap()
+            .contains("working directory has not changed"));
+        assert_eq!(std::env::current_dir().unwrap(), cwd);
+        git(&root, &["worktree", "remove", "relative-worktree"]);
+    }
+
+    #[tokio::test]
+    async fn creation_fails_clearly_when_project_has_no_head() {
+        let root = tempfile::tempdir().unwrap();
+        git(root.path(), &["init", "-q"]);
+        let invocation = EnterWorktreeInvocation {
+            params: EnterWorktreeParams {
+                path: Some("must-not-exist".into()),
+            },
+            project_root: root.path().to_owned(),
+        };
+        let error = invocation.execute(None, None).await.unwrap_err();
+        assert!(error.to_string().contains("Cannot resolve project HEAD"));
+        assert!(!root.path().join("must-not-exist").exists());
     }
 }
 
 pub struct EnterWorktreeInvocation {
     params: EnterWorktreeParams,
+    project_root: std::path::PathBuf,
 }
 
 impl ToolInvocation for EnterWorktreeInvocation {
@@ -128,9 +214,15 @@ impl ToolInvocation for EnterWorktreeInvocation {
         >,
     > {
         let custom_path = self.params.path.clone();
+        let cwd = self.project_root.clone();
         Box::pin(async move {
             let worktree_path = if let Some(p) = custom_path {
-                std::path::PathBuf::from(&p)
+                let path = std::path::PathBuf::from(p);
+                if path.is_absolute() {
+                    path
+                } else {
+                    cwd.join(path)
+                }
             } else {
                 let dir = std::env::temp_dir().join(format!(
                     "star-worktree-{}",
@@ -143,29 +235,24 @@ impl ToolInvocation for EnterWorktreeInvocation {
                 dir
             };
 
-            // Create the worktree from current branch
-            let cwd = std::env::current_dir().unwrap_or_default();
+            // 从所属项目的 HEAD 创建；不读取或改变进程 cwd。
             let worktree_path_clone = worktree_path.clone();
 
             let result = tokio::task::spawn_blocking(
                 move || -> Result<ToolResult, Box<dyn std::error::Error + Send + Sync>> {
-                    let branch = std::process::Command::new("git")
-                        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                    let head = std::process::Command::new("git")
+                        .args(["rev-parse", "--verify", "HEAD"])
                         .current_dir(&cwd)
-                        .output()
-                        .ok()
-                        .and_then(|o| String::from_utf8(o.stdout).ok())
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_else(|| "HEAD".to_string());
+                        .output()?;
+                    if !head.status.success() {
+                        return Err(format!("Cannot resolve project HEAD: {}", String::from_utf8_lossy(&head.stderr).trim()).into());
+                    }
+                    let head = String::from_utf8(head.stdout)?.trim().to_owned();
 
                     let output = std::process::Command::new("git")
-                        .args([
-                            "worktree",
-                            "add",
-                            "--detach",
-                            worktree_path_clone.to_str().unwrap_or("/tmp/star-worktree"),
-                            &branch,
-                        ])
+                        .args(["worktree", "add", "--detach", "--"])
+                        .arg(&worktree_path_clone)
+                        .arg(&head)
                         .current_dir(&cwd)
                         .output();
 
@@ -175,22 +262,23 @@ impl ToolInvocation for EnterWorktreeInvocation {
                             Ok(ToolResult {
                                 llm_content: Some(format!(
                                     "Worktree created at: {}\n\
-                                 You are now working in an isolated git worktree. \
-                                 Changes here will not affect the main working directory. \
-                                 Use 'exit_worktree' to clean up this worktree when done.\n\
-                                 Current branch: {}",
-                                    path_str, branch
+                                 This session's working directory has not changed. \
+                                 Pass this path explicitly to subsequent tools. \
+                                 Use ExitWorktree to clean up this worktree when done.\n\
+                                 Detached HEAD: {}",
+                                    path_str, head
                                 )),
-                                return_display: Some(format!("Entered worktree: {}", path_str)),
+                                return_display: Some(format!("Created worktree: {}", path_str)),
                                 output: format!(
-                                    "Created isolated worktree at {}\nWorking on branch: {}",
-                                    path_str, branch
+                                    "Created worktree at {}\nDetached HEAD: {}\nSession working directory unchanged.",
+                                    path_str, head
                                 ),
                                 error: None,
                                 data: Some(serde_json::json!({
                                     "worktree_path": path_str,
-                                    "branch": branch,
-                                    "worktree_active": true
+                                    "head": head,
+                                    "worktree_active": false,
+                                    "session_cwd_changed": false
                                 })),
                             })
                         }

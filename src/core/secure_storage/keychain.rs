@@ -121,34 +121,20 @@ impl KeychainStorage {
 
 impl SecureStorage for KeychainStorage {
     fn store(&self, key: &str, value: &str) -> Result<(), StorageError> {
-        // TODO: 实现系统钥匙串存储
-        // 在macOS上使用security命令或keychain-rs crate
-        // 在Linux上使用secret-service
-        // 在Windows上使用Windows Credential Manager
-
         #[cfg(target_os = "macos")]
         {
-            // 使用security命令存储到macOS钥匙串
-            let output = std::process::Command::new("security")
-                .args([
-                    "add-generic-password",
-                    "-s",
-                    &self.service_name,
-                    "-a",
-                    key,
-                    "-w",
-                    value,
-                    "-U",
-                ]) // 更新如果存在
-                .output()
-                .map_err(|e| StorageError::KeychainError(e.to_string()))?;
-
-            if !output.status.success() {
-                let error = String::from_utf8_lossy(&output.stderr);
-                return Err(StorageError::KeychainError(error.to_string()));
-            }
-
-            Ok(())
+            // 与查询/删除保持相同 service/account；库在条目存在时原位更新。
+            security_framework::passwords::set_generic_password(
+                &self.service_name,
+                key,
+                value.as_bytes(),
+            )
+            .map_err(|error| {
+                StorageError::KeychainError(format!(
+                    "Keychain store failed (OSStatus {})",
+                    error.code()
+                ))
+            })
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -234,6 +220,51 @@ impl SecureStorage for KeychainStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 新增或更新秘密不得退回子进程参数，纯源码门可在非 macOS 平台运行。
+    #[test]
+    fn keychain_store_uses_the_native_api_without_a_subprocess() {
+        let source = include_str!("keychain.rs");
+        let implementation = source.split("#[cfg(test)]").next().unwrap();
+        let store = implementation
+            .split("fn store(")
+            .nth(1)
+            .unwrap()
+            .split("fn get(")
+            .next()
+            .unwrap();
+        assert!(store.contains("security_framework::passwords::set_generic_password"));
+        assert!(!store.contains("std::process::Command"));
+        assert!(!store.contains("add-generic-password"));
+    }
+
+    /// 在 macOS 上显式运行，核对原生命令写入与既有查询/删除路径的互通。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires an unlocked macOS login Keychain and may show a system authorization dialog"]
+    fn native_store_updates_and_remains_readable_by_existing_commands() {
+        let storage = KeychainStorage::new();
+        let account = format!("starcode-native-store-test-{}", uuid::Uuid::new_v4());
+        struct RemoveTestItem<'a>(&'a KeychainStorage, &'a str);
+        impl Drop for RemoveTestItem<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.delete(self.1);
+            }
+        }
+        let _cleanup = RemoveTestItem(&storage, &account);
+        storage.store(&account, "local test value").unwrap();
+        assert_eq!(
+            storage.get(&account).unwrap().as_deref(),
+            Some("local test value")
+        );
+        storage.store(&account, "updated local test value").unwrap();
+        assert_eq!(
+            storage.get(&account).unwrap().as_deref(),
+            Some("updated local test value")
+        );
+        storage.delete(&account).unwrap();
+        assert!(storage.get(&account).unwrap().is_none());
+    }
 
     /// 构造一次 `security` 调用的结果。
     fn call(exit_code: Option<i32>, stdout: &str, stderr: &str) -> SecurityCall {

@@ -873,6 +873,7 @@ impl Agent {
         match hooks::run_pre_tool_hooks(user_input, &tool_call).await {
             Ok(()) => {
                 let result = self.execute_single_tool(&tool_call).await;
+                self.adopt_skill_effort(&tool_call, &result);
                 if let Some(flag) = usable_flag {
                     *flag = tool_helpers::tool_result_is_usable(&result);
                 }
@@ -1386,7 +1387,8 @@ fn tool_execution_segments(tool_calls: &[StarToolCall]) -> Vec<ToolExecutionSegm
 
 /// 走 Barrier（`execute_single_tool`）而非 Batch 的工具。
 ///
-/// 两类工具必须独占执行：
+/// 以下工具必须独占执行：
+/// - Skill：先消费本轮设置，再启动后续 Agent，避免同批调用继承旧档位。
 /// - 检索类（CodebaseSearch / ProjectMap）：占用索引引擎，批处理并发会互相踩。
 /// - 流式进度类（Bash / WebSearch）：只有 Barrier 路径会装 `update_output`
 ///   回调并把进度事件转发给 UI（见 `execute_single_tool`）。走 Batch 的话回调
@@ -1400,7 +1402,13 @@ fn tool_execution_segments(tool_calls: &[StarToolCall]) -> Vec<ToolExecutionSegm
 fn is_barrier_tool(name: &str) -> bool {
     matches!(
         crate::core::tools::constants::resolve_registered_tool_name(name),
-        "CodebaseSearch" | "ProjectMap" | "Bash" | "WebSearch" | "EnterPlanMode" | "ExitPlanMode"
+        "CodebaseSearch"
+            | "ProjectMap"
+            | "Bash"
+            | "WebSearch"
+            | "EnterPlanMode"
+            | "ExitPlanMode"
+            | "Skill"
     )
 }
 
@@ -1663,6 +1671,18 @@ mod tests {
                 ToolExecutionSegment::Batch(vec![3]),
                 ToolExecutionSegment::Barrier(4),
                 ToolExecutionSegment::Batch(vec![5]),
+            ]
+        );
+    }
+
+    #[test]
+    fn skill_settings_are_consumed_before_a_following_agent_launch() {
+        let calls = [tool_call(0, "Skill"), tool_call(1, "Agent")];
+        assert_eq!(
+            tool_execution_segments(&calls),
+            vec![
+                ToolExecutionSegment::Barrier(0),
+                ToolExecutionSegment::Batch(vec![1]),
             ]
         );
     }

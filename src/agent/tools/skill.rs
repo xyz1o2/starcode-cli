@@ -184,6 +184,7 @@ impl BaseDeclarativeTool for SkillTool {
             message_bus: self.message_bus.clone(),
             model_switch_cell: self.model_switch_cell.clone(),
             async_runner: self.async_runner.clone(),
+            parent_thinking_effort: None,
         }))
     }
 }
@@ -200,10 +201,23 @@ pub struct SkillInvocation {
     model_switch_cell: Option<crate::agent::model_switch::ModelSwitchCell>,
     /// 后台子代理执行器（`context: fork`）。
     async_runner: Option<std::sync::Arc<crate::agent::subagent::runner::AsyncSubagentRunner>>,
+    /// 调用方当前回合的冻结档位，只供 fork 继承。
+    parent_thinking_effort: Option<crate::types::ThinkingEffort>,
 }
 
 #[async_trait]
 impl ToolInvocation for SkillInvocation {
+    fn set_agent_parent_client(&mut self, client: &StarClient) {
+        self.async_runner = self
+            .async_runner
+            .as_ref()
+            .map(|runner| Arc::new(runner.with_parent_client(client)));
+    }
+
+    fn set_agent_parent_thinking_effort(&mut self, effort: crate::types::ThinkingEffort) {
+        self.parent_thinking_effort = Some(effort);
+    }
+
     fn get_description(&self) -> String {
         format!("Executing skill: {}", self.skill_name)
     }
@@ -231,6 +245,7 @@ impl ToolInvocation for SkillInvocation {
         let message_bus = self.message_bus.clone();
         let model_switch_cell = self.model_switch_cell.clone();
         let async_runner = self.async_runner.clone();
+        let parent_thinking_effort = self.parent_thinking_effort.clone();
 
         Box::pin(async move {
             if let Some(cb) = update_output.as_ref() {
@@ -405,7 +420,14 @@ impl ToolInvocation for SkillInvocation {
                     // 子代理**看不到**当前对话历史 —— 所以 skill 正文必须
                     // 自成一体。默认后台运行（`background: false` 则本轮等结果）。
                     if skill.metadata.is_forked() {
-                        return run_skill_forked(&skill, async_runner.as_ref(), &skill_name).await;
+                        return run_skill_forked(
+                            &skill,
+                            &args,
+                            async_runner.as_ref(),
+                            &skill_name,
+                            parent_thinking_effort,
+                        )
+                        .await;
                     }
 
                     // ── 应用 frontmatter 的运行时效果 ─────────────────────────
@@ -890,8 +912,10 @@ async fn apply_skill_runtime_effects(
 /// 子代理吃掉了，再塞回主上下文就是重复。
 async fn run_skill_forked(
     skill: &crate::agent::skills::loader::SkillDefinition,
+    args: &Value,
     async_runner: Option<&std::sync::Arc<crate::agent::subagent::runner::AsyncSubagentRunner>>,
     skill_name: &str,
+    parent_thinking_effort: Option<crate::types::ThinkingEffort>,
 ) -> Result<CoreToolResult, Box<dyn std::error::Error>> {
     let Some(runner) = async_runner else {
         let output = format!(
@@ -920,11 +944,17 @@ async fn run_skill_forked(
         None => crate::core::agents::SubagentType::GeneralPurpose,
     };
 
-    // 子代理的 prompt = skill 正文（`!cmd` 块先执行）。
-    let prompt = crate::agent::skills::loader::SkillLoader::render_skill_prompt(skill);
-
-    let request =
+    // 与内联 Skill 共用参数展开；覆盖值只进入子请求，不写父级设置或全局状态。
+    let prompt = render_skill_with_args(skill, args);
+    let mut request =
         crate::core::agents::SubAgentRequest::new(prompt).with_subagent_type(subagent_type.clone());
+    request.model = skill.metadata.model.clone();
+    request.effort = skill
+        .metadata
+        .effort
+        .as_deref()
+        .and_then(crate::types::ThinkingEffort::parse_skill_effort)
+        .or(parent_thinking_effort);
 
     let type_label = subagent_type.user_facing_name().to_string();
     let description = format!("skill `{}`", skill.name);

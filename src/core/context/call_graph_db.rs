@@ -44,6 +44,16 @@ fn last_sync_tokens() -> &'static Mutex<HashMap<PathBuf, Option<SystemTime>>> {
     LAST_SYNC_TOKEN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 污染锁不再展开 panic；拒绝复用受损缓存，由查询入口选择内存降级。
+fn cache_lock<'a, T>(
+    lock: &'a Mutex<T>,
+    name: &str,
+) -> Result<std::sync::MutexGuard<'a, T>, std::io::Error> {
+    lock.lock().map_err(|_| {
+        std::io::Error::other(format!("{name} lock poisoned; cached state is unavailable"))
+    })
+}
+
 /// 库文件位置：`.star/context/callgraph.db`（与 `index.json` 同目录）。
 pub fn db_path(root: &Path) -> PathBuf {
     project_root(root)
@@ -95,11 +105,12 @@ pub fn get_call_graph(root: &Path) -> Result<CallGraph, Box<dyn Error + Send + S
     let canonical = project_root(root);
     let token = index_token(&canonical);
 
-    let token_changed = {
-        let tokens = last_sync_tokens()
-            .lock()
-            .expect("callgraph token lock poisoned");
-        tokens.get(&canonical).copied() != Some(token)
+    let token_changed = match cache_lock(last_sync_tokens(), "callgraph token") {
+        Ok(tokens) => tokens.get(&canonical).copied() != Some(token),
+        Err(error) => {
+            log::warn!("{error}; rebuilding call graph in memory");
+            return crate::core::tools::codebase_search::build_call_graph(root);
+        }
     };
 
     if !token_changed {
@@ -119,10 +130,12 @@ pub fn get_call_graph(root: &Path) -> Result<CallGraph, Box<dyn Error + Send + S
                 report.removed,
                 report.fast_path_skips
             );
-            last_sync_tokens()
-                .lock()
-                .expect("callgraph token lock poisoned")
-                .insert(canonical.clone(), token);
+            match cache_lock(last_sync_tokens(), "callgraph token") {
+                Ok(mut tokens) => {
+                    tokens.insert(canonical.clone(), token);
+                }
+                Err(error) => log::warn!("{error}; sync token was not cached"),
+            }
             if let Ok(Some(graph)) = load_graph(&canonical) {
                 return Ok(graph);
             }
@@ -148,17 +161,19 @@ pub fn get_call_graph(root: &Path) -> Result<CallGraph, Box<dyn Error + Send + S
 /// 周期性 refiller 插入，清 token 会让每次查询都重新同步，等于禁用缓存。
 pub fn invalidate(root: &Path) {
     let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    last_sync_tokens()
-        .lock()
-        .expect("callgraph token lock poisoned")
-        .remove(&canonical);
+    match cache_lock(last_sync_tokens(), "callgraph token") {
+        Ok(mut tokens) => {
+            tokens.remove(&canonical);
+        }
+        Err(error) => log::warn!("{error}; call graph queries will bypass the cache"),
+    }
 }
 
 // ── 同步（写入） ──────────────────────────────────────────────────────────────
 
 /// 全量/增量同步。库损坏时隔离旧文件并重建一次。
 pub fn sync(root: &Path) -> Result<SyncReport, Box<dyn Error + Send + Sync>> {
-    let _guard = SYNC_LOCK.lock().expect("callgraph sync lock poisoned");
+    let _guard = cache_lock(&SYNC_LOCK, "callgraph sync")?;
     let started = Instant::now();
 
     let root = project_root(root);
@@ -974,6 +989,69 @@ fn now_millis() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn poisoned_callgraph_cache_is_rejected_without_reusing_its_state() {
+        let lock = std::sync::Arc::new(std::sync::Mutex::new(vec!["partial update"]));
+        let held = lock.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = held.lock().unwrap();
+            panic!("controlled callgraph cache poisoning");
+        })
+        .join()
+        .is_err());
+        for _ in 0..2 {
+            let error = super::cache_lock(&lock, "callgraph test").unwrap_err();
+            assert!(error.to_string().contains("callgraph test lock poisoned"));
+        }
+    }
+
+    /// 真正污染进程级锁的用例放到专用子进程，避免破坏后续库测试。
+    #[test]
+    fn poisoned_shared_callgraph_locks_keep_queries_available() {
+        for mode in ["token", "sync"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "core::context::call_graph_db::tests::poisoned_callgraph_process_probe",
+                    "--ignored",
+                    "--test-threads=1",
+                ])
+                .env("STAR_TEST_CALLGRAPH_POISON", mode)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{mode}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "dedicated subprocess entry for irreversible global lock poisoning"]
+    fn poisoned_callgraph_process_probe() {
+        let mode =
+            std::env::var("STAR_TEST_CALLGRAPH_POISON").expect("run through parent regression");
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/main.rs", "fn fresh_symbol() {}\n");
+        let poison = std::thread::spawn(move || {
+            if mode == "token" {
+                let _guard = last_sync_tokens().lock().unwrap();
+                panic!("controlled token poisoning");
+            } else {
+                let _guard = SYNC_LOCK.lock().unwrap();
+                panic!("controlled sync poisoning");
+            }
+        });
+        assert!(poison.join().is_err());
+        for _ in 0..2 {
+            invalidate(dir.path());
+            let graph = get_call_graph(dir.path()).unwrap();
+            assert!(!graph.find_symbols("fresh_symbol").is_empty());
+        }
+    }
+
     use super::*;
 
     fn write(root: &Path, rel: &str, content: &str) {

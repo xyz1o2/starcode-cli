@@ -195,24 +195,70 @@ pub(crate) async fn run_post_tool_failure_hooks(tool_call: &StarToolCall, error:
     .await;
 }
 
-/// 子代理**开始**时触发 `SubagentStart`。
-pub(crate) async fn run_subagent_start_hook(
+/// 子代理生命周期使用调用方目录和任务 ID，不读取进程级项目目录。
+pub(crate) async fn run_subagent_lifecycle_hook(
+    project_root: &std::path::Path,
+    event: crate::core::hooks::store::ManagedHookEvent,
     agent_id: &str,
-    description: &str,
+    prompt: &str,
     subagent_type: &str,
+    status: &str,
+    success: Option<bool>,
+    reason: Option<String>,
 ) {
-    let details = Some(serde_json::json!({
+    let details = serde_json::json!({
         "agent_id": agent_id,
-        "description": description,
+        "description": prompt,
         "subagent_type": subagent_type,
-    }));
-    let _ = run_stage_hooks(
-        "",
-        crate::core::hooks::store::ManagedHookEvent::SubagentStart,
-        "subagent_start",
-        details,
+    });
+    let result = crate::core::hooks::runner::run_hooks(
+        project_root,
+        event,
+        &crate::core::hooks::runner::HookRunContext {
+            user_message: prompt.to_owned(),
+            status: status.to_owned(),
+            tool_name: Some(subagent_type.to_owned()),
+            tool_arguments: Some(details.to_string()),
+            tool_success: success,
+            stop_reason: reason,
+            stop_hook_active: false,
+            tool_call_id: None,
+        },
     )
     .await;
+    // 生命周期通知沿用原先的非阻断行为，失败仍记录可诊断原因。
+    match result {
+        Ok(results) => {
+            for result in results.into_iter().filter(|result| !result.success) {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[WARN] {status} hook [{}] failed: {}",
+                    result.name,
+                    hook_result_reason(&result)
+                ));
+            }
+        }
+        Err(error) => crate::utils::logging::append_debug_log_line(&format!(
+            "[WARN] {status} hook engine error: {error}"
+        )),
+    }
+}
+
+/// 临时项目中的受控生命周期记录器，不修改用户配置或进程环境。
+#[cfg(all(test, unix))]
+pub(crate) async fn install_subagent_hook_recorder(project_root: &std::path::Path) {
+    use crate::core::hooks::store::{save_store, HookStore, ManagedHook, ManagedHookEvent};
+    let hooks = [ManagedHookEvent::SubagentStart, ManagedHookEvent::SubagentStop]
+        .into_iter()
+        .map(|event| ManagedHook {
+            name: event.as_str().to_owned(), event,
+            command: "printf '%s\\t%s\\t%s\\t%s\\n' \"$STAR_HOOK_EVENT\" \"$STAR_HOOK_STATUS\" \"$STAR_HOOK_TOOL_SUCCESS\" \"$STAR_HOOK_TOOL_ARGUMENTS\" >> lifecycle.log".to_owned(),
+            timeout_secs: 5, blocking: false, enabled: true, created_at: 0, updated_at: 0,
+            source: None, working_dir: None,
+            matcher: Some("general_purpose".to_owned()), once: false, status_message: None,
+        }).collect();
+    save_store(project_root, &HookStore { hooks })
+        .await
+        .unwrap();
 }
 
 /// 上下文压缩**完成**后触发 `PostCompact`。

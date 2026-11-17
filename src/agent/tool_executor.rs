@@ -1338,7 +1338,7 @@ impl ToolExecutor {
             match tool.create_invocation(args.clone()) {
                 Ok(mut invocation) => {
                     invocation.set_agent_parent_identity(self.config.agent_identity.clone());
-                    if name == "Agent" {
+                    if matches!(name, "Agent" | "Skill") {
                         self.attach_agent_parent_context(invocation.as_mut());
                     }
                     // 门禁先行：没批准就一步都不许往下走。
@@ -3313,6 +3313,256 @@ mod tests {
                 })
             })
         }
+    }
+
+    /// 从真实 Skill 文件经执行器、子代理循环到 HTTP，核对覆盖与继承的作用域。
+    #[tokio::test]
+    async fn forked_skills_use_calling_agent_settings_at_the_http_boundary() {
+        use crate::agent::subagent::{
+            notification::{NotificationQueue, NotificationStatus},
+            runner::{AsyncSubagentRunner, StarAgentRunner},
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _effort_guard =
+            crate::llm::thinking::TestEffortGuard::new(&crate::types::ThinkingEffort::Max);
+        let directory = tempfile::tempdir().unwrap();
+        let cases = [
+            (
+                "inherit_foreground",
+                "background: false\nmodel: inherit",
+                "gpt-5-current",
+                Some("low"),
+            ),
+            (
+                "off_foreground",
+                "background: false\neffort: off\nmodel: gpt-5-child-off",
+                "gpt-5-child-off",
+                None,
+            ),
+            (
+                "high_background",
+                "background: true\neffort: high\nmodel: gpt-5-child-high",
+                "gpt-5-child-high",
+                Some("high"),
+            ),
+            (
+                "inherit_background",
+                "background: true",
+                "gpt-5-current",
+                Some("low"),
+            ),
+            (
+                "high_concurrent",
+                "background: false\neffort: high",
+                "gpt-5-current",
+                Some("high"),
+            ),
+            (
+                "low_concurrent",
+                "background: false\neffort: low",
+                "gpt-5-current",
+                Some("low"),
+            ),
+        ];
+        for (name, metadata, _, _) in cases {
+            let path = directory.path().join(".star/skills").join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("SKILL.md"), format!(
+                "---\nname: {name}\ndescription: local regression\ncontext: fork\narguments:\n  - issue\n{metadata}\n---\ninspect {name} $issue\n"
+            )).unwrap();
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            for _ in 0..6 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                handlers.spawn(async move {
+                    let mut bytes = Vec::new();
+                    let mut buf = [0; 4096];
+                    let request = loop {
+                        let count = socket.read(&mut buf).await.unwrap();
+                        assert!(count > 0);
+                        bytes.extend_from_slice(&buf[..count]);
+                        if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let length = String::from_utf8_lossy(&bytes[..end]).lines().find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            }).unwrap();
+                            if bytes.len() >= end + 4 + length {
+                                break serde_json::from_slice::<Value>(&bytes[end + 4..end + 4 + length]).unwrap();
+                            }
+                        }
+                    };
+                    let body = "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"fork answer\"}}]}\n\ndata: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+                    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                    request
+                });
+            }
+            let mut requests = Vec::new();
+            while let Some(request) = handlers.join_next().await {
+                requests.push(request.unwrap());
+            }
+            requests
+        });
+        struct StopServer(tokio::task::AbortHandle);
+        impl Drop for StopServer {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let _server_guard = StopServer(server.abort_handle());
+        tokio::time::timeout(std::time::Duration::from_secs(40), async {
+            let mut config = Config::new(crate::core::config::ConfigParameters {
+                target_dir: directory.path().to_owned(),
+                core_tools: Some(Vec::new()),
+                mcp_enabled: Some(false),
+                enable_agents: Some(false),
+                ..Default::default()
+            });
+            config.initialize().await.unwrap();
+            #[cfg(unix)]
+            crate::agent::hooks::install_subagent_hook_recorder(directory.path()).await;
+            let config = Arc::new(config);
+            let stale = StarClient::new(
+                "local-key",
+                Some("stale-model".into()),
+                Some("http://127.0.0.1:1/v1".into()),
+                Some(true),
+                Some("local-test".into()),
+            );
+            let current = StarClient::new(
+                "local-key",
+                Some("gpt-5-current".into()),
+                Some(endpoint),
+                Some(true),
+                Some("local-test".into()),
+            );
+            let queue = Arc::new(tokio::sync::Mutex::new(NotificationQueue::new()));
+            let runner = Arc::new(AsyncSubagentRunner::new(
+                StarAgentRunner::shared(stale.clone(), config.clone()),
+                queue.clone(),
+            ));
+            let cell = crate::agent::model_switch::new_cell();
+            let skill = crate::agent::tools::skill::SkillTool::new(stale.clone(), config.clone())
+                .with_async_runner(runner)
+                .with_model_switch_cell(cell.clone());
+            let registry = Arc::new(ToolRegistry::new(config.clone()));
+            registry.register_tool(Arc::new(skill));
+            let bus = config.runtime_message_bus().unwrap();
+            bus.set_approval_mode(crate::core::policy::types::ApprovalMode::BypassPermissions)
+                .await;
+            let executor = ToolExecutor::new(stale, registry, Some(bus), config);
+            executor.set_agent_parent_client(&current);
+            executor.set_agent_parent_thinking_effort(crate::types::ThinkingEffort::Low);
+            executor.set_agent_parent_context(&[crate::types::StarMessage::user(
+                "private parent history",
+            )]);
+            let call = |name: &str| StarToolCall {
+                id: name.into(),
+                call_type: "function".into(),
+                function: crate::types::StarToolCallFunction {
+                    name: "Skill".into(),
+                    arguments: json!({"skill": name, "args": ["issue-42"]}).to_string(),
+                },
+            };
+            for (name, metadata, _, _) in &cases[..4] {
+                let result = executor.execute(&call(name), None, None).await;
+                assert!(result.success, "{name}: {result:?}");
+                if metadata.contains("background: true") {
+                    let id = result.data.unwrap()["agent_id"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned();
+                    loop {
+                        if let Some(notification) =
+                            queue.lock().await.drain_for_next_turn().into_iter().next()
+                        {
+                            assert_eq!(notification.task_id, id);
+                            assert_eq!(
+                                notification.status,
+                                NotificationStatus::Completed,
+                                "{}",
+                                notification.result
+                            );
+                            assert_eq!(notification.result, "fork answer");
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                } else {
+                    assert_eq!(result.output.as_deref(), Some("fork answer"));
+                }
+            }
+            let high = call("high_concurrent");
+            let low = call("low_concurrent");
+            let (high, low) = tokio::join!(
+                executor.execute(&high, None, None),
+                executor.execute(&low, None, None)
+            );
+            assert!(high.success, "{high:?}");
+            assert!(low.success, "{low:?}");
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), cases.len());
+            for (name, _, model, effort) in cases {
+                let request = requests
+                    .iter()
+                    .find(|request| {
+                        request["messages"]
+                            .to_string()
+                            .contains(&format!("inspect {name} issue-42"))
+                    })
+                    .unwrap_or_else(|| panic!("missing expanded prompt for {name}: {requests:?}"));
+                assert_eq!(request["model"], model);
+                assert_eq!(
+                    request.get("reasoning_effort").and_then(Value::as_str),
+                    effort,
+                    "{name}: {request}"
+                );
+                assert!(!request["messages"]
+                    .to_string()
+                    .contains("private parent history"));
+            }
+            assert_eq!(
+                *executor.agent_parent_thinking_effort.read().unwrap(),
+                crate::types::ThinkingEffort::Low
+            );
+            assert_eq!(
+                executor.agent_parent_client.read().unwrap().model,
+                "gpt-5-current"
+            );
+            assert_eq!(
+                crate::llm::thinking::current_effort(),
+                crate::types::ThinkingEffort::Max
+            );
+            assert!(crate::agent::model_switch::take(&cell).await.is_none());
+            #[cfg(unix)]
+            {
+                let log = std::fs::read_to_string(directory.path().join("lifecycle.log")).unwrap();
+                let mut events = std::collections::HashMap::<String, Vec<String>>::new();
+                for line in log.lines() {
+                    let fields = line.splitn(4, '\t').collect::<Vec<_>>();
+                    let details: Value = serde_json::from_str(fields[3]).unwrap();
+                    let id = details["agent_id"].as_str().unwrap();
+                    assert!(!id.is_empty());
+                    if fields[0] == "SubagentStop" {
+                        assert_eq!(fields[2], "true");
+                    }
+                    events
+                        .entry(id.to_owned())
+                        .or_default()
+                        .push(fields[0].to_owned());
+                }
+                assert_eq!(events.len(), cases.len());
+                for events in events.values() {
+                    assert_eq!(events, &["SubagentStart", "SubagentStop"]);
+                }
+            }
+        })
+        .await
+        .expect("forked Skill HTTP regression must finish");
     }
 
     #[test]

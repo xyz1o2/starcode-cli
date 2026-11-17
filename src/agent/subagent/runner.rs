@@ -213,6 +213,61 @@ impl StarAgentRunner {
 
     async fn run_with_control(
         &self,
+        mut request: SubAgentRequest,
+        sink: Option<SubAgentProgressSink>,
+        stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<SubAgentResult, SubAgentError> {
+        use crate::core::hooks::store::ManagedHookEvent;
+        let identity = request
+            .identity
+            .get_or_insert_with(|| format!("agent-{}", uuid::Uuid::new_v4()))
+            .clone();
+        let prompt = request.prompt.clone();
+        let kind = request.subagent_type.as_str();
+        crate::agent::hooks::run_subagent_lifecycle_hook(
+            self.config.target_dir(),
+            ManagedHookEvent::SubagentStart,
+            &identity,
+            &prompt,
+            kind,
+            "subagent_start",
+            None,
+            None,
+        )
+        .await;
+        let result = self.run_inner(request, sink, stop.clone()).await;
+        let stopped = stop
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst));
+        let reason = if stopped {
+            Some(match result.as_ref().err() {
+                Some(error) => format!("SubAgent stopped; {error}"),
+                None => "SubAgent stopped".to_owned(),
+            })
+        } else {
+            result.as_ref().err().map(ToString::to_string)
+        };
+        crate::agent::hooks::run_subagent_lifecycle_hook(
+            self.config.target_dir(),
+            ManagedHookEvent::SubagentStop,
+            &identity,
+            &prompt,
+            kind,
+            if stopped {
+                "subagent_stopped"
+            } else {
+                "subagent_stop"
+            },
+            Some(result.is_ok() && !stopped),
+            reason,
+        )
+        .await;
+        result
+    }
+
+    /// 所有普通返回均由外层统一发布结束通知；不保证进程退出或外层强制中止。
+    async fn run_inner(
+        &self,
         request: SubAgentRequest,
         sink: Option<SubAgentProgressSink>,
         stop: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -265,16 +320,6 @@ impl StarAgentRunner {
         } else {
             None
         };
-        // 子代理开始 —— 外部 harness 靠这个事件知道"多了一个干活的"。
-        // 之前 `SubagentStop` 只在**失败**时触发，成功路径静悄悄，外部看不到
-        // 子代理的完整生命周期。
-        crate::agent::hooks::run_subagent_start_hook(
-            "",
-            &request.prompt,
-            request.subagent_type.as_str(),
-        )
-        .await;
-
         // 共享注册表的 runner 可能属于父级，以执行器传来的真实调用深度为下界。
         let child_depth = child_depth(request.parent_depth, self.config.recursion_depth)?;
 
@@ -540,6 +585,56 @@ async fn emit_team_snapshot(hub: &crate::agent::messaging::SharedAgentRouter) {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_hooks_isolate_projects_and_close_failed_attempts() {
+        async fn attempt(root: &std::path::Path, cancelled: bool) {
+            crate::agent::hooks::install_subagent_hook_recorder(root).await;
+            let config = Arc::new(Config::new(crate::core::config::ConfigParameters {
+                target_dir: root.to_owned(),
+                ..Default::default()
+            }));
+            let runner = StarAgentRunner::new(StarClient::new("", None, None, None, None), config);
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(cancelled));
+            let result = runner
+                .run_with_control(
+                    SubAgentRequest::new("local validation failure").with_parent_depth(usize::MAX),
+                    None,
+                    Some(stop),
+                )
+                .await;
+            assert!(result.is_err());
+            let log = std::fs::read_to_string(root.join("lifecycle.log")).unwrap();
+            let lines = log
+                .lines()
+                .map(|line| line.splitn(4, '\t').collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+            assert_eq!(lines.len(), 2);
+            assert_eq!(lines[0][0], "SubagentStart");
+            assert_eq!(lines[1][0], "SubagentStop");
+            assert_eq!(
+                lines[1][1],
+                if cancelled {
+                    "subagent_stopped"
+                } else {
+                    "subagent_stop"
+                }
+            );
+            assert_eq!(lines[1][2], "false");
+            let start: serde_json::Value = serde_json::from_str(lines[0][3]).unwrap();
+            let end: serde_json::Value = serde_json::from_str(lines[1][3]).unwrap();
+            assert_eq!(start["agent_id"], end["agent_id"]);
+            assert!(start["agent_id"].as_str().unwrap().starts_with("agent-"));
+        }
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(attempt(first.path(), false), attempt(second.path(), true));
+        })
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn child_model_override_keeps_parent_provider_endpoint_and_model() {
         let parent = crate::agent::StarAgent::new_for_runtime_settings_test_with_provider(Some(
@@ -734,6 +829,8 @@ mod tests {
         use crate::core::tools::tools::BaseDeclarativeTool;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let directory = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        crate::agent::hooks::install_subagent_hook_recorder(directory.path()).await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -825,6 +922,20 @@ mod tests {
                 assert!(stop.load(std::sync::atomic::Ordering::SeqCst));
             } else {
                 assert_eq!(first.unwrap().output, "original answer");
+            }
+            #[cfg(unix)]
+            {
+                let log = std::fs::read_to_string(directory.path().join("lifecycle.log")).unwrap();
+                let lines = log.lines().map(|line| line.splitn(4, '\t').collect::<Vec<_>>()).collect::<Vec<_>>();
+                assert_eq!(lines.len(), 2);
+                assert_eq!(lines[0][0], "SubagentStart");
+                assert_eq!(lines[1][0], "SubagentStop");
+                assert_eq!(lines[1][2], if fail_first || cancel_first { "false" } else { "true" });
+                assert_eq!(lines[1][1], if cancel_first { "subagent_stopped" } else { "subagent_stop" });
+                for fields in &lines {
+                    let details: serde_json::Value = serde_json::from_str(fields[3]).unwrap();
+                    assert_eq!(details["agent_id"], "agent-original");
+                }
             }
             let before = tokio::fs::read(config.storage().project_subagent_sessions_dir().join("agent-original.json")).await.unwrap();
             let original = crate::agent::subagent::session::AgentSession::load(config.storage(), "agent-original").await.unwrap();
