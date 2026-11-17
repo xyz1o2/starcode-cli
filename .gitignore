@@ -27,3 +27,4 @@ logs/
 !tests/snapshots/ui/spinner_explicit_phase.snap
 !tests/snapshots/ui/resume_argument_help.snap
 !tests/snapshots/ui/agent_selector_viewing.snap
+skills-lock.json
