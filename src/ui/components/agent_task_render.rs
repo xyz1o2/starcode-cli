@@ -120,7 +120,7 @@ fn render_agent_header(entry: &ChatEntry, area_width: u16, theme: &Theme) -> Vec
         AgentTaskStatus::Running => theme.warning,
         AgentTaskStatus::Completed => theme.success,
         AgentTaskStatus::Failed | AgentTaskStatus::Rejected => theme.error,
-        AgentTaskStatus::Background => theme.inactive,
+        AgentTaskStatus::Background | AgentTaskStatus::Killed => theme.inactive,
     };
     spans.push(Span::styled(
         display_name.to_string(),
@@ -210,6 +210,7 @@ fn render_done_line(state: &ChatState, entry: &ChatEntry, area_width: u16) -> Ve
         // 用户拒绝授权（对标 renderToolUseRejectedMessage）
         AgentTaskStatus::Rejected => ("✗", theme.error, crate::core::i18n::t1("agent.rejected")),
         AgentTaskStatus::Failed => ("✗", theme.error, crate::core::i18n::t1("agent.failed")),
+        AgentTaskStatus::Killed => ("⊘", theme.inactive, crate::core::i18n::t1("agent.killed")),
         // 后台 agent 已交回控制权，不算"完成"
         AgentTaskStatus::Background => (
             "●",

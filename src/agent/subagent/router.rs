@@ -82,7 +82,7 @@ fn should_fork(input: &AgentToolFullInput) -> bool {
 }
 
 fn fork_requested(input: &AgentToolFullInput, enabled: bool) -> bool {
-    enabled && input.subagent_type.is_none() && should_fork(input)
+    enabled && input.resume.is_none() && input.subagent_type.is_none() && should_fork(input)
 }
 
 // ── 核心分流函数 ─────────────────────────────────────────────────────────
@@ -161,7 +161,7 @@ pub fn route_agent_call(
 
 fn generate_agent_id() -> String {
     let id = uuid::Uuid::new_v4().to_string();
-    format!("agent-{}", &id[..8])
+    format!("agent-{id}")
 }
 
 fn build_request(input: &AgentToolFullInput) -> SubAgentRequest {
@@ -169,6 +169,7 @@ fn build_request(input: &AgentToolFullInput) -> SubAgentRequest {
         prompt: input.prompt.clone(),
         max_rounds: input.max_rounds,
         model: input.model.clone(),
+        resume: input.resume.clone(),
         subagent_type: input
             .subagent_type
             .clone()
@@ -192,6 +193,7 @@ mod tests {
             name: None,
             isolation: None,
             model: None,
+            resume: None,
             background: None,
             max_rounds: None,
             parent_depth: 0,

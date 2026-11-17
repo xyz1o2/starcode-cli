@@ -9,6 +9,30 @@ use tokio::sync::RwLock;
 
 const PLUGIN_MCP_SERVER_PREFIX: &str = "plugin:";
 
+use crate::core::mcp::types::join_call_and_reconnect_errors;
+
+/// 「刷新结果 + 工具缓存」→ 这次调用能不能继续。
+///
+/// 纯函数，好让"刷新失败不许变成 Tool not found"这条规则能直接被测，
+/// 不必真的连一个 MCP server。
+///
+/// - 刷新失败 → 原样返回刷新错误。**不能**落到"工具不存在"的结论上：
+///   那会把"没问成"说成"没有"。
+/// - 刷新成功但缓存里没有这个工具 → `Tool X not found in server Y`。
+/// - 刷新成功且工具在 → `Ok(())`，调用继续。
+fn resolve_tool_call(
+    server_name: &str,
+    tool_name: &str,
+    refresh: Result<(), McpError>,
+    cached_tools: &[MCPTool],
+) -> Result<(), McpError> {
+    refresh?;
+    if !cached_tools.iter().any(|t| t.name == tool_name) {
+        return Err(format!("Tool {} not found in server {}", tool_name, server_name).into());
+    }
+    Ok(())
+}
+
 pub struct MCPManager {
     servers: Arc<RwLock<HashMap<String, MCPServer>>>,
     plugin_server_names: Arc<RwLock<Vec<String>>>,
@@ -103,21 +127,25 @@ impl MCPManager {
             .get_mut(server_name)
             .ok_or_else(|| format!("Server {} not found", server_name))?;
 
-        let _ = server.refresh_tools().await;
-
-        if !server.get_tools().iter().any(|t| t.name == tool_name) {
-            return Err(format!("Tool {} not found in server {}", tool_name, server_name).into());
-        }
+        // 刷新失败必须**让这次调用失败**，不能吞掉。
+        //
+        // 以前是 `let _ = server.refresh_tools().await;`：刷新失败后接着用
+        // **空/过期缓存**判断工具存在与否，于是"刷新失败"（连不上、协议
+        // 错误、权限问题）被报成 "Tool X not found in server Y" —— 一个
+        // 看起来像"这个 server 没有这个工具"的结论，实际是"我们没问成"。
+        // 现在刷新错误按原样带出去，工具是否存在只在刷新成功后才判断。
+        let refresh = server.refresh_tools().await;
+        resolve_tool_call(server_name, tool_name, refresh, server.get_tools())?;
 
         match server.call_tool(tool_name, arguments.clone()).await {
             Ok(result) => Ok(result),
-            Err(e) => {
-                if server.try_reconnect().await.is_ok() {
-                    server.call_tool(tool_name, arguments).await
-                } else {
-                    Err(e)
-                }
-            }
+            Err(e) => match server.try_reconnect().await {
+                Ok(()) => server.call_tool(tool_name, arguments).await,
+                // 重连也失败时，**两段原因都要留着**：最初那次调用为什么失败，
+                // 以及重连为什么失败。以前只报第一段，"重连失败"这个真正的
+                // 现场信息被吞掉，排查时只能看到一个已经过时的错误。
+                Err(reconnect_err) => Err(join_call_and_reconnect_errors(&e, &reconnect_err)),
+            },
         }
     }
 
@@ -400,6 +428,196 @@ mod split_disambiguation_tests {
         assert_eq!(
             manager.split_mcp_tool_name("mcp__plugin_exa_exa__do").await,
             Some(("plugin:exa:exa".to_string(), "do".to_string()))
+        );
+    }
+}
+
+#[cfg(test)]
+mod call_tool_error_tests {
+    use super::*;
+
+    fn tool(name: &str) -> MCPTool {
+        MCPTool {
+            name: name.to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    /// 刷新失败时，**不能**报成 "Tool not found" —— 那会把"没问成"说成
+    /// "这个 server 没有这个工具"。
+    #[test]
+    fn a_failed_refresh_is_never_reported_as_a_missing_tool() {
+        let err = resolve_tool_call(
+            "srv",
+            "do_thing",
+            Err("mcp server closed transport".into()),
+            &[],
+        )
+        .expect_err("刷新失败必须让调用失败");
+
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("not found in server"),
+            "刷新失败不能被报成工具不存在：{msg}"
+        );
+        assert!(
+            msg.contains("mcp server closed transport"),
+            "刷新失败的原因必须保留：{msg}"
+        );
+    }
+
+    /// 刷新失败 + 缓存里其实有那个工具：仍然必须失败（刷新失败是硬错误），
+    /// 且原因不能被"工具存在"掩盖。
+    #[test]
+    fn a_failed_refresh_wins_over_a_populated_cache() {
+        let err = resolve_tool_call(
+            "srv",
+            "do_thing",
+            Err("tools/list timed out".into()),
+            &[tool("do_thing")],
+        )
+        .expect_err("刷新失败必须让调用失败");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tools/list timed out"),
+            "刷新失败的原因必须保留：{msg}"
+        );
+        assert!(
+            !msg.contains("not found in server"),
+            "有缓存也不该绕过刷新失败：{msg}"
+        );
+    }
+
+    /// 刷新成功、工具确实不在 → 才是 "Tool not found"。
+    #[test]
+    fn a_successful_refresh_reports_a_genuinely_missing_tool() {
+        let err = resolve_tool_call("srv", "do_thing", Ok(()), &[tool("other")])
+            .expect_err("工具不存在必须报错");
+        assert_eq!(
+            err.to_string(),
+            "Tool do_thing not found in server srv",
+            "只有刷新成功后才允许下'工具不存在'的结论"
+        );
+    }
+
+    /// 刷新成功、工具在 → 放行。
+    #[test]
+    fn a_successful_refresh_with_the_tool_present_passes() {
+        resolve_tool_call("srv", "do_thing", Ok(()), &[tool("do_thing")])
+            .expect("工具存在时不该报错");
+    }
+
+    /// 重连失败时，两段原因都要留着。
+    #[test]
+    fn a_failed_reconnect_keeps_both_reasons() {
+        let call_err: McpError = "tool call timed out".into();
+        let reconnect_err: McpError = "Max retries (5) exhausted for server srv".into();
+
+        let msg = join_call_and_reconnect_errors(&call_err, &reconnect_err).to_string();
+        assert!(
+            msg.contains("tool call timed out"),
+            "首次调用失败的原因必须保留：{msg}"
+        );
+        assert!(
+            msg.contains("Max retries (5) exhausted"),
+            "重连失败的原因必须保留：{msg}"
+        );
+    }
+
+    /// 通过 manager 真实路径验证：刷新失败时，错误会**原样**报出，而不是
+    /// 变成 "Tool not found in server ..."。
+    ///
+    /// 用一个**不支持的 transport 类型** —— `ensure_connected` 会直接返回
+    /// 确定性的错误，不会去起任何子进程，也不需要网络（跨平台一致）。
+    #[tokio::test]
+    async fn a_manager_call_reports_the_refresh_failure_verbatim() {
+        let manager = MCPManager::new();
+        manager
+            .add_server(MCPServerConfig {
+                name: "srv".to_string(),
+                transport: TransportConfig {
+                    transport_type: "not-a-real-transport".to_string(),
+                    command: None,
+                    args: None,
+                    env: None,
+                    url: None,
+                    headers: None,
+                },
+                command: None,
+                args: None,
+                env: None,
+                disabled: None,
+            })
+            .await
+            .unwrap();
+
+        let err = manager
+            .call_tool("srv", "do_thing", serde_json::json!({}))
+            .await
+            .expect_err("刷新失败必须让调用失败");
+
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("not found in server"),
+            "刷新失败不能被报成工具不存在：{msg}"
+        );
+        assert!(
+            msg.contains("unsupported MCP transport"),
+            "刷新失败的原因必须原样带出：{msg}"
+        );
+    }
+
+    /// 同一个 server 上：刷新失败发生在**已有缓存**之后，也一样不许变成
+    /// "Tool not found" —— 缓存里有工具不代表这次刷新成功了。
+    #[tokio::test]
+    async fn a_manager_call_reports_the_refresh_failure_even_with_cached_tools() {
+        let manager = MCPManager::new();
+        manager
+            .add_server(MCPServerConfig {
+                name: "srv".to_string(),
+                transport: TransportConfig {
+                    transport_type: "not-a-real-transport".to_string(),
+                    command: None,
+                    args: None,
+                    env: None,
+                    url: None,
+                    headers: None,
+                },
+                command: None,
+                args: None,
+                env: None,
+                disabled: None,
+            })
+            .await
+            .unwrap();
+
+        // 手工塞一个缓存，模拟"之前发现过这个工具"。
+        {
+            let mut servers = manager.servers.write().await;
+            let srv = servers.get_mut("srv").expect("server 在册");
+            srv.add_tool(tool("do_thing"));
+        }
+        assert_eq!(
+            manager.get_cached_tools("srv").await.map(|t| t.len()),
+            Some(1),
+            "缓存里应有这个工具"
+        );
+
+        let err = manager
+            .call_tool("srv", "do_thing", serde_json::json!({}))
+            .await
+            .expect_err("刷新失败必须让调用失败");
+
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("not found in server"),
+            "有缓存也不该绕过刷新失败：{msg}"
+        );
+        assert!(
+            msg.contains("unsupported MCP transport"),
+            "刷新失败的原因必须原样带出：{msg}"
         );
     }
 }

@@ -11,9 +11,32 @@ use ratatui::{
 
 use crate::core::i18n;
 
-pub fn max_help_scroll(terminal_height: u16) -> u16 {
+pub fn max_help_scroll(terminal_height: u16, terminal_width: u16) -> u16 {
     let viewport = terminal_height.saturating_sub(6);
-    (help_lines().len() as u16).saturating_sub(viewport)
+    (wrapped_help_lines(terminal_width)
+        .len()
+        .min(u16::MAX as usize) as u16)
+        .saturating_sub(viewport)
+}
+
+fn wrapped_help_lines(terminal_width: u16) -> Vec<Line<'static>> {
+    let width = 80
+        .min(terminal_width.saturating_sub(8))
+        .saturating_sub(2)
+        .max(1);
+    help_lines()
+        .into_iter()
+        .flat_map(|line| {
+            if line.spans.iter().all(|span| span.content.is_empty()) {
+                vec![Line::from("")]
+            } else {
+                crate::ui::utils::render::wrap_spans_to_width(line.spans, width as usize)
+                    .into_iter()
+                    .map(Line::from)
+                    .collect()
+            }
+        })
+        .collect()
 }
 
 fn help_lines() -> Vec<Line<'static>> {
@@ -39,6 +62,8 @@ fn help_lines() -> Vec<Line<'static>> {
                 ("Enter".to_string(), i18n::t1("ui.help.input.enter")),
                 ("Alt+P".to_string(), i18n::t1("ui.help.input.fold")),
                 ("Backspace".to_string(), i18n::t1("ui.help.input.backspace")),
+                ("Ctrl+Z".to_string(), i18n::t1("ui.help.input.undo")),
+                ("Ctrl+Y".to_string(), i18n::t1("ui.help.input.yank_redo")),
             ],
         ),
         (
@@ -146,8 +171,39 @@ fn help_lines() -> Vec<Line<'static>> {
     lines
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrolling_help_reaches_the_last_line() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let max = max_help_scroll(24, 100);
+        terminal
+            .draw(|f| render_help_popup(f, f.area(), max))
+            .unwrap();
+        let drawn = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        let normalized = drawn
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+        let expected = i18n::t1("ui.help.tip.confirm")
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+        assert!(normalized.contains(&expected));
+    }
+}
+
 pub fn render_help_popup(f: &mut Frame, area: Rect, scroll: u16) {
-    let lines = help_lines();
+    let lines = wrapped_help_lines(area.width);
     let content_height = lines.len();
     let height = (content_height as u16 + 2).min(area.height.saturating_sub(4));
     let width = 80.min(area.width.saturating_sub(8));
@@ -166,7 +222,8 @@ pub fn render_help_popup(f: &mut Frame, area: Rect, scroll: u16) {
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .title(i18n::t1("ui.help.block")),
+            .title(i18n::t1("ui.help.block"))
+            .title_bottom(" ↑↓ PgUp/PgDn Home/End · Esc "),
     );
 
     f.render_widget(Clear, popup_area);

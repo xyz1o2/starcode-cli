@@ -425,6 +425,7 @@ fn render_teammate_view(state: &ChatState, area_width: u16) -> Option<Vec<Line<'
             theme.error
         }
         crate::types::AgentTaskStatus::Background => theme.info,
+        crate::types::AgentTaskStatus::Killed => theme.inactive,
     };
 
     let hint = "Esc to return";
@@ -482,11 +483,13 @@ fn render_teammate_view(state: &ChatState, area_width: u16) -> Option<Vec<Line<'
     let mut lines = vec![Line::from(header), Line::from("")];
 
     if info.sub_entries.is_empty() {
+        let stopped_label = crate::core::i18n::t1("agent.killed");
         let detail = match info.status {
             crate::types::AgentTaskStatus::Failed | crate::types::AgentTaskStatus::Rejected => {
                 info.last_tool_info.as_deref().unwrap_or("Task failed")
             }
             crate::types::AgentTaskStatus::Completed => "Task completed without tool calls",
+            crate::types::AgentTaskStatus::Killed => stopped_label.as_str(),
             crate::types::AgentTaskStatus::Running | crate::types::AgentTaskStatus::Background => {
                 info.last_tool_info
                     .as_deref()

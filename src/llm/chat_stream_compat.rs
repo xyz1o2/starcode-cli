@@ -157,6 +157,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropping_stream_releases_pending_http_connection() {
+        assert_dropped_http_connection().await;
+    }
+
+    async fn assert_dropped_http_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for send_headers in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0; 4096];
+                loop {
+                    let count = socket.read(&mut buf).await.unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&buf[..count]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let length = String::from_utf8_lossy(&request[..end])
+                            .lines()
+                            .find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                if send_headers {
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"working\"}}]}\n\n").await.unwrap();
+                }
+                let _ = started_tx.send(());
+                let closed =
+                    tokio::time::timeout(std::time::Duration::from_secs(3), socket.read(&mut buf))
+                        .await
+                        .unwrap_or_else(|_| {
+                            panic!(
+                                "dropping the consumer must release HTTP: headers={send_headers}"
+                            )
+                        });
+                assert!(matches!(closed, Ok(0) | Err(_)));
+            });
+            struct StopServer(tokio::task::AbortHandle);
+            impl Drop for StopServer {
+                fn drop(&mut self) {
+                    self.0.abort();
+                }
+            }
+            let _guard = StopServer(server.abort_handle());
+            let adapter = crate::llm::rig_adapter::RigAdapter::openai_compatible(
+                "test-key".into(),
+                "test-model".into(),
+                format!("http://{addr}/v1"),
+                "local-test".into(),
+            );
+            let mut stream = adapter
+                .chat_stream_events(vec![crate::types::StarMessage::user("hello")], None)
+                .await
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), started_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            if send_headers {
+                let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(first, LlmEvent::TextChunk(_)));
+            }
+            drop(stream);
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn mislabeled_usage_frame_keeps_text_and_usage_without_duplicate_text() {
         let events = mock_stream(vec![
             serde_json::json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hello "}}]}),

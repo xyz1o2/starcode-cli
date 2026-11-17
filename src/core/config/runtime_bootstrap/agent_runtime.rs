@@ -215,12 +215,13 @@ fn register_agent_execution_tools(
 
     // ── Task Management Extensions ──────────────────────────
     use crate::core::tools::task_management::{
-        TaskGetTool, TaskListTool, TaskOutputTool, TaskUpdateTool,
+        TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
     };
     tool_registry.register_tool(Arc::new(TaskGetTool::new(config.clone())));
     tool_registry.register_tool(Arc::new(TaskListTool::new(config.clone())));
     tool_registry.register_tool(Arc::new(TaskUpdateTool::new(config.clone())));
     tool_registry.register_tool(Arc::new(TaskOutputTool::new(config.clone())));
+    tool_registry.register_tool(Arc::new(TaskStopTool::new(config.clone())));
 
     // ── Process Monitor ─────────────────────────────────────
     use crate::core::tools::monitor::MonitorTool;

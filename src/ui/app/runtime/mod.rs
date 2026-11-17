@@ -195,6 +195,36 @@ fn clear_without_cursor_query<B: ratatui::backend::Backend>(
     Ok(())
 }
 
+fn should_draw_ui(
+    dirty: bool,
+    key_events: usize,
+    animating: bool,
+    elapsed: Duration,
+    frame: Duration,
+) -> bool {
+    dirty && (key_events > 0 || !animating || elapsed >= frame)
+}
+
+enum UiWakeup {
+    Tick,
+    Key(Option<crossterm::event::Event>),
+    Stream(Option<StreamMessage>),
+}
+
+async fn wait_for_ui_activity(
+    keys: &mut mpsc::Receiver<crossterm::event::Event>,
+    stream: &mut mpsc::Receiver<StreamMessage>,
+    wait: Duration,
+    key_closed: bool,
+    stream_closed: bool,
+) -> UiWakeup {
+    tokio::select! {
+        _ = tokio::time::sleep(wait) => UiWakeup::Tick,
+        event = keys.recv(), if !key_closed => UiWakeup::Key(event),
+        message = stream.recv(), if !stream_closed => UiWakeup::Stream(message),
+    }
+}
+
 #[allow(unused_assignments)]
 pub async fn run_ui_loop(
     terminal: &mut RatatuiTerminal<CrosstermBackend<std::io::Stdout>>,
@@ -660,7 +690,13 @@ pub async fn run_ui_loop(
         }
 
         // 先处理流消息再绘制，避免已收到的正文多等一轮。
-        if needs_redraw {
+        if should_draw_ui(
+            needs_redraw,
+            key_event_count,
+            is_animating(state),
+            last_draw.elapsed(),
+            framerate,
+        ) {
             draw_frame_atomically(terminal, state)?;
             last_draw = Instant::now();
             needs_redraw = false;
@@ -671,40 +707,39 @@ pub async fn run_ui_loop(
         // 空闲且无动画时改为**阻塞等输入事件**，而不是睡一个帧预算再空转一轮 ——
         // 后者配合「恒为真的重绘门」等于 30Hz 满载轮询。
         // 有动画时仍按帧预算节流，让 spinner 保持目标帧率。
-        let wait = if is_animating(state) {
+        let wait = if needs_redraw || is_animating(state) {
             framerate.saturating_sub(last_draw.elapsed())
         } else {
             PERIODIC_TICK_INTERVAL.saturating_sub(last_periodic_tick.elapsed())
         };
         if !wait.is_zero() {
-            tokio::select! {
-                _ = tokio::time::sleep(wait) => {}
-                event = key_rx.recv(), if !key_channel_closed => {
-                    match event {
-                        Some(event) => pending_key_events.push_back(event),
-                        None => key_channel_closed = true,
-                    }
+            match wait_for_ui_activity(
+                &mut key_rx,
+                &mut rx,
+                wait,
+                key_channel_closed,
+                stream_channel_closed,
+            )
+            .await
+            {
+                UiWakeup::Tick => {}
+                UiWakeup::Key(Some(event)) => pending_key_events.push_back(event),
+                UiWakeup::Key(None) => key_channel_closed = true,
+                UiWakeup::Stream(Some(message)) => {
+                    crate::ui::services::stream::handle_stream_update(state, message, &agent_tx)
+                        .await?;
+                    stream_msg_count += 1;
+                    needs_redraw = true;
                 }
-                message = rx.recv(), if !stream_channel_closed => {
-                    match message {
-                        Some(message) => {
-                            crate::ui::services::stream::handle_stream_update(
-                                state, message, &agent_tx,
-                            ).await?;
-                            stream_msg_count += 1;
-                            needs_redraw = true;
-                        }
-                        None => {
-                            stream_channel_closed = true;
-                            if state.is_streaming || state.is_processing {
-                                state.current_status_line =
-                                    Some("Worker disconnected — press Enter to retry".to_string());
-                                state.is_streaming = false;
-                                state.is_processing = false;
-                                state.end_thinking();
-                                needs_redraw = true;
-                            }
-                        }
+                UiWakeup::Stream(None) => {
+                    stream_channel_closed = true;
+                    if state.is_streaming || state.is_processing {
+                        state.current_status_line =
+                            Some("Worker disconnected — press Enter to retry".to_string());
+                        state.is_streaming = false;
+                        state.is_processing = false;
+                        state.end_thinking();
+                        needs_redraw = true;
                     }
                 }
             }

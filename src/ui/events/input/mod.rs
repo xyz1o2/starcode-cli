@@ -1056,7 +1056,10 @@ pub async fn handle_key_event(
                 KeyCode::Up => state.help_scroll = state.help_scroll.saturating_sub(1),
                 KeyCode::Down | KeyCode::PageDown | KeyCode::End => {
                     let height = state.last_help_terminal_height;
-                    let max = crate::ui::components::help_popup::max_help_scroll(height);
+                    let max = crate::ui::components::help_popup::max_help_scroll(
+                        height,
+                        state.last_terminal_width,
+                    );
                     state.help_scroll = match key.code {
                         KeyCode::End => max,
                         KeyCode::PageDown => state.help_scroll.saturating_add(10).min(max),
@@ -2181,8 +2184,9 @@ mod tests {
         state.set_input_text("draft");
         state.show_help = true;
         state.last_help_terminal_height = 24;
+        state.last_terminal_width = 100;
         let (tx, _rx) = mpsc::channel(16);
-        let max = crate::ui::components::help_popup::max_help_scroll(24);
+        let max = crate::ui::components::help_popup::max_help_scroll(24, 100);
         assert!(max > 0);
         for (key, expected) in [(KeyCode::End, max), (KeyCode::Home, 0)] {
             handle_key_event(

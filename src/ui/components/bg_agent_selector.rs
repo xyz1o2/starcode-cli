@@ -165,6 +165,7 @@ pub fn render_selector_with_limit(
             AgentTaskStatus::Completed => ("✓", theme.success),
             AgentTaskStatus::Failed | AgentTaskStatus::Rejected => ("×", theme.error),
             AgentTaskStatus::Background => ("·", theme.info),
+            AgentTaskStatus::Killed => ("⊘", theme.inactive),
         };
 
         // 2(❯) + 2(●) + label + 2 空格 + desc + 空隙 + stats。

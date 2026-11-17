@@ -1308,17 +1308,30 @@ fn late_background_launch_result_cannot_resurrect_completed_agent() {
         task_description: None,
         new_sub_entries: Vec::new(),
     };
-    handle_agent_task_update(&mut state, update(crate::types::AgentTaskStatus::Running));
-    handle_agent_task_update(&mut state, update(crate::types::AgentTaskStatus::Completed));
-    handle_agent_task_update(
-        &mut state,
-        update(crate::types::AgentTaskStatus::Background),
-    );
-    assert_eq!(
-        state.active_agent_tasks["fast-agent"].status,
+    for terminal in [
         crate::types::AgentTaskStatus::Completed,
-    );
-    assert!(state.background_agent_rows().is_empty());
+        crate::types::AgentTaskStatus::Killed,
+    ] {
+        state = ChatState::test_fixture();
+        handle_agent_task_update(&mut state, update(crate::types::AgentTaskStatus::Running));
+        handle_agent_task_update(&mut state, update(terminal.clone()));
+        let finished_at = state.active_agent_tasks["fast-agent"].finished_at;
+        assert!(finished_at.is_some());
+        for late in [
+            crate::types::AgentTaskStatus::Background,
+            crate::types::AgentTaskStatus::Running,
+        ] {
+            handle_agent_task_update(&mut state, update(late));
+        }
+        let info = &state.active_agent_tasks["fast-agent"];
+        assert_eq!(info.status, terminal);
+        assert_eq!(info.finished_at, finished_at);
+        assert!(state.background_agent_rows().is_empty());
+        let payload = crate::types::AgentTaskUpdatePayload::new("fast-agent", "Explore")
+            .with_status(terminal);
+        assert!(payload.is_resolved);
+        assert!(!payload.is_error);
+    }
 }
 
 #[tokio::test]

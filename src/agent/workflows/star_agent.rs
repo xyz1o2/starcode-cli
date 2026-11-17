@@ -890,6 +890,12 @@ impl StarAgent {
         crate::agent::abort::abort(&self.abort_flag);
     }
 
+    /// 后台任务控制与内部执行循环使用同一标志，避免两层中断状态分离。
+    pub(crate) fn bind_abort_handle(&mut self, flag: Arc<AtomicBool>) {
+        self.abort_flag = flag.clone();
+        self.inner.set_abort_flag(flag);
+    }
+
     pub fn abort_handle(&self) -> Arc<AtomicBool> {
         self.abort_flag.clone()
     }

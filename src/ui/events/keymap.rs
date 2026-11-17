@@ -52,7 +52,7 @@ pub enum GlobalBinding {
     WithdrawMessage,
     /// F1 — 帮助
     ToggleHelp,
-    /// Shift+Tab — 切换 Plan/Build
+    /// Shift+Tab — 循环切换权限模式
     TogglePlanMode,
     /// Alt+P — 折叠/展开长输入
     FoldInput,

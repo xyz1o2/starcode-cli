@@ -244,7 +244,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         core::config::settings_manager::get_settings_manager(),
         async {
             let store = crate::core::config::provider_store::ProviderStore::new();
-            (store.load().await.unwrap_or_default(), store)
+            (store.load().await, store)
         },
         async { std::env::current_dir() }
     );
@@ -253,6 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cwd = cwd?;
     let cwd_clone = cwd.clone(); // 克隆一份用于后台初始化
     let (provider_config, _provider_store) = provider_store_result;
+    let provider_config = provider_config.map_err(std::io::Error::other)?;
 
     // settings 依赖 settings_manager，但可以在加载后立即初始化 i18n
     let settings = settings_manager

@@ -35,6 +35,57 @@ fn wrapped_prompt_keeps_cursor_visible_in_short_viewports() {
 }
 
 #[test]
+fn stream_wakeups_do_not_bypass_frame_throttling() {
+    let frame = Duration::from_millis(33);
+    for elapsed_ms in 0..33 {
+        assert!(!should_draw_ui(
+            true,
+            0,
+            true,
+            Duration::from_millis(elapsed_ms),
+            frame
+        ));
+    }
+    assert!(should_draw_ui(true, 0, true, frame, frame));
+    assert!(should_draw_ui(true, 1, true, Duration::ZERO, frame));
+    assert!(should_draw_ui(true, 0, false, Duration::ZERO, frame));
+    assert!(!should_draw_ui(false, 1, false, frame, frame));
+}
+
+#[tokio::test]
+async fn stream_message_wakes_idle_ui_without_keyboard_input() {
+    let (_key_tx, mut key_rx) = mpsc::channel(1);
+    let (stream_tx, mut stream_rx) = mpsc::channel(1);
+    let sender = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        stream_tx
+            .send(StreamMessage::TextDelta {
+                message_id: 1,
+                content: "first token".into(),
+            })
+            .await
+            .unwrap();
+    });
+    let wake = tokio::time::timeout(
+        Duration::from_millis(200),
+        wait_for_ui_activity(
+            &mut key_rx,
+            &mut stream_rx,
+            Duration::from_secs(1),
+            false,
+            false,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        wake,
+        UiWakeup::Stream(Some(StreamMessage::TextDelta { .. }))
+    ));
+    sender.await.unwrap();
+}
+
+#[test]
 fn clear_without_query_repaints_identical_content() {
     use ratatui::{backend::TestBackend, widgets::Paragraph, Terminal};
     let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
@@ -42,11 +93,36 @@ fn clear_without_query_repaints_identical_content() {
         .draw(|f| f.render_widget(Paragraph::new("same content"), f.area()))
         .unwrap();
     let expected = terminal.backend().buffer().clone();
-    clear_without_cursor_query(&mut terminal).unwrap();
-    terminal
-        .draw(|f| f.render_widget(Paragraph::new("same content"), f.area()))
-        .unwrap();
-    assert_eq!(terminal.backend().buffer(), &expected);
+    for _ in 0..3 {
+        clear_without_cursor_query(&mut terminal).unwrap();
+        terminal
+            .draw(|f| f.render_widget(Paragraph::new("same content"), f.area()))
+            .unwrap();
+        assert_eq!(terminal.backend().buffer(), &expected);
+    }
+    for text in ["中文🙂  tail", "", " a "] {
+        let mut fresh = Terminal::new(TestBackend::new(20, 4)).unwrap();
+        fresh
+            .draw(|f| {
+                f.render_widget(
+                    Paragraph::new(text)
+                        .style(ratatui::style::Style::default().fg(ratatui::style::Color::Green)),
+                    f.area(),
+                )
+            })
+            .unwrap();
+        clear_without_cursor_query(&mut terminal).unwrap();
+        terminal
+            .draw(|f| {
+                f.render_widget(
+                    Paragraph::new(text)
+                        .style(ratatui::style::Style::default().fg(ratatui::style::Color::Green)),
+                    f.area(),
+                )
+            })
+            .unwrap();
+        assert_eq!(terminal.backend().buffer(), fresh.backend().buffer());
+    }
 }
 
 #[test]

@@ -5159,6 +5159,33 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn task_cancellation_ends_pending_approval_without_running_the_tool() {
+        let (executor, bus, runs) = counting_gate();
+        let mut receiver = bus.subscribe();
+        let token = tokio_util::sync::CancellationToken::new();
+        let cancel = token.clone();
+        let canceller = tokio::spawn(async move {
+            while let Ok(message) = receiver.recv().await {
+                if let Message::ToolConfirmationRequest(_) = message {
+                    cancel.cancel();
+                    return;
+                }
+            }
+            panic!("confirmation bus closed before request");
+        });
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            executor.execute(&counting_call(), None, Some(token)),
+        )
+        .await
+        .expect("task cancellation must release approval wait");
+        canceller.await.unwrap();
+        assert!(!result.success);
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!result.error.unwrap_or_default().contains("timed out"));
+    }
+
     /// 用户批准之后照常执行 —— 门禁没有把路堵死。
     #[tokio::test]
     async fn an_approved_confirmation_runs_the_tool() {

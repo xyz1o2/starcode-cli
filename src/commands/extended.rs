@@ -2216,6 +2216,50 @@ mod runtime_settings_tests {
     }
 
     #[tokio::test]
+    async fn workflow_commands_dispatch_edits_and_reject_extra_run_arguments() {
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        let (tx, mut rx) = mpsc::channel(4);
+        let next_id = state.next_message_id;
+        workflow_run(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            vec!["build".into(), "ignored".into()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.next_message_id, next_id);
+        assert!(rx.try_recv().is_err());
+        workflow_create(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            vec!["build".into(), "run checks".into()],
+        )
+        .await
+        .unwrap();
+        workflow_edit(
+            CommandContext {
+                state: &mut state,
+                agent_tx: &tx,
+            },
+            vec!["build".into(), "add lint".into()],
+        )
+        .await
+        .unwrap();
+        for expected in ["run checks", "add lint"] {
+            let AgentRequest::SendMessage { message, .. } = rx.try_recv().unwrap() else {
+                panic!("expected agent request");
+            };
+            assert!(message.contains(expected));
+            assert!(message.contains(".json") && message.contains(".sh"));
+            assert!(!message.contains(".md"));
+        }
+    }
+
+    #[tokio::test]
     async fn effort_queues_a_persistent_request_without_changing_active_state() {
         let mut state = crate::ui::state::ChatState::new();
         let original_effort = state.thinking_effort.clone();

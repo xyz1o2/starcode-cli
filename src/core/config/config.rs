@@ -661,6 +661,14 @@ impl Config {
             .as_ref()
             .and_then(|services| services.agent_hub())
     }
+    pub(crate) fn runtime_subagent_tasks(
+        &self,
+    ) -> Option<crate::agent::subagent::tasks::SharedSubagentTasks> {
+        self.runtime_services
+            .as_ref()
+            .map(|services| services.subagent_tasks())
+    }
+
     pub fn install_runtime_services(&mut self, runtime_services: RuntimeServices) {
         self.runtime_services = Some(Arc::new(runtime_services));
     }

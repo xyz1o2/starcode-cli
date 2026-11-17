@@ -3,6 +3,18 @@ use std::collections::HashMap;
 
 pub type McpError = Box<dyn std::error::Error + Send + Sync>;
 
+/// 保留调用失败与重连失败的两段原因，供 server 和 manager 共用。
+pub(super) fn join_call_and_reconnect_errors(
+    call_err: &McpError,
+    reconnect_err: &McpError,
+) -> McpError {
+    format!(
+        "MCP tool call failed: {}; reconnect failed: {}",
+        call_err, reconnect_err
+    )
+    .into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MCPServerStatus {
     Disconnected,

@@ -145,7 +145,11 @@ pub const USER_AGENT: &str = concat!("starcode-cli/", env!("CARGO_PKG_VERSION"))
 /// Forces HTTP/1.1 (SSE over HTTP/2 is unreliable on many LLM APIs)
 /// and enables gzip/brotli decompression.
 pub fn build_http_client(timeout_secs: u64, connect_timeout_secs: u64) -> reqwest::Client {
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder();
+    // 库测试只访问本机模拟服务；环境代理会继续持有上游连接，破坏取消断言。
+    #[cfg(test)]
+    let builder = builder.no_proxy();
+    builder
         .http1_only()
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs))

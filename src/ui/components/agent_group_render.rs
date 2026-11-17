@@ -154,7 +154,7 @@ fn render_agent_progress_lines(
         AgentTaskStatus::Running => Color::Yellow,
         AgentTaskStatus::Completed => Color::Green,
         AgentTaskStatus::Failed | AgentTaskStatus::Rejected => Color::Red,
-        AgentTaskStatus::Background => Color::DarkGray,
+        AgentTaskStatus::Background | AgentTaskStatus::Killed => Color::DarkGray,
     };
     let display_name = stat.name.as_deref().unwrap_or(&stat.agent_type);
     line1_spans.push(Span::styled(
@@ -261,6 +261,10 @@ fn render_agent_progress_lines(
             };
             (text, Color::Red)
         }
+        AgentTaskStatus::Killed => (
+            with_elapsed(&crate::core::i18n::t1("agent.killed"), stat),
+            Color::DarkGray,
+        ),
         AgentTaskStatus::Background => {
             let text = stat
                 .task_description

@@ -12,6 +12,7 @@ const MAX_WORKFLOW_TIMEOUT_SECS: u64 = 1800;
 struct WorkflowProcessGroup {
     #[cfg(unix)]
     id: u32,
+    armed: bool,
 }
 
 impl Drop for WorkflowProcessGroup {
@@ -19,7 +20,7 @@ impl Drop for WorkflowProcessGroup {
         #[cfg(unix)]
         {
             // spawn 已设置 process_group(0)，负 PID 只指向该命令自己的进程组。
-            if self.id > 0 && self.id <= i32::MAX as u32 {
+            if self.armed && self.id > 0 && self.id <= i32::MAX as u32 {
                 unsafe { libc::kill(-(self.id as i32), libc::SIGKILL) };
             }
         }
@@ -44,25 +45,56 @@ async fn run_workflow_command(
         .stderr(std::process::Stdio::piped());
     #[cfg(unix)]
     command.process_group(0);
-    let child = command.spawn().map_err(|error| error.to_string())?;
-    let group = WorkflowProcessGroup {
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let mut group = WorkflowProcessGroup {
         #[cfg(unix)]
         id: child.id().ok_or("Workflow process has no PID")?,
+        armed: true,
     };
-    let wait = child.wait_with_output();
-    tokio::pin!(wait);
-    let result = tokio::select! {
-        biased;
-        _ = async {
-            match signal {
-                Some(signal) => signal.cancelled().await,
-                None => std::future::pending::<()>().await,
-            }
-        } => Err("Workflow cancelled".into()),
-        _ = tokio::time::sleep_until(deadline) => Err("Workflow timed out".into()),
-        output = &mut wait => output.map_err(|error| error.to_string()),
+    let mut stdout = child.stdout.take().ok_or("Workflow stdout is not piped")?;
+    let mut stderr = child.stderr.take().ok_or("Workflow stderr is not piped")?;
+    let result = {
+        let wait = async {
+            use tokio::io::AsyncReadExt;
+            let read_stdout = async {
+                let mut bytes = Vec::new();
+                stdout.read_to_end(&mut bytes).await?;
+                Ok::<_, std::io::Error>(bytes)
+            };
+            let read_stderr = async {
+                let mut bytes = Vec::new();
+                stderr.read_to_end(&mut bytes).await?;
+                Ok::<_, std::io::Error>(bytes)
+            };
+            // 先并行排空管道，再收尸；在此之前组长 PID 保持被占用，取消清理不会误伤复用 PID。
+            let (stdout, stderr) = tokio::try_join!(read_stdout, read_stderr)?;
+            let status = child.wait().await?;
+            group.armed = false;
+            Ok::<_, std::io::Error>(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
+        };
+        tokio::pin!(wait);
+        let result = tokio::select! {
+            biased;
+            _ = async {
+                match signal {
+                    Some(signal) => signal.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => Err("Workflow cancelled".into()),
+            _ = tokio::time::sleep_until(deadline) => Err("Workflow timed out".into()),
+            output = &mut wait => output.map_err(|error| error.to_string()),
+        };
+        result
     };
-    drop(group);
+    if result.is_err() {
+        // 借用 child 的等待 future 已退出，先杀组再回收直接子进程。
+        drop(group);
+        let _ = child.kill().await;
+    }
     result
 }
 
@@ -388,6 +420,71 @@ mod tests {
         assert!(!marker.exists());
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn cancellation_and_dropped_execution_terminate_the_running_process_group() {
+        for drop_execution in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let marker = dir.path().join("child-pid");
+            let signal = tokio_util::sync::CancellationToken::new();
+            let task_signal = signal.clone();
+            let task_marker = marker.clone();
+            let task = tokio::spawn(async move {
+                let mut command = tokio::process::Command::new("bash");
+                command
+                    .args([
+                        "-c",
+                        "sleep 30 & printf '%s' \"$!\" > \"$1\"; wait",
+                        "workflow-test",
+                    ])
+                    .arg(task_marker);
+                run_workflow_command(
+                    &mut command,
+                    Some(&task_signal),
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                )
+                .await
+            });
+            let pid = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    if let Ok(value) = tokio::fs::read_to_string(&marker).await {
+                        if let Ok(pid) = value.parse::<u32>() {
+                            break pid;
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            if drop_execution {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                signal.cancel();
+                assert!(task.await.unwrap().unwrap_err().contains("cancelled"));
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    // 孤儿由系统 init 收尸；僵尸已停止执行，不等同仍存活的脚本。
+                    match tokio::fs::read_to_string(format!("/proc/{pid}/stat")).await {
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                        Ok(stat)
+                            if stat
+                                .rsplit_once(") ")
+                                .is_some_and(|(_, fields)| fields.starts_with('Z')) =>
+                        {
+                            break
+                        }
+                        _ => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn workflow_command_observes_cancellation_and_deadline() {
         let signal = tokio_util::sync::CancellationToken::new();
@@ -426,6 +523,37 @@ mod tests {
         .unwrap()
         .unwrap_err();
         assert!(error.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn json_steps_share_one_deadline_and_stop_before_later_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Arc::new(crate::core::config::Config::new(
+            crate::core::config::ConfigParameters {
+                target_dir: dir.path().to_path_buf(),
+                ..Default::default()
+            },
+        ));
+        let workflows = config.storage().project_workflows_dir();
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(
+            workflows.join("deadline.json"),
+            serde_json::json!({"steps": [
+                {"command": "sleep 0.7"},
+                {"command": "sleep 0.7"},
+                {"command": "touch should-not-exist"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let invocation = WorkflowTool::new(config)
+            .create_invocation(serde_json::json!({
+                "workflow": "deadline", "timeout_secs": 1
+            }))
+            .unwrap();
+        let error = invocation.execute(None, None).await.unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(!dir.path().join("should-not-exist").exists());
     }
 
     #[tokio::test]

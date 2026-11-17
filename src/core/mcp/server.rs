@@ -463,16 +463,22 @@ impl MCPServer {
             }
             Err(e) => {
                 drop(cli);
-                if self.try_reconnect().await.is_ok() {
-                    let cli_arc2 = self
-                        .client
-                        .as_ref()
-                        .ok_or("MCP client not connected after reconnect")?
-                        .clone();
-                    let mut cli2 = cli_arc2.lock().await;
-                    cli2.call_tool(tool_name, arguments).await
-                } else {
-                    Err(e)
+                match self.try_reconnect().await {
+                    Ok(()) => {
+                        let cli_arc2 = self
+                            .client
+                            .as_ref()
+                            .ok_or("MCP client not connected after reconnect")?
+                            .clone();
+                        let mut cli2 = cli_arc2.lock().await;
+                        cli2.call_tool(tool_name, arguments).await
+                    }
+                    Err(reconnect_error) => {
+                        Err(crate::core::mcp::types::join_call_and_reconnect_errors(
+                            &e,
+                            &reconnect_error,
+                        ))
+                    }
                 }
             }
         }
@@ -578,5 +584,81 @@ impl MCPServer {
 
     pub fn get_mcp_skills(&self) -> &[(String, String)] {
         &self.cached_mcp_skills
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::mcp::transport::Transport;
+    use crate::core::mcp::types::TransportConfig;
+
+    struct FailedCallTransport;
+
+    #[async_trait::async_trait]
+    impl Transport for FailedCallTransport {
+        async fn start(&self) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn send(&self, message: serde_json::Value) -> Result<(), McpError> {
+            // 初始化在 send 阶段成功，工具调用失败；不用子进程或网络。
+            if message["method"] == "tools/call" {
+                Err("original tool transport failure".into())
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn receive(&self) -> Result<Option<serde_json::Value>, McpError> {
+            Ok(Some(
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
+            ))
+        }
+
+        async fn close(&self) -> Result<(), McpError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_failure_preserves_reconnect_reason_at_server_boundary() {
+        for exhausted in [false, true] {
+            let mut server = MCPServer::new(MCPServerConfig {
+                name: "local-error-test".into(),
+                transport: TransportConfig {
+                    transport_type: "unsupported-test-transport".into(),
+                    command: None,
+                    args: None,
+                    env: None,
+                    url: None,
+                    headers: None,
+                },
+                command: None,
+                args: None,
+                env: None,
+                disabled: None,
+            });
+            server.client = Some(Arc::new(Mutex::new(McpClient::new(Box::new(
+                FailedCallTransport,
+            )))));
+            if exhausted {
+                server.retry_count = server.max_retries;
+            }
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                server.call_tool("inspect", serde_json::json!({})),
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("original tool transport failure"), "{error}");
+            if exhausted {
+                assert!(error.contains("Max retries (5) exhausted"), "{error}");
+            } else {
+                assert!(error.contains("unsupported MCP transport"), "{error}");
+            }
+        }
     }
 }

@@ -4,18 +4,12 @@
 
 use super::*;
 
-/// Prevent escape sequences from being split into independent key events due to crossterm's internal ESC timeout (~100ms).
-/// On affected terminals (legacy Windows console, WSL2 PTY, high-latency SSH),
-/// arrow key ESC [ A may be split into Esc + Char('[') + Char('A'),
-/// where Char fragments get collected by the character batching logic into char_buf and inserted as garbage into the input box.
+/// 尝试重组已被终端事件解析器拆开的 ESC 序列，避免片段进入正文。
 ///
-/// This guard uses timing heuristics to detect split sequences:
-/// 1. CSI introducer ('[' or 'O') appearing within 250ms after Esc → enter absorb mode
-/// 2. In absorb mode, all subsequent Char events are intercepted and collected into fragment_buf
-/// 3. After 500ms the window closes and collected bytes are reconstructed into a correct KeyEvent
-/// 4. If reconstruction succeeds, dispatch the reconstructed key event; otherwise discard the fragments
-///
-/// Safety assumption: A human cannot press a physical Esc key and then type '[' or 'O' within 250ms.
+/// Esc 后在 TRIGGER_WINDOW_MS 内出现 '[' / 'O' 才开始吸收，
+/// ABSORB_DURATION_MS 后按收集片段重建按键。当前窗口为 20 / 100ms；
+/// 这是兼顾独立 Esc 与正常文本的启发式，不保证恢复任意慢速拆分序列。
+/// 未识别片段按下方逻辑归还文本，不能假设用户不可能快速输入 Esc 后接 '['。
 pub(super) struct EscapeGuard {
     last_esc: Option<Instant>,
     absorbing_deadline: Option<Instant>,
@@ -27,9 +21,7 @@ pub(super) struct EscapeGuard {
 
 impl EscapeGuard {
     const CSI_INTRODUCERS: &[char] = &['[', 'O'];
-    // Escape sequences arrive as a burst of bytes within a few ms, even over
-    // high-latency connections (WSL2, SSH). Keep windows tight so standalone Esc
-    // (cancel, dismiss) responds instantly without absorbing subsequent keystrokes.
+    // 窗口保持较短以减少误吞正常输入；跨终端的最佳值需实测，不能仅凭网络延迟推断。
     const TRIGGER_WINDOW_MS: u64 = 20;
     const ABSORB_DURATION_MS: u64 = 100;
 

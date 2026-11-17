@@ -28,6 +28,7 @@ pub struct RuntimeServices {
     /// notification_queue 相同：子 config 经 `Arc` clone 自动继承，lead 与
     /// worker 共享同一个注册表和邮箱分家就永远不存在。
     agent_hub: Option<crate::agent::messaging::SharedAgentRouter>,
+    subagent_tasks: crate::agent::subagent::tasks::SharedSubagentTasks,
 }
 
 impl RuntimeServices {
@@ -45,6 +46,7 @@ impl RuntimeServices {
             notification_queue: None,
             model_switch_cell: None,
             agent_hub: None,
+            subagent_tasks: Arc::new(Mutex::new(Default::default())),
         }
     }
 
@@ -62,6 +64,18 @@ impl RuntimeServices {
 
     pub(crate) fn global_state(&self) -> Arc<GlobalState> {
         self.global_state.clone()
+    }
+
+    pub(crate) fn subagent_tasks(&self) -> crate::agent::subagent::tasks::SharedSubagentTasks {
+        self.subagent_tasks.clone()
+    }
+
+    pub(crate) fn with_subagent_tasks(
+        mut self,
+        tasks: crate::agent::subagent::tasks::SharedSubagentTasks,
+    ) -> Self {
+        self.subagent_tasks = tasks;
+        self
     }
 
     /// 设置或读取后台 SubAgent 通知队列

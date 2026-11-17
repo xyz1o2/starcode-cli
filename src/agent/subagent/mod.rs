@@ -12,6 +12,8 @@ pub mod notification;
 pub mod progress;
 pub mod router;
 pub mod runner;
+pub(crate) mod session;
+pub(crate) mod tasks;
 
 pub use fork::{ForkConfig, ForkManager, ForkStatus, ForkedSession};
 pub use notification::{

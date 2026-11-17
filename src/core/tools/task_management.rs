@@ -628,6 +628,347 @@ impl BaseDeclarativeTool for TaskUpdateTool {
     }
 }
 
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+    use crate::agent::subagent::notification::NotificationStatus;
+
+    #[tokio::test]
+    async fn background_output_is_shared_and_survives_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = crate::core::config::Config::new(crate::core::config::ConfigParameters {
+            target_dir: directory.path().to_owned(),
+            ..Default::default()
+        });
+        let bus = Arc::new(crate::core::confirmation_bus::MessageBus::new(
+            crate::core::policy::policy_engine::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let services = crate::core::config::RuntimeServices::new(
+            None,
+            bus,
+            None,
+            Arc::new(crate::core::state::GlobalState::new()),
+        );
+        let tasks = services.subagent_tasks();
+        config.install_runtime_services(services.clone());
+        assert!(Arc::ptr_eq(
+            &tasks,
+            &config.clone().runtime_subagent_tasks().unwrap()
+        ));
+        let config = Arc::new(config);
+        let tool = TaskOutputTool::new(config.clone());
+        let path = config
+            .storage()
+            .project_subagent_outputs_dir()
+            .join("agent-result.txt");
+        tasks
+            .lock()
+            .await
+            .register("agent-result", "inspect".into(), path.clone());
+        let invocation = tool
+            .create_invocation(serde_json::json!({"task_id": "agent-result"}))
+            .unwrap();
+        let result = invocation.execute(None, None).await.unwrap();
+        assert_eq!(result.data.unwrap()["status"], "running");
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&path, "final result").await.unwrap();
+        tasks
+            .lock()
+            .await
+            .finish("agent-result", NotificationStatus::Completed, None);
+        tasks
+            .lock()
+            .await
+            .finish("agent-result", NotificationStatus::Failed, None);
+        for _ in 0..2 {
+            let result = invocation.execute(None, None).await.unwrap();
+            assert_eq!(result.output, "final result");
+            assert_eq!(result.data.unwrap()["status"], "completed");
+        }
+        tasks
+            .lock()
+            .await
+            .register("agent-write-error", "inspect".into(), path);
+        tasks.lock().await.finish(
+            "agent-write-error",
+            NotificationStatus::Failed,
+            Some("disk full".into()),
+        );
+        let error = tool
+            .create_invocation(serde_json::json!({"task_id": "agent-write-error"}))
+            .unwrap()
+            .execute(None, None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("disk full"));
+    }
+
+    #[tokio::test]
+    async fn final_outputs_survive_a_fresh_runtime_and_corruption_is_explicit() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = crate::core::config::Config::new(crate::core::config::ConfigParameters {
+            target_dir: directory.path().to_owned(),
+            ..Default::default()
+        });
+        config.initialize().await.unwrap();
+        let tasks = config.runtime_subagent_tasks().unwrap();
+        let output_dir = config.storage().project_subagent_outputs_dir();
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        for (id, status) in [
+            ("done", NotificationStatus::Completed),
+            ("failed", NotificationStatus::Failed),
+            ("stopped", NotificationStatus::Killed),
+        ] {
+            let path = output_dir.join(format!("{id}.txt"));
+            tokio::fs::write(&path, format!("result {id}"))
+                .await
+                .unwrap();
+            let snapshot = {
+                let mut tasks = tasks.lock().await;
+                tasks.register(id, format!("description {id}"), path);
+                tasks.finish(id, status, None);
+                tasks.get(id).unwrap()
+            };
+            snapshot.persist_final().await.unwrap();
+        }
+        let mut fresh = crate::core::config::Config::new(crate::core::config::ConfigParameters {
+            target_dir: directory.path().to_owned(),
+            ..Default::default()
+        });
+        fresh.initialize().await.unwrap();
+        assert!(!Arc::ptr_eq(
+            &tasks,
+            &fresh.runtime_subagent_tasks().unwrap()
+        ));
+        assert!(fresh
+            .runtime_subagent_tasks()
+            .unwrap()
+            .lock()
+            .await
+            .get("done")
+            .is_none());
+        let tool = TaskOutputTool::new(Arc::new(fresh));
+        for (id, status) in [
+            ("done", "completed"),
+            ("failed", "failed"),
+            ("stopped", "killed"),
+        ] {
+            let result = tool
+                .create_invocation(serde_json::json!({"task_id": id}))
+                .unwrap()
+                .execute(None, None)
+                .await
+                .unwrap();
+            assert_eq!(result.output, format!("result {id}"));
+            assert_eq!(result.data.unwrap()["status"], status);
+        }
+        let child = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("core::tools::task_management::output_tests::stored_output_reader_in_another_process")
+            .arg("--test-threads=1")
+            .arg("--ignored")
+            .env("STAR_TEST_TASK_OUTPUT_PROJECT", directory.path())
+            .kill_on_drop(true)
+            .output();
+        let child = tokio::time::timeout(std::time::Duration::from_secs(15), child)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "child failed: {} {}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        for content in [
+            "{broken",
+            r#"{"version":2,"task_id":"done","description":"x","status":"Completed","output_error":null}"#,
+            r#"{"version":1,"task_id":"other","description":"x","status":"Completed","output_error":null}"#,
+            r#"{"version":1,"task_id":"done","description":"x","status":"Running","output_error":null}"#,
+        ] {
+            tokio::fs::write(output_dir.join("done.json"), content)
+                .await
+                .unwrap();
+            let error = tool
+                .create_invocation(serde_json::json!({"task_id":"done"}))
+                .unwrap()
+                .execute(None, None)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("Invalid task record"));
+        }
+        tokio::fs::write(output_dir.join("done.json"), r#"{"version":1,"task_id":"done","description":"x","status":"Failed","output_error":"disk full"}"#).await.unwrap();
+        let error = tool
+            .create_invocation(serde_json::json!({"task_id":"done"}))
+            .unwrap()
+            .execute(None, None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("disk full"));
+        tokio::fs::remove_file(output_dir.join("failed.txt"))
+            .await
+            .unwrap();
+        let error = tool
+            .create_invocation(serde_json::json!({"task_id":"failed"}))
+            .unwrap()
+            .execute(None, None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Failed to read output"));
+    }
+
+    #[tokio::test]
+    #[ignore = "spawned by the persistence regression with its temporary project"]
+    async fn stored_output_reader_in_another_process() {
+        let directory = std::env::var_os("STAR_TEST_TASK_OUTPUT_PROJECT").expect("parent project");
+        let config = crate::core::config::Config::new(crate::core::config::ConfigParameters {
+            target_dir: directory.into(),
+            ..Default::default()
+        });
+        assert!(config.runtime_subagent_tasks().is_none());
+        let tool = TaskOutputTool::new(Arc::new(config));
+        for (id, status) in [
+            ("done", "completed"),
+            ("failed", "failed"),
+            ("stopped", "killed"),
+        ] {
+            let result = tool
+                .create_invocation(serde_json::json!({"task_id": id}))
+                .unwrap()
+                .execute(None, None)
+                .await
+                .unwrap();
+            assert_eq!(result.output, format!("result {id}"));
+            assert_eq!(result.data.unwrap()["status"], status);
+        }
+    }
+
+    #[tokio::test]
+    async fn task_output_preserves_json_results_and_rejects_path_traversal() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Arc::new(crate::core::config::Config::new(
+            crate::core::config::ConfigParameters {
+                target_dir: directory.path().to_owned(),
+                ..Default::default()
+            },
+        ));
+        let path = config.storage().project_task_outputs_dir();
+        tokio::fs::create_dir_all(&path).await.unwrap();
+        tokio::fs::write(path.join("old-task.json"), r#"{"result":"legacy"}"#)
+            .await
+            .unwrap();
+        let tool = TaskOutputTool::new(config);
+        let result = tool
+            .create_invocation(serde_json::json!({"task_id":"old-task"}))
+            .unwrap()
+            .execute(None, None)
+            .await
+            .unwrap();
+        assert_eq!(result.data.unwrap()["result"], "legacy");
+        for id in ["", "../outside", "a/b", "a\\b", ".", ".."] {
+            assert!(tool
+                .create_invocation(serde_json::json!({"task_id": id}))
+                .is_err());
+        }
+    }
+}
+
+// ── TaskStop ─────────────────────────────────────────────────────────
+
+pub struct TaskStopTool {
+    config: Arc<crate::core::config::Config>,
+}
+
+impl TaskStopTool {
+    pub fn new(config: Arc<crate::core::config::Config>) -> Self {
+        Self { config }
+    }
+}
+
+struct TaskStopInvocation {
+    config: Arc<crate::core::config::Config>,
+    task_id: String,
+}
+
+impl ToolInvocation for TaskStopInvocation {
+    fn get_description(&self) -> String {
+        format!("Request stop: {}", self.task_id)
+    }
+    fn tool_locations(&self) -> Vec<ToolLocation> {
+        vec![]
+    }
+    fn execute(
+        &self,
+        _signal: Option<&tokio_util::sync::CancellationToken>,
+        _update_output: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ToolResult, Box<dyn std::error::Error>>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let tasks = self
+                .config
+                .runtime_subagent_tasks()
+                .ok_or("Background task registry unavailable")?;
+            let requested = tasks.lock().await.request_stop(&self.task_id)?;
+            let message = if requested {
+                format!(
+                    "Stop requested for {}. Wait for terminal status before claiming it stopped.",
+                    self.task_id
+                )
+            } else {
+                format!(
+                    "Task {} has finished execution or is already finalizing.",
+                    self.task_id
+                )
+            };
+            Ok(ToolResult {
+                llm_content: Some(message.clone()),
+                return_display: Some(message.clone()),
+                output: message,
+                error: None,
+                data: Some(
+                    serde_json::json!({"task_id": self.task_id, "stop_requested": requested}),
+                ),
+            })
+        })
+    }
+}
+
+impl BaseDeclarativeTool for TaskStopTool {
+    fn name(&self) -> &str {
+        "TaskStop"
+    }
+    fn display_name(&self) -> &str {
+        "Stop Task"
+    }
+    fn description(&self) -> &str {
+        "Request cancellation of a running background agent by task ID."
+    }
+    fn kind(&self) -> Kind {
+        Kind::Execute
+    }
+    fn parameter_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object", "properties":{"task_id":{"type":"string"}}, "required":["task_id"]})
+    }
+    fn create_invocation(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
+        let params: TaskOutputParams = serde_json::from_value(params)?;
+        Ok(Box::new(TaskStopInvocation {
+            config: self.config.clone(),
+            task_id: params.task_id,
+        }))
+    }
+}
+
 // ── TaskOutput ───────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -675,9 +1016,63 @@ impl ToolInvocation for TaskOutputInvocation {
         let task_id = self.params.task_id.clone();
         Box::pin(async move {
             let workspace = config.working_dir();
-            let output_path = workspace
-                .join(".star")
-                .join("task_outputs")
+            let live_task = if let Some(tasks) = config.runtime_subagent_tasks() {
+                tasks.lock().await.get(&task_id)
+            } else {
+                None
+            };
+            let task = match live_task {
+                Some(task) => Some(task),
+                None => {
+                    crate::agent::subagent::tasks::SubagentTask::load_final(
+                        &config.storage().project_subagent_outputs_dir(),
+                        &task_id,
+                    )
+                    .await?
+                }
+            };
+            if let Some(task) = task {
+                let status = match task.status.as_ref() {
+                    None => "running",
+                    Some(crate::agent::subagent::notification::NotificationStatus::Completed) => {
+                        "completed"
+                    }
+                    Some(crate::agent::subagent::notification::NotificationStatus::Failed) => {
+                        "failed"
+                    }
+                    Some(crate::agent::subagent::notification::NotificationStatus::Killed) => {
+                        "killed"
+                    }
+                };
+                if let Some(error) = task.output_error {
+                    return Err(
+                        format!("Failed to store output for task {task_id}: {error}").into(),
+                    );
+                }
+                let output = if task.status.is_some() {
+                    tokio::fs::read_to_string(&task.output_file)
+                        .await
+                        .map_err(|error| {
+                            format!("Failed to read output for task {task_id}: {error}")
+                        })?
+                } else {
+                    format!("Task '{task_id}' is running. No final output stored yet.")
+                };
+                let data = serde_json::json!({
+                    "task_id": task.task_id, "description": task.description,
+                    "status": status, "output": output, "output_file": task.output_file,
+                });
+                return Ok(ToolResult {
+                    llm_content: Some(serde_json::to_string_pretty(&data)?),
+                    return_display: Some(format!("Task {task_id}: {status}")),
+                    output,
+                    error: None,
+                    data: Some(data),
+                });
+            }
+            let output_path = config
+                .storage()
+                .project_task_outputs_dir()
                 .join(format!("{}.json", task_id));
 
             if !output_path.exists() {
@@ -769,6 +1164,17 @@ impl BaseDeclarativeTool for TaskOutputTool {
         params: serde_json::Value,
     ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
         let params: TaskOutputParams = serde_json::from_value(params)?;
+        if params.task_id.is_empty()
+            || params.task_id.len() > 128
+            || !params
+                .task_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(
+                "task_id must contain only ASCII letters, digits, hyphens, or underscores".into(),
+            );
+        }
         Ok(Box::new(TaskOutputInvocation {
             config: self.config.clone(),
             params,

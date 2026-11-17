@@ -110,6 +110,7 @@ pub enum AgentTaskStatus {
     Failed,
     Background, // 异步后台运行
     Rejected,   // 用户拒绝授权（对标 renderToolUseRejectedMessage）
+    Killed,     // 主动停止，区别于执行失败
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1013,6 +1014,7 @@ impl AgentTaskUpdatePayload {
             AgentTaskStatus::Completed
                 | AgentTaskStatus::Failed
                 | AgentTaskStatus::Rejected
+                | AgentTaskStatus::Killed
                 | AgentTaskStatus::Background
         );
         self.is_error = matches!(status, AgentTaskStatus::Failed | AgentTaskStatus::Rejected);

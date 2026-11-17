@@ -244,11 +244,17 @@ impl Agent {
             msgs
         };
 
-        let mut stream = match self
-            .client
-            .chat_stream(msgs, Some(turn_tool_selection.tools.clone()), None, None)
-            .await
-        {
+        // 请求头尚未返回时同样响应取消，不能只在取得流后才监听中断。
+        let request_abort = self.abort_token.clone();
+        let stream_result = tokio::select! {
+            biased;
+            _ = async {
+                if let Some(token) = &request_abort { token.cancelled().await; }
+                else { std::future::pending::<()>().await; }
+            } => return LlmResult::Error(AgentEvent::Done),
+            result = self.client.chat_stream(msgs, Some(turn_tool_selection.tools.clone()), None, None) => result,
+        };
+        let mut stream = match stream_result {
             Ok(stream) => stream,
             Err(e) => {
                 return self

@@ -210,7 +210,7 @@ pub(super) async fn submit_provider_form(
         Some(id) => id,
         None => {
             let base_id = crate::core::config::provider_store::derive_provider_id(&name, &base_url);
-            store.resolve_unique_provider_id(&base_id).await
+            store.resolve_unique_provider_id(&base_id).await?
         }
     };
 
@@ -218,11 +218,7 @@ pub(super) async fn submit_provider_form(
     // 传 None 会把已存的 key 抹掉，所以这里把存着的 key 读出来原样写回。
     let mut api_key = normalize_modal_api_key(form.api_key());
     if api_key.is_empty() && is_editing {
-        api_key = store
-            .get_api_key(&provider_id)
-            .await
-            .unwrap_or(None)
-            .unwrap_or_default();
+        api_key = store.get_api_key(&provider_id).await?.unwrap_or_default();
     }
 
     // 模型字段是多值的：先取出解析后的名字列表，`add_custom_provider` 只拿首项当

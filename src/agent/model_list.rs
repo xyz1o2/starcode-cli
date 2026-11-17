@@ -276,7 +276,12 @@ pub async fn list_models_with_mode(
         ));
     };
     let store = crate::core::config::provider_store::ProviderStore::new();
-    let config = store.load().await.ok();
+    let config = Some(store.load().await.map_err(|error| {
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[ListModels] provider config load failed: {error}"
+        ));
+        format!("Failed to load provider configuration: {error}")
+    })?);
     mark("provider-store-load");
 
     // 一次全量清扫：把**所有**已删除 provider 留下的桶删掉。

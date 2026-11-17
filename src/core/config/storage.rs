@@ -197,6 +197,18 @@ impl Storage {
         self.star_dir().join("workflows")
     }
 
+    pub fn project_task_outputs_dir(&self) -> PathBuf {
+        self.star_dir().join("task_outputs")
+    }
+
+    pub fn project_subagent_outputs_dir(&self) -> PathBuf {
+        self.star_dir().join("subagent_outputs")
+    }
+
+    pub fn project_subagent_sessions_dir(&self) -> PathBuf {
+        self.star_dir().join("subagent_sessions")
+    }
+
     pub fn project_i18n_dir(&self) -> PathBuf {
         self.star_dir().join("i18n")
     }

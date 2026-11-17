@@ -18,6 +18,7 @@ pub(super) fn handle_agent_task_update(state: &mut ChatState, args: AgentTaskUpd
         crate::types::AgentTaskStatus::Completed
             | crate::types::AgentTaskStatus::Failed
             | crate::types::AgentTaskStatus::Rejected
+            | crate::types::AgentTaskStatus::Killed
     );
     let first_terminal = incoming_terminal && prior.is_none_or(|info| info.finished_at.is_none());
     if prior.is_some_and(|info| info.finished_at.is_some()) && !incoming_terminal {

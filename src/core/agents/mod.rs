@@ -9,6 +9,8 @@ pub struct SubAgentRequest {
     pub max_rounds: Option<u32>,
     /// 单次调用的模型覆盖；None 或 inherit 继承父级模型及 provider。
     pub model: Option<String>,
+    /// 恢复当前项目中已结束子代理的有效原生上下文；本次执行使用新任务身份。
+    pub resume: Option<String>,
     /// 子代理类型：共享流式循环，Explorer 选择专用搜索提示与工具白名单。
     pub subagent_type: SubagentType,
     /// fork 与 `/subtask` 子代理在开始前继承的父会话消息。
@@ -46,6 +48,7 @@ impl SubAgentRequest {
             prompt: prompt.into(),
             max_rounds: None,
             model: None,
+            resume: None,
             subagent_type: SubagentType::GeneralPurpose,
             parent_messages: Vec::new(),
             parent_pending_context: Vec::new(),

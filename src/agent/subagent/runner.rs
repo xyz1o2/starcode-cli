@@ -146,6 +146,30 @@ impl StarAgentRunner {
         }
     }
 
+    /// 在路由和工具集合确定前继承恢复来源的类型，显式冲突不得静默覆盖。
+    pub(crate) async fn resolve_resume_type(
+        &self,
+        input: &mut crate::core::agents::AgentToolFullInput,
+    ) -> Result<(), SubAgentError> {
+        if let Some(id) = input.resume.as_deref() {
+            let session = super::session::AgentSession::load(self.config.storage(), id)
+                .await
+                .map_err(|e| SubAgentError::new(SubAgentErrorKind::InitializationFailed, e))?;
+            if input
+                .subagent_type
+                .as_ref()
+                .is_some_and(|kind| *kind != session.subagent_type)
+            {
+                return Err(SubAgentError::new(
+                    SubAgentErrorKind::InitializationFailed,
+                    "Resume requires the original subagent type",
+                ));
+            }
+            input.subagent_type = Some(session.subagent_type);
+        }
+        Ok(())
+    }
+
     /// 创建共享引用（供 AgentTool 使用）
     pub fn shared(client: StarClient, config: Arc<Config>) -> SharedSubAgentRunner {
         Arc::new(Self::new(client, config))
@@ -172,6 +196,63 @@ impl StarAgentRunner {
         request: SubAgentRequest,
         sink: Option<SubAgentProgressSink>,
     ) -> Result<SubAgentResult, SubAgentError> {
+        self.run_with_control(request, sink, None).await
+    }
+
+    async fn run_with_control(
+        &self,
+        request: SubAgentRequest,
+        sink: Option<SubAgentProgressSink>,
+        stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<SubAgentResult, SubAgentError> {
+        if stop
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            return Err(SubAgentError::new(
+                SubAgentErrorKind::ExecutionFailed,
+                "SubAgent stopped before initialization",
+            ));
+        }
+        let resumed = if let Some(id) = request.resume.as_deref() {
+            if request.identity.as_deref() == Some(id) {
+                return Err(SubAgentError::new(
+                    SubAgentErrorKind::InitializationFailed,
+                    "Resume requires a new task identity",
+                ));
+            }
+            if !request.parent_messages.is_empty() || !request.parent_pending_context.is_empty() {
+                return Err(SubAgentError::new(
+                    SubAgentErrorKind::InitializationFailed,
+                    "Cannot combine resume with fork context",
+                ));
+            }
+            if let Some(tasks) = self.config.runtime_subagent_tasks() {
+                if tasks
+                    .lock()
+                    .await
+                    .get(id)
+                    .is_some_and(|task| task.status.is_none())
+                {
+                    return Err(SubAgentError::new(
+                        SubAgentErrorKind::InitializationFailed,
+                        "Cannot resume a running agent",
+                    ));
+                }
+            }
+            let session = super::session::AgentSession::load(self.config.storage(), id)
+                .await
+                .map_err(|e| SubAgentError::new(SubAgentErrorKind::InitializationFailed, e))?;
+            if request.subagent_type != session.subagent_type {
+                return Err(SubAgentError::new(
+                    SubAgentErrorKind::InitializationFailed,
+                    "Resume requires the original subagent type",
+                ));
+            }
+            Some(session)
+        } else {
+            None
+        };
         // 子代理开始 —— 外部 harness 靠这个事件知道"多了一个干活的"。
         // 之前 `SubagentStop` 只在**失败**时触发，成功路径静悄悄，外部看不到
         // 子代理的完整生命周期。
@@ -216,10 +297,20 @@ impl StarAgentRunner {
         // worker 回话给 "lead" 时不用自报 agent_id（Phase 3/4）。
         let child_identity = request.identity.clone().or_else(|| {
             let id = uuid::Uuid::new_v4().to_string();
-            Some(format!("agent-{}", &id[..8]))
+            Some(format!("agent-{id}"))
         });
         sub_config.agent_identity = child_identity.clone();
+        let session_id = child_identity
+            .clone()
+            .expect("child identity is generated above");
 
+        if let Some(bus) = self.config.runtime_message_bus() {
+            sub_config
+                .set_approval_mode(bus.approval_mode().await)
+                .map_err(|e| {
+                    SubAgentError::new(SubAgentErrorKind::InitializationFailed, e.to_string())
+                })?;
+        }
         let mut agent = self.create_child_agent(&request, sub_config).await?;
 
         // Hub 身份接线（Phase 3）：子 agent 在 hub 里注册成自己的身份，
@@ -234,21 +325,28 @@ impl StarAgentRunner {
         {
             let identity = child_identity.unwrap_or_else(|| {
                 let id = uuid::Uuid::new_v4().to_string();
-                format!("agent-{}", &id[..8])
+                format!("agent-{id}")
             });
             agent.set_agent_hub(hub, identity);
         }
 
         // fork 与 /subtask 都先安装结构化父上下文，再追加本次任务，
         // 保留已有工具调用和结果的配对。普通子代理的父上下文为空。
-        install_parent_context(&mut agent, &request);
+        if let Some(session) = resumed {
+            agent.replace_session_context(session.messages, session.pending_context);
+        } else {
+            install_parent_context(&mut agent, &request);
+        }
+        // 父上下文安装会清除旧标志；之后再绑定本任务控制，保留初始化期间的停止请求。
+        if let Some(stop) = stop {
+            agent.bind_abort_handle(stop);
+        }
 
-        let parent_message_count = agent.session_context_snapshot().0.len();
         let mut tracker = AgentProgressTracker::new(sink);
         let mut final_text = String::new();
         let mut stream_error = None;
 
-        {
+        let execution = async {
             use crate::types::StreamingChunkType;
             use futures::StreamExt;
 
@@ -263,12 +361,14 @@ impl StarAgentRunner {
                 })?;
 
             while let Some(item) = stream.next().await {
-                let chunk = item.map_err(|e| {
-                    SubAgentError::new(
-                        SubAgentErrorKind::ExecutionFailed,
-                        format!("SubAgent execution error: {}", e),
-                    )
-                })?;
+                let chunk = match item {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        stream_error = Some(error.to_string());
+                        // 继续排空到执行器的结束交接，避免丢弃外层流留下实际循环。
+                        continue;
+                    }
+                };
 
                 match chunk.chunk_type {
                     StreamingChunkType::ToolCalls => {
@@ -303,7 +403,37 @@ impl StarAgentRunner {
                     _ => {}
                 }
             }
+            Ok::<(), SubAgentError>(())
         }
+        .await;
+        let (session_messages, pending_context) = agent.session_context_snapshot();
+        let snapshot_result = super::session::AgentSession::new(
+            self.config.storage(),
+            session_id,
+            request.subagent_type.clone(),
+            session_messages.clone(),
+            pending_context,
+        )
+        .map_err(|e| SubAgentError::new(SubAgentErrorKind::ExecutionFailed, e));
+        let snapshot_result = match snapshot_result {
+            Ok(snapshot) => snapshot.save(self.config.storage()).await,
+            Err(error) => Err(error.to_string()),
+        };
+        if let Err(save_error) = snapshot_result {
+            let original = execution
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .or_else(|| stream_error.clone());
+            return Err(SubAgentError::new(
+                SubAgentErrorKind::ExecutionFailed,
+                match original {
+                    Some(original) => format!("{original}; {save_error}"),
+                    None => save_error,
+                },
+            ));
+        }
+        execution?;
 
         if let Some(error) = stream_error {
             return Err(SubAgentError::new(
@@ -315,11 +445,12 @@ impl StarAgentRunner {
         // 流式模型的正文通常只走 direct TextDelta；Branch A 的 Message
         // 会因为已流式输出而跳过，因此 tracker 不一定收到 Content。
         // 结果以代理最终会话里的 assistant 正文为准，不从中间增量猜结论。
-        let (session_messages, _) = agent.session_context_snapshot();
-        let answer = subagent_final_text(
-            &session_messages[parent_message_count.min(session_messages.len())..],
-        )
-        .or_else(|| (!final_text.trim().is_empty()).then_some(final_text));
+        // 压缩会缩短历史，不能按继承消息数切片；本次用户消息之后的末条助手才是本轮结果。
+        let answer = session_messages
+            .iter()
+            .rposition(|m| m.role == "user")
+            .and_then(|index| subagent_final_text(&session_messages[index + 1..]))
+            .or_else(|| (!final_text.trim().is_empty()).then_some(final_text));
         if let Some(ref text) = answer {
             // 增量流本身不记助手条目；收尾时补上最终结论供详情与通知展示。
             if tracker.last_assistant_text() != Some(text.as_str()) {
@@ -444,14 +575,372 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn child_model_and_refreshed_parent_reach_the_http_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0; 4096];
+                loop {
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert!(count > 0, "request ended before its body");
+                    bytes.extend_from_slice(&buffer[..count]);
+                    assert!(bytes.len() < 1024 * 1024, "unexpected request size");
+                    if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        if bytes.len() >= end + 4 + length {
+                            assert!(headers.starts_with("POST /v1/chat/completions "));
+                            requests.push(
+                                serde_json::from_slice::<serde_json::Value>(
+                                    &bytes[end + 4..end + 4 + length],
+                                )
+                                .unwrap(),
+                            );
+                            break;
+                        }
+                    }
+                }
+                let body = r#"{"id":"child-test","object":"chat.completion","created":1,"model":"local-test","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"child response"}}]}"#;
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        struct AbortServerOnDrop(tokio::task::AbortHandle);
+        impl Drop for AbortServerOnDrop {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let _server_guard = AbortServerOnDrop(server.abort_handle());
+        let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let directory = tempfile::tempdir().unwrap();
+            let mut parameters = crate::core::config::ConfigParameters::default();
+            parameters.target_dir = directory.path().to_owned();
+            parameters.core_tools = Some(Vec::new());
+            parameters.mcp_enabled = Some(false);
+            parameters.enable_agents = Some(false);
+            let mut config = Config::new(parameters);
+            config.initialize().await.unwrap();
+            let config = Arc::new(config);
+            let original_client = StarClient::new(
+                "local-test-key",
+                Some("original-parent".into()),
+                Some(endpoint.clone()),
+                Some(true),
+                Some("local-test".into()),
+            );
+            let original = StarAgentRunner::new(original_client, config.clone());
+            let current_client = StarClient::new(
+                "local-test-key",
+                Some("refreshed-parent".into()),
+                Some(endpoint.clone()),
+                Some(true),
+                Some("local-test".into()),
+            );
+            let refreshed = original.with_parent_client(&current_client);
+            for (runner, model) in [
+                (&original, None),
+                (&refreshed, Some("inherit")),
+                (&refreshed, Some("explicit-child")),
+            ] {
+                let mut request = SubAgentRequest::new("inspect");
+                request.model = model.map(str::to_owned);
+                let child = runner
+                    .create_child_agent(&request, (*config).clone())
+                    .await
+                    .unwrap();
+                assert_eq!(child.client.base_url, endpoint);
+                let answer = child.client.chat_completion_simple("reply").await.unwrap();
+                assert_eq!(answer, "child response");
+            }
+            assert_eq!(original.client.model, "original-parent");
+            assert_eq!(refreshed.client.model, "refreshed-parent");
+            server.await.unwrap()
+        })
+        .await;
+        let requests = result.expect("local HTTP regression timed out");
+        let models: Vec<_> = requests
+            .iter()
+            .map(|body| body["model"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            models,
+            ["original-parent", "refreshed-parent", "explicit-child"]
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_reaches_http_with_native_history_and_current_client() {
+        assert_resume_http(false, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn resume_after_execution_failure_preserves_tool_history() {
+        assert_resume_http(true, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn resume_after_cancel_uses_fresh_abort_control() {
+        assert_resume_http(false, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn resume_obeys_current_plan_permissions() {
+        assert_resume_http(false, false, true).await;
+    }
+
+    async fn assert_resume_http(fail_first: bool, cancel_first: bool, plan_write: bool) {
+        use crate::core::tools::tools::BaseDeclarativeTool;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (index, answer) in ["original answer", "continued answer"]
+                .into_iter()
+                .enumerate()
+            {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buf = [0; 4096];
+                loop {
+                    let count = socket.read(&mut buf).await.unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&buf[..count]);
+                    if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let length = String::from_utf8_lossy(&bytes[..end])
+                            .lines()
+                            .find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        if bytes.len() >= end + 4 + length {
+                            requests.push(
+                                serde_json::from_slice::<serde_json::Value>(
+                                    &bytes[end + 4..end + 4 + length],
+                                )
+                                .unwrap(),
+                            );
+                            break;
+                        }
+                    }
+                }
+                if cancel_first && index == 0 {
+                    server_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let closed = tokio::time::timeout(
+                        std::time::Duration::from_secs(8),
+                        socket.read(&mut buf),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(matches!(closed, Ok(0) | Err(_)));
+                    continue;
+                }
+                let frame = if plan_write && index == 1 {
+                    serde_json::json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"plan-write","type":"function","function":{"name":"Write","arguments":"{\"file_path\":\"forbidden.txt\",\"content\":\"must not exist\"}"}}]}}]})
+                } else if fail_first && index == 0 {
+                    serde_json::json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"failed-read","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"missing.rs\"}"}}]}}]})
+                } else {
+                    serde_json::json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content": answer}}]})
+                };
+                let body = format!("data: {frame}\n\ndata: {{\"object\":\"chat.completion.chunk\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n");
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        struct StopServer(tokio::task::AbortHandle);
+        impl Drop for StopServer {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let _guard = StopServer(server.abort_handle());
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let mut config = Config::new(crate::core::config::ConfigParameters {
+                target_dir: directory.path().to_owned(), core_tools: Some(if plan_write { vec!["Write".into()] } else { Vec::new() }),
+                mcp_enabled: Some(false), enable_agents: Some(false), ..Default::default()
+            });
+            config.initialize().await.unwrap();
+            let config = Arc::new(config);
+            let client = StarClient::new("local-key", Some("original-model".into()), Some(endpoint.clone()), Some(true), Some("local-test".into()));
+            let runner = StarAgentRunner::shared(client, config.clone());
+            let call = crate::types::StarToolCall {
+                id: "old-read".into(), call_type: "function".into(),
+                function: crate::types::StarToolCallFunction { name: "Read".into(), arguments: r#"{"file_path":"old.rs"}"#.into() }
+            };
+            let history = vec![crate::types::StarMessage::user("historical question"),
+                crate::types::StarMessage::assistant_with_tool_calls(vec![call]),
+                crate::types::StarMessage::tool("old-read", "historical tool result")];
+            let first = runner.run_with_control(SubAgentRequest::new("original prompt").with_identity("agent-original")
+                .with_parent_context(history, vec![]).with_max_rounds(if fail_first { 1 } else { 2 }), None, Some(stop.clone())).await;
+            if fail_first {
+                assert!(first.is_err(), "a tool turn at the turn limit must fail");
+            } else if cancel_first {
+                assert!(stop.load(std::sync::atomic::Ordering::SeqCst));
+            } else {
+                assert_eq!(first.unwrap().output, "original answer");
+            }
+            let before = tokio::fs::read(config.storage().project_subagent_sessions_dir().join("agent-original.json")).await.unwrap();
+            let original = crate::agent::subagent::session::AgentSession::load(config.storage(), "agent-original").await.unwrap();
+            assert!(original.messages.iter().any(|m| m.tool_calls.as_ref().is_some_and(|calls| calls.iter().any(|call| call.id == "old-read"))));
+            assert!(original.messages.iter().any(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("old-read")));
+            if plan_write {
+                config.runtime_message_bus().unwrap().set_approval_mode(crate::core::policy::types::ApprovalMode::Plan).await;
+                assert_ne!(*config.approval_mode(), crate::core::policy::types::ApprovalMode::Plan);
+            }
+            let tool = crate::core::tools::agent_tool::AgentTool::new(runner);
+            let mut invocation = tool.create_invocation(serde_json::json!({
+                "description":"continue investigation", "prompt":"new follow-up", "resume":"agent-original", "max_rounds": if plan_write { 1 } else { 2 }
+            })).unwrap();
+            let current = StarClient::new("current-local-key", Some("current-model".into()), Some(endpoint), Some(true), Some("local-test".into()));
+            invocation.set_agent_parent_client(&current);
+            let result = invocation.execute(None, None).await.unwrap();
+            if plan_write {
+                assert!(result.error.is_some());
+                assert!(!directory.path().join("forbidden.txt").exists());
+            } else {
+                assert!(result.error.is_none(), "{:?}", result.error);
+                assert_eq!(result.output, "continued answer");
+            }
+            let id = result.data.unwrap()["agent_id"].as_str().unwrap().to_owned();
+            assert_ne!(id, "agent-original");
+            let continued = crate::agent::subagent::session::AgentSession::load(config.storage(), &id).await.unwrap();
+            if plan_write {
+                let denied = continued.messages.iter().find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("plan-write")).expect("denied Write must have a tool result");
+                let text = denied.content.as_deref().unwrap_or("").to_lowercase();
+                assert!(text.contains("denied") || text.contains("not allowed"), "{text}");
+            } else {
+                assert!(continued.messages.iter().any(|m| m.content.as_deref() == Some("continued answer")));
+            }
+            assert!(continued.messages.iter().any(|m| m.tool_calls.as_ref().is_some_and(|calls| calls.iter().any(|call| call.id == "old-read"))));
+            assert!(continued.messages.iter().any(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("old-read")));
+            assert_eq!(before, tokio::fs::read(config.storage().project_subagent_sessions_dir().join("agent-original.json")).await.unwrap());
+            let requests = server.await.unwrap();
+            assert_eq!(requests[1]["model"], "current-model");
+            let messages = requests[1]["messages"].as_array().unwrap();
+            let serialized = serde_json::to_string(messages).unwrap();
+            // 当前工具集合为空时，rig 将历史工具调用转成文本；原生 ID 已在两份快照中验证。
+            for text in ["historical question", "historical tool result", "old.rs", "original prompt", "new follow-up"] {
+                assert!(serialized.contains(text), "missing {text}: {serialized}");
+            }
+            if fail_first {
+                assert!(original.messages.iter().any(|m| m.tool_calls.as_ref().is_some_and(|calls| calls.iter().any(|call| call.id == "failed-read"))));
+                assert!(original.messages.iter().any(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("failed-read")));
+                assert!(serialized.contains("missing.rs"));
+            } else if !cancel_first {
+                assert!(serialized.contains("original answer"));
+            }
+            if cancel_first {
+                assert!(stop.load(std::sync::atomic::Ordering::SeqCst), "resume must not reuse or clear the source abort control");
+            }
+        }).await.expect("resume HTTP regression timed out");
+    }
+
+    #[tokio::test]
+    async fn resume_inherits_type_before_routing_and_rejects_conflicts() {
+        use crate::agent::subagent::router::{route_agent_call, AgentRoute};
+        use crate::core::agents::{AgentToolFullInput, SubagentType};
+        let root = tempfile::tempdir().unwrap();
+        let config = Arc::new(Config::new(crate::core::config::ConfigParameters {
+            target_dir: root.path().to_owned(),
+            ..Default::default()
+        }));
+        crate::agent::subagent::session::AgentSession::new(
+            config.storage(),
+            "explore-old".into(),
+            SubagentType::Explorer,
+            vec![],
+            vec![],
+        )
+        .unwrap()
+        .save(config.storage())
+        .await
+        .unwrap();
+        let runner = StarAgentRunner::new(StarClient::new("", None, None, None, None), config);
+        let mut input: AgentToolFullInput = serde_json::from_value(serde_json::json!({
+            "description":"continue", "prompt":"find caller", "resume":"explore-old"
+        }))
+        .unwrap();
+        runner.resolve_resume_type(&mut input).await.unwrap();
+        assert_eq!(input.subagent_type, Some(SubagentType::Explorer));
+        assert!(matches!(
+            route_agent_call(&input, false, false),
+            AgentRoute::AsyncAgent { .. }
+        ));
+        input.background = Some(false);
+        assert!(matches!(
+            route_agent_call(&input, false, false),
+            AgentRoute::SyncNamedAgent {
+                subagent_type: SubagentType::Explorer,
+                ..
+            }
+        ));
+        input.subagent_type = Some(SubagentType::Editor);
+        assert!(runner
+            .resolve_resume_type(&mut input)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("original subagent type"));
+        let mut request = SubAgentRequest::new("continue").with_identity("explore-old");
+        request.resume = Some("explore-old".into());
+        assert!(runner
+            .run(request)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("new task identity"));
+        input.resume = Some("missing".into());
+        assert!(runner.resolve_resume_type(&mut input).await.is_err());
+    }
+
+    #[tokio::test]
     async fn background_launch_registers_before_return_and_cleans_up_after_failure() {
-        let config = Arc::new(Config::new(Default::default()));
-        let sync = StarAgentRunner::shared(StarClient::new("", None, None, None, None), config);
+        use crate::core::tools::tools::BaseDeclarativeTool;
+        let output_directory = tempfile::tempdir().unwrap();
+        let mut config = Config::new(crate::core::config::ConfigParameters {
+            target_dir: output_directory.path().to_owned(),
+            ..Default::default()
+        });
+        let bus = Arc::new(crate::core::confirmation_bus::MessageBus::new(
+            crate::core::policy::policy_engine::PolicyEngine::new(Default::default()),
+            false,
+        ));
         let queue = Arc::new(Mutex::new(NotificationQueue::new()));
         let hub = crate::agent::messaging::new_shared_router();
-        let output_directory = tempfile::tempdir().unwrap();
-        let mut runner = AsyncSubagentRunner::new(sync, queue.clone()).with_agent_hub(hub.clone());
-        runner.output_directory = Some(output_directory.path().to_owned());
+        config.install_runtime_services(
+            crate::core::config::RuntimeServices::new(
+                None,
+                bus,
+                None,
+                Arc::new(crate::core::state::GlobalState::new()),
+            )
+            .with_notification_queue(queue.clone())
+            .with_agent_hub(hub.clone()),
+        );
+        let config = Arc::new(config);
+        let output_tool = crate::core::tools::task_management::TaskOutputTool::new(config.clone());
+        let sync = StarAgentRunner::shared(StarClient::new("", None, None, None, None), config);
+        let runner = AsyncSubagentRunner::new(sync, queue.clone()).with_agent_hub(hub.clone());
         assert!(Arc::ptr_eq(
             runner.sync_runner.agent_hub.as_ref().unwrap(),
             &hub
@@ -481,6 +970,47 @@ mod tests {
             .unwrap();
             assert!(hub.lock().await.resolve(&launch.agent_id).is_none());
             assert_eq!(notifications.len(), 1);
+            let queried = output_tool
+                .create_invocation(serde_json::json!({"task_id": launch.agent_id}))
+                .unwrap()
+                .execute(None, None)
+                .await
+                .unwrap();
+            assert_eq!(queried.output, notifications[0].result);
+            let mut fresh = Config::new(crate::core::config::ConfigParameters {
+                target_dir: output_directory.path().to_owned(),
+                ..Default::default()
+            });
+            fresh.initialize().await.unwrap();
+            assert!(fresh
+                .runtime_subagent_tasks()
+                .unwrap()
+                .lock()
+                .await
+                .get(&launch.agent_id)
+                .is_none());
+            let historical =
+                crate::core::tools::task_management::TaskOutputTool::new(Arc::new(fresh))
+                    .create_invocation(serde_json::json!({"task_id": launch.agent_id}))
+                    .unwrap()
+                    .execute(None, None)
+                    .await
+                    .unwrap();
+            assert_eq!(historical.output, queried.output);
+            assert_eq!(historical.data.as_ref().unwrap()["status"], "failed");
+            assert_eq!(queried.data.as_ref().unwrap()["status"], "failed");
+            assert_eq!(
+                queried.data.as_ref().unwrap()["output_file"],
+                launch.output_file.to_string_lossy().as_ref()
+            );
+            let stored = runner.tasks.lock().await.get(&launch.agent_id).unwrap();
+            assert_eq!(stored.status, Some(NotificationStatus::Failed));
+            assert_eq!(stored.output_file, launch.output_file);
+            assert!(stored.output_error.is_none());
+            assert!(tokio::fs::read_to_string(&stored.output_file)
+                .await
+                .unwrap()
+                .contains("SubAgent failed"));
             assert!(matches!(
                 notifications[0].status,
                 NotificationStatus::Failed
@@ -492,6 +1022,219 @@ mod tests {
             // 测试只清理由本次启动返回的临时输出文件。
             let _ = tokio::fs::remove_file(launch.output_file).await;
         }
+    }
+
+    #[tokio::test]
+    async fn background_stop_cancels_the_actual_stream_and_preserves_queryable_result() {
+        assert_background_stop(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn background_stop_cancels_before_response_headers() {
+        assert_background_stop(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn background_stop_preserves_session_save_failure() {
+        assert_background_stop(false, true).await;
+    }
+
+    async fn assert_background_stop(send_headers: bool, block_session_save: bool) {
+        use crate::core::tools::tools::BaseDeclarativeTool;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut bytes = [0; 4096];
+            loop {
+                let count = socket.read(&mut bytes).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&bytes[..count]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        let body: serde_json::Value =
+                            serde_json::from_slice(&request[end + 4..end + 4 + length]).unwrap();
+                        assert_eq!(body["model"], "local-model");
+                        assert_eq!(
+                            body["stream"], true,
+                            "stop regression must reach the agent stream"
+                        );
+                        break;
+                    }
+                }
+            }
+            if send_headers {
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"working\"}}]}\n\n").await.unwrap();
+            }
+            let _ = started_tx.send(());
+            let closed =
+                tokio::time::timeout(std::time::Duration::from_secs(8), socket.read(&mut bytes))
+                    .await
+                    .expect("cancelled request must release its connection");
+            assert!(
+                matches!(closed, Ok(0) | Err(_)),
+                "request sent unexpected data after cancellation"
+            );
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept())
+                    .await
+                    .is_err(),
+                "cancelled request must not retry"
+            );
+        });
+        struct StopServer(tokio::task::AbortHandle);
+        impl Drop for StopServer {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let _server_guard = StopServer(server.abort_handle());
+        let mut config = Config::new(crate::core::config::ConfigParameters {
+            target_dir: directory.path().to_owned(),
+            core_tools: Some(Vec::new()),
+            mcp_enabled: Some(false),
+            enable_agents: Some(false),
+            ..Default::default()
+        });
+        config.initialize().await.unwrap();
+        let config = Arc::new(config);
+        let queue = Arc::new(Mutex::new(NotificationQueue::new()));
+        let runner = AsyncSubagentRunner::new(
+            StarAgentRunner::shared(
+                StarClient::new(
+                    "local-test-key",
+                    Some("local-model".into()),
+                    Some(endpoint),
+                    Some(true),
+                    Some("local-test".into()),
+                ),
+                config.clone(),
+            ),
+            queue.clone(),
+        );
+        let launch = runner
+            .spawn_background(
+                SubAgentRequest::new("inspect").with_max_rounds(2),
+                Some("stoppable-worker".into()),
+                "inspect".into(),
+                "Agent".into(),
+            )
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        if block_session_save {
+            tokio::fs::create_dir_all(config.storage().star_dir())
+                .await
+                .unwrap();
+            tokio::fs::write(
+                config.storage().project_subagent_sessions_dir(),
+                "blocked session directory",
+            )
+            .await
+            .unwrap();
+        }
+        let tool = crate::core::tools::task_management::TaskStopTool::new(config.clone());
+        for attempt in 0..2 {
+            let response = tool
+                .create_invocation(serde_json::json!({"task_id": launch.agent_id}))
+                .unwrap()
+                .execute(None, None)
+                .await
+                .unwrap();
+            if attempt == 0 {
+                assert_eq!(response.data.unwrap()["stop_requested"], true);
+            } else {
+                assert!(response.error.is_none());
+            }
+        }
+        let notifications = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let notifications = queue.lock().await.drain_for_next_turn();
+                if !notifications.is_empty() {
+                    break notifications;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].status, NotificationStatus::Killed);
+        assert!(!queue.lock().await.has_inflight());
+        assert!(queue.lock().await.drain_for_next_turn().is_empty());
+        assert!(runner.resolve_name("stoppable-worker").await.is_none());
+        assert!(config
+            .runtime_agent_hub()
+            .unwrap()
+            .lock()
+            .await
+            .resolve(&launch.agent_id)
+            .is_none());
+        let snapshot =
+            crate::agent::subagent::session::AgentSession::load(config.storage(), &launch.agent_id)
+                .await;
+        if block_session_save {
+            assert!(snapshot.is_err());
+            assert!(notifications[0]
+                .result
+                .contains("Failed to create agent session directory"));
+        } else {
+            assert!(snapshot.unwrap().messages.iter().any(|m| m.role == "user"));
+        }
+        let output = crate::core::tools::task_management::TaskOutputTool::new(config)
+            .create_invocation(serde_json::json!({"task_id": launch.agent_id}))
+            .unwrap()
+            .execute(None, None)
+            .await
+            .unwrap();
+        assert_eq!(output.data.unwrap()["status"], "killed");
+        assert!(output.output.contains("stopped by request"));
+        if block_session_save {
+            assert!(output
+                .output
+                .contains("Failed to create agent session directory"));
+        }
+        let response = tool
+            .create_invocation(serde_json::json!({"task_id": launch.agent_id}))
+            .unwrap()
+            .execute(None, None)
+            .await
+            .unwrap();
+        assert_eq!(response.data.unwrap()["stop_requested"], false);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_before_initialization_never_constructs_a_child() {
+        let runner = StarAgentRunner::new(
+            StarClient::new("", None, None, None, None),
+            Arc::new(Config::new(Default::default())),
+        );
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let error = runner
+            .run_with_control(
+                SubAgentRequest::new("inspect").with_parent_depth(usize::MAX),
+                None,
+                Some(stop),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("stopped before initialization"));
     }
 
     #[test]
@@ -744,6 +1487,7 @@ pub struct AsyncSubagentRunner {
     notification_queue: Arc<Mutex<NotificationQueue>>,
     /// agent_name → agent_id 注册表，供 SendMessage 按 name 寻址
     name_registry: Arc<Mutex<HashMap<String, String>>>,
+    tasks: crate::agent::subagent::tasks::SharedSubagentTasks,
     /// Agent 间消息路由 hub（进程级单例）。`None` = 装配方没接 hub，
     /// `deliver_message` 退回写文件死信（旧行为），注册/注销跳过。
     agent_hub: Option<crate::agent::messaging::SharedAgentRouter>,
@@ -761,9 +1505,14 @@ impl AsyncSubagentRunner {
             .agent_hub
             .clone()
             .or_else(|| sync_runner.config.runtime_agent_hub());
+        let tasks = sync_runner
+            .config
+            .runtime_subagent_tasks()
+            .unwrap_or_default();
         Self {
             sync_runner,
             notification_queue,
+            tasks,
             name_registry: Arc::new(Mutex::new(HashMap::new())),
             agent_hub,
             #[cfg(test)]
@@ -789,6 +1538,7 @@ impl AsyncSubagentRunner {
             sync_runner: Arc::new(self.sync_runner.with_parent_client(client)),
             notification_queue: self.notification_queue.clone(),
             name_registry: self.name_registry.clone(),
+            tasks: self.tasks.clone(),
             agent_hub: self.agent_hub.clone(),
             #[cfg(test)]
             output_directory: self.output_directory.clone(),
@@ -800,7 +1550,11 @@ impl AsyncSubagentRunner {
         if let Some(ref directory) = self.output_directory {
             return directory.join(format!("{agent_id}.txt"));
         }
-        PathBuf::from(format!(".star/subagent_outputs/{agent_id}.txt"))
+        self.sync_runner
+            .config
+            .storage()
+            .project_subagent_outputs_dir()
+            .join(format!("{agent_id}.txt"))
     }
 
     /// 邮箱以任务 ID 隔离；可读名仅作别名，重名任务不能消费彼此的消息。
@@ -824,7 +1578,7 @@ impl AsyncSubagentRunner {
         description: String,
         agent_type_label: String,
     ) -> Result<SubAgentResult, SubAgentError> {
-        let aid = format!("agent-fork-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let aid = format!("agent-fork-{}", uuid::Uuid::new_v4());
         let identity = Self::bind_identity(&mut request, name.as_deref(), &aid);
         if let Some(ref agent_name) = name {
             self.name_registry
@@ -867,10 +1621,20 @@ impl AsyncSubagentRunner {
     ) -> AsyncLaunchResult {
         let agent_id: String = {
             let id = uuid::Uuid::new_v4().to_string();
-            format!("agent-{}", &id[..8])
+            format!("agent-{id}")
         };
 
         let output_file = self.output_file(&agent_id);
+        self.tasks
+            .lock()
+            .await
+            .register(&agent_id, description.clone(), output_file.clone());
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.tasks
+            .lock()
+            .await
+            .attach_cancel(&agent_id, stop.clone());
+        let tasks = self.tasks.clone();
         let out_path = output_file.clone();
         let runner = self.sync_runner.clone();
         let queue = self.notification_queue.clone();
@@ -946,7 +1710,26 @@ impl AsyncSubagentRunner {
                 );
             });
 
-            let result = runner.run_with_progress(request, Some(sink)).await;
+            let result = runner
+                .run_with_control(request, Some(sink), Some(stop.clone()))
+                .await;
+            // 完成与停止在同一注册表锁下裁决；进入收尾后不再接收新的停止请求。
+            let stopped = {
+                let mut records = tasks.lock().await;
+                records.close_control(&aid)
+            };
+            let result = if stopped {
+                let message = match result {
+                    Err(error) => format!("SubAgent stopped by request; {error}"),
+                    Ok(_) => "SubAgent stopped by request".to_owned(),
+                };
+                Err(SubAgentError::new(
+                    SubAgentErrorKind::ExecutionFailed,
+                    message,
+                ))
+            } else {
+                result
+            };
 
             let (status, output, entries, tokens, tool_uses) = match result {
                 Ok(r) => (
@@ -957,8 +1740,16 @@ impl AsyncSubagentRunner {
                     r.tool_use_count as u64,
                 ),
                 Err(e) => (
-                    NotificationStatus::Failed,
-                    format!("SubAgent failed: {}", e),
+                    if stopped {
+                        NotificationStatus::Killed
+                    } else {
+                        NotificationStatus::Failed
+                    },
+                    if stopped {
+                        e.to_string()
+                    } else {
+                        format!("SubAgent failed: {}", e)
+                    },
                     Vec::new(),
                     0,
                     0,
@@ -971,14 +1762,31 @@ impl AsyncSubagentRunner {
             if let Some(parent) = out_path.parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
-            if let Err(e) = tokio::fs::write(&out_path, &output).await {
-                crate::utils::logging::append_agent_log_line(&format!(
-                    "[AsyncSubagent] failed to write {}: {}",
-                    out_path.display(),
-                    e
-                ));
+            let mut output_error = tokio::fs::write(&out_path, &output)
+                .await
+                .err()
+                .map(|error| {
+                    crate::utils::logging::append_agent_log_line(&format!(
+                        "[AsyncSubagent] failed to write {}: {}",
+                        out_path.display(),
+                        error
+                    ));
+                    error.to_string()
+                });
+            let snapshot = tasks.lock().await.get(&aid);
+            if let Some(mut snapshot) = snapshot {
+                snapshot.status = Some(status.clone());
+                snapshot.output_error = output_error.clone();
+                if let Err(error) = snapshot.persist_final().await {
+                    crate::utils::logging::append_agent_log_line(&format!(
+                        "[AsyncSubagent] {error}"
+                    ));
+                    output_error = Some(match output_error {
+                        Some(previous) => format!("{previous}; {error}"),
+                        None => error,
+                    });
+                }
             }
-
             // 先停止寻址，再发布终态，避免调用方收到完成通知后仍能投递到旧任务。
             if let Some(ref name) = agent_name {
                 let mut names = registry.lock().await;
@@ -990,6 +1798,15 @@ impl AsyncSubagentRunner {
                 hub.lock().await.unregister(&aid);
                 emit_team_snapshot(hub).await;
             }
+
+            let notification_output = match output_error.as_ref() {
+                Some(error) => format!("{output}\n\nTask output persistence failed: {error}"),
+                None => output.clone(),
+            };
+            tasks
+                .lock()
+                .await
+                .finish(&aid, status.clone(), output_error);
 
             // 终态直接推给 UI。原先终态只在下一个 turn 排空通知队列时才到 UI
             // （agent_loop.rs 的 drain_for_next_turn），用户空闲时后台代理跑完了，
@@ -1003,7 +1820,8 @@ impl AsyncSubagentRunner {
             {
                 let final_status = match &status {
                     NotificationStatus::Completed => crate::types::AgentTaskStatus::Completed,
-                    _ => crate::types::AgentTaskStatus::Failed,
+                    NotificationStatus::Killed => crate::types::AgentTaskStatus::Killed,
+                    NotificationStatus::Failed => crate::types::AgentTaskStatus::Failed,
                 };
                 crate::agent::subagent::progress::emit_to_ui(
                     crate::types::StreamingChunk::agent_task_update(
@@ -1031,7 +1849,7 @@ impl AsyncSubagentRunner {
                 tool_use_id: None,
                 status,
                 summary: desc,
-                result: output,
+                result: notification_output,
                 usage: NotificationUsage {
                     total_tokens: final_tokens,
                     tool_uses: final_tools,

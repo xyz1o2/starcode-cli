@@ -11,6 +11,7 @@ use crate::core::utils::paths::find_project_file_upwards;
 pub struct ProviderStore {
     global_config_path: PathBuf,
     project_config_path: Option<PathBuf>,
+    legacy_config_path: PathBuf,
 }
 
 fn normalize_optional_string(value: Option<String>) -> Option<String> {
@@ -107,6 +108,7 @@ impl ProviderStore {
         Self {
             global_config_path,
             project_config_path,
+            legacy_config_path: Storage::global_star_dir().join("providers.json"),
         }
     }
 
@@ -125,6 +127,7 @@ impl ProviderStore {
         project_config_path: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
+            legacy_config_path: global_config_path.with_file_name("providers.json"),
             global_config_path,
             project_config_path,
         }
@@ -132,7 +135,7 @@ impl ProviderStore {
 
     pub async fn load(&self) -> Result<ProviderConfig, String> {
         let mut config = ProviderConfig::default();
-        let legacy_path = Storage::global_star_dir().join("providers.json");
+        let legacy_path = &self.legacy_config_path;
         let mut loaded_from_user_settings = false;
 
         // 1. Load Global Config (from user-settings.json)
@@ -141,35 +144,35 @@ impl ProviderStore {
                 .await
                 .map_err(|e| format!("Failed to read global config: {}", e))?;
 
-            // Try to parse as UserSettings (Unified Config)
-            if let Ok(user_settings) = parse_json_with_comments::<UserSettings>(&content) {
-                if let Some(providers) = user_settings.providers {
-                    config.providers = providers;
-                    loaded_from_user_settings = true;
-                }
-                config.active_provider_id = user_settings.active_provider_id;
-                config.active_model = user_settings.active_model;
-            } else {
-                // Fallback: Try to parse as old ProviderConfig (providers.json format)
-                if let Ok(old_config) = parse_json_with_comments::<ProviderConfig>(&content) {
-                    config = old_config;
-                    loaded_from_user_settings = true;
-                } else {
-                    // 两种格式都解析失败：文件存在但内容坏了。不能静默继续——
-                    // 否则用户只会看到 "API key required"，不知道配置文件本身
-                    // 已经损坏。记录到 agent.log，让 /doctor 与日志能指出来。
-                    crate::utils::logging::append_agent_log_line(&format!(
-                        "[CONFIG] Failed to parse {}: not valid as user-settings or providers.json. Provider config reset to defaults.",
-                        self.global_config_path.display()
-                    ));
-                }
+            // 旧版三个字段均为统一设置的子集；二次宽松解析会吞掉其它设置的类型错误。
+            let user_settings = parse_json_with_comments::<UserSettings>(&content).map_err(|_| {
+                format!("Failed to parse global config {}: invalid user-settings or provider config", self.global_config_path.display())
+            })?;
+            if let Some(providers) = user_settings.providers {
+                config.providers = providers;
+                loaded_from_user_settings = true;
             }
+            config.active_provider_id = user_settings.active_provider_id;
+            config.active_model = user_settings.active_model;
         }
 
         // 2. Migration: If no providers loaded from user-settings, try legacy providers.json
         if !loaded_from_user_settings && legacy_path.exists() {
-            if let Ok(content) = fs::read_to_string(&legacy_path).await {
-                if let Ok(legacy_config) = parse_json_with_comments::<ProviderConfig>(&content) {
+            let content = fs::read_to_string(legacy_path).await.map_err(|e| {
+                format!(
+                    "Failed to read legacy provider config {}: {e}",
+                    legacy_path.display()
+                )
+            })?;
+            {
+                let legacy_config =
+                    parse_json_with_comments::<ProviderConfig>(&content).map_err(|_| {
+                        format!(
+                            "Failed to parse legacy provider config {}",
+                            legacy_path.display()
+                        )
+                    })?;
+                {
                     // Merge legacy config
                     config.providers = legacy_config.providers;
                     if config.active_provider_id.is_none() {
@@ -180,10 +183,17 @@ impl ProviderStore {
                     }
 
                     // Auto-save to user-settings.json to complete migration
-                    let _ = self.save(&config).await;
+                    self.save(&config).await?;
 
-                    // Rename legacy file to avoid confusion/re-reading
-                    let _ = fs::rename(&legacy_path, legacy_path.with_extension("json.bak")).await;
+                    // 新配置保存成功后才移走旧文件，失败时保留可恢复来源。
+                    fs::rename(legacy_path, legacy_path.with_extension("json.bak"))
+                        .await
+                        .map_err(|e| {
+                            format!(
+                                "Failed to archive legacy provider config {}: {e}",
+                                legacy_path.display()
+                            )
+                        })?;
                 }
             }
         }
@@ -195,7 +205,11 @@ impl ProviderStore {
                     .await
                     .map_err(|e| format!("Failed to read project config: {}", e))?;
 
-                if let Ok(project_config) = parse_json_with_comments::<ProviderConfig>(&content) {
+                let project_config =
+                    parse_json_with_comments::<ProviderConfig>(&content).map_err(|_| {
+                        format!("Failed to parse project provider config {}", path.display())
+                    })?;
+                {
                     // Merge active_provider_id
                     if let Some(id) = project_config.active_provider_id {
                         config.active_provider_id = Some(id);
@@ -352,26 +366,12 @@ impl ProviderStore {
             let content = fs::read_to_string(&self.global_config_path)
                 .await
                 .map_err(|e| format!("Failed to read global config: {}", e))?;
-            parse_json_with_comments::<UserSettings>(&content).unwrap_or_else(|_| UserSettings {
-                api_key: None,
-                base_url: None,
-                default_model: None,
-                models: None,
-                settings_version: Some(2),
-                is_openai_compatible: Some(true),
-                providers: None,
-                active_provider_id: None,
-                active_model: None,
-                sandbox: None,
-                ui_language: None,
-                thinking_effort: None,
-                output_style: None,
-                context_window: None,
-                file_filtering: None,
-                env: None,
-                poor_mode: None,
-                proactive_suggestions: None,
-            })
+            parse_json_with_comments::<UserSettings>(&content).map_err(|_| {
+                format!(
+                    "Failed to parse global config {}: refusing to overwrite invalid settings",
+                    self.global_config_path.display()
+                )
+            })?
         } else {
             // Default if not exists
             UserSettings {
@@ -675,9 +675,9 @@ impl ProviderStore {
     }
 
     /// 解决 id 冲突：和内置 id 或已存在的自定义 key 撞了就追加 `-2` / `-3` ……
-    pub async fn resolve_unique_provider_id(&self, base_id: &str) -> String {
-        let config = self.load().await.unwrap_or_default();
-        resolve_provider_id_conflicts(base_id, &config)
+    pub async fn resolve_unique_provider_id(&self, base_id: &str) -> Result<String, String> {
+        let config = self.load().await?;
+        Ok(resolve_provider_id_conflicts(base_id, &config))
     }
 
     /// 一次 load+save 写完一个自定义 provider 的全部字段。
@@ -787,6 +787,113 @@ fn resolve_provider_id_conflicts(base_id: &str, config: &ProviderConfig) -> Stri
 mod tests {
     use super::*;
     use crate::core::config::models::ProviderConfig;
+
+    #[tokio::test]
+    async fn malformed_configs_report_paths_without_content_and_are_not_overwritten() {
+        let root = tempfile::tempdir().unwrap();
+        let global = root.path().join("user-settings.json");
+        let project = root.path().join("project.jsonc");
+        let store = ProviderStore::with_paths(global.clone(), Some(project.clone()));
+        assert!(store.load().await.unwrap().providers.is_empty());
+        let malformed = r#"{"api_key":"private-test-marker", broken}"#;
+        fs::write(&global, malformed).await.unwrap();
+        let error = store.load().await.unwrap_err();
+        assert!(error.contains(&global.display().to_string()));
+        assert!(!error.contains("private-test-marker"));
+        assert!(store.save(&ProviderConfig::default()).await.is_err());
+        assert_eq!(fs::read_to_string(&global).await.unwrap(), malformed);
+        fs::write(&global, "{\"providers\":{}}").await.unwrap();
+        fs::write(&project, malformed).await.unwrap();
+        let error = store.load().await.unwrap_err();
+        assert!(error.contains(&project.display().to_string()));
+        assert!(!error.contains("private-test-marker"));
+        fs::remove_file(&project).await.unwrap();
+        fs::write(&store.legacy_config_path, malformed)
+            .await
+            .unwrap();
+        // providers 已在新格式中声明时，不读取过期旧文件。
+        assert!(store.load().await.is_ok());
+        fs::remove_file(&global).await.unwrap();
+        let error = store.load().await.unwrap_err();
+        assert!(error.contains("legacy provider config"));
+        assert!(!error.contains("private-test-marker"));
+        assert_eq!(
+            fs::read_to_string(&store.legacy_config_path).await.unwrap(),
+            malformed
+        );
+        fs::remove_file(&store.legacy_config_path).await.unwrap();
+        fs::create_dir(&global).await.unwrap();
+        assert!(store
+            .load()
+            .await
+            .unwrap_err()
+            .contains("Failed to read global config"));
+    }
+
+    #[tokio::test]
+    async fn invalid_settings_types_cannot_fall_back_to_empty_provider_config() {
+        let root = tempfile::tempdir().unwrap();
+        let global = root.path().join("user-settings.json");
+        let store = ProviderStore::with_paths(global.clone(), None);
+        for content in [
+            r#"{"api_key":17}"#,
+            r#"{"context_window":"invalid"}"#,
+            r#"{"providers":{},"env":{"SECRET":"private-test-marker"},"poor_mode":123}"#,
+        ] {
+            fs::write(&global, content).await.unwrap();
+            let error = store.load().await.unwrap_err();
+            assert!(error.contains(&global.display().to_string()));
+            assert!(!error.contains("private-test-marker"));
+            assert!(store
+                .resolve_unique_provider_id("new-provider")
+                .await
+                .is_err());
+            assert!(store.save(&ProviderConfig::default()).await.is_err());
+            assert_eq!(fs::read_to_string(&global).await.unwrap(), content);
+        }
+        fs::write(
+            &global,
+            r#"{"providers":{},"activeProviderId":"openai","activeModel":"legacy-model"}"#,
+        )
+        .await
+        .unwrap();
+        let loaded = store.load().await.unwrap();
+        assert_eq!(loaded.active_provider_id.as_deref(), Some("openai"));
+        assert_eq!(loaded.active_model.as_deref(), Some("legacy-model"));
+    }
+
+    #[tokio::test]
+    async fn jsonc_and_legacy_provider_configs_still_load() {
+        let root = tempfile::tempdir().unwrap();
+        let global = root.path().join("user-settings.json");
+        let project = root.path().join("project.jsonc");
+        let store = ProviderStore::with_paths(global.clone(), Some(project.clone()));
+        fs::write(
+            &global,
+            "// settings\n{\"providers\":{},\"active_model\":\"global\"}",
+        )
+        .await
+        .unwrap();
+        fs::write(&project, "/* override */ {\"active_model\":\"project\"}")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load().await.unwrap().active_model.as_deref(),
+            Some("project")
+        );
+        fs::remove_file(&global).await.unwrap();
+        fs::remove_file(&project).await.unwrap();
+        fs::write(
+            &store.legacy_config_path,
+            "{\"providers\":{},\"active_model\":\"legacy\"}",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store.load().await.unwrap().active_model.as_deref(),
+            Some("legacy")
+        );
+    }
 
     /// RAII guard 复用 providers.rs 的 [`crate::core::config::providers::
     /// ScopedApiKeyEnvRemoval`]：`configured_provider_ids_from` 会把「内建**且

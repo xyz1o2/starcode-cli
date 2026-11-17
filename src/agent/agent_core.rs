@@ -777,6 +777,57 @@ impl Agent {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn public_tool_batches_receive_the_current_abort_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::new(crate::core::config::ConfigParameters {
+            target_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        });
+        let registry = Arc::new(crate::core::tools::ToolRegistry::new(Arc::new(
+            config.clone(),
+        )));
+        let bus = Arc::new(crate::core::confirmation_bus::MessageBus::new(
+            crate::core::policy::policy_engine::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        config.install_runtime_services(crate::core::config::RuntimeServices::new(
+            Some(registry),
+            bus,
+            None,
+            Arc::new(crate::core::state::GlobalState::new()),
+        ));
+        let mut agent = Agent::new(
+            StarClient::new("", None, None, None, None),
+            Arc::new(config),
+        );
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        agent.abort_token = Some(token);
+        for count in [1, 2] {
+            let calls = (0..count)
+                .map(|i| crate::types::StarToolCall {
+                    id: format!("cancelled-{i}"),
+                    call_type: "function".into(),
+                    function: crate::types::StarToolCallFunction {
+                        name: "Read".into(),
+                        arguments: "{}".into(),
+                    },
+                })
+                .collect();
+            let results = agent.execute_tool_calls(calls).await;
+            assert_eq!(results.len(), count);
+            for result in results {
+                assert!(!result.success);
+                assert!(result
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("cancelled"));
+            }
+        }
+    }
+
     #[test]
     fn only_the_lead_consumes_background_subagent_notifications() {
         // lead 消费 —— 主 agent 必须能拿到 `<task-notification>`。

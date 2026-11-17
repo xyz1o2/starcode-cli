@@ -79,6 +79,9 @@ pub async fn build_runtime_services(
         .and_then(|runtime| runtime.agent_hub())
         .unwrap_or_else(crate::agent::messaging::new_shared_router);
     let agent_hub_for_registry = agent_hub.clone();
+    let subagent_tasks = existing_runtime
+        .map(|runtime| runtime.subagent_tasks())
+        .unwrap_or_default();
 
     let mut registry_config = config.clone();
     registry_config.install_runtime_services(
@@ -89,7 +92,8 @@ pub async fn build_runtime_services(
             global_state.clone(),
         )
         .with_model_switch_cell(model_switch_cell.clone())
-        .with_agent_hub(agent_hub_for_registry),
+        .with_agent_hub(agent_hub_for_registry)
+        .with_subagent_tasks(subagent_tasks.clone()),
     );
     let registry_config = Arc::new(registry_config);
 
@@ -116,7 +120,8 @@ pub async fn build_runtime_services(
     services = services
         .with_notification_queue(notification_queue)
         .with_model_switch_cell(model_switch_cell)
-        .with_agent_hub(agent_hub);
+        .with_agent_hub(agent_hub)
+        .with_subagent_tasks(subagent_tasks);
 
     Ok(RuntimeBootstrapArtifacts { services })
 }

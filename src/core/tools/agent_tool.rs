@@ -28,6 +28,8 @@ pub struct AgentToolParams {
     pub max_rounds: Option<u32>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub resume: Option<String>,
     /// **调用方**所处的递归深度 —— 本子代理落在 `depth + 1`。
     ///
     /// 由执行器（`ToolExecutor::normalize_agent_args`）覆盖写入，不在参数
@@ -47,6 +49,7 @@ impl From<AgentToolParams> for AgentToolFullInput {
             name: p.name,
             isolation: None,
             model: p.model,
+            resume: p.resume,
             background: p.background,
             max_rounds: p.max_rounds,
             parent_depth: p.parent_depth,
@@ -113,7 +116,7 @@ impl BaseDeclarativeTool for AgentTool {
                 "subagent_type": {
                     "type": "string",
                     "enum": ["general_purpose", "explorer", "analyzer", "editor", "code_reviewer"],
-                    "description": "Type of specialized agent to use. Default: general_purpose."
+                    "description": "Type of specialized agent to use. Defaults to the source type when resuming, otherwise general_purpose."
                 },
                 "name": {
                     "type": "string",
@@ -126,6 +129,10 @@ impl BaseDeclarativeTool for AgentTool {
                 "model": {
                     "type": "string",
                     "description": "Optional model ID on the current provider. Omit or use inherit to keep the parent model; this does not switch providers."
+                },
+                "resume": {
+                    "type": "string",
+                    "description": "Continue from an ended agent ID in this project using its last saved native context. A new task ID is created; current permissions, provider and working directory apply. Missing snapshots are errors. Cannot combine with a different subagent type or fork."
                 },
                 "max_rounds": {
                     "type": "integer",
@@ -141,6 +148,13 @@ impl BaseDeclarativeTool for AgentTool {
         params: serde_json::Value,
     ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
         let params: AgentToolParams = serde_json::from_value(params)?;
+        if params
+            .resume
+            .as_deref()
+            .is_some_and(|id| !crate::agent::subagent::session::valid_task_id(id))
+        {
+            return Err("Invalid agent session ID".into());
+        }
         Ok(Box::new(AgentToolInvocation {
             full_input: params.into(),
             runner: self.runner.clone(),
@@ -200,11 +214,12 @@ impl ToolInvocation for AgentToolInvocation {
                 + '_,
         >,
     > {
-        let input = self.full_input.clone();
+        let mut input = self.full_input.clone();
         let runner = self.runner.clone();
         let async_runner = self.async_runner.clone();
 
         Box::pin(async move {
+            runner.resolve_resume_type(&mut input).await?;
             let route = route_agent_call(&input, false, false);
 
             match route {
@@ -247,7 +262,9 @@ impl ToolInvocation for AgentToolInvocation {
 
                     // max_rounds 现在真正生效：调用方给了就用，否则回落默认值
                     let rounds = request.max_rounds.unwrap_or(DEFAULT_SYNC_MAX_ROUNDS);
-                    let request = request.with_max_rounds(rounds);
+                    let request = request
+                        .with_max_rounds(rounds)
+                        .with_identity(agent_id.clone());
 
                     match runner.run_with_progress(request, Some(sink)).await {
                         Ok(result) => {
@@ -307,7 +324,11 @@ impl ToolInvocation for AgentToolInvocation {
                                     error_type,
                                     message: err.message,
                                 }),
-                                data: None,
+                                data: Some(serde_json::json!({
+                                    "status": "failed",
+                                    "agent_id": agent_id,
+                                    "agent_type": type_label,
+                                })),
                             })
                         }
                     }
@@ -454,7 +475,7 @@ mod tests {
     #[test]
     fn invocation_model_reaches_every_request_route() {
         let params: AgentToolParams = serde_json::from_value(json!({
-            "description": "inspect code", "prompt": "find caller", "model": "child-model"
+            "description": "inspect code", "prompt": "find caller", "model": "child-model", "resume": "agent-old"
         }))
         .unwrap();
         let mut input: AgentToolFullInput = params.into();
@@ -466,6 +487,7 @@ mod tests {
                 other => panic!("unexpected route: {other:?}"),
             };
             assert_eq!(request.model.as_deref(), Some("child-model"));
+            assert_eq!(request.resume.as_deref(), Some("agent-old"));
         }
     }
 

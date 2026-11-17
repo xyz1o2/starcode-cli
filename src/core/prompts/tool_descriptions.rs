@@ -68,6 +68,7 @@ fn tool_description_key_map() -> &'static std::collections::HashMap<&'static str
         m.insert("TaskList", "tasklist");
         m.insert("TaskUpdate", "taskupdate");
         m.insert("TaskOutput", "taskoutput");
+        m.insert("TaskStop", "taskstop");
         // 代理/技能
         m.insert("Agent", "runagent");
         m.insert("Skill", "skill");

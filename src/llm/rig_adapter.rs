@@ -540,6 +540,20 @@ fn usage_reported(usage: &rig_core::completion::request::Usage) -> bool {
 /// `CompletionResponse` 携带它，所以在流耗尽后发送 `UsageUpdate`。
 async fn drive_stream(
     label: &'static str,
+    streamed: rig_core::streaming::Streamed<rig_core::operation::Completion>,
+    tx: tokio::sync::mpsc::Sender<Result<LlmEvent, LlmError>>,
+) {
+    // 消费者取消后，上游可能永远不再发事件；不能等下一次 send 才发现接收端关闭。
+    // 覆盖请求头、事件读取和 finish 的整个生命周期，退出时丢弃 HTTP 流。
+    tokio::select! {
+        biased;
+        _ = tx.closed() => {},
+        _ = drive_stream_events(label, streamed, tx.clone()) => {},
+    }
+}
+
+async fn drive_stream_events(
+    label: &'static str,
     mut streamed: rig_core::streaming::Streamed<rig_core::operation::Completion>,
     tx: tokio::sync::mpsc::Sender<Result<LlmEvent, LlmError>>,
 ) {

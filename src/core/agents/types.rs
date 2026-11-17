@@ -344,6 +344,9 @@ pub struct AgentToolFullInput {
     pub isolation: Option<AgentIsolation>,
     /// 模型覆盖
     pub model: Option<String>,
+    /// 已结束子代理的上下文来源 ID。
+    #[serde(default)]
+    pub resume: Option<String>,
     /// 显式请求后台异步执行
     pub background: Option<bool>,
     /// 最大轮次数

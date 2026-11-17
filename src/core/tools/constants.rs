@@ -66,6 +66,7 @@ pub enum ToolName {
     TaskList,
     TaskUpdate,
     TaskOutput,
+    TaskStop,
     /// 后台 bash 治理（对标 CC 的 TaskOutput；本仓库 TaskOutput 已被任务
     /// 系统占用，改名避开）。配套 `KillShell`。
     BashTaskOutput,
@@ -166,6 +167,7 @@ impl ToolName {
             ToolName::TaskList => "TaskList",
             ToolName::TaskUpdate => "TaskUpdate",
             ToolName::TaskOutput => "TaskOutput",
+            ToolName::TaskStop => "TaskStop",
             ToolName::BashTaskOutput => "BashTaskOutput",
             ToolName::KillShell => "KillShell",
 
@@ -253,6 +255,7 @@ impl ToolName {
             "TaskList" => Some(ToolName::TaskList),
             "TaskUpdate" => Some(ToolName::TaskUpdate),
             "TaskOutput" => Some(ToolName::TaskOutput),
+            "TaskStop" => Some(ToolName::TaskStop),
             "BashTaskOutput" => Some(ToolName::BashTaskOutput),
             "KillShell" => Some(ToolName::KillShell),
             "Wait" => Some(ToolName::Wait),
@@ -338,6 +341,7 @@ impl ToolName {
             ToolName::TaskList,
             ToolName::TaskUpdate,
             ToolName::TaskOutput,
+            ToolName::TaskStop,
             ToolName::BashTaskOutput,
             ToolName::KillShell,
             // 调度
@@ -468,6 +472,7 @@ impl ToolName {
             | ToolName::TaskList
             | ToolName::TaskUpdate
             | ToolName::TaskOutput
+            | ToolName::TaskStop
             | ToolName::BashTaskOutput
             | ToolName::KillShell
             | ToolName::SendMessage
