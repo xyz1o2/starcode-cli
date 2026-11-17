@@ -920,6 +920,10 @@ impl StarAgent {
         self.abort_flag.store(false, Ordering::SeqCst);
     }
 
+    pub(crate) fn turn_context_handed_back(&self) -> bool {
+        self.inner.turn_context_handed_back
+    }
+
     /// 取得 worker 所有的原生 provider 上下文与尚未注入的本地命令输出。
     pub fn session_context_snapshot(&self) -> (Vec<StarMessage>, Vec<String>) {
         (

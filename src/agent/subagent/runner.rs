@@ -95,6 +95,8 @@ pub struct StarAgentRunner {
     /// Agent 间消息 hub：派生带 identity 的子 agent 时把 hub 接进去。
     /// `None` = 从 config 的 RuntimeServices 读（bootstrap 创建的同一单例）。
     agent_hub: Option<crate::agent::messaging::SharedAgentRouter>,
+    #[cfg(test)]
+    panic_loop_before_handoff: bool,
 }
 
 impl StarAgentRunner {
@@ -104,6 +106,8 @@ impl StarAgentRunner {
             client,
             config,
             agent_hub,
+            #[cfg(test)]
+            panic_loop_before_handoff: false,
         }
     }
 
@@ -143,6 +147,8 @@ impl StarAgentRunner {
             client: client.clone(),
             config: self.config.clone(),
             agent_hub: self.agent_hub.clone(),
+            #[cfg(test)]
+            panic_loop_before_handoff: self.panic_loop_before_handoff,
         }
     }
 
@@ -312,6 +318,10 @@ impl StarAgentRunner {
                 })?;
         }
         let mut agent = self.create_child_agent(&request, sub_config).await?;
+        #[cfg(test)]
+        {
+            agent.panic_loop_before_handoff = self.panic_loop_before_handoff;
+        }
 
         // Hub 身份接线（Phase 3）：子 agent 在 hub 里注册成自己的身份，
         // SendMessage 按 name / agent_id 单播它，它自己每个 turn 开头 drain。
@@ -406,6 +416,17 @@ impl StarAgentRunner {
             Ok::<(), SubAgentError>(())
         }
         .await;
+        if !agent.turn_context_handed_back() {
+            return Err(SubAgentError::new(
+                SubAgentErrorKind::ExecutionFailed,
+                stream_error
+                    .or_else(|| execution.as_ref().err().map(ToString::to_string))
+                    .unwrap_or_else(|| {
+                        "Agent execution did not return session context; no resume snapshot saved"
+                            .to_owned()
+                    }),
+            ));
+        }
         let (session_messages, pending_context) = agent.session_context_snapshot();
         let snapshot_result = super::session::AgentSession::new(
             self.config.storage(),
@@ -1220,6 +1241,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn panicked_execution_fails_and_never_publishes_stale_session() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = Config::new(crate::core::config::ConfigParameters {
+            target_dir: root.path().to_owned(),
+            core_tools: Some(vec![]),
+            mcp_enabled: Some(false),
+            enable_agents: Some(false),
+            ..Default::default()
+        });
+        config.initialize().await.unwrap();
+        let config = Arc::new(config);
+        let mut sync = StarAgentRunner::new(
+            StarClient::new(
+                "local-key",
+                Some("local-model".into()),
+                Some("http://127.0.0.1:9/v1".into()),
+                Some(true),
+                None,
+            ),
+            config.clone(),
+        );
+        sync.panic_loop_before_handoff = true;
+        let queue = Arc::new(Mutex::new(NotificationQueue::new()));
+        let runner = AsyncSubagentRunner::new(Arc::new(sync), queue.clone());
+        let launch = runner
+            .spawn_background(
+                SubAgentRequest::new("inspect").with_parent_context(
+                    vec![
+                        crate::types::StarMessage::user("old question"),
+                        crate::types::StarMessage::assistant("stale answer"),
+                    ],
+                    vec![],
+                ),
+                Some("panic-worker".into()),
+                "inspect".into(),
+                "Agent".into(),
+            )
+            .await;
+        let notification = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                if let Some(notification) =
+                    queue.lock().await.drain_for_next_turn().into_iter().next()
+                {
+                    break notification;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("panic must close both streams and finish the background task");
+        assert_eq!(notification.status, NotificationStatus::Failed);
+        assert!(notification
+            .result
+            .contains("without returning session context"));
+        assert!(!config
+            .storage()
+            .project_subagent_sessions_dir()
+            .join(format!("{}.json", launch.agent_id))
+            .exists());
+        assert!(runner.resolve_name("panic-worker").await.is_none());
+        assert!(!queue.lock().await.has_inflight());
+        assert!(config
+            .runtime_agent_hub()
+            .unwrap()
+            .lock()
+            .await
+            .resolve(&launch.agent_id)
+            .is_none());
+        assert_eq!(
+            runner
+                .tasks
+                .lock()
+                .await
+                .get(&launch.agent_id)
+                .unwrap()
+                .status,
+            Some(NotificationStatus::Failed)
+        );
+    }
+
+    #[tokio::test]
     async fn stop_before_initialization_never_constructs_a_child() {
         let runner = StarAgentRunner::new(
             StarClient::new("", None, None, None, None),
@@ -1527,6 +1629,8 @@ impl AsyncSubagentRunner {
             client: self.sync_runner.client.clone(),
             config: self.sync_runner.config.clone(),
             agent_hub: Some(hub.clone()),
+            #[cfg(test)]
+            panic_loop_before_handoff: self.sync_runner.panic_loop_before_handoff,
         });
         self.agent_hub = Some(hub);
         self

@@ -18,6 +18,10 @@ pub struct Agent {
     pub(crate) compact_manager: crate::agent::compact::CompactManager,
     pub(crate) context_engine: crate::core::context::engine::ContextEngine,
     pub(crate) session_messages: Vec<StarMessage>,
+    /// 本次内部循环是否已交回上下文；异常退出时不得发布旧会话为新快照。
+    pub(crate) turn_context_handed_back: bool,
+    #[cfg(test)]
+    pub(crate) panic_loop_before_handoff: bool,
     /// `!command` 跑出来的输出，等下一条用户消息一起发出去
     ///
     /// 不直接 push 成一条独立的 user 消息：Anthropic 要求 user/assistant 交替，
@@ -207,6 +211,9 @@ impl Agent {
             compact_manager,
             context_engine,
             session_messages: Vec::new(),
+            turn_context_handed_back: false,
+            #[cfg(test)]
+            panic_loop_before_handoff: false,
             pending_local_context: Vec::new(),
             abort_flag: None,
             abort_token: None,

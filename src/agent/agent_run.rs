@@ -129,6 +129,7 @@ impl Agent {
                 + 'a,
         >,
     > {
+        self.turn_context_handed_back = false;
         let user_input = input.text;
         let images = input.images;
         Box::pin(async_stream::try_stream! {
@@ -502,6 +503,8 @@ impl Agent {
             // 运行中切模型的交接槽也要传下去 —— 运行中的回合靠它在下一次请求前
             // 换上用户刚选的模型。
             agent_for_loop.model_switch_cell = self.model_switch_cell.clone();
+            #[cfg(test)]
+            { agent_for_loop.panic_loop_before_handoff = self.panic_loop_before_handoff; }
 
             let (result_tx, result_rx) =
                 tokio::sync::oneshot::channel::<(Result<Vec<StarMessage>, (Vec<StarMessage>, AgentEvent)>, Vec<StarMessage>)>();
@@ -514,6 +517,10 @@ impl Agent {
             let mut messages_clone = messages.clone();
 
             tokio::spawn(async move {
+                #[cfg(test)]
+                if agent_for_loop.panic_loop_before_handoff {
+                    panic!("controlled test panic before session handoff");
+                }
                 let result = agent_for_loop.run_agentic_loop(
                     &user_input_clone,
                     &mut messages_clone,
@@ -555,6 +562,7 @@ impl Agent {
                         // 更新 session_messages 以保留对话历史
                         if let Some((loop_result, updated_session_messages)) = result {
                             self.session_messages = updated_session_messages;
+                            self.turn_context_handed_back = true;
 
                             // `run_agentic_loop` 的失败**只**活在这个 Err 里 ——
                             // 循环内部不 emit_event，所以之前把它丢进 `_`、
@@ -572,6 +580,8 @@ impl Agent {
                                     yield event;
                                 }
                             }
+                        } else {
+                            yield AgentEvent::Error("Agent execution task exited without returning session context".to_owned());
                         }
                         result_rx = None;
                         break;
