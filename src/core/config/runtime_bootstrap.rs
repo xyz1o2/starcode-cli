@@ -66,10 +66,7 @@ pub async fn build_runtime_services(
             }
         });
 
-    // 模型切换槽：Agent 与 SkillTool 共用同一个。
-    //
-    // 用户 `/model` 与 skill 的 `model` frontmatter 都要换模型 ——
-    // 必须是同一个槽，否则两边互相覆盖。
+    // lead 的 Agent 与 SkillTool 共用模型切换槽；子代理槽独立，避免竞争消费。
     let model_switch_cell = crate::agent::model_switch::new_cell();
 
     // Agent 间消息路由 hub（进程级单例）：与 notification_queue 同样的共享

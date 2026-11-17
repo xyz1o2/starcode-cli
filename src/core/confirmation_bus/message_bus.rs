@@ -115,22 +115,46 @@ impl MessageBus {
         tool_call: &crate::core::policy::FunctionCall,
         server_name: Option<&str>,
     ) -> crate::core::policy::CheckResult {
+        self.check_tool_policy_for(tool_call, server_name, None).await
+    }
+
+    pub async fn check_tool_policy_for(
+        &self,
+        tool_call: &crate::core::policy::FunctionCall,
+        server_name: Option<&str>,
+        policy_identity: Option<&str>,
+    ) -> crate::core::policy::CheckResult {
         let policy_engine = self.policy_engine.read().await;
-        policy_engine.check(tool_call, server_name).await
+        policy_engine
+            .check_for(tool_call, server_name, policy_identity)
+            .await
     }
 
     /// 应用 skill 的本轮工具策略（`allowed-tools` / `disallowed-tools`）。
     ///
     /// 只到下一条用户消息为止 —— 由 [`Self::clear_turn_tool_policy`] 清掉。
     pub async fn apply_turn_tool_policy(&self, allowed: &[String], disallowed: &[String]) {
-        let mut policy_engine = self.policy_engine.write().await;
-        policy_engine.apply_turn_tool_policy(allowed, disallowed);
+        self.apply_turn_tool_policy_for(None, allowed, disallowed).await;
     }
 
-    /// 清空本轮的工具策略（下一条用户消息开始时调用）。
-    pub async fn clear_turn_tool_policy(&self) {
+    pub async fn apply_turn_tool_policy_for(
+        &self,
+        identity: Option<&str>,
+        allowed: &[String],
+        disallowed: &[String],
+    ) {
         let mut policy_engine = self.policy_engine.write().await;
-        policy_engine.clear_turn_grants();
+        policy_engine.apply_turn_tool_policy_for(identity, allowed, disallowed);
+    }
+
+    /// 清空本轮的 lead 工具策略（下一条用户消息开始时调用）。
+    pub async fn clear_turn_tool_policy(&self) {
+        self.clear_turn_tool_policy_for(None).await;
+    }
+
+    pub async fn clear_turn_tool_policy_for(&self, identity: Option<&str>) {
+        let mut policy_engine = self.policy_engine.write().await;
+        policy_engine.clear_turn_grants_for(identity);
     }
 
     /// 现在有没有人能够回答确认卡片。
@@ -179,7 +203,11 @@ impl MessageBus {
                     read_only: None,
                 };
                 let check_result = policy_engine
-                    .check(&tool_call, req.server_name.as_deref())
+                    .check_for(
+                        &tool_call,
+                        req.server_name.as_deref(),
+                        req.policy_identity.as_deref(),
+                    )
                     .await;
 
                 match check_result.decision {

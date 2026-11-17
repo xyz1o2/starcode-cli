@@ -71,14 +71,13 @@ fn child_depth(parent_depth: usize, runner_depth: usize) -> Result<usize, SubAge
     Ok(depth)
 }
 
-/// Explorer 的工具集合；执行器同时限制 schema 和执行入口。
-/// Bash 仍经过通用权限门，工具白名单本身不是命令参数级只读沙箱。
+/// Explorer 的检索工具集合；执行器同时限制 schema 和执行入口。
+/// 不提供 Bash：通用权限门没有命令参数级只读隔离。
 pub const EXPLORER_READONLY_TOOLS: &[&str] = &[
     "Read",
     "Grep",
     "Glob",
     "LS",
-    "Bash",
     "ReadManyFiles",
     "CodebaseSearch",
     "CodeGraph",
@@ -224,8 +223,10 @@ impl StarAgentRunner {
             .clone();
         let prompt = request.prompt.clone();
         let kind = request.subagent_type.as_str();
+        let project_root = crate::agent::hooks::cached_project_root()
+            .unwrap_or_else(|| self.config.target_dir().to_path_buf());
         crate::agent::hooks::run_subagent_lifecycle_hook(
-            self.config.target_dir(),
+            &project_root,
             ManagedHookEvent::SubagentStart,
             &identity,
             &prompt,
@@ -248,7 +249,7 @@ impl StarAgentRunner {
             result.as_ref().err().map(ToString::to_string)
         };
         crate::agent::hooks::run_subagent_lifecycle_hook(
-            self.config.target_dir(),
+            &project_root,
             ManagedHookEvent::SubagentStop,
             &identity,
             &prompt,
@@ -340,8 +341,8 @@ impl StarAgentRunner {
         let rounds = request.max_rounds.unwrap_or(DEFAULT_SUBAGENT_MAX_ROUNDS);
         sub_config.set_max_session_turns(rounds as i32);
         //
-        // Explorer 只暴露搜索工具；Bash 继续走权限门，不能把工具名当成
-        // 参数级只读保证。专用提示说明职责边界，执行器负责工具集合约束。
+        // Explorer 只暴露专用检索工具；Bash 缺少参数级只读隔离，不能提供。
+        // 执行器同时过滤共享注册表的 schema 和直接工具调用。
         if request.subagent_type == crate::core::agents::SubagentType::Explorer {
             sub_config.core_tools = Some(
                 EXPLORER_READONLY_TOOLS
@@ -1560,14 +1561,21 @@ mod tests {
         );
     }
 
-    /// Explore 只读白名单（对标 CC 官方 docs 的 Explore agent：Read/Grep/Glob/
-    /// 只读 Bash，禁一切可变更工具）。两条派发路径的收口点都靠把
+    /// Explore 使用专用读取/检索工具；没有系统只读隔离时不提供 Bash。
+    /// 两条派发路径的收口点都靠把
     /// `core_tools` 灌进子 config —— 这里锁不变量的输入侧：白名单不含
     /// Write/Edit 类可变更工具，且派发判定路由正确（真正注册面由
     /// `is_core_tool_enabled` 在构造期消费，其覆盖见 core_runtime 测试）。
     #[test]
     fn explorer_readonly_whitelist_excludes_mutating_tools() {
-        let mutating = ["Write", "Edit", "MultiEdit", "SmartEdit", "NotebookEdit"];
+        let mutating = [
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "SmartEdit",
+            "NotebookEdit",
+            "Bash",
+        ];
         for tool in mutating {
             assert!(
                 !EXPLORER_READONLY_TOOLS.contains(&tool),
@@ -1575,7 +1583,7 @@ mod tests {
                 tool
             );
         }
-        for tool in ["Read", "Grep", "Glob", "Bash"] {
+        for tool in ["Read", "Grep", "Glob", "LS", "CodeGraph", "RepoMap"] {
             assert!(
                 EXPLORER_READONLY_TOOLS.contains(&tool),
                 "{} 是 Explore 的核心检索工具，必须在名单里",

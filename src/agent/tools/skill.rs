@@ -859,8 +859,12 @@ async fn apply_skill_runtime_effects(
     // ── allowed-tools / disallowed-tools ──────────────────────────
     if !meta.allowed_tools.is_empty() || !meta.disallowed_tools.is_empty() {
         if let Some(bus) = message_bus {
-            bus.apply_turn_tool_policy(&meta.allowed_tools, &meta.disallowed_tools)
-                .await;
+            bus.apply_turn_tool_policy_for(
+                self.config.agent_identity.as_deref(),
+                &meta.allowed_tools,
+                &meta.disallowed_tools,
+            )
+            .await;
             crate::utils::logging::append_debug_log_line(&format!(
                 "[Skill] `{}` applied turn tool policy: allowed={:?} disallowed={:?}",
                 skill.name, meta.allowed_tools, meta.disallowed_tools

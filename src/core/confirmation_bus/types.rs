@@ -61,6 +61,8 @@ pub struct ToolConfirmationRequest {
     #[serde(rename = "type")]
     pub message_type: MessageBusType,
     pub tool_call: FunctionCall,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_identity: Option<String>,
     pub correlation_id: String,
     pub server_name: Option<String>,
     pub title: Option<String>,

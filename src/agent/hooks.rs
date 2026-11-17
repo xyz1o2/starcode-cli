@@ -217,7 +217,11 @@ pub(crate) async fn run_subagent_lifecycle_hook(
         &crate::core::hooks::runner::HookRunContext {
             user_message: prompt.to_owned(),
             status: status.to_owned(),
-            tool_name: Some(subagent_type.to_owned()),
+            tool_name: Some(
+                crate::core::agents::SubagentType::from_name(subagent_type)
+                    .map(|kind| kind.user_facing_name().to_owned())
+                    .unwrap_or_else(|| subagent_type.to_owned()),
+            ),
             tool_arguments: Some(details.to_string()),
             tool_success: success,
             stop_reason: reason,
@@ -254,7 +258,7 @@ pub(crate) async fn install_subagent_hook_recorder(project_root: &std::path::Pat
             command: "printf '%s\\t%s\\t%s\\t%s\\n' \"$STAR_HOOK_EVENT\" \"$STAR_HOOK_STATUS\" \"$STAR_HOOK_TOOL_SUCCESS\" \"$STAR_HOOK_TOOL_ARGUMENTS\" >> lifecycle.log".to_owned(),
             timeout_secs: 5, blocking: false, enabled: true, created_at: 0, updated_at: 0,
             source: None, working_dir: None,
-            matcher: Some("general_purpose".to_owned()), once: false, status_message: None,
+            matcher: Some("general-purpose".to_owned()), once: false, status_message: None,
         }).collect();
     save_store(project_root, &HookStore { hooks })
         .await

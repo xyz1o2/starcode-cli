@@ -607,13 +607,14 @@ impl ToolExecutor {
         let mut approved = false;
 
         let check = bus
-            .check_tool_policy(
+            .check_tool_policy_for(
                 &FunctionCall {
                     name: tool_name.to_string(),
                     args: Some(args.clone()),
                     read_only: Some(read_only),
                 },
                 None,
+                self.config.agent_identity.as_deref(),
             )
             .await;
 
@@ -697,6 +698,7 @@ impl ToolExecutor {
                 args: Some(args.clone()),
                 read_only: Some(read_only),
             },
+            policy_identity: self.config.agent_identity.clone(),
             correlation_id: String::new(),
             server_name: None,
             title: Some(details.title),
@@ -800,7 +802,7 @@ impl ToolExecutor {
 
         if let Some(bus) = &self.message_bus {
             let check = bus
-                .check_tool_policy(
+                .check_tool_policy_for(
                     &FunctionCall {
                         name: tool_name.to_string(),
                         args: Some(args.clone()),
@@ -810,6 +812,7 @@ impl ToolExecutor {
                         read_only: Some(tool.is_read_only()),
                     },
                     None,
+                    self.config.agent_identity.as_deref(),
                 )
                 .await;
 
@@ -1033,6 +1036,7 @@ impl ToolExecutor {
                 args: Some(args.clone()),
                 read_only: None,
             },
+            policy_identity: self.config.agent_identity.clone(),
             // correlation_id 由 bus 在发出去之前填。
             correlation_id: String::new(),
             server_name: None,

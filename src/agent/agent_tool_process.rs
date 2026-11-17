@@ -448,8 +448,10 @@ impl Agent {
         loop_state: &mut LoopState,
     ) {
         if tool_calls.iter().any(|call| {
-            crate::core::tools::constants::resolve_registered_tool_name(&call.function.name)
-                == "Agent"
+            matches!(
+                crate::core::tools::constants::resolve_registered_tool_name(&call.function.name),
+                "Agent" | "Skill"
+            )
         }) {
             self.tool_executor.set_agent_parent_context(messages);
             self.tool_executor.set_agent_parent_client(&self.client);
@@ -1562,6 +1564,142 @@ mod tests {
         assert_eq!(crate::llm::thinking::current_effort(), global_before);
         caller.apply_runtime_snapshot(policy, ThinkingEffort::Low);
         assert_eq!(caller.thinking_effort, ThinkingEffort::Low);
+    }
+
+    /// 模型实际调用内联 Skill 后，下一次 provider 请求必须消费局部 effort。
+    #[tokio::test]
+    async fn inline_skill_changes_the_next_http_request_and_keeps_global_effort_unchanged() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(".star/skills/http-effort");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("SKILL.md"), "---\nname: http-effort\ndescription: local fixture\neffort: high\n---\nReturn the local result.\n").unwrap();
+        let _effort_guard =
+            crate::llm::thinking::TestEffortGuard::new(&crate::types::ThinkingEffort::Max);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for index in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buf = [0; 4096];
+                loop {
+                    let count = socket.read(&mut buf).await.unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&buf[..count]);
+                    if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let length = String::from_utf8_lossy(&bytes[..end])
+                            .lines()
+                            .find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        if bytes.len() >= end + 4 + length {
+                            requests.push(
+                                serde_json::from_slice::<serde_json::Value>(
+                                    &bytes[end + 4..end + 4 + length],
+                                )
+                                .unwrap(),
+                            );
+                            break;
+                        }
+                    }
+                }
+                let frame = if index == 0 {
+                    serde_json::json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"skill-http","type":"function","function":{"name":"Skill","arguments":"{\"skill\":\"http-effort\"}"}}]}}]})
+                } else {
+                    serde_json::json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"The local skill completed and returned the expected result."}}]})
+                };
+                let body = format!("data: {frame}\n\ndata: {{\"object\":\"chat.completion.chunk\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n");
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        struct StopServer(tokio::task::AbortHandle);
+        impl Drop for StopServer {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let _server_guard = StopServer(server.abort_handle());
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut config =
+                crate::core::config::Config::new(crate::core::config::ConfigParameters {
+                    target_dir: directory.path().to_owned(),
+                    core_tools: Some(Vec::new()),
+                    mcp_enabled: Some(false),
+                    enable_agents: Some(false),
+                    max_session_turns: Some(2),
+                    ..Default::default()
+                });
+            config.initialize().await.unwrap();
+            let config = std::sync::Arc::new(config);
+            let client = crate::llm::client::StarClient::new(
+                "local-key",
+                Some("gpt-5-local".into()),
+                Some(endpoint),
+                Some(true),
+                Some("local-test".into()),
+            );
+            config
+                .runtime_tool_registry()
+                .unwrap()
+                .register_tool(std::sync::Arc::new(
+                    crate::agent::tools::skill::SkillTool::new(client.clone(), config.clone()),
+                ));
+            config
+                .runtime_message_bus()
+                .unwrap()
+                .set_approval_mode(crate::core::policy::types::ApprovalMode::BypassPermissions)
+                .await;
+            let mut agent = Agent::new(client, config);
+            let policy = agent.context_policy.clone();
+            agent.apply_runtime_snapshot(policy.clone(), crate::types::ThinkingEffort::Low);
+            let tools = agent.tool_executor.get_tool_definitions();
+            let names = tools
+                .iter()
+                .map(|tool| tool.function.name.clone())
+                .collect::<std::collections::HashSet<_>>();
+            let selection = crate::agent::tool_routing::ToolSelection {
+                tools: tools.clone(),
+                selected_names: names.clone(),
+                rationale: "local regression".into(),
+                total_tools: tools.len(),
+            };
+            let mut messages = vec![StarMessage::user(
+                "Use the http-effort skill and return its result.",
+            )];
+            let result = agent
+                .run_agentic_loop(
+                    "Use the http-effort skill and return its result.",
+                    &mut messages,
+                    &tools,
+                    &names,
+                    "local",
+                    0,
+                    &selection,
+                )
+                .await;
+            assert!(result.is_ok(), "{result:?}");
+            let requests = server.await.unwrap();
+            assert_eq!(requests[0]["reasoning_effort"], "low");
+            assert_eq!(requests[1]["reasoning_effort"], "high");
+            assert!(requests[1]["messages"]
+                .to_string()
+                .contains("Return the local result."));
+            assert_eq!(agent.thinking_effort, crate::types::ThinkingEffort::High);
+            assert_eq!(
+                crate::llm::thinking::current_effort(),
+                crate::types::ThinkingEffort::Max
+            );
+            agent.apply_runtime_snapshot(policy, crate::types::ThinkingEffort::Low);
+            assert_eq!(agent.thinking_effort, crate::types::ThinkingEffort::Low);
+        })
+        .await
+        .expect("inline Skill HTTP regression must finish");
     }
 
     #[test]

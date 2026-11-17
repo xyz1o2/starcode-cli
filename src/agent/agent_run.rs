@@ -144,7 +144,8 @@ impl Agent {
             // 不清的话，上一条消息的 skill 授权会漏到下一条 —— 那条消息
             // 可能压根没调用过任何 skill。
             if let Some(bus) = self.runtime_message_bus() {
-                bus.clear_turn_tool_policy().await;
+                bus.clear_turn_tool_policy_for(self.config.agent_identity.as_deref())
+                    .await;
             }
             // 本轮思考力度同样只到下一条用户消息为止
             // （skill 的 `effort` frontmatter 字段）。
@@ -500,9 +501,7 @@ impl Agent {
             // steering 队列要一路传到这个 fresh Agent —— 运行中插入的需求
             // 是在这里被消费、插进对话的。
             agent_for_loop.steering_queue = self.steering_queue.clone();
-            // 运行中切模型的交接槽也要传下去 —— 运行中的回合靠它在下一次请求前
-            // 换上用户刚选的模型。
-            agent_for_loop.model_switch_cell = self.model_switch_cell.clone();
+            // 父回合的模型切换槽仅由 lead 消费，子代理不共享此槽。
             #[cfg(test)]
             { agent_for_loop.panic_loop_before_handoff = self.panic_loop_before_handoff; }
 

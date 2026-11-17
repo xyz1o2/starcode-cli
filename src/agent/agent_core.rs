@@ -176,13 +176,19 @@ impl Agent {
         );
         crate::utils::logging::append_agent_log_line("[INIT] ToolExecutor::new completed");
 
-        // 模型切换槽：与 SkillTool 共用同一个 —— 用户的 `/model` 与 skill 的
-        // `model` frontmatter 都要走它，两边分家会互相覆盖。
+        // lead 与 SkillTool 共用模型切换槽；子代理使用独立槽，不能消费 lead 请求。
         //
         // 在结构体字面量之前取出来：`config` 会被 move 进 `Agent`。
-        let model_switch_cell = config
-            .runtime_model_switch_cell()
-            .unwrap_or_else(crate::agent::model_switch::new_cell);
+        let model_switch_cell = if config.recursion_depth > 0 {
+            // 子代理不能竞争消费 lead 的 /model 请求，只继承创建时解析出的客户端。
+            config
+                .runtime_child_model_switch_cell()
+                .unwrap_or_else(crate::agent::model_switch::new_cell)
+        } else {
+            config
+                .runtime_model_switch_cell()
+                .unwrap_or_else(crate::agent::model_switch::new_cell)
+        };
 
         // ContextEngine: 延迟初始化，不在构造函数中做任何 I/O
         let context_engine = crate::core::context::engine::ContextEngine::new();
@@ -759,8 +765,10 @@ impl Agent {
         tool_calls: Vec<crate::types::StarToolCall>,
     ) -> Vec<crate::types::ToolResult> {
         if tool_calls.iter().any(|call| {
-            crate::core::tools::constants::resolve_registered_tool_name(&call.function.name)
-                == "Agent"
+            matches!(
+                crate::core::tools::constants::resolve_registered_tool_name(&call.function.name),
+                "Agent" | "Skill"
+            )
         }) {
             self.tool_executor
                 .set_agent_parent_context(&self.session_messages);

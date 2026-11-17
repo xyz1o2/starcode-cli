@@ -42,6 +42,12 @@ pub struct CheckResult {
     pub explicit_rule: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+struct ScopedTurnPolicy {
+    grants: std::collections::HashSet<String>,
+    denials: std::collections::HashSet<String>,
+}
+
 pub struct PolicyEngine {
     rules: Vec<PolicyRule>,
     checkers: Vec<SafetyCheckerRule>,
@@ -67,6 +73,8 @@ pub struct PolicyEngine {
     ///
     /// 与 `turn_grants` 相反：这个是"本轮不许用"。清空时机相同。
     turn_denials: std::collections::HashSet<String>,
+    /// 子代理当前回合应用的权限约束，不写入共享的 PolicyEngine。
+    scoped_turn_policies: std::collections::HashMap<String, ScopedTurnPolicy>,
     permission_rule_engine: PermissionRuleEngine,
     /// settings.json `permissions` 段里的 allow/ask/deny 规则
     settings_permissions: SettingsPermissions,
@@ -103,6 +111,7 @@ impl PolicyEngine {
             session_allowances: std::collections::HashSet::new(),
             turn_grants: std::collections::HashSet::new(),
             turn_denials: std::collections::HashSet::new(),
+            scoped_turn_policies: std::collections::HashMap::new(),
             permission_rule_engine: PermissionRuleEngine::new(),
             settings_permissions: SettingsPermissions::default(),
             auto_classifier: None,
@@ -233,7 +242,7 @@ impl PolicyEngine {
         self.session_allowances.insert(tool_name);
     }
 
-    /// 应用一个 skill 的本轮工具策略（`allowed-tools` / `disallowed-tools`）。
+    /// 应用一个代理身份的本轮工具策略（`allowed-tools` / `disallowed-tools`）。
     ///
     /// 只影响**本轮** —— 下一条用户消息进来时由 [`Self::clear_turn_grants`] 清掉。
     ///
@@ -241,34 +250,69 @@ impl PolicyEngine {
     /// 语义）：不在名单里的工具仍然可用，只是照常走审批。
     /// `disallowed-tools` 才是真的从可用池里移除。
     pub fn apply_turn_tool_policy(&mut self, allowed: &[String], disallowed: &[String]) {
+        self.apply_turn_tool_policy_for(None, allowed, disallowed);
+    }
+
+    pub fn apply_turn_tool_policy_for(
+        &mut self,
+        identity: Option<&str>,
+        allowed: &[String],
+        disallowed: &[String],
+    ) {
+        let policy = identity.map(|value| self.scoped_turn_policies.entry(value.to_owned()).or_default());
+        let (grants, denials) = match policy {
+            Some(policy) => (&mut policy.grants, &mut policy.denials),
+            None => (&mut self.turn_grants, &mut self.turn_denials),
+        };
         for tool in allowed {
-            let canonical =
-                crate::core::tools::constants::resolve_registered_tool_name(tool).to_string();
-            self.turn_grants.insert(canonical);
+            grants.insert(crate::core::tools::constants::resolve_registered_tool_name(tool).to_string());
         }
         for tool in disallowed {
-            let canonical =
-                crate::core::tools::constants::resolve_registered_tool_name(tool).to_string();
-            self.turn_denials.insert(canonical);
+            denials.insert(crate::core::tools::constants::resolve_registered_tool_name(tool).to_string());
         }
     }
 
-    /// 清空本轮的工具策略（下一条用户消息开始时调用）。
+    pub fn clear_turn_grants_for(&mut self, identity: Option<&str>) {
+        if let Some(identity) = identity {
+            self.scoped_turn_policies.remove(identity);
+        } else {
+            self.turn_grants.clear();
+            self.turn_denials.clear();
+        }
+    }
+
     pub fn clear_turn_grants(&mut self) {
-        self.turn_grants.clear();
-        self.turn_denials.clear();
+        self.clear_turn_grants_for(None);
     }
 
-    /// 本轮是否放行这个工具（skill 的 `allowed-tools`）。
     pub fn is_turn_granted(&self, tool_name: &str) -> bool {
-        let canonical = crate::core::tools::constants::resolve_registered_tool_name(tool_name);
-        self.turn_grants.contains(canonical)
+        self.is_turn_granted_for(None, tool_name)
     }
 
-    /// 本轮是否禁用这个工具（skill 的 `disallowed-tools`）。
-    pub fn is_turn_denied(&self, tool_name: &str) -> bool {
+    pub fn is_turn_granted_for(&self, identity: Option<&str>, tool_name: &str) -> bool {
         let canonical = crate::core::tools::constants::resolve_registered_tool_name(tool_name);
-        self.turn_denials.contains(canonical)
+        match identity {
+            Some(value) => self
+                .scoped_turn_policies
+                .get(value)
+                .is_some_and(|policy| policy.grants.contains(canonical)),
+            None => self.turn_grants.contains(canonical),
+        }
+    }
+
+    pub fn is_turn_denied(&self, tool_name: &str) -> bool {
+        self.is_turn_denied_for(None, tool_name)
+    }
+
+    pub fn is_turn_denied_for(&self, identity: Option<&str>, tool_name: &str) -> bool {
+        let canonical = crate::core::tools::constants::resolve_registered_tool_name(tool_name);
+        match identity {
+            Some(value) => self
+                .scoped_turn_policies
+                .get(value)
+                .is_some_and(|policy| policy.denials.contains(canonical)),
+            None => self.turn_denials.contains(canonical),
+        }
     }
 
     pub fn set_approval_mode(&mut self, mode: ApprovalMode) {
@@ -427,6 +471,15 @@ impl PolicyEngine {
     /// 7. `ask` 规则 —— 命中则强制弹确认，哪怕默认是放行；
     /// 8. 旧的 `PolicyRule` 列表，最后落到 `default_decision`。
     pub async fn check(&self, tool_call: &FunctionCall, server_name: Option<&str>) -> CheckResult {
+        self.check_for(tool_call, server_name, None).await
+    }
+
+    pub async fn check_for(
+        &self,
+        tool_call: &FunctionCall,
+        server_name: Option<&str>,
+        policy_identity: Option<&str>,
+    ) -> CheckResult {
         let args = tool_call.args.clone().unwrap_or(serde_json::Value::Null);
         let settings_verdict = self.settings_permissions.evaluate(&tool_call.name, &args);
         let legacy_verdict = self.legacy_verdict(&tool_call.name, &args);
@@ -447,7 +500,7 @@ impl PolicyEngine {
         // 放在 session_allowances 之前 —— 「本轮不许用」比「本会话总是允许」
         // 更具体、更当下。skill 说别用 AskUserQuestion，就不该因为上一轮
         // 点过「总是允许」而继续弹。
-        if self.is_turn_denied(&tool_call.name) {
+        if self.is_turn_denied_for(policy_identity, &tool_call.name) {
             return CheckResult {
                 decision: PolicyDecision::DenyWithReason(format!(
                     "tool `{}` is disabled for this turn by the active skill's disallowed-tools",
@@ -472,7 +525,7 @@ impl PolicyEngine {
         // **放在审批模式之前，但不放���显式 `ask` 规则之前** —— 显式 `ask`
         // 规则的语义是"每次都问我"，那比 skill 的免确认强（skill 是用户自己
         // 写的，但它不能推翻用户在 settings.json 里写的 `ask`）。
-        if self.is_turn_granted(&tool_call.name) {
+        if self.is_turn_granted_for(policy_identity, &tool_call.name) {
             let asked_by_rule = [&settings_verdict, &legacy_verdict]
                 .into_iter()
                 .flatten()
