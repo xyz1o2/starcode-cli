@@ -794,6 +794,65 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn child_model_switches_cannot_consume_lead_or_sibling_requests() {
+        use crate::agent::model_switch::{new_cell, publish, take, PendingModelSwitch};
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::new(crate::core::config::ConfigParameters {
+            target_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        });
+        let registry = Arc::new(crate::core::tools::ToolRegistry::new(Arc::new(
+            config.clone(),
+        )));
+        let bus = Arc::new(crate::core::confirmation_bus::MessageBus::new(
+            crate::core::policy::policy_engine::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let lead_cell = new_cell();
+        config.install_runtime_services(
+            crate::core::config::RuntimeServices::new(
+                Some(registry),
+                bus,
+                None,
+                Arc::new(crate::core::state::GlobalState::new()),
+            )
+            .with_model_switch_cell(lead_cell.clone()),
+        );
+        let client = StarClient::new("", None, None, None, None);
+        let lead = Agent::new(client.clone(), Arc::new(config.clone()));
+        config.recursion_depth = 1;
+        let first = Agent::new(client.clone(), Arc::new(config.clone()));
+        let second = Agent::new(client, Arc::new(config));
+        assert!(Arc::ptr_eq(&lead.model_switch_cell, &lead_cell));
+        publish(
+            &lead_cell,
+            PendingModelSwitch {
+                model: "lead-next".into(),
+                provider_id: None,
+            },
+        )
+        .await;
+        publish(
+            &first.model_switch_cell,
+            PendingModelSwitch {
+                model: "first-next".into(),
+                provider_id: None,
+            },
+        )
+        .await;
+        assert!(take(&second.model_switch_cell).await.is_none());
+        assert_eq!(
+            take(&first.model_switch_cell).await.unwrap().model,
+            "first-next"
+        );
+        assert!(take(&first.model_switch_cell).await.is_none());
+        assert_eq!(
+            take(&lead.model_switch_cell).await.unwrap().model,
+            "lead-next"
+        );
+    }
+
+    #[tokio::test]
     async fn public_tool_batches_receive_the_current_abort_token() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = Config::new(crate::core::config::ConfigParameters {

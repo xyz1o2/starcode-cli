@@ -1723,14 +1723,22 @@ mod turn_grant_tests {
     async fn scoped_skill_policies_are_isolated_between_lead_and_subagents() {
         let mut engine = engine_with(SettingsPermissions::default());
         engine.apply_turn_tool_policy_for(Some("child-a"), &["Bash".into()], &["Write".into()]);
-        engine.apply_turn_tool_policy(&["Read".into()], &[]);
+        // 使用默认仍需确认的工具，避免只读工具的自动放行掩盖授权串扰。
+        engine.apply_turn_tool_policy(&["WebFetch".into()], &[]);
+        assert_eq!(
+            engine
+                .check_for(&call("WebFetch"), None, None)
+                .await
+                .decision,
+            PolicyDecision::Allow
+        );
         assert_eq!(
             engine.check_for(&call("Bash"), None, None).await.decision,
             PolicyDecision::AskUser
         );
         assert_eq!(
             engine
-                .check_for(&call("Read"), None, Some("child-a"))
+                .check_for(&call("WebFetch"), None, Some("child-a"))
                 .await
                 .decision,
             PolicyDecision::AskUser
@@ -1749,8 +1757,32 @@ mod turn_grant_tests {
                 .decision,
             PolicyDecision::DenyWithReason(_)
         ));
+        assert_eq!(
+            engine
+                .check_for(&call("Bash"), None, Some("child-b"))
+                .await
+                .decision,
+            PolicyDecision::AskUser
+        );
+        assert_eq!(
+            engine.check_for(&call("Write"), None, None).await.decision,
+            PolicyDecision::AskUser
+        );
         engine.clear_turn_grants_for(Some("child-a"));
-        assert!(engine.is_turn_granted("Read"));
+        assert_eq!(
+            engine
+                .check_for(&call("WebFetch"), None, None)
+                .await
+                .decision,
+            PolicyDecision::Allow
+        );
+        assert_eq!(
+            engine
+                .check_for(&call("Write"), None, Some("child-a"))
+                .await
+                .decision,
+            PolicyDecision::AskUser
+        );
         assert_eq!(
             engine
                 .check_for(&call("Bash"), None, Some("child-a"))

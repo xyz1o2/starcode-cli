@@ -3638,7 +3638,14 @@ mod tests {
             Arc::new(child),
         );
         assert!(executor.subagent_tool_allowed("read"));
-        for name in ["Agent", "WorkflowTool", "Skill", "Write", "two_channel"] {
+        for name in [
+            "Agent",
+            "WorkflowTool",
+            "Skill",
+            "Bash",
+            "Write",
+            "two_channel",
+        ] {
             assert!(!executor.subagent_tool_allowed(name));
             let result = executor
                 .execute(

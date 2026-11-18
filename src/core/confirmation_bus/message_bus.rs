@@ -495,6 +495,71 @@ mod tests {
     use super::*;
     use crate::core::policy::types::PolicyEngineConfig;
 
+    #[tokio::test]
+    async fn confirmation_recheck_preserves_scoped_policy_identity() {
+        let bus = MessageBus::new(PolicyEngine::new(PolicyEngineConfig::default()), false);
+        bus.apply_turn_tool_policy_for(None, &["WebFetch".into()], &["Write".into()])
+            .await;
+        bus.apply_turn_tool_policy_for(Some("child-a"), &["Bash".into()], &["WebFetch".into()])
+            .await;
+        for (identity, tool, denied) in [
+            (None, "WebFetch", false),
+            (Some("child-a"), "WebFetch", true),
+            (Some("child-b"), "WebFetch", false),
+            (None, "Write", true),
+            (Some("child-a"), "Write", false),
+            (Some("child-a"), "Bash", false),
+            (Some("child-b"), "Bash", false),
+        ] {
+            let request = ToolConfirmationRequest {
+                message_type: MessageBusType::ToolConfirmationRequest,
+                tool_call: crate::core::policy::FunctionCall {
+                    name: tool.into(),
+                    args: None,
+                    read_only: None,
+                },
+                policy_identity: identity.map(str::to_owned),
+                correlation_id: uuid::Uuid::new_v4().to_string(),
+                server_name: None,
+                title: None,
+                prompt: None,
+                reason: None,
+                originating_tool_call_id: None,
+            };
+            let wire = serde_json::to_value(&request).unwrap();
+            if identity.is_none() {
+                assert!(wire.get("policy_identity").is_none());
+            }
+            let decoded: ToolConfirmationRequest = serde_json::from_value(wire).unwrap();
+            assert_eq!(decoded.policy_identity.as_deref(), identity);
+            let mut rx = bus.subscribe();
+            bus.publish(Message::ToolConfirmationRequest(decoded))
+                .await
+                .unwrap();
+            if denied {
+                assert!(matches!(
+                    rx.try_recv().unwrap(),
+                    Message::ToolPolicyRejection(_)
+                ));
+                let Message::ToolConfirmationResponse(response) = rx.try_recv().unwrap() else {
+                    panic!("denial must resolve the matching confirmation");
+                };
+                assert!(!response.confirmed);
+                assert_eq!(response.correlation_id, request.correlation_id);
+            } else {
+                let Message::ToolConfirmationRequest(forwarded) = rx.try_recv().unwrap() else {
+                    panic!("published requests must still reach the user even when allowed");
+                };
+                assert_eq!(forwarded.policy_identity.as_deref(), identity);
+                assert_eq!(forwarded.correlation_id, request.correlation_id);
+            }
+            assert!(matches!(
+                rx.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ));
+        }
+    }
+
     /// 造一条 headless 语境的总线：策略层是 non_interactive（没有人能按键）。
     fn headless_bus() -> MessageBus {
         let policy = PolicyEngine::new(PolicyEngineConfig {

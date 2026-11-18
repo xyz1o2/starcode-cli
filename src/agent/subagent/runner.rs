@@ -212,9 +212,19 @@ impl StarAgentRunner {
 
     async fn run_with_control(
         &self,
+        request: SubAgentRequest,
+        sink: Option<SubAgentProgressSink>,
+        stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<SubAgentResult, SubAgentError> {
+        self.run_with_task_control(request, sink, stop, None).await
+    }
+
+    async fn run_with_task_control(
+        &self,
         mut request: SubAgentRequest,
         sink: Option<SubAgentProgressSink>,
         stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+        tasks: Option<&crate::agent::subagent::tasks::SharedSubagentTasks>,
     ) -> Result<SubAgentResult, SubAgentError> {
         use crate::core::hooks::store::ManagedHookEvent;
         let identity = request
@@ -239,6 +249,10 @@ impl StarAgentRunner {
         )
         .await;
         let result = self.run_inner(request, sink, stop.clone()).await;
+        // Stop hook 与最终通知共用这一裁决点；hook 执行期间不再接受停止请求。
+        if let Some(tasks) = tasks {
+            tasks.lock().await.close_control(&identity);
+        }
         let stopped = stop
             .as_ref()
             .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst));
@@ -636,6 +650,145 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_hook_marker(path: &std::path::Path) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !path.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("hook marker must arrive");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_hook_closes_control_before_reporting_the_outcome() {
+        use crate::core::hooks::store::{list_hooks, save_store, HookStore, ManagedHookEvent};
+        let root = tempfile::tempdir().unwrap();
+        crate::agent::hooks::install_subagent_hook_recorder(root.path()).await;
+        let mut hooks = list_hooks(root.path()).await.unwrap();
+        let hook = hooks
+            .iter_mut()
+            .find(|hook| hook.event == ManagedHookEvent::SubagentStop)
+            .unwrap();
+        hook.command = format!(
+            "touch stop-entered; while [ ! -f release-stop ]; do sleep 0.01; done; {}",
+            hook.command
+        );
+        save_store(root.path(), &HookStore { hooks }).await.unwrap();
+        let config = Arc::new(Config::new(crate::core::config::ConfigParameters {
+            target_dir: root.path().to_owned(),
+            ..Default::default()
+        }));
+        let queue = Arc::new(Mutex::new(NotificationQueue::new()));
+        let mut runner = AsyncSubagentRunner::new(
+            StarAgentRunner::shared(StarClient::new("", None, None, None, None), config),
+            queue.clone(),
+        );
+        runner.output_directory = Some(root.path().join("outputs"));
+        let launch = runner
+            .spawn_background(
+                SubAgentRequest::new("local validation failure").with_parent_depth(usize::MAX),
+                None,
+                "test".into(),
+                "Agent".into(),
+            )
+            .await;
+        wait_for_hook_marker(&root.path().join("stop-entered")).await;
+        let accepted = runner
+            .tasks
+            .lock()
+            .await
+            .request_stop(&launch.agent_id)
+            .unwrap();
+        std::fs::write(root.path().join("release-stop"), "").unwrap();
+        assert!(!accepted, "Stop hook 开始后终态不可再改写");
+        let notifications = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let notifications = queue.lock().await.drain_for_next_turn();
+                if !notifications.is_empty() {
+                    break notifications;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].status, NotificationStatus::Failed);
+        assert_eq!(
+            runner
+                .tasks
+                .lock()
+                .await
+                .get(&launch.agent_id)
+                .unwrap()
+                .status,
+            Some(NotificationStatus::Failed)
+        );
+        let log = std::fs::read_to_string(root.path().join("lifecycle.log")).unwrap();
+        assert!(
+            log.contains("SubagentStop\tsubagent_stop\tfalse\t"),
+            "{log}"
+        );
+        assert!(!log.contains("subagent_stopped"), "{log}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_hooks_freeze_the_current_session_root_for_each_attempt() {
+        use crate::core::hooks::store::{list_hooks, save_store, HookStore, ManagedHookEvent};
+        let original = tempfile::tempdir().unwrap();
+        let current = tempfile::tempdir().unwrap();
+        let next = tempfile::tempdir().unwrap();
+        for root in [original.path(), current.path(), next.path()] {
+            crate::agent::hooks::install_subagent_hook_recorder(root).await;
+        }
+        let mut hooks = list_hooks(current.path()).await.unwrap();
+        let hook = hooks
+            .iter_mut()
+            .find(|hook| hook.event == ManagedHookEvent::SubagentStart)
+            .unwrap();
+        hook.command = format!(
+            "touch start-entered; while [ ! -f release-start ]; do sleep 0.01; done; {}",
+            hook.command
+        );
+        save_store(current.path(), &HookStore { hooks })
+            .await
+            .unwrap();
+        let config = Arc::new(Config::new(crate::core::config::ConfigParameters {
+            target_dir: original.path().to_owned(),
+            ..Default::default()
+        }));
+        let runner =
+            StarAgentRunner::new(StarClient::new("", None, None, None, None), config.clone());
+        config
+            .set_session_hook_root(current.path().to_owned())
+            .unwrap();
+        let execution =
+            runner.run(SubAgentRequest::new("first attempt").with_parent_depth(usize::MAX));
+        let change_root = async {
+            wait_for_hook_marker(&current.path().join("start-entered")).await;
+            config
+                .set_session_hook_root(next.path().to_owned())
+                .unwrap();
+            std::fs::write(current.path().join("release-start"), "").unwrap();
+        };
+        let (result, ()) = tokio::join!(execution, change_root);
+        assert!(result.is_err());
+        assert!(!original.path().join("lifecycle.log").exists());
+        assert!(!next.path().join("lifecycle.log").exists());
+        let log = std::fs::read_to_string(current.path().join("lifecycle.log")).unwrap();
+        assert_eq!(log.lines().count(), 2, "Start/Stop 必须使用同一目录");
+        assert!(runner
+            .run(SubAgentRequest::new("next attempt").with_parent_depth(usize::MAX))
+            .await
+            .is_err());
+        let log = std::fs::read_to_string(next.path().join("lifecycle.log")).unwrap();
+        assert_eq!(log.lines().count(), 2);
     }
 
     #[tokio::test]
@@ -1942,13 +2095,10 @@ impl AsyncSubagentRunner {
             });
 
             let result = runner
-                .run_with_control(request, Some(sink), Some(stop.clone()))
+                .run_with_task_control(request, Some(sink), Some(stop.clone()), Some(&tasks))
                 .await;
-            // 完成与停止在同一注册表锁下裁决；进入收尾后不再接收新的停止请求。
-            let stopped = {
-                let mut records = tasks.lock().await;
-                records.close_control(&aid)
-            };
+            // 控制入口已在 Stop hook 前关闭，标志与 hook 看到的终态保持一致。
+            let stopped = stop.load(std::sync::atomic::Ordering::SeqCst);
             let result = if stopped {
                 let message = match result {
                     Err(error) => format!("SubAgent stopped by request; {error}"),
