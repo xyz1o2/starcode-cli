@@ -224,19 +224,33 @@ pub struct RunConfig {
 
 /// 命名 SubAgent 类型（对标 CCB 的 built-in agent definitions）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(from = "String", into = "String")]
 pub enum SubagentType {
     GeneralPurpose,
     Explorer,
     Analyzer,
     Editor,
     CodeReviewer,
+    Custom(String),
+}
+
+impl From<String> for SubagentType {
+    fn from(value: String) -> Self {
+        Self::from_name(&value).unwrap_or(Self::Custom(value))
+    }
+}
+
+impl From<SubagentType> for String {
+    fn from(value: SubagentType) -> Self {
+        value.as_str().to_owned()
+    }
 }
 
 impl SubagentType {
     /// 序列化用的 slug（与 `#[serde(rename_all = "snake_case")]` 一致）
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
+            Self::Custom(name) => name,
             Self::GeneralPurpose => "general_purpose",
             Self::Explorer => "explorer",
             Self::Analyzer => "analyzer",
@@ -249,8 +263,9 @@ impl SubagentType {
     ///
     /// 参考实现把内置的 general-purpose agent 显示为 "Agent"，
     /// 自定义类型则原样显示 slug。
-    pub fn user_facing_name(&self) -> &'static str {
+    pub fn user_facing_name(&self) -> &str {
         match self {
+            Self::Custom(name) => name,
             Self::GeneralPurpose => "Agent",
             Self::Explorer => "Explore",
             Self::Analyzer => "Analyze",
@@ -283,6 +298,17 @@ impl SubagentType {
         if target.len() < 4 {
             return None;
         }
+        let normalized = raw.to_ascii_lowercase().replace(['-', ' '], "_");
+        if let Some(kind) = match normalized.as_str() {
+            "general_purpose" => Some(Self::GeneralPurpose),
+            "explorer" => Some(Self::Explorer),
+            "analyzer" => Some(Self::Analyzer),
+            "editor" => Some(Self::Editor),
+            "code_reviewer" => Some(Self::CodeReviewer),
+            _ => None,
+        } {
+            return Some(kind);
+        }
         for variant in [
             Self::GeneralPurpose,
             Self::Explorer,
@@ -307,7 +333,7 @@ impl SubagentType {
 }
 
 /// `Option<SubagentType>` 的用户可见标签：`None` 代表 fork（继承父上下文）
-pub fn agent_type_label(subagent_type: Option<&SubagentType>) -> &'static str {
+pub fn agent_type_label(subagent_type: Option<&SubagentType>) -> &str {
     match subagent_type {
         Some(t) => t.user_facing_name(),
         None => "Fork",

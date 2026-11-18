@@ -94,6 +94,12 @@ jobs:
       - name: Run doc tests
         run: cargo test --workspace --doc
 
+      # 临时默认钥匙串只在一次性托管 runner 内配置，测试结束恢复并删除。
+      - name: Verify native Keychain and legacy item interoperability (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 10
+        run: bash scripts/test-keychain-macos.sh
+
   build:
     name: Build Release (${{ matrix.os }})
     needs: check

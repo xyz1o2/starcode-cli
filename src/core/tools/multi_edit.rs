@@ -60,7 +60,7 @@ impl ToolInvocation for MultiEditToolInvocation {
             .edits
             .iter()
             .map(|edit| {
-                let path = self.config.target_dir().join(&edit.file_path);
+                let path = self.config.agent_working_dir().join(&edit.file_path);
                 ToolLocation {
                     path,
                     location_type: crate::core::tools::tools::LocationType::Write,
@@ -109,7 +109,7 @@ impl ToolInvocation for MultiEditToolInvocation {
                     let mut unread: Vec<&str> = Vec::new();
                     let mut seen_unread: HashSet<String> = HashSet::new();
                     for edit in &params.edits {
-                        let path = config.target_dir().join(&edit.file_path);
+                        let path = config.agent_working_dir().join(&edit.file_path);
                         // 键必须和写入端（`read_file::record_file_read`、`Glob` 的
                         // 浏览登记）用同一个函数算。这里原来自己 canonicalize 一次、
                         // 失败就退回未规范化的原路径，于是 `src/../lib.rs` 这类路径
@@ -163,7 +163,7 @@ impl ToolInvocation for MultiEditToolInvocation {
 
             // 1. Read and Validate Phase
             for edit in &params.edits {
-                let path = config.target_dir().join(&edit.file_path);
+                let path = config.agent_working_dir().join(&edit.file_path);
 
                 // Read file if not already read
                 if !file_contents.contains_key(&path) {
@@ -218,7 +218,7 @@ impl ToolInvocation for MultiEditToolInvocation {
             let mut working_contents = file_contents.clone();
 
             for edit in &params.edits {
-                let path = config.target_dir().join(&edit.file_path);
+                let path = config.agent_working_dir().join(&edit.file_path);
                 // Important: Use working_contents here to pick up changes from previous edits in the same sequence!
                 // Wait, if we edit file1 twice, the second edit should run against the output of the first edit.
                 let current_content = working_contents.get(&path).unwrap();
@@ -274,7 +274,7 @@ impl ToolInvocation for MultiEditToolInvocation {
                 let is_target = params
                     .edits
                     .iter()
-                    .any(|e| config.target_dir().join(&e.file_path) == *path);
+                    .any(|e| config.agent_working_dir().join(&e.file_path) == *path);
                 if is_target && path.exists() {
                     // File-history checkpoint: snapshot before overwrite.
                     // track_edit is best-effort — failures must not block.
@@ -331,7 +331,7 @@ impl ToolInvocation for MultiEditToolInvocation {
                 let is_target = params
                     .edits
                     .iter()
-                    .any(|e| config.target_dir().join(&e.file_path) == path);
+                    .any(|e| config.agent_working_dir().join(&e.file_path) == path);
                 if is_target {
                     if let Some(parent) = path.parent() {
                         if let Err(e) = tokio::fs::create_dir_all(parent).await {
@@ -541,7 +541,7 @@ mod tests {
             params.core_tools = Some(Vec::new());
             params.mcp_enabled = Some(false);
             params.enable_agents = Some(false);
-            // 必须是 `target_dir` 而不是 `cwd`：所有工具都用 `config.target_dir()`
+            // 必须是 `target_dir` 而不是 `cwd`：所有工具都用 `config.agent_working_dir()`
             // 解析相对路径，`cwd` 是另一个字段，设了它 target_dir 仍然是真实仓库目录。
             params.target_dir = dir.path().to_path_buf();
             let mut config = crate::core::config::Config::new(params);
@@ -550,7 +550,7 @@ mod tests {
                 .await
                 .expect("test config must initialize");
             assert_eq!(
-                config.target_dir(),
+                config.agent_working_dir(),
                 dir.path(),
                 "harness 必须把 target_dir 指到临时目录，否则工具会在真实仓库里读写"
             );

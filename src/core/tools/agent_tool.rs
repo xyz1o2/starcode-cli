@@ -35,6 +35,8 @@ pub struct AgentToolParams {
     #[serde(default)]
     pub subagent_type: Option<SubagentType>,
     #[serde(default)]
+    pub isolation: Option<crate::core::agents::AgentIsolation>,
+    #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub background: Option<bool>,
@@ -63,8 +65,8 @@ impl From<AgentToolParams> for AgentToolFullInput {
             description: p.description,
             prompt: p.prompt,
             subagent_type: p.subagent_type,
+            isolation: p.isolation,
             name: p.name,
-            isolation: None,
             model: p.model,
             resume: p.resume,
             effort: p.effort,
@@ -133,8 +135,12 @@ impl BaseDeclarativeTool for AgentTool {
                 },
                 "subagent_type": {
                     "type": "string",
-                    "enum": ["general_purpose", "explorer", "analyzer", "editor", "code_reviewer"],
-                    "description": "Type of specialized agent to use. Defaults to the source type when resuming, otherwise general_purpose."
+                    "description": "Built-in type (general_purpose, explorer, analyzer, editor, code_reviewer) or the name of a custom agent in .star/agents. Defaults to the source type when resuming, otherwise general_purpose."
+                },
+                "isolation": {
+                    "type": "string",
+                    "enum": ["none", "worktree"],
+                    "description": "Run in a separate Git worktree; does not inherit parent conversation history."
                 },
                 "name": {
                     "type": "string",
@@ -242,7 +248,7 @@ impl ToolInvocation for AgentToolInvocation {
 
     fn execute(
         &self,
-        _signal: Option<&tokio_util::sync::CancellationToken>,
+        signal: Option<&tokio_util::sync::CancellationToken>,
         _update_output: Option<Arc<dyn Fn(String) + Send + Sync>>,
     ) -> std::pin::Pin<
         Box<
@@ -252,12 +258,17 @@ impl ToolInvocation for AgentToolInvocation {
         >,
     > {
         let mut input = self.full_input.clone();
-        self.inherit_parent_effort(&mut input);
+        let signal = signal.cloned();
         let runner = self.runner.clone();
         let async_runner = self.async_runner.clone();
 
         Box::pin(async move {
             runner.resolve_resume_type(&mut input).await?;
+            crate::agent::skills::custom::apply_definition_defaults(
+                &mut input,
+                &runner.project_root(),
+            )?;
+            self.inherit_parent_effort(&mut input);
             let route = route_agent_call(&input, false, false);
 
             match route {
@@ -304,7 +315,10 @@ impl ToolInvocation for AgentToolInvocation {
                         .with_max_rounds(rounds)
                         .with_identity(agent_id.clone());
 
-                    match runner.run_with_progress(request, Some(sink)).await {
+                    match runner
+                        .run_with_progress_and_control(request, Some(sink), signal)
+                        .await
+                    {
                         Ok(result) => {
                             emit_to_ui(StreamingChunk::agent_task_update(
                                 AgentTaskUpdatePayload::new(&agent_id, &type_label)

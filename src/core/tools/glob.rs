@@ -88,8 +88,8 @@ impl ToolInvocation for GlobToolInvocation {
         let mut description = format!("'{}'", self.params.pattern);
 
         if let Some(dir_path) = &self.params.dir_path {
-            let search_dir = resolve_tool_path(self.config.target_dir(), dir_path);
-            let relative_path = make_relative(&search_dir, self.config.target_dir());
+            let search_dir = resolve_tool_path(self.config.agent_working_dir(), dir_path);
+            let relative_path = make_relative(&search_dir, self.config.agent_working_dir());
             description.push_str(&format!(
                 " within {}",
                 shorten_path(&relative_path.to_string_lossy(), 80)
@@ -127,9 +127,9 @@ impl ToolInvocation for GlobToolInvocation {
         let config = self.config.clone();
         let pattern = &self.params.pattern;
         let search_dir = if let Some(dir) = &self.params.dir_path {
-            resolve_tool_path(config.target_dir(), dir)
+            resolve_tool_path(config.agent_working_dir(), dir)
         } else {
-            config.target_dir().to_path_buf()
+            config.agent_working_dir().to_path_buf()
         };
 
         let path_to_check = search_dir.join(pattern);
@@ -177,7 +177,7 @@ impl ToolInvocation for GlobToolInvocation {
         >,
     > {
         let config = self.config.clone();
-        let base_dir = config.target_dir().clone();
+        let base_dir = config.agent_working_dir().to_path_buf();
         let params = self.params.clone();
         let signal = signal.cloned();
         let global_state = self.global_state.clone();
@@ -197,9 +197,9 @@ impl ToolInvocation for GlobToolInvocation {
 
             let result = tokio::task::spawn_blocking(move || {
                 let search_dir = if let Some(dir_path) = &params.dir_path {
-                    resolve_tool_path(config.target_dir(), dir_path)
+                    resolve_tool_path(config.agent_working_dir(), dir_path)
                 } else {
-                    config.target_dir().clone()
+                    config.agent_working_dir().to_path_buf()
                 };
 
                 let pattern = params.pattern.clone();
@@ -336,12 +336,12 @@ impl ToolInvocation for GlobToolInvocation {
                                 .unwrap_or_default()
                                 .as_millis();
                             let mut state = global_state.read_file_state.write().await;
-                            let base_dir = base_dir.as_path();
+                            let base_dir = base_dir;
                             for path in &paths {
                                 // 键必须和 Edit 查表时一致（read_state_key），否则
                                 // glob 浏览过的文件仍会被 [edit_file_not_read] 拦下。
                                 let resolved =
-                                    crate::core::utils::paths::resolve_tool_path(base_dir, path);
+                                    crate::core::utils::paths::resolve_tool_path(&base_dir, path);
                                 let key = crate::core::utils::paths::read_state_key(&resolved);
                                 state.entry(key).or_insert(ReadFileState {
                                     content: String::new(),
@@ -428,9 +428,9 @@ impl GlobMatchTool {
         }
 
         let search_dir = if let Some(dir_path) = &params.dir_path {
-            resolve_tool_path(self.config.target_dir(), dir_path)
+            resolve_tool_path(self.config.agent_working_dir(), dir_path)
         } else {
-            self.config.target_dir().clone()
+            self.config.agent_working_dir().to_path_buf()
         };
 
         if !search_dir.exists() {

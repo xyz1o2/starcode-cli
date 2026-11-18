@@ -34,8 +34,18 @@ pub async fn run_hooks(
     context: &HookRunContext,
 ) -> Result<Vec<HookRunResult>, String> {
     let hooks = list_hooks(project_root).await?;
+    run_defined_hooks(project_root, event, context, &hooks).await
+}
+
+/// 运行显式传入的定义级 hooks，不写入或修改项目配置。
+pub(crate) async fn run_defined_hooks(
+    project_root: &std::path::Path,
+    event: ManagedHookEvent,
+    context: &HookRunContext,
+    hooks: &[super::store::ManagedHook],
+) -> Result<Vec<HookRunResult>, String> {
     let selected: Vec<_> = hooks
-        .into_iter()
+        .iter()
         .filter(|h| h.enabled && h.event == event)
         // matcher 是 Claude Code 配置带来的过滤条件。`/hooks add` 建的 hook
         // matcher 为 None，即不过滤 —— 保持既有行为不变。

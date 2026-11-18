@@ -1,9 +1,12 @@
 use crate::core::tools::tools::{
     BaseDeclarativeTool, Kind, ToolError, ToolInvocation, ToolLocation, ToolResult,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+#[path = "workflow_dynamic.rs"]
+mod dynamic;
 
 const DEFAULT_WORKFLOW_TIMEOUT_SECS: u64 = 300;
 const MAX_WORKFLOW_TIMEOUT_SECS: u64 = 1800;
@@ -129,9 +132,18 @@ impl WorkflowTool {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WorkflowParams {
-    pub workflow: String,
+    #[serde(default)]
+    pub workflow: Option<String>,
+    #[serde(default)]
+    pub script: Option<String>,
+    #[serde(default)]
+    pub args: Option<serde_json::Value>,
+    #[serde(default)]
+    pub resume_from_run_id: Option<String>,
+    #[serde(default)]
+    pub max_concurrency: Option<usize>,
     #[serde(default)]
     pub params: Option<HashMap<String, serde_json::Value>>,
     #[serde(default)]
@@ -141,11 +153,37 @@ pub struct WorkflowParams {
 pub struct WorkflowInvocation {
     config: Arc<crate::core::config::Config>,
     params: WorkflowParams,
+    parent_client: Option<crate::llm::client::StarClient>,
+    parent_context: Option<Arc<Vec<crate::types::StarMessage>>>,
+    parent_effort: Option<crate::types::ThinkingEffort>,
+    parent_identity: Option<String>,
 }
 
 impl ToolInvocation for WorkflowInvocation {
+    fn set_agent_parent_context(&mut self, messages: Arc<Vec<crate::types::StarMessage>>) {
+        self.parent_context = Some(messages);
+    }
+
+    fn set_agent_parent_client(&mut self, client: &crate::llm::client::StarClient) {
+        self.parent_client = Some(client.clone());
+    }
+
+    fn set_agent_parent_thinking_effort(&mut self, effort: crate::types::ThinkingEffort) {
+        self.parent_effort = Some(effort);
+    }
+
+    fn set_agent_parent_identity(&mut self, identity: Option<String>) {
+        self.parent_identity = identity;
+    }
+
     fn get_description(&self) -> String {
-        format!("Execute workflow: {}", self.params.workflow)
+        format!(
+            "Execute workflow: {}",
+            self.params
+                .workflow
+                .as_deref()
+                .unwrap_or("inline JavaScript")
+        )
     }
 
     fn tool_locations(&self) -> Vec<ToolLocation> {
@@ -155,7 +193,7 @@ impl ToolInvocation for WorkflowInvocation {
     fn execute(
         &self,
         signal: Option<&tokio_util::sync::CancellationToken>,
-        _update_output: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
+        update_output: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<ToolResult, Box<dyn std::error::Error>>>
@@ -167,7 +205,31 @@ impl ToolInvocation for WorkflowInvocation {
         let params = self.params.clone();
         let signal = signal.cloned();
         Box::pin(async move {
-            validate_workflow_name(&params.workflow)?;
+            if params.script.is_some()
+                || params.workflow.as_ref().is_some_and(|name| {
+                    validate_workflow_name(name).is_ok()
+                        && config
+                            .storage()
+                            .project_workflows_dir()
+                            .join(format!("{name}.js"))
+                            .is_file()
+                })
+            {
+                return dynamic::execute(self, signal, update_output)
+                    .await
+                    .map_err(Into::into);
+            }
+            let workflow = params
+                .workflow
+                .as_deref()
+                .ok_or("Provide workflow or script")?;
+            if params.resume_from_run_id.is_some()
+                || params.args.is_some()
+                || params.max_concurrency.is_some()
+            {
+                return Err("Dynamic workflow options require a JavaScript workflow".into());
+            }
+            validate_workflow_name(workflow)?;
             let timeout_secs = params.timeout_secs.unwrap_or(DEFAULT_WORKFLOW_TIMEOUT_SECS);
             if !(1..=MAX_WORKFLOW_TIMEOUT_SECS).contains(&timeout_secs) {
                 return Err("Workflow timeout_secs must be between 1 and 1800".into());
@@ -175,10 +237,10 @@ impl ToolInvocation for WorkflowInvocation {
             let deadline =
                 tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
             let workflows_dir = config.storage().project_workflows_dir();
-            let workflow_file = workflows_dir.join(format!("{}.json", params.workflow));
+            let workflow_file = workflows_dir.join(format!("{workflow}.json"));
 
             if !workflow_file.exists() {
-                let script_file = workflows_dir.join(format!("{}.sh", params.workflow));
+                let script_file = workflows_dir.join(format!("{}.sh", workflow));
                 if script_file.exists() {
                     let mut cmd = tokio::process::Command::new("bash");
                     cmd.arg(&script_file)
@@ -205,10 +267,7 @@ impl ToolInvocation for WorkflowInvocation {
                     if output.status.success() {
                         return Ok(ToolResult {
                             llm_content: Some(stdout.to_string()),
-                            return_display: Some(format!(
-                                "Workflow '{}' completed",
-                                params.workflow
-                            )),
+                            return_display: Some(format!("Workflow '{}' completed", workflow)),
                             output: stdout.to_string(),
                             error: None,
                             data: None,
@@ -237,7 +296,7 @@ impl ToolInvocation for WorkflowInvocation {
                     output: String::new(),
                     error: Some(ToolError {
                         error_type: "not_found".to_string(),
-                        message: format!("Workflow '{}' not found", params.workflow),
+                        message: format!("Workflow '{}' not found", workflow),
                     }),
                     data: None,
                 });
@@ -314,7 +373,7 @@ impl ToolInvocation for WorkflowInvocation {
 
             Ok(ToolResult {
                 llm_content: Some(results.join("\n")),
-                return_display: Some(format!("Workflow '{}' executed", params.workflow)),
+                return_display: Some(format!("Workflow '{}' executed", workflow)),
                 output: results.join("\n"),
                 error: None,
                 data: None,
@@ -348,9 +407,13 @@ impl BaseDeclarativeTool for WorkflowTool {
                     "type": "string",
                     "description": "工作流名称 (Workflow name)"
                 },
+                "script": { "type": "string", "description": "Inline JavaScript with agent, parallel, pipeline, phase, log and args; requires Node.js" },
+                "args": { "description": "JSON input for a JavaScript workflow" },
+                "resume_from_run_id": { "type": "string", "description": "Reuse successful matching calls from a previous run; starts a new run" },
+                "max_concurrency": { "type": "integer", "minimum": 1, "maximum": 16, "default": 4 },
                 "params": {
                     "type": "object",
-                    "description": "工作流参数 (Workflow parameters as key-value pairs)"
+                    "description": "Shell workflow parameters as key-value pairs"
                 },
                 "timeout_secs": {
                     "type": "integer",
@@ -360,7 +423,7 @@ impl BaseDeclarativeTool for WorkflowTool {
                     "description": "Total execution limit for the entire workflow, excluding approval time"
                 }
             },
-            "required": ["workflow"]
+            "oneOf": [{ "required": ["workflow"], "not": { "required": ["script"] } }, { "required": ["script"], "not": { "required": ["workflow"] } }]
         })
     }
 
@@ -369,9 +432,16 @@ impl BaseDeclarativeTool for WorkflowTool {
         params: serde_json::Value,
     ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
         let params: WorkflowParams = serde_json::from_value(params)?;
+        if params.workflow.is_some() == params.script.is_some() {
+            return Err("Provide exactly one of workflow or script".into());
+        }
         Ok(Box::new(WorkflowInvocation {
             config: self.config.clone(),
             params,
+            parent_client: None,
+            parent_context: None,
+            parent_effort: None,
+            parent_identity: None,
         }))
     }
 }

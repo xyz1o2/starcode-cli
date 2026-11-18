@@ -1556,8 +1556,10 @@ fn resolve_codebase_search_root(
     path: Option<&str>,
 ) -> PathBuf {
     let requested = path
-        .map(|value| crate::core::utils::paths::resolve_tool_path(config.target_dir(), value))
-        .unwrap_or_else(|| config.target_dir().clone());
+        .map(|value| {
+            crate::core::utils::paths::resolve_tool_path(config.agent_working_dir(), value)
+        })
+        .unwrap_or_else(|| config.agent_working_dir().to_path_buf());
 
     if requested.is_dir() {
         return requested;
@@ -1567,10 +1569,10 @@ fn resolve_codebase_search_root(
         return requested
             .parent()
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| config.target_dir().clone());
+            .unwrap_or_else(|| config.agent_working_dir().to_path_buf());
     }
 
-    config.target_dir().clone()
+    config.agent_working_dir().to_path_buf()
 }
 
 fn format_ripgrep_fallback(query: &str, root: &std::path::Path) -> String {

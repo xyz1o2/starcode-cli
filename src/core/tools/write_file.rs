@@ -282,7 +282,12 @@ impl WriteFileToolInvocation {
         _tool_name: Option<String>,
         _tool_display_name: Option<String>,
     ) -> Self {
-        let resolved_path = config.target_dir().join(&params.file_path);
+        let base_dir = config
+            .agent_working_dir
+            .as_deref()
+            .unwrap_or(config.target_dir());
+        let resolved_path =
+            crate::core::utils::paths::resolve_tool_path(base_dir, &params.file_path);
 
         Self {
             config,
@@ -705,7 +710,7 @@ impl WriteFileTool {
             return Err("Missing or empty \"file_path\"".to_string());
         }
 
-        let resolved_path = self.config.target_dir().join(&params.file_path);
+        let resolved_path = self.config.agent_working_dir().join(&params.file_path);
 
         if let Ok(metadata) = std::fs::metadata(&resolved_path) {
             if metadata.is_dir() {
@@ -775,7 +780,7 @@ impl ModifiableDeclarativeTool<WriteFileToolParams> for WriteFileTool {
                 let file_path_str = params.file_path.clone();
                 let content = params.content.clone();
                 Box::pin(async move {
-                    let file_path = config.target_dir().join(&file_path_str);
+                    let file_path = config.agent_working_dir().join(&file_path_str);
                     let result = get_corrected_file_content(
                         &config,
                         &file_path,
@@ -791,7 +796,7 @@ impl ModifiableDeclarativeTool<WriteFileToolParams> for WriteFileTool {
                 let file_path_str = params.file_path.clone();
                 let content = params.content.clone();
                 Box::pin(async move {
-                    let file_path = config.target_dir().join(&file_path_str);
+                    let file_path = config.agent_working_dir().join(&file_path_str);
                     let result = get_corrected_file_content(
                         &config,
                         &file_path,

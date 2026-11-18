@@ -76,7 +76,7 @@ impl ToolInvocation for NotebookEditInvocation {
     }
 
     fn tool_locations(&self) -> Vec<ToolLocation> {
-        let path = self.config.target_dir().join(&self.params.file_path);
+        let path = self.config.agent_working_dir().join(&self.params.file_path);
         vec![ToolLocation {
             path,
             location_type: crate::core::tools::tools::LocationType::Write,
@@ -102,7 +102,7 @@ impl ToolInvocation for NotebookEditInvocation {
             let mut _file_contents: HashMap<PathBuf, String> = HashMap::new();
             let mut _final_contents: HashMap<PathBuf, String> = HashMap::new();
 
-            let path = config.target_dir().join(&params.file_path);
+            let path = config.agent_working_dir().join(&params.file_path);
 
             if !path.exists() {
                 return Ok(ToolResult {

@@ -62,8 +62,8 @@ impl ToolInvocation for GrepToolInvocation {
         }
 
         if let Some(dir_path) = &self.params.dir_path {
-            let resolved_path = resolve_tool_path(self.config.target_dir(), dir_path);
-            let relative_path = make_relative(&resolved_path, self.config.target_dir());
+            let resolved_path = resolve_tool_path(self.config.agent_working_dir(), dir_path);
+            let relative_path = make_relative(&resolved_path, self.config.agent_working_dir());
             description.push_str(&format!(
                 " within {}",
                 shorten_path(&relative_path.to_string_lossy(), 80)
@@ -102,9 +102,9 @@ impl ToolInvocation for GrepToolInvocation {
     > {
         let config = self.config.clone();
         let path = if let Some(dir) = &self.params.dir_path {
-            resolve_tool_path(config.target_dir(), dir)
+            resolve_tool_path(config.agent_working_dir(), dir)
         } else {
-            config.target_dir().to_path_buf()
+            config.agent_working_dir().to_path_buf()
         };
 
         Box::pin(async move {
@@ -163,7 +163,7 @@ impl ToolInvocation for GrepToolInvocation {
 
             let result = tokio::task::spawn_blocking(move || {
                 let search_dir_abs = if let Some(dir_path) = &params.dir_path {
-                    let target_path = resolve_tool_path(config.target_dir(), dir_path);
+                    let target_path = resolve_tool_path(config.agent_working_dir(), dir_path);
                     if !target_path.exists() {
                         return Ok::<ToolResult, Box<dyn std::error::Error + Send + Sync>>(
                             ToolResult {
@@ -210,7 +210,7 @@ impl ToolInvocation for GrepToolInvocation {
                     }
                     Some(target_path)
                 } else {
-                    Some(config.target_dir().to_path_buf())
+                    Some(config.agent_working_dir().to_path_buf())
                 };
 
                 let search_dir = search_dir_abs.unwrap();
@@ -401,7 +401,7 @@ impl GrepTool {
     pub fn validate_tool_params(&self, params: &GrepToolParams) -> Result<(), String> {
         // Validate dir_path if provided
         if let Some(dir_path) = &params.dir_path {
-            let target_path = resolve_tool_path(self.config.target_dir(), dir_path);
+            let target_path = resolve_tool_path(self.config.agent_working_dir(), dir_path);
 
             if !target_path.exists() {
                 return Err(format!("Path does not exist: {}", target_path.display()));

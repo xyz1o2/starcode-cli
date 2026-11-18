@@ -4,7 +4,7 @@ use crate::core::config::storage::Storage;
 use crate::core::config::trusted_folders::TrustedFolders;
 use crate::core::policy::ApprovalMode;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD: usize = 4_000_000;
@@ -21,6 +21,9 @@ pub struct Config {
     pub(crate) debug_mode: bool,
     pub(crate) question: Option<String>,
     pub(crate) core_tools: Option<Vec<String>>,
+    pub(crate) subagent_hooks: Vec<crate::core::hooks::store::ManagedHook>,
+    /// 子代理真实运行目录；仅 worktree 隔离时设置。
+    pub(crate) agent_working_dir: Option<PathBuf>,
     pub(crate) allowed_tools: Option<Vec<String>>,
     pub(crate) exclude_tools: Option<Vec<String>>,
     pub(crate) tool_discovery_command: Option<String>,
@@ -136,6 +139,8 @@ impl Config {
             debug_mode: params.debug_mode,
             question: params.question,
             core_tools: params.core_tools,
+            subagent_hooks: Vec::new(),
+            agent_working_dir: None,
             allowed_tools: params.allowed_tools,
             exclude_tools: params.exclude_tools,
             tool_discovery_command: params.tool_discovery_command,
@@ -303,6 +308,31 @@ impl Config {
             .map_err(|_| "Session hook directory lock poisoned".to_owned())?;
         *current = root;
         Ok(())
+    }
+
+    /// 子代理目录独立于进程 cwd；工具必须重新绑定到这个配置快照。
+    pub(crate) async fn rebind_subagent_directory(&mut self, root: PathBuf) -> Result<(), String> {
+        self.agent_working_dir = Some(root.clone());
+        self.target_dir = root.clone();
+        self.cwd = root.clone();
+        self.storage = Storage::for_worktree(root.clone());
+        self.session_hook_root = Arc::new(std::sync::RwLock::new(root));
+        let existing = self.runtime_services.clone();
+        let bootstrap =
+            crate::core::config::runtime_bootstrap::build_runtime_services(self, existing.as_ref())
+                .await
+                .map_err(|error| {
+                    format!("Failed to bind subagent tools to working directory: {error}")
+                })?;
+        // 工具读取工作树的状态；任务会话快照由 runner 显式写回发起项目。
+        self.install_runtime_services(bootstrap.services);
+        Ok(())
+    }
+
+    pub(crate) fn agent_working_dir(&self) -> &Path {
+        self.agent_working_dir
+            .as_deref()
+            .unwrap_or(&self.target_dir)
     }
 
     pub fn target_dir(&self) -> &PathBuf {

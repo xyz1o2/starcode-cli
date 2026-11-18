@@ -54,7 +54,7 @@ impl ToolInvocation for NotebookReadInvocation {
     }
 
     fn tool_locations(&self) -> Vec<ToolLocation> {
-        let path = self.config.target_dir().join(&self.params.file_path);
+        let path = self.config.agent_working_dir().join(&self.params.file_path);
         vec![ToolLocation {
             path,
             location_type: crate::core::tools::tools::LocationType::Read,
@@ -84,7 +84,7 @@ impl ToolInvocation for NotebookReadInvocation {
         let file_path_str = params.file_path.clone();
 
         Box::pin(async move {
-            let path = config.target_dir().join(&file_path_str);
+            let path = config.agent_working_dir().join(&file_path_str);
 
             if !path.exists() {
                 return Ok(ToolResult {

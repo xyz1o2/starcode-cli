@@ -247,6 +247,41 @@ pub(crate) async fn run_subagent_lifecycle_hook(
     }
 }
 
+pub(crate) async fn run_defined_subagent_lifecycle_hook(
+    project_root: &std::path::Path,
+    event: crate::core::hooks::store::ManagedHookEvent,
+    agent_id: &str,
+    prompt: &str,
+    subagent_type: &str,
+    status: &str,
+    success: Option<bool>,
+    reason: Option<String>,
+    hooks: &[crate::core::hooks::store::ManagedHook],
+) {
+    let details = serde_json::json!({
+        "agent_id": agent_id,
+        "description": prompt,
+        "subagent_type": subagent_type,
+    });
+    let context = crate::core::hooks::runner::HookRunContext {
+        user_message: prompt.to_owned(),
+        status: status.to_owned(),
+        tool_name: Some(subagent_type.to_owned()),
+        tool_arguments: Some(details.to_string()),
+        tool_success: success,
+        stop_reason: reason,
+        stop_hook_active: false,
+        tool_call_id: None,
+    };
+    if let Err(error) =
+        crate::core::hooks::runner::run_defined_hooks(project_root, event, &context, hooks).await
+    {
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[WARN] {status} definition hook failed: {error}"
+        ));
+    }
+}
+
 /// 临时项目中的受控生命周期记录器，不修改用户配置或进程环境。
 #[cfg(all(test, unix))]
 pub(crate) async fn install_subagent_hook_recorder(project_root: &std::path::Path) {
@@ -278,6 +313,75 @@ pub(crate) async fn run_post_compact_hook(before_tokens: usize, after_tokens: us
         details,
     )
     .await;
+}
+
+pub(crate) async fn run_defined_pre_tool_hooks(
+    project_root: &std::path::Path,
+    definitions: &[crate::core::hooks::store::ManagedHook],
+    user_input: &str,
+    tool_call: &StarToolCall,
+) -> Result<(), String> {
+    let results = crate::core::hooks::runner::run_defined_hooks(
+        project_root,
+        crate::core::hooks::store::ManagedHookEvent::PreToolUse,
+        &crate::core::hooks::runner::HookRunContext {
+            user_message: user_input.to_owned(),
+            status: "before_tool".to_owned(),
+            tool_name: Some(tool_call.function.name.clone()),
+            tool_arguments: Some(tool_call.function.arguments.clone()),
+            tool_success: None,
+            stop_reason: None,
+            stop_hook_active: false,
+            tool_call_id: Some(tool_call.id.clone()),
+        },
+        definitions,
+    )
+    .await?;
+    let blocking_errors = results
+        .into_iter()
+        .filter(|result| result.blocking && !result.success)
+        .map(|result| format!("{} ({})", result.name, hook_result_reason(&result)))
+        .collect::<Vec<_>>();
+    if blocking_errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "tool `{}` blocked by PreToolUse hook: {}",
+            tool_call.function.name,
+            blocking_errors.join(", ")
+        ))
+    }
+}
+
+pub(crate) async fn run_defined_post_tool_hooks(
+    project_root: &std::path::Path,
+    definitions: &[crate::core::hooks::store::ManagedHook],
+    user_input: &str,
+    tool_call: &StarToolCall,
+    result: &ToolResult,
+) {
+    let context = crate::core::hooks::runner::HookRunContext {
+        user_message: user_input.to_owned(),
+        status: "after_tool".to_owned(),
+        tool_name: Some(tool_call.function.name.clone()),
+        tool_arguments: Some(tool_call.function.arguments.clone()),
+        tool_success: Some(result.success),
+        stop_reason: result.error.clone(),
+        stop_hook_active: false,
+        tool_call_id: None,
+    };
+    if let Err(error) = crate::core::hooks::runner::run_defined_hooks(
+        project_root,
+        crate::core::hooks::store::ManagedHookEvent::PostToolUse,
+        &context,
+        definitions,
+    )
+    .await
+    {
+        crate::utils::logging::append_debug_log_line(&format!(
+            "[WARN] custom PostToolUse hook failed: {error}"
+        ));
+    }
 }
 
 pub(crate) async fn run_pre_tool_hooks(

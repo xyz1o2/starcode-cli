@@ -760,9 +760,9 @@ impl ToolInvocation for ShellToolInvocation {
         let config = self.config.clone();
         let params = self.params.clone();
         let path = if let Some(dir) = &params.dir_path {
-            resolve_tool_path(config.target_dir(), dir)
+            resolve_tool_path(config.agent_working_dir(), dir)
         } else {
-            config.target_dir().to_path_buf()
+            config.agent_working_dir().to_path_buf()
         };
         let client = self.client.clone();
 
@@ -822,7 +822,7 @@ impl ToolInvocation for ShellToolInvocation {
 
             // 3.5 External Path Check (Opencode-style)
             let external_paths =
-                Self::external_paths_in_command(command, &path, config.target_dir());
+                Self::external_paths_in_command(command, &path, config.agent_working_dir());
             if !external_paths.is_empty() {
                 let persist_path = config.storage().project_permission_grants_path();
                 let persisted = Self::load_permission_signatures(&persist_path);
@@ -975,11 +975,18 @@ impl ToolInvocation for ShellToolInvocation {
                 stripped_command.clone()
             };
 
+            let base_dir = config
+                .agent_working_dir
+                .as_deref()
+                .unwrap_or(config.target_dir());
             let cwd = if let Some(dir_path) = &params.dir_path {
-                resolve_tool_path(config.target_dir(), dir_path)
+                resolve_tool_path(base_dir, dir_path)
             } else {
-                config.target_dir().clone()
+                base_dir.to_path_buf()
             };
+            if config.agent_working_dir.is_some() && !cwd.starts_with(base_dir) {
+                return Err("Working directory escapes the isolated agent worktree".into());
+            }
 
             let mut cmd = if cfg!(windows) {
                 let mut c = tokio::process::Command::new("powershell.exe");

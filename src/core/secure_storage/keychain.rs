@@ -104,6 +104,28 @@ fn interpret_delete(call: &SecurityCall) -> Result<(), StorageError> {
     Err(StorageError::KeychainError(failure_reason(call)))
 }
 
+fn interpret_native_get(result: Result<Vec<u8>, i32>) -> Result<Option<String>, StorageError> {
+    match result {
+        Ok(value) => String::from_utf8(value).map(Some).map_err(|_| {
+            StorageError::KeychainError("Keychain value is not valid UTF-8".to_string())
+        }),
+        Err(ERR_SEC_ITEM_NOT_FOUND) => Ok(None),
+        Err(code) => Err(StorageError::KeychainError(format!(
+            "Keychain get failed (OSStatus {code})"
+        ))),
+    }
+}
+
+fn interpret_native_delete(result: Result<(), i32>) -> Result<(), StorageError> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(ERR_SEC_ITEM_NOT_FOUND) => Err(StorageError::NotFound),
+        Err(code) => Err(StorageError::KeychainError(format!(
+            "Keychain delete failed (OSStatus {code})"
+        ))),
+    }
+}
+
 /// 钥匙串存储
 pub struct KeychainStorage {
     /// 服务名称
@@ -146,19 +168,10 @@ impl SecureStorage for KeychainStorage {
     fn get(&self, key: &str) -> Result<Option<String>, StorageError> {
         #[cfg(target_os = "macos")]
         {
-            let output = std::process::Command::new("security")
-                .args([
-                    "find-generic-password",
-                    "-s",
-                    &self.service_name,
-                    "-a",
-                    key,
-                    "-w",
-                ])
-                .output()
-                .map_err(|e| StorageError::KeychainError(e.to_string()))?;
-
-            interpret_get(&SecurityCall::from_output(&output))
+            interpret_native_get(
+                security_framework::passwords::get_generic_password(&self.service_name, key)
+                    .map_err(|error| error.code()),
+            )
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -170,18 +183,10 @@ impl SecureStorage for KeychainStorage {
     fn delete(&self, key: &str) -> Result<(), StorageError> {
         #[cfg(target_os = "macos")]
         {
-            let output = std::process::Command::new("security")
-                .args([
-                    "delete-generic-password",
-                    "-s",
-                    &self.service_name,
-                    "-a",
-                    key,
-                ])
-                .output()
-                .map_err(|e| StorageError::KeychainError(e.to_string()))?;
-
-            interpret_delete(&SecurityCall::from_output(&output))
+            interpret_native_delete(
+                security_framework::passwords::delete_generic_password(&self.service_name, key)
+                    .map_err(|error| error.code()),
+            )
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -236,22 +241,58 @@ mod tests {
         assert!(store.contains("security_framework::passwords::set_generic_password"));
         assert!(!store.contains("std::process::Command"));
         assert!(!store.contains("add-generic-password"));
+        let read_delete = implementation
+            .split("fn get(")
+            .nth(1)
+            .unwrap()
+            .split("fn list(")
+            .next()
+            .unwrap();
+        assert!(read_delete.contains("security_framework::passwords::get_generic_password"));
+        assert!(read_delete.contains("security_framework::passwords::delete_generic_password"));
+        assert!(!read_delete.contains("std::process::Command"));
     }
 
-    /// 在 macOS 上显式运行，核对原生命令写入与既有查询/删除路径的互通。
+    /// 仅由隔离 CI 脚本显式运行，未提供临时钥匙串时直接失败。
     #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "requires an unlocked macOS login Keychain and may show a system authorization dialog"]
+    #[ignore = "run scripts/test-keychain-macos.sh on a disposable GitHub-hosted macOS runner"]
     fn native_store_updates_and_remains_readable_by_existing_commands() {
+        let keychain = std::env::var("STARCODE_TEST_KEYCHAIN")
+            .expect("a disposable test keychain is required");
+        assert_eq!(
+            std::env::var("RUNNER_ENVIRONMENT").as_deref(),
+            Ok("github-hosted")
+        );
+        let default = std::process::Command::new("security")
+            .args(["default-keychain", "-d", "user"])
+            .output()
+            .expect("read default keychain");
+        assert!(default.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&default.stdout)
+                .trim()
+                .trim_matches('"'),
+            keychain
+        );
+        let search = std::process::Command::new("security")
+            .args(["list-keychains", "-d", "user"])
+            .output()
+            .expect("read keychain search list");
+        assert!(search.status.success());
+        let search = String::from_utf8_lossy(&search.stdout);
+        let paths: Vec<_> = search
+            .lines()
+            .map(|line| line.trim().trim_matches('"'))
+            .collect();
+        assert_eq!(
+            paths,
+            vec![keychain.as_str()],
+            "only the disposable keychain may be searched"
+        );
         let storage = KeychainStorage::new();
         let account = format!("starcode-native-store-test-{}", uuid::Uuid::new_v4());
-        struct RemoveTestItem<'a>(&'a KeychainStorage, &'a str);
-        impl Drop for RemoveTestItem<'_> {
-            fn drop(&mut self) {
-                let _ = self.0.delete(self.1);
-            }
-        }
-        let _cleanup = RemoveTestItem(&storage, &account);
+        // 外层脚本始终删除整个临时库，panic 路径也不访问用户钥匙串。
         storage.store(&account, "local test value").unwrap();
         assert_eq!(
             storage.get(&account).unwrap().as_deref(),
@@ -264,6 +305,93 @@ mod tests {
         );
         storage.delete(&account).unwrap();
         assert!(storage.get(&account).unwrap().is_none());
+        assert!(matches!(
+            storage.delete(&account),
+            Err(StorageError::NotFound)
+        ));
+
+        // 旧版 security 写入的条目明确授权当前测试程序和 security 读取。
+        // 参数里的值为公开测试夹具，不是用户秘密。
+        let executable = std::env::current_exe().unwrap();
+        let legacy = std::process::Command::new("security")
+            .args([
+                "add-generic-password",
+                "-s",
+                &storage.service_name,
+                "-a",
+                &account,
+                "-w",
+                "public legacy fixture",
+                "-T",
+                "/usr/bin/security",
+                "-T",
+            ])
+            .arg(&executable)
+            .arg(&keychain)
+            .output()
+            .unwrap();
+        assert!(
+            legacy.status.success(),
+            "{}",
+            String::from_utf8_lossy(&legacy.stderr)
+        );
+        storage
+            .store(&account, "native updated legacy fixture")
+            .unwrap();
+        assert_eq!(
+            storage.get(&account).unwrap().as_deref(),
+            Some("native updated legacy fixture")
+        );
+        storage.delete(&account).unwrap();
+
+        // 锁定临时库并禁止本进程弹窗，验证真实系统拒绝不会被吞成成功。
+        storage.store(&account, "public locked fixture").unwrap();
+        let interaction =
+            security_framework::os::macos::keychain::SecKeychain::disable_user_interaction()
+                .unwrap();
+        let locked = std::process::Command::new("security")
+            .arg("lock-keychain")
+            .arg(&keychain)
+            .output()
+            .unwrap();
+        assert!(locked.status.success());
+        let failure = storage
+            .store(&account, "must not be stored")
+            .expect_err("locked keychain must reject writes");
+        assert!(reason(&failure).contains("OSStatus"));
+        let failure = storage
+            .get(&account)
+            .expect_err("locked item must not look missing");
+        assert!(reason(&failure).contains("OSStatus"));
+        // 清理不走用户钥匙串；外层脚本删除整个临时库。
+        drop(interaction);
+    }
+
+    #[test]
+    fn native_results_preserve_values_and_distinguish_errors() {
+        let value = "  value with whitespace\n";
+        assert_eq!(
+            interpret_native_get(Ok(value.as_bytes().to_vec()))
+                .unwrap()
+                .as_deref(),
+            Some(value)
+        );
+        assert!(interpret_native_get(Err(ERR_SEC_ITEM_NOT_FOUND))
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            interpret_native_delete(Err(ERR_SEC_ITEM_NOT_FOUND)),
+            Err(StorageError::NotFound)
+        ));
+        for code in [-25293, -25308, -25291] {
+            assert!(
+                reason(&interpret_native_get(Err(code)).unwrap_err()).contains(&code.to_string())
+            );
+            assert!(reason(&interpret_native_delete(Err(code)).unwrap_err())
+                .contains(&code.to_string()));
+        }
+        assert!(interpret_native_get(Ok(vec![0xff])).is_err());
+        assert!(interpret_native_delete(Ok(())).is_ok());
     }
 
     /// 构造一次 `security` 调用的结果。

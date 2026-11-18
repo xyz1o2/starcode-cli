@@ -47,7 +47,7 @@ mod subagent_runner;
 mod system_prompt_merge;
 mod token_budget;
 mod tool_enhanced;
-mod tool_executor;
+pub(crate) mod tool_executor;
 mod tool_helpers;
 mod tool_result_persist;
 mod tool_routing;

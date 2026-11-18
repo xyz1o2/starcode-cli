@@ -26,6 +26,11 @@ impl Storage {
         Self { target_dir }
     }
 
+    /// 独立工作树使用自己的状态根，不向上继承父仓库的目录。
+    pub(crate) fn for_worktree(target_dir: PathBuf) -> Self {
+        Self { target_dir }
+    }
+
     /// 全局配置目录。
     ///
     /// 设了 `STAR_CONFIG_DIR` 环境变量时整体搬迁到这里（对标 Claude Code 的

@@ -215,6 +215,96 @@ impl WorktreeManager {
     }
 }
 
+/// 单次子代理的 Git 工作目录；保留有改动或提交的结果，不改变进程 cwd。
+pub(crate) struct AgentWorktree {
+    pub path: PathBuf,
+    project_root: PathBuf,
+    initial_head: String,
+}
+
+impl AgentWorktree {
+    async fn git(root: &Path, args: &[&std::ffi::OsStr]) -> Result<String, String> {
+        let output = tokio::process::Command::new("git")
+            .current_dir(root)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .args(args)
+            .output()
+            .await
+            .map_err(|error| format!("Failed to execute git in {}: {error}", root.display()))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Git failed in {}: {}",
+                root.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    pub(crate) async fn create(project_root: &Path) -> Result<Self, String> {
+        let root = Self::git(
+            project_root,
+            &["rev-parse".as_ref(), "--show-toplevel".as_ref()],
+        )
+        .await?;
+        let project_root = PathBuf::from(root);
+        let initial_head =
+            Self::git(&project_root, &["rev-parse".as_ref(), "HEAD".as_ref()]).await?;
+        let base = crate::core::config::storage::Storage::new(project_root.clone())
+            .star_dir()
+            .join("worktrees");
+        tokio::fs::create_dir_all(&base)
+            .await
+            .map_err(|error| format!("Failed to create {}: {error}", base.display()))?;
+        let path = base.join(format!("agent-{}", uuid::Uuid::new_v4()));
+        Self::git(
+            &project_root,
+            &[
+                "worktree".as_ref(),
+                "add".as_ref(),
+                "--detach".as_ref(),
+                path.as_os_str(),
+                initial_head.as_ref(),
+            ],
+        )
+        .await?;
+        Ok(Self {
+            path,
+            project_root,
+            initial_head,
+        })
+    }
+
+    /// 只有 HEAD 未移动且包含未跟踪文件的状态为空，才移除本次创建的工作树。
+    pub(crate) async fn finish(&self) -> Result<bool, String> {
+        let head = Self::git(&self.path, &["rev-parse".as_ref(), "HEAD".as_ref()]).await?;
+        let status = Self::git(
+            &self.path,
+            &[
+                "status".as_ref(),
+                "--porcelain".as_ref(),
+                "--untracked-files=all".as_ref(),
+            ],
+        )
+        .await?;
+        if head != self.initial_head || !status.is_empty() {
+            return Ok(false);
+        }
+        Self::git(
+            &self.project_root,
+            &[
+                "worktree".as_ref(),
+                "remove".as_ref(),
+                self.path.as_os_str(),
+            ],
+        )
+        .await?;
+        Ok(true)
+    }
+}
+
 /// Worktree 安全防护
 pub struct WorktreeSafety {
     /// 禁止在主 worktree 中直接修改的路径

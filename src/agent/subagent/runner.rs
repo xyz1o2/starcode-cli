@@ -207,7 +207,36 @@ impl StarAgentRunner {
         request: SubAgentRequest,
         sink: Option<SubAgentProgressSink>,
     ) -> Result<SubAgentResult, SubAgentError> {
-        self.run_with_control(request, sink, None).await
+        self.run_with_progress_and_control(request, sink, None)
+            .await
+    }
+
+    pub async fn run_with_progress_and_control(
+        &self,
+        request: SubAgentRequest,
+        sink: Option<SubAgentProgressSink>,
+        signal: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<SubAgentResult, SubAgentError> {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let execution = self.run_with_control(request, sink, Some(stop.clone()));
+        tokio::pin!(execution);
+        if let Some(signal) = signal {
+            tokio::select! {
+                result = &mut execution => result,
+                _ = signal.cancelled() => {
+                    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                    execution.await
+                }
+            }
+        } else {
+            execution.await
+        }
+    }
+
+    pub(crate) fn project_root(&self) -> PathBuf {
+        self.config
+            .session_hook_root()
+            .unwrap_or_else(|_| self.config.target_dir().to_path_buf())
     }
 
     async fn run_with_control(
@@ -216,7 +245,8 @@ impl StarAgentRunner {
         sink: Option<SubAgentProgressSink>,
         stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<SubAgentResult, SubAgentError> {
-        self.run_with_task_control(request, sink, stop, None).await
+        self.run_with_task_control(request, sink, stop, None, &self.config.storage())
+            .await
     }
 
     async fn run_with_task_control(
@@ -225,6 +255,7 @@ impl StarAgentRunner {
         sink: Option<SubAgentProgressSink>,
         stop: Option<Arc<std::sync::atomic::AtomicBool>>,
         tasks: Option<&crate::agent::subagent::tasks::SharedSubagentTasks>,
+        session_storage: &crate::core::config::storage::Storage,
     ) -> Result<SubAgentResult, SubAgentError> {
         use crate::core::hooks::store::ManagedHookEvent;
         let identity = request
@@ -232,23 +263,120 @@ impl StarAgentRunner {
             .get_or_insert_with(|| format!("agent-{}", uuid::Uuid::new_v4()))
             .clone();
         let prompt = request.prompt.clone();
-        let kind = request.subagent_type.as_str();
-        let project_root = self
-            .config
-            .session_hook_root()
-            .unwrap_or_else(|_| self.config.target_dir().to_path_buf());
-        crate::agent::hooks::run_subagent_lifecycle_hook(
-            &project_root,
-            ManagedHookEvent::SubagentStart,
-            &identity,
-            &prompt,
-            kind,
-            "subagent_start",
-            None,
-            None,
-        )
-        .await;
-        let result = self.run_inner(request, sink, stop.clone()).await;
+        let kind = request.subagent_type.as_str().to_owned();
+        let project_root = self.project_root();
+        let mut configured = (*self.config).clone();
+        let custom_configuration = if matches!(
+            request.subagent_type,
+            crate::core::agents::SubagentType::Custom(_)
+        ) {
+            crate::agent::skills::custom::configure_custom_agent(
+                &mut request,
+                &mut configured,
+                &project_root,
+            )
+            .await
+        } else {
+            configured.subagent_hooks.clear();
+            Ok(())
+        };
+        let definition_hooks = configured.subagent_hooks.clone();
+        if definition_hooks.is_empty() {
+            crate::agent::hooks::run_subagent_lifecycle_hook(
+                &project_root,
+                ManagedHookEvent::SubagentStart,
+                &identity,
+                &prompt,
+                &kind,
+                "subagent_start",
+                None,
+                None,
+            )
+            .await;
+        } else {
+            crate::agent::hooks::run_defined_subagent_lifecycle_hook(
+                &project_root,
+                ManagedHookEvent::SubagentStart,
+                &identity,
+                &prompt,
+                &kind,
+                "subagent_start",
+                None,
+                None,
+                &definition_hooks,
+            )
+            .await;
+        }
+        let mut worktree = None;
+        let mut result = if let Err(error) = custom_configuration {
+            Err(SubAgentError::new(
+                SubAgentErrorKind::InitializationFailed,
+                error,
+            ))
+        } else if request.isolation == Some(crate::core::agents::AgentIsolation::Worktree) {
+            match crate::agent::worktree::AgentWorktree::create(&project_root).await {
+                Ok(created) => {
+                    let mut config = configured;
+                    let rebound = config.rebind_subagent_directory(created.path.clone()).await;
+                    worktree = Some(created);
+                    match rebound {
+                        Ok(()) => {
+                            let isolated = StarAgentRunner {
+                                config: Arc::new(config),
+                                client: self.client.clone(),
+                                agent_hub: self.agent_hub.clone(),
+                                #[cfg(test)]
+                                panic_loop_before_handoff: self.panic_loop_before_handoff,
+                            };
+                            isolated
+                                .run_inner(request, sink, stop.clone(), self.config.storage())
+                                .await
+                        }
+                        Err(error) => Err(SubAgentError::new(
+                            SubAgentErrorKind::InitializationFailed,
+                            error,
+                        )),
+                    }
+                }
+                Err(error) => Err(SubAgentError::new(
+                    SubAgentErrorKind::InitializationFailed,
+                    error,
+                )),
+            }
+        } else {
+            let configured_runner = StarAgentRunner {
+                config: Arc::new(configured),
+                client: self.client.clone(),
+                agent_hub: self.agent_hub.clone(),
+                #[cfg(test)]
+                panic_loop_before_handoff: self.panic_loop_before_handoff,
+            };
+            configured_runner
+                .run_inner(request, sink, stop.clone(), self.config.storage())
+                .await
+        };
+        if let Some(worktree) = worktree {
+            let note = match worktree.finish().await {
+                Ok(true) => None,
+                Ok(false) => Some(format!("Worktree retained at {}", worktree.path.display())),
+                Err(error) => Some(format!(
+                    "Worktree retained at {}: {error}",
+                    worktree.path.display()
+                )),
+            };
+            if let Some(note) = note {
+                match &mut result {
+                    Ok(result) => {
+                        result.output.push_str("\n\n");
+                        result.output.push_str(&note);
+                    }
+                    Err(error) => {
+                        error.message.push_str("\n\n");
+                        error.message.push_str(&note);
+                    }
+                }
+            }
+        }
         // Stop hook 与最终通知共用这一裁决点；hook 执行期间不再接受停止请求。
         if let Some(tasks) = tasks {
             tasks.lock().await.close_control(&identity);
@@ -264,21 +392,40 @@ impl StarAgentRunner {
         } else {
             result.as_ref().err().map(ToString::to_string)
         };
-        crate::agent::hooks::run_subagent_lifecycle_hook(
-            &project_root,
-            ManagedHookEvent::SubagentStop,
-            &identity,
-            &prompt,
-            kind,
-            if stopped {
-                "subagent_stopped"
-            } else {
-                "subagent_stop"
-            },
-            Some(result.is_ok() && !stopped),
-            reason,
-        )
-        .await;
+        if definition_hooks.is_empty() {
+            crate::agent::hooks::run_subagent_lifecycle_hook(
+                &project_root,
+                ManagedHookEvent::SubagentStop,
+                &identity,
+                &prompt,
+                &kind,
+                if stopped {
+                    "subagent_stopped"
+                } else {
+                    "subagent_stop"
+                },
+                Some(result.is_ok() && !stopped),
+                reason,
+            )
+            .await;
+        } else {
+            crate::agent::hooks::run_defined_subagent_lifecycle_hook(
+                &project_root,
+                ManagedHookEvent::SubagentStop,
+                &identity,
+                &prompt,
+                &kind,
+                if stopped {
+                    "subagent_stopped"
+                } else {
+                    "subagent_stop"
+                },
+                Some(result.is_ok() && !stopped),
+                reason,
+                &definition_hooks,
+            )
+            .await;
+        }
         result
     }
 
@@ -288,6 +435,7 @@ impl StarAgentRunner {
         request: SubAgentRequest,
         sink: Option<SubAgentProgressSink>,
         stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+        session_storage: &crate::core::config::storage::Storage,
     ) -> Result<SubAgentResult, SubAgentError> {
         if stop
             .as_ref()
@@ -324,7 +472,7 @@ impl StarAgentRunner {
                     ));
                 }
             }
-            let session = super::session::AgentSession::load(self.config.storage(), id)
+            let session = super::session::AgentSession::load(session_storage, id)
                 .await
                 .map_err(|e| SubAgentError::new(SubAgentErrorKind::InitializationFailed, e))?;
             if request.subagent_type != session.subagent_type {
@@ -363,6 +511,11 @@ impl StarAgentRunner {
             sub_config.core_tools = Some(
                 EXPLORER_READONLY_TOOLS
                     .iter()
+                    .filter(|name| {
+                        sub_config.core_tools.as_ref().is_none_or(|allowed| {
+                            allowed.iter().any(|value| value.eq_ignore_ascii_case(name))
+                        })
+                    })
                     .map(|s| s.to_string())
                     .collect(),
             );
@@ -497,7 +650,7 @@ impl StarAgentRunner {
         }
         let (session_messages, pending_context) = agent.session_context_snapshot();
         let snapshot_result = super::session::AgentSession::new(
-            self.config.storage(),
+            session_storage,
             session_id,
             request.subagent_type.clone(),
             session_messages.clone(),
@@ -505,7 +658,7 @@ impl StarAgentRunner {
         )
         .map_err(|e| SubAgentError::new(SubAgentErrorKind::ExecutionFailed, e));
         let snapshot_result = match snapshot_result {
-            Ok(snapshot) => snapshot.save(self.config.storage()).await,
+            Ok(snapshot) => snapshot.save(session_storage).await,
             Err(error) => Err(error.to_string()),
         };
         if let Err(save_error) = snapshot_result {
@@ -1957,10 +2110,22 @@ impl AsyncSubagentRunner {
     /// 语义是「本轮等 fork 的结果，而不是让它在后台跑」。
     pub async fn run_foreground(
         &self,
+        request: SubAgentRequest,
+        name: Option<String>,
+        description: String,
+        agent_type_label: String,
+    ) -> Result<SubAgentResult, SubAgentError> {
+        self.run_foreground_with_control(request, name, description, agent_type_label, None)
+            .await
+    }
+
+    pub async fn run_foreground_with_control(
+        &self,
         mut request: SubAgentRequest,
         name: Option<String>,
         description: String,
         agent_type_label: String,
+        signal: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<SubAgentResult, SubAgentError> {
         let aid = format!("agent-fork-{}", uuid::Uuid::new_v4());
         let identity = Self::bind_identity(&mut request, name.as_deref(), &aid);
@@ -1978,7 +2143,22 @@ impl AsyncSubagentRunner {
         }
         let _ = description;
         let _ = agent_type_label;
-        let result = self.sync_runner.run(request).await;
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let execution = self
+            .sync_runner
+            .run_with_control(request, None, Some(stop.clone()));
+        tokio::pin!(execution);
+        let result = if let Some(signal) = signal {
+            tokio::select! {
+                result = &mut execution => result,
+                _ = signal.cancelled() => {
+                    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                    execution.await
+                }
+            }
+        } else {
+            execution.await
+        };
         if let Some(ref agent_name) = name {
             let mut registry = self.name_registry.lock().await;
             if registry.get(agent_name) == Some(&aid) {
@@ -2095,7 +2275,13 @@ impl AsyncSubagentRunner {
             });
 
             let result = runner
-                .run_with_task_control(request, Some(sink), Some(stop.clone()), Some(&tasks))
+                .run_with_task_control(
+                    request,
+                    Some(sink),
+                    Some(stop.clone()),
+                    Some(&tasks),
+                    &runner.config.storage(),
+                )
                 .await;
             // 控制入口已在 Stop hook 前关闭，标志与 hook 看到的终态保持一致。
             let stopped = stop.load(std::sync::atomic::Ordering::SeqCst);

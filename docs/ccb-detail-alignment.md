@@ -50,7 +50,7 @@
 
 ## 验证记录
 
-- 2026-11-18 隔离与生命周期补验：本轮策略按 agent identity 隔离，确认请求携带 identity 供总线再次判定；lead 保留共享模型切换槽，每个 child 独立建槽。父批次仅包含 Skill 时也刷新当前客户端。生命周期 matcher 的展示名/slug 归一仅作用于 SubagentStart/Stop；任务启动时冻结会话 hook 根。后台停止入口提前到 Stop hook 前关闭，避免 hook 与最终任务状态不一致。新增权限隔离、确认消息序列化/复核、模型槽独立性、hook 目录冻结、hook 执行期间停止请求的回归。bxi9jreq4 定向门通过：全目标 locked 编译、确认复核 1 项、runner 25 项、core hooks 17 项、内联 Skill HTTP 1 项、fork Skill HTTP 1 项。Clippy --lib --locked 完成（533 条既有警告，变更文件所见警告均在未修改行）；全库串行门及最终变更补验进行中。最初隔离测试错误地期待默认 Auto 对 Read 返回 AskUser，改用 WebFetch 并保留双向及兄弟隔离断言后通过；未更改生产默认权限。
+- 2026-11-18 隔离与生命周期补验：本轮策略按 agent identity 隔离，确认请求携带 identity 供总线再次判定；lead 保留共享模型切换槽，每个 child 独立建槽。父批次仅包含 Skill 时也刷新当前客户端。生命周期 matcher 的展示名/slug 归一仅作用于 SubagentStart/Stop；任务启动时冻结会话 hook 根。后台停止入口提前到 Stop hook 前关闭，避免 hook 与最终任务状态不一致。新增权限隔离、确认消息序列化/复核、模型槽独立性、hook 目录冻结、hook 执行期间停止请求的回归。bxi9jreq4 定向门通过：全目标 locked 编译、确认复核 1 项、runner 25 项、core hooks 17 项、内联 Skill HTTP 1 项、fork Skill HTTP 1 项。Clippy --lib --locked 完成（533 条既有警告，变更文件所见警告均在未修改行）；bfalm8h6n 最终门禁通过：串行库 2374 通过 / 7 忽略 / 0 失败；文档 0 通过 / 3 忽略；全目标 locked 编译、fmt/diff 检查通过。最初隔离测试错误地期待默认 Auto 对 Read 返回 AskUser，改用 WebFetch 并保留双向及兄弟隔离断言后通过；未更改生产默认权限。
 
 - 索引锁污染与 worktree 创建补充门禁 bon7zs9rv：串行库 2367 通过 / 7 忽略；文档 0 通过 / 3 忽略；fmt/diff 通过。新增的两项忽略测试是仅由父测试显式启动的隔离子进程探针；父测试实际验证 token/sync/index-IO 全局锁污染，不把全局污染留给其余库测试。bniezsi42 全目标 locked 编译通过；buo8j1cuq worktree 真实 Git 回归 2 项及全目标 locked 编译通过。随后新增的内联 Skill HTTP 测试首次编译失败于误用 Config getter 名，已按真实 runtime_tool_registry 接口修正；第二次因模拟结论过短触发生产结论补问而耗尽两轮，保持生产规则并补足模拟结论。by3b04j41 补验通过：内联 Skill 模型循环 HTTP 回归 1 项、全目标 locked 编译及 fmt/diff。该回归验证首请求 Low、加载真实 Skill 后下一请求 High、全局 Max 不变及快照重装恢复 Low，未覆盖 UI/StarAgent 外层入口。
 

@@ -74,10 +74,6 @@ fn should_fork(input: &AgentToolFullInput) -> bool {
     if input.description.to_lowercase().contains("fork") {
         return true;
     }
-    // 检查 isolation 是否为 Worktree（fork 的一种形式）
-    if input.isolation == Some(AgentIsolation::Worktree) {
-        return true;
-    }
     false
 }
 
@@ -171,6 +167,7 @@ fn build_request(input: &AgentToolFullInput) -> SubAgentRequest {
         model: input.model.clone(),
         effort: input.effort.clone(),
         resume: input.resume.clone(),
+        isolation: input.isolation.clone(),
         subagent_type: input
             .subagent_type
             .clone()

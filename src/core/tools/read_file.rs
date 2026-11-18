@@ -89,13 +89,19 @@ impl ReadFileToolInvocation {
         _tool_name: Option<String>,
         _tool_display_name: Option<String>,
     ) -> Self {
+        let base_dir = config
+            .agent_working_dir
+            .as_deref()
+            .unwrap_or(config.target_dir());
         let resolved_paths = if let Some(file_paths) = &params.file_paths {
             file_paths
                 .iter()
-                .map(|p| config.target_dir().join(p))
+                .map(|p| crate::core::utils::paths::resolve_tool_path(base_dir, p))
                 .collect()
         } else if let Some(file_path) = &params.file_path {
-            vec![config.target_dir().join(file_path)]
+            vec![crate::core::utils::paths::resolve_tool_path(
+                base_dir, file_path,
+            )]
         } else {
             vec![]
         };
@@ -117,7 +123,7 @@ impl ToolInvocation for ReadFileToolInvocation {
         if self.resolved_paths.len() > 1 {
             format!("Read {} files", self.resolved_paths.len())
         } else if let Some(path) = self.resolved_paths.first() {
-            let relative_path = make_relative(path, self.config.target_dir());
+            let relative_path = make_relative(path, self.config.agent_working_dir());
             shorten_path(&relative_path.to_string_lossy(), 80)
         } else {
             "Read file".to_string()

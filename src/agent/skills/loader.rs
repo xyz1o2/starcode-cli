@@ -35,6 +35,16 @@ pub struct SkillMetadata {
     pub name: String,
     pub description: String,
     pub when_to_use: Option<String>,
+    /// 自定义代理工具白名单；None 表示继承父级。
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub memory: Option<String>,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    /// 自定义代理限定的执行 hooks，不进入全局项目 hooks 配置。
+    #[serde(skip)]
+    pub hooks: Vec<crate::core::hooks::store::ManagedHook>,
     /// 本轮免确认放行的工具（调用 skill 的那一轮有效，下条消息即清）。
     pub allowed_tools: Vec<String>,
     /// 本轮从可用池移除的工具。
@@ -103,6 +113,10 @@ impl Default for SkillMetadata {
             name: String::new(),
             description: String::new(),
             when_to_use: None,
+            tools: None,
+            memory: None,
+            max_turns: None,
+            hooks: Vec::new(),
             allowed_tools: Vec::new(),
             disallowed_tools: Vec::new(),
             argument_hint: None,
@@ -283,6 +297,11 @@ impl SkillLoader {
 
                 // Check if this key starts a YAML array (next lines are indented items)
                 if value.is_empty() {
+                    if key == "hooks" {
+                        i += 1;
+                        meta.hooks = parse_custom_hooks(&lines, &mut i);
+                        continue;
+                    }
                     // Collect indented array items
                     let mut items = Vec::new();
                     i += 1;
@@ -315,6 +334,7 @@ impl SkillLoader {
                         "allowed-tools" | "allowed_tools" => meta.allowed_tools = items,
                         "disallowed-tools" | "disallowed_tools" => meta.disallowed_tools = items,
                         "paths" => meta.paths = items,
+                        "tools" | "tool" => meta.tools = Some(items),
                         "arguments" => {
                             // Parse structured arguments from collected items
                             // Each item might be "name: value" or we parse them as argument blocks
@@ -340,6 +360,8 @@ impl SkillLoader {
                     "when_to_use" | "when-to-use" => meta.when_to_use = Some(cleaned),
                     "argument_hint" | "argument-hint" => meta.argument_hint = Some(cleaned),
                     "model" => meta.model = Some(cleaned),
+                    "memory" => meta.memory = Some(cleaned),
+                    "maxTurns" | "max-turns" => meta.max_turns = cleaned.parse().ok(),
                     "context" => meta.context = Some(cleaned),
                     "effort" => meta.effort = Some(cleaned),
                     "agent" => meta.agent = Some(cleaned),
@@ -673,6 +695,80 @@ fn find_matching_paren(s: &str) -> Option<usize> {
 
 /// Parse argument items from YAML block.
 /// Supports both simple list items and structured blocks.
+fn parse_custom_hooks(
+    lines: &[&str],
+    index: &mut usize,
+) -> Vec<crate::core::hooks::store::ManagedHook> {
+    use crate::core::hooks::store::{ManagedHook, ManagedHookEvent};
+    let mut hooks = Vec::new();
+    while *index < lines.len() {
+        let line = lines[*index];
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            *index += 1;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("- ") {
+            let mut fields = HashMap::new();
+            if let Some((key, value)) = rest.split_once(':') {
+                fields.insert(
+                    key.trim().to_owned(),
+                    value.trim().trim_matches(['"', '\'']).to_owned(),
+                );
+            }
+            *index += 1;
+            while *index < lines.len() {
+                let nested = lines[*index];
+                if !nested.starts_with(' ') && !nested.starts_with('\t') {
+                    break;
+                }
+                let nested = nested.trim();
+                if let Some((key, value)) = nested.split_once(':') {
+                    fields.insert(
+                        key.trim().to_owned(),
+                        value.trim().trim_matches(['"', '\'']).to_owned(),
+                    );
+                }
+                *index += 1;
+            }
+            let event = fields
+                .get("event")
+                .and_then(|value| ManagedHookEvent::parse(value));
+            let command = fields
+                .get("command")
+                .filter(|value| !value.trim().is_empty());
+            if let (Some(event), Some(command)) = (event, command) {
+                hooks.push(ManagedHook {
+                    name: format!("definition:{}", event.as_str()),
+                    event,
+                    command: command.clone(),
+                    timeout_secs: fields
+                        .get("timeout")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(600),
+                    blocking: fields
+                        .get("blocking")
+                        .is_some_and(|value| matches!(value.as_str(), "true" | "yes" | "1")),
+                    enabled: true,
+                    created_at: 0,
+                    updated_at: 0,
+                    source: Some("custom-agent-definition".into()),
+                    working_dir: None,
+                    matcher: fields.get("matcher").cloned(),
+                    once: false,
+                    status_message: fields.get("statusMessage").cloned(),
+                });
+            }
+        } else {
+            *index += 1;
+        }
+    }
+    hooks
+}
+
 fn parse_argument_items(_lines: &[&str], _pos: &mut usize, items: &[String]) -> Vec<SkillArgument> {
     let mut args = Vec::new();
 
@@ -879,6 +975,23 @@ mod tests {
         assert_eq!(meta.model.as_deref(), Some("gpt-4o"));
         assert_eq!(meta.agent.as_deref(), Some("Explore"));
         assert_eq!(meta.shell.as_deref(), Some("powershell"));
+    }
+
+    #[test]
+    fn custom_agent_fields_and_hooks_are_parsed_without_shell_execution() {
+        let meta = meta_of("tools: Read, Grep\nmemory: project\nmaxTurns: 9\nhooks:\n  - event: PreToolUse\n    command: printf ok\n    blocking: true\n");
+        assert_eq!(
+            meta.tools.as_deref(),
+            Some(["Read".to_string(), "Grep".to_string()].as_slice())
+        );
+        assert_eq!(meta.memory.as_deref(), Some("project"));
+        assert_eq!(meta.max_turns, Some(9));
+        assert_eq!(meta.hooks.len(), 1);
+        assert_eq!(
+            meta.hooks[0].event,
+            crate::core::hooks::store::ManagedHookEvent::PreToolUse
+        );
+        assert!(meta.hooks[0].blocking);
     }
 
     /// 官方 SKILL.md frontmatter 的 `license` 字段（纯元数据）。

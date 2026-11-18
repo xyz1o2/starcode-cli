@@ -235,7 +235,7 @@ impl ToolInvocation for SkillInvocation {
 
     fn execute(
         &self,
-        _signal: Option<&tokio_util::sync::CancellationToken>,
+        signal: Option<&tokio_util::sync::CancellationToken>,
         update_output: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
     ) -> std::pin::Pin<
         Box<
@@ -244,6 +244,7 @@ impl ToolInvocation for SkillInvocation {
                 + '_,
         >,
     > {
+        let signal = signal.cloned();
         let manager = self.manager.clone();
         let skill_name = self.skill_name.clone();
         let args = self.args.clone();
@@ -434,6 +435,7 @@ impl ToolInvocation for SkillInvocation {
                             async_runner.as_ref(),
                             &skill_name,
                             parent_thinking_effort,
+                            signal.as_ref(),
                         )
                         .await;
                     }
@@ -930,6 +932,7 @@ async fn run_skill_forked(
     async_runner: Option<&std::sync::Arc<crate::agent::subagent::runner::AsyncSubagentRunner>>,
     skill_name: &str,
     parent_thinking_effort: Option<crate::types::ThinkingEffort>,
+    signal: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<CoreToolResult, Box<dyn std::error::Error>> {
     let Some(runner) = async_runner else {
         let output = format!(
@@ -998,7 +1001,13 @@ async fn run_skill_forked(
     } else {
         // 前台：本轮等结果。
         let result = runner
-            .run_foreground(request, agent_name, description, type_label)
+            .run_foreground_with_control(
+                request,
+                agent_name,
+                description,
+                type_label,
+                signal.cloned(),
+            )
             .await
             .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
         let output = if result.output.trim().is_empty() {

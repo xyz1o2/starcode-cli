@@ -920,8 +920,9 @@ impl EditToolInvocation {
         message_bus: Arc<MessageBus>,
         global_state: Arc<GlobalState>,
     ) -> Self {
+        let base_dir = config.agent_working_dir();
         let resolved_path =
-            crate::core::utils::paths::resolve_tool_path(config.target_dir(), &params.file_path);
+            crate::core::utils::paths::resolve_tool_path(base_dir, &params.file_path);
         Self {
             config,
             params,

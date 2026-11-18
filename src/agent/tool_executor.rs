@@ -1342,7 +1342,7 @@ impl ToolExecutor {
             match tool.create_invocation(args.clone()) {
                 Ok(mut invocation) => {
                     invocation.set_agent_parent_identity(self.config.agent_identity.clone());
-                    if matches!(name, "Agent" | "Skill") {
+                    if matches!(name, "Agent" | "Skill" | "WorkflowTool") {
                         self.attach_agent_parent_context(invocation.as_mut());
                     }
                     // 门禁先行：没批准就一步都不许往下走。

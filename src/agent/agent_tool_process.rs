@@ -450,7 +450,7 @@ impl Agent {
         if tool_calls.iter().any(|call| {
             matches!(
                 crate::core::tools::constants::resolve_registered_tool_name(&call.function.name),
-                "Agent" | "Skill"
+                "Agent" | "Skill" | "WorkflowTool"
             )
         }) {
             self.tool_executor.set_agent_parent_context(messages);
@@ -472,7 +472,18 @@ impl Agent {
         let mut runnable_tool_calls: Vec<StarToolCall> = Vec::new();
         let mut lens_grep_nudged = false;
         for tool_call in tool_calls {
-            match hooks::run_pre_tool_hooks(user_input, tool_call).await {
+            let pre_hook_result = if self.config.subagent_hooks.is_empty() {
+                hooks::run_pre_tool_hooks(user_input, tool_call).await
+            } else {
+                hooks::run_defined_pre_tool_hooks(
+                    &self.config.target_dir,
+                    &self.config.subagent_hooks,
+                    user_input,
+                    tool_call,
+                )
+                .await
+            };
+            match pre_hook_result {
                 Ok(()) => {
                     // StarLens：首个 Grep 前轻推一次"先回想系统认知"（默认关，不拦截 grep）。
                     if !lens_grep_nudged
@@ -745,7 +756,18 @@ impl Agent {
             verification_required,
             skip_verification,
         );
-        hooks::run_post_tool_hooks(user_input, tool_call, &result).await;
+        if self.config.subagent_hooks.is_empty() {
+            hooks::run_post_tool_hooks(user_input, tool_call, &result).await;
+        } else {
+            hooks::run_defined_post_tool_hooks(
+                &self.config.target_dir,
+                &self.config.subagent_hooks,
+                user_input,
+                tool_call,
+                &result,
+            )
+            .await;
+        }
         // 失败单独走一个事件 —— 外部 harness 常要按"工具失败了"做不同处理
         // （重试、告警、换策略），而 `PostToolUse` 的 `tool_success=false`
         // 太笼统。

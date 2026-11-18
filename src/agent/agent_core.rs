@@ -766,7 +766,7 @@ impl Agent {
         if tool_calls.iter().any(|call| {
             matches!(
                 crate::core::tools::constants::resolve_registered_tool_name(&call.function.name),
-                "Agent" | "Skill"
+                "Agent" | "Skill" | "WorkflowTool"
             )
         }) {
             self.tool_executor

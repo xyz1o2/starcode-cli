@@ -677,7 +677,9 @@ fn workflows_in(ctx: &mut CommandContext<'_>, cwd: &std::path::Path) {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.is_file()
-                        && path.extension().is_some_and(|e| e == "json" || e == "sh")
+                        && path
+                            .extension()
+                            .is_some_and(|e| e == "json" || e == "sh" || e == "js")
                         && path
                             .file_stem()
                             .and_then(|s| s.to_str())

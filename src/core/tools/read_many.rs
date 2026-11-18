@@ -358,8 +358,10 @@ impl ToolInvocation for ReadManyToolInvocation {
                 for path_str in &paths {
                     // 键必须和 Edit 查表时一致（read_state_key），否则 read_many
                     // 读过的文件仍会被 [edit_file_not_read] 拦下。
-                    let resolved =
-                        crate::core::utils::paths::resolve_tool_path(config.target_dir(), path_str);
+                    let resolved = crate::core::utils::paths::resolve_tool_path(
+                        config.agent_working_dir(),
+                        path_str,
+                    );
                     let abs_str = crate::core::utils::paths::read_state_key(&resolved);
                     // 只用当前时间作为占位时间戳（read_many 不返回文件元数据）
                     state.entry(abs_str).or_insert(ReadFileState {
