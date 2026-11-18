@@ -281,19 +281,20 @@ impl StarAgentRunner {
             Ok(())
         };
         let definition_hooks = configured.subagent_hooks.clone();
-        if definition_hooks.is_empty() {
-            crate::agent::hooks::run_subagent_lifecycle_hook(
-                &project_root,
-                ManagedHookEvent::SubagentStart,
-                &identity,
-                &prompt,
-                &kind,
-                "subagent_start",
-                None,
-                None,
-            )
-            .await;
-        } else {
+        // 定义内 hooks 是额外的局部行为，不应屏蔽项目/用户级 hooks；两层
+        // 都执行，且各自仍由自己的 matcher/blocking 语义决定。
+        crate::agent::hooks::run_subagent_lifecycle_hook(
+            &project_root,
+            ManagedHookEvent::SubagentStart,
+            &identity,
+            &prompt,
+            &kind,
+            "subagent_start",
+            None,
+            None,
+        )
+        .await;
+        if !definition_hooks.is_empty() {
             crate::agent::hooks::run_defined_subagent_lifecycle_hook(
                 &project_root,
                 ManagedHookEvent::SubagentStart,
@@ -392,23 +393,22 @@ impl StarAgentRunner {
         } else {
             result.as_ref().err().map(ToString::to_string)
         };
-        if definition_hooks.is_empty() {
-            crate::agent::hooks::run_subagent_lifecycle_hook(
-                &project_root,
-                ManagedHookEvent::SubagentStop,
-                &identity,
-                &prompt,
-                &kind,
-                if stopped {
-                    "subagent_stopped"
-                } else {
-                    "subagent_stop"
-                },
-                Some(result.is_ok() && !stopped),
-                reason,
-            )
-            .await;
-        } else {
+        crate::agent::hooks::run_subagent_lifecycle_hook(
+            &project_root,
+            ManagedHookEvent::SubagentStop,
+            &identity,
+            &prompt,
+            &kind,
+            if stopped {
+                "subagent_stopped"
+            } else {
+                "subagent_stop"
+            },
+            Some(result.is_ok() && !stopped),
+            reason.clone(),
+        )
+        .await;
+        if !definition_hooks.is_empty() {
             crate::agent::hooks::run_defined_subagent_lifecycle_hook(
                 &project_root,
                 ManagedHookEvent::SubagentStop,

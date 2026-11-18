@@ -10,6 +10,7 @@
 //! - `utils/agentContext.ts` 的 AsyncLocalStorage → [`ui_sink`]（进程级单活跃会话）
 
 use crate::types::{ChatEntry, StreamingChunk};
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock, RwLock};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -277,6 +278,11 @@ pub struct AgentProgressTracker {
     last_tool_desc: Option<String>,
     /// tool_call_id → (tool_name, arguments)，用于结果到达时还原摘要
     pending: std::collections::HashMap<String, (String, String)>,
+    /// 已接收的开始/结束事件。直接 chunk 与 AgentEvent 是两条传输路径，
+    /// 同一工具可能从两条路径各抵达一次；按调用 ID 做幂等，避免子代理
+    /// 的进度列表把一个实际调用显示成两次。
+    started_ids: HashSet<String>,
+    finished_ids: HashSet<String>,
     /// 全部子条目（用于最终 SubAgentResult.entries）
     entries: Vec<ChatEntry>,
 }
@@ -292,6 +298,8 @@ impl AgentProgressTracker {
             trailing_repl: 0,
             last_tool_desc: None,
             pending: std::collections::HashMap::new(),
+            started_ids: HashSet::new(),
+            finished_ids: HashSet::new(),
             entries: Vec::new(),
         }
     }
@@ -335,6 +343,11 @@ impl AgentProgressTracker {
 
     /// 记录一次工具调用开始
     pub fn on_tool_started(&mut self, tool_call: &crate::types::StarToolCall) {
+        // 工具事件同时经过 direct chunk 和 AgentEvent 两条路径；同一 ID
+        // 的第二次开始通知只是传输层重复，不应再创建一条活动。
+        if !self.started_ids.insert(tool_call.id.clone()) {
+            return;
+        }
         let name = tool_call.function.name.clone();
         let args = tool_call.function.arguments.clone();
         self.last_tool_desc = Some(describe_tool_use(&name, &args));
@@ -351,7 +364,11 @@ impl AgentProgressTracker {
         tool_call: &crate::types::StarToolCall,
         result: &crate::types::ToolResult,
     ) {
-        // 与参考实现一致：统计口径是 tool_result
+        // 与参考实现一致：统计口径是 tool_result。direct chunk 和 AgentEvent
+        // 都可能送到这里；按 ID 幂等，防止重复计数和重复结果行。
+        if !self.finished_ids.insert(tool_call.id.clone()) {
+            return;
+        }
         self.tool_use_count = self.tool_use_count.saturating_add(1);
 
         let (name, args) = self.pending.remove(&tool_call.id).unwrap_or_else(|| {
@@ -447,6 +464,35 @@ mod tests {
             user_facing_tool_name("mcp__exa__web_search"),
             "exa:web_search"
         );
+    }
+
+    #[test]
+    fn duplicate_transport_events_are_idempotent_by_tool_call_id() {
+        let mut t = AgentProgressTracker::new(None);
+        let call = crate::types::StarToolCall {
+            id: "same-call".to_string(),
+            call_type: "function".to_string(),
+            function: crate::types::StarToolCallFunction {
+                name: "Read".to_string(),
+                arguments: r#"{"file_path":"src/lib.rs"}"#.to_string(),
+            },
+        };
+        let result = crate::types::ToolResult {
+            success: true,
+            output: Some("ok".to_string()),
+            error: None,
+            data: None,
+            llm_content: None,
+        };
+
+        // direct StreamingChunk 与 AgentEvent 各回调一次，但实际只有一次工具调用。
+        t.on_tool_started(&call);
+        t.on_tool_started(&call);
+        t.on_tool_finished(&call, &result);
+        t.on_tool_finished(&call, &result);
+
+        assert_eq!(t.tool_use_count(), 1);
+        assert_eq!(t.entries.len(), 2, "同一调用只能有一对开始/结果条目");
     }
 
     #[test]

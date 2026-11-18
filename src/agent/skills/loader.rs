@@ -332,7 +332,9 @@ impl SkillLoader {
 
                     match key.as_str() {
                         "allowed-tools" | "allowed_tools" => meta.allowed_tools = items,
-                        "disallowed-tools" | "disallowed_tools" => meta.disallowed_tools = items,
+                        "disallowed-tools" | "disallowed_tools" | "disallowedTools" => {
+                            meta.disallowed_tools = items
+                        }
                         "paths" => meta.paths = items,
                         "tools" | "tool" => meta.tools = Some(items),
                         "arguments" => {
@@ -382,7 +384,10 @@ impl SkillLoader {
                         // Inline array like: allowed-tools: Bash, Read, Write
                         meta.allowed_tools = parse_inline_csv(&cleaned);
                     }
-                    "disallowed-tools" | "disallowed_tools" => {
+                    "tools" | "tool" => {
+                        meta.tools = Some(parse_inline_csv(&cleaned));
+                    }
+                    "disallowed-tools" | "disallowed_tools" | "disallowedTools" => {
                         meta.disallowed_tools = parse_inline_csv(&cleaned);
                     }
                     "paths" => {
@@ -703,67 +708,79 @@ fn parse_custom_hooks(
     let mut hooks = Vec::new();
     while *index < lines.len() {
         let line = lines[*index];
-        if !line.starts_with(' ') && !line.starts_with('\t') {
-            break;
-        }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             *index += 1;
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("- ") {
-            let mut fields = HashMap::new();
-            if let Some((key, value)) = rest.split_once(':') {
+        let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+        if indent == 0 {
+            break;
+        }
+        let Some(rest) = trimmed.strip_prefix("- ") else {
+            *index += 1;
+            continue;
+        };
+        let item_indent = indent;
+        let mut fields = HashMap::new();
+        if let Some((key, value)) = rest.split_once(':') {
+            fields.insert(
+                key.trim().to_owned(),
+                value.trim().trim_matches(['"', '\'']).to_owned(),
+            );
+        }
+        *index += 1;
+        // 只有比列表项更深的缩进才属于当前 hook；相同缩进的下一项
+        // 必须留给外层循环，否则两个 hook 会被合并成一个。
+        while *index < lines.len() {
+            let nested = lines[*index];
+            let nested_trimmed = nested.trim();
+            if nested_trimmed.is_empty() {
+                *index += 1;
+                continue;
+            }
+            let nested_indent = nested.len() - nested.trim_start_matches([' ', '\t']).len();
+            if nested_indent <= item_indent {
+                break;
+            }
+            if let Some((key, value)) = nested_trimmed.split_once(':') {
                 fields.insert(
                     key.trim().to_owned(),
                     value.trim().trim_matches(['"', '\'']).to_owned(),
                 );
             }
             *index += 1;
-            while *index < lines.len() {
-                let nested = lines[*index];
-                if !nested.starts_with(' ') && !nested.starts_with('\t') {
-                    break;
-                }
-                let nested = nested.trim();
-                if let Some((key, value)) = nested.split_once(':') {
-                    fields.insert(
-                        key.trim().to_owned(),
-                        value.trim().trim_matches(['"', '\'']).to_owned(),
-                    );
-                }
-                *index += 1;
-            }
-            let event = fields
-                .get("event")
-                .and_then(|value| ManagedHookEvent::parse(value));
-            let command = fields
-                .get("command")
-                .filter(|value| !value.trim().is_empty());
-            if let (Some(event), Some(command)) = (event, command) {
-                hooks.push(ManagedHook {
-                    name: format!("definition:{}", event.as_str()),
-                    event,
-                    command: command.clone(),
-                    timeout_secs: fields
-                        .get("timeout")
-                        .and_then(|value| value.parse().ok())
-                        .unwrap_or(600),
-                    blocking: fields
-                        .get("blocking")
-                        .is_some_and(|value| matches!(value.as_str(), "true" | "yes" | "1")),
-                    enabled: true,
-                    created_at: 0,
-                    updated_at: 0,
-                    source: Some("custom-agent-definition".into()),
-                    working_dir: None,
-                    matcher: fields.get("matcher").cloned(),
-                    once: false,
-                    status_message: fields.get("statusMessage").cloned(),
-                });
-            }
-        } else {
-            *index += 1;
+        }
+        let event = fields
+            .get("event")
+            .and_then(|value| ManagedHookEvent::parse(value));
+        let command = fields
+            .get("command")
+            .filter(|value| !value.trim().is_empty());
+        if let (Some(event), Some(command)) = (event, command) {
+            hooks.push(ManagedHook {
+                name: format!("definition:{}", event.as_str()),
+                event,
+                command: command.clone(),
+                timeout_secs: fields
+                    .get("timeout")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(600),
+                blocking: fields
+                    .get("blocking")
+                    .is_some_and(|value| matches!(value.as_str(), "true" | "yes" | "1")),
+                enabled: true,
+                created_at: 0,
+                updated_at: 0,
+                source: Some("custom-agent-definition".into()),
+                working_dir: None,
+                matcher: fields.get("matcher").cloned(),
+                once: false,
+                status_message: fields
+                    .get("statusMessage")
+                    .or_else(|| fields.get("status-message"))
+                    .cloned(),
+            });
         }
     }
     hooks
@@ -943,6 +960,9 @@ mod tests {
         let meta = meta_of("disallowed-tools: AskUserQuestion");
         assert_eq!(meta.disallowed_tools, vec!["AskUserQuestion"]);
 
+        let meta = meta_of("disallowedTools: Bash Read");
+        assert_eq!(meta.disallowed_tools, vec!["Bash", "Read"]);
+
         let meta = meta_of("disallowed-tools:\n  - AskUserQuestion\n  - WebFetch");
         assert_eq!(meta.disallowed_tools, vec!["AskUserQuestion", "WebFetch"]);
     }
@@ -979,19 +999,24 @@ mod tests {
 
     #[test]
     fn custom_agent_fields_and_hooks_are_parsed_without_shell_execution() {
-        let meta = meta_of("tools: Read, Grep\nmemory: project\nmaxTurns: 9\nhooks:\n  - event: PreToolUse\n    command: printf ok\n    blocking: true\n");
+        let meta = meta_of("tools: Read, Grep\ndisallowedTools: Bash\nmemory: project\nmaxTurns: 9\nhooks:\n  - event: PreToolUse\n    command: printf ok\n    blocking: true\n  - event: PostToolUse\n    command: printf done\n");
         assert_eq!(
             meta.tools.as_deref(),
             Some(["Read".to_string(), "Grep".to_string()].as_slice())
         );
+        assert_eq!(meta.disallowed_tools, vec!["Bash"]);
         assert_eq!(meta.memory.as_deref(), Some("project"));
         assert_eq!(meta.max_turns, Some(9));
-        assert_eq!(meta.hooks.len(), 1);
+        assert_eq!(meta.hooks.len(), 2);
         assert_eq!(
             meta.hooks[0].event,
             crate::core::hooks::store::ManagedHookEvent::PreToolUse
         );
         assert!(meta.hooks[0].blocking);
+        assert_eq!(
+            meta.hooks[1].event,
+            crate::core::hooks::store::ManagedHookEvent::PostToolUse
+        );
     }
 
     /// 官方 SKILL.md frontmatter 的 `license` 字段（纯元数据）。

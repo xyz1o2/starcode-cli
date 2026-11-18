@@ -305,6 +305,70 @@ impl AgentWorktree {
     }
 }
 
+#[cfg(test)]
+mod agent_worktree_tests {
+    use super::AgentWorktree;
+    use std::process::Command;
+
+    fn git(root: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .expect("git must be available for worktree regression");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_worktree_is_removed_but_dirty_and_committed_results_are_retained() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        git(repository.path(), &["init", "-q"]);
+        git(
+            repository.path(),
+            &["config", "user.email", "starcode-tests@example.invalid"],
+        );
+        git(
+            repository.path(),
+            &["config", "user.name", "StarCode Tests"],
+        );
+        std::fs::write(repository.path().join("tracked.txt"), "base").unwrap();
+        git(repository.path(), &["add", "tracked.txt"]);
+        git(repository.path(), &["commit", "-qm", "initial"]);
+
+        let clean = AgentWorktree::create(repository.path()).await.unwrap();
+        let clean_path = clean.path.clone();
+        assert_eq!(clean.finish().await.unwrap(), true);
+        assert!(!clean_path.exists(), "clean worktree should be removed");
+
+        let dirty = AgentWorktree::create(repository.path()).await.unwrap();
+        let dirty_path = dirty.path.clone();
+        std::fs::write(dirty_path.join("new.txt"), "keep").unwrap();
+        assert_eq!(dirty.finish().await.unwrap(), false);
+        assert!(dirty_path.exists(), "dirty worktree must remain available");
+        git(repository.path(), &["worktree", "remove", "-f", dirty_path.to_str().unwrap()]);
+
+        let committed = AgentWorktree::create(repository.path()).await.unwrap();
+        let committed_path = committed.path.clone();
+        std::fs::write(committed_path.join("tracked.txt"), "changed").unwrap();
+        git(&committed_path, &["add", "tracked.txt"]);
+        git(&committed_path, &["commit", "-qm", "agent result"]);
+        assert_eq!(committed.finish().await.unwrap(), false);
+        assert!(
+            committed_path.exists(),
+            "committed result must remain available"
+        );
+        git(
+            repository.path(),
+            &["worktree", "remove", "-f", committed_path.to_str().unwrap()],
+        );
+    }
+}
+
 /// Worktree 安全防护
 pub struct WorktreeSafety {
     /// 禁止在主 worktree 中直接修改的路径

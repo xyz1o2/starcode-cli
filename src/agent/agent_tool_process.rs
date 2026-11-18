@@ -472,16 +472,27 @@ impl Agent {
         let mut runnable_tool_calls: Vec<StarToolCall> = Vec::new();
         let mut lens_grep_nudged = false;
         for tool_call in tool_calls {
-            let pre_hook_result = if self.config.subagent_hooks.is_empty() {
-                hooks::run_pre_tool_hooks(user_input, tool_call).await
-            } else {
-                hooks::run_defined_pre_tool_hooks(
-                    &self.config.target_dir,
-                    &self.config.subagent_hooks,
-                    user_input,
-                    tool_call,
-                )
-                .await
+            // 定义级 hooks 是额外约束，不替换项目/用户级 hooks。先跑
+            // 全局安全 hook，再跑代理定义内的局部 hook；任一 blocking
+            // hook 拒绝都阻止本次工具调用。
+            let pre_hook_result = match hooks::run_pre_tool_hooks_at(
+                self.config.agent_working_dir(),
+                user_input,
+                tool_call,
+            )
+            .await
+            {
+                Err(error) => Err(error),
+                Ok(()) if self.config.subagent_hooks.is_empty() => Ok(()),
+                Ok(()) => {
+                    hooks::run_defined_pre_tool_hooks(
+                        self.config.agent_working_dir(),
+                        &self.config.subagent_hooks,
+                        user_input,
+                        tool_call,
+                    )
+                    .await
+                }
             };
             match pre_hook_result {
                 Ok(()) => {
@@ -756,11 +767,16 @@ impl Agent {
             verification_required,
             skip_verification,
         );
-        if self.config.subagent_hooks.is_empty() {
-            hooks::run_post_tool_hooks(user_input, tool_call, &result).await;
-        } else {
+        hooks::run_post_tool_hooks_at(
+            self.config.agent_working_dir(),
+            user_input,
+            tool_call,
+            &result,
+        )
+        .await;
+        if !self.config.subagent_hooks.is_empty() {
             hooks::run_defined_post_tool_hooks(
-                &self.config.target_dir,
+                self.config.agent_working_dir(),
                 &self.config.subagent_hooks,
                 user_input,
                 tool_call,

@@ -388,11 +388,21 @@ pub(crate) async fn run_pre_tool_hooks(
     user_input: &str,
     tool_call: &StarToolCall,
 ) -> Result<(), String> {
-    let Some(cwd_owned) = cached_project_root() else {
+    let Some(cwd) = cached_project_root() else {
         return Ok(());
     };
-    let cwd = &cwd_owned;
+    run_pre_tool_hooks_at(&cwd, user_input, tool_call).await
+}
 
+/// 在明确的会话目录执行全局 PreToolUse hooks。
+///
+/// 子代理不能使用进程级 cwd：worktree 子代理的安全 hook 必须从它自己的
+/// 项目根加载，否则会把父项目 hooks 错当成当前策略。
+pub(crate) async fn run_pre_tool_hooks_at(
+    cwd: &std::path::Path,
+    user_input: &str,
+    tool_call: &StarToolCall,
+) -> Result<(), String> {
     if !hooks_maybe_enabled_for_event(cwd, crate::core::hooks::store::ManagedHookEvent::PreToolUse)
         .await
     {
@@ -456,11 +466,20 @@ pub(crate) async fn run_post_tool_hooks(
     tool_call: &StarToolCall,
     result: &ToolResult,
 ) {
-    let Some(cwd_owned) = cached_project_root() else {
+    let Some(cwd) = cached_project_root() else {
         return;
     };
-    let cwd = &cwd_owned;
+    run_post_tool_hooks_at(&cwd, user_input, tool_call, result).await;
+}
 
+/// 在明确的会话目录执行全局 PostToolUse hooks；与 `run_pre_tool_hooks_at`
+/// 配对，保证 worktree 子代理不回到父项目查 hooks。
+pub(crate) async fn run_post_tool_hooks_at(
+    cwd: &std::path::Path,
+    user_input: &str,
+    tool_call: &StarToolCall,
+    result: &ToolResult,
+) {
     if !hooks_maybe_enabled_for_event(
         cwd,
         crate::core::hooks::store::ManagedHookEvent::PostToolUse,
