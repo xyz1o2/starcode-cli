@@ -1,5 +1,7 @@
 pub(crate) async fn run_git(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
-    let output = tokio::process::Command::new("git")
+    let mut command = tokio::process::Command::new("git");
+    crate::agent::worktree::clear_git_repository_env(&mut command);
+    let output = command
         .current_dir(dir)
         .args(args)
         .output()

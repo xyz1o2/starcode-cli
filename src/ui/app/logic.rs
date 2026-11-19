@@ -968,6 +968,42 @@ mod steering_tests {
     use crate::types::ChatEntryType;
     use crate::ui::state::ChatState;
 
+    /// 审批等待期间的补充需求仍进入当前回合，不会被当成批准或排到下一回合。
+    #[tokio::test]
+    async fn steering_during_approval_keeps_the_pending_decision() {
+        let mut state = ChatState::test_fixture();
+        state.chat_history.clear();
+        state.is_processing = true;
+        state.is_streaming = true;
+        state.active_message_id = Some(7);
+        state.next_message_id = 8;
+        state.is_awaiting_confirmation = true;
+        state.pending_confirmation_entry_idx = Some(0);
+        state.pending_tool_call_id = Some("approval-7".into());
+        state.chat_history.push(crate::types::ChatEntry::new(
+            ChatEntryType::ToolConfirmation,
+            String::new(),
+        ));
+        state.stream_targets.insert(7, state.chat_history.len());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        // 命中历史去重，避免此回归写入开发者的全局命令历史。
+        state
+            .command_history
+            .push_front("只分析，不要改文件".into());
+        super::enqueue_user_message(&mut state, "只分析，不要改文件".into(), &tx)
+            .await
+            .expect("steering should succeed");
+        assert!(matches!(rx.try_recv().expect("message sent"),
+            crate::runtime::messages::AgentRequest::SendMessage { message_id: 8, message }
+                if message.contains("只分析，不要改文件")));
+        assert!(rx.try_recv().is_err(), "steering must not send approval");
+        assert!(state.is_awaiting_confirmation);
+        assert_eq!(state.pending_tool_call_id.as_deref(), Some("approval-7"));
+        assert!(state.pending_user_messages.is_empty());
+        assert_eq!(state.chat_history[1].entry_type, ChatEntryType::User);
+        assert_eq!(state.stream_targets.get(&7), Some(&2));
+    }
+
     /// 运行中插入的需求会把助手正在写的那段输出切成两半：前半在用户消息之前，
     /// 后半在之后。**代码块不能被劈开** —— 前半的 ``` 没闭合时，渲染会把后面
     /// 整段（含用户那条消息）当成代码，消息就"插到 markdown 里面"了。

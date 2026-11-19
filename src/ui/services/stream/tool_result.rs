@@ -166,13 +166,9 @@ pub(super) fn handle_tool_result_message(
     }
     let elapsed = elapsed_ms.map(|ms| format_elapsed_for_tool(ms));
     let elapsed_for_status = elapsed.clone();
-    let raw_out = if tool_result.success {
-        tool_result.output.as_deref().unwrap_or("")
-    } else {
-        tool_result.error.as_deref().unwrap_or("")
-    };
-    let saved_path = if should_save_tool_output(raw_out) {
-        save_tool_output(&tool_call, raw_out)
+    let raw_out = tool_result.display_output();
+    let saved_path = if should_save_tool_output(&raw_out) {
+        save_tool_output(&tool_call, &raw_out)
     } else {
         None
     };
@@ -187,13 +183,17 @@ pub(super) fn handle_tool_result_message(
     // streaming 标记清掉。否则该工具行的 ● 圆点会因收不到结束事件而永远闪烁。
     for (idx, e) in state.chat_history.iter_mut().enumerate() {
         if e.entry_type == ChatEntryType::ToolCall
-            && e.is_streaming == Some(true)
             && e.tool_call
                 .as_ref()
                 .map(|tc| tc.id == tool_call.id)
                 .unwrap_or(false)
         {
             e.is_streaming = Some(false);
+            e.status = Some(if tool_result.success {
+                EntryStatus::Success
+            } else {
+                EntryStatus::SoftError
+            });
             state.rendered_cache.remove(&idx);
             state.virtual_list.mark_dirty(idx);
         }

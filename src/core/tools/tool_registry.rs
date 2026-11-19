@@ -23,6 +23,26 @@ impl ToolRegistry {
         }
     }
 
+    /// 子代理继承已有工具实例，但注册映射与 schema 缓存独立。
+    /// 后续按子配置重装 Agent/Workflow 等工具时，不能覆盖父或兄弟的 runner。
+    pub(crate) fn fork_for_agent(&self, config: Arc<crate::core::config::Config>) -> Self {
+        let tools = self
+            .all_known_tools
+            .read()
+            .expect("tool registry lock poisoned");
+        let plugin_names = self
+            .plugin_tool_names
+            .read()
+            .expect("plugin tool names lock poisoned");
+        Self {
+            all_known_tools: RwLock::new(tools.clone()),
+            plugin_tool_names: RwLock::new(plugin_names.clone()),
+            generation: AtomicU64::new(self.generation()),
+            cached_function_declarations: RwLock::new(None),
+            config,
+        }
+    }
+
     pub fn register_tool(&self, tool: Arc<dyn BaseDeclarativeTool>) {
         let mut map = self.all_known_tools.write().unwrap();
         let name = tool.name().to_string();

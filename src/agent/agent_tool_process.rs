@@ -537,6 +537,7 @@ impl Agent {
                         llm_content: None,
                     };
                     reflection::maybe_write_reflection_memory(
+                        self.config.agent_working_dir(),
                         user_input,
                         tool_call,
                         &blocked_result,
@@ -795,7 +796,13 @@ impl Agent {
                 .unwrap_or_else(|| "tool failed".to_string());
             hooks::run_post_tool_failure_hooks(tool_call, &reason).await;
         }
-        reflection::maybe_write_reflection_memory(user_input, tool_call, &result).await;
+        reflection::maybe_write_reflection_memory(
+            self.config.agent_working_dir(),
+            user_input,
+            tool_call,
+            &result,
+        )
+        .await;
         if let Some(instruction) =
             record_tool_outcome(loop_state, &tool_call.function.name, &result)
         {
@@ -834,11 +841,17 @@ impl Agent {
         let Some(file_path) = extract_file_path_from_tool_call(tool_call) else {
             return;
         };
+        let file_path = crate::core::utils::paths::resolve_tool_path(
+            self.config.agent_working_dir(),
+            &file_path,
+        );
         let Ok(content) = std::fs::read_to_string(&file_path) else {
             return;
         };
-        let verify_result =
-            crate::core::tools::verify_edit::verify_edit_syntax(&file_path, &content);
+        let verify_result = crate::core::tools::verify_edit::verify_edit_syntax(
+            &file_path.to_string_lossy(),
+            &content,
+        );
         if verify_result.syntax_ok {
             return;
         }
@@ -924,7 +937,13 @@ impl Agent {
                     skip_verification,
                 );
                 hooks::run_post_tool_hooks(user_input, &tool_call, &result).await;
-                reflection::maybe_write_reflection_memory(user_input, &tool_call, &result).await;
+                reflection::maybe_write_reflection_memory(
+                    self.config.agent_working_dir(),
+                    user_input,
+                    &tool_call,
+                    &result,
+                )
+                .await;
                 messages.push(StarMessage::tool(
                     tool_call.id.clone(),
                     // 同 `consume_tool_result`：`llm_content` 才是给模型的那份正文。
@@ -960,7 +979,13 @@ impl Agent {
                     data: None,
                     llm_content: None,
                 };
-                reflection::maybe_write_reflection_memory(user_input, &tool_call, &blocked).await;
+                reflection::maybe_write_reflection_memory(
+                    self.config.agent_working_dir(),
+                    user_input,
+                    &tool_call,
+                    &blocked,
+                )
+                .await;
                 self.emit_event(crate::agent::messaging::AgentEvent::ToolFinished {
                     tool_call: tool_call.clone(),
                     result: blocked.clone(),

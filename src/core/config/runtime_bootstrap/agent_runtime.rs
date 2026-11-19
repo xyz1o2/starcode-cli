@@ -14,9 +14,9 @@ pub(super) fn register_agent_runtime_tools(
 ) {
     register_skill_tool(client, config, tool_registry, message_bus);
     register_agent_editing_tools(tool_registry, config, message_bus, global_state, client);
-    register_agent_observability_tools(tool_registry, client);
+    register_agent_observability_tools(tool_registry, config, client);
     register_agent_execution_tools(tool_registry, config, message_bus, client);
-    register_tool_search(tool_registry);
+    register_tool_search(tool_registry, config);
 }
 
 fn register_agent_editing_tools(
@@ -27,7 +27,10 @@ fn register_agent_editing_tools(
     client: &StarClient,
 ) {
     use crate::tools::editor::smart_edit::SmartEditTool;
-    tool_registry.register_tool(Arc::new(SmartEditTool::new(client.clone())));
+    tool_registry.register_tool(Arc::new(SmartEditTool::new_with_working_dir(
+        client.clone(),
+        config.agent_working_dir().to_path_buf(),
+    )));
 
     use crate::core::tools::multi_edit::MultiEditTool;
     tool_registry.register_tool(Arc::new(MultiEditTool::new(
@@ -57,7 +60,11 @@ fn register_agent_editing_tools(
     ensure_fallback_core_tools(config, tool_registry, message_bus, global_state);
 }
 
-fn register_agent_observability_tools(tool_registry: &Arc<ToolRegistry>, client: &StarClient) {
+fn register_agent_observability_tools(
+    tool_registry: &Arc<ToolRegistry>,
+    config: &Arc<Config>,
+    client: &StarClient,
+) {
     use crate::core::tools::web_fetch::WebFetchTool;
     // 带客户端注册：WebFetch 的 `prompt` 参数靠它把整页压成一个答案，主上下文里就不用
     // 塞几万字符的网页了（对标 Claude Code 的 WebFetch）
@@ -67,13 +74,19 @@ fn register_agent_observability_tools(tool_registry: &Arc<ToolRegistry>, client:
     // 此处不得再无条件注册，否则 core_tools 白名单形同虚设。
 
     use crate::tools::git_insight::GitInsightTool;
-    tool_registry.register_tool(Arc::new(GitInsightTool::new()));
+    tool_registry.register_tool(Arc::new(GitInsightTool::with_working_dir(
+        config.agent_working_dir().to_path_buf(),
+    )));
 
     use crate::tools::github_pr_comments::GhPrCommentsTool;
-    tool_registry.register_tool(Arc::new(GhPrCommentsTool::new()));
+    tool_registry.register_tool(Arc::new(GhPrCommentsTool::with_base_dir(
+        config.agent_working_dir().to_path_buf(),
+    )));
 
     use crate::tools::memory::MemoryTool;
-    tool_registry.register_tool(Arc::new(MemoryTool::new()));
+    tool_registry.register_tool(Arc::new(MemoryTool::with_base_dir(
+        config.agent_working_dir().to_path_buf(),
+    )));
 }
 
 fn register_agent_execution_tools(
@@ -152,10 +165,14 @@ fn register_agent_execution_tools(
     use crate::core::tools::codebase_search::CodebaseSearchTool;
     tool_registry.register_tool(Arc::new(CodebaseSearchTool::new(config.clone())));
     tool_registry.register_tool(Arc::new(
-        crate::core::tools::code_graph_tool::CodeGraphTool::new(),
+        crate::core::tools::code_graph_tool::CodeGraphTool::with_base_dir(
+            config.agent_working_dir().to_path_buf(),
+        ),
     ));
     tool_registry.register_tool(Arc::new(
-        crate::core::tools::repo_map_tool::RepoMapTool::new(),
+        crate::core::tools::repo_map_tool::RepoMapTool::with_base_dir(
+            config.agent_working_dir().to_path_buf(),
+        ),
     ));
 
     use crate::core::tools::shell::ShellTool;
@@ -256,9 +273,12 @@ fn register_agent_execution_tools(
     tool_registry.register_tool(Arc::new(McpReadResourceTool::new()));
 }
 
-fn register_tool_search(tool_registry: &Arc<ToolRegistry>) {
+fn register_tool_search(tool_registry: &Arc<ToolRegistry>, config: &Arc<Config>) {
     use crate::core::tools::tool_search::ToolSearchTool;
-    tool_registry.register_tool(Arc::new(ToolSearchTool::new(tool_registry.clone())));
+    tool_registry.register_tool(Arc::new(ToolSearchTool::with_config(
+        tool_registry.clone(),
+        config.clone(),
+    )));
 }
 
 fn register_skill_tool(
@@ -400,7 +420,9 @@ fn ensure_fallback_core_tools(
             "ListDir (ListDirTool) missing, attempting manual registration.",
         );
         use crate::core::tools::ls::ListDirTool;
-        tool_registry.register_tool(Arc::new(ListDirTool::new()));
+        tool_registry.register_tool(Arc::new(ListDirTool::with_base_dir(
+            config.agent_working_dir().to_path_buf(),
+        )));
     }
     if !tool_names.iter().any(|name| name == "Glob") {
         crate::utils::logging::append_debug_log_line(

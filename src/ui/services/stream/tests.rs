@@ -33,6 +33,41 @@ async fn text_deltas_clear_completed_analysis_and_preserve_repeated_text() {
 }
 
 #[tokio::test]
+async fn tool_only_response_clears_completed_analysis() {
+    let mut state = ChatState::test_fixture();
+    state.chat_history.clear();
+    state
+        .chat_history
+        .push(ChatEntry::assistant("").with_streaming(true));
+    state.stream_targets.insert(42, 0);
+    state.current_status_line = Some("Analyzing task complexity...".into());
+    let (tx, _rx) = mpsc::channel(4);
+    let calls = StreamMessage::ToolCalls {
+        message_id: 42,
+        tool_calls: vec![agent_tool_call()],
+    };
+
+    handle_stream_update(&mut state, calls.clone(), &tx)
+        .await
+        .unwrap();
+    assert!(!state
+        .current_status_line
+        .as_deref()
+        .is_some_and(|status| status.contains("Analyzing task complexity")));
+    assert!(state
+        .chat_history
+        .iter()
+        .any(|entry| entry.entry_type == ChatEntryType::ToolCall));
+
+    state.current_status_line = Some("Waiting for approval".into());
+    handle_stream_update(&mut state, calls, &tx).await.unwrap();
+    assert_eq!(
+        state.current_status_line.as_deref(),
+        Some("Waiting for approval")
+    );
+}
+
+#[tokio::test]
 async fn withdrawal_waits_for_runtime_and_preserves_draft_and_history() {
     let mut state = ChatState::test_fixture();
     state.chat_history.clear();
@@ -1930,6 +1965,86 @@ async fn a_tool_result_removes_its_queued_confirmation() {
         Some("corr-2"),
         "当前这张不受影响"
     );
+}
+
+/// 截图回归：审批不是成功，失败输出也不能只剩退出码。
+#[tokio::test]
+async fn approved_bash_failure_preserves_output_and_failure_marker() {
+    let mut state = ChatState::test_fixture();
+    state.chat_history.clear();
+    let (tx, _rx) = mpsc::channel(4);
+    let call = StarToolCall {
+        id: "bash-failure".into(),
+        call_type: "function".into(),
+        function: crate::types::StarToolCallFunction {
+            name: "Bash".into(),
+            arguments: r#"{"command":"git status --porcelain && grep missing changes.txt"}"#.into(),
+        },
+    };
+    state
+        .chat_history
+        .push(ChatEntry::tool_call("", call.clone()).with_streaming(true));
+    handle_stream_update(
+        &mut state,
+        StreamMessage::ToolConfirmationRequest {
+            message_id: 7,
+            tool_call_id: "approval-7".into(),
+            originating_tool_call_id: Some(call.id.clone()),
+            confirmation: shell_confirmation("git status --porcelain && grep missing changes.txt"),
+        },
+        &tx,
+    )
+    .await
+    .expect("confirmation should reach UI");
+    state.chat_history[1]
+        .confirmation
+        .as_mut()
+        .expect("approval card")
+        .outcome = Some("Allowed (once)".into());
+    state.clear_pending_confirmation();
+    let result = ToolResult {
+        success: false,
+        output: Some(" M src/main.rs\nstderr: no matching entry".into()),
+        error: Some("Exit code: 1".into()),
+        data: None,
+        llm_content: None,
+    };
+    handle_tool_result_message(&mut state, 7, call.clone(), result.clone());
+    handle_tool_result_message(&mut state, 7, call.clone(), result);
+    state.stream_targets.insert(7, state.chat_history.len());
+    handle_stream_update(
+        &mut state,
+        StreamMessage::ToolCalls {
+            message_id: 7,
+            tool_calls: vec![call],
+        },
+        &tx,
+    )
+    .await
+    .expect("late start event should be harmless");
+    assert_eq!(state.chat_history[0].is_streaming, Some(false));
+    assert_eq!(state.chat_history[0].status, Some(EntryStatus::SoftError));
+    assert_eq!(
+        state.chat_history.len(),
+        3,
+        "duplicate transport results stay idempotent"
+    );
+    let lines: Vec<_> = (0..state.chat_history.len())
+        .flat_map(|idx| crate::ui::components::chat_history::render_entry_lines(&state, idx, 92))
+        .collect();
+    let text: String = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(text.contains("Allowed once"), "{text}");
+    assert!(
+        !text.contains('✓'),
+        "approval must not look like execution success: {text}"
+    );
+    assert!(text.contains("src/main.rs"), "{text}");
+    assert!(text.contains("no matching entry"), "{text}");
+    crate::assert_lines_render!("approved_bash_failure", 92, 8, &lines);
 }
 
 fn shell_confirmation(command: &str) -> crate::types::ToolConfirmation {

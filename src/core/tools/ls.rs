@@ -26,7 +26,9 @@ use std::path::{Path, PathBuf};
 const MAX_ENTRIES: usize = 1000;
 
 #[derive(Clone)]
-pub struct ListDirTool;
+pub struct ListDirTool {
+    base_dir: PathBuf,
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ListDirParams {
@@ -50,6 +52,7 @@ pub struct DirEntry {
 pub struct ListDirToolInvocation {
     tool: ListDirTool,
     params: ListDirParams,
+    directory: PathBuf,
 }
 
 impl ToolInvocation for ListDirToolInvocation {
@@ -59,7 +62,7 @@ impl ToolInvocation for ListDirToolInvocation {
 
     fn tool_locations(&self) -> Vec<ToolLocation> {
         vec![ToolLocation {
-            path: normalize_cross_platform_path(&self.params.directory),
+            path: self.tool.resolve_normalized_path(&self.directory),
             location_type: crate::core::tools::tools::LocationType::Read,
         }]
     }
@@ -76,7 +79,7 @@ impl ToolInvocation for ListDirToolInvocation {
         >,
     > {
         let tool = self.tool.clone();
-        let dir = self.params.directory.clone();
+        let dir = self.directory.clone();
         let recursive = self.params.recursive;
         let max_depth = self.params.max_depth;
         let filter = self.params.filter_ext.clone();
@@ -147,9 +150,11 @@ impl BaseDeclarativeTool for ListDirTool {
         params: Value,
     ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
         let params: ListDirParams = serde_json::from_value(params)?;
+        let directory = self.resolve_path(&params.directory);
         Ok(Box::new(ListDirToolInvocation {
             tool: self.clone(),
             params,
+            directory,
         }))
     }
 
@@ -160,12 +165,34 @@ impl BaseDeclarativeTool for ListDirTool {
 
 impl ListDirTool {
     pub fn new() -> Self {
-        Self
+        Self::with_base_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    pub fn with_base_dir(base_dir: PathBuf) -> Self {
+        Self { base_dir }
+    }
+
+    fn resolve_path(&self, directory: &str) -> PathBuf {
+        let path = normalize_cross_platform_path(directory);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.base_dir.join(path)
+        };
+        self.resolve_normalized_path(&path)
+    }
+
+    fn resolve_normalized_path(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            crate::core::utils::paths::normalize_path(path)
+        } else {
+            crate::core::utils::paths::normalize_path(&self.base_dir.join(path))
+        }
     }
 
     async fn list(
         &self,
-        directory: &str,
+        directory: &Path,
         recursive: Option<bool>,
         max_depth: Option<usize>,
         filter_ext: Option<Vec<String>>,
@@ -177,7 +204,7 @@ impl ListDirTool {
         // `.env.example` 这类文件本来就是要看的。
         let include_hidden = include_hidden.unwrap_or(true);
 
-        let dir_path = normalize_cross_platform_path(directory);
+        let dir_path = directory.to_path_buf();
         let display_dir = dir_path.to_string_lossy().to_string();
 
         // 检查是否为目录
@@ -387,5 +414,44 @@ impl ListDirTool {
         }
 
         output
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn relative_directory_uses_the_bound_base_dir() {
+        let root = tempfile::tempdir().expect("create temporary root");
+        let parent = root.path().join("parent");
+        let child = root.path().join("child");
+        std::fs::create_dir_all(parent.join("same")).expect("create parent directory");
+        std::fs::create_dir_all(child.join("same")).expect("create child directory");
+        std::fs::write(parent.join("same").join("same.txt"), b"parent data")
+            .expect("write parent file");
+        std::fs::write(child.join("same").join("same.txt"), b"child").expect("write child file");
+
+        let parent_listing = parent.join("same");
+        let tool = ListDirTool::with_base_dir(child);
+        let invocation = tool
+            .create_invocation(json!({
+                "directory": "same",
+                "recursive": false,
+            }))
+            .expect("create LS invocation");
+        let result = invocation
+            .execute(None, None)
+            .await
+            .expect("execute LS invocation");
+
+        assert!(result.error.is_none());
+        assert!(result.output.contains("same.txt"));
+        assert!(result.output.contains("5 B"));
+        assert!(!result.output.contains("11 B"));
+        assert!(!result
+            .output
+            .contains(&parent_listing.to_string_lossy().to_string()));
     }
 }

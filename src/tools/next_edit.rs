@@ -4,14 +4,21 @@ use crate::core::tools::tools::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 #[derive(Clone)]
-pub struct NextEditTool;
+pub struct NextEditTool {
+    base_dir: PathBuf,
+}
 
 impl NextEditTool {
     pub fn new() -> Self {
-        Self
+        Self::with_base_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    pub fn with_base_dir(base_dir: PathBuf) -> Self {
+        Self { base_dir }
     }
 }
 
@@ -24,6 +31,7 @@ pub struct NextEditParams {
 
 pub struct NextEditInvocation {
     params: NextEditParams,
+    base_dir: PathBuf,
 }
 
 impl ToolInvocation for NextEditInvocation {
@@ -51,9 +59,10 @@ impl ToolInvocation for NextEditInvocation {
     > {
         let file_path = self.params.file_path.clone();
         let symbol_name = self.params.symbol_name.clone();
+        let base_dir = self.base_dir.clone();
 
         Box::pin(async move {
-            let result = analyze_impact(&file_path, &symbol_name).await;
+            let result = analyze_impact(&file_path, &symbol_name, &base_dir).await;
 
             match result {
                 Ok(output) => Ok(CoreToolResult {
@@ -122,7 +131,10 @@ impl BaseDeclarativeTool for NextEditTool {
         params: serde_json::Value,
     ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
         let params: NextEditParams = serde_json::from_value(params)?;
-        Ok(Box::new(NextEditInvocation { params }))
+        Ok(Box::new(NextEditInvocation {
+            params,
+            base_dir: self.base_dir.clone(),
+        }))
     }
 
     // 纯分析：rg 找引用 + 读文件，不改任何磁盘状态。
@@ -134,13 +146,15 @@ impl BaseDeclarativeTool for NextEditTool {
 async fn analyze_impact(
     file_path: &str,
     symbol_name: &str,
+    base_dir: &Path,
 ) -> Result<String, Box<dyn std::error::Error>> {
     // 1. First, use ripgrep for fast text search to find potential usages
     // This is much faster than parsing every file
     let output = Command::new("rg")
         .arg("--json")
         .arg(symbol_name)
-        .arg(".") // Search from current directory
+        .arg(".")
+        .current_dir(base_dir)
         .output()
         .await?;
 
@@ -198,7 +212,7 @@ async fn analyze_impact(
         // Context snippet for first match
         if let Some(first_line) = lines.first() {
             // Read file line
-            if let Ok(content) = tokio::fs::read_to_string(&file).await {
+            if let Ok(content) = tokio::fs::read_to_string(base_dir.join(&file)).await {
                 let content_lines: Vec<&str> = content.lines().collect();
                 if let Some(line_content) =
                     content_lines.get((*first_line as usize).saturating_sub(1))
@@ -211,4 +225,46 @@ async fn analyze_impact(
     }
 
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn impact_search_and_snippets_use_the_bound_base_dir() {
+        let root = tempfile::tempdir().expect("create temporary root");
+        let parent = root.path().join("parent");
+        let child = root.path().join("child");
+        std::fs::create_dir_all(&parent).expect("create parent directory");
+        std::fs::create_dir_all(&child).expect("create child directory");
+        std::fs::write(
+            parent.join("same.rs"),
+            "fn shared_symbol() { /* parent context */ }\n",
+        )
+        .expect("write parent source");
+        std::fs::write(
+            child.join("same.rs"),
+            "fn shared_symbol() { /* child context */ }\n",
+        )
+        .expect("write child source");
+
+        let tool = NextEditTool::with_base_dir(PathBuf::from(child));
+        let invocation = tool
+            .create_invocation(json!({
+                "file_path": "same.rs",
+                "symbol_name": "shared_symbol",
+            }))
+            .expect("create NextEdit invocation");
+        let result = invocation
+            .execute(None, None)
+            .await
+            .expect("execute NextEdit invocation");
+
+        assert!(result.error.is_none());
+        assert!(result.output.contains("child context"));
+        assert!(!result.output.contains("parent context"));
+    }
 }

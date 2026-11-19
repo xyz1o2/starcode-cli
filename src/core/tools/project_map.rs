@@ -168,12 +168,17 @@ const MAX_PROJECT_MAP_CACHE_ENTRIES: usize = 24;
 
 #[derive(Clone)]
 pub struct ProjectMapTool {
-    _config: Arc<crate::core::config::Config>,
+    working_dir: PathBuf,
 }
 
 impl ProjectMapTool {
     pub fn new(config: Arc<crate::core::config::Config>) -> Self {
-        Self { _config: config }
+        Self::with_working_dir(config.agent_working_dir().to_path_buf())
+    }
+
+    /// 将省略路径和相对路径绑定到所属代理的工作目录。
+    pub fn with_working_dir(working_dir: PathBuf) -> Self {
+        Self { working_dir }
     }
 }
 
@@ -188,6 +193,7 @@ pub struct ProjectMapParams {
 
 pub struct ProjectMapInvocation {
     params: ProjectMapParams,
+    working_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -352,16 +358,14 @@ impl ToolInvocation for ProjectMapInvocation {
                 + '_,
         >,
     > {
-        let path = self.params.path.clone();
+        let root_path = self
+            .working_dir
+            .join(self.params.path.as_deref().unwrap_or("."));
         let options = ProjectMapBuildOptions::from_params(&self.params);
         let force_refresh = self.params.force_refresh.unwrap_or(false);
 
         Box::pin(async move {
-            let root_path = if let Some(p) = path {
-                canonicalize_or_self(Path::new(&p))
-            } else {
-                canonicalize_or_self(&std::env::current_dir()?)
-            };
+            let root_path = canonicalize_or_self(&root_path);
             if let Some(cb) = update_output.as_ref() {
                 cb(format!("Preparing project map for {}", root_path.display()));
             }
@@ -478,7 +482,10 @@ impl BaseDeclarativeTool for ProjectMapTool {
         params: serde_json::Value,
     ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
         let params: ProjectMapParams = serde_json::from_value(params)?;
-        Ok(Box::new(ProjectMapInvocation { params }))
+        Ok(Box::new(ProjectMapInvocation {
+            params,
+            working_dir: self.working_dir.clone(),
+        }))
     }
 
     // 只读，但会写 `.star/context/project_map_cache.json` 磁盘缓存 ——
@@ -890,4 +897,80 @@ fn store_cache_entry(cache_key: &str, root: &Path, output: String) {
     disk_cache.entries.insert(cache_key.to_string(), entry);
     prune_cache_entries(&mut disk_cache.entries);
     persist_disk_cache(&disk_path, &disk_cache);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn assert_agent_root(path: Option<&str>) {
+        let process_cwd = std::env::current_dir().expect("read process cwd");
+        let parent = tempfile::tempdir().expect("create parent project");
+        let worktree = parent.path().join("worktree");
+        std::fs::create_dir_all(worktree.join("src")).expect("create worktree source directory");
+        std::fs::write(parent.path().join("parent_only.rs"), "fn parent_only() {}")
+            .expect("write parent source");
+        std::fs::write(worktree.join("src/child_only.rs"), "fn child_only() {}")
+            .expect("write worktree source");
+        let mut config = crate::core::config::Config::new(crate::core::config::ConfigParameters {
+            target_dir: parent.path().to_path_buf(),
+            ..Default::default()
+        });
+        config.agent_working_dir = Some(worktree.clone());
+        let tool = ProjectMapTool::new(Arc::new(config));
+        let mut params = serde_json::json!({
+            "include_symbols": true,
+            "force_refresh": true
+        });
+        if let Some(path) = path {
+            params["path"] = serde_json::json!(path);
+        }
+        let invocation = tool
+            .create_invocation(params)
+            .expect("create project map invocation");
+        let result = invocation
+            .execute(None, None)
+            .await
+            .expect("generate project map");
+        let expected_root = canonicalize_or_self(&worktree.join(path.unwrap_or(".")));
+
+        assert!(
+            result.error.is_none(),
+            "project map failed: {:?}",
+            result.error
+        );
+        assert!(result
+            .output
+            .contains(&format!("Project Map for {}", expected_root.display())));
+        assert!(result.output.contains("child_only.rs"), "{}", result.output);
+        assert!(!result.output.contains("parent_only"), "{}", result.output);
+        assert!(
+            cache_file_path(&expected_root).is_file(),
+            "cache must stay with mapped root"
+        );
+        assert!(
+            !parent.path().join(".star").exists(),
+            "parent must not receive a cache"
+        );
+        assert_eq!(
+            std::fs::read_to_string(parent.path().join("parent_only.rs"))
+                .expect("read parent source"),
+            "fn parent_only() {}"
+        );
+        assert_eq!(
+            std::env::current_dir().expect("read process cwd"),
+            process_cwd
+        );
+    }
+
+    #[tokio::test]
+    async fn omitted_path_maps_agent_worktree_and_keeps_parent_unchanged() {
+        assert_agent_root(None).await;
+    }
+
+    #[tokio::test]
+    async fn explicit_relative_paths_map_agent_worktree_and_keep_parent_unchanged() {
+        assert_agent_root(Some(".")).await;
+        assert_agent_root(Some("src")).await;
+    }
 }

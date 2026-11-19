@@ -242,8 +242,7 @@ impl Agent {
             };
 
             // 5. Load Context + Auto-Plan in PARALLEL
-            let cwd = crate::agent::hooks::cached_project_root()
-                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let cwd = self.config.agent_working_dir().to_path_buf();
             let load_dynamic_context = history_len > 0 || crate::agent::tool_routing::dynamic_context_first_turn_enabled();
 
             // Check if model supports thinking (using runtime detection if available)

@@ -5,6 +5,7 @@ use lsp_types::{
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -22,8 +23,18 @@ pub struct LspClient {
 
 impl LspClient {
     pub async fn new(server_path: &str, args: &[String]) -> Result<Self, String> {
+        let root_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::new_with_root(server_path, args, root_dir).await
+    }
+
+    pub async fn new_with_root(
+        server_path: &str,
+        args: &[String],
+        root_dir: PathBuf,
+    ) -> Result<Self, String> {
         let mut child = Command::new(server_path)
             .args(args)
+            .current_dir(&root_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -110,13 +121,12 @@ impl LspClient {
         };
 
         // Perform initialization
-        client.initialize().await?;
+        client.initialize(&root_dir).await?;
 
         Ok(client)
     }
 
-    async fn initialize(&self) -> Result<(), String> {
-        let root_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+    async fn initialize(&self, root_dir: &Path) -> Result<(), String> {
         let root_url =
             Url::from_directory_path(root_dir).map_err(|_| "Invalid root path".to_string())?;
         let root_uri =

@@ -2,7 +2,7 @@ use crate::core::permissions::SessionPermissionManager;
 use crate::types::ToolResult;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
@@ -162,7 +162,7 @@ pub struct GlobalState {
     /// 必须活在运行时共享状态里：`Agent::run_stream` 每条用户消息都会新建一个
     /// `Agent` → 新 `ToolExecutor`，如果管理器跟着 executor 走，用户上一轮点过的
     /// "Allow for session" 到下一轮就没了，于是同一个命令反复弹确认。
-    permission_manager: Arc<OnceLock<Arc<SessionPermissionManager>>>,
+    permission_managers: Arc<Mutex<HashMap<PathBuf, Arc<SessionPermissionManager>>>>,
     /// auto 档位的 LLM 分类器读到的对话上下文。
     ///
     /// 分类器要判断"这次调用是不是用户要的"，就得看见对话。放在共享状态里是
@@ -181,7 +181,7 @@ impl GlobalState {
             tool_cache: Arc::new(RwLock::new(HashMap::new())),
             execution_state: Arc::new(RwLock::new(ExecutionState::new())),
             current_message_id: Arc::new(RwLock::new(None)),
-            permission_manager: Arc::new(OnceLock::new()),
+            permission_managers: Arc::new(Mutex::new(HashMap::new())),
             auto_mode_transcript: Arc::new(RwLock::new(None)),
         }
     }
@@ -210,14 +210,21 @@ impl GlobalState {
 
     /// 取得运行时共享的会话权限管理器。
     ///
-    /// 第一次调用决定持久化路径（当前项目的 `.star/permission_grants.json`）。
-    /// 同一运行时里的主 Agent、子 Agent、每条消息新建的 Agent 都拿到同一个 Arc。
+    /// 返回指定项目授权文件对应的会话权限管理器。
+    ///
+    /// 父代理与子代理共享相同路径时共享授权；不同 worktree 使用不同槽，
+    /// 避免首次初始化的路径把后续代理错误地绑定到父项目。
     pub fn session_permission_manager(
         &self,
         persist_path: PathBuf,
     ) -> Arc<SessionPermissionManager> {
-        self.permission_manager
-            .get_or_init(|| Arc::new(SessionPermissionManager::with_persistence(persist_path)))
+        let mut managers = self
+            .permission_managers
+            .lock()
+            .expect("permission manager map lock poisoned");
+        managers
+            .entry(persist_path.clone())
+            .or_insert_with(|| Arc::new(SessionPermissionManager::with_persistence(persist_path)))
             .clone()
     }
 
@@ -235,5 +242,25 @@ impl GlobalState {
 impl Default for GlobalState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GlobalState;
+    use std::sync::Arc;
+
+    #[test]
+    fn permission_managers_are_shared_per_grant_path_not_across_worktrees() {
+        let state = GlobalState::new();
+        let parent = std::path::PathBuf::from("/tmp/star-parent/.star/permission_grants.json");
+        let child = std::path::PathBuf::from("/tmp/star-child/.star/permission_grants.json");
+
+        let parent_manager = state.session_permission_manager(parent.clone());
+        let same_parent_manager = state.session_permission_manager(parent);
+        let child_manager = state.session_permission_manager(child);
+
+        assert!(Arc::ptr_eq(&parent_manager, &same_parent_manager));
+        assert!(!Arc::ptr_eq(&parent_manager, &child_manager));
     }
 }

@@ -1262,7 +1262,9 @@ impl ToolExecutor {
         let is_readonly = self.is_tool_read_only(name);
         let global_state = self.tool_registry.get_config().runtime_global_state();
         let cache_key = if is_readonly {
-            Some(format!("{}:{}", name, args.to_string()))
+            let root = self.config.agent_working_dir();
+            let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+            Some(serde_json::json!([root, name, args]).to_string())
         } else {
             None
         };
@@ -1292,17 +1294,6 @@ impl ToolExecutor {
                                 .await;
                         }
 
-                        if let Some(bus) = &self.message_bus {
-                            let _ = bus
-                                .publish(Message::ToolFinished(ToolFinished {
-                                    message_type: MessageBusType::ToolFinished,
-                                    tool_call_id: tool_call.id.clone(),
-                                    tool_name: name.to_string(),
-                                    success: cached.result.success,
-                                }))
-                                .await;
-                        }
-
                         // 命中缓存时 `execute()` 被整个跳过了，而"读过的文件要登记
                         // 进 read state"正是写在工具 `execute()` 里的副作用。于是同
                         // 一个 `Read` 第二次命中缓存时：内容返回给模型了，登记却
@@ -1313,9 +1304,57 @@ impl ToolExecutor {
                         // 先 clone 再释放读锁：`rerecord_read_paths` 自己也要拿锁。
                         let cached_result = cached.result.clone();
                         drop(cache);
-                        self.rerecord_read_paths(name, &args).await;
-
-                        return cached_result;
+                        // 缓存只省执行，不能让新规则或当前代理的审批约束失效。
+                        let gate = if let Some(tool) = self.tool_registry.get_tool(name) {
+                            match tool.create_invocation(args.clone()) {
+                                Ok(mut invocation) => {
+                                    invocation.set_agent_parent_identity(
+                                        self.config.agent_identity.clone(),
+                                    );
+                                    self.pass_gate(GateInput {
+                                        tool_name: name,
+                                        args: &args,
+                                        tool: tool.as_ref(),
+                                        invocation: invocation.as_ref(),
+                                        permission_identity: tool
+                                            .permission_cache_identity()
+                                            .as_deref(),
+                                        requires_invocation_confirmation: tool
+                                            .requires_invocation_confirmation(),
+                                        originating_tool_call_id: &tool_call.id,
+                                        abort_signal: abort_signal.as_ref(),
+                                    })
+                                    .await
+                                }
+                                Err(error) => return Self::error_result(error),
+                            }
+                        } else {
+                            self.pass_gate_registryless(
+                                name,
+                                &args,
+                                &tool_call.id,
+                                abort_signal.as_ref(),
+                            )
+                            .await
+                        };
+                        let result = match gate {
+                            Gate::Closed(reason) => Self::error_result(reason.into()),
+                            Gate::Open => {
+                                self.rerecord_read_paths(name, &args).await;
+                                cached_result
+                            }
+                        };
+                        if let Some(bus) = &self.message_bus {
+                            let _ = bus
+                                .publish(Message::ToolFinished(ToolFinished {
+                                    message_type: MessageBusType::ToolFinished,
+                                    tool_call_id: tool_call.id.clone(),
+                                    tool_name: name.to_string(),
+                                    success: result.success,
+                                }))
+                                .await;
+                        }
+                        return result;
                     }
                     // else: stale — don't use, fall through to re-execute
                 }
@@ -1412,12 +1451,20 @@ impl ToolExecutor {
                                                 structured.to_json_value(),
                                             );
                                         }
+                                        let mut display = structured.format_display();
+                                        let details = output.trim_end();
+                                        if !details.trim().is_empty()
+                                            && details.trim() != err.trim()
+                                        {
+                                            display.push('\n');
+                                            display.push_str(details);
+                                        }
                                         ToolResult {
                                             success: false,
-                                            output: Some(structured.format_display()),
+                                            output: Some(display),
                                             error: error_msg,
                                             data: Some(data),
-                                            llm_content: None,
+                                            llm_content,
                                         }
                                     } else {
                                         ToolResult {
@@ -3717,6 +3764,142 @@ mod tests {
             Some("the full body the model needs"),
             "llm_content 必须在 executor 里被保留下来"
         );
+    }
+
+    /// 同名相对参数不能复用其他工作树的结果，命中缓存仍须执行当前权限门。
+    #[tokio::test]
+    async fn readonly_cache_is_scoped_to_the_working_directory_and_current_policy() {
+        use crate::core::config::{ConfigParameters, RuntimeServices};
+        use crate::core::state::GlobalState;
+        use crate::core::tools::read_file::ReadFileTool;
+
+        let temp = tempfile::tempdir().expect("temporary project");
+        let bus = Arc::new(MessageBus::new(
+            crate::core::policy::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let state = Arc::new(GlobalState::new());
+        let mut executors = Vec::new();
+        for (name, body) in [("parent", "parent content"), ("child", "child content")] {
+            let root = temp.path().join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("shared.txt"), body).unwrap();
+            let mut config = Config::new(ConfigParameters {
+                target_dir: root.clone(),
+                cwd: root,
+                ..Default::default()
+            });
+            config.install_runtime_services(RuntimeServices::new(
+                None,
+                bus.clone(),
+                None,
+                state.clone(),
+            ));
+            let config = Arc::new(config);
+            let registry = Arc::new(ToolRegistry::new(config.clone()));
+            registry.register_tool(Arc::new(ReadFileTool::new(
+                config.clone(),
+                bus.clone(),
+                state.clone(),
+            )));
+            executors.push(ToolExecutor::new(
+                StarClient::new("", None, None, None, None),
+                registry,
+                Some(bus.clone()),
+                config,
+            ));
+        }
+        let call = StarToolCall {
+            id: "cached-read".into(),
+            call_type: "function".into(),
+            function: crate::types::StarToolCallFunction {
+                name: "Read".into(),
+                arguments: json!({"file_path": "shared.txt"}).to_string(),
+            },
+        };
+        for (executor, expected, other) in [
+            (&executors[0], "parent content", "child content"),
+            (&executors[1], "child content", "parent content"),
+        ] {
+            let result = executor.execute(&call, None, None).await;
+            assert!(result.success, "{:?}", result.error);
+            let output = result.display_output();
+            assert!(output.contains(expected), "{output}");
+            assert!(!output.contains(other), "{output}");
+        }
+        assert_eq!(state.tool_cache.read().await.len(), 2);
+        bus.apply_turn_tool_policy(&[], &["Read".into()]).await;
+        let denied = executors[1].execute(&call, None, None).await;
+        assert!(
+            !denied.success,
+            "cached content must not bypass a new denial"
+        );
+        assert!(!denied.display_output().contains("child content"));
+    }
+
+    /// 真实 Bash 经审批执行失败后，界面和模型各自保留完整诊断。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn approved_bash_failure_preserves_both_output_channels() {
+        use crate::core::config::ConfigParameters;
+        use crate::core::tools::shell::ShellTool;
+
+        let temp = tempfile::tempdir().expect("create temporary directory");
+        let config = Arc::new(Config::new(ConfigParameters {
+            target_dir: temp.path().to_path_buf(),
+            cwd: temp.path().to_path_buf(),
+            ..Default::default()
+        }));
+        let bus = Arc::new(MessageBus::new(
+            crate::core::policy::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let registry = Arc::new(ToolRegistry::new(config.clone()));
+        registry.register_tool(Arc::new(ShellTool::new(config.clone(), None)));
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            registry,
+            Some(bus.clone()),
+            config,
+        );
+        let responder = tokio::spawn(watch_for_confirmation(
+            bus,
+            crate::types::ToolConfirmationOutcome::ProceedOnce,
+        ));
+        let call = StarToolCall {
+            id: "approved-bash-failure".into(),
+            call_type: "function".into(),
+            function: crate::types::StarToolCallFunction {
+                name: "Bash".into(),
+                arguments: json!({
+                    "command": "printf 'fixture stdout\\n' && printf 'fixture stderr\\n' >&2 && false"
+                })
+                .to_string(),
+            },
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let (result, response) = tokio::join!(executor.execute(&call, None, None), responder);
+            (result, response.expect("approval response task"))
+        })
+        .await
+        .expect("the test must exercise the approval and execution path");
+
+        assert!(!result.success);
+        assert_eq!(result.error.as_deref(), Some("Exit code: 1"));
+        let display = result.display_output();
+        assert!(display.contains("[Runtime] Exit code: 1"), "{display}");
+        assert!(
+            display.lines().any(|line| line == "fixture stdout"),
+            "{display}"
+        );
+        assert!(
+            display.lines().any(|line| line == "fixture stderr"),
+            "{display}"
+        );
+        let model = result.llm_content.as_deref().expect("Bash model output");
+        assert!(model.contains("Output: fixture stdout"), "{model}");
+        assert!(model.contains("Error: fixture stderr"), "{model}");
+        assert!(model.contains("Exit Code: 1"), "{model}");
     }
 
     /// 回归：`CodebaseSearch` 的中文 query 必须在**工具入口**被归一。

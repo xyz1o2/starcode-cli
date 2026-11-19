@@ -89,7 +89,9 @@ fn register_core_file_tools(
     }
 
     if is_core_tool_enabled(selection_config, "LS") {
-        registry.register_tool(Arc::new(ListDirTool::new()));
+        registry.register_tool(Arc::new(ListDirTool::with_base_dir(
+            selection_config.agent_working_dir().to_path_buf(),
+        )));
     }
 }
 
@@ -103,7 +105,7 @@ fn register_core_command_tools(
     if is_core_tool_enabled(selection_config, "Grep") {
         registry.register_tool(Arc::new(SearchTool::new_with_base_dir(
             global_state.clone(),
-            selection_config.target_dir().clone(),
+            selection_config.agent_working_dir().to_path_buf(),
         )));
     }
 
@@ -151,10 +153,14 @@ fn register_core_navigation_tools(registry: &Arc<ToolRegistry>, selection_config
     }
 
     if is_core_tool_enabled(selection_config, "LSP") {
-        registry.register_tool(Arc::new(LspTool::new()));
+        registry.register_tool(Arc::new(LspTool::with_root_dir(
+            selection_config.agent_working_dir().to_path_buf(),
+        )));
     }
 
     if is_core_tool_enabled(selection_config, "NextEdit") {
-        registry.register_tool(Arc::new(NextEditTool::new()));
+        registry.register_tool(Arc::new(NextEditTool::with_base_dir(
+            selection_config.agent_working_dir().to_path_buf(),
+        )));
     }
 }

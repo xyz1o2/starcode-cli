@@ -13,6 +13,7 @@
 //! （`turn_active_tools` 只用于自动触发与 JSON fallback），模型报得出名字就能调用，
 //! 所以把 schema 交出去就够了，无需再加一层转发。
 
+use crate::core::config::Config;
 use crate::core::tools::tools::{
     BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation, ToolResult,
 };
@@ -250,19 +251,75 @@ struct Hit {
     usage_body: Option<String>,
 }
 
+#[derive(Clone)]
+struct SearchFilter {
+    recursion_depth: usize,
+    core_tools: Option<Vec<String>>,
+    exclude_tools: Option<Vec<String>>,
+}
+
 pub struct ToolSearchTool {
     registry: Arc<ToolRegistry>,
+    filter: Option<SearchFilter>,
 }
 
 impl ToolSearchTool {
+    /// 保留无配置构造，兼容已有调用的全量发现行为。
     pub fn new(registry: Arc<ToolRegistry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            filter: None,
+        }
+    }
+
+    /// 按当前代理的配置复制过滤快照，不持有可能反向引用注册表的 `Config`。
+    pub fn with_config(registry: Arc<ToolRegistry>, config: Arc<Config>) -> Self {
+        Self {
+            registry,
+            filter: Some(SearchFilter {
+                recursion_depth: config.recursion_depth,
+                core_tools: config.core_tools().map(ToOwned::to_owned),
+                exclude_tools: config.exclude_tools().map(ToOwned::to_owned),
+            }),
+        }
+    }
+
+    fn is_tool_visible(&self, name: &str) -> bool {
+        let Some(filter) = &self.filter else {
+            return true;
+        };
+        if filter.recursion_depth > 0 && name.eq_ignore_ascii_case("Skill") {
+            return false;
+        }
+        if filter
+            .exclude_tools
+            .as_deref()
+            .is_some_and(|tools| tools.iter().any(|tool| tool.eq_ignore_ascii_case(name)))
+        {
+            return false;
+        }
+        filter
+            .core_tools
+            .as_deref()
+            .is_none_or(|tools| tools.iter().any(|tool| tool.eq_ignore_ascii_case(name)))
+    }
+
+    // 子代理的注册表仍含父工具，必须在排序或宽松匹配之前过滤。
+    fn visible_tool_entries(&self) -> Vec<(String, String, serde_json::Value)> {
+        self.registry
+            .get_all_tool_entries()
+            .into_iter()
+            .filter(|(name, _, _)| self.is_tool_visible(name))
+            .collect()
     }
 
     /// `select:<name>` 模式：精确取一个工具（经 `get_tool` 走 canonical 别名解析），
     /// 并动态加载其完整使用说明正文。
     fn select_tool(&self, name: &str) -> Option<Hit> {
         let tool = self.registry.get_tool(name)?;
+        if !self.is_tool_visible(tool.name()) {
+            return None;
+        }
         Some(Hit {
             name: tool.name().to_string(),
             description: tool.description().to_string(),
@@ -290,8 +347,7 @@ impl ToolSearchTool {
         // 只作为兜底，且要求唯一命中 —— 多个候选时仍然列出来让模型选。
         let wanted_folded = wanted.replace('_', "");
         let candidates: Vec<Hit> = self
-            .registry
-            .get_all_tool_entries()
+            .visible_tool_entries()
             .into_iter()
             .filter(|(tool_name, _, _)| {
                 let tool_name = tool_name.to_lowercase();
@@ -317,7 +373,7 @@ impl ToolSearchTool {
 
     /// 关键词模式：分词打分，按分数降序、同分按名称升序。
     fn search_ranked(&self, query: &str, max_results: usize) -> Vec<Hit> {
-        rank_entries(self.registry.get_all_tool_entries(), query, max_results)
+        rank_entries(self.visible_tool_entries(), query, max_results)
     }
 }
 
@@ -369,6 +425,7 @@ impl Clone for ToolSearchTool {
     fn clone(&self) -> Self {
         Self {
             registry: self.registry.clone(),
+            filter: self.filter.clone(),
         }
     }
 }
@@ -791,6 +848,127 @@ mod tests {
         ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
             unimplemented!("测试辅助工具不执行")
         }
+    }
+
+    /// 子代理发现范围取决于自己的配置，父注册表仍可保留全部工具。
+    #[test]
+    fn child_search_and_select_respect_the_whitelist_without_changing_the_parent() {
+        let parent_config = test_config();
+        let parent_registry = Arc::new(ToolRegistry::new(parent_config.clone()));
+        for name in ["Read", "Write", "Bash", "ToolSearch"] {
+            parent_registry.register_tool(Arc::new(FakeMcpTool::new(name, "Test capability.")));
+        }
+        let mut child_config = (*parent_config).clone();
+        child_config.recursion_depth = 1;
+        child_config.core_tools = Some(vec!["read".to_string(), "toolsearch".to_string()]);
+        child_config.exclude_tools = Some(Vec::new());
+        let child_config = Arc::new(child_config);
+        let child_registry = Arc::new(parent_registry.fork_for_agent(child_config.clone()));
+        let tool = ToolSearchTool::with_config(child_registry, child_config);
+
+        assert!(tool.search_ranked("Write Bash", 10).is_empty());
+        // 先过滤再截断：不可见工具即使参与同分排序，也不能挤掉 Read。
+        let hits = tool.search_ranked("Read Write Bash", 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "Read");
+        for name in ["Write", "write", "Bash"] {
+            assert!(
+                matches!(tool.select_tool_lenient(name), SelectOutcome::NotFound),
+                "子代理不得发现 {name}"
+            );
+        }
+        for name in ["Read", "read", "ToolSearch"] {
+            assert!(
+                matches!(tool.select_tool_lenient(name), SelectOutcome::Found(_)),
+                "子代理应能发现 {name}"
+            );
+        }
+        assert_eq!(parent_registry.get_all_tool_entries().len(), 4);
+        assert!(parent_registry.get_tool("Write").is_some());
+        assert!(parent_registry.get_tool("Bash").is_some());
+        let parent_tool = ToolSearchTool::new(parent_registry);
+        assert!(matches!(
+            parent_tool.select_tool_lenient("Write"),
+            SelectOutcome::Found(_)
+        ));
+    }
+
+    /// 无白名单时保留主代理行为；排除项和子代理 Skill 限制始终生效。
+    #[test]
+    fn configured_search_applies_exclusions_and_recursion_limits() {
+        let base_config = test_config();
+        let registry = Arc::new(ToolRegistry::new(base_config.clone()));
+        for name in ["Read", "Write", "Skill", "ToolSearch"] {
+            registry.register_tool(Arc::new(FakeMcpTool::new(name, "Test capability.")));
+        }
+        let cases = [
+            (
+                0,
+                None,
+                vec![],
+                vec!["Read", "Write", "Skill", "ToolSearch"],
+            ),
+            (0, None, vec!["wRiTe"], vec!["Read", "Skill", "ToolSearch"]),
+            (1, None, vec![], vec!["Read", "Write", "ToolSearch"]),
+            (
+                1,
+                Some(vec!["Read", "Write", "Skill", "ToolSearch"]),
+                vec!["wRiTe", "ToolSearch"],
+                vec!["Read"],
+            ),
+            (1, Some(vec!["Read"]), vec![], vec!["Read"]),
+            (1, Some(vec![]), vec![], vec![]),
+        ];
+        for (depth, whitelist, exclusions, expected) in cases {
+            let mut config = (*base_config).clone();
+            config.recursion_depth = depth;
+            config.core_tools =
+                whitelist.map(|names| names.into_iter().map(String::from).collect());
+            config.exclude_tools = Some(exclusions.into_iter().map(String::from).collect());
+            let tool = ToolSearchTool::with_config(registry.clone(), Arc::new(config));
+            let mut hits: Vec<String> = tool
+                .search_ranked("Read Write Skill ToolSearch", 10)
+                .into_iter()
+                .map(|hit| hit.name)
+                .collect();
+            hits.sort();
+            let mut expected_sorted = expected.clone();
+            expected_sorted.sort();
+            assert_eq!(hits, expected_sorted, "recursion_depth={depth}");
+            for name in ["Read", "Write", "Skill", "ToolSearch"] {
+                assert_eq!(
+                    matches!(tool.select_tool_lenient(name), SelectOutcome::Found(_)),
+                    expected.contains(&name),
+                    "recursion_depth={depth}, tool={name}"
+                );
+            }
+        }
+    }
+
+    /// 宽松匹配只统计可见候选，避免禁用工具泄漏到歧义列表。
+    #[test]
+    fn lenient_select_filters_candidates_before_resolving_ambiguity() {
+        let mut config = (*test_config()).clone();
+        config.recursion_depth = 1;
+        config.core_tools = Some(vec![
+            "mcp__allowed__search".to_string(),
+            "mcp__blocked__search".to_string(),
+        ]);
+        config.exclude_tools = Some(vec!["mcp__blocked__search".to_string()]);
+        let config = Arc::new(config);
+        let registry = Arc::new(ToolRegistry::new(config.clone()));
+        for name in ["mcp__allowed__search", "mcp__blocked__search"] {
+            registry.register_tool(Arc::new(FakeMcpTool::new(name, "Search capability.")));
+        }
+        let tool = ToolSearchTool::with_config(registry, config);
+        match tool.select_tool_lenient("search") {
+            SelectOutcome::Found(hit) => assert_eq!(hit.name, "mcp__allowed__search"),
+            _ => panic!("过滤后应仅命中允许的 MCP 工具"),
+        }
+        assert!(matches!(
+            tool.select_tool_lenient("mcp__blocked__search"),
+            SelectOutcome::NotFound
+        ));
     }
 
     #[test]

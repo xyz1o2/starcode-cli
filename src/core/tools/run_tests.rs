@@ -2,15 +2,20 @@ use crate::core::tools::tools::ToolResult as CoreToolResult;
 use crate::core::tools::tools::{BaseDeclarativeTool, Kind, ToolInvocation, ToolLocation};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
 #[derive(Clone)]
-pub struct RunTestsTool;
+pub struct RunTestsTool {
+    working_dir: PathBuf,
+}
 
 impl RunTestsTool {
-    pub fn new(_config: Arc<crate::core::config::Config>) -> Self {
-        Self
+    pub fn new(config: Arc<crate::core::config::Config>) -> Self {
+        Self {
+            working_dir: config.agent_working_dir().to_path_buf(),
+        }
     }
 }
 
@@ -22,6 +27,7 @@ pub struct RunTestsParams {
 
 pub struct RunTestsInvocation {
     params: RunTestsParams,
+    working_dir: PathBuf,
 }
 
 impl ToolInvocation for RunTestsInvocation {
@@ -49,47 +55,22 @@ impl ToolInvocation for RunTestsInvocation {
     > {
         let command = self.params.command.clone();
         let filter = self.params.filter.clone();
+        let working_dir = self.working_dir.clone();
 
         Box::pin(async move {
-            let res = tokio::task::spawn_blocking(move || {
-                let (cmd, args) = if let Some(c) = command {
-                    let parts: Vec<&str> = c.split_whitespace().collect();
-                    if parts.is_empty() {
-                        return Err(Box::<dyn std::error::Error + Send + Sync>::from(
-                            "Empty command",
-                        ));
-                    }
-                    (
-                        parts[0].to_string(),
-                        parts[1..].iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                    )
-                } else {
-                    // Auto-detect
-                    if std::path::Path::new("Cargo.toml").exists() {
-                        ("cargo".to_string(), vec!["test".to_string()])
-                    } else if std::path::Path::new("package.json").exists() {
-                        ("npm".to_string(), vec!["test".to_string()])
-                    } else if std::path::Path::new("pyproject.toml").exists()
-                        || std::path::Path::new("requirements.txt").exists()
-                    {
-                        ("pytest".to_string(), vec![])
-                    } else {
-                        return Err(Box::<dyn std::error::Error + Send + Sync>::from(
-                            "Could not auto-detect test runner. Please specify command.",
-                        ));
-                    }
+            let res = tokio::task::spawn_blocking(move || -> Result<CoreToolResult, String> {
+                let (cmd, args) = match command {
+                    Some(command) => parse_test_command(&command).map_err(|e| e.to_string())?,
+                    None => detect_test_runner(&working_dir).map_err(|e| e.to_string())?,
                 };
 
-                let mut command_builder = Command::new(&cmd);
-                command_builder.args(&args);
+                let mut command_builder = test_command(&cmd, &args, &working_dir);
 
                 if let Some(f) = filter {
                     command_builder.arg(f);
                 }
 
-                let output = command_builder
-                    .output()
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+                let output = command_builder.output().map_err(|e| e.to_string())?;
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let combined = format!("STDOUT:\n{}\n\nSTDERR:\n{}", stdout, stderr);
@@ -118,7 +99,7 @@ impl ToolInvocation for RunTestsInvocation {
                     llm_content: None,
                     return_display: None,
                     output: serde_json::to_string_pretty(&result_json)
-                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?,
+                        .map_err(|e| e.to_string())?,
                     error: None,
                     data: Some(result_json),
                 })
@@ -126,11 +107,47 @@ impl ToolInvocation for RunTestsInvocation {
             .await;
 
             match res {
-                Ok(inner) => inner.map_err(|e| e as Box<dyn std::error::Error>),
+                Ok(inner) => inner.map_err(|e| -> Box<dyn std::error::Error> { e.into() }),
                 Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>),
             }
         })
     }
+}
+
+fn parse_test_command(
+    command: &str,
+) -> Result<(String, Vec<String>), Box<dyn std::error::Error + Send + Sync>> {
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err("Empty command".into());
+    }
+    Ok((
+        parts[0].to_string(),
+        parts[1..].iter().map(|part| (*part).to_string()).collect(),
+    ))
+}
+
+fn detect_test_runner(
+    working_dir: &Path,
+) -> Result<(String, Vec<String>), Box<dyn std::error::Error + Send + Sync>> {
+    if working_dir.join("Cargo.toml").exists() {
+        Ok(("cargo".to_string(), vec!["test".to_string()]))
+    } else if working_dir.join("package.json").exists() {
+        Ok(("npm".to_string(), vec!["test".to_string()]))
+    } else if working_dir.join("pyproject.toml").exists()
+        || working_dir.join("requirements.txt").exists()
+    {
+        Ok(("pytest".to_string(), Vec::new()))
+    } else {
+        Err("Could not auto-detect test runner. Please specify command.".into())
+    }
+}
+
+fn test_command(program: &str, args: &[String], working_dir: &Path) -> Command {
+    let mut command = tokio::process::Command::new(program);
+    crate::agent::worktree::clear_git_repository_env(&mut command);
+    command.args(args).current_dir(working_dir);
+    command.into_std()
 }
 
 impl BaseDeclarativeTool for RunTestsTool {
@@ -171,7 +188,98 @@ impl BaseDeclarativeTool for RunTestsTool {
         params: serde_json::Value,
     ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
         let params: RunTestsParams = serde_json::from_value(params)?;
-        Ok(Box::new(RunTestsInvocation { params }))
+        Ok(Box::new(RunTestsInvocation {
+            params,
+            working_dir: self.working_dir.clone(),
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn config_for(root: &Path) -> crate::core::config::Config {
+        let mut params = crate::core::config::ConfigParameters::default();
+        params.model = "test-model".to_string();
+        params.core_tools = Some(Vec::new());
+        params.mcp_enabled = Some(false);
+        params.enable_agents = Some(false);
+        params.target_dir = root.to_path_buf();
+        let mut config = crate::core::config::Config::new(params);
+        config.initialize().await.expect("initialize test config");
+        config
+    }
+
+    #[tokio::test]
+    async fn invocation_uses_agent_worktree_for_command_and_auto_detection() {
+        let process_cwd = std::env::current_dir().expect("read process cwd");
+        let parent = tempfile::tempdir().expect("create parent directory");
+        let worktree = tempfile::tempdir().expect("create agent worktree");
+        std::fs::write(
+            parent.path().join("Cargo.toml"),
+            "[package]\nname = \"parent\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write parent manifest");
+        std::fs::write(
+            worktree.path().join("Cargo.toml"),
+            "[package]\nname = \"child\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write worktree manifest");
+        let mut config = config_for(parent.path()).await;
+        config.agent_working_dir = Some(worktree.path().to_path_buf());
+        assert_eq!(
+            detect_test_runner(worktree.path())
+                .expect("detect child manifest")
+                .0,
+            "cargo"
+        );
+        let tool = RunTestsTool::new(Arc::new(config));
+
+        let marker = tool
+            .create_invocation(serde_json::json!({ "command": "printf child-marker" }))
+            .expect("create marker invocation");
+        let result = marker
+            .execute(None, None)
+            .await
+            .expect("execute local printf command");
+        assert!(result.output.contains("child-marker"), "{}", result.output);
+
+        let pwd = tool
+            .create_invocation(serde_json::json!({ "command": "pwd" }))
+            .expect("create pwd invocation");
+        let result = pwd
+            .execute(None, None)
+            .await
+            .expect("execute local pwd command");
+        assert!(
+            result
+                .output
+                .contains(worktree.path().to_string_lossy().as_ref()),
+            "{}",
+            result.output
+        );
+        assert!(
+            !result
+                .output
+                .contains(parent.path().to_string_lossy().as_ref()),
+            "{}",
+            result.output
+        );
+        assert_eq!(
+            std::env::current_dir().expect("read process cwd"),
+            process_cwd
+        );
+    }
+
+    #[test]
+    fn test_command_sets_directory_and_clears_git_repository_environment() {
+        let worktree = tempfile::tempdir().expect("create worktree directory");
+        let command = test_command("printf", &["marker".to_string()], worktree.path());
+        assert_eq!(command.get_current_dir(), Some(worktree.path()));
+        assert!(command
+            .get_envs()
+            .any(|(name, value)| name == "GIT_DIR" && value.is_none()));
     }
 }
 

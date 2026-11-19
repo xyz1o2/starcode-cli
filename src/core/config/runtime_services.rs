@@ -43,6 +43,12 @@ impl RuntimeServices {
         self.tool_registry.clone()
     }
 
+    /// 仅替换工具映射，保留同一会话的审批、任务与消息句柄。
+    pub(crate) fn with_tool_registry(mut self, registry: Option<Arc<ToolRegistry>>) -> Self {
+        self.tool_registry = registry;
+        self
+    }
+
     pub(crate) fn message_bus(&self) -> Arc<MessageBus> {
         self.message_bus.clone()
     }

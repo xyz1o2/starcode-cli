@@ -17,12 +17,14 @@ use crate::llm::client::StarClient;
 use crate::types::ToolResult;
 use serde::Deserialize;
 use similar::TextDiff;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 
 #[derive(Clone)]
 pub struct SmartEditTool {
     strategies: Arc<Vec<Box<dyn EditStrategy>>>,
+    working_dir: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,7 +47,7 @@ impl ToolInvocation for SmartEditToolInvocation {
 
     fn tool_locations(&self) -> Vec<ToolLocation> {
         vec![ToolLocation {
-            path: std::path::PathBuf::from(&self.params.file_path),
+            path: self.tool.resolve_path(&self.params.file_path),
             location_type: crate::core::tools::tools::LocationType::Write,
         }]
     }
@@ -63,7 +65,7 @@ impl ToolInvocation for SmartEditToolInvocation {
                 > + Send,
         >,
     > {
-        let path = self.params.file_path.clone();
+        let path = self.tool.resolve_path(&self.params.file_path);
         let old = self.params.old_string.clone();
         let new = self.params.new_string.clone();
 
@@ -76,7 +78,7 @@ impl ToolInvocation for SmartEditToolInvocation {
                     title: "Edit Confirmation".to_string(),
                     prompt: format!(
                         "Editing file: {}\n- old: {}\n- new: {}\n(full diff will be shown after execution)",
-                        path, old_preview, new_preview
+                        path.display(), old_preview, new_preview
                     ),
                     on_confirm: std::sync::Arc::new(|_, _feedback| {}),
                 },
@@ -162,16 +164,37 @@ impl BaseDeclarativeTool for SmartEditTool {
 impl SmartEditTool {
     /// 创建 Smart Edit 工具（包含 LLM 策略）
     pub fn new(llm_client: StarClient) -> Self {
+        Self::new_with_working_dir(
+            llm_client,
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        )
+    }
+
+    /// 将读写与文件位置报告绑定到所属代理的工作目录。
+    pub fn new_with_working_dir(llm_client: StarClient, working_dir: PathBuf) -> Self {
         Self {
             strategies: Arc::new(StrategyFactory::create_all_strategies(Some(llm_client))),
+            working_dir,
         }
     }
 
     /// 创建 Smart Edit 工具（不包含 LLM 策略）
     pub fn new_basic() -> Self {
+        Self::new_basic_with_working_dir(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        )
+    }
+
+    /// 在指定工作目录使用本地编辑策略，不发起模型请求。
+    pub fn new_basic_with_working_dir(working_dir: PathBuf) -> Self {
         Self {
             strategies: Arc::new(StrategyFactory::create_basic_strategies()),
+            working_dir,
         }
+    }
+
+    fn resolve_path(&self, file_path: &str) -> PathBuf {
+        self.working_dir.join(Path::new(file_path))
     }
 
     /// 执行智能编辑
@@ -190,11 +213,13 @@ impl SmartEditTool {
         new_string: &str,
         dry_run: bool,
     ) -> Result<ToolResult, Box<dyn std::error::Error>> {
-        // 读取文件内容
-        let content = crate::core::utils::file_utils::read_file_with_encoding_async(
-            std::path::Path::new(file_path),
-        )
-        .await?;
+        let resolved_path = self.resolve_path(file_path);
+        let file_path = resolved_path.to_string_lossy();
+        let file_path = file_path.as_ref();
+
+        // 读取与保存共用同一个解析结果，避免相对路径落回进程目录。
+        let content =
+            crate::core::utils::file_utils::read_file_with_encoding_async(&resolved_path).await?;
 
         // 构建编辑上下文
         let context = EditContext::new(
@@ -235,7 +260,7 @@ impl SmartEditTool {
                         }
 
                         // 策略成功，保存文件
-                        fs::write(file_path, &result.new_content).await?;
+                        fs::write(&resolved_path, &result.new_content).await?;
 
                         return Ok(self.format_success_result(
                             &result,
@@ -334,5 +359,85 @@ impl SmartEditTool {
             .iter()
             .map(|s| s.name().to_string())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn relative_edit_and_dry_run_use_agent_worktree_and_keep_parent_unchanged() {
+        let process_cwd = std::env::current_dir().expect("read process cwd");
+        let parent = tempfile::tempdir().expect("create parent project");
+        let worktree = parent.path().join("worktree");
+        std::fs::create_dir(&worktree).expect("create worktree");
+        let relative_path = "shared.rs";
+        let original = "fn child_before() {}\n";
+        let replacement = "fn child_after() {}\n";
+        std::fs::write(parent.path().join(relative_path), "fn parent_only() {}\n")
+            .expect("write parent file");
+        std::fs::write(worktree.join(relative_path), original).expect("write worktree file");
+        let tool = SmartEditTool::new_basic_with_working_dir(worktree.clone());
+        let params = serde_json::json!({
+            "file_path": relative_path,
+            "old_string": "child_before",
+            "new_string": "child_after"
+        });
+        let mut preview_params = params.clone();
+        preview_params["dry_run"] = serde_json::json!(true);
+        let preview = tool
+            .create_invocation(preview_params)
+            .expect("create preview");
+        assert_eq!(
+            preview.tool_locations()[0].path,
+            worktree.join(relative_path)
+        );
+        let confirmation = preview
+            .should_confirm_execute(None)
+            .await
+            .expect("build confirmation")
+            .expect("edit needs confirmation");
+        assert!(confirmation
+            .prompt
+            .contains(&worktree.join(relative_path).display().to_string()));
+        let result = preview
+            .execute(None, None)
+            .await
+            .expect("preview relative edit");
+        assert!(result.error.is_none(), "preview failed: {:?}", result.error);
+        assert!(result.data.as_ref().expect("preview data")["diff"]
+            .as_str()
+            .expect("preview diff")
+            .contains("child_after"));
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(relative_path)).expect("read preview file"),
+            original
+        );
+
+        let invocation = tool
+            .create_invocation(params)
+            .expect("create relative edit");
+        let result = invocation
+            .execute(None, None)
+            .await
+            .expect("execute relative edit");
+        assert!(result.error.is_none(), "edit failed: {:?}", result.error);
+        assert_eq!(
+            result.data.as_ref().expect("edit data")["file_path"],
+            serde_json::json!(worktree.join(relative_path))
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(relative_path)).expect("read edited file"),
+            replacement
+        );
+        assert_eq!(
+            std::fs::read_to_string(parent.path().join(relative_path)).expect("read parent file"),
+            "fn parent_only() {}\n"
+        );
+        assert_eq!(
+            std::env::current_dir().expect("read process cwd"),
+            process_cwd
+        );
     }
 }

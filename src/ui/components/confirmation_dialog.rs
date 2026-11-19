@@ -289,21 +289,37 @@ pub fn build_confirmation_card_block(
                 })
             }
         };
-        // 已裁决的卡片：**只显示图标 + 内容摘要**，不显示 "Allowed (once)" 这类
-        // 裁决文字。
-        //
-        // 图标已经表达了裁决结果（✓ 放行 / ✗ 拒绝 / … 排队），文字是冗余的 ——
-        // 而且它把整行拉长，让「已批准」和「已拒绝」在扫视时都变成一串要看清的
-        // 英文。用户在意的只是「这步过没过」，那一眼看图标就够。
+        // 审批结果与执行结果分开表达：放行用中性色及明确文字，避免绿色勾号
+        // 被读成命令执行成功；拒绝和排队仍保留各自标记。
+        let allowed = icon == "✓";
+        let (color, icon) = if allowed {
+            (palette.secondary, "›")
+        } else {
+            (color, icon)
+        };
+        let label = if let Some(suffix) = outcome.strip_prefix("Allowed (once)") {
+            format!("{}{suffix}", i18n::t1("ui.confirm.outcome.once"))
+        } else if let Some(suffix) = outcome.strip_prefix("Allowed (session)") {
+            format!("{}{suffix}", i18n::t1("ui.confirm.outcome.session"))
+        } else if let Some(suffix) = outcome.strip_prefix("Allowed (always)") {
+            format!("{}{suffix}", i18n::t1("ui.confirm.outcome.always"))
+        } else {
+            outcome.clone()
+        };
+        let summary = if allowed
+            && confirmation.tool_name.eq_ignore_ascii_case("Bash")
+            && matches!(confirmation.details, ConfirmationDetails::Generic { .. })
+        {
+            label
+        } else {
+            format!("{label} · {detail}")
+        };
         return vec![Line::from(vec![
             Span::styled(
                 format!("{} ", icon),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("  {}", detail),
-                Style::default().fg(palette.secondary),
-            ),
+            Span::styled(summary, Style::default().fg(palette.secondary)),
         ])];
     }
 

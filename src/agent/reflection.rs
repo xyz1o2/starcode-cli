@@ -71,6 +71,7 @@ fn generic_failure_summary(result: &ToolResult, fallback: &str) -> Option<String
 }
 
 pub(crate) async fn maybe_write_reflection_memory(
+    working_dir: &std::path::Path,
     user_input: &str,
     tool_call: &StarToolCall,
     result: &ToolResult,
@@ -113,7 +114,7 @@ pub(crate) async fn maybe_write_reflection_memory(
         task_excerpt, summary
     );
 
-    let tool = crate::tools::memory::MemoryTool::new();
+    let tool = crate::tools::memory::MemoryTool::with_base_dir(working_dir.to_path_buf());
     let params = crate::tools::memory::MemoryParams {
         action: "save".to_string(),
         content: Some(reflection_text),

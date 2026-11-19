@@ -930,6 +930,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_message_reaches_current_turn_queue_once() {
+        let mut deferred = DeferredRuntimeActions::default();
+        let (tx, _rx) = mpsc::channel(1);
+        let steering_queue = Arc::new(AsyncMessageQueue::new());
+        let steering_signal = Arc::new(Notify::new());
+        let message_bus = Arc::new(crate::core::confirmation_bus::MessageBus::new(
+            crate::core::policy::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let abort_flag = Arc::new(AtomicBool::new(false));
+        let model_switch_cell = crate::agent::model_switch::new_cell();
+        let outcome = handle_streaming_request(
+            &mut deferred,
+            Some(AgentRequest::SendMessage {
+                message_id: 8,
+                message: "只分析，不要改文件".into(),
+            }),
+            StreamingRequestContext {
+                tx: &tx,
+                message_id: 7,
+                user_message: "test",
+                current_model_snapshot: "local-model",
+                project_root: None,
+                abort_flag: &abort_flag,
+                steering_queue: &steering_queue,
+                steering_signal: &steering_signal,
+                message_bus: &message_bus,
+                model_switch_cell: &model_switch_cell,
+            },
+        )
+        .await;
+        assert_eq!(outcome, StreamingRequestOutcome::Continue);
+        let (id, input) = steering_queue
+            .try_next()
+            .expect("current turn receives steering");
+        assert_eq!(id, 8);
+        assert_eq!(input.text, "只分析，不要改文件");
+        assert!(steering_queue.try_next().is_none());
+        assert!(deferred.pending_context_actions.is_empty());
+        assert!(!abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            steering_signal.notified(),
+        )
+        .await
+        .expect("steering wakes the worker");
+    }
+
+    #[tokio::test]
     async fn streaming_subtask_waits_for_the_turn_before_forking_context() {
         let mut deferred = DeferredRuntimeActions::default();
         let (tx, _rx) = mpsc::channel(1);

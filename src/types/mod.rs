@@ -39,6 +39,24 @@ pub struct ToolResult {
     pub llm_content: Option<String>,
 }
 
+impl ToolResult {
+    /// 展示正文保留失败输出和错误摘要；已含摘要时不重复添加。
+    pub(crate) fn display_output(&self) -> std::borrow::Cow<'_, str> {
+        let output = self.output.as_deref().unwrap_or("");
+        if self.success {
+            return std::borrow::Cow::Borrowed(output);
+        }
+        let error = self.error.as_deref().unwrap_or("");
+        if output.trim().is_empty() {
+            std::borrow::Cow::Borrowed(error)
+        } else if error.trim().is_empty() || output.contains(error) {
+            std::borrow::Cow::Borrowed(output)
+        } else {
+            std::borrow::Cow::Owned(format!("{error}\n{output}"))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorCommand {
     pub command: EditorCommandType,
@@ -1680,6 +1698,36 @@ impl ModelInfo {
     /// Get short display string (just model name)
     pub fn short_display(&self) -> String {
         self.display_name.clone().unwrap_or_else(|| self.id.clone())
+    }
+}
+
+#[cfg(test)]
+mod tool_result_display_tests {
+    use super::ToolResult;
+
+    #[test]
+    fn failed_output_keeps_details_without_losing_or_repeating_the_error() {
+        let mut result = ToolResult {
+            success: false,
+            output: Some("compiler diagnostics".into()),
+            error: Some("Exit code: 1".into()),
+            data: None,
+            llm_content: None,
+        };
+        assert_eq!(
+            result.display_output(),
+            "Exit code: 1\ncompiler diagnostics"
+        );
+        result.output = Some("Exit code: 1\ncompiler diagnostics".into());
+        assert_eq!(
+            result.display_output(),
+            "Exit code: 1\ncompiler diagnostics"
+        );
+        result.output = Some("  ".into());
+        assert_eq!(result.display_output(), "Exit code: 1");
+        result.success = true;
+        result.output = Some("normal output".into());
+        assert_eq!(result.display_output(), "normal output");
     }
 }
 

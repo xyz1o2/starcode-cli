@@ -222,13 +222,30 @@ pub(crate) struct AgentWorktree {
     initial_head: String,
 }
 
+/// 清除继承自启动环境的仓库定位，确保 Git 按子命令 cwd 发现工作树。
+/// 只在工作树管理命令和已绑定独立工作目录的子代理 Shell 中使用。
+pub(crate) fn clear_git_repository_env(command: &mut tokio::process::Command) {
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_QUARANTINE_PATH",
+    ] {
+        command.env_remove(name);
+    }
+}
+
 impl AgentWorktree {
     async fn git(root: &Path, args: &[&std::ffi::OsStr]) -> Result<String, String> {
-        let output = tokio::process::Command::new("git")
+        let mut command = tokio::process::Command::new("git");
+        clear_git_repository_env(&mut command);
+        let output = command
             .current_dir(root)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
             .args(args)
             .output()
             .await
@@ -324,6 +341,91 @@ mod agent_worktree_tests {
         );
     }
 
+    /// 在子命令上模拟污染环境，不修改测试进程的全局环境。
+    #[tokio::test]
+    async fn inherited_git_locations_do_not_redirect_an_isolated_shell() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        git(repository.path(), &["init", "-q"]);
+        git(
+            repository.path(),
+            &["config", "user.email", "starcode-tests@example.invalid"],
+        );
+        git(
+            repository.path(),
+            &["config", "user.name", "StarCode Tests"],
+        );
+        std::fs::write(repository.path().join("tracked.txt"), "base").unwrap();
+        git(repository.path(), &["add", "tracked.txt"]);
+        git(repository.path(), &["commit", "-qm", "initial"]);
+        let worktree = AgentWorktree::create(repository.path()).await.unwrap();
+        let mut command = tokio::process::Command::new("git");
+        command
+            .current_dir(&worktree.path)
+            .args(["rev-parse", "--show-toplevel"]);
+        command.env("GIT_DIR", repository.path().join(".git"));
+        command.env("GIT_WORK_TREE", repository.path());
+        command.env("GIT_INDEX_FILE", repository.path().join(".git/index"));
+        command.env("GIT_COMMON_DIR", repository.path().join(".git"));
+        command.env(
+            "GIT_OBJECT_DIRECTORY",
+            repository.path().join(".git/objects"),
+        );
+        super::clear_git_repository_env(&mut command);
+        let output = command.output().await.expect("git probe");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let actual = std::path::PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+        assert_eq!(
+            actual.canonicalize().unwrap(),
+            worktree.path.canonicalize().unwrap()
+        );
+        // 走真实 Shell invocation，验证默认 cwd 及相对写入确实落在工作树。
+        let mut config = crate::core::config::Config::new(crate::core::config::ConfigParameters {
+            target_dir: repository.path().to_owned(),
+            ..Default::default()
+        });
+        config.agent_working_dir = Some(worktree.path.clone());
+        let shell = crate::core::tools::shell::ShellToolInvocation::new(
+            std::sync::Arc::new(config),
+            crate::core::tools::shell::ShellToolParams {
+                command: "git rev-parse --show-toplevel && printf 'child only' > tracked.txt"
+                    .into(),
+                description: None,
+                dir_path: None,
+                dangerously_disable_sandbox: false,
+                run_in_background: Some(false),
+            },
+            None,
+            None,
+            None,
+        );
+        let result = crate::core::tools::tools::ToolInvocation::execute(&shell, None, None)
+            .await
+            .expect("isolated shell should execute");
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.output.contains(worktree.path.to_str().unwrap()),
+            "{}",
+            result.output
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.path.join("tracked.txt")).unwrap(),
+            "child only"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join("tracked.txt")).unwrap(),
+            "base"
+        );
+        assert!(!worktree.finish().await.unwrap());
+        git(
+            repository.path(),
+            &["worktree", "remove", "-f", worktree.path.to_str().unwrap()],
+        );
+    }
+
     #[tokio::test]
     async fn clean_worktree_is_removed_but_dirty_and_committed_results_are_retained() {
         let repository = tempfile::tempdir().expect("temporary repository");
@@ -350,7 +452,10 @@ mod agent_worktree_tests {
         std::fs::write(dirty_path.join("new.txt"), "keep").unwrap();
         assert_eq!(dirty.finish().await.unwrap(), false);
         assert!(dirty_path.exists(), "dirty worktree must remain available");
-        git(repository.path(), &["worktree", "remove", "-f", dirty_path.to_str().unwrap()]);
+        git(
+            repository.path(),
+            &["worktree", "remove", "-f", dirty_path.to_str().unwrap()],
+        );
 
         let committed = AgentWorktree::create(repository.path()).await.unwrap();
         let committed_path = committed.path.clone();

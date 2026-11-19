@@ -8,16 +8,23 @@ use crate::tools::lsp::client::LspClient;
 use async_trait::async_trait;
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 pub struct LspTool {
     clients: Arc<tokio::sync::Mutex<HashMap<String, LspClient>>>,
+    root_dir: PathBuf,
 }
 
 impl LspTool {
     pub fn new() -> Self {
+        Self::with_root_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    pub fn with_root_dir(root_dir: PathBuf) -> Self {
         Self {
             clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            root_dir,
         }
     }
 
@@ -88,7 +95,7 @@ impl LspTool {
         let env_var_name = format!("STAR_LSP_SERVER_{}", language.to_uppercase());
         let cmd = std::env::var(&env_var_name).unwrap_or(cmd);
 
-        match LspClient::new(&cmd, &args).await {
+        match LspClient::new_with_root(&cmd, &args, self.root_dir.clone()).await {
             Ok(client) => {
                 clients.insert(language.to_string(), client);
                 Ok(())
@@ -182,6 +189,7 @@ impl LspTool {
     fn clone_box(&self) -> Arc<LspTool> {
         Arc::new(LspTool {
             clients: self.clients.clone(),
+            root_dir: self.root_dir.clone(),
         })
     }
 }

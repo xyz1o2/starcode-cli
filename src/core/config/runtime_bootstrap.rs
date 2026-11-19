@@ -103,9 +103,13 @@ pub async fn build_runtime_services(
     .await?;
 
     // 后台 SubAgent 通知队列（全局共享，供 AgentTool 写入、主 Agent 每轮消费）
-    let notification_queue = Arc::new(tokio::sync::Mutex::new(
-        crate::agent::subagent::notification::NotificationQueue::new(),
-    ));
+    let notification_queue = existing_runtime
+        .and_then(|runtime| runtime.notification_queue())
+        .unwrap_or_else(|| {
+            Arc::new(tokio::sync::Mutex::new(
+                crate::agent::subagent::notification::NotificationQueue::new(),
+            ))
+        });
 
     // Re-install services with the notification queue attached (retains built registry)
     let mut services = RuntimeServices::new(
@@ -200,6 +204,50 @@ pub(crate) async fn build_two_layer_registry_for_tests() -> Arc<ToolRegistry> {
     let client = StarClient::new("", None, None, None, None);
     agent_runtime::register_agent_runtime_tools(&registry, &config, &bus, &gs, &client);
     registry
+}
+
+/// 子代理重装工具前先分离注册映射，避免覆盖父级或兄弟的客户端和 runner。
+pub(crate) fn isolate_agent_tool_registry(config: Arc<Config>) -> Arc<Config> {
+    let inherited = config
+        .runtime_tool_registry()
+        .expect("ToolRegistry not initialized");
+    let services = config
+        .runtime_services
+        .as_ref()
+        .expect("RuntimeServices not initialized");
+    let mut local = (*config).clone();
+    let registry_config = inherited.get_config();
+    let same_agent = registry_config.recursion_depth == config.recursion_depth
+        && registry_config.agent_identity == config.agent_identity;
+    // 同一子代理每条消息会重建循环 Agent；保留它自己的槽，Skill 和循环才能读同一份。
+    let model_switch_cell = if same_agent {
+        config
+            .runtime_model_switch_cell()
+            .unwrap_or_else(crate::agent::model_switch::new_cell)
+    } else {
+        crate::agent::model_switch::new_cell()
+    };
+    let services = (**services)
+        .clone()
+        .with_tool_registry(None)
+        .with_model_switch_cell(model_switch_cell);
+    local.install_runtime_services(services.clone());
+    // 注册表自己的配置不持有注册表，避免 Arc 循环；工具使用下面安装后的配置。
+    let registry = Arc::new(inherited.fork_for_agent(Arc::new(local.clone())));
+    local.install_runtime_services(services.with_tool_registry(Some(registry.clone())));
+    let local = Arc::new(local);
+    core_runtime::register_core_runtime_tools(
+        &registry,
+        &local,
+        &local,
+        &local
+            .runtime_message_bus()
+            .expect("message bus is inherited"),
+        &local
+            .runtime_global_state()
+            .expect("global state is inherited"),
+    );
+    local
 }
 
 pub fn build_agent_runtime_artifacts(

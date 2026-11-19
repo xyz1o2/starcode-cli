@@ -1006,6 +1006,9 @@ impl ToolInvocation for ShellToolInvocation {
             };
 
             cmd.current_dir(&cwd);
+            if config.agent_working_dir.is_some() {
+                crate::agent::worktree::clear_git_repository_env(&mut cmd);
+            }
             cmd.kill_on_drop(true);
             // Unix 下让每条命令独立成组：超时转后台 / KillShell 时可以整组发信
             // 号（pgid == child pid），命令自己起的子进程一起收掉。
@@ -1317,10 +1320,9 @@ impl ShellToolInvocation {
 
         // 失败时把 stderr 和退出码一起带上。
         //
-        // executor 用 `return_display.unwrap_or(output)` 得到**同一个**字符串，既发给
-        // 模型也给 UI（`llm_content` 根本没人读，见 agent/tool_executor.rs）。所以
-        // 只放 stdout 的话，一个同时写了两个流的失败命令，模型看到的是"输出正常"，
-        // 只能靠重跑去猜哪里错了。
+        // `return_display` 面向 UI，`llm_content` 面向模型，失败时两条通道都必须保留
+        // stdout、stderr 和退出码。只放 stdout 的话，一个同时写了两个流的失败命令，
+        // 模型看到的是"输出正常"，只能靠重跑去猜哪里错了。
         let return_display = if !stdout_output.is_empty() {
             if status.success() {
                 stdout_output.to_string()

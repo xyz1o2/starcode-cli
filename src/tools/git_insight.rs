@@ -3,14 +3,22 @@ use crate::core::tools::tools::{
     ToolResult as CoreToolResult,
 };
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Clone)]
-pub struct GitInsightTool;
+pub struct GitInsightTool {
+    working_dir: PathBuf,
+}
 
 impl GitInsightTool {
     pub fn new() -> Self {
-        Self
+        Self::with_working_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    /// 所有 Git 与 gh 子命令都使用所属代理的工作目录。
+    pub fn with_working_dir(working_dir: PathBuf) -> Self {
+        Self { working_dir }
     }
 }
 
@@ -29,6 +37,7 @@ pub struct GitInsightParams {
 
 pub struct GitInsightInvocation {
     params: GitInsightParams,
+    working_dir: PathBuf,
 }
 
 impl ToolInvocation for GitInsightInvocation {
@@ -67,6 +76,7 @@ impl ToolInvocation for GitInsightInvocation {
 
         Box::pin(async move {
             let result = execute_git_command(
+                &self.working_dir,
                 &params,
                 max_count,
                 file_path.as_deref(),
@@ -195,11 +205,23 @@ impl BaseDeclarativeTool for GitInsightTool {
         params: serde_json::Value,
     ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
         let params: GitInsightParams = serde_json::from_value(params)?;
-        Ok(Box::new(GitInsightInvocation { params }))
+        Ok(Box::new(GitInsightInvocation {
+            params,
+            working_dir: self.working_dir.clone(),
+        }))
     }
 }
 
+fn repository_command(program: &str, working_dir: &Path) -> Command {
+    // 复用工作树管理的清理规则，防止父进程环境把 Git 重定向到主仓库。
+    let mut command = tokio::process::Command::new(program);
+    crate::agent::worktree::clear_git_repository_env(&mut command);
+    command.current_dir(working_dir);
+    command.into_std()
+}
+
 async fn execute_git_command(
+    working_dir: &Path,
     command: &str,
     max_count: Option<usize>,
     file_path: Option<&str>,
@@ -214,7 +236,7 @@ async fn execute_git_command(
         let title = title.ok_or("Title is required for pr_create")?;
         let body = body.ok_or("Body is required for pr_create")?;
 
-        let mut cmd = Command::new("gh");
+        let mut cmd = repository_command("gh", working_dir);
         cmd.arg("pr");
         cmd.arg("create");
         cmd.arg("--title");
@@ -235,7 +257,7 @@ async fn execute_git_command(
         return Ok(String::from_utf8_lossy(&output.stdout).to_string());
     }
 
-    let mut cmd = Command::new("git");
+    let mut cmd = repository_command("git", working_dir);
     cmd.arg("--no-pager"); // Ensure no pager is used
 
     match command {
@@ -406,7 +428,7 @@ async fn execute_git_command(
                 file_path.ok_or("File path is required for related files analysis")?;
 
             // 1. Get all commit hashes that touched this file
-            let mut hash_cmd = Command::new("git");
+            let mut hash_cmd = repository_command("git", working_dir);
             hash_cmd.arg("log").arg("--format=%H").arg(target_path);
             if let Some(s) = since {
                 hash_cmd.arg(format!("--since={}", s));
@@ -444,7 +466,7 @@ async fn execute_git_command(
             }
 
             // We can pass multiple hashes to `git show`
-            let mut show_cmd = Command::new("git");
+            let mut show_cmd = repository_command("git", working_dir);
             show_cmd.arg("show").arg("--name-only").arg("--format=");
             show_cmd.args(&hash_list);
 
@@ -485,5 +507,178 @@ async fn execute_git_command(
     } else {
         let err = String::from_utf8_lossy(&output.stderr).to_string();
         Err(format!("Git command failed: {}", err).into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let output = repository_command("git", root)
+            .args(args)
+            .output()
+            .expect("run fixture git command");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    async fn invoke(tool: &GitInsightTool, params: serde_json::Value) -> CoreToolResult {
+        let invocation = tool
+            .create_invocation(params)
+            .expect("create GitInsight invocation");
+        let result = invocation
+            .execute(None, None)
+            .await
+            .expect("execute GitInsight invocation");
+        assert!(
+            result.error.is_none(),
+            "GitInsight failed: {:?}",
+            result.error
+        );
+        result
+    }
+
+    #[tokio::test]
+    async fn relative_git_reads_and_add_use_agent_worktree_and_keep_parent_unchanged() {
+        let process_cwd = std::env::current_dir().expect("read process cwd");
+        let parent = tempfile::tempdir().expect("create parent repository");
+        let worktree = tempfile::tempdir().expect("create worktree directory");
+        git(parent.path(), &["init"]);
+        std::fs::write(parent.path().join("shared.rs"), "fn original() {}\n")
+            .expect("write shared fixture");
+        std::fs::write(parent.path().join("co_changed.rs"), "fn companion() {}\n")
+            .expect("write companion fixture");
+        git(parent.path(), &["add", "shared.rs", "co_changed.rs"]);
+        let hooks = parent.path().join("empty-hooks");
+        std::fs::create_dir(&hooks).expect("create empty hook directory");
+        let hooks_config = format!("core.hooksPath={}", hooks.display());
+        git(
+            parent.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                &hooks_config,
+                "commit",
+                "-m",
+                "fixture history",
+            ],
+        );
+        git(
+            parent.path(),
+            &[
+                "-c",
+                &hooks_config,
+                "worktree",
+                "add",
+                "-b",
+                "isolated",
+                worktree.path().to_str().expect("worktree path is UTF-8"),
+            ],
+        );
+        std::fs::write(parent.path().join("shared.rs"), "fn parent_only() {}\n")
+            .expect("modify parent fixture");
+        std::fs::write(worktree.path().join("shared.rs"), "fn child_only() {}\n")
+            .expect("modify worktree fixture");
+        let parent_status = git(parent.path(), &["status", "--porcelain"]);
+        let parent_index =
+            std::fs::read(parent.path().join(".git/index")).expect("read parent index");
+        let tool = GitInsightTool::with_working_dir(worktree.path().to_path_buf());
+
+        let diff = invoke(
+            &tool,
+            serde_json::json!({"command": "diff", "file_path": "shared.rs"}),
+        )
+        .await;
+        let diff_data = diff.data.expect("diff data");
+        let diff_text = diff_data["diff"].as_str().expect("diff text");
+        assert!(diff_text.contains("child_only"), "{diff_text}");
+        assert!(!diff_text.contains("parent_only"), "{diff_text}");
+        let related = invoke(
+            &tool,
+            serde_json::json!({"command": "related", "file_path": "shared.rs"}),
+        )
+        .await;
+        assert!(
+            related.output.contains("co_changed.rs"),
+            "{}",
+            related.output
+        );
+        let churn = invoke(&tool, serde_json::json!({"command": "churn"})).await;
+        assert!(churn.output.contains("shared.rs"), "{}", churn.output);
+        let log = invoke(
+            &tool,
+            serde_json::json!({"command": "log", "file_path": "shared.rs"}),
+        )
+        .await;
+        assert!(log.output.contains("fixture history"), "{}", log.output);
+        let blame = invoke(
+            &tool,
+            serde_json::json!({"command": "blame", "file_path": "shared.rs"}),
+        )
+        .await;
+        assert!(blame.output.contains("child_only"), "{}", blame.output);
+        invoke(
+            &tool,
+            serde_json::json!({"command": "add", "file_path": "shared.rs"}),
+        )
+        .await;
+        let status = invoke(&tool, serde_json::json!({"command": "status"})).await;
+        assert_eq!(status.output, "M  shared.rs\n");
+        assert!(
+            git(worktree.path(), &["diff", "--cached", "--", "shared.rs"]).contains("child_only")
+        );
+        assert_eq!(
+            git(parent.path(), &["status", "--porcelain"]),
+            parent_status
+        );
+        assert_eq!(
+            std::fs::read(parent.path().join(".git/index")).expect("read parent index"),
+            parent_index
+        );
+        assert_eq!(
+            std::fs::read_to_string(parent.path().join("shared.rs")).expect("read parent file"),
+            "fn parent_only() {}\n"
+        );
+        assert_eq!(
+            std::env::current_dir().expect("read process cwd"),
+            process_cwd
+        );
+    }
+
+    #[test]
+    fn git_and_gh_commands_clear_repository_environment_and_bind_working_dir() {
+        let worktree = tempfile::tempdir().expect("create worktree directory");
+        for program in ["git", "gh"] {
+            let command = repository_command(program, worktree.path());
+            assert_eq!(command.get_current_dir(), Some(worktree.path()));
+            for key in [
+                "GIT_DIR",
+                "GIT_WORK_TREE",
+                "GIT_INDEX_FILE",
+                "GIT_COMMON_DIR",
+                "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                "GIT_PREFIX",
+                "GIT_SHALLOW_FILE",
+                "GIT_QUARANTINE_PATH",
+            ] {
+                assert!(
+                    command
+                        .get_envs()
+                        .any(|(name, value)| name == key && value.is_none()),
+                    "{program} must remove inherited {key}"
+                );
+            }
+        }
     }
 }

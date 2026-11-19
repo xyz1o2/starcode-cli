@@ -27,11 +27,22 @@ pub struct RepoMapParams {
     pub max_entries: Option<usize>,
 }
 
-pub struct RepoMapTool;
+pub struct RepoMapTool {
+    base_dir: PathBuf,
+}
 
 impl RepoMapTool {
     pub fn new() -> Self {
-        RepoMapTool
+        Self::with_base_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    /// 将扫描根目录绑定到代理工作目录，避免执行时读取进程 cwd。
+    pub fn with_base_dir(base_dir: PathBuf) -> Self {
+        Self { base_dir }
+    }
+
+    fn resolve_root(&self, path: Option<&str>) -> PathBuf {
+        crate::core::utils::paths::resolve_tool_path(&self.base_dir, path.unwrap_or("."))
     }
 }
 
@@ -43,6 +54,7 @@ impl Default for RepoMapTool {
 
 pub struct RepoMapInvocation {
     params: RepoMapParams,
+    base_dir: PathBuf,
 }
 
 impl ToolInvocation for RepoMapInvocation {
@@ -74,13 +86,13 @@ impl ToolInvocation for RepoMapInvocation {
         >,
     > {
         let focus = self.params.focus.clone();
-        let path = self.params.path.clone();
+        let root = crate::core::utils::paths::resolve_tool_path(
+            &self.base_dir,
+            self.params.path.as_deref().unwrap_or("."),
+        );
         let max_entries = self.params.max_entries.unwrap_or(60).clamp(1, 200);
 
         Box::pin(async move {
-            let root = path
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
             let limits = RepoMapLimits {
                 max_entries,
                 ..RepoMapLimits::default()
@@ -106,6 +118,25 @@ impl ToolInvocation for RepoMapInvocation {
                 data: None,
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_root_uses_the_bound_directory() {
+        let tool = RepoMapTool::with_base_dir(PathBuf::from("/tmp/subagent-worktree"));
+
+        assert_eq!(
+            tool.resolve_root(None),
+            PathBuf::from("/tmp/subagent-worktree")
+        );
+        assert_eq!(
+            tool.resolve_root(Some("src")),
+            PathBuf::from("/tmp/subagent-worktree/src")
+        );
     }
 }
 
@@ -143,7 +174,10 @@ impl BaseDeclarativeTool for RepoMapTool {
         params: serde_json::Value,
     ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
         let params: RepoMapParams = serde_json::from_value(params)?;
-        Ok(Box::new(RepoMapInvocation { params }))
+        Ok(Box::new(RepoMapInvocation {
+            params,
+            base_dir: self.base_dir.clone(),
+        }))
     }
 
     fn is_read_only(&self) -> bool {

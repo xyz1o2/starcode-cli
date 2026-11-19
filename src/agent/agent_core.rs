@@ -158,6 +158,11 @@ impl Agent {
     pub fn new(client: StarClient, config: Arc<Config>) -> Self {
         crate::utils::logging::append_agent_log_line("[INIT] Agent::new starting...");
 
+        let config = if config.recursion_depth > 0 {
+            crate::core::config::runtime_bootstrap::isolate_agent_tool_registry(config)
+        } else {
+            config
+        };
         crate::utils::logging::append_agent_log_line("[INIT] build_agent_runtime_artifacts...");
         let runtime =
             crate::core::config::runtime_bootstrap::build_agent_runtime_artifacts(&client, &config);
@@ -179,14 +184,9 @@ impl Agent {
         // lead 与 SkillTool 共用模型切换槽；子代理使用独立槽，不能消费 lead 请求。
         //
         // 在结构体字面量之前取出来：`config` 会被 move 进 `Agent`。
-        let model_switch_cell = if config.recursion_depth > 0 {
-            // 子代理不能竞争消费 lead 的 /model 请求，只继承创建时解析出的客户端。
-            crate::agent::model_switch::new_cell()
-        } else {
-            config
-                .runtime_model_switch_cell()
-                .unwrap_or_else(crate::agent::model_switch::new_cell)
-        };
+        let model_switch_cell = config
+            .runtime_model_switch_cell()
+            .unwrap_or_else(crate::agent::model_switch::new_cell);
 
         // ContextEngine: 延迟初始化，不在构造函数中做任何 I/O
         let context_engine = crate::core::context::engine::ContextEngine::new();
@@ -206,6 +206,7 @@ impl Agent {
         );
         let compact_config = compact_manager.config().clone();
 
+        let memory_manager = crate::core::memory::MemoryManager::new(config.agent_working_dir());
         let mut agent = Self {
             client,
             config,
@@ -235,9 +236,7 @@ impl Agent {
             hub_identity: None,
             model_switch_cell,
             task_complexity: crate::core::routing::RequestComplexity::Medium,
-            memory_manager: crate::core::memory::MemoryManager::new(
-                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            ),
+            memory_manager,
             context_engine_initialized: false,
             token_budget_tracker: crate::agent::token_budget::TokenBudgetTracker::new(),
             stream_stall_detector: crate::agent::stream_stall::StreamStallDetector::new(),
@@ -297,7 +296,8 @@ impl Agent {
         self.refresh_plugin_tools().await;
 
         // 2. ContextEngine 初始化
-        if let Ok(cwd) = std::env::current_dir() {
+        {
+            let cwd = self.config.agent_working_dir().to_path_buf();
             crate::utils::logging::append_agent_log_line("[INIT-LAZY] init_project_components...");
             self.context_engine.init_project_components(&cwd);
 
@@ -820,9 +820,52 @@ mod tests {
         );
         let client = StarClient::new("", None, None, None, None);
         let lead = Agent::new(client.clone(), Arc::new(config.clone()));
+        let lead_registry = lead.runtime_tool_registry().unwrap();
+        let lead_runner = lead_registry.get_tool("Agent").unwrap();
+        let lead_workflow = lead_registry.get_tool("WorkflowTool").unwrap();
+        let lead_generation = lead_registry.generation();
         config.recursion_depth = 1;
         let first = Agent::new(client.clone(), Arc::new(config.clone()));
         let second = Agent::new(client, Arc::new(config));
+        let first_registry = first.runtime_tool_registry().unwrap();
+        let second_registry = second.runtime_tool_registry().unwrap();
+        assert!(!Arc::ptr_eq(&lead_registry, &first_registry));
+        assert!(!Arc::ptr_eq(&first_registry, &second_registry));
+        assert!(Arc::ptr_eq(
+            &lead_runner,
+            &lead_registry.get_tool("Agent").unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &lead_workflow,
+            &lead_registry.get_tool("WorkflowTool").unwrap()
+        ));
+        assert!(!Arc::ptr_eq(
+            &lead_runner,
+            &first_registry.get_tool("Agent").unwrap()
+        ));
+        assert!(!Arc::ptr_eq(
+            &first_registry.get_tool("Agent").unwrap(),
+            &second_registry.get_tool("Agent").unwrap()
+        ));
+        assert_eq!(lead_registry.generation(), lead_generation);
+        assert_eq!(first_registry.get_config().recursion_depth, 1);
+        assert!(Arc::ptr_eq(
+            &lead.config.runtime_message_bus().unwrap(),
+            &first.config.runtime_message_bus().unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &first.model_switch_cell,
+            &first.config.runtime_model_switch_cell().unwrap()
+        ));
+        let fresh_loop = Agent::new(first.client.clone(), first.config.clone());
+        assert!(Arc::ptr_eq(
+            &first.model_switch_cell,
+            &fresh_loop.model_switch_cell
+        ));
+        assert!(Arc::ptr_eq(
+            &fresh_loop.model_switch_cell,
+            &fresh_loop.config.runtime_model_switch_cell().unwrap()
+        ));
         assert!(Arc::ptr_eq(&lead.model_switch_cell, &lead_cell));
         publish(
             &lead_cell,
@@ -850,6 +893,69 @@ mod tests {
             take(&lead.model_switch_cell).await.unwrap().model,
             "lead-next"
         );
+    }
+
+    #[tokio::test]
+    async fn custom_agent_restrictions_survive_registry_isolation() {
+        use crate::core::{
+            agents::{SubAgentRequest, SubagentType},
+            config::{ConfigParameters, RuntimeServices},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join(".star/agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("isolation-fixture.md"), "---\nname: isolation-fixture\ntools: Read, Write, Bash\ndisallowedTools: Bash\n---\nInspect only.\n").unwrap();
+        let mut config = Config::new(ConfigParameters {
+            target_dir: dir.path().to_owned(),
+            core_tools: Some(vec!["Read".into(), "Write".into(), "Bash".into()]),
+            exclude_tools: Some(vec!["Write".into()]),
+            ..Default::default()
+        });
+        let registry = Arc::new(crate::core::tools::ToolRegistry::new(Arc::new(
+            config.clone(),
+        )));
+        let bus = Arc::new(crate::core::confirmation_bus::MessageBus::new(
+            crate::core::policy::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        config.install_runtime_services(RuntimeServices::new(
+            Some(registry),
+            bus,
+            None,
+            Arc::new(crate::core::state::GlobalState::new()),
+        ));
+        let client = StarClient::new("", None, None, None, None);
+        let lead = Agent::new(client.clone(), Arc::new(config.clone()));
+        let parent_registry = lead.runtime_tool_registry().unwrap();
+        config.recursion_depth = 1;
+        let mut request = SubAgentRequest::new("inspect");
+        request.subagent_type = SubagentType::Custom("isolation-fixture".into());
+        crate::agent::skills::custom::configure_custom_agent(&mut request, &mut config, dir.path())
+            .await
+            .unwrap();
+        let mut child = Agent::new(client, Arc::new(config));
+        let definitions = child.tool_executor.get_tool_definitions();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].function.name, "Read");
+        for name in ["Write", "Bash"] {
+            let result = child
+                .execute_tool_calls(vec![crate::types::StarToolCall {
+                    id: format!("restricted-{name}"),
+                    call_type: "function".into(),
+                    function: crate::types::StarToolCallFunction {
+                        name: name.into(),
+                        arguments: "{}".into(),
+                    },
+                }])
+                .await;
+            assert!(!result[0].success);
+            assert!(result[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("unavailable for this sub-agent"));
+            assert!(parent_registry.get_tool(name).is_some());
+        }
     }
 
     #[tokio::test]

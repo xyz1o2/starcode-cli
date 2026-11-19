@@ -6,11 +6,17 @@ use std::collections::HashMap;
 use tokio::process::Command;
 
 #[derive(Clone)]
-pub struct GhPrCommentsTool;
+pub struct GhPrCommentsTool {
+    base_dir: std::path::PathBuf,
+}
 
 impl GhPrCommentsTool {
     pub fn new() -> Self {
-        Self
+        Self::with_base_dir(std::env::current_dir().unwrap_or_else(|_| ".".into()))
+    }
+
+    pub fn with_base_dir(base_dir: std::path::PathBuf) -> Self {
+        Self { base_dir }
     }
 
     pub async fn fetch(
@@ -18,56 +24,59 @@ impl GhPrCommentsTool {
         pr_number: Option<u64>,
         repo: Option<String>,
     ) -> Result<CoreToolResult, Box<dyn std::error::Error>> {
-        let (owner, repo_name, pr, head_ref) = match resolve_repo_pr(pr_number, repo).await {
-            Ok(v) => v,
-            Err(e) => {
-                return Ok(CoreToolResult {
-                    llm_content: None,
-                    return_display: None,
-                    output: String::new(),
-                    error: Some(ToolError {
-                        error_type: "execution_error".to_string(),
-                        message: e,
-                    }),
-                    data: None,
-                });
-            }
-        };
+        let (owner, repo_name, pr, head_ref) =
+            match resolve_repo_pr(pr_number, repo, &self.base_dir).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Ok(CoreToolResult {
+                        llm_content: None,
+                        return_display: None,
+                        output: String::new(),
+                        error: Some(ToolError {
+                            error_type: "execution_error".to_string(),
+                            message: e,
+                        }),
+                        data: None,
+                    });
+                }
+            };
 
         let issue_comments_url = format!("repos/{}/{}/issues/{}/comments", owner, repo_name, pr);
         let review_comments_url = format!("repos/{}/{}/pulls/{}/comments", owner, repo_name, pr);
 
-        let issue_comments_v = match gh_api_json(&["api", &issue_comments_url]).await {
-            Ok(v) => v,
-            Err(e) => {
-                return Ok(CoreToolResult {
-                    llm_content: None,
-                    return_display: None,
-                    output: String::new(),
-                    error: Some(ToolError {
-                        error_type: "gh_api_error".to_string(),
-                        message: format!("gh api failed: {}", e),
-                    }),
-                    data: None,
-                });
-            }
-        };
+        let issue_comments_v =
+            match gh_api_json(&["api", &issue_comments_url], &self.base_dir).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Ok(CoreToolResult {
+                        llm_content: None,
+                        return_display: None,
+                        output: String::new(),
+                        error: Some(ToolError {
+                            error_type: "gh_api_error".to_string(),
+                            message: format!("gh api failed: {}", e),
+                        }),
+                        data: None,
+                    });
+                }
+            };
 
-        let review_comments_v = match gh_api_json(&["api", &review_comments_url]).await {
-            Ok(v) => v,
-            Err(e) => {
-                return Ok(CoreToolResult {
-                    llm_content: None,
-                    return_display: None,
-                    output: String::new(),
-                    error: Some(ToolError {
-                        error_type: "gh_api_error".to_string(),
-                        message: format!("gh api failed: {}", e),
-                    }),
-                    data: None,
-                });
-            }
-        };
+        let review_comments_v =
+            match gh_api_json(&["api", &review_comments_url], &self.base_dir).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Ok(CoreToolResult {
+                        llm_content: None,
+                        return_display: None,
+                        output: String::new(),
+                        error: Some(ToolError {
+                            error_type: "gh_api_error".to_string(),
+                            message: format!("gh api failed: {}", e),
+                        }),
+                        data: None,
+                    });
+                }
+            };
 
         let issue_comments: Vec<GhIssueComment> =
             serde_json::from_value(issue_comments_v).unwrap_or_default();
@@ -232,6 +241,7 @@ struct GhPrView {
 async fn resolve_repo_pr(
     pr_number: Option<u64>,
     repo: Option<String>,
+    base_dir: &std::path::Path,
 ) -> Result<(String, String, u64, Option<String>), String> {
     if let (Some(repo), Some(pr)) = (repo.as_deref(), pr_number) {
         let (owner, repo_name) = parse_owner_repo(repo)?;
@@ -239,12 +249,15 @@ async fn resolve_repo_pr(
     }
 
     // 尝试从当前工作区上下文获取
-    let v = gh_api_json(&[
-        "pr",
-        "view",
-        "--json",
-        "number,headRepository,baseRepository,headRefName",
-    ])
+    let v = gh_api_json(
+        &[
+            "pr",
+            "view",
+            "--json",
+            "number,headRepository,baseRepository,headRefName",
+        ],
+        base_dir,
+    )
     .await
     .map_err(|e| format!("gh pr view failed: {}", e))?;
 
@@ -280,9 +293,10 @@ fn parse_owner_repo(s: &str) -> Result<(String, String), String> {
     Ok((parts[0].to_string(), parts[1].to_string()))
 }
 
-async fn gh_api_json(args: &[&str]) -> Result<Value, String> {
+async fn gh_api_json(args: &[&str], base_dir: &std::path::Path) -> Result<Value, String> {
     let mut cmd = Command::new("gh");
-    cmd.args(args);
+    crate::agent::worktree::clear_git_repository_env(&mut cmd);
+    cmd.args(args).current_dir(base_dir);
 
     // 尽量非交互
     cmd.env("PAGER", "cat");

@@ -250,10 +250,19 @@ pub(crate) fn render_tool_entry_blocks(
     // ToolResult: 无标记，直接显示结果内容
     if entry.entry_type == ChatEntryType::ToolCall {
         // ToolCall 行：圆点 + 工具名称 + 参数
-        // 注意：闪烁通过颜色明暗切换实现，字符恒为 ●。
+        // 运行时闪烁通过颜色明暗切换实现，字符恒为 ●；终态按执行结果取标记。
         // 不能用空格替代 ● —— CJK 终端下 ● 是双宽、空格是单宽，
         // 交替会导致整行文字左右移动（所有工具行都会抖动）。
-        let marker = if cancelling { "⊘" } else { "●" };
+        let marker = if cancelling || entry.status == Some(EntryStatus::Cancelled) {
+            "⊘"
+        } else if matches!(
+            entry.status,
+            Some(EntryStatus::Error | EntryStatus::SoftError)
+        ) {
+            "✗"
+        } else {
+            "●"
+        };
         let marker_color = if cancelling {
             theme.warning
         } else if is_streaming {
@@ -263,7 +272,13 @@ pub(crate) fn render_tool_entry_blocks(
                 theme.inactive // 闪烁"灭"态：暗色圆点，宽度不变
             }
         } else {
-            theme.tool_success // 完成后用绿色
+            match entry.status {
+                Some(EntryStatus::Error) => theme.tool_error,
+                Some(EntryStatus::SoftError) => theme.subtle,
+                Some(EntryStatus::Cancelled) => theme.inactive,
+                Some(EntryStatus::Success) => theme.tool_success,
+                _ => theme.inactive,
+            }
         };
 
         // 第一行：圆点 + 工具信息（在 content_lines 中已经渲染好了）
@@ -841,11 +856,8 @@ fn render_rich_tool_content(
         }
 
         // 非 diff 工具：根据工具类型决定折叠态显示方式
-        let text = if tr.success {
-            tr.output.as_deref().unwrap_or("")
-        } else {
-            tr.error.as_deref().unwrap_or("")
-        };
+        let display_output = tr.display_output();
+        let text = display_output.as_ref();
 
         // ===== 查看类工具：折叠态只显示摘要行 =====
         if !expanded && !text.trim().is_empty() && tr.success {
@@ -2047,10 +2059,11 @@ mod tests {
     fn snapshot_tool_call_entry() {
         let mut state = ChatState::test_fixture();
         state.ui_verbose = false;
-        let entry = tool_call_entry(
+        let mut entry = tool_call_entry(
             "Bash",
             r#"{"command":"cargo test --lib","description":"跑单元测试"}"#,
         );
+        entry.status = Some(EntryStatus::Success);
 
         let blocks = render_tool_entry_blocks(&state, &entry, 0, 72, false, false, false);
         let flat: Vec<Line> = blocks.iter().flat_map(|b| b.iter()).cloned().collect();

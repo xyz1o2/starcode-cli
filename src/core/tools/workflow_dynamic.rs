@@ -276,7 +276,7 @@ async fn run(
     // 失败时也保留已落盘的成功调用，后续恢复不会再执行它们。
     journal.status = if result.is_ok() {
         "completed"
-    } else if cancel.is_cancelled() {
+    } else if journal.status == "cancelled" {
         "cancelled"
     } else {
         "failed"
@@ -409,6 +409,10 @@ async fn drive(
         }
     }.await;
     if execution.is_err() {
+        // 先记录取消来源；失败清理也要停下游，但不能把脚本或权限错误记成用户取消。
+        if cancel.is_cancelled() {
+            journal.status = "cancelled".into();
+        }
         cancel.cancel();
     }
     // 取消下游后排空，确保 Agent 的实际循环已交接，不留下脱离工作流的写操作。
@@ -437,6 +441,407 @@ async fn drive(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct LocalHttp {
+        endpoint: String,
+        requests: Arc<tokio::sync::Mutex<Vec<Value>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for LocalHttp {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    impl LocalHttp {
+        async fn start() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+            let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            let captured = requests.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut bytes = Vec::new();
+                    let mut buffer = [0; 4096];
+                    let request = loop {
+                        let count = socket.read(&mut buffer).await.unwrap();
+                        assert!(count > 0, "HTTP request ended before its body");
+                        bytes.extend_from_slice(&buffer[..count]);
+                        if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&bytes[..end]);
+                            assert!(headers.starts_with("POST /v1/chat/completions "));
+                            assert!(
+                                headers.lines().any(|line| {
+                                    line.split_once(':').is_some_and(|(name, value)| {
+                                        name.eq_ignore_ascii_case("authorization")
+                                            && value.trim() == "Bearer workflow-local-key"
+                                    })
+                                }),
+                                "HTTP must use the fixture credential"
+                            );
+                            let length = headers
+                                .lines()
+                                .find_map(|line| {
+                                    let (name, value) = line.split_once(':')?;
+                                    name.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse::<usize>().unwrap())
+                                })
+                                .unwrap();
+                            if bytes.len() >= end + 4 + length {
+                                break serde_json::from_slice::<Value>(
+                                    &bytes[end + 4..end + 4 + length],
+                                )
+                                .unwrap();
+                            }
+                        }
+                    };
+                    let prompt = request["messages"].to_string();
+                    let answer = if prompt.contains("invalid-schema-task") {
+                        r#"{"count":"wrong type"}"#
+                    } else if prompt.contains("structured-task") {
+                        r#"{"count":7}"#
+                    } else {
+                        "override answer"
+                    };
+                    captured.lock().await.push(request);
+                    let frame = json!({"object":"chat.completion.chunk", "choices":[{"index":0,"delta":{"content":answer}}]});
+                    let body = format!("data: {frame}\n\ndata: {{\"object\":\"chat.completion.chunk\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n");
+                    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                }
+            });
+            Self {
+                endpoint,
+                requests,
+                task,
+            }
+        }
+    }
+
+    fn workflow_executor(
+        root: &Path,
+        endpoint: &str,
+        agent_decision: crate::core::policy::PolicyDecision,
+    ) -> (
+        Arc<crate::core::config::Config>,
+        crate::agent::tool_executor::ToolExecutor,
+    ) {
+        use crate::core::{
+            config::{Config, ConfigParameters, RuntimeServices},
+            confirmation_bus::MessageBus,
+            policy::{PolicyEngine, PolicyEngineConfig},
+            state::GlobalState,
+            tools::ToolRegistry,
+        };
+        use crate::llm::client::StarClient;
+
+        let mut config = Config::new(ConfigParameters {
+            target_dir: root.to_owned(),
+            cwd: root.to_owned(),
+            core_tools: Some(vec!["Agent".into()]),
+            approval_mode: Some(crate::core::policy::ApprovalMode::Default),
+            mcp_enabled: Some(false),
+            enable_agents: Some(false),
+            enable_hooks: Some(false),
+            headless: Some(true),
+            ..Default::default()
+        });
+        // 显式内存规则只放行工作流；内部 Agent 仍经过同一条真实权限门。
+        use crate::core::policy::settings_rules::{PermissionRuleSpec, SettingsPermissions};
+        let mut policy = PolicyEngine::new(PolicyEngineConfig {
+            non_interactive: Some(true),
+            ..Default::default()
+        });
+        let mut permissions = SettingsPermissions::default();
+        permissions
+            .allow
+            .push(PermissionRuleSpec::parse("WorkflowTool").unwrap());
+        let agent_rule = PermissionRuleSpec::parse("Agent").unwrap();
+        match agent_decision {
+            crate::core::policy::PolicyDecision::Allow => permissions.allow.push(agent_rule),
+            crate::core::policy::PolicyDecision::Deny => permissions.deny.push(agent_rule),
+            other => panic!("unsupported workflow fixture decision: {other:?}"),
+        }
+        policy.set_settings_permissions(permissions);
+        let bus = Arc::new(MessageBus::new(policy, false));
+        let global = Arc::new(GlobalState::new());
+        config.install_runtime_services(RuntimeServices::new(
+            None,
+            bus.clone(),
+            None,
+            global.clone(),
+        ));
+        let registry = Arc::new(ToolRegistry::new(Arc::new(config.clone())));
+        config.install_runtime_services(RuntimeServices::new(
+            Some(registry.clone()),
+            bus.clone(),
+            None,
+            global,
+        ));
+        let config = Arc::new(config);
+        // 注册时的旧客户端不可被工作流或共享 AgentTool 错当成当前调用方。
+        let stale = StarClient::new(
+            "workflow-local-key",
+            Some("stale-model".into()),
+            Some("http://127.0.0.1:1/v1".into()),
+            Some(true),
+            Some("local-test".into()),
+        );
+        crate::core::config::runtime_bootstrap::build_agent_runtime_artifacts(&stale, &config);
+        let current = StarClient::new(
+            "workflow-local-key",
+            Some("gpt-5-workflow-current".into()),
+            Some(endpoint.into()),
+            Some(true),
+            Some("local-test".into()),
+        );
+        let executor = crate::agent::tool_executor::ToolExecutor::new(
+            stale,
+            registry,
+            Some(bus),
+            config.clone(),
+        );
+        executor.set_agent_parent_client(&current);
+        executor.set_agent_parent_thinking_effort(crate::types::ThinkingEffort::Low);
+        executor.set_agent_parent_context(&[crate::types::StarMessage::user(
+            "workflow-parent-context",
+        )]);
+        (config, executor)
+    }
+
+    fn workflow_call(arguments: Value) -> crate::types::StarToolCall {
+        crate::types::StarToolCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            call_type: "function".into(),
+            function: crate::types::StarToolCallFunction {
+                name: "WorkflowTool".into(),
+                arguments: arguments.to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn production_chain_inherits_http_settings_validates_schema_and_resumes() {
+        tokio::time::timeout(std::time::Duration::from_secs(40), async {
+            let directory = tempfile::tempdir().unwrap();
+            let http = LocalHttp::start().await;
+            let (config, executor) = workflow_executor(
+                directory.path(),
+                &http.endpoint,
+                crate::core::policy::PolicyDecision::Allow,
+            );
+            let script = r#"
+const values = await parallel([
+  () => agent("structured-task", { label: "structured", max_rounds: 2,
+    schema: { type: "object", properties: { count: { type: "integer" } }, required: ["count"] } }),
+  () => agent("override-task", { label: "override", max_rounds: 2,
+    model: "gpt-5-workflow-override", effort: "high" }),
+]);
+return { count: values[0].count, text: values[1], args };
+"#;
+            let args = json!({"input": 42});
+            let first = executor
+                .execute(
+                    &workflow_call(json!({"script":script, "args":args})),
+                    None,
+                    None,
+                )
+                .await;
+            assert!(first.success, "{first:?}");
+            let data = first.data.unwrap();
+            assert_eq!(data["status"], "completed");
+            assert_eq!(
+                data["result"],
+                json!({"count":7,"text":"override answer","args":args})
+            );
+            let id = data["run_id"].as_str().unwrap();
+            let journal_path = config
+                .storage()
+                .project_workflows_dir()
+                .join("runs")
+                .join(id)
+                .join("journal.json");
+            let before = tokio::fs::read(&journal_path).await.unwrap();
+            let journal: Value = serde_json::from_slice(&before).unwrap();
+            assert_eq!(journal["calls"]["structured"]["value"], json!({"count":7}));
+            let requests = http.requests.lock().await.clone();
+            assert_eq!(
+                requests.len(),
+                2,
+                "both agents must reach the local HTTP server"
+            );
+            for (prompt, model, effort) in [
+                ("structured-task", "gpt-5-workflow-current", "low"),
+                ("override-task", "gpt-5-workflow-override", "high"),
+            ] {
+                let request = requests
+                    .iter()
+                    .find(|r| r["messages"].to_string().contains(prompt))
+                    .unwrap();
+                assert_eq!(request["model"], model);
+                assert_eq!(request["reasoning_effort"], effort);
+                assert!(
+                    !request["messages"]
+                        .to_string()
+                        .contains("workflow-parent-context"),
+                    "普通同步 Agent 不应继承 fork 专用父上下文"
+                );
+            }
+            assert_eq!(
+                config.runtime_message_bus().unwrap().approval_mode().await,
+                crate::core::policy::ApprovalMode::Default,
+                "the child workflow must not mutate the caller approval mode"
+            );
+            let resumed = executor
+                .execute(
+                    &workflow_call(json!({"script":script, "args":args,
+                "resume_from_run_id":id})),
+                    None,
+                    None,
+                )
+                .await;
+            assert!(resumed.success, "{resumed:?}");
+            let resumed_data = resumed.data.unwrap();
+            assert_ne!(resumed_data["run_id"], id);
+            assert_eq!(resumed_data["result"], data["result"]);
+            let resumed_journal: Value = serde_json::from_slice(
+                &tokio::fs::read(resumed_data["journal"].as_str().unwrap())
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(resumed_journal["context"], journal["context"]);
+            assert_eq!(resumed_journal["calls"], journal["calls"]);
+            let resumed_requests = http.requests.lock().await.clone();
+            assert_eq!(
+                resumed_requests.len(),
+                2,
+                "resume must not repeat HTTP calls: {resumed_requests:?}"
+            );
+            assert_eq!(tokio::fs::read(journal_path).await.unwrap(), before);
+
+            let invalid = executor
+                .execute(
+                    &workflow_call(json!({"script":r#"
+return await agent("invalid-schema-task", { label: "invalid", max_rounds: 2,
+  schema: { type: "object", properties: { count: { type: "integer" } }, required: ["count"] } });
+"#})),
+                    None,
+                    None,
+                )
+                .await;
+            assert!(!invalid.success, "schema mismatch must fail: {invalid:?}");
+            assert!(invalid.error.unwrap().contains("does not match schema"));
+            let failed = invalid.data.unwrap();
+            assert_eq!(failed["status"], "failed");
+            let journal: Value = serde_json::from_slice(
+                &tokio::fs::read(failed["journal"].as_str().unwrap())
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                journal["calls"],
+                json!({}),
+                "invalid structured output must not be cached"
+            );
+            assert_eq!(http.requests.lock().await.len(), 3);
+            assert!(!http.task.is_finished(), "HTTP fixture must remain healthy");
+        })
+        .await
+        .expect("workflow production HTTP regression must finish");
+    }
+
+    #[tokio::test]
+    async fn production_chain_obeys_agent_denial_before_http_dispatch() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let directory = tempfile::tempdir().unwrap();
+            let http = LocalHttp::start().await;
+            let (_, executor) = workflow_executor(
+                directory.path(),
+                &http.endpoint,
+                crate::core::policy::PolicyDecision::Deny,
+            );
+            let result = executor
+                .execute(
+                    &workflow_call(json!({"script":
+                r#"return await agent("must-not-dispatch", { label: "denied" });"#})),
+                    None,
+                    None,
+                )
+                .await;
+            assert!(
+                !result.success,
+                "Agent denial must propagate through workflow: {result:?}"
+            );
+            let data = result.data.unwrap();
+            assert_eq!(data["status"], "failed");
+            let journal: Value = serde_json::from_slice(
+                &tokio::fs::read(data["journal"].as_str().unwrap())
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(journal["error"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("denied"));
+            assert_eq!(journal["calls"], json!({}));
+            assert!(
+                http.requests.lock().await.is_empty(),
+                "denied Agent must not reach HTTP"
+            );
+            assert!(!http.task.is_finished(), "HTTP fixture must remain healthy");
+        })
+        .await
+        .expect("workflow denied Agent regression must finish");
+    }
+
+    #[tokio::test]
+    async fn external_cancellation_is_distinct_from_failure_cleanup_in_the_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let backend_cancel = cancel.clone();
+        let backend: Backend = Arc::new(move |_| {
+            let cancel = backend_cancel.clone();
+            Box::pin(async move {
+                cancel.cancel();
+                Err("agent interrupted".into())
+            })
+        });
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(
+                directory.path(),
+                directory.path(),
+                r#"return await agent("interrupt", { label: "interrupt" });"#.into(),
+                Value::Null,
+                None,
+                "cancellation-context".into(),
+                1,
+                3,
+                cancel,
+                backend,
+                None,
+            ),
+        )
+        .await
+        .expect("workflow cancellation must finish")
+        .unwrap();
+        assert!(result.error.is_some());
+        let data = result.data.unwrap();
+        assert_eq!(data["status"], "cancelled");
+        let journal: Value = serde_json::from_slice(
+            &tokio::fs::read(data["journal"].as_str().unwrap())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(journal["status"], "cancelled");
+        assert_eq!(journal["calls"], json!({}));
+    }
 
     fn local_backend(calls: Arc<AtomicUsize>) -> Backend {
         Arc::new(move |arguments| {

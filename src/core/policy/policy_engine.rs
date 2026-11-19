@@ -149,6 +149,9 @@ impl PolicyEngine {
         tool_name: &str,
         args: &serde_json::Value,
     ) -> Option<crate::core::auto_mode::service::AutoVerdict> {
+        if self.approval_mode != ApprovalMode::Auto {
+            return None;
+        }
         let classifier = self.auto_classifier.as_ref()?;
         if !classifier.is_available() {
             return None;
@@ -1428,6 +1431,53 @@ mod tests {
                 PolicyDecision::AskUser,
                 "{tool}({args}) 在没有分类器时必须弹确认"
             );
+        }
+    }
+
+    /// 已安装的分类器不能改变 Default/AcceptEdits 的审批语义。
+    #[tokio::test]
+    async fn non_auto_modes_do_not_consult_an_installed_classifier() {
+        use crate::core::auto_mode::service::{mock_classifier, AutoVerdict};
+        for mode in [ApprovalMode::Default, ApprovalMode::AcceptEdits] {
+            for verdict in [
+                AutoVerdict::Allow {
+                    reason: "fixture allow".into(),
+                },
+                AutoVerdict::Deny {
+                    reason: "fixture deny".into(),
+                },
+            ] {
+                let mut engine = engine_in(mode.clone());
+                engine.set_auto_classifier(mock_classifier(vec![verdict]), None);
+                assert_eq!(
+                    engine
+                        .check(
+                            &call(
+                                "WebFetch",
+                                serde_json::json!({"url": "https://example.com"})
+                            ),
+                            None
+                        )
+                        .await
+                        .decision,
+                    PolicyDecision::AskUser
+                );
+                engine.set_settings_permissions(SettingsPermissions {
+                    allow: vec![PermissionRuleSpec::parse("WorkflowTool").unwrap()],
+                    ..Default::default()
+                });
+                assert_eq!(
+                    engine
+                        .check(
+                            &call("WorkflowTool", serde_json::json!({"script": "return 1"})),
+                            None
+                        )
+                        .await
+                        .decision,
+                    PolicyDecision::Allow
+                );
+                assert_eq!(engine.auto_classifier_stats().total_classifications, 0);
+            }
         }
     }
 

@@ -941,6 +941,7 @@ pub async fn handle_stream_update(
             if tool_calls.is_empty() {
                 return Ok(());
             }
+            clear_stale_retry_status(state);
             // 1. End the current Assistant message's streaming state
             let had_thinking = if let Some(entry) = state.chat_history.get(assistant_idx) {
                 entry.entry_type == ChatEntryType::Assistant
@@ -963,6 +964,18 @@ pub async fn handle_stream_update(
                         && e.tool_call.as_ref().map(|t| t.id == tc.id).unwrap_or(false)
                 });
                 if let Some(idx) = existing_idx {
+                    // 双通道迟到的开始事件不能把已经收尾的工具重新标成运行中。
+                    if matches!(
+                        state.chat_history[idx].status,
+                        Some(
+                            EntryStatus::Success
+                                | EntryStatus::Error
+                                | EntryStatus::SoftError
+                                | EntryStatus::Cancelled
+                        )
+                    ) {
+                        continue;
+                    }
                     // Still update tracking state for the existing entry
                     state
                         .tool_started_at
@@ -1730,8 +1743,8 @@ async fn dequeue_pending_user_input(
 /// 的展示；重试成功、模型重新开始输出后，没有人清 `current_status_line` ——
 /// 旧的 "Provider Error — retrying now (1/3)" 会一直挂在 spinner 行上，直到
 /// 回合结束被 "✓ Done" 覆盖。实测出现过正文已经流了 5 分钟、括号里还是 1/3
-/// 的情况。TextDelta / Content / Thinking 三个"模型确实在说话"的信号到达时
-/// 调用这里：只清已结束的复杂度分析和重试文案，保留确认、错误等其他状态。
+/// 的情况。正文、思考或非空工具调用到达时调用这里：只清已结束的复杂度分析和
+/// 重试文案，保留确认、错误等其他状态。
 fn clear_stale_retry_status(state: &mut ChatState) {
     const RETRY_MARKERS: [&str; 2] = ["— retrying now", "— retry"];
     let Some(status) = state.current_status_line.as_deref() else {

@@ -1343,6 +1343,7 @@ mod tests {
         std::fs::write(wf.join("deploy.json"), "steps").unwrap();
         std::fs::write(wf.join("build.sh"), "steps").unwrap();
         std::fs::write(wf.join("notes.md"), "ignored").unwrap();
+        // JavaScript workflows are executable and therefore included in the list.
         std::fs::write(wf.join("dynamic.js"), "ignored").unwrap();
         let nested = dir.path().join("nested");
         std::fs::create_dir_all(&nested).unwrap();
@@ -1356,7 +1357,8 @@ mod tests {
         let out = last(&state);
         assert!(out.contains("- deploy ("), "{out}");
         assert!(out.contains("- build ("), "{out}");
-        assert!(!out.contains("notes") && !out.contains("dynamic"), "{out}");
+        assert!(!out.contains("notes"), "{out}");
+        assert!(out.contains("- dynamic ("), "{out}");
     }
 
     #[test]

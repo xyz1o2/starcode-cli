@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
 pub struct SearchTool {
-    current_directory: String,
+    current_directory: PathBuf,
     global_state: Arc<GlobalState>,
 }
 
@@ -31,16 +31,13 @@ impl SearchTool {
     /// workspace the agent is operating on (especially visible in WSL/IDE launches).
     pub fn new_with_base_dir(global_state: Arc<GlobalState>, base_dir: PathBuf) -> Self {
         Self {
-            current_directory: base_dir.to_string_lossy().to_string(),
+            current_directory: base_dir,
             global_state,
         }
     }
 
     fn base_dir(&self) -> String {
-        let raw_base_dir = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| self.current_directory.clone());
-        normalize_existing_search_dir(&raw_base_dir)
+        normalize_existing_search_dir(&self.current_directory.to_string_lossy())
     }
 
     pub async fn search(
@@ -296,14 +293,10 @@ impl SearchTool {
             file_types: file_types.cloned(),
             exclude_patterns: None,
             include_patterns: include_pattern.map(|p| vec![p.to_string()]),
-            // `include_pattern` 由 `tool_executor::normalize_search_args` 生成，
-            // 而 `normalize_search_scope` 会把绝对路径剥成相对 cwd —— 所以这个
-            // glob 是相对 **cwd** 写的，不是相对 `base_dir`。
-            //
-            // `path` 已经被 `resolve_search_base_dir` 用来把 walker 的根收窄成
-            // `<cwd>/src` 了；两个基再不一致，`Grep(pattern, path="src")` 会一个
-            // 文件都匹配不上（结果恒为空，且不报错）。
-            include_base: Some(crate::core::utils::paths::current_dir_cached().clone()),
+            // `include_pattern` 由搜索参数规范化生成，使用绑定的工作目录作为
+            // glob 基准。`path` 已经被 `resolve_search_base_dir` 用来把 walker
+            // 的根收窄成 `<base_dir>/src` 了，两个基必须保持一致。
+            include_base: Some(PathBuf::from(self.base_dir())),
             include_hidden,
             max_file_size: Some(2 * 1024 * 1024),
         };
@@ -426,7 +419,7 @@ impl SearchTool {
             return format!("No results found for \"{}\"", query);
         }
 
-        let base_dir = PathBuf::from(crate::core::utils::paths::current_dir_cached().clone());
+        let base_dir = PathBuf::from(self.base_dir());
         let mut output = String::new();
 
         let file_results: Vec<&UnifiedSearchResult> =
@@ -473,7 +466,7 @@ impl SearchTool {
             return format!("No matches found for \"{}\"", query);
         }
 
-        let base_dir = PathBuf::from(crate::core::utils::paths::current_dir_cached().clone());
+        let base_dir = PathBuf::from(self.base_dir());
         let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
         for r in &text_results {
             *counts.entry(r.file.as_str()).or_default() += 1;
@@ -504,7 +497,7 @@ impl SearchTool {
             return format!("No files with matches found for \"{}\"", query);
         }
 
-        let base_dir = PathBuf::from(crate::core::utils::paths::current_dir_cached().clone());
+        let base_dir = PathBuf::from(self.base_dir());
         let mut output = format!("{} with matches:\n", plural_count(files.len(), "file"));
         for file in files {
             output.push_str(&format!("{}\n", display_path(&file, &base_dir)));
@@ -612,6 +605,17 @@ mod tests {
 
     fn tool() -> SearchTool {
         SearchTool::new(Arc::new(GlobalState::new()))
+    }
+
+    #[test]
+    fn explicit_base_dir_is_used_when_no_search_path_is_given() {
+        let tool = SearchTool::new_with_base_dir(
+            Arc::new(GlobalState::new()),
+            PathBuf::from("/tmp/subagent-worktree"),
+        );
+
+        assert_eq!(tool.base_dir(), "/tmp/subagent-worktree");
+        assert_eq!(tool.resolve_search_base_dir(None), "/tmp/subagent-worktree");
     }
 
     /// 回归：每行显示的是**命中行的原文**，不是 pattern。

@@ -31,11 +31,22 @@ pub struct CodeGraphParams {
     pub max_symbols: Option<usize>,
 }
 
-pub struct CodeGraphTool;
+pub struct CodeGraphTool {
+    base_dir: PathBuf,
+}
 
 impl CodeGraphTool {
     pub fn new() -> Self {
-        CodeGraphTool
+        Self::with_base_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    /// 将代码图根目录绑定到代理工作目录，避免执行时读取进程 cwd。
+    pub fn with_base_dir(base_dir: PathBuf) -> Self {
+        Self { base_dir }
+    }
+
+    fn resolve_root(&self, path: Option<&str>) -> PathBuf {
+        crate::core::utils::paths::resolve_tool_path(&self.base_dir, path.unwrap_or("."))
     }
 }
 
@@ -47,6 +58,7 @@ impl Default for CodeGraphTool {
 
 pub struct CodeGraphInvocation {
     params: CodeGraphParams,
+    base_dir: PathBuf,
 }
 
 impl ToolInvocation for CodeGraphInvocation {
@@ -70,16 +82,16 @@ impl ToolInvocation for CodeGraphInvocation {
         >,
     > {
         let symbol = self.params.symbol.clone();
-        let path = self.params.path.clone();
+        let root = crate::core::utils::paths::resolve_tool_path(
+            &self.base_dir,
+            self.params.path.as_deref().unwrap_or("."),
+        );
         let limits = ExploreLimits {
             max_symbols: self.params.max_symbols.unwrap_or(3).clamp(1, 5),
             depth: self.params.depth.unwrap_or(2).clamp(1, 4),
             max_source_lines: ExploreLimits::default().max_source_lines,
         };
         Box::pin(async move {
-            let root = path
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
             // 构图会走全仓解析，放到 blocking 线程，避免卡住 async 执行器。
             let joined =
                 tokio::task::spawn_blocking(move || explore_symbol(&root, &symbol, limits)).await;
@@ -96,6 +108,25 @@ impl ToolInvocation for CodeGraphInvocation {
                 data: None,
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_root_uses_the_bound_directory() {
+        let tool = CodeGraphTool::with_base_dir(PathBuf::from("/tmp/subagent-worktree"));
+
+        assert_eq!(
+            tool.resolve_root(None),
+            PathBuf::from("/tmp/subagent-worktree")
+        );
+        assert_eq!(
+            tool.resolve_root(Some("src")),
+            PathBuf::from("/tmp/subagent-worktree/src")
+        );
     }
 }
 
@@ -134,7 +165,10 @@ impl BaseDeclarativeTool for CodeGraphTool {
         params: serde_json::Value,
     ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
         let params: CodeGraphParams = serde_json::from_value(params)?;
-        Ok(Box::new(CodeGraphInvocation { params }))
+        Ok(Box::new(CodeGraphInvocation {
+            params,
+            base_dir: self.base_dir.clone(),
+        }))
     }
 
     fn is_read_only(&self) -> bool {

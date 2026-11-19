@@ -12,11 +12,15 @@ pub struct ExitWorktreeParams {
     pub keep_changes: Option<bool>,
 }
 
-pub struct ExitWorktreeTool;
+pub struct ExitWorktreeTool {
+    working_dir: std::path::PathBuf,
+}
 
 impl ExitWorktreeTool {
-    pub fn new(_config: Arc<Config>, _message_bus: Arc<MessageBus>) -> Self {
-        Self
+    pub fn new(config: Arc<Config>, _message_bus: Arc<MessageBus>) -> Self {
+        Self {
+            working_dir: config.agent_working_dir().to_path_buf(),
+        }
     }
 }
 
@@ -58,17 +62,27 @@ impl BaseDeclarativeTool for ExitWorktreeTool {
         &self,
         params: serde_json::Value,
     ) -> Result<Box<dyn ToolInvocation>, Box<dyn std::error::Error + Send + Sync>> {
-        let params: ExitWorktreeParams = serde_json::from_value(params)?;
-        Ok(Box::new(ExitWorktreeInvocation { params }))
+        let mut params: ExitWorktreeParams = serde_json::from_value(params)?;
+        params.path = crate::core::utils::paths::resolve_tool_path(&self.working_dir, &params.path)
+            .to_string_lossy()
+            .into_owned();
+        Ok(Box::new(ExitWorktreeInvocation {
+            params,
+            working_dir: self.working_dir.clone(),
+        }))
     }
 }
 
 pub struct ExitWorktreeInvocation {
     params: ExitWorktreeParams,
+    working_dir: std::path::PathBuf,
 }
 
 fn git_output(dir: &std::path::Path, args: &[&str]) -> Result<std::process::Output, String> {
-    std::process::Command::new("git")
+    let mut command = tokio::process::Command::new("git");
+    crate::agent::worktree::clear_git_repository_env(&mut command);
+    command
+        .into_std()
         .args(args)
         .current_dir(dir)
         .output()
@@ -211,12 +225,12 @@ impl ToolInvocation for ExitWorktreeInvocation {
         >,
     > {
         let path = self.params.path.clone();
+        let cwd = self.working_dir.clone();
 
         Box::pin(async move {
             let path_clone = path.clone();
 
             let result = tokio::task::spawn_blocking(move || -> Result<ToolResult, Box<dyn std::error::Error + Send + Sync>> {
-                let cwd = std::env::current_dir().unwrap_or_default();
                 let worktree_path = std::path::Path::new(&path_clone);
 
                 // 目标不存在时直接失败，不触碰 worktree 登记信息。
@@ -253,7 +267,9 @@ impl ToolInvocation for ExitWorktreeInvocation {
                     }
                 };
 
-                let output = std::process::Command::new("git")
+                let mut command = tokio::process::Command::new("git");
+                crate::agent::worktree::clear_git_repository_env(&mut command);
+                let output = command.into_std()
                     .args(["worktree", "remove", "--"])
                     .arg(&validated)
                     .current_dir(&cwd)
@@ -313,6 +329,7 @@ impl ToolInvocation for ExitWorktreeInvocation {
 mod tests {
     use super::*;
     use std::path::Path;
+    use std::sync::Arc;
 
     fn git(dir: &Path, args: &[&str]) {
         let result = git_output(dir, args).expect("git must start");
@@ -321,6 +338,51 @@ mod tests {
             "git {args:?} failed: {}",
             String::from_utf8_lossy(&result.stderr)
         );
+    }
+
+    #[tokio::test]
+    async fn invocation_refuses_to_remove_the_current_worktree() {
+        let temp = tempfile::tempdir().expect("create temporary root");
+        let main = temp.path().join("main");
+        std::fs::create_dir(&main).expect("create main worktree");
+        git(&main, &["init", "-q"]);
+        git(&main, &["config", "user.email", "test@example.invalid"]);
+        git(&main, &["config", "user.name", "Test"]);
+        std::fs::write(main.join("tracked"), "first").expect("create tracked file");
+        git(&main, &["add", "."]);
+        git(&main, &["commit", "-qm", "initial"]);
+
+        let mut config_params = crate::core::config::ConfigParameters::default();
+        config_params.model = "test-model".to_string();
+        config_params.core_tools = Some(Vec::new());
+        config_params.mcp_enabled = Some(false);
+        config_params.enable_agents = Some(false);
+        config_params.target_dir = main.clone();
+        let mut config = crate::core::config::Config::new(config_params);
+        config.initialize().await.expect("initialize test config");
+        config.agent_working_dir = Some(main.clone());
+        let bus = Arc::new(MessageBus::new(
+            crate::core::policy::PolicyEngine::new(
+                crate::core::policy::PolicyEngineConfig::default(),
+            ),
+            false,
+        ));
+        let tool = ExitWorktreeTool::new(Arc::new(config), bus);
+        let invocation = tool
+            .create_invocation(serde_json::json!({ "path": main }))
+            .expect("create invocation");
+
+        let result = invocation
+            .execute(None, None)
+            .await
+            .expect("execute current-worktree removal request");
+        assert!(result.error.is_some());
+        assert!(result
+            .llm_content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("current worktree"));
+        assert!(main.exists(), "current worktree must remain on disk");
     }
 
     #[test]

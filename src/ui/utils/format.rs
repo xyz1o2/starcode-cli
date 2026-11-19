@@ -359,11 +359,8 @@ pub fn format_tool_result(_tc: &StarToolCall, tr: &ToolResult) -> String {
         }
     }
 
-    let out_raw = if tr.success {
-        tr.output.as_deref().unwrap_or("")
-    } else {
-        tr.error.as_deref().unwrap_or("")
-    };
+    let display_output = tr.display_output();
+    let out_raw = display_output.as_ref();
     let out_clean = crate::ui::utils::text::sanitize_for_tui(out_raw);
     let out = truncate_text(&out_clean, 1200);
 

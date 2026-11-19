@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use tokio::fs;
 
 #[derive(Clone)]
-pub struct MemoryTool;
+pub struct MemoryTool {
+    base_dir: PathBuf,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct MemoryParams {
@@ -23,24 +25,31 @@ pub struct MemoryToolInvocation {
 
 impl MemoryTool {
     pub fn new() -> Self {
-        Self
+        Self::with_base_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
-    async fn get_memory_file_path() -> Result<PathBuf, String> {
-        let mut path = std::env::current_dir().map_err(|e| e.to_string())?;
-        path.push(".star");
+    /// 将记忆文件绑定到代理工作目录，避免执行时读取进程 cwd。
+    pub fn with_base_dir(base_dir: PathBuf) -> Self {
+        Self { base_dir }
+    }
+
+    fn memory_file_path(&self) -> PathBuf {
+        self.base_dir.join(".star").join("memory.md")
+    }
+
+    async fn get_memory_file_path(&self) -> Result<PathBuf, String> {
+        let path = self.base_dir.join(".star");
         if !path.exists() {
             fs::create_dir_all(&path).await.map_err(|e| e.to_string())?;
         }
-        path.push("memory.md");
-        Ok(path)
+        Ok(self.memory_file_path())
     }
 
     pub async fn execute_memory_op(
         &self,
         params: &MemoryParams,
     ) -> Result<CoreToolResult, Box<dyn std::error::Error>> {
-        let path = Self::get_memory_file_path().await?;
+        let path = self.get_memory_file_path().await?;
 
         match params.action.as_str() {
             "save" => {
@@ -147,6 +156,20 @@ impl ToolInvocation for MemoryToolInvocation {
         };
 
         Box::pin(async move { tool.execute_memory_op(&params).await })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_file_path_uses_the_bound_working_directory() {
+        let tool = MemoryTool::with_base_dir(PathBuf::from("/tmp/subagent-worktree"));
+        assert_eq!(
+            tool.memory_file_path(),
+            PathBuf::from("/tmp/subagent-worktree/.star/memory.md")
+        );
     }
 }
 

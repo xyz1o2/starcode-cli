@@ -12,9 +12,8 @@ use crate::core::tools::tools::{
     ToolResult as CoreToolResult,
 };
 use crate::core::utils::file_utils::{detect_encoding_simple, format_file_size, is_binary_file};
-use crate::core::utils::paths::resolve_path;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
@@ -109,31 +108,50 @@ impl ReadManyFilesTool {
         max_size: Option<u64>,
         truncate_lines: Option<usize>,
     ) -> Result<CoreToolResult, String> {
+        self.read_many_with_paths(paths, skip_binary, max_size, truncate_lines)
+            .await
+            .map(|(result, _)| result)
+    }
+
+    async fn read_many_with_paths(
+        &self,
+        paths: Vec<String>,
+        skip_binary: Option<bool>,
+        max_size: Option<u64>,
+        truncate_lines: Option<usize>,
+    ) -> Result<(CoreToolResult, Vec<PathBuf>), String> {
         let mut results = Vec::new();
+        let mut successful_paths = Vec::new();
 
         for path_str in paths {
-            let path_result = resolve_path(&path_str);
+            let path_result = crate::core::utils::paths::resolve_tool_path(
+                self.config.agent_working_dir(),
+                &path_str,
+            );
 
-            match path_result {
-                Ok(path) => {
-                    let res = self
-                        .read_single_file(&path, &path_str, skip_binary, max_size, truncate_lines)
-                        .await;
-                    results.push(res);
-                }
-                Err(e) => {
-                    results.push(FileOpResult::error(path_str, e));
-                }
+            let res = self
+                .read_single_file(
+                    &path_result,
+                    &path_str,
+                    skip_binary,
+                    max_size,
+                    truncate_lines,
+                )
+                .await;
+            if res.success {
+                successful_paths.push(path_result);
             }
+            results.push(res);
         }
 
-        Ok(CoreToolResult {
+        let result = CoreToolResult {
             llm_content: None,
             return_display: None,
             output: format_batch_results(&results),
             error: None,
             data: None,
-        })
+        };
+        Ok((result, successful_paths))
     }
 
     async fn read_single_file(
@@ -315,8 +333,11 @@ impl ToolInvocation for ReadManyToolInvocation {
         self.params
             .file_paths
             .iter()
-            .map(|p| ToolLocation {
-                path: std::path::PathBuf::from(p),
+            .map(|path| ToolLocation {
+                path: crate::core::utils::paths::resolve_tool_path(
+                    self.config.agent_working_dir(),
+                    path,
+                ),
                 location_type: LocationType::Read,
             })
             .collect()
@@ -333,8 +354,7 @@ impl ToolInvocation for ReadManyToolInvocation {
                 + '_,
         >,
     > {
-        let config = self.config.clone();
-        let tool = ReadManyFilesTool::new(config.clone(), self.global_state.clone());
+        let tool = ReadManyFilesTool::new(self.config.clone(), self.global_state.clone());
         let paths = self.params.file_paths.clone();
         let skip = self.params.skip_binary;
         let max = self.params.max_size_per_file;
@@ -342,26 +362,20 @@ impl ToolInvocation for ReadManyToolInvocation {
         let global_state = self.global_state.clone();
 
         Box::pin(async move {
-            let result = tool
-                .read_many(paths.clone(), skip, max, trunc)
+            let (result, successful_paths) = tool
+                .read_many_with_paths(paths, skip, max, trunc)
                 .await
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
-            // ── 更新 read_file_state：避免后续编辑被 [edit_file_not_read] 拦截 ──
-            // 从 output 中解析成功读取的文件路径，更新全局状态
+            // ── 更新 read_file_state：只登记实际成功读取的文件 ──
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis();
             {
                 let mut state = global_state.read_file_state.write().await;
-                for path_str in &paths {
-                    // 键必须和 Edit 查表时一致（read_state_key），否则 read_many
-                    // 读过的文件仍会被 [edit_file_not_read] 拦下。
-                    let resolved = crate::core::utils::paths::resolve_tool_path(
-                        config.agent_working_dir(),
-                        path_str,
-                    );
+                for resolved in successful_paths {
+                    // 读取和登记共用已解析的绝对路径，避免工作目录与进程目录不一致。
                     let abs_str = crate::core::utils::paths::read_state_key(&resolved);
                     // 只用当前时间作为占位时间戳（read_many 不返回文件元数据）
                     state.entry(abs_str).or_insert(ReadFileState {
@@ -436,5 +450,89 @@ impl BaseDeclarativeTool for ReadManyFilesTool {
 
     fn is_read_only(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn config_for(root: &Path) -> crate::core::config::Config {
+        let mut params = crate::core::config::ConfigParameters::default();
+        params.model = "test-model".to_string();
+        params.core_tools = Some(Vec::new());
+        params.mcp_enabled = Some(false);
+        params.enable_agents = Some(false);
+        params.target_dir = root.to_path_buf();
+        let mut config = crate::core::config::Config::new(params);
+        config.initialize().await.expect("initialize test config");
+        config
+    }
+
+    async fn invoke(tool: &ReadManyFilesTool, params: serde_json::Value) -> CoreToolResult {
+        tool.create_invocation(params)
+            .expect("create ReadManyFiles invocation")
+            .execute(None, None)
+            .await
+            .expect("execute ReadManyFiles invocation")
+    }
+
+    #[tokio::test]
+    async fn invocation_reads_and_marks_only_successful_files_from_agent_worktree() {
+        let process_cwd = std::env::current_dir().expect("read process cwd");
+        let parent = tempfile::tempdir().expect("create parent directory");
+        let worktree = tempfile::tempdir().expect("create agent worktree");
+        let parent_same = parent.path().join("same.txt");
+        let child_same = worktree.path().join("same.txt");
+        std::fs::write(&parent_same, "parent contents").expect("write parent file");
+        std::fs::write(&child_same, "child contents").expect("write worktree file");
+        let mut config = config_for(parent.path()).await;
+        config.agent_working_dir = Some(worktree.path().to_path_buf());
+        let config = Arc::new(config);
+        let global_state = Arc::new(GlobalState::new());
+        let tool = ReadManyFilesTool::new(config.clone(), global_state.clone());
+        let invocation = tool
+            .create_invocation(serde_json::json!({
+                "file_paths": ["same.txt", "missing.txt"]
+            }))
+            .expect("create invocation");
+        let locations = invocation.tool_locations();
+        assert_eq!(locations[0].path, child_same);
+        assert_eq!(locations[1].path, worktree.path().join("missing.txt"));
+        let result = invocation
+            .execute(None, None)
+            .await
+            .expect("read invocation");
+
+        assert!(
+            result.output.contains("child contents"),
+            "{}",
+            result.output
+        );
+        assert!(
+            !result.output.contains("parent contents"),
+            "{}",
+            result.output
+        );
+        assert!(result.output.contains("missing.txt"), "{}", result.output);
+        let state = global_state.read_file_state.read().await;
+        assert!(
+            state.contains_key(&crate::core::utils::paths::read_state_key(&child_same)),
+            "successfully read worktree file should be registered"
+        );
+        assert!(
+            !state.contains_key(&crate::core::utils::paths::read_state_key(&parent_same)),
+            "same-named parent file must not be read or registered"
+        );
+        assert!(
+            !state.contains_key(&crate::core::utils::paths::read_state_key(
+                &worktree.path().join("missing.txt")
+            )),
+            "failed read must not be registered"
+        );
+        assert_eq!(
+            std::env::current_dir().expect("read process cwd"),
+            process_cwd
+        );
     }
 }
