@@ -70,8 +70,6 @@ pub fn resolve_border_color(state: &ChatState) -> Color {
         } else {
             Color::Magenta
         }
-    } else if first_line.starts_with('#') {
-        Color::Yellow
     } else if first_line.starts_with('/') {
         Color::Blue
     } else {
@@ -448,6 +446,18 @@ mod tests {
     fn test_border_color_bash() {
         let state = make_state(ApprovalMode::Default, "!ls");
         assert_eq!(resolve_border_color(&state), Color::Magenta);
+    }
+
+    #[test]
+    fn markdown_hash_keeps_the_normal_input_border() {
+        for mode in [ApprovalMode::Default, ApprovalMode::Plan] {
+            let normal = make_state(mode.clone(), "ordinary message");
+            let markdown = make_state(mode, "# Markdown heading");
+            assert_eq!(
+                resolve_border_color(&markdown),
+                resolve_border_color(&normal)
+            );
+        }
     }
 
     #[test]

@@ -1308,7 +1308,7 @@ pub async fn handle_key_event(
                             | crate::ui::state::PasteKind::AttachedImage(_)
                     ) && raw_input.contains(&crate::ui::state::format_image_paste_ref(segment.id))
                 });
-                if has_images && trimmed_raw.starts_with(['/', '#', '!']) {
+                if has_images && trimmed_raw.starts_with(['/', '!']) {
                     state.push_toast(
                         &crate::core::i18n::t1("ui.image.send_unavailable"),
                         crate::ui::state::ToastKind::Warning,
@@ -1393,7 +1393,7 @@ pub async fn handle_key_event(
                         && (state.network_offline
                             || crate::core::offline::is_offline()
                             || state.current_model.trim().is_empty()
-                            || prepared.text.trim_start().starts_with(['/', '#', '!']))
+                            || prepared.text.trim_start().starts_with(['/', '!']))
                     {
                         state.push_toast(
                             &crate::core::i18n::t1("ui.image.send_unavailable"),
@@ -2006,6 +2006,82 @@ fn apply_vim_motion(state: &mut ChatState, motion: &crate::ui::vim::motions::Mot
 mod tests {
     use super::*;
     use crate::ui::state::store::AgentTaskInfo;
+
+    #[tokio::test]
+    async fn pasted_markdown_hash_is_sent_in_full_instead_of_saved_as_memory() {
+        let project = crate::ui::test_support::TestProject::new();
+        let text = std::iter::once("# 粘贴的任务要求".to_string())
+            .chain((1..53).map(|i| format!("第 {i:02} 行：{}", "保留完整正文与缩进 ".repeat(6))))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for with_image in [false, true] {
+            for collapsed in [false, true] {
+                let mut state = ChatState::test_fixture();
+                state.chat_history.clear();
+                state.draft_path = None;
+                state.current_model = "test-model".into();
+                if collapsed {
+                    super::super::clipboard_paste::insert_paste_block_confirmed(
+                        &mut state,
+                        text.clone(),
+                    );
+                    assert_eq!(state.paste_segments.len(), 1);
+                } else {
+                    state.textarea.insert_str("# 短标题\n正文");
+                }
+                let mut png = std::io::Cursor::new(Vec::new());
+                image::DynamicImage::new_rgb8(1, 1)
+                    .write_to(&mut png, image::ImageFormat::Png)
+                    .unwrap();
+                let image = crate::types::ImageAttachment::from_bytes(png.get_ref()).unwrap();
+                if with_image {
+                    let id = state.paste_segments.len();
+                    state.paste_segments.push(crate::ui::state::PasteSegment {
+                        id,
+                        content: "[Image]".into(),
+                        line_count: 1,
+                        kind: crate::ui::state::PasteKind::AttachedImage(image.clone()),
+                    });
+                    state
+                        .textarea
+                        .insert_str(&crate::ui::state::format_image_paste_ref(id));
+                }
+                sync_input_from_textarea(&mut state);
+                let raw = state.textarea.lines().join("\n");
+                let expected = crate::ui::state::prepare_user_input(&raw, &state.paste_segments)
+                    .expect("prepare test input");
+                state
+                    .command_history
+                    .push_front(expected.text.trim().into());
+                let (tx, mut rx) = mpsc::channel(8);
+                handle_key_event(
+                    &mut state,
+                    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                    &tx,
+                    None,
+                )
+                .await
+                .expect("submit pasted Markdown");
+                match rx.try_recv().expect("pasted Markdown must reach the agent") {
+                    AgentRequest::SendMessage { message, .. } if !with_image => {
+                        assert_eq!(message, expected.text);
+                    }
+                    AgentRequest::SendUserInput { input, .. } if with_image => {
+                        assert_eq!(input.text, expected.text);
+                        assert_eq!(input.images, vec![image]);
+                    }
+                    other => panic!("unexpected Markdown request: {other:?}"),
+                }
+                assert!(rx.try_recv().is_err());
+                assert!(state.pending_user_messages.is_empty());
+                assert!(!project.path().join(".star/memory.md").exists());
+                assert!(!state
+                    .chat_history
+                    .iter()
+                    .any(|entry| entry.content.contains("Saved in")));
+            }
+        }
+    }
 
     /// 用真实按键覆盖清空后的同步和命令补全，不直接给 input 赋期望值。
     #[tokio::test]

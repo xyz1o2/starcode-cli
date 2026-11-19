@@ -238,12 +238,12 @@ fn truncate_local_command_output(output: &str) -> String {
 
 /// 运行中输入的内容是不是一条「需求」。
 ///
-/// `/command`、`#memory`、`!shell` 都有各自的处理路径（开面板 / 改会话 / 直接跑
+/// `/command`、`!shell` 都有各自的处理路径（开面板 / 改会话 / 直接跑
 /// 命令），不能当需求插进对话。`![` 是 markdown 图片语法，与 `!shell` 无关，
 /// 按需求处理。
 fn is_plain_requirement(input: &str) -> bool {
     let trimmed = input.trim_start();
-    if trimmed.starts_with('/') || trimmed.starts_with('#') {
+    if trimmed.starts_with('/') {
         return false;
     }
     !(trimmed.starts_with('!') && !trimmed.starts_with("!["))
@@ -414,7 +414,7 @@ pub async fn enqueue_user_input(
         && (state.network_offline
             || crate::core::offline::is_offline()
             || state.current_model.trim().is_empty()
-            || user_input.trim_start().starts_with(['/', '#', '!']))
+            || user_input.trim_start().starts_with(['/', '!']))
     {
         state.textarea.insert_str(&user_input);
         crate::ui::events::clipboard_paste::restore_image_attachments(state, images);
@@ -481,41 +481,12 @@ pub async fn enqueue_user_input(
 
     if (state.is_processing || actually_streaming) && !is_safe_command_during_stream {
         // 需求插进当前这一轮（模型下一次调用就能看到），不用等本轮跑完。
-        // 命令类（/ # !）仍排队 —— 它们各有各的处理路径，不是需求。
+        // 命令类（/ !）仍排队 —— 它们各有各的处理路径，不是需求。
         if is_plain_requirement(&user_input) {
             return steer_user_message(state, user_input, images, agent_tx).await;
         }
         state.pending_user_messages.push_back(user_input);
         return Ok(());
-    }
-
-    // Check for # shortcut (Memory)
-    if user_input.trim().starts_with('#') {
-        let content = user_input.trim()[1..].trim();
-        if !content.is_empty() {
-            if let Some(parsed) = crate::commands::system::parse_command("/memory add") {
-                // Keep the tagged text opaque: `#foo/bar` is memory content,
-                // not a command path or a quoted argument.
-                let mut args_vec = crate::commands::system::parsed_command_args(&parsed);
-                args_vec.push(content.to_string());
-
-                // Show the command in history as user message (preserving original input)
-                state.chat_history.push(ChatEntry::user(user_input.clone()));
-
-                let ctx = crate::commands::execution::CommandContext { state, agent_tx };
-
-                match crate::commands::handle_command(&parsed.path[0], args_vec, ctx).await {
-                    Ok(_) => return Ok(()),
-                    Err(e) => {
-                        state.chat_history.push(ChatEntry {
-                            is_streaming: Some(false),
-                            ..ChatEntry::assistant(format!("Command Error: {}", e))
-                        });
-                        return Ok(());
-                    }
-                }
-            }
-        }
     }
 
     // Check for slash command
@@ -654,7 +625,7 @@ pub async fn enqueue_user_input(
         }
     }
 
-    // 离线模式：拒绝发送真正的消息（/、#、! 前缀在上方已分流，能走到这里的是普通消息）。
+    // 离线模式：拒绝发送真正的消息（/、! 前缀在上方已分流，能走到这里的是普通消息）。
     // 调用方在 enqueue 之前就清空了输入框（input.rs 的 reset_main_textarea），所以这里
     // 把文本放回去，用户 /network off 之后可以直接重发，不用重新打一遍。
     if state.network_offline || crate::core::offline::is_offline() {
@@ -967,6 +938,112 @@ mod no_model_guard_tests {
 mod steering_tests {
     use crate::types::ChatEntryType;
     use crate::ui::state::ChatState;
+
+    #[tokio::test]
+    async fn markdown_hash_messages_never_write_memory_or_queue_as_commands() {
+        let project = crate::ui::test_support::TestProject::new();
+        let memory = project.path().join(".star/memory.md");
+        std::fs::create_dir_all(memory.parent().unwrap()).unwrap();
+        let sentinel = "existing memory\n";
+        std::fs::write(&memory, sentinel).unwrap();
+        for text in ["# 标题\n\n正文", "## 标题", "#foo", " \n # 标题", "#"] {
+            for phase in 0..3 {
+                let mut state = ChatState::test_fixture();
+                state.chat_history.clear();
+                state.draft_path = None;
+                state.current_model = "test-model".into();
+                state.command_history.push_front(text.trim().into());
+                state.next_message_id = 8;
+                if phase > 0 {
+                    state.is_processing = true;
+                    state.is_streaming = true;
+                    state.active_message_id = Some(7);
+                }
+                if phase == 2 {
+                    state.is_awaiting_confirmation = true;
+                    state.pending_confirmation_entry_idx = Some(0);
+                    state.pending_tool_call_id = Some("approval-7".into());
+                    state.chat_history.push(crate::types::ChatEntry::new(
+                        ChatEntryType::ToolConfirmation,
+                        String::new(),
+                    ));
+                }
+                let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+                super::enqueue_user_message(&mut state, text.into(), &tx)
+                    .await
+                    .expect("submit Markdown");
+                assert!(
+                    matches!(rx.try_recv().expect("Markdown must reach the agent"),
+                    crate::runtime::messages::AgentRequest::SendMessage { message_id: 8, message }
+                        if message == text),
+                    "phase {phase}, text {text:?}"
+                );
+                assert!(rx.try_recv().is_err(), "only one agent request");
+                assert!(state.pending_user_messages.is_empty());
+                assert_eq!(std::fs::read_to_string(&memory).unwrap(), sentinel);
+                if phase == 2 {
+                    assert!(state.is_awaiting_confirmation);
+                    assert_eq!(state.pending_tool_call_id.as_deref(), Some("approval-7"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn markdown_hash_with_image_preserves_the_attachment() {
+        let project = crate::ui::test_support::TestProject::new();
+        let mut state = ChatState::test_fixture();
+        state.draft_path = None;
+        state.current_model = "test-model".into();
+        let text = "# 图片任务\n请分析附件";
+        state.command_history.push_front(text.into());
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let image = crate::types::ImageAttachment::from_bytes(png.get_ref()).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        super::enqueue_user_input(
+            &mut state,
+            crate::types::UserInput {
+                text: text.into(),
+                images: vec![image.clone()],
+            },
+            &tx,
+        )
+        .await
+        .expect("submit Markdown with image");
+        assert!(matches!(rx.try_recv().expect("image must reach the agent"),
+            crate::runtime::messages::AgentRequest::SendUserInput { input, .. }
+                if input.text == text && input.images == vec![image]));
+        assert!(rx.try_recv().is_err());
+        assert!(!project.path().join(".star/memory.md").exists());
+    }
+
+    #[tokio::test]
+    async fn explicit_memory_add_still_appends_without_sending_to_the_agent() {
+        let project = crate::ui::test_support::TestProject::new();
+        let memory = project.path().join(".star/memory.md");
+        std::fs::create_dir_all(memory.parent().unwrap()).unwrap();
+        std::fs::write(&memory, "existing memory\n").unwrap();
+        let mut state = ChatState::test_fixture();
+        state.chat_history.clear();
+        state.draft_path = None;
+        let command = "/memory add explicit new memory";
+        state.command_history.push_front(command.into());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        super::enqueue_user_message(&mut state, command.into(), &tx)
+            .await
+            .expect("explicit memory command");
+        let saved = std::fs::read_to_string(memory).unwrap();
+        assert!(saved.starts_with("existing memory\n"));
+        assert!(saved.contains("explicit new memory"));
+        assert!(rx.try_recv().is_err(), "memory command must stay local");
+        assert!(state
+            .chat_history
+            .iter()
+            .any(|entry| entry.content.contains("Saved in")));
+    }
 
     /// 审批等待期间的补充需求仍进入当前回合，不会被当成批准或排到下一回合。
     #[tokio::test]

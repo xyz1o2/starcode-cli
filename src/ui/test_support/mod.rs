@@ -21,6 +21,35 @@ pub use crate::{assert_lines_render, assert_render};
 
 use crate::ui::state::ChatState;
 
+/// 临时项目作用域；进程 cwd 是全局状态，使用它的测试必须串行运行。
+pub(crate) struct TestProject {
+    original_dir: std::path::PathBuf,
+    directory: tempfile::TempDir,
+}
+
+impl TestProject {
+    pub(crate) fn new() -> Self {
+        let original_dir = std::env::current_dir().expect("read original working directory");
+        let directory = tempfile::tempdir().expect("create temporary project");
+        std::env::set_current_dir(directory.path()).expect("enter temporary project");
+        Self {
+            original_dir,
+            directory,
+        }
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        self.directory.path()
+    }
+}
+
+impl Drop for TestProject {
+    fn drop(&mut self) {
+        // 必须先恢复 cwd，再由 TempDir 清理当前项目。
+        std::env::set_current_dir(&self.original_dir).expect("restore working directory");
+    }
+}
+
 impl ChatState {
     /// 快照测试用的确定性状态。
     ///
