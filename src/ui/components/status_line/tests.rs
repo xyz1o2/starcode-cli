@@ -777,7 +777,7 @@ fn verb_table_matches_the_real_claude_code_list() {
 /// 一到就显示且随每轮工具调用上涨；`token_usage` 仍是上下文口径，互不污染。
 #[test]
 fn spinner_token_group_shows_turn_cumulative_down_tokens_immediately() {
-    let mut state = ChatState::new();
+    let mut state = ChatState::test_fixture();
     state.is_processing = true;
     state.turn_tokens = 8_700;
 
@@ -786,7 +786,8 @@ fn spinner_token_group_shows_turn_cumulative_down_tokens_immediately() {
         .iter()
         .map(|s| s.content.as_ref())
         .collect();
-    assert!(text.contains("↓ 8.7k tokens"), "{text:?}");
+    let expected = crate::core::i18n::t1("ui.status.turn_tokens").replace("{count}", "8.7k");
+    assert!(text.contains(&expected), "{text:?}");
 
     // 无可用累计（回合还没出第一条 provider 响应，或新回合刚归零）时不显示。
     state.turn_tokens = 0;
@@ -796,4 +797,21 @@ fn spinner_token_group_shows_turn_cumulative_down_tokens_immediately() {
         .map(|s| s.content.as_ref())
         .collect();
     assert!(!text.contains("tokens"), "{text:?}");
+}
+
+#[test]
+fn pending_approval_overrides_the_processing_verb_until_answered() {
+    let mut state = ChatState::test_fixture();
+    state.is_processing = true;
+    state.is_awaiting_confirmation = true;
+    state.current_status_line = Some("Preparing request".into());
+    let text: String = processing_spinner_line(&state, 120)[1]
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    let expected = crate::core::i18n::t1("ui.status.waiting_for_approval");
+    assert!(text.contains(&expected), "{text}");
+    state.clear_pending_confirmation();
+    assert_eq!(status_suffix(&state).as_deref(), Some("Preparing request"));
 }

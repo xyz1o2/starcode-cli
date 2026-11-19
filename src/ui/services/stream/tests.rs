@@ -2047,6 +2047,86 @@ async fn approved_bash_failure_preserves_output_and_failure_marker() {
     crate::assert_lines_render!("approved_bash_failure", 92, 8, &lines);
 }
 
+#[tokio::test]
+async fn approved_multi_edit_history_shows_the_target_and_resolved_decision() {
+    let mut state = ChatState::test_fixture();
+    state.chat_history.clear();
+    let (tx, _rx) = mpsc::channel(4);
+    let call = StarToolCall {
+        id: "multi-edit-screenshot".into(),
+        call_type: "function".into(),
+        function: crate::types::StarToolCallFunction {
+            name: "MultiEdit".into(),
+            arguments: serde_json::json!({"edits": [{
+                "file_path": "src/UddTaskController.java",
+                "old_string": "before", "new_string": "after"
+            }]})
+            .to_string(),
+        },
+    };
+    state
+        .chat_history
+        .push(ChatEntry::tool_call("", call.clone()).with_streaming(true));
+    handle_stream_update(
+        &mut state,
+        StreamMessage::ToolConfirmationRequest {
+            message_id: 8,
+            tool_call_id: "multi-edit-approval".into(),
+            originating_tool_call_id: Some(call.id.clone()),
+            confirmation: crate::types::ToolConfirmation {
+                tool_name: "MultiEdit".into(),
+                operation_type: crate::types::ConfirmationType::Generic,
+                details: crate::types::ConfirmationDetails::Generic {
+                    title: "Permission required: MultiEdit".into(),
+                    prompt: "Approval required\n\nsrc/UddTaskController.java".into(),
+                },
+                is_dangerous: true,
+                outcome: None,
+                reason: None,
+            },
+        },
+        &tx,
+    )
+    .await
+    .expect("receive confirmation");
+    state.chat_history[1]
+        .confirmation
+        .as_mut()
+        .expect("approval card")
+        .outcome = Some("Allowed (once)".into());
+    state.clear_pending_confirmation();
+    handle_tool_result_message(
+        &mut state,
+        8,
+        call,
+        ToolResult {
+            success: true,
+            output: Some("Successfully modified 1 files: UddTaskController.java".into()),
+            error: None,
+            data: None,
+            llm_content: None,
+        },
+    );
+    let lines: Vec<_> = (0..state.chat_history.len())
+        .flat_map(|idx| crate::ui::components::chat_history::render_entry_lines(&state, idx, 92))
+        .collect();
+    let text: String = lines
+        .iter()
+        .flat_map(|line| &line.spans)
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(text.contains("UddTaskController.java"), "{text}");
+    assert!(
+        text.contains(&crate::core::i18n::t1("ui.confirm.outcome.once")),
+        "{text}"
+    );
+    assert!(!text.contains("no path provided"), "{text}");
+    assert!(!text.contains("Permission required"), "{text}");
+    assert!(!state.is_awaiting_confirmation);
+    assert_eq!(state.chat_history[0].is_streaming, Some(false));
+    crate::assert_lines_render!("approved_multi_edit_targets", 92, 6, &lines);
+}
+
 fn shell_confirmation(command: &str) -> crate::types::ToolConfirmation {
     crate::types::ToolConfirmation {
         tool_name: "Bash".to_string(),

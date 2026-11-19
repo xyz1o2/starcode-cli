@@ -21,6 +21,10 @@
   "ui.input.paste_folded": "[已粘贴内容 +{lines} 行]",
 
   "ui.status.start": "状态：开始处理",
+  "ui.status.waiting_for_approval": "等待审批",
+  "ui.status.waiting_for_answer": "等待你的回答",
+  "ui.status.turn_tokens": "本轮 {count} tokens",
+  "ui.tool.multi_edit_targets": "{path}，另 {count} 个文件",
   "ui.status.restore": "状态：已恢复检查点 {id}",
   "ui.status.restore.summary": "状态：已恢复检查点 {id}{summary}",
   "ui.status.model_prepare": "状态：准备模型请求",

@@ -1,0 +1,12 @@
+─── 92x6 ───
+  0│● multi edit(src/UddTaskController.java)                                                    │
+  1│› Allowed once                                                                              │
+  2│  ⎿  Successfully modified 1 files: UddTaskController.java                                  │
+  3│                                                                                            │
+  4│                                                                                            │
+  5│                                                                                            │
+
+─── styles ───
+  0│0-1 bold,fg:rgb(80,220,100) · 2-11 bold,fg:cyan · 12-91 plain│
+  1│0-1 bold,fg:gray · 2-13 fg:gray · 14-91 plain│
+  2│0-4 fg:rgb(80,80,80) · 5-91 plain│

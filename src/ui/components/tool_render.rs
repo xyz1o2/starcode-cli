@@ -541,11 +541,7 @@ fn build_tool_argument_display(
                 .unwrap_or_else(|| "(no path provided)".to_string())
         }
         "MultiEdit" => {
-            // 与 Write 同款问题：edits 数组会被倾倒成 "[N items]"，路径反而看不见。
-            // collapsed 说明交给结果块的 "Added N lines, removed M lines"。
-            let path = get_str(&["path", "file_path", "target_file"])
-                .map(|p| shorten(&p))
-                .unwrap_or_else(|| "(no path provided)".to_string());
+            let paths = crate::core::tools::multi_edit::multi_edit_target_paths(&args);
             if let Some(n) = obj
                 .get("edits")
                 .and_then(|v| v.as_array())
@@ -554,7 +550,13 @@ fn build_tool_argument_display(
             {
                 extra_info.push(format!("{} edits", n));
             }
-            path
+            match paths.as_slice() {
+                [] => String::new(),
+                [path] => shorten(path),
+                [first, rest @ ..] => crate::core::i18n::t1("ui.tool.multi_edit_targets")
+                    .replace("{count}", &rest.len().to_string())
+                    .replace("{path}", &shorten(first)),
+            }
         }
         "Bash" => {
             let cmd = get_str(&["command", "CommandLine"]).unwrap_or_default();
@@ -1649,17 +1651,31 @@ mod tests {
     /// MultiEdit 同款回归：edits 数组不该占掉调用行，路径 + 编辑数分开交代。
     #[test]
     fn multi_edit_call_line_shows_path_and_edit_count() {
-        let args =
-            r#"{"edits":[{"old":"a","new":"b"},{"old":"c","new":"d"}],"file_path":"src/main.rs"}"#;
-        let (summary, extra) = build_tool_argument_display(&call_for("MultiEdit", args), false);
-        assert!(
-            summary.contains("main.rs"),
-            "调用行摘要必须包含路径，实际 {summary:?}"
+        let args = serde_json::json!({"edits": [
+            {"file_path": "src/main.rs", "old_string": "a", "new_string": "b"},
+            {"file_path": "src/main.rs", "old_string": "c", "new_string": "d"},
+        ]});
+        let (summary, extra) =
+            build_tool_argument_display(&call_for("MultiEdit", &args.to_string()), false);
+        assert_eq!(summary, "src/main.rs");
+        assert_eq!(extra, ["2 edits"]);
+
+        let mut args = args;
+        args["edits"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "file_path": "src/lib.rs", "old_string": "e", "new_string": "f"
+            }));
+        let (summary, extra) =
+            build_tool_argument_display(&call_for("MultiEdit", &args.to_string()), false);
+        assert_eq!(
+            summary,
+            crate::core::i18n::t1("ui.tool.multi_edit_targets")
+                .replace("{count}", "1")
+                .replace("{path}", "src/main.rs")
         );
-        assert!(
-            extra.iter().any(|e| e.contains("2 edits")),
-            "edits 数量进 extra_info，实际 {extra:?}"
-        );
+        assert_eq!(extra, ["3 edits"]);
     }
 
     /// 回归：CodebaseSearch 折叠态以前预览输出头部，那是索引元数据

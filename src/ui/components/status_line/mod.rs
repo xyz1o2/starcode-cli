@@ -788,8 +788,26 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
     // 区别只在于 todo 文案要先过一遍英文/长度筛（见 in_progress_todo_verb），
     // 筛不过就用本轮固定的随机动词。
     let todo_verb = in_progress_todo_verb(state);
-    let live_status =
-        status_suffix(state).map(|text| text.trim_end_matches(['.', '…', ' ']).to_string());
+    let live_status = if state.is_awaiting_confirmation {
+        let is_question = state
+            .pending_confirmation_entry_idx
+            .and_then(|idx| state.chat_history.get(idx))
+            .and_then(|entry| entry.confirmation.as_ref())
+            .is_some_and(|confirmation| {
+                matches!(
+                    confirmation.operation_type,
+                    crate::types::ConfirmationType::AskUserQuestion
+                )
+            });
+        Some(if is_question {
+            crate::core::i18n::t1("ui.status.waiting_for_answer")
+        } else {
+            crate::core::i18n::t1("ui.status.waiting_for_approval")
+        })
+    } else {
+        status_suffix(state)
+    }
+    .map(|text| text.trim_end_matches(['.', '…', ' ']).to_string());
     let hint_width = if width >= INTERRUPT_HINT_MIN_WIDTH {
         META_SEP.width() + INTERRUPT_HINT.width()
     } else {
@@ -809,12 +827,15 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
     // 两个信号各司其职：`warmup` 是"还在算"，`stall` 是"工具可能卡住"。
     // 工具 ID 而不是显示标签才是权威来源——并行工具完成时不能把兄弟项藏掉。
     let current_tool_started = latest_active_tool_started_at(state);
-    let stall = if state.is_streaming {
+    let stall = if state.is_streaming && !state.is_awaiting_confirmation {
         tool_stall_intensity(current_tool_started, state.animation_tick)
     } else {
         0.0
     };
-    let warmup = if state.is_streaming && current_tool_started.is_none() {
+    let warmup = if state.is_streaming
+        && !state.is_awaiting_confirmation
+        && current_tool_started.is_none()
+    {
         warmup_intensity(state.last_token_time, state.animation_tick)
     } else {
         0.0
@@ -903,7 +924,8 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
         };
         groups.push((
             color,
-            format!("↓ {} tokens", format_token_count(state.turn_tokens)),
+            crate::core::i18n::t1("ui.status.turn_tokens")
+                .replace("{count}", &format_token_count(state.turn_tokens)),
         ));
     }
 

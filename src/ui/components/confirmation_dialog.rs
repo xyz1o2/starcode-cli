@@ -307,7 +307,8 @@ pub fn build_confirmation_card_block(
             outcome.clone()
         };
         let summary = if allowed
-            && confirmation.tool_name.eq_ignore_ascii_case("Bash")
+            && (confirmation.tool_name.eq_ignore_ascii_case("Bash")
+                || confirmation.tool_name.eq_ignore_ascii_case("MultiEdit"))
             && matches!(confirmation.details, ConfirmationDetails::Generic { .. })
         {
             label

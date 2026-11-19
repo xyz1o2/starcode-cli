@@ -162,14 +162,21 @@ fn policy_confirmation_details(
         prompt: format!(
             "`{}` matches an `ask` rule in your permission settings.{}",
             tool_name,
-            confirmation_summary(args)
+            confirmation_summary(tool_name, args)
         ),
         on_confirm: std::sync::Arc::new(|_, _feedback| {}),
     }
 }
 
 /// 确认卡片里附带的命令或路径摘要。
-fn confirmation_summary(args: &serde_json::Value) -> String {
+fn confirmation_summary(tool_name: &str, args: &serde_json::Value) -> String {
+    if tool_name.eq_ignore_ascii_case("MultiEdit") {
+        let paths = crate::core::tools::multi_edit::multi_edit_target_paths(args);
+        if paths.is_empty() {
+            return String::new();
+        }
+        return format!("\n\n{}", paths.join("\n"));
+    }
     args.get("command")
         .and_then(|v| v.as_str())
         .or_else(|| args.get("file_path").and_then(|v| v.as_str()))
@@ -223,7 +230,7 @@ fn default_confirmation_details(
         prompt: format!(
             "`{}` needs approval before it can run. No allow rule covers it yet.{}",
             tool_name,
-            confirmation_summary(args)
+            confirmation_summary(tool_name, args)
         ),
         on_confirm: std::sync::Arc::new(|_, _feedback| {}),
     }
@@ -247,7 +254,7 @@ fn sensitive_confirmation_details(
              session/persistent approvals do not cover credentials and keys.{}",
             tool_name,
             hit,
-            confirmation_summary(args)
+            confirmation_summary(tool_name, args)
         ),
         on_confirm: std::sync::Arc::new(|_, _feedback| {}),
     }
@@ -3224,6 +3231,23 @@ async fn execute_mcp_dynamic_tool(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn multi_edit_confirmation_lists_each_target_without_replacement_text() {
+        let args = json!({"edits": [
+            {"file_path": "src/main.rs", "old_string": "first", "new_string": "second"},
+            {"file_path": "src/lib.rs", "old_string": "old", "new_string": "new"},
+            {"file_path": "src/main.rs", "old_string": "third", "new_string": "fourth"}
+        ]});
+        for details in [
+            default_confirmation_details("MultiEdit", &args),
+            policy_confirmation_details("MultiEdit", &args),
+            sensitive_confirmation_details("MultiEdit", &args, ".env"),
+        ] {
+            let (_, paths) = details.prompt.split_once("\n\n").expect("target summary");
+            assert_eq!(paths, "src/main.rs\nsrc/lib.rs");
+        }
+    }
 
     /// `subagent_type` 的 camelCase 与别名写法统一归一到 slug；
     /// 未识别的自定义名原样透传（架构上归一收敛在 SubagentType::from_name）。

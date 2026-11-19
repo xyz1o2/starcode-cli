@@ -28,6 +28,18 @@ pub struct SingleFileEdit {
     pub new_string: String,
 }
 
+/// 按首次出现的顺序提取目标路径，供审批卡和调用行共用。
+pub(crate) fn multi_edit_target_paths(args: &serde_json::Value) -> Vec<&str> {
+    let mut seen = HashSet::new();
+    args.get("edits")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|edit| edit.get("file_path")?.as_str())
+        .filter(|path| !path.trim().is_empty() && seen.insert(*path))
+        .collect()
+}
+
 pub struct MultiEditToolInvocation {
     config: Arc<crate::core::config::Config>,
     params: MultiEditToolParams,

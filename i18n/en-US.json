@@ -21,6 +21,10 @@
   "ui.input.paste_folded": "[Pasted +{lines} lines]",
 
   "ui.status.start": "Status: processing",
+  "ui.status.waiting_for_approval": "Waiting for approval",
+  "ui.status.waiting_for_answer": "Waiting for your answer",
+  "ui.status.turn_tokens": "{count} tokens this turn",
+  "ui.tool.multi_edit_targets": "{path} +{count} more",
   "ui.status.restore": "Status: restored checkpoint {id}",
   "ui.status.restore.summary": "Status: restored checkpoint {id}{summary}",
   "ui.status.model_prepare": "Status: preparing model request",

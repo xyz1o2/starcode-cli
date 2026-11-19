@@ -28,4 +28,5 @@ logs/
 !tests/snapshots/ui/resume_argument_help.snap
 !tests/snapshots/ui/agent_selector_viewing.snap
 !tests/snapshots/ui/approved_bash_failure.snap
+!tests/snapshots/ui/approved_multi_edit_targets.snap
 skills-lock.json
