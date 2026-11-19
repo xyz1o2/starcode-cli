@@ -44,6 +44,12 @@ pub struct SubAgentRequest {
     /// 显式带上 `depth` 后，每一级都从**真实的调用链**上数，派生关系与
     /// 深度不再依赖注册表里恰好装着谁的 runner。
     pub parent_depth: usize,
+    /// Fork Skill 的本地禁止策略，只施加到该子代理及其后代。
+    pub disallowed_tools: Vec<String>,
+    /// Fork Skill 的本地免确认策略，不改变子代理工具白名单。
+    pub allowed_tools: Vec<String>,
+    /// 真实父调用方的工具范围；只允许缩小 runner 或定义给出的集合。
+    pub parent_tools: Option<Vec<String>>,
 }
 
 impl SubAgentRequest {
@@ -60,6 +66,9 @@ impl SubAgentRequest {
             parent_pending_context: Vec::new(),
             identity: None,
             parent_depth: 0,
+            disallowed_tools: Vec::new(),
+            allowed_tools: Vec::new(),
+            parent_tools: None,
         }
     }
 
@@ -103,6 +112,11 @@ impl SubAgentRequest {
     /// 记录**发起方**所处的递归深度（本子代理落在 `depth + 1`）。
     pub fn with_parent_depth(mut self, depth: usize) -> Self {
         self.parent_depth = depth;
+        self
+    }
+
+    pub fn with_disallowed_tools(mut self, tools: impl IntoIterator<Item = String>) -> Self {
+        self.disallowed_tools = tools.into_iter().collect();
         self
     }
 }

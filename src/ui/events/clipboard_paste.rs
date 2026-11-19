@@ -431,6 +431,9 @@ pub(crate) fn restore_image_attachments(
     state: &mut ChatState,
     images: Vec<crate::types::ImageAttachment>,
 ) {
+    if images.is_empty() {
+        return;
+    }
     for image in images {
         let id = state.paste_segments.len();
         let reference = crate::ui::state::format_image_paste_ref(id);
@@ -484,6 +487,7 @@ pub(crate) fn insert_image_paste_block(
 
 /// 创建文件路径粘贴块
 pub(crate) fn insert_file_paste_block(state: &mut ChatState, paths: Vec<String>) {
+    state.input_intent = crate::types::InputIntent::Literal;
     let content = paths.join("\n");
     let id = state.paste_segments.len();
     let placeholder = crate::ui::state::format_files_paste_ref(id);
@@ -562,6 +566,7 @@ pub(super) fn reset_main_textarea(state: &mut ChatState) {
         state.paste_in_progress = false;
         state.paste_end_time = None;
     }
+    state.input_intent = crate::types::InputIntent::CommandEligible;
     state.textarea = TextArea::default();
     state.textarea.set_placeholder_text("Type a message...");
     state
@@ -582,6 +587,14 @@ pub(super) fn reset_main_textarea(state: &mut ChatState) {
 pub(crate) fn sync_input_from_textarea(state: &mut ChatState) {
     state.input_line_count = state.textarea.lines().len();
     state.input = state.textarea.lines().join("\n");
+    if state.input.is_empty() && state.input_intent == crate::types::InputIntent::Literal {
+        // 完整删除正文时清掉 textarea 的 undo 历史，不能撤销后恢复为可执行命令。
+        // 粘贴段本身仍保留：删除占位符只是取消本次引用，已有测试和后续粘贴
+        // 逻辑需要它继续作为不可见的段记录存在。
+        let segments = std::mem::take(&mut state.paste_segments);
+        reset_main_textarea(state);
+        state.paste_segments = segments;
+    }
     if state.input_line_count < crate::ui::state::INPUT_FOLD_MIN_LINES {
         state.input_folded = false;
     }
@@ -626,6 +639,9 @@ pub(crate) fn insert_paste_block(state: &mut ChatState, text: String) {
         return;
     }
 
+    if !normalized.is_empty() {
+        state.input_intent = crate::types::InputIntent::Literal;
+    }
     let is_large = line_count >= crate::ui::state::INPUT_FOLD_MIN_LINES
         || normalized.len() >= PASTE_CHAR_THRESHOLD;
     if is_large {
@@ -663,6 +679,9 @@ pub(crate) fn insert_paste_block_confirmed(state: &mut ChatState, text: String) 
         .replace("\u{2028}", "\n")
         .replace("\u{2029}", "\n");
     let line_count = normalized.lines().count();
+    if !normalized.is_empty() {
+        state.input_intent = crate::types::InputIntent::Literal;
+    }
     let is_large = line_count >= crate::ui::state::INPUT_FOLD_MIN_LINES
         || normalized.len() >= PASTE_CHAR_THRESHOLD;
     if is_large {

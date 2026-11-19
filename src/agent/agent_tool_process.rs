@@ -1555,6 +1555,23 @@ mod tests {
     use super::*;
     use crate::types::StarToolCallFunction;
 
+    struct AllowSkillCommands;
+
+    #[async_trait::async_trait]
+    impl crate::core::tools::tools::CommandApproval for AllowSkillCommands {
+        async fn approve_command(
+            &self,
+            command: &str,
+            cwd: &std::path::Path,
+            _signal: Option<&tokio_util::sync::CancellationToken>,
+        ) -> Result<crate::core::tools::tools::ApprovedCommand, String> {
+            Ok(crate::core::tools::tools::ApprovedCommand::new(
+                command.to_owned(),
+                cwd.to_owned(),
+            ))
+        }
+    }
+
     fn tool_call(id: usize, name: &str) -> StarToolCall {
         StarToolCall {
             id: format!("call_{id}"),
@@ -1568,7 +1585,7 @@ mod tests {
 
     #[tokio::test]
     async fn loaded_skill_effort_updates_only_the_calling_agent() {
-        use crate::core::tools::tools::BaseDeclarativeTool;
+        use crate::core::tools::tools::{BaseDeclarativeTool, ToolInvocation};
         use crate::types::ThinkingEffort;
 
         let directory = tempfile::tempdir().expect("temporary project");
@@ -1596,9 +1613,14 @@ mod tests {
             None,
         );
         let tool = crate::agent::tools::skill::SkillTool::new(client.clone(), config.clone());
-        let invocation = tool
+        let mut invocation = tool
             .create_invocation(serde_json::json!({"skill": "local-effort"}))
             .expect("skill invocation");
+        invocation.set_agent_parent_config(config.as_ref());
+        invocation
+            .preflight(&AllowSkillCommands, None)
+            .await
+            .expect("skill preflight");
         let global_before = crate::llm::thinking::current_effort();
         let core_result = invocation.execute(None, None).await.expect("skill loads");
         assert!(core_result.error.is_none(), "{:?}", core_result.error);

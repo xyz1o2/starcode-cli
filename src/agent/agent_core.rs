@@ -310,9 +310,6 @@ impl Agent {
             // runtime_bootstrap 里**独立**创建了自己的一份。两边不是同一个
             // 对象，于是 watcher 建好的索引工具永远读不到，每次检索都退回
             // 同步全量重建。
-            crate::core::context::watcher::set_engine_cache(
-                crate::core::context::search_cache::shared_search_cache(),
-            );
 
             // 装 watcher + 请求首轮重建**必须**离开这条关键路径。
             //
@@ -333,11 +330,12 @@ impl Agent {
             let _ = std::thread::Builder::new()
                 .name("star-index-watch-setup".into())
                 .spawn(move || {
-                    crate::core::context::watcher::ensure_started(&root);
-                    // 仅启动 watcher 不会触发首轮构建（ensure_started 不插脏标记）。
-                    // 冷启动时必须主动请求一次，否则首次 CodebaseSearch 只能拿到
-                    // 空引擎并返回 "index is building"，且本轮不会有任何重建发生。
-                    crate::core::context::watcher::request_refresh(&root);
+                    if let Err(error) = crate::core::context::watcher::request_refresh(&root) {
+                        crate::utils::logging::append_debug_log_line(&format!(
+                            "[Context] watcher startup failed for {}: {error}",
+                            root.display()
+                        ));
+                    }
                 });
 
             if self.context_engine.has_dynamic_context_candidates(&cwd) {

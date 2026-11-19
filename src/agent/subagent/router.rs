@@ -176,6 +176,9 @@ fn build_request(input: &AgentToolFullInput) -> SubAgentRequest {
         parent_pending_context: Vec::new(),
         identity: None,
         parent_depth: input.parent_depth,
+        disallowed_tools: Vec::new(),
+        allowed_tools: Vec::new(),
+        parent_tools: None,
     }
 }
 

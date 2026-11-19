@@ -87,6 +87,28 @@ pub const EXPLORER_READONLY_TOOLS: &[&str] = &[
     "AskUserQuestion",
 ];
 
+fn apply_request_tool_limits(config: &mut Config, request: &SubAgentRequest) {
+    if let Some(parent) = &request.parent_tools {
+        config.core_tools = Some(match config.core_tools.take() {
+            Some(tools) => tools
+                .into_iter()
+                .filter(|tool| parent.iter().any(|item| item.eq_ignore_ascii_case(tool)))
+                .collect(),
+            None => parent.clone(),
+        });
+    }
+    if !request.disallowed_tools.is_empty() {
+        config
+            .exclude_tools
+            .get_or_insert_with(Vec::new)
+            .extend(request.disallowed_tools.iter().cloned());
+    }
+    // 子 turn 清掉旧授权后再安装；这里只给当前 child 的配置快照传数据。
+    config
+        .child_skill_allowed_tools
+        .clone_from(&request.allowed_tools);
+}
+
 /// 同步 SubAgent 执行器
 pub struct StarAgentRunner {
     client: StarClient,
@@ -507,6 +529,7 @@ impl StarAgentRunner {
         //
         // Explorer 只暴露专用检索工具；Bash 缺少参数级只读隔离，不能提供。
         // 执行器同时过滤共享注册表的 schema 和直接工具调用。
+        apply_request_tool_limits(&mut sub_config, &request);
         if request.subagent_type == crate::core::agents::SubagentType::Explorer {
             sub_config.core_tools = Some(
                 EXPLORER_READONLY_TOOLS
@@ -754,6 +777,78 @@ async fn emit_team_snapshot(hub: &crate::agent::messaging::SharedAgentRouter) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fork_skill_limits_filter_schema_and_execution_without_mutating_siblings() {
+        let registry =
+            crate::core::config::runtime_bootstrap::build_two_layer_registry_for_tests().await;
+        let parent = Config::new(crate::core::config::ConfigParameters {
+            core_tools: Some(vec!["Read".into(), "Write".into(), "Grep".into()]),
+            exclude_tools: Some(vec!["Grep".into()]),
+            ..Default::default()
+        });
+        let mut child_base = parent.clone();
+        child_base.recursion_depth = 1;
+        child_base.core_tools = Some(vec![
+            "Read".into(),
+            "Write".into(),
+            "Bash".into(),
+            "Grep".into(),
+        ]);
+        let mut child = child_base.clone();
+        let mut request =
+            SubAgentRequest::new("fixture").with_disallowed_tools(["write".to_owned()]);
+        request.parent_tools = parent.core_tools().map(<[String]>::to_vec);
+        request.allowed_tools = vec!["Bash".into()];
+        apply_request_tool_limits(&mut child, &request);
+        assert_eq!(child.child_skill_allowed_tools, ["Bash"]);
+        assert!(parent.child_skill_allowed_tools.is_empty());
+        assert!(child_base.child_skill_allowed_tools.is_empty());
+        let executor = |config: Config| {
+            crate::agent::tool_executor::ToolExecutor::new(
+                StarClient::new("", None, None, None, None),
+                registry.clone(),
+                None,
+                Arc::new(config),
+            )
+        };
+        let child = executor(child);
+        let parent = executor(parent);
+        let sibling = executor(child_base);
+        let has_tool = |executor: &crate::agent::tool_executor::ToolExecutor, name: &str| {
+            executor
+                .get_tool_definitions()
+                .iter()
+                .any(|tool| tool.function.name == name)
+        };
+        assert!(has_tool(&child, "Read"));
+        assert!(has_tool(&parent, "Write"));
+        assert!(has_tool(&sibling, "Write"));
+        for name in ["Write", "Grep", "Bash"] {
+            assert!(!has_tool(&child, name));
+            let result = child
+                .execute(
+                    &crate::types::StarToolCall {
+                        id: format!("child-{name}"),
+                        call_type: "function".into(),
+                        function: crate::types::StarToolCallFunction {
+                            name: name.into(),
+                            arguments: "{}".into(),
+                        },
+                    },
+                    None,
+                    None,
+                )
+                .await;
+            assert!(
+                result
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("unavailable for this sub-agent")),
+                "{name}: {result:?}"
+            );
+        }
+    }
 
     #[cfg(unix)]
     #[tokio::test]

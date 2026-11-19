@@ -94,6 +94,7 @@ impl WorktreeManager {
 
     /// 移除 worktree
     pub fn remove_worktree(&self, worktree_path: &Path) -> Result<(), String> {
+        let index_root = crate::core::context::watcher::normalized_root(worktree_path);
         let output = Command::new("git")
             .args(["worktree", "remove", &worktree_path.to_string_lossy()])
             .output()
@@ -104,6 +105,8 @@ impl WorktreeManager {
             return Err(format!("git worktree remove failed: {}", stderr));
         }
 
+        crate::core::context::watcher::unregister_root(&index_root)
+            .map_err(|error| format!("Failed to unregister worktree index: {error}"))?;
         Ok(())
     }
 
@@ -309,6 +312,7 @@ impl AgentWorktree {
         if head != self.initial_head || !status.is_empty() {
             return Ok(false);
         }
+        let index_root = crate::core::context::watcher::normalized_root(&self.path);
         Self::git(
             &self.project_root,
             &[
@@ -318,6 +322,8 @@ impl AgentWorktree {
             ],
         )
         .await?;
+        crate::core::context::watcher::unregister_root(&index_root)
+            .map_err(|error| format!("Failed to unregister worktree index: {error}"))?;
         Ok(true)
     }
 }
@@ -444,8 +450,18 @@ mod agent_worktree_tests {
 
         let clean = AgentWorktree::create(repository.path()).await.unwrap();
         let clean_path = clean.path.clone();
+        let index_root = crate::core::context::watcher::normalized_root(&clean_path);
+        let cache = crate::core::context::search_cache::shared_search_cache();
+        cache.put_engine(
+            (index_root.clone(), "engine".into()),
+            crate::core::context::search_cache::CachedSearchEngine {
+                engine: crate::core::context::search_engine::SearchEngine::new(),
+                index_mtime: Some(std::time::SystemTime::now()),
+            },
+        );
         assert_eq!(clean.finish().await.unwrap(), true);
         assert!(!clean_path.exists(), "clean worktree should be removed");
+        assert!(cache.engine_meta(&(index_root, "engine".into())).is_none());
 
         let dirty = AgentWorktree::create(repository.path()).await.unwrap();
         let dirty_path = dirty.path.clone();

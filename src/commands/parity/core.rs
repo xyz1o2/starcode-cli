@@ -391,7 +391,7 @@ pub async fn history(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandR
     if sub == "clear" {
         ctx.state.command_history.clear();
         ctx.state.history_index = None;
-        crate::core::config::history_store::save_history(&ctx.state.command_history);
+        ctx.state.save_input_history();
         push_msg(&mut ctx, "✅ Input history cleared for this project.");
         return Ok(());
     }
@@ -408,7 +408,8 @@ pub async fn history(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandR
         .state
         .command_history
         .iter()
-        .filter(|e| query.is_empty() || e.to_lowercase().contains(&query))
+        .filter(|e| query.is_empty() || e.text.to_lowercase().contains(&query))
+        .map(|e| &e.text)
         .take(40)
         .collect();
 

@@ -1,155 +1,265 @@
-//! 后台索引协调器：watcher（notify）+ 防抖 + 低优先级增量重建。
-//!
-//! 设计目标（对标 Augment ACE / Cursor 的实时索引，且绝不阻塞前台）：
-//! - **零阻塞**：所有索引工作跑在 `THREAD_PRIORITY_LOWEST` 后台线程，
-//!   前台（首任务、用户输入）永远优先。
-//! - **防抖合并**：watcher 事件与 agent 编辑钩子统一汇入脏集合，
-//!   300ms 内的连续变更合并为一次重建。
-//! - **增量重建**：重建入口是 `Indexer::index_project()` —— 得益于
-//!   (size, mtime) 快速跳过，它天然只读变更文件。
-//! - **单一事实源**：agent 的 Edit/Write 打脏、codebase_search 发现
-//!   引擎过期、watcher 文件事件，三条路径都汇入同一个重建队列。
-//! - **空转退避**：连续 0 变更重建后把重建节奏从背靠背放松到
-//!   5s→2min 的低频心跳（agent 主动打脏随时插队）；慢盘上被预算截断的
-//!   索引不喂引擎，先排续扫把尾巴收完，避免「开头两次连续全量」。
+//! 按规范化根管理索引监听和重建；注册表只登记资源，不持锁执行 I/O。
+//! 每根独立 dirty、generation 与 worker 句柄；最多三个监听根和一个重建。
+//! worker 退出由守卫公布，panic 不捕获；Indexer 的污染锁错误原样传播。
 
 use crate::core::context::indexer::Indexer;
+use crate::core::context::search_cache::shared_search_cache;
 use notify::Watcher as _;
-use parking_lot::{Condvar, Mutex};
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use parking_lot::Mutex;
+use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, OnceLock};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, LazyLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// 重建防抖窗口：窗口内的连续变更合并为一次。
 const DEBOUNCE: Duration = Duration::from_millis(300);
+const MAX_ROOTS: usize = 3;
+const IDLE_TTL: Duration = Duration::from_secs(300);
+const MAX_EVENT_QUEUE: usize = 1024;
 
-/// 把当前线程降为后台优先级（Windows: THREAD_PRIORITY_LOWEST；
-/// 其它平台按 thread-priority crate 的映射）。
-/// 索引是纯粹的后台工作，必须给前台（首任务、用户交互）让路。
+static ROOTS: LazyLock<std::sync::Mutex<HashMap<PathBuf, Arc<IndexCoordinator>>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+// 包含同步降级路径，所有根共享同一个重建配额；Indexer 仍拥有磁盘 I/O 锁。
+static REBUILD_SLOT: LazyLock<std::sync::Mutex<()>> = LazyLock::new(|| std::sync::Mutex::new(()));
+
+struct CoordInner {
+    dirty: HashSet<String>,
+    last_used: Instant,
+    retry_at: Instant,
+    failures: u32,
+    error: Option<String>,
+    worker: Option<JoinHandle<()>>,
+}
+
+struct IndexCoordinator {
+    inner: Mutex<CoordInner>,
+    stop: AtomicBool,
+    started: AtomicBool,
+    ready: AtomicBool,
+    rebuilding: AtomicBool,
+    failed: AtomicBool,
+    generation: AtomicU64,
+    dirty_epoch: AtomicU64,
+}
+
+impl IndexCoordinator {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(CoordInner {
+                dirty: HashSet::new(),
+                last_used: Instant::now(),
+                retry_at: Instant::now(),
+                failures: 0,
+                error: None,
+                worker: None,
+            }),
+            stop: AtomicBool::new(false),
+            started: AtomicBool::new(true),
+            ready: AtomicBool::new(false),
+            rebuilding: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+            dirty_epoch: AtomicU64::new(0),
+        }
+    }
+}
+
+type IndexError = Box<dyn std::error::Error + Send + Sync>;
+
+/// 现存根解析符号链接；已删除根仍按绝对、词法规范化路径匹配注销记录。
+pub fn normalized_root(root: &Path) -> PathBuf {
+    if let Ok(root) = root.canonicalize() {
+        return root;
+    }
+    let absolute = if root.is_absolute() {
+        root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .expect("current directory is required for relative index roots")
+            .join(root)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+/// 将索引工作线程降为后台优先级。
 pub fn lower_current_thread_priority() {
     let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
 }
 
-struct CoordInner {
-    /// 待重建的相对/绝对文件路径（仅供日志与状态展示；重建本身是全量入口的增量执行）
-    dirty: HashSet<String>,
-    project_root: Option<PathBuf>,
+fn lookup(root: &Path) -> Result<Option<Arc<IndexCoordinator>>, IndexError> {
+    let roots = ROOTS
+        .lock()
+        .map_err(|_| std::io::Error::other("index registry lock poisoned"))?;
+    Ok(roots.get(&normalized_root(root)).cloned())
 }
 
-/// 全局索引协调器。
-pub struct IndexCoordinator {
-    inner: Mutex<CoordInner>,
-    /// 脏集合变化信号（worker 从 recv_timeout 醒来后检查）
-    dirty_signal: Condvar,
-    generation: AtomicU64,
-    ready: AtomicBool,
-    started: AtomicBool,
-    rebuilding: AtomicBool,
-    last_rebuild_failed: AtomicBool,
-    /// agent 主动打脏旗标：Edit/Write 后的 [`mark_files_dirty`] 置位
-    /// （引擎过期的 [`request_refresh`] 也置位，但见下方细则），worker 的
-    /// 下一轮 rebuild 跳过空转退避。
-    ///
-    /// **细则（F2 反弹保护）**：上一轮刚空转 no-op 后又出现的 `\0refresh-all`
-    /// 哨兵，引擎刚与磁盘对齐、几秒内再次「判定过期」的可疑度极高 —— 实测
-    /// 疑似 refiller 就长这样，它每一次请求都会置位本旗标，若无条件豁免，
-    /// 退避会被连环插队打穿。worker 在退避等待时不把哨兵类的请求当插队，
-    /// 真正的 Edit/Write 打脏（快照里无哨兵）才插队。
-    skip_idle_backoff: AtomicBool,
-    /// 语义搜索引擎缓存（agent_core lazy_init 时注入）
-    engine_cache: Mutex<Option<Arc<crate::core::context::search_cache::SearchEngineCacheManager>>>,
-    /// 0 变更空转重建的抑制计数：每轮空转 +1，每 30s 汇总打一次点并清零。
-    ///
-    /// 只影响日志，不影响任何逻辑 —— 空转本身无害，刷屏有害。
-    /// 实测教训：0 变更重建不抑制时，50 Hz 空转两天写满 2.5 GB 日志。
-    idle_noop_count: AtomicU64,
-    /// 上次空转汇总打点的时刻。
-    last_idle_report: Mutex<Option<Instant>>,
+fn record_failure(coord: &IndexCoordinator, error: String) {
+    coord.failed.store(true, Ordering::SeqCst);
+    coord.ready.store(false, Ordering::SeqCst);
+    let mut inner = coord.inner.lock();
+    inner.failures = inner.failures.saturating_add(1);
+    inner.retry_at = Instant::now() + Duration::from_secs(1_u64 << inner.failures.min(6));
+    inner.error = Some(error.clone());
+    crate::utils::logging::append_debug_log_line(&format!(
+        "[Context] index worker failed: {error}"
+    ));
 }
 
-static COORDINATOR: OnceLock<IndexCoordinator> = OnceLock::new();
-
-fn coordinator() -> &'static IndexCoordinator {
-    COORDINATOR.get_or_init(|| IndexCoordinator {
-        inner: Mutex::new(CoordInner {
-            dirty: HashSet::new(),
-            project_root: None,
-        }),
-        dirty_signal: Condvar::new(),
-        generation: AtomicU64::new(0),
-        ready: AtomicBool::new(false),
-        started: AtomicBool::new(false),
-        rebuilding: AtomicBool::new(false),
-        last_rebuild_failed: AtomicBool::new(false),
-        skip_idle_backoff: AtomicBool::new(false),
-        engine_cache: Mutex::new(None),
-        idle_noop_count: AtomicU64::new(0),
-        last_idle_report: Mutex::new(None),
-    })
+/// 不捕获 unwind；守卫只发布退出事实，不重用 panic 栈上的资源。
+struct WorkerExit(Arc<IndexCoordinator>);
+impl Drop for WorkerExit {
+    fn drop(&mut self) {
+        if !self.0.stop.load(Ordering::SeqCst) && !self.0.failed.load(Ordering::SeqCst) {
+            record_failure(&self.0, "index worker exited unexpectedly".into());
+        }
+        self.0.rebuilding.store(false, Ordering::SeqCst);
+        self.0.started.store(false, Ordering::SeqCst);
+    }
 }
 
-/// 注入语义搜索引擎缓存（`agent_core::lazy_init` 调用一次）。
-pub fn set_engine_cache(cache: Arc<crate::core::context::search_cache::SearchEngineCacheManager>) {
-    *coordinator().engine_cache.lock() = Some(cache);
+fn retire(coord: &IndexCoordinator) {
+    coord.stop.store(true, Ordering::SeqCst);
+    coord.ready.store(false, Ordering::SeqCst);
 }
 
-/// 标记文件已变更（agent 的 Edit/Write/multi_edit 成功后调用）。
-/// 若协调器尚未启动，以文件所在工作目录惰性启动。
-pub fn mark_files_dirty(paths: impl IntoIterator<Item = String>) {
-    let coord = coordinator();
-    let root = {
-        let mut inner = coord.inner.lock();
-        if inner.project_root.is_none() {
-            if let Ok(cwd) = std::env::current_dir() {
-                inner.project_root = Some(cwd);
+/// 按 root 幂等启动。容量不足返回 false，由查询方走受控同步降级。
+/// 注册和启动占位在同一个锁边界内；目录扫描和 worker 等待都在锁外。
+pub fn ensure_started(project_root: &Path) -> Result<bool, IndexError> {
+    let root = normalized_root(project_root);
+    if !root.is_dir() {
+        return Ok(false);
+    }
+    let coord = {
+        let mut roots = ROOTS
+            .lock()
+            .map_err(|_| std::io::Error::other("index registry lock poisoned"))?;
+        // 退出中的线程仍计入容量，不能靠快速注销/启动突破资源上限。
+        roots.retain(|path, coord| {
+            let inner = coord.inner.lock();
+            if !path.is_dir() || inner.last_used.elapsed() > IDLE_TTL {
+                retire(coord);
             }
+            let finished = inner.worker.as_ref().is_some_and(JoinHandle::is_finished);
+            !(coord.stop.load(Ordering::SeqCst) && finished)
+        });
+        if let Some(coord) = roots.get(&root) {
+            let mut inner = coord.inner.lock();
+            inner.last_used = Instant::now();
+            if coord.started.load(Ordering::SeqCst) {
+                return Ok(!coord.stop.load(Ordering::SeqCst));
+            }
+            if inner
+                .worker
+                .as_ref()
+                .is_some_and(|worker| !worker.is_finished())
+                || Instant::now() < inner.retry_at
+            {
+                return Ok(false);
+            }
+            // 旧句柄已结束，创建完整的新协调器、监听器和队列，而非复用 panic 状态。
+        } else if roots.len() >= MAX_ROOTS {
+            return Ok(false);
         }
-        for p in paths {
-            inner.dirty.insert(p);
-        }
-        // agent 刚写完文件：这是最高优先级的重建请求，别让空转退避挡路。
-        coord.skip_idle_backoff.store(true, Ordering::SeqCst);
-        coord.dirty_signal.notify_one();
-        inner.project_root.clone()
+        let coord = Arc::new(IndexCoordinator::new());
+        roots.insert(root.clone(), coord.clone());
+        coord
     };
-    if let Some(root) = root {
-        ensure_started(&root);
-    }
-}
-
-/// 请求一次完整增量刷新（codebase_search 发现引擎过期时调用）。
-/// 防抖合并，不会叠加执行。
-pub fn request_refresh(project_root: &Path) {
-    let coord = coordinator();
-    {
-        let mut inner = coord.inner.lock();
-        if inner.project_root.is_none() {
-            inner.project_root = Some(project_root.to_path_buf());
+    let worker_coord = coord.clone();
+    let worker_root = root.clone();
+    let worker = std::thread::Builder::new()
+        .name("star-index-worker".into())
+        .spawn(move || {
+            let _exit = WorkerExit(worker_coord.clone());
+            if let Err(error) = run_worker(&worker_root, &worker_coord) {
+                record_failure(&worker_coord, error.to_string());
+            }
+        });
+    match worker {
+        Ok(worker) => {
+            coord.inner.lock().worker = Some(worker);
+            Ok(true)
         }
-        inner.dirty.insert("\0refresh-all".to_string());
-        // 查询方判定引擎过期要的是「现在」的索引 —— 同样不让退避拖它。
-        coord.skip_idle_backoff.store(true, Ordering::SeqCst);
-    }
-    ensure_started(project_root);
-
-    // 必须在 worker 线程 spawn 之后再 notify —— parking_lot 的 Condvar
-    // 不缓存 notify：在线程启动前发出的通知会被静默丢弃，worker 永远
-    // 收不到首轮重建信号，索引一直不构建，查询也就一直返回 Warming。
-    {
-        let inner = coord.inner.lock();
-        coord.dirty_signal.notify_one();
+        Err(error) => {
+            record_failure(&coord, error.to_string());
+            coord.started.store(false, Ordering::SeqCst);
+            Err(error.into())
+        }
     }
 }
 
-/// 已注册的目录 watch 集合。
-///
-/// 以前这里是 `std::mem::forget(watcher)` —— 整个 watcher 被泄漏掉，换取「它
-/// 一直活着」，代价是**没人能再碰它**：既不能在新建目录时补 watch，也不能在
-/// 目录删除时回收。改成 `Arc<Mutex<…>>` 之后 worker 线程拿得到它，增删目录才
-/// 维护得动。
+/// 注销只发停止信号，不在调用线程等待重建；worker 独占并释放监听器。
+pub fn unregister_root(root: &Path) -> Result<(), IndexError> {
+    let root = normalized_root(root);
+    if let Some(coord) = lookup(&root)? {
+        retire(&coord);
+    }
+    shared_search_cache().remove_root(&root);
+    Ok(())
+}
+
+/// 查询只对仍有健康 worker 的根使用 stale/warming，失败原因不会被隐藏。
+pub fn is_healthy(root: &Path) -> Result<bool, IndexError> {
+    let Some(coord) = lookup(root)? else {
+        return Ok(false);
+    };
+    let mut inner = coord.inner.lock();
+    inner.last_used = Instant::now();
+    Ok(coord.started.load(Ordering::SeqCst)
+        && !coord.failed.load(Ordering::SeqCst)
+        && !coord.stop.load(Ordering::SeqCst)
+        && !inner.worker.as_ref().is_some_and(JoinHandle::is_finished))
+}
+
+/// 文件变更显式归属指定根，不从进程 cwd 猜测。
+pub fn mark_files_dirty(
+    root: &Path,
+    paths: impl IntoIterator<Item = String>,
+) -> Result<(), IndexError> {
+    let root = normalized_root(root);
+    shared_search_cache().invalidate_root(&root);
+    let _ = ensure_started(&root)?;
+    if let Some(coord) = lookup(&root)? {
+        let mut inner = coord.inner.lock();
+        inner.dirty.extend(paths);
+        coord.dirty_epoch.fetch_add(1, Ordering::SeqCst);
+    }
+    crate::core::context::call_graph_db::invalidate(&root);
+    Ok(())
+}
+
+/// 为指定根排刷新；不清空失败状态，也不把失败重试无限推迟。
+pub fn request_refresh(root: &Path) -> Result<bool, IndexError> {
+    if !ensure_started(root)? {
+        return Ok(false);
+    }
+    if let Some(coord) = lookup(root)? {
+        coord.inner.lock().dirty.insert("\0refresh-all".into());
+    }
+    is_healthy(root)
+}
+
+/// 同步降级和后台重建共享有界执行配额；污染后明确报错，不恢复锁。
+pub(crate) fn with_rebuild_slot<T>(
+    work: impl FnOnce() -> Result<T, IndexError>,
+) -> Result<T, IndexError> {
+    let _slot = REBUILD_SLOT
+        .lock()
+        .map_err(|_| std::io::Error::other("index rebuild slot lock poisoned"))?;
+    work()
+}
+
 struct DirWatches {
     watcher: notify::RecommendedWatcher,
     /// 已注册目录（绝对路径），用于去重。
@@ -244,522 +354,181 @@ fn add_watch_tree(watches: &Arc<Mutex<DirWatches>>, dir: &Path) {
     }
 }
 
-/// 启动 watcher + 重建 worker（幂等）。
-pub fn ensure_started(project_root: &Path) {
-    let coord = coordinator();
-    if coord.started.swap(true, Ordering::SeqCst) {
-        return;
-    }
-
-    {
-        let mut inner = coord.inner.lock();
-        if inner.project_root.is_none() {
-            inner.project_root = Some(project_root.to_path_buf());
+fn run_worker(root: &Path, coord: &Arc<IndexCoordinator>) -> Result<(), IndexError> {
+    lower_current_thread_priority();
+    let _ = crate::utils::git_self_exclude::ensure_star_excluded(root);
+    let (tx, rx) = mpsc::sync_channel(MAX_EVENT_QUEUE);
+    let overflow = Arc::new(AtomicBool::new(false));
+    let callback_overflow = overflow.clone();
+    let watcher = notify::recommended_watcher(move |event| {
+        if tx.try_send(event).is_err() {
+            callback_overflow.store(true, Ordering::SeqCst);
         }
-    }
-
-    let root = project_root.to_path_buf();
-
-    // ── git 排除：把 .star/ 写进 .git/info/exclude（一次性、幂等）────────
-    // 对标 Claude Code 对 settings.local.json 的处理：agent 的本地状态目录
-    // 不该出现在用户的 git status 里。注册 watcher 之前做——早一点让用户
-    // 第一次 git status 就是干净的；写不进（非 git 目录/权限/竞争失败）
-    // 安静返回，`ensure_star_excluded` 自己不刷日志。
-    if crate::utils::git_self_exclude::ensure_star_excluded(&root).unwrap_or(false) {
-        crate::utils::logging::append_debug_log_line(&format!(
-            "[GIT] excluded .star/ in {} (.git/info/exclude)",
-            root.display()
-        ));
-    }
-
-    // ── watcher：文件系统事件 → 脏集合 ─────────────────────────────────
-    // notify 的 recommended_watcher 在独立内部线程回调，这里只把
-    // 变更路径塞进脏集合，完全不碰索引。
-    let (tx, rx): (Sender<notify::Result<notify::Event>>, Receiver<_>) = mpsc::channel();
-    let watcher_result = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        // channel 满了就丢弃（下一轮全量增量重建会补上），绝不阻塞回调线程
-        let _ = tx.send(res);
-    });
-    let Ok(watcher) = watcher_result else {
-        crate::utils::logging::append_debug_log_line(
-            "[Context] notify watcher init failed; falling back to query-triggered refresh",
-        );
-        coord.started.store(false, Ordering::SeqCst);
-        return;
-    };
-
+    })?;
     let watches = Arc::new(Mutex::new(DirWatches {
         watcher,
         watched: HashSet::new(),
     }));
-
-    // 注册必须在 spawn worker **之前**做完：worker 一起来就可能收到事件并需要
-    // 访问 `watches`，顺序反了会出现「worker 已在跑、watch 却还没建好」的窗口。
-    let registered = register_indexed_dirs(&watches, &root);
-
-    // ── 重建 worker：防抖合并 + 低优先级增量重建 ────────────────────────
-    let worker_watches = Arc::clone(&watches);
-    std::thread::Builder::new()
-        .name("star-index-worker".into())
-        .spawn(move || rebuild_worker_loop(root, rx, worker_watches))
-        .map(|_| ())
-        .unwrap_or_else(|e| {
-            crate::utils::logging::append_debug_log_line(&format!(
-                "[Context] index worker spawn failed: {}",
-                e
-            ));
-            coordinator().started.store(false, Ordering::SeqCst);
-        });
-
-    crate::utils::logging::append_debug_log_line(&format!(
-        "[Context] index coordinator started (watching {}, {} dirs)",
-        project_root.display(),
-        registered
-    ));
-}
-
-/// 两轮 rebuild 之间的**事件窗口**构成统计。
-///
-/// notify 线程只负责投递，worker 在每个窗口开头统一排出；这里记录
-/// 「上次 rebuild 收尾后收到了什么事件」。dirty 突然非空却 0 变更重建时，
-/// 这份统计随空转聚合行打出，塞脏的来源应当现形：
-///
-/// ```text
-/// ev c/m/r/o=0/0/0/0 recv=0 filt=0 sent=1   ← 只有哨兵来了
-/// ev c/m/r/o=0/3/0/0 recv=41 filt=38 sent=0 ← 有一批 modify，但多半被过滤
-/// ```
-///
-/// 实测对照（2026-10-29，WSL2 `/mnt/d` 9p）：add_watch 成功且
-/// create/attrib/close 可送达；`noatime` 下读文件不产生事件，写入**已有**
-/// 文件也不产生事件 —— 空转窗口里若 c/r 几乎为零而 sentinel/哨兵为 1，
-/// 那么周期性塞脏的不是文件系统，是某个还在调 `request_refresh` 的调用方。
-#[derive(Default)]
-struct EventWindowStats {
-    create_events: usize,
-    modify_events: usize,
-    remove_events: usize,
-    other_events: usize,
-    /// 本窗口实际接收到的事件笔数（路径数 ≥ 笔数）
-    events: usize,
-    /// 被 `.star` 前缀或 [`EventFilter`] 剪掉、没进脏集合的路径数
-    filtered_paths: usize,
-    /// strip_prefix(root) 失败、升级成 `\0refresh-all` 哨兵的路径数
-    sentinel_paths: usize,
-}
-
-impl EventWindowStats {
-    /// 单行摘要，只随空转聚合行打出，密度优先。
-    fn summary(&self) -> String {
-        format!(
-            "ev c/m/r/o={}/{}/{}/{} recv={} filtered={} sentinel={}",
-            self.create_events,
-            self.modify_events,
-            self.remove_events,
-            self.other_events,
-            self.events,
-            self.filtered_paths,
-            self.sentinel_paths
-        )
+    register_indexed_dirs(&watches, root);
+    if !watches.lock().watched.contains(root) {
+        return Err(std::io::Error::other("index root watch registration failed").into());
     }
-}
-
-/// 连续 no-op 之后，**下一轮**重建前的额外等待级别：5s 起步指数翻倍、封顶 2 分钟。
-///
-/// 5s → 10s → 20s → 40s → 80s → 120s。这是兜底不是根治：把「未知 refiller
-/// 每 ~4s 抢一次 9p 全树 stat」从背靠背改成低频心跳。agent 经
-/// [`mark_files_dirty`] / [`request_refresh`] 请求的重建置位
-/// `skip_idle_backoff` 插队；只走文件系统事件、没经 agent 的外部编辑最多
-/// 让索引晚一个退避档 —— 之后 codebase_search 的 serve-stale 查询路径仍会
-/// 主动触发一次续扫，最终一致。
-fn next_noop_backoff(current: Duration) -> Duration {
-    if current.is_zero() {
-        Duration::from_secs(5)
-    } else {
-        (current * 2).min(Duration::from_secs(120))
-    }
-}
-
-/// worker 主循环：收集事件 → 防抖 → 增量重建。
-/// notify 事件的接收超时就是防抖窗口 —— 窗口内新事件持续刷新，
-/// 静默满 300ms 才执行一次重建。
-/// 连续 0 变更空转后走 [`next_noop_backoff`] 的退避，agent 主动打脏插队列外。
-fn rebuild_worker_loop(
-    root: PathBuf,
-    rx: Receiver<notify::Result<notify::Event>>,
-    watches: Arc<Mutex<DirWatches>>,
-) {
-    lower_current_thread_priority();
-    let coord = coordinator();
-    let filter = build_event_filter(&root);
-    // 连续 no-op 后的额外等待级别（ZERO = 不退避）。
-    let mut idle_backoff = Duration::ZERO;
-    // 事件窗口统计：随空转聚合行打出来定位「谁在周期性塞脏」。
-    let mut stats = EventWindowStats::default();
-
+    let filter = build_event_filter(root);
+    let mut pending_since = None;
     loop {
-        // 收集一批事件
-        let mut got_event = false;
-        loop {
-            match rx.try_recv() {
-                Ok(Ok(event)) => {
-                    got_event = true;
-                    stats.events += 1;
-                    match event.kind {
-                        notify::EventKind::Create(_) => stats.create_events += 1,
-                        notify::EventKind::Modify(_) => stats.modify_events += 1,
-                        notify::EventKind::Remove(_) => stats.remove_events += 1,
-                        _ => stats.other_events += 1,
+        if coord.stop.load(Ordering::SeqCst) || !root.is_dir() {
+            retire(coord);
+            shared_search_cache().remove_root(root);
+            return Ok(());
+        }
+        if coord.inner.lock().last_used.elapsed() > IDLE_TTL {
+            retire(coord);
+            return Ok(());
+        }
+        collect_events(root, coord, &rx, &watches, &filter)?;
+        if overflow.swap(false, Ordering::SeqCst) {
+            shared_search_cache().invalidate_root(root);
+            let mut inner = coord.inner.lock();
+            inner.dirty.insert("\0refresh-all".into());
+            coord.dirty_epoch.fetch_add(1, Ordering::SeqCst);
+        }
+        let pending = !coord.inner.lock().dirty.is_empty();
+        if pending && pending_since.is_none() {
+            pending_since = Some(Instant::now());
+        }
+        if pending_since.is_some_and(|since| since.elapsed() >= DEBOUNCE) {
+            let can_retry = Instant::now() >= coord.inner.lock().retry_at;
+            if can_retry {
+                let dirty = std::mem::take(&mut coord.inner.lock().dirty);
+                let epoch = coord.dirty_epoch.load(Ordering::SeqCst);
+                coord.rebuilding.store(true, Ordering::SeqCst);
+                let result = with_rebuild_slot(|| {
+                    if coord.stop.load(Ordering::SeqCst) {
+                        return Ok(false);
                     }
-                    // 目录增删要维护 watch 集合：注册是 NonRecursive 的，
-                    // 所以没人会替我们递归下去。
-                    match event.kind {
-                        notify::EventKind::Create(_) => {
-                            for path in &event.paths {
-                                if path.is_dir() && !filter.is_ignored(path) {
-                                    add_watch_tree(&watches, path);
-                                }
-                            }
-                        }
-                        notify::EventKind::Remove(_) => {
-                            for path in &event.paths {
-                                watches.lock().remove_subtree(path);
-                            }
-                        }
-                        _ => {}
+                    let index = Indexer::new(root).index_project()?;
+                    if index.truncated {
+                        return Ok(false);
                     }
-                    let mut inner = coord.inner.lock();
-                    for path in event.paths {
-                        if let Ok(rel) = path.strip_prefix(&root) {
-                            let rel = rel.to_string_lossy().replace('\\', "/");
-                            // 索引自身的持久化文件不进脏集合，否则重建→写盘→事件→重建 死循环
-                            //
-                            // 注意 `.star` 目录**本身**也算：Windows 上 notify 会把「watch
-                            // 根目录自己的元数据变更」直接以 watch 根路径上报，rel == ".star"
-                            // 和 rel == "" 都不指向任何文件，放进来只会引发「0 变更重建
-                            // 空转 50 Hz + 刷爆 debug 日志」（实测把 2.5 GB 日志灌满的就是它）。
-                            // `.star` 内部的真实写入反正由 `(size, mtime)` 全量增量兜底，
-                            // 下一轮真实事件自会把变化补进来。
-                            if rel.is_empty() || rel == ".star" || rel.starts_with(".star/") {
-                                stats.filtered_paths += 1;
-                                continue;
-                            }
-                            // 事件过滤：没有这一层，跑一次 `cargo build` 会灌进
-                            // 几千个 `target/` 事件，每轮防抖窗口都被它们刷新，
-                            // 重建被无限推迟（甚至永远不触发）。
-                            if filter.is_ignored(&path) {
-                                stats.filtered_paths += 1;
-                                continue;
-                            }
-                            inner.dirty.insert(rel);
-                        } else {
-                            inner.dirty.insert("\0refresh-all".to_string());
-                            stats.sentinel_paths += 1;
+                    crate::core::tools::codebase_search::update_engine_in_cache(
+                        root,
+                        &shared_search_cache(),
+                        &index,
+                        None,
+                    )?;
+                    Ok(true)
+                });
+                coord.rebuilding.store(false, Ordering::SeqCst);
+                match result {
+                    Ok(true) => {
+                        let mut inner = coord.inner.lock();
+                        inner.failures = 0;
+                        inner.error = None;
+                        inner.retry_at = Instant::now();
+                        coord.failed.store(false, Ordering::SeqCst);
+                        coord.ready.store(true, Ordering::SeqCst);
+                        coord.generation.fetch_add(1, Ordering::SeqCst);
+                        if coord.dirty_epoch.load(Ordering::SeqCst) != epoch {
+                            shared_search_cache().invalidate_root(root);
                         }
                     }
-                    if matches!(event.kind, notify::EventKind::Remove(_)) {
-                        coord.dirty_signal.notify_one();
+                    Ok(false) => {
+                        coord.inner.lock().dirty.extend(dirty);
+                    }
+                    Err(error) => {
+                        shared_search_cache().invalidate_root(root);
+                        record_failure(coord, error.to_string());
+                        coord.inner.lock().dirty.extend(dirty);
                     }
                 }
-                Ok(Err(err)) => {
-                    crate::utils::logging::append_debug_log_line(&format!(
-                        "[Context] watch event error: {}",
-                        err
-                    ));
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => return,
+                pending_since = None;
             }
         }
-        if got_event {
-            coord.dirty_signal.notify_one();
-        }
+        std::thread::park_timeout(Duration::from_millis(50));
+    }
+}
 
-        // 防抖等待：静默满 DEBOUNCE 才动手
-        let has_pending = {
-            let mut inner = coord.inner.lock();
-            if !inner.dirty.is_empty() {
-                true
-            } else {
-                // 等待脏信号或超时（超时后同样检查，watcher 事件由本线程自己收）
-                let _ = coord.dirty_signal.wait_for(&mut inner, DEBOUNCE);
-                !inner.dirty.is_empty()
+fn collect_events(
+    root: &Path,
+    coord: &IndexCoordinator,
+    rx: &Receiver<notify::Result<notify::Event>>,
+    watches: &Arc<Mutex<DirWatches>>,
+    filter: &EventFilter,
+) -> Result<(), IndexError> {
+    // 每轮有界排空，持续事件风暴也不能饿死停止检查与重建。
+    for _ in 0..MAX_EVENT_QUEUE {
+        let event = match rx.try_recv() {
+            Ok(event) => event?,
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(std::io::Error::other("index event channel closed").into())
             }
         };
-
-        if has_pending {
-            // F2 空转退避：连续 no-op 之后先睡一拍，把「未知 refiller」的
-            // rebuild 节奏从背靠背压到 5s→2min 低频。
-            //
-            // 插队细则见 `skip_idle_backoff` 的文档：真实 Edit/Write 的打脏
-            // （快照里无 `\0refresh-all` 哨兵）插队；周期性出现的哨兵类请求
-            // 不豁免 —— 否则 refiller 每次置位旗标，退避形同虚设。
-            if !idle_backoff.is_zero() {
-                let wait_rec = {
-                    let mut inner = coord.inner.lock();
-                    let snapshot_has_sentinel = inner.dirty.iter().any(|p| p.starts_with('\0'));
-                    let urgent = coord.skip_idle_backoff.swap(false, Ordering::SeqCst)
-                        && !snapshot_has_sentinel;
-                    if urgent {
-                        None
-                    } else {
-                        Some(Instant::now() + idle_backoff)
-                    }
-                };
-                if let Some(deadline) = wait_rec {
-                    loop {
-                        let now = Instant::now();
-                        if now >= deadline {
-                            break;
-                        }
-                        let outcome = {
-                            let mut inner = coord.inner.lock();
-                            // 等待期间的插队检查同样只认「无哨兵的打脏」。
-                            let wake_early = coord.skip_idle_backoff.swap(false, Ordering::SeqCst)
-                                && !inner.dirty.iter().any(|p| p.starts_with('\0'));
-                            if wake_early {
-                                break;
-                            }
-                            coord
-                                .dirty_signal
-                                .wait_for(&mut inner, deadline.saturating_duration_since(now))
-                        };
-                        if outcome.timed_out() {
-                            break;
-                        }
-                        // 提前醒来：可能是真事件也可能是 refiller。分不清，
-                        // 继续把窗口睡满；事件留在 rx 里，窗口结束统一排出。
-                    }
-                }
-            }
-            let mut snapshot: Vec<String> = {
-                let mut inner = coord.inner.lock();
-                std::mem::take(&mut inner.dirty).into_iter().collect()
+        if !matches!(
+            event.kind,
+            notify::EventKind::Create(_)
+                | notify::EventKind::Modify(_)
+                | notify::EventKind::Remove(_)
+        ) {
+            continue;
+        }
+        let mut dirty = Vec::new();
+        for path in event.paths {
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
             };
-            // 真实文件变更（排除 `\0refresh-all` 哨兵，它可能来自周期性
-            // refiller）→ 让调用图库的缓存 token 失效。下一次 CodeGraph
-            // 查询会重新 walk + 只重解析变更文件，而不是读编辑前的旧图。
-            if has_real_dirty_paths(&snapshot) {
-                crate::core::context::call_graph_db::invalidate(&root);
+            if relative.as_os_str().is_empty() || filter.is_ignored(&path) {
+                continue;
             }
-            // HashSet 迭代序是随机的：日志里 dirty.first() 一会 `Some("")`
-            // 一会 `Some(".star")`，排查时误导。排序一次，日志稳定可读。
-            snapshot.sort();
-            let was_noop = run_incremental_rebuild(&root, &snapshot, &stats);
-            if was_noop {
-                idle_backoff = next_noop_backoff(idle_backoff);
-            } else {
-                // 有真实进展：退避清零，恢复 300ms 首触发。
-                idle_backoff = Duration::ZERO;
+            if matches!(event.kind, notify::EventKind::Create(_)) && path.is_dir() {
+                add_watch_tree(watches, &path);
             }
-            // 窗口清零：下一轮统计只计本轮 rebuild 结束后新到的事件。
-            stats = EventWindowStats::default();
+            if matches!(event.kind, notify::EventKind::Remove(_)) {
+                watches.lock().remove_subtree(&path);
+            }
+            dirty.push(relative.to_string_lossy().replace('\\', "/"));
+        }
+        if !dirty.is_empty() {
+            shared_search_cache().invalidate_root(root);
+            crate::core::context::call_graph_db::invalidate(root);
+            coord.inner.lock().dirty.extend(dirty);
+            coord.dirty_epoch.fetch_add(1, Ordering::SeqCst);
         }
     }
+    Ok(())
 }
 
-/// 脏快照里是否包含**真实文件路径**（排除 `\0refresh-all` 哨兵）。
-///
-/// 哨兵可能是周期性 refiller 塞进来的；若也按它清调用图 token，
-/// 每次查询都会重新同步，等于把持久化缓存关掉。
-fn has_real_dirty_paths(snapshot: &[String]) -> bool {
-    snapshot.iter().any(|path| !path.starts_with('\0'))
-}
-
-/// 增量重建：indexer（(size,mtime) 快速跳过）→ 语义引擎增量更新 → 状态翻转。
-///
-/// 返回本轮是否「纯空转」（索引 0 变更、引擎无实质更新）—— worker 据此
-/// 调整空转退避级别。
-fn run_incremental_rebuild(root: &Path, dirty: &[String], stats: &EventWindowStats) -> bool {
-    let coord = coordinator();
-    if coord.rebuilding.swap(true, Ordering::SeqCst) {
-        // 上一轮还在跑：把这一轮的脏路径原样放回去，下一轮再处理。
-        requeue_dirty_paths(dirty);
-        return false;
-    }
-
-    let started_at = Instant::now();
-    lower_current_thread_priority();
-
-    // 1. 文件索引增量更新（(size,mtime) 未变的文件零读取）
-    let indexer = Indexer::new(root);
-    let index_result = indexer.index_project();
-
-    // 0 变更 = 本轮没有任何文件内容变化（自指事件残留等），是纯空转：
-    // 日志照打会把 debug 日志刷爆（实测 50 Hz 空转两天写满 2.5 GB）。
-    // 抑制为「每 30s 汇总一次」—— 空转次数和耗时仍然可观测，不再刷屏。
-    // 索引被预算截断（F3）不是空转 —— 它有实质进展，continue 路径见下。
-    let truncated = matches!(&index_result, Ok(r) if r.truncated);
-    let index_noop =
-        matches!(&index_result, Ok(r) if r.new_blobs.is_empty() && r.removed_blobs.is_empty());
-
-    match &index_result {
-        Ok(result) => {
-            if truncated {
-                crate::utils::logging::append_debug_log_line(&format!(
-                    "[Context] incremental reindex truncated at byte budget ({} new hashed, {} entries) in {:?} — F3 引擎更新推迟，已排续扫",
-                    result.new_blobs.len(),
-                    result.total_files,
-                    started_at.elapsed()
-                ));
-            } else if index_noop {
-                let count = coord.idle_noop_count.fetch_add(1, Ordering::SeqCst) + 1;
-                let mut last = coord.last_idle_report.lock();
-                if last
-                    .as_ref()
-                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(30))
-                {
-                    *last = Some(Instant::now());
-                    coord.idle_noop_count.store(0, Ordering::SeqCst);
-                    drop(last);
-                    // F2 插桩：耗时之外带上快照指纹（多少条 dirty、第一条是
-                    // 什么）和事件窗口统计 —— 周期性塞脏的来源看这几行现形。
-                    crate::utils::logging::append_debug_log_line(&format!(
-                        "[Context] incremental reindex: 0 changes (no-op ×{}) — suppressing for 30s (last {:?}) [dirty_n={} first={:?} {}]",
-                        count,
-                        started_at.elapsed(),
-                        dirty.len(),
-                        dirty.first(),
-                        stats.summary()
-                    ));
-                }
-            } else {
-                crate::utils::logging::append_debug_log_line(&format!(
-                    "[Context] incremental reindex: {} changed, {} removed, {} total ({:?}) in {:?}",
-                    result.new_blobs.len(),
-                    result.removed_blobs.len(),
-                    result.total_files,
-                    dirty.first(),
-                    started_at.elapsed()
-                ));
-            }
-        }
-        Err(err) => {
-            crate::utils::logging::append_debug_log_line(&format!(
-                "[Context] incremental reindex failed: {}",
-                err
-            ));
-        }
-    }
-
-    // 2. 语义搜索引擎增量更新（有缓存管理器时）
-    //
-    // 锁纪律：先把 `Arc` clone 出来、**让 guard 落出作用域**，再调
-    // `update_engine_in_cache`。那条路径内部要回调 `engine_meta` /
-    // `patch_engine`，两者取的是同一把锁 —— 攥着 guard 去调就是自死锁。
-    //
-    // F3：索引被预算截断时不喂引擎 —— 半截数据 patch 一轮还常常撞 patch
-    // 上限直接全量一次；几秒后续扫把尾巴补进来又撞上限再来一次全量。实测
-    // 「开头两次连续 FullRebuild」（11.9s + 14.2s）就是这条链。引擎更新推
-    // 迟到续扫收尾那一轮，完整数据只做一次。
-    let cache = if truncated {
-        None
-    } else {
-        coord.engine_cache.lock().clone()
+/// 指定根的可观察状态，包含退出、失败、重建及代数。
+pub fn status_text(root: &Path) -> Result<String, IndexError> {
+    let Some(coord) = lookup(root)? else {
+        return Ok("index: off".into());
     };
-    if let Some(cache) = cache {
-        match &index_result {
-            Ok(result) => {
-                match crate::core::tools::codebase_search::update_engine_in_cache(
-                    root, &cache, result, None,
-                ) {
-                    Ok(outcome) => {
-                        // `FullRebuild` 是**成功**，不是失败 —— 变化太大时
-                        // 逐条补不如重建，这是预期路径。误报成失败会让
-                        // resolve_engine 平白禁用 Warming 快路径。
-                        let detail = match &outcome {
-                            crate::core::tools::codebase_search::UpdateOutcome::Patched {
-                                changed,
-                            } => format!("patched {} ops", changed),
-                            crate::core::tools::codebase_search::UpdateOutcome::FullRebuild {
-                                files,
-                            } => format!("full rebuild, {} files", files),
-                        };
-                        // 索引 0 变更 + 补丁 0 ops：纯空转，不复打点（同上面
-                        // reindex 的 30s 汇总口径）—— 这一条本身就是 2.5 GB
-                        // 日志里最大的单一来源（1,159 万行 / 1.1 GB）。
-                        // FullRebuild 和真实补丁照常打点，可观测性不受影响。
-                        let boring = index_noop
-                            && matches!(
-                                &outcome,
-                                crate::core::tools::codebase_search::UpdateOutcome::Patched {
-                                    changed,
-                                } if *changed == 0
-                            );
-                        if !boring {
-                            crate::utils::logging::append_debug_log_line(&format!(
-                                "[Context] semantic engine updated in background: {} in {:?}",
-                                detail,
-                                started_at.elapsed()
-                            ));
-                        }
-                        coord.last_rebuild_failed.store(false, Ordering::SeqCst);
-                    }
-                    Err(err) => {
-                        crate::utils::logging::append_debug_log_line(&format!(
-                            "[Context] background engine update failed: {}",
-                            err
-                        ));
-                        coord.last_rebuild_failed.store(true, Ordering::SeqCst);
-                    }
-                }
-            }
-            Err(err) => {
-                // 文件索引都没跑成功，拿不到权威变更集 —— 不能凭脏集合
-                // 去猜引擎要改什么。下一轮事件会重新触发。
-                crate::utils::logging::append_debug_log_line(&format!(
-                    "[Context] semantic engine update skipped (index failed): {}",
-                    err
-                ));
-            }
-        }
-    }
-
-    // F3：本轮索引被截断 —— 排一次续扫把尾巴收完。`\0refresh-all` 恰是
-    // 「不增量、从头推一遍」的入口，续扫靠 (size,mtime) 快速跳过已完成的
-    // 文件，只推进新的一部分；直到某一轮不再截断，引擎才拿完整数据。
-    if truncated {
-        coord.inner.lock().dirty.insert("\0refresh-all".to_string());
-        // 续扫**必须插队**。
-        //
-        // 它不是空转：上一轮真的推进了一部分索引（预算耗尽前读进去的那些文件
-        // 已经落盘），只是没读完。不插队的话，续扫要排在空转退避后面 —— 那个
-        // 退避是指数增长的（5s→10s→…→2min），于是"首次构建"在会话内根本
-        // 走不完：查询侧一次又一次看到 Warming，模型一次次重试，最后放弃。
-        //
-        // 截断本身说明还有大量文件没读 —— 那就是"确实有事要做"，与
-        // "这轮什么都没变"（空转）性质完全不同。
-        coord.skip_idle_backoff.store(true, Ordering::SeqCst);
-    }
-
-    coord.generation.fetch_add(1, Ordering::SeqCst);
-    coord.ready.store(true, Ordering::SeqCst);
-    coord.rebuilding.store(false, Ordering::SeqCst);
-    coord.dirty_signal.notify_one();
-    index_noop
+    let inner = coord.inner.lock();
+    let state = if coord.failed.load(Ordering::SeqCst) {
+        "failed"
+    } else if !coord.started.load(Ordering::SeqCst) {
+        "exited"
+    } else if coord.stop.load(Ordering::SeqCst) {
+        "stopping"
+    } else if coord.rebuilding.load(Ordering::SeqCst) {
+        "rebuilding"
+    } else if coord.ready.load(Ordering::SeqCst) {
+        "ready"
+    } else {
+        "warming"
+    };
+    Ok(format!(
+        "index: {state} (gen {}, {} dirty){}",
+        coord.generation.load(Ordering::SeqCst),
+        inner.dirty.len(),
+        inner
+            .error
+            .as_ref()
+            .map(|e| format!(" {e}"))
+            .unwrap_or_default()
+    ))
 }
 
-/// 重建进行中时，把这一轮的脏路径**原样**放回队列。
-///
-/// 这里以前插 `"\0refresh-all"` 哨兵。增量补丁上线后那是脚枪：哨兵的含义是
-/// "无条件全量重建"，而回队的往往只是补丁窗口内到达的普通编辑 —— 用哨兵会把
-/// 它们误升级成一次全量。下一轮本来就会从 `index_project()` 重新推导权威变更集，
-/// 把实际路径还回去就够了。
-///
-/// 哨兵只保留给两处真正需要全量的场景：[`request_refresh`]（引擎已被判定过期）
-/// 与 root 之外的事件。
-fn requeue_dirty_paths(paths: &[String]) {
-    let mut inner = coordinator().inner.lock();
-    for path in paths {
-        inner.dirty.insert(path.clone());
-    }
-}
-
-/// watcher 事件过滤器：只有"可能进入索引"的路径才配进脏集合。
-///
-/// 口径与 `utils::file_walk` 完全一致（`.gitignore` + `.starignore` +
-/// `~/.star/ignore` + VCS 目录 + `.star/`），不另起一套 —— 否则"遍历时看不到
-/// 的文件"和"能触发重建的文件"会分叉，出现"事件一直在来但索引永远不变"
-/// 或反过来的怪状。
 struct EventFilter {
     matcher: ignore::gitignore::Gitignore,
 }
@@ -800,64 +569,6 @@ fn build_event_filter(root: &Path) -> EventFilter {
             .build()
             .unwrap_or_else(|_| ignore::gitignore::Gitignore::empty()),
     }
-}
-
-/// 协调器是否已启动（查询路径据此决定冷启动策略）。
-pub fn is_started() -> bool {
-    coordinator().started.load(Ordering::SeqCst)
-}
-
-/// 语义引擎是否就绪（供查询路径决定是否提示 warming）。
-pub fn is_engine_ready() -> bool {
-    coordinator().ready.load(Ordering::SeqCst)
-}
-
-/// 协调器**实际在重建哪个 root**。
-///
-/// 查询路径必须拿它和查询 root 比对 —— 协调器是进程级单例，它只重建**第一次**
-/// 交给它的那棵树。对另一个 root 的查询走 Warming 路径 = 永远等不到引擎：
-/// 后台根本不会给那个 root 建索引（现场：把查询缩到子目录后，连着几次都是
-/// "still building"，而全仓查询同样等不到，因为两边其实都不是托管 root）。
-///
-/// 返回 `None` = 协调器没启动，或还没定下 root。
-pub fn rebuild_root() -> Option<std::path::PathBuf> {
-    coordinator()
-        .inner
-        .lock()
-        .project_root
-        .as_ref()
-        .map(|root| root.canonicalize().unwrap_or_else(|_| root.clone()))
-}
-
-/// 是否有后台重建正在进行。
-pub fn is_rebuilding() -> bool {
-    coordinator().rebuilding.load(Ordering::SeqCst)
-}
-
-/// 上次后台重建是否失败（失败时查询路径应回退同步构建，避免死循环 warming）。
-pub fn last_rebuild_failed() -> bool {
-    coordinator().last_rebuild_failed.load(Ordering::SeqCst)
-}
-
-/// 状态摘要（日志/状态行用）。
-pub fn status_text() -> String {
-    let coord = coordinator();
-    let dirty_len = coord.inner.lock().dirty.len();
-    let state = if coord.rebuilding.load(Ordering::SeqCst) {
-        "rebuilding"
-    } else if coord.ready.load(Ordering::SeqCst) {
-        "ready"
-    } else if coord.started.load(Ordering::SeqCst) {
-        "warming"
-    } else {
-        "off"
-    };
-    format!(
-        "index: {} (gen {}, {} dirty)",
-        state,
-        coord.generation.load(Ordering::SeqCst),
-        dirty_len
-    )
 }
 
 #[cfg(test)]
@@ -904,6 +615,19 @@ mod tests {
     /// 以前这里是 `watch(root, Recursive)`：整棵树的每个目录都注册一遍 ——
     /// 本仓库 `target/` 下有 6,000+ 个，而它们的事件随后会被 `EventFilter`
     /// 丢掉。注册量 6,600 而有用的一百多个，慢盘上就是那 80 多秒。
+    #[test]
+    fn root_normalization_collapses_parent_segments_and_resolves_existing_aliases() {
+        let dir = tempfile::tempdir().expect("fixture");
+        let nested = dir.path().join("src").join("..");
+        assert_eq!(normalized_root(&nested), normalized_root(dir.path()));
+        #[cfg(unix)]
+        {
+            let alias = dir.path().join("alias");
+            std::os::unix::fs::symlink(dir.path(), &alias).expect("symlink fixture");
+            assert_eq!(normalized_root(&alias), normalized_root(dir.path()));
+        }
+    }
+
     #[test]
     fn ignored_directories_never_get_a_watch() {
         let dir = repo_fixture();
@@ -999,138 +723,6 @@ mod tests {
         assert!(!watches.lock().add(&missing));
     }
 
-    /// 涉及全局协调器脏集合的测试共用这一把锁。
-    ///
-    /// 协调器是 `OnceLock` 单例，`request_refresh` / `mark_files_dirty` /
-    /// `requeue_dirty_paths` 写的是同一个 `HashSet`。并行测试里只要两个用例
-    /// 同时碰它，一个用例合法插入的哨兵就会落进另一个用例的断言里 ——
-    /// 那是测试间的竞争，不是被测代码的 bug。串行化这一组用例即可消除它。
-    static DIRTY_SET_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
-
-    /// 捏住 `rebuilding` 旗标的守卫：worker 排空脏集合后见 `rebuilding`
-    /// 已置位，会走 `run_incremental_rebuild` 的「上一轮还在跑」分支把路径
-    /// **原样回队**，既不做真重建也不消费路径。
-    ///
-    /// 没有这个守卫，「打脏后脏集合里仍有路径」就是测试线程和 worker
-    /// 抢锁的竞态：worker 随时可能被 condvar 唤醒，一把
-    /// `mem::take(&mut inner.dirty)` 排空整个集合去重建。1793 个测试并行
-    /// 时 worker 常常赢——本测试因此在 CI Linux 上间歇性挂掉（本地
-    /// Windows 却一直过，纯属调度运气；和 tokio 版本无关，worker 是
-    /// 普通 std 线程）。
-    ///
-    /// 置位前先等 worker 走完手上那轮真重建：否则它结束时执行
-    /// `rebuilding.store(false)`，顺手就把我们的 hold 释放了。
-    struct RebuildingHold(&'static IndexCoordinator);
-
-    impl RebuildingHold {
-        fn acquire(coord: &'static IndexCoordinator) -> Self {
-            let deadline = Instant::now() + Duration::from_secs(15);
-            while coord.rebuilding.load(Ordering::SeqCst) {
-                if Instant::now() > deadline {
-                    break; // 兜底超时：best-effort，不再死等
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            coord.rebuilding.store(true, Ordering::SeqCst);
-            RebuildingHold(coord)
-        }
-    }
-
-    impl Drop for RebuildingHold {
-        fn drop(&mut self) {
-            self.0.rebuilding.store(false, Ordering::SeqCst);
-        }
-    }
-
-    /// 自旋等待脏集合里出现满足谓词的路径（2s 截止）。在 `RebuildingHold`
-    /// 下 worker 排空后必会原样回队，所以等多轮一定能看到；超时才认输。
-    fn wait_for_dirty<F>(coord: &IndexCoordinator, pred: F) -> bool
-    where
-        F: Fn(&str) -> bool,
-    {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            if coord.inner.lock().dirty.iter().any(|p| pred(p)) {
-                return true;
-            }
-            if Instant::now() > deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    #[test]
-    fn mark_dirty_starts_coordinator_and_collects_paths() {
-        let _guard = DIRTY_SET_TEST_LOCK.lock();
-        let coord = coordinator();
-        let _hold = RebuildingHold::acquire(coord);
-        let dir = tempfile::tempdir().unwrap();
-        // 全局协调器可能被并行测试先播种过 root（engine/semantic 查询路径
-        // 也会 request_refresh），因此这里不断言 root 归属，只验证：
-        // 1) 幂等启动 2) 脏集合收集到标记文件。
-        request_refresh(dir.path());
-        coord.inner.lock().dirty.clear();
-
-        mark_files_dirty(vec![dir.path().join("a.rs").to_string_lossy().to_string()]);
-
-        // 路径要么尚未被 worker 排空，要么已被它按回队路径放回——
-        // 两种情况自旋都能看到。没有 RebuildingHold 时这是纯竞态。
-        let found = wait_for_dirty(coord, |p| p.ends_with("a.rs"));
-
-        assert!(coord.started.load(Ordering::SeqCst));
-        assert!(
-            found,
-            "脏集合应包含标记的文件: {:?}",
-            coord.inner.lock().dirty
-        );
-    }
-
-    #[test]
-    fn status_text_reflects_state() {
-        let s = status_text();
-        assert!(s.starts_with("index:"));
-    }
-
-    /// 重建进行中回队的必须是**实际路径**，不是哨兵。
-    ///
-    /// 用哨兵会把补丁窗口内到达的普通编辑误升级成一次全量重建 ——
-    /// 这是增量补丁上线后才出现的脚枪。
-    #[test]
-    fn requeue_keeps_paths_verbatim_and_adds_no_sentinel() {
-        // 必须和 `mark_dirty_starts_coordinator_and_collects_paths` 共用同一把锁：
-        // 那个用例会调 `request_refresh`（合法地插哨兵）。不串行化的话，
-        // 它的哨兵会落进本用例的断言里 —— 那是测试间竞争，不是被测代码的 bug。
-        let _guard = DIRTY_SET_TEST_LOCK.lock();
-        let coord = coordinator();
-        // 同一类竞态：worker 可能在本用例断言前把刚回队的路径排空去重建。
-        // 捏住 rebuilding 让它排空后按「上一轮还在跑」原样放回。
-        let _hold = RebuildingHold::acquire(coord);
-
-        coord.inner.lock().dirty.clear();
-
-        requeue_dirty_paths(&["src/a.rs".to_string(), "src/b.rs".to_string()]);
-
-        let has_a = wait_for_dirty(coord, |p| p == "src/a.rs");
-        let has_b = wait_for_dirty(coord, |p| p == "src/b.rs");
-
-        assert!(
-            has_a,
-            "回队必须保留 src/a.rs: {:?}",
-            coord.inner.lock().dirty
-        );
-        assert!(
-            has_b,
-            "回队必须保留 src/b.rs: {:?}",
-            coord.inner.lock().dirty
-        );
-        assert!(
-            !coord.inner.lock().dirty.iter().any(|p| p.starts_with('\0')),
-            "回队不得注入哨兵，否则普通编辑会被误升级为全量重建：{:?}",
-            coord.inner.lock().dirty
-        );
-    }
-
     /// 事件过滤必须复用 `utils::file_walk` 的忽略口径 —— 否则"遍历时看不到
     /// 的文件"和"能触发重建的文件"会分叉。
     #[test]
@@ -1158,74 +750,5 @@ mod tests {
         let filter = build_event_filter(dir.path());
         assert!(!filter.is_ignored(&dir.path().join("main.rs")));
         assert!(filter.is_ignored(&dir.path().join(".star/logs/agent.log")));
-    }
-
-    /// F2 空转退避的级别曲线：首档 5s 指数翻倍、封顶 2 分钟。
-    /// 真实进展由 worker 清零（见 worker 主循环），这里是纯函数的契约。
-    #[test]
-    fn noop_backoff_levels_go_5s_to_120s() {
-        let mut level = Duration::ZERO;
-        let mut seen = Vec::new();
-        for _ in 0..8 {
-            level = next_noop_backoff(level);
-            seen.push(level.as_secs());
-        }
-        assert_eq!(seen, vec![5, 10, 20, 40, 80, 120, 120, 120]);
-    }
-
-    /// F2 空转聚合行携带的窗口摘要：定位「谁在周期性塞脏」看的就是这一行，
-    /// 每个计数字段都必须在位 —— 扩字段时同步这里，防止诊断指标悄悄丢掉。
-    #[test]
-    fn event_window_stats_summary_carries_all_counters() {
-        let mut st = EventWindowStats::default();
-        st.create_events = 2;
-        st.other_events = 12;
-        st.events = 41;
-        st.filtered_paths = 39;
-        st.sentinel_paths = 1;
-        assert_eq!(
-            st.summary(),
-            "ev c/m/r/o=2/0/0/12 recv=41 filtered=39 sentinel=1"
-        );
-
-        st.modify_events = 3;
-        assert!(
-            st.summary().starts_with("ev c/m/r/o=2/3/0/12"),
-            "修改事件计数也必须在摘要里: {}",
-            st.summary()
-        );
-    }
-
-    /// F2 插队契约：agent 的 Edit/Write 打脏必须置位插队旗标 —— 否则长
-    /// 空转链上的真编辑会陪等到退避窗口结束才进索引。
-    #[test]
-    fn mark_files_dirty_requests_backoff_skip() {
-        let _guard = DIRTY_SET_TEST_LOCK.lock();
-        let coord = coordinator();
-        coord.skip_idle_backoff.store(false, Ordering::SeqCst);
-
-        let dir = tempfile::tempdir().unwrap();
-        mark_files_dirty(vec![dir
-            .path()
-            .join("skip-flag.rs")
-            .to_string_lossy()
-            .to_string()]);
-
-        assert!(
-            coord.skip_idle_backoff.load(Ordering::SeqCst),
-            "mark_files_dirty 后应置位插队旗标"
-        );
-    }
-
-    /// 只有真实路径才让调用图 token 失效；`\0refresh-all` 哨兵不算 ——
-    /// 否则周期性 refiller 会让每次 CodeGraph 查询都重新同步。
-    #[test]
-    fn sentinel_only_snapshots_do_not_invalidate_the_callgraph() {
-        assert!(!has_real_dirty_paths(&[]));
-        assert!(!has_real_dirty_paths(&["\0refresh-all".to_string()]));
-        assert!(has_real_dirty_paths(&[
-            "\0refresh-all".to_string(),
-            "src/a.rs".to_string()
-        ]));
     }
 }

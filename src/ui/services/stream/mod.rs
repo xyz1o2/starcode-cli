@@ -478,7 +478,8 @@ pub async fn handle_stream_update(
                     }
                     state.textarea.move_cursor(tui_textarea::CursorMove::Top);
                     state.textarea.move_cursor(tui_textarea::CursorMove::Head);
-                    state.textarea.insert_str(&format!("{raw}\n"));
+                    state.textarea.insert_str(&format!("{}\n", raw.text));
+                    state.input_intent = crate::types::InputIntent::Literal;
                     crate::ui::events::clipboard_paste::sync_input_from_textarea(state);
                     crate::ui::services::suggestions::on_input_changed(state);
                     append_transcript_event(
@@ -1731,7 +1732,7 @@ async fn dequeue_pending_user_input(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !state.is_awaiting_confirmation {
         if let Some(next_input) = state.pending_user_messages.pop_front() {
-            enqueue_user_message(state, next_input, agent_tx).await?;
+            crate::ui::app::logic::enqueue_user_input(state, next_input, agent_tx).await?;
         }
     }
     Ok(())

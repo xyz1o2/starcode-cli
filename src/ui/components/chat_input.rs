@@ -64,6 +64,9 @@ pub fn resolve_border_color(state: &ChatState) -> Color {
     if state.vim_enabled && state.vim_state.is_normal_mode() {
         return Color::Green;
     }
+    if state.input_intent == crate::types::InputIntent::Literal {
+        return base_color;
+    }
     if first_line.starts_with('!') {
         if state.approval_mode == crate::types::ApprovalMode::Plan {
             base_color // Plan mode keeps cyan even with !

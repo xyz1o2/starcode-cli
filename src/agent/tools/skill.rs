@@ -186,6 +186,10 @@ impl BaseDeclarativeTool for SkillTool {
             async_runner: self.async_runner.clone(),
             parent_thinking_effort: None,
             policy_identity: None,
+            prepared: None,
+            parent_tools: None,
+            parent_excluded_tools: Vec::new(),
+            parent_depth: 0,
         }))
     }
 }
@@ -206,10 +210,108 @@ pub struct SkillInvocation {
     parent_thinking_effort: Option<crate::types::ThinkingEffort>,
     /// 执行器注入的调用方身份；不从共享注册工具的旧配置推导。
     policy_identity: Option<String>,
+    prepared: Option<(
+        crate::agent::skills::loader::SkillDefinition,
+        crate::agent::skills::loader::PreparedSkillPrompt,
+    )>,
+    parent_tools: Option<Vec<String>>,
+    parent_excluded_tools: Vec<String>,
+    parent_depth: usize,
+}
+
+impl SkillInvocation {
+    fn task(&self) -> SubTask {
+        let mut task = SubTask::new(
+            uuid::Uuid::new_v4().to_string(),
+            self.args
+                .get("objective")
+                .and_then(Value::as_str)
+                .unwrap_or(&self.skill_name)
+                .to_owned(),
+            self.args
+                .get("task_type")
+                .and_then(Value::as_str)
+                .unwrap_or(&self.skill_name)
+                .to_owned(),
+            self.args
+                .get("target")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+        );
+        if let Some(params) = self.args.get("params").and_then(Value::as_object) {
+            for (key, value) in params {
+                task = task.with_param(key.clone(), value.clone());
+            }
+        }
+        task
+    }
 }
 
 #[async_trait]
 impl ToolInvocation for SkillInvocation {
+    fn set_agent_parent_config(&mut self, config: &Config) {
+        self.project_root = config
+            .agent_working_dir
+            .as_deref()
+            .unwrap_or(config.target_dir())
+            .to_owned();
+        self.parent_tools = config.core_tools().map(<[String]>::to_vec);
+        self.parent_excluded_tools = config.exclude_tools().unwrap_or_default().to_vec();
+        self.parent_depth = config.recursion_depth;
+    }
+
+    fn preflight<'a>(
+        &'a mut self,
+        approval: &'a dyn crate::core::tools::tools::CommandApproval,
+        signal: Option<&'a tokio_util::sync::CancellationToken>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            self.prepared = None;
+            if self.manager.get_agent(&self.skill_name).is_some()
+                || self.manager.select_agent(&self.task()).is_some()
+            {
+                return Ok(());
+            }
+            let mut skill = load_user_skill_from_dirs(&self.skill_name, &self.project_root).await;
+            if skill.is_none() {
+                if self.skill_name.starts_with("http") || self.skill_name.starts_with("git@") {
+                    skill = crate::agent::skills::loader::SkillLoader::load_skill_from_github(
+                        &self.skill_name,
+                        None,
+                        approval,
+                        signal,
+                    )
+                    .await?;
+                } else {
+                    let path = crate::core::utils::paths::resolve_tool_path(
+                        &self.project_root,
+                        &self.skill_name,
+                    );
+                    skill = crate::agent::skills::loader::SkillLoader::load_skill_from_file(&path)
+                        .await;
+                }
+            }
+            if let Some(skill) = skill {
+                if !skill.metadata.model_may_invoke() {
+                    return Err(format!(
+                        "Skill `{}` sets disable-model-invocation: true",
+                        skill.name
+                    ));
+                }
+                let prompt = crate::agent::skills::loader::PreparedSkillPrompt::prepare(
+                    &skill,
+                    &self.project_root,
+                    approval,
+                    signal,
+                )
+                .await?;
+                self.prepared = Some((skill, prompt));
+            }
+            Ok(())
+        })
+    }
+
     fn set_agent_parent_identity(&mut self, identity: Option<String>) {
         self.policy_identity = identity;
     }
@@ -249,49 +351,20 @@ impl ToolInvocation for SkillInvocation {
         let skill_name = self.skill_name.clone();
         let args = self.args.clone();
         let update_output = update_output.clone();
-        let project_root = self.project_root.clone();
         let message_bus = self.message_bus.clone();
         let model_switch_cell = self.model_switch_cell.clone();
         let async_runner = self.async_runner.clone();
         let parent_thinking_effort = self.parent_thinking_effort.clone();
         let policy_identity = self.policy_identity.clone();
+        let prepared = self.prepared.clone();
+        let parent_tools = self.parent_tools.clone();
+        let parent_excluded_tools = self.parent_excluded_tools.clone();
+        let parent_depth = self.parent_depth;
+        let task = self.task();
 
         Box::pin(async move {
             if let Some(cb) = update_output.as_ref() {
                 cb(format!("Running skill `{skill_name}`\n"));
-            }
-
-            // Construct SubTask
-            let objective = args
-                .get("objective")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&skill_name)
-                .to_string();
-            let task_type = args
-                .get("task_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&skill_name)
-                .to_string();
-            let target = args
-                .get("target")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let params = args
-                .get("params")
-                .and_then(|v| v.as_object())
-                .cloned()
-                .unwrap_or_default();
-
-            let mut task = SubTask::new(
-                uuid::Uuid::new_v4().to_string(),
-                objective,
-                task_type,
-                target,
-            );
-
-            for (k, v) in params {
-                task = task.with_param(k, v);
             }
 
             // Try to find agent by ID first, then by task matching
@@ -364,78 +437,28 @@ impl ToolInvocation for SkillInvocation {
                 // 查找顺序（先命中先用）：
                 // 1. 项目 `.star/skills/<name>/SKILL.md` 或 `<name>.skill.md`
                 // 2. 用户 `~/.starcode/skills/<name>/SKILL.md`（全局）
-                let skill_def = load_user_skill_from_dirs(&skill_name, &project_root).await;
-
-                // ============ 外部 Skill 加载 (GitHub / Local) ============
-                // 用户目录里没有，再试 GitHub / 本地路径。
-
-                let skill_def = match skill_def {
-                    Some(found) => Some(found),
-                    None if skill_name.starts_with("http") || skill_name.starts_with("git@") => {
-                        // GitHub / Remote Git
-                        crate::agent::skills::loader::SkillLoader::load_skill_from_github(
-                            &skill_name,
-                            None,
-                        )
-                        .await
-                    }
-                    None => {
-                        // Local Path
-                        let path = std::path::Path::new(&skill_name);
-                        if path.exists() {
-                            crate::agent::skills::loader::SkillLoader::load_skill_from_file(path)
-                                .await
-                        } else {
-                            None
-                        }
-                    }
-                };
-
-                if let Some(skill) = skill_def {
-                    // ── 调用闸门：`disable-model-invocation` ──────────────────
-                    //
-                    // Claude Code 语义：模型不得自动调用这个 skill，用户仍可
-                    // 显式调用（`/name`）。
-                    //
-                    // StarCode 没有 `/name` 入口（用户 skill 不在 `/` 菜单里），
-                    // 而 `SkillTool` 的调用**全部**来自模型 —— 所以对这个工具
-                    // 而言，"模型不许自动调" 就等于"不许调"。用户想用就走
-                    // `/skills show` 看内容。
-                    if !skill.metadata.model_may_invoke() {
-                        let output = format!(
-                            "Skill `{}` is not available for model invocation \
-                             (its frontmatter sets `disable-model-invocation: true`). \
-                             Use `/skills show {}` to read it.",
-                            skill.name, skill.name
+                if let Some((skill, prepared_prompt)) = prepared {
+                    let body = match prepared_prompt.render(signal.as_ref()).await {
+                        Ok(body) => body,
+                        Err(error) => return Ok(skill_error(error)),
+                    };
+                    let rendered_body =
+                        crate::agent::skills::loader::SkillLoader::substitute_skill_arguments(
+                            &body,
+                            &skill.metadata.arguments,
+                            &positional_args_from(&args),
                         );
-                        return Ok(CoreToolResult {
-                            llm_content: Some(output.clone()),
-                            return_display: Some(output.clone()),
-                            output,
-                            error: Some(ToolError {
-                                error_type: "SkillNotInvocable".to_string(),
-                                message: format!(
-                                    "skill `{}` sets disable-model-invocation: true",
-                                    skill.name
-                                ),
-                            }),
-                            data: None,
-                        });
-                    }
-
-                    // ── `context: fork`：在隔离子代理里跑 ─────────────────────
-                    //
-                    // Claude Code 语义：skill 正文成为子代理的 prompt，
-                    // 子代理**看不到**当前对话历史 —— 所以 skill 正文必须
-                    // 自成一体。默认后台运行（`background: false` 则本轮等结果）。
                     if skill.metadata.is_forked() {
                         return run_skill_forked(
                             &skill,
-                            &args,
+                            rendered_body,
                             async_runner.as_ref(),
                             &skill_name,
                             parent_thinking_effort,
                             signal.as_ref(),
+                            parent_tools,
+                            parent_excluded_tools,
+                            parent_depth,
                         )
                         .await;
                     }
@@ -453,14 +476,6 @@ impl ToolInvocation for SkillInvocation {
                     )
                     .await;
 
-                    // 成功加载外部 Skill
-                    // 将其内容作为上下文注入返回
-                    // 沙箱隔离：明确标记来源和边界
-                    // 执行内联 shell 命令 (!(...) 语法)
-                    //
-                    // 参数替换：frontmatter 的 `arguments` 声明按位置取
-                    // `args` 里的值（`$name` / `$1` / `$ARGUMENTS`）。
-                    let rendered_body = render_skill_with_args(&skill, &args);
                     let output = format!(
                         "✅ External Skill Loaded Successfully\n\n<skill_sandbox name=\"{}\" source=\"{}\">\n{}\n</skill_sandbox>\n\n⚠️ This skill is running in a restricted context. Please follow the instructions above.",
                         skill.name, skill.location, rendered_body
@@ -928,11 +943,14 @@ async fn apply_skill_runtime_effects(
 /// 子代理吃掉了，再塞回主上下文就是重复。
 async fn run_skill_forked(
     skill: &crate::agent::skills::loader::SkillDefinition,
-    args: &Value,
+    prompt: String,
     async_runner: Option<&std::sync::Arc<crate::agent::subagent::runner::AsyncSubagentRunner>>,
     skill_name: &str,
     parent_thinking_effort: Option<crate::types::ThinkingEffort>,
     signal: Option<&tokio_util::sync::CancellationToken>,
+    parent_tools: Option<Vec<String>>,
+    parent_excluded_tools: Vec<String>,
+    parent_depth: usize,
 ) -> Result<CoreToolResult, Box<dyn std::error::Error>> {
     let Some(runner) = async_runner else {
         let output = format!(
@@ -961,10 +979,17 @@ async fn run_skill_forked(
         None => crate::core::agents::SubagentType::GeneralPurpose,
     };
 
-    // 与内联 Skill 共用参数展开；覆盖值只进入子请求，不写父级设置或全局状态。
-    let prompt = render_skill_with_args(skill, args);
-    let mut request =
-        crate::core::agents::SubAgentRequest::new(prompt).with_subagent_type(subagent_type.clone());
+    // 参数只在审批后的模板快照上展开，不会重新生成执行块。
+    let mut request = crate::core::agents::SubAgentRequest::new(prompt)
+        .with_subagent_type(subagent_type.clone())
+        .with_parent_depth(parent_depth);
+    let mut disallowed = parent_excluded_tools;
+    disallowed.extend(skill.metadata.disallowed_tools.clone());
+    request = request.with_disallowed_tools(disallowed);
+    if !skill.metadata.allowed_tools.is_empty() {
+        request.allowed_tools = skill.metadata.allowed_tools.clone();
+    }
+    request.parent_tools = parent_tools;
     request.model = skill.metadata.model.clone();
     request.effort = skill
         .metadata
@@ -1055,12 +1080,25 @@ fn render_skill_with_args(
     args: &serde_json::Value,
 ) -> String {
     let positional = positional_args_from(args);
-    let body = crate::agent::skills::loader::SkillLoader::render_skill_prompt(skill);
+    let body = skill.body.clone();
     crate::agent::skills::loader::SkillLoader::substitute_skill_arguments(
         &body,
         &skill.metadata.arguments,
         &positional,
     )
+}
+
+fn skill_error(message: String) -> CoreToolResult {
+    CoreToolResult {
+        llm_content: Some(message.clone()),
+        return_display: Some(message.clone()),
+        output: message.clone(),
+        error: Some(ToolError {
+            error_type: "SkillExecutionFailed".to_owned(),
+            message,
+        }),
+        data: None,
+    }
 }
 
 /// 从工具调用的 `args` 里取出位置参数（字符串数组）。
@@ -1087,6 +1125,160 @@ mod frontmatter_effects {
     use super::*;
     use crate::core::confirmation_bus::MessageBus;
     use crate::core::policy::{PolicyDecision, PolicyEngine};
+
+    #[cfg(unix)]
+    async fn skill_command_fixture() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        crate::agent::tool_executor::ToolExecutor,
+        Arc<MessageBus>,
+        crate::types::StarToolCall,
+    ) {
+        let directory = tempfile::tempdir().expect("temporary skill project");
+        let skill_path = directory.path().join(".star/skills/approval/SKILL.md");
+        tokio::fs::create_dir_all(skill_path.parent().expect("skill directory"))
+            .await
+            .expect("create skill directory");
+        tokio::fs::write(&skill_path, "---\nname: approval\narguments:\n  - value\n---\n!(printf original; touch approved) $value").await.expect("write skill fixture");
+        let config = Arc::new(Config::new(crate::core::config::ConfigParameters {
+            target_dir: directory.path().to_owned(),
+            cwd: directory.path().to_owned(),
+            ..Default::default()
+        }));
+        let client = StarClient::new("", None, None, None, None);
+        let bus = bus();
+        bus.apply_turn_tool_policy(&["Skill".to_owned()], &[]).await;
+        let registry = Arc::new(crate::core::tools::tool_registry::ToolRegistry::new(
+            config.clone(),
+        ));
+        registry.register_tool(Arc::new(crate::core::tools::shell::ShellTool::new(
+            config.clone(),
+            None,
+        )));
+        registry.register_tool(Arc::new(SkillTool {
+            manager: Arc::new(SubAgentManager::new()),
+            description: "local fixture".into(),
+            available_skill_names: vec!["approval".into()],
+            project_root: directory.path().to_owned(),
+            message_bus: Some(bus.clone()),
+            model_switch_cell: None,
+            async_runner: None,
+        }));
+        let executor = crate::agent::tool_executor::ToolExecutor::new(
+            client,
+            registry,
+            Some(bus.clone()),
+            config,
+        );
+        let call = crate::types::StarToolCall {
+            id: "skill-command".into(),
+            call_type: "function".into(),
+            function: crate::types::StarToolCallFunction {
+                name: "Skill".into(),
+                arguments: json!({"skill": "approval", "args": ["!(touch injected)"]}).to_string(),
+            },
+        };
+        (directory, skill_path, executor, bus, call)
+    }
+
+    #[cfg(unix)]
+    async fn next_bash_confirmation(
+        receiver: &mut tokio::sync::broadcast::Receiver<
+            crate::core::confirmation_bus::types::Message,
+        >,
+    ) -> String {
+        use crate::core::confirmation_bus::types::Message;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Message::ToolConfirmationRequest(request) =
+                    receiver.recv().await.expect("confirmation bus")
+                {
+                    assert_eq!(request.tool_call.name, "Bash");
+                    assert_eq!(
+                        request.tool_call.args.expect("Bash arguments")["command"],
+                        "printf original; touch approved"
+                    );
+                    return request.correlation_id;
+                }
+            }
+        })
+        .await
+        .expect("inline Bash command must request approval")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_skill_executes_approved_snapshot_not_edited_template_or_args() {
+        use crate::core::confirmation_bus::types::{Message, ToolConfirmationResponse};
+        use crate::types::ToolConfirmationOutcome;
+        let (directory, skill_path, executor, bus, call) = skill_command_fixture().await;
+        let mut receiver = bus.subscribe();
+        let responder = async {
+            let id = next_bash_confirmation(&mut receiver).await;
+            assert!(!directory.path().join("approved").exists());
+            tokio::fs::write(&skill_path, "---\nname: approval\n---\n!(touch modified)")
+                .await
+                .expect("edit pending template");
+            bus.publish(Message::ToolConfirmationResponse(
+                ToolConfirmationResponse::from_user_decision(
+                    id,
+                    ToolConfirmationOutcome::ProceedOnce,
+                    None,
+                ),
+            ))
+            .await
+            .expect("approve snapshot");
+        };
+        let (result, ()) = tokio::join!(executor.execute(&call, None, None), responder);
+        assert!(result.success, "{result:?}");
+        assert!(result
+            .output
+            .as_deref()
+            .is_some_and(|output| output.contains("original !(touch injected)")));
+        assert!(directory.path().join("approved").exists());
+        assert!(!directory.path().join("modified").exists());
+        assert!(!directory.path().join("injected").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_skill_refusal_cancellation_and_plan_do_not_execute_commands() {
+        use crate::core::confirmation_bus::types::{Message, ToolConfirmationResponse};
+        use crate::core::policy::types::ApprovalMode;
+        use crate::types::ToolConfirmationOutcome;
+        let (directory, _, executor, bus, call) = skill_command_fixture().await;
+        let mut receiver = bus.subscribe();
+        let responder = async {
+            let id = next_bash_confirmation(&mut receiver).await;
+            bus.publish(Message::ToolConfirmationResponse(
+                ToolConfirmationResponse::from_user_decision(
+                    id,
+                    ToolConfirmationOutcome::Cancel,
+                    None,
+                ),
+            ))
+            .await
+            .expect("refuse command");
+        };
+        let (result, ()) = tokio::join!(executor.execute(&call, None, None), responder);
+        assert!(!result.success, "{result:?}");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut receiver = bus.subscribe();
+        let responder = async {
+            next_bash_confirmation(&mut receiver).await;
+            cancel.cancel();
+        };
+        let (result, ()) = tokio::join!(
+            executor.execute(&call, None, Some(cancel.clone())),
+            responder
+        );
+        assert!(!result.success, "{result:?}");
+        bus.set_approval_mode(ApprovalMode::Plan).await;
+        let result = executor.execute(&call, None, None).await;
+        assert!(!result.success, "{result:?}");
+        assert!(!directory.path().join("approved").exists());
+        assert!(!directory.path().join("injected").exists());
+    }
 
     fn bus() -> std::sync::Arc<MessageBus> {
         std::sync::Arc::new(MessageBus::new(

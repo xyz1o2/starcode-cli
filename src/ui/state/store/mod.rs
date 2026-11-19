@@ -56,13 +56,15 @@ pub struct ChatState {
     pub thinking_collapse_at: Option<(usize, std::time::Instant)>,
     pub complete_task_message_ids: HashSet<u64>,
     pub auto_continued_message_ids: HashSet<u64>,
-    pub pending_user_messages: VecDeque<String>,
+    pub pending_user_messages: VecDeque<crate::types::UserInput>,
+    pub input_intent: crate::types::InputIntent,
+    pub command_history_path: Option<std::path::PathBuf>,
     /// 已送入运行时的补充消息，以独立 message_id 区分，撤回以回执为准。
-    pub steered_user_messages: Vec<(u64, String)>,
+    pub steered_user_messages: Vec<(u64, crate::types::UserInput)>,
     // ============ Command History ============
-    pub command_history: VecDeque<String>,
+    pub command_history: VecDeque<crate::types::UserInput>,
     pub history_index: Option<usize>,
-    pub history_input_snapshot: Option<String>,
+    pub history_input_snapshot: Option<crate::types::UserInput>,
     // ==========================================
     pub tool_started_at: HashMap<String, Instant>,
     pub tool_call_args_cache: HashMap<String, String>,
@@ -723,12 +725,16 @@ impl ChatState {
     /// Save current input draft to file
     pub fn save_draft(&self) {
         if let Some(ref path) = self.draft_path {
-            let text = self.textarea.lines().join("\n");
-            if !text.trim().is_empty() {
+            let Ok(input) = self.prepared_input() else {
+                return;
+            };
+            if !input.text.trim().is_empty() || !input.images.is_empty() {
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                let _ = std::fs::write(path, &text);
+                if let Ok(text) = serde_json::to_string(&input) {
+                    let _ = std::fs::write(path, text);
+                }
             } else {
                 let _ = std::fs::remove_file(path);
             }
@@ -753,11 +759,17 @@ impl ChatState {
         }
         let _ = std::fs::remove_file(path);
 
-        let mut parts = vec![text];
-        if !self.input.trim().is_empty() {
-            parts.push(std::mem::take(&mut self.input));
+        let mut restored =
+            serde_json::from_str::<crate::types::UserInput>(&text).unwrap_or_else(|_| text.into());
+        if let Ok(current) = self.prepared_input() {
+            if !current.text.is_empty() || !current.images.is_empty() {
+                restored.text.push('\n');
+                restored.text.push_str(&current.text);
+                restored.images.extend(current.images);
+                restored.intent = crate::types::InputIntent::Literal;
+            }
         }
-        self.set_input_text(&parts.join("\n"));
+        self.set_user_input(restored);
     }
 
     /// 把输入框整体重设为 `text`（重建 textarea，同步 `input` 与行数计数器）。
@@ -765,7 +777,30 @@ impl ChatState {
     /// 语义是「设」而不是「追加」：逻辑行数、编辑内容与提交正文必须同步，
     /// 布局再按当前宽度测量软换行后的高度。只动 textarea 会让 `state.input` 留着旧值。
     /// 所有需要整体重设输入框的地方都走这里，免得 textarea 和 `state.input` 走岔。
+    pub fn prepared_input(&self) -> Result<crate::types::UserInput, String> {
+        let mut input =
+            super::prepare_user_input(&self.textarea.lines().join("\n"), &self.paste_segments)?;
+        input.intent = self.input_intent;
+        Ok(input)
+    }
+
+    pub fn save_input_history(&self) {
+        if let Some(path) = &self.command_history_path {
+            crate::core::config::history_store::save_history_to(path, &self.command_history);
+        }
+    }
+
+    /// 整体恢复结构化输入，重建编辑历史，旧 undo 不能重新引入命令资格。
+    pub fn set_user_input(&mut self, input: crate::types::UserInput) {
+        self.set_input_text(&input.text);
+        self.input_intent = input.intent;
+        crate::ui::events::clipboard_paste::restore_image_attachments(self, input.images);
+        self.input = self.textarea.lines().join("\n");
+        self.input_line_count = self.textarea.lines().len();
+    }
+
     pub fn set_input_text(&mut self, text: &str) {
+        self.input_intent = crate::types::InputIntent::CommandEligible;
         let mut textarea = TextArea::default();
         textarea.set_placeholder_text(crate::ui::utils::text::input_placeholder_text());
         textarea.set_cursor_line_style(ratatui::style::Style::default());
@@ -833,6 +868,8 @@ impl ChatState {
             complete_task_message_ids: HashSet::new(),
             auto_continued_message_ids: HashSet::new(),
             pending_user_messages: VecDeque::new(),
+            input_intent: crate::types::InputIntent::CommandEligible,
+            command_history_path: crate::core::config::history_store::history_file(),
             steered_user_messages: Vec::new(),
             // ============ Command History ============
             command_history: crate::core::config::history_store::load_history(),

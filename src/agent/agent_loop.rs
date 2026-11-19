@@ -1439,6 +1439,7 @@ mod tests {
                 crate::types::UserInput {
                     text: String::new(),
                     images: vec![image.clone()],
+                    intent: crate::types::InputIntent::Literal,
                 },
             ))
             .unwrap();

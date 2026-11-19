@@ -110,18 +110,41 @@ pub(crate) fn restore_queued_messages_to_input(state: &mut ChatState) -> bool {
     if state.pending_user_messages.is_empty() {
         return false;
     }
-    let parts: Vec<String> = state.pending_user_messages.drain(..).collect();
-    let mut text = parts.join("\n");
-    if !state.input.is_empty() {
-        text.push('\n');
+    let mut inputs: Vec<_> = state.pending_user_messages.drain(..).collect();
+    // 图片路径可能已经失效；即使展开失败，也必须把当前草稿和它的
+    // paste segment 原样保住，不能因为取回队列而静默丢掉附件引用。
+    let current_raw = state.textarea.lines().join("\n");
+    let current_segments = state.paste_segments.clone();
+    let current = state
+        .prepared_input()
+        .unwrap_or_else(|_| crate::types::UserInput {
+            text: current_raw.clone(),
+            images: Vec::new(),
+            intent: state.input_intent,
+        });
+    if !current.text.is_empty() || !current.images.is_empty() {
+        inputs.push(current);
     }
-    // 保留草稿里的图片/文本占位符及其 paste_segments 映射。
-    state.textarea.move_cursor(tui_textarea::CursorMove::Top);
-    state.textarea.move_cursor(tui_textarea::CursorMove::Head);
-    state.textarea.insert_str(&text);
-    state.textarea.move_cursor(tui_textarea::CursorMove::Bottom);
-    state.textarea.move_cursor(tui_textarea::CursorMove::End);
-    sync_input_from_textarea(state);
+    let intent = if inputs.len() == 1 {
+        inputs[0].intent
+    } else {
+        crate::types::InputIntent::Literal
+    };
+    let text = inputs
+        .iter()
+        .map(|input| input.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let images = inputs.into_iter().flat_map(|input| input.images).collect();
+    state.set_user_input(crate::types::UserInput {
+        text,
+        images,
+        intent,
+    });
+    if !current_segments.is_empty() && state.paste_segments.is_empty() {
+        state.paste_segments = current_segments;
+        sync_input_from_textarea(state);
+    }
     crate::ui::services::suggestions::on_input_changed(state);
     true
 }
@@ -1300,6 +1323,8 @@ pub async fn handle_key_event(
                 let input =
                     crate::ui::state::expand_paste_segments(&raw_input, &state.paste_segments);
 
+                let commands_allowed =
+                    state.input_intent == crate::types::InputIntent::CommandEligible;
                 let trimmed_raw = raw_input.trim();
                 let has_images = state.paste_segments.iter().any(|segment| {
                     matches!(
@@ -1308,14 +1333,14 @@ pub async fn handle_key_event(
                             | crate::ui::state::PasteKind::AttachedImage(_)
                     ) && raw_input.contains(&crate::ui::state::format_image_paste_ref(segment.id))
                 });
-                if has_images && trimmed_raw.starts_with(['/', '!']) {
+                if commands_allowed && has_images && trimmed_raw.starts_with(['/', '!']) {
                     state.push_toast(
                         &crate::core::i18n::t1("ui.image.send_unavailable"),
                         crate::ui::state::ToastKind::Warning,
                     );
                     return Ok(());
                 }
-                if trimmed_raw == "/model" || trimmed_raw == "/models" {
+                if commands_allowed && (trimmed_raw == "/model" || trimmed_raw == "/models") {
                     reset_main_textarea(state);
 
                     if state.available_models.is_empty() {
@@ -1346,7 +1371,10 @@ pub async fn handle_key_event(
                     return Ok(());
                 }
 
-                if let Some(model_name) = trimmed_raw.strip_prefix("/model ") {
+                if let Some(model_name) = trimmed_raw
+                    .strip_prefix("/model ")
+                    .filter(|_| commands_allowed)
+                {
                     let model_name = model_name.trim();
                     if !model_name.is_empty() {
                         reset_main_textarea(state);
@@ -1379,10 +1407,7 @@ pub async fn handle_key_event(
                 }
 
                 if !input.trim().is_empty() {
-                    let prepared = match crate::ui::state::prepare_user_input(
-                        &raw_input,
-                        &state.paste_segments,
-                    ) {
+                    let prepared = match state.prepared_input() {
                         Ok(input) => input,
                         Err(error) => {
                             state.push_toast(&error, crate::ui::state::store::ToastKind::Error);
@@ -1393,7 +1418,8 @@ pub async fn handle_key_event(
                         && (state.network_offline
                             || crate::core::offline::is_offline()
                             || state.current_model.trim().is_empty()
-                            || prepared.text.trim_start().starts_with(['/', '!']))
+                            || (commands_allowed
+                                && prepared.text.trim_start().starts_with(['/', '!'])))
                     {
                         state.push_toast(
                             &crate::core::i18n::t1("ui.image.send_unavailable"),
@@ -1515,16 +1541,13 @@ pub async fn handle_key_event(
                     .map(|t| now.duration_since(t) <= Duration::from_millis(1000))
                     .unwrap_or(false);
                 if double {
-                    let input = state.input.trim().to_string();
-                    let is_dup = state
-                        .command_history
-                        .front()
-                        .map(|l| l == &input)
-                        .unwrap_or(false);
-                    if !is_dup {
-                        state.command_history.push_front(input);
-                        state.command_history.truncate(100);
-                        crate::core::config::history_store::save_history(&state.command_history);
+                    if let Ok(input) = state.prepared_input() {
+                        let is_dup = state.command_history.front() == Some(&input);
+                        if !is_dup {
+                            state.command_history.push_front(input);
+                            state.command_history.truncate(100);
+                            state.save_input_history();
+                        }
                     }
                     reset_main_textarea(state);
                     crate::ui::services::suggestions::on_input_changed(state);
@@ -1617,16 +1640,14 @@ pub async fn handle_key_event(
                     let idx = match state.history_index {
                         Some(i) => i.saturating_add(1),
                         None => {
-                            state.history_input_snapshot = Some(state.input.clone());
+                            state.history_input_snapshot = state.prepared_input().ok();
                             0
                         }
                     };
                     if idx < state.command_history.len() {
                         state.history_index = Some(idx);
                         let hist_entry = state.command_history[idx].clone();
-                        state.textarea.select_all();
-                        state.textarea.delete_str(state.input.len());
-                        state.textarea.insert_str(&hist_entry);
+                        state.set_user_input(hist_entry);
                         sync_input_from_textarea(state);
                         crate::ui::services::suggestions::on_input_changed(state);
                     }
@@ -1646,18 +1667,14 @@ pub async fn handle_key_event(
                 if idx == 0 {
                     state.history_index = None;
                     let snapshot = state.history_input_snapshot.take().unwrap_or_default();
-                    state.textarea.select_all();
-                    state.textarea.delete_str(state.input.len());
-                    state.textarea.insert_str(&snapshot);
+                    state.set_user_input(snapshot);
                     sync_input_from_textarea(state);
                     crate::ui::services::suggestions::on_input_changed(state);
                 } else {
                     let new_idx = idx.saturating_sub(1);
                     state.history_index = Some(new_idx);
                     let hist_entry = state.command_history[new_idx].clone();
-                    state.textarea.select_all();
-                    state.textarea.delete_str(state.input.len());
-                    state.textarea.insert_str(&hist_entry);
+                    state.set_user_input(hist_entry);
                     sync_input_from_textarea(state);
                     crate::ui::services::suggestions::on_input_changed(state);
                 }
@@ -2052,7 +2069,7 @@ mod tests {
                     .expect("prepare test input");
                 state
                     .command_history
-                    .push_front(expected.text.trim().into());
+                    .push_front(crate::types::UserInput::from(expected.text.trim()));
                 let (tx, mut rx) = mpsc::channel(8);
                 handle_key_event(
                     &mut state,
@@ -2326,7 +2343,12 @@ mod tests {
     async fn rapid_arrow_keys_navigate_history_without_scrolling_chat() {
         let mut state = ChatState::test_fixture();
         state.set_input_text("");
-        state.command_history = ["newest".into(), "older".into(), "oldest".into()].into();
+        state.command_history = [
+            crate::types::UserInput::from("newest"),
+            crate::types::UserInput::from("older"),
+            crate::types::UserInput::from("oldest"),
+        ]
+        .into();
         state.history_index = None;
         let scroll_before = (state.scroll, state.scroll_velocity);
         let (tx, _rx) = mpsc::channel(16);
@@ -2373,7 +2395,7 @@ mod tests {
         sync_input_from_textarea(&mut state);
         state
             .pending_user_messages
-            .push_back("queued requirement".into());
+            .push_back(crate::types::UserInput::from("queued requirement"));
 
         assert!(restore_queued_messages_to_input(&mut state));
         assert!(state.input.starts_with("queued requirement\n"));
@@ -3747,8 +3769,12 @@ mod tests {
             Some(&crate::ui::state::modal::Modal::LogSelector)
         );
         assert_eq!(
-            state.pending_user_messages.iter().collect::<Vec<_>>(),
-            vec![&"/chat resume saved-session".to_string()]
+            state
+                .pending_user_messages
+                .iter()
+                .map(|input| input.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/chat resume saved-session"]
         );
         assert!(agent_rx.try_recv().is_err());
     }
@@ -3757,8 +3783,12 @@ mod tests {
     #[test]
     fn restoring_the_queue_joins_messages_in_order() {
         let mut state = ChatState::new();
-        state.pending_user_messages.push_back("first".to_string());
-        state.pending_user_messages.push_back("second".to_string());
+        state
+            .pending_user_messages
+            .push_back(crate::types::UserInput::from("first"));
+        state
+            .pending_user_messages
+            .push_back(crate::types::UserInput::from("second"));
 
         assert!(restore_queued_messages_to_input(&mut state));
         assert_eq!(state.input, "first\nsecond");
@@ -3769,7 +3799,9 @@ mod tests {
     #[test]
     fn restoring_the_queue_keeps_the_half_typed_draft() {
         let mut state = ChatState::new();
-        state.pending_user_messages.push_back("queued".to_string());
+        state
+            .pending_user_messages
+            .push_back(crate::types::UserInput::from("queued"));
         state.textarea.insert_str("half typed");
         sync_input_from_textarea(&mut state);
 

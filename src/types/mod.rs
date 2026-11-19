@@ -4,7 +4,7 @@
 pub mod command;
 pub mod image_attachment;
 pub mod message;
-pub use image_attachment::{ImageAttachment, UserInput};
+pub use image_attachment::{ImageAttachment, InputIntent, UserInput};
 pub mod permissions;
 pub mod tools;
 
@@ -136,6 +136,8 @@ pub struct ChatEntry {
     #[serde(rename = "type")]
     pub entry_type: ChatEntryType,
     pub content: String,
+    #[serde(default)]
+    pub input_intent: InputIntent,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageAttachment>,
     pub timestamp: DateTime<Utc>,
@@ -248,6 +250,7 @@ impl ChatEntry {
         Self {
             entry_type,
             content,
+            input_intent: InputIntent::Literal,
             images: Vec::new(),
             timestamp: Utc::now(),
             tool_calls: None,

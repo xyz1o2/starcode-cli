@@ -13,6 +13,23 @@ fn close_turn_stream(
     }
 }
 
+/// 新消息开始时清除旧回合策略，再为当前 child 身份重装 fork Skill grant。
+async fn reset_turn_tool_policy_for_message(
+    config: &crate::core::config::Config,
+    bus: &crate::core::confirmation_bus::MessageBus,
+) {
+    let identity = config.agent_identity.as_deref();
+    bus.clear_turn_tool_policy_for(identity).await;
+    if let Some(identity) = identity {
+        if !config.child_skill_allowed_tools.is_empty()
+            && bus.approval_mode().await != crate::core::policy::ApprovalMode::Plan
+        {
+            bus.apply_turn_tool_policy_for(Some(identity), &config.child_skill_allowed_tools, &[])
+                .await;
+        }
+    }
+}
+
 /// 构造 auto 档位分类器要读的对话摘要。
 ///
 /// 只保留 **user 与 assistant 的正文**，跳过 system 提示与 tool 输出：
@@ -144,8 +161,7 @@ impl Agent {
             // 不清的话，上一条消息的 skill 授权会漏到下一条 —— 那条消息
             // 可能压根没调用过任何 skill。
             if let Some(bus) = self.runtime_message_bus() {
-                bus.clear_turn_tool_policy_for(self.config.agent_identity.as_deref())
-                    .await;
+                reset_turn_tool_policy_for_message(&self.config, &bus).await;
             }
             // 本轮思考力度同样只到下一条用户消息为止
             // （skill 的 `effort` frontmatter 字段）。
@@ -731,6 +747,92 @@ impl Agent {
 mod tests {
     use super::*;
     use futures::StreamExt;
+
+    #[tokio::test]
+    async fn child_skill_grants_are_reinstalled_after_reset_and_stay_scoped() {
+        let config =
+            crate::core::config::Config::new(crate::core::config::ConfigParameters::default());
+        let mut config = config;
+        config.agent_identity = Some("child-a".into());
+        config.child_skill_allowed_tools = vec!["Bash".into()];
+        let bus = crate::core::confirmation_bus::MessageBus::new(
+            crate::core::policy::PolicyEngine::new(crate::core::policy::PolicyEngineConfig {
+                approval_mode: Some(crate::core::policy::ApprovalMode::Default),
+                ..Default::default()
+            }),
+            false,
+        );
+        bus.apply_turn_tool_policy_for(Some("child-a"), &["WebFetch".into()], &[])
+            .await;
+
+        reset_turn_tool_policy_for_message(&config, &bus).await;
+
+        let bash = crate::core::policy::FunctionCall {
+            name: "Bash".into(),
+            args: Some(serde_json::json!({"command": "git push"})),
+            read_only: None,
+        };
+        let bash_check = bus
+            .check_tool_policy_for(&bash, None, Some("child-a"))
+            .await;
+        assert_eq!(
+            bash_check.decision,
+            crate::core::policy::PolicyDecision::Allow
+        );
+        assert_eq!(
+            bus.check_tool_policy_for(&bash, None, None).await.decision,
+            crate::core::policy::PolicyDecision::AskUser,
+            "child grants must not authorize the lead"
+        );
+        assert_eq!(
+            bus.check_tool_policy_for(&bash, None, Some("sibling"))
+                .await
+                .decision,
+            crate::core::policy::PolicyDecision::AskUser,
+            "child grants must not authorize a sibling"
+        );
+        let previous_grant = crate::core::policy::FunctionCall {
+            name: "WebFetch".into(),
+            args: None,
+            read_only: None,
+        };
+        assert_eq!(
+            bus.check_tool_policy_for(&previous_grant, None, Some("child-a"))
+                .await
+                .decision,
+            crate::core::policy::PolicyDecision::AskUser,
+            "the previous turn's child grant must be cleared"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_skill_grants_do_not_override_plan_mode() {
+        let mut config =
+            crate::core::config::Config::new(crate::core::config::ConfigParameters::default());
+        config.agent_identity = Some("child-plan".into());
+        config.child_skill_allowed_tools = vec!["Bash".into()];
+        let bus = crate::core::confirmation_bus::MessageBus::new(
+            crate::core::policy::PolicyEngine::new(crate::core::policy::PolicyEngineConfig {
+                approval_mode: Some(crate::core::policy::ApprovalMode::Plan),
+                ..Default::default()
+            }),
+            false,
+        );
+
+        reset_turn_tool_policy_for_message(&config, &bus).await;
+
+        let bash = crate::core::policy::FunctionCall {
+            name: "Bash".into(),
+            args: Some(serde_json::json!({"command": "git push"})),
+            read_only: None,
+        };
+        assert_eq!(
+            bus.check_tool_policy_for(&bash, None, Some("child-plan"))
+                .await
+                .decision,
+            crate::core::policy::PolicyDecision::Deny
+        );
+    }
 
     #[tokio::test]
     async fn completed_turn_closes_direct_stream_after_last_sender() {

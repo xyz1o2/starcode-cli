@@ -265,6 +265,7 @@ async fn steer_user_message(
     state: &mut ChatState,
     user_input: String,
     images: Vec<crate::types::ImageAttachment>,
+    intent: crate::types::InputIntent,
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // `@file` 引用与普通发送走同一套处理：插进对话的必须是展开后的正文。
@@ -305,6 +306,7 @@ async fn steer_user_message(
     // 用户输入照常显示在聊天区。
     let mut entry = ChatEntry::user(user_input.clone());
     entry.images = images.clone();
+    entry.input_intent = intent;
     state.chat_history.push(entry);
 
     // 助手那条要么被切走（后半另起一条继续流），要么本来就不存在/是悬空的 ——
@@ -344,9 +346,14 @@ async fn steer_user_message(
     {
         entry.group_id = Some(format!("user-message:{message_id}"));
     }
-    state
-        .steered_user_messages
-        .push((message_id, user_input.clone()));
+    state.steered_user_messages.push((
+        message_id,
+        crate::types::UserInput {
+            text: user_input.clone(),
+            images: images.clone(),
+            intent,
+        },
+    ));
 
     append_transcript_event(
         state,
@@ -374,14 +381,20 @@ async fn steer_user_message(
             input: crate::types::UserInput {
                 text: final_message,
                 images,
+                intent,
             },
         }
     };
     if let Err(error) = agent_tx.send(request).await {
-        if let AgentRequest::SendUserInput { input, .. } = error.0 {
-            state.textarea.insert_str(&user_input);
-            crate::ui::events::clipboard_paste::restore_image_attachments(state, input.images);
-        }
+        let images = match error.0 {
+            AgentRequest::SendUserInput { input, .. } => input.images,
+            _ => Vec::new(),
+        };
+        state.set_user_input(crate::types::UserInput {
+            text: user_input,
+            images,
+            intent,
+        });
         state.is_processing = false;
         state.is_streaming = false;
         return Err("Agent worker channel closed".into());
@@ -397,7 +410,12 @@ pub async fn enqueue_user_message(
     user_input: String,
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    enqueue_user_input(state, crate::types::UserInput::from(user_input), agent_tx).await
+    enqueue_user_input(
+        state,
+        crate::types::UserInput::command_eligible(user_input),
+        agent_tx,
+    )
+    .await
 }
 
 pub async fn enqueue_user_input(
@@ -408,16 +426,21 @@ pub async fn enqueue_user_input(
     let crate::types::UserInput {
         text: user_input,
         images,
+        intent,
     } = input;
+    let commands_allowed = intent == crate::types::InputIntent::CommandEligible;
     // 附件消息不可走命令分流或在离线时进入 steering；重试入口同样需要保护。
     if !images.is_empty()
         && (state.network_offline
             || crate::core::offline::is_offline()
             || state.current_model.trim().is_empty()
-            || user_input.trim_start().starts_with(['/', '!']))
+            || (commands_allowed && user_input.trim_start().starts_with(['/', '!'])))
     {
-        state.textarea.insert_str(&user_input);
-        crate::ui::events::clipboard_paste::restore_image_attachments(state, images);
+        state.set_user_input(crate::types::UserInput {
+            text: user_input,
+            images,
+            intent,
+        });
         state.push_toast(
             &i18n::t1("ui.image.send_unavailable"),
             crate::ui::state::ToastKind::Warning,
@@ -435,18 +458,23 @@ pub async fn enqueue_user_input(
 
     // Save to command history (deduplicate consecutive entries)
     let trimmed = user_input.trim().to_string();
+    let history_input = crate::types::UserInput {
+        text: trimmed.clone(),
+        images: images.clone(),
+        intent,
+    };
     if !trimmed.is_empty() {
         let is_duplicate = state
             .command_history
             .front()
-            .map(|last| last == &trimmed)
+            .map(|last| last == &history_input)
             .unwrap_or(false);
         if !is_duplicate {
-            state.command_history.push_front(trimmed.clone());
+            state.command_history.push_front(history_input);
             if state.command_history.len() > 100 {
                 state.command_history.pop_back();
             }
-            crate::core::config::history_store::save_history(&state.command_history);
+            state.save_input_history();
         }
     }
     // Reset history navigation state
@@ -460,16 +488,23 @@ pub async fn enqueue_user_input(
     // 需求是个例外：它插进当前这一轮（模型下一次调用就能看到），不用等本轮
     // 跑完 —— 工具在等审批时用户补充的说明，正是要赶在下一轮之前送达的。
     if state.pending_confirmation_entry_idx.is_some() {
-        if is_plain_requirement(&user_input) {
-            return steer_user_message(state, user_input, images, agent_tx).await;
+        if !commands_allowed || is_plain_requirement(&user_input) {
+            return steer_user_message(state, user_input, images, intent, agent_tx).await;
         }
-        state.pending_user_messages.push_back(user_input);
+        state
+            .pending_user_messages
+            .push_back(crate::types::UserInput {
+                text: user_input,
+                images,
+                intent,
+            });
         return Ok(());
     }
 
     // 流式期间的"安全命令"直接执行，不进等待队列：
     // 仅限纯 UI / 只读查询类命令；会改动会话状态或与 agent 交互的命令仍排队
-    let is_safe_command_during_stream = is_streaming_safe_command(user_input.trim());
+    let is_safe_command_during_stream =
+        commands_allowed && is_streaming_safe_command(user_input.trim());
 
     // 「真正在流式中」= is_streaming && 不在取消宽限期内。
     // 取消宽限期里 is_streaming 仍是 true（用于 UI 动画平滑收尾），但不应拦住用户输入。
@@ -482,15 +517,21 @@ pub async fn enqueue_user_input(
     if (state.is_processing || actually_streaming) && !is_safe_command_during_stream {
         // 需求插进当前这一轮（模型下一次调用就能看到），不用等本轮跑完。
         // 命令类（/ !）仍排队 —— 它们各有各的处理路径，不是需求。
-        if is_plain_requirement(&user_input) {
-            return steer_user_message(state, user_input, images, agent_tx).await;
+        if !commands_allowed || is_plain_requirement(&user_input) {
+            return steer_user_message(state, user_input, images, intent, agent_tx).await;
         }
-        state.pending_user_messages.push_back(user_input);
+        state
+            .pending_user_messages
+            .push_back(crate::types::UserInput {
+                text: user_input,
+                images,
+                intent,
+            });
         return Ok(());
     }
 
     // Check for slash command
-    if user_input.trim().starts_with('/') {
+    if commands_allowed && user_input.trim().starts_with('/') {
         let (command_name, args_vec) =
             if let Some(parsed) = crate::commands::system::parse_command(&user_input) {
                 let args_vec = crate::commands::system::parsed_command_args(&parsed);
@@ -529,7 +570,10 @@ pub async fn enqueue_user_input(
     //
     // `!cmd`  → 本地执行，并把输出追加进模型上下文（对标 Claude Code）
     // `!!cmd` → 本地执行，输出只给人看，不进上下文
-    if user_input.trim().starts_with('!') && !user_input.trim().starts_with("![") {
+    if commands_allowed
+        && user_input.trim().starts_with('!')
+        && !user_input.trim().starts_with("![")
+    {
         if state.approval_mode == crate::types::ApprovalMode::Plan {
             state.chat_history.push(ChatEntry {
                  is_streaming: Some(false),
@@ -633,7 +677,11 @@ pub async fn enqueue_user_input(
             "Offline mode is ON — message not sent. Use /network off to go back online.",
             crate::ui::state::store::ToastKind::Warning,
         );
-        state.textarea.insert_str(&user_input);
+        state.set_user_input(crate::types::UserInput {
+            text: user_input,
+            images,
+            intent,
+        });
         return Ok(());
     }
 
@@ -670,6 +718,11 @@ pub async fn enqueue_user_input(
         // 清掉失败标志：这条消息不可能成功，`last_turn_failed` 再留着只会让 Esc
         // 继续无意义地重发（每次都撞回这里）。
         state.last_turn_failed = false;
+        state.set_user_input(crate::types::UserInput {
+            text: user_input,
+            images,
+            intent,
+        });
         return Ok(());
     }
 
@@ -715,6 +768,7 @@ pub async fn enqueue_user_input(
     // 显示用户原始输入，并随历史保存附件。
     let mut entry = ChatEntry::user(user_input.clone());
     entry.images = images.clone();
+    entry.input_intent = intent;
     state.chat_history.push(entry);
 
     // 如果有文件内容，显示已读取的文件
@@ -847,14 +901,20 @@ pub async fn enqueue_user_input(
             input: crate::types::UserInput {
                 text: final_message,
                 images,
+                intent,
             },
         }
     };
     if let Err(error) = agent_tx.send(request).await {
-        if let AgentRequest::SendUserInput { input, .. } = error.0 {
-            state.textarea.insert_str(&user_input);
-            crate::ui::events::clipboard_paste::restore_image_attachments(state, input.images);
-        }
+        let images = match error.0 {
+            AgentRequest::SendUserInput { input, .. } => input.images,
+            _ => Vec::new(),
+        };
+        state.set_user_input(crate::types::UserInput {
+            text: user_input,
+            images,
+            intent,
+        });
         state.is_processing = false;
         state.is_streaming = false;
         return Err("Agent worker channel closed".into());
@@ -1008,6 +1068,7 @@ mod steering_tests {
             crate::types::UserInput {
                 text: text.into(),
                 images: vec![image.clone()],
+                intent: crate::types::InputIntent::Literal,
             },
             &tx,
         )
@@ -1100,9 +1161,15 @@ mod steering_tests {
         state.stream_targets.insert(7, assistant_idx);
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        super::steer_user_message(&mut state, "顺便补个测试".to_string(), Vec::new(), &tx)
-            .await
-            .expect("steering should succeed");
+        super::steer_user_message(
+            &mut state,
+            "顺便补个测试".to_string(),
+            Vec::new(),
+            crate::types::InputIntent::CommandEligible,
+            &tx,
+        )
+        .await
+        .expect("steering should succeed");
 
         // 顺序：助手前半 / 用户消息 / 助手后半
         assert_eq!(
@@ -1165,9 +1232,15 @@ mod steering_tests {
         state.stream_targets.insert(3, assistant_idx);
 
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        super::steer_user_message(&mut state, "补充".to_string(), Vec::new(), &tx)
-            .await
-            .expect("steering should succeed");
+        super::steer_user_message(
+            &mut state,
+            "补充".to_string(),
+            Vec::new(),
+            crate::types::InputIntent::CommandEligible,
+            &tx,
+        )
+        .await
+        .expect("steering should succeed");
 
         assert_eq!(state.chat_history.len(), assistant_idx + 3);
         assert_eq!(
@@ -1197,9 +1270,15 @@ mod steering_tests {
         state.rendered_cache.clear();
 
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        super::steer_user_message(&mut state, "顺便补个测试".to_string(), Vec::new(), &tx)
-            .await
-            .expect("steering should succeed");
+        super::steer_user_message(
+            &mut state,
+            "顺便补个测试".to_string(),
+            Vec::new(),
+            crate::types::InputIntent::CommandEligible,
+            &tx,
+        )
+        .await
+        .expect("steering should succeed");
         state.rendered_cache.clear();
 
         let lines = crate::ui::components::chat_history::render_chat_lines(&mut state, 80);
@@ -1364,9 +1443,15 @@ mod steering_tests {
         );
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        super::steer_user_message(&mut state, "顺便补个测试".to_string(), Vec::new(), &tx)
-            .await
-            .expect("steering should not panic");
+        super::steer_user_message(
+            &mut state,
+            "顺便补个测试".to_string(),
+            Vec::new(),
+            crate::types::InputIntent::CommandEligible,
+            &tx,
+        )
+        .await
+        .expect("steering should not panic");
 
         // 需求照常显示，也照常发出去
         assert!(state

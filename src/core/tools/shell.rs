@@ -15,6 +15,208 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, BufReader};
 
+/// 已批准命令的前台执行接口；不进行审批，也不自动转后台。
+pub(crate) async fn run_controlled_command(
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    signal: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<String, String> {
+    #[cfg(not(unix))]
+    {
+        let _ = (command, cwd, timeout, signal);
+        return Err(
+            "Controlled Skill processes require process-tree supervision on this platform".into(),
+        );
+    }
+    #[cfg(unix)]
+    {
+        if signal.is_some_and(|signal| signal.is_cancelled()) {
+            return Err("Skill command cancelled before start".into());
+        }
+        let execution = async {
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.arg("-c")
+                .arg(command)
+                .current_dir(cwd)
+                .process_group(0)
+                .kill_on_drop(true)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            ShellToolInvocation::apply_non_interactive_env(&mut cmd);
+            crate::agent::worktree::clear_git_repository_env(&mut cmd);
+            let mut child = cmd
+                .spawn()
+                .map_err(|error| format!("Skill command spawn failed: {error}"))?;
+            let group =
+                ControlledProcessGroup(child.id().ok_or("Skill command has no process id")?);
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or("Skill command stdout unavailable")?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or("Skill command stderr unavailable")?;
+            let wait = async {
+                let status = child.wait().await;
+                // 宿主 shell 退出不代表后代退出；先终止同组后代，再等管道 EOF。
+                group.terminate();
+                status
+            };
+            let (status, stdout, stderr) = tokio::try_join!(
+                wait,
+                drain_controlled_output(stdout),
+                drain_controlled_output(stderr)
+            )
+            .map_err(|error| format!("Skill command I/O failed: {error}"))?;
+            let mut output = String::from_utf8_lossy(&stdout).into_owned();
+            if !stderr.is_empty() {
+                output.push_str("\n[stderr]\n");
+                output.push_str(&String::from_utf8_lossy(&stderr));
+            }
+            if !status.success() {
+                return Err(format!("Skill command exited with {status}: {output}"));
+            }
+            Ok(output)
+        };
+        tokio::select! {
+            biased;
+            _ = async {
+                match signal {
+                    Some(signal) => signal.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => Err("Skill command cancelled".into()),
+            result = tokio::time::timeout(timeout, execution) => {
+                result.map_err(|_| format!("Skill command timed out after {timeout:?}"))?
+            }
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod controlled_skill_process_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stdout_and_stderr_are_drained_concurrently_with_a_budget() {
+        let dir = tempfile::tempdir().expect("process fixture");
+        let output = run_controlled_command(
+            "i=0; while [ $i -lt 12000 ]; do printf 'stdout-line\\n'; printf 'stderr-line\\n' >&2; i=$((i + 1)); done",
+            dir.path(), Duration::from_secs(10), None,
+        ).await.expect("both pipes should drain without blocking");
+        assert!(output.contains("stdout-line"));
+        assert!(output.contains("stderr-line"));
+        assert!(
+            output.len() <= 2 * 32 * 1024 + 10,
+            "output budget: {}",
+            output.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_covers_a_quiet_process_and_cancels_descendants() {
+        let dir = tempfile::tempdir().expect("process fixture");
+        let error = run_controlled_command(
+            "(sleep 0.4; touch escaped) & wait",
+            dir.path(),
+            Duration::from_millis(50),
+            None,
+        )
+        .await
+        .expect_err("quiet command must time out");
+        assert!(error.contains("timed out"), "{error}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!dir.path().join("escaped").exists());
+    }
+
+    #[tokio::test]
+    async fn shell_exit_closes_descendant_pipes_without_waiting_for_timeout() {
+        let dir = tempfile::tempdir().expect("process fixture");
+        let output = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_controlled_command(
+                "sleep 30 & printf parent-finished",
+                dir.path(),
+                Duration::from_secs(10),
+                None,
+            ),
+        )
+        .await
+        .expect("inherited pipes must not keep the command alive")
+        .expect("parent command should succeed");
+        assert_eq!(output, "parent-finished");
+    }
+
+    #[tokio::test]
+    async fn cancellation_reclaims_the_process_group() {
+        let dir = tempfile::tempdir().expect("process fixture");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let execution = run_controlled_command(
+            "touch started; (sleep 0.4; touch escaped) & wait",
+            dir.path(),
+            Duration::from_secs(10),
+            Some(&cancel),
+        );
+        tokio::pin!(execution);
+        tokio::select! {
+            result = &mut execution => panic!("command unexpectedly finished: {result:?}"),
+            _ = async {
+                while !dir.path().join("started").exists() {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+        cancel.cancel();
+        let error = execution.await.expect_err("cancelled command must fail");
+        assert!(error.contains("cancelled"), "{error}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!dir.path().join("escaped").exists());
+    }
+}
+
+#[cfg(unix)]
+struct ControlledProcessGroup(u32);
+
+#[cfg(unix)]
+impl ControlledProcessGroup {
+    fn terminate(&self) {
+        if let Ok(pid) = i32::try_from(self.0) {
+            // SAFETY: pid 来自当前调用独立进程组的直接子进程；负值只寻址该组。
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ControlledProcessGroup {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+#[cfg(unix)]
+async fn drain_controlled_output(
+    mut stream: impl tokio::io::AsyncRead + Unpin,
+) -> std::io::Result<Vec<u8>> {
+    // 两条管道分别保留 32 KiB，超额仍持续排空，避免反压和无界内存。
+    const PIPE_BUDGET: usize = 32 * 1024;
+    let mut output = Vec::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let read = stream.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(output);
+        }
+        let keep = read.min(PIPE_BUDGET.saturating_sub(output.len()));
+        output.extend_from_slice(&buffer[..keep]);
+    }
+}
+
 pub const OUTPUT_UPDATE_INTERVAL_MS: u64 = 1000;
 const EXTERNAL_DIR_SIGNATURE_PREFIX: &str = "__external_dir__:";
 

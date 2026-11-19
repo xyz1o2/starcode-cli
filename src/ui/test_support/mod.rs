@@ -79,6 +79,8 @@ impl ChatState {
 
         // new() 读的用户数据 —— 与机器/账号绑定，会让基线不可复现
         state.command_history.clear();
+        state.command_history_path = None;
+        state.draft_path = None;
         state.transcript_enabled = false;
         state.transcript_path = None;
         state.transcript_run_id = "run-test".to_string();

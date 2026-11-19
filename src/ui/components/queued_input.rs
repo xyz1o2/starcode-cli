@@ -71,7 +71,7 @@ fn build_lines(state: &ChatState, width: u16) -> Vec<Line<'static>> {
             truncated = true;
             break;
         }
-        let rows = wrap_queued_message(msg, body_width);
+        let rows = wrap_queued_message(&msg.text, body_width);
         let take = rows.len().min(remaining);
         if take < rows.len() {
             truncated = true;
@@ -141,7 +141,9 @@ mod tests {
     fn state_with(queued: &[&str]) -> ChatState {
         let mut state = ChatState::new();
         for msg in queued {
-            state.pending_user_messages.push_back(msg.to_string());
+            state
+                .pending_user_messages
+                .push_back(crate::types::UserInput::from(*msg));
         }
         state
     }

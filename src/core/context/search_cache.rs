@@ -13,6 +13,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -66,6 +67,7 @@ pub struct SearchEngineCacheManager {
     engine_cache: RwLock<HashMap<(PathBuf, String), CachedSearchEngine>>,
     /// LRU query result cache, keyed by (canonical_root, query, index_mtime).
     query_cache: RwLock<LruCache<(PathBuf, String, Option<SystemTime>), String>>,
+    revision: AtomicU64,
 }
 
 /// 进程级共享的搜索引擎缓存。
@@ -126,6 +128,7 @@ impl SearchEngineCacheManager {
     pub fn new() -> Self {
         Self {
             engine_cache: RwLock::new(HashMap::new()),
+            revision: AtomicU64::new(0),
             query_cache: RwLock::new(LruCache::new(
                 NonZeroUsize::new(MAX_CACHED_QUERIES).unwrap(),
             )),
@@ -255,15 +258,26 @@ impl SearchEngineCacheManager {
     where
         F: FnOnce(&mut SearchEngine) -> bool,
     {
-        let mut cache = self.engine_cache.write();
-        let Some(cached) = cache.get_mut(key) else {
-            return PatchOutcome::Missing;
+        // 补丁只修改私有副本；回调 panic 时不留下部分更新的共享引擎。
+        let (mut cached, revision) = {
+            let cache = self.engine_cache.read();
+            let Some(cached) = cache.get(key) else {
+                return PatchOutcome::Missing;
+            };
+            if cached.index_mtime != expected_mtime {
+                return PatchOutcome::Stale;
+            }
+            (cached.clone(), self.revision())
         };
-        if cached.index_mtime != expected_mtime {
+        let _changed = f(&mut cached.engine);
+        let mut cache = self.engine_cache.write();
+        if self.revision() != revision {
             return PatchOutcome::Stale;
         }
-        let _changed = f(&mut cached.engine);
         cached.index_mtime = new_mtime;
+        cache.insert(key.clone(), cached);
+        self.revision.fetch_add(1, Ordering::SeqCst);
+        self.clear_root_queries(&key.0);
         PatchOutcome::Applied
     }
 
@@ -276,7 +290,59 @@ impl SearchEngineCacheManager {
                 cache.remove(&oldest_key);
             }
         }
+        self.revision.fetch_add(1, Ordering::SeqCst);
+        self.clear_root_queries(&key.0);
         cache.insert(key, cached);
+    }
+
+    fn clear_root_queries(&self, root: &Path) {
+        let mut queries = self.query_cache.write();
+        let keys: Vec<_> = queries
+            .iter()
+            .filter(|(key, _)| key.0 == root)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in keys {
+            queries.pop(&key);
+        }
+    }
+
+    /// 编辑发生后立即失效结果和引擎令牌，不等 index.json 写盘。
+    pub fn invalidate_root(&self, root: &Path) {
+        let mut engines = self.engine_cache.write();
+        for ((path, _), cached) in engines.iter_mut() {
+            if path == root {
+                cached.index_mtime = None;
+            }
+        }
+        self.revision.fetch_add(1, Ordering::SeqCst);
+        self.clear_root_queries(root);
+    }
+
+    /// 根注销时释放其引擎及结果，不影响其他根。
+    pub fn remove_root(&self, root: &Path) {
+        let mut engines = self.engine_cache.write();
+        engines.retain(|(path, _), _| path != root);
+        self.revision.fetch_add(1, Ordering::SeqCst);
+        self.clear_root_queries(root);
+    }
+
+    /// 查询计算期间若发生失效，禁止把旧结果重新塞回缓存。
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::SeqCst)
+    }
+
+    /// 仅发布基于同一缓存修订计算出的查询。
+    pub fn put_query_if_revision(
+        &self,
+        key: (PathBuf, String, Option<SystemTime>),
+        output: String,
+        revision: u64,
+    ) {
+        let mut queries = self.query_cache.write();
+        if self.revision() == revision {
+            queries.put(key, output);
+        }
     }
 
     /// Look up a cached query result.
@@ -475,6 +541,57 @@ mod tests {
 
     /// mtime 为 None（index.json 从未写过）时 `get_engine` 不应命中 ——
     /// 没有令牌就没有并发校验，此时必须回退全量重建。
+    #[test]
+    fn root_invalidation_removes_same_query_and_engine_for_only_that_root() {
+        let cache = SearchEngineCacheManager::new();
+        let root_a = PathBuf::from("/project/a");
+        let root_b = PathBuf::from("/project/b");
+        let t0 = SystemTime::now();
+        for root in [&root_a, &root_b] {
+            let key = (root.clone(), "engine".to_string());
+            cache.put_engine(
+                key,
+                CachedSearchEngine {
+                    engine: test_engine(&["src.rs"]),
+                    index_mtime: Some(t0),
+                },
+            );
+            cache.put_query(
+                (root.clone(), "same query".into(), Some(t0)),
+                format!("{} old", root.display()),
+            );
+        }
+
+        cache.invalidate_root(&root_a);
+
+        assert_eq!(
+            cache.get_query(&(root_a.clone(), "same query".into(), Some(t0))),
+            None
+        );
+        assert!(cache
+            .get_engine(&(root_a, "engine".into()), Some(t0))
+            .is_none());
+        assert_eq!(
+            cache
+                .get_query(&(root_b.clone(), "same query".into(), Some(t0)))
+                .as_deref(),
+            Some("/project/b old")
+        );
+        assert!(cache
+            .get_engine(&(root_b, "engine".into()), Some(t0))
+            .is_some());
+    }
+
+    #[test]
+    fn query_computed_before_invalidation_cannot_be_published_afterward() {
+        let cache = SearchEngineCacheManager::new();
+        let root = PathBuf::from("/project/revision");
+        let revision = cache.revision();
+        cache.invalidate_root(&root);
+        cache.put_query_if_revision((root.clone(), "q".into(), None), "old".into(), revision);
+        assert_eq!(cache.get_query(&(root, "q".into(), None)), None);
+    }
+
     #[test]
     fn engine_without_mtime_never_hits() {
         let cache = SearchEngineCacheManager::new();

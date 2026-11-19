@@ -98,7 +98,52 @@ pub enum ConfirmationType {
     Ask,
 }
 
+/// 工具执行前的命令审批入口；批准值只能由执行器构造。
+#[async_trait::async_trait]
+pub trait CommandApproval: Send + Sync {
+    async fn approve_command(
+        &self,
+        command: &str,
+        cwd: &std::path::Path,
+        signal: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<ApprovedCommand, String>;
+}
+
+/// 命令、工作目录与审批结果绑定，不允许执行阶段重新解析模板。
+#[derive(Debug, Clone)]
+pub struct ApprovedCommand {
+    command: String,
+    cwd: std::path::PathBuf,
+}
+
+impl ApprovedCommand {
+    pub(crate) fn new(command: String, cwd: std::path::PathBuf) -> Self {
+        Self { command, cwd }
+    }
+
+    pub async fn execute(
+        &self,
+        timeout: std::time::Duration,
+        signal: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<String, String> {
+        crate::core::tools::shell::run_controlled_command(&self.command, &self.cwd, timeout, signal)
+            .await
+    }
+}
+
 pub trait ToolInvocation: Send + Sync {
+    /// 准备与审批不计入执行 watchdog；默认工具无需准备。
+    fn preflight<'a>(
+        &'a mut self,
+        _approval: &'a dyn CommandApproval,
+        _signal: Option<&'a tokio_util::sync::CancellationToken>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// 真实调用方的目录与工具范围，不使用共享注册表里的旧配置。
+    fn set_agent_parent_config(&mut self, _config: &crate::core::config::Config) {}
+
     /// 执行器提供真实调用方的结构化历史，只有 Agent 的 fork 路径消费。
     /// 不从模型参数反序列化，避免伪造父会话或污染共享工具注册表。
     fn set_agent_parent_context(&mut self, _messages: Arc<Vec<crate::types::StarMessage>>) {}

@@ -107,6 +107,76 @@ enum Gate {
     Closed(String),
 }
 
+struct InvocationCommandApproval<'a> {
+    executor: &'a ToolExecutor,
+    originating_tool_call_id: &'a str,
+}
+
+#[async_trait::async_trait]
+impl crate::core::tools::tools::CommandApproval for InvocationCommandApproval<'_> {
+    async fn approve_command(
+        &self,
+        command: &str,
+        cwd: &std::path::Path,
+        signal: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<crate::core::tools::tools::ApprovedCommand, String> {
+        if !self.executor.subagent_tool_allowed("Bash") {
+            return Err("Bash is not allowed for this agent".into());
+        }
+        if self
+            .executor
+            .config
+            .agent_working_dir
+            .as_ref()
+            .is_some_and(|root| !cwd.starts_with(root))
+        {
+            return Err("Working directory escapes the isolated agent worktree".into());
+        }
+        let bus = self
+            .executor
+            .message_bus
+            .as_ref()
+            .ok_or("Skill command approval requires the confirmation bus")?;
+        // Skill 本轮的通用 grant 不能为模板命令绕开 Plan。
+        if bus.approval_mode().await == crate::core::policy::types::ApprovalMode::Plan {
+            return Err("Skill commands are not allowed in Plan mode".into());
+        }
+        if signal.is_some_and(|signal| signal.is_cancelled()) {
+            return Err("Skill command approval cancelled".into());
+        }
+        let tool = self
+            .executor
+            .tool_registry
+            .get_tool("Bash")
+            .ok_or("Skill command approval requires the Bash tool")?;
+        let args = serde_json::json!({"command": command, "dir_path": cwd});
+        let invocation = tool
+            .create_invocation(args.clone())
+            .map_err(|error| error.to_string())?;
+        let identity = tool.permission_cache_identity();
+        match self
+            .executor
+            .pass_gate(GateInput {
+                tool_name: "Bash",
+                args: &args,
+                tool: tool.as_ref(),
+                invocation: invocation.as_ref(),
+                permission_identity: identity.as_deref(),
+                requires_invocation_confirmation: tool.requires_invocation_confirmation(),
+                originating_tool_call_id: self.originating_tool_call_id,
+                abort_signal: signal,
+            })
+            .await
+        {
+            Gate::Open => Ok(crate::core::tools::tools::ApprovedCommand::new(
+                command.to_owned(),
+                cwd.to_owned(),
+            )),
+            Gate::Closed(reason) => Err(reason),
+        }
+    }
+}
+
 /// [`ToolExecutor::pass_gate`] 的入参。参数多到不适合逐个传递，
 /// 但它们全是这次调用的既有事实，不该重新计算。
 struct GateInput<'a> {
@@ -370,10 +440,14 @@ impl ToolExecutor {
     /// 子代理的显式工具集合必须在 schema 与执行入口使用相同判据。
     fn subagent_tool_allowed(&self, name: &str) -> bool {
         self.config.recursion_depth == 0
-            || self
+            || (!self
                 .config
-                .core_tools()
-                .is_none_or(|tools| tools.iter().any(|tool| tool.eq_ignore_ascii_case(name)))
+                .exclude_tools()
+                .is_some_and(|tools| tools.iter().any(|tool| tool.eq_ignore_ascii_case(name)))
+                && self
+                    .config
+                    .core_tools()
+                    .is_none_or(|tools| tools.iter().any(|tool| tool.eq_ignore_ascii_case(name))))
     }
 
     pub fn get_tool_definitions(&self) -> Vec<StarTool> {
@@ -482,7 +556,7 @@ impl ToolExecutor {
         match futures::FutureExt::catch_unwind(guarded).await {
             Ok(result) => {
                 if result.success {
-                    Self::mark_edited_file_dirty(tool_call);
+                    self.mark_edited_file_dirty(tool_call);
                 }
                 result
             }
@@ -527,7 +601,7 @@ impl ToolExecutor {
 
     /// 编辑类工具成功执行后，把目标文件标记为脏 —— 后台索引协调器
     /// （`context::watcher`）会在防抖窗口后做增量重建，语义搜索保持新鲜。
-    fn mark_edited_file_dirty(tool_call: &StarToolCall) {
+    fn mark_edited_file_dirty(&self, tool_call: &StarToolCall) {
         // 走统一归一：覆盖 Edit/multi_edit/smart_edit/Write/NotebookEdit 及其别名
         if !crate::core::tools::constants::is_edit_tool_name(&tool_call.function.name) {
             return;
@@ -536,10 +610,28 @@ impl ToolExecutor {
         else {
             return;
         };
-        let Some(file_path) = args.get("file_path").and_then(|v| v.as_str()) else {
-            return;
-        };
-        crate::core::context::watcher::mark_files_dirty(std::iter::once(file_path.to_string()));
+        let mut paths = Vec::new();
+        for field in ["file_path", "notebook_path", "path"] {
+            if let Some(path) = args.get(field).and_then(|value| value.as_str()) {
+                paths.push(path.to_string());
+            }
+        }
+        if let Some(edits) = args.get("edits").and_then(|value| value.as_array()) {
+            paths.extend(
+                edits
+                    .iter()
+                    .filter_map(|edit| edit.get("file_path").and_then(|value| value.as_str()))
+                    .map(str::to_string),
+            );
+        }
+        if !paths.is_empty() {
+            let root = self.config.agent_working_dir();
+            if let Err(error) = crate::core::context::watcher::mark_files_dirty(root, paths) {
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[Context] edit invalidation failed: {error}"
+                ));
+            }
+        }
     }
 
     /// 给工具的执行加一道兜底时限，超时后转成一条普通的工具错误。
@@ -1407,6 +1499,20 @@ impl ToolExecutor {
                     {
                         Gate::Open => {}
                         Gate::Closed(reason) => return Self::error_result(reason.into()),
+                    }
+
+                    invocation.set_agent_parent_config(&self.config);
+                    if let Err(reason) = invocation
+                        .preflight(
+                            &InvocationCommandApproval {
+                                executor: self,
+                                originating_tool_call_id: &tool_call.id,
+                            },
+                            abort_signal.as_ref(),
+                        )
+                        .await
+                    {
+                        return Self::error_result(reason.into());
                     }
 
                     {

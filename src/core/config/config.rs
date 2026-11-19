@@ -112,6 +112,11 @@ pub struct Config {
     /// `SendMessage` 工具据此确认发件人，worker 才不用老老实实自报家门。
     /// 设计文档：`docs/agent-messaging-design.zh-CN.md` §4/§6 Phase 3/4。
     pub agent_identity: Option<String>,
+    /// 当前子代理回合由 fork Skill 注入的免确认工具集合。
+    ///
+    /// 这是 child-local 的配置快照；不能放进共享 PolicyEngine 的普通回合
+    /// grant，否则 agent_run 清理下一条消息时会误清或串到父/兄弟代理。
+    pub(crate) child_skill_allowed_tools: Vec<String>,
     /// `-p` 单次执行（headless）：没有 UI 订阅确认总线。
     pub headless: bool,
     pub policy_engine_approval_mode: ApprovalMode,
@@ -256,6 +261,7 @@ impl Config {
             recursion_depth: params.recursion_depth.unwrap_or(0),
             subagent_type: None,
             agent_identity: None,
+            child_skill_allowed_tools: Vec::new(),
             headless: params.headless.unwrap_or(false),
             // 默认档位是 auto（对标 Claude Code 的 auto 模式）。但 auto 免确认写操作，
             // 受信任检查约束：不受信任的目录退回 default，否则"文件夹信任"这道闸门

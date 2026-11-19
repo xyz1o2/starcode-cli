@@ -177,6 +177,7 @@ pub(crate) async fn retry_last_user_message(
     let input = crate::types::UserInput {
         text: last_user.content.clone(),
         images: last_user.images.clone(),
+        intent: last_user.input_intent,
     };
     crate::ui::app::logic::enqueue_user_input(state, input, agent_tx).await?;
     Ok(true)

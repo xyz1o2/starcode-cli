@@ -63,18 +63,47 @@ impl ImageAttachment {
     }
 }
 
+/// 输入的解释资格在提交时冻结；旧持久数据缺少来源时只允许作为正文恢复。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputIntent {
+    #[default]
+    Literal,
+    CommandEligible,
+}
+
 /// 普通输入与 steering 共用的数据包，文字分类不会读取图片字节。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserInput {
     pub text: String,
+    #[serde(default)]
+    pub intent: InputIntent,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageAttachment>,
+}
+
+impl UserInput {
+    /// 仅供明确的本地命令入口使用，反序列化和恢复不能隐式调用。
+    pub fn command_eligible(text: String) -> Self {
+        Self {
+            text,
+            intent: InputIntent::CommandEligible,
+            images: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for UserInput {
+    fn from(text: &str) -> Self {
+        text.to_owned().into()
+    }
 }
 
 impl From<String> for UserInput {
     fn from(text: String) -> Self {
         Self {
             text,
+            intent: InputIntent::Literal,
             images: Vec::new(),
         }
     }

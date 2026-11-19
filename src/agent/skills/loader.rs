@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 use tokio::fs;
 
@@ -189,38 +188,42 @@ impl SkillLoader {
     pub async fn load_skill_from_github(
         repo_url: &str,
         path_in_repo: Option<&str>,
-    ) -> Option<SkillDefinition> {
-        let hash = crate::core::utils::paths::sha256_hex(repo_url.as_bytes());
-
+        approval: &dyn crate::core::tools::tools::CommandApproval,
+        signal: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<Option<SkillDefinition>, String> {
         let cache_base = Storage::global_star_dir().join("skills_cache");
+        Self::load_git_skill_at(repo_url, path_in_repo, &cache_base, approval, signal).await
+    }
+
+    async fn load_git_skill_at(
+        repo_url: &str,
+        path_in_repo: Option<&str>,
+        cache_base: &Path,
+        approval: &dyn crate::core::tools::tools::CommandApproval,
+        signal: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<Option<SkillDefinition>, String> {
+        let hash = crate::core::utils::paths::sha256_hex(repo_url.as_bytes());
         let cache_dir = cache_base.join(&hash);
 
-        if std::fs::create_dir_all(&cache_base).is_err() {
-            return None;
-        }
-
-        if cache_dir.exists() {
-            let _ = Command::new("git")
-                .current_dir(&cache_dir)
-                .args(&["pull"])
-                .status();
+        let (command, cwd) = if cache_dir.exists() {
+            ("git pull --ff-only".to_owned(), cache_dir.clone())
         } else {
-            let status = Command::new("git")
-                .args(&[
-                    "clone",
-                    "--depth",
-                    "1",
-                    repo_url,
-                    cache_dir.to_str().unwrap(),
-                ])
-                .status()
-                .ok()?;
-
-            if !status.success() {
-                let _ = std::fs::remove_dir_all(&cache_dir);
-                return None;
-            }
-        }
+            (
+                format!(
+                    "git clone --depth 1 -- {} {}",
+                    shell_quote(repo_url),
+                    shell_quote(&cache_dir.to_string_lossy())
+                ),
+                cache_base.to_path_buf(),
+            )
+        };
+        let approved = approval.approve_command(&command, &cwd, signal).await?;
+        fs::create_dir_all(&cache_base)
+            .await
+            .map_err(|error| error.to_string())?;
+        approved
+            .execute(std::time::Duration::from_secs(60), signal)
+            .await?;
 
         let mut skill_path = cache_dir.clone();
         if let Some(p) = path_in_repo {
@@ -231,7 +234,7 @@ impl SkillLoader {
             skill_path.push("SKILL.md");
         }
 
-        Self::load_skill_from_file(&skill_path).await
+        Ok(Self::load_skill_from_file(&skill_path).await)
     }
 
     pub async fn load_skill_from_file(path: &Path) -> Option<SkillDefinition> {
@@ -565,6 +568,91 @@ impl SkillLoader {
     }
 }
 
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// 只从原始模板识别执行块；执行结果与用户参数都不会再次参与识别。
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedSkillPrompt {
+    body: String,
+    commands: Vec<(
+        std::ops::Range<usize>,
+        crate::core::tools::tools::ApprovedCommand,
+    )>,
+}
+
+impl PreparedSkillPrompt {
+    pub(crate) async fn prepare(
+        skill: &SkillDefinition,
+        cwd: &Path,
+        approval: &dyn crate::core::tools::tools::CommandApproval,
+        signal: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<Self, String> {
+        let mut commands = Vec::new();
+        if skill
+            .metadata
+            .shell
+            .as_deref()
+            .is_none_or(|shell| shell.trim() != "0")
+        {
+            let mut offset = 0;
+            while let Some(start) = skill.body[offset..].find("!(") {
+                let start = offset + start;
+                let after = start + 2;
+                if let Some(end) = find_matching_paren(&skill.body[after..]) {
+                    let command = &skill.body[after..after + end];
+                    let command = if skill
+                        .metadata
+                        .shell
+                        .as_deref()
+                        .is_some_and(|shell| shell.eq_ignore_ascii_case("powershell"))
+                    {
+                        format!("powershell -NoProfile -Command {}", shell_quote(command))
+                    } else {
+                        command.to_owned()
+                    };
+                    let approved = approval.approve_command(&command, cwd, signal).await?;
+                    offset = after + end + 1;
+                    commands.push((start..offset, approved));
+                } else {
+                    offset = after;
+                }
+            }
+        }
+        Ok(Self {
+            body: skill.body.clone(),
+            commands,
+        })
+    }
+
+    pub(crate) async fn render(
+        &self,
+        signal: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<String, String> {
+        // 限制整个模板注入的命令输出；模板自己的正文不占用子进程配额。
+        const COMMAND_OUTPUT_BUDGET: usize = 128 * 1024;
+        let mut remaining = COMMAND_OUTPUT_BUDGET;
+        let mut output = String::new();
+        let mut offset = 0;
+        for (range, command) in &self.commands {
+            output.push_str(&self.body[offset..range.start]);
+            let captured = command.execute(SHELL_EXEC_TIMEOUT, signal).await?;
+            let keep = captured.floor_char_boundary(remaining.min(captured.len()));
+            output.push_str(&captured[..keep]);
+            if keep < captured.len() && remaining > 0 {
+                output.push_str("\n[Skill command output truncated]\n");
+                remaining = 0;
+            } else {
+                remaining -= keep;
+            }
+            offset = range.end;
+        }
+        output.push_str(&self.body[offset..]);
+        Ok(output)
+    }
+}
+
 fn execute_single_shell(cmd: &str) -> String {
     execute_single_shell_with(cmd, false)
 }
@@ -871,6 +959,167 @@ mod tests {
         let content = format!("---\n{yaml}\n---\n\nbody\n");
         let (meta, _) = SkillLoader::parse_frontmatter(&content);
         meta
+    }
+
+    struct ApproveFixture;
+
+    #[async_trait::async_trait]
+    impl crate::core::tools::tools::CommandApproval for ApproveFixture {
+        async fn approve_command(
+            &self,
+            command: &str,
+            cwd: &Path,
+            _signal: Option<&tokio_util::sync::CancellationToken>,
+        ) -> Result<crate::core::tools::tools::ApprovedCommand, String> {
+            Ok(crate::core::tools::tools::ApprovedCommand::new(
+                command.to_owned(),
+                cwd.to_owned(),
+            ))
+        }
+    }
+
+    struct DenyFixture;
+
+    #[async_trait::async_trait]
+    impl crate::core::tools::tools::CommandApproval for DenyFixture {
+        async fn approve_command(
+            &self,
+            _command: &str,
+            _cwd: &Path,
+            _signal: Option<&tokio_util::sync::CancellationToken>,
+        ) -> Result<crate::core::tools::tools::ApprovedCommand, String> {
+            Err("fixture denied".into())
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_git_loader_uses_only_an_approved_local_fixture() {
+        let directory = tempfile::tempdir().expect("git fixture");
+        let repo = directory.path().join("source");
+        fs::create_dir_all(&repo).await.expect("fixture directory");
+        fs::write(
+            repo.join("SKILL.md"),
+            "---\nname: local-git-fixture\n---\nfixture body",
+        )
+        .await
+        .expect("fixture skill");
+        let initialized = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&repo)
+            .status()
+            .expect("git init");
+        assert!(initialized.success());
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["add", "SKILL.md"])
+            .status()
+            .expect("git add")
+            .success());
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture"
+            ])
+            .status()
+            .expect("git fixture commit")
+            .success());
+        let cache = directory.path().join("cache");
+        let denied = SkillLoader::load_git_skill_at(
+            &repo.to_string_lossy(),
+            None,
+            &cache,
+            &DenyFixture,
+            None,
+        )
+        .await
+        .expect_err("denial must stop before git");
+        assert_eq!(denied, "fixture denied");
+        assert!(!cache.exists());
+        let skill = SkillLoader::load_git_skill_at(
+            &repo.to_string_lossy(),
+            None,
+            &cache,
+            &ApproveFixture,
+            None,
+        )
+        .await
+        .expect("approved local clone")
+        .expect("fixture skill loads");
+        assert_eq!(skill.name, "local-git-fixture");
+        assert!(skill.body.contains("fixture body"));
+        assert!(SkillLoader::load_git_skill_at(
+            &repo.to_string_lossy(),
+            None,
+            &cache,
+            &ApproveFixture,
+            None,
+        )
+        .await
+        .expect("approved local pull")
+        .is_some());
+    }
+
+    struct ApproveEcho;
+
+    #[async_trait::async_trait]
+    impl crate::core::tools::tools::CommandApproval for ApproveEcho {
+        async fn approve_command(
+            &self,
+            command: &str,
+            cwd: &Path,
+            _signal: Option<&tokio_util::sync::CancellationToken>,
+        ) -> Result<crate::core::tools::tools::ApprovedCommand, String> {
+            assert_eq!(command, "$ARGUMENTS");
+            Ok(crate::core::tools::tools::ApprovedCommand::new(
+                "printf approved".to_owned(),
+                cwd.to_owned(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn skill_arguments_cannot_create_new_shell_blocks() {
+        let (mut metadata, body) = SkillLoader::parse_frontmatter(
+            "---\nname: injection\n---\nbefore !($ARGUMENTS) after $value",
+        );
+        metadata.arguments = vec![SkillArgument {
+            name: "value".to_owned(),
+            description: String::new(),
+            required: true,
+            default: None,
+        }];
+        let skill = SkillDefinition {
+            name: "injection".to_owned(),
+            description: String::new(),
+            location: "fixture".to_owned(),
+            body,
+            disabled: false,
+            version: None,
+            metadata,
+        };
+        let prepared = PreparedSkillPrompt::prepare(&skill, Path::new("."), &ApproveEcho, None)
+            .await
+            .expect("template command should be prepared");
+        let rendered = prepared
+            .render(None)
+            .await
+            .expect("approved command should run");
+        let substituted = SkillLoader::substitute_skill_arguments(
+            &rendered,
+            &skill.metadata.arguments,
+            &["$(printf injected)".to_owned()],
+        );
+        assert_eq!(substituted, "before approved after $(printf injected)");
     }
 
     /// 布尔值按 Claude Code 的口径：`true/false/yes/no/on/off/1/0`，任意大小写。

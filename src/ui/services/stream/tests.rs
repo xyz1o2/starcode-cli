@@ -132,6 +132,7 @@ async fn image_attachment_survives_steering_withdrawal_and_resubmission() {
         crate::types::UserInput {
             text: "look at this".into(),
             images: vec![image.clone()],
+            intent: crate::types::InputIntent::Literal,
         },
         &tx,
     )

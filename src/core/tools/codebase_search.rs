@@ -1091,6 +1091,34 @@ enum EngineSource {
 /// 3. 冷启动 → 触发后台构建并返回 Warming，让本次查询降级到 Grep，
 ///    绝不在查询路径上同步做全量构建卡住 agent。
 /// 协调器不可用（未启动/上次后台重建失败）时回退旧的同步构建路径。
+fn rebuild_unmanaged_root(
+    root: &Path,
+    limits: CodebaseSearchLimits,
+    update_output: &Option<ProgressCallback>,
+    cache: &Arc<SearchEngineCacheManager>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    crate::core::context::watcher::with_rebuild_slot(|| {
+        if !root.is_dir() {
+            return Err(std::io::Error::other("index root does not exist").into());
+        }
+        let index = crate::core::context::indexer::Indexer::new(root).index_project()?;
+        if index.truncated {
+            return Err(std::io::Error::other(
+                "index rebuild is incomplete (byte budget exhausted)",
+            )
+            .into());
+        }
+        let key = (root.canonicalize()?, limits.cache_key());
+        if !index.new_blobs.is_empty()
+            || !index.removed_blobs.is_empty()
+            || cache.get_engine(&key, index_mtime(root)).is_none()
+        {
+            update_engine_in_cache_with_limits(root, cache, &index, limits, update_output.clone())?;
+        }
+        Ok(())
+    })
+}
+
 fn resolve_engine(
     root: &Path,
     limits: CodebaseSearchLimits,
@@ -1106,47 +1134,32 @@ fn resolve_engine(
             return Ok((engine, IndexStats::default(), EngineSource::Fresh));
         }
 
-        if let Some((stale_engine, _)) = manager.get_engine_stale(&cache_key) {
-            crate::core::context::watcher::request_refresh(root);
-            return Ok((stale_engine, IndexStats::default(), EngineSource::Stale));
+        let managed = Arc::ptr_eq(
+            manager,
+            &crate::core::context::search_cache::shared_search_cache(),
+        ) && crate::core::context::watcher::is_healthy(root)?;
+        if managed {
+            if let Some((stale_engine, _)) = manager.get_engine_stale(&cache_key) {
+                if crate::core::context::watcher::request_refresh(root)? {
+                    return Ok((stale_engine, IndexStats::default(), EngineSource::Stale));
+                }
+            }
         }
 
-        // 冷启动：协调器可用且未发生过失败 → 后台构建 + Warming 兜底
-        //
-        // 但**只有查询的就是协调器实际在重建的那个 root** 时才能走这条路。
-        // 协调器是进程级单例，它只重建第一次交给它的那棵树；对别的 root
-        // （典型：把查询缩到子目录）走 Warming = 永远等不到引擎 —— 后台根本
-        // 不会给那个 root 建索引，而查询侧一次又一次看到同一条 "still
-        // building"。现场：缩到单目录后连着几次都是 Warming，而全仓查询
-        // 同样等不到（协调器的 root 是启动时的 cwd，查询 root 与它不一致）。
-        //
-        // 非托管 root 直接同步构建：它没被后台覆盖，只能自己建。子目录通常
-        // 很小，同步构建代价可接受；大目录则会走上面的超时兜底。
-        let coordinator_engaged = crate::core::context::watcher::is_started();
-        let root_is_managed = crate::core::context::watcher::rebuild_root()
-            .map(|managed| managed == canonical_root)
-            .unwrap_or(false);
-        if coordinator_engaged
-            && root_is_managed
-            && !crate::core::context::watcher::last_rebuild_failed()
-        {
-            crate::core::context::watcher::request_refresh(root);
+        if managed && crate::core::context::watcher::request_refresh(root)? {
             return Ok((
                 SearchEngine::new(),
                 IndexStats::default(),
                 EngineSource::Warming,
             ));
         }
-        // 协调器不可用 → 同步构建（旧行为）
-        let (engine, stats) = build_search_engine_from_fs(root, limits, update_output)?;
-        manager.put_engine(
-            cache_key,
-            CachedSearchEngine {
-                engine: engine.clone(),
-                index_mtime: current_mtime,
-            },
-        );
-        return Ok((engine, stats, EngineSource::Fresh));
+        rebuild_unmanaged_root(root, limits, update_output, manager)?;
+        let engine = manager
+            .get_engine(&cache_key, index_mtime(root))
+            .ok_or_else(|| {
+                std::io::Error::other("index rebuild completed without a fresh engine")
+            })?;
+        return Ok((engine, IndexStats::default(), EngineSource::Fresh));
     }
 
     // 无缓存（standalone/测试）：保持旧的同步构建行为
@@ -1161,8 +1174,17 @@ fn search_codebase_with_limits(
     limits: CodebaseSearchLimits,
     cache: Option<&Arc<SearchEngineCacheManager>>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    // ── Query result cache ────────────────────────────────────────────────────
-    // Check the parking_lot-based LRU cache (no poisoning risk).
+    // 非托管根没有监听新鲜度保证，查询缓存前必须经 Indexer 验证磁盘。
+    if let Some(manager) = cache {
+        let managed = Arc::ptr_eq(
+            manager,
+            &crate::core::context::search_cache::shared_search_cache(),
+        ) && crate::core::context::watcher::is_healthy(root)?;
+        if !managed {
+            rebuild_unmanaged_root(root, limits, &update_output, manager)?;
+        }
+    }
+    let query_revision = cache.map(|manager| manager.revision());
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let current_mtime = index_mtime(root);
     let query_cache_key = (canonical_root.clone(), query.to_string(), current_mtime);
@@ -1517,9 +1539,9 @@ fn search_codebase_with_limits(
     // 但**未就绪**的输出不能进缓存："索引还在构建"不是检索结果。缓存下来会让
     // 同一条 query 在引擎就绪之后仍然重播那句"还在构建"——用户看到的就是
     // "连查两次都是同一句"，像坏了。
-    if let Some(manager) = cache {
-        if !matches!(source, EngineSource::Warming) {
-            manager.put_query(query_cache_key, output.clone());
+    if let (Some(manager), Some(revision)) = (cache, query_revision) {
+        if matches!(source, EngineSource::Fresh) {
+            manager.put_query_if_revision(query_cache_key, output.clone(), revision);
         }
     }
 
@@ -1638,7 +1660,9 @@ pub async fn wait_for_index_ready_in(
         if root_engine_presence(cache, root) != EnginePresence::Absent {
             return true;
         }
-        if std::time::Instant::now() >= deadline {
+        if !crate::core::context::watcher::is_healthy(root).unwrap_or(false)
+            || std::time::Instant::now() >= deadline
+        {
             return false;
         }
         tokio::time::sleep(Duration::from_millis(120)).await;

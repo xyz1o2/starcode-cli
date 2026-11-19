@@ -1167,7 +1167,22 @@ async fn handle_history_search(
                 .results
                 .get(state.history_search_state.selected_index)
             {
-                state.input = entry.content.clone();
+                let content = entry.content.clone();
+                let input = state
+                    .chat_history
+                    .iter()
+                    .rev()
+                    .find(|item| {
+                        item.entry_type == crate::types::ChatEntryType::User
+                            && item.content == content
+                    })
+                    .map(|item| crate::types::UserInput {
+                        text: content.clone(),
+                        images: item.images.clone(),
+                        intent: item.input_intent,
+                    })
+                    .unwrap_or_else(|| content.into());
+                state.set_user_input(input);
                 state.pop_modal();
             }
         }

@@ -81,6 +81,7 @@ pub async fn run_streaming_session(
             .process_user_input_stream(crate::types::UserInput {
                 text: context.user_message.to_string(),
                 images: context.images.to_vec(),
+                intent: crate::types::InputIntent::Literal,
             })
             .await
         {
