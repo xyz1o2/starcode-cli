@@ -466,20 +466,21 @@ pub async fn handle_stream_update(
                 let (_, raw) = state.steered_user_messages.remove(pos);
                 if withdrawn {
                     let tag = format!("user-message:{message_id}");
-                    if let Some(idx) = state.chat_history.iter().position(|entry| {
+                    let images = if let Some(idx) = state.chat_history.iter().position(|entry| {
                         entry.entry_type == ChatEntryType::User
                             && entry.group_id.as_deref() == Some(tag.as_str())
                     }) {
                         let images = state.chat_history[idx].images.clone();
                         remove_chat_entry_and_shift_indices(state, idx);
-                        crate::ui::events::clipboard_paste::restore_image_attachments(
-                            state, images,
-                        );
-                    }
+                        images
+                    } else {
+                        raw.images.clone()
+                    };
                     state.textarea.move_cursor(tui_textarea::CursorMove::Top);
                     state.textarea.move_cursor(tui_textarea::CursorMove::Head);
                     state.textarea.insert_str(&format!("{}\n", raw.text));
                     state.input_intent = crate::types::InputIntent::Literal;
+                    crate::ui::events::clipboard_paste::restore_image_attachments(state, images);
                     crate::ui::events::clipboard_paste::sync_input_from_textarea(state);
                     crate::ui::services::suggestions::on_input_changed(state);
                     append_transcript_event(

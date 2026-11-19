@@ -150,7 +150,7 @@ pub fn format_files_paste_ref(id: usize) -> String {
     format!("[Files #{}]", id)
 }
 
-/// 正则匹配粘贴占位符: [Pasted text #N], [Image #N], [Files #N]
+/// 解析粘贴引用行：[Pasted text #N]、[Image #N] 或 [Files #N]。
 pub fn parse_paste_reference(line: &str) -> Option<usize> {
     // Match [Pasted text #N +M lines] or [Pasted text #N]
     if let Some(captures) = line.strip_prefix("[Pasted text #") {

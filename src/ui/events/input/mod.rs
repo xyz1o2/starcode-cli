@@ -2389,6 +2389,28 @@ mod tests {
     }
 
     #[test]
+    fn restoring_structured_input_replaces_image_markers_without_duplicates() {
+        let mut state = ChatState::test_fixture();
+        let image = crate::types::ImageAttachment {
+            media_type: "image/png".into(),
+            data: "aGVsbG8=".into(),
+            width: 1,
+            height: 1,
+        };
+        state.set_user_input(crate::types::UserInput {
+            text: "look at [Image] please".into(),
+            intent: crate::types::InputIntent::Literal,
+            images: vec![image],
+        });
+
+        assert_eq!(state.paste_segments.len(), 1);
+        assert_eq!(state.input, "look at [Image #0] please");
+        let prepared = state.prepared_input().expect("restored attachment");
+        assert_eq!(prepared.images.len(), 1);
+        assert_eq!(prepared.text, "look at [Image] please");
+    }
+
+    #[test]
     fn restoring_queued_messages_preserves_image_draft() {
         let mut state = ChatState::test_fixture();
         insert_image_paste_block(&mut state, "/tmp/draft-image.png".into(), 10, 10);

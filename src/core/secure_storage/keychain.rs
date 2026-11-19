@@ -363,6 +363,10 @@ mod tests {
             .get(&account)
             .expect_err("locked item must not look missing");
         assert!(reason(&failure).contains("OSStatus"));
+        let failure = storage
+            .delete(&account)
+            .expect_err("locked item deletion must report the system error");
+        assert!(reason(&failure).contains("OSStatus"));
         // 清理不走用户钥匙串；外层脚本删除整个临时库。
         drop(interaction);
     }

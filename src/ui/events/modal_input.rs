@@ -1167,21 +1167,24 @@ async fn handle_history_search(
                 .results
                 .get(state.history_search_state.selected_index)
             {
-                let content = entry.content.clone();
                 let input = state
                     .chat_history
                     .iter()
-                    .rev()
-                    .find(|item| {
-                        item.entry_type == crate::types::ChatEntryType::User
-                            && item.content == content
+                    .filter(|item| {
+                        matches!(
+                            item.entry_type,
+                            crate::types::ChatEntryType::User
+                                | crate::types::ChatEntryType::Assistant
+                        )
                     })
+                    .nth(entry.index)
+                    .filter(|item| item.entry_type == crate::types::ChatEntryType::User)
                     .map(|item| crate::types::UserInput {
-                        text: content.clone(),
+                        text: item.content.clone(),
                         images: item.images.clone(),
                         intent: item.input_intent,
                     })
-                    .unwrap_or_else(|| content.into());
+                    .unwrap_or_else(|| entry.content.clone().into());
                 state.set_user_input(input);
                 state.pop_modal();
             }
@@ -1247,6 +1250,46 @@ fn open_marketplace_source_input(state: &mut ChatState) {
 mod tests {
     use super::*;
     use crate::ui::state::modal::Modal;
+
+    #[tokio::test]
+    async fn history_search_restores_the_selected_duplicate_entry_and_its_image() {
+        let mut state = ChatState::test_fixture();
+        let first_image = crate::types::ImageAttachment {
+            media_type: "image/png".into(),
+            data: "Zmlyc3Q=".into(),
+            width: 1,
+            height: 1,
+        };
+        let selected_image = crate::types::ImageAttachment {
+            media_type: "image/png".into(),
+            data: "c2Vjb25k".into(),
+            width: 1,
+            height: 1,
+        };
+        let mut first = crate::types::ChatEntry::new(
+            crate::types::ChatEntryType::User,
+            "same text [Image]".into(),
+        );
+        first.images = vec![first_image];
+        let mut second = crate::types::ChatEntry::new(
+            crate::types::ChatEntryType::User,
+            "same text [Image]".into(),
+        );
+        second.images = vec![selected_image.clone()];
+        state.chat_history.extend([first, second]);
+        state.open_history_search();
+        state.history_search_state.selected_index = 2;
+        let (tx, _rx) = mpsc::channel(1);
+        let enter = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        );
+
+        assert!(handle_history_search(&mut state, enter, &tx).await.unwrap());
+        assert_eq!(state.paste_segments.len(), 1);
+        assert_eq!(state.prepared_input().unwrap().images, vec![selected_image]);
+        assert_eq!(state.input, "same text [Image #0]");
+    }
 
     /// 每个模态变体都必须**吃掉**按键。
     ///

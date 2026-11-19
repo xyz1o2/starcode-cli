@@ -254,7 +254,7 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 
 同时修掉两个与代码相反的注释：`collect_context_files` 原注释写「返回的 Vec 从高到低排列」而循环实为 CWD 优先；`load_and_merge_context_files` 原注释写「后面的级别（更靠近 CWD）优先级更高」而实际后面的更远。这两条注释本身就是该 bug 的成因。
 
-**仍未对齐**：8000 字符截断（`DEFAULT_PROJECT_CONTEXT_MAX_CHARS`）与 CC 的「4 MiB 全量」不同 —— 有意保留，避免无脑拉高所有用户的 token 消耗。`@import` 展开、`.claude/rules/` 的 `paths:` 条件加载、`claudeMdExcludes` 均未实现。
+**仍未对齐**：8000 字符截断（`DEFAULT_PROJECT_CONTEXT_MAX_CHARS`）与 CC 的「4 MiB 全量」不同 —— 有意保留，避免无脑拉高所有用户的 token 消耗。`.claude/rules/` 的 `paths:` 条件加载、`claudeMdExcludes` 均未实现。`@import` 的“当前生产加载链已展开”状态已在 2026-11-20 复核；后续调整以 `utils/project_context.rs` 的实际调用路径为准。
 
 **② 全局层有两个 settings 文件名 —— 不是 bug，刻意保留分工。** ✅ 已查 + 已收口（2026-10-13）
 

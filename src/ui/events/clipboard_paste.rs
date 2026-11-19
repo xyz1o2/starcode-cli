@@ -434,17 +434,32 @@ pub(crate) fn restore_image_attachments(
     if images.is_empty() {
         return;
     }
-    for image in images {
-        let id = state.paste_segments.len();
+    let intent = state.input_intent;
+    let existing_segments = std::mem::take(&mut state.paste_segments);
+    let mut text = state.textarea.lines().join("\n");
+    let offset = existing_segments.len();
+    let mut segments = existing_segments;
+    for (index, image) in images.into_iter().enumerate() {
+        let id = offset + index;
         let reference = crate::ui::state::format_image_paste_ref(id);
-        state.paste_segments.push(crate::ui::state::PasteSegment {
+        if let Some(marker) = text.find("[Image]") {
+            text.replace_range(marker..marker + "[Image]".len(), &reference);
+        } else {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&reference);
+        }
+        segments.push(crate::ui::state::PasteSegment {
             id,
             content: "[Image]".to_string(),
             line_count: 1,
             kind: crate::ui::state::PasteKind::AttachedImage(image),
         });
-        state.textarea.insert_str(&format!("\n{reference}\n"));
     }
+    state.set_input_text(&text);
+    state.input_intent = intent;
+    state.paste_segments = segments;
     sync_input_from_textarea(state);
 }
 

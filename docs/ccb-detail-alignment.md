@@ -19,7 +19,7 @@
 | 后台邮箱身份 | 完整门禁通过 | 启动返回前用任务 ID 注册邮箱；名称只是别名。同名并发隔离，前台 async-runner、后台、fork/subtask 统一入口；替换 hub 同时更新注册与消费侧 |
 | 终态与广播 | 完整门禁通过 | 广播/可寻址集合只包括 Running；先注销再发布终态，旧 ID 收尾不影响同名新任务 |
 | 子代理消息发件人 | 完整门禁通过 | 执行器向每个 invocation 注入当前 identity；实际投递及 lead mailbox 消费回归覆盖 |
-| 自定义 tools/disallowedTools | 已接通，定向回归通过 | `SubagentType::Custom` 解析名称/别名；定义的 tools 与 disallowedTools 均和父 core/exclude 工具集合求交，只收紧不授权；schema 与直接执行共享同一注册表/执行门。frontmatter 支持行内、空格/逗号和 YAML 列表，camelCase `disallowedTools` 也覆盖。 |
+| 自定义 tools/disallowedTools 与 fork Skill 限制 | 已接通，定向与完整库测试通过 | `SubagentType::Custom` 解析名称/别名；定义工具、fork Skill 的 `allowed-tools` 与 `disallowed-tools` 均在 child 配置内与父级工具范围求交/收紧，schema 与直接执行门使用同一判据。`allowed-tools` 在 child 每条消息清理旧策略后按 identity 安装为 scoped grant，Plan 模式不安装；不写入共享父级授权，也不影响兄弟代理。frontmatter 支持行内、空格/逗号和 YAML 列表，camelCase `disallowedTools` 也覆盖。 |
 | 自定义类型与 background | 已接通，定向回归通过 | `AgentTool` 接受自定义名称并在运行前解析定义；调用方显式 model/effort/max_rounds/background 优先，未提供时才采用定义默认值；未知名称在启动前报错。 |
 | 自定义 memory/hooks | 已接通，定向回归通过 | user/project/local memory 从各自 `.star/agent-memory*` 读取并注入上下文；定义 hooks 保存在子代理 Config，不写回项目配置；项目/用户 hooks 与定义 hooks 均执行，定义级 hook 只增加约束。 |
 | 调用级 effort | 实现接通，分层回归及完整门禁通过 | AgentToolParams → FullInput → SubAgentRequest → child 回合快照；执行器注入实际调用方的冻结值，显式 Off 优先。agent_llm 显式传 LlmRequestOptions，StarClient 冻结一次并供入口流式失败后的非流式 fallback 共用，RigAdapter 请求构造不再读全局。LLM 94 项通过，含 wire JSON、并发本机 HTTP low/high 与受控 fallback；这些并发 HTTP 直接调用适配器，尚非父执行器启动两个完整子代理的全链证明。Off 仍沿用 provider 方言，OpenAI 方言省略字段，不承诺服务端关闭推理。Skill 本轮 effort 改为经成功工具结果交回当前 Agent，不写进程全局值；真实加载 Skill 后的本地消费隔离回归 1 项和 frontmatter 8 项通过。普通内联 Skill 已补生产 run_agentic_loop → 本机 HTTP 两次请求回归：首请求 Low，模型调用真实 Skill 后第二次请求 High，包含 Skill 正文，全局 Max 不变，重装回合快照可恢复 Low；不覆盖 UI 或 StarAgent 外层入口。Skill context: fork 的 effort/model 和参数展开已接通，执行器每次刷新真实父客户端及冻结 effort；真实文件 → 执行器 → 子代理循环 → 本机 HTTP 回归通过，含前后台继承、显式覆盖、Off、并发 high/low、父设置不变及不继承父历史。工具限制、自定义 agent 解析元数据已由本轮定向测试覆盖 |
@@ -49,12 +49,15 @@
 | Ctrl+L | 在同步输出范围内清后端并更新差分空屏基线，不查询光标 DSR | 已补连续清屏、相同内容、中文/emoji/空白/样式重绘回归；未做终端闪屏实测 |
 | 帮助与窄终端 | 帮助软换行、滚动条、方向/PgUp/PgDn/Home/End；提示退出条件、撤销/重做与审批字母别名；选择浮层尺寸先限制再居中 | 已补帮助末行可达、按键不改草稿、极窄/矮区域边界回归。EscapeGuard 修正文档以匹配20/100ms，不无依据放宽窗口 |
 | MCP 调用错误保真 | refresh_tools 失败直接返回原错；manager 与 server 内层重连失败均保留首次调用和重连原因，共用错误合并函数 | MCP 16 项回归通过，包含 server 真实调用边界：模拟工具传输失败后重连配置错误/重试耗尽，最终错误同时保留两段原因 |
+| 普通与 fork Skill 内联 shell | 模板命令先经 Bash 权限确认并冻结为不可变快照；批准后异步执行，再进行参数替换，参数不能新造 shell 执行块。输出有界；Unix 进程组覆盖取消/超时/future 丢弃及继承管道后代回收 | 本机审批允许/拒绝/取消/Plan、模板被改写、参数注入、stdout/stderr 排空、超时及后代回收回归通过。非 Unix 平台明确拒绝启动，主动脱离 Unix 进程组的后代不在保证内；不是 OS 沙箱 |
 | Keychain 写入/查询/删除 | macOS 写入、查询和删除均走 security-framework 系统 API，保留 service/account 与新增或更新语义，秘密不进子进程 argv；只有 item-not-found 映射为缺失，其余系统错误保留 | Linux 回归通过；macOS CI 已接一次性托管 runner 的临时钥匙串测试，覆盖新增/更新/删除、旧命令生成条目互通及锁定库错误，详见 [平台验收](keychain-validation.md)。本机只有 Linux/WSL2，无包含本次变更的 macOS CI 结果；系统授权弹窗与任意既有登录库 ACL 的人工验收仍无法在本机完成 |
 | 模型列表加载错误 | 传播 ProviderStore::load 的 Err，进入现有 ModelsError 提示 | ProviderStore 全局/项目/旧版坏JSON改为返回路径错误，不输出原始配置内容；启动入口移除unwrap_or_default；save拒绝覆盖坏配置；旧版迁移在保存成功后才归档。测试legacy路径也隔离到临时项目。by7j2lda9全目标编译和ProviderStore18项通过；其停止保存失败回归因夹具缺父目录失败，已修。bde8l83g3完整门禁通过：全目标locked编译、ProviderStore18项、后台停止3项、串行库2343通过/5忽略、文档0通过/3忽略、fmt/diff通过。随后移除会吞掉字段类型错误的二次解析（旧版字段已为统一设置子集），去重ID及编辑表单保留key的读取错误向上传播，新增类型错误与旧版别名兼容回归；bfzvj4g0k定向补验通过：全目标locked编译、ProviderStore19项、provider_form7项、fmt/diff通过 |
 
-完整问题核查见 [2026-11-17 核查报告](archive/2026-11-17-ccb-issue-verification.md)。A1 参数注入、A3 同步技能 shell 阻塞、自定义工具限制涉及此前受拒绝的 custom.rs 编辑，当前未换路径执行；A2 Keychain store argv 已改为系统 API，macOS 平台验收尚缺；B1 索引锁污染已改为明确错误及调用图内存降级，不强行恢复受损状态；bniezsi42 的 indexer 13 项及 call_graph_db 18 项通过，真实进程级 token/sync/index-IO 锁在专用子进程污染后重复查询/调用验证通过，未覆盖 watcher 线程自身 panic 的自动重启。B3 shell 竞态未证实，不凭 expect 直接改成已修复。
+完整问题核查见 [2026-11-17 核查报告](archive/2026-11-17-ccb-issue-verification.md)，该归档保留当时状态。本轮已通过普通与 fork Skill 的受控异步 shell 执行、child 工具限制和输入意图回归收敛相关遗留项；未修改此前受拒绝的 `custom.rs`。A2 Keychain store argv 已改为系统 API，macOS 实机/托管 runner 验收尚缺；B1 索引锁污染已改为明确错误及调用图内存降级，不强行恢复受损状态；多 root watcher 现已实现并经本轮串行库测试验证，但不代表跨进程协调或 OS 沙箱。B3 shell 竞态未证实，不凭 expect 直接改成已修复。
 
 ## 验证记录
+
+- 2026-11-20 本轮最终核验：全目标 `cargo check --workspace --all-targets --locked` 通过；串行库测试 2431 通过 / 7 忽略；文档测试 0 通过 / 3 忽略；`cargo fmt --all -- --check` 与 `git diff --check` 通过。新增/修复覆盖粘贴正文意图、队列图片恢复、历史搜索重复正文选中对应附件、fork Skill child-scoped `allowed-tools` 清理后重装与 Plan 拒绝、Skill 模板批准快照、拒绝/取消、POSIX 进程组输出/超时/取消及多 root watcher。Clippy 0 errors / 622 warnings；`cargo doc --no-deps --locked` 成功但报告 41 条 rustdoc 链接/标记警告，未清理全仓既有文档警告。Linux/WSL2 无法执行 Darwin Keychain 实机验收；没有启动真实 TUI、真实外部模型、参考项目脚本，也没有提交或推送。
 
 - 2026-11-19 MultiEdit 截图补验：修复已由共享工作区其他会话纳入 `cd40c29`，本助手未提交或推送。最终门禁 `bq7oif7m0` 通过：`cargo build --locked --bin starcode-cli`、`cargo check --workspace --all-targets --locked`、串行库 `2416` 通过 / `7` 忽略 / `0` 失败、文档测试 `0` 通过 / `3` 忽略、fmt/diff 检查通过。`cargo clippy --lib --locked` 退出码为 0，既有警告未清零。初次 MultiEdit 定向为 13 通过 / 1 失败，仅因新增快照首次生成而按设计失败；人工检查渲染基线后，完整库和定向补验均通过。快照已纳入版本控制，不依赖本机忽略文件。
   - 原测试使用顶层 `file_path`，未覆盖实际 `edits[].file_path` 参数；现测试覆盖同文件多处替换去重及多个文件。审批摘要列出各目标路径，不输出替换正文。批准历史不再显示过时的“Permission required”；审批结果与工具执行成功仍分开表达。
