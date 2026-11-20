@@ -9,6 +9,9 @@ pub(crate) async fn execute_palette_action(
     action: PaletteAction,
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if crate::ui::services::session_restore::block_submission(state) {
+        return Ok(());
+    }
     match action {
         PaletteAction::Navigate(mode) => {
             state.palette_history.push(state.palette_mode.clone());
@@ -95,10 +98,8 @@ pub(crate) async fn execute_palette_action(
             state.open_market_modal().await;
         }
         PaletteAction::ShowSessionMenu => {
-            let sessions = crate::utils::session_manager::list_session_summaries()
-                .await
-                .unwrap_or_default();
-            open_session_selection_menu(state, true, sessions);
+            use crate::ui::services::session_list::{self, Target};
+            session_list::start(state, Target::QuickMenu { from_palette: true });
         }
         PaletteAction::SetModel { model, provider_id } => {
             // If conversation has history, preserve the existing confirmation gate. Only the
@@ -360,26 +361,8 @@ pub(crate) async fn execute_palette_action(
             crate::ui::app::logic::emit_status_text(state, 0, &format!("Output style: {}", style));
         }
         PaletteAction::ShowLogSelector => {
-            state.close_palette();
-            state.open_log_selector();
-            state.log_selector_state.begin_loading();
-
-            match crate::utils::session_manager::list_session_summaries().await {
-                Ok(sessions) => {
-                    state
-                        .log_selector_state
-                        .set_sessions(sessions.into_iter().map(Into::into).collect());
-                }
-                Err(error) => {
-                    let error = error.to_string();
-                    state.log_selector_state.set_load_error(error.clone());
-                    crate::ui::app::logic::emit_status_text(
-                        state,
-                        0,
-                        &format!("Could not load saved sessions: {}", error),
-                    );
-                }
-            }
+            use crate::ui::services::session_list::{self, Target};
+            session_list::start(state, Target::Browser);
         }
         PaletteAction::ShowContextViz => {
             state.close_palette();

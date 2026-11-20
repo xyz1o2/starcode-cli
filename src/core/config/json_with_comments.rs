@@ -78,7 +78,10 @@ mod tests {
     fn block_comment_cannot_join_adjacent_json_tokens() {
         let result = parse_json_with_comments::<Value>(r#"{"value": 1/* comment */2}"#);
 
-        assert!(result.is_err(), "comments must not join neighboring JSON tokens");
+        assert!(
+            result.is_err(),
+            "comments must not join neighboring JSON tokens"
+        );
     }
 
     #[test]

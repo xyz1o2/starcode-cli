@@ -7,7 +7,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState},
     Frame,
 };
 
@@ -80,7 +80,7 @@ fn render_provider_selection_overlay(
         })
         .collect();
 
-    render_centered_list(f, f.area(), "Providers", &items);
+    render_centered_list(f, f.area(), "Providers", items, None);
 }
 
 fn render_session_selection_overlay(
@@ -93,6 +93,18 @@ fn render_session_selection_overlay(
         return;
     }
 
+    use crate::core::i18n;
+    use crate::ui::services::session_list;
+    let title = i18n::t1("ui.log_selector.sessions");
+    if state.available_sessions.is_empty() {
+        let message = if session_list::quick_menu_is_loading(state) {
+            i18n::t1("ui.log_selector.loading")
+        } else {
+            i18n::t1("ui.log_selector.no_sessions")
+        };
+        render_centered_list(f, f.area(), &title, vec![ListItem::new(message)], None);
+        return;
+    }
     let sessions =
         crate::ui::components::palette::get_session_quick_items(&state.available_sessions);
     let items: Vec<ListItem> = sessions
@@ -128,13 +140,21 @@ fn render_session_selection_overlay(
         })
         .collect();
 
-    render_centered_list(f, f.area(), "Sessions", &items);
+    let selected =
+        (state.selected_session_index < items.len()).then_some(state.selected_session_index);
+    render_centered_list(f, f.area(), &title, items, selected);
 }
 
-fn render_centered_list(f: &mut Frame<'_>, area: Rect, title: &str, items: &[ListItem<'_>]) {
+fn render_centered_list(
+    f: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    items: Vec<ListItem<'_>>,
+    selected: Option<usize>,
+) {
     let visible = items.len().clamp(1, 10);
     let popup_area = centered_rect(68, (visible as u16) + 4, area);
-    let list = List::new(items.to_vec()).block(
+    let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -144,7 +164,9 @@ fn render_centered_list(f: &mut Frame<'_>, area: Rect, title: &str, items: &[Lis
     );
 
     f.render_widget(Clear, popup_area);
-    f.render_widget(list, popup_area);
+    // 由列表按去掉边框后的高度滚动，不改变 Enter 使用的会话索引。
+    let mut list_state = ListState::default().with_selected(selected);
+    f.render_stateful_widget(list, popup_area, &mut list_state);
 }
 
 fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
@@ -426,6 +448,56 @@ fn render_command_hints_overlay(
 #[cfg(test)]
 mod geometry_tests {
     use super::*;
+    use crate::ui::{services::suggestions, state::PaletteAction};
+    use crate::utils::session_manager::SessionSummary;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn session_picker_keeps_the_confirmed_row_visible_and_highlighted() {
+        for (height, steps, up) in [(22, 12, 0), (8, 4, 0), (8, 15, 2), (3, 15, 0)] {
+            let mut state = ChatState::test_fixture();
+            state.show_session_menu = true;
+            state.available_sessions = (0..16)
+                .map(|i| SessionSummary {
+                    id: format!("saved-{i:02}"),
+                    title: format!("Fixture {i:02}"),
+                    subtitle: String::new(),
+                    created_at: 0,
+                })
+                .collect();
+            for _ in 0..steps {
+                assert!(suggestions::handle_down(&mut state));
+            }
+            for _ in 0..up {
+                assert!(suggestions::handle_up(&mut state));
+            }
+
+            let label = format!("Fixture {:02}", steps - up);
+            let theme = state.theme_manager.current();
+            let mut terminal = Terminal::new(TestBackend::new(60, height)).unwrap();
+            terminal
+                .draw(|f| render_session_selection_overlay(f, &state, f.area(), theme))
+                .unwrap();
+            let highlighted: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .filter(|cell| {
+                    cell.bg == theme.selection_bg && cell.modifier.contains(Modifier::BOLD)
+                })
+                .map(|cell| cell.symbol())
+                .collect();
+            assert_eq!(highlighted, label, "terminal height {height}");
+
+            assert!(suggestions::handle_enter(&mut state));
+            assert!(matches!(
+                state.pending_palette_action,
+                Some(PaletteAction::ExecuteCommand(command))
+                    if command == format!("/chat resume saved-{:02}", steps - up)
+            ));
+        }
+    }
 
     #[test]
     fn centered_popup_stays_inside_even_tiny_areas() {

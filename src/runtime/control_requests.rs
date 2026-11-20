@@ -484,10 +484,9 @@ pub async fn handle_request(
         AgentRequest::RestoreSession {
             messages,
             pending_local_context,
-            response,
         } => {
             agent.replace_session_context(messages, pending_local_context);
-            let _ = response.send(Ok(())).await;
+            let _ = tx.send(StreamMessage::SessionRestoreFinished(Ok(()))).await;
         }
         AgentRequest::ChangeWorkingDirectory { path, response } => {
             let result = agent.change_working_directory(&path).await;

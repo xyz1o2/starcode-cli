@@ -21,6 +21,16 @@ pub(super) async fn persist_session_on_exit(
     state: &ChatState,
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Option<String> {
+    // 事件循环异常退出时可能没收到切换回执。原生上下文不一定还是 UI 可见的
+    // 那个，不能把两份不对应的状态写到同一个会话文件。
+    if crate::ui::services::session_restore::awaiting_worker(state) {
+        crate::utils::logging::append_debug_log_line(
+            "[SESSION] Skipped exit snapshot: session restore was not acknowledged",
+        );
+        let _ = crate::commands::chat::request_worker_shutdown(agent_tx).await;
+        return None;
+    }
+
     // Exclude the transient welcome header entry from saved history.
     let history: Vec<_> = state
         .chat_history

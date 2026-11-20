@@ -1,6 +1,9 @@
 pub mod at_processor;
 pub mod file_search;
 pub(crate) mod plugin_commands;
+pub(crate) mod session_list;
+pub(crate) mod session_restore;
+pub(crate) mod session_schedules;
 pub(crate) mod status_helpers;
 pub mod stream;
 pub mod suggestions;

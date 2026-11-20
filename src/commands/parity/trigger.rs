@@ -7,13 +7,13 @@ use crate::commands::parity::git_github::gh_ready;
 use crate::commands::parity::git_github::repo_slug;
 use crate::commands::parity::goal_job::render_jobs;
 use crate::commands::parity::remote::remote_surface;
-use crate::runtime::messages::AgentRequest;
+use crate::core::trigger_scheduler;
 use crate::types::ChatEntry;
 use std::path::PathBuf;
 
 /// `/schedule [add <desc> [in <secs>|at <HH:MM>]|list|remove <id>]` — 会话内定时触发
 /// （对标 Claude Code 的 /schedule、/triggers）。实现挂在 `.star/triggers.json`，
-/// 每个 trigger 是一次性定时，到期时通过 `AgentRequest::SendMessage` 把描述注入主对话。
+/// 每个 trigger 是一次性定时，到期后由 UI 在创建它的会话中投递。
 /// 本项目没有完整的 cron 引擎，这里用会话内轻量调度器覆盖"给未来的自己发一条
 /// 消息"的核心语义；持久化 JSON 保证重启后仍能列出（不会在重启后补发）。
 pub async fn schedule(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
@@ -28,47 +28,24 @@ pub async fn schedule(mut ctx: CommandContext<'_>, args: Vec<String>) -> Command
         }
         let (message, delay) = split_schedule_args(&args[1..]);
         if message.trim().is_empty() {
-            push_msg(&mut ctx, "❌ Nothing to schedule: the message is empty.");
+            push_msg(&mut ctx, "Nothing to schedule: the message is empty.");
             return Ok(());
         }
         match delay {
             Ok(secs) => {
-                let id = crate::core::trigger_scheduler::add_trigger(&message, secs);
+                let path = trigger_scheduler::triggers_path();
+                let id = trigger_scheduler::add_trigger_at(&path, &message, secs);
                 let when = format_schedule_when(secs);
                 push_msg(
                     &mut ctx,
-                    format!("⏰ Scheduled trigger `{}` to fire **{}**.", id, when),
+                    format!("Scheduled trigger `{}` to fire **{}**.", id, when),
                 );
-                // 会话内定时：后台 task 睡眠 secs 后把消息注入主对话。触发前重新
-                // 校验 `.star/triggers.json` 里仍有这个 id —— 这样 `/schedule remove`
-                // 能真正取消已排程的 task（否则被删掉的触发照样会发）。
-                let tx = ctx.agent_tx.clone();
-                let fire_msg = message.clone();
-                let fire_id = id.clone();
-                let message_id = ctx.state.next_message_id;
-                ctx.state.next_message_id += 1;
-                tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
-                    // 离线模式下不能悄悄把消息发出去（那会绕过 `enqueue_user_message` 里的
-                    // offline 拦截）。等回到在线再发，有上限；超时就放弃并留下日志。
-                    if !wait_until_online(&fire_id).await {
-                        return;
-                    }
-                    // take_trigger 是"取出并删除"：既充当取消检查，也避免重复触发
-                    if !crate::core::trigger_scheduler::take_trigger(&fire_id) {
-                        crate::utils::logging::append_debug_log_line(&format!(
-                            "[SCHEDULE] Trigger {} was removed before firing",
-                            fire_id
-                        ));
-                        return;
-                    }
-                    let _ = tx
-                        .send(crate::runtime::messages::AgentRequest::SendMessage {
-                            message_id,
-                            message: fire_msg,
-                        })
-                        .await;
-                });
+                ctx.state.session_schedules.schedule(
+                    path,
+                    id,
+                    message,
+                    std::time::Duration::from_secs(secs),
+                );
             }
             Err(e) => push_msg(&mut ctx, format!("❌ {}", e)),
         }
@@ -79,9 +56,11 @@ pub async fn schedule(mut ctx: CommandContext<'_>, args: Vec<String>) -> Command
             push_msg(&mut ctx, "Usage: `/schedule remove <id>`");
             return Ok(());
         };
-        match crate::core::trigger_scheduler::remove_trigger(id) {
-            true => push_msg(&mut ctx, format!("🗑 Removed trigger `{}`.", id)),
-            false => push_msg(&mut ctx, format!("❌ No trigger with id `{}`.", id)),
+        let path = trigger_scheduler::triggers_path();
+        let removed = ctx.state.session_schedules.cancel(&path, id);
+        match removed {
+            true => push_msg(&mut ctx, format!("Removed trigger `{}`.", id)),
+            false => push_msg(&mut ctx, format!("No trigger with id `{}`.", id)),
         }
         return Ok(());
     }
@@ -132,38 +111,6 @@ pub(crate) fn split_schedule_args(args: &[String]) -> (String, Result<u64, Strin
 
 /// `/schedule add` 未指定时间时的默认延迟。
 pub(crate) const DEFAULT_SCHEDULE_DELAY_SECS: u64 = 60;
-
-/// 触发到期时若处于离线模式，最多等多久回到在线。
-pub(crate) const SCHEDULE_OFFLINE_WAIT_SECS: u64 = 1_800;
-pub(crate) const SCHEDULE_OFFLINE_POLL_SECS: u64 = 15;
-
-/// 到期触发落在离线模式里时的处理：轮询等待回到在线，返回 `true` 表示可以发送。
-///
-/// 超过 `SCHEDULE_OFFLINE_WAIT_SECS` 仍离线就放弃 —— 并把触发从存储里摘掉，否则它会
-/// 以一条永不到期的过期记录留在 `.star/triggers.json` 里，直到 stale 清理才消失。
-pub(crate) async fn wait_until_online(fire_id: &str) -> bool {
-    if !crate::core::offline::is_offline() {
-        return true;
-    }
-    let mut waited = 0;
-    while crate::core::offline::is_offline() {
-        if waited >= SCHEDULE_OFFLINE_WAIT_SECS {
-            crate::core::trigger_scheduler::remove_trigger(fire_id);
-            crate::utils::logging::append_debug_log_line(&format!(
-                "[SCHEDULE] Trigger {} dropped: still offline after {}s",
-                fire_id, waited
-            ));
-            return false;
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(SCHEDULE_OFFLINE_POLL_SECS)).await;
-        waited += SCHEDULE_OFFLINE_POLL_SECS;
-    }
-    crate::utils::logging::append_debug_log_line(&format!(
-        "[SCHEDULE] Trigger {} held {}s for offline mode, firing now",
-        fire_id, waited
-    ));
-    true
-}
 
 /// 把 `in <secs>` / `at <HH:MM>`（今天最近的时刻，已过则算明天）解析成相对秒数。
 ///

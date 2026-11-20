@@ -44,7 +44,7 @@ pub enum McpCommand {
     Import {
         /// Path to mcp_config.json
         path: String,
-        /// Do not persist env values
+        /// Do not persist environment variables or HTTP headers
         #[arg(long = "strip-env", default_value_t = false)]
         strip_env: bool,
     },
@@ -54,7 +54,7 @@ pub enum McpCommand {
     Export {
         /// Output path (will be overwritten)
         path: String,
-        /// Do not write env values
+        /// Do not write environment variables or HTTP headers
         #[arg(long = "strip-env", default_value_t = false)]
         strip_env: bool,
     },
@@ -113,6 +113,7 @@ async fn import_windsurf_config(
     for (name, mut s) in cfg.mcp_servers {
         if strip_env {
             s.env = None;
+            s.headers = None;
         }
         project_cfg.mcp_servers.insert(name, s);
     }
@@ -128,6 +129,7 @@ async fn export_windsurf_config(
     if strip_env {
         for (_, s) in project_cfg.mcp_servers.iter_mut() {
             s.env = None;
+            s.headers = None;
         }
     }
     let s = serde_json::to_string_pretty(&project_cfg)?;
@@ -147,6 +149,7 @@ pub async fn add_mcp_server(
         disabled: config.disabled,
         transport_type: Some(config.transport.transport_type.clone()),
         url: config.transport.url.clone(),
+        headers: config.transport.headers.clone(),
     };
     project_cfg.mcp_servers.insert(name.clone(), s);
     crate::core::mcp::save_project_mcp_config(&project_cfg).await?;
@@ -498,6 +501,48 @@ pub async fn execute_mcp_command(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn project_mcp_edits_keep_headers_and_stripped_export_omits_them() {
+        use crate::core::utils::paths::set_current_dir;
+
+        struct RestoreCwd(PathBuf);
+        impl Drop for RestoreCwd {
+            fn drop(&mut self) {
+                set_current_dir(&self.0).expect("restore test cwd");
+            }
+        }
+
+        let project = tempfile::tempdir().unwrap();
+        let _restore = RestoreCwd(std::env::current_dir().unwrap());
+        set_current_dir(project.path()).unwrap();
+        let source = project.path().join(".mcp.json");
+        let export = project.path().join("export.json");
+        let raw = r#"{"mcpServers":{"fixture":{"type":"http","url":"https://example.invalid/mcp","headers":{"X-Fixture":"fixture-value"},"env":{"FIXTURE":"env-value"}}}}"#;
+        tokio::fs::write(&source, raw).await.unwrap();
+        import_windsurf_config(source.to_str().unwrap(), false)
+            .await
+            .unwrap();
+        let extra = serde_json::from_value(serde_json::json!({
+            "name": "extra", "transport": {"type": "stdio", "command": "must-not-run"}
+        }))
+        .unwrap();
+        add_mcp_server("extra".into(), extra).await.unwrap();
+        remove_mcp_server("extra").await.unwrap();
+
+        let config = crate::core::mcp::load_project_mcp_config().await.unwrap();
+        assert_eq!(
+            config.mcp_servers["fixture"].headers.as_ref().unwrap()["X-Fixture"],
+            "fixture-value"
+        );
+        export_windsurf_config(export.to_str().unwrap(), true)
+            .await
+            .unwrap();
+        let exported = tokio::fs::read_to_string(export).await.unwrap();
+        assert!(!exported.contains("fixture-value"));
+        assert!(!exported.contains("env-value"));
+        assert_eq!(tokio::fs::read_to_string(source).await.unwrap(), raw);
+    }
+
     fn env(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
     }
@@ -528,6 +573,7 @@ mod tests {
 
     #[test]
     fn malformed_env_entries_are_rejected() {
+        i18n::reset_for_tests();
         let err = parse_env_pairs(&env(&["NO_EQUALS"])).unwrap_err();
         assert!(err.contains("invalid --env value: NO_EQUALS"), "{err}");
 
@@ -538,6 +584,7 @@ mod tests {
     /// `install` 以前对空 key 放行，`add` 拒绝 —— 同一个旗子不能有两种语义。
     #[tokio::test]
     async fn both_add_and_install_share_one_env_parser() {
+        i18n::reset_for_tests();
         let result = execute_mcp_command(McpCommand::Install {
             package: "@scope/server-x".to_string(),
             name: None,
@@ -568,6 +615,7 @@ mod tests {
 
     #[test]
     fn url_transports_require_a_url() {
+        i18n::reset_for_tests();
         for transport in ["http", "sse", "streamable_http"] {
             let err = validate_transport(transport, None, None).unwrap_err();
             assert!(err.contains("requires --url"), "{transport}: {err}");
@@ -584,6 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn adding_a_stdio_server_without_a_command_fails_before_writing() {
+        i18n::reset_for_tests();
         let result = execute_mcp_command(McpCommand::Add {
             name: "bad".to_string(),
             transport: "stdio".to_string(),

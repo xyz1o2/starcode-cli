@@ -1203,6 +1203,9 @@ pub async fn handle_stream_update(
                 }
             }
         }
+        StreamMessage::SessionRestoreFinished(result) => {
+            crate::ui::services::session_restore::finish(state, result);
+        }
         StreamMessage::Done { message_id } => {
             handle_done_message(state, agent_tx, message_id).await?
         }
@@ -1681,7 +1684,8 @@ async fn handle_done_message(
         .map(|ce| ce.content.trim().is_empty())
         .unwrap_or(true);
     // Auto-continue keeps the same message ID, so this logical request retains its cost and model.
-    let can_auto_continue = state.auto_continue_enabled
+    let can_auto_continue = state.pending_session_restore.is_none()
+        && state.auto_continue_enabled
         && state.auto_continue_remaining > 0
         && has_tools
         && !state.auto_continued_message_ids.contains(&message_id);
@@ -1777,7 +1781,7 @@ async fn dequeue_pending_user_input(
     state: &mut ChatState,
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !state.is_awaiting_confirmation {
+    if !state.is_awaiting_confirmation && state.pending_session_restore.is_none() {
         if let Some(next_input) = state.pending_user_messages.pop_front() {
             crate::ui::app::logic::enqueue_user_input(state, next_input, agent_tx).await?;
         }

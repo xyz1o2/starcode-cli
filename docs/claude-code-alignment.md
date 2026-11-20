@@ -295,7 +295,7 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | 无 settings 文件监听 | 纯 300s TTL 缓存；权限规则靠 `reload_permission_rules` 命令式触发 | ❌ `config/settings_manager.rs:337` |
 | 兜底路径丢审批模式 | **已修**：3 处 `unwrap_or_else` 现在都带上真实 `approval_mode`（新增 `StarAgent::policy_approval_mode()` 做枚举转换） | ✅ `ui/services/worker.rs`、`runtime/control_requests.rs`、`agent/skills/editor.rs` |
 | `.star/` 缺 CC 对应目录 | 无 `rules/` `output-styles/` `workflows/` `themes/` `keybindings.json` `agent-memory/` | ❌ 见 §5 ④ |
-| MCP 只读 `.star/mcp.json` | 不读项目根 `.mcp.json` | ❌ `core/utils/paths.rs:337`、`storage.rs:130` |
+| 项目 MCP 配置 | 读取当前工作目录的 `.mcp.json`；同名配置由项目 `.star/mcp.json` 整条覆盖。`.mcp.json` 不向父目录查找。显式 `http` / `streamable_http` 支持静态 `headers`；旧式 `sse` 请求头、Claude Code 的变量展开与项目级独立授权未对齐 | ✅ 读取与覆盖：`core/mcp/config.rs`；传输：`core/mcp/manager.rs`、`core/mcp/transport.rs` |
 | 无 tool search | 缓存的 `Vec<FunctionDeclaration>` **全量注入**模型 | ❌ `core/tools/tool_registry.rs:121-153` |
 | subagent 字段薄 | 无 `omitClaudeMd` / `maxTurns` / `permissionMode` / `effort` / `isolation` / `background` / description token 预算 | ❌ `commands/agents/custom_agents.rs` |
 | workflows | `WorkflowTool` 读 `.star/workflows/*.{json,sh}`（活）；`WorkflowManager`（`core/workflow/`）**无构造点，是死代码** | ⚠️→✅ 见下 |
@@ -345,6 +345,7 @@ frontmatter 字段：`name` `description` `tools` `disallowedTools` `model` `per
 | WebFetch / WebSearch / Task / MCP 无专属渲染 | `ui/components/tool_render.rs` | 调用行摘要 + 结果块摘要，MCP 标出 server 名 |
 | 无对话内搜索 | 新增 `ui/components/chat_search.rs`、`ChatSearchState`、`Ctrl+F` | 与 `Ctrl+Shift+F`（搜仓库文件）分工；命中坐标与 `render_chat_lines` 同行号，有测试守着一致性 |
 | 无 `--continue`，`/continue` 打开的是菜单 | `main.rs`、`commands/chat.rs::continue_cmd` | `-c/--continue` = `--resume latest`；`/continue` 无参直接接最近会话 |
+| `/resume` 等读盘或 worker 回执时卡住 TUI | `ui/services/session_list.rs`、`ui/services/session_restore.rs` | 会话选择器后台加载；选中后继续消费流，只有同一条流上的成功回执才替换历史和活动会话 ID |
 | `/status` 不报配置来源 | `commands/core.rs::setting_sources_section` | 列出 4 个 settings 文件（是否存在、各自负责什么）+ 生效规则数 |
 | 中断后没有提示行 | `ui/components/interrupted.rs` 复活 + `ui/app/runtime.rs` 宽限期 | 在唯一知道"用户按了 Esc"的地方推 `Interrupted · What should I do instead?` |
 | 帮助文案把 Tab 说成补全 | `ui/components/help_popup.rs`、`events/keymap.rs` | 按真实行为改写；键表文档补上"两个搜索键的分工" |
@@ -357,7 +358,7 @@ lib 套件 914 全绿，`cargo fmt --check` 绿，本次改动范围内 clippy �
 | P | 项 | 落点 | 预估 |
 |---|---|---|---|
 | **P1** | ~~`@import` 展开~~ **已完成（2026-11-10）**：`expand_imports`，围栏/深度/环三个边界都有测试 | ✅ |—|
-| **P1** | `.mcp.json` 作为回落 | `core/utils/paths.rs:337` | S |
+| **P1** | ~~`.mcp.json` 作为回落~~ **已接入**：当前工作目录的共享配置优先于用户层，低于项目 `.star/mcp.json` | `core/mcp/config.rs` | — |
 | **P1** | ~~`STAR_CONFIG_DIR` 环境变量，对应 `CLAUDE_CONFIG_DIR`~~ **已完成**：`global_star_dir()` 已认该变量（2026-11-13 复查时发现基线过期） | ✅ |—|
 | **P1** | ~~`ApprovalMode` 补 `dontAsk`（headless/CI 用）~~ **已完成（2026-11-10）**：`acceptEdits` / `auto` / `bypassPermissions` / `dontAsk` 四档全部独立成档，CC 的五种审批模式对齐完毕 |—| ✅ |
 | **P1** | MCP tool search，schema 延迟加载 | `core/tools/tool_registry.rs` | L |

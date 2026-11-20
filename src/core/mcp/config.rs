@@ -49,6 +49,8 @@ pub struct WindsurfMcpServer {
     #[serde(rename = "type", alias = "transport_type")]
     pub transport_type: Option<String>,
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HashMap<String, String>>,
 }
 
 /// 一次读取的来源。诊断信息用 —— 用户得知道 server 到底是从哪来的。
@@ -278,6 +280,26 @@ pub async fn save_project_mcp_config(config: &WindsurfMcpConfig) -> Result<(), M
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn project_http_headers_survive_loading_and_round_trip() {
+        let dir = tempfile::tempdir().expect("isolated MCP config directory");
+        let path = dir.path().join(".mcp.json");
+        tokio::fs::write(
+            &path,
+            r#"{"mcpServers":{"fixture":{"type":"http","url":"https://example.invalid/mcp","headers":{"X-Fixture":"fixture-value"}}}}"#,
+        )
+        .await
+        .expect("write fixture");
+        let config = load_config_from_path(&path)
+            .await
+            .expect("load project config");
+        let serialized = serde_json::to_value(config).expect("serialize project config");
+        assert_eq!(
+            serialized["mcpServers"]["fixture"]["headers"]["X-Fixture"],
+            "fixture-value"
+        );
+    }
+
     #[test]
     fn merge_order_lets_higher_scope_replace_the_whole_server() {
         let mut target = WindsurfMcpConfig::default();
@@ -291,6 +313,7 @@ mod tests {
                 disabled: None,
                 transport_type: None,
                 url: None,
+                headers: None,
             },
         );
         let mut higher = WindsurfMcpConfig::default();
@@ -303,6 +326,7 @@ mod tests {
                 disabled: None,
                 transport_type: None,
                 url: None,
+                headers: None,
             },
         );
 

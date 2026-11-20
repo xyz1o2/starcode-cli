@@ -364,12 +364,29 @@ impl StreamableHttpTransport {
             for (k, v) in hdrs {
                 let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
                     .map_err(|e| format!("Invalid header name {}: {}", k, e))?;
-                let val = reqwest::header::HeaderValue::from_str(v)
+                let mut val = reqwest::header::HeaderValue::from_str(v)
                     .map_err(|e| format!("Invalid header value for {}: {}", k, e))?;
+                val.set_sensitive(true);
                 headers.insert(name, val);
             }
         }
-        let client = reqwest::Client::builder()
+        let mut client = reqwest::Client::builder();
+        if !headers.is_empty() {
+            // 任意自定义头都可能携带凭据，不能随跨源跳转发送。
+            let limit = reqwest::redirect::Policy::default();
+            client = client.redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt
+                    .previous()
+                    .first()
+                    .is_some_and(|origin| origin.origin() != attempt.url().origin())
+                {
+                    attempt.stop()
+                } else {
+                    limit.redirect(attempt)
+                }
+            }));
+        }
+        let client = client
             .default_headers(headers)
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
@@ -530,5 +547,58 @@ impl Transport for StreamableHttpTransport {
         *self.session_id.lock().await = None;
         self.buffer.lock().await.clear();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn http_headers_reach_the_configured_origin_but_not_a_redirect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let other = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect = other.local_addr().unwrap();
+        let config = serde_json::from_value(serde_json::json!({
+            "type": "http", "url": url, "headers": {"X-Fixture": "fixture-value"}
+        }))
+        .unwrap();
+        let transport = StreamableHttpTransport::new(&config).unwrap();
+        let origin = async {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            let mut found = false;
+            loop {
+                let mut line = String::new();
+                assert!(socket.read_line(&mut line).await.unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("X-Fixture") {
+                        assert_eq!(value.trim(), "fixture-value");
+                        found = true;
+                    }
+                }
+            }
+            assert!(found);
+            socket.get_mut().write_all(format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{redirect}/mcp\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            ).as_bytes()).await.unwrap();
+        };
+        let request = async {
+            let error = transport.send(serde_json::json!({})).await.unwrap_err();
+            assert!(error.to_string().contains("307"));
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                _ = async { tokio::join!(origin, request); } => {},
+                connection = other.accept() => panic!("cross-origin redirect followed: {}", connection.is_ok()),
+            }
+        }).await.expect("HTTP fixture timed out");
     }
 }

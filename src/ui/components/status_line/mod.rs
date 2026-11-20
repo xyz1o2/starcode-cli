@@ -773,6 +773,12 @@ const TOOL_NAME_MAX_CHARS: usize = 30;
 /// 动词是主角（主题强调色 + 流光），括号里全部退到 `secondary`，提示退到
 /// `inactive`。元数据装不下时整组丢弃，绝不切出半个单词。
 pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::text::Line<'static>> {
+    if state.pending_session_restore.is_some() && !state.is_awaiting_confirmation {
+        return vec![Line::from(Span::styled(
+            crate::core::i18n::t1("ui.session.restore.loading"),
+            crate::ui::themes::theme::muted_style(),
+        ))];
+    }
     if !state.is_processing {
         return vec![];
     }

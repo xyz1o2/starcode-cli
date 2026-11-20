@@ -199,9 +199,7 @@ pub fn handle_up(state: &mut ChatState) -> bool {
 
 pub fn handle_down(state: &mut ChatState) -> bool {
     if state.show_session_menu {
-        let sessions_len =
-            crate::ui::components::palette::get_session_quick_items(&state.available_sessions)
-                .len();
+        let sessions_len = state.available_sessions.len();
         if state.selected_session_index + 1 < sessions_len {
             state.selected_session_index += 1;
         }
@@ -261,12 +259,14 @@ fn update_textarea_from_input(state: &mut ChatState) {
 pub fn handle_enter(state: &mut ChatState) -> bool {
     crate::ui::services::plugin_commands::invalidate_changed_root(state);
     if state.show_session_menu {
-        let sessions =
-            crate::ui::components::palette::get_session_quick_items(&state.available_sessions);
-        if state.selected_session_index < sessions.len() {
-            state.pending_palette_action =
-                Some(sessions[state.selected_session_index].action.clone());
-            state.show_session_menu = false;
+        if crate::ui::services::session_list::invalidate_changed_directory(state) {
+            return true;
+        }
+        if let Some(session) = state.available_sessions.get(state.selected_session_index) {
+            state.pending_palette_action = Some(crate::ui::state::PaletteAction::ExecuteCommand(
+                format!("/chat resume {}", session.id),
+            ));
+            state.close_quick_menus();
         }
         return true;
     }

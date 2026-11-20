@@ -1316,6 +1316,7 @@ fn parse_codex_mcp(content: &str) -> Result<Vec<(String, WindsurfMcpServer)>, St
                 disabled,
                 transport_type,
                 url,
+                headers: None,
             },
         ));
     }
@@ -1383,6 +1384,12 @@ fn parse_json_mcp(content: &str) -> Result<Vec<(String, WindsurfMcpServer)>, Str
                 })
                 .collect()
         });
+        let headers = server
+            .get("headers")
+            .map(|value| serde_json::from_value::<Option<HashMap<String, String>>>(value.clone()))
+            .transpose()
+            .map_err(|_| format!("invalid MCP headers for server {name}"))?
+            .flatten();
         let url = server
             .get("url")
             .or_else(|| server.get("httpUrl"))
@@ -1415,6 +1422,7 @@ fn parse_json_mcp(content: &str) -> Result<Vec<(String, WindsurfMcpServer)>, Str
                 disabled,
                 transport_type,
                 url,
+                headers,
             },
         ));
     }
@@ -2273,6 +2281,18 @@ developer_instructions = "Review carefully and report risks."
     fn cursor_frontmatter_is_not_imported_as_instruction_text() {
         let content = "---\ndescription: style\nglobs: src/**\n---\nUse tabs.\n";
         assert_eq!(strip_frontmatter(content).trim(), "Use tabs.");
+    }
+
+    #[test]
+    fn json_mcp_import_preserves_static_headers() {
+        let servers = parse_json_mcp(
+            r#"{"mcpServers":{"fixture":{"type":"http","url":"https://example.invalid/mcp","headers":{"X-Fixture":"fixture-value"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            servers[0].1.headers.as_ref().unwrap()["X-Fixture"],
+            "fixture-value"
+        );
     }
 
     #[test]

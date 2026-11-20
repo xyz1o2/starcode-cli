@@ -27,11 +27,6 @@ enum DeferredContextAction {
         last_usage: Option<crate::types::StarUsage>,
         response: mpsc::Sender<Result<(), String>>,
     },
-    Restore {
-        messages: Vec<crate::types::StarMessage>,
-        pending_local_context: Vec<String>,
-        response: mpsc::Sender<Result<(), String>>,
-    },
     /// `/subtask` 在流式回合中到达时不能读 agent 的最终上下文；排到回合结束后
     /// 启动，fork 才能看到本轮完整产出。
     RunSubtask {
@@ -39,7 +34,7 @@ enum DeferredContextAction {
         description: String,
         response: mpsc::Sender<Result<crate::agent::subagent::runner::AsyncLaunchResult, String>>,
     },
-    /// 此项必须排在 save/restore 等上下文变更之后执行，确保快照拿到流结束同步的原生消息。
+    /// 此项排在先到达的上下文变更之后，确保退出快照拿到本轮同步的原生消息。
     Shutdown {
         response: mpsc::Sender<Result<(), String>>,
     },
@@ -424,18 +419,15 @@ pub async fn handle_streaming_request(
                 });
             StreamingRequestOutcome::Continue
         }
-        Some(AgentRequest::RestoreSession {
-            messages,
-            pending_local_context,
-            response,
-        }) => {
-            deferred
-                .pending_context_actions
-                .push_back(DeferredContextAction::Restore {
-                    messages,
-                    pending_local_context,
-                    response,
-                });
+        Some(AgentRequest::RestoreSession { .. }) => {
+            // UI 取消宽限期结束不代表 worker 已结束当前回合。正在流式时不换上下文，
+            // 否则本轮迟到的输出或收尾动作可能落到新会话。
+            let _ = context
+                .tx
+                .send(StreamMessage::SessionRestoreFinished(Err(
+                    crate::core::i18n::t1("ui.session.restore.worker_busy"),
+                )))
+                .await;
             StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::ChangeWorkingDirectory { response, .. }) => {
@@ -516,14 +508,6 @@ pub async fn apply_deferred_context_actions(
                 .await
                 .map_err(|error| error.to_string());
                 let _ = response.send(result).await;
-            }
-            DeferredContextAction::Restore {
-                messages,
-                pending_local_context,
-                response,
-            } => {
-                agent.replace_session_context(messages, pending_local_context);
-                let _ = response.send(Ok(())).await;
             }
             DeferredContextAction::RunSubtask {
                 task,
@@ -1025,6 +1009,49 @@ mod tests {
             Some(DeferredContextAction::RunSubtask { task, .. })
                 if task == "check the regression"
         ));
+    }
+
+    #[tokio::test]
+    async fn restore_during_an_active_turn_is_rejected_without_deferring_a_context_swap() {
+        let mut deferred = DeferredRuntimeActions::default();
+        let (tx, mut rx) = mpsc::channel(1);
+        let steering_queue = Arc::new(AsyncMessageQueue::new());
+        let steering_signal = Arc::new(Notify::new());
+        let message_bus = Arc::new(crate::core::confirmation_bus::MessageBus::new(
+            crate::core::policy::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let abort_flag = Arc::new(AtomicBool::new(false));
+        let model_switch_cell = crate::agent::model_switch::new_cell();
+
+        let outcome = handle_streaming_request(
+            &mut deferred,
+            Some(AgentRequest::RestoreSession {
+                messages: Vec::new(),
+                pending_local_context: Vec::new(),
+            }),
+            StreamingRequestContext {
+                tx: &tx,
+                message_id: 7,
+                user_message: "fixture turn",
+                current_model_snapshot: "active-model",
+                project_root: None,
+                abort_flag: &abort_flag,
+                steering_queue: &steering_queue,
+                steering_signal: &steering_signal,
+                message_bus: &message_bus,
+                model_switch_cell: &model_switch_cell,
+            },
+        )
+        .await;
+
+        assert_eq!(outcome, StreamingRequestOutcome::Continue);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(StreamMessage::SessionRestoreFinished(Err(_)))
+        ));
+        assert!(deferred.pending_context_actions.is_empty());
+        assert!(!abort_flag.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

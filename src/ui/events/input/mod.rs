@@ -200,21 +200,6 @@ fn open_provider_selection_menu(
     state.open_provider_menu();
 }
 
-fn open_session_selection_menu(
-    state: &mut ChatState,
-    origin_palette: bool,
-    sessions: Vec<crate::utils::session_manager::SessionSummary>,
-) {
-    clear_suggestion_overlays(state);
-    state.close_palette();
-    state.exit_input_modal();
-    state.quick_menu_back = None;
-    state.quick_menu_origin_palette = origin_palette;
-    state.available_sessions = sessions;
-    state.open_session_menu();
-    state.selected_session_index = 0;
-}
-
 fn navigate_back_from_quick_menu(state: &mut ChatState) {
     if matches!(
         state.quick_menu_back,
@@ -504,6 +489,7 @@ async fn handle_inline_confirm(
                     };
                 state.pending_clear_name = None;
                 state.active_session_id = None;
+                state.session_schedules.change_session();
                 state.current_session_title = None;
                 state.chat_history.clear();
                 // 会话已重置，上下文读数必须一起归零：否则新会话首轮会顶着一个
@@ -1365,6 +1351,9 @@ pub async fn handle_key_event(
                     return Ok(());
                 }
 
+                if crate::ui::services::session_restore::block_submission(state) {
+                    return Ok(());
+                }
                 let raw_input = state.textarea.lines().join("\n");
                 let input =
                     crate::ui::state::expand_paste_segments(&raw_input, &state.paste_segments);
@@ -1489,6 +1478,11 @@ pub async fn handle_key_event(
             }
         }
         KeyCode::Esc => {
+            // 选择器可能在一轮刚开始时仍然打开。Esc 先关选择器，不中断模型回合。
+            if state.show_session_menu {
+                navigate_back_from_quick_menu(state);
+                return Ok(());
+            }
             // 详情页的 Esc 先返回主会话，不能被运行中的取消分支抢走。
             if state.viewing_agent_task_id.is_some() {
                 state.exit_teammate_view();
@@ -1814,8 +1808,8 @@ pub async fn handle_key_event(
                 let new_col = if trimmed_len == 0 {
                     0
                 } else {
-                    let last_is_word = before[trimmed_len - 1].is_alphanumeric()
-                        || before[trimmed_len - 1] == '_';
+                    let last_is_word =
+                        before[trimmed_len - 1].is_alphanumeric() || before[trimmed_len - 1] == '_';
                     let mut start = trimmed_len - 1;
                     while start > 0 {
                         let previous = before[start - 1];

@@ -6,13 +6,15 @@
 //! - `remove_trigger` 按 id 移除；
 //! - `secs_until_hhmm` 把 `HH:MM` 换算成今天最近一次出现的相对秒数（已过则算到明天）。
 //!
-//! 到期时的实际注入由命令侧（`/schedule add`）spawn 一个 tokio task，延迟后通过
-//! `AgentRequest::SendMessage` 把消息放进主对话 —— 本模块只负责存储与时间换算，
-//! 保持无异步依赖、可单测。
+//! 本模块只负责存储与时间换算；到期消息由 UI 按所属会话投递。
 
 use chrono::{Local, Timelike};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+// 命令与后台到期任务不能同时读改写同一份文件。
+static STORE_LOCK: Mutex<()> = Mutex::new(());
 
 /// 一条已排程的触发。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,29 +25,23 @@ pub struct Trigger {
     pub fires_at_epoch: i64,
 }
 
-fn triggers_path() -> PathBuf {
-    // 允许覆盖存储位置：单测用临时路径，避免污染仓库 cwd 下的 .star/
-    if let Some(path) = std::env::var_os("STAR_TRIGGERS_FILE") {
-        if !path.is_empty() {
-            return PathBuf::from(path);
-        }
+pub(crate) fn triggers_path() -> PathBuf {
+    let cwd = crate::core::utils::paths::current_dir_cached();
+    if let Some(path) = std::env::var_os("STAR_TRIGGERS_FILE").filter(|path| !path.is_empty()) {
+        return cwd.join(path);
     }
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".star")
-        .join("triggers.json")
+    crate::core::utils::paths::project_star_dir(cwd).join("triggers.json")
 }
 
-fn load_triggers() -> Vec<Trigger> {
-    let raw = std::fs::read_to_string(triggers_path()).unwrap_or_default();
+fn load_triggers(path: &Path) -> Vec<Trigger> {
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
     if raw.trim().is_empty() {
         return Vec::new();
     }
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
-fn save_triggers(triggers: &[Trigger]) {
-    let path = triggers_path();
+fn save_triggers(path: &Path, triggers: &[Trigger]) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -59,8 +55,13 @@ const STALE_GRACE_SECS: i64 = 300;
 
 /// 新增一条 `secs` 秒后到期的触发，返回其 id。
 pub fn add_trigger(message: &str, secs: u64) -> String {
+    add_trigger_at(&triggers_path(), message, secs)
+}
+
+pub(crate) fn add_trigger_at(path: &Path, message: &str, secs: u64) -> String {
+    let _guard = STORE_LOCK.lock().expect("trigger store lock poisoned");
     let now = chrono::Utc::now().timestamp();
-    let mut triggers = load_triggers();
+    let mut triggers = load_triggers(path);
     // 顺手清理早已过期的项，避免 JSON 无限膨胀
     triggers.retain(|t| t.fires_at_epoch > now - STALE_GRACE_SECS);
     // id 用毫秒时间戳；同一毫秒内连续两次 add 会撞号，加后缀去重
@@ -74,32 +75,43 @@ pub fn add_trigger(message: &str, secs: u64) -> String {
     triggers.push(Trigger {
         id: id.clone(),
         message: message.to_string(),
-        fires_at_epoch: now + secs as i64,
+        fires_at_epoch: now.saturating_add(i64::try_from(secs).unwrap_or(i64::MAX)),
     });
-    save_triggers(&triggers);
+    save_triggers(path, &triggers);
     id
 }
 
 /// 按 id 移除触发；不存在则返回 false。
 pub fn remove_trigger(id: &str) -> bool {
-    let mut triggers = load_triggers();
-    let before = triggers.len();
-    triggers.retain(|t| t.id != id);
-    let removed = triggers.len() != before;
-    save_triggers(&triggers);
-    removed
+    take_trigger_at(&triggers_path(), id)
 }
 
-/// 「取出并删除」：触发到期时调用。返回 false 表示这个 id 已经不在存储里
-/// （被 `/schedule remove` 取消，或已经触发过），调用方应当放弃发送。
+/// 「取出并删除」：按创建时的文件查找，避免切目录后误读别的项目。
+pub(crate) fn take_trigger_at(path: &Path, id: &str) -> bool {
+    remove_trigger_at(path, id)
+}
+
+pub(crate) fn remove_trigger_at(path: &Path, id: &str) -> bool {
+    let _guard = STORE_LOCK.lock().expect("trigger store lock poisoned");
+    let mut triggers = load_triggers(path);
+    let before = triggers.len();
+    triggers.retain(|t| t.id != id);
+    if triggers.len() == before {
+        return false;
+    }
+    save_triggers(path, &triggers);
+    true
+}
+
 pub fn take_trigger(id: &str) -> bool {
-    remove_trigger(id)
+    take_trigger_at(&triggers_path(), id)
 }
 
 /// 列出尚未到期的触发：`(id, message, 剩余时间描述)`。
 pub fn list_triggers() -> Vec<(String, String, String)> {
+    let _guard = STORE_LOCK.lock().expect("trigger store lock poisoned");
     let now = chrono::Utc::now().timestamp();
-    load_triggers()
+    load_triggers(&triggers_path())
         .into_iter()
         .filter(|t| t.fires_at_epoch > now)
         .map(|t| {

@@ -250,6 +250,9 @@ impl ChatState {
 
     pub fn pop_modal(&mut self) -> Option<Modal> {
         let modal = self.modal_stack.pop();
+        if matches!(modal, Some(Modal::LogSelector)) {
+            crate::ui::services::session_list::cancel_browser(self);
+        }
         if matches!(modal, Some(Modal::GlobalSearch)) {
             self.global_search_state.cancel_active_request();
         }
@@ -284,6 +287,7 @@ impl ChatState {
     }
 
     pub fn close_all_modals(&mut self) {
+        crate::ui::services::session_list::cancel_browser(self);
         if self
             .modal_stack
             .iter()
@@ -552,7 +556,7 @@ impl ChatState {
     /// 直接置位会留下「两个同时 true」的非法状态，此后 ↑/↓/Enter 该听谁的只能靠
     /// `command_suggestions` 里一份没有文档的优先级顺序来裁决。
     pub fn open_provider_menu(&mut self) {
-        self.show_session_menu = false;
+        self.close_quick_menus();
         self.show_provider_menu = true;
         self.selected_provider_index = 0;
     }
@@ -565,6 +569,7 @@ impl ChatState {
 
     /// 关闭两个快捷菜单。
     pub fn close_quick_menus(&mut self) {
+        crate::ui::services::session_list::cancel_quick_menu(self);
         self.show_provider_menu = false;
         self.show_session_menu = false;
     }

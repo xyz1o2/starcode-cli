@@ -86,36 +86,20 @@ async fn save(ctx: CommandContext<'_>, args: &[String]) -> CommandResult {
 
 async fn resume(ctx: CommandContext<'_>, args: &[String]) -> CommandResult {
     if args.is_empty() {
-        // 无参数：打开交互式会话选择菜单，而不是静默用最近会话替换当前对话
-        let sessions = crate::utils::session_manager::list_session_summaries()
-            .await
-            .unwrap_or_default();
-        if sessions.is_empty() {
-            ctx.state.current_status_line = Some("No saved sessions yet.".to_string());
-            return Ok(());
-        }
-        ctx.state.close_palette();
-        ctx.state.open_session_menu();
-        ctx.state.available_sessions = sessions;
-        ctx.state.selected_session_index = 0;
+        use crate::ui::services::session_list::{self, Target};
+        session_list::start(
+            ctx.state,
+            Target::QuickMenu {
+                from_palette: false,
+            },
+        );
         return Ok(());
     }
 
-    let tag = &args[0];
-    let session = session_manager::load_session(tag)
-        .await
-        .map_err(|e| e.to_string())?;
-    let messages = session_manager::agent_messages_for_restore(&session);
-    let pending_local_context = session.pending_local_context.clone().unwrap_or_default();
-    request_session_restore(ctx.agent_tx, messages, pending_local_context).await?;
-    restore_session_history(
+    crate::ui::services::session_restore::start(
         ctx.state,
-        session.chat_history,
-        session.last_usage,
-        &format!("'{}'", tag),
-    );
-    ctx.state.active_session_id = Some(tag.clone());
-    Ok(())
+        crate::ui::services::session_restore::Selection::Resume(args[0].clone()),
+    )
 }
 
 /// 将完整快照交给 worker；等待应答避免 UI 报成功但 session 文件并不存在。
@@ -195,24 +179,6 @@ pub(crate) async fn save_conversation_for_clear(
     Ok(Some(id))
 }
 
-/// 只在 worker 成功替换原生上下文后，调用方才能替换可见 transcript。
-pub(crate) async fn request_session_restore(
-    agent_tx: &mpsc::Sender<AgentRequest>,
-    messages: Vec<crate::types::StarMessage>,
-    pending_local_context: Vec<String>,
-) -> Result<(), String> {
-    let (response_tx, mut response_rx) = mpsc::channel(1);
-    agent_tx
-        .send(AgentRequest::RestoreSession {
-            messages,
-            pending_local_context,
-            response: response_tx,
-        })
-        .await
-        .map_err(|_| "Agent worker is unavailable; session was not restored.".to_string())?;
-    wait_for_session_response(&mut response_rx, "restore").await
-}
-
 pub(crate) async fn request_session_save_then_shutdown(
     agent_tx: &mpsc::Sender<AgentRequest>,
     id: String,
@@ -281,7 +247,7 @@ async fn wait_for_session_response(
 }
 
 /// 用磁盘会话替换可见历史，并清除依附旧历史的 UI 瞬态状态。
-fn restore_session_history(
+pub(crate) fn restore_session_history(
     state: &mut crate::ui::state::ChatState,
     restored_history: Vec<ChatEntry>,
     last_usage: Option<StarUsage>,
@@ -297,6 +263,11 @@ fn restore_session_history(
     state.auto_follow = true;
     state.is_streaming = false;
     state.is_processing = false;
+    state.cancelling_since = None;
+    state.last_turn_failed = false;
+    state.last_code_block_content = None;
+    state.current_session_title = None;
+    state.steered_user_messages.clear();
     state.processing_started_at = None;
     state.thinking_started_at = None;
     state.thinking_finished = None;
@@ -356,55 +327,11 @@ fn restore_session_history(
 #[cfg(test)]
 mod tests {
     use super::{
-        request_session_restore, request_session_save, restore_session_history,
-        save_conversation_for_clear, AgentRequest,
+        request_session_save, restore_session_history, save_conversation_for_clear, AgentRequest,
     };
-    use crate::types::{ChatEntry, StarMessage};
+    use crate::types::ChatEntry;
     use std::time::Instant;
     use tokio::sync::mpsc;
-
-    /// `/continue` 与 `--continue` 必须落在**同一条**路径上：两者都是"接上最近一次会话"。
-    ///
-    /// 之前 `/continue` 只是 `/resume` 的别名而无参开菜单，说明写着"resume the current
-    /// conversation"，用户按了等于没按；`--continue` 这个 flag 则根本不存在。
-    /// 这里钉住 `continue_cmd` 恢复成功后必须设置的三个字段。
-    #[tokio::test]
-    async fn continue_cmd_restores_the_latest_session_in_place() {
-        let mut state = crate::ui::state::ChatState::new();
-        state.is_streaming = true;
-        state.is_processing = true;
-
-        let (tx, mut rx) = mpsc::channel(8);
-        // 模拟 worker：接下 RestoreSession 并回一个 Ok。
-        // send 是 async，必须 .await——否则 Future 被 let _ 丢弃，回执从未发出，
-        // restore 侧会拿到 "Agent worker closed ..." 而在这里必然失败。
-        let worker = tokio::spawn(async move {
-            if let Some(AgentRequest::RestoreSession { response, .. }) = rx.recv().await {
-                let _ = response.send(Ok(())).await;
-            }
-        });
-
-        // 没有已保存会话时不能 panic，也不能悄悄改成"开菜单"
-        let result = super::continue_cmd(
-            crate::commands::execution::CommandContext {
-                state: &mut state,
-                agent_tx: &tx,
-            },
-            Vec::new(),
-        )
-        .await;
-        worker.abort();
-
-        // 断言只看"没有崩、且没有偷偷去开会话菜单"，具体是否恢复取决于磁盘上有没有会话
-        assert!(result.is_ok());
-        if state.active_session_id.is_none() {
-            assert_eq!(
-                state.current_status_line.as_deref(),
-                Some("No saved sessions yet."),
-                "没有可恢复的会话时必须如实说明，而不是打开别的界面"
-            );
-        }
-    }
 
     #[test]
     fn restoring_history_resets_old_stream_and_tool_state() {
@@ -522,44 +449,10 @@ mod tests {
         assert!(save_task.await.unwrap().is_ok());
 
         drop(agent_rx);
-        let error = request_session_restore(&agent_tx, Vec::new(), Vec::new())
+        let error = request_session_save(&agent_tx, "saved".into(), Vec::new(), None)
             .await
             .unwrap_err();
-        assert_eq!(
-            error,
-            "Agent worker is unavailable; session was not restored."
-        );
-    }
-
-    #[tokio::test]
-    async fn restore_request_carries_pending_local_context() {
-        let (agent_tx, mut agent_rx) = mpsc::channel(1);
-        let restore_task = tokio::spawn({
-            let agent_tx = agent_tx.clone();
-            async move {
-                request_session_restore(
-                    &agent_tx,
-                    vec![StarMessage::user("restored context")],
-                    vec!["local command output".to_string()],
-                )
-                .await
-            }
-        });
-
-        let request = agent_rx.recv().await.expect("restore request");
-        let AgentRequest::RestoreSession {
-            messages,
-            pending_local_context,
-            response,
-        } = request
-        else {
-            panic!("expected RestoreSession");
-        };
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].content.as_deref(), Some("restored context"));
-        assert_eq!(pending_local_context, vec!["local command output"]);
-        response.send(Ok(())).await.unwrap();
-        assert!(restore_task.await.unwrap().is_ok());
+        assert_eq!(error, "Agent worker is unavailable; session was not saved.");
     }
 
     fn unique_label(prefix: &str) -> String {
@@ -737,32 +630,8 @@ pub async fn resume_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> CommandRe
 /// 接上最近的那个。此前 `/continue` 的描述写着"resume the current conversation"，
 /// 实现却转手去开了菜单 —— 命令说明与行为不一致，用户按了等于没按。
 pub async fn continue_cmd(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
-    let latest = if args.is_empty() {
-        crate::utils::session_manager::read_latest_session_id()
-            .await
-            .map_err(|e| e.to_string())?
-    } else {
-        Some(args[0].clone())
-    };
-
-    let Some(tag) = latest else {
-        ctx.state.current_status_line = Some("No saved sessions yet.".to_string());
-        return Ok(());
-    };
-
-    let session = session_manager::load_session(&tag)
-        .await
-        .map_err(|e| e.to_string())?;
-    let messages = session_manager::agent_messages_for_restore(&session);
-    let pending_local_context = session.pending_local_context.clone().unwrap_or_default();
-    request_session_restore(ctx.agent_tx, messages, pending_local_context).await?;
-    restore_session_history(
+    crate::ui::services::session_restore::start(
         ctx.state,
-        session.chat_history,
-        session.last_usage,
-        &format!("'{}'", tag),
-    );
-    ctx.state.active_session_id = Some(tag.clone());
-    ctx.state.current_status_line = Some(format!("Continued session '{}'", tag));
-    Ok(())
+        crate::ui::services::session_restore::Selection::Continue(args.into_iter().next()),
+    )
 }

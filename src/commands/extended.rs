@@ -309,24 +309,12 @@ pub async fn session_list(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Co
     Ok(())
 }
 
-pub async fn session_resume(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
-    let session_id = args.first().cloned().unwrap_or_default();
-    if session_id.is_empty() {
-        // 无 id：打开交互式会话选择菜单（与 /resume 一致），而不是打印用法
-        let sessions = crate::utils::session_manager::list_session_summaries()
-            .await
-            .unwrap_or_default();
-        if sessions.is_empty() {
-            ctx.state.current_status_line = Some("No saved sessions yet.".to_string());
-            return Ok(());
-        }
-        ctx.state.close_palette();
-        ctx.state.open_session_menu();
-        ctx.state.available_sessions = sessions;
-        ctx.state.selected_session_index = 0;
-        return Ok(());
-    }
-    // 带 id：委托给真正能恢复会话的 /resume 路径（session_manager 后端）
+pub async fn session_resume(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    let args = if args.first().is_some_and(String::is_empty) {
+        Vec::new()
+    } else {
+        args
+    };
     crate::commands::chat::resume_cmd(ctx, args).await
 }
 
@@ -1656,6 +1644,7 @@ pub async fn cd(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult
     match response_rx.recv().await {
         Some(Ok(())) => {
             let released_session = ctx.state.active_session_id.take();
+            ctx.state.session_schedules.change_session();
             ctx.state.current_session_title = None;
             // The status-line poller follows the live root, but clear the old
             // project's values immediately so the next frame cannot show them.
@@ -1832,6 +1821,7 @@ pub async fn branch_conversation(mut ctx: CommandContext<'_>, args: Vec<String>)
     }
 
     ctx.state.active_session_id = Some(branch_id.clone());
+    ctx.state.session_schedules.change_session();
     ctx.state.current_session_title = Some(branch_id.clone());
     push_msg(
         &mut ctx,

@@ -4,7 +4,7 @@ use chrono::{Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -40,6 +40,10 @@ fn latest_session_marker_path() -> Result<PathBuf, Box<dyn Error + Send + Sync>>
 
 /// Session IDs become part of a filesystem path, so keep them as portable filename atoms.
 fn session_path(id: &str) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+    session_path_in(&sessions_dir()?, id)
+}
+
+fn session_path_in(dir: &Path, id: &str) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
     let valid = !id.is_empty()
         && id.len() <= 128
         && id
@@ -53,7 +57,7 @@ fn session_path(id: &str) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
         .into());
     }
 
-    Ok(sessions_dir()?.join(format!("{}.json", id)))
+    Ok(dir.join(format!("{}.json", id)))
 }
 
 pub async fn list_sessions() -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
@@ -78,14 +82,19 @@ pub async fn list_sessions() -> Result<Vec<String>, Box<dyn Error + Send + Sync>
 }
 
 pub async fn list_session_summaries() -> Result<Vec<SessionSummary>, Box<dyn Error + Send + Sync>> {
-    let dir = sessions_dir()?;
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
+    list_session_summaries_in(&sessions_dir()?).await
+}
 
-    let latest_id = read_latest_session_id().await.ok().flatten();
+pub(crate) async fn list_session_summaries_in(
+    dir: &Path,
+) -> Result<Vec<SessionSummary>, Box<dyn Error + Send + Sync>> {
+    let mut rd = match tokio::fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let latest_id = read_latest_session_id_in(dir).await.ok().flatten();
     let mut summaries = Vec::new();
-    let mut rd = tokio::fs::read_dir(&dir).await?;
     while let Some(ent) = rd.next_entry().await? {
         let path = ent.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
@@ -97,6 +106,14 @@ pub async fn list_session_summaries() -> Result<Vec<SessionSummary>, Box<dyn Err
         let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
+        if session_path_in(dir, id).is_err()
+            || !ent
+                .file_type()
+                .await
+                .is_ok_and(|file_type| file_type.is_file())
+        {
+            continue;
+        }
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(content) => content,
             Err(_) => continue,
@@ -266,15 +283,26 @@ fn valid_tool_call(call: &StarToolCall) -> bool {
 }
 
 pub async fn load_session(id: &str) -> Result<Session, Box<dyn Error + Send + Sync>> {
-    let p = session_path(id)?;
+    load_session_in(&sessions_dir()?, id).await
+}
 
-    if !p.exists() {
-        return Err(format!("Session '{}' not found", id).into());
+pub(crate) async fn load_session_in(
+    dir: &Path,
+    id: &str,
+) -> Result<Session, Box<dyn Error + Send + Sync>> {
+    let path = session_path_in(dir, id)?;
+    match tokio::fs::metadata(&path).await {
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(format!("Session '{}' is not a regular file", id).into())
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("Session '{}' not found", id).into())
+        }
+        Err(error) => return Err(error.into()),
     }
-
-    let content = tokio::fs::read_to_string(&p).await?;
-    let session: Session = serde_json::from_str(&content)?;
-    Ok(session)
+    let content = tokio::fs::read_to_string(path).await?;
+    Ok(serde_json::from_str(&content)?)
 }
 
 pub async fn load_latest_session() -> Result<Session, Box<dyn Error + Send + Sync>> {
@@ -294,18 +322,23 @@ pub async fn delete_session(id: &str) -> Result<(), Box<dyn Error + Send + Sync>
 }
 
 pub async fn read_latest_session_id() -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
-    let marker_path = latest_session_marker_path()?;
-    if !marker_path.exists() {
-        return Ok(None);
-    }
+    read_latest_session_id_in(&sessions_dir()?).await
+}
 
-    let id = tokio::fs::read_to_string(&marker_path).await?;
+pub(crate) async fn read_latest_session_id_in(
+    dir: &Path,
+) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
+    let id = match tokio::fs::read_to_string(dir.join(".latest")).await {
+        Ok(id) => id,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     let id = id.trim();
     if id.is_empty() {
         return Ok(None);
     }
 
-    let target = session_path(id)?;
+    let target = session_path_in(dir, id)?;
     match tokio::fs::metadata(target).await {
         Ok(_) => return Ok(Some(id.to_string())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -314,7 +347,7 @@ pub async fn read_latest_session_id() -> Result<Option<String>, Box<dyn Error + 
 
     // 删除会话可能留下悬空指针；仅隐式恢复回退，显式 ID 仍由 load_session 报错。
     let mut newest: Option<(i64, String)> = None;
-    let mut entries = tokio::fs::read_dir(sessions_dir()?).await?;
+    let mut entries = tokio::fs::read_dir(dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
@@ -323,7 +356,7 @@ pub async fn read_latest_session_id() -> Result<Option<String>, Box<dyn Error + 
         let Some(candidate) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
-        if session_path(candidate).is_err() || !entry.file_type().await?.is_file() {
+        if session_path_in(dir, candidate).is_err() || !entry.file_type().await?.is_file() {
             continue;
         }
         let content = match tokio::fs::read_to_string(&path).await {

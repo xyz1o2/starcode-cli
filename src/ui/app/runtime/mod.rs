@@ -347,7 +347,7 @@ pub async fn run_ui_loop(
     crate::utils::logging::append_debug_log_line("[UI] Event loop started");
     loop {
         // Check exit flag
-        if state.should_exit {
+        if state.should_exit && !crate::ui::services::session_restore::awaiting_worker(state) {
             break Ok(());
         }
 
@@ -357,7 +357,10 @@ pub async fn run_ui_loop(
         const MAX_KEY_EVENTS_PER_TICK: usize = 64;
         let mut key_event_count = 0;
         loop {
-            if key_event_count >= MAX_KEY_EVENTS_PER_TICK {
+            // 退出前正在等恢复回执时，仍需允许处理旧回合的确认或中断。
+            if (state.should_exit && !crate::ui::services::session_restore::awaiting_worker(state))
+                || key_event_count >= MAX_KEY_EVENTS_PER_TICK
+            {
                 break;
             }
             // 先取尾部 async 等待时已经收到的事件，再取键盘线程新投递的。
@@ -463,6 +466,13 @@ pub async fn run_ui_loop(
         }
 
         if crate::ui::services::plugin_commands::poll(state) {
+            needs_redraw = true;
+        }
+        if crate::ui::services::session_list::poll(state).await {
+            needs_redraw = true;
+        }
+        if !state.should_exit && crate::ui::services::session_restore::poll(state, &agent_tx).await
+        {
             needs_redraw = true;
         }
 
@@ -586,11 +596,16 @@ pub async fn run_ui_loop(
         //
         // 此前是两个各带 500ms 超时的 `await` 直接写在循环里，每秒各一次：慢盘/
         // 网络盘上循环会整个停在超时里，键盘线程投递的事件要等它返回才被处理。
-        while let Ok(event) = bg_events_rx.try_recv() {
+        while !state.should_exit && state.pending_session_restore.is_none() {
+            let Ok(event) = bg_events_rx.try_recv() else {
+                break;
+            };
             if crate::runtime::background::apply_background_event(state, &agent_tx, event).await {
                 needs_redraw = true;
             }
         }
+
+        needs_redraw |= crate::ui::services::session_schedules::poll(state, &agent_tx);
 
         // Only draw if needed or enough time passed.
         // Adaptive framerate during streaming: faster when content changes rapidly.
@@ -681,6 +696,17 @@ pub async fn run_ui_loop(
                     break;
                 }
             }
+        }
+
+        // worker 退出以后后台发送者可能仍持有流的 Sender。先处理缓冲中的确认，
+        // 只有真正收不到确认时才保留旧会话并报告失败。
+        if state.pending_session_restore.is_some()
+            && (stream_channel_closed || (agent_tx.is_closed() && rx.is_empty()))
+        {
+            needs_redraw |= crate::ui::services::session_restore::worker_disconnected(state);
+        }
+        if state.should_exit && !crate::ui::services::session_restore::awaiting_worker(state) {
+            break Ok(());
         }
 
         // Update streaming message rate
@@ -774,7 +800,10 @@ pub async fn run_ui_loop(
                 agent_mail_peers = result.peers;
             }
         }
-        if let Some(ref signal) = agent_mail_wakeup {
+        if let Some(signal) = agent_mail_wakeup
+            .as_ref()
+            .filter(|_| !state.should_exit && state.pending_session_restore.is_none())
+        {
             let woke =
                 tokio::time::timeout(std::time::Duration::from_millis(0), signal.wait_mail())
                     .await

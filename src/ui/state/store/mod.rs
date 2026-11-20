@@ -396,6 +396,7 @@ pub struct ChatState {
     pub show_session_menu: bool,
     pub selected_session_index: usize,
     pub available_sessions: Vec<crate::utils::session_manager::SessionSummary>,
+    pub(crate) session_picker: Option<crate::ui::services::session_list::SessionPicker>,
     // ============ Input Modal State ============
     // 输入框是否打开同样由 `modal_stack` 里的 `Modal::InputModal` 表达
     // （`ChatState::is_input_modal_open`）。平行的 `show_input_modal` flag 已删除：
@@ -481,6 +482,9 @@ pub struct ChatState {
     // ============ Session Persistence ============
     /// 当前恢复的 canonical session 文件名；退出时覆盖它而非创建新的 auto snapshot。
     pub active_session_id: Option<String>,
+    pub(crate) pending_session_restore:
+        Option<crate::ui::services::session_restore::PendingRestore>,
+    pub(crate) session_schedules: crate::ui::services::session_schedules::SessionSchedules,
     pub current_session_title: Option<String>,
     // ============ Permission Rules ============
     pub permission_rules: crate::core::permission_rules::PermissionRuleEngine,
@@ -1048,6 +1052,7 @@ impl ChatState {
             show_session_menu: false,
             selected_session_index: 0,
             available_sessions: Vec::new(),
+            session_picker: None,
             input_modal_title: String::new(),
             input_modal_prompt: String::new(),
             input_modal_value: String::new(),
@@ -1080,6 +1085,8 @@ impl ChatState {
             last_scroll_time: None,
             current_tool_name: None,
             active_session_id: None,
+            pending_session_restore: None,
+            session_schedules: Default::default(),
             current_session_title: None,
             permission_rules: crate::core::permission_rules::PermissionRuleEngine::new(),
             feature_flags: FeatureFlags::new(),

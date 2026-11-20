@@ -102,7 +102,9 @@ pub(crate) async fn handle_log_selector_key(
 ) -> Result<bool, Box<dyn std::error::Error>> {
     match key.code {
         KeyCode::Enter => {
-            if state.log_selector_state.is_loading {
+            if crate::ui::services::session_list::invalidate_changed_directory(state)
+                || state.log_selector_state.is_loading
+            {
                 return Ok(true);
             }
 
@@ -160,7 +162,7 @@ pub(crate) async fn retry_last_user_message(
     state: &mut ChatState,
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    if !state.last_turn_failed {
+    if !state.last_turn_failed || state.pending_session_restore.is_some() {
         return Ok(false);
     }
     let Some(last_user) = state

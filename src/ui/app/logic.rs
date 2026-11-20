@@ -443,6 +443,10 @@ pub async fn enqueue_user_input(
     input: crate::types::UserInput,
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if crate::ui::services::session_restore::block_submission(state) {
+        state.pending_user_messages.push_back(input);
+        return Ok(());
+    }
     let crate::types::UserInput {
         text: user_input,
         images,

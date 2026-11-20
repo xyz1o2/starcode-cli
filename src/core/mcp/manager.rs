@@ -289,6 +289,13 @@ impl MCPManager {
     /// registry —— `ToolSearch` 于是搜不到任何 MCP 工具。
     pub async fn initialize_mcp_servers(&self) -> Result<(), McpError> {
         let cfg = load_effective_mcp_config().await?;
+        self.register_configured_servers(cfg).await
+    }
+
+    async fn register_configured_servers(
+        &self,
+        cfg: crate::core::mcp::config::WindsurfMcpConfig,
+    ) -> Result<(), McpError> {
         for (name, s) in cfg.mcp_servers {
             if s.disabled.unwrap_or(false) {
                 continue;
@@ -308,7 +315,7 @@ impl MCPManager {
                 args: s.args.clone(),
                 env: s.env.clone(),
                 url: s.url.clone(),
-                headers: None,
+                headers: s.headers.clone(),
             };
             let server_cfg = MCPServerConfig {
                 name: name.clone(),
@@ -387,6 +394,29 @@ impl Default for MCPManager {
 mod split_disambiguation_tests {
     use super::*;
     use crate::core::mcp::types::TransportConfig;
+
+    #[tokio::test]
+    async fn project_http_headers_reach_the_registered_transport() {
+        let config = serde_json::from_str(
+            r#"{"mcpServers":{"fixture":{"type":"http","url":"https://example.invalid/mcp","headers":{"X-Fixture":"fixture-value"}},"disabled":{"command":"must-not-run","disabled":true}}}"#,
+        )
+        .expect("parse fixture config");
+        let manager = MCPManager::new();
+        manager
+            .register_configured_servers(config)
+            .await
+            .expect("register without connecting");
+        let server = manager
+            .get_server("fixture")
+            .await
+            .expect("registered server");
+        assert_eq!(server.config.transport.transport_type, "http");
+        assert_eq!(
+            server.config.transport.headers.as_ref().unwrap()["X-Fixture"],
+            "fixture-value"
+        );
+        assert!(manager.get_server("disabled").await.is_none());
+    }
 
     fn stdio_config(name: &str) -> MCPServerConfig {
         MCPServerConfig {

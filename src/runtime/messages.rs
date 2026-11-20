@@ -225,6 +225,8 @@ pub enum StreamMessage {
         message_id: u64,
         error: String,
     },
+    /// 会话原生上下文已切换（或被拒绝）；与旧回合输出走同一条 FIFO 流。
+    SessionRestoreFinished(Result<(), String>),
     RestoreCheckpointApplied {
         message_id: u64,
         checkpoint_id: String,
@@ -473,7 +475,6 @@ pub enum AgentRequest {
     RestoreSession {
         messages: Vec<crate::types::StarMessage>,
         pending_local_context: Vec<String>,
-        response: tokio::sync::mpsc::Sender<Result<(), String>>,
     },
     /// Move the session to another working directory. Handled on the agent
     /// worker so the OS cwd, cached path, memory manager and project-scoped
